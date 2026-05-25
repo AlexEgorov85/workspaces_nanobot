@@ -1,0 +1,264 @@
+{
+  "schema_oarb_audit_reports_audits_report_items_violations": {
+    "schema": {
+      "tables": {
+        "audit_reports": {
+          "comment": "Акты аудиторской проверки (оформленные документы по результатам)",
+          "columns": {
+            "id": {
+              "type": "integer",
+              "nullable": false,
+              "default": "nextval('oarb.audit_reports_id_seq'::regclass)",
+              "comment": "Уникальный идентификатор акта"
+            },
+            "audit_id": {
+              "type": "integer",
+              "nullable": false,
+              "default": null,
+              "comment": "Ссылка на проверку, к которой относится акт"
+            },
+            "report_number": {
+              "type": "character varying",
+              "nullable": false,
+              "default": null,
+              "comment": "Номер акта (внутренняя нумерация)"
+            },
+            "report_date": {
+              "type": "date",
+              "nullable": false,
+              "default": null,
+              "comment": "Дата составления акта"
+            },
+            "title": {
+              "type": "character varying",
+              "nullable": false,
+              "default": null,
+              "comment": "Название акта / заголовок документа"
+            },
+            "full_text": {
+              "type": "text",
+              "nullable": true,
+              "default": null,
+              "comment": "Полный текст акта (если не используется разбивка по пунктам)"
+            },
+            "created_at": {
+              "type": "timestamp without time zone",
+              "nullable": true,
+              "default": "CURRENT_TIMESTAMP",
+              "comment": "Дата и время создания записи"
+            },
+            "updated_at": {
+              "type": "timestamp without time zone",
+              "nullable": true,
+              "default": "CURRENT_TIMESTAMP",
+              "comment": "Дата и время последнего обновления"
+            }
+          }
+        },
+        "audits": {
+          "comment": "Проверки (плановые и внеплановые аудиторские мероприятия)",
+          "columns": {
+            "id": {
+              "type": "integer",
+              "nullable": false,
+              "default": "nextval('oarb.audits_id_seq'::regclass)",
+              "comment": "Уникальный идентификатор проверки"
+            },
+            "title": {
+              "type": "character varying",
+              "nullable": false,
+              "default": null,
+              "comment": "Наименование / тема проверки"
+            },
+            "audit_type": {
+              "type": "character varying",
+              "nullable": false,
+              "default": null,
+              "comment": "Тип проверки (плановая, внеплановая и т.д.)"
+            },
+            "planned_date": {
+              "type": "date",
+              "nullable": true,
+              "default": null,
+              "comment": "Плановая дата проведения проверки"
+            },
+            "actual_date": {
+              "type": "date",
+              "nullable": true,
+              "default": null,
+              "comment": "Фактическая дата завершения проверки"
+            },
+            "status": {
+              "type": "character varying",
+              "nullable": true,
+              "default": "'Запланирована'::character varying",
+              "comment": "Текущий статус проверки"
+            },
+            "auditee_entity": {
+              "type": "character varying",
+              "nullable": true,
+              "default": null,
+              "comment": "Проверяемый объект (подразделение, компания, филиал)"
+            },
+            "created_at": {
+              "type": "timestamp without time zone",
+              "nullable": true,
+              "default": "CURRENT_TIMESTAMP",
+              "comment": "Дата и время создания записи"
+            },
+            "updated_at": {
+              "type": "timestamp without time zone",
+              "nullable": true,
+              "default": "CURRENT_TIMESTAMP",
+              "comment": "Дата и время последнего обновления"
+            }
+          }
+        },
+        "report_items": {
+          "comment": "Пункты (разделы) акта аудиторской проверки с текстовым наполнением",
+          "columns": {
+            "id": {
+              "type": "integer",
+              "nullable": false,
+              "default": "nextval('oarb.report_items_id_seq'::regclass)",
+              "comment": "Уникальный идентификатор пункта акта"
+            },
+            "report_id": {
+              "type": "integer",
+              "nullable": false,
+              "default": null,
+              "comment": "Ссылка на акт, которому принадлежит пункт"
+            },
+            "item_number": {
+              "type": "character varying",
+              "nullable": false,
+              "default": null,
+              "comment": "Номер пункта (может содержать буквы, цифры, иерархию)"
+            },
+            "item_title": {
+              "type": "character varying",
+              "nullable": false,
+              "default": null,
+              "comment": "Название пункта (заголовок раздела)"
+            },
+            "item_content": {
+              "type": "text",
+              "nullable": true,
+              "default": null,
+              "comment": "Текст содержания пункта"
+            },
+            "order_index": {
+              "type": "integer",
+              "nullable": true,
+              "default": null,
+              "comment": "Порядковый индекс для ручной сортировки"
+            },
+            "created_at": {
+              "type": "timestamp without time zone",
+              "nullable": true,
+              "default": "CURRENT_TIMESTAMP",
+              "comment": "Дата и время создания записи"
+            },
+            "updated_at": {
+              "type": "timestamp without time zone",
+              "nullable": true,
+              "default": "CURRENT_TIMESTAMP",
+              "comment": "Дата и время последнего обновления"
+            }
+          }
+        },
+        "violations": {
+          "comment": "Отклонения (нарушения, проблемы), выявленные в ходе аудита",
+          "columns": {
+            "id": {
+              "type": "integer",
+              "nullable": false,
+              "default": "nextval('oarb.violations_id_seq'::regclass)",
+              "comment": "Уникальный идентификатор отклонения"
+            },
+            "audit_id": {
+              "type": "integer",
+              "nullable": false,
+              "default": null,
+              "comment": "Ссылка на проверку, в ходе которой выявлено отклонение"
+            },
+            "report_id": {
+              "type": "integer",
+              "nullable": false,
+              "default": null,
+              "comment": "Ссылка на акт, в котором зафиксировано отклонение"
+            },
+            "item_id": {
+              "type": "integer",
+              "nullable": false,
+              "default": null,
+              "comment": "Ссылка на конкретный пункт акта, к которому относится отклонение"
+            },
+            "violation_code": {
+              "type": "character varying",
+              "nullable": true,
+              "default": null,
+              "comment": "Код нарушения по внутреннему классификатору (если используется)"
+            },
+            "description": {
+              "type": "text",
+              "nullable": false,
+              "default": null,
+              "comment": "Подробное описание сути отклонения"
+            },
+            "recommendation": {
+              "type": "text",
+              "nullable": true,
+              "default": null,
+              "comment": "Рекомендации аудитора по устранению нарушения"
+            },
+            "severity": {
+              "type": "character varying",
+              "nullable": false,
+              "default": null,
+              "comment": "Критичность нарушения (Низкая, Средняя, Высокая)"
+            },
+            "status": {
+              "type": "character varying",
+              "nullable": true,
+              "default": "'Открыто'::character varying",
+              "comment": "Текущий статус работы с нарушением"
+            },
+            "responsible": {
+              "type": "character varying",
+              "nullable": true,
+              "default": null,
+              "comment": "Ответственное лицо или подразделение за устранение"
+            },
+            "deadline": {
+              "type": "date",
+              "nullable": true,
+              "default": null,
+              "comment": "Плановая дата устранения нарушения"
+            },
+            "created_at": {
+              "type": "timestamp without time zone",
+              "nullable": true,
+              "default": "CURRENT_TIMESTAMP",
+              "comment": "Дата и время фиксации отклонения в системе"
+            },
+            "updated_at": {
+              "type": "timestamp without time zone",
+              "nullable": true,
+              "default": "CURRENT_TIMESTAMP",
+              "comment": "Дата и время последнего изменения записи"
+            }
+          }
+        }
+      }
+    },
+    "timestamp": "2026-05-18T14:14:57.345120",
+    "schema_name": "oarb",
+    "tables": [
+      "audit_reports",
+      "audits",
+      "report_items",
+      "violations"
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+# Secrets
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data
+history/
+media/
+webui/
+cron/
+**.nanobot/tool-results/
+.local/
+
+# Vector indexes (large binaries)
+**/data/vector/
+*.faiss

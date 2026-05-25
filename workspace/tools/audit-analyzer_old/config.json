@@ -1,0 +1,43 @@
+{
+  "description": "Audit Analyzer - Comprehensive audit analysis tool with predefined scripts, SQL generation, and vector search",
+  "version": "2.0.0",
+  "capabilities": [
+    "text_generation",
+    "vector_search",
+    "sql_execution"
+  ],
+  "settings": {
+    "database": {
+      "connection_string": "postgresql://postgres:1@localhost:5432/postgres",
+      "schema": "oarb",
+      "tables": [
+        "audit_reports",
+        "audits",
+        "report_items",
+        "violations"
+      ],
+      "schema_cache_ttl": 86400
+    },
+    "llm": {
+      "provider": "openrouter",
+      "model": "anthropic/claude-3.5-sonnet",
+      "api_key": "sk-or-v1-...",
+      "base_url": "https://openrouter.ai/api/v1",
+      "temperature": 0.05,
+      "max_tokens": 512
+    },
+    "vector_search": {
+      "index_path": "C:\\Users\\Алексей\\.nanobot\\workspace\\memory\\vectors\\audit_index",
+      "top_k": 5,
+      "similarity_threshold": 0.7
+    },
+    "execution": {
+      "auto_execute_threshold_bytes": 500,
+      "max_retries": 3
+    },
+    "script_detection": {
+      "keyword_threshold": 0.4,
+      "vector_threshold": 0.7
+    }
+  }
+}
