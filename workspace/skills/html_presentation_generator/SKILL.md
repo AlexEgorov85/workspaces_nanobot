@@ -100,8 +100,11 @@ xychart-beta
 Запуск через `generate_presentation.bat` (Windows) или `generate_presentation.sh` (Linux):
 
 ```bash
-# Из папки навыка:
-generate_presentation --input slides.md --output out.html --title "Мой доклад"
+# Windows:
+generate_presentation.bat --input slides.md --output out.html --title "Мой доклад"
+
+# Linux:
+generate_presentation.sh --input slides.md --output out.html --title "Мой доклад"
 ```
 
 Параметры:

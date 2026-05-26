@@ -1,0 +1,87 @@
+---
+name: db_analyzer
+description: Анализ аудиторских проверок — SQL-отчёты, векторный поиск, генерация SQL через LLM.
+metadata: {"nanobot":{"emoji":"📊"}}
+---
+
+# Audit Analyzer
+
+Три режима анализа аудиторских проверок.
+
+## Режимы
+
+| Режим | Когда использовать |
+|:------|:-------------------|
+| `predefined` | Стандартные отчёты по имени скрипта + параметры |
+| `vector` | Семантический поиск по FAISS-индексу |
+| `sql` | Сложные нестандартные запросы — LLM генерирует SELECT |
+
+## Реестр скриптов (predefined)
+
+### `analytics_by_year_month`
+- **Описание:** Аналитика проверок по годам и месяцам
+- **Параметры:** `year` (number) — год проверки
+
+### `violations_by_type`
+- **Описание:** Статистика нарушений по кодам
+- **Параметры:** `date_from` (date), `violation_code` (like)
+
+### `top_audited_objects`
+- **Описание:** Топ проверяемых объектов
+- **Параметры:** `auditee_entity` (like), `date_from` (date), `limit` (number)
+
+### `audit_effectiveness`
+- **Описание:** Оценка эффективности проверок
+- **Параметры:** `date_from` (date), `date_to` (date), `min_violations` (number)
+
+### `audit_dynamics`
+- **Описание:** Динамика проверок по периодам
+- **Параметры:** `period` (month/quarter/week), `date_from` (date)
+
+### `audit_types_stats`
+- **Описание:** Статистика по типам проверок
+- **Параметры:** `audit_type` (like), `date_from` (date)
+
+## Режим sql — генерация SQL через LLM
+
+```
+Запрос → Схема БД → LLM генерирует SELECT
+  → validate_sql → EXPLAIN (FORMAT JSON) — проверка
+  → ошибка → retry до 3 раз → execute_query
+```
+
+## Векторные индексы (vector)
+
+Поиск по FAISS-индексу. Параметры: `index_name` (обяз.), `top_k`, `threshold`.
+
+---
+
+## CLI (standalone)
+
+Запуск через `audit_analyze.bat` (Windows) или `audit_analyze.sh` (Linux):
+
+```bash
+# Windows:
+audit_analyze.bat --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
+audit_analyze.bat --mode predefined --script violations_by_type --params '{"violation_code": "финансовые"}'
+audit_analyze.bat --mode sql --query "топ-10 объектов по нарушениям"
+audit_analyze.bat --mode vector --query "финансовые нарушения" --index-name violations_index
+audit_analyze.bat --mode vector --query "статусы аудитов" --index-name audits_index
+
+# Linux:
+audit_analyze.sh --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
+audit_analyze.sh --mode sql --query "топ-10 объектов по нарушениям"
+audit_analyze.sh --mode vector --query "финансовые нарушения" --index-name violations_index
+```
+
+Параметры:
+
+| Аргумент          | Обязательный | Описание |
+|:------------------|:------------:|:---------|
+| `--mode`          | да | Режим: `predefined`, `sql`, `vector` |
+| `--script`        | для `predefined` | Имя скрипта из реестра |
+| `--params`        | нет | Параметры скрипта в JSON: `'{"year": 2024}'` |
+| `--query`         | для `sql`/`vector` | Запрос на естественном языке |
+| `--index-name`    | для `vector` | Имя FAISS-индекса (без .faiss) |
+| `--vector-index`  | нет | Директория с индексами (переопределяет config.json) |
+| `--context`       | нет | Контекст чата в формате JSON |
