@@ -1,5 +1,11 @@
 # Agent Instructions
 
+## File Storage Policy
+
+New files must be saved under `data_store/cache/` (e.g. `data_store/cache/report.csv`).
+Editing existing files (HEARTBEAT.md, MEMORY.md, etc.) works as before.
+Do NOT use shell redirects (`>`, `>>`) in `exec` to create files — use `write_file` instead.
+
 ## Scheduled Reminders
 
 Before scheduling reminders, check available skills and follow skill guidance first.

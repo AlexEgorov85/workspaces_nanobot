@@ -16,35 +16,38 @@ from nanobot.channels.base import BaseChannel
 
 
 class PostgresChannel(BaseChannel):
-    """Polls a PostgreSQL or Greenplum table for pending user messages and writes back responses.
+    """Polls ``conversation_questions`` for pending user messages and writes
+    responses (and real-time reasoning) into ``conversation_answers``.
 
     Config (in ``config.json`` under ``channels.postgres``)::
 
         {
             "enabled": true,
             "dsn": "postgresql://user:pass@localhost:5432/nanobot",
-            "table": "conversation_messages",
             "schema": "public",
+            "questions_table": "conversation_questions",
+            "answers_table": "conversation_answers",
             "poll_interval": 2.0,
             "processing_timeout": 300,
             "allow_from": ["*"]
         }
 
-    Expected table schema (see ``create_table.sql``)::
+    Table schemas (see ``create_table.sql``):
 
-        column           | type
-        -----------------|-------------------------------
-        id               | UUID / TEXT PRIMARY KEY
-        chat_id          | TEXT (null → falls back to conversation_id)
-        user_id          | TEXT (null → falls back to conversation_id)
-        conversation_id  | UUID / TEXT NOT NULL
-        role             | TEXT CHECK (user / assistant / system)
-        content          | TEXT NOT NULL
-        media            | JSON / JSONB
-        metadata         | JSON / JSONB DEFAULT '{}'
-        status           | TEXT CHECK (pending / processing / completed / failed)
-        created_at       | TIMESTAMPTZ NOT NULL
-        updated_at       | TIMESTAMPTZ NOT NULL
+    **conversation_questions**
+        id, chat_id, user_id, conversation_id, content, media,
+        metadata, status (pending|processing|completed|failed),
+        created_at, updated_at
+
+    **conversation_answers**
+        id, question_id (FK), chat_id, conversation_id,
+        content, reasoning, metadata, buttons,
+        status (thinking|streaming|completed|failed),
+        created_at, updated_at
+
+    The ``reasoning`` column is updated in real-time as the model thinks;
+    the web server can poll ``conversation_answers`` and display incremental
+    reasoning before the final answer appears in ``content``.
     """
 
     name = "postgres"
@@ -64,14 +67,17 @@ class PostgresChannel(BaseChannel):
             )
 
         self._dsn: str = _get("dsn", "")
-        self._table: str = _get("table", "conversation_messages")
         self._schema: str = _get("schema", "public")
-        self._fqtable: str = f"{self._schema}.{self._table}"
+        self._questions_table: str = _get("questions_table", "conversation_questions")
+        self._answers_table: str = _get("answers_table", "conversation_answers")
+        self._fq_questions: str = f"{self._schema}.{self._questions_table}"
+        self._fq_answers: str = f"{self._schema}.{self._answers_table}"
         self._poll_interval: float = float(_get("poll_interval", 2.0))
         self._processing_timeout: int = int(_get("processing_timeout", 600))
         self._pool: Any = None
         self._poll_task: asyncio.Task | None = None
         self._stream_buffers: dict[str, str] = {}
+        # question_id -> {answer_id, tool_events, reasoning_buf}
         self._msg_ctx: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
@@ -80,9 +86,11 @@ class PostgresChannel(BaseChannel):
 
     async def start(self) -> None:
         self._running = True
+        await self._ensure_tables()
         self._poll_task = asyncio.create_task(self._poll_loop())
         self.logger.info(
-            "Polling every {}s (processing timeout {}s)",
+            "Polling {} every {}s (processing timeout {}s)",
+            self._fq_questions,
             self._poll_interval,
             self._processing_timeout,
         )
@@ -96,6 +104,45 @@ class PostgresChannel(BaseChannel):
         if self._pool:
             await self._pool.close()
             self._pool = None
+
+    # ------------------------------------------------------------------
+    # Tables
+    # ------------------------------------------------------------------
+
+    async def _ensure_tables(self) -> None:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self._fq_questions} (
+                    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    chat_id         TEXT,
+                    user_id         TEXT,
+                    conversation_id UUID NOT NULL,
+                    content         TEXT NOT NULL,
+                    media           JSON DEFAULT '[]'::json,
+                    metadata        JSON DEFAULT '{{}}'::json,
+                    status          TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self._fq_answers} (
+                    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    question_id     UUID REFERENCES {self._fq_questions}(id),
+                    chat_id         TEXT,
+                    conversation_id UUID NOT NULL,
+                    content         TEXT,
+                    reasoning       TEXT,
+                    metadata        JSON DEFAULT '{{}}'::json,
+                    buttons         JSON DEFAULT '[]'::json,
+                    status          TEXT NOT NULL DEFAULT 'thinking'
+                        CHECK (status IN ('thinking', 'streaming', 'completed', 'failed')),
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
 
     # ------------------------------------------------------------------
     # Poll loop
@@ -113,7 +160,8 @@ class PostgresChannel(BaseChannel):
             await asyncio.sleep(self._poll_interval)
 
     async def _unstick_processing(self) -> None:
-        """Release messages stuck in ``processing`` beyond the timeout (max 3 retries)."""
+        """Release questions stuck in ``processing`` beyond the timeout (max 3 retries).
+        Also fail orphaned answers stuck in ``thinking``/``streaming``."""
         pool = await self._get_pool()
         max_retries = 3
         timeout = timedelta(seconds=self._processing_timeout)
@@ -121,7 +169,7 @@ class PostgresChannel(BaseChannel):
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT id, metadata FROM {self._fqtable}
+                SELECT id, metadata FROM {self._fq_questions}
                 WHERE status = 'processing' AND updated_at + $1 < NOW()
                 FOR UPDATE
                 """,
@@ -140,46 +188,61 @@ class PostgresChannel(BaseChannel):
                 if retry_count >= max_retries:
                     await conn.execute(
                         f"""
-                        UPDATE {self._fqtable}
+                        UPDATE {self._fq_questions}
                         SET status = 'failed', metadata = $1::json, updated_at = NOW()
                         WHERE id = $2
                         """,
                         json.dumps(meta),
                         msg_id,
                     )
+                    await conn.execute(
+                        f"""
+                        UPDATE {self._fq_answers}
+                        SET status = 'failed', updated_at = NOW()
+                        WHERE question_id = $1 AND status IN ('thinking', 'streaming')
+                        """,
+                        msg_id,
+                    )
                     self.logger.warning(
-                        "Message {} exceeded max retries ({}/{}), marking as failed",
+                        "Question {} exceeded max retries ({}/{})",
                         msg_id, retry_count, max_retries,
                     )
                 else:
                     await conn.execute(
                         f"""
-                        UPDATE {self._fqtable}
+                        UPDATE {self._fq_questions}
                         SET status = 'pending', metadata = $1::json, updated_at = NOW()
                         WHERE id = $2
                         """,
                         json.dumps(meta),
                         msg_id,
                     )
+                    await conn.execute(
+                        f"""
+                        UPDATE {self._fq_answers}
+                        SET status = 'failed', updated_at = NOW()
+                        WHERE question_id = $1 AND status IN ('thinking', 'streaming')
+                        """,
+                        msg_id,
+                    )
                     self.logger.warning(
-                        "Released stuck message {} (retry {}/{})",
+                        "Released stuck question {} (retry {}/{})",
                         msg_id, retry_count, max_retries,
                     )
 
-                # Discard any accumulated context for this message
                 self._msg_ctx.pop(msg_id, None)
 
     async def _poll_once(self) -> None:
-        """Claim the oldest pending user message and forward it to the agent."""
+        """Claim the oldest pending question and forward it to the agent."""
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                UPDATE {self._fqtable}
+                UPDATE {self._fq_questions}
                 SET status = 'processing', updated_at = NOW()
                 WHERE id = (
-                    SELECT id FROM {self._fqtable}
-                    WHERE status = 'pending' AND role = 'user'
+                    SELECT id FROM {self._fq_questions}
+                    WHERE status = 'pending'
                     ORDER BY created_at ASC
                     LIMIT 1
                     FOR UPDATE
@@ -191,11 +254,12 @@ class PostgresChannel(BaseChannel):
             if row is None:
                 return
 
-        msg_id = str(row["id"])
+        question_id = str(row["id"])
         conv_id = str(row["conversation_id"])
         chat_id = str(row["chat_id"]) if row["chat_id"] else conv_id
         user_id = str(row["user_id"]) if row["user_id"] else conv_id
         content = row["content"] or ""
+
         raw_meta = row["metadata"] or {}
         if isinstance(raw_meta, str):
             raw_meta = json.loads(raw_meta) if raw_meta else {}
@@ -205,8 +269,12 @@ class PostgresChannel(BaseChannel):
             raw_media = json.loads(raw_media) if raw_media else []
         media: list[str] = raw_media if isinstance(raw_media, list) else []
 
+        # Insert answer placeholder so the web server can start polling
+        answer_id = await self._insert_answer(question_id, chat_id, conv_id)
+
         meta: dict[str, Any] = {
-            "message_id": msg_id,
+            "message_id": question_id,
+            "answer_id": answer_id,
             "conversation_id": conv_id,
             **raw_meta,
         }
@@ -220,32 +288,84 @@ class PostgresChannel(BaseChannel):
                 metadata=meta,
             )
         except Exception:
-            self.logger.exception("Failed to dispatch message {}", msg_id)
-            await self._mark_failed(msg_id, conv_id, "dispatch_error")
+            self.logger.exception("Failed to dispatch question {}", question_id)
+            await self._mark_failed(question_id, answer_id, "dispatch_error")
 
-    async def _mark_failed(self, msg_id: str, conv_id: str, reason: str, chat_id: str = "") -> None:
-        """Mark a user message as failed and write an error response."""
+    async def _insert_answer(self, question_id: str, chat_id: str, conv_id: str) -> str:
+        """Create a ``thinking`` answer row and store its id in ``_msg_ctx``."""
         pool = await self._get_pool()
         async with pool.acquire() as conn:
-            await conn.execute(
+            row = await conn.fetchrow(
                 f"""
-                INSERT INTO {self._fqtable}
-                    (chat_id, conversation_id, role, content, metadata, status, created_at, updated_at)
-                VALUES ($1, $2, 'assistant', $3, $4::json, 'failed', NOW(), NOW())
+                INSERT INTO {self._fq_answers}
+                    (question_id, chat_id, conversation_id, status, created_at, updated_at)
+                VALUES ($1, $2, $3, 'thinking', NOW(), NOW())
+                RETURNING id
                 """,
-                chat_id or conv_id,
+                question_id,
+                chat_id,
                 conv_id,
-                f"Internal error: {reason}",
-                json.dumps({"error": reason, "original_message_id": msg_id}),
             )
+            answer_id = str(row["id"])
+            self._msg_ctx[question_id] = {"answer_id": answer_id, "tool_events": [], "reasoning_buf": []}
+            self.logger.debug("Inserted answer placeholder {} for question {}", answer_id, question_id)
+            return answer_id
+
+    async def _mark_failed(self, question_id: str, answer_id: str | None, reason: str) -> None:
+        """Mark a question and its answer as failed."""
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT conversation_id FROM {self._fq_questions} WHERE id = $1",
+                question_id,
+            )
+            conv_id = str(row["conversation_id"]) if row else question_id
+
+            if answer_id:
+                await conn.execute(
+                    f"""
+                    UPDATE {self._fq_answers}
+                    SET content = $1, metadata = $2::json, status = 'failed', updated_at = NOW()
+                    WHERE id = $3
+                    """,
+                    f"Internal error: {reason}",
+                    json.dumps({"error": reason}),
+                    answer_id,
+                )
+
             await conn.execute(
                 f"""
-                UPDATE {self._fqtable}
+                UPDATE {self._fq_questions}
                 SET status = 'failed', updated_at = NOW()
                 WHERE id = $1
                 """,
-                msg_id,
+                question_id,
             )
+            self._msg_ctx.pop(question_id, None)
+
+    # ------------------------------------------------------------------
+    # Reasoning — real-time streaming
+    # ------------------------------------------------------------------
+
+    async def send_reasoning_delta(
+        self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None
+    ) -> None:
+        """Write a reasoning chunk to the answer row immediately (direct call path)."""
+        answer_id = self._resolve_answer_id(metadata)
+        if not answer_id:
+            return
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f"UPDATE {self._fq_answers} SET reasoning = COALESCE(reasoning, '') || $1, updated_at = NOW() WHERE id = $2",
+                delta,
+                answer_id,
+            )
+
+    async def send_reasoning_end(
+        self, chat_id: str, metadata: dict[str, Any] | None = None
+    ) -> None:
+        pass
 
     # ------------------------------------------------------------------
     # Send (outbound)
@@ -255,90 +375,87 @@ class PostgresChannel(BaseChannel):
         meta = dict(msg.metadata or {})
         msg_id = meta.get("origin_message_id") or meta.get("message_id")
 
-        # Intermediate progress/tool-event messages — accumulate, don't write to DB
+        # --- Reasoning progress — write to DB in real-time ---
+        if meta.get("_reasoning_delta"):
+            if msg.content:
+                answer_id = self._resolve_answer_id(meta)
+                if answer_id:
+                    pool = await self._get_pool()
+                    async with pool.acquire() as conn:
+                        await conn.execute(
+                            f"UPDATE {self._fq_answers} SET reasoning = COALESCE(reasoning, '') || $1, updated_at = NOW() WHERE id = $2",
+                            msg.content,
+                            answer_id,
+                        )
+                elif msg_id:
+                    ctx = self._msg_ctx.setdefault(msg_id, {})
+                    ctx.setdefault("reasoning_buf", []).append(msg.content)
+            return
+
+        if meta.get("_reasoning_end"):
+            return
+
+        # --- Intermediate progress/tool-event messages — accumulate, don't write ---
         if meta.get("_progress"):
             if msg_id:
                 if len(self._msg_ctx) > 100:
                     self._msg_ctx.clear()
-                ctx = self._msg_ctx.setdefault(msg_id, {"tool_events": [], "reasoning": []})
+                ctx = self._msg_ctx.setdefault(msg_id, {"tool_events": [], "reasoning_buf": []})
                 if "_tool_events" in meta:
                     ctx["tool_events"].extend(meta["_tool_events"])
             return
 
-        # Control signals — skip DB write entirely
+        # --- Control signals ---
         if meta.get("_turn_end"):
             return
 
-        # Final response — merge accumulated context into metadata
-        if msg_id and msg_id in self._msg_ctx:
-            ctx = self._msg_ctx.pop(msg_id)
-            if ctx["tool_events"]:
-                existing = meta.get("_tool_events", [])
-                meta["_tool_events"] = existing + ctx["tool_events"]
-            if ctx["reasoning"]:
-                meta["_reasoning"] = " ".join(ctx["reasoning"])
+        # --- Final response — merge accumulated context, write to DB ---
+        ctx = self._msg_ctx.pop(msg_id, {}) if msg_id else {}
+        answer_id = ctx.get("answer_id") or meta.get("answer_id")
+        if not answer_id:
+            self.logger.warning("send: no answer_id for msg_id={}", msg_id)
+            return
+
+        if ctx.get("reasoning_buf"):
+            meta["_reasoning"] = " ".join(ctx["reasoning_buf"])
+        if ctx.get("tool_events"):
+            existing = meta.get("_tool_events", [])
+            meta["_tool_events"] = existing + ctx["tool_events"]
 
         chat_id = msg.chat_id
-        conv_id = self._resolve_conv_id(chat_id, msg)
+        conv_id = await self._resolve_conv_id(chat_id, msg)
         if not conv_id:
             self.logger.warning("send: no conv_id for chat_id={}, skipping response", chat_id)
             return
-
-        reply_to = meta.get("message_id") or meta.get("origin_message_id")
 
         try:
             pool = await self._get_pool()
             async with pool.acquire() as conn:
                 await conn.execute(
                     f"""
-                    INSERT INTO {self._fqtable}
-                        (chat_id, conversation_id, role, content, media, metadata, reply_to, buttons, status, created_at, updated_at)
-                    VALUES ($1, $2, 'assistant', $3, $4::json, $5::json, $6, $7::json, 'completed', NOW(), NOW())
+                    UPDATE {self._fq_answers}
+                    SET content = $1, metadata = $2::json, buttons = $3::json,
+                        status = 'completed', updated_at = NOW()
+                    WHERE id = $4
                     """,
-                    chat_id,
-                    conv_id,
                     msg.content,
-                    json.dumps(msg.media or []),
                     json.dumps(meta),
-                    reply_to,
                     json.dumps(msg.buttons or []),
+                    answer_id,
                 )
-                if reply_to:
+                if msg_id:
                     await conn.execute(
                         f"""
-                        UPDATE {self._fqtable}
+                        UPDATE {self._fq_questions}
                         SET status = 'completed', updated_at = NOW()
                         WHERE id = $1 AND status = 'processing'
                         """,
-                        reply_to,
+                        msg_id,
                     )
         except Exception:
             self.logger.exception("Failed to write response for {}", chat_id)
-            if reply_to:
-                await self._mark_failed(reply_to, conv_id, "write_error")
-
-    async def send_reasoning_delta(
-        self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None
-    ) -> None:
-        meta = metadata or {}
-        msg_id = meta.get("origin_message_id") or meta.get("message_id") or chat_id
-        ctx = self._msg_ctx.setdefault(msg_id, {"tool_events": [], "reasoning": []})
-        ctx["reasoning"].append(delta)
-
-    async def send_reasoning_end(
-        self, chat_id: str, metadata: dict[str, Any] | None = None
-    ) -> None:
-        pass
-
-    def _resolve_conv_id(self, chat_id: str, msg: OutboundMessage) -> str | None:
-        """Fallback: extract conversation_id from msg.metadata."""
-        meta = msg.metadata
-        if meta and isinstance(meta, dict):
-            cid = meta.get("conversation_id") or meta.get("conv_id")
-            if cid:
-                return str(cid)
-        self.logger.warning("_resolve_conv_id: no conv_id in metadata for {}", chat_id)
-        return None
+            if msg_id:
+                await self._mark_failed(msg_id, answer_id, "write_error")
 
     async def send_delta(
         self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None
@@ -348,45 +465,80 @@ class PostgresChannel(BaseChannel):
 
         if meta.get("_stream_end"):
             msg_id = meta.get("origin_message_id") or meta.get("message_id")
-            if msg_id and msg_id in self._msg_ctx:
-                ctx = self._msg_ctx.pop(msg_id)
-                if ctx["tool_events"]:
-                    existing = meta.get("_tool_events", [])
-                    meta["_tool_events"] = existing + ctx["tool_events"]
-                if ctx["reasoning"]:
-                    meta["_reasoning"] = " ".join(ctx["reasoning"])
+            ctx = self._msg_ctx.pop(msg_id, {}) if msg_id else {}
+            answer_id = ctx.get("answer_id") or meta.get("answer_id")
+
+            if ctx.get("tool_events"):
+                existing = meta.get("_tool_events", [])
+                meta["_tool_events"] = existing + ctx["tool_events"]
+            if ctx.get("reasoning_buf"):
+                meta["_reasoning"] = " ".join(ctx["reasoning_buf"])
 
             content = self._stream_buffers.pop(stream_id, "")
-            if content:
+            if content and answer_id:
                 conv_id = meta.get("conversation_id") or meta.get("conv_id") or chat_id
-                reply_to = meta.get("message_id") or meta.get("origin_message_id")
                 pool = await self._get_pool()
                 async with pool.acquire() as conn:
                     await conn.execute(
                         f"""
-                        INSERT INTO {self._fqtable}
-                            (chat_id, conversation_id, role, content, metadata, reply_to, status, created_at, updated_at)
-                        VALUES ($1, $2, 'assistant', $3, $4::json, $5, 'completed', NOW(), NOW())
+                        UPDATE {self._fq_answers}
+                        SET content = $1, metadata = $2::json, status = 'completed', updated_at = NOW()
+                        WHERE id = $3
                         """,
-                        chat_id,
-                        conv_id,
                         content,
                         json.dumps(meta | {"streamed": True}),
-                        reply_to,
+                        answer_id,
                     )
-                    if reply_to:
+                    if msg_id:
                         await conn.execute(
                             f"""
-                            UPDATE {self._fqtable}
+                            UPDATE {self._fq_questions}
                             SET status = 'completed', updated_at = NOW()
                             WHERE id = $1 AND status = 'processing'
                             """,
-                            reply_to,
+                            msg_id,
                         )
-
         else:
             buf = self._stream_buffers.get(stream_id, "")
             self._stream_buffers[stream_id] = buf + delta
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_answer_id(self, metadata: dict[str, Any] | None) -> str | None:
+        """Extract ``answer_id`` from metadata or ``_msg_ctx`` by question id."""
+        meta = metadata or {}
+        answer_id = meta.get("answer_id")
+        if answer_id:
+            return str(answer_id)
+        msg_id = meta.get("origin_message_id") or meta.get("message_id")
+        if msg_id:
+            ctx = self._msg_ctx.get(msg_id)
+            if ctx:
+                return ctx.get("answer_id")
+        return None
+
+    async def _resolve_conv_id(self, chat_id: str, msg: OutboundMessage) -> str | None:
+        """Extract conversation_id from msg.metadata."""
+        meta = msg.metadata
+        if meta and isinstance(meta, dict):
+            cid = meta.get("conversation_id") or meta.get("conv_id")
+            if cid:
+                return str(cid)
+            # Fallback: look up from the question row
+            msg_id = meta.get("origin_message_id") or meta.get("message_id")
+            if msg_id:
+                pool = await self._get_pool()
+                async with pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        f"SELECT conversation_id FROM {self._fq_questions} WHERE id = $1",
+                        msg_id,
+                    )
+                    if row:
+                        return str(row["conversation_id"])
+        self.logger.warning("_resolve_conv_id: no conv_id in metadata for {}", chat_id)
+        return None
 
     # ------------------------------------------------------------------
     # Connection pool
@@ -410,8 +562,9 @@ class PostgresChannel(BaseChannel):
         return {
             "enabled": True,
             "dsn": "postgresql://user:pass@localhost:5432/nanobot",
-            "table": "conversation_messages",
             "schema": "public",
+            "questions_table": "conversation_questions",
+            "answers_table": "conversation_answers",
             "poll_interval": 2.0,
             "processing_timeout": 600,
             "allow_from": ["*"],

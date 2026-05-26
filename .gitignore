@@ -1,5 +1,7 @@
 # Secrets
 config.json
+.env
+**/.env
 
 # Python
 __pycache__/
@@ -25,8 +27,12 @@ history/
 media/
 webui/
 cron/
-**.nanobot/tool-results/
+**/tool-results/
 .local/
+workspace/sessions/
+workspace/cache/
+workspace/output/
+workspace/temp_query.sql
 
 # Vector indexes (large binaries)
 **/data/vector/

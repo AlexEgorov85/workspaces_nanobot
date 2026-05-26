@@ -1,5 +1,5 @@
 ---
-name: html-presentation-generator
+name: html_presentation_generator
 description: Генератор HTML-презентаций из Markdown. Используй tool **`generate_presentation`**.
 metadata: {"nanobot":{"emoji":"📊"}}
 ---
@@ -92,3 +92,22 @@ xychart-beta
 
 - Mermaid требует подключения к интернету (CDN)
 - Экспорт в PDF — через браузер (Ctrl+P)
+
+---
+
+## CLI (standalone)
+
+Запуск через `generate_presentation.bat` (Windows) или `generate_presentation.sh` (Linux):
+
+```bash
+# Из папки навыка:
+generate_presentation --input slides.md --output out.html --title "Мой доклад"
+```
+
+Параметры:
+
+| Аргумент      | Обязательный | Описание |
+|:--------------|:------------:|:---------|
+| `--input`     | да | Путь к Markdown-файлу |
+| `--output`    | да | Путь к выходному HTML-файлу |
+| `--title`     | нет | Заголовок презентации (по умолч. "Презентация") |
