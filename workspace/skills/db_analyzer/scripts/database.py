@@ -1,54 +1,112 @@
 """
-Работа с PostgreSQL: получение схемы, выполнение запросов,
-EXPLAIN-валидация и проверка безопасности SQL.
+Класс Database — подключение к PostgreSQL с пулом соединений,
+кешированием схемы и фильтрацией таблиц.
 
-Все функции, работающие с БД, принимают dict-конфиг подключения:
-    {"host": str, "port": int, "database": str, "user": str, "password": str}
+Использование:
+    from database import Database
+    from config import load_db_config
+
+    cfg = load_db_config()
+    async with Database(cfg) as db:
+        schema = await db.get_schema()
+        result = await db.execute_query("SELECT * FROM oarb.audits LIMIT $1", [5])
 """
 
-from typing import Optional
+import json
+import time
+from pathlib import Path
+from typing import Any, Optional
+
+import asyncpg
 
 
-async def get_schema(db: dict, schema_name: str = "oarb") -> dict:
+class Database:
     """
-    Получить структуру таблиц из information_schema.
+    Подключение к PostgreSQL через пул соединений.
 
-    Запрашивает колонки, их типы, комментарии колонок и таблиц
-    для указанной схемы PostgreSQL.
-
-    Args:
-        db: Параметры подключения (см. load_db_config в config.py).
-        schema_name: Имя схемы (по умолчанию 'oarb').
-
-    Returns:
-        dict вида:
-            {
-              "schema": "oarb",
-              "tables": {
-                "audits": {
-                  "comment": "Аудиторские проверки",
-                  "columns": {
-                    "id": {"type": "integer", "comment": "Идентификатор"},
-                    "actual_date": {"type": "date", "comment": "Дата проверки"},
-                    ...
-                  }
-                },
-                ...
-              }
-            }
-
-    Пример:
-        >>> import asyncio
-        >>> from config import load_db_config
-        >>> db = load_db_config()
-        >>> asyncio.run(get_schema(db, "oarb"))  # doctest: +SKIP
+    Принимает dict конфигурации из load_db_config():
+        connection_string — DSN для asyncpg (используется напрямую, без парсинга)
+        schema           — имя схемы по умолчанию
+        tables           — список таблиц для фильтрации (опционально)
+        schema_cache     — настройки кеша: enabled, path, ttl_seconds
     """
-    import asyncpg
 
-    conn = await asyncpg.connect(**db)
-    try:
-        rows = await conn.fetch(
-            """
+    def __init__(self, db_config: dict):
+        self._dsn = db_config.get("connection_string", "")
+        self._schema_name = db_config.get("schema", "public")
+        self._table_names: Optional[list[str]] = db_config.get("tables") or None
+        self._pool: Optional[asyncpg.Pool] = None
+
+        cache_cfg = db_config.get("schema_cache", {})
+        self._cache_enabled = bool(cache_cfg.get("enabled", False))
+        self._cache_path: Optional[str] = cache_cfg.get("path") or None
+        self._cache_ttl = int(cache_cfg.get("ttl_seconds", 3600))
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def connect(self):
+        """Создать пул соединений к PostgreSQL."""
+        if not self._dsn:
+            raise ValueError("Database connection string is empty")
+        self._pool = await asyncpg.create_pool(dsn=self._dsn, min_size=1, max_size=2)
+
+    async def close(self):
+        """Закрыть пул соединений."""
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
+
+    async def __aenter__(self):
+        await self.connect()
+        return self
+
+    async def __aexit__(self, *args):
+        await self.close()
+
+    # ------------------------------------------------------------------
+    # Schema
+    # ------------------------------------------------------------------
+
+    async def get_schema(
+        self,
+        schema_name: Optional[str] = None,
+        table_names: Optional[list[str]] = None,
+        use_cache: Optional[bool] = None,
+    ) -> dict:
+        """
+        Получить структуру таблиц из information_schema.
+
+        Args:
+            schema_name: Имя схемы (по умолчанию из конфига).
+            table_names: Список таблиц для фильтрации (по умолчанию из конфига).
+            use_cache: Использовать файловый кеш (по умолчанию из конфига).
+
+        Returns:
+            dict: {"schema": str, "tables": {table: {comment, columns: {col: {type, comment}}}}}
+        """
+        schema = schema_name or self._schema_name
+        tables = table_names if table_names is not None else self._table_names
+        cache = use_cache if use_cache is not None else self._cache_enabled
+
+        if cache:
+            cached = self._read_cache(schema, tables)
+            if cached:
+                return cached
+
+        data = await self._fetch_schema(schema, tables)
+
+        if cache:
+            self._write_cache(schema, data)
+
+        return data
+
+    async def _fetch_schema(self, schema: str, tables: Optional[list[str]]) -> dict:
+        if not self._pool:
+            raise RuntimeError("Database not connected. Call connect() first.")
+
+        query = """
             SELECT
                 c.table_name,
                 c.column_name,
@@ -61,62 +119,94 @@ async def get_schema(db: dict, schema_name: str = "oarb") -> dict:
                 ON pgd.objsubid = c.ordinal_position
                AND pgd.objoid = pc.oid
             WHERE c.table_schema = $1
-            ORDER BY c.table_name, c.ordinal_position
-            """,
-            schema_name,
-        )
-        tables: dict = {}
+        """
+        params: list[Any] = [schema]
+
+        if tables:
+            query += " AND c.table_name = ANY($2::text[])"
+            params.append(tables)
+
+        query += " ORDER BY c.table_name, c.ordinal_position"
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+
+        result: dict = {}
         for row in rows:
             tbl = row["table_name"]
-            if tbl not in tables:
-                tables[tbl] = {"comment": row["table_comment"], "columns": {}}
-            tables[tbl]["columns"][row["column_name"]] = {
+            if tbl not in result:
+                result[tbl] = {"comment": row["table_comment"], "columns": {}}
+            result[tbl]["columns"][row["column_name"]] = {
                 "type": row["data_type"],
                 "comment": row["column_comment"],
             }
-        return {"schema": schema_name, "tables": tables}
-    finally:
-        await conn.close()
 
+        return {"schema": schema, "tables": result}
 
-async def execute_query(db: dict, sql: str, params: Optional[list] = None) -> dict:
-    """
-    Выполнить SELECT-запрос и вернуть колонки и строки.
+    # ------------------------------------------------------------------
+    # Schema cache (файловый)
+    # ------------------------------------------------------------------
 
-    Args:
-        db: Параметры подключения.
-        sql: SQL-запрос (с $1, $2, ... плейсхолдерами asyncpg).
-        params: Список значений для плейсхолдеров (опционально).
+    def _cache_file(self) -> Optional[Path]:
+        return Path(self._cache_path) if self._cache_path else None
 
-    Returns:
-        dict с ключами:
-            status: "success" | "error"
-            row_count: количество строк
-            columns: список имён колонок
-            rows: список dict-строк
+    def _read_cache(self, schema: str, tables: Optional[list[str]]) -> Optional[dict]:
+        path = self._cache_file()
+        if not path or not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
 
-    Пример:
-        >>> import asyncio
-        >>> from config import load_db_config
-        >>> db = load_db_config()
-        >>> asyncio.run(execute_query(db, "SELECT 1 AS x"))
-        {'status': 'success', 'row_count': 1, 'columns': ['x'], 'rows': [{'x': 1}]}
+        if data.get("schema") != schema:
+            return None
+        if time.time() - data.get("cached_at", 0) > self._cache_ttl:
+            return None
 
-    Пример с параметрами:
-        >>> asyncio.run(execute_query(
-        ...     db, "SELECT * FROM oarb.audits WHERE id = $1", [42]
-        ... ))  # doctest: +SKIP
-    """
-    import asyncpg
+        cached_tables = data.get("tables", {})
+        if tables:
+            if not all(t in cached_tables for t in tables):
+                return None
+            filtered = {t: cached_tables[t] for t in tables if t in cached_tables}
+            return {"schema": schema, "tables": filtered}
 
-    conn = await asyncpg.connect(**db)
-    try:
-        if params:
-            rows = await conn.fetch(sql, *params)
-        else:
-            rows = await conn.fetch(sql)
+        return {"schema": schema, "tables": cached_tables}
+
+    def _write_cache(self, schema: str, schema_data: dict):
+        path = self._cache_file()
+        if not path:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = {**schema_data, "cached_at": time.time()}
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Query execution
+    # ------------------------------------------------------------------
+
+    async def execute_query(self, sql: str, params: Optional[list] = None) -> dict:
+        """
+        Выполнить SELECT-запрос, вернуть колонки и строки.
+
+        Returns:
+            dict: {status, row_count, columns, rows}
+        """
+        if not self._pool:
+            raise RuntimeError("Database not connected. Call connect() first.")
+
+        async with self._pool.acquire() as conn:
+            if params:
+                rows = await conn.fetch(sql, *params)
+            else:
+                rows = await conn.fetch(sql)
+
         if not rows:
             return {"status": "success", "row_count": 0, "columns": [], "rows": []}
+
         columns = list(rows[0].keys())
         return {
             "status": "success",
@@ -124,129 +214,67 @@ async def execute_query(db: dict, sql: str, params: Optional[list] = None) -> di
             "columns": columns,
             "rows": [dict(r) for r in rows],
         }
-    finally:
-        await conn.close()
 
+    async def execute_explain(self, sql: str) -> dict:
+        """
+        EXPLAIN (FORMAT JSON) — проверка синтаксиса без выполнения.
 
-async def execute_explain(db: dict, sql: str) -> dict:
-    """
-    Выполнить EXPLAIN (FORMAT JSON) для проверки SQL без его выполнения.
+        Returns:
+            {"valid": True, "plan": [...]} или {"valid": False, "error": "..."}
+        """
+        if not self._pool:
+            raise RuntimeError("Database not connected. Call connect() first.")
 
-    Используется в sql_mode как защита: сначала проверяем, что запрос
-    синтаксически корректен и все объекты существуют, потом выполняем.
-
-    Args:
-        db: Параметры подключения.
-        sql: SQL-запрос.
-
-    Returns:
-        {"valid": True, "plan": [...]} при успехе,
-        {"valid": False, "error": "..."} при ошибке.
-
-    Пример:
-        >>> import asyncio
-        >>> from config import load_db_config
-        >>> db = load_db_config()
-        >>> res = await execute_explain(db, "SELECT 1")
-        >>> res["valid"]
-        True
-
-        >>> res = await execute_explain(db, "SELECT * FROM nonexistent")
-        >>> res["valid"]
-        False
-    """
-    import asyncpg
-
-    conn = await asyncpg.connect(**db)
-    try:
         explain_sql = f"EXPLAIN (FORMAT JSON) {sql}"
-        rows = await conn.fetch(explain_sql)
-        plan = rows[0][0] if rows else None
-        return {"valid": True, "plan": plan}
-    except asyncpg.PostgresError as e:
-        return {"valid": False, "error": str(e)}
-    except Exception as e:
-        return {"valid": False, "error": f"EXPLAIN failed: {e}"}
-    finally:
-        await conn.close()
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(explain_sql)
+            plan = rows[0][0] if rows else None
+            return {"valid": True, "plan": plan}
+        except asyncpg.PostgresError as e:
+            return {"valid": False, "error": str(e)}
+        except Exception as e:
+            return {"valid": False, "error": f"EXPLAIN failed: {e}"}
 
+    # ------------------------------------------------------------------
+    # Static helpers (не требуют подключения)
+    # ------------------------------------------------------------------
 
-def validate_sql(sql: str) -> Optional[str]:
-    """
-    Проверить SQL на безопасность: запретить DDL/DML и мульти-запросы.
+    @staticmethod
+    def validate_sql(sql: str) -> Optional[str]:
+        """
+        Проверить SQL на безопасность: только SELECT, один statement.
 
-    Разрешены только SELECT-запросы (один statement).
+        Returns:
+            None если всё в порядке, str с ошибкой иначе.
+        """
+        stripped = sql.strip().upper()
+        if not stripped:
+            return "SQL query is empty"
+        first_word = stripped.split(maxsplit=1)[0] if stripped else ""
+        ddl = {
+            "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+            "TRUNCATE", "EXECUTE", "CALL", "MERGE", "REPLACE",
+        }
+        if first_word in ddl:
+            return f"DML/DDL statements are not allowed: {first_word}"
+        if stripped.count(";") > 1:
+            return "Multiple SQL statements are not allowed"
+        return None
 
-    Args:
-        sql: SQL-запрос.
+    @staticmethod
+    def format_schema(schema: dict) -> str:
+        """
+        Преобразовать схему БД в читаемый текст для промпта LLM.
 
-    Returns:
-        None если всё в порядке,
-        str с описанием ошибки если запрос небезопасен.
-
-    Пример:
-        >>> validate_sql("SELECT * FROM audits")
-        None  # OK
-
-        >>> validate_sql("DROP TABLE audits")
-        'DML/DDL statements are not allowed: DROP'
-
-        >>> validate_sql("SELECT 1; SELECT 2")
-        'Multiple SQL statements are not allowed'
-    """
-    stripped = sql.strip().upper()
-    if not stripped:
-        return "SQL query is empty"
-    first_word = stripped.split(maxsplit=1)[0] if stripped else ""
-    ddl = {
-        "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
-        "TRUNCATE", "EXECUTE", "CALL", "MERGE", "REPLACE",
-    }
-    if first_word in ddl:
-        return f"DML/DDL statements are not allowed: {first_word}"
-    if stripped.count(";") > 1:
-        return "Multiple SQL statements are not allowed"
-    return None
-
-
-def format_schema(schema: dict) -> str:
-    """
-    Преобразовать схему БД в читаемый текст для промпта LLM.
-
-    Из dict-структуры, возвращённой get_schema(), делает
-    строку вида:
-
-        Table: audits — Аудиторские проверки
-          id: integer — Идентификатор
-          actual_date: date — Дата проверки
-          ...
-
-    Args:
-        schema: dict от get_schema().
-
-    Returns:
-        str — форматированное описание схемы.
-
-    Пример:
-        >>> schema = {
-        ...   "schema": "oarb",
-        ...   "tables": {
-        ...     "audits": {
-        ...       "comment": "Проверки",
-        ...       "columns": {
-        ...         "id": {"type": "integer", "comment": "ID"},
-        ...       }
-        ...     }
-        ...   }
-        ... }
-        >>> print(format_schema(schema))
-        Table: audits — Проверки
-          id: integer — ID
-    """
-    lines: list[str] = []
-    for tbl, info in schema.get("tables", {}).items():
-        lines.append(f"Table: {tbl} — {info.get('comment') or ''}")
-        for col, cinfo in info.get("columns", {}).items():
-            lines.append(f"  {col}: {cinfo['type']} — {cinfo.get('comment') or ''}")
-        lines.append("")
-    return "\n".join(lines)
+        Пример:
+            Table: audits — Аудиторские проверки
+              id: integer — Идентификатор
+        """
+        lines: list[str] = []
+        for tbl, info in schema.get("tables", {}).items():
+            lines.append(f"Table: {tbl} — {info.get('comment') or ''}")
+            for col, cinfo in info.get("columns", {}).items():
+                lines.append(f"  {col}: {cinfo['type']} — {cinfo.get('comment') or ''}")
+            lines.append("")
+        return "\n".join(lines)

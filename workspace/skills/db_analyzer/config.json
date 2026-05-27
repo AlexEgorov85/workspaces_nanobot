@@ -10,7 +10,12 @@
   "database": {
     "connection_string": "",
     "schema": "oarb",
-    "tables": ["audit_reports", "audits", "report_items", "violations"]
+    "tables": ["audit_reports", "audits", "report_items", "violations"],
+    "schema_cache": {
+      "enabled": true,
+      "path": "cache/schema.json",
+      "ttl_seconds": 86400
+    }
   },
   "embedding": {
     "base_url": "http://localhost:11434/api/embed",
