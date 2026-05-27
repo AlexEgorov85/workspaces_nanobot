@@ -117,8 +117,9 @@ def _scan_and_register_tools(registry) -> None:
     Для каждой поддиректории ищет файл tool.py, импортирует его как модуль
     и извлекает все классы, наследуемые от Tool (но не сам Tool).
     """
+    if not _TOOLS_DIR.is_dir():
+        return
     for pkg_dir in sorted(_TOOLS_DIR.iterdir()):
-        # Пропускаем скрытые и системные директории
         if not pkg_dir.is_dir() or pkg_dir.name.startswith("_") or pkg_dir.name.startswith("."):
             continue
         tool_file = pkg_dir / "tool.py"
@@ -237,34 +238,16 @@ def _run_interactive_loop(agent, config) -> None:
 
         # ── 4a. Фоновая задача: потребление исходящих сообщений ──────────────
         #     Получает сообщения из шины и выводит их пользователю.
-        reasoning_buf: str = ""
-        reasoning_active: bool = False
 
-        async def _show_reasoning(finalize: bool = False):
-            nonlocal reasoning_buf, reasoning_active
-            if not reasoning_active or not reasoning_buf:
-                reasoning_buf = ""
-                reasoning_active = False
-                return
-            text = reasoning_buf.strip()
-            if not text or not renderer:
-                reasoning_buf = ""
-                reasoning_active = False
+        async def _print_reasoning(text: str) -> None:
+            """Печатает reasoning отдельной строкой, как стандартный CLI."""
+            if not text.strip() or not renderer:
                 return
             with renderer.pause_spinner():
                 renderer.ensure_header()
-                f = renderer.console.file
-                if finalize:
-                    f.write(f"\r  > {text}\n")
-                else:
-                    f.write(f"\r  > {text}")
-                f.flush()
-            if finalize:
-                reasoning_buf = ""
-                reasoning_active = False
+                renderer.console.print(f"[dim italic]> {text}[/dim italic]")
 
         async def _consume_outbound():
-            nonlocal reasoning_buf, reasoning_active
             """
             Бесконечный цикл, который читает сообщения из outbound-очереди bus
             и обрабатывает их: стриминг-дельты, прогресс, финальные ответы.
@@ -285,24 +268,19 @@ def _run_interactive_loop(agent, config) -> None:
                     if agent.channels_config and not agent.channels_config.show_reasoning:
                         continue
                     if msg.content:
-                        reasoning_buf += msg.content
-                        reasoning_active = True
-                        await _show_reasoning(finalize=False)
+                        await _print_reasoning(msg.content)
                     continue
                 if meta.get("_reasoning_end"):
-                    await _show_reasoning(finalize=True)
                     continue
 
                 # ── Обработка стриминговых сообщений ─────────────────────────
                 # _stream_delta — очередной фрагмент ответа (стриминг)
                 if meta.get("_stream_delta"):
-                    await _show_reasoning(finalize=True)
                     if renderer:
                         await renderer.on_delta(msg.content)
                     continue
                 # _stream_end — завершение стриминга
                 if meta.get("_stream_end"):
-                    await _show_reasoning(finalize=True)
                     if renderer:
                         await renderer.on_end(
                             resuming=meta.get("_resuming", False),
@@ -310,11 +288,17 @@ def _run_interactive_loop(agent, config) -> None:
                     continue
                 # _streamed — ответ полностью получен (не по фрагментам)
                 if meta.get("_streamed"):
-                    await _show_reasoning(finalize=True)
                     if renderer and renderer.streamed:
                         turn_done.set()
                         continue
-                    # Без стриминга — пропускаем в fallback для вывода контента
+                    # Стриминга не было — сохраняем контент для финального вывода
+                    if msg.content:
+                        meta_copy = dict(meta)
+                        if renderer and not renderer.streamed:
+                            meta_copy.pop("_streamed", None)
+                        turn_response.append((msg.content, meta_copy))
+                    turn_done.set()
+                    continue
 
                 # ── Результаты вызова инструментов (tool_events finish) ──────
                 if meta.get("_tool_events") and not meta.get("_tool_hint"):
