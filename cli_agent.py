@@ -94,12 +94,12 @@ from nanobot.utils.helpers import sync_workspace_templates
 
 from pg_session_manager import PGSessionManager
 
-# ── Пути к кастомным workspace-директориям ──────────────────────────────────
-#    tools/ — пользовательские инструменты (Tool subclasses)
-#    hooks/ — пользовательские хуки жизненного цикла
-_WORKSPACE_DIR = Path(__file__).parent / "workspace"
-_TOOLS_DIR = _WORKSPACE_DIR / "tools"
-_HOOKS_DIR = _WORKSPACE_DIR / "hooks"
+# ── Путь к конфигу и кастомным workspace-директориям ─────────────────────────
+#    Эти переменные можно менять под своё окружение.
+_CONFIG_PATH: str = str(Path(__file__).parent / "config.json")
+_WORKSPACE_DIR: Path = Path(__file__).parent / "workspace"
+_TOOLS_DIR: Path = _WORKSPACE_DIR / "tools"
+_HOOKS_DIR: Path = _WORKSPACE_DIR / "hooks"
 sys.path.insert(0, str(_TOOLS_DIR))
 sys.path.insert(0, str(_HOOKS_DIR))
 sys.path.insert(0, str(_WORKSPACE_DIR))
@@ -237,7 +237,34 @@ def _run_interactive_loop(agent, config) -> None:
 
         # ── 4a. Фоновая задача: потребление исходящих сообщений ──────────────
         #     Получает сообщения из шины и выводит их пользователю.
+        reasoning_buf: str = ""
+        reasoning_active: bool = False
+
+        async def _show_reasoning(finalize: bool = False):
+            nonlocal reasoning_buf, reasoning_active
+            if not reasoning_active or not reasoning_buf:
+                reasoning_buf = ""
+                reasoning_active = False
+                return
+            text = reasoning_buf.strip()
+            if not text or not renderer:
+                reasoning_buf = ""
+                reasoning_active = False
+                return
+            with renderer.pause_spinner():
+                renderer.ensure_header()
+                f = renderer.console.file
+                if finalize:
+                    f.write(f"\r  > {text}\n")
+                else:
+                    f.write(f"\r  > {text}")
+                f.flush()
+            if finalize:
+                reasoning_buf = ""
+                reasoning_active = False
+
         async def _consume_outbound():
+            nonlocal reasoning_buf, reasoning_active
             """
             Бесконечный цикл, который читает сообщения из outbound-очереди bus
             и обрабатывает их: стриминг-дельты, прогресс, финальные ответы.
@@ -251,26 +278,46 @@ def _run_interactive_loop(agent, config) -> None:
                 except asyncio.CancelledError:
                     break  # Задачу отменили — выходим
 
+                meta = msg.metadata or {}
+
+                # ── Обработка размышлений (reasoning) ─────────────────────────
+                if meta.get("_reasoning_delta"):
+                    if agent.channels_config and not agent.channels_config.show_reasoning:
+                        continue
+                    if msg.content:
+                        reasoning_buf += msg.content
+                        reasoning_active = True
+                        await _show_reasoning(finalize=False)
+                    continue
+                if meta.get("_reasoning_end"):
+                    await _show_reasoning(finalize=True)
+                    continue
+
                 # ── Обработка стриминговых сообщений ─────────────────────────
                 # _stream_delta — очередной фрагмент ответа (стриминг)
-                if msg.metadata.get("_stream_delta"):
+                if meta.get("_stream_delta"):
+                    await _show_reasoning(finalize=True)
                     if renderer:
                         await renderer.on_delta(msg.content)
                     continue
                 # _stream_end — завершение стриминга
-                if msg.metadata.get("_stream_end"):
+                if meta.get("_stream_end"):
+                    await _show_reasoning(finalize=True)
                     if renderer:
                         await renderer.on_end(
-                            resuming=msg.metadata.get("_resuming", False),
+                            resuming=meta.get("_resuming", False),
                         )
                     continue
                 # _streamed — ответ полностью получен (не по фрагментам)
-                if msg.metadata.get("_streamed"):
-                    turn_done.set()
-                    continue
+                if meta.get("_streamed"):
+                    await _show_reasoning(finalize=True)
+                    if renderer and renderer.streamed:
+                        turn_done.set()
+                        continue
+                    # Без стриминга — пропускаем в fallback для вывода контента
 
                 # ── Обработка прогресс-сообщений ─────────────────────────────
-                #     (вызовы инструментов, размышления и т.д.)
+                #     (вызовы инструментов и т.д.)
                 if await _maybe_print_interactive_progress(
                     msg, None, agent.channels_config, renderer,
                 ):
@@ -280,14 +327,14 @@ def _run_interactive_loop(agent, config) -> None:
                 if not turn_done.is_set():
                     # Первый ответ с контентом — сохраняем
                     if msg.content:
-                        turn_response.append((msg.content, dict(msg.metadata or {})))
+                        turn_response.append((msg.content, dict(meta)))
                     turn_done.set()
                 elif msg.content:
                     # Последующие ответы (отложенные сообщения) — выводим сразу
                     await _print_agent_response(
                         msg.content,
                         render_markdown=True,
-                        metadata=msg.metadata,
+                        metadata=meta,
                     )
 
         outbound_task = asyncio.create_task(_consume_outbound())
@@ -316,6 +363,8 @@ def _run_interactive_loop(agent, config) -> None:
                     # Сбрасываем состояние перед новым запросом
                     turn_done.clear()
                     turn_response.clear()
+                    reasoning_buf = ""
+                    reasoning_active = False
                     renderer = StreamRenderer(
                         render_markdown=True,
                         bot_name=config.agents.defaults.bot_name,
@@ -391,7 +440,7 @@ def _run_vanilla_agent() -> None:
     История сессий хранится в JSONL-файлах (стандартный SessionManager).
     """
     # Загружаем конфигурацию
-    config = _load_runtime_config()
+    config = _load_runtime_config(config=_CONFIG_PATH, workspace=str(_WORKSPACE_DIR))
     # Синхронизируем шаблоны workspace
     sync_workspace_templates(config.workspace_path)
     console.print(f"{__logo__} Starting nanobot CLI agent v{__version__}...")
@@ -433,7 +482,7 @@ def _run_patched_agent(args: argparse.Namespace) -> None:
         args: распарсенные аргументы командной строки (storage)
     """
     # ── 1. Загрузка конфигурации и подготовка workspace ──────────────────────
-    config = _load_runtime_config()
+    config = _load_runtime_config(config=_CONFIG_PATH, workspace=str(_WORKSPACE_DIR))
     sync_workspace_templates(config.workspace_path)
     console.print(f"{__logo__} Starting nanobot CLI agent v{__version__}...")
 
