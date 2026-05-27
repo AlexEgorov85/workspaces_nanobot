@@ -80,7 +80,7 @@ audit_analyze.sh --mode vector --query "финансовые нарушения"
 |:------------------|:------------:|:---------|
 | `--mode`          | да | Режим: `predefined`, `sql`, `vector` |
 | `--script`        | для `predefined` | Имя скрипта из реестра |
-| `--params`        | нет | Параметры скрипта в JSON: `'{"year": 2024}'` |
+| `--params`        | нет | Параметры: `year=2024` (key=value) или `'{"year":2024}'` (JSON, Linux) |
 | `--query`         | для `sql`/`vector` | Запрос на естественном языке |
 | `--index-name`    | для `vector` | Имя FAISS-индекса (без .faiss) |
 | `--vector-index`  | нет | Директория с индексами (переопределяет config.json) |
