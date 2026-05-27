@@ -78,6 +78,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cli
 import config
+import database
 from database import Database
 import llm
 import output

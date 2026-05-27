@@ -84,7 +84,7 @@ class Database:
             use_cache: Использовать файловый кеш (по умолчанию из конфига).
 
         Returns:
-            dict: {"schema": str, "tables": {table: {comment, columns: {col: {type, comment}}}}}
+            dict: {"schema": str, "tables": {table: {comment, columns: {col: {type, not_null, comment}}}}}
         """
         schema = schema_name or self._schema_name
         tables = table_names if table_names is not None else self._table_names
@@ -111,6 +111,8 @@ class Database:
                 c.table_name,
                 c.column_name,
                 c.data_type,
+                c.is_nullable,
+                c.character_maximum_length,
                 pgd.description AS column_comment,
                 obj_description(pc.oid) AS table_comment
             FROM information_schema.columns c
@@ -136,8 +138,15 @@ class Database:
             tbl = row["table_name"]
             if tbl not in result:
                 result[tbl] = {"comment": row["table_comment"], "columns": {}}
+
+            col_type = row["data_type"]
+            max_len = row["character_maximum_length"]
+            if max_len and col_type in ("character varying", "character"):
+                col_type = f"varchar({max_len})"
+
             result[tbl]["columns"][row["column_name"]] = {
-                "type": row["data_type"],
+                "type": col_type,
+                "not_null": row["is_nullable"] == "NO",
                 "comment": row["column_comment"],
             }
 
@@ -265,16 +274,32 @@ class Database:
     @staticmethod
     def format_schema(schema: dict) -> str:
         """
-        Преобразовать схему БД в читаемый текст для промпта LLM.
+        Преобразовать схему БД в промпт для LLM.
+
+        Показывает для каждой колонки:
+          - тип (с длиной для varchar)
+          - NOT/NULL
+          - комментарий (если есть)
 
         Пример:
+            === Schema: oarb ===
+
             Table: audits — Аудиторские проверки
-              id: integer — Идентификатор
+              id: integer NOT NULL — Идентификатор
+              actual_date: date — Дата проверки
+              title: varchar(500) — Название проверки
         """
-        lines: list[str] = []
+        schema_name = schema.get("schema", "?")
+        parts: list[str] = [f"=== Schema: {schema_name} ===", ""]
         for tbl, info in schema.get("tables", {}).items():
-            lines.append(f"Table: {tbl} — {info.get('comment') or ''}")
+            comment = info.get("comment") or ""
+            parts.append(f"Table: \"{schema_name}\".{tbl} — {comment}")
             for col, cinfo in info.get("columns", {}).items():
-                lines.append(f"  {col}: {cinfo['type']} — {cinfo.get('comment') or ''}")
-            lines.append("")
-        return "\n".join(lines)
+                nn = " NOT NULL" if cinfo.get("not_null") else ""
+                col_comment = cinfo.get("comment") or ""
+                if col_comment:
+                    parts.append(f"  {col}: {cinfo['type']}{nn} — {col_comment}")
+                else:
+                    parts.append(f"  {col}: {cinfo['type']}{nn}")
+            parts.append("")
+        return "\n".join(parts)
