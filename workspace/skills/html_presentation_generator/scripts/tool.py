@@ -189,7 +189,7 @@ class HtmlPresentationTool(Tool):
             msg = (
                 f"Презентация успешно сгенерирована: {out_path}\n"
                 f"Слайдов: {len(slides)}\n"
-                f"Навигация: ← → Space, F — полный экран, Home/End — начало/конец."
+                f"Навигация: <- -> Space, F — полный экран, Home/End — начало/конец."
             )
             return self._make_result(msg, out_path)
 

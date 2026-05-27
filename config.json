@@ -3,8 +3,8 @@
     "defaults": {
       "workspace": "~/.nanobot/workspace",
       "modelPreset": null,
-      "model": "mistral-large-latest",
-      "provider": "mistral",
+      "model": "gpt-oss:20b-cloud",
+      "provider": "ollama",
       "maxTokens": 8192,
       "contextWindowTokens": 65536,
       "contextBlockLimit": null,
