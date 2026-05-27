@@ -316,6 +316,27 @@ def _run_interactive_loop(agent, config) -> None:
                         continue
                     # Без стриминга — пропускаем в fallback для вывода контента
 
+                # ── Результаты вызова инструментов (tool_events finish) ──────
+                if meta.get("_tool_events") and not meta.get("_tool_hint"):
+                    if renderer:
+                        for ev in meta["_tool_events"]:
+                            if not isinstance(ev, dict):
+                                continue
+                            name = ev.get("name", "?")
+                            phase = ev.get("phase", "")
+                            if phase == "end":
+                                result = ev.get("result")
+                                summary = str(result)[:120] if result else "ok"
+                                with renderer.pause_spinner():
+                                    renderer.ensure_header()
+                                    renderer.console.print(f"  [dim]✓ {name} → {summary}[/dim]")
+                            elif phase == "error":
+                                err = ev.get("error") or "failed"
+                                with renderer.pause_spinner():
+                                    renderer.ensure_header()
+                                    renderer.console.print(f"  [dim]✗ {name}: {err}[/dim]")
+                    continue
+
                 # ── Обработка прогресс-сообщений ─────────────────────────────
                 #     (вызовы инструментов и т.д.)
                 if await _maybe_print_interactive_progress(
@@ -327,7 +348,10 @@ def _run_interactive_loop(agent, config) -> None:
                 if not turn_done.is_set():
                     # Первый ответ с контентом — сохраняем
                     if msg.content:
-                        turn_response.append((msg.content, dict(meta)))
+                        meta_copy = dict(meta)
+                        if renderer and not renderer.streamed:
+                            meta_copy.pop("_streamed", None)
+                        turn_response.append((msg.content, meta_copy))
                     turn_done.set()
                 elif msg.content:
                     # Последующие ответы (отложенные сообщения) — выводим сразу
