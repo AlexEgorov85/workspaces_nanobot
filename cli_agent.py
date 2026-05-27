@@ -249,6 +249,7 @@ def _run_interactive_loop(agent, config) -> None:
             Бесконечный цикл, который читает сообщения из outbound-очереди bus
             и обрабатывает их: стриминг-дельты, прогресс, финальные ответы.
             """
+            nonlocal reasoning_buf, reasoning_display_buf
             while True:
                 try:
                     # Ожидаем новое сообщение с таймаутом 1с
@@ -265,9 +266,24 @@ def _run_interactive_loop(agent, config) -> None:
                     if agent.channels_config and not agent.channels_config.show_reasoning:
                         continue
                     if msg.content:
-                        await _print_reasoning(msg.content)
+                        # Дедупликация: одно и то же reasoning приходит и из
+                        # нативного reasoning_content, и из <think>-тегов в контенте
+                        if msg.content in reasoning_buf:
+                            continue
+                        reasoning_buf += msg.content
+                        # Буферизируем дельты и выводим только по строкам,
+                        # чтобы мелкие куски не печатались каждый на отдельной строке
+                        reasoning_display_buf += msg.content
+                        while "\n" in reasoning_display_buf:
+                            line, reasoning_display_buf = reasoning_display_buf.split("\n", 1)
+                            if line.strip():
+                                await _print_reasoning(line)
                     continue
                 if meta.get("_reasoning_end"):
+                    # Сбрасываем остаток буфера
+                    if reasoning_display_buf.strip():
+                        await _print_reasoning(reasoning_display_buf)
+                        reasoning_display_buf = ""
                     continue
 
                 # ── Обработка стриминговых сообщений ─────────────────────────
@@ -278,6 +294,12 @@ def _run_interactive_loop(agent, config) -> None:
                     continue
                 # _stream_end — завершение стриминга
                 if meta.get("_stream_end"):
+                    # Сбрасываем остаток буфера размышлений — в стриминговом
+                    # пути _reasoning_end может не прийти (runner.py не шлёт
+                    # emit_reasoning_end для прямого стриминга)
+                    if reasoning_display_buf.strip():
+                        await _print_reasoning(reasoning_display_buf)
+                        reasoning_display_buf = ""
                     if renderer:
                         await renderer.on_end(
                             resuming=meta.get("_resuming", False),
@@ -369,6 +391,7 @@ def _run_interactive_loop(agent, config) -> None:
                     turn_done.clear()
                     turn_response.clear()
                     reasoning_buf = ""
+                    reasoning_display_buf = ""
                     reasoning_active = False
                     renderer = StreamRenderer(
                         render_markdown=True,
