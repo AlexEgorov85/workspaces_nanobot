@@ -10,7 +10,6 @@
   "database": {
     "connection_string": "",
     "schema": "oarb",
-<<<<<<< HEAD
     "tables": ["audit_reports", "audits", "report_items", "violations"],
     "schema_cache": {
       "enabled": true,
