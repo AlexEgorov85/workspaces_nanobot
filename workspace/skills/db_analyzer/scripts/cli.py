@@ -30,7 +30,43 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+
+def _parse_params(raw: str) -> dict[str, Any]:
+    """
+    Распарсить --params в dict. Поддерживает два формата:
+
+    1. JSON:  {"year": 2024, "limit": 10}
+    2. key=value через запятую:  year=2024, limit=10
+
+    Args:
+        raw: Строка параметров.
+
+    Returns:
+        dict с параметрами.
+
+    Пример:
+        >>> _parse_params('{"year": 2024}')
+        {'year': 2024}
+        >>> _parse_params('year=2024')
+        {'year': '2024'}
+        >>> _parse_params('year=2024,limit=10')
+        {'year': '2024', 'limit': '10'}
+    """
+    if not raw:
+        return {}
+    raw = raw.strip()
+    if raw.startswith("{"):
+        return json.loads(raw)
+    result: dict[str, Any] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if "=" not in pair:
+            continue
+        k, v = pair.split("=", 1)
+        result[k.strip()] = v.strip()
+    return result
 
 # Add scripts dir to path so sibling modules are importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -81,9 +117,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--params",
         default=None,
-        type=json.loads,
-        help='Параметры скрипта для mode=predefined в JSON. '
-             'Например: \'{"year": 2024}\'',
+        type=_parse_params,
+        help='Параметры скрипта для mode=predefined. '
+             'Форматы: \'{"year": 2024}\' (JSON) или year=2024 (key=value, запятые).',
     )
     parser.add_argument(
         "--vector-index",

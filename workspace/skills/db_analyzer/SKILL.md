@@ -61,14 +61,14 @@ metadata: {"nanobot":{"emoji":"📊"}}
 Запуск через `audit_analyze.bat` (Windows) или `audit_analyze.sh` (Linux):
 
 ```bash
-# Windows:
-audit_analyze.bat --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
-audit_analyze.bat --mode predefined --script violations_by_type --params '{"violation_code": "финансовые"}'
+# Windows (PowerShell / cmd) — key=value без кавычек:
+audit_analyze.bat --mode predefined --script analytics_by_year_month --params year=2024
+audit_analyze.bat --mode predefined --script violations_by_type --params violation_code=финансовые
 audit_analyze.bat --mode sql --query "топ-10 объектов по нарушениям"
 audit_analyze.bat --mode vector --query "финансовые нарушения" --index-name violations_index
 audit_analyze.bat --mode vector --query "статусы аудитов" --index-name audits_index
 
-# Linux:
+# Linux — JSON в одинарных кавычках:
 audit_analyze.sh --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
 audit_analyze.sh --mode sql --query "топ-10 объектов по нарушениям"
 audit_analyze.sh --mode vector --query "финансовые нарушения" --index-name violations_index
