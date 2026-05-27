@@ -52,7 +52,12 @@ metadata: {"nanobot":{"emoji":"📊"}}
 
 ## Векторные индексы (vector)
 
-Поиск по FAISS-индексу. Параметры: `index_name` (обяз.), `top_k`, `threshold`.
+Семантический поиск по FAISS-индексу через Ollama embeddings.
+
+**Параметры CLI:**
+- `--index-name` — имя индекса: `audits_index`, `violations_index`
+- `--top-k N` — ровно N лучших результатов (по умолч. 5)
+- `--threshold X` — все результаты выше порога X (0.0–1.0), `--top-k` игнорируется
 
 ---
 
@@ -65,13 +70,17 @@ metadata: {"nanobot":{"emoji":"📊"}}
 audit_analyze.bat --mode predefined --script analytics_by_year_month --params year=2024
 audit_analyze.bat --mode predefined --script violations_by_type --params violation_code=финансовые
 audit_analyze.bat --mode sql --query "топ-10 объектов по нарушениям"
-audit_analyze.bat --mode vector --query "финансовые нарушения" --index-name violations_index
-audit_analyze.bat --mode vector --query "статусы аудитов" --index-name audits_index
+
+# Векторный поиск: top-3 результата
+audit_analyze.bat --mode vector --query "финансовые нарушения" --index-name violations_index --top-k 3
+
+# Векторный поиск: всё выше порога 0.5
+audit_analyze.bat --mode vector --query "статусы аудитов" --index-name audits_index --threshold 0.5
 
 # Linux — JSON в одинарных кавычках:
 audit_analyze.sh --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
 audit_analyze.sh --mode sql --query "топ-10 объектов по нарушениям"
-audit_analyze.sh --mode vector --query "финансовые нарушения" --index-name violations_index
+audit_analyze.sh --mode vector --query "финансовые нарушения" --index-name violations_index --top-k 5
 ```
 
 Параметры:
