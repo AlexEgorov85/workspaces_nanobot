@@ -4,7 +4,7 @@
 Режимы:
     predefined  — выполнение готовых SQL-шаблонов (--script + --params)
     sql         — генерация SQL через LLM по текстовому запросу (--query)
-    vector      — семантический поиск по FAISS-индексу (--query + --index-name)
+    vector      — семантический поиск по FAISS-индексу (--query + --index-name, --top-k/--threshold)
 
 Примеры запуска:
     # Предопределённый скрипт
@@ -134,6 +134,20 @@ def _build_parser() -> argparse.ArgumentParser:
              "По умолчанию: 'audits_index'",
     )
     parser.add_argument(
+        "--top-k",
+        default=None,
+        type=int,
+        help="Количество результатов для mode=vector (по умолч. 5). "
+             "Игнорируется при --threshold.",
+    )
+    parser.add_argument(
+        "--threshold",
+        default=None,
+        type=float,
+        help="Минимальный порог схожести (0.0–1.0) для mode=vector. "
+             "Если задан, возвращаются ВСЕ результаты выше порога, --top-k игнорируется.",
+    )
+    parser.add_argument(
         "--context",
         default=None,
         type=json.loads,
@@ -177,7 +191,11 @@ async def _run(args: argparse.Namespace) -> dict:
     if args.mode == "vector":
         index_dir = args.vector_index or get_vector_index_path()
         index_name = args.index_name or "audits_index"
-        return await vector_mode.run(args.query, index_name, index_path=index_dir)
+        return await vector_mode.run(
+            args.query, index_name, index_path=index_dir,
+            top_k=args.top_k or 5,
+            threshold=args.threshold,
+        )
 
     return {"status": "error", "data": {"message": f"Неизвестный режим: {args.mode}"}}
 
