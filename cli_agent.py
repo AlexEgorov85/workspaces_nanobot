@@ -103,6 +103,7 @@ _HOOKS_DIR: Path = _WORKSPACE_DIR / "hooks"
 sys.path.insert(0, str(_TOOLS_DIR))
 sys.path.insert(0, str(_HOOKS_DIR))
 sys.path.insert(0, str(_WORKSPACE_DIR))
+sys.path.insert(0, str(_WORKSPACE_DIR / "skills"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -112,25 +113,31 @@ sys.path.insert(0, str(_WORKSPACE_DIR))
 
 def _scan_and_register_tools(registry) -> None:
     """
-    Сканирует workspace/tools/ на предмет Tool-подклассов и регистрирует их.
+    Сканирует workspace/tools/ и workspace/skills/ на предмет Tool-подклассов
+    и регистрирует их.
 
-    Для каждой поддиректории ищет файл tool.py, импортирует его как модуль
+    В каждой поддиректории ищет файл tool.py, импортирует его как модуль
     и извлекает все классы, наследуемые от Tool (но не сам Tool).
     """
-    for pkg_dir in sorted(_TOOLS_DIR.iterdir()):
-        # Пропускаем скрытые и системные директории
+    _do_scan(_TOOLS_DIR, registry)
+    _do_scan(_WORKSPACE_DIR / "skills", registry)
+
+
+def _do_scan(scan_dir: Path, registry) -> None:
+    """Сканирует одну директорию на tool.py с Tool-подклассами."""
+    if not scan_dir.is_dir():
+        return
+    for pkg_dir in sorted(scan_dir.iterdir()):
         if not pkg_dir.is_dir() or pkg_dir.name.startswith("_") or pkg_dir.name.startswith("."):
             continue
         tool_file = pkg_dir / "tool.py"
         if not tool_file.exists():
             continue
         try:
-            # Импортируем модуль (директория уже в sys.path)
             mod = importlib.import_module(f"{pkg_dir.name}.tool")
         except Exception as exc:
             console.print(f"[yellow]⚠[/yellow] tool.py in {pkg_dir.name}: {exc}")
             continue
-        # Ищем Tool-подклассы
         for attr_name in dir(mod):
             attr = getattr(mod, attr_name)
             if (
@@ -140,7 +147,6 @@ def _scan_and_register_tools(registry) -> None:
                 and not attr_name.startswith("_")
             ):
                 try:
-                    # Регистрируем экземпляр инструмента в реестре агента
                     registry.register(attr())
                     console.print(f"[green]✓[/green] {attr.__name__} registered")
                 except Exception as exc:
