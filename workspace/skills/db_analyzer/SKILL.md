@@ -77,10 +77,11 @@ audit_analyze.bat --mode vector --query "финансовые нарушения
 # Векторный поиск: всё выше порога 0.5
 audit_analyze.bat --mode vector --query "статусы аудитов" --index-name audits_index --threshold 0.5
 
-# Linux — JSON в одинарных кавычках:
-audit_analyze.sh --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
-audit_analyze.sh --mode sql --query "топ-10 объектов по нарушениям"
-audit_analyze.sh --mode vector --query "финансовые нарушения" --index-name violations_index --top-k 5
+# Linux:
+audit_analyzer.sh --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
+audit_analyzer.sh --mode sql --query "топ-10 объектов по нарушениям"
+audit_analyzer.sh --mode vector --query "финансовые нарушения" --index-name violations_index --top-k 3
+audit_analyzer.sh --mode vector --query "статусы аудитов" --index-name audits_index --threshold 0.5
 ```
 
 Параметры:

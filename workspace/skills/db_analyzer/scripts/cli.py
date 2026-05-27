@@ -13,8 +13,11 @@
     # SQL-генерация
     audit_analyze --mode sql --query 'сколько аудитов было в 2024 по месяцам'
 
-    # Векторный поиск
-    audit_analyze --mode vector --query 'пожарная безопасность' --index-name audits_index
+    # Векторный поиск: топ-3
+    audit_analyze --mode vector --query 'пожарная безопасность' --index-name audits_index --top-k 3
+
+    # Векторный поиск: всё выше порога 0.5
+    audit_analyze --mode vector --query 'статусы аудитов' --index-name audits_index --threshold 0.5
 
     # Векторный поиск с кастомной директорией индексов
     audit_analyze --mode vector --query 'финансы' --index-name fin_index \\
