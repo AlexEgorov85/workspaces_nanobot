@@ -1,0 +1,36 @@
+{
+  "llm": {
+    "provider": "mistral",
+    "model": "mistral-large-latest",
+    "api_base": "https://api.mistral.ai/v1",
+    "api_key": "",
+    "max_tokens": 8192,
+    "temperature": 0.1
+  },
+  "database": {
+    "connection_string": "",
+    "schema": "oarb",
+    "tables": ["audit_reports", "audits", "report_items", "violations"]
+  },
+  "embedding": {
+    "base_url": "http://localhost:11434/api/embed",
+    "model": "mxbai-embed-large:latest",
+    "dimension": 1024
+  },
+  "modes": {
+    "predefined": { "enabled": true },
+    "vector": {
+      "enabled": true,
+      "index_path": "C:/Users/Алексей/Documents/WORK/Agent_v5/data/vector",
+      "top_k": 5,
+      "threshold": 0.75
+    },
+    "sql": { "enabled": true }
+  },
+  "cli": {
+    "default_mode": "predefined",
+    "default_format": "json",
+    "max_retries": 3,
+    "timeout_sec": 60
+  }
+}
