@@ -1,0 +1,528 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.nanobot/workspace",
+      "modelPreset": null,
+      "model": "mistral-large-latest",
+      "provider": "mistral",
+      "maxTokens": 8192,
+      "contextWindowTokens": 65536,
+      "contextBlockLimit": null,
+      "temperature": 0.1,
+      "fallbackModels": [],
+      "maxToolIterations": 200,
+      "maxConcurrentSubagents": 1,
+      "maxToolResultChars": 16000,
+      "providerRetryMode": "standard",
+      "toolHintMaxLength": 40,
+      "reasoningEffort": null,
+      "timezone": "UTC",
+      "botName": "Aura",
+      "botIcon": "🐈",
+      "unifiedSession": false,
+      "disabledSkills": [],
+      "idleCompactAfterMinutes": 0,
+      "maxMessages": 120,
+      "consolidationRatio": 0.5,
+      "dream": {
+        "intervalH": 2,
+        "modelOverride": null,
+        "maxBatchSize": 20,
+        "maxIterations": 15,
+        "annotateLineAges": true
+      }
+    }
+  },
+  "channels": {
+    "sendProgress": true,
+    "sendToolHints": false,
+    "showReasoning": true,
+    "sendMaxRetries": 3,
+    "transcriptionProvider": "groq",
+    "transcriptionLanguage": null,
+    "postgres": {
+	  "enabled": true,
+	  "dsn": "",
+	  "table": "conversation_messages",
+	  "schema": "public",
+	  "poll_interval": 2.0,
+	  "allow_from": ["*"]
+	},
+    "dingtalk": {
+      "enabled": false,
+      "clientId": "",
+      "clientSecret": "",
+      "allowFrom": [],
+      "allowRemoteMediaRedirects": false,
+      "remoteMediaRedirectAllowedHosts": []
+    },
+    "discord": {
+      "enabled": false,
+      "token": "",
+      "allowFrom": [],
+      "allowChannels": [],
+      "intents": 37377,
+      "groupPolicy": "mention",
+      "readReceiptEmoji": "👀",
+      "workingEmoji": "🔧",
+      "workingEmojiDelay": 2.0,
+      "streaming": true,
+      "proxy": null,
+      "proxyUsername": null,
+      "proxyPassword": null
+    },
+    "email": {
+      "enabled": false,
+      "consentGranted": false,
+      "imapHost": "",
+      "imapPort": 993,
+      "imapUsername": "",
+      "imapPassword": "",
+      "imapMailbox": "INBOX",
+      "imapUseSsl": true,
+      "smtpHost": "",
+      "smtpPort": 587,
+      "smtpUsername": "",
+      "smtpPassword": "",
+      "smtpUseTls": true,
+      "smtpUseSsl": false,
+      "fromAddress": "",
+      "autoReplyEnabled": true,
+      "pollIntervalSeconds": 30,
+      "markSeen": true,
+      "maxBodyChars": 12000,
+      "subjectPrefix": "Re: ",
+      "allowFrom": [],
+      "verifyDkim": true,
+      "verifySpf": true,
+      "allowedAttachmentTypes": [],
+      "maxAttachmentSize": 2000000,
+      "maxAttachmentsPerEmail": 5
+    },
+    "feishu": {
+      "enabled": false,
+      "appId": "",
+      "appSecret": "",
+      "encryptKey": "",
+      "verificationToken": "",
+      "allowFrom": [],
+      "reactEmoji": "THUMBSUP",
+      "doneEmoji": null,
+      "toolHintPrefix": "🔧",
+      "groupPolicy": "mention",
+      "replyToMessage": false,
+      "streaming": true,
+      "domain": "feishu",
+      "topicIsolation": true
+    },
+    "mochat": {
+      "enabled": false,
+      "baseUrl": "https://mochat.io",
+      "socketUrl": "",
+      "socketPath": "/socket.io",
+      "socketDisableMsgpack": false,
+      "socketReconnectDelayMs": 1000,
+      "socketMaxReconnectDelayMs": 10000,
+      "socketConnectTimeoutMs": 10000,
+      "refreshIntervalMs": 30000,
+      "watchTimeoutMs": 25000,
+      "watchLimit": 100,
+      "retryDelayMs": 500,
+      "maxRetryAttempts": 0,
+      "clawToken": "",
+      "agentUserId": "",
+      "sessions": [],
+      "panels": [],
+      "allowFrom": [],
+      "mention": {
+        "requireInGroups": false
+      },
+      "groups": {},
+      "replyDelayMode": "non-mention",
+      "replyDelayMs": 120000
+    },
+    "msteams": {
+      "enabled": false,
+      "appId": "",
+      "appPassword": "",
+      "tenantId": "",
+      "host": "0.0.0.0",
+      "port": 3978,
+      "path": "/api/messages",
+      "allowFrom": [],
+      "replyInThread": true,
+      "mentionOnlyResponse": "Hi — what can I help with?",
+      "validateInboundAuth": true,
+      "refTtlDays": 30,
+      "pruneWebChatRefs": true,
+      "pruneNonPersonalRefs": true,
+      "refTouchIntervalS": 300
+    },
+    "qq": {
+      "enabled": false,
+      "appId": "",
+      "secret": "",
+      "allowFrom": [],
+      "msgFormat": "plain",
+      "ackMessage": "⏳ Processing...",
+      "mediaDir": "",
+      "downloadChunkSize": 262144,
+      "downloadMaxBytes": 209715200
+    },
+    "slack": {
+      "enabled": false,
+      "mode": "socket",
+      "webhookPath": "/slack/events",
+      "botToken": "",
+      "appToken": "",
+      "userTokenReadOnly": true,
+      "replyInThread": true,
+      "reactEmoji": "eyes",
+      "doneEmoji": "white_check_mark",
+      "includeThreadContext": true,
+      "threadContextLimit": 20,
+      "allowFrom": [],
+      "groupPolicy": "mention",
+      "groupAllowFrom": [],
+      "dm": {
+        "enabled": true,
+        "policy": "open",
+        "allowFrom": []
+      }
+    },
+    "telegram": {
+      "enabled": false,
+      "token": "",
+      "allowFrom": [],
+      "proxy": null,
+      "replyToMessage": false,
+      "reactEmoji": "👀",
+      "groupPolicy": "mention",
+      "connectionPoolSize": 32,
+      "poolTimeout": 5.0,
+      "streaming": true,
+      "inlineKeyboards": false,
+      "streamEditInterval": 0.6
+    },
+    "websocket": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 8765,
+      "path": "/",
+      "token": "",
+      "tokenIssuePath": "",
+      "tokenIssueSecret": "",
+      "tokenTtlS": 300,
+      "websocketRequiresToken": false,
+      "allowFrom": [
+        "*"
+      ],
+      "streaming": true,
+      "maxMessageBytes": 37748736,
+      "pingIntervalS": 20.0,
+      "pingTimeoutS": 20.0,
+      "sslCertfile": "",
+      "sslKeyfile": ""
+    },
+    "wecom": {
+      "enabled": false,
+      "botId": "",
+      "secret": "",
+      "allowFrom": [],
+      "welcomeMessage": ""
+    },
+    "weixin": {
+      "enabled": false,
+      "allowFrom": [],
+      "baseUrl": "https://ilinkai.weixin.qq.com",
+      "cdnBaseUrl": "https://novac2c.cdn.weixin.qq.com/c2c",
+      "routeTag": null,
+      "token": "",
+      "stateDir": "",
+      "pollTimeout": 35
+    },
+    "whatsapp": {
+      "enabled": false,
+      "bridgeUrl": "ws://localhost:3001",
+      "bridgeToken": "",
+      "allowFrom": [],
+      "groupPolicy": "open"
+    }
+  },
+  "providers": {
+    "custom": {
+      "apiKey": null,
+      "apiBase": "http://localhost:11434/api/generate",
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "azureOpenai": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "bedrock": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null,
+      "region": null,
+      "profile": null
+    },
+    "anthropic": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "openai": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "openrouter": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "huggingface": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "deepseek": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "groq": {
+      "apiKey": null,
+      "apiBase": "https://api.groq.com/openai/v1",
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "zhipu": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "dashscope": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "vllm": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "ollama": {
+      "apiKey": "ollama",
+      "apiBase": "http://localhost:11434/v1",
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "lmStudio": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "atomicChat": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "ovms": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "gemini": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "moonshot": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "minimax": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "minimaxAnthropic": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "mistral": {
+      "apiKey": null,
+      "apiBase": "https://api.mistral.ai/v1",
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "stepfun": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "xiaomiMimo": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "longcat": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "aihubmix": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "siliconflow": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "volcengine": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "volcengineCodingPlan": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "byteplus": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "byteplusCodingPlan": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "qianfan": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    },
+    "nvidia": {
+      "apiKey": null,
+      "apiBase": null,
+      "extraHeaders": null,
+      "extraBody": null
+    }
+  },
+  "api": {
+    "host": "127.0.0.1",
+    "port": 8900,
+    "timeout": 120.0
+  },
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 18790,
+    "heartbeat": {
+      "enabled": true,
+      "intervalS": 1800,
+      "keepRecentMessages": 8
+    }
+  },
+  "tools": {
+    "web": {
+      "enable": true,
+      "proxy": null,
+      "userAgent": null,
+      "search": {
+        "provider": "duckduckgo",
+        "apiKey": "",
+        "baseUrl": "",
+        "maxResults": 5,
+        "timeout": 30
+      },
+      "fetch": {
+        "useJinaReader": true
+      }
+    },
+    "exec": {
+      "enable": true,
+      "timeout": 60,
+      "pathAppend": "",
+      "sandbox": "",
+      "allowedEnvKeys": [],
+      "allowPatterns": [],
+      "denyPatterns": []
+    },
+    "my": {
+      "enable": true,
+      "allowSet": false
+    },
+    "imageGeneration": {
+      "enabled": false,
+      "provider": "openrouter",
+      "model": "openai/gpt-5.4-image-2",
+      "defaultAspectRatio": "1:1",
+      "defaultImageSize": "1K",
+      "maxImagesPerTurn": 4,
+      "saveDir": "generated"
+    },
+    "restrictToWorkspace": false,
+    "mcpServers": {},
+    "ssrfWhitelist": [],
+    "db_analyzer": {
+      "database": {
+        "connection_string": "",
+        "schema": "oarb",
+        "tables": ["audit_reports", "audits", "report_items", "violations"]
+      },
+      "embedding": {
+        "base_url": "http://localhost:11434/api/embed",
+        "model": "mxbai-embed-large:latest",
+        "dimension": 1024
+      },
+      "modes": {
+        "predefined": { "enabled": true },
+        "vector": { "enabled": true, "index_path": "C:/Users/Алексей/Documents/WORK/Agent_v5/data/vector", "top_k": 5, "threshold": 0.75 },
+        "sql": { "enabled": true }
+      },
+      "cli": {
+        "default_mode": "predefined",
+        "default_format": "json",
+        "max_retries": 3,
+        "timeout_sec": 60
+      }
+    }
+  },
+  "model_presets": {}
+}
