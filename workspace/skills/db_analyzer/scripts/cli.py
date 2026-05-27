@@ -74,7 +74,8 @@ def _parse_params(raw: str) -> dict[str, Any]:
 # Add scripts dir to path so sibling modules are importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config import get_vector_index_path, get_max_retries
+from config import get_vector_index_path, get_max_retries, load_db_config
+from database import Database
 from output import _sanitize_value, prepare_output
 import predefined_mode
 import sql_mode
@@ -175,21 +176,21 @@ async def _run(args: argparse.Namespace) -> dict:
     Returns:
         dict с результатом выполнения режима.
     """
-    from config import load_db_config
-    db_cfg = load_db_config()
     context = args.context
 
-    if args.mode == "predefined":
-        if not args.script:
-            return {"status": "error", "data": {"message": "Для mode=predefined укажите --script"}}
-        return await predefined_mode.run(args.script, db_cfg, params=args.params,
-                                          index_dir=get_vector_index_path())
+    async with Database(load_db_config()) as db:
 
-    if not args.query:
-        return {"status": "error", "data": {"message": f"Для mode={args.mode} требуется --query"}}
+        if args.mode == "predefined":
+            if not args.script:
+                return {"status": "error", "data": {"message": "Для mode=predefined укажите --script"}}
+            return await predefined_mode.run(args.script, db, params=args.params,
+                                              index_dir=get_vector_index_path())
 
-    if args.mode == "sql":
-        return await sql_mode.run(args.query, db_cfg, context=context)
+        if not args.query:
+            return {"status": "error", "data": {"message": f"Для mode={args.mode} требуется --query"}}
+
+        if args.mode == "sql":
+            return await sql_mode.run(args.query, db, context=context)
 
     if args.mode == "vector":
         index_dir = args.vector_index or get_vector_index_path()

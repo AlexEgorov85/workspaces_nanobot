@@ -78,7 +78,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cli
 import config
-import database
+from database import Database
 import llm
 import output
 import predefined
@@ -93,7 +93,7 @@ import vector_mode
 
 async def run_predefined(
     script_name: str,
-    db_cfg: Optional[dict] = None,
+    db_config: Optional[dict] = None,
     params: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """
@@ -101,7 +101,7 @@ async def run_predefined(
 
     Args:
         script_name: Имя скрипта (ключ в SCRIPTS_REGISTRY).
-        db_cfg: Параметры подключения (из config.load_db_config() если None).
+        db_config: Конфиг БД (из config.load_db_config() если None).
         params: Параметры скрипта (опционально).
 
     Returns:
@@ -109,22 +109,21 @@ async def run_predefined(
 
     Пример:
         >>> import asyncio
+        >>> cfg = config.load_db_config()
         >>> asyncio.run(run_predefined(
-        ...     "analytics_by_year_month",
-        ...     {"host":"localhost","port":5432,"database":"postgres",
-        ...      "user":"postgres","password":"1"},
-        ...     {"year": 2024},
+        ...     "analytics_by_year_month", cfg, {"year": 2024},
         ... ))  # doctest: +SKIP
     """
-    if db_cfg is None:
-        db_cfg = config.load_db_config()
-    return await predefined_mode.run(script_name, db_cfg, params=params,
-                                      index_dir=config.get_vector_index_path())
+    if db_config is None:
+        db_config = config.load_db_config()
+    async with Database(db_config) as db:
+        return await predefined_mode.run(script_name, db, params=params,
+                                          index_dir=config.get_vector_index_path())
 
 
 async def run_sql(
     query: str,
-    db_cfg: Optional[dict] = None,
+    db_config: Optional[dict] = None,
     context: Optional[List[dict]] = None,
 ) -> dict:
     """
@@ -132,7 +131,7 @@ async def run_sql(
 
     Args:
         query: Запрос на естественном языке.
-        db_cfg: Параметры подключения (из config.load_db_config() если None).
+        db_config: Конфиг БД (из config.load_db_config() если None).
         context: История чата (опционально).
 
     Returns:
@@ -140,15 +139,13 @@ async def run_sql(
 
     Пример:
         >>> import asyncio
-        >>> asyncio.run(run_sql(
-        ...     "сколько проверок по объектам",
-        ...     {"host":"localhost","port":5432,"database":"postgres",
-        ...      "user":"postgres","password":"1"},
-        ... ))  # doctest: +SKIP
+        >>> cfg = config.load_db_config()
+        >>> asyncio.run(run_sql("сколько проверок по объектам", cfg))  # doctest: +SKIP
     """
-    if db_cfg is None:
-        db_cfg = config.load_db_config()
-    return await sql_mode.run(query, db_cfg, context=context)
+    if db_config is None:
+        db_config = config.load_db_config()
+    async with Database(db_config) as db:
+        return await sql_mode.run(query, db, context=context)
 
 
 async def run_vector(

@@ -45,7 +45,6 @@
 
 import json
 import os
-import re
 from pathlib import Path
 from typing import Any
 
@@ -122,36 +121,41 @@ def load_db_config() -> dict[str, Any]:
     """
     Конфигурация подключения к PostgreSQL.
 
-    Парсит connection_string вида:
-        postgresql://user:password@host:port/database
-
     Returns:
-        dict с ключами: host, port, database, user, password.
+        dict из секции database config.json:
+            connection_string, schema, tables, schema_cache.
+        Путь schema_cache.path разрешается в абсолютный.
 
     Пример:
         >>> load_db_config()
-        {'host': 'localhost', 'port': 5432, 'database': 'postgres',
-         'user': 'postgres', 'password': '1'}
+        {'connection_string': 'postgresql://...', 'schema': 'oarb',
+         'tables': [...], 'schema_cache': {...}}
     """
     cfg = _load().get("database", {})
-    cs = cfg.get("connection_string", "postgresql://localhost:5432/postgres")
-    m = re.match(
-        r"postgresql(?:s)?://"
-        r"(?:(?P<user>[^:@]+)(?::(?P<password>[^@]*))?@)?"
-        r"(?P<host>[^:/]+)"
-        r"(?::(?P<port>\d+))?"
-        r"/(?P<database>.+)?",
-        cs,
-    )
-    if m:
-        return {
-            "host": m.group("host") or "localhost",
-            "port": int(m.group("port")) if m.group("port") else 5432,
-            "database": m.group("database") or "postgres",
-            "user": m.group("user") or "postgres",
-            "password": m.group("password") or "",
-        }
-    return {"host": "localhost", "port": 5432, "database": "postgres", "user": "postgres", "password": ""}
+    result = dict(cfg)
+    if not result.get("connection_string"):
+        result["connection_string"] = "postgresql://postgres:@localhost:5432/postgres"
+    # Разрешаем относительный путь кеша
+    cache = result.get("schema_cache")
+    if cache:
+        path = cache.get("path", "")
+        if path and not Path(path).is_absolute():
+            cache["path"] = str(_CONFIG_DIR / path)
+    return result
+
+
+def get_db_tables() -> list[str]:
+    """
+    Список таблиц для фильтрации (секция 'database.tables').
+
+    Returns:
+        Список имён таблиц или [] если не указаны.
+
+    Пример:
+        >>> get_db_tables()
+        ['audit_reports', 'audits', 'report_items', 'violations']
+    """
+    return _load().get("database", {}).get("tables", [])
 
 
 def get_db_schema() -> str:

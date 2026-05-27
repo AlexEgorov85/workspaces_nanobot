@@ -16,13 +16,13 @@ Pipeline:
 
 from typing import Any, Dict, Optional
 
-from database import execute_query
+from database import Database
 from predefined import build_sql, get_script_by_name, list_available, resolve_params_with_vector
 
 
 async def run(
     script_name: str,
-    db_cfg: dict,
+    db: Database,
     params: Optional[Dict[str, Any]] = None,
     index_dir: str = "",
 ) -> dict:
@@ -70,7 +70,7 @@ async def run(
 
     merged = await resolve_params_with_vector(script, params, index_dir=index_dir)
     sql, sql_params = build_sql(script, merged)
-    result = await execute_query(db_cfg, sql, sql_params)
+    result = await db.execute_query(sql, sql_params)
 
     return {
         "mode": "predefined",

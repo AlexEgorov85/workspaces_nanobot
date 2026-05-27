@@ -18,15 +18,15 @@ Pipeline с ретраями:
 
 from typing import Optional
 
-from config import get_db_schema
+from config import get_db_schema, get_db_tables
+from database import Database
 from llm import chat
-from database import get_schema, execute_query, execute_explain, format_schema, validate_sql
 
 
 MAX_RETRIES = 2
 
 
-async def run(query: str, db_cfg: dict, context: Optional[list[dict]] = None) -> dict:
+async def run(query: str, db: Database, context: Optional[list[dict]] = None) -> dict:
     """
     Сгенерировать SQL через LLM, проверить, выполнить (с retry-циклом).
 
@@ -59,8 +59,9 @@ async def run(query: str, db_cfg: dict, context: Optional[list[dict]] = None) ->
         >>> history = [{"role": "user", "content": "Привет"}]
         >>> asyncio.run(run("сколько аудитов", db, context=history))  # doctest: +SKIP
     """
-    schema = await get_schema(db_cfg, schema_name=get_db_schema())
-    schema_text = format_schema(schema)
+    tables = get_db_tables() or None
+    schema = await db.get_schema(schema_name=get_db_schema(), table_names=tables)
+    schema_text = Database.format_schema(schema)
 
     base_messages = [
         {
@@ -97,19 +98,19 @@ async def run(query: str, db_cfg: dict, context: Optional[list[dict]] = None) ->
         sql = sql.strip().rstrip(";")
 
         # Шаг 1: безопасность (DDL/DML/multi-statement)
-        safety_error = validate_sql(sql)
+        safety_error = Database.validate_sql(sql)
         if safety_error:
             last_error = {"error": safety_error, "sql": sql}
             continue
 
         # Шаг 2: EXPLAIN — проверка синтаксиса и существования объектов
-        explain_result = await execute_explain(db_cfg, sql)
+        explain_result = await db.execute_explain(sql)
         if not explain_result["valid"]:
             last_error = {"error": explain_result["error"], "sql": sql}
             continue
 
         # Шаг 3: выполнить
-        result = await execute_query(db_cfg, sql)
+        result = await db.execute_query(sql)
         return {
             "mode": "sql",
             "status": result["status"],
