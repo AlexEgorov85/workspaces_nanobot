@@ -1,75 +1,225 @@
 """
-CLI-агент для nanobot с поддержкой PostgreSQL-хранилища.
+CLI-агент для nanobot — интерактивный терминальный интерфейс к LLM-агенту.
 
-══════════════════════════════════════════════════════════════════════════════
-НАЗНАЧЕНИЕ
-══════════════════════════════════════════════════════════════════════════════
+╔══════════════════════════════════════════════════════════════════════════╗
+║                          АРХИТЕКТУРА                                   ║
+╚══════════════════════════════════════════════════════════════════════════╝
 
-Скрипт запускает nanobot в интерактивном CLI-режиме. Пользователь может
-общаться с LLM-агентом напрямую из терминала: вводить сообщения, получать
-ответы в реальном времени (со стримингом), использовать инструменты.
+cli_agent.py — это точка входа для запуска nanobot в режиме прямого
+общения через терминал (stdin/stdout), без использования Telegram, Slack
+или других каналов связи.
 
-В отличие от gateway, этот режим не требует запуска каналов связи — всё
-общение происходит через stdin/stdout.
+Скрипт имеет два режима работы:
 
-══════════════════════════════════════════════════════════════════════════════
-ПАРАМЕТРЫ ЗАПУСКА
-══════════════════════════════════════════════════════════════════════════════
+  vanilla
+    Стандартный `nanobot agent` без каких-либо доработок.
+    Сессии хранятся в JSONL-файлах (стандартный SessionManager).
+    Используется для отладки и тестирования базовой функциональности.
 
-  -P, --patched        Включить локальные доработки (см. ниже).
-  -S, --storage        Хранилище сессий: auto | file | postgres
-                       (только с --patched, по умолчанию auto)
+  patched  (--patched, -P)
+    Расширенная версия с локальными доработками:
+      • PGSessionManager — хранение истории сессий в PostgreSQL
+      • AgentHook-хуки из workspace/hooks/ — автоматически загружаются
+        и подключаются к циклу агента
 
-══════════════════════════════════════════════════════════════════════════════
-РЕЖИМЫ ЗАПУСКА
-══════════════════════════════════════════════════════════════════════════════
+    patched-режим НЕ включает сканирование инструментов — все инструменты
+    должны быть объявлены через стандартный механизм nanobot (config.json).
 
-1. Без --patched (режим по умолчанию)
-   ─────────────────────────────────
-   Стандартный CLI-агент, аналогичный `nanobot agent`. Используются
-   стандартные JSONL-файлы для истории. Кастомные инструменты из
-   workspace/tools/ не сканируются.
 
-2. С --patched (режим с доработками)
-   ─────────────────────────────────
-   Подключаются:
-     • PGSessionManager — хранение истории сессий в PostgreSQL
-     • Сканирование workspace/tools/ для поиска кастомных Tool-подклассов
-     • Гибкий выбор хранилища через --storage
+╔══════════════════════════════════════════════════════════════════════════╗
+║                          ЖИЗНЕННЫЙ ЦИКЛ                                ║
+╚══════════════════════════════════════════════════════════════════════════╝
 
-══════════════════════════════════════════════════════════════════════════════
-ПРИМЕРЫ ЗАПУСКА
-══════════════════════════════════════════════════════════════════════════════
+  1. Загрузка конфига
+     Читается config.json из той же директории, что и cli_agent.py.
+     Разрешаются переменные окружения через resolve_config_env_vars().
 
-  # Стандартный запуск (как библиотека nanobot)
+  2. Создание шины сообщений (MessageBus)
+     Центральная шина, через которую агент и CLI обмениваются сообщениями.
+     Inbound  → пользователь → агент
+     Outbound → агент → пользователь
+
+  3. Выбор хранилища сессий (только patched)
+     • --storage=postgres  → принудительно PGSessionManager
+     • --storage=file      → принудительно JSONL-файлы
+     • --storage=auto      → PG если есть dsn в конфиге, иначе JSONL
+
+  4. Загрузка хуков (только patched)
+     Сканируется workspace/hooks/*.py, ищутся AgentHook-подклассы.
+     Хуки подключаются к циклу агента (до/после вызова LLM, после
+     вызова инструментов и т.д.)
+
+  5. Создание AgentLoop
+     Главный цикл агента: получает сообщения из шины, отправляет их
+     в LLM, обрабатывает вызовы инструментов, публикует ответы.
+
+  6. Интерактивный цикл (_run_interactive_loop)
+     ┌─────────────────────────────────────────────────────┐
+     │  while True:                                        │
+     │    read_input() → publish_inbound() → consume()     │
+     │                                                     │
+     │    consume_outbound():                              │
+     │      reasoning → tool_events → progress → response  │
+     │                                                     │
+     │    _print_agent_response(content)                   │
+     └─────────────────────────────────────────────────────┘
+
+     Цикл не использует стриминг — агент возвращает полный ответ.
+     Все промежуточные сообщения (размышления, вызовы инструментов)
+     буферизируются и выводятся с псевдо-стримингом (пауза перед
+     выводом каждого блока). Прогресс-бары показываются по мере
+     поступления.
+
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                      ФОРМАТ OUTBOUND-СООБЩЕНИЙ                         ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+Агент публикует в outbound-очередь сообщения с метаданными, которые
+позволяют CLI различать типы сообщений:
+
+  _reasoning_delta
+    Фрагмент текста размышлений LLM (chain-of-thought).
+    Приходит частями. CLI буферизирует всё до _reasoning_end,
+    затем выводит целиком с паузой ``len(text) * speed``.
+
+  _reasoning_end
+    Сигнал, что размышления завершены. Сбрасывается буфер.
+
+  _tool_events
+    Массив событий вызова инструментов. Каждый элемент:
+      { "name": "<tool_name>", "phase": "end"|"error", "result": ..., "error": "..." }
+    CLI выводит: "✓ tool_name → result" или "✗ tool_name: error"
+
+  _tool_hint
+    UI-подсказки (визуальные разделители) — игнорируются (всегда).
+
+  Обычное сообщение (без служебных меток)
+    Считается финальным ответом. После его получения consume_outbound()
+    сначала сбрасывает накопленные tool_events (если есть),
+    затем завершает работу, и ответ выводится через _typewriter()
+    или _print_agent_response().
+
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                     СТРУКТУРА ФАЙЛА                                    ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  1. Импорты и константы
+     ─────────────────────
+     _CONFIG_PATH   — путь к config.json
+     _WORKSPACE_DIR — корень workspace (tools/, hooks/, data_store/)
+     _HOOKS_DIR     — директория с AgentHook-файлами
+
+  2. Пользовательская конфигурация
+     ──────────────────────────────
+     DISPLAY        — настройки вывода (блоки, typewriter)
+     LLM_TIMEOUT    — таймаут LLM вызова (сек)
+     EXEC_TIMEOUT   — таймаут exec-скриптов (сек)
+     MAX_ITERATIONS — макс. итераций инструментов
+     LOG_LEVEL      — уровень лога в stderr (WARNING подавляет INFO)
+
+  3. Вспомогательные функции
+     ─────────────────────────
+     _scan_and_register_hooks()  — сканирует hooks/ и загружает хуки
+     _migrate_cron_store()      — перенос cron-задач в workspace
+
+  4. Интерактивный цикл
+     ────────────────────
+     _run_interactive_loop()    — главный цикл ввода-вывода
+       └─ run_interactive()     — асинхронная обёртка
+           ├─ agent.run()       — фоновая задача агента
+           ├─ consume_outbound()— чтение и обработка ответов
+           └─ while True:       — ввод → публикация → вывод
+
+  5. Режимы запуска
+     ────────────────
+     _run_vanilla_agent()       — стандартный запуск
+     _run_patched_agent()       — запуск с доработками
+
+  6. Точка входа
+     ─────────────
+     _parse_args()              — парсинг --patched, --storage, --session
+     main()                     — выбор режима
+
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                         ПРИМЕРЫ ЗАПУСКА                                ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  # Стандартный режим (JSONL-файлы, без доработок)
   python cli_agent.py
 
-  # С локальными доработками и автоопределением хранилища
+  # С PGSessionManager (автоопределение — PG если есть dsn)
   python cli_agent.py --patched
 
-  # Локальные доработки + принудительно PostgreSQL
+  # С PGSessionManager принудительно
   python cli_agent.py --patched --storage postgres
 
-  # Локальные доработки + принудительно JSONL-файлы
+  # Принудительно JSONL (даже если есть PostgreSQL dsn)
   python cli_agent.py --patched --storage file
+
+  # Сессии (--session / -s)
+  python cli_agent.py --session my-project          # сессия cli:my-project, JSONL
+  python cli_agent.py -s my-project                 # краткая форма
+  python cli_agent.py -s my-project --patched       # сессия + PGSessionManager
+  python cli_agent.py -s my-project -P -S postgres  # сессия + PG принудительно
+  python cli_agent.py -s my-project -P -S file      # сессия + JSONL (даже если есть dsn)
+
+  # Разные сессии — разная история диалога
+  python cli_agent.py -s work                       # рабочая сессия
+  python cli_agent.py -s play                       # личная сессия
+
+  # Продолжить существующую сессию по session_key из БД
+  python cli_agent.py -P -s cli:abc123
+
+  # Комбинации
+  python cli_agent.py                       # vanilla, сессия cli:direct
+  python cli_agent.py -P                    # patched, авто-storage, cli:direct
+  python cli_agent.py -P -s dev -S postgres # patched, PG, сессия cli:dev
+
+  # Конфигурация вывода и таймаутов — в скрипте, раздел ПОЛЬЗОВАТЕЛЬСКАЯ КОНФИГУРАЦИЯ:
+
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                         ПРИМЕРЫ ХУКОВ                                  ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  Хук — это наследник nanobot.agent.AgentHook. Он получает контекст
+  после каждого шага агента (вызов LLM, вызов инструмента и т.д.)
+
+  workspace/hooks/auto_store_hook.py:
+    ─────────────────────────────────
+    from nanobot.agent import AgentHook, AgentHookContext
+
+    class AutoStoreHook(AgentHook):
+        def __init__(self, workspace_dir):
+            super().__init__()
+            store = SessionFileStore(workspace_dir / "data_store")
+
+        async def after_iteration(self, ctx: AgentHookContext) -> None:
+            for i, res in enumerate(ctx.tool_results):
+                # сохранить результат в файл если он большой
+                ...
+
+  Если конструктор хука принимает workspace_dir — он будет вызван
+  с workspace_dir=.... Если нет — хук создастся без аргументов.
 """
 
 import argparse
 import asyncio
-import contextlib
 import importlib
+import os
 import signal
 import sys
 from pathlib import Path
 
-# ── Подключаем директорию скрипта к sys.path, чтобы импортировать ───────────
-#    локальные модули: pg_session_manager
 sys.path.insert(0, str(Path(__file__).parent))
 
 from loguru import logger
 
+from nanobot.agent import AgentHook
 from nanobot.agent.loop import AgentLoop
-from nanobot.agent.tools.base import Tool
 from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import (
     _flush_pending_tty_input,
@@ -86,72 +236,100 @@ from nanobot.cli.commands import (
     __logo__,
     __version__,
 )
-from nanobot.cli.stream import StreamRenderer
-from nanobot.config.loader import load_config, resolve_config_env_vars
 from nanobot.config.paths import is_default_workspace
 from nanobot.cron.service import CronService
 from nanobot.utils.helpers import sync_workspace_templates
 
 from pg_session_manager import PGSessionManager
 
-# ── Путь к конфигу и кастомным workspace-директориям ─────────────────────────
-#    Эти переменные можно менять под своё окружение.
 _CONFIG_PATH: str = str(Path(__file__).parent / "config.json")
 _WORKSPACE_DIR: Path = Path(__file__).parent / "workspace"
-_TOOLS_DIR: Path = _WORKSPACE_DIR / "tools"
 _HOOKS_DIR: Path = _WORKSPACE_DIR / "hooks"
-sys.path.insert(0, str(_TOOLS_DIR))
 sys.path.insert(0, str(_HOOKS_DIR))
 sys.path.insert(0, str(_WORKSPACE_DIR))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (используются только в patched-режиме)
+# ПОЛЬЗОВАТЕЛЬСКАЯ КОНФИГУРАЦИЯ
+# ══════════════════════════════════════════════════════════════════════════════
+# Меняйте значения ниже под свои задачи.
+
+from dataclasses import dataclass
+
+
+@dataclass
+class DisplayConfig:
+    """Настройки вывода: какие блоки показывать и как."""
+    show_reasoning: bool = True
+    show_tool_calls: bool = True
+    show_tool_results: bool = True
+    show_tool_params: bool = True
+    show_progress: bool = True
+    typewriter_speed: float = 0.01  # секунд на символ; 0 = мгновенно
+
+
+# Активная конфигурация вывода
+DISPLAY: DisplayConfig = DisplayConfig()
+
+# Таймауты (секунды; 0 = без лимита)
+LLM_TIMEOUT: float = 300      # LLM call timeout
+EXEC_TIMEOUT: int = 60        # Script execution timeout
+MAX_ITERATIONS: int = 200     # Max tool call iterations per turn
+
+# Логирование в stderr (подавляем INFO, чтобы не мешали typewriter)
+LOG_LEVEL: str = "WARNING"    # "DEBUG" | "INFO" | "WARNING" | "ERROR"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _scan_and_register_tools(registry) -> None:
-    """
-    Сканирует workspace/tools/ на предмет Tool-подклассов и регистрирует их.
-
-    В каждой поддиректории ищет файл tool.py, импортирует его как модуль
-    и извлекает все классы, наследуемые от Tool (но не сам Tool).
-    """
-    if not _TOOLS_DIR.is_dir():
-        return
-    for pkg_dir in sorted(_TOOLS_DIR.iterdir()):
-        if not pkg_dir.is_dir() or pkg_dir.name.startswith("_") or pkg_dir.name.startswith("."):
-            continue
-        tool_file = pkg_dir / "tool.py"
-        if not tool_file.exists():
+def _scan_and_register_hooks() -> list:
+    """Сканирует workspace/hooks/ и возвращает экземпляры AgentHook-подклассов."""
+    global _PARAMS_HOOK
+    hooks: list = []
+    _PARAMS_HOOK = None
+    if not _HOOKS_DIR.is_dir():
+        return hooks
+    for f in sorted(_HOOKS_DIR.iterdir()):
+        if not f.is_file() or not f.name.endswith(".py") or f.name.startswith("_"):
             continue
         try:
-            mod = importlib.import_module(f"{pkg_dir.name}.tool")
+            mod = importlib.import_module(f.name[:-3])
         except Exception as exc:
-            console.print(f"[yellow]⚠[/yellow] tool.py in {pkg_dir.name}: {exc}")
+            console.print(f"[yellow]⚠[/yellow] {f.name}: {exc}")
             continue
         for attr_name in dir(mod):
             attr = getattr(mod, attr_name)
             if (
                 isinstance(attr, type)
-                and issubclass(attr, Tool)
-                and attr is not Tool
+                and issubclass(attr, AgentHook)
+                and attr is not AgentHook
                 and not attr_name.startswith("_")
             ):
                 try:
-                    registry.register(attr())
-                    console.print(f"[green]✓[/green] {attr.__name__} registered")
-                except Exception as exc:
-                    console.print(f"[yellow]⚠[/yellow] {attr.__name__}: {exc}")
+                    hook = attr(workspace_dir=_WORKSPACE_DIR)
+                except Exception:
+                    try:
+                        hook = attr()
+                    except Exception as exc:
+                        console.print(f"[yellow]⚠[/yellow] {attr_name}: {exc}")
+                        continue
+                hooks.append(hook)
+                console.print(f"[green]✓[/green] {attr_name} loaded")
+                # Detect ToolParamsHook for parameter display
+                try:
+                    from tool_params_hook import ToolParamsHook as _TPH
+                    if isinstance(hook, _TPH):
+                        _PARAMS_HOOK = hook
+                except ImportError:
+                    pass
+    return hooks
 
 
 def _migrate_cron_store(config) -> None:
-    """
-    Переносит файл cron-задач из глобальной директории (~/.nanobot/cron/)
-    в workspace-специфичную директорию.
-
-    Нужен для совместимости после перехода на мульти-воркспейсную модель.
-    """
+    """Переносит cron-задачи из глобальной ~/.nanobot/cron/ в workspace."""
     from nanobot.config.paths import get_cron_dir
 
     legacy_path = get_cron_dir() / "jobs.json"
@@ -159,36 +337,132 @@ def _migrate_cron_store(config) -> None:
     if legacy_path.is_file() and not new_path.exists():
         new_path.parent.mkdir(parents=True, exist_ok=True)
         import shutil
-
         shutil.move(str(legacy_path), str(new_path))
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ОБЩИЙ ИНТЕРАКТИВНЫЙ ЦИКЛ (используется в обоих режимах)
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# Этот цикл:
-#   1. Принимает ввод пользователя через prompt_toolkit (с историей, автодополнением)
-#   2. Публикует сообщение в шину как InboundMessage
-#   3. Ожидает ответ от агента (со стримингом через bus)
-#   4. Выводит ответ пользователю в терминал
+import re as _re
+
+_ANSI_RE = _re.compile(r'(\x1b\[[0-9;]*[a-zA-Z])')
+_WRITE_LOCK = asyncio.Lock()
+_PARAMS_HOOK: "Any | None" = None  # ToolParamsHook instance, set by _scan_and_register_hooks
 
 
-def _run_interactive_loop(agent, config) -> None:
+async def _typewriter(text: str, style: str, speed: float) -> None:
+    """Псевдо-стриминг: посимвольный вывод с раздельной записью ANSI.
+
+    ANSI-последовательности пишутся целиком (чтобы терминал не сбивался),
+    видимые символы — по одному с задержкой ``speed``.
+    При speed=0 — мгновенный вывод через console.print.
+
+    Весь вывод — под ``_WRITE_LOCK``, чтобы никакое фоновое сообщение
+    не вклинилось между символами.
     """
-    Запускает интерактивный цикл ввода-вывода.
+    if not text:
+        return
+    if speed <= 0:
+        if style:
+            console.print(f"[{style}]{text}[/{style}]")
+        else:
+            console.print(text)
+        return
+    from io import StringIO
+    from rich.console import Console as RichConsole
+    buf = StringIO()
+    tmp = RichConsole(file=buf, force_terminal=True)
+    if style:
+        tmp.print(f"[{style}]{text}[/{style}]", end="")
+    else:
+        tmp.print(text, end="")
+    async with _WRITE_LOCK:
+        for part in _ANSI_RE.split(buf.getvalue()):
+            if not part:
+                continue
+            if _ANSI_RE.fullmatch(part):
+                sys.stdout.write(part)
+                sys.stdout.flush()
+            else:
+                for char in part:
+                    sys.stdout.write(char)
+                    sys.stdout.flush()
+                    await asyncio.sleep(speed)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
-    Параметры:
-        agent: экземпляр AgentLoop (уже сконфигурированный)
-        config: конфигурация nanobot для получения настроек отображения
+
+async def _print_reasoning_block(text: str, cfg: DisplayConfig) -> None:
+    """Выводит блок размышлений целиком."""
+    if not text.strip() or not cfg.show_reasoning:
+        return
+    await _typewriter(text.strip(), "dim italic", cfg.typewriter_speed)
+
+
+async def _print_tool_events(events: list[dict], cfg: DisplayConfig) -> None:
+    """Выводит вызовы инструментов с параметрами (если доступны)."""
+    if not cfg.show_tool_calls:
+        return
+
+    # Параметры из ToolParamsHook
+    param_lookup: dict[str, str] = {}
+    if cfg.show_tool_params and _PARAMS_HOOK is not None:
+        try:
+            raw = _PARAMS_HOOK.drain_calls()
+            from tool_params_hook import format_tool_params
+            param_lookup = format_tool_params(raw)
+        except Exception:
+            pass
+
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        name = ev.get("name", "?")
+        params_str = param_lookup.get(name, "")
+
+        phase = ev.get("phase", "")
+        if phase == "end":
+            result = str(ev.get("result", ""))[:120] or "ok"
+            if params_str:
+                label = f"✓ {name}({params_str}) → {result}"
+            elif cfg.show_tool_results:
+                label = f"✓ {name} → {result}"
+            else:
+                label = f"✓ {name}"
+            await _typewriter(label, "dim", cfg.typewriter_speed)
+        elif phase == "error":
+            err = ev.get("error", "failed")
+            if params_str:
+                label = f"✗ {name}({params_str}): {err}"
+            else:
+                label = f"✗ {name}: {err}"
+            await _typewriter(label, "dim", cfg.typewriter_speed)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ИНТЕРАКТИВНЫЙ ЦИКЛ
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _run_interactive_loop(agent, config, *, session: str | None = None,
+                          display: DisplayConfig | None = None) -> None:
+    """
+    Интерактивный цикл: ввод пользователя → агент → вывод ответа.
+
+    Сообщения потребляются из outbound-очереди:
+      1. Размышления буферизируются до _reasoning_end, затем _typewriter
+      2. Вызовы инструментов буферизируются и выводятся пачками (_typewriter)
+      3. Прогресс-бары показываются по мере поступления
+      4. Финальный ответ — _typewriter (или _print_agent_response если speed=0)
     """
     from nanobot.bus.events import InboundMessage
 
-    # Получаем ссылку на шину сообщений из агента
-    bus = agent.bus
+    # Подавляем INFO-логи в stderr (мешают typewriter-выводу)
+    try:
+        logger.remove()
+        logger.add(sys.stderr, level=LOG_LEVEL)
+    except Exception:
+        pass
 
-    # ── 1. Инициализация prompt_toolkit ──────────────────────────────────────
-    #    Создаём сессию с поддержкой истории, автодополнения и т.д.
+    cfg = display or DisplayConfig()
+    bus = agent.bus
     _init_prompt_session()
     _model, _preset_tag = _model_display(config)
     console.print(
@@ -196,17 +470,9 @@ def _run_interactive_loop(agent, config) -> None:
         f"\u2014 type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit\n"
     )
 
-    # ── 2. Определяем идентификатор сессии и канала ─────────────────────────
-    #    Для CLI используем фиксированный session_id = "cli:direct",
-    #    из которого извлекаем channel="cli" и chat_id="direct".
-    session_id = "cli:direct"
-    if ":" in session_id:
-        cli_channel, cli_chat_id = session_id.split(":", 1)
-    else:
-        cli_channel, cli_chat_id = "cli", session_id
+    chat_id = session or "direct"
+    cli_channel, cli_chat_id = "cli", chat_id
 
-    # ── 3. Обработчики сигналов ──────────────────────────────────────────────
-    #    Нужны для корректного восстановления терминала при Ctrl+C и т.д.
     def _handle_signal(signum, frame):
         sig_name = signal.Signals(signum).name
         _restore_terminal()
@@ -220,214 +486,102 @@ def _run_interactive_loop(agent, config) -> None:
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
-    # ── 4. Асинхронный цикл ──────────────────────────────────────────────────
     async def run_interactive():
-        # Запускаем агента в фоновой задаче
         bus_task = asyncio.create_task(agent.run())
 
-        # turn_done — сигнал о завершении обработки текущего сообщения
-        turn_done = asyncio.Event()
-        turn_done.set()
-        turn_response: list[tuple[str, dict]] = []
-
-        # StreamRenderer для стриминга ответов (постепенный вывод токенов)
-        renderer: StreamRenderer | None = None
-
-        # ── 4a. Фоновая задача: потребление исходящих сообщений ──────────────
-        #     Получает сообщения из шины и выводит их пользователю.
-
-        async def _print_reasoning(text: str) -> None:
-            """Печатает reasoning отдельной строкой, как стандартный CLI."""
-            if not text.strip() or not renderer:
-                return
-            with renderer.pause_spinner():
-                renderer.ensure_header()
-                renderer.console.print(f"[dim italic]> {text}[/dim italic]")
-
-        async def _consume_outbound():
+        async def consume_outbound() -> tuple[str, dict]:
             """
-            Бесконечный цикл, который читает сообщения из outbound-очереди bus
-            и обрабатывает их: стриминг-дельты, прогресс, финальные ответы.
+            Читает outbound-сообщения до получения финального ответа.
+
+            Буферизирует размышления и вызовы инструментов, затем выводит
+            каждый блок через _typewriter (псевдо-стриминг).
             """
-            nonlocal reasoning_buf, reasoning_display_buf
+            full_response = ""
+            response_meta: dict = {}
+            reason_buf = ""
+            tool_buf: list[dict] = []
+
             while True:
                 try:
-                    # Ожидаем новое сообщение с таймаутом 1с
                     msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
                 except asyncio.TimeoutError:
-                    continue  # Таймаут — просто продолжаем ждать
+                    if tool_buf:
+                        await _print_tool_events(tool_buf, cfg)
+                        tool_buf = []
+                    continue
                 except asyncio.CancelledError:
-                    break  # Задачу отменили — выходим
+                    # Сбрасываем оставшиеся блоки перед выходом
+                    if reason_buf.strip():
+                        await _print_reasoning_block(reason_buf, cfg)
+                    if tool_buf:
+                        await _print_tool_events(tool_buf, cfg)
+                    break
 
                 meta = msg.metadata or {}
 
-                # ── Обработка размышлений (reasoning) ─────────────────────────
+                # Размышления — буферизируем, выводим после _reasoning_end
                 if meta.get("_reasoning_delta"):
-                    if agent.channels_config and not agent.channels_config.show_reasoning:
-                        continue
                     if msg.content:
-                        # Дедупликация: одно и то же reasoning приходит и из
-                        # нативного reasoning_content, и из <think>-тегов в контенте
-                        if msg.content in reasoning_buf:
-                            continue
-                        reasoning_buf += msg.content
-                        # Буферизируем дельты и выводим только по строкам,
-                        # чтобы мелкие куски не печатались каждый на отдельной строке
-                        reasoning_display_buf += msg.content
-                        while "\n" in reasoning_display_buf:
-                            line, reasoning_display_buf = reasoning_display_buf.split("\n", 1)
-                            if line.strip():
-                                await _print_reasoning(line)
+                        reason_buf += msg.content
                     continue
+
                 if meta.get("_reasoning_end"):
-                    # Сбрасываем остаток буфера
-                    if reasoning_display_buf.strip():
-                        await _print_reasoning(reasoning_display_buf)
-                        reasoning_display_buf = ""
+                    if reason_buf:
+                        await _print_reasoning_block(reason_buf, cfg)
+                        reason_buf = ""
                     continue
 
-                # ── Обработка стриминговых сообщений ─────────────────────────
-                # _stream_delta — очередной фрагмент ответа (стриминг)
-                if meta.get("_stream_delta"):
-                    if renderer:
-                        await renderer.on_delta(msg.content)
-                    continue
-                # _stream_end — завершение стриминга
-                if meta.get("_stream_end"):
-                    # Сбрасываем остаток буфера размышлений — в стриминговом
-                    # пути _reasoning_end может не прийти (runner.py не шлёт
-                    # emit_reasoning_end для прямого стриминга)
-                    if reasoning_display_buf.strip():
-                        await _print_reasoning(reasoning_display_buf)
-                        reasoning_display_buf = ""
-                    if renderer:
-                        await renderer.on_end(
-                            resuming=meta.get("_resuming", False),
-                        )
-                    continue
-                # _streamed — ответ полностью получен (не по фрагментам)
-                if meta.get("_streamed"):
-                    if renderer and renderer.streamed:
-                        turn_done.set()
-                        continue
-                    # Стриминга не было — сохраняем контент для финального вывода
-                    if msg.content:
-                        meta_copy = dict(meta)
-                        if renderer and not renderer.streamed:
-                            meta_copy.pop("_streamed", None)
-                        turn_response.append((msg.content, meta_copy))
-                    turn_done.set()
-                    continue
-
-                # ── Результаты вызова инструментов (tool_events finish) ──────
+                # Вызовы инструментов — буферизируем, выводим пачками
                 if meta.get("_tool_events") and not meta.get("_tool_hint"):
-                    if renderer:
-                        for ev in meta["_tool_events"]:
-                            if not isinstance(ev, dict):
-                                continue
-                            name = ev.get("name", "?")
-                            phase = ev.get("phase", "")
-                            if phase == "end":
-                                result = ev.get("result")
-                                summary = str(result)[:120] if result else "ok"
-                                with renderer.pause_spinner():
-                                    renderer.ensure_header()
-                                    renderer.console.print(f"  [dim]✓ {name} → {summary}[/dim]")
-                            elif phase == "error":
-                                err = ev.get("error") or "failed"
-                                with renderer.pause_spinner():
-                                    renderer.ensure_header()
-                                    renderer.console.print(f"  [dim]✗ {name}: {err}[/dim]")
+                    tool_buf.extend(meta["_tool_events"])
                     continue
 
-                # ── Обработка прогресс-сообщений ─────────────────────────────
-                #     (вызовы инструментов и т.д.)
-                if await _maybe_print_interactive_progress(
-                    msg, None, agent.channels_config, renderer,
+                # Прогресс-сообщения
+                if cfg.show_progress and await _maybe_print_interactive_progress(
+                    msg, None, agent.channels_config, None,
                 ):
                     continue
 
-                # ── Обработка финального ответа ──────────────────────────────
-                if not turn_done.is_set():
-                    # Первый ответ с контентом — сохраняем
-                    if msg.content:
-                        meta_copy = dict(meta)
-                        if renderer and not renderer.streamed:
-                            meta_copy.pop("_streamed", None)
-                        turn_response.append((msg.content, meta_copy))
-                    turn_done.set()
-                elif msg.content:
-                    # Последующие ответы (отложенные сообщения) — выводим сразу
-                    await _print_agent_response(
-                        msg.content,
-                        render_markdown=True,
-                        metadata=meta,
-                    )
+                # Финальный ответ — сначала выводим накопленные инструменты
+                if msg.content:
+                    if tool_buf:
+                        await _print_tool_events(tool_buf, cfg)
+                        tool_buf = []
+                    full_response = msg.content
+                    response_meta = meta
+                    break
 
-        outbound_task = asyncio.create_task(_consume_outbound())
+            return full_response, response_meta
 
-        # ── 4b. Основной цикл ввода-вывода ──────────────────────────────────
+        # Основной цикл ввода-вывода
         try:
             while True:
                 try:
-                    # Сбрасываем накопленный ввод (нажатия во время генерации)
                     _flush_pending_tty_input()
-                    if renderer:
-                        renderer.stop_for_input()
 
-                    # Читаем ввод пользователя через prompt_toolkit
                     user_input = _sanitize_surrogates(await _read_interactive_input_async())
                     command = user_input.strip()
                     if not command:
                         continue
-
-                    # Проверяем команды выхода
                     if _is_exit_command(command):
                         _restore_terminal()
                         console.print("\nGoodbye!")
                         break
 
-                    # Сбрасываем состояние перед новым запросом
-                    turn_done.clear()
-                    turn_response.clear()
-                    reasoning_buf = ""
-                    reasoning_display_buf = ""
-                    reasoning_active = False
-                    renderer = StreamRenderer(
-                        render_markdown=True,
-                        bot_name=config.agents.defaults.bot_name,
-                        bot_icon=config.agents.defaults.bot_icon,
-                    )
-
-                    # Публикуем сообщение в шину для агента
                     await bus.publish_inbound(InboundMessage(
                         channel=cli_channel,
                         sender_id="user",
                         chat_id=cli_chat_id,
                         content=user_input,
-                        metadata={"_wants_stream": True},  # Запрашиваем стриминг
                     ))
 
-                    # Ждём завершения обработки (turn_done)
-                    await turn_done.wait()
+                    content, meta = await consume_outbound()
 
-                    # ── Вывод финального ответа ──────────────────────────────
-                    if turn_response:
-                        content, meta = turn_response[0]
-                        if content and not meta.get("_streamed"):
-                            if renderer:
-                                await renderer.close()
-                            print_kwargs = {}
-                            if renderer and renderer.header_printed:
-                                print_kwargs["show_header"] = False
-                            _print_agent_response(
-                                content,
-                                render_markdown=True,
-                                metadata=meta,
-                                **print_kwargs,
-                            )
-                    elif renderer and not renderer.streamed:
-                        await renderer.close()
+                    if content:
+                        if cfg.typewriter_speed > 0:
+                            await _typewriter(content, "", cfg.typewriter_speed)
+                        else:
+                            _print_agent_response(content, render_markdown=True, metadata=meta)
 
                 except KeyboardInterrupt:
                     _restore_terminal()
@@ -438,13 +592,8 @@ def _run_interactive_loop(agent, config) -> None:
                     console.print("\nGoodbye!")
                     break
         finally:
-            # ── 4c. Очистка при выходе ───────────────────────────────────────
             agent.stop()
-            outbound_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await outbound_task
             await agent.close_mcp()
-            # Сохраняем все кэшированные сессии на диск
             flushed = agent.sessions.flush_all()
             if flushed:
                 logger.info("Flushed {} session(s) to disk", flushed)
@@ -453,87 +602,62 @@ def _run_interactive_loop(agent, config) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# РЕЖИМ "VANILLA" — СТАНДАРТНЫЙ ЗАПУСК БЕЗ ДОРАБОТОК
+# РЕЖИМЫ ЗАПУСКА
 # ══════════════════════════════════════════════════════════════════════════════
-#
-# В этом режиме не используются PGSessionManager и кастомные инструменты.
-# Всё работает как в стандартном `nanobot agent`.
 
 
-def _run_vanilla_agent() -> None:
-    """
-    Запускает стандартный CLI-агент (как `nanobot agent` из библиотеки).
+def _apply_timeouts(config) -> None:
+    """Применяет таймауты из констант в config и переменные окружения."""
+    if LLM_TIMEOUT >= 0:
+        os.environ["NANOBOT_LLM_TIMEOUT_S"] = str(LLM_TIMEOUT)
+    if EXEC_TIMEOUT >= 0:
+        try:
+            config.tools.exec.timeout = EXEC_TIMEOUT
+        except Exception:
+            pass
+    if MAX_ITERATIONS > 0:
+        try:
+            config.agents.defaults.max_tool_iterations = MAX_ITERATIONS
+        except Exception:
+            pass
 
-    Без PGSessionManager, без сканирования кастомных инструментов.
-    История сессий хранится в JSONL-файлах (стандартный SessionManager).
-    """
-    # Загружаем конфигурацию
+
+def _run_vanilla_agent(args: argparse.Namespace) -> None:
+    """Стандартный CLI-агент (как `nanobot agent`). Без доработок."""
     config = _load_runtime_config(config=_CONFIG_PATH, workspace=str(_WORKSPACE_DIR))
-    # Синхронизируем шаблоны workspace
+    _apply_timeouts(config)
     sync_workspace_templates(config.workspace_path)
     console.print(f"{__logo__} Starting nanobot CLI agent v{__version__}...")
 
-    # Создаём шину сообщений
     bus = MessageBus()
-
-    # Миграция cron-задач (если нужно)
     if is_default_workspace(config.workspace_path):
         _migrate_cron_store(config)
 
-    # Создаём сервис cron для периодических задач
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
-    # Создаём AgentLoop без кастомного session_manager.
-    # Используется стандартный SessionManager из библиотеки (JSONL-файлы).
-    agent = AgentLoop.from_config(
-        config, bus,
-        cron_service=cron,
-    )
-
-    _run_interactive_loop(agent, config)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# РЕЖИМ "PATCHED" — ЗАПУСК С ЛОКАЛЬНЫМИ ДОРАБОТКАМИ
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# В этом режиме подключаются PGSessionManager и сканирование кастомных
-# инструментов из workspace/tools/.
+    agent = AgentLoop.from_config(config, bus, cron_service=cron)
+    _run_interactive_loop(agent, config, session=args.session, display=DISPLAY)
 
 
 def _run_patched_agent(args: argparse.Namespace) -> None:
-    """
-    Запускает CLI-агента с локальными доработками.
-
-    Параметры:
-        args: распарсенные аргументы командной строки (storage)
-    """
-    # ── 1. Загрузка конфигурации и подготовка workspace ──────────────────────
+    """CLI-агент с PGSessionManager и кастомными инструментами."""
     config = _load_runtime_config(config=_CONFIG_PATH, workspace=str(_WORKSPACE_DIR))
+    _apply_timeouts(config)
     sync_workspace_templates(config.workspace_path)
     console.print(f"{__logo__} Starting nanobot CLI agent v{__version__}...")
 
-    # Создаём шину сообщений
     bus = MessageBus()
-
-    # Миграция cron-задач (если нужно)
     if is_default_workspace(config.workspace_path):
         _migrate_cron_store(config)
 
-    # Создаём сервис cron
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
-    # ── 2. Выбор хранилища сессий ────────────────────────────────────────────
-    #    Достаём DSN для PostgreSQL из конфига (секция channels.postgres)
+    # Выбор хранилища сессий
     pg_cfg = getattr(config.channels, "postgres", {})
     dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else getattr(pg_cfg, "dsn", "")
 
-    # Логика выбора:
-    #   postgres → принудительно PG (ошибка если нет DSN)
-    #   auto     → PG если есть DSN, иначе None (стандартный SessionManager)
-    #   file     → принудительно None (стандартный SessionManager)
     use_postgres = args.storage == "postgres" or (args.storage == "auto" and bool(dsn))
     if use_postgres:
         if not dsn:
@@ -543,7 +667,6 @@ def _run_patched_agent(args: argparse.Namespace) -> None:
             workspace=config.workspace_path,
             dsn=dsn,
         )
-        # Создаём таблицы в БД, если их ещё нет
         session_manager.ensure_tables()
         console.print("[green]✓[/green] PGSessionManager: sessions stored in PostgreSQL")
     else:
@@ -551,60 +674,54 @@ def _run_patched_agent(args: argparse.Namespace) -> None:
         if dsn:
             console.print("[dim]PostgreSQL DSN available but --storage=file; using JSONL files[/dim]")
 
-    # ── 3. Создание AgentLoop ────────────────────────────────────────────────
+    hooks = _scan_and_register_hooks()
     agent = AgentLoop.from_config(
         config, bus,
         cron_service=cron,
         session_manager=session_manager,
+        hooks=hooks,
     )
-
-    # ── 4. Сканирование кастомных инструментов ────────────────────────────────
-    _scan_and_register_tools(agent.tools)
-
-    # ── 5. Запуск интерактивного цикла ───────────────────────────────────────
-    _run_interactive_loop(agent, config)
+    _run_interactive_loop(agent, config, session=args.session, display=DISPLAY)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ТОЧКА ВХОДА
 # ══════════════════════════════════════════════════════════════════════════════
-#
-# Парсинг аргументов и выбор режима запуска (vanilla / patched).
 
 
 def _parse_args() -> argparse.Namespace:
     """Парсит аргументы командной строки."""
     parser = argparse.ArgumentParser(
-        description="nanobot CLI agent — upstream by default, --patched for local extras",
+        description="nanobot CLI agent",
     )
     parser.add_argument(
         "--patched", "-P",
         action="store_true",
         default=False,
-        help="Enable local patches: PGSessionManager, workspace tool scanning, etc.",
+        help="Enable local patches: PGSessionManager, workspace hooks",
     )
     parser.add_argument(
         "--storage", "-S",
         type=str,
         default="auto",
         choices=("auto", "file", "postgres"),
-        help="Session storage backend. (only with --patched, default: auto)",
+        help="Session storage (only with --patched, default: auto)",
+    )
+    parser.add_argument(
+        "--session", "-s",
+        type=str,
+        default=None,
+        help="Session key (default: cli:direct). Resume or start a named session.",
     )
     return parser.parse_args()
 
 
 def main():
-    """
-    Главная функция: выбирает режим запуска в зависимости от флага --patched.
-
-    Без --patched → стандартный CLI-агент (как `nanobot agent`).
-    С --patched  → запуск с PGSessionManager и кастомными инструментами.
-    """
     args = _parse_args()
     if args.patched:
         _run_patched_agent(args)
     else:
-        _run_vanilla_agent()
+        _run_vanilla_agent(args)
 
 
 if __name__ == "__main__":
