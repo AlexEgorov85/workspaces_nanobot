@@ -42,10 +42,12 @@
     "transcriptionLanguage": null,
     "postgres": {
 	  "enabled": true,
-	  "dsn": "",
-	  "table": "conversation_messages",
+	  "dsn": "postgresql://postgres:1@localhost:5432/postgres",
+	  "table_name": "conversation_messages",
 	  "schema": "public",
 	  "poll_interval": 2.0,
+	  "flush_interval": 2.0,
+	  "max_concurrent": 1,
 	  "allow_from": ["*"]
 	},
     "dingtalk": {
@@ -373,7 +375,7 @@
       "extraBody": null
     },
     "mistral": {
-      "apiKey": null,
+      "apiKey": "XavGPsHjtNt3uOtFGUhbUuad5PRm2D0W",
       "apiBase": "https://api.mistral.ai/v1",
       "extraHeaders": null,
       "extraBody": null

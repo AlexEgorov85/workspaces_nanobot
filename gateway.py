@@ -35,13 +35,10 @@
 2. С --patched (режим с доработками)
    ─────────────────────────────────
    Включаются все локальные расширения:
-     • PostgresChannel — канал на основе PostgreSQL LISTEN/NOTIFY
-     • PGSessionManager — хранение истории сессий в PostgreSQL
-     • AutoStoreHook — автоматическое сохранение контекста
-     • Сканирование и регистрация кастомных инструментов из workspace/tools/
-     • Автоформатирование результатов инструментов в JSON
-     • Ограничение записи новых файлов только в data_store/cache
-     • Кастомная WebUI-сборка из директории webui-dist/
+      • PostgresChannel — канал на основе PostgreSQL LISTEN/NOTIFY
+      • PGSessionManager — хранение истории сессий в PostgreSQL
+      • AutoStoreHook — автоматическое сохранение контекста
+      • Кастомная WebUI-сборка из директории webui-dist/
 
 ══════════════════════════════════════════════════════════════════════════════
 ПРИМЕРЫ ЗАПУСКА
@@ -68,9 +65,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import importlib
-import json
-import re
 import sys
 import traceback
 from pathlib import Path
@@ -83,184 +77,17 @@ from loguru import logger
 from postgres_channel import PostgresChannel
 
 from nanobot.agent.loop import AgentLoop
-from nanobot.agent.tools.base import Tool
-from nanobot.agent.tools.filesystem import WriteFileTool, EditFileTool
-from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.manager import ChannelManager, _default_webui_dist
 from nanobot.cli.commands import _load_runtime_config, console, __logo__, __version__
-from nanobot.config.loader import load_config, resolve_config_env_vars
-from nanobot.config.paths import get_workspace_path, is_default_workspace
 from pg_session_manager import PGSessionManager
 from nanobot.utils.helpers import sync_workspace_templates
 
-# ── Пути к кастомным workspace-директориям ──────────────────────────────────
-#    tools/   — пользовательские инструменты (Tool subclasses)
-#    skills/  — пользовательские навыки
-#    hooks/   — пользовательские хуки жизненного цикла
-#    data_store/cache/ — кэш для новых файлов, создаваемых LLM
+# ── Пути к workspace и hooks для AutoStoreHook ──────────────────────────────
 _WORKSPACE_DIR = Path(__file__).parent / "workspace"
-_TOOLS_DIR = _WORKSPACE_DIR / "tools"
-_SKILLS_DIR = _WORKSPACE_DIR / "skills"
 _HOOKS_DIR = _WORKSPACE_DIR / "hooks"
-_CACHE_DIR = _WORKSPACE_DIR / "data_store" / "cache"
-sys.path.insert(0, str(_TOOLS_DIR))
-sys.path.insert(0, str(_SKILLS_DIR))
 sys.path.insert(0, str(_HOOKS_DIR))
 sys.path.insert(0, str(_WORKSPACE_DIR))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (используются только в patched-режиме)
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-def _auto_format_result(result: object) -> object:
-    """
-    Преобразует результат работы инструмента в читаемый JSON.
-
-    Если инструмент вернул dict или list, сериализуем его в отформатированный
-    JSON, чтобы LLM видела структурированные данные, а не сырой repr().
-    """
-    if isinstance(result, (dict, list)):
-        return json.dumps(result, ensure_ascii=False, indent=2)
-    return result
-
-
-def _wrap_tool_execute(registry) -> None:
-    """
-    Оборачивает execute() каждого зарегистрированного инструмента.
-
-    После обёртки все нестроковые результаты автоматически проходят через
-    _auto_format_result, что делает вывод инструментов более читаемым для LLM.
-    """
-    for name in registry.tool_names:
-        tool = registry.get(name)
-        if tool is None:
-            continue
-        original = tool.execute
-
-        # Создаём новую асинхронную функцию-обёртку
-        async def _execute(self, original=original, **kwargs: object) -> object:
-            return _auto_format_result(await original(**kwargs))
-
-        # Привязываем обёртку к конкретному экземпляру инструмента
-        tool.execute = _execute.__get__(tool, type(tool))
-
-
-def _restrict_writes_to_cache(registry) -> None:
-    """
-    Ограничивает создание новых файлов директорией data_store/cache/.
-
-    Редактирование существующих файлов разрешено всегда. Новые файлы вне
-    _CACHE_DIR блокируются с сообщением об ошибке. Это предотвращает
-    случайную запись LLM в произвольные места файловой системы.
-    """
-    _WRITE_TYPES = (WriteFileTool, EditFileTool)
-
-    for name in registry.tool_names:
-        tool = registry.get(name)
-        if not isinstance(tool, _WRITE_TYPES):
-            continue  # Пропускаем инструменты, не связанные с записью файлов
-
-        original = tool.execute
-
-        async def _wrapped(self, **kwargs):
-            # Проверяем path (для write_file)
-            if "path" in kwargs and kwargs["path"]:
-                err = _check_path(self, kwargs["path"])
-                if err:
-                    return err
-            # Проверяем edits (для edit_file — список изменений)
-            if "edits" in kwargs and kwargs["edits"]:
-                for edit in kwargs["edits"]:
-                    err = _check_path(self, edit.get("path", ""))
-                    if err:
-                        return err
-            return await original(**kwargs)
-
-        tool.execute = _wrapped.__get__(tool, type(tool))
-
-
-def _check_path(tool, path: str) -> str | None:
-    """
-    Проверяет, можно ли создавать файл по указанному пути.
-
-    Возвращает строку с ошибкой, если файл новый и находится вне _CACHE_DIR,
-    иначе None (путь разрешён).
-    """
-    try:
-        # Пытаемся разрешить путь относительно workspace
-        resolved = tool._resolve(path)
-    except PermissionError:
-        return f"Error: Can only write to '{_CACHE_DIR}'. Use a path under that directory."
-    # Если файл уже существует — редактирование всегда разрешено
-    if resolved.exists():
-        return None
-    # Проверяем, что новый файл находится внутри _CACHE_DIR
-    try:
-        resolved.relative_to(_CACHE_DIR)
-    except ValueError:
-        return (
-            f"Error: New files can only be created under '{_CACHE_DIR}'. "
-            f"Use a path under that directory "
-            f"(e.g. '{_CACHE_DIR / Path(path).name}')."
-        )
-    return None
-
-
-def _scan_and_register_tools(registry) -> None:
-    """
-    Сканирует директории workspace/tools/ и workspace/skills/ на предмет
-    Tool-подклассов и регистрирует их в реестре агента.
-    """
-    _scan_dir(registry, _TOOLS_DIR)
-    _scan_dir(registry, _SKILLS_DIR)
-
-
-def _sanitize_module_name(name: str) -> str:
-    """
-    Заменяет недопустимые для Python-идентификаторов символы на подчёркивания.
-
-    Нужно, чтобы имена директорий вроде 'my-tool' стали 'my_tool'.
-    """
-    return re.sub(r"[^\w]", "_", name)
-
-
-def _scan_dir(registry, scan_dir: Path) -> None:
-    """
-    Сканирует одну директорию: для каждой поддиректории с tool.py пытается
-    импортировать модуль и найти в нём подклассы Tool для регистрации.
-    """
-    if not scan_dir.exists():
-        return
-    for pkg_dir in sorted(scan_dir.iterdir()):
-        # Пропускаем скрытые и системные директории
-        if not pkg_dir.is_dir() or pkg_dir.name.startswith("_") or pkg_dir.name.startswith("."):
-            continue
-        tool_file = pkg_dir / "tool.py"
-        if not tool_file.exists():
-            continue
-        mod_name = _sanitize_module_name(pkg_dir.name)
-        try:
-            mod = importlib.import_module(f"{mod_name}.tool")
-        except Exception as exc:
-            console.print(f"[yellow]⚠[/yellow] tool.py in {pkg_dir.name}: {exc}")
-            continue
-        # Ищем Tool-подклассы в модуле
-        for attr_name in dir(mod):
-            attr = getattr(mod, attr_name)
-            if (
-                isinstance(attr, type)
-                and issubclass(attr, Tool)
-                and attr is not Tool
-                and not attr_name.startswith("_")
-            ):
-                try:
-                    registry.register(attr())
-                    console.print(f"[green]✓[/green] {attr.__name__} registered from {pkg_dir.name}")
-                except Exception as exc:
-                    console.print(f"[yellow]⚠[/yellow] {attr.__name__}: {exc}")
 
 
 def _patch_webui_dist(channels: ChannelManager) -> None:
@@ -340,7 +167,7 @@ def _run_vanilla_gateway() -> None:
 #
 # В этом режиме скрипт самостоятельно конфигурирует и запускает gateway,
 # добавляя все локальные расширения: PostgresChannel, PGSessionManager,
-# AutoStoreHook, кастомные инструменты, ограничение записи файлов и др.
+# AutoStoreHook, кастомная WebUI-сборка.
 
 
 def _run_patched_gateway(args: argparse.Namespace) -> None:
@@ -420,25 +247,12 @@ def _run_patched_gateway(args: argparse.Namespace) -> None:
 
     agent._run_agent_loop = _run_agent_loop_with_session_key
 
-    # ── 6. Регистрация кастомных инструментов и их обёрток ────────────────────
-    #    Сканируем workspace/tools/ и workspace/skills/ для поиска Tool.
-    _scan_and_register_tools(agent.tools)
-
-    # Оборачиваем execute() всех инструментов для автоформатирования JSON
-    _wrap_tool_execute(agent.tools)
-    console.print("[green]✓[/green] Tool result auto-formatting applied")
-
-    # Ограничиваем запись новых файлов директорией data_store/cache/
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    _restrict_writes_to_cache(agent.tools)
-    console.print(f"[green]✓[/green] File writes restricted to {_CACHE_DIR}")
-
-    # ── 7. Инициализация ChannelManager ───────────────────────────────────────
+    # ── 6. Инициализация ChannelManager ───────────────────────────────────────
     #    ChannelManager обнаруживает и запускает каналы, перечисленные в конфиге
     #    (telegram, websocket, discord и т.д.) через секцию channels.
     channels = ChannelManager(config, bus, session_manager=session_manager)
 
-    # ── 8. Добавление PostgresChannel (канал поверх PostgreSQL) ───────────────
+    # ── 7. Добавление PostgresChannel (канал поверх PostgreSQL) ───────────────
     #    Позволяет отправлять и получать сообщения через БД.
     if pg_cfg.get("enabled", False):
         pg_channel = PostgresChannel(pg_cfg, bus)
@@ -457,7 +271,7 @@ def _run_patched_gateway(args: argparse.Namespace) -> None:
     else:
         console.print("[dim]PostgreSQL channel disabled[/dim]")
 
-    # ── 9. Фильтрация каналов (если указан --channels) ────────────────────────
+    # ── 8. Фильтрация каналов (если указан --channels) ────────────────────────
     #    Оставляем только те каналы, которые перечислены в аргументе.
     if args.channels:
         allowed = {name.strip() for name in args.channels.split(",")}
@@ -467,13 +281,13 @@ def _run_patched_gateway(args: argparse.Namespace) -> None:
         if not channels.channels:
             console.print("[yellow]⚠[/yellow] No matching channels in --channels list")
 
-    # ── 10. Подмена WebUI-сборки на кастомную ─────────────────────────────────
+    # ── 9. Подмена WebUI-сборки на кастомную ─────────────────────────────────
     _patch_webui_dist(channels)
 
     # Выводим список активных каналов
     console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
 
-    # ── 11. Главный цикл запуска ──────────────────────────────────────────────
+    # ── 10. Главный цикл запуска ──────────────────────────────────────────────
     #    Запускаем агента и все каналы, обрабатываем остановку.
     async def run():
         # Запускаем каналы в фоновой задаче
@@ -520,7 +334,7 @@ def _parse_args() -> argparse.Namespace:
         "--patched", "-P",
         action="store_true",
         default=False,
-        help="Enable local patches: PostgresChannel, AutoStoreHook, tool wrapping, etc.",
+        help="Enable local patches: PostgresChannel, AutoStoreHook, WebUI, etc.",
     )
     parser.add_argument(
         "--channels", "-C",

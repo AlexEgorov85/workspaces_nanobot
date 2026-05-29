@@ -16,8 +16,8 @@ from nanobot.channels.base import BaseChannel
 
 
 class PostgresChannel(BaseChannel):
-    """Polls ``conversation_questions`` for pending user messages and writes
-    responses (and real-time reasoning) into ``conversation_answers``.
+    """Polls ``conversation_messages`` for pending user messages and writes
+    assistant responses (and real-time reasoning) back into the same table.
 
     Config (in ``config.json`` under ``channels.postgres``)::
 
@@ -25,29 +25,45 @@ class PostgresChannel(BaseChannel):
             "enabled": true,
             "dsn": "postgresql://user:pass@localhost:5432/nanobot",
             "schema": "public",
-            "questions_table": "conversation_questions",
-            "answers_table": "conversation_answers",
+            "table_name": "conversation_messages",
             "poll_interval": 2.0,
+            "max_concurrent": 1,
             "processing_timeout": 300,
             "allow_from": ["*"]
         }
 
-    Table schemas (see ``create_table.sql``):
+    ``max_concurrent`` controls how many messages the channel dispatches to
+    the agent simultaneously (default 1, meaning strictly sequential).
+    Higher values let the agent queue fill faster; the agent still processes
+    one message at a time.
 
-    **conversation_questions**
-        id, chat_id, user_id, conversation_id, content, media,
-        metadata, status (pending|processing|completed|failed),
-        created_at, updated_at
+    Messages from the same ``conversation_id`` are never dispatched in
+    parallel — the channel waits for the active one to finish before
+    picking the next from that conversation, regardless of
+    ``max_concurrent``.
 
-    **conversation_answers**
-        id, question_id (FK), chat_id, conversation_id,
-        content, reasoning, metadata, buttons,
-        status (thinking|streaming|completed|failed),
-        created_at, updated_at
+    Table schema (``conversation_messages``)::
 
-    The ``reasoning`` column is updated in real-time as the model thinks;
-    the web server can poll ``conversation_answers`` and display incremental
-    reasoning before the final answer appears in ``content``.
+        id              UUID PK DEFAULT gen_random_uuid()
+        chat_id         TEXT
+        user_id         TEXT
+        conversation_id UUID NOT NULL
+        role            TEXT NOT NULL CHECK (IN ('user','assistant','system'))
+        content         TEXT NOT NULL
+        media           JSONB DEFAULT '[]'
+        metadata        JSONB DEFAULT '{}'
+        reply_to        UUID          — points to user message for assistant replies
+        buttons         JSONB DEFAULT '[]'
+        status          TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (IN ('pending','processing','completed','failed'))
+        created_at      TIMESTAMPTZ DEFAULT NOW()
+        updated_at      TIMESTAMPTZ DEFAULT NOW()
+
+    User messages arrive with ``role='user'`` and ``status='pending'``.
+    The channel claims them (``status → 'processing'``), creates an
+    ``role='assistant'`` row linked via ``reply_to``, and streams
+    reasoning deltas into ``metadata.reasoning`` until the final
+    response is written into ``content``.
     """
 
     name = "postgres"
@@ -68,16 +84,22 @@ class PostgresChannel(BaseChannel):
 
         self._dsn: str = _get("dsn", "")
         self._schema: str = _get("schema", "public")
-        self._questions_table: str = _get("questions_table", "conversation_questions")
-        self._answers_table: str = _get("answers_table", "conversation_answers")
-        self._fq_questions: str = f"{self._schema}.{self._questions_table}"
-        self._fq_answers: str = f"{self._schema}.{self._answers_table}"
+        self._table_name: str = _get("table_name", "conversation_messages")
+        self._fq_table: str = f"{self._schema}.{self._table_name}"
         self._poll_interval: float = float(_get("poll_interval", 2.0))
         self._processing_timeout: int = int(_get("processing_timeout", 600))
+        self._flush_interval: float = float(_get("flush_interval", 2.0))
+        self._max_concurrent: int = int(_get("max_concurrent", 1))
+        self._semaphore = asyncio.Semaphore(self._max_concurrent)
+        self._inflight: set[str] = set()
+        self._inflight_conv: dict[str, str] = {}  # user_msg_id -> conversation_id
+        self._conv_inflight: set[str] = set()     # conversation_ids currently busy
         self._pool: Any = None
         self._poll_task: asyncio.Task | None = None
         self._stream_buffers: dict[str, str] = {}
-        # question_id -> {answer_id, tool_events, reasoning_buf}
+        self._reasoning_buffers: dict[str, str] = {}  # assistant_msg_id -> accumulated delta
+        self._flush_task: asyncio.Task | None = None
+        # user_msg_id -> {assistant_msg_id, tool_events, reasoning_buf}
         self._msg_ctx: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
@@ -87,16 +109,22 @@ class PostgresChannel(BaseChannel):
     async def start(self) -> None:
         self._running = True
         await self._ensure_tables()
+        self._flush_task = asyncio.create_task(self._flush_reasoning_loop())
         self._poll_task = asyncio.create_task(self._poll_loop())
         self.logger.info(
             "Polling {} every {}s (processing timeout {}s)",
-            self._fq_questions,
+            self._fq_table,
             self._poll_interval,
             self._processing_timeout,
         )
 
     async def stop(self) -> None:
         self._running = False
+        await self._flush_reasoning()
+        if self._flush_task:
+            self._flush_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._flush_task
         if self._poll_task:
             self._poll_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -106,43 +134,67 @@ class PostgresChannel(BaseChannel):
             self._pool = None
 
     # ------------------------------------------------------------------
-    # Tables
+    # Table
     # ------------------------------------------------------------------
 
     async def _ensure_tables(self) -> None:
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             await conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self._fq_questions} (
+                CREATE TABLE IF NOT EXISTS {self._fq_table} (
                     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     chat_id         TEXT,
                     user_id         TEXT,
                     conversation_id UUID NOT NULL,
+                    role            TEXT NOT NULL
+                        CHECK (role IN ('user', 'assistant', 'system')),
                     content         TEXT NOT NULL,
-                    media           JSON DEFAULT '[]'::json,
-                    metadata        JSON DEFAULT '{{}}'::json,
+                    media           JSONB DEFAULT '[]'::jsonb,
+                    metadata        JSONB DEFAULT '{{}}'::jsonb,
+                    reply_to        UUID,
+                    buttons         JSONB DEFAULT '[]'::jsonb,
                     status          TEXT NOT NULL DEFAULT 'pending'
                         CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
                     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
-            await conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self._fq_answers} (
-                    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    question_id     UUID REFERENCES {self._fq_questions}(id),
-                    chat_id         TEXT,
-                    conversation_id UUID NOT NULL,
-                    content         TEXT,
-                    reasoning       TEXT,
-                    metadata        JSON DEFAULT '{{}}'::json,
-                    buttons         JSON DEFAULT '[]'::json,
-                    status          TEXT NOT NULL DEFAULT 'thinking'
-                        CHECK (status IN ('thinking', 'streaming', 'completed', 'failed')),
-                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-            """)
+
+    # ------------------------------------------------------------------
+    # Reasoning batch flush
+    # ------------------------------------------------------------------
+
+    async def _flush_reasoning_loop(self) -> None:
+        """Flush accumulated reasoning buffers to DB periodically."""
+        while self._running:
+            await asyncio.sleep(self._flush_interval)
+            try:
+                await self._flush_reasoning()
+            except Exception:
+                self.logger.exception("Flush reasoning error")
+
+    async def _flush_reasoning(self) -> None:
+        """Write all dirty reasoning buffers to DB in a single batch."""
+        if not self._reasoning_buffers:
+            return
+        buffers = self._reasoning_buffers
+        self._reasoning_buffers = {}
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            for assistant_msg_id, delta in buffers.items():
+                if delta:
+                    await conn.execute(
+                        f"""
+                        UPDATE {self._fq_table}
+                        SET metadata = COALESCE(metadata, '{{}}'::jsonb) ||
+                            jsonb_build_object('reasoning',
+                                COALESCE(metadata->>'reasoning', '') || $1),
+                            updated_at = NOW()
+                        WHERE id = $2
+                        """,
+                        delta,
+                        assistant_msg_id,
+                    )
 
     # ------------------------------------------------------------------
     # Poll loop
@@ -152,7 +204,8 @@ class PostgresChannel(BaseChannel):
         while self._running:
             try:
                 await self._unstick_processing()
-                await self._poll_once()
+                if len(self._inflight) < self._max_concurrent:
+                    await self._poll_once()
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -160,8 +213,8 @@ class PostgresChannel(BaseChannel):
             await asyncio.sleep(self._poll_interval)
 
     async def _unstick_processing(self) -> None:
-        """Release questions stuck in ``processing`` beyond the timeout (max 3 retries).
-        Also fail orphaned answers stuck in ``thinking``/``streaming``."""
+        """Release user messages stuck in ``processing`` beyond the timeout (max 3 retries).
+        Also fail orphaned assistant messages stuck in ``processing``."""
         pool = await self._get_pool()
         max_retries = 3
         timeout = timedelta(seconds=self._processing_timeout)
@@ -169,8 +222,8 @@ class PostgresChannel(BaseChannel):
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT id, metadata FROM {self._fq_questions}
-                WHERE status = 'processing' AND updated_at + $1 < NOW()
+                SELECT id, metadata FROM {self._fq_table}
+                WHERE role = 'user' AND status = 'processing' AND updated_at + $1 < NOW()
                 FOR UPDATE
                 """,
                 timeout,
@@ -188,8 +241,8 @@ class PostgresChannel(BaseChannel):
                 if retry_count >= max_retries:
                     await conn.execute(
                         f"""
-                        UPDATE {self._fq_questions}
-                        SET status = 'failed', metadata = $1::json, updated_at = NOW()
+                        UPDATE {self._fq_table}
+                        SET status = 'failed', metadata = $1::jsonb, updated_at = NOW()
                         WHERE id = $2
                         """,
                         json.dumps(meta),
@@ -197,21 +250,21 @@ class PostgresChannel(BaseChannel):
                     )
                     await conn.execute(
                         f"""
-                        UPDATE {self._fq_answers}
+                        UPDATE {self._fq_table}
                         SET status = 'failed', updated_at = NOW()
-                        WHERE question_id = $1 AND status IN ('thinking', 'streaming')
+                        WHERE reply_to = $1 AND role = 'assistant' AND status = 'processing'
                         """,
                         msg_id,
                     )
                     self.logger.warning(
-                        "Question {} exceeded max retries ({}/{})",
+                        "User msg {} exceeded max retries ({}/{})",
                         msg_id, retry_count, max_retries,
                     )
                 else:
                     await conn.execute(
                         f"""
-                        UPDATE {self._fq_questions}
-                        SET status = 'pending', metadata = $1::json, updated_at = NOW()
+                        UPDATE {self._fq_table}
+                        SET status = 'pending', metadata = $1::jsonb, updated_at = NOW()
                         WHERE id = $2
                         """,
                         json.dumps(meta),
@@ -219,30 +272,42 @@ class PostgresChannel(BaseChannel):
                     )
                     await conn.execute(
                         f"""
-                        UPDATE {self._fq_answers}
+                        UPDATE {self._fq_table}
                         SET status = 'failed', updated_at = NOW()
-                        WHERE question_id = $1 AND status IN ('thinking', 'streaming')
+                        WHERE reply_to = $1 AND role = 'assistant' AND status = 'processing'
                         """,
                         msg_id,
                     )
                     self.logger.warning(
-                        "Released stuck question {} (retry {}/{})",
+                        "Released stuck user msg {} (retry {}/{})",
                         msg_id, retry_count, max_retries,
                     )
 
                 self._msg_ctx.pop(msg_id, None)
+                self._release_slot(msg_id)
+                self._reasoning_buffers.clear()
+
+            # Also fail orphaned assistant messages not linked to a failing user msg
+            await conn.execute(
+                f"""
+                UPDATE {self._fq_table}
+                SET status = 'failed', updated_at = NOW()
+                WHERE role = 'assistant' AND status = 'processing' AND updated_at + $1 < NOW()
+                """,
+                timeout,
+            )
 
     async def _poll_once(self) -> None:
-        """Claim the oldest pending question and forward it to the agent."""
+        """Claim the oldest pending user message and forward it to the agent."""
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                UPDATE {self._fq_questions}
+                UPDATE {self._fq_table}
                 SET status = 'processing', updated_at = NOW()
                 WHERE id = (
-                    SELECT id FROM {self._fq_questions}
-                    WHERE status = 'pending'
+                    SELECT id FROM {self._fq_table}
+                    WHERE role = 'user' AND status = 'pending'
                     ORDER BY created_at ASC
                     LIMIT 1
                     FOR UPDATE
@@ -254,8 +319,23 @@ class PostgresChannel(BaseChannel):
             if row is None:
                 return
 
-        question_id = str(row["id"])
-        conv_id = str(row["conversation_id"])
+            user_msg_id = str(row["id"])
+            conv_id = str(row["conversation_id"])
+
+            # Не диспатчим, если из этого conversation_id уже есть активное сообщение
+            if conv_id in self._conv_inflight:
+                await conn.execute(
+                    f"""
+                    UPDATE {self._fq_table}
+                    SET status = 'pending', updated_at = NOW()
+                    WHERE id = $1
+                    """,
+                    user_msg_id,
+                )
+                self.logger.debug(
+                    "Deferred msg {} from busy conversation {}", user_msg_id, conv_id,
+                )
+                return
         chat_id = str(row["chat_id"]) if row["chat_id"] else conv_id
         user_id = str(row["user_id"]) if row["user_id"] else conv_id
         content = row["content"] or ""
@@ -269,12 +349,17 @@ class PostgresChannel(BaseChannel):
             raw_media = json.loads(raw_media) if raw_media else []
         media: list[str] = raw_media if isinstance(raw_media, list) else []
 
-        # Insert answer placeholder so the web server can start polling
-        answer_id = await self._insert_answer(question_id, chat_id, conv_id)
+        # Insert assistant placeholder so the web server can start polling
+        assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id, conv_id)
+
+        await self._semaphore.acquire()
+        self._inflight.add(user_msg_id)
+        self._inflight_conv[user_msg_id] = conv_id
+        self._conv_inflight.add(conv_id)
 
         meta: dict[str, Any] = {
-            "message_id": question_id,
-            "answer_id": answer_id,
+            "message_id": user_msg_id,
+            "answer_id": assistant_msg_id,
             "conversation_id": conv_id,
             **raw_meta,
         }
@@ -288,79 +373,83 @@ class PostgresChannel(BaseChannel):
                 metadata=meta,
             )
         except Exception:
-            self.logger.exception("Failed to dispatch question {}", question_id)
-            await self._mark_failed(question_id, answer_id, "dispatch_error")
+            self.logger.exception("Failed to dispatch user message {}", user_msg_id)
+            await self._mark_failed(user_msg_id, assistant_msg_id, "dispatch_error")
 
-    async def _insert_answer(self, question_id: str, chat_id: str, conv_id: str) -> str:
-        """Create a ``thinking`` answer row and store its id in ``_msg_ctx``."""
+    async def _insert_assistant_message(self, user_msg_id: str, chat_id: str, conv_id: str) -> str:
+        """Create a ``processing`` assistant row and store its id in ``_msg_ctx``."""
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                INSERT INTO {self._fq_answers}
-                    (question_id, chat_id, conversation_id, status, created_at, updated_at)
-                VALUES ($1, $2, $3, 'thinking', NOW(), NOW())
+                INSERT INTO {self._fq_table}
+                    (chat_id, conversation_id, role, content, reply_to, status, created_at, updated_at)
+                VALUES ($1, $2, 'assistant', '', $3, 'processing', NOW(), NOW())
                 RETURNING id
                 """,
-                question_id,
                 chat_id,
                 conv_id,
+                user_msg_id,
             )
-            answer_id = str(row["id"])
-            self._msg_ctx[question_id] = {"answer_id": answer_id, "tool_events": [], "reasoning_buf": []}
-            self.logger.debug("Inserted answer placeholder {} for question {}", answer_id, question_id)
-            return answer_id
+            assistant_msg_id = str(row["id"])
+            self._msg_ctx[user_msg_id] = {
+                "assistant_msg_id": assistant_msg_id,
+                "tool_events": [],
+                "reasoning_buf": [],
+            }
+            self.logger.debug(
+                "Inserted assistant placeholder {} for user msg {}",
+                assistant_msg_id, user_msg_id,
+            )
+            return assistant_msg_id
 
-    async def _mark_failed(self, question_id: str, answer_id: str | None, reason: str) -> None:
-        """Mark a question and its answer as failed."""
+    async def _mark_failed(self, user_msg_id: str, assistant_msg_id: str | None, reason: str) -> None:
+        """Mark a user message and its assistant reply as failed."""
         pool = await self._get_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"SELECT conversation_id FROM {self._fq_questions} WHERE id = $1",
-                question_id,
-            )
-            conv_id = str(row["conversation_id"]) if row else question_id
-
-            if answer_id:
+            if assistant_msg_id:
                 await conn.execute(
                     f"""
-                    UPDATE {self._fq_answers}
-                    SET content = $1, metadata = $2::json, status = 'failed', updated_at = NOW()
+                    UPDATE {self._fq_table}
+                    SET content = $1, metadata = $2::jsonb, status = 'failed', updated_at = NOW()
                     WHERE id = $3
                     """,
                     f"Internal error: {reason}",
                     json.dumps({"error": reason}),
-                    answer_id,
+                    assistant_msg_id,
                 )
 
             await conn.execute(
                 f"""
-                UPDATE {self._fq_questions}
+                UPDATE {self._fq_table}
                 SET status = 'failed', updated_at = NOW()
                 WHERE id = $1
                 """,
-                question_id,
+                user_msg_id,
             )
-            self._msg_ctx.pop(question_id, None)
+            self._msg_ctx.pop(user_msg_id, None)
+        self._release_slot(user_msg_id)
+        if assistant_msg_id:
+            self._reasoning_buffers.pop(assistant_msg_id, None)
 
     # ------------------------------------------------------------------
-    # Reasoning — real-time streaming
+    # Reasoning — real-time streaming into metadata.reasoning
     # ------------------------------------------------------------------
 
     async def send_reasoning_delta(
         self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None
     ) -> None:
-        """Write a reasoning chunk to the answer row immediately (direct call path)."""
-        answer_id = self._resolve_answer_id(metadata)
-        if not answer_id:
+        """Buffer a reasoning chunk for batch flush into ``metadata.reasoning``."""
+        assistant_msg_id = self._resolve_assistant_msg_id(metadata)
+        if assistant_msg_id:
+            buf = self._reasoning_buffers.get(assistant_msg_id, "")
+            self._reasoning_buffers[assistant_msg_id] = buf + delta
             return
-        pool = await self._get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                f"UPDATE {self._fq_answers} SET reasoning = COALESCE(reasoning, '') || $1, updated_at = NOW() WHERE id = $2",
-                delta,
-                answer_id,
-            )
+        # Fallback: assistant_msg_id not yet resolved — buffer in _msg_ctx
+        msg_id = (metadata or {}).get("origin_message_id") or (metadata or {}).get("message_id")
+        if msg_id:
+            ctx = self._msg_ctx.setdefault(msg_id, {})
+            ctx.setdefault("reasoning_buf", []).append(delta)
 
     async def send_reasoning_end(
         self, chat_id: str, metadata: dict[str, Any] | None = None
@@ -378,15 +467,10 @@ class PostgresChannel(BaseChannel):
         # --- Reasoning progress — write to DB in real-time ---
         if meta.get("_reasoning_delta"):
             if msg.content:
-                answer_id = self._resolve_answer_id(meta)
-                if answer_id:
-                    pool = await self._get_pool()
-                    async with pool.acquire() as conn:
-                        await conn.execute(
-                            f"UPDATE {self._fq_answers} SET reasoning = COALESCE(reasoning, '') || $1, updated_at = NOW() WHERE id = $2",
-                            msg.content,
-                            answer_id,
-                        )
+                assistant_msg_id = self._resolve_assistant_msg_id(meta)
+                if assistant_msg_id:
+                    buf = self._reasoning_buffers.get(assistant_msg_id, "")
+                    self._reasoning_buffers[assistant_msg_id] = buf + msg.content
                 elif msg_id:
                     ctx = self._msg_ctx.setdefault(msg_id, {})
                     ctx.setdefault("reasoning_buf", []).append(msg.content)
@@ -411,10 +495,30 @@ class PostgresChannel(BaseChannel):
 
         # --- Final response — merge accumulated context, write to DB ---
         ctx = self._msg_ctx.pop(msg_id, {}) if msg_id else {}
-        answer_id = ctx.get("answer_id") or meta.get("answer_id")
-        if not answer_id:
-            self.logger.warning("send: no answer_id for msg_id={}", msg_id)
+        self._release_slot(msg_id)
+        assistant_msg_id = ctx.get("assistant_msg_id") or meta.get("answer_id")
+        if not assistant_msg_id:
+            self.logger.warning("send: no assistant_msg_id for msg_id={}", msg_id)
             return
+
+        # Flush any pending buffered reasoning before final answer
+        if assistant_msg_id and assistant_msg_id in self._reasoning_buffers:
+            delta = self._reasoning_buffers.pop(assistant_msg_id, "")
+            if delta:
+                pool = await self._get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        f"""
+                        UPDATE {self._fq_table}
+                        SET metadata = COALESCE(metadata, '{{}}'::jsonb) ||
+                            jsonb_build_object('reasoning',
+                                COALESCE(metadata->>'reasoning', '') || $1),
+                            updated_at = NOW()
+                        WHERE id = $2
+                        """,
+                        delta,
+                        assistant_msg_id,
+                    )
 
         if ctx.get("reasoning_buf"):
             meta["_reasoning"] = " ".join(ctx["reasoning_buf"])
@@ -433,29 +537,31 @@ class PostgresChannel(BaseChannel):
             async with pool.acquire() as conn:
                 await conn.execute(
                     f"""
-                    UPDATE {self._fq_answers}
-                    SET content = $1, metadata = $2::json, buttons = $3::json,
+                    UPDATE {self._fq_table}
+                    SET content = $1,
+                        metadata = COALESCE(metadata, '{{}}'::jsonb) || $2::jsonb,
+                        buttons = $3::jsonb,
                         status = 'completed', updated_at = NOW()
                     WHERE id = $4
                     """,
                     msg.content,
                     json.dumps(meta),
                     json.dumps(msg.buttons or []),
-                    answer_id,
+                    assistant_msg_id,
                 )
                 if msg_id:
                     await conn.execute(
                         f"""
-                        UPDATE {self._fq_questions}
+                        UPDATE {self._fq_table}
                         SET status = 'completed', updated_at = NOW()
-                        WHERE id = $1 AND status = 'processing'
+                        WHERE id = $1
                         """,
                         msg_id,
                     )
         except Exception:
             self.logger.exception("Failed to write response for {}", chat_id)
             if msg_id:
-                await self._mark_failed(msg_id, answer_id, "write_error")
+                await self._mark_failed(msg_id, assistant_msg_id, "write_error")
 
     async def send_delta(
         self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None
@@ -466,7 +572,8 @@ class PostgresChannel(BaseChannel):
         if meta.get("_stream_end"):
             msg_id = meta.get("origin_message_id") or meta.get("message_id")
             ctx = self._msg_ctx.pop(msg_id, {}) if msg_id else {}
-            answer_id = ctx.get("answer_id") or meta.get("answer_id")
+            self._release_slot(msg_id)
+            assistant_msg_id = ctx.get("assistant_msg_id") or meta.get("answer_id")
 
             if ctx.get("tool_events"):
                 existing = meta.get("_tool_events", [])
@@ -475,26 +582,28 @@ class PostgresChannel(BaseChannel):
                 meta["_reasoning"] = " ".join(ctx["reasoning_buf"])
 
             content = self._stream_buffers.pop(stream_id, "")
-            if content and answer_id:
+            if content and assistant_msg_id:
                 conv_id = meta.get("conversation_id") or meta.get("conv_id") or chat_id
                 pool = await self._get_pool()
                 async with pool.acquire() as conn:
                     await conn.execute(
                         f"""
-                        UPDATE {self._fq_answers}
-                        SET content = $1, metadata = $2::json, status = 'completed', updated_at = NOW()
+                        UPDATE {self._fq_table}
+                        SET content = $1,
+                            metadata = COALESCE(metadata, '{{}}'::jsonb) || $2::jsonb,
+                            status = 'completed', updated_at = NOW()
                         WHERE id = $3
                         """,
                         content,
                         json.dumps(meta | {"streamed": True}),
-                        answer_id,
+                        assistant_msg_id,
                     )
                     if msg_id:
                         await conn.execute(
                             f"""
-                            UPDATE {self._fq_questions}
+                            UPDATE {self._fq_table}
                             SET status = 'completed', updated_at = NOW()
-                            WHERE id = $1 AND status = 'processing'
+                            WHERE id = $1
                             """,
                             msg_id,
                         )
@@ -503,11 +612,24 @@ class PostgresChannel(BaseChannel):
             self._stream_buffers[stream_id] = buf + delta
 
     # ------------------------------------------------------------------
+    # Concurrency slot
+    # ------------------------------------------------------------------
+
+    def _release_slot(self, user_msg_id: str) -> None:
+        """Release a concurrency slot if this message holds one."""
+        if user_msg_id in self._inflight:
+            self._inflight.discard(user_msg_id)
+            self._semaphore.release()
+        if user_msg_id in self._inflight_conv:
+            conv_id = self._inflight_conv.pop(user_msg_id)
+            self._conv_inflight.discard(conv_id)
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _resolve_answer_id(self, metadata: dict[str, Any] | None) -> str | None:
-        """Extract ``answer_id`` from metadata or ``_msg_ctx`` by question id."""
+    def _resolve_assistant_msg_id(self, metadata: dict[str, Any] | None) -> str | None:
+        """Extract ``assistant_msg_id`` from metadata or ``_msg_ctx`` by user msg id."""
         meta = metadata or {}
         answer_id = meta.get("answer_id")
         if answer_id:
@@ -516,23 +638,22 @@ class PostgresChannel(BaseChannel):
         if msg_id:
             ctx = self._msg_ctx.get(msg_id)
             if ctx:
-                return ctx.get("answer_id")
+                return ctx.get("assistant_msg_id")
         return None
 
     async def _resolve_conv_id(self, chat_id: str, msg: OutboundMessage) -> str | None:
-        """Extract conversation_id from msg.metadata."""
+        """Extract conversation_id from msg.metadata or the user message row."""
         meta = msg.metadata
         if meta and isinstance(meta, dict):
             cid = meta.get("conversation_id") or meta.get("conv_id")
             if cid:
                 return str(cid)
-            # Fallback: look up from the question row
             msg_id = meta.get("origin_message_id") or meta.get("message_id")
             if msg_id:
                 pool = await self._get_pool()
                 async with pool.acquire() as conn:
                     row = await conn.fetchrow(
-                        f"SELECT conversation_id FROM {self._fq_questions} WHERE id = $1",
+                        f"SELECT conversation_id FROM {self._fq_table} WHERE id = $1",
                         msg_id,
                     )
                     if row:
@@ -563,9 +684,10 @@ class PostgresChannel(BaseChannel):
             "enabled": True,
             "dsn": "postgresql://user:pass@localhost:5432/nanobot",
             "schema": "public",
-            "questions_table": "conversation_questions",
-            "answers_table": "conversation_answers",
+            "table_name": "conversation_messages",
             "poll_interval": 2.0,
+            "flush_interval": 2.0,
+            "max_concurrent": 1,
             "processing_timeout": 600,
             "allow_from": ["*"],
         }
