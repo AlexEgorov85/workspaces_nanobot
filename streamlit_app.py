@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import queue
 import threading
@@ -45,8 +46,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--storage", choices=["file", "postgres", "auto"], default="file")
+    args, _ = parser.parse_known_args()
+    return args
+
+
 @st.cache_resource
-def _init():
+def _init(storage: str):
     config = _load_runtime_config(
         config="config.json",
         workspace=str(Path("workspace")),
@@ -54,11 +62,16 @@ def _init():
 
     pg_cfg = getattr(config.channels, "postgres", {})
     dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else getattr(pg_cfg, "dsn", "")
-    session_manager = PGSessionManager(
-        workspace=config.workspace_path,
-        dsn=dsn,
-    ) if dsn else None
-    if session_manager:
+
+    use_pg = True if storage == "postgres" else (
+        bool(dsn) if storage == "auto" else False
+    )
+    session_manager = None
+    if use_pg:
+        session_manager = PGSessionManager(
+            workspace=config.workspace_path,
+            dsn=dsn,
+        )
         session_manager.ensure_tables()
 
     bus = MessageBus()
@@ -116,7 +129,8 @@ def _process_in_background(prompt: str, q: queue.Queue):
     q.put(("done", ""))
 
 
-bus, agent_loop = _init()
+_args = _parse_args()
+bus, agent_loop = _init(_args.storage)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
