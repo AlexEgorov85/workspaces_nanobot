@@ -226,9 +226,7 @@ from nanobot.cli.commands import (
     _init_prompt_session,
     _is_exit_command,
     _load_runtime_config,
-    _maybe_print_interactive_progress,
     _model_display,
-    _print_agent_response,
     _read_interactive_input_async,
     _restore_terminal,
     _sanitize_surrogates,
@@ -493,63 +491,54 @@ def _run_interactive_loop(agent, config, *, session: str | None = None,
             """
             Читает outbound-сообщения до получения финального ответа.
 
-            Буферизирует размышления и вызовы инструментов, затем выводит
-            каждый блок через _typewriter (псевдо-стриминг).
+            Выводится только:
+              • reasoning — сразу по мере поступления
+              • стриминг-чанки — сразу по мере поступления
+              • финальный ответ — целиком (если не был отстримлен)
             """
             full_response = ""
             response_meta: dict = {}
-            reason_buf = ""
-            tool_buf: list[dict] = []
 
             while True:
                 try:
                     msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
                 except asyncio.TimeoutError:
-                    if tool_buf:
-                        await _print_tool_events(tool_buf, cfg)
-                        tool_buf = []
                     continue
                 except asyncio.CancelledError:
-                    # Сбрасываем оставшиеся блоки перед выходом
-                    if reason_buf.strip():
-                        await _print_reasoning_block(reason_buf, cfg)
-                    if tool_buf:
-                        await _print_tool_events(tool_buf, cfg)
                     break
 
                 meta = msg.metadata or {}
 
-                # Размышления — буферизируем, выводим после _reasoning_end
                 if meta.get("_reasoning_delta"):
-                    if msg.content:
-                        reason_buf += msg.content
+                    if msg.content and cfg.show_reasoning:
+                        await _typewriter(msg.content, "dim italic", cfg.typewriter_speed)
                     continue
 
                 if meta.get("_reasoning_end"):
-                    if reason_buf:
-                        await _print_reasoning_block(reason_buf, cfg)
-                        reason_buf = ""
                     continue
 
-                # Вызовы инструментов — буферизируем, выводим пачками
-                if meta.get("_tool_events") and not meta.get("_tool_hint"):
-                    tool_buf.extend(meta["_tool_events"])
+                if meta.get("_stream_delta"):
+                    if msg.content:
+                        async with _WRITE_LOCK:
+                            sys.stdout.write(msg.content)
+                            sys.stdout.flush()
+                        full_response += msg.content
                     continue
 
-                # Прогресс-сообщения
-                if cfg.show_progress and await _maybe_print_interactive_progress(
-                    msg, None, agent.channels_config, None,
-                ):
+                if meta.get("_stream_end"):
+                    async with _WRITE_LOCK:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
                     continue
 
-                # Финальный ответ — сначала выводим накопленные инструменты
-                if msg.content:
-                    if tool_buf:
-                        await _print_tool_events(tool_buf, cfg)
-                        tool_buf = []
-                    full_response = msg.content
-                    response_meta = meta
-                    break
+                # Всё остальное (tool_events, progress, control) — тихо пропускаем
+                if not msg.content or meta.get("_progress") or meta.get("_turn_end") or meta.get("_tool_events") or meta.get("_tool_hint"):
+                    continue
+
+                # Финальный ответ
+                full_response = msg.content
+                response_meta = meta
+                break
 
             return full_response, response_meta
 
@@ -577,11 +566,8 @@ def _run_interactive_loop(agent, config, *, session: str | None = None,
 
                     content, meta = await consume_outbound()
 
-                    if content:
-                        if cfg.typewriter_speed > 0:
-                            await _typewriter(content, "", cfg.typewriter_speed)
-                        else:
-                            _print_agent_response(content, render_markdown=True, metadata=meta)
+                    if content and not meta.get("_stream_delta"):
+                        await _typewriter(content, "", cfg.typewriter_speed)
 
                 except KeyboardInterrupt:
                     _restore_terminal()
