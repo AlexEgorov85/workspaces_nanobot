@@ -1,12 +1,15 @@
 import argparse
 import asyncio
+import importlib
 import queue
+import sys
 import threading
 import time
 from pathlib import Path
 
 import streamlit as st
 
+from nanobot.agent.hook import AgentHook
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
@@ -25,23 +28,44 @@ st.markdown("""
         border-left: 3px solid #ddd;
         border-radius: 0 8px 8px 0;
         padding: 0.75rem 1rem;
-        margin: 0.5rem 0;
         font-size: 0.85rem;
         line-height: 1.5;
         color: #555;
     }
-    .reasoning-header {
+    details.reasoning-wrap {
+        margin: 0.5rem 0;
+    }
+    details.reasoning-wrap summary {
         cursor: pointer;
         user-select: none;
         font-size: 0.8rem;
         color: #888;
         margin-bottom: 0.25rem;
+        list-style: none;
     }
-    .reasoning-header:hover {color: #555;}
+    details.reasoning-wrap summary:hover {color: #555;}
+    details.reasoning-wrap summary::-webkit-details-marker {
+        display: none;
+    }
     .stream-cursor {display:inline-block; background:#f0f0f0; border-radius:20px; padding:2px 12px 4px; margin-left:4px; font-size:.85rem; color:#888; letter-spacing:2px; vertical-align:middle;}
     .stream-cursor::after {content:'...'; animation: dots 1.5s steps(4) infinite;}
     @keyframes dots {0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}100%{content:''}}
     .stChatInput {border: 1px solid #e0e0e0 !important; border-radius: 12px !important;}
+    .tool-events {
+        margin-top: 0.5rem;
+        padding-top: 0.5rem;
+        border-top: 1px dashed #ccc;
+    }
+    .tool-event {
+        font-size: 0.8rem;
+        font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+        padding: 0.15rem 0;
+        color: #666;
+    }
+    .tool-event::before {content: "⚙ "; color: #999;}
+    .tool-event-error {color: #c00;}
+    .tool-event-error::before {content: "✗ "; color: #c00;}
+    .tool-event-ok {color: #2a7;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -51,6 +75,38 @@ def _parse_args():
     parser.add_argument("--storage", choices=["file", "postgres", "auto"], default="file")
     args, _ = parser.parse_known_args()
     return args
+
+
+def _load_hooks(workspace_dir: Path) -> list:
+    hooks: list = []
+    hooks_dir = workspace_dir / "hooks"
+    if not hooks_dir.is_dir():
+        return hooks
+    sys.path.insert(0, str(hooks_dir))
+    for f in sorted(hooks_dir.iterdir()):
+        if not f.is_file() or not f.name.endswith(".py") or f.name.startswith("_"):
+            continue
+        try:
+            mod = importlib.import_module(f.name[:-3])
+        except Exception:
+            continue
+        for attr_name in dir(mod):
+            attr = getattr(mod, attr_name)
+            if (
+                isinstance(attr, type)
+                and issubclass(attr, AgentHook)
+                and attr is not AgentHook
+                and not attr_name.startswith("_")
+            ):
+                try:
+                    hook = attr(workspace_dir=workspace_dir)
+                except Exception:
+                    try:
+                        hook = attr()
+                    except Exception:
+                        continue
+                hooks.append(hook)
+    return hooks
 
 
 @st.cache_resource
@@ -74,8 +130,9 @@ def _init(storage: str):
         )
         session_manager.ensure_tables()
 
+    hooks = _load_hooks(config.workspace_path)
     bus = MessageBus()
-    agent = AgentLoop.from_config(config, bus, session_manager=session_manager)
+    agent = AgentLoop.from_config(config, bus, session_manager=session_manager, hooks=hooks)
     loop = asyncio.new_event_loop()
     t = threading.Thread(target=_bg_loop, args=(agent, loop), daemon=True)
     t.start()
@@ -120,7 +177,9 @@ def _process_in_background(prompt: str, q: queue.Queue):
             q.put(("delta", msg.content))
         elif meta.get("_stream_end"):
             continue
-        elif meta.get("_progress") or meta.get("_turn_end") or meta.get("_tool_events"):
+        elif meta.get("_tool_events"):
+            q.put(("tool_events", meta["_tool_events"]))
+        elif meta.get("_progress") or meta.get("_turn_end"):
             continue
         else:
             q.put(("final", msg.content))
@@ -139,10 +198,29 @@ st.markdown("## Чат с агентом")
 
 for entry in st.session_state.messages:
     with st.chat_message(entry["role"]):
-        if r := entry.get("reasoning"):
+        r = entry.get("reasoning", "")
+        te = entry.get("tool_events", [])
+        if r or te:
+            parts = []
+            if r:
+                parts.append(f'<div class="reasoning-box">{r}</div>')
+            if te:
+                events_html = ""
+                for ev in te:
+                    name = ev.get("name", "?")
+                    phase = ev.get("phase", "")
+                    if phase == "end":
+                        result = str(ev.get("result", ""))[:80] or "ok"
+                        events_html += f'<div class="tool-event tool-event-ok">{name} → {result}</div>'
+                    elif phase == "error":
+                        err = ev.get("error", "failed")
+                        events_html += f'<div class="tool-event tool-event-error">{name}: {err}</div>'
+                parts.append(f'<div class="tool-events">{events_html}</div>')
             st.markdown(
-                f'<div class="reasoning-header">💭 Размышления</div>'
-                f'<div class="reasoning-box">{r}</div>',
+                f'<details class="reasoning-wrap">'
+                f'<summary>💭 Размышления</summary>'
+                f'{"".join(parts)}'
+                f'</details>',
                 unsafe_allow_html=True,
             )
         st.markdown(entry["content"])
@@ -158,6 +236,10 @@ if processing:
             break
         if type_ == "reasoning":
             st.session_state["_reasoning_parts"].append(content)
+        elif type_ == "tool_events":
+            for ev in content:
+                if ev.get("phase") in ("end", "error"):
+                    st.session_state["_tool_events"].append(ev)
         elif type_ == "delta":
             st.session_state["_response_accum"] += content
         elif type_ == "final":
@@ -170,10 +252,30 @@ if processing:
 
     with st.chat_message("assistant"):
         reasoning = "".join(st.session_state["_reasoning_parts"])
-        if reasoning:
+        tool_events = st.session_state["_tool_events"]
+        if reasoning or tool_events:
+            parts = []
+            if reasoning:
+                parts.append(f'<div class="reasoning-box">{reasoning}</div>')
+            if tool_events:
+                events_html = ""
+                for ev in tool_events:
+                    name = ev.get("name", "?")
+                    phase = ev.get("phase", "")
+                    if phase == "end":
+                        result = str(ev.get("result", ""))[:80] or "ok"
+                        cls = "tool-event-ok"
+                        events_html += f'<div class="tool-event {cls}">{name} → {result}</div>'
+                    elif phase == "error":
+                        err = ev.get("error", "failed")
+                        cls = "tool-event-error"
+                        events_html += f'<div class="tool-event {cls}">{name}: {err}</div>'
+                parts.append(f'<div class="tool-events">{events_html}</div>')
             st.markdown(
-                f'<div class="reasoning-header">💭 Размышления</div>'
-                f'<div class="reasoning-box">{reasoning}</div>',
+                f'<details class="reasoning-wrap">'
+                f'<summary>💭 Размышления</summary>'
+                f'{"".join(parts)}'
+                f'</details>',
                 unsafe_allow_html=True,
             )
         response = st.session_state["_response_accum"]
@@ -198,6 +300,7 @@ if prompt and not processing:
     st.session_state["_response_accum"] = ""
     st.session_state["_done"] = False
     st.session_state["_error"] = ""
+    st.session_state["_tool_events"] = []
     st.session_state["_queue"] = queue.Queue()
     threading.Thread(
         target=_process_in_background,
@@ -213,5 +316,6 @@ if processing and st.session_state.get("_done"):
         "role": "assistant",
         "content": st.session_state["_response_accum"],
         "reasoning": "".join(st.session_state["_reasoning_parts"]),
+        "tool_events": st.session_state["_tool_events"],
     })
     st.rerun()
