@@ -75,6 +75,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from loguru import logger
 from postgres_channel import PostgresChannel
+from redis_channel import RedisChannel
 
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
@@ -189,9 +190,27 @@ def _run_patched_gateway(args: argparse.Namespace) -> None:
     #    SessionManager — хранилище истории сессий (файлы или PostgreSQL).
     bus = MessageBus()
 
-    # Достаём DSN для PostgreSQL из конфига (секция channels.postgres)
+    # Достаём DSN для PostgreSQL из конфига (секция session_manager, fallback channels.postgres)
     pg_cfg = getattr(config.channels, "postgres", {})
-    dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else getattr(pg_cfg, "dsn", "")
+    channel_dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else getattr(pg_cfg, "dsn", "")
+    sm_cfg = getattr(config, "session_manager", {}) or {}
+    if isinstance(sm_cfg, dict):
+        sm_dsn = sm_cfg.get("dsn") or channel_dsn
+        sm_schema = sm_cfg.get("schema", "public")
+        sm_messages_table = sm_cfg.get("messages_table", "session_messages")
+        sm_meta_table = sm_cfg.get("meta_table", "session_meta")
+        sm_min_conn = sm_cfg.get("min_conn", 1)
+        sm_max_conn = sm_cfg.get("max_conn", 4)
+        sm_pool_timeout = sm_cfg.get("pool_timeout", 5.0)
+    else:
+        sm_dsn = channel_dsn
+        sm_schema = "public"
+        sm_messages_table = "session_messages"
+        sm_meta_table = "session_meta"
+        sm_min_conn = 1
+        sm_max_conn = 4
+        sm_pool_timeout = 5.0
+    dsn = sm_dsn
 
     # Логика выбора хранилища:
     #   postgres → принудительно PG (ошибка если нет DSN)
@@ -205,6 +224,12 @@ def _run_patched_gateway(args: argparse.Namespace) -> None:
         session_manager = PGSessionManager(
             workspace=config.workspace_path,
             dsn=dsn,
+            schema=sm_schema,
+            messages_table=sm_messages_table,
+            meta_table=sm_meta_table,
+            min_conn=sm_min_conn,
+            max_conn=sm_max_conn,
+            pool_timeout=sm_pool_timeout,
         )
         # Создаём таблицы в БД, если их ещё нет
         session_manager.ensure_tables()
@@ -252,7 +277,19 @@ def _run_patched_gateway(args: argparse.Namespace) -> None:
     #    (telegram, websocket, discord и т.д.) через секцию channels.
     channels = ChannelManager(config, bus, session_manager=session_manager)
 
-    # ── 7. Добавление PostgresChannel (канал поверх PostgreSQL) ───────────────
+    # ── 7. Добавление RedisChannel (канал поверх Redis) ──────────────────────
+    redis_cfg = getattr(config.channels, "redis", {})
+    if redis_cfg.get("enabled", False):
+        redis_channel = RedisChannel(redis_cfg, bus)
+        redis_channel.send_progress = config.channels.send_progress
+        redis_channel.send_tool_hints = config.channels.send_tool_hints
+        redis_channel.show_reasoning = config.channels.show_reasoning
+        channels.channels["redis"] = redis_channel
+        console.print("[green]✓[/green] Redis channel enabled")
+    else:
+        console.print("[dim]Redis channel disabled[/dim]")
+
+    # ── 8. Добавление PostgresChannel (канал поверх PostgreSQL) ───────────────
     #    Позволяет отправлять и получать сообщения через БД.
     if pg_cfg.get("enabled", False):
         pg_channel = PostgresChannel(pg_cfg, bus)
@@ -271,7 +308,7 @@ def _run_patched_gateway(args: argparse.Namespace) -> None:
     else:
         console.print("[dim]PostgreSQL channel disabled[/dim]")
 
-    # ── 8. Фильтрация каналов (если указан --channels) ────────────────────────
+    # ── 9. Фильтрация каналов (если указан --channels) ────────────────────────
     #    Оставляем только те каналы, которые перечислены в аргументе.
     if args.channels:
         allowed = {name.strip() for name in args.channels.split(",")}
@@ -281,13 +318,13 @@ def _run_patched_gateway(args: argparse.Namespace) -> None:
         if not channels.channels:
             console.print("[yellow]⚠[/yellow] No matching channels in --channels list")
 
-    # ── 9. Подмена WebUI-сборки на кастомную ─────────────────────────────────
+    # ── 10. Подмена WebUI-сборки на кастомную ─────────────────────────────────
     _patch_webui_dist(channels)
 
     # Выводим список активных каналов
     console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
 
-    # ── 10. Главный цикл запуска ──────────────────────────────────────────────
+    # ── 11. Главный цикл запуска ──────────────────────────────────────────────
     #    Запускаем агента и все каналы, обрабатываем остановку.
     async def run():
         # Запускаем каналы в фоновой задаче

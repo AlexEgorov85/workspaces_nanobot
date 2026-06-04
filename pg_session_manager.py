@@ -59,6 +59,8 @@ class PGSessionManager(SessionManager):
         workspace: Path,
         dsn: str,
         schema: str = "public",
+        messages_table: str = "session_messages",
+        meta_table: str = "session_meta",
         min_conn: int = 1,
         max_conn: int = 4,
         pool_timeout: float = 5.0,
@@ -67,8 +69,8 @@ class PGSessionManager(SessionManager):
         self._dsn = dsn
         self._schema = schema
         self._pool_timeout = pool_timeout
-        self._fq_meta = self._quote(f"{schema}.{METADATA_TABLE}")
-        self._fq_messages = self._quote(f"{schema}.{MESSAGES_TABLE}")
+        self._fq_meta = self._quote(f"{schema}.{meta_table}")
+        self._fq_messages = self._quote(f"{schema}.{messages_table}")
         self._cache: dict[str, Session] = {}
         self._pool: psycopg2.pool.ThreadedConnectionPool | None = None
         self._lock = threading.Lock()
@@ -217,24 +219,24 @@ class PGSessionManager(SessionManager):
         conn = self._get_conn()
         try:
             with conn.cursor() as cur:
+                metadata_json = json.dumps(session.metadata, ensure_ascii=False, default=str)
+                updated_at = datetime.now()
                 cur.execute(
-                    f"""
-                    INSERT INTO {self._fq_meta}
-                        (session_key, created_at, updated_at, last_consolidated, metadata)
-                    VALUES (%s, %s, %s, %s, %s::jsonb)
-                    ON CONFLICT (session_key) DO UPDATE SET
-                        updated_at = EXCLUDED.updated_at,
-                        last_consolidated = EXCLUDED.last_consolidated,
-                        metadata = EXCLUDED.metadata
-                    """,
-                    (
-                        session.key,
-                        session.created_at,
-                        datetime.now(),
-                        session.last_consolidated,
-                        json.dumps(session.metadata, ensure_ascii=False, default=str),
-                    ),
+                    f"""UPDATE {self._fq_meta} SET
+                            updated_at = %s,
+                            last_consolidated = %s,
+                            metadata = %s::jsonb
+                        WHERE session_key = %s""",
+                    (updated_at, session.last_consolidated, metadata_json, session.key),
                 )
+                if cur.rowcount == 0:
+                    cur.execute(
+                        f"""INSERT INTO {self._fq_meta}
+                                (session_key, created_at, updated_at, last_consolidated, metadata)
+                            VALUES (%s, %s, %s, %s, %s::jsonb)""",
+                        (session.key, session.created_at, updated_at,
+                         session.last_consolidated, metadata_json),
+                    )
 
                 cur.execute(
                     f"DELETE FROM {self._fq_messages} WHERE session_key = %s",

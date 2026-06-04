@@ -44,7 +44,7 @@ class PostgresChannel(BaseChannel):
 
     Table schema (``conversation_messages``)::
 
-        id              UUID PK DEFAULT gen_random_uuid()
+        id              UUID PK DEFAULT uuid_generate_v4()
         chat_id         TEXT
         user_id         TEXT
         conversation_id UUID NOT NULL
@@ -140,9 +140,10 @@ class PostgresChannel(BaseChannel):
     async def _ensure_tables(self) -> None:
         pool = await self._get_pool()
         async with pool.acquire() as conn:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
             await conn.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self._fq_table} (
-                    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                     chat_id         TEXT,
                     user_id         TEXT,
                     conversation_id UUID NOT NULL,
@@ -183,16 +184,18 @@ class PostgresChannel(BaseChannel):
         async with pool.acquire() as conn:
             for assistant_msg_id, delta in buffers.items():
                 if delta:
+                    row = await conn.fetchrow(
+                        f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
+                        assistant_msg_id,
+                    )
+                    meta = row["metadata"] or {}
+                    if isinstance(meta, str):
+                        meta = json.loads(meta)
+                    reasoning = (meta.get("reasoning") or "") + delta
+                    meta["reasoning"] = reasoning
                     await conn.execute(
-                        f"""
-                        UPDATE {self._fq_table}
-                        SET metadata = COALESCE(metadata, '{{}}'::jsonb) ||
-                            jsonb_build_object('reasoning',
-                                COALESCE(metadata->>'reasoning', '') || $1),
-                            updated_at = NOW()
-                        WHERE id = $2
-                        """,
-                        delta,
+                        f"UPDATE {self._fq_table} SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
+                        json.dumps(meta, ensure_ascii=False),
                         assistant_msg_id,
                     )
 
@@ -507,16 +510,18 @@ class PostgresChannel(BaseChannel):
             if delta:
                 pool = await self._get_pool()
                 async with pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
+                        assistant_msg_id,
+                    )
+                    meta_row = row["metadata"] or {}
+                    if isinstance(meta_row, str):
+                        meta_row = json.loads(meta_row)
+                    reasoning = (meta_row.get("reasoning") or "") + delta
+                    meta_row["reasoning"] = reasoning
                     await conn.execute(
-                        f"""
-                        UPDATE {self._fq_table}
-                        SET metadata = COALESCE(metadata, '{{}}'::jsonb) ||
-                            jsonb_build_object('reasoning',
-                                COALESCE(metadata->>'reasoning', '') || $1),
-                            updated_at = NOW()
-                        WHERE id = $2
-                        """,
-                        delta,
+                        f"UPDATE {self._fq_table} SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
+                        json.dumps(meta_row, ensure_ascii=False),
                         assistant_msg_id,
                     )
 
@@ -535,17 +540,25 @@ class PostgresChannel(BaseChannel):
         try:
             pool = await self._get_pool()
             async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
+                    assistant_msg_id,
+                )
+                existing_meta = row["metadata"] or {}
+                if isinstance(existing_meta, str):
+                    existing_meta = json.loads(existing_meta)
+                existing_meta.update(meta)
                 await conn.execute(
                     f"""
                     UPDATE {self._fq_table}
                     SET content = $1,
-                        metadata = COALESCE(metadata, '{{}}'::jsonb) || $2::jsonb,
+                        metadata = $2::jsonb,
                         buttons = $3::jsonb,
                         status = 'completed', updated_at = NOW()
                     WHERE id = $4
                     """,
                     msg.content,
-                    json.dumps(meta),
+                    json.dumps(existing_meta, ensure_ascii=False),
                     json.dumps(msg.buttons or []),
                     assistant_msg_id,
                 )
@@ -586,16 +599,24 @@ class PostgresChannel(BaseChannel):
                 conv_id = meta.get("conversation_id") or meta.get("conv_id") or chat_id
                 pool = await self._get_pool()
                 async with pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
+                        assistant_msg_id,
+                    )
+                    existing_meta = row["metadata"] or {}
+                    if isinstance(existing_meta, str):
+                        existing_meta = json.loads(existing_meta)
+                    existing_meta.update(meta | {"streamed": True})
                     await conn.execute(
                         f"""
                         UPDATE {self._fq_table}
                         SET content = $1,
-                            metadata = COALESCE(metadata, '{{}}'::jsonb) || $2::jsonb,
+                            metadata = $2::jsonb,
                             status = 'completed', updated_at = NOW()
                         WHERE id = $3
                         """,
                         content,
-                        json.dumps(meta | {"streamed": True}),
+                        json.dumps(existing_meta, ensure_ascii=False),
                         assistant_msg_id,
                     )
                     if msg_id:

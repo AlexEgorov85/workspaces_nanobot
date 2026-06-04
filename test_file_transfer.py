@@ -33,7 +33,7 @@ async def main():
     msg_id = await conn.fetchval("""
         INSERT INTO public.conversation_messages
             (chat_id, user_id, conversation_id, role, content, media, status)
-        VALUES ($1, $2, gen_random_uuid(), 'user', $3, $4::jsonb, 'pending')
+        VALUES ($1, $2, uuid_generate_v4(), 'user', $3, $4::jsonb, 'pending')
         RETURNING id
     """, "file_test_chat", "test_user", "Прочитай этот файл", json.dumps([data_uri]))
     print(f"[1] Вставлено сообщение {msg_id} с файлом (data URI, {len(test_content)} байт)")

@@ -19,7 +19,7 @@ async def main():
     msg_id = await conn.fetchval("""
         INSERT INTO public.conversation_messages
             (chat_id, user_id, conversation_id, role, content, status)
-        VALUES ($1, $2, gen_random_uuid(), 'user', $3, 'pending')
+        VALUES ($1, $2, uuid_generate_v4(), 'user', $3, 'pending')
         RETURNING id
     """, "csv_test_chat", "test_user",
         "Сгенерируй CSV-файл с примерами аудиторских проверок за 2024 год: "

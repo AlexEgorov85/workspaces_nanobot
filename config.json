@@ -249,6 +249,18 @@
       "bridgeToken": "",
       "allowFrom": [],
       "groupPolicy": "open"
+    },
+    "redis": {
+      "enabled": true,
+      "host": "192.168.1.100",
+      "port": 6379,
+      "db": 0,
+      "password": null,
+      "incoming_key": "nanobot:inbox",
+      "outgoing_prefix": "nanobot:outbox",
+      "poll_timeout": 5.0,
+      "max_concurrent": 1,
+      "allow_from": ["*"]
     }
   },
   "providers": {
@@ -446,6 +458,15 @@
       "extraHeaders": null,
       "extraBody": null
     }
+  },
+  "session_manager": {
+    "dsn": null,
+    "schema": "public",
+    "messages_table": "session_messages",
+    "meta_table": "session_meta",
+    "min_conn": 1,
+    "max_conn": 4,
+    "pool_timeout": 5.0
   },
   "api": {
     "host": "127.0.0.1",

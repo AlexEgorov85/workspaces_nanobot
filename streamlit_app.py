@@ -117,7 +117,25 @@ def _init(storage: str):
     )
 
     pg_cfg = getattr(config.channels, "postgres", {})
-    dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else getattr(pg_cfg, "dsn", "")
+    channel_dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else getattr(pg_cfg, "dsn", "")
+    sm_cfg = getattr(config, "session_manager", {}) or {}
+    if isinstance(sm_cfg, dict):
+        sm_dsn = sm_cfg.get("dsn") or channel_dsn
+        sm_schema = sm_cfg.get("schema", "public")
+        sm_messages_table = sm_cfg.get("messages_table", "session_messages")
+        sm_meta_table = sm_cfg.get("meta_table", "session_meta")
+        sm_min_conn = sm_cfg.get("min_conn", 1)
+        sm_max_conn = sm_cfg.get("max_conn", 4)
+        sm_pool_timeout = sm_cfg.get("pool_timeout", 5.0)
+    else:
+        sm_dsn = channel_dsn
+        sm_schema = "public"
+        sm_messages_table = "session_messages"
+        sm_meta_table = "session_meta"
+        sm_min_conn = 1
+        sm_max_conn = 4
+        sm_pool_timeout = 5.0
+    dsn = sm_dsn
 
     use_pg = True if storage == "postgres" else (
         bool(dsn) if storage == "auto" else False
@@ -127,6 +145,12 @@ def _init(storage: str):
         session_manager = PGSessionManager(
             workspace=config.workspace_path,
             dsn=dsn,
+            schema=sm_schema,
+            messages_table=sm_messages_table,
+            meta_table=sm_meta_table,
+            min_conn=sm_min_conn,
+            max_conn=sm_max_conn,
+            pool_timeout=sm_pool_timeout,
         )
         session_manager.ensure_tables()
 

@@ -5,8 +5,10 @@
 -- ================================================================
 
 -- Вопросы (сообщения от пользователей)
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
 CREATE TABLE IF NOT EXISTS public.conversation_questions (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     chat_id         TEXT,                          -- идентификатор чата/диалога
     user_id         TEXT,                          -- идентификатор пользователя (для allow_from)
     conversation_id UUID NOT NULL,                 -- внутренний ID сессии nanobot
@@ -21,7 +23,7 @@ CREATE TABLE IF NOT EXISTS public.conversation_questions (
 
 -- Ответы (сообщения от агента)
 CREATE TABLE IF NOT EXISTS public.conversation_answers (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     question_id     UUID REFERENCES public.conversation_questions(id),
     chat_id         TEXT,
     conversation_id UUID NOT NULL,

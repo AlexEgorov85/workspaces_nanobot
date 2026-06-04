@@ -1,6 +1,7 @@
 -- Скрипты INSERT в public.conversation_messages
 -- для тестирования PostgresChannel с однотабличной схемой + reasoning в metadata.
 -- Запуск: psql -d <db> -U <user> -f seed_messages.sql
+-- Требуется расширение: CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ================================================================
 -- USER-СООБЩЕНИЯ (role = 'user', status = 'pending')
@@ -10,7 +11,7 @@
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, status)
 VALUES
-    ('chat_alice_1', 'alice', gen_random_uuid(), 'user',
+    ('chat_alice_1', 'alice', uuid_generate_v4(), 'user',
      'Сколько аудиторских проверок проведено за прошлый год?',
      'pending');
 
@@ -18,7 +19,7 @@ VALUES
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, status)
 VALUES
-    ('chat_bob_1', 'bob', gen_random_uuid(), 'user',
+    ('chat_bob_1', 'bob', uuid_generate_v4(), 'user',
      'Покажи топ-10 нарушений по типам за 2024 год',
      'pending');
 
@@ -26,7 +27,7 @@ VALUES
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, status)
 VALUES
-    ('chat_alice_2', 'alice', gen_random_uuid(), 'user',
+    ('chat_alice_2', 'alice', uuid_generate_v4(), 'user',
      'Найди документы, связанные с налоговыми проверками',
      'pending');
 
@@ -34,14 +35,14 @@ VALUES
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, status)
 VALUES
-    ('chat_bob_1', 'bob', gen_random_uuid(), 'user',
+    ('chat_bob_1', 'bob', uuid_generate_v4(), 'user',
      'Напиши SQL: сколько объектов проверено в каждом квартале 2024',
      'pending');
 
 -- 5. Диалог из нескольких сообщений (alice, chat_alice_1 — один чат)
 --    User-сообщения: role='user', Assistant-ответы: role='assistant', reply_to = user_msg.id
 WITH conv AS (
-    SELECT gen_random_uuid() AS cid
+    SELECT uuid_generate_v4() AS cid
 ),
 q1 AS (
     INSERT INTO public.conversation_messages
@@ -69,7 +70,7 @@ SELECT 'chat_alice_1', 'alice', (SELECT cid FROM conv), 'user',
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, metadata, status)
 VALUES
-    ('chat_charlie_1', 'charlie', gen_random_uuid(), 'user',
+    ('chat_charlie_1', 'charlie', uuid_generate_v4(), 'user',
      'Сделай анализ эффективности проверок за 2023-2024: группировка по кварталам, сумма штрафов, количество нарушений',
      '{"client": "web", "priority": "high"}'::jsonb,
      'pending');
@@ -78,7 +79,7 @@ VALUES
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, status)
 VALUES
-    ('chat_alice_1', 'alice', gen_random_uuid(), 'user',
+    ('chat_alice_1', 'alice', uuid_generate_v4(), 'user',
      'Это сообщение уже обработано',
      'completed');
 
@@ -86,7 +87,7 @@ VALUES
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, media, status)
 VALUES
-    ('chat_alice_1', 'alice', gen_random_uuid(), 'user',
+    ('chat_alice_1', 'alice', uuid_generate_v4(), 'user',
      'Прочитай этот файл',
      '["data:text/plain;base64,0J/RgNC40LLQtdGCLCDQsdC+0YIhINCt0YLQviDRgtC10YHRgtC+0LLRi9C5INGE0LDQudC7INC40Lcg0LHQsNC30Ysg0LTQsNC90L3Ri9GFLg=="]'::jsonb,
      'pending');
@@ -95,7 +96,7 @@ VALUES
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, media, status)
 VALUES
-    ('chat_bob_1', 'bob', gen_random_uuid(), 'user',
+    ('chat_bob_1', 'bob', uuid_generate_v4(), 'user',
      'Проанализируй этот отчёт',
      '["https://example.com/report_2024.pdf"]'::jsonb,
      'pending');
@@ -104,7 +105,7 @@ VALUES
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, media, status)
 VALUES
-    ('chat_bob_1', 'bob', gen_random_uuid(), 'user',
+    ('chat_bob_1', 'bob', uuid_generate_v4(), 'user',
      'Сравни данные из этих двух отчётов',
      '["https://example.com/data_2023.csv", "https://example.com/data_2024.csv"]'::jsonb,
      'pending');
@@ -113,7 +114,7 @@ VALUES
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, metadata, status)
 VALUES
-    ('tg_12345', 'telegram_user_42', gen_random_uuid(), 'user',
+    ('tg_12345', 'telegram_user_42', uuid_generate_v4(), 'user',
      'Покажи статистику по проверкам за март 2025',
      '{"source": "telegram", "username": "test_user"}'::jsonb,
      'pending');
@@ -122,7 +123,7 @@ VALUES
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, status)
 VALUES
-    ('chat_alice_1', 'alice', gen_random_uuid(), 'user',
+    ('chat_alice_1', 'alice', uuid_generate_v4(), 'user',
      'Проанализируй эффективность аудиторских проверок за последние 3 года. '
      'Нужно: 1) количество проверок по годам, 2) средняя сумма выявленных нарушений, '
      '3) топ-5 объектов с наибольшим количеством нарушений, '
@@ -133,7 +134,7 @@ VALUES
 INSERT INTO public.conversation_messages
     (chat_id, user_id, conversation_id, role, content, status)
 VALUES
-    ('chat_charlie_1', 'charlie', gen_random_uuid(), 'user',
+    ('chat_charlie_1', 'charlie', uuid_generate_v4(), 'user',
      'Найди похожие случаи: штраф за несоблюдение трудового законодательства',
      'pending');
 
@@ -141,7 +142,7 @@ VALUES
 INSERT INTO public.conversation_messages
     (conversation_id, role, content, status)
 VALUES
-    (gen_random_uuid(), 'user',
+    (uuid_generate_v4(), 'user',
      'Привет! Это тест без chat_id и user_id (должен работать через fallback)',
      'pending');
 
