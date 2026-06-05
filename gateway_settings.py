@@ -83,7 +83,7 @@ class PostgresChannelConfig:
     poll_interval: float = 2.0
     flush_interval: float = 2.0
     max_concurrent: int = 1
-    processing_timeout: int = 600
+    processing_timeout: int = 120
 
     # Схема и DSN. Пусто = наследовать из корневых pg.dsn / pg.schema.
     dsn: str = ""
