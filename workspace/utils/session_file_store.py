@@ -121,28 +121,10 @@ class SessionFileStore:
         filepath.write_text(content, encoding="utf-8")
         size = len(content.encode("utf-8"))
 
-        idx_path = sdir / "INDEX.json"
-        idx = []
-        if idx_path.exists():
-            try: idx = json.loads(idx_path.read_text())
-            except: idx = []
-        idx.append({
-            "id": entry_id,
-            "timestamp": datetime.now(UTC).isoformat(),
-            "source_tool": source_tool,
-            "size_bytes": size,
-            "format": ext.lstrip("."),
-            "file_path": f"results/{filename}",
-        })
-        # Keep last 1000 entries to prevent unbounded growth
-        if len(idx) > 1000:
-            idx = idx[-1000:]
-        idx_path.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
-
         meta_path = sdir / "metadata.json"
         meta = json.loads(meta_path.read_text())
         meta["last_activity"] = datetime.now(UTC).isoformat()
-        meta["file_count"] = len(idx)
+        meta["file_count"] = meta.get("file_count", 0) + 1
         meta["total_bytes"] += size
         meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
