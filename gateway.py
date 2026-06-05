@@ -138,17 +138,21 @@ def main() -> None:
                         pass
 
                 if text is not None and len(text.encode("utf-8")) > SETTINGS.persist_threshold:
-                    content, ext = prepare_content(text)
-                    save_info = _persisted_store.save(
-                        session_key=spec.session_key or "default",
-                        content=content,
-                        source_tool=tool_name,
-                        ext=ext,
-                    )
-                    return (
-                        f"[Result saved to data_store/cache/sessions/"
-                        f"{save_info['path']} ({save_info['size_kb']} KB)]"
-                    )
+                    try:
+                        content, ext = prepare_content(text)
+                        save_info = _persisted_store.save(
+                            session_key=spec.session_key or "default",
+                            content=content,
+                            source_tool=tool_name,
+                            ext=ext,
+                        )
+                        return (
+                            f"[Result saved to data_store/cache/sessions/"
+                            f"{save_info['path']} ({save_info['size_kb']} KB)]"
+                        )
+                    except OSError as _exc:
+                        # disk full, permissions, etc — fall back to original
+                        pass
 
                 return _original(self, spec, tool_call_id, tool_name, result)
 
