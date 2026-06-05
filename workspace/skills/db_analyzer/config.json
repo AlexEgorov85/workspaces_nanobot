@@ -3,12 +3,12 @@
     "provider": "mistral",
     "model": "mistral-large-latest",
     "api_base": "https://api.mistral.ai/v1",
-    "api_key": "",
+    "api_key": "XavGPsHjtNt3uOtFGUhbUuad5PRm2D0W",
     "max_tokens": 8192,
     "temperature": 0.1
   },
   "database": {
-    "connection_string": "",
+    "connection_string": "postgresql://postgres:1@localhost:5432/postgres",
     "schema": "oarb",
     "tables": ["audit_reports", "audits", "report_items", "violations"],
     "schema_cache": {

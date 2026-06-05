@@ -13,6 +13,7 @@
 """
 
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -159,27 +160,45 @@ class Database:
     def _cache_file(self) -> Optional[Path]:
         return Path(self._cache_path) if self._cache_path else None
 
+    def _cache_log(self, msg: str):
+        print(f"[CACHE] {msg}", file=sys.stderr)
+
     def _read_cache(self, schema: str, tables: Optional[list[str]]) -> Optional[dict]:
         path = self._cache_file()
-        if not path or not path.exists():
+        if not path:
+            self._cache_log("кеш отключён (нет пути)")
+            return None
+        if not path.exists():
+            self._cache_log(f"{path.name}: miss (файл не найден)")
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            self._cache_log(f"{path.name}: miss (ошибка чтения: {e})")
             return None
 
         if data.get("schema") != schema:
+            self._cache_log(f"{path.name}: miss (схема '{data.get('schema')}' не совпадает с '{schema}')")
             return None
-        if time.time() - data.get("cached_at", 0) > self._cache_ttl:
+
+        age = time.time() - data.get("cached_at", 0)
+        if age > self._cache_ttl:
+            self._cache_log(f"{path.name}: miss (просрочен TTL: {age:.0f}s > {self._cache_ttl}s)")
             return None
 
         cached_tables = data.get("tables", {})
         if tables:
             if not all(t in cached_tables for t in tables):
+                missing = [t for t in tables if t not in cached_tables]
+                self._cache_log(f"{path.name}: miss (нет таблиц в кеше: {missing})")
                 return None
             filtered = {t: cached_tables[t] for t in tables if t in cached_tables}
+            ncols = sum(len(c["columns"]) for c in filtered.values())
+            self._cache_log(f"{path.name}: hit ({len(filtered)} таблиц, {ncols} колонок, возраст {age:.0f}с)")
             return {"schema": schema, "tables": filtered}
 
+        ncols = sum(len(c["columns"]) for c in cached_tables.values())
+        self._cache_log(f"{path.name}: hit ({len(cached_tables)} таблиц, {ncols} колонок, возраст {age:.0f}с)")
         return {"schema": schema, "tables": cached_tables}
 
     def _write_cache(self, schema: str, schema_data: dict):
@@ -190,8 +209,10 @@ class Database:
             path.parent.mkdir(parents=True, exist_ok=True)
             data = {**schema_data, "cached_at": time.time()}
             path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+            ncols = sum(len(c["columns"]) for c in data.get("tables", {}).values())
+            self._cache_log(f"{path.name}: записан ({len(data.get('tables', {}))} таблиц, {ncols} колонок)")
+        except OSError as e:
+            self._cache_log(f"{path.name}: ошибка записи: {e}")
 
     # ------------------------------------------------------------------
     # Query execution
