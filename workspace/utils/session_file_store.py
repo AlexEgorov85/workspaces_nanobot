@@ -5,6 +5,7 @@ import re
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
+UTC = timezone.utc
 from typing import Optional
 
 # Characters invalid in directory names across platforms (Windows, macOS, Linux).
@@ -96,12 +97,13 @@ class SessionFileStore:
         return sdir
 
     def _ensure_metadata(self, session_key: str) -> None:
-        meta_path = self.base / safe_session_key(session_key) / "metadata.json"
+        sdir = self._get_session_dir(session_key)
+        meta_path = sdir / "metadata.json"
         if not meta_path.exists():
             meta_path.write_text(json.dumps({
                 "session_key": session_key,
-                "created_at": datetime.now(timezone.UTC).isoformat(),
-                "last_activity": datetime.now(timezone.UTC).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
+                "last_activity": datetime.now(UTC).isoformat(),
                 "status": "active",
                 "file_count": 0,
                 "total_bytes": 0
@@ -111,7 +113,7 @@ class SessionFileStore:
         self._ensure_metadata(session_key)
         sdir = self._get_session_dir(session_key)
 
-        ts = datetime.now(timezone.UTC).strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         entry_id = uuid.uuid4().hex[:8]
         filename = f"{ts}_{source_tool}_{entry_id}{ext}"
         filepath = sdir / "results" / filename
@@ -126,7 +128,7 @@ class SessionFileStore:
             except: idx = []
         idx.append({
             "id": entry_id,
-            "timestamp": datetime.now(timezone.UTC).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "source_tool": source_tool,
             "size_bytes": size,
             "format": ext.lstrip("."),
@@ -137,7 +139,7 @@ class SessionFileStore:
 
         meta_path = sdir / "metadata.json"
         meta = json.loads(meta_path.read_text())
-        meta["last_activity"] = datetime.now(timezone.UTC).isoformat()
+        meta["last_activity"] = datetime.now(UTC).isoformat()
         meta["file_count"] = len(idx)
         meta["total_bytes"] += size
         meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -152,7 +154,7 @@ class SessionFileStore:
 
     def archive_session(self, session_key: str) -> bool:
         src = self.base / safe_session_key(session_key)
-        dst = self.archive_dir / f"{safe_session_key(session_key)}_{datetime.now(timezone.UTC).strftime('%Y%m%d')}"
+        dst = self.archive_dir / f"{safe_session_key(session_key)}_{datetime.now(UTC).strftime('%Y%m%d')}"
         if src.exists() and not dst.exists():
             import shutil
             shutil.move(str(src), str(dst))

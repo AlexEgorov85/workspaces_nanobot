@@ -225,6 +225,7 @@ def main() -> None:
                 "flush_interval": ch.flush_interval,
                 "max_concurrent": ch.max_concurrent,
                 "processing_timeout": ch.processing_timeout,
+                "allow_from": ch.allow_from,
             }
             pg_channel = PostgresChannel(ch_cfg, bus)
             pg_channel.transcription_provider = config.channels.transcription_provider
@@ -238,15 +239,6 @@ def main() -> None:
             console.print("[green]✓[/green] PostgreSQL channel enabled")
     else:
         console.print("[dim]PostgreSQL channel disabled[/dim]")
-
-    # ── 10. Фильтрация каналов по настройке ─────────────────────────────
-    if SETTINGS.channels:
-        allowed = set(SETTINGS.channels)
-        for name in list(channels.channels):
-            if name not in allowed:
-                del channels.channels[name]
-        if not channels.channels:
-            console.print("[yellow]⚠[/yellow] No matching channels in settings")
 
     # ── 11. Кастомная WebUI-сборка ──────────────────────────────────────
     _patch_webui_dist(channels)

@@ -89,6 +89,9 @@ class PostgresChannelConfig:
     dsn: str = ""
     schema: str = ""
 
+    # Кому разрешён доступ. "*" = все.
+    allow_from: list[str] = field(default_factory=lambda: ["*"])
+
 
 @dataclass
 class PGSettings:
@@ -109,7 +112,7 @@ class PGSettings:
       pool_min_conn / pool_max_conn — мин/макс число соединений
       pool_timeout — таймаут ожидания свободного соединения (сек)
     """
-    dsn: str = ""                          # postgresql://user:pass@host:5432/dbname
+    dsn: str = "postgresql://postgres:1@localhost:5432/postgres"                          # postgresql://user:pass@host:5432/dbname
     schema: str = "public"
 
     # ── Сессии (PGSessionManager) ──────────────────────────────────────────
@@ -161,18 +164,6 @@ class RedisSettings:
 @dataclass
 class GatewaySettings:
     """Главный объект настроек. Импортируется в gateway.py как SETTINGS."""
-
-    # ── Каналы ───────────────────────────────────────────────────────────────
-    # Какие каналы запустить. Пустой список = все из config.json.
-    # Примеры:
-    #   ["websocket"]                  — только WebSocket
-    #   ["telegram"]                   — только Telegram
-    #   ["websocket", "telegram"]      — WebSocket + Telegram
-    #   []                             — все, что включены в config.json
-    channels: list[str] = field(default_factory=lambda: [
-        "websocket",
-        "telegram",
-    ])
 
     # ── Хранилище сессий ────────────────────────────────────────────────────
     # "auto"    — PostgreSQL если заполнен pg.dsn, иначе JSONL-файлы
