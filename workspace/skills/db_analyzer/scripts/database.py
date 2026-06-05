@@ -1,15 +1,14 @@
 """
-Класс Database — подключение к PostgreSQL с пулом соединений,
-кешированием схемы и фильтрацией таблиц.
+Класс Database — обёртка над SharedDB для навыка db_analyzer.
 
 Использование:
     from database import Database
     from config import load_db_config
 
     cfg = load_db_config()
-    async with Database(cfg) as db:
-        schema = await db.get_schema()
-        result = await db.execute_query("SELECT * FROM oarb.audits LIMIT $1", [5])
+    db = Database(cfg)
+    schema = await db.get_schema()
+    result = await db.execute_query("SELECT * FROM oarb.audits LIMIT %s", [5])
 """
 
 import json
@@ -18,25 +17,26 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-import asyncpg
+from utils.db import db as shared_db
 
 
 class Database:
     """
-    Подключение к PostgreSQL через пул соединений.
+    Подключение к PostgreSQL через глобальный SharedDB.
 
     Принимает dict конфигурации из load_db_config():
-        connection_string — DSN для asyncpg (используется напрямую, без парсинга)
+        connection_string — DSN (используется если SharedDB не сконфигурирован)
         schema           — имя схемы по умолчанию
         tables           — список таблиц для фильтрации (опционально)
         schema_cache     — настройки кеша: enabled, path, ttl_seconds
     """
 
     def __init__(self, db_config: dict):
-        self._dsn = db_config.get("connection_string", "")
+        dsn = db_config.get("connection_string", "")
+        if dsn:
+            shared_db.configure(dsn)
         self._schema_name = db_config.get("schema", "public")
         self._table_names: Optional[list[str]] = db_config.get("tables") or None
-        self._pool: Optional[asyncpg.Pool] = None
 
         cache_cfg = db_config.get("schema_cache", {})
         self._cache_enabled = bool(cache_cfg.get("enabled", False))
@@ -44,27 +44,20 @@ class Database:
         self._cache_ttl = int(cache_cfg.get("ttl_seconds", 3600))
 
     # ------------------------------------------------------------------
-    # Lifecycle
+    # Lifecycle (no-op, SharedDB управляется глобально)
     # ------------------------------------------------------------------
 
     async def connect(self):
-        """Создать пул соединений к PostgreSQL."""
-        if not self._dsn:
-            raise ValueError("Database connection string is empty")
-        self._pool = await asyncpg.create_pool(dsn=self._dsn, min_size=1, max_size=2)
+        pass
 
     async def close(self):
-        """Закрыть пул соединений."""
-        if self._pool:
-            await self._pool.close()
-            self._pool = None
+        pass
 
     async def __aenter__(self):
-        await self.connect()
         return self
 
     async def __aexit__(self, *args):
-        await self.close()
+        pass
 
     # ------------------------------------------------------------------
     # Schema
@@ -104,9 +97,6 @@ class Database:
         return data
 
     async def _fetch_schema(self, schema: str, tables: Optional[list[str]]) -> dict:
-        if not self._pool:
-            raise RuntimeError("Database not connected. Call connect() first.")
-
         query = """
             SELECT
                 c.table_name,
@@ -121,18 +111,17 @@ class Database:
             LEFT JOIN pg_catalog.pg_description pgd
                 ON pgd.objsubid = c.ordinal_position
                AND pgd.objoid = pc.oid
-            WHERE c.table_schema = $1
+            WHERE c.table_schema = %s
         """
         params: list[Any] = [schema]
 
         if tables:
-            query += " AND c.table_name = ANY($2::text[])"
+            query += " AND c.table_name = ANY(%s)"
             params.append(tables)
 
         query += " ORDER BY c.table_name, c.ordinal_position"
 
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
+        rows = await shared_db.afetch(query, params)
 
         result: dict = {}
         for row in rows:
@@ -225,14 +214,7 @@ class Database:
         Returns:
             dict: {status, row_count, columns, rows}
         """
-        if not self._pool:
-            raise RuntimeError("Database not connected. Call connect() first.")
-
-        async with self._pool.acquire() as conn:
-            if params:
-                rows = await conn.fetch(sql, *params)
-            else:
-                rows = await conn.fetch(sql)
+        rows = await shared_db.afetch(sql, params or [])
 
         if not rows:
             return {"status": "success", "row_count": 0, "columns": [], "rows": []}
@@ -252,17 +234,11 @@ class Database:
         Returns:
             {"valid": True, "plan": [...]} или {"valid": False, "error": "..."}
         """
-        if not self._pool:
-            raise RuntimeError("Database not connected. Call connect() first.")
-
         explain_sql = f"EXPLAIN (FORMAT JSON) {sql}"
         try:
-            async with self._pool.acquire() as conn:
-                rows = await conn.fetch(explain_sql)
+            rows = await shared_db.afetch(explain_sql)
             plan = rows[0][0] if rows else None
             return {"valid": True, "plan": plan}
-        except asyncpg.PostgresError as e:
-            return {"valid": False, "error": str(e)}
         except Exception as e:
             return {"valid": False, "error": f"EXPLAIN failed: {e}"}
 
