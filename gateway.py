@@ -83,7 +83,6 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.manager import ChannelManager, _default_webui_dist
 from nanobot.cli.commands import _load_runtime_config, console, __logo__, __version__
-from nanobot.config.loader import get_config_path
 from pg_session_manager import PGSessionManager
 from nanobot.utils.helpers import sync_workspace_templates
 
@@ -197,8 +196,11 @@ def _run_patched_gateway(args: argparse.Namespace) -> None:
     pg_cfg = getattr(config.channels, "postgres", {})
     channel_dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else getattr(pg_cfg, "dsn", "")
     try:
-        _sm_raw = json.loads(get_config_path().read_text(encoding="utf-8"))
-        sm_cfg = _sm_raw.get("session_manager", {}) or {}
+        _sm_path = Path(__file__).parent / "session_manager.json"
+        if _sm_path.exists():
+            sm_cfg = json.loads(_sm_path.read_text(encoding="utf-8"))
+        else:
+            sm_cfg = {}
     except Exception:
         sm_cfg = {}
     if isinstance(sm_cfg, dict):

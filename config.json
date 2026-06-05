@@ -459,15 +459,6 @@
       "extraBody": null
     }
   },
-  "session_manager": {
-    "dsn": null,
-    "schema": "public",
-    "messages_table": "session_messages",
-    "meta_table": "session_meta",
-    "min_conn": 1,
-    "max_conn": 4,
-    "pool_timeout": 5.0
-  },
   "api": {
     "host": "127.0.0.1",
     "port": 8900,
