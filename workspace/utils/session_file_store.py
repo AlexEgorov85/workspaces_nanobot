@@ -133,8 +133,10 @@ class SessionFileStore:
             "size_bytes": size,
             "format": ext.lstrip("."),
             "file_path": f"results/{filename}",
-            "preview": content[:250]
         })
+        # Keep last 1000 entries to prevent unbounded growth
+        if len(idx) > 1000:
+            idx = idx[-1000:]
         idx_path.write_text(json.dumps(idx, indent=2, ensure_ascii=False), encoding="utf-8")
 
         meta_path = sdir / "metadata.json"
