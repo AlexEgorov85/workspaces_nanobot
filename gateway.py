@@ -87,6 +87,9 @@ def main() -> None:
 
     pg = SETTINGS.pg
     dsn = pg.dsn
+    if dsn:
+        from utils.db import db
+        db.configure(dsn)
     use_postgres = SETTINGS.storage == "postgres" or (SETTINGS.storage == "auto" and bool(dsn))
     if use_postgres:
         if not dsn:
