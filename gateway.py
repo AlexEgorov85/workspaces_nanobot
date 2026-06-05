@@ -114,6 +114,13 @@ def main() -> None:
 
     # ── 3. Monkey-patch _normalize_tool_result ────────────────────────────
     if SETTINGS.persist_threshold > 0:
+        # Увеличиваем лимит вывода shell-команды, чтобы сохранять полный вывод
+        try:
+            from nanobot.agent.tools.shell import ExecTool
+            ExecTool._MAX_OUTPUT = 10_000_000
+        except Exception:
+            pass
+
         _persisted_store = SessionFileStore(_WORKSPACE_DIR / "data_store")
         try:
             from nanobot.agent.runner import AgentRunner
@@ -147,7 +154,7 @@ def main() -> None:
                             ext=ext,
                         )
                         return (
-                            f"[Result saved to data_store/cache/sessions/"
+                            f"[Result saved to data_store/"
                             f"{save_info['path']} ({save_info['size_kb']} KB)]"
                         )
                     except OSError as _exc:
