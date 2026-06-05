@@ -37,7 +37,7 @@ class PostgresChannel(BaseChannel):
     Higher values let the agent queue fill faster; the agent still processes
     one message at a time.
 
-    Messages from the same ``conversation_id`` are never dispatched in
+    Messages from the same ``chat_id`` are never dispatched in
     parallel — the channel waits for the active one to finish before
     picking the next from that conversation, regardless of
     ``max_concurrent``.
@@ -47,7 +47,6 @@ class PostgresChannel(BaseChannel):
         id              UUID PK DEFAULT uuid_generate_v4()
         chat_id         TEXT
         user_id         TEXT
-        conversation_id UUID NOT NULL
         role            TEXT NOT NULL CHECK (IN ('user','assistant','system'))
         content         TEXT NOT NULL
         media           JSONB DEFAULT '[]'
@@ -92,8 +91,8 @@ class PostgresChannel(BaseChannel):
         self._max_concurrent: int = int(_get("max_concurrent", 1))
         self._semaphore = asyncio.Semaphore(self._max_concurrent)
         self._inflight: set[str] = set()
-        self._inflight_conv: dict[str, str] = {}  # user_msg_id -> conversation_id
-        self._conv_inflight: set[str] = set()     # conversation_ids currently busy
+        self._chat_inflight: set[str] = set()     # chat_ids currently busy
+        self._msg_chat: dict[str, str] = {}       # user_msg_id -> chat_id
         self._pool: Any = None
         self._poll_task: asyncio.Task | None = None
         self._stream_buffers: dict[str, str] = {}
@@ -146,7 +145,6 @@ class PostgresChannel(BaseChannel):
                     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                     chat_id         TEXT,
                     user_id         TEXT,
-                    conversation_id UUID NOT NULL,
                     role            TEXT NOT NULL
                         CHECK (role IN ('user', 'assistant', 'system')),
                     content         TEXT NOT NULL,
@@ -316,17 +314,21 @@ class PostgresChannel(BaseChannel):
                     FOR UPDATE
                 )
                 AND status = 'pending'
-                RETURNING id, chat_id, user_id, conversation_id, content, media, metadata, created_at
+                RETURNING id, chat_id, user_id, content, media, metadata, created_at
                 """
             )
             if row is None:
                 return
 
             user_msg_id = str(row["id"])
-            conv_id = str(row["conversation_id"])
 
-            # Не диспатчим, если из этого conversation_id уже есть активное сообщение
-            if conv_id in self._conv_inflight:
+        chat_id = str(row["chat_id"]) if row["chat_id"] else str(row["user_id"])
+        user_id = str(row["user_id"]) if row["user_id"] else chat_id
+
+        # Не диспатчим, если из этого chat_id уже есть активное сообщение
+        if chat_id in self._chat_inflight:
+            pool = await self._get_pool()
+            async with pool.acquire() as conn:
                 await conn.execute(
                     f"""
                     UPDATE {self._fq_table}
@@ -335,12 +337,11 @@ class PostgresChannel(BaseChannel):
                     """,
                     user_msg_id,
                 )
-                self.logger.debug(
-                    "Deferred msg {} from busy conversation {}", user_msg_id, conv_id,
-                )
-                return
-        chat_id = str(row["chat_id"]) if row["chat_id"] else conv_id
-        user_id = str(row["user_id"]) if row["user_id"] else conv_id
+            self.logger.debug(
+                "Deferred msg {} from busy chat {}", user_msg_id, chat_id,
+            )
+            return
+
         content = row["content"] or ""
 
         raw_meta = row["metadata"] or {}
@@ -353,17 +354,16 @@ class PostgresChannel(BaseChannel):
         media: list[str] = raw_media if isinstance(raw_media, list) else []
 
         # Insert assistant placeholder so the web server can start polling
-        assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id, conv_id)
+        assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id)
 
         await self._semaphore.acquire()
         self._inflight.add(user_msg_id)
-        self._inflight_conv[user_msg_id] = conv_id
-        self._conv_inflight.add(conv_id)
+        self._chat_inflight.add(chat_id)
+        self._msg_chat[user_msg_id] = chat_id
 
         meta: dict[str, Any] = {
             "message_id": user_msg_id,
             "answer_id": assistant_msg_id,
-            "conversation_id": conv_id,
             **raw_meta,
         }
 
@@ -379,19 +379,18 @@ class PostgresChannel(BaseChannel):
             self.logger.exception("Failed to dispatch user message {}", user_msg_id)
             await self._mark_failed(user_msg_id, assistant_msg_id, "dispatch_error")
 
-    async def _insert_assistant_message(self, user_msg_id: str, chat_id: str, conv_id: str) -> str:
+    async def _insert_assistant_message(self, user_msg_id: str, chat_id: str) -> str:
         """Create a ``processing`` assistant row and store its id in ``_msg_ctx``."""
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO {self._fq_table}
-                    (chat_id, conversation_id, role, content, reply_to, status, created_at, updated_at)
-                VALUES ($1, $2, 'assistant', '', $3, 'processing', NOW(), NOW())
+                    (chat_id, role, content, reply_to, status, created_at, updated_at)
+                VALUES ($1, 'assistant', '', $2, 'processing', NOW(), NOW())
                 RETURNING id
                 """,
                 chat_id,
-                conv_id,
                 user_msg_id,
             )
             assistant_msg_id = str(row["id"])
@@ -532,10 +531,6 @@ class PostgresChannel(BaseChannel):
             meta["_tool_events"] = existing + ctx["tool_events"]
 
         chat_id = msg.chat_id
-        conv_id = await self._resolve_conv_id(chat_id, msg)
-        if not conv_id:
-            self.logger.warning("send: no conv_id for chat_id={}, skipping response", chat_id)
-            return
 
         try:
             pool = await self._get_pool()
@@ -596,7 +591,6 @@ class PostgresChannel(BaseChannel):
 
             content = self._stream_buffers.pop(stream_id, "")
             if content and assistant_msg_id:
-                conv_id = meta.get("conversation_id") or meta.get("conv_id") or chat_id
                 pool = await self._get_pool()
                 async with pool.acquire() as conn:
                     row = await conn.fetchrow(
@@ -641,9 +635,9 @@ class PostgresChannel(BaseChannel):
         if user_msg_id in self._inflight:
             self._inflight.discard(user_msg_id)
             self._semaphore.release()
-        if user_msg_id in self._inflight_conv:
-            conv_id = self._inflight_conv.pop(user_msg_id)
-            self._conv_inflight.discard(conv_id)
+        chat_id = self._msg_chat.pop(user_msg_id, None)
+        if chat_id:
+            self._chat_inflight.discard(chat_id)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -660,26 +654,6 @@ class PostgresChannel(BaseChannel):
             ctx = self._msg_ctx.get(msg_id)
             if ctx:
                 return ctx.get("assistant_msg_id")
-        return None
-
-    async def _resolve_conv_id(self, chat_id: str, msg: OutboundMessage) -> str | None:
-        """Extract conversation_id from msg.metadata or the user message row."""
-        meta = msg.metadata
-        if meta and isinstance(meta, dict):
-            cid = meta.get("conversation_id") or meta.get("conv_id")
-            if cid:
-                return str(cid)
-            msg_id = meta.get("origin_message_id") or meta.get("message_id")
-            if msg_id:
-                pool = await self._get_pool()
-                async with pool.acquire() as conn:
-                    row = await conn.fetchrow(
-                        f"SELECT conversation_id FROM {self._fq_table} WHERE id = $1",
-                        msg_id,
-                    )
-                    if row:
-                        return str(row["conversation_id"])
-        self.logger.warning("_resolve_conv_id: no conv_id in metadata for {}", chat_id)
         return None
 
     # ------------------------------------------------------------------
