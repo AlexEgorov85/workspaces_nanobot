@@ -209,6 +209,7 @@ cli_agent.py — это точка входа для запуска nanobot в �
 import argparse
 import asyncio
 import importlib
+import json
 import os
 import signal
 import sys
@@ -234,6 +235,7 @@ from nanobot.cli.commands import (
     __logo__,
     __version__,
 )
+from nanobot.config.loader import get_config_path
 from nanobot.config.paths import is_default_workspace
 from nanobot.cron.service import CronService
 from nanobot.utils.helpers import sync_workspace_templates
@@ -643,7 +645,11 @@ def _run_patched_agent(args: argparse.Namespace) -> None:
     # Выбор хранилища сессий
     pg_cfg = getattr(config.channels, "postgres", {})
     channel_dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else getattr(pg_cfg, "dsn", "")
-    sm_cfg = getattr(config, "session_manager", {}) or {}
+    try:
+        _sm_raw = json.loads(get_config_path().read_text(encoding="utf-8"))
+        sm_cfg = _sm_raw.get("session_manager", {}) or {}
+    except Exception:
+        sm_cfg = {}
     if isinstance(sm_cfg, dict):
         sm_dsn = sm_cfg.get("dsn") or channel_dsn
         sm_schema = sm_cfg.get("schema", "public")

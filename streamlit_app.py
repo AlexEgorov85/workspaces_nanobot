@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import importlib
+import json
 import queue
 import sys
 import threading
@@ -14,6 +15,7 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import _load_runtime_config
+from nanobot.config.loader import get_config_path
 from pg_session_manager import PGSessionManager
 
 
@@ -118,7 +120,11 @@ def _init(storage: str):
 
     pg_cfg = getattr(config.channels, "postgres", {})
     channel_dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else getattr(pg_cfg, "dsn", "")
-    sm_cfg = getattr(config, "session_manager", {}) or {}
+    try:
+        _sm_raw = json.loads(get_config_path().read_text(encoding="utf-8"))
+        sm_cfg = _sm_raw.get("session_manager", {}) or {}
+    except Exception:
+        sm_cfg = {}
     if isinstance(sm_cfg, dict):
         sm_dsn = sm_cfg.get("dsn") or channel_dsn
         sm_schema = sm_cfg.get("schema", "public")
