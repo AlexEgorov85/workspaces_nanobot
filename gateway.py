@@ -1,83 +1,30 @@
 """
-Шлюз (gateway) для nanobot с поддержкой PostgresChannel.
+Шлюз (gateway) для nanobot — долгоживущий сервер с каналами связи.
 
-══════════════════════════════════════════════════════════════════════════════
-НАЗНАЧЕНИЕ
-══════════════════════════════════════════════════════════════════════════════
-
-Скрипт запускает nanobot в режиме gateway — долгоживущего сервера, который:
-  • Одновременно обслуживает несколько каналов связи (Telegram, WebSocket,
-    Discord, PostgresChannel и др.)
-  • Принимает входящие сообщения от пользователей через любой канал,
-    обрабатывает их через LLM-агента и отправляет ответ обратно
-  • При необходимости использует инструменты (tools) из workspace/tools/
-
-══════════════════════════════════════════════════════════════════════════════
-ПАРАМЕТРЫ ЗАПУСКА
-══════════════════════════════════════════════════════════════════════════════
-
-  -P, --patched        Включить локальные доработки (см. ниже).
-  -C, --channels       Список каналов через запятую (только с --patched).
-                       Пример: --channels websocket,telegram
-  -S, --storage        Хранилище сессий: auto | file | postgres
-                       (только с --patched, по умолчанию auto)
-
-══════════════════════════════════════════════════════════════════════════════
-РЕЖИМЫ ЗАПУСКА
-══════════════════════════════════════════════════════════════════════════════
-
-1. Без --patched (режим по умолчанию)
-   ─────────────────────────────────
-   Используется стандартный gateway из библиотеки nanobot (функция
-   _run_gateway из nanobot.cli.commands). Никаких локальных доработок
-   не применяется. Каналы и сессии управляются стандартными средствами.
-
-2. С --patched (режим с доработками)
-   ─────────────────────────────────
-   Включаются все локальные расширения:
-      • PostgresChannel — канал на основе PostgreSQL LISTEN/NOTIFY
-      • PGSessionManager — хранение истории сессий в PostgreSQL
-      • AutoStoreHook — автоматическое сохранение контекста
-      • Кастомная WebUI-сборка из директории webui-dist/
-
-══════════════════════════════════════════════════════════════════════════════
-ПРИМЕРЫ ЗАПУСКА
-══════════════════════════════════════════════════════════════════════════════
-
-  # Стандартный запуск (как библиотека nanobot)
-  python gateway.py
-
-  # Все локальные доработки + автоопределение хранилища
-  python gateway.py --patched
-
-  # Только Telegram и WebSocket, история в PostgreSQL
-  python gateway.py --patched --channels websocket,telegram --storage postgres
-
-  # Все каналы из конфига, история принудительно в JSONL
-  python gateway.py --patched --storage file
-
-  # Только PostgresChannel
-  python gateway.py --patched --channels postgres
+Настройки — в gateway_settings.py в той же директории.
+Запуск:
+    python gateway.py
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import sys
 import traceback
 from pathlib import Path
 
-# ── Подключаем директорию скрипта к sys.path, чтобы импортировать ───────────
-#    локальные модули: postgres_channel, pg_session_manager, auto_store_hook.
-sys.path.insert(0, str(Path(__file__).parent))
+_SCRIPT_DIR = Path(__file__).parent
+_WORKSPACE_DIR = _SCRIPT_DIR / "workspace"
+sys.path.insert(0, str(_SCRIPT_DIR))
+sys.path.insert(0, str(_WORKSPACE_DIR))
 
 import json
 
 from loguru import logger
 from postgres_channel import PostgresChannel
 from redis_channel import RedisChannel
+from utils.session_file_store import SessionFileStore, prepare_content
 
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
@@ -86,26 +33,19 @@ from nanobot.cli.commands import _load_runtime_config, console, __logo__, __vers
 from pg_session_manager import PGSessionManager
 from nanobot.utils.helpers import sync_workspace_templates
 
-# ── Пути к workspace и hooks для AutoStoreHook ──────────────────────────────
-_WORKSPACE_DIR = Path(__file__).parent / "workspace"
-_HOOKS_DIR = _WORKSPACE_DIR / "hooks"
-sys.path.insert(0, str(_HOOKS_DIR))
-sys.path.insert(0, str(_WORKSPACE_DIR))
+from gateway_settings import GatewaySettings
+
+SETTINGS = GatewaySettings()
 
 
 def _patch_webui_dist(channels: ChannelManager) -> None:
-    """
-    Заменяет стандартную WebUI-сборку на кастомную из webui-dist/.
-
-    Если кастомная директория не существует — копирует туда оригинальную
-    сборку из библиотеки, чтобы пользователь мог её модифицировать.
-    """
+    """Replace WebUI dist with custom build from webui-dist/."""
     ws = channels.channels.get("websocket")
     if ws is None or not hasattr(ws, "_static_dist_path"):
-        return  # Нет WebSocket-канала или он не поддерживает статику
+        return
     orig = _default_webui_dist()
     if orig is None:
-        return  # Нет встроенной WebUI-сборки
+        return
     custom = Path(__file__).parent / "webui-dist"
     if not custom.is_dir():
         import shutil
@@ -115,12 +55,6 @@ def _patch_webui_dist(channels: ChannelManager) -> None:
 
 
 def _resolve_transcription_key(config):
-    """
-    Возвращает API-ключ для сервиса транскрипции.
-
-    Выбирает провайдера (openai или groq) в зависимости от настройки
-    transcription_provider в конфиге.
-    """
     provider = config.channels.transcription_provider
     try:
         if provider == "openai":
@@ -131,11 +65,6 @@ def _resolve_transcription_key(config):
 
 
 def _resolve_transcription_base(config):
-    """
-    Возвращает базовый URL для API транскрипции.
-
-    Некоторые провайдеры используют кастомные эндпоинты.
-    """
     provider = config.channels.transcription_provider
     try:
         if provider == "openai":
@@ -145,150 +74,131 @@ def _resolve_transcription_base(config):
         return ""
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# РЕЖИМ "VANILLA" — СТАНДАРТНЫЙ ЗАПУСК БЕЗ ДОРАБОТОК
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# В этом режиме вызывается нативная функция _run_gateway() из библиотеки
-# nanobot. Никаких локальных патчей не применяется — только то, что
-# предоставляет стандартная библиотека.
-# Используется, когда скрипт запущен без флага --patched.
+def main() -> None:
+    """Запускает gateway со всеми локальными доработками."""
 
-
-def _run_vanilla_gateway() -> None:
-    """Запускает стандартный gateway из библиотеки nanobot (без локальных доработок)."""
-    from nanobot.cli.commands import _run_gateway
-
-    # Загружаем конфигурацию и делегируем запуск библиотечной функции
+    # ── 1. Загрузка конфигурации ─────────────────────────────────────────
     config = _load_runtime_config()
-    _run_gateway(config)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# РЕЖИМ "PATCHED" — ЗАПУСК С ЛОКАЛЬНЫМИ ДОРАБОТКАМИ
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# В этом режиме скрипт самостоятельно конфигурирует и запускает gateway,
-# добавляя все локальные расширения: PostgresChannel, PGSessionManager,
-# AutoStoreHook, кастомная WebUI-сборка.
-
-
-def _run_patched_gateway(args: argparse.Namespace) -> None:
-    """
-    Запускает gateway со всеми локальными доработками.
-
-    Параметры:
-        args: распарсенные аргументы командной строки (channels, storage)
-    """
-    # ── 1. Загрузка конфигурации и подготовка workspace ──────────────────────
-    config = _load_runtime_config()
-
-    # Синхронизируем шаблоны workspace (создаём недостающие директории)
     sync_workspace_templates(config.workspace_path)
     console.print(f"{__logo__} Starting nanobot gateway v{__version__}...")
 
-    # ── 2. Создание шины сообщений и SessionManager ──────────────────────────
-    #    MessageBus — центральная шина, через которую проходят все сообщения.
-    #    SessionManager — хранилище истории сессий (файлы или PostgreSQL).
+    # ── 2. Шина сообщений и SessionManager ───────────────────────────────
     bus = MessageBus()
 
-    # Достаём DSN для PostgreSQL из конфига (секция session_manager, fallback channels.postgres)
-    pg_cfg = getattr(config.channels, "postgres", {})
-    channel_dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else getattr(pg_cfg, "dsn", "")
-    try:
-        _sm_path = Path(__file__).parent / "session_manager.json"
-        if _sm_path.exists():
-            sm_cfg = json.loads(_sm_path.read_text(encoding="utf-8"))
-        else:
-            sm_cfg = {}
-    except Exception:
-        sm_cfg = {}
-    if isinstance(sm_cfg, dict):
-        sm_dsn = sm_cfg.get("dsn") or channel_dsn
-        sm_schema = sm_cfg.get("schema", "public")
-        sm_messages_table = sm_cfg.get("messages_table", "session_messages")
-        sm_meta_table = sm_cfg.get("meta_table", "session_meta")
-        sm_min_conn = sm_cfg.get("min_conn", 1)
-        sm_max_conn = sm_cfg.get("max_conn", 4)
-        sm_pool_timeout = sm_cfg.get("pool_timeout", 5.0)
-    else:
-        sm_dsn = channel_dsn
-        sm_schema = "public"
-        sm_messages_table = "session_messages"
-        sm_meta_table = "session_meta"
-        sm_min_conn = 1
-        sm_max_conn = 4
-        sm_pool_timeout = 5.0
-    dsn = sm_dsn
-
-    # Логика выбора хранилища:
-    #   postgres → принудительно PG (ошибка если нет DSN)
-    #   auto     → PG если есть DSN, иначе JSONL
-    #   file     → принудительно JSONL
-    use_postgres = args.storage == "postgres" or (args.storage == "auto" and bool(dsn))
+    pg = SETTINGS.pg
+    dsn = pg.dsn
+    use_postgres = SETTINGS.storage == "postgres" or (SETTINGS.storage == "auto" and bool(dsn))
     if use_postgres:
         if not dsn:
-            console.print("[red]✗[/red] --storage=postgres but no PostgreSQL DSN in config")
+            console.print("[red]✗[/red] storage=postgres but pg.dsn is empty in gateway_settings.py")
             sys.exit(1)
         session_manager = PGSessionManager(
             workspace=config.workspace_path,
             dsn=dsn,
-            schema=sm_schema,
-            messages_table=sm_messages_table,
-            meta_table=sm_meta_table,
-            min_conn=sm_min_conn,
-            max_conn=sm_max_conn,
-            pool_timeout=sm_pool_timeout,
+            schema=pg.schema,
+            messages_table=pg.messages_table,
+            meta_table=pg.meta_table,
+            min_conn=pg.pool_min_conn,
+            max_conn=pg.pool_max_conn,
+            pool_timeout=pg.pool_timeout,
         )
-        # Создаём таблицы в БД, если их ещё нет
         session_manager.ensure_tables()
         console.print("[green]✓[/green] PGSessionManager: sessions stored in PostgreSQL")
     else:
         from nanobot.session.manager import SessionManager
         session_manager = SessionManager(config.workspace_path)
         if dsn:
-            console.print("[dim]PostgreSQL DSN available but --storage=file; using JSONL files[/dim]")
+            console.print("[dim]PostgreSQL DSN available but storage=file; using JSONL files[/dim]")
         else:
             console.print("[yellow]⚠[/yellow] No PostgreSQL DSN — using JSONL files")
 
-    # ── 3. Загрузка AutoStoreHook ─────────────────────────────────────────────
-    #    Хук автоматически сохраняет контекст агента между вызовами.
-    hooks = []
-    try:
-        from auto_store_hook import AutoStoreHook, set_session_key
-        hooks.append(AutoStoreHook(workspace_dir=_WORKSPACE_DIR))
-        console.print("[green]✓[/green] AutoStoreHook loaded")
-    except Exception as exc:
-        console.print(f"[yellow]⚠[/yellow] AutoStoreHook: {exc}")
+    # ── 3. Monkey-patch _normalize_tool_result ────────────────────────────
+    if SETTINGS.persist_threshold > 0:
+        _persisted_store = SessionFileStore(_WORKSPACE_DIR / "data_store")
+        try:
+            from nanobot.agent.runner import AgentRunner
+            from nanobot.utils.runtime import ensure_nonempty_tool_result
 
-    # ── 4. Создание AgentLoop ─────────────────────────────────────────────────
-    #    AgentLoop — главный цикл агента: получает сообщения, отправляет их
-    #    в LLM, обрабатывает вызовы инструментов, формирует ответ.
+            # read_file — exempt from offload to prevent persist→read→persist loops
+            _EXEMPT_TOOLS = frozenset({"read_file"})
+            _original = AgentRunner._normalize_tool_result
+
+            def _normalize_with_persist(self, spec, tool_call_id, tool_name, result):
+                result = ensure_nonempty_tool_result(tool_name, result)
+                if tool_name in _EXEMPT_TOOLS:
+                    return result
+
+                text = None
+                if isinstance(result, str):
+                    text = result
+                elif not isinstance(result, bytes):
+                    try:
+                        text = json.dumps(result, ensure_ascii=False, indent=2)
+                    except (TypeError, ValueError):
+                        pass
+
+                if text is not None and len(text.encode("utf-8")) > SETTINGS.persist_threshold:
+                    content, ext = prepare_content(text)
+                    save_info = _persisted_store.save(
+                        session_key=spec.session_key or "default",
+                        content=content,
+                        source_tool=tool_name,
+                        ext=ext,
+                    )
+                    return (
+                        f"[Result saved to data_store/cache/sessions/"
+                        f"{save_info['path']} ({save_info['size_kb']} KB)]"
+                    )
+
+                return _original(self, spec, tool_call_id, tool_name, result)
+
+            AgentRunner._normalize_tool_result = _normalize_with_persist
+            console.print("[green]✓[/green] _normalize_tool_result patched")
+        except Exception as exc:
+            console.print(f"[yellow]⚠[/yellow] _normalize_tool_result patch failed: {exc}")
+
+    # ── 4. Таймауты ───────────────────────────────────────────────────────
+    import os
+    if SETTINGS.llm_timeout >= 0:
+        os.environ["NANOBOT_LLM_TIMEOUT_S"] = str(SETTINGS.llm_timeout)
+    if SETTINGS.exec_timeout >= 0:
+        try:
+            config.tools.exec.timeout = SETTINGS.exec_timeout
+        except Exception:
+            pass
+
+    # ── 5. Логирование ───────────────────────────────────────────────────
+    try:
+        logger.remove()
+        logger.add(sys.stderr, level=SETTINGS.log_level)
+    except Exception:
+        pass
+
+    # ── 6. Создание AgentLoop ────────────────────────────────────────────
     agent = AgentLoop.from_config(
         config, bus,
         session_manager=session_manager,
-        hooks=hooks,
+        hooks=[],
     )
 
-    # ── 5. Проброс session_key в AutoStoreHook ────────────────────────────────
-    #    Перехватываем _run_agent_loop, чтобы передавать session_key в глобальную
-    #    переменную set_session_key для AutoStoreHook.
-    _original_run_loop = agent._run_agent_loop
-
-    async def _run_agent_loop_with_session_key(*args, **kwargs):
-        set_session_key(kwargs.get("session_key"))
-        return await _original_run_loop(*args, **kwargs)
-
-    agent._run_agent_loop = _run_agent_loop_with_session_key
-
-    # ── 6. Инициализация ChannelManager ───────────────────────────────────────
-    #    ChannelManager обнаруживает и запускает каналы, перечисленные в конфиге
-    #    (telegram, websocket, discord и т.д.) через секцию channels.
+    # ── 7. ChannelManager ────────────────────────────────────────────────
     channels = ChannelManager(config, bus, session_manager=session_manager)
 
-    # ── 7. Добавление RedisChannel (канал поверх Redis) ──────────────────────
-    redis_cfg = getattr(config.channels, "redis", {})
-    if redis_cfg.get("enabled", False):
+    # ── 8. Redis-канал ────────────────────────────────────────────────────
+    rs = SETTINGS.redis
+    if rs.enabled:
+        redis_cfg = {
+            "enabled": True,
+            "host": rs.host,
+            "port": rs.port,
+            "db": rs.db,
+            "password": rs.password,
+            "incoming_key": rs.incoming_key,
+            "outgoing_prefix": rs.outgoing_prefix,
+            "poll_timeout": rs.poll_timeout,
+            "max_concurrent": rs.max_concurrent,
+            "allow_from": rs.allow_from,
+        }
         redis_channel = RedisChannel(redis_cfg, bus)
         redis_channel.send_progress = config.channels.send_progress
         redis_channel.send_tool_hints = config.channels.send_tool_hints
@@ -298,49 +208,55 @@ def _run_patched_gateway(args: argparse.Namespace) -> None:
     else:
         console.print("[dim]Redis channel disabled[/dim]")
 
-    # ── 8. Добавление PostgresChannel (канал поверх PostgreSQL) ───────────────
-    #    Позволяет отправлять и получать сообщения через БД.
-    if pg_cfg.get("enabled", False):
-        pg_channel = PostgresChannel(pg_cfg, bus)
-
-        # Копируем настройки транскрипции и отображения из конфига
-        pg_channel.transcription_provider = config.channels.transcription_provider
-        pg_channel.transcription_api_key = _resolve_transcription_key(config)
-        pg_channel.transcription_api_base = _resolve_transcription_base(config)
-        pg_channel.transcription_language = config.channels.transcription_language
-        pg_channel.send_progress = config.channels.send_progress
-        pg_channel.send_tool_hints = config.channels.send_tool_hints
-        pg_channel.show_reasoning = config.channels.show_reasoning
-
-        channels.channels["postgres"] = pg_channel
-        console.print("[green]✓[/green] PostgreSQL channel enabled")
+    # ── 9. Postgres-канал ────────────────────────────────────────────────
+    ch = pg.channel
+    ch_dsn = ch.dsn or dsn
+    ch_schema = ch.schema or pg.schema
+    if ch.enabled:
+        if not ch_dsn:
+            console.print("[red]✗[/red] PostgresChannel enabled but no DSN (pg.dsn or pg.channel.dsn)")
+        else:
+            ch_cfg = {
+                "enabled": True,
+                "dsn": ch_dsn,
+                "schema": ch_schema,
+                "table_name": ch.table_name,
+                "poll_interval": ch.poll_interval,
+                "flush_interval": ch.flush_interval,
+                "max_concurrent": ch.max_concurrent,
+                "processing_timeout": ch.processing_timeout,
+            }
+            pg_channel = PostgresChannel(ch_cfg, bus)
+            pg_channel.transcription_provider = config.channels.transcription_provider
+            pg_channel.transcription_api_key = _resolve_transcription_key(config)
+            pg_channel.transcription_api_base = _resolve_transcription_base(config)
+            pg_channel.transcription_language = config.channels.transcription_language
+            pg_channel.send_progress = config.channels.send_progress
+            pg_channel.send_tool_hints = config.channels.send_tool_hints
+            pg_channel.show_reasoning = config.channels.show_reasoning
+            channels.channels["postgres"] = pg_channel
+            console.print("[green]✓[/green] PostgreSQL channel enabled")
     else:
         console.print("[dim]PostgreSQL channel disabled[/dim]")
 
-    # ── 9. Фильтрация каналов (если указан --channels) ────────────────────────
-    #    Оставляем только те каналы, которые перечислены в аргументе.
-    if args.channels:
-        allowed = {name.strip() for name in args.channels.split(",")}
+    # ── 10. Фильтрация каналов по настройке ─────────────────────────────
+    if SETTINGS.channels:
+        allowed = set(SETTINGS.channels)
         for name in list(channels.channels):
             if name not in allowed:
                 del channels.channels[name]
         if not channels.channels:
-            console.print("[yellow]⚠[/yellow] No matching channels in --channels list")
+            console.print("[yellow]⚠[/yellow] No matching channels in settings")
 
-    # ── 10. Подмена WebUI-сборки на кастомную ─────────────────────────────────
+    # ── 11. Кастомная WebUI-сборка ──────────────────────────────────────
     _patch_webui_dist(channels)
 
-    # Выводим список активных каналов
     console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
 
-    # ── 11. Главный цикл запуска ──────────────────────────────────────────────
-    #    Запускаем агента и все каналы, обрабатываем остановку.
+    # ── 12. Запуск ───────────────────────────────────────────────────────
     async def run():
-        # Запускаем каналы в фоновой задаче
         channels_task = asyncio.create_task(channels.start_all())
-
         try:
-            # Запускаем основной цикл агента
             await agent.run()
         except KeyboardInterrupt:
             console.print("\nShutting down...")
@@ -348,69 +264,17 @@ def _run_patched_gateway(args: argparse.Namespace) -> None:
             console.print("\n[red]Gateway crashed[/red]")
             console.print(traceback.format_exc())
         finally:
-            # Останавливаем каналы
             channels_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await channels_task
-            # Закрываем MCP-соединения
             await agent.close_mcp()
             agent.stop()
             await channels.stop_all()
-            # Сбрасываем все кэшированные сессии на диск с fsync
             flushed = agent.sessions.flush_all()
             if flushed:
                 logger.info("Flushed {} session(s) to disk", flushed)
 
     asyncio.run(run())
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ТОЧКА ВХОДА
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# Парсинг аргументов и выбор режима запуска (vanilla / patched).
-
-
-def _parse_args() -> argparse.Namespace:
-    """Парсит аргументы командной строки."""
-    parser = argparse.ArgumentParser(
-        description="nanobot gateway — upstream by default, --patched for local extras",
-    )
-    parser.add_argument(
-        "--patched", "-P",
-        action="store_true",
-        default=False,
-        help="Enable local patches: PostgresChannel, AutoStoreHook, WebUI, etc.",
-    )
-    parser.add_argument(
-        "--channels", "-C",
-        type=str,
-        default=None,
-        help="Comma-separated channel names to start (e.g. websocket,telegram). "
-             "(only with --patched)",
-    )
-    parser.add_argument(
-        "--storage", "-S",
-        type=str,
-        default="auto",
-        choices=("auto", "file", "postgres"),
-        help="Session storage backend. (only with --patched, default: auto)",
-    )
-    return parser.parse_args()
-
-
-def main():
-    """
-    Главная функция: выбирает режим запуска в зависимости от флага --patched.
-
-    Без --patched → запуск стандартного библиотечного gateway.
-    С --patched  → запуск с локальными доработками.
-    """
-    args = _parse_args()
-    if args.patched:
-        _run_patched_gateway(args)
-    else:
-        _run_vanilla_gateway()
 
 
 if __name__ == "__main__":

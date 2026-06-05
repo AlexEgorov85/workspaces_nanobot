@@ -40,16 +40,6 @@
     "sendMaxRetries": 3,
     "transcriptionProvider": "groq",
     "transcriptionLanguage": null,
-    "postgres": {
-	  "enabled": true,
-	  "dsn": "postgresql://postgres:1@localhost:5432/postgres",
-	  "table_name": "conversation_messages",
-	  "schema": "public",
-	  "poll_interval": 2.0,
-	  "flush_interval": 2.0,
-	  "max_concurrent": 1,
-	  "allow_from": ["*"]
-	},
     "dingtalk": {
       "enabled": false,
       "clientId": "",
@@ -249,18 +239,6 @@
       "bridgeToken": "",
       "allowFrom": [],
       "groupPolicy": "open"
-    },
-    "redis": {
-      "enabled": true,
-      "host": "192.168.1.100",
-      "port": 6379,
-      "db": 0,
-      "password": null,
-      "incoming_key": "nanobot:inbox",
-      "outgoing_prefix": "nanobot:outbox",
-      "poll_timeout": 5.0,
-      "max_concurrent": 1,
-      "allow_from": ["*"]
     }
   },
   "providers": {
