@@ -250,6 +250,8 @@ def main() -> None:
         channels_task = asyncio.create_task(channels.start_all())
         try:
             await agent.run()
+        except asyncio.CancelledError:
+            console.print("\nShutting down...")
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         except Exception:
@@ -266,7 +268,18 @@ def main() -> None:
             if flushed:
                 logger.info("Flushed {} session(s) to disk", flushed)
 
-    asyncio.run(run())
+    while True:
+        try:
+            asyncio.run(run())
+        except KeyboardInterrupt:
+            console.print("\nExiting...")
+            break
+        except Exception:
+            console.print("[red]Gateway exited unexpectedly, restarting in 5s...[/red]")
+            import time
+            time.sleep(5)
+            continue
+        break  # clean shutdown
 
 
 if __name__ == "__main__":
