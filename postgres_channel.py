@@ -13,6 +13,7 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from utils.db import db
 
 
 class PostgresChannel(BaseChannel):
@@ -93,7 +94,6 @@ class PostgresChannel(BaseChannel):
         self._inflight: set[str] = set()
         self._chat_inflight: set[str] = set()     # chat_ids currently busy
         self._msg_chat: dict[str, str] = {}       # user_msg_id -> chat_id
-        self._pool: Any = None
         self._poll_task: asyncio.Task | None = None
         self._stream_buffers: dict[str, str] = {}
         self._reasoning_buffers: dict[str, str] = {}  # assistant_msg_id -> accumulated delta
@@ -128,36 +128,32 @@ class PostgresChannel(BaseChannel):
             self._poll_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._poll_task
-        if self._pool:
-            await self._pool.close()
-            self._pool = None
+        pass  # db — глобальный singleton, закрывается при выходе
 
     # ------------------------------------------------------------------
     # Table
     # ------------------------------------------------------------------
 
     async def _ensure_tables(self) -> None:
-        pool = await self._get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
-            await conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self._fq_table} (
-                    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                    chat_id         TEXT,
-                    user_id         TEXT,
-                    role            TEXT NOT NULL
-                        CHECK (role IN ('user', 'assistant', 'system')),
-                    content         TEXT NOT NULL,
-                    media           JSONB DEFAULT '[]'::jsonb,
-                    metadata        JSONB DEFAULT '{{}}'::jsonb,
-                    reply_to        UUID,
-                    buttons         JSONB DEFAULT '[]'::jsonb,
-                    status          TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
-                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-            """)
+        await db.aexecute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
+        await db.aexecute(f"""
+            CREATE TABLE IF NOT EXISTS {self._fq_table} (
+                id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                chat_id         TEXT,
+                user_id         TEXT,
+                role            TEXT NOT NULL
+                    CHECK (role IN ('user', 'assistant', 'system')),
+                content         TEXT NOT NULL,
+                media           JSONB DEFAULT '[]'::jsonb,
+                metadata        JSONB DEFAULT '{{}}'::jsonb,
+                reply_to        UUID,
+                buttons         JSONB DEFAULT '[]'::jsonb,
+                status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
 
     # ------------------------------------------------------------------
     # Reasoning batch flush
@@ -178,24 +174,21 @@ class PostgresChannel(BaseChannel):
             return
         buffers = self._reasoning_buffers
         self._reasoning_buffers = {}
-        pool = await self._get_pool()
-        async with pool.acquire() as conn:
-            for assistant_msg_id, delta in buffers.items():
-                if delta:
-                    row = await conn.fetchrow(
-                        f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
-                        assistant_msg_id,
-                    )
-                    meta = row["metadata"] or {}
-                    if isinstance(meta, str):
-                        meta = json.loads(meta)
-                    reasoning = (meta.get("reasoning") or "") + delta
-                    meta["reasoning"] = reasoning
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
-                        json.dumps(meta, ensure_ascii=False),
-                        assistant_msg_id,
-                    )
+        for assistant_msg_id, delta in buffers.items():
+            if delta:
+                row = await db.afetchone(
+                    f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
+                    [assistant_msg_id],
+                )
+                if not row:
+                    continue
+                meta = dict(row["metadata"] or {}) if row["metadata"] else {}
+                reasoning = (meta.get("reasoning") or "") + delta
+                meta["reasoning"] = reasoning
+                await db.aexecute(
+                    f"UPDATE {self._fq_table} SET metadata = %s::jsonb, updated_at = NOW() WHERE id = %s",
+                    [json.dumps(meta, ensure_ascii=False), assistant_msg_id],
+                )
 
     # ------------------------------------------------------------------
     # Poll loop
@@ -216,127 +209,102 @@ class PostgresChannel(BaseChannel):
     async def _unstick_processing(self) -> None:
         """Release user messages stuck in ``processing`` beyond the timeout (max 3 retries).
         Also fail orphaned assistant messages stuck in ``processing``."""
-        pool = await self._get_pool()
-        max_retries = 3
-        timeout = timedelta(seconds=self._processing_timeout)
 
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"""
-                SELECT id, metadata FROM {self._fq_table}
-                WHERE role = 'user' AND status = 'processing' AND updated_at + $1 < NOW()
-                FOR UPDATE
-                """,
-                timeout,
-            )
+        def _do_unstick(conn):
+            import psycopg2.extras
+            max_retries = 3
+            timeout_s = self._processing_timeout
 
-            for row in rows:
-                msg_id = str(row["id"])
-                meta = row["metadata"] or {}
-                if isinstance(meta, str):
-                    meta = json.loads(meta) if meta else {}
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"""
+                    SELECT id, metadata FROM {self._fq_table}
+                    WHERE role = 'user' AND status = 'processing'
+                    AND updated_at + interval %s < NOW()
+                    FOR UPDATE
+                    """,
+                    (f"{timeout_s} seconds",),
+                )
+                rows = cur.fetchall()
 
-                retry_count = meta.get("retry_count", 0) + 1
-                meta["retry_count"] = retry_count
+                for row in rows:
+                    msg_id = str(row["id"])
+                    meta = dict(row["metadata"] or {}) if row["metadata"] else {}
+                    retry_count = meta.get("retry_count", 0) + 1
+                    meta["retry_count"] = retry_count
 
-                if retry_count >= max_retries:
-                    await conn.execute(
-                        f"""
-                        UPDATE {self._fq_table}
-                        SET status = 'failed', metadata = $1::jsonb, updated_at = NOW()
-                        WHERE id = $2
-                        """,
-                        json.dumps(meta),
-                        msg_id,
-                    )
-                    await conn.execute(
-                        f"""
-                        UPDATE {self._fq_table}
-                        SET status = 'failed', updated_at = NOW()
-                        WHERE reply_to = $1 AND role = 'assistant' AND status = 'processing'
-                        """,
-                        msg_id,
-                    )
-                    self.logger.warning(
-                        "User msg {} exceeded max retries ({}/{})",
-                        msg_id, retry_count, max_retries,
-                    )
-                else:
-                    await conn.execute(
-                        f"""
-                        UPDATE {self._fq_table}
-                        SET status = 'pending', metadata = $1::jsonb, updated_at = NOW()
-                        WHERE id = $2
-                        """,
-                        json.dumps(meta),
-                        msg_id,
-                    )
-                    await conn.execute(
-                        f"""
-                        UPDATE {self._fq_table}
-                        SET status = 'failed', updated_at = NOW()
-                        WHERE reply_to = $1 AND role = 'assistant' AND status = 'processing'
-                        """,
-                        msg_id,
-                    )
-                    self.logger.warning(
-                        "Released stuck user msg {} (retry {}/{})",
-                        msg_id, retry_count, max_retries,
-                    )
+                    if retry_count >= max_retries:
+                        cur.execute(
+                            f"UPDATE {self._fq_table} SET status = 'failed', "
+                            f"metadata = %s::jsonb, updated_at = NOW() WHERE id = %s",
+                            [json.dumps(meta), msg_id],
+                        )
+                        cur.execute(
+                            f"UPDATE {self._fq_table} SET status = 'failed', "
+                            f"updated_at = NOW() WHERE reply_to = %s AND role = 'assistant' AND status = 'processing'",
+                            [msg_id],
+                        )
+                        self.logger.warning(
+                            "User msg {} exceeded max retries ({}/{})",
+                            msg_id, retry_count, max_retries,
+                        )
+                    else:
+                        cur.execute(
+                            f"UPDATE {self._fq_table} SET status = 'pending', "
+                            f"metadata = %s::jsonb, updated_at = NOW() WHERE id = %s",
+                            [json.dumps(meta), msg_id],
+                        )
+                        cur.execute(
+                            f"UPDATE {self._fq_table} SET status = 'failed', "
+                            f"updated_at = NOW() WHERE reply_to = %s AND role = 'assistant' AND status = 'processing'",
+                            [msg_id],
+                        )
+                        self.logger.warning(
+                            "Released stuck user msg {} (retry {}/{})",
+                            msg_id, retry_count, max_retries,
+                        )
 
-                self._msg_ctx.pop(msg_id, None)
-                self._release_slot(msg_id)
-                self._reasoning_buffers.clear()
+                # Also fail orphaned assistant messages
+                cur.execute(
+                    f"UPDATE {self._fq_table} SET status = 'failed', "
+                    f"updated_at = NOW() WHERE role = 'assistant' AND status = 'processing' "
+                    f"AND updated_at + interval %s < NOW()",
+                    (f"{timeout_s} seconds",),
+                )
+            conn.commit()
 
-            # Also fail orphaned assistant messages not linked to a failing user msg
-            await conn.execute(
-                f"""
-                UPDATE {self._fq_table}
-                SET status = 'failed', updated_at = NOW()
-                WHERE role = 'assistant' AND status = 'processing' AND updated_at + $1 < NOW()
-                """,
-                timeout,
-            )
+        await db.awith_connection(_do_unstick)
 
     async def _poll_once(self) -> None:
         """Claim the oldest pending user message and forward it to the agent."""
-        pool = await self._get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                UPDATE {self._fq_table}
-                SET status = 'processing', updated_at = NOW()
-                WHERE id = (
-                    SELECT id FROM {self._fq_table}
-                    WHERE role = 'user' AND status = 'pending'
-                    ORDER BY created_at ASC
-                    LIMIT 1
-                    FOR UPDATE
-                )
-                AND status = 'pending'
-                RETURNING id, chat_id, user_id, content, media, metadata, created_at
-                """
+        row = await db.afetchone(
+            f"""
+            UPDATE {self._fq_table}
+            SET status = 'processing', updated_at = NOW()
+            WHERE id = (
+                SELECT id FROM {self._fq_table}
+                WHERE role = 'user' AND status = 'pending'
+                ORDER BY created_at ASC
+                LIMIT 1
+                FOR UPDATE
             )
-            if row is None:
-                return
+            AND status = 'pending'
+            RETURNING id, chat_id, user_id, content, media, metadata, created_at
+            """
+        )
+        if row is None:
+            return
 
-            user_msg_id = str(row["id"])
-
+        user_msg_id = str(row["id"])
         chat_id = str(row["chat_id"]) if row["chat_id"] else str(row["user_id"])
         user_id = str(row["user_id"]) if row["user_id"] else chat_id
 
         # Не диспатчим, если из этого chat_id уже есть активное сообщение
         if chat_id in self._chat_inflight:
-            pool = await self._get_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    f"""
-                    UPDATE {self._fq_table}
-                    SET status = 'pending', updated_at = NOW()
-                    WHERE id = $1
-                    """,
-                    user_msg_id,
-                )
+            await db.aexecute(
+                f"UPDATE {self._fq_table} SET status = 'pending', updated_at = NOW() WHERE id = %s",
+                [user_msg_id],
+            )
             self.logger.debug(
                 "Deferred msg {} from busy chat {}", user_msg_id, chat_id,
             )
@@ -381,55 +349,40 @@ class PostgresChannel(BaseChannel):
 
     async def _insert_assistant_message(self, user_msg_id: str, chat_id: str) -> str:
         """Create a ``processing`` assistant row and store its id in ``_msg_ctx``."""
-        pool = await self._get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                INSERT INTO {self._fq_table}
-                    (chat_id, role, content, reply_to, status, created_at, updated_at)
-                VALUES ($1, 'assistant', '', $2, 'processing', NOW(), NOW())
-                RETURNING id
-                """,
-                chat_id,
-                user_msg_id,
-            )
-            assistant_msg_id = str(row["id"])
-            self._msg_ctx[user_msg_id] = {
-                "assistant_msg_id": assistant_msg_id,
-                "tool_events": [],
-                "reasoning_buf": [],
-            }
-            self.logger.debug(
-                "Inserted assistant placeholder {} for user msg {}",
-                assistant_msg_id, user_msg_id,
-            )
-            return assistant_msg_id
+        row = await db.afetchone(
+            f"""
+            INSERT INTO {self._fq_table}
+                (chat_id, role, content, reply_to, status, created_at, updated_at)
+            VALUES (%s, 'assistant', '', %s, 'processing', NOW(), NOW())
+            RETURNING id
+            """,
+            [chat_id, user_msg_id],
+        )
+        assistant_msg_id = str(row["id"])
+        self._msg_ctx[user_msg_id] = {
+            "assistant_msg_id": assistant_msg_id,
+            "tool_events": [],
+            "reasoning_buf": [],
+        }
+        self.logger.debug(
+            "Inserted assistant placeholder {} for user msg {}",
+            assistant_msg_id, user_msg_id,
+        )
+        return assistant_msg_id
 
     async def _mark_failed(self, user_msg_id: str, assistant_msg_id: str | None, reason: str) -> None:
         """Mark a user message and its assistant reply as failed."""
-        pool = await self._get_pool()
-        async with pool.acquire() as conn:
-            if assistant_msg_id:
-                await conn.execute(
-                    f"""
-                    UPDATE {self._fq_table}
-                    SET content = $1, metadata = $2::jsonb, status = 'failed', updated_at = NOW()
-                    WHERE id = $3
-                    """,
-                    f"Internal error: {reason}",
-                    json.dumps({"error": reason}),
-                    assistant_msg_id,
-                )
-
-            await conn.execute(
-                f"""
-                UPDATE {self._fq_table}
-                SET status = 'failed', updated_at = NOW()
-                WHERE id = $1
-                """,
-                user_msg_id,
+        if assistant_msg_id:
+            await db.aexecute(
+                f"UPDATE {self._fq_table} SET content = %s, metadata = %s::jsonb, "
+                f"status = 'failed', updated_at = NOW() WHERE id = %s",
+                [f"Internal error: {reason}", json.dumps({"error": reason}), assistant_msg_id],
             )
-            self._msg_ctx.pop(user_msg_id, None)
+        await db.aexecute(
+            f"UPDATE {self._fq_table} SET status = 'failed', updated_at = NOW() WHERE id = %s",
+            [user_msg_id],
+        )
+        self._msg_ctx.pop(user_msg_id, None)
         self._release_slot(user_msg_id)
         if assistant_msg_id:
             self._reasoning_buffers.pop(assistant_msg_id, None)
@@ -507,21 +460,17 @@ class PostgresChannel(BaseChannel):
         if assistant_msg_id and assistant_msg_id in self._reasoning_buffers:
             delta = self._reasoning_buffers.pop(assistant_msg_id, "")
             if delta:
-                pool = await self._get_pool()
-                async with pool.acquire() as conn:
-                    row = await conn.fetchrow(
-                        f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
-                        assistant_msg_id,
-                    )
-                    meta_row = row["metadata"] or {}
-                    if isinstance(meta_row, str):
-                        meta_row = json.loads(meta_row)
+                row = await db.afetchone(
+                    f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
+                    [assistant_msg_id],
+                )
+                if row and row.get("metadata"):
+                    meta_row = dict(row["metadata"]) if isinstance(row["metadata"], dict) else json.loads(row["metadata"] or "{}")
                     reasoning = (meta_row.get("reasoning") or "") + delta
                     meta_row["reasoning"] = reasoning
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
-                        json.dumps(meta_row, ensure_ascii=False),
-                        assistant_msg_id,
+                    await db.aexecute(
+                        f"UPDATE {self._fq_table} SET metadata = %s::jsonb, updated_at = NOW() WHERE id = %s",
+                        [json.dumps(meta_row, ensure_ascii=False), assistant_msg_id],
                     )
 
         if ctx.get("reasoning_buf"):
@@ -533,39 +482,32 @@ class PostgresChannel(BaseChannel):
         chat_id = msg.chat_id
 
         try:
-            pool = await self._get_pool()
-            async with pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
-                    assistant_msg_id,
-                )
-                existing_meta = row["metadata"] or {}
-                if isinstance(existing_meta, str):
-                    existing_meta = json.loads(existing_meta)
-                existing_meta.update(meta)
-                await conn.execute(
-                    f"""
-                    UPDATE {self._fq_table}
-                    SET content = $1,
-                        metadata = $2::jsonb,
-                        buttons = $3::jsonb,
-                        status = 'completed', updated_at = NOW()
-                    WHERE id = $4
-                    """,
-                    msg.content,
-                    json.dumps(existing_meta, ensure_ascii=False),
-                    json.dumps(msg.buttons or []),
-                    assistant_msg_id,
-                )
-                if msg_id:
-                    await conn.execute(
-                        f"""
-                        UPDATE {self._fq_table}
-                        SET status = 'completed', updated_at = NOW()
-                        WHERE id = $1
-                        """,
-                        msg_id,
+            def _do_send(conn):
+                import psycopg2.extras
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        f"SELECT metadata FROM {self._fq_table} WHERE id = %s FOR UPDATE",
+                        [assistant_msg_id],
                     )
+                    row = cur.fetchone()
+                    existing_meta = dict(row["metadata"] or {}) if row and row["metadata"] else {}
+                    existing_meta.update(meta)
+                    cur.execute(
+                        f"UPDATE {self._fq_table} "
+                        f"SET content = %s, metadata = %s::jsonb, buttons = %s::jsonb, "
+                        f"status = 'completed', updated_at = NOW() WHERE id = %s",
+                        [msg.content, json.dumps(existing_meta, ensure_ascii=False),
+                         json.dumps(msg.buttons or []), assistant_msg_id],
+                    )
+                    if msg_id:
+                        cur.execute(
+                            f"UPDATE {self._fq_table} SET status = 'completed', "
+                            f"updated_at = NOW() WHERE id = %s",
+                            [msg_id],
+                        )
+                conn.commit()
+
+            await db.awith_connection(_do_send)
         except Exception:
             self.logger.exception("Failed to write response for {}", chat_id)
             if msg_id:
@@ -591,37 +533,30 @@ class PostgresChannel(BaseChannel):
 
             content = self._stream_buffers.pop(stream_id, "")
             if content and assistant_msg_id:
-                pool = await self._get_pool()
-                async with pool.acquire() as conn:
-                    row = await conn.fetchrow(
-                        f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
-                        assistant_msg_id,
-                    )
-                    existing_meta = row["metadata"] or {}
-                    if isinstance(existing_meta, str):
-                        existing_meta = json.loads(existing_meta)
-                    existing_meta.update(meta | {"streamed": True})
-                    await conn.execute(
-                        f"""
-                        UPDATE {self._fq_table}
-                        SET content = $1,
-                            metadata = $2::jsonb,
-                            status = 'completed', updated_at = NOW()
-                        WHERE id = $3
-                        """,
-                        content,
-                        json.dumps(existing_meta, ensure_ascii=False),
-                        assistant_msg_id,
-                    )
-                    if msg_id:
-                        await conn.execute(
-                            f"""
-                            UPDATE {self._fq_table}
-                            SET status = 'completed', updated_at = NOW()
-                            WHERE id = $1
-                            """,
-                            msg_id,
+                def _do_send_delta(conn):
+                    import psycopg2.extras
+                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                        cur.execute(
+                            f"SELECT metadata FROM {self._fq_table} WHERE id = %s FOR UPDATE",
+                            [assistant_msg_id],
                         )
+                        row = cur.fetchone()
+                        existing_meta = dict(row["metadata"] or {}) if row and row["metadata"] else {}
+                        existing_meta.update(meta | {"streamed": True})
+                        cur.execute(
+                            f"UPDATE {self._fq_table} SET content = %s, "
+                            f"metadata = %s::jsonb, status = 'completed', updated_at = NOW() WHERE id = %s",
+                            [content, json.dumps(existing_meta, ensure_ascii=False), assistant_msg_id],
+                        )
+                        if msg_id:
+                            cur.execute(
+                                f"UPDATE {self._fq_table} SET status = 'completed', "
+                                f"updated_at = NOW() WHERE id = %s",
+                                [msg_id],
+                            )
+                    conn.commit()
+
+                await db.awith_connection(_do_send_delta)
         else:
             buf = self._stream_buffers.get(stream_id, "")
             self._stream_buffers[stream_id] = buf + delta
@@ -655,19 +590,6 @@ class PostgresChannel(BaseChannel):
             if ctx:
                 return ctx.get("assistant_msg_id")
         return None
-
-    # ------------------------------------------------------------------
-    # Connection pool
-    # ------------------------------------------------------------------
-
-    async def _get_pool(self):
-        if self._pool is None:
-            import asyncpg
-
-            self._pool = await asyncpg.create_pool(
-                dsn=self._dsn, min_size=1, max_size=2
-            )
-        return self._pool
 
     # ------------------------------------------------------------------
     # Default config (auto-injected by ``nanobot onboard`` via entry_points)
