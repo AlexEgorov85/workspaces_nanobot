@@ -171,8 +171,8 @@ class PostgresChannel(BaseChannel):
             await asyncio.sleep(self._flush_interval)
             try:
                 await self._flush_reasoning()
-            except Exception:
-                self.logger.exception("Flush reasoning error")
+            except Exception as e:
+                self.logger.error("Flush reasoning error: {}", e)
 
     async def _flush_reasoning(self) -> None:
         """Write all dirty reasoning buffers to DB in a single batch."""
@@ -211,8 +211,8 @@ class PostgresChannel(BaseChannel):
                     await self._poll_once()
             except asyncio.CancelledError:
                 break
-            except Exception:
-                self.logger.exception("Poll error")
+            except Exception as e:
+                self.logger.error("Poll error: {}", e)
             await asyncio.sleep(self._poll_interval)
 
     async def _unstick_processing(self) -> None:

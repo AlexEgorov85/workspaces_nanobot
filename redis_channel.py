@@ -202,8 +202,8 @@ class RedisChannel(BaseChannel):
                     await self._poll_once()
             except asyncio.CancelledError:
                 break
-            except Exception:
-                self.logger.exception("Poll error")
+            except Exception as e:
+                self.logger.error("Redis poll error: {}", e)
                 await asyncio.sleep(1.0)
 
     async def _poll_once(self) -> None:
