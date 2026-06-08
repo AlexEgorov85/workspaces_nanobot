@@ -19,7 +19,7 @@ except AttributeError:
 # Добавляем scripts и workspace в путь для импорта utils.db
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _SCRIPTS_DIR)
-_nanobot_root = os.path.abspath(os.path.join(_SCRIPTS_DIR, "..", ".."))
+_nanobot_root = os.path.abspath(os.path.join(_SCRIPTS_DIR, "..", "..", ".."))
 if _nanobot_root not in sys.path:
     sys.path.insert(0, _nanobot_root)
 

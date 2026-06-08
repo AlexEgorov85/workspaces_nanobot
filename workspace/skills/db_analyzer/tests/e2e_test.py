@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Сквозные тесты db_analyzer: реальные вызовы всех режимов."""
 import sys, os, json, asyncio
+from pathlib import Path
 
-sys.path.insert(0, r'C:\Users\Алексей\.nanobot\workspace\skills\db_analyzer\scripts')
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 # Fix Windows console encoding
 if sys.platform == 'win32':
