@@ -68,8 +68,71 @@ async def run(
             },
         }
 
-    merged = await resolve_params_with_vector(script, params, index_dir=index_dir)
-    sql, sql_params = build_sql(script, merged)
+    merged, unknown = await resolve_params_with_vector(script, params, index_dir=index_dir)
+
+    if unknown:
+        valid = list(script.parameters.keys())
+        return {
+            "status": "error",
+            "data": {
+                "message": (
+                    f"Неизвестные параметры: {', '.join(unknown)}. "
+                    f"Допустимые параметры для скрипта '{script.name}': {', '.join(valid)}"
+                ),
+            },
+        }
+
+    if params and not merged:
+        valid = list(script.parameters.keys())
+        return {
+            "status": "error",
+            "data": {
+                "message": (
+                    f"Ни один из переданных параметров не подходит для скрипта '{script.name}'. "
+                    f"Допустимые параметры: {', '.join(valid)}"
+                ),
+            },
+        }
+
+    for pname, pdef in script.parameters.items():
+        if pname not in merged:
+            if pdef.required:
+                return {
+                    "status": "error",
+                    "data": {
+                        "message": f"Обязательный параметр '{pname}' не указан для скрипта '{script.name}'",
+                    },
+                }
+            continue
+        val = merged[pname]
+        if pdef.type in ("number", "limit"):
+            try:
+                int(val)
+            except (ValueError, TypeError):
+                return {
+                    "status": "error",
+                    "data": {
+                        "message": f"Параметр '{pname}' должен быть числом, получено: {val}",
+                    },
+                }
+        elif pdef.type == "boolean" and not isinstance(val, bool):
+            return {
+                "status": "error",
+                "data": {
+                    "message": f"Параметр '{pname}' должен быть boolean (true/false), получено: {val}",
+                },
+            }
+
+    try:
+        sql, sql_params = build_sql(script, merged)
+    except ValueError as e:
+        return {
+            "status": "error",
+            "data": {
+                "message": f"Ошибка сборки SQL: {e}",
+            },
+        }
+
     result = await db.execute_query(sql, sql_params)
 
     return {

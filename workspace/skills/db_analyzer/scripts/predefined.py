@@ -108,75 +108,25 @@ def list_available() -> str:
     return ", ".join(SCRIPTS_REGISTRY.keys())
 
 
-def resolve_params(script: ScriptDefinition, params: dict | None) -> dict:
-    """
-    Отфильтровать параметры, переданные пользователем, и применить алиасы.
-
-    Алиасы позволяют использовать альтернативные имена параметров:
-        audited_object → auditee_entity
-        audit_type     → audit_type (совпадает)
-        violation_code → violation_code (совпадает)
-
-    Args:
-        script: ScriptDefinition (содержит список допустимых параметров).
-        params: Параметры от пользователя.
-
-    Returns:
-        dict только с теми параметрами, что есть в script.parameters,
-        с преобразованными алиасами.
-
-    Пример:
-        >>> from scripts_registry import SCRIPTS_REGISTRY
-        >>> script = SCRIPTS_REGISTRY["top_audited_objects"]
-        >>> resolve_params(script, {"audited_object": "ВУЗ", "unknown": 123})
-        {'auditee_entity': 'ВУЗ'}
-    """
+def resolve_params(script: ScriptDefinition, params: dict | None) -> tuple[dict, list[str]]:
     merged: dict = {}
+    unknown: list[str] = []
     for k, v in (params or {}).items():
         if v is None or v == "":
             continue
         if k in script.parameters:
             merged[k] = v
-        elif k == "audited_object" and "auditee_entity" in script.parameters:
-            merged["auditee_entity"] = v
-        elif k == "audit_type" and "audit_type" in script.parameters:
-            merged["audit_type"] = v
-        elif k == "violation_code" and "violation_code" in script.parameters:
-            merged["violation_code"] = v
-    return merged
+        else:
+            unknown.append(k)
+    return merged, unknown
 
 
 async def resolve_params_with_vector(
     script: ScriptDefinition,
     params: dict | None,
     index_dir: str = "",
-) -> dict:
-    """
-    Разрешить параметры, выполняя семантический поиск по FAISS для тех
-    параметров, у которых в validation указан vector_source.
-
-    Если векторный поиск недоступен (нет индекса, Ollama не отвечает),
-    возвращается исходное значение параметра (без изменений).
-
-    Args:
-        script: ScriptDefinition с описанием параметров.
-        params: Параметры от пользователя.
-        index_dir: Путь к директории с FAISS-индексами.
-
-    Returns:
-        dict с разрешёнными параметрами.
-
-    Пример:
-        >>> import asyncio
-        >>> from scripts_registry import SCRIPTS_REGISTRY
-        >>> script = SCRIPTS_REGISTRY["violations_by_type"]
-        >>> asyncio.run(resolve_params_with_vector(
-        ...     script, {"violation_code": "финансовые"},
-        ...     index_dir="path/to/index",
-        ... ))  # doctest: +SKIP
-        {'violation_code': 'VIOL-01-002'}
-    """
-    merged = resolve_params(script, params)
+) -> tuple[dict, list[str]]:
+    merged, unknown = resolve_params(script, params)
 
     for param_name, param_def in script.parameters.items():
         if param_name not in merged:
@@ -219,4 +169,4 @@ async def resolve_params_with_vector(
         if resolved:
             merged[param_name] = resolved
 
-    return merged
+    return merged, unknown
