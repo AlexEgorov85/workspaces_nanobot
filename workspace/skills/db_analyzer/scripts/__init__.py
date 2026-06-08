@@ -107,19 +107,15 @@ async def run_predefined(
 
     Returns:
         dict с результатом: status, data (script_name, sql, parameters, result).
-
-    Пример:
-        >>> import asyncio
-        >>> cfg = config.load_db_config()
-        >>> asyncio.run(run_predefined(
-        ...     "analytics_by_year_month", cfg, {"year": 2024},
-        ... ))  # doctest: +SKIP
     """
-    if db_config is None:
-        db_config = config.load_db_config()
-    async with Database(db_config) as db:
-        return await predefined_mode.run(script_name, db, params=params,
-                                          index_dir=config.get_vector_index_path())
+    try:
+        if db_config is None:
+            db_config = config.load_db_config()
+        async with Database(db_config) as db:
+            return await predefined_mode.run(script_name, db, params=params,
+                                              index_dir=config.get_vector_index_path())
+    except Exception as e:
+        return {"status": "error", "data": {"message": f"Ошибка в run_predefined: {e}"}}
 
 
 async def run_sql(
@@ -137,16 +133,14 @@ async def run_sql(
 
     Returns:
         dict с результатом: status, data (sql, result).
-
-    Пример:
-        >>> import asyncio
-        >>> cfg = config.load_db_config()
-        >>> asyncio.run(run_sql("сколько проверок по объектам", cfg))  # doctest: +SKIP
     """
-    if db_config is None:
-        db_config = config.load_db_config()
-    async with Database(db_config) as db:
-        return await sql_mode.run(query, db, context=context)
+    try:
+        if db_config is None:
+            db_config = config.load_db_config()
+        async with Database(db_config) as db:
+            return await sql_mode.run(query, db, context=context)
+    except Exception as e:
+        return {"status": "error", "data": {"message": f"Ошибка в run_sql: {e}"}}
 
 
 async def run_vector(
@@ -168,17 +162,14 @@ async def run_vector(
 
     Returns:
         dict с результатом: status, data (results, count).
-
-    Пример:
-        >>> import asyncio
-        >>> asyncio.run(run_vector("пожарная безопасность",
-        ...     index_name="audits_index",
-        ...     index_path="path/to/index"))  # doctest: +SKIP
     """
-    if index_path is None:
-        index_path = config.get_vector_index_path()
-    return await vector_mode.run(query, index_name, index_path=index_path,
-                                  top_k=top_k, threshold=threshold)
+    try:
+        if index_path is None:
+            index_path = config.get_vector_index_path()
+        return await vector_mode.run(query, index_name, index_path=index_path,
+                                      top_k=top_k, threshold=threshold)
+    except Exception as e:
+        return {"status": "error", "data": {"message": f"Ошибка в run_vector: {e}"}}
 
 
 # ---------------------------------------------------------------------------

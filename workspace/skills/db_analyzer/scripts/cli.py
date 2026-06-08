@@ -32,6 +32,7 @@ import argparse
 import asyncio
 import json
 import sys
+import traceback
 from pathlib import Path
 from typing import Any, Optional
 
@@ -61,7 +62,10 @@ def _parse_params(raw: str) -> dict[str, Any]:
         return {}
     raw = raw.strip()
     if raw.startswith("{"):
-        return json.loads(raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise argparse.ArgumentTypeError(f"Неверный JSON в --params: {e}")
     result: dict[str, Any] = {}
     for pair in raw.split(","):
         pair = pair.strip()
@@ -223,12 +227,28 @@ def main() -> None:
         python scripts/cli.py --mode predefined --script analytics_by_year_month \\
             --params '{"year": 2024}'
     """
-    parser = _build_parser()
-    args = parser.parse_args()
+    try:
+        parser = _build_parser()
+        args = parser.parse_args()
 
-    result = asyncio.run(_run(args))
-    output = _sanitize_value(prepare_output(result, args.mode))
-    print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
+        result = asyncio.run(_run(args))
+        output = _sanitize_value(prepare_output(result, args.mode))
+        print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
+    except argparse.ArgumentTypeError as e:
+        print(json.dumps({
+            "mode": "unknown",
+            "status": "error",
+            "message": str(e),
+        }, ensure_ascii=False, indent=2))
+        sys.exit(1)
+    except Exception as e:
+        print(json.dumps({
+            "mode": "unknown",
+            "status": "error",
+            "message": f"Внутренняя ошибка: {e}",
+            "traceback": traceback.format_exc(),
+        }, ensure_ascii=False, indent=2))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

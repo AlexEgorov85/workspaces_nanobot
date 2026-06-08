@@ -219,7 +219,11 @@ class Database:
         Returns:
             dict: {status, row_count, columns, rows}
         """
-        rows = await shared_db.fetch(sql, *(params or []))
+        try:
+            rows = await shared_db.fetch(sql, *(params or []))
+        except Exception as e:
+            return {"status": "error", "row_count": 0, "columns": [], "rows": [],
+                    "error": f"Ошибка выполнения запроса: {e}"}
 
         if not rows:
             return {"status": "success", "row_count": 0, "columns": [], "rows": []}

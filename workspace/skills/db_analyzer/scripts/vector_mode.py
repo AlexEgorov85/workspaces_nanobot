@@ -21,7 +21,6 @@ Pipeline:
 
 import json
 import os
-import sys
 from typing import Any, Optional
 
 import aiohttp
@@ -53,7 +52,6 @@ async def _get_embedding(text: str) -> Optional[list[float]]:
     model = cfg.get("model", "mxbai-embed-large:latest")
 
     if not url:
-        print("Embedding error: base_url не задан в tools.db_analyzer.embedding", file=sys.stderr)
         return None
 
     payload = {"model": model, "input": text}
@@ -62,13 +60,11 @@ async def _get_embedding(text: str) -> Optional[list[float]]:
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
-    except Exception as e:
-        print(f"Embedding error: {e}", file=sys.stderr)
+    except Exception:
         return None
 
     embeddings = data.get("embeddings")
     if not embeddings or not isinstance(embeddings, list) or len(embeddings) == 0:
-        print(f"Embedding error: пустой ответ embeddings", file=sys.stderr)
         return None
 
     return embeddings[0]
@@ -130,8 +126,7 @@ def _load_index(index_dir: str, index_name: str) -> tuple[Any, Optional[dict]]:
     try:
         idx = faiss.read_index(tmp_idx)
         return idx, meta
-    except Exception as e:
-        print(f"Warning: Failed to load index '{index_name}': {e}", file=sys.stderr)
+    except Exception:
         return None, None
 
 
