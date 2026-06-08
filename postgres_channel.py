@@ -16,6 +16,21 @@ from nanobot.channels.base import BaseChannel
 from utils.db import db
 
 
+def _decode_jsonb(val: Any) -> dict:
+    """Безопасно декодировать JSONB значение.
+
+    asyncpg с JSONB-кодеком возвращает dict для новых записей,
+    но старые (сохранённые до установки кодека) — строку.
+    """
+    if val is None:
+        return {}
+    if isinstance(val, str):
+        return json.loads(val)
+    if isinstance(val, dict):
+        return val
+    return dict(val) if val else {}
+
+
 class PostgresChannel(BaseChannel):
     """Polls ``conversation_messages`` for pending user messages and writes
     assistant responses (and real-time reasoning) back into the same table.
@@ -182,12 +197,12 @@ class PostgresChannel(BaseChannel):
                 )
                 if not row:
                     continue
-                meta = dict(row["metadata"] or {}) if row["metadata"] else {}
+                meta = _decode_jsonb(row["metadata"])
                 reasoning = (meta.get("reasoning") or "") + delta
                 meta["reasoning"] = reasoning
                 await db.execute(
                     f"UPDATE {self._fq_table} SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
-                    json.dumps(meta, ensure_ascii=False), assistant_msg_id,
+                    meta, assistant_msg_id,
                 )
 
     # ------------------------------------------------------------------
@@ -225,7 +240,7 @@ class PostgresChannel(BaseChannel):
 
             for row in rows:
                 msg_id = str(row["id"])
-                meta = dict(row["metadata"] or {}) if row["metadata"] else {}
+                meta = _decode_jsonb(row["metadata"])
                 retry_count = meta.get("retry_count", 0) + 1
                 meta["retry_count"] = retry_count
 
@@ -233,7 +248,7 @@ class PostgresChannel(BaseChannel):
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'failed', "
                         f"metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
-                        json.dumps(meta), msg_id,
+                        meta, msg_id,
                     )
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'failed', "
@@ -248,7 +263,7 @@ class PostgresChannel(BaseChannel):
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'pending', "
                         f"metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
-                        json.dumps(meta), msg_id,
+                        meta, msg_id,
                     )
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'failed', "
@@ -305,9 +320,7 @@ class PostgresChannel(BaseChannel):
 
         content = row["content"] or ""
 
-        raw_meta = row["metadata"] or {}
-        if isinstance(raw_meta, str):
-            raw_meta = json.loads(raw_meta) if raw_meta else {}
+        raw_meta = _decode_jsonb(row["metadata"])
 
         raw_media = row["media"] or []
         if isinstance(raw_media, str):
@@ -369,7 +382,7 @@ class PostgresChannel(BaseChannel):
             await db.execute(
                 f"UPDATE {self._fq_table} SET content = $1, metadata = $2::jsonb, "
                 f"status = 'failed', updated_at = NOW() WHERE id = $3",
-                f"Internal error: {reason}", json.dumps({"error": reason}), assistant_msg_id,
+                f"Internal error: {reason}", {"error": reason}, assistant_msg_id,
             )
         await db.execute(
             f"UPDATE {self._fq_table} SET status = 'failed', updated_at = NOW() WHERE id = $1",
@@ -458,12 +471,12 @@ class PostgresChannel(BaseChannel):
                     assistant_msg_id,
                 )
                 if row and row.get("metadata"):
-                    meta_row = dict(row["metadata"]) if isinstance(row["metadata"], dict) else json.loads(row["metadata"] or "{}")
+                    meta_row = _decode_jsonb(row["metadata"])
                     reasoning = (meta_row.get("reasoning") or "") + delta
                     meta_row["reasoning"] = reasoning
                     await db.execute(
                         f"UPDATE {self._fq_table} SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
-                        json.dumps(meta_row, ensure_ascii=False), assistant_msg_id,
+                        meta_row, assistant_msg_id,
                     )
 
         if ctx.get("reasoning_buf"):
@@ -480,14 +493,14 @@ class PostgresChannel(BaseChannel):
                     f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
                     assistant_msg_id,
                 )
-                existing_meta = dict(row["metadata"] or {}) if row and row["metadata"] else {}
+                existing_meta = _decode_jsonb(row["metadata"]) if row else {}
                 existing_meta.update(meta)
                 await conn.execute(
                     f"UPDATE {self._fq_table} "
                     f"SET content = $1, metadata = $2::jsonb, buttons = $3::jsonb, "
                     f"status = 'completed', updated_at = NOW() WHERE id = $4",
-                    msg.content, json.dumps(existing_meta, ensure_ascii=False),
-                    json.dumps(msg.buttons or []), assistant_msg_id,
+                    msg.content, existing_meta,
+                    msg.buttons or [], assistant_msg_id,
                 )
                 if msg_id:
                     await conn.execute(
@@ -525,12 +538,12 @@ class PostgresChannel(BaseChannel):
                         f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
                         assistant_msg_id,
                     )
-                    existing_meta = dict(row["metadata"] or {}) if row and row["metadata"] else {}
+                    existing_meta = _decode_jsonb(row["metadata"]) if row else {}
                     existing_meta.update(meta | {"streamed": True})
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET content = $1, "
                         f"metadata = $2::jsonb, status = 'completed', updated_at = NOW() WHERE id = $3",
-                        content, json.dumps(existing_meta, ensure_ascii=False), assistant_msg_id,
+                        content, existing_meta, assistant_msg_id,
                     )
                     if msg_id:
                         await conn.execute(
