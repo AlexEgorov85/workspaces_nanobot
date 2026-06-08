@@ -1,22 +1,23 @@
-"""Тест: бот генерирует файл (CSV) и возвращает его через таблицу."""
+"""Тест: бот генерирует файл (CSV) и возвращает его через таблицу.
+
+DSN берётся из gateway_settings.py — единственный источник правды.
+"""
 
 import asyncio
 import json
-import asyncpg
+
+from gateway_settings import SETTINGS
+from workspace.utils.db import db
+
+db.configure(SETTINGS.pg.dsn)
 
 
 async def main():
-    conn = await asyncpg.connect(
-        host="localhost", port=5432,
-        user="postgres", password="1",
-        database="postgres",
-    )
-
     # Убедиться что колонки есть
     for col in ["chat_id TEXT", "user_id TEXT", "media JSONB DEFAULT '[]'::jsonb"]:
-        await conn.execute(f"ALTER TABLE public.conversation_messages ADD COLUMN IF NOT EXISTS {col}")
+        await db.execute(f"ALTER TABLE public.conversation_messages ADD COLUMN IF NOT EXISTS {col}")
 
-    msg_id = await conn.fetchval("""
+    row = await db.fetchone("""
         INSERT INTO public.conversation_messages
             (chat_id, user_id, conversation_id, role, content, status)
         VALUES ($1, $2, uuid_generate_v4(), 'user', $3, 'pending')
@@ -26,12 +27,13 @@ async def main():
         "колонки: id, object, violation_type, fine_amount, date. "
         "Создай файл через write_file и верни его содержимое."
     )
+    msg_id = row["id"]
     print(f"[1] Запрос отправлен (id={msg_id})")
 
     print("[2] Ожидание ответа агента...")
     for attempt in range(30):
         await asyncio.sleep(2)
-        row = await conn.fetchrow(
+        row = await db.fetchone(
             "SELECT role, content, media, status FROM public.conversation_messages "
             "WHERE chat_id = 'csv_test_chat' AND role = 'assistant' "
             "ORDER BY created_at DESC LIMIT 1"
@@ -63,7 +65,7 @@ async def main():
         print("[3] Ответ не получен за 60с")
 
     print("\n[4] Вся переписка:")
-    rows = await conn.fetch(
+    rows = await db.fetch(
         "SELECT role, left(content, 100) AS preview, media IS NOT NULL AND media != '[]'::jsonb AS has_media "
         "FROM public.conversation_messages WHERE chat_id = 'csv_test_chat' "
         "ORDER BY created_at"
@@ -72,9 +74,8 @@ async def main():
         print(f"  [{r['role']:9}] {r['preview']}  | files={r['has_media']}")
 
     # Почистить
-    await conn.execute("DELETE FROM public.conversation_messages WHERE chat_id = 'csv_test_chat'")
+    await db.execute("DELETE FROM public.conversation_messages WHERE chat_id = 'csv_test_chat'")
     print("\n[5] Тестовые сообщения удалены")
-    await conn.close()
 
 
 asyncio.run(main())

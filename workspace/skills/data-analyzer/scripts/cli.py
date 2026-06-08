@@ -16,14 +16,14 @@ try:
 except AttributeError:
     pass
 
-# Добавляем scripts в путь
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Добавляем scripts и workspace в путь для импорта utils.db
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _SCRIPTS_DIR)
+_nanobot_root = os.path.abspath(os.path.join(_SCRIPTS_DIR, "..", ".."))
+if _nanobot_root not in sys.path:
+    sys.path.insert(0, _nanobot_root)
 
 from api import AuditAnalyzer
-from database import DatabaseManager
-from predefined_scripts import PredefinedScripts
-from vector_integration import VectorSearch
-from llm_client import LLMClient
 
 def setup_logging():
     logging.basicConfig(
@@ -53,12 +53,15 @@ def main():
 
     try:
         cfg = load_config(args.config)
-        db = DatabaseManager(cfg["database"]["connection_string"])
-        scripts = PredefinedScripts()
-        vector = VectorSearch(cfg.get("modes", {}).get("vector", {}))
-        llm = LLMClient(cfg["llm"], max_retries=cfg["cli"]["max_retries"])
-        
-        analyzer = AuditAnalyzer(db, scripts, vector, llm, cfg)
+        # Навык data-analyzer не имеет реализации БД — см. db_analyzer
+        from utils.db import db
+        db_class = type("SharedDBWrapper", (), {
+            "get_schema_description": lambda self: "Схема не доступна (data-analyzer не подключён к БД)",
+            "validate_sql": lambda self, sql: None,
+            "generate_sql": lambda self, schema, query: "-- SQL generation not available",
+        })
+        db_wrapper = db_class()
+        analyzer = AuditAnalyzer(db_wrapper, None, None, None, cfg)
         result = analyzer.execute_mode(args.mode, args.query)
         
         # Формирование отчёта

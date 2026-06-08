@@ -494,7 +494,6 @@
     "ssrfWhitelist": [],
     "db_analyzer": {
       "database": {
-        "connection_string": "",
         "schema": "oarb",
         "tables": ["audit_reports", "audits", "report_items", "violations"]
       },

@@ -17,6 +17,11 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+# Добавляем корень проекта в sys.path для импорта utils.db
+_project_root = Path(__file__).resolve().parents[3]  # workspace/ — для импорта utils.db
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 from utils.db import db as shared_db
 
 
