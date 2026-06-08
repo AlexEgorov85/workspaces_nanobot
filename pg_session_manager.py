@@ -64,7 +64,7 @@ class PGSessionManager(SessionManager):
         self.sessions_dir = workspace / "sessions"
         self.legacy_sessions_dir = self.sessions_dir
         if dsn:
-            db.configure(dsn)
+            db.configure(dsn, min_size=min_conn, max_size=max_conn)
 
     def close(self) -> None:
         pass

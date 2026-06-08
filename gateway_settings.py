@@ -103,14 +103,17 @@ class PGSettings:
     Если указать dsn/schema в секции конкретного канала
     (например pg.channel.dsn), они переопределят корневые.
 
-    ── Сессии (PGSessionManager) ─────────────────────────────────────────
-    Хранит историю диалогов в таблицах:
-      messages_table — сообщения сессий
-      meta_table     — метаданные сессий (модель, токены, статус)
+    ── SharedDB (asyncpg pool) ──────────────────────────────────────────
+    Все асинхронные запросы (PostgresChannel, db_analyzer) идут через
+    единый asyncpg-пул. Если max_size занят, acquire() ждёт
+    освобождения — очередь встроена в asyncpg.
 
-    Пул соединений:
-      pool_min_conn / pool_max_conn — мин/макс число соединений
+      pool_min_conn / pool_max_conn — мин/макс число соединений в пуле
       pool_timeout — таймаут ожидания свободного соединения (сек)
+      (таймаут пока не используется — можно добавить при необходимости)
+
+    Синхронные запросы (PGSessionManager) создают отдельные подключения
+    вне пула (в executor-треде) и не влияют на pool.
     """
     dsn: str = "postgresql://postgres:1@localhost:5432/postgres"                          # postgresql://user:pass@host:5432/dbname
     schema: str = "public"

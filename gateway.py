@@ -89,7 +89,7 @@ def main() -> None:
     dsn = pg.dsn
     if dsn:
         from utils.db import db
-        db.configure(dsn)
+        db.configure(dsn, min_size=pg.pool_min_conn, max_size=pg.pool_max_conn)
     use_postgres = SETTINGS.storage == "postgres" or (SETTINGS.storage == "auto" and bool(dsn))
     if use_postgres:
         if not dsn:
