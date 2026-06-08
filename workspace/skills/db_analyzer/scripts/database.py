@@ -33,7 +33,7 @@ class Database:
 
     def __init__(self, db_config: dict):
         dsn = db_config.get("connection_string", "")
-        if dsn:
+        if dsn and dsn != shared_db.dsn:
             shared_db.configure(dsn)
         self._schema_name = db_config.get("schema", "public")
         self._table_names: Optional[list[str]] = db_config.get("tables") or None
@@ -111,12 +111,12 @@ class Database:
             LEFT JOIN pg_catalog.pg_description pgd
                 ON pgd.objsubid = c.ordinal_position
                AND pgd.objoid = pc.oid
-            WHERE c.table_schema = %s
+            WHERE c.table_schema = $1
         """
         params: list[Any] = [schema]
 
         if tables:
-            query += " AND c.table_name = ANY(%s)"
+            query += " AND c.table_name = ANY($2)"
             params.append(tables)
 
         query += " ORDER BY c.table_name, c.ordinal_position"
