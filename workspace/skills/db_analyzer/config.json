@@ -8,7 +8,6 @@
     "temperature": 0.1
   },
   "database": {
-    "connection_string": "postgresql://postgres:1@localhost:5432/postgres",
     "schema": "oarb",
     "tables": ["audit_reports", "audits", "report_items", "violations"],
     "schema_cache": {

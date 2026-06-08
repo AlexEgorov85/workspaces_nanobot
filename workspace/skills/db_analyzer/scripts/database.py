@@ -24,17 +24,17 @@ class Database:
     """
     Подключение к PostgreSQL через глобальный SharedDB.
 
+    DSN задаётся в gateway_settings.py (pg.dsn) — навык не имеет
+    собственного DSN. Перед использованием Database SharedDB должен
+    быть сконфигурирован (gateway вызывает db.configure(dsn) при старте).
+
     Принимает dict конфигурации из load_db_config():
-        connection_string — DSN (используется если SharedDB не сконфигурирован)
         schema           — имя схемы по умолчанию
         tables           — список таблиц для фильтрации (опционально)
         schema_cache     — настройки кеша: enabled, path, ttl_seconds
     """
 
     def __init__(self, db_config: dict):
-        dsn = db_config.get("connection_string", "")
-        if dsn and dsn != shared_db.dsn:
-            shared_db.configure(dsn)
         self._schema_name = db_config.get("schema", "public")
         self._table_names: Optional[list[str]] = db_config.get("tables") or None
 

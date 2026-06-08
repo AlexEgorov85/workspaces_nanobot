@@ -121,20 +121,18 @@ def load_db_config() -> dict[str, Any]:
     """
     Конфигурация подключения к PostgreSQL.
 
+    DSN задаётся в gateway_settings.py (pg.dsn) — единственный источник правды.
+    Навык использует глобальный SharedDB, настроенный gateway.
+
     Returns:
         dict из секции database config.json:
-            connection_string, schema, tables, schema_cache.
+            connection_string (пустая строка — DSN берётся из gateway),
+            schema, tables, schema_cache.
         Путь schema_cache.path разрешается в абсолютный.
-
-    Пример:
-        >>> load_db_config()
-        {'connection_string': 'postgresql://...', 'schema': 'oarb',
-         'tables': [...], 'schema_cache': {...}}
     """
     cfg = _load().get("database", {})
     result = dict(cfg)
-    if not result.get("connection_string"):
-        result["connection_string"] = "postgresql://postgres:@localhost:5432/postgres"
+    result.setdefault("connection_string", "")
     # Разрешаем относительный путь кеша
     cache = result.get("schema_cache")
     if cache:
