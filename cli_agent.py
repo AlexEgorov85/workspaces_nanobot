@@ -221,6 +221,7 @@ from loguru import logger
 
 from nanobot.agent import AgentHook
 from nanobot.agent.loop import AgentLoop
+from workspace.patches.review_agent_loop import ReviewAgentLoop
 from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import (
     _flush_pending_tty_input,
@@ -623,7 +624,7 @@ def _run_vanilla_agent(args: argparse.Namespace) -> None:
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
-    agent = AgentLoop.from_config(config, bus, cron_service=cron)
+    agent = ReviewAgentLoop.from_config(config, bus, cron_service=cron)
     _run_interactive_loop(agent, config, session=args.session, display=DISPLAY)
 
 
@@ -693,7 +694,7 @@ def _run_patched_agent(args: argparse.Namespace) -> None:
             console.print("[dim]PostgreSQL DSN available but --storage=file; using JSONL files[/dim]")
 
     hooks = _scan_and_register_hooks()
-    agent = AgentLoop.from_config(
+    agent = ReviewAgentLoop.from_config(
         config, bus,
         cron_service=cron,
         session_manager=session_manager,

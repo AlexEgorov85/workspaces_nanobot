@@ -27,6 +27,7 @@ from redis_channel import RedisChannel
 from utils.session_file_store import SessionFileStore, prepare_content
 
 from nanobot.agent.loop import AgentLoop
+from workspace.patches.review_agent_loop import ReviewAgentLoop
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.manager import ChannelManager, _default_webui_dist
 from nanobot.cli.commands import _load_runtime_config, console, __logo__, __version__
@@ -189,7 +190,7 @@ def main() -> None:
         pass
 
     # ── 6. Создание AgentLoop ────────────────────────────────────────────
-    agent = AgentLoop.from_config(
+    agent = ReviewAgentLoop.from_config(
         config, bus,
         session_manager=session_manager,
         hooks=[],

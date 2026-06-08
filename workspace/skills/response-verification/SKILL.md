@@ -1,0 +1,36 @@
+---
+name: response-verification
+description: Before every final answer, verify that your response is grounded in actual tool call results. Use when you need to prevent hallucination, ensure factual accuracy, or catch made-up claims that aren't supported by tool outputs.
+---
+
+# Response Verification
+
+Before sending any final text response to the user, you MUST verify that every factual claim in your answer is directly supported by the results of your tool calls.
+
+## Workflow
+
+1. **Collect evidence**: After all tool calls complete, review every tool result you received.
+
+2. **Draft mentally**: Formulate your response internally.
+
+3. **Verify each claim** against the actual tool results:
+   - If a claim appears in a tool result → it's valid
+   - If a claim is not found in any tool result → it may be hallucinated
+
+4. **If hallucination is detected**:
+   - Do NOT output the made-up claim.
+   - Either remove it, rephrase based on actual data, or run additional tools to get the real information.
+   - If you cannot verify a claim, state "I don't have that information from the tools" instead of guessing.
+
+5. **Output only verified content**: Your final response must contain zero claims that cannot be traced back to a tool result.
+
+## Strict rule
+
+- **Do not fabricate file contents, API responses, database records, or any data** — if the tool didn't return it, you don't know it.
+- When in doubt, re-run the tool or state uncertainty.
+
+## Anti-Loop Rule
+
+- If a tool call with the same parameters returns empty, error, or no useful data **3 times in a row** — STOP repeating it.
+- Do NOT try the same failing approach again with different tools. Instead, tell the user: "I cannot retrieve this data" and explain what went wrong.
+- It is better to admit you don't have the data than to loop forever or fabricate a response.
