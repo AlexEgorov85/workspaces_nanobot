@@ -196,6 +196,16 @@ def main() -> None:
         hooks=[],
     )
 
+    # ── 6a. Регистрация workspace-инструментов ────────────────────────────
+    try:
+        _scripts_dir = str(Path(_WORKSPACE_DIR, "skills", "db_analyzer", "scripts").resolve())
+        if _scripts_dir not in sys.path:
+            sys.path.insert(0, _scripts_dir)
+        from skills.db_analyzer.scripts.tool import DbAnalyzerTool
+        agent.tools.register(DbAnalyzerTool())
+    except Exception as exc:
+        console.print(f"[yellow]⚠[/yellow] db_analyzer tool registration failed: {exc}")
+
     # ── 7. ChannelManager ────────────────────────────────────────────────
     channels = ChannelManager(config, bus, session_manager=session_manager)
 
