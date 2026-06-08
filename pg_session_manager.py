@@ -164,6 +164,10 @@ class PGSessionManager(SessionManager):
             for col in _MESSAGE_COLUMNS:
                 val = r.get(col)
                 if val is not None:
+                    # backward compat: старые данные могли быть сохранены
+                    # как json.dumps(str) до установки JSONB-кодека
+                    if isinstance(val, str) and col in _JSON_COLUMNS:
+                        val = json.loads(val)
                     msg[col] = val
             messages.append(msg)
 
@@ -172,7 +176,7 @@ class PGSessionManager(SessionManager):
             messages=messages,
             created_at=meta["created_at"].replace(tzinfo=None) if meta["created_at"] else datetime.now(),
             updated_at=meta["updated_at"].replace(tzinfo=None) if meta["updated_at"] else datetime.now(),
-            metadata=dict(meta["metadata"] or {}),
+            metadata=dict((json.loads(meta["metadata"]) if isinstance(meta["metadata"], str) else meta["metadata"]) or {}),
             last_consolidated=meta["last_consolidated"],
         )
 
@@ -182,14 +186,15 @@ class PGSessionManager(SessionManager):
     async def _async_save(
         self, conn: asyncpg.Connection, session: Session
     ) -> None:
-        metadata_json = json.dumps(session.metadata, ensure_ascii=False, default=str)
+        # metadata — dict, asyncpg JSONB-кодек сам сделает json.dumps
+        metadata_val = session.metadata or {}
         updated_at = datetime.now()
 
         result = await conn.execute(
             f"UPDATE {self._fq_meta} SET "
             f"updated_at = $1, last_consolidated = $2, metadata = $3::jsonb "
             f"WHERE session_key = $4",
-            updated_at, session.last_consolidated, metadata_json, session.key,
+            updated_at, session.last_consolidated, metadata_val, session.key,
         )
         if result == "UPDATE 0":
             await conn.execute(
@@ -197,7 +202,7 @@ class PGSessionManager(SessionManager):
                 f"(session_key, created_at, updated_at, last_consolidated, metadata) "
                 f"VALUES ($1, $2, $3, $4, $5::jsonb)",
                 session.key, session.created_at, updated_at,
-                session.last_consolidated, metadata_json,
+                session.last_consolidated, metadata_val,
             )
 
         await conn.execute(
@@ -230,7 +235,7 @@ class PGSessionManager(SessionManager):
         for col in _MESSAGE_COLUMNS:
             val = msg.get(col)
             if val is not None:
-                vals[col] = json.dumps(val, ensure_ascii=False, default=str) if col in _JSON_COLUMNS else val
+                vals[col] = val  # JSONB-колонки кодируются кодеком, остальные — скаляры
             else:
                 vals[col] = None
         vals["msg_timestamp"] = msg.get("timestamp")
@@ -272,7 +277,10 @@ class PGSessionManager(SessionManager):
         out: list[dict[str, Any]] = []
         for meta in meta_rows:
             key = meta["session_key"]
-            meta_dict = dict(meta["metadata"] or {})
+            _raw = meta["metadata"]
+            if isinstance(_raw, str):
+                _raw = json.loads(_raw)
+            meta_dict = dict(_raw or {})
             title = meta_dict.get("title") if isinstance(meta_dict.get("title"), str) else ""
 
             rows = await conn.fetch(
