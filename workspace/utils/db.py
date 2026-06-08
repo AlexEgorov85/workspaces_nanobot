@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Optional
 
@@ -71,6 +72,21 @@ class _SharedDB:
             self._pool.terminate()
             self._pool = None
 
+    @staticmethod
+    async def _init_jsonb(conn: asyncpg.Connection) -> None:
+        """Зарегистрировать декодер JSONB → dict на подключении.
+
+        asyncpg по умолчанию возвращает JSONB как str;
+        этот кодек делает так, что все JSONB-колонки
+        возвращаются как Python dict/list сразу.
+        """
+        await conn.set_type_codec(
+            "jsonb",
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
+
     async def _get_pool(self) -> asyncpg.Pool:
         if self._pool is None:
             if not self._dsn:
@@ -79,7 +95,10 @@ class _SharedDB:
                     "или заполните pg.dsn в gateway_settings.py"
                 )
             self._pool = await asyncpg.create_pool(
-                dsn=self._dsn, min_size=self._pool_min, max_size=self._pool_max
+                dsn=self._dsn,
+                min_size=self._pool_min,
+                max_size=self._pool_max,
+                init=self._init_jsonb,
             )
         return self._pool
 
@@ -90,7 +109,9 @@ class _SharedDB:
                 "SharedDB не инициализирован: вызовите db.configure(dsn) "
                 "или заполните pg.dsn в gateway_settings.py"
             )
-        return await asyncpg.connect(dsn=self._dsn)
+        conn = await asyncpg.connect(dsn=self._dsn)
+        await self._init_jsonb(conn)
+        return conn
 
     # ------------------------------------------------------------------
     # Транзакция (асинхронная)
