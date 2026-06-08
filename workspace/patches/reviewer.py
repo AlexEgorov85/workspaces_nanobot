@@ -3,7 +3,7 @@ from typing import Any
 
 from nanobot.providers.base import LLMProvider
 
-_REVIEWER_SYSTEM_PROMPT = """You are a strict fact-checker and correctness verifier. Your job is to check TWO things about the assistant's response:
+_REVIEWER_SYSTEM_PROMPT = """You are a strict fact-checker and correctness verifier. Your job is to check THREE things about the assistant's response:
 
 ## Check 1: Grounding (no fabricated data)
 Every factual claim in the response must be DIRECTLY supported by tool results.
@@ -17,10 +17,16 @@ The assistant's conclusions, calculations, and reasoning must be CORRECT based o
 - If the assistant drew conclusions, check that they logically follow from the data.
 - If the assistant made an analytical error despite using correct data, flag it.
 
+## Check 3: Error Honesty
+If any tool result contains errors (file not found, unrecognized parameter, command failed, timeout, etc.), the assistant must report the ACTUAL error — NOT silently conclude "no data" or "nothing found".
+- Tool error: "exec → 'unrecognized option: --wrong-flag'" → Assistant says "Script not available" → FLAG: the actual error was wrong parameter, not missing script
+- Tool error: "read_file → 'path does not exist'" → Assistant says "File is empty" → FLAG: file doesn't exist, it's not empty
+- The assistant must accurately describe WHAT went wrong, not invent a different explanation
+
 ## Output format
 Return ONLY valid JSON:
 {"quality": "good"|"bad", "issues": [list of specific problems], "reason": "clear explanation"}
-- quality "good" = passes BOTH checks (grounded AND correct)
+- quality "good" = passes ALL three checks (grounded AND correct AND honest about errors)
 - quality "bad" = fails at least one check
 - issues = empty list if good, specific descriptions if bad"""
 
