@@ -32,21 +32,21 @@ def build_sql(
       2. Форматирует значения по типу (like → %%, number → int)
       3. Рендерит {% if %} блоки
       4. Добавляет LIMIT
-      5. Конвертирует :param → %s
+      5. Конвертирует :param → $N
 
     Args:
         script: ScriptDefinition из реестра.
         params: Значения параметров.
 
     Returns:
-        (sql_string, [values_for_execute])
+        (sql_string, [values_for_asyncpg])
 
     Пример:
         >>> from scripts_registry import SCRIPTS_REGISTRY
         >>> script = SCRIPTS_REGISTRY["analytics_by_year_month"]
         >>> sql, vals = build_sql(script, {"year": 2024})
-        >>> sql  # содержит %s плейсхолдеры
-        'SELECT ... WHERE ... = %s\\nLIMIT %s'
+        >>> sql  # содержит $1, $2 плейсхолдеры
+        'SELECT ... WHERE ... = $1\\nLIMIT $2'
         >>> vals
         [2024, 100]
     """

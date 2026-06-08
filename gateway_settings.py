@@ -184,7 +184,7 @@ class GatewaySettings:
     #   [Result saved to data_store/cache/sessions/.../results/...json (12.5 KB)]
     #
     # 0 = не сохранять, оставить стандартное поведение (обрезать в истории).
-    persist_threshold: int = 500
+    persist_threshold: int = 50
 
     # ── Таймауты (секунды; 0 = без лимита) ──────────────────────────────────
     llm_timeout: float = 300      # Лимит на один LLM-запрос
@@ -195,7 +195,7 @@ class GatewaySettings:
     # "INFO"    — основные события (рекомендуется для ежедневного использования)
     # "WARNING" — только ошибки и предупреждения
     # "ERROR"   — только ошибки
-    log_level: str = "WARNING"
+    log_level: str = "INFO"
 
     # ── Redis-канал ──────────────────────────────────────────────────────────
     redis: 'RedisSettings' = field(default_factory=lambda: RedisSettings())

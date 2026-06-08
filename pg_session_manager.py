@@ -20,11 +20,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import psycopg2.extras
 from loguru import logger
 
 from nanobot.session.manager import Session, SessionManager, _message_preview_text
 from utils.db import db
+
+import asyncpg
 
 
 MESSAGES_TABLE = "session_messages"
@@ -42,12 +43,7 @@ _JSON_COLUMNS = {
 
 
 class PGSessionManager(SessionManager):
-    """Drop-in for SessionManager backed by PostgreSQL.
-
-    Uses a sync connection pool (psycopg2) so it matches the base class
-    synchronous ``save()`` / ``_load()`` / ``list_sessions()`` interface.
-    Long-running async callers should wrap these in ``run_in_executor``.
-    """
+    """Drop-in for SessionManager backed by PostgreSQL via asyncpg."""
 
     def __init__(
         self,
@@ -65,14 +61,12 @@ class PGSessionManager(SessionManager):
         self._fq_meta = self._quote(f"{schema}.{meta_table}")
         self._fq_messages = self._quote(f"{schema}.{messages_table}")
         self._cache: dict[str, Session] = {}
-        # For legacy compatibility — SessionManager stores these
         self.sessions_dir = workspace / "sessions"
-        self.legacy_sessions_dir = self.sessions_dir  # not used
+        self.legacy_sessions_dir = self.sessions_dir
         if dsn:
             db.configure(dsn)
 
     def close(self) -> None:
-        """Совместимость с SessionManager: ничего не делаем, коннекшн глобальный."""
         pass
 
     # ------------------------------------------------------------------
@@ -80,49 +74,45 @@ class PGSessionManager(SessionManager):
     # ------------------------------------------------------------------
 
     def ensure_tables(self) -> None:
-        with db.connection() as conn:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(f"""
-                        CREATE TABLE IF NOT EXISTS {self._fq_meta} (
-                            session_key      TEXT PRIMARY KEY,
-                            created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            last_consolidated INT NOT NULL DEFAULT 0,
-                            metadata         JSONB NOT NULL DEFAULT '{{}}'::jsonb
-                        )
-                    """)
-                    cur.execute(f"""
-                        CREATE TABLE IF NOT EXISTS {self._fq_messages} (
-                            id               BIGSERIAL PRIMARY KEY,
-                            session_key      TEXT NOT NULL
-                                REFERENCES {self._fq_meta}(session_key) ON DELETE CASCADE,
-                            seq              INT NOT NULL,
-                            role             TEXT NOT NULL,
-                            content          TEXT,
-                            msg_timestamp    TEXT,
-                            tool_calls       JSONB,
-                            tool_call_id     TEXT,
-                            name             TEXT,
-                            reasoning_content TEXT,
-                            thinking_blocks  JSONB,
-                            media            JSONB,
-                            cli_apps         JSONB,
-                            mcp_presets      JSONB,
-                            injected_event   TEXT,
-                            _command         BOOLEAN,
-                            _channel_delivery BOOLEAN,
-                            created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                    """)
-                    cur.execute(f"""
-                        CREATE INDEX IF NOT EXISTS idx_{MESSAGES_TABLE}_sk_seq
-                        ON {self._fq_messages} (session_key, seq)
-                    """)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        db.sync_transaction(self._async_create_tables)
+
+    async def _async_create_tables(self, conn: asyncpg.Connection) -> None:
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self._fq_meta} (
+                session_key      TEXT PRIMARY KEY,
+                created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_consolidated INT NOT NULL DEFAULT 0,
+                metadata         JSONB NOT NULL DEFAULT '{{}}'::jsonb
+            )
+        """)
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self._fq_messages} (
+                id               BIGSERIAL PRIMARY KEY,
+                session_key      TEXT NOT NULL
+                    REFERENCES {self._fq_meta}(session_key) ON DELETE CASCADE,
+                seq              INT NOT NULL,
+                role             TEXT NOT NULL,
+                content          TEXT,
+                msg_timestamp    TEXT,
+                tool_calls       JSONB,
+                tool_call_id     TEXT,
+                name             TEXT,
+                reasoning_content TEXT,
+                thinking_blocks  JSONB,
+                media            JSONB,
+                cli_apps         JSONB,
+                mcp_presets      JSONB,
+                injected_event   TEXT,
+                _command         BOOLEAN,
+                _channel_delivery BOOLEAN,
+                created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{MESSAGES_TABLE}_sk_seq
+            ON {self._fq_messages} (session_key, seq)
+        """)
 
     # ------------------------------------------------------------------
     # SessionManager interface
@@ -146,26 +136,25 @@ class PGSessionManager(SessionManager):
         return session
 
     def _load(self, key: str) -> Session | None:
-        with db.connection() as conn:
-            try:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    cur.execute(
-                        f"SELECT * FROM {self._fq_meta} WHERE session_key = %s",
-                        (key,),
-                    )
-                    meta = cur.fetchone()
-                    if meta is None:
-                        return None
+        return db.sync_transaction(lambda conn: self._async_load(conn, key))
 
-                    cur.execute(
-                        f"SELECT * FROM {self._fq_messages} WHERE session_key = %s ORDER BY seq ASC",
-                        (key,),
-                    )
-                    rows = cur.fetchall()
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+    async def _async_load(
+        self, conn: asyncpg.Connection, key: str
+    ) -> Session | None:
+        from asyncpg import Record
+
+        meta = await conn.fetchrow(
+            f"SELECT * FROM {self._fq_meta} WHERE session_key = $1",
+            key,
+        )
+        if meta is None:
+            return None
+
+        rows = await conn.fetch(
+            f"SELECT * FROM {self._fq_messages} "
+            f"WHERE session_key = $1 ORDER BY seq ASC",
+            key,
+        )
 
         messages = []
         for r in rows:
@@ -188,51 +177,51 @@ class PGSessionManager(SessionManager):
         )
 
     def save(self, session: Session, *, fsync: bool = False) -> None:
-        with db.connection() as conn:
-            try:
-                with conn.cursor() as cur:
-                    metadata_json = json.dumps(session.metadata, ensure_ascii=False, default=str)
-                    updated_at = datetime.now()
-                    cur.execute(
-                        f"""UPDATE {self._fq_meta} SET
-                                updated_at = %s,
-                                last_consolidated = %s,
-                                metadata = %s::jsonb
-                            WHERE session_key = %s""",
-                        (updated_at, session.last_consolidated, metadata_json, session.key),
-                    )
-                    if cur.rowcount == 0:
-                        cur.execute(
-                            f"""INSERT INTO {self._fq_meta}
-                                    (session_key, created_at, updated_at, last_consolidated, metadata)
-                                VALUES (%s, %s, %s, %s, %s::jsonb)""",
-                            (session.key, session.created_at, updated_at,
-                             session.last_consolidated, metadata_json),
-                        )
+        db.sync_transaction(lambda conn: self._async_save(conn, session))
 
-                    cur.execute(
-                        f"DELETE FROM {self._fq_messages} WHERE session_key = %s",
-                        (session.key,),
-                    )
+    async def _async_save(
+        self, conn: asyncpg.Connection, session: Session
+    ) -> None:
+        metadata_json = json.dumps(session.metadata, ensure_ascii=False, default=str)
+        updated_at = datetime.now()
 
-                    for seq, msg in enumerate(session.messages):
-                        self._insert_message(cur, session.key, seq, msg)
+        result = await conn.execute(
+            f"UPDATE {self._fq_meta} SET "
+            f"updated_at = $1, last_consolidated = $2, metadata = $3::jsonb "
+            f"WHERE session_key = $4",
+            updated_at, session.last_consolidated, metadata_json, session.key,
+        )
+        if result == "UPDATE 0":
+            await conn.execute(
+                f"INSERT INTO {self._fq_meta} "
+                f"(session_key, created_at, updated_at, last_consolidated, metadata) "
+                f"VALUES ($1, $2, $3, $4, $5::jsonb)",
+                session.key, session.created_at, updated_at,
+                session.last_consolidated, metadata_json,
+            )
 
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        await conn.execute(
+            f"DELETE FROM {self._fq_messages} WHERE session_key = $1",
+            session.key,
+        )
 
-        self._cache[session.key] = session
+        for seq, msg in enumerate(session.messages):
+            await self._async_insert_message(conn, session.key, seq, msg)
 
-    def _insert_message(
+    async def _async_insert_message(
         self,
-        cur: psycopg2.extensions.cursor,
+        conn: asyncpg.Connection,
         session_key: str,
         seq: int,
         msg: dict[str, Any],
     ) -> None:
-        values: dict[str, Any] = {
+        cols = [
+            "session_key", "seq", "role", "content",
+            "tool_calls", "tool_call_id", "name", "reasoning_content",
+            "thinking_blocks", "media", "cli_apps", "mcp_presets",
+            "injected_event", "_command", "_channel_delivery", "msg_timestamp",
+        ]
+        vals: dict[str, Any] = {
             "session_key": session_key,
             "seq": seq,
             "role": msg.get("role", "user"),
@@ -241,16 +230,16 @@ class PGSessionManager(SessionManager):
         for col in _MESSAGE_COLUMNS:
             val = msg.get(col)
             if val is not None:
-                values[col] = json.dumps(val, ensure_ascii=False, default=str) if col in _JSON_COLUMNS else val
+                vals[col] = json.dumps(val, ensure_ascii=False, default=str) if col in _JSON_COLUMNS else val
             else:
-                values[col] = None
-        values["msg_timestamp"] = msg.get("timestamp")
+                vals[col] = None
+        vals["msg_timestamp"] = msg.get("timestamp")
 
-        cols = ", ".join(values)
-        placeholders = ", ".join(f"%({k})s" for k in values)
-        cur.execute(
-            f"INSERT INTO {self._fq_messages} ({cols}) VALUES ({placeholders})",
-            values,
+        placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
+        col_list = ", ".join(cols)
+        await conn.execute(
+            f"INSERT INTO {self._fq_messages} ({col_list}) VALUES ({placeholders})",
+            *[vals[c] for c in cols],
         )
 
     def invalidate(self, key: str) -> None:
@@ -258,64 +247,54 @@ class PGSessionManager(SessionManager):
 
     def delete_session(self, key: str) -> bool:
         self.invalidate(key)
-        with db.connection() as conn:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"DELETE FROM {self._fq_meta} WHERE session_key = %s",
-                        (key,),
-                    )
-                    deleted = cur.rowcount > 0
-                conn.commit()
-                return deleted
-            except Exception:
-                conn.rollback()
-                raise
+        return db.sync_transaction(lambda conn: self._async_delete_session(conn, key))
+
+    async def _async_delete_session(
+        self, conn: asyncpg.Connection, key: str
+    ) -> bool:
+        result = await conn.execute(
+            f"DELETE FROM {self._fq_meta} WHERE session_key = $1",
+            key,
+        )
+        return "DELETE" in result and result.split()[-1] != "0"
 
     def list_sessions(self) -> list[dict[str, Any]]:
-        with db.connection() as conn:
-            try:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    cur.execute(f"""
-                        SELECT m.session_key, m.created_at, m.updated_at, m.metadata
-                        FROM {self._fq_meta} m
-                        ORDER BY m.updated_at DESC
-                    """)
-                    meta_rows = cur.fetchall()
+        return db.sync_transaction(self._async_list_sessions)
 
-                    out: list[dict[str, Any]] = []
-                    for meta in meta_rows:
-                        key = meta["session_key"]
-                        meta_dict = dict(meta["metadata"] or {})
-                        title = meta_dict.get("title") if isinstance(meta_dict.get("title"), str) else ""
+    async def _async_list_sessions(
+        self, conn: asyncpg.Connection
+    ) -> list[dict[str, Any]]:
+        meta_rows = await conn.fetch(
+            f"SELECT session_key, created_at, updated_at, metadata "
+            f"FROM {self._fq_meta} ORDER BY updated_at DESC"
+        )
 
-                        cur.execute(
-                            f"""
-                            SELECT role, content FROM {self._fq_messages}
-                            WHERE session_key = %s
-                            ORDER BY seq ASC LIMIT 10
-                            """,
-                            (key,),
-                        )
-                        preview = ""
-                        for row in cur.fetchall():
-                            text = _message_preview_text(dict(row))
-                            if text:
-                                preview = text
-                                break
+        out: list[dict[str, Any]] = []
+        for meta in meta_rows:
+            key = meta["session_key"]
+            meta_dict = dict(meta["metadata"] or {})
+            title = meta_dict.get("title") if isinstance(meta_dict.get("title"), str) else ""
 
-                        out.append({
-                            "key": key,
-                            "created_at": meta["created_at"].isoformat() if meta["created_at"] else None,
-                            "updated_at": meta["updated_at"].isoformat() if meta["updated_at"] else None,
-                            "title": title,
-                            "preview": preview,
-                        })
-                    conn.commit()
-                    return out
-            except Exception:
-                conn.rollback()
-                raise
+            rows = await conn.fetch(
+                f"SELECT role, content FROM {self._fq_messages} "
+                f"WHERE session_key = $1 ORDER BY seq ASC LIMIT 10",
+                key,
+            )
+            preview = ""
+            for row in rows:
+                text = _message_preview_text(dict(row))
+                if text:
+                    preview = text
+                    break
+
+            out.append({
+                "key": key,
+                "created_at": meta["created_at"].isoformat() if meta["created_at"] else None,
+                "updated_at": meta["updated_at"].isoformat() if meta["updated_at"] else None,
+                "title": title,
+                "preview": preview,
+            })
+        return out
 
     def read_session_file(self, key: str) -> dict[str, Any] | None:
         session = self._load(key)
@@ -349,16 +328,5 @@ class PGSessionManager(SessionManager):
 
     @staticmethod
     def _quote(ident: str) -> str:
-        """Quote a PostgreSQL identifier (schema.table)."""
         parts = ident.split(".")
         return ".".join(f'"{p}"' for p in parts)
-
-    @staticmethod
-    def _session_payload(session):
-        return {
-            "key": session.key,
-            "created_at": session.created_at.isoformat(),
-            "updated_at": session.updated_at.isoformat(),
-            "metadata": session.metadata,
-            "messages": session.messages,
-        }

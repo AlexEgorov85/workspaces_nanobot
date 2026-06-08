@@ -121,7 +121,7 @@ class Database:
 
         query += " ORDER BY c.table_name, c.ordinal_position"
 
-        rows = await shared_db.afetch(query, params)
+        rows = await shared_db.fetch(query, *params)
 
         result: dict = {}
         for row in rows:
@@ -214,7 +214,7 @@ class Database:
         Returns:
             dict: {status, row_count, columns, rows}
         """
-        rows = await shared_db.afetch(sql, params or [])
+        rows = await shared_db.fetch(sql, *(params or []))
 
         if not rows:
             return {"status": "success", "row_count": 0, "columns": [], "rows": []}
@@ -236,7 +236,7 @@ class Database:
         """
         explain_sql = f"EXPLAIN (FORMAT JSON) {sql}"
         try:
-            rows = await shared_db.afetch(explain_sql)
+            rows = await shared_db.fetch(explain_sql)
             plan = rows[0][0] if rows else None
             return {"valid": True, "plan": plan}
         except Exception as e:

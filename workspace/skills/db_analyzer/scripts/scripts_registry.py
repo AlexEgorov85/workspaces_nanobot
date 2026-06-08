@@ -99,14 +99,14 @@ class ScriptDefinition:
 class DynamicQueryBuilder:
     """
     Сборка SQL из шаблона: обработка {% if %}, подстановка параметров,
-    конвертация :param → %s для psycopg2.
+    конвертация :param → $1 для asyncpg.
 
     Pipeline:
         1. Значения по умолчанию для отсутствующих параметров
         2. Форматирование значений по типу (like → %%, limit → max_rows)
         3. Рендеринг {% if param %}...{% endif %} — удаление блоков с пустыми параметрами
         4. Авто-добавление LIMIT :max_rows если не указан
-        5. :param_name → %s (psycopg2 style)
+        5. :param_name → $1, $2, ... для asyncpg
     """
 
     @staticmethod
@@ -173,7 +173,7 @@ class DynamicQueryBuilder:
     @staticmethod
     def _convert_to_positional(sql: str, params: Dict[str, Any]) -> Tuple[str, List[Any]]:
         """
-        Конвертация :param_name → %s для psycopg2.
+        Конвертация :param_name → $1, $2 для asyncpg.
 
         Не трогает ::type_cast (двойное двоеточие) — используется
         для приведения типов в PostgreSQL.
@@ -183,32 +183,33 @@ class DynamicQueryBuilder:
             params: Словарь значений {имя: значение}.
 
         Returns:
-            (sql_with_percent_s_params, [values_in_order])
+            (sql_with_dollar_params, [values_in_order])
 
         Пример:
             >>> sql = "SELECT * FROM t WHERE x = :x AND y = :y"
             >>> DynamicQueryBuilder._convert_to_positional(sql, {"x": 1, "y": "abc"})
-            ('SELECT * FROM t WHERE x = %s AND y = %s', [1, 'abc'])
+            ('SELECT * FROM t WHERE x = $1 AND y = $2', [1, 'abc'])
 
             >>> sql = "SELECT * FROM t WHERE x = :x AND y = :x"
             >>> DynamicQueryBuilder._convert_to_positional(sql, {"x": 1})
-            ('SELECT * FROM t WHERE x = %s AND y = %s', [1, 1])
+            ('SELECT * FROM t WHERE x = $1 AND y = $2', [1])
 
         Внимание: не трогает ::type_cast (двойное двоеточие):
             >>> sql = "SELECT :x::TEXT"
             >>> DynamicQueryBuilder._convert_to_positional(sql, {"x": 42})
-            ('SELECT %s::TEXT', [42])
+            ('SELECT $1::TEXT', [42])
         """
-        matches: list[str] = []
+        seen: Dict[str, int] = {}
 
         def _repl(m: re.Match) -> str:
             name = m.group(1)
-            matches.append(name)
-            return '%s'
+            if name not in seen:
+                seen[name] = len(seen) + 1
+            return f'${seen[name]}'
 
         # Negative lookbehind: не заменять ::TEXT, ::INTEGER и т.д.
         positional_sql = re.sub(r'(?<!:):(\w+)', _repl, sql)
-        values = [params[name] for name in matches]
+        values = [params[name] for name in seen]
         return positional_sql, values
 
     @classmethod
@@ -225,14 +226,14 @@ class DynamicQueryBuilder:
             2. Для каждого параметра: форматирование по типу (like → %%, limit → max_rows, etc.)
             3. Рендеринг {% if %} блоков
             4. Авто-добавление LIMIT :max_rows
-            5. Конвертация :param → %s
+            5. Конвертация :param → $N
 
         Args:
             script: ScriptDefinition с sql_template и parameters.
             params: Значения параметров от пользователя.
 
         Returns:
-            (sql_with_percent_s_params, [values_for_execute])
+            (sql_with_dollar_params, [values_for_asyncpg])
 
         Raises:
             ValueError: Если обязательный параметр отсутствует.
@@ -241,12 +242,12 @@ class DynamicQueryBuilder:
             >>> from scripts_registry import SCRIPTS_REGISTRY
             >>> script = SCRIPTS_REGISTRY["analytics_by_year_month"]
             >>> DynamicQueryBuilder.build(script, {"year": 2024})
-            ('SELECT ... WHERE ... = %s\\nLIMIT %s', [2024, 100])
+            ('SELECT ... WHERE ... = $1\\nLIMIT $2', [2024, 100])
 
         Пример с like-параметром:
             >>> script2 = SCRIPTS_REGISTRY["violations_by_type"]
             >>> DynamicQueryBuilder.build(script2, {"violation_code": "финан"})
-            ('SELECT ... WHERE ... ILIKE %s\\nLIMIT %s', ['%финан%', 100])
+            ('SELECT ... WHERE ... ILIKE $1\\nLIMIT $2', ['%финан%', 100])
         """
         clean_params: Dict[str, Any] = {}
         final_sql = script.sql_template

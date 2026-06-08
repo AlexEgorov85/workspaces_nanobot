@@ -1,42 +1,44 @@
-import threading
+"""
+Единый коннектор к PostgreSQL через asyncpg.
+
+Использует один пул asyncpg (min_size=1, max_size=1).
+В каждый момент времени выполняется не более одного запроса.
+
+Асинхронные методы (для PostgresChannel, db_analyzer)::
+
+    from utils.db import db
+    rows = await db.fetch("SELECT * FROM my_table")
+
+Синхронные методы (для PGSessionManager)::
+
+    rows = db.sync_fetch("SELECT * FROM my_table")
+
+Транзакция (асинхронная)::
+
+    async with db.transaction() as conn:
+        row = await conn.fetchrow("SELECT ... FOR UPDATE", arg)
+        await conn.execute("UPDATE ...", arg)
+
+Параметры — в стиле asyncpg ($1, $2, ...).
+"""
+
+from __future__ import annotations
+
 import asyncio
-from contextlib import contextmanager
+import concurrent.futures
+from contextlib import asynccontextmanager
 from typing import Any, Callable, Optional
 
-import psycopg2
-import psycopg2.extras
+import asyncpg
 
 
 class _SharedDB:
-    """Единый коннектор к PostgreSQL для gateway, каналов и навыков.
-
-    Использует один psycopg2-коннекшн с блокировкой (threading.Lock).
-    В каждый момент времени выполняется не более одного запроса.
-
-    Первый вызов любого метода инициализирует коннекшн из настроек.
-
-    Пример (синхронный)::
-
-        from utils.db import db
-        rows = db.fetch("SELECT * FROM my_table")
-
-    Пример (асинхронный)::
-
-        rows = await db.afetch("SELECT * FROM my_table")
-
-    Пример (транзакция)::
-
-        with db.connection() as conn:
-            cur = conn.cursor()
-            cur.execute("DELETE FROM t")
-            cur.execute("INSERT INTO t VALUES (1)")
-            conn.commit()
-    """
-
     def __init__(self):
         self._dsn: str = ""
-        self._conn: Optional[psycopg2.extensions.connection] = None
-        self._lock = threading.Lock()
+        self._pool: Optional[asyncpg.Pool] = None
+        self._sync_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="db_sync"
+        )
 
     # ------------------------------------------------------------------
     # Инициализация
@@ -48,114 +50,101 @@ class _SharedDB:
         self._close()
 
     def _close(self) -> None:
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
+        if self._pool is not None:
+            self._pool.terminate()
+            self._pool = None
 
-    def _ensure(self) -> psycopg2.extensions.connection:
-        if self._conn is None or self._conn.closed:
+    async def _get_pool(self) -> asyncpg.Pool:
+        if self._pool is None:
             if not self._dsn:
                 raise RuntimeError(
                     "SharedDB не инициализирован: вызовите db.configure(dsn) "
                     "или заполните pg.dsn в gateway_settings.py"
                 )
-            self._conn = psycopg2.connect(self._dsn)
-            # Оставляем autocommit=False — вызывающий сам управляет commit/rollback
-        return self._conn
+            self._pool = await asyncpg.create_pool(
+                dsn=self._dsn, min_size=1, max_size=1
+            )
+        return self._pool
 
     # ------------------------------------------------------------------
-    # Сырой коннекшн (для транзакций)
+    # Транзакция (асинхронная)
     # ------------------------------------------------------------------
 
-    @contextmanager
-    def connection(self) -> psycopg2.extensions.connection:
-        """Контекстный менеджер: заблокированный коннекшн для транзакций.
+    @asynccontextmanager
+    async def transaction(self):
+        """Асинхронная транзакция: все операции в одном подключении.
 
-        Вызывающий сам делает commit / rollback::
+        Пример::
 
-            with db.connection() as conn:
-                cur = conn.cursor()
-                cur.execute("DELETE FROM t WHERE id = %s", (1,))
-                conn.commit()
+            async with db.transaction() as conn:
+                row = await conn.fetchrow("SELECT ... FOR UPDATE", arg)
+                await conn.execute("UPDATE ...", arg)
         """
-        with self._lock:
-            yield self._ensure()
-
-    async def aconnection(self):
-        """Асинхронный контекстный менеджер (обёртка вокруг sync connection)."""
-        loop = asyncio.get_running_loop()
-        conn = await loop.run_in_executor(None, self._lock_acquire)
-        try:
-            yield conn
-        finally:
-            self._lock.release()
-
-    def _lock_acquire(self):
-        self._lock.acquire()
-        return self._ensure()
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                yield conn
 
     # ------------------------------------------------------------------
-    # Простые запросы (авто-commit)
+    # Простые запросы (асинхронные)
     # ------------------------------------------------------------------
 
-    def execute(self, sql: str, params: Optional[list] = None) -> Optional[list[tuple]]:
-        """Выполнить SQL, вернуть строки если есть (sync)."""
-        with self.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                conn.commit()
-                if cur.description:
-                    return cur.fetchall()
-                return None
+    async def execute(
+        self, sql: str, *args: Any
+    ) -> Optional[str]:
+        """INSERT/UPDATE/DELETE — вернуть статус."""
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            return await conn.execute(sql, *args)
 
-    def fetch(self, sql: str, params: Optional[list] = None) -> list[dict[str, Any]]:
-        """SELECT — вернуть список строк как dict (sync)."""
-        with self.connection() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, params)
-                conn.commit()
-                return cur.fetchall()
+    async def fetch(self, sql: str, *args: Any) -> list[asyncpg.Record]:
+        """SELECT — вернуть список строк."""
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetch(sql, *args)
 
-    def fetchone(self, sql: str, params: Optional[list] = None) -> Optional[dict[str, Any]]:
-        """SELECT — вернуть одну строку как dict (sync)."""
-        with self.connection() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, params)
-                conn.commit()
-                return cur.fetchone()
+    async def fetchone(self, sql: str, *args: Any) -> Optional[asyncpg.Record]:
+        """SELECT — вернуть одну строку."""
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetchrow(sql, *args)
 
     # ------------------------------------------------------------------
-    # Многошаговые операции
+    # Синхронные обёртки (для PGSessionManager)
     # ------------------------------------------------------------------
 
-    def with_connection(self, fn: Callable, *args, **kwargs) -> Any:
-        """Выполнить fn(conn, *args, **kwargs) под блокировкой с auto-commit.
+    def _run_sync(self, coro_factory: Callable[[], Any]) -> Any:
+        """Запустить корутину синхронно в отдельном потоке со своим event loop.
 
-        Все операции внутри fn выполняются атомарно (один захват блокировки).
-        fn получает сырой psycopg2-connection и должна сама делать commit/rollback.
+        Нужен чтобы не блокировать работающий event loop основного потока.
         """
-        with self.connection() as conn:
-            return fn(conn, *args, **kwargs)
+        future = self._sync_executor.submit(
+            lambda: asyncio.run(coro_factory())
+        )
+        return future.result()
 
-    async def awith_connection(self, fn: Callable, *args, **kwargs) -> Any:
-        """Асинхронная версия with_connection."""
-        return await asyncio.to_thread(self.with_connection, fn, *args, **kwargs)
+    def sync_execute(self, sql: str, *args: Any) -> Optional[str]:
+        return self._run_sync(lambda: self.execute(sql, *args))
 
-    # ------------------------------------------------------------------
-    # Асинхронные обёртки
-    # ------------------------------------------------------------------
+    def sync_fetch(self, sql: str, *args: Any) -> list[asyncpg.Record]:
+        return self._run_sync(lambda: self.fetch(sql, *args))
 
-    async def aexecute(self, sql: str, params: Optional[list] = None) -> Optional[list[tuple]]:
-        return await asyncio.to_thread(self.execute, sql, params)
+    def sync_fetchone(self, sql: str, *args: Any) -> Optional[asyncpg.Record]:
+        return self._run_sync(lambda: self.fetchone(sql, *args))
 
-    async def afetch(self, sql: str, params: Optional[list] = None) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self.fetch, sql, params)
+    def sync_transaction(
+        self, async_fn: Callable[[asyncpg.Connection], Any]
+    ) -> Any:
+        """Запустить async_fn(connection) в синхронном контексте.
 
-    async def afetchone(self, sql: str, params: Optional[list] = None) -> Optional[dict[str, Any]]:
-        return await asyncio.to_thread(self.fetchone, sql, params)
+        async_fn получает asyncpg.Connection и может делать несколько
+        запросов в одной транзакции.
+        """
+        async def _wrapper():
+            async with self.transaction() as conn:
+                return await async_fn(conn)
+
+        return self._run_sync(_wrapper)
 
 
 db = _SharedDB()
