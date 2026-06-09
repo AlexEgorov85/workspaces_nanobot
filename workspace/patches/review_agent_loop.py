@@ -130,9 +130,9 @@ class ReviewAgentLoop(AgentLoop):
             if guard:
                 review_info["tool_repeat_stopped"] = guard.triggered
 
-            # Skip review if nothing to verify
-            if not tools_used or stop_reason in ("error", "tool_error", "max_iterations"):
-                review_info["reason"] = f"no tools or stop_reason={stop_reason}"
+            # Skip review only on errors that prevent tool usage entirely
+            if stop_reason in ("error", "tool_error", "max_iterations"):
+                review_info["reason"] = f"stop_reason={stop_reason}"
                 break
 
             review = await run_review(
