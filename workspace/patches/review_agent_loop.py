@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from copy import deepcopy
 from typing import Any
 
 from loguru import logger
 from nanobot.agent import AgentHook, AgentHookContext
-from nanobot.agent.loop import AgentLoop, TurnContext, publish_turn_run_status
+from nanobot.agent.loop import AgentLoop, TurnContext
 
 from .reviewer import run_review
 
@@ -25,6 +26,10 @@ class RepeatGuardHook(AgentHook):
         self._signatures: list[tuple[str, str]] = []
         self._max_repeats = max_repeats
         self._injected = False
+
+    @property
+    def triggered(self) -> bool:
+        return self._injected
 
     async def after_iteration(self, ctx: AgentHookContext) -> None:
         if self._injected:
@@ -81,7 +86,12 @@ class ReviewAgentLoop(AgentLoop):
         self._extra_hooks.append(RepeatGuardHook(max_repeats=max_tool_repeats))
 
     async def _state_run(self, ctx: TurnContext) -> str:
-        await publish_turn_run_status(self.bus, ctx.msg, "running")
+        if ctx.visible_run_started_at is None:
+            ctx.visible_run_started_at = time.time()
+        await self._webui_turns.publish_run_status(
+            ctx.msg, "running",
+            started_at=ctx.visible_run_started_at,
+        )
 
         base_kwargs: dict[str, Any] = {
             "on_progress": ctx.on_progress,
@@ -97,6 +107,16 @@ class ReviewAgentLoop(AgentLoop):
             "pending_queue": ctx.pending_queue,
         }
 
+        # locate RepeatGuardHook for metadata
+        guard = self._find_guard_hook()
+
+        review_info: dict[str, Any] = {
+            "quality": "skipped",
+            "attempts": 0,
+            "issues": [],
+            "tool_repeat_stopped": False,
+        }
+
         for attempt in range(self.max_review_retries + 1):
             result = await self._run_agent_loop(ctx.initial_messages, **base_kwargs)
             final_content, tools_used, all_msgs, stop_reason, had_injections = result
@@ -107,9 +127,13 @@ class ReviewAgentLoop(AgentLoop):
             ctx.stop_reason = stop_reason
             ctx.had_injections = had_injections
 
+            if guard:
+                review_info["tool_repeat_stopped"] = guard.triggered
+
             # Skip review if nothing to verify
             if not tools_used or stop_reason in ("error", "tool_error", "max_iterations"):
-                return "ok"
+                review_info["reason"] = f"no tools or stop_reason={stop_reason}"
+                break
 
             review = await run_review(
                 self.provider,
@@ -118,13 +142,18 @@ class ReviewAgentLoop(AgentLoop):
                 all_msgs,
             )
 
+            review_info["attempts"] = attempt + 1
+            review_info["quality"] = review.get("quality", "bad")
+            review_info["issues"] = review.get("issues", [])
+            review_info["reason"] = review.get("reason", "")
+
             if review.get("quality") == "good":
                 logger.info(
                     "Review passed (attempt {}/{})",
                     attempt + 1,
                     self.max_review_retries + 1,
                 )
-                return "ok"
+                break
 
             if attempt >= self.max_review_retries:
                 warning = (
@@ -138,7 +167,7 @@ class ReviewAgentLoop(AgentLoop):
                     self.max_review_retries + 1,
                     ctx.session_key,
                 )
-                return "ok"
+                break
 
             # Build correction and retry
             correction = self._build_review_correction(review, attempt + 1)
@@ -166,7 +195,15 @@ class ReviewAgentLoop(AgentLoop):
                 review.get("issues", []),
             )
 
+        # Store review metadata on the outbound message
+        ctx.msg.metadata["_review"] = review_info
         return "ok"
+
+    def _find_guard_hook(self) -> RepeatGuardHook | None:
+        for hook in self._extra_hooks:
+            if isinstance(hook, RepeatGuardHook):
+                return hook
+        return None
 
     @staticmethod
     def _build_review_correction(review: dict, attempt: int) -> str:
