@@ -130,9 +130,19 @@ class ReviewAgentLoop(AgentLoop):
             if guard:
                 review_info["tool_repeat_stopped"] = guard.triggered
 
-            # Skip review only on errors that prevent tool usage entirely
-            if stop_reason in ("error", "tool_error", "max_iterations"):
+            # Hard stop on fatal errors — replace response with honest message
+            if stop_reason in ("error", "tool_error"):
                 review_info["reason"] = f"stop_reason={stop_reason}"
+                break
+
+            if stop_reason == "max_iterations":
+                ctx.final_content = (
+                    "Я не смог получить данные — достигнут лимит итераций. "
+                    "Попробуй уточнить запрос или проверить доступность данных вручную."
+                )
+                ctx.stop_reason = "max_iterations"
+                review_info["quality"] = "blocked"
+                review_info["reason"] = "max_iterations — replaced with honest message"
                 break
 
             review = await run_review(
