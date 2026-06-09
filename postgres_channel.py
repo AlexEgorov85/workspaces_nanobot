@@ -470,7 +470,7 @@ class PostgresChannel(BaseChannel):
                     f"SELECT metadata FROM {self._fq_table} WHERE id = $1",
                     assistant_msg_id,
                 )
-                if row and row.get("metadata"):
+                if row:
                     meta_row = _decode_jsonb(row["metadata"])
                     reasoning = (meta_row.get("reasoning") or "") + delta
                     meta_row["reasoning"] = reasoning

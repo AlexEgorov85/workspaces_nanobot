@@ -78,11 +78,13 @@ class ReviewAgentLoop(AgentLoop):
         max_review_retries: int = 2,
         reviewer_model: str | None = None,
         max_tool_repeats: int = 3,
+        enabled_checks: set[str] | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.max_review_retries = max_review_retries
         self._reviewer_model = reviewer_model
+        self._enabled_checks = enabled_checks
         self._extra_hooks.append(RepeatGuardHook(max_repeats=max_tool_repeats))
 
     async def _state_run(self, ctx: TurnContext) -> str:
@@ -150,6 +152,7 @@ class ReviewAgentLoop(AgentLoop):
                 self._reviewer_model or self.model,
                 final_content or "",
                 all_msgs,
+                enabled_checks=self._enabled_checks,
             )
 
             review_info["attempts"] = attempt + 1
@@ -166,12 +169,13 @@ class ReviewAgentLoop(AgentLoop):
                 break
 
             if attempt >= self.max_review_retries:
-                warning = (
-                    f"\n\n[Self-review: ответ не прошёл проверку после "
-                    f"{self.max_review_retries + 1} попыток. "
-                    f"Проверьте факты самостоятельно.]"
+                ctx.final_content = (
+                    "Не удалось получить ответ на ваш вопрос — "
+                    "все попытки проверки не прошли. "
+                    "Попробуйте переформулировать запрос."
                 )
-                ctx.final_content = (final_content or "") + warning
+                review_info["quality"] = "blocked"
+                review_info["reason"] = "all review retries exhausted"
                 logger.warning(
                     "Review failed after {} attempts for session {}",
                     self.max_review_retries + 1,
@@ -180,11 +184,11 @@ class ReviewAgentLoop(AgentLoop):
                 break
 
             # Build correction and retry
-            correction = self._build_review_correction(review, attempt + 1)
+            correction_text = self._build_review_correction(review, attempt + 1)
             ctx.initial_messages = deepcopy(all_msgs)
             ctx.initial_messages.append({
                 "role": "user",
-                "content": correction,
+                "content": correction_text,
             })
 
             # Disable streaming/progress for retry — only final result matters
@@ -235,6 +239,16 @@ class ReviewAgentLoop(AgentLoop):
             "3. Если выводы/расчёты ошибочны — пересчитай на основе tool results.",
             "4. Не придумывай новые данные — используй ТОЛЬКО то, что вернули инструменты.",
             "5. Части ответа, где всё верно, — оставь без изменений.",
+            "6. Не пиши пустые отписки вроде «не смог получить данные» или «попробуйте ещё раз» — "
+            "обязательно опиши, КАКИЕ инструменты вызывал и ЧТО именно пошло не так "
+            "(ошибка, пустой результат, неверный путь и т.п.).",
+            "7. Отвечай на русском языке — язык ответа должен совпадать с языком запроса пользователя.",
+            "8. Отвечай НА вопрос пользователя, а не описывай процесс. "
+            "Первое предложение — прямой ответ (даже если ответ «не знаю» или «не могу найти»). "
+            "Только после этого можно объяснять, что делал и почему не вышло.",
+            "9. НЕ проси пользователя что-то делать (запускать скрипты, искать файлы, проверять пути). "
+            "Если данных нет — объясни почему. Если нужно уточнение — задай короткий вопрос. "
+            "Всю работу делаешь ТЫ, а не пользователь.",
         ])
         return "\n".join(lines)
 
