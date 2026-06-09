@@ -35,16 +35,19 @@ Return ONLY valid JSON:
 - quality "bad" = fails at least one check
 - issues = empty list if good, specific descriptions if bad"""
 
-_REVIEWER_USER_TEMPLATE = """Tool results (tool calls and their outputs):
+_REVIEWER_USER_TEMPLATE = """User request:
+{user_query}
+
+Tool results (tool calls and their outputs):
 {formatted_results}
 
 Assistant response to verify:
 {response}
 
-Now check for BOTH fabricated data AND correctness errors.
+Now run all four checks.
 
 Return JSON:
-{{"quality": "good"|"bad", "issues": [list of specific mismatches or errors], "reason": "summary"}}
+{{"quality": "good"|"bad", "issues": [list of specific problems], "reason": "summary"}}
 """
 
 
@@ -80,8 +83,10 @@ async def run_review(
     """Запускает LLM-ревью.
 
     Проверяет:
-    1. Все ли данные в ответе подтверждаются tool results (нет выдумок)
-    2. Корректны ли выводы/расчёты на основе tool results
+    1. Использованы ли инструменты, когда нужны (нет ответа по памяти)
+    2. Все ли данные в ответе подтверждаются tool results (нет выдумок)
+    3. Корректны ли выводы/расчёты на основе tool results
+    4. Честность при ошибках инструментов
 
     Returns:
         {"quality": "good"|"bad", "issues": [...], "reason": "..."}
@@ -90,9 +95,17 @@ async def run_review(
     if not response or not all_msgs:
         return {"quality": "good", "issues": [], "reason": "nothing to review"}
 
+    # Extract user query (first user message that's not system-generated)
+    user_query = ""
+    for msg in all_msgs:
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str) and "[Self-review," not in content:
+                user_query = content[:1000]
+                break
+
     tool_blocks = _extract_tool_blocks(all_msgs)
-    if not tool_blocks:
-        return {"quality": "good", "issues": [], "reason": "no tool calls to verify against"}
+    has_tools = bool(tool_blocks)
 
     formatted = json.dumps(
         [
@@ -108,7 +121,8 @@ async def run_review(
     )
 
     user_prompt = _REVIEWER_USER_TEMPLATE.format(
-        formatted_results=formatted,
+        user_query=user_query or "(no user message found)",
+        formatted_results=formatted if has_tools else "No tool calls were made.",
         response=response,
     )
 
