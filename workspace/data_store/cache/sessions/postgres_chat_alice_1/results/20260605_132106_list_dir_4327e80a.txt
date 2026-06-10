@@ -1,3 +1,0 @@
-Error: Directory not found: C:\Users\Алексей\.nanobot\workspace\data_store\cache\sessions\cache\sessions\postgres_chat_alice_1\results
-
-[Analyze the error above and try a different approach.]

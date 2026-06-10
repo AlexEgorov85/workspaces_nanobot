@@ -1,9 +1,0 @@
-skills/data-analyzer/SKILL.md
-skills/db_analyzer/SKILL.md
-skills/html_presentation_generator/SKILL.md
-skills/map-reduce-file-analysis/SKILL.md
-skills/nanobot-exec-integration/SKILL.md
-skills/response-verification/SKILL.md
-skills/stage-driven-development/SKILL.md
-skills/structured-report-generation/SKILL.md
-skills/windows-cyrillic-handling/SKILL.md

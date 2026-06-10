@@ -1,2 +1,0 @@
-Goal recorded. Keep working toward the objective using ordinary tools. When fully done (verified against what was asked), call complete_goal with a short recap.
-Summary line: Capabilities answer

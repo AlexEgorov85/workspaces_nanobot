@@ -1,3 +1,0 @@
-memory/history.jsonl
-
-(skipped 1 binary/unreadable files)
