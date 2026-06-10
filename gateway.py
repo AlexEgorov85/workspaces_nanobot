@@ -29,7 +29,7 @@ from utils.session_file_store import SessionFileStore, prepare_content
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.channels.manager import ChannelManager, _default_webui_dist
+from nanobot.channels.manager import ChannelManager
 from nanobot.cli.commands import _load_runtime_config, console, __logo__, __version__
 from pg_session_manager import PGSessionManager
 from nanobot.utils.helpers import sync_workspace_templates
@@ -39,22 +39,6 @@ from hooks.tool_audit_hook import ToolAuditHook
 from gateway_settings import GatewaySettings
 
 SETTINGS = GatewaySettings()
-
-
-def _patch_webui_dist(channels: ChannelManager) -> None:
-    """Replace WebUI dist with custom build from webui-dist/."""
-    ws = channels.channels.get("websocket")
-    if ws is None or not hasattr(ws, "_static_dist_path"):
-        return
-    orig = _default_webui_dist()
-    if orig is None:
-        return
-    custom = Path(__file__).parent / "webui-dist"
-    if not custom.is_dir():
-        import shutil
-        shutil.copytree(str(orig), str(custom))
-        console.print(f"[green]✓[/green] Created custom webui dist at {custom}")
-    ws._static_dist_path = custom.resolve()
 
 
 def _resolve_transcription_key(config):
@@ -275,9 +259,6 @@ def main() -> None:
             console.print("[green]✓[/green] PostgreSQL channel enabled")
     else:
         console.print("[dim]PostgreSQL channel disabled[/dim]")
-
-    # ── 11. Кастомная WebUI-сборка ──────────────────────────────────────
-    _patch_webui_dist(channels)
 
     console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
 
