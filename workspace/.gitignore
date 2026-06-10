@@ -3,6 +3,8 @@
 !memory/
 !patches/
 !skills/
+!db_api/
+!utils/
 !SOUL.md
 !USER.md
 !memory/MEMORY.md
