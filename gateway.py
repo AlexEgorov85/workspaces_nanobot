@@ -201,16 +201,6 @@ def main() -> None:
         hooks=[],
     )
 
-    # ── 6a. Регистрация workspace-инструментов ────────────────────────────
-    try:
-        _scripts_dir = str(Path(_WORKSPACE_DIR, "skills", "db_analyzer", "scripts").resolve())
-        if _scripts_dir not in sys.path:
-            sys.path.insert(0, _scripts_dir)
-        from skills.db_analyzer.scripts.tool import DbAnalyzerTool
-        agent.tools.register(DbAnalyzerTool())
-    except Exception as exc:
-        console.print(f"[yellow]⚠[/yellow] db_analyzer tool registration failed: {exc}")
-
     # ── 7. ChannelManager ────────────────────────────────────────────────
     channels = ChannelManager(config, bus, session_manager=session_manager)
 
@@ -278,6 +268,22 @@ def main() -> None:
     # ── 12. Запуск ───────────────────────────────────────────────────────
     async def run():
         channels_task = asyncio.create_task(channels.start_all())
+
+        # Start DB API server (if PostgreSQL configured)
+        db_api_runner = None
+        if dsn:
+            try:
+                from db_api.server import _build_app
+                import aiohttp
+                db_api_app = _build_app()
+                db_api_runner = aiohttp.web.AppRunner(db_api_app)
+                await db_api_runner.setup()
+                db_api_site = aiohttp.web.TCPSite(db_api_runner, "127.0.0.1", 8777)
+                await db_api_site.start()
+                console.print("[green]\u2713[/green] DB API server started on :8777")
+            except Exception as exc:
+                console.print(f"[yellow]\u26a0[/yellow] DB API server failed to start: {exc}")
+
         try:
             await agent.run()
         except asyncio.CancelledError:
@@ -291,6 +297,9 @@ def main() -> None:
             channels_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await channels_task
+            if db_api_runner:
+                with contextlib.suppress(Exception):
+                    await db_api_runner.cleanup()
             await agent.close_mcp()
             agent.stop()
             await channels.stop_all()

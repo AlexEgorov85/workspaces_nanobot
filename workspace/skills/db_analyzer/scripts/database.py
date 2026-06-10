@@ -17,27 +17,23 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-# Добавляем корень проекта в sys.path для импорта utils.db
-_project_root = Path(__file__).resolve().parents[3]  # workspace/ — для импорта utils.db
+# Добавляем корень проекта в sys.path для импорта db_api.client
+_project_root = Path(__file__).resolve().parents[3]  # workspace/ — для импорта db_api
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-import os
-
-from utils.db import db as shared_db
+from db_api.client import DBClient
 
 
 class Database:
     """
-    Подключение к PostgreSQL через глобальный SharedDB.
+    Подключение к PostgreSQL через DB API (HTTP).
 
     DSN задаётся в gateway_settings.py (pg.dsn) — навык не имеет
-    собственного DSN. Перед использованием Database SharedDB должен
-    быть сконфигурирован (gateway вызывает db.configure(dsn) при старте).
+    собственного DSN. Сервер DB API запускается gateway.py при старте.
 
     Если скрипт запущен в отдельном процессе (через exec/audit_analyze.bat),
-    DSN берётся из переменной окружения DATABASE_URL (устанавливается
-    gateway.py при старте).
+    используется DBClient через HTTP на 127.0.0.1:8777.
 
     Принимает dict конфигурации из load_db_config():
         schema           — имя схемы по умолчанию
@@ -46,10 +42,7 @@ class Database:
     """
 
     def __init__(self, db_config: dict):
-        if not shared_db.dsn:
-            env_dsn = os.getenv("DATABASE_URL")
-            if env_dsn:
-                shared_db.configure(env_dsn)
+        self._db = DBClient()
         self._schema_name = db_config.get("schema", "public")
         self._table_names: Optional[list[str]] = db_config.get("tables") or None
 
@@ -136,7 +129,7 @@ class Database:
 
         query += " ORDER BY c.table_name, c.ordinal_position"
 
-        rows = await shared_db.fetch(query, *params)
+        rows = await self._db.fetch(query, *params)
 
         result: dict = {}
         for row in rows:
@@ -230,7 +223,7 @@ class Database:
             dict: {status, row_count, columns, rows}
         """
         try:
-            rows = await shared_db.fetch(sql, *(params or []))
+            rows = await self._db.fetch(sql, *(params or []))
         except Exception as e:
             return {"status": "error", "row_count": 0, "columns": [], "rows": [],
                     "error": f"Ошибка выполнения запроса: {e}"}
@@ -255,7 +248,7 @@ class Database:
         """
         explain_sql = f"EXPLAIN (FORMAT JSON) {sql}"
         try:
-            rows = await shared_db.fetch(explain_sql)
+            rows = await self._db.fetch(explain_sql)
             plan = rows[0][0] if rows else None
             return {"valid": True, "plan": plan}
         except Exception as e:
