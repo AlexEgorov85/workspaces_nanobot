@@ -16,6 +16,7 @@ Usage in gateway.py::
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,12 @@ from typing import Any
 from loguru import logger
 
 from nanobot.session.manager import Session, SessionManager, _message_preview_text
+
+# workspace/utils/db.py — added to path so utils.db can be found
+_workspace = str(Path(__file__).resolve().parent / "workspace")
+if _workspace not in sys.path:
+    sys.path.insert(0, _workspace)
+
 from utils.db import db
 
 import asyncpg

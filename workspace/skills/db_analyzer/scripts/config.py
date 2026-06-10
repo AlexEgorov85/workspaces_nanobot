@@ -15,7 +15,6 @@
         "temperature": 0.1
       },
       "database": {
-        "connection_string": "",
         "schema": "oarb",
         "tables": ["audit_reports", "audits", "report_items", "violations"]
       },
