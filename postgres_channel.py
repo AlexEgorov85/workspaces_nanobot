@@ -446,9 +446,7 @@ class PostgresChannel(BaseChannel):
             if msg_id:
                 if len(self._msg_ctx) > 100:
                     self._msg_ctx.clear()
-                ctx = self._msg_ctx.setdefault(msg_id, {"tool_events": [], "reasoning_buf": []})
-                if "_tool_events" in meta:
-                    ctx["tool_events"].extend(meta["_tool_events"])
+                ctx = self._msg_ctx.setdefault(msg_id, {"reasoning_buf": []})
             return
 
         # --- Control signals ---
@@ -484,10 +482,6 @@ class PostgresChannel(BaseChannel):
                     f"UPDATE {self._fq_table} SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
                     meta_row, assistant_msg_id,
                 )
-
-        if ctx.get("tool_events"):
-            existing = meta.get("_tool_events", [])
-            meta["_tool_events"] = existing + ctx["tool_events"]
 
         chat_id = msg.chat_id
 
@@ -529,9 +523,6 @@ class PostgresChannel(BaseChannel):
             self._release_slot(msg_id)
             assistant_msg_id = ctx.get("assistant_msg_id") or meta.get("answer_id")
 
-            if ctx.get("tool_events"):
-                existing = meta.get("_tool_events", [])
-                meta["_tool_events"] = existing + ctx["tool_events"]
             if ctx.get("reasoning_buf"):
                 meta["reasoning"] = " ".join(ctx["reasoning_buf"])
 

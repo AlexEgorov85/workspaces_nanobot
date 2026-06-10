@@ -209,11 +209,11 @@ def _process_in_background(prompt: str, q: queue.Queue):
             q.put(("delta", msg.content))
         elif meta.get("_stream_end"):
             continue
-        elif meta.get("_tool_events"):
-            q.put(("tool_events", meta["_tool_events"]))
         elif meta.get("_progress") or meta.get("_turn_end"):
             continue
         else:
+            if meta.get("_tool_audit"):
+                q.put(("tool_events", meta["_tool_audit"]))
             q.put(("final", msg.content))
             break
 
@@ -231,7 +231,7 @@ st.markdown("## Чат с агентом")
 for entry in st.session_state.messages:
     with st.chat_message(entry["role"]):
         r = entry.get("reasoning", "")
-        te = entry.get("tool_events", [])
+        te = entry.get("tool_audit") or entry.get("tool_events", [])
         if r or te:
             parts = []
             if r:
@@ -240,11 +240,11 @@ for entry in st.session_state.messages:
                 events_html = ""
                 for ev in te:
                     name = ev.get("name", "?")
-                    phase = ev.get("phase", "")
-                    if phase == "end":
-                        result = str(ev.get("result", ""))[:80] or "ok"
+                    status = ev.get("status") or ev.get("phase", "")
+                    if status in ("ok", "end"):
+                        result = str(ev.get("result_preview") or ev.get("result", ""))[:80] or "ok"
                         events_html += f'<div class="tool-event tool-event-ok">{name} → {result}</div>'
-                    elif phase == "error":
+                    elif status == "error":
                         err = ev.get("error", "failed")
                         events_html += f'<div class="tool-event tool-event-error">{name}: {err}</div>'
                 parts.append(f'<div class="tool-events">{events_html}</div>')
@@ -270,7 +270,8 @@ if processing:
             st.session_state["_reasoning_parts"].append(content)
         elif type_ == "tool_events":
             for ev in content:
-                if ev.get("phase") in ("end", "error"):
+                status = ev.get("status") or ev.get("phase", "")
+                if status in ("ok", "end", "error"):
                     st.session_state["_tool_events"].append(ev)
         elif type_ == "delta":
             st.session_state["_response_accum"] += content
@@ -293,12 +294,12 @@ if processing:
                 events_html = ""
                 for ev in tool_events:
                     name = ev.get("name", "?")
-                    phase = ev.get("phase", "")
-                    if phase == "end":
-                        result = str(ev.get("result", ""))[:80] or "ok"
+                    status = ev.get("status") or ev.get("phase", "")
+                    if status in ("ok", "end"):
+                        result = str(ev.get("result_preview") or ev.get("result", ""))[:80] or "ok"
                         cls = "tool-event-ok"
                         events_html += f'<div class="tool-event {cls}">{name} → {result}</div>'
-                    elif phase == "error":
+                    elif status == "error":
                         err = ev.get("error", "failed")
                         cls = "tool-event-error"
                         events_html += f'<div class="tool-event {cls}">{name}: {err}</div>'
@@ -348,6 +349,6 @@ if processing and st.session_state.get("_done"):
         "role": "assistant",
         "content": st.session_state["_response_accum"],
         "reasoning": "".join(st.session_state["_reasoning_parts"]),
-        "tool_events": st.session_state["_tool_events"],
+        "tool_audit": st.session_state["_tool_events"],
     })
     st.rerun()

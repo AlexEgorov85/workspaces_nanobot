@@ -86,10 +86,11 @@ cli_agent.py — это точка входа для запуска nanobot в �
   _reasoning_end
     Сигнал, что размышления завершены. Сбрасывается буфер.
 
-  _tool_events
-    Массив событий вызова инструментов. Каждый элемент:
-      { "name": "<tool_name>", "phase": "end"|"error", "result": ..., "error": "..." }
-    CLI выводит: "✓ tool_name → result" или "✗ tool_name: error"
+  _tool_audit
+    Массив событий вызова инструментов от ToolAuditHook. Каждый элемент:
+      { "name": "<tool_name>", "arguments": {...}, "status": "ok"|"error",
+        "error": "...", "result_preview": "...", "iteration": 0 }
+    CLI выводит: "✓ tool_name(params) → result" или "✗ tool_name: error"
 
   _tool_hint
     UI-подсказки (визуальные разделители) — игнорируются (всегда).
@@ -414,29 +415,25 @@ async def _print_reasoning_block(text: str, cfg: DisplayConfig) -> None:
 
 
 async def _print_tool_events(events: list[dict], cfg: DisplayConfig) -> None:
-    """Выводит вызовы инструментов с параметрами (если доступны)."""
+    """Выводит вызовы инструментов (_tool_audit и _tool_events)."""
     if not cfg.show_tool_calls:
         return
-
-    # Параметры из ToolAuditHook
-    param_lookup: dict[str, str] = {}
-    if cfg.show_tool_params and _PARAMS_HOOK is not None:
-        try:
-            raw = _PARAMS_HOOK.drain_calls()
-            from tool_audit_hook import format_tool_params
-            param_lookup = format_tool_params(raw)
-        except Exception:
-            pass
 
     for ev in events:
         if not isinstance(ev, dict):
             continue
         name = ev.get("name", "?")
-        params_str = param_lookup.get(name, "")
+        status = ev.get("status") or ev.get("phase", "")
 
-        phase = ev.get("phase", "")
-        if phase == "end":
-            result = str(ev.get("result", ""))[:120] or "ok"
+        # Параметры — сначала из audit, потом из ToolParamsHook
+        args = ev.get("arguments")
+        if args and cfg.show_tool_params:
+            params_str = ", ".join(f"{k}={v}" for k, v in args.items())[:200]
+        else:
+            params_str = ""
+
+        if status in ("ok", "end"):
+            result = str(ev.get("result_preview") or ev.get("result", ""))[:120] or "ok"
             if params_str:
                 label = f"✓ {name}({params_str}) → {result}"
             elif cfg.show_tool_results:
@@ -444,7 +441,7 @@ async def _print_tool_events(events: list[dict], cfg: DisplayConfig) -> None:
             else:
                 label = f"✓ {name}"
             await _typewriter(label, "dim", cfg.typewriter_speed)
-        elif phase == "error":
+        elif status in ("error",):
             err = ev.get("error", "failed")
             if params_str:
                 label = f"✗ {name}({params_str}): {err}"
@@ -550,8 +547,8 @@ def _run_interactive_loop(agent, config, *, session: str | None = None,
                         sys.stdout.flush()
                     continue
 
-                # Всё остальное (tool_events, progress, control) — тихо пропускаем
-                if not msg.content or meta.get("_progress") or meta.get("_turn_end") or meta.get("_tool_events") or meta.get("_tool_hint"):
+                # Progress и control-сигналы — тихо пропускаем
+                if not msg.content or meta.get("_progress") or meta.get("_turn_end") or meta.get("_tool_hint"):
                     continue
 
                 # Финальный ответ
@@ -585,6 +582,8 @@ def _run_interactive_loop(agent, config, *, session: str | None = None,
 
                     content, meta = await consume_outbound()
 
+                    if meta.get("_tool_audit"):
+                        await _print_tool_events(meta["_tool_audit"], cfg)
                     if content and not meta.get("_stream_delta"):
                         await _typewriter(content, "", cfg.typewriter_speed)
 
