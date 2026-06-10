@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -262,7 +263,9 @@ def main() -> None:
 
     console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
 
-    # ── 12. Запуск ───────────────────────────────────────────────────────
+    _streamlit_script = _SCRIPT_DIR / "streamlit_app.py"
+
+    # ── 11. Запуск ───────────────────────────────────────────────────────
     async def run():
         channels_task = asyncio.create_task(channels.start_all())
 
@@ -281,6 +284,21 @@ def main() -> None:
             except Exception as exc:
                 console.print(f"[yellow]⚠[/yellow] DB API server failed to start: {exc}")
 
+        # Start Streamlit UI
+        _streamlit_proc: subprocess.Popen | None = None
+        if _streamlit_script.exists():
+            try:
+                _streamlit_proc = subprocess.Popen(
+                    [sys.executable, "-m", "streamlit", "run", str(_streamlit_script),
+                     "--server.headless", "true",
+                     "--server.port", "8501"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                console.print("[green]✓[/green] Streamlit UI started on :8501")
+            except Exception as exc:
+                console.print(f"[yellow]⚠[/yellow] Streamlit failed to start: {exc}")
+
         try:
             await agent.run()
         except asyncio.CancelledError:
@@ -297,6 +315,12 @@ def main() -> None:
             if db_api_runner:
                 with contextlib.suppress(Exception):
                     await db_api_runner.cleanup()
+            if _streamlit_proc:
+                _streamlit_proc.terminate()
+                try:
+                    _streamlit_proc.wait(timeout=5)
+                except Exception:
+                    _streamlit_proc.kill()
             await agent.close_mcp()
             agent.stop()
             await channels.stop_all()
