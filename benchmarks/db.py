@@ -5,7 +5,7 @@ Uses the project-wide shared db connector from utils.db.
 Usage:
     from benchmarks.db import BenchmarkDB
 
-    db = BenchmarkDB(dsn="postgresql://...")
+    db = BenchmarkDB(dsn="...")
     db.ensure_tables()
     db.save_run(suite_result)
     history = db.get_history("my_suite", limit=5)

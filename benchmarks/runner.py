@@ -5,7 +5,7 @@ Usage:
     python benchmarks/runner.py
     python benchmarks/runner.py --tags simple
     python benchmarks/runner.py --items benchmarks/items/simple.yaml
-    python benchmarks/runner.py --db postgresql://localhost/nanobot
+    python benchmarks/runner.py --db postgresql://user@host/dbname
     python benchmarks/runner.py --compare runs/2026-06-08/ runs/2026-06-09/
     python benchmarks/runner.py --dry-run
 """

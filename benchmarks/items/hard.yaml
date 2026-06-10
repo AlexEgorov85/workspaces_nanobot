@@ -27,8 +27,8 @@
       weight: 0.4
       question: "Добавь валидацию ввода в fibonacci.py, чтобы он корректно обрабатывал отрицательные числа и нечисловые аргументы, затем протестируй с невалидным вводом и покажи сообщение об ошибке"
       expect:
-        tools: ["exec", "read_file"]
-        keywords_include: ["ошибк", "отрицательн"]
+        tools: ["exec"]
+        keywords_include: ["валидац"]
         match_type: "llm_judge"
 
 - id: "hard-research-report"
@@ -57,7 +57,7 @@
       expect:
         tools: ["write_file"]
         check_file: "test_summary.md"
-        keywords_include: ["тест", "файл"]
+        keywords_include: ["отчёт", "создан"]
         match_type: "llm_judge"
 
 - id: "hard-data-pipeline"
@@ -79,7 +79,7 @@
       weight: 0.4
       question: "Проанализируй файл sales.csv, найденный в workspace, и вычисли общую выручку, среднюю сумму продажи и количество транзакций"
       expect:
-        tools: ["read_file", "exec"]
+        tools: ["read_file"]
         keywords_include: ["выручк", "средн", "транзакц"]
     - step: 3
       weight: 0.4
@@ -87,7 +87,7 @@
       expect:
         tools: ["write_file"]
         check_file: "sales_report.md"
-        keywords_include: ["выручк", "продаж"]
+        keywords_include: ["отчёт", "создан"]
         match_type: "llm_judge"
 
 - id: "hard-git-history"

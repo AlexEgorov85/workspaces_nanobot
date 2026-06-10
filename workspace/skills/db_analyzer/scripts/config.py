@@ -15,7 +15,7 @@
         "temperature": 0.1
       },
       "database": {
-        "connection_string": "postgresql://postgres:1@localhost:5432/postgres",
+        "connection_string": "",
         "schema": "oarb",
         "tables": ["audit_reports", "audits", "report_items", "violations"]
       },
@@ -126,13 +126,13 @@ def load_db_config() -> dict[str, Any]:
 
     Returns:
         dict из секции database config.json:
-            connection_string (пустая строка — DSN берётся из gateway),
             schema, tables, schema_cache.
+        Поле connection_string не используется (DSN задаётся в gateway_settings.py).
         Путь schema_cache.path разрешается в абсолютный.
     """
     cfg = _load().get("database", {})
     result = dict(cfg)
-    result.setdefault("connection_string", "")
+    result.pop("connection_string", None)
     # Разрешаем относительный путь кеша
     cache = result.get("schema_cache")
     if cache:
