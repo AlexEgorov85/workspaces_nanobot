@@ -335,10 +335,10 @@ def _scan_and_register_hooks() -> list:
                         continue
                 hooks.append(hook)
                 console.print(f"[green]✓[/green] {attr_name} loaded")
-                # Detect ToolParamsHook for parameter display
+                # Detect ToolAuditHook for parameter display
                 try:
-                    from tool_params_hook import ToolParamsHook as _TPH
-                    if isinstance(hook, _TPH):
+                    from tool_audit_hook import ToolAuditHook as _TAH
+                    if isinstance(hook, _TAH):
                         _PARAMS_HOOK = hook
                 except ImportError:
                     pass
@@ -418,12 +418,12 @@ async def _print_tool_events(events: list[dict], cfg: DisplayConfig) -> None:
     if not cfg.show_tool_calls:
         return
 
-    # Параметры из ToolParamsHook
+    # Параметры из ToolAuditHook
     param_lookup: dict[str, str] = {}
     if cfg.show_tool_params and _PARAMS_HOOK is not None:
         try:
             raw = _PARAMS_HOOK.drain_calls()
-            from tool_params_hook import format_tool_params
+            from tool_audit_hook import format_tool_params
             param_lookup = format_tool_params(raw)
         except Exception:
             pass

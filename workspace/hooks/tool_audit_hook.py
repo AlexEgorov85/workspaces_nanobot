@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from nanobot.agent import AgentHook, AgentHookContext
@@ -13,9 +14,14 @@ class ToolAuditHook(AgentHook):
     def __init__(self) -> None:
         super().__init__()
         self._entries: list[dict[str, Any]] = []
+        self._calls: list[dict] = []
         self._pending_start: int = 0
 
     async def before_execute_tools(self, ctx: AgentHookContext) -> None:
+        self._calls = [
+            {"name": tc.name, "arguments": tc.arguments}
+            for tc in ctx.tool_calls
+        ]
         self._pending_start = len(self._entries)
         for tc in ctx.tool_calls:
             arguments = tc.arguments if isinstance(tc.arguments, dict) else {}
@@ -45,3 +51,30 @@ class ToolAuditHook(AgentHook):
         entries = self._entries
         self._entries = []
         return entries
+
+    def drain_calls(self) -> list[dict]:
+        calls = self._calls
+        self._calls = []
+        return calls
+
+
+def format_tool_params(params: list[dict]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for p in params:
+        name = p["name"]
+        try:
+            args = json.loads(p["arguments"])
+            if not isinstance(args, dict):
+                args = {"_": str(args)}
+        except (json.JSONDecodeError, TypeError):
+            args = {"_": str(p["arguments"])}
+        parts = []
+        for k, v in args.items():
+            if isinstance(v, str):
+                parts.append(f"{k}={v!r}")
+            elif isinstance(v, (dict, list)):
+                parts.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
+            else:
+                parts.append(f"{k}={v!r}")
+        result[name] = ", ".join(parts)
+    return result
