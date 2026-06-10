@@ -53,15 +53,7 @@ class _SharedDB:
     # ------------------------------------------------------------------
 
     def configure(self, dsn: str, min_size: int = 1, max_size: int = 1) -> None:
-        """Задать DSN и параметры пула (вызывается из gateway.py при старте).
-
-        Args:
-            dsn: Строка подключения.
-            min_size: Минимум соединений в пуле (для async-запросов).
-            max_size: Максимум соединений в пуле (для async-запросов).
-                      Очередь встроена в asyncpg — при max_size занятых
-                      соединений acquire() ждёт освобождения.
-        """
+        """Задать DSN и параметры пула (вызывается из gateway.py при старте)."""
         self._dsn = dsn
         self._pool_min = min_size
         self._pool_max = max_size

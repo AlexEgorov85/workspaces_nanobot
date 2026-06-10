@@ -378,16 +378,17 @@ class PostgresChannel(BaseChannel):
 
     async def _mark_failed(self, user_msg_id: str, assistant_msg_id: str | None, reason: str) -> None:
         """Mark a user message and its assistant reply as failed."""
-        if assistant_msg_id:
-            await db.execute(
-                f"UPDATE {self._fq_table} SET content = $1, metadata = $2::jsonb, "
-                f"status = 'failed', updated_at = NOW() WHERE id = $3",
-                f"Internal error: {reason}", {"error": reason}, assistant_msg_id,
+        async with db.transaction() as conn:
+            if assistant_msg_id:
+                await conn.execute(
+                    f"UPDATE {self._fq_table} SET content = $1, metadata = $2::jsonb, "
+                    f"status = 'failed', updated_at = NOW() WHERE id = $3",
+                    f"Internal error: {reason}", {"error": reason}, assistant_msg_id,
+                )
+            await conn.execute(
+                f"UPDATE {self._fq_table} SET status = 'failed', updated_at = NOW() WHERE id = $1",
+                user_msg_id,
             )
-        await db.execute(
-            f"UPDATE {self._fq_table} SET status = 'failed', updated_at = NOW() WHERE id = $1",
-            user_msg_id,
-        )
         self._msg_ctx.pop(user_msg_id, None)
         self._release_slot(user_msg_id)
         if assistant_msg_id:
