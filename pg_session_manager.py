@@ -35,6 +35,7 @@ from utils.db import db
 import asyncpg
 
 
+
 MESSAGES_TABLE = "session_messages"
 METADATA_TABLE = "session_meta"
 
@@ -176,6 +177,10 @@ class PGSessionManager(SessionManager):
                     if isinstance(val, str) and col in _JSON_COLUMNS:
                         val = json.loads(val)
                     msg[col] = val
+            # reasoning_content — модель не должна видеть свои прошлые
+            # размышления; Mistral API их отвергает, DeepSeek сам добавляет
+            # пустые при необходимости.
+            msg.pop("reasoning_content", None)
             messages.append(msg)
 
         return Session(
