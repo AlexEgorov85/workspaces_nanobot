@@ -8,7 +8,6 @@ pg_agent_worker.py
 DSN по умолчанию из gateway_settings.py, можно переопределить через --db-url или DATABASE_URL.
 """
 import asyncio
-import json
 import logging
 import os
 import sys
@@ -134,7 +133,7 @@ class PostgresAgentWorker:
                 INSERT INTO {self.output_table}
                 (question_id, response, status, metadata, created_at)
                 VALUES ($1, $2, $3, $4, NOW())
-            """, question_id, response, status, json.dumps(metadata) if metadata else None)
+            """, question_id, response, status, metadata)
 
     async def _get_session_key(self, session_id: str) -> str:
         if session_id not in self._session_cache:
