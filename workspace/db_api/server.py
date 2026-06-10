@@ -58,10 +58,8 @@ def _coerce_params(params: list) -> list:
         if isinstance(p, dict) and "type" in p and "value" in p:
             converter = _TYPE_CONVERTERS.get(p["type"])
             if converter is None:
-                raise ValueError(
-                    f"Unsupported param type: {p['type']!r}. "
-                    f"Supported: {', '.join(_TYPE_CONVERTERS)}"
-                )
+                raise ValueError(f"Unsupported param type: {p['type']!r}. "
+                                 f"Supported: {', '.join(_TYPE_CONVERTERS)}")
             result.append(converter(p["value"]))
         else:
             result.append(p)
@@ -100,10 +98,7 @@ async def handle_fetch(request: web.Request) -> web.Response:
         params = _coerce_params(body.get("params", []))
         rows = await shared_db.fetch(query, *params)
         data = _rows_to_list(rows)
-        return web.json_response(
-            {"ok": True, "data": data},
-            dumps=lambda o: json.dumps(o, default=_default_json),
-        )
+        return web.json_response({"ok": True, "data": data}, dumps=lambda o: json.dumps(o, default=_default_json))
     except Exception as e:
         logger.exception("fetch failed")
         return web.json_response({"ok": False, "error": str(e)}, status=500)
@@ -116,10 +111,7 @@ async def handle_fetchone(request: web.Request) -> web.Response:
         params = _coerce_params(body.get("params", []))
         row = await shared_db.fetchone(query, *params)
         data = _row_to_dict(row) if row else None
-        return web.json_response(
-            {"ok": True, "data": data},
-            dumps=lambda o: json.dumps(o, default=_default_json),
-        )
+        return web.json_response({"ok": True, "data": data}, dumps=lambda o: json.dumps(o, default=_default_json))
     except Exception as e:
         logger.exception("fetchone failed")
         return web.json_response({"ok": False, "error": str(e)}, status=500)
@@ -148,10 +140,7 @@ async def handle_transaction(request: web.Request) -> web.Response:
                 p = _coerce_params(stmt.get("params", []))
                 r = await conn.fetch(q, *p)
                 results.append(_rows_to_list(r) if r else [])
-        return web.json_response(
-            {"ok": True, "results": results},
-            dumps=lambda o: json.dumps(o, default=_default_json),
-        )
+        return web.json_response({"ok": True, "results": results}, dumps=lambda o: json.dumps(o, default=_default_json))
     except Exception as e:
         logger.exception("transaction failed")
         return web.json_response({"ok": False, "error": str(e)}, status=500)

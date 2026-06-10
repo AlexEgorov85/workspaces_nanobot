@@ -1,5 +1,9 @@
 """
-Класс Database — обёртка над SharedDB для навыка db_analyzer.
+Класс Database — обёртка над DB API для навыка db_analyzer.
+
+Работает через HTTP к DB API Server (port 8777), что позволяет
+использовать Database как из основного процесса (gateway), так и
+из отдельных процессов (CLI, subprocess).
 
 Использование:
     from database import Database
@@ -8,16 +12,16 @@
     cfg = load_db_config()
     db = Database(cfg)
     schema = await db.get_schema()
-    result = await db.execute_query("SELECT * FROM oarb.audits LIMIT %s", [5])
+    result = await db.execute_query("SELECT * FROM oarb.audits LIMIT $1", [5])
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-# Добавляем корень проекта в sys.path для импорта db_api.client
 _project_root = Path(__file__).resolve().parents[3]  # workspace/ — для импорта db_api
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
@@ -39,10 +43,10 @@ class Database:
         schema           — имя схемы по умолчанию
         tables           — список таблиц для фильтрации (опционально)
         schema_cache     — настройки кеша: enabled, path, ttl_seconds
+        api_url          — URL DB API Server (по умолч. http://127.0.0.1:8777)
     """
 
     def __init__(self, db_config: dict):
-        self._db = DBClient()
         self._schema_name = db_config.get("schema", "public")
         self._table_names: Optional[list[str]] = db_config.get("tables") or None
 
@@ -51,8 +55,11 @@ class Database:
         self._cache_path: Optional[str] = cache_cfg.get("path") or None
         self._cache_ttl = int(cache_cfg.get("ttl_seconds", 3600))
 
+        api_url = db_config.get("api_url") or os.environ.get("DB_API_URL", "http://127.0.0.1:8777")
+        self._client = DBClient(api_url)
+
     # ------------------------------------------------------------------
-    # Lifecycle (no-op, SharedDB управляется глобально)
+    # Lifecycle (no-op, подключение через HTTP)
     # ------------------------------------------------------------------
 
     async def connect(self):
@@ -129,7 +136,7 @@ class Database:
 
         query += " ORDER BY c.table_name, c.ordinal_position"
 
-        rows = await self._db.fetch(query, *params)
+        rows = await self._client.fetch(query, *params)
 
         result: dict = {}
         for row in rows:
@@ -223,7 +230,7 @@ class Database:
             dict: {status, row_count, columns, rows}
         """
         try:
-            rows = await self._db.fetch(sql, *(params or []))
+            rows = await self._client.fetch(sql, *(params or []))
         except Exception as e:
             return {"status": "error", "row_count": 0, "columns": [], "rows": [],
                     "error": f"Ошибка выполнения запроса: {e}"}
@@ -248,8 +255,8 @@ class Database:
         """
         explain_sql = f"EXPLAIN (FORMAT JSON) {sql}"
         try:
-            rows = await self._db.fetch(explain_sql)
-            plan = rows[0][0] if rows else None
+            rows = await self._client.fetch(explain_sql)
+            plan = list(rows[0].values())[0] if rows else None
             return {"valid": True, "plan": plan}
         except Exception as e:
             return {"valid": False, "error": f"EXPLAIN failed: {e}"}

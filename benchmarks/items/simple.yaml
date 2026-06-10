@@ -1,0 +1,83 @@
+# Простые задания (сложность 1-3)
+# Базовые возможности агента: приветствия, математика, работа с файлами
+
+- id: "simple-greeting"
+  name: "Приветствие"
+  difficulty: 1
+  category: "basic"
+  type: "single"
+  new_session: true
+  question: "Поздоровайся"
+  max_iterations: 5
+  expect:
+    keywords_include: ["привет"]
+    keywords_exclude: ["error"]
+
+- id: "simple-math"
+  name: "Простая математика"
+  difficulty: 1
+  category: "basic"
+  type: "single"
+  new_session: true
+  question: "Сколько будет 2 + 2?"
+  max_iterations: 5
+  expect:
+    keywords_include: ["4"]
+
+- id: "simple-list-files"
+  name: "Список файлов"
+  difficulty: 2
+  category: "basic"
+  type: "single"
+  new_session: true
+  question: "Перечисли файлы в текущей директории"
+  max_iterations: 10
+  expect:
+    tools: ["list_dir"]
+
+- id: "simple-create-file"
+  name: "Создать файл"
+  difficulty: 2
+  category: "basic"
+  type: "single"
+  new_session: true
+  question: "Создай пустой файл с именем hello_benchmark.txt"
+  max_iterations: 10
+  expect:
+    tools: ["write_file"]
+    check_file: "data_store/cache/hello_benchmark.txt"
+
+- id: "simple-date"
+  name: "Текущая дата"
+  difficulty: 1
+  category: "basic"
+  type: "single"
+  new_session: true
+  question: "Какая сегодня дата?"
+  max_iterations: 5
+  expect:
+    keywords_include: ["2026"]
+
+- id: "simple-read-file"
+  name: "Чтение файла"
+  difficulty: 2
+  category: "basic"
+  type: "single"
+  new_session: true
+  question: "Прочитай файл AGENTS.md и скажи в одном предложении, о чём он"
+  max_iterations: 10
+  expect:
+    tools: ["read_file"]
+    keywords_include: ["агент"]
+
+- id: "simple-git-status"
+  name: "Git статус"
+  difficulty: 2
+  category: "basic"
+  type: "single"
+  new_session: true
+  question: "Выполни git status и скажи, какая сейчас ветка"
+  max_iterations: 10
+  expect:
+    tools: ["exec"]
+    keywords_include: ["ветк"]

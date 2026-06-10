@@ -217,7 +217,6 @@ def main() -> None:
         return result
 
     agent._assemble_outbound = _assemble_with_audit
-
     # ── 7. ChannelManager ────────────────────────────────────────────────
     channels = ChannelManager(config, bus, session_manager=session_manager)
 
@@ -297,9 +296,9 @@ def main() -> None:
                 await db_api_runner.setup()
                 db_api_site = aiohttp.web.TCPSite(db_api_runner, "127.0.0.1", 8777)
                 await db_api_site.start()
-                console.print("[green]\u2713[/green] DB API server started on :8777")
+                console.print("[green]✓[/green] DB API server started on :8777")
             except Exception as exc:
-                console.print(f"[yellow]\u26a0[/yellow] DB API server failed to start: {exc}")
+                console.print(f"[yellow]⚠[/yellow] DB API server failed to start: {exc}")
 
         try:
             await agent.run()

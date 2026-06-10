@@ -1,6 +1,5 @@
 import json
 import os
-import re as _re
 import sys
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -24,6 +23,10 @@ def _default_json(obj: Any) -> str:
     if isinstance(obj, bytes):
         return obj.decode("utf-8", errors="replace")
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
+def _dumps(obj: Any) -> str:
+    return json.dumps(obj, default=_default_json, ensure_ascii=False)
 
 
 class DBClient:
@@ -68,20 +71,28 @@ class DBClient:
             return resp.json()
 
 
-_TYPED_PARAM_RE = _re.compile(
-    r"^(date|datetime|time|int|integer|float|decimal|uuid|bool|boolean|bytes):(.+)$",
-    re.IGNORECASE,
-)
+_TYPED_PARAM_RE = None  # lazy compile
 
 
 def _parse_param(raw: str) -> Any:
+    global _TYPED_PARAM_RE
+    if _TYPED_PARAM_RE is None:
+        import re
+        _TYPED_PARAM_RE = re.compile(
+            r"^(date|datetime|time|int|integer|float|decimal|uuid|bool|boolean|bytes):(.+)$",
+            re.IGNORECASE,
+        )
     m = _TYPED_PARAM_RE.match(raw)
     if m:
         return {"type": m.group(1).lower(), "value": m.group(2)}
+    return _try_json(raw)
+
+
+def _try_json(value: str) -> Any:
     try:
-        return json.loads(raw)
+        return json.loads(value)
     except (json.JSONDecodeError, TypeError):
-        return raw
+        return value
 
 
 def main() -> int:
@@ -91,6 +102,7 @@ def main() -> int:
     if not args:
         print("Usage: python -m workspace.db_api <method> <query> [params...]", file=sys.stderr)
         print("       python -m workspace.db_api fetch \"SELECT * FROM users\"", file=sys.stderr)
+        print("       python -m workspace.db_api execute \"UPDATE users SET n=$1\" \"Alice\"", file=sys.stderr)
         print('       python -m workspace.db_api fetch "SELECT $1::date" "date:2024-01-01"', file=sys.stderr)
         return 1
 
