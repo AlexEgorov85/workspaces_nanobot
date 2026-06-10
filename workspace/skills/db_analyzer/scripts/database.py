@@ -22,6 +22,8 @@ _project_root = Path(__file__).resolve().parents[3]  # workspace/ — для и�
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+import os
+
 from utils.db import db as shared_db
 
 
@@ -33,6 +35,10 @@ class Database:
     собственного DSN. Перед использованием Database SharedDB должен
     быть сконфигурирован (gateway вызывает db.configure(dsn) при старте).
 
+    Если скрипт запущен в отдельном процессе (через exec/audit_analyze.bat),
+    DSN берётся из переменной окружения DATABASE_URL (устанавливается
+    gateway.py при старте).
+
     Принимает dict конфигурации из load_db_config():
         schema           — имя схемы по умолчанию
         tables           — список таблиц для фильтрации (опционально)
@@ -40,6 +46,10 @@ class Database:
     """
 
     def __init__(self, db_config: dict):
+        if not shared_db.dsn:
+            env_dsn = os.getenv("DATABASE_URL")
+            if env_dsn:
+                shared_db.configure(env_dsn)
         self._schema_name = db_config.get("schema", "public")
         self._table_names: Optional[list[str]] = db_config.get("tables") or None
 

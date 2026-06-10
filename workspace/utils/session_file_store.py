@@ -83,12 +83,14 @@ def _try_convert_to_csv(data) -> Optional[str]:
 
 
 class SessionFileStore:
-    def __init__(self, base_dir: Path):
+    def __init__(self, base_dir: Path, max_files: int = 0, max_age_hours: int = 0):
         cache = base_dir / "cache"
         self.base = cache / "sessions"
         self.base.mkdir(parents=True, exist_ok=True)
         self.archive_dir = cache / "archive"
         self.archive_dir.mkdir(exist_ok=True)
+        self.max_files = max_files
+        self.max_age_hours = max_age_hours
 
     def _get_session_dir(self, session_key: str) -> Path:
         sdir = self.base / safe_session_key(session_key)
@@ -128,6 +130,8 @@ class SessionFileStore:
         meta["total_bytes"] += size
         meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
+        self.cleanup(session_key)
+
         return {
             "session_key": session_key,
             "id": entry_id,
@@ -135,6 +139,63 @@ class SessionFileStore:
             "size_kb": round(size / 1024, 2),
             "format": ext.lstrip(".")
         }
+
+    def cleanup(self, session_key: str) -> None:
+        """Remove old result files according to max_files / max_age_hours limits."""
+        max_files = self.max_files
+        max_age_hours = self.max_age_hours
+        if max_files <= 0 and max_age_hours <= 0:
+            return
+
+        sdir = self._get_session_dir(session_key)
+        results_dir = sdir / "results"
+        if not results_dir.exists():
+            return
+
+        now = datetime.now(UTC)
+        removed = 0
+
+        # Remove by age
+        if max_age_hours > 0:
+            cutoff = now.timestamp() - max_age_hours * 3600
+            for f in sorted(results_dir.iterdir(), key=lambda p: p.name):
+                try:
+                    ts_str = f.stem[:15]
+                    file_ts = datetime.strptime(ts_str, "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
+                    if file_ts.timestamp() < cutoff:
+                        f.unlink()
+                        removed += 1
+                    else:
+                        break
+                except (ValueError, IndexError, OSError):
+                    continue
+
+        # Remove by count (after age cleanup, so fewer to scan)
+        if max_files > 0:
+            files = sorted(results_dir.iterdir(), key=lambda p: p.name)
+            if len(files) > max_files:
+                for f in files[:len(files) - max_files]:
+                    try:
+                        f.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+
+        if removed > 0:
+            meta_path = sdir / "metadata.json"
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text())
+                    meta["last_activity"] = now.isoformat()
+                    old_count = meta.get("file_count", 0)
+                    meta["file_count"] = max(0, old_count - removed)
+                    remaining_bytes = sum(
+                        f.stat().st_size for f in results_dir.iterdir() if f.is_file()
+                    )
+                    meta["total_bytes"] = remaining_bytes
+                    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                except (OSError, json.JSONDecodeError):
+                    pass
 
     def archive_session(self, session_key: str) -> bool:
         src = self.base / safe_session_key(session_key)

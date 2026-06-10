@@ -472,7 +472,7 @@
       "timeout": 60,
       "pathAppend": "",
       "sandbox": "",
-      "allowedEnvKeys": [],
+      "allowedEnvKeys": ["DATABASE_URL"],
       "allowPatterns": [],
       "denyPatterns": []
     },

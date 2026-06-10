@@ -27,7 +27,6 @@ from redis_channel import RedisChannel
 from utils.session_file_store import SessionFileStore, prepare_content
 
 from nanobot.agent.loop import AgentLoop
-from workspace.patches.review_agent_loop import ReviewAgentLoop
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.manager import ChannelManager, _default_webui_dist
 from nanobot.cli.commands import _load_runtime_config, console, __logo__, __version__
@@ -91,6 +90,8 @@ def main() -> None:
     if dsn:
         from utils.db import db
         db.configure(dsn, min_size=pg.pool_min_conn, max_size=pg.pool_max_conn)
+        import os
+        os.environ["DATABASE_URL"] = dsn
     use_postgres = SETTINGS.storage == "postgres" or (SETTINGS.storage == "auto" and bool(dsn))
     if use_postgres:
         if not dsn:
@@ -125,7 +126,11 @@ def main() -> None:
         except Exception:
             pass
 
-        _persisted_store = SessionFileStore(_WORKSPACE_DIR / "data_store")
+        _persisted_store = SessionFileStore(
+            _WORKSPACE_DIR / "data_store",
+            max_files=SETTINGS.persist_max_files,
+            max_age_hours=SETTINGS.persist_max_age_hours,
+        )
         try:
             from nanobot.agent.runner import AgentRunner
             from nanobot.utils.runtime import ensure_nonempty_tool_result
@@ -190,7 +195,7 @@ def main() -> None:
         pass
 
     # ── 6. Создание AgentLoop ────────────────────────────────────────────
-    agent = ReviewAgentLoop.from_config(
+    agent = AgentLoop.from_config(
         config, bus,
         session_manager=session_manager,
         hooks=[],
