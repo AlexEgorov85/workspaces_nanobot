@@ -28,7 +28,7 @@
       question: "Добавь валидацию ввода в fibonacci.py, чтобы он корректно обрабатывал отрицательные числа и нечисловые аргументы, затем протестируй с невалидным вводом и покажи сообщение об ошибке"
       expect:
         tools: ["exec"]
-        keywords_include: ["валидац"]
+        check_file: "fibonacci.py"
         match_type: "llm_judge"
 
 - id: "hard-research-report"
@@ -57,7 +57,6 @@
       expect:
         tools: ["write_file"]
         check_file: "test_summary.md"
-        keywords_include: ["отчёт", "создан"]
         match_type: "llm_judge"
 
 - id: "hard-data-pipeline"
@@ -87,7 +86,6 @@
       expect:
         tools: ["write_file"]
         check_file: "sales_report.md"
-        keywords_include: ["отчёт", "создан"]
         match_type: "llm_judge"
 
 - id: "hard-git-history"
@@ -117,4 +115,3 @@
       expect:
         tools: ["exec"]
         check_file: "git_log.md"
-        keywords_include: ["коммит"]

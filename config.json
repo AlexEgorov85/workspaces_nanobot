@@ -3,7 +3,7 @@
     "defaults": {
       "workspace": "~/.nanobot/workspace",
       "modelPreset": null,
-      "model": "codestral-2508",
+      "model": "ministral-14b-2512",
       "provider": "mistral",
       "maxTokens": 8192,
       "contextWindowTokens": 65536,

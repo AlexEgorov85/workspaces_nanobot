@@ -1,5 +1,5 @@
 # Простые задания (сложность 1-3)
-# Базовые возможности агента: приветствия, математика, работа с файлами
+# Базовое знакомство с предметной областью аудиторских проверок
 
 - id: "simple-greeting"
   name: "Приветствие"
@@ -13,40 +13,6 @@
     keywords_include: ["привет"]
     keywords_exclude: ["error"]
 
-- id: "simple-math"
-  name: "Простая математика"
-  difficulty: 1
-  category: "basic"
-  type: "single"
-  new_session: true
-  question: "Сколько будет 2 + 2?"
-  max_iterations: 5
-  expect:
-    keywords_include: ["4"]
-
-- id: "simple-list-files"
-  name: "Список файлов"
-  difficulty: 2
-  category: "basic"
-  type: "single"
-  new_session: true
-  question: "Перечисли файлы в текущей директории"
-  max_iterations: 10
-  expect:
-    tools: ["list_dir"]
-
-- id: "simple-create-file"
-  name: "Создать файл"
-  difficulty: 2
-  category: "basic"
-  type: "single"
-  new_session: true
-  question: "Создай пустой файл с именем hello_benchmark.txt"
-  max_iterations: 10
-  expect:
-    tools: ["write_file"]
-    check_file: "data_store/cache/hello_benchmark.txt"
-
 - id: "simple-date"
   name: "Текущая дата"
   difficulty: 1
@@ -58,26 +24,62 @@
   expect:
     keywords_include: ["2026"]
 
-- id: "simple-read-file"
-  name: "Чтение файла"
+- id: "simple-schema-tables"
+  name: "Схема БД"
   difficulty: 2
-  category: "basic"
+  category: "db_analyzer"
   type: "single"
   new_session: true
-  question: "Прочитай файл AGENTS.md и скажи в одном предложении, о чём он"
+  question: "Прочитай файл skills/db_analyzer/cache/schema.json и перечисли все таблицы в схеме oarb. Сколько их?"
   max_iterations: 10
   expect:
     tools: ["read_file"]
-    keywords_include: ["агент"]
+    keywords_include: ["таблиц", "oarb"]
 
-- id: "simple-git-status"
-  name: "Git статус"
+- id: "simple-skill-modes"
+  name: "Режимы анализа"
   difficulty: 2
-  category: "basic"
+  category: "db_analyzer"
   type: "single"
   new_session: true
-  question: "Выполни git status и скажи, какая сейчас ветка"
+  question: "Прочитай SKILL.md навыка db_analyzer (skills/db_analyzer/SKILL.md) и перечисли три режима анализа, которые доступны"
   max_iterations: 10
   expect:
-    tools: ["exec"]
-    keywords_include: ["ветк"]
+    tools: ["read_file"]
+    keywords_include: ["predefined", "vector", "sql"]
+
+- id: "simple-scripts-list"
+  name: "Список скриптов"
+  difficulty: 2
+  category: "db_analyzer"
+  type: "single"
+  new_session: true
+  question: "Прочитай файл реестра скриптов skills/db_analyzer/scripts/scripts_registry.py и перечисли все предопределённые скрипты аналитики (их имена)"
+  max_iterations: 15
+  expect:
+    tools: ["read_file"]
+    keywords_include: ["analytics", "violations", "audit"]
+
+- id: "simple-db-config"
+  name: "Конфиг анализатора"
+  difficulty: 2
+  category: "db_analyzer"
+  type: "single"
+  new_session: true
+  question: "Прочитай config.json навыка db_analyzer (skills/db_analyzer/config.json) и скажи, какой LLM провайдер используется и какая модель"
+  max_iterations: 10
+  expect:
+    tools: ["read_file"]
+    keywords_include: ["mistral"]
+
+- id: "simple-violations-table"
+  name: "Структура нарушений"
+  difficulty: 3
+  category: "db_analyzer"
+  type: "single"
+  new_session: true
+  question: "Прочитай schema.json и опиши структуру таблицы violations: какие колонки есть, какой тип у severity и какие значения она может принимать"
+  max_iterations: 15
+  expect:
+    tools: ["read_file"]
+    keywords_include: ["severity", "нарушен"]

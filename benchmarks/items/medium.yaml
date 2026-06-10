@@ -1,83 +1,86 @@
 # Средние задания (сложность 4-7)
-# Многоинструментальные задачи, анализ данных, понимание кода
+# Анализ данных аудиторских проверок через db_analyzer
 
-- id: "medium-grep-files"
-  name: "Поиск Python файлов"
+- id: "medium-schema-relations"
+  name: "Связи таблиц"
   difficulty: 4
-  category: "code_search"
+  category: "db_analyzer"
   type: "single"
   new_session: true
-  question: "Найди все Python файлы, содержащие 'def main', и посчитай их"
-  max_iterations: 15
-  expect:
-    tools: ["grep"]
-
-- id: "medium-file-analysis"
-  name: "Анализ импортов"
-  difficulty: 5
-  category: "code_analysis"
-  type: "single"
-  new_session: true
-  question: "Найди все уникальные Python импорты во всех .py файлах и опиши, какие библиотеки используются"
-  max_iterations: 25
-  expect:
-    tools: ["grep"]
-
-- id: "medium-skill-discovery"
-  name: "Список навыков"
-  difficulty: 4
-  category: "system"
-  type: "single"
-  new_session: true
-  question: "Какие навыки (skills) доступны? Перечисли их и кратко опиши, что делает data-analyzer"
-  max_iterations: 15
-  expect:
-    keywords_include: ["data-analyzer", "навык"]
-
-- id: "medium-config-analysis"
-  name: "Анализ конфига"
-  difficulty: 5
-  category: "system"
-  type: "single"
-  new_session: true
-  question: "Прочитай файл config.json, который находится в ../config.json (на уровень выше workspace), и скажи, какой провайдер модели используется и сколько максимально итераций инструментов"
+  question: "Прочитай schema.json и объясни, как связаны таблицы audits, audit_reports, report_items и violations. Какие внешние ключи соединяют их?"
   max_iterations: 15
   expect:
     tools: ["read_file"]
-    keywords_include: ["модел", "провайдер"]
+    keywords_include: ["audit_id", "report_id", "связ"]
 
-- id: "medium-project-architecture"
-  name: "Архитектура проекта"
-  difficulty: 6
-  category: "code_analysis"
-  type: "single"
-  new_session: true
-  question: "Объясни общую архитектуру проекта. Прочитай gateway.py (../gateway.py) и cli_agent.py (../cli_agent.py), чтобы понять, как работает поток сообщений"
-  max_iterations: 25
-  expect:
-    tools: ["read_file"]
-    keywords_include: ["агент", "сесси", "gateway"]
-
-- id: "medium-simple-script"
-  name: "Скрипт на Python"
+- id: "medium-predefined-run"
+  name: "Запуск скрипта"
   difficulty: 5
-  category: "coding"
+  category: "db_analyzer"
   type: "single"
   new_session: true
-  question: "Напиши Python скрипт, который выводит числа от 1 до 10, запусти его и покажи результат"
-  max_iterations: 15
+  question: "Запусти audit_analyze.bat с режимом predefined и скриптом analytics_by_year_month. Используй команду: skills/db_analyzer/audit_analyze.bat --mode predefined --script analytics_by_year_month --params year=2024. Если БД недоступна, объясни, что делает этот скрипт"
+  max_iterations: 20
   expect:
     tools: ["exec"]
-    keywords_include: ["1", "2", "3", "10"]
+    keywords_include: ["аналитик", "проверок"]
 
-- id: "medium-find-configs"
-  name: "Поиск конфигов"
-  difficulty: 4
-  category: "code_search"
+- id: "medium-violations-query"
+  name: "Статистика нарушений"
+  difficulty: 6
+  category: "db_analyzer"
   type: "single"
   new_session: true
-  question: "Найди все JSON конфигурационные файлы в проекте и перечисли их имена"
+  question: "Прочитай описание скрипта violations_by_type в scripts_registry.py и объясни, какие параметры он принимает, какую SQL-логику реализует. Если можешь — выполни его через audit_analyze.bat"
+  max_iterations: 20
+  expect:
+    tools: ["read_file"]
+    keywords_include: ["violation_code", "ILIKE", "нарушен"]
+
+- id: "medium-effectiveness-script"
+  name: "Эффективность проверок"
+  difficulty: 6
+  category: "db_analyzer"
+  type: "single"
+  new_session: true
+  question: "Прочитай скрипт audit_effectiveness в scripts_registry.py и объясни, как классифицируются проверки по уровню серьёзности (severity_level). Какие категории выделяются и по какому принципу?"
   max_iterations: 15
   expect:
-    tools: ["find_files"]
-    keywords_include: [".json"]
+    tools: ["read_file"]
+    keywords_include: ["критическ", "серьезн", "допустим"]
+
+- id: "medium-vector-search"
+  name: "Векторный поиск"
+  difficulty: 6
+  category: "db_analyzer"
+  type: "single"
+  new_session: true
+  question: "Прочитай SKILL.md и config.json db_analyzer и объясни, как работает векторный поиск по FAISS-индексам. Какие индексы существуют, какой моделью делаются эмбеддинги, какая размерность?"
+  max_iterations: 15
+  expect:
+    tools: ["read_file"]
+    keywords_include: ["FAISS", "embedding", "mxbai"]
+
+- id: "medium-dynamics-analysis"
+  name: "Динамика проверок"
+  difficulty: 5
+  category: "db_analyzer"
+  type: "single"
+  new_session: true
+  question: "Прочитай скрипт audit_dynamics в scripts_registry.py и объясни, какие периоды группировки поддерживаются, какие метрики рассчитываются. Какой SQL-запрос сгенерируется для period=quarter?"
+  max_iterations: 15
+  expect:
+    tools: ["read_file"]
+    keywords_include: ["period", "квартал", "месяц"]
+
+- id: "medium-sql-mode"
+  name: "SQL-генерация"
+  difficulty: 7
+  category: "db_analyzer"
+  type: "single"
+  new_session: true
+  question: "Прочитай файл skills/db_analyzer/scripts/sql_mode.py и объясни, как работает режим sql в db_analyzer: как LLM генерирует SQL, как валидируется запрос, сколько попыток повторения при ошибке"
+  max_iterations: 20
+  expect:
+    tools: ["read_file"]
+    keywords_include: ["SELECT", "EXPLAIN", "retry"]

@@ -140,16 +140,45 @@ def _print_summary(suite_result: SuiteResult) -> None:
     print("=" * 60)
 
 
+def _cleanup_item(item: BenchItem, bot: Any) -> None:
+    """Remove files created by agent during a benchmark item."""
+    workspace = Path(bot._loop.workspace) if hasattr(bot._loop, "workspace") else None
+    if not workspace:
+        return
+    files_to_check: list[str] = []
+    if item.type == "single" and item.expect:
+        if item.expect.check_file:
+            files_to_check.append(item.expect.check_file)
+        if item.expect.check_file_content:
+            files_to_check.append(item.expect.check_file)
+    elif item.type == "multi_step" and item.steps:
+        for s in item.steps:
+            if s.expect.check_file:
+                files_to_check.append(s.expect.check_file)
+            if s.expect.check_file_content:
+                files_to_check.append(s.expect.check_file)
+    for fname in set(files_to_check):
+        fpath = workspace / fname
+        if fpath.exists():
+            try:
+                fpath.unlink()
+            except Exception:
+                pass
+
+
 async def _run_item(
     item: BenchItem,
     run_id: str,
     bot: Any,
     verbose: bool,
 ) -> BenchResult:
-    if item.type == "single":
-        return await _run_single(item, run_id, bot, verbose)
-    else:
-        return await _run_multi_step(item, run_id, bot, verbose)
+    try:
+        if item.type == "single":
+            return await _run_single(item, run_id, bot, verbose)
+        else:
+            return await _run_multi_step(item, run_id, bot, verbose)
+    finally:
+        _cleanup_item(item, bot)
 
 
 async def _run_single(
