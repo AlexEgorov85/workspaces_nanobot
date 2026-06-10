@@ -464,24 +464,27 @@ class PostgresChannel(BaseChannel):
             return
 
         # Flush any pending buffered reasoning before final answer
+        reasoning_parts = []
         if assistant_msg_id and assistant_msg_id in self._reasoning_buffers:
             delta = self._reasoning_buffers.pop(assistant_msg_id, "")
             if delta:
-                row = await db.fetchone(
-                    f"SELECT metadata FROM {self._fq_table} WHERE id = $1",
-                    assistant_msg_id,
-                )
-                if row:
-                    meta_row = _decode_jsonb(row["metadata"])
-                    reasoning = (meta_row.get("reasoning") or "") + delta
-                    meta_row["reasoning"] = reasoning
-                    await db.execute(
-                        f"UPDATE {self._fq_table} SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
-                        meta_row, assistant_msg_id,
-                    )
-
+                reasoning_parts.append(delta)
         if ctx.get("reasoning_buf"):
-            meta["_reasoning"] = " ".join(ctx["reasoning_buf"])
+            reasoning_parts = ctx["reasoning_buf"] + reasoning_parts
+        if reasoning_parts:
+            combined = " ".join(reasoning_parts)
+            row = await db.fetchone(
+                f"SELECT metadata FROM {self._fq_table} WHERE id = $1",
+                assistant_msg_id,
+            )
+            if row:
+                meta_row = _decode_jsonb(row["metadata"])
+                meta_row["reasoning"] = (meta_row.get("reasoning") or "") + combined
+                await db.execute(
+                    f"UPDATE {self._fq_table} SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
+                    meta_row, assistant_msg_id,
+                )
+
         if ctx.get("tool_events"):
             existing = meta.get("_tool_events", [])
             meta["_tool_events"] = existing + ctx["tool_events"]
@@ -530,7 +533,7 @@ class PostgresChannel(BaseChannel):
                 existing = meta.get("_tool_events", [])
                 meta["_tool_events"] = existing + ctx["tool_events"]
             if ctx.get("reasoning_buf"):
-                meta["_reasoning"] = " ".join(ctx["reasoning_buf"])
+                meta["reasoning"] = " ".join(ctx["reasoning_buf"])
 
             content = self._stream_buffers.pop(stream_id, "")
             if content and assistant_msg_id:
