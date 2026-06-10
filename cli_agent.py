@@ -221,6 +221,7 @@ from loguru import logger
 
 from nanobot.agent import AgentHook
 from nanobot.agent.loop import AgentLoop
+from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.cli.commands import (
     _flush_pending_tty_input,
@@ -240,6 +241,8 @@ from nanobot.cron.service import CronService
 from nanobot.utils.helpers import sync_workspace_templates
 
 from pg_session_manager import PGSessionManager
+
+from hooks.tool_audit_hook import ToolAuditHook
 
 _CONFIG_PATH: str = str(Path(__file__).parent / "config.json")
 _WORKSPACE_DIR: Path = Path(__file__).parent / "workspace"
@@ -282,6 +285,21 @@ LOG_LEVEL: str = "WARNING"    # "DEBUG" | "INFO" | "WARNING" | "ERROR"
 # ══════════════════════════════════════════════════════════════════════════════
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+def _patch_agent_tool_audit(agent, hook) -> None:
+    """Monkey-patch _assemble_outbound to inject tool audit trail into msg.metadata."""
+    _orig = agent._assemble_outbound
+
+    def _wrap(msg, final_content, all_msgs, stop_reason, had_injections, on_stream, *, turn_latency_ms=None):
+        result = _orig(msg, final_content, all_msgs, stop_reason, had_injections, on_stream, turn_latency_ms=turn_latency_ms)
+        if result is not None:
+            entries = hook.drain()
+            if entries:
+                result.metadata["_tool_audit"] = entries
+        return result
+
+    agent._assemble_outbound = _wrap
 
 
 def _scan_and_register_hooks() -> list:
@@ -623,7 +641,9 @@ def _run_vanilla_agent(args: argparse.Namespace) -> None:
     cron_store_path = config.workspace_path / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
-    agent = AgentLoop.from_config(config, bus, cron_service=cron)
+    tool_audit_hook = ToolAuditHook()
+    agent = AgentLoop.from_config(config, bus, cron_service=cron, hooks=[tool_audit_hook])
+    _patch_agent_tool_audit(agent, tool_audit_hook)
     _run_interactive_loop(agent, config, session=args.session, display=DISPLAY)
 
 
@@ -693,12 +713,24 @@ def _run_patched_agent(args: argparse.Namespace) -> None:
             console.print("[dim]PostgreSQL DSN available but --storage=file; using JSONL files[/dim]")
 
     hooks = _scan_and_register_hooks()
+
+    # Find or create ToolAuditHook for metadata injection
+    tool_audit_hook = None
+    for h in hooks:
+        if isinstance(h, ToolAuditHook):
+            tool_audit_hook = h
+            break
+    if tool_audit_hook is None:
+        tool_audit_hook = ToolAuditHook()
+        hooks.append(tool_audit_hook)
+
     agent = AgentLoop.from_config(
         config, bus,
         cron_service=cron,
         session_manager=session_manager,
         hooks=hooks,
     )
+    _patch_agent_tool_audit(agent, tool_audit_hook)
     _run_interactive_loop(agent, config, session=args.session, display=DISPLAY)
 
 
