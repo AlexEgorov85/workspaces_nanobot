@@ -1,0 +1,7 @@
+# Benchmark run results (auto-generated)
+results/runs/*
+!results/runs/.gitkeep
+
+# Python cache
+__pycache__/
+*.pyc

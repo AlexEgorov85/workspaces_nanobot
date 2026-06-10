@@ -1,0 +1,120 @@
+# Сложные задания (сложность 8-10)
+# Многошаговые комплексные задачи с контекстом между шагами
+
+- id: "hard-code-test-fix"
+  name: "Написать, протестировать и исправить"
+  difficulty: 8
+  category: "coding"
+  type: "multi_step"
+  new_session: false
+  max_iterations: 40
+  timeout: 180
+  steps:
+    - step: 1
+      weight: 0.3
+      question: "Напиши Python скрипт fibonacci.py, который генерирует первые N чисел Фибоначчи, где N передаётся аргументом командной строки"
+      expect:
+        tools: ["write_file"]
+        check_file: "fibonacci.py"
+    - step: 2
+      weight: 0.3
+      question: "Запусти fibonacci.py с аргументом 11 и сохрани вывод в fibonacci_output.txt"
+      expect:
+        tools: ["exec"]
+        check_file: "fibonacci_output.txt"
+        keywords_include: ["55"]
+    - step: 3
+      weight: 0.4
+      question: "Добавь валидацию ввода в fibonacci.py, чтобы он корректно обрабатывал отрицательные числа и нечисловые аргументы, затем протестируй с невалидным вводом и покажи сообщение об ошибке"
+      expect:
+        tools: ["exec", "read_file"]
+        keywords_include: ["ошибк", "отрицательн"]
+        match_type: "llm_judge"
+
+- id: "hard-research-report"
+  name: "Исследование и отчёт"
+  difficulty: 8
+  category: "research"
+  type: "multi_step"
+  new_session: false
+  max_iterations: 40
+  timeout: 300
+  steps:
+    - step: 1
+      weight: 0.2
+      question: "Найди все Python тестовые файлы в проекте и посчитай их"
+      expect:
+        tools: ["find_files"]
+    - step: 2
+      weight: 0.3
+      question: "Прочитай один из тестовых файлов и опиши, что он тестирует"
+      expect:
+        tools: ["read_file"]
+        keywords_include: ["тест"]
+    - step: 3
+      weight: 0.5
+      question: "Создай файл отчёта test_summary.md, в котором перечисли все найденные тестовые файлы и кратко опиши подход к тестированию в этом проекте"
+      expect:
+        tools: ["write_file"]
+        check_file: "test_summary.md"
+        keywords_include: ["тест", "файл"]
+        match_type: "llm_judge"
+
+- id: "hard-data-pipeline"
+  name: "Анализ данных"
+  difficulty: 9
+  category: "data_analysis"
+  type: "multi_step"
+  new_session: false
+  max_iterations: 45
+  timeout: 300
+  steps:
+    - step: 1
+      weight: 0.2
+      question: "Найди CSV файлы в workspace и перечисли их"
+      expect:
+        tools: ["find_files"]
+        keywords_include: [".csv"]
+    - step: 2
+      weight: 0.4
+      question: "Проанализируй файл sales.csv, найденный в workspace, и вычисли общую выручку, среднюю сумму продажи и количество транзакций"
+      expect:
+        tools: ["read_file", "exec"]
+        keywords_include: ["выручк", "средн", "транзакц"]
+    - step: 3
+      weight: 0.4
+      question: "Создай файл отчёта sales_report.md с результатами анализа: общая выручка, средняя продажа и интересные закономерности"
+      expect:
+        tools: ["write_file"]
+        check_file: "sales_report.md"
+        keywords_include: ["выручк", "продаж"]
+        match_type: "llm_judge"
+
+- id: "hard-git-history"
+  name: "Анализ Git истории"
+  difficulty: 8
+  category: "git"
+  type: "multi_step"
+  new_session: false
+  max_iterations: 30
+  timeout: 180
+  steps:
+    - step: 1
+      weight: 0.3
+      question: "Покажи последние 5 коммитов git с их сообщениями"
+      expect:
+        tools: ["exec"]
+        keywords_include: ["коммит"]
+    - step: 2
+      weight: 0.3
+      question: "Какие файлы были изменены в последнем коммите? Покажи краткую сводку изменений"
+      expect:
+        tools: ["exec"]
+        keywords_include: ["файл", "изменен"]
+    - step: 3
+      weight: 0.4
+      question: "Создай файл git_log.md с последними 5 коммитами в красиво оформленном виде. Используй exec с командой git log"
+      expect:
+        tools: ["exec"]
+        check_file: "git_log.md"
+        keywords_include: ["коммит"]

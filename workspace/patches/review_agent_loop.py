@@ -11,6 +11,7 @@ from nanobot.agent import AgentHook, AgentHookContext
 from nanobot.agent.loop import AgentLoop, TurnContext
 
 from .reviewer import run_review
+from hooks.tool_audit_hook import ToolAuditHook
 
 
 class RepeatGuardHook(AgentHook):
@@ -86,6 +87,7 @@ class ReviewAgentLoop(AgentLoop):
         self._reviewer_model = reviewer_model
         self._enabled_checks = enabled_checks
         self._extra_hooks.append(RepeatGuardHook(max_repeats=max_tool_repeats))
+        self._extra_hooks.append(ToolAuditHook())
 
     async def _state_run(self, ctx: TurnContext) -> str:
         if ctx.visible_run_started_at is None:
@@ -109,8 +111,9 @@ class ReviewAgentLoop(AgentLoop):
             "pending_queue": ctx.pending_queue,
         }
 
-        # locate RepeatGuardHook for metadata
+        # locate RepeatGuardHook and ToolAuditHook for metadata
         guard = self._find_guard_hook()
+        audit_hook = self._find_audit_hook()
 
         review_info: dict[str, Any] = {
             "quality": "skipped",
@@ -211,11 +214,24 @@ class ReviewAgentLoop(AgentLoop):
 
         # Store review metadata on the outbound message
         ctx.msg.metadata["_review"] = review_info
+
+        # Store tool audit trail (all tool calls with status, errors, args)
+        if audit_hook:
+            entries = audit_hook.drain()
+            if entries:
+                ctx.msg.metadata["_tool_audit"] = entries
+
         return "ok"
 
     def _find_guard_hook(self) -> RepeatGuardHook | None:
         for hook in self._extra_hooks:
             if isinstance(hook, RepeatGuardHook):
+                return hook
+        return None
+
+    def _find_audit_hook(self) -> ToolAuditHook | None:
+        for hook in self._extra_hooks:
+            if isinstance(hook, ToolAuditHook):
                 return hook
         return None
 

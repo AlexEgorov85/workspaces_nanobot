@@ -1,0 +1,83 @@
+# Средние задания (сложность 4-7)
+# Многоинструментальные задачи, анализ данных, понимание кода
+
+- id: "medium-grep-files"
+  name: "Поиск Python файлов"
+  difficulty: 4
+  category: "code_search"
+  type: "single"
+  new_session: true
+  question: "Найди все Python файлы, содержащие 'def main', и посчитай их"
+  max_iterations: 15
+  expect:
+    tools: ["grep"]
+
+- id: "medium-file-analysis"
+  name: "Анализ импортов"
+  difficulty: 5
+  category: "code_analysis"
+  type: "single"
+  new_session: true
+  question: "Найди все уникальные Python импорты во всех .py файлах и опиши, какие библиотеки используются"
+  max_iterations: 25
+  expect:
+    tools: ["grep"]
+
+- id: "medium-skill-discovery"
+  name: "Список навыков"
+  difficulty: 4
+  category: "system"
+  type: "single"
+  new_session: true
+  question: "Какие навыки (skills) доступны? Перечисли их и кратко опиши, что делает data-analyzer"
+  max_iterations: 15
+  expect:
+    keywords_include: ["data-analyzer", "навык"]
+
+- id: "medium-config-analysis"
+  name: "Анализ конфига"
+  difficulty: 5
+  category: "system"
+  type: "single"
+  new_session: true
+  question: "Прочитай файл config.json, который находится в ../config.json (на уровень выше workspace), и скажи, какой провайдер модели используется и сколько максимально итераций инструментов"
+  max_iterations: 15
+  expect:
+    tools: ["read_file"]
+    keywords_include: ["модел", "провайдер"]
+
+- id: "medium-project-architecture"
+  name: "Архитектура проекта"
+  difficulty: 6
+  category: "code_analysis"
+  type: "single"
+  new_session: true
+  question: "Объясни общую архитектуру проекта. Прочитай gateway.py (../gateway.py) и cli_agent.py (../cli_agent.py), чтобы понять, как работает поток сообщений"
+  max_iterations: 25
+  expect:
+    tools: ["read_file"]
+    keywords_include: ["агент", "сесси", "gateway"]
+
+- id: "medium-simple-script"
+  name: "Скрипт на Python"
+  difficulty: 5
+  category: "coding"
+  type: "single"
+  new_session: true
+  question: "Напиши Python скрипт, который выводит числа от 1 до 10, запусти его и покажи результат"
+  max_iterations: 15
+  expect:
+    tools: ["exec"]
+    keywords_include: ["1", "2", "3", "10"]
+
+- id: "medium-find-configs"
+  name: "Поиск конфигов"
+  difficulty: 4
+  category: "code_search"
+  type: "single"
+  new_session: true
+  question: "Найди все JSON конфигурационные файлы в проекте и перечисли их имена"
+  max_iterations: 15
+  expect:
+    tools: ["find_files"]
+    keywords_include: [".json"]

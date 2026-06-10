@@ -1,0 +1,50 @@
+# Шаблон для написания benchmark-вопросов
+# Копируйте этот блок и заполняйте свои значения
+
+# --- single question ---
+- id: "my-unique-id"
+  name: "Human readable name"
+  difficulty: 5          # 1-10: 1-3 simple, 4-7 medium, 8-10 hard
+  category: "general"    # e.g. basic, data_analysis, coding, research
+  type: "single"         # single | multi_step
+  new_session: true      # true = fresh session, false = continue conversation
+  question: "Ask the agent something"
+  context_files: []      # files to make available in workspace
+  max_iterations: 30
+  timeout: 60
+  expect:
+    tools: ["exec", "glob"]
+    skills: []
+    keywords_include: ["expected", "keyword"]
+    keywords_exclude: ["error", "failed"]
+    match_type: "keyword"  # keyword | functional | llm_judge
+    check_file: null
+    check_file_content: null
+
+# --- multi-step question ---
+- id: "my-multi-step-id"
+  name: "Multi-step task"
+  difficulty: 8
+  category: "coding"
+  type: "multi_step"
+  new_session: false     # все шаги в одной сессии (agent помнит контекст)
+  max_iterations: 40
+  timeout: 180
+  steps:
+    - step: 1
+      weight: 0.3
+      question: "First step question"
+      expect:
+        tools: ["exec"]
+        keywords_include: ["done"]
+    - step: 2
+      weight: 0.3
+      question: "Second step question"
+      expect:
+        check_file: "output.txt"
+    - step: 3
+      weight: 0.4
+      question: "Third step question"
+      expect:
+        keywords_include: ["summary"]
+        match_type: "llm_judge"
