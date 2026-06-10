@@ -16,7 +16,7 @@
 === КАК ВКЛЮЧИТЬ / ВЫКЛЮЧИТЬ КАНАЛЫ =========================================
 
  Способ 1 — через channels (список имён):
-   channels = ["websocket", "telegram"]   # запустить только эти каналы
+    channels = ["telegram"]   # запустить только эти каналы
    channels = []                           # запустить все из config.json
 
  Способ 2 — через config.json:
@@ -36,13 +36,13 @@
 
 === ПРИМЕР: ТОЛЬКО WEBSOCKET, БЕЗ БД ========================================
 
-   channels = ["websocket"]
+    channels = []
    storage = "file"
    pg.dsn = ""
 
 === ПРИМЕР: ПОЛНЫЙ НАБОР С БД ===============================================
 
-   channels = ["websocket", "telegram"]
+    channels = ["telegram"]
    storage = "auto"
    pg.dsn = "postgresql://user:pass@localhost:5432/nanobot"
    pg.channel.enabled = True

@@ -196,26 +196,6 @@
       "inlineKeyboards": false,
       "streamEditInterval": 0.6
     },
-    "websocket": {
-      "enabled": true,
-      "host": "127.0.0.1",
-      "port": 8765,
-      "path": "/",
-      "token": "",
-      "tokenIssuePath": "",
-      "tokenIssueSecret": "",
-      "tokenTtlS": 300,
-      "websocketRequiresToken": false,
-      "allowFrom": [
-        "*"
-      ],
-      "streaming": true,
-      "maxMessageBytes": 37748736,
-      "pingIntervalS": 20.0,
-      "pingTimeoutS": 20.0,
-      "sslCertfile": "",
-      "sslKeyfile": ""
-    },
     "wecom": {
       "enabled": false,
       "botId": "",
