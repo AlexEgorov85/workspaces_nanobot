@@ -1,0 +1,47 @@
+{
+  "item_id": "simple-list-files",
+  "item_name": "Список файлов",
+  "difficulty": 2,
+  "passed": false,
+  "total_score": 0.7143,
+  "response": "Error: {'message': 'registry.ollama.ai/library/opencoder:latest does not support tools', 'type': 'api_error', 'param': None, 'code': None}",
+  "error": null,
+  "tools_used": [],
+  "skills_activated": [],
+  "total_iterations": 1,
+  "duration_sec": 0.11461019515991211,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing tools: ['list_dir']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 1.0,
+      "detail": "1 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No keyword requirements"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    }
+  ],
+  "steps": []
+}

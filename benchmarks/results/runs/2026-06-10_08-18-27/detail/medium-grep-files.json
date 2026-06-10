@@ -1,0 +1,47 @@
+{
+  "item_id": "medium-grep-files",
+  "item_name": "Поиск Python файлов",
+  "difficulty": 4,
+  "passed": false,
+  "total_score": 0.7143,
+  "response": "Error: {'message': '429 Too Many Requests: you (alekseyvegorov) have reached your session usage limit, upgrade for higher limits: https://ollama.com/upgrade (ref: 628b4704-f5f9-42dc-a167-e917f23fa5d0)', 'type': 'api_error', 'param': None, 'code': None}",
+  "error": null,
+  "tools_used": [],
+  "skills_activated": [],
+  "total_iterations": 1,
+  "duration_sec": 10.075456619262695,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing tools: ['grep']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 1.0,
+      "detail": "1 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No keyword requirements"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    }
+  ],
+  "steps": []
+}

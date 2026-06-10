@@ -1,0 +1,3 @@
+Error: Invalid parameters for tool 'grep': missing required pattern
+
+[Analyze the error above and try a different approach.]

@@ -1,0 +1,47 @@
+{
+  "item_id": "medium-skill-discovery",
+  "item_name": "Список навыков",
+  "difficulty": 4,
+  "passed": false,
+  "total_score": 0.7857,
+  "response": "Error: {'message': '429 Too Many Requests: you (alekseyvegorov) have reached your session usage limit, upgrade for higher limits: https://ollama.com/upgrade (ref: db196fe9-5e69-4c2e-a0b2-f1548c0c0403)', 'type': 'api_error', 'param': None, 'code': None}",
+  "error": null,
+  "tools_used": [],
+  "skills_activated": [],
+  "total_iterations": 1,
+  "duration_sec": 8.682549953460693,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No tool expectations"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 1.0,
+      "detail": "1 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing keywords: ['data-analyzer', 'навык']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    }
+  ],
+  "steps": []
+}

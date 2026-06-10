@@ -1,0 +1,271 @@
+{
+  "item_id": "hard-research-report",
+  "item_name": "Исследование и отчёт",
+  "difficulty": 8,
+  "passed": false,
+  "total_score": 0.5273,
+  "response": null,
+  "error": null,
+  "tools_used": [
+    "find_files",
+    "read_file",
+    "write_file"
+  ],
+  "skills_activated": [],
+  "total_iterations": 9,
+  "duration_sec": 27.3418972492218,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing tools: ['exec']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 0.9333333333333333,
+      "detail": "5 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No keyword requirements"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    },
+    {
+      "check": "tools",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All expected tools used: ['read_file']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 0.9833333333333333,
+      "detail": "2 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing keywords: ['assert']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    },
+    {
+      "check": "tools",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing tools: ['exec']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 0.9833333333333333,
+      "detail": "2 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All keywords found: ['тест', 'файл']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    },
+    {
+      "check": "file_exists",
+      "passed": false,
+      "score": 0.0,
+      "detail": "File not found: C:\\Users\\Алексей\\.nanobot\\workspace\\data_store\\cache\\test_summary.md"
+    },
+    {
+      "check": "llm_judge",
+      "passed": true,
+      "score": 0.5,
+      "detail": "LLM judge not available, skipped"
+    }
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "weight": 0.2,
+      "passed": false,
+      "score": 0.7,
+      "response": "В проекте найдено 5 Python тестовых файлов:\n\n1. `skills/data-analyzer/tests/prepare_test_data.py`\n2. `skills/data-analyzer/tests/run_integration_tests.py`\n3. `skills/data-analyzer/tests/validate_results.py`\n4. `skills/db_analyzer/tests/e2e_test.py`\n5. `skills/html_presentation_generator/tests/e2e_test.py`",
+      "tools_used": [
+        "find_files",
+        "find_files",
+        "find_files",
+        "find_files"
+      ],
+      "iterations": 5,
+      "duration_sec": 11.588385343551636,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing tools: ['exec']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 0.9333333333333333,
+          "detail": "5 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No keyword requirements"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ]
+    },
+    {
+      "step": 2,
+      "weight": 0.3,
+      "passed": false,
+      "score": 0.7821,
+      "response": "Файл `skills/data-analyzer/tests/prepare_test_data.py` предназначен для генерации тестовых данных, используемых для проверки работы навыка анализа данных. Вот что он делает:\n\n1. **Создаёт тестовую директорию** `test_files` внутри каталога тестов.\n2. **Генерирует несколько типов тестовых файлов**:\n   - `small.txt` — небольшой текстовый файл с логами приложения, включая сообщения разных уровней (INFO, ERROR, WARN).\n   - `large.log` — большой лог-файл из 2000 строк с разными уровнями логирования и случайными сообщениями.\n   - `sales.csv` — CSV-файл с данными о продажах, содержащий дубликаты по полю `id`.\n   - `analytics.xlsx` — Excel-файл с табличными данными для проверки агрегаций (если установлен `pandas` и `openpyxl`).\n\nЭтот файл не является тестом в обычном смысле (с проверками и утверждениями), а служит для подготовки тестовых данных, на которых затем тестируются функции навыка `data-analyzer`.",
+      "tools_used": [
+        "read_file"
+      ],
+      "iterations": 2,
+      "duration_sec": 7.626612424850464,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All expected tools used: ['read_file']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 0.9833333333333333,
+          "detail": "2 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing keywords: ['assert']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ]
+    },
+    {
+      "step": 3,
+      "weight": 0.5,
+      "passed": false,
+      "score": 0.569,
+      "response": "Файл отчёта `test_summary.md` успешно создан. В нём перечислены все найденные тестовые файлы и описан общий подход к тестированию в проекте.",
+      "tools_used": [
+        "write_file"
+      ],
+      "iterations": 2,
+      "duration_sec": 8.126899480819702,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing tools: ['exec']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 0.9833333333333333,
+          "detail": "2 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All keywords found: ['тест', 'файл']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        },
+        {
+          "check": "file_exists",
+          "passed": false,
+          "score": 0.0,
+          "detail": "File not found: C:\\Users\\Алексей\\.nanobot\\workspace\\data_store\\cache\\test_summary.md"
+        },
+        {
+          "check": "llm_judge",
+          "passed": true,
+          "score": 0.5,
+          "detail": "LLM judge not available, skipped"
+        }
+      ]
+    }
+  ]
+}

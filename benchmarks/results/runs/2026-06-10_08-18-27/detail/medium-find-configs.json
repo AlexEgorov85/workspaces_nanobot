@@ -1,0 +1,47 @@
+{
+  "item_id": "medium-find-configs",
+  "item_name": "Поиск конфигов",
+  "difficulty": 4,
+  "passed": false,
+  "total_score": 0.5,
+  "response": "Error: {'message': '429 Too Many Requests: you (alekseyvegorov) have reached your session usage limit, upgrade for higher limits: https://ollama.com/upgrade (ref: 073f9faa-f8fd-4e0d-b45c-623e177a472e)', 'type': 'api_error', 'param': None, 'code': None}",
+  "error": null,
+  "tools_used": [],
+  "skills_activated": [],
+  "total_iterations": 1,
+  "duration_sec": 8.719664335250854,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing tools: ['find_files']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 1.0,
+      "detail": "1 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing keywords: ['.json']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    }
+  ],
+  "steps": []
+}

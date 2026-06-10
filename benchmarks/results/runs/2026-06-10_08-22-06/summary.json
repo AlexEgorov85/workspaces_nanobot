@@ -1,0 +1,350 @@
+{
+  "suite_name": "simple",
+  "timestamp": "2026-06-10T08:22:11.055892",
+  "total_items": 7,
+  "passed_items": 0,
+  "total_score": 4.6933,
+  "avg_score": 0.6704714285714285,
+  "duration_sec": 4.205844879150391,
+  "config": {
+    "tags": [],
+    "mode": "all"
+  },
+  "results": [
+    {
+      "item_id": "simple-greeting",
+      "item_name": "Приветствие",
+      "difficulty": 1,
+      "passed": false,
+      "total_score": 0.6429,
+      "response": "Error: {'message': 'registry.ollama.ai/library/opencoder:latest does not support tools', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 2.153531312942505,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No tool expectations"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing keywords: ['привет']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Forbidden keywords found: ['error']"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-math",
+      "item_name": "Простая математика",
+      "difficulty": 1,
+      "passed": false,
+      "total_score": 0.7857,
+      "response": "Error: {'message': 'registry.ollama.ai/library/opencoder:latest does not support tools', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.11541604995727539,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No tool expectations"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing keywords: ['4']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-list-files",
+      "item_name": "Список файлов",
+      "difficulty": 2,
+      "passed": false,
+      "total_score": 0.7143,
+      "response": "Error: {'message': 'registry.ollama.ai/library/opencoder:latest does not support tools', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.11461019515991211,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing tools: ['list_dir']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No keyword requirements"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-create-file",
+      "item_name": "Создать файл",
+      "difficulty": 2,
+      "passed": false,
+      "total_score": 0.7647,
+      "response": "Error: {'message': 'registry.ollama.ai/library/opencoder:latest does not support tools', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.09983444213867188,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing tools: ['write_file']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No keyword requirements"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        },
+        {
+          "check": "file_exists",
+          "passed": true,
+          "score": 1.0,
+          "detail": "File exists: C:\\Users\\Алексей\\.nanobot\\workspace\\data_store\\cache\\hello_benchmark.txt"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-date",
+      "item_name": "Текущая дата",
+      "difficulty": 1,
+      "passed": false,
+      "total_score": 0.7857,
+      "response": "Error: {'message': 'registry.ollama.ai/library/opencoder:latest does not support tools', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.11718082427978516,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No tool expectations"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing keywords: ['2026']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-read-file",
+      "item_name": "Чтение файла",
+      "difficulty": 2,
+      "passed": false,
+      "total_score": 0.5,
+      "response": "Error: {'message': 'registry.ollama.ai/library/opencoder:latest does not support tools', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.1121971607208252,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing tools: ['read_file']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing keywords: ['агент']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-git-status",
+      "item_name": "Git статус",
+      "difficulty": 2,
+      "passed": false,
+      "total_score": 0.5,
+      "response": "Error: {'message': 'registry.ollama.ai/library/opencoder:latest does not support tools', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.11684560775756836,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing tools: ['exec']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing keywords: ['ветк']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    }
+  ]
+}

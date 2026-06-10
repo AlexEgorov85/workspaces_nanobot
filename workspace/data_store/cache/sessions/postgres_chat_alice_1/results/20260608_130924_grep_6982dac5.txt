@@ -1,0 +1,8 @@
+skills/db_analyzer/tests/e2e_test.py
+skills/db_analyzer/scripts/predefined.py
+skills/db_analyzer/scripts/scripts_registry.py
+skills/db_analyzer/scripts/sql_mode.py
+skills/db_analyzer/scripts/__init__.py
+skills/db_analyzer/scripts/cli.py
+skills/db_analyzer/scripts/predefined_mode.py
+skills/db_analyzer/scripts/vector_mode.py

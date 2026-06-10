@@ -1,0 +1,49 @@
+{
+  "item_id": "simple-read-file",
+  "item_name": "Чтение файла",
+  "difficulty": 2,
+  "passed": true,
+  "total_score": 0.9964,
+  "response": "Файл `AGENTS.md` содержит инструкции для агентов по политике хранения файлов, работе с напоминаниями через `cron` и управлению периодическими задачами через `HEARTBEAT.md`.",
+  "error": null,
+  "tools_used": [
+    "read_file"
+  ],
+  "skills_activated": [],
+  "total_iterations": 2,
+  "duration_sec": 4.27962851524353,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All expected tools used: ['read_file']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 0.9833333333333333,
+      "detail": "2 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All keywords found: ['агент']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    }
+  ],
+  "steps": []
+}

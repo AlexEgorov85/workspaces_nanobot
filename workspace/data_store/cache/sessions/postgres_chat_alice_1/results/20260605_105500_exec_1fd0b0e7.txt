@@ -1,0 +1,222 @@
+{
+  "mode": "predefined",
+  "status": "success",
+  "row_count": 41,
+  "columns": [
+    "violation_code",
+    "violation_count",
+    "affected_audits"
+  ],
+  "rows": [
+    {
+      "violation_code": "VIOL-01-001",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-002",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-003",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-004",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-005",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-006",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-007",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-008",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-009",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-010",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-011",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-012",
+      "violation_count": 4,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-013",
+      "violation_count": 3,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-014",
+      "violation_count": 3,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-015",
+      "violation_count": 3,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-016",
+      "violation_count": 3,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-017",
+      "violation_count": 3,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-018",
+      "violation_count": 3,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-019",
+      "violation_count": 3,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-020",
+      "violation_count": 3,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-021",
+      "violation_count": 3,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-022",
+      "violation_count": 3,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-023",
+      "violation_count": 3,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-024",
+      "violation_count": 2,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-025",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-026",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-027",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-028",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-029",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-030",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-031",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-032",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-033",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-034",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-035",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-036",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-037",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-038",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-039",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-040",
+      "violation_count": 1,
+      "affected_audits": 1
+    },
+    {
+      "violation_code": "VIOL-01-041",
+      "violation_count": 1,
+      "affected_audits": 1
+    }
+  ],
+  "sql": "SELECT\nv.violation_code,\nCOUNT(*) AS violation_count,\nCOUNT(DISTINCT v.audit_id) AS affected_audits\nFROM oarb.violations v\nJOIN oarb.audits a ON v.audit_id = a.id\nWHERE a.actual_date IS NOT NULL\nGROUP BY v.violation_code\nORDER BY violation_count DESC LIMIT $1",
+  "script_name": "violations_by_type"
+}
+
+
+Exit code: 0

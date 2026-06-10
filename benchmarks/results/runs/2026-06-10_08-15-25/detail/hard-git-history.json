@@ -1,0 +1,254 @@
+{
+  "item_id": "hard-git-history",
+  "item_name": "Анализ Git истории",
+  "difficulty": 8,
+  "passed": false,
+  "total_score": 0.8177,
+  "response": null,
+  "error": null,
+  "tools_used": [
+    "exec"
+  ],
+  "skills_activated": [],
+  "total_iterations": 6,
+  "duration_sec": 23.988261461257935,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All expected tools used: ['exec']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 0.9833333333333333,
+      "detail": "2 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All keywords found: ['коммит']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    },
+    {
+      "check": "tools",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All expected tools used: ['exec']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 0.9833333333333333,
+      "detail": "2 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All keywords found: ['файл', 'изменен']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    },
+    {
+      "check": "tools",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All expected tools used: ['exec']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 0.9833333333333333,
+      "detail": "2 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing keywords: ['коммит']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    },
+    {
+      "check": "file_exists",
+      "passed": false,
+      "score": 0.0,
+      "detail": "File not found: C:\\Users\\Алексей\\.nanobot\\workspace\\data_store\\cache\\git_log.md"
+    }
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "weight": 0.3,
+      "passed": true,
+      "score": 0.9964,
+      "response": "Вот последние 5 коммитов из истории Git с их сообщениями:\n\n1. `eabc2ff` — remove reviewer, add DB auto-cleanup and subprocess DSN support  \n2. `e8eb5c5` — refactor(reviewer): split into 8 independent checks with Russian prompts, add greeting fast-path, fix multi-turn context  \n3. `e19840c` — feat: on max_iterations replace agent response with 'could not get data' message instead of passing hallucinated content  \n4. `767e57d` — feat: add Fresh Data Rule - agent must make fresh tool calls, not reuse history  \n5. `a0e4a51` — fix(reviewer): pass user query to reviewer, remove early-skip on no tool calls so Check 1 (Tool Usage) can fire",
+      "tools_used": [
+        "exec"
+      ],
+      "iterations": 2,
+      "duration_sec": 6.03287935256958,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All expected tools used: ['exec']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 0.9833333333333333,
+          "detail": "2 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All keywords found: ['коммит']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ]
+    },
+    {
+      "step": 2,
+      "weight": 0.3,
+      "passed": true,
+      "score": 0.9964,
+      "response": "В последнем коммите `eabc2ff` были внесены следующие изменения:\n\n### Удалено:\n- `workspace/patches/reviewer.py`\n- `workspace/patches/review_agent_loop.py`\n- `workspace/skills/response-verification/SKILL.md`\n- Весь каталог `workspace/skills/response-verification/`\n\n### Изменено:\n- `cli_agent.py` — заменён `ReviewAgentLoop` на `AgentLoop`\n- `gateway.py` — аналогично, заменён `ReviewAgentLoop` на `AgentLoop`\n- `config.json` — добавлены настройки автоочистки (`persist_max_files`, `persist_max_age_hours`)\n- `gateway_settings.py` — добавлена поддержка переменной окружения `DATABASE_URL`\n- `workspace/skills/db_analyzer/scripts/database.py` — добавлена поддержка `DATABASE_URL` для доступа к БД из подпроцессов\n- `workspace/utils/session_file_store.py` — добавлена логика автоочистки\n\n### Прочее:\n- Удалён LLM-ревьюер в `benchmarks/evaluator.py`\n- Добавлена переменная окружения `DATABASE_URL` в список разрешённых для exec-команд\n\nКоммит удаляет систему ревью ответов и добавляет поддержку автоочистки файлов и переменной окружения для работы с БД.",
+      "tools_used": [
+        "exec"
+      ],
+      "iterations": 2,
+      "duration_sec": 6.804260492324829,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All expected tools used: ['exec']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 0.9833333333333333,
+          "detail": "2 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All keywords found: ['файл', 'изменен']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ]
+    },
+    {
+      "step": 3,
+      "weight": 0.4,
+      "passed": false,
+      "score": 0.6441,
+      "response": "Error: {'message': '429 Too Many Requests: you (alekseyvegorov) have reached your session usage limit, upgrade for higher limits: https://ollama.com/upgrade (ref: 7875f1fd-f7d5-4af9-83c6-fa6e9cc222ee)', 'type': 'api_error', 'param': None, 'code': None}",
+      "tools_used": [
+        "exec"
+      ],
+      "iterations": 2,
+      "duration_sec": 11.151121616363525,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All expected tools used: ['exec']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 0.9833333333333333,
+          "detail": "2 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing keywords: ['коммит']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        },
+        {
+          "check": "file_exists",
+          "passed": false,
+          "score": 0.0,
+          "detail": "File not found: C:\\Users\\Алексей\\.nanobot\\workspace\\data_store\\cache\\git_log.md"
+        }
+      ]
+    }
+  ]
+}

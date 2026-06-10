@@ -1,0 +1,12 @@
+{
+  "mode": "predefined",
+  "status": "success",
+  "row_count": 0,
+  "columns": [],
+  "rows": [],
+  "sql": "SELECT\nEXTRACT(YEAR FROM actual_date) AS audit_year,\nEXTRACT(MONTH FROM actual_date) AS audit_month,\nCOUNT(*) AS audit_count,\nTO_CHAR(actual_date, 'Month') AS month_name\nFROM oarb.audits\nWHERE actual_date IS NOT NULL\nAND EXTRACT(YEAR FROM actual_date) = $1\nGROUP BY audit_year, audit_month, TO_CHAR(actual_date, 'Month')\nORDER BY audit_year DESC, audit_month LIMIT $2",
+  "script_name": "analytics_by_year_month"
+}
+
+
+Exit code: 0

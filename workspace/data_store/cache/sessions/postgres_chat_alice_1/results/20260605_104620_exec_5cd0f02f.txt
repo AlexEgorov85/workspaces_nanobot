@@ -1,0 +1,48 @@
+{
+  "mode": "predefined",
+  "status": "success",
+  "row_count": 5,
+  "columns": [
+    "audit_year",
+    "audit_month",
+    "audit_count",
+    "month_name"
+  ],
+  "rows": [
+    {
+      "audit_year": 2024.0,
+      "audit_month": 1.0,
+      "audit_count": 1,
+      "month_name": "January  "
+    },
+    {
+      "audit_year": 2024.0,
+      "audit_month": 2.0,
+      "audit_count": 1,
+      "month_name": "February "
+    },
+    {
+      "audit_year": 2024.0,
+      "audit_month": 3.0,
+      "audit_count": 2,
+      "month_name": "March    "
+    },
+    {
+      "audit_year": 2024.0,
+      "audit_month": 5.0,
+      "audit_count": 2,
+      "month_name": "May      "
+    },
+    {
+      "audit_year": 2024.0,
+      "audit_month": 6.0,
+      "audit_count": 1,
+      "month_name": "June     "
+    }
+  ],
+  "sql": "SELECT\nEXTRACT(YEAR FROM actual_date) AS audit_year,\nEXTRACT(MONTH FROM actual_date) AS audit_month,\nCOUNT(*) AS audit_count,\nTO_CHAR(actual_date, 'Month') AS month_name\nFROM oarb.audits\nWHERE actual_date IS NOT NULL\nGROUP BY audit_year, audit_month, TO_CHAR(actual_date, 'Month')\nORDER BY audit_year DESC, audit_month LIMIT $1",
+  "script_name": "analytics_by_year_month"
+}
+
+
+Exit code: 0

@@ -1,0 +1,47 @@
+{
+  "item_id": "simple-greeting",
+  "item_name": "Greeting",
+  "difficulty": 1,
+  "passed": true,
+  "total_score": 1.0,
+  "response": "Hello!",
+  "error": null,
+  "tools_used": [],
+  "skills_activated": [],
+  "total_iterations": 1,
+  "duration_sec": 2.209162473678589,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No tool expectations"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 1.0,
+      "detail": "1 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All keywords found: ['hello']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    }
+  ],
+  "steps": []
+}

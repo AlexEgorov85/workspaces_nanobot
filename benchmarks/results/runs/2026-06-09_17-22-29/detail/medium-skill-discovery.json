@@ -1,0 +1,49 @@
+{
+  "item_id": "medium-skill-discovery",
+  "item_name": "List available skills",
+  "difficulty": 4,
+  "passed": true,
+  "total_score": 0.9964,
+  "response": "**Доступные навыки (skills)**  \n\n| № | Название навыка | Краткое описание |\n|---|-----------------|-------------------|\n| 1 | **data-analyzer** | Анализ файлов в папке или списке файлов. Поддерживает два режима: `llm_text` (семантический анализ текста/логов через LLM) и `pandas` (быстрая табличная аналитика). |\n| 2 | **db_analyzer** | Генерация SQL‑отчётов, векторный поиск и генерация SQL‑запросов через LLM. |\n| 3 | **html_presentation_generator** | Создание HTML‑презентаций из Markdown. |\n| 4 | **map-reduce-file-analysis** | Разделение больших файлов на чанки, параллельный анализ и объединение результатов. |\n| 5 | **nanobot-exec-integration** | Интеграция `exec` с абсолютными путями для Windows‑совместимой автоматизации. |\n| 6 | **response-verification** | Проверка, что ответы основаны на фактических результатах инструментов. |\n| 7 | **stage-driven-development** | Разбиение проектов на нумерованные стадии с проверкой и отчётами. |\n| 8 | **structured-report-generation** | Генерация структурированных отчётов в Markdown/JSON с поддержкой `--output`. |\n| 9 | **windows-cyrillic-handling** | Рекомендации по работе с кириллическими путями и файлами в Windows. |\n|10 | **clawhub** | Поиск и установка навыков из публичного реестра ClawHub. |\n|11 | **cron** | Планирование напоминаний и периодических задач. |\n|12 | **github** | Интерактив с GitHub через CLI `gh`. |\n|13 | **image-generation** | Создание и редактирование изображений. |\n|14 | **long-goal** | Управление длительными задачами через `long_task`/`complete_goal`. |\n|15 | **skill-creator** | Создание и обновление навыков. |\n|16 | **summarize** | Сводка текста/видео (неактивен). |\n|17 | **tmux** | Управление tmux‑сессиями (неактивен). |\n|18 | **update-setup** | Обновление окружения. |\n|19 | **weather** | Получение текущей погоды без ключа API. |\n\n---\n\n### Что делает **data‑analyzer**\n\n- **Режим `llm_text`** – семантический анализ больших текстовых файлов (логи, `.txt`, `.md`, `.py`). Файлы автоматически разбиваются на чанки (≈ 70 % контекста), LLM обрабатывает каждый чанк, а результаты объединяются итеративно. Подходит для поиска причин ошибок, суммирования текста, анализа паттернов.  \n- **Режим `pandas`** – быстрая табличная аналитика. Скрипт загружает файл, генерирует Python‑код через LLM, выполняет его и возвращает точный ответ. Работает с `.csv`, `.xlsx`, `.xls`, `.json`. Подходит для подсчётов, группировок, фильтраций и статистики.  \n\nКоманда запуска: `analyze.bat` (Windows) или `analyze.sh` (Linux/macOS) с аргументами `--mode`, `--path`/`--files`, `--question`, `--report`, `--output`, `--ext`.  \n\nТаким образом, **data‑analyzer** позволяет быстро и гибко анализировать как неструктурированные тексты, так и табличные данные, используя LLM и Pandas.",
+  "error": null,
+  "tools_used": [
+    "read_file"
+  ],
+  "skills_activated": [],
+  "total_iterations": 2,
+  "duration_sec": 7.852805852890015,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No tool expectations"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 0.9833333333333333,
+      "detail": "2 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All keywords found: ['data-analyzer', 'skill']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    }
+  ],
+  "steps": []
+}

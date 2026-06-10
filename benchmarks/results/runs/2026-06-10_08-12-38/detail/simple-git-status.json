@@ -1,0 +1,47 @@
+{
+  "item_id": "simple-git-status",
+  "item_name": "Git статус",
+  "difficulty": 2,
+  "passed": false,
+  "total_score": 0.5,
+  "response": "Error: {'message': '403 Forbidden: this model requires a subscription, upgrade for access: https://ollama.com/upgrade (ref: 7ff729e6-a791-4ee5-9bb4-9a0b9b2736ec)', 'type': 'api_error', 'param': None, 'code': None}",
+  "error": null,
+  "tools_used": [],
+  "skills_activated": [],
+  "total_iterations": 1,
+  "duration_sec": 0.29129695892333984,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing tools: ['exec']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 1.0,
+      "detail": "1 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing keywords: ['ветк']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    }
+  ],
+  "steps": []
+}

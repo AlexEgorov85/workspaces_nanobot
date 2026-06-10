@@ -1,0 +1,52 @@
+{
+  "item_id": "medium-config-analysis",
+  "item_name": "Config analysis",
+  "difficulty": 5,
+  "passed": false,
+  "total_score": 0.4857,
+  "response": "I completed the tool steps but couldn't produce a final answer. Please try again or narrow the task.",
+  "error": null,
+  "tools_used": [
+    "find_files",
+    "find_files",
+    "find_files",
+    "find_files"
+  ],
+  "skills_activated": [],
+  "total_iterations": 5,
+  "duration_sec": 11.640115976333618,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing tools: ['read_file']"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 0.9333333333333333,
+      "detail": "5 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": false,
+      "score": 0.0,
+      "detail": "Missing keywords: ['model', 'provider', 'iteration']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    }
+  ],
+  "steps": []
+}

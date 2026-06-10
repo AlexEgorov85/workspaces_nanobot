@@ -1,0 +1,8 @@
+📁 data-analyzer
+📁 db_analyzer
+📁 html_presentation_generator
+📁 map-reduce-file-analysis
+📁 nanobot-exec-integration
+📁 stage-driven-development
+📁 structured-report-generation
+📁 windows-cyrillic-handling

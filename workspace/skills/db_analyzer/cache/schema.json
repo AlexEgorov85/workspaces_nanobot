@@ -1,0 +1,216 @@
+{
+  "schema": "oarb",
+  "tables": {
+    "audit_reports": {
+      "comment": "Акты аудиторской проверки (оформленные документы по результатам)",
+      "columns": {
+        "id": {
+          "type": "integer",
+          "not_null": true,
+          "comment": "Уникальный идентификатор акта"
+        },
+        "audit_id": {
+          "type": "integer",
+          "not_null": true,
+          "comment": "Ссылка на проверку, к которой относится акт"
+        },
+        "report_number": {
+          "type": "varchar(50)",
+          "not_null": true,
+          "comment": "Номер акта (внутренняя нумерация)"
+        },
+        "report_date": {
+          "type": "date",
+          "not_null": true,
+          "comment": "Дата составления акта"
+        },
+        "title": {
+          "type": "varchar(500)",
+          "not_null": true,
+          "comment": "Название акта / заголовок документа"
+        },
+        "full_text": {
+          "type": "text",
+          "not_null": false,
+          "comment": "Полный текст акта (если не используется разбивка по пунктам)"
+        },
+        "created_at": {
+          "type": "timestamp without time zone",
+          "not_null": false,
+          "comment": "Дата и время создания записи"
+        },
+        "updated_at": {
+          "type": "timestamp without time zone",
+          "not_null": false,
+          "comment": "Дата и время последнего обновления"
+        }
+      }
+    },
+    "audits": {
+      "comment": "Проверки (плановые и внеплановые аудиторские мероприятия)",
+      "columns": {
+        "id": {
+          "type": "integer",
+          "not_null": true,
+          "comment": "Уникальный идентификатор проверки"
+        },
+        "title": {
+          "type": "varchar(500)",
+          "not_null": true,
+          "comment": "Наименование / тема проверки"
+        },
+        "audit_type": {
+          "type": "varchar(50)",
+          "not_null": true,
+          "comment": "Тип проверки (плановая, внеплановая и т.д.)"
+        },
+        "planned_date": {
+          "type": "date",
+          "not_null": false,
+          "comment": "Плановая дата проведения проверки"
+        },
+        "actual_date": {
+          "type": "date",
+          "not_null": false,
+          "comment": "Фактическая дата завершения проверки"
+        },
+        "status": {
+          "type": "varchar(30)",
+          "not_null": false,
+          "comment": "Текущий статус проверки"
+        },
+        "auditee_entity": {
+          "type": "varchar(500)",
+          "not_null": false,
+          "comment": "Проверяемый объект (подразделение, компания, филиал)"
+        },
+        "created_at": {
+          "type": "timestamp without time zone",
+          "not_null": false,
+          "comment": "Дата и время создания записи"
+        },
+        "updated_at": {
+          "type": "timestamp without time zone",
+          "not_null": false,
+          "comment": "Дата и время последнего обновления"
+        }
+      }
+    },
+    "report_items": {
+      "comment": "Пункты (разделы) акта аудиторской проверки с текстовым наполнением",
+      "columns": {
+        "id": {
+          "type": "integer",
+          "not_null": true,
+          "comment": "Уникальный идентификатор пункта акта"
+        },
+        "report_id": {
+          "type": "integer",
+          "not_null": true,
+          "comment": "Ссылка на акт, которому принадлежит пункт"
+        },
+        "item_number": {
+          "type": "varchar(20)",
+          "not_null": true,
+          "comment": "Номер пункта (может содержать буквы, цифры, иерархию)"
+        },
+        "item_title": {
+          "type": "varchar(500)",
+          "not_null": true,
+          "comment": "Название пункта (заголовок раздела)"
+        },
+        "item_content": {
+          "type": "text",
+          "not_null": false,
+          "comment": "Текст содержания пункта"
+        },
+        "order_index": {
+          "type": "integer",
+          "not_null": false,
+          "comment": "Порядковый индекс для ручной сортировки"
+        },
+        "created_at": {
+          "type": "timestamp without time zone",
+          "not_null": false,
+          "comment": "Дата и время создания записи"
+        },
+        "updated_at": {
+          "type": "timestamp without time zone",
+          "not_null": false,
+          "comment": "Дата и время последнего обновления"
+        }
+      }
+    },
+    "violations": {
+      "comment": "Отклонения (нарушения, проблемы), выявленные в ходе аудита",
+      "columns": {
+        "id": {
+          "type": "integer",
+          "not_null": true,
+          "comment": "Уникальный идентификатор отклонения"
+        },
+        "audit_id": {
+          "type": "integer",
+          "not_null": true,
+          "comment": "Ссылка на проверку, в ходе которой выявлено отклонение"
+        },
+        "report_id": {
+          "type": "integer",
+          "not_null": true,
+          "comment": "Ссылка на акт, в котором зафиксировано отклонение"
+        },
+        "item_id": {
+          "type": "integer",
+          "not_null": true,
+          "comment": "Ссылка на конкретный пункт акта, к которому относится отклонение"
+        },
+        "violation_code": {
+          "type": "varchar(50)",
+          "not_null": false,
+          "comment": "Код нарушения по внутреннему классификатору (если используется)"
+        },
+        "description": {
+          "type": "text",
+          "not_null": true,
+          "comment": "Подробное описание сути отклонения"
+        },
+        "recommendation": {
+          "type": "text",
+          "not_null": false,
+          "comment": "Рекомендации аудитора по устранению нарушения"
+        },
+        "severity": {
+          "type": "varchar(20)",
+          "not_null": true,
+          "comment": "Критичность нарушения (Низкая, Средняя, Высокая)"
+        },
+        "status": {
+          "type": "varchar(20)",
+          "not_null": false,
+          "comment": "Текущий статус работы с нарушением"
+        },
+        "responsible": {
+          "type": "varchar(255)",
+          "not_null": false,
+          "comment": "Ответственное лицо или подразделение за устранение"
+        },
+        "deadline": {
+          "type": "date",
+          "not_null": false,
+          "comment": "Плановая дата устранения нарушения"
+        },
+        "created_at": {
+          "type": "timestamp without time zone",
+          "not_null": false,
+          "comment": "Дата и время фиксации отклонения в системе"
+        },
+        "updated_at": {
+          "type": "timestamp without time zone",
+          "not_null": false,
+          "comment": "Дата и время последнего изменения записи"
+        }
+      }
+    }
+  },
+  "cached_at": 1780059484.766261
+}

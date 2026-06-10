@@ -1,0 +1,47 @@
+{
+  "item_id": "medium-skill-discovery",
+  "item_name": "Список навыков",
+  "difficulty": 4,
+  "passed": true,
+  "total_score": 1.0,
+  "response": "Доступные навыки (skills):\n\n1. **data-analyzer** — анализирует данные с помощью Pandas, поддерживает настройку формата вывода (Markdown/JSON) и аргумент `--output`.\n2. **db_analyzer** — анализ аудиторских проверок: SQL-отчёты, векторный поиск, генерация SQL через LLM.\n3. **html_presentation_generator** — генератор HTML-презентаций из Markdown. Используй инструмент `generate_presentation`.\n4. **map-reduce-file-analysis** — разбивает большие файлы на части, анализирует по отдельности, объединяет результаты с очисткой.\n5. **nanobot-exec-integration** — использует `exec` с абсолютными путями для автоматизации в Windows.\n6. **stage-driven-development** — разбивает проекты на пронумерованные этапы с отчётами и подтверждением после каждого.\n7. **structured-report-generation** — генерирует настраиваемые отчёты в формате Markdown/JSON с поддержкой аргумента `--output`.\n8. **windows-cyrillic-handling** — обеспечивает работу с кириллическими путями в Windows через `utf-8` и `errors='ignore'`.\n9. **clawhub** — поиск и установка навыков из публичного реестра ClawHub.\n10. **cron** — планировщик напоминаний и повторяющихся задач.\n11. **image-generation** — генерация изображений и итеративное редактирование.\n12. **long-goal** — управление долгосрочными задачами через `long_task` / `complete_goal`.\n13. **skill-creator** — создание и обновление AgentSkills с поддержкой скриптов и ресурсов.\n14. **update-setup** — управление обновлениями и настройками.\n\n### Что делает **data-analyzer**:\nЭтот навык предназначен для анализа структурированных данных с помощью Pandas. Он поддерживает:\n- Чтение и обработку CSV/JSON/Excel.\n- Генерацию отчётов в Markdown или JSON.\n- Настраиваемый вывод через аргумент `--output`.\n- Автоматическую сериализацию результатов.\n\nПример: анализ таблиц, агрегация, фильтрация, визуализация данных в виде отчётов.",
+  "error": null,
+  "tools_used": [],
+  "skills_activated": [],
+  "total_iterations": 1,
+  "duration_sec": 8.332707405090332,
+  "llm_judge_score": null,
+  "checks": [
+    {
+      "check": "tools",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No tool expectations"
+    },
+    {
+      "check": "skills",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No skill expectations"
+    },
+    {
+      "check": "iterations",
+      "passed": true,
+      "score": 1.0,
+      "detail": "1 iterations within limit of 30"
+    },
+    {
+      "check": "keywords_include",
+      "passed": true,
+      "score": 1.0,
+      "detail": "All keywords found: ['data-analyzer', 'навык']"
+    },
+    {
+      "check": "keywords_exclude",
+      "passed": true,
+      "score": 1.0,
+      "detail": "No forbidden keywords"
+    }
+  ],
+  "steps": []
+}

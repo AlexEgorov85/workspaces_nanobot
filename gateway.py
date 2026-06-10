@@ -27,11 +27,14 @@ from redis_channel import RedisChannel
 from utils.session_file_store import SessionFileStore, prepare_content
 
 from nanobot.agent.loop import AgentLoop
+from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.manager import ChannelManager, _default_webui_dist
 from nanobot.cli.commands import _load_runtime_config, console, __logo__, __version__
 from pg_session_manager import PGSessionManager
 from nanobot.utils.helpers import sync_workspace_templates
+
+from hooks.tool_audit_hook import ToolAuditHook
 
 from gateway_settings import GatewaySettings
 
@@ -195,11 +198,25 @@ def main() -> None:
         pass
 
     # ── 6. Создание AgentLoop ────────────────────────────────────────────
+    tool_audit_hook = ToolAuditHook()
     agent = AgentLoop.from_config(
         config, bus,
         session_manager=session_manager,
-        hooks=[],
+        hooks=[tool_audit_hook],
     )
+
+    # Monkey-patch _assemble_outbound to inject tool audit trail into metadata
+    _orig_assemble = agent._assemble_outbound
+
+    def _assemble_with_audit(msg, final_content, all_msgs, stop_reason, had_injections, on_stream, *, turn_latency_ms=None):
+        result = _orig_assemble(msg, final_content, all_msgs, stop_reason, had_injections, on_stream, turn_latency_ms=turn_latency_ms)
+        if result is not None:
+            entries = tool_audit_hook.drain()
+            if entries:
+                result.metadata["_tool_audit"] = entries
+        return result
+
+    agent._assemble_outbound = _assemble_with_audit
 
     # ── 7. ChannelManager ────────────────────────────────────────────────
     channels = ChannelManager(config, bus, session_manager=session_manager)

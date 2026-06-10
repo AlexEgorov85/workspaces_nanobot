@@ -1,0 +1,3 @@
+Error: Directory not found: C:\Users\Алексей\.nanobot\workspace\skills\audit-analyzer
+
+[Analyze the error above and try a different approach.]

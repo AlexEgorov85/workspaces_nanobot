@@ -1,0 +1,358 @@
+{
+  "suite_name": "simple",
+  "timestamp": "2026-06-10T08:13:25.538887",
+  "total_items": 7,
+  "passed_items": 7,
+  "total_score": 6.9863,
+  "avg_score": 0.9980428571428571,
+  "duration_sec": 34.533841371536255,
+  "config": {
+    "tags": [],
+    "mode": "all"
+  },
+  "results": [
+    {
+      "item_id": "simple-greeting",
+      "item_name": "Приветствие",
+      "difficulty": 1,
+      "passed": true,
+      "total_score": 1.0,
+      "response": "Привет, Алексей! Чем могу помочь?",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 3.043039083480835,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No tool expectations"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All keywords found: ['привет']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-math",
+      "item_name": "Простая математика",
+      "difficulty": 1,
+      "passed": true,
+      "total_score": 1.0,
+      "response": "2 + 2 = 4.",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 2.037677764892578,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No tool expectations"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All keywords found: ['4']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-list-files",
+      "item_name": "Список файлов",
+      "difficulty": 2,
+      "passed": true,
+      "total_score": 0.9964,
+      "response": "Вот список файлов и папок в текущей директории:\n\n- `.gitignore`\n- `.nanobot/`\n- `AGENTS.md`\n- `cache/`\n- `cron/`\n- `data_store/`\n- `HEARTBEAT.md`\n- `hooks/`\n- `memory/`\n- `nanobot_presentation.html`\n- `nanobot_skills_presentation.html`\n- `nanobot_skills_presentation.md`\n- `output/`\n- `patches/`\n- `run_gen.py`\n- `scripts/`\n- `sessions/`\n- `skills/`\n- `SOUL.md`\n- `temp_generate.py`\n- `temp_query.sql`\n- `TOOLS.md`\n- `USER.md`\n- `utils/`",
+      "error": null,
+      "tools_used": [
+        "list_dir"
+      ],
+      "skills_activated": [],
+      "total_iterations": 2,
+      "duration_sec": 14.243209600448608,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All expected tools used: ['list_dir']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 0.9833333333333333,
+          "detail": "2 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No keyword requirements"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-create-file",
+      "item_name": "Создать файл",
+      "difficulty": 2,
+      "passed": true,
+      "total_score": 0.9971,
+      "response": "Файл `hello_benchmark.txt` успешно создан в каталоге `data_store/cache/`.",
+      "error": null,
+      "tools_used": [
+        "write_file"
+      ],
+      "skills_activated": [],
+      "total_iterations": 2,
+      "duration_sec": 4.406946420669556,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All expected tools used: ['write_file']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 0.9833333333333333,
+          "detail": "2 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No keyword requirements"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        },
+        {
+          "check": "file_exists",
+          "passed": true,
+          "score": 1.0,
+          "detail": "File exists: C:\\Users\\Алексей\\.nanobot\\workspace\\data_store\\cache\\hello_benchmark.txt"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-date",
+      "item_name": "Текущая дата",
+      "difficulty": 1,
+      "passed": true,
+      "total_score": 1.0,
+      "response": "Сегодня 10 июня 2026 года.",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 1.657210111618042,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No tool expectations"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All keywords found: ['2026']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-read-file",
+      "item_name": "Чтение файла",
+      "difficulty": 2,
+      "passed": true,
+      "total_score": 0.9964,
+      "response": "Файл `AGENTS.md` содержит инструкции для агентов по политике хранения файлов, работе с напоминаниями через `cron` и управлению периодическими задачами через `HEARTBEAT.md`.",
+      "error": null,
+      "tools_used": [
+        "read_file"
+      ],
+      "skills_activated": [],
+      "total_iterations": 2,
+      "duration_sec": 4.27962851524353,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All expected tools used: ['read_file']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 0.9833333333333333,
+          "detail": "2 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All keywords found: ['агент']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-git-status",
+      "item_name": "Git статус",
+      "difficulty": 2,
+      "passed": true,
+      "total_score": 0.9964,
+      "response": "Текущая ветка: **master**.  \nВетка синхронизирована с `origin/master`.\n\nЕсть изменения в файлах, которые ещё не добавлены в коммит, а также неотслеживаемые файлы.",
+      "error": null,
+      "tools_used": [
+        "exec"
+      ],
+      "skills_activated": [],
+      "total_iterations": 2,
+      "duration_sec": 4.043030738830566,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All expected tools used: ['exec']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 0.9833333333333333,
+          "detail": "2 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All keywords found: ['ветк']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    }
+  ]
+}

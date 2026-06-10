@@ -1,0 +1,350 @@
+{
+  "suite_name": "simple",
+  "timestamp": "2026-06-10T08:12:43.090545",
+  "total_items": 7,
+  "passed_items": 1,
+  "total_score": 4.9076,
+  "avg_score": 0.7010857142857143,
+  "duration_sec": 4.16408109664917,
+  "config": {
+    "tags": [],
+    "mode": "all"
+  },
+  "results": [
+    {
+      "item_id": "simple-greeting",
+      "item_name": "Приветствие",
+      "difficulty": 1,
+      "passed": false,
+      "total_score": 0.6429,
+      "response": "Error: {'message': '403 Forbidden: this model requires a subscription, upgrade for access: https://ollama.com/upgrade (ref: bc5bb4f2-6969-4391-a1d7-f31005c5af94)', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 1.398057460784912,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No tool expectations"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing keywords: ['привет']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Forbidden keywords found: ['error']"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-math",
+      "item_name": "Простая математика",
+      "difficulty": 1,
+      "passed": true,
+      "total_score": 1.0,
+      "response": "Error: {'message': '403 Forbidden: this model requires a subscription, upgrade for access: https://ollama.com/upgrade (ref: 63f182b1-9677-4bf6-b2b2-df506e829998)', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.29539990425109863,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No tool expectations"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "All keywords found: ['4']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-list-files",
+      "item_name": "Список файлов",
+      "difficulty": 2,
+      "passed": false,
+      "total_score": 0.7143,
+      "response": "Error: {'message': '403 Forbidden: this model requires a subscription, upgrade for access: https://ollama.com/upgrade (ref: acaa8286-3b68-4c07-8fef-79768ba37dce)', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.283219575881958,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing tools: ['list_dir']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No keyword requirements"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-create-file",
+      "item_name": "Создать файл",
+      "difficulty": 2,
+      "passed": false,
+      "total_score": 0.7647,
+      "response": "Error: {'message': '403 Forbidden: this model requires a subscription, upgrade for access: https://ollama.com/upgrade (ref: a52b3ca8-67d3-4611-ac13-e0669325bb25)', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.35332274436950684,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing tools: ['write_file']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No keyword requirements"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        },
+        {
+          "check": "file_exists",
+          "passed": true,
+          "score": 1.0,
+          "detail": "File exists: C:\\Users\\Алексей\\.nanobot\\workspace\\data_store\\cache\\hello_benchmark.txt"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-date",
+      "item_name": "Текущая дата",
+      "difficulty": 1,
+      "passed": false,
+      "total_score": 0.7857,
+      "response": "Error: {'message': '403 Forbidden: this model requires a subscription, upgrade for access: https://ollama.com/upgrade (ref: 95272e3a-7812-40ca-aa28-e3e0d9c36b1b)', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.2859001159667969,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No tool expectations"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing keywords: ['2026']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-read-file",
+      "item_name": "Чтение файла",
+      "difficulty": 2,
+      "passed": false,
+      "total_score": 0.5,
+      "response": "Error: {'message': '403 Forbidden: this model requires a subscription, upgrade for access: https://ollama.com/upgrade (ref: 460e2f0d-3191-48a3-a49c-9fd7c997bf89)', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.36653733253479004,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing tools: ['read_file']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing keywords: ['агент']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    },
+    {
+      "item_id": "simple-git-status",
+      "item_name": "Git статус",
+      "difficulty": 2,
+      "passed": false,
+      "total_score": 0.5,
+      "response": "Error: {'message': '403 Forbidden: this model requires a subscription, upgrade for access: https://ollama.com/upgrade (ref: 7ff729e6-a791-4ee5-9bb4-9a0b9b2736ec)', 'type': 'api_error', 'param': None, 'code': None}",
+      "error": null,
+      "tools_used": [],
+      "skills_activated": [],
+      "total_iterations": 1,
+      "duration_sec": 0.29129695892333984,
+      "llm_judge_score": null,
+      "checks": [
+        {
+          "check": "tools",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing tools: ['exec']"
+        },
+        {
+          "check": "skills",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No skill expectations"
+        },
+        {
+          "check": "iterations",
+          "passed": true,
+          "score": 1.0,
+          "detail": "1 iterations within limit of 30"
+        },
+        {
+          "check": "keywords_include",
+          "passed": false,
+          "score": 0.0,
+          "detail": "Missing keywords: ['ветк']"
+        },
+        {
+          "check": "keywords_exclude",
+          "passed": true,
+          "score": 1.0,
+          "detail": "No forbidden keywords"
+        }
+      ],
+      "steps": []
+    }
+  ]
+}
