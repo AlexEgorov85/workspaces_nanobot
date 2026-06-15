@@ -31,14 +31,14 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRIES = 10
+_MAX_RETRIES = 10            # общие ошибки соединения
+_MAX_RETRIES_TOO_MANY = 50   # too many connections (ждём пока освободится)
 _RETRY_DELAY = 1.0
 _RETRY_MAX_DELAY = 15.0
 
 DB_RETRYABLE_ERRORS = (
-    asyncpg.CannotConnectNowError,
     asyncpg.ConnectionFailureError,
-    asyncpg.ConnectionDoesNotExistError,
+    asyncpg.TooManyConnectionsError,
     OSError,
     ConnectionError,
 )
@@ -80,20 +80,27 @@ async def _connect() -> asyncpg.Connection:
 
 
 async def _retry(coro_factory):
-    """Выполнить coro_factory() с ретраем при ошибках соединения."""
+    """Выполнить coro_factory() с ретраем при ошибках соединения.
+
+    * ``TooManyConnectionsError`` — до 50 попыток (ждём освобождения).
+    * Остальные ошибки соединения — до 10 попыток.
+    """
     last_exc = None
     delay = _RETRY_DELAY
-    for attempt in range(_MAX_RETRIES):
+    attempt = 0
+    while True:
         try:
             return await coro_factory()
         except DB_RETRYABLE_ERRORS as e:
             last_exc = e
-            if attempt < _MAX_RETRIES - 1:
-                logger.warning("DB retry %d/%d after %.1fs: %s",
-                               attempt + 1, _MAX_RETRIES, delay, e)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, _RETRY_MAX_DELAY)
-    raise last_exc
+            max_retries = _MAX_RETRIES_TOO_MANY if isinstance(e, asyncpg.TooManyConnectionsError) else _MAX_RETRIES
+            attempt += 1
+            if attempt >= max_retries:
+                raise
+            logger.warning("DB retry %d/%d after %.1fs: %s",
+                           attempt, max_retries, delay, e)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _RETRY_MAX_DELAY)
 
 
 # ---------------------------------------------------------------------------
