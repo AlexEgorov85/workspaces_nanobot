@@ -102,8 +102,7 @@ class _SharedDB:
             schema="pg_catalog",
         )
 
-    @staticmethod
-    async def _retry(coro_factory):
+    async def _retry(self, coro_factory):
         last_exc = None
         delay = _RETRY_DELAY
         for attempt in range(_MAX_RETRIES):
@@ -122,21 +121,31 @@ class _SharedDB:
 
     async def _get_pool(self) -> asyncpg.Pool:
         if self._pool is None:
-            if not self._dsn:
-                raise RuntimeError(
-                    "SharedDB не инициализирован: вызовите db.configure(dsn) "
-                    "или заполните pg.dsn в gateway_settings.py"
-                )
-            await self._retry(lambda: self._create_pool())
+            self._pool = await asyncpg.create_pool(
+                dsn=self._dsn,
+                min_size=self._pool_min,
+                max_size=self._pool_max,
+                init=self._init_jsonb,
+            )
         return self._pool
 
-    async def _create_pool(self) -> None:
-        self._pool = await asyncpg.create_pool(
-            dsn=self._dsn,
-            min_size=self._pool_min,
-            max_size=self._pool_max,
-            init=self._init_jsonb,
-        )
+    async def _get_conn(self) -> asyncpg.Connection:
+        """Создать отдельное подключение (не из пула) — для sync-операций."""
+        return await self._retry(self._do_connect)
+
+    async def _do_connect(self) -> asyncpg.Connection:
+        if not self._dsn:
+            raise RuntimeError(
+                "SharedDB не инициализирован: вызовите db.configure(dsn) "
+                "или заполните pg.dsn в gateway_settings.py"
+            )
+        conn = await asyncpg.connect(dsn=self._dsn)
+        try:
+            await self._init_jsonb(conn)
+            return conn
+        except Exception:
+            await conn.close()
+            raise
 
     # ------------------------------------------------------------------
     # Транзакция (асинхронная)
@@ -192,7 +201,7 @@ class _SharedDB:
 
     # ------------------------------------------------------------------
     # Синхронные обёртки (для PGSessionManager)
-    # Используют тот же пул, но в отдельном event loop (executor thread).
+    # Используют отдельное подключение в своём event loop (executor thread).
     # ------------------------------------------------------------------
 
     def _run_sync(self, coro_factory: Callable[[], Any]) -> Any:
@@ -202,20 +211,42 @@ class _SharedDB:
         return future.result()
 
     def sync_execute(self, sql: str, *args: Any) -> Optional[str]:
-        return self._run_sync(lambda: self.execute(sql, *args))
+        async def _run():
+            conn = await self._get_conn()
+            try:
+                return await conn.execute(sql, *args)
+            finally:
+                await conn.close()
+        return self._run_sync(_run)
 
     def sync_fetch(self, sql: str, *args: Any) -> list[asyncpg.Record]:
-        return self._run_sync(lambda: self.fetch(sql, *args))
+        async def _run():
+            conn = await self._get_conn()
+            try:
+                return await conn.fetch(sql, *args)
+            finally:
+                await conn.close()
+        return self._run_sync(_run)
 
     def sync_fetchone(self, sql: str, *args: Any) -> Optional[asyncpg.Record]:
-        return self._run_sync(lambda: self.fetchone(sql, *args))
+        async def _run():
+            conn = await self._get_conn()
+            try:
+                return await conn.fetchrow(sql, *args)
+            finally:
+                await conn.close()
+        return self._run_sync(_run)
 
     def sync_transaction(
         self, async_fn: Callable[[asyncpg.Connection], Any]
     ) -> Any:
         async def _run():
-            async with self.transaction() as conn:
-                return await async_fn(conn)
+            conn = await self._get_conn()
+            try:
+                async with conn.transaction():
+                    return await async_fn(conn)
+            finally:
+                await conn.close()
 
         return self._run_sync(_run)
 
