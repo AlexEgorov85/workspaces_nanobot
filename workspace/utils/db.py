@@ -110,8 +110,12 @@ class _SharedDB:
                 "или заполните pg.dsn в gateway_settings.py"
             )
         conn = await asyncpg.connect(dsn=self._dsn)
-        await self._init_jsonb(conn)
-        return conn
+        try:
+            await self._init_jsonb(conn)
+            return conn
+        except Exception:
+            await conn.close()
+            raise
 
     # ------------------------------------------------------------------
     # Транзакция (асинхронная)
