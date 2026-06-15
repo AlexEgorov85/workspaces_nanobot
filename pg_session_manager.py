@@ -29,7 +29,7 @@ _workspace = str(Path(__file__).resolve().parent / "workspace")
 if _workspace not in sys.path:
     sys.path.insert(0, _workspace)
 
-from utils.db import db, DB_RETRYABLE_ERRORS
+from utils.db import sync_transaction, DB_RETRYABLE_ERRORS
 
 
 
@@ -57,9 +57,7 @@ class PGSessionManager(SessionManager):
         schema: str = "public",
         messages_table: str = "session_messages",
         meta_table: str = "session_meta",
-        min_conn: int = 1,
-        max_conn: int = 4,
-        pool_timeout: float = 5.0,
+        **kwargs: Any,
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self._schema = schema
@@ -69,7 +67,8 @@ class PGSessionManager(SessionManager):
         self.sessions_dir = workspace / "sessions"
         self.legacy_sessions_dir = self.sessions_dir
         if dsn:
-            db.configure(dsn, min_size=min_conn, max_size=max_conn)
+            from utils.db import configure as _cfg
+            _cfg(dsn)
 
     def close(self) -> None:
         pass
@@ -97,7 +96,7 @@ class PGSessionManager(SessionManager):
 
     def _load(self, key: str) -> Session | None:
         try:
-            return db.sync_transaction(lambda conn: self._async_load(conn, key))
+            return sync_transaction(lambda conn: self._async_load(conn, key))
         except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL for session {}", key)
             return super()._load(key)
@@ -150,7 +149,7 @@ class PGSessionManager(SessionManager):
 
     def save(self, session: Session, *, fsync: bool = False) -> None:
         try:
-            db.sync_transaction(lambda conn: self._async_save(conn, session))
+            sync_transaction(lambda conn: self._async_save(conn, session))
         except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL for session {}", session.key)
             super().save(session, fsync=fsync)
@@ -228,7 +227,7 @@ class PGSessionManager(SessionManager):
     def delete_session(self, key: str) -> bool:
         self.invalidate(key)
         try:
-            return db.sync_transaction(lambda conn: self._async_delete_session(conn, key))
+            return sync_transaction(lambda conn: self._async_delete_session(conn, key))
         except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL delete for session {}", key)
             return super().delete_session(key)
@@ -244,7 +243,7 @@ class PGSessionManager(SessionManager):
 
     def list_sessions(self) -> list[dict[str, Any]]:
         try:
-            return db.sync_transaction(self._async_list_sessions)
+            return sync_transaction(self._async_list_sessions)
         except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL for session list")
             return super().list_sessions()

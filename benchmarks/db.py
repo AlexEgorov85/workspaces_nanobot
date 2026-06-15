@@ -22,9 +22,11 @@ from loguru import logger
 from benchmarks.models import BenchResult, SuiteResult
 
 try:
-    from utils.db import db as shared_db
+    from utils.db import configure, sync_execute, sync_transaction, sync_fetch as _bench_fetch
+    _db_ok = True
 except ImportError:
-    shared_db = None
+    configure = sync_execute = sync_transaction = _bench_fetch = None
+    _db_ok = False
 
 
 SCHEMA = "public"
@@ -38,9 +40,9 @@ class BenchmarkDB:
         self._schema = schema
         self._fq_runs = f'"{schema}"."{RUNS_TABLE}"'
         self._fq_results = f'"{schema}"."{RESULTS_TABLE}"'
-        self._available = shared_db is not None
+        self._available = _db_ok
         if self._available and dsn:
-            shared_db.configure(dsn)
+            configure(dsn)
 
     def ensure_tables(self) -> None:
         if not self._available:
@@ -49,7 +51,7 @@ class BenchmarkDB:
         sql_path = Path(__file__).parent / "sql" / "create_benchmark_tables.sql"
         if sql_path.exists():
             sql = sql_path.read_text(encoding="utf-8")
-            shared_db.sync_execute(sql)
+            sync_execute(sql)
             logger.info("Benchmark tables ensured")
         else:
             logger.warning("SQL DDL file not found at {}", sql_path)
@@ -58,7 +60,7 @@ class BenchmarkDB:
         if not self._available:
             logger.warning("PostgreSQL not available, skipping save")
             return None
-        return shared_db.sync_transaction(lambda conn: self._async_save_run(conn, suite_result))
+        return sync_transaction(lambda conn: self._async_save_run(conn, suite_result))
 
     async def _async_save_run(self, conn, suite_result: SuiteResult) -> str:
         now = datetime.now()
@@ -114,7 +116,7 @@ class BenchmarkDB:
         if not self._available:
             logger.warning("PostgreSQL not available")
             return []
-        return shared_db.sync_fetch(
+        return _bench_fetch(
             f"SELECT id, suite_name, total_items, passed_items, "
             f"total_score, avg_score, duration_sec, started_at, finished_at "
             f"FROM {self._fq_runs} "
@@ -128,7 +130,7 @@ class BenchmarkDB:
         if not self._available:
             logger.warning("PostgreSQL not available")
             return None
-        return shared_db.sync_transaction(
+        return sync_transaction(
             lambda conn: self._async_compare_runs(conn, run_id_1, run_id_2)
         )
 

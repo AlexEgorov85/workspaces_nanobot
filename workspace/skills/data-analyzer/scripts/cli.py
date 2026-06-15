@@ -54,7 +54,6 @@ def main():
     try:
         cfg = load_config(args.config)
         # Навык data-analyzer не имеет реализации БД — см. db_analyzer
-        from utils.db import db
         db_class = type("SharedDBWrapper", (), {
             "get_schema_description": lambda self: "Схема не доступна (data-analyzer не подключён к БД)",
             "validate_sql": lambda self, sql: None,

@@ -76,8 +76,8 @@ def main() -> None:
     pg = SETTINGS.pg
     dsn = pg.dsn
     if dsn:
-        from utils.db import db
-        db.configure(dsn, min_size=pg.pool_min_conn, max_size=pg.pool_max_conn)
+        from utils.db import configure
+        configure(dsn)
         import os
         os.environ["DATABASE_URL"] = dsn
     use_postgres = SETTINGS.storage == "postgres" or (SETTINGS.storage == "auto" and bool(dsn))
@@ -91,9 +91,6 @@ def main() -> None:
             schema=pg.schema,
             messages_table=pg.messages_table,
             meta_table=pg.meta_table,
-            min_conn=pg.pool_min_conn,
-            max_conn=pg.pool_max_conn,
-            pool_timeout=pg.pool_timeout,
         )
         console.print("[green]✓[/green] PGSessionManager: sessions stored in PostgreSQL")
     else:
@@ -268,21 +265,6 @@ def main() -> None:
     async def run():
         channels_task = asyncio.create_task(channels.start_all())
 
-        # Start DB API server (if PostgreSQL configured)
-        db_api_runner = None
-        if dsn:
-            try:
-                from db_api.server import _build_app
-                import aiohttp
-                db_api_app = _build_app()
-                db_api_runner = aiohttp.web.AppRunner(db_api_app)
-                await db_api_runner.setup()
-                db_api_site = aiohttp.web.TCPSite(db_api_runner, "127.0.0.1", 8777)
-                await db_api_site.start()
-                console.print("[green]✓[/green] DB API server started on :8777")
-            except Exception as exc:
-                console.print(f"[yellow]⚠[/yellow] DB API server failed to start: {exc}")
-
         # Start Streamlit UI
         _streamlit_proc: subprocess.Popen | None = None
         if _streamlit_script.exists():
@@ -311,9 +293,6 @@ def main() -> None:
             channels_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await channels_task
-            if db_api_runner:
-                with contextlib.suppress(Exception):
-                    await db_api_runner.cleanup()
             if _streamlit_proc:
                 _streamlit_proc.terminate()
                 try:

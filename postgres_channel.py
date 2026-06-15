@@ -13,7 +13,7 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from utils.db import db
+from utils.db import fetchval, execute, fetchone, transaction, fetch
 
 
 def _decode_jsonb(val: Any) -> dict:
@@ -165,7 +165,7 @@ class PostgresChannel(BaseChannel):
         self._reasoning_buffers = {}
         for assistant_msg_id, delta in buffers.items():
             if delta:
-                row = await db.fetchone(
+                row = await fetchone(
                     f"SELECT metadata FROM {self._fq_table} WHERE id = $1",
                     assistant_msg_id,
                 )
@@ -174,7 +174,7 @@ class PostgresChannel(BaseChannel):
                 meta = _decode_jsonb(row["metadata"])
                 reasoning = (meta.get("reasoning") or "") + delta
                 meta["reasoning"] = reasoning
-                await db.execute(
+                await execute(
                     f"UPDATE {self._fq_table} SET metadata = $1, updated_at = NOW() WHERE id = $2",
                     meta, assistant_msg_id,
                 )
@@ -201,7 +201,7 @@ class PostgresChannel(BaseChannel):
         max_retries = 3
         timeout_s = self._processing_timeout
 
-        async with db.transaction() as conn:
+        async with transaction() as conn:
             rows = await conn.fetch(
                 f"""
                 SELECT id, metadata FROM {self._fq_table}
@@ -259,7 +259,7 @@ class PostgresChannel(BaseChannel):
 
     async def _poll_once(self) -> None:
         """Claim the oldest pending user message and forward it to the agent."""
-        row = await db.fetchone(
+        row = await fetchone(
             f"""
             UPDATE {self._fq_table}
             SET status = 'processing', updated_at = NOW()
@@ -283,7 +283,7 @@ class PostgresChannel(BaseChannel):
 
         # Не диспатчим, если из этого chat_id уже есть активное сообщение
         if chat_id in self._chat_inflight:
-            await db.execute(
+            await execute(
                 f"UPDATE {self._fq_table} SET status = 'pending', updated_at = NOW() WHERE id = $1",
                 user_msg_id,
             )
@@ -329,7 +329,7 @@ class PostgresChannel(BaseChannel):
 
     async def _insert_assistant_message(self, user_msg_id: str, chat_id: str) -> str:
         """Create a ``processing`` assistant row and store its id in ``_msg_ctx``."""
-        row = await db.fetchone(
+        row = await fetchone(
             f"""
             INSERT INTO {self._fq_table}
                 (chat_id, role, content, reply_to, status, created_at, updated_at)
@@ -352,7 +352,7 @@ class PostgresChannel(BaseChannel):
 
     async def _mark_failed(self, user_msg_id: str, assistant_msg_id: str | None, reason: str) -> None:
         """Mark a user message and its assistant reply as failed."""
-        async with db.transaction() as conn:
+        async with transaction() as conn:
             if assistant_msg_id:
                 await conn.execute(
                     f"UPDATE {self._fq_table} SET content = $1, metadata = $2, "
@@ -445,14 +445,14 @@ class PostgresChannel(BaseChannel):
             reasoning_parts = ctx["reasoning_buf"] + reasoning_parts
         if reasoning_parts:
             combined = " ".join(reasoning_parts)
-            row = await db.fetchone(
+            row = await fetchone(
                 f"SELECT metadata FROM {self._fq_table} WHERE id = $1",
                 assistant_msg_id,
             )
             if row:
                 meta_row = _decode_jsonb(row["metadata"])
                 meta_row["reasoning"] = (meta_row.get("reasoning") or "") + combined
-                await db.execute(
+                await execute(
                     f"UPDATE {self._fq_table} SET metadata = $1, updated_at = NOW() WHERE id = $2",
                     meta_row, assistant_msg_id,
                 )
@@ -460,7 +460,7 @@ class PostgresChannel(BaseChannel):
         chat_id = msg.chat_id
 
         try:
-            async with db.transaction() as conn:
+            async with transaction() as conn:
                 row = await conn.fetchrow(
                     f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
                     assistant_msg_id,
@@ -502,7 +502,7 @@ class PostgresChannel(BaseChannel):
 
             content = self._stream_buffers.pop(stream_id, "")
             if content and assistant_msg_id:
-                async with db.transaction() as conn:
+                async with transaction() as conn:
                     row = await conn.fetchrow(
                         f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
                         assistant_msg_id,

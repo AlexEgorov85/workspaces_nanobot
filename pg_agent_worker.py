@@ -23,7 +23,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 from nanobot import Nanobot, RunResult
 
 from gateway_settings import SETTINGS
-from workspace.utils.db import db
+from workspace.utils.db import fetch, execute, transaction, configure
 
 # Настройка логирования
 logging.basicConfig(
@@ -64,7 +64,7 @@ class PostgresAgentWorker:
 
     async def _get_pending_questions(self, limit: int) -> list[dict]:
         """Получить ожидающие вопросы, сгруппированные по сессиям."""
-        rows = await db.fetch(f"""
+        rows = await fetch(f"""
             SELECT id, session_id, question, priority, created_at
             FROM {self.input_table}
             WHERE status = 'pending'
@@ -75,7 +75,7 @@ class PostgresAgentWorker:
 
     async def _mark_processing(self, question_id: int):
         """Отметить вопрос как обрабатываемый."""
-        await db.execute(
+        await execute(
             f"UPDATE {self.input_table} SET status = 'processing' WHERE id = $1",
             question_id
         )
@@ -89,7 +89,7 @@ class PostgresAgentWorker:
         error_message: Optional[str] = None
     ):
         """Сохранить ответ и обновить статус вопроса (в одной транзакции)."""
-        async with db.transaction() as conn:
+        async with transaction() as conn:
             await conn.execute(f"""
                 UPDATE {self.input_table}
                 SET status = $1, processed_at = NOW(), error_message = $2
@@ -241,7 +241,7 @@ async def main():
     if not dsn:
         print("❌ Error: DSN не задан. Укажите --db-url, DATABASE_URL или pg.dsn в gateway_settings.py")
         return 1
-    db.configure(dsn)
+    configure(dsn)
 
     worker = PostgresAgentWorker(
         config_path=args.config,

@@ -1,9 +1,5 @@
 """
-Класс Database — обёртка над DB API для навыка db_analyzer.
-
-Работает через HTTP к DB API Server (port 8777), что позволяет
-использовать Database как из основного процесса (gateway), так и
-из отдельных процессов (CLI, subprocess).
+Класс Database — обёртка над PostgreSQL для навыка db_analyzer.
 
 Использование:
     from database import Database
@@ -12,38 +8,33 @@
     cfg = load_db_config()
     db = Database(cfg)
     schema = await db.get_schema()
-    result = await db.execute_query("SELECT * FROM oarb.audits LIMIT $1", [5])
+    result = await db.execute_query("SELECT * FROM oarb.audits LIMIT 5")
 """
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-_project_root = Path(__file__).resolve().parents[3]  # workspace/ — для импорта db_api
+_project_root = Path(__file__).resolve().parents[3]  # workspace/
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from db_api.client import DBClient
+from utils.db import fetch
 
 
 class Database:
     """
-    Подключение к PostgreSQL через DB API (HTTP).
+    Прямое подключение к PostgreSQL через utils.db.
 
     DSN задаётся в gateway_settings.py (pg.dsn) — навык не имеет
-    собственного DSN. Сервер DB API запускается gateway.py при старте.
-
-    Если скрипт запущен в отдельном процессе (через exec/audit_analyze.bat),
-    используется DBClient через HTTP на 127.0.0.1:8777.
+    собственного DSN. configure(dsn) должен быть вызван до создания Database.
 
     Принимает dict конфигурации из load_db_config():
         schema           — имя схемы по умолчанию
         tables           — список таблиц для фильтрации (опционально)
         schema_cache     — настройки кеша: enabled, path, ttl_seconds
-        api_url          — URL DB API Server (по умолч. http://127.0.0.1:8777)
     """
 
     def __init__(self, db_config: dict):
@@ -54,9 +45,6 @@ class Database:
         self._cache_enabled = bool(cache_cfg.get("enabled", False))
         self._cache_path: Optional[str] = cache_cfg.get("path") or None
         self._cache_ttl = int(cache_cfg.get("ttl_seconds", 3600))
-
-        api_url = db_config.get("api_url") or os.environ.get("DB_API_URL", "http://127.0.0.1:8777")
-        self._client = DBClient(api_url)
 
     # ------------------------------------------------------------------
     # Lifecycle (no-op, подключение через HTTP)
@@ -136,7 +124,7 @@ class Database:
 
         query += " ORDER BY c.table_name, c.ordinal_position"
 
-        rows = await self._client.fetch(query, *params)
+        rows = await fetch(query, *params)
 
         result: dict = {}
         for row in rows:
@@ -230,7 +218,7 @@ class Database:
             dict: {status, row_count, columns, rows}
         """
         try:
-            rows = await self._client.fetch(sql, *(params or []))
+            rows = await fetch(sql, *(params or []))
         except Exception as e:
             return {"status": "error", "row_count": 0, "columns": [], "rows": [],
                     "error": f"Ошибка выполнения запроса: {e}"}
@@ -255,7 +243,7 @@ class Database:
         """
         explain_sql = f"EXPLAIN (FORMAT JSON) {sql}"
         try:
-            rows = await self._client.fetch(explain_sql)
+            rows = await fetch(explain_sql)
             plan = list(rows[0].values())[0] if rows else None
             return {"valid": True, "plan": plan}
         except Exception as e:

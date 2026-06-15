@@ -14,7 +14,7 @@ _workspace = str(Path(__file__).resolve().parent / "workspace")
 if _workspace not in sys.path:
     sys.path.insert(0, _workspace)
 
-from utils.db import db
+from utils.db import configure, sync_fetchone, sync_execute
 from gateway_settings import GatewaySettings
 
 _SETTINGS = GatewaySettings()
@@ -25,12 +25,12 @@ _table = _pg.channel.table_name or "conversation_messages"
 _fq_table = f"{_schema}.{_table}"
 
 if _dsn:
-    db.configure(_dsn)
+    configure(_dsn)
 
 
 def _check_response(msg_id: str) -> str | None:
     """Check conversation_messages for the assistant response. Returns None if not ready."""
-    row = db.sync_fetchone(
+    row = sync_fetchone(
         f"SELECT content, metadata, status FROM {_fq_table} "
         f"WHERE reply_to = $1::uuid AND role = 'assistant' ORDER BY created_at ASC LIMIT 1",
         msg_id,
@@ -120,7 +120,7 @@ if prompt and not processing:
     msg_id = str(uuid.uuid4())
 
     # Write to conversation_messages — gateway picks it up
-    db.sync_execute(
+    sync_execute(
         f"INSERT INTO {_fq_table} (id, chat_id, user_id, role, content, status) "
         f"VALUES ($1::uuid, $2, $3, 'user', $4, 'pending')",
         msg_id, "streamlit", "user", prompt,
