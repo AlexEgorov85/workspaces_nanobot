@@ -222,18 +222,23 @@ class PGSessionManager(SessionManager):
         metadata_val = session.metadata or {}
         updated_at = datetime.now()
 
-        await conn.execute(
-            f"INSERT INTO {self._fq_meta} "
-            f"(session_key, created_at, updated_at, last_consolidated, metadata) "
-            f"VALUES ($1, $2, $3, $4, $5) "
-            f"ON CONFLICT (session_key) DO UPDATE SET "
-            f"created_at = COALESCE({self._fq_meta}.created_at, $2), "
-            f"updated_at = $3, "
-            f"last_consolidated = $4, "
-            f"metadata = $5",
-            session.key, session.created_at, updated_at,
+        result = await conn.execute(
+            f"UPDATE {self._fq_meta} SET "
+            f"updated_at = $2, "
+            f"last_consolidated = $3, "
+            f"metadata = $4 "
+            f"WHERE session_key = $1",
+            session.key, updated_at,
             session.last_consolidated, metadata_val,
         )
+        if result == "UPDATE 0":
+            await conn.execute(
+                f"INSERT INTO {self._fq_meta} "
+                f"(session_key, created_at, updated_at, last_consolidated, metadata) "
+                f"VALUES ($1, $2, $3, $4, $5)",
+                session.key, session.created_at, updated_at,
+                session.last_consolidated, metadata_val,
+            )
 
         await conn.execute(
             f"DELETE FROM {self._fq_messages} WHERE session_key = $1",

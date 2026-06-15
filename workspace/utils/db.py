@@ -156,6 +156,12 @@ class _SharedDB:
         async with pool.acquire() as conn:
             return await conn.fetchrow(sql, *args)
 
+    async def fetchval(self, sql: str, *args: Any) -> Any:
+        """SELECT — вернуть одно значение (первая колонка первой строки)."""
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            return await conn.fetchval(sql, *args)
+
     # ------------------------------------------------------------------
     # Синхронные обёртки (для PGSessionManager)
     # Используют отдельный коннекшн (не из пула) в своём event loop,
