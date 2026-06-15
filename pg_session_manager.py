@@ -85,42 +85,62 @@ class PGSessionManager(SessionManager):
         db.sync_transaction(self._async_create_tables)
 
     async def _async_create_tables(self, conn: asyncpg.Connection) -> None:
-        await conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self._fq_meta} (
-                session_key      TEXT PRIMARY KEY,
-                created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                last_consolidated INT NOT NULL DEFAULT 0,
-                metadata         JSONB NOT NULL DEFAULT '{{}}'::jsonb
-            )
-        """)
-        await conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self._fq_messages} (
-                id               BIGSERIAL PRIMARY KEY,
-                session_key      TEXT NOT NULL
-                    REFERENCES {self._fq_meta}(session_key) ON DELETE CASCADE,
-                seq              INT NOT NULL,
-                role             TEXT NOT NULL,
-                content          TEXT,
-                msg_timestamp    TEXT,
-                tool_calls       JSONB,
-                tool_call_id     TEXT,
-                name             TEXT,
-                reasoning_content TEXT,
-                thinking_blocks  JSONB,
-                media            JSONB,
-                cli_apps         JSONB,
-                mcp_presets      JSONB,
-                injected_event   TEXT,
-                _command         BOOLEAN,
-                _channel_delivery BOOLEAN,
-                created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """)
-        await conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{MESSAGES_TABLE}_sk_seq
-            ON {self._fq_messages} (session_key, seq)
-        """)
+        meta_exists = await conn.fetchval(
+            f"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_tables "
+            f"WHERE tablename = $1 AND schemaname = $2)",
+            METADATA_TABLE, self._schema,
+        )
+        if not meta_exists:
+            await conn.execute(f"""
+                CREATE TABLE {self._fq_meta} (
+                    session_key      TEXT PRIMARY KEY,
+                    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_consolidated INT NOT NULL DEFAULT 0,
+                    metadata         JSONB NOT NULL DEFAULT '{{}}'::jsonb
+                )
+            """)
+
+        msgs_exists = await conn.fetchval(
+            f"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_tables "
+            f"WHERE tablename = $1 AND schemaname = $2)",
+            MESSAGES_TABLE, self._schema,
+        )
+        if not msgs_exists:
+            await conn.execute(f"""
+                CREATE TABLE {self._fq_messages} (
+                    id               BIGSERIAL PRIMARY KEY,
+                    session_key      TEXT NOT NULL
+                        REFERENCES {self._fq_meta}(session_key) ON DELETE CASCADE,
+                    seq              INT NOT NULL,
+                    role             TEXT NOT NULL,
+                    content          TEXT,
+                    msg_timestamp    TEXT,
+                    tool_calls       JSONB,
+                    tool_call_id     TEXT,
+                    name             TEXT,
+                    reasoning_content TEXT,
+                    thinking_blocks  JSONB,
+                    media            JSONB,
+                    cli_apps         JSONB,
+                    mcp_presets      JSONB,
+                    injected_event   TEXT,
+                    _command         BOOLEAN,
+                    _channel_delivery BOOLEAN,
+                    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+
+        idx_exists = await conn.fetchval(
+            f"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_indexes "
+            f"WHERE indexname = $1 AND schemaname = $2)",
+            f"idx_{MESSAGES_TABLE}_sk_seq", self._schema,
+        )
+        if not idx_exists:
+            await conn.execute(f"""
+                CREATE INDEX idx_{MESSAGES_TABLE}_sk_seq
+                ON {self._fq_messages} (session_key, seq)
+            """)
 
     # ------------------------------------------------------------------
     # SessionManager interface

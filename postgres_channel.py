@@ -150,25 +150,39 @@ class PostgresChannel(BaseChannel):
     # ------------------------------------------------------------------
 
     async def _ensure_tables(self) -> None:
-        await db.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
-        await db.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self._fq_table} (
-                id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                chat_id         TEXT,
-                user_id         TEXT,
-                role            TEXT NOT NULL
-                    CHECK (role IN ('user', 'assistant', 'system')),
-                content         TEXT NOT NULL,
-                media           JSONB DEFAULT '[]'::jsonb,
-                metadata        JSONB DEFAULT '{{}}'::jsonb,
-                reply_to        UUID,
-                buttons         JSONB DEFAULT '[]'::jsonb,
-                status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
-                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        """)
+        ext_exists = await db.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = $1)",
+            "uuid-ossp",
+        )
+        if not ext_exists:
+            try:
+                await db.execute("CREATE EXTENSION \"uuid-ossp\"")
+            except Exception:
+                pass
+        tbl_exists = await db.fetchval(
+            f"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_tables "
+            f"WHERE tablename = $1 AND schemaname = $2)",
+            self._table_name, self._schema,
+        )
+        if not tbl_exists:
+            await db.execute(f"""
+                CREATE TABLE {self._fq_table} (
+                    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    chat_id         TEXT,
+                    user_id         TEXT,
+                    role            TEXT NOT NULL
+                        CHECK (role IN ('user', 'assistant', 'system')),
+                    content         TEXT NOT NULL,
+                    media           JSONB DEFAULT '[]'::jsonb,
+                    metadata        JSONB DEFAULT '{{}}'::jsonb,
+                    reply_to        UUID,
+                    buttons         JSONB DEFAULT '[]'::jsonb,
+                    status          TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
 
     # ------------------------------------------------------------------
     # Reasoning batch flush
@@ -201,7 +215,7 @@ class PostgresChannel(BaseChannel):
                 reasoning = (meta.get("reasoning") or "") + delta
                 meta["reasoning"] = reasoning
                 await db.execute(
-                    f"UPDATE {self._fq_table} SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
+                    f"UPDATE {self._fq_table} SET metadata = $1, updated_at = NOW() WHERE id = $2",
                     meta, assistant_msg_id,
                 )
 
@@ -247,7 +261,7 @@ class PostgresChannel(BaseChannel):
                 if retry_count >= max_retries:
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'failed', "
-                        f"metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
+                        f"metadata = $1, updated_at = NOW() WHERE id = $2",
                         meta, msg_id,
                     )
                     await conn.execute(
@@ -262,7 +276,7 @@ class PostgresChannel(BaseChannel):
                 else:
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'pending', "
-                        f"metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
+                        f"metadata = $1, updated_at = NOW() WHERE id = $2",
                         meta, msg_id,
                     )
                     await conn.execute(
@@ -381,7 +395,7 @@ class PostgresChannel(BaseChannel):
         async with db.transaction() as conn:
             if assistant_msg_id:
                 await conn.execute(
-                    f"UPDATE {self._fq_table} SET content = $1, metadata = $2::jsonb, "
+                    f"UPDATE {self._fq_table} SET content = $1, metadata = $2, "
                     f"status = 'failed', updated_at = NOW() WHERE id = $3",
                     f"Internal error: {reason}", {"error": reason}, assistant_msg_id,
                 )
@@ -479,7 +493,7 @@ class PostgresChannel(BaseChannel):
                 meta_row = _decode_jsonb(row["metadata"])
                 meta_row["reasoning"] = (meta_row.get("reasoning") or "") + combined
                 await db.execute(
-                    f"UPDATE {self._fq_table} SET metadata = $1::jsonb, updated_at = NOW() WHERE id = $2",
+                    f"UPDATE {self._fq_table} SET metadata = $1, updated_at = NOW() WHERE id = $2",
                     meta_row, assistant_msg_id,
                 )
 
@@ -495,7 +509,7 @@ class PostgresChannel(BaseChannel):
                 existing_meta.update(meta)
                 await conn.execute(
                     f"UPDATE {self._fq_table} "
-                    f"SET content = $1, metadata = $2::jsonb, buttons = $3::jsonb, "
+                    f"SET content = $1, metadata = $2, buttons = $3, "
                     f"status = 'completed', updated_at = NOW() WHERE id = $4",
                     msg.content, existing_meta,
                     msg.buttons or [], assistant_msg_id,
@@ -537,7 +551,7 @@ class PostgresChannel(BaseChannel):
                     existing_meta.update(meta | {"streamed": True})
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET content = $1, "
-                        f"metadata = $2::jsonb, status = 'completed', updated_at = NOW() WHERE id = $3",
+                        f"metadata = $2, status = 'completed', updated_at = NOW() WHERE id = $3",
                         content, existing_meta, assistant_msg_id,
                     )
                     if msg_id:
