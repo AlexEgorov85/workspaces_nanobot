@@ -36,6 +36,7 @@ class DBClient:
     async def fetch(self, query: str, *params: Any) -> list[dict]:
         async with httpx.AsyncClient(base_url=self.base_url) as client:
             resp = await client.post("/db/fetch", json={"query": query, "params": list(params)})
+            print("resp", resp)
             data = resp.json()
             if not data.get("ok"):
                 raise RuntimeError(data.get("error", "unknown error"))

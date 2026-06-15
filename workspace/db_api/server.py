@@ -30,7 +30,10 @@ def _default_json(obj: Any) -> str:
         return str(obj)
     if isinstance(obj, bytes):
         return obj.decode("utf-8", errors="replace")
-    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    logger.warning("JSON serializing unknown type %s, falling back to str()", type(obj))
+    return str(obj)
 
 
 _TYPE_CONVERTERS = {
@@ -92,6 +95,7 @@ def _get_dsn() -> str:
 
 
 async def handle_fetch(request: web.Request) -> web.Response:
+    print("handle_fetch")
     body = await request.json()
     query = body["query"]
     try:

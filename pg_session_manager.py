@@ -188,7 +188,7 @@ class PGSessionManager(SessionManager):
             messages=messages,
             created_at=meta["created_at"].replace(tzinfo=None) if meta["created_at"] else datetime.now(),
             updated_at=meta["updated_at"].replace(tzinfo=None) if meta["updated_at"] else datetime.now(),
-            metadata=dict((json.loads(meta["metadata"]) if isinstance(meta["metadata"], str) else meta["metadata"]) or {}),
+            metadata=dict(meta["metadata"] or {}),
             last_consolidated=meta["last_consolidated"],
         )
 
@@ -205,12 +205,12 @@ class PGSessionManager(SessionManager):
         await conn.execute(
             f"INSERT INTO {self._fq_meta} "
             f"(session_key, created_at, updated_at, last_consolidated, metadata) "
-            f"VALUES ($1, $2, $3, $4, $5::jsonb) "
+            f"VALUES ($1, $2, $3, $4, $5) "
             f"ON CONFLICT (session_key) DO UPDATE SET "
-            f"created_at = COALESCE({self._fq_meta}.created_at, EXCLUDED.created_at), "
-            f"updated_at = EXCLUDED.updated_at, "
-            f"last_consolidated = EXCLUDED.last_consolidated, "
-            f"metadata = EXCLUDED.metadata",
+            f"created_at = COALESCE({self._fq_meta}.created_at, $2), "
+            f"updated_at = $3, "
+            f"last_consolidated = $4, "
+            f"metadata = $5",
             session.key, session.created_at, updated_at,
             session.last_consolidated, metadata_val,
         )
@@ -241,14 +241,14 @@ class PGSessionManager(SessionManager):
             "seq": seq,
             "role": msg.get("role", "user"),
             "content": msg.get("content", ""),
+            "msg_timestamp": msg.get("timestamp"),
         }
         for col in _MESSAGE_COLUMNS:
             val = msg.get(col)
             if val is not None:
-                vals[col] = val  # JSONB-колонки кодируются кодеком, остальные — скаляры
+                vals[col] = val
             else:
                 vals[col] = None
-        vals["msg_timestamp"] = msg.get("timestamp")
 
         placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
         col_list = ", ".join(cols)
