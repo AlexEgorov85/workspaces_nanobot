@@ -52,6 +52,7 @@ class _SharedDB:
         self._dsn: str = ""
         self._pool_min: int = 0
         self._pool_max: int = 1
+        self._pool_acquire_timeout: int = 30
         self._pool: Optional[asyncpg.Pool] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -64,19 +65,20 @@ class _SharedDB:
     # Инициализация
     # ------------------------------------------------------------------
 
-    def configure(self, dsn: str, min_size: int = 0, max_size: int = 1) -> None:
+    def configure(self, dsn: str, min_size: int = 0, max_size: int = 1, acquire_timeout: int = 30) -> None:
         """Задать DSN и параметры пула (вызывается из gateway.py при старте).
 
         Args:
             dsn: Строка подключения.
             min_size: Минимум соединений в пуле.
-            max_size: Максимум соединений в пуле.
-                      Очередь встроена в asyncpg — при max_size занятых
-                      соединений acquire() ждёт освобождения.
+            max_size: Максимум соединений в пуле (1 = один запрос в моменте).
+            acquire_timeout: Секунд ждать освобождения коннекшена, затем
+                             asyncio.TimeoutError / PoolAcquireTimeoutError.
         """
         self._dsn = dsn
         self._pool_min = min_size
         self._pool_max = max_size
+        self._pool_acquire_timeout = acquire_timeout
         self._close()
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
@@ -142,6 +144,7 @@ class _SharedDB:
                 min_size=self._pool_min,
                 max_size=self._pool_max,
                 init=self._init_jsonb,
+                timeout=self._pool_acquire_timeout,
             )
         return self._pool
 
