@@ -122,7 +122,7 @@ class PGSettings:
     messages_table: str = "session_messages"
     meta_table: str = "session_meta"
     pool_min_conn: int = 1
-    pool_max_conn: int = 4
+    pool_max_conn: int = 1
     pool_timeout: float = 5.0
 
     # ── PostgresChannel ────────────────────────────────────────────────────
