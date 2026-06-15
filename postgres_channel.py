@@ -122,10 +122,6 @@ class PostgresChannel(BaseChannel):
 
     async def start(self) -> None:
         self._running = True
-        try:
-            await self._ensure_tables()
-        except Exception:
-            self.logger.exception("Failed to ensure tables, will retry in poll loop")
         self._flush_task = asyncio.create_task(self._flush_reasoning_loop())
         self._poll_task = asyncio.create_task(self._poll_loop())
         self.logger.info(
@@ -147,45 +143,6 @@ class PostgresChannel(BaseChannel):
             with suppress(asyncio.CancelledError):
                 await self._poll_task
         pass  # db — глобальный singleton, закрывается при выходе
-
-    # ------------------------------------------------------------------
-    # Table
-    # ------------------------------------------------------------------
-
-    async def _ensure_tables(self) -> None:
-        ext_exists = await db.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = $1)",
-            "uuid-ossp",
-        )
-        if not ext_exists:
-            try:
-                await db.execute("CREATE EXTENSION \"uuid-ossp\"")
-            except Exception:
-                pass
-        tbl_exists = await db.fetchval(
-            f"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_tables "
-            f"WHERE tablename = $1 AND schemaname = $2)",
-            self._table_name, self._schema,
-        )
-        if not tbl_exists:
-            await db.execute(f"""
-                CREATE TABLE {self._fq_table} (
-                    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                    chat_id         TEXT,
-                    user_id         TEXT,
-                    role            TEXT NOT NULL
-                        CHECK (role IN ('user', 'assistant', 'system')),
-                    content         TEXT NOT NULL,
-                    media           JSONB DEFAULT '[]'::jsonb,
-                    metadata        JSONB DEFAULT '{{}}'::jsonb,
-                    reply_to        UUID,
-                    buttons         JSONB DEFAULT '[]'::jsonb,
-                    status          TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
-                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-            """)
 
     # ------------------------------------------------------------------
     # Reasoning batch flush

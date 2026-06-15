@@ -62,72 +62,6 @@ class PostgresAgentWorker:
         self._bot: Optional[Nanobot] = None
         self._session_cache: dict[str, str] = {}
 
-    async def _ensure_tables(self):
-        """Создать таблицы, если их нет."""
-        schema = "public"
-
-        tbl_exists = await db.fetchval(
-            f"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_tables "
-            f"WHERE tablename = $1 AND schemaname = $2)",
-            self.input_table, schema,
-        )
-        if not tbl_exists:
-            await db.execute(f"""
-                CREATE TABLE {self.input_table} (
-                    id SERIAL PRIMARY KEY,
-                    session_id VARCHAR(64) NOT NULL,
-                    question TEXT NOT NULL,
-                    priority INTEGER DEFAULT 0,
-                    status VARCHAR(20) DEFAULT 'pending',
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    processed_at TIMESTAMPTZ,
-                    error_message TEXT
-                )
-            """)
-
-        tbl_exists = await db.fetchval(
-            f"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_tables "
-            f"WHERE tablename = $1 AND schemaname = $2)",
-            self.output_table, schema,
-        )
-        if not tbl_exists:
-            await db.execute(f"""
-                CREATE TABLE {self.output_table} (
-                    id SERIAL PRIMARY KEY,
-                    question_id INTEGER NOT NULL REFERENCES {self.input_table}(id) ON DELETE CASCADE,
-                    response TEXT NOT NULL,
-                    status VARCHAR(20) DEFAULT 'completed',
-                    metadata JSONB,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-
-        idx_name = f"idx_{self.input_table}_session"
-        idx_exists = await db.fetchval(
-            f"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_indexes "
-            f"WHERE indexname = $1 AND schemaname = $2)",
-            idx_name, schema,
-        )
-        if not idx_exists:
-            await db.execute(f"""
-                CREATE INDEX {idx_name}
-                ON {self.input_table}(session_id, status, priority DESC, created_at ASC)
-            """)
-
-        idx_name = f"idx_{self.input_table}_pending"
-        idx_exists = await db.fetchval(
-            f"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_indexes "
-            f"WHERE indexname = $1 AND schemaname = $2)",
-            idx_name, schema,
-        )
-        if not idx_exists:
-            await db.execute(f"""
-                CREATE INDEX {idx_name}
-                ON {self.input_table}(status) WHERE status = 'pending'
-            """)
-
-        logger.info("Tables ensured")
-
     async def _get_pending_questions(self, limit: int) -> list[dict]:
         """Получить ожидающие вопросы, сгруппированные по сессиям."""
         rows = await db.fetch(f"""
@@ -269,7 +203,6 @@ class PostgresAgentWorker:
     async def run_continuous(self, interval_sec: int = 30):
         """Бесконечный цикл обработки."""
         logger.info(f"Starting continuous mode (interval: {interval_sec}s)")
-        await self._ensure_tables()
 
         while True:
             try:
@@ -320,7 +253,6 @@ async def main():
     )
 
     try:
-        await worker._ensure_tables()
         if args.once:
             stats = await worker.run_batch()
             print(f"\n✅ Done: {stats}")

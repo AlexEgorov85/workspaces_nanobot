@@ -77,11 +77,21 @@ class _SharedDB:
         self._dsn = dsn
         self._pool_min = min_size
         self._pool_max = max_size
-        try:
-            self._loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._loop = None
         self._close()
+
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        """Вернуть сохранённый loop или получить текущий."""
+        if self._loop is None:
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+        if self._loop is None:
+            raise RuntimeError(
+                "SharedDB не инициализирован: вызовите db.configure(dsn) "
+                "в асинхронном контексте"
+            )
+        return self._loop
 
     def _close(self) -> None:
         if self._pool is not None:
@@ -198,12 +208,8 @@ class _SharedDB:
         Использует ``asyncio.run_coroutine_threadsafe``, поэтому sync-операции
         используют тот же пул, что и async — на GP6 не создаётся 2-й коннекшн.
         """
-        if self._loop is None:
-            raise RuntimeError(
-                "SharedDB не инициализирован: вызовите db.configure(dsn) "
-                "в асинхронном контексте"
-            )
-        future = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
+        loop = self._get_loop()
+        future = asyncio.run_coroutine_threadsafe(coro_factory(), loop)
         return future.result()
 
     def sync_execute(self, sql: str, *args: Any) -> Optional[str]:

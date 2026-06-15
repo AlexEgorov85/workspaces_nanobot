@@ -95,7 +95,6 @@ def main() -> None:
             max_conn=pg.pool_max_conn,
             pool_timeout=pg.pool_timeout,
         )
-        session_manager.ensure_tables()
         console.print("[green]✓[/green] PGSessionManager: sessions stored in PostgreSQL")
     else:
         from nanobot.session.manager import SessionManager
