@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -207,14 +208,38 @@ class _SharedDB:
     # ------------------------------------------------------------------
 
     def _run_sync(self, coro_factory: Callable[[], Any]) -> Any:
-        """Запустить корутину на главном event loop и дождаться результата.
+        """Запустить корутину и дождаться результата.
 
-        Использует ``asyncio.run_coroutine_threadsafe``, поэтому sync-операции
-        используют тот же пул, что и async — на GP6 не создаётся 2-й коннекшн.
+        * Если есть running event loop (gateway) — шедулит на главный loop
+          через ``run_coroutine_threadsafe``, использует общий пул (1 коннекшн).
+        * Если loop нет (streamlit, CLI) — закрывает старый пул (если есть),
+          создаёт свежий во временном event loop, выполняет, закрывает.
         """
-        loop = self._get_loop()
+        try:
+            loop = self._get_loop()
+        except RuntimeError:
+            self._close()
+            return self._run_with_temp_pool(coro_factory)
         future = asyncio.run_coroutine_threadsafe(coro_factory(), loop)
         return future.result()
+
+    def _run_with_temp_pool(self, coro_factory: Callable[[], Any]) -> Any:
+        """Создать пул во временном event loop, выполнить, закрыть."""
+        async def _work():
+            self._pool = await asyncpg.create_pool(
+                dsn=self._dsn,
+                min_size=0, max_size=1,
+                init=self._init_jsonb,
+                timeout=self._pool_acquire_timeout,
+            )
+            try:
+                return await coro_factory()
+            finally:
+                await self._pool.close()
+                self._pool = None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(_work())).result()
 
     def sync_execute(self, sql: str, *args: Any) -> Optional[str]:
         return self._run_sync(lambda: self.execute(sql, *args))
