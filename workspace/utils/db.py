@@ -27,10 +27,25 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import logging
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Optional
 
 import asyncpg
+
+logger = logging.getLogger(__name__)
+
+_MAX_RETRIES = 10
+_RETRY_DELAY = 1.0   # seconds, doubles each attempt
+_RETRY_MAX_DELAY = 15.0
+
+_RETRYABLE = (
+    asyncpg.CannotConnectNowError,
+    asyncpg.ConnectionFailureError,
+    asyncpg.ConnectionDoesNotExistError,
+    OSError,
+    ConnectionError,
+)
 
 
 class _SharedDB:
@@ -87,6 +102,24 @@ class _SharedDB:
             schema="pg_catalog",
         )
 
+    @staticmethod
+    async def _retry(coro_factory):
+        last_exc = None
+        delay = _RETRY_DELAY
+        for attempt in range(_MAX_RETRIES):
+            try:
+                return await coro_factory()
+            except _RETRYABLE as e:
+                last_exc = e
+                if attempt < _MAX_RETRIES - 1:
+                    logger.warning(
+                        "DB retry %d/%d after %.1fs: %s",
+                        attempt + 1, _MAX_RETRIES, delay, e,
+                    )
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, _RETRY_MAX_DELAY)
+        raise last_exc
+
     async def _get_pool(self) -> asyncpg.Pool:
         if self._pool is None:
             if not self._dsn:
@@ -94,28 +127,16 @@ class _SharedDB:
                     "SharedDB не инициализирован: вызовите db.configure(dsn) "
                     "или заполните pg.dsn в gateway_settings.py"
                 )
-            self._pool = await asyncpg.create_pool(
-                dsn=self._dsn,
-                min_size=self._pool_min,
-                max_size=self._pool_max,
-                init=self._init_jsonb,
-            )
+            await self._retry(lambda: self._create_pool())
         return self._pool
 
-    async def _get_conn(self) -> asyncpg.Connection:
-        """Создать отдельное подключение (не из пула) — для sync-операций."""
-        if not self._dsn:
-            raise RuntimeError(
-                "SharedDB не инициализирован: вызовите db.configure(dsn) "
-                "или заполните pg.dsn в gateway_settings.py"
-            )
-        conn = await asyncpg.connect(dsn=self._dsn)
-        try:
-            await self._init_jsonb(conn)
-            return conn
-        except Exception:
-            await conn.close()
-            raise
+    async def _create_pool(self) -> None:
+        self._pool = await asyncpg.create_pool(
+            dsn=self._dsn,
+            min_size=self._pool_min,
+            max_size=self._pool_max,
+            init=self._init_jsonb,
+        )
 
     # ------------------------------------------------------------------
     # Транзакция (асинхронная)
@@ -123,14 +144,7 @@ class _SharedDB:
 
     @asynccontextmanager
     async def transaction(self):
-        """Асинхронная транзакция: все операции в одном подключении.
-
-        Пример::
-
-            async with db.transaction() as conn:
-                row = await conn.fetchrow("SELECT ... FOR UPDATE", arg)
-                await conn.execute("UPDATE ...", arg)
-        """
+        """Асинхронная транзакция: все операции в одном подключении."""
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -140,91 +154,68 @@ class _SharedDB:
     # Простые запросы (асинхронные)
     # ------------------------------------------------------------------
 
-    async def execute(
-        self, sql: str, *args: Any
-    ) -> Optional[str]:
+    async def execute(self, sql: str, *args: Any) -> Optional[str]:
         """INSERT/UPDATE/DELETE — вернуть статус."""
+        return await self._retry(lambda: self._do_execute(sql, *args))
+
+    async def _do_execute(self, sql: str, *args: Any) -> Optional[str]:
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             return await conn.execute(sql, *args)
 
     async def fetch(self, sql: str, *args: Any) -> list[asyncpg.Record]:
         """SELECT — вернуть список строк."""
+        return await self._retry(lambda: self._do_fetch(sql, *args))
+
+    async def _do_fetch(self, sql: str, *args: Any) -> list[asyncpg.Record]:
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             return await conn.fetch(sql, *args)
 
     async def fetchone(self, sql: str, *args: Any) -> Optional[asyncpg.Record]:
         """SELECT — вернуть одну строку."""
+        return await self._retry(lambda: self._do_fetchone(sql, *args))
+
+    async def _do_fetchone(self, sql: str, *args: Any) -> Optional[asyncpg.Record]:
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             return await conn.fetchrow(sql, *args)
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
         """SELECT — вернуть одно значение (первая колонка первой строки)."""
+        return await self._retry(lambda: self._do_fetchval(sql, *args))
+
+    async def _do_fetchval(self, sql: str, *args: Any) -> Any:
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             return await conn.fetchval(sql, *args)
 
     # ------------------------------------------------------------------
     # Синхронные обёртки (для PGSessionManager)
-    # Используют отдельный коннекшн (не из пула) в своём event loop,
-    # чтобы не пересекаться с async-потоком.
+    # Используют тот же пул, но в отдельном event loop (executor thread).
     # ------------------------------------------------------------------
 
     def _run_sync(self, coro_factory: Callable[[], Any]) -> Any:
-        """Запустить корутину синхронно в executor-треде со своим event loop.
-
-        Нужен чтобы не блокировать работающий event loop основного потока.
-        Создаёт отдельный asyncpg-коннекшн (не из пула) — thread-safe.
-        """
         future = self._sync_executor.submit(
             lambda: asyncio.run(coro_factory())
         )
         return future.result()
 
     def sync_execute(self, sql: str, *args: Any) -> Optional[str]:
-        async def _run():
-            conn = await self._get_conn()
-            try:
-                return await conn.execute(sql, *args)
-            finally:
-                await conn.close()
-        return self._run_sync(_run)
+        return self._run_sync(lambda: self.execute(sql, *args))
 
     def sync_fetch(self, sql: str, *args: Any) -> list[asyncpg.Record]:
-        async def _run():
-            conn = await self._get_conn()
-            try:
-                return await conn.fetch(sql, *args)
-            finally:
-                await conn.close()
-        return self._run_sync(_run)
+        return self._run_sync(lambda: self.fetch(sql, *args))
 
     def sync_fetchone(self, sql: str, *args: Any) -> Optional[asyncpg.Record]:
-        async def _run():
-            conn = await self._get_conn()
-            try:
-                return await conn.fetchrow(sql, *args)
-            finally:
-                await conn.close()
-        return self._run_sync(_run)
+        return self._run_sync(lambda: self.fetchone(sql, *args))
 
     def sync_transaction(
         self, async_fn: Callable[[asyncpg.Connection], Any]
     ) -> Any:
-        """Запустить async_fn(connection) в синхронном контексте.
-
-        Создаёт отдельное подключение (не из пула), выполняет
-        async_fn внутри транзакции, закрывает подключение.
-        """
         async def _run():
-            conn = await self._get_conn()
-            try:
-                async with conn.transaction():
-                    return await async_fn(conn)
-            finally:
-                await conn.close()
+            async with self.transaction() as conn:
+                return await async_fn(conn)
 
         return self._run_sync(_run)
 

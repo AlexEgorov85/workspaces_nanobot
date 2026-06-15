@@ -122,7 +122,10 @@ class PostgresChannel(BaseChannel):
 
     async def start(self) -> None:
         self._running = True
-        await self._ensure_tables()
+        try:
+            await self._ensure_tables()
+        except Exception:
+            self.logger.exception("Failed to ensure tables, will retry in poll loop")
         self._flush_task = asyncio.create_task(self._flush_reasoning_loop())
         self._poll_task = asyncio.create_task(self._poll_loop())
         self.logger.info(

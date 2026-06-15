@@ -34,6 +34,15 @@ from utils.db import db
 
 import asyncpg
 
+# Ошибки, при которых переключаемся на JSONL-файлы (родительское поведение)
+_DB_FALLBACK_ERRORS = (
+    asyncpg.CannotConnectNowError,
+    asyncpg.ConnectionFailureError,
+    asyncpg.ConnectionDoesNotExistError,
+    OSError,
+    ConnectionError,
+)
+
 
 
 MESSAGES_TABLE = "session_messages"
@@ -164,7 +173,11 @@ class PGSessionManager(SessionManager):
         return session
 
     def _load(self, key: str) -> Session | None:
-        return db.sync_transaction(lambda conn: self._async_load(conn, key))
+        try:
+            return db.sync_transaction(lambda conn: self._async_load(conn, key))
+        except _DB_FALLBACK_ERRORS:
+            logger.warning("DB unavailable, falling back to JSONL for session {}", key)
+            return super()._load(key)
 
     async def _async_load(
         self, conn: asyncpg.Connection, key: str
@@ -213,7 +226,11 @@ class PGSessionManager(SessionManager):
         )
 
     def save(self, session: Session, *, fsync: bool = False) -> None:
-        db.sync_transaction(lambda conn: self._async_save(conn, session))
+        try:
+            db.sync_transaction(lambda conn: self._async_save(conn, session))
+        except _DB_FALLBACK_ERRORS:
+            logger.warning("DB unavailable, falling back to JSONL for session {}", session.key)
+            super().save(session, fsync=fsync)
 
     async def _async_save(
         self, conn: asyncpg.Connection, session: Session
@@ -287,7 +304,11 @@ class PGSessionManager(SessionManager):
 
     def delete_session(self, key: str) -> bool:
         self.invalidate(key)
-        return db.sync_transaction(lambda conn: self._async_delete_session(conn, key))
+        try:
+            return db.sync_transaction(lambda conn: self._async_delete_session(conn, key))
+        except _DB_FALLBACK_ERRORS:
+            logger.warning("DB unavailable, falling back to JSONL delete for session {}", key)
+            return super().delete_session(key)
 
     async def _async_delete_session(
         self, conn: asyncpg.Connection, key: str
@@ -299,7 +320,11 @@ class PGSessionManager(SessionManager):
         return "DELETE" in result and result.split()[-1] != "0"
 
     def list_sessions(self) -> list[dict[str, Any]]:
-        return db.sync_transaction(self._async_list_sessions)
+        try:
+            return db.sync_transaction(self._async_list_sessions)
+        except _DB_FALLBACK_ERRORS:
+            logger.warning("DB unavailable, falling back to JSONL for session list")
+            return super().list_sessions()
 
     async def _async_list_sessions(
         self, conn: asyncpg.Connection
@@ -340,10 +365,14 @@ class PGSessionManager(SessionManager):
         return out
 
     def read_session_file(self, key: str) -> dict[str, Any] | None:
-        session = self._load(key)
-        if session is None:
-            return None
-        return self._session_payload(session)
+        try:
+            session = self._load(key)
+            if session is None:
+                return None
+            return self._session_payload(session)
+        except _DB_FALLBACK_ERRORS:
+            logger.warning("DB unavailable, falling back to JSONL read for session {}", key)
+            return super().read_session_file(key)
 
     @staticmethod
     def _session_payload(session: Session) -> dict[str, Any]:
