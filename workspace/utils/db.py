@@ -38,7 +38,8 @@ _MAX_RETRIES = 10
 _RETRY_DELAY = 1.0   # seconds, doubles each attempt
 _RETRY_MAX_DELAY = 15.0
 
-_RETRYABLE = (
+# Ошибки соединения — ретраим и падаем на JSONL
+DB_RETRYABLE_ERRORS = (
     asyncpg.CannotConnectNowError,
     asyncpg.ConnectionFailureError,
     asyncpg.ConnectionDoesNotExistError,
@@ -121,7 +122,7 @@ class _SharedDB:
         for attempt in range(_MAX_RETRIES):
             try:
                 return await coro_factory()
-            except _RETRYABLE as e:
+            except DB_RETRYABLE_ERRORS as e:
                 last_exc = e
                 if attempt < _MAX_RETRIES - 1:
                     logger.warning(

@@ -29,18 +29,7 @@ _workspace = str(Path(__file__).resolve().parent / "workspace")
 if _workspace not in sys.path:
     sys.path.insert(0, _workspace)
 
-from utils.db import db
-
-import asyncpg
-
-# Ошибки, при которых переключаемся на JSONL-файлы (родительское поведение)
-_DB_FALLBACK_ERRORS = (
-    asyncpg.CannotConnectNowError,
-    asyncpg.ConnectionFailureError,
-    asyncpg.ConnectionDoesNotExistError,
-    OSError,
-    ConnectionError,
-)
+from utils.db import db, DB_RETRYABLE_ERRORS
 
 
 
@@ -109,7 +98,7 @@ class PGSessionManager(SessionManager):
     def _load(self, key: str) -> Session | None:
         try:
             return db.sync_transaction(lambda conn: self._async_load(conn, key))
-        except _DB_FALLBACK_ERRORS:
+        except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL for session {}", key)
             return super()._load(key)
 
@@ -162,7 +151,7 @@ class PGSessionManager(SessionManager):
     def save(self, session: Session, *, fsync: bool = False) -> None:
         try:
             db.sync_transaction(lambda conn: self._async_save(conn, session))
-        except _DB_FALLBACK_ERRORS:
+        except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL for session {}", session.key)
             super().save(session, fsync=fsync)
 
@@ -240,7 +229,7 @@ class PGSessionManager(SessionManager):
         self.invalidate(key)
         try:
             return db.sync_transaction(lambda conn: self._async_delete_session(conn, key))
-        except _DB_FALLBACK_ERRORS:
+        except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL delete for session {}", key)
             return super().delete_session(key)
 
@@ -256,7 +245,7 @@ class PGSessionManager(SessionManager):
     def list_sessions(self) -> list[dict[str, Any]]:
         try:
             return db.sync_transaction(self._async_list_sessions)
-        except _DB_FALLBACK_ERRORS:
+        except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL for session list")
             return super().list_sessions()
 
@@ -304,7 +293,7 @@ class PGSessionManager(SessionManager):
             if session is None:
                 return None
             return self._session_payload(session)
-        except _DB_FALLBACK_ERRORS:
+        except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL read for session {}", key)
             return super().read_session_file(key)
 
