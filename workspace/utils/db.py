@@ -25,7 +25,6 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -51,12 +50,10 @@ _RETRYABLE = (
 class _SharedDB:
     def __init__(self):
         self._dsn: str = ""
-        self._pool_min: int = 1
+        self._pool_min: int = 0
         self._pool_max: int = 1
         self._pool: Optional[asyncpg.Pool] = None
-        self._sync_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="db_sync"
-        )
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     @property
     def dsn(self) -> str:
@@ -67,19 +64,23 @@ class _SharedDB:
     # Инициализация
     # ------------------------------------------------------------------
 
-    def configure(self, dsn: str, min_size: int = 1, max_size: int = 1) -> None:
+    def configure(self, dsn: str, min_size: int = 0, max_size: int = 1) -> None:
         """Задать DSN и параметры пула (вызывается из gateway.py при старте).
 
         Args:
             dsn: Строка подключения.
-            min_size: Минимум соединений в пуле (для async-запросов).
-            max_size: Максимум соединений в пуле (для async-запросов).
+            min_size: Минимум соединений в пуле.
+            max_size: Максимум соединений в пуле.
                       Очередь встроена в asyncpg — при max_size занятых
                       соединений acquire() ждёт освобождения.
         """
         self._dsn = dsn
         self._pool_min = min_size
         self._pool_max = max_size
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
         self._close()
 
     def _close(self) -> None:
@@ -121,6 +122,11 @@ class _SharedDB:
 
     async def _get_pool(self) -> asyncpg.Pool:
         if self._pool is None:
+            if not self._dsn:
+                raise RuntimeError(
+                    "SharedDB не инициализирован: вызовите db.configure(dsn) "
+                    "или заполните pg.dsn в gateway_settings.py"
+                )
             self._pool = await asyncpg.create_pool(
                 dsn=self._dsn,
                 min_size=self._pool_min,
@@ -128,24 +134,6 @@ class _SharedDB:
                 init=self._init_jsonb,
             )
         return self._pool
-
-    async def _get_conn(self) -> asyncpg.Connection:
-        """Создать отдельное подключение (не из пула) — для sync-операций."""
-        return await self._retry(self._do_connect)
-
-    async def _do_connect(self) -> asyncpg.Connection:
-        if not self._dsn:
-            raise RuntimeError(
-                "SharedDB не инициализирован: вызовите db.configure(dsn) "
-                "или заполните pg.dsn в gateway_settings.py"
-            )
-        conn = await asyncpg.connect(dsn=self._dsn)
-        try:
-            await self._init_jsonb(conn)
-            return conn
-        except Exception:
-            await conn.close()
-            raise
 
     # ------------------------------------------------------------------
     # Транзакция (асинхронная)
@@ -205,48 +193,34 @@ class _SharedDB:
     # ------------------------------------------------------------------
 
     def _run_sync(self, coro_factory: Callable[[], Any]) -> Any:
-        future = self._sync_executor.submit(
-            lambda: asyncio.run(coro_factory())
-        )
+        """Запустить корутину на главном event loop и дождаться результата.
+
+        Использует ``asyncio.run_coroutine_threadsafe``, поэтому sync-операции
+        используют тот же пул, что и async — на GP6 не создаётся 2-й коннекшн.
+        """
+        if self._loop is None:
+            raise RuntimeError(
+                "SharedDB не инициализирован: вызовите db.configure(dsn) "
+                "в асинхронном контексте"
+            )
+        future = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
         return future.result()
 
     def sync_execute(self, sql: str, *args: Any) -> Optional[str]:
-        async def _run():
-            conn = await self._get_conn()
-            try:
-                return await conn.execute(sql, *args)
-            finally:
-                await conn.close()
-        return self._run_sync(_run)
+        return self._run_sync(lambda: self.execute(sql, *args))
 
     def sync_fetch(self, sql: str, *args: Any) -> list[asyncpg.Record]:
-        async def _run():
-            conn = await self._get_conn()
-            try:
-                return await conn.fetch(sql, *args)
-            finally:
-                await conn.close()
-        return self._run_sync(_run)
+        return self._run_sync(lambda: self.fetch(sql, *args))
 
     def sync_fetchone(self, sql: str, *args: Any) -> Optional[asyncpg.Record]:
-        async def _run():
-            conn = await self._get_conn()
-            try:
-                return await conn.fetchrow(sql, *args)
-            finally:
-                await conn.close()
-        return self._run_sync(_run)
+        return self._run_sync(lambda: self.fetchone(sql, *args))
 
     def sync_transaction(
         self, async_fn: Callable[[asyncpg.Connection], Any]
     ) -> Any:
         async def _run():
-            conn = await self._get_conn()
-            try:
-                async with conn.transaction():
-                    return await async_fn(conn)
-            finally:
-                await conn.close()
+            async with self.transaction() as conn:
+                return await async_fn(conn)
 
         return self._run_sync(_run)
 
