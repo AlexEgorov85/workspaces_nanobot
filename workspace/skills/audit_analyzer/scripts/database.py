@@ -12,7 +12,6 @@
 """
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -22,11 +21,16 @@ _project_root = Path(__file__).resolve().parents[3]  # workspace/
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+_nanobot_root = _project_root.parent  # ~/.nanobot/
+if str(_nanobot_root) not in sys.path:
+    sys.path.insert(0, str(_nanobot_root))
+
+import gateway_settings
 from utils.db import configure, fetch
 
-_dsn_env = os.environ.get("DATABASE_URL", "")
-if _dsn_env:
-    configure(_dsn_env)
+_settings = gateway_settings.GatewaySettings()
+if _settings.pg.dsn:
+    configure(_settings.pg.dsn)
 
 
 class Database:

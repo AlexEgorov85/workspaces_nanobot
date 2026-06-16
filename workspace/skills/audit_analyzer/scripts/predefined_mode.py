@@ -14,6 +14,7 @@ Pipeline:
     audit_analyze --mode predefined --script top_audited_objects --params '{"limit": 5, "audited_object": "ВУЗ"}'
 """
 
+import asyncio
 from typing import Any, Dict, Optional
 
 from database import Database
@@ -57,7 +58,7 @@ def run(
             },
         }
 
-    merged, unknown = resolve_params_with_vector(script, params, index_dir=index_dir)
+    merged, unknown = asyncio.run(resolve_params_with_vector(script, params, index_dir=index_dir))
 
     if unknown:
         valid = list(script.parameters.keys())

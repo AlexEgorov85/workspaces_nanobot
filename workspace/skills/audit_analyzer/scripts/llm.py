@@ -15,11 +15,12 @@ LLM-клиент с OpenAI-compatible HTTP API.
     }
 """
 
+import time
 from typing import Optional
 
 import httpx
 
-from config import get_llm_config
+from config import get_llm_config, get_cli_config
 
 
 def chat(messages: list[dict], *, context: Optional[list[dict]] = None, **kwargs) -> str:
@@ -61,11 +62,36 @@ def chat(messages: list[dict], *, context: Optional[list[dict]] = None, **kwargs
         "temperature": temperature,
     }
 
-    with httpx.Client(timeout=120) as client:
-        resp = client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+    max_retries = get_cli_config().get("max_retries", 3)
+    timeout = get_cli_config().get("timeout_sec", 60)
 
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+            break
+        except httpx.HTTPStatusError as e:
+            last_exc = e
+            if e.response.status_code == 429 and attempt < max_retries:
+                sleep_sec = 2 ** attempt
+                print(f"[LLM] 429 Too Many Requests, retrying in {sleep_sec}s...")
+                time.sleep(sleep_sec)
+                continue
+            raise
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            last_exc = e
+            if attempt < max_retries:
+                sleep_sec = 2 ** attempt
+                print(f"[LLM] {type(e).__name__}, retrying in {sleep_sec}s...")
+                time.sleep(sleep_sec)
+                continue
+            raise
+    else:
+        raise RuntimeError(f"LLM call failed after {max_retries + 1} attempts: {last_exc}")
+
+    data = resp.json()
     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
     if not content:
         raise RuntimeError("LLM вернул пустой ответ")

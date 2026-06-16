@@ -135,6 +135,8 @@ def prepare_output(result: dict, mode: str) -> dict:
         out["columns"] = r.get("columns", [])
         out["rows"] = r.get("rows", [])
         out["sql"] = data.get("sql", "")
+        if r.get("status") == "error" and "error" in r:
+            out["message"] = r["error"]
     elif "message" in data:
         out["message"] = data["message"]
 
