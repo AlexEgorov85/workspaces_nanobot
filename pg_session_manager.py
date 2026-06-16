@@ -119,8 +119,8 @@ class PGSessionManager(SessionManager):
         try:
             with transaction() as conn:
                 return self._load_inner(conn, key)
-        except DB_RETRYABLE_ERRORS:
-            logger.warning("DB unavailable, falling back to JSONL for session {}", key)
+        except DB_RETRYABLE_ERRORS as e:
+            logger.warning("DB unavailable, falling back to JSONL for session {}: {}", key, e)
             return super()._load(key)
 
     def _load_inner(self, conn, key: str) -> Session | None:
@@ -180,8 +180,8 @@ class PGSessionManager(SessionManager):
         try:
             with transaction() as conn:
                 self._save_inner(conn, session)
-        except DB_RETRYABLE_ERRORS:
-            logger.warning("DB unavailable, falling back to JSONL for session {}", session.key)
+        except DB_RETRYABLE_ERRORS as e:
+            logger.warning("DB unavailable, falling back to JSONL for session {}: {}", session.key, e)
             super().save(session, fsync=fsync)
 
     def _save_inner(self, conn, session: Session) -> None:
@@ -273,8 +273,8 @@ class PGSessionManager(SessionManager):
                         (key,),
                     )
                     return cur.rowcount > 0
-        except DB_RETRYABLE_ERRORS:
-            logger.warning("DB unavailable, falling back to JSONL delete for session {}", key)
+        except DB_RETRYABLE_ERRORS as e:
+            logger.warning("DB unavailable, falling back to JSONL delete for session {}: {}", key, e)
             return super().delete_session(key)
 
     def list_sessions(self) -> list[dict[str, Any]]:
@@ -282,8 +282,8 @@ class PGSessionManager(SessionManager):
         try:
             with transaction() as conn:
                 return self._list_sessions_inner(conn)
-        except DB_RETRYABLE_ERRORS:
-            logger.warning("DB unavailable, falling back to JSONL for session list")
+        except DB_RETRYABLE_ERRORS as e:
+            logger.warning("DB unavailable, falling back to JSONL for session list: {}", e)
             return super().list_sessions()
 
     def _list_sessions_inner(self, conn) -> list[dict[str, Any]]:
@@ -344,8 +344,8 @@ class PGSessionManager(SessionManager):
             if session is None:
                 return None
             return self._session_payload(session)
-        except DB_RETRYABLE_ERRORS:
-            logger.warning("DB unavailable, falling back to JSONL read for session {}", key)
+        except DB_RETRYABLE_ERRORS as e:
+            logger.warning("DB unavailable, falling back to JSONL read for session {}: {}", key, e)
             return super().read_session_file(key)
 
     @staticmethod
