@@ -1,10 +1,9 @@
 """
 Единый коннектор к PostgreSQL / Greenplum через psycopg2.
 
-Соединения:
-  — При наличии пула (``configure()`` вызван): ``ThreadedConnectionPool``
-    с min=1, max=10 соединений. Соединения переиспользуются.
-  — Без пула: короткоживущие соединения (connect → query → close).
+Все операции создают короткоживущие соединения (connect → query → close).
+Пул ThreadedConnectionPool убран — он вызывал "double free" на Windows
+при работе с asyncio.
 
 Синхронный API — основной.
 Асинхронный API — надстройка через ``asyncio.to_thread``.
@@ -29,7 +28,6 @@ from typing import Any, Callable, Optional
 import psycopg2
 import psycopg2.extras
 import psycopg2.extensions
-import psycopg2.pool
 
 # Глобальный адаптер: psycopg2 автоматически сериализует dict → JSONB
 psycopg2.extensions.register_adapter(dict, psycopg2.extras.Json)
@@ -40,9 +38,6 @@ _MAX_RETRIES = 15
 _RETRY_DELAY = 1.0
 _RETRY_MAX_DELAY = 15.0
 
-_DEFAULT_MIN_CONN = 1
-_DEFAULT_MAX_CONN = 10
-
 DB_RETRYABLE_ERRORS = (
     psycopg2.OperationalError,
     psycopg2.InterfaceError,
@@ -51,44 +46,23 @@ DB_RETRYABLE_ERRORS = (
 )
 
 _dsn: str = ""
-_pool: psycopg2.pool.ThreadedConnectionPool | None = None
 
 
-def configure(dsn: str, minconn: int = _DEFAULT_MIN_CONN, maxconn: int = _DEFAULT_MAX_CONN) -> None:
-    """Настроить подключение к БД.
+def configure(dsn: str) -> None:
+    """Настроить DSN для подключения к БД.
 
-    Создаёт пул ThreadedConnectionPool (minconn..maxconn соединений)
-    для переиспользования соединений между запросами.
-
-    Если ``configure`` вызван повторно, старый пул закрывается.
-
-    Параметры:
-        dsn — строка подключения (``postgresql://user:pass@host:port/db``)
-        minconn — минимальное число соединений в пуле (по умолчанию 1)
-        maxconn — максимальное число соединений в пуле (по умолчанию 10)
+    Вызов с тем же DSN — idempotent (повторный вызов игнорируется).
     """
-    global _dsn, _pool
-    _dsn = dsn
-    if _pool is not None:
-        _pool.closeall()
-        _pool = None
-    if dsn:
-        _pool = psycopg2.pool.ThreadedConnectionPool(minconn, maxconn, dsn)
+    global _dsn
+    if dsn and dsn != _dsn:
+        _dsn = dsn
 
 
 def _connect() -> psycopg2.extensions.connection:
-    """Получить соединение из пула (или создать новое, если пула нет).
+    """Создать новое соединение с БД.
 
-    Если пул настроен — берёт соединение из пула.
-    Если пула нет — создаёт прямое соединение (для совместимости).
-
-    В обоих случаях регистрирует JSON-адаптер и включает autocommit.
+    Регистрирует JSON-адаптер и включает autocommit.
     """
-    if _pool is not None:
-        conn = _pool.getconn()
-        psycopg2.extras.register_json(conn, globally=False)
-        conn.autocommit = True
-        return conn
     if not _dsn:
         raise RuntimeError(
             "SharedDB не инициализирован: вызовите configure(dsn) "
@@ -105,15 +79,8 @@ def _connect() -> psycopg2.extensions.connection:
 
 
 def _disconnect(conn: psycopg2.extensions.connection) -> None:
-    """Вернуть соединение в пул (или закрыть, если пула нет).
-
-    Если пул настроен — возвращает соединение в пул для переиспользования.
-    Если пула нет — просто закрывает соединение.
-    """
-    if _pool is not None:
-        _pool.putconn(conn)
-    else:
-        conn.close()
+    """Закрыть соединение с БД."""
+    conn.close()
 
 
 def _retry(fn: Callable[[], Any]) -> Any:
