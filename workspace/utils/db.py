@@ -59,9 +59,13 @@ def configure(dsn: str) -> None:
 
 
 def _connect() -> psycopg2.extensions.connection:
-    """Создать новое соединение с БД.
+    """Создать новое соединение с БД с автоматическими retry.
 
     Регистрирует JSON-адаптер и включает autocommit.
+
+    Retry-логика:
+      — "too many connections": до 50 раз, backoff 2→30с
+      — остальные ошибки: до 15 раз, backoff 1→15с
     """
     if not _dsn:
         raise RuntimeError(
@@ -71,14 +75,40 @@ def _connect() -> psycopg2.extensions.connection:
     # libpq в psycopg2-binary (≥ 2.9.x) пытается использовать
     # GSSAPI-шифрование по умолчанию, но GP 6.25 / PG 9.4 его не
     # поддерживают, что вызывает ошибку соединения.
-    conn = psycopg2.connect(_dsn, gssencmode="disable")
-    try:
-        psycopg2.extras.register_json(conn, globally=False)
-        conn.autocommit = True
-        return conn
-    except Exception:
-        conn.close()
-        raise
+    delay = _RETRY_DELAY
+    attempt = 0
+    max_retries = _MAX_RETRIES
+    while True:
+        try:
+            conn = psycopg2.connect(_dsn, gssencmode="disable")
+        except DB_RETRYABLE_ERRORS as e:
+            attempt += 1
+            msg = str(e).lower()
+            is_too_many = "too many connections" in msg
+            if is_too_many:
+                max_retries = max(max_retries, 50)
+                delay = min(delay * 2, 30.0)
+            else:
+                delay = min(delay * 1.5, _RETRY_MAX_DELAY)
+            if attempt >= max_retries:
+                raise
+            label = "too_many" if is_too_many else "other"
+            logger.warning(
+                "DB connect retry %d/%d (%s) after %.1fs: %s",
+                attempt, max_retries, label, delay, e,
+            )
+            time.sleep(delay)
+            continue
+        except Exception as e:
+            logger.error("DB connect non-retryable error: %s", e)
+            raise
+        try:
+            psycopg2.extras.register_json(conn, globally=False)
+            conn.autocommit = True
+            return conn
+        except Exception:
+            conn.close()
+            raise
 
 
 def _disconnect(conn: psycopg2.extensions.connection) -> None:
