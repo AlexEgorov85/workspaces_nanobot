@@ -1,7 +1,7 @@
 -- Таблицы для хранения истории сессий nanobot в PostgreSQL
 -- Вместо JSONL-файлов в workspace/sessions/*.jsonl
 -- Управляется PGSessionManager (pg_session_manager.py)
--- Создаются автоматически при вызове PGSessionManager.ensure_tables()
+-- Создаются вручную администратором (запуском этого скрипта)
 
 -- Мета-информация о сессии
 CREATE TABLE IF NOT EXISTS public.session_meta (

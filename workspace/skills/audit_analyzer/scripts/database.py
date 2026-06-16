@@ -105,6 +105,11 @@ class Database:
         return data
 
     def _fetch_schema(self, schema: str, tables: Optional[list[str]]) -> dict:
+        """
+        Выполнить сложный SQL-запрос с JOIN к information_schema и pg_catalog
+        для получения структуры таблиц: колонки, типы, NOT/NULL, комментарии.
+        Результат собирается в dict {schema, tables: {table: {comment, columns}}}.
+        """
         query = """
             SELECT
                 c.table_name,
@@ -155,12 +160,24 @@ class Database:
     # ------------------------------------------------------------------
 
     def _cache_file(self) -> Optional[Path]:
+        """
+        Вернуть Path к файлу кеша схемы или None, если путь не задан.
+        """
         return Path(self._cache_path) if self._cache_path else None
 
     def _cache_log(self, msg: str):
+        """
+        Вывести сообщение кеша в stderr с префиксом [CACHE].
+        """
         print(f"[CACHE] {msg}", file=sys.stderr)
 
     def _read_cache(self, schema: str, tables: Optional[list[str]]) -> Optional[dict]:
+        """
+        Прочитать кеш схемы из JSON-файла.
+        Проверяет TTL (age > ttl_seconds), совпадение имени схемы,
+        и при фильтрации по таблицам — наличие всех запрошенных таблиц.
+        Возвращает dict с отфильтрованными данными или None при промахе.
+        """
         path = self._cache_file()
         if not path:
             self._cache_log("кеш отключён (нет пути)")
@@ -199,6 +216,11 @@ class Database:
         return {"schema": schema, "tables": cached_tables}
 
     def _write_cache(self, schema: str, schema_data: dict):
+        """
+        Записать JSON-файл кеша схемы.
+        Создаёт родительскую директорию при необходимости.
+        Добавляет timestamp cached_at. В случае ошибки выводит предупреждение.
+        """
         path = self._cache_file()
         if not path:
             return

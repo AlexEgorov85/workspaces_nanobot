@@ -86,6 +86,12 @@ import vector_mode
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """
+    Создать и настроить парсер аргументов командной строки.
+    Добавляет ~10 аргументов: --mode (обязательный), --script, --query,
+    --params, --vector-index, --index-name, --top-k, --threshold, --context.
+    Возвращает настроенный ArgumentParser.
+    """
     parser = argparse.ArgumentParser(description="audit_analyzer — анализ БД через LLM агента")
     parser.add_argument(
         "--mode",
@@ -149,6 +155,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run(args: argparse.Namespace) -> dict:
+    """
+    Маршрутизация выполнения по режиму (predefined/sql/vector).
+    Для predefined проверяет наличие --script, для sql/vector — --query.
+    Возвращает dict-результат от соответствующего модуля.
+    """
     with Database(load_db_config()) as db:
 
         if args.mode == "predefined":

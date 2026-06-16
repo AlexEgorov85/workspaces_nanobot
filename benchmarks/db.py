@@ -1,8 +1,8 @@
-"""PostgreSQL storage for benchmark results.
+"""Хранилище результатов бенчмарков в PostgreSQL.
 
-Uses the project-wide shared db connector from utils.db.
+Использует общепроектный коннектор к БД из utils.db.
 
-Usage:
+Пример:
     from benchmarks.db import BenchmarkDB
 
     db = BenchmarkDB(dsn="...")
@@ -36,7 +36,15 @@ RESULTS_TABLE = "benchmark_results"
 
 
 class BenchmarkDB:
+    """Управление сохранением и загрузкой результатов бенчмарков в PostgreSQL."""
+
     def __init__(self, dsn: str = "", schema: str = SCHEMA) -> None:
+        """Инициализация подключения к БД.
+
+        Args:
+            dsn: Строка подключения к PostgreSQL.
+            schema: Схема базы данных (по умолчанию public).
+        """
         self._dsn = dsn
         self._schema = schema
         self._fq_runs = f'"{schema}"."{RUNS_TABLE}"'
@@ -46,6 +54,7 @@ class BenchmarkDB:
             configure(dsn)
 
     def ensure_tables(self) -> None:
+        """Создание таблиц для хранения прогонов, если они ещё не существуют."""
         if not self._available:
             logger.warning("PostgreSQL not available, skipping table creation")
             return
@@ -58,6 +67,14 @@ class BenchmarkDB:
             logger.warning("SQL DDL file not found at {}", sql_path)
 
     def save_run(self, suite_result: SuiteResult) -> str | None:
+        """Сохранение результатов прогона набора тестов.
+
+        Args:
+            suite_result: Результаты прогона набора.
+
+        Returns:
+            Идентификатор сохранённого прогона или None, если БД недоступна.
+        """
         if not self._available:
             logger.warning("PostgreSQL not available, skipping save")
             return None
@@ -65,6 +82,15 @@ class BenchmarkDB:
             return self._save_run_inner(conn, suite_result)
 
     def _save_run_inner(self, conn, suite_result: SuiteResult) -> str:
+        """Вставка записи прогона и связанных результатов в БД.
+
+        Args:
+            conn: Активное соединение с БД (внутри транзакции).
+            suite_result: Результаты прогона набора.
+
+        Returns:
+            Идентификатор созданной записи прогона.
+        """
         now = datetime.now()
 
         with conn.cursor() as cur:
@@ -122,6 +148,15 @@ class BenchmarkDB:
         return run_id
 
     def get_history(self, suite_name: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Получение истории прогонов для указанного набора тестов.
+
+        Args:
+            suite_name: Имя набора тестов.
+            limit: Максимальное количество записей (по умолчанию 10).
+
+        Returns:
+            Список словарей с данными прогонов.
+        """
         if not self._available:
             logger.warning("PostgreSQL not available")
             return []
@@ -136,6 +171,15 @@ class BenchmarkDB:
         )
 
     def compare_runs(self, run_id_1: str, run_id_2: str) -> dict[str, Any] | None:
+        """Сравнение двух прогонов по идентификаторам.
+
+        Args:
+            run_id_1: Идентификатор первого прогона.
+            run_id_2: Идентификатор второго прогона.
+
+        Returns:
+            Словарь со сравнением или None, если БД недоступна.
+        """
         if not self._available:
             logger.warning("PostgreSQL not available")
             return None
@@ -145,6 +189,16 @@ class BenchmarkDB:
     def _compare_runs_inner(
         self, conn, run_id_1: str, run_id_2: str
     ) -> dict[str, Any] | None:
+        """Внутренняя логика сравнения двух прогонов.
+
+        Args:
+            conn: Активное соединение с БД (внутри транзакции).
+            run_id_1: Идентификатор первого прогона.
+            run_id_2: Идентификатор второго прогона.
+
+        Returns:
+            Словарь с данными обоих прогонов и дельтами.
+        """
         with conn.cursor() as cur:
             cur.execute(f"SELECT * FROM {self._fq_runs} WHERE id = %s", (run_id_1,))
             col_names = [desc[0] for desc in cur.description]

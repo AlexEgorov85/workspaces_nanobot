@@ -266,9 +266,13 @@ class RedisChannel(BaseChannel):
             )
         except Exception:
             self.logger.exception("Failed to dispatch Redis message from {}", sender_id)
+            self._reply_to_map.pop(chat_id, None)
         finally:
             self._inflight.discard(chat_id)
             self._semaphore.release()
+            if len(self._reply_to_map) > 10000:
+                while len(self._reply_to_map) > 5000:
+                    self._reply_to_map.pop(next(iter(self._reply_to_map)), None)
 
     # ══════════════════════════════════════════════════════════════════
     # Отправка ответа (OutboundMessage → Redis)

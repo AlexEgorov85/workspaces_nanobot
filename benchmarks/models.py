@@ -1,3 +1,9 @@
+"""Модели данных для бенчмарков nanobot.
+
+Содержит dataclasses для описания заданий, шагов, ожиданий,
+результатов проверок и прогонов.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,6 +12,18 @@ from typing import Any
 
 @dataclass
 class BenchExpect:
+    """Ожидаемые критерии оценки ответа агента.
+
+    Attributes:
+        tools: Список инструментов, которые должен использовать агент.
+        skills: Список навыков, которые должен активировать агент.
+        keywords_include: Обязательные ключевые слова в ответе.
+        keywords_exclude: Запрещённые ключевые слова в ответе.
+        max_iterations: Максимальное число итераций.
+        match_type: Тип сопоставления ("keyword" или "llm_judge").
+        check_file: Путь к файлу, который должен существовать.
+        check_file_content: Ожидаемое содержимое файла.
+    """
     tools: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
     keywords_include: list[str] = field(default_factory=list)
@@ -18,6 +36,14 @@ class BenchExpect:
 
 @dataclass
 class BenchStep:
+    """Один шаг многошагового задания.
+
+    Attributes:
+        step: Номер шага.
+        question: Формулировка вопроса для данного шага.
+        weight: Вес шага в итоговой оценке.
+        expect: Ожидаемые критерии для данного шага.
+    """
     step: int
     question: str
     weight: float = 1.0
@@ -26,6 +52,22 @@ class BenchStep:
 
 @dataclass
 class BenchItem:
+    """Одно задание бенчмарка (простое или многошаговое).
+
+    Attributes:
+        id: Уникальный идентификатор задания.
+        name: Человекочитаемое название.
+        difficulty: Уровень сложности (1–10).
+        category: Категория задания.
+        type: Тип задания ("single" или "multi_step").
+        new_session: Флаг создания новой сессии.
+        question: Текст вопроса (для single-заданий).
+        steps: Список шагов (для multi_step-заданий).
+        expect: Ожидаемые критерии оценки.
+        context_files: Файлы контекста, предоставляемые агенту.
+        max_iterations: Максимальное количество итераций.
+        timeout: Таймаут выполнения в секундах.
+    """
     id: str
     name: str
     difficulty: int
@@ -45,6 +87,13 @@ class BenchItem:
 
 @dataclass
 class BenchSuite:
+    """Набор тестовых заданий бенчмарка.
+
+    Attributes:
+        name: Имя набора.
+        items: Список заданий.
+        tags: Теги для фильтрации (simple, medium, hard и т.д.).
+    """
     name: str
     items: list[BenchItem]
     tags: list[str] = field(default_factory=list)
@@ -52,6 +101,14 @@ class BenchSuite:
 
 @dataclass
 class CheckResult:
+    """Результат одной проверки.
+
+    Attributes:
+        check: Имя проверки (tools, keywords_include, file_exists и т.д.).
+        passed: Флаг успешности проверки.
+        score: Числовой балл (0.0–1.0).
+        detail: Текстовое описание результата.
+    """
     check: str
     passed: bool
     score: float
@@ -60,6 +117,13 @@ class CheckResult:
 
 @dataclass
 class EvalResult:
+    """Результат оценки ответа агента по всем проверкам.
+
+    Attributes:
+        passed: Флаг, пройдено ли задание в целом.
+        total_score: Итоговый средний балл.
+        checks: Список результатов отдельных проверок.
+    """
     passed: bool
     total_score: float
     checks: list[CheckResult] = field(default_factory=list)
@@ -67,6 +131,20 @@ class EvalResult:
 
 @dataclass
 class StepResult:
+    """Результат выполнения одного шага многошагового задания.
+
+    Attributes:
+        step: Номер шага.
+        weight: Вес шага.
+        passed: Флаг успешности.
+        score: Балл за шаг.
+        response: Ответ агента на шаге.
+        tools_used: Использованные инструменты.
+        iterations: Число итераций на шаге.
+        duration_sec: Длительность шага.
+        details: Дополнительные детали (ошибки и т.д.).
+        checks: Результаты проверок шага.
+    """
     step: int
     weight: float
     passed: bool
@@ -81,6 +159,25 @@ class StepResult:
 
 @dataclass
 class BenchResult:
+    """Результат выполнения одного задания бенчмарка.
+
+    Attributes:
+        item_id: Идентификатор задания.
+        item_name: Название задания.
+        difficulty: Сложность задания.
+        passed: Флаг успешности.
+        total_score: Итоговый балл.
+        response: Текст ответа агента.
+        error: Сообщение об ошибке (если была).
+        tools_used: Список использованных инструментов.
+        skills_activated: Список активированных навыков.
+        total_iterations: Общее число итераций.
+        duration_sec: Общая длительность.
+        llm_judge_score: Оценка LLM-судьи (если применимо).
+        steps: Результаты по шагам (для multi_step).
+        checks: Результаты проверок.
+        details: Дополнительная информация.
+    """
     item_id: str
     item_name: str = ""
     difficulty: int = 5
@@ -100,6 +197,19 @@ class BenchResult:
 
 @dataclass
 class SuiteResult:
+    """Результат прогона целого набора тестов.
+
+    Attributes:
+        suite_name: Имя набора.
+        timestamp: Метка времени прогона.
+        total_items: Общее количество заданий.
+        passed_items: Количество пройденных заданий.
+        total_score: Суммарный балл.
+        avg_score: Средний балл.
+        duration_sec: Общая длительность прогона.
+        results: Список результатов по каждому заданию.
+        config: Конфигурация прогона (теги, режим и т.д.).
+    """
     suite_name: str
     timestamp: str
     total_items: int

@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -43,6 +44,10 @@ SETTINGS = GatewaySettings()
 
 
 def _resolve_transcription_key(config):
+    """Вернуть API-ключ для провайдера транскрипции.
+
+    Поддерживает openai и groq. Если ключ не найден — пустая строка.
+    """
     provider = config.channels.transcription_provider
     try:
         if provider == "openai":
@@ -53,6 +58,10 @@ def _resolve_transcription_key(config):
 
 
 def _resolve_transcription_base(config):
+    """Вернуть базовый URL для API транскрипции.
+
+    Поддерживает openai и groq. Если не задан — пустая строка.
+    """
     provider = config.channels.transcription_provider
     try:
         if provider == "openai":
@@ -119,7 +128,8 @@ def main() -> None:
             from nanobot.agent.runner import AgentRunner
             from nanobot.utils.runtime import ensure_nonempty_tool_result
 
-            # read_file — exempt from offload to prevent persist→read→persist loops
+            # read_file исключён из выгрузки, чтобы избежать циклов
+            # persist → прочитал файл → persist прочитанного → ...
             _EXEMPT_TOOLS = frozenset({"read_file"})
             _original = AgentRunner._normalize_tool_result
 
@@ -186,7 +196,7 @@ def main() -> None:
         hooks=[tool_audit_hook],
     )
 
-    # Monkey-patch _assemble_outbound to inject tool audit trail into metadata
+    # Monkey-patch _assemble_outbound — внедряем аудит тулов в metadata
     _orig_assemble = agent._assemble_outbound
 
     def _assemble_with_audit(msg, final_content, all_msgs, stop_reason, had_injections, on_stream, *, turn_latency_ms=None):
@@ -265,16 +275,19 @@ def main() -> None:
     async def run():
         channels_task = asyncio.create_task(channels.start_all())
 
-        # Start Streamlit UI
+        # Запуск Streamlit UI (веб-интерфейс чата)
         _streamlit_proc: subprocess.Popen | None = None
+        _streamlit_log_handle = None
         if _streamlit_script.exists():
             try:
+                _streamlit_log = _SCRIPT_DIR / "streamlit.log"
+                _streamlit_log_handle = open(_streamlit_log, "a", encoding="utf-8")
                 _streamlit_proc = subprocess.Popen(
                     [sys.executable, "-m", "streamlit", "run", str(_streamlit_script),
                      "--server.headless", "true",
                      "--server.port", "8501"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=_streamlit_log_handle,
+                    stderr=subprocess.STDOUT,
                 )
                 console.print("[green]✓[/green] Streamlit UI started on :8501")
             except Exception as exc:
@@ -299,12 +312,24 @@ def main() -> None:
                     _streamlit_proc.wait(timeout=5)
                 except Exception:
                     _streamlit_proc.kill()
+            if _streamlit_log_handle:
+                try:
+                    _streamlit_log_handle.close()
+                except Exception:
+                    pass
             await agent.close_mcp()
             agent.stop()
             await channels.stop_all()
             flushed = agent.sessions.flush_all()
             if flushed:
                 logger.info("Flushed {} session(s) to disk", flushed)
+
+    # Перезапуск с exponential backoff: 1с → 2с → 4с → 8с → 16с → 30с
+    # Если gateway упал с ошибкой, ждём всё дольше, чтобы не спамить
+    # БД/Redis переподключениями. После успешного запуска (clean shutdown)
+    # задержка сбрасывается, т.к. мы выходим из цикла.
+    restart_delay = 1.0
+    max_restart_delay = 30.0
 
     while True:
         try:
@@ -313,11 +338,12 @@ def main() -> None:
             console.print("\nExiting...")
             break
         except Exception:
-            console.print("[red]Gateway exited unexpectedly, restarting in 5s...[/red]")
-            import time
-            time.sleep(5)
+            console.print(f"[red]Gateway exited unexpectedly, restarting in {restart_delay}s...[/red]")
+            console.print(traceback.format_exc())
+            time.sleep(restart_delay)
+            restart_delay = min(restart_delay * 2, max_restart_delay)
             continue
-        break  # clean shutdown
+        break  # clean shutdown — выходим из цикла, процесс завершается
 
 
 if __name__ == "__main__":

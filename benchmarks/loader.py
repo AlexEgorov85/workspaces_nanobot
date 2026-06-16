@@ -1,3 +1,9 @@
+"""Загрузка конфигураций бенчмарков из YAML-файлов.
+
+Поддерживает загрузку из отдельных файлов и директорий, парсинг элементов,
+шагов и ожидаемых критериев оценки.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,6 +15,18 @@ from benchmarks.models import BenchExpect, BenchItem, BenchStep, BenchSuite
 
 
 def load_benchmark(path: str | Path) -> BenchSuite:
+    """Загрузка набора бенчмарков из файла или директории.
+
+    Args:
+        path: Путь к YAML-файлу или директории с файлами.
+
+    Returns:
+        Набор тестов BenchSuite.
+
+    Пример:
+        >>> suite = load_benchmark("benchmarks/items/simple.yaml")
+        >>> suite = load_benchmark("benchmarks/items/")
+    """
     path = Path(path)
     if path.is_dir():
         return _load_directory(path)
@@ -16,6 +34,14 @@ def load_benchmark(path: str | Path) -> BenchSuite:
 
 
 def _load_directory(dir_path: Path) -> BenchSuite:
+    """Загрузка всех YAML-файлов из директории, исключая файлы, начинающиеся с '_'.
+
+    Args:
+        dir_path: Путь к директории.
+
+    Returns:
+        Набор тестов, собранный из всех файлов директории.
+    """
     all_items: list[BenchItem] = []
     tags: list[str] = []
 
@@ -36,6 +62,17 @@ def _load_directory(dir_path: Path) -> BenchSuite:
 
 
 def _load_file(file_path: Path) -> BenchSuite:
+    """Загрузка одного YAML-файла с бенчмарками.
+
+    Args:
+        file_path: Путь к YAML-файлу.
+
+    Returns:
+        Набор тестов из файла.
+
+    Пример:
+        # Файл может содержать список элементов или словарь с ключом "benchmarks"/"items".
+    """
     with open(file_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
@@ -60,6 +97,17 @@ def _load_file(file_path: Path) -> BenchSuite:
 
 
 def _parse_item(data: dict[str, Any]) -> BenchItem:
+    """Парсинг одного задания бенчмарка из словаря YAML.
+
+    Args:
+        data: Словарь с данными задания.
+
+    Returns:
+        Объект BenchItem.
+
+    Пример:
+        >>> item = _parse_item({"id": "test1", "question": "..."})
+    """
     expect_raw = data.get("expect", {})
     steps_raw = data.get("steps", [])
 
@@ -85,6 +133,14 @@ def _parse_item(data: dict[str, Any]) -> BenchItem:
 
 
 def _parse_expect(data: dict[str, Any]) -> BenchExpect:
+    """Парсинг ожидаемых критериев оценки из YAML-словаря.
+
+    Args:
+        data: Словарь с ожиданиями (tools, keywords_include, check_file и т.д.).
+
+    Returns:
+        Объект BenchExpect.
+    """
     return BenchExpect(
         tools=data.get("tools", []),
         skills=data.get("skills", []),
@@ -98,6 +154,15 @@ def _parse_expect(data: dict[str, Any]) -> BenchExpect:
 
 
 def _parse_step(data: dict[str, Any], default_step: int) -> BenchStep:
+    """Парсинг одного шага многошагового задания.
+
+    Args:
+        data: Словарь с данными шага.
+        default_step: Номер шага по умолчанию (если не указан в данных).
+
+    Returns:
+        Объект BenchStep.
+    """
     return BenchStep(
         step=data.get("step", default_step),
         question=data["question"],

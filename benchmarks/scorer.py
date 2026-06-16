@@ -1,9 +1,18 @@
+"""Подсчёт взвешенных оценок для результатов бенчмарков.
+
+Определяет веса для каждого типа проверки и функции расчёта
+итоговых баллов для одношаговых, многошаговых заданий и отдельных шагов.
+"""
+
 from __future__ import annotations
 
 from benchmarks.models import BenchExpect, BenchItem, BenchResult, CheckResult, EvalResult, StepResult
 
-# Default weights per check type
+# Веса по умолчанию для каждого типа проверки.
+# Используются при расчёте взвешенной средней оценки.
+# Нормализация весов происходит внутри _weighted_score.
 CHECK_WEIGHTS: dict[str, float] = {
+    # tools — вес проверки инструментов
     "tools": 0.20,
     "keywords_include": 0.15,
     "keywords_exclude": 0.10,
@@ -16,6 +25,15 @@ CHECK_WEIGHTS: dict[str, float] = {
 
 
 def score_item(item: BenchItem, eval_result: EvalResult) -> BenchResult:
+    """Расчёт результата задания на основе оценки (без дополнительных метаданных).
+
+    Args:
+        item: Задание бенчмарка.
+        eval_result: Результат оценки ответа агента.
+
+    Returns:
+        Результат выполнения задания с взвешенным баллом.
+    """
     weighted = _weighted_score(eval_result.checks)
     return BenchResult(
         item_id=item.id,
@@ -36,6 +54,20 @@ def score_single(
     iterations: int = 0,
     duration_sec: float = 0.0,
 ) -> BenchResult:
+    """Расчёт полного результата одношагового задания с метаданными выполнения.
+
+    Args:
+        item: Задание бенчмарка.
+        eval_result: Результат оценки ответа агента.
+        response: Текст ответа агента.
+        tools_used: Список использованных инструментов.
+        skills_activated: Множество активированных навыков.
+        iterations: Число итераций.
+        duration_sec: Длительность выполнения.
+
+    Returns:
+        Результат задания с заполненными метаданными.
+    """
     weighted = _weighted_score(eval_result.checks)
     llm_judge = _find_check_score(eval_result.checks, "llm_judge")
 
@@ -64,6 +96,20 @@ def score_step(
     iterations: int = 0,
     duration_sec: float = 0.0,
 ) -> StepResult:
+    """Расчёт результата одного шага многошагового задания.
+
+    Args:
+        step_index: Номер шага.
+        weight: Вес шага в итоговой оценке.
+        eval_result: Результат оценки ответа агента на шаге.
+        response: Ответ агента на шаге.
+        tools_used: Инструменты, использованные на шаге.
+        iterations: Число итераций на шаге.
+        duration_sec: Длительность шага.
+
+    Returns:
+        Результат шага с метаданными.
+    """
     weighted = _weighted_score(eval_result.checks)
     return StepResult(
         step=step_index,
@@ -79,6 +125,17 @@ def score_step(
 
 
 def score_multi_step(item: BenchItem, step_results: list[StepResult]) -> BenchResult:
+    """Агрегация результатов всех шагов в итоговый результат многошагового задания.
+
+    Итоговый балл = 80% взвешенная сумма шагов + 20% доля пройденных шагов.
+
+    Args:
+        item: Задание бенчмарка.
+        step_results: Список результатов по каждому шагу.
+
+    Returns:
+        Итоговый результат задания.
+    """
     if not step_results:
         return BenchResult(
             item_id=item.id,
@@ -123,6 +180,14 @@ def score_multi_step(item: BenchItem, step_results: list[StepResult]) -> BenchRe
 
 
 def _weighted_score(checks: list[CheckResult]) -> float:
+    """Расчёт взвешенного среднего балла по всем проверкам.
+
+    Args:
+        checks: Список результатов проверок.
+
+    Returns:
+        Взвешенный средний балл (0.0–1.0).
+    """
     if not checks:
         return 0.0
     total_weight = 0.0
@@ -137,6 +202,15 @@ def _weighted_score(checks: list[CheckResult]) -> float:
 
 
 def _find_check_score(checks: list[CheckResult], name: str) -> float | None:
+    """Поиск балла конкретной проверки по её имени.
+
+    Args:
+        checks: Список результатов проверок.
+        name: Имя проверки (например "llm_judge").
+
+    Returns:
+        Балл проверки или None, если проверка не найдена.
+    """
     for c in checks:
         if c.check == name:
             return c.score

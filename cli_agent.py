@@ -289,7 +289,11 @@ LOG_LEVEL: str = "WARNING"    # "DEBUG" | "INFO" | "WARNING" | "ERROR"
 
 
 def _patch_agent_tool_audit(agent, hook) -> None:
-    """Monkey-patch _assemble_outbound to inject tool audit trail into msg.metadata."""
+    """Монки-патч ``_assemble_outbound``: добавляет tool audit trail в msg.metadata.
+
+    После оригинального ``_assemble_outbound`` сливает накопленные записи
+    из ``hook.drain()`` в ``result.metadata["_tool_audit"]``.
+    """
     _orig = agent._assemble_outbound
 
     def _wrap(msg, final_content, all_msgs, stop_reason, had_injections, on_stream, *, turn_latency_ms=None):
@@ -488,9 +492,10 @@ def _run_interactive_loop(agent, config, *, session: str | None = None,
     cli_channel, cli_chat_id = "cli", chat_id
 
     def _handle_signal(signum, frame):
+        """Обработчик SIGINT/SIGTERM — восстанавливает терминал и завершает процесс."""
         sig_name = signal.Signals(signum).name
         _restore_terminal()
-        console.print(f"\nReceived {sig_name}, goodbye!")
+        console.print(f"\nПолучен {sig_name}, завершение.")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _handle_signal)
@@ -501,6 +506,7 @@ def _run_interactive_loop(agent, config, *, session: str | None = None,
         signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
     async def run_interactive():
+        """Основной async-цикл: запускает агента, читает outbound, выводит стриминг/финал."""
         bus_task = asyncio.create_task(agent.run())
 
         async def consume_outbound() -> tuple[str, dict]:
@@ -704,7 +710,6 @@ def _run_patched_agent(args: argparse.Namespace) -> None:
             max_conn=sm_max_conn,
             pool_timeout=sm_pool_timeout,
         )
-        session_manager.ensure_tables()
         console.print("[green]✓[/green] PGSessionManager: sessions stored in PostgreSQL")
     else:
         session_manager = None
@@ -766,6 +771,10 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main():
+    """Точка входа CLI-агента.
+
+    Определяет режим (vanilla / patched) и запускает соответствующий раннер.
+    """
     args = _parse_args()
     if args.patched:
         _run_patched_agent(args)

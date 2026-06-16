@@ -19,6 +19,8 @@ from utils import load_config, filter_files_by_extension
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def collect_files(path: str | None, files_list: list[str] | None, exts: list[str]) -> list[str]:
+    """Собирает все файлы из указанного пути (рекурсивно) и/или из переданного списка,
+    затем фильтрует по расширениям. Возвращает список путей к найденным файлам."""
     collected = []
     if path and os.path.isdir(path):
         for root, _, fnames in os.walk(path):
@@ -28,6 +30,9 @@ def collect_files(path: str | None, files_list: list[str] | None, exts: list[str
     return filter_files_by_extension(collected, exts)
 
 def main():
+    """CLI-маршрутизатор: разбирает аргументы командной строки, загружает конфиг,
+    собирает целевые файлы, выбирает режим (llm_text/pandas), генерирует отчёт
+    в формате md или json и выводит либо сохраняет результат."""
     parser = argparse.ArgumentParser(description="Folder Analyzer Skill (LLM Text & Pandas Modes)")
     parser.add_argument("--mode", choices=["llm_text", "pandas"], required=True,
                         help="Режим анализа: llm_text (текст/логи) или pandas (таблицы)")

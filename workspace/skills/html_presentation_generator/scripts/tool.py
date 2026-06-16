@@ -28,7 +28,7 @@ def _tool_dir() -> str:
     """
     Абсолютный путь к директории scripts/.
 
-    Returns:
+    Возвращает:
         Строка пути.
 
     Пример:
@@ -95,17 +95,18 @@ class HtmlPresentationTool(Tool):
     )
 
     def __init__(self):
+        """Инициализация инструмента."""
         self._name = "generate_presentation"
 
     def _make_result(self, message: str, file_path: str) -> str:
         """
         Форматирование результата для возврата агенту.
 
-        Args:
+        Аргументы:
             message: Текстовое сообщение.
             file_path: Путь к файлу (не используется в текущей реализации).
 
-        Returns:
+        Возвращает:
             То же сообщение.
         """
         return message
@@ -120,7 +121,7 @@ class HtmlPresentationTool(Tool):
         """
         Выполнить генерацию презентации.
 
-        Pipeline:
+        Пайплайн:
             1. Получить Markdown-контент (из input или input_file)
             2. Распарсить на слайды (parse_markdown_to_slides)
             3. Загрузить шаблон (templates/base.html) и CSS (assets/styles.css)
@@ -128,13 +129,13 @@ class HtmlPresentationTool(Tool):
             5. Собрать HTML (generate_html)
             6. Вернуть сообщение с путём и количеством слайдов
 
-        Args:
+        Аргументы:
             input: Markdown-содержимое презентации.
             input_file: Путь к Markdown-файлу (альтернатива input).
             output: Путь к выходному HTML (опционально).
             title: Заголовок презентации (опционально).
 
-        Returns:
+        Возвращает:
             Строка с результатом или ошибкой.
 
         Пример вызова агентом:

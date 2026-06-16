@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-# Fix Windows console encoding
+# Исправление кодировки консоли Windows
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
@@ -32,6 +32,15 @@ import vector_mode
 
 
 async def run_tests():
+    """
+    Главная тестовая функция. Выполняет 6 асинхронных тестовых сценариев:
+      1. predefined — analytics_by_year_month с реальным SQL
+      2. predefined — top_audited_objects с алиасом параметра
+      3. predefined — неизвестный скрипт (ожидается ошибка)
+      4. predefined — violations_by_type с кодом нарушения
+      5. sql mode — генерация SQL через LLM + EXPLAIN + выполнение
+      6. vector — FAISS + embedding (при необходимости создаёт тестовый индекс)
+    """
     cfg = load_db_config()
     db_cfg = cfg if isinstance(cfg, dict) else {}
     async with Database(db_cfg) as db:
@@ -104,7 +113,7 @@ async def run_tests():
         else:
             fail('violations_by_type', json.dumps(res4, ensure_ascii=False, indent=2)[:300])
 
-    # Database closed here — sql_mode needs its own connection
+    # Database закрыт — sql_mode требует своего подключения
     print('\n[5] sql mode — генерация + EXPLAIN + выполнение')
     async with Database(db_cfg) as db_sql:
         res5 = await sql_mode.run('покажи все таблицы в схеме oarb', db_sql)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Benchmark runner for nanobot agent.
+"""Запуск бенчмарков для агента nanobot.
 
-Usage:
+Примеры:
     python benchmarks/runner.py
     python benchmarks/runner.py --tags simple
     python benchmarks/runner.py --items benchmarks/items/simple.yaml
@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Ensure project root is on sys.path for imports like utils.db, benchmarks.*
+# Добавление корня проекта в sys.path для импортов utils.db, benchmarks.*
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
@@ -41,11 +41,24 @@ ITEMS_DIR = Path(__file__).parent / "items"
 
 
 def _detect_run_id() -> str:
+    """Генерация уникального идентификатора прогона на основе текущей метки времени.
+
+    Returns:
+        Строка вида "2026-06-16_14-30-00".
+    """
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="nanobot benchmark runner")
+    """Парсинг аргументов командной строки.
+
+    Args:
+        argv: Список аргументов (по умолчанию sys.argv).
+
+    Returns:
+        Пространство имён с распарсенными аргументами.
+    """
+    p = argparse.ArgumentParser(description="Запуск бенчмарков nanobot")
     p.add_argument("--items", default=str(ITEMS_DIR),
                    help="Path to YAML file or directory with benchmark items")
     p.add_argument("--tags", nargs="*", default=None,
@@ -80,6 +93,18 @@ def _filter_items(
     difficulty: str | None,
     mode: str,
 ) -> BenchSuite:
+    """Фильтрация заданий по тегам, категории, сложности и типу.
+
+    Args:
+        suite: Исходный набор тестов.
+        tags: Список тегов для фильтрации (simple, medium, hard).
+        category: Список категорий.
+        difficulty: Диапазон сложности (например "1-3").
+        mode: Режим ("all", "single", "multi_step").
+
+    Returns:
+        Новый набор тестов только с отфильтрованными заданиями.
+    """
     items = suite.items
 
     if mode == "single":
@@ -119,6 +144,11 @@ def _filter_items(
 
 
 def _print_summary(suite_result: SuiteResult) -> None:
+    """Вывод итоговой сводки по прогону в консоль.
+
+    Args:
+        suite_result: Результаты прогона набора.
+    """
     print()
     print("=" * 60)
     print(f"  BENCHMARK COMPLETE: {suite_result.suite_name}")
@@ -141,7 +171,12 @@ def _print_summary(suite_result: SuiteResult) -> None:
 
 
 def _cleanup_item(item: BenchItem, bot: Any) -> None:
-    """Remove files created by agent during a benchmark item."""
+    """Удаление файлов, созданных агентом во время выполнения задания.
+
+    Args:
+        item: Задание бенчмарка.
+        bot: Экземпляр агента Nanobot.
+    """
     workspace = Path(bot._loop.workspace) if hasattr(bot._loop, "workspace") else None
     if not workspace:
         return
@@ -172,6 +207,17 @@ async def _run_item(
     bot: Any,
     verbose: bool,
 ) -> BenchResult:
+    """Запуск одного задания бенчмарка (single или multi_step).
+
+    Args:
+        item: Задание бенчмарка.
+        run_id: Идентификатор текущего прогона.
+        bot: Экземпляр агента Nanobot.
+        verbose: Флаг подробного вывода.
+
+    Returns:
+        Результат выполнения задания.
+    """
     try:
         if item.type == "single":
             return await _run_single(item, run_id, bot, verbose)
@@ -187,6 +233,19 @@ async def _run_single(
     bot: Any,
     verbose: bool,
 ) -> BenchResult:
+    """Запуск одношагового задания.
+
+    Выполняет задание через агента, оценивает ответ и возвращает результат.
+
+    Args:
+        item: Задание бенчмарка (тип "single").
+        run_id: Идентификатор прогона.
+        bot: Экземпляр агента Nanobot.
+        verbose: Флаг подробного вывода.
+
+    Returns:
+        Результат выполнения задания.
+    """
     hook = BenchmarkHook()
     session_key = f"bench:single:{item.id}:{run_id}"
 
@@ -231,7 +290,7 @@ async def _run_single(
         duration_sec=hook.duration_sec,
     )
 
-    # Clean up session
+    # Очистка сессии агента
     try:
         await bot._loop.sessions.delete_session(session_key)
     except Exception:
@@ -246,6 +305,20 @@ async def _run_multi_step(
     bot: Any,
     verbose: bool,
 ) -> BenchResult:
+    """Запуск многошагового задания.
+
+    Последовательно выполняет каждый шаг в рамках одной сессии,
+    оценивает каждый шаг и агрегирует итоговый результат.
+
+    Args:
+        item: Задание бенчмарка (тип "multi_step").
+        run_id: Идентификатор прогона.
+        bot: Экземпляр агента Nanobot.
+        verbose: Флаг подробного вывода.
+
+    Returns:
+        Результат выполнения задания.
+    """
     session_key = f"bench:multi:{item.id}:{run_id}"
     step_results: list[StepResult] = []
 
@@ -292,7 +365,7 @@ async def _run_multi_step(
         )
         step_results.append(sr)
 
-    # Clean up session
+    # Очистка сессии агента
     try:
         await bot._loop.sessions.delete_session(session_key)
     except Exception:
@@ -306,6 +379,16 @@ async def _run_suite(
     run_id: str,
     args: argparse.Namespace,
 ) -> SuiteResult:
+    """Запуск всех заданий набора бенчмарков.
+
+    Args:
+        suite: Набор тестов для запуска.
+        run_id: Идентификатор прогона.
+        args: Аргументы командной строки.
+
+    Returns:
+        Результаты прогона всего набора.
+    """
     from nanobot import Nanobot
     from nanobot.config.loader import load_config, resolve_config_env_vars
     from nanobot.agent.loop import AgentLoop
@@ -364,6 +447,11 @@ async def _run_suite(
 
 
 def _do_compare(args: argparse.Namespace) -> None:
+    """Сравнение двух предыдущих прогонов по JSON-отчётам.
+
+    Args:
+        args: Аргументы командной строки (содержит compare — два пути).
+    """
     run1_path, run2_path = args.compare
 
     def load_summary(path: str) -> dict[str, Any] | None:
@@ -408,6 +496,14 @@ def _do_compare(args: argparse.Namespace) -> None:
 
 
 async def main_async(argv: list[str] | None = None) -> int:
+    """Асинхронный входной точка запуска бенчмарков.
+
+    Args:
+        argv: Список аргументов командной строки.
+
+    Returns:
+        Код возврата: 0 — все тесты пройдены, 1 — есть упавшие.
+    """
     args = _parse_args(argv)
 
     if args.compare:
@@ -472,6 +568,14 @@ async def main_async(argv: list[str] | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Синхронная точка входа для запуска бенчмарков.
+
+    Args:
+        argv: Список аргументов командной строки.
+
+    Returns:
+        Код возврата (0 — успех, 1 — ошибка).
+    """
     return asyncio.run(main_async(argv))
 
 

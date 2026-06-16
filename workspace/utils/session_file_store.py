@@ -8,6 +8,12 @@ from datetime import datetime, timezone
 UTC = timezone.utc
 from typing import Optional
 
+"""Модуль для хранения сессий в файловой системе.
+
+SessionFileStore управляет сохранением, архивацией и очисткой
+файлов результатов сессий инструментов.
+"""
+
 # Characters invalid in directory names across platforms (Windows, macOS, Linux).
 # On Windows: \ / : * ? " < > |
 # On Linux:  / (null byte handled separately)
@@ -16,20 +22,22 @@ _INVALID_FS_CHARS = re.compile(r'[\\/:*?"<>|]+')
 
 
 def safe_session_key(key: str) -> str:
-    """Replace characters unsafe for directory names with ``_``."""
+    """Заменяет символы, небезопасные для имён директорий, на ``_``."""
     return _INVALID_FS_CHARS.sub("_", key)
 
 
 def _csv_val(v):
+    """Возвращает пустую строку для None, иначе строковое представление значения."""
     return "" if v is None else str(v)
 
 
 def prepare_content(content: str) -> tuple[str, str]:
-    """Normalize tool result content and choose file extension.
+    """Нормализует содержимое результата инструмента и выбирает расширение файла.
 
-    Returns ``(content, ext)`` where ``ext`` is ``.json``, ``.csv``, or ``.txt``.
-    JSON-like content is pretty-printed and optionally converted to CSV
-    if it has a tabular structure (list-of-dicts or dict with rows/columns).
+    Возвращает ``(content, ext)``, где ``ext`` — ``.json``, ``.csv`` или ``.txt``.
+    JSON-подобное содержимое форматируется с отступами и опционально
+    преобразуется в CSV, если имеет табличную структуру (список словарей
+    или словарь со строками/колонками).
     """
     stripped = content.strip()
     if stripped.startswith("{") or stripped.startswith("["):
@@ -45,6 +53,12 @@ def prepare_content(content: str) -> tuple[str, str]:
 
 
 def _try_convert_to_csv(data) -> Optional[str]:
+    """Пытается преобразовать данные (list/dict) в CSV с BOM.
+
+    Проверяет несколько распространённых структур: список словарей,
+    словарь с ключами results/rows+columns/data.
+    Возвращает строку CSV или None, если данные не табличные.
+    """
     rows = None
     columns = None
 
@@ -84,6 +98,13 @@ def _try_convert_to_csv(data) -> Optional[str]:
 
 class SessionFileStore:
     def __init__(self, base_dir: Path, max_files: int = 0, max_age_hours: int = 0):
+        """Инициализирует хранилище сессий.
+
+        Аргументы:
+            base_dir: Базовая директория (внутри неё создаются cache/sessions и cache/archive).
+            max_files: Максимальное количество файлов на сессию (0 — без ограничения).
+            max_age_hours: Максимальный возраст файлов в часах (0 — без ограничения).
+        """
         cache = base_dir / "cache"
         self.base = cache / "sessions"
         self.base.mkdir(parents=True, exist_ok=True)
@@ -93,12 +114,14 @@ class SessionFileStore:
         self.max_age_hours = max_age_hours
 
     def _get_session_dir(self, session_key: str) -> Path:
+        """Возвращает директорию сессии, создавая её при необходимости."""
         sdir = self.base / safe_session_key(session_key)
         sdir.mkdir(exist_ok=True)
         (sdir / "results").mkdir(exist_ok=True)
         return sdir
 
     def _ensure_metadata(self, session_key: str) -> None:
+        """Создаёт metadata.json для сессии, если его ещё нет."""
         sdir = self._get_session_dir(session_key)
         meta_path = sdir / "metadata.json"
         if not meta_path.exists():
@@ -112,6 +135,17 @@ class SessionFileStore:
             }, indent=2), encoding="utf-8")
 
     def save(self, session_key: str, content: str, source_tool: str, ext: str = ".json") -> dict:
+        """Сохраняет содержимое как файл результата в сессии.
+
+        Аргументы:
+            session_key: Ключ сессии.
+            content: Содержимое файла.
+            source_tool: Имя инструмента-источника.
+            ext: Расширение файла (по умолчанию .json).
+
+        Возвращает словарь с информацией о сохранённом файле
+        (ключ сессии, id, путь, размер, формат).
+        """
         self._ensure_metadata(session_key)
         sdir = self._get_session_dir(session_key)
 
@@ -141,7 +175,7 @@ class SessionFileStore:
         }
 
     def cleanup(self, session_key: str) -> None:
-        """Remove old result files according to max_files / max_age_hours limits."""
+        """Удаляет устаревшие файлы результатов согласно лимитам max_files / max_age_hours."""
         max_files = self.max_files
         max_age_hours = self.max_age_hours
         if max_files <= 0 and max_age_hours <= 0:
@@ -198,6 +232,10 @@ class SessionFileStore:
                     pass
 
     def archive_session(self, session_key: str) -> bool:
+        """Перемещает директорию сессии в архив.
+
+        Возвращает True, если архивация выполнена, иначе False.
+        """
         src = self.base / safe_session_key(session_key)
         dst = self.archive_dir / f"{safe_session_key(session_key)}_{datetime.now(UTC).strftime('%Y%m%d')}"
         if src.exists() and not dst.exists():

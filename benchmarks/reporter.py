@@ -1,3 +1,9 @@
+"""Формирование отчётов о результатах бенчмарков.
+
+Поддерживает сохранение в JSON и Markdown форматах, группировку
+по сложности и форматирование оценок.
+"""
+
 from __future__ import annotations
 
 import json
@@ -9,6 +15,15 @@ from benchmarks.models import BenchResult, SuiteResult
 
 
 def _score_label(score: float) -> str:
+    """Текстовое обозначение уровня оценки.
+
+    Args:
+        score: Числовой балл (0.0–1.0).
+
+    Returns:
+        "EXCELLENT" при score >= 0.9, "GOOD" при >= 0.7,
+        "SATISFACTORY" при >= 0.5, иначе "FAIL".
+    """
     if score >= 0.9:
         return "EXCELLENT"
     if score >= 0.7:
@@ -19,6 +34,14 @@ def _score_label(score: float) -> str:
 
 
 def _difficulty_label(d: int) -> str:
+    """Текстовое обозначение уровня сложности.
+
+    Args:
+        d: Числовой уровень сложности (1–10).
+
+    Returns:
+        "simple" при d <= 3, "medium" при d <= 7, иначе "hard".
+    """
     if d <= 3:
         return "simple"
     if d <= 7:
@@ -27,6 +50,18 @@ def _difficulty_label(d: int) -> str:
 
 
 def save_json_report(suite_result: SuiteResult, output_dir: str | Path) -> Path:
+    """Сохранение результатов в JSON-формате.
+
+    Создаёт summary.json и отдельные файлы detail/<item_id>.json
+    для каждого задания.
+
+    Args:
+        suite_result: Результаты прогона набора.
+        output_dir: Директория для сохранения отчётов.
+
+    Returns:
+        Путь к созданному файлу summary.json.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -46,6 +81,18 @@ def save_json_report(suite_result: SuiteResult, output_dir: str | Path) -> Path:
 
 
 def save_markdown_report(suite_result: SuiteResult, output_dir: str | Path) -> Path:
+    """Сохранение результатов в Markdown-формате.
+
+    Создаёт summary.md с таблицами сводки, группировки по сложности
+    и детальным отчётом по каждому заданию.
+
+    Args:
+        suite_result: Результаты прогона набора.
+        output_dir: Директория для сохранения отчёта.
+
+    Returns:
+        Путь к созданному файлу summary.md.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -118,6 +165,14 @@ def save_markdown_report(suite_result: SuiteResult, output_dir: str | Path) -> P
 
 
 def _suite_to_dict(suite_result: SuiteResult) -> dict[str, Any]:
+    """Преобразование SuiteResult в словарь для JSON-сериализации.
+
+    Args:
+        suite_result: Результаты прогона набора.
+
+    Returns:
+        Словарь с данными набора.
+    """
     return {
         "suite_name": suite_result.suite_name,
         "timestamp": suite_result.timestamp,
@@ -132,6 +187,14 @@ def _suite_to_dict(suite_result: SuiteResult) -> dict[str, Any]:
 
 
 def _result_to_dict(r: BenchResult) -> dict[str, Any]:
+    """Преобразование BenchResult в словарь для JSON-сериализации.
+
+    Args:
+        r: Результат выполнения задания.
+
+    Returns:
+        Словарь с данными результата.
+    """
     return {
         "item_id": r.item_id,
         "item_name": r.item_name,
@@ -164,6 +227,14 @@ def _result_to_dict(r: BenchResult) -> dict[str, Any]:
 
 
 def _group_by_difficulty(results: list[BenchResult]) -> dict[str, list[BenchResult]]:
+    """Группировка результатов по уровню сложности.
+
+    Args:
+        results: Список результатов заданий.
+
+    Returns:
+        Словарь {метка_сложности: список_результатов}.
+    """
     groups: dict[str, list[BenchResult]] = {}
     for r in results:
         d = _difficulty_label(r.total_score)
@@ -172,4 +243,16 @@ def _group_by_difficulty(results: list[BenchResult]) -> dict[str, list[BenchResu
 
 
 def _pct(value: float) -> str:
+    """Форматирование числа как процента с одним знаком после запятой.
+
+    Args:
+        value: Дробное число (0.0–1.0).
+
+    Returns:
+        Отформатированная строка, например "75.3%".
+
+    Пример:
+        >>> _pct(0.753)
+        '75.3%'
+    """
     return f"{value * 100:.1f}%"

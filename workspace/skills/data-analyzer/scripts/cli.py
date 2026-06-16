@@ -26,6 +26,8 @@ if _nanobot_root not in sys.path:
 from api import AuditAnalyzer
 
 def setup_logging():
+    """Настраивает базовое логирование в stderr с форматом [LEVEL] message.
+    Возвращает экземпляр логгера для текущего модуля."""
     logging.basicConfig(
         stream=sys.stderr,
         level=logging.INFO,
@@ -34,10 +36,15 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 def load_config(path: str) -> dict:
+    """Загружает JSON-конфигурацию из файла по указанному пути.
+    Возвращает словарь с настройками навыка."""
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 def main():
+    """Полный CLI-пайплайн: настройка логирования, парсинг аргументов,
+    загрузка конфига, создание mock-обёртки БД, выполнение анализатора
+    в указанном режиме, форматирование отчёта (json/md) и вывод/сохранение."""
     logger = setup_logging()
     parser = argparse.ArgumentParser(description="Audit Analyzer Skill CLI")
     parser.add_argument("--mode", choices=["predefined", "vector", "sql"], required=True)

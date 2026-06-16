@@ -1,3 +1,4 @@
-"""nanobot benchmark suite — automated agent quality evaluation."""
+"""Набор бенчмарков nanobot — автоматическая оценка качества агента."""
 
+# Версия пакета
 __version__ = "0.1.0"

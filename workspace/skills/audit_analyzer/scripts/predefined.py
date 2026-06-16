@@ -109,6 +109,11 @@ def list_available() -> str:
 
 
 def resolve_params(script: ScriptDefinition, params: dict | None) -> tuple[dict, list[str]]:
+    """
+    Объединить переданные params с параметрами скрипта.
+    Фильтрует неизвестные (не указанные в script.parameters) ключи,
+    возвращает кортеж (merged, unknown).
+    """
     merged: dict = {}
     unknown: list[str] = []
     for k, v in (params or {}).items():
@@ -126,6 +131,12 @@ async def resolve_params_with_vector(
     params: dict | None,
     index_dir: str = "",
 ) -> tuple[dict, list[str]]:
+    """
+    Асинхронно разрешить параметры с использованием FAISS-векторного поиска.
+    Для каждого строкового параметра с validation.vector_source выполняет
+    embedding-поиск через vector_mode.run и подставляет лучшее совпадение.
+    Возвращает кортеж (merged, unknown).
+    """
     merged, unknown = resolve_params(script, params)
 
     for param_name, param_def in script.parameters.items():

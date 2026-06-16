@@ -42,10 +42,10 @@ def parse_markdown_to_slides(md_content: str) -> list[dict]:
 
     Разделитель --- должен быть на отдельной строке (с обеих сторон).
 
-    Args:
+    Аргументы:
         md_content: Markdown-текст с несколькими слайдами.
 
-    Returns:
+    Возвращает:
         Список слайдов.
 
     Пример:
@@ -117,7 +117,7 @@ def generate_html(
     """
     Собрать самодостаточный HTML-файл из шаблона, CSS и слайдов.
 
-    Pipeline:
+    Пайплайн:
         1. Загрузить HTML-шаблон (templates/base.html)
         2. Загрузить CSS (assets/styles.css)
         3. Конвертировать Markdown-контент каждого слайда в HTML (с таблицами)
@@ -126,14 +126,14 @@ def generate_html(
         6. Для каждого слайда: div.slide > div.slide-content > {h1, div.content, div.mermaid}
         7. Сохранить результат в output_path
 
-    Args:
+    Аргументы:
         slides:          Список слайдов (от parse_markdown_to_slides).
         template_path:   Путь к base.html.
         css_path:        Путь к styles.css.
         output_path:     Куда сохранить результат.
         title:           Заголовок презентации (тег <title>).
 
-    Returns:
+    Возвращает:
         output_path (путь к сгенерированному файлу).
 
     Пример:

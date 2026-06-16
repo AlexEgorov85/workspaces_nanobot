@@ -32,6 +32,10 @@ if _dsn:
 
 
 def _decode_jsonb(val) -> dict:
+    """Распарсить JSONB-значение из PG в dict.
+
+    Принимает None, строку JSON, уже готовый dict или Mapping.
+    """
     if val is None:
         return {}
     if isinstance(val, str):
@@ -126,6 +130,7 @@ for entry in st.session_state.messages:
 processing = st.session_state.get("_processing", False)
 
 if processing:
+    # Блокирующий цикл ожидания: поллим БД пока assistant не ответит
     msg_id = st.session_state["_msg_id"]
 
     with st.status("⏳ Агент думает...", expanded=True) as status:
@@ -136,6 +141,7 @@ if processing:
             elapsed = int(time.time() - start_time)
             remaining = _MAX_WAIT - elapsed
 
+            # Таймаут — показываем ошибку и выходим из цикла
             if remaining <= 0:
                 status.update(label="⏱️ Таймаут", state="error")
                 st.session_state.messages.append({
@@ -144,6 +150,7 @@ if processing:
                 })
                 break
 
+            # Показываем live-состояние: размышления, черновик или просто счётчик
             state = _get_processing_state(msg_id)
             if state and state["reasoning"]:
                 placeholder.markdown(
@@ -159,6 +166,7 @@ if processing:
             else:
                 placeholder.markdown(f"⏳ Ожидание... {elapsed}с")
 
+            # Проверяем, не появился ли финальный ответ assistant'а
             response = _check_response(msg_id)
             if response is not None:
                 status.update(label="✅ Ответ получен", state="complete")

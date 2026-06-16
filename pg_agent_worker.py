@@ -52,6 +52,18 @@ class PostgresAgentWorker:
         batch_size: int = 10,
         session_prefix: str = "pg_worker",
     ):
+        """Инициализация воркера PostgreSQL → nanobot.
+
+        Args:
+            config_path: Путь к конфигурационному файлу nanobot (или None для автоопределения).
+            workspace: Путь к рабочей директории агента (или None для автоопределения).
+            input_table: Имя таблицы-источника с вопросами (по умолчанию agent_questions).
+            output_table: Имя таблицы-приёмника с ответами (по умолчанию agent_responses).
+            batch_size: Максимальное количество вопросов, обрабатываемых за один батч.
+            session_prefix: Префикс для ключей сессий nanobot (отличает сессии этого воркера).
+            _bot: Внутренний экземпляр Nanobot (инициализируется лениво).
+            _session_cache: Внутренний кэш session_id → session_key для переиспользования сессий.
+        """
         self.config_path = config_path
         self.workspace = workspace
         self.input_table = input_table
@@ -102,6 +114,15 @@ class PostgresAgentWorker:
             """, question_id, response, status, metadata)
 
     async def _get_session_key(self, session_id: str) -> str:
+        """Вернуть session_key для заданного session_id, используя кэш.
+
+        Если session_id уже известен, возвращает сохранённый ключ без
+        повторного формирования. Иначе создаёт новый ключ вида
+        ``{session_prefix}:{session_id}``, сохраняет его в
+        ``_session_cache`` и возвращает. Это гарантирует, что вопросы
+        с одинаковым session_id получат одну и ту же историю диалога
+        в nanobot.
+        """
         if session_id not in self._session_cache:
             self._session_cache[session_id] = f"{self.session_prefix}:{session_id}"
             logger.debug(f"New session_key for session_id='{session_id}': {self._session_cache[session_id]}")
@@ -222,6 +243,23 @@ class PostgresAgentWorker:
 # === CLI ===
 
 async def main():
+    """CLI-точка входа для запуска воркера.
+
+    Разбор аргументов командной строки:
+      --db-url / DATABASE_URL / SETTINGS.pg.dsn  — DSN для подключения к PostgreSQL.
+      --config / NANOBOT_CONFIG_PATH              — путь к конфигу nanobot.
+      --workspace / NANOBOT_WORKSPACE             — рабочая директория агента.
+      --batch, --interval, --once, --input-table,
+      --output-table, --session-prefix             — параметры воркера.
+
+    После парсинга аргументов:
+    1. Определяется DSN (приоритет: --db-url > DATABASE_URL > SETTINGS.pg.dsn).
+    2. Выполняется configure(dsn) для настройки SharedDB.
+    3. Создаётся экземпляр PostgresAgentWorker.
+    4. В режиме --once выполняется один батч (run_batch), и воркер завершается.
+    5. Иначе запускается непрерывный цикл (run_continuous) с заданным интервалом.
+    6. При KeyboardInterrupt или штатном завершении воркер закрывается через close().
+    """
     import argparse
 
     parser = argparse.ArgumentParser(description="nanobot PostgreSQL worker with session support")

@@ -16,6 +16,9 @@ except AttributeError:
     pass
 
 def describe_data(df: pd.DataFrame) -> str:
+    """Формирует JSON-описание DataFrame: размерность, типы столбцов,
+    пропущенные значения, количество уникальных значений и примеры строк.
+    Возвращает строку в формате JSON."""
     desc = {
         "shape": df.shape,
         "dtypes": df.dtypes.astype(str).to_dict(),
@@ -26,6 +29,8 @@ def describe_data(df: pd.DataFrame) -> str:
     return json.dumps(desc, indent=2, ensure_ascii=False)
 
 def generate_script(description: str, question: str, config: dict) -> str:
+    """Генерирует Python-скрипт через LLM на основе описания данных и вопроса.
+    Извлекает код из markdown-блока ```python ... ```. Возвращает строку с кодом."""
     prompt = (
         f"Данные (описание JSON): {description}\n\n"
         f"Вопрос пользователя: {question}\n\n"
@@ -41,6 +46,11 @@ def generate_script(description: str, question: str, config: dict) -> str:
     return match.group(1).strip() if match else raw.strip()
 
 def run_script_safe(script: str, df: pd.DataFrame) -> str:
+    """Выполняет сгенерированный Python-скрипт в изолированном окружении с
+    ограниченным набором встроенных функций (print, len, int и т.д.).
+    exec() использует кастомные safe_globals — это песочница, предотвращающая
+    доступ к опасным операциям (io, import, os и т.п.).
+    Возвращает строковое значение переменной result или сообщение об ошибке."""
     safe_globals = {
         "__builtins__": {
             "print": print, "len": len, "int": int, "float": float,
@@ -57,6 +67,8 @@ def run_script_safe(script: str, df: pd.DataFrame) -> str:
         return f"Ошибка выполнения скрипта: {type(e).__name__}: {e}"
 
 def generate_answer(result: str, question: str, config: dict) -> str:
+    """Формирует финальный ответ на русском языке через LLM на основе
+    результата вычислений и вопроса пользователя."""
     prompt = (
         f"Результат вычислений: {result}\n\n"
         f"Вопрос пользователя: {question}\n\n"
@@ -66,6 +78,9 @@ def generate_answer(result: str, question: str, config: dict) -> str:
     return retry_llm(query_llm, prompt, config, max_retries=config["analyzer"]["max_retries"])
 
 def analyze_pandas_mode(file_path: str, question: str, config: dict) -> str:
+    """Основной пайплайн pandas-анализа: загрузка файла (csv/json/xlsx),
+    описание данных, генерация скрипта через LLM, безопасное выполнение
+    скрипта и формирование итогового ответа."""
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".csv":
         df = pd.read_csv(file_path, encoding="utf-8")
