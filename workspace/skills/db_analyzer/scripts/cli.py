@@ -29,7 +29,6 @@
 """
 
 import argparse
-import asyncio
 import json
 import sys
 import traceback
@@ -87,22 +86,6 @@ import vector_mode
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """
-    Собрать парсер аргументов командной строки.
-
-    Arguments:
-        --mode: Режим работы (predefined | sql | vector) — обязательный.
-        --script: Имя скрипта из SCRIPTS_REGISTRY (для predefined).
-        --query: Запрос на естественном языке (для sql/vector).
-        --params: JSON с параметрами скрипта (для predefined).
-                  Парсится json.loads, передаётся как dict.
-        --vector-index: Директория с FAISS-индексами (для vector).
-        --index-name: Имя индекса без .faiss (для vector).
-        --context: История чата в JSON (для sql/vector, опционально).
-
-    Returns:
-        argparse.ArgumentParser с настроенными аргументами.
-    """
     parser = argparse.ArgumentParser(description="db_analyzer — анализ БД через LLM агента")
     parser.add_argument(
         "--mode",
@@ -165,41 +148,25 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _run(args: argparse.Namespace) -> dict:
-    """
-    Маршрутизация по режимам.
-
-    В зависимости от args.mode вызывает соответствующий модуль:
-        predefined → predefined_mode.run()
-        sql        → sql_mode.run()
-        vector     → vector_mode.run()
-
-    Args:
-        args: Распарсенные аргументы (argparse.Namespace).
-
-    Returns:
-        dict с результатом выполнения режима.
-    """
-    context = args.context
-
-    async with Database(load_db_config()) as db:
+def _run(args: argparse.Namespace) -> dict:
+    with Database(load_db_config()) as db:
 
         if args.mode == "predefined":
             if not args.script:
                 return {"status": "error", "data": {"message": "Для mode=predefined укажите --script"}}
-            return await predefined_mode.run(args.script, db, params=args.params,
-                                              index_dir=get_vector_index_path())
+            return predefined_mode.run(args.script, db, params=args.params,
+                                        index_dir=get_vector_index_path())
 
         if not args.query:
             return {"status": "error", "data": {"message": f"Для mode={args.mode} требуется --query"}}
 
         if args.mode == "sql":
-            return await sql_mode.run(args.query, db, context=context)
+            return sql_mode.run(args.query, db, context=args.context)
 
     if args.mode == "vector":
         index_dir = args.vector_index or get_vector_index_path()
         index_name = args.index_name or "audits_index"
-        return await vector_mode.run(
+        return vector_mode.run(
             args.query, index_name, index_path=index_dir,
             top_k=args.top_k or 5,
             threshold=args.threshold,
@@ -214,7 +181,7 @@ def main() -> None:
 
     Pipeline:
         1. Парсинг аргументов (argparse)
-        2. Запуск асинхронного _run() с маршрутизацией
+        2. Запуск _run() с маршрутизацией
         3. Форматирование результата (prepare_output)
         4. Вывод JSON в stdout
 
@@ -222,16 +189,12 @@ def main() -> None:
         - mode: режим работы
         - status: "success" | "error"
         - поля в зависимости от режима
-
-    Пример вызова:
-        python scripts/cli.py --mode predefined --script analytics_by_year_month \\
-            --params '{"year": 2024}'
     """
     try:
         parser = _build_parser()
         args = parser.parse_args()
 
-        result = asyncio.run(_run(args))
+        result = _run(args)
         output = _sanitize_value(prepare_output(result, args.mode))
         print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
     except argparse.ArgumentTypeError as e:

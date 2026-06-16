@@ -20,7 +20,7 @@ from database import Database
 from predefined import build_sql, get_script_by_name, list_available, resolve_params_with_vector
 
 
-async def run(
+def run(
     script_name: str,
     db: Database,
     params: Optional[Dict[str, Any]] = None,
@@ -34,7 +34,7 @@ async def run(
 
     Args:
         script_name: Имя скрипта (ключ в SCRIPTS_REGISTRY).
-        db_cfg: Конфигурация БД (из config.py load_db_config).
+        db: Объект Database.
         params: Параметры скрипта (опционально).
         index_dir: Путь к директории с FAISS-индексами (опционально).
 
@@ -47,17 +47,6 @@ async def run(
                 sql: сгенерированный SQL
                 parameters: использованные параметры
                 result: результат execute_query (columns, rows, row_count)
-
-    Пример:
-        >>> import asyncio
-        >>> from config import load_db_config
-        >>> db = load_db_config()
-        >>> asyncio.run(run("analytics_by_year_month", db, {"year": 2024}))
-        {'mode': 'predefined', 'status': 'success', 'data': {...}}
-
-    Пример с ошибкой (скрипт не найден):
-        >>> asyncio.run(run("nonexistent", db))
-        {'status': 'error', 'data': {'message': "Скрипт 'nonexistent' не найден. ..."}}
     """
     script = get_script_by_name(script_name)
     if not script:
@@ -68,7 +57,7 @@ async def run(
             },
         }
 
-    merged, unknown = await resolve_params_with_vector(script, params, index_dir=index_dir)
+    merged, unknown = resolve_params_with_vector(script, params, index_dir=index_dir)
 
     if unknown:
         valid = list(script.parameters.keys())
@@ -133,7 +122,7 @@ async def run(
             },
         }
 
-    result = await db.execute_query(sql, sql_params)
+    result = db.execute_query(sql, sql_params)
 
     return {
         "mode": "predefined",

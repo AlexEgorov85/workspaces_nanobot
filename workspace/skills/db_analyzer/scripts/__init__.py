@@ -92,7 +92,8 @@ import vector_mode
 # Публичный API — функции верхнего уровня
 # ---------------------------------------------------------------------------
 
-async def run_predefined(
+
+def run_predefined(
     script_name: str,
     db_config: Optional[dict] = None,
     params: Optional[Dict[str, Any]] = None,
@@ -111,14 +112,14 @@ async def run_predefined(
     try:
         if db_config is None:
             db_config = config.load_db_config()
-        async with Database(db_config) as db:
-            return await predefined_mode.run(script_name, db, params=params,
-                                              index_dir=config.get_vector_index_path())
+        with Database(db_config) as db:
+            return predefined_mode.run(script_name, db, params=params,
+                                        index_dir=config.get_vector_index_path())
     except Exception as e:
         return {"status": "error", "data": {"message": f"Ошибка в run_predefined: {e}"}}
 
 
-async def run_sql(
+def run_sql(
     query: str,
     db_config: Optional[dict] = None,
     context: Optional[List[dict]] = None,
@@ -137,13 +138,13 @@ async def run_sql(
     try:
         if db_config is None:
             db_config = config.load_db_config()
-        async with Database(db_config) as db:
-            return await sql_mode.run(query, db, context=context)
+        with Database(db_config) as db:
+            return sql_mode.run(query, db, context=context)
     except Exception as e:
         return {"status": "error", "data": {"message": f"Ошибка в run_sql: {e}"}}
 
 
-async def run_vector(
+def run_vector(
     query: str,
     index_name: str = "audits_index",
     index_path: Optional[str] = None,
@@ -166,8 +167,8 @@ async def run_vector(
     try:
         if index_path is None:
             index_path = config.get_vector_index_path()
-        return await vector_mode.run(query, index_name, index_path=index_path,
-                                      top_k=top_k, threshold=threshold)
+        return vector_mode.run(query, index_name, index_path=index_path,
+                                top_k=top_k, threshold=threshold)
     except Exception as e:
         return {"status": "error", "data": {"message": f"Ошибка в run_vector: {e}"}}
 
@@ -175,6 +176,7 @@ async def run_vector(
 # ---------------------------------------------------------------------------
 # Утилиты
 # ---------------------------------------------------------------------------
+
 
 def list_scripts() -> List[Dict[str, Any]]:
     """

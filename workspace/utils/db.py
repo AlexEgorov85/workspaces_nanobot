@@ -1,194 +1,223 @@
 """
-Единый коннектор к PostgreSQL через asyncpg.
-
-Каждый запрос создаёт новое подключение и сразу его закрывает.
-Нет пула — нет проблем с очередями, event loop, лимитом коннекшенов.
-Если GP6 занят (too many connections), ретраим с backoff и ждём.
-
-Асинхронные методы (PostgresChannel, db_analyzer)::
-
-    from utils.db import fetch
-    rows = await fetch("SELECT * FROM my_table")
-    async with transaction() as conn:
-        row = await conn.fetchrow("SELECT ... FOR UPDATE", arg)
-
-Синхронные методы (PGSessionManager, streamlit)::
-
-    from utils.db import sync_fetch
-    rows = sync_fetch("SELECT * FROM my_table")
+Единый коннектор к PostgreSQL через psycopg2.
+Короткоживущие соединения: connect -> query -> close.
+Синхронный API — основной, асинхронный — надстройка через asyncio.to_thread.
 """
 
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
-import json
 import logging
-from contextlib import asynccontextmanager
+import time
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Callable, Optional
 
-import asyncpg
+import psycopg2
+import psycopg2.extras
+import psycopg2.extensions
+
+# Allow passing plain dict as JSONB parameter
+psycopg2.extensions.register_adapter(dict, psycopg2.extras.Json)
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRIES = 10            # общие ошибки соединения
-_MAX_RETRIES_TOO_MANY = 50   # too many connections (ждём пока освободится)
+_MAX_RETRIES = 15
 _RETRY_DELAY = 1.0
 _RETRY_MAX_DELAY = 15.0
 
 DB_RETRYABLE_ERRORS = (
-    asyncpg.ConnectionFailureError,
-    asyncpg.TooManyConnectionsError,
-    OSError,
+    psycopg2.OperationalError,
+    psycopg2.InterfaceError,
     ConnectionError,
+    OSError,
 )
-
-# ---------------------------------------------------------------------------
-# Shared state
-# ---------------------------------------------------------------------------
 
 _dsn: str = ""
 
 
 def configure(dsn: str) -> None:
-    """Задать DSN. Вызвать один раз при старте."""
     global _dsn
     _dsn = dsn
 
 
-# ---------------------------------------------------------------------------
-# Low-level connect / retry
-# ---------------------------------------------------------------------------
-
-async def _connect() -> asyncpg.Connection:
-    """Создать новое подключение и зарегистрировать JSONB-кодек."""
+def _connect() -> psycopg2.extensions.connection:
     if not _dsn:
         raise RuntimeError(
             "SharedDB не инициализирован: вызовите configure(dsn) "
             "или заполните pg.dsn в gateway_settings.py"
         )
-    conn = await asyncpg.connect(dsn=_dsn)
     try:
-        await conn.set_type_codec("jsonb",
-                                  encoder=json.dumps,
-                                  decoder=json.loads,
-                                  schema="pg_catalog")
+        conn = psycopg2.connect(_dsn)
+    except Exception:
+        raise
+    try:
+        psycopg2.extras.register_json(conn, globally=False)
+        conn.autocommit = True
         return conn
     except Exception:
-        await conn.close()
+        conn.close()
         raise
 
 
-async def _retry(coro_factory):
-    """Выполнить coro_factory() с ретраем при ошибках соединения.
-
-    * ``TooManyConnectionsError`` — до 50 попыток (ждём освобождения).
-    * Остальные ошибки соединения — до 10 попыток.
-    """
+def _retry(fn: Callable[[], Any]) -> Any:
     last_exc = None
     delay = _RETRY_DELAY
     attempt = 0
     while True:
         try:
-            return await coro_factory()
+            return fn()
         except DB_RETRYABLE_ERRORS as e:
             last_exc = e
-            max_retries = _MAX_RETRIES_TOO_MANY if isinstance(e, asyncpg.TooManyConnectionsError) else _MAX_RETRIES
             attempt += 1
-            if attempt >= max_retries:
+            if attempt >= _MAX_RETRIES:
                 raise
             logger.warning("DB retry %d/%d after %.1fs: %s",
-                           attempt, max_retries, delay, e)
-            await asyncio.sleep(delay)
+                           attempt, _MAX_RETRIES, delay, e)
+            time.sleep(delay)
             delay = min(delay * 2, _RETRY_MAX_DELAY)
 
 
 # ---------------------------------------------------------------------------
-# Public helpers
+# Sync API
 # ---------------------------------------------------------------------------
 
-def _run_sync(coro_factory: Callable[[], Any]) -> Any:
-    """Запустить корутину синхронно (через asyncio.run в треде)."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(lambda: asyncio.run(coro_factory())).result()
+def execute(sql: str, *args: Any) -> Optional[str]:
+    """Execute INSERT/UPDATE/DELETE, return command tag (e.g. 'INSERT 0 1')."""
+    def _work():
+        conn = None
+        try:
+            conn = _connect()
+            with conn.cursor() as cur:
+                cur.execute(sql, args)
+                return cur.statusmessage
+        finally:
+            if conn:
+                conn.close()
+    return _retry(_work)
+
+
+def fetch(sql: str, *args: Any) -> list[dict[str, Any]]:
+    """Execute SELECT, return list of dicts."""
+    def _work():
+        conn = None
+        try:
+            conn = _connect()
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, args)
+                return [dict(r) for r in cur.fetchall()]
+        finally:
+            if conn:
+                conn.close()
+    return _retry(_work)
+
+
+def fetchone(sql: str, *args: Any) -> Optional[dict[str, Any]]:
+    """Execute SELECT, return single dict or None."""
+    def _work():
+        conn = None
+        try:
+            conn = _connect()
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, args)
+                row = cur.fetchone()
+                return dict(row) if row else None
+        finally:
+            if conn:
+                conn.close()
+    return _retry(_work)
+
+
+def fetchval(sql: str, *args: Any) -> Any:
+    """Execute SELECT, return first column of first row or None."""
+    def _work():
+        conn = None
+        try:
+            conn = _connect()
+            with conn.cursor() as cur:
+                cur.execute(sql, args)
+                row = cur.fetchone()
+                return row[0] if row else None
+        finally:
+            if conn:
+                conn.close()
+    return _retry(_work)
+
+
+@contextmanager
+def transaction():
+    """Sync transaction context manager. Yields psycopg2 connection (autocommit=False)."""
+    conn = _connect()
+    conn.autocommit = False
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
-# Async API
+# Async API (wraps sync in asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
-async def execute(sql: str, *args: Any) -> Optional[str]:
-    async def _work():
-        conn = await _connect()
-        try:
-            return await conn.execute(sql, *args)
-        finally:
-            await conn.close()
-    return await _retry(_work)
+class _AsyncConnectionWrapper:
+    """Wraps a sync psycopg2 connection so it can be used from async code."""
 
+    def __init__(self, conn: psycopg2.extensions.connection) -> None:
+        self._conn = conn
 
-async def fetch(sql: str, *args: Any) -> list[asyncpg.Record]:
-    async def _work():
-        conn = await _connect()
-        try:
-            return await conn.fetch(sql, *args)
-        finally:
-            await conn.close()
-    return await _retry(_work)
+    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        def _work():
+            with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, args)
+                return [dict(r) for r in cur.fetchall()]
+        return await asyncio.to_thread(_work)
 
+    async def fetchrow(self, sql: str, *args: Any) -> Optional[dict[str, Any]]:
+        def _work():
+            with self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, args)
+                row = cur.fetchone()
+                return dict(row) if row else None
+        return await asyncio.to_thread(_work)
 
-async def fetchone(sql: str, *args: Any) -> Optional[asyncpg.Record]:
-    async def _work():
-        conn = await _connect()
-        try:
-            return await conn.fetchrow(sql, *args)
-        finally:
-            await conn.close()
-    return await _retry(_work)
-
-
-async def fetchval(sql: str, *args: Any) -> Any:
-    async def _work():
-        conn = await _connect()
-        try:
-            return await conn.fetchval(sql, *args)
-        finally:
-            await conn.close()
-    return await _retry(_work)
+    async def execute(self, sql: str, *args: Any) -> Optional[str]:
+        def _work():
+            with self._conn.cursor() as cur:
+                cur.execute(sql, args)
+                return cur.statusmessage
+        return await asyncio.to_thread(_work)
 
 
 @asynccontextmanager
-async def transaction():
-    """Асинхронная транзакция: connect + yield + commit/rollback + close."""
-    conn = await _connect()
+async def async_transaction():
+    """Async transaction. Yields _AsyncConnectionWrapper with async methods."""
+    conn = _connect()
+    conn.autocommit = False
+    wrapper = _AsyncConnectionWrapper(conn)
     try:
-        async with conn.transaction():
-            yield conn
+        yield wrapper
+        await asyncio.to_thread(conn.commit)
+    except Exception:
+        await asyncio.to_thread(conn.rollback)
+        raise
     finally:
-        await conn.close()
+        await asyncio.to_thread(conn.close)
 
 
-# ---------------------------------------------------------------------------
-# Sync API  (для PGSessionManager, streamlit, CLI — где нет async)
-# ---------------------------------------------------------------------------
-
-def sync_execute(sql: str, *args: Any) -> Optional[str]:
-    return _run_sync(lambda: execute(sql, *args))
+async def async_execute(sql: str, *args: Any) -> Optional[str]:
+    return await asyncio.to_thread(execute, sql, *args)
 
 
-def sync_fetch(sql: str, *args: Any) -> list[asyncpg.Record]:
-    return _run_sync(lambda: fetch(sql, *args))
+async def async_fetch(sql: str, *args: Any) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(fetch, sql, *args)
 
 
-def sync_fetchone(sql: str, *args: Any) -> Optional[asyncpg.Record]:
-    return _run_sync(lambda: fetchone(sql, *args))
+async def async_fetchone(sql: str, *args: Any) -> Optional[dict[str, Any]]:
+    return await asyncio.to_thread(fetchone, sql, *args)
 
 
-def sync_transaction(async_fn: Callable[[asyncpg.Connection], Any]) -> Any:
-    async def _run():
-        async with transaction() as conn:
-            return await async_fn(conn)
-    return _run_sync(_run)
-
-
-
+async def async_fetchval(sql: str, *args: Any) -> Any:
+    return await asyncio.to_thread(fetchval, sql, *args)

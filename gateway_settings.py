@@ -103,17 +103,14 @@ class PGSettings:
     Если указать dsn/schema в секции конкретного канала
     (например pg.channel.dsn), они переопределят корневые.
 
-    ── SharedDB (asyncpg pool) ──────────────────────────────────────────
-    Все асинхронные запросы (PostgresChannel, db_analyzer) идут через
-    единый asyncpg-пул. Если max_size занят, acquire() ждёт
-    освобождения — очередь встроена в asyncpg.
+    ── psycopg2 (short‑lived connections) ──────────────────────────────
+    Все запросы (PostgresChannel, db_analyzer, PGSessionManager)
+    используют единый DSN из pg.dsn. Каждый запрос создаёт новое
+    короткоживущее соединение psycopg2 (connect → query → close).
+    Retry с backoff при OperationalError (до 15 попыток).
 
-      pool_min_conn / pool_max_conn — мин/макс число соединений в пуле
-      pool_timeout — таймаут ожидания свободного соединения (сек)
-      (таймаут пока не используется — можно добавить при необходимости)
-
-    Синхронные запросы (PGSessionManager) создают отдельные подключения
-    вне пула (в executor-треде) и не влияют на pool.
+    Параметры пула больше не используются — всё работает через
+    прямой psycopg2.connect().
     """
     dsn: str = "postgresql://postgres:1@localhost:5432/postgres"                          # postgresql://user:pass@host:5432/dbname
     schema: str = "public"

@@ -13,14 +13,15 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from utils.db import fetchval, execute, fetchone, transaction, fetch
+from utils.db import async_fetchval as fetchval, async_execute as execute, async_fetchone as fetchone, async_transaction as transaction, async_fetch as fetch
+from psycopg2.extras import Json
 
 
 def _decode_jsonb(val: Any) -> dict:
     """Безопасно декодировать JSONB значение.
 
-    asyncpg с JSONB-кодеком возвращает dict для новых записей,
-    но старые (сохранённые до установки кодека) — строку.
+    psycopg2 с register_json возвращает dict.
+    Старые записи (сохранённые до перехода) могут быть строкой.
     """
     if val is None:
         return {}
@@ -32,6 +33,7 @@ def _decode_jsonb(val: Any) -> dict:
 
 
 class PostgresChannel(BaseChannel):
+    name = "postgres"
     """Polls ``conversation_messages`` for pending user messages and writes
     assistant responses (and real-time reasoning) back into the same table.
 
@@ -47,55 +49,11 @@ class PostgresChannel(BaseChannel):
             "processing_timeout": 300,
             "allow_from": ["*"]
         }
-
-    ``max_concurrent`` controls how many messages the channel dispatches to
-    the agent simultaneously (default 1, meaning strictly sequential).
-    Higher values let the agent queue fill faster; the agent still processes
-    one message at a time.
-
-    Messages from the same ``chat_id`` are never dispatched in
-    parallel — the channel waits for the active one to finish before
-    picking the next from that conversation, regardless of
-    ``max_concurrent``.
-
-    Table schema (``conversation_messages``)::
-
-        id              UUID PK DEFAULT uuid_generate_v4()
-        chat_id         TEXT
-        user_id         TEXT
-        role            TEXT NOT NULL CHECK (IN ('user','assistant','system'))
-        content         TEXT NOT NULL
-        media           JSONB DEFAULT '[]'
-        metadata        JSONB DEFAULT '{}'
-        reply_to        UUID          — points to user message for assistant replies
-        buttons         JSONB DEFAULT '[]'
-        status          TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (IN ('pending','processing','completed','failed'))
-        created_at      TIMESTAMPTZ DEFAULT NOW()
-        updated_at      TIMESTAMPTZ DEFAULT NOW()
-
-    User messages arrive with ``role='user'`` and ``status='pending'``.
-    The channel claims them (``status → 'processing'``), creates an
-    ``role='assistant'`` row linked via ``reply_to``, and streams
-    reasoning deltas into ``metadata.reasoning`` until the final
-    response is written into ``content``.
     """
 
-    name = "postgres"
-    display_name = "PostgreSQL"
-    send_progress = True
-    send_tool_hints = True
-    show_reasoning = True
-
-    def __init__(self, config: Any, bus: MessageBus) -> None:
+    def __init__(self, config: dict, bus: MessageBus) -> None:
         super().__init__(config, bus)
-
-        def _get(key: str, default: Any = None) -> Any:
-            return (
-                config.get(key, default)
-                if isinstance(config, dict)
-                else getattr(config, key, default)
-            )
+        _get = config.get
 
         self._dsn: str = _get("dsn", "")
         self._schema: str = _get("schema", "public")
@@ -166,7 +124,7 @@ class PostgresChannel(BaseChannel):
         for assistant_msg_id, delta in buffers.items():
             if delta:
                 row = await fetchone(
-                    f"SELECT metadata FROM {self._fq_table} WHERE id = $1",
+                    f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
                     assistant_msg_id,
                 )
                 if not row:
@@ -175,7 +133,7 @@ class PostgresChannel(BaseChannel):
                 reasoning = (meta.get("reasoning") or "") + delta
                 meta["reasoning"] = reasoning
                 await execute(
-                    f"UPDATE {self._fq_table} SET metadata = $1, updated_at = NOW() WHERE id = $2",
+                    f"UPDATE {self._fq_table} SET metadata = %s, updated_at = NOW() WHERE id = %s",
                     meta, assistant_msg_id,
                 )
 
@@ -206,8 +164,7 @@ class PostgresChannel(BaseChannel):
                 f"""
                 SELECT id, metadata FROM {self._fq_table}
                 WHERE role = 'user' AND status = 'processing'
-                AND updated_at + interval '1 second' * $1 < NOW()
-                FOR UPDATE
+                AND updated_at + interval '1 second' * %s < NOW()
                 """,
                 timeout_s,
             )
@@ -221,12 +178,12 @@ class PostgresChannel(BaseChannel):
                 if retry_count >= max_retries:
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'failed', "
-                        f"metadata = $1, updated_at = NOW() WHERE id = $2",
+                        f"metadata = %s, updated_at = NOW() WHERE id = %s",
                         meta, msg_id,
                     )
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'failed', "
-                        f"updated_at = NOW() WHERE reply_to = $1 AND role = 'assistant' AND status = 'processing'",
+                        f"updated_at = NOW() WHERE reply_to = %s AND role = 'assistant' AND status = 'processing'",
                         msg_id,
                     )
                     self.logger.warning(
@@ -236,12 +193,12 @@ class PostgresChannel(BaseChannel):
                 else:
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'pending', "
-                        f"metadata = $1, updated_at = NOW() WHERE id = $2",
+                        f"metadata = %s, updated_at = NOW() WHERE id = %s",
                         meta, msg_id,
                     )
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'failed', "
-                        f"updated_at = NOW() WHERE reply_to = $1 AND role = 'assistant' AND status = 'processing'",
+                        f"updated_at = NOW() WHERE reply_to = %s AND role = 'assistant' AND status = 'processing'",
                         msg_id,
                     )
                     self.logger.warning(
@@ -253,7 +210,7 @@ class PostgresChannel(BaseChannel):
             await conn.execute(
                 f"UPDATE {self._fq_table} SET status = 'failed', "
                 f"updated_at = NOW() WHERE role = 'assistant' AND status = 'processing' "
-                f"AND updated_at + interval '1 second' * $1 < NOW()",
+                f"AND updated_at + interval '1 second' * %s < NOW()",
                 timeout_s,
             )
 
@@ -268,7 +225,6 @@ class PostgresChannel(BaseChannel):
                 WHERE role = 'user' AND status = 'pending'
                 ORDER BY created_at ASC
                 LIMIT 1
-                FOR UPDATE
             )
             AND status = 'pending'
             RETURNING id, chat_id, user_id, content, media, metadata, created_at
@@ -284,7 +240,7 @@ class PostgresChannel(BaseChannel):
         # Не диспатчим, если из этого chat_id уже есть активное сообщение
         if chat_id in self._chat_inflight:
             await execute(
-                f"UPDATE {self._fq_table} SET status = 'pending', updated_at = NOW() WHERE id = $1",
+                f"UPDATE {self._fq_table} SET status = 'pending', updated_at = NOW() WHERE id = %s",
                 user_msg_id,
             )
             self.logger.debug(
@@ -333,7 +289,7 @@ class PostgresChannel(BaseChannel):
             f"""
             INSERT INTO {self._fq_table}
                 (chat_id, role, content, reply_to, status, created_at, updated_at)
-            VALUES ($1, 'assistant', '', $2, 'processing', NOW(), NOW())
+            VALUES (%s, 'assistant', '', %s, 'processing', NOW(), NOW())
             RETURNING id
             """,
             chat_id, user_msg_id,
@@ -355,12 +311,12 @@ class PostgresChannel(BaseChannel):
         async with transaction() as conn:
             if assistant_msg_id:
                 await conn.execute(
-                    f"UPDATE {self._fq_table} SET content = $1, metadata = $2, "
-                    f"status = 'failed', updated_at = NOW() WHERE id = $3",
+                    f"UPDATE {self._fq_table} SET content = %s, metadata = %s, "
+                    f"status = 'failed', updated_at = NOW() WHERE id = %s",
                     f"Internal error: {reason}", {"error": reason}, assistant_msg_id,
                 )
             await conn.execute(
-                f"UPDATE {self._fq_table} SET status = 'failed', updated_at = NOW() WHERE id = $1",
+                f"UPDATE {self._fq_table} SET status = 'failed', updated_at = NOW() WHERE id = %s",
                 user_msg_id,
             )
         self._msg_ctx.pop(user_msg_id, None)
@@ -446,14 +402,14 @@ class PostgresChannel(BaseChannel):
         if reasoning_parts:
             combined = " ".join(reasoning_parts)
             row = await fetchone(
-                f"SELECT metadata FROM {self._fq_table} WHERE id = $1",
+                f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
                 assistant_msg_id,
             )
             if row:
                 meta_row = _decode_jsonb(row["metadata"])
                 meta_row["reasoning"] = (meta_row.get("reasoning") or "") + combined
                 await execute(
-                    f"UPDATE {self._fq_table} SET metadata = $1, updated_at = NOW() WHERE id = $2",
+                    f"UPDATE {self._fq_table} SET metadata = %s, updated_at = NOW() WHERE id = %s",
                     meta_row, assistant_msg_id,
                 )
 
@@ -462,22 +418,22 @@ class PostgresChannel(BaseChannel):
         try:
             async with transaction() as conn:
                 row = await conn.fetchrow(
-                    f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
+                    f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
                     assistant_msg_id,
                 )
                 existing_meta = _decode_jsonb(row["metadata"]) if row else {}
                 existing_meta.update(meta)
                 await conn.execute(
                     f"UPDATE {self._fq_table} "
-                    f"SET content = $1, metadata = $2, buttons = $3, "
-                    f"status = 'completed', updated_at = NOW() WHERE id = $4",
+                    f"SET content = %s, metadata = %s, buttons = %s, "
+                    f"status = 'completed', updated_at = NOW() WHERE id = %s",
                     msg.content, existing_meta,
-                    msg.buttons or [], assistant_msg_id,
+                    Json(msg.buttons or []), assistant_msg_id,
                 )
                 if msg_id:
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'completed', "
-                        f"updated_at = NOW() WHERE id = $1",
+                        f"updated_at = NOW() WHERE id = %s",
                         msg_id,
                     )
         except Exception:
@@ -504,20 +460,20 @@ class PostgresChannel(BaseChannel):
             if content and assistant_msg_id:
                 async with transaction() as conn:
                     row = await conn.fetchrow(
-                        f"SELECT metadata FROM {self._fq_table} WHERE id = $1 FOR UPDATE",
+                        f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
                         assistant_msg_id,
                     )
                     existing_meta = _decode_jsonb(row["metadata"]) if row else {}
                     existing_meta.update(meta | {"streamed": True})
                     await conn.execute(
-                        f"UPDATE {self._fq_table} SET content = $1, "
-                        f"metadata = $2, status = 'completed', updated_at = NOW() WHERE id = $3",
+                        f"UPDATE {self._fq_table} SET content = %s, "
+                        f"metadata = %s, status = 'completed', updated_at = NOW() WHERE id = %s",
                         content, existing_meta, assistant_msg_id,
                     )
                     if msg_id:
                         await conn.execute(
                             f"UPDATE {self._fq_table} SET status = 'completed', "
-                            f"updated_at = NOW() WHERE id = $1",
+                            f"updated_at = NOW() WHERE id = %s",
                             msg_id,
                         )
         else:

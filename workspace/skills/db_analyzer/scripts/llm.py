@@ -22,7 +22,7 @@ import httpx
 from config import get_llm_config
 
 
-async def chat(messages: list[dict], *, context: Optional[list[dict]] = None, **kwargs) -> str:
+def chat(messages: list[dict], *, context: Optional[list[dict]] = None, **kwargs) -> str:
     """
     Отправить сообщения в LLM и получить текстовый ответ.
 
@@ -41,19 +41,6 @@ async def chat(messages: list[dict], *, context: Optional[list[dict]] = None, **
     Raises:
         httpx.HTTPStatusError: При ошибке HTTP.
         RuntimeError: Если LLM вернул пустой ответ.
-
-    Пример:
-        >>> import asyncio
-        >>> msgs = [
-        ...     {"role": "system", "content": "Ты SQL-эксперт."},
-        ...     {"role": "user", "content": "Напиши SELECT для таблицы audits"},
-        ... ]
-        >>> asyncio.run(chat(msgs))  # doctest: +SKIP
-        'SELECT * FROM oarb.audits LIMIT 100'
-
-    Пример с контекстом (история чата):
-        >>> history = [{"role": "user", "content": "Привет"}, {"role": "assistant", "content": "Здравствуйте"}]
-        >>> asyncio.run(chat(msgs, context=history))  # doctest: +SKIP
     """
     cfg = get_llm_config()
     api_base = cfg.get("api_base", "").rstrip("/")
@@ -74,8 +61,8 @@ async def chat(messages: list[dict], *, context: Optional[list[dict]] = None, **
         "temperature": temperature,
     }
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(url, json=payload, headers=headers)
+    with httpx.Client(timeout=120) as client:
+        resp = client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
 

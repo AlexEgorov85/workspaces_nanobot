@@ -23,7 +23,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 from nanobot import Nanobot, RunResult
 
 from gateway_settings import SETTINGS
-from workspace.utils.db import fetch, execute, transaction, configure
+from workspace.utils.db import async_fetch as fetch, async_execute as execute, async_transaction as transaction, configure
 
 # Настройка логирования
 logging.basicConfig(
@@ -69,14 +69,14 @@ class PostgresAgentWorker:
             FROM {self.input_table}
             WHERE status = 'pending'
             ORDER BY session_id, priority DESC, created_at ASC
-            LIMIT $1
+            LIMIT %s
         """, limit)
         return [dict(row) for row in rows]
 
     async def _mark_processing(self, question_id: int):
         """Отметить вопрос как обрабатываемый."""
         await execute(
-            f"UPDATE {self.input_table} SET status = 'processing' WHERE id = $1",
+            f"UPDATE {self.input_table} SET status = 'processing' WHERE id = %s",
             question_id
         )
 
@@ -92,13 +92,13 @@ class PostgresAgentWorker:
         async with transaction() as conn:
             await conn.execute(f"""
                 UPDATE {self.input_table}
-                SET status = $1, processed_at = NOW(), error_message = $2
-                WHERE id = $3
+                SET status = %s, processed_at = NOW(), error_message = %s
+                WHERE id = %s
             """, status, error_message, question_id)
             await conn.execute(f"""
                 INSERT INTO {self.output_table}
                 (question_id, response, status, metadata, created_at)
-                VALUES ($1, $2, $3, $4, NOW())
+                VALUES (%s, %s, %s, %s, NOW())
             """, question_id, response, status, metadata)
 
     async def _get_session_key(self, session_id: str) -> str:

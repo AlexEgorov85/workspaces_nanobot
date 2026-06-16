@@ -12,23 +12,19 @@ Pipeline:
     4. Фильтрация по threshold (если задан)
     5. Сборка результатов с метаданными
 
-Зависимости: faiss, numpy, aiohttp.
-
-Пример запуска через CLI:
-    audit_analyze --mode vector --query 'нарушения пожарной безопасности' --index-name audits_index
-    audit_analyze --mode vector --query 'финансовые несоответствия' --index-name violations_index
+Зависимости: faiss, numpy, httpx.
 """
 
 import json
 import os
 from typing import Any, Optional
 
-import aiohttp
+import httpx
 
 from config import get_vector_index_path, get_embedding_config
 
 
-async def _get_embedding(text: str) -> Optional[list[float]]:
+def _get_embedding(text: str) -> Optional[list[float]]:
     """
     Получить эмбеддинг текста через HTTP POST к embedding-ендпоинту.
 
@@ -41,11 +37,6 @@ async def _get_embedding(text: str) -> Optional[list[float]]:
 
     Returns:
         Список float (эмбеддинг) или None при ошибке.
-
-    Пример:
-        >>> import asyncio
-        >>> asyncio.run(_get_embedding("нарушение пожарной безопасности"))
-        [0.023, -0.045, ..., 0.012]  # 1024-мерный вектор
     """
     cfg = get_embedding_config()
     url = cfg.get("base_url")
@@ -56,10 +47,10 @@ async def _get_embedding(text: str) -> Optional[list[float]]:
 
     payload = {"model": model, "input": text}
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
+        with httpx.Client(timeout=60) as client:
+            resp = client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
     except Exception:
         return None
 
@@ -87,11 +78,6 @@ def _load_index(index_dir: str, index_name: str) -> tuple[Any, Optional[dict]]:
 
     Returns:
         (faiss.Index, dict_metadata) или (None, None) при ошибке.
-
-    Пример:
-        >>> idx, meta = _load_index("path/to/index", "audits_index")
-        >>> idx.ntotal
-        1234  # количество векторов в индексе
     """
     import faiss
     import shutil
@@ -114,7 +100,6 @@ def _load_index(index_dir: str, index_name: str) -> tuple[Any, Optional[dict]]:
     except RuntimeError:
         pass
 
-    # faiss C++ может не прочитать путь с кириллицей — копируем в temp
     tmp_dir = os.path.join(tempfile.gettempdir(), "audit_analyzer_vectors")
     os.makedirs(tmp_dir, exist_ok=True)
     tmp_idx = os.path.join(tmp_dir, f"{index_name}.faiss")
@@ -130,7 +115,7 @@ def _load_index(index_dir: str, index_name: str) -> tuple[Any, Optional[dict]]:
         return None, None
 
 
-async def run(
+def run(
     query: str,
     index_name: str,
     index_path: Optional[str] = None,
@@ -156,21 +141,6 @@ async def run(
                     [{content, score, source, table, pk_value}, ...]
                 count: количество результатов
                 (или message: сообщение если не найдено)
-
-    Пример:
-        >>> import asyncio
-        >>> asyncio.run(run("пожарная безопасность", "audits_index",
-        ...                 index_path="path/to/index"))
-        {'status': 'success', 'data': {
-          'results': [
-            {'content': 'В помещении...', 'score': 0.92, 'source': 'audits_index',
-             'table': 'violations', 'pk_value': 42, 'row': {...}},
-            ...
-          ],
-          'count': 5}}
-
-    Пример с threshold (все результаты выше 0.8):
-        >>> asyncio.run(run("финансы", "audits_index", threshold=0.8))  # doctest: +SKIP
     """
     from pathlib import Path
 
@@ -200,7 +170,7 @@ async def run(
             "data": {"message": f"Индекс '{index_name}' не найден в {idx_path}"},
         }
 
-    embedding = await _get_embedding(query)
+    embedding = _get_embedding(query)
     if embedding is None:
         return {
             "status": "error",

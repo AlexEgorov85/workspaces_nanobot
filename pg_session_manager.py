@@ -29,8 +29,8 @@ _workspace = str(Path(__file__).resolve().parent / "workspace")
 if _workspace not in sys.path:
     sys.path.insert(0, _workspace)
 
-from utils.db import sync_transaction, DB_RETRYABLE_ERRORS
-
+from utils.db import transaction, DB_RETRYABLE_ERRORS
+from psycopg2.extras import Json
 
 
 MESSAGES_TABLE = "session_messages"
@@ -48,7 +48,7 @@ _JSON_COLUMNS = {
 
 
 class PGSessionManager(SessionManager):
-    """Drop-in for SessionManager backed by PostgreSQL via asyncpg."""
+    """Drop-in for SessionManager backed by PostgreSQL via psycopg2."""
 
     def __init__(
         self,
@@ -96,45 +96,40 @@ class PGSessionManager(SessionManager):
 
     def _load(self, key: str) -> Session | None:
         try:
-            return sync_transaction(lambda conn: self._async_load(conn, key))
+            with transaction() as conn:
+                return self._load_inner(conn, key)
         except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL for session {}", key)
             return super()._load(key)
 
-    async def _async_load(
-        self, conn: asyncpg.Connection, key: str
-    ) -> Session | None:
-        from asyncpg import Record
+    def _load_inner(self, conn, key: str) -> Session | None:
+        meta = None
+        rows_raw_list = None
 
-        meta = await conn.fetchrow(
-            f"SELECT * FROM {self._fq_meta} WHERE session_key = $1",
-            key,
-        )
-        if meta is None:
-            return None
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT * FROM {self._fq_meta} WHERE session_key = %s", (key,))
+            col_names = [desc[0] for desc in cur.description]
+            meta_row = cur.fetchone()
+            if meta_row is None:
+                return None
+            meta = dict(zip(col_names, meta_row))
 
-        rows = await conn.fetch(
-            f"SELECT * FROM {self._fq_messages} "
-            f"WHERE session_key = $1 ORDER BY seq ASC",
-            key,
-        )
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT * FROM {self._fq_messages} WHERE session_key = %s ORDER BY seq ASC", (key,))
+            col_names = [desc[0] for desc in cur.description]
+            rows_raw_list = [dict(zip(col_names, r)) for r in cur.fetchall()]
 
-        messages = []
-        for r in rows:
-            msg: dict[str, Any] = {"role": r["role"], "content": r["content"] or ""}
+        messages: list[dict[str, Any]] = []
+        for r in rows_raw_list:
+            msg = {"role": r["role"], "content": r["content"] or ""}
             if r.get("msg_timestamp"):
                 msg["timestamp"] = r["msg_timestamp"]
             for col in _MESSAGE_COLUMNS:
                 val = r.get(col)
                 if val is not None:
-                    # backward compat: старые данные могли быть сохранены
-                    # как json.dumps(str) до установки JSONB-кодека
                     if isinstance(val, str) and col in _JSON_COLUMNS:
                         val = json.loads(val)
                     msg[col] = val
-            # reasoning_content — модель не должна видеть свои прошлые
-            # размышления; Mistral API их отвергает, DeepSeek сам добавляет
-            # пустые при необходимости.
             msg.pop("reasoning_content", None)
             messages.append(msg)
 
@@ -149,47 +144,45 @@ class PGSessionManager(SessionManager):
 
     def save(self, session: Session, *, fsync: bool = False) -> None:
         try:
-            sync_transaction(lambda conn: self._async_save(conn, session))
+            with transaction() as conn:
+                self._save_inner(conn, session)
         except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL for session {}", session.key)
             super().save(session, fsync=fsync)
 
-    async def _async_save(
-        self, conn: asyncpg.Connection, session: Session
-    ) -> None:
-        # metadata — dict, asyncpg JSONB-кодек сам сделает json.dumps
+    def _save_inner(self, conn, session: Session) -> None:
         metadata_val = session.metadata or {}
         updated_at = datetime.now()
 
-        result = await conn.execute(
-            f"UPDATE {self._fq_meta} SET "
-            f"updated_at = $2, "
-            f"last_consolidated = $3, "
-            f"metadata = $4 "
-            f"WHERE session_key = $1",
-            session.key, updated_at,
-            session.last_consolidated, metadata_val,
-        )
-        if result == "UPDATE 0":
-            await conn.execute(
-                f"INSERT INTO {self._fq_meta} "
-                f"(session_key, created_at, updated_at, last_consolidated, metadata) "
-                f"VALUES ($1, $2, $3, $4, $5)",
-                session.key, session.created_at, updated_at,
-                session.last_consolidated, metadata_val,
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {self._fq_meta} SET "
+                f"updated_at = %s, "
+                f"last_consolidated = %s, "
+                f"metadata = %s "
+                f"WHERE session_key = %s",
+                (updated_at, session.last_consolidated, metadata_val, session.key),
+            )
+            if cur.rowcount == 0:
+                cur.execute(
+                    f"INSERT INTO {self._fq_meta} "
+                    f"(session_key, created_at, updated_at, last_consolidated, metadata) "
+                    f"VALUES (%s, %s, %s, %s, %s)",
+                    (session.key, session.created_at, updated_at,
+                     session.last_consolidated, metadata_val),
+                )
+
+            cur.execute(
+                f"DELETE FROM {self._fq_messages} WHERE session_key = %s",
+                (session.key,),
             )
 
-        await conn.execute(
-            f"DELETE FROM {self._fq_messages} WHERE session_key = $1",
-            session.key,
-        )
-
         for seq, msg in enumerate(session.messages):
-            await self._async_insert_message(conn, session.key, seq, msg)
+            self._insert_message(conn, session.key, seq, msg)
 
-    async def _async_insert_message(
+    def _insert_message(
         self,
-        conn: asyncpg.Connection,
+        conn,
         session_key: str,
         seq: int,
         msg: dict[str, Any],
@@ -209,17 +202,17 @@ class PGSessionManager(SessionManager):
         }
         for col in _MESSAGE_COLUMNS:
             val = msg.get(col)
-            if val is not None:
-                vals[col] = val
-            else:
-                vals[col] = None
+            if isinstance(val, list) and col in _JSON_COLUMNS:
+                val = Json(val)
+            vals[col] = val
 
-        placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
         col_list = ", ".join(cols)
-        await conn.execute(
-            f"INSERT INTO {self._fq_messages} ({col_list}) VALUES ({placeholders})",
-            *[vals[c] for c in cols],
-        )
+        placeholders = ", ".join(["%s"] * len(cols))
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {self._fq_messages} ({col_list}) VALUES ({placeholders})",
+                [vals[c] for c in cols],
+            )
 
     def invalidate(self, key: str) -> None:
         self._cache.pop(key, None)
@@ -227,34 +220,35 @@ class PGSessionManager(SessionManager):
     def delete_session(self, key: str) -> bool:
         self.invalidate(key)
         try:
-            return sync_transaction(lambda conn: self._async_delete_session(conn, key))
+            with transaction() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM {self._fq_meta} WHERE session_key = %s",
+                        (key,),
+                    )
+                    return cur.rowcount > 0
         except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL delete for session {}", key)
             return super().delete_session(key)
 
-    async def _async_delete_session(
-        self, conn: asyncpg.Connection, key: str
-    ) -> bool:
-        result = await conn.execute(
-            f"DELETE FROM {self._fq_meta} WHERE session_key = $1",
-            key,
-        )
-        return "DELETE" in result and result.split()[-1] != "0"
-
     def list_sessions(self) -> list[dict[str, Any]]:
         try:
-            return sync_transaction(self._async_list_sessions)
+            with transaction() as conn:
+                return self._list_sessions_inner(conn)
         except DB_RETRYABLE_ERRORS:
             logger.warning("DB unavailable, falling back to JSONL for session list")
             return super().list_sessions()
 
-    async def _async_list_sessions(
-        self, conn: asyncpg.Connection
-    ) -> list[dict[str, Any]]:
-        meta_rows = await conn.fetch(
-            f"SELECT session_key, created_at, updated_at, metadata "
-            f"FROM {self._fq_meta} ORDER BY updated_at DESC"
-        )
+    def _list_sessions_inner(self, conn) -> list[dict[str, Any]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT session_key, created_at, updated_at, metadata "
+                f"FROM {self._fq_meta} ORDER BY updated_at DESC"
+            )
+            col_names = [desc[0] for desc in cur.description]
+            meta_rows_raw = cur.fetchall()
+
+        meta_rows = [dict(zip(col_names, r)) for r in meta_rows_raw]
 
         out: list[dict[str, Any]] = []
         for meta in meta_rows:
@@ -265,17 +259,21 @@ class PGSessionManager(SessionManager):
             meta_dict = dict(_raw or {})
             title = meta_dict.get("title") if isinstance(meta_dict.get("title"), str) else ""
 
-            rows = await conn.fetch(
-                f"SELECT role, content FROM {self._fq_messages} "
-                f"WHERE session_key = $1 ORDER BY seq ASC LIMIT 10",
-                key,
-            )
-            preview = ""
-            for row in rows:
-                text = _message_preview_text(dict(row))
-                if text:
-                    preview = text
-                    break
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT role, content FROM {self._fq_messages} "
+                    f"WHERE session_key = %s ORDER BY seq ASC LIMIT 10",
+                    (key,),
+                )
+                preview = ""
+                for row in cur:
+                    text = _message_preview_text({
+                        "role": row[0],
+                        "content": row[1],
+                    })
+                    if text:
+                        preview = text
+                        break
 
             out.append({
                 "key": key,

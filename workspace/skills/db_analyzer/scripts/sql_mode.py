@@ -26,7 +26,7 @@ from llm import chat
 MAX_RETRIES = 2
 
 
-async def run(query: str, db: Database, context: Optional[list[dict]] = None) -> dict:
+def run(query: str, db: Database, context: Optional[list[dict]] = None) -> dict:
     """
     Сгенерировать SQL через LLM, проверить, выполнить (с retry-циклом).
 
@@ -36,7 +36,7 @@ async def run(query: str, db: Database, context: Optional[list[dict]] = None) ->
     Args:
         query: Запрос на естественном языке (например,
                'сколько проверок было в 2024 году по каждому объекту').
-        db_cfg: Конфигурация подключения к БД.
+        db: Объект Database.
         context: История чата (опционально — список сообщений).
 
     Returns:
@@ -47,20 +47,9 @@ async def run(query: str, db: Database, context: Optional[list[dict]] = None) ->
                 sql: сгенерированный SQL
                 result: результат выполнения (columns, rows, row_count)
             (при ошибке) message: описание ошибки
-
-    Пример успеха:
-        >>> import asyncio
-        >>> from config import load_db_config
-        >>> db = load_db_config()
-        >>> asyncio.run(run("покажи всех нарушителей", db))  # doctest: +SKIP
-        {'mode': 'sql', 'status': 'success', 'data': {'sql': 'SELECT ...', 'result': {...}}}
-
-    Пример c контекстом (история чата):
-        >>> history = [{"role": "user", "content": "Привет"}]
-        >>> asyncio.run(run("сколько аудитов", db, context=history))  # doctest: +SKIP
     """
     tables = get_db_tables() or None
-    schema = await db.get_schema(schema_name=get_db_schema(), table_names=tables)
+    schema = db.get_schema(schema_name=get_db_schema(), table_names=tables)
     schema_text = Database.format_schema(schema)
 
     base_messages = [
@@ -90,7 +79,7 @@ async def run(query: str, db: Database, context: Optional[list[dict]] = None) ->
             })
 
         try:
-            sql = await chat(messages, context=context)
+            sql = chat(messages, context=context)
         except Exception as e:
             last_error = {"error": f"LLM call failed: {e}", "sql": ""}
             continue
@@ -104,13 +93,19 @@ async def run(query: str, db: Database, context: Optional[list[dict]] = None) ->
             continue
 
         # Шаг 2: EXPLAIN — проверка синтаксиса и существования объектов
-        explain_result = await db.execute_explain(sql)
+        explain_result = db.execute_explain(sql)
         if not explain_result["valid"]:
             last_error = {"error": explain_result["error"], "sql": sql}
+            if "временно занята" in explain_result.get("error", ""):
+                break
             continue
 
         # Шаг 3: выполнить
-        result = await db.execute_query(sql)
+        result = db.execute_query(sql)
+        if result["status"] == "error" and "временно занята" in result.get("error", ""):
+            last_error = {"error": result["error"], "sql": sql}
+            break
+
         return {
             "mode": "sql",
             "status": result["status"],

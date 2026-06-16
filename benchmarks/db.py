@@ -22,10 +22,11 @@ from loguru import logger
 from benchmarks.models import BenchResult, SuiteResult
 
 try:
-    from utils.db import configure, sync_execute, sync_transaction, sync_fetch as _bench_fetch
+    from utils.db import configure, execute, transaction, fetch as _bench_fetch
+    from psycopg2.extras import Json
     _db_ok = True
 except ImportError:
-    configure = sync_execute = sync_transaction = _bench_fetch = None
+    configure = execute = transaction = _bench_fetch = Json = None
     _db_ok = False
 
 
@@ -51,7 +52,7 @@ class BenchmarkDB:
         sql_path = Path(__file__).parent / "sql" / "create_benchmark_tables.sql"
         if sql_path.exists():
             sql = sql_path.read_text(encoding="utf-8")
-            sync_execute(sql)
+            execute(sql)
             logger.info("Benchmark tables ensured")
         else:
             logger.warning("SQL DDL file not found at {}", sql_path)
@@ -60,57 +61,65 @@ class BenchmarkDB:
         if not self._available:
             logger.warning("PostgreSQL not available, skipping save")
             return None
-        return sync_transaction(lambda conn: self._async_save_run(conn, suite_result))
+        with transaction() as conn:
+            return self._save_run_inner(conn, suite_result)
 
-    async def _async_save_run(self, conn, suite_result: SuiteResult) -> str:
+    def _save_run_inner(self, conn, suite_result: SuiteResult) -> str:
         now = datetime.now()
-        run_id = await conn.fetchval(
-            f"INSERT INTO {self._fq_runs} "
-            f"(suite_name, suite_tags, config, total_items, passed_items, "
-            f"total_score, avg_score, duration_sec, started_at, finished_at) "
-            f"VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6, $7, $8, $9, $10) "
-            f"RETURNING id",
-            suite_result.suite_name,
-            suite_result.config.get("tags", []),
-            suite_result.config,
-            suite_result.total_items,
-            suite_result.passed_items,
-            suite_result.total_score,
-            suite_result.avg_score,
-            suite_result.duration_sec,
-            now,
-            now,
-        )
-        run_id_str = str(run_id)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {self._fq_runs} "
+                f"(suite_name, suite_tags, config, total_items, passed_items, "
+                f"total_score, avg_score, duration_sec, started_at, finished_at) "
+                f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                f"RETURNING id",
+                (
+                    suite_result.suite_name,
+                    Json(suite_result.config.get("tags", [])),
+                    suite_result.config,
+                    suite_result.total_items,
+                    suite_result.passed_items,
+                    suite_result.total_score,
+                    suite_result.avg_score,
+                    suite_result.duration_sec,
+                    now,
+                    now,
+                ),
+            )
+            run_id = str(cur.fetchone()[0])
 
         for r in suite_result.results:
-            await conn.execute(
-                f"INSERT INTO {self._fq_results} "
-                f"(run_id, item_id, item_name, difficulty, category, item_type, "
-                f"passed, score, response, tools_used, skills_activated, "
-                f"total_iterations, duration_sec, error, llm_judge_score, details) "
-                f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, "
-                f"$11::jsonb, $12, $13, $14, $15, $16::jsonb)",
-                run_id_str,
-                r.item_id,
-                "",
-                r.total_score,
-                "",
-                "single" if not r.steps else "multi_step",
-                r.passed,
-                r.total_score,
-                r.response,
-                r.tools_used,
-                r.skills_activated,
-                r.total_iterations,
-                r.duration_sec,
-                r.error,
-                r.llm_judge_score,
-                r.details,
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO {self._fq_results} "
+                    f"(run_id, item_id, item_name, difficulty, category, item_type, "
+                    f"passed, score, response, tools_used, skills_activated, "
+                    f"total_iterations, duration_sec, error, llm_judge_score, details) "
+                    f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                    f"%s, %s, %s, %s, %s, %s)",
+                    (
+                        run_id,
+                        r.item_id,
+                        "",
+                        r.total_score,
+                        "",
+                        "single" if not r.steps else "multi_step",
+                        r.passed,
+                        r.total_score,
+                        r.response,
+                        Json(r.tools_used),
+                        Json(r.skills_activated),
+                        r.total_iterations,
+                        r.duration_sec,
+                        r.error,
+                        r.llm_judge_score,
+                        r.details,
+                    ),
+                )
 
-        logger.info("Saved benchmark run {} to PostgreSQL", run_id_str)
-        return run_id_str
+        logger.info("Saved benchmark run {} to PostgreSQL", run_id)
+        return run_id
 
     def get_history(self, suite_name: str, limit: int = 10) -> list[dict[str, Any]]:
         if not self._available:
@@ -120,8 +129,8 @@ class BenchmarkDB:
             f"SELECT id, suite_name, total_items, passed_items, "
             f"total_score, avg_score, duration_sec, started_at, finished_at "
             f"FROM {self._fq_runs} "
-            f"WHERE suite_name = $1 "
-            f"ORDER BY started_at DESC LIMIT $2",
+            f"WHERE suite_name = %s "
+            f"ORDER BY started_at DESC LIMIT %s",
             suite_name,
             limit,
         )
@@ -130,28 +139,32 @@ class BenchmarkDB:
         if not self._available:
             logger.warning("PostgreSQL not available")
             return None
-        return sync_transaction(
-            lambda conn: self._async_compare_runs(conn, run_id_1, run_id_2)
-        )
+        with transaction() as conn:
+            return self._compare_runs_inner(conn, run_id_1, run_id_2)
 
-    async def _async_compare_runs(
+    def _compare_runs_inner(
         self, conn, run_id_1: str, run_id_2: str
-    ) -> dict[str, Any]:
-        run1 = await conn.fetchrow(
-            f"SELECT * FROM {self._fq_runs} WHERE id = $1", run_id_1
-        )
-        run2 = await conn.fetchrow(
-            f"SELECT * FROM {self._fq_runs} WHERE id = $1", run_id_2
-        )
+    ) -> dict[str, Any] | None:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT * FROM {self._fq_runs} WHERE id = %s", (run_id_1,))
+            col_names = [desc[0] for desc in cur.description]
+            row = cur.fetchone()
+            run1 = dict(zip(col_names, row)) if row else None
+
+            cur.execute(f"SELECT * FROM {self._fq_runs} WHERE id = %s", (run_id_2,))
+            row = cur.fetchone()
+            run2 = dict(zip(col_names, row)) if row else None
+
         if not run1 or not run2:
             return None
 
-        results1 = await conn.fetch(
-            f"SELECT * FROM {self._fq_results} WHERE run_id = $1", run_id_1
-        )
-        results2 = await conn.fetch(
-            f"SELECT * FROM {self._fq_results} WHERE run_id = $1", run_id_2
-        )
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT * FROM {self._fq_results} WHERE run_id = %s", (run_id_1,))
+            col_names = [desc[0] for desc in cur.description]
+            results1 = [dict(zip(col_names, r)) for r in cur.fetchall()]
+
+            cur.execute(f"SELECT * FROM {self._fq_results} WHERE run_id = %s", (run_id_2,))
+            results2 = [dict(zip(col_names, r)) for r in cur.fetchall()]
 
         items1 = {r["item_id"]: r["score"] for r in results1}
         items2 = {r["item_id"]: r["score"] for r in results2}

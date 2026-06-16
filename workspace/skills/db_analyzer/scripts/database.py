@@ -7,11 +7,12 @@
 
     cfg = load_db_config()
     db = Database(cfg)
-    schema = await db.get_schema()
-    result = await db.execute_query("SELECT * FROM oarb.audits LIMIT 5")
+    schema = db.get_schema()
+    result = db.execute_query("SELECT * FROM oarb.audits LIMIT 5")
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -21,7 +22,11 @@ _project_root = Path(__file__).resolve().parents[3]  # workspace/
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from utils.db import fetch
+from utils.db import configure, fetch
+
+_dsn_env = os.environ.get("DATABASE_URL", "")
+if _dsn_env:
+    configure(_dsn_env)
 
 
 class Database:
@@ -47,26 +52,26 @@ class Database:
         self._cache_ttl = int(cache_cfg.get("ttl_seconds", 3600))
 
     # ------------------------------------------------------------------
-    # Lifecycle (no-op, подключение через HTTP)
+    # Lifecycle (no-op, подключение через utils.db)
     # ------------------------------------------------------------------
 
-    async def connect(self):
+    def connect(self):
         pass
 
-    async def close(self):
+    def close(self):
         pass
 
-    async def __aenter__(self):
+    def __enter__(self):
         return self
 
-    async def __aexit__(self, *args):
+    def __exit__(self, *args):
         pass
 
     # ------------------------------------------------------------------
     # Schema
     # ------------------------------------------------------------------
 
-    async def get_schema(
+    def get_schema(
         self,
         schema_name: Optional[str] = None,
         table_names: Optional[list[str]] = None,
@@ -92,14 +97,14 @@ class Database:
             if cached:
                 return cached
 
-        data = await self._fetch_schema(schema, tables)
+        data = self._fetch_schema(schema, tables)
 
         if cache:
             self._write_cache(schema, data)
 
         return data
 
-    async def _fetch_schema(self, schema: str, tables: Optional[list[str]]) -> dict:
+    def _fetch_schema(self, schema: str, tables: Optional[list[str]]) -> dict:
         query = """
             SELECT
                 c.table_name,
@@ -114,17 +119,17 @@ class Database:
             LEFT JOIN pg_catalog.pg_description pgd
                 ON pgd.objsubid = c.ordinal_position
                AND pgd.objoid = pc.oid
-            WHERE c.table_schema = $1
+            WHERE c.table_schema = %s
         """
         params: list[Any] = [schema]
 
         if tables:
-            query += " AND c.table_name = ANY($2)"
+            query += " AND c.table_name = ANY(%s)"
             params.append(tables)
 
         query += " ORDER BY c.table_name, c.ordinal_position"
 
-        rows = await fetch(query, *params)
+        rows = fetch(query, *params)
 
         result: dict = {}
         for row in rows:
@@ -210,7 +215,7 @@ class Database:
     # Query execution
     # ------------------------------------------------------------------
 
-    async def execute_query(self, sql: str, params: Optional[list] = None) -> dict:
+    def execute_query(self, sql: str, params: Optional[list] = None) -> dict:
         """
         Выполнить SELECT-запрос, вернуть колонки и строки.
 
@@ -218,7 +223,7 @@ class Database:
             dict: {status, row_count, columns, rows}
         """
         try:
-            rows = await fetch(sql, *(params or []))
+            rows = fetch(sql, *(params or []))
         except Exception as e:
             return {"status": "error", "row_count": 0, "columns": [], "rows": [],
                     "error": f"Ошибка выполнения запроса: {e}"}
@@ -234,7 +239,7 @@ class Database:
             "rows": [dict(r) for r in rows],
         }
 
-    async def execute_explain(self, sql: str) -> dict:
+    def execute_explain(self, sql: str) -> dict:
         """
         EXPLAIN (FORMAT JSON) — проверка синтаксиса без выполнения.
 
@@ -243,7 +248,7 @@ class Database:
         """
         explain_sql = f"EXPLAIN (FORMAT JSON) {sql}"
         try:
-            rows = await fetch(explain_sql)
+            rows = fetch(explain_sql)
             plan = list(rows[0].values())[0] if rows else None
             return {"valid": True, "plan": plan}
         except Exception as e:
