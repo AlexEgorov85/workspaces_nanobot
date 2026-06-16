@@ -255,11 +255,19 @@ class PGSessionManager(SessionManager):
         self._cache.pop(key, None)
 
     def delete_session(self, key: str) -> bool:
-        """Удалить сессию из БД и из кеша. При ошибке — fallback на JSONL."""
+        """Удалить сессию из БД и из кеша. При ошибке — fallback на JSONL.
+
+        Удаляет сначала сообщения, потом meta — это необходимо для
+        Greenplum 6.25, где внешние ключи не поддерживаются.
+        """
         self.invalidate(key)
         try:
             with transaction() as conn:
                 with conn.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM {self._fq_messages} WHERE session_key = %s",
+                        (key,),
+                    )
                     cur.execute(
                         f"DELETE FROM {self._fq_meta} WHERE session_key = %s",
                         (key,),

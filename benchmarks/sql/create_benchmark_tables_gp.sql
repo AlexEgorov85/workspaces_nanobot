@@ -1,12 +1,10 @@
--- Таблицы для хранения результатов бенчмарков
--- Схема: public (или переопределяется в коде)
--- Управляется: benchmarks/db.py
+-- Greenplum 6.25: create_benchmark_tables.sql + DISTRIBUTED BY, pgcrypto, без FK
 
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- Прогоны бенчмарков (мета-информация)
 CREATE TABLE IF NOT EXISTS public.benchmark_runs (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     suite_name      TEXT NOT NULL,
     suite_tags      JSONB DEFAULT '[]'::jsonb,
     config          JSONB DEFAULT '{}'::jsonb,
@@ -17,11 +15,12 @@ CREATE TABLE IF NOT EXISTS public.benchmark_runs (
     duration_sec    REAL NOT NULL DEFAULT 0.0,
     started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at     TIMESTAMPTZ
-);
+)
+DISTRIBUTED BY (id);
 
 -- Результаты по каждому вопросу бенчмарка
 CREATE TABLE IF NOT EXISTS public.benchmark_results (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     run_id          UUID NOT NULL,
     item_id         TEXT NOT NULL,
     item_name       TEXT NOT NULL,
@@ -39,7 +38,8 @@ CREATE TABLE IF NOT EXISTS public.benchmark_results (
     llm_judge_score REAL,
     details         JSONB DEFAULT '{}'::jsonb,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+)
+DISTRIBUTED BY (run_id);
 
 -- Индексы
 CREATE INDEX IF NOT EXISTS idx_benchmark_results_run

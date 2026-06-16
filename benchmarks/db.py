@@ -22,17 +22,28 @@ from loguru import logger
 from benchmarks.models import BenchResult, SuiteResult
 
 try:
-    from utils.db import configure, execute, transaction, fetch as _bench_fetch
+    from utils.db import configure, execute, transaction, fetchval, fetch as _bench_fetch
     from psycopg2.extras import Json
     _db_ok = True
 except ImportError:
-    configure = execute = transaction = _bench_fetch = Json = None
+    configure = execute = transaction = _bench_fetch = fetchval = Json = None
     _db_ok = False
 
 
 SCHEMA = "public"
 RUNS_TABLE = "benchmark_runs"
 RESULTS_TABLE = "benchmark_results"
+
+
+def _is_greenplum() -> bool:
+    """Определить, работаем ли мы с Greenplum."""
+    if not _db_ok:
+        return False
+    try:
+        ver = fetchval("SELECT version()")
+        return ver and "Greenplum" in ver
+    except Exception:
+        return False
 
 
 class BenchmarkDB:
@@ -54,15 +65,20 @@ class BenchmarkDB:
             configure(dsn)
 
     def ensure_tables(self) -> None:
-        """Создание таблиц для хранения прогонов, если они ещё не существуют."""
+        """Создание таблиц для хранения прогонов, если они ещё не существуют.
+
+        Автоматически выбирает между PG 9.4 и GP 6.25 DDL.
+        """
         if not self._available:
             logger.warning("PostgreSQL not available, skipping table creation")
             return
-        sql_path = Path(__file__).parent / "sql" / "create_benchmark_tables.sql"
+        base = Path(__file__).parent / "sql"
+        is_gp = _is_greenplum()
+        sql_path = base / "create_benchmark_tables_gp.sql" if is_gp else base / "create_benchmark_tables.sql"
         if sql_path.exists():
             sql = sql_path.read_text(encoding="utf-8")
             execute(sql)
-            logger.info("Benchmark tables ensured")
+            logger.info("Benchmark tables ensured (gp={})", is_gp)
         else:
             logger.warning("SQL DDL file not found at {}", sql_path)
 

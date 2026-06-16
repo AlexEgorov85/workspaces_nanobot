@@ -121,12 +121,13 @@ class Database:
                 obj_description(pc.oid) AS table_comment
             FROM information_schema.columns c
             JOIN pg_class pc ON pc.relname = c.table_name
+                AND pc.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = %s)
             LEFT JOIN pg_catalog.pg_description pgd
                 ON pgd.objsubid = c.ordinal_position
                AND pgd.objoid = pc.oid
             WHERE c.table_schema = %s
         """
-        params: list[Any] = [schema]
+        params: list[Any] = [schema, schema]
 
         if tables:
             query += " AND c.table_name = ANY(%s)"

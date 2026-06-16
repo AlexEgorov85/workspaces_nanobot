@@ -1,7 +1,8 @@
 -- Скрипты INSERT в public.conversation_messages
 -- для тестирования PostgresChannel с однотабличной схемой + reasoning в metadata.
 -- Запуск: psql -d <db> -U <user> -f seed_messages.sql
--- Требуется расширение: CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- PG 9.4: CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- GP 6.25: CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- ================================================================
 -- USER-СООБЩЕНИЯ (role = 'user', status = 'pending')
