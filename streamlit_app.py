@@ -24,12 +24,25 @@ _schema = _pg.schema or "public"
 _table = _pg.channel.table_name or "conversation_messages"
 _fq_table = f"{_schema}.{_table}"
 
+_MAX_WAIT = 600  # максимальное время ожидания ответа, секунд
+_POLL_INTERVAL = 1.0  # интервал опроса БД
+
 if _dsn:
     configure(_dsn)
 
 
+def _decode_jsonb(val) -> dict:
+    if val is None:
+        return {}
+    if isinstance(val, str):
+        return json.loads(val)
+    if isinstance(val, dict):
+        return val
+    return dict(val) if val else {}
+
+
 def _check_response(msg_id: str) -> str | None:
-    """Check conversation_messages for the assistant response. Returns None if not ready."""
+    """Проверяет ответ assistant'а. Возвращает контент или None."""
     row = fetchone(
         f"SELECT content, metadata, status FROM {_fq_table} "
         f"WHERE reply_to = %s AND role = 'assistant' ORDER BY created_at ASC LIMIT 1",
@@ -43,6 +56,19 @@ def _check_response(msg_id: str) -> str | None:
     if status == "failed":
         return "⚠️ Ошибка обработки"
     return None
+
+
+def _get_processing_state(msg_id: str) -> dict | None:
+    """Возвращает промежуточное состояние processing-сообщения (контент, размышления)."""
+    row = fetchone(
+        f"SELECT content, metadata, status FROM {_fq_table} "
+        f"WHERE reply_to = %s AND role = 'assistant' ORDER BY created_at ASC LIMIT 1",
+        msg_id,
+    )
+    if not row or row["status"] != "processing":
+        return None
+    meta = _decode_jsonb(row["metadata"])
+    return {"content": row["content"] or "", "reasoning": meta.get("reasoning", "")}
 
 
 st.set_page_config(page_title="Чат с агентом", page_icon="💬", layout="wide")
@@ -101,14 +127,49 @@ processing = st.session_state.get("_processing", False)
 
 if processing:
     msg_id = st.session_state["_msg_id"]
-    response = _check_response(msg_id)
-    if response is not None:
-        st.session_state["_processing"] = False
-        st.session_state.messages.append({"role": "assistant", "content": response})
-        st.rerun()
-    else:
-        time.sleep(0.3)
-        st.rerun()
+
+    with st.status("⏳ Агент думает...", expanded=True) as status:
+        placeholder = st.empty()
+        start_time = time.time()
+
+        while True:
+            elapsed = int(time.time() - start_time)
+            remaining = _MAX_WAIT - elapsed
+
+            if remaining <= 0:
+                status.update(label="⏱️ Таймаут", state="error")
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": "⏱️ Превышено время ожидания ответа агента. Попробуйте ещё раз.",
+                })
+                break
+
+            state = _get_processing_state(msg_id)
+            if state and state["reasoning"]:
+                placeholder.markdown(
+                    f"⏳ Ожидание... {elapsed}с\n\n"
+                    f'<details class="reasoning-wrap" open>'
+                    f"<summary>💭 Размышления</summary>"
+                    f'<div class="reasoning-box">{state["reasoning"]}</div>'
+                    f"</details>",
+                    unsafe_allow_html=True,
+                )
+            elif state and state["content"]:
+                placeholder.markdown(f"✍️ {state['content'][:200]}...")
+            else:
+                placeholder.markdown(f"⏳ Ожидание... {elapsed}с")
+
+            response = _check_response(msg_id)
+            if response is not None:
+                status.update(label="✅ Ответ получен", state="complete")
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                placeholder.empty()
+                break
+
+            time.sleep(_POLL_INTERVAL)
+
+    st.session_state["_processing"] = False
+    st.rerun()
 
 prompt = st.chat_input("Напишите сообщение...", disabled=processing)
 
@@ -116,10 +177,8 @@ if prompt and not processing:
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.session_state["_processing"] = True
 
-    # Generate unique message ID
     msg_id = str(uuid.uuid4())
 
-    # Write to conversation_messages — gateway picks it up
     execute(
         f"INSERT INTO {_fq_table} (id, chat_id, user_id, role, content, status) "
         f"VALUES (%s, %s, %s, 'user', %s, 'pending')",
