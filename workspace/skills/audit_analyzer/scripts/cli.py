@@ -86,7 +86,7 @@ import vector_mode
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="db_analyzer — анализ БД через LLM агента")
+    parser = argparse.ArgumentParser(description="audit_analyzer — анализ БД через LLM агента")
     parser.add_argument(
         "--mode",
         required=True,

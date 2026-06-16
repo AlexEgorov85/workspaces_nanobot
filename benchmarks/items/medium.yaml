@@ -1,10 +1,10 @@
 # Средние задания (сложность 4-7)
-# Анализ данных аудиторских проверок через db_analyzer
+# Анализ данных аудиторских проверок через audit_analyzer
 
 - id: "medium-schema-relations"
   name: "Связи таблиц"
   difficulty: 4
-  category: "db_analyzer"
+  category: "audit_analyzer"
   type: "single"
   new_session: true
   question: "Прочитай schema.json и объясни, как связаны таблицы audits, audit_reports, report_items и violations. Какие внешние ключи соединяют их?"
@@ -16,10 +16,10 @@
 - id: "medium-predefined-run"
   name: "Запуск скрипта"
   difficulty: 5
-  category: "db_analyzer"
+  category: "audit_analyzer"
   type: "single"
   new_session: true
-  question: "Запусти audit_analyze.bat с режимом predefined и скриптом analytics_by_year_month. Используй команду: skills/db_analyzer/audit_analyze.bat --mode predefined --script analytics_by_year_month --params year=2024. Если БД недоступна, объясни, что делает этот скрипт"
+  question: "Запусти audit_analyze.bat с режимом predefined и скриптом analytics_by_year_month. Используй команду: skills/audit_analyzer/audit_analyze.bat --mode predefined --script analytics_by_year_month --params year=2024. Если БД недоступна, объясни, что делает этот скрипт"
   max_iterations: 20
   expect:
     tools: ["exec"]
@@ -28,7 +28,7 @@
 - id: "medium-violations-query"
   name: "Статистика нарушений"
   difficulty: 6
-  category: "db_analyzer"
+  category: "audit_analyzer"
   type: "single"
   new_session: true
   question: "Прочитай описание скрипта violations_by_type в scripts_registry.py и объясни, какие параметры он принимает, какую SQL-логику реализует. Если можешь — выполни его через audit_analyze.bat"
@@ -40,7 +40,7 @@
 - id: "medium-effectiveness-script"
   name: "Эффективность проверок"
   difficulty: 6
-  category: "db_analyzer"
+  category: "audit_analyzer"
   type: "single"
   new_session: true
   question: "Прочитай скрипт audit_effectiveness в scripts_registry.py и объясни, как классифицируются проверки по уровню серьёзности (severity_level). Какие категории выделяются и по какому принципу?"
@@ -52,10 +52,10 @@
 - id: "medium-vector-search"
   name: "Векторный поиск"
   difficulty: 6
-  category: "db_analyzer"
+  category: "audit_analyzer"
   type: "single"
   new_session: true
-  question: "Прочитай SKILL.md и config.json db_analyzer и объясни, как работает векторный поиск по FAISS-индексам. Какие индексы существуют, какой моделью делаются эмбеддинги, какая размерность?"
+  question: "Прочитай SKILL.md и config.json audit_analyzer и объясни, как работает векторный поиск по FAISS-индексам. Какие индексы существуют, какой моделью делаются эмбеддинги, какая размерность?"
   max_iterations: 15
   expect:
     tools: ["read_file"]
@@ -64,7 +64,7 @@
 - id: "medium-dynamics-analysis"
   name: "Динамика проверок"
   difficulty: 5
-  category: "db_analyzer"
+  category: "audit_analyzer"
   type: "single"
   new_session: true
   question: "Прочитай скрипт audit_dynamics в scripts_registry.py и объясни, какие периоды группировки поддерживаются, какие метрики рассчитываются. Какой SQL-запрос сгенерируется для period=quarter?"
@@ -76,10 +76,10 @@
 - id: "medium-sql-mode"
   name: "SQL-генерация"
   difficulty: 7
-  category: "db_analyzer"
+  category: "audit_analyzer"
   type: "single"
   new_session: true
-  question: "Прочитай файл skills/db_analyzer/scripts/sql_mode.py и объясни, как работает режим sql в db_analyzer: как LLM генерирует SQL, как валидируется запрос, сколько попыток повторения при ошибке"
+  question: "Прочитай файл skills/audit_analyzer/scripts/sql_mode.py и объясни, как работает режим sql в audit_analyzer: как LLM генерирует SQL, как валидируется запрос, сколько попыток повторения при ошибке"
   max_iterations: 20
   expect:
     tools: ["read_file"]

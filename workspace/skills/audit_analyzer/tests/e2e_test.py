@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Сквозные тесты db_analyzer: реальные вызовы всех режимов."""
+"""Сквозные тесты audit_analyzer: реальные вызовы всех режимов."""
 import sys, os, json, asyncio
 from pathlib import Path
 
@@ -22,7 +22,7 @@ def fail(msg, detail=''):
     if detail:
         print(f'     {detail}')
 
-print('=== db_analyzer: E2E tests ===\n')
+print('=== audit_analyzer: E2E tests ===\n')
 
 from config import load_db_config, get_vector_index_path
 from database import Database

@@ -1,5 +1,5 @@
 """
-Класс Database — обёртка над PostgreSQL для навыка db_analyzer.
+Класс Database — обёртка над PostgreSQL для навыка audit_analyzer.
 
 Использование:
     from database import Database

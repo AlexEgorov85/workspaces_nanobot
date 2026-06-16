@@ -66,7 +66,7 @@ def main() -> None:
     """Запускает gateway со всеми локальными доработками."""
 
     # ── 1. Загрузка конфигурации ─────────────────────────────────────────
-    config = _load_runtime_config()
+    config = _load_runtime_config(config=str(_SCRIPT_DIR / "config.json"), workspace=str(_WORKSPACE_DIR))
     sync_workspace_templates(config.workspace_path)
     console.print(f"{__logo__} Starting nanobot gateway v{__version__}...")
 

@@ -1,7 +1,7 @@
 """
-Конфигурация db_analyzer.
+Конфигурация audit_analyzer.
 
-Читает skills/db_analyzer/config.json, кеширует при первом вызове.
+Читает skills/audit_analyzer/config.json, кеширует при первом вызове.
 Все getter-функции возвращают значения из конкретных секций конфига.
 
 Пример config.json:
@@ -174,14 +174,14 @@ def get_vector_index_path() -> str:
     Путь к директории с FAISS-индексами (секция 'modes.vector.index_path').
 
     Если путь относительный — разрешается относительно директории config.json
-    (корень навыка db_analyzer). Если абсолютный — используется как есть.
+    (корень навыка audit_analyzer). Если абсолютный — используется как есть.
 
     Returns:
         Абсолютный путь к директории с .faiss и _metadata.json файлами.
 
     Пример:
         >>> get_vector_index_path()
-        '.../db_analyzer/data/vector'
+        '.../audit_analyzer/data/vector'
     """
     vec = _load().get("modes", {}).get("vector", {})
     path = vec.get("index_path", "")

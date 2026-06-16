@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-db_analyzer — анализ PostgreSQL-базы данных через LLM-агента.
+audit_analyzer — анализ PostgreSQL-базы данных через LLM-агента.
 
 Пакет предоставляет три режима работы, вызываемые через CLI:
 
@@ -224,7 +224,7 @@ def get_script(name: str) -> Optional[Dict[str, Any]]:
 
 def load_config() -> dict:
     """
-    Полная конфигурация db_analyzer.
+    Полная конфигурация audit_analyzer.
 
     Returns:
         dict с содержимым config.json.

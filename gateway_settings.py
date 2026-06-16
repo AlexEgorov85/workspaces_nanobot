@@ -104,7 +104,7 @@ class PGSettings:
     (например pg.channel.dsn), они переопределят корневые.
 
     ── psycopg2 (short‑lived connections) ──────────────────────────────
-    Все запросы (PostgresChannel, db_analyzer, PGSessionManager)
+    Все запросы (PostgresChannel, audit_analyzer, PGSessionManager)
     используют единый DSN из pg.dsn. Каждый запрос создаёт новое
     короткоживущее соединение psycopg2 (connect → query → close).
     Retry с backoff при OperationalError (до 15 попыток).

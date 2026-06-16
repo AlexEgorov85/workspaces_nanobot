@@ -472,7 +472,7 @@
     "restrictToWorkspace": false,
     "mcpServers": {},
     "ssrfWhitelist": [],
-    "db_analyzer": {
+    "audit_analyzer": {
       "database": {
         "schema": "oarb",
         "tables": ["audit_reports", "audits", "report_items", "violations"]
