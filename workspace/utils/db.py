@@ -68,17 +68,10 @@ def _connect() -> psycopg2.extensions.connection:
             "SharedDB не инициализирован: вызовите configure(dsn) "
             "или заполните pg.dsn в gateway_settings.py"
         )
-    # gssencmode=disable — libpq в psycopg2-binary (≥ 2.9.x) пытается
-    # использовать GSSAPI-шифрование по умолчанию, но GP 6.25 / PG 9.4
-    # его не поддерживают, что вызывает ошибку соединения.
-    dsn = _dsn
-    if "gssencmode" not in dsn:
-        if dsn.startswith("postgresql://") or dsn.startswith("postgres://"):
-            sep = "&" if "?" in dsn else "?"
-            dsn = f"{dsn}{sep}gssencmode=disable"
-        else:
-            dsn = f"{dsn} gssencmode=disable"
-    conn = psycopg2.connect(dsn)
+    # libpq в psycopg2-binary (≥ 2.9.x) пытается использовать
+    # GSSAPI-шифрование по умолчанию, но GP 6.25 / PG 9.4 его не
+    # поддерживают, что вызывает ошибку соединения.
+    conn = psycopg2.connect(_dsn, gssencmode="disable")
     try:
         psycopg2.extras.register_json(conn, globally=False)
         conn.autocommit = True
