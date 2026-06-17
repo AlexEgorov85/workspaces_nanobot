@@ -23,6 +23,7 @@ import asyncio
 import base64
 import json
 import mimetypes
+import uuid
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
@@ -33,10 +34,11 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from nanobot.config.paths import get_media_dir
-from nanobot.utils.media_decode import save_base64_data_url
 from utils.db import async_fetchval as fetchval, async_execute as execute, async_fetchone as fetchone, async_transaction as transaction, async_fetch as fetch
 from psycopg2.extras import Json
+
+_WORKSPACE_DIR = Path(__file__).parent / "workspace"
+_DATA_STORE_DIR = _WORKSPACE_DIR / "data_store" / "cache" / "sessions"
 
 
 def _decode_jsonb(val: Any) -> dict:
@@ -123,11 +125,21 @@ class PostgresChannel(BaseChannel):
     # Кодирование/декодирование медиа-файлов для передачи через БД
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _session_media_dir(session_key: str) -> Path:
+        """Вернуть директорию для медиа-файлов сессии.
+
+        Путь: ``workspace/data_store/cache/sessions/{session_key}/``
+        """
+        sdir = _DATA_STORE_DIR / session_key
+        sdir.mkdir(parents=True, exist_ok=True)
+        return sdir
+
     async def _embed_media_for_db(self, media: list[str]) -> list[str]:
-        """Прочитать локальные файлы из ``media`` и закодировать как data URL.
+        """Прочитать локальные файлы и закодировать как data URL для БД.
 
         Каждый путь к локальному файлу заменяется на data URL вида
-        ``data:<mime>;base64,<содержимое>`` для хранения в БД.
+        ``data:<mime>;base64,<содержимое>``.
         HTTP/HTTPS/data URL передаются как есть.
         """
         if not media:
@@ -154,27 +166,36 @@ class PostgresChannel(BaseChannel):
                 embedded.append(path)
         return embedded
 
-    async def _decode_media_from_db(self, media: list[str]) -> list[str]:
-        """Декодировать data URL из БД обратно в локальные файлы.
+    async def _decode_media_from_db(
+        self, media: list[str], session_key: str = "default"
+    ) -> list[str]:
+        """Декодировать data URL из БД обратно в локальные файлы сессии.
 
-        Каждый entry вида ``data:<mime>;base64,...`` сохраняется в
-        ``media/postgres/``. Пути передаются агенту как локальные пути.
+        Путь: ``data_store/cache/sessions/{session_key}/{uuid}.{ext}``
         """
         if not media:
             return media
         resolved: list[str] = []
-        media_dir = get_media_dir("postgres")
+        sdir = self._session_media_dir(session_key)
         for entry in media:
             if not entry.startswith("data:"):
                 resolved.append(entry)
                 continue
             try:
-                saved = save_base64_data_url(entry, media_dir)
-                if saved:
-                    resolved.append(saved)
-                else:
-                    self.logger.warning("Failed to decode data URL, keeping as-is")
+                mime_match = __import__("re").match(
+                    r"^data:([^;,]+)(?:;[^,]*)*;base64,(.+)$", entry
+                )
+                if not mime_match:
                     resolved.append(entry)
+                    continue
+                mime_type = mime_match.group(1).strip().lower()
+                b64_payload = mime_match.group(2)
+                raw = base64.b64decode(b64_payload)
+                ext = mimetypes.guess_extension(mime_type) or ".bin"
+                filename = f"{uuid.uuid4().hex[:12]}{ext}"
+                dest = sdir / filename
+                dest.write_bytes(raw)
+                resolved.append(str(dest))
             except Exception:
                 self.logger.exception("Failed to decode media data URL")
                 resolved.append(entry)
@@ -408,8 +429,9 @@ class PostgresChannel(BaseChannel):
         if isinstance(raw_media, str):
             raw_media = json.loads(raw_media) if raw_media else []
         media: list[str] = raw_media if isinstance(raw_media, list) else []
-        # Декодируем data URL из БД обратно в локальные файлы
-        media = await self._decode_media_from_db(media)
+        # Декодируем data URL из БД обратно в локальные файлы сессии
+        session_key = raw_meta.get("session_key") or f"postgres:{chat_id}"
+        media = await self._decode_media_from_db(media, session_key)
 
         # Создаём assistant-placeholder, чтобы Streamlit мог начать опрос
         assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id)
