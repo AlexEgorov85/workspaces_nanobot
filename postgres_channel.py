@@ -20,9 +20,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
 from contextlib import suppress
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -30,6 +33,8 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.config.paths import get_media_dir
+from nanobot.utils.media_decode import save_base64_data_url
 from utils.db import async_fetchval as fetchval, async_execute as execute, async_fetchone as fetchone, async_transaction as transaction, async_fetch as fetch
 from psycopg2.extras import Json
 
@@ -113,6 +118,67 @@ class PostgresChannel(BaseChannel):
         # ---- контекст сообщения ----
         # user_msg_id → {assistant_msg_id, tool_events, reasoning_buf}
         self._msg_ctx: dict[str, dict] = {}
+
+    # ------------------------------------------------------------------
+    # Кодирование/декодирование медиа-файлов для передачи через БД
+    # ------------------------------------------------------------------
+
+    async def _embed_media_for_db(self, media: list[str]) -> list[str]:
+        """Прочитать локальные файлы из ``media`` и закодировать как data URL.
+
+        Каждый путь к локальному файлу заменяется на data URL вида
+        ``data:<mime>;base64,<содержимое>`` для хранения в БД.
+        HTTP/HTTPS/data URL передаются как есть.
+        """
+        if not media:
+            return media
+        embedded: list[str] = []
+        for path in media:
+            if path.startswith(("http://", "https://", "data:")):
+                embedded.append(path)
+                continue
+            try:
+                p = Path(path).expanduser()
+                if not p.is_file():
+                    self.logger.warning("Media file not found, keeping path: {}", path)
+                    embedded.append(path)
+                    continue
+                raw = p.read_bytes()
+                mime_type, _ = mimetypes.guess_type(str(p))
+                if mime_type is None:
+                    mime_type = "application/octet-stream"
+                b64 = base64.b64encode(raw).decode("ascii")
+                embedded.append(f"data:{mime_type};base64,{b64}")
+            except Exception:
+                self.logger.exception("Failed to encode media file: {}", path)
+                embedded.append(path)
+        return embedded
+
+    async def _decode_media_from_db(self, media: list[str]) -> list[str]:
+        """Декодировать data URL из БД обратно в локальные файлы.
+
+        Каждый entry вида ``data:<mime>;base64,...`` сохраняется в
+        ``media/postgres/``. Пути передаются агенту как локальные пути.
+        """
+        if not media:
+            return media
+        resolved: list[str] = []
+        media_dir = get_media_dir("postgres")
+        for entry in media:
+            if not entry.startswith("data:"):
+                resolved.append(entry)
+                continue
+            try:
+                saved = save_base64_data_url(entry, media_dir)
+                if saved:
+                    resolved.append(saved)
+                else:
+                    self.logger.warning("Failed to decode data URL, keeping as-is")
+                    resolved.append(entry)
+            except Exception:
+                self.logger.exception("Failed to decode media data URL")
+                resolved.append(entry)
+        return resolved
 
     # ------------------------------------------------------------------
     # Жизненный цикл (start / stop)
@@ -342,6 +408,8 @@ class PostgresChannel(BaseChannel):
         if isinstance(raw_media, str):
             raw_media = json.loads(raw_media) if raw_media else []
         media: list[str] = raw_media if isinstance(raw_media, list) else []
+        # Декодируем data URL из БД обратно в локальные файлы
+        media = await self._decode_media_from_db(media)
 
         # Создаём assistant-placeholder, чтобы Streamlit мог начать опрос
         assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id)
@@ -559,6 +627,9 @@ class PostgresChannel(BaseChannel):
 
         chat_id = msg.chat_id
 
+        # Кодируем локальные файлы в data URL для хранения в БД
+        db_media = await self._embed_media_for_db(msg.media or [])
+
         try:
             async with transaction() as conn:
                 row = await conn.fetchrow(
@@ -570,9 +641,11 @@ class PostgresChannel(BaseChannel):
                 await conn.execute(
                     f"UPDATE {self._fq_table} "
                     f"SET content = %s, metadata = %s, buttons = %s, "
+                    f"media = %s, "
                     f"status = 'completed', updated_at = NOW() WHERE id = %s",
                     msg.content, existing_meta,
-                    Json(msg.buttons or []), assistant_msg_id,
+                    Json(msg.buttons or []), Json(db_media),
+                    assistant_msg_id,
                 )
                 if msg_id:
                     await conn.execute(
