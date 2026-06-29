@@ -1,4 +1,6 @@
--- Таблица для хранения сериализованных FAISS-индексов
+-- Таблица для хранения сериализованных FAISS-индексов.
+-- Совместимо с PostgreSQL 13+ и Greenplum 6+.
+-- На GP без DISTRIBUTED BY — hash-распределение по первой колонке.
 CREATE TABLE IF NOT EXISTS oarb.vector_index_store (
     source       TEXT PRIMARY KEY,
     index_binary BYTEA NOT NULL,
@@ -8,7 +10,8 @@ CREATE TABLE IF NOT EXISTS oarb.vector_index_store (
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Таблица для хранения векторных эмбеддингов (PostgreSQL 13)
+-- Таблица для хранения векторных эмбеддингов.
+-- Совместимо с PostgreSQL 13+ и Greenplum 6+.
 -- Поддерживает чанкование: один документ → несколько векторов-чанков
 --
 -- Использование:

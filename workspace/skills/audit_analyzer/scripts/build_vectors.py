@@ -383,7 +383,6 @@ def build_index(
             from vector_mode import invalidate_cache, rebuild_and_store_index
             invalidate_cache(index_name)
             rebuild_and_store_index(index_name, db_table)
-            print(f"  Индекс {index_name} перестроен и сохранён в store")
         except ImportError:
             pass
 

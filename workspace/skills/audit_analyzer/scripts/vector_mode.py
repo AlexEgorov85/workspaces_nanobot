@@ -199,27 +199,30 @@ def _save_index_to_store(source: str, index, metadata: dict) -> None:
     """Сериализовать FAISS-индекс и сохранить в vector_index_store."""
     import faiss
 
-    from utils.db import execute
+    from utils.db import execute, fetch
 
     blob = bytes(faiss.serialize_index(index))
     meta_json = json.dumps(metadata, ensure_ascii=False, default=str)
-    execute(
-        f"""
-        INSERT INTO {STORE_TABLE} (source, index_binary, metadata, dimension, vector_count, updated_at)
-        VALUES (%s, %s, %s::jsonb, %s, %s, NOW())
-        ON CONFLICT (source) DO UPDATE SET
-            index_binary = EXCLUDED.index_binary,
-            metadata = EXCLUDED.metadata,
-            dimension = EXCLUDED.dimension,
-            vector_count = EXCLUDED.vector_count,
-            updated_at = NOW()
-        """,
-        source,
-        blob,  # bytes → psycopg2 адаптирует в BYTEA автоматически
-        meta_json,
-        index.d,
-        index.ntotal,
+    dim = index.d
+    ntotal = index.ntotal
+
+    # Ручной UPSERT — совместимо с GP 6.25 (нет ON CONFLICT)
+    exists = fetch(
+        f"SELECT 1 FROM {STORE_TABLE} WHERE source = %s", source
     )
+    if exists:
+        execute(
+            f"UPDATE {STORE_TABLE} SET index_binary = %s, metadata = %s::jsonb, "
+            f"dimension = %s, vector_count = %s, updated_at = NOW() "
+            f"WHERE source = %s",
+            blob, meta_json, dim, ntotal, source,
+        )
+    else:
+        execute(
+            f"INSERT INTO {STORE_TABLE} (source, index_binary, metadata, dimension, vector_count, updated_at) "
+            f"VALUES (%s, %s, %s::jsonb, %s, %s, NOW())",
+            source, blob, meta_json, dim, ntotal,
+        )
 
 
 def _load_index_from_store(source: str) -> tuple[Any, Optional[dict]]:
@@ -343,12 +346,6 @@ def _load_vectors_from_db(
 
     index = faiss.IndexFlatIP(dimension)
     index.add(vectors)
-
-    # Сохраняем сериализованный индекс в store для быстрой загрузки в будущем
-    try:
-        _save_index_to_store(source or "default", index, metadata)
-    except Exception:
-        pass
 
     return index, metadata
 
