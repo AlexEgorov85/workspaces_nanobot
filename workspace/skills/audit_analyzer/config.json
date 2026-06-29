@@ -27,9 +27,48 @@
       "enabled": true,
       "index_path": "C:/Users/Алексей/Documents/WORK/Agent_v5/data/vector",
       "top_k": 5,
-      "threshold": 0.75
+      "threshold": 0.75,
+      "db_table": "oarb.audit_vectors"
     },
     "sql": { "enabled": true }
+  },
+  "vector_indexes": {
+    "audits_index": {
+      "table": "oarb.audits",
+      "pk": "id",
+      "source_table": "audits",
+      "content_columns": ["title"],
+      "embedding_columns": ["title", "audit_type", "auditee_entity"],
+      "track_column": "updated_at",
+      "enabled": true
+    },
+    "violations_index": {
+      "table": "oarb.violations",
+      "pk": "id",
+      "source_table": "violations",
+      "content_columns": ["violation_code", "description"],
+      "embedding_columns": ["violation_code", "description", "recommendation"],
+      "track_column": "created_at",
+      "enabled": true
+    },
+    "audit_reports_index": {
+      "table": "oarb.audit_reports",
+      "pk": "id",
+      "source_table": "audit_reports",
+      "content_columns": ["title"],
+      "embedding_columns": ["title", "full_text"],
+      "track_column": "updated_at",
+      "enabled": false
+    },
+    "report_items_index": {
+      "table": "oarb.report_items",
+      "pk": "id",
+      "source_table": "report_items",
+      "content_columns": ["item_title"],
+      "embedding_columns": ["item_title", "item_content"],
+      "track_column": "updated_at",
+      "enabled": false
+    }
   },
   "cli": {
     "default_mode": "predefined",

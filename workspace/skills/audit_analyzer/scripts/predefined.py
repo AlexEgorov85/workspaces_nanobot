@@ -126,7 +126,7 @@ def resolve_params(script: ScriptDefinition, params: dict | None) -> tuple[dict,
     return merged, unknown
 
 
-async def resolve_params_with_vector(
+def resolve_params_with_vector(
     script: ScriptDefinition,
     params: dict | None,
     index_dir: str = "",
@@ -159,7 +159,7 @@ async def resolve_params_with_vector(
             continue
 
         try:
-            result = await vector_mode.run(
+            result = vector_mode.run(
                 val, index_name, index_path=index_dir,
                 top_k=top_k, threshold=min_score,
             )

@@ -194,6 +194,72 @@ def get_vector_index_path() -> str:
     return str(_CONFIG_DIR / path)
 
 
+def get_vector_db_table() -> str:
+    """
+    Имя таблицы в БД для векторных данных (секция 'modes.vector.db_table').
+
+    Если указана, векторы загружаются из GP вместо FAISS-файлов.
+
+    Returns:
+        Имя таблицы (schema.table) или пустую строку если не настроена.
+
+    Пример:
+        >>> get_vector_db_table()
+        'oarb.audit_vectors'
+    """
+    vec = _load().get("modes", {}).get("vector", {})
+    return vec.get("db_table", "")
+
+
+def get_vector_indexes() -> dict[str, Any]:
+    """
+    Конфигурация сборки векторных индексов из исходных таблиц.
+
+    Приоритет: таблица oarb.vector_index_config (если есть данные)
+               → секция 'vector_indexes' в config.json (fallback).
+
+    embedding_columns — список имён колонок.
+    Чанкование определяется автоматически: колонки длиннее chunk_size
+    дробятся, короткие входят в каждый чанк целиком.
+
+    Returns:
+        dict: {имя_индекса: {table, pk, source_table,
+               content_columns, embedding_columns, track_column, enabled}}
+
+    Пример:
+        >>> get_vector_indexes()
+        {'audits_index': {'table': 'oarb.audits', 'pk': 'id', ...}, ...}
+    """
+    from utils.db import fetch
+
+    try:
+        rows = fetch(
+            "SELECT index_name, source_table, src_table, pk_column, "
+            "content_cols, embedding_cols, track_column, enabled "
+            "FROM oarb.vector_index_config ORDER BY index_name"
+        )
+        if rows:
+            result = {}
+            for r in rows:
+                ec = r["embedding_cols"]
+                if isinstance(ec, str):
+                    ec = json.loads(ec)
+                result[r["index_name"]] = {
+                    "table": r["src_table"],
+                    "pk": r["pk_column"],
+                    "source_table": r["source_table"],
+                    "content_columns": list(r["content_cols"]) if isinstance(r.get("content_cols"), (list, tuple)) else [],
+                    "embedding_columns": ec,
+                    "track_column": r["track_column"],
+                    "enabled": r["enabled"],
+                }
+            return result
+    except Exception:
+        pass
+
+    return _load().get("vector_indexes", {})
+
+
 def get_embedding_config() -> dict[str, Any]:
     """
     Конфигурация embedding-сервиса (секция 'embedding').
