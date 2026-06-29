@@ -44,8 +44,8 @@ if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
-_WORKSPACE_DIR = _SCRIPTS_DIR.parents[2]
-_NANOBOT_DIR = _SCRIPTS_DIR.parents[3]
+_WORKSPACE_DIR = _SCRIPTS_DIR.parents[3]
+_NANOBOT_DIR = _SCRIPTS_DIR.parents[4]
 
 for p in [str(_WORKSPACE_DIR), str(_NANOBOT_DIR)]:
     if p not in sys.path:

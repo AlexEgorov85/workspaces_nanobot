@@ -30,8 +30,8 @@ import httpx
 
 # Путь к workspace/utils — для импорта utils.db
 _SCRIPTS_DIR = Path(__file__).resolve().parent
-_WORKSPACE_DIR = _SCRIPTS_DIR.parents[2]
-for p in [str(_SCRIPTS_DIR), str(_WORKSPACE_DIR), str(_SCRIPTS_DIR.parents[3])]:
+_WORKSPACE_DIR = _SCRIPTS_DIR.parents[3]
+for p in [str(_SCRIPTS_DIR), str(_WORKSPACE_DIR), str(_SCRIPTS_DIR.parents[4])]:
     if p not in sys.path:
         sys.path.insert(0, p)
 

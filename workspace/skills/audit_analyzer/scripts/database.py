@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-_project_root = Path(__file__).resolve().parents[2]  # workspace/
+_project_root = Path(__file__).resolve().parents[3]  # workspace/
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 

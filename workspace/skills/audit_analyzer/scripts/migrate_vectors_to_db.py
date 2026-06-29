@@ -152,8 +152,8 @@ def migrate_index(index_dir: str, index_name: str, dry_run: bool = False) -> dic
 def main():
     # Настройка подключения к БД из gateway_settings
     p_scripts = Path(__file__).resolve().parent
-    base_dir = p_scripts.parents[2]  # workspace/
-    nanobot_root = p_scripts.parents[3]  # ~/.nanobot/
+    base_dir = p_scripts.parents[3]  # workspace/
+    nanobot_root = p_scripts.parents[4]  # ~/.nanobot/
     for p in [str(base_dir), str(nanobot_root)]:
         if p not in sys.path:
             sys.path.insert(0, p)
