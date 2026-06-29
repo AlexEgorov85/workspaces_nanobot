@@ -49,7 +49,7 @@ def _check_response(msg_id: str) -> str | None:
     """Проверяет ответ assistant'а. Возвращает контент или None."""
     row = fetchone(
         f"SELECT content, metadata, status FROM {_fq_table} "
-        f"WHERE reply_to = %s AND role = 'assistant' ORDER BY created_at ASC LIMIT 1",
+        f"WHERE reply_to = %s AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
         msg_id,
     )
     if not row:
@@ -66,7 +66,7 @@ def _get_processing_state(msg_id: str) -> dict | None:
     """Возвращает промежуточное состояние processing-сообщения (контент, размышления)."""
     row = fetchone(
         f"SELECT content, metadata, status FROM {_fq_table} "
-        f"WHERE reply_to = %s AND role = 'assistant' ORDER BY created_at ASC LIMIT 1",
+        f"WHERE reply_to = %s AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
         msg_id,
     )
     if not row or row["status"] != "processing":

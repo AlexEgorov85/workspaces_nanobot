@@ -312,7 +312,8 @@ class PostgresChannel(BaseChannel):
           — Счётчик retry_count в metadata увеличивается.
           — Если retry_count >= 3 → status = 'failed' (окончательно).
           — Иначе → status = 'pending' (повторная попытка).
-          — Сообщение assistant с reply_to на это сообщение тоже failed.
+          — Старый assistant-placeholder удаляется (вместо failed), чтобы
+            пользователь не видел ошибочный статус до повторной обработки.
 
         Это защита от ситуаций, когда агент упал, а сообщение осталось
         висеть в processing навсегда.
@@ -359,9 +360,13 @@ class PostgresChannel(BaseChannel):
                         f"metadata = %s, updated_at = NOW() WHERE id = %s",
                         meta, msg_id,
                     )
+                    # Удаляем старый assistant-placeholder, чтобы пользователь
+                    # не увидел "Ошибка обработки" до того, как новый ответ будет готов.
+                    # Удаляем как processing (текущий зависший), так и failed (если
+                    # _mark_failed частично записал ошибку до того, как мы решили retry).
                     await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'failed', "
-                        f"updated_at = NOW() WHERE reply_to = %s AND role = 'assistant' AND status = 'processing'",
+                        f"DELETE FROM {self._fq_table} "
+                        f"WHERE reply_to = %s AND role = 'assistant' AND status IN ('processing', 'failed')",
                         msg_id,
                     )
                     self.logger.warning(
