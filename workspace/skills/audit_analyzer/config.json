@@ -14,6 +14,11 @@
       "enabled": true,
       "path": "cache/schema.json",
       "ttl_seconds": 86400
+    },
+    "in_memory": {
+      "enabled": true,
+      "engine": "duckdb",
+      "cache_path": "cache/audit_cache.duckdb"
     }
   },
   "embedding": {

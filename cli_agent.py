@@ -508,6 +508,7 @@ def _run_interactive_loop(agent, config, *, session: str | None = None,
     async def run_interactive():
         """Основной async-цикл: запускает агента, читает outbound, выводит стриминг/финал."""
         bus_task = asyncio.create_task(agent.run())
+        asyncio.create_task(_background_audit_cache_refresh(config))
 
         async def consume_outbound() -> tuple[str, dict]:
             """
@@ -632,6 +633,89 @@ def _apply_timeouts(config) -> None:
             pass
 
 
+def _get_audit_cache_config(config):
+    """Вернуть (cache_file_path, db_config) или (None, None) если in_memory не включён."""
+    skill_config_path = config.workspace_path / "skills" / "audit_analyzer" / "config.json"
+    if not skill_config_path.exists():
+        return None, None
+
+    import json as _json
+    try:
+        skill_cfg = _json.loads(skill_config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None, None
+
+    im_config = skill_cfg.get("database", {}).get("in_memory", {})
+    if not im_config.get("enabled"):
+        return None, None
+
+    cache_path = im_config.get("cache_path", "")
+    if not cache_path:
+        return None, None
+
+    from pathlib import Path as _Path
+    cache_file = _Path(cache_path)
+    if not cache_file.is_absolute():
+        cache_file = skill_config_path.parent / cache_file
+
+    from skills.audit_analyzer.scripts.config import load_db_config
+    return str(cache_file), load_db_config()
+
+
+def _preload_audit_cache(config) -> None:
+    """
+    Фоновая загрузка DuckDB-кеша для навыка audit_analyzer при старте агента.
+    """
+    cache_path, db_cfg = _get_audit_cache_config(config)
+    if not cache_path or not db_cfg:
+        return
+
+    from skills.audit_analyzer.scripts.database import InMemoryDatabase
+
+    cache_file = Path(cache_path)
+    if cache_file.exists():
+        age = __import__("time").time() - cache_file.stat().st_mtime
+        if age < 3600:
+            return
+
+    try:
+        InMemoryDatabase.load_from_postgres(cache_path, db_cfg)
+    except Exception as exc:
+        import logging
+        logging.getLogger("preload").warning(
+            "audit_analyzer cache preload failed (non-critical): %s", exc
+        )
+
+
+async def _background_audit_cache_refresh(config):
+    """
+    Фоновая задача: каждые 60 сек проверять свежесть DuckDB-кеша через MAX(updated_at).
+    Если данные в PG изменились — перезагрузить кеш.
+    """
+    cache_path, db_cfg = _get_audit_cache_config(config)
+    if not cache_path or not db_cfg:
+        return
+
+    from skills.audit_analyzer.scripts.database import InMemoryDatabase
+    import logging as _logging
+
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            result = InMemoryDatabase.check_stale(cache_path, db_cfg)
+            if result.get("stale_tables"):
+                _logging.getLogger("cache").info(
+                    "Audit cache stale tables: %s, reloading...", result["stale_tables"]
+                )
+                InMemoryDatabase.load_from_postgres(cache_path, db_cfg)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            _logging.getLogger("cache").warning(
+                "Audit cache refresh check failed: %s", exc
+            )
+
+
 def _run_vanilla_agent(args: argparse.Namespace) -> None:
     """Стандартный CLI-агент (как `nanobot agent`). Без доработок."""
     config = _load_runtime_config(config=_CONFIG_PATH, workspace=str(_WORKSPACE_DIR))
@@ -649,6 +733,7 @@ def _run_vanilla_agent(args: argparse.Namespace) -> None:
     tool_audit_hook = ToolAuditHook()
     agent = AgentLoop.from_config(config, bus, cron_service=cron, hooks=[tool_audit_hook])
     _patch_agent_tool_audit(agent, tool_audit_hook)
+    _preload_audit_cache(config)
     _run_interactive_loop(agent, config, session=args.session, display=DISPLAY)
 
 
@@ -735,6 +820,7 @@ def _run_patched_agent(args: argparse.Namespace) -> None:
         hooks=hooks,
     )
     _patch_agent_tool_audit(agent, tool_audit_hook)
+    _preload_audit_cache(config)
     _run_interactive_loop(agent, config, session=args.session, display=DISPLAY)
 
 

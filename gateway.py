@@ -271,7 +271,70 @@ def main() -> None:
 
     _streamlit_script = _SCRIPT_DIR / "streamlit_app.py"
 
-    # ── 11. Запуск ───────────────────────────────────────────────────────
+    # ── 11. Фоновая загрузка DuckDB-кеша для audit_analyzer ──────────────
+    async def _preload_audit_cache():
+        """Фоновая загрузка DuckDB-кеша для навыка audit_analyzer при старте."""
+        cache_path, db_cfg = _get_audit_cache_cfg()
+        if not cache_path or not db_cfg:
+            return
+        from skills.audit_analyzer.scripts.database import InMemoryDatabase
+        from pathlib import Path
+        cache_file = Path(cache_path)
+        if cache_file.exists():
+            import time
+            if time.time() - cache_file.stat().st_mtime < 3600:
+                return
+        try:
+            InMemoryDatabase.load_from_postgres(cache_path, db_cfg)
+        except Exception as exc:
+            import logging
+            logging.getLogger("preload").warning("audit_analyzer cache preload failed: %s", exc)
+
+    async def _background_audit_cache_refresh():
+        """Фоновая задача: каждый час проверять свежесть кеша и перезагружать при изменениях."""
+        cache_path, db_cfg = _get_audit_cache_cfg()
+        if not cache_path or not db_cfg:
+            return
+        from skills.audit_analyzer.scripts.database import InMemoryDatabase
+        import logging as _logging
+        while True:
+            try:
+                await asyncio.sleep(3600)
+                result = InMemoryDatabase.check_stale(cache_path, db_cfg)
+                if result.get("stale_tables"):
+                    _logging.getLogger("cache").info(
+                        "Audit cache stale tables: %s, reloading...", result["stale_tables"]
+                    )
+                    InMemoryDatabase.load_from_postgres(cache_path, db_cfg)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                _logging.getLogger("cache").warning("Audit cache refresh failed: %s", exc)
+
+    def _get_audit_cache_cfg():
+        """Вернуть (cache_path, db_config) для audit_analyzer или (None, None)."""
+        skill_config_path = config.workspace_path / "skills" / "audit_analyzer" / "config.json"
+        if not skill_config_path.exists():
+            return None, None
+        try:
+            import json
+            cfg = json.loads(skill_config_path.read_text(encoding="utf-8"))
+            im_config = cfg.get("database", {}).get("in_memory", {})
+            if not im_config.get("enabled"):
+                return None, None
+            cache_path = im_config.get("cache_path", "")
+            if not cache_path:
+                return None, None
+            from pathlib import Path
+            cache_file = Path(cache_path)
+            if not cache_file.is_absolute():
+                cache_file = skill_config_path.parent / cache_file
+            from skills.audit_analyzer.scripts.config import load_db_config
+            return str(cache_file), load_db_config()
+        except Exception:
+            return None, None
+
+    # ── 12. Запуск ───────────────────────────────────────────────────────
     async def run():
         channels_task = asyncio.create_task(channels.start_all())
 
@@ -294,6 +357,8 @@ def main() -> None:
                 console.print(f"[yellow]⚠[/yellow] Streamlit failed to start: {exc}")
 
         try:
+            asyncio.create_task(_preload_audit_cache())
+            asyncio.create_task(_background_audit_cache_refresh())
             await agent.run()
         except asyncio.CancelledError:
             console.print("\nShutting down...")

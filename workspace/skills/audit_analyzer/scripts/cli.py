@@ -77,8 +77,11 @@ def _parse_params(raw: str) -> dict[str, Any]:
 # Add scripts dir to path so sibling modules are importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config import get_vector_index_path, get_max_retries, load_db_config
-from database import Database
+from config import (
+    get_vector_index_path, get_max_retries, load_db_config,
+    is_in_memory_enabled, get_in_memory_config,
+)
+from database import Database, InMemoryDatabase
 from output import _sanitize_value, prepare_output
 import predefined_mode
 import sql_mode
@@ -96,8 +99,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         required=True,
-        choices=["predefined", "sql", "vector"],
-        help="Режим работы: predefined, sql или vector",
+        choices=["predefined", "sql", "vector", "init"],
+        help="Режим работы: predefined, sql, vector или init",
     )
     parser.add_argument(
         "--script",
@@ -151,16 +154,52 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Контекст чата в формате JSON (опционально). '
              'Например: \'[{"role":"user","content":"привет"}]\'',
     )
+    parser.add_argument(
+        "--force",
+        default=False,
+        action="store_true",
+        help="Принудительная перезагрузка кеша (только для mode=init). "
+             "Игнорировать существующий DuckDB-файл.",
+    )
     return parser
+
+
+def _create_db() -> Database | InMemoryDatabase:
+    """
+    Создать объект БД: InMemoryDatabase если включено, иначе Database.
+
+    Returns:
+        Database или InMemoryDatabase.
+    """
+    cfg = load_db_config()
+    if is_in_memory_enabled():
+        im_cfg = get_in_memory_config()
+        cfg["in_memory"] = im_cfg
+        return InMemoryDatabase(cfg)
+    return Database(cfg)
 
 
 def _run(args: argparse.Namespace) -> dict:
     """
-    Маршрутизация выполнения по режиму (predefined/sql/vector).
+    Маршрутизация выполнения по режиму (predefined/sql/vector/init).
     Для predefined проверяет наличие --script, для sql/vector — --query.
     Возвращает dict-результат от соответствующего модуля.
     """
-    with Database(load_db_config()) as db:
+    if args.mode == "init":
+        cfg = load_db_config()
+        im_cfg = get_in_memory_config()
+        cache_path = im_cfg.get("cache_path", "")
+        if not cache_path:
+            return {"status": "error", "data": {"message": "in_memory.cache_path не задан в config.json"}}
+        if not args.force and Path(cache_path).exists():
+            return {"status": "success", "mode": "init", "data": {"message": "Кеш уже существует, используйте --force для перезагрузки"}}
+        try:
+            InMemoryDatabase.load_from_postgres(cache_path, cfg)
+        except Exception as e:
+            return {"status": "error", "data": {"message": f"Ошибка загрузки кеша: {e}"}}
+        return {"status": "success", "mode": "init", "data": {"message": f"Кеш загружен: {cache_path}"}}
+
+    with _create_db() as db:
 
         if args.mode == "predefined":
             if not args.script:

@@ -1,7 +1,7 @@
 ---
 name: audit_analyzer
 description: Анализ аудиторских проверок — SQL-отчёты, векторный поиск, генерация SQL через LLM.
-metadata: {"nanobot":{"emoji":"📊"}}
+metadata: {"nanobot":{"emoji":"📊","always":true}}
 ---
 
 # Audit Analyzer

@@ -169,6 +169,31 @@ def get_db_schema() -> str:
     return _load().get("database", {}).get("schema", "oarb")
 
 
+def get_in_memory_config() -> dict[str, Any]:
+    """
+    Конфигурация in-memory БД (секция 'database.in_memory').
+
+    Returns:
+        dict с ключами: enabled, engine, cache_path (абсолютный).
+    """
+    cfg = _load().get("database", {}).get("in_memory", {})
+    result = dict(cfg)
+    path = result.get("cache_path", "")
+    if path and not Path(path).is_absolute():
+        result["cache_path"] = str(_CONFIG_DIR / path)
+    return result
+
+
+def is_in_memory_enabled() -> bool:
+    """
+    Включена ли in-memory БД (секция 'database.in_memory.enabled').
+
+    Returns:
+        True если enabled, иначе False.
+    """
+    return bool(_load().get("database", {}).get("in_memory", {}).get("enabled", False))
+
+
 def get_vector_index_path() -> str:
     """
     Путь к директории с FAISS-индексами (секция 'modes.vector.index_path').
