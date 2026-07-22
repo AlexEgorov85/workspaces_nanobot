@@ -24,7 +24,7 @@ def fail(msg, detail=''):
 
 print('=== audit_analyzer: E2E tests ===\n')
 
-from config import load_db_config, get_vector_index_path
+from skill_config import load_db_config, get_vector_index_path
 from database import Database
 import predefined_mode
 import sql_mode

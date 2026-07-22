@@ -6,6 +6,7 @@ import os
 import json
 import sys
 import time
+from pathlib import Path
 import requests
 import tiktoken
 
@@ -17,11 +18,31 @@ except AttributeError:
     pass  # Python < 3.7 или нестандартная среда
 
 def load_config():
-    """Загружает config.json из папки уровнем выше (skills/data-analyzer/).
-    Возвращает словарь с настройками навыка (LLM, анализатор и т.д.)."""
-    config_path = os.path.join(os.path.dirname(__file__), "..", "config.json")
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    """Возвращает словарь с настройками навыка (LLM, анализатор) из .env."""
+    _root = str(Path(__file__).resolve().parents[3])
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    from config import SETTINGS as _S
+    cfg = _S.get("skills", {}).get("data_analyzer", {})
+    # Преобразуем в dict-структуру для обратной совместимости
+    return {
+        "llm": {
+            "provider": cfg.get("llm_provider", "ollama"),
+            "model": cfg.get("llm_model", "glm-4.6:cloud"),
+            "api_url": cfg.get("llm_api_url", "http://localhost:11434/api/generate"),
+            "api_key": cfg.get("llm_api_key", ""),
+            "temperature": float(cfg.get("llm_temperature", 0.2)),
+            "max_tokens": int(cfg.get("llm_max_tokens", 4000)),
+            "context_window": int(cfg.get("llm_context_window", 8192)),
+        },
+        "analyzer": {
+            "chunk_ratio": float(cfg.get("analyzer", {}).get("chunk_ratio", 0.7)),
+            "max_retries": int(cfg.get("analyzer", {}).get("max_retries", 3)),
+            "retry_delay_base": int(cfg.get("analyzer", {}).get("retry_delay_base", 2)),
+            "supported_structured": cfg.get("supported_structured", [".csv", ".xlsx", ".xls", ".json"]),
+            "supported_text": cfg.get("supported_text", [".txt", ".log", ".md", ".py", ".js", ".json", ".csv"]),
+        },
+    }
 
 def get_tokenizer(model_name: str = "cl100k_base") -> tiktoken.Encoding:
     """Возвращает токенизатор tiktoken для указанной модели.

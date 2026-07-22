@@ -51,10 +51,10 @@ for p in [str(_WORKSPACE_DIR), str(_NANOBOT_DIR)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from config import get_vector_indexes, get_embedding_config
+from skill_config import get_vector_indexes, get_embedding_config, get_embedding_model
 from utils.db import configure, execute, fetch
 from text_splitter import build_chunks
-import gateway_settings
+from config import SETTINGS as _SETTINGS
 
 
 def fetchone(sql, *args):
@@ -465,11 +465,12 @@ def main():
 
     args = parser.parse_args()
 
-    settings = gateway_settings.GatewaySettings()
-    if not settings.pg.dsn:
-        print("ОШИБКА: pg.dsn не задан в gateway_settings.py")
+    pg_cfg = _SETTINGS.get("postgresql", {})
+    dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else ""
+    if not dsn:
+        print("ОШИБКА: PG_DSN не задан в .env")
         sys.exit(1)
-    configure(settings.pg.dsn)
+    configure(dsn)
 
     row = fetch(
         "SELECT 1 FROM information_schema.tables "

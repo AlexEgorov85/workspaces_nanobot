@@ -3,7 +3,7 @@
 
 Использование (PG):
     from database import Database
-    from config import load_db_config
+    from skill_config import load_db_config
     cfg = load_db_config()
     db = Database(cfg)
     schema = db.get_schema()
@@ -11,7 +11,7 @@
 
 Использование (DuckDB in-memory):
     from database import InMemoryDatabase
-    from config import load_db_config
+    from skill_config import load_db_config
     cfg = load_db_config()
     db = InMemoryDatabase(cfg)
     schema = db.get_schema()
@@ -28,27 +28,25 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-_project_root = Path(__file__).resolve().parents[3]  # workspace/
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
+_workspace_root = Path(__file__).resolve().parents[3]  # workspace/
+_nanobot_root = Path(__file__).resolve().parents[4]   # .nanobot/
+for _p in [str(_nanobot_root), str(_workspace_root)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-_nanobot_root = _project_root.parent  # ~/.nanobot/
-if str(_nanobot_root) not in sys.path:
-    sys.path.insert(0, str(_nanobot_root))
-
-import gateway_settings
+from config import SETTINGS
 from utils.db import configure, fetch
 
-_settings = gateway_settings.GatewaySettings()
-if _settings.pg.dsn:
-    configure(_settings.pg.dsn)
+_pg_dsn = SETTINGS.get("postgresql", {}).get("dsn", "") if isinstance(SETTINGS.get("postgresql", {}), dict) else ""
+if _pg_dsn:
+    configure(_pg_dsn)
 
 
 class Database:
     """
     Прямое подключение к PostgreSQL через utils.db.
 
-    DSN задаётся в gateway_settings.py (pg.dsn) — навык не имеет
+    DSN задаётся через PG_DSN в .env — навык не имеет
     собственного DSN. configure(dsn) должен быть вызван до создания Database.
 
     Принимает dict конфигурации из load_db_config():
@@ -597,16 +595,14 @@ class InMemoryDatabase:
         """
         import duckdb
         import psycopg2
-        import gateway_settings
         from utils.db import configure
 
         schema = db_config.get("schema", "public")
         tables = db_config.get("tables")
 
-        settings = gateway_settings.GatewaySettings()
-        dsn = settings.pg.dsn
+        dsn = SETTINGS.get("postgresql", {}).get("dsn", "") if isinstance(SETTINGS.get("postgresql", {}), dict) else ""
         if not dsn:
-            raise RuntimeError("pg.dsn is not configured in gateway_settings.py")
+            raise RuntimeError("PG_DSN is not configured")
 
         configure(dsn)
 
@@ -668,7 +664,6 @@ class InMemoryDatabase:
         """
         import duckdb
         import psycopg2
-        import gateway_settings
         from utils.db import configure
 
         schema = db_config.get("schema", "public")
@@ -689,11 +684,10 @@ class InMemoryDatabase:
                     "error": "No cache metadata found"}
         cache_conn.close()
 
-        settings = gateway_settings.GatewaySettings()
-        dsn = settings.pg.dsn
+        dsn = SETTINGS.get("postgresql", {}).get("dsn", "") if isinstance(SETTINGS.get("postgresql", {}), dict) else ""
         if not dsn:
             return {"fresh": False, "stale_tables": [], "cache_meta": cache_meta, "pg_meta": {},
-                    "error": "pg.dsn is not configured"}
+                    "error": "PG_DSN is not configured"}
 
         configure(dsn)
 

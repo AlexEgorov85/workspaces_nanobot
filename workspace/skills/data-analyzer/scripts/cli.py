@@ -8,6 +8,7 @@ import os
 import json
 import argparse
 import logging
+from pathlib import Path
 
 # Принудительный UTF-8 для Windows
 try:
@@ -35,11 +36,29 @@ def setup_logging():
     )
     return logging.getLogger(__name__)
 
-def load_config(path: str) -> dict:
-    """Загружает JSON-конфигурацию из файла по указанному пути.
-    Возвращает словарь с настройками навыка."""
-    with open(path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+def load_config_from_settings() -> dict:
+    """Возвращает конфиг навыка из SETTINGS (.env)."""
+    _root = str(Path(__file__).resolve().parents[3])
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    from config import SETTINGS as _S
+    cfg = _S.get("skills", {}).get("data_analyzer", {})
+    return {
+        "llm": {
+            "provider": cfg.get("llm_provider", "ollama"),
+            "model": cfg.get("llm_model", "glm-4.6:cloud"),
+            "api_url": cfg.get("llm_api_url", "http://localhost:11434/api/generate"),
+            "api_key": cfg.get("llm_api_key", ""),
+            "temperature": float(cfg.get("llm_temperature", 0.2)),
+            "max_tokens": int(cfg.get("llm_max_tokens", 4000)),
+            "context_window": int(cfg.get("llm_context_window", 8192)),
+        },
+        "analyzer": {
+            "chunk_ratio": float(cfg.get("analyzer", {}).get("chunk_ratio", 0.7)),
+            "max_retries": int(cfg.get("analyzer", {}).get("max_retries", 3)),
+            "retry_delay_base": int(cfg.get("analyzer", {}).get("retry_delay_base", 2)),
+        },
+    }
 
 def main():
     """Полный CLI-пайплайн: настройка логирования, парсинг аргументов,
@@ -49,17 +68,12 @@ def main():
     parser = argparse.ArgumentParser(description="Audit Analyzer Skill CLI")
     parser.add_argument("--mode", choices=["predefined", "vector", "sql"], required=True)
     parser.add_argument("--query", type=str, required=True)
-    parser.add_argument("--config", type=str, default=os.path.join(os.path.dirname(__file__), "..", "config.json"))
     parser.add_argument("--format", choices=["json", "md"], default="json")
     parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
 
-    if not os.path.exists(args.config):
-        logger.error(f"Конфиг не найден: {args.config}")
-        sys.exit(2)
-
     try:
-        cfg = load_config(args.config)
+        cfg = load_config_from_settings()
         # Навык data-analyzer не имеет реализации БД — см. audit_analyzer
         db_class = type("SharedDBWrapper", (), {
             "get_schema_description": lambda self: "Схема не доступна (data-analyzer не подключён к БД)",

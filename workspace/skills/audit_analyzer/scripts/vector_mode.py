@@ -35,7 +35,7 @@ for p in [str(_SCRIPTS_DIR), str(_WORKSPACE_DIR), str(_SCRIPTS_DIR.parents[4])]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from config import get_vector_index_path, get_embedding_config, get_vector_db_table
+from skill_config import get_vector_index_path, get_embedding_config, get_vector_db_table
 
 # ---------------------------------------------------------------------------
 # Кеш индекса из БД в памяти — живёт до перезапуска агента

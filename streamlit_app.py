@@ -15,17 +15,16 @@ if _workspace not in sys.path:
     sys.path.insert(0, _workspace)
 
 from utils.db import configure, fetchone, execute
-from gateway_settings import GatewaySettings
+from config import SETTINGS
 
-_SETTINGS = GatewaySettings()
-_pg = _SETTINGS.pg
-_dsn = _pg.dsn
-_schema = _pg.schema or "public"
-_table = _pg.channel.table_name or "conversation_messages"
+_dsn = SETTINGS.postgresql.get("dsn", "")
+_schema = SETTINGS.postgresql.get("schema", "public")
+_channel_cfg = SETTINGS.postgresql.get("channel", {})
+_table = _channel_cfg.get("table", "conversation_messages")
 _fq_table = f"{_schema}.{_table}"
 
-_MAX_WAIT = 600  # максимальное время ожидания ответа, секунд
-_POLL_INTERVAL = 1.0  # интервал опроса БД
+_MAX_WAIT = SETTINGS.streamlit.get("max_wait", 600)
+_POLL_INTERVAL = SETTINGS.streamlit.get("poll_interval", 1.0)
 
 if _dsn:
     configure(_dsn)

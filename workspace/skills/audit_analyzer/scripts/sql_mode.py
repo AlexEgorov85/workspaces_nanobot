@@ -18,7 +18,7 @@ Pipeline с ретраями:
 
 from typing import Optional
 
-from config import get_db_schema, get_db_tables
+from skill_config import get_db_schema, get_db_tables
 from database import Database
 from llm import chat
 

@@ -63,7 +63,7 @@ audit_analyzer — анализ PostgreSQL-базы данных через LLM-
 scripts/
     __init__.py              — этот файл, публичный API
     cli.py                   — точка входа, парсинг аргументов, маршрутизация
-    config.py                — загрузка config.json, геттеры
+    config.py                — загрузка .env, геттеры
     database.py              — PostgreSQL: схема, execute, EXPLAIN, валидация
     llm.py                   — LLM-клиент (OpenAI-compatible HTTP)
     output.py                — форматирование результата в JSON
@@ -76,17 +76,6 @@ scripts/
 """
 from typing import Any, Dict, List, Optional, Tuple
 
-import cli
-import config
-import database
-from database import Database
-import llm
-import output
-import predefined
-import predefined_mode
-import scripts_registry
-import sql_mode
-import vector_mode
 
 # ---------------------------------------------------------------------------
 # Публичный API — функции верхнего уровня
@@ -98,23 +87,15 @@ def run_predefined(
     db_config: Optional[dict] = None,
     params: Optional[Dict[str, Any]] = None,
 ) -> dict:
-    """
-    Выполнить предопределённый SQL-скрипт.
-
-    Args:
-        script_name: Имя скрипта (ключ в SCRIPTS_REGISTRY).
-        db_config: Конфиг БД (из config.load_db_config() если None).
-        params: Параметры скрипта (опционально).
-
-    Returns:
-        dict с результатом: status, data (script_name, sql, parameters, result).
-    """
     try:
+        import skill_config as _cfg
+        from database import Database as _Db
+        import predefined_mode as _pm
         if db_config is None:
-            db_config = config.load_db_config()
-        with Database(db_config) as db:
-            return predefined_mode.run(script_name, db, params=params,
-                                        index_dir=config.get_vector_index_path())
+            db_config = _cfg.load_db_config()
+        with _Db(db_config) as db:
+            return _pm.run(script_name, db, params=params,
+                           index_dir=_cfg.get_vector_index_path())
     except Exception as e:
         return {"status": "error", "data": {"message": f"Ошибка в run_predefined: {e}"}}
 
@@ -124,22 +105,14 @@ def run_sql(
     db_config: Optional[dict] = None,
     context: Optional[List[dict]] = None,
 ) -> dict:
-    """
-    Сгенерировать и выполнить SQL-запрос через LLM.
-
-    Args:
-        query: Запрос на естественном языке.
-        db_config: Конфиг БД (из config.load_db_config() если None).
-        context: История чата (опционально).
-
-    Returns:
-        dict с результатом: status, data (sql, result).
-    """
     try:
+        import skill_config as _cfg
+        from database import Database as _Db
+        import sql_mode as _sm
         if db_config is None:
-            db_config = config.load_db_config()
-        with Database(db_config) as db:
-            return sql_mode.run(query, db, context=context)
+            db_config = _cfg.load_db_config()
+        with _Db(db_config) as db:
+            return _sm.run(query, db, context=context)
     except Exception as e:
         return {"status": "error", "data": {"message": f"Ошибка в run_sql: {e}"}}
 
@@ -151,24 +124,13 @@ def run_vector(
     top_k: int = 5,
     threshold: Optional[float] = None,
 ) -> dict:
-    """
-    Выполнить семантический поиск по FAISS-индексу.
-
-    Args:
-        query: Текстовый запрос.
-        index_name: Имя индекса (без .faiss).
-        index_path: Путь к директории с индексами (из конфига если None).
-        top_k: Количество результатов (по умолч. 5, игнорируется при threshold).
-        threshold: Порог схожести (0.0–1.0). Если задан, top_k игнорируется.
-
-    Returns:
-        dict с результатом: status, data (results, count).
-    """
     try:
+        import skill_config as _cfg
+        import vector_mode as _vm
         if index_path is None:
-            index_path = config.get_vector_index_path()
-        return vector_mode.run(query, index_name, index_path=index_path,
-                                top_k=top_k, threshold=threshold)
+            index_path = _cfg.get_vector_index_path()
+        return _vm.run(query, index_name, index_path=index_path,
+                       top_k=top_k, threshold=threshold)
     except Exception as e:
         return {"status": "error", "data": {"message": f"Ошибка в run_vector: {e}"}}
 
@@ -179,35 +141,13 @@ def run_vector(
 
 
 def list_scripts() -> List[Dict[str, Any]]:
-    """
-    Список всех предопределённых скриптов.
-
-    Returns:
-        Список dict: name, description, parameters.
-
-    Пример:
-        >>> list_scripts()
-        [{'name': 'analytics_by_year_month', 'description': 'Аналитика...', 'parameters': ['year']}, ...]
-    """
-    return predefined.list_all_scripts()
+    import predefined as _pre
+    return _pre.list_all_scripts()
 
 
 def get_script(name: str) -> Optional[Dict[str, Any]]:
-    """
-    Информация о конкретном скрипте.
-
-    Args:
-        name: Имя скрипта.
-
-    Returns:
-        dict с полями ScriptDefinition или None.
-
-    Пример:
-        >>> s = get_script("violations_by_type")
-        >>> s["description"]
-        'Статистика нарушений по типам и категориям'
-    """
-    sd = predefined.get_script_by_name(name)
+    import predefined as _pre
+    sd = _pre.get_script_by_name(name)
     if sd is None:
         return None
     return {
@@ -223,28 +163,13 @@ def get_script(name: str) -> Optional[Dict[str, Any]]:
 
 
 def load_config() -> dict:
-    """
-    Полная конфигурация audit_analyzer.
-
-    Returns:
-        dict с содержимым config.json.
-
-    Пример:
-        >>> cfg = load_config()
-        >>> cfg["llm"]["model"]
-        'mistral-large-latest'
-    """
-    return config.get_tool_config()
+    import skill_config as _cfg
+    return _cfg.get_tool_config()
 
 
 def refresh_config():
-    """
-    Принудительно перечитать config.json.
-
-    Пример:
-        >>> refresh_config()
-    """
-    config.refresh_config()
+    import skill_config as _cfg
+    _cfg.refresh_config()
 
 
 # ---------------------------------------------------------------------------
@@ -260,14 +185,4 @@ __all__ = [
     "get_script",
     "load_config",
     "refresh_config",
-    "cli",
-    "config",
-    "database",
-    "llm",
-    "output",
-    "predefined",
-    "predefined_mode",
-    "scripts_registry",
-    "sql_mode",
-    "vector_mode",
 ]

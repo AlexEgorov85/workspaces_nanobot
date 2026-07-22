@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config import get_vector_index_path, get_tool_config
+from skill_config import get_vector_index_path, get_tool_config
 from utils.db import configure, fetch, execute, fetchone
 
 
@@ -158,16 +158,17 @@ def main():
         if p not in sys.path:
             sys.path.insert(0, p)
 
-    import gateway_settings
+    from config import SETTINGS as _SETTINGS
     from utils.db import configure as db_configure
 
-    settings = gateway_settings.GatewaySettings()
-    if not settings.pg.dsn:
-        print("ОШИБКА: pg.dsn не задан в gateway_settings.py")
+    pg_cfg = _SETTINGS.get("postgresql", {})
+    dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else ""
+    if not dsn:
+        print("ОШИБКА: PG_DSN не задан в .env")
         sys.exit(1)
 
-    db_configure(settings.pg.dsn)
-    print(f"Подключение к БД: {settings.pg.dsn}")
+    db_configure(dsn)
+    print(f"Подключение к БД: {dsn}")
 
     # Проверка существования таблицы
     try:

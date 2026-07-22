@@ -58,6 +58,18 @@ def configure(dsn: str) -> None:
         _dsn = dsn
 
 
+def _get_dsn() -> str:
+    """Вернуть DSN: из configure() или fallback из SETTINGS."""
+    if _dsn:
+        return _dsn
+    try:
+        from config import SETTINGS
+        cfg = SETTINGS.get("postgresql", {})
+        return cfg.get("dsn", "") if isinstance(cfg, dict) else ""
+    except Exception:
+        return ""
+
+
 def _connect() -> psycopg2.extensions.connection:
     """Создать новое соединение с БД с автоматическими retry.
 
@@ -67,10 +79,11 @@ def _connect() -> psycopg2.extensions.connection:
       — "too many connections": до 50 раз, backoff 2→30с
       — остальные ошибки: до 15 раз, backoff 1→15с
     """
-    if not _dsn:
+    resolved = _get_dsn()
+    if not resolved:
         raise RuntimeError(
             "SharedDB не инициализирован: вызовите configure(dsn) "
-            "или заполните pg.dsn в gateway_settings.py"
+            "или заполните PG_DSN в .env"
         )
     # libpq в psycopg2-binary (≥ 2.9.x) пытается использовать
     # GSSAPI-шифрование по умолчанию, но GP 6.25 / PG 9.4 его не
@@ -80,7 +93,7 @@ def _connect() -> psycopg2.extensions.connection:
     max_retries = _MAX_RETRIES
     while True:
         try:
-            conn = psycopg2.connect(_dsn, gssencmode="disable")
+            conn = psycopg2.connect(resolved, gssencmode="disable")
         except DB_RETRYABLE_ERRORS as e:
             attempt += 1
             msg = str(e).lower()

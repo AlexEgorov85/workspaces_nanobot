@@ -251,13 +251,10 @@ _HOOKS_DIR: Path = _WORKSPACE_DIR / "hooks"
 sys.path.insert(0, str(_HOOKS_DIR))
 sys.path.insert(0, str(_WORKSPACE_DIR))
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ПОЛЬЗОВАТЕЛЬСКАЯ КОНФИГУРАЦИЯ
-# ══════════════════════════════════════════════════════════════════════════════
-# Меняйте значения ниже под свои задачи.
-
 from dataclasses import dataclass
+from config import SETTINGS
+
+_CLI = SETTINGS.cli
 
 
 @dataclass
@@ -268,19 +265,22 @@ class DisplayConfig:
     show_tool_results: bool = True
     show_tool_params: bool = True
     show_progress: bool = True
-    typewriter_speed: float = 0.01  # секунд на символ; 0 = мгновенно
+    typewriter_speed: float = 0.01
 
 
-# Активная конфигурация вывода
-DISPLAY: DisplayConfig = DisplayConfig()
+DISPLAY: DisplayConfig = DisplayConfig(
+    show_reasoning=_CLI.get("show_reasoning", True),
+    show_tool_calls=_CLI.get("show_tool_calls", True),
+    show_tool_results=_CLI.get("show_tool_results", True),
+    show_tool_params=_CLI.get("show_tool_params", True),
+    show_progress=_CLI.get("show_progress", True),
+    typewriter_speed=float(_CLI.get("typewriter_speed", 0.01)),
+)
 
-# Таймауты (секунды; 0 = без лимита)
-LLM_TIMEOUT: float = 300      # LLM call timeout
-EXEC_TIMEOUT: int = 60        # Script execution timeout
-MAX_ITERATIONS: int = 200     # Max tool call iterations per turn
-
-# Логирование в stderr (подавляем INFO, чтобы не мешали typewriter)
-LOG_LEVEL: str = "WARNING"    # "DEBUG" | "INFO" | "WARNING" | "ERROR"
+LLM_TIMEOUT: float = float(_CLI.get("llm_timeout", 300))
+EXEC_TIMEOUT: int = int(_CLI.get("exec_timeout", 60))
+MAX_ITERATIONS: int = int(_CLI.get("max_iterations", 200))
+LOG_LEVEL: str = str(_CLI.get("log_level", "WARNING"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -635,31 +635,24 @@ def _apply_timeouts(config) -> None:
 
 def _get_audit_cache_config(config):
     """Вернуть (cache_file_path, db_config) или (None, None) если in_memory не включён."""
-    skill_config_path = config.workspace_path / "skills" / "audit_analyzer" / "config.json"
-    if not skill_config_path.exists():
-        return None, None
-
-    import json as _json
     try:
-        skill_cfg = _json.loads(skill_config_path.read_text(encoding="utf-8"))
+        acfg = SETTINGS.skills.audit_analyzer
+        if not acfg.get("in_memory_enabled", False):
+            return None, None
+
+        cache_path = acfg.get("in_memory_cache_path", "")
+        if not cache_path:
+            return None, None
+
+        from pathlib import Path as _Path
+        cache_file = _Path(cache_path)
+        if not cache_file.is_absolute():
+            cache_file = config.workspace_path / "skills" / "audit_analyzer" / cache_file
+
+        from skills.audit_analyzer.scripts.config import load_db_config
+        return str(cache_file), load_db_config()
     except Exception:
         return None, None
-
-    im_config = skill_cfg.get("database", {}).get("in_memory", {})
-    if not im_config.get("enabled"):
-        return None, None
-
-    cache_path = im_config.get("cache_path", "")
-    if not cache_path:
-        return None, None
-
-    from pathlib import Path as _Path
-    cache_file = _Path(cache_path)
-    if not cache_file.is_absolute():
-        cache_file = skill_config_path.parent / cache_file
-
-    from skills.audit_analyzer.scripts.config import load_db_config
-    return str(cache_file), load_db_config()
 
 
 def _preload_audit_cache(config) -> None:

@@ -20,7 +20,7 @@ from typing import Optional
 
 import httpx
 
-from config import get_llm_config, get_cli_config
+from skill_config import get_llm_config, get_cli_config
 
 
 def chat(messages: list[dict], *, context: Optional[list[dict]] = None, **kwargs) -> str:

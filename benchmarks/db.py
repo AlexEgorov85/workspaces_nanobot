@@ -29,10 +29,19 @@ except ImportError:
     configure = execute = transaction = _bench_fetch = fetchval = Json = None
     _db_ok = False
 
+try:
+    from config import SETTINGS as _S
+    _SCHEMA = _S.get("benchmark", {}).get("db_schema", "public") if isinstance(_S.get("benchmark", {}), dict) else "public"
+    _RUNS_TABLE = _S.get("benchmark", {}).get("runs_table", "benchmark_runs") if isinstance(_S.get("benchmark", {}), dict) else "benchmark_runs"
+    _RESULTS_TABLE = _S.get("benchmark", {}).get("results_table", "benchmark_results") if isinstance(_S.get("benchmark", {}), dict) else "benchmark_results"
+except Exception:
+    _SCHEMA = "public"
+    _RUNS_TABLE = "benchmark_runs"
+    _RESULTS_TABLE = "benchmark_results"
 
-SCHEMA = "public"
-RUNS_TABLE = "benchmark_runs"
-RESULTS_TABLE = "benchmark_results"
+SCHEMA = _SCHEMA
+RUNS_TABLE = _RUNS_TABLE
+RESULTS_TABLE = _RESULTS_TABLE
 
 
 def _is_greenplum() -> bool:

@@ -22,7 +22,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from nanobot import Nanobot, RunResult
 
-from gateway_settings import SETTINGS
+from config import SETTINGS
 from workspace.utils.db import async_fetch as fetch, async_execute as execute, async_transaction as transaction, configure
 
 # Настройка логирования
@@ -275,9 +275,9 @@ async def main():
 
     args = parser.parse_args()
 
-    dsn = args.db_url or os.getenv("DATABASE_URL") or SETTINGS.pg.dsn
+    dsn = args.db_url or os.getenv("DATABASE_URL") or SETTINGS.postgresql.get("dsn", "")
     if not dsn:
-        print("❌ Error: DSN не задан. Укажите --db-url, DATABASE_URL или pg.dsn в gateway_settings.py")
+        print("❌ Error: DSN не задан. Укажите --db-url, DATABASE_URL или PG_DSN в .env")
         return 1
     configure(dsn)
 

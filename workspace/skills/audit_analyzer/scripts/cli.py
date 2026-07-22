@@ -77,7 +77,7 @@ def _parse_params(raw: str) -> dict[str, Any]:
 # Add scripts dir to path so sibling modules are importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config import (
+from skill_config import (
     get_vector_index_path, get_max_retries, load_db_config,
     is_in_memory_enabled, get_in_memory_config,
 )
@@ -165,17 +165,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _create_db() -> Database | InMemoryDatabase:
-    """
-    Создать объект БД: InMemoryDatabase если включено, иначе Database.
-
-    Returns:
-        Database или InMemoryDatabase.
-    """
     cfg = load_db_config()
     if is_in_memory_enabled():
         im_cfg = get_in_memory_config()
         cfg["in_memory"] = im_cfg
+        print(f"[DB] DuckDB in-memory cache ({im_cfg.get('cache_path', '?')})", file=sys.stderr)
         return InMemoryDatabase(cfg)
+    print("[DB] PostgreSQL (direct)", file=sys.stderr)
     return Database(cfg)
 
 

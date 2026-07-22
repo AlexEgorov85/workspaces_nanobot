@@ -38,9 +38,7 @@ from nanobot.utils.helpers import sync_workspace_templates
 
 from hooks.tool_audit_hook import ToolAuditHook
 
-from gateway_settings import GatewaySettings
-
-SETTINGS = GatewaySettings()
+from config import SETTINGS
 
 
 def _resolve_transcription_key(config):
@@ -82,17 +80,17 @@ def main() -> None:
     # ── 2. Шина сообщений и SessionManager ───────────────────────────────
     bus = MessageBus()
 
-    pg = SETTINGS.pg
+    pg = SETTINGS.postgresql
     dsn = pg.dsn
     if dsn:
         from utils.db import configure
         configure(dsn)
         import os
         os.environ["DATABASE_URL"] = dsn
-    use_postgres = SETTINGS.storage == "postgres" or (SETTINGS.storage == "auto" and bool(dsn))
+    use_postgres = SETTINGS.gateway.storage == "postgres" or (SETTINGS.gateway.storage == "auto" and bool(dsn))
     if use_postgres:
         if not dsn:
-            console.print("[red]✗[/red] storage=postgres but pg.dsn is empty in gateway_settings.py")
+            console.print("[red]✗[/red] storage=postgres but pg.dsn is empty in config")
             sys.exit(1)
         session_manager = PGSessionManager(
             workspace=config.workspace_path,
@@ -111,18 +109,11 @@ def main() -> None:
             console.print("[yellow]⚠[/yellow] No PostgreSQL DSN — using JSONL files")
 
     # ── 3. Monkey-patch _normalize_tool_result ────────────────────────────
-    if SETTINGS.persist_threshold > 0:
-        # Увеличиваем лимит вывода shell-команды, чтобы сохранять полный вывод
-        try:
-            from nanobot.agent.tools.shell import ExecTool
-            ExecTool._MAX_OUTPUT = 10_000_000
-        except Exception:
-            pass
-
+    if SETTINGS.gateway.persist_threshold > 0:
         _persisted_store = SessionFileStore(
             _WORKSPACE_DIR / "data_store",
-            max_files=SETTINGS.persist_max_files,
-            max_age_hours=SETTINGS.persist_max_age_hours,
+            max_files=SETTINGS.gateway.persist_max_files,
+            max_age_hours=SETTINGS.gateway.persist_max_age_hours,
         )
         try:
             from nanobot.agent.runner import AgentRunner
@@ -147,7 +138,7 @@ def main() -> None:
                     except (TypeError, ValueError):
                         pass
 
-                if text is not None and len(text.encode("utf-8")) > SETTINGS.persist_threshold:
+                if text is not None and len(text.encode("utf-8")) > SETTINGS.gateway.persist_threshold:
                     try:
                         content, ext = prepare_content(text)
                         save_info = _persisted_store.save(
@@ -173,18 +164,18 @@ def main() -> None:
 
     # ── 4. Таймауты ───────────────────────────────────────────────────────
     import os
-    if SETTINGS.llm_timeout >= 0:
-        os.environ["NANOBOT_LLM_TIMEOUT_S"] = str(SETTINGS.llm_timeout)
-    if SETTINGS.exec_timeout >= 0:
+    if SETTINGS.gateway.llm_timeout >= 0:
+        os.environ["NANOBOT_LLM_TIMEOUT_S"] = str(SETTINGS.gateway.llm_timeout)
+    if SETTINGS.gateway.exec_timeout >= 0:
         try:
-            config.tools.exec.timeout = SETTINGS.exec_timeout
+            config.tools.exec.timeout = SETTINGS.gateway.exec_timeout
         except Exception:
             pass
 
     # ── 5. Логирование ───────────────────────────────────────────────────
     try:
         logger.remove()
-        logger.add(sys.stderr, level=SETTINGS.log_level)
+        logger.add(sys.stderr, level=SETTINGS.gateway.log_level)
     except Exception:
         pass
 
@@ -236,10 +227,10 @@ def main() -> None:
         console.print("[dim]Redis channel disabled[/dim]")
 
     # ── 9. Postgres-канал ────────────────────────────────────────────────
-    ch = pg.channel
-    ch_dsn = ch.dsn or dsn
-    ch_schema = ch.schema or pg.schema
-    if ch.enabled:
+    ch = pg.get("channel", {})
+    ch_dsn = ch.get("dsn", "") or dsn
+    ch_schema = ch.get("schema", "") or pg.schema
+    if ch.get("enabled", False):
         if not ch_dsn:
             console.print("[red]✗[/red] PostgresChannel enabled but no DSN (pg.dsn or pg.channel.dsn)")
         else:
@@ -247,12 +238,12 @@ def main() -> None:
                 "enabled": True,
                 "dsn": ch_dsn,
                 "schema": ch_schema,
-                "table_name": ch.table_name,
-                "poll_interval": ch.poll_interval,
-                "flush_interval": ch.flush_interval,
-                "max_concurrent": ch.max_concurrent,
-                "processing_timeout": ch.processing_timeout,
-                "allow_from": ch.allow_from,
+                "table_name": ch.get("table", "conversation_messages"),
+                "poll_interval": ch.get("poll_interval", 2.0),
+                "flush_interval": ch.get("flush_interval", 2.0),
+                "max_concurrent": ch.get("max_concurrent", 1),
+                "processing_timeout": ch.get("processing_timeout", 120),
+                "allow_from": ch.get("allow_from", ["*"]),
             }
             pg_channel = PostgresChannel(ch_cfg, bus)
             pg_channel.transcription_provider = config.channels.transcription_provider
@@ -276,19 +267,22 @@ def main() -> None:
         """Фоновая загрузка DuckDB-кеша для навыка audit_analyzer при старте."""
         cache_path, db_cfg = _get_audit_cache_cfg()
         if not cache_path or not db_cfg:
+            console.print("[dim]audit_analyzer in-memory cache: disabled[/dim]")
             return
         from skills.audit_analyzer.scripts.database import InMemoryDatabase
         from pathlib import Path
         cache_file = Path(cache_path)
         if cache_file.exists():
             import time
-            if time.time() - cache_file.stat().st_mtime < 3600:
+            age = time.time() - cache_file.stat().st_mtime
+            if age < 3600:
+                console.print(f"[green]✓[/green] audit_analyzer in-memory cache is fresh ({age/60:.0f}m old)")
                 return
         try:
             InMemoryDatabase.load_from_postgres(cache_path, db_cfg)
+            console.print(f"[green]✓[/green] audit_analyzer in-memory cache loaded ({Path(cache_path).name})")
         except Exception as exc:
-            import logging
-            logging.getLogger("preload").warning("audit_analyzer cache preload failed: %s", exc)
+            console.print(f"[yellow]⚠[/yellow] audit_analyzer cache preload failed: {exc}")
 
     async def _background_audit_cache_refresh():
         """Фоновая задача: каждый час проверять свежесть кеша и перезагружать при изменениях."""
@@ -313,23 +307,17 @@ def main() -> None:
 
     def _get_audit_cache_cfg():
         """Вернуть (cache_path, db_config) для audit_analyzer или (None, None)."""
-        skill_config_path = config.workspace_path / "skills" / "audit_analyzer" / "config.json"
-        if not skill_config_path.exists():
-            return None, None
         try:
-            import json
-            cfg = json.loads(skill_config_path.read_text(encoding="utf-8"))
-            im_config = cfg.get("database", {}).get("in_memory", {})
-            if not im_config.get("enabled"):
+            acfg = SETTINGS.skills.audit_analyzer
+            if not acfg.get("in_memory_enabled", False):
                 return None, None
-            cache_path = im_config.get("cache_path", "")
+            cache_path = acfg.get("in_memory_cache_path", "")
             if not cache_path:
                 return None, None
-            from pathlib import Path
             cache_file = Path(cache_path)
             if not cache_file.is_absolute():
-                cache_file = skill_config_path.parent / cache_file
-            from skills.audit_analyzer.scripts.config import load_db_config
+                cache_file = config.workspace_path / "skills" / "audit_analyzer" / cache_path
+            from skills.audit_analyzer.scripts.skill_config import load_db_config
             return str(cache_file), load_db_config()
         except Exception:
             return None, None
