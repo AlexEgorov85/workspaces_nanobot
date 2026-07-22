@@ -77,6 +77,15 @@ def main() -> None:
     sync_workspace_templates(config.workspace_path)
     console.print(f"{__logo__} Starting nanobot gateway v{__version__}...")
 
+    # ── 1b. Подстановка API-ключей провайдеров из .secrets.env ────────────
+    if hasattr(SETTINGS, "providers"):
+        for prov_name, prov_cfg in SETTINGS.providers.items():
+            api_key = prov_cfg.get("api_key") if hasattr(prov_cfg, "get") else None
+            if api_key:
+                section = getattr(config.providers, prov_name, None)
+                if section is not None:
+                    section.api_key = api_key
+
     # ── 2. Шина сообщений и SessionManager ───────────────────────────────
     bus = MessageBus()
 
