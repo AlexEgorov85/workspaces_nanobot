@@ -241,7 +241,7 @@ from nanobot.config.paths import is_default_workspace
 from nanobot.cron.service import CronService
 from nanobot.utils.helpers import sync_workspace_templates
 
-from pg_session_manager import PGSessionManager
+from lib.session.pg_session_manager import PGSessionManager
 
 from hooks.tool_audit_hook import ToolAuditHook
 
@@ -649,7 +649,7 @@ def _get_audit_cache_config(config):
         if not cache_file.is_absolute():
             cache_file = config.workspace_path / "skills" / "audit_analyzer" / cache_file
 
-        from skills.audit_analyzer.scripts.config import load_db_config
+        from skills.audit_analyzer.scripts.skill_config import load_db_config
         return str(cache_file), load_db_config()
     except Exception:
         return None, None

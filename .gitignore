@@ -36,8 +36,14 @@ workspace/temp_query.sql
 # DuckDB cache (auto-generated, binary)
 *.duckdb
 
+# IDE / tooling
+.opencode/
+
 # Runtime logs
-streamlit.log
+logs/
+
+# Runtime data
+workspace/memory/.cursor
 
 # Vector indexes (large binaries)
 **/data/vector/

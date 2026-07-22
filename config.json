@@ -345,7 +345,7 @@
       "extraBody": null
     },
     "mistral": {
-      "apiKey": "XavGPsHjtNt3uOtFGUhbUuad5PRm2D0W",
+      "apiKey": null,
       "apiBase": "https://api.mistral.ai/v1",
       "extraHeaders": null,
       "extraBody": null
@@ -484,7 +484,7 @@
       },
       "modes": {
         "predefined": { "enabled": true },
-        "vector": { "enabled": true, "index_path": "C:/Users/Алексей/Documents/WORK/Agent_v5/data/vector", "top_k": 5, "threshold": 0.75 },
+        "vector": { "enabled": true, "index_path": null, "top_k": 5, "threshold": 0.75 },
         "sql": { "enabled": true }
       },
       "cli": {

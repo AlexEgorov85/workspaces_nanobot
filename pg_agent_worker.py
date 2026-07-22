@@ -5,7 +5,7 @@ pg_agent_worker.py
 Поддерживает сессии: вопросы с одинаковым session_id используют общую историю диалога.
 
 Подключение к БД через глобальный SharedDB (utils.db).
-DSN по умолчанию из gateway_settings.py, можно переопределить через --db-url или DATABASE_URL.
+DSN по умолчанию из .env (ключ dsn), можно переопределить через --db-url или DATABASE_URL.
 """
 import asyncio
 import logging
@@ -30,7 +30,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.FileHandler("pg_worker.log", encoding="utf-8"),
+        logging.FileHandler("logs/pg_worker.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -263,7 +263,7 @@ async def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="nanobot PostgreSQL worker with session support")
-    parser.add_argument("--db-url", default=None, help="PostgreSQL DSN (по умолчанию из gateway_settings.py)")
+    parser.add_argument("--db-url", default=None, help="PostgreSQL DSN (по умолчанию из .env)")
     parser.add_argument("--config", default=os.getenv("NANOBOT_CONFIG_PATH"), help="nanobot config path")
     parser.add_argument("--workspace", default=os.getenv("NANOBOT_WORKSPACE"), help="Agent workspace")
     parser.add_argument("--batch", type=int, default=10, help="Batch size")

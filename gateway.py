@@ -1,7 +1,7 @@
 """
 Шлюз (gateway) для nanobot — долгоживущий сервер с каналами связи.
 
-Настройки — в gateway_settings.py в той же директории.
+Настройки — в .env / config.json.
 Запуск:
     python gateway.py
 """
@@ -24,8 +24,8 @@ sys.path.insert(0, str(_WORKSPACE_DIR))
 import json
 
 from loguru import logger
-from postgres_channel import PostgresChannel
-from redis_channel import RedisChannel
+from lib.channels.postgres_channel import PostgresChannel
+from lib.channels.redis_channel import RedisChannel
 from utils.session_file_store import SessionFileStore, prepare_content
 
 from nanobot.agent.loop import AgentLoop
@@ -33,7 +33,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.manager import ChannelManager
 from nanobot.cli.commands import _load_runtime_config, console, __logo__, __version__
-from pg_session_manager import PGSessionManager
+from lib.session.pg_session_manager import PGSessionManager
 from nanobot.utils.helpers import sync_workspace_templates
 
 from hooks.tool_audit_hook import ToolAuditHook
@@ -331,7 +331,7 @@ def main() -> None:
         _streamlit_log_handle = None
         if _streamlit_script.exists():
             try:
-                _streamlit_log = _SCRIPT_DIR / "streamlit.log"
+                _streamlit_log = _SCRIPT_DIR / "logs" / "streamlit.log"
                 _streamlit_log_handle = open(_streamlit_log, "a", encoding="utf-8")
                 _streamlit_proc = subprocess.Popen(
                     [sys.executable, "-m", "streamlit", "run", str(_streamlit_script),
