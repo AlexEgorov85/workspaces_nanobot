@@ -84,6 +84,11 @@ class BenchItem:
     def __hash__(self) -> int:
         return hash(self.id)
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, BenchItem):
+            return NotImplemented
+        return self.id == other.id
+
 
 @dataclass
 class BenchSuite:

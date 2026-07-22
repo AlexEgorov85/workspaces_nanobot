@@ -38,7 +38,7 @@ def _decode_jsonb(val) -> dict:
     if val is None:
         return {}
     if isinstance(val, str):
-        return json.loads(val)
+        return json.loads(val) if val else {}
     if isinstance(val, dict):
         return val
     return dict(val) if val else {}

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["config.py", "benchmarks", "lib"]
+omit = ["*/__pycache__/*", "*.pyc"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+[tool.pylint]
+disable = ["C0114", "C0115", "C0116", "R0903", "R0913"]

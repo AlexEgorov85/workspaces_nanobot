@@ -39,6 +39,13 @@ workspace/temp_query.sql
 # IDE / tooling
 .opencode/
 
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
 # Runtime logs
 logs/
 

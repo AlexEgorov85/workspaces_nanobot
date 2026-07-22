@@ -237,7 +237,7 @@ def _group_by_difficulty(results: list[BenchResult]) -> dict[str, list[BenchResu
     """
     groups: dict[str, list[BenchResult]] = {}
     for r in results:
-        d = _difficulty_label(r.total_score)
+        d = _difficulty_label(r.difficulty)
         groups.setdefault(d, []).append(r)
     return groups
 

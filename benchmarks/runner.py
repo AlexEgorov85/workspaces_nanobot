@@ -32,7 +32,7 @@ from benchmarks.db import BenchmarkDB
 from benchmarks.evaluator import evaluate
 from benchmarks.hooks import BenchmarkHook
 from benchmarks.loader import load_benchmark
-from benchmarks.models import BenchItem, BenchResult, BenchSuite, StepResult, SuiteResult
+from benchmarks.models import BenchItem, BenchResult, BenchSuite, CheckResult, StepResult, SuiteResult
 from benchmarks.reporter import save_json_report, save_markdown_report
 from benchmarks.scorer import score_multi_step, score_single, score_step
 
@@ -143,6 +143,21 @@ def _filter_items(
     return BenchSuite(name=suite.name, items=items, tags=suite.tags)
 
 
+def _format_checks_failures(checks: list[CheckResult]) -> str:
+    """Форматирование списка заваленных проверок в читаемую строку.
+
+    Args:
+        checks: Список результатов проверок.
+
+    Returns:
+        Строка вида 'tools✗ keywords_include✗' или пустая строка.
+    """
+    failed = [c for c in checks if not c.passed]
+    if not failed:
+        return ""
+    return " ".join(f"{c.check}✗" for c in failed)
+
+
 def _print_summary(suite_result: SuiteResult) -> None:
     """Вывод итоговой сводки по прогону в консоль.
 
@@ -150,24 +165,31 @@ def _print_summary(suite_result: SuiteResult) -> None:
         suite_result: Результаты прогона набора.
     """
     print()
-    print("=" * 60)
+    print("=" * 70)
     print(f"  BENCHMARK COMPLETE: {suite_result.suite_name}")
-    print("=" * 60)
+    print("=" * 70)
     print(f"  Items:    {suite_result.total_items}")
     print(f"  Passed:   {suite_result.passed_items} / {suite_result.total_items} "
-          f"({suite_result.passed_items / suite_result.total_items * 100:.1f}%"
-          f")" if suite_result.total_items else "  Passed:   0 / 0")
+          f"({suite_result.passed_items / suite_result.total_items * 100:.1f}%)")
     print(f"  Avg Score: {suite_result.avg_score:.2%}")
     print(f"  Duration:  {suite_result.duration_sec:.1f}s")
-    print("-" * 60)
+    print("-" * 70)
     for r in suite_result.results:
         status = "PASS" if r.passed else "FAIL"
-        diff = "S" if r.total_score <= 3 else ("M" if r.total_score <= 7 else "H")
-        print(f"  [{status}] [{diff}] {r.item_id:40s} score={r.total_score:.2%} "
-              f"iter={r.total_iterations} dur={r.duration_sec:.1f}s")
+        diff = "S" if r.difficulty <= 3 else ("M" if r.difficulty <= 7 else "H")
+        line = f"  [{status}] [{diff}] {r.item_id:35s} score={r.total_score:.2%}  iter={r.total_iterations}  dur={r.duration_sec:.1f}s"
+        if not r.passed:
+            fails = _format_checks_failures(r.checks)
+            if fails:
+                line += f"  [{fails}]"
+        print(line)
         if r.error:
-            print(f"         ERROR: {r.error}")
-    print("=" * 60)
+            print(f"  {'':38s}ERROR: {r.error}")
+    print("=" * 70)
+    if suite_result.passed_items < suite_result.total_items:
+        print(f"  {suite_result.total_items - suite_result.passed_items} item(s) FAILED.")
+        print("  See detail/<id>.json for per-check breakdown.")
+        print("  Hint: run with --verbose to see full agent responses.")
 
 
 def _cleanup_item(item: BenchItem, bot: Any) -> None:
@@ -260,8 +282,6 @@ async def _run_single(
         )
     except Exception as e:
         logger.error("Error running item {}: {}", item.id, e)
-        if verbose:
-            print(f"  ERROR: {e}")
         try:
             await bot._loop.sessions.delete_session(session_key)
         except Exception:
@@ -322,12 +342,12 @@ async def _run_multi_step(
     session_key = f"bench:multi:{item.id}:{run_id}"
     step_results: list[StepResult] = []
 
+    total_steps = len(item.steps)
+
     for step in item.steps:
         hook = BenchmarkHook()
-
-        if verbose:
-            total = len(item.steps)
-            print(f"  Step {step.step}/{total}: {step.question[:60]}")
+        step_index = step.step
+        print(f"    Step {step_index}/{total_steps}: {step.question[:70]}")
 
         try:
             result = await bot.run(
@@ -337,6 +357,7 @@ async def _run_multi_step(
             )
         except Exception as e:
             logger.error("Error in step {} of item {}: {}", step.step, item.id, e)
+            print(f"      -> ERROR: {e}")
             step_results.append(StepResult(
                 step=step.step,
                 weight=step.weight,
@@ -363,6 +384,11 @@ async def _run_multi_step(
             iterations=hook.iterations,
             duration_sec=hook.duration_sec,
         )
+
+        s_status = "PASS" if sr.passed else "FAIL"
+        fails = _format_checks_failures(sr.checks)
+        s_ext = f" [{fails}]" if fails else ""
+        print(f"      -> {s_status} score={sr.score:.2%} iter={sr.iterations} dur={sr.duration_sec:.1f}s{s_ext}")
         step_results.append(sr)
 
     # Очистка сессии агента
@@ -495,6 +521,38 @@ def _do_compare(args: argparse.Namespace) -> None:
     print()
 
 
+def _validate_items(suite: BenchSuite) -> list[str]:
+    """Проверка всех заданий на очевидные проблемы перед запуском.
+
+    Args:
+        suite: Набор тестов для проверки.
+
+    Returns:
+        Список предупреждений (пустой, если всё в порядке).
+    """
+    warnings: list[str] = []
+    seen_ids: set[str] = set()
+    for item in suite.items:
+        if item.id in seen_ids:
+            warnings.append(f"DUPLICATE ID '{item.id}' — will be overwritten in reports/DB")
+        seen_ids.add(item.id)
+        if item.type == "single" and not item.question:
+            warnings.append(f"Item '{item.id}' is single but has no question")
+        if item.type == "multi_step" and not item.steps:
+            warnings.append(f"Item '{item.id}' is multi_step but has no steps")
+        if item.difficulty < 1 or item.difficulty > 10:
+            warnings.append(f"Item '{item.id}' has difficulty={item.difficulty}, expected 1-10")
+        if item.max_iterations < 1:
+            warnings.append(f"Item '{item.id}' has max_iterations={item.max_iterations}, must be >= 1")
+        if item.timeout < 1:
+            warnings.append(f"Item '{item.id}' has timeout={item.timeout}, must be >= 1")
+        if item.type == "multi_step":
+            total_weight = sum(s.weight for s in item.steps)
+            if total_weight == 0:
+                warnings.append(f"Item '{item.id}': sum of step weights is 0 (all steps will be ignored)")
+    return warnings
+
+
 async def main_async(argv: list[str] | None = None) -> int:
     """Асинхронный входной точка запуска бенчмарков.
 
@@ -514,12 +572,79 @@ async def main_async(argv: list[str] | None = None) -> int:
     logger.remove()
     logger.add(sys.stderr, level=log_level)
 
-    suite = load_benchmark(args.items)
+    # Загрузка YAML с дружественной диагностикой ошибок
+    try:
+        suite = load_benchmark(args.items)
+    except FileNotFoundError as e:
+        print()
+        print("=" * 70)
+        print("  ERROR: Benchmark file(s) not found")
+        print("=" * 70)
+        print(f"  {e}")
+        print()
+        print("  Check that --items points to a valid .yaml file or directory.")
+        print(f"  Default items dir: {ITEMS_DIR}")
+        print(f"  Try: python benchmarks/runner.py --items {ITEMS_DIR}")
+        print()
+        return 1
+    except ValueError as e:
+        print()
+        print("=" * 70)
+        print("  ERROR: Invalid benchmark definition")
+        print("=" * 70)
+        print(f"  {e}")
+        print()
+        print("  Hint: for multi_step items, you must define at least one step.")
+        print("  Hint: run with --dry-run to preview items before running.")
+        print()
+        return 1
+    except KeyError as e:
+        print()
+        print("=" * 70)
+        print("  ERROR: Missing required field in benchmark YAML")
+        print("=" * 70)
+        print(f"  Missing field: {e}")
+        print()
+        print("  Every item must have at least: id, name, difficulty, category, type")
+        print("  For single items: question is required")
+        print("  For multi_step items: steps is required")
+        print()
+        print("  Check your YAML file and add the missing field.")
+        print("  See benchmarks/items/_template.yaml for reference.")
+        print()
+        return 1
+    except Exception as e:
+        print()
+        print("=" * 70)
+        print("  ERROR: Failed to load benchmark")
+        print("=" * 70)
+        print(f"  {type(e).__name__}: {e}")
+        print()
+        print("  Check your YAML file for syntax errors.")
+        print("  Run this to validate:")
+        print(f"    python -c \"import yaml; yaml.safe_load(open('{args.items}'))\"")
+        print()
+        return 1
+
     suite = _filter_items(suite, args.tags, args.category, args.difficulty, args.mode)
 
     if not suite.items:
+        print()
         print("No items match the filters. Nothing to run.")
+        print(f"  Available: {len(suite.items)} items in suite '{suite.name}'")
+        print(f"  Filters applied: tags={args.tags}, category={args.category}, "
+              f"difficulty={args.difficulty}, mode={args.mode}")
+        print()
         return 0
+
+    # Валидация перед запуском
+    warnings = _validate_items(suite)
+    if warnings:
+        print()
+        print("Warnings:")
+        for w in warnings:
+            print(f"  ! {w}")
+        print()
 
     if args.dry_run:
         print(f"DRY RUN: {suite.name}")
@@ -532,10 +657,32 @@ async def main_async(argv: list[str] | None = None) -> int:
             if item_type == "single":
                 print(f"  [SINGLE] d={diff} {name}")
                 print(f"           Q: {item.question}")
+                if item.expect:
+                    parts = []
+                    if item.expect.tools:
+                        parts.append(f"tools={item.expect.tools}")
+                    if item.expect.keywords_include:
+                        parts.append(f"kw_in={item.expect.keywords_include}")
+                    if item.expect.keywords_exclude:
+                        parts.append(f"kw_ex={item.expect.keywords_exclude}")
+                    if item.expect.check_file:
+                        parts.append(f"file={item.expect.check_file}")
+                    if item.expect.match_type != "keyword":
+                        parts.append(f"match={item.expect.match_type}")
+                    if parts:
+                        print(f"           expect: {', '.join(parts)}")
             else:
                 print(f"  [MULTI]  d={diff} {name}")
                 for step in item.steps:
-                    print(f"           Step {step.step}: {step.question}")
+                    s_parts = []
+                    if step.expect.tools:
+                        s_parts.append(f"tools={step.expect.tools}")
+                    if step.expect.keywords_include:
+                        s_parts.append(f"kw_in={step.expect.keywords_include}")
+                    if step.expect.check_file:
+                        s_parts.append(f"file={step.expect.check_file}")
+                    s_str = f" [{', '.join(s_parts)}]" if s_parts else ""
+                    print(f"           Step {step.step} (w={step.weight}): {step.question}{s_str}")
             print()
         return 0
 
