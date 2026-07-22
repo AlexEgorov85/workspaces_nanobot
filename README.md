@@ -195,8 +195,8 @@ python pg_agent_worker.py --once
 
 | Режим | Флаг | Хранилище | Хуки |
 |-------|------|-----------|------|
-| **vanilla** | (по умолчанию) | JSONL-файлы | Нет |
-| **patched** | `--patched / -P` | PGSessionManager (или file) | Из `workspace/hooks/` |
+| **vanilla** | (по умолчанию) | JSONL-файлы | ToolAuditHook |
+| **patched** | `--patched / -P` | PGSessionManager (или file) | ToolAuditHook + из `workspace/hooks/` |
 
 **Примеры:**
 ```bash
@@ -216,6 +216,7 @@ python cli_agent.py -P -S postgres            # patched, принудитель�
 - **Streamlit UI** — веб-чат на `:8501`
 - **ToolAuditHook** — мониторинг вызовов инструментов
 - Monkey-patch `_normalize_tool_result` — сохранение больших результатов в `data_store/`
+- Monkey-patch `agent._assemble_outbound` — инъекция tool audit в metadata исходящих сообщений
 
 Автоматический restart с exponential backoff (1с → 30с) при падении.
 
@@ -303,8 +304,8 @@ metadata (JSONB), reply_to, status, created_at, updated_at
 
 | Файл | Импортирует | Настраивается через |
 |------|-----------|-------------------|
-| `gateway.py` | `lib.channels.*`, `lib.session.*`, `utils.db`, `hooks.tool_audit_hook` | `.env`, `config.json` |
-| `cli_agent.py` | `lib.session.*`, `hooks.tool_audit_hook` | CLI-аргументы, `.env`, `config.json` |
+| `gateway.py` | `lib.channels.postgres_channel`, `lib.channels.redis_channel`, `lib.session.pg_session_manager`, `utils.session_file_store`, `utils.db` (lazy), `hooks.tool_audit_hook` | `.env`, `config.json` |
+| `cli_agent.py` | `lib.session.pg_session_manager`, `hooks.tool_audit_hook` | CLI-аргументы, `.env`, `config.json` |
 | `pg_agent_worker.py` | `workspace.utils.db` | `.env` |
 | `streamlit_app.py` | `workspace.utils.db` | `.env` |
 | `lib/session/pg_session_manager.py` | `workspace.utils.db` | `.env` |
@@ -375,7 +376,7 @@ python pg_agent_worker.py --once
 
 - **nanobot** — фреймворк (`pip install nanobot`)
 - **psycopg2-binary** — PostgreSQL
-- **redis[hiredis]** — Redis-канал
+- **redis>=5.0** — Redis-канал
 - **streamlit** — веб-чат
 - **loguru** — логирование
 - **httpx** — HTTP-клиент (асинхронный)
@@ -384,4 +385,5 @@ python pg_agent_worker.py --once
 - **pandas, openpyxl, tiktoken** — анализ данных (data-analyzer)
 - **Markdown, beautifulsoup4** — генерация HTML-презентаций
 - **PyYAML** — конфиги бенчмарков
+- **requests** — HTTP-клиент (синхронный)
 - **anthropic, openai** — опциональные LLM-провайдеры

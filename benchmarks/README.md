@@ -256,7 +256,7 @@ items:
 |-----------|--------------------|-----------------|
 | `FileNotFoundError` | `ERROR: Benchmark file(s) not found` | Нет файла/директории, расширение `.yml` вместо `.yaml` |
 | `ValueError` | `ERROR: Invalid benchmark definition` | multi_step без steps |
-| `KeyError` | `ERROR: Missing required field` | Нет поля `id` |
+| `KeyError` | `ERROR: Missing required field in benchmark YAML` | Нет поля `id` |
 | `yaml.ScannerError` / `yaml.ParserError` | `ERROR: Failed to load benchmark` + тип ошибки | Сбиты отступы, неверный синтаксис |
 | Любая другая | `ERROR: Failed to load benchmark` + тип и сообщение | Прочие проблемы |
 
