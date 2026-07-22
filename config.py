@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 _ENV_FILE = Path(__file__).parent / ".env"
+_SECRETS_FILE = Path(__file__).parent / ".secrets.env"
 
 
 class AttrDict(dict):
@@ -77,7 +78,17 @@ def load_env(path: str | Path | None = None) -> AttrDict:
     return AttrDict(tree)
 
 
+def _deep_merge(base: dict, override: dict) -> None:
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
+
 SETTINGS = load_env()
+if _SECRETS_FILE.exists():
+    _secrets = load_env(_SECRETS_FILE)
+    _deep_merge(SETTINGS, _secrets)
 
 
 def _flatten_env(d: dict, prefix: str = "") -> dict[str, str]:
