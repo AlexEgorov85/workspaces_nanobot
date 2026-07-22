@@ -1,0 +1,29 @@
+# Core
+psycopg2-binary>=2.9
+duckdb>=1.5
+streamlit>=1.56
+httpx>=0.28
+requests>=2.31
+loguru>=0.7
+
+# Skills: audit_analyzer
+faiss-cpu>=1.13
+numpy>=2.0
+sentence-transformers>=3.0
+
+# Skills: data-analyzer
+pandas>=2.0
+tiktoken>=0.7
+openpyxl>=3.1
+
+# Skills: html_presentation_generator
+Markdown>=3.5
+beautifulsoup4>=4.12
+PyYAML>=6.0
+
+# Channels
+redis>=5.0
+
+# LLM providers (optional — depending on which you use)
+anthropic>=0.100
+openai>=2.0

@@ -33,6 +33,12 @@ workspace/cache/
 workspace/output/
 workspace/temp_query.sql
 
+# DuckDB cache (auto-generated, binary)
+*.duckdb
+
+# Runtime logs
+streamlit.log
+
 # Vector indexes (large binaries)
 **/data/vector/
 *.faiss
