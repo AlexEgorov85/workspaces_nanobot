@@ -301,7 +301,15 @@ for entry in st.session_state.messages:
                     # Это может быть data URL или путь к файлу
                     if media_item.startswith("data:"):
                         # Data URL — сохраняем и показываем ссылку на скачивание
-                        filename = f"file_{uuid.uuid4().hex[:8]}"
+                        # Извлекаем MIME-тип из data URL для определения расширения
+                        mime_type = ""
+                        if "," in media_item:
+                            header = media_item.split(",")[0]
+                            if ":" in header and ";" in header:
+                                mime_type = header.split(":")[1].split(";")[0]
+                        
+                        ext = _get_extension_from_mime(mime_type) if mime_type else ""
+                        filename = f"file_{uuid.uuid4().hex[:8]}{ext}"
                         saved_path = _save_file_from_data_url(media_item, filename)
                         if saved_path:
                             file_path = Path(saved_path)
@@ -332,14 +340,27 @@ for entry in st.session_state.messages:
                     path = media_item.get("path", "")
                     
                     if data_url and data_url.startswith("data:"):
+                        # Извлекаем MIME-тип из data URL для определения расширения
+                        mime_type = ""
+                        if "," in data_url:
+                            header = data_url.split(",")[0]
+                            if ":" in header and ";" in header:
+                                mime_type = header.split(":")[1].split(";")[0]
+                        
+                        ext = _get_extension_from_mime(mime_type) if mime_type else ""
+                        
+                        # Если в filename нет расширения, добавляем его из MIME-типа
+                        if not Path(filename).suffix and ext:
+                            filename = f"{Path(filename).stem}{ext}"
+                        
                         saved_path = _save_file_from_data_url(data_url, filename)
                         if saved_path:
                             file_path = Path(saved_path)
                             with open(file_path, "rb") as f:
                                 st.download_button(
-                                    label=f"📎 Скачать {filename}",
+                                    label=f"📎 Скачать {file_path.name}",
                                     data=f.read(),
-                                    file_name=filename,
+                                    file_name=file_path.name,
                                     key=f"download_{uuid.uuid4()}",
                                 )
                     elif path and Path(path).exists():
