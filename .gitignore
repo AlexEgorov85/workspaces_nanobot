@@ -1,1 +1,58 @@
-(empty)
+# Secrets
+.secrets.env
+**/.secrets.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data
+history/
+media/
+webui/
+cron/
+**/tool-results/
+.local/
+workspace/sessions/
+workspace/cache/
+workspace/output/
+workspace/temp_query.sql
+
+# DuckDB cache (auto-generated, binary)
+*.duckdb
+
+# IDE / tooling
+.opencode/
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# Runtime logs
+logs/
+
+# Runtime data
+workspace/memory/.cursor
+
+# Vector indexes (large binaries)
+**/data/vector/
+*.faiss
+
