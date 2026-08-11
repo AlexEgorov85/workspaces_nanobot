@@ -1,76 +1,58 @@
-```gitignore
+# Secrets
+.secrets.env
+**/.secrets.env
+
 # Python
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-.Python
-python-eggs/
-
-# Virtual environments
-venv/
-env/
-ENV/
+*.egg-info/
+*.egg
 .venv/
-.env/
-
-# Streamlit
-.streamlit/
-
-# Dependencies
-pip-log.txt
-pip-delete-this-directory.txt
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.log
-*.tmp
-*.swp
-.DS_Store
-Thumbs.db
-
-# Local configuration
-.env
-.env.local
-*.env
-*.env.*
-config.json
-*.json
+venv/
 
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
 *.swo
 
-# Build artifacts
-dist/
-build/
-*.egg-info/
-target/
-.gradle/
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data
+history/
+media/
+webui/
+cron/
+**/tool-results/
+.local/
+workspace/sessions/
+workspace/cache/
+workspace/output/
+workspace/temp_query.sql
+
+# DuckDB cache (auto-generated, binary)
+*.duckdb
+
+# IDE / tooling
+.opencode/
 
 # Testing
 .pytest_cache/
-.mypy_cache/
-.hypothesis/
-cover/
 htmlcov/
+.coverage
+.coverage.*
+coverage.xml
 
-# OS generated
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-```
+# Runtime logs
+logs/
+
+# Runtime data
+workspace/memory/.cursor
+
+# Vector indexes (large binaries)
+**/data/vector/
+*.faiss
+
