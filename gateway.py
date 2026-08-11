@@ -1,9 +1,143 @@
 """
 Шлюз (gateway) для nanobot — долгоживущий сервер с каналами связи.
 
-Настройки — в .env / config.json.
-Запуск:
-    python gateway.py
+╔══════════════════════════════════════════════════════════════════════════╗
+║                          АРХИТЕКТУРА                                   ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+gateway.py — это точка входа для запуска nanobot как долгоживущего сервера.
+В отличие от cli_agent.py (терминальный интерфейс, stdin/stdout), gateway
+общается с пользователями через внешние каналы связи (channels):
+
+  • Telegram / Slack / webhook  — стандартные каналы из nanobot (ChannelManager)
+  • Redis                       — канал поверх Redis pub/sub (incoming/outgoing keys)
+  • PostgreSQL                  — канал поверх таблицы conversation_messages
+  • Streamlit UI                — локальный веб-интерфейс чата на :8501
+
+Процесс рассчитан на работу "вечно": при необработанном исключении
+gateway перезапускается сам с exponential backoff (1с → 2с → ... → 30с).
+
+Основные отличия от cli_agent.py:
+  • Нет интерактивного цикла ввода — всё общение идёт через шину сообщений
+    (MessageBus) и каналы, которые читают входящие сообщения и публикуют ответы.
+  • Сессии по умолчанию хранятся в PostgreSQL (PGSessionManager), если
+    настроен DSN; иначе — в JSONL-файлах (SessionManager).
+  • Встроенный ToolAuditHook — аудит вызовов инструментов в metadata ответа.
+  • Monkey-patch ContextGovernor.normalize_tool_result — большие результаты
+    инструментов выгружаются в data_store/ (файл вместо гигантской строки).
+
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                          ЖИЗНЕННЫЙ ЦИКЛ                                ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  1. Загрузка конфига
+     Читается config.json из той же директории, что и gateway.py.
+     Запускается sync_workspace_templates() — синхронизация шаблонов workspace.
+
+  1b. Подстановка API-ключей
+     Из SETTINGS.providers (секция в .env / config.json) ключи провайдеров
+     подставляются в config.providers.*.api_key.
+
+  2. Создание шины сообщений (MessageBus)
+     Центральная шина: агент и каналы обмениваются через неё.
+     Inbound  → канал → агент
+     Outbound → агент → канал
+
+  3. Выбор хранилища сессий
+     • storage=postgres → принудительно PGSessionManager (требует DSN)
+     • storage=file     → JSONL-файлы (SessionManager)
+     • storage=auto     → PG если есть dsn в конфиге, иначе JSONL
+
+  4. Monkey-patch ContextGovernor.normalize_tool_result
+     Результаты инструментов больше persist_threshold байт сохраняются
+     в workspace/data_store/ как файлы; в контекст LLM подставляется
+     короткая ссылка "[Result saved to data_store/...]" (защита от
+     раздувания контекста). read_file исключён из выгрузки во избежание
+     циклов persist → read → persist.
+
+  5. Таймауты и логирование
+     LLM-таймаут (NANOBOT_LLM_TIMEOUT_S) и exec-таймаут из настроек.
+     Уровень логов loguru настраивается из SETTINGS.gateway.log_level.
+
+  6. Создание AgentLoop
+     Главный цикл агента. Подключается ToolAuditHook и monkey-patch
+     _assemble_outbound, внедряющий аудит тулов в result.metadata.
+
+  7. ChannelManager + Redis/Postgres каналы
+     ChannelManager управляет стандартными каналами nanobot. Redis и
+     Postgres каналы создаются и регистрируются вручную (по настройкам
+     SETTINGS.channels.redis / SETTINGS.channels.postgres).
+
+  8. Фоновые задачи при старте
+     • _preload_vector_indexes()     — загрузка векторных индексов audit_analyzer
+     • _preload_audit_cache()        — загрузка DuckDB-кеша audit_analyzer
+     • _background_audit_cache_refresh() — перезагрузка кеша каждый час,
+                                           если таблицы в PG устарели
+
+  9. Запуск (run())
+     Стартует все каналы, поднимает Streamlit UI (:8501) как subprocess,
+     запускает AgentLoop. При завершении корректно останавливает каналы,
+     закрывает MCP, сбрасывает сессии на диск.
+
+  10. Перезапуск с backoff
+      Если run() упал с исключением — пауза restart_delay, удвоение
+      задержки до max_restart_delay, затем повторный запуск.
+      Чистое завершение (clean shutdown) выходит из цикла.
+
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                     СТРУКТУРА ФАЙЛА                                    ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  1. Импорты и пути
+     ─────────────────────
+     _SCRIPT_DIR   — директория со скриптом
+     _WORKSPACE_DIR— корень workspace (tools/, hooks/, data_store/)
+
+  2. Вспомогательные функции
+     ─────────────────────────
+     _settings_section()          — достать top-level секцию SETTINGS как dict
+     _resolve_transcription_key() — API-ключ провайдера транскрипции (openai/groq)
+     _resolve_transcription_base()— базовый URL API транскрипции
+
+  3. main() — запуск шлюза (все этапы по номерам выше)
+
+  4. Точка входа
+     ─────────────
+     if __name__ == "__main__": main()
+
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                         НАСТРОЙКИ                                       ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  Все настройки — в .env / config.json (секция SETTINGS.gateway):
+
+    storage                  — "postgres" | "file" | "auto"
+    persist_threshold        — мин. размер результата (байт) для выгрузки в data_store
+    persist_max_files        — макс. файлов в data_store
+    persist_max_age_hours    — макс. возраст файла (часы)
+    llm_timeout              — таймаут LLM вызова, сек (>=0 активирует env var)
+    exec_timeout             — таймаут exec-скриптов, сек
+    log_level                — уровень логов loguru (например "WARNING")
+
+  Каналы (SETTINGS.channels):
+    redis.enabled            — включить Redis-канал
+    postgres.enabled         — включить Postgres-канал
+    postgres.dsn             — строка подключения к БД
+    transcription_provider   — "openai" | "groq" (транскрипция голосовых)
+
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║                         ПРИМЕРЫ ЗАПУСКА                                ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+  # Запуск gateway со стандартными настройками
+  python gateway.py
+
+  # С логированием в stderr на уровне DEBUG
+  # (SETTINGS.gateway.log_level = "DEBUG" в config.json)
 """
 
 from __future__ import annotations
@@ -16,6 +150,11 @@ import time
 import traceback
 from pathlib import Path
 
+# ── Пути скрипта и workspace ────────────────────────────────────────────────
+# _SCRIPT_DIR    — директория, где лежит gateway.py (корень проекта nanobot)
+# _WORKSPACE_DIR — корень workspace (tools/, hooks/, data_store/, skills/).
+# Оба добавляются в sys.path, чтобы импорты вида `from utils...`, `from hooks...`
+# и `from config import SETTINGS` работали независимо от рабочего каталога.
 _SCRIPT_DIR = Path(__file__).parent
 _WORKSPACE_DIR = _SCRIPT_DIR / "workspace"
 sys.path.insert(0, str(_SCRIPT_DIR))
@@ -42,7 +181,14 @@ from config import SETTINGS
 
 
 def _settings_section(name: str, default: dict | None = None) -> dict:
-    """Вернуть top-level секцию SETTINGS как dict (пусто, если нет)."""
+    """Вернуть top-level секцию SETTINGS как dict (пусто, если нет).
+
+    SETTINGS может быть как dict-ом, так и объектом с атрибутами
+    (в зависимости от формата config.json/.env). Функция нормализует
+    любой из вариантов к dict.
+
+    Пример: _settings_section("channels").get("redis") — конфиг Redis-канала.
+    """
     if isinstance(SETTINGS, dict):
         node = SETTINGS.get(name, {}) or {}
     else:
@@ -54,6 +200,7 @@ def _resolve_transcription_key(config):
     """Вернуть API-ключ для провайдера транскрипции.
 
     Поддерживает openai и groq. Если ключ не найден — пустая строка.
+    Используется для распознавания голосовых сообщений в Postgres-канале.
     """
     provider = config.channels.transcription_provider
     try:
@@ -67,7 +214,8 @@ def _resolve_transcription_key(config):
 def _resolve_transcription_base(config):
     """Вернуть базовый URL для API транскрипции.
 
-    Поддерживает openai и groq. Если не задан — пустая строка.
+    Поддерживает openai и groq. Если не задан — пустая строка
+    (тогда используется стандартный endpoint провайдера).
     """
     provider = config.channels.transcription_provider
     try:
@@ -82,11 +230,16 @@ def main() -> None:
     """Запускает gateway со всеми локальными доработками."""
 
     # ── 1. Загрузка конфигурации ─────────────────────────────────────────
+    # Читаем config.json из директории скрипта, резолвим переменные
+    # окружения, синхронизируем шаблоны workspace (новые файлы/инструменты).
     config = _load_runtime_config(config=str(_SCRIPT_DIR / "config.json"), workspace=str(_WORKSPACE_DIR))
     sync_workspace_templates(config.workspace_path)
     console.print(f"{__logo__} Starting nanobot gateway v{__version__}...")
 
     # ── 1b. Подстановка API-ключей провайдеров из .secrets.env ────────────
+    # SETTINGS.providers содержит api_key для каждого провайдера
+    # (обычно из .secrets.env). Перекладываем их в загруженный config,
+    # чтобы агент и инструменты использовали актуальные ключи.
     if hasattr(SETTINGS, "providers"):
         for prov_name, prov_cfg in SETTINGS.providers.items():
             api_key = prov_cfg.get("api_key") if hasattr(prov_cfg, "get") else None
@@ -96,8 +249,13 @@ def main() -> None:
                     section.api_key = api_key
 
     # ── 2. Шина сообщений и SessionManager ───────────────────────────────
+    # MessageBus — центральная шина: каналы публикуют inbound, агент
+    # публикует outbound. SessionManager хранит историю сессий.
     bus = MessageBus()
 
+    # Конфиг Postgres для хранилища сессий (секция channels.postgres).
+    # Если задан DSN — настраиваем utils.db (configure) и экспортируем
+    # DATABASE_URL в окружение (нужно некоторым инструментам/скриптам).
     pg = _settings_section("channels").get("postgres", {})
     dsn = pg.get("dsn", "")
     if dsn:
@@ -105,6 +263,11 @@ def main() -> None:
         configure(dsn)
         import os
         os.environ["DATABASE_URL"] = dsn
+
+    # Выбор хранилища сессий:
+    #   postgres → принудительно PGSessionManager (нужен DSN, иначе выходим)
+    #   auto     → PG если есть DSN, иначе JSONL-файлы
+    #   file     → JSONL-файлы (ветка else ниже)
     use_postgres = SETTINGS.gateway.storage == "postgres" or (SETTINGS.gateway.storage == "auto" and bool(dsn))
     if use_postgres:
         if not dsn:
@@ -129,7 +292,14 @@ def main() -> None:
     # ── 3. Monkey-patch ContextGovernor.normalize_tool_result ──────────────
     # v0.3.0: AgentRunner._normalize_tool_result перенесён в
     # ContextGovernor.normalize_tool_result (nanobot/agent/context_governance.py).
+    #
+    # Идея: огромные результаты инструментов (например, вывод скрипта на
+    # сотни КБ) раздувают контекст LLM и дорого стоят. Поэтому результаты
+    # больше persist_threshold байт сохраняются в data_store/ как файлы,
+    # а в контекст подставляется короткая ссылка на файл.
     if SETTINGS.gateway.persist_threshold > 0:
+        # Файловое хранилище для "выгруженных" результатов инструментов.
+        # max_files / max_age_hours ограничивают рост data_store.
         _persisted_store = SessionFileStore(
             _WORKSPACE_DIR / "data_store",
             max_files=SETTINGS.gateway.persist_max_files,
@@ -145,10 +315,13 @@ def main() -> None:
             _original = ContextGovernor.normalize_tool_result
 
             def _normalize_with_persist(config, tool_call_id, tool_name, result):
+                # 1. Нормализуем "пустой" результат (пустые строки и т.п.)
                 result = ensure_nonempty_tool_result(tool_name, result)
+                # 2. Инструменты из _EXEMPT_TOOLS пропускаем без выгрузки
                 if tool_name in _EXEMPT_TOOLS:
                     return result
 
+                # 3. Приводим результат к тексту (str напрямую, остальное — JSON)
                 text = None
                 if isinstance(result, str):
                     text = result
@@ -158,6 +331,8 @@ def main() -> None:
                     except (TypeError, ValueError):
                         pass
 
+                # 4. Если текст больше порога — сохраняем в data_store/
+                #    и подставляем короткую ссылку вместо полного содержимого.
                 if text is not None and len(text.encode("utf-8")) > SETTINGS.gateway.persist_threshold:
                     try:
                         content, ext = prepare_content(text)
@@ -173,16 +348,24 @@ def main() -> None:
                         )
                     except OSError as _exc:
                         # disk full, permissions, etc — fall back to original
+                        # (не выгружаем, возвращаем как есть)
                         pass
 
+                # 5. Иначе — оригинальная нормализация без изменений
                 return _original(config, tool_call_id, tool_name, result)
 
+            # staticmethod, т.к. ContextGovernor.normalize_tool_result —
+            # статический метод; обёртка должна сохранить эту сигнатуру.
             ContextGovernor.normalize_tool_result = staticmethod(_normalize_with_persist)
             console.print("[green]✓[/green] ContextGovernor.normalize_tool_result patched")
         except Exception as exc:
+            # Если патч не применился (версия nanobot изменилась) —
+            # не роняем gateway, а просто предупреждаем.
             console.print(f"[yellow]⚠[/yellow] _normalize_tool_result patch failed: {exc}")
 
     # ── 4. Таймауты ───────────────────────────────────────────────────────
+    # LLM-таймаут пробрасывается в окружение (NANOBOT_LLM_TIMEOUT_S),
+    # exec-таймаут — в config.tools.exec.timeout.
     import os
     if SETTINGS.gateway.llm_timeout >= 0:
         os.environ["NANOBOT_LLM_TIMEOUT_S"] = str(SETTINGS.gateway.llm_timeout)
@@ -193,6 +376,8 @@ def main() -> None:
             pass
 
     # ── 5. Логирование ───────────────────────────────────────────────────
+    # Перенастраиваем loguru: убираем дефолтные обработчики и пишем
+    # в stderr с заданным уровнем (WARNING подавляет INFO-шум).
     try:
         logger.remove()
         logger.add(sys.stderr, level=SETTINGS.gateway.log_level)
@@ -200,6 +385,7 @@ def main() -> None:
         pass
 
     # ── 6. Создание AgentLoop ────────────────────────────────────────────
+    # ToolAuditHook собирает события вызовов инструментов за ход агента.
     tool_audit_hook = ToolAuditHook()
     agent = AgentLoop.from_config(
         config, bus,
@@ -207,7 +393,12 @@ def main() -> None:
         hooks=[tool_audit_hook],
     )
 
-    # Monkey-patch _assemble_outbound — внедряем аудит тулов в metadata
+    # Monkey-patch _assemble_outbound — внедряем аудит тулов в metadata.
+    # _assemble_outbound формирует финальное outbound-сообщение агента.
+    # Обёртка добавляет в result.metadata["_tool_audit"] список записей
+    # из tool_audit_hook.drain() (вызовы инструментов за этот ход).
+    # Это позволяет каналам показать пользователю, какие инструменты
+    # вызывались и с каким результатом.
     _orig_assemble = agent._assemble_outbound
 
     def _assemble_with_audit(msg, final_content, all_msgs, stop_reason, had_injections, on_stream, *, turn_latency_ms=None):
@@ -220,9 +411,13 @@ def main() -> None:
 
     agent._assemble_outbound = _assemble_with_audit
     # ── 7. ChannelManager ────────────────────────────────────────────────
+    # ChannelManager управляет стандартными каналами nanobot (Telegram,
+    # Slack, webhook и т.д.). Redis/Postgres каналы добавляются ниже вручную.
     channels = ChannelManager(config, bus, session_manager=session_manager)
 
     # ── 8. Redis-канал ────────────────────────────────────────────────────
+    # Канал поверх Redis: читает сообщения из incoming_key, публикует
+    # ответы в outgoing_prefix. Настройки — секция SETTINGS.channels.redis.
     rs = _settings_section("channels").get("redis", {})
     if rs.get("enabled", False):
         redis_cfg = {
@@ -238,6 +433,7 @@ def main() -> None:
             "allow_from": rs.get("allow_from", ["*"]),
         }
         redis_channel = RedisChannel(redis_cfg, bus)
+        # Пробрасываем глобальные настройки вывода из конфига в канал
         redis_channel.send_progress = config.channels.send_progress
         redis_channel.send_tool_hints = config.channels.send_tool_hints
         redis_channel.show_reasoning = config.channels.show_reasoning
@@ -247,6 +443,9 @@ def main() -> None:
         console.print("[dim]Redis channel disabled[/dim]")
 
     # ── 9. Postgres-канал ────────────────────────────────────────────────
+    # Канал поверх таблицы conversation_messages в PostgreSQL: агент
+    # отвечает, записывая строку в таблицу (интеграция с внешними БП).
+    # Плюс транскрипция голосовых через transcription_provider.
     if pg.get("enabled", False):
         if not dsn:
             console.print("[red]✗[/red] PostgresChannel enabled but no DSN (channels.postgres.dsn)")
@@ -263,6 +462,8 @@ def main() -> None:
                 "allow_from": pg.get("allow_from", ["*"]),
             }
             pg_channel = PostgresChannel(ch_cfg, bus)
+            # Транскрипция голосовых (whisper): провайдер, ключ, базовый URL,
+            # язык распознавания — берём из конфига каналов.
             pg_channel.transcription_provider = config.channels.transcription_provider
             pg_channel.transcription_api_key = _resolve_transcription_key(config)
             pg_channel.transcription_api_base = _resolve_transcription_base(config)
@@ -280,13 +481,19 @@ def main() -> None:
     _streamlit_script = _SCRIPT_DIR / "streamlit_app.py"
 
     # ── 11. Фоновая загрузка DuckDB-кеша и векторных индексов для audit_analyzer ──
+    # Навык audit_analyzer (анализ аудитов) работает с кешем в памяти:
+    # векторные индексы и DuckDB-таблицы. Загружаем их фоном при старте,
+    # чтобы первый запрос не ждал инициализацию.
+
     async def _preload_vector_indexes():
         """Фоновая загрузка векторных индексов из БД в память при старте."""
         try:
             acfg = SETTINGS.skills.audit_analyzer
+            # Если mode_vector_db_table не задан — индексы не загружаем
             if not acfg.get("mode_vector_db_table"):
                 console.print("[dim]audit_analyzer vector indexes: mode_vector_db_table не задан, пропуск[/dim]")
                 return
+            # preload_indexes возвращает список загруженных индексов
             from skills.audit_analyzer.scripts.vector_mode import preload_indexes
             loaded = await asyncio.to_thread(preload_indexes)
             if loaded:
@@ -303,12 +510,14 @@ def main() -> None:
     async def _preload_audit_cache():
         """Фоновая загрузка DuckDB-кеша для навыка audit_analyzer при старте."""
         cache_path, db_cfg = _get_audit_cache_cfg()
+        # Если in_memory_enabled выключен или путь не задан — пропускаем
         if not cache_path or not db_cfg:
             console.print("[dim]audit_analyzer in-memory cache: disabled[/dim]")
             return
         from skills.audit_analyzer.scripts.database import InMemoryDatabase
         from pathlib import Path
         cache_file = Path(cache_path)
+        # Если кеш свежий (< 1 часа) — не пересоздаём его на старте
         if cache_file.exists():
             import time
             age = time.time() - cache_file.stat().st_mtime
@@ -331,6 +540,7 @@ def main() -> None:
         while True:
             try:
                 await asyncio.sleep(3600)
+                # check_stale сверяет MAX(updated_at) таблиц в PG с кешем
                 result = InMemoryDatabase.check_stale(cache_path, db_cfg)
                 if result.get("stale_tables"):
                     _logging.getLogger("cache").info(
@@ -338,12 +548,18 @@ def main() -> None:
                     )
                     InMemoryDatabase.load_from_postgres(cache_path, db_cfg)
             except asyncio.CancelledError:
-                break
+                break  # штатное завершение при остановке gateway
             except Exception as exc:
                 _logging.getLogger("cache").warning("Audit cache refresh failed: %s", exc)
 
     def _get_audit_cache_cfg():
-        """Вернуть (cache_path, db_config) для audit_analyzer или (None, None)."""
+        """Вернуть (cache_path, db_config) для audit_analyzer или (None, None).
+
+        Возвращает (None, None), если:
+          • in_memory_enabled выключен
+          • in_memory_cache_path не задан
+          • не удалось загрузить конфиг БД (напр. нет доступа к PG)
+        """
         try:
             acfg = SETTINGS.skills.audit_analyzer
             if not acfg.get("in_memory_enabled", False):
@@ -351,6 +567,7 @@ def main() -> None:
             cache_path = acfg.get("in_memory_cache_path", "")
             if not cache_path:
                 return None, None
+            # Относительный путь резолвится относительно workspace/skills/audit_analyzer
             cache_file = Path(cache_path)
             if not cache_file.is_absolute():
                 cache_file = config.workspace_path / "skills" / "audit_analyzer" / cache_path
@@ -361,9 +578,12 @@ def main() -> None:
 
     # ── 12. Запуск ───────────────────────────────────────────────────────
     async def run():
+        # Стартуем все каналы (включая Redis/Postgres выше) как фоновую задачу
         channels_task = asyncio.create_task(channels.start_all())
 
         # Запуск Streamlit UI (веб-интерфейс чата)
+        # Поднимаем отдельный subprocess `streamlit run streamlit_app.py` на :8501.
+        # Логи пишем в logs/streamlit.log (append).
         _streamlit_proc: subprocess.Popen | None = None
         _streamlit_log_handle = None
         if _streamlit_script.exists():
@@ -379,12 +599,16 @@ def main() -> None:
                 )
                 console.print("[green]✓[/green] Streamlit UI started on :8501")
             except Exception as exc:
+                # Если Streamlit не поднялся — gateway продолжает работать
                 console.print(f"[yellow]⚠[/yellow] Streamlit failed to start: {exc}")
 
         try:
+            # Фоновые задачи предзагрузки кеша audit_analyzer
             asyncio.create_task(_preload_vector_indexes())
             asyncio.create_task(_preload_audit_cache())
             asyncio.create_task(_background_audit_cache_refresh())
+            # Блокирующий вызов: главный цикл агента работает,
+            # пока его не остановят (CancelledError/KeyboardInterrupt).
             await agent.run()
         except asyncio.CancelledError:
             console.print("\nShutting down...")
@@ -394,6 +618,7 @@ def main() -> None:
             console.print("\n[red]Gateway crashed[/red]")
             console.print(traceback.format_exc())
         finally:
+            # Корректная остановка: сначала каналы, затем Streamlit, затем агент.
             channels_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await channels_task
@@ -411,6 +636,7 @@ def main() -> None:
             await agent.close_mcp()
             agent.stop()
             await channels.stop_all()
+            # Сбрасываем несохранённые сессии на диск
             flushed = agent.sessions.flush_all()
             if flushed:
                 logger.info("Flushed {} session(s) to disk", flushed)
@@ -429,6 +655,7 @@ def main() -> None:
             console.print("\nExiting...")
             break
         except Exception:
+            # Падение — ждём и перезапускаемся с увеличивающейся паузой
             console.print(f"[red]Gateway exited unexpectedly, restarting in {restart_delay}s...[/red]")
             console.print(traceback.format_exc())
             time.sleep(restart_delay)
