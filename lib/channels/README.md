@@ -70,7 +70,7 @@
 | `created_at` | TIMESTAMPTZ | Дата создания |
 | `updated_at` | TIMESTAMPTZ | Дата обновления |
 
-Тестовые данные: `sql/seed_messages.sql` (14 user + 3 assistant сообщения).
+Тестовые данные: `sql/seed_messages.sql` (14 user + 4 assistant сообщения).
 
 ---
 

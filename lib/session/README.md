@@ -51,6 +51,12 @@ agent = AgentLoop.from_config(config, bus, session_manager=sm)
 | `media` | JSONB | Медиафайлы |
 | `cli_apps` | JSONB | CLI-приложения |
 | `mcp_presets` | JSONB | MCP-пресеты |
+| `tool_call_id` | TEXT | ID вызова инструмента |
+| `name` | TEXT | Имя инструмента |
+| `injected_event` | TEXT | Инжектированное событие |
+| `_command` | BOOLEAN | Флаг командного сообщения |
+| `_channel_delivery` | BOOLEAN | Флаг доставки через канал |
+| `created_at` | TIMESTAMPTZ | Дата создания |
 
 Индекс: `(session_key, seq)` для быстрой загрузки.
 
@@ -64,7 +70,7 @@ psql -d nanobot -f lib/session/sql/create_session_tables.sql
 psql -d nanobot -f lib/session/sql/create_session_tables_gp.sql
 ```
 
-Разница GP-версии: `DISTRIBUTED BY (session_key)`, отсутствие `BIGSERIAL` → `BIGSERIAL` (для seq), нет FK.
+Разница GP-версии: `DISTRIBUTED BY (session_key)`, `id BIGSERIAL` без `PRIMARY KEY` (для seq), нет FK.
 
 ## Graceful degradation
 

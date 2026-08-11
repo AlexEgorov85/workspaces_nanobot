@@ -1,6 +1,6 @@
 ﻿# nanobot — Personal AI Agent (Deployment)
 
-Локальная инсталляция фреймворка **[nanobot](https://opencode.ai)** — персонального AI-агента, запущенного с **кастомными доработками**: PostgreSQL-каналы, Redis-интеграция, Streamlit UI, система бенчмарков и три пользовательских навыка.
+Локальная инсталляция фреймворка **[nanobot](https://opencode.ai)** — персонального AI-агента, запущенного с **кастомными доработками**: PostgreSQL-каналы, Redis-интеграция, Streamlit UI, система бенчмарков и пользовательский навык audit_analyzer.
 
 > **Имя агента:** Aura (🐈)  
 > **Базовая модель:** `ministral-14b-2512` (Mistral)  
@@ -23,9 +23,6 @@ pip install nanobot
 
 # Зависимости проекта
 pip install -r requirements.txt
-
-# Для навыка data-analyzer (дополнительно)
-pip install -r workspace\skills\data-analyzer\requirements.txt
 ```
 
 ### 2. Настройка окружения
@@ -175,10 +172,9 @@ python pg_agent_worker.py --once
 │   │   └── session_file_store.py   # Файловое хранилище результатов сессий
 │   │
 │   ├── skills/
-│   │   ├── audit_analyzer/         # 📊 Анализ аудиторских проверок
-│   │   ├── data-analyzer/          # 📁 Анализ файлов (LLM + Pandas)
-│   │   └── html_presentation_generator/  # 📊 HTML-презентации из Markdown
+│   │   └── audit_analyzer/         # 📊 Анализ аудиторских проверок
 │   │
+│   ├── prompts/                    # Prompt overrides (dream, evaluator)
 │   ├── sessions/                   # JSONL-файлы сессий (fallback)
 │   ├── memory/
 │   │   ├── MEMORY.md               # Долговременная память
@@ -272,8 +268,6 @@ python cli_agent.py -P -S postgres            # patched, принудитель�
 | Навык | Назначение | Точка входа |
 |-------|-----------|-------------|
 | `audit_analyzer` | Анализ аудиторских проверок — SQL, векторный поиск, LLM-генерация | `scripts/cli.py` (3 режима) |
-| `data-analyzer` | Анализ файлов: `llm_text` (семантический) и `pandas` (табличный) | `scripts/analyze.py` |
-| `html_presentation_generator` | Генерация HTML-презентаций из Markdown с Mermaid | `tool.py` (агентский tool) |
 
 ### 9. Benchmarks (`benchmarks/`)
 
@@ -389,8 +383,6 @@ python pg_agent_worker.py --once
 - **httpx** — HTTP-клиент (асинхронный)
 - **duckdb** — встраиваемая аналитическая БД (audit_analyzer)
 - **faiss-cpu, numpy, sentence-transformers** — векторный поиск (audit_analyzer)
-- **pandas, openpyxl, tiktoken** — анализ данных (data-analyzer)
-- **Markdown, beautifulsoup4** — генерация HTML-презентаций
 - **PyYAML** — конфиги бенчмарков
 - **requests** — HTTP-клиент (синхронный)
 - **anthropic, openai** — опциональные LLM-провайдеры
