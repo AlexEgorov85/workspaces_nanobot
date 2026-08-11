@@ -41,6 +41,15 @@ from hooks.tool_audit_hook import ToolAuditHook
 from config import SETTINGS
 
 
+def _settings_section(name: str, default: dict | None = None) -> dict:
+    """Вернуть top-level секцию SETTINGS как dict (пусто, если нет)."""
+    if isinstance(SETTINGS, dict):
+        node = SETTINGS.get(name, {}) or {}
+    else:
+        node = getattr(SETTINGS, name, {}) or {}
+    return node if isinstance(node, dict) else (default or {})
+
+
 def _resolve_transcription_key(config):
     """Вернуть API-ключ для провайдера транскрипции.
 
@@ -89,8 +98,8 @@ def main() -> None:
     # ── 2. Шина сообщений и SessionManager ───────────────────────────────
     bus = MessageBus()
 
-    pg = SETTINGS.postgresql
-    dsn = pg.dsn
+    pg = _settings_section("channels").get("postgres", {})
+    dsn = pg.get("dsn", "")
     if dsn:
         from utils.db import configure
         configure(dsn)
@@ -104,9 +113,9 @@ def main() -> None:
         session_manager = PGSessionManager(
             workspace=config.workspace_path,
             dsn=dsn,
-            schema=pg.schema,
-            messages_table=pg.messages_table,
-            meta_table=pg.meta_table,
+            schema=pg.get("schema", "public"),
+            messages_table=pg.get("messages_table", "session_messages"),
+            meta_table=pg.get("meta_table", "session_meta"),
         )
         console.print("[green]✓[/green] PGSessionManager: sessions stored in PostgreSQL")
     else:
@@ -117,7 +126,9 @@ def main() -> None:
         else:
             console.print("[yellow]⚠[/yellow] No PostgreSQL DSN — using JSONL files")
 
-    # ── 3. Monkey-patch _normalize_tool_result ────────────────────────────
+    # ── 3. Monkey-patch ContextGovernor.normalize_tool_result ──────────────
+    # v0.3.0: AgentRunner._normalize_tool_result перенесён в
+    # ContextGovernor.normalize_tool_result (nanobot/agent/context_governance.py).
     if SETTINGS.gateway.persist_threshold > 0:
         _persisted_store = SessionFileStore(
             _WORKSPACE_DIR / "data_store",
@@ -125,15 +136,15 @@ def main() -> None:
             max_age_hours=SETTINGS.gateway.persist_max_age_hours,
         )
         try:
-            from nanobot.agent.runner import AgentRunner
+            from nanobot.agent.context_governance import ContextGovernor
             from nanobot.utils.runtime import ensure_nonempty_tool_result
 
             # read_file исключён из выгрузки, чтобы избежать циклов
             # persist → прочитал файл → persist прочитанного → ...
             _EXEMPT_TOOLS = frozenset({"read_file"})
-            _original = AgentRunner._normalize_tool_result
+            _original = ContextGovernor.normalize_tool_result
 
-            def _normalize_with_persist(self, spec, tool_call_id, tool_name, result):
+            def _normalize_with_persist(config, tool_call_id, tool_name, result):
                 result = ensure_nonempty_tool_result(tool_name, result)
                 if tool_name in _EXEMPT_TOOLS:
                     return result
@@ -151,7 +162,7 @@ def main() -> None:
                     try:
                         content, ext = prepare_content(text)
                         save_info = _persisted_store.save(
-                            session_key=spec.session_key or "default",
+                            session_key=config.session_key or "default",
                             content=content,
                             source_tool=tool_name,
                             ext=ext,
@@ -164,10 +175,10 @@ def main() -> None:
                         # disk full, permissions, etc — fall back to original
                         pass
 
-                return _original(self, spec, tool_call_id, tool_name, result)
+                return _original(config, tool_call_id, tool_name, result)
 
-            AgentRunner._normalize_tool_result = _normalize_with_persist
-            console.print("[green]✓[/green] _normalize_tool_result patched")
+            ContextGovernor.normalize_tool_result = staticmethod(_normalize_with_persist)
+            console.print("[green]✓[/green] ContextGovernor.normalize_tool_result patched")
         except Exception as exc:
             console.print(f"[yellow]⚠[/yellow] _normalize_tool_result patch failed: {exc}")
 
@@ -212,19 +223,19 @@ def main() -> None:
     channels = ChannelManager(config, bus, session_manager=session_manager)
 
     # ── 8. Redis-канал ────────────────────────────────────────────────────
-    rs = SETTINGS.redis
-    if rs.enabled:
+    rs = _settings_section("channels").get("redis", {})
+    if rs.get("enabled", False):
         redis_cfg = {
             "enabled": True,
-            "host": rs.host,
-            "port": rs.port,
-            "db": rs.db,
-            "password": rs.password,
-            "incoming_key": rs.incoming_key,
-            "outgoing_prefix": rs.outgoing_prefix,
-            "poll_timeout": rs.poll_timeout,
-            "max_concurrent": rs.max_concurrent,
-            "allow_from": rs.allow_from,
+            "host": rs.get("host", "127.0.0.1"),
+            "port": rs.get("port", 6379),
+            "db": rs.get("db", 0),
+            "password": rs.get("password"),
+            "incoming_key": rs.get("incoming_key", "nanobot:inbox"),
+            "outgoing_prefix": rs.get("outgoing_prefix", "nanobot:outbox"),
+            "poll_timeout": rs.get("poll_timeout", 5.0),
+            "max_concurrent": rs.get("max_concurrent", 1),
+            "allow_from": rs.get("allow_from", ["*"]),
         }
         redis_channel = RedisChannel(redis_cfg, bus)
         redis_channel.send_progress = config.channels.send_progress
@@ -236,23 +247,20 @@ def main() -> None:
         console.print("[dim]Redis channel disabled[/dim]")
 
     # ── 9. Postgres-канал ────────────────────────────────────────────────
-    ch = pg.get("channel", {})
-    ch_dsn = ch.get("dsn", "") or dsn
-    ch_schema = ch.get("schema", "") or pg.schema
-    if ch.get("enabled", False):
-        if not ch_dsn:
-            console.print("[red]✗[/red] PostgresChannel enabled but no DSN (pg.dsn or pg.channel.dsn)")
+    if pg.get("enabled", False):
+        if not dsn:
+            console.print("[red]✗[/red] PostgresChannel enabled but no DSN (channels.postgres.dsn)")
         else:
             ch_cfg = {
                 "enabled": True,
-                "dsn": ch_dsn,
-                "schema": ch_schema,
-                "table_name": ch.get("table", "conversation_messages"),
-                "poll_interval": ch.get("poll_interval", 2.0),
-                "flush_interval": ch.get("flush_interval", 2.0),
-                "max_concurrent": ch.get("max_concurrent", 1),
-                "processing_timeout": ch.get("processing_timeout", 120),
-                "allow_from": ch.get("allow_from", ["*"]),
+                "dsn": dsn,
+                "schema": pg.get("schema", "public"),
+                "table_name": pg.get("table_name", "conversation_messages"),
+                "poll_interval": pg.get("poll_interval", 2.0),
+                "flush_interval": pg.get("flush_interval", 2.0),
+                "max_concurrent": pg.get("max_concurrent", 1),
+                "processing_timeout": pg.get("processing_timeout", 120),
+                "allow_from": pg.get("allow_from", ["*"]),
             }
             pg_channel = PostgresChannel(ch_cfg, bus)
             pg_channel.transcription_provider = config.channels.transcription_provider

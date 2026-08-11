@@ -1,7 +1,10 @@
 import json
 import os
+import re
 from pathlib import Path
 
+_CONFIG_FILE = Path(__file__).parent / "config.json"
+_PROJECT_FILE = Path(__file__).parent / "project.json"
 _ENV_FILE = Path(__file__).parent / ".env"
 _SECRETS_FILE = Path(__file__).parent / ".secrets.env"
 
@@ -78,6 +81,18 @@ def load_env(path: str | Path | None = None) -> AttrDict:
     return AttrDict(tree)
 
 
+def load_config_json(path: str | Path | None = None) -> AttrDict:
+    """Загрузить config.json в AttrDict; несуществующий/битый файл → пустой AttrDict."""
+    config_file = Path(path or _CONFIG_FILE)
+    if not config_file.exists():
+        return AttrDict()
+    try:
+        data = json.loads(config_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return AttrDict()
+    return AttrDict(data) if isinstance(data, dict) else AttrDict()
+
+
 def _deep_merge(base: dict, override: dict) -> None:
     for k, v in override.items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
@@ -85,10 +100,39 @@ def _deep_merge(base: dict, override: dict) -> None:
         else:
             base[k] = v
 
-SETTINGS = load_env()
+# Основной источник — config.json (настройки nanobot + каналы channels.*);
+# project.json — проектные секции без нативного блока в nanobot
+# (cli/benchmark/streamlit/gateway); .env остаётся legacy-фолбэком;
+# .secrets.env хранит секреты и имеет наивысший приоритет.
+SETTINGS = AttrDict()
+if _ENV_FILE.exists():
+    SETTINGS = load_env(_ENV_FILE)
+if _PROJECT_FILE.exists():
+    _deep_merge(SETTINGS, load_config_json(_PROJECT_FILE))
+if _CONFIG_FILE.exists():
+    _deep_merge(SETTINGS, load_config_json(_CONFIG_FILE))
 if _SECRETS_FILE.exists():
-    _secrets = load_env(_SECRETS_FILE)
-    _deep_merge(SETTINGS, _secrets)
+    _deep_merge(SETTINGS, load_env(_SECRETS_FILE))
+
+
+_ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _resolve_env_refs(value):
+    """Рекурсивно заменить ``${VAR}`` на значение из os.environ.
+
+    Неизвестная переменная оставляется как есть (ленивый режим, как
+    resolve_env_refs у nanobot) — импорт не должен падать без секрета.
+    """
+    if isinstance(value, str):
+        return _ENV_REF_PATTERN.sub(
+            lambda m: os.environ.get(m.group(1), m.group(0)), value
+        )
+    if isinstance(value, dict):
+        return AttrDict({k: _resolve_env_refs(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return [_resolve_env_refs(v) for v in value]
+    return value
 
 
 def _flatten_env(d: dict, prefix: str = "") -> dict[str, str]:
@@ -106,5 +150,22 @@ def _(s: str) -> str:
     return s.replace(" ", "_").replace("-", "_")
 
 
+for _prov_name, _prov_cfg in (SETTINGS.get("providers", {}) or {}).items():
+    if isinstance(_prov_cfg, dict):
+        _key = _prov_cfg.get("api_key") or _prov_cfg.get("apiKey")
+        if _key and isinstance(_key, str) and not _key.startswith("${"):
+            os.environ.setdefault(f"{_(_prov_name).upper()}_API_KEY", _key)
+
+# Экспорт без ${...}: эти ключи не меняются при резолве и не должны
+# затирать уже выставленные переменные окружения (setdefault).
+for key, val in _flatten_env(SETTINGS).items():
+    if "${" not in val:
+        os.environ.setdefault(key, val)
+
+# Резолв ${VAR} в проектных настройках (config.json читается сырым,
+# поэтому мост сам подставляет секреты из os.environ).
+SETTINGS = _resolve_env_refs(SETTINGS)
+
+# Доэкспорт резолвнутых значений (setdefault: внешние env сохраняют приоритет).
 for key, val in _flatten_env(SETTINGS).items():
     os.environ.setdefault(key, val)

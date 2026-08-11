@@ -12,6 +12,7 @@
       "fallbackModels": [],
       "maxToolIterations": 200,
       "maxConcurrentSubagents": 1,
+      "failOnToolError": true,
       "maxToolResultChars": 16000,
       "providerRetryMode": "standard",
       "toolHintMaxLength": 40,
@@ -22,9 +23,9 @@
       "unifiedSession": false,
       "disabledSkills": [],
       "idleCompactAfterMinutes": 0,
-      "maxMessages": 120,
       "consolidationRatio": 0.5,
       "dream": {
+        "enabled": true,
         "intervalH": 2,
         "modelOverride": null,
         "maxBatchSize": 20,
@@ -37,6 +38,7 @@
     "sendProgress": true,
     "sendToolHints": false,
     "showReasoning": true,
+    "extractDocumentText": true,
     "sendMaxRetries": 3,
     "transcriptionProvider": "groq",
     "transcriptionLanguage": null,
@@ -221,210 +223,438 @@
       "groupPolicy": "open"
     }
   },
+  "transcription": {
+    "enabled": true,
+    "provider": null,
+    "model": null,
+    "language": null,
+    "maxDurationSec": 120,
+    "maxUploadMb": 25
+  },
   "providers": {
     "custom": {
       "apiKey": null,
       "apiBase": "http://localhost:11434/api/generate",
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "azureOpenai": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "bedrock": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
       "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null,
       "region": null,
       "profile": null
     },
     "anthropic": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "openai": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "openrouter": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
+    },
+    "assemblyai": {
+      "apiKey": null,
+      "apiBase": null,
+      "apiType": "auto",
+      "extraHeaders": null,
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "huggingface": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
+    },
+    "skywork": {
+      "apiKey": null,
+      "apiBase": null,
+      "apiType": "auto",
+      "extraHeaders": null,
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "deepseek": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "groq": {
       "apiKey": null,
       "apiBase": "https://api.groq.com/openai/v1",
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "zhipu": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "dashscope": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
+    },
+    "modelscope": {
+      "apiKey": null,
+      "apiBase": null,
+      "apiType": "auto",
+      "extraHeaders": null,
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "vllm": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "ollama": {
       "apiKey": "ollama",
       "apiBase": "http://localhost:11434/v1",
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "lmStudio": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "atomicChat": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "ovms": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "gemini": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "moonshot": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
+    },
+    "kimiCoding": {
+      "apiKey": null,
+      "apiBase": null,
+      "apiType": "auto",
+      "extraHeaders": null,
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "minimax": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "minimaxAnthropic": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "mistral": {
-      "apiKey": null,
+      "apiKey": "${MISTRAL_API_KEY}",
       "apiBase": "https://api.mistral.ai/v1",
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "stepfun": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "xiaomiMimo": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "longcat": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
+    },
+    "antLing": {
+      "apiKey": null,
+      "apiBase": null,
+      "apiType": "auto",
+      "extraHeaders": null,
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "aihubmix": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "siliconflow": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
+    },
+    "novita": {
+      "apiKey": null,
+      "apiBase": null,
+      "apiType": "auto",
+      "extraHeaders": null,
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "volcengine": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "volcengineCodingPlan": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "byteplus": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "byteplusCodingPlan": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "qianfan": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     },
     "nvidia": {
       "apiKey": null,
       "apiBase": null,
+      "apiType": "auto",
       "extraHeaders": null,
-      "extraBody": null
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
+    },
+    "opencode": {
+      "apiKey": null,
+      "apiBase": null,
+      "apiType": "auto",
+      "extraHeaders": null,
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
+    },
+    "opencodeZen": {
+      "apiKey": null,
+      "apiBase": null,
+      "apiType": "auto",
+      "extraHeaders": null,
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
+    },
+    "opencodeGo": {
+      "apiKey": null,
+      "apiBase": null,
+      "apiType": "auto",
+      "extraHeaders": null,
+      "extraBody": null,
+      "extraQuery": null,
+      "proxy": null,
+      "thinkingStyle": null
     }
   },
   "api": {
     "host": "127.0.0.1",
     "port": 8900,
-    "timeout": 120.0
+    "timeout": 120.0,
+    "apiKey": ""
   },
   "gateway": {
     "host": "127.0.0.1",
     "port": 18790,
+    "restartMode": "auto",
     "heartbeat": {
       "enabled": true,
       "intervalS": 1800,
@@ -450,11 +680,23 @@
     "exec": {
       "enable": true,
       "timeout": 60,
+      "pathPrepend": "",
       "pathAppend": "",
       "sandbox": "",
-      "allowedEnvKeys": ["DATABASE_URL"],
+      "allowedEnvKeys": [
+        "DATABASE_URL"
+      ],
       "allowPatterns": [],
       "denyPatterns": []
+    },
+    "file": {
+      "enable": true
+    },
+    "cliApps": {
+      "enable": true,
+      "installTimeout": 300,
+      "runTimeout": 60,
+      "catalogTtlSeconds": 3600
     },
     "my": {
       "enable": true,
@@ -470,30 +712,10 @@
       "saveDir": "generated"
     },
     "restrictToWorkspace": false,
+    "webuiAllowLocalServiceAccess": true,
+    "webuiAllowRemotePackageInstall": false,
     "mcpServers": {},
-    "ssrfWhitelist": [],
-    "audit_analyzer": {
-      "database": {
-        "schema": "oarb",
-        "tables": ["audit_reports", "audits", "report_items", "violations"]
-      },
-      "embedding": {
-        "base_url": "http://localhost:11434/api/embed",
-        "model": "mxbai-embed-large:latest",
-        "dimension": 1024
-      },
-      "modes": {
-        "predefined": { "enabled": true },
-        "vector": { "enabled": true, "index_path": null, "top_k": 5, "threshold": 0.75 },
-        "sql": { "enabled": true }
-      },
-      "cli": {
-        "default_mode": "predefined",
-        "default_format": "json",
-        "max_retries": 3,
-        "timeout_sec": 60
-      }
-    }
+    "ssrfWhitelist": []
   },
-  "model_presets": {}
+  "modelPresets": {}
 }

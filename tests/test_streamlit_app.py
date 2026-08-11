@@ -40,7 +40,7 @@ def mock_all():
         sys.modules["streamlit"] = st
 
         class MockSettings:
-            postgresql = {"dsn": "", "schema": "public", "channel": {}}
+            channels = {"postgres": {"dsn": "", "schema": "public", "table_name": "conversation_messages"}}
             streamlit = {"max_wait": 600, "poll_interval": 1.0}
 
         cfg = types.ModuleType("config")

@@ -236,8 +236,8 @@ class PostgresAgentWorker:
 
     async def close(self):
         """Закрыть nanobot."""
-        if self._bot and hasattr(self._bot, 'close'):
-            await self._bot.close()
+        if self._bot and hasattr(self._bot, 'aclose'):
+            await self._bot.aclose()
 
 
 # === CLI ===
@@ -275,7 +275,7 @@ async def main():
 
     args = parser.parse_args()
 
-    dsn = args.db_url or os.getenv("DATABASE_URL") or SETTINGS.postgresql.get("dsn", "")
+    dsn = args.db_url or os.getenv("DATABASE_URL") or (getattr(SETTINGS, "channels", {}) or {}).get("postgres", {}).get("dsn", "")
     if not dsn:
         print("❌ Error: DSN не задан. Укажите --db-url, DATABASE_URL или PG_DSN в .env")
         return 1

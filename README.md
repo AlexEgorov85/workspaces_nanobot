@@ -33,19 +33,22 @@ pip install -r workspace\skills\data-analyzer\requirements.txt
 Создайте файл `.secrets.env` в корне проекта (он в `.gitignore`, не попадёт в репозиторий):
 
 ```ini
+DATABASE_URL=postgresql://user:password@localhost:5432/nanobot
+
+# providers: mistral
+api_key=ваш_ключ_mistral
+
 # Skills: audit_analyzer
 llm_api_key=ваш_ключ_mistral
 ```
 
-Настройки подключения к БД и каналам — в `.env` (уже в репозитории, отредактируйте под себя):
+Все остальные настройки лежат в конфигурационных файлах (без дублирования):
 
-```ini
-# PostgreSQL
-dsn=postgresql://user:password@localhost:5432/nanobot
-
-# Redis (опционально, отключён по умолчанию)
-enabled=false
-```
+| Файл | Что хранит |
+|------|-----------|
+| `config.json` | Настройки nanobot: агенты, провайдеры, каналы, инструменты, API, gateway (формат nanobot) |
+| `project.json` | Настройки проекта: каналы `channels.*` (postgres, redis), навыки `skills.*`, `cli`, `gateway`, `streamlit`, `benchmark` |
+| `.secrets.env` | Секреты (API-ключи, `DATABASE_URL`) — подставляются в конфиг через `${VAR}` |
 
 ### 3. База данных
 
@@ -111,9 +114,11 @@ python pg_agent_worker.py --once
 ```
 
 Конфигурация:
-- **`config.json`** — провайдеры, каналы, инструменты, API (формат nanobot)
-- **`.env`** — настройки подключения, навыков, режимов (читается `config.py`)
-- **`.secrets.env`** — секреты (API-ключи) — в `.gitignore`
+- **`config.json`** — настройки nanobot: провайдеры, каналы, инструменты, API (формат nanobot)
+- **`project.json`** — настройки проекта: каналы `channels.*`, навыки `skills.*`, `cli`/`gateway`/`streamlit`/`benchmark`
+- **`.secrets.env`** — секреты (API-ключи, `DATABASE_URL`) — в `.gitignore`
+
+Порядок мержа в `config.py` (поздний источник перекрывает ранний): `project.json` → `config.json` → `.secrets.env` (секреты — наивысший приоритет). Значения вида `${VAR}` подставляются из `os.environ` (секреты — из `.secrets.env`).
 
 ---
 
@@ -122,10 +127,10 @@ python pg_agent_worker.py --once
 ```
 ~/.nanobot/
 ├── README.md                       ← этот файл
-├── config.json                     # Центральная конфигурация nanobot
-├── config.py                       # Загрузчик .env → AttrDict SETTINGS
-├── .env                            # Настройки (PG, Redis, Gateway, CLI, навыки)
-├── .secrets.env                    # Секреты (API-ключи) — в .gitignore
+├── config.json                     # Настройки nanobot (агенты, провайдеры, каналы, инструменты, API)
+├── project.json                    # Настройки проекта (channels.*, skills.*, cli, gateway, streamlit, benchmark)
+├── config.py                       # Сборка SETTINGS: project.json + config.json + .secrets.env
+├── .secrets.env                    # Секреты (API-ключи, DATABASE_URL) — в .gitignore
 │
 ├── gateway.py                      # [Entry point] Gateway-сервер
 ├── cli_agent.py                    # [Entry point] CLI-агент (терминальный режим)
@@ -304,13 +309,13 @@ metadata (JSONB), reply_to, status, created_at, updated_at
 
 | Файл | Импортирует | Настраивается через |
 |------|-----------|-------------------|
-| `gateway.py` | `lib.channels.postgres_channel`, `lib.channels.redis_channel`, `lib.session.pg_session_manager`, `utils.session_file_store`, `utils.db` (lazy), `hooks.tool_audit_hook` | `.env`, `config.json` |
-| `cli_agent.py` | `lib.session.pg_session_manager`, `hooks.tool_audit_hook` | CLI-аргументы, `.env`, `config.json` |
-| `pg_agent_worker.py` | `workspace.utils.db` | `.env` |
-| `streamlit_app.py` | `workspace.utils.db` | `.env` |
-| `lib/session/pg_session_manager.py` | `workspace.utils.db` | `.env` |
-| `lib/channels/postgres_channel.py` | `workspace.utils.db` | `.env` |
-| `lib/channels/redis_channel.py` | `redis.asyncio` | `.env` |
+| `gateway.py` | `lib.channels.postgres_channel`, `lib.channels.redis_channel`, `lib.session.pg_session_manager`, `utils.session_file_store`, `utils.db` (lazy), `hooks.tool_audit_hook` | `project.json` (`channels.*`, `gateway`), `config.json` |
+| `cli_agent.py` | `lib.session.pg_session_manager`, `hooks.tool_audit_hook` | CLI-аргументы, `project.json` (`cli`), `config.json` |
+| `pg_agent_worker.py` | `workspace.utils.db` | `project.json` → `channels.postgres.dsn` |
+| `streamlit_app.py` | `workspace.utils.db` | `project.json` → `channels.postgres`, `streamlit` |
+| `lib/session/pg_session_manager.py` | `workspace.utils.db` | `project.json` |
+| `lib/channels/postgres_channel.py` | `workspace.utils.db` | `project.json` → `channels.postgres` |
+| `lib/channels/redis_channel.py` | `redis.asyncio` | `project.json` → `channels.redis` |
 | `workspace/utils/db.py` | `config` (SETTINGS) | `configure(dsn)` — глобальный singleton |
 
 ---
@@ -343,8 +348,10 @@ Streamlit         PostgresChannel        Agent
 | Что нужно сделать | Файл |
 |-----------------|------|
 | Сменить модель/провайдера | `config.json` → `agents.defaults.model` |
-| Настроить таймауты | `.env` → секции `gateway`, `cli` или `streamlit` |
-| Настроить подключение к БД | `.env` → `dsn`, `schema` |
+| Настроить таймауты | `project.json` → секции `gateway`, `cli` или `streamlit` |
+| Настроить подключение к БД | `project.json` → `channels.postgres` (`dsn`, `schema`, `table_name`) |
+| Включить Redis-канал | `project.json` → `channels.redis.enabled` |
+| Настроить навык | `project.json` → `skills.<имя>` |
 | Добавить API-ключ | `.secrets.env` |
 | Добавить канал связи | Написать класс унаследовав `BaseChannel`, подключить в `gateway.py` |
 | Добавить хук агента | Создать файл в `workspace/hooks/` с подклассом `AgentHook` |

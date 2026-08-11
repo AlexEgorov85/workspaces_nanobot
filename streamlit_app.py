@@ -17,10 +17,10 @@ if _workspace not in sys.path:
 from utils.db import configure, fetchone, execute
 from config import SETTINGS
 
-_dsn = SETTINGS.postgresql.get("dsn", "")
-_schema = SETTINGS.postgresql.get("schema", "public")
-_channel_cfg = SETTINGS.postgresql.get("channel", {})
-_table = _channel_cfg.get("table", "conversation_messages")
+_pg = (getattr(SETTINGS, "channels", {}) or {}).get("postgres", {})
+_dsn = _pg.get("dsn", "")
+_schema = _pg.get("schema", "public")
+_table = _pg.get("table_name", "conversation_messages")
 _fq_table = f"{_schema}.{_table}"
 
 _MAX_WAIT = SETTINGS.streamlit.get("max_wait", 600)

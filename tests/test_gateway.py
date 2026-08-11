@@ -20,11 +20,16 @@ if _user_site not in sys.path:
 def _make_settings(**overrides):
     """Create a SETTINGS-like object with defaults for gateway tests."""
     s = MagicMock()
-    s.postgresql = MagicMock()
-    s.postgresql.dsn = ""
-    s.postgresql.schema = "public"
-    s.postgresql.messages_table = "conversation_messages"
-    s.postgresql.meta_table = "session_meta"
+    s.channels = {
+        "postgres": {
+            "enabled": False,
+            "dsn": "",
+            "schema": "public",
+            "messages_table": "session_messages",
+            "meta_table": "session_meta",
+        },
+        "redis": {"enabled": False},
+    }
     s.gateway = MagicMock()
     s.gateway.storage = "file"
     s.gateway.persist_threshold = 0
@@ -38,8 +43,6 @@ def _make_settings(**overrides):
     s.skills = MagicMock()
     s.skills.audit_analyzer = MagicMock()
     s.skills.audit_analyzer.get = MagicMock(return_value=False)
-    s.redis = MagicMock()
-    s.redis.enabled = False
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
@@ -289,7 +292,7 @@ class TestMain:
         agent = self._setup_agent_run(AgentLoop)
         self._setup_channels()
 
-        mock_all["cfg"].SETTINGS.postgresql.dsn = "postgresql://user@host/db"
+        mock_all["cfg"].SETTINGS.channels["postgres"]["dsn"] = "postgresql://user@host/db"
         mock_all["cfg"].SETTINGS.gateway.storage = "postgres"
 
         mock_all["main"]()
@@ -303,7 +306,7 @@ class TestMain:
         agent = self._setup_agent_run(AgentLoop)
         cm = self._setup_channels()
 
-        mock_all["cfg"].SETTINGS.redis.enabled = True
+        mock_all["cfg"].SETTINGS.channels["redis"]["enabled"] = True
 
         mock_all["main"]()
 
@@ -316,8 +319,8 @@ class TestMain:
         agent = self._setup_agent_run(AgentLoop)
         self._setup_channels()
 
-        mock_all["cfg"].SETTINGS.postgresql.dsn = "postgresql://user@host/db"
-        mock_all["cfg"].SETTINGS.postgresql.get = MagicMock(return_value={"enabled": True})
+        mock_all["cfg"].SETTINGS.channels["postgres"]["dsn"] = "postgresql://user@host/db"
+        mock_all["cfg"].SETTINGS.channels["postgres"]["enabled"] = True
 
         mock_all["main"]()
 

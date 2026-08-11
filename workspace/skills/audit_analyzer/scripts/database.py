@@ -511,7 +511,8 @@ class InMemoryDatabase:
             duck_sql = sql.replace("%s", "?")
             duck_sql = _REWRITE_TO_CHAR.sub(r"strftime(\1, '%B')", duck_sql)
             result = self._conn.execute(f"EXPLAIN {duck_sql}")
-            plan = [dict(r) for r in result.fetchall()]
+            columns = [desc[0] for desc in result.description]
+            plan = [dict(zip(columns, r)) for r in result.fetchall()]
             return {"valid": True, "plan": plan}
         except Exception as e:
             return {"valid": False, "error": f"EXPLAIN failed: {e}"}

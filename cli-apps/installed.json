@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "apps": {
+    "minimax-cli": {
+      "version": "latest",
+      "entry_point": "minimax-cli",
+      "source": "public",
+      "strategy": "npm",
+      "installed_at": 1786434592,
+      "display_name": "MiniMax CLI",
+      "category": "ai",
+      "description": "MiniMax AI platform CLI for managing tokens, models, and API interactions from the command line",
+      "requires": "Node.js >= 16, MINIMAX_API_KEY"
+    }
+  }
+}

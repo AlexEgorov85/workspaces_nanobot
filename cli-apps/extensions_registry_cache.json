@@ -1,0 +1,37 @@
+{
+  "_cached_at": 1786440912.719061,
+  "data": {
+    "meta": {
+      "repo": "https://github.com/Re-bin/nanobot-extension",
+      "description": "Personal nanobot extension registry",
+      "updated": "2026-05-29"
+    },
+    "clis": [
+      {
+        "name": "hyperframes",
+        "display_name": "HyperFrames",
+        "version": "latest",
+        "description": "HTML-to-MP4 motion graphics CLI for creating, previewing, and rendering browser-based video compositions.",
+        "category": "video",
+        "requires": "Node.js, Chrome or Chromium, and FFmpeg for final renders.",
+        "homepage": "https://github.com/heygen-com/hyperframes",
+        "source_url": "https://github.com/heygen-com/hyperframes",
+        "package_manager": "npm",
+        "npm_package": "hyperframes",
+        "install_cmd": "npm install -g hyperframes",
+        "update_cmd": "npm install -g hyperframes@latest",
+        "uninstall_cmd": "npm uninstall -g hyperframes",
+        "entry_point": "hyperframes",
+        "logo_url": "https://raw.githubusercontent.com/heygen-com/hyperframes/main/assets/logo.png",
+        "brand_color": "#111827",
+        "skill_md": "skills/hyperframes/SKILL.md",
+        "contributors": [
+          {
+            "name": "heygen-com",
+            "url": "https://github.com/heygen-com/hyperframes"
+          }
+        ]
+      }
+    ]
+  }
+}

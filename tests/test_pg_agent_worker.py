@@ -229,4 +229,4 @@ class TestWorkerClose:
         worker = pw.PostgresAgentWorker()
         worker._bot = AsyncMock()
         await worker.close()
-        worker._bot.close.assert_awaited_once()
+        worker._bot.aclose.assert_awaited_once()
