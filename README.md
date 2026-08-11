@@ -27,7 +27,13 @@ pip install -r requirements.txt
 
 ### 2. Настройка окружения
 
-Создайте файл `.secrets.env` в корне проекта (он в `.gitignore`, не попадёт в репозиторий):
+Скопируйте шаблон `.secrets.env.example` в `.secrets.env`:
+
+```bash
+cp .secrets.env.example .secrets.env
+```
+
+Отредактируйте `.secrets.env` (он в `.gitignore`, не попадёт в репозиторий):
 
 ```ini
 DATABASE_URL=postgresql://user:password@localhost:5432/nanobot
@@ -128,6 +134,7 @@ python pg_agent_worker.py --once
 ├── project.json                    # Настройки проекта (channels.*, skills.*, cli, gateway, streamlit, benchmark)
 ├── config.py                       # Сборка SETTINGS: project.json + config.json + .secrets.env
 ├── .secrets.env                    # Секреты (API-ключи, DATABASE_URL) — в .gitignore
+├── .secrets.env.example            # Шаблон для .secrets.env
 │
 ├── gateway.py                      # [Entry point] Gateway-сервер
 ├── cli_agent.py                    # [Entry point] CLI-агент (терминальный режим)
@@ -146,16 +153,22 @@ python pg_agent_worker.py --once
 │           ├── create_session_tables.sql    # DDL для session_meta / session_messages (PG)
 │           └── create_session_tables_gp.sql # DDL для Greenplum 6.25
 │
-├── scripts/                        # Диагностические и вспомогательные скрипты
+├── scripts/                        # Пустая директория для будущих скриптов (.gitkeep)
 │
 ├── benchmarks/                     # Система автоматического тестирования агента
 │   ├── runner.py                   #   Запуск бенчмарков
 │   ├── items/                      #   YAML-файлы с заданиями (simple, medium, hard)
+│   │   └── _template.yaml          #   Шаблон для создания новых тестов
 │   ├── loader.py / evaluator.py    #   Загрузка и оценка
 │   ├── scorer.py / reporter.py     #   Подсчёт баллов и отчёты
 │   ├── models.py                   #   Pydantic-модели
 │   ├── hooks.py / db.py            #   Хуки и сохранение в БД
+│   ├── results/runs/               #   Результаты прогонов
 │   └── sql/                        #   DDL для БД бенчмарков
+│       ├── create_benchmark_tables.sql      # Таблицы benchmark_runs, benchmark_results (PG)
+│       └── create_benchmark_tables_gp.sql   # Версия для Greenplum
+│
+├── tests/                          # Unit-тесты (pytest)
 │
 ├── workspace/
 │   ├── AGENTS.md                   # Инструкции агенту (политики, heartbeat, cron)
@@ -173,6 +186,13 @@ python pg_agent_worker.py --once
 │   │
 │   ├── skills/
 │   │   └── audit_analyzer/         # 📊 Анализ аудиторских проверок
+│   │       ├── SKILL.md            #   Документация навыка
+│   │       ├── audit_analyze.bat   #   Standalone-запуск (Windows)
+│   │       ├── audit_analyze.sh    #   Standalone-запуск (Linux)
+│   │       ├── check_status.py     #   Проверка статуса
+│   │       ├── scripts/            #   Модули режимов (cli.py, predefined.py, sql_mode.py, vector_mode.py)
+│   │       ├── cache/              #   DuckDB-кеш для предопределённых скриптов
+│   │       └── tests/              #   Unit-тесты навыка
 │   │
 │   ├── prompts/                    # Prompt overrides (dream, evaluator)
 │   ├── sessions/                   # JSONL-файлы сессий (fallback)
@@ -183,8 +203,13 @@ python pg_agent_worker.py --once
 │   └── cron/jobs.json              # Cron-задачи (dream каждые 2ч)
 │
 ├── requirements.txt                # Зависимости проекта
-└── history/                        # История CLI
 ```
+
+**Примечания:**
+- `scripts/` — пустая директория для будущих скриптов (содержит только `.gitkeep`)
+- `logs/` — создаётся при первом запуске для хранения логов
+- `workspace/memory/history.jsonl` — история взаимодействий агента (файл существует)
+- `workspace/memory/MEMORY.md` — файл долговременной памяти (существует)
 
 ---
 
@@ -267,16 +292,79 @@ python cli_agent.py -P -S postgres            # patched, принудитель�
 
 | Навык | Назначение | Точка входа |
 |-------|-----------|-------------|
-| `audit_analyzer` | Анализ аудиторских проверок — SQL, векторный поиск, LLM-генерация | `scripts/cli.py` (3 режима) |
+| `audit_analyzer` | Анализ аудиторских проверок — SQL-отчёты, векторный поиск, LLM-генерация SQL | Standalone: `audit_analyze.bat` / `audit_analyze.sh`<br>CLI: `workspace/skills/audit_analyzer/scripts/cli.py` (4 режима) |
+
+**Режимы `audit_analyzer`:**
+
+| Режим | Описание | Пример |
+|-------|----------|--------|
+| `predefined` | Готовые SQL-скрипты с параметрами | `--mode predefined --script analytics_by_year_month --params year=2024` |
+| `sql` | LLM генерирует SQL по текстовому запросу | `--mode sql --query "топ-10 объектов по нарушениям"` |
+| `vector` | Семантический поиск по векторному индексу | `--mode vector --query "финансовые нарушения" --index-name violations_index --top-k 3` |
+| `init` | Загрузка DuckDB-кеша из PostgreSQL | `--mode init --force` (принудительная перезагрузка) |
+
+**Примеры standalone-запуска:**
+
+```bash
+# Windows (PowerShell / cmd)
+audit_analyze.bat --mode predefined --script analytics_by_year_month --params year=2024
+audit_analyze.bat --mode sql --query "топ-10 объектов по нарушениям"
+audit_analyze.bat --mode vector --query "финансовые нарушения" --index-name violations_index --top-k 3
+
+# Linux
+./audit_analyze.sh --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
+./audit_analyze.sh --mode sql --query "топ-10 объектов по нарушениям"
+./audit_analyze.sh --mode vector --query "финансовые нарушения" --index-name violations_index --threshold 0.5
+```
+
+Параметры векторного поиска:
+- `--top-k N` — вернуть ровно N лучших результатов (по умолчанию 5)
+- `--threshold X` — вернуть все результаты выше порога схожести X (0.0–1.0); если задан, `--top-k` игнорируется
 
 ### 9. Benchmarks (`benchmarks/`)
 
 Автоматическая оценка качества агента:
 - YAML-определения тестов (difficulty 1–10)
 - Типы: `single` (один вопрос) и `multi_step` (последовательность шагов)
-- Скоринг по ключевым словам, файлам, использованным инструментам
+- Скоринг по ключевым словам, файлам, использованным инструментам, LLM-судье
 - Сохранение результатов в JSON/Markdown/PostgreSQL
 - Сравнение прогонов (`--compare`)
+
+**Создание своих тестов:**
+
+Скопируйте шаблон `benchmarks/items/_template.yaml` и заполните:
+
+```yaml
+- id: "my-test-id"
+  name: "Human readable name"
+  difficulty: 5          # 1-10: 1-3 simple, 4-7 medium, 8-10 hard
+  category: "general"    # e.g. basic, data_analysis, coding, research
+  type: "single"         # single | multi_step
+  new_session: true      # true = fresh session, false = continue conversation
+  question: "Ask the agent something"
+  max_iterations: 30
+  timeout: 60
+  expect:
+    tools: ["exec", "glob"]
+    keywords_include: ["expected", "keyword"]
+    match_type: "keyword"  # keyword | functional | llm_judge
+```
+
+**Таблицы БД для бенчмарков:**
+
+```bash
+# PostgreSQL
+psql -d nanobot -f benchmarks/sql/create_benchmark_tables.sql
+
+# Greenplum
+psql -d nanobot -f benchmarks/sql/create_benchmark_tables_gp.sql
+```
+
+Создаются таблицы:
+- `benchmark_runs` — метаданные прогона (дата, конфиг, версия агента)
+- `benchmark_results` — результаты по каждому тесту (id, score, детали)
+
+**Результаты прогонов** сохраняются в `benchmarks/results/runs/`.
 
 ---
 
@@ -296,6 +384,102 @@ metadata (JSONB), reply_to, status, created_at, updated_at
 
 ### Таблицы worker'а (`agent_questions`, `agent_responses`)
 Определяются в `pg_agent_worker.py`. Пакетный режим.
+
+### Таблицы бенчмарков (`benchmark_runs`, `benchmark_results`)
+```bash
+# Создание: psql -d <db> -f benchmarks/sql/create_benchmark_tables.sql
+```
+
+---
+
+## Векторные индексы (в PostgreSQL)
+
+**v1.5.0:** Векторные индексы перенесены из файлов `.faiss` в таблицы PostgreSQL.
+
+### Таблицы
+
+| Таблица | Назначение |
+|---------|-----------|
+| `oarb.audit_vectors` | Векторные эмбеддинги текстов аудитов и нарушений |
+| `oarb.vector_index_store` | Хранилище векторных индексов (FAISS в бинарном формате) |
+| `oarb.vector_index_config` | Конфигурация индексов (параметры, метаданные) |
+
+### Миграция со старых файловых индексов
+
+Если у вас есть старые `.faiss`-файлы, используйте скрипт миграции:
+
+```bash
+python workspace/skills/audit_analyzer/scripts/migrate_vectors_to_db.py
+```
+
+### Создание векторных индексов с нуля
+
+```bash
+# PostgreSQL
+psql -d nanobot -f workspace/skills/audit_analyzer/scripts/create_audit_vectors_table_gp.sql
+psql -d nanobot -f workspace/skills/audit_analyzer/scripts/create_vector_index_config_gp.sql
+
+# Запуск индексации через CLI навыка
+audit_analyze.bat --mode init --force
+```
+
+### Поиск через векторный режим
+
+См. раздел [Skills](#8-skillsпользовательские-навыки) — режим `vector`.
+
+---
+
+## Тестирование
+
+Проект содержит **75+ unit-тестов** в директории `tests/`.
+
+### Запуск тестов
+
+```bash
+# Все тесты
+pytest tests/ -v
+
+# Тесты конкретного модуля
+pytest tests/test_pg_session_manager.py -v
+pytest tests/test_benchmarks_runner.py -v
+
+# С покрытием
+pytest tests/ --cov=. --cov-report=html
+```
+
+### Структура тестов
+
+| Файл | Что тестирует |
+|------|--------------|
+| `test_cli_agent.py` | CLI-агент (vanilla/patched режимы) |
+| `test_gateway.py` | Gateway, MessageBus, каналы |
+| `test_pg_session_manager.py` | PGSessionManager (сессии в БД) |
+| `test_postgres_channel.py` | PostgresChannel (поллинг, streaming) |
+| `test_redis_channel.py` | RedisChannel (BRPOP/LPUSH) |
+| `test_benchmarks_*.py` | Система бенчмарков (loader, evaluator, scorer, reporter, runner) |
+| `test_utils_db.py` | Утилиты БД (sync/async коннекторы) |
+| `test_hooks_tool_audit_hook.py` | Хук аудита инструментов |
+
+---
+
+## Миграции и изменения
+
+### v1.5.0
+
+- **Векторные индексы в БД:** Переход с файлов `.faiss` на таблицы PostgreSQL (`audit_vectors`, `vector_index_store`, `vector_index_config`)
+- **Удалённые навыки:** `data-analyzer`, `html_presentation_generator` (устарели)
+- **Новый режим `init`:** Загрузка DuckDB-кеша для `audit_analyzer`
+
+### v1.4.0
+
+- **Переход на psycopg2:** Замена DB-API драйвера для совместимости с Greenplum
+- **Переименование навыка:** `db_analyzer` → `audit_analyzer`
+- **Standalone-скрипты:** Добавлены `audit_analyze.bat` / `audit_analyze.sh`
+
+### Конфигурация
+
+- **Переход с `.env` на `project.json` + `.secrets.env`:** Разделение публичных настроек и секретов
+- **Мерж конфигов:** `project.json` → `config.json` → `.secrets.env` (последний перекрывает)
 
 ---
 
@@ -386,3 +570,10 @@ python pg_agent_worker.py --once
 - **PyYAML** — конфиги бенчмарков
 - **requests** — HTTP-клиент (синхронный)
 - **anthropic, openai** — опциональные LLM-провайдеры
+- **pytest** — запуск unit-тестов (опционально, для разработки)
+
+---
+
+## Лицензия
+
+[Укажите лицензию, если применимо]
