@@ -1,7 +1,0 @@
-{
-  "success": true,
-  "returncode": 0,
-  "duration_sec": 117.87,
-  "output": "",
-  "stderr": "[LOAD] Reading and describing data...\n[GEN] Generating analytical script via LLM...\n[EXEC] Executing script...\n[FMT] Formatting final answer...\n[INFO] РћС‚С‡РµС‚ СЃРѕС…СЂР°РЅРµРЅ РІ: C:\\Users\\РђР»РµРєСЃРµР№\\.nanobot\\workspace\\skills\\data-analyzer\\tests\\results\\pandas_aggregation.json"
-}
