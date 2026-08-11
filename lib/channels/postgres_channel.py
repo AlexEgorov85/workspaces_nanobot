@@ -23,6 +23,7 @@ import asyncio
 import base64
 import json
 import mimetypes
+import re
 import uuid
 from contextlib import suppress
 from datetime import timedelta
@@ -37,7 +38,7 @@ from nanobot.channels.base import BaseChannel
 from utils.db import async_fetchval as fetchval, async_execute as execute, async_fetchone as fetchone, async_transaction as transaction, async_fetch as fetch
 from psycopg2.extras import Json
 
-_WORKSPACE_DIR = Path(__file__).parent / "workspace"
+_WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent / "workspace"
 _DATA_STORE_DIR = _WORKSPACE_DIR / "data_store" / "cache" / "sessions"
 
 
@@ -129,9 +130,14 @@ class PostgresChannel(BaseChannel):
     def _session_media_dir(session_key: str) -> Path:
         """Вернуть директорию для медиа-файлов сессии.
 
-        Путь: ``workspace/data_store/cache/sessions/{session_key}/``
+        Путь: ``workspace/data_store/cache/sessions/{session_key}/``.
+
+        ``session_key`` может содержать символы, недопустимые в именах
+        каталогов Windows (например, ``postgres:streamlit``) — они
+        заменяются на ``_``.
         """
-        sdir = _DATA_STORE_DIR / session_key
+        safe_key = re.sub(r"[^\w\- ]", "_", session_key or "").strip() or "default"
+        sdir = _DATA_STORE_DIR / safe_key
         sdir.mkdir(parents=True, exist_ok=True)
         return sdir
 
@@ -167,39 +173,96 @@ class PostgresChannel(BaseChannel):
         return embedded
 
     async def _decode_media_from_db(
-        self, media: list[str], session_key: str = "default"
-    ) -> list[str]:
+        self, media: list[Any], session_key: str = "default"
+    ) -> list[Any]:
         """Декодировать data URL из БД обратно в локальные файлы сессии.
 
-        Путь: ``data_store/cache/sessions/{session_key}/{uuid}.{ext}``
+        Поддерживаемые элементы списка ``media``:
+          — строка ``data:...;base64,...`` → строка с путём к файлу сессии
+          — dict ``{"filename": "отчёт.pdf", "data": "data:..."}`` → dict
+            ``{"filename": "отчёт.pdf", "path": "..."}`` (оригинальное имя
+            сохраняется, чтобы агент знал, что приложил пользователь)
+          — всё остальное (http-ссылки, локальные пути) → как есть
+
+        Файлы: ``data_store/cache/sessions/{session_key}/{uuid}_{имя}``.
         """
         if not media:
             return media
-        resolved: list[str] = []
+        resolved: list[Any] = []
         sdir = self._session_media_dir(session_key)
         for entry in media:
-            if not entry.startswith("data:"):
-                resolved.append(entry)
-                continue
             try:
-                mime_match = __import__("re").match(
-                    r"^data:([^;,]+)(?:;[^,]*)*;base64,(.+)$", entry
-                )
-                if not mime_match:
+                if isinstance(entry, dict):
+                    data = entry.get("data") or entry.get("path") or ""
+                    if not isinstance(data, str) or not data.startswith("data:"):
+                        resolved.append(entry)
+                        continue
+                    filename = entry.get("filename") or ""
+                    dest = self._decode_data_url_to_file(data, sdir, filename=filename)
+                    resolved.append({
+                        "filename": filename or dest.name,
+                        "path": str(dest),
+                    })
+                    continue
+                if not isinstance(entry, str) or not entry.startswith("data:"):
                     resolved.append(entry)
                     continue
-                mime_type = mime_match.group(1).strip().lower()
-                b64_payload = mime_match.group(2)
-                raw = base64.b64decode(b64_payload)
-                ext = mimetypes.guess_extension(mime_type) or ".bin"
-                filename = f"{uuid.uuid4().hex[:12]}{ext}"
-                dest = sdir / filename
-                dest.write_bytes(raw)
+                dest = self._decode_data_url_to_file(entry, sdir)
                 resolved.append(str(dest))
             except Exception:
                 self.logger.exception("Failed to decode media data URL")
                 resolved.append(entry)
         return resolved
+
+    def _decode_data_url_to_file(
+        self, data_url: str, sdir: Path, filename: str | None = None
+    ) -> Path:
+        """Декодировать один data URL в файл сессии и вернуть путь к нему.
+
+        Если передан ``filename`` (оригинальное имя пользователя), файл
+        сохраняется как ``{uuid}_{имя}`` — имя сохраняется в подсказке агенту.
+        """
+        mime_match = re.match(r"^data:([^;,]+)(?:;[^,]*)*;base64,(.+)$", data_url)
+        if not mime_match:
+            raise ValueError(f"Unsupported data URL: {data_url[:40]!r}")
+        mime_type = mime_match.group(1).strip().lower()
+        raw = base64.b64decode(mime_match.group(2))
+
+        base = ""
+        if filename:
+            base = Path(filename).name.strip()
+            base = re.sub(r"[^\w.\- ]", "_", base).strip()
+        if base:
+            dest = sdir / f"{uuid.uuid4().hex[:12]}_{base}"
+        else:
+            ext = mimetypes.guess_extension(mime_type) or ".bin"
+            dest = sdir / f"{uuid.uuid4().hex[:12]}{ext}"
+        dest.write_bytes(raw)
+        return dest
+
+    @staticmethod
+    def _resolve_media_paths_and_hints(
+        media: list[Any],
+    ) -> tuple[list[str], list[str]]:
+        """Из декодированных media (строки-пути или dict filename/path)
+        извлечь пути для агента и подсказки «файл лежит там-то»."""
+        media_paths: list[str] = []
+        hints: list[str] = []
+        for entry in media:
+            if isinstance(entry, dict):
+                path = str(entry.get("path") or "")
+                name = str(entry.get("filename") or (Path(path).name if path else ""))
+            else:
+                path = str(entry) if entry else ""
+                name = Path(path).name if path else ""
+            if not path:
+                continue
+            media_paths.append(path)
+            if name:
+                hints.append(f"[Attachment: {name} (saved at {path})]")
+            else:
+                hints.append(f"[Attachment: saved at {path}]")
+        return media_paths, hints
 
     # ------------------------------------------------------------------
     # Жизненный цикл (start / stop)
@@ -437,6 +500,13 @@ class PostgresChannel(BaseChannel):
         # Декодируем data URL из БД обратно в локальные файлы сессии
         session_key = raw_meta.get("session_key") or f"postgres:{chat_id}"
         media = await self._decode_media_from_db(media, session_key)
+        # Агенту передаём только пути; в текст добавляем подсказку, что
+        # пользователь приложил файл и где он лежит в кэше сессии.
+        media_paths, hints = self._resolve_media_paths_and_hints(media)
+        if hints:
+            suffix = "\n".join(hints)
+            content = f"{content}\n\n{suffix}" if content else suffix
+        media = media_paths
 
         # Создаём assistant-placeholder, чтобы Streamlit мог начать опрос
         assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id)

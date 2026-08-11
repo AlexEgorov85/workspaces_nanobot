@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import sys
 from pathlib import Path
@@ -309,6 +310,71 @@ class TestPostgresChannelMedia:
         ch = _make_channel((PostgresChannel, None, None))
         assert await ch._decode_media_from_db([], "sess-1") == []
         assert await ch._decode_media_from_db(None, "sess-1") is None
+
+    @pytest.mark.asyncio
+    async def test_decode_data_url_writes_session_file(self, mock_db_and_psycopg, tmp_path):
+        import lib.channels.postgres_channel as pch
+
+        PostgresChannel, _, _ = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, None))
+        raw = b"%PDF-1.4 fake content"
+        data_url = "data:application/pdf;base64," + base64.b64encode(raw).decode()
+        with patch.object(pch, "_DATA_STORE_DIR", tmp_path):
+            result = await ch._decode_media_from_db([data_url], "sess-1")
+        assert len(result) == 1
+        path = Path(result[0])
+        assert path.is_file()
+        assert path.read_bytes() == raw
+        assert path.suffix == ".pdf"
+        assert path.parent == tmp_path / "sess-1"
+
+    @pytest.mark.asyncio
+    async def test_decode_dict_with_filename_keeps_name(self, mock_db_and_psycopg, tmp_path):
+        import lib.channels.postgres_channel as pch
+
+        PostgresChannel, _, _ = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, None))
+        raw = b"hello world"
+        data_url = "data:application/octet-stream;base64," + base64.b64encode(raw).decode()
+        entry = {"filename": "отчёт.pdf", "data": data_url}
+        with patch.object(pch, "_DATA_STORE_DIR", tmp_path):
+            result = await ch._decode_media_from_db([entry], "sess-1")
+        assert isinstance(result[0], dict)
+        assert result[0]["filename"] == "отчёт.pdf"
+        saved = Path(result[0]["path"])
+        assert saved.is_file()
+        assert saved.read_bytes() == raw
+        assert "_отчёт.pdf" in saved.name
+
+    @pytest.mark.asyncio
+    async def test_decode_non_data_dict_passthrough(self, mock_db_and_psycopg, tmp_path):
+        import lib.channels.postgres_channel as pch
+
+        PostgresChannel, _, _ = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, None))
+        entry = {"filename": "x.pdf", "path": "/tmp/x.pdf"}
+        with patch.object(pch, "_DATA_STORE_DIR", tmp_path):
+            result = await ch._decode_media_from_db([entry], "sess-1")
+        assert result == [entry]
+
+    def test_resolve_media_paths_and_hints(self, mock_db_and_psycopg):
+        PostgresChannel, _, _ = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, None))
+        media = [
+            {"filename": "отчёт.pdf", "path": "/cache/sessions/s/abc_отчёт.pdf"},
+            "/cache/sessions/s/plain.png",
+        ]
+        paths, hints = ch._resolve_media_paths_and_hints(media)
+        assert paths == ["/cache/sessions/s/abc_отчёт.pdf", "/cache/sessions/s/plain.png"]
+        assert hints == [
+            "[Attachment: отчёт.pdf (saved at /cache/sessions/s/abc_отчёт.pdf)]",
+            "[Attachment: plain.png (saved at /cache/sessions/s/plain.png)]",
+        ]
+
+    def test_resolve_media_paths_and_hints_empty(self, mock_db_and_psycopg):
+        PostgresChannel, _, _ = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, None))
+        assert ch._resolve_media_paths_and_hints([]) == ([], [])
 
 
 class TestPostgresChannelUnstickProcessing:

@@ -1,6 +1,7 @@
 """Streamlit UI — тонкий клиент gateway через conversation_messages."""
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import time
@@ -178,6 +179,14 @@ if processing:
     st.session_state["_processing"] = False
     st.rerun()
 
+_upload_key = st.session_state.get("_upload_key", 0)
+uploaded_files = st.file_uploader(
+    "Вложения",
+    accept_multiple_files=True,
+    key=f"attachments_{_upload_key}",
+    disabled=processing,
+)
+
 prompt = st.chat_input("Напишите сообщение...", disabled=processing)
 
 if prompt and not processing:
@@ -186,10 +195,21 @@ if prompt and not processing:
 
     msg_id = str(uuid.uuid4())
 
+    media_entries = []
+    if uploaded_files:
+        for f in uploaded_files:
+            b64 = base64.b64encode(f.getvalue()).decode("ascii")
+            mime = f.type or "application/octet-stream"
+            media_entries.append({
+                "filename": f.name,
+                "data": f"data:{mime};base64,{b64}",
+            })
+    st.session_state["_upload_key"] = _upload_key + 1
+
     execute(
-        f"INSERT INTO {_fq_table} (id, chat_id, user_id, role, content, status) "
-        f"VALUES (%s, %s, %s, 'user', %s, 'pending')",
-        msg_id, "streamlit", "user", prompt,
+        f"INSERT INTO {_fq_table} (id, chat_id, user_id, role, content, media, status) "
+        f"VALUES (%s, %s, %s, 'user', %s, %s::jsonb, 'pending')",
+        msg_id, "streamlit", "user", prompt, json.dumps(media_entries),
     )
 
     st.session_state["_msg_id"] = msg_id

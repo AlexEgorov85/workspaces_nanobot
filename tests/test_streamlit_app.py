@@ -33,6 +33,7 @@ def mock_all():
         st.chat_message = MagicMock()
         st.markdown = MagicMock()
         st.chat_input = MagicMock(return_value=None)
+        st.file_uploader = MagicMock(return_value=None)
         st.rerun = MagicMock()
         st.status = MagicMock()
         st.set_page_config = MagicMock()
