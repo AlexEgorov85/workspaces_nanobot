@@ -102,6 +102,29 @@ def _load_chat_history(chat_id: str = _CHAT_ID) -> list[dict]:
     return messages
 
 
+def _get_extension_from_mime(mime_type: str) -> str:
+    """Получить расширение файла по MIME-типу."""
+    mime_to_ext = {
+        "application/pdf": ".pdf",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "text/plain": ".txt",
+        "text/csv": ".csv",
+        "application/json": ".json",
+        "application/xml": ".xml",
+        "application/zip": ".zip",
+        "application/x-zip-compressed": ".zip",
+        "application/msword": ".doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/vnd.ms-excel": ".xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/octet-stream": "",
+    }
+    return mime_to_ext.get(mime_type, "")
+
+
 def _save_file_from_data_url(data_url: str, filename: str) -> str | None:
     """Сохранить файл из data URL в локальную папку, вернуть путь."""
     try:
@@ -114,15 +137,24 @@ def _save_file_from_data_url(data_url: str, filename: str) -> str | None:
         
         file_data = base64.b64decode(data)
         
-        # Создаём уникальный путь
+        # Создаём уникальный путь с правильным расширением
         safe_filename = Path(filename).name
+        stem = Path(filename).stem
+        suffix = Path(filename).suffix
+        
+        # Если расширения нет в имени файла, пробуем получить его из MIME-типа
+        if not suffix:
+            ext = _get_extension_from_mime(mime_part)
+            if ext:
+                safe_filename = f"{stem}{ext}"
+        
         file_path = _FILES_DIR / safe_filename
         
         # Если файл существует, добавляем суффикс
         counter = 1
         while file_path.exists():
-            stem = Path(filename).stem
-            suffix = Path(filename).suffix
+            stem = Path(safe_filename).stem
+            suffix = Path(safe_filename).suffix
             file_path = _FILES_DIR / f"{stem}_{counter}{suffix}"
             counter += 1
         
