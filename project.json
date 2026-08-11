@@ -121,34 +121,6 @@
           "enabled": false
         }
       }
-    },
-    "data_analyzer": {
-      "llm_provider": "ollama",
-      "llm_model": "glm-4.6:cloud",
-      "llm_api_url": "http://localhost:11434/api/generate",
-      "llm_temperature": 0.2,
-      "llm_max_tokens": 4000,
-      "llm_context_window": 8192,
-      "analyzer": {
-        "chunk_ratio": 0.7,
-        "max_retries": 3,
-        "retry_delay_base": 2
-      },
-      "supported_structured": [
-        ".csv",
-        ".xlsx",
-        ".xls",
-        ".json"
-      ],
-      "supported_text": [
-        ".txt",
-        ".log",
-        ".md",
-        ".py",
-        ".js",
-        ".json",
-        ".csv"
-      ]
     }
   },
   "cli": {
