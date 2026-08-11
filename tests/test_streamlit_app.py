@@ -38,11 +38,12 @@ def mock_all():
         st.status = MagicMock()
         st.set_page_config = MagicMock()
         st.empty = MagicMock()
+        st.download_button = MagicMock()
         sys.modules["streamlit"] = st
 
         class MockSettings:
             channels = {"postgres": {"dsn": "", "schema": "public", "table_name": "conversation_messages"}}
-            streamlit = {"max_wait": 600, "poll_interval": 1.0}
+            streamlit = {"max_wait": 600, "poll_interval": 1.0, "chat_id": "streamlit", "user_id": "user"}
 
         cfg = types.ModuleType("config")
         cfg.SETTINGS = MockSettings()
@@ -52,6 +53,7 @@ def mock_all():
         utils_db.configure = MagicMock()
         utils_db.fetchone = MagicMock()
         utils_db.execute = MagicMock()
+        utils_db.fetch = MagicMock(return_value=[])
         sys.modules["utils"] = types.ModuleType("utils")
         sys.modules["utils.db"] = utils_db
 
@@ -101,38 +103,148 @@ class TestCheckResponse:
         mock_all["utils_db"].fetchone.return_value = {
             "content": "Hello!",
             "status": "completed",
+            "metadata": "{}",
+            "media": "[]",
         }
         result = mock_all["streamlit_app"]._check_response("msg-1")
-        assert result == "Hello!"
+        assert result[0] == "Hello!"
 
     def test_returns_error_when_failed(self, mock_all):
         mock_all["utils_db"].fetchone.return_value = {
             "content": "error",
             "status": "failed",
+            "metadata": "{}",
+            "media": "[]",
         }
         result = mock_all["streamlit_app"]._check_response("msg-1")
-        assert "Ошибка" in result
+        assert "Ошибка" in result[0]
 
     def test_returns_none_when_processing(self, mock_all):
         mock_all["utils_db"].fetchone.return_value = {
             "content": "in progress",
             "status": "processing",
+            "metadata": "{}",
+            "media": "[]",
         }
         result = mock_all["streamlit_app"]._check_response("msg-1")
-        assert result is None
+        assert result[0] is None
 
     def test_returns_none_when_no_row(self, mock_all):
         mock_all["utils_db"].fetchone.return_value = None
         result = mock_all["streamlit_app"]._check_response("msg-1")
-        assert result is None
+        assert result[0] is None
 
     def test_returns_empty_string_when_no_content_but_completed(self, mock_all):
         mock_all["utils_db"].fetchone.return_value = {
             "content": None,
             "status": "completed",
+            "metadata": "{}",
+            "media": "[]",
         }
         result = mock_all["streamlit_app"]._check_response("msg-1")
-        assert result == ""
+        assert result[0] == ""
+
+    def test_returns_media_with_content(self, mock_all):
+        mock_all["utils_db"].fetchone.return_value = {
+            "content": "Here is the file",
+            "status": "completed",
+            "metadata": "{}",
+            "media": '["data:text/plain;base64,SGVsbG8="]',
+        }
+        content, data = mock_all["streamlit_app"]._check_response("msg-1")
+        assert content == "Here is the file"
+        assert data is not None
+        assert "media" in data
+
+
+# ===================================================================
+# _decode_media_list
+# ===================================================================
+
+class TestDecodeMediaList:
+    def test_none_returns_empty_list(self, mock_all):
+        assert mock_all["streamlit_app"]._decode_media_list(None) == []
+
+    def test_str_parsed(self, mock_all):
+        result = mock_all["streamlit_app"]._decode_media_list('["file1.txt"]')
+        assert result == ["file1.txt"]
+
+    def test_list_returned_as_is(self, mock_all):
+        input_list = ["file1.txt", "file2.pdf"]
+        assert mock_all["streamlit_app"]._decode_media_list(input_list) == input_list
+
+    def test_empty_str(self, mock_all):
+        assert mock_all["streamlit_app"]._decode_media_list("") == []
+
+
+# ===================================================================
+# _load_chat_history
+# ===================================================================
+
+class TestLoadChatHistory:
+    def test_loads_messages_from_db(self, mock_all):
+        mock_all["utils_db"].fetch.return_value = [
+            {
+                "id": "1",
+                "role": "user",
+                "content": "Hello",
+                "media": "[]",
+                "metadata": "{}",
+                "reply_to": None,
+                "status": "completed",
+                "created_at": "2025-01-01 00:00:00",
+            },
+            {
+                "id": "2",
+                "role": "assistant",
+                "content": "Hi there!",
+                "media": "[]",
+                "metadata": '{"reasoning": "greeting"}',
+                "reply_to": "1",
+                "status": "completed",
+                "created_at": "2025-01-01 00:00:01",
+            },
+        ]
+        result = mock_all["streamlit_app"]._load_chat_history("test-chat")
+        assert len(result) == 2
+        assert result[0]["role"] == "user"
+        assert result[0]["content"] == "Hello"
+        assert result[1]["role"] == "assistant"
+        assert result[1]["reasoning"] == "greeting"
+
+    def test_skips_non_user_assistant_roles(self, mock_all):
+        mock_all["utils_db"].fetch.return_value = [
+            {
+                "id": "1",
+                "role": "system",
+                "content": "System message",
+                "media": "[]",
+                "metadata": "{}",
+                "reply_to": None,
+                "status": "completed",
+                "created_at": "2025-01-01 00:00:00",
+            },
+        ]
+        result = mock_all["streamlit_app"]._load_chat_history("test-chat")
+        assert len(result) == 0
+
+    def test_includes_media_in_messages(self, mock_all):
+        mock_all["utils_db"].fetch.return_value = [
+            {
+                "id": "1",
+                "role": "user",
+                "content": "Check this file",
+                "media": '["data:text/plain;base64,SGVsbG8="]',
+                "metadata": "{}",
+                "reply_to": None,
+                "status": "completed",
+                "created_at": "2025-01-01 00:00:00",
+            },
+        ]
+        result = mock_all["streamlit_app"]._load_chat_history("test-chat")
+        assert len(result) == 1
+        assert "media" in result[0]
+        assert len(result[0]["media"]) == 1
 
 
 # ===================================================================
