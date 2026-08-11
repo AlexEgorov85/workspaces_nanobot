@@ -279,7 +279,27 @@ def main() -> None:
 
     _streamlit_script = _SCRIPT_DIR / "streamlit_app.py"
 
-    # ── 11. Фоновая загрузка DuckDB-кеша для audit_analyzer ──────────────
+    # ── 11. Фоновая загрузка DuckDB-кеша и векторных индексов для audit_analyzer ──
+    async def _preload_vector_indexes():
+        """Фоновая загрузка векторных индексов из БД в память при старте."""
+        try:
+            acfg = SETTINGS.skills.audit_analyzer
+            if not acfg.get("mode_vector_db_table"):
+                console.print("[dim]audit_analyzer vector indexes: mode_vector_db_table не задан, пропуск[/dim]")
+                return
+            from skills.audit_analyzer.scripts.vector_mode import preload_indexes
+            loaded = await asyncio.to_thread(preload_indexes)
+            if loaded:
+                for item in loaded:
+                    console.print(
+                        f"[green]✓[/green] vector index '{item['index_name']}' "
+                        f"loaded from DB: {item['vectors']} vectors (in memory)"
+                    )
+            else:
+                console.print("[dim]audit_analyzer vector indexes: ничего не загружено[/dim]")
+        except Exception as exc:
+            console.print(f"[yellow]⚠[/yellow] audit_analyzer vector index preload failed: {exc}")
+
     async def _preload_audit_cache():
         """Фоновая загрузка DuckDB-кеша для навыка audit_analyzer при старте."""
         cache_path, db_cfg = _get_audit_cache_cfg()
@@ -362,6 +382,7 @@ def main() -> None:
                 console.print(f"[yellow]⚠[/yellow] Streamlit failed to start: {exc}")
 
         try:
+            asyncio.create_task(_preload_vector_indexes())
             asyncio.create_task(_preload_audit_cache())
             asyncio.create_task(_background_audit_cache_refresh())
             await agent.run()

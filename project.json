@@ -1,156 +1,164 @@
 {
+  // ============================================================================
+  //  project.json — настройки проекта nanobot (дополнение к config.json)
+  // ============================================================================
+  //  Читается config.py и мержится в SETTINGS в порядке (поздний перекрывает):
+  //      project.json → config.json → .secrets.env (секреты)
+  //  .env был удалён (миграция в project.json/config.json); код оставил лишь
+  //  защитный fallback: если файл .env когда-либо появится, он прочитается первым.
+  //
+  //  Формат: JSONC — обычный JSON + комментарии // и /* */.
+  //  Значения вида ${VAR} подставляются из os.environ (секреты — из .secrets.env).
+  //
+  //  Проектные секции, у которых нет нативного блока в nanobot:
+  //      channels.*, skills.*, cli, benchmark, streamlit, gateway.
+  //  Нативный конфиг nanobot (агенты, провайдеры, API) — в config.json.
+  // ============================================================================
+
+  // ---------------------------------------------------------------------------
+  //  channels.* — каналы связи (заменяют секции [PostgreSQL]/[Redis] из .env)
+  // ---------------------------------------------------------------------------
   "channels": {
     "postgres": {
-      "enabled": true,
-      "dsn": "${DATABASE_URL}",
-      "schema": "public",
-      "messages_table": "session_messages",
-      "meta_table": "session_meta",
-      "table_name": "conversation_messages",
-      "poll_interval": 2.0,
-      "flush_interval": 2.0,
-      "max_concurrent": 1,
-      "processing_timeout": 120,
-      "allow_from": ["*"]
+      "enabled": true,                        // Канал включён. Варианты: true | false
+      "dsn": "${DATABASE_URL}",               // Строка подключения (секрет в .secrets.env)
+      "schema": "public",                     // Схема БД
+      "messages_table": "session_messages",   // Таблица сообщений сессий (PGSessionManager)
+      "meta_table": "session_meta",           // Таблица метаданных сессий (PGSessionManager)
+      "table_name": "conversation_messages",  // Таблица обмена сообщениями (PostgresChannel)
+      "poll_interval": 2.0,                   // Поллинг новых сообщений, сек
+      "flush_interval": 2.0,                  // Сброс reasoning в metadata, сек
+      "max_concurrent": 1,                    // Макс. параллельно обрабатываемых сообщений
+      "processing_timeout": 120,              // Зависшее сообщение → retry (до 3 раз), сек
+      "allow_from": ["*"]                     // Допустимые отправители. Варианты: ["*"] — все | ["<sender_id>", ...] — точное совпадение (nanobot/channels/base.py:203)
     },
     "redis": {
-      "enabled": false,
+      "enabled": false,                       // Выключен по умолчанию. Варианты: true | false
       "host": "127.0.0.1",
       "port": 6379,
       "db": 0,
-      "password": null,
-      "incoming_key": "nanobot:inbox",
-      "outgoing_prefix": "nanobot:outbox",
-      "poll_timeout": 5.0,
-      "max_concurrent": 1,
-      "allow_from": ["*"]
+      "password": null,                       // Пароль Redis. Варианты: null (без пароля) | "<пароль>"
+      "incoming_key": "nanobot:inbox",        // Список входящих (BRPOP)
+      "outgoing_prefix": "nanobot:outbox",    // Префикс очередей ответов (LPUSH outbox:{chat_id})
+      "poll_timeout": 5.0,                    // Таймаут BRPOP, сек
+      "max_concurrent": 1,                    // Макс. параллельно обрабатываемых сообщений
+      "allow_from": ["*"]                     // Варианты: ["*"] — все | ["<sender_id>", ...] — точное совпадение
     }
   },
+
+  // ---------------------------------------------------------------------------
+  //  skills.* — настройки пользовательских навыков
+  // ---------------------------------------------------------------------------
   "skills": {
     "audit_analyzer": {
-      "llm_provider": "mistral",
-      "llm_model": "mistral-large-latest",
+      // --- LLM: генерация SQL и обобщение результатов -----------------------
+      "llm_provider": "mistral",              // Провайдер LLM. Варианты: mistral | openai | ollama | vllm.
+      //   ВНИМАНИЕ: в llm.py ключ НЕ читается — реальный эндпоинт задаёт llm_api_base; значение информационное
+      "llm_model": "mistral-large-latest",    // Модель для генерации SQL
       "llm_api_base": "https://api.mistral.ai/v1",
+      // llm_api_key здесь НЕ задаётся — берётся из .secrets.env (наивысший приоритет)
       "llm_max_tokens": 8192,
       "llm_temperature": 0.1,
-      "db_schema": "oarb",
-      "db_tables": [
+
+      // --- База данных: источник данных для анализа ------------------------
+      "db_schema": "oarb",                    // Схема с таблицами аудита
+      "db_tables": [                          // Таблицы, доступные агенту
         "audit_reports",
         "audits",
         "report_items",
         "violations"
       ],
-      "schema_cache_enabled": true,
-      "schema_cache_path": "cache/schema.json",
-      "schema_cache_ttl": 86400,
-      "in_memory_enabled": true,
-      "in_memory_engine": "duckdb",
+
+      // --- Кеш схемы БД (для SQL-генерации без лишних запросов) -------------
+      "schema_cache": {                       // Ожидаемая структура из database.py:55 (enabled/path/ttl_seconds).
+        "enabled": true,                      //   Варианты: true | false
+        "path": "cache/schema.json",          //   Путь относительно skills/audit_analyzer/
+        "ttl_seconds": 86400                  //   TTL кеша, сек (1 сутки)
+      },
+      //   ВНИМАНИЕ: load_db_config() пока не передаёт schema_cache в Database —
+      //   кеш схемы фактически не работает, блок резервный.
+
+      // --- In-memory кеш (DuckDB): локальная копия данных для скорости ------
+      "in_memory_enabled": true,              // Варианты: true | false
+      "in_memory_engine": "duckdb",           // Движок in-memory кеша. Варианты: duckdb (единственный реализованный)
       "in_memory_cache_path": "cache/audit_cache.duckdb",
-      "embedding_base_url": "http://localhost:11434/api/embed",
+
+      // --- Эмбеддинги для семантического (векторного) поиска ----------------
+      "embedding_base_url": "http://localhost:11434/api/embed",  // Ollama /api/embed
       "embedding_model": "mxbai-embed-large:latest",
       "embedding_dimension": 1024,
-      "mode_predefined_enabled": true,
-      "mode_vector_enabled": true,
-      "mode_vector_index_path": "C:/Users/Алексей/Documents/WORK/Agent_v5/data/vector",
-      "mode_vector_top_k": 5,
-      "mode_vector_threshold": 0.75,
-      "mode_vector_db_table": "oarb.audit_vectors",
-      "mode_sql_enabled": true,
-      "cli_default_mode": "predefined",
-      "cli_default_format": "json",
-      "cli_max_retries": 3,
-      "cli_timeout_sec": 60,
-      "vector_indexes": {
-        "audits_index": {
-          "table": "oarb.audits",
-          "pk": "id",
-          "source_table": "audits",
-          "content_columns": [
-            "title"
-          ],
-          "embedding_columns": [
-            "title",
-            "audit_type",
-            "auditee_entity"
-          ],
-          "track_column": "updated_at",
-          "enabled": true
-        },
-        "violations_index": {
-          "table": "oarb.violations",
-          "pk": "id",
-          "source_table": "violations",
-          "content_columns": [
-            "violation_code",
-            "description"
-          ],
-          "embedding_columns": [
-            "violation_code",
-            "description",
-            "recommendation"
-          ],
-          "track_column": "created_at",
-          "enabled": true
-        },
-        "audit_reports_index": {
-          "table": "oarb.audit_reports",
-          "pk": "id",
-          "source_table": "audit_reports",
-          "content_columns": [
-            "title"
-          ],
-          "embedding_columns": [
-            "title",
-            "full_text"
-          ],
-          "track_column": "updated_at",
-          "enabled": false
-        },
-        "report_items_index": {
-          "table": "oarb.report_items",
-          "pk": "id",
-          "source_table": "report_items",
-          "content_columns": [
-            "item_title"
-          ],
-          "embedding_columns": [
-            "item_title",
-            "item_content"
-          ],
-          "track_column": "updated_at",
-          "enabled": false
-        }
-      }
+
+      // --- Векторный поиск: ИНДЕКСЫ В БАЗЕ ДАННЫХ ----------------------------
+      // С 2026-06 векторы и их конфигурация хранятся в PostgreSQL/Greenplum:
+      //   oarb.audit_vectors        — сырые эмбеддинги REAL[] + метаданные (строит build_vectors.py)
+      //   oarb.vector_index_store   — сериализованный FAISS-индекс (BYTEA), ищет vector_mode.py
+      //   oarb.vector_index_config  — конфигурация индексов (таблицы/колонки для эмбеддинга).
+      //     Раньше это были ключи vector_indexes + mode_vector_index_path (файлы .faiss) —
+      //     теперь управляется SQL-таблицей, project.json больше их не содержит.
+      "mode_vector_db_table": "oarb.audit_vectors",  // Таблица сырых векторов (источник индекса)
+      // Параметры поиска top_k / threshold задаются аргументами CLI:
+      //   audit_analyze --mode vector --query '...' --index-name audits_index --top-k 5 --threshold 0.75 (0.0–1.0)
+      // (в конфиге не хранятся — код их не читает)
+
+      // --- Режимы работы навыка ---------------------------------------------
+      //   predefined — готовые SQL-шаблоны (--script), кеш в DuckDB
+      //   sql        — генерация SQL через LLM по текстовому запросу (--query)
+      //   vector     — семантический поиск по индексу из БД (--query + --index-name)
+      //   init       — загрузка DuckDB-кеша из PostgreSQL
+      "cli_default_mode": "predefined",       // Режим по умолчанию. Варианты: predefined | sql | vector | init (см. выше).
+      //   ВНИМАНИЕ: cli.py требует --mode явно (required=True); ключ нигде не потребляется — резервный
+      "cli_default_format": "json",           // Формат вывода. ВНИМАНИЕ: НЕ читается кодом — llm.py возвращает текст как есть
+      "cli_max_retries": 3,                   // Ретраи LLM при генерации SQL
+      "cli_timeout_sec": 60                   // Таймаут запроса к LLM, сек
     }
   },
+
+  // ---------------------------------------------------------------------------
+  //  cli.* — настройки CLI-агента (cli_agent.py)
+  // ---------------------------------------------------------------------------
   "cli": {
-    "show_reasoning": true,
-    "show_tool_calls": true,
-    "show_tool_results": true,
-    "show_tool_params": true,
-    "show_progress": true,
-    "typewriter_speed": 0.01,
-    "llm_timeout": 300,
-    "exec_timeout": 60,
-    "max_iterations": 200,
-    "log_level": "WARNING"
+    "show_reasoning": true,       // Показывать рассуждения агента
+    "show_tool_calls": true,      // Показывать вызовы инструментов
+    "show_tool_results": true,    // Показывать результаты инструментов
+    "show_tool_params": true,     // Показывать параметры вызовов
+    "show_progress": true,        // Прогресс обработки
+    "typewriter_speed": 0.01,     // Скорость "печатания" ответа, сек/символ
+    "llm_timeout": 300,           // Таймаут LLM-запроса, сек
+    "exec_timeout": 60,           // Таймаут exec-инструмента, сек
+    "max_iterations": 200,        // Макс. итераций агента
+    "log_level": "WARNING"        // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR
   },
+
+  // ---------------------------------------------------------------------------
+  //  benchmark.* — сохранение результатов бенчмарков в PostgreSQL
+  // ---------------------------------------------------------------------------
   "benchmark": {
-    "db_schema": "public",
-    "runs_table": "benchmark_runs",
-    "results_table": "benchmark_results"
+    "db_schema": "public",            // Схема БД
+    "runs_table": "benchmark_runs",   // Таблица прогонов
+    "results_table": "benchmark_results"  // Таблица результатов по вопросам
   },
+
+  // ---------------------------------------------------------------------------
+  //  streamlit.* — веб-чат (streamlit_app.py)
+  // ---------------------------------------------------------------------------
   "streamlit": {
-    "max_wait": 600,
-    "poll_interval": 1.0
+    "max_wait": 600,          // Макс. ожидание ответа агента, сек
+    "poll_interval": 1.0      // Интервал поллинга статуса, сек
   },
+
+  // ---------------------------------------------------------------------------
+  //  gateway.* — настройки gateway-сервера (gateway.py)
+  // ---------------------------------------------------------------------------
   "gateway": {
-    "storage": "auto",
-    "persist_threshold": 5000,
-    "persist_max_files": 100,
-    "persist_max_age_hours": 0,
-    "llm_timeout": 300,
-    "exec_timeout": 60,
-    "log_level": "INFO"
+    "storage": "auto",                // Хранилище сессий. Варианты: auto | postgres | file
+    //   auto     — PGSessionManager при наличии dsn, иначе JSONL-файлы
+    //   postgres — только PGSessionManager (без dsn — ошибка)
+    //   file     — только JSONL-файлы (SessionManager), dsn игнорируется
+    "persist_threshold": 5000,        // Порог байт для выноса результата в файл
+    "persist_max_files": 100,         // Макс. файлов в data_store/cache/sessions/
+    "persist_max_age_hours": 0,       // 0 = хранить бессрочно
+    "llm_timeout": 300,               // Таймаут LLM, сек
+    "exec_timeout": 60,               // Таймаут exec, сек
+    "log_level": "INFO"               // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR
   }
 }

@@ -180,6 +180,7 @@ class TestPostgresChannelSend:
         ch = _make_channel((PostgresChannel, None, mock_db))
 
         msg = MagicMock()
+        msg.event = None
         msg.content = "thinking..."
         msg.metadata = {"_reasoning_delta": True, "answer_id": "a-1"}
 
@@ -192,6 +193,7 @@ class TestPostgresChannelSend:
         ch = _make_channel((PostgresChannel, None, mock_db))
 
         msg = MagicMock()
+        msg.event = None
         msg.metadata = {"_reasoning_end": True}
 
         await ch.send(msg)  # should not raise
@@ -202,6 +204,7 @@ class TestPostgresChannelSend:
         ch = _make_channel((PostgresChannel, None, mock_db))
 
         msg = MagicMock()
+        msg.event = None
         msg.metadata = {"_progress": True, "origin_message_id": "m-1"}
 
         await ch.send(msg)
@@ -213,6 +216,7 @@ class TestPostgresChannelSend:
         ch = _make_channel((PostgresChannel, None, mock_db))
 
         msg = MagicMock()
+        msg.event = None
         msg.metadata = {"_turn_end": True}
 
         await ch.send(msg)  # should not raise
@@ -227,6 +231,7 @@ class TestPostgresChannelSend:
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
 
         msg = MagicMock()
+        msg.event = None
         msg.content = "Final answer"
         msg.chat_id = "chat-1"
         msg.metadata = {"origin_message_id": "m-1", "answer_id": "a-1"}

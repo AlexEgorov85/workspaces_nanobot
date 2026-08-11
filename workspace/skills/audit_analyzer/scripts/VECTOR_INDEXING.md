@@ -59,7 +59,7 @@ python build_vectors.py --index violations_index
 
 ### Алгоритм работы
 
-1. Читает конфиг: `oarb.vector_index_config` (если есть данные) → `config.json` (`vector_indexes`)
+1. Читает конфиг: `oarb.vector_index_config` (если есть данные) → `project.json` (`skills.audit_analyzer.vector_indexes`)
 2. Для каждого активного (`enabled: true`) индекса:
    - Загружает все строки из source-таблицы
    - Сравнивает с существующими записями в `audit_vectors` по `(source, pk_value)`
@@ -88,9 +88,9 @@ python build_vectors.py --index violations_index
 
 ## Как добавить новый индекс
 
-### Через config.json
+### Через project.json (fallback)
 
-Добавить секцию в `config.json`:
+Добавить секцию `skills.audit_analyzer.vector_indexes` в `project.json`:
 
 ```json
 "vector_indexes": {
@@ -136,7 +136,7 @@ VALUES (
 );
 ```
 
-Приоритет: если в таблице есть данные — используется она, иначе `config.json`.
+Приоритет: если в таблице есть данные — используется она, иначе `project.json` (`skills.audit_analyzer.vector_indexes`).
 
 ### Запустить сборку
 
@@ -187,13 +187,13 @@ python build_vectors.py --chunk-size 800 --chunk-overlap 150
 | После вставки новых строк в источнике | `python build_vectors.py` |
 | После массового обновления | `python build_vectors.py --full-rebuild` |
 | После удаления строк из источника | `python build_vectors.py` |
-| После изменений в `config.json` | `python build_vectors.py --full-rebuild` |
+| После изменений в `vector_index_config`/`project.json` | `python build_vectors.py --full-rebuild` |
 
 ## Как удалить индекс
 
 ```bash
 # 1. Отключить в конфиге
-# config.json: "enabled": false
+# project.json (skills.audit_analyzer.vector_indexes): "enabled": false
 # или UPDATE oarb.vector_index_config SET enabled = false WHERE index_name = '...'
 
 # 2. Очистить данные

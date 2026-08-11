@@ -6,7 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from config import AttrDict, _deep_merge, _flatten_env, _header_to_prefix, _parse_value, load_env
+from config import (
+    AttrDict,
+    _deep_merge,
+    _flatten_env,
+    _header_to_prefix,
+    _parse_value,
+    _strip_jsonc_comments,
+    load_config_json,
+    load_env,
+)
 
 
 class TestAttrDict:
@@ -231,6 +240,83 @@ class TestLoadEnv:
             result = load_env(tmp)
             assert result.DATABASE.HOST == "localhost"
             assert result.DATABASE.PORT == 5432
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+
+class TestStripJsoncComments:
+    def test_line_comments_removed(self):
+        text = '{\n  // ведущий комментарий\n  "a": 1 // хвостовой комментарий\n}'
+        assert _strip_jsonc_comments(text) == '{\n  \n  "a": 1 \n}'
+
+    def test_block_comments_removed(self):
+        text = '{ /* блок */ "a": /* внутри */ 1 }'
+        assert _strip_jsonc_comments(text) == '{  "a":  1 }'
+
+    def test_url_inside_string_kept(self):
+        text = '{"url": "https://example.com/x", "dsn": "postgresql://u:p@host/db"}'
+        assert _strip_jsonc_comments(text) == text
+
+    def test_escaped_quote_inside_string(self):
+        text = '{"path": "a/\\"b\\"//c", "x": 1 // comment\n}'
+        out = _strip_jsonc_comments(text)
+        assert 'a/\\"b\\"//c' in out
+        assert "// comment" not in out
+
+    def test_multiline_block_comment(self):
+        text = '{\n/* строка 1\n   строка 2 */\n"a": 1\n}'
+        assert _strip_jsonc_comments(text) == '{\n\n"a": 1\n}'
+
+    def test_string_with_url_scheme_plus_comment_after(self):
+        text = '{"base": "http://localhost:11434/api/embed", "x": 1} // trailing'
+        out = _strip_jsonc_comments(text)
+        assert "http://localhost:11434/api/embed" in out
+        assert "trailing" not in out
+
+
+class TestLoadConfigJson:
+    def test_file_not_found_returns_empty(self):
+        result = load_config_json("/nonexistent/config.json")
+        assert result == {}
+
+    def test_plain_json(self):
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False, suffix=".json") as f:
+            f.write('{"a": 1, "b": {"c": 2}}')
+            tmp = f.name
+        try:
+            result = load_config_json(tmp)
+            assert result.a == 1
+            assert result.b.c == 2
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_jsonc_with_comments(self):
+        content = (
+            '{\n'
+            '  // секция с комментариями\n'
+            '  "dsn": "postgresql://user:pass@localhost/db", /* блок */\n'
+            '  "enabled": true,   // хвостовой комментарий\n'
+            '  "url": "https://example.com/api" // URL внутри строки цел\n'
+            '}\n'
+        )
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False, suffix=".json") as f:
+            f.write(content)
+            tmp = f.name
+        try:
+            result = load_config_json(tmp)
+            assert result.enabled is True
+            assert result.dsn == "postgresql://user:pass@localhost/db"
+            assert result.url == "https://example.com/api"
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_broken_json_returns_empty(self):
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False, suffix=".json") as f:
+            f.write('{ not valid json')
+            tmp = f.name
+        try:
+            result = load_config_json(tmp)
+            assert result == {}
         finally:
             Path(tmp).unlink(missing_ok=True)
 

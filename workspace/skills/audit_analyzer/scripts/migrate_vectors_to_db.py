@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from skill_config import get_vector_index_path, get_tool_config
-from utils.db import configure, fetch, execute, fetchone
+from utils.db import configure, fetch, execute, fetchone, resolve_dsn
 
 
 def _load_metadata(meta_path: str) -> dict:
@@ -158,16 +158,12 @@ def main():
         if p not in sys.path:
             sys.path.insert(0, p)
 
-    from config import SETTINGS as _SETTINGS
-    from utils.db import configure as db_configure
-
-    pg_cfg = _SETTINGS.get("postgresql", {})
-    dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else ""
+    dsn = resolve_dsn()
     if not dsn:
-        print("ОШИБКА: PG_DSN не задан в .env")
+        print("ОШИБКА: DSN не задан. Укажите DATABASE_URL (channels.postgres.dsn в project.json)")
         sys.exit(1)
 
-    db_configure(dsn)
+    configure(dsn)
     print(f"Подключение к БД: {dsn}")
 
     # Проверка существования таблицы

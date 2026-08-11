@@ -124,8 +124,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vector-index",
         default=None,
-        help="Директория с FAISS-индексами (только для vector mode). "
-             "По умолчанию из config.json modes.vector.index_path",
+        help="Директория с FAISS-индексами (legacy, только для vector mode). "
+             "По умолчанию из skills.audit_analyzer.mode_vector_index_path "
+             "или ~/.nanobot/vectors/audits_index",
     )
     parser.add_argument(
         "--index-name",

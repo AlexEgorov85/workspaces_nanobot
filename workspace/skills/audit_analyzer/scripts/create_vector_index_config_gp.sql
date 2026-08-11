@@ -1,5 +1,6 @@
 -- Таблица конфигурации векторных индексов (PostgreSQL 13+ / Greenplum 6+).
--- Альтернатива секции "vector_indexes" в config.json —
+-- Основной источник конфигурации индексов (fallback — ключ
+-- vector_indexes в skills.audit_analyzer / project.json) —
 -- позволяет управлять настройками индексации через SQL.
 --
 -- Использование:

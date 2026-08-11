@@ -81,14 +81,71 @@ def load_env(path: str | Path | None = None) -> AttrDict:
     return AttrDict(tree)
 
 
+def _strip_jsonc_comments(text: str) -> str:
+    """Удалить ``//`` и ``/* */`` комментарии из JSON (JSONC), не трогая строки.
+
+    Сохраняет содержимое строковых литералов (включая ``https://...``),
+    корректно обрабатывает экранирование ``\\"``.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_string = False
+    in_block = False
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if in_block:
+            if c == "*" and nxt == "/":
+                in_block = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_string:
+            out.append(c)
+            if c == "\\" and nxt:
+                out.append(nxt)
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+            i += 1
+            continue
+        if c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and nxt == "/":
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            continue
+        if c == "/" and nxt == "*":
+            in_block = True
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def load_config_json(path: str | Path | None = None) -> AttrDict:
-    """Загрузить config.json в AttrDict; несуществующий/битый файл → пустой AttrDict."""
+    """Загрузить JSON/JSONC-файл в AttrDict; несуществующий/битый файл → пустой AttrDict.
+
+    Поддерживает комментарии ``//`` и ``/* */`` (JSONC) — проект использует их
+    в project.json. Стандартный JSON (config.json) парсится как и раньше.
+    """
     config_file = Path(path or _CONFIG_FILE)
     if not config_file.exists():
         return AttrDict()
     try:
-        data = json.loads(config_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = config_file.read_text(encoding="utf-8")
+    except OSError:
+        return AttrDict()
+    raw = _strip_jsonc_comments(raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
         return AttrDict()
     return AttrDict(data) if isinstance(data, dict) else AttrDict()
 
@@ -102,8 +159,9 @@ def _deep_merge(base: dict, override: dict) -> None:
 
 # Основной источник — config.json (настройки nanobot + каналы channels.*);
 # project.json — проектные секции без нативного блока в nanobot
-# (cli/benchmark/streamlit/gateway); .env остаётся legacy-фолбэком;
-# .secrets.env хранит секреты и имеет наивысший приоритет.
+# (cli/benchmark/streamlit/gateway); .env удалён и остался лишь защитным
+# fallback (если файл появится — прочитается первым); .secrets.env хранит
+# секреты и имеет наивысший приоритет.
 SETTINGS = AttrDict()
 if _ENV_FILE.exists():
     SETTINGS = load_env(_ENV_FILE)

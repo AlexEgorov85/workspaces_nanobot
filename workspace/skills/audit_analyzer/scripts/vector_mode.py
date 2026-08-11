@@ -7,7 +7,7 @@
 
 Поддерживает два источника данных:
   - FAISS-файлы (.faiss + _metadata.json) — по умолчанию
-  - PostgreSQL/Greenplum таблица (через config modes.vector.db_table)
+  - PostgreSQL/Greenplum таблица (mode_vector_db_table в skills.audit_analyzer, project.json)
 
 Pipeline:
     1. Получить эмбеддинг запроса (Ollama /api/embed)
@@ -77,6 +77,48 @@ def invalidate_cache(source: Optional[str] = None) -> None:
         _INDEX_CACHE.pop(source, None)
     else:
         _INDEX_CACHE.clear()
+
+
+def preload_indexes(db_table: Optional[str] = None) -> list[dict]:
+    """
+    Прогреть кеш индексов из БД (vector_index_store / audit_vectors) в память.
+
+    Загружает все активные индексы при старте агента (gateway.py / cli_agent.py).
+    Имена индексов берутся из oarb.vector_index_config (skills.audit_analyzer)
+    плюс из фактически присутствующих в vector_index_store (когда конфиг пуст).
+
+    Args:
+        db_table: Таблица сырых векторов (schema.table).
+                  По умолчанию из skills.audit_analyzer.mode_vector_db_table.
+
+    Returns:
+        Список загруженных индексов: [{"index_name", "vectors"}, ...].
+    """
+    from skill_config import get_vector_indexes
+    from utils.db import fetch
+
+    table = db_table or get_vector_db_table()
+    if not table:
+        return []
+
+    names: dict[str, bool] = {}
+    cfg = get_vector_indexes() or {}
+    for name, c in cfg.items():
+        names[name] = not (isinstance(c, dict) and c.get("enabled") is False)
+    try:
+        for r in fetch(f"SELECT DISTINCT source FROM {STORE_TABLE}"):
+            names.setdefault(r["source"], True)
+    except Exception:
+        pass
+
+    loaded = []
+    for name, enabled in names.items():
+        if not enabled:
+            continue
+        idx, _ = _load_index("", name, table)
+        if idx is not None:
+            loaded.append({"index_name": name, "vectors": idx.ntotal})
+    return loaded
 
 
 # ---------------------------------------------------------------------------
@@ -382,8 +424,9 @@ def _load_index(
         idx, meta = _load_index_from_store(index_name)
         if idx is not None:
             n_vectors = idx.ntotal
-            print(f"[vector] Индекс '{index_name}' загружен из store: {n_vectors} векторов, "
-                  f"кеш до перезапуска", file=__import__('sys').stderr)
+            print(f"[vector] Индекс '{index_name}' скачан из БД (vector_index_store): "
+                  f"{n_vectors} векторов, кеширован в памяти",
+                  file=__import__('sys').stderr)
             _INDEX_CACHE[index_name] = (idx, meta)
             return idx, meta
 
@@ -392,8 +435,9 @@ def _load_index(
         if idx is not None:
             _save_index_to_store(index_name, idx, meta)
             n_vectors = idx.ntotal
-            print(f"[vector] Индекс '{index_name}' перестроен из БД: {n_vectors} векторов, "
-                  f"сохранён в store", file=__import__('sys').stderr)
+            print(f"[vector] Индекс '{index_name}' перестроен из БД (audit_vectors): "
+                  f"{n_vectors} векторов, кеширован в памяти и сохранён в store",
+                  file=__import__('sys').stderr)
             _INDEX_CACHE[index_name] = (idx, meta)
             return idx, meta
 
@@ -416,7 +460,7 @@ def run(
     """
     Семантический поиск по FAISS-индексу.
 
-    Источник данных: БД (если modes.vector.db_table в конфиге) или FAISS-файлы.
+    Источник данных: БД (если задан mode_vector_db_table) или FAISS-файлы.
 
     Args:
         query: Запрос на естественном языке.

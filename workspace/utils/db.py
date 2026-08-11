@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Callable, Optional
@@ -48,6 +49,38 @@ DB_RETRYABLE_ERRORS = (
 _dsn: str = ""
 
 
+def resolve_dsn() -> str:
+    """Найти DSN из доступных источников в порядке приоритета.
+
+    1. configure(dsn) — явно заданный при запуске;
+    2. SETTINGS.postgresql.dsn — legacy-место из .env (удалено);
+    3. SETTINGS.channels.postgres.dsn — новый дом в project.json
+       (значение ``${DATABASE_URL}`` уже резолвится в config.py);
+    4. os.environ DATABASE_URL / PG_DSN.
+
+    Возвращает пустую строку, если DSN нигде нет.
+    """
+    if _dsn:
+        return _dsn
+    try:
+        from config import SETTINGS
+        for section in ("postgresql", "channels.postgres"):
+            cfg = SETTINGS
+            for part in section.split("."):
+                if isinstance(cfg, dict):
+                    cfg = cfg.get(part, {})
+                else:
+                    break
+            else:
+                if isinstance(cfg, dict):
+                    dsn = cfg.get("dsn", "") or ""
+                    if dsn:
+                        return dsn
+    except Exception:
+        pass
+    return os.environ.get("DATABASE_URL", "") or os.environ.get("PG_DSN", "")
+
+
 def configure(dsn: str) -> None:
     """Настроить DSN для подключения к БД.
 
@@ -59,15 +92,8 @@ def configure(dsn: str) -> None:
 
 
 def _get_dsn() -> str:
-    """Вернуть DSN: из configure() или fallback из SETTINGS."""
-    if _dsn:
-        return _dsn
-    try:
-        from config import SETTINGS
-        cfg = SETTINGS.get("postgresql", {})
-        return cfg.get("dsn", "") if isinstance(cfg, dict) else ""
-    except Exception:
-        return ""
+    """Вернуть DSN: из configure() или fallback из SETTINGS/env."""
+    return resolve_dsn()
 
 
 def _connect() -> psycopg2.extensions.connection:
@@ -82,8 +108,8 @@ def _connect() -> psycopg2.extensions.connection:
     resolved = _get_dsn()
     if not resolved:
         raise RuntimeError(
-            "SharedDB не инициализирован: вызовите configure(dsn) "
-            "или заполните PG_DSN в .env"
+            "SharedDB не инициализирован: вызовите configure(dsn), "
+            "задайте channels.postgres.dsn в project.json или DATABASE_URL в .secrets.env"
         )
     # libpq в psycopg2-binary (≥ 2.9.x) пытается использовать
     # GSSAPI-шифрование по умолчанию, но GP 6.25 / PG 9.4 его не

@@ -9,7 +9,7 @@ row_data (JSONB) всегда содержит ПОЛНУЮ строку исх�
 независимо от количества чанков.
 
 Конфиг читается из oarb.vector_index_config (БД) с fallback
-на секцию vector_indexes в config.json.
+на ключ vector_indexes в skills.audit_analyzer (project.json).
 
 Запуск:
     # Инкрементальное обновление (только новые строки)
@@ -52,9 +52,8 @@ for p in [str(_WORKSPACE_DIR), str(_NANOBOT_DIR)]:
         sys.path.insert(0, p)
 
 from skill_config import get_vector_indexes, get_embedding_config, get_embedding_model
-from utils.db import configure, execute, fetch
+from utils.db import configure, execute, fetch, resolve_dsn
 from text_splitter import build_chunks
-from config import SETTINGS as _SETTINGS
 
 
 def fetchone(sql, *args):
@@ -465,10 +464,9 @@ def main():
 
     args = parser.parse_args()
 
-    pg_cfg = _SETTINGS.get("postgresql", {})
-    dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else ""
+    dsn = resolve_dsn()
     if not dsn:
-        print("ОШИБКА: PG_DSN не задан в .env")
+        print("ОШИБКА: DSN не задан. Укажите DATABASE_URL (channels.postgres.dsn в project.json)")
         sys.exit(1)
     configure(dsn)
 

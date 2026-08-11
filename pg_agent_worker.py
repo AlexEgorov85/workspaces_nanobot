@@ -277,7 +277,7 @@ async def main():
 
     dsn = args.db_url or os.getenv("DATABASE_URL") or (getattr(SETTINGS, "channels", {}) or {}).get("postgres", {}).get("dsn", "")
     if not dsn:
-        print("❌ Error: DSN не задан. Укажите --db-url, DATABASE_URL или PG_DSN в .env")
+        print("❌ Error: DSN не задан. Укажите --db-url или DATABASE_URL (channels.postgres.dsn в project.json)")
         return 1
     configure(dsn)
 

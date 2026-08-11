@@ -35,9 +35,9 @@ for _p in [str(_nanobot_root), str(_workspace_root)]:
         sys.path.insert(0, _p)
 
 from config import SETTINGS
-from utils.db import configure, fetch
+from utils.db import configure, fetch, resolve_dsn
 
-_pg_dsn = SETTINGS.get("postgresql", {}).get("dsn", "") if isinstance(SETTINGS.get("postgresql", {}), dict) else ""
+_pg_dsn = resolve_dsn()
 if _pg_dsn:
     configure(_pg_dsn)
 
@@ -46,8 +46,9 @@ class Database:
     """
     Прямое подключение к PostgreSQL через utils.db.
 
-    DSN задаётся через PG_DSN в .env — навык не имеет
-    собственного DSN. configure(dsn) должен быть вызван до создания Database.
+    DSN берётся из resolve_dsn() (channels.postgres.dsn в project.json /
+    DATABASE_URL); навык не имеет собственного DSN.
+    configure(dsn) должен быть вызван до создания Database.
 
     Принимает dict конфигурации из load_db_config():
         schema           — имя схемы по умолчанию
@@ -601,9 +602,9 @@ class InMemoryDatabase:
         schema = db_config.get("schema", "public")
         tables = db_config.get("tables")
 
-        dsn = SETTINGS.get("postgresql", {}).get("dsn", "") if isinstance(SETTINGS.get("postgresql", {}), dict) else ""
+        dsn = resolve_dsn()
         if not dsn:
-            raise RuntimeError("PG_DSN is not configured")
+            raise RuntimeError("DSN is not configured")
 
         configure(dsn)
 
@@ -685,10 +686,10 @@ class InMemoryDatabase:
                     "error": "No cache metadata found"}
         cache_conn.close()
 
-        dsn = SETTINGS.get("postgresql", {}).get("dsn", "") if isinstance(SETTINGS.get("postgresql", {}), dict) else ""
+        dsn = resolve_dsn()
         if not dsn:
             return {"fresh": False, "stale_tables": [], "cache_meta": cache_meta, "pg_meta": {},
-                    "error": "PG_DSN is not configured"}
+                    "error": "DSN is not configured"}
 
         configure(dsn)
 
