@@ -588,6 +588,18 @@ class PostgresChannel(BaseChannel):
         meta = dict(msg.metadata or {})
         msg_id = meta.get("origin_message_id") or meta.get("message_id")
 
+        # v0.3.0: runtime-события (прогресс тулов, рассуждения, стриминг)
+        # переносятся типизированным полем OutboundMessage.event, а не
+        # legacy-флагами в metadata. Такие события обрабатываются отдельными
+        # методами (send_delta / send_reasoning_delta), а в send() они
+        # попадают только как побочный прогресс (например, ProgressEvent
+        # c пустым content после выполнения тула message). Если их
+        # обработать как финальный ответ — они перезапишут уже записанные
+        # content/media пустыми значениями, и вложение тула message
+        # пропадёт из БД. Поэтому типизированные события здесь игнорируем.
+        if msg.event is not None:
+            return
+
         # --- Чанк рассуждений — буферизируем, в БД попадёт через flush ---
         if meta.get("_reasoning_delta"):
             if msg.content:
@@ -660,18 +672,27 @@ class PostgresChannel(BaseChannel):
         try:
             async with transaction() as conn:
                 row = await conn.fetchrow(
-                    f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
+                    f"SELECT metadata, media FROM {self._fq_table} WHERE id = %s",
                     assistant_msg_id,
                 )
                 existing_meta = _decode_jsonb(row["metadata"]) if row else {}
                 existing_meta.update(meta)
+                # Не затираем вложения, прикреплённые тулом message в этом же
+                # обороте: если финальный ответ приходит без собственных media,
+                # сохраняем ранее записанные data URL.
+                existing_media = row["media"] if row else []
+                if isinstance(existing_media, str):
+                    existing_media = json.loads(existing_media) if existing_media else []
+                if not isinstance(existing_media, list):
+                    existing_media = []
+                final_media = db_media if db_media else existing_media
                 await conn.execute(
                     f"UPDATE {self._fq_table} "
                     f"SET content = %s, metadata = %s, buttons = %s, "
                     f"media = %s, "
                     f"status = 'completed', updated_at = NOW() WHERE id = %s",
                     msg.content, existing_meta,
-                    Json(msg.buttons or []), Json(db_media),
+                    Json(msg.buttons or []), Json(final_media),
                     assistant_msg_id,
                 )
                 if msg_id:
