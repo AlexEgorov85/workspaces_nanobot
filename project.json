@@ -83,6 +83,10 @@
       "in_memory_engine": "duckdb",           // Движок in-memory кеша. Варианты: duckdb (единственный реализованный)
       "in_memory_cache_path": "cache/audit_cache.duckdb",
 
+      // --- Фоновая синхронизация (gateway: AuditSyncService) ------------------
+      "poll_interval_sec": 60,                // Поллинг новых/изменённых строк из PostgreSQL, сек
+      "sync_write_table": "audit_interactions",  // Таблица записи ответов навыка в PG (создаётся автоматически)
+
       // --- Эмбеддинги для семантического (векторного) поиска ----------------
       "embedding_base_url": "http://localhost:11434/api/embed",  // Ollama /api/embed
       "embedding_model": "mxbai-embed-large:latest",

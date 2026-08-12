@@ -88,11 +88,11 @@ audit_analyzer.sh --mode vector --query "статусы аудитов" --index-
 
 | Аргумент          | Обязательный | Описание |
 |:------------------|:------------:|:---------|
-| `--mode`          | да | Режим: `predefined`, `sql`, `vector` |
+| `--mode`          | да | Режим: `predefined`, `sql`, `vector` (анализ). DuckDB-кеш создаёт и обновляет gateway автоматически |
 | `--script`        | для `predefined` | Имя скрипта из реестра |
 | `--params`        | нет | Параметры: `year=2024` (key=value) или `'{"year":2024}'` (JSON, Linux) |
 | `--query`         | для `sql`/`vector` | Запрос на естественном языке |
-| `--index-name`    | для `vector` | Имя FAISS-индекса (без .faiss) |
+| `--index-name`    | для `vector` | Имя индекса (`audits_index`, `violations_index`) |
 | `--top-k`         | нет | Количество результатов (по умолч. 5). Для `vector` |
 | `--threshold`     | нет | Порог схожести 0.0–1.0. Если задан — все результаты выше порога, `--top-k` игнорируется |
 | `--vector-index`  | нет | Директория с индексами (переопределяет config.json) |

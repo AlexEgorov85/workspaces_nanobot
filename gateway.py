@@ -69,13 +69,17 @@ gateway перезапускается сам с exponential backoff (1с → 2�
      Postgres каналы создаются и регистрируются вручную (по настройкам
      SETTINGS.channels.redis / SETTINGS.channels.postgres).
 
-  8. Фоновые задачи при старте
-     Кеш и векторные индексы audit_analyzer поднимает универсальный
-     CacheProvider (lib/services/cache_provider_impl.py):
-     • _preload_vector_indexes(provider)  — загрузка векторных индексов
-     • _preload_audit_cache(provider)     — загрузка DuckDB-кеша
-     • _background_audit_cache_refresh(provider) — перезагрузка кеша каждый
-                                           час, если таблицы в PG устарели
+  8. Сервисы синхронизации audit_analyzer
+     Gateway — владелец файла кеша навыка. AuditSyncService (единственный
+     владелец подключения к PostgreSQL, worker-поток) инкрементально
+     синхронизирует таблицы в AuditMemoryStore (in-memory DuckDB + FAISS),
+     а после каждого цикла публикует атомарный снимок (temp + os.replace)
+     в файл кеша навыка (in_memory_cache_path). Навык (CLI) только читает
+     этот файл — создание и обновление его больше не касаются:
+     • _build_audit_services()    — создание (store, sync_service)
+     • sync_service.start(True)   — initial load + поллинг по track-колонке
+     • store.publish()            — снимок для CLI (по on_sync_callback)
+     • _preload_vector_indexes()  — прогрев FAISS-индексов в память
 
   9. Запуск (run())
      Стартует все каналы, поднимает Streamlit UI (:8501) как subprocess,
@@ -482,113 +486,96 @@ def main() -> None:
 
     _streamlit_script = _SCRIPT_DIR / "streamlit_app.py"
 
-    # ── 11. Фоновая загрузка кеша и векторных индексов через CacheProvider ──
-    # Инфраструктура (DuckDB-кеш, векторные индексы, эмбеддинг) вынесена
-    # в универсальный провайдер lib/services.cache_provider_impl. Здесь
-    # остаётся только предметная конфигурация навыка audit_analyzer.
+    # ── 11. Сервисы синхронизации audit_analyzer ─────────────────────────────
+    # Единственное подключение к PostgreSQL живёт в worker-потоке
+    # AuditSyncService, который инкрементально передаёт изменения в
+    # AuditMemoryStore (DuckDB-кэш + FAISS). Навык не трогаем — его CLI
+    # продолжает работать со своим in-memory кэшем.
 
-    def _build_audit_provider():
-        """Построить CacheProvider для данных audit_analyzer или вернуть None.
+    def _build_audit_services():
+        """Построить (store, sync_service) для audit_analyzer или (None, None).
 
-        Провайдер создаётся, если включён in-memory кеш (in_memory_enabled +
-        in_memory_cache_path) и/или настроены векторные индексы
-        (mode_vector_db_table). Тяжёлые зависимости загружаются лениво.
+        Сервисы создаются, если включён in-memory кеш (in_memory_enabled),
+        задан DSN и есть таблицы.
+
+        ВАЖНО: gateway — владелец файла кеша навыка. AuditMemoryStore держит
+        живое зеркало в чисто in-memory DuckDB (cache_path="") и после каждого
+        цикла синхронизации публикует снимок в файл навыка (publish_path =
+        in_memory_cache_path) атомарно (temp + os.replace). DuckDB допускает
+        только один процесс-писатель на файл, поэтому gateway никогда не
+        открывает целевой файл на запись — навык (CLI) читает его на чтение
+        в любой момент без конфликтов.
         """
         try:
             acfg = SETTINGS.skills.audit_analyzer
-            cache_path = ""
-            if acfg.get("in_memory_enabled", False):
-                cp = acfg.get("in_memory_cache_path", "") or ""
-                if cp:
-                    p = Path(cp)
-                    cache_path = (
-                        str(config.workspace_path / "skills" / "audit_analyzer" / cp)
-                        if not p.is_absolute() else str(p)
-                    )
+            if not acfg.get("in_memory_enabled", False):
+                return None, None
+            if not dsn:
+                return None, None
+
+            tables = [t for t in (acfg.get("db_tables", []) or []) if t]
             vector_table = acfg.get("mode_vector_db_table", "") or ""
-            if not cache_path and not vector_table:
-                return None
-            from lib.services.cache_provider_impl import PostgresDuckDbProvider
-            return PostgresDuckDbProvider(
-                dsn=dsn,
-                schema=acfg.get("db_schema", "oarb") or "oarb",
-                tables=acfg.get("db_tables", []) or None,
-                cache_path=cache_path,
+            schema = acfg.get("db_schema", "oarb") or "oarb"
+            if not vector_table and not tables:
+                return None, None
+
+            # Целевой файл снимка — кеш навыка (in_memory_cache_path)
+            publish_path = ""
+            cp = acfg.get("in_memory_cache_path", "") or ""
+            if cp:
+                p = Path(cp)
+                publish_path = (
+                    str(config.workspace_path / "skills" / "audit_analyzer" / cp)
+                    if not p.is_absolute() else str(p)
+                )
+
+            from lib.services.audit_memory_store import AuditMemoryStore
+            from lib.services.audit_sync_service import AuditSyncService
+
+            store = AuditMemoryStore(
+                cache_path="",
+                publish_path=publish_path,
+                schema=schema,
+                tables=tables or None,
                 vector_db_table=vector_table,
-                vector_index_path=acfg.get("mode_vector_index_path", "") or "",
-                vector_indexes=acfg.get("vector_indexes", {}) or {},
-                vector_store_table=(
-                    acfg.get("mode_vector_store_table", "oarb.vector_index_store")
-                    or "oarb.vector_index_store"
-                ),
                 embedding_base_url=acfg.get("embedding_base_url", "") or "",
                 embedding_model=acfg.get("embedding_model", "mxbai-embed-large:latest"),
             )
+            sync_service = AuditSyncService(
+                dsn=dsn,
+                schema=schema,
+                tables=(tables + [vector_table]) if vector_table else tables,
+                vector_table=vector_table,
+                poll_interval_sec=float(acfg.get("poll_interval_sec", 60)),
+                write_table=acfg.get("sync_write_table", "audit_interactions"),
+                write_schema=schema,
+            )
+            return store, sync_service
         except Exception:
-            return None
+            return None, None
 
-    async def _preload_vector_indexes(provider):
-        """Фоновая загрузка векторных индексов из БД в память при старте."""
-        if provider is None or not provider.vector_table:
-            console.print("[dim]audit_analyzer vector indexes: mode_vector_db_table не задан, пропуск[/dim]")
+    async def _preload_vector_indexes(store):
+        """Фоновый прогрев FAISS-индексов из DuckDB-кэша в память при старте."""
+        if store is None or not store.is_ready():
             return
         try:
-            loaded = await asyncio.to_thread(provider.preload_indexes)
+            loaded = await asyncio.to_thread(store.preload_indexes)
             if loaded:
                 for item in loaded:
                     console.print(
                         f"[green]✓[/green] vector index '{item['index_name']}' "
-                        f"loaded from DB: {item['vectors']} vectors (in memory)"
+                        f"built in memory: {item['vectors']} vectors"
                     )
             else:
-                console.print("[dim]audit_analyzer vector indexes: ничего не загружено[/dim]")
+                console.print("[dim]audit_analyzer vector indexes: нет данных в кэше[/dim]")
         except Exception as exc:
             console.print(f"[yellow]⚠[/yellow] audit_analyzer vector index preload failed: {exc}")
 
-    async def _preload_audit_cache(provider):
-        """Фоновая загрузка DuckDB-кеша для навыка audit_analyzer при старте."""
-        if provider is None or not provider.cache_path:
-            console.print("[dim]audit_analyzer in-memory cache: disabled[/dim]")
-            return
-        cache_file = provider.cache_path
-        # Если кеш свежий (< 1 часа) — не пересоздаём его на старте
-        if cache_file.exists():
-            import time
-            age = time.time() - cache_file.stat().st_mtime
-            if age < 3600:
-                console.print(f"[green]✓[/green] audit_analyzer in-memory cache is fresh ({age/60:.0f}m old)")
-                return
-        try:
-            ok = await asyncio.to_thread(provider.refresh)
-            if ok:
-                console.print(f"[green]✓[/green] audit_analyzer in-memory cache loaded ({cache_file.name})")
-            else:
-                console.print("[yellow]⚠[/yellow] audit_analyzer cache preload failed (empty/missing tables)")
-        except Exception as exc:
-            console.print(f"[yellow]⚠[/yellow] audit_analyzer cache preload failed: {exc}")
-
-    async def _background_audit_cache_refresh(provider):
-        """Фоновая задача: каждый час проверять свежесть кеша и перезагружать при изменениях."""
-        if provider is None or not provider.cache_path:
-            return
-        import logging as _logging
-        while True:
-            try:
-                await asyncio.sleep(3600)
-                # check_stale сверяет MAX(updated_at) таблиц в PG с кешем
-                result = await asyncio.to_thread(provider.check_stale)
-                if result.get("stale_tables"):
-                    _logging.getLogger("cache").info(
-                        "Audit cache stale tables: %s, reloading...", result["stale_tables"]
-                    )
-                    await asyncio.to_thread(provider.refresh)
-            except asyncio.CancelledError:
-                break  # штатное завершение при остановке gateway
-            except Exception as exc:
-                _logging.getLogger("cache").warning("Audit cache refresh failed: %s", exc)
-
     # ── 12. Запуск ───────────────────────────────────────────────────────
     async def run():
+        store = None
+        sync_service = None
+
         # Стартуем все каналы (включая Redis/Postgres выше) как фоновую задачу
         channels_task = asyncio.create_task(channels.start_all())
 
@@ -614,11 +601,24 @@ def main() -> None:
                 console.print(f"[yellow]⚠[/yellow] Streamlit failed to start: {exc}")
 
         try:
-            # Фоновые задачи предзагрузки кеша / индексов audit_analyzer
-            provider = _build_audit_provider()
-            asyncio.create_task(_preload_vector_indexes(provider))
-            asyncio.create_task(_preload_audit_cache(provider))
-            asyncio.create_task(_background_audit_cache_refresh(provider))
+            # Фоновые сервисы синхронизации audit_analyzer
+            store, sync_service = _build_audit_services()
+            if store is not None and sync_service is not None:
+                store.open()
+                sync_service.set_on_new_records_callback(store.upsert_records)
+                sync_service.set_on_sync_callback(store.publish)
+                sync_service.start(initial_load=True)
+                if store.get_stats().get("publish_path"):
+                    console.print(
+                        f"[green]✓[/green] audit_analyzer sync started "
+                        f"(in-memory cache + vectors, публикация кеша навыка: "
+                        f"{store.get_stats()['publish_path']})"
+                    )
+                else:
+                    console.print("[green]✓[/green] audit_analyzer sync started (in-memory cache + vectors)")
+                asyncio.create_task(_preload_vector_indexes(store))
+            else:
+                console.print("[dim]audit_analyzer sync disabled (in_memory_enabled/dsn)[/dim]")
             # Блокирующий вызов: главный цикл агента работает,
             # пока его не остановят (CancelledError/KeyboardInterrupt).
             await agent.run()
@@ -630,6 +630,22 @@ def main() -> None:
             console.print("\n[red]Gateway crashed[/red]")
             console.print(traceback.format_exc())
         finally:
+            # Останавливаем сервисы синхронизации audit_analyzer
+            if sync_service is not None:
+                try:
+                    sync_service.stop(timeout_sec=10.0)
+                except Exception:
+                    pass
+            if store is not None:
+                try:
+                    # Финальная публикация снимка кеша навыка
+                    store.publish()
+                except Exception:
+                    pass
+                try:
+                    store.close()
+                except Exception:
+                    pass
             # Корректная остановка: сначала каналы, затем Streamlit, затем агент.
             channels_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

@@ -98,8 +98,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         required=True,
-        choices=["predefined", "sql", "vector", "init"],
-        help="Режим работы: predefined, sql, vector или init",
+        choices=["predefined", "sql", "vector"],
+        help="Режим работы: predefined, sql или vector",
     )
     parser.add_argument(
         "--script",
@@ -154,22 +154,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Контекст чата в формате JSON (опционально). '
              'Например: \'[{"role":"user","content":"привет"}]\'',
     )
-    parser.add_argument(
-        "--force",
-        default=False,
-        action="store_true",
-        help="Принудительная перезагрузка кеша (только для mode=init). "
-             "Игнорировать существующий DuckDB-файл.",
-    )
     return parser
 
 
-def _create_db() -> QueryBackend:
+def _open_db() -> QueryBackend:
     cfg = load_db_config()
     if is_in_memory_enabled():
         im_cfg = get_in_memory_config()
         provider = build_cache_provider()
-        provider.open_cache()
+        if not provider.open_cache():
+            cache_path = im_cfg.get("cache_path", "?")
+            raise FileNotFoundError(
+                f"DuckDB-кеш не найден: {cache_path}. "
+                "Кеш создаёт и обновляет gateway автоматически — "
+                "запустите его (python gateway.py)."
+            )
         print(f"[DB] DuckDB in-memory cache ({im_cfg.get('cache_path', '?')})", file=sys.stderr)
         return provider
     print("[DB] PostgreSQL (direct)", file=sys.stderr)
@@ -178,26 +177,11 @@ def _create_db() -> QueryBackend:
 
 def _run(args: argparse.Namespace) -> dict:
     """
-    Маршрутизация выполнения по режиму (predefined/sql/vector/init).
+    Маршрутизация выполнения по режиму (predefined/sql/vector).
     Для predefined проверяет наличие --script, для sql/vector — --query.
     Возвращает dict-результат от соответствующего модуля.
     """
-    if args.mode == "init":
-        cfg = load_db_config()
-        im_cfg = get_in_memory_config()
-        cache_path = im_cfg.get("cache_path", "")
-        if not cache_path:
-            return {"status": "error", "data": {"message": "in_memory.cache_path не задан в config.json"}}
-        if not args.force and Path(cache_path).exists():
-            return {"status": "success", "mode": "init", "data": {"message": "Кеш уже существует, используйте --force для перезагрузки"}}
-        try:
-            from lib.services.cache_provider_impl import load_cache_from_postgres
-            load_cache_from_postgres(cache_path, cfg)
-        except Exception as e:
-            return {"status": "error", "data": {"message": f"Ошибка загрузки кеша: {e}"}}
-        return {"status": "success", "mode": "init", "data": {"message": f"Кеш загружен: {cache_path}"}}
-
-    with _create_db() as db:
+    with _open_db() as db:
 
         if args.mode == "predefined":
             if not args.script:
@@ -259,6 +243,13 @@ def main() -> None:
         output = _sanitize_value(prepare_output(result, args.mode))
         print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
     except argparse.ArgumentTypeError as e:
+        print(json.dumps({
+            "mode": "unknown",
+            "status": "error",
+            "message": str(e),
+        }, ensure_ascii=False, indent=2))
+        sys.exit(1)
+    except FileNotFoundError as e:
         print(json.dumps({
             "mode": "unknown",
             "status": "error",
