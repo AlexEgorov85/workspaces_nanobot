@@ -21,6 +21,7 @@ class TestDatabaseLoggingHook:
         from workspace.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
+        service.get_request_id.return_value = "m1"
         hook = DatabaseLoggingHook(service)
         ctx = MagicMock()
         ctx.session_key = "cli:1"
@@ -37,11 +38,13 @@ class TestDatabaseLoggingHook:
         assert kwargs["tool_name"] == "read"
         assert kwargs["args"] == {"path": "x"}
         assert kwargs["tool_call_id"] == "tc1"
+        assert kwargs["request_id"] == "m1"
 
     def test_after_execute_tool_records_latency(self, sys_path):
         from workspace.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
+        service.get_request_id.return_value = "m1"
         hook = DatabaseLoggingHook(service)
         ctx = MagicMock()
         ctx.session_key = "cli:1"
@@ -67,6 +70,7 @@ class TestDatabaseLoggingHook:
         from workspace.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
+        service.get_request_id.return_value = "m1"
         hook = DatabaseLoggingHook(service)
         ctx = MagicMock()
         ctx.session_key = "cli:1"
@@ -88,6 +92,7 @@ class TestDatabaseLoggingHook:
         from workspace.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
+        service.get_request_id.return_value = "m1"
         hook = DatabaseLoggingHook(service)
         ctx = MagicMock()
         ctx.final_content = "hello"
@@ -97,12 +102,36 @@ class TestDatabaseLoggingHook:
         ctx.error = None
         ctx.usage = {"total_tokens": 123}
 
+        asyncio.run(hook.before_iteration(MagicMock(session_key="cli:1")))
         asyncio.run(hook.after_run(ctx))
         service.log_event.assert_called_once()
         event = service.log_event.call_args[0][0]
         assert event.event_type == "run_finished"
         assert event.summary == "hello"
         assert event.payload["tools_used"] == ["read", "write"]
+        assert event.session_id == "cli:1"
+        assert event.request_id == "m1"
+        assert event.payload["request_id"] == "m1"
+        service.finish_request.assert_called_once_with(
+            "m1", status="finished", summary="hello"
+        )
+        service.clear_request.assert_called_once_with("cli:1")
+
+    def test_before_execute_tool_captures_session_key(self, sys_path):
+        from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+
+        service = MagicMock()
+        service.get_request_id.return_value = "m1"
+        hook = DatabaseLoggingHook(service)
+        ctx = MagicMock()
+        ctx.session_key = "cli:1"
+        tool_call = MagicMock()
+        tool_call.id = "tc1"
+        tool_call.name = "read"
+        tool = MagicMock()
+        asyncio.run(hook.before_execute_tool(ctx, tool_call, tool, {}))
+        assert hook._run_session_key == "cli:1"
+        assert hook._request_id == "m1"
 
 
 class TestBusLoggers:
@@ -116,10 +145,17 @@ class TestBusLoggers:
         msg.channel = "cli"
         msg.content = "hi"
         msg.metadata = {"message_id": "m1"}
+        msg.sender_id = "u1"
+        msg.chat_id = "c1"
         asyncio.run(logger(msg))
+        service.register_request.assert_called_once_with(
+            "cli:42", "m1", user_id="u1", chat_id="c1", channel="cli",
+            agent_id=None,
+        )
         service.log_inbound.assert_called_once_with(
             session_id="cli:42", channel="cli", content="hi",
-            message_id="m1",
+            message_id="m1", sender_id="u1", chat_id="c1",
+            request_id="m1",
         )
 
     def test_outbound_logger_drops_reasoning(self):
@@ -138,13 +174,17 @@ class TestBusLoggers:
         from lib.services.db_logging_bus import make_outbound_logger
 
         service = MagicMock()
+        service.get_request_id.return_value = "m1"
         logger = make_outbound_logger(service)
         msg = MagicMock()
         msg.channel = "cli"
+        msg.chat_id = "42"
         msg.content = "final answer"
-        msg.metadata = {}
+        msg.metadata = {"message_id": "m1"}
         asyncio.run(logger(msg))
         service.log_outbound.assert_called_once()
         kwargs = service.log_outbound.call_args.kwargs
         assert kwargs["kind"] == "outbound_final"
         assert kwargs["content"] == "final answer"
+        assert kwargs["session_id"] == "cli:42"
+        assert kwargs["request_id"] == "m1"

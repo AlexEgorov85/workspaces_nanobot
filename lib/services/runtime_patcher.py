@@ -5,7 +5,11 @@
   1. ``patch_context_governor`` — большие результаты инструментов выгружаются
      в ``data_store/`` (ContextGovernor.normalize_tool_result) — было в gateway;
   2. ``patch_assemble_outbound`` — внедрение ``_tool_audit`` в metadata ответа
-     (agent._assemble_outbound) — было в gateway И в cli (одинаковый код).
+     (agent._assemble_outbound) — было в gateway И в cli (одинаковый код);
+  3. ``patch_subagent_logging`` — БД-логирование подагентов: их tool-события,
+     итог запуска (``subagent_run_finished``) и история пишутся в
+     ``DbLoggingService`` и ``session_manager`` (SubagentManager использует
+     внутренний ``_SubagentHook``, который иначе пишет только debug в loguru).
 
 Каждый патч — в try/except: если API nanobot изменился, патч не применяется,
 процесс не падает, причина попадает в ``PatchReport``.
@@ -58,6 +62,9 @@ class RuntimePatcher:
         workspace_dir: Any,
         agent: Any,
         tool_audit_hook: Any,
+        *,
+        db_logging_service: Any = None,
+        session_manager: Any = None,
     ) -> PatchReport:
         """Применить все патчи и вернуть отчёт.
 
@@ -68,6 +75,10 @@ class RuntimePatcher:
             workspace_dir: ``Path`` — корень workspace (для ``data_store/``).
             agent: ``AgentLoop`` (для ``patch_assemble_outbound``).
             tool_audit_hook: ``ToolAuditHook`` (для ``patch_assemble_outbound``).
+            db_logging_service: ``DbLoggingService`` (для ``patch_subagent_logging``;
+                ``None`` — патч пропускается).
+            session_manager: ``SessionManager``/``PGSessionManager`` — для
+                персиста истории подагентов (может быть ``None``).
 
         Returns:
             ``PatchReport`` со списками ``applied`` / ``skipped`` (с причиной).
@@ -77,6 +88,8 @@ class RuntimePatcher:
             config, settings, workspace_dir))
         self._record(report, "assemble_outbound", self.patch_assemble_outbound(
             agent, tool_audit_hook))
+        self._record(report, "subagent_logging", self.patch_subagent_logging(
+            db_logging_service, session_manager))
         return report
 
     @staticmethod
@@ -227,3 +240,254 @@ class RuntimePatcher:
 
         agent._assemble_outbound = _wrap
         return True, "agent._assemble_outbound patched"
+
+    # ------------------------------------------------------------------
+    # Патч 3: SubagentManager._SubagentHook → БД-логирование подагентов
+    # ------------------------------------------------------------------
+
+    def patch_subagent_logging(
+        self, db_logging_service: Any, session_manager: Any = None
+    ) -> Tuple[bool, str]:
+        """Логировать подагентов: tool-события, итог запуска и историю.
+
+        ``SubagentManager._run_subagent`` (``nanobot/agent/subagent.py``)
+        исполняет подагента через ``AgentRunner.run(AgentRunSpec(hook=
+        _SubagentHook(task_id, status)))`` — внутренний ``_SubagentHook``
+        пишет только статус и debug в loguru, в БД ничего не попадает.
+
+        Патч заменяет класс ``nanobot.agent.subagent._SubagentHook`` на
+        подкласс, который дополнительно:
+
+          1. проксирует tool-события подагента (call/result/error) в
+             ``DatabaseLoggingHook`` → ``DbLoggingService``;
+          2. пишет итог запуска как ``subagent_run_finished``;
+          3. персистит историю подагента (``context.messages``) в
+             ``session_manager`` под ключом ``subagent:<task_id>``.
+
+        События подагента получают ``session_id`` вида
+        ``<origin>:subagent:<task_id>`` (или ``subagent:<task_id>`` без
+        origin) — их легко отличить от событий основного агента и связать
+        с конкретным запуском. ``channel`` для итога — ``subagent``.
+
+        История пишется один раз на запуск: guard-флаг ``_finalized``
+        исключает дубликат, когда у runner вызываются и ``on_error``, и
+        ``after_run`` (путь tool_error), а при hard-exception — только
+        ``on_error``.
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` если
+            ``db_logging_service`` не передан или API nanobot изменился
+            (патч пропускается, подагенты продолжают работать как раньше).
+        """
+        if db_logging_service is None:
+            return False, "db_logging_service is None"
+        try:
+            from nanobot.agent.subagent import _SubagentHook
+            from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+            from lib.services.db_logging_service import LogEvent
+        except Exception as exc:
+            return False, f"import failed: {exc}"
+
+        db_hook = DatabaseLoggingHook(db_logging_service)
+
+        class _SubagentLoggingHook(_SubagentHook):
+            """_SubagentHook + БД-логирование + персист истории подагента."""
+
+            _db_hook = db_hook
+            _sessions = session_manager
+
+            def __init__(self, task_id, status=None):
+                super().__init__(task_id, status)
+                self._task_id = str(task_id)
+                self._session_id = f"subagent:{self._task_id}"
+                self._finalized = False
+                # Контекст подагента: собственный request_id (subagent:<task_id>),
+                # parent_request_id = вопрос-родитель, parent_agent_id = агент-родитель,
+                # is_subagent=True. Контекст живёт в question_runs, в событиях
+                # gateway_logs остаётся только request_id.
+                self._parent_rid = None
+
+            def _subagent_session_key(self, context) -> str:
+                """``<origin>:subagent:<task_id>`` или ``subagent:<task_id>``."""
+                origin = getattr(context, "session_key", None) or ""
+                return f"{origin}:{self._session_id}" if origin else self._session_id
+
+            def _ensure_request(self, context) -> None:
+                """Зарегистрировать контекст подагента в question_runs (upsert)."""
+                if self._parent_rid is None:
+                    origin = getattr(context, "session_key", None) or ""
+                    self._parent_rid = (
+                        self._db_hook._service.get_request_id(origin)
+                        or self._task_id
+                    )
+                key = self._subagent_session_key(context)
+                self._db_hook._service.register_request(
+                    key,
+                    self._session_id,   # request_id подагента = subagent:<task_id>
+                    parent_request_id=self._parent_rid,
+                    agent_id=self._session_id,
+                    parent_agent_id=self._db_hook._agent_id,
+                    is_subagent=True,
+                    status="running",
+                )
+
+            async def before_execute_tool(self, context, tool_call, tool, params):
+                self._ensure_request(context)
+                key = self._subagent_session_key(context)
+                orig = context.session_key
+                ctx_session = self._db_hook._run_session_key
+                ctx_rid = self._db_hook._request_id
+                context.session_key = key
+                try:
+                    await self._db_hook.before_execute_tool(
+                        context, tool_call, tool, params
+                    )
+                finally:
+                    context.session_key = orig
+                    # вложенный вызов не должен портить состояние
+                    # основного прогона (его after_run читает эти поля)
+                    self._db_hook._run_session_key = ctx_session
+                    self._db_hook._request_id = ctx_rid
+
+            async def after_execute_tool(
+                self, context, tool_call, tool, params, result
+            ):
+                self._ensure_request(context)
+                key = self._subagent_session_key(context)
+                orig = context.session_key
+                ctx_session = self._db_hook._run_session_key
+                ctx_rid = self._db_hook._request_id
+                context.session_key = key
+                try:
+                    await self._db_hook.after_execute_tool(
+                        context, tool_call, tool, params, result
+                    )
+                finally:
+                    context.session_key = orig
+                    self._db_hook._run_session_key = ctx_session
+                    self._db_hook._request_id = ctx_rid
+
+            async def on_execute_tool_error(
+                self, context, tool_call, tool, params, error
+            ):
+                self._ensure_request(context)
+                key = self._subagent_session_key(context)
+                orig = context.session_key
+                ctx_session = self._db_hook._run_session_key
+                ctx_rid = self._db_hook._request_id
+                context.session_key = key
+                try:
+                    await self._db_hook.on_execute_tool_error(
+                        context, tool_call, tool, params, error
+                    )
+                finally:
+                    context.session_key = orig
+                    self._db_hook._run_session_key = ctx_session
+                    self._db_hook._request_id = ctx_rid
+
+            async def after_run(self, context):
+                await self._finalize(context)
+
+            async def on_error(self, context):
+                # runner вызывает on_error до after_run в путях с error —
+                # guard-флаг исключает двойную запись истории/итога
+                await self._finalize(context)
+
+            async def _finalize(self, context):
+                if self._finalized:
+                    return
+                self._finalized = True
+                self._ensure_request(context)
+                key = self._subagent_session_key(context)
+                try:
+                    self._persist_history(context)
+                except Exception:
+                    pass
+                try:
+                    final = context.final_content or ""
+                    task = self._extract_task(context)
+                    self._db_hook._service.log_event(LogEvent(
+                        event_type="subagent_run_finished",
+                        level="ERROR" if context.error else "INFO",
+                        session_id=self._session_id,
+                        channel="subagent",
+                        actor="agent",
+                        name=self._task_id,
+                        request_id=self._session_id,
+                        summary=(task or final)[:200],
+                        payload={
+                            "final_content": final,
+                            "tools_used": list(context.tools_used or []),
+                            "stop_reason": context.stop_reason,
+                            "task_id": self._task_id,
+                            "task": task,
+                            "request_id": self._session_id,
+                            "parent_request_id": self._parent_rid,
+                        },
+                        metadata={
+                            "tokens_used": (context.usage or {}).get("total_tokens"),
+                            "had_error": bool(context.error),
+                        },
+                    ))
+                    self._db_hook._service.finish_request(
+                        self._session_id,
+                        status="error" if context.error else "finished",
+                        summary=(task or final)[:200] or None,
+                    )
+                except Exception:
+                    pass
+                finally:
+                    self._db_hook._service.clear_request(key)
+
+            @staticmethod
+            def _extract_task(context) -> Optional[str]:
+                """Извлечь описание задачи подагента (первое user-сообщение)."""
+                msgs = list(getattr(context, "messages", None) or [])
+                for m in msgs:
+                    if m.get("role") == "user":
+                        content = m.get("content")
+                        if isinstance(content, str):
+                            return content[:500]
+                        if isinstance(content, list):
+                            parts = []
+                            for blk in content:
+                                if isinstance(blk, dict) and blk.get("type") == "text":
+                                    parts.append(blk.get("text", ""))
+                            return "".join(parts)[:500]
+                return None
+
+            def _persist_history(self, context):
+                msgs = list(getattr(context, "messages", None) or [])
+                if not msgs or self._sessions is None:
+                    return
+                session = self._sessions.get_or_create(self._session_id)
+                for m in msgs:
+                    role = m.get("role")
+                    if role == "system":
+                        continue
+                    content = m.get("content")
+                    if not isinstance(content, str):
+                        try:
+                            content = json.dumps(content, ensure_ascii=False)
+                        except (TypeError, ValueError):
+                            content = str(content) if content is not None else ""
+                    kwargs = {}
+                    if m.get("tool_calls"):
+                        kwargs["tool_calls"] = m["tool_calls"]
+                    if m.get("tool_call_id"):
+                        kwargs["tool_call_id"] = m["tool_call_id"]
+                    if m.get("name"):
+                        kwargs["name"] = m["name"]
+                    if m.get("reasoning_content"):
+                        kwargs["reasoning_content"] = m["reasoning_content"]
+                    if m.get("thinking_blocks"):
+                        kwargs["thinking_blocks"] = m["thinking_blocks"]
+                    session.add_message(role, content, **kwargs)
+                self._sessions.save(session)
+
+        try:
+            import nanobot.agent.subagent as _subagent_mod
+            _subagent_mod._SubagentHook = _SubagentLoggingHook
+        except Exception as exc:
+            return False, f"patch failed: {exc}"
+        return True, "SubagentManager._SubagentHook patched for DB logging"

@@ -3,8 +3,8 @@
     "defaults": {
       "workspace": "~/.nanobot/workspace",
       "modelPreset": null,
-      "model": "ministral-14b-2512",
-      "provider": "mistral",
+      "model": "MiniMax-M3",
+      "provider": "minimax",
       "maxTokens": 8192,
       "contextWindowTokens": 65536,
       "contextBlockLimit": null,
@@ -455,8 +455,8 @@
       "thinkingStyle": null
     },
     "minimax": {
-      "apiKey": null,
-      "apiBase": null,
+      "apiKey": "${MISTRAL_API_KEY}",
+      "apiBase": "https://api.minimax.io/v1",
       "apiType": "auto",
       "extraHeaders": null,
       "extraBody": null,

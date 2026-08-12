@@ -37,7 +37,7 @@ runner туда положил) — иначе None.
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 # Служебные ключи в OutboundMessage.metadata, которые НЕ логируем.
 # Подавляющее большинство outbound-сообщений — это промежуточные сигналы
@@ -53,7 +53,9 @@ _OUTBOUND_DROPPED_KEYS = (
 )
 
 
-def make_inbound_logger(service: Any) -> Callable[[Any], Awaitable[None]]:
+def make_inbound_logger(
+    service: Any, agent_id: Optional[str] = None
+) -> Callable[[Any], Awaitable[None]]:
     """Создать async-логгер для ``MessageBus.publish_inbound``.
 
     Получает ``InboundMessage`` (см. ``nanobot.bus.events``) и достаёт:
@@ -63,6 +65,10 @@ def make_inbound_logger(service: Any) -> Callable[[Any], Awaitable[None]]:
       * ``content`` — текст сообщения;
       * ``message_id`` — из ``metadata`` (если канал его туда положил).
 
+    Регистрирует контекст вопроса в сервисе (user_id/chat_id/agent_id),
+    чтобы все последующие события вопроса (tool/run/outbound) несли
+    эти поля. ``agent_id`` — id агента, обрабатывающего шину (опционален).
+
     Все ошибки глотаются — логгер не должен ломать публикацию сообщения,
     иначе агент зависнет. Если нужна диагностика — смотрите ``service.get_stats()``.
 
@@ -71,22 +77,34 @@ def make_inbound_logger(service: Any) -> Callable[[Any], Awaitable[None]]:
     """
     async def _log(msg: Any) -> None:
         try:
+            session_key = getattr(msg, "session_key", "") or ""
+            channel = getattr(msg, "channel", "") or ""
+            message_id = (getattr(msg, "metadata", {}) or {}).get("message_id")
+            sender_id = getattr(msg, "sender_id", None) or None
+            chat_id = getattr(msg, "chat_id", None) or None
+            if session_key and message_id:
+                service.register_request(
+                    session_key, message_id,
+                    user_id=sender_id, chat_id=chat_id, channel=channel,
+                    agent_id=agent_id,
+                )
             service.log_inbound(
-                session_id=getattr(msg, "session_key", "") or "",
-                channel=getattr(msg, "channel", "") or "",
+                session_id=session_key,
+                channel=channel,
                 content=getattr(msg, "content", "") or "",
-                message_id=(
-                    (getattr(msg, "metadata", {}) or {}).get("message_id")
-                ),
+                message_id=message_id,
+                sender_id=sender_id,
+                chat_id=chat_id,
+                request_id=message_id,
             )
         except Exception:
-            # НИКОГДА не пробрасываем — иначе сломаем publish_inbound,
-            # и шина сообщений перестанет работать.
             pass
     return _log
 
 
-def make_outbound_logger(service: Any) -> Callable[[Any], Awaitable[None]]:
+def make_outbound_logger(
+    service: Any, agent_id: Optional[str] = None
+) -> Callable[[Any], Awaitable[None]]:
     """Создать async-логгер для ``MessageBus.publish_outbound``.
 
     Получает ``OutboundMessage`` (см. ``nanobot.bus.events``) и решает,
@@ -98,6 +116,9 @@ def make_outbound_logger(service: Any) -> Callable[[Any], Awaitable[None]]:
          стриминг-ответа, логируем с ``kind="outbound_delta"``;
       3. Иначе — это финальный ответ оборота, логируем с
          ``kind="outbound_final"``.
+
+    Контекст вопроса (user_id/agent_id/...) подхватывается из индекса
+    сервиса по session_id (зарегистрирован при inbound).
 
     ``latency_ms`` и ``tokens_used`` достаются из ``msg.metadata._turn``
     (если ``_turn`` — dict; runner туда кладёт метрики). При отсутствии
@@ -120,9 +141,14 @@ def make_outbound_logger(service: Any) -> Callable[[Any], Awaitable[None]]:
             if isinstance(turn_meta, dict):
                 latency = turn_meta.get("latency_ms")
                 tokens = turn_meta.get("tokens_used")
+            ch = getattr(msg, "channel", "") or ""
+            cid = getattr(msg, "chat_id", "") or ""
+            session_id = f"{ch}:{cid}" if (ch or cid) else ""
+            request_id = meta.get("message_id") or service.get_request_id(session_id)
             service.log_outbound(
-                session_id="",
-                channel=getattr(msg, "channel", "") or "",
+                session_id=session_id,
+                channel=ch,
+                request_id=request_id,
                 content=getattr(msg, "content", "") or "",
                 latency_ms=latency,
                 tokens_used=tokens,

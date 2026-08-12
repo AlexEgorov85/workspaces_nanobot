@@ -51,6 +51,7 @@ class AgentFactory:
         session_manager: Optional[Any] = None,
         cron_service: Optional[Any] = None,
         db_logging_service: Optional[Any] = None,
+        agent_id: Optional[str] = None,
     ) -> Tuple[Any, List[Any]]:
         """Создать AgentLoop с подключёнными хуками.
 
@@ -81,7 +82,7 @@ class AgentFactory:
         # реально передан db_logging_service. Если workspace.hooks
         # недоступен (например, в тестах) — пропускаем без ошибки.
         if db_logging_service is not None:
-            db_hook = self._build_database_logging_hook(db_logging_service)
+            db_hook = self._build_database_logging_hook(db_logging_service, agent_id)
             if db_hook is not None:
                 hooks.append(db_hook)
 
@@ -106,7 +107,9 @@ class AgentFactory:
         return ToolAuditHook
 
     @staticmethod
-    def _build_database_logging_hook(db_logging_service: Any) -> Optional[Any]:
+    def _build_database_logging_hook(
+        db_logging_service: Any, agent_id: Optional[str] = None
+    ) -> Optional[Any]:
         """Ленивое создание ``DatabaseLoggingHook``.
 
         Импорт через try/except, чтобы:
@@ -116,12 +119,15 @@ class AgentFactory:
             не всегда);
           * в тестах без полного окружения хук просто не подключался.
 
+        Args:
+            agent_id: идентификатор агента (для колонки ``agent_id`` в логах).
+
         Returns:
-            ``DatabaseLoggingHook(db_logging_service)`` или ``None``,
+            ``DatabaseLoggingHook(db_logging_service, agent_id)`` или ``None``,
             если модуль недоступен.
         """
         try:
             from workspace.hooks.database_logging_hook import DatabaseLoggingHook
         except Exception:
             return None
-        return DatabaseLoggingHook(db_logging_service)
+        return DatabaseLoggingHook(db_logging_service, agent_id)

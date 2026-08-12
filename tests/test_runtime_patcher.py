@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -141,6 +142,123 @@ class TestPatchContextGovernor:
             assert "import failed" in detail
 
 
+class TestPatchSubagentLogging:
+    def _context(self, **overrides):
+        base = {
+            "session_key": "telegram:1",
+            "final_content": "done",
+            "tools_used": ["read"],
+            "usage": {"total_tokens": 42},
+            "stop_reason": "completed",
+            "error": None,
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "task"},
+                {"role": "assistant", "content": "",
+                 "tool_calls": [{"id": "tc1", "type": "function", "function": {"name": "read", "arguments": "{}"}}]},
+                {"role": "tool", "content": "content", "tool_call_id": "tc1", "name": "read"},
+                {"role": "assistant", "content": "done"},
+            ],
+        }
+        base.update(overrides)
+        return types.SimpleNamespace(**base)
+
+    def test_db_logging_applied_and_tool_events_logged(self):
+        import nanobot.agent.subagent as subagent_mod
+        from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+
+        original = subagent_mod._SubagentHook
+        try:
+            svc = MagicMock()
+            sessions = MagicMock()
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_subagent_logging(svc, sessions)
+            assert ok
+
+            HookCls = subagent_mod._SubagentHook
+            assert HookCls is not original
+
+            hook = HookCls("t123")
+            ctx = self._context()
+            tool_call = types.SimpleNamespace(id="tc1", name="read")
+
+            asyncio.run(hook.before_execute_tool(ctx, tool_call, None, {"path": "x"}))
+            asyncio.run(hook.after_execute_tool(ctx, tool_call, None, {"path": "x"}, "content"))
+
+            svc.log_tool_call.assert_called_once()
+            call_kwargs = svc.log_tool_call.call_args.kwargs
+            assert call_kwargs["tool_name"] == "read"
+            assert "subagent:t123" in call_kwargs["session_id"]
+            svc.log_tool_result.assert_called_once()
+        finally:
+            subagent_mod._SubagentHook = original
+
+    def test_after_run_logs_summary_and_persists_history(self):
+        import nanobot.agent.subagent as subagent_mod
+        from nanobot.session.manager import Session
+
+        original = subagent_mod._SubagentHook
+        try:
+            svc = MagicMock()
+            real_session = Session(key="")
+            sessions = MagicMock()
+            sessions.get_or_create.return_value = real_session
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_subagent_logging(svc, sessions)
+            assert ok
+
+            hook = subagent_mod._SubagentHook("t456")
+            ctx = self._context()
+            asyncio.run(hook.after_run(ctx))
+
+            # итог запуска записан один раз
+            summary_events = [c.args[0] for c in svc.log_event.call_args_list
+                              if c.args[0].event_type == "subagent_run_finished"]
+            assert len(summary_events) == 1
+            ev = summary_events[0]
+            assert ev.session_id == "subagent:t456"
+            assert ev.channel == "subagent"
+            assert ev.payload["task_id"] == "t456"
+
+            # история подагента персистится без system-сообщения
+            roles = [m["role"] for m in real_session.messages]
+            assert "system" not in roles
+            assert roles == ["user", "assistant", "tool", "assistant"]
+            sessions.save.assert_called_once_with(real_session)
+        finally:
+            subagent_mod._SubagentHook = original
+
+    def test_finalize_guard_no_duplicate(self):
+        import nanobot.agent.subagent as subagent_mod
+
+        original = subagent_mod._SubagentHook
+        try:
+            svc = MagicMock()
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_subagent_logging(svc, None)
+            assert ok
+
+            hook = subagent_mod._SubagentHook("t789")
+            ctx = self._context(error="boom", stop_reason="tool_error")
+            # на путях tool_error runner вызывает on_error, а затем after_run —
+            # должен быть только один итог
+            asyncio.run(hook.on_error(ctx))
+            asyncio.run(hook.after_run(ctx))
+
+            summaries = [c for c in svc.log_event.call_args_list
+                         if c.args[0].event_type == "subagent_run_finished"]
+            assert len(summaries) == 1
+            assert summaries[0].args[0].level == "ERROR"
+        finally:
+            subagent_mod._SubagentHook = original
+
+    def test_none_service_skipped(self):
+        patcher = RuntimePatcher()
+        ok, detail = patcher.patch_subagent_logging(None, None)
+        assert not ok
+        assert "db_logging_service" in detail
+
+
 class TestApplyAll:
     def test_report_contents(self):
         agent = MagicMock()
@@ -152,8 +270,10 @@ class TestApplyAll:
 
         patcher = RuntimePatcher()
         report = patcher.apply_all(
-            MagicMock(), _settings(persist_threshold=0), Path("ws"), agent, hook
+            MagicMock(), _settings(persist_threshold=0), Path("ws"), agent, hook,
+            db_logging_service=None,
         )
         d = report.to_dict()
         assert "assemble_outbound" in d["applied"]
         assert any(name == "context_governor" for name, _ in d["skipped"])
+        assert any(name == "subagent_logging" for name, _ in d["skipped"])

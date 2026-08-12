@@ -143,9 +143,12 @@ class ApplicationContext:
 
         inbound_logger = None
         outbound_logger = None
+        # Идентификатор агента — для колонки agent_id в логах
+        # (подагенты получают parent_agent_id = этот id).
+        agent_id = _resolve_agent_id(ctx.config)
         if ctx.db_logging_service is not None:
-            inbound_logger = make_inbound_logger(ctx.db_logging_service)
-            outbound_logger = make_outbound_logger(ctx.db_logging_service)
+            inbound_logger = make_inbound_logger(ctx.db_logging_service, agent_id)
+            outbound_logger = make_outbound_logger(ctx.db_logging_service, agent_id)
 
         bus_factory = BusFactory(
             inbound_logger=inbound_logger,
@@ -166,6 +169,7 @@ class ApplicationContext:
             session_manager=ctx.session_manager,
             cron_service=cron_service,
             db_logging_service=ctx.db_logging_service,
+            agent_id=agent_id,
         )
         ctx.tool_audit_hook = ctx.hooks[0]
 
@@ -176,6 +180,8 @@ class ApplicationContext:
         ctx.runtime_patcher.apply_all(
             ctx.config, ctx.settings, ctx.workspace_dir,
             ctx.agent, ctx.tool_audit_hook,
+            db_logging_service=ctx.db_logging_service,
+            session_manager=ctx.session_manager,
         )
 
         # 8. Помощники
@@ -234,6 +240,20 @@ def _make_config_service(script_dir: Path, workspace_dir: Path) -> Any:
     return ConfigService(script_dir=script_dir, workspace_dir=workspace_dir)
 
 
+def _resolve_agent_id(config: Any) -> str:
+    """Получить идентификатор агента из конфигурации (или ``"main"``)."""
+    try:
+        agents = getattr(config, "agents", None)
+        if agents is not None:
+            defaults = getattr(agents, "defaults", None) or {}
+            name = defaults.get("name") if isinstance(defaults, dict) else getattr(defaults, "name", None)
+            if name:
+                return str(name)
+    except Exception:
+        pass
+    return "main"
+
+
 def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
     """Собрать ``DbLoggingService`` из секции ``logging.db`` в settings.
 
@@ -269,10 +289,12 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
         dsn=dsn,
         table_name=db_cfg.get("table_name", "gateway_logs"),
         schema=db_cfg.get("schema", "public"),
+        dialect=db_cfg.get("dialect", "postgres"),
         flush_interval_sec=float(db_cfg.get("flush_interval_sec", 5.0)),
         batch_size=int(db_cfg.get("batch_size", 100)),
         queue_maxsize=int(db_cfg.get("queue_maxsize", 10000)),
         min_level=db_cfg.get("min_level", "INFO"),
+        fallback_path=Path(ctx.script_dir) / "logs" / "gateway_logs_fallback.jsonl",
     )
 
 
