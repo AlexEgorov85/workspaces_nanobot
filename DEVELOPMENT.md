@@ -868,16 +868,101 @@ GROUP BY v.source;
 
 ### Типичные проблемы
 
+#### Ошибки при запуске
+
 | Симптом | Причина | Что делать |
 |---------|---------|-----------|
 | `ModuleNotFoundError: No module named 'faiss'` | Не установлен `faiss-cpu` | `pip install faiss-cpu numpy` |
+| `ModuleNotFoundError: No module named 'numpy'` | Не установлен `numpy` | `pip install numpy` |
 | `FAISS-индекс не собран` warning | `faiss` или `numpy` отсутствуют | Установить, перезапустить `--full-rebuild` |
+| `ImportError: No module named 'utils'` или `No module named 'lib'` | Скрипт не из корня проекта | Запускать из корня: `cd /path/to/nanobot && python tools/build_vectors.py` |
+| `psycopg2.OperationalError: connection refused` | Неверный DSN или PostgreSQL не запущен | Проверьте `DATABASE_URL` в `.secrets.env`, `pg_isready` |
+| `psql: command not found` | Нет `psql` в PATH (только для seed/DDL) | Установите PostgreSQL client или используйте `python -c "from workspace.utils.db import execute; execute(open('sql/...').read())"` |
+| `permission denied for table oarb.vector_index_store` | Не хватает GRANT | `GRANT INSERT, UPDATE, DELETE ON oarb.vector_index_store TO <user>` |
 | `--status` показывает 0 индексов | `oarb.vector_index_config` пуст | Применить `sql/audit_analyzer/seed_default_indexes.sql` |
-| `TypeError: cannot use 'dict' as a dict key` | `embedding_cols` содержит dict-объекты без нормализации | Уже исправлено в `_normalize_cols()` (tools/build_vectors.py) |
-| `--full-rebuild` не пересобирает FAISS | Права на `oarb.vector_index_store` отсутствуют | `GRANT INSERT, UPDATE ON oarb.vector_index_store` |
-| Пустой результат `--mode vector` | Индекс не существует или FAISS устарел | `python tools/build_vectors.py --status`, при необходимости `--full-rebuild` |
-| Дубликаты в результатах поиска | Несколько чанков одного документа в top-K | Это нормально — возвращается лучший, остальные через `matched_chunks` |
-| Поиск возвращает документы другой таблицы | Неправильный `embedding_cols` (взяты чужие колонки) | Проверьте конфиг: `SELECT * FROM oarb.vector_index_config` |
+| `ERROR: таблица oarb.audit_vectors не создана` | DDL не применён | `psql -f sql/audit_analyzer/create_audit_vectors_table_gp.sql` |
+
+#### Ошибки при сборке
+
+| Симптом | Причина | Что делать |
+|---------|---------|-----------|
+| `TypeError: cannot use 'dict' as a dict key` | `embedding_cols` содержит dict-объекты без нормализации | Уже исправлено в `_normalize_cols()` (`tools/build_vectors.py`); если повторилось — обновите код |
+| `column "description" does not exist` | Колонка указана в `embedding_cols`, но отсутствует в источнике | Проверьте `\d oarb.violations`; удалите колонку из конфига или ALTER TABLE |
+| `column "updated_at" does not exist` (при `_filter_unchanged`) | `track_column` отсутствует в источнике | Укажите существующую колонку или добавьте `updated_at` через `ALTER TABLE ... ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()` |
+| `psycopg2.errors.StringDataRightTruncation` при INSERT | Длина `search_text` > ограничения TEXT | Это не должно происходить (TEXT без лимита); если происходит — `ALTER TABLE oarb.audit_vectors ALTER COLUMN search_text TYPE TEXT` |
+| `duplicate key value violates unique constraint` | Параллельный запуск `build_vectors.py` | Запускайте только один экземпляр; для cron используйте flock |
+| `httpx.ConnectError: [Errno 111] Connection refused` | Ollama не запущена | `systemctl start ollama` (или запустить вручную); проверить `curl http://localhost:11434` |
+| `httpx.HTTPStatusError: 404 Not Found` от Ollama | Модель не загружена | `ollama pull mxbai-embed-large:latest` |
+| `httpx.HTTPStatusError: 500 Internal Server Error` | Ollama не справилась с запросом (длинный текст, OOM) | Уменьшите `--batch-size`, разбейте длинные тексты чанками меньшего размера |
+| Все строки в `errors`, 0 вставлено | Ollama возвращает ошибку на каждый запрос | Проверьте `ollama logs`; возможно, текст содержит невалидные символы или модель не загружена |
+| `Все индексы актуальны, синхронизация не требуется` (а должна быть) | Сигнатура совпадает: `COUNT + MAX(track_column)` одинаковые | Проверьте: `SELECT COUNT(*), MAX(updated_at) FROM oarb.<table>` — если `MAX` старее последнего изменения, добавьте триггер `BEFORE UPDATE` на обновление `updated_at` |
+| Бесконечный `Retry N/3 через Nс` | Ollama недоступна, retry безуспешны | Проверьте Ollama; `--check` лучше `--full-rebuild` для cron |
+| `Ошибка удаления pk=X` при инкрементальной сборке | Строки были удалены из источника и из `audit_vectors`, но транзакция прервалась | Запустите снова: идемпотентно, дойдёт до консистентного состояния |
+| `psycopg2.errors.InvalidTextRepresentation` | Невалидный UTF-8 в строке источника | Очистите данные в источнике: `UPDATE oarb.<table> SET col = regexp_replace(col, '[\\x00-\\x08\\x0B-\\x1F]', '', 'g')` |
+
+#### Проблемы с FAISS-поиском
+
+| Симптом | Причина | Что делать |
+|---------|---------|-----------|
+| `RuntimeError: Error in faiss::IndexFlat::search: index has 0 vectors` | FAISS-индекс пуст | `python tools/build_vectors.py --status` — если `vector_count=0`, пересоберите `--full-rebuild` |
+| `RuntimeError: Error in faiss::IndexFlat::add: dimension mismatch` | Размерность FAISS ≠ размерности эмбеддинга запроса | Модель Ollama изменилась, а конфиг/project.json — нет. Обновите `embedding_dimension` и `--full-rebuild` |
+| Все результаты с `score=0.000` | FAISS устарел (новые вектора в `audit_vectors` не пересобраны в FAISS) | `python tools/build_vectors.py --full-rebuild` |
+| Все результаты возвращают `row_data=None` | Поле `row_data` не пишется в INSERT | Проверьте `INSERT` в `tools/build_vectors.py:392-405`; у вас должна быть колонка `row_data JSONB` |
+| Поиск возвращает результаты из другой таблицы | `embedding_cols` конфликтуют между индексами (один и тот же текст в разных таблицах) | Используйте разные `index_name` и проверьте через `SELECT DISTINCT source FROM oarb.audit_vectors` |
+| Поиск по `violations_index` возвращает нарушения из всех проверок сразу | Индекс не фильтрует по `audit_id` | По умолчанию семантический поиск не фильтрует; для фильтрации нужен префикс в `--query` (например, `audit_id:5 ...`) — **это расширение, не реализовано** |
+| Поиск очень медленный (>1 сек на запрос) | FAISS не в памяти, пересобирается из БД каждый раз | `provider._INDEX_CACHE` пуст; gateway должен делать `preload_indexes()` при старте |
+
+#### Проблемы с конфигурацией индексов
+
+| Симптом | Причина | Что делать |
+|---------|---------|-----------|
+| `embedding_cols` содержит `[]` (пустой массив) | Все строки молча игнорируются (нет search_text) | Заполните конфиг: `UPDATE ... SET embedding_cols = '["title"]'::jsonb` |
+| `embedding_cols` содержит колонку с NULL для всех строк | `_build_search_text` возвращает `""` → строка пропускается | Проверьте `SELECT col, COUNT(*) FROM table GROUP BY col`; используйте только заполненные колонки |
+| `content_cols` пуст | INSERT упадёт или `content` будет NULL | Заполните `content_cols` хотя бы одной колонкой |
+| `pk_column` — UUID или TEXT | `pk_value INTEGER` в `oarb.audit_vectors` не вместит | Сейчас поддерживается только INTEGER; для UUID нужен ALTER: `ALTER TABLE oarb.audit_vectors ALTER COLUMN pk_value TYPE TEXT USING pk_value::TEXT` |
+| `track_column = NULL` для всех строк | `_filter_unchanged` пропускает индекс | Используйте другую track_column или добавьте заполнение: `UPDATE table SET updated_at = NOW() WHERE updated_at IS NULL` |
+| В конфиге 2 индекса на одну таблицу с разными `embedding_cols` | Поддерживается, но FAISS общий | Создайте два индекса с разными `index_name`, проверьте через `provider.search_vector(index_name=...)` |
+| DROP COLUMN в источнике | `embedding_cols` ссылается на несущую колонку → ошибка чтения | Обновите конфиг: `UPDATE ... SET embedding_cols = '[...]'::jsonb WHERE index_name = '...'` |
+| `updated_at` не обновляется при UPDATE | Нет триггера `BEFORE UPDATE` | `CREATE OR REPLACE FUNCTION touch_updated_at() RETURNS TRIGGER AS $$ BEGIN NEW.updated_at = NOW(); RETURN NEW; END $$ LANGUAGE plpgsql; CREATE TRIGGER ... BEFORE UPDATE ON oarb.<table> FOR EACH ROW EXECUTE FUNCTION touch_updated_at();` |
+
+#### Размерность и совместимость моделей
+
+| Модель Ollama | Размерность | По умолчанию в конфиге |
+|---------------|-------------|------------------------|
+| `mxbai-embed-large:latest` | 1024 | да (дефолт) |
+| `nomic-embed-text:latest` | 768 | нет |
+| `all-minilm:latest` | 384 | нет |
+| `snowflake-arctic-embed:latest` | 1024 | нет |
+| `bge-m3` | 1024 | нет |
+
+**Если меняете модель:**
+
+```jsonc
+// project.json
+"embedding_model":     "nomic-embed-text:latest",  // было mxbai-embed-large:latest
+"embedding_dimension": 768,                          // было 1024
+```
+
+После смены **обязательно**:
+```bash
+# 1. Удалить старые FAISS (они имеют старую размерность)
+psql -c "DELETE FROM oarb.vector_index_store"
+psql -c "TRUNCATE oarb.audit_vectors"
+
+# 2. Пересобрать с новой моделью
+python tools/build_vectors.py --full-rebuild
+
+# 3. Проверить что размерности совпадают
+python tools/build_vectors.py --status
+# dim должен быть 768
+```
+
+**Если размерность в конфиге не совпадает с реальной Ollama** — FAISS будет собран с правильной размерностью, но `--status` покажет неправильную. Проверяйте вручную:
+
+```bash
+curl -X POST http://localhost:11434/api/embed \
+     -d '{"model":"<model>","input":["test"]}' | jq '.embeddings[0] | length'
+```
 
 ### Расширенные сценарии
 
@@ -918,6 +1003,213 @@ WHERE jsonb_typeof(embedding_cols->0) = 'object'
 ```
 
 После — `--full-rebuild` для затронутых индексов.
+
+### Edge cases и редкие сценарии
+
+#### Несколько индексов на одну таблицу
+
+Поддерживается. Например, `audits_summary_index` (только title) и `audits_full_index` (description чанковано):
+
+```sql
+INSERT INTO oarb.vector_index_config (..., index_name, embedding_cols, enabled) VALUES
+('audits_summary_index', 'audits', 'oarb.audits', 'id',
+ ARRAY['title']::text[],
+ '["title"]'::jsonb, 'updated_at', true),
+('audits_full_index', 'audits', 'oarb.audits', 'id',
+ ARRAY['title','description']::text[],
+ '[{"column":"description","chunk":true,"chunk_size":500,"chunk_overlap":80},"title"]'::jsonb,
+ 'updated_at', true);
+```
+
+Поиск: `audit_analyze.bat --mode vector --query "..." --index-name audits_full_index --top-k 5`.
+
+#### Инкрементальная сборка vs `--check` — разница
+
+| Сценарий | Команда | Что делает |
+|----------|---------|-----------|
+| Быстрая проверка без записей | `python tools/build_vectors.py --check` | Сравнивает сигнатуру `(count, MAX(track))` → запускает инкрементальную сборку только если diff |
+| Полная проверка и сборка | `python tools/build_vectors.py` (без флагов) | Загружает все строки, классифицирует NEW/CHANGED/DELETED, собирает |
+| Принудительная полная перестройка | `python tools/build_vectors.py --full-rebuild` | TRUNCATE индекса + все строки заново |
+
+**`--check` НЕ помогает, если изменения в embedding_cols** (сигнатура источника не меняется). Используйте `--full-rebuild` или `--index <name> --full-rebuild` после изменения конфига.
+
+**`--check` пропускает индекс если `track_column` NULL** (MAX возвращает NULL → сравнение `0|` с `0|` = совпадение). Используйте непустую track_column.
+
+#### Параллельный запуск (concurrency)
+
+`build_vectors.py` использует `DELETE + INSERT` без блокировок. Параллельный запуск на одном индексе приведёт к:
+
+- `psycopg2.errors.UniqueViolation` на `id SERIAL`
+- Потерянным изменениям (один из процессов перезатрёт другого)
+
+**Решения:**
+
+```bash
+# Через flock (cron-friendly)
+flock -n /var/lock/build_vectors.lock python tools/build_vectors.py --full-rebuild
+
+# Через .pid файл
+[ -f /tmp/build_vectors.pid ] && kill -0 $(cat /tmp/build_vectors.pid) 2>/dev/null && exit 1
+echo $$ > /tmp/build_vectors.pid
+python tools/build_vectors.py --full-rebuild
+rm /tmp/build_vectors.pid
+```
+
+Параллельная сборка **разных** индексов безопасна (разные `source`).
+
+#### Миграция со старой версии (v1.x → v2.0.0)
+
+Если у вас остались FAISS-индексы в файлах `.faiss` (не в БД) — мигрируйте:
+
+```bash
+# 1. Применить новые DDL (если ещё не)
+psql -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
+psql -f sql/audit_analyzer/create_vector_index_config_gp.sql
+
+# 2. Зарегистрировать индексы в oarb.vector_index_config
+psql -f sql/audit_analyzer/seed_default_indexes.sql
+
+# 3. Пересобрать (старые файлы .faiss будут проигнорированы)
+python tools/build_vectors.py --full-rebuild
+
+# 4. Удалить старые файлы
+rm -rf ~/.nanobot/workspace/skills/audit_analyzer/cache/*.faiss
+```
+
+#### Что делать при ошибке посреди `--full-rebuild`
+
+`--full-rebuild` сначала делает `DELETE FROM oarb.audit_vectors WHERE source = X` (строка 308-316), затем собирает. Если сборка упадёт посередине (например, Ollama недоступна) — индекс окажется в неполном состоянии.
+
+**Решение:**
+
+```bash
+# Просто перезапустить — операция идемпотентна:
+python tools/build_vectors.py --index audits_index --full-rebuild
+# Сначала TRUNCATE, потом заново INSERT
+```
+
+**Не нужно:** `TRUNCATE oarb.audit_vectors` — `--full-rebuild` уже делает DELETE перед сборкой.
+
+#### Один и тот же текст в нескольких индексах
+
+Если `oarb.violations.description` индексируется и в `violations_index`, и в `audit_full_index` — FAISS-поиск может вернуть один и тот же документ дважды. **Дедупликация по `pk_value + source`** — ответственность вызывающего кода.
+
+#### Эмбеддинг для разных моделей
+
+Каждый индекс эмбеддится **одной моделью** (из `project.json → skills.audit_analyzer.embedding_*`). Разные модели для разных индексов **не поддерживаются** через конфиг — только глобально.
+
+Если нужна разная размерность для разных индексов — нужен рефакторинг `cache_provider_impl.py:PostgresDuckDbProvider` (per-index `embedding_base_url/model`).
+
+#### Обновление без пересборки (in-place)
+
+Если хотите обновить FAISS в памяти после изменения `audit_vectors` без полного пересбора:
+
+```python
+from workspace.skills.audit_analyzer.scripts.skill_config import build_cache_provider
+provider = build_cache_provider()
+
+# Сбросить in-memory FAISS для одного индекса (перечитает из oarb.vector_index_store)
+provider.invalidate_cache('audits_index')
+
+# Принудительно пересобрать (заново прочитает audit_vectors и сериализует)
+provider.rebuild_and_store_index('audits_index', 'oarb.audit_vectors')
+```
+
+#### Graceful degradation в навыке
+
+`audit_analyzer` (CLI `--mode vector`) при сбое эмбеддинга возвращает `[]` без падения:
+
+```python
+embedding = get_embedding(query, url, model)
+if embedding is None:
+    return []   # ← здесь
+```
+
+Если в логах навыка видите `Ошибка эмбеддинга после 3 попыток` — ищите проблему в Ollama, а не в навыке.
+
+#### Большие источники и память Ollama
+
+| Размер источника | `--batch-size` | Время Ollama | Память |
+|-----------------|----------------|-------------|--------|
+| <1000 строк | 16 (дефолт 10) | минуты | <2 GB |
+| 1k–10k строк | 16 | десятки минут | 2–4 GB |
+| 10k–100k строк | 8 + `--chunk-size 300` | часы | 4–8 GB |
+| >100k строк | 4 + `--chunk-size 200` | дни | 8+ GB |
+
+**Мониторинг во время сборки:**
+
+```bash
+# Размер загруженных моделей Ollama
+ollama ps
+
+# Логи Ollama (в реальном времени)
+journalctl -u ollama -f
+```
+
+#### Что если Ollama медленная?
+
+`-chunk-size 200 -batch-size 4 -overlap 50` — снижает нагрузку.
+
+#### Параллельные запуски в gateway
+
+`AuditSyncService` и `build_vectors.py` могут работать одновременно. Они **не конфликтуют** (разные таблицы: `audit_interactions` vs `audit_vectors`), но:
+
+- Если источник (`oarb.audits`) сильно меняется во время `--full-rebuild` — могут появиться пропущенные строки (сигнатура уже посчитана).
+- Решение: запускать `build_vectors.py` в период минимальной нагрузки (ночью).
+
+#### Когда `--full-rebuild` медленный
+
+- **Ollama медленная** → уменьшите batch-size.
+- **Источник огромный** → запускайте по одному индексу: `--index <name> --full-rebuild`.
+- **Сеть до PostgreSQL медленная** → проверьте DSN, используйте локальную БД.
+- **Disk I/O на запись в `audit_vectors`** → 100k+ строк = много INSERT; используйте `--batch-size` побольше (32-64) для меньшего числа батчей (но больше памяти Ollama).
+
+#### Когда НЕ нужен `--full-rebuild`
+
+Если добавилась **одна колонка** в источник и она в `embedding_cols` — без `--full-rebuild` строки не пересоберутся (content_hash изменится, но `tools/build_vectors.py` сравнивает по `(source, pk_value)` и content_hash — он увидит diff и обработает). **Проверьте:** добавьте колонку, запустите без `--full-rebuild`, проверьте `audit_vectors.content_hash`.
+
+#### Особые случаи с Ollama моделями
+
+| Проблема | Решение |
+|----------|---------|
+| Модель `mxbai-embed-large` не поддерживает батчи >32 | `--batch-size 16` (уже дефолт) |
+| Модель требует префикс `query:` или `passage:` (ColBERT-style) | Добавьте префикс в `_build_search_text()` перед отправкой |
+| Модель возвращает разные размерности для разных текстов | Не поддерживается; проверьте `len(data["embeddings"][0])` — должно быть константой |
+| Ollama отвечает `embedding: null` (модель не загружена) | `ollama pull mxbai-embed-large:latest` |
+| Ollama требует больше памяти (большие чанки) | Уменьшите `--chunk-size` или `--batch-size` |
+
+#### Совместимость с PostgreSQL 13+
+
+`oarb.audit_vectors.embedding REAL[]` — нативный PostgreSQL массив. Работает на 9.4+. На Greenplum 6.25 — поддерживается.
+
+Если мигрируете на старый PG 9.4 — может потребоваться замена `REAL[]` на `numeric[]` или `double precision[]` (см. DDL).
+
+#### JSONB в Greenplum 6.25
+
+`embedding_cols JSONB` и `row_data JSONB` работают на GP 6+. Если на старом GP (5.x) — нужна миграция на `TEXT`.
+
+#### Безопасность и секреты
+
+`build_vectors.py` использует `DATABASE_URL` через `utils.db.resolve_dsn()` — никаких секретов в коде или логах.
+
+Логи `build_vectors.py` могут содержать **содержимое строк** (превью `content[:60]`) — если источник содержит PII (персональные данные), это утечка. Решение — закомментируйте превью в `_get_embeddings` или обфусцируйте.
+
+#### Когда все сломалось — пересоздание с нуля
+
+```bash
+# 1. Удалить конфиг индексов
+psql -c "TRUNCATE oarb.vector_index_config CASCADE"
+
+# 2. Удалить собранные вектора
+psql -c "TRUNCATE oarb.audit_vectors"
+psql -c "TRUNCATE oarb.vector_index_store"
+
+# 3. Заново применить seed
+psql -f sql/audit_analyzer/seed_default_indexes.sql
+
+# 4. Пересобрать
+python tools/build_vectors.py --full-rebuild
+```
 
 ---
 
@@ -982,70 +1274,6 @@ python tools/build_vectors.py --db-table my_app.vectors
 - **Проверка готовности системы** (cron / healthcheck) — `--check`.
 - **Мониторинг без записи** — `--status`.
 - **Большой источник + экономия памяти Ollama** — `--batch-size 8` + `--chunk-size 300`.
-
-## 🛠 tools/ — инфраструктурные утилиты
-
-В корне `tools/` живут CLI-утилиты, **отдельные от навыков** — инфраструктура, не аналитика.
-
-### `tools/build_vectors.py`
-
-Перестроение векторных индексов из PostgreSQL-данных. Полная документация по флагам и пайплайну — в [Векторная индексация](#векторная-индексация). Краткая шпаргалка:
-
-```bash
-# Статус без изменений
-python tools/build_vectors.py --status
-
-# Полная перестройка всех индексов (осторожно: долго + нагрузка на Ollama)
-python tools/build_vectors.py --full-rebuild
-
-# Только проверка сигнатуры (COUNT + MAX track_column) — подходит для cron
-python tools/build_vectors.py --check
-
-# Один индекс
-python tools/build_vectors.py --index audits_index
-
-# Dry-run без записи в БД
-python tools/build_vectors.py --dry-run
-
-# Параметры эмбеддинга
-python tools/build_vectors.py --batch-size 32 --chunk-size 500 --chunk-overlap 80
-
-# Другая таблица векторов
-python tools/build_vectors.py --db-table my_app.vectors
-```
-
-| Флаг | Дефолт | Описание |
-|------|--------|----------|
-| *(без флагов)* | — | Инкрементальная синхронизация (NEW / CHANGED / DELETED) |
-| `--full-rebuild` | — | Полная перестройка (TRUNCATE + все строки) |
-| `--check` | — | Сравнить сигнатуру (count + max track); синхронизировать только при diff |
-| `--status` | — | Сводное состояние индексов без синхронизации |
-| `--dry-run` | — | План без записей в БД |
-| `--index <name>` | все | Собрать только индекс `name` |
-| `--db-table` | `oarb.audit_vectors` | Таблица сырых векторов |
-| `--batch-size` | env | Батч эмбеддинга |
-| `--chunk-size` | 500 | Размер чанка в символах |
-| `--chunk-overlap` | 80 | Перекрытие чанков |
-
-**Типичные сценарии:**
-
-- **После изменений в DDL таблиц** — `--full-rebuild`.
-- **Проверка готовности системы** (cron / healthcheck) — `--check`.
-- **Мониторинг без записи** — `--status`.
-- **Большой источник + экономия памяти Ollama** — `--batch-size 8` + `--chunk-size 300`.
-
-DSN берётся из `channels.postgres.dsn` (или `DATABASE_URL`/`PG_DSN`) через `utils.db.resolve_dsn()`. Параметры эмбеддинга (`embedding_base_url`, `embedding_model`, `embedding_dimension`) — из `skills.audit_analyzer.*` в `project.json`.
-
-### Когда добавлять новую утилиту в `tools/`
-
-Утилита попадает в `tools/` если она:
-- **инфраструктурная** (миграции, сборка индексов, очистка кешей) — **не часть навыка**.
-- запускается из shell/CI, не из агента.
-- работает с БД напрямую (минуя `lib/services/*` если скрипт одноразовый).
-
-Если скрипт — часть навыка (например, обработка `predefined`-скриптов), он идёт в `workspace/skills/<skill>/scripts/`, а не в `tools/`.
-
----
 
 ## 🗃 SQL-скрипты: создание таблиц
 
