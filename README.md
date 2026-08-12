@@ -88,19 +88,19 @@ python gateway.py
 flowchart TB
     %% Конфигурация
     subgraph CFG["Конфигурация"]
-        CONFIG["config.json<br/>провайдеры, каналы, API"]
-        PROJECT["project.json<br/>channels.*, skills.*,<br/>cli/gateway/streamlit,<br/>benchmark, logging.db"]
-        SECRETS[".secrets.env<br/>(в .gitignore)"]
+        CONFIG["config.json<br>провайдеры, каналы, API"]
+        PROJECT["project.json<br>channels.*, skills.*,<br>cli/gateway/streamlit,<br>benchmark, logging.db"]
+        SECRETS[".secrets.env<br>(в .gitignore)"]
     end
 
     %% SETTINGS
-    CFG -->|"merger"| SETTINGS["config.py: SETTINGS<br/>project.json → config.json → .secrets.env"]
+    CFG -->|"merger"| SETTINGS["config.py: SETTINGS<br>project.json → config.json → .secrets.env"]
 
     %% Bootstrap
-    SETTINGS --> CTX["ApplicationContext<br/>(lib/core/)"]
-    CTX -->|"create/start/stop"| SVC["Сервисный слой<br/>(lib/services/)"]
-    CTX --> CORE["Фабрики<br/>lib/core/<br/>agent_factory, bus_factory"]
-    CTX --> LIFE["Lifecycle<br/>lib/lifecycle/<br/>gateway_runner,<br/>shutdown_coordinator"]
+    SETTINGS --> CTX["ApplicationContext<br>(lib/core/)"]
+    CTX -->|"create/start/stop"| SVC["Сервисный слой<br>(lib/services/)"]
+    CTX --> CORE["Фабрики<br>lib/core/<br>agent_factory, bus_factory"]
+    CTX --> LIFE["Lifecycle<br>lib/lifecycle/<br>gateway_runner,<br>shutdown_coordinator"]
 
     %% Сервисы
     subgraph SERVICES["lib/services/ (v2.0.0)"]
@@ -117,24 +117,24 @@ flowchart TB
     SVC --> CFG_SVC & SESS_SVC & CHAN_SVC & PATCHER & LOG_SVC & TRANS_SVC & SUB_SVC & PRELOAD
 
     %% Точки входа
-    GATEWAY["gateway.py<br/>тонкий оркестратор"]
-    CLI["cli_agent.py<br/>тонкий оркестратор"]
+    GATEWAY["gateway.py<br>тонкий оркестратор"]
+    CLI["cli_agent.py<br>тонкий оркестратор"]
     CTX --> GATEWAY
     CTX --> CLI
 
     %% Шина
-    BUS["MessageBus<br/>(publish inbound/outbound)"]
+    BUS["MessageBus<br>(publish inbound/outbound)"]
     CTX --> BUS
-    BUS --> AGENT["AgentLoop<br/>(+ ToolAuditHook + DatabaseLoggingHook)"]
+    BUS --> AGENT["AgentLoop<br>(+ ToolAuditHook + DatabaseLoggingHook)"]
 
     %% Pre-existing (не через ApplicationContext)
     subgraph LEGACY["Pre-existing точки входа (НЕ через ApplicationContext)"]
-        STREAMLIT["streamlit_app.py<br/>web-клиент"]
+        STREAMLIT["streamlit_app.py<br>web-клиент"]
     end
 
     %% Каналы
     PG["PostgreSQL"]
-    REDIS["Redis<br/>(опционально)"]
+    REDIS["Redis<br>(опционально)"]
     BUS --> PG
     BUS --> REDIS
     PG --> STREAMLIT
