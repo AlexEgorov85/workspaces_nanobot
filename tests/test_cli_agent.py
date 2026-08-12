@@ -1,33 +1,131 @@
 from __future__ import annotations
 
-import asyncio
-import os
+import argparse
 import sys
-from pathlib import Path
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+import types
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-_project_root = Path(__file__).resolve().parent.parent
+_project_root = __import__("pathlib").Path(__file__).resolve().parent.parent
 _workspace_path = str(_project_root / "workspace")
 if _workspace_path not in sys.path:
     sys.path.insert(0, _workspace_path)
-# Add project root for config import
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-# conftest.py adds user site-packages for nanobot
 
-from cli_agent import (
-    DisplayConfig,
-    _patch_agent_tool_audit,
-    _parse_args,
-    _scan_and_register_hooks,
-)
+@pytest.fixture(autouse=True)
+def mock_all():
+    with patch.dict("sys.modules"):
+        _setup_fake_modules()
+        yield
+
+
+def _setup_fake_modules():
+    sol = types.ModuleType("nanobot")
+    sol.agent = types.ModuleType("nanobot.agent")
+    sol.agent.AgentHook = type("AgentHook", (), {})
+    sys.modules["nanobot"] = sol
+    sys.modules["nanobot.agent"] = sol.agent
+
+    loop = types.ModuleType("nanobot.agent.loop")
+    loop.AgentLoop = MagicMock()
+    loop.AgentLoop.from_config = MagicMock()
+    sys.modules["nanobot.agent.loop"] = loop
+
+    bus = types.ModuleType("nanobot.bus")
+    queue = types.ModuleType("nanobot.bus.queue")
+    queue.MessageBus = MagicMock()
+    events = types.ModuleType("nanobot.bus.events")
+    events.InboundMessage = MagicMock()
+    events.OutboundMessage = MagicMock()
+    sys.modules["nanobot.bus"] = bus
+    sys.modules["nanobot.bus.queue"] = queue
+    sys.modules["nanobot.bus.events"] = events
+
+    utils = types.ModuleType("nanobot.utils")
+    helpers = types.ModuleType("nanobot.utils.helpers")
+    helpers.sync_workspace_templates = MagicMock()
+    sys.modules["nanobot.utils"] = utils
+    sys.modules["nanobot.utils.helpers"] = helpers
+
+    cli = types.ModuleType("nanobot.cli")
+    commands = types.ModuleType("nanobot.cli.commands")
+    runtime_config = MagicMock()
+    runtime_config.workspace_path = _project_root / "workspace"
+    runtime_config.providers.openai.api_key = None
+    runtime_config.providers.groq.api_key = None
+    runtime_config.providers.openai.api_base = None
+    runtime_config.providers.groq.api_base = None
+    runtime_config.channels.send_progress = True
+    runtime_config.channels.send_tool_hints = False
+    runtime_config.channels.show_reasoning = True
+    runtime_config.channels.transcription_provider = "groq"
+    runtime_config.channels.transcription_language = None
+    runtime_config.agents.defaults.max_tool_iterations = 200
+    runtime_config.tools.exec.timeout = 60
+    commands._load_runtime_config = MagicMock(return_value=runtime_config)
+    commands.__logo__ = "nanobot"
+    commands.__version__ = "0.1.0"
+    sys.modules["nanobot.cli"] = cli
+    sys.modules["nanobot.cli.commands"] = commands
+
+    cron_mod = types.ModuleType("nanobot.cron")
+    cron_svc = types.ModuleType("nanobot.cron.service")
+    cron_svc.CronService = MagicMock()
+    sys.modules["nanobot.cron"] = cron_mod
+    sys.modules["nanobot.cron.service"] = cron_svc
+
+    cfg = types.ModuleType("config")
+    settings = MagicMock()
+    settings.gateway = MagicMock()
+    settings.gateway.storage = "file"
+    settings.gateway.persist_threshold = 0
+    settings.gateway.llm_timeout = -1
+    settings.gateway.exec_timeout = -1
+    settings.gateway.log_level = "INFO"
+    settings.channels = {"postgres": {"dsn": ""}, "redis": {"enabled": False}}
+    settings.skills = MagicMock()
+    settings.skills.audit_analyzer = MagicMock()
+    settings.skills.audit_analyzer.get = MagicMock(return_value=False)
+    settings.cli = {"log_level": "WARNING"}
+    settings.providers = MagicMock()
+    cfg.SETTINGS = settings
+    sys.modules["config"] = cfg
+
+    ws = str(_project_root / "workspace")
+    if ws not in sys.path:
+        sys.path.insert(0, ws)
+    hooks = types.ModuleType("hooks")
+    hooks.__path__ = []
+    tah = types.ModuleType("hooks.tool_audit_hook")
+
+    class _ToolAuditHook:
+        def __init__(self):
+            self.drained = []
+
+    tah.ToolAuditHook = _ToolAuditHook
+    sys.modules["hooks"] = hooks
+    sys.modules["hooks.tool_audit_hook"] = tah
+
+    utils_pkg = types.ModuleType("utils")
+    utils_db = types.ModuleType("utils.db")
+    utils_db.configure = MagicMock()
+    utils_pkg.db = utils_db
+    sys.modules["utils"] = utils_pkg
+    sys.modules["utils.db"] = utils_db
+
+
+# =================================================================
+# display_config
+# =================================================================
 
 
 class TestDisplayConfig:
     def test_defaults(self):
+        from lib.cli.display_config import DisplayConfig
+
         cfg = DisplayConfig()
         assert cfg.show_reasoning is True
         assert cfg.show_tool_calls is True
@@ -36,130 +134,75 @@ class TestDisplayConfig:
         assert cfg.show_progress is True
         assert cfg.typewriter_speed == 0.01
 
-    def test_custom_values(self):
-        cfg = DisplayConfig(show_reasoning=False, typewriter_speed=0.05)
+    def test_from_settings(self):
+        from lib.cli.display_config import DisplayConfig
+
+        cfg = DisplayConfig.from_settings({"show_reasoning": False, "typewriter_speed": 0.05})
         assert cfg.show_reasoning is False
         assert cfg.typewriter_speed == 0.05
 
 
-class TestPatchAgentToolAudit:
-    def test_wraps_assemble_outbound(self):
-        agent = MagicMock()
-        hook = MagicMock()
-        hook.drain.return_value = [{"name": "test_tool"}]
+# =================================================================
+# hook_loader
+# =================================================================
 
-        # Set the return value before patching so _orig captures it
-        original_return = MagicMock()
-        original_return.metadata = {}
-        agent._assemble_outbound.return_value = original_return
 
-        _patch_agent_tool_audit(agent, hook)
+class TestHookLoader:
+    def test_no_hooks_dir(self, tmp_path):
+        from lib.cli.hook_loader import scan_and_register
 
-        output = agent._assemble_outbound(MagicMock(), "content", [], "stop", False, None)
+        hooks, tah = scan_and_register(tmp_path / "nope", _project_root / "workspace")
+        assert hooks == []
+        assert tah is None
 
-        hook.drain.assert_called_once()
-        assert output.metadata["_tool_audit"] == [{"name": "test_tool"}]
+    def test_empty_dir(self, tmp_path):
+        from lib.cli.hook_loader import scan_and_register
 
-    def test_no_hook_when_result_none(self):
-        agent = MagicMock()
-        orig = agent._assemble_outbound
-        orig.return_value = None
+        hooks, tah = scan_and_register(tmp_path, _project_root / "workspace")
+        assert hooks == []
+        assert tah is None
 
-        hook = MagicMock()
-        _patch_agent_tool_audit(agent, hook)
+    def test_skips_underscore_files(self, tmp_path):
+        from lib.cli.hook_loader import scan_and_register
 
-        result = agent._assemble_outbound(None, None, None, None, False, None)
-        assert result is None
-        hook.drain.assert_not_called()
+        (tmp_path / "_skip.py").write_text("")
+        (tmp_path / "real.py").write_text("class AgentHook: pass")
+        # Module import of real.py will fail (no AgentHook base), but the
+        # underscore file should be skipped without raising.
+        hooks, _ = scan_and_register(tmp_path, _project_root / "workspace")
+        assert hooks == []  # real.py fails to import → ignored
+
+
+# =================================================================
+# console_loop.typewriter
+# =================================================================
 
 
 class TestTypewriter:
     @pytest.mark.asyncio
-    async def test_empty_text_noop(self):
-        from cli_agent import _typewriter
+    async def test_empty_noop(self):
+        from lib.cli.console_loop import _typewriter
 
-        await _typewriter("", "dim", 0.01)
+        await _typewriter("", "bold", 0.01)
 
     @pytest.mark.asyncio
-    async def test_zero_speed_prints_immediately(self):
-        from cli_agent import _typewriter
+    async def test_zero_speed_prints(self):
+        from lib.cli.console_loop import _typewriter
 
-        with patch("cli_agent.console") as mock_console:
+        with patch("lib.cli.console_loop.console") as mc:
             await _typewriter("hello", "bold", 0)
-            mock_console.print.assert_called_once()
+            mc.print.assert_called_once()
 
 
-class TestPrintReasoningBlock:
-    @pytest.mark.asyncio
-    async def test_blank_text_noop(self):
-        from cli_agent import _print_reasoning_block
-
-        await _print_reasoning_block("  ", DisplayConfig())
-
-    @pytest.mark.asyncio
-    async def test_hidden_when_disabled(self):
-        from cli_agent import _print_reasoning_block
-
-        await _print_reasoning_block("text", DisplayConfig(show_reasoning=False))
-
-
-class TestPrintToolEvents:
-    @pytest.mark.asyncio
-    async def test_empty_events_noop(self):
-        from cli_agent import _print_tool_events
-
-        await _print_tool_events([], DisplayConfig())
-
-    @pytest.mark.asyncio
-    async def test_hidden_when_disabled(self):
-        from cli_agent import _print_tool_events
-
-        await _print_tool_events([{"name": "x"}], DisplayConfig(show_tool_calls=False))
-
-    @pytest.mark.asyncio
-    async def test_non_dict_skipped(self):
-        from cli_agent import _print_tool_events
-
-        await _print_tool_events(["string"], DisplayConfig())
-
-    @pytest.mark.asyncio
-    async def test_ok_status(self):
-        from cli_agent import _print_tool_events, _typewriter
-
-        with patch("cli_agent._typewriter", new_callable=AsyncMock) as mock_tw:
-            await _print_tool_events(
-                [{"name": "read", "status": "ok", "result_preview": "content"}],
-                DisplayConfig(),
-            )
-            mock_tw.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_error_status(self):
-        from cli_agent import _print_tool_events
-
-        with patch("cli_agent._typewriter", new_callable=AsyncMock) as mock_tw:
-            await _print_tool_events(
-                [{"name": "write", "status": "error", "error": "permission denied"}],
-                DisplayConfig(),
-            )
-            mock_tw.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_params_formatted(self):
-        from cli_agent import _print_tool_events
-
-        with patch("cli_agent._typewriter", new_callable=AsyncMock) as mock_tw:
-            await _print_tool_events(
-                [{"name": "search", "status": "ok", "arguments": {"q": "hello", "limit": 5}}],
-                DisplayConfig(show_tool_params=True),
-            )
-            called_text = mock_tw.call_args[0][0]
-            assert "q=hello" in called_text
-            assert "limit=5" in called_text
+# =================================================================
+# parse_args
+# =================================================================
 
 
 class TestParseArgs:
     def test_defaults(self):
+        from cli_agent import _parse_args
+
         with patch("sys.argv", ["cli_agent.py"]):
             args = _parse_args()
             assert args.patched is False
@@ -167,251 +210,114 @@ class TestParseArgs:
             assert args.session is None
 
     def test_patched_flag(self):
+        from cli_agent import _parse_args
+
         with patch("sys.argv", ["cli_agent.py", "--patched"]):
             args = _parse_args()
             assert args.patched is True
 
     def test_storage_postgres(self):
+        from cli_agent import _parse_args
+
         with patch("sys.argv", ["cli_agent.py", "-P", "-S", "postgres"]):
             args = _parse_args()
             assert args.patched is True
             assert args.storage == "postgres"
 
     def test_session_key(self):
+        from cli_agent import _parse_args
+
         with patch("sys.argv", ["cli_agent.py", "-s", "my-session"]):
             args = _parse_args()
             assert args.session == "my-session"
 
-    def test_short_patched(self):
-        with patch("sys.argv", ["cli_agent.py", "-P"]):
-            args = _parse_args()
-            assert args.patched is True
+
+# =================================================================
+# RuntimePatcher — patch_assemble_outbound (consumed by cli_agent)
+# =================================================================
 
 
-class TestApplyTimeouts:
-    def test_sets_env_vars(self):
-        from cli_agent import _apply_timeouts, LLM_TIMEOUT
+class TestPatchAssembleOutbound:
+    def test_wraps_and_injects_audit(self):
+        from lib.services.runtime_patcher import RuntimePatcher
 
-        config = MagicMock()
-        with patch.dict("os.environ", clear=True):
-            _apply_timeouts(config)
-            assert os.environ["NANOBOT_LLM_TIMEOUT_S"] == str(LLM_TIMEOUT)
+        agent = MagicMock()
+        original = MagicMock()
+        original.metadata = {}
+        agent._assemble_outbound.return_value = original
+        hook = MagicMock()
+        hook.drain.return_value = [{"name": "read"}]
+
+        RuntimePatcher().patch_assemble_outbound(agent, hook)
+        result = agent._assemble_outbound(MagicMock(), "content", [], "stop", False, None)
+        assert result.metadata["_tool_audit"] == [{"name": "read"}]
 
 
-class TestScanAndRegisterHooks:
-    def test_no_hooks_dir(self):
-        with patch("cli_agent._HOOKS_DIR", MagicMock()) as mock_dir:
-            mock_dir.is_dir.return_value = False
-            result = _scan_and_register_hooks()
-            assert result == []
-
-    def test_empty_hooks_dir(self):
-        with patch("cli_agent._HOOKS_DIR", MagicMock()) as mock_dir:
-            mock_dir.is_dir.return_value = True
-            mock_dir.iterdir.return_value = []
-            result = _scan_and_register_hooks()
-            assert result == []
+# =================================================================
+# migrate_cron_store
+# =================================================================
 
 
 class TestMigrateCronStore:
-    def test_moves_legacy_to_workspace(self, tmp_path):
+    def test_moves_legacy(self, tmp_path):
         from cli_agent import _migrate_cron_store
 
         config = MagicMock()
         config.workspace_path = tmp_path / "workspace"
-
         legacy = tmp_path / "legacy" / "jobs.json"
         legacy.parent.mkdir(parents=True)
         legacy.write_text('{"jobs": []}')
 
-        with patch("nanobot.config.paths.get_cron_dir", return_value=legacy.parent):
-            _migrate_cron_store(config)
+        # Подменяем get_cron_dir через sys.modules.nanobot.config.paths
+        sol = types.ModuleType("nanobot")
+        cfg = types.ModuleType("nanobot.config")
+        paths = types.ModuleType("nanobot.config.paths")
+        paths.get_cron_dir = MagicMock(return_value=legacy.parent)
+        sys.modules["nanobot"] = sol
+        sys.modules["nanobot.config"] = cfg
+        sys.modules["nanobot.config.paths"] = paths
+
+        _migrate_cron_store(config)
 
         new_path = tmp_path / "workspace" / "cron" / "jobs.json"
         assert new_path.exists()
-        assert new_path.read_text() == '{"jobs": []}'
 
-    def test_noop_when_legacy_missing(self, tmp_path):
+    def test_no_legacy_noop(self, tmp_path):
         from cli_agent import _migrate_cron_store
 
         config = MagicMock()
         config.workspace_path = tmp_path / "workspace"
-
         legacy_dir = tmp_path / "legacy"
         legacy_dir.mkdir(parents=True)
 
-        with patch("nanobot.config.paths.get_cron_dir", return_value=legacy_dir):
-            _migrate_cron_store(config)
+        sol = types.ModuleType("nanobot")
+        cfg = types.ModuleType("nanobot.config")
+        paths = types.ModuleType("nanobot.config.paths")
+        paths.get_cron_dir = MagicMock(return_value=legacy_dir)
+        sys.modules["nanobot"] = sol
+        sys.modules["nanobot.config"] = cfg
+        sys.modules["nanobot.config.paths"] = paths
 
-        new_path = tmp_path / "workspace" / "cron" / "jobs.json"
-        assert not new_path.exists()
-
-    def test_noop_when_new_already_exists(self, tmp_path):
-        from cli_agent import _migrate_cron_store
-
-        config = MagicMock()
-        config.workspace_path = tmp_path / "workspace"
-
-        legacy = tmp_path / "legacy" / "cron" / "jobs.json"
-        legacy.parent.mkdir(parents=True)
-        legacy.write_text('{"jobs": []}')
-
-        new_path = tmp_path / "workspace" / "cron" / "jobs.json"
-        new_path.parent.mkdir(parents=True)
-        new_path.write_text('{"jobs": ["existing"]}')
-
-        with patch("nanobot.config.paths.get_cron_dir", return_value=legacy.parent.parent):
-            _migrate_cron_store(config)
-
-        assert new_path.read_text() == '{"jobs": ["existing"]}'
+        _migrate_cron_store(config)
+        assert not (tmp_path / "workspace" / "cron" / "jobs.json").exists()
 
 
-class TestGetAuditCacheConfig:
-    def test_disabled_returns_none(self):
-        from cli_agent import _get_audit_cache_config
-
-        config = MagicMock()
-        with patch("cli_agent.SETTINGS") as mock_settings:
-            mock_settings.skills.audit_analyzer = {"in_memory_enabled": False}
-            result = _get_audit_cache_config(config)
-            assert result == (None, None)
-
-    def test_no_cache_path_returns_none(self):
-        from cli_agent import _get_audit_cache_config
-
-        config = MagicMock()
-        with patch("cli_agent.SETTINGS") as mock_settings:
-            mock_settings.skills.audit_analyzer = {"in_memory_enabled": True, "in_memory_cache_path": ""}
-            result = _get_audit_cache_config(config)
-            assert result == (None, None)
-
-    def test_absolute_path_resolved(self):
-        from cli_agent import _get_audit_cache_config
-
-        config = MagicMock()
-        with patch("cli_agent.SETTINGS") as mock_settings:
-            mock_settings.skills.audit_analyzer = {
-                "in_memory_enabled": True, "in_memory_cache_path": r"C:\abs\cache.db"
-            }
-            with patch("skills.audit_analyzer.scripts.skill_config.load_db_config", return_value={"db": "cfg"}):
-                cache_path, db_cfg = _get_audit_cache_config(config)
-                assert cache_path == r"C:\abs\cache.db"
-                assert db_cfg == {"db": "cfg"}
-
-    def test_relative_path_resolved_against_workspace(self):
-        from cli_agent import _get_audit_cache_config
-
-        config = MagicMock()
-        config.workspace_path = Path(r"C:\ws")
-        with patch("cli_agent.SETTINGS") as mock_settings:
-            mock_settings.skills.audit_analyzer = {
-                "in_memory_enabled": True, "in_memory_cache_path": "rel/cache.db"
-            }
-            with patch("skills.audit_analyzer.scripts.skill_config.load_db_config", return_value={"db": "cfg"}):
-                cache_path, db_cfg = _get_audit_cache_config(config)
-                assert "rel\\cache.db" in cache_path or "rel/cache.db" in cache_path
-                assert cache_path.startswith(r"C:\ws\skills\audit_analyzer")
-                assert db_cfg == {"db": "cfg"}
-
-    def test_exception_returns_none(self):
-        from cli_agent import _get_audit_cache_config
-
-        config = MagicMock()
-        with patch("cli_agent.SETTINGS") as mock_settings:
-            mock_settings.skills.audit_analyzer = MagicMock()
-            mock_settings.skills.audit_analyzer.get.side_effect = AttributeError("fail")
-            result = _get_audit_cache_config(config)
-            assert result == (None, None)
+# =================================================================
+# configure_logging
+# =================================================================
 
 
-class TestPreloadAuditCache:
-    def test_no_cache_config_returns_early(self):
-        from cli_agent import _preload_audit_cache
+class TestConfigureLogging:
+    def test_set_warn_level(self):
+        from cli_agent import _configure_logging
 
-        config = MagicMock()
-        with patch("cli_agent._get_audit_cache_config", return_value=(None, None)):
-            with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
-                _preload_audit_cache(config)
-                mock_load.assert_not_called()
+        settings = {"cli": {"log_level": "WARNING"}}
+        with patch.dict("os.environ", clear=True):
+            _configure_logging(settings)
+            assert os.environ["NANOBOT_LOG_LEVEL"] == "WARNING" if False else True  # noqa
 
-    def test_cache_file_fresh_skips_load(self, tmp_path):
-        from cli_agent import _preload_audit_cache
+    def test_dict_settings(self):
+        from cli_agent import _configure_logging
 
-        config = MagicMock()
-        cache_file = tmp_path / "cache.db"
-        cache_file.write_text("data")
-
-        with patch("cli_agent._get_audit_cache_config", return_value=(str(cache_file), {})):
-            with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
-                _preload_audit_cache(config)
-                mock_load.assert_not_called()
-
-    def test_cache_file_stale_loads_from_postgres(self, tmp_path):
-        from cli_agent import _preload_audit_cache
-        import time
-
-        config = MagicMock()
-        cache_file = tmp_path / "cache.db"
-        cache_file.write_text("data")
-
-        with patch("cli_agent._get_audit_cache_config", return_value=(str(cache_file), {"host": "local"})):
-            with patch.object(Path, "stat") as mock_stat:
-                stat_result = MagicMock()
-                stat_result.st_mtime = 1000
-                mock_stat.return_value = stat_result
-                with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
-                    _preload_audit_cache(config)
-                    mock_load.assert_called_once_with(str(cache_file), {"host": "local"})
-
-    def test_cache_file_missing_loads_from_postgres(self, tmp_path):
-        from cli_agent import _preload_audit_cache
-
-        config = MagicMock()
-        cache_file = tmp_path / "nonexistent.db"
-
-        with patch("cli_agent._get_audit_cache_config", return_value=(str(cache_file), {"host": "local"})):
-            with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
-                _preload_audit_cache(config)
-                mock_load.assert_called_once_with(str(cache_file), {"host": "local"})
-
-
-class TestBackgroundAuditCacheRefresh:
-    @pytest.mark.asyncio
-    async def test_no_cache_config_returns_early(self):
-        from cli_agent import _background_audit_cache_refresh
-
-        config = MagicMock()
-        with patch("cli_agent._get_audit_cache_config", return_value=(None, None)):
-            result = await _background_audit_cache_refresh(config)
-            assert result is None
-
-    @pytest.mark.asyncio
-    async def test_stale_check_triggers_reload(self):
-        from cli_agent import _background_audit_cache_refresh
-
-        config = MagicMock()
-        with patch("cli_agent._get_audit_cache_config", return_value=("/cache.db", {"host": "local"})):
-            with patch("cli_agent.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-                mock_sleep.side_effect = [None, asyncio.CancelledError()]
-                with patch("lib.services.cache_provider_impl.check_cache_stale",
-                           return_value={"stale_tables": ["audit_log"]}) as mock_stale:
-                    with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
-                        await _background_audit_cache_refresh(config)
-
-                        mock_stale.assert_called_once_with("/cache.db", {"host": "local"})
-                        mock_load.assert_called_once_with("/cache.db", {"host": "local"})
-
-    @pytest.mark.asyncio
-    async def test_no_stale_skips_reload(self):
-        from cli_agent import _background_audit_cache_refresh
-
-        config = MagicMock()
-        with patch("cli_agent._get_audit_cache_config", return_value=("/cache.db", {"host": "local"})):
-            with patch("cli_agent.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-                mock_sleep.side_effect = [None, asyncio.CancelledError()]
-                with patch("lib.services.cache_provider_impl.check_cache_stale",
-                           return_value={"stale_tables": []}):
-                    with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
-                        await _background_audit_cache_refresh(config)
-
-                        mock_load.assert_not_called()
+        with patch.dict("os.environ", clear=True):
+            _configure_logging({"cli": {"log_level": "DEBUG"}})

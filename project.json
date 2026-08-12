@@ -165,5 +165,20 @@
     "llm_timeout": 300,               // Таймаут LLM, сек
     "exec_timeout": 60,               // Таймаут exec, сек
     "log_level": "INFO"               // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR
+  },
+
+  // ---------------------------------------------------------------------------
+  //  logging.* — структурированный журнал событий агента (DbLoggingService)
+  // ---------------------------------------------------------------------------
+  "logging": {
+    "db": {
+      "enabled": true,                 // Варианты: true | false
+      "table_name": "gateway_logs",    // Таблица в PostgreSQL
+      "schema": "public",              // Схема
+      "flush_interval_sec": 5.0,       // Интервал флаша батча, сек
+      "batch_size": 100,               // Размер батча
+      "queue_maxsize": 10000,          // Макс. размер очереди
+      "min_level": "INFO"              // Варианты: DEBUG | INFO | WARN | ERROR
+    }
   }
 }

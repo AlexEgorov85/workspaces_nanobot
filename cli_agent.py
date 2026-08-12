@@ -1,864 +1,165 @@
+"""cli_agent.py — терминальный режим работы агента (REPL).
+
+Тонкий оркестратор: загрузка конфига и сервисов — в ``ApplicationContext``,
+REPL/typewriter — в ``lib.cli.console_loop``, авто-сканирование хуков — в
+``lib.cli.hook_loader``. Этот файл — CLI-аргументы, миграция cron,
+preload аудит-кеша навыка, vanilla/patched-режимы.
 """
-CLI-агент для nanobot — интерактивный терминальный интерфейс к LLM-агенту.
 
-╔══════════════════════════════════════════════════════════════════════════╗
-║                          АРХИТЕКТУРА                                   ║
-╚══════════════════════════════════════════════════════════════════════════╝
-
-cli_agent.py — это точка входа для запуска nanobot в режиме прямого
-общения через терминал (stdin/stdout), без использования Telegram, Slack
-или других каналов связи.
-
-Скрипт имеет два режима работы:
-
-  vanilla
-    Стандартный `nanobot agent` без каких-либо доработок.
-    Сессии хранятся в JSONL-файлах (стандартный SessionManager).
-    Используется для отладки и тестирования базовой функциональности.
-
-  patched  (--patched, -P)
-    Расширенная версия с локальными доработками:
-      • PGSessionManager — хранение истории сессий в PostgreSQL
-      • AgentHook-хуки из workspace/hooks/ — автоматически загружаются
-        и подключаются к циклу агента
-
-    patched-режим НЕ включает сканирование инструментов — все инструменты
-    должны быть объявлены через стандартный механизм nanobot (config.json).
-
-
-╔══════════════════════════════════════════════════════════════════════════╗
-║                          ЖИЗНЕННЫЙ ЦИКЛ                                ║
-╚══════════════════════════════════════════════════════════════════════════╝
-
-  1. Загрузка конфига
-     Читается config.json из той же директории, что и cli_agent.py.
-     Разрешаются переменные окружения через resolve_config_env_vars().
-
-  2. Создание шины сообщений (MessageBus)
-     Центральная шина, через которую агент и CLI обмениваются сообщениями.
-     Inbound  → пользователь → агент
-     Outbound → агент → пользователь
-
-  3. Выбор хранилища сессий (только patched)
-     • --storage=postgres  → принудительно PGSessionManager
-     • --storage=file      → принудительно JSONL-файлы
-     • --storage=auto      → PG если есть dsn в конфиге, иначе JSONL
-
-  4. Загрузка хуков (только patched)
-     Сканируется workspace/hooks/*.py, ищутся AgentHook-подклассы.
-     Хуки подключаются к циклу агента (до/после вызова LLM, после
-     вызова инструментов и т.д.)
-
-  5. Создание AgentLoop
-     Главный цикл агента: получает сообщения из шины, отправляет их
-     в LLM, обрабатывает вызовы инструментов, публикует ответы.
-
-  6. Интерактивный цикл (_run_interactive_loop)
-     ┌─────────────────────────────────────────────────────┐
-     │  while True:                                        │
-     │    read_input() → publish_inbound() → consume()     │
-     │                                                     │
-     │    consume_outbound():                              │
-     │      reasoning → tool_events → progress → response  │
-     │                                                     │
-     │    _print_agent_response(content)                   │
-     └─────────────────────────────────────────────────────┘
-
-     Цикл не использует стриминг — агент возвращает полный ответ.
-     Все промежуточные сообщения (размышления, вызовы инструментов)
-     буферизируются и выводятся с псевдо-стримингом (пауза перед
-     выводом каждого блока). Прогресс-бары показываются по мере
-     поступления.
-
-
-╔══════════════════════════════════════════════════════════════════════════╗
-║                      ФОРМАТ OUTBOUND-СООБЩЕНИЙ                         ║
-╚══════════════════════════════════════════════════════════════════════════╝
-
-Агент публикует в outbound-очередь сообщения с метаданными, которые
-позволяют CLI различать типы сообщений:
-
-  _reasoning_delta
-    Фрагмент текста размышлений LLM (chain-of-thought).
-    Приходит частями. CLI буферизирует всё до _reasoning_end,
-    затем выводит целиком с паузой ``len(text) * speed``.
-
-  _reasoning_end
-    Сигнал, что размышления завершены. Сбрасывается буфер.
-
-  _tool_audit
-    Массив событий вызова инструментов от ToolAuditHook. Каждый элемент:
-      { "name": "<tool_name>", "arguments": {...}, "status": "ok"|"error",
-        "error": "...", "result_preview": "...", "iteration": 0 }
-    CLI выводит: "✓ tool_name(params) → result" или "✗ tool_name: error"
-
-  _tool_hint
-    UI-подсказки (визуальные разделители) — игнорируются (всегда).
-
-  Обычное сообщение (без служебных меток)
-    Считается финальным ответом. После его получения consume_outbound()
-    сначала сбрасывает накопленные tool_events (если есть),
-    затем завершает работу, и ответ выводится через _typewriter()
-    или _print_agent_response().
-
-
-╔══════════════════════════════════════════════════════════════════════════╗
-║                     СТРУКТУРА ФАЙЛА                                    ║
-╚══════════════════════════════════════════════════════════════════════════╝
-
-  1. Импорты и константы
-     ─────────────────────
-     _CONFIG_PATH   — путь к config.json
-     _WORKSPACE_DIR — корень workspace (tools/, hooks/, data_store/)
-     _HOOKS_DIR     — директория с AgentHook-файлами
-
-  2. Пользовательская конфигурация
-     ──────────────────────────────
-     DISPLAY        — настройки вывода (блоки, typewriter)
-     LLM_TIMEOUT    — таймаут LLM вызова (сек)
-     EXEC_TIMEOUT   — таймаут exec-скриптов (сек)
-     MAX_ITERATIONS — макс. итераций инструментов
-     LOG_LEVEL      — уровень лога в stderr (WARNING подавляет INFO)
-
-  3. Вспомогательные функции
-     ─────────────────────────
-     _scan_and_register_hooks()  — сканирует hooks/ и загружает хуки
-     _migrate_cron_store()      — перенос cron-задач в workspace
-
-  4. Интерактивный цикл
-     ────────────────────
-     _run_interactive_loop()    — главный цикл ввода-вывода
-       └─ run_interactive()     — асинхронная обёртка
-           ├─ agent.run()       — фоновая задача агента
-           ├─ consume_outbound()— чтение и обработка ответов
-           └─ while True:       — ввод → публикация → вывод
-
-  5. Режимы запуска
-     ────────────────
-     _run_vanilla_agent()       — стандартный запуск
-     _run_patched_agent()       — запуск с доработками
-
-  6. Точка входа
-     ─────────────
-     _parse_args()              — парсинг --patched, --storage, --session
-     main()                     — выбор режима
-
-
-╔══════════════════════════════════════════════════════════════════════════╗
-║                         ПРИМЕРЫ ЗАПУСКА                                ║
-╚══════════════════════════════════════════════════════════════════════════╝
-
-  # Стандартный режим (JSONL-файлы, без доработок)
-  python cli_agent.py
-
-  # С PGSessionManager (автоопределение — PG если есть dsn)
-  python cli_agent.py --patched
-
-  # С PGSessionManager принудительно
-  python cli_agent.py --patched --storage postgres
-
-  # Принудительно JSONL (даже если есть PostgreSQL dsn)
-  python cli_agent.py --patched --storage file
-
-  # Сессии (--session / -s)
-  python cli_agent.py --session my-project          # сессия cli:my-project, JSONL
-  python cli_agent.py -s my-project                 # краткая форма
-  python cli_agent.py -s my-project --patched       # сессия + PGSessionManager
-  python cli_agent.py -s my-project -P -S postgres  # сессия + PG принудительно
-  python cli_agent.py -s my-project -P -S file      # сессия + JSONL (даже если есть dsn)
-
-  # Разные сессии — разная история диалога
-  python cli_agent.py -s work                       # рабочая сессия
-  python cli_agent.py -s play                       # личная сессия
-
-  # Продолжить существующую сессию по session_key из БД
-  python cli_agent.py -P -s cli:abc123
-
-  # Комбинации
-  python cli_agent.py                       # vanilla, сессия cli:direct
-  python cli_agent.py -P                    # patched, авто-storage, cli:direct
-  python cli_agent.py -P -s dev -S postgres # patched, PG, сессия cli:dev
-
-  # Конфигурация вывода и таймаутов — в скрипте, раздел ПОЛЬЗОВАТЕЛЬСКАЯ КОНФИГУРАЦИЯ:
-
-
-╔══════════════════════════════════════════════════════════════════════════╗
-║                         ПРИМЕРЫ ХУКОВ                                  ║
-╚══════════════════════════════════════════════════════════════════════════╝
-
-  Хук — это наследник nanobot.agent.AgentHook. Он получает контекст
-  после каждого шага агента (вызов LLM, вызов инструмента и т.д.)
-
-  workspace/hooks/auto_store_hook.py:
-    ─────────────────────────────────
-    from nanobot.agent import AgentHook, AgentHookContext
-
-    class AutoStoreHook(AgentHook):
-        def __init__(self, workspace_dir):
-            super().__init__()
-            store = SessionFileStore(workspace_dir / "data_store")
-
-        async def after_iteration(self, ctx: AgentHookContext) -> None:
-            for i, res in enumerate(ctx.tool_results):
-                # сохранить результат в файл если он большой
-                ...
-
-  Если конструктор хука принимает workspace_dir — он будет вызван
-  с workspace_dir=.... Если нет — хук создастся без аргументов.
-"""
+from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib
-import json
 import os
-import signal
+import shutil
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+from rich.console import Console
 
-from loguru import logger
+from lib.cli.console_loop import run_repl
+from lib.cli.display_config import DisplayConfig
+from lib.cli.hook_loader import scan_and_register
+from lib.core.application_context import ApplicationContext
 
-from nanobot.agent import AgentHook
-from nanobot.agent.loop import AgentLoop
-from nanobot.bus.events import OutboundMessage
-from nanobot.bus.queue import MessageBus
-from nanobot.cli.commands import (
-    _flush_pending_tty_input,
-    _init_prompt_session,
-    _is_exit_command,
-    _load_runtime_config,
-    _model_display,
-    _read_interactive_input_async,
-    _restore_terminal,
-    _sanitize_surrogates,
-    console,
-    __logo__,
-    __version__,
-)
-from nanobot.config.paths import is_default_workspace
-from nanobot.cron.service import CronService
-from nanobot.utils.helpers import sync_workspace_templates
+_SCRIPT_DIR = Path(__file__).parent
+_WORKSPACE_DIR = _SCRIPT_DIR / "workspace"
+_HOOKS_DIR = _WORKSPACE_DIR / "hooks"
 
-from lib.session.pg_session_manager import PGSessionManager
-
-from hooks.tool_audit_hook import ToolAuditHook
-
-_CONFIG_PATH: str = str(Path(__file__).parent / "config.json")
-_WORKSPACE_DIR: Path = Path(__file__).parent / "workspace"
-_HOOKS_DIR: Path = _WORKSPACE_DIR / "hooks"
-sys.path.insert(0, str(_HOOKS_DIR))
+# Добавляем корень проекта и workspace в sys.path (для hooks.* импортов).
+sys.path.insert(0, str(_SCRIPT_DIR))
 sys.path.insert(0, str(_WORKSPACE_DIR))
 
-from dataclasses import dataclass
-from config import SETTINGS
-
-_CLI = SETTINGS.cli
+console = Console()
 
 
-@dataclass
-class DisplayConfig:
-    """Настройки вывода: какие блоки показывать и как."""
-    show_reasoning: bool = True
-    show_tool_calls: bool = True
-    show_tool_results: bool = True
-    show_tool_params: bool = True
-    show_progress: bool = True
-    typewriter_speed: float = 0.01
-
-
-DISPLAY: DisplayConfig = DisplayConfig(
-    show_reasoning=_CLI.get("show_reasoning", True),
-    show_tool_calls=_CLI.get("show_tool_calls", True),
-    show_tool_results=_CLI.get("show_tool_results", True),
-    show_tool_params=_CLI.get("show_tool_params", True),
-    show_progress=_CLI.get("show_progress", True),
-    typewriter_speed=float(_CLI.get("typewriter_speed", 0.01)),
-)
-
-LLM_TIMEOUT: float = float(_CLI.get("llm_timeout", 300))
-EXEC_TIMEOUT: int = int(_CLI.get("exec_timeout", 60))
-MAX_ITERATIONS: int = int(_CLI.get("max_iterations", 200))
-LOG_LEVEL: str = str(_CLI.get("log_level", "WARNING"))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-def _patch_agent_tool_audit(agent, hook) -> None:
-    """Монки-патч ``_assemble_outbound``: добавляет tool audit trail в msg.metadata.
-
-    После оригинального ``_assemble_outbound`` сливает накопленные записи
-    из ``hook.drain()`` в ``result.metadata["_tool_audit"]``.
-    """
-    _orig = agent._assemble_outbound
-
-    def _wrap(msg, final_content, all_msgs, stop_reason, had_injections, on_stream, *, turn_latency_ms=None):
-        result = _orig(msg, final_content, all_msgs, stop_reason, had_injections, on_stream, turn_latency_ms=turn_latency_ms)
-        if result is not None:
-            entries = hook.drain()
-            if entries:
-                result.metadata["_tool_audit"] = entries
-        return result
-
-    agent._assemble_outbound = _wrap
-
-
-def _scan_and_register_hooks() -> list:
-    """Сканирует workspace/hooks/ и возвращает экземпляры AgentHook-подклассов."""
-    global _PARAMS_HOOK
-    hooks: list = []
-    _PARAMS_HOOK = None
-    if not _HOOKS_DIR.is_dir():
-        return hooks
-    for f in sorted(_HOOKS_DIR.iterdir()):
-        if not f.is_file() or not f.name.endswith(".py") or f.name.startswith("_"):
-            continue
-        try:
-            mod = importlib.import_module(f.name[:-3])
-        except Exception as exc:
-            console.print(f"[yellow]⚠[/yellow] {f.name}: {exc}")
-            continue
-        for attr_name in dir(mod):
-            attr = getattr(mod, attr_name)
-            if (
-                isinstance(attr, type)
-                and issubclass(attr, AgentHook)
-                and attr is not AgentHook
-                and not attr_name.startswith("_")
-            ):
-                try:
-                    hook = attr(workspace_dir=_WORKSPACE_DIR)
-                except Exception:
-                    try:
-                        hook = attr()
-                    except Exception as exc:
-                        console.print(f"[yellow]⚠[/yellow] {attr_name}: {exc}")
-                        continue
-                hooks.append(hook)
-                console.print(f"[green]✓[/green] {attr_name} loaded")
-                # Detect ToolAuditHook for parameter display
-                try:
-                    from tool_audit_hook import ToolAuditHook as _TAH
-                    if isinstance(hook, _TAH):
-                        _PARAMS_HOOK = hook
-                except ImportError:
-                    pass
-    return hooks
-
-
-def _migrate_cron_store(config) -> None:
-    """Переносит cron-задачи из глобальной ~/.nanobot/cron/ в workspace."""
-    from nanobot.config.paths import get_cron_dir
-
-    legacy_path = get_cron_dir() / "jobs.json"
-    new_path = config.workspace_path / "cron" / "jobs.json"
-    if legacy_path.is_file() and not new_path.exists():
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        import shutil
-        shutil.move(str(legacy_path), str(new_path))
-
-
-import re as _re
-
-_ANSI_RE = _re.compile(r'(\x1b\[[0-9;]*[a-zA-Z])')
-_WRITE_LOCK = asyncio.Lock()
-_PARAMS_HOOK: "Any | None" = None  # ToolParamsHook instance, set by _scan_and_register_hooks
-
-
-async def _typewriter(text: str, style: str, speed: float) -> None:
-    """Псевдо-стриминг: посимвольный вывод с раздельной записью ANSI.
-
-    ANSI-последовательности пишутся целиком (чтобы терминал не сбивался),
-    видимые символы — по одному с задержкой ``speed``.
-    При speed=0 — мгновенный вывод через console.print.
-
-    Весь вывод — под ``_WRITE_LOCK``, чтобы никакое фоновое сообщение
-    не вклинилось между символами.
-    """
-    if not text:
-        return
-    if speed <= 0:
-        if style:
-            console.print(f"[{style}]{text}[/{style}]")
-        else:
-            console.print(text)
-        return
-    from io import StringIO
-    from rich.console import Console as RichConsole
-    buf = StringIO()
-    tmp = RichConsole(file=buf, force_terminal=True)
-    if style:
-        tmp.print(f"[{style}]{text}[/{style}]", end="")
+def main() -> None:
+    args = _parse_args()
+    if args.patched:
+        _run_patched(args)
     else:
-        tmp.print(text, end="")
-    async with _WRITE_LOCK:
-        for part in _ANSI_RE.split(buf.getvalue()):
-            if not part:
-                continue
-            if _ANSI_RE.fullmatch(part):
-                sys.stdout.write(part)
-                sys.stdout.flush()
-            else:
-                for char in part:
-                    sys.stdout.write(char)
-                    sys.stdout.flush()
-                    await asyncio.sleep(speed)
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        _run_vanilla(args)
 
 
-async def _print_reasoning_block(text: str, cfg: DisplayConfig) -> None:
-    """Выводит блок размышлений целиком."""
-    if not text.strip() or not cfg.show_reasoning:
-        return
-    await _typewriter(text.strip(), "dim italic", cfg.typewriter_speed)
-
-
-async def _print_tool_events(events: list[dict], cfg: DisplayConfig) -> None:
-    """Выводит вызовы инструментов (_tool_audit и _tool_events)."""
-    if not cfg.show_tool_calls:
-        return
-
-    for ev in events:
-        if not isinstance(ev, dict):
-            continue
-        name = ev.get("name", "?")
-        status = ev.get("status") or ev.get("phase", "")
-
-        # Параметры — сначала из audit, потом из ToolParamsHook
-        args = ev.get("arguments")
-        if args and cfg.show_tool_params:
-            params_str = ", ".join(f"{k}={v}" for k, v in args.items())[:200]
-        else:
-            params_str = ""
-
-        if status in ("ok", "end"):
-            result = str(ev.get("result_preview") or ev.get("result", ""))[:120] or "ok"
-            if params_str:
-                label = f"✓ {name}({params_str}) → {result}"
-            elif cfg.show_tool_results:
-                label = f"✓ {name} → {result}"
-            else:
-                label = f"✓ {name}"
-            await _typewriter(label, "dim", cfg.typewriter_speed)
-        elif status in ("error",):
-            err = ev.get("error", "failed")
-            if params_str:
-                label = f"✗ {name}({params_str}): {err}"
-            else:
-                label = f"✗ {name}: {err}"
-            await _typewriter(label, "dim", cfg.typewriter_speed)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ИНТЕРАКТИВНЫЙ ЦИКЛ
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-def _run_interactive_loop(agent, config, *, session: str | None = None,
-                          display: DisplayConfig | None = None) -> None:
-    """
-    Интерактивный цикл: ввод пользователя → агент → вывод ответа.
-
-    Сообщения потребляются из outbound-очереди:
-      1. Размышления буферизируются до _reasoning_end, затем _typewriter
-      2. Вызовы инструментов буферизируются и выводятся пачками (_typewriter)
-      3. Прогресс-бары показываются по мере поступления
-      4. Финальный ответ — _typewriter (или _print_agent_response если speed=0)
-    """
-    from nanobot.bus.events import InboundMessage
-
-    # Подавляем INFO-логи в stderr (мешают typewriter-выводу)
+def _run_vanilla(args: argparse.Namespace) -> None:
+    """Стандартный CLI-агент (как ``nanobot agent``). Без доработок."""
+    ctx = ApplicationContext.create(
+        script_dir=_SCRIPT_DIR,
+        workspace_dir=_WORKSPACE_DIR,
+        enable_db_logging=True,
+        enable_audit=False,
+        enable_cron=True,
+        session_override=args.session,
+    )
+    _configure_logging(ctx.settings)
+    _migrate_cron_store(ctx.config)
+    ctx.start()
     try:
+        display = DisplayConfig.from_settings(
+            ctx.config_service.settings_section("cli")
+        )
+        asyncio.run(run_repl(ctx.agent, ctx.config, session=args.session, display=display))
+    finally:
+        ctx.stop()
+
+
+def _run_patched(args: argparse.Namespace) -> None:
+    """CLI-агент с PGSessionManager и workspace-хуками."""
+    ctx = ApplicationContext.create(
+        script_dir=_SCRIPT_DIR,
+        workspace_dir=_WORKSPACE_DIR,
+        enable_db_logging=True,
+        enable_audit=False,
+        enable_cron=True,
+        storage_override=args.storage,
+        session_override=args.session,
+    )
+    _configure_logging(ctx.settings)
+    _migrate_cron_store(ctx.config)
+
+    hooks, _ = scan_and_register(_HOOKS_DIR, _WORKSPACE_DIR)
+    if ctx.tool_audit_hook not in hooks:
+        hooks.append(ctx.tool_audit_hook)
+    ctx.agent = ctx.agent.__class__.from_config(
+        ctx.config,
+        ctx.bus,
+        session_manager=ctx.session_manager,
+        cron_service=__get_cron(ctx),
+        hooks=hooks,
+    )
+    ctx.runtime_patcher.patch_assemble_outbound(ctx.agent, ctx.tool_audit_hook)
+
+    asyncio.create_task(_run_patched_repl(ctx, args))
+
+
+def _run_patched_repl(ctx: ApplicationContext, args: argparse.Namespace) -> None:
+    """REPL для patched-режима (фоновая подгрузка кеша + REPL)."""
+    import asyncio
+    from lib.services.preload_service import PreloadService
+
+    preload = PreloadService(settings=ctx.settings)
+
+    async def bg():
+        reload_task = await preload.start_audit_cache_tasks(ctx.config)
+        try:
+            await run_repl(ctx.agent, ctx.config, session=args.session,
+                           display=DisplayConfig.from_settings(
+                               ctx.config_service.settings_section("cli")),
+                           background_task_factory=lambda: asyncio.sleep(1))
+        finally:
+            await preload.stop_tasks(reload_task)
+
+    ctx.start()
+    try:
+        asyncio.run(bg())
+    finally:
+        ctx.stop()
+
+
+def __get_cron(_ctx: ApplicationContext):
+    """CronService уже создан в ApplicationContext — возвращаем None,
+    потому что AgentFactory уже подключила его из hooks."""
+    return None
+
+
+def _configure_logging(settings) -> None:
+    """loguru из cli.log_level."""
+    cli = settings.get("cli") if isinstance(settings, dict) else getattr(settings, "cli", None)
+    level = "WARNING"
+    if cli is not None:
+        if isinstance(cli, dict):
+            level = cli.get("log_level", "WARNING")
+        else:
+            level = getattr(cli, "log_level", "WARNING")
+    os.environ.setdefault("NANOBOT_LOG_LEVEL", str(level))
+    try:
+        from loguru import logger
         logger.remove()
-        logger.add(sys.stderr, level=LOG_LEVEL)
+        logger.add(sys.stderr, level=level)
     except Exception:
         pass
 
-    cfg = display or DisplayConfig()
-    bus = agent.bus
-    _init_prompt_session()
-    _model, _preset_tag = _model_display(config)
-    console.print(
-        f"Interactive mode [bold blue]({_model})[/bold blue]{_preset_tag} "
-        f"\u2014 type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit\n"
-    )
 
-    chat_id = session or "direct"
-    cli_channel, cli_chat_id = "cli", chat_id
-
-    def _handle_signal(signum, frame):
-        """Обработчик SIGINT/SIGTERM — восстанавливает терминал и завершает процесс."""
-        sig_name = signal.Signals(signum).name
-        _restore_terminal()
-        console.print(f"\nПолучен {sig_name}, завершение.")
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-    if hasattr(signal, "SIGHUP"):
-        signal.signal(signal.SIGHUP, _handle_signal)
-    if hasattr(signal, "SIGPIPE"):
-        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-
-    async def run_interactive():
-        """Основной async-цикл: запускает агента, читает outbound, выводит стриминг/финал."""
-        bus_task = asyncio.create_task(agent.run())
-        asyncio.create_task(_background_audit_cache_refresh(config))
-
-        async def consume_outbound() -> tuple[str, dict]:
-            """
-            Читает outbound-сообщения до получения финального ответа.
-
-            Выводится только:
-              • reasoning — сразу по мере поступления
-              • стриминг-чанки — сразу по мере поступления
-              • финальный ответ — целиком (если не был отстримлен)
-            """
-            full_response = ""
-            response_meta: dict = {}
-
-            while True:
-                try:
-                    msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
-                except asyncio.CancelledError:
-                    break
-
-                meta = msg.metadata or {}
-
-                if meta.get("_reasoning_delta"):
-                    if msg.content and cfg.show_reasoning:
-                        await _typewriter(msg.content, "dim italic", cfg.typewriter_speed)
-                    continue
-
-                if meta.get("_reasoning_end"):
-                    continue
-
-                if meta.get("_stream_delta"):
-                    if msg.content:
-                        async with _WRITE_LOCK:
-                            sys.stdout.write(msg.content)
-                            sys.stdout.flush()
-                        full_response += msg.content
-                    continue
-
-                if meta.get("_stream_end"):
-                    async with _WRITE_LOCK:
-                        sys.stdout.write("\n")
-                        sys.stdout.flush()
-                    continue
-
-                # Progress и control-сигналы — тихо пропускаем
-                if not msg.content or meta.get("_progress") or meta.get("_turn_end") or meta.get("_tool_hint"):
-                    continue
-
-                # Финальный ответ
-                full_response = msg.content
-                response_meta = meta
-                break
-
-            return full_response, response_meta
-
-        # Основной цикл ввода-вывода
-        try:
-            while True:
-                try:
-                    _flush_pending_tty_input()
-
-                    user_input = _sanitize_surrogates(await _read_interactive_input_async())
-                    command = user_input.strip()
-                    if not command:
-                        continue
-                    if _is_exit_command(command):
-                        _restore_terminal()
-                        console.print("\nGoodbye!")
-                        break
-
-                    await bus.publish_inbound(InboundMessage(
-                        channel=cli_channel,
-                        sender_id="user",
-                        chat_id=cli_chat_id,
-                        content=user_input,
-                    ))
-
-                    content, meta = await consume_outbound()
-
-                    if meta.get("_tool_audit"):
-                        await _print_tool_events(meta["_tool_audit"], cfg)
-                    if content and not meta.get("_stream_delta"):
-                        await _typewriter(content, "", cfg.typewriter_speed)
-
-                except KeyboardInterrupt:
-                    _restore_terminal()
-                    console.print("\nGoodbye!")
-                    break
-                except EOFError:
-                    _restore_terminal()
-                    console.print("\nGoodbye!")
-                    break
-        finally:
-            agent.stop()
-            await agent.close_mcp()
-            flushed = agent.sessions.flush_all()
-            if flushed:
-                logger.info("Flushed {} session(s) to disk", flushed)
-
-    asyncio.run(run_interactive())
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# РЕЖИМЫ ЗАПУСКА
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-def _apply_timeouts(config) -> None:
-    """Применяет таймауты из констант в config и переменные окружения."""
-    if LLM_TIMEOUT >= 0:
-        os.environ["NANOBOT_LLM_TIMEOUT_S"] = str(LLM_TIMEOUT)
-    if EXEC_TIMEOUT >= 0:
-        try:
-            config.tools.exec.timeout = EXEC_TIMEOUT
-        except Exception:
-            pass
-    if MAX_ITERATIONS > 0:
-        try:
-            config.agents.defaults.max_tool_iterations = MAX_ITERATIONS
-        except Exception:
-            pass
-
-
-def _get_audit_cache_config(config):
-    """Вернуть (cache_file_path, db_config) или (None, None) если in_memory не включён."""
+def _migrate_cron_store(config) -> None:
+    """Перенос cron-задач из ``~/.nanobot/cron/`` в workspace."""
     try:
-        acfg = SETTINGS.skills.audit_analyzer
-        if not acfg.get("in_memory_enabled", False):
-            return None, None
-
-        cache_path = acfg.get("in_memory_cache_path", "")
-        if not cache_path:
-            return None, None
-
-        from pathlib import Path as _Path
-        cache_file = _Path(cache_path)
-        if not cache_file.is_absolute():
-            cache_file = config.workspace_path / "skills" / "audit_analyzer" / cache_file
-
-        from skills.audit_analyzer.scripts.skill_config import load_db_config
-        return str(cache_file), load_db_config()
+        from nanobot.config.paths import get_cron_dir  # type: ignore
+        legacy = get_cron_dir() / "jobs.json"
+        new = config.workspace_path / "cron" / "jobs.json"
+        if legacy.is_file() and not new.exists():
+            new.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy), str(new))
     except Exception:
-        return None, None
-
-
-def _preload_audit_cache(config) -> None:
-    """
-    Фоновая загрузка DuckDB-кеша для навыка audit_analyzer при старте агента.
-    """
-    cache_path, db_cfg = _get_audit_cache_config(config)
-    if not cache_path or not db_cfg:
-        return
-
-    from lib.services.cache_provider_impl import load_cache_from_postgres
-
-    cache_file = Path(cache_path)
-    if cache_file.exists():
-        age = __import__("time").time() - cache_file.stat().st_mtime
-        if age < 3600:
-            return
-
-    try:
-        load_cache_from_postgres(cache_path, db_cfg)
-    except Exception as exc:
-        import logging
-        logging.getLogger("preload").warning(
-            "audit_analyzer cache preload failed (non-critical): %s", exc
-        )
-
-
-async def _background_audit_cache_refresh(config):
-    """
-    Фоновая задача: каждые 60 сек проверять свежесть DuckDB-кеша через MAX(updated_at).
-    Если данные в PG изменились — перезагрузить кеш.
-    """
-    cache_path, db_cfg = _get_audit_cache_config(config)
-    if not cache_path or not db_cfg:
-        return
-
-    from lib.services.cache_provider_impl import check_cache_stale, load_cache_from_postgres
-    import logging as _logging
-
-    while True:
-        try:
-            await asyncio.sleep(3600)
-            result = check_cache_stale(cache_path, db_cfg)
-            if result.get("stale_tables"):
-                _logging.getLogger("cache").info(
-                    "Audit cache stale tables: %s, reloading...", result["stale_tables"]
-                )
-                load_cache_from_postgres(cache_path, db_cfg)
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            _logging.getLogger("cache").warning(
-                "Audit cache refresh check failed: %s", exc
-            )
-
-
-def _run_vanilla_agent(args: argparse.Namespace) -> None:
-    """Стандартный CLI-агент (как `nanobot agent`). Без доработок."""
-    config = _load_runtime_config(config=_CONFIG_PATH, workspace=str(_WORKSPACE_DIR))
-    _apply_timeouts(config)
-    sync_workspace_templates(config.workspace_path)
-    console.print(f"{__logo__} Starting nanobot CLI agent v{__version__}...")
-
-    bus = MessageBus()
-    if is_default_workspace(config.workspace_path):
-        _migrate_cron_store(config)
-
-    cron_store_path = config.workspace_path / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
-
-    tool_audit_hook = ToolAuditHook()
-    agent = AgentLoop.from_config(config, bus, cron_service=cron, hooks=[tool_audit_hook])
-    _patch_agent_tool_audit(agent, tool_audit_hook)
-    _preload_audit_cache(config)
-    _run_interactive_loop(agent, config, session=args.session, display=DISPLAY)
-
-
-def _run_patched_agent(args: argparse.Namespace) -> None:
-    """CLI-агент с PGSessionManager и кастомными инструментами."""
-    config = _load_runtime_config(config=_CONFIG_PATH, workspace=str(_WORKSPACE_DIR))
-    _apply_timeouts(config)
-    sync_workspace_templates(config.workspace_path)
-    console.print(f"{__logo__} Starting nanobot CLI agent v{__version__}...")
-
-    bus = MessageBus()
-    if is_default_workspace(config.workspace_path):
-        _migrate_cron_store(config)
-
-    cron_store_path = config.workspace_path / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
-
-    # Выбор хранилища сессий
-    pg_cfg = getattr(config.channels, "postgres", {})
-    channel_dsn = pg_cfg.get("dsn", "") if isinstance(pg_cfg, dict) else getattr(pg_cfg, "dsn", "")
-    try:
-        _sm_path = Path(__file__).parent / "session_manager.json"
-        if _sm_path.exists():
-            sm_cfg = json.loads(_sm_path.read_text(encoding="utf-8"))
-        else:
-            sm_cfg = {}
-    except Exception:
-        sm_cfg = {}
-    if isinstance(sm_cfg, dict):
-        sm_dsn = sm_cfg.get("dsn") or channel_dsn
-        sm_schema = sm_cfg.get("schema", "public")
-        sm_messages_table = sm_cfg.get("messages_table", "session_messages")
-        sm_meta_table = sm_cfg.get("meta_table", "session_meta")
-        sm_min_conn = sm_cfg.get("min_conn", 1)
-        sm_max_conn = sm_cfg.get("max_conn", 4)
-        sm_pool_timeout = sm_cfg.get("pool_timeout", 5.0)
-    else:
-        sm_dsn = channel_dsn
-        sm_schema = "public"
-        sm_messages_table = "session_messages"
-        sm_meta_table = "session_meta"
-        sm_min_conn = 1
-        sm_max_conn = 4
-        sm_pool_timeout = 5.0
-    dsn = sm_dsn
-
-    use_postgres = args.storage == "postgres" or (args.storage == "auto" and bool(dsn))
-    if use_postgres:
-        if not dsn:
-            console.print("[red]✗[/red] --storage=postgres but no PostgreSQL DSN in config")
-            sys.exit(1)
-        session_manager = PGSessionManager(
-            workspace=config.workspace_path,
-            dsn=dsn,
-            schema=sm_schema,
-            messages_table=sm_messages_table,
-            meta_table=sm_meta_table,
-            min_conn=sm_min_conn,
-            max_conn=sm_max_conn,
-            pool_timeout=sm_pool_timeout,
-        )
-        console.print("[green]✓[/green] PGSessionManager: sessions stored in PostgreSQL")
-    else:
-        session_manager = None
-        if dsn:
-            console.print("[dim]PostgreSQL DSN available but --storage=file; using JSONL files[/dim]")
-
-    hooks = _scan_and_register_hooks()
-
-    # Find or create ToolAuditHook for metadata injection
-    tool_audit_hook = None
-    for h in hooks:
-        if isinstance(h, ToolAuditHook):
-            tool_audit_hook = h
-            break
-    if tool_audit_hook is None:
-        tool_audit_hook = ToolAuditHook()
-        hooks.append(tool_audit_hook)
-
-    agent = AgentLoop.from_config(
-        config, bus,
-        cron_service=cron,
-        session_manager=session_manager,
-        hooks=hooks,
-    )
-    _patch_agent_tool_audit(agent, tool_audit_hook)
-    _preload_audit_cache(config)
-    _run_interactive_loop(agent, config, session=args.session, display=DISPLAY)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ТОЧКА ВХОДА
-# ══════════════════════════════════════════════════════════════════════════════
+        pass
 
 
 def _parse_args() -> argparse.Namespace:
-    """Парсит аргументы командной строки."""
-    parser = argparse.ArgumentParser(
-        description="nanobot CLI agent",
-    )
-    parser.add_argument(
-        "--patched", "-P",
-        action="store_true",
-        default=False,
-        help="Enable local patches: PGSessionManager, workspace hooks",
-    )
-    parser.add_argument(
-        "--storage", "-S",
-        type=str,
-        default="auto",
-        choices=("auto", "file", "postgres"),
-        help="Session storage (only with --patched, default: auto)",
-    )
-    parser.add_argument(
-        "--session", "-s",
-        type=str,
-        default=None,
-        help="Session key (default: cli:direct). Resume or start a named session.",
-    )
+    parser = argparse.ArgumentParser(description="nanobot CLI agent")
+    parser.add_argument("--patched", "-P", action="store_true", default=False)
+    parser.add_argument("--storage", "-S", type=str, default="auto",
+                        choices=("auto", "file", "postgres"))
+    parser.add_argument("--session", "-s", type=str, default=None)
     return parser.parse_args()
-
-
-def main():
-    """Точка входа CLI-агента.
-
-    Определяет режим (vanilla / patched) и запускает соответствующий раннер.
-    """
-    args = _parse_args()
-    if args.patched:
-        _run_patched_agent(args)
-    else:
-        _run_vanilla_agent(args)
 
 
 if __name__ == "__main__":
