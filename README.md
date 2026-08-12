@@ -408,9 +408,12 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 | **Канал** | создаётся автоматически | `conversation_messages` | авто |
 | **Seed канала** | `sql/channels/seed_messages.sql` | 14 user + 4 assistant сообщений | тестовые данные |
 | **DbLoggingService** | `sql/logs/create_logs_table.sql` | `gateway_logs` (UUID, JSONB) | рабочий |
-| **Домен (audit_analyzer)** | `sql/audit_analyzer/create_audit_source_tables_gp.sql` | `oarb.audits`, `oarb.violations`, `oarb.audit_reports`, `oarb.report_items` | REFERENCE — уточняет владелец данных |
-| **Векторы** | `sql/audit_analyzer/create_audit_vectors_table_gp.sql` | `oarb.audit_vectors`, `oarb.vector_index_store` | рабочий |
-| **Конфиг индексов** | `sql/audit_analyzer/create_vector_index_config_gp.sql` | `oarb.vector_index_config` | рабочий |
+| **Домен audit_analyzer (PG)** | `sql/audit_analyzer/create_audit_source_tables.sql` | `oarb.audits/violations/audit_reports/report_items` | REFERENCE — уточняет владелец данных |
+| **Домен audit_analyzer (GP)** | `sql/audit_analyzer/create_audit_source_tables_gp.sql` | то же + `DISTRIBUTED BY` | REFERENCE для GP 6.5 |
+| **Векторы (PG)** | `sql/audit_analyzer/create_audit_vectors_table.sql` | `oarb.audit_vectors` (BIGINT IDENTITY, TEXT pk_value) + 3 индекса | рабочий (PG 13+) |
+| **Векторы (GP)** | `sql/audit_analyzer/create_audit_vectors_table_gp.sql` | то же + `DISTRIBUTED BY (source)` | рабочий (GP 6.5) |
+| **Конфиг индексов (PG)** | `sql/audit_analyzer/create_vector_index_config.sql` | `oarb.vector_index_config` | рабочий (PG 13+) |
+| **Конфиг индексов (GP)** | `sql/audit_analyzer/create_vector_index_config_gp.sql` | то же + `DISTRIBUTED BY` | рабочий (GP 6.5) |
 | **Бенчмарки** | `sql/benchmarks/create_benchmark_tables.sql` | `benchmark_runs`, `benchmark_results` | рабочий (PG 9.4+) |
 | **Бенчмарки (GP)** | `sql/benchmarks/create_benchmark_tables_gp.sql` | то же + `DISTRIBUTED BY` | рабочий (GP 6.25) |
 

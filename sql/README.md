@@ -27,16 +27,21 @@ sql/
 │   ├── create_logs_table.sql                  #   PostgreSQL 9.4+
 │   └── create_logs_table_gp.sql               #   Greenplum 6.25
 ├── audit_analyzer/                            # audit_analyzer + cache_provider
-│   ├── create_audit_source_tables_gp.sql      #   REFERENCE DDL oarb.*
-│   ├── create_audit_vectors_table_gp.sql      #   oarb.audit_vectors + vector_index_store
-│   ├── create_vector_index_config_gp.sql      #   oarb.vector_index_config
+│   ├── create_audit_source_tables_gp.sql      #   REFERENCE DDL oarb.* (GP 6.5)
+│   ├── create_audit_source_tables.sql         #   PG 13+ вариант (без DISTRIBUTED BY)
+│   ├── create_audit_vectors_table_gp.sql      #   oarb.audit_vectors + vector_index_store (GP 6.5)
+│   ├── create_audit_vectors_table.sql         #   PG 13+ вариант
+│   ├── create_vector_index_config_gp.sql      #   oarb.vector_index_config (GP 6.5)
+│   ├── create_vector_index_config.sql         #   PG 13+ вариант
 │   └── seed_default_indexes.sql               #   3 дефолтных индекса (audits/violations/reports)
 ├── benchmarks/                                # Benchmarks
 │   ├── create_benchmark_tables.sql            #   PostgreSQL 9.4+
 │   └── create_benchmark_tables_gp.sql         #   Greenplum 6.25
 └── migrations/                                # инкрементальные миграции
-    ├── migrate_logs_v1.sql                    #   изменения gateway_logs
-    └── migrate_logs_v1_gp.sql                 #   GP-вариант
+    ├── migrate_logs_v1.sql                    #   изменения gateway_logs (PG)
+    ├── migrate_logs_v1_gp.sql                 #   GP-вариант
+    ├── migrate_vectors_v2.sql                 #   vectors + config v2 (PG 13+)
+    └── migrate_vectors_v2_gp.sql              #   GP 6.5 вариант
 ```
 
 ---
@@ -96,19 +101,30 @@ python tools/build_vectors.py --full-rebuild
 
 ## Совместимость
 
-| Каталог | PG 9.4+ | GP 6.25 |
+| Каталог | PG 13+ | GP 6.5 |
 |---------|---------|---------|
 | `session/` | ✓ | ✓ |
 | `channels/` (seed) | ✓ | ✓ |
 | `logs/` | ✓ | ✓ |
-| `audit_analyzer/` | нет (только GP) | ✓ |
+| `audit_analyzer/` | ✓ (`*.sql` без суффикса `_gp`) | ✓ (`*_gp.sql` с DISTRIBUTED BY) |
 | `benchmarks/` | ✓ | ✓ |
-| `migrations/` | ✓ | ✓ |
+| `migrations/` | ✓ (`*.sql` без суффикса) | ✓ (`*_gp.sql`) |
 
-`audit_analyzer/` поставляется только в GP-варианте — схема домена и
-векторные индексы используют `DISTRIBUTED BY`, специфичный для Greenplum.
-Если у вас обычный PostgreSQL — адаптируйте `DISTRIBUTED BY` под
-`PARTITION BY` / обычные индексы вручную.
+**Выбор варианта DDL:**
+
+- **PostgreSQL 13+** — используйте файлы без суффикса `_gp`:
+  - `sql/audit_analyzer/create_audit_source_tables.sql`
+  - `sql/audit_analyzer/create_audit_vectors_table.sql`
+  - `sql/audit_analyzer/create_vector_index_config.sql`
+  - `sql/migrations/migrate_vectors_v2.sql`
+
+- **Greenplum 6.5+** — используйте файлы с суффиксом `_gp`:
+  - `sql/audit_analyzer/create_audit_source_tables_gp.sql`
+  - `sql/audit_analyzer/create_audit_vectors_table_gp.sql`
+  - `sql/audit_analyzer/create_vector_index_config_gp.sql`
+  - `sql/migrations/migrate_vectors_v2_gp.sql`
+
+`seed_default_indexes.sql` — общий для обеих СУБД (только данные).
 
 ---
 
