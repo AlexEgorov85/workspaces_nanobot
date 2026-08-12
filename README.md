@@ -169,11 +169,11 @@ nanobot/
 ├── project.json            # Настройки проекта (channels.*, skills.*, cli, gateway, logging.db)
 ├── config.py               # Сборка SETTINGS: project.json + config.json + .secrets.env
 │
-├── gateway.py              # ⭐ v2.0.0: 132 строки, тонкий оркестратор
-├── cli_agent.py            # ⭐ v2.0.0: 165 строк, тонкий оркестратор
+├── gateway.py              #  v2.0.0: 132 строки, тонкий оркестратор
+├── cli_agent.py            #  v2.0.0: 165 строк, тонкий оркестратор
 ├── streamlit_app.py        # [отдельный клиент] поллинг conversation_messages
 │
-├── lib/                    # ⭐ v2.0.0: сервисный слой (core/services/cli/lifecycle)
+├── lib/                    #  v2.0.0: сервисный слой (core/services/cli/lifecycle)
 ├── workspace/              # Runtime-данные, хуки, skills/, memory/
 ├── tests/                  # 701 unit-тест
 ├── benchmarks/             # YAML-тесты, runner, scorer, reporter
@@ -464,21 +464,21 @@ pytest tests/ --cov=lib --cov-report=term-missing
 
 | Файл | Что тестирует |
 |------|--------------|
-| `test_application_context.py` | ⭐ `ApplicationContext` — bootstrap всех сервисов, lifecycle |
-| `test_agent_factory.py` | ⭐ `AgentFactory` — создание AgentLoop с хуками |
-| `test_bus_factory.py` | ⭐ `BusFactory` — MessageBus + обёртки логгеров |
-| `test_config_service.py` | ⭐ `ConfigService` — загрузка конфига, pre-resolve env, таймауты |
-| `test_session_storage.py` | ⭐ `SessionStorageService` — выбор PG/File/auto |
-| `test_runtime_patcher.py` | ⭐ `RuntimePatcher` — оба monkey-patch'а, fallback |
-| `test_transcription_service.py` | ⭐ `TranscriptionService` — openai/groq |
-| `test_channel_factory.py` | ⭐ `ChannelFactory` — Redis/Postgres каналы |
-| `test_subprocess_manager.py` | ⭐ `SubprocessManager` — Streamlit spawn/terminate |
-| `test_preload_service.py` | ⭐ `PreloadService` — FAISS + audit_cache |
-| `test_db_logging_service.py` | ⭐ `DbLoggingService` — worker, batch, fallback |
-| `test_hooks_database_logging.py` | ⭐ `DatabaseLoggingHook` — AgentHook для tool-событий |
-| `test_gateway_runner.py` | ⭐ `GatewayRunner` — exponential backoff |
-| `test_shutdown_coordinator.py` | ⭐ `ShutdownCoordinator` — LIFO graceful shutdown |
-| `test_console_loop.py` | ⭐ REPL/typewriter/print_tool_events |
+| `test_application_context.py` |  `ApplicationContext` — bootstrap всех сервисов, lifecycle |
+| `test_agent_factory.py` |  `AgentFactory` — создание AgentLoop с хуками |
+| `test_bus_factory.py` |  `BusFactory` — MessageBus + обёртки логгеров |
+| `test_config_service.py` |  `ConfigService` — загрузка конфига, pre-resolve env, таймауты |
+| `test_session_storage.py` |  `SessionStorageService` — выбор PG/File/auto |
+| `test_runtime_patcher.py` |  `RuntimePatcher` — оба monkey-patch'а, fallback |
+| `test_transcription_service.py` |  `TranscriptionService` — openai/groq |
+| `test_channel_factory.py` |  `ChannelFactory` — Redis/Postgres каналы |
+| `test_subprocess_manager.py` |  `SubprocessManager` — Streamlit spawn/terminate |
+| `test_preload_service.py` |  `PreloadService` — FAISS + audit_cache |
+| `test_db_logging_service.py` |  `DbLoggingService` — worker, batch, fallback |
+| `test_hooks_database_logging.py` |  `DatabaseLoggingHook` — AgentHook для tool-событий |
+| `test_gateway_runner.py` |  `GatewayRunner` — exponential backoff |
+| `test_shutdown_coordinator.py` |  `ShutdownCoordinator` — LIFO graceful shutdown |
+| `test_console_loop.py` |  REPL/typewriter/print_tool_events |
 | `test_cli_agent.py` | CLI-агент (vanilla/patched режимы) |
 | `test_gateway.py` | Gateway-оркестратор (обновлён под ApplicationContext) |
 | `test_pg_session_manager.py` | PGSessionManager (сессии в БД) |

@@ -216,33 +216,33 @@ nanobot/
 │   ├── create_audit_vectors_table_gp.sql # oarb.vector_index_store + oarb.audit_vectors
 │   └── create_vector_index_config_gp.sql # oarb.vector_index_config
 │
-├── lib/                                  # ⭐ v2.0.0: сервисный слой
+├── lib/                                  #  v2.0.0: сервисный слой
 │   ├── core/                             #   bootstrap ApplicationContext + фабрики
 │   │   ├── application_context.py        #     create/start/stop, связывает все общие сервисы
 │   │   ├── agent_factory.py              #     AgentLoop + ToolAudit + DatabaseLogging hooks
 │   │   └── bus_factory.py                #     MessageBus + обёртки publish_inbound/outbound
 │   ├── services/                         #   сервисный слой (v2.0.0 + pre-existing)
-│   │   ├── config_service.py             # ⭐   SETTINGS-аксессор + pre-resolve env + таймауты
-│   │   ├── session_storage.py            # ⭐   выбор PGSessionManager / SessionManager
-│   │   ├── runtime_patcher.py            # ⭐   все monkey-patch'и (ContextGovernor + _assemble_outbound)
-│   │   ├── channel_factory.py            # ⭐   ChannelManager + Redis/Postgres каналы
-│   │   ├── transcription_service.py      # ⭐   openai/groq key/URL/language
-│   │   ├── subprocess_manager.py         # ⭐   Streamlit spawn + terminate/kill
-│   │   ├── preload_service.py            # ⭐   FAISS preload + audit_cache refresh
-│   │   ├── db_logging_service.py         # ⭐   worker, batch INSERT, JSONL fallback, get_stats()
-│   │   ├── db_logging_bus.py             # ⭐   обёртки publish_inbound/outbound
+│   │   ├── config_service.py             #    SETTINGS-аксессор + pre-resolve env + таймауты
+│   │   ├── session_storage.py            #    выбор PGSessionManager / SessionManager
+│   │   ├── runtime_patcher.py            #    все monkey-patch'и (ContextGovernor + _assemble_outbound)
+│   │   ├── channel_factory.py            #    ChannelManager + Redis/Postgres каналы
+│   │   ├── transcription_service.py      #    openai/groq key/URL/language
+│   │   ├── subprocess_manager.py         #    Streamlit spawn + terminate/kill
+│   │   ├── preload_service.py            #    FAISS preload + audit_cache refresh
+│   │   ├── db_logging_service.py         #    worker, batch INSERT, JSONL fallback, get_stats()
+│   │   ├── db_logging_bus.py             #    обёртки publish_inbound/outbound
 │   │   ├── audit_memory_store.py         #     in-memory DuckDB-зеркало + атомарный publish()
 │   │   ├── audit_sync_service.py         #     фоновый поллинг PG (worker-поток)
 │   │   ├── cache_provider.py             #     интерфейс CacheProvider + SearchResult
 │   │   ├── cache_provider_impl.py        #     PostgresDuckDbProvider + фабрика и модульные функции
 │   │   ├── text_splitter.py              #     чанкование текстов для индексаторов
 │   │   └── sql/
-│   │       └── create_logs_table.sql     # ⭐ DDL для DbLoggingService (gateway_logs)
-│   ├── cli/                              # ⭐ вынесено из cli_agent.py
+│   │       └── create_logs_table.sql     #  DDL для DbLoggingService (gateway_logs)
+│   ├── cli/                              #  вынесено из cli_agent.py
 │   │   ├── console_loop.py               #   REPL + typewriter + consume_outbound
 │   │   ├── display_config.py             #   DisplayConfig
 │   │   └── hook_loader.py                #   сканирование workspace/hooks/*.py
-│   ├── lifecycle/                        # ⭐ цикл запуска и graceful shutdown
+│   ├── lifecycle/                        #  цикл запуска и graceful shutdown
 │   │   ├── gateway_runner.py             #   run_forever с exponential backoff (1с → 30с)
 │   │   └── shutdown_coordinator.py       #   LIFO graceful shutdown
 │   ├── channels/                         #   каналы
@@ -255,7 +255,7 @@ nanobot/
 ├── workspace/                            # runtime-данные и хуки
 │   ├── hooks/
 │   │   ├── tool_audit_hook.py            #   хук аудита вызовов инструментов
-│   │   └── database_logging_hook.py      # ⭐ AgentHook для tool-событий + run_finished в БД
+│   │   └── database_logging_hook.py      #  AgentHook для tool-событий + run_finished в БД
 │   └── skills/audit_analyzer/            # навык: тонкий CLI поверх провайдера
 │       ├── SKILL.md                      #   пользовательская документация
 │       ├── audit_analyze.bat / .sh       #   точки входа
@@ -272,8 +272,8 @@ nanobot/
 │       └── tests/
 │           └── e2e_test.py               #   сквозной тест навыка (нужна живая БД)
 │
-├── gateway.py                            # ⭐ v2.0.0: 132 строки, тонкий оркестратор
-├── cli_agent.py                          # ⭐ v2.0.0: 165 строк, тонкий оркестратор
+├── gateway.py                            #  v2.0.0: 132 строки, тонкий оркестратор
+├── cli_agent.py                          #  v2.0.0: 165 строк, тонкий оркестратор
 ├── streamlit_app.py                      # [web-клиент, не через ApplicationContext]
 ├── config.py                             # SETTINGS (project.json + config.json + .secrets.env)
 └── project.json                          # конфигурация (channels.*, skills.*, gateway, cli, logging.db)
@@ -668,24 +668,24 @@ python tools/build_vectors.py --full-rebuild
 
 | Файл | Что делает |
 |------|-----------|
-| `lib/core/application_context.py` | ⭐ Единый bootstrap всех общих сервисов |
-| `lib/core/agent_factory.py` | ⭐ Создание AgentLoop с хуками (ToolAudit + DatabaseLogging) |
-| `lib/core/bus_factory.py` | ⭐ MessageBus + обёртки publish_inbound/outbound |
-| `lib/services/config_service.py` | ⭐ Загрузка конфига, SETTINGS-аксессор, pre-resolve env, таймауты |
-| `lib/services/session_storage.py` | ⭐ Выбор PGSessionManager / SessionManager |
-| `lib/services/runtime_patcher.py` | ⭐ Все monkey-patch'и (ContextGovernor + _assemble_outbound) |
-| `lib/services/channel_factory.py` | ⭐ ChannelManager + Redis/Postgres |
-| `lib/services/transcription_service.py` | ⭐ openai/groq key/URL/language |
-| `lib/services/subprocess_manager.py` | ⭐ Streamlit spawn + terminate/kill |
-| `lib/services/preload_service.py` | ⭐ FAISS preload + audit_cache refresh |
-| `lib/services/db_logging_service.py` | ⭐ Worker-поток, batch INSERT, JSONL fallback |
-| `lib/services/db_logging_bus.py` | ⭐ Обёртки publish_inbound/outbound для логгера |
-| `lib/cli/console_loop.py` | ⭐ REPL/typewriter/consume_outbound (вынесено из cli_agent.py) |
-| `lib/cli/display_config.py` | ⭐ DisplayConfig |
-| `lib/cli/hook_loader.py` | ⭐ Сканирование workspace/hooks/*.py |
-| `lib/lifecycle/gateway_runner.py` | ⭐ Цикл с exponential backoff |
-| `lib/lifecycle/shutdown_coordinator.py` | ⭐ LIFO graceful shutdown |
-| `workspace/hooks/database_logging_hook.py` | ⭐ AgentHook для tool-событий + run_finished |
+| `lib/core/application_context.py` |  Единый bootstrap всех общих сервисов |
+| `lib/core/agent_factory.py` |  Создание AgentLoop с хуками (ToolAudit + DatabaseLogging) |
+| `lib/core/bus_factory.py` |  MessageBus + обёртки publish_inbound/outbound |
+| `lib/services/config_service.py` |  Загрузка конфига, SETTINGS-аксессор, pre-resolve env, таймауты |
+| `lib/services/session_storage.py` |  Выбор PGSessionManager / SessionManager |
+| `lib/services/runtime_patcher.py` |  Все monkey-patch'и (ContextGovernor + _assemble_outbound) |
+| `lib/services/channel_factory.py` |  ChannelManager + Redis/Postgres |
+| `lib/services/transcription_service.py` |  openai/groq key/URL/language |
+| `lib/services/subprocess_manager.py` |  Streamlit spawn + terminate/kill |
+| `lib/services/preload_service.py` |  FAISS preload + audit_cache refresh |
+| `lib/services/db_logging_service.py` |  Worker-поток, batch INSERT, JSONL fallback |
+| `lib/services/db_logging_bus.py` |  Обёртки publish_inbound/outbound для логгера |
+| `lib/cli/console_loop.py` |  REPL/typewriter/consume_outbound (вынесено из cli_agent.py) |
+| `lib/cli/display_config.py` |  DisplayConfig |
+| `lib/cli/hook_loader.py` |  Сканирование workspace/hooks/*.py |
+| `lib/lifecycle/gateway_runner.py` |  Цикл с exponential backoff |
+| `lib/lifecycle/shutdown_coordinator.py` |  LIFO graceful shutdown |
+| `workspace/hooks/database_logging_hook.py` |  AgentHook для tool-событий + run_finished |
 
 ### Pre-existing (не тронуты рефакторингом)
 

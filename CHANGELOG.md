@@ -9,20 +9,236 @@
 ## [Unreleased]
 
 ### Added
-- Механизм подстановки секретов `${VAR}` из окружения при чтении конфигурации.
-- `project.json` — JSONC-файл с комментариями (дополнение к `config.json`), где задаются проектные секции: `channels.*` (PostgreSQL/Redis), `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway`.
-- Шаблон `.secrets.env.example` со списком переменных окружения, ожидаемых при старте.
+- ...
 
 ### Changed
-- Конфигурация мигрирована из `.env` в `project.json` + `config.json`, секреты вынесены в `.secrets.env`; порядок мержа: `project.json → config.json → .secrets.env` (поздний перекрывает ранний). Оставлен защитный fallback: если `.env` появится, он прочитается первым.
-- Удалены навыки `data-analyzer` и `html_presentation_generator`: вычищены их зависимости из `requirements.txt`, блоки из `project.json`/`config.json`.
-
-### Removed
-- Артефакты аудита упомянутых навыков, конфигурация `data-analyzer` и `html_presentation_generator`.
+- ...
 
 ### Fixed
-- README приведены в соответствие реальности: убраны упоминания удалённых навыков, исправлена заметка о GP-схеме, счётчик seed-записей и ссылки на бенчмарки.
-- Прогресс-события рантайма больше не затирают media сообщений-инструментов в `PostgresChannel.send`.
+- ...
+
+---
+
+## [2.0.0] — 2026-08-12
+
+> **Главный релиз:** выделен сервисный слой и единый bootstrap-контекст
+> (`ApplicationContext`). `gateway.py` и `cli_agent.py` стали тонкими
+> оркестраторами. Аудит-инфраструктура (`audit_analyzer`) переехала в
+> универсальный слой `lib/services`, gateway — единственный владелец
+> DuckDB-кеша навыка.
+
+### Added
+
+**Сервисный слой v2.0.0 (`lib/`)**
+
+- **`lib/core/application_context.py:ApplicationContext`** — единый bootstrap
+  всех общих сервисов. Поля: `bus`, `agent`, `tool_audit_hook`, `hooks`,
+  `session_manager`, `db_logging_service`, `audit_sync_service`,
+  `audit_memory_store`, `config_service`, `runtime_patcher`,
+  `transcription_service`, `subprocess_manager`, `preload_service`. Метод
+  `start()` использует `ShutdownCoordinator`, `stop()` — LIFO graceful
+  shutdown. Graceful degradation: при недоступности БД сервис остаётся `None`.
+- **`lib/core/agent_factory.py:AgentFactory`** — `create(...)` возвращает
+  `(agent, hooks)`; создаёт `AgentLoop` с `ToolAuditHook` + `DatabaseLoggingHook`.
+- **`lib/core/bus_factory.py:BusFactory`** — оборачивает `publish_inbound` /
+  `publish_outbound` async-логгерами `DbLoggingService` без monkey-patch'ей.
+- **`lib/services/config_service.py`** — единый SETTINGS-аксессор,
+  `_load_runtime_config`, pre-resolve `${VAR}` из `.secrets.env`.
+- **`lib/services/session_storage.py`** — выбор `PGSessionManager` /
+  `SessionManager` (auto / postgres / file).
+- **`lib/services/runtime_patcher.py`** — оба monkey-patch'а в одном классе
+  (`ContextGovernor.normalize_tool_result` + `agent._assemble_outbound`) с
+  fallback при изменении API nanobot.
+- **`lib/services/channel_factory.py`** — `ChannelManager` + Redis + Postgres
+  каналы + транскрипция.
+- **`lib/services/transcription_service.py`** — openai/groq key/URL/language.
+- **`lib/services/subprocess_manager.py`** — Streamlit spawn + terminate/kill.
+- **`lib/services/preload_service.py`** — FAISS preload (gateway) +
+  audit_cache refresh (cli).
+- **`lib/services/db_logging_service.py`**  — структурированный журнал
+  агента в `gateway_logs`: worker-поток, единственное psycopg2-соединение,
+  неблокирующая очередь, batch INSERT через `execute_batch`, JSONL-fallback
+  при недоступности БД, `get_stats()`. Методы `log_inbound`, `log_outbound`,
+  `log_tool_call`, `log_tool_result` (с `latency_ms`), `log_error`.
+- **`lib/services/db_logging_bus.py`**  — обёртки `publish_inbound` /
+  `publish_outbound` для `DbLoggingService`.
+- **`lib/services/sql/create_logs_table.sql`** — DDL для `gateway_logs`
+  (UUID, JSONB, индексы по `timestamp` / `session_id` / `event_type` / `level`).
+- **`lib/lifecycle/gateway_runner.py`** — `run_forever` с exponential backoff
+  (1с → 30с) при падении.
+- **`lib/lifecycle/shutdown_coordinator.py`** — LIFO graceful shutdown.
+- **`lib/cli/console_loop.py`** — REPL + typewriter + `consume_outbound`
+  (вынесено из `cli_agent.py`).
+- **`lib/cli/display_config.py`** — `DisplayConfig`.
+- **`lib/cli/hook_loader.py`** — сканирование `workspace/hooks/*.py`.
+- **`workspace/hooks/database_logging_hook.py`** — `AgentHook` для tool-событий
+  + `after_run` summary в БД.
+
+**`audit_analyzer` — универсальный слой данных (`lib/services`)**
+
+- **`lib/services/cache_provider.py`** — интерфейс `CacheProvider`
+  (`is_ready` / `refresh` / `check_stale` / `preload_indexes` / `search_vector` /
+  `query_sql` / `explain` / `get_schema` / `close`) + dataclass `SearchResult`.
+- **`lib/services/cache_provider_impl.py`** — `PostgresDuckDbProvider`
+  (DuckDB-кеш + FAISS-индексы). Модульные функции: `get_embedding`
+  (Ollama `/api/embed`), `load_cache_from_postgres`, `check_cache_stale`,
+  `read_vector_index_config`, `read_embedding_config`, `build_cache_provider`.
+  Тяжёлые зависимости импортируются лениво внутри методов.
+- **`lib/services/text_splitter.py`** — чанкование текстов для индексаторов
+  (вынесено из навыка).
+- **`lib/services/audit_memory_store.py`** — in-memory DuckDB-зеркало +
+  FAISS-индексы + атомарный `publish()` (ATTACH temp + `os.replace`).
+  `ensure_schema()` создаёт таблицы с типами из PG, сохраняет
+  `pg_type` + комментарии в `__nanobot_meta.__schema_meta`. Снапшот
+  публикуется в файл `in_memory_cache_path` навыка; `publish()` no-op,
+  если `_dirty=False` или `publish_path` пуст.
+- **`lib/services/audit_sync_service.py`** — фоновый worker-поток, единственный
+  psycopg2-коннекшн. `_fetch_schema` собирает структуру из PG
+  (`information_schema` + `pg_description`). Callbacks: `on_new_records`,
+  `on_replace_records`, `on_schema`, `on_sync`. Полная пересинхронизация
+  каждые `full_resync_every` циклов.
+
+**Инфраструктура `audit_analyzer`**
+
+- **`tools/build_vectors.py`** — индексатор вынесен в корень проекта
+  (вне навыка). Флаги: `--full-rebuild`, `--check`, `--status`,
+  `--dry-run`, `--index`, `--batch-size`, `--chunk-size`, `--chunk-overlap`,
+  `--db-table`. Чанкование через `lib/services/text_splitter.py`.
+- **`sql/create_audit_source_tables_gp.sql`** — REFERENCE DDL домена
+  (`oarb.audits`, `oarb.violations`, `oarb.audit_reports`, `oarb.report_items`).
+- **`sql/create_audit_vectors_table_gp.sql`** — `oarb.audit_vectors` +
+  `oarb.vector_index_store` + индексы.
+- **`sql/create_vector_index_config_gp.sql`** — `oarb.vector_index_config`.
+
+**Конфигурация и секреты**
+
+- **`project.json`** (JSONC с `//` и `/* */` комментариями) — новый формат
+  проектных настроек. Порядок мержа: `project.json → config.json →
+  .secrets.env` (поздний перекрывает ранний).
+- Новые секции `project.json`: `channels.*` (postgres/redis), `skills.*`,
+  `cli`, `benchmark`, `streamlit`, `gateway`, `logging.db`.
+- Механизм подстановки секретов `${VAR}` из `.secrets.env` /
+  `os.environ` при чтении конфигурации.
+- **`.secrets.env.example`** — шаблон переменных окружения.
+- **`workspace/utils/db.py:resolve_dsn()`** — единое разрешение DSN
+  (`configure()` → `channels.postgres.dsn` → `DATABASE_URL`/`PG_DSN`),
+  идемпотентная настройка глобального коннектора.
+
+**Документация**
+
+- `DEVELOPMENT.md` — техническая документация: архитектура сервисного
+  слоя v2.0.0, полная таблица связей между файлами (`lib/core/`,
+  `lib/services/`, `lib/cli/`, `lib/lifecycle/`), жизненный цикл кеша,
+  раздел «Управление синхронизацией» (callbacks, ключи конфига,
+  мониторинг, требования к таблицам источника).
+- `README.md` — обновлён под v2.0.0: mermaid-диаграммы, 11 компонентов,
+  таблица БД, запуск.
+
+### Changed
+
+- **Точки входа → тонкие оркестраторы:**
+  `gateway.py` сократился с 696 до 132 строк, `cli_agent.py` — с 865 до 165.
+- **`audit_analyzer` — тонкий CLI поверх `lib/services`.** Удалены
+  `InMemoryDatabase`, `vector_mode.py`, `check_status.py`,
+  `cache/query_audit.py`. Навык работает с `PostgresDuckDbProvider`
+  через `build_cache_provider()`; `Database` (прямой PG) и провайдер
+  кеша реализуют единый протокол `QueryBackend` (`get_schema` /
+  `query_sql` / `explain`).
+- **Gateway — единственный владелец файла кеша навыка.** `AuditSyncService`
+  инкрементально синхронизирует таблицы в `AuditMemoryStore`, после
+  каждого цикла `store.publish()` атомарно записывает снимок
+  (`temp + os.replace`) в файл кеша навыка. CLI открывает снимок только
+  на чтение.
+- **Pre-resolve `${VAR}` от `.secrets.env`**: gateway больше НЕ требует
+  `export MISTRAL_API_KEY=...` в shell — `ConfigService._pre_resolve_env_refs`
+  кладёт ключи в `os.environ` ДО `_load_runtime_config`.
+- **Режим `--mode init` / `--force` в `audit_analyzer` удалён.**
+  `cli.py` завершается `FileNotFoundError`, указывающим на gateway.
+- **`audit_analyzer.SCRIPTS_REGISTRY`** вынесен из `scripts_registry.py`
+  в отдельный `predefined_scripts.py`.
+- **`requirements.txt`** — убраны неиспользуемые пакеты (`requests`,
+  `sentence-transformers`, `anthropic`, `openai`), версии — точные
+  `=X.Y.Z` для полной воспроизводимости.
+- **`config.py`** — удалена загрузка `.env` (защитный fallback) и
+  константа `_ENV_FILE` (больше не используется); merge-order
+  комментарий обновлён.
+- **Документация:** ASCII-арт заменён на mermaid-диаграммы,
+  `REFACTORING_PLAN.md` удалён (план завершён).
+
+### Removed
+
+- Навыки **`data-analyzer`** и **`html_presentation_generator`** —
+  вычищены зависимости из `requirements.txt`, блоки из
+  `project.json`/`config.json`. Все артефакты аудита этих навыков
+  удалены (`webui/`, `ws/`, `media/`, `workspace/data_store/cache/*.html`,
+  `count_numbers.py`).
+- **`pg_agent_worker.py`** и `tests/test_pg_agent_worker.py` — старый
+  standalone Postgres-воркер, не использовался в v2.0.0.
+- Мёртвые ключи конфига: `schema_cache`, `cli_default_format`,
+  `_ENV_FILE` (не читались кодом).
+- Мусорные артефакты: `lib/channels/workspace/` (баг путей v1.4.0),
+  `__pycache__/` старых хуков.
+- `webui/` (старый SPA-dist из v1.3.0), `ws/`, `media/`.
+- `REFACTORING_PLAN.md` (план завершён).
+- Legacy `workspace/skills/audit_analyzer/DEVELOPMENT/*` —
+  перенесены в корень (`DEVELOPMENT.md`) и `tools/build_vectors.py`.
+- Legacy мигратор `migrate_vectors_to_db.py`.
+
+### Fixed
+
+- **Race-condition FAISS preload**: callbacks на `AuditSyncService`
+  устанавливаются **ДО** `ctx.start()`, иначе worker-тред при первом
+  `_do_initial_load` скипает записи → DuckDB остаётся пустым →
+  `preload_vector_indexes` видит «нет данных». Теперь в `gateway.py:main()`
+  callbacks идут раньше `start()`.
+- **Совместимость с nanobot 0.2.2**: инъекция провайдерских API-ключей
+  из `.secrets.env` в конфиг на старте (провайдер-скоупинг формат
+  `.secrets.env` не попадал в `os.environ` как `MISTRAL_API_KEY`).
+- **`PostgresChannel.send`** — runtime-progress события больше не
+  затирают `media` сообщений-инструментов.
+- **Streamlit**: `_get_extension_from_mime` корректно выводит расширение
+  через `mimetypes` (с fallback `.bin`); ожидание ответа агента больше
+  не имеет таймаута — на статусе `failed` re-check 5 минут, далее
+  бесконечное ожидание возврата в `processing`.
+- **Аттачменты в `PostgresChannel`**: `_decode_media_from_db` корректно
+  обрабатывает dict-entries `{filename, data}` и сохраняет оригинальные
+  имена файлов в session cache. `_poll_once` добавляет
+  `[Attachment: name (saved at path)]` к пользовательскому контенту.
+  Исправлено разрешение workspace dir и санитизация session key для
+  Windows-путей.
+- **`database.py`** (навык): упрощён на 78 строк без изменения поведения
+  (удалён мёртвый Schema cache).
+- **`lib/session/pg_session_manager.py`**: удалён нерабочий `sys.path`
+  hack, указывавший на несуществующий путь.
+- **README/DEVELOPMENT**: устранены неточности — убраны упоминания
+  удалённых навыков, исправлена заметка о GP-схеме, счётчик seed-записей,
+  ссылки на бенчмарки, ссылка nanobot (была `opencode.ai`).
+- **Тесты:** `test_exception` использует объект с `__getattr__`,
+  поднимающим исключение (т.к. `_get` использует `getattr`, не `.get()`).
+  Pre-resolve использует `patch.dict` для nanobot.
+
+### Security
+
+- **`.gitignore` (новый, корневой):** защита `.secrets.env`
+  (КРИТИЧНО — API-ключи и DSN), Python (`__pycache__/`, `*.pyc`),
+  pytest/coverage, артефакты удалённых навыков, runtime
+  (`workspace/data_store/`, `workspace/sessions/`), DuckDB, IDE.
+- API-ключи вынесены из кода и конфигурации в `.secrets.env`.
+
+### Tests
+
+- **701 → 683 unit-теста** (`-18` после удаления `test_pg_agent_worker.py`).
+- `+107` новых тестов в v2.0.0: `test_application_context.py`,
+  `test_agent_factory.py`, `test_bus_factory.py`, `test_config_service.py`,
+  `test_session_storage.py`, `test_runtime_patcher.py`,
+  `test_transcription_service.py`, `test_channel_factory.py`,
+  `test_subprocess_manager.py`, `test_preload_service.py`,
+  `test_db_logging_service.py`, `test_hooks_database_logging.py`,
+  `test_gateway_runner.py`, `test_shutdown_coordinator.py`,
+  `test_console_loop.py`.
+- Покрытие `audit_analyzer`: `TestSchema`, `TestReplace`,
+  `TestSchemaAndResync`, `test_map_pg_type`, `publish()`,
+  `on_sync_callback`.
 
 ---
 
@@ -38,7 +254,7 @@
 - Передача файлов между агентами через БД как base64 `data URL` вместо файловых ссылок.
 - 75 unit-тестов по runner/gateway/streamlit (`tests/`), исправлены найденные баги.
 - `requirements.txt` со всеми зависимостями.
-- Инъекция провайдерных API-ключей из `.secrets.env` в конфиг на старте (совместимость с nanobot 0.2.2).
+- Инъекция провайдерских API-ключей из `.secrets.env` в конфиг на старте (совместимость с nanobot 0.2.2).
 - Инструкция разработчика по векторным индексам (docs).
 
 ### Changed
@@ -162,8 +378,3 @@
 
 
 ---
-
-## [0.9.0] — 2026-05-25
-
-### Added
-- Начальная версия проекта: nanobot-шлюз с `PostgresChannel`, инструментами и конфигурацией workspace.
