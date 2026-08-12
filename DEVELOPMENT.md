@@ -304,7 +304,7 @@ nanobot/
   `read_vector_index_config(cfg)` (конфиг индексов из БД → fallback в настройках),
   `read_embedding_config(cfg)`, `build_cache_provider(cfg, base_dir)` (фабрика
   провайдера из конфиг-секции навыка).
-- Тяжёлые зависимости (`duckdb`, `psycopg2`, `faiss`, `numpy`, `pandas`, `httpx`)
+- Тяжёлые зависимости (`duckdb`, `psycopg2`, `faiss`, `numpy`, `pyarrow`, `httpx`)
   импортируются **лениво** внутри методов — импорт модуля остаётся лёгким,
   и gateway может управлять жизненным циклом без побочных эффектов.
 - Если передан `dsn` — провайдер сам вызывает `utils.db.configure(dsn)`

@@ -663,7 +663,7 @@ v2.0.0 — крупное обновление. Изменения в конфи
 - **loguru** — логирование
 - **httpx** — HTTP-клиент (Ollama эмбеддинги)
 - **duckdb** — встраиваемая аналитическая БД (audit_analyzer)
-- **faiss-cpu**, **numpy**, **pandas** — векторный поиск (audit_analyzer)
+- **faiss-cpu**, **numpy**, **pyarrow** — векторный поиск и Arrow IPC (audit_analyzer)
 - **PyYAML** — конфиги бенчмарков
 
 Версии — точные `=X.Y.Z` в `requirements.txt` для полной воспроизводимости.
