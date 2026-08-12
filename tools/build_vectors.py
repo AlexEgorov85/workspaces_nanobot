@@ -160,6 +160,26 @@ def _content_hash(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
+def _normalize_cols(embedding_cols: list) -> list[str]:
+    """Привести embedding_cols к списку строк-имён колонок.
+
+    Конфигурация в oarb.vector_index_config может содержать как
+    простые имена колонок (["col1", "col2"]), так и объекты
+    ([{"column": "col", "chunk": true, ...}, ...]). Функции
+    `_build_search_text` и `build_chunks` ожидают только имена колонок,
+    поэтому извлекаем поле `column` из объектов.
+    """
+    out = []
+    for c in embedding_cols:
+        if isinstance(c, dict):
+            col = c.get("column")
+            if col:
+                out.append(col)
+        elif isinstance(c, str):
+            out.append(c)
+    return out
+
+
 # =============================================================================
 # СБОРКА ОДНОГО ИНДЕКСА
 # =============================================================================
@@ -194,7 +214,8 @@ def build_index(
     pk_column = index_cfg["pk"]
     src_table = index_cfg["table"]
     content_cols = index_cfg.get("content_columns", [])
-    embedding_cols = index_cfg.get("embedding_columns", content_cols)
+    raw_embedding_cols = index_cfg.get("embedding_columns", content_cols)
+    embedding_cols = _normalize_cols(raw_embedding_cols)
 
     print(f"\n=== {index_name} ({source_table}) ===")
 
@@ -286,8 +307,14 @@ def build_index(
         if changed and not dry_run:
             try:
                 _build_provider(_CFG, str(_SKILL_ROOT)).invalidate_cache(index_name)
-            except ImportError:
-                pass
+                _build_provider(_CFG, str(_SKILL_ROOT)).rebuild_and_store_index(index_name, db_table)
+                print(f"  FAISS-индекс '{index_name}' пересобран (только удаление)")
+            except (ImportError, ModuleNotFoundError) as exc:
+                print(f"  ! ПРЕДУПРЕЖДЕНИЕ: FAISS-индекс для '{index_name}' не пересобран — "
+                      f"отсутствует зависимость ({exc.__class__.__name__}: {exc})")
+            except Exception as exc:
+                print(f"  ! ОШИБКА пересборки FAISS-индекса для '{index_name}': "
+                      f"{exc.__class__.__name__}: {exc}")
         return {
             "index_name": index_name,
             "total": 0,
@@ -386,8 +413,14 @@ def build_index(
             provider = _build_provider(_CFG, str(_SKILL_ROOT))
             provider.invalidate_cache(index_name)
             provider.rebuild_and_store_index(index_name, db_table)
-        except ImportError:
-            pass
+            print(f"  FAISS-индекс '{index_name}' собран в памяти и сохранён в oarb.vector_index_store")
+        except (ImportError, ModuleNotFoundError) as exc:
+            print(f"  ! ПРЕДУПРЕЖДЕНИЕ: FAISS-индекс для '{index_name}' не собран — "
+                  f"отсутствует зависимость ({exc.__class__.__name__}: {exc}). "
+                  f"Поиск через vector_mode будет работать только после установки faiss-cpu + numpy.")
+        except Exception as exc:
+            print(f"  ! ОШИБКА сборки FAISS-индекса для '{index_name}': "
+                  f"{exc.__class__.__name__}: {exc}")
 
     return {
         "index_name": index_name,
@@ -467,6 +500,15 @@ def main():
                         help="Таблица векторов в БД")
 
     args = parser.parse_args()
+
+    # Предупреждение о FAISS-зависимостях (для rebuild_and_store_index)
+    try:
+        import faiss  # noqa: F401
+        import numpy  # noqa: F401
+    except ImportError as exc:
+        print(f"ПРЕДУПРЕЖДЕНИЕ: {exc.__class__.__name__}: {exc}")
+        print("  Вектора будут вставлены в oarb.audit_vectors, но FAISS-индекс не соберётся.")
+        print("  Поставьте: pip install faiss-cpu numpy")
 
     dsn = resolve_dsn()
     if not dsn:

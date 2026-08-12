@@ -558,75 +558,430 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 
 ## 🔍 Векторная индексация
 
+> **Исчерпывающий гайд:** как устроены индексы, как их создавать, обновлять,
+> добавлять новые, отлаживать, и какие таблицы/файлы задействованы.
+
+### Архитектура
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ 1. Конфиг (oarb.vector_index_config)                                  │
+│    - задаёт какие таблицы индексировать, какие колонки эмбеддить,    │
+│      параметры чанкования, track-колонку                             │
+└──────────────────────────────────────────────────────────────────────┘
+                              ↓
+┌──────────────────────────────────────────────────────────────────────┐
+│ 2. Источники (oarb.audits, oarb.violations, oarb.audit_reports, …)   │
+│    - читаются через SELECT * + track_column для инкрементального     │
+│      сравнения с уже собранными векторами                            │
+└──────────────────────────────────────────────────────────────────────┘
+                              ↓
+┌──────────────────────────────────────────────────────────────────────┐
+│ 3. tools/build_vectors.py (сборщик)                                   │
+│    - NEW/CHANGED/DELETED классификация по (source, pk_value)         │
+│    - чанкование длинных текстов (lib/services/text_splitter.py)      │
+│    - батчевый эмбеддинг через Ollama /api/embed                       │
+│    - INSERT в oarb.audit_vectors + rebuild FAISS в oarb.vector_index_store
+└──────────────────────────────────────────────────────────────────────┘
+                              ↓
+┌──────────────────────────────────────────────────────────────────────┐
+│ 4. Хранилище                                                         │
+│    - oarb.audit_vectors:  эмбеддинги REAL[] + метаданные             │
+│    - oarb.vector_index_store: сериализованный FAISS BYTEA (для поиска)│
+└──────────────────────────────────────────────────────────────────────┘
+                              ↓
+┌──────────────────────────────────────────────────────────────────────┐
+│ 5. Поиск (audit_analyzer --mode vector)                              │
+│    - PostgresDuckDbProvider.search_vector()                          │
+│    - десериализует FAISS из oarb.vector_index_store, ищет в памяти,  │
+│      при промахе пересобирает из oarb.audit_vectors                  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
 ### Таблицы
 
-| Таблица | Назначение |
-|---------|-----------|
-| `oarb.audit_vectors` | Сырые векторы `REAL[]` + метаданные (`content`, `search_text`, `table`, `pk_value`, `chunk_index/count`, `row_data` JSONB, `content_hash`, `max_src_track`, `synced_at`). Строится `build_vectors.py` |
-| `oarb.vector_index_store` | Сериализованный FAISS-индекс `BYTEA` (source, metadata, dimension, vector_count, updated_at). Пересобирается провайдером при промахе или после изменений |
-| `oarb.vector_index_config` | Конфигурация индексов (основной источник; fallback — `vector_indexes` в project.json) |
+| Таблица | Назначение | Кто пишет | Кто читает |
+|---------|-----------|-----------|-----------|
+| `oarb.vector_index_config` | Конфиг индексов (имя, источник, колонки, чанки, track_column, enabled) | `seed_default_indexes.sql` (вручную) | `tools/build_vectors.py` |
+| `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (chunk_index/count, content_hash, row_data JSONB, synced_at) | `tools/build_vectors.py` | `lib/services/cache_provider_impl.py:PostgresDuckDbProvider` |
+| `oarb.vector_index_store` | Сериализованный FAISS `BYTEA` + метаданные (dimension, vector_count, updated_at) | `provider.rebuild_and_store_index()` | `provider._INDEX_CACHE` (in-memory после preload) |
 
-### Пайплайн
+DDL: `sql/audit_analyzer/create_vector_index_config_gp.sql`, `sql/audit_analyzer/create_audit_vectors_table_gp.sql`.
 
+### Дефолтные индексы
+
+В `sql/audit_analyzer/seed_default_indexes.sql` (idempotent):
+
+| index_name | Источник | content_cols | embedding_cols | Чанкование |
+|------------|----------|--------------|----------------|------------|
+| `audits_index` | `oarb.audits` | `title, audit_type, auditee_entity, status` | те же 4 колонки | нет |
+| `violations_index` | `oarb.violations` | `description, recommendation, violation_code, severity` | `description` (chunked 500/80) + `violation_code` | да |
+| `audit_reports_index` | `oarb.audit_reports` | `full_text, title, report_number, report_date` | `full_text` (chunked 500/80) + `title` | да |
+
+Применение: `psql "$DATABASE_URL" -f sql/audit_analyzer/seed_default_indexes.sql`
+
+### Как добавить новый индекс
+
+**1. Опишите индекс в `oarb.vector_index_config`:**
+
+```sql
+INSERT INTO oarb.vector_index_config
+    (index_name, source_table, src_table, pk_column,
+     content_cols, embedding_cols, track_column, enabled)
+VALUES (
+    'objects_index',                        -- уникальное имя (используется в CLI --index-name)
+    'objects',                              -- короткое имя (идёт в column "source" таблицы audit_vectors)
+    'oarb.objects',                         -- полное имя исходной таблицы
+    'id',                                   -- колонка первичного ключа
+    ARRAY['name', 'description']::TEXT[],   -- колонки для content (отображение в результатах поиска)
+    '[
+        {"column": "description", "chunk": true, "chunk_size": 500, "chunk_overlap": 80},
+        "name"
+    ]'::JSONB,                              -- колонки для эмбеддинга (с чанкованием или без)
+    'updated_at',                           -- track_column: должен быть monotonic, тип timestamp/bigint
+    true
+)
+ON CONFLICT (index_name) DO UPDATE SET ...;  -- для идемпотентного повторного применения
 ```
-source table          build_vectors.py                 audit_vectors               vector_index_store
-(oarb.audits) ──► read → embed → insert          ──►   REAL[] + row_data     ──►   BYTEA (FAISS)
-(oarb.violations)                                                                    │
-                                                                                     ▼
-                                                                          PostgresDuckDbProvider
-                                                                          (search: deserialize из store,
-                                                                           кеш в памяти, пересборка при промахе)
-```
 
-### `build_vectors.py`
-
-Инструмент в корневом [`tools/build_vectors.py`](tools/build_vectors.py) — вне навыка:
-создание индексов это инфраструктура, а не задача навыка (навык только запрашивает).
-
-| Флаг | Действие |
-|------|----------|
-| *(без флагов)* | Инкрементальная синхронизация: новые/изменённые/удалённые строки |
-| `--full-rebuild` | Полная перестройка (очистка + все строки) |
-| `--check` | Быстрая проверка сигнатуры (COUNT + MAX track_column), синхронизация только при изменениях |
-| `--status` | Состояние индексов без синхронизации |
-| `--dry-run` | Репетиция без вставки в БД |
-| `--index <name>` | Собрать только один индекс |
-| `--batch-size` / `--chunk-size` / `--chunk-overlap` | Параметры эмбеддинга и чанкования |
-| `--db-table` | Таблица векторов (по умолч. `oarb.audit_vectors`) |
+**2. Проверьте:**
 
 ```bash
-# из корня проекта:
 python tools/build_vectors.py --status
+# Должен появиться objects_index со счётчиком 0
+```
+
+**3. Соберите вектора:**
+
+```bash
+# Только новый индекс
+python tools/build_vectors.py --index objects_index --full-rebuild
+
+# Или все индексы из конфига
 python tools/build_vectors.py --full-rebuild
-python tools/build_vectors.py --check          # например, при старте контейнера
+```
+
+**4. Проверьте FAISS:**
+
+```bash
+python tools/build_vectors.py --status
+# objects_index: 100 векторов, размерность 1024
+
+psql -c "SELECT source, dimension, vector_count, updated_at FROM oarb.vector_index_store ORDER BY source"
+# objects_index | 1024 | 100 | 2026-08-12 ...
+```
+
+**5. Используйте в CLI:**
+
+```bash
+audit_analyze.bat --mode vector --query "объект с нарушениями" --index-name objects_index --top-k 5
+```
+
+### Как обновить существующий индекс
+
+**Сценарий A: изменились данные в источнике (новые/изменённые/удалённые строки)**
+
+```bash
 python tools/build_vectors.py --index audits_index
+# без --full-rebuild: инкрементально, классификация NEW/CHANGED/DELETED по content_hash
 ```
 
-Алгоритм (на индекс):
-1. Конфиг: `oarb.vector_index_config` → fallback `skills.audit_analyzer.vector_indexes`.
-2. Загрузка строк источника, сравнение с `audit_vectors` по `(source, pk_value)`,
-   классификация NEW / CHANGED (изменился `content_hash`) / DELETED.
-3. Эмбеддинг через Ollama батчами; длинные тексты режутся на чанки
-   (`--chunk-size`, по умолч. 500, перекрытие `--chunk-overlap`, по умолч. 80)
-   — универсальный `lib/services/text_splitter.py`.
-4. INSERT/UPDATE в `audit_vectors`; после изменений провайдеру делается
-   `invalidate_cache(index)` + `rebuild_and_store_index(index, db_table)`
-   (пересборка FAISS и сохранение в `vector_index_store`).
+**Сценарий B: изменился список embedding_cols или content_cols**
 
-Чанкование: один документ → несколько векторов-чанков; `content` и `row_data`
-всегда полные; при поиске из нескольких чанков одного документа возвращается
-только один с наибольшим score (`matched_chunks` показывает число совпавших).
-
-### Сброс in-memory кеша индекса
-
-```python
-from workspace.skills.audit_analyzer.scripts.skill_config import build_cache_provider
-provider = build_cache_provider()
-provider.invalidate_cache('audits_index')   # один индекс
-provider.invalidate_cache()                 # все
+```sql
+UPDATE oarb.vector_index_config
+SET embedding_cols = '["title", "description", {"column":"body","chunk":true}]'::jsonb,
+    content_cols = ARRAY['title', 'description']::text[],
+    updated_at = NOW()
+WHERE index_name = 'audits_index';
 ```
+
+```bash
+python tools/build_vectors.py --index audits_index --full-rebuild
+# Контент изменился → content_hash другой → все строки пересоздаются
+```
+
+**Сценарий C: изменилась модель эмбеддинга или размерность**
+
+`project.json → skills.audit_analyzer.embedding_*`:
+
+```json
+{
+  "embedding_model": "nomic-embed-text:latest",
+  "embedding_dimension": 768
+}
+```
+
+Размерность изменилась → старые FAISS-индексы в `oarb.vector_index_store` невалидны. Провайдер автоматически пересоберёт, но можно сделать принудительно:
+
+```bash
+python tools/build_vectors.py --full-rebuild
+```
+
+**Сценарий D: добавилась новая колонка в источнике**
+
+Просто перезапустите:
+
+```bash
+python tools/build_vectors.py --index audits_index --full-rebuild
+```
+
+### Как отключить/удалить индекс
+
+**Отключить** (без удаления собранных векторов):
+
+```sql
+UPDATE oarb.vector_index_config SET enabled = false WHERE index_name = 'audits_index';
+```
+
+`build_vectors.py` пропустит его при следующем запуске. Вектора остаются в `oarb.audit_vectors`.
+
+**Удалить полностью:**
+
+```sql
+-- 1. Удалить собранные вектора
+DELETE FROM oarb.audit_vectors WHERE source = 'audits_index';
+DELETE FROM oarb.vector_index_store WHERE source = 'audits_index';
+
+-- 2. Удалить конфиг
+DELETE FROM oarb.vector_index_config WHERE index_name = 'audits_index';
+```
+
+### Алгоритм сборки одного индекса
+
+`tools/build_vectors.py:build_index(index_name, index_cfg, db_table, ...)`:
+
+1. **Загрузить текущее состояние** из `oarb.audit_vectors` по `(source, pk_value)`.
+2. **Прочитать все строки** из исходной таблицы через `SELECT *`.
+3. **Посчитать `content_hash`** для каждой строки (MD5 от search_text).
+4. **Классифицировать:**
+   - **NEW** — строки, которых нет в `audit_vectors` → INSERT
+   - **CHANGED** — `content_hash` изменился → DELETE + INSERT
+   - **DELETED** — строки, удалённые из источника → DELETE
+5. **Разбить на чанки** через `lib/services/text_splitter.py:build_chunks` (только колонки с `chunk: true`).
+6. **Батчами отправить в Ollama** (`embedding_base_url` из project.json).
+7. **INSERT в `oarb.audit_vectors`** (один INSERT на чанк).
+8. **Пересобрать FAISS**: `provider.invalidate_cache(index)` + `provider.rebuild_and_store_index(index, db_table)`.
+
+### Параметры конфигурации (oarb.vector_index_config)
+
+| Поле | Тип | Назначение |
+|------|-----|-----------|
+| `index_name` | TEXT PK | Уникальное имя индекса (audits_index, violations_index, …). Используется в CLI `--index-name`. |
+| `source_table` | TEXT | Короткое имя для `column "source"` в `audit_vectors` (например `audits`, `violations`). |
+| `src_table` | TEXT | Полное имя исходной таблицы (`schema.table`). |
+| `pk_column` | TEXT | Колонка первичного ключа (по умолч. `id`). |
+| `content_cols` | TEXT[] | Колонки для `content` (полный текст для отображения в результатах поиска). |
+| `embedding_cols` | JSONB | Колонки для эмбеддинга. Формат: `["col"]` или `[{"column":"col","chunk":true,"chunk_size":500,"chunk_overlap":80}]`. |
+| `track_column` | TEXT | Колонка для инкрементальной выборки. Должна быть сравнимой (`>`): `timestamp`, `bigint`. |
+| `enabled` | BOOLEAN | Активен ли индекс при следующем запуске `build_vectors.py`. |
+
+### Формат `embedding_cols`
+
+Два варианта в одном массиве (можно смешивать):
+
+```jsonc
+// Только имена колонок — простой случай
+["title", "audit_type", "status"]
+
+// С чанкованием для длинных текстов
+[
+  {"column": "description", "chunk": true, "chunk_size": 500, "chunk_overlap": 80},
+  "violation_code"
+]
+
+// Микс — некоторые с чанкованием, некоторые без
+[
+  {"column": "full_text", "chunk": true, "chunk_size": 800, "chunk_overlap": 150},
+  {"column": "summary", "chunk": false},
+  "title"
+]
+```
+
+**Когда использовать чанкование:**
+- Текст >1000 символов → да (по умолчанию chunk_size=500).
+- Структурированные поля (код, статус, тип) → нет.
+- Короткие тексты (title, summary до 200 символов) → нет (чанки будут по 1).
+
+### Требования к исходной таблице
+
+| Требование | Зачем | Как проверить |
+|-----------|-------|---------------|
+| Колонка `pk_column` существует | Для `DELETE + INSERT` (upsert) | `SELECT pk FROM table LIMIT 1` |
+| Колонка `track_column` монотонна | Для инкрементального опроса | Должна быть `TIMESTAMP` или `BIGINT`, обновляться при UPDATE |
+| Все `content_cols` и `embedding_cols` существуют | Для чтения | `SELECT col1, col2 FROM table LIMIT 1` |
+| Доступ на `SELECT` | Сборщик должен читать | `GRANT SELECT ON table TO <user>` |
+| Доступ на `INSERT`/`DELETE` в `oarb.audit_vectors` | Запись результатов | `GRANT INSERT, DELETE ON oarb.audit_vectors` |
+| Доступ на `INSERT`/`UPDATE`/`DELETE` в `oarb.vector_index_store` | FAISS-сериализация | `GRANT ... ON oarb.vector_index_store` |
+
+### Алгоритм чанкования
+
+`lib/services/text_splitter.py:build_chunks(row, embedding_cols, chunk_size, chunk_overlap)`:
+
+1. Если **все** колонки короче `chunk_size` → один чанк.
+2. Иначе → самая длинная колонка дробится рекурсивно через `split_text()`:
+   - Разделители (по приоритету): `\n\n` → `\n` → `.!?` → `,;` → пробел → символ.
+   - Чанки склеиваются с перекрытием `chunk_overlap`.
+3. В `search_text` каждого чанка добавляется метка `[N/M]`.
+4. В `content` (для отображения) добавляется суффикс ` [ч. N/M]`.
+
+**Поведение при поиске:** если несколько чанков одного документа попали в top-K, возвращается только один с наивысшим score, остальные доступны через `matched_chunks`.
+
+### Мониторинг
+
+**Статусы через CLI:**
+
+```bash
+python tools/build_vectors.py --status
+# index_name: vector_count, dimension, src_rows, last_sync
+```
+
+**SQL-запросы:**
+
+```sql
+-- Сколько векторов в каждом индексе
+SELECT source, COUNT(*) AS cnt, MAX(synced_at) AS last
+FROM oarb.audit_vectors
+GROUP BY source
+ORDER BY source;
+
+-- Состояние FAISS-индексов
+SELECT source, dimension, vector_count, updated_at
+FROM oarb.vector_index_store
+ORDER BY source;
+
+-- Сколько чанков у одного документа (для отладки)
+SELECT pk_value, COUNT(*) AS chunks
+FROM oarb.audit_vectors
+WHERE source = 'violations_index'
+GROUP BY pk_value
+ORDER BY chunks DESC
+LIMIT 10;
+
+-- Вектора без FAISS-индекса (несоответствие)
+SELECT v.source, COUNT(*) AS orphan_vectors
+FROM oarb.audit_vectors v
+LEFT JOIN oarb.vector_index_store s ON s.source = v.source
+WHERE s.source IS NULL
+GROUP BY v.source;
+```
+
+### Типичные проблемы
+
+| Симптом | Причина | Что делать |
+|---------|---------|-----------|
+| `ModuleNotFoundError: No module named 'faiss'` | Не установлен `faiss-cpu` | `pip install faiss-cpu numpy` |
+| `FAISS-индекс не собран` warning | `faiss` или `numpy` отсутствуют | Установить, перезапустить `--full-rebuild` |
+| `--status` показывает 0 индексов | `oarb.vector_index_config` пуст | Применить `sql/audit_analyzer/seed_default_indexes.sql` |
+| `TypeError: cannot use 'dict' as a dict key` | `embedding_cols` содержит dict-объекты без нормализации | Уже исправлено в `_normalize_cols()` (tools/build_vectors.py) |
+| `--full-rebuild` не пересобирает FAISS | Права на `oarb.vector_index_store` отсутствуют | `GRANT INSERT, UPDATE ON oarb.vector_index_store` |
+| Пустой результат `--mode vector` | Индекс не существует или FAISS устарел | `python tools/build_vectors.py --status`, при необходимости `--full-rebuild` |
+| Дубликаты в результатах поиска | Несколько чанков одного документа в top-K | Это нормально — возвращается лучший, остальные через `matched_chunks` |
+| Поиск возвращает документы другой таблицы | Неправильный `embedding_cols` (взяты чужие колонки) | Проверьте конфиг: `SELECT * FROM oarb.vector_index_config` |
+
+### Расширенные сценарии
+
+**Добавить колонку для индексации без пересоздания:**
+
+```sql
+UPDATE oarb.vector_index_config
+SET embedding_cols = embedding_cols || '["new_column"]'::jsonb
+WHERE index_name = 'audits_index';
+```
+
+Затем **обязательно** `--full-rebuild` (т.к. изменился `content_hash` → все строки CHANGED).
+
+**Полная очистка и пересоздание:**
+
+```sql
+TRUNCATE oarb.audit_vectors;
+TRUNCATE oarb.vector_index_store;
+```
+
+```bash
+python tools/build_vectors.py --full-rebuild
+```
+
+**Массовое обновление embedding_cols:**
+
+```sql
+-- Увеличить размер чанка для всех индексов с чанкованием
+UPDATE oarb.vector_index_config
+SET embedding_cols = jsonb_set(
+    embedding_cols,
+    '{0,chunk_size}',
+    '800',
+    false
+)
+WHERE jsonb_typeof(embedding_cols->0) = 'object'
+  AND embedding_cols->0->>'column' IN ('description', 'full_text');
+```
+
+После — `--full-rebuild` для затронутых индексов.
 
 ---
+
+## 🛠 tools/ — инфраструктурные утилиты
+
+В корне `tools/` живут CLI-утилиты, **отдельные от навыков** — инфраструктура, не аналитика.
+
+### `tools/build_vectors.py`
+
+Перестроение векторных индексов из PostgreSQL-данных. **Полная документация — в [Векторная индексация](#векторная-индексация)**, включая:
+
+- как добавить/обновить/удалить индекс,
+- формат `embedding_cols` (с чанкованием и без),
+- алгоритм сборки и классификации NEW/CHANGED/DELETED,
+- типичные проблемы и их решения,
+- мониторинг через SQL-запросы.
+
+Краткая шпаргалка по флагам:
+
+```bash
+# Статус без изменений
+python tools/build_vectors.py --status
+
+# Полная перестройка всех индексов (осторожно: долго + нагрузка на Ollama)
+python tools/build_vectors.py --full-rebuild
+
+# Только проверка сигнатуры (COUNT + MAX track_column) — для cron
+python tools/build_vectors.py --check
+
+# Один индекс
+python tools/build_vectors.py --index audits_index
+
+# Dry-run без записи в БД
+python tools/build_vectors.py --dry-run
+
+# Параметры эмбеддинга
+python tools/build_vectors.py --batch-size 32 --chunk-size 500 --chunk-overlap 80
+
+# Другая таблица векторов
+python tools/build_vectors.py --db-table my_app.vectors
+```
+
+| Флаг | Дефолт | Описание |
+|------|--------|----------|
+| *(без флагов)* | — | Инкрементальная синхронизация (NEW / CHANGED / DELETED) |
+| `--full-rebuild` | — | Полная перестройка (TRUNCATE индекса + все строки) |
+| `--check` | — | Сравнить сигнатуру (count + max track); синхронизировать только при diff |
+| `--status` | — | Сводное состояние индексов без синхронизации |
+| `--dry-run` | — | План без записей в БД |
+| `--index <name>` | все | Собрать только индекс `name` |
+| `--db-table` | `oarb.audit_vectors` | Таблица сырых векторов |
+| `--batch-size` | 10 | Батч эмбеддинга |
+| `--chunk-size` | 500 | Размер чанка в символах |
+| `--chunk-overlap` | 80 | Перекрытие чанков |
+
+**Важно:** при первом запуске проверить, что установлены зависимости FAISS:
+`pip install faiss-cpu numpy`. Без них вектора вставляются в `audit_vectors`,
+но `oarb.vector_index_store` остаётся пустой, и `vector_mode` поиск не работает.
+
+**Типичные сценарии:**
+- **После изменений в DDL таблиц** — `--full-rebuild`.
+- **Проверка готовности системы** (cron / healthcheck) — `--check`.
+- **Мониторинг без записи** — `--status`.
+- **Большой источник + экономия памяти Ollama** — `--batch-size 8` + `--chunk-size 300`.
 
 ## 🛠 tools/ — инфраструктурные утилиты
 

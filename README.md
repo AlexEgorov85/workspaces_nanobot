@@ -422,20 +422,39 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 
 **v1.5.0:** Векторные индексы перенесены из файлов `.faiss` в PostgreSQL. Файловый мигратор удалён как legacy — новые индексы создаются сразу в БД.
 
+**v2.0.0:** Конфигурация индексов — в `oarb.vector_index_config` (БД), а не в `project.json`. Управление через SQL.
+
 | Таблица | Назначение |
 |---------|-----------|
-| `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (строит `build_vectors.py`) |
+| `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (строит `tools/build_vectors.py`) |
 | `oarb.vector_index_store` | Сериализованный FAISS-индекс `BYTEA` (ищет провайдер `lib/services`) |
 | `oarb.vector_index_config` | Конфигурация индексов (таблицы/колонки, чанкование, автосинхронизация) |
 
-### Создание
+### Дефолтные индексы
+
+В `sql/audit_analyzer/seed_default_indexes.sql` зарегистрированы 3 индекса:
+
+| Имя | Источник | Чанкование |
+|-----|----------|------------|
+| `audits_index` | `oarb.audits` | нет (композит из 4 коротких колонок) |
+| `violations_index` | `oarb.violations` | да (`description` 500/80) |
+| `audit_reports_index` | `oarb.audit_reports` | да (`full_text` 500/80) |
+
+### Создание с нуля
 
 ```bash
-# 1. DDL
+# 1. DDL (таблицы домена + векторные таблицы + конфиг)
+psql -d nanobot -f sql/audit_analyzer/create_audit_source_tables_gp.sql
 psql -d nanobot -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
 psql -d nanobot -f sql/audit_analyzer/create_vector_index_config_gp.sql
 
-# 2. Сборка индексов
+# 2. Зарегистрировать 3 дефолтных индекса
+psql -d nanobot -f sql/audit_analyzer/seed_default_indexes.sql
+
+# 3. Зависимости для FAISS (если ещё не установлены)
+pip install faiss-cpu numpy
+
+# 4. Сборка векторов
 python tools/build_vectors.py --full-rebuild
 ```
 
@@ -448,6 +467,10 @@ python tools/build_vectors.py --full-rebuild
 Задаются **аргументами**, а не в `project.json`:
 - `--top-k N` — ровно N лучших (по умолчанию 5).
 - `--threshold X` — все результаты выше X (0.0–1.0); если задан, `--top-k` игнорируется.
+
+### Добавить/обновить/удалить индекс
+
+**Исчерпывающий гайд** (как устроены индексы, как создать новый, как обновить при изменении источника/модели/колонок, формат `embedding_cols` с чанкованием, требования к таблицам, мониторинг, типичные проблемы) — в [DEVELOPMENT.md → Векторная индексация](DEVELOPMENT.md#векторная-индексация).
 
 ---
 

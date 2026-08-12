@@ -29,7 +29,8 @@ sql/
 ├── audit_analyzer/                            # audit_analyzer + cache_provider
 │   ├── create_audit_source_tables_gp.sql      #   REFERENCE DDL oarb.*
 │   ├── create_audit_vectors_table_gp.sql      #   oarb.audit_vectors + vector_index_store
-│   └── create_vector_index_config_gp.sql      #   oarb.vector_index_config
+│   ├── create_vector_index_config_gp.sql      #   oarb.vector_index_config
+│   └── seed_default_indexes.sql               #   3 дефолтных индекса (audits/violations/reports)
 ├── benchmarks/                                # Benchmarks
 │   ├── create_benchmark_tables.sql            #   PostgreSQL 9.4+
 │   └── create_benchmark_tables_gp.sql         #   Greenplum 6.25
@@ -73,10 +74,13 @@ psql "$DATABASE_URL" -f sql/audit_analyzer/create_audit_source_tables_gp.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_vector_index_config_gp.sql
 
-# 5. Бенчмарки (если запускаете тесты)
+# 5. Дефолтные индексы (3 шт.: audits_index, violations_index, audit_reports_index)
+psql "$DATABASE_URL" -f sql/audit_analyzer/seed_default_indexes.sql
+
+# 6. Бенчмарки (если запускаете тесты)
 psql "$DATABASE_URL" -f sql/benchmarks/create_benchmark_tables_gp.sql
 
-# 6. Сборка векторных индексов (если используется audit_analyzer)
+# 7. Сборка векторных индексов (если используется audit_analyzer)
 python tools/build_vectors.py --full-rebuild
 ```
 
