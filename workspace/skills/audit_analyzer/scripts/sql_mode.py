@@ -19,14 +19,14 @@ Pipeline с ретраями:
 from typing import Optional
 
 from skill_config import get_db_schema, get_db_tables
-from database import Database
+from database import QueryBackend, format_schema, validate_sql
 from llm import chat
 
 
 MAX_RETRIES = 2
 
 
-def run(query: str, db: Database, context: Optional[list[dict]] = None) -> dict:
+def run(query: str, db: QueryBackend, context: Optional[list[dict]] = None) -> dict:
     """
     Сгенерировать SQL через LLM, проверить, выполнить (с retry-циклом).
 
@@ -36,7 +36,7 @@ def run(query: str, db: Database, context: Optional[list[dict]] = None) -> dict:
     Args:
         query: Запрос на естественном языке (например,
                'сколько проверок было в 2024 году по каждому объекту').
-        db: Объект Database.
+        db: Бэкенд запросов (PostgreSQL напрямую или DuckDB-кэш).
         context: История чата (опционально — список сообщений).
 
     Returns:
@@ -50,7 +50,7 @@ def run(query: str, db: Database, context: Optional[list[dict]] = None) -> dict:
     """
     tables = get_db_tables() or None
     schema = db.get_schema(schema_name=get_db_schema(), table_names=tables)
-    schema_text = Database.format_schema(schema)
+    schema_text = format_schema(schema)
 
     base_messages = [
         {
@@ -87,13 +87,13 @@ def run(query: str, db: Database, context: Optional[list[dict]] = None) -> dict:
         sql = sql.strip().rstrip(";")
 
         # Шаг 1: безопасность (DDL/DML/multi-statement)
-        safety_error = Database.validate_sql(sql)
+        safety_error = validate_sql(sql)
         if safety_error:
             last_error = {"error": safety_error, "sql": sql}
             continue
 
         # Шаг 2: EXPLAIN — проверка синтаксиса и существования объектов
-        explain_result = db.execute_explain(sql)
+        explain_result = db.explain(sql)
         if not explain_result["valid"]:
             last_error = {"error": explain_result["error"], "sql": sql}
             if "временно занята" in explain_result.get("error", ""):
@@ -101,7 +101,7 @@ def run(query: str, db: Database, context: Optional[list[dict]] = None) -> dict:
             continue
 
         # Шаг 3: выполнить
-        result = db.execute_query(sql)
+        result = db.query_sql(sql)
         if result["status"] == "error" and "временно занята" in result.get("error", ""):
             last_error = {"error": result["error"], "sql": sql}
             break

@@ -79,13 +79,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from skill_config import (
     get_vector_index_path, get_max_retries, load_db_config,
-    is_in_memory_enabled, get_in_memory_config,
+    is_in_memory_enabled, get_in_memory_config, build_cache_provider,
 )
-from database import Database, InMemoryDatabase
+from database import Database, QueryBackend
 from output import _sanitize_value, prepare_output
 import predefined_mode
 import sql_mode
-import vector_mode
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -124,7 +123,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vector-index",
         default=None,
-        help="Директория с FAISS-индексами (legacy, только для vector mode). "
+        help="Директория с FAISS-индексами (только для vector mode). "
              "По умолчанию из skills.audit_analyzer.mode_vector_index_path "
              "или ~/.nanobot/vectors/audits_index",
     )
@@ -165,13 +164,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _create_db() -> Database | InMemoryDatabase:
+def _create_db() -> QueryBackend:
     cfg = load_db_config()
     if is_in_memory_enabled():
         im_cfg = get_in_memory_config()
-        cfg["in_memory"] = im_cfg
+        provider = build_cache_provider()
+        provider.open_cache()
         print(f"[DB] DuckDB in-memory cache ({im_cfg.get('cache_path', '?')})", file=sys.stderr)
-        return InMemoryDatabase(cfg)
+        return provider
     print("[DB] PostgreSQL (direct)", file=sys.stderr)
     return Database(cfg)
 
@@ -191,7 +191,8 @@ def _run(args: argparse.Namespace) -> dict:
         if not args.force and Path(cache_path).exists():
             return {"status": "success", "mode": "init", "data": {"message": "Кеш уже существует, используйте --force для перезагрузки"}}
         try:
-            InMemoryDatabase.load_from_postgres(cache_path, cfg)
+            from lib.services.cache_provider_impl import load_cache_from_postgres
+            load_cache_from_postgres(cache_path, cfg)
         except Exception as e:
             return {"status": "error", "data": {"message": f"Ошибка загрузки кеша: {e}"}}
         return {"status": "success", "mode": "init", "data": {"message": f"Кеш загружен: {cache_path}"}}
@@ -211,13 +212,26 @@ def _run(args: argparse.Namespace) -> dict:
             return sql_mode.run(args.query, db, context=args.context)
 
     if args.mode == "vector":
-        index_dir = args.vector_index or get_vector_index_path()
-        index_name = args.index_name or "audits_index"
-        return vector_mode.run(
-            args.query, index_name, index_path=index_dir,
+        from dataclasses import asdict
+        provider = build_cache_provider()
+        results = provider.search_vector(
+            args.query,
+            index_name=args.index_name or "audits_index",
+            index_path=args.vector_index or get_vector_index_path(),
             top_k=args.top_k or 5,
             threshold=args.threshold,
         )
+        if provider._search_error:
+            return {"status": "error", "data": {"message": provider._search_error}}
+        if not results:
+            return {
+                "status": "success",
+                "data": {"message": "Документы не найдены", "results": [], "count": 0},
+            }
+        return {
+            "status": "success",
+            "data": {"results": [asdict(r) for r in results], "count": len(results)},
+        }
 
     return {"status": "error", "data": {"message": f"Неизвестный режим: {args.mode}"}}
 

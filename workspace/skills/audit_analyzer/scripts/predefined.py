@@ -17,7 +17,6 @@ from scripts_registry import (
     DynamicQueryBuilder,
     ScriptDefinition,
 )
-import vector_mode
 
 
 def build_sql(
@@ -134,8 +133,8 @@ def resolve_params_with_vector(
     """
     Асинхронно разрешить параметры с использованием FAISS-векторного поиска.
     Для каждого строкового параметра с validation.vector_source выполняет
-    embedding-поиск через vector_mode.run и подставляет лучшее совпадение.
-    Возвращает кортеж (merged, unknown).
+    embedding-поиск через провайдера данных (lib/services) и подставляет
+    лучшее совпадение. Возвращает кортеж (merged, unknown).
     """
     merged, unknown = resolve_params(script, params)
 
@@ -159,24 +158,21 @@ def resolve_params_with_vector(
             continue
 
         try:
-            result = vector_mode.run(
-                val, index_name, index_path=index_dir,
+            from skill_config import build_cache_provider
+            provider = build_cache_provider()
+            results = provider.search_vector(
+                val, index_name=index_name, index_path=index_dir,
                 top_k=top_k, threshold=min_score,
             )
         except Exception:
             continue
 
-        if result.get("status") != "success":
-            continue
-        items = result.get("data", {}).get("results", [])
-        if not items:
+        if not results:
             continue
 
-        best = items[0]
-        resolved = (
-            best.get("row", {}).get(v_field)
-            or best.get(v_field)
-        )
+        best = results[0]
+        row = best.row or {}
+        resolved = row.get(v_field) or getattr(best, v_field, None)
         if resolved:
             merged[param_name] = resolved
 

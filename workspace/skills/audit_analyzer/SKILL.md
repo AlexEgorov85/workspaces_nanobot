@@ -47,7 +47,7 @@ metadata: {"nanobot":{"emoji":"📊","always":true}}
 ```
 Запрос → Схема БД → LLM генерирует SELECT
   → validate_sql → EXPLAIN (FORMAT JSON) — проверка
-  → ошибка → retry до 3 раз → execute_query
+  → ошибка → retry до 3 раз → query_sql
 ```
 
 ## Векторные индексы (vector)

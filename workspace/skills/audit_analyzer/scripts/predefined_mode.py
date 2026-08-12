@@ -5,7 +5,7 @@ Pipeline:
     1. Найти ScriptDefinition по имени в SCRIPTS_REGISTRY
     2. Отфильтровать параметры (resolve_params — алиасы + валидация)
     3. Собрать SQL через DynamicQueryBuilder (рендер + форматирование)
-    4. Выполнить запрос через execute_query
+    4. Выполнить запрос через query_sql
     5. Вернуть результат с SQL, параметрами и данными
 
 Пример запуска через CLI:
@@ -16,13 +16,13 @@ Pipeline:
 
 from typing import Any, Dict, Optional
 
-from database import Database
+from database import QueryBackend
 from predefined import build_sql, get_script_by_name, list_available, resolve_params_with_vector
 
 
 def run(
     script_name: str,
-    db: Database,
+    db: QueryBackend,
     params: Optional[Dict[str, Any]] = None,
     index_dir: str = "",
 ) -> dict:
@@ -34,7 +34,7 @@ def run(
 
     Args:
         script_name: Имя скрипта (ключ в SCRIPTS_REGISTRY).
-        db: Объект Database.
+        db: Бэкенд запросов (PostgreSQL напрямую или DuckDB-кэш).
         params: Параметры скрипта (опционально).
         index_dir: Путь к директории с FAISS-индексами (опционально).
 
@@ -46,7 +46,7 @@ def run(
                 script_name: имя скрипта
                 sql: сгенерированный SQL
                 parameters: использованные параметры
-                result: результат execute_query (columns, rows, row_count)
+                result: результат query_sql (columns, rows, row_count)
     """
     script = get_script_by_name(script_name)
     if not script:
@@ -122,7 +122,7 @@ def run(
             },
         }
 
-    result = db.execute_query(sql, sql_params)
+    result = db.query_sql(sql, sql_params)
 
     return {
         "mode": "predefined",

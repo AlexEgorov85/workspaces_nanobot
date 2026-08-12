@@ -147,13 +147,20 @@ python pg_agent_worker.py --once
 │   │   ├── redis_channel.py        # Канал через Redis-очереди (BRPOP/LPUSH)
 │   │   └── sql/
 │   │       └── seed_messages.sql   # Тестовые данные для PostgresChannel
-│   └── session/
-│       ├── pg_session_manager.py   # Хранение сессий в PostgreSQL (замена JSONL)
-│       └── sql/
-│           ├── create_session_tables.sql    # DDL для session_meta / session_messages (PG)
-│           └── create_session_tables_gp.sql # DDL для Greenplum 6.25
+│   ├── session/
+│   │   ├── pg_session_manager.py   # Хранение сессий в PostgreSQL (замена JSONL)
+│   │   └── sql/
+│   │       ├── create_session_tables.sql    # DDL для session_meta / session_messages (PG)
+│   │       └── create_session_tables_gp.sql # DDL для Greenplum 6.25
+│   └── services/                    # Универсальный слой данных (навыки, gateway)
+│       ├── cache_provider.py        #   Интерфейс CacheProvider + SearchResult
+│       ├── cache_provider_impl.py   #   PostgresDuckDbProvider (DuckDB-кеш + FAISS)
+│       └── text_splitter.py         #   Чанкование текстов для индексаторов
 │
 ├── scripts/                        # Пустая директория для будущих скриптов (.gitkeep)
+│
+├── tools/                          # Инфраструктурные CLI-утилиты
+│   └── build_vectors.py            #   Сборка векторных индексов (вне навыка)
 │
 ├── benchmarks/                     # Система автоматического тестирования агента
 │   ├── runner.py                   #   Запуск бенчмарков
@@ -189,8 +196,7 @@ python pg_agent_worker.py --once
 │   │       ├── SKILL.md            #   Документация навыка
 │   │       ├── audit_analyze.bat   #   Standalone-запуск (Windows)
 │   │       ├── audit_analyze.sh    #   Standalone-запуск (Linux)
-│   │       ├── check_status.py     #   Проверка статуса
-│   │       ├── scripts/            #   Модули режимов (cli.py, predefined.py, sql_mode.py, vector_mode.py)
+│   │       ├── scripts/            #   Модули режимов (cli.py, predefined.py, sql_mode.py, ...)
 │   │       ├── cache/              #   DuckDB-кеш для предопределённых скриптов
 │   │       └── tests/              #   Unit-тесты навыка
 │   │
@@ -406,21 +412,18 @@ metadata (JSONB), reply_to, status, created_at, updated_at
 
 ### Миграция со старых файловых индексов
 
-Если у вас есть старые `.faiss`-файлы, используйте скрипт миграции:
+Не требуется: мигратор из `.faiss`-файлов удалён (legacy). Новые индексы
+создаются сразу в БД через `tools/build_vectors.py`.
+
+### Создание векторных индексов
 
 ```bash
-python workspace/skills/audit_analyzer/scripts/migrate_vectors_to_db.py
-```
+# 1. Таблицы (см. sql/ в корне проекта)
+psql -d nanobot -f sql/create_audit_vectors_table_gp.sql
+psql -d nanobot -f sql/create_vector_index_config_gp.sql
 
-### Создание векторных индексов с нуля
-
-```bash
-# PostgreSQL
-psql -d nanobot -f workspace/skills/audit_analyzer/scripts/create_audit_vectors_table_gp.sql
-psql -d nanobot -f workspace/skills/audit_analyzer/scripts/create_vector_index_config_gp.sql
-
-# Запуск индексации через CLI навыка
-audit_analyze.bat --mode init --force
+# 2. Сборка индексов (инфраструктурная утилита, вне навыка)
+python tools/build_vectors.py --full-rebuild
 ```
 
 ### Поиск через векторный режим

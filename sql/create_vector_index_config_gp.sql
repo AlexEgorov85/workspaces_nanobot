@@ -8,7 +8,7 @@
 --  2. Вставить настройки индексов:
 --     INSERT INTO oarb.vector_index_config (...) VALUES (...);
 --  3. Запустить сборку:
---     python build_vectors.py
+--     python tools/build_vectors.py
 
 CREATE TABLE IF NOT EXISTS oarb.vector_index_config (
     index_name      TEXT PRIMARY KEY,

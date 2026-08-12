@@ -24,11 +24,10 @@ def fail(msg, detail=''):
 
 print('=== audit_analyzer: E2E tests ===\n')
 
-from skill_config import load_db_config, get_vector_index_path
+from skill_config import load_db_config, get_vector_index_path, build_cache_provider
 from database import Database
 import predefined_mode
 import sql_mode
-import vector_mode
 
 
 async def run_tests():
@@ -181,7 +180,18 @@ async def run_tests():
         print(f'     Индекс найден: {index_file}')
 
     if vpath:
-        res6 = await vector_mode.run('нарушения пожарной безопасности', 'audit_index', index_path=vpath)
+        provider = build_cache_provider()
+        results = provider.search_vector(
+            'нарушения пожарной безопасности',
+            index_name='audit_index',
+            index_path=vpath,
+        )
+        res6 = (
+            {"status": "success",
+             "data": {"results": [vars(r) for r in results], "count": len(results)}}
+            if results else
+            {"status": "error", "data": {"message": provider._search_error or "Нет результатов"}}
+        )
     else:
         res6 = {"status": "error", "data": {"message": "Нет индекса для теста"}}
 

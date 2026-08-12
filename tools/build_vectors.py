@@ -11,21 +11,21 @@ row_data (JSONB) всегда содержит ПОЛНУЮ строку исх�
 Конфиг читается из oarb.vector_index_config (БД) с fallback
 на ключ vector_indexes в skills.audit_analyzer (project.json).
 
-Запуск:
+Запуск (из корня проекта):
     # Инкрементальное обновление (только новые строки)
-    python build_vectors.py
+    python tools/build_vectors.py
 
     # Полная перестройка
-    python build_vectors.py --full-rebuild
+    python tools/build_vectors.py --full-rebuild
 
     # Показать что будет добавлено
-    python build_vectors.py --dry-run
+    python tools/build_vectors.py --dry-run
 
     # Настроить чанкование
-    python build_vectors.py --chunk-size 800 --chunk-overlap 150
+    python tools/build_vectors.py --chunk-size 800 --chunk-overlap 150
 
 Может вызываться по cron:
-    0 3 * * * cd /path && python build_vectors.py >> build.log 2>&1
+    0 3 * * * cd /path && python tools/build_vectors.py >> build.log 2>&1
 """
 
 import hashlib
@@ -43,17 +43,22 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-_SCRIPTS_DIR = Path(__file__).resolve().parent
-_WORKSPACE_DIR = _SCRIPTS_DIR.parents[3]
-_NANOBOT_DIR = _SCRIPTS_DIR.parents[4]
-
-for p in [str(_WORKSPACE_DIR), str(_NANOBOT_DIR)]:
+_ROOT = Path(__file__).resolve().parents[1]                    # .nanobot/
+_SKILL_ROOT = _ROOT / "workspace" / "skills" / "audit_analyzer"  # корень навыка (кэш/индексы)
+for p in [str(_ROOT), str(_SKILL_ROOT)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from skill_config import get_vector_indexes, get_embedding_config, get_embedding_model
+from config import SETTINGS
+from lib.services.cache_provider_impl import (
+    build_cache_provider as _build_provider,
+    read_vector_index_config,
+    read_embedding_config,
+)
+from lib.services.text_splitter import build_chunks
 from utils.db import configure, execute, fetch, resolve_dsn
-from text_splitter import build_chunks
+
+_CFG = SETTINGS.get("skills", {}).get("audit_analyzer", {})
 
 
 def fetchone(sql, *args):
@@ -68,7 +73,7 @@ def fetchone(sql, *args):
 
 def _get_embeddings(texts: list[str], retries: int = 3) -> Optional[list[list[float]]]:
     """Получить эмбеддинги для списка текстов через Ollama /api/embed."""
-    cfg = get_embedding_config()
+    cfg = read_embedding_config(_CFG)
     url = cfg.get("base_url")
     model = cfg.get("model", "mxbai-embed-large:latest")
 
@@ -280,8 +285,7 @@ def build_index(
         changed = bool(to_delete)
         if changed and not dry_run:
             try:
-                from vector_mode import invalidate_cache
-                invalidate_cache(index_name)
+                _build_provider(_CFG, str(_SKILL_ROOT)).invalidate_cache(index_name)
             except ImportError:
                 pass
         return {
@@ -379,9 +383,9 @@ def build_index(
 
     if not dry_run and (inserted > 0 or deleted > 0):
         try:
-            from vector_mode import invalidate_cache, rebuild_and_store_index
-            invalidate_cache(index_name)
-            rebuild_and_store_index(index_name, db_table)
+            provider = _build_provider(_CFG, str(_SKILL_ROOT))
+            provider.invalidate_cache(index_name)
+            provider.rebuild_and_store_index(index_name, db_table)
         except ImportError:
             pass
 
@@ -476,10 +480,10 @@ def main():
     )
     if not row:
         print("ОШИБКА: таблица oarb.audit_vectors не создана")
-        print("Сначала выполните create_audit_vectors_table_gp.sql")
+        print("Сначала выполните sql/create_audit_vectors_table_gp.sql")
         sys.exit(1)
 
-    indexes = get_vector_indexes()
+    indexes = read_vector_index_config(_CFG)
     if not indexes:
         print("Нет конфигурации vector_indexes")
         sys.exit(1)

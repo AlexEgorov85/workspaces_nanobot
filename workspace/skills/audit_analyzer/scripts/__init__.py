@@ -63,16 +63,18 @@ audit_analyzer — анализ PostgreSQL-базы данных через LLM-
 scripts/
     __init__.py              — этот файл, публичный API
     cli.py                   — точка входа, парсинг аргументов, маршрутизация
-    config.py                — загрузка .env, геттеры
-    database.py              — PostgreSQL: схема, execute, EXPLAIN, валидация
+    skill_config.py          — конфигурация навыка из SETTINGS, фабрика провайдера
+    database.py              — PostgreSQL (fallback): схема, query, EXPLAIN
     llm.py                   — LLM-клиент (OpenAI-compatible HTTP)
     output.py                — форматирование результата в JSON
     predefined.py            — обёртка над SCRIPTS_REGISTRY + DynamicQueryBuilder
     predefined_mode.py       — оркестрация режима predefined
     scripts_registry.py      — ScriptDefinition, ParamDefinition, DynamicQueryBuilder, реестр
     sql_mode.py              — оркестрация режима sql (LLM + retry)
-    vector_mode.py           — оркестрация режима vector (FAISS + embeddings)
 
+Инфраструктура (DuckDB-кэш, векторные индексы, эмбеддинг, чанкование
+text_splitter.py) живёт в универсальном слое lib/services (cache_provider_impl.py)
+и используется CLI навыка напрямую. Индексаторы — в tools/build_vectors.py.
 """
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -125,12 +127,26 @@ def run_vector(
     threshold: Optional[float] = None,
 ) -> dict:
     try:
+        from dataclasses import asdict
         import skill_config as _cfg
-        import vector_mode as _vm
         if index_path is None:
             index_path = _cfg.get_vector_index_path()
-        return _vm.run(query, index_name, index_path=index_path,
-                       top_k=top_k, threshold=threshold)
+        provider = _cfg.build_cache_provider()
+        results = provider.search_vector(
+            query, index_name=index_name, index_path=index_path,
+            top_k=top_k, threshold=threshold,
+        )
+        if provider._search_error:
+            return {"status": "error", "data": {"message": provider._search_error}}
+        if not results:
+            return {
+                "status": "success",
+                "data": {"message": "Документы не найдены", "results": [], "count": 0},
+            }
+        return {
+            "status": "success",
+            "data": {"results": [asdict(r) for r in results], "count": len(results)},
+        }
     except Exception as e:
         return {"status": "error", "data": {"message": f"Ошибка в run_vector: {e}"}}
 

@@ -91,7 +91,7 @@
       // --- Векторный поиск: ИНДЕКСЫ В БАЗЕ ДАННЫХ ----------------------------
       // С 2026-06 векторы и их конфигурация хранятся в PostgreSQL/Greenplum:
       //   oarb.audit_vectors        — сырые эмбеддинги REAL[] + метаданные (строит build_vectors.py)
-      //   oarb.vector_index_store   — сериализованный FAISS-индекс (BYTEA), ищет vector_mode.py
+      //   oarb.vector_index_store   — сериализованный FAISS-индекс (BYTEA), ищет провайдер lib/services
       //   oarb.vector_index_config  — конфигурация индексов (таблицы/колонки для эмбеддинга).
       //     Раньше это были ключи vector_indexes + mode_vector_index_path (файлы .faiss) —
       //     теперь управляется SQL-таблицей, project.json больше их не содержит.

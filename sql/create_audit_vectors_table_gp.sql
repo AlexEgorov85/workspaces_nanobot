@@ -16,11 +16,9 @@ CREATE TABLE IF NOT EXISTS oarb.vector_index_store (
 --
 -- Использование:
 --  1. Выполнить этот SQL на GP:
---     psql -d <dbname> -f create_audit_vectors_table_gp.sql
---  2. Запустить миграцию существующих данных:
---     python migrate_vectors_to_db.py
---  3. Собрать/обновить векторы из исходных таблиц:
---     python build_vectors.py
+--     psql -d <dbname> -f sql/create_audit_vectors_table_gp.sql
+--  2. Собрать/обновить векторы из исходных таблиц:
+--     python tools/build_vectors.py --full-rebuild
 
 CREATE TABLE IF NOT EXISTS oarb.audit_vectors (
     id SERIAL,

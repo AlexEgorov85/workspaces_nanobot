@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 from typing import Any
 
@@ -72,42 +71,32 @@ def get_vector_db_table() -> str:
     return _CFG.get("mode_vector_db_table", "")
 
 
+def get_vector_store_table() -> str:
+    return _CFG.get("mode_vector_store_table", "oarb.vector_index_store")
+
+
+def build_cache_provider() -> Any:
+    """Построить универсального провайдера данных (lib/services) для навыка.
+
+    Конфигурируется из skills.audit_analyzer: DuckDB-кэш (in_memory_*)
+    и векторные индексы (mode_vector_*). Используется CLI навыка напрямую —
+    без промежуточных обёрток.
+    """
+    from lib.services.cache_provider_impl import build_cache_provider as _build
+
+    return _build(_CFG, str(_SKILL_ROOT))
+
+
 def get_vector_indexes() -> dict[str, Any]:
-    from utils.db import fetch
-    try:
-        rows = fetch(
-            "SELECT index_name, source_table, src_table, pk_column, "
-            "content_cols, embedding_cols, track_column, enabled "
-            "FROM oarb.vector_index_config ORDER BY index_name"
-        )
-        if rows:
-            result = {}
-            for r in rows:
-                ec = r["embedding_cols"]
-                if isinstance(ec, str):
-                    ec = json.loads(ec)
-                result[r["index_name"]] = {
-                    "table": r["src_table"],
-                    "pk": r["pk_column"],
-                    "source_table": r["source_table"],
-                    "content_columns": list(r["content_cols"]) if isinstance(r.get("content_cols"), (list, tuple)) else [],
-                    "embedding_columns": ec,
-                    "track_column": r["track_column"],
-                    "enabled": r["enabled"],
-                }
-            return result
-    except Exception:
-        pass
-    val = _CFG.get("vector_indexes", {})
-    return dict(val) if isinstance(val, dict) else {}
+    from lib.services.cache_provider_impl import read_vector_index_config
+
+    return read_vector_index_config(_CFG)
 
 
 def get_embedding_config() -> dict[str, Any]:
-    return {
-        "base_url": _CFG.get("embedding_base_url", "http://localhost:11434/api/embed"),
-        "model": _CFG.get("embedding_model", "mxbai-embed-large:latest"),
-        "dimension": int(_CFG.get("embedding_dimension", 1024)),
-    }
+    from lib.services.cache_provider_impl import read_embedding_config
+
+    return read_embedding_config(_CFG)
 
 
 def get_embedding_model() -> str:

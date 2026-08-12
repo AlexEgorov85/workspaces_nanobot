@@ -325,45 +325,31 @@ class TestGetAuditCacheConfig:
 
 
 class TestPreloadAuditCache:
-    def _setup_db_mock(self):
-        """Set up skills.audit_analyzer.scripts.database in sys.modules."""
-        import types
-        db_mod = types.ModuleType("skills.audit_analyzer.scripts.database")
-        db_mod.InMemoryDatabase = MagicMock()
-        sys.modules["skills"] = types.ModuleType("skills")
-        sys.modules["skills.audit_analyzer"] = types.ModuleType("skills.audit_analyzer")
-        sys.modules["skills.audit_analyzer.scripts"] = types.ModuleType("skills.audit_analyzer.scripts")
-        sys.modules["skills.audit_analyzer.scripts.database"] = db_mod
-        return db_mod.InMemoryDatabase
-
     def test_no_cache_config_returns_early(self):
         from cli_agent import _preload_audit_cache
 
-        InMemoryDatabase = self._setup_db_mock()
         config = MagicMock()
         with patch("cli_agent._get_audit_cache_config", return_value=(None, None)):
-            _preload_audit_cache(config)
-            InMemoryDatabase.load_from_postgres.assert_not_called()
-        sys.modules.pop("skills", None)
+            with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
+                _preload_audit_cache(config)
+                mock_load.assert_not_called()
 
     def test_cache_file_fresh_skips_load(self, tmp_path):
         from cli_agent import _preload_audit_cache
 
-        InMemoryDatabase = self._setup_db_mock()
         config = MagicMock()
         cache_file = tmp_path / "cache.db"
         cache_file.write_text("data")
 
         with patch("cli_agent._get_audit_cache_config", return_value=(str(cache_file), {})):
-            _preload_audit_cache(config)
-            InMemoryDatabase.load_from_postgres.assert_not_called()
-        sys.modules.pop("skills", None)
+            with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
+                _preload_audit_cache(config)
+                mock_load.assert_not_called()
 
     def test_cache_file_stale_loads_from_postgres(self, tmp_path):
         from cli_agent import _preload_audit_cache
         import time
 
-        InMemoryDatabase = self._setup_db_mock()
         config = MagicMock()
         cache_file = tmp_path / "cache.db"
         cache_file.write_text("data")
@@ -373,35 +359,23 @@ class TestPreloadAuditCache:
                 stat_result = MagicMock()
                 stat_result.st_mtime = 1000
                 mock_stat.return_value = stat_result
-                _preload_audit_cache(config)
-                InMemoryDatabase.load_from_postgres.assert_called_once_with(str(cache_file), {"host": "local"})
-        sys.modules.pop("skills", None)
+                with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
+                    _preload_audit_cache(config)
+                    mock_load.assert_called_once_with(str(cache_file), {"host": "local"})
 
     def test_cache_file_missing_loads_from_postgres(self, tmp_path):
         from cli_agent import _preload_audit_cache
 
-        InMemoryDatabase = self._setup_db_mock()
         config = MagicMock()
         cache_file = tmp_path / "nonexistent.db"
 
         with patch("cli_agent._get_audit_cache_config", return_value=(str(cache_file), {"host": "local"})):
-            _preload_audit_cache(config)
-            InMemoryDatabase.load_from_postgres.assert_called_once_with(str(cache_file), {"host": "local"})
-        sys.modules.pop("skills", None)
+            with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
+                _preload_audit_cache(config)
+                mock_load.assert_called_once_with(str(cache_file), {"host": "local"})
 
 
 class TestBackgroundAuditCacheRefresh:
-    def _setup_db_mock(self):
-        import types
-        db_mod = types.ModuleType("skills.audit_analyzer.scripts.database")
-        imd = MagicMock()
-        db_mod.InMemoryDatabase = imd
-        for mod_name in ["skills", "skills.audit_analyzer", "skills.audit_analyzer.scripts",
-                         "skills.audit_analyzer.scripts.database"]:
-            sys.modules[mod_name] = types.ModuleType(mod_name) if mod_name != "skills.audit_analyzer.scripts.database" else db_mod
-        sys.modules["skills.audit_analyzer.scripts.database"] = db_mod
-        return imd
-
     @pytest.mark.asyncio
     async def test_no_cache_config_returns_early(self):
         from cli_agent import _background_audit_cache_refresh
@@ -415,31 +389,29 @@ class TestBackgroundAuditCacheRefresh:
     async def test_stale_check_triggers_reload(self):
         from cli_agent import _background_audit_cache_refresh
 
-        imd = self._setup_db_mock()
         config = MagicMock()
         with patch("cli_agent._get_audit_cache_config", return_value=("/cache.db", {"host": "local"})):
             with patch("cli_agent.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = [None, asyncio.CancelledError()]
-                imd.check_stale.return_value = {"stale_tables": ["audit_log"]}
+                with patch("lib.services.cache_provider_impl.check_cache_stale",
+                           return_value={"stale_tables": ["audit_log"]}) as mock_stale:
+                    with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
+                        await _background_audit_cache_refresh(config)
 
-                await _background_audit_cache_refresh(config)
-
-                imd.check_stale.assert_called_once_with("/cache.db", {"host": "local"})
-                imd.load_from_postgres.assert_called_once_with("/cache.db", {"host": "local"})
-        sys.modules.pop("skills", None)
+                        mock_stale.assert_called_once_with("/cache.db", {"host": "local"})
+                        mock_load.assert_called_once_with("/cache.db", {"host": "local"})
 
     @pytest.mark.asyncio
     async def test_no_stale_skips_reload(self):
         from cli_agent import _background_audit_cache_refresh
 
-        imd = self._setup_db_mock()
         config = MagicMock()
         with patch("cli_agent._get_audit_cache_config", return_value=("/cache.db", {"host": "local"})):
             with patch("cli_agent.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 mock_sleep.side_effect = [None, asyncio.CancelledError()]
-                imd.check_stale.return_value = {"stale_tables": []}
+                with patch("lib.services.cache_provider_impl.check_cache_stale",
+                           return_value={"stale_tables": []}):
+                    with patch("lib.services.cache_provider_impl.load_cache_from_postgres") as mock_load:
+                        await _background_audit_cache_refresh(config)
 
-                await _background_audit_cache_refresh(config)
-
-                imd.load_from_postgres.assert_not_called()
-        sys.modules.pop("skills", None)
+                        mock_load.assert_not_called()

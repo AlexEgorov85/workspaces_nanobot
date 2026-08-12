@@ -663,7 +663,7 @@ def _preload_audit_cache(config) -> None:
     if not cache_path or not db_cfg:
         return
 
-    from skills.audit_analyzer.scripts.database import InMemoryDatabase
+    from lib.services.cache_provider_impl import load_cache_from_postgres
 
     cache_file = Path(cache_path)
     if cache_file.exists():
@@ -672,7 +672,7 @@ def _preload_audit_cache(config) -> None:
             return
 
     try:
-        InMemoryDatabase.load_from_postgres(cache_path, db_cfg)
+        load_cache_from_postgres(cache_path, db_cfg)
     except Exception as exc:
         import logging
         logging.getLogger("preload").warning(
@@ -689,18 +689,18 @@ async def _background_audit_cache_refresh(config):
     if not cache_path or not db_cfg:
         return
 
-    from skills.audit_analyzer.scripts.database import InMemoryDatabase
+    from lib.services.cache_provider_impl import check_cache_stale, load_cache_from_postgres
     import logging as _logging
 
     while True:
         try:
             await asyncio.sleep(3600)
-            result = InMemoryDatabase.check_stale(cache_path, db_cfg)
+            result = check_cache_stale(cache_path, db_cfg)
             if result.get("stale_tables"):
                 _logging.getLogger("cache").info(
                     "Audit cache stale tables: %s, reloading...", result["stale_tables"]
                 )
-                InMemoryDatabase.load_from_postgres(cache_path, db_cfg)
+                load_cache_from_postgres(cache_path, db_cfg)
         except asyncio.CancelledError:
             break
         except Exception as exc:
