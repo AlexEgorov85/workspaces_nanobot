@@ -620,6 +620,26 @@ DDL: `sql/audit_analyzer/create_vector_index_config_gp.sql`, `sql/audit_analyzer
 
 Применение: `psql "$DATABASE_URL" -f sql/audit_analyzer/seed_default_indexes.sql`
 
+### Шпаргалка: что делать в каком случае
+
+| Цель | Команда | Что происходит |
+|------|---------|---------------|
+| **Добавить новый индекс** | 1. INSERT в `oarb.vector_index_config`<br>2. `--index <name> --full-rebuild` | Создаётся конфиг, собираются вектора + FAISS |
+| **Обновить один индекс (новые строки)** | `--index <name>` | Инкрементально: NEW/CHANGED/DELETED по `content_hash` |
+| **Обновить один индекс (изменился конфиг)** | UPDATE конфига + `--index <name> --full-rebuild` | TRUNCATE индекса + все строки заново |
+| **Обновить все индексы (новые строки)** | `build_vectors.py` (без флагов) | Все индексы из конфига, инкрементально |
+| **Обновить все индексы (после изменений конфига)** | `--full-rebuild` | Все индексы, TRUNCATE + заново |
+| **Проверить что всё актуально (без записей)** | `--check` | Сравнивает сигнатуру, обновляет только diff |
+| **Обновить индекс после DDL таблицы** | `--index <name> --full-rebuild` | Схема таблицы изменилась → нужен полный пересчёт |
+| **Изменилась модель эмбеддинга** | UPDATE `embedding_*` в `project.json` + `--full-rebuild` | Старые FAISS с неправильной размерностью пересоберутся |
+| **Отключить индекс (без удаления данных)** | `UPDATE ... SET enabled = false` | `build_vectors` пропустит, вектора остаются |
+| **Удалить индекс полностью** | DELETE из 3 таблиц (`audit_vectors`, `vector_index_store`, `vector_index_config`) | Полное удаление |
+| **Удалить все индексы разом** | `TRUNCATE oarb.audit_vectors, oarb.vector_index_store` + `DELETE FROM oarb.vector_index_config` | Полная очистка |
+| **Восстановить случайно удалённый индекс** | Заново INSERT + `--full-rebuild` | Полная пересборка из источника |
+| **Сценарий «один и тот же текст в разных индексах»** | Два индекса с разными `index_name` на одной таблице | Поддерживается, поиск по `index_name` |
+| **Embedding провайдер недоступен** | `--check` (быстрее падает), проверить Ollama | Все строки → `errors=N` |
+| **Performance для 100k+ строк** | `--batch-size 8 --chunk-size 300` | Меньше памяти Ollama, дольше |
+
 ### Как добавить новый индекс
 
 **1. Опишите индекс в `oarb.vector_index_config`:**
@@ -679,14 +699,24 @@ audit_analyze.bat --mode vector --query "объект с нарушениями"
 
 ### Как обновить существующий индекс
 
-**Сценарий A: изменились данные в источнике (новые/изменённые/удалённые строки)**
+#### Сценарий A: новые/изменённые/удалённые строки в источнике (типичный случай)
 
 ```bash
+# Один индекс — инкрементально (быстро, классификация NEW/CHANGED/DELETED по content_hash)
 python tools/build_vectors.py --index audits_index
-# без --full-rebuild: инкрементально, классификация NEW/CHANGED/DELETED по content_hash
+
+# Все индексы — инкрементально
+python tools/build_vectors.py
+
+# Быстрая проверка: обновить только если сигнатура изменилась (для cron)
+python tools/build_vectors.py --check
 ```
 
-**Сценарий B: изменился список embedding_cols или content_cols**
+`--check` сравнивает `(count, MAX(track_column))` источника с `oarb.audit_vectors`. Если совпадает — пропускает; если различается — запускает инкрементальную сборку.
+
+**Когда `--check` не помогает:** если меняли `embedding_cols` (сигнатура та же), или добавляли колонку в источник.
+
+#### Сценарий B: изменился список embedding_cols или content_cols
 
 ```sql
 UPDATE oarb.vector_index_config
@@ -701,7 +731,9 @@ python tools/build_vectors.py --index audits_index --full-rebuild
 # Контент изменился → content_hash другой → все строки пересоздаются
 ```
 
-**Сценарий C: изменилась модель эмбеддинга или размерность**
+**Без `--full-rebuild`** нельзя: `content_hash` изменится для всех строк → `build_vectors` увидит CHANGED → DELETE + INSERT (это эквивалентно `--full-rebuild` для индекса, но медленнее — без TRUNCATE). Используйте `--full-rebuild` явно.
+
+#### Сценарий C: изменилась модель эмбеддинга или размерность
 
 `project.json → skills.audit_analyzer.embedding_*`:
 
@@ -712,39 +744,244 @@ python tools/build_vectors.py --index audits_index --full-rebuild
 }
 ```
 
-Размерность изменилась → старые FAISS-индексы в `oarb.vector_index_store` невалидны. Провайдер автоматически пересоберёт, но можно сделать принудительно:
+**Обязательная последовательность:**
 
 ```bash
+# 1. Удалить старые FAISS — у них неправильная размерность
+psql -c "DELETE FROM oarb.vector_index_store"
+
+# 2. Удалить старые вектора — у них неправильная размерность
+psql -c "TRUNCATE oarb.audit_vectors"
+
+# 3. Пересобрать с новой моделью
 python tools/build_vectors.py --full-rebuild
+
+# 4. Проверить размерность
+python tools/build_vectors.py --status
+# dim должен быть 768, не 1024
 ```
 
-**Сценарий D: добавилась новая колонка в источнике**
+**Альтернатива (быстрее, но менее надёжно):** оставить `audit_vectors` без изменений, но тогда `provider.search_vector()` может получить `RuntimeError: dimension mismatch` (Ollama вернёт 768, FAISS ожидает 1024). Чистая пересборка безопаснее.
 
-Просто перезапустите:
+#### Сценарий D: добавилась новая колонка в источнике (DDL)
+
+**Если колонка НЕ используется в embedding_cols** — просто запустите без `--full-rebuild`:
 
 ```bash
+python tools/build_vectors.py --index audits_index
+```
+
+**Если колонка добавляется в embedding_cols** — это сценарий B (UPDATE конфига + `--full-rebuild`).
+
+**Если изменился тип колонки** (varchar→text, bigint→int) — `--full-rebuild` обязателен.
+
+**Если колонка переименована** — старые вектора ссылаются на старое имя через `row_data` (JSONB). В поиске будут видны старые имена; новый `--full-rebuild` обновит.
+
+#### Сценарий E: DDL-изменения в исходной таблице (DROP COLUMN, RENAME, ALTER TYPE)
+
+```bash
+# Полная перестройка индекса на этой таблице
 python tools/build_vectors.py --index audits_index --full-rebuild
 ```
 
+**Если `embedding_cols` ссылается на колонку, которой больше нет** — будет ошибка `column "X" does not exist`. Решение: сначала обновите конфиг (`UPDATE oarb.vector_index_config SET embedding_cols = '[...]'::jsonb WHERE ...`), затем `--full-rebuild`.
+
+**Если DROP COLUMN `track_column`** (`updated_at`) — все индексы на этой таблице перестанут обновляться инкрементально. Решение: добавить новую `updated_at` + обновить конфиг.
+
+#### Сценарий F: исходная таблица пуста (TRUNCATE в источнике)
+
+```bash
+# После очистки источника вручную:
+psql -c "TRUNCATE oarb.audits"
+
+# build_vectors увидит: source rows = 0, audit_vectors > 0 → все строки DELETED
+python tools/build_vectors.py --index audits_index
+# Все вектора индекса будут удалены
+```
+
+Или принудительно:
+
+```bash
+python tools/build_vectors.py --index audits_index --full-rebuild
+# TRUNCATE индекса + нет строк для добавления → 0 векторов в индексе
+```
+
+#### Сценарий G: добавлен новый индекс (см. «Как добавить новый индекс» выше)
+
+#### Сценарий H: обновить ВСЕ индексы разом
+
+```bash
+# Все индексы, инкрементально (без --full-rebuild)
+python tools/build_vectors.py
+
+# Все индексы, полная перестройка
+python tools/build_vectors.py --full-rebuild
+
+# Все индексы, только проверка сигнатуры
+python tools/build_vectors.py --check
+```
+
+**Порядок обработки:** `audits_index` → `violations_index` → `audit_reports_index` (по алфавиту `index_name`).
+
+#### Сценарий I: остановить и продолжить обновление (mid-build)
+
+`build_vectors.py` — **идемпотентен**. Если прервать (Ctrl-C) посередине `--full-rebuild`:
+
+```bash
+# Что произошло: DELETE FROM oarb.audit_vectors WHERE source = X выполнен
+# INSERT выполнен частично
+# Что делать:
+python tools/build_vectors.py --index X --full-rebuild
+# DELETE повторится (безопасно, ничего не изменит), INSERT добьёт
+```
+
+**Не нужно:** `TRUNCATE` вручную — `--full-rebuild` уже сделал DELETE.
+
+#### Сценарий J: ошибка во время обновления
+
+См. [Edge cases → Что делать при ошибке посреди --full-rebuild](#что-делать-при-ошибке-посреди---full-rebuild) ниже.
+
 ### Как отключить/удалить индекс
 
-**Отключить** (без удаления собранных векторов):
+#### Отключить (без удаления собранных векторов)
 
 ```sql
 UPDATE oarb.vector_index_config SET enabled = false WHERE index_name = 'audits_index';
 ```
 
-`build_vectors.py` пропустит его при следующем запуске. Вектора остаются в `oarb.audit_vectors`.
+`build_vectors.py` пропустит его при следующем запуске. Вектора остаются в `oarb.audit_vectors` и `oarb.vector_index_store`.
 
-**Удалить полностью:**
+**Когда использовать:** временно не нужен (например, на время миграции источника), но потом восстановим.
+
+**Что произойдёт в навыке:** `--mode vector --index-name audits_index` **продолжит работать** — провайдер читает FAISS из `vector_index_store`, а не из конфига.
+
+#### Удалить полностью (один индекс)
 
 ```sql
--- 1. Удалить собранные вектора
+-- 1. Удалить собранные вектора (каскадно по source)
 DELETE FROM oarb.audit_vectors WHERE source = 'audits_index';
 DELETE FROM oarb.vector_index_store WHERE source = 'audits_index';
 
 -- 2. Удалить конфиг
 DELETE FROM oarb.vector_index_config WHERE index_name = 'audits_index';
+```
+
+После этого `audit_analyze.bat --mode vector --index-name audits_index` вернёт **пустой результат** (нет FAISS-индекса). Чтобы восстановить — INSERT конфига + `--full-rebuild`.
+
+**Что НЕ удаляется:**
+- Исходная таблица `oarb.audits` — не трогается.
+- Другие индексы — не затрагиваются.
+
+#### Удалить все индексы разом (полная очистка)
+
+```sql
+-- Все собранные вектора + FAISS + конфиги
+TRUNCATE oarb.audit_vectors;
+TRUNCATE oarb.vector_index_store;
+TRUNCATE oarb.vector_index_config CASCADE;
+```
+
+После этого `audit_analyze --mode vector` **вернёт ошибку** «нет конфигурации индексов». Восстановление:
+
+```bash
+# 1. Применить seed заново
+psql -f sql/audit_analyzer/seed_default_indexes.sql
+
+# 2. Пересобрать
+python tools/build_vectors.py --full-rebuild
+```
+
+#### Удалить один индекс через `TRUNCATE` (быстро, но задевает всё)
+
+**Не рекомендуется** — `TRUNCATE oarb.audit_vectors` без `WHERE` очищает ВСЕ индексы. Если нужно очистить только один:
+
+```sql
+-- Найти pk_value, которые принадлежат этому индексу
+DELETE FROM oarb.audit_vectors
+WHERE source = 'audits_index';
+
+DELETE FROM oarb.vector_index_store
+WHERE source = 'audits_index';
+```
+
+Это эквивалентно первому варианту, но с явным указанием колонки. Используйте `DELETE FROM ... WHERE source = X`, а не `TRUNCATE` — без `WHERE` очистите всё.
+
+#### Восстановление (recovery) после случайного удаления
+
+**Если удалили только конфиг (`DELETE FROM vector_index_config`):**
+
+```bash
+# 1. Восстановить конфиг (можно взять из бэкапа или из seed_default_indexes.sql)
+psql -f sql/audit_analyzer/seed_default_indexes.sql
+# Отредактируйте если нужен был другой конфиг
+
+# 2. Вектора и FAISS остались в БД — НЕ пересобирайте, просто проверить
+python tools/build_vectors.py --status
+# Если FAISS нет — нужно --full-rebuild
+```
+
+**Если удалили вектора (`DELETE FROM audit_vectors`):**
+
+```bash
+# Вектора потеряны, FAISS остался но невалиден
+python tools/build_vectors.py --full-rebuild
+# TRUNCATE индекса + полная пересборка
+```
+
+**Если `TRUNCATE` всех таблиц:**
+
+```bash
+psql -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
+psql -f sql/audit_analyzer/create_vector_index_config_gp.sql
+psql -f sql/audit_analyzer/seed_default_indexes.sql
+python tools/build_vectors.py --full-rebuild
+```
+
+#### Что будет если `--index-name` указывает на несуществующий индекс
+
+```bash
+audit_analyze.bat --mode vector --query "..." --index-name does_not_exist
+# "Индекс 'does_not_exist' не найден или отключён"
+```
+
+Вектора в БД не затрагиваются. Ошибка показывается пользователю.
+
+#### Что будет если удалить индекс, а в `audit_analyze.bat` ссылка
+
+**Если индекс был в реестре предопределённых скриптов (`predefined.py`):** поиск перестанет находить `vector_source` параметры для этого индекса (ошибка `CacheProvider.search_vector` → `[]`).
+
+**Если индекс был в `predefined.py` через `validation.vector_source`:** скрипт вернёт ошибку `vector_source not configured` или пустой результат.
+
+**Чистый CLI:** `--mode vector --index-name X` — пустой результат без падения.
+
+#### Удалить через `psql` cascade (осторожно)
+
+```sql
+-- Удалить только конфиг одного индекса (без удаления векторов)
+DELETE FROM oarb.vector_index_config WHERE index_name = 'audits_index';
+-- Вектора остаются, но build_vectors не будет их пересобирать
+-- (новые строки в источнике не подхватятся — нужен заново INSERT конфига)
+```
+
+#### Что удалять нельзя
+
+- `oarb.vector_index_config` целиком `TRUNCATE ... CASCADE` — удалит все индексы разом (см. выше как восстановить).
+- `oarb.audit_vectors` без `WHERE` — удалит ВСЕ вектора всех индексов.
+- `oarb.vector_index_store` без `WHERE` — удалит ВСЕ FAISS-индексы.
+
+Если удалили случайно — см. **«Восстановление после случайного удаления»** выше.
+
+#### Автоматизация удаления в cron / CI
+
+```bash
+# Временно отключить индекс (без потери данных)
+psql -c "UPDATE oarb.vector_index_config SET enabled = false WHERE index_name = 'audit_reports_index'"
+
+# Полностью удалить индекс + пересобрать остальные
+psql -c "DELETE FROM oarb.audit_vectors WHERE source = 'audit_reports_index'"
+psql -c "DELETE FROM oarb.vector_index_store WHERE source = 'audit_reports_index'"
+psql -c "DELETE FROM oarb.vector_index_config WHERE index_name = 'audit_reports_index'"
+python tools/build_vectors.py --full-rebuild  # пересоберёт оставшиеся 2
 ```
 
 ### Алгоритм сборки одного индекса
