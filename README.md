@@ -616,135 +616,7 @@ pytest tests/ --cov=lib --cov-report=term-missing
 
 ---
 
-## Миграции и изменения
-
-### v2.0.0 (текущая)
-
-- **ApplicationContext + сервисный слой:** `gateway.py` (696 → 132 строк) и `cli_agent.py` (865 → 165 строк) теперь — тонкие оркестраторы. Вся инициализация вынесена в `lib/core/ApplicationContext` и переиспользуемые сервисы в `lib/services/`, `lib/core/`, `lib/lifecycle/`, `lib/cli/`.
-- **DbLoggingService:** структурированный журнал событий агента в PostgreSQL (`gateway_logs`). Worker-поток, batch INSERT, JSONL fallback при недоступности БД, `get_stats()`. Подключён через `BusFactory` (обёртки `publish_inbound`/`publish_outbound`) + `DatabaseLoggingHook` (AgentHook для tool-событий).
-- **Pre-resolve `${VAR}`:** `ConfigService._pre_resolve_env_refs()` автоматически подставляет `MISTRAL_API_KEY` (и другие `*_API_KEY`) из `SETTINGS.providers.<name>.api_key` (туда `config.py` уже подставил значение из `.secrets.env`). **Gateway больше НЕ требует `export MISTRAL_API_KEY=...` в shell.**
-- **RuntimePatcher:** оба monkey-patch'а (`ContextGovernor.normalize_tool_result` и `agent._assemble_outbound`) — в одном классе, с fallback при изменении API nanobot. Дублирование в gateway и cli устранено.
-- **Race-condition fix:** callbacks на `AuditSyncService` (`set_on_new_records_callback` + `set_on_sync_callback`) устанавливаются в `gateway.py:main()` ДО `ctx.start()`, иначе worker-тред успевает сделать `initial_load` раньше — `AuditMemoryStore` остаётся пустым, и `preload_vector_indexes` показывает "нет данных в кэше". Восстановлено отображение `✓ vector index 'audits_index' built in memory: 10 vectors` и т.п.
-- **Graceful degradation:** если `psycopg2` не установлен или DSN пуст — `ApplicationContext.create()` создаётся, битый сервис остаётся `None`, gateway работает без него (с предупреждением).
-- **`pg_agent_worker.py` и `streamlit_app.py` НЕ тронуты** — у них другая архитектура (legacy-воркер и тонкий web-клиент через PG-канал). `streamlit_app.py` — отдельный клиент, работающий через polling таблицы `conversation_messages`; он НЕ должен использовать `ApplicationContext` (это бы создало второго in-process агента).
-- **Тесты:** 701 unit-тест (было 594, +107 новых). Все существующие тесты обновлены под новые модули. Pre-existing тесты на `audit_memory_store.py`/`audit_sync_service.py` не трогали (они были в working tree до рефакторинга).
-
-Подробный план: `REFACTORING_PLAN.md` (16 шагов, все отмечены как выполненные).
-
-### v1.5.0
-
-- **Векторные индексы в БД:** Переход с файлов `.faiss` на таблицы PostgreSQL (`audit_vectors`, `vector_index_store`, `vector_index_config`)
-- **Удалённые навыки:** `data-analyzer`, `html_presentation_generator` (устарели)
-- **Новый режим `init`:** Загрузка DuckDB-кеша для `audit_analyzer`
-
-### v1.4.0
-
-- **Переход на psycopg2:** Замена DB-API драйвера для совместимости с Greenplum
-- **Переименование навыка:** `db_analyzer` → `audit_analyzer`
-- **Standalone-скрипты:** Добавлены `audit_analyze.bat` / `audit_analyze.sh`
-
-### Конфигурация
-
-- **Переход с `.env` на `project.json` + `.secrets.env`:** Разделение публичных настроек и секретов
-- **Мерж конфигов:** `project.json` → `config.json` → `.secrets.env` (последний перекрывает)
-
----
-
-## Ключевые связи между файлами (v2.0.0)
-
-Точки входа (тонкие оркестраторы) — обе идут через `ApplicationContext`:
-
-| Файл | Строк | Что делает | Настраивается через |
-|------|------:|-----------|-------------------|
-| `gateway.py` | 132 | Сервер: каналы, Streamlit, FAISS preload, restart-loop | `project.json` (`channels.*`, `gateway`, `logging.db`) |
-| `cli_agent.py` | 165 | REPL: ввод → `MessageBus` → `AgentLoop` | CLI-аргументы, `project.json` (`cli`) |
-| `pg_agent_worker.py` | 310 | Legacy пакетный режим (НЕ через ApplicationContext) | `project.json` → `channels.postgres.dsn` |
-| `streamlit_app.py` | 502 | Тонкий web-клиент (НЕ через ApplicationContext) | `project.json` → `channels.postgres`, `streamlit` |
-
-Bootstrap и сервисный слой:
-
-| Файл | Что делает |
-|------|-----------|
-| `lib/core/application_context.py` | ⭐ Единый bootstrap всех общих сервисов |
-| `lib/core/agent_factory.py` | ⭐ Создание AgentLoop с хуками (ToolAudit + DatabaseLogging) |
-| `lib/core/bus_factory.py` | ⭐ MessageBus + обёртки publish_inbound/outbound |
-| `lib/services/config_service.py` | ⭐ Загрузка конфига, SETTINGS-аксессор, pre-resolve env, таймауты |
-| `lib/services/session_storage.py` | ⭐ Выбор PGSessionManager / SessionManager |
-| `lib/services/runtime_patcher.py` | ⭐ Все monkey-patch'и (ContextGovernor + _assemble_outbound) |
-| `lib/services/channel_factory.py` | ⭐ ChannelManager + Redis/Postgres |
-| `lib/services/transcription_service.py` | ⭐ openai/groq key/URL/language |
-| `lib/services/subprocess_manager.py` | ⭐ Streamlit spawn + terminate/kill |
-| `lib/services/preload_service.py` | ⭐ FAISS preload + audit_cache refresh |
-| `lib/services/db_logging_service.py` | ⭐ Worker-поток, batch INSERT, JSONL fallback |
-| `lib/services/db_logging_bus.py` | ⭐ Обёртки publish_inbound/outbound для логгера |
-| `lib/cli/console_loop.py` | ⭐ REPL/typewriter/consume_outbound (вынесено из cli_agent.py) |
-| `lib/cli/display_config.py` | ⭐ DisplayConfig |
-| `lib/cli/hook_loader.py` | ⭐ Сканирование workspace/hooks/*.py |
-| `lib/lifecycle/gateway_runner.py` | ⭐ Цикл с exponential backoff |
-| `lib/lifecycle/shutdown_coordinator.py` | ⭐ LIFO graceful shutdown |
-| `workspace/hooks/database_logging_hook.py` | ⭐ AgentHook для tool-событий + run_finished |
-
-Прочее:
-
-| Файл | Что делает |
-|------|-----------|
-| `lib/session/pg_session_manager.py` | Хранение сессий в PostgreSQL (замена JSONL) |
-| `lib/channels/postgres_channel.py` | Канал через таблицу conversation_messages |
-| `lib/channels/redis_channel.py` | Канал через Redis-очереди (BRPOP/LPUSH) |
-| `lib/services/audit_sync_service.py` | Синхронизация audit-таблиц из PG в in-memory DuckDB |
-| `lib/services/audit_memory_store.py` | DuckDB-кеш + FAISS-индексы + publish-snapshot |
-| `lib/services/cache_provider.py` | Интерфейс CacheProvider + SearchResult |
-| `lib/services/cache_provider_impl.py` | Реализация кеша (PostgresDuckDbProvider) |
-| `lib/services/text_splitter.py` | Чанкование текстов |
-| `workspace/utils/db.py` | Глобальный singleton `configure(dsn)` + sync/async коннекторы |
-
----
-
-## Поток сообщения (gateway + Streamlit)
-
-```
-Streamlit         PostgresChannel        Agent
-   │                    │                  │
-   │ INSERT (pending)   │                  │
-   │───────────────────>│                  │
-   │                    │ UPDATE processing│
-   │                    │──────────────────>│
-   │                    │ reasoning_delta   │
-   │                    │<─────────────────│
-   │ (poll: reasoning)  │                  │
-   │<───────────────────│                  │
-   │                    │  финальный ответ  │
-   │                    │<─────────────────│
-   │ (poll: completed)  │                  │
-   │<───────────────────│                  │
-```
-
----
-
-## Разработка
-
-### Где что править
-
-| Что нужно сделать | Файл |
-|-----------------|------|
-| Сменить модель/провайдера | `config.json` → `agents.defaults.model` |
-| Настроить таймауты | `project.json` → секции `gateway`, `cli` или `streamlit` |
-| Настроить подключение к БД | `project.json` → `channels.postgres` (`dsn`, `schema`, `table_name`) |
-| Включить Redis-канал | `project.json` → `channels.redis.enabled` |
-| Настроить навык | `project.json` → `skills.<имя>` |
-| Добавить API-ключ | `.secrets.env` (провайдер-скоупинг формат) |
-| Настроить БД-логирование | `project.json` → `logging.db` (`enabled`, `flush_interval_sec`, `batch_size`, `min_level`) |
-| Изменить сервисный слой | `lib/services/<service>.py` (например, `db_logging_service.py`) |
-| Изменить bootstrap | `lib/core/application_context.py` |
-| Изменить lifecycle (backoff/shutdown) | `lib/lifecycle/gateway_runner.py` / `shutdown_coordinator.py` |
-| Добавить канал связи | Написать класс унаследовав `BaseChannel`, подключить через `lib/services/channel_factory.py` |
-| Добавить хук агента | Создать файл в `workspace/hooks/` с подклассом `AgentHook` |
-| Добавить тест бенчмарка | YAML-файл в `benchmarks/items/` |
-| Настроить Streamlit UI | `streamlit_app.py` |
-| Изменить личность агента | `workspace/SOUL.md` |
-| Дать инструкции агенту | `workspace/AGENTS.md` |
-
-### Запуск
+## Запуск
 
 ```bash
 # CLI-агент
@@ -761,7 +633,15 @@ python benchmarks/runner.py --compare runs/run1 runs/run2
 python pg_agent_worker.py --once
 ```
 
----
+## Документация
+
+- **[DEVELOPMENT.md](DEVELOPMENT.md)** — техническая документация: архитектура
+  (включая v2.0.0 service layer, `ApplicationContext`, race-condition fix),
+  описание компонентов, audit_analyzer, жизненный цикл кеша, векторная
+  индексация, SQL-скрипты, **где что править**, changelog, **полная таблица
+  связей между файлами** (lib/core/, lib/services/, lib/cli/, lib/lifecycle/).
+- **[REFACTORING_PLAN.md](REFACTORING_PLAN.md)** — 16 шагов рефакторинга v2.0.0
+  с чекбоксами и блоками проверки (все отмечены как выполненные).
 
 ## Зависимости
 
@@ -777,8 +657,6 @@ python pg_agent_worker.py --once
 - **requests** — HTTP-клиент (синхронный)
 - **anthropic, openai** — опциональные LLM-провайдеры
 - **pytest** — запуск unit-тестов (опционально, для разработки)
-
----
 
 ## Лицензия
 
