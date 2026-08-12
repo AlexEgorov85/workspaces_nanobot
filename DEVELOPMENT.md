@@ -16,7 +16,7 @@
 3. [Универсальный слой данных lib/services](#универсальный-слой-данных-libservices)
 4. [Конфигурация навыка](#конфигурация-навыка)
 5. [CLI навыка: режимы](#cli-навыка-режимы)
-6. [Жизненный цикл кеша (gateway / cli_agent)](#жизненный-цикл-кеша-gateway--cli_agent)
+6. [Жизненный цикл кеша](#жизненный-цикл-кеша)
 7. [Векторная индексация](#векторная-индексация)
 8. [SQL-скрипты: создание таблиц](#sql-скрипты-создание-таблиц)
 9. [Тестирование](#тестирование)
@@ -37,27 +37,35 @@
   PostgreSQL (канон) ───►│  lib/services (универсальный слой данных)   │
   oarb.audits,           │  • CacheProvider (интерфейс)                │
   oarb.violations, ...   │  • PostgresDuckDbProvider (реализация)      │
-                        │  • load_cache_from_postgres / check_stale    │
+                        │  • AuditSyncService   (поллинг PG, worker)  │
+                        │  • AuditMemoryStore   (in-memory DuckDB+FAISS)│
                         │  • get_embedding (Ollama)                    │
                         └───────────────┬──────────────────────────────┘
                                         │ query_sql / get_schema / explain
                                         │ search_vector / preload_indexes
                 ┌───────────────────────┼────────────────────────────┐
                 ▼                       ▼                            ▼
-        DuckDB-кеш (файл)        FAISS-индексы (store в БД)      эмбеддинг
+        DuckDB-кеш (снимок)      FAISS-индексы (store в БД)      эмбеддинг
         oarb.* (аналитика)       oarb.audit_vectors →           Ollama /api/embed
                                  oarb.vector_index_store
 
-        Потребители:  gateway.py        cli_agent.py        навык CLI (scripts/cli.py)
-                      (фон: preload,    (фон: preload,      (режимы predefined/sql/vector/init)
-                       refresh, stale)   refresh, stale)
+        Владелец кеша:             Потребители (только чтение):
+        gateway.py                 навык CLI (scripts/cli.py)
+        (AuditSyncService →        (режимы predefined/sql/vector)
+         AuditMemoryStore →
+         publish() temp+os.replace)
 ```
 
 **Потоки данных**
 
-- `--mode init` / `refresh()` — копирует таблицы из PostgreSQL в DuckDB-файл (кеш).
-- `--mode predefined` / `sql` — запросы выполняются по кешу (или напрямую по PG,
-  если кеш выключен). Единый интерфейс бэкенда: `get_schema / query_sql / explain`.
+- `gateway.py` — единственный владелец файла кеша навыка. `AuditSyncService`
+  (worker-поток, единственное подключение к PG) инкрементально синхронизирует
+  таблицы в `AuditMemoryStore` (чисто in-memory DuckDB), а после каждого цикла
+  `store.publish()` атомарно записывает снимок (temp + `os.replace`) в файл
+  кеша навыка (`in_memory_cache_path`).
+- Навык CLI (`predefined`/`sql`) — запросы выполняются по опубликованному кешу
+  (или напрямую по PG, если кеш выключен). Создание/обновление кеша его не
+  касается. Единый интерфейс бэкенда: `get_schema / query_sql / explain`.
 - `--mode vector` — семантический поиск по FAISS-индексу: провайдер загружает
   индекс из `oarb.vector_index_store` (BYTEA), при промахе пересобирает из
   `oarb.audit_vectors`, эмбеддинг запроса получает через Ollama.
@@ -79,11 +87,13 @@ nanobot/
 ├── lib/services/                         # универсальный слой данных
 │   ├── cache_provider.py                 #   интерфейс CacheProvider + SearchResult
 │   ├── cache_provider_impl.py            #   PostgresDuckDbProvider + фабрика и модульные функции
+│   ├── audit_memory_store.py             #   in-memory DuckDB-зеркало + атомарный publish()
+│   ├── audit_sync_service.py             #   фоновый поллинг PG (worker-поток)
 │   └── text_splitter.py                  #   чанкование текстов для индексаторов
 │
-├── gateway.py                            # долгоживущий сервер: фоновые задачи кеша
-├── cli_agent.py                          # CLI-агент: фоновая загрузка/свежесть кеша
-├── config.py                             # SETTINGS (project.json + .secrets.env)
+├── gateway.py                            # долгоживущий сервер: владелец кеша навыка
+├── cli_agent.py                          # CLI-агент: (legacy) фоновая загрузка/свежесть кеша
+├── config.py                             # SETTINGS (project.json + config.json + .secrets.env)
 ├── project.json                          # конфигурация (skills.audit_analyzer.*)
 │
 └── workspace/skills/audit_analyzer/      # навык: тонкий CLI поверх провайдера
@@ -140,7 +150,7 @@ nanobot/
 **Фабрика провайдера** — универсальная `lib.services.cache_provider_impl.build_cache_provider(cfg, base_dir)`
 собирает провайдера из конфиг-секции навыка (DuckDB-кеш, индексы, эмбеддинг).
 Навык делегирует ей через `scripts/skill_config.build_cache_provider()`, тот же
-набор настроек читает `gateway.py::_build_audit_provider()` и индексатор
+набор настроек читает `gateway.py::_build_audit_services()` и индексатор
 `tools/build_vectors.py`.
 
 ---
@@ -149,24 +159,30 @@ nanobot/
 
 Секция `skills.audit_analyzer` в `project.json`:
 
-| Ключ | Назначение | По умолчанию |
+| Ключ | Назначение | Значение / по умолчанию |
 |------|-----------|-------------|
-| `llm_provider` / `llm_model` / `llm_api_base` | LLM для генерации SQL | `mistral` / `mistral-large-latest` / API Mistral |
+| `llm_provider` / `llm_model` / `llm_api_base` | LLM для генерации SQL | `mistral` / `mistral-large-latest` / `https://api.mistral.ai/v1` |
 | `llm_max_tokens` / `llm_temperature` | Параметры генерации | `8192` / `0.1` |
 | `db_schema` | Схема с таблицами аудита | `oarb` |
-| `db_tables` | Таблицы, доступные агенту | `audit_reports, audits, report_items, violations` |
-| `schema_cache` | Файловый кеш схемы (enabled/path/ttl_seconds) | выключен (резерв) |
+| `db_tables` | Таблицы, доступные агенту | `audit_reports, audits, report_items, violations` (значение project.json; код по умолч. — пустой список) |
+| `schema_cache` | Файловый кеш схемы (enabled/path/ttl_seconds) | резерв: блок настроен (`enabled: true`, path `cache/schema.json`, TTL 86400), но `load_db_config()` не передаёт его в `Database` — кеш схемы фактически не работает |
 | `in_memory_enabled` | Включить DuckDB-кеш | `true` |
 | `in_memory_engine` | Движок кеша | `duckdb` |
 | `in_memory_cache_path` | Путь к файлу кеша (отн. навыка) | `cache/audit_cache.duckdb` |
+| `poll_interval_sec` | Период инкрементального поллинга PG в `AuditSyncService` | `60` |
+| `sync_write_table` | Таблица журнала взаимодействий (создаётся автоматически) | `audit_interactions` |
 | `embedding_base_url` | Ollama `/api/embed` | `http://localhost:11434/api/embed` |
 | `embedding_model` | Модель эмбеддинга | `mxbai-embed-large:latest` |
 | `embedding_dimension` | Размерность вектора | `1024` |
-| `mode_vector_db_table` | Таблица сырых векторов (источник индекса) | `oarb.audit_vectors` |
+| `mode_vector_db_table` | Таблица сырых векторов (источник индекса) | `oarb.audit_vectors` (значение project.json; код по умолч. — пусто) |
 | `mode_vector_store_table` | Таблица сериализованных FAISS-индексов | `oarb.vector_index_store` |
 | `cli_default_mode` | Режим по умолчанию (резерв; CLI требует `--mode`) | `predefined` |
-| `cli_max_retries` | Ретраи LLM при генерации SQL | `3` |
-| `cli_timeout_sec` | Таймаут LLM | `60` |
+| `cli_max_retries` | Ретраи HTTP-запросов LLM-клиента (`llm.py`) | `3` |
+| `cli_timeout_sec` | Таймаут запроса к LLM (`llm.py`) | `60` |
+
+> Примечание: ретраи *генерации* SQL в режиме `sql` захардкожены в
+> `sql_mode.py` (`MAX_RETRIES = 2` → до 3 попыток) и от `cli_max_retries`
+> не зависят.
 
 DSN подключается через `channels.postgres.dsn` в `project.json` /
 `DATABASE_URL` в `.secrets.env` (`utils.db.resolve_dsn()`). Навык собственного
@@ -180,7 +196,7 @@ DSN не хранит.
 `.sh`), либо `python scripts/cli.py`.
 
 ```
-audit_analyze --mode {predefined,sql,vector,init} [опции]
+audit_analyze --mode {predefined,sql,vector} [опции]
 ```
 
 | Режим | Назначение | Ключевые флаги |
@@ -188,7 +204,6 @@ audit_analyze --mode {predefined,sql,vector,init} [опции]
 | `predefined` | Выполнение готовых SQL-шаблонов из реестра | `--script`, `--params` |
 | `sql` | Генерация SELECT через LLM по текстовому запросу | `--query`, `--context` |
 | `vector` | Семантический поиск по FAISS-индексу | `--query`, `--index-name`, `--top-k`, `--threshold`, `--vector-index` |
-| `init` | Загрузка DuckDB-кеша из PostgreSQL | `--force` |
 
 Примеры:
 
@@ -204,14 +219,14 @@ audit_analyze --mode vector --query 'пожарная безопасность' 
 
 # vector — всё выше порога 0.7
 audit_analyze --mode vector --query 'статусы аудитов' --index-name audits_index --threshold 0.7
-
-# init — принудительная перезагрузка кеша
-audit_analyze --mode init --force
 ```
 
 **Как выбирается бэкенд запросов:** если `in_memory_enabled: true` — CLI строит
-провайдера (`build_cache_provider()`), открывает DuckDB-кеш и работает по нему;
-иначе — `Database` (прямой PostgreSQL).
+провайдера (`build_cache_provider()`), открывает DuckDB-кеш на чтение и работает
+по нему; иначе — `Database` (прямой PostgreSQL). Кеш создаёт и обновляет
+**gateway** (см. раздел «Жизненный цикл кеша»); CLI про это не знает. Если файла
+кеша нет — CLI завершается с `FileNotFoundError`: «Кеш создаёт и обновляет
+gateway автоматически — запустите его (python gateway.py)».
 
 **Векторный поиск в predefined:** строковые параметры с
 `validation.vector_source` (например, `violation_code`, `auditee_entity`,
@@ -220,29 +235,48 @@ audit_analyze --mode init --force
 
 ---
 
-## 🔄 Жизненный цикл кеша (gateway / cli_agent)
+## 🔄 Жизненный цикл кеша
 
-Оба процесса при старте поднимают DuckDB-кеш и следят за его свежестью,
-используя универсальный провайдер / модульные функции из `lib/services`.
+**Владелец файла кеша навыка — `gateway.py`.** Навык (CLI) про создание и
+обновление кеша больше не знает: `--mode init` и `--force` удалены.
 
-**gateway.py** (секция 11):
+Пара сервисов строится в `gateway.py::_build_audit_services()` (возвращает
+`(None, None)`, если `in_memory_enabled` выключен, нет DSN или таблиц):
 
-- `_build_audit_provider()` — строит провайдера из `SETTINGS.skills.audit_analyzer`
-  (возвращает `None`, если кеш и векторные индексы не настроены).
-- `_preload_audit_cache(provider)` — если кеш-файл свежий (< 1 ч) — пропуск,
-  иначе `provider.refresh()` (копирует таблицы из PG в DuckDB).
-- `_preload_vector_indexes(provider)` — `provider.preload_indexes()` прогревает
-  FAISS-индексы в память.
-- `_background_audit_cache_refresh(provider)` — каждый час `provider.check_stale()`
-  сверяет `MAX(updated_at)` таблиц в PG с метаданными кеша; при изменениях —
-  `provider.refresh()`.
+- **`AuditSyncService`** — единственный владелец подключения к PostgreSQL
+  (worker-поток). При старте выполняет полную загрузку таблиц, далее каждые
+  `poll_interval_sec` (по умолч. 60 с) инкрементально опрашивает таблицы по
+  track-колонке (`updated_at`; для `audit_vectors` — `id`). Новые/изменённые
+  строки передаёт в callback `on_new_records` → `AuditMemoryStore.upsert_records`.
+  Дополнительно создаёт таблицу журнала `oarb.audit_interactions`
+  (`sync_write_table`), куда через `submit_write()` пишутся ответы агента.
+- **`AuditMemoryStore`** — живое зеркало в чисто in-memory DuckDB
+  (`cache_path=""`) + FAISS-индексы. `publish()` атомарно записывает снимок
+  таблиц (ATTACH во временный файл → `os.replace`) в `publish_path` =
+  `in_memory_cache_path` навыка. Без изменений (`_dirty` = False) файл не
+  перезаписывается; если снимок занят читателем (CLI) — публикация откладывается
+  до следующего цикла, ошибка не теряет данные.
 
-**cli_agent.py** — аналогично, но использует модульные функции напрямую:
-`load_cache_from_postgres()` и `check_cache_stale()`.
+Схема в `gateway.py::run()`:
 
-Свежесть определяется по таблице `__cache_meta` внутри DuckDB-файла
-(`max_updated_at` на таблицу), сравнением с `SELECT MAX(updated_at)`
-в канонической БД.
+```
+_build_audit_services() ──► (store, sync_service)
+sync_service.set_on_new_records_callback(store.upsert_records)
+sync_service.set_on_sync_callback(store.publish)     # снимок после каждого цикла
+sync_service.start(initial_load=True)                # полная загрузка + поллинг
+_preload_vector_indexes(store)                       # прогрев FAISS в память
+...
+(finally) store.publish() → store.close()            # финальный снимок при выходе
+```
+
+**Правило одного писателя.** DuckDB допускает только один процесс-писатель на
+файл, поэтому gateway никогда не открывает целевой файл на запись: он пишет во
+временный файл и атомарно подменяет его `os.replace()`. Навык (CLI) открывает
+опубликованный снимок только на чтение и видит целостные данные в любой момент.
+
+**cli_agent.py** по-прежнему содержит унаследованную фоновую загрузку/свежесть
+кеша (`load_cache_from_postgres` / `check_cache_stale`) как резерв; основной
+владелец и источник снимка — `gateway.py`.
 
 ---
 
@@ -353,6 +387,12 @@ python tools/build_vectors.py --full-rebuild
 # Юнит-тесты инфраструктуры и агента (не требуют БД)
 python -m pytest tests/test_gateway.py tests/test_cli_agent.py -q
 
+# Юнит-тесты сервисов кеша: AuditMemoryStore (upsert/publish/vector) и AuditSyncService
+python -m pytest tests/test_audit_memory_store.py tests/test_audit_sync_service.py -q
+
+# Полный набор (без БД)
+python -m pytest tests -q
+
 # Сквозной тест навыка (требует живого PostgreSQL)
 python workspace/skills/audit_analyzer/tests/e2e_test.py
 ```
@@ -364,6 +404,21 @@ E2E проверяет все режимы: predefined (реальный SQL п�
 ---
 
 ## 📝 Изменения и миграции
+
+### 2026-08 — Gateway — владелец кеша навыка
+
+- Создание и обновление файла кеша полностью перенесено в `gateway.py`;
+  навык (CLI) про это больше не знает: удалены `--mode init` и `--force`.
+- Новые сервисы в `lib/services`: `AuditMemoryStore` (in-memory DuckDB +
+  FAISS, `publish()` атомарным снимком через temp + `os.replace`) и
+  `AuditSyncService` (worker-поток, инкрементальный поллинг PG по track-колонке).
+- `AuditMemoryStore.publish()` публикует снимок после каждого цикла синхронизации
+  (`on_sync_callback`) и при завершении gateway; пропускает ещё не синхронизированные
+  таблицы, не перезаписывает файл без изменений (флаг `_dirty`).
+- `AuditSyncService` пишет журнал взаимодействий в `oarb.audit_interactions`
+  (создаётся автоматически, `sync_write_table` / `poll_interval_sec` в project.json).
+- При отсутствии файла кеша CLI завершается с `FileNotFoundError` и подсказкой
+  запустить gateway.
 
 ### 2026-08 — Универсальный слой данных, чистка навыка
 
@@ -384,14 +439,22 @@ E2E проверяет все режимы: predefined (реальный SQL п�
   это инфраструктура, а не задача навыка.
 - Удалены debug-скрипты `check_status.py` и `cache/query_audit.py`.
 
+### 2026-07 — DuckDB-кеш
+
+- Введён DuckDB-кеш навыка: `InMemoryDatabase` → `load_from_postgres()` /
+  `check_stale()` (сравнение `MAX(updated_at)`), фоновый опрос свежести раз в час
+  в `gateway.py` / `cli_agent.py`.
+- Добавлен `--mode init` для ручного создания/обновления кеша.
+
 ### 2026-06 — Векторные индексы в PostgreSQL
 
 - Векторные индексы мигрированы из `.faiss`-файлов в БД:
-  `oarb.audit_vectors`, `oarb.vector_index_store`, `oarb.vector_index_config`.
-- Введён `--mode init` для загрузки DuckDB-кеша и фоновая перезагрузка кеша
-  по свежести (`MAX(updated_at)`).
+  `oarb.audit_vectors`, `oarb.vector_index_store`, `oarb.vector_index_config`
+  (29.06.2026).
 
-### 2025 — Ранняя история
+### 2026-05/06 — Ранняя история
 
-- Переименование `db_analyzer` → `audit_analyzer`, переход на `psycopg2`.
-- Первоначальная реализация на FAISS-файлах (режимы predefined/sql/vector).
+- (05.2026) Первоначальная реализация навыка `db_analyzer` на FAISS-файлах
+  (режимы predefined/sql/vector).
+- (06.2026) Переименование `db_analyzer` → `audit_analyzer`, переход
+  `asyncpg` → `psycopg2` (совместимость с Greenplum).
