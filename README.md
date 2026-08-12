@@ -117,8 +117,8 @@ flowchart TB
     SVC --> CFG_SVC & SESS_SVC & CHAN_SVC & PATCHER & LOG_SVC & TRANS_SVC & SUB_SVC & PRELOAD
 
     %% Точки входа
-    GATEWAY["gateway.py<br>тонкий оркестратор"]
-    CLI["cli_agent.py<br>тонкий оркестратор"]
+    GATEWAY["gateway.py\nтонкий оркестратор"]
+    CLI["cli_agent.py\nтонкий оркестратор"]
     CTX --> GATEWAY
     CTX --> CLI
 
@@ -129,7 +129,7 @@ flowchart TB
 
     %% Pre-existing (не через ApplicationContext)
     subgraph LEGACY["Pre-existing точки входа (НЕ через ApplicationContext)"]
-        STREAMLIT["streamlit_app.py<br>web-клиент"]
+        STREAMLIT["streamlit_app.py\nweb-клиент"]
     end
 
     %% Каналы
