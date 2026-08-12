@@ -12,8 +12,8 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from predefined_scripts import SCRIPTS_REGISTRY
 from scripts_registry import (
-    SCRIPTS_REGISTRY,
     DynamicQueryBuilder,
     ScriptDefinition,
 )
@@ -41,7 +41,7 @@ def build_sql(
         (sql_string, [values_for_psycopg2])
 
     Пример:
-        >>> from scripts_registry import SCRIPTS_REGISTRY
+        >>> from predefined_scripts import SCRIPTS_REGISTRY
         >>> script = SCRIPTS_REGISTRY["analytics_by_year_month"]
         >>> sql, vals = build_sql(script, {"year": 2024})
         >>> sql  # содержит %s, %s плейсхолдеры

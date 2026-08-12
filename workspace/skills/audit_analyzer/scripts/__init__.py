@@ -69,7 +69,8 @@ scripts/
     output.py                — форматирование результата в JSON
     predefined.py            — обёртка над SCRIPTS_REGISTRY + DynamicQueryBuilder
     predefined_mode.py       — оркестрация режима predefined
-    scripts_registry.py      — ScriptDefinition, ParamDefinition, DynamicQueryBuilder, реестр
+    scripts_registry.py      — ScriptDefinition, ParamDefinition, DynamicQueryBuilder
+    predefined_scripts.py    — реестр готовых SQL-скриптов (SCRIPTS_REGISTRY)
     sql_mode.py              — оркестрация режима sql (LLM + retry)
 
 Инфраструктура (DuckDB-кэш, векторные индексы, эмбеддинг, чанкование
