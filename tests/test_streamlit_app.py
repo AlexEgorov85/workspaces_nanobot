@@ -295,6 +295,33 @@ class TestGetProcessingState:
 
 
 # ===================================================================
+# _get_extension_from_mime
+# ===================================================================
+
+class TestGetExtensionFromMime:
+    def test_html(self, mock_all):
+        assert mock_all["streamlit_app"]._get_extension_from_mime("text/html") == ".html"
+
+    def test_pdf(self, mock_all):
+        assert mock_all["streamlit_app"]._get_extension_from_mime("application/pdf") == ".pdf"
+
+    def test_image(self, mock_all):
+        assert mock_all["streamlit_app"]._get_extension_from_mime("image/png") == ".png"
+
+    def test_octet_stream_gets_bin(self, mock_all):
+        assert mock_all["streamlit_app"]._get_extension_from_mime("application/octet-stream") == ".bin"
+
+    def test_unknown_mime_gets_bin(self, mock_all):
+        assert mock_all["streamlit_app"]._get_extension_from_mime("application/x-unknown-foo") == ".bin"
+
+    def test_empty(self, mock_all):
+        assert mock_all["streamlit_app"]._get_extension_from_mime("") == ""
+
+    def test_mime_with_params(self, mock_all):
+        assert mock_all["streamlit_app"]._get_extension_from_mime("text/html; charset=utf-8") == ".html"
+
+
+# ===================================================================
 # Module-level configuration
 # ===================================================================
 

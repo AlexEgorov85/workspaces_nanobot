@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import sys
 import time
 import uuid
@@ -103,26 +104,28 @@ def _load_chat_history(chat_id: str = _CHAT_ID) -> list[dict]:
 
 
 def _get_extension_from_mime(mime_type: str) -> str:
-    """Получить расширение файла по MIME-типу."""
-    mime_to_ext = {
-        "application/pdf": ".pdf",
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/gif": ".gif",
-        "image/webp": ".webp",
-        "text/plain": ".txt",
-        "text/csv": ".csv",
-        "application/json": ".json",
-        "application/xml": ".xml",
-        "application/zip": ".zip",
-        "application/x-zip-compressed": ".zip",
-        "application/msword": ".doc",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-        "application/vnd.ms-excel": ".xls",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-        "application/octet-stream": "",
+    """Получить расширение файла по MIME-типу.
+
+    Для неизвестного типа возвращается ``.bin`` — файл никогда не должен
+    оставаться без расширения (иначе скачивание агентских файлов даёт имя
+    вида ``file_1a2b3c4d`` без расширения).
+    """
+    if not mime_type:
+        return ""
+    mime = mime_type.split(";")[0].strip().lower()
+    ext = mimetypes.guess_extension(mime)
+    if ext:
+        return ext
+    fallback = {
+        "application/octet-stream": ".bin",
+        "text/markdown": ".md",
+        "text/html": ".html",
+        "text/xml": ".xml",
+        "application/x-7z-compressed": ".7z",
+        "application/x-rar-compressed": ".rar",
+        "application/vnd.rar": ".rar",
     }
-    return mime_to_ext.get(mime_type, "")
+    return fallback.get(mime, ".bin")
 
 
 def _save_file_from_data_url(data_url: str, filename: str) -> str | None:
@@ -384,20 +387,56 @@ if processing:
     with st.status("⏳ Агент думает...", expanded=True) as status:
         placeholder = st.empty()
         start_time = time.time()
+        failed_since: float | None = None
 
         while True:
             elapsed = int(time.time() - start_time)
-            remaining = _MAX_WAIT - elapsed
 
-            # Таймаут — показываем ошибку и выходим из цикла
-            if remaining <= 0:
-                status.update(label="⏱️ Таймаут", state="error")
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": "⏱️ Превышено время ожидания ответа агента. Попробуйте ещё раз.",
-                })
+            # Проверяем статус пользовательского сообщения напрямую
+            row = fetchone(
+                f"SELECT status FROM {_fq_table} WHERE id = %s", msg_id
+            )
+            cur_status = row["status"] if row else None
+
+            if cur_status == "completed":
+                response, response_data = _check_response(msg_id)
+                status.update(label="✅ Ответ получен", state="complete")
+
+                # Формируем полное сообщение с метаданными
+                msg_entry = {"role": "assistant", "content": response or ""}
+                if response_data:
+                    meta = response_data.get("metadata", {})
+                    if meta.get("reasoning"):
+                        msg_entry["reasoning"] = meta["reasoning"]
+                    if response_data.get("media"):
+                        msg_entry["media"] = response_data["media"]
+
+                st.session_state.messages.append(msg_entry)
+                placeholder.empty()
                 st.session_state._processing = False
                 st.rerun()
+
+            if cur_status == "failed":
+                # Статус может вернуться в работу (retry канала). Даём окно
+                # в 5 минут на повторную обработку, и только после него
+                # показываем ошибку окончательно.
+                if failed_since is None:
+                    failed_since = time.time()
+                failed_elapsed = int(time.time() - failed_since)
+                if failed_elapsed >= 300:
+                    status.update(label="❌ Ошибка", state="error")
+                    placeholder.markdown("⚠️ Ошибка обработки. Ответ не получен.")
+                    st.session_state._processing = False
+                    st.rerun()
+                placeholder.markdown(
+                    f"⚠️ Получена ошибка, перепроверяю... {failed_elapsed}с из 300с"
+                )
+                time.sleep(_POLL_INTERVAL)
+                continue
+
+            # status in ('pending', 'processing') — сообщение в работе,
+            # ждём бесконечно, без таймаута.
+            failed_since = None
 
             # Показываем live-состояние: размышления, черновик или просто счётчик
             state = _get_processing_state(msg_id)
@@ -414,24 +453,6 @@ if processing:
                 placeholder.markdown(f"✍️ {state['content'][:200]}...")
             else:
                 placeholder.markdown(f"⏳ Ожидание... {elapsed}с")
-
-            # Проверяем, не появился ли финальный ответ assistant'а
-            response, response_data = _check_response(msg_id)
-            if response is not None:
-                status.update(label="✅ Ответ получен", state="complete")
-                
-                # Формируем полное сообщение с метаданными
-                msg_entry = {"role": "assistant", "content": response}
-                if response_data:
-                    if response_data.get("metadata", {}).get("reasoning"):
-                        msg_entry["reasoning"] = response_data["metadata"]["reasoning"]
-                    if response_data.get("media"):
-                        msg_entry["media"] = response_data["media"]
-                
-                st.session_state.messages.append(msg_entry)
-                placeholder.empty()
-                st.session_state._processing = False
-                st.rerun()
 
             time.sleep(_POLL_INTERVAL)
 
