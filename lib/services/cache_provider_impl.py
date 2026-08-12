@@ -438,21 +438,48 @@ class PostgresDuckDbProvider(CacheProvider):
         sql += " ORDER BY table_name, ordinal_position"
 
         rows = self._conn.execute(sql, params).fetchall()
+        meta = self._read_schema_meta(schema)
         result: Dict[str, Any] = {}
         for row in rows:
             tbl = row[0]
             if tbl not in result:
-                result[tbl] = {"comment": None, "columns": {}}
+                result[tbl] = {"comment": self._meta_value(meta, tbl, None, 0), "columns": {}}
             col_type = row[2]
             max_len = row[4]
-            if max_len and col_type in ("character varying", "character"):
+            # Исходный PG-тип (если сохранён в __schema_meta) — точнее DuckDB
+            pg_type = self._meta_value(meta, tbl, row[1], 1)
+            if pg_type:
+                col_type = pg_type
+            elif max_len and str(col_type).lower() in (
+                "character varying", "character", "varchar", "char",
+            ):
                 col_type = f"varchar({max_len})"
             result[tbl]["columns"][row[1]] = {
                 "type": col_type,
                 "not_null": row[3] == "NO",
-                "comment": None,
+                "comment": self._meta_value(meta, tbl, row[1], 0),
             }
         return {"schema": schema, "tables": result}
+
+    @staticmethod
+    def _meta_value(meta: Dict[tuple, tuple], table: str, column: Optional[str], idx: int) -> Any:
+        val = meta.get((table, column))
+        return val[idx] if val else None
+
+    def _read_schema_meta(self, schema: str) -> Dict[tuple, tuple]:
+        """Комментарии и исходные PG-типы из __nanobot_meta.__schema_meta (снимка)."""
+        result: Dict[tuple, tuple] = {}
+        try:
+            rows = self._conn.execute(
+                'SELECT table_name, column_name, comment, pg_type '
+                'FROM "__nanobot_meta"."__schema_meta" WHERE schema_name = ?',
+                [schema],
+            ).fetchall()
+        except Exception:
+            return result
+        for table, column, comment, pg_type in rows:
+            result[(table, column)] = (comment, pg_type)
+        return result
 
     def query_sql(self, sql: str, params: Optional[list] = None) -> Dict[str, Any]:
         if self._conn is None:

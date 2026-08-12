@@ -549,6 +549,7 @@ def main() -> None:
                 poll_interval_sec=float(acfg.get("poll_interval_sec", 60)),
                 write_table=acfg.get("sync_write_table", "audit_interactions"),
                 write_schema=schema,
+                full_resync_every=int(acfg.get("full_resync_every", 10)),
             )
             return store, sync_service
         except Exception:
@@ -606,6 +607,8 @@ def main() -> None:
             if store is not None and sync_service is not None:
                 store.open()
                 sync_service.set_on_new_records_callback(store.upsert_records)
+                sync_service.set_on_replace_records_callback(store.replace_records)
+                sync_service.set_on_schema_callback(store.ensure_schema)
                 sync_service.set_on_sync_callback(store.publish)
                 sync_service.start(initial_load=True)
                 if store.get_stats().get("publish_path"):

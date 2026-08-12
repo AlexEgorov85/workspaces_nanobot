@@ -248,6 +248,147 @@ class TestPublish:
 
 
 # ---------------------------------------------------------------------------
+# Структура из PG (ensure_schema) и сверка удалений (replace_records)
+# ---------------------------------------------------------------------------
+
+_COLS = [
+    {"name": "__table__", "type": "", "not_null": False, "comment": "Аудиторские проверки"},
+    {"name": "id", "type": "integer", "not_null": True, "comment": "Идентификатор"},
+    {"name": "title", "type": "character varying(500)", "not_null": False, "comment": "Название проверки"},
+    {"name": "amount", "type": "numeric(10,2)", "not_null": False, "comment": None},
+    {"name": "checked_on", "type": "date", "not_null": False, "comment": None},
+]
+
+
+class TestSchema:
+    def test_ensure_schema_creates_table_with_pg_types(self, store):
+        assert store.ensure_schema("oarb.audits", _COLS)
+        sch = store.get_schema()
+        cols = sch["tables"]["audits"]["columns"]
+        # исходные PG-типы сохранены в __schema_meta и возвращаются в get_schema
+        assert cols["id"]["type"] == "integer"
+        assert cols["title"]["type"] == "character varying(500)"
+        assert cols["amount"]["type"] == "numeric(10,2)"
+        assert cols["checked_on"]["type"] == "date"
+        # псевдоколонка __table__ не попадает в реальную структуру
+        assert "__table__" not in cols
+
+    def test_ensure_schema_returns_comments(self, store):
+        store.ensure_schema("oarb.audits", _COLS)
+        t = store.get_schema()["tables"]["audits"]
+        assert t["comment"] == "Аудиторские проверки"
+        assert t["columns"]["id"]["comment"] == "Идентификатор"
+        assert t["columns"]["title"]["comment"] == "Название проверки"
+        assert t["columns"]["amount"]["comment"] is None
+
+    def test_empty_table_created_via_schema(self, store):
+        store.ensure_schema("oarb.audits", _COLS)
+        r = store.query_sql("SELECT COUNT(*) AS n FROM oarb.audits")
+        assert r["status"] == "success"
+        assert r["rows"][0]["n"] == 0
+
+    def test_ensure_schema_adds_new_columns(self, store):
+        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
+        store.ensure_schema("oarb.audits", [
+            {"name": "id", "type": "integer", "not_null": False, "comment": None},
+            {"name": "title", "type": "character varying(500)", "not_null": False, "comment": None},
+            {"name": "status", "type": "character varying(50)", "not_null": False, "comment": None},
+            {"name": "new_col", "type": "bigint", "not_null": False, "comment": "Новая колонка"},
+        ])
+        cols = store.get_schema()["tables"]["audits"]["columns"]
+        assert cols["new_col"]["type"] == "bigint"
+        assert cols["new_col"]["comment"] == "Новая колонка"
+        # старые данные на месте
+        r = store.query_sql("SELECT title FROM oarb.audits WHERE id = 1")
+        assert r["rows"][0]["title"] == "А"
+
+    def test_upsert_after_ensure_schema_preserves_types(self, store):
+        store.ensure_schema("oarb.audits", _COLS)
+        assert store.upsert_records("oarb.audits", [
+            {"id": 1, "title": "П1", "amount": 123.45, "checked_on": "2024-05-21"},
+        ])
+        r = store.query_sql("SELECT id, amount FROM oarb.audits")
+        assert str(r["rows"][0]["amount"]) == "123.45"
+        assert store.get_schema()["tables"]["audits"]["columns"]["amount"]["type"] == "numeric(10,2)"
+
+
+class TestReplace:
+    def test_replace_reconciles_deletions(self, store):
+        store.upsert_records("oarb.audits", [
+            {"id": 1, "title": "А", "status": "open"},
+            {"id": 2, "title": "Б", "status": "closed"},
+        ])
+        assert store.replace_records("oarb.audits", [
+            {"id": 1, "title": "А", "status": "open"},
+        ])
+        r = store.query_sql("SELECT id FROM oarb.audits ORDER BY id")
+        assert [row["id"] for row in r["rows"]] == [1]
+
+    def test_replace_empty_keeps_schema(self, store):
+        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
+        assert store.replace_records("oarb.audits", [])
+        r = store.query_sql("SELECT COUNT(*) AS n FROM oarb.audits")
+        assert r["rows"][0]["n"] == 0
+        assert "audits" in store.get_schema()["tables"]
+
+    def test_replace_preserves_typed_schema(self, store):
+        store.ensure_schema("oarb.audits", _COLS)
+        store.upsert_records("oarb.audits", [
+            {"id": 1, "title": "П1", "amount": 1.5, "checked_on": "2024-05-21"},
+            {"id": 2, "title": "П2", "amount": 2.5, "checked_on": "2024-06-24"},
+        ])
+        store.replace_records("oarb.audits", [
+            {"id": 2, "title": "П2", "amount": 2.5, "checked_on": "2024-06-24"},
+        ])
+        cols = store.get_schema()["tables"]["audits"]["columns"]
+        assert cols["amount"]["type"] == "numeric(10,2)"
+        r = store.query_sql("SELECT id FROM oarb.audits")
+        assert [row["id"] for row in r["rows"]] == [2]
+
+    def test_publish_includes_schema_meta(self, tmp_path):
+        target = tmp_path / "out.duckdb"
+        st = AuditMemoryStore(
+            cache_path="", publish_path=str(target), schema="oarb", tables=["audits"],
+        )
+        st.open()
+        st.ensure_schema("oarb.audits", _COLS)
+        st.upsert_records("oarb.audits", [{"id": 1, "title": "П1", "amount": 1.5, "checked_on": "2024-05-21"}])
+        assert st.publish() is True
+
+        import duckdb
+        ro = duckdb.connect(str(target), read_only=True)
+        meta = ro.execute(
+            "SELECT column_name, comment FROM __nanobot_meta.__schema_meta "
+            "WHERE schema_name = 'oarb' AND table_name = 'audits'"
+        ).fetchall()
+        ro.close()
+        comments = {row[0]: row[1] for row in meta}
+        assert comments[None] == "Аудиторские проверки"
+        assert comments["id"] == "Идентификатор"
+        assert comments["title"] == "Название проверки"
+        st.close()
+
+
+def test_map_pg_type():
+    from lib.services.audit_memory_store import _map_pg_type
+
+    assert _map_pg_type("integer") == "INTEGER"
+    assert _map_pg_type("bigint") == "BIGINT"
+    assert _map_pg_type("boolean") == "BOOLEAN"
+    assert _map_pg_type("double precision") == "DOUBLE"
+    assert _map_pg_type("text") == "VARCHAR"
+    assert _map_pg_type("character varying") == "VARCHAR"
+    assert _map_pg_type("character varying(500)") == "character varying(500)"
+    assert _map_pg_type("numeric(10,2)") == "DECIMAL(10,2)"
+    assert _map_pg_type("numeric") == "DOUBLE"
+    assert _map_pg_type("timestamp with time zone") == "TIMESTAMPTZ"
+    assert _map_pg_type("jsonb") == "JSON"
+    assert _map_pg_type("uuid") == "UUID"
+    assert _map_pg_type("something_exotic") == "VARCHAR"
+    assert _map_pg_type("") == "VARCHAR"
+
+
+# ---------------------------------------------------------------------------
 # Статистика
 # ---------------------------------------------------------------------------
 

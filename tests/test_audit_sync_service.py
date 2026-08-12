@@ -45,6 +45,9 @@ class ScriptedCursor:
     def fetchall(self):
         return self._rows
 
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
     def close(self):
         self.closed = True
 
@@ -261,6 +264,112 @@ class TestSyncCallback:
             time.sleep(0.2)
             s.stop(timeout_sec=2.0)
         assert s.get_stats()["errors"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Структура из PG (schema callback) и полная пересинхронизация (удаления)
+# ---------------------------------------------------------------------------
+
+_SCHEMA_COLUMNS = {
+    "audits": [
+        {"column_name": "id", "data_type": "integer", "is_nullable": "NO",
+         "character_maximum_length": None, "numeric_precision": None,
+         "numeric_scale": None, "column_comment": "Идентификатор"},
+        {"column_name": "title", "data_type": "character varying", "is_nullable": "YES",
+         "character_maximum_length": 500, "numeric_precision": None,
+         "numeric_scale": None, "column_comment": "Название проверки"},
+        {"column_name": "amount", "data_type": "numeric", "is_nullable": "YES",
+         "character_maximum_length": None, "numeric_precision": 10,
+         "numeric_scale": 2, "column_comment": None},
+    ],
+}
+_TABLE_COMMENTS = {"audits": "Аудиторские проверки"}
+
+
+def _schema_and_rows_for(sql, params):
+    low = sql.lower()
+    if "information_schema.columns" in low:
+        tbl = params[1] if params and len(params) > 1 else _table_from_sql(sql)
+        return _SCHEMA_COLUMNS.get(tbl, [])
+    if "obj_description" in low:
+        tbl = params[1] if params and len(params) > 1 else ""
+        comment = _TABLE_COMMENTS.get(tbl)
+        return [(comment,)] if comment else []
+    return _standard_rows_for(sql, params)
+
+
+class TestSchemaAndResync:
+    def test_schema_callback_receives_pg_columns(self):
+        received = []
+        conn = ScriptedConn(_schema_and_rows_for)
+        s = AuditSyncService(
+            dsn="postgresql://u@h/db", tables=["audits"],
+            poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=0,
+        )
+        s.set_on_schema_callback(lambda table, columns: received.append((table, columns)))
+        with patch("psycopg2.connect", return_value=conn):
+            s.start(initial_load=True)
+            time.sleep(0.25)
+            s.stop(timeout_sec=2.0)
+        assert received
+        table, columns = received[0]
+        assert table == "audits"
+        by_name = {c["name"]: c for c in columns}
+        assert by_name["id"]["type"] == "integer"
+        assert by_name["id"]["comment"] == "Идентификатор"
+        assert by_name["title"]["type"] == "character varying(500)"
+        assert by_name["amount"]["type"] == "numeric(10,2)"
+        # комментарий таблицы приходит псевдоколонкой __table__
+        assert by_name["__table__"]["comment"] == "Аудиторские проверки"
+
+    def test_schema_callback_not_called_without_schema_rows(self):
+        received = []
+        conn = ScriptedConn(_standard_rows_for)
+        s = AuditSyncService(
+            dsn="postgresql://u@h/db", tables=["audits"],
+            poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=0,
+        )
+        s.set_on_schema_callback(lambda table, columns: received.append((table, columns)))
+        with patch("psycopg2.connect", return_value=conn):
+            s.start(initial_load=True)
+            time.sleep(0.2)
+            s.stop(timeout_sec=2.0)
+        assert received == []
+
+    def test_periodic_full_resync_invokes_replace(self):
+        replaced = []
+        conn = ScriptedConn(_schema_and_rows_for)
+        s = AuditSyncService(
+            dsn="postgresql://u@h/db", tables=["audits"],
+            poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=1,
+        )
+        s.set_on_replace_records_callback(
+            lambda table, rows: replaced.append((table, [dict(r) for r in rows]))
+        )
+        with patch("psycopg2.connect", return_value=conn):
+            s.start(initial_load=True)
+            time.sleep(0.4)
+            s.stop(timeout_sec=2.0)
+        assert replaced
+        assert any(table == "audits" for table, _ in replaced)
+        assert s.get_stats()["full_resyncs"] >= 1
+
+    def test_full_resync_disabled_by_zero(self):
+        replaced = []
+        conn = ScriptedConn(_schema_and_rows_for)
+        s = AuditSyncService(
+            dsn="postgresql://u@h/db", tables=["audits"],
+            poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=0,
+        )
+        s.set_on_replace_records_callback(
+            lambda table, rows: replaced.append((table, [dict(r) for r in rows]))
+        )
+        with patch("psycopg2.connect", return_value=conn):
+            s.start(initial_load=True)
+            time.sleep(0.3)
+            s.stop(timeout_sec=2.0)
+        assert replaced == []
+        assert s.get_stats()["full_resyncs"] == 0
 
 
 class TestReconnect:

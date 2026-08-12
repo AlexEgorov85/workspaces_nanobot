@@ -59,6 +59,64 @@ def _infer_duckdb_type(values) -> str:
     return "VARCHAR"
 
 
+# Внутренняя таблица метаданных схемы (комментарии таблиц/колонок).
+_META_TABLE = "__schema_meta"
+# Схема, в которой живёт мета-таблица (общая для всех зеркал).
+_META_SCHEMA = "__nanobot_meta"
+
+_PG_TO_DUCKDB = {
+    "boolean": "BOOLEAN",
+    "smallint": "SMALLINT",
+    "integer": "INTEGER",
+    "bigint": "BIGINT",
+    "real": "REAL",
+    "double precision": "DOUBLE",
+    "text": "VARCHAR",
+    "date": "DATE",
+    "time without time zone": "TIME",
+    "time with time zone": "TIME",
+    "timestamp without time zone": "TIMESTAMP",
+    "timestamp with time zone": "TIMESTAMPTZ",
+    "json": "JSON",
+    "jsonb": "JSON",
+    "uuid": "UUID",
+    "bytea": "BLOB",
+    "interval": "INTERVAL",
+}
+
+
+def _map_pg_type(pg_type: str) -> str:
+    """Смаппить PG-тип колонки в DuckDB-тип.
+
+    Возвращает тип, пригодный для ``CREATE TABLE`` / ``ALTER ADD COLUMN``
+    в DuckDB. Неизвестные/сложные типы сводятся к VARCHAR, чтобы не ломать
+    создание таблицы.
+    """
+    t = (pg_type or "").strip().lower()
+    if not t:
+        return "VARCHAR"
+    # character varying(n) / character(n)
+    if t.startswith("character varying") or t.startswith("varchar"):
+        return t if "(" in t else "VARCHAR"
+    if t.startswith("character(") or t.startswith("char("):
+        return t
+    if t.startswith("numeric") or t.startswith("decimal"):
+        m = re.match(r"^(numeric|decimal)\((\d+)(?:\s*,\s*(\d+))?\)$", t)
+        if m:
+            prec, scale = m.group(2), m.group(3) or "0"
+            return f"DECIMAL({prec},{scale})"
+        return "DOUBLE"
+    if t.startswith("timestamp"):
+        return "TIMESTAMPTZ" if "with time zone" in t else "TIMESTAMP"
+    if t.startswith("time"):
+        return "TIME"
+    if t.startswith("character") and not t == "character":
+        return "CHAR"
+    if t.startswith("array") or t.startswith("text[]") or t.startswith("_") or t.endswith("[]"):
+        return "VARCHAR"  # массивы в DuckDB сложны — сводим к строке-представлению
+    return _PG_TO_DUCKDB.get(t, "VARCHAR")
+
+
 class AuditMemoryStore:
     """Локальное хранилище данных аудита: DuckDB-кэш + FAISS-индексы.
 
@@ -92,6 +150,8 @@ class AuditMemoryStore:
         self._index_cache: Dict[str, tuple[Any, Optional[dict]]] = {}
         self._dirty_sources: set[str] = set()
         self._dirty = False               # были новые данные с момента последнего publish
+        # Описания колонок (из PG information_schema) для пересоздания пустых таблиц
+        self._schema_defs: Dict[str, List[Dict[str, Any]]] = {}
 
         # статистика для мониторинга
         self._upserts = 0
@@ -188,6 +248,194 @@ class AuditMemoryStore:
                 print(f"[memory_store] Ошибка upsert {table}: {e}", file=sys.stderr)
                 return False
 
+    def ensure_schema(self, table: str, columns: List[Dict[str, Any]]) -> bool:
+        """Создать таблицу по описанию колонок из источника (типы, NOT NULL, комментарии).
+
+        Используется вместо вывода структуры из значений: так в снимок попадают
+        честные PG-типы (маппинг ``_map_pg_type``) и пустые таблицы тоже
+        создаются. Комментарии сохраняются в ``__schema_meta`` и возвращаются
+        через :meth:`get_schema`.
+
+        Args:
+            table: полное имя таблицы (``oarb.audits``).
+            columns: список описаний колонок
+                ``[{"name", "type", "not_null", "comment"}, ...]``.
+
+        Returns:
+            True при успехе, False при ошибке.
+        """
+        if not columns:
+            return True
+        with self._lock:
+            try:
+                self._open_locked()
+                self._ensure_schema_locked(table, columns)
+                return True
+            except Exception as e:
+                self._upsert_errors += 1
+                self._last_error = f"ensure_schema {table}: {e}"
+                print(f"[memory_store] Ошибка ensure_schema {table}: {e}", file=sys.stderr)
+                return False
+
+    def _ensure_schema_locked(self, table: str, columns: List[Dict[str, Any]]) -> None:
+        schema, name = _split_table(table)
+        schema = schema or self._schema
+        if not name:
+            raise ValueError(f"Некорректное имя таблицы: {table!r}")
+
+        conn = self._conn
+        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        full = f'"{schema}"."{name}"'
+        self._schema_defs[f"{schema}.{name}"] = list(columns)
+        # "__table__" — не настоящая колонка, а комментарий таблицы
+        real_cols = [c for c in columns if c.get("name") != "__table__"]
+
+        exists = conn.execute(
+            "SELECT 1 FROM information_schema.tables "
+            'WHERE table_schema = ? AND table_name = ?', [schema, name]
+        ).fetchone()
+
+        if not exists:
+            cols_sql = ", ".join(
+                f'"{c["name"]}" {_map_pg_type(c.get("type", ""))}'
+                for c in real_cols
+            )
+            conn.execute(f"CREATE TABLE {full} ({cols_sql})")
+        else:
+            existing = [r[0] for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                'WHERE table_schema = ? AND table_name = ?', [schema, name]
+            ).fetchall()]
+            for c in real_cols:
+                if c["name"] not in existing:
+                    conn.execute(
+                        f'ALTER TABLE {full} ADD COLUMN "{c["name"]}" '
+                        f'{_map_pg_type(c.get("type", ""))}'
+                    )
+
+        self._save_schema_meta(schema, name, columns)
+
+    def replace_records(self, table: str, records: List[Dict[str, Any]]) -> bool:
+        """Полностью пересоздать содержимое таблицы из полного батча.
+
+        Используется при полной пересинхронизации (сверка удалённых строк):
+        структура таблицы сохраняется (из ``ensure_schema`` либо существующей),
+        удаляются строки, отсутствующие в батче.
+
+        Returns:
+            True при успехе, False при ошибке.
+        """
+        with self._lock:
+            try:
+                self._open_locked()
+                self._replace_locked(table, records)
+                self._upserts += 1
+                self._last_upsert_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                self._dirty = True
+                self._mark_vector_sources_dirty(table, records)
+                return True
+            except Exception as e:
+                self._upsert_errors += 1
+                self._last_error = f"replace {table}: {e}"
+                print(f"[memory_store] Ошибка replace {table}: {e}", file=sys.stderr)
+                return False
+
+    def _replace_locked(self, table: str, records: List[Dict[str, Any]]) -> None:
+        schema, name = _split_table(table)
+        schema = schema or self._schema
+        if not name:
+            raise ValueError(f"Некорректное имя таблицы: {table!r}")
+
+        conn = self._conn
+        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        full = f'"{schema}"."{name}"'
+
+        exists = conn.execute(
+            "SELECT 1 FROM information_schema.tables "
+            'WHERE table_schema = ? AND table_name = ?', [schema, name]
+        ).fetchone()
+        if not exists:
+            # пустой источник без сохранённого описания — создаём из батча
+            if records:
+                self._upsert_locked(table, records)
+            return
+
+        conn.execute(f"DELETE FROM {full}")
+        if not records:
+            return
+
+        import pandas as pd
+
+        df = pd.DataFrame(records)
+        if df.empty or df.shape[1] == 0:
+            return
+        existing_cols = [r[0] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            'WHERE table_schema = ? AND table_name = ?', [schema, name]
+        ).fetchall()]
+        insert_cols = [c for c in df.columns if c in existing_cols]
+        if not insert_cols:
+            return
+        conn.register("_replace_df", df)
+        cols_sql = ", ".join(f'"{c}"' for c in insert_cols)
+        conn.execute(
+            f"INSERT INTO {full} ({cols_sql}) "
+            f"SELECT {cols_sql} FROM _replace_df"
+        )
+        conn.unregister("_replace_df")
+
+    # -- метаданные схемы (комментарии + исходные PG-типы) -------------------
+
+    def _ensure_meta_table(self) -> None:
+        conn = self._conn
+        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{_META_SCHEMA}"')
+        conn.execute(
+            f'CREATE TABLE IF NOT EXISTS "{_META_SCHEMA}"."{_META_TABLE}" ('
+            "schema_name TEXT, table_name TEXT, column_name TEXT, "
+            "comment TEXT, pg_type TEXT)"
+        )
+
+    def _save_schema_meta(self, schema: str, table: str, columns: List[Dict[str, Any]]) -> None:
+        conn = self._conn
+        self._ensure_meta_table()
+        table_comment = next((c.get("comment") for c in columns if c.get("name") == "__table__"), None)
+        conn.execute(
+            f'DELETE FROM "{_META_SCHEMA}"."{_META_TABLE}" '
+            "WHERE schema_name = ? AND table_name = ?", [schema, table]
+        )
+        rows = []
+        if table_comment:
+            rows.append((schema, table, None, table_comment, None))
+        for c in columns:
+            if c.get("name") == "__table__":
+                continue
+            rows.append((schema, table, c["name"], c.get("comment"), c.get("type")))
+        if rows:
+            conn.executemany(
+                f'INSERT INTO "{_META_SCHEMA}"."{_META_TABLE}" '
+                "(schema_name, table_name, column_name, comment, pg_type) "
+                "VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+
+    def _load_schema_meta(self, schema: str) -> Dict[tuple, tuple]:
+        """Метаданные схемы: {(table, col|None) -> (comment, pg_type)}."""
+        result: Dict[tuple, tuple] = {}
+        if self._conn is None:
+            return result
+        try:
+            self._ensure_meta_table()
+            rows = self._conn.execute(
+                f'SELECT table_name, column_name, comment, pg_type '
+                f'FROM "{_META_SCHEMA}"."{_META_TABLE}" WHERE schema_name = ?',
+                [schema],
+            ).fetchall()
+        except Exception:
+            return result
+        for table, column, comment, pg_type in rows:
+            result[(table, column)] = (comment, pg_type)
+        return result
+
     def _upsert_locked(self, table: str, records: List[Dict[str, Any]]) -> None:
         schema, name = _split_table(table)
         schema = schema or self._schema
@@ -211,10 +459,18 @@ class AuditMemoryStore:
         ).fetchone()
 
         if not exists:
-            conn.register("_upsert_df", df)
-            conn.execute(f"CREATE TABLE {full} AS SELECT * FROM _upsert_df")
-            conn.unregister("_upsert_df")
-            return
+            defs = self._schema_defs.get(f"{schema}.{name}")
+            if defs:
+                self._ensure_schema_locked(table, defs)
+                existing_cols = [r[0] for r in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    'WHERE table_schema = ? AND table_name = ?', [schema, name]
+                ).fetchall()]
+            else:
+                conn.register("_upsert_df", df)
+                conn.execute(f"CREATE TABLE {full} AS SELECT * FROM _upsert_df")
+                conn.unregister("_upsert_df")
+                return
 
         existing_cols = [r[0] for r in conn.execute(
             "SELECT column_name FROM information_schema.columns "
@@ -318,6 +574,7 @@ class AuditMemoryStore:
                 tmp_literal = "'" + str(tmp).replace("'", "''") + "'"
                 self._conn.execute(f"ATTACH {tmp_literal} AS __out (READ_WRITE)")
                 try:
+                    copied = set()
                     for t in out:
                         schema, name = _split_table(t)
                         schema = schema or self._schema
@@ -333,6 +590,23 @@ class AuditMemoryStore:
                         self._conn.execute(
                             f'CREATE OR REPLACE TABLE __out."{schema}"."{name}" '
                             f'AS SELECT * FROM "{schema}"."{name}"'
+                        )
+                        copied.add((schema, name))
+                    # метаданные схемы (комментарии) — если есть что копировать
+                    meta_exists = self._conn.execute(
+                        f"SELECT 1 FROM information_schema.tables "
+                        f"WHERE table_schema = ? AND table_name = ?",
+                        [_META_SCHEMA, _META_TABLE],
+                    ).fetchone()
+                    if meta_exists is not None and copied:
+                        src_schemas = [c[0] for c in copied]
+                        placeholders = ",".join("?" for _ in src_schemas)
+                        self._conn.execute(f'CREATE SCHEMA IF NOT EXISTS __out."{_META_SCHEMA}"')
+                        self._conn.execute(
+                            f'CREATE OR REPLACE TABLE __out."{_META_SCHEMA}"."{_META_TABLE}" '
+                            f"AS SELECT * FROM \"{_META_SCHEMA}\".\"{_META_TABLE}\" "
+                            f"WHERE schema_name IN ({placeholders})",
+                            src_schemas,
                         )
                 finally:
                     self._conn.execute("DETACH __out")
@@ -377,21 +651,33 @@ class AuditMemoryStore:
             sql += " ORDER BY table_name, ordinal_position"
 
             rows = self._conn.execute(sql, params).fetchall()
+            meta = self._load_schema_meta(schema)
             result: Dict[str, Any] = {}
             for row in rows:
                 tbl = row[0]
                 if tbl not in result:
-                    result[tbl] = {"comment": None, "columns": {}}
+                    result[tbl] = {"comment": self._meta_value(meta, tbl, None, 0), "columns": {}}
                 col_type = row[2]
                 max_len = row[4]
-                if max_len and col_type in ("character varying", "character"):
+                # Исходный PG-тип (если сохранили в __schema_meta) — точнее DuckDB
+                pg_type = self._meta_value(meta, tbl, row[1], 1)
+                if pg_type:
+                    col_type = pg_type
+                elif max_len and str(col_type).lower() in (
+                    "character varying", "character", "varchar", "char",
+                ):
                     col_type = f"varchar({max_len})"
                 result[tbl]["columns"][row[1]] = {
                     "type": col_type,
                     "not_null": row[3] == "NO",
-                    "comment": None,
+                    "comment": self._meta_value(meta, tbl, row[1], 0),
                 }
             return {"schema": schema, "tables": result}
+
+    @staticmethod
+    def _meta_value(meta: Dict[tuple, tuple], table: str, column: Optional[str], idx: int) -> Any:
+        val = meta.get((table, column))
+        return val[idx] if val else None
 
     def query_sql(self, sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
         with self._lock:

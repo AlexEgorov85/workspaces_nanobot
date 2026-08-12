@@ -59,6 +59,7 @@ class AuditSyncService:
         write_schema: str = "oarb",
         max_queue_size: int = 10000,
         reconnect_backoff: float = 1.0,
+        full_resync_every: int = 10,
     ) -> None:
         self._dsn = dsn
         self._schema = schema
@@ -69,6 +70,8 @@ class AuditSyncService:
         self._write_schema = write_schema
         self._max_queue_size = max_queue_size
         self._reconnect_backoff = reconnect_backoff
+        self._full_resync_every = max(0, int(full_resync_every))
+        self._resync_counter = 0
 
         self._queue: "queue.Queue[tuple[str, Any]]" = queue.Queue(maxsize=max_queue_size)
         self._stop_event = threading.Event()
@@ -82,11 +85,14 @@ class AuditSyncService:
         # Инкрементальный поллинг: {table: последнее значение track-колонки}
         self._last_sync: Dict[str, Any] = {}
         self._on_new_records: Optional[Callable[[str, List[dict]], None]] = None
+        self._on_replace_records: Optional[Callable[[str, List[dict]], None]] = None
+        self._on_schema: Optional[Callable[[str, List[dict]], None]] = None
         self._on_sync_callback: Optional[Callable[[], None]] = None
 
         self._stats: Dict[str, Any] = {
             "started_at": None,
             "polls": 0,
+            "full_resyncs": 0,
             "writes_queued": 0,
             "writes_written": 0,
             "writes_failed": 0,
@@ -105,6 +111,28 @@ class AuditSyncService:
     ) -> None:
         """Задать callback для новых/изменённых строк: ``callback(table, records)``."""
         self._on_new_records = callback
+
+    def set_on_replace_records_callback(
+        self, callback: Callable[[str, List[dict]], None]
+    ) -> None:
+        """Задать callback для полной пересинхронизации: ``callback(table, records)``.
+
+        Вызывается при периодической полной перезагрузке таблицы (сверка
+        удалённых строк). Обычно это ``AuditMemoryStore.replace_records``.
+        """
+        self._on_replace_records = callback
+
+    def set_on_schema_callback(
+        self, callback: Callable[[str, List[dict]], None]
+    ) -> None:
+        """Задать callback для описания колонок таблицы из PG information_schema.
+
+        Вызывается перед загрузкой/полной пересинхронизацией таблицы:
+        ``callback(table, columns)``, где ``columns`` — список описаний
+        ``[{"name", "type", "not_null", "comment"}, ...]``. Обычно это
+        ``AuditMemoryStore.ensure_schema``.
+        """
+        self._on_schema = callback
 
     def set_on_sync_callback(self, callback: Callable[[], None]) -> None:
         """Задать callback по завершении цикла синхронизации.
@@ -185,6 +213,7 @@ class AuditSyncService:
                 "connected": connected,
                 "queue_size": self._queue.qsize(),
                 "last_sync": dict(self._last_sync),
+                "full_resync_every": self._full_resync_every,
             }
         )
         return stats
@@ -269,6 +298,7 @@ class AuditSyncService:
             if not self._running:
                 return
             try:
+                self._ensure_table_schema(table)
                 rows, last = self._fetch_all(table)
                 self._dispatch(table, rows)
                 if last is not None:
@@ -304,6 +334,21 @@ class AuditSyncService:
                     self._stats["errors"] += 1
 
     def _poll_table(self, table: str) -> None:
+        # Периодическая полная пересинхронизация — сверка удалённых строк.
+        if self._full_resync_every > 0:
+            self._resync_counter += 1
+            if self._resync_counter >= self._full_resync_every:
+                self._resync_counter = 0
+                with self._state_lock:
+                    self._stats["full_resyncs"] += 1
+                self._ensure_table_schema(table)
+                rows, last = self._fetch_all(table)
+                self._dispatch_replace(table, rows)
+                # курсор не откатываем: новое значение только если оно больше
+                prev = self._last_sync.get(table)
+                if last is not None and (prev is None or last > prev):
+                    self._last_sync[table] = last
+                return
         track_col = self._track_column_for(table)
         last = self._last_sync.get(table)
         if last is None:
@@ -326,6 +371,97 @@ class AuditSyncService:
             except Exception:
                 with self._state_lock:
                     self._stats["errors"] += 1
+
+    def _dispatch_replace(self, table: str, rows: List[dict]) -> None:
+        """Полная пересинхронизация: заменить содержимое таблицы целиком."""
+        callback = self._on_replace_records
+        if callback is None:
+            return
+        try:
+            callback(table, rows)
+        except Exception:
+            with self._state_lock:
+                self._stats["errors"] += 1
+
+    def _ensure_table_schema(self, table: str) -> None:
+        """Передать описание колонок таблицы (PG information_schema) в store."""
+        callback = self._on_schema
+        if callback is None:
+            return
+        columns = self._fetch_schema(table)
+        if not columns:
+            return
+        try:
+            callback(table, columns)
+        except Exception:
+            with self._state_lock:
+                self._stats["errors"] += 1
+
+    def _fetch_schema(self, table: str) -> List[dict]:
+        """Описание колонок таблицы из PG: типы, NOT NULL, комментарии."""
+        schema, name = self._split_table(table)
+        if not name:
+            return []
+        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur.execute(
+                "SELECT c.column_name, c.data_type, c.is_nullable, "
+                "c.character_maximum_length, c.numeric_precision, c.numeric_scale, "
+                "pgd.description AS column_comment "
+                "FROM information_schema.columns c "
+                "JOIN pg_class pc ON pc.relname = c.table_name "
+                "AND pc.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = %s) "
+                "LEFT JOIN pg_catalog.pg_description pgd "
+                "ON pgd.objsubid = c.ordinal_position AND pgd.objoid = pc.oid "
+                "WHERE c.table_schema = %s AND c.table_name = %s "
+                "ORDER BY c.ordinal_position",
+                [schema, name],
+            )
+            col_rows = [dict(r) for r in cur.fetchall()]
+        finally:
+            cur.close()
+
+        cur = self._conn.cursor()
+        try:
+            cur.execute(
+                "SELECT obj_description(pc.oid) FROM pg_class pc "
+                "JOIN pg_namespace n ON n.oid = pc.relnamespace "
+                "WHERE n.nspname = %s AND pc.relname = %s",
+                [schema, name],
+            )
+            row = cur.fetchone()
+        finally:
+            cur.close()
+        table_comment = row[0] if row else None
+
+        columns: List[dict] = []
+        if table_comment:
+            columns.append({
+                "name": "__table__", "type": "", "not_null": False,
+                "comment": table_comment,
+            })
+        for r in col_rows:
+            dt = r["data_type"]
+            if dt == "character varying" and r["character_maximum_length"]:
+                dt = f"character varying({r['character_maximum_length']})"
+            elif dt == "character" and r["character_maximum_length"]:
+                dt = f"character({r['character_maximum_length']})"
+            elif dt == "numeric" and r["numeric_precision"]:
+                dt = f"numeric({r['numeric_precision']},{r.get('numeric_scale') or 0})"
+            columns.append({
+                "name": r["column_name"],
+                "type": dt,
+                "not_null": r["is_nullable"] == "NO",
+                "comment": r["column_comment"],
+            })
+        return columns
+
+    def _split_table(self, table: str) -> tuple[str, str]:
+        """Разбить 'oarb.audits' на (schema, table)."""
+        if "." in table:
+            schema, name = table.split(".", 1)
+            return schema, name
+        return self._schema, table
 
     # ------------------------------------------------------------------
     # SQL-доступ (единственное подключение)

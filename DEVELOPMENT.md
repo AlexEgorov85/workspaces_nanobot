@@ -17,6 +17,7 @@
 4. [Конфигурация навыка](#конфигурация-навыка)
 5. [CLI навыка: режимы](#cli-навыка-режимы)
 6. [Жизненный цикл кеша](#жизненный-цикл-кеша)
+   - [Управление синхронизацией](#управление-синхронизацией)
 7. [Векторная индексация](#векторная-индексация)
 8. [SQL-скрипты: создание таблиц](#sql-скрипты-создание-таблиц)
 9. [Тестирование](#тестирование)
@@ -170,6 +171,7 @@ nanobot/
 | `in_memory_engine` | Движок кеша | `duckdb` |
 | `in_memory_cache_path` | Путь к файлу кеша (отн. навыка) | `cache/audit_cache.duckdb` |
 | `poll_interval_sec` | Период инкрементального поллинга PG в `AuditSyncService` | `60` |
+| `full_resync_every` | Полная перезагрузка таблицы каждые N циклов (сверка удалений) | `10` |
 | `sync_write_table` | Таблица журнала взаимодействий (создаётся автоматически) | `audit_interactions` |
 | `embedding_base_url` | Ollama `/api/embed` | `http://localhost:11434/api/embed` |
 | `embedding_model` | Модель эмбеддинга | `mxbai-embed-large:latest` |
@@ -248,20 +250,31 @@ gateway автоматически — запустите его (python gateway
   `poll_interval_sec` (по умолч. 60 с) инкрементально опрашивает таблицы по
   track-колонке (`updated_at`; для `audit_vectors` — `id`). Новые/изменённые
   строки передаёт в callback `on_new_records` → `AuditMemoryStore.upsert_records`.
+  Структуру таблиц собирает из PG `information_schema` (+ `pg_description`):
+  колонки, типы, NOT NULL, комментарии → callback `on_schema` →
+  `AuditMemoryStore.ensure_schema` (создание пустых таблиц, типы из PG).
+  Каждые `full_resync_every` циклов (по умолч. 10) делает полную перезагрузку
+  таблицы через `on_replace_records` → `AuditMemoryStore.replace_records`
+  (сверка удалённых строк; курсор поллинга не откатывается).
   Дополнительно создаёт таблицу журнала `oarb.audit_interactions`
   (`sync_write_table`), куда через `submit_write()` пишутся ответы агента.
 - **`AuditMemoryStore`** — живое зеркало в чисто in-memory DuckDB
-  (`cache_path=""`) + FAISS-индексы. `publish()` атомарно записывает снимок
-  таблиц (ATTACH во временный файл → `os.replace`) в `publish_path` =
-  `in_memory_cache_path` навыка. Без изменений (`_dirty` = False) файл не
-  перезаписывается; если снимок занят читателем (CLI) — публикация откладывается
-  до следующего цикла, ошибка не теряет данные.
+  (`cache_path=""`) + FAISS-индексы. `ensure_schema()` создаёт таблицы с типами
+  из PG и сохраняет комментарии + исходные PG-типы в мета-таблицу
+  `__nanobot_meta.__schema_meta` (входит в снимок). `get_schema()` возвращает
+  исходные PG-типы и комментарии (без них — DuckDB-тип из information_schema).
+  `publish()` атомарно записывает снимок таблиц (ATTACH во временный файл →
+  `os.replace`) в `publish_path` = `in_memory_cache_path` навыка. Без изменений
+  (`_dirty` = False) файл не перезаписывается; если снимок занят читателем
+  (CLI) — публикация откладывается до следующего цикла, ошибка не теряет данные.
 
 Схема в `gateway.py::run()`:
 
 ```
 _build_audit_services() ──► (store, sync_service)
 sync_service.set_on_new_records_callback(store.upsert_records)
+sync_service.set_on_replace_records_callback(store.replace_records)
+sync_service.set_on_schema_callback(store.ensure_schema)
 sync_service.set_on_sync_callback(store.publish)     # снимок после каждого цикла
 sync_service.start(initial_load=True)                # полная загрузка + поллинг
 _preload_vector_indexes(store)                       # прогрев FAISS в память
@@ -277,6 +290,102 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 **cli_agent.py** по-прежнему содержит унаследованную фоновую загрузку/свежесть
 кеша (`load_cache_from_postgres` / `check_cache_stale`) как резерв; основной
 владелец и источник снимка — `gateway.py`.
+
+### 🔧 Управление синхронизацией
+
+#### Полный цикл обновления данных (что происходит по шагам)
+
+1. **Старт gateway** (`gateway.py::run()`): `_build_audit_services()` читает
+   секцию `skills.audit_analyzer` из `project.json`. Сервисы создаются, только
+   если `in_memory_enabled: true`, задан DSN и есть таблицы; иначе — `(None, None)`
+   и синхронизация не запускается.
+2. **Initial load**: `AuditSyncService._do_initial_load()` для каждой таблицы из
+   `db_tables` (+ таблица векторов) делает:
+   - `_fetch_schema()` — запрос структуры из PG `information_schema.columns`
+     + `pg_description` (колонки, типы, NOT NULL, комментарии таблиц/колонок);
+   - `_ensure_table_schema()` → колбека `on_schema` → `store.ensure_schema()` —
+     создаёт таблицу в in-memory DuckDB **с типами из PG** (включая пустые);
+   - `_fetch_all()` → `SELECT *` → колбека `on_new_records` → `store.upsert_records()`.
+3. **Поллинг**: worker-поток каждые `poll_interval_sec` вызывает
+   `_poll_table()`: `SELECT * WHERE "<track>" > <последняя_метка>`. Track-колонка:
+   `updated_at` (доменные таблицы) или `id` (`audit_vectors`). Новые/изменённые
+   строки → `upsert_records()` (upsert по `id`: DELETE + INSERT).
+4. **Публикация снимка**: после initial load и каждого цикла поллинга
+   `_fire_sync_callback()` → `store.publish()` — атомарный снимок (ATTACH во
+   временный файл → `os.replace`) в файл кеша навыка. `publish()` — no-op, если
+   данных не менялось (`_dirty = False`) или `publish_path` пуст.
+5. **Полная пересинхронизация** (сверка удалений): каждые `full_resync_every`
+   циклов поллинга `_poll_table()` вместо инкрементального запроса делает
+   `_fetch_all()` + `_dispatch_replace()` → `store.replace_records()` — таблица
+   перезаписывается целиком (структура и типы сохраняются), удалённые в PG
+   строки исчезают. Курсор поллинга не откатывается (новое значение только если
+   больше текущего).
+6. **Журнал ответов**: при старте создаётся таблица
+   `"<schema>"."<sync_write_table>"` (`audit_interactions`); ответы агента
+   ставятся в очередь через `submit_write()` и записываются worker-потоком.
+7. **Завершение**: при остановке gateway `sync_service.stop()` дописывает
+   очередь, затем в `finally` — финальный `store.publish()` и `store.close()`.
+
+#### Как связаны компоненты (callbacks)
+
+Колбеки подключаются в `gateway.py::run()` (строки ~608-613) — это единственная
+точка связывания `AuditSyncService` и `AuditMemoryStore`:
+
+| Событие в AuditSyncService | Колбека | Метод store | Что делает |
+|---------------------------|---------|-------------|-----------|
+| новые/изменённые строки | `set_on_new_records_callback` | `upsert_records` | инкрементальный апдейт |
+| полная перезагрузка таблицы | `set_on_replace_records_callback` | `replace_records` | сверка удалений |
+| структура из PG | `set_on_schema_callback` | `ensure_schema` | типы, NOT NULL, комментарии |
+| завершение цикла | `set_on_sync_callback` | `publish` | публикация снимка для CLI |
+
+Чтобы изменить поведение (например, публиковать снимок реже или дополнительно
+инвалидировать индексы) — правишь именно эту секцию `gateway.py`.
+
+#### Управляющие ключи (`skills.audit_analyzer` в `project.json`)
+
+| Ключ | Где читается | По умолч. | Эффект |
+|------|-------------|-----------|--------|
+| `in_memory_enabled` | `gateway.py:511` | `false` | Выключает весь кеш и синхронизацию: CLI ходит напрямую в PG. `true` — включает |
+| `in_memory_cache_path` | `gateway.py:524` | `cache/audit_cache.duckdb` | Куда публикуется снимок (отн. `workspace/skills/audit_analyzer/`). Меняя — меняешь файл, который читает CLI |
+| `db_schema` / `db_tables` | `gateway.py:516-518` | `oarb` / 4 таблицы | Какие таблицы синхронизировать. Список — массив строк; добавил таблицу → она появится в кеше после следующего цикла |
+| `poll_interval_sec` | `gateway.py:549` | `60` | Частота инкрементального поллинга, сек. Меньше → свежее кеш, больше запросов к PG |
+| `full_resync_every` | `gateway.py:552` | `10` | Полная перезагрузка таблиц каждые N циклов поллинга. `0` — отключить (удалённые строки останутся в кеше) |
+| `sync_write_table` | `gateway.py:550` | `audit_interactions` | Таблица журнала ответов агента (создаётся автоматически в схеме `db_schema`) |
+| `mode_vector_db_table` | `gateway.py:517` | `oarb.audit_vectors` | Таблица векторов, включается в синхронизацию и прогревается в FAISS |
+
+`config.py` мержит `project.json` в `SETTINGS`; после правки `project.json`
+перезапуск gateway обязателен.
+
+#### Требования к таблицам источника
+
+- Колонка `id` (для upsert `DELETE + INSERT` по ключу; если её нет — таблица
+  пересоздаётся из батча целиком).
+- Колонка `updated_at` (инкрементальный поллинг). Для `audit_vectors` — `id`.
+  Тип track-колонки должен быть сравнимым (`>`) — `timestamp`/`bigint`.
+- Безопасность поллинга: строки, изменённые **и** удалённые между циклами,
+  подхватятся полной пересинхронизацией (`full_resync_every`).
+
+#### Практические сценарии
+
+- **Свежее кеш, чаще опрос**: `poll_interval_sec: 15`.
+- **Меньше нагрузки на PG**: `poll_interval_sec: 300`, `full_resync_every: 5`
+  (реже опрос, но регулярная сверка удалений).
+- **Не нужна сверка удалений / большие таблицы**: `full_resync_every: 0`.
+- **Выключить кеш совсем**: `in_memory_enabled: false` (CLI → прямой PG).
+- **Добавить таблицу в анализ**: вставить её имя в `db_tables` и перезапустить
+  gateway.
+
+#### Мониторинг
+
+- `AuditMemoryStore.get_stats()`: `tables` (кол-во строк), `dirty`,
+  `upserts`, `publishes`, `publish_errors`, `last_upsert_at`, `last_publish_at`,
+  `last_error`, `indexes_in_memory`, `vector_sources`.
+- `AuditSyncService.get_stats()`: `polls`, `full_resyncs`, `reconnects`,
+  `errors`, `queue_size`, `last_sync` (метка на таблицу), `connected`.
+- Внешние признаки работы: mtime файла кеша
+  (`workspace/skills/audit_analyzer/cache/audit_cache.duckdb`) обновляется после
+  каждого publish; лог gateway: `audit_analyzer sync started (in-memory cache +
+  vectors, публикация кеша навыка: <path>)`.
 
 ---
 
@@ -404,6 +513,20 @@ E2E проверяет все режимы: predefined (реальный SQL п�
 ---
 
 ## 📝 Изменения и миграции
+
+### 2026-08 — Структура таблиц из PG + сверка удалений
+
+- `AuditSyncService` собирает структуру таблиц из PG `information_schema`
+  (+ `pg_description`): колонки, типы, NOT NULL, комментарии таблиц/колонок —
+  и передаёт в store через `set_on_schema_callback` → `ensure_schema`.
+- `AuditMemoryStore.ensure_schema()` создаёт таблицы с типами из PG (маппинг
+  `_map_pg_type`), в т.ч. пустые; комментарии и исходные PG-типы сохраняются
+  в `__nanobot_meta.__schema_meta` (входит в снимок и публикуется).
+- `get_schema()` (store и `PostgresDuckDbProvider`) возвращает исходные PG-типы
+  и комментарии — схема кеша совпадает с прямой PostgreSQL.
+- `AuditMemoryStore.replace_records()` — полная перезапись содержимого таблицы
+  (структура и типы сохраняются); `AuditSyncService` вызывает её каждые
+  `full_resync_every` циклов — удалённые в PG строки уходят из кеша.
 
 ### 2026-08 — Gateway — владелец кеша навыка
 
