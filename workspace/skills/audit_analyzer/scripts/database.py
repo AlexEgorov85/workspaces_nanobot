@@ -20,10 +20,8 @@ PostgreSQL, когда in-memory кэш выключен.
     result = db.query_sql("SELECT * FROM oarb.audits LIMIT 5")
 """
 
-import json
 import re
 import sys
-import time
 from pathlib import Path
 from typing import Any, Optional, Protocol, runtime_checkable
 
@@ -120,17 +118,11 @@ class Database(QueryBackend):
     Принимает dict конфигурации из load_db_config():
         schema           — имя схемы по умолчанию
         tables           — список таблиц для фильтрации (опционально)
-        schema_cache     — настройки файлового кеша схемы: enabled, path, ttl_seconds
     """
 
     def __init__(self, db_config: dict):
         self._schema_name = db_config.get("schema", "public")
         self._table_names: Optional[list[str]] = db_config.get("tables") or None
-
-        cache_cfg = db_config.get("schema_cache", {})
-        self._cache_enabled = bool(cache_cfg.get("enabled", False))
-        self._cache_path: Optional[str] = cache_cfg.get("path") or None
-        self._cache_ttl = int(cache_cfg.get("ttl_seconds", 3600))
 
     # ------------------------------------------------------------------
     # Lifecycle (no-op, подключение через utils.db)
@@ -156,7 +148,6 @@ class Database(QueryBackend):
         self,
         schema_name: Optional[str] = None,
         table_names: Optional[list[str]] = None,
-        use_cache: Optional[bool] = None,
     ) -> dict:
         """
         Получить структуру таблиц из information_schema.
@@ -164,26 +155,13 @@ class Database(QueryBackend):
         Args:
             schema_name: Имя схемы (по умолчанию из конфига).
             table_names: Список таблиц для фильтрации (по умолчанию из конфига).
-            use_cache: Использовать файловый кеш (по умолчанию из конфига).
 
         Returns:
             dict: {"schema": str, "tables": {table: {comment, columns: {col: {type, not_null, comment}}}}}
         """
         schema = schema_name or self._schema_name
         tables = table_names if table_names is not None else self._table_names
-        cache = use_cache if use_cache is not None else self._cache_enabled
-
-        if cache:
-            cached = self._read_cache(schema, tables)
-            if cached:
-                return cached
-
-        data = self._fetch_schema(schema, tables)
-
-        if cache:
-            self._write_cache(schema, data)
-
-        return data
+        return self._fetch_schema(schema, tables)
 
     def _fetch_schema(self, schema: str, tables: Optional[list[str]]) -> dict:
         """
@@ -235,67 +213,6 @@ class Database(QueryBackend):
             }
 
         return {"schema": schema, "tables": result}
-
-    # ------------------------------------------------------------------
-    # Schema cache (файловый)
-    # ------------------------------------------------------------------
-
-    def _cache_file(self) -> Optional[Path]:
-        return Path(self._cache_path) if self._cache_path else None
-
-    def _cache_log(self, msg: str):
-        print(f"[CACHE] {msg}", file=sys.stderr)
-
-    def _read_cache(self, schema: str, tables: Optional[list[str]]) -> Optional[dict]:
-        path = self._cache_file()
-        if not path:
-            self._cache_log("кеш отключён (нет пути)")
-            return None
-        if not path.exists():
-            self._cache_log(f"{path.name}: miss (файл не найден)")
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
-            self._cache_log(f"{path.name}: miss (ошибка чтения: {e})")
-            return None
-
-        if data.get("schema") != schema:
-            self._cache_log(f"{path.name}: miss (схема '{data.get('schema')}' не совпадает с '{schema}')")
-            return None
-
-        age = time.time() - data.get("cached_at", 0)
-        if age > self._cache_ttl:
-            self._cache_log(f"{path.name}: miss (просрочен TTL: {age:.0f}s > {self._cache_ttl}s)")
-            return None
-
-        cached_tables = data.get("tables", {})
-        if tables:
-            if not all(t in cached_tables for t in tables):
-                missing = [t for t in tables if t not in cached_tables]
-                self._cache_log(f"{path.name}: miss (нет таблиц в кеше: {missing})")
-                return None
-            filtered = {t: cached_tables[t] for t in tables if t in cached_tables}
-            ncols = sum(len(c["columns"]) for c in filtered.values())
-            self._cache_log(f"{path.name}: hit ({len(filtered)} таблиц, {ncols} колонок, возраст {age:.0f}с)")
-            return {"schema": schema, "tables": filtered}
-
-        ncols = sum(len(c["columns"]) for c in cached_tables.values())
-        self._cache_log(f"{path.name}: hit ({len(cached_tables)} таблиц, {ncols} колонок, возраст {age:.0f}с)")
-        return {"schema": schema, "tables": cached_tables}
-
-    def _write_cache(self, schema: str, schema_data: dict):
-        path = self._cache_file()
-        if not path:
-            return
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            data = {**schema_data, "cached_at": time.time()}
-            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            ncols = sum(len(c["columns"]) for c in data.get("tables", {}).values())
-            self._cache_log(f"{path.name}: записан ({len(data.get('tables', {}))} таблиц, {ncols} колонок)")
-        except OSError as e:
-            self._cache_log(f"{path.name}: ошибка записи: {e}")
 
     # ------------------------------------------------------------------
     # Query execution

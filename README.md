@@ -63,7 +63,7 @@ psql -d nanobot -f lib/session/sql/create_session_tables.sql
 psql -d nanobot -f lib/session/sql/create_session_tables_gp.sql
 ```
 
-Таблица канала (`conversation_messages`) и таблицы воркера (`agent_questions`, `agent_responses`) создаются автоматически.
+Таблица канала (`conversation_messages`) создаётся автоматически.
 
 Тестовые данные для канала:
 ```bash
@@ -78,9 +78,6 @@ python cli_agent.py -P -s dev
 
 # Gateway + Streamlit UI
 python gateway.py
-
-# Пакетный обработчик
-python pg_agent_worker.py --once
 ```
 
 ---
@@ -132,7 +129,6 @@ flowchart TB
 
     %% Pre-existing (не через ApplicationContext)
     subgraph LEGACY["Pre-existing точки входа (НЕ через ApplicationContext)"]
-        PGWORKER["pg_agent_worker.py<br/>310 строк<br/>legacy"]
         STREAMLIT["streamlit_app.py<br/>502 строки<br/>web-клиент"]
     end
 
@@ -175,7 +171,6 @@ nanobot/
 │
 ├── gateway.py              # ⭐ v2.0.0: 132 строки, тонкий оркестратор
 ├── cli_agent.py            # ⭐ v2.0.0: 165 строк, тонкий оркестратор
-├── pg_agent_worker.py      # [legacy] пакетный воркер, НЕ через ApplicationContext
 ├── streamlit_app.py        # [отдельный клиент] поллинг conversation_messages
 │
 ├── lib/                    # ⭐ v2.0.0: сервисный слой (core/services/cli/lifecycle)
@@ -275,17 +270,7 @@ WHERE event_type = 'tool_result' AND timestamp > NOW() - INTERVAL '24 hours'
 GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 ```
 
-### 5. Postgres Worker (`pg_agent_worker.py`)
-
-Пакетный обработчик: читает `agent_questions` из БД → отправляет агенту → пишет ответы в `agent_responses`.
-
-Поддерживает сессии: вопросы с одинаковым `session_id` используют общую историю.
-
-**Режимы:**
-- `--once` — один батч и выход
-- `--interval N` (по умолч. 30с) — непрерывный цикл
-
-### 6. PGSessionManager (`lib/session/pg_session_manager.py`)
+### 5. PGSessionManager (`lib/session/pg_session_manager.py`)
 
 Замена штатного `SessionManager`. Хранит сессии в двух таблицах:
 - **session_meta** — метаданные сессии (ключ, даты, заголовок)
@@ -293,7 +278,7 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 
 При недоступности БД — graceful degradation на JSONL-файлы.
 
-### 7. PostgresChannel (`lib/channels/postgres_channel.py`)
+### 6. PostgresChannel (`lib/channels/postgres_channel.py`)
 
 Канал через таблицу `conversation_messages`:
 - Поллинг новых сообщений (status='pending')
@@ -409,9 +394,6 @@ id, chat_id, user_id, role, content, media, buttons,
 metadata (JSONB), reply_to, status, created_at, updated_at
 ```
 
-### Таблицы worker'а (`agent_questions`, `agent_responses`)
-Определяются в `pg_agent_worker.py`. Пакетный режим.
-
 ### Таблицы бенчмарков (`benchmark_runs`, `benchmark_results`)
 ```bash
 # Создание: psql -d <db> -f benchmarks/sql/create_benchmark_tables.sql
@@ -513,9 +495,6 @@ python gateway.py
 # Бенчмарки
 python benchmarks/runner.py --tags simple
 python benchmarks/runner.py --compare runs/run1 runs/run2
-
-# Пакетный воркер
-python pg_agent_worker.py --once
 ```
 
 ## Документация

@@ -15,12 +15,14 @@
 скриптом ``create_session_tables.sql``.
 
 При недоступности БД автоматически падает на JSONL-файлы (graceful degradation).
+
+Импорт ``utils.db`` работает потому, что вызывающий (gateway.py / cli_agent.py /
+тесты) уже добавил ``workspace/`` в ``sys.path``.
 """
 
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,11 +30,6 @@ from typing import Any
 from loguru import logger
 
 from nanobot.session.manager import Session, SessionManager, _message_preview_text
-
-# workspace/utils/db.py — добавляем в путь, чтобы импортировать utils.db
-_workspace = str(Path(__file__).resolve().parent / "workspace")
-if _workspace not in sys.path:
-    sys.path.insert(0, _workspace)
 
 from utils.db import transaction, DB_RETRYABLE_ERRORS
 from psycopg2.extras import Json, execute_values

@@ -274,7 +274,6 @@ nanobot/
 │
 ├── gateway.py                            # ⭐ v2.0.0: 132 строки, тонкий оркестратор
 ├── cli_agent.py                          # ⭐ v2.0.0: 165 строк, тонкий оркестратор
-├── pg_agent_worker.py                    # [legacy, не через ApplicationContext]
 ├── streamlit_app.py                      # [web-клиент, не через ApplicationContext]
 ├── config.py                             # SETTINGS (project.json + config.json + .secrets.env)
 └── project.json                          # конфигурация (channels.*, skills.*, gateway, cli, logging.db)
@@ -332,7 +331,6 @@ nanobot/
 | `llm_max_tokens` / `llm_temperature` | Параметры генерации | `8192` / `0.1` |
 | `db_schema` | Схема с таблицами аудита | `oarb` |
 | `db_tables` | Таблицы, доступные агенту | `audit_reports, audits, report_items, violations` (значение project.json; код по умолч. — пустой список) |
-| `schema_cache` | Файловый кеш схемы (enabled/path/ttl_seconds) | резерв: блок настроен (`enabled: true`, path `cache/schema.json`, TTL 86400), но `load_db_config()` не передаёт его в `Database` — кеш схемы фактически не работает |
 | `in_memory_enabled` | Включить DuckDB-кеш | `true` |
 | `in_memory_engine` | Движок кеша | `duckdb` |
 | `in_memory_cache_path` | Путь к файлу кеша (отн. навыка) | `cache/audit_cache.duckdb` |
@@ -664,7 +662,6 @@ python tools/build_vectors.py --full-rebuild
 |------|------:|-----------|-------------------|
 | `gateway.py` | 132 | Сервер: каналы, Streamlit, FAISS preload, restart-loop | `project.json` (`channels.*`, `gateway`, `logging.db`) |
 | `cli_agent.py` | 165 | REPL: ввод → `MessageBus` → `AgentLoop` | CLI-аргументы, `project.json` (`cli`) |
-| `pg_agent_worker.py` | 310 | Legacy пакетный режим (НЕ через ApplicationContext) | `project.json` → `channels.postgres.dsn` |
 | `streamlit_app.py` | 502 | Тонкий web-клиент (НЕ через ApplicationContext) | `project.json` → `channels.postgres`, `streamlit` |
 
 ### Bootstrap и сервисный слой
@@ -707,25 +704,28 @@ python tools/build_vectors.py --full-rebuild
 
 ### Где что править
 
-| Что нужно сделать | Файл |
-|-----------------|------|
-| Сменить модель/провайдера | `config.json` → `agents.defaults.model` |
-| Настроить таймауты | `project.json` → секции `gateway`, `cli` или `streamlit` |
-| Настроить подключение к БД | `project.json` → `channels.postgres` (`dsn`, `schema`, `table_name`) |
-| Включить Redis-канал | `project.json` → `channels.redis.enabled` |
-| Настроить навык | `project.json` → `skills.<имя>` |
-| Добавить API-ключ | `.secrets.env` (провайдер-скоупинг формат) |
-| Настроить БД-логирование | `project.json` → `logging.db` (`enabled`, `flush_interval_sec`, `batch_size`, `min_level`) |
-| Изменить сервисный слой | `lib/services/<service>.py` (например, `db_logging_service.py`) |
-| Изменить bootstrap | `lib/core/application_context.py` |
-| Изменить lifecycle (backoff/shutdown) | `lib/lifecycle/gateway_runner.py` / `shutdown_coordinator.py` |
-| Добавить канал связи | Написать класс унаследовав `BaseChannel`, подключить через `lib/services/channel_factory.py` |
-| Добавить хук агента | Создать файл в `workspace/hooks/` с подклассом `AgentHook` |
-| Добавить тест бенчмарка | YAML-файл в `benchmarks/items/` |
-| Настроить Streamlit UI | `streamlit_app.py` |
-| Изменить личность агента | `workspace/SOUL.md` |
-| Дать инструкции агенту | `workspace/AGENTS.md` |
-| Расширить навык `audit_analyzer` | `workspace/skills/audit_analyzer/scripts/` + `lib/services/audit_*` (кеш) |
+| Компонент | Что нужно сделать | Файл | Если сломалось — где смотреть |
+|-----------|-----------------|------|------------------------------|
+| **Конфиг** | Сменить модель/провайдера | `config.json` → `agents.defaults.model` | `ValueError: MISTRAL_API_KEY` → `.secrets.env` (секция `providers: mistral`); gateway не находит ключ → `lib/services/config_service.py:_pre_resolve_env_refs` |
+| **Конфиг** | Настроить таймауты | `project.json` → секции `gateway`, `cli` или `streamlit` | LLM-запросы висят → `cli.llm_timeout` / `gateway.llm_timeout`; exec-команды обрываются на 60с → `tools.exec.timeout` (`config.json`) |
+| **Каналы / БД** | Подключение к БД | `project.json` → `channels.postgres` (`dsn`, `schema`, `table_name`) | `psycopg2.OperationalError` / `connection refused` → `DATABASE_URL` в `.secrets.env`; `gssencmode` ошибка на GP 6.25 → `lib/services/config_service.py` (kwargs `connect()`); `too many connections` → `lib/services/audit_sync_service.py` (ретраи) |
+| **Каналы** | Включить Redis-канал | `project.json` → `channels.redis.enabled` | `Connection refused` → `host`/`port`/`password`; не приходят сообщения → `lib/channels/redis_channel.py` + `allow_from` |
+| **Навыки** | Настроить навык | `project.json` → `skills.<имя>` | Навык не подхватывается → `agents.defaults.disabledSkills` (`config.json`); навык стартует со старыми параметрами → `lib/services/runtime_patcher.py` (см. `RuntimePatcher.apply_all`) |
+| **Секреты** | Добавить API-ключ | `.secrets.env` (провайдер-скоупинг формат) | `nanobot._load_runtime_config` падает с `ValueError` → `lib/services/config_service.py:_pre_resolve_env_refs` (должен подставить `${VAR}` в `os.environ` ДО nanobot) |
+| **Логирование** | БД-логирование | `project.json` → `logging.db` (`enabled`, `flush_interval_sec`, `batch_size`, `min_level`) | В таблице `gateway_logs` пусто → `lib/services/db_logging_service.py:get_stats()` (`queue_size`, `connected`, `last_error`); fallback в JSONL → `lib/services/db_logging_service.py:fallback_path` |
+| **Сервисный слой** | Сервисный слой | `lib/services/<service>.py` (например, `db_logging_service.py`) | `ctx.start()` падает → сервис в `None` (graceful degradation, см. `lib/core/application_context.py:create`); race-condition `нет данных в кэше` → callbacks на `AuditSyncService` ДО `ctx.start()` (см. `gateway.py:main`) |
+| **Bootstrap** | Bootstrap | `lib/core/application_context.py` | Контекст не создаётся → `lib/core/application_context.py:create` + флаги `enable_db_logging`/`enable_audit`; double-init воркеров → `lib/lifecycle/shutdown_coordinator.py` |
+| **Lifecycle** | Lifecycle (backoff/shutdown) | `lib/lifecycle/gateway_runner.py` / `shutdown_coordinator.py` | Gateway зацикливается на рестартах → `GatewayRunner.run_forever` (exponential backoff 1с→30с); процесс не умирает по Ctrl-C → `ShutdownCoordinator` (LIFO) |
+| **Каналы** | Канал связи | Написать класс унаследовав `BaseChannel`, подключить через `lib/services/channel_factory.py` | Сообщения не доходят → `allow_from` в `project.json`; reasoning не пишется → `PostgresChannel._flush_reasoning` (период `flush_interval`) |
+| **Хуки** | Хук агента | Создать файл в `workspace/hooks/` с подклассом `AgentHook` | Хук не вызывается → `lib/services/agent_factory.py:AgentFactory.create` (lazy-import + добавление в `AgentLoop.hooks`); `ImportError` из хука → `try/except` в `AgentFactory` (хук просто не добавится) |
+| **Бенчмарки** | Тест бенчмарка | YAML-файл в `benchmarks/items/` | Тест падает по `keyword` → перечитать `expect.keywords_include`; `multi_step` не переходит к следующему шагу → `new_session: true` (или `false` для общей истории) |
+| **Web UI** | Streamlit UI | `streamlit_app.py` | Чат не отвечает → `streamlit.max_wait` (дефолт 600с) и `poll_interval`; `st.rerun` лимит → блокирующий поллинг в `streamlit_app.py` (без `st.rerun`) |
+| **Агент** | Личность агента | `workspace/SOUL.md` | — |
+| **Агент** | Инструкции агенту | `workspace/AGENTS.md` | Инструкции не подхватываются → путь `agents.defaults.workspace` (`config.json`); конфликт с глобальным `AGENTS.md` → файлы мерджатся в порядке: `~/.nanobot/AGENTS.md` < `workspace/AGENTS.md` |
+| **Навык audit_analyzer** | Навык `audit_analyzer` (общее) | `workspace/skills/audit_analyzer/scripts/` + `lib/services/audit_*` (кеш) | `FileNotFoundError: audit_cache.duckdb` → `python gateway.py` (владелец кеша); `--mode init` неизвестен → удалён (миграция v1.5.0+ в gateway); LLM 429 → `cli_max_retries` (`project.json`) |
+| **Навык audit_analyzer** | Схема таблиц | `workspace/skills/audit_analyzer/scripts/database.py:_fetch_schema` (строки 188-237) | Таблица не видна → `db_tables` в `project.json` + `db_schema`; нет комментариев колонок → `pg_catalog.pg_description.objsubid`; тип `varchar(N)` без длины → `character_maximum_length` в `_fetch_schema` |
+| **Навык audit_analyzer** | DuckDB-кеш аудита | `lib/services/audit_memory_store.py` (in-memory) + `lib/services/audit_sync_service.py` (поллинг PG) | `нет данных в кэше` несмотря на строки в PG → callbacks ДО `ctx.start()` (см. `gateway.py:main`); удалённые в PG строки остаются в кеше → `full_resync_every: 0` отключает сверку; файл кеша не обновляется → `publish_path` пуст или `_dirty=False` |
+| **Навык audit_analyzer** | Векторный поиск | `lib/services/cache_provider_impl.py` (провайдер) + `tools/build_vectors.py` (индексатор) | `vector_mode` пустой результат → `python tools/build_vectors.py --status` + пересборка `--full-rebuild`; эмбеддинг не строится → Ollama на `embedding_base_url` (дефолт `http://localhost:11434/api/embed`); индекс пересобирается при каждом запросе → `invalidate_cache` не вызван, FAISS не в памяти |
 
 ---
 
@@ -743,7 +743,7 @@ python -m pytest tests/test_config_service.py tests/test_session_storage.py \
                     tests/test_application_context.py -q
 
 # Тесты воркеров (некоторые требуют БД)
-python -m pytest tests/test_pg_session_manager.py tests/test_pg_agent_worker.py -q
+python -m pytest tests/test_pg_session_manager.py -q
 
 # Юнит-тесты audit/кэша (sync+memory)
 python -m pytest tests/test_audit_memory_store.py tests/test_audit_sync_service.py -q
@@ -820,8 +820,7 @@ E2E проверяет все режимы: predefined (реальный SQL п�
 - **Graceful degradation:** если `psycopg2` не установлен или DSN пуст —
   `ApplicationContext.create()` создаётся, битый сервис остаётся `None`,
   gateway/cli работают без него.
-- **`pg_agent_worker.py` и `streamlit_app.py` НЕ тронуты** — у них другая
-  архитектура (legacy-воркер и тонкий web-клиент через PG-канал).
+- **`streamlit_app.py` НЕ тронут** — у него другая архитектура (тонкий web-клиент через PG-канал).
 - **Тесты:** 701 unit-тестов (было 594, +107). Полный changelog: `README.md`
   (v2.0.0 секция) и ниже в этом документе («Изменения и миграции»).
 

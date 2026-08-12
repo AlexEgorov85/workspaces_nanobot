@@ -5,7 +5,6 @@ from pathlib import Path
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
 _PROJECT_FILE = Path(__file__).parent / "project.json"
-_ENV_FILE = Path(__file__).parent / ".env"
 _SECRETS_FILE = Path(__file__).parent / ".secrets.env"
 
 
@@ -157,14 +156,15 @@ def _deep_merge(base: dict, override: dict) -> None:
         else:
             base[k] = v
 
-# Основной источник — config.json (настройки nanobot + каналы channels.*);
-# project.json — проектные секции без нативного блока в nanobot
-# (cli/benchmark/streamlit/gateway); .env удалён и остался лишь защитным
-# fallback (если файл появится — прочитается первым); .secrets.env хранит
-# секреты и имеет наивысший приоритет.
+# Порядок мержей (поздний перекрывает ранний):
+#   project.json → config.json → .secrets.env
+#
+#   project.json   — проектные секции (channels.*, skills.*, cli, benchmark,
+#                    streamlit, gateway, logging.db) в формате JSONC.
+#   config.json    — настройки nanobot (агенты, провайдеры, API, gateway).
+#   .secrets.env   — секреты (API-ключи, DATABASE_URL) в провайдер-скоупинг
+#                    формате; подставляются в ${VAR} после резолва.
 SETTINGS = AttrDict()
-if _ENV_FILE.exists():
-    SETTINGS = load_env(_ENV_FILE)
 if _PROJECT_FILE.exists():
     _deep_merge(SETTINGS, load_config_json(_PROJECT_FILE))
 if _CONFIG_FILE.exists():

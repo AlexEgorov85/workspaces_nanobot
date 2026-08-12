@@ -69,15 +69,6 @@
         "violations"
       ],
 
-      // --- Кеш схемы БД (для SQL-генерации без лишних запросов) -------------
-      "schema_cache": {                       // Ожидаемая структура из database.py:55 (enabled/path/ttl_seconds).
-        "enabled": true,                      //   Варианты: true | false
-        "path": "cache/schema.json",          //   Путь относительно skills/audit_analyzer/
-        "ttl_seconds": 86400                  //   TTL кеша, сек (1 сутки)
-      },
-      //   ВНИМАНИЕ: load_db_config() пока не передаёт schema_cache в Database —
-      //   кеш схемы фактически не работает, блок резервный.
-
       // --- In-memory кеш (DuckDB): локальная копия данных для скорости ------
       "in_memory_enabled": true,              // Варианты: true | false
       "in_memory_engine": "duckdb",           // Движок in-memory кеша. Варианты: duckdb (единственный реализованный)
@@ -112,7 +103,6 @@
       //   init       — загрузка DuckDB-кеша из PostgreSQL
       "cli_default_mode": "predefined",       // Режим по умолчанию. Варианты: predefined | sql | vector | init (см. выше).
       //   ВНИМАНИЕ: cli.py требует --mode явно (required=True); ключ нигде не потребляется — резервный
-      "cli_default_format": "json",           // Формат вывода. ВНИМАНИЕ: НЕ читается кодом — llm.py возвращает текст как есть
       "cli_max_retries": 3,                   // Ретраи LLM при генерации SQL
       "cli_timeout_sec": 60                   // Таймаут запроса к LLM, сек
     }

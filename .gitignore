@@ -1,58 +1,65 @@
-# Secrets
-.secrets.env
-**/.secrets.env
+# ============================================================================
+#  Корневой .gitignore для проекта nanobot
+#  Дополняет workspace/.gitignore (только для data_store/.nanobot внутри workspace).
+#  Защищает секреты, кеши, runtime-данные и артефакты удалённых навыков.
+# ============================================================================
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-*.egg
+# --- Секреты (КРИТИЧНО: .secrets.env содержит API-ключи и DSN) ---
+.secrets.env
+.env
+*.env.local
+
+# --- Python: виртуальное окружение и кеши ---
 .venv/
 venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
 
-# IDE
+# --- pytest / coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.cache
+
+# --- Бенчмарки (только результаты прогонов, не сами тесты) ---
+.benchmarks/
+
+# --- Runtime-логи и история CLI ---
+logs/
+*.log
+history/
+
+# --- Артефакты удалённых навыков / legacy ---
+webui/                       # старый SPA-dist (удалён в v1.3.0, см. CHANGELOG)
+ws/                          # артефакты миграции data_store
+media/                       # выгрузка из удалённого WebSocket-канала
+
+# --- Runtime-данные workspace ---
+# (workspace/.gitignore уже игнорирует data_store/cache/ и .nanobot/tool-results/ внутри workspace,
+#  поэтому в корне только то, что не закрыто вложенным .gitignore)
+workspace/sessions/           # JSONL-истории старого SessionManager
+
+# --- DuckDB файлы (runtime-кеш) ---
+*.duckdb
+*.duckdb.wal
+*.duckdb-shm
+*.duckdb-journal
+
+# --- Кеши реестров CLI-приложений (регенерируются) ---
+cli-apps/*.json
+
+# --- IDE/редакторы ---
 .idea/
 .vscode/
 *.swp
-*.swo
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Runtime data
-history/
-media/
-webui/
-cron/
-**/tool-results/
-.local/
-workspace/sessions/
-workspace/cache/
-workspace/output/
-workspace/temp_query.sql
-
-# DuckDB cache (auto-generated, binary)
-*.duckdb
-
-# IDE / tooling
-.opencode/
-
-# Testing
-.pytest_cache/
-htmlcov/
-.coverage
-.coverage.*
-coverage.xml
-
-# Runtime logs
-logs/
-
-# Runtime data
-workspace/memory/.cursor
-
-# Vector indexes (large binaries)
-**/data/vector/
-*.faiss
-
+# --- Разное ---
+*.bak
+*.tmp
+*.pid
