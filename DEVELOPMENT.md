@@ -37,28 +37,50 @@
 тонким CLI: он конфигурирует провайдера из своих настроек и работает с ним
 напрямую (без промежуточных обёрток-шимов).
 
-```
-                        ┌──────────────────────────────────────────────┐
-  PostgreSQL (канон) ───►│  lib/services (универсальный слой данных)   │
-  oarb.audits,           │  • CacheProvider (интерфейс)                │
-  oarb.violations, ...   │  • PostgresDuckDbProvider (реализация)      │
-                        │  • AuditSyncService   (поллинг PG, worker)  │
-                        │  • AuditMemoryStore   (in-memory DuckDB+FAISS)│
-                        │  • get_embedding (Ollama)                    │
-                        └───────────────┬──────────────────────────────┘
-                                        │ query_sql / get_schema / explain
-                                        │ search_vector / preload_indexes
-                ┌───────────────────────┼────────────────────────────┐
-                ▼                       ▼                            ▼
-        DuckDB-кеш (снимок)      FAISS-индексы (store в БД)      эмбеддинг
-        oarb.* (аналитика)       oarb.audit_vectors →           Ollama /api/embed
-                                 oarb.vector_index_store
+```mermaid
+flowchart LR
+    subgraph PG["PostgreSQL (канон)"]
+        AUDITS["oarb.audits<br/>oarb.violations<br/>oarb.audit_reports<br/>oarb.report_items"]
+        VECTORS["oarb.audit_vectors"]
+        STORE["oarb.vector_index_store<br/>(FAISS в BYTEA)"]
+        CONFIG["oarb.vector_index_config"]
+    end
 
-        Владелец кеша:             Потребители (только чтение):
-        gateway.py                 навык CLI (scripts/cli.py)
-        (AuditSyncService →        (режимы predefined/sql/vector)
-         AuditMemoryStore →
-         publish() temp+os.replace)
+    subgraph SERVICES["lib/services (универсальный слой данных)"]
+        SYNC["AuditSyncService<br/>(worker-поток,<br/>единственный psycopg2)"]
+        STORE_SVC["AuditMemoryStore<br/>(in-memory DuckDB+FAISS)"]
+        PROV["PostgresDuckDbProvider<br/>(CacheProvider)"]
+        EMBED["get_embedding<br/>(Ollama /api/embed)"]
+    end
+
+    subgraph ARTIFACT["Файл кеша навыка"]
+        DUCK["cache/audit_cache.duckdb<br/>(снимок таблиц)"]
+    end
+
+    AUDITS -->|"поллинг<br/>(incremental)"| SYNC
+    VECTORS --> SYNC
+    SYNC -->|"upsert_records<br/>(batch)"| STORE_SVC
+    SYNC -->|"after sync"| STORE_SVC
+    STORE_SVC -->|"publish()<br/>temp+os.replace"| DUCK
+    VECTORS -->|"при промахе индекса"| STORE
+    PROV -->|"query_sql/explain"| AUDITS
+    PROV -->|"search_vector"| STORE
+    PROV -->|"get_embedding"| EMBED
+
+    GATEWAY["gateway.py<br/>(владелец кеша)<br/>AuditSyncService →<br/>AuditMemoryStore →<br/>publish()"]
+    CLI["навык CLI<br/>(только чтение)"]
+
+    GATEWAY --> SYNC
+    GATEWAY --> STORE_SVC
+    CLI --> DUCK
+    CLI --> PROV
+
+    classDef v2 fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef owner fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
+    classDef consumer fill:#f8d7da,stroke:#c82333
+    class SYNC,STORE_SVC v2
+    class GATEWAY owner
+    class CLI consumer
 ```
 
 **Потоки данных**
@@ -87,21 +109,29 @@
 
 ### Точки входа → общий bootstrap
 
-```
-gateway.py (132)  ─┐
-                   ├─► ApplicationContext.create(...)
-cli_agent.py (165) ─┘   │
-                       ▼
-              lib/core/ApplicationContext
-              ├─ ConfigService (config.json, SETTINGS, pre-resolve env)
-              ├─ SessionStorageService (PGSessionManager / SessionManager)
-              ├─ DbLoggingService (worker, batch INSERT, JSONL fallback)
-              ├─ AuditSyncService + AuditMemoryStore (audit_analyzer)
-              ├─ MessageBus (через BusFactory, с обёрткой под логгеры)
-              ├─ AgentLoop (через AgentFactory, hooks=[ToolAudit, DbLogging])
-              ├─ RuntimePatcher (ContextGovernor + _assemble_outbound)
-              ├─ PreloadService (FAISS / audit_cache)
-              └─ TranscriptionService
+```mermaid
+flowchart TB
+    GW["gateway.py<br/>132 строки<br/>(тонкий оркестратор)"]
+    CLI["cli_agent.py<br/>165 строк<br/>(тонкий оркестратор)"]
+    CTX["lib/core/ApplicationContext<br/>(create/start/stop)"]
+
+    GW -->|"create(...)"| CTX
+    CLI -->|"create(...)"| CTX
+
+    CTX --> CFG_SVC["ConfigService<br/>(config.json, SETTINGS, pre-resolve env)"]
+    CTX --> SESS["SessionStorageService<br/>(PGSessionManager / SessionManager)"]
+    CTX --> DB_LOG["DbLoggingService<br/>(worker, batch INSERT, JSONL fallback)"]
+    CTX --> AUDIT["AuditSyncService + AuditMemoryStore<br/>(audit_analyzer)"]
+    CTX --> BUS["MessageBus<br/>(через BusFactory, с обёрткой под логгеры)"]
+    CTX --> AGENT["AgentLoop<br/>(через AgentFactory,<br/>hooks=[ToolAudit, DbLogging])"]
+    CTX --> PATCHER["RuntimePatcher<br/>(ContextGovernor + _assemble_outbound)"]
+    CTX --> PRELOAD["PreloadService<br/>(FAISS / audit_cache)"]
+    CTX --> TRANS["TranscriptionService"]
+
+    classDef v2 fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef entry fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
+    class CTX v2
+    class GW,CLI entry
 ```
 
 ### `lib/core/` (ApplicationContext + фабрики)

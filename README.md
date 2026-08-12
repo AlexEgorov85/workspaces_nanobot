@@ -87,219 +87,104 @@ python pg_agent_worker.py --once
 
 ## Архитектура
 
+```mermaid
+flowchart TB
+    %% Конфигурация
+    subgraph CFG["Конфигурация"]
+        CONFIG["config.json<br/>провайдеры, каналы, API"]
+        PROJECT["project.json<br/>channels.*, skills.*,<br/>cli/gateway/streamlit,<br/>benchmark, logging.db"]
+        SECRETS[".secrets.env<br/>(в .gitignore)"]
+    end
+
+    %% SETTINGS
+    CFG -->|"merger"| SETTINGS["config.py: SETTINGS<br/>project.json → config.json → .secrets.env"]
+
+    %% Bootstrap
+    SETTINGS --> CTX["ApplicationContext<br/>(lib/core/)"]
+    CTX -->|"create/start/stop"| SVC["Сервисный слой<br/>(lib/services/)"]
+    CTX --> CORE["Фабрики<br/>lib/core/<br/>agent_factory, bus_factory"]
+    CTX --> LIFE["Lifecycle<br/>lib/lifecycle/<br/>gateway_runner,<br/>shutdown_coordinator"]
+
+    %% Сервисы
+    subgraph SERVICES["lib/services/ (новые в v2.0.0 ⭐)"]
+        CFG_SVC["config_service"]
+        SESS_SVC["session_storage"]
+        CHAN_SVC["channel_factory"]
+        PATCHER["runtime_patcher"]
+        LOG_SVC["db_logging_service"]
+        TRANS_SVC["transcription_service"]
+        SUB_SVC["subprocess_manager"]
+        PRELOAD["preload_service"]
+    end
+
+    SVC --> CFG_SVC & SESS_SVC & CHAN_SVC & PATCHER & LOG_SVC & TRANS_SVC & SUB_SVC & PRELOAD
+
+    %% Точки входа
+    GATEWAY["gateway.py<br/>132 строки<br/>тонкий оркестратор"]
+    CLI["cli_agent.py<br/>165 строк<br/>тонкий оркестратор"]
+    CTX --> GATEWAY
+    CTX --> CLI
+
+    %% Шина
+    BUS["MessageBus<br/>(publish inbound/outbound)"]
+    CTX --> BUS
+    BUS --> AGENT["AgentLoop<br/>(+ ToolAuditHook + DatabaseLoggingHook)"]
+
+    %% Pre-existing (не через ApplicationContext)
+    subgraph LEGACY["Pre-existing точки входа (НЕ через ApplicationContext)"]
+        PGWORKER["pg_agent_worker.py<br/>310 строк<br/>legacy"]
+        STREAMLIT["streamlit_app.py<br/>502 строки<br/>web-клиент"]
+    end
+
+    %% Каналы
+    PG["PostgreSQL"]
+    REDIS["Redis<br/>(опционально)"]
+    BUS --> PG
+    BUS --> REDIS
+    PG --> STREAMLIT
+
+    %% Стили
+    classDef v2 fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef legacy fill:#f8d7da,stroke:#c82333
+    classDef infra fill:#d1ecf1,stroke:#0c5460
+
+    class CTX,CORE,LIFE,SVC,CORE,LOG_SVC,PATCHER v2
+    class PGWORKER,STREAMLIT legacy
+    class CFG,SETTINGS,BUS,PG,REDIS,AGENT infra
 ```
-                 ┌──────────────────────┐
-                 │    config.json        │
-                 │ (провайдеры, каналы, │
-                 │  инструменты, API)    │
-                 └──────────┬───────────┘
-                            │
-                 ┌──────────┴───────────┐
-                 ▼                      ▼
-         ┌─────────────┐       ┌──────────────┐
-         │ project.json │       │ .secrets.env  │
-         │ (channels.*,  │       │ (API-ключи,   │
-         │  skills.*,   │       │  DATABASE_URL)│
-         │  cli/gateway/ │       └──────┬───────┘
-         │  streamlit,   │              │
-         │  benchmark,   │              │
-         │  logging.db)  │              │
-         └──────┬───────┘              │
-                │                      │
-                └──────────┬───────────┘
-                           │
-                           ▼
-               ┌────────────────────────┐
-               │  config.py: SETTINGS     │   (глобал,
-               │  + _resolve_env_refs     │    project.json + config.json + .secrets.env)
-               └────────────┬───────────┘
-                            │
-                            ▼
-              ┌──────────────────────────────┐
-              │  ApplicationContext (Bootstrap) │
-              │  Создаёт и связывает ВСЕ общие   │
-              │  сервисы: Config, Sessions,      │
-              │  Bus, Agent, DB-Logging, Audit   │
-              └──────────┬─────────────────────┘
-                         │
-        ┌────────────────┼─────────────────────┐
-        ▼                ▼                       ▼
-   ┌────────┐   ┌────────────────┐       ┌─────────────┐
-   │ gateway │   │ lib/services/  │       │  lib/core/   │
-   │  (132)  │   │  Сервисный слой │       │ AgentFactory │
-   │ тонкий  │   │ ConfigService  │       │ BusFactory   │
-   │ оркестр.│   │ SessionStorage │       └─────────────┘
-   └────────┘   │ ChannelFactory │
-                │ SubprocessMgr  │
-                │ PreloadService │
-                │ RuntimePatcher │
-                │ DbLoggingSvc   │
-                │ TranscriptionSvc│
-                └───────┬────────┘
-                        │
-                        ▼
-                ┌──────────────────┐
-                │  MessageBus       │
-                │  (publish inbound │
-                │   / outbound)     │
-                └──────────────────┘
 
-Каналы сообщений:
-   PostgresChannel    RedisChannel    (опционально)
-        │                  │
-        ▼                  ▼
-   PostgreSQL          Redis (inbox/outbox)
-        │
-        ▼
-   Streamlit UI (поллинг conversation_messages, веб-чат)
-```
+**Поток инициализации:** конфиги (3 файла) → `config.py` собирает `SETTINGS` → `ApplicationContext.create()` инициализирует и связывает все общие сервисы → `MessageBus` → `AgentLoop` с хуками → `gateway.py`/`cli_agent.py` (тонкие оркестраторы) запускают каналы и lifecycle.
 
-**Ключевые компоненты:**
-
-- **`config.py`** — собирает `SETTINGS` из `project.json + config.json + .secrets.env`, резолвит `${VAR}`. Глобальный singleton.
-- **`lib/core/application_context.py:ApplicationContext`** — единая точка создания и связывания сервисов (`create`/`start`/`stop`). Использует graceful degradation — если БД недоступна, сервис просто не создаётся.
-- **`lib/services/`** — переиспользуемые сервисы (см. таблицу ниже).
-- **`lib/lifecycle/`** — `GatewayRunner` (цикл с backoff) + `ShutdownCoordinator` (LIFO graceful shutdown).
-- **`lib/cli/`** — `DisplayConfig`, `hook_loader`, `console_loop` (вынесено из `cli_agent.py`).
-- **`workspace/hooks/database_logging_hook.py`** — `AgentHook` для логирования tool-событий и run-level summary в БД.
-- **Точки входа:** `gateway.py` (132 строки), `cli_agent.py` (165 строк), `pg_agent_worker.py` (310 строк, legacy, не трогали), `streamlit_app.py` (502 строки, отдельный клиент через PG-канал, не трогали).
-
-Конфигурация:
-- **`config.json`** — настройки nanobot: провайдеры, каналы, инструменты, API (формат nanobot)
-- **`project.json`** — настройки проекта: каналы `channels.*`, навыки `skills.*`, `cli`/`gateway`/`streamlit`/`benchmark`/`logging.db`
-- **`.secrets.env`** — секреты (API-ключи, `DATABASE_URL`) — в `.gitignore`
-
-Порядок мержа в `config.py` (поздний источник перекрывает ранний): `project.json` → `config.json` → `.secrets.env` (секреты — наивысший приоритет). Значения вида `${VAR}` подставляются из `os.environ` (секреты — из `.secrets.env`).
-
-**Pre-resolve env** (`ConfigService._pre_resolve_env_refs`): если в `config.json` есть `"apiKey": "${MISTRAL_API_KEY}"`, а env-переменная не задана (ключ лежит в `.secrets.env` через провайдер-скоупинг `# providers: mistral\napi_key=...`), сервис достаёт ключ из `SETTINGS.providers.mistral.api_key` и кладёт в `os.environ` ДО вызова `nanobot._load_runtime_config`. Это значит, что `MISTRAL_API_KEY` НЕ нужно экспортировать в shell — gateway стартует без `export MISTRAL_API_KEY=...`.
+Подробности по сервисам и таблица связей — в **[DEVELOPMENT.md](DEVELOPMENT.md)**.
 
 ---
 
 ## Структура проекта
 
-```
-~/.nanobot/
-├── README.md                       ← этот файл
-├── config.json                     # Настройки nanobot (агенты, провайдеры, каналы, инструменты, API)
-├── project.json                    # Настройки проекта (channels.*, skills.*, cli, gateway, streamlit, benchmark)
-├── config.py                       # Сборка SETTINGS: project.json + config.json + .secrets.env
-├── .secrets.env                    # Секреты (API-ключи, DATABASE_URL) — в .gitignore
-├── .secrets.env.example            # Шаблон для .secrets.env
-│
-├── gateway.py                      # [Entry point] Gateway-сервер (тонкий оркестратор, 132 строки)
-├── cli_agent.py                    # [Entry point] CLI-агент (тонкий оркестратор, 165 строк)
-├── pg_agent_worker.py              # [Entry point] Пакетный обработчик PG→nanobot→PG (legacy, 310 строк)
-├── streamlit_app.py                # [Entry point] Streamlit веб-чат (отдельный клиент, 502 строки)
-│
-├── lib/                            # Внутренняя реализация
-│   ├── core/                        # ⭐ ApplicationContext + фабрики
-│   │   ├── application_context.py  #   Единый bootstrap: create/start/stop, связывает все сервисы
-│   │   ├── agent_factory.py        #   Создание AgentLoop с хуками (ToolAudit + DatabaseLogging)
-│   │   └── bus_factory.py          #   MessageBus + опциональная обёртка publish_inbound/outbound для логгеров
-│   │
-│   ├── services/                    # ⭐ Сервисный слой (вынесено из gateway.py и cli_agent.py)
-│   │   ├── config_service.py        #   Загрузка конфига, SETTINGS-аксессор, инъекция ключей, таймауты
-│   │   ├── session_storage.py       #   Фабрика SessionManager / PGSessionManager (auto/postgres/file)
-│   │   ├── runtime_patcher.py       #   Все monkey-patch'и (ContextGovernor + _assemble_outbound) в одном месте
-│   │   ├── channel_factory.py      #   ChannelManager + Redis/Postgres каналы + транскрипция
-│   │   ├── subprocess_manager.py    #   Streamlit spawn + graceful terminate/kill
-│   │   ├── preload_service.py      #   FAISS preload (gateway) + audit_cache refresh (cli)
-│   │   ├── transcription_service.py # openai/groq: API-ключ/URL/язык
-│   │   ├── db_logging_service.py    # ⭐ Worker-поток, batch INSERT, JSONL fallback, get_stats()
-│   │   ├── db_logging_bus.py        #   Обёртки publish_inbound/outbound для DbLoggingService
-│   │   ├── audit_sync_service.py    #   [был] Синхронизация audit-таблиц из PG в in-memory DuckDB
-│   │   ├── audit_memory_store.py    #   [был] DuckDB-кеш + FAISS-индексы + publish-snapshot
-│   │   ├── cache_provider.py        #   [был] Интерфейс CacheProvider + SearchResult
-│   │   ├── cache_provider_impl.py   #   [был] Реализация кеша (PostgresDuckDbProvider)
-│   │   ├── text_splitter.py         #   [был] Чанкование текстов
-│   │   └── sql/
-│   │       └── create_logs_table.sql  # DDL для DbLoggingService (gateway_logs)
-│   │
-│   ├── cli/                         # ⭐ Вынесено из cli_agent.py
-│   │   ├── console_loop.py          #   REPL + typewriter + consume_outbound
-│   │   ├── display_config.py        #   DisplayConfig (show_reasoning/tool_calls/...)
-│   │   └── hook_loader.py           #   Сканирование workspace/hooks/*.py для AgentHook-подклассов
-│   │
-│   ├── lifecycle/                   # ⭐ Цикл запуска и graceful shutdown
-│   │   ├── gateway_runner.py        #   run_forever() с exponential backoff (1с → 30с)
-│   │   └── shutdown_coordinator.py  #   LIFO-остановка сервисов, изоляция ошибок
-│   │
-│   ├── channels/
-│   │   ├── postgres_channel.py     # Канал через таблицу conversation_messages
-│   │   ├── redis_channel.py        # Канал через Redis-очереди (BRPOP/LPUSH)
-│   │   └── sql/
-│   │       └── seed_messages.sql   # Тестовые данные для PostgresChannel
-│   │
-│   ├── session/
-│   │   ├── pg_session_manager.py   # Хранение сессий в PostgreSQL (замена JSONL)
-│   │   └── sql/
-│   │       ├── create_session_tables.sql    # DDL для session_meta / session_messages (PG)
-│   │       └── create_session_tables_gp.sql # DDL для Greenplum 6.25
-│
-├── workspace/                      # Runtime-данные и хуки (на уровень выше lib/)
-│   ├── hooks/
-│   │   ├── tool_audit_hook.py      #   [был] Хук аудита вызовов инструментов
-│   │   └── database_logging_hook.py # ⭐ AgentHook для логирования tool-событий + run_finished в БД
-│
-├── scripts/                        # Пустая директория для будущих скриптов (.gitkeep)
-│
-├── tools/                          # Инфраструктурные CLI-утилиты
-│   └── build_vectors.py            #   Сборка векторных индексов (вне навыка)
-│
-├── benchmarks/                     # Система автоматического тестирования агента
-│   ├── runner.py                   #   Запуск бенчмарков
-│   ├── items/                      #   YAML-файлы с заданиями (simple, medium, hard)
-│   │   └── _template.yaml          #   Шаблон для создания новых тестов
-│   ├── loader.py / evaluator.py    #   Загрузка и оценка
-│   ├── scorer.py / reporter.py     #   Подсчёт баллов и отчёты
-│   ├── models.py                   #   Pydantic-модели
-│   ├── hooks.py / db.py            #   Хуки и сохранение в БД
-│   ├── results/runs/               #   Результаты прогонов
-│   └── sql/                        #   DDL для БД бенчмарков
-│       ├── create_benchmark_tables.sql      # Таблицы benchmark_runs, benchmark_results (PG)
-│       └── create_benchmark_tables_gp.sql   # Версия для Greenplum
-│
-├── tests/                          # Unit-тесты (pytest)
-│
-├── workspace/
-│   ├── AGENTS.md                   # Инструкции агенту (политики, heartbeat, cron)
-│   ├── HEARTBEAT.md                # Периодические задачи (проверка каждые 30 мин)
-│   ├── SOUL.md                     # Системная личность агента
-│   ├── TOOLS.md                    # Описание инструментов
-│   ├── USER.md                     # Профиль пользователя (Алексей)
-│   │
-│   ├── hooks/
-│   │   └── tool_audit_hook.py      # Хук аудита вызовов инструментов
-│   │
-│   ├── utils/
-│   │   ├── db.py                   # Единый коннектор PostgreSQL (sync + async)
-│   │   └── session_file_store.py   # Файловое хранилище результатов сессий
-│   │
-│   ├── skills/
-│   │   └── audit_analyzer/         # 📊 Анализ аудиторских проверок
-│   │       ├── SKILL.md            #   Документация навыка
-│   │       ├── audit_analyze.bat   #   Standalone-запуск (Windows)
-│   │       ├── audit_analyze.sh    #   Standalone-запуск (Linux)
-│   │       ├── scripts/            #   Модули режимов (cli.py, predefined.py, sql_mode.py, ...)
-│   │       ├── cache/              #   DuckDB-кеш для предопределённых скриптов
-│   │       └── tests/              #   Unit-тесты навыка
-│   │
-│   ├── prompts/                    # Prompt overrides (dream, evaluator)
-│   ├── sessions/                   # JSONL-файлы сессий (fallback)
-│   ├── memory/
-│   │   ├── MEMORY.md               # Долговременная память
-│   │   └── history.jsonl           # История взаимодействий
-│   ├── data_store/cache/           # Кэш результатов инструментов
-│   └── cron/jobs.json              # Cron-задачи (dream каждые 2ч)
-│
-├── requirements.txt                # Зависимости проекта
-```
+Краткий обзор. **Полное дерево с описанием каждого модуля** (lib/core/, lib/services/, lib/cli/, lib/lifecycle/, workspace/skills/audit_analyzer/ и т.д.) — в [DEVELOPMENT.md → Структура проекта](DEVELOPMENT.md#структура-проекта).
 
-**Примечания:**
-- `scripts/` — пустая директория для будущих скриптов (содержит только `.gitkeep`)
-- `logs/` — создаётся при первом запуске для хранения логов
-- `workspace/memory/history.jsonl` — история взаимодействий агента (файл существует)
-- `workspace/memory/MEMORY.md` — файл долговременной памяти (существует)
+```
+nanobot/
+├── README.md               ← этот файл
+├── DEVELOPMENT.md          ← техническая документация
+├── CHANGELOG.md            ← история релизов (keep-a-changelog)
+│
+├── config.json             # Настройки nanobot (агенты, провайдеры, каналы, API, gateway)
+├── project.json            # Настройки проекта (channels.*, skills.*, cli, gateway, logging.db)
+├── config.py               # Сборка SETTINGS: project.json + config.json + .secrets.env
+│
+├── gateway.py              # ⭐ v2.0.0: 132 строки, тонкий оркестратор
+├── cli_agent.py            # ⭐ v2.0.0: 165 строк, тонкий оркестратор
+├── pg_agent_worker.py      # [legacy] пакетный воркер, НЕ через ApplicationContext
+├── streamlit_app.py        # [отдельный клиент] поллинг conversation_messages
+│
+├── lib/                    # ⭐ v2.0.0: сервисный слой (core/services/cli/lifecycle)
+├── workspace/              # Runtime-данные, хуки, skills/, memory/
+├── tests/                  # 701 unit-тест
+├── benchmarks/             # YAML-тесты, runner, scorer, reporter
+├── tools/                  # Инфраструктурные CLI-утилиты (build_vectors.py)
+├── requirements.txt
+```
 
 ---
 
