@@ -29,7 +29,7 @@ htmlcov/
 .benchmarks/
 
 # --- Runtime-логи и история CLI ---
-logs/
+/logs/
 *.log
 history/
 

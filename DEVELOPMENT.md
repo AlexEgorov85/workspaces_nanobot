@@ -75,10 +75,10 @@ flowchart LR
     CLI --> DUCK
     CLI --> PROV
 
-    classDef v2 fill:#fff3cd,stroke:#d39e00,stroke-width:2px
-    classDef owner fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
+    classDef service fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
+    classDef owner fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef consumer fill:#f8d7da,stroke:#c82333
-    class SYNC,STORE_SVC v2
+    class SYNC,STORE_SVC service
     class GATEWAY owner
     class CLI consumer
 ```
@@ -128,9 +128,9 @@ flowchart TB
     CTX --> PRELOAD["PreloadService<br/>(FAISS / audit_cache)"]
     CTX --> TRANS["TranscriptionService"]
 
-    classDef v2 fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef bootstrap fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef entry fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
-    class CTX v2
+    class CTX bootstrap
     class GW,CLI entry
 ```
 
@@ -211,10 +211,14 @@ nanobot/
 ├── DEVELOPMENT.md                        # этот документ
 ├── tools/                                # инфраструктурные CLI-утилиты
 │   └── build_vectors.py                  #   сборка векторных индексов (вне навыка)
-├── sql/                                  # DDL всех таблиц, нужных навыку
-│   ├── create_audit_source_tables_gp.sql # REFERENCE-схема домена (audits, violations, ...)
-│   ├── create_audit_vectors_table_gp.sql # oarb.vector_index_store + oarb.audit_vectors
-│   └── create_vector_index_config_gp.sql # oarb.vector_index_config
+├── sql/                                  # v2.0.0: все DDL сгруппированы по доменам
+│   ├── README.md                          #   порядок применения, каталог
+│   ├── session/                           #   session_meta + session_messages
+│   ├── channels/                          #   seed_messages.sql (тестовые данные)
+│   ├── logs/                              #   gateway_logs (DbLoggingService)
+│   ├── audit_analyzer/                    #   домен oarb.* + векторы (GP)
+│   ├── benchmarks/                        #   benchmark_runs + benchmark_results
+│   └── migrations/                        #   инкрементальные миграции (например, logs)
 │
 ├── lib/                                  #  v2.0.0: сервисный слой
 │   ├── core/                             #   bootstrap ApplicationContext + фабрики
@@ -236,8 +240,7 @@ nanobot/
 │   │   ├── cache_provider.py             #     интерфейс CacheProvider + SearchResult
 │   │   ├── cache_provider_impl.py        #     PostgresDuckDbProvider + фабрика и модульные функции
 │   │   ├── text_splitter.py              #     чанкование текстов для индексаторов
-│   │   └── sql/
-│   │       └── create_logs_table.sql     #  DDL для DbLoggingService (gateway_logs)
+│   │   # DDL для DbLoggingService (gateway_logs) теперь в sql/logs/ и sql/migrations/
 │   ├── cli/                              #  вынесено из cli_agent.py
 │   │   ├── console_loop.py               #   REPL + typewriter + consume_outbound
 │   │   ├── display_config.py             #   DisplayConfig
@@ -404,7 +407,7 @@ gateway автоматически — запустите его (python gateway
 ## 🔄 Жизненный цикл кеша
 
 **Владелец файла кеша навыка — `gateway.py`.** Навык (CLI) про создание и
-обновление кеша больше не знает: `--mode init` и `--force` удалены.
+обновление кеша больше не знает: `--force` удалён.
 
 Пара сервисов строится в `gateway.py::_build_audit_services()` (возвращает
 `(None, None)`, если `in_memory_enabled` выключен, нет DSN или таблиц):
@@ -625,29 +628,96 @@ provider.invalidate_cache()                 # все
 
 ---
 
+## 🛠 tools/ — инфраструктурные утилиты
+
+В корне `tools/` живут CLI-утилиты, **отдельные от навыков** — инфраструктура, не аналитика.
+
+### `tools/build_vectors.py`
+
+Перестроение векторных индексов из PostgreSQL-данных. Полная документация по флагам и пайплайну — в [Векторная индексация](#векторная-индексация). Краткая шпаргалка:
+
+```bash
+# Статус без изменений
+python tools/build_vectors.py --status
+
+# Полная перестройка всех индексов (осторожно: долго + нагрузка на Ollama)
+python tools/build_vectors.py --full-rebuild
+
+# Только проверка сигнатуры (COUNT + MAX track_column) — подходит для cron
+python tools/build_vectors.py --check
+
+# Один индекс
+python tools/build_vectors.py --index audits_index
+
+# Dry-run без записи в БД
+python tools/build_vectors.py --dry-run
+
+# Параметры эмбеддинга
+python tools/build_vectors.py --batch-size 32 --chunk-size 500 --chunk-overlap 80
+
+# Другая таблица векторов
+python tools/build_vectors.py --db-table my_app.vectors
+```
+
+| Флаг | Дефолт | Описание |
+|------|--------|----------|
+| *(без флагов)* | — | Инкрементальная синхронизация (NEW / CHANGED / DELETED) |
+| `--full-rebuild` | — | Полная перестройка (TRUNCATE + все строки) |
+| `--check` | — | Сравнить сигнатуру (count + max track); синхронизировать только при diff |
+| `--status` | — | Сводное состояние индексов без синхронизации |
+| `--dry-run` | — | План без записей в БД |
+| `--index <name>` | все | Собрать только индекс `name` |
+| `--db-table` | `oarb.audit_vectors` | Таблица сырых векторов |
+| `--batch-size` | env | Батч эмбеддинга |
+| `--chunk-size` | 500 | Размер чанка в символах |
+| `--chunk-overlap` | 80 | Перекрытие чанков |
+
+**Типичные сценарии:**
+
+- **После изменений в DDL таблиц** — `--full-rebuild`.
+- **Проверка готовности системы** (cron / healthcheck) — `--check`.
+- **Мониторинг без записи** — `--status`.
+- **Большой источник + экономия памяти Ollama** — `--batch-size 8` + `--chunk-size 300`.
+
+DSN берётся из `channels.postgres.dsn` (или `DATABASE_URL`/`PG_DSN`) через `utils.db.resolve_dsn()`. Параметры эмбеддинга (`embedding_base_url`, `embedding_model`, `embedding_dimension`) — из `skills.audit_analyzer.*` в `project.json`.
+
+### Когда добавлять новую утилиту в `tools/`
+
+Утилита попадает в `tools/` если она:
+- **инфраструктурная** (миграции, сборка индексов, очистка кешей) — **не часть навыка**.
+- запускается из shell/CI, не из агента.
+- работает с БД напрямую (минуя `lib/services/*` если скрипт одноразовый).
+
+Если скрипт — часть навыка (например, обработка `predefined`-скриптов), он идёт в `workspace/skills/<skill>/scripts/`, а не в `tools/`.
+
+---
+
 ## 🗃 SQL-скрипты: создание таблиц
 
 Все DDL собраны в корневом каталоге [`sql/`](sql/). Порядок применения:
 
 ```bash
 # 1. Схема домена (REFERENCE — уточняется владельцем данных)
-psql "$DATABASE_URL" -f sql/create_audit_source_tables_gp.sql
+psql "$DATABASE_URL" -f sql/audit_analyzer/create_audit_source_tables_gp.sql
 
 # 2. Векторные таблицы (oarb.audit_vectors + oarb.vector_index_store)
-psql "$DATABASE_URL" -f sql/create_audit_vectors_table_gp.sql
+psql "$DATABASE_URL" -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
 
 # 3. Конфигурация индексов (oarb.vector_index_config)
-psql "$DATABASE_URL" -f sql/create_vector_index_config_gp.sql
+psql "$DATABASE_URL" -f sql/audit_analyzer/create_vector_index_config_gp.sql
 
 # 4. Сборка индексов
 python tools/build_vectors.py --full-rebuild
 ```
 
+Все DDL собраны в корневом каталоге [`sql/`](sql/) с подкаталогами по доменам.
+Полный каталог и порядок применения — в [`sql/README.md`](sql/README.md).
+
 | Файл | Таблицы | Статус |
 |------|---------|--------|
-| `sql/create_audit_source_tables_gp.sql` | `oarb.audits`, `oarb.violations`, `oarb.audit_reports`, `oarb.report_items` | **REFERENCE** — минимальный набор колонок из кода, уточняет владелец данных |
-| `sql/create_audit_vectors_table_gp.sql` | `oarb.vector_index_store`, `oarb.audit_vectors` (+ индексы) | рабочий |
-| `sql/create_vector_index_config_gp.sql` | `oarb.vector_index_config` | рабочий |
+| `sql/audit_analyzer/create_audit_source_tables_gp.sql` | `oarb.audits`, `oarb.violations`, `oarb.audit_reports`, `oarb.report_items` | **REFERENCE** — минимальный набор колонок из кода, уточняет владелец данных |
+| `sql/audit_analyzer/create_audit_vectors_table_gp.sql` | `oarb.vector_index_store`, `oarb.audit_vectors` (+ индексы) | рабочий |
+| `sql/audit_analyzer/create_vector_index_config_gp.sql` | `oarb.vector_index_config` | рабочий |
 
 Совместимо с PostgreSQL 13+ и Greenplum 6+ (на GP таблицы без `DISTRIBUTED BY`
 распределяются hash по первой колонке).
@@ -722,7 +792,7 @@ python tools/build_vectors.py --full-rebuild
 | **Web UI** | Streamlit UI | `streamlit_app.py` | Чат не отвечает → `streamlit.max_wait` (дефолт 600с) и `poll_interval`; `st.rerun` лимит → блокирующий поллинг в `streamlit_app.py` (без `st.rerun`) |
 | **Агент** | Личность агента | `workspace/SOUL.md` | — |
 | **Агент** | Инструкции агенту | `workspace/AGENTS.md` | Инструкции не подхватываются → путь `agents.defaults.workspace` (`config.json`); конфликт с глобальным `AGENTS.md` → файлы мерджатся в порядке: `~/.nanobot/AGENTS.md` < `workspace/AGENTS.md` |
-| **Навык audit_analyzer** | Навык `audit_analyzer` (общее) | `workspace/skills/audit_analyzer/scripts/` + `lib/services/audit_*` (кеш) | `FileNotFoundError: audit_cache.duckdb` → `python gateway.py` (владелец кеша); `--mode init` неизвестен → удалён (миграция v1.5.0+ в gateway); LLM 429 → `cli_max_retries` (`project.json`) |
+| **Навык audit_analyzer** | Навык `audit_analyzer` (общее) | `workspace/skills/audit_analyzer/scripts/` + `lib/services/audit_*` (кеш) | `FileNotFoundError: audit_cache.duckdb` → `python gateway.py` (владелец кеша); LLM 429 → `cli_max_retries` (`project.json`) |
 | **Навык audit_analyzer** | Схема таблиц | `workspace/skills/audit_analyzer/scripts/database.py:_fetch_schema` (строки 188-237) | Таблица не видна → `db_tables` в `project.json` + `db_schema`; нет комментариев колонок → `pg_catalog.pg_description.objsubid`; тип `varchar(N)` без длины → `character_maximum_length` в `_fetch_schema` |
 | **Навык audit_analyzer** | DuckDB-кеш аудита | `lib/services/audit_memory_store.py` (in-memory) + `lib/services/audit_sync_service.py` (поллинг PG) | `нет данных в кэше` несмотря на строки в PG → callbacks ДО `ctx.start()` (см. `gateway.py:main`); удалённые в PG строки остаются в кеше → `full_resync_every: 0` отключает сверку; файл кеша не обновляется → `publish_path` пуст или `_dirty=False` |
 | **Навык audit_analyzer** | Векторный поиск | `lib/services/cache_provider_impl.py` (провайдер) + `tools/build_vectors.py` (индексатор) | `vector_mode` пустой результат → `python tools/build_vectors.py --status` + пересборка `--full-rebuild`; эмбеддинг не строится → Ollama на `embedding_base_url` (дефолт `http://localhost:11434/api/embed`); индекс пересобирается при каждом запросе → `invalidate_cache` не вызван, FAISS не в памяти |
@@ -776,118 +846,59 @@ E2E проверяет все режимы: predefined (реальный SQL п�
 
 ## 📝 Изменения и миграции
 
-### 2026-08 — v2.0.0: ApplicationContext + сервисный слой (текущая)
+Краткий таймлайн релизов — в [CHANGELOG.md](CHANGELOG.md). Этот раздел — только то, что **требует ручных действий при миграции**.
 
-- **`gateway.py` (696 → 132) и `cli_agent.py` (865 → 165 строк)** — тонкие
-  оркестраторы. Вся инициализация вынесена в `lib/core/ApplicationContext`.
-- **Новый сервисный слой** (`lib/services/`):
-  - `ConfigService` — единая точка загрузки конфига, SETTINGS-аксессор,
-    инъекция ключей, таймауты. **Pre-resolve `${PROVIDER_API_KEY}`** —
-    автоматически достаёт ключ из `SETTINGS.providers.<name>.api_key` (туда
-    `config.py` подставил значение из `.secrets.env`) и кладёт в `os.environ`
-    ДО `_load_runtime_config`. Gateway больше НЕ требует
-    `export MISTRAL_API_KEY=...` в shell.
-  - `SessionStorageService` — выбор `PGSessionManager` / `SessionManager`
-    (auto / postgres / file) с поддержкой `session_manager.json` override.
-  - `RuntimePatcher` — оба monkey-patch'а (`ContextGovernor.normalize_tool_result`
-    + `agent._assemble_outbound`) в одном классе с fallback при изменении API
-    nanobot. Дубликат в cli_agent удалён.
-  - `ChannelFactory` — `ChannelManager` + Redis/Postgres каналы +
-    транскрипция.
-  - `SubprocessManager` — Streamlit spawn + terminate/kill.
-  - `PreloadService` — разделяет FAISS preload (gateway) и audit_cache
-    refresh (cli).
-  - `TranscriptionService` — openai/groq key/URL/language.
-- **`DbLoggingService`** — структурированный журнал событий агента в
-  PostgreSQL (таблица `gateway_logs`, см. `lib/services/sql/create_logs_table.sql`).
-  Worker-поток, batch INSERT через `psycopg2.extras.execute_batch`,
-  JSONL fallback при недоступности БД, `get_stats()` для мониторинга.
-  Подключён через `BusFactory` (обёртки `publish_inbound`/`publish_outbound`)
-  + `DatabaseLoggingHook` (AgentHook для tool-событий и run_finished).
-- **Новые модули**:
-  - `lib/core/application_context.py` — bootstrap
-  - `lib/core/agent_factory.py`, `bus_factory.py` — фабрики
-  - `lib/lifecycle/gateway_runner.py` — цикл с exponential backoff (1с → 30с)
-  - `lib/lifecycle/shutdown_coordinator.py` — LIFO graceful shutdown
-  - `lib/cli/console_loop.py`, `display_config.py`, `hook_loader.py` — вынесено из cli_agent.py
-  - `workspace/hooks/database_logging_hook.py` — AgentHook для БД
-- **Race-condition fix:** callbacks на `AuditSyncService` (`set_on_new_records_callback`
-  + `set_on_sync_callback`) устанавливаются в `gateway.py:main()` ДО `ctx.start()`.
-  Без этого worker-тред успевает сделать `initial_load` раньше → `AuditMemoryStore`
-  пустой → `preload_vector_indexes` показывает "нет данных в кэше" несмотря на
-  наличие строк в `oarb.audit_vectors`. Восстановлено отображение
-  `✓ vector index 'audits_index' built in memory: 10 vectors`.
-- **Graceful degradation:** если `psycopg2` не установлен или DSN пуст —
-  `ApplicationContext.create()` создаётся, битый сервис остаётся `None`,
-  gateway/cli работают без него.
-- **`streamlit_app.py` НЕ тронут** — у него другая архитектура (тонкий web-клиент через PG-канал).
-- **Тесты:** 701 unit-тестов (было 594, +107). Полный changelog: `README.md`
-  (v2.0.0 секция) и ниже в этом документе («Изменения и миграции»).
+### Миграция 1.5.0 → 2.0.0
 
-### 2026-08 — Структура таблиц из PG + сверка удалений
+**Конфигурация:**
 
-- `AuditSyncService` собирает структуру таблиц из PG `information_schema`
-  (+ `pg_description`): колонки, типы, NOT NULL, комментарии таблиц/колонок —
-  и передаёт в store через `set_on_schema_callback` → `ensure_schema`.
-- `AuditMemoryStore.ensure_schema()` создаёт таблицы с типами из PG (маппинг
-  `_map_pg_type`), в т.ч. пустые; комментарии и исходные PG-типы сохраняются
-  в `__nanobot_meta.__schema_meta` (входит в снимок и публикуется).
-- `get_schema()` (store и `PostgresDuckDbProvider`) возвращает исходные PG-типы
-  и комментарии — схема кеша совпадает с прямой PostgreSQL.
-- `AuditMemoryStore.replace_records()` — полная перезапись содержимого таблицы
-  (структура и типы сохраняются); `AuditSyncService` вызывает её каждые
-  `full_resync_every` циклов — удалённые в PG строки уходят из кеша.
+| Изменение | Действие |
+|-----------|----------|
+| `.env` → `project.json` + `.secrets.env` | Скопировать секции `channels.*`, `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway` в `project.json` (JSONC). Секреты — в `.secrets.env` с провайдер-скоупинг форматом |
+| Провайдерские ключи больше не через `export` | Секция `# providers: mistral` с `api_key=...` в `.secrets.env`. `ConfigService._pre_resolve_env_refs` подставит в `os.environ` автоматически |
+| `vector_indexes` / `mode_vector_index_path` в `config.json` | Удалить; теперь в `oarb.vector_index_config` (см. [DEVELOPMENT.md → Векторная индексация](#векторная-индексация)) |
+| DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
+| `data-analyzer`, `html_presentation_generator` | Удалены. Убрать из импортов и `config.json` |
+| `pg_agent_worker.py` | Удалён. Использовать `streamlit_app.py` + `PostgresChannel` |
 
-### 2026-08 — Gateway — владелец кеша навыка
+**Код (если вы форкали):**
 
-- Создание и обновление файла кеша полностью перенесено в `gateway.py`;
-  навык (CLI) про это больше не знает: удалены `--mode init` и `--force`.
-- Новые сервисы в `lib/services`: `AuditMemoryStore` (in-memory DuckDB +
-  FAISS, `publish()` атомарным снимком через temp + `os.replace`) и
-  `AuditSyncService` (worker-поток, инкрементальный поллинг PG по track-колонке).
-- `AuditMemoryStore.publish()` публикует снимок после каждого цикла синхронизации
-  (`on_sync_callback`) и при завершении gateway; пропускает ещё не синхронизированные
-  таблицы, не перезаписывает файл без изменений (флаг `_dirty`).
-- `AuditSyncService` пишет журнал взаимодействий в `oarb.audit_interactions`
-  (создаётся автоматически, `sync_write_table` / `poll_interval_sec` в project.json).
-- При отсутствии файла кеша CLI завершается с `FileNotFoundError` и подсказкой
-  запустить gateway.
+| Что | Изменение |
+|-----|-----------|
+| `gateway.py` | Было 696 строк, стало 132. Вся инициализация — в `lib/core/ApplicationContext`. Свой код инициализации → переносить в `ApplicationContext.create()` или в новый сервис в `lib/services/` |
+| `cli_agent.py` | Было 865 строк, стало 165. То же самое |
+| `RuntimePatcher` | Оба monkey-patch'а (`ContextGovernor.normalize_tool_result`, `agent._assemble_outbound`) теперь в `lib/services/runtime_patcher.py` с fallback при изменении API nanobot |
+| `DbLoggingService` | Новый. Если раньше логировали вызовы иначе — мигрировать на `lib/services/db_logging_service.py` + `workspace/hooks/database_logging_hook.py` |
+| Хуки | `workspace/hooks/database_logging_hook.py` теперь встроен в `AgentLoop.hooks` через `AgentFactory` |
 
-### 2026-08 — Универсальный слой данных, чистка навыка
+**Данные:**
 
-- Инфраструктура вынесена из навыка в `lib/services` (интерфейс
-  `CacheProvider` + реализация `PostgresDuckDbProvider`, модульные функции
-  загрузки/проверки кеша и эмбеддинга).
-- Удалены промежуточные обёртки из навыка: `InMemoryDatabase`,
-  `scripts/vector_mode.py` — CLI и агент работают с провайдером напрямую.
-- Унифицирован интерфейс бэкенда запросов: `get_schema / query_sql / explain`
-  (`QueryBackend`) — реализован и в `Database` (прямой PG), и в провайдере.
-- Фоновая загрузка/свежесть кеша в `gateway.py` и `cli_agent.py` переведена
-  на провайдера / модульные функции `lib/services`.
-- Документация разработчика перенесена из навыка в корень: `DEVELOPMENT.md` +
-  `sql/` (все DDL нужных таблиц).
-- Индексация вынесена из навыка: `build_vectors.py` → корневой `tools/`,
-  `text_splitter.py` → `lib/services/`; удалён legacy-мигратор
-  `migrate_vectors_to_db.py`. Навык остался тонким CLI — создание индексов
-  это инфраструктура, а не задача навыка.
-- Удалены debug-скрипты `check_status.py` и `cache/query_audit.py`.
+- **Сессии** (`session_meta`, `session_messages`) — без миграции, схема та же.
+- **Канал** (`conversation_messages`) — без миграции.
+- **`audit_cache.duckdb`** — gateway пересоздаст автоматически (in-memory → новый snapshot).
+- **Векторные индексы** (`oarb.audit_vectors`, `oarb.vector_index_store`, `oarb.vector_index_config`) — без миграции (1.5.0 уже хранил их в БД).
+- **Бенчмарки** (`benchmark_runs`, `benchmark_results`) — без миграции.
+- **`gateway_logs`** — новая таблица, создаётся через `sql/logs/create_logs_table.sql`.
 
-### 2026-07 — DuckDB-кеш
+**Что НЕ изменилось:**
 
-- Введён DuckDB-кеш навыка: `InMemoryDatabase` → `load_from_postgres()` /
-  `check_stale()` (сравнение `MAX(updated_at)`), фоновый опрос свежести раз в час
-  в `gateway.py` / `cli_agent.py`.
-- Добавлен `--mode init` для ручного создания/обновления кеша.
+- API точек входа: `python gateway.py`, `python cli_agent.py -P`.
+- Имена таблиц БД.
+- `benchmarks/items/*.yaml` — формат совместим.
+- `audit_analyzer` режимы `predefined` / `sql` / `vector`.
+- Параметры CLI `audit_analyzer` (`--top-k`, `--threshold`, `--index-name`).
 
-### 2026-06 — Векторные индексы в PostgreSQL
+### Краткий таймлайн
 
-- Векторные индексы мигрированы из `.faiss`-файлов в БД:
-  `oarb.audit_vectors`, `oarb.vector_index_store`, `oarb.vector_index_config`
-  (29.06.2026).
+| Дата | Версия | Что |
+|------|--------|-----|
+| 2026-05-25 | 0.9.0 | nanobot-шлюз с `PostgresChannel`, инструментами, конфигурацией workspace |
+| 2026-05-27 | 1.0.0 | Навыки `db_analyzer` + `html_presentation_generator`, E2E-тесты |
+| 2026-05-27 | 1.1.0 | Модель `gpt-oss:20b-cloud`, кеш схемы в `db_analyzer` |
+| 2026-05-29 | 1.2.0 | Streamlit-чат, единотабличная архитектура `conversation_messages` |
+| 2026-06-10 | 1.3.0 | Self-review система, `ToolAuditHook`, бенчмарк-фреймворк, Redis-канал |
+| 2026-06-16 | 1.4.0 | Переход asyncpg → psycopg2, переименование `db_analyzer` → `audit_analyzer` |
+| 2026-07-22 | 1.5.0 | Векторные индексы в PostgreSQL, DuckDB-кеш, файловые → БД-секреты |
+| 2026-08-12 | 2.0.0 | `ApplicationContext` + сервисный слой, gateway — владелец кеша, JSONC, удаление навыков |
 
-### 2026-05/06 — Ранняя история
-
-- (05.2026) Первоначальная реализация навыка `db_analyzer` на FAISS-файлах
-  (режимы predefined/sql/vector).
-- (06.2026) Переименование `db_analyzer` → `audit_analyzer`, переход
-  `asyncpg` → `psycopg2` (совместимость с Greenplum).
+Подробный changelog — в [CHANGELOG.md](CHANGELOG.md).

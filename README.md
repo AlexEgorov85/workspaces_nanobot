@@ -9,31 +9,44 @@
 
 ---
 
+## Содержание
+
+1. [Быстрый старт](#быстрый-старт)
+2. [Переменные окружения](#переменные-окружения)
+3. [Запуск](#запуск)
+4. [Архитектура](#архитектура)
+5. [Структура проекта](#структура-проекта)
+6. [Компоненты](#компоненты)
+7. [База данных](#база-данных)
+8. [Векторные индексы](#векторные-индексы)
+9. [Тестирование](#тестирование)
+10. [Heartbeat и cron](#heartbeat-и-cron)
+11. [Troubleshooting](#troubleshooting)
+12. [Миграция с 1.5.0](#миграция-с-150-на-200)
+13. [Документация](#документация)
+14. [Зависимости и лицензия](#зависимости-и-лицензия)
+
+---
+
 ## Быстрый старт
 
 ### 1. Установка зависимостей
 
 ```bash
-# Виртуальное окружение (рекомендуется)
 python -m venv .venv
 .venv\Scripts\activate
-
-# Фреймворк nanobot
 pip install nanobot
-
-# Зависимости проекта
 pip install -r requirements.txt
 ```
 
 ### 2. Настройка окружения
 
-Скопируйте шаблон `.secrets.env.example` в `.secrets.env`:
-
 ```bash
-cp .secrets.env.example .secrets.env
+copy .secrets.env.example .secrets.env   # Windows
+# или: cp .secrets.env.example .secrets.env
 ```
 
-Отредактируйте `.secrets.env` (он в `.gitignore`, не попадёт в репозиторий):
+Отредактируйте `.secrets.env` (он в `.gitignore`):
 
 ```ini
 DATABASE_URL=postgresql://user:password@localhost:5432/nanobot
@@ -45,30 +58,31 @@ api_key=ваш_ключ_mistral
 llm_api_key=ваш_ключ_mistral
 ```
 
-Все остальные настройки лежат в конфигурационных файлах (без дублирования):
+Полный список переменных и куда они подставляются — в [Переменные окружения](#переменные-окружения).
+
+Все остальные настройки лежат в конфигурационных файлах:
 
 | Файл | Что хранит |
 |------|-----------|
-| `config.json` | Настройки nanobot: агенты, провайдеры, каналы, инструменты, API, gateway (формат nanobot) |
-| `project.json` | Настройки проекта: каналы `channels.*` (postgres, redis), навыки `skills.*`, `cli`, `gateway`, `streamlit`, `benchmark` |
+| `config.json` | Настройки nanobot: агенты, провайдеры, каналы, инструменты, API, gateway |
+| `project.json` | Настройки проекта: `channels.*` (postgres, redis), `skills.*`, `cli`, `gateway`, `streamlit`, `benchmark`, `logging.db` |
 | `.secrets.env` | Секреты (API-ключи, `DATABASE_URL`) — подставляются в конфиг через `${VAR}` |
+
+`config.py` мержит их в `SETTINGS` в порядке: `project.json → config.json → .secrets.env` (поздний перекрывает ранний). `project.json` поддерживает JSONC-комментарии (`//` и `/* */`).
 
 ### 3. База данных
 
-Создайте таблицы сессий в PostgreSQL:
-
 ```bash
-psql -d nanobot -f lib/session/sql/create_session_tables.sql
+# Таблицы сессий (PGSessionManager)
+psql -d nanobot -f sql/session/create_session_tables.sql
 # Для Greenplum:
-psql -d nanobot -f lib/session/sql/create_session_tables_gp.sql
+psql -d nanobot -f sql/session/create_session_tables_gp.sql
+
+# Таблица канала (PostgresChannel) — создаётся автоматически
+psql -d nanobot -f sql/channels/seed_messages.sql   # тестовые данные
 ```
 
-Таблица канала (`conversation_messages`) создаётся автоматически.
-
-Тестовые данные для канала:
-```bash
-psql -d nanobot -f lib/channels/sql/seed_messages.sql
-```
+Полный список DDL — в [DEVELOPMENT.md → SQL-скрипты](DEVELOPMENT.md#sql-скрипты-создание-таблиц).
 
 ### 4. Запуск
 
@@ -80,106 +94,197 @@ python cli_agent.py -P -s dev
 python gateway.py
 ```
 
+Подробности и все CLI-флаги — в [Запуск](#запуск).
+
+---
+
+## Переменные окружения
+
+Конфиг в `config.json`/`project.json` может ссылаться на переменные окружения через `${VAR}`. `ConfigService._pre_resolve_env_refs` подставляет их ДО `_load_runtime_config`, поэтому **export в shell не обязателен** — gateway берёт ключи из `.secrets.env`.
+
+### Формат `.secrets.env`
+
+Файл поддерживает **провайдер-скоупинг** (секции `# providers:`, `# Skills:` и т.п.):
+
+```ini
+DATABASE_URL=postgresql://user:password@localhost:5432/nanobot
+
+# providers: mistral
+api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
+
+# Skills: audit_analyzer
+llm_api_key=...mistral...
+```
+
+В одной секции `# providers: <name>` ключи попадают в `SETTINGS.providers.<name>.<key>`. Секция `# Skills: <skill>` — в `SETTINGS.skills.<skill>.<key>`.
+
+### Распознаваемые переменные
+
+| Переменная | Куда попадает | Назначение |
+|-----------|---------------|-----------|
+| `DATABASE_URL` / `PG_DSN` | `channels.postgres.dsn` через `utils.db.resolve_dsn()` | DSN PostgreSQL/Greenplum |
+| `REDIS_URL` / `REDIS_PASSWORD` | `channels.redis.*` | DSN и пароль Redis |
+| `MISTRAL_API_KEY` | `providers.mistral.api_key` | Ключ Mistral (через pre-resolve) |
+| `<provider>_API_KEY` | `providers.<lower>.api_key` | Ключ произвольного провайдера |
+| `LLM_API_KEY` | `skills.audit_analyzer.llm_api_key` | Ключ LLM для `audit_analyzer` (если не из провайдер-секции) |
+
+Если переменная не задана ни в `.secrets.env`, ни в `os.environ`, а в конфиге есть `${VAR}` — `nanobot._load_runtime_config` упадёт `ValueError`.
+
+### Поддержка JSONC
+
+`project.json` парсится как JSONC — можно использовать `//` и `/* */` комментарии. Все строки (включая DSN с `?`) сохраняются как есть.
+
+---
+
+## Запуск
+
+### `gateway.py` (долгоживущий сервер) {#gatewaypy}
+
+```bash
+python gateway.py
+```
+
+Что делает `gateway.py` (тонкий оркестратор, 132 строки):
+- `ApplicationContext.create(...)` — собирает конфиг, сессии, агента, аудит-сервисы, БД-логирование.
+- Регистрирует callbacks на `AuditSyncService` **ДО** `ctx.start()` — иначе FAISS preload видит «нет данных» (race condition).
+- `ChannelFactory.create_all()` — `ChannelManager` + Redis + Postgres каналы + транскрипция.
+- `SubprocessManager.spawn_streamlit()` — запуск Streamlit UI на `:8501` (логи: `logs/streamlit.log`).
+- `GatewayRunner().run_forever()` — главный цикл с exponential backoff (1с → 30с) при падении.
+- Shutdown: `channels.stop_all()` → Streamlit `terminate_all()` → `agent.close_mcp()/stop()` → `agent.sessions.flush_all()`.
+
+### `cli_agent.py` (REPL) {#cliagentpy}
+
+| Режим | Флаг | Хранилище | Хуки |
+|-------|------|-----------|------|
+| **vanilla** | (по умолчанию) | JSONL-файлы | ToolAuditHook |
+| **patched** | `--patched / -P` | PGSessionManager (или file) | ToolAuditHook + из `workspace/hooks/` |
+
+```bash
+python cli_agent.py                           # vanilla
+python cli_agent.py -P                        # patched, авто-storage
+python cli_agent.py -P -s my-session          # patched + именованная сессия
+python cli_agent.py -P -S postgres            # patched, принудительно PostgreSQL
+python cli_agent.py -S file                   # patched, принудительно JSONL
+```
+
+### `audit_analyzer` (навык) {#audit-analyzer}
+
+Точка входа: `workspace/skills/audit_analyzer/audit_analyze.bat` (Windows) или `audit_analyze.sh` (Linux). **CLI требует `--mode` явно.** Пользовательская документация навыка — `workspace/skills/audit_analyzer/SKILL.md`.
+
+| Режим | Описание | Пример |
+|-------|----------|--------|
+| `predefined` | Готовые SQL-скрипты из реестра | `--mode predefined --script analytics_by_year_month --params year=2024` |
+| `sql` | LLM генерирует SELECT по текстовому запросу | `--mode sql --query "топ-10 объектов по нарушениям"` |
+| `vector` | Семантический поиск по FAISS-индексу | `--mode vector --query "финансовые нарушения" --index-name violations_index --top-k 3` |
+
+> **Внимание:** DuckDB-кеш создаёт и обновляет `gateway.py` автоматически. Запустите gateway перед CLI — иначе `FileNotFoundError`.
+
+Параметры векторного поиска:
+- `--top-k N` — ровно N лучших результатов (по умолчанию 5).
+- `--threshold X` — все результаты выше порога X (0.0–1.0); если задан, `--top-k` игнорируется.
+
+### `benchmarks/runner.py`
+
+```bash
+python benchmarks/runner.py --tags simple
+python benchmarks/runner.py --compare runs/run1 runs/run2
+python benchmarks/runner.py --dry-run --tags hard
+```
+
+Подробности — в [`benchmarks/README.md`](benchmarks/README.md).
+
+### `tools/build_vectors.py`
+
+Инфраструктурная утилита для перестроения FAISS-индексов:
+
+```bash
+python tools/build_vectors.py --status
+python tools/build_vectors.py --full-rebuild
+python tools/build_vectors.py --check          # например, при старте контейнера
+python tools/build_vectors.py --index audits_index
+```
+
+Подробности — в [DEVELOPMENT.md → Векторная индексация](DEVELOPMENT.md#векторная-индексация).
+
 ---
 
 ## Архитектура
 
 ```mermaid
 flowchart TB
-    %% Конфигурация
-    subgraph CFG["Конфигурация"]
-        CONFIG["config.json<br>провайдеры, каналы, API"]
+    subgraph CFG["Конфигурация (3 файла, порядок мержа: поздний перекрывает ранний)"]
+        CONFIG["config.json<br>провайдеры, API, агенты"]
         PROJECT["project.json<br>channels.*, skills.*,<br>cli/gateway/streamlit,<br>benchmark, logging.db"]
         SECRETS[".secrets.env<br>(в .gitignore)"]
     end
 
-    %% SETTINGS
-    CFG -->|"merger"| SETTINGS["config.py: SETTINGS<br>project.json → config.json → .secrets.env"]
+    CFG -->|"config.py: SETTINGS"| CTX["ApplicationContext<br>(lib/core/)"]
+    CTX -->|"create/start/stop"| SVC["lib/services/<br>config_service, session_storage,<br>channel_factory, runtime_patcher,<br>db_logging_service,<br>transcription_service,<br>subprocess_manager, preload_service"]
+    CTX --> CORE["Фабрики lib/core/<br>agent_factory, bus_factory"]
+    CTX --> LIFE["Lifecycle lib/lifecycle/<br>gateway_runner,<br>shutdown_coordinator"]
 
-    %% Bootstrap
-    SETTINGS --> CTX["ApplicationContext<br>(lib/core/)"]
-    CTX -->|"create/start/stop"| SVC["Сервисный слой<br>(lib/services/)"]
-    CTX --> CORE["Фабрики<br>lib/core/<br>agent_factory, bus_factory"]
-    CTX --> LIFE["Lifecycle<br>lib/lifecycle/<br>gateway_runner,<br>shutdown_coordinator"]
+    BUS["MessageBus"]
+    CTX --> BUS
+    BUS --> AGENT["AgentLoop<br>+ ToolAuditHook + DatabaseLoggingHook"]
 
-    %% Сервисы
-    subgraph SERVICES["lib/services/ (v2.0.0)"]
-        CFG_SVC["config_service"]
-        SESS_SVC["session_storage"]
-        CHAN_SVC["channel_factory"]
-        PATCHER["runtime_patcher"]
-        LOG_SVC["db_logging_service"]
-        TRANS_SVC["transcription_service"]
-        SUB_SVC["subprocess_manager"]
-        PRELOAD["preload_service"]
-    end
-
-    SVC --> CFG_SVC & SESS_SVC & CHAN_SVC & PATCHER & LOG_SVC & TRANS_SVC & SUB_SVC & PRELOAD
-
-    %% Точки входа
-    GATEWAY["gateway.py\nтонкий оркестратор"]
-    CLI["cli_agent.py\nтонкий оркестратор"]
+    GATEWAY["gateway.py<br>(тонкий оркестратор)"]
+    CLI["cli_agent.py<br>(тонкий оркестратор)"]
     CTX --> GATEWAY
     CTX --> CLI
 
-    %% Шина
-    BUS["MessageBus<br>(publish inbound/outbound)"]
-    CTX --> BUS
-    BUS --> AGENT["AgentLoop<br>(+ ToolAuditHook + DatabaseLoggingHook)"]
-
-    %% Pre-existing (не через ApplicationContext)
-    subgraph LEGACY["Pre-existing точки входа (НЕ через ApplicationContext)"]
-        STREAMLIT["streamlit_app.py\nweb-клиент"]
-    end
-
-    %% Каналы
+    STREAMLIT["streamlit_app.py<br>(НЕ через ApplicationContext)"]
     PG["PostgreSQL"]
     REDIS["Redis<br>(опционально)"]
     BUS --> PG
     BUS --> REDIS
     PG --> STREAMLIT
 
-    %% Стили
     classDef v2 fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef legacy fill:#f8d7da,stroke:#c82333
     classDef infra fill:#d1ecf1,stroke:#0c5460
-
-    class CTX,CORE,LIFE,SVC,LOG_SVC,PATCHER v2
+    class CTX,CORE,LIFE,SVC v2
     class STREAMLIT legacy
-    class CFG,SETTINGS,BUS,PG,REDIS,AGENT infra
+    class CFG,BUS,PG,REDIS,AGENT infra
 ```
 
-**Поток инициализации:** конфиги (3 файла) → `config.py` собирает `SETTINGS` → `ApplicationContext.create()` инициализирует и связывает все общие сервисы → `MessageBus` → `AgentLoop` с хуками → `gateway.py`/`cli_agent.py` (тонкие оркестраторы) запускают каналы и lifecycle.
+**Поток инициализации:** 3 конфига → `config.py` собирает `SETTINGS` → `ApplicationContext.create()` инициализирует и связывает общие сервисы → `MessageBus` → `AgentLoop` с хуками → `gateway.py`/`cli_agent.py` запускают каналы и lifecycle.
 
-Подробности по сервисам и таблица связей — в **[DEVELOPMENT.md](DEVELOPMENT.md)**.
+**Полная таблица связей** между `lib/core/`, `lib/services/`, `lib/cli/`, `lib/lifecycle/` — в [DEVELOPMENT.md → Полная таблица связей](DEVELOPMENT.md#полная-таблица-связей-между-файлами-v200).
 
 ---
 
 ## Структура проекта
 
-Краткий обзор. **Полное дерево с описанием каждого модуля** (lib/core/, lib/services/, lib/cli/, lib/lifecycle/, workspace/skills/audit_analyzer/ и т.д.) — в [DEVELOPMENT.md → Структура проекта](DEVELOPMENT.md#структура-проекта).
-
 ```
 nanobot/
-├── README.md               ← этот файл
-├── DEVELOPMENT.md          ← техническая документация
-├── CHANGELOG.md            ← история релизов (keep-a-changelog)
+├── README.md               # этот файл
+├── DEVELOPMENT.md          # техническая документация (lib/, audit_analyzer, SQL, миграции)
+├── CHANGELOG.md            # история релизов (keep-a-changelog)
 │
-├── config.json             # Настройки nanobot (агенты, провайдеры, каналы, API, gateway)
-├── project.json            # Настройки проекта (channels.*, skills.*, cli, gateway, logging.db)
-├── config.py               # Сборка SETTINGS: project.json + config.json + .secrets.env
+├── config.json             # nanobot: агенты, провайдеры, API
+├── project.json            # проект: channels.*, skills.*, cli, gateway, logging.db
+├── config.py               # сборка SETTINGS (JSONC + .secrets.env)
 │
-├── gateway.py              #  v2.0.0: 132 строки, тонкий оркестратор
-├── cli_agent.py            #  v2.0.0: 165 строк, тонкий оркестратор
-├── streamlit_app.py        # [отдельный клиент] поллинг conversation_messages
+├── gateway.py              # 132 строки, тонкий оркестратор
+├── cli_agent.py            # 165 строк, тонкий оркестратор
+├── streamlit_app.py        # [web-клиент, не через ApplicationContext]
 │
-├── lib/                    #  v2.0.0: сервисный слой (core/services/cli/lifecycle)
-├── workspace/              # Runtime-данные, хуки, skills/, memory/
-├── tests/                  # 701 unit-тест
+├── lib/                    # v2.0.0: сервисный слой
+│   ├── core/               #   ApplicationContext + фабрики
+│   ├── services/           #   сервисы (db_logging, audit, channels, ...)
+│   ├── cli/                #   REPL/typewriter/hook_loader
+│   ├── lifecycle/          #   gateway_runner + shutdown_coordinator
+│   ├── channels/           #   postgres_channel, redis_channel
+│   └── session/            #   pg_session_manager
+├── workspace/              # runtime-данные, hooks/, skills/, memory/
+├── tests/                  # 683 unit-теста (после v2.0.0)
 ├── benchmarks/             # YAML-тесты, runner, scorer, reporter
-├── tools/                  # Инфраструктурные CLI-утилиты (build_vectors.py)
+├── tools/                  # инфраструктурные CLI (build_vectors.py)
+├── sql/                    # DDL всех таблиц
 ├── requirements.txt
 ```
+
+Подробное дерево с описанием каждого модуля — в [DEVELOPMENT.md → Структура проекта](DEVELOPMENT.md#структура-проекта).
 
 ---
 
@@ -187,76 +292,50 @@ nanobot/
 
 ### 1. CLI Agent (`cli_agent.py`)
 
-Интерактивный терминальный интерфейс. Два режима:
-
-| Режим | Флаг | Хранилище | Хуки |
-|-------|------|-----------|------|
-| **vanilla** | (по умолчанию) | JSONL-файлы | ToolAuditHook |
-| **patched** | `--patched / -P` | PGSessionManager (или file) | ToolAuditHook + из `workspace/hooks/` |
-
-**Примеры:**
-```bash
-python cli_agent.py                           # vanilla
-python cli_agent.py -P                        # patched, авто-storage
-python cli_agent.py -P -s my-session          # patched + именованная сессия
-python cli_agent.py -P -S postgres            # patched, принудительно PostgreSQL
-```
+См. [Запуск → cli_agent.py](#cliagentpy).
 
 ### 2. Gateway (`gateway.py`)
 
-Долгоживущий сервер с каналами связи. После рефакторинга `gateway.py` — **тонкий оркестратор** (132 строки): вся инициализация — в `ApplicationContext`.
-
-Что `gateway.py` делает:
-- `ApplicationContext.create(...)` — собирает конфиг, сессии, агента, аудит-сервисы, БД-логирование
-- Регистрирует callbacks на `AuditSyncService` **ДО** `ctx.start()` (race-condition fix — иначе FAISS preload видит "нет данных")
-- `ChannelFactory.create_all()` — `ChannelManager` + Redis + Postgres каналы + транскрипция
-- `SubprocessManager.spawn_streamlit()` — запуск Streamlit UI на `:8501` (логи в `logs/streamlit.log`)
-- `GatewayRunner().run_forever()` — главный цикл с exponential backoff (1с → 30с) при падении
-- Корректный shutdown: `channels.stop_all()` → Streamlit `terminate_all()` → `agent.close_mcp()/stop()` → `agent.sessions.flush_all()`
-
-**Запуск:** `python gateway.py`
+См. [Запуск → gateway.py](#gatewaypy).
 
 ### 3. ApplicationContext (`lib/core/application_context.py`)
 
-Единый bootstrap всех общих сервисов. Используется обеими точками входа (gateway + cli). Создаёт и связывает:
-- `ConfigService` + `RuntimeConfig` (из `config.json`)
+Единый bootstrap всех общих сервисов. Создаёт и связывает:
+- `ConfigService` + `RuntimeConfig`
 - `SessionStorageService` → `PGSessionManager`/`SessionManager`
 - `DbLoggingService` (если `enable_db_logging=True` и есть DSN)
 - `AuditSyncService` + `AuditMemoryStore` (если `enable_audit=True`)
-- `MessageBus` (с обёрткой под логгеры если есть `DbLoggingService`)
+- `MessageBus` (с обёрткой под логгеры, если есть `DbLoggingService`)
 - `AgentLoop` (через `AgentFactory`) с `ToolAuditHook` + `DatabaseLoggingHook`
 - `RuntimePatcher.apply_all()` — все monkey-patch'и в одном месте
 - `PreloadService`, `TranscriptionService`
 
-**Флаги:** `enable_db_logging`, `enable_audit`, `enable_cron`, `storage_override`. Graceful degradation: если БД недоступна, контекст создаётся, битый сервис остаётся `None`.
+**Флаги:** `enable_db_logging`, `enable_audit`, `enable_cron`, `storage_override`. Graceful degradation: если БД недоступна, сервис остаётся `None`, gateway/cli работают без него (с предупреждением в логах).
 
 **Публичный API:**
 ```python
 ctx = ApplicationContext.create(script_dir, workspace_dir, enable_db_logging=True)
 ctx.start()           # запустить фоновые сервисы
-# ... работа ...
 ctx.stop()            # LIFO graceful shutdown через ShutdownCoordinator
 ```
 
 ### 4. DbLoggingService (`lib/services/db_logging_service.py`)
 
-Структурированный журнал событий агента в PostgreSQL (таблица `gateway_logs`). Worker-поток с **единственным** psycopg2-соединением, **неблокирующая** очередь (`log_*` → `put_nowait`), батч-вставка через `psycopg2.extras.execute_batch`. При недоступности БД — лог пишется в JSONL-файл (`fallback_path`).
+Структурированный журнал событий агента в PostgreSQL (`gateway_logs`). Worker-поток с **единственным** psycopg2-соединением, неблокирующая очередь, batch INSERT через `psycopg2.extras.execute_batch`. При недоступности БД — fallback в JSONL.
 
-**Методы:** `log_inbound`, `log_outbound` (с `kind="outbound_final"` / `"outbound_delta"`), `log_tool_call`, `log_tool_result` (с `latency_ms`), `log_error`. Все вызовы `O(1)` — `True` (в очереди) или `False` (очередь полная).
+**Методы:** `log_inbound`, `log_outbound` (`kind="outbound_final"` / `"outbound_delta"`), `log_tool_call`, `log_tool_result` (с `latency_ms`), `log_error`. Все вызовы `O(1)` — `True` (в очереди) или `False` (очередь полная).
 
-**`get_stats()`** для мониторинга: `written`, `failed`, `queue_size`, `fallback_written`, `connected`, `last_error`.
+**Мониторинг:** `get_stats()` → `written`, `failed`, `queue_size`, `fallback_written`, `connected`, `last_error`.
 
-**Подключение к агенту:** через `BusFactory(inbound_logger=..., outbound_logger=...)` (bus-обёртки) + `DatabaseLoggingHook` (AgentHook для tool-событий и run-level summary).
+**DDL:** `sql/logs/create_logs_table.sql` (UUID, JSONB, индексы по `timestamp` / `session_id` / `event_type` / `level`).
 
-**DDL:** `lib/services/sql/create_logs_table.sql` (UUID, JSONB, индексы по `timestamp`/`session_id`/`event_type`/`level`).
-
-**Полезные SQL-запросы для аудита:**
+**Полезные SQL:**
 ```sql
 -- Последние 10 событий
 SELECT timestamp, level, event_type, session_id, summary
 FROM gateway_logs ORDER BY timestamp DESC LIMIT 10;
 
--- Статистика по типам событий за час
+-- Статистика по типам за час
 SELECT event_type, COUNT(*) FROM gateway_logs
 WHERE timestamp > NOW() - INTERVAL '1 hour'
 GROUP BY event_type ORDER BY 2 DESC;
@@ -272,261 +351,297 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 
 ### 5. PGSessionManager (`lib/session/pg_session_manager.py`)
 
-Замена штатного `SessionManager`. Хранит сессии в двух таблицах:
-- **session_meta** — метаданные сессии (ключ, даты, заголовок)
-- **session_messages** — сообщения (seq, role, content, tool_calls, media, reasoning)
+Хранит сессии в PostgreSQL в двух таблицах: `session_meta` и `session_messages`. При недоступности БД — graceful degradation на JSONL-файлы.
 
-При недоступности БД — graceful degradation на JSONL-файлы.
+**Полная документация:** [`lib/session/README.md`](lib/session/README.md) — схема таблиц, методы, graceful degradation, безопасность.
 
 ### 6. PostgresChannel (`lib/channels/postgres_channel.py`)
 
-Канал через таблицу `conversation_messages`:
-- Поллинг новых сообщений (status='pending')
-- Потоковая запись reasoning в `metadata.reasoning`
-- Автоматическая разблокировка зависших сообщений (retry 3 раза)
-- Медиафайлы: кодирование в data URL → хранение в БД → декодирование на стороне агента
+Канал через таблицу `conversation_messages`: поллинг новых сообщений (`status='pending'`), потоковая запись reasoning в `metadata.reasoning`, автоматическая разблокировка зависших сообщений (retry до 3 раз), медиа-файлы через data URL.
 
-### 7. TranscriptionService (`lib/services/transcription_service.py`)
+**Полная документация:** [`lib/channels/README.md`](lib/channels/README.md) — диаграмма потоков, DDL колонок, конфигурация, инструкция «как добавить новый канал».
 
-Сервис для транскрибации аудио в текст. Поддерживает:
-- OpenAI Whisper
-- Groq Whisper
-- Локальные модели (опционально)
-
-### 8. RedisChannel (`lib/channels/redis_channel.py`)
+### 7. RedisChannel (`lib/channels/redis_channel.py`)
 
 Канал через Redis-списки:
-- **Inbox:** BRPOP из `nanobot:inbox`
-- **Outbox:** LPUSH в `nanobot:outbox:{chat_id}`
-- Формат JSON повторяет InboundMessage/OutboundMessage
+- **Inbox:** `BRPOP nanobot:inbox`
+- **Outbox:** `LPUSH nanobot:outbox:{chat_id}`
+- Формат JSON повторяет `InboundMessage`/`OutboundMessage`.
+
+**Полная документация:** [`lib/channels/README.md`](lib/channels/README.md).
+
+### 8. TranscriptionService (`lib/services/transcription_service.py`)
+
+Сервис транскрибации аудио: OpenAI Whisper, Groq Whisper, локальные модели (опционально). Настройки через `transcription.*` в `project.json`.
 
 ### 9. Streamlit UI (`streamlit_app.py`)
 
-Тонкий веб-клиент:
-- Пользователь → INSERT в `conversation_messages` (status='pending')
-- Блокирующий поллинг ответа с отображением reasoning в реальном времени
-- Чистый чат-интерфейс
+Тонкий web-клиент, **не через `ApplicationContext`**:
+- INSERT в `conversation_messages` (`status='pending'`).
+- Блокирующий поллинг ответа с отображением reasoning в реальном времени.
+- Загружается gateway как subprocess на `:8501`, логи в `logs/streamlit.log`.
 
-### 10. Skills (пользовательские навыки)
+Конфигурация — `streamlit.*` в `project.json` (`max_wait`, `poll_interval`).
 
-| Навык | Назначение | Точка входа |
-|-------|-----------|-------------|
-| `audit_analyzer` | Анализ аудиторских проверок — SQL-отчёты, векторный поиск, LLM-генерация SQL | Standalone: `audit_analyze.bat` / `audit_analyze.sh`<br>CLI: `workspace/skills/audit_analyzer/scripts/cli.py` (4 режима) |
+### 10. Skills
 
-**Режимы `audit_analyzer`:**
-
-| Режим | Описание | Пример |
-|-------|----------|--------|
-| `predefined` | Готовые SQL-скрипты с параметрами | `--mode predefined --script analytics_by_year_month --params year=2024` |
-| `sql` | LLM генерирует SQL по текстовому запросу | `--mode sql --query "топ-10 объектов по нарушениям"` |
-| `vector` | Семантический поиск по векторному индексу | `--mode vector --query "финансовые нарушения" --index-name violations_index --top-k 3` |
-| `init` | Загрузка DuckDB-кеша из PostgreSQL | `--mode init --force` (принудительная перезагрузка) |
-
-**Примеры standalone-запуска:**
-
-```bash
-# Windows (PowerShell / cmd)
-audit_analyze.bat --mode predefined --script analytics_by_year_month --params year=2024
-audit_analyze.bat --mode sql --query "топ-10 объектов по нарушениям"
-audit_analyze.bat --mode vector --query "финансовые нарушения" --index-name violations_index --top-k 3
-
-# Linux
-./audit_analyze.sh --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
-./audit_analyze.sh --mode sql --query "топ-10 объектов по нарушениям"
-./audit_analyze.sh --mode vector --query "финансовые нарушения" --index-name violations_index --threshold 0.5
-```
-
-Параметры векторного поиска:
-- `--top-k N` — вернуть ровно N лучших результатов (по умолчанию 5)
-- `--threshold X` — вернуть все результаты выше порога схожести X (0.0–1.0); если задан, `--top-k` игнорируется
+Подробная документация навыков и режимов — в:
+- `workspace/skills/audit_analyzer/SKILL.md` — пользовательская документация навыка.
+- [DEVELOPMENT.md → audit_analyzer и lib/services](DEVELOPMENT.md) — архитектура и жизненный цикл кеша.
 
 ### 11. Benchmarks (`benchmarks/`)
 
-Автоматическая оценка качества агента:
-- YAML-определения тестов (difficulty 1–10)
-- Типы: `single` (один вопрос) и `multi_step` (последовательность шагов)
-- Скоринг по ключевым словам, файлам, использованным инструментам, LLM-судье
-- Сохранение результатов в JSON/Markdown/PostgreSQL
-- Сравнение прогонов (`--compare`)
+Автоматическая оценка качества агента. YAML-определения тестов (difficulty 1–10), типы `single` и `multi_step`, скоринг по ключевым словам/файлам/инструментам/LLM-судье, сохранение в JSON/Markdown/PostgreSQL, сравнение прогонов (`--compare`).
 
-**Создание своих тестов:**
-
-Скопируйте шаблон `benchmarks/items/_template.yaml` и заполните:
-
-```yaml
-- id: "my-test-id"
-  name: "Human readable name"
-  difficulty: 5          # 1-10: 1-3 simple, 4-7 medium, 8-10 hard
-  category: "general"    # e.g. basic, data_analysis, coding, research
-  type: "single"         # single | multi_step
-  new_session: true      # true = fresh session, false = continue conversation
-  question: "Ask the agent something"
-  max_iterations: 30
-  timeout: 60
-  expect:
-    tools: ["exec", "glob"]
-    keywords_include: ["expected", "keyword"]
-    match_type: "keyword"  # keyword | functional | llm_judge
-```
-
-**Таблицы БД для бенчмарков:**
-
-```bash
-# PostgreSQL
-psql -d nanobot -f benchmarks/sql/create_benchmark_tables.sql
-
-# Greenplum
-psql -d nanobot -f benchmarks/sql/create_benchmark_tables_gp.sql
-```
-
-Создаются таблицы:
-- `benchmark_runs` — метаданные прогона (дата, конфиг, версия агента)
-- `benchmark_results` — результаты по каждому тесту (id, score, детали)
-
-**Результаты прогонов** сохраняются в `benchmarks/results/runs/`.
+**Полная документация:** [`benchmarks/README.md`](benchmarks/README.md) — 764 строки: модели данных, формат YAML, веса проверок, CLI-флаги, диагностика.
 
 ---
 
 ## База данных
 
-### Таблицы сессий (`session_meta`, `session_messages`)
-```sql
--- Создание: psql -d <db> -f lib/session/sql/create_session_tables.sql
-```
+Все DDL — в корневом `sql/` с подкаталогами по доменам: `sql/session/`, `sql/channels/`, `sql/logs/`, `sql/audit_analyzer/`, `sql/benchmarks/`, `sql/migrations/`. **Применяются вручную** — никаких `ensure_tables()` в коде больше нет. Полный каталог и порядок применения — в [`sql/README.md`](sql/README.md).
 
-### Таблица канала (`conversation_messages`)
-Создаётся автоматически или вручную. Схема:
-```
-id, chat_id, user_id, role, content, media, buttons,
-metadata (JSONB), reply_to, status, created_at, updated_at
-```
+| Слой | Файл | Таблицы | Статус |
+|------|------|---------|--------|
+| **Сессии** | `sql/session/create_session_tables.sql` | `session_meta`, `session_messages` | рабочий (PG 9.4+) |
+| **Сессии (GP)** | `sql/session/create_session_tables_gp.sql` | то же + `DISTRIBUTED BY (session_key)` | рабочий (GP 6.25) |
+| **Канал** | создаётся автоматически | `conversation_messages` | авто |
+| **Seed канала** | `sql/channels/seed_messages.sql` | 14 user + 4 assistant сообщений | тестовые данные |
+| **DbLoggingService** | `sql/logs/create_logs_table.sql` | `gateway_logs` (UUID, JSONB) | рабочий |
+| **Домен (audit_analyzer)** | `sql/audit_analyzer/create_audit_source_tables_gp.sql` | `oarb.audits`, `oarb.violations`, `oarb.audit_reports`, `oarb.report_items` | REFERENCE — уточняет владелец данных |
+| **Векторы** | `sql/audit_analyzer/create_audit_vectors_table_gp.sql` | `oarb.audit_vectors`, `oarb.vector_index_store` | рабочий |
+| **Конфиг индексов** | `sql/audit_analyzer/create_vector_index_config_gp.sql` | `oarb.vector_index_config` | рабочий |
+| **Бенчмарки** | `sql/benchmarks/create_benchmark_tables.sql` | `benchmark_runs`, `benchmark_results` | рабочий (PG 9.4+) |
+| **Бенчмарки (GP)** | `sql/benchmarks/create_benchmark_tables_gp.sql` | то же + `DISTRIBUTED BY` | рабочий (GP 6.25) |
 
-### Таблицы бенчмарков (`benchmark_runs`, `benchmark_results`)
-```bash
-# Создание: psql -d <db> -f benchmarks/sql/create_benchmark_tables.sql
-```
+Полный DDL с комментариями — в [DEVELOPMENT.md → SQL-скрипты](DEVELOPMENT.md#sql-скрипты-создание-таблиц).
 
 ---
 
-## Векторные индексы (в PostgreSQL)
+## Векторные индексы
 
-**v1.5.0:** Векторные индексы перенесены из файлов `.faiss` в таблицы PostgreSQL.
-
-### Таблицы
+**v1.5.0:** Векторные индексы перенесены из файлов `.faiss` в PostgreSQL. Файловый мигратор удалён как legacy — новые индексы создаются сразу в БД.
 
 | Таблица | Назначение |
 |---------|-----------|
-| `oarb.audit_vectors` | Векторные эмбеддинги текстов аудитов и нарушений |
-| `oarb.vector_index_store` | Хранилище векторных индексов (FAISS в бинарном формате) |
-| `oarb.vector_index_config` | Конфигурация индексов (параметры, метаданные) |
+| `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (строит `build_vectors.py`) |
+| `oarb.vector_index_store` | Сериализованный FAISS-индекс `BYTEA` (ищет провайдер `lib/services`) |
+| `oarb.vector_index_config` | Конфигурация индексов (таблицы/колонки, чанкование, автосинхронизация) |
 
-### Миграция со старых файловых индексов
-
-Не требуется: мигратор из `.faiss`-файлов удалён (legacy). Новые индексы
-создаются сразу в БД через `tools/build_vectors.py`.
-
-### Создание векторных индексов
+### Создание
 
 ```bash
-# 1. Таблицы (см. sql/ в корне проекта)
-psql -d nanobot -f sql/create_audit_vectors_table_gp.sql
-psql -d nanobot -f sql/create_vector_index_config_gp.sql
+# 1. DDL
+psql -d nanobot -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
+psql -d nanobot -f sql/audit_analyzer/create_vector_index_config_gp.sql
 
-# 2. Сборка индексов (инфраструктурная утилита, вне навыка)
+# 2. Сборка индексов
 python tools/build_vectors.py --full-rebuild
 ```
 
-### Поиск через векторный режим
+### Поиск
 
-См. раздел [Skills](#10-skillsпользовательские-навыки) — режим `vector`.
+См. [Запуск → audit_analyzer](#audit-analyzer), режим `vector`.
+
+### Параметры CLI `--top-k` / `--threshold`
+
+Задаются **аргументами**, а не в `project.json`:
+- `--top-k N` — ровно N лучших (по умолчанию 5).
+- `--threshold X` — все результаты выше X (0.0–1.0); если задан, `--top-k` игнорируется.
 
 ---
 
 ## Тестирование
 
-Проект содержит **701 unit-тест** в директории `tests/` (по состоянию после рефакторинга v2.0.0).
+**683 unit-теста** в `tests/` (после удаления `test_pg_agent_worker.py` в v2.0.0).
 
-### Запуск тестов
+### Запуск
 
 ```bash
-# Все тесты
 pytest tests/ -q
-
-# Тесты конкретного модуля
 pytest tests/test_db_logging_service.py -v
-pytest tests/test_application_context.py -v
-
-# С покрытием по lib/ (новый сервисный слой)
 pytest tests/ --cov=lib --cov-report=term-missing
 ```
 
-### Структура тестов (по сервисному слою)
+### Структура
 
 | Файл | Что тестирует |
 |------|--------------|
-| `test_application_context.py` |  `ApplicationContext` — bootstrap всех сервисов, lifecycle |
-| `test_agent_factory.py` |  `AgentFactory` — создание AgentLoop с хуками |
-| `test_bus_factory.py` |  `BusFactory` — MessageBus + обёртки логгеров |
-| `test_config_service.py` |  `ConfigService` — загрузка конфига, pre-resolve env, таймауты |
-| `test_session_storage.py` |  `SessionStorageService` — выбор PG/File/auto |
-| `test_runtime_patcher.py` |  `RuntimePatcher` — оба monkey-patch'а, fallback |
-| `test_transcription_service.py` |  `TranscriptionService` — openai/groq |
-| `test_channel_factory.py` |  `ChannelFactory` — Redis/Postgres каналы |
-| `test_subprocess_manager.py` |  `SubprocessManager` — Streamlit spawn/terminate |
-| `test_preload_service.py` |  `PreloadService` — FAISS + audit_cache |
-| `test_db_logging_service.py` |  `DbLoggingService` — worker, batch, fallback |
-| `test_hooks_database_logging.py` |  `DatabaseLoggingHook` — AgentHook для tool-событий |
-| `test_gateway_runner.py` |  `GatewayRunner` — exponential backoff |
-| `test_shutdown_coordinator.py` |  `ShutdownCoordinator` — LIFO graceful shutdown |
-| `test_console_loop.py` |  REPL/typewriter/print_tool_events |
-| `test_cli_agent.py` | CLI-агент (vanilla/patched режимы) |
-| `test_gateway.py` | Gateway-оркестратор (обновлён под ApplicationContext) |
-| `test_pg_session_manager.py` | PGSessionManager (сессии в БД) |
-| `test_postgres_channel.py` | PostgresChannel (поллинг, streaming) |
-| `test_redis_channel.py` | RedisChannel (BRPOP/LPUSH) |
-| `test_benchmarks_*.py` | Система бенчмарков (loader, evaluator, scorer, reporter, runner) |
-| `test_utils_db.py` | Утилиты БД (sync/async коннекторы) |
-| `test_hooks_tool_audit_hook.py` | Хук аудита инструментов |
+| `test_application_context.py` | `ApplicationContext` — bootstrap всех сервисов, lifecycle |
+| `test_agent_factory.py` | `AgentFactory` — создание `AgentLoop` с хуками |
+| `test_bus_factory.py` | `BusFactory` — `MessageBus` + обёртки логгеров |
+| `test_config_service.py` | `ConfigService` — загрузка конфига, pre-resolve env, таймауты |
+| `test_session_storage.py` | `SessionStorageService` — выбор PG/File/auto |
+| `test_runtime_patcher.py` | `RuntimePatcher` — оба monkey-patch'а, fallback |
+| `test_transcription_service.py` | `TranscriptionService` — openai/groq |
+| `test_channel_factory.py` | `ChannelFactory` — Redis/Postgres каналы |
+| `test_subprocess_manager.py` | `SubprocessManager` — Streamlit spawn/terminate |
+| `test_preload_service.py` | `PreloadService` — FAISS + audit_cache |
+| `test_db_logging_service.py` | `DbLoggingService` — worker, batch, fallback |
+| `test_hooks_database_logging.py` | `DatabaseLoggingHook` — AgentHook для tool-событий |
+| `test_gateway_runner.py` | `GatewayRunner` — exponential backoff |
+| `test_shutdown_coordinator.py` | `ShutdownCoordinator` — LIFO graceful shutdown |
+| `test_console_loop.py` | REPL/typewriter/print_tool_events |
+| `test_cli_agent.py` | CLI-агент (vanilla/patched) |
+| `test_gateway.py` | Gateway-оркестратор (под `ApplicationContext`) |
+| `test_pg_session_manager.py` | `PGSessionManager` (сессии в БД) |
+| `test_postgres_channel.py` | `PostgresChannel` (поллинг, streaming) |
+| `test_redis_channel.py` | `RedisChannel` (BRPOP/LPUSH) |
+| `test_audit_memory_store.py` / `test_audit_sync_service.py` | `AuditMemoryStore`, `AuditSyncService` |
+| `test_benchmarks_*.py` | Бенчмарки (loader, evaluator, scorer, reporter, runner, db) |
+| `test_utils_db.py` | Утилиты БД (sync/async коннекторы, retry) |
+| `test_hooks_tool_audit_hook.py` | `ToolAuditHook` |
 
 ---
 
-## Запуск
+## Heartbeat и cron
 
-```bash
-# CLI-агент
-python cli_agent.py -P -s dev
+`nanobot gateway` регистрирует **защищённый heartbeat-cron job**, который периодически проверяет `HEARTBEAT.md`. Не дублируйте его другим cron-job'ом, если не отключили встроенный.
 
-# Gateway + Streamlit
-python gateway.py
+| Файл | Назначение |
+|------|-----------|
+| `HEARTBEAT.md` | Список задач для периодической проверки |
+| `workspace/AGENTS.md` | Политика storage, cron/heartbeat инструкции для агента |
+| `workspace/SOUL.md` | Личность/стиль агента |
+| `workspace/USER.md` | Долговременные факты о пользователе |
+| `workspace/TOOLS.md` | Описание доступных инструментов |
+| `workspace/cron/jobs.json` | Ручные cron-задачи |
+| `memory/MEMORY.md` | Долговременная память агента |
 
-# Бенчмарки
-python benchmarks/runner.py --tags simple
-python benchmarks/runner.py --compare runs/run1 runs/run2
+**Использование:**
+- Периодическая проверка с уведомлением только при изменениях → `HEARTBEAT.md`.
+- Одноразовое напоминание → встроенный `cron` tool.
+- **Не пишите напоминания только в `MEMORY.md`** — это не вызывает уведомлений.
+
+---
+
+## Troubleshooting
+
+### `ValueError: MISTRAL_API_KEY not set` / `ApiKey not found`
+
+Причина: ключ провайдера не подставился в `os.environ`. Проверьте `.secrets.env`:
+
+```ini
+# providers: mistral   ← секция обязательна
+api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 ```
+
+Если секция и значение на месте, но ошибка остаётся — `ConfigService._pre_resolve_env_refs` не нашёл ключ. Проверьте `config.json`: имя провайдера должно совпадать с секцией в `.secrets.env` (case-insensitive).
+
+### `psycopg2.OperationalError: connection refused`
+
+1. PostgreSQL/Greenplum запущен? `pg_isready` или `pg_lsclusters`.
+2. DSN правильный? `psql "$DATABASE_URL"` работает?
+3. На Greenplum 6.25 — `gssencmode=disable` (`ConfigService` уже выставляет его через kwargs `connect()`, но если проблема — проверьте).
+4. На PG 9.4 — минимум 3 retry, для GP — 50.
+
+### `too many connections` (Greenplum)
+
+`pool_max_conn = 1` в `PGSessionManager`. Если не хватает — уменьшите `AuditSyncService.poll_interval_sec` (меньше опрос → меньше пиков). Мониторинг: `AuditSyncService.get_stats().reconnects`.
+
+### `FileNotFoundError: cache/audit_cache.duckdb`
+
+DuckDB-кеш `audit_analyzer` создаётся **только gateway'ом**. Запустите `python gateway.py` и подождите первого цикла синхронизации (см. `in_memory_enabled: true` в `project.json`).
+
+### `FAISS preload: no data in cache`
+
+Race condition: callbacks на `AuditSyncService` установлены **после** `ctx.start()`. Уже исправлено в `gateway.py:main()` (callbacks идут до `start()`). Если столкнулись — проверьте, что ваш код вызывает `set_on_*_callback` ДО `ctx.start()`.
+
+### `match_type: llm_judge` всегда даёт 0.5
+
+LLM-судья — заглушка (`evaluator.py:_check_llm_judge()` возвращает 0.5). Используйте `match_type: "keyword"` или реализуйте судью.
+
+### Файл `.yaml` в `benchmarks/items/` игнорируется
+
+Файлы, начинающиеся с `_` (например `_template.yaml`), пропускаются загрузчиком. Уберите `_` из имени.
+
+### `Streamlit` ждёт ответ бесконечно
+
+С v2.0.0 streamlit-цикл не имеет таймаута: на статусе `failed` он делает re-check 5 минут, далее ждёт возврата в `processing` бесконечно. Это сделано умышленно (обход `st.rerun maxReruns`). Если поведение не устраивает — меняйте `streamlit_app.py`.
+
+### `--params year=2024` не работает в PowerShell
+
+PowerShell интерпретирует `=` по-своему. Используйте кавычки: `"year=2024"` или `'{"year":2024}'` (Linux-формат).
+
+### Тесты падают на импорте `nanobot`
+
+`nanobot>=0.2.2` нужен. Проверьте: `pip show nanobot`. Если ниже — `pip install --upgrade nanobot`.
+
+### JSONC в `project.json` не парсится
+
+Только `//` и `/* */` поддерживаются. Хэштеги `#` — нет. Кавычки в DSN не должны пересекаться с комментариями.
+
+---
+
+## Миграция с 1.5.0 на 2.0.0
+
+v2.0.0 — крупное обновление. Изменения в конфигурации и структуре:
+
+### Конфигурация
+
+| Что | Было (1.5.0) | Стало (2.0.0) |
+|-----|---------------|----------------|
+| Формат конфига | `.env` (только переменные) | `project.json` (JSONC) + `config.json` + `.secrets.env` |
+| Секции проекта | смешаны в `.env` | `channels.*`, `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway`, `logging.db` — в `project.json` |
+| API-ключи | `.env` | `.secrets.env` (в `.gitignore`) |
+| DSN провайдеров | `MISTRAL_API_KEY` в shell | `# providers: mistral` секция в `.secrets.env` (pre-resolve через `ConfigService`) |
+| Параметры векторов | `vector_indexes.*`, `mode_vector_index_path` в `config.json` | `oarb.vector_index_config` в БД (таблица) |
+| DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
+| Навыки `data-analyzer`, `html_presentation_generator` | присутствовали | удалены |
+| `pg_agent_worker.py` | standalone DB API server | удалён |
+
+### Действия при обновлении
+
+1. **Перенесите секреты** из `.env` в `.secrets.env` (формат секций `# providers: <name>`).
+2. **Создайте `project.json`** из секций `.env` (`channels.*`, `skills.*`, `cli`, ...). JSONC — можно копировать `project.json` из этого репо.
+3. **Удалите** `vector_indexes` / `mode_vector_index_path` из конфигов — теперь в `oarb.vector_index_config`.
+4. **Удалите** `data-analyzer`, `html_presentation_generator`, `pg_agent_worker.py` из импортов и конфигов.
+5. **Перезапустите gateway** — `ConfigService._pre_resolve_env_refs` подставит ключи в `os.environ` автоматически.
+6. **Проверьте health** — `gateway_logs` пустая, но `AuditSyncService.polls` > 0.
+
+### Что НЕ изменилось
+
+- API точек входа: `python gateway.py`, `python cli_agent.py -P`.
+- Имена таблиц БД: `session_meta`, `session_messages`, `conversation_messages`, `oarb.audit_vectors`, `oarb.vector_index_store`, `benchmark_runs`, `benchmark_results`.
+- `benchmarks/items/*.yaml` — формат совместим.
+- `audit_analyzer` режимы `predefined` / `sql` / `vector` — без изменений.
+
+Полный changelog — в [CHANGELOG.md](CHANGELOG.md).
+
+---
 
 ## Документация
 
-- **[DEVELOPMENT.md](DEVELOPMENT.md)** — техническая документация: архитектура
-  (включая v2.0.0 service layer, `ApplicationContext`, race-condition fix),
-  описание компонентов, audit_analyzer, жизненный цикл кеша, векторная
-  индексация, SQL-скрипты, **где что править**, changelog, **полная таблица
-  связей между файлами** (lib/core/, lib/services/, lib/cli/, lib/lifecycle/).
+| Файл | Назначение |
+|------|-----------|
+| **[README.md](README.md)** | этот файл: обзор, запуск, troubleshooting, миграции |
+| **[DEVELOPMENT.md](DEVELOPMENT.md)** | тех. документация: архитектура сервисного слоя v2.0.0, audit_analyzer, жизненный цикл кеша, DDL, **где что править**, полная таблица связей |
+| **[CHANGELOG.md](CHANGELOG.md)** | история релизов (Keep a Changelog / SemVer) |
+| **[benchmarks/README.md](benchmarks/README.md)** | система бенчмарков: модели, формат YAML, веса, диагностика |
+| **[lib/channels/README.md](lib/channels/README.md)** | каналы (Postgres/Redis): DDL, поток сообщений, конфиг |
+| **[lib/session/README.md](lib/session/README.md)** | `PGSessionManager`: схема, graceful degradation, методы |
+| **workspace/skills/audit_analyzer/SKILL.md** | пользовательская документация навыка |
+| **workspace/AGENTS.md** | инструкции для агента: storage, cron, heartbeat |
+| **.secrets.env.example** | шаблон переменных окружения |
 
-## Зависимости
+---
+
+## Зависимости и лицензия
+
+### Зависимости
 
 - **nanobot** — фреймворк (`pip install nanobot`)
-- **psycopg2-binary** — PostgreSQL
-- **redis>=5.0** — Redis-канал
+- **psycopg2-binary** — PostgreSQL/Greenplum
+- **redis** — Redis-канал
 - **streamlit** — веб-чат
 - **loguru** — логирование
-- **httpx** — HTTP-клиент (асинхронный)
+- **httpx** — HTTP-клиент (Ollama эмбеддинги)
 - **duckdb** — встраиваемая аналитическая БД (audit_analyzer)
-- **faiss-cpu, numpy, sentence-transformers** — векторный поиск (audit_analyzer)
+- **faiss-cpu**, **numpy**, **pandas** — векторный поиск (audit_analyzer)
 - **PyYAML** — конфиги бенчмарков
-- **requests** — HTTP-клиент (синхронный)
-- **anthropic, openai** — опциональные LLM-провайдеры
-- **pytest** — запуск unit-тестов (опционально, для разработки)
 
-## Лицензия
+Версии — точные `=X.Y.Z` в `requirements.txt` для полной воспроизводимости.
+
+### Лицензия
 
 MIT License

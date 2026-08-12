@@ -64,10 +64,10 @@ agent = AgentLoop.from_config(config, bus, session_manager=sm)
 
 ```bash
 # PostgreSQL
-psql -d nanobot -f lib/session/sql/create_session_tables.sql
+psql -d nanobot -f sql/session/create_session_tables.sql
 
 # Greenplum 6.25
-psql -d nanobot -f lib/session/sql/create_session_tables_gp.sql
+psql -d nanobot -f sql/session/create_session_tables_gp.sql
 ```
 
 Разница GP-версии: `DISTRIBUTED BY (session_key)`, `id BIGSERIAL` без `PRIMARY KEY` (для seq), нет FK.

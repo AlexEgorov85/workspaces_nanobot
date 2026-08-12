@@ -62,7 +62,7 @@
   `log_tool_call`, `log_tool_result` (с `latency_ms`), `log_error`.
 - **`lib/services/db_logging_bus.py`**  — обёртки `publish_inbound` /
   `publish_outbound` для `DbLoggingService`.
-- **`lib/services/sql/create_logs_table.sql`** — DDL для `gateway_logs`
+- **`sql/logs/create_logs_table.sql`** — DDL для `gateway_logs`
   (UUID, JSONB, индексы по `timestamp` / `session_id` / `event_type` / `level`).
 - **`lib/lifecycle/gateway_runner.py`** — `run_forever` с exponential backoff
   (1с → 30с) при падении.
@@ -104,11 +104,11 @@
   (вне навыка). Флаги: `--full-rebuild`, `--check`, `--status`,
   `--dry-run`, `--index`, `--batch-size`, `--chunk-size`, `--chunk-overlap`,
   `--db-table`. Чанкование через `lib/services/text_splitter.py`.
-- **`sql/create_audit_source_tables_gp.sql`** — REFERENCE DDL домена
+- **`sql/audit_analyzer/create_audit_source_tables_gp.sql`** — REFERENCE DDL домена
   (`oarb.audits`, `oarb.violations`, `oarb.audit_reports`, `oarb.report_items`).
-- **`sql/create_audit_vectors_table_gp.sql`** — `oarb.audit_vectors` +
+- **`sql/audit_analyzer/create_audit_vectors_table_gp.sql`** — `oarb.audit_vectors` +
   `oarb.vector_index_store` + индексы.
-- **`sql/create_vector_index_config_gp.sql`** — `oarb.vector_index_config`.
+- **`sql/audit_analyzer/create_vector_index_config_gp.sql`** — `oarb.vector_index_config`.
 
 **Конфигурация и секреты**
 
@@ -152,7 +152,7 @@
 - **Pre-resolve `${VAR}` от `.secrets.env`**: gateway больше НЕ требует
   `export MISTRAL_API_KEY=...` в shell — `ConfigService._pre_resolve_env_refs`
   кладёт ключи в `os.environ` ДО `_load_runtime_config`.
-- **Режим `--mode init` / `--force` в `audit_analyzer` удалён.**
+- **`--force` в `audit_analyzer` удалён.**
   `cli.py` завершается `FileNotFoundError`, указывающим на gateway.
 - **`audit_analyzer.SCRIPTS_REGISTRY`** вынесен из `scripts_registry.py`
   в отдельный `predefined_scripts.py`.
@@ -259,7 +259,7 @@
 
 ### Changed
 - Конфигурация мигрирована из кода в `.env` (+ исправлена коллизия имени `scripts/config.py`); из `.env` в `.secrets.env` вынесены API-ключи.
-- Реорганизована структура: модули `lib/channels` и `lib/session`, добавлены README для них; итоговое расположение `lib/session/sql/`, `lib/channels/sql/`, `scripts/`, `logs/`.
+- Реорганизована структура: модули `lib/channels` и `lib/session`, добавлены README для них; итоговое расположение `sql/session/`, `sql/channels/`, `scripts/`, `logs/`.
 - README исправлен (неточности), добавлены README для `lib/channels` и `lib/session`.
 
 ### Fixed

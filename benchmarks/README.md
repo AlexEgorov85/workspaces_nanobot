@@ -711,8 +711,8 @@ Markdown-отчёт с:
 
 ### SQL-файлы
 
-- `benchmarks/sql/create_benchmark_tables.sql` — для PostgreSQL 9.4+ (uuid-ossp)
-- `benchmarks/sql/create_benchmark_tables_gp.sql` — для Greenplum 6.25 (pgcrypto, DISTRIBUTED BY)
+- `sql/benchmarks/create_benchmark_tables.sql` — для PostgreSQL 9.4+ (uuid-ossp)
+- `sql/benchmarks/create_benchmark_tables_gp.sql` — для Greenplum 6.25 (pgcrypto, DISTRIBUTED BY)
 
 Выбор SQL-файла происходит автоматически через `_is_greenplum()`.
 
@@ -744,8 +744,8 @@ Markdown-отчёт с:
 | **Изменить формат отчёта** | `benchmarks/reporter.py` — функции `save_json_report`, `save_markdown_report` |
 | **Добавить фильтр** | `benchmarks/runner.py:_filter_items()` |
 | **Изменить расчёт multi_step** | `benchmarks/scorer.py:score_multi_step()` |
-| **Сменить БД** | `benchmarks/db.py` + `benchmarks/sql/` |
-| **Добавить поддержку новой БД** | 1) SQL-файл в `benchmarks/sql/`; 2) `_is_<db>()` в `db.py`; 3) выбор файла в `ensure_tables()` |
+| **Сменить БД** | `benchmarks/db.py` + `sql/benchmarks/` |
+| **Добавить поддержку новой БД** | 1) SQL-файл в `sql/benchmarks/`; 2) `_is_<db>()` в `db.py`; 3) выбор файла в `ensure_tables()` |
 | **Реализовать LLM-судью** | `benchmarks/evaluator.py:_check_llm_judge()` — заменить заглушку |
 | **Добавить CLI-аргумент** | `benchmarks/runner.py:_parse_args()` + обработка в `main_async()` |
 | **Очистить результаты** | Удалить папки в `benchmarks/results/runs/` (кроме `.gitkeep`) |
