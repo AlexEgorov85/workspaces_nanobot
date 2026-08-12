@@ -103,7 +103,7 @@ flowchart TB
     CTX --> LIFE["Lifecycle<br/>lib/lifecycle/<br/>gateway_runner,<br/>shutdown_coordinator"]
 
     %% Сервисы
-    subgraph SERVICES["lib/services/ (новые в v2.0.0 ⭐)"]
+    subgraph SERVICES["lib/services/ (v2.0.0)"]
         CFG_SVC["config_service"]
         SESS_SVC["session_storage"]
         CHAN_SVC["channel_factory"]
@@ -144,8 +144,8 @@ flowchart TB
     classDef legacy fill:#f8d7da,stroke:#c82333
     classDef infra fill:#d1ecf1,stroke:#0c5460
 
-    class CTX,CORE,LIFE,SVC,CORE,LOG_SVC,PATCHER v2
-    class PGWORKER,STREAMLIT legacy
+    class CTX,CORE,LIFE,SVC,LOG_SVC,PATCHER v2
+    class STREAMLIT legacy
     class CFG,SETTINGS,BUS,PG,REDIS,AGENT infra
 ```
 
@@ -285,6 +285,13 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 - Потоковая запись reasoning в `metadata.reasoning`
 - Автоматическая разблокировка зависших сообщений (retry 3 раза)
 - Медиафайлы: кодирование в data URL → хранение в БД → декодирование на стороне агента
+
+### 7. TranscriptionService (`lib/services/transcription_service.py`)
+
+Сервис для транскрибации аудио в текст. Поддерживает:
+- OpenAI Whisper
+- Groq Whisper
+- Локальные модели (опционально)
 
 ### 8. RedisChannel (`lib/channels/redis_channel.py`)
 
@@ -431,7 +438,7 @@ python tools/build_vectors.py --full-rebuild
 
 ### Поиск через векторный режим
 
-См. раздел [Skills](#8-skillsпользовательские-навыки) — режим `vector`.
+См. раздел [Skills](#10-skillsпользовательские-навыки) — режим `vector`.
 
 ---
 
@@ -522,4 +529,4 @@ python benchmarks/runner.py --compare runs/run1 runs/run2
 
 ## Лицензия
 
-[Укажите лицензию, если применимо]
+MIT License
