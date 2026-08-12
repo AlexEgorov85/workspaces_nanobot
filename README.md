@@ -640,8 +640,6 @@ python pg_agent_worker.py --once
   описание компонентов, audit_analyzer, жизненный цикл кеша, векторная
   индексация, SQL-скрипты, **где что править**, changelog, **полная таблица
   связей между файлами** (lib/core/, lib/services/, lib/cli/, lib/lifecycle/).
-- **[REFACTORING_PLAN.md](REFACTORING_PLAN.md)** — 16 шагов рефакторинга v2.0.0
-  с чекбоксами и блоками проверки (все отмечены как выполненные).
 
 ## Зависимости
 
