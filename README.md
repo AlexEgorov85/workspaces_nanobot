@@ -1,6 +1,6 @@
 ﻿# nanobot — Personal AI Agent (Deployment)
 
-Локальная инсталляция фреймворка **[nanobot](https://opencode.ai)** — персонального AI-агента, запущенного с **кастомными доработками**: PostgreSQL-каналы, Redis-интеграция, Streamlit UI, система бенчмарков и пользовательский навык audit_analyzer.
+Локальная инсталляция фреймворка **[nanobot-ai](https://github.com/HKUDS/nanobot)** (PyPI: `nanobot-ai`) — персонального AI-агента, запущенного с **кастомными доработками**: PostgreSQL-каналы, Redis-интеграция, Streamlit UI, система бенчмарков и пользовательский навык audit_analyzer.
 
 > **Имя агента:** Aura (🐈)  
 > **Базовая модель:** `ministral-14b-2512` (Mistral)  
