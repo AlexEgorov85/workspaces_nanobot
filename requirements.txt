@@ -1,23 +1,10 @@
-# Core
-psycopg2-binary>=2.9
-duckdb>=1.5
-streamlit>=1.56
-httpx>=0.28
-requests>=2.31
-loguru>=0.7
-
-# Skills: audit_analyzer
-faiss-cpu>=1.13
-numpy>=2.0
-sentence-transformers>=3.0
-pandas>=2.0
-
-# Benchmarks
-PyYAML>=6.0
-
-# Channels
-redis>=5.0
-
-# LLM providers (optional — depending on which you use)
-anthropic>=0.100
-openai>=2.0
+psycopg2-binary==2.9.12
+duckdb==1.5.4
+streamlit==1.56.0
+httpx==0.28.1
+loguru==0.7.3
+faiss-cpu==1.13.2
+numpy==2.4.2
+pandas==3.0.2
+PyYAML==6.0.3
+redis==8.0.0
