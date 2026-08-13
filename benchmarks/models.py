@@ -218,6 +218,8 @@ class SuiteResult:
         duration_sec: Общая длительность прогона.
         results: Список результатов по каждому заданию.
         config: Конфигурация прогона (теги, режим и т.д.).
+        run_id: Единый идентификатор прогона (UUID) для связи файлов и БД.
+        artifacts_dir: Каталог файловых отчётов этого прогона (для связи БД -> файлы).
     """
     suite_name: str
     timestamp: str
@@ -228,3 +230,5 @@ class SuiteResult:
     duration_sec: float
     results: list[BenchResult]
     config: dict[str, Any] = field(default_factory=dict)
+    run_id: str | None = None
+    artifacts_dir: str | None = None

@@ -15,8 +15,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import shutil
 import sys
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -55,6 +57,19 @@ def _detect_run_id() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
+def _generate_run_id() -> str:
+    """Генерация единого UUID-идентификатора прогона.
+
+    Один и тот же id используется для каталога файловых отчётов
+    (results/runs/{run_id}) и первичного ключа прогона в БД, чтобы
+    связать файлы и записи в PostgreSQL.
+
+    Returns:
+        Строка UUID4 (hex, без дефисов).
+    """
+    return uuid.uuid4().hex
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Парсинг аргументов командной строки.
 
@@ -87,6 +102,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Override model name (e.g. phi4:latest, qwen3:4b)")
     p.add_argument("--config", default=None,
                    help="Path to config.json (default: auto-detect)")
+    p.add_argument("--keep-runs", type=int, default=20,
+                   help="Keep only N newest run dirs, delete older (0 = never delete)")
     p.add_argument("--dry-run", action="store_true",
                    help="Only show what would be run, don't execute")
     return p.parse_args(argv)
@@ -196,6 +213,36 @@ def _print_summary(suite_result: SuiteResult) -> None:
         print(f"  {suite_result.total_items - suite_result.passed_items} item(s) FAILED.")
         print("  See detail/<id>.json for per-check breakdown.")
         print("  Hint: run with --verbose to see full agent responses.")
+
+
+def cleanup_old_runs(keep_last: int = 20, runs_dir: str | Path | None = None) -> int:
+    """Удаление старейших каталогов прогонов, кроме последних N.
+
+    Args:
+        keep_last: Сколько последних прогонов сохранять (по времени изменения).
+        runs_dir: Каталог прогонов (по умолчанию benchmarks/results/runs).
+
+    Returns:
+        Число удалённых каталогов.
+    """
+    base = Path(runs_dir) if runs_dir else RESULTS_DIR
+    if keep_last <= 0 or not base.is_dir():
+        return 0
+    dirs = sorted(
+        (d for d in base.iterdir() if d.is_dir()),
+        key=lambda d: d.stat().st_mtime,
+    )
+    removed = 0
+    for old_dir in dirs[:-keep_last]:
+        try:
+            shutil.rmtree(old_dir)
+            removed += 1
+            print(f"  Cleanup: removed old run dir {old_dir.name}")
+        except Exception as e:
+            logger.warning("Failed to remove {}: {}", old_dir, e)
+    if removed:
+        print(f"  Cleanup: removed {removed} old run dir(s), keeping last {keep_last}")
+    return removed
 
 
 def _cleanup_item(item: BenchItem, bot: Any) -> None:
@@ -504,6 +551,8 @@ async def _run_suite(
         duration_sec=duration_sec,
         results=results,
         config={"tags": suite.tags, "mode": args.mode},
+        run_id=run_id,
+        artifacts_dir=str(RESULTS_DIR / run_id),
     )
 
     return suite_result
@@ -723,12 +772,13 @@ async def main_async(argv: list[str] | None = None) -> int:
             print()
         return 0
 
-    run_id = _detect_run_id()
+    run_id = _generate_run_id()
     suite_result = await _run_suite(suite, run_id, args)
 
     output_dir = args.output or str(RESULTS_DIR / run_id)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    suite_result.artifacts_dir = str(output_path)
 
     json_path = save_json_report(suite_result, output_path)
     md_path = save_markdown_report(suite_result, output_path)
@@ -745,6 +795,8 @@ async def main_async(argv: list[str] | None = None) -> int:
                 print(f"Saved to PostgreSQL: run_id={db_run_id}")
         except Exception as e:
             logger.error("Failed to save to PostgreSQL: {}", e)
+
+    cleanup_old_runs(keep_last=args.keep_runs)
 
     _print_summary(suite_result)
 

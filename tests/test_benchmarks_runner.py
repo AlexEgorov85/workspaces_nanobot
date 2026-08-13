@@ -58,6 +58,22 @@ class TestDetectRunId:
 
 
 # ===================================================================
+# _generate_run_id
+# ===================================================================
+
+class TestGenerateRunId:
+    def test_returns_uuid_hex(self):
+        from benchmarks.runner import _generate_run_id
+        result = _generate_run_id()
+        assert len(result) == 32
+        assert all(c in "0123456789abcdef" for c in result)
+
+    def test_is_unique(self):
+        from benchmarks.runner import _generate_run_id
+        assert _generate_run_id() != _generate_run_id()
+
+
+# ===================================================================
 # _parse_args
 # ===================================================================
 
@@ -454,6 +470,47 @@ class TestCleanupItem:
         bot._loop.workspace = str(tmp_path)
         _cleanup_item(item, bot)
         assert not f.exists()
+
+
+# ===================================================================
+# cleanup_old_runs
+# ===================================================================
+
+class TestCleanupOldRuns:
+    def test_removes_oldest_beyond_keep(self, tmp_path):
+        from benchmarks.runner import cleanup_old_runs
+        for name in ["run-1", "run-2", "run-3"]:
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "summary.json").write_text("{}")
+        # run-1 oldest, run-3 newest (mtimes may be equal on fast FS)
+        import os
+        base = tmp_path
+        for i, name in enumerate(["run-1", "run-2", "run-3"]):
+            p = base / name
+            os.utime(p, (1_700_000_000 + i, 1_700_000_000 + i))
+        removed = cleanup_old_runs(keep_last=2, runs_dir=base)
+        assert removed == 1
+        assert not (base / "run-1").exists()
+        assert (base / "run-2").exists()
+        assert (base / "run-3").exists()
+
+    def test_keep_all_when_keep_last_gt_count(self, tmp_path):
+        from benchmarks.runner import cleanup_old_runs
+        (tmp_path / "run-1").mkdir()
+        removed = cleanup_old_runs(keep_last=10, runs_dir=tmp_path)
+        assert removed == 0
+        assert (tmp_path / "run-1").exists()
+
+    def test_zero_keep_disables(self, tmp_path):
+        from benchmarks.runner import cleanup_old_runs
+        (tmp_path / "run-1").mkdir()
+        removed = cleanup_old_runs(keep_last=0, runs_dir=tmp_path)
+        assert removed == 0
+        assert (tmp_path / "run-1").exists()
+
+    def test_missing_dir_noop(self, tmp_path):
+        from benchmarks.runner import cleanup_old_runs
+        assert cleanup_old_runs(keep_last=5, runs_dir=tmp_path / "nope") == 0
 
 
 # ===================================================================

@@ -130,6 +130,99 @@ class TestSaveRun:
         assert run_id == "42"
         assert mock_utils_db["utils_db"].transaction.called
 
+    def test_saves_with_explicit_run_id_and_artifacts_dir(self, mock_utils_db):
+        from datetime import datetime
+        from benchmarks.models import BenchResult, CheckResult, SuiteResult
+
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.__enter__.return_value = mock_cur
+        mock_cur.fetchone.return_value = ("abc123",)
+        mock_conn.cursor.return_value = mock_cur
+        mock_utils_db["utils_db"].transaction.return_value.__enter__.return_value = mock_conn
+
+        db = mock_utils_db["BenchmarkDB"]()
+        suite = SuiteResult(
+            run_id="run-uuid-1",
+            artifacts_dir="benchmarks/results/runs/run-uuid-1",
+            suite_name="test_suite",
+            config={"tags": ["fast"]},
+            timestamp=datetime.now(),
+            total_items=1,
+            passed_items=1,
+            total_score=0.95,
+            avg_score=0.95,
+            duration_sec=1.0,
+            results=[
+                BenchResult(
+                    item_id="item-1",
+                    passed=True,
+                    total_score=0.95,
+                    response="ok",
+                    total_iterations=2,
+                    tools_used=["read"],
+                    skills_activated=["python"],
+                    checks=[CheckResult(check="tools", passed=True, score=1.0)],
+                ),
+            ],
+        )
+
+        run_id = db.save_run(suite)
+        assert run_id == "abc123"
+
+        # первый INSERT (runs) должен содержать явный id и artifacts_dir
+        runs_args = mock_cur.execute.call_args_list[0][0][1]
+        assert "run-uuid-1" in runs_args
+        assert "benchmarks/results/runs/run-uuid-1" in runs_args
+
+        # второй INSERT (results) должен содержать details с checks
+        results_args = mock_cur.execute.call_args_list[1][0][1]
+        details = results_args[-1]
+        assert details["checks"][0]["check"] == "tools"
+
+    def test_details_include_multi_step(self, mock_utils_db):
+        from datetime import datetime
+        from benchmarks.models import BenchResult, CheckResult, StepResult, SuiteResult
+
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.__enter__.return_value = mock_cur
+        mock_cur.fetchone.return_value = ("xyz",)
+        mock_conn.cursor.return_value = mock_cur
+        mock_utils_db["utils_db"].transaction.return_value.__enter__.return_value = mock_conn
+
+        db = mock_utils_db["BenchmarkDB"]()
+        suite = SuiteResult(
+            suite_name="s",
+            timestamp=datetime.now(),
+            total_items=1,
+            passed_items=1,
+            total_score=0.5,
+            avg_score=0.5,
+            duration_sec=1.0,
+            results=[
+                BenchResult(
+                    item_id="m",
+                    passed=True,
+                    total_score=0.5,
+                    tools_used=["exec"],
+                    total_iterations=3,
+                    steps=[
+                        StepResult(step=1, weight=1.0, passed=True, score=0.5,
+                                   response="step resp", tools_used=["exec"],
+                                   iterations=1, duration_sec=1.0,
+                                   checks=[CheckResult(check="tools", passed=True, score=1.0)]),
+                    ],
+                ),
+            ],
+        )
+        db.save_run(suite)
+        results_args = mock_cur.execute.call_args_list[1][0][1]
+        details = results_args[-1]
+        assert details["steps"][0]["step"] == 1
+        assert details["steps"][0]["response"] == "step resp"
+        assert details["steps"][0]["checks"][0]["check"] == "tools"
+
 
 class TestGetHistory:
     def test_returns_list(self, mock_utils_db):

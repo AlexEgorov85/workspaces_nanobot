@@ -176,6 +176,8 @@ def _suite_to_dict(suite_result: SuiteResult) -> dict[str, Any]:
     return {
         "suite_name": suite_result.suite_name,
         "timestamp": suite_result.timestamp,
+        "run_id": suite_result.run_id,
+        "artifacts_dir": suite_result.artifacts_dir,
         "total_items": suite_result.total_items,
         "passed_items": suite_result.passed_items,
         "total_score": suite_result.total_score,

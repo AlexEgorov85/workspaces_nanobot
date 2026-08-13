@@ -28,6 +28,12 @@ BEGIN
              WHERE schemaname = 'public' AND indexname = 'idx_benchmark_results_item') THEN
     ALTER INDEX public.idx_benchmark_results_item RENAME TO idx_agent_benchmark_results_item;
   END IF;
+  -- миграция: колонка artifacts_dir (обратная ссылка БД -> каталог файловых отчётов)
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_schema = 'public' AND table_name = 'agent_benchmark_runs'
+                   AND column_name = 'artifacts_dir') THEN
+    ALTER TABLE public.agent_benchmark_runs ADD COLUMN artifacts_dir TEXT;
+  END IF;
 END $$;
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -45,7 +51,8 @@ CREATE TABLE IF NOT EXISTS public.agent_benchmark_runs (
     avg_score       REAL NOT NULL DEFAULT 0.0,
     duration_sec    REAL NOT NULL DEFAULT 0.0,
     started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    finished_at     TIMESTAMPTZ
+    finished_at     TIMESTAMPTZ,
+    artifacts_dir   TEXT
 );
 
 COMMENT ON TABLE public.agent_benchmark_runs IS

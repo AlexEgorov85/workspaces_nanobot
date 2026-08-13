@@ -14,6 +14,12 @@ BEGIN
              WHERE table_schema = 'public' AND table_name = 'benchmark_results') THEN
     ALTER TABLE public.benchmark_results RENAME TO agent_benchmark_results;
   END IF;
+  -- миграция: колонка artifacts_dir (обратная ссылка БД -> каталог файловых отчётов)
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                 WHERE table_schema = 'public' AND table_name = 'agent_benchmark_runs'
+                   AND column_name = 'artifacts_dir') THEN
+    ALTER TABLE public.agent_benchmark_runs ADD COLUMN artifacts_dir TEXT;
+  END IF;
 END $$;
 
 CREATE TABLE IF NOT EXISTS public.agent_benchmark_runs (
@@ -27,7 +33,8 @@ CREATE TABLE IF NOT EXISTS public.agent_benchmark_runs (
     avg_score       REAL NOT NULL DEFAULT 0.0,
     duration_sec    REAL NOT NULL DEFAULT 0.0,
     started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    finished_at     TIMESTAMPTZ
+    finished_at     TIMESTAMPTZ,
+    artifacts_dir   TEXT
 )
 DISTRIBUTED BY (id);
 

@@ -117,6 +117,11 @@ class BenchmarkDB:
     def _save_run_inner(self, conn, suite_result: SuiteResult) -> str:
         """Вставка записи прогона и связанных результатов в БД.
 
+        Использует единый ``suite_result.run_id`` (если задан) как первичный
+        ключ прогона — тот же id, что у каталога файловых отчётов. Если
+        ``run_id`` не задан (например, результат собран вручную), id
+        генерирует сама БД.
+
         Args:
             conn: Активное соединение с БД (внутри транзакции).
             suite_result: Результаты прогона набора.
@@ -126,25 +131,34 @@ class BenchmarkDB:
         """
         now = datetime.now()
 
+        run_columns = [
+            "suite_name", "suite_tags", "config", "total_items", "passed_items",
+            "total_score", "avg_score", "duration_sec", "started_at", "finished_at",
+            "artifacts_dir",
+        ]
+        run_params = [
+            suite_result.suite_name,
+            Json(suite_result.config.get("tags", [])),
+            suite_result.config,
+            suite_result.total_items,
+            suite_result.passed_items,
+            suite_result.total_score,
+            suite_result.avg_score,
+            suite_result.duration_sec,
+            now,
+            now,
+            suite_result.artifacts_dir,
+        ]
+        if suite_result.run_id:
+            run_columns.insert(0, "id")
+            run_params.insert(0, suite_result.run_id)
+
+        placeholders = ", ".join(["%s"] * len(run_columns))
         with conn.cursor() as cur:
             cur.execute(
-                f"INSERT INTO {self._fq_runs} "
-                f"(suite_name, suite_tags, config, total_items, passed_items, "
-                f"total_score, avg_score, duration_sec, started_at, finished_at) "
-                f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-                f"RETURNING id",
-                (
-                    suite_result.suite_name,
-                    Json(suite_result.config.get("tags", [])),
-                    suite_result.config,
-                    suite_result.total_items,
-                    suite_result.passed_items,
-                    suite_result.total_score,
-                    suite_result.avg_score,
-                    suite_result.duration_sec,
-                    now,
-                    now,
-                ),
+                f"INSERT INTO {self._fq_runs} ({', '.join(run_columns)}) "
+                f"VALUES ({placeholders}) RETURNING id",
+                tuple(run_params),
             )
             run_id = str(cur.fetchone()[0])
 
@@ -173,12 +187,46 @@ class BenchmarkDB:
                         r.duration_sec,
                         r.error,
                         r.llm_judge_score,
-                        r.details,
+                        Json(self._result_details(r)),
                     ),
                 )
 
         logger.info("Saved benchmark run {} to PostgreSQL", run_id)
         return run_id
+
+    @staticmethod
+    def _result_details(r: BenchResult) -> dict[str, Any]:
+        """Собрать JSONB-details результата: checks и шаги multi_step.
+
+        Args:
+            r: Результат выполнения задания.
+
+        Returns:
+            Словарь с ключами ``checks`` и, для многошаговых заданий, ``steps``.
+        """
+        details: dict[str, Any] = dict(r.details or {})
+        details["checks"] = [
+            {"check": c.check, "passed": c.passed, "score": c.score, "detail": c.detail}
+            for c in r.checks
+        ]
+        if r.steps:
+            details["steps"] = [
+                {
+                    "step": s.step,
+                    "weight": s.weight,
+                    "passed": s.passed,
+                    "score": s.score,
+                    "response": s.response,
+                    "tools_used": s.tools_used,
+                    "iterations": s.iterations,
+                    "checks": [
+                        {"check": c.check, "passed": c.passed, "score": c.score, "detail": c.detail}
+                        for c in s.checks
+                    ],
+                }
+                for s in r.steps
+            ]
+        return details
 
     def get_history(self, suite_name: str, limit: int = 10) -> list[dict[str, Any]]:
         """Получение истории прогонов для указанного набора тестов.
