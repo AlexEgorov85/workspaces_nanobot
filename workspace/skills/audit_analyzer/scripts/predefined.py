@@ -1,5 +1,9 @@
 """
-Обёртка над SCRIPTS_REGISTRY + DynamicQueryBuilder для режима predefined.
+Обёртка над реестром скриптов + DynamicQueryBuilder для режима predefined.
+
+Реестр загружается из PostgreSQL (public.predefined_scripts) через
+db_loader. Все хелперы ниже остаются API-стабильными: тот же контракт,
+что был у модуля на SCRIPTS_REGISTRY.
 
 Содержит функции для поиска скриптов, подстановки параметров (с алиасами),
 сборки SQL и формирования списка доступных скриптов.
@@ -11,12 +15,31 @@
 """
 
 from typing import Any, Dict, List, Optional, Tuple
+import sys
 
-from predefined_scripts import SCRIPTS_REGISTRY
+from db_loader import load_registry
 from scripts_registry import (
     DynamicQueryBuilder,
     ScriptDefinition,
 )
+
+
+def _get_registry() -> Dict[str, ScriptDefinition]:
+    """Ленивая загрузка реестра из БД (с кешем внутри db_loader)."""
+    return load_registry()
+
+
+def get_script_by_name(name: str) -> Optional[ScriptDefinition]:
+    """
+    Получить ScriptDefinition по имени из реестра (БД).
+
+    Args:
+        name: Имя скрипта (ключ в реестре).
+
+    Returns:
+        ScriptDefinition или None если не найден.
+    """
+    return _get_registry().get(name)
 
 
 def build_sql(
@@ -41,8 +64,8 @@ def build_sql(
         (sql_string, [values_for_psycopg2])
 
     Пример:
-        >>> from predefined_scripts import SCRIPTS_REGISTRY
-        >>> script = SCRIPTS_REGISTRY["analytics_by_year_month"]
+        >>> from predefined import get_script_by_name, build_sql
+        >>> script = get_script_by_name("analytics_by_year_month")
         >>> sql, vals = build_sql(script, {"year": 2024})
         >>> sql  # содержит %s, %s плейсхолдеры
         'SELECT ... WHERE ... = %s\\nLIMIT %s'
@@ -50,26 +73,6 @@ def build_sql(
         [2024, 100]
     """
     return DynamicQueryBuilder.build(script, params)
-
-
-def get_script_by_name(name: str) -> Optional[ScriptDefinition]:
-    """
-    Получить ScriptDefinition по имени из SCRIPTS_REGISTRY.
-
-    Args:
-        name: Имя скрипта (ключ в SCRIPTS_REGISTRY).
-
-    Returns:
-        ScriptDefinition или None если не найден.
-
-    Пример:
-        >>> s = get_script_by_name("violations_by_type")
-        >>> s.description
-        'Статистика нарушений по типам и категориям'
-
-        >>> get_script_by_name("nonexistent")  # None
-    """
-    return SCRIPTS_REGISTRY.get(name)
 
 
 def list_all_scripts() -> List[Dict[str, Any]]:
@@ -89,7 +92,7 @@ def list_all_scripts() -> List[Dict[str, Any]]:
             "description": s.description,
             "parameters": list(s.parameters.keys()),
         }
-        for s in SCRIPTS_REGISTRY.values()
+        for s in _get_registry().values()
     ]
 
 
@@ -104,7 +107,7 @@ def list_available() -> str:
         >>> list_available()
         'analytics_by_year_month, violations_by_type, top_audited_objects, ...'
     """
-    return ", ".join(SCRIPTS_REGISTRY.keys())
+    return ", ".join(_get_registry().keys())
 
 
 def resolve_params(script: ScriptDefinition, params: dict | None) -> tuple[dict, list[str]]:
@@ -164,7 +167,13 @@ def resolve_params_with_vector(
                 val, index_name=index_name, index_path=index_dir,
                 top_k=top_k, threshold=min_score,
             )
-        except Exception:
+        except (ImportError, AttributeError) as e:
+            print(f"[predefined] vector-резолвер недоступен: {e}", file=sys.stderr)
+            continue
+        except Exception as e:
+            # Сетевые/IO ошибки — не фатально (vector-параметр просто не резолвится)
+            print(f"[predefined] vector-резолвер упал для {param_name!r}: {e}",
+                  file=sys.stderr)
             continue
 
         if not results:

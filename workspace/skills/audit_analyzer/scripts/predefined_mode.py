@@ -2,7 +2,7 @@
 Режим: predefined — выполнение готовых SQL-шаблонов по имени скрипта.
 
 Pipeline:
-    1. Найти ScriptDefinition по имени в SCRIPTS_REGISTRY
+    1. Найти ScriptDefinition по имени в реестре (БД → DuckDB-кэш через db_loader)
     2. Отфильтровать параметры (resolve_params — алиасы + валидация)
     3. Собрать SQL через DynamicQueryBuilder (рендер + форматирование)
     4. Выполнить запрос через query_sql
@@ -17,6 +17,7 @@ Pipeline:
 from typing import Any, Dict, Optional
 
 from database import QueryBackend
+from db_loader import set_provider
 from predefined import build_sql, get_script_by_name, list_available, resolve_params_with_vector
 
 
@@ -33,7 +34,7 @@ def run(
     через семантический поиск по FAISS (Ollama embedding + FAISS index).
 
     Args:
-        script_name: Имя скрипта (ключ в SCRIPTS_REGISTRY).
+        script_name: Имя скрипта (ключ в реестре public.predefined_scripts).
         db: Бэкенд запросов (PostgreSQL напрямую или DuckDB-кэш).
         params: Параметры скрипта (опционально).
         index_dir: Путь к директории с FAISS-индексами (опционально).
@@ -48,6 +49,10 @@ def run(
                 parameters: использованные параметры
                 result: результат query_sql (columns, rows, row_count)
     """
+    # Реестр скриптов должен читаться из ТОГО ЖЕ DuckDB-кэша, что и данные,
+    # иначе будут два разных CacheProvider на одном файле (race + двойной open).
+    set_provider(db)
+
     script = get_script_by_name(script_name)
     if not script:
         return {

@@ -67,10 +67,10 @@ scripts/
     database.py              — PostgreSQL (fallback): схема, query, EXPLAIN
     llm.py                   — LLM-клиент (OpenAI-compatible HTTP)
     output.py                — форматирование результата в JSON
-    predefined.py            — обёртка над SCRIPTS_REGISTRY + DynamicQueryBuilder
+    predefined.py            — обёртка над реестром скриптов (БД → DuckDB) + DynamicQueryBuilder
     predefined_mode.py       — оркестрация режима predefined
     scripts_registry.py      — ScriptDefinition, ParamDefinition, DynamicQueryBuilder
-    predefined_scripts.py    — реестр готовых SQL-скриптов (SCRIPTS_REGISTRY)
+    db_loader.py             — адаптер: реестр из public.predefined_scripts → ScriptDefinition
     sql_mode.py              — оркестрация режима sql (LLM + retry)
 
 Инфраструктура (DuckDB-кэш, векторные индексы, эмбеддинг, чанкование

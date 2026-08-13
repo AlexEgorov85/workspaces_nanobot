@@ -2,7 +2,9 @@
 Типизированные модели скриптов (ParamDefinition, ScriptDefinition)
 и динамический построитель SQL с Jinja2-подобными шаблонами (DynamicQueryBuilder).
 
-Реестр готовых SQL-скриптов вынесен в predefined_scripts.py (SCRIPTS_REGISTRY).
+Реестр готовых SQL-скриптов хранится в public.predefined_scripts (PostgreSQL);
+загрузчик db_loader.py снимает снимок в DuckDB-кэш, откуда читает
+predefined.py при каждом вызове get_script_by_name.
 
 Каждый скрипт может иметь параметры с типизацией (like, number, date, ...),
 условные блоки {% if param %}...{% endif %} и автоматическое добавление LIMIT.
@@ -237,13 +239,13 @@ class DynamicQueryBuilder:
             ValueError: Если обязательный параметр отсутствует.
 
         Пример:
-            >>> from predefined_scripts import SCRIPTS_REGISTRY
-            >>> script = SCRIPTS_REGISTRY["analytics_by_year_month"]
+            >>> from db_loader import load_registry
+            >>> script = load_registry()["analytics_by_year_month"]
             >>> DynamicQueryBuilder.build(script, {"year": 2024})
             ('SELECT ... WHERE ... = %s\\nLIMIT %s', [2024, 100])
 
         Пример с like-параметром:
-            >>> script2 = SCRIPTS_REGISTRY["violations_by_type"]
+            >>> script2 = load_registry()["violations_by_type"]
             >>> DynamicQueryBuilder.build(script2, {"violation_code": "финан"})
             ('SELECT ... WHERE ... ILIKE %s\\nLIMIT %s', ['%финан%', 100])
         """
@@ -319,5 +321,6 @@ class DynamicQueryBuilder:
 # РЕЕСТР ПРЕДОПРЕДЕЛЁННЫХ СКРИПТОВ
 # =============================================================================
 #
-# Вынесен в predefined_scripts.py (SCRIPTS_REGISTRY):
-#   from predefined_scripts import SCRIPTS_REGISTRY
+# Хранится в PostgreSQL (public.predefined_scripts). Загрузчик:
+#   from db_loader import load_registry
+#   registry = load_registry()  # {script_name: ScriptDefinition}
