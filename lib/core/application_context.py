@@ -285,14 +285,15 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
     if not dsn:
         return None
 
-    fallback_path_raw = db_cfg.get("fallback_path", "logs/gateway_logs_fallback.jsonl")
+    fallback_path_raw = db_cfg.get("fallback_path", "logs/agent_gateway_logs_fallback.jsonl")
     fallback_path = Path(fallback_path_raw)
     if not fallback_path.is_absolute():
         fallback_path = Path(ctx.script_dir) / fallback_path
 
     return DbLoggingService(
         dsn=dsn,
-        table_name=db_cfg.get("table_name", "gateway_logs"),
+        table_name=db_cfg.get("table_name", "agent_gateway_logs"),
+        question_runs_table=db_cfg.get("question_runs_table", "agent_question_runs"),
         schema=db_cfg.get("schema", "public"),
         dialect=db_cfg.get("dialect", "postgres"),
         flush_interval_sec=float(db_cfg.get("flush_interval_sec", 5.0)),

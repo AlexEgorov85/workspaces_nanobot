@@ -11,7 +11,7 @@
 
     agent = AgentLoop.from_config(config, bus, session_manager=session_manager)
 
-Таблицы ``session_meta`` и ``session_messages`` создаются вручную
+Таблицы ``agent_session_meta`` и ``agent_session_messages`` создаются вручную
 скриптом ``create_session_tables.sql``.
 
 При недоступности БД автоматически падает на JSONL-файлы (graceful degradation).
@@ -35,8 +35,8 @@ from utils.db import transaction, DB_RETRYABLE_ERRORS
 from psycopg2.extras import Json, execute_values
 
 
-MESSAGES_TABLE = "session_messages"
-METADATA_TABLE = "session_meta"
+MESSAGES_TABLE = "agent_session_messages"
+METADATA_TABLE = "agent_session_meta"
 
 # Все колонки, которые могут появиться в сообщении сессии (кроме базовых)
 _MESSAGE_COLUMNS = (
@@ -55,7 +55,7 @@ class PGSessionManager(SessionManager):
     """Замена SessionManager с хранением в PostgreSQL через psycopg2.
 
     Полностью повторяет интерфейс SessionManager, но все данные хранит
-    в двух таблицах: ``session_meta`` и ``session_messages``.
+    в двух таблицах: ``agent_session_meta`` и ``agent_session_messages``.
 
     При ошибках БД (DB_RETRYABLE_ERRORS) автоматически падает
     на JSONL-файлы (унаследовано от super()).
@@ -66,8 +66,8 @@ class PGSessionManager(SessionManager):
         workspace: Path,
         dsn: str = "",
         schema: str = "public",
-        messages_table: str = "session_messages",
-        meta_table: str = "session_meta",
+        messages_table: str = "agent_session_messages",
+        meta_table: str = "agent_session_meta",
         **kwargs: Any,
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
@@ -124,8 +124,8 @@ class PGSessionManager(SessionManager):
         """Загрузить сессию из БД (внутренняя реализация, без fallback).
 
         Читает:
-          1. Одну строку из ``session_meta`` по session_key
-          2. Все строки из ``session_messages`` по session_key (ORDER BY seq)
+           1. Одну строку из ``agent_session_meta`` по session_key
+           2. Все строки из ``agent_session_messages`` по session_key (ORDER BY seq)
 
         Собирает Session с распаковкой JSON-колонок.
         """
@@ -185,7 +185,7 @@ class PGSessionManager(SessionManager):
         """Сохранить сессию в БД (внутренняя реализация, без fallback).
 
         Алгоритм:
-          1. UPSERT в session_meta (UPDATE → если 0 rows → INSERT)
+           1. UPSERT в agent_session_meta (UPDATE → если 0 rows → INSERT)
           2. DELETE всех старых сообщений сессии
           3. batch-INSERT всех текущих сообщений через ``execute_values``
 
@@ -390,7 +390,7 @@ class PGSessionManager(SessionManager):
     def _quote(ident: str) -> str:
         """Экранировать идентификатор (схема.таблица) кавычками.
 
-        Пример: ``public.session_messages`` → ``"public"."session_messages"``
+        Пример: ``public.agent_session_messages`` → ``"public"."agent_session_messages"``
 
         Вызывает ``ValueError``, если любая часть идентификатора содержит
         недопустимые символы (защита от SQL injection).

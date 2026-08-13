@@ -35,8 +35,8 @@
       "enabled": true,                        // Канал включён. Варианты: true | false
       "dsn": "${DATABASE_URL}",               // Строка подключения (секрет в .secrets.env)
       "schema": "public",                     // Схема БД
-      "messages_table": "session_messages",   // Таблица сообщений сессий (PGSessionManager)
-      "meta_table": "session_meta",           // Таблица метаданных сессий (PGSessionManager)
+      "messages_table": "agent_session_messages",   // Таблица сообщений сессий (PGSessionManager, префикс agent_)
+      "meta_table": "agent_session_meta",           // Таблица метаданных сессий (PGSessionManager, префикс agent_)
       "table_name": "conversation_messages",  // Таблица обмена сообщениями (PostgresChannel)
       "poll_interval": 2.0,                   // Поллинг новых сообщений, сек
       "flush_interval": 2.0,                  // Сброс reasoning в metadata, сек
@@ -98,6 +98,7 @@
       //   Источник истины для режима predefined. Заполняется через
       //   sql/audit_analyzer/create_predefined_scripts_table.sql и
       //   tools/generate_predefined_scripts_sql.py.
+      "mode_vector_index_config_table": "oarb.vector_index_config",  // Конфиг FAISS-индексов (читается cache_provider_impl)
 
       // --- Фоновая синхронизация (gateway: AuditSyncService) ------------------
       "poll_interval_sec": 60,                // Поллинг новых/изменённых строк из PostgreSQL, сек
@@ -174,8 +175,8 @@
   // ---------------------------------------------------------------------------
   "benchmark": {
     "db_schema": "public",            // Схема БД
-    "runs_table": "benchmark_runs",   // Таблица прогонов
-    "results_table": "benchmark_results"  // Таблица результатов по вопросам
+    "runs_table": "agent_benchmark_runs",   // Таблица прогонов (префикс agent_)
+    "results_table": "agent_benchmark_results"  // Таблица результатов (префикс agent_)
   },
 
   // ---------------------------------------------------------------------------
@@ -215,14 +216,15 @@
   "logging": {
     "db": {
       "enabled": true,                 // Варианты: true | false
-      "table_name": "gateway_logs",    // Таблица в PostgreSQL
+      "table_name": "agent_gateway_logs",    // Таблица событий агента (префикс agent_)
+      "question_runs_table": "agent_question_runs",  // Контекст вопросов (префикс agent_)
       "schema": "public",              // Схема
       "flush_interval_sec": 5.0,       // Интервал флаша батча, сек
       "batch_size": 100,               // Размер батча
       "queue_maxsize": 10000,          // Макс. размер очереди
       "min_level": "INFO",             // Варианты: DEBUG | INFO | WARN | ERROR
       "dialect": "postgres",           // Диалект БД. Варианты: postgres | greenplum
-      "fallback_path": "logs/gateway_logs_fallback.jsonl",  // Путь к JSONL-fallback
+      "fallback_path": "logs/agent_gateway_logs_fallback.jsonl",  // Путь к JSONL-fallback
       "connect_backoff_sec": 1.0,      // Начальный backoff psycopg2.connect
       "connect_backoff_max_sec": 60.0, // Потолок backoff psycopg2.connect
       "summary_max_chars": 200         // Усечение summary до N символов
