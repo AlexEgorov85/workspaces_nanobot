@@ -13,7 +13,7 @@
   * прогрев векторных индексов в память              (preload_indexes)
   * семантический поиск по индексам                  (search_vector)
 
-Тяжёлые зависимости (duckdb, psycopg2, faiss, numpy, pandas, httpx)
+Тяжёлые зависимости (duckdb, psycopg2, faiss, numpy, httpx)
 импортируются лениво внутри методов, чтобы импорт модуля оставался лёгким
 и gateway мог управлять жизненным циклом без побочных эффектов.
 """
@@ -47,7 +47,7 @@ _REWRITE_TO_CHAR = re.compile(r"TO_CHAR\((\w+)\s*,\s*'Month'\)", re.IGNORECASE)
 
 
 def get_embedding(text: str, base_url: str = "", model: str = "mxbai-embed-large:latest",
-                  retries: int = 3) -> Optional[List[float]]:
+                  retries: int = 3, timeout_sec: float = 60.0) -> Optional[List[float]]:
     """Получить эмбеддинг текста через Ollama /api/embed."""
     if not base_url:
         return None
@@ -56,7 +56,7 @@ def get_embedding(text: str, base_url: str = "", model: str = "mxbai-embed-large
     payload = {"model": model, "input": text}
     for attempt in range(1, retries + 1):
         try:
-            with httpx.Client(timeout=60) as client:
+            with httpx.Client(timeout=timeout_sec) as client:
                 resp = client.post(base_url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -84,14 +84,15 @@ def read_embedding_config(cfg: dict) -> Dict[str, Any]:
 
 
 def read_vector_index_config(cfg: dict) -> Dict[str, Any]:
-    """Конфиг векторных индексов: таблица oarb.vector_index_config → fallback в настройках."""
+    """Конфиг векторных индексов: таблица vector_index_config → fallback в настройках."""
     from utils.db import fetch
 
+    table = cfg.get("mode_vector_index_config_table", "oarb.vector_index_config")
     try:
         rows = fetch(
             "SELECT index_name, source_table, src_table, pk_column, "
             "content_cols, embedding_cols, track_column, enabled "
-            "FROM oarb.vector_index_config ORDER BY index_name"
+            f"FROM {table} ORDER BY index_name"
         )
         if rows:
             result = {}
@@ -139,9 +140,11 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> "PostgresDuckDbProvid
 
     emb = read_embedding_config(cfg)
     tables = cfg.get("db_tables", [])
+    additional = cfg.get("db_additional_tables", [])
     return PostgresDuckDbProvider(
         schema=cfg.get("db_schema", "oarb"),
         tables=list(tables) if isinstance(tables, (list, tuple)) else None,
+        additional_tables=_normalize_additional_tables(additional),
         cache_path=cache_path,
         vector_db_table=cfg.get("mode_vector_db_table", ""),
         vector_index_path=index_path,
@@ -150,6 +153,31 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> "PostgresDuckDbProvid
         embedding_base_url=emb.get("base_url", ""),
         embedding_model=emb.get("model", "mxbai-embed-large:latest"),
     )
+
+
+def _normalize_additional_tables(value: Any) -> List[Tuple[str, str]]:
+    """
+    Приводит db_additional_tables к канону: List[Tuple[schema, table]].
+
+    Допустимые форматы:
+      - [["public", "predefined_scripts"], {"schema": "audit", "table": "rules"}]
+      - ["public.predefined_scripts", "audit.rules"]
+    """
+    out: List[Tuple[str, str]] = []
+    if not value:
+        return out
+    for item in value:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            sch, tbl = item
+            if sch and tbl:
+                out.append((str(sch), str(tbl)))
+        elif isinstance(item, dict) and item.get("schema") and item.get("table"):
+            out.append((str(item["schema"]), str(item["table"])))
+        elif isinstance(item, str) and "." in item:
+            sch, tbl = item.split(".", 1)
+            if sch and tbl:
+                out.append((sch, tbl))
+    return out
 
 
 def _discover_tables(pg_conn, schema: str) -> List[str]:
@@ -165,26 +193,98 @@ def _discover_tables(pg_conn, schema: str) -> List[str]:
     return tables
 
 
-def _store_meta(conn, pg_conn, schema: str, table_list: List[str]) -> None:
-    """Сохранить метку MAX(updated) для каждой таблицы в таблицу __cache_meta."""
+def _store_meta(conn: Any, pg_conn: Any, schema: str, table_list: List[str]) -> None:
+    """Сохранить метку MAX(updated) для каждой таблицы в __cache_meta."""
     conn.execute("DROP TABLE IF EXISTS __cache_meta")
-    meta_rows = []
+
+    meta_rows: List[Tuple[str, Optional[str]]] = []
     for tbl in table_list:
         cur = pg_conn.cursor()
         try:
             cur.execute(f'SELECT MAX(updated_at) FROM "{schema}"."{tbl}"')
             max_ts = cur.fetchone()[0]
-            meta_rows.append({"table_name": tbl, "max_updated_at": str(max_ts) if max_ts else None})
+            meta_rows.append((tbl, str(max_ts) if max_ts else None))
         except Exception:
-            meta_rows.append({"table_name": tbl, "max_updated_at": None})
+            meta_rows.append((tbl, None))
         finally:
             cur.close()
 
-    import pandas as pd
-    df = pd.DataFrame(meta_rows)
-    conn.register("__meta_df", df)
-    conn.execute("CREATE TABLE __cache_meta AS SELECT * FROM __meta_df")
-    conn.unregister("__meta_df")
+    conn.execute("CREATE TABLE __cache_meta (table_name VARCHAR, max_updated_at VARCHAR)")
+    conn.executemany(
+        "INSERT INTO __cache_meta VALUES (?, ?)",
+        meta_rows,
+    )
+
+
+def _copy_table(
+    pg_conn: Any,
+    conn: Any,
+    schema: str,
+    tbl: str,
+) -> None:
+    """
+    Скопировать таблицу schema.tbl из PG в DuckDB через COPY ... TO STDOUT → CSV.
+
+    Без pandas, без pyarrow-IPC. Поток:
+      1) DESCRIBE TABLE в PG → имена колонок
+      2) COPY (SELECT * FROM schema.tbl) TO STDOUT WITH CSV HEADER
+      3) DuckDB read_csv_auto() с авто-типизацией → INSERT INTO
+
+    Преимущества:
+      - никакой материализации в Python, стрим идёт PG → DuckDB;
+      - DuckDB сам выводит типы из CSV-выборки (sniff_rows);
+      - работает на psycopg2-binary (не требует пересборки).
+    """
+    import io
+    import tempfile
+    from pathlib import Path as _P
+
+    full_name = f"{schema}.{tbl}"
+    print(f"[LOAD] Copying {full_name} (CSV stream)...", file=sys.stderr)
+
+    # 1) Снимаем имена колонок (если таблицы нет в PG — placeholder)
+    cur = pg_conn.cursor()
+    cur.execute("""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = %s AND table_name = %s
+        ORDER BY ordinal_position
+    """, [schema, tbl])
+    col_names = [r[0] for r in cur.fetchall()]
+    cur.close()
+
+    if not col_names:
+        conn.execute(f'DROP TABLE IF EXISTS "{schema}"."{tbl}"')
+        conn.execute(f'CREATE TABLE "{schema}"."{tbl}" (placeholder VARCHAR)')
+        print(f"[LOAD]  {full_name} not found in PG, placeholder created", file=sys.stderr)
+        return
+
+    # 2) Стрим PG → временный CSV-файл (binary mode — copy_expert пишет байты)
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        suffix=".csv",
+        delete=False,
+    ) as tmp:
+        tmp_path = _P(tmp.name)
+        cur = pg_conn.cursor()
+        try:
+            sql_copy = f'COPY "{schema}"."{tbl}" TO STDOUT WITH CSV HEADER'
+            cur.copy_expert(sql_copy, tmp)
+        finally:
+            cur.close()
+
+    try:
+        # 3) Создаём/наполняем таблицу через read_csv_auto (auto-sniff типов)
+        conn.execute(
+            f"CREATE OR REPLACE TABLE \"{schema}\".\"{tbl}\" AS "
+            f"SELECT * FROM read_csv_auto('{tmp_path.as_posix()}', "
+            f"header=true, all_varchar=false)"
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    count = conn.execute(f'SELECT COUNT(*) FROM "{schema}"."{tbl}"').fetchone()[0]
+    print(f"[LOAD]  {count} rows loaded into {tbl}", file=sys.stderr)
 
 
 def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
@@ -192,6 +292,12 @@ def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
     Подключиться к канонической БД (PostgreSQL) и скопировать таблицы в SQL-кэш.
 
     DSN берётся через resolve_dsn() (configure(dsn) должен быть вызван ранее).
+
+    Структура db_config:
+      schema           — основная схема (audit data)
+      tables           — список таблиц в основной схеме
+      additional_tables — список [(schema, table), ...] для копирования из
+                          произвольных схем (метаданные, реестры и т.п.)
     """
     import duckdb
     import psycopg2
@@ -199,6 +305,7 @@ def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
 
     schema = db_config.get("schema", "public")
     tables = db_config.get("tables")
+    additional_tables = db_config.get("additional_tables") or []
 
     dsn = resolve_dsn()
     if not dsn:
@@ -210,6 +317,11 @@ def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
     conn = duckdb.connect(str(path))
     conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
 
+    # Все дополнительные схемы (для CREATE SCHEMA IF NOT EXISTS)
+    extra_schemas = {sch for sch, _ in additional_tables}
+    for sch in extra_schemas:
+        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{sch}"')
+
     pg_conn = psycopg2.connect(dsn)
     pg_conn.autocommit = True
 
@@ -217,29 +329,11 @@ def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
         table_list = tables or _discover_tables(pg_conn, schema)
 
         for tbl in table_list:
-            full_name = f"{schema}.{tbl}"
-            print(f"[LOAD] Copying {full_name}...", file=sys.stderr)
+            _copy_table(pg_conn, conn, schema, tbl)
 
-            cur = pg_conn.cursor()
-            cur.execute(f"SELECT * FROM {full_name}")
-            pg_rows = cur.fetchall()
-            columns = [desc[0] for desc in cur.description]
-            cur.close()
-
-            conn.execute(f'DROP TABLE IF EXISTS "{schema}"."{tbl}"')
-
-            if pg_rows:
-                import pandas as pd
-                df = pd.DataFrame(pg_rows, columns=columns)
-                conn.register("_df_temp", df)
-                conn.execute(f'CREATE TABLE "{schema}"."{tbl}" AS SELECT * FROM _df_temp')
-                conn.unregister("_df_temp")
-                count = conn.execute(f'SELECT COUNT(*) FROM "{schema}"."{tbl}"').fetchone()[0]
-                print(f"[LOAD]  {count} rows loaded into {tbl}", file=sys.stderr)
-            else:
-                col_defs = ", ".join(f'"{c}" VARCHAR' for c in columns)
-                conn.execute(f'CREATE TABLE "{schema}"."{tbl}" ({col_defs})')
-                print(f"[LOAD]  Table {tbl} created (empty)", file=sys.stderr)
+        # Копируем дополнительные таблицы (например, public.predefined_scripts)
+        for sch, tbl in additional_tables:
+            _copy_table(pg_conn, conn, sch, tbl)
 
         _store_meta(conn, pg_conn, schema, table_list)
         print(f"[LOAD] Cache saved to {cache_path}", file=sys.stderr)
@@ -327,6 +421,7 @@ class PostgresDuckDbProvider(CacheProvider):
         dsn: str = "",
         schema: str = "public",
         tables: Optional[List[str]] = None,
+        additional_tables: Optional[List[Tuple[str, str]]] = None,
         cache_path: str = "",
         vector_db_table: str = "",
         vector_index_path: str = "",
@@ -334,10 +429,12 @@ class PostgresDuckDbProvider(CacheProvider):
         vector_store_table: str = "",
         embedding_base_url: str = "",
         embedding_model: str = "mxbai-embed-large:latest",
+        embedding_timeout_sec: float = 60.0,
     ) -> None:
         self._dsn = dsn
         self._schema = schema
         self._tables = list(tables) if tables else None
+        self._additional_tables = list(additional_tables) if additional_tables else []
         self._cache_path = Path(cache_path)
         self._vector_db_table = vector_db_table
         self._vector_index_path = vector_index_path
@@ -345,6 +442,7 @@ class PostgresDuckDbProvider(CacheProvider):
         self._vector_store_table = vector_store_table
         self._embedding_base_url = embedding_base_url
         self._embedding_model = embedding_model or "mxbai-embed-large:latest"
+        self._embedding_timeout_sec = float(embedding_timeout_sec)
 
         if dsn:
             # Провайдер может работать сам по себе: подключаем DSN к utils.db.
@@ -369,7 +467,11 @@ class PostgresDuckDbProvider(CacheProvider):
         return self._vector_db_table
 
     def _db_config(self) -> dict:
-        return {"schema": self._schema, "tables": self._tables}
+        return {
+            "schema": self._schema,
+            "tables": self._tables,
+            "additional_tables": self._additional_tables,
+        }
 
     # -- lifecycle ------------------------------------------------------
 
@@ -759,7 +861,8 @@ class PostgresDuckDbProvider(CacheProvider):
                 self._search_error = f"Индекс '{index_name}' не найден в {idx_path or 'файлах'}"
             return []
 
-        embedding = get_embedding(query, self._embedding_base_url, self._embedding_model)
+        embedding = get_embedding(query, self._embedding_base_url, self._embedding_model,
+                                  timeout_sec=self._embedding_timeout_sec)
         if embedding is None:
             self._search_error = "Не удалось получить эмбеддинг запроса."
             return []
