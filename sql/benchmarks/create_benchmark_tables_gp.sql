@@ -69,7 +69,7 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_indexes
                    WHERE schemaname = 'public' AND indexname = 'idx_agent_benchmark_runs_suite') THEN
         CREATE INDEX idx_agent_benchmark_runs_suite
-            ON public.agent_benchmark_runs (suite_name, created_at DESC);
+            ON public.agent_benchmark_runs (suite_name, started_at DESC);
     END IF;
 END
 $gp$;

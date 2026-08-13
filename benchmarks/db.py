@@ -19,6 +19,14 @@ from typing import Any
 
 from loguru import logger
 
+import sys
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parents[1]           # .nanobot/
+_WORKSPACE = _ROOT / "workspace"
+for _p in (str(_ROOT), str(_WORKSPACE)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 from benchmarks.models import BenchResult, SuiteResult
 
 try:
@@ -81,7 +89,7 @@ class BenchmarkDB:
         if not self._available:
             logger.warning("PostgreSQL not available, skipping table creation")
             return
-        base = Path(__file__).parent / "sql"
+        base = _ROOT / "sql" / "benchmarks"
         is_gp = _is_greenplum()
         sql_path = base / "create_benchmark_tables_gp.sql" if is_gp else base / "create_benchmark_tables.sql"
         if sql_path.exists():

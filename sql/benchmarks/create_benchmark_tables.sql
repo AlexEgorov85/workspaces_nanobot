@@ -117,4 +117,4 @@ CREATE INDEX IF NOT EXISTS idx_agent_benchmark_results_item
     ON public.agent_benchmark_results (item_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_agent_benchmark_runs_suite
-    ON public.agent_benchmark_runs (suite_name, created_at DESC);
+    ON public.agent_benchmark_runs (suite_name, started_at DESC);
