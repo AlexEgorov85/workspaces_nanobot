@@ -136,6 +136,21 @@ COMMENT ON COLUMN public.agent_session_messages."_command" IS 'Внутренн�
 COMMENT ON COLUMN public.agent_session_messages."_channel_delivery" IS 'Внутренний флаг: доставлено в канал.';
 COMMENT ON COLUMN public.agent_session_messages."created_at" IS 'Время записи в БД.';
 
+-- ---- public.agent_conversation_messages ----
+COMMENT ON TABLE public.agent_conversation_messages IS 'Таблица обмена сообщениями канала PostgresChannel / Web-чата (Streamlit). Агент опрашивает входящие (status=pending), отвечает и пишет ответ обратно в эту же таблицу. Единотабличная схема (роль в role, рассуждения в metadata.reasoning). Таблица агента (префикс agent_).';
+COMMENT ON COLUMN public.agent_conversation_messages."id" IS 'PK — уникальный ID сообщения (UUID).';
+COMMENT ON COLUMN public.agent_conversation_messages."chat_id" IS 'ID чата / диалога.';
+COMMENT ON COLUMN public.agent_conversation_messages."user_id" IS 'ID отправителя (пользователь или агент).';
+COMMENT ON COLUMN public.agent_conversation_messages."role" IS 'Роль: user / assistant / system / tool.';
+COMMENT ON COLUMN public.agent_conversation_messages."content" IS 'Текст сообщения.';
+COMMENT ON COLUMN public.agent_conversation_messages."media" IS 'JSONB: вложения (картинки, файлы, ...).';
+COMMENT ON COLUMN public.agent_conversation_messages."metadata" IS 'JSONB: дополнительные метаданные (reasoning, session, ...).';
+COMMENT ON COLUMN public.agent_conversation_messages."reply_to" IS 'ID родительского сообщения (для связки ответ—вопрос).';
+COMMENT ON COLUMN public.agent_conversation_messages."buttons" IS 'JSONB: интерактивные кнопки/инлайн-клавиатура.';
+COMMENT ON COLUMN public.agent_conversation_messages."status" IS 'Статус: pending / processing / completed (конвейер канала).';
+COMMENT ON COLUMN public.agent_conversation_messages."created_at" IS 'Время создания сообщения.';
+COMMENT ON COLUMN public.agent_conversation_messages."updated_at" IS 'Время последнего изменения (статус/reasoning).';
+
 -- ---- public.agent_question_runs ----
 COMMENT ON TABLE public.agent_question_runs IS 'Контекст вопроса/прогона: пользователь, агент, статус, вопрос/ответ, summary. Одна строка на request_id. Не дублируется на каждое событие лога. Полный текст вопроса/ответа в question/response, media — вложения. Таблица агента (префикс agent_).';
 COMMENT ON COLUMN public.agent_question_runs."request_id" IS 'PK — ID сообщения, вызвавшего обработку.';

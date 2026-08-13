@@ -163,6 +163,26 @@ session = {
             "created_at": "Время записи в БД.",
         },
     ),
+    "public.agent_conversation_messages": (
+        "Таблица обмена сообщениями канала PostgresChannel / Web-чата (Streamlit). "
+        "Агент опрашивает входящие (status=pending), отвечает и пишет ответ обратно "
+        "в эту же таблицу. Единотабличная схема (роль в role, рассуждения в metadata.reasoning). "
+        "Таблица агента (префикс agent_).",
+        {
+            "id": "PK — уникальный ID сообщения (UUID).",
+            "chat_id": "ID чата / диалога.",
+            "user_id": "ID отправителя (пользователь или агент).",
+            "role": "Роль: user / assistant / system / tool.",
+            "content": "Текст сообщения.",
+            "media": "JSONB: вложения (картинки, файлы, ...).",
+            "metadata": "JSONB: дополнительные метаданные (reasoning, session, ...).",
+            "reply_to": "ID родительского сообщения (для связки ответ—вопрос).",
+            "buttons": "JSONB: интерактивные кнопки/инлайн-клавиатура.",
+            "status": "Статус: pending / processing / completed (конвейер канала).",
+            "created_at": "Время создания сообщения.",
+            "updated_at": "Время последнего изменения (статус/reasoning).",
+        },
+    ),
 }
 
 # 7. logs
