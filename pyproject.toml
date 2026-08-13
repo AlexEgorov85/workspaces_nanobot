@@ -7,6 +7,11 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+filterwarnings = [
+    # FAISS SWIG-биндинги не имеют __module__; предупреждение приходит из
+    # importlib._bootstrap при загрузке C-расширения _faiss (не наш код).
+    "ignore:builtin type .* has no __module__ attribute:DeprecationWarning",
+]
 
 [tool.coverage.run]
 source = ["config.py", "benchmarks", "lib"]

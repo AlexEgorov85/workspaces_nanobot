@@ -208,11 +208,29 @@ def _(s: str) -> str:
     return s.replace(" ", "_").replace("-", "_")
 
 
+def get_setting(*keys: str, default=None):
+    """Безопасный доступ к вложенным ключам SETTINGS.
+
+    Принимает путь из имён ключей: ``get_setting("channels", "postgres", "poll_interval", default=2.0)``.
+    Возвращает ``default`` (по умолчанию ``None``), если любого уровня нет
+    или значение — лист/скаляр, который не пройти дальше как dict.
+
+    Используется в коде, где требуется fallback при отсутствии ключа.
+    """
+    node: object = SETTINGS
+    for k in keys:
+        if isinstance(node, dict) and k in node:
+            node = node[k]
+        else:
+            return default
+    return node
+
+
 for _prov_name, _prov_cfg in (SETTINGS.get("providers", {}) or {}).items():
     if isinstance(_prov_cfg, dict):
         _key = _prov_cfg.get("api_key") or _prov_cfg.get("apiKey")
         if _key and isinstance(_key, str) and not _key.startswith("${"):
-            os.environ.setdefault(f"{_(_prov_name).upper()}_API_KEY", _key)
+            os.environ.setdefault("LLM_API_KEY", _key)
 
 # Экспорт без ${...}: эти ключи не меняются при резолве и не должны
 # затирать уже выставленные переменные окружения (setdefault).
