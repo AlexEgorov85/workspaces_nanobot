@@ -16,8 +16,11 @@ callback), и ни одна строка кода здесь не знает п�
 потребители (gateway, навык) работают с ним так же, как с провайдером.
 SearchResult используется тот же (lib.services.cache_provider.SearchResult).
 
-Тяжёлые зависимости (duckdb, pandas, faiss, numpy) импортируются лениво
+Тяжёлые зависимости (duckdb, faiss, numpy, pyarrow) импортируются лениво
 внутри методов — импорт модуля остаётся лёгким и без побочных эффектов.
+
+Bulk-вставка записей (list[dict]) идёт через pyarrow arrays по колонкам
++ pa.table() + DuckDB conn.register (без pandas, без pyarrow.Table.from_pylist).
 """
 
 from __future__ import annotations
@@ -57,6 +60,59 @@ def _infer_duckdb_type(values) -> str:
     if all(isinstance(v, dict) for v in sample):
         return "JSON"
     return "VARCHAR"
+
+
+def _records_to_arrow(records: List[Dict[str, Any]]):
+    """
+    Сериализовать list[dict] в pyarrow.Table (без pandas).
+
+    Сохраняет вложенные типы:
+      - list[number] → DOUBLE[] (DuckDB при register)
+      - dict/list[str] → list[str] (json-строки)
+      - None → null
+
+    pyarrow умеет сам вывести типы; для embedding (list[float]) это даёт
+    list<float64>, который DuckDB читает как DOUBLE[].
+    """
+    import pyarrow as pa
+
+    if not records:
+        return None
+
+    # Собираем уникальные ключи в порядке появления
+    cols: List[str] = []
+    seen = set()
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        for k in r.keys():
+            if k not in seen:
+                seen.add(k)
+                cols.append(str(k))
+
+    if not cols:
+        return None
+
+    # Сборка по колонкам: pa.array() с auto-типом
+    arrays = {}
+    for c in cols:
+        col_data = [r.get(c) if isinstance(r, dict) else None for r in records]
+        try:
+            arrays[c] = pa.array(col_data)
+        except (pa.lib.ArrowInvalid, TypeError):
+            # фоллбэк: всё строкой
+            arrays[c] = pa.array([_safe_str(v) for v in col_data])
+
+    return pa.table(arrays)
+
+
+def _safe_str(v: Any) -> Optional[str]:
+    """Строковое представление для гетерогенных/нестандартных значений."""
+    if v is None:
+        return None
+    if isinstance(v, (dict, list, tuple)):
+        return json.dumps(v, ensure_ascii=False, default=str)
+    return str(v)
 
 
 # Внутренняя таблица метаданных схемы (комментарии таблиц/колонок).
@@ -135,6 +191,7 @@ class AuditMemoryStore:
         vector_db_table: str = "",
         embedding_base_url: str = "",
         embedding_model: str = "mxbai-embed-large:latest",
+        embedding_timeout_sec: float = 60.0,
     ) -> None:
         self._cache_path = cache_path or ""      # строка; пустая => in-memory DuckDB
         self._publish_path = publish_path or ""  # целевой файл снимка для навыка (CLI)
@@ -143,6 +200,7 @@ class AuditMemoryStore:
         self._vector_db_table = vector_db_table or ""
         self._embedding_base_url = embedding_base_url
         self._embedding_model = embedding_model or "mxbai-embed-large:latest"
+        self._embedding_timeout_sec = float(embedding_timeout_sec)
 
         self._lock = threading.RLock()
         self._conn: Any = None            # DuckDB (read-write)
@@ -360,29 +418,44 @@ class AuditMemoryStore:
                 self._upsert_locked(table, records)
             return
 
-        conn.execute(f"DELETE FROM {full}")
-        if not records:
-            return
+        # Транзакция: DELETE + INSERT. Если INSERT упадёт — таблица останется
+        # в исходном состоянии, без потери данных.
+        conn.execute("BEGIN")
+        try:
+            conn.execute(f"DELETE FROM {full}")
+            if not records:
+                conn.execute("COMMIT")
+                return
 
-        import pandas as pd
-
-        df = pd.DataFrame(records)
-        if df.empty or df.shape[1] == 0:
-            return
-        existing_cols = [r[0] for r in conn.execute(
-            "SELECT column_name FROM information_schema.columns "
-            'WHERE table_schema = ? AND table_name = ?', [schema, name]
-        ).fetchall()]
-        insert_cols = [c for c in df.columns if c in existing_cols]
-        if not insert_cols:
-            return
-        conn.register("_replace_df", df)
-        cols_sql = ", ".join(f'"{c}"' for c in insert_cols)
-        conn.execute(
-            f"INSERT INTO {full} ({cols_sql}) "
-            f"SELECT {cols_sql} FROM _replace_df"
-        )
-        conn.unregister("_replace_df")
+            # Без pandas: pyarrow.Table + DuckDB conn.register
+            arrow_tbl = _records_to_arrow(records)
+            if arrow_tbl is None:
+                conn.execute("COMMIT")
+                return
+            existing_cols = [r[0] for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                'WHERE table_schema = ? AND table_name = ?', [schema, name]
+            ).fetchall()]
+            insert_cols = [c for c in arrow_tbl.column_names if c in existing_cols]
+            if not insert_cols:
+                conn.execute("COMMIT")
+                return
+            cols_csv = ",".join(f'"{c}"' for c in insert_cols)
+            conn.register("_replace_arrow", arrow_tbl)
+            try:
+                conn.execute(
+                    f"INSERT INTO {full} ({cols_csv}) "
+                    f"SELECT {cols_csv} FROM _replace_arrow"
+                )
+            finally:
+                conn.unregister("_replace_arrow")
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
 
     # -- метаданные схемы (комментарии + исходные PG-типы) -------------------
 
@@ -442,12 +515,21 @@ class AuditMemoryStore:
         if not name:
             raise ValueError(f"Некорректное имя таблицы: {table!r}")
 
-        import pandas as pd
-
-        df = pd.DataFrame(records)
-        if df.empty or df.shape[1] == 0:
+        if not records:
             return
-        df_cols = [str(c) for c in df.columns]
+
+        # Колонки — из объединения ключей records (порядок появления)
+        df_cols: List[str] = []
+        seen = set()
+        for r in records:
+            if not isinstance(r, dict):
+                continue
+            for k in r.keys():
+                if k not in seen:
+                    seen.add(k)
+                    df_cols.append(str(k))
+        if not df_cols:
+            return
 
         conn = self._conn
         conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
@@ -467,9 +549,7 @@ class AuditMemoryStore:
                     'WHERE table_schema = ? AND table_name = ?', [schema, name]
                 ).fetchall()]
             else:
-                conn.register("_upsert_df", df)
-                conn.execute(f"CREATE TABLE {full} AS SELECT * FROM _upsert_df")
-                conn.unregister("_upsert_df")
+                self._ingest_arrow(table, records, df_cols, create_table=True)
                 return
 
         existing_cols = [r[0] for r in conn.execute(
@@ -477,44 +557,108 @@ class AuditMemoryStore:
             'WHERE table_schema = ? AND table_name = ?', [schema, name]
         ).fetchall()]
 
+        # DDL (ALTER/DROP) вне транзакции — DuckDB не откатывает DDL.
         # новые колонки (появившиеся в источнике) — добавляем с выводом типа
         for c in df_cols:
             if c not in existing_cols:
+                col_values = [r.get(c) for r in records if isinstance(r, dict)]
                 conn.execute(
-                    f'ALTER TABLE {full} ADD COLUMN "{c}" {_infer_duckdb_type(df[c])}'
+                    f'ALTER TABLE {full} ADD COLUMN "{c}" {_infer_duckdb_type(col_values)}'
                 )
+        # обновим existing_cols после ALTER
+        existing_cols = [r[0] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            'WHERE table_schema = ? AND table_name = ?', [schema, name]
+        ).fetchall()]
 
         key_col = "id" if "id" in df_cols else None
-        insert_cols = [c for c in df_cols if c in existing_cols or c in df_cols]
+        insert_cols = [c for c in df_cols if c in existing_cols]
 
-        if key_col and key_col in existing_cols:
-            ids = df[key_col].dropna().tolist()
-            if ids:
-                conn.execute(
-                    f'DELETE FROM {full} WHERE "{key_col}" IN (SELECT unnest(?))',
-                    [ids],
-                )
-        else:
-            # нет стабильного ключа — пересоздаём таблицу из батча
+        # Если нет ключа — DROP (DDL), дальше _ingest_arrow сделает CREATE OR REPLACE.
+        if not (key_col and key_col in existing_cols):
             print(
                 f"[memory_store] Таблица {full}: нет колонки 'id', "
                 "таблица пересоздаётся из батча",
                 file=sys.stderr,
             )
-            conn.execute(f"DROP TABLE {full}")
+            self._ingest_arrow(table, records, insert_cols, create_table=True)
+            return
 
-        conn.register("_upsert_df", df)
-        if conn.execute(
-            "SELECT 1 FROM information_schema.tables "
-            'WHERE table_schema = ? AND table_name = ?', [schema, name]
-        ).fetchone() is None:
-            conn.execute(f"CREATE TABLE {full} AS SELECT * FROM _upsert_df")
-        else:
-            cols_sql = ", ".join(f'"{c}"' for c in insert_cols)
-            conn.execute(
-                f"INSERT INTO {full} ({cols_sql}) SELECT {cols_sql} FROM _upsert_df"
-            )
-        conn.unregister("_upsert_df")
+        # Транзакция: DELETE + INSERT. Если INSERT упадёт — данные останутся.
+        ids = [r[key_col] for r in records
+               if isinstance(r, dict) and r.get(key_col) is not None]
+        conn.execute("BEGIN")
+        try:
+            if ids:
+                conn.execute(
+                    f'DELETE FROM {full} WHERE "{key_col}" IN (SELECT unnest(?))',
+                    [ids],
+                )
+            self._ingest_arrow(table, records, insert_cols, create_table=False)
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
+    def _ingest_arrow(
+        self,
+        table: str,
+        records: List[Dict[str, Any]],
+        cols: List[str],
+        create_table: bool,
+    ) -> None:
+        """
+        Залить записи в DuckDB через pyarrow + conn.register.
+
+        create_table=True  → CREATE OR REPLACE TABLE
+        create_table=False → INSERT INTO … SELECT
+
+        Сохраняет вложенные типы (list[float] → DOUBLE[]).
+        """
+        schema, name = _split_table(table)
+        schema = schema or self._schema
+        full = f'"{schema}"."{name}"'
+
+        arrow_tbl = _records_to_arrow(records)
+        if arrow_tbl is None:
+            return
+
+        # Если переданы конкретные колонки — проекция
+        if cols:
+            arrow_tbl = arrow_tbl.select([c for c in cols if c in arrow_tbl.column_names])
+
+        if not arrow_tbl.column_names:
+            return
+
+        cols_csv = ",".join(f'"{c}"' for c in arrow_tbl.column_names)
+        self._conn.register("_upsert_arrow", arrow_tbl)
+        try:
+            if create_table:
+                self._conn.execute(
+                    f"CREATE OR REPLACE TABLE {full} AS "
+                    f"SELECT {cols_csv} FROM _upsert_arrow"
+                )
+            else:
+                # Проверим, что таблица ещё существует (могла быть пересоздана)
+                exists = self._conn.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    'WHERE table_schema = ? AND table_name = ?', [schema, name]
+                ).fetchone()
+                if exists is None:
+                    self._conn.execute(
+                        f"CREATE TABLE {full} AS "
+                        f"SELECT {cols_csv} FROM _upsert_arrow"
+                    )
+                else:
+                    self._conn.execute(
+                        f"INSERT INTO {full} ({cols_csv}) "
+                        f"SELECT {cols_csv} FROM _upsert_arrow"
+                    )
+        finally:
+            self._conn.unregister("_upsert_arrow")
 
     def _mark_vector_sources_dirty(self, table: str, records: List[Dict[str, Any]]) -> None:
         if not self._vector_db_table:
@@ -848,7 +992,8 @@ class AuditMemoryStore:
             if idx is None:
                 return []
 
-        embedding = get_embedding(query, self._embedding_base_url, self._embedding_model)
+        embedding = get_embedding(query, self._embedding_base_url, self._embedding_model,
+                                  timeout_sec=self._embedding_timeout_sec)
         if embedding is None:
             return []
 
