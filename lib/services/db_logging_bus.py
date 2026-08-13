@@ -82,20 +82,25 @@ def make_inbound_logger(
             message_id = (getattr(msg, "metadata", {}) or {}).get("message_id")
             sender_id = getattr(msg, "sender_id", None) or None
             chat_id = getattr(msg, "chat_id", None) or None
+            content = getattr(msg, "content", "") or ""
+            media = [p for p in (getattr(msg, "media", None) or []) if isinstance(p, str) and p]
             if session_key and message_id:
                 service.register_request(
                     session_key, message_id,
                     user_id=sender_id, chat_id=chat_id, channel=channel,
                     agent_id=agent_id,
+                    question=content,
+                    media=media or None,
                 )
             service.log_inbound(
                 session_id=session_key,
                 channel=channel,
-                content=getattr(msg, "content", "") or "",
+                content=content,
                 message_id=message_id,
                 sender_id=sender_id,
                 chat_id=chat_id,
                 request_id=message_id,
+                media=media or None,
             )
         except Exception:
             pass
@@ -145,6 +150,7 @@ def make_outbound_logger(
             cid = getattr(msg, "chat_id", "") or ""
             session_id = f"{ch}:{cid}" if (ch or cid) else ""
             request_id = meta.get("message_id") or service.get_request_id(session_id)
+            media = [p for p in (getattr(msg, "media", None) or []) if isinstance(p, str) and p]
             service.log_outbound(
                 session_id=session_id,
                 channel=ch,
@@ -153,6 +159,7 @@ def make_outbound_logger(
                 latency_ms=latency,
                 tokens_used=tokens,
                 kind=kind,
+                media=media or None,
             )
         except Exception:
             pass

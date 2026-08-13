@@ -303,8 +303,8 @@ class RuntimePatcher:
                 self._finalized = False
                 # Контекст подагента: собственный request_id (subagent:<task_id>),
                 # parent_request_id = вопрос-родитель, parent_agent_id = агент-родитель,
-                # is_subagent=True. Контекст живёт в question_runs, в событиях
-                # gateway_logs остаётся только request_id.
+                # is_subagent=True. Контекст живёт в agent_question_runs, в событиях
+                # agent_gateway_logs остаётся только request_id.
                 self._parent_rid = None
 
             def _subagent_session_key(self, context) -> str:
@@ -313,7 +313,7 @@ class RuntimePatcher:
                 return f"{origin}:{self._session_id}" if origin else self._session_id
 
             def _ensure_request(self, context) -> None:
-                """Зарегистрировать контекст подагента в question_runs (upsert)."""
+                """Зарегистрировать контекст подагента в agent_question_runs (upsert)."""
                 if self._parent_rid is None:
                     origin = getattr(context, "session_key", None) or ""
                     self._parent_rid = (
@@ -433,6 +433,7 @@ class RuntimePatcher:
                         self._session_id,
                         status="error" if context.error else "finished",
                         summary=(task or final)[:200] or None,
+                        response=final or None,
                     )
                 except Exception:
                     pass

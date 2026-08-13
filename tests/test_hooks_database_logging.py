@@ -113,7 +113,7 @@ class TestDatabaseLoggingHook:
         assert event.request_id == "m1"
         assert event.payload["request_id"] == "m1"
         service.finish_request.assert_called_once_with(
-            "m1", status="finished", summary="hello"
+            "m1", status="finished", summary="hello", response="hello"
         )
         service.clear_request.assert_called_once_with("cli:1")
 
@@ -147,16 +147,37 @@ class TestBusLoggers:
         msg.metadata = {"message_id": "m1"}
         msg.sender_id = "u1"
         msg.chat_id = "c1"
+        msg.media = []
         asyncio.run(logger(msg))
         service.register_request.assert_called_once_with(
             "cli:42", "m1", user_id="u1", chat_id="c1", channel="cli",
-            agent_id=None,
+            agent_id=None, question="hi", media=None,
         )
         service.log_inbound.assert_called_once_with(
             session_id="cli:42", channel="cli", content="hi",
             message_id="m1", sender_id="u1", chat_id="c1",
-            request_id="m1",
+            request_id="m1", media=None,
         )
+
+    def test_inbound_logger_with_media(self):
+        from lib.services.db_logging_bus import make_inbound_logger
+
+        service = MagicMock()
+        logger = make_inbound_logger(service)
+        msg = MagicMock()
+        msg.session_key = "cli:42"
+        msg.channel = "cli"
+        msg.content = "см. файл"
+        msg.metadata = {"message_id": "m1"}
+        msg.sender_id = "u1"
+        msg.chat_id = "c1"
+        msg.media = ["doc.pdf", ""]
+        asyncio.run(logger(msg))
+        kwargs = service.register_request.call_args.kwargs
+        assert kwargs["question"] == "см. файл"
+        assert kwargs["media"] == ["doc.pdf"]
+        kwargs = service.log_inbound.call_args.kwargs
+        assert kwargs["media"] == ["doc.pdf"]
 
     def test_outbound_logger_drops_reasoning(self):
         from lib.services.db_logging_bus import make_outbound_logger
@@ -181,6 +202,7 @@ class TestBusLoggers:
         msg.chat_id = "42"
         msg.content = "final answer"
         msg.metadata = {"message_id": "m1"}
+        msg.media = []
         asyncio.run(logger(msg))
         service.log_outbound.assert_called_once()
         kwargs = service.log_outbound.call_args.kwargs
@@ -188,3 +210,4 @@ class TestBusLoggers:
         assert kwargs["content"] == "final answer"
         assert kwargs["session_id"] == "cli:42"
         assert kwargs["request_id"] == "m1"
+        assert kwargs["media"] is None

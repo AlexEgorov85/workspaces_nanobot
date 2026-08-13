@@ -13,12 +13,15 @@
 --   * DISTRIBUTED BY                   — задаём явно для co-located join'ов
 --                                      по request_id.
 --
+-- Префикс agent_ — таблицы агента (не навыка).
+--
 -- Плейсхолдеры, подставляются в DbLoggingService._ensure_schema:
 --   @@SCHEMA@@      → имя схемы (напр. public)
---   @@TABLE@@       → имя таблицы логов (напр. gateway_logs)
+--   @@TABLE@@       → имя таблицы логов (напр. agent_gateway_logs)
 --   @@TABLE_DDL@@   → schema-qualified имя таблицы логов ("schema"."table")
+--   @@QR_TABLE@@    → имя таблицы контекста вопросов (agent_question_runs)
 
-CREATE TABLE IF NOT EXISTS question_runs (
+CREATE TABLE IF NOT EXISTS agent_question_runs (
     request_id        VARCHAR(256) PRIMARY KEY,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -37,58 +40,83 @@ CREATE TABLE IF NOT EXISTS question_runs (
 
     -- Краткое описание/статус (обновляется по мере прогона)
     status            VARCHAR(32),    -- running / finished / error
-    summary           TEXT            -- финальный ответ или описание задачи
+    summary           TEXT,           -- финальный ответ или описание задачи (кратко)
+
+    -- Полный текст вопроса и ответа (без обрезки)
+    question          TEXT,           -- полный текст сообщения пользователя
+    response          TEXT,           -- полный текст ответа агента
+    media             TEXT            -- JSON-список вложенных файлов (media)
 ) DISTRIBUTED BY (request_id);
 
 DO $gp$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_indexes
                    WHERE schemaname = '@@SCHEMA@@'
-                     AND tablename = 'question_runs'
-                     AND indexname = 'idx_qruns_user') THEN
-        CREATE INDEX idx_qruns_user ON question_runs (user_id, created_at DESC);
+                     AND tablename = 'agent_question_runs'
+                     AND indexname = 'idx_agent_qruns_user') THEN
+        CREATE INDEX idx_agent_qruns_user ON agent_question_runs (user_id, created_at DESC);
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_indexes
                    WHERE schemaname = '@@SCHEMA@@'
-                     AND tablename = 'question_runs'
-                     AND indexname = 'idx_qruns_session') THEN
-        CREATE INDEX idx_qruns_session ON question_runs (session_id, created_at DESC);
+                     AND tablename = 'agent_question_runs'
+                     AND indexname = 'idx_agent_qruns_session') THEN
+        CREATE INDEX idx_agent_qruns_session ON agent_question_runs (session_id, created_at DESC);
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_indexes
                    WHERE schemaname = '@@SCHEMA@@'
-                     AND tablename = 'question_runs'
-                     AND indexname = 'idx_qruns_parent_request') THEN
-        CREATE INDEX idx_qruns_parent_request ON question_runs (parent_request_id, created_at DESC);
+                     AND tablename = 'agent_question_runs'
+                     AND indexname = 'idx_agent_qruns_parent_request') THEN
+        CREATE INDEX idx_agent_qruns_parent_request ON agent_question_runs (parent_request_id, created_at DESC);
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_indexes
                    WHERE schemaname = '@@SCHEMA@@'
-                     AND tablename = 'question_runs'
-                     AND indexname = 'idx_qruns_agent') THEN
-        CREATE INDEX idx_qruns_agent ON question_runs (agent_id, created_at DESC);
+                     AND tablename = 'agent_question_runs'
+                     AND indexname = 'idx_agent_qruns_agent') THEN
+        CREATE INDEX idx_agent_qruns_agent ON agent_question_runs (agent_id, created_at DESC);
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_indexes
                    WHERE schemaname = '@@SCHEMA@@'
-                     AND tablename = 'question_runs'
-                     AND indexname = 'idx_qruns_subagent') THEN
-        CREATE INDEX idx_qruns_subagent ON question_runs (is_subagent, created_at DESC);
+                     AND tablename = 'agent_question_runs'
+                     AND indexname = 'idx_agent_qruns_subagent') THEN
+        CREATE INDEX idx_agent_qruns_subagent ON agent_question_runs (is_subagent, created_at DESC);
+    END IF;
+
+    -- колонки question/response/media для уже существующей таблицы (идемпотентно)
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = '@@SCHEMA@@'
+                     AND table_name = 'agent_question_runs'
+                     AND column_name = 'question') THEN
+        ALTER TABLE agent_question_runs ADD COLUMN question TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = '@@SCHEMA@@'
+                     AND table_name = 'agent_question_runs'
+                     AND column_name = 'response') THEN
+        ALTER TABLE agent_question_runs ADD COLUMN response TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = '@@SCHEMA@@'
+                     AND table_name = 'agent_question_runs'
+                     AND column_name = 'media') THEN
+        ALTER TABLE agent_question_runs ADD COLUMN media TEXT;
     END IF;
 END
 $gp$;
 
 
--- gateway_logs — структурированный журнал событий агента.
+-- agent_gateway_logs — структурированный журнал событий агента.
 -- Внимание, Greenplum: PRIMARY KEY на id + DISTRIBUTED BY (request_id)
 -- несовместимы (ключ распределения должен быть подмножеством PK), поэтому
 -- у таблицы нет PRIMARY KEY — уникальность id обеспечивает приложение
 -- (UUID генерируется в Python). Распределение по request_id делает
--- JOIN с question_runs co-located.
+-- JOIN с agent_question_runs co-located.
 CREATE TABLE IF NOT EXISTS @@TABLE_DDL@@ (
     id              UUID NOT NULL,
     "timestamp"    TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     level          VARCHAR(16) NOT NULL,
     event_type     VARCHAR(64) NOT NULL,
 
-    request_id     VARCHAR(256),   -- FK -> question_runs.request_id (без жёсткого FK)
+    request_id     VARCHAR(256),   -- FK -> agent_question_runs.request_id (без жёсткого FK)
     session_id     VARCHAR(256),   -- channel:chat_id (денормализовано для удобства)
     channel        VARCHAR(64),
     actor          VARCHAR(32),
@@ -101,7 +129,7 @@ CREATE TABLE IF NOT EXISTS @@TABLE_DDL@@ (
     CONSTRAINT valid_level CHECK (level IN ('DEBUG', 'INFO', 'WARN', 'ERROR'))
 ) DISTRIBUTED BY (request_id);
 
--- Индексы gateway_logs создаются в migrate_logs_v1_gp.sql (после возможного
+-- Индексы agent_gateway_logs создаются в migrate_logs_v1_gp.sql (после возможного
 -- ALTER ADD COLUMN для уже существующей таблицы).
 
 -- Полезные запросы (см. create_logs_table.sql) — идентичны:

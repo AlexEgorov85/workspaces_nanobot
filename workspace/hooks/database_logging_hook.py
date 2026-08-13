@@ -151,6 +151,7 @@ class DatabaseLoggingHook(AgentHook):
                     self._request_id,
                     status="error" if context.error else "finished",
                     summary=(context.final_content or "")[:200] or None,
+                    response=context.final_content or None,
                 )
         except Exception as exc:
             logger.warning("DbLoggingHook.after_run failed: %s", exc)

@@ -30,10 +30,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LogEvent:
-    """Одно событие для записи в БД (стройная таблица gateway_logs).
+    """Одно событие для записи в БД (стройная таблица agent_gateway_logs).
 
     Контекст вопроса (user_id/agent_id/is_subagent/parent_*) живёт в
-    отдельной таблице question_runs (см. upsert_question_run) и здесь
+    отдельной таблице agent_question_runs (см. upsert_question_run) и здесь
     не дублируется — только request_id для связи.
     """
 
@@ -57,7 +57,7 @@ class _FlushSentinel:
 
 @dataclass
 class _QuestionRunRecord:
-    """Контекст вопроса для upsert в question_runs (не в gateway_logs)."""
+    """Контекст вопроса для upsert в agent_question_runs (не в agent_gateway_logs)."""
 
     request_id: str
     session_id: Optional[str] = None
@@ -70,6 +70,9 @@ class _QuestionRunRecord:
     is_subagent: bool = False
     status: Optional[str] = None
     summary: Optional[str] = None
+    question: Optional[str] = None
+    response: Optional[str] = None
+    media: Optional[list] = None
     update_only: bool = False
 
 
@@ -80,7 +83,8 @@ class DbLoggingService:
         self,
         dsn: Optional[str] = None,
         *,
-        table_name: str = "gateway_logs",
+        table_name: str = "agent_gateway_logs",
+        question_runs_table: str = "agent_question_runs",
         schema: str = "public",
         dialect: str = "postgres",
         flush_interval_sec: float = 5.0,
@@ -94,6 +98,7 @@ class DbLoggingService:
     ) -> None:
         self._dsn = dsn or ""
         self._table_name = table_name
+        self._question_runs_table = question_runs_table
         self._schema = schema
         self._dialect = (dialect or "postgres").lower()
         self._flush_interval = float(flush_interval_sec)
@@ -174,12 +179,12 @@ class DbLoggingService:
         return self._enqueue(event)
 
     # ------------------------------------------------------------------
-    # Контекст вопроса (таблица question_runs) + индекс session_key→request_id
+    # Контекст вопроса (таблица agent_question_runs) + индекс session_key→request_id
     # ------------------------------------------------------------------
     #
     # Контекст вопроса (user_id/agent_id/is_subagent/parent_*) пишется ОДИН
-    # раз в отдельную таблицу question_runs (upsert), а не дублируется на
-    # каждое событие. В gateway_logs хранится только request_id для связи.
+    # раз в отдельную таблицу agent_question_runs (upsert), а не дублируется на
+    # каждое событие. В agent_gateway_logs хранится только request_id для связи.
     #
     # Индекс session_key → request_id позволяет tool/run/outbound-событиям
     # узнать request_id текущего вопроса. При параллельной обработке вопросов
@@ -200,8 +205,10 @@ class DbLoggingService:
         is_subagent: bool = False,
         status: Optional[str] = "running",
         summary: Optional[str] = None,
+        question: Optional[str] = None,
+        media: Optional[list] = None,
     ) -> bool:
-        """Зарегистрировать контекст вопроса (upsert в question_runs).
+        """Зарегистрировать контекст вопроса (upsert в agent_question_runs).
 
         Также сохраняет session_key → request_id в индексе, чтобы последующие
         tool/run/outbound-события знали request_id текущего вопроса.
@@ -223,6 +230,8 @@ class DbLoggingService:
             is_subagent=is_subagent,
             status=status,
             summary=summary,
+            question=question,
+            media=media,
         ))
 
     def get_request_id(self, session_key: Optional[str]) -> Optional[str]:
@@ -245,14 +254,18 @@ class DbLoggingService:
         *,
         status: str = "finished",
         summary: Optional[str] = None,
+        response: Optional[str] = None,
+        media: Optional[list] = None,
     ) -> bool:
-        """Обновить статус/summary вопроса (upsert в question_runs)."""
+        """Обновить статус/summary/response вопроса (upsert в agent_question_runs)."""
         if not request_id:
             return False
         return self._enqueue(_QuestionRunRecord(
             request_id=request_id,
             status=status,
             summary=summary,
+            response=response,
+            media=media,
             update_only=True,
         ))
 
@@ -268,6 +281,7 @@ class DbLoggingService:
         actor: Optional[str] = None,
         request_id: Optional[str] = None,
         level: str = "INFO",
+        media: Optional[list] = None,
     ) -> bool:
         actor_val = actor or sender_id or "user"
         payload: Dict[str, Any] = {"content": content, "message_id": message_id}
@@ -275,6 +289,8 @@ class DbLoggingService:
             payload["sender_id"] = sender_id
         if chat_id:
             payload["chat_id"] = chat_id
+        if media:
+            payload["media"] = list(media)
         return self.log_event(LogEvent(
             event_type="inbound",
             level=level,
@@ -297,7 +313,11 @@ class DbLoggingService:
         kind: str = "outbound_final",
         request_id: Optional[str] = None,
         level: str = "INFO",
+        media: Optional[list] = None,
     ) -> bool:
+        payload: Dict[str, Any] = {"content": content}
+        if media:
+            payload["media"] = list(media)
         return self.log_event(LogEvent(
             event_type=kind,
             level=level,
@@ -305,7 +325,7 @@ class DbLoggingService:
             channel=channel,
             actor="agent",
             summary=content[: self._summary_max_chars] if content else "",
-            payload={"content": content},
+            payload=payload,
             metadata={"latency_ms": latency_ms, "tokens_used": tokens_used},
             request_id=request_id,
         ))
@@ -452,8 +472,8 @@ class DbLoggingService:
                         return
                     continue
 
-                # Контекст вопроса — отдельный upsert в question_runs,
-                # не смешивается с батчем событий gateway_logs.
+                # Контекст вопроса — отдельный upsert в agent_question_runs,
+                # не смешивается с батчем событий agent_gateway_logs.
                 if isinstance(item, _QuestionRunRecord):
                     self._handle_question_run(conn, item)
                     continue
@@ -513,7 +533,7 @@ class DbLoggingService:
             если DSN не задан, psycopg2 не установлен или ``_running == False``.
 
         После успешного ``connect`` выполняется ``_ensure_schema`` —
-        таблица ``gateway_logs`` (и индексы) создаются через
+        таблица ``agent_gateway_logs`` (и индексы) создаются через
         ``CREATE TABLE/INDEX IF NOT EXISTS``. Если DDL падает — соединение
         закрывается и попытка повторяется с backoff (создание таблицы не
         обязано происходить мгновенно, ретрай самодостаточен).
@@ -569,7 +589,7 @@ class DbLoggingService:
         return None
 
     def _ensure_schema(self, conn: Any) -> None:
-        """Создать таблицы ``question_runs``/``gateway_logs`` и индексы.
+        """Создать таблицы ``agent_question_runs``/``agent_gateway_logs`` и индексы.
 
         DDL берётся ТОЛЬКО из отдельных SQL-файлов
         ``lib/services/sql/*.sql``. Выбор набора файлов зависит от диалекта:
@@ -585,10 +605,10 @@ class DbLoggingService:
             join'ов.
 
         В файлах имя таблицы логов подставляется через плейсхолдеры:
-          * PostgreSQL: строка ``gateway_logs`` заменяется на
+          * PostgreSQL: строка ``agent_gateway_logs`` заменяется на
             schema-qualified имя ``"schema"."table_name"``;
           * Greenplum: ``@@SCHEMA@@`` / ``@@TABLE@@`` / ``@@TABLE_DDL@@``
-            (иначе ``gateway_logs`` внутри каталог-запросов DO-блоков
+            (иначе ``agent_gateway_logs`` внутри каталог-запросов DO-блоков
             сломает подстановку).
 
         Inline-DDL в коде нет — файлы являются единственным источником
@@ -599,7 +619,7 @@ class DbLoggingService:
         """
         ddl_path, migration_path = self._schema_files()
         if not ddl_path.exists():
-            raise FileNotFoundError(f"gateway_logs DDL file not found: {ddl_path}")
+            raise FileNotFoundError(f"agent_gateway_logs DDL file not found: {ddl_path}")
         table = f'"{self._schema}"."{self._table_name}"'
         cur = conn.cursor()
         try:
@@ -626,10 +646,15 @@ class DbLoggingService:
     def _render_sql(self, path: Path, table: str) -> str:
         """Прочитать SQL-файл и подставить имя таблицы логов.
 
-        Для ``postgres``-диалекта (без плейсхолдеров) — наивная замена
-        ``gateway_logs`` → ``"schema"."table"``. Для ``greenplum`` —
-        подстановка ``@@SCHEMA@@``/``@@TABLE@@``/``@@TABLE_DDL@@``.
+        Для ``postgres``-диалекта (без плейсхолдеров) — замена
+        ``agent_gateway_logs`` → ``"schema"."table"``, но НЕ выше тех
+        вхождений, где это имя нельзя квалифицировать: цель ``RENAME TO``
+        и уже schema-qualified ``public.agent_gateway_logs``. Иначе наивная
+        замена ломает ``RENAME TO "public"."agent_gateway_logs"`` (невалидно)
+        и даёт ``public."public"."agent_gateway_logs"`` (дублирование схемы).
+        Для ``greenplum`` — подстановка ``@@SCHEMA@@``/``@@TABLE@@``/``@@TABLE_DDL@@``.
         """
+        import re
         sql = path.read_text(encoding="utf-8")
         if self._dialect == "greenplum":
             return (
@@ -638,7 +663,12 @@ class DbLoggingService:
                 .replace("@@TABLE@@", self._table_name)
                 .replace("@@TABLE_DDL@@", table)
             )
-        return sql.replace("gateway_logs", table)
+        needle = re.escape("agent_gateway_logs")
+        return re.sub(
+            rf"(?<!public\.)(?<!RENAME TO ){needle}",
+            lambda _m: table,
+            sql,
+        )
 
     def _flush_batch(self, conn: Any, batch: List[LogEvent]) -> None:
         """Вставить батч в PostgreSQL через ``psycopg2.extras.execute_batch``.
@@ -689,7 +719,7 @@ class DbLoggingService:
             self._flush_to_fallback(batch)
 
     def _handle_question_run(self, conn: Any, rec: _QuestionRunRecord) -> None:
-        """Обработать контекст вопроса: upsert в question_runs.
+        """Обработать контекст вопроса: upsert в agent_question_runs.
 
         Если соединения нет — попробуем подключиться; при неудаче пишем
         запись в fallback-JSONL (``_question_run_fallback``), не теряя её.
@@ -708,7 +738,7 @@ class DbLoggingService:
         self._question_run_fallback(rec)
 
     def _upsert_question_run(self, conn: Any, rec: _QuestionRunRecord) -> None:
-        """Upsert контекста вопроса в question_runs (без ON CONFLICT).
+        """Upsert контекста вопроса в agent_question_runs (без ON CONFLICT).
 
         Greenplum 6.x (база PostgreSQL 9.4) НЕ поддерживает
         ``INSERT ... ON CONFLICT (…) DO UPDATE`` — он появился только в
@@ -726,49 +756,52 @@ class DbLoggingService:
         """
         cur = conn.cursor()
         try:
+            # media хранится как JSON-строка в TEXT-колонке
+            media_json = json.dumps(rec.media, ensure_ascii=False) if rec.media else None
             if rec.update_only:
                 cur.execute(
-                    f'UPDATE "{self._schema}".question_runs '
-                    "SET updated_at = now(), status = %s, summary = %s "
+                    f'UPDATE "{self._schema}"."{self._question_runs_table}" '
+                    "SET updated_at = now(), status = %s, summary = %s, "
+                    "response = COALESCE(%s, response), media = COALESCE(%s, media) "
                     "WHERE request_id = %s",
-                    (rec.status, rec.summary, rec.request_id),
+                    (rec.status, rec.summary, rec.response, media_json, rec.request_id),
                 )
                 cur.execute(
-                    f'INSERT INTO "{self._schema}".question_runs '
-                    "(request_id, status, summary) "
-                    "SELECT %s, %s, %s "
-                    f'WHERE NOT EXISTS (SELECT 1 FROM "{self._schema}".question_runs '
+                    f'INSERT INTO "{self._schema}"."{self._question_runs_table}" '
+                    "(request_id, status, summary, response, media) "
+                    "SELECT %s, %s, %s, %s, %s "
+                    f'WHERE NOT EXISTS (SELECT 1 FROM "{self._schema}"."{self._question_runs_table}" '
                     "WHERE request_id = %s)",
-                    (rec.request_id, rec.status, rec.summary, rec.request_id),
+                    (rec.request_id, rec.status, rec.summary, rec.response, media_json, rec.request_id),
                 )
             else:
                 cur.execute(
-                    f'UPDATE "{self._schema}".question_runs '
+                    f'UPDATE "{self._schema}"."{self._question_runs_table}" '
                     "SET session_id = %s, user_id = %s, chat_id = %s, "
                     "channel = %s, parent_request_id = %s, agent_id = %s, "
                     "parent_agent_id = %s, is_subagent = %s, status = %s, "
-                    "summary = %s, updated_at = now() "
+                    "summary = %s, question = %s, media = %s, updated_at = now() "
                     "WHERE request_id = %s",
                     (
                         rec.session_id, rec.user_id, rec.chat_id, rec.channel,
                         rec.parent_request_id, rec.agent_id,
                         rec.parent_agent_id, rec.is_subagent, rec.status,
-                        rec.summary, rec.request_id,
+                        rec.summary, rec.question, media_json, rec.request_id,
                     ),
                 )
                 cur.execute(
-                    f'INSERT INTO "{self._schema}".question_runs '
+                    f'INSERT INTO "{self._schema}"."{self._question_runs_table}" '
                     "(request_id, session_id, user_id, chat_id, channel, "
                     "parent_request_id, agent_id, parent_agent_id, is_subagent, "
-                    "status, summary) "
-                    "SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
-                    f'WHERE NOT EXISTS (SELECT 1 FROM "{self._schema}".question_runs '
+                    "status, summary, question, media) "
+                    "SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
+                    f'WHERE NOT EXISTS (SELECT 1 FROM "{self._schema}"."{self._question_runs_table}" '
                     "WHERE request_id = %s)",
                     (
                         rec.request_id, rec.session_id, rec.user_id, rec.chat_id,
                         rec.channel, rec.parent_request_id, rec.agent_id,
                         rec.parent_agent_id, rec.is_subagent, rec.status,
-                        rec.summary, rec.request_id,
+                        rec.summary, rec.question, media_json, rec.request_id,
                     ),
                 )
             with self._state_lock:
@@ -784,7 +817,7 @@ class DbLoggingService:
 
         Используется, когда БД недоступна или upsert упал. Формат строки —
         JSON с префиксом-маркером ``{"_qr": true, ...}``, чтобы можно было
-        отличить от событий gateway_logs при re-import.
+        отличить от событий agent_gateway_logs при re-import.
         """
         if not self._fallback_path:
             return
@@ -804,6 +837,9 @@ class DbLoggingService:
                     "is_subagent": rec.is_subagent,
                     "status": rec.status,
                     "summary": rec.summary,
+                    "question": rec.question,
+                    "response": rec.response,
+                    "media": rec.media,
                     "update_only": rec.update_only,
                 }, ensure_ascii=False) + "\n")
             with self._state_lock:

@@ -131,12 +131,17 @@ class TestNonBlocking:
         assert svc.register_request(
             "cli:1", "m1", user_id="u1", chat_id="c1",
             agent_id="main", parent_agent_id=None,
+            question="привет", media=["file1.png"],
         ) is True
-        assert svc.finish_request("m1", status="finished", summary="ok") is True
+        assert svc.finish_request("m1", status="finished", summary="ok",
+                                  response="полный ответ") is True
         records = [i for i in svc._queue.queue if type(i).__name__ == "_QuestionRunRecord"]
         assert len(records) == 2
         assert records[0].request_id == "m1" and records[0].user_id == "u1"
+        assert records[0].question == "привет"
+        assert records[0].media == ["file1.png"]
         assert records[1].update_only is True and records[1].status == "finished"
+        assert records[1].response == "полный ответ"
 
     def test_log_tool_event_dimensions(self, fake_psycopg2):
         svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
@@ -158,6 +163,14 @@ class TestNonBlocking:
         assert svc.log_outbound(
             "cli:1", "cli", "ok", latency_ms=12.5, tokens_used=42
         ) is True
+
+    def test_log_media_in_payload(self, fake_psycopg2):
+        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.log_inbound("cli:1", "cli", "привет", media=["doc.pdf"])
+        svc.log_outbound("cli:1", "cli", "ответ", media=["report.xlsx"])
+        inbound, outbound = list(svc._queue.queue)
+        assert inbound.payload["media"] == ["doc.pdf"]
+        assert outbound.payload["media"] == ["report.xlsx"]
 
     def test_log_tool_call_and_result(self, fake_psycopg2):
         svc = DbLoggingService(dsn="postgresql://x")
@@ -282,7 +295,7 @@ class TestGreenplumDialect:
         # schema-qualified имя в CREATE TABLE
         assert 'CREATE TABLE IF NOT EXISTS "public"."gateway_logs"' in rendered
         # каталог-проверки в DO-блоках ссылаются на голое имя
-        assert "tablename = 'question_runs'" in rendered
+        assert "tablename = 'agent_question_runs'" in rendered
 
     def test_upsert_question_run_no_on_conflict(self, fake_psycopg2):
         from lib.services.db_logging_service import _QuestionRunRecord
@@ -311,11 +324,31 @@ class TestGreenplumDialect:
         conn.cursor.reset_mock()
         cursor = fake_psycopg2["cursor"]
         svc._upsert_question_run(conn, _QuestionRunRecord(
-            request_id="m1", status="finished", summary="ok", update_only=True,
+            request_id="m1", status="finished", summary="ok",
+            response="полный ответ", update_only=True,
         ))
         calls = [c.args[0] for c in cursor.execute.call_args_list]
         assert len(calls) == 2
         assert calls[0].lstrip().startswith("UPDATE")
         assert "status = %s" in calls[0]
+        assert "response = COALESCE(%s, response)" in calls[0]
+        assert "media = COALESCE(%s, media)" in calls[0]
         assert calls[1].lstrip().startswith("INSERT")
         assert "WHERE NOT EXISTS" in calls[1]
+
+    def test_upsert_question_run_question_media(self, fake_psycopg2):
+        from lib.services.db_logging_service import _QuestionRunRecord
+
+        svc = DbLoggingService(dsn="postgresql://x")
+        conn = fake_psycopg2["conn"]
+        conn.cursor.reset_mock()
+        cursor = fake_psycopg2["cursor"]
+        svc._upsert_question_run(conn, _QuestionRunRecord(
+            request_id="m1", session_id="cli:1", user_id="u1",
+            status="running", question="вопрос", media=["f.pdf"],
+        ))
+        calls = [c.args[0] for c in cursor.execute.call_args_list]
+        assert len(calls) == 2
+        assert "question = %s" in calls[0]
+        assert "media = %s" in calls[0]
+        assert "media" in calls[1]
