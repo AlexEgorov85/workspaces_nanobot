@@ -118,12 +118,12 @@ class ConfigService:
         """Pre-resolve ``${VAR}`` placeholders in config.json from SETTINGS.
 
         nanobot's ``_load_runtime_config`` resolves ``${VAR}`` от ``os.environ``.
-        Если в config.json есть ``"apiKey": "${MISTRAL_API_KEY}"``, а в env этого
+        Если в config.json есть ``"apiKey": "${LLM_API_KEY}"``, а в env этого
         нет (ключ задан в ``.secrets.env`` через провайдер-скоупинг,
-        ``config.py`` автоматически не выставляет ``MISTRAL_API_KEY``), мы
-        достаём ключ из ``SETTINGS.providers.<lower>.api_key`` (оттуда, куда
-        ``config.py`` уже подставил значение из ``.secrets.env``) и временно
-        кладём в ``os.environ``.
+        ``config.py`` автоматически выставляет ``LLM_API_KEY`` из
+        ``SETTINGS.providers.<name>.api_key`` — но только если ключ задан
+        скаляром, не плейсхолдером), мы достаём ключ из
+        ``SETTINGS.providers.<lower>.api_key`` и временно кладём в ``os.environ``.
         """
         import json as _json
         import re as _re
@@ -159,7 +159,7 @@ class ConfigService:
 
         # Достаём ключи провайдеров из SETTINGS.providers.<name>.api_key
         # (туда config.py уже положил то, что задано в .secrets.env через
-        # "# providers: <name>\\napi_key=...").
+        # "# providers: <name>\napi_key=...").
         try:
             settings = self.settings
         except Exception:
@@ -172,9 +172,22 @@ class ConfigService:
             if len(parts) != 2 or parts[1] != "API_KEY":
                 continue  # нас интересуют только *_API_KEY плейсхолдеры
             provider_name = parts[0].lower()
-            key = _get(settings, "providers", provider_name, "api_key")
-            if not key or not isinstance(key, str):
-                key = _get(settings, "providers", provider_name, "apiKey")
+            # Канонический LLM_API_KEY — единый ключ для всех провайдеров.
+            # Берём из любой непустой секции providers.*.
+            if var == "LLM_API_KEY":
+                key = ""
+                providers = _get(settings, "providers", default={}) or {}
+                for prov_cfg in providers.values():
+                    if not isinstance(prov_cfg, dict):
+                        continue
+                    candidate = prov_cfg.get("api_key") or prov_cfg.get("apiKey")
+                    if candidate and isinstance(candidate, str) and not candidate.startswith("${"):
+                        key = candidate
+                        break
+            else:
+                key = _get(settings, "providers", provider_name, "api_key")
+                if not key or not isinstance(key, str):
+                    key = _get(settings, "providers", provider_name, "apiKey")
             if not key or not isinstance(key, str):
                 continue
             # Если ключ сам — плейсхолдер, пропускаем

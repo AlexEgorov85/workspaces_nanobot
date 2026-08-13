@@ -15,9 +15,9 @@ _CFG = SETTINGS.get("skills", {}).get("audit_analyzer", {})
 
 def get_llm_config() -> dict[str, Any]:
     return {
-        "provider": _CFG.get("llm_provider", "mistral"),
-        "model": _CFG.get("llm_model", "mistral-large-latest"),
-        "api_base": _CFG.get("llm_api_base", "https://api.mistral.ai/v1"),
+        "provider": _CFG.get("llm_provider", "openai-compatible"),
+        "model": _CFG.get("llm_model", "gpt-4o-mini"),
+        "api_base": _CFG.get("llm_api_base", "https://api.openai.com/v1"),
         "api_key": _CFG.get("llm_api_key", ""),
         "max_tokens": int(_CFG.get("llm_max_tokens", 8192)),
         "temperature": float(_CFG.get("llm_temperature", 0.1)),
@@ -43,6 +43,18 @@ def get_db_schema() -> str:
     return _CFG.get("db_schema", "oarb")
 
 
+def get_predefined_scripts_table() -> str:
+    """
+    Имя таблицы (схема.имя) с реестром предопределённых SQL-скриптов.
+
+    Источник истины: project.json → skills.audit_analyzer.predefined_scripts_table.
+    Используется:
+      - db_loader.load_registry()  — читает реестр из БД
+      - tools/generate_predefined_scripts_sql.py — генерирует INSERT в эту таблицу
+    """
+    return _CFG.get("predefined_scripts_table", "public.predefined_scripts")
+
+
 def get_in_memory_config() -> dict[str, Any]:
     path = _CFG.get("in_memory_cache_path", "cache/audit_cache.duckdb")
     p = Path(path)
@@ -62,7 +74,7 @@ def is_in_memory_enabled() -> bool:
 def get_vector_index_path() -> str:
     path = _CFG.get("mode_vector_index_path", "")
     if not path:
-        return str(Path.home() / ".nanobot" / "vectors" / "audits_index")
+        path = _CFG.get("vector_index_default_path", "data_store/vectors/audits_index")
     p = Path(path)
     return str(p) if p.is_absolute() else str(_SKILL_ROOT / path)
 

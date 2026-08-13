@@ -2,13 +2,13 @@
 LLM-клиент с OpenAI-compatible HTTP API.
 
 Поддерживает любой провайдер с эндпоинтом /chat/completions
-(Mistral AI, OpenAI, Ollama, vLLM и т.д.).
+(Mistral AI, OpenAI, MiniMax, Ollama, vLLM и т.д.).
 
-Конфигурация читается из config.json -> секция "llm":
+Конфигурация читается из project.json → skills.audit_analyzer.llm_*:
     {
-      "provider": "mistral",
-      "model": "mistral-large-latest",
-      "api_base": "https://api.mistral.ai/v1",
+      "provider": "openai-compatible",
+      "model": "gpt-4o-mini",
+      "api_base": "https://api.openai.com/v1",
       "api_key": "секретный-ключ",
       "max_tokens": 8192,
       "temperature": 0.1
@@ -44,12 +44,14 @@ def chat(messages: list[dict], *, context: Optional[list[dict]] = None, **kwargs
         RuntimeError: Если LLM вернул пустой ответ.
     """
     cfg = get_llm_config()
+    provider = cfg.get("provider", "openai-compatible")
     api_base = cfg.get("api_base", "").rstrip("/")
     api_key = cfg.get("api_key", "")
-    model = kwargs.get("model") or cfg.get("model", "mistral-large-latest")
+    model = kwargs.get("model") or cfg.get("model", "gpt-4o-mini")
     max_tokens = kwargs.get("max_tokens") or cfg.get("max_tokens", 8192)
     temperature = kwargs.get("temperature") or cfg.get("temperature", 0.1)
     url = f"{api_base}/chat/completions"
+    print(f"[LLM] provider={provider} model={model} api_base={api_base}")
 
     headers = {"Content-Type": "application/json"}
     if api_key:

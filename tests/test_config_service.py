@@ -196,7 +196,7 @@ class TestPreResolveEnvRefs:
         """Создать config.json с ${VAR} плейсхолдерами."""
         cfg = tmp_path / "config.json"
         cfg.write_text(
-            '{"providers": {"mistral": {"apiKey": "${MISTRAL_API_KEY}"}}}',
+            '{"providers": {"minimax": {"apiKey": "${LLM_API_KEY}"}}}',
             encoding="utf-8",
         )
         return cfg
@@ -205,28 +205,28 @@ class TestPreResolveEnvRefs:
         from lib.services.config_service import ConfigService
 
         cfg_path = self._setup(tmp_path)
-        # settings.providers.mistral.api_key задан (из .secrets.env)
+        # settings.providers.<любой>.api_key задан (из .secrets.env)
         fake_config_module.SETTINGS = {
-            "providers": {"mistral": {"api_key": "XavGPsHjtNt3uOtFGUhbUuad5PRm2D0W"}}
+            "providers": {"minimax": {"api_key": "XavGPsHjtNt3uOtFGUhbUuad5PRm2D0W"}}
         }
 
         with patch.dict("os.environ", clear=True):
             svc = ConfigService()
             svc._pre_resolve_env_refs(script_dir=tmp_path)
-            assert os.environ["MISTRAL_API_KEY"] == "XavGPsHjtNt3uOtFGUhbUuad5PRm2D0W"
+            assert os.environ["LLM_API_KEY"] == "XavGPsHjtNt3uOtFGUhbUuad5PRm2D0W"
 
     def test_does_not_override_existing_env(self, fake_config_module, tmp_path):
         from lib.services.config_service import ConfigService
 
         self._setup(tmp_path)
         fake_config_module.SETTINGS = {
-            "providers": {"mistral": {"api_key": "from-settings"}}
+            "providers": {"minimax": {"api_key": "from-settings"}}
         }
 
-        with patch.dict("os.environ", {"MISTRAL_API_KEY": "from-shell"}):
+        with patch.dict("os.environ", {"LLM_API_KEY": "from-shell"}):
             svc = ConfigService()
             svc._pre_resolve_env_refs(script_dir=tmp_path)
-            assert os.environ["MISTRAL_API_KEY"] == "from-shell"
+            assert os.environ["LLM_API_KEY"] == "from-shell"
 
     def test_ignores_non_api_key_placeholders(self, fake_config_module, tmp_path):
         from lib.services.config_service import ConfigService
@@ -245,13 +245,13 @@ class TestPreResolveEnvRefs:
 
         self._setup(tmp_path)
         fake_config_module.SETTINGS = {
-            "providers": {"mistral": {"api_key": "${MISTRAL_API_KEY}"}}
+            "providers": {"minimax": {"api_key": "${LLM_API_KEY}"}}
         }
 
         with patch.dict("os.environ", clear=True):
             svc = ConfigService()
             svc._pre_resolve_env_refs(script_dir=tmp_path)
-            assert "MISTRAL_API_KEY" not in os.environ
+            assert "LLM_API_KEY" not in os.environ
 
     def test_no_config_json_noop(self, fake_config_module, tmp_path):
         from lib.services.config_service import ConfigService

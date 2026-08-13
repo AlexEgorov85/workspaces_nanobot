@@ -24,7 +24,7 @@ audit_analyzer — анализ PostgreSQL-базы данных через LLM-
         --script violations_by_type \\
         --params '{"date_from": "2024-01-01", "violation_code": "финан"}'
 
-**sql** — генерация и выполнение SELECT через LLM (Mistral AI).
+**sql** — генерация и выполнение SELECT через LLM (любой OpenAI-compatible).
 
     audit_analyze --mode sql \\
         --query 'сколько аудитов было в 2024 году по каждому месяцу'

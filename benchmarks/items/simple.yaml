@@ -70,7 +70,7 @@
   max_iterations: 10
   expect:
     tools: ["read_file"]
-    keywords_include: ["mistral"]
+    keywords_include: ["openai"]
 
 - id: "simple-violations-table"
   name: "Структура нарушений"

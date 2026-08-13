@@ -455,7 +455,7 @@
       "thinkingStyle": null
     },
     "minimax": {
-      "apiKey": "${MISTRAL_API_KEY}",
+      "apiKey": "${LLM_API_KEY}",
       "apiBase": "https://api.minimax.io/v1",
       "apiType": "auto",
       "extraHeaders": null,
@@ -475,7 +475,7 @@
       "thinkingStyle": null
     },
     "mistral": {
-      "apiKey": "${MISTRAL_API_KEY}",
+      "apiKey": "${LLM_API_KEY}",
       "apiBase": "https://api.mistral.ai/v1",
       "apiType": "auto",
       "extraHeaders": null,
