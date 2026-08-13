@@ -104,6 +104,12 @@ class SessionStorageService:
         """
         pg_cfg = dict(pg or {})
         pg_cfg.update(self._load_override())  # session_manager.json побеждает
+        pool_cfg = pg_cfg.get("pool", {}) if isinstance(pg_cfg.get("pool"), dict) else {}
+        # Legacy: плоские ключи min_conn/max_conn/pool_timeout в session_manager.json
+        # (использовались до введения channels.postgres.pool).
+        for legacy_key in ("min_conn", "max_conn", "pool_timeout"):
+            if legacy_key in pg_cfg and legacy_key not in pool_cfg:
+                pool_cfg[legacy_key] = pg_cfg[legacy_key]
 
         dsn = pg_cfg.get("dsn") or ""
         workspace = Path(workspace_dir) if workspace_dir else config.workspace_path
@@ -130,9 +136,9 @@ class SessionStorageService:
                 schema=pg_cfg.get("schema", "public"),
                 messages_table=pg_cfg.get("messages_table", "session_messages"),
                 meta_table=pg_cfg.get("meta_table", "session_meta"),
-                min_conn=int(pg_cfg.get("min_conn", 1)),
-                max_conn=int(pg_cfg.get("max_conn", 4)),
-                pool_timeout=float(pg_cfg.get("pool_timeout", 5.0)),
+                min_conn=int(pool_cfg.get("min_conn", 1)),
+                max_conn=int(pool_cfg.get("max_conn", 4)),
+                pool_timeout=float(pool_cfg.get("pool_timeout", 5.0)),
             )
             return "postgres", manager
 

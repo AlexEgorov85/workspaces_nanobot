@@ -90,16 +90,22 @@ import sql_mode
 def _build_parser() -> argparse.ArgumentParser:
     """
     Создать и настроить парсер аргументов командной строки.
-    Добавляет ~10 аргументов: --mode (обязательный), --script, --query,
+    Добавляет ~10 аргументов: --mode, --script, --query,
     --params, --vector-index, --index-name, --top-k, --threshold, --context.
     Возвращает настроенный ArgumentParser.
+
+    --mode не обязателен: значение по умолчанию берётся из
+    ``skills.audit_analyzer.cli_default_mode`` в project.json.
     """
+    from skill_config import get_cli_config
+
+    default_mode = get_cli_config().get("default_mode", "predefined")
     parser = argparse.ArgumentParser(description="audit_analyzer — анализ БД через LLM агента")
     parser.add_argument(
         "--mode",
-        required=True,
+        default=default_mode,
         choices=["predefined", "sql", "vector"],
-        help="Режим работы: predefined, sql или vector",
+        help=f"Режим работы: predefined, sql или vector (default: {default_mode})",
     )
     parser.add_argument(
         "--script",

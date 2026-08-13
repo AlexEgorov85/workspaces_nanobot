@@ -130,13 +130,19 @@ async def run_repl(
 
     chat_id = session or "direct"
     cli_channel = "cli"
+    try:
+        from config import SETTINGS
+
+        repl_idle_timeout = float(SETTINGS.get("cli", {}).get("repl_idle_timeout_sec", 1.0))
+    except Exception:
+        repl_idle_timeout = 1.0
 
     async def consume_outbound() -> tuple:
         full_response = ""
         response_meta: dict = {}
         while True:
             try:
-                msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+                msg = await asyncio.wait_for(bus.consume_outbound(), timeout=repl_idle_timeout)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:

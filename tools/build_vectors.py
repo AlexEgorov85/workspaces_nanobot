@@ -76,6 +76,7 @@ def _get_embeddings(texts: list[str], retries: int = 3) -> Optional[list[list[fl
     cfg = read_embedding_config(_CFG)
     url = cfg.get("base_url")
     model = cfg.get("model", "mxbai-embed-large:latest")
+    timeout_sec = float(_CFG.get("embedding_http_timeout_sec", 60))
 
     if not url:
         print("  ОШИБКА: embedding base_url не задан в config.json")
@@ -85,7 +86,7 @@ def _get_embeddings(texts: list[str], retries: int = 3) -> Optional[list[list[fl
 
     for attempt in range(1, retries + 1):
         try:
-            with httpx.Client(timeout=120) as client:
+            with httpx.Client(timeout=timeout_sec) as client:
                 resp = client.post(url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -404,7 +405,7 @@ def build_index(
                 errors += 1
 
         if start + batch_size < len(all_chunks):
-            time.sleep(0.5)
+            time.sleep(float(_CFG.get("build_batch_pause_sec", 0.5)))
 
     print(f"  Вставлено векторов: {inserted}, удалено pk: {deleted}, ошибок: {errors}")
 
@@ -485,10 +486,12 @@ def main():
                         help="Собрать только конкретный индекс")
     parser.add_argument("--batch-size", type=int, default=10,
                         help="Размер батча для эмбеддинга")
-    parser.add_argument("--chunk-size", type=int, default=500,
-                        help="Размер чанка в символах (по умолч. 500)")
-    parser.add_argument("--chunk-overlap", type=int, default=80,
-                        help="Перекрытие чанков в символах")
+    parser.add_argument("--chunk-size", type=int,
+                        default=int(_CFG.get("text_chunk_size", 500)),
+                        help="Размер чанка в символах (default из text_chunk_size)")
+    parser.add_argument("--chunk-overlap", type=int,
+                        default=int(_CFG.get("text_chunk_overlap", 80)),
+                        help="Перекрытие чанков в символах (default из text_chunk_overlap)")
     parser.add_argument("--status", action="store_true",
                         help="Показать состояние всех индексов (кол-во векторов, размерность, актуальность)")
     parser.add_argument("--check", action="store_true",

@@ -59,6 +59,7 @@ class AuditSyncService:
         write_schema: str = "oarb",
         max_queue_size: int = 10000,
         reconnect_backoff: float = 1.0,
+        reconnect_backoff_max: float = 60.0,
         full_resync_every: int = 10,
     ) -> None:
         self._dsn = dsn
@@ -70,6 +71,7 @@ class AuditSyncService:
         self._write_schema = write_schema
         self._max_queue_size = max_queue_size
         self._reconnect_backoff = reconnect_backoff
+        self._reconnect_backoff_max = reconnect_backoff_max
         self._full_resync_every = max(0, int(full_resync_every))
         self._resync_counter = 0
 
@@ -564,7 +566,7 @@ class AuditSyncService:
                 return
             except Exception:
                 self._stop_event.wait(backoff)
-                backoff = min(backoff * 2, 60.0)
+                backoff = min(backoff * 2, self._reconnect_backoff_max)
 
     def _reconnect(self) -> None:
         """Закрыть соединение и сбросить инкрементальные метки.

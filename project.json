@@ -10,9 +10,21 @@
   //  Формат: JSONC — обычный JSON + комментарии // и /* */.
   //  Значения вида ${VAR} подставляются из os.environ (секреты — из .secrets.env).
   //
-  //  Проектные секции, у которых нет нативного блока в nanobot:
-  //      channels.*, skills.*, cli, benchmark, streamlit, gateway.
+  //  Секции (порядок логический, не синтаксический):
+  //      channels.*        — каналы связи (Postgres, Redis, пулы)
+  //      skills.*          — настройки пользовательских навыков
+  //      cli               — настройки CLI-агента (cli_agent.py)
+  //      benchmark         — сохранение результатов бенчмарков
+  //      streamlit         — веб-чат (streamlit_app.py)
+  //      gateway           — gateway-сервер + перезапуск + subprocess'ы
+  //      logging.db        — структурированный журнал (DbLoggingService)
+  //
   //  Нативный конфиг nanobot (агенты, провайдеры, API) — в config.json.
+  //
+  //  Правило добавления новой настройки:
+  //    1. Объявить ключ здесь (с дефолтом и комментарием).
+  //    2. В коде читать через get_setting(*keys, default=...) или SETTINGS.*.
+  //    3. Добавить запись в REQUIRED_KEYS в tests/test_config_keys.py.
   // ============================================================================
 
   // ---------------------------------------------------------------------------
@@ -30,7 +42,15 @@
       "flush_interval": 2.0,                  // Сброс reasoning в metadata, сек
       "max_concurrent": 1,                    // Макс. параллельно обрабатываемых сообщений
       "processing_timeout": 120,              // Зависшее сообщение → retry (до 3 раз), сек
-      "allow_from": ["*"]                     // Допустимые отправители. Варианты: ["*"] — все | ["<sender_id>", ...] — точное совпадение (nanobot/channels/base.py:203)
+      "max_stuck_retries": 3,                 // Лимит retry зависшего сообщения (postgres_channel.py)
+      "msg_ctx_max_size": 100,                // Защитный лимит размера _msg_ctx (postgres_channel.py)
+      "media_cache_dir": "data_store/cache/sessions",  // Кеш медиа-файлов сессий
+      "allow_from": ["*"],                    // Допустимые отправители. Варианты: ["*"] — все | ["<sender_id>", ...] — точное совпадение (nanobot/channels/base.py:203)
+      "pool": {                               // Параметры пула psycopg2 (session_storage.py)
+        "min_conn": 1,
+        "max_conn": 4,
+        "pool_timeout": 5.0
+      }
     },
     "redis": {
       "enabled": false,                       // Выключен по умолчанию. Варианты: true | false
@@ -42,6 +62,9 @@
       "outgoing_prefix": "nanobot:outbox",    // Префикс очередей ответов (LPUSH outbox:{chat_id})
       "poll_timeout": 5.0,                    // Таймаут BRPOP, сек
       "max_concurrent": 1,                    // Макс. параллельно обрабатываемых сообщений
+      "error_backoff_sec": 1.0,               // Пауза между итерациями при исключении BRPOP
+      "reply_to_max_size": 10000,             // Защитный потолок размера _reply_to_map
+      "reply_to_trim_to": 5000,               // Целевой размер после усечения
       "allow_from": ["*"]                     // Варианты: ["*"] — все | ["<sender_id>", ...] — точное совпадение
     }
   },
@@ -52,10 +75,10 @@
   "skills": {
     "audit_analyzer": {
       // --- LLM: генерация SQL и обобщение результатов -----------------------
-      "llm_provider": "mistral",              // Провайдер LLM. Варианты: mistral | openai | ollama | vllm.
-      //   ВНИМАНИЕ: в llm.py ключ НЕ читается — реальный эндпоинт задаёт llm_api_base; значение информационное
-      "llm_model": "mistral-large-latest",    // Модель для генерации SQL
-      "llm_api_base": "https://api.mistral.ai/v1",
+      "llm_provider": "openai-compatible",    // Провайдер LLM. Любой OpenAI-compatible (Mistral, OpenAI, MiniMax, Ollama, vLLM).
+      //   Логируется в llm.py при каждом запросе (для отладки), эндпоинт задаётся llm_api_base.
+      "llm_model": "gpt-4o-mini",             // Модель для генерации SQL
+      "llm_api_base": "https://api.openai.com/v1",
       // llm_api_key здесь НЕ задаётся — берётся из .secrets.env (наивысший приоритет)
       "llm_max_tokens": 8192,
       "llm_temperature": 0.1,
@@ -68,21 +91,34 @@
         "report_items",
         "violations"
       ],
-
-      // --- In-memory кеш (DuckDB): локальная копия данных для скорости ------
-      "in_memory_enabled": true,              // Варианты: true | false
-      "in_memory_engine": "duckdb",           // Движок in-memory кеша. Варианты: duckdb (единственный реализованный)
-      "in_memory_cache_path": "cache/audit_cache.duckdb",
+      "db_additional_tables": [               // Доп. таблицы (из других схем) для копирования в DuckDB-кэш
+        ["public", "predefined_scripts"]     // реестр SQL-скриптов (см. predefined_scripts_table)
+      ],
+      "predefined_scripts_table": "public.predefined_scripts",  // Реестр SQL-скриптов (sql_template + parameters)
+      //   Источник истины для режима predefined. Заполняется через
+      //   sql/audit_analyzer/create_predefined_scripts_table.sql и
+      //   tools/generate_predefined_scripts_sql.py.
 
       // --- Фоновая синхронизация (gateway: AuditSyncService) ------------------
       "poll_interval_sec": 60,                // Поллинг новых/изменённых строк из PostgreSQL, сек
       "full_resync_every": 10,                // Полная перезагрузка таблицы каждые N циклов (сверка удалений; 0 = выкл)
       "sync_write_table": "audit_interactions",  // Таблица записи ответов навыка в PG (создаётся автоматически)
+      "sync_max_queue_size": 10000,           // Макс. размер очереди синхронизации (audit_sync_service.py)
+      "reconnect_backoff_sec": 1.0,           // Начальный backoff после разрыва соединения
+      "reconnect_backoff_max_sec": 60.0,      // Потолок reconnect-backoff (экспоненциально)
+
+      // --- In-memory кеш (DuckDB): локальная копия данных для скорости ------
+      "in_memory_enabled": true,              // Варианты: true | false
+      "in_memory_engine": "duckdb",           // Движок in-memory кеша. Варианты: duckdb (единственный реализованный)
+      "in_memory_cache_path": "cache/audit_cache.duckdb",
+      "cache_max_age_sec": 3600,              // Возраст кеша для initial-проверки (preload_service.py)
+      "cache_refresh_interval_sec": 3600,     // Фоновый интервал проверки кеша
 
       // --- Эмбеддинги для семантического (векторного) поиска ----------------
       "embedding_base_url": "http://localhost:11434/api/embed",  // Ollama /api/embed
       "embedding_model": "mxbai-embed-large:latest",
-      "embedding_dimension": 1024,
+      "embedding_dimension": 1024,            // Размерность векторов. Используется read_embedding_config() в cache_provider_impl.py
+      "embedding_http_timeout_sec": 60,       // HTTP-таймаут Ollama /api/embed
 
       // --- Векторный поиск: ИНДЕКСЫ В БАЗЕ ДАННЫХ ----------------------------
       // С 2026-06 векторы и их конфигурация хранятся в PostgreSQL/Greenplum:
@@ -92,9 +128,16 @@
       //     Раньше это были ключи vector_indexes + mode_vector_index_path (файлы .faiss) —
       //     теперь управляется SQL-таблицей, project.json больше их не содержит.
       "mode_vector_db_table": "oarb.audit_vectors",  // Таблица сырых векторов (источник индекса)
+      "mode_vector_store_table": "oarb.vector_index_store",  // Таблица FAISS-индексов (BYTEA)
+      "vector_index_default_path": "data_store/vectors/audits_index",  // Fallback-путь FAISS-индекса
       // Параметры поиска top_k / threshold задаются аргументами CLI:
       //   audit_analyze --mode vector --query '...' --index-name audits_index --top-k 5 --threshold 0.75 (0.0–1.0)
       // (в конфиге не хранятся — код их не читает)
+
+      // --- Текст-сплиттер (build_vectors.py, text_splitter.py) --------------
+      "text_chunk_size": 500,                 // Размер чанка текста для эмбеддинга
+      "text_chunk_overlap": 80,               // Перекрытие между чанками
+      "build_batch_pause_sec": 0.5,           // Пауза между батчами в build_vectors.py
 
       // --- Режимы работы навыка ---------------------------------------------
       //   predefined — готовые SQL-шаблоны (--script), кеш в DuckDB
@@ -102,7 +145,8 @@
       //   vector     — семантический поиск по индексу из БД (--query + --index-name)
       //   init       — загрузка DuckDB-кеша из PostgreSQL
       "cli_default_mode": "predefined",       // Режим по умолчанию. Варианты: predefined | sql | vector | init (см. выше).
-      //   ВНИМАНИЕ: cli.py требует --mode явно (required=True); ключ нигде не потребляется — резервный
+      //   Используется cli.py как default для --mode (если флаг не передан).
+      "cli_default_format": "json",           // Формат вывода по умолчанию
       "cli_max_retries": 3,                   // Ретраи LLM при генерации SQL
       "cli_timeout_sec": 60                   // Таймаут запроса к LLM, сек
     }
@@ -121,7 +165,8 @@
     "llm_timeout": 300,           // Таймаут LLM-запроса, сек
     "exec_timeout": 60,           // Таймаут exec-инструмента, сек
     "max_iterations": 200,        // Макс. итераций агента
-    "log_level": "WARNING"        // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR
+    "log_level": "WARNING",       // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR
+    "repl_idle_timeout_sec": 1.0  // Таймаут REPL-цикла ожидания outbound (console_loop.py)
   },
 
   // ---------------------------------------------------------------------------
@@ -137,8 +182,10 @@
   //  streamlit.* — веб-чат (streamlit_app.py)
   // ---------------------------------------------------------------------------
   "streamlit": {
-    "max_wait": 600,          // Макс. ожидание ответа агента, сек
-    "poll_interval": 1.0      // Интервал поллинга статуса, сек
+    "max_wait": 600,                  // Макс. ожидание ответа агента, сек
+    "poll_interval": 1.0,             // Интервал поллинга статуса, сек
+    "files_dir": "data_store/streamlit_files",  // Папка загруженных файлов
+    "failed_window_sec": 300          // Окно retry для failed-сообщений (5 мин)
   },
 
   // ---------------------------------------------------------------------------
@@ -154,7 +201,12 @@
     "persist_max_age_hours": 0,       // 0 = хранить бессрочно
     "llm_timeout": 300,               // Таймаут LLM, сек
     "exec_timeout": 60,               // Таймаут exec, сек
-    "log_level": "INFO"               // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR
+    "log_level": "INFO",              // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR
+    "restart_initial_delay_sec": 1.0, // Начальная пауза backoff при перезапуске (gateway_runner.py)
+    "restart_max_delay_sec": 30.0,    // Потолок backoff при перезапуске
+    "streamlit_port": 8501,           // Порт Streamlit subprocess (subprocess_manager.py)
+    "streamlit_log_filename": "streamlit.log",  // Имя лог-файла Streamlit
+    "subprocess_shutdown_timeout_sec": 5.0  // Таймаут graceful shutdown subprocess'а
   },
 
   // ---------------------------------------------------------------------------
@@ -168,7 +220,12 @@
       "flush_interval_sec": 5.0,       // Интервал флаша батча, сек
       "batch_size": 100,               // Размер батча
       "queue_maxsize": 10000,          // Макс. размер очереди
-      "min_level": "INFO"              // Варианты: DEBUG | INFO | WARN | ERROR
+      "min_level": "INFO",             // Варианты: DEBUG | INFO | WARN | ERROR
+      "dialect": "postgres",           // Диалект БД. Варианты: postgres | greenplum
+      "fallback_path": "logs/gateway_logs_fallback.jsonl",  // Путь к JSONL-fallback
+      "connect_backoff_sec": 1.0,      // Начальный backoff psycopg2.connect
+      "connect_backoff_max_sec": 60.0, // Потолок backoff psycopg2.connect
+      "summary_max_chars": 200         // Усечение summary до N символов
     }
   }
 }

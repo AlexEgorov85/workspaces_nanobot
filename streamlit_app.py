@@ -30,9 +30,13 @@ _MAX_WAIT = SETTINGS.streamlit.get("max_wait", 600)
 _POLL_INTERVAL = SETTINGS.streamlit.get("poll_interval", 1.0)
 _CHAT_ID = SETTINGS.streamlit.get("chat_id", "streamlit")
 _USER_ID = SETTINGS.streamlit.get("user_id", "user")
+_FAILED_WINDOW = SETTINGS.streamlit.get("failed_window_sec", 300)
+_FILES_DIR_RAW = SETTINGS.streamlit.get("files_dir", "data_store/streamlit_files")
 
 # Папка для загруженных/скачанных файлов
-_FILES_DIR = Path(__file__).parent / "workspace" / "data_store" / "streamlit_files"
+_FILES_DIR = Path(_FILES_DIR_RAW)
+if not _FILES_DIR.is_absolute():
+    _FILES_DIR = Path(__file__).parent / "workspace" / _FILES_DIR
 _FILES_DIR.mkdir(parents=True, exist_ok=True)
 
 if _dsn:
@@ -423,13 +427,13 @@ if processing:
                 if failed_since is None:
                     failed_since = time.time()
                 failed_elapsed = int(time.time() - failed_since)
-                if failed_elapsed >= 300:
+                if failed_elapsed >= _FAILED_WINDOW:
                     status.update(label="❌ Ошибка", state="error")
                     placeholder.markdown("⚠️ Ошибка обработки. Ответ не получен.")
                     st.session_state._processing = False
                     st.rerun()
                 placeholder.markdown(
-                    f"⚠️ Получена ошибка, перепроверяю... {failed_elapsed}с из 300с"
+                    f"⚠️ Получена ошибка, перепроверяю... {failed_elapsed}с из {_FAILED_WINDOW}с"
                 )
                 time.sleep(_POLL_INTERVAL)
                 continue

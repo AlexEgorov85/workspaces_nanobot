@@ -34,6 +34,8 @@ import time
 import traceback
 from typing import Callable, Optional
 
+from config import get_setting
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,25 +44,35 @@ class GatewayRunner:
 
     Attributes:
         _initial_delay: пауза перед первым рестартом (сек).
-        _max_delay: потолок паузы (сек). После 30с backoff больше не растёт.
+        _max_delay: потолок паузы (сек). После _max_delay backoff больше не растёт.
         _sleep: инъекция ``time.sleep`` (для тестов — подменяется).
     """
 
     def __init__(
         self,
         *,
-        initial_delay: float = 1.0,
-        max_delay: float = 30.0,
+        initial_delay: Optional[float] = None,
+        max_delay: Optional[float] = None,
         sleep: Optional[Callable[[float], None]] = None,
     ) -> None:
         """Args:
             initial_delay: секунды перед первым рестартом после падения.
+                По умолчанию — ``gateway.restart_initial_delay_sec`` (1.0).
             max_delay: максимальная пауза между рестартами (сек).
+                По умолчанию — ``gateway.restart_max_delay_sec`` (30.0).
             sleep: инъекция ``time.sleep`` — тесты подменяют на
                 ``list.append``, чтобы не блокировать.
         """
-        self._initial_delay = initial_delay
-        self._max_delay = max_delay
+        self._initial_delay = float(
+            initial_delay
+            if initial_delay is not None
+            else get_setting("gateway", "restart_initial_delay_sec", default=1.0)
+        )
+        self._max_delay = float(
+            max_delay
+            if max_delay is not None
+            else get_setting("gateway", "restart_max_delay_sec", default=30.0)
+        )
         self._sleep = sleep or time.sleep
 
     def run_forever(self, run_once: Callable[[], None]) -> None:

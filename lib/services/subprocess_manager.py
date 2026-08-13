@@ -24,10 +24,11 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from config import get_setting
+
 
 class SubprocessManager:
     """Управление фоновыми процессами (Streamlit UI; добавляются через ``spawn_*``).
-
     Attributes:
         _log_dir: директория для логов (создаётся при первом ``spawn_*``).
         _processes: список ``(Popen, file_handle)`` — для terminate в
@@ -36,18 +37,26 @@ class SubprocessManager:
 
     def __init__(self, log_dir: Optional[Path] = None) -> None:
         self._log_dir = log_dir or Path.cwd() / "logs"
+        self._default_port: int = int(get_setting("gateway", "streamlit_port", default=8501))
+        self._log_filename: str = str(
+            get_setting("gateway", "streamlit_log_filename", default="streamlit.log")
+        )
+        self._shutdown_timeout: float = float(
+            get_setting("gateway", "subprocess_shutdown_timeout_sec", default=5.0)
+        )
         self._processes: List[Tuple[subprocess.Popen, Optional[object]]] = []
 
     # ------------------------------------------------------------------
     # Streamlit
     # ------------------------------------------------------------------
 
-    def spawn_streamlit(self, script_path: Path, port: int = 8501) -> bool:
+    def spawn_streamlit(self, script_path: Path, port: Optional[int] = None) -> bool:
         """Запустить Streamlit UI как subprocess.
 
         Args:
             script_path: путь к ``streamlit_app.py``.
-            port: порт (по умолчанию 8501 — стандартный для Streamlit).
+            port: порт (по умолчанию берётся из
+                ``gateway.streamlit_port`` в project.json, иначе 8501).
 
         Returns:
             ``True`` если процесс запущен, ``False`` если скрипт не
@@ -57,16 +66,17 @@ class SubprocessManager:
         Notes:
             Использует ``--server.headless true`` (без автооткрытия
             браузера — иначе в server-окружениях будет ошибка).
-            stdout+stderr редиректятся в ``<log_dir>/streamlit.log`` —
+            stdout+stderr редиректятся в ``<log_dir>/<streamlit_log_filename>`` —
             иначе вывод теряется при завершении родителя.
         """
         script = Path(script_path)
         if not script.exists():
             return False
+        port = int(port) if port else self._default_port
 
         try:
             self._log_dir.mkdir(parents=True, exist_ok=True)
-            log_handle = open(self._log_dir / "streamlit.log", "a", encoding="utf-8")
+            log_handle = open(self._log_dir / self._log_filename, "a", encoding="utf-8")
         except OSError:
             log_handle = None
 
@@ -86,11 +96,17 @@ class SubprocessManager:
         self._processes.append((proc, log_handle))
         return True
 
+    def __enter__(self) -> "SubprocessManager":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.terminate_all()
+
     # ------------------------------------------------------------------
     # Завершение
     # ------------------------------------------------------------------
 
-    def terminate_all(self, timeout_sec: float = 5.0) -> None:
+    def terminate_all(self, timeout_sec: Optional[float] = None) -> None:
         """Корректно завершить все subprocess'ы.
 
         Алгоритм для каждого процесса:
@@ -105,7 +121,7 @@ class SubprocessManager:
         for proc, handle in self._processes:
             try:
                 proc.terminate()
-                proc.wait(timeout=timeout_sec)
+                proc.wait(timeout=timeout_sec if timeout_sec is not None else self._shutdown_timeout)
             except Exception:
                 try:
                     proc.kill()

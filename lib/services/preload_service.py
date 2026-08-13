@@ -132,7 +132,8 @@ class PreloadService:
         cache_file = Path(cache_path)
         if cache_file.exists():
             age = time.time() - cache_file.stat().st_mtime
-            if age < 3600:
+            max_age = float(self._audit_settings.get("cache_max_age_sec", 3600))
+            if age < max_age:
                 return
 
         try:
@@ -165,9 +166,10 @@ class PreloadService:
         )
         import logging
 
+        refresh_interval = float(self._audit_settings.get("cache_refresh_interval_sec", 3600))
         while True:
             try:
-                await asyncio.sleep(3600)
+                await asyncio.sleep(refresh_interval)
                 result = check_cache_stale(cache_path, db_cfg)
                 if result.get("stale_tables"):
                     logging.getLogger("cache").info(

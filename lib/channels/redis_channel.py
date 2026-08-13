@@ -137,6 +137,9 @@ class RedisChannel(BaseChannel):
         # ---- Тюнинг ----
         self._poll_timeout: float = float(_get("poll_timeout", 5.0))
         self._max_concurrent: int = int(_get("max_concurrent", 1))
+        self._error_backoff_sec: float = float(_get("error_backoff_sec", 1.0))
+        self._reply_to_max_size: int = int(_get("reply_to_max_size", 10000))
+        self._reply_to_trim_to: int = int(_get("reply_to_trim_to", 5000))
         self._semaphore = asyncio.Semaphore(self._max_concurrent)
 
         # ---- Состояние ----
@@ -204,7 +207,7 @@ class RedisChannel(BaseChannel):
                 break
             except Exception as e:
                 self.logger.error("Redis poll error: {}", e)
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(self._error_backoff_sec)
 
     async def _poll_once(self) -> None:
         """
@@ -270,8 +273,8 @@ class RedisChannel(BaseChannel):
         finally:
             self._inflight.discard(chat_id)
             self._semaphore.release()
-            if len(self._reply_to_map) > 10000:
-                while len(self._reply_to_map) > 5000:
+            if len(self._reply_to_map) > self._reply_to_max_size:
+                while len(self._reply_to_map) > self._reply_to_trim_to:
                     self._reply_to_map.pop(next(iter(self._reply_to_map)), None)
 
     # ══════════════════════════════════════════════════════════════════

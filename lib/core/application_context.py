@@ -285,6 +285,11 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
     if not dsn:
         return None
 
+    fallback_path_raw = db_cfg.get("fallback_path", "logs/gateway_logs_fallback.jsonl")
+    fallback_path = Path(fallback_path_raw)
+    if not fallback_path.is_absolute():
+        fallback_path = Path(ctx.script_dir) / fallback_path
+
     return DbLoggingService(
         dsn=dsn,
         table_name=db_cfg.get("table_name", "gateway_logs"),
@@ -294,7 +299,10 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
         batch_size=int(db_cfg.get("batch_size", 100)),
         queue_maxsize=int(db_cfg.get("queue_maxsize", 10000)),
         min_level=db_cfg.get("min_level", "INFO"),
-        fallback_path=Path(ctx.script_dir) / "logs" / "gateway_logs_fallback.jsonl",
+        fallback_path=fallback_path,
+        connect_backoff_sec=float(db_cfg.get("connect_backoff_sec", 1.0)),
+        connect_backoff_max_sec=float(db_cfg.get("connect_backoff_max_sec", 60.0)),
+        summary_max_chars=int(db_cfg.get("summary_max_chars", 200)),
     )
 
 
@@ -362,6 +370,10 @@ def _make_audit_services(ctx: "ApplicationContext") -> tuple:
         poll_interval_sec=float(cfg.get("poll_interval_sec", 60)),
         write_table=cfg.get("sync_write_table", "audit_interactions"),
         write_schema=schema,
+        max_queue_size=int(cfg.get("sync_max_queue_size", 10000)),
+        reconnect_backoff=float(cfg.get("reconnect_backoff_sec", 1.0)),
+        reconnect_backoff_max=float(cfg.get("reconnect_backoff_max_sec", 60.0)),
+        full_resync_every=int(cfg.get("full_resync_every", 10)),
     )
     return sync, store
 

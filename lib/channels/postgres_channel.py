@@ -39,7 +39,6 @@ from utils.db import async_fetchval as fetchval, async_execute as execute, async
 from psycopg2.extras import Json
 
 _WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent / "workspace"
-_DATA_STORE_DIR = _WORKSPACE_DIR / "data_store" / "cache" / "sessions"
 
 
 def _decode_jsonb(val: Any) -> dict:
@@ -90,7 +89,11 @@ class PostgresChannel(BaseChannel):
         # как часто опрашивать БД на новые сообщения (сек)
         self._poll_interval: float = float(_get("poll_interval", 2.0))
         # через сколько секунд сообщение в processing считается зависшим
-        self._processing_timeout: int = int(_get("processing_timeout", 600))
+        self._processing_timeout: int = int(_get("processing_timeout", 120))
+        # сколько раз retry'ить зависшее сообщение до отказа
+        self._max_stuck_retries: int = int(_get("max_stuck_retries", 3))
+        # защитный лимит размера _msg_ctx
+        self._msg_ctx_max_size: int = int(_get("msg_ctx_max_size", 100))
         # как часто сбрасывать буферы reasoning в БД (сек)
         self._flush_interval: float = float(_get("flush_interval", 2.0))
 
@@ -101,9 +104,16 @@ class PostgresChannel(BaseChannel):
         # user_msg_id сообщений, которые сейчас в обработке
         self._inflight: set[str] = set()
         # chat_id, которые сейчас заняты (чтобы не диспатчить второе
-        # сообщение в тот же чат, пока первое не完成)
+        # сообщение в тот же чат, пока первое не 完成)
         self._chat_inflight: set[str] = set()
-        # user_msg_id → chat_id (для освобождения chat_inflight)
+
+        # ---- медиа-кеш ----
+        media_cache_dir = _get("media_cache_dir", "data_store/cache/sessions")
+        cache_path = Path(media_cache_dir)
+        if not cache_path.is_absolute():
+            cache_path = _WORKSPACE_DIR / media_cache_dir
+        self._media_cache_dir: Path = cache_path
+
         self._msg_chat: dict[str, str] = {}
 
         # ---- стриминг (потоковая передача ответа) ----
@@ -126,18 +136,17 @@ class PostgresChannel(BaseChannel):
     # Кодирование/декодирование медиа-файлов для передачи через БД
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _session_media_dir(session_key: str) -> Path:
+    def _session_media_dir(self, session_key: str) -> Path:
         """Вернуть директорию для медиа-файлов сессии.
 
-        Путь: ``workspace/data_store/cache/sessions/{session_key}/``.
+        Путь: ``{media_cache_dir}/{session_key}/``.
 
         ``session_key`` может содержать символы, недопустимые в именах
         каталогов Windows (например, ``postgres:streamlit``) — они
         заменяются на ``_``.
         """
         safe_key = re.sub(r"[^\w\- ]", "_", session_key or "").strip() or "default"
-        sdir = _DATA_STORE_DIR / safe_key
+        sdir = self._media_cache_dir / safe_key
         sdir.mkdir(parents=True, exist_ok=True)
         return sdir
 
@@ -381,7 +390,7 @@ class PostgresChannel(BaseChannel):
         Это защита от ситуаций, когда агент упал, а сообщение осталось
         висеть в processing навсегда.
         """
-        max_retries = 3
+        max_retries = self._max_stuck_retries
         timeout_s = self._processing_timeout
 
         async with transaction() as conn:

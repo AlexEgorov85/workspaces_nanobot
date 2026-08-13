@@ -88,8 +88,9 @@ class DbLoggingService:
         queue_maxsize: int = 10000,
         min_level: str = "INFO",
         fallback_path: Optional[Path] = None,
-        min_conn: int = 1,
-        max_conn: int = 4,
+        connect_backoff_sec: float = 1.0,
+        connect_backoff_max_sec: float = 60.0,
+        summary_max_chars: int = 200,
     ) -> None:
         self._dsn = dsn or ""
         self._table_name = table_name
@@ -99,8 +100,9 @@ class DbLoggingService:
         self._batch_size = int(batch_size)
         self._min_level = min_level
         self._fallback_path = Path(fallback_path) if fallback_path else None
-        self._min_conn = min_conn
-        self._max_conn = max_conn
+        self._connect_backoff_sec = float(connect_backoff_sec)
+        self._connect_backoff_max_sec = float(connect_backoff_max_sec)
+        self._summary_max_chars = int(summary_max_chars)
 
         self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=queue_maxsize)
         self._stop_event = threading.Event()
@@ -279,7 +281,7 @@ class DbLoggingService:
             session_id=session_id,
             channel=channel,
             actor=actor_val,
-            summary=content[:200] if content else "",
+            summary=content[: self._summary_max_chars] if content else "",
             payload=payload,
             request_id=request_id or message_id,
         ))
@@ -302,7 +304,7 @@ class DbLoggingService:
             session_id=session_id,
             channel=channel,
             actor="agent",
-            summary=content[:200] if content else "",
+            summary=content[: self._summary_max_chars] if content else "",
             payload={"content": content},
             metadata={"latency_ms": latency_ms, "tokens_used": tokens_used},
             request_id=request_id,
@@ -530,7 +532,7 @@ class DbLoggingService:
                 self._stats["last_error"] = f"psycopg2 import: {exc}"
             return None
 
-        backoff = 1.0
+        backoff = self._connect_backoff_sec
         while self._running:
             try:
                 conn = psycopg2.connect(self._dsn, gssencmode="disable")
@@ -540,7 +542,7 @@ class DbLoggingService:
                     self._stats["last_error"] = f"connect: {exc}"
                     self._stats["connected"] = False
                 self._stop_event.wait(backoff)
-                backoff = min(backoff * 2, 60.0)
+                backoff = min(backoff * 2, self._connect_backoff_max_sec)
                 continue
             try:
                 self._ensure_schema(conn)
@@ -559,7 +561,7 @@ class DbLoggingService:
                     self._stats["last_error"] = f"ensure schema: {exc}"
                     self._stats["connected"] = False
                 self._stop_event.wait(backoff)
-                backoff = min(backoff * 2, 60.0)
+                backoff = min(backoff * 2, self._connect_backoff_max_sec)
                 continue
             with self._state_lock:
                 self._stats["connected"] = True
