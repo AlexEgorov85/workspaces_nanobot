@@ -61,3 +61,5 @@ COMMENT ON COLUMN oarb.audit_vectors.max_src_track IS
     'MAX(track_column) в источнике';
 COMMENT ON COLUMN oarb.audit_vectors.synced_at IS
     'Время последней синхронизации';
+COMMENT ON COLUMN oarb.audit_vectors.created_at IS
+    'Время создания записи в этой таблице.';

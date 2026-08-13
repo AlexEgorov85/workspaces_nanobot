@@ -1,6 +1,11 @@
 """
 Класс Database — обёртка над PostgreSQL для навыка audit_analyzer (fallback).
 
+.. deprecated:: 2.0
+    Навык работает через DuckDB-кэш (lib.services.cache_provider_impl).
+    Прямой psycopg2-доступ остался как legacy-фоллбэк, когда
+    ``in_memory_enabled: false`` в project.json. Не используйте в новом коде.
+
 Инфраструктура (DuckDB-кэш, векторные индексы) вынесена в универсальный
 слой lib/services (CacheProvider, см. cache_provider_impl.py). CLI навыка
 использует провайдера напрямую; Database остаётся как прямой доступ к
@@ -22,6 +27,7 @@ PostgreSQL, когда in-memory кэш выключен.
 
 import re
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Optional, Protocol, runtime_checkable
 
@@ -33,6 +39,13 @@ for _p in [str(_nanobot_root), str(_workspace_root)]:
 
 from config import SETTINGS
 from utils.db import configure, fetch, resolve_dsn
+
+warnings.warn(
+    "database.Database is deprecated; use CacheProvider (lib.services) instead. "
+    "The skill now reads everything from DuckDB cache.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 _pg_dsn = resolve_dsn()
 if _pg_dsn:
