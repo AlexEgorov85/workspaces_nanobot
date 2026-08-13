@@ -23,6 +23,21 @@
   - `streamlit.{files_dir, failed_window_sec}`;
   - `gateway.{restart_initial_delay_sec, restart_max_delay_sec, streamlit_port, streamlit_log_filename, subprocess_shutdown_timeout_sec}`;
   - `logging.db.{dialect, fallback_path, connect_backoff_sec, connect_backoff_max_sec, summary_max_chars}`.
+- **`agent_question_runs` хранит полный текст вопроса и ответа (без обрезки):**
+  добавлены колонки `question` (полный текст сообщения пользователя),
+  `response` (полный ответ агента) и `media` (JSON-список приложенных файлов).
+  `question`/`media` заполняются в `register_request` (inbound), `response` —
+  в `finish_request` (after_run/подагент). В `summary` остаётся краткая
+  версия (обрезанная) для быстрого просмотра.
+- **Логирование вложенных файлов (media):** `log_inbound`/`log_outbound`
+  теперь кладут `media` (список `media` из `InboundMessage`/`OutboundMessage`)
+  в `payload["media"]` события `agent_gateway_logs`. Файлы от пользователя
+  (inbound) и вложения агента (outbound) больше не теряются в логах.
+  В `register_request` media также сохраняется в `agent_question_runs.media`
+  (вопросные вложения не затираются при финализации через `COALESCE`).
+- **Колонки `question`/`response`/`media` покрыты миграциями** в
+  `create_logs_table.sql(+_gp)` и `migrate_logs_v1.sql(+_gp)` — идемпотентное
+  `ADD COLUMN` для существующих установок.
 
 ### Changed
 - **Все ранее хардкоженные magic-числа и пути вынесены в `project.json`**:
@@ -36,6 +51,14 @@
   `~/.nanobot/vectors/audits_index` на `workspace/data_store/vectors/audits_index`.
 - `DbLoggingService`: удалены мёртвые параметры `min_conn`/`max_conn`
   (не подключались к реальному пулу).
+- **Удалены legacy-таблицы `public.agent_questions` и `public.agent_responses`.**
+  Они не использовались ни одним Python-модулем; их роль полностью покрыта
+  `agent_gateway_logs` (вопрос → `inbound`, ответ → `outbound_final` в
+  `payload.content`) + `agent_question_runs` (контекст).
+- **`DbLoggingService._render_sql` исправлена для PostgreSQL:** наивная
+  `replace("agent_gateway_logs", ...)` ломала `RENAME TO` в миграциях
+  (`RENAME TO "public"."agent_gateway_logs"`). Теперь цель `RENAME TO`
+  и schema-qualified `public.agent_gateway_logs` не квалифицируются повторно.
 - `lib/channels/postgres_channel.py`: `_session_media_dir` стал инстанс-методом
   (раньше — static с глобальной `_DATA_STORE_DIR`); путь управляется ключом
   `channels.postgres.media_cache_dir`.
@@ -49,6 +72,12 @@
 - Если вы переопределяли `~/.nanobot/vectors/audits_index` через свой скрипт —
   теперь значение по умолчанию другое (`workspace/data_store/vectors/audits_index`).
   Чтобы сохранить старое — задайте `vector_index_default_path` явно.
+- **`agent_question_runs`: новые колонки `question`/`response`/`media`.**
+  Для существующих установок выполните `create_logs_table.sql` (и
+  `migrate_logs_v1.sql`) — они содержат идемпотентное `ADD COLUMN`; или
+  вручную: `ALTER TABLE agent_question_runs ADD COLUMN IF NOT EXISTS
+  question TEXT, ADD COLUMN IF NOT EXISTS response TEXT,
+  ADD COLUMN IF NOT EXISTS media TEXT;`
 
 ### Renamed
 - **Контракт LLM-провайдера нейтрализован.** Имя env-переменной для ключа
