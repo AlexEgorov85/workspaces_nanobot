@@ -90,7 +90,7 @@ class TestPostgresChannelInit:
     def test_defaults(self, mock_db_and_psycopg):
         ch = _make_channel(mock_db_and_psycopg)
         assert ch._schema == "public"
-        assert ch._table_name == "conversation_messages"
+        assert ch._table_name == "agent_conversation_messages"
         assert ch._max_concurrent == 1
         assert ch._poll_interval == 0.1
 

@@ -42,7 +42,7 @@ def mock_all():
         sys.modules["streamlit"] = st
 
         class MockSettings:
-            channels = {"postgres": {"dsn": "", "schema": "public", "table_name": "conversation_messages"}}
+            channels = {"postgres": {"dsn": "", "schema": "public", "table_name": "agent_conversation_messages"}}
             streamlit = {"max_wait": 600, "poll_interval": 1.0, "chat_id": "streamlit", "user_id": "user"}
 
         cfg = types.ModuleType("config")
@@ -333,4 +333,4 @@ class TestModuleConfig:
         assert mock_all["streamlit_app"]._schema == "public"
 
     def test_default_fq_table(self, mock_all):
-        assert "public.conversation_messages" in mock_all["streamlit_app"]._fq_table
+        assert "public.agent_conversation_messages" in mock_all["streamlit_app"]._fq_table
