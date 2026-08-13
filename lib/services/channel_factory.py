@@ -136,7 +136,7 @@ class ChannelFactory:
     ) -> List[str]:
         """Зарегистрировать Postgres-канал (если включён в ``settings.channels.postgres``).
 
-        Канал поверх таблицы ``conversation_messages``: агент отвечает,
+        Канал поверх таблицы ``agent_conversation_messages``: агент отвечает,
         записывая строку в таблицу. Это основной способ интеграции с
         внешними бизнес-процессами, а также с Streamlit UI
         (см. ``streamlit_app.py`` — он полит эту таблицу и рендерит
@@ -167,7 +167,7 @@ class ChannelFactory:
             "enabled": True,
             "dsn": dsn,
             "schema": pg.get("schema", "public"),
-            "table_name": pg.get("table_name", "conversation_messages"),
+            "table_name": pg.get("table_name", "agent_conversation_messages"),
             "poll_interval": pg.get("poll_interval", 2.0),
             "flush_interval": pg.get("flush_interval", 2.0),
             "max_concurrent": pg.get("max_concurrent", 1),

@@ -1,6 +1,6 @@
 """PostgreSQL / Greenplum канал — связывает БД веб-сервера с nanobot-агентом.
 
-Канал опрашивает таблицу ``conversation_messages``, забирает входящие
+Канал опрашивает таблицу ``agent_conversation_messages``, забирает входящие
 сообщения от пользователей (status='pending'), отправляет их агенту,
 и записывает ответы обратно в ту же таблицу.
 
@@ -10,7 +10,7 @@
         "enabled": true,
         "dsn": "postgresql://user:pass@localhost:5432/nanobot",
         "schema": "public",
-        "table_name": "conversation_messages",
+        "table_name": "agent_conversation_messages",
         "poll_interval": 2.0,
         "max_concurrent": 1,
         "processing_timeout": 300
@@ -58,7 +58,7 @@ def _decode_jsonb(val: Any) -> dict:
 
 class PostgresChannel(BaseChannel):
     name = "postgres"
-    """Опрашивает ``conversation_messages`` и отправляет ответы агенту.
+    """Опрашивает ``agent_conversation_messages`` и отправляет ответы агенту.
 
     Жизненный цикл сообщения:
 
@@ -82,7 +82,7 @@ class PostgresChannel(BaseChannel):
         # ---- настройки подключения к БД ----
         self._dsn: str = _get("dsn", "")
         self._schema: str = _get("schema", "public")
-        self._table_name: str = _get("table_name", "conversation_messages")
+        self._table_name: str = _get("table_name", "agent_conversation_messages")
         self._fq_table: str = f"{self._schema}.{self._table_name}"
 
         # ---- тайминги ----
@@ -906,7 +906,7 @@ class PostgresChannel(BaseChannel):
             "enabled": True,
             "dsn": "postgresql://user:pass@localhost:5432/nanobot",
             "schema": "public",
-            "table_name": "conversation_messages",
+            "table_name": "agent_conversation_messages",
             "poll_interval": 2.0,
             "flush_interval": 2.0,
             "max_concurrent": 1,

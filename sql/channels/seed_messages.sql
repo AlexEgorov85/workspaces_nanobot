@@ -1,4 +1,4 @@
--- Скрипты INSERT в public.conversation_messages
+-- Скрипты INSERT в public.agent_conversation_messages
 -- для тестирования PostgresChannel с однотабличной схемой + reasoning в metadata.
 -- Запуск: psql -d <db> -U <user> -f seed_messages.sql
 -- PG 9.4: CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -9,7 +9,7 @@
 -- ================================================================
 
 -- 1. Простой вопрос про аудит (alice, начало диалога)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, status)
 VALUES
     ('chat_alice_1', 'alice', 'user',
@@ -17,7 +17,7 @@ VALUES
      'pending');
 
 -- 2. Запрос с анализом нарушений (bob)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, status)
 VALUES
     ('chat_bob_1', 'bob', 'user',
@@ -25,7 +25,7 @@ VALUES
      'pending');
 
 -- 3. Векторный поиск по документам (alice, второй чат)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, status)
 VALUES
     ('chat_alice_2', 'alice', 'user',
@@ -33,7 +33,7 @@ VALUES
      'pending');
 
 -- 4. SQL-запрос через LLM (bob)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, status)
 VALUES
     ('chat_bob_1', 'bob', 'user',
@@ -43,7 +43,7 @@ VALUES
 -- 5. Диалог из нескольких сообщений (alice, chat_alice_1 — один чат)
 --    User-сообщения: role='user', Assistant-ответы: role='assistant', reply_to = user_msg.id
 WITH q1 AS (
-    INSERT INTO public.conversation_messages
+    INSERT INTO public.agent_conversation_messages
         (chat_id, user_id, role, content, status)
     VALUES
         ('chat_alice_1', 'alice', 'user',
@@ -51,21 +51,21 @@ WITH q1 AS (
     RETURNING id
 ),
 a1 AS (
-    INSERT INTO public.conversation_messages
+    INSERT INTO public.agent_conversation_messages
         (chat_id, role, content, reply_to, status)
     SELECT 'chat_alice_1', 'assistant',
            'Чаще всего встречаются: налоговые, трудовые и экологические нарушения.',
            q1.id, 'completed'
     FROM q1
 )
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, status)
 SELECT 'chat_alice_1', 'alice', 'user',
        'А какие из них самые дорогие по штрафам?',
        'pending';
 
 -- 6. Запрос с metadata (charlie, web-клиент)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, metadata, status)
 VALUES
     ('chat_charlie_1', 'charlie', 'user',
@@ -74,7 +74,7 @@ VALUES
      'pending');
 
 -- 7. Уже обработанное user-сообщение (должно пропускаться поллером — status = completed)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, status)
 VALUES
     ('chat_alice_1', 'alice', 'user',
@@ -82,7 +82,7 @@ VALUES
      'completed');
 
 -- 8. Сообщение с медиа-файлом (data URI)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, media, status)
 VALUES
     ('chat_alice_1', 'alice', 'user',
@@ -91,7 +91,7 @@ VALUES
      'pending');
 
 -- 9. Сообщение с файлом по URL
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, media, status)
 VALUES
     ('chat_bob_1', 'bob', 'user',
@@ -100,7 +100,7 @@ VALUES
      'pending');
 
 -- 10. Сообщение с несколькими файлами
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, media, status)
 VALUES
     ('chat_bob_1', 'bob', 'user',
@@ -109,7 +109,7 @@ VALUES
      'pending');
 
 -- 11. Telegram-style сообщение
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, metadata, status)
 VALUES
     ('tg_12345', 'telegram_user_42', 'user',
@@ -118,7 +118,7 @@ VALUES
      'pending');
 
 -- 12. Длинный аналитический запрос
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, status)
 VALUES
     ('chat_alice_1', 'alice', 'user',
@@ -129,7 +129,7 @@ VALUES
      'pending');
 
 -- 13. Векторный поиск (charlie)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, user_id, role, content, status)
 VALUES
     ('chat_charlie_1', 'charlie', 'user',
@@ -137,7 +137,7 @@ VALUES
      'pending');
 
 -- 14. Новый пользователь без chat_id/user_id (тест fallback на user_id)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (role, content, status)
 VALUES
     ('user',
@@ -149,37 +149,37 @@ VALUES
 -- ================================================================
 
 -- Ответ к сообщению 1 (простой ответ с reasoning в metadata)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, role, content, metadata, reply_to, status)
 SELECT
     chat_id, 'assistant',
     'Вот результат: за прошлый год проведено 1247 аудиторских проверок.',
     '{"reasoning": "Пользователь спрашивает о количестве проверок. Ищем в БД по году."}'::jsonb,
     id, 'completed'
-FROM public.conversation_messages
+FROM public.agent_conversation_messages
 WHERE role = 'user' AND content LIKE 'Сколько аудиторских проверок%'
 LIMIT 1;
 
 -- Ответ с кнопками (к сообщению 2)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, role, content, buttons, reply_to, status)
 SELECT
     chat_id, 'assistant',
     'Топ-10 нарушений по типам за 2024 год:\n1. Налоговые — 342\n2. Трудовые — 287\n...',
     '[{"title": "Детали", "url": "https://example.com/violations/2024"}, {"title": "Экспорт CSV", "payload": "/export csv"}]'::jsonb,
     id, 'completed'
-FROM public.conversation_messages
+FROM public.agent_conversation_messages
 WHERE role = 'user' AND content LIKE 'Покажи топ-10 нарушений%'
 LIMIT 1;
 
 -- Ответ с reasoning (к сообщению 4 — SQL-запрос)
-INSERT INTO public.conversation_messages
+INSERT INTO public.agent_conversation_messages
     (chat_id, role, content, metadata, reply_to, status)
 SELECT
     chat_id, 'assistant',
     'Вот SQL-запрос для подсчёта объектов проверки по кварталам.',
     '{"reasoning": "Надо сгруппировать по EXTRACT(YEAR...) и EXTRACT(QUARTER...) из даты проверки. Использую CHECK_DATE из таблицы inspections."}'::jsonb,
     id, 'completed'
-FROM public.conversation_messages
+FROM public.agent_conversation_messages
 WHERE role = 'user' AND content LIKE 'Напиши SQL%'
 LIMIT 1;

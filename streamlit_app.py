@@ -1,4 +1,4 @@
-"""Streamlit UI — тонкий клиент gateway через conversation_messages."""
+"""Streamlit UI — тонкий клиент gateway через agent_conversation_messages."""
 from __future__ import annotations
 
 import base64
@@ -23,7 +23,7 @@ from config import SETTINGS
 _pg = (getattr(SETTINGS, "channels", {}) or {}).get("postgres", {})
 _dsn = _pg.get("dsn", "")
 _schema = _pg.get("schema", "public")
-_table = _pg.get("table_name", "conversation_messages")
+_table = _pg.get("table_name", "agent_conversation_messages")
 _fq_table = f"{_schema}.{_table}"
 
 _MAX_WAIT = SETTINGS.streamlit.get("max_wait", 600)

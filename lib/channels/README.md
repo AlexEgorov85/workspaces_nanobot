@@ -4,7 +4,7 @@
 
 ## PostgresChannel
 
-Работает через таблицу `conversation_messages` в PostgreSQL/Greenplum.
+Работает через таблицу `agent_conversation_messages` в PostgreSQL/Greenplum.
 
 ### Жизненный цикл сообщения
 
@@ -43,7 +43,7 @@
     "enabled": true,
     "dsn": "postgresql://user:pass@localhost:5432/nanobot",
     "schema": "public",
-    "table_name": "conversation_messages",
+    "table_name": "agent_conversation_messages",
     "poll_interval": 2.0,
     "flush_interval": 2.0,
     "max_concurrent": 1,
@@ -53,7 +53,7 @@
 
 ### DDL
 
-Таблица `conversation_messages` создаётся автоматически или вручную:
+Таблица `agent_conversation_messages` создаётся автоматически или вручную:
 
 | Колонка | Тип | Описание |
 |---------|-----|----------|
