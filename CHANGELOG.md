@@ -9,13 +9,98 @@
 ## [Unreleased]
 
 ### Added
-- ...
+- **Конфигурация: единый стиль settings-чтения.** Добавлен хелпер
+  `config.get_setting(*keys, default=...)` для безопасного доступа к вложенным
+  ключам `SETTINGS` с fallback.
+- **Тест-каркас `tests/test_config_keys.py`:** проверяет наличие и дефолты
+  всех обязательных ключей в `project.json` через JSONC-парсер из `config.py`.
+  При добавлении новой настройки — добавляйте запись в `REQUIRED_KEYS`.
+- **Новые ключи `project.json` (из рефакторинга hardcoded-значений):**
+  - `channels.postgres.{max_stuck_retries, msg_ctx_max_size, media_cache_dir}` и под-секция `pool.{min_conn, max_conn, pool_timeout}`;
+  - `channels.redis.{error_backoff_sec, reply_to_max_size, reply_to_trim_to}`;
+  - `skills.audit_analyzer.{sync_max_queue_size, reconnect_backoff_sec, reconnect_backoff_max_sec, cache_max_age_sec, cache_refresh_interval_sec, embedding_http_timeout_sec, mode_vector_store_table, vector_index_default_path, cli_default_format, text_chunk_size, text_chunk_overlap, build_batch_pause_sec}`;
+  - `cli.repl_idle_timeout_sec`;
+  - `streamlit.{files_dir, failed_window_sec}`;
+  - `gateway.{restart_initial_delay_sec, restart_max_delay_sec, streamlit_port, streamlit_log_filename, subprocess_shutdown_timeout_sec}`;
+  - `logging.db.{dialect, fallback_path, connect_backoff_sec, connect_backoff_max_sec, summary_max_chars}`.
 
 ### Changed
-- ...
+- **Все ранее хардкоженные magic-числа и пути вынесены в `project.json`**:
+  timeout'ы, интервалы, retry-лимиты, пороги, размеры пулов и очередей,
+  пути к кешу/индексам, chunk-параметры — теперь управляются через настройки.
+- `cli_agent.py` (`--mode`): снят `required=True`. Значение по умолчанию
+  берётся из `skills.audit_analyzer.cli_default_mode` в `project.json`.
+- `channels.postgres.processing_timeout`: дефолт унифицирован на `120`
+  (раньше расходился между `project.json=120` и `postgres_channel.py=600`).
+- `skills.audit_analyzer.vector_index_default_path`: дефолт сменён с
+  `~/.nanobot/vectors/audits_index` на `workspace/data_store/vectors/audits_index`.
+- `DbLoggingService`: удалены мёртвые параметры `min_conn`/`max_conn`
+  (не подключались к реальному пулу).
+- `lib/channels/postgres_channel.py`: `_session_media_dir` стал инстанс-методом
+  (раньше — static с глобальной `_DATA_STORE_DIR`); путь управляется ключом
+  `channels.postgres.media_cache_dir`.
+- `tools/build_vectors.py`: default'ы `--chunk-size` / `--chunk-overlap` /
+  `--batch-pause` читаются из `skills.audit_analyzer.*`.
+
+### Migration notes
+- Если у вас уже есть `session_manager.json` с плоскими `min_conn`/`max_conn`/
+  `pool_timeout` — продолжает работать (legacy-fallback в `session_storage.py`).
+  Рекомендуется перенести в `channels.postgres.pool.*` в `project.json`.
+- Если вы переопределяли `~/.nanobot/vectors/audits_index` через свой скрипт —
+  теперь значение по умолчанию другое (`workspace/data_store/vectors/audits_index`).
+  Чтобы сохранить старое — задайте `vector_index_default_path` явно.
+
+### Renamed
+- **Контракт LLM-провайдера нейтрализован.** Имя env-переменной для ключа
+  провайдера сменено: `MISTRAL_API_KEY` → `LLM_API_KEY`. Больше нет привязки
+  к конкретному вендору в имени переменной. Изменения:
+  - `config.py`: ключ из любой непустой `SETTINGS.providers.*.api_key`
+    всегда экспортируется как `LLM_API_KEY`.
+  - `config.json`: `${MISTRAL_API_KEY}` → `${LLM_API_KEY}` в
+    `providers.minimax.apiKey` и `providers.mistral.apiKey`.
+  - `lib/services/config_service.py:_pre_resolve_env_refs`:
+    `LLM_API_KEY` берётся из первой непустой `SETTINGS.providers.*.api_key`.
+  - Дефолты `project.json` (`llm_provider`, `llm_model`, `llm_api_base`)
+    нейтральны (`openai-compatible` / `gpt-4o-mini` / OpenAI URL); выбрать
+    Mistral/MiniMax/etc. — задать `llm_api_base` явно.
+  - `.secrets.env.example`: секция `# providers: mistral` →
+    `# providers: llm` (любое имя секции допустимо).
+- Действия при миграции:
+  - В `.secrets.env` переименуйте секцию `# providers: mistral` в
+    `# providers: llm` (необязательно, но рекомендуется для ясности).
+  - Если вы где-то задавали `MISTRAL_API_KEY` в shell через `export` —
+    переименуйте в `LLM_API_KEY`.
+  - В `project.json` при необходимости укажите свой `llm_api_base`
+    (например, `https://api.minimax.io/v1`).
+
+- **Навык `audit_analyzer` теперь читает ВСЕ данные из DuckDB-кэша.**
+  Прямой psycopg2 в read-only потоке навыка не используется.
+  Раньше `db_loader` ходил в PG через `utils.db.fetch` — теперь через
+  `cache_provider.query_sql(...)` (тот же DuckDB-файл, что и для аудит-данных).
+- `lib/services/cache_provider_impl.py`: копирование PG → DuckDB переведено
+  с `pd.DataFrame(records)` на `COPY ... TO STDOUT` + `read_csv_auto`
+  (без `pandas`, без pyarrow-IPC). Сохраняются типы JSONB → JSON,
+  TIMESTAMPTZ → TIMESTAMPTZ, NUMERIC → DECIMAL, UUID → UUID.
+- `lib/services/audit_memory_store.py`: `pd.DataFrame(records)` →
+  `pyarrow.Table.from_pylist` + `conn.register`. Сохраняет `list[float]`
+  как `DOUBLE[]` (раньше через `pd` → `DOUBLE[]`, через CSV → `VARCHAR`).
+- Удалён `workspace/skills/audit_analyzer/scripts/predefined_scripts.py`
+  (267 строк) — реестр перенесён в БД.
+- `cache_provider_impl.py` теперь поддерживает `additional_tables`
+  (минимальное расширение для копирования таблиц из произвольных схем).
 
 ### Fixed
-- ...
+- `audit_memory_store._replace_locked` / `_upsert_locked`: добавлены транзакции
+  `BEGIN/COMMIT/ROLLBACK` для DELETE + INSERT (ранее при ошибке INSERT
+  таблица оставалась пустой). DDL (ALTER/DROP) остаётся вне транзакции
+  (DuckDB не откатывает DDL).
+- `db_loader.get_provider()` теперь fail-fast без инжекции — ранее молча
+  создавал второй CacheProvider, что приводило к Windows-блокировкам файла.
+- `db_loader._parse_parameters()` корректно обрабатывает `None` и пустые
+  строки (раньше бросал `TypeError`).
+
+### Removed
+- `pandas` из `requirements.txt` (заменён на `pyarrow`).
 
 ---
 
@@ -150,7 +235,7 @@
   (`temp + os.replace`) в файл кеша навыка. CLI открывает снимок только
   на чтение.
 - **Pre-resolve `${VAR}` от `.secrets.env`**: gateway больше НЕ требует
-  `export MISTRAL_API_KEY=...` в shell — `ConfigService._pre_resolve_env_refs`
+  `export LLM_API_KEY=...` в shell — `ConfigService._pre_resolve_env_refs`
   кладёт ключи в `os.environ` ДО `_load_runtime_config`.
 - **`--force` в `audit_analyzer` удалён.**
   `cli.py` завершается `FileNotFoundError`, указывающим на gateway.
@@ -193,7 +278,7 @@
   callbacks идут раньше `start()`.
 - **Совместимость с nanobot 0.2.2**: инъекция провайдерских API-ключей
   из `.secrets.env` в конфиг на старте (провайдер-скоупинг формат
-  `.secrets.env` не попадал в `os.environ` как `MISTRAL_API_KEY`).
+  `.secrets.env` не попадал в `os.environ` как `LLM_API_KEY`).
 - **`PostgresChannel.send`** — runtime-progress события больше не
   затирают `media` сообщений-инструментов.
 - **Streamlit**: `_get_extension_from_mime` корректно выводит расширение

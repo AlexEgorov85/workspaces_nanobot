@@ -174,22 +174,27 @@ flowchart TB
 
 ### Pre-resolve `${VAR}` от `.secrets.env`
 
-`nanobot._load_runtime_config` резолвит `${MISTRAL_API_KEY}` только из
+`nanobot._load_runtime_config` резолвит `${LLM_API_KEY}` только из
 `os.environ` и при отсутствии падает `ValueError`. Между тем `config.py`
 для провайдерских ключей использует провайдер-скоупинг формат
 `.secrets.env`:
 
 ```
-# providers: mistral
+# providers: llm
 api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 ```
 
-— в `os.environ` это не попадает как `MISTRAL_API_KEY`. Решение
+— в `os.environ` это не попадает как `LLM_API_KEY`. Решение
 (`ConfigService._pre_resolve_env_refs`): прочитать `config.json`,
 найти `${VAR}` плейсхолдеры, для каждого `*_API_KEY` без env — достать
-ключ из `SETTINGS.providers.<lower>.api_key` (туда `config.py` уже
+ключ из `SETTINGS.providers.<любой>.api_key` (туда `config.py` уже
 подставил значение) и положить в `os.environ` ДО `_load_runtime_config`.
-**Gateway больше НЕ требует `export MISTRAL_API_KEY=...` в shell.**
+**Gateway больше НЕ требует `export LLM_API_KEY=...` в shell.**
+
+> **Миграция с исторического имени:** в старых конфигах `.secrets.env` мог
+> быть `# providers: mistral`. Логика остаётся обратно совместимой: ключ
+> из любой непустой секции `providers.*` подставляется как `LLM_API_KEY`.
+> Достаточно переименовать секцию в `# providers: llm` для ясности.
 
 ### Race-condition fix: callbacks ДО `ctx.start()`
 
@@ -330,7 +335,7 @@ nanobot/
 
 | Ключ | Назначение | Значение / по умолчанию |
 |------|-----------|-------------|
-| `llm_provider` / `llm_model` / `llm_api_base` | LLM для генерации SQL | `mistral` / `mistral-large-latest` / `https://api.mistral.ai/v1` |
+| `llm_provider` / `llm_model` / `llm_api_base` | LLM для генерации SQL | `openai-compatible` / `gpt-4o-mini` / `https://api.openai.com/v1` (любой OpenAI-compatible: Mistral, OpenAI, MiniMax, Ollama, vLLM) |
 | `llm_max_tokens` / `llm_temperature` | Параметры генерации | `8192` / `0.1` |
 | `db_schema` | Схема с таблицами аудита | `oarb` |
 | `db_tables` | Таблицы, доступные агенту | `audit_reports, audits, report_items, violations` (значение project.json; код по умолч. — пустой список) |
@@ -1646,7 +1651,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 
 | Компонент | Что нужно сделать | Файл | Если сломалось — где смотреть |
 |-----------|-----------------|------|------------------------------|
-| **Конфиг** | Сменить модель/провайдера | `config.json` → `agents.defaults.model` | `ValueError: MISTRAL_API_KEY` → `.secrets.env` (секция `providers: mistral`); gateway не находит ключ → `lib/services/config_service.py:_pre_resolve_env_refs` |
+| **Конфиг** | Сменить модель/провайдера | `config.json` → `agents.defaults.model` | `ValueError: LLM_API_KEY` → `.secrets.env` (секция `providers: llm`); gateway не находит ключ → `lib/services/config_service.py:_pre_resolve_env_refs` |
 | **Конфиг** | Настроить таймауты | `project.json` → секции `gateway`, `cli` или `streamlit` | LLM-запросы висят → `cli.llm_timeout` / `gateway.llm_timeout`; exec-команды обрываются на 60с → `tools.exec.timeout` (`config.json`) |
 | **Каналы / БД** | Подключение к БД | `project.json` → `channels.postgres` (`dsn`, `schema`, `table_name`) | `psycopg2.OperationalError` / `connection refused` → `DATABASE_URL` в `.secrets.env`; `gssencmode` ошибка на GP 6.25 → `lib/services/config_service.py` (kwargs `connect()`); `too many connections` → `lib/services/audit_sync_service.py` (ретраи) |
 | **Каналы** | Включить Redis-канал | `project.json` → `channels.redis.enabled` | `Connection refused` → `host`/`port`/`password`; не приходят сообщения → `lib/channels/redis_channel.py` + `allow_from` |
@@ -1714,6 +1719,39 @@ E2E проверяет все режимы: predefined (реальный SQL п�
 
 ---
 
+## ➕ Добавление новой настройки
+
+Если вы вводите новый параметр, который раньше был литералом в коде, следуйте правилу:
+
+1. **Объявите ключ в `project.json`** (JSONC, с дефолтом и комментарием) — в подходящей секции (`channels.*`, `skills.*`, `cli`, `gateway`, `logging.db` и т.п.).
+2. **Читайте через `config.get_setting(*keys, default=...)`** или `SETTINGS.<section>.<key>` с fallback. **Не хардкодьте литерал**.
+3. **Добавьте ключ в `REQUIRED_KEYS` в `tests/test_config_keys.py`** — иначе CI не поймает случайное удаление/переименование.
+4. **Перезапустите gateway / CLI** после правки `project.json`.
+
+Пример (вынос `max_stuck_retries`):
+
+```json
+// project.json
+"channels": {
+  "postgres": {
+    "max_stuck_retries": 3   // Лимит retry зависшего сообщения
+  }
+}
+```
+
+```python
+# lib/channels/postgres_channel.py
+from config import get_setting
+max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3)
+```
+
+```python
+# tests/test_config_keys.py → REQUIRED_KEYS
+("channels.postgres.max_stuck_retries", 3),
+```
+
+Используйте `get_setting()` для вложенных ключей с дефолтом; `SETTINGS.x.y.z` — для горячего чтения без дефолта (если ключ гарантированно есть). Избегайте `cfg.get("key", "default")` без явного пути — это маскирует orphan-ключи.
+
 ## 📝 Изменения и миграции
 
 Краткий таймлайн релизов — в [CHANGELOG.md](CHANGELOG.md). Этот раздел — только то, что **требует ручных действий при миграции**.
@@ -1725,7 +1763,7 @@ E2E проверяет все режимы: predefined (реальный SQL п�
 | Изменение | Действие |
 |-----------|----------|
 | `.env` → `project.json` + `.secrets.env` | Скопировать секции `channels.*`, `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway` в `project.json` (JSONC). Секреты — в `.secrets.env` с провайдер-скоупинг форматом |
-| Провайдерские ключи больше не через `export` | Секция `# providers: mistral` с `api_key=...` в `.secrets.env`. `ConfigService._pre_resolve_env_refs` подставит в `os.environ` автоматически |
+| Провайдерские ключи больше не через `export` | Секция `# providers: llm` с `api_key=...` в `.secrets.env`. `ConfigService._pre_resolve_env_refs` подставит в `os.environ` автоматически (env-переменная — каноническая `LLM_API_KEY`) |
 | `vector_indexes` / `mode_vector_index_path` в `config.json` | Удалить; теперь в `oarb.vector_index_config` (см. [DEVELOPMENT.md → Векторная индексация](#векторная-индексация)) |
 | DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
 | `data-analyzer`, `html_presentation_generator` | Удалены. Убрать из импортов и `config.json` |

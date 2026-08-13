@@ -3,7 +3,7 @@
 Локальная инсталляция фреймворка **[nanobot-ai](https://github.com/HKUDS/nanobot)** (PyPI: `nanobot-ai`) — персонального AI-агента, запущенного с **кастомными доработками**: PostgreSQL-каналы, Redis-интеграция, Streamlit UI, система бенчмарков и пользовательский навык audit_analyzer.
 
 > **Имя агента:** Aura (🐈)  
-> **Базовая модель:** `ministral-14b-2512` (Mistral)  
+> **Базовая модель:** OpenAI-compatible (задаётся в `config.json`/`project.json`)  
 > **ОС:** Windows  
 > **Язык:** Русский / English
 
@@ -51,11 +51,11 @@ copy .secrets.env.example .secrets.env   # Windows
 ```ini
 DATABASE_URL=postgresql://user:password@localhost:5432/nanobot
 
-# providers: mistral
-api_key=ваш_ключ_mistral
+# providers: llm
+api_key=ваш_LLM_API_KEY
 
 # Skills: audit_analyzer
-llm_api_key=ваш_ключ_mistral
+llm_api_key=ваш_LLM_API_KEY
 ```
 
 Полный список переменных и куда они подставляются — в [Переменные окружения](#переменные-окружения).
@@ -109,11 +109,11 @@ python gateway.py
 ```ini
 DATABASE_URL=postgresql://user:password@localhost:5432/nanobot
 
-# providers: mistral
+# providers: llm
 api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 
 # Skills: audit_analyzer
-llm_api_key=...mistral...
+llm_api_key=...llm_api_key...
 ```
 
 В одной секции `# providers: <name>` ключи попадают в `SETTINGS.providers.<name>.<key>`. Секция `# Skills: <skill>` — в `SETTINGS.skills.<skill>.<key>`.
@@ -124,9 +124,8 @@ llm_api_key=...mistral...
 |-----------|---------------|-----------|
 | `DATABASE_URL` / `PG_DSN` | `channels.postgres.dsn` через `utils.db.resolve_dsn()` | DSN PostgreSQL/Greenplum |
 | `REDIS_URL` / `REDIS_PASSWORD` | `channels.redis.*` | DSN и пароль Redis |
-| `MISTRAL_API_KEY` | `providers.mistral.api_key` | Ключ Mistral (через pre-resolve) |
-| `<provider>_API_KEY` | `providers.<lower>.api_key` | Ключ произвольного провайдера |
-| `LLM_API_KEY` | `skills.audit_analyzer.llm_api_key` | Ключ LLM для `audit_analyzer` (если не из провайдер-секции) |
+| `LLM_API_KEY` | `providers.<любой>.api_key` (через pre-resolve) | Ключ LLM-провайдера |
+| `<provider>_API_KEY` | `providers.<lower>.api_key` | Ключ произвольного провайдера (legacy-fallback) |
 
 Если переменная не задана ни в `.secrets.env`, ни в `os.environ`, а в конфиге есть `${VAR}` — `nanobot._load_runtime_config` упадёт `ValueError`.
 
@@ -543,16 +542,16 @@ pytest tests/ --cov=lib --cov-report=term-missing
 
 ## Troubleshooting
 
-### `ValueError: MISTRAL_API_KEY not set` / `ApiKey not found`
+### `ValueError: LLM_API_KEY not set` / `ApiKey not found`
 
 Причина: ключ провайдера не подставился в `os.environ`. Проверьте `.secrets.env`:
 
 ```ini
-# providers: mistral   ← секция обязательна
+# providers: llm   ← секция обязательна
 api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 ```
 
-Если секция и значение на месте, но ошибка остаётся — `ConfigService._pre_resolve_env_refs` не нашёл ключ. Проверьте `config.json`: имя провайдера должно совпадать с секцией в `.secrets.env` (case-insensitive).
+Если секция и значение на месте, но ошибка остаётся — `ConfigService._pre_resolve_env_refs` не нашёл ключ. Проверьте `config.json`: имя провайдера должно совпадать с секцией в `.secrets.env` (case-insensitive). Имя env-переменной теперь каноническое — `LLM_API_KEY` (вместо исторического `MISTRAL_API_KEY`).
 
 ### `psycopg2.OperationalError: connection refused`
 
@@ -610,7 +609,7 @@ v2.0.0 — крупное обновление. Изменения в конфи
 | Формат конфига | `.env` (только переменные) | `project.json` (JSONC) + `config.json` + `.secrets.env` |
 | Секции проекта | смешаны в `.env` | `channels.*`, `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway`, `logging.db` — в `project.json` |
 | API-ключи | `.env` | `.secrets.env` (в `.gitignore`) |
-| DSN провайдеров | `MISTRAL_API_KEY` в shell | `# providers: mistral` секция в `.secrets.env` (pre-resolve через `ConfigService`) |
+| DSN провайдеров | `LLM_API_KEY` в shell | `# providers: llm` секция в `.secrets.env` (pre-resolve через `ConfigService`) |
 | Параметры векторов | `vector_indexes.*`, `mode_vector_index_path` в `config.json` | `oarb.vector_index_config` в БД (таблица) |
 | DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
 | Навыки `data-analyzer`, `html_presentation_generator` | присутствовали | удалены |
@@ -663,7 +662,7 @@ v2.0.0 — крупное обновление. Изменения в конфи
 - **loguru** — логирование
 - **httpx** — HTTP-клиент (Ollama эмбеддинги)
 - **duckdb** — встраиваемая аналитическая БД (audit_analyzer)
-- **faiss-cpu**, **numpy**, **pyarrow** — векторный поиск и Arrow IPC (audit_analyzer)
+- **faiss-cpu**, **numpy**, **pyarrow** — векторный поиск и bulk-вставка в DuckDB (audit_analyzer)
 - **PyYAML** — конфиги бенчмарков
 
 Версии — точные `=X.Y.Z` в `requirements.txt` для полной воспроизводимости.
