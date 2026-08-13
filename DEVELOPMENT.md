@@ -196,6 +196,23 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 > из любой непустой секции `providers.*` подставляется как `LLM_API_KEY`.
 > Достаточно переименовать секцию в `# providers: llm` для ясности.
 
+### Единый резолв LLM-конфигурации: `lib/services/llm_config.py`
+
+Резолв провайдера/модели/ключа вынесен в общий модуль
+`lib/services/llm_config.py::resolve_llm_config()`: дефолт берётся из
+`agents.defaults` (модель/провайдер) и `providers.<provider>`
+(`apiBase`/`apiKey`) уже-резолвнутых `SETTINGS`, переопределения
+(например, `skills.audit_analyzer.llm_*`) передаются через `overrides`.
+
+Используется единообразно:
+* навыком `audit_analyzer` — `scripts/skill_config.py::get_llm_config()`;
+* бенчмарками — `benchmarks/runner.py::_run_suite()` (без хардкода
+  провайдера при `--model`; `ensure_llm_env()` гарантирует
+  `LLM_API_KEY` в env для резолва `${LLM_API_KEY}`).
+
+Так смена модели/провайдера/ключа агента автоматически меняет LLM и в
+навыке, и в бенчмарке — без дублирования секретов в трёх местах.
+
 ### Race-condition fix: callbacks ДО `ctx.start()`
 
 `AuditSyncService` — worker-поток, который делает `initial_load` сразу
