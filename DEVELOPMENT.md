@@ -375,8 +375,9 @@ nanobot/
 > `sql_mode.py` (`MAX_RETRIES = 2` → до 3 попыток) и от `cli_max_retries`
 > не зависят.
 
-DSN подключается через `channels.postgres.dsn` в `project.json` /
-`DATABASE_URL` в `.secrets.env` (`utils.db.resolve_dsn()`). Навык собственного
+DSN подключается через `channels.postgres.{host,port,dbname,user}` в
+`project.json` + `DB_PASSWORD` в `.secrets.env` (или полный `dsn` override,
+или legacy `DATABASE_URL`) через `utils.db.resolve_dsn()`. Навык собственного
 DSN не хранит.
 
 ---
@@ -1135,7 +1136,7 @@ GROUP BY v.source;
 | `ModuleNotFoundError: No module named 'numpy'` | Не установлен `numpy` | `pip install numpy` |
 | `FAISS-индекс не собран` warning | `faiss` или `numpy` отсутствуют | Установить, перезапустить `--full-rebuild` |
 | `ImportError: No module named 'utils'` или `No module named 'lib'` | Скрипт не из корня проекта | Запускать из корня: `cd /path/to/nanobot && python tools/build_vectors.py` |
-| `psycopg2.OperationalError: connection refused` | Неверный DSN или PostgreSQL не запущен | Проверьте `DATABASE_URL` в `.secrets.env`, `pg_isready` |
+| `psycopg2.OperationalError: connection refused` | Неверный DSN или PostgreSQL не запущен | Проверьте `channels.postgres.{host,port,user,dbname}` в `project.json` + `DB_PASSWORD` в `.secrets.env`; `pg_isready` |
 | `psql: command not found` | Нет `psql` в PATH (только для seed/DDL) | Установите PostgreSQL client или используйте `python -c "from workspace.utils.db import execute; execute(open('sql/...').read())"` |
 | `permission denied for table public.agent_vector_index_store` | Не хватает GRANT | `GRANT INSERT, UPDATE, DELETE ON public.agent_vector_index_store TO <user>` |
 | `--status` показывает 0 индексов | `public.agent_vector_index_config` пуст | Применить `sql/audit_analyzer/seed_default_indexes.sql` |
@@ -1670,7 +1671,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 |-----------|-----------------|------|------------------------------|
 | **Конфиг** | Сменить модель/провайдера | `config.json` → `agents.defaults.model` | `ValueError: LLM_API_KEY` → `.secrets.env` (секция `providers: llm`); gateway не находит ключ → `lib/services/config_service.py:_pre_resolve_env_refs` |
 | **Конфиг** | Настроить таймауты | `project.json` → секции `gateway`, `cli` или `streamlit` | LLM-запросы висят → `cli.llm_timeout` / `gateway.llm_timeout`; exec-команды обрываются на 60с → `tools.exec.timeout` (`config.json`) |
-| **Каналы / БД** | Подключение к БД | `project.json` → `channels.postgres` (`dsn`, `schema`, `table_name`) | `psycopg2.OperationalError` / `connection refused` → `DATABASE_URL` в `.secrets.env`; `gssencmode` ошибка на GP 6.25 → `lib/services/config_service.py` (kwargs `connect()`); `too many connections` → `lib/services/audit_sync_service.py` (ретраи) |
+| **Каналы / БД** | Подключение к БД | `project.json` → `channels.postgres` (`host`/`port`/`dbname`/`user` + опц. `dsn`) | `psycopg2.OperationalError` / `connection refused` → `DB_PASSWORD` в `.secrets.env` (DSN собирается в `utils.db.resolve_dsn()`); `gssencmode` ошибка на GP 6.25 → `lib/services/config_service.py` (kwargs `connect()`); `too many connections` → `lib/services/audit_sync_service.py` (ретраи) |
 | **Каналы** | Включить Redis-канал | `project.json` → `channels.redis.enabled` | `Connection refused` → `host`/`port`/`password`; не приходят сообщения → `lib/channels/redis_channel.py` + `allow_from` |
 | **Навыки** | Настроить навык | `project.json` → `skills.<имя>` | Навык не подхватывается → `agents.defaults.disabledSkills` (`config.json`); навык стартует со старыми параметрами → `lib/services/runtime_patcher.py` (см. `RuntimePatcher.apply_all`) |
 | **Секреты** | Добавить API-ключ | `.secrets.env` (провайдер-скоупинг формат) | `nanobot._load_runtime_config` падает с `ValueError` → `lib/services/config_service.py:_pre_resolve_env_refs` (должен подставить `${VAR}` в `os.environ` ДО nanobot) |

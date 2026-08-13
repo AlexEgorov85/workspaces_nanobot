@@ -33,7 +33,11 @@
   "channels": {
     "postgres": {
       "enabled": true,                        // Канал включён. Варианты: true | false
-      "dsn": "${DATABASE_URL}",               // Строка подключения (секрет в .secrets.env)
+      "dsn": null,                            // Полный DSN (override). Приоритет над частями ниже. Варианты: null | "postgresql://..."
+      "host": "localhost",                    // Хост PostgreSQL/Greenplum
+      "port": 5432,                           // Порт
+      "dbname": "nanobot",                    // Имя БД
+      "user": "postgres",                     // Пользователь
       "schema": "public",                     // Схема БД
       "messages_table": "agent_session_messages",   // Таблица сообщений сессий (PGSessionManager, префикс agent_)
       "meta_table": "agent_session_meta",           // Таблица метаданных сессий (PGSessionManager, префикс agent_)

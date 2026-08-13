@@ -49,7 +49,8 @@ copy .secrets.env.example .secrets.env   # Windows
 Отредактируйте `.secrets.env` (он в `.gitignore`):
 
 ```ini
-DATABASE_URL=postgresql://user:password@localhost:5432/nanobot
+# Пароль БД (host/port/dbname/user — в project.json → channels.postgres)
+DB_PASSWORD=ваш_пароль_БД
 
 # providers: llm
 api_key=ваш_LLM_API_KEY
@@ -65,8 +66,8 @@ llm_api_key=ваш_LLM_API_KEY
 | Файл | Что хранит |
 |------|-----------|
 | `config.json` | Настройки nanobot: агенты, провайдеры, каналы, инструменты, API, gateway |
-| `project.json` | Настройки проекта: `channels.*` (postgres, redis), `skills.*`, `cli`, `gateway`, `streamlit`, `benchmark`, `logging.db` |
-| `.secrets.env` | Секреты (API-ключи, `DATABASE_URL`) — подставляются в конфиг через `${VAR}` |
+| `project.json` | Настройки проекта: `channels.*` (postgres: host/port/dbname/user + dsn override, redis), `skills.*`, `cli`, `gateway`, `streamlit`, `benchmark`, `logging.db` |
+| `.secrets.env` | Секреты (API-ключи, `DB_PASSWORD`) — подставляются в конфиг через `${VAR}` или собираются в DSN |
 
 `config.py` мержит их в `SETTINGS` в порядке: `project.json → config.json → .secrets.env` (поздний перекрывает ранний). `project.json` поддерживает JSONC-комментарии (`//` и `/* */`).
 
@@ -107,7 +108,8 @@ python gateway.py
 Файл поддерживает **провайдер-скоупинг** (секции `# providers:`, `# Skills:` и т.п.):
 
 ```ini
-DATABASE_URL=postgresql://user:password@localhost:5432/nanobot
+# Пароль БД (host/port/dbname/user — в project.json → channels.postgres)
+DB_PASSWORD=ваш_пароль_БД
 
 # providers: llm
 api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
@@ -122,10 +124,18 @@ llm_api_key=...llm_api_key...
 
 | Переменная | Куда попадает | Назначение |
 |-----------|---------------|-----------|
-| `DATABASE_URL` / `PG_DSN` | `channels.postgres.dsn` через `utils.db.resolve_dsn()` | DSN PostgreSQL/Greenplum |
+| `DB_PASSWORD` / `PGPASSWORD` | `channels.postgres` (host/port/dbname/user из project.json + пароль) | Пароль PostgreSQL/Greenplum |
+| `DATABASE_URL` / `PG_DSN` | `channels.postgres.dsn` (override-полный DSN) | Полный DSN PostgreSQL/Greenplum (legacy) |
 | `REDIS_URL` / `REDIS_PASSWORD` | `channels.redis.*` | DSN и пароль Redis |
 | `LLM_API_KEY` | `providers.<любой>.api_key` (через pre-resolve) | Ключ LLM-провайдера |
 | `<provider>_API_KEY` | `providers.<lower>.api_key` | Ключ произвольного провайдера (legacy-fallback) |
+
+**DSN собирается так** (`utils.db.resolve_dsn()`, приоритет по убыванию):
+
+1. `configure(dsn)` — явный вызов при старте.
+2. `channels.postgres.dsn` — полный DSN в `project.json` (override).
+3. `channels.postgres.{host,port,dbname,user}` + `DB_PASSWORD` — собрать из частей.
+4. `DATABASE_URL` / `PG_DSN` из `os.environ` — legacy-fallback.
 
 Если переменная не задана ни в `.secrets.env`, ни в `os.environ`, а в конфиге есть `${VAR}` — `nanobot._load_runtime_config` упадёт `ValueError`.
 

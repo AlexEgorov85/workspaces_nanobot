@@ -54,9 +54,10 @@ def resolve_dsn() -> str:
 
     1. configure(dsn) — явно заданный при запуске;
     2. SETTINGS.postgresql.dsn — legacy-место из .env (удалено);
-    3. SETTINGS.channels.postgres.dsn — новый дом в project.json
-       (значение ``${DATABASE_URL}`` уже резолвится в config.py);
-    4. os.environ DATABASE_URL / PG_DSN.
+    3. SETTINGS.channels.postgres.dsn — полный DSN в project.json (override);
+    4. SETTINGS.channels.postgres.{host,port,dbname,user} + os.environ DB_PASSWORD
+       — собрать DSN из частей (пароль в .secrets.env);
+    5. os.environ DATABASE_URL / PG_DSN.
 
     Возвращает пустую строку, если DSN нигде нет.
     """
@@ -64,18 +65,38 @@ def resolve_dsn() -> str:
         return _dsn
     try:
         from config import SETTINGS
+        cfg = SETTINGS
+        # Идём по секциям в порядке приоритета (поздний перекрывает ранний).
         for section in ("postgresql", "channels.postgres"):
-            cfg = SETTINGS
+            node = cfg
             for part in section.split("."):
-                if isinstance(cfg, dict):
-                    cfg = cfg.get(part, {})
+                if isinstance(node, dict):
+                    node = node.get(part, {})
                 else:
+                    node = {}
                     break
-            else:
-                if isinstance(cfg, dict):
-                    dsn = cfg.get("dsn", "") or ""
-                    if dsn:
-                        return dsn
+            if not isinstance(node, dict):
+                continue
+            explicit = node.get("dsn") or ""
+            if explicit:
+                return explicit
+            if section == "channels.postgres":
+                # Собрать DSN из частей: host/port/dbname/user (из project.json)
+                # + пароль (из os.environ DB_PASSWORD / PGPASSWORD).
+                host = node.get("host")
+                if host:
+                    port = node.get("port") or 5432
+                    dbname = node.get("dbname") or ""
+                    user = node.get("user") or ""
+                    password = (
+                        os.environ.get("DB_PASSWORD")
+                        or os.environ.get("PGPASSWORD")
+                        or ""
+                    )
+                    return (
+                        f"postgresql://{user}:{password}"
+                        f"@{host}:{port}/{dbname}"
+                    )
     except Exception:
         pass
     return os.environ.get("DATABASE_URL", "") or os.environ.get("PG_DSN", "")
@@ -109,7 +130,8 @@ def _connect() -> psycopg2.extensions.connection:
     if not resolved:
         raise RuntimeError(
             "SharedDB не инициализирован: вызовите configure(dsn), "
-            "задайте channels.postgres.dsn в project.json или DATABASE_URL в .secrets.env"
+            "задайте channels.postgres (host/port/dbname/user) в project.json "
+            "+ DB_PASSWORD в .secrets.env, или DATABASE_URL в .secrets.env"
         )
     # libpq в psycopg2-binary (≥ 2.9.x) пытается использовать
     # GSSAPI-шифрование по умолчанию, но GP 6.25 / PG 9.4 его не

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -105,6 +106,156 @@ class TestConfigure:
         mock_psycopg2["configure"]("dsn1")
         mock_psycopg2["configure"]("dsn2")
         assert mock_psycopg2["_get_dsn"]() == "dsn2"
+
+
+class TestResolveDsnFromParts:
+    """DSN собирается из channels.postgres.{host,port,dbname,user} + DB_PASSWORD."""
+
+    def test_explicit_dsn_wins_over_parts(self, mock_psycopg2):
+        import utils.db as _db
+        from config import SETTINGS
+
+        _db._dsn = ""
+        original = dict(SETTINGS.get("channels", {}))
+        try:
+            SETTINGS["channels"] = {
+                "postgres": {
+                    "dsn": "postgresql://explicit@x/y",
+                    "host": "ignored",
+                    "port": 1111,
+                    "dbname": "ignored",
+                    "user": "ignored",
+                }
+            }
+            with patch.dict(
+                "os.environ", {"DB_PASSWORD": "secret"}, clear=False
+            ):
+                assert mock_psycopg2["_get_dsn"]() == "postgresql://explicit@x/y"
+        finally:
+            SETTINGS["channels"] = original
+
+    def test_builds_from_parts_with_db_password(self, mock_psycopg2):
+        import utils.db as _db
+        from config import SETTINGS
+
+        _db._dsn = ""
+        original = dict(SETTINGS.get("channels", {}))
+        try:
+            SETTINGS["channels"] = {
+                "postgres": {
+                    "dsn": None,
+                    "host": "db.local",
+                    "port": 5432,
+                    "dbname": "nanobot",
+                    "user": "postgres",
+                }
+            }
+            with patch.dict(
+                "os.environ", {"DB_PASSWORD": "s3cret"}, clear=False
+            ):
+                assert (
+                    mock_psycopg2["_get_dsn"]()
+                    == "postgresql://postgres:s3cret@db.local:5432/nanobot"
+                )
+        finally:
+            SETTINGS["channels"] = original
+
+    def test_falls_back_to_pgpassword(self, mock_psycopg2):
+        import utils.db as _db
+        from config import SETTINGS
+
+        _db._dsn = ""
+        original = dict(SETTINGS.get("channels", {}))
+        try:
+            SETTINGS["channels"] = {
+                "postgres": {
+                    "dsn": None,
+                    "host": "db.local",
+                    "port": 5432,
+                    "dbname": "mydb",
+                    "user": "alice",
+                }
+            }
+            env = {
+                "PGPASSWORD": "fallback",
+                "DB_PASSWORD": "",
+            }
+            with patch.dict("os.environ", env, clear=False):
+                # Удаляем DB_PASSWORD, если был задан вне патча
+                os.environ.pop("DB_PASSWORD", None)
+                os.environ["PGPASSWORD"] = "fallback"
+                assert (
+                    mock_psycopg2["_get_dsn"]()
+                    == "postgresql://alice:fallback@db.local:5432/mydb"
+                )
+        finally:
+            SETTINGS["channels"] = original
+
+    def test_default_port_when_missing(self, mock_psycopg2):
+        import utils.db as _db
+        from config import SETTINGS
+
+        _db._dsn = ""
+        original = dict(SETTINGS.get("channels", {}))
+        try:
+            SETTINGS["channels"] = {
+                "postgres": {
+                    "dsn": None,
+                    "host": "db.local",
+                    "dbname": "x",
+                    "user": "u",
+                }
+            }
+            with patch.dict("os.environ", {"DB_PASSWORD": "p"}, clear=False):
+                assert (
+                    mock_psycopg2["_get_dsn"]()
+                    == "postgresql://u:p@db.local:5432/x"
+                )
+        finally:
+            SETTINGS["channels"] = original
+
+    def test_no_host_returns_empty(self, mock_psycopg2):
+        import utils.db as _db
+        from config import SETTINGS
+
+        _db._dsn = ""
+        original = dict(SETTINGS.get("channels", {}))
+        try:
+            # Удаляем postgresql-секцию полностью, чтобы не подхватился
+            # реальный host из project.json.
+            SETTINGS["channels"] = {}
+            with patch.dict(
+                "os.environ",
+                {"DATABASE_URL": "", "PG_DSN": "", "DB_PASSWORD": "p"},
+                clear=False,
+            ):
+                os.environ.pop("DATABASE_URL", None)
+                os.environ.pop("PG_DSN", None)
+                assert mock_psycopg2["_get_dsn"]() == ""
+        finally:
+            SETTINGS["channels"] = original
+
+    def test_database_url_env_still_works(self, mock_psycopg2):
+        import utils.db as _db
+        from config import SETTINGS
+
+        _db._dsn = ""
+        original = dict(SETTINGS.get("channels", {}))
+        try:
+            # Удаляем каналы, чтобы не собрать DSN из host/project.json
+            SETTINGS["channels"] = {}
+            with patch.dict(
+                "os.environ",
+                {"DATABASE_URL": "postgresql://env@x/y", "DB_PASSWORD": ""},
+                clear=False,
+            ):
+                os.environ["DATABASE_URL"] = "postgresql://env@x/y"
+                assert (
+                    mock_psycopg2["_get_dsn"]()
+                    == "postgresql://env@x/y"
+                )
+        finally:
+            SETTINGS["channels"] = original
 
 
 class TestConnect:
