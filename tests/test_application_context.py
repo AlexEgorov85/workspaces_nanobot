@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import types
 from pathlib import Path
@@ -101,6 +102,7 @@ def full_fake_modules(tmp_path):
         settings.cli = {}
         settings.providers = MagicMock()
         cfg_mod.SETTINGS = settings
+        cfg_mod.ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
         sys.modules["config"] = cfg_mod
 
         # workspace

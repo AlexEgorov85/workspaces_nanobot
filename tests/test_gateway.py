@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 import types
 from pathlib import Path
@@ -121,6 +122,7 @@ def _setup_fake_modules():
     settings.cli = {}
     settings.providers = MagicMock()
     cfg.SETTINGS = settings
+    cfg.ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
     sys.modules["config"] = cfg
 
     # workspace

@@ -74,6 +74,28 @@ class ConfigService:
             return node
         return default or {}
 
+    def get_int(self, *path: str, default: int = 0) -> int:
+        """Достать int из вложенного dict/AttrDict по цепочке ``path``.
+
+        Если на любом уровне атрибут отсутствует или не приводится к
+        ``int`` — возвращает ``default``. Безопасный аксессор для
+        ``SETTINGS.gateway.*``, ``SETTINGS.cli.*`` и аналогичных секций.
+        """
+        val = _get(self.settings, *path, default=None)
+        try:
+            return int(val) if val is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    def get_str(self, *path: str, default: str = "") -> str:
+        """Достать str из вложенного dict/AttrDict по цепочке ``path``.
+
+        Пустая строка и ``None`` считаются отсутствием → возвращается
+        ``default``. Используется для ``SETTINGS.gateway.storage`` и т.п.
+        """
+        val = _get(self.settings, *path, default=None)
+        return str(val) if val else default
+
     # ------------------------------------------------------------------
     # Runtime-конфиг nanobot
     # ------------------------------------------------------------------
@@ -94,6 +116,16 @@ class ConfigService:
 
         Returns:
             Runtime-конфиг nanobot (объект с ``providers``, ``channels`` и т.д.).
+
+        Порядок резолва ``${VAR}``:
+          1. config.py уже резолвит ``${...}`` в SETTINGS на старте импорта
+             (``_resolve_env_refs`` — из ``os.environ``, неизвестный ключ остаётся
+             как есть) и доэкспортирует плоские значения в ``os.environ``.
+          2. Здесь, до ``_load_runtime_config``, ``_pre_resolve_env_refs``
+             подставляет ``*_API_KEY`` из ``SETTINGS.providers``, которых ещё нет
+             в ``os.environ`` (секреты из .secrets.env), чтобы nanobot увидел их.
+          3. nanobot ``_load_runtime_config`` резолвит оставшиеся ``${VAR}`` из
+             ``os.environ``.
         """
         self._pre_resolve_env_refs(script_dir=script_dir)
 
@@ -126,14 +158,16 @@ class ConfigService:
         ``SETTINGS.providers.<lower>.api_key`` и временно кладём в ``os.environ``.
         """
         import json as _json
-        import re as _re
 
         script = Path(script_dir) if script_dir else (self.script_dir or Path.cwd())
         config_path = script / "config.json"
         if not config_path.exists():
             return
 
-        pattern = _re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+        # Тот же ${VAR}-паттерн, что и config.ENV_REF_PATTERN (единый источник).
+        from config import ENV_REF_PATTERN
+
+        pattern = ENV_REF_PATTERN
         try:
             data = _json.loads(config_path.read_text(encoding="utf-8"))
         except Exception:

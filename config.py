@@ -173,7 +173,7 @@ if _SECRETS_FILE.exists():
     _deep_merge(SETTINGS, load_env(_SECRETS_FILE))
 
 
-_ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _resolve_env_refs(value):
@@ -183,7 +183,7 @@ def _resolve_env_refs(value):
     resolve_env_refs у nanobot) — импорт не должен падать без секрета.
     """
     if isinstance(value, str):
-        return _ENV_REF_PATTERN.sub(
+        return ENV_REF_PATTERN.sub(
             lambda m: os.environ.get(m.group(1), m.group(0)), value
         )
     if isinstance(value, dict):

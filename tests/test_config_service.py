@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import types
 from pathlib import Path
@@ -11,10 +12,11 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def fake_config_module():
-    """Подменяем sys.modules['config'] фейковым SETTINGS на время теста."""
+    """�?�?�?�?��?�?��? sys.modules['config'] �"�����?�?�<�? SETTINGS �?�� �?�?��?�? �'��?�'��."""
     with patch.dict("sys.modules"):
         mod = types.ModuleType("config")
         mod.SETTINGS = MagicMock()
+        mod.ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
         sys.modules["config"] = mod
         yield mod
 

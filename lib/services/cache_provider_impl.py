@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -36,9 +35,6 @@ for _p in (str(_ROOT), str(_WORKSPACE)):
         sys.path.insert(0, _p)
 
 from lib.services.cache_provider import CacheProvider, SearchResult
-
-# DuckDB не поддерживает TO_CHAR(date, 'Month') — переписываем в strftime.
-_REWRITE_TO_CHAR = re.compile(r"TO_CHAR\((\w+)\s*,\s*'Month'\)", re.IGNORECASE)
 
 
 # =============================================================================
@@ -527,46 +523,9 @@ class PostgresDuckDbProvider(CacheProvider):
         if self._conn is None:
             raise RuntimeError("Cache is not ready")
 
-        sql = (
-            "SELECT table_name, column_name, data_type, is_nullable, "
-            "character_maximum_length "
-            "FROM information_schema.columns WHERE table_schema = ?"
-        )
-        params = [schema]
-        if tables:
-            placeholders = ",".join("?" for _ in tables)
-            sql += f" AND table_name IN ({placeholders})"
-            params.extend(tables)
-        sql += " ORDER BY table_name, ordinal_position"
+        from lib.utils.duckdb_query import build_schema
 
-        rows = self._conn.execute(sql, params).fetchall()
-        meta = self._read_schema_meta(schema)
-        result: Dict[str, Any] = {}
-        for row in rows:
-            tbl = row[0]
-            if tbl not in result:
-                result[tbl] = {"comment": self._meta_value(meta, tbl, None, 0), "columns": {}}
-            col_type = row[2]
-            max_len = row[4]
-            # Исходный PG-тип (если сохранён в __schema_meta) — точнее DuckDB
-            pg_type = self._meta_value(meta, tbl, row[1], 1)
-            if pg_type:
-                col_type = pg_type
-            elif max_len and str(col_type).lower() in (
-                "character varying", "character", "varchar", "char",
-            ):
-                col_type = f"varchar({max_len})"
-            result[tbl]["columns"][row[1]] = {
-                "type": col_type,
-                "not_null": row[3] == "NO",
-                "comment": self._meta_value(meta, tbl, row[1], 0),
-            }
-        return {"schema": schema, "tables": result}
-
-    @staticmethod
-    def _meta_value(meta: Dict[tuple, tuple], table: str, column: Optional[str], idx: int) -> Any:
-        val = meta.get((table, column))
-        return val[idx] if val else None
+        return build_schema(self._conn, schema, tables, self._read_schema_meta)
 
     def _read_schema_meta(self, schema: str) -> Dict[tuple, tuple]:
         """Комментарии и исходные PG-типы из __nanobot_meta.__schema_meta (снимка)."""
@@ -587,42 +546,17 @@ class PostgresDuckDbProvider(CacheProvider):
         if self._conn is None:
             return {"status": "error", "row_count": 0, "columns": [], "rows": [],
                     "error": "Cache is not ready"}
-        duck_sql = sql.replace("%s", "?")
-        duck_sql = _REWRITE_TO_CHAR.sub(r"strftime(\1, '%B')", duck_sql)
+        from lib.utils.duckdb_query import run_query
 
-        try:
-            if params:
-                result = self._conn.execute(duck_sql, params)
-            else:
-                result = self._conn.execute(duck_sql)
-        except Exception as e:
-            return {"status": "error", "row_count": 0, "columns": [], "rows": [],
-                    "error": f"Ошибка выполнения запроса: {e}"}
-
-        columns = [desc[0] for desc in result.description]
-        rows = result.fetchall()
-        if not rows:
-            return {"status": "success", "row_count": 0, "columns": columns, "rows": []}
-        return {
-            "status": "success",
-            "row_count": len(rows),
-            "columns": columns,
-            "rows": [dict(zip(columns, r)) for r in rows],
-        }
+        return run_query(self._conn, sql, params)
 
     def explain(self, sql: str) -> Dict[str, Any]:
         """EXPLAIN на DuckDB-кэше — синтаксическая проверка без выполнения."""
         if self._conn is None:
             return {"valid": False, "error": "Cache is not ready"}
-        duck_sql = sql.replace("%s", "?")
-        duck_sql = _REWRITE_TO_CHAR.sub(r"strftime(\1, '%B')", duck_sql)
-        try:
-            result = self._conn.execute(f"EXPLAIN {duck_sql}")
-            columns = [desc[0] for desc in result.description]
-            plan = [dict(zip(columns, r)) for r in result.fetchall()]
-            return {"valid": True, "plan": plan}
-        except Exception as e:
-            return {"valid": False, "error": f"EXPLAIN failed: {e}"}
+        from lib.utils.duckdb_query import explain_query
+
+        return explain_query(self._conn, sql)
 
     # -- vector indexes --------------------------------------------------
 
@@ -872,49 +806,11 @@ class PostgresDuckDbProvider(CacheProvider):
         scores, ids = idx.search(query_vec, n)
 
         meta_items = (meta or {}).get("metadata", {})
-        raw: List[Dict[str, Any]] = []
-        for score, doc_id in zip(scores[0], ids[0]):
-            if doc_id < 0:
-                continue
-            if threshold is not None and score < threshold:
-                continue
-            item = meta_items.get(str(doc_id), {})
-            chunk_idx = item.get("chunk_index", 0)
-            chunk_total = item.get("chunk_count", 1)
-            pk = item.get("pk_value", int(doc_id))
-            tbl = item.get("table", "")
-            src = item.get("source", index_name)
-            content = item.get("content", item.get("search_text", ""))
-            raw.append({
-                "content": content,
-                "score": float(score),
-                "source": src,
-                "table": tbl,
-                "pk_value": pk,
-                "chunk_index": chunk_idx,
-                "chunk_total": chunk_total,
-                "chunk": f"{chunk_idx + 1}/{chunk_total}" if chunk_total > 1 else "",
-                "row": item.get("row", {}),
-            })
 
-        # Группировка чанков: один документ = одно место в top_k.
-        doc_groups: Dict[tuple[str, str, Any], Dict[str, Any]] = {}
-        for r in raw:
-            key = (r["source"], r["table"], r["pk_value"])
-            if key not in doc_groups or r["score"] > doc_groups[key]["score"]:
-                entry = dict(r)
-                entry["matched_chunks"] = 1
-                doc_groups[key] = entry
-            else:
-                doc_groups[key]["matched_chunks"] += 1
+        from lib.utils.duckdb_query import build_raw_items, group_vector_hits
 
-        results = sorted(doc_groups.values(), key=lambda r: r["score"], reverse=True)
-        if top_k and threshold is None:
-            results = results[:top_k]
-
-        for r in results:
-            r.pop("chunk_index", None)
-            r.pop("chunk_total", None)
+        raw = build_raw_items(meta_items, scores, ids, index_name, threshold)
+        results = group_vector_hits(raw, top_k, threshold)
 
         return [
             SearchResult(

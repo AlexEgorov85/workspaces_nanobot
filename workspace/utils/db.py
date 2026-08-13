@@ -162,22 +162,18 @@ def _retry(fn: Callable[[], Any]) -> Any:
     Начальная задержка ``_RETRY_DELAY`` (1с), удваивается до ``_RETRY_MAX_DELAY`` (15с).
 
     Исключения, не входящие в ``DB_RETRYABLE_ERRORS``, пробрасываются сразу.
+    Реализация — общий ``retry_on_exception`` из ``lib.utils.retry``.
     """
-    last_exc = None
-    delay = _RETRY_DELAY
-    attempt = 0
-    while True:
-        try:
-            return fn()
-        except DB_RETRYABLE_ERRORS as e:
-            last_exc = e
-            attempt += 1
-            if attempt >= _MAX_RETRIES:
-                raise
-            logger.warning("DB retry %d/%d after %.1fs: %s",
-                           attempt, _MAX_RETRIES, delay, e)
-            time.sleep(delay)
-            delay = min(delay * 2, _RETRY_MAX_DELAY)
+    from lib.utils.retry import retry_on_exception
+
+    return retry_on_exception(
+        fn,
+        exceptions=DB_RETRYABLE_ERRORS,
+        max_retries=_MAX_RETRIES,
+        base_delay=_RETRY_DELAY,
+        max_delay=_RETRY_MAX_DELAY,
+        label="DB",
+    )
 
 
 # ---------------------------------------------------------------------------

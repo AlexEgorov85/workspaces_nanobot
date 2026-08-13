@@ -96,9 +96,9 @@ class ApplicationContext:
         # 2. Таймауты
         ctx.config_service.apply_timeouts(
             ctx.config,
-            llm_timeout=_gateway_int(ctx.settings, "gateway", "llm_timeout", default=300),
-            exec_timeout=_gateway_int(ctx.settings, "gateway", "exec_timeout", default=60),
-            max_iterations=_cli_int(ctx.settings, "max_iterations", default=200),
+            llm_timeout=ctx.config_service.get_int("gateway", "llm_timeout", default=300),
+            exec_timeout=ctx.config_service.get_int("gateway", "exec_timeout", default=60),
+            max_iterations=ctx.config_service.get_int("cli", "max_iterations", default=200),
         )
 
         # 3. SessionStorageService
@@ -114,7 +114,7 @@ class ApplicationContext:
             storage_mode, session_manager = ctx.session_storage_service.create(
                 ctx.config,
                 storage=storage_override
-                or _gateway_str(ctx.settings, "gateway", "storage", default="auto"),
+                or ctx.config_service.get_str("gateway", "storage", default="auto"),
                 pg=pg_section,
                 configure_db=True,
                 return_file_manager=not enable_cron,
@@ -411,53 +411,3 @@ def _make_cron_service(config: Any) -> Any:
     from nanobot.cron.service import CronService
 
     return CronService(config.workspace_path / "cron" / "jobs.json")
-
-
-def _gateway_int(settings: Any, *path: str, default: int) -> int:
-    """Достать int-значение из вложенного dict/AttrDict по цепочке ``path``.
-
-    Если на любом уровне атрибут отсутствует или не приводится к int —
-    возвращает ``default``. Безопасный аксессор для ``SETTINGS.gateway.*``
-    и аналогичных секций, где значения могут быть None или битыми.
-    """
-    for key in path:
-        try:
-            settings = settings.get(key) if isinstance(settings, dict) else getattr(settings, key)
-        except (AttributeError, KeyError):
-            return default
-    try:
-        return int(settings) if settings is not None else default
-    except (TypeError, ValueError):
-        return default
-
-
-def _gateway_str(settings: Any, *path: str, default: str) -> str:
-    """Достать str-значение из вложенного dict/AttrDict по цепочке ``path``.
-
-    Пустая строка и ``None`` считаются отсутствием → возвращается
-    ``default``. Используется для ``SETTINGS.gateway.storage`` и т.п.
-    """
-    for key in path:
-        try:
-            settings = settings.get(key) if isinstance(settings, dict) else getattr(settings, key)
-        except (AttributeError, KeyError):
-            return default
-    return str(settings) if settings else default
-
-
-def _cli_int(settings: Any, key: str, default: int) -> int:
-    """Достать int-значение из ``settings.cli.<key>``.
-
-    Специализированная версия ``_gateway_int`` для секции ``cli`` —
-    CLI-таймауты и лимиты (``max_iterations``, ``llm_timeout``) заданы
-    именно в ``project.json`` → ``SETTINGS.cli.*``. Все исключения
-    глотаются с возвратом ``default`` — config может быть неполным.
-    """
-    try:
-        node = settings.get("cli") if isinstance(settings, dict) else getattr(settings, "cli", None)
-        if node is None:
-            return default
-        v = node.get(key) if isinstance(node, dict) else getattr(node, key, None)
-        return int(v) if v is not None else default
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return default

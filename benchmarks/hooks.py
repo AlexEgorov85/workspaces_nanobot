@@ -5,13 +5,25 @@
 
 from __future__ import annotations
 
+import sys
 import time
+from pathlib import Path as _Path
 from typing import Any
 
-from nanobot.agent.hook import AgentHook, AgentHookContext
+# Корень проекта + workspace — чтобы импорты lib.workspace / hooks работали
+# независимо от рабочего каталога (тот же паттерн, что и в benchmarks/db.py).
+_ROOT = _Path(__file__).resolve().parents[1]
+_WORKSPACE = _ROOT / "workspace"
+for _p in (str(_ROOT), str(_WORKSPACE)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from nanobot.agent.hook import AgentHookContext
+
+from hooks.base_tool_tracking_hook import BaseToolTrackingHook
 
 
-class BenchmarkHook(AgentHook):
+class BenchmarkHook(BaseToolTrackingHook):
     """Перехватывает метрики во время выполнения агента в бенчмарке."""
 
     def __init__(self) -> None:
@@ -44,11 +56,12 @@ class BenchmarkHook(AgentHook):
         Args:
             context: Контекст завершённой итерации агента.
         """
-        for call in context.tool_calls:
-            self._tool_names.add(call.name)
+        for call in self._iter_tool_calls(context):
+            name = self._tool_call_name(call)
+            self._tool_names.add(name)
             self.tool_calls.append({
-                "name": call.name,
-                "params": call.arguments,
+                "name": name,
+                "params": self._tool_call_arguments(call),
                 "iteration": context.iteration,
             })
 
