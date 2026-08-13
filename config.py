@@ -226,11 +226,17 @@ def get_setting(*keys: str, default=None):
     return node
 
 
-for _prov_name, _prov_cfg in (SETTINGS.get("providers", {}) or {}).items():
-    if isinstance(_prov_cfg, dict):
-        _key = _prov_cfg.get("api_key") or _prov_cfg.get("apiKey")
-        if _key and isinstance(_key, str) and not _key.startswith("${"):
-            os.environ.setdefault("LLM_API_KEY", _key)
+# Приоритет: провайдер "llm" (из .secrets.env: секция "# providers: llm") —
+# это основной ключ LLM. Затем остальные провайдеры по порядку.
+_providers = SETTINGS.get("providers", {}) or {}
+_candidates: list[tuple[str, Any]] = []
+if isinstance(_providers.get("llm"), dict):
+    _candidates.append(("llm", _providers["llm"]))
+_candidates += [(_n, _c) for _n, _c in _providers.items() if isinstance(_c, dict)]
+for _prov_name, _prov_cfg in _candidates:
+    _key = _prov_cfg.get("api_key") or _prov_cfg.get("apiKey")
+    if _key and isinstance(_key, str) and not _key.startswith("${"):
+        os.environ.setdefault("LLM_API_KEY", _key)
 
 # Экспорт без ${...}: эти ключи не меняются при резолве и не должны
 # затирать уже выставленные переменные окружения (setdefault).
