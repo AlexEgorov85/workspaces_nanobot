@@ -60,9 +60,9 @@ def _required_keys():
         ("channels.redis.reply_to_max_size", 10000),
         ("channels.redis.reply_to_trim_to", 5000),
         # skills.audit_analyzer
-        ("skills.audit_analyzer.llm_provider", "openai-compatible"),
-        ("skills.audit_analyzer.llm_model", "gpt-4o-mini"),
-        ("skills.audit_analyzer.llm_api_base", "https://api.openai.com/v1"),
+        # LLM навыка теперь наследуется от агента (agents.defaults +
+        # providers.<provider>); llm_provider/llm_model/llm_api_base — опциональные
+        # переопределения, поэтому из REQUIRED_KEYS убраны.
         ("skills.audit_analyzer.llm_max_tokens", 8192),
         ("skills.audit_analyzer.llm_temperature", 0.1),
         ("skills.audit_analyzer.db_schema", "oarb"),

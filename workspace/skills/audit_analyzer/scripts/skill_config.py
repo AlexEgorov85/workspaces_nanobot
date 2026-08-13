@@ -14,11 +14,25 @@ _CFG = SETTINGS.get("skills", {}).get("audit_analyzer", {})
 
 
 def get_llm_config() -> dict[str, Any]:
+    # Навык по умолчанию использует ТУ ЖЕ LLM, что и агент (agents.defaults +
+    # providers.<provider> из config.json). Специфичные для навыка llm_* ключи
+    # (project.json → skills.audit_analyzer) приоритетнее и могут перекрывать.
+    # Таким образом смена провайдера/модели/ключа агента автоматически меняет
+    # и LLM навыка, без дублирования секретов.
+    defaults = SETTINGS.get("agents", {}).get("defaults", {}) or {}
+
+    provider = _CFG.get("llm_provider") or defaults.get("provider") or "openai-compatible"
+    provider_cfg = SETTINGS.get("providers", {}).get(provider) or {}
+
+    model = _CFG.get("llm_model") or defaults.get("model") or "gpt-4o-mini"
+    api_base = _CFG.get("llm_api_base") or provider_cfg.get("apiBase") or ""
+    api_key = _CFG.get("llm_api_key") or provider_cfg.get("apiKey") or ""
+
     return {
-        "provider": _CFG.get("llm_provider", "openai-compatible"),
-        "model": _CFG.get("llm_model", "gpt-4o-mini"),
-        "api_base": _CFG.get("llm_api_base", "https://api.openai.com/v1"),
-        "api_key": _CFG.get("llm_api_key", ""),
+        "provider": provider,
+        "model": model,
+        "api_base": api_base or "https://api.openai.com/v1",
+        "api_key": api_key,
         "max_tokens": int(_CFG.get("llm_max_tokens", 8192)),
         "temperature": float(_CFG.get("llm_temperature", 0.1)),
     }

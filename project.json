@@ -75,11 +75,10 @@
   "skills": {
     "audit_analyzer": {
       // --- LLM: генерация SQL и обобщение результатов -----------------------
-      "llm_provider": "openai-compatible",    // Провайдер LLM. Любой OpenAI-compatible (Mistral, OpenAI, MiniMax, Ollama, vLLM).
-      //   Логируется в llm.py при каждом запросе (для отладки), эндпоинт задаётся llm_api_base.
-      "llm_model": "gpt-4o-mini",             // Модель для генерации SQL
-      "llm_api_base": "https://api.openai.com/v1",
-      // llm_api_key здесь НЕ задаётся — берётся из .secrets.env (наивысший приоритет)
+      // Навык использует ТУ ЖЕ LLM, что и агент: провайдер/модель/api_base/ключ
+      // берутся из agents.defaults + providers.<provider> (config.json).
+      // Специфичные для навыка переопределения (llm_provider/llm_model/llm_api_base)
+      // задаются только при необходимости отклониться от агентской LLM.
       "llm_max_tokens": 8192,
       "llm_temperature": 0.1,
 
