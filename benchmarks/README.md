@@ -23,9 +23,6 @@ benchmarks/
 │   ├── simple.yaml       # Простые (сложность 1-3)
 │   ├── medium.yaml       # Средние (сложность 4-7)
 │   └── hard.yaml         # Сложные (сложность 8-10)
-├── sql/                  # DDL для таблиц БД
-│   ├── create_benchmark_tables.sql      # PostgreSQL
-│   └── create_benchmark_tables_gp.sql   # Greenplum 6.25
 ├── results/runs/         # Результаты прогонов (авто-генерация)
 │   ├── .gitkeep
 │   └── YYYY-MM-DD_HH-MM-SS/  # Каждый прогон — отдельная папка

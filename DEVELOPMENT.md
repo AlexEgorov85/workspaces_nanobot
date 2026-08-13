@@ -335,7 +335,7 @@ nanobot/
 
 | Ключ | Назначение | Значение / по умолчанию |
 |------|-----------|-------------|
-| `llm_provider` / `llm_model` / `llm_api_base` | LLM для генерации SQL | `openai-compatible` / `gpt-4o-mini` / `https://api.openai.com/v1` (любой OpenAI-compatible: Mistral, OpenAI, MiniMax, Ollama, vLLM) |
+| `llm_provider` / `llm_model` / `llm_api_base` | LLM для генерации SQL | `minimax` / `MiniMax-M3` / `https://api.minimax.io/v1` (единая с агентом; любой OpenAI-compatible: Mistral, OpenAI, MiniMax, Ollama, vLLM) |
 | `llm_max_tokens` / `llm_temperature` | Параметры генерации | `8192` / `0.1` |
 | `db_schema` | Схема с таблицами аудита | `oarb` |
 | `db_tables` | Таблицы, доступные агенту | `audit_reports, audits, report_items, violations` (значение project.json; код по умолч. — пустой список) |

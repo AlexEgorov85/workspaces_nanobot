@@ -413,7 +413,7 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 | **Векторы (GP)** | `sql/audit_analyzer/create_audit_vectors_table_gp.sql` | то же + `DISTRIBUTED BY (source)` | рабочий (GP 6.5) |
 | **Конфиг индексов (PG)** | `sql/audit_analyzer/create_agent_vector_index_config.sql` | `public.agent_vector_index_config` | рабочий (PG 13+) |
 | **Конфиг индексов (GP)** | `sql/audit_analyzer/create_agent_vector_index_config_gp.sql` | то же + `DISTRIBUTED BY` | рабочий (GP 6.5) |
-| **Бенчмарки** | `sql/benchmarks/create_benchmark_tables.sql` | `benchmark_runs`, `benchmark_results` | рабочий (PG 9.4+) |
+| **Бенчмарки** | `sql/benchmarks/create_benchmark_tables.sql` | `agent_benchmark_runs`, `agent_benchmark_results` | рабочий (PG 9.4+) |
 | **Бенчмарки (GP)** | `sql/benchmarks/create_benchmark_tables_gp.sql` | то же + `DISTRIBUTED BY` | рабочий (GP 6.25) |
 
 Полный DDL с комментариями — в [DEVELOPMENT.md → SQL-скрипты](DEVELOPMENT.md#sql-скрипты-создание-таблиц).
