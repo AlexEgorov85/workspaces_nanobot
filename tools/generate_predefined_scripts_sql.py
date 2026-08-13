@@ -1,7 +1,7 @@
 """
 Генератор SQL для переноса реестра предопределённых SQL-скриптов
 в таблицу, заданную в project.json → skills.audit_analyzer.predefined_scripts_table
-(по умолчанию: public.predefined_scripts).
+(по умолчанию: public.agent_predefined_scripts).
 
 Источник данных (выбирается флагом):
   --from-db    — читает SELECT из БД (через utils.db.fetch)
@@ -50,7 +50,7 @@ for p in (str(_WORKSPACE), str(_ROOT)):
 #   1) --table <schema.table> в CLI
 #   2) project.json → skills.audit_analyzer.predefined_scripts_table
 # Чтобы сменить «имя таблицы» — правьте project.json, см. skill_config.py.
-FALLBACK_TABLE = "public.predefined_scripts"
+FALLBACK_TABLE = "public.agent_predefined_scripts"
 
 
 def get_target_table() -> str:
@@ -78,10 +78,10 @@ def load_from_db() -> List[Dict[str, Any]]:
     """
     from utils.db import fetch  # noqa: WPS433
 
-    sql = """
+    sql = f"""
         SELECT name, description, returns, long_description,
                sql_template, parameters, max_rows_default
-        FROM predefined_scripts
+        FROM {get_target_table()}
         ORDER BY name
     """
     rows = fetch(sql)
@@ -296,7 +296,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         help=(
             "Имя целевой таблицы (schema.table). По умолчанию берётся из "
             "project.json → skills.audit_analyzer.predefined_scripts_table; "
-            "если не задано — 'public.predefined_scripts'."
+            "если не задано — 'public.agent_predefined_scripts'."
         ),
     )
     p.add_argument("--out", type=Path, default=None,

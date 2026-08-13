@@ -56,22 +56,22 @@ COMMENT ON COLUMN oarb.violations."deadline" IS 'Плановая дата ус�
 COMMENT ON COLUMN oarb.violations."created_at" IS 'Дата и время фиксации отклонения в системе';
 COMMENT ON COLUMN oarb.violations."updated_at" IS 'Дата и время последнего изменения записи';
 
--- ---- public.predefined_scripts ----
-COMMENT ON TABLE public.predefined_scripts IS 'Реестр предопределённых SQL-скриптов навыка audit_analyzer. Источник истины для режима --mode predefined. JSONB-колонка parameters повторяет структуру dataclass ParamDefinition: {param_name: {type, required, default, description, validation}}. Копируется в DuckDB-кэш через db_additional_tables (config project.json) и читается в run-time через db_loader.load_registry().';
-COMMENT ON COLUMN public.predefined_scripts."name" IS 'PK — уникальное имя скрипта. Используется в CLI: --script <name>. Имя должно быть валидным идентификатором (^[a-z][a-z0-9_]*$) — иначе f-string в CacheProvider.query_sql может сломать SQL.';
-COMMENT ON COLUMN public.predefined_scripts."description" IS 'Краткое описание для меню/подсказок (1-2 строки). Показывается в list_available().';
-COMMENT ON COLUMN public.predefined_scripts."sql_template" IS 'SQL-шаблон с Jinja2-подобными блоками: {% if param %}...{% endif %} (условные блоки) и :param_name (плейсхолдеры). При выполнении DynamicQueryBuilder: рендерит условия, подставляет :param → %s, добавляет LIMIT :max_rows.';
-COMMENT ON COLUMN public.predefined_scripts."parameters" IS 'JSONB: {param_name: ParamDefinition}. ParamDefinition имеет поля: type (like/exact/limit/number/date/enum/boolean), required, default, description, validation (опц., для vector-резолва).';
-COMMENT ON COLUMN public.predefined_scripts."max_rows_default" IS 'Лимит строк по умолчанию (добавляется в LIMIT). Если передан --params с полем type=limit, перекрывает default.';
-COMMENT ON COLUMN public.predefined_scripts."returns" IS 'Что возвращает скрипт (для документации и LLM-промпта в --mode sql).';
-COMMENT ON COLUMN public.predefined_scripts."long_description" IS 'Подробное описание для LLM-промпта: что делает, когда использовать, edge cases.';
-COMMENT ON COLUMN public.predefined_scripts."created_at" IS 'Время создания записи (при первой INSERT).';
-COMMENT ON COLUMN public.predefined_scripts."updated_at" IS 'Время последнего изменения (обновляется триггером predefined_scripts_touch_updated_at).';
+-- ---- public.agent_predefined_scripts ----
+COMMENT ON TABLE public.agent_predefined_scripts IS 'Реестр предопределённых SQL-скриптов навыка audit_analyzer. Источник истины для режима --mode predefined. JSONB-колонка parameters повторяет структуру dataclass ParamDefinition: {param_name: {type, required, default, description, validation}}. Копируется в DuckDB-кэш через db_additional_tables (config project.json) и читается в run-time через db_loader.load_registry().';
+COMMENT ON COLUMN public.agent_predefined_scripts."name" IS 'PK — уникальное имя скрипта. Используется в CLI: --script <name>. Имя должно быть валидным идентификатором (^[a-z][a-z0-9_]*$) — иначе f-string в CacheProvider.query_sql может сломать SQL.';
+COMMENT ON COLUMN public.agent_predefined_scripts."description" IS 'Краткое описание для меню/подсказок (1-2 строки). Показывается в list_available().';
+COMMENT ON COLUMN public.agent_predefined_scripts."sql_template" IS 'SQL-шаблон с Jinja2-подобными блоками: {% if param %}...{% endif %} (условные блоки) и :param_name (плейсхолдеры). При выполнении DynamicQueryBuilder: рендерит условия, подставляет :param → %s, добавляет LIMIT :max_rows.';
+COMMENT ON COLUMN public.agent_predefined_scripts."parameters" IS 'JSONB: {param_name: ParamDefinition}. ParamDefinition имеет поля: type (like/exact/limit/number/date/enum/boolean), required, default, description, validation (опц., для vector-резолва).';
+COMMENT ON COLUMN public.agent_predefined_scripts."max_rows_default" IS 'Лимит строк по умолчанию (добавляется в LIMIT). Если передан --params с полем type=limit, перекрывает default.';
+COMMENT ON COLUMN public.agent_predefined_scripts."returns" IS 'Что возвращает скрипт (для документации и LLM-промпта в --mode sql).';
+COMMENT ON COLUMN public.agent_predefined_scripts."long_description" IS 'Подробное описание для LLM-промпта: что делает, когда использовать, edge cases.';
+COMMENT ON COLUMN public.agent_predefined_scripts."created_at" IS 'Время создания записи (при первой INSERT).';
+COMMENT ON COLUMN public.agent_predefined_scripts."updated_at" IS 'Время последнего изменения (обновляется триггером agent_predefined_scripts_touch_updated_at).';
 
 -- ---- oarb.audit_vectors ----
 COMMENT ON TABLE oarb.audit_vectors IS 'Векторные эмбеддинги для семантического поиска audit_analyzer.';
 COMMENT ON COLUMN oarb.audit_vectors."id" IS 'PK эмбеддинга (BIGINT IDENTITY).';
-COMMENT ON COLUMN oarb.audit_vectors."source" IS 'Имя индекса (= vector_index_config.index_name).';
+COMMENT ON COLUMN oarb.audit_vectors."source" IS 'Имя индекса (= agent_vector_index_config.index_name).';
 COMMENT ON COLUMN oarb.audit_vectors."content" IS 'Текст для отображения.';
 COMMENT ON COLUMN oarb.audit_vectors."search_text" IS 'Текст по которому строился эмбеддинг.';
 COMMENT ON COLUMN oarb.audit_vectors."table" IS 'Короткое имя исходной таблицы.';
@@ -85,27 +85,27 @@ COMMENT ON COLUMN oarb.audit_vectors."max_src_track" IS 'MAX(track_column) в и
 COMMENT ON COLUMN oarb.audit_vectors."synced_at" IS 'Время последней синхронизации.';
 COMMENT ON COLUMN oarb.audit_vectors."created_at" IS 'Время создания записи в этой таблице.';
 
--- ---- oarb.vector_index_config ----
-COMMENT ON TABLE oarb.vector_index_config IS 'КОНФИГУРАЦИЯ сборки векторных индексов. Описывает ЧТО строить: имя индекса, исходная таблица, колонки для content/embedding, колонка-маркер изменений. Не содержит самих векторов — только метаданные сборки. Используется tools/build_vectors.py.';
-COMMENT ON COLUMN oarb.vector_index_config."index_name" IS 'PK — уникальное имя индекса (= source в audit_vectors, = source в vector_index_store).';
-COMMENT ON COLUMN oarb.vector_index_config."source_table" IS 'Короткое имя для колонки source в audit_vectors. Должно совпадать с index_name.';
-COMMENT ON COLUMN oarb.vector_index_config."src_table" IS 'Исходная таблица (schema.table), из которой берутся строки для эмбеддинга.';
-COMMENT ON COLUMN oarb.vector_index_config."pk_column" IS 'Колонка первичного ключа в исходной таблице (для join с vector_index_store.metadata).';
-COMMENT ON COLUMN oarb.vector_index_config."content_cols" IS 'TEXT[] — колонки исходной таблицы, которые попадают в audit_vectors.content (для отображения).';
-COMMENT ON COLUMN oarb.vector_index_config."embedding_cols" IS 'JSONB — словарь {col_name: {chunk: bool}} — какие колонки эмбеддингить и чанковать ли.';
-COMMENT ON COLUMN oarb.vector_index_config."track_column" IS 'Колонка исходной таблицы для инкрементальных обновлений (обычно updated_at).';
-COMMENT ON COLUMN oarb.vector_index_config."enabled" IS 'False — пропустить индекс при сборке (например, при отключении).';
-COMMENT ON COLUMN oarb.vector_index_config."created_at" IS 'Время создания записи конфига.';
-COMMENT ON COLUMN oarb.vector_index_config."updated_at" IS 'Время последнего изменения конфига.';
+-- ---- public.agent_vector_index_config ----
+COMMENT ON TABLE public.agent_vector_index_config IS 'КОНФИГУРАЦИЯ сборки векторных индексов. Описывает ЧТО строить: имя индекса, исходная таблица, колонки для content/embedding, колонка-маркер изменений. Не содержит самих векторов — только метаданные сборки. Используется tools/build_vectors.py.';
+COMMENT ON COLUMN public.agent_vector_index_config."index_name" IS 'PK — уникальное имя индекса (= source в audit_vectors, = source в agent_vector_index_store).';
+COMMENT ON COLUMN public.agent_vector_index_config."source_table" IS 'Короткое имя для колонки source в audit_vectors. Должно совпадать с index_name.';
+COMMENT ON COLUMN public.agent_vector_index_config."src_table" IS 'Исходная таблица (schema.table), из которой берутся строки для эмбеддинга.';
+COMMENT ON COLUMN public.agent_vector_index_config."pk_column" IS 'Колонка первичного ключа в исходной таблице (для join с agent_vector_index_store.metadata).';
+COMMENT ON COLUMN public.agent_vector_index_config."content_cols" IS 'TEXT[] — колонки исходной таблицы, которые попадают в audit_vectors.content (для отображения).';
+COMMENT ON COLUMN public.agent_vector_index_config."embedding_cols" IS 'JSONB — словарь {col_name: {chunk: bool}} — какие колонки эмбеддингить и чанковать ли.';
+COMMENT ON COLUMN public.agent_vector_index_config."track_column" IS 'Колонка исходной таблицы для инкрементальных обновлений (обычно updated_at).';
+COMMENT ON COLUMN public.agent_vector_index_config."enabled" IS 'False — пропустить индекс при сборке (например, при отключении).';
+COMMENT ON COLUMN public.agent_vector_index_config."created_at" IS 'Время создания записи конфига.';
+COMMENT ON COLUMN public.agent_vector_index_config."updated_at" IS 'Время последнего изменения конфига.';
 
--- ---- oarb.vector_index_store ----
-COMMENT ON TABLE oarb.vector_index_store IS 'СЕРИАЛИЗОВАННЫЕ FAISS-ИНДЕКСЫ (binary blob + metadata). Одна строка на source (= index_name из vector_index_config). Строится из audit_vectors инструментами build_vectors.py: собираются все векторы одного source в faiss.IndexFlatIP/IVFFlat, сериализуются в BYTEA. Загружается lib.services.cache_provider_impl при search_vector. Контраст с audit_vectors: audit_vectors — это сырьё (по чанкам с метаданными), vector_index_store — готовый поисковый индекс (быстрый ANN).';
-COMMENT ON COLUMN oarb.vector_index_store."source" IS 'PK — имя индекса (= index_name из vector_index_config, = source в audit_vectors).';
-COMMENT ON COLUMN oarb.vector_index_store."index_binary" IS 'Сериализованный FAISS-индекс (pickle/bytes). Десериализуется при search_vector.';
-COMMENT ON COLUMN oarb.vector_index_store."metadata" IS 'JSONB: {pk_value: {source, chunk_index, row_id, ...}} — связь FAISS-индекса с audit_vectors.';
-COMMENT ON COLUMN oarb.vector_index_store."dimension" IS 'Размерность векторов (должна совпадать с embedding в audit_vectors).';
-COMMENT ON COLUMN oarb.vector_index_store."vector_count" IS 'Количество векторов в индексе (контроль согласованности с audit_vectors).';
-COMMENT ON COLUMN oarb.vector_index_store."updated_at" IS 'Время последней пересборки индекса.';
+-- ---- public.agent_vector_index_store ----
+COMMENT ON TABLE public.agent_vector_index_store IS 'СЕРИАЛИЗОВАННЫЕ FAISS-ИНДЕКСЫ (binary blob + metadata). Одна строка на source (= index_name из agent_vector_index_config). Строится из audit_vectors инструментами build_vectors.py: собираются все векторы одного source в faiss.IndexFlatIP/IVFFlat, сериализуются в BYTEA. Загружается lib.services.cache_provider_impl при search_vector. Контраст с audit_vectors: audit_vectors — это сырьё (по чанкам с метаданными), agent_vector_index_store — готовый поисковый индекс (быстрый ANN).';
+COMMENT ON COLUMN public.agent_vector_index_store."source" IS 'PK — имя индекса (= index_name из agent_vector_index_config, = source в audit_vectors).';
+COMMENT ON COLUMN public.agent_vector_index_store."index_binary" IS 'Сериализованный FAISS-индекс (pickle/bytes). Десериализуется при search_vector.';
+COMMENT ON COLUMN public.agent_vector_index_store."metadata" IS 'JSONB: {pk_value: {source, chunk_index, row_id, ...}} — связь FAISS-индекса с audit_vectors.';
+COMMENT ON COLUMN public.agent_vector_index_store."dimension" IS 'Размерность векторов (должна совпадать с embedding в audit_vectors).';
+COMMENT ON COLUMN public.agent_vector_index_store."vector_count" IS 'Количество векторов в индексе (контроль согласованности с audit_vectors).';
+COMMENT ON COLUMN public.agent_vector_index_store."updated_at" IS 'Время последней пересборки индекса.';
 
 -- ---- public.agent_session_meta ----
 COMMENT ON TABLE public.agent_session_meta IS 'Метаданные сессий nanobot. Заменяет JSONL-файлы в workspace/sessions/. Управляется PGSessionManager (lib/session/pg_session_manager.py). Таблица агента (префикс agent_).';

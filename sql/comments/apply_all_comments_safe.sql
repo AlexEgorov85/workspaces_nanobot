@@ -72,17 +72,17 @@ END $$;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.tables
-             WHERE table_schema = 'public' AND table_name = 'predefined_scripts') THEN
-    EXECUTE 'COMMENT ON TABLE public.predefined_scripts IS ''Реестр предопределённых SQL-скриптов навыка audit_analyzer. Источник истины для режима --mode predefined. JSONB-колонка parameters повторяет структуру dataclass ParamDefinition: {param_name: {type, required, default, description, validation}}.''';
-    EXECUTE 'COMMENT ON COLUMN public.predefined_scripts."name" IS ''Уникальное имя скрипта (используется в CLI: --script <name>).''';
-    EXECUTE 'COMMENT ON COLUMN public.predefined_scripts."description" IS ''Краткое описание для меню/подсказок.''';
-    EXECUTE 'COMMENT ON COLUMN public.predefined_scripts."sql_template" IS ''SQL-шаблон с Jinja2-подобными блоками {% if param %} и :param_name плейсхолдерами.''';
-    EXECUTE 'COMMENT ON COLUMN public.predefined_scripts."parameters" IS ''Параметры скрипта как JSONB: {param_name: ParamDefinition}.''';
-    EXECUTE 'COMMENT ON COLUMN public.predefined_scripts."max_rows_default" IS ''Лимит строк по умолчанию (добавляется в LIMIT).''';
-    EXECUTE 'COMMENT ON COLUMN public.predefined_scripts."returns" IS ''Что возвращает скрипт (для документации).''';
-    EXECUTE 'COMMENT ON COLUMN public.predefined_scripts."long_description" IS ''Подробное описание для LLM-промпта.''';
-    EXECUTE 'COMMENT ON COLUMN public.predefined_scripts."created_at" IS ''Время создания записи.''';
-    EXECUTE 'COMMENT ON COLUMN public.predefined_scripts."updated_at" IS ''Время последнего изменения (обновляется триггером).''';
+             WHERE table_schema = 'public' AND table_name = 'agent_predefined_scripts') THEN
+    EXECUTE 'COMMENT ON TABLE public.agent_predefined_scripts IS ''Реестр предопределённых SQL-скриптов навыка audit_analyzer. Источник истины для режима --mode predefined. JSONB-колонка parameters повторяет структуру dataclass ParamDefinition: {param_name: {type, required, default, description, validation}}.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_predefined_scripts."name" IS ''Уникальное имя скрипта (используется в CLI: --script <name>).''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_predefined_scripts."description" IS ''Краткое описание для меню/подсказок.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_predefined_scripts."sql_template" IS ''SQL-шаблон с Jinja2-подобными блоками {% if param %} и :param_name плейсхолдерами.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_predefined_scripts."parameters" IS ''Параметры скрипта как JSONB: {param_name: ParamDefinition}.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_predefined_scripts."max_rows_default" IS ''Лимит строк по умолчанию (добавляется в LIMIT).''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_predefined_scripts."returns" IS ''Что возвращает скрипт (для документации).''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_predefined_scripts."long_description" IS ''Подробное описание для LLM-промпта.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_predefined_scripts."created_at" IS ''Время создания записи.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_predefined_scripts."updated_at" IS ''Время последнего изменения (обновляется триггером).''';
   END IF;
 END $$;
 
@@ -92,7 +92,7 @@ BEGIN
              WHERE table_schema = 'oarb' AND table_name = 'audit_vectors') THEN
     EXECUTE 'COMMENT ON TABLE oarb.audit_vectors IS ''Векторные эмбеддинги для семантического поиска audit_analyzer.''';
     EXECUTE 'COMMENT ON COLUMN oarb.audit_vectors."id" IS ''PK эмбеддинга (BIGINT IDENTITY).''';
-    EXECUTE 'COMMENT ON COLUMN oarb.audit_vectors."source" IS ''Имя индекса (= vector_index_config.index_name).''';
+    EXECUTE 'COMMENT ON COLUMN oarb.audit_vectors."source" IS ''Имя индекса (= agent_vector_index_config.index_name).''';
     EXECUTE 'COMMENT ON COLUMN oarb.audit_vectors."content" IS ''Текст для отображения.''';
     EXECUTE 'COMMENT ON COLUMN oarb.audit_vectors."search_text" IS ''Текст по которому строился эмбеддинг.''';
     EXECUTE 'COMMENT ON COLUMN oarb.audit_vectors."table" IS ''Короткое имя исходной таблицы.''';
@@ -111,32 +111,32 @@ END $$;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.tables
-             WHERE table_schema = 'oarb' AND table_name = 'vector_index_config') THEN
-    EXECUTE 'COMMENT ON TABLE oarb.vector_index_config IS ''Конфигурация сборки векторных индексов (audit_analyzer).''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_config."index_name" IS ''Уникальное имя индекса.''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_config."source_table" IS ''Короткое имя для колонки source в audit_vectors.''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_config."src_table" IS ''Исходная таблица (schema.table).''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_config."pk_column" IS ''Колонка первичного ключа в исходной таблице.''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_config."content_cols" IS ''Колонки для content (отображение).''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_config."embedding_cols" IS ''Колонки для эмбеддинга (JSONB).''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_config."track_column" IS ''Колонка для ORDER BY (track изменений).''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_config."enabled" IS ''Индекс активен.''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_config."created_at" IS ''Время создания записи.''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_config."updated_at" IS ''Время последнего изменения.''';
+             WHERE table_schema = 'public' AND table_name = 'agent_vector_index_config') THEN
+    EXECUTE 'COMMENT ON TABLE public.agent_vector_index_config IS ''Конфигурация сборки векторных индексов (audit_analyzer).''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_config."index_name" IS ''Уникальное имя индекса.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_config."source_table" IS ''Короткое имя для колонки source в audit_vectors.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_config."src_table" IS ''Исходная таблица (schema.table).''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_config."pk_column" IS ''Колонка первичного ключа в исходной таблице.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_config."content_cols" IS ''Колонки для content (отображение).''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_config."embedding_cols" IS ''Колонки для эмбеддинга (JSONB).''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_config."track_column" IS ''Колонка для ORDER BY (track изменений).''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_config."enabled" IS ''Индекс активен.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_config."created_at" IS ''Время создания записи.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_config."updated_at" IS ''Время последнего изменения.''';
   END IF;
 END $$;
 
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.tables
-             WHERE table_schema = 'oarb' AND table_name = 'vector_index_store') THEN
-    EXECUTE 'COMMENT ON TABLE oarb.vector_index_store IS ''Сериализованные FAISS-индексы (binary blob + metadata). Загружаются lib.services.cache_provider_impl при search_vector.''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_store."source" IS ''PK — имя индекса (= index_name из vector_index_config).''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_store."index_binary" IS ''Сериализованный FAISS-индекс (pickle/bytes).''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_store."metadata" IS ''Метаданные индекса (id↔source↔pk_value mapping).''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_store."dimension" IS ''Размерность векторов в индексе.''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_store."vector_count" IS ''Количество векторов в индексе.''';
-    EXECUTE 'COMMENT ON COLUMN oarb.vector_index_store."updated_at" IS ''Время последней пересборки индекса.''';
+             WHERE table_schema = 'public' AND table_name = 'agent_vector_index_store') THEN
+    EXECUTE 'COMMENT ON TABLE public.agent_vector_index_store IS ''Сериализованные FAISS-индексы (binary blob + metadata). Загружаются lib.services.cache_provider_impl при search_vector.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_store."source" IS ''PK — имя индекса (= index_name из vector_index_config).''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_store."index_binary" IS ''Сериализованный FAISS-индекс (pickle/bytes).''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_store."metadata" IS ''Метаданные индекса (id↔source↔pk_value mapping).''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_store."dimension" IS ''Размерность векторов в индексе.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_store."vector_count" IS ''Количество векторов в индексе.''';
+    EXECUTE 'COMMENT ON COLUMN public.agent_vector_index_store."updated_at" IS ''Время последней пересборки индекса.''';
   END IF;
 END $$;
 

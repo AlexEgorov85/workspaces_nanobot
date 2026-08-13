@@ -1,7 +1,7 @@
 -- ============================================================================
 --  Seed: дефолтные векторные индексы audit_analyzer
 -- ============================================================================
---  Заполняет oarb.vector_index_config тремя индексами на основе реальной
+--  Заполняет public.agent_vector_index_config тремя индексами на основе реальной
 --  схемы источников:
 --
 --    audits_index       → oarb.audits         (composite из 4 колонок)
@@ -22,7 +22,7 @@
 --  В oarb.audits нет полнотекстовых колонок, поэтому собираем search_text
 --  из title + audit_type + auditee_entity + status с метками колонок.
 -- ─────────────────────────────────────────────────────────────────────
-INSERT INTO oarb.vector_index_config
+INSERT INTO public.agent_vector_index_config
     (index_name, source_table, src_table, pk_column,
      content_cols, embedding_cols, track_column, enabled)
 VALUES (
@@ -50,7 +50,7 @@ ON CONFLICT (index_name) DO UPDATE SET
 --  description может быть длинным → разбиваем на чанки по 500 символов
 --  с перекрытием 80. content = полное описание + рекомендация.
 -- ─────────────────────────────────────────────────────────────────────
-INSERT INTO oarb.vector_index_config
+INSERT INTO public.agent_vector_index_config
     (index_name, source_table, src_table, pk_column,
      content_cols, embedding_cols, track_column, enabled)
 VALUES (
@@ -81,7 +81,7 @@ ON CONFLICT (index_name) DO UPDATE SET
 --  full_text — основной текст отчёта, может быть очень длинным.
 --  content = full_text + title + report_number.
 -- ─────────────────────────────────────────────────────────────────────
-INSERT INTO oarb.vector_index_config
+INSERT INTO public.agent_vector_index_config
     (index_name, source_table, src_table, pk_column,
      content_cols, embedding_cols, track_column, enabled)
 VALUES (
@@ -109,5 +109,5 @@ ON CONFLICT (index_name) DO UPDATE SET
 
 -- Проверка: что вставлено
 SELECT index_name, source_table, enabled, jsonb_array_length(embedding_cols) AS emb_cols_count
-FROM oarb.vector_index_config
+FROM public.agent_vector_index_config
 ORDER BY index_name;

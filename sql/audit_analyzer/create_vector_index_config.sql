@@ -11,17 +11,78 @@
 
 -- ============================================================================
 --  Три таблицы, участвующие в семантическом поиске audit_analyzer:
---    1) oarb.vector_index_config — КОНФИГ (что строить, откуда брать)
---    2) oarb.audit_vectors       — СЫРЫЕ ЭМБЕДДИНГИ (по чанкам, с метаданными)
---    3) oarb.vector_index_store  — СЕРИАЛИЗОВАННЫЙ FAISS-ИНДЕКС (binary blob)
+--    1) public.agent_vector_index_config — КОНФИГ (что строить, откуда брать)
+--    2) oarb.audit_vectors               — СЫРЫЕ ЭМБЕДДИНГИ (по чанкам, с метаданными)
+--    3) public.agent_vector_index_store  — СЕРИАЛИЗОВАННЫЙ FAISS-ИНДЕКС (binary blob)
 --
 --  Конвейер: src_table → (build_vectors.py + Ollama) → audit_vectors
---         → (faiss.IndexFlatIP/IVFFlat) → vector_index_store
+--         → (faiss.IndexFlatIP/IVFFlat) → agent_vector_index_store
 --         → (CacheProvider.search_vector) → результаты.
 -- ============================================================================
 
+-- миграция со старых имён (oarb.vector_index_config / oarb.vector_index_store):
+-- данные переносятся в public.agent_*, старые таблицы удаляются.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables
+             WHERE table_schema = 'public' AND table_name = 'agent_vector_index_config')
+     AND EXISTS (SELECT 1 FROM information_schema.tables
+                 WHERE table_schema = 'oarb' AND table_name = 'vector_index_config') THEN
+    INSERT INTO public.agent_vector_index_config
+        (index_name, source_table, src_table, pk_column, content_cols,
+         embedding_cols, track_column, enabled, created_at, updated_at)
+    SELECT index_name, source_table, src_table, pk_column, content_cols,
+           embedding_cols, track_column, enabled, created_at, updated_at
+      FROM oarb.vector_index_config
+    ON CONFLICT (index_name) DO UPDATE SET
+        source_table    = EXCLUDED.source_table,
+        src_table       = EXCLUDED.src_table,
+        pk_column       = EXCLUDED.pk_column,
+        content_cols    = EXCLUDED.content_cols,
+        embedding_cols  = EXCLUDED.embedding_cols,
+        track_column    = EXCLUDED.track_column,
+        enabled         = EXCLUDED.enabled,
+        updated_at      = EXCLUDED.updated_at;
+    DROP TABLE IF EXISTS oarb.vector_index_config CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.tables
+                 WHERE table_schema = 'public' AND table_name = 'agent_vector_index_config')
+     AND EXISTS (SELECT 1 FROM information_schema.tables
+                 WHERE table_schema = 'oarb' AND table_name = 'vector_index_config') THEN
+    CREATE TABLE public.agent_vector_index_config AS
+      SELECT * FROM oarb.vector_index_config;
+    ALTER TABLE public.agent_vector_index_config ADD PRIMARY KEY (index_name);
+    DROP TABLE IF EXISTS oarb.vector_index_config CASCADE;
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables
+             WHERE table_schema = 'public' AND table_name = 'agent_vector_index_store')
+     AND EXISTS (SELECT 1 FROM information_schema.tables
+                 WHERE table_schema = 'oarb' AND table_name = 'vector_index_store') THEN
+    INSERT INTO public.agent_vector_index_store
+        (source, index_binary, metadata, dimension, vector_count, updated_at)
+    SELECT source, index_binary, metadata, dimension, vector_count, updated_at
+      FROM oarb.vector_index_store
+    ON CONFLICT (source) DO UPDATE SET
+        index_binary   = EXCLUDED.index_binary,
+        metadata       = EXCLUDED.metadata,
+        dimension      = EXCLUDED.dimension,
+        vector_count   = EXCLUDED.vector_count,
+        updated_at     = EXCLUDED.updated_at;
+    DROP TABLE IF EXISTS oarb.vector_index_store CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.tables
+                 WHERE table_schema = 'public' AND table_name = 'agent_vector_index_store')
+     AND EXISTS (SELECT 1 FROM information_schema.tables
+                 WHERE table_schema = 'oarb' AND table_name = 'vector_index_store') THEN
+    CREATE TABLE public.agent_vector_index_store AS
+      SELECT * FROM oarb.vector_index_store;
+    ALTER TABLE public.agent_vector_index_store ADD PRIMARY KEY (source);
+    DROP TABLE IF EXISTS oarb.vector_index_store CASCADE;
+  END IF;
+END $$;
+
 -- 1) Конфигурация векторных индексов
-CREATE TABLE IF NOT EXISTS oarb.vector_index_config (
+CREATE TABLE IF NOT EXISTS public.agent_vector_index_config (
     index_name      TEXT PRIMARY KEY,
     source_table    TEXT NOT NULL,
     src_table       TEXT NOT NULL,
@@ -34,34 +95,34 @@ CREATE TABLE IF NOT EXISTS oarb.vector_index_config (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-COMMENT ON TABLE oarb.vector_index_config IS
+COMMENT ON TABLE public.agent_vector_index_config IS
     'КОНФИГУРАЦИЯ сборки векторных индексов. '
     'Описывает ЧТО строить: имя индекса, исходная таблица, колонки для content/embedding, '
     'колонка-маркер изменений. Не содержит самих векторов — только метаданные сборки. '
     'Используется tools/build_vectors.py.';
-COMMENT ON COLUMN oarb.vector_index_config.index_name IS
-    'PK — уникальное имя индекса (= source в audit_vectors, = source в vector_index_store).';
-COMMENT ON COLUMN oarb.vector_index_config.source_table IS
+COMMENT ON COLUMN public.agent_vector_index_config.index_name IS
+    'PK — уникальное имя индекса (= source в audit_vectors, = source в agent_vector_index_store).';
+COMMENT ON COLUMN public.agent_vector_index_config.source_table IS
     'Короткое имя для колонки source в audit_vectors. Должно совпадать с index_name.';
-COMMENT ON COLUMN oarb.vector_index_config.src_table IS
+COMMENT ON COLUMN public.agent_vector_index_config.src_table IS
     'Исходная таблица (schema.table), из которой берутся строки для эмбеддинга.';
-COMMENT ON COLUMN oarb.vector_index_config.pk_column IS
-    'Колонка первичного ключа в исходной таблице (для join с vector_index_store.metadata).';
-COMMENT ON COLUMN oarb.vector_index_config.content_cols IS
+COMMENT ON COLUMN public.agent_vector_index_config.pk_column IS
+    'Колонка первичного ключа в исходной таблице (для join с agent_vector_index_store.metadata).';
+COMMENT ON COLUMN public.agent_vector_index_config.content_cols IS
     'TEXT[] — колонки исходной таблицы, которые попадают в audit_vectors.content (для отображения).';
-COMMENT ON COLUMN oarb.vector_index_config.embedding_cols IS
+COMMENT ON COLUMN public.agent_vector_index_config.embedding_cols IS
     'JSONB — словарь {col_name: {chunk: bool}} — какие колонки эмбеддингить и чанковать ли.';
-COMMENT ON COLUMN oarb.vector_index_config.track_column IS
+COMMENT ON COLUMN public.agent_vector_index_config.track_column IS
     'Колонка исходной таблицы для инкрементальных обновлений (обычно updated_at).';
-COMMENT ON COLUMN oarb.vector_index_config.enabled IS
+COMMENT ON COLUMN public.agent_vector_index_config.enabled IS
     'False — пропустить индекс при сборке (например, при отключении).';
-COMMENT ON COLUMN oarb.vector_index_config.created_at IS
+COMMENT ON COLUMN public.agent_vector_index_config.created_at IS
     'Время создания записи конфига.';
-COMMENT ON COLUMN oarb.vector_index_config.updated_at IS
+COMMENT ON COLUMN public.agent_vector_index_config.updated_at IS
     'Время последнего изменения конфига.';
 
 -- 2) Хранилище сериализованных FAISS-индексов
-CREATE TABLE IF NOT EXISTS oarb.vector_index_store (
+CREATE TABLE IF NOT EXISTS public.agent_vector_index_store (
     source       TEXT PRIMARY KEY,
     index_binary BYTEA NOT NULL,
     metadata     JSONB NOT NULL DEFAULT '{}'::JSONB,
@@ -70,23 +131,23 @@ CREATE TABLE IF NOT EXISTS oarb.vector_index_store (
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-COMMENT ON TABLE oarb.vector_index_store IS
+COMMENT ON TABLE public.agent_vector_index_store IS
     'СЕРИАЛИЗОВАННЫЕ FAISS-ИНДЕКСЫ (binary blob + metadata). '
-    'Одна строка на source (= index_name из vector_index_config). '
+    'Одна строка на source (= index_name из agent_vector_index_config). '
     'Строится из audit_vectors инструментами build_vectors.py: '
     'собираются все векторы одного source в faiss.IndexFlatIP/IVFFlat, '
     'сериализуются в BYTEA. Загружается lib.services.cache_provider_impl при search_vector. '
     'Контраст с audit_vectors: audit_vectors — это сырьё (по чанкам с метаданными), '
-    'vector_index_store — готовый поисковый индекс (быстрый ANN).';
-COMMENT ON COLUMN oarb.vector_index_store.source IS
-    'PK — имя индекса (= index_name из vector_index_config, = source в audit_vectors).';
-COMMENT ON COLUMN oarb.vector_index_store.index_binary IS
+    'agent_vector_index_store — готовый поисковый индекс (быстрый ANN).';
+COMMENT ON COLUMN public.agent_vector_index_store.source IS
+    'PK — имя индекса (= index_name из agent_vector_index_config, = source в audit_vectors).';
+COMMENT ON COLUMN public.agent_vector_index_store.index_binary IS
     'Сериализованный FAISS-индекс (pickle/bytes). Десериализуется при search_vector.';
-COMMENT ON COLUMN oarb.vector_index_store.metadata IS
+COMMENT ON COLUMN public.agent_vector_index_store.metadata IS
     'JSONB: {pk_value: {source, chunk_index, row_id, ...}} — связь FAISS-индекса с audit_vectors.';
-COMMENT ON COLUMN oarb.vector_index_store.dimension IS
+COMMENT ON COLUMN public.agent_vector_index_store.dimension IS
     'Размерность векторов (должна совпадать с embedding в audit_vectors).';
-COMMENT ON COLUMN oarb.vector_index_store.vector_count IS
+COMMENT ON COLUMN public.agent_vector_index_store.vector_count IS
     'Количество векторов в индексе (контроль согласованности с audit_vectors).';
-COMMENT ON COLUMN oarb.vector_index_store.updated_at IS
+COMMENT ON COLUMN public.agent_vector_index_store.updated_at IS
     'Время последней пересборки индекса.';

@@ -33,7 +33,7 @@
 --  ~1GB на массив на сегмент (для 1024-dim = ~1M векторов на сегмент).
 --  Для большинства случаев (10k-100k векторов) — OK.
 --
---  Распределение: DISTRIBUTED BY (source) — JOIN с vector_index_store
+--  Распределение: DISTRIBUTED BY (source) — JOIN с agent_vector_index_store
 --  (REPLICATED) делается локально, фильтрация по source без broadcast.
 -- ─────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS oarb.audit_vectors (
@@ -73,7 +73,7 @@ COMMENT ON TABLE oarb.audit_vectors IS
 COMMENT ON COLUMN oarb.audit_vectors.id IS
     'BIGINT IDENTITY (GP 6.5 / PG 10+)';
 COMMENT ON COLUMN oarb.audit_vectors.source IS
-    'Имя индекса (= oarb.vector_index_config.index_name)';
+    'Имя индекса (= public.agent_vector_index_config.index_name)';
 COMMENT ON COLUMN oarb.audit_vectors.content IS
     'Текст для отображения в результатах поиска';
 COMMENT ON COLUMN oarb.audit_vectors.search_text IS

@@ -30,7 +30,7 @@ for tbl_name, tbl in data["tables"].items():
 
 # 2. predefined_scripts
 predefined_scripts = {
-    "public.predefined_scripts": (
+    "public.agent_predefined_scripts": (
         "Реестр предопределённых SQL-скриптов навыка audit_analyzer. "
         "Источник истины для режима --mode predefined. "
         "JSONB-колонка parameters повторяет структуру dataclass ParamDefinition: "
@@ -54,7 +54,7 @@ predefined_scripts = {
             "returns": "Что возвращает скрипт (для документации и LLM-промпта в --mode sql).",
             "long_description": "Подробное описание для LLM-промпта: что делает, когда использовать, edge cases.",
             "created_at": "Время создания записи (при первой INSERT).",
-            "updated_at": "Время последнего изменения (обновляется триггером predefined_scripts_touch_updated_at).",
+            "updated_at": "Время последнего изменения (обновляется триггером agent_predefined_scripts_touch_updated_at).",
         },
     )
 }
@@ -65,7 +65,7 @@ audit_vectors = {
         "Векторные эмбеддинги для семантического поиска audit_analyzer.",
         {
             "id": "PK эмбеддинга (BIGINT IDENTITY).",
-            "source": "Имя индекса (= vector_index_config.index_name).",
+            "source": "Имя индекса (= agent_vector_index_config.index_name).",
             "content": "Текст для отображения.",
             "search_text": "Текст по которому строился эмбеддинг.",
             "table": "Короткое имя исходной таблицы.",
@@ -84,16 +84,16 @@ audit_vectors = {
 
 # 4. vector_index_config
 vector_index_config = {
-    "oarb.vector_index_config": (
+    "public.agent_vector_index_config": (
         "КОНФИГУРАЦИЯ сборки векторных индексов. "
         "Описывает ЧТО строить: имя индекса, исходная таблица, колонки для content/embedding, "
         "колонка-маркер изменений. Не содержит самих векторов — только метаданные сборки. "
         "Используется tools/build_vectors.py.",
         {
-            "index_name": "PK — уникальное имя индекса (= source в audit_vectors, = source в vector_index_store).",
+            "index_name": "PK — уникальное имя индекса (= source в audit_vectors, = source в agent_vector_index_store).",
             "source_table": "Короткое имя для колонки source в audit_vectors. Должно совпадать с index_name.",
             "src_table": "Исходная таблица (schema.table), из которой берутся строки для эмбеддинга.",
-            "pk_column": "Колонка первичного ключа в исходной таблице (для join с vector_index_store.metadata).",
+            "pk_column": "Колонка первичного ключа в исходной таблице (для join с agent_vector_index_store.metadata).",
             "content_cols": "TEXT[] — колонки исходной таблицы, которые попадают в audit_vectors.content (для отображения).",
             "embedding_cols": "JSONB — словарь {col_name: {chunk: bool}} — какие колонки эмбеддингить и чанковать ли.",
             "track_column": "Колонка исходной таблицы для инкрементальных обновлений (обычно updated_at).",
@@ -106,16 +106,16 @@ vector_index_config = {
 
 # 5. vector_index_store
 vector_index_store = {
-    "oarb.vector_index_store": (
+    "public.agent_vector_index_store": (
         "СЕРИАЛИЗОВАННЫЕ FAISS-ИНДЕКСЫ (binary blob + metadata). "
-        "Одна строка на source (= index_name из vector_index_config). "
+        "Одна строка на source (= index_name из agent_vector_index_config). "
         "Строится из audit_vectors инструментами build_vectors.py: "
         "собираются все векторы одного source в faiss.IndexFlatIP/IVFFlat, "
         "сериализуются в BYTEA. Загружается lib.services.cache_provider_impl при search_vector. "
         "Контраст с audit_vectors: audit_vectors — это сырьё (по чанкам с метаданными), "
-        "vector_index_store — готовый поисковый индекс (быстрый ANN).",
+        "agent_vector_index_store — готовый поисковый индекс (быстрый ANN).",
         {
-            "source": "PK — имя индекса (= index_name из vector_index_config, = source в audit_vectors).",
+            "source": "PK — имя индекса (= index_name из agent_vector_index_config, = source в audit_vectors).",
             "index_binary": "Сериализованный FAISS-индекс (pickle/bytes). Десериализуется при search_vector.",
             "metadata": "JSONB: {pk_value: {source, chunk_index, row_id, ...}} — связь FAISS-индекса с audit_vectors.",
             "dimension": "Размерность векторов (должна совпадать с embedding в audit_vectors).",

@@ -11,7 +11,7 @@
 --    3. Новые индексы source_synced и source_hash
 --
 --  КРИТИЧНО: миграция удаляет ВСЕ данные в oarb.audit_vectors
---  и oarb.vector_index_store. После ОБЯЗАТЕЛЬНО:
+--  и public.agent_vector_index_store. После ОБЯЗАТЕЛЬНО:
 --      python tools/build_vectors.py --full-rebuild
 -- ============================================================================
 
@@ -19,11 +19,11 @@ BEGIN;
 
 DROP INDEX IF EXISTS oarb.idx_audit_vectors_source;
 DROP INDEX IF EXISTS oarb.idx_audit_vectors_pk;
-DROP TABLE IF EXISTS oarb.vector_index_store CASCADE;
+DROP TABLE IF EXISTS public.agent_vector_index_store CASCADE;
 DROP TABLE IF EXISTS oarb.audit_vectors CASCADE;
-DROP TABLE IF EXISTS oarb.vector_index_config CASCADE;
+DROP TABLE IF EXISTS public.agent_vector_index_config CASCADE;
 
-CREATE TABLE IF NOT EXISTS oarb.vector_index_config (
+CREATE TABLE IF NOT EXISTS public.agent_vector_index_config (
     index_name      TEXT PRIMARY KEY,
     source_table    TEXT NOT NULL,
     src_table       TEXT NOT NULL,
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS oarb.vector_index_config (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS oarb.vector_index_store (
+CREATE TABLE IF NOT EXISTS public.agent_vector_index_store (
     source       TEXT PRIMARY KEY,
     index_binary BYTEA NOT NULL,
     metadata     JSONB NOT NULL DEFAULT '{}'::JSONB,
@@ -69,7 +69,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_vectors_source_synced
 CREATE INDEX IF NOT EXISTS idx_audit_vectors_source_hash
     ON oarb.audit_vectors (source, content_hash);
 
-INSERT INTO oarb.vector_index_config
+INSERT INTO public.agent_vector_index_config
     (index_name, source_table, src_table, pk_column,
      content_cols, embedding_cols, track_column, enabled)
 VALUES

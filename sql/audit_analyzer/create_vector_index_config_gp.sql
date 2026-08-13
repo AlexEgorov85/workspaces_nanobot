@@ -12,12 +12,12 @@
 --       нет переполнения на 2.1B записей (BIGINT = 9.2×10^18).
 --       GP 6.5 поддерживает IDENTITY (стандарт SQL:2003).
 --
---    3. DISTRIBUTED BY (index_name) для vector_index_config —
+--    3. DISTRIBUTED BY (index_name) для agent_vector_index_config —
 --       PK = dist key, позволяет локальные UPDATE без перемещения
 --       строк между сегментами GP.
 --
---    4. DISTRIBUTED REPLICATED для vector_index_store —
---       несколько строк (по одной на индекс), JOIN с vector_index_config
+--    4. DISTRIBUTED REPLICATED для agent_vector_index_store —
+--       несколько строк (по одной на индекс), JOIN с agent_vector_index_config
 --       без пересылки по сегментам. Полная копия на каждом сегменте.
 --
 --    5. DISTRIBUTED BY (source) для audit_vectors —
@@ -38,7 +38,7 @@
 --  конфигурации. PK = dist key, UPDATE других колонок не перемещает
 --  строки между сегментами GP.
 -- ─────────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS oarb.vector_index_config (
+CREATE TABLE IF NOT EXISTS public.agent_vector_index_config (
     index_name      TEXT NOT NULL,
     source_table    TEXT NOT NULL,
     src_table       TEXT NOT NULL,
@@ -53,23 +53,23 @@ CREATE TABLE IF NOT EXISTS oarb.vector_index_config (
 )
 DISTRIBUTED BY (index_name);
 
-COMMENT ON TABLE oarb.vector_index_config IS
+COMMENT ON TABLE public.agent_vector_index_config IS
     'Конфигурация сборки векторных индексов (audit_analyzer)';
-COMMENT ON COLUMN oarb.vector_index_config.index_name IS
+COMMENT ON COLUMN public.agent_vector_index_config.index_name IS
     'Уникальное имя индекса (например audits_index)';
-COMMENT ON COLUMN oarb.vector_index_config.source_table IS
+COMMENT ON COLUMN public.agent_vector_index_config.source_table IS
     'Короткое имя для колонки source в audit_vectors';
-COMMENT ON COLUMN oarb.vector_index_config.src_table IS
+COMMENT ON COLUMN public.agent_vector_index_config.src_table IS
     'Исходная таблица (schema.table)';
-COMMENT ON COLUMN oarb.vector_index_config.pk_column IS
+COMMENT ON COLUMN public.agent_vector_index_config.pk_column IS
     'Колонка первичного ключа в исходной таблице';
-COMMENT ON COLUMN oarb.vector_index_config.content_cols IS
+COMMENT ON COLUMN public.agent_vector_index_config.content_cols IS
     'Колонки для content (текст для отображения в результатах поиска)';
-COMMENT ON COLUMN oarb.vector_index_config.embedding_cols IS
+COMMENT ON COLUMN public.agent_vector_index_config.embedding_cols IS
     'Колонки для эмбеддинга: ["col"] или [{"column":"col","chunk":true,"chunk_size":500,"chunk_overlap":80}]';
-COMMENT ON COLUMN oarb.vector_index_config.track_column IS
+COMMENT ON COLUMN public.agent_vector_index_config.track_column IS
     'Колонка для ORDER BY при инкрементальной загрузке';
-COMMENT ON COLUMN oarb.vector_index_config.enabled IS
+COMMENT ON COLUMN public.agent_vector_index_config.enabled IS
     'Индекс активен (true = включён в build_vectors.py)';
 
 -- ─────────────────────────────────────────────────────────────────────
@@ -77,14 +77,14 @@ COMMENT ON COLUMN oarb.vector_index_config.enabled IS
 --
 --  Распределение: DISTRIBUTED REPLICATED — каждый сегмент GP получает
 --  полную копию. Несколько строк (по одной на индекс), экономит
---  JOIN-операции с vector_index_config.
+--  JOIN-операции с agent_vector_index_config.
 --
 --  Ограничения GP 6.5:
 --    - BYTEA на сегмент: до ~1GB (для индексов <1M×1024 float32 = ~400MB OK).
 --    - Для очень больших индексов (>1M векторов): нужно партиционирование
 --      или внешнее хранилище. Выходит за рамки данного скрипта.
 -- ─────────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS oarb.vector_index_store (
+CREATE TABLE IF NOT EXISTS public.agent_vector_index_store (
     source       TEXT NOT NULL,
     index_binary BYTEA NOT NULL,
     metadata     JSONB NOT NULL DEFAULT '{}'::JSONB,
@@ -95,13 +95,13 @@ CREATE TABLE IF NOT EXISTS oarb.vector_index_store (
 )
 DISTRIBUTED REPLICATED;
 
-COMMENT ON TABLE oarb.vector_index_store IS
+COMMENT ON TABLE public.agent_vector_index_store IS
     'Сериализованные FAISS-индексы в BYTEA';
-COMMENT ON COLUMN oarb.vector_index_store.source IS
-    'Имя индекса (= oarb.vector_index_config.index_name)';
-COMMENT ON COLUMN oarb.vector_index_store.index_binary IS
+COMMENT ON COLUMN public.agent_vector_index_store.source IS
+    'Имя индекса (= public.agent_vector_index_config.index_name)';
+COMMENT ON COLUMN public.agent_vector_index_store.index_binary IS
     'FAISS-индекс сериализованный через faiss.serialize_index';
-COMMENT ON COLUMN oarb.vector_index_store.dimension IS
+COMMENT ON COLUMN public.agent_vector_index_store.dimension IS
     'Размерность векторов (для валидации при десериализации)';
-COMMENT ON COLUMN oarb.vector_index_store.vector_count IS
+COMMENT ON COLUMN public.agent_vector_index_store.vector_count IS
     'Количество векторов в индексе';

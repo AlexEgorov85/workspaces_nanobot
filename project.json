@@ -37,7 +37,7 @@
       "schema": "public",                     // Схема БД
       "messages_table": "agent_session_messages",   // Таблица сообщений сессий (PGSessionManager, префикс agent_)
       "meta_table": "agent_session_meta",           // Таблица метаданных сессий (PGSessionManager, префикс agent_)
-      "table_name": "conversation_messages",  // Таблица обмена сообщениями (PostgresChannel)
+      "table_name": "agent_conversation_messages",  // Таблица обмена сообщениями (PostgresChannel/streamlit, префикс agent_)
       "poll_interval": 2.0,                   // Поллинг новых сообщений, сек
       "flush_interval": 2.0,                  // Сброс reasoning в metadata, сек
       "max_concurrent": 1,                    // Макс. параллельно обрабатываемых сообщений
@@ -92,13 +92,13 @@
         "violations"
       ],
       "db_additional_tables": [               // Доп. таблицы (из других схем) для копирования в DuckDB-кэш
-        ["public", "predefined_scripts"]     // реестр SQL-скриптов (см. predefined_scripts_table)
+        ["public", "agent_predefined_scripts"]     // реестр SQL-скриптов (см. predefined_scripts_table)
       ],
-      "predefined_scripts_table": "public.predefined_scripts",  // Реестр SQL-скриптов (sql_template + parameters)
+      "predefined_scripts_table": "public.agent_predefined_scripts",  // Реестр SQL-скриптов (sql_template + parameters)
       //   Источник истины для режима predefined. Заполняется через
       //   sql/audit_analyzer/create_predefined_scripts_table.sql и
       //   tools/generate_predefined_scripts_sql.py.
-      "mode_vector_index_config_table": "oarb.vector_index_config",  // Конфиг FAISS-индексов (читается cache_provider_impl)
+      "mode_vector_index_config_table": "public.agent_vector_index_config",  // Конфиг FAISS-индексов (читается cache_provider_impl)
 
       // --- Фоновая синхронизация (gateway: AuditSyncService) ------------------
       "poll_interval_sec": 60,                // Поллинг новых/изменённых строк из PostgreSQL, сек
@@ -123,13 +123,13 @@
 
       // --- Векторный поиск: ИНДЕКСЫ В БАЗЕ ДАННЫХ ----------------------------
       // С 2026-06 векторы и их конфигурация хранятся в PostgreSQL/Greenplum:
-      //   oarb.audit_vectors        — сырые эмбеддинги REAL[] + метаданные (строит build_vectors.py)
-      //   oarb.vector_index_store   — сериализованный FAISS-индекс (BYTEA), ищет провайдер lib/services
-      //   oarb.vector_index_config  — конфигурация индексов (таблицы/колонки для эмбеддинга).
+      //   oarb.audit_vectors          — сырые эмбеддинги REAL[] + метаданные (строит build_vectors.py)
+      //   public.agent_vector_index_store   — сериализованный FAISS-индекс (BYTEA), ищет провайдер lib/services
+      //   public.agent_vector_index_config  — конфигурация индексов (таблицы/колонки для эмбеддинга).
       //     Раньше это были ключи vector_indexes + mode_vector_index_path (файлы .faiss) —
       //     теперь управляется SQL-таблицей, project.json больше их не содержит.
       "mode_vector_db_table": "oarb.audit_vectors",  // Таблица сырых векторов (источник индекса)
-      "mode_vector_store_table": "oarb.vector_index_store",  // Таблица FAISS-индексов (BYTEA)
+      "mode_vector_store_table": "public.agent_vector_index_store",  // Таблица FAISS-индексов (BYTEA)
       "vector_index_default_path": "data_store/vectors/audits_index",  // Fallback-путь FAISS-индекса
       // Параметры поиска top_k / threshold задаются аргументами CLI:
       //   audit_analyze --mode vector --query '...' --index-name audits_index --top-k 5 --threshold 0.75 (0.0–1.0)

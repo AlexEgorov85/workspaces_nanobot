@@ -19,7 +19,7 @@
 --       idx_audit_vectors_source_hash.
 --
 --  КРИТИЧНО: миграция удаляет ВСЕ данные в oarb.audit_vectors и
---  oarb.vector_index_store. После миграции ОБЯЗАТЕЛЬНО:
+--  public.agent_vector_index_store. После миграции ОБЯЗАТЕЛЬНО:
 --
 --      python tools/build_vectors.py --full-rebuild
 --
@@ -40,8 +40,8 @@ BEGIN;
 -- ─────────────────────────────────────────────────────────────────────
 --  Шаг 1: бэкап не нужен — мы удаляем данные
 --  Если нужен бэкап, выполните ДО этой миграции:
---      pg_dump -t oarb.audit_vectors -t oarb.vector_index_store \
---          -t oarb.vector_index_config > backup_vectors.sql
+--      pg_dump -t oarb.audit_vectors -t public.agent_vector_index_store \
+--          -t public.agent_vector_index_config > backup_vectors.sql
 -- ─────────────────────────────────────────────────────────────────────
 
 -- ─────────────────────────────────────────────────────────────────────
@@ -56,9 +56,9 @@ DROP INDEX IF EXISTS oarb.idx_audit_vectors_pk;
 -- Удалить таблицы — после ALTER TYPE они всё равно будут пересозданы.
 -- Это безопаснее, чем ALTER на месте (GP 6.5 требует пересоздания
 -- для изменения IDENTITY-колонок и distribution policy).
-DROP TABLE IF EXISTS oarb.vector_index_store CASCADE;
+DROP TABLE IF EXISTS public.agent_vector_index_store CASCADE;
 DROP TABLE IF EXISTS oarb.audit_vectors CASCADE;
-DROP TABLE IF EXISTS oarb.vector_index_config CASCADE;
+DROP TABLE IF EXISTS public.agent_vector_index_config CASCADE;
 
 -- ─────────────────────────────────────────────────────────────────────
 --  Шаг 3: пересоздание с новой структурой
@@ -67,7 +67,7 @@ DROP TABLE IF EXISTS oarb.vector_index_config CASCADE;
 --  Идемпотентно: CREATE TABLE IF NOT EXISTS.
 -- ─────────────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS oarb.vector_index_config (
+CREATE TABLE IF NOT EXISTS public.agent_vector_index_config (
     index_name      TEXT NOT NULL,
     source_table    TEXT NOT NULL,
     src_table       TEXT NOT NULL,
@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS oarb.vector_index_config (
 )
 DISTRIBUTED BY (index_name);
 
-CREATE TABLE IF NOT EXISTS oarb.vector_index_store (
+CREATE TABLE IF NOT EXISTS public.agent_vector_index_store (
     source       TEXT NOT NULL,
     index_binary BYTEA NOT NULL,
     metadata     JSONB NOT NULL DEFAULT '{}'::JSONB,
@@ -125,7 +125,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_vectors_source_hash
 --  Шаг 4: перерегистрация дефолтных индексов
 -- ─────────────────────────────────────────────────────────────────────
 
-INSERT INTO oarb.vector_index_config
+INSERT INTO public.agent_vector_index_config
     (index_name, source_table, src_table, pk_column,
      content_cols, embedding_cols, track_column, enabled)
 VALUES

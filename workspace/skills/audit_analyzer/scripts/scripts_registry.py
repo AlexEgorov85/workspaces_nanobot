@@ -2,7 +2,7 @@
 Типизированные модели скриптов (ParamDefinition, ScriptDefinition)
 и динамический построитель SQL с Jinja2-подобными шаблонами (DynamicQueryBuilder).
 
-Реестр готовых SQL-скриптов хранится в public.predefined_scripts (PostgreSQL);
+Реестр готовых SQL-скриптов хранится в public.agent_predefined_scripts (PostgreSQL);
 загрузчик db_loader.py снимает снимок в DuckDB-кэш, откуда читает
 predefined.py при каждом вызове get_script_by_name.
 
@@ -321,6 +321,6 @@ class DynamicQueryBuilder:
 # РЕЕСТР ПРЕДОПРЕДЕЛЁННЫХ СКРИПТОВ
 # =============================================================================
 #
-# Хранится в PostgreSQL (public.predefined_scripts). Загрузчик:
+# Хранится в PostgreSQL (public.agent_predefined_scripts). Загрузчик:
 #   from db_loader import load_registry
 #   registry = load_registry()  # {script_name: ScriptDefinition}

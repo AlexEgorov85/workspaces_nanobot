@@ -1,7 +1,7 @@
 """
 Обёртка над реестром скриптов + DynamicQueryBuilder для режима predefined.
 
-Реестр загружается из PostgreSQL (public.predefined_scripts) через
+Реестр загружается из PostgreSQL (public.agent_predefined_scripts) через
 db_loader. Все хелперы ниже остаются API-стабильными: тот же контракт,
 что был у модуля на SCRIPTS_REGISTRY.
 

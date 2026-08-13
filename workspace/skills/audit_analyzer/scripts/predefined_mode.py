@@ -34,7 +34,7 @@ def run(
     через семантический поиск по FAISS (Ollama embedding + FAISS index).
 
     Args:
-        script_name: Имя скрипта (ключ в реестре public.predefined_scripts).
+        script_name: Имя скрипта (ключ в реестре public.agent_predefined_scripts).
         db: Бэкенд запросов (PostgreSQL напрямую или DuckDB-кэш).
         params: Параметры скрипта (опционально).
         index_dir: Путь к директории с FAISS-индексами (опционально).

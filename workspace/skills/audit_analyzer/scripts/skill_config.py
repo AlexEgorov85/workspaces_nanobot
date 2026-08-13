@@ -52,7 +52,7 @@ def get_predefined_scripts_table() -> str:
       - db_loader.load_registry()  — читает реестр из БД
       - tools/generate_predefined_scripts_sql.py — генерирует INSERT в эту таблицу
     """
-    return _CFG.get("predefined_scripts_table", "public.predefined_scripts")
+    return _CFG.get("predefined_scripts_table", "public.agent_predefined_scripts")
 
 
 def get_in_memory_config() -> dict[str, Any]:
@@ -84,7 +84,7 @@ def get_vector_db_table() -> str:
 
 
 def get_vector_store_table() -> str:
-    return _CFG.get("mode_vector_store_table", "oarb.vector_index_store")
+    return _CFG.get("mode_vector_store_table", "public.agent_vector_index_store")
 
 
 def build_cache_provider() -> Any:

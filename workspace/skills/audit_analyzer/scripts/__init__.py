@@ -70,7 +70,7 @@ scripts/
     predefined.py            — обёртка над реестром скриптов (БД → DuckDB) + DynamicQueryBuilder
     predefined_mode.py       — оркестрация режима predefined
     scripts_registry.py      — ScriptDefinition, ParamDefinition, DynamicQueryBuilder
-    db_loader.py             — адаптер: реестр из public.predefined_scripts → ScriptDefinition
+db_loader.py — адаптер: реестр из public.agent_predefined_scripts → ScriptDefinition
     sql_mode.py              — оркестрация режима sql (LLM + retry)
 
 Инфраструктура (DuckDB-кэш, векторные индексы, эмбеддинг, чанкование

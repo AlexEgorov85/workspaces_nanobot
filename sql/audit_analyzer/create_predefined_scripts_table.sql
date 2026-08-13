@@ -1,13 +1,20 @@
 -- ============================================================================
 -- Реестр предопределённых SQL-скриптов (audit_analyzer)
--- Источник истины для скриптов: публичная таблица predefined_scripts
+-- Источник истины для скриптов: публичная таблица agent_predefined_scripts
 -- Структура JSONB parameters зеркалит dataclass ParamDefinition,
 -- чтобы db_loader.py сводился к ParamDefinition(**pdef).
 -- ============================================================================
 
-DROP TABLE IF EXISTS predefined_scripts;
+-- миграция со старого имени (сохранение данных)
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables
+             WHERE table_schema = 'public' AND table_name = 'predefined_scripts') THEN
+    ALTER TABLE public.predefined_scripts RENAME TO agent_predefined_scripts;
+  END IF;
+END $$;
 
-CREATE TABLE IF NOT EXISTS predefined_scripts (
+CREATE TABLE IF NOT EXISTS agent_predefined_scripts (
     name                TEXT PRIMARY KEY,
     description         TEXT NOT NULL,
     sql_template        TEXT NOT NULL,
@@ -19,7 +26,7 @@ CREATE TABLE IF NOT EXISTS predefined_scripts (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-COMMENT ON TABLE predefined_scripts IS
+COMMENT ON TABLE agent_predefined_scripts IS
     'Реестр предопределённых SQL-скриптов навыка audit_analyzer. '
     'Источник истины для режима --mode predefined. '
     'JSONB-колонка parameters повторяет структуру dataclass ParamDefinition: '
@@ -27,34 +34,34 @@ COMMENT ON TABLE predefined_scripts IS
     'Копируется в DuckDB-кэш через db_additional_tables (config project.json) '
     'и читается в run-time через db_loader.load_registry().';
 
-COMMENT ON COLUMN predefined_scripts.name IS
+COMMENT ON COLUMN agent_predefined_scripts.name IS
     'PK — уникальное имя скрипта. Используется в CLI: --script <name>. '
     'Имя должно быть валидным идентификатором (^[a-z][a-z0-9_]*$) — иначе '
     'f-string в CacheProvider.query_sql может сломать SQL.';
-COMMENT ON COLUMN predefined_scripts.description IS
+COMMENT ON COLUMN agent_predefined_scripts.description IS
     'Краткое описание для меню/подсказок (1-2 строки). Показывается в list_available().';
-COMMENT ON COLUMN predefined_scripts.sql_template IS
+COMMENT ON COLUMN agent_predefined_scripts.sql_template IS
     'SQL-шаблон с Jinja2-подобными блоками: '
     '{% if param %}...{% endif %} (условные блоки) и :param_name (плейсхолдеры). '
     'При выполнении DynamicQueryBuilder: рендерит условия, подставляет :param → %s, '
     'добавляет LIMIT :max_rows.';
-COMMENT ON COLUMN predefined_scripts.parameters IS
+COMMENT ON COLUMN agent_predefined_scripts.parameters IS
     'JSONB: {param_name: ParamDefinition}. ParamDefinition имеет поля: '
     'type (like/exact/limit/number/date/enum/boolean), required, default, '
     'description, validation (опц., для vector-резолва).';
-COMMENT ON COLUMN predefined_scripts.max_rows_default IS
+COMMENT ON COLUMN agent_predefined_scripts.max_rows_default IS
     'Лимит строк по умолчанию (добавляется в LIMIT). '
     'Если передан --params с полем type=limit, перекрывает default.';
-COMMENT ON COLUMN predefined_scripts.returns IS
+COMMENT ON COLUMN agent_predefined_scripts.returns IS
     'Что возвращает скрипт (для документации и LLM-промпта в --mode sql).';
-COMMENT ON COLUMN predefined_scripts.long_description IS
+COMMENT ON COLUMN agent_predefined_scripts.long_description IS
     'Подробное описание для LLM-промпта: что делает, когда использовать, edge cases.';
-COMMENT ON COLUMN predefined_scripts.created_at IS
+COMMENT ON COLUMN agent_predefined_scripts.created_at IS
     'Время создания записи (при первой INSERT).';
-COMMENT ON COLUMN predefined_scripts.updated_at IS
-    'Время последнего изменения (обновляется триггером predefined_scripts_touch_updated_at).';
+COMMENT ON COLUMN agent_predefined_scripts.updated_at IS
+    'Время последнего изменения (обновляется триггером agent_predefined_scripts_touch_updated_at).';
 
-CREATE OR REPLACE FUNCTION predefined_scripts_touch_updated_at()
+CREATE OR REPLACE FUNCTION agent_predefined_scripts_touch_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
     NEW.updated_at = now();
@@ -62,17 +69,17 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_predefined_scripts_updated_at ON predefined_scripts;
-CREATE TRIGGER trg_predefined_scripts_updated_at
-    BEFORE UPDATE ON predefined_scripts
-    FOR EACH ROW EXECUTE FUNCTION predefined_scripts_touch_updated_at();
+DROP TRIGGER IF EXISTS trg_agent_predefined_scripts_updated_at ON agent_predefined_scripts;
+CREATE TRIGGER trg_agent_predefined_scripts_updated_at
+    BEFORE UPDATE ON agent_predefined_scripts
+    FOR EACH ROW EXECUTE FUNCTION agent_predefined_scripts_touch_updated_at();
 
 -- ============================================================================
 -- INSERT: 6 скриптов
 -- parameters — JSONB {param_name: {type, required, default, description, validation}}
 -- ============================================================================
 
-INSERT INTO predefined_scripts (name, description, sql_template, parameters, max_rows_default, returns, long_description) VALUES
+INSERT INTO agent_predefined_scripts (name, description, sql_template, parameters, max_rows_default, returns, long_description) VALUES
 ('analytics_by_year_month',
  'Аналитика проверок по годам и месяцам',
  $sql$

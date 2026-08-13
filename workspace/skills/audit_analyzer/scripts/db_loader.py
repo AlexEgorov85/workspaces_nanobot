@@ -1,7 +1,7 @@
 """
 Загрузка реестра предопределённых SQL-скриптов.
 
-Читает таблицу (по умолчанию public.predefined_scripts) ИЗ DuckDB-кэша
+Читает таблицу (по умолчанию public.agent_predefined_scripts) ИЗ DuckDB-кэша
 через cache_provider.query_sql(), минуя прямой psycopg2. Это согласовано
 с тем, как навык читает данные аудита (oarb.audits, oarb.violations) — тоже
 из DuckDB. Сценарий: gateway один раз копирует таблицы в DuckDB-файл, дальше

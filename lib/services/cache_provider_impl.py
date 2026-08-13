@@ -84,10 +84,10 @@ def read_embedding_config(cfg: dict) -> Dict[str, Any]:
 
 
 def read_vector_index_config(cfg: dict) -> Dict[str, Any]:
-    """Конфиг векторных индексов: таблица vector_index_config → fallback в настройках."""
+    """Конфиг векторных индексов: таблица agent_vector_index_config → fallback в настройках."""
     from utils.db import fetch
 
-    table = cfg.get("mode_vector_index_config_table", "oarb.vector_index_config")
+    table = cfg.get("mode_vector_index_config_table", "public.agent_vector_index_config")
     try:
         rows = fetch(
             "SELECT index_name, source_table, src_table, pk_column, "
@@ -149,7 +149,7 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> "PostgresDuckDbProvid
         vector_db_table=cfg.get("mode_vector_db_table", ""),
         vector_index_path=index_path,
         vector_indexes=read_vector_index_config(cfg),
-        vector_store_table=cfg.get("mode_vector_store_table", "oarb.vector_index_store"),
+        vector_store_table=cfg.get("mode_vector_store_table", "public.agent_vector_index_store"),
         embedding_base_url=emb.get("base_url", ""),
         embedding_model=emb.get("model", "mxbai-embed-large:latest"),
     )
@@ -331,7 +331,7 @@ def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
         for tbl in table_list:
             _copy_table(pg_conn, conn, schema, tbl)
 
-        # Копируем дополнительные таблицы (например, public.predefined_scripts)
+        # Копируем дополнительные таблицы (например, public.agent_predefined_scripts)
         for sch, tbl in additional_tables:
             _copy_table(pg_conn, conn, sch, tbl)
 

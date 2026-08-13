@@ -8,7 +8,7 @@ embedding_columns помечена "chunk": true, её текст разбива
 row_data (JSONB) всегда содержит ПОЛНУЮ строку исходной таблицы,
 независимо от количества чанков.
 
-Конфиг читается из oarb.vector_index_config (БД) с fallback
+Конфиг читается из public.agent_vector_index_config (БД) с fallback
 на ключ vector_indexes в skills.audit_analyzer (project.json).
 
 Запуск (из корня проекта):
@@ -164,7 +164,7 @@ def _content_hash(text: str) -> str:
 def _normalize_cols(embedding_cols: list) -> list[str]:
     """Привести embedding_cols к списку строк-имён колонок.
 
-    Конфигурация в oarb.vector_index_config может содержать как
+    Конфигурация в public.agent_vector_index_config может содержать как
     простые имена колонок (["col1", "col2"]), так и объекты
     ([{"column": "col", "chunk": true, ...}, ...]). Функции
     `_build_search_text` и `build_chunks` ожидают только имена колонок,
@@ -414,7 +414,7 @@ def build_index(
             provider = _build_provider(_CFG, str(_SKILL_ROOT))
             provider.invalidate_cache(index_name)
             provider.rebuild_and_store_index(index_name, db_table)
-            print(f"  FAISS-индекс '{index_name}' собран в памяти и сохранён в oarb.vector_index_store")
+            print(f"  FAISS-индекс '{index_name}' собран в памяти и сохранён в public.agent_vector_index_store")
         except (ImportError, ModuleNotFoundError) as exc:
             print(f"  ! ПРЕДУПРЕЖДЕНИЕ: FAISS-индекс для '{index_name}' не собран — "
                   f"отсутствует зависимость ({exc.__class__.__name__}: {exc}). "
@@ -578,7 +578,7 @@ def main():
     print(f"Режим: {mode_label}")
     print(f"Батч: {args.batch_size}, чанк: {args.chunk_size} симв., перекрытие: {args.chunk_overlap}")
     print(f"Индексы: {', '.join(enabled.keys())}")
-    print("Источник конфига: таблица oarb.vector_index_config -> config.json")
+    print("Источник конфига: таблица public.agent_vector_index_config -> config.json")
 
     results = []
     for name, cfg in enabled.items():
