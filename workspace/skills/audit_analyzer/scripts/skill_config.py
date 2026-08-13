@@ -18,24 +18,11 @@ def get_llm_config() -> dict[str, Any]:
     # providers.<provider> из config.json). Специфичные для навыка llm_* ключи
     # (project.json → skills.audit_analyzer) приоритетнее и могут перекрывать.
     # Таким образом смена провайдера/модели/ключа агента автоматически меняет
-    # и LLM навыка, без дублирования секретов.
-    defaults = SETTINGS.get("agents", {}).get("defaults", {}) or {}
+    # и LLM навыка, без дублирования секретов. Логика вынесена в общий модуль
+    # lib/services/llm_config.py и переиспользуется бенчмарком.
+    from lib.services.llm_config import resolve_llm_config
 
-    provider = _CFG.get("llm_provider") or defaults.get("provider") or "openai-compatible"
-    provider_cfg = SETTINGS.get("providers", {}).get(provider) or {}
-
-    model = _CFG.get("llm_model") or defaults.get("model") or "gpt-4o-mini"
-    api_base = _CFG.get("llm_api_base") or provider_cfg.get("apiBase") or ""
-    api_key = _CFG.get("llm_api_key") or provider_cfg.get("apiKey") or ""
-
-    return {
-        "provider": provider,
-        "model": model,
-        "api_base": api_base or "https://api.openai.com/v1",
-        "api_key": api_key,
-        "max_tokens": int(_CFG.get("llm_max_tokens", 8192)),
-        "temperature": float(_CFG.get("llm_temperature", 0.1)),
-    }
+    return resolve_llm_config(overrides=_CFG)
 
 
 def get_tool_config() -> dict[str, Any]:
