@@ -27,6 +27,10 @@ from typing import Any
 _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+# workspace/ нужен для ToolAuditHook (workspace/hooks/tool_audit_hook.py)
+# и для runtime-хуков, которые импортирует AgentLoop.from_config.
+if str(_SCRIPT_DIR / "workspace") not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR / "workspace"))
 
 from loguru import logger
 
@@ -35,6 +39,38 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+# Глобальный лог-файл прогресса. По умолчанию прогон пишет в
+# ``--output-dir/progress.log`` (или ``benchmarks/results/runs/<run_id>/progress.log``),
+# дополнительно к stdout. Используется ``_emit()`` ниже — он работает так
+# же как ``print()``, но дополнительно пишет в файл, если задан ``_LOG_FILE``.
+# Это лечит проблему ``System.Management.Automation.RemoteException``,
+# когда stdout/stderr Python содержит большие/бинарные данные.
+_LOG_FILE: "Any | None" = None  # io.TextIOBase или None
+
+
+def _emit(msg: str = "", *, end: str = "\n") -> None:
+    """Напечатать ``msg`` в stdout и (если открыт) в лог-файл.
+
+    Замена ``print()`` в runner: вывод идёт в оба места сразу. Используется
+    для прогресса по тестам, чтобы хвост лога был виден независимо от того,
+    перехватывает ли вызывающая обёртка (PowerShell/CI) Python-stdout.
+    """
+    text = (msg + ("" if end == "\n" else end)) if end else msg
+    try:
+        print(text, end="" if end == "\n" else end)
+    except Exception:
+        try:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+        except Exception:
+            pass
+    if _LOG_FILE is not None and not _LOG_FILE.closed:
+        try:
+            _LOG_FILE.write(text)
+            _LOG_FILE.flush()
+        except Exception:
+            pass
 
 from benchmarks.db import BenchmarkDB
 from benchmarks.evaluator import evaluate
@@ -46,6 +82,13 @@ from benchmarks.scorer import score_multi_step, score_single, score_step
 
 RESULTS_DIR = Path(__file__).parent / "results" / "runs"
 ITEMS_DIR = Path(__file__).parent / "items"
+
+# Поднимаем контекст приложения по аналогии с gateway: nanobot-агент +
+# DuckDB-кэш аудита + FAISS-индексы + PGSessionManager + ToolAuditHook.
+# Без этого бенчмарк тестирует агента в вакууме — он не видит данные
+# audit_analyzer и работает медленнее через прямой psycopg2 вместо DuckDB.
+BENCH_SCRIPT_DIR = _SCRIPT_DIR
+BENCH_WORKSPACE_DIR = BENCH_SCRIPT_DIR / "workspace"
 
 
 def _detect_run_id() -> str:
@@ -106,6 +149,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Keep only N newest run dirs, delete older (0 = never delete)")
     p.add_argument("--dry-run", action="store_true",
                    help="Only show what would be run, don't execute")
+    p.add_argument("--no-audit", action="store_true",
+                   help="Disable audit_analyzer services (DuckDB+FAISS) — "
+                        "use for CI/short runs without DSN")
+    p.add_argument("--log-file", default=None,
+                   help="Path to progress log file. If omitted, defaults to "
+                        "<output-dir>/progress.log when running.")
     return p.parse_args(argv)
 
 
@@ -257,9 +306,14 @@ def _cleanup_item(item: BenchItem, bot: Any) -> None:
         item: Задание бенчмарка.
         bot: Экземпляр агента Nanobot.
     """
-    workspace = Path(bot._loop.workspace) if hasattr(bot._loop, "workspace") else None
+    workspace = None
+    try:
+        if hasattr(bot, "_loop") and hasattr(bot._loop, "workspace"):
+            workspace = Path(bot._loop.workspace)
+    except Exception:
+        workspace = None
     if not workspace:
-        return
+        workspace = BENCH_WORKSPACE_DIR
     patterns: list[str] = list(item.cleanup or [])
     if item.type == "single" and item.expect:
         if item.expect.check_file:
@@ -419,9 +473,10 @@ async def _run_multi_step(
     total_steps = len(item.steps)
 
     for step in item.steps:
+        t_step_start = time.time()
         hook = BenchmarkHook()
         step_index = step.step
-        print(f"    Step {step_index}/{total_steps}: {step.question[:70]}")
+        _emit(f"    Шаг {step_index}/{total_steps} ({datetime.now().strftime('%H:%M:%S')}): {step.question[:70]}")
 
         try:
             result = await bot.run(
@@ -431,7 +486,7 @@ async def _run_multi_step(
             )
         except Exception as e:
             logger.error("Error in step {} of item {}: {}", step.step, item.id, e)
-            print(f"      -> ERROR: {e}")
+            _emit(f"      -> ОШИБКА ({time.time() - t_step_start:.1f}с): {e}")
             step_results.append(StepResult(
                 step=step.step,
                 weight=step.weight,
@@ -479,7 +534,12 @@ async def _run_suite(
     run_id: str,
     args: argparse.Namespace,
 ) -> SuiteResult:
-    """Запуск всех заданий набора бенчмарков.
+    """Запустить все задания набора бенчмарков через ApplicationContext.
+
+    По аналогии с gateway: поднимаем единый контекст приложения (агент +
+    bus + session_manager + db_logging + audit_analyzer), дожидаемся
+    initial_load из PG в DuckDB и прогрева FAISS-индексов — затем гоняем
+    задания через ``ctx.agent`` (а не собранный вручную ``Nanobot``).
 
     Args:
         suite: Набор тестов для запуска.
@@ -489,73 +549,196 @@ async def _run_suite(
     Returns:
         Результаты прогона всего набора.
     """
-    from nanobot import Nanobot
-    from nanobot.config.loader import load_config, resolve_config_env_vars
-    from nanobot.agent.loop import AgentLoop
-    from nanobot.providers.image_generation import image_gen_provider_configs
+    from lib.core.application_context import ApplicationContext
     from lib.services.llm_config import ensure_llm_env, resolve_llm_config
 
-    # Единая LLM-конфигурация агента (agents.defaults + providers.<provider> из
-    # config.json): бенчмарк использует ту же модель/провайдер/ключ, что и агент,
-    # без хардкода провайдера. ensure_llm_env() гарантирует LLM_API_KEY в env
-    # для резолва ${LLM_API_KEY} в config.json.
+    # Переопределение модели из CLI (если задано). ``ensure_llm_env()``
+    # поднимает LLM_API_KEY в env, чтобы ConfigService смог резолвить
+    # ${LLM_API_KEY}-плейсхолдеры в config.json.
     ensure_llm_env()
-    llm = resolve_llm_config({"llm_model": args.model} if args.model else None)
+    llm_override = {"llm_model": args.model} if args.model else None
+    llm = resolve_llm_config(llm_override)
 
-    config_path = args.config
-    config = resolve_config_env_vars(load_config(config_path))
-    config.agents.defaults.model = llm["model"]
-    config.agents.defaults.provider = llm["provider"]
-    provider_cfg = getattr(config.providers, llm["provider"], None)
-    if provider_cfg is not None:
-        provider_cfg.api_key = llm["api_key"] or provider_cfg.api_key
-        provider_cfg.api_base = llm["api_base"] or provider_cfg.api_base
-    loop = AgentLoop.from_config(
-        config,
-        image_generation_provider_configs=image_gen_provider_configs(config),
+    # ApplicationContext внутри читает config.json и собирает AgentLoop
+    # на модели, указанной в agents.defaults.model. Поэтому override модели
+    # через --model делаем ДО create(): временно модифицируем config.json,
+    # после прогона восстанавливаем оригинал.
+    config_json_path = BENCH_SCRIPT_DIR / "config.json"
+    original_config: str | None = None
+    if llm_override and config_json_path.is_file():
+        try:
+            original_config = config_json_path.read_text(encoding="utf-8")
+            data = json.loads(original_config)
+            agents = data.setdefault("agents", {}).setdefault("defaults", {})
+            agents["model"] = llm["model"]
+            agents["provider"] = llm["provider"]
+            if llm["provider"]:
+                providers = data.setdefault("providers", {})
+                prov_cfg = providers.setdefault(llm["provider"], {})
+                if llm["api_key"]:
+                    prov_cfg["apiKey"] = llm["api_key"]
+                    prov_cfg["api_key"] = llm["api_key"]
+                if llm["api_base"]:
+                    prov_cfg["apiBase"] = llm["api_base"]
+                    prov_cfg["api_base"] = llm["api_base"]
+            config_json_path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.warning("Не удалось применить --model override: {}", exc)
+            original_config = None
+
+    # Контекст приложения: поднимает Bus + SessionStorage + DbLogging +
+    # AuditSyncService + AuditMemoryStore + PreloadService + AgentLoop.
+    # enable_audit=False при --no-audit (только локальные прогоны без DSN).
+    enable_audit = not getattr(args, "no_audit", False)
+    try:
+        ctx = ApplicationContext.create(
+            script_dir=BENCH_SCRIPT_DIR,
+            workspace_dir=BENCH_WORKSPACE_DIR,
+            enable_db_logging=True,
+            enable_audit=enable_audit,
+        )
+    finally:
+        # Восстанавливаем config.json даже при ошибке инициализации
+        # (иначе следующие запуски будут гонять на чужой модели).
+        if original_config is not None:
+            try:
+                config_json_path.write_text(original_config, encoding="utf-8")
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Не удалось восстановить config.json: {}", exc)
+            original_config = None
+
+    # Коллбэки синка ставим ДО ctx.start() — иначе worker-тред успеет
+    # сделать initial_load раньше и данные не попадут в DuckDB-кэш
+    # (см. комментарий в gateway.py:50-77).
+    first_sync_event: "asyncio.Event | None" = None
+    audit_ready = (
+        ctx.audit_sync_service is not None and ctx.audit_memory_store is not None
     )
-    bot = Nanobot(loop)
+    if audit_ready:
+        ctx.audit_memory_store.open()
+        ctx.audit_sync_service.set_on_new_records_callback(
+            ctx.audit_memory_store.upsert_records
+        )
+        prev_cb = getattr(ctx.audit_sync_service, "_on_sync_callback", None)
+        first_sync_event = asyncio.Event()
 
-    start_time = time.time()
-    results: list[BenchResult] = []
+        def _on_first_sync() -> None:
+            if first_sync_event is not None:
+                first_sync_event.set()
 
-    print(f"Running suite: {suite.name} ({len(suite.items)} items)")
-    print()
+        def _wrapped() -> None:
+            _on_first_sync()
+            if prev_cb is not None:
+                try:
+                    prev_cb()
+                except Exception:
+                    pass
 
-    for idx, item in enumerate(suite.items, 1):
-        print(f"[{idx}/{len(suite.items)}] {item.id} (difficulty={item.difficulty})")
-        bench_result = await _run_item(item, run_id, bot, args.verbose)
-        results.append(bench_result)
+        ctx.audit_sync_service.set_on_sync_callback(_wrapped)
 
-        status = "PASS" if bench_result.passed else "FAIL"
-        print(f"  -> {status} score={bench_result.total_score:.2%} "
-              f"iter={bench_result.total_iterations} "
-              f"dur={bench_result.duration_sec:.1f}s")
-        if bench_result.error:
-            print(f"     ERROR: {bench_result.error}")
-        print()
+    ctx.start()
 
-    duration_sec = time.time() - start_time
-    total_items = len(results)
-    passed_items = sum(1 for r in results if r.passed)
-    total_score = sum(r.total_score for r in results)
-    avg_score = total_score / total_items if total_items else 0.0
+    try:
+        if audit_ready:
+            try:
+                await asyncio.wait_for(first_sync_event.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                print(
+                    "[yellow]⚠[/yellow] audit_analyzer initial load timeout "
+                    "(>30s), прогон на текущем состоянии DuckDB-кэша"
+                )
+            else:
+                print("[green]✓[/green] audit_analyzer initial load received")
 
-    suite_result = SuiteResult(
-        suite_name=suite.name,
-        timestamp=datetime.now().isoformat(),
-        total_items=total_items,
-        passed_items=passed_items,
-        total_score=total_score,
-        avg_score=avg_score,
-        duration_sec=duration_sec,
-        results=results,
-        config={"tags": suite.tags, "mode": args.mode},
-        run_id=run_id,
-        artifacts_dir=str(RESULTS_DIR / run_id),
-    )
+            loaded = await ctx.preload_service.preload_vector_indexes(
+                ctx.audit_memory_store
+            )
+            if not loaded:
+                print(
+                    "[dim]audit_analyzer vector indexes: нет данных в кэше[/dim]"
+                )
+            else:
+                for item in loaded:
+                    print(
+                        f"[green]✓[/green] vector index '{item['index_name']}' "
+                        f"built in memory: {item['vectors']} vectors"
+                    )
+        else:
+            if enable_audit:
+                print(
+                    "[yellow]⚠[/yellow] audit_analyzer services недоступны "
+                    "(нет DSN) — задания с SQL/vector могут работать медленнее"
+                )
 
-    return suite_result
+        # ctx.agent — это AgentLoop, а _run_item/_run_single/_run_multi_step
+        # ожидают интерфейс Nanobot.run(message=..., session_key=..., hooks=...).
+        # Оборачиваем в Nanobot, чтобы не дублировать сигнатуру.
+        from nanobot import Nanobot
+        bot = Nanobot(ctx.agent, config=ctx.config)
+
+        start_time = time.time()
+        results: list[BenchResult] = []
+
+        suite_start = time.time()
+        _emit(f"=== Прогон набора: {suite.name} ({len(suite.items)} заданий) ===")
+        _emit(f"Начало: {datetime.now().isoformat(timespec='seconds')}")
+        _emit("")
+
+        for idx, item in enumerate(suite.items, 1):
+            t_item_start = time.time()
+            _emit(f"[{idx}/{len(suite.items)}] {item.id} (сложность={item.difficulty}) — старт {datetime.now().strftime('%H:%M:%S')}")
+            bench_result = await _run_item(item, run_id, bot, args.verbose)
+            results.append(bench_result)
+
+            status = "ПРОЙДЕН" if bench_result.passed else "ПРОВАЛЕН"
+            elapsed = time.time() - t_item_start
+            _emit(f"  -> {status} | балл={bench_result.total_score:.2%} "
+                  f"| итераций={bench_result.total_iterations} "
+                  f"| агент={bench_result.duration_sec:.1f}с "
+                  f"| общее={elapsed:.1f}с")
+            if bench_result.error:
+                _emit(f"     ОШИБКА: {bench_result.error}")
+            _emit("")
+
+        duration_sec = time.time() - start_time
+        total_items = len(results)
+        passed_items = sum(1 for r in results if r.passed)
+        total_score = sum(r.total_score for r in results)
+        avg_score = total_score / total_items if total_items else 0.0
+
+        suite_result = SuiteResult(
+            suite_name=suite.name,
+            timestamp=datetime.now().isoformat(),
+            total_items=total_items,
+            passed_items=passed_items,
+            total_score=total_score,
+            avg_score=avg_score,
+            duration_sec=duration_sec,
+            results=results,
+            config={"tags": suite.tags, "mode": args.mode},
+            run_id=run_id,
+            artifacts_dir=str(RESULTS_DIR / run_id),
+        )
+        return suite_result
+    finally:
+        # Корректный shutdown в стиле gateway.py:158-172
+        try:
+            await ctx.agent.close_mcp()
+        except Exception:
+            pass
+        try:
+            ctx.agent.stop()
+        except Exception:
+            pass
+        try:
+            flushed = ctx.agent.sessions.flush_all()
+            if flushed:
+                logger.info("Flushed {} session(s) to disk", flushed)
+        except Exception:
+            pass
+        ctx.stop()
 
 
 def _do_compare(args: argparse.Namespace) -> None:
@@ -773,18 +956,44 @@ async def main_async(argv: list[str] | None = None) -> int:
         return 0
 
     run_id = _generate_run_id()
-    suite_result = await _run_suite(suite, run_id, args)
-
     output_dir = args.output or str(RESULTS_DIR / run_id)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+
+    # Открываем прогресс-лог (если запрошен) ДО _run_suite, чтобы
+    # ловить ход выполнения с самого начала. По умолчанию — пишем в
+    # <output-dir>/progress.log.
+    global _LOG_FILE
+    log_path = Path(args.log_file) if args.log_file else (output_path / "progress.log")
+    _LOG_FILE = open(log_path, "w", encoding="utf-8", errors="replace")
+    _emit(f"=== Лог прогона бенчмарка ===")
+    _emit(f"ID прогона: {run_id}")
+    _emit(f"Набор:      {suite.name} ({len(suite.items)} заданий)")
+    _emit(f"Старт:      {datetime.now().isoformat(timespec='seconds')}")
+    _emit(f"Отчёты:     {output_path}")
+    _emit(f"DSN:        {bool(args.db)} | audit_analyzer: {not getattr(args, 'no_audit', False)}")
+    _emit("")
+
+    try:
+        suite_result = await _run_suite(suite, run_id, args)
+    finally:
+        # Даже при падении записываем хвост лога перед закрытием.
+        try:
+            _emit(f"=== Прогон завершён в {datetime.now().isoformat(timespec='seconds')} ===")
+        except Exception:
+            pass
+        if _LOG_FILE is not None and not _LOG_FILE.closed:
+            _LOG_FILE.close()
+        _LOG_FILE = None
+
     suite_result.artifacts_dir = str(output_path)
 
     json_path = save_json_report(suite_result, output_path)
     md_path = save_markdown_report(suite_result, output_path)
 
-    print(f"JSON report:  {json_path}")
-    print(f"Markdown report: {md_path}")
+    _emit(f"JSON-отчёт:      {json_path}")
+    _emit(f"Markdown-отчёт:  {md_path}")
+    _emit(f"Лог прогресса:   {log_path}")
 
     if args.db:
         try:
@@ -792,7 +1001,7 @@ async def main_async(argv: list[str] | None = None) -> int:
             bdb.ensure_tables()
             db_run_id = bdb.save_run(suite_result)
             if db_run_id:
-                print(f"Saved to PostgreSQL: run_id={db_run_id}")
+                _emit(f"Saved to PostgreSQL: run_id={db_run_id}")
         except Exception as e:
             logger.error("Failed to save to PostgreSQL: {}", e)
 

@@ -38,19 +38,73 @@ runner.py (CLI)
   │
   ├── load_benchmark(path)        → BenchSuite (loader.py)
   ├── _filter_items(...)          → отфильтрованный BenchSuite
-  ├── _run_suite()                → для каждого item:
-  │     ├── _run_single()         →   single-задание
-  │     │     ├── bot.run()       →     агент + BenchmarkHook
-  │     │     └── evaluate()      →     оценка (evaluator.py)
-  │     └── _run_multi_step()     →   multi_step-задание
-  │           ├── bot.run() × N   →     шаги в одной сессии
-  │           └── evaluate() × N  →     оценка каждого шага
+  ├── _run_suite()                → поднимает ApplicationContext (как gateway)
+  │     ├── ApplicationContext.create(enable_db_logging=True, enable_audit=True)
+  │     ├── set_on_new_records_callback(upsert_records)
+  │     ├── set_on_sync_callback(wrapped)         → first_sync_event (asyncio.Event)
+  │     ├── ctx.start()                            → старт audit_sync_service + db_logging
+  │     ├── await asyncio.wait_for(first_sync_event, 30s)
+  │     ├── await preload_service.preload_vector_indexes(store)   → прогрев FAISS
+  │     └── для каждого item:
+  │           ├── _run_single()         →   single-задание
+  │           │     ├── bot.run()       →     Nanobot(ctx.agent) + BenchmarkHook
+  │           │     └── evaluate()      →     оценка (evaluator.py)
+  │           └── _run_multi_step()     →   multi_step-задание
+  │                 ├── bot.run() × N   →     шаги в одной сессии
+  │                 └── evaluate() × N  →     оценка каждого шага
   │
   ├── save_json_report()          → JSON-отчёт (reporter.py)
   ├── save_markdown_report()      → Markdown-отчёт (reporter.py)
   ├── BenchmarkDB.save_run()      → сохранение в PostgreSQL (db.py)
   └── _print_summary()            → консольный вывод
 ```
+
+### Зачем benchmark переиспользует `ApplicationContext`?
+
+Раньше `benchmarks/runner.py` собирал свой собственный `Nanobot`/`AgentLoop` напрямую через
+`AgentLoop.from_config(...)`. Это давало рабочий, но «слепой» агент: он не имел
+доступа к `Bus`, `SessionManager`, `DbLoggingService`, `AuditSyncService`,
+`AuditMemoryStore` (DuckDB-кэш + FAISS-индексы) — всем сервисам,
+которыми владеет `ApplicationContext`.
+
+Теперь benchmark использует **тот же `ApplicationContext.create()`**,
+что и `gateway.py` и `cli_agent.py`. Это означает:
+
+* **Агент видит реальные данные**: SQL через `query_sql` в DuckDB-кэше
+  (миллисекунды вместо psycopg2-секунд), семантический поиск через
+  FAISS-индексы, прогретые в память (см. `preload_vector_indexes()`).
+* **`ToolAuditHook`** автоматически подключается к `ctx.hooks[0]` —
+  вызовы инструментов пишутся в outbound-метаданные и в БД через
+  `DbLoggingService` (как в gateway).
+* **`PGSessionManager`** (если есть DSN) пишет сессии benchmark в ту же
+  таблицу, что и обычный агент.
+* **`RuntimePatcher`** подменяет `_assemble_outbound` — UI получает
+  консистентный формат tool-вызовов.
+* **`ShutdownCoordinator`** через `ctx.stop()` гасит фоновые сервисы
+  при выходе — без утечек worker-тредов.
+
+Архитектурно runner теперь — **тонкий оркестратор** поверх
+`ApplicationContext`, что устраняет дрейф конфигурации между prod (gateway)
+и бенчмарками.
+
+#### Graceful degradation без DSN
+
+`ApplicationContext.create()` умеет graceful fallback:
+
+* Нет DSN в `channels.postgres.dsn` → `audit_memory_store` и
+  `audit_sync_service` остаются `None`, `session_manager` уходит в
+  file-mode. Бенчмарк продолжит работу, агент будет видеть данные
+  audit_analyzer **только если они есть локально** (например, через
+  опубликованный snapshot в `workspace/skills/audit_analyzer/`).
+* Флаг `--no-audit` отключает `enable_audit` явно — для коротких CI-прогонов
+  без поднятого PostgreSQL.
+
+#### Override модели через `--model`
+
+`--model NAME` мутирует `agents.defaults.model` + `providers.<name>` в
+`config.json` на время прогона. После `_run_suite()` (в `finally`)
+оригинальный `config.json` восстанавливается. Если что-то идёт не так
+на старте — `finally` всё равно восстановит файл.
 
 ---
 
@@ -550,7 +604,24 @@ python benchmarks/runner.py --output my_reports/run1
 python benchmarks/runner.py --config my_config.json
 ```
 
-### 5.11. Обратная связь при запуске
+### 5.11. Отключение audit_analyzer (без DuckDB+FAISS)
+
+По умолчанию benchmark поднимает `ApplicationContext` c `enable_audit=True`:
+`AuditSyncService` читает таблицы из PostgreSQL в in-memory DuckDB-кэш и
+прогревает FAISS-индексы. Если DSN нет или нужен короткий smoke-прогон без
+PG — используйте `--no-audit`:
+
+```bash
+python benchmarks/runner.py --no-audit
+python benchmarks/runner.py --no-audit --tags simple --difficulty 1
+```
+
+Без `--no-audit` бенчмарк ждёт `initial_load` (таблицы → DuckDB) и
+`preload_vector_indexes` (DuckDB → FAISS) перед стартом тестов. Таймаут
+`first_sync_event` — 30 секунд (как в `gateway.py`). Превышение →
+warning и прогон на текущем состоянии кэша.
+
+### 5.12. Обратная связь при запуске
 
 При запуске `runner.py` вы получаете многоуровневую обратную связь:
 
