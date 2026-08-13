@@ -1,117 +1,117 @@
-# Сложные задания (сложность 8-10)
-# Многошаговые комплексные задачи с контекстом между шагами
+﻿# Сложные задания (сложность 8-10)
+# Многошаговый анализ реальных данных oarb с итоговым отчётом
 
-- id: "hard-code-test-fix"
-  name: "Написать, протестировать и исправить"
+- id: "hard-effectiveness-report"
+  name: "Отчёт по эффективности проверок"
   difficulty: 8
-  category: "coding"
-  type: "multi_step"
-  new_session: false
-  max_iterations: 40
-  timeout: 180
-  steps:
-    - step: 1
-      weight: 0.3
-      question: "Напиши Python скрипт fibonacci.py, который генерирует первые N чисел Фибоначчи, где N передаётся аргументом командной строки"
-      expect:
-        tools: ["write_file"]
-        check_file: "fibonacci.py"
-    - step: 2
-      weight: 0.3
-      question: "Запусти fibonacci.py с аргументом 11 и сохрани вывод в fibonacci_output.txt"
-      expect:
-        tools: ["exec"]
-        check_file: "fibonacci_output.txt"
-        keywords_include: ["55"]
-    - step: 3
-      weight: 0.4
-      question: "Добавь валидацию ввода в fibonacci.py, чтобы он корректно обрабатывал отрицательные числа и нечисловые аргументы, затем протестируй с невалидным вводом и покажи сообщение об ошибке"
-      expect:
-        tools: ["exec"]
-        check_file: "fibonacci.py"
-        match_type: "llm_judge"
-
-- id: "hard-research-report"
-  name: "Исследование и отчёт"
-  difficulty: 8
-  category: "research"
+  category: "audit_analyzer"
   type: "multi_step"
   new_session: false
   max_iterations: 40
   timeout: 300
   steps:
     - step: 1
-      weight: 0.2
-      question: "Найди все Python тестовые файлы в проекте и посчитай их"
+      weight: 0.3
+      question: >-
+        Запусти предопределённый скрипт analytics_by_year_month с параметром
+        year=2024 через skills/audit_analyzer/audit_analyze.bat и покажи,
+        сколько проверок прошло по месяцам.
       expect:
-        tools: ["find_files"]
+        tools: ["exec"]
+        keywords_include: ["2024", "проверок"]
     - step: 2
       weight: 0.3
-      question: "Прочитай один из тестовых файлов и опиши, что он тестирует"
+      question: >-
+        Запусти скрипт audit_effectiveness и определи, какая проверка имеет
+        наибольшее число нарушений и какой у неё уровень серьёзности.
       expect:
-        tools: ["read_file"]
-        keywords_include: ["тест"]
+        tools: ["exec"]
+        
+        keywords_include: ["severity_level", "критическ"]
     - step: 3
-      weight: 0.5
-      question: "Создай файл отчёта test_summary.md, в котором перечисли все найденные тестовые файлы и кратко опиши подход к тестированию в этом проекте"
+      weight: 0.4
+      question: >-
+        По результатам двух предыдущих шагов собери итоговый отчёт по
+        эффективности аудиторских проверок за 2024 год и сохрани его в файл
+        data_store/cache/effectiveness_report.md.
       expect:
         tools: ["write_file"]
-        check_file: "test_summary.md"
+        check_file: "data_store/cache/effectiveness_report.md"
         match_type: "llm_judge"
+        goal: "Отчёт содержит итоги по эффективности аудиторских проверок за 2024 год: помесячную картину и выделение проверки с наибольшим числом нарушений и её уровнем серьёзности"
 
-- id: "hard-data-pipeline"
-  name: "Анализ данных"
+- id: "hard-dynamics-report"
+  name: "Отчёт по динамике проверок"
   difficulty: 9
-  category: "data_analysis"
+  category: "audit_analyzer"
   type: "multi_step"
   new_session: false
   max_iterations: 45
   timeout: 300
   steps:
     - step: 1
-      weight: 0.2
-      question: "Найди CSV файлы в workspace и перечисли их"
+      weight: 0.3
+      question: >-
+        Запусти предопределённый скрипт analytics_by_year_month с параметром
+        year=2024 через skills/audit_analyzer/audit_analyze.bat и покажи,
+        в каких месяцах 2024 года проходили проверки и сколько их было.
       expect:
-        tools: ["find_files"]
-        keywords_include: [".csv"]
+        tools: ["exec"]
+        keywords_include: ["2024", "проверок"]
     - step: 2
-      weight: 0.4
-      question: "Проанализируй файл sales.csv, найденный в workspace, и вычисли общую выручку, среднюю сумму продажи и количество транзакций"
+      weight: 0.3
+      question: >-
+        Запусти скрипт top_audited_objects и покажи, какие объекты
+        проверялись чаще всего в 2024 году.
       expect:
-        tools: ["read_file"]
-        keywords_include: ["выручк", "средн", "транзакц"]
+        tools: ["exec"]
+        keywords_include: ["объект", "проверок"]
     - step: 3
       weight: 0.4
-      question: "Создай файл отчёта sales_report.md с результатами анализа: общая выручка, средняя продажа и интересные закономерности"
+      question: >-
+        Собери итоговый отчёт по динамике аудиторских проверок за 2024 год:
+        помесячное распределение и список наиболее проверяемых объектов.
+        Сохрани его в файл data_store/cache/dynamics_report.md.
       expect:
         tools: ["write_file"]
-        check_file: "sales_report.md"
+        check_file: "data_store/cache/dynamics_report.md"
         match_type: "llm_judge"
+        goal: "Отчёт отражает динамику проверок за 2024 год: помесячное распределение и список наиболее проверяемых объектов"
 
-- id: "hard-git-history"
-  name: "Анализ Git истории"
-  difficulty: 8
-  category: "git"
+- id: "hard-violations-analysis"
+  name: "Анализ нарушений по кодам"
+  difficulty: 9
+  category: "audit_analyzer"
   type: "multi_step"
   new_session: false
-  max_iterations: 30
-  timeout: 180
+  max_iterations: 45
+  timeout: 300
   steps:
     - step: 1
       weight: 0.3
-      question: "Покажи последние 5 коммитов git с их сообщениями"
+      question: >-
+        Запусти предопределённый скрипт violations_by_type через
+        skills/audit_analyzer/audit_analyze.bat и покажи распределение
+        нарушений по кодам.
       expect:
         tools: ["exec"]
-        keywords_include: ["коммит"]
+        keywords_include: ["VIOL", "нарушений"]
     - step: 2
       weight: 0.3
-      question: "Какие файлы были изменены в последнем коммите? Покажи краткую сводку изменений"
+      question: >-
+        Запусти скрипт top_audited_objects и покажи, какие объекты
+        проверялись чаще всего.
       expect:
         tools: ["exec"]
-        keywords_include: ["файл", "изменен"]
+        keywords_include: ["объект", "проверок"]
     - step: 3
       weight: 0.4
-      question: "Создай файл git_log.md с последними 5 коммитами в красиво оформленном виде. Используй exec с командой git log"
+      question: >-
+        Собери итоговый отчёт по нарушениям: какие коды нарушений самые
+        частые и какие объекты проверялись чаще всего. Сохрани его в файл
+        data_store/cache/violations_report.md.
       expect:
-        tools: ["exec"]
-        check_file: "git_log.md"
+        tools: ["write_file"]
+        check_file: "data_store/cache/violations_report.md"
+        match_type: "llm_judge"
+        goal: "Отчёт содержит распределение нарушений по кодам и список наиболее проверяемых объектов"

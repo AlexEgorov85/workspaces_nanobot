@@ -39,9 +39,9 @@
       "dbname": "nanobot",                    // Имя БД
       "user": "postgres",                     // Пользователь
       "schema": "public",                     // Схема БД
-      "messages_table": "agent_session_messages",   // Таблица сообщений сессий (PGSessionManager, префикс agent_)
-      "meta_table": "agent_session_meta",           // Таблица метаданных сессий (PGSessionManager, префикс agent_)
-      "table_name": "agent_conversation_messages",  // Таблица обмена сообщениями (PostgresChannel/streamlit, префикс agent_)
+      "messages_table": "agent_session_messages",   // Таблица сообщений сессий (PGSessionManager)
+      "meta_table": "agent_session_meta",           // Таблица метаданных сессий (PGSessionManager)
+      "table_name": "agent_conversation_messages",  // Таблица обмена сообщениями (PostgresChannel/streamlit)
       "poll_interval": 2.0,                   // Поллинг новых сообщений, сек
       "flush_interval": 2.0,                  // Сброс reasoning в metadata, сек
       "max_concurrent": 1,                    // Макс. параллельно обрабатываемых сообщений
@@ -125,12 +125,7 @@
       "embedding_http_timeout_sec": 60,       // HTTP-таймаут Ollama /api/embed
 
       // --- Векторный поиск: ИНДЕКСЫ В БАЗЕ ДАННЫХ ----------------------------
-      // С 2026-06 векторы и их конфигурация хранятся в PostgreSQL/Greenplum:
-      //   oarb.audit_vectors          — сырые эмбеддинги REAL[] + метаданные (строит build_vectors.py)
-      //   public.agent_vector_index_store   — сериализованный FAISS-индекс (BYTEA), ищет провайдер lib/services
-      //   public.agent_vector_index_config  — конфигурация индексов (таблицы/колонки для эмбеддинга).
-      //     Раньше это были ключи vector_indexes + mode_vector_index_path (файлы .faiss) —
-      //     теперь управляется SQL-таблицей, project.json больше их не содержит.
+      // Векторы и их конфигурация хранятся в PostgreSQL/Greenplum:
       "mode_vector_db_table": "oarb.audit_vectors",  // Таблица сырых векторов (источник индекса)
       "mode_vector_store_table": "public.agent_vector_index_store",  // Таблица FAISS-индексов (BYTEA)
       "vector_index_default_path": "data_store/vectors/audits_index",  // Fallback-путь FAISS-индекса
@@ -178,8 +173,8 @@
   // ---------------------------------------------------------------------------
   "benchmark": {
     "db_schema": "public",            // Схема БД
-    "runs_table": "agent_benchmark_runs",   // Таблица прогонов (префикс agent_)
-    "results_table": "agent_benchmark_results"  // Таблица результатов (префикс agent_)
+    "runs_table": "agent_benchmark_runs",   // Таблица прогонов
+    "results_table": "agent_benchmark_results"  // Таблица результатов
   },
 
   // ---------------------------------------------------------------------------
@@ -219,8 +214,8 @@
   "logging": {
     "db": {
       "enabled": true,                 // Варианты: true | false
-      "table_name": "agent_gateway_logs",    // Таблица событий агента (префикс agent_)
-      "question_runs_table": "agent_question_runs",  // Контекст вопросов (префикс agent_)
+      "table_name": "agent_gateway_logs",    // Таблица событий агента
+      "question_runs_table": "agent_question_runs",  // Контекст вопросов
       "schema": "public",              // Схема
       "flush_interval_sec": 5.0,       // Интервал флаша батча, сек
       "batch_size": 100,               // Размер батча

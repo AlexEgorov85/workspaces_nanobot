@@ -1,5 +1,5 @@
-# Простые задания (сложность 1-3)
-# Базовое знакомство с предметной областью аудиторских проверок
+﻿# Простые задания (сложность 1-3)
+# Естественные вопросы пользователя о данных в схеме oarb БД аудита
 
 - id: "simple-greeting"
   name: "Приветствие"
@@ -13,73 +13,60 @@
     keywords_include: ["привет"]
     keywords_exclude: ["error"]
 
-- id: "simple-date"
-  name: "Текущая дата"
-  difficulty: 1
-  category: "basic"
-  type: "single"
-  new_session: true
-  question: "Какая сегодня дата?"
-  max_iterations: 5
-  expect:
-    keywords_include: ["2026"]
-
 - id: "simple-schema-tables"
-  name: "Схема БД"
+  name: "Таблицы базы аудита"
   difficulty: 2
   category: "audit_analyzer"
   type: "single"
   new_session: true
-  question: "Прочитай файл skills/audit_analyzer/cache/schema.json и перечисли все таблицы в схеме oarb. Сколько их?"
+  question: >-
+    Посмотри на структуру базы в файле skills/audit_analyzer/cache/schema.json.
+    Какие таблицы относятся к схеме oarb и сколько их всего?
   max_iterations: 10
   expect:
     tools: ["read_file"]
-    keywords_include: ["таблиц", "oarb"]
+    keywords_include: ["oarb", "violations"]
 
-- id: "simple-skill-modes"
-  name: "Режимы анализа"
-  difficulty: 2
-  category: "audit_analyzer"
-  type: "single"
-  new_session: true
-  question: "Прочитай SKILL.md навыка audit_analyzer (skills/audit_analyzer/SKILL.md) и перечисли три режима анализа, которые доступны"
-  max_iterations: 10
-  expect:
-    tools: ["read_file"]
-    keywords_include: ["predefined", "vector", "sql"]
-
-- id: "simple-scripts-list"
-  name: "Список скриптов"
-  difficulty: 2
-  category: "audit_analyzer"
-  type: "single"
-  new_session: true
-  question: "Прочитай файл реестра скриптов skills/audit_analyzer/scripts/scripts_registry.py и перечисли все предопределённые скрипты аналитики (их имена)"
-  max_iterations: 15
-  expect:
-    tools: ["read_file"]
-    keywords_include: ["analytics", "violations", "audit"]
-
-- id: "simple-db-config"
-  name: "Конфиг анализатора"
-  difficulty: 2
-  category: "audit_analyzer"
-  type: "single"
-  new_session: true
-  question: "Прочитай config.json навыка audit_analyzer (skills/audit_analyzer/config.json) и скажи, какой LLM провайдер используется и какая модель"
-  max_iterations: 10
-  expect:
-    tools: ["read_file"]
-    keywords_include: ["openai"]
-
-- id: "simple-violations-table"
+- id: "simple-schema-violations"
   name: "Структура нарушений"
+  difficulty: 2
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: >-
+    В базе аудита есть таблица violations. Расскажи, из каких колонок она
+    состоит и что означает каждая из них.
+  max_iterations: 10
+  expect:
+    tools: ["read_file"]
+    keywords_include: ["severity", "violation_code"]
+
+- id: "simple-audits-2024"
+  name: "Проверки за 2024 год"
   difficulty: 3
   category: "audit_analyzer"
   type: "single"
   new_session: true
-  question: "Прочитай schema.json и опиши структуру таблицы violations: какие колонки есть, какой тип у severity и какие значения она может принимать"
+  question: >-
+    Покажи, сколько аудиторских проверок прошло в 2024 году по месяцам.
+    Воспользуйся навыком audit_analyzer: запусти скрипт analytics_by_year_month
+    с параметром year=2024 через skills/audit_analyzer/audit_analyze.bat.
   max_iterations: 15
   expect:
+    tools: ["exec"]
+    
+    keywords_include: ["2024", "проверк"]
+
+- id: "simple-violations-table"
+  name: "Значения серьёзности"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: >-
+    Посмотри на схему таблицы violations в schema.json. Какие значения может
+    принимать колонка severity и какого она типа?
+  max_iterations: 10
+  expect:
     tools: ["read_file"]
-    keywords_include: ["severity", "нарушен"]
+    keywords_include: ["severity", "Низкая"]

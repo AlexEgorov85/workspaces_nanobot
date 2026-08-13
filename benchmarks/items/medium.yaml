@@ -1,5 +1,5 @@
-# Средние задания (сложность 4-7)
-# Анализ данных аудиторских проверок через audit_analyzer
+﻿# Средние задания (сложность 4-7)
+# Анализ реальных данных oarb через audit_analyzer (predefined-скрипты)
 
 - id: "medium-schema-relations"
   name: "Связи таблиц"
@@ -7,80 +7,89 @@
   category: "audit_analyzer"
   type: "single"
   new_session: true
-  question: "Прочитай schema.json и объясни, как связаны таблицы audits, audit_reports, report_items и violations. Какие внешние ключи соединяют их?"
+  question: >-
+    Посмотри на схему базы в schema.json и объясни, как таблицы audits,
+    audit_reports, report_items и violations связаны между собой. Какие колонки
+    соединяют их друг с другом?
   max_iterations: 15
   expect:
     tools: ["read_file"]
-    keywords_include: ["audit_id", "report_id", "связ"]
+    keywords_include: ["audit_id", "report_id"]
 
-- id: "medium-predefined-run"
-  name: "Запуск скрипта"
+- id: "medium-audit-types"
+  name: "Статистика по типам проверок"
   difficulty: 5
   category: "audit_analyzer"
   type: "single"
   new_session: true
-  question: "Запусти audit_analyze.bat с режимом predefined и скриптом analytics_by_year_month. Используй команду: skills/audit_analyzer/audit_analyze.bat --mode predefined --script analytics_by_year_month --params year=2024. Если БД недоступна, объясни, что делает этот скрипт"
-  max_iterations: 20
+  question: >-
+    Какие типы аудиторских проверок встречаются в базе и как часто?
+    Запусти предопределённый скрипт audit_types_stats через
+    skills/audit_analyzer/audit_analyze.bat и перечисли типы с их количеством.
+  max_iterations: 40
   expect:
     tools: ["exec"]
-    keywords_include: ["аналитик", "проверок"]
+    keywords_include: ["audit_type", "Внеплановая"]
 
-- id: "medium-violations-query"
-  name: "Статистика нарушений"
+- id: "medium-violations-by-type"
+  name: "Нарушения по кодам"
   difficulty: 6
   category: "audit_analyzer"
   type: "single"
   new_session: true
-  question: "Прочитай описание скрипта violations_by_type в scripts_registry.py и объясни, какие параметры он принимает, какую SQL-логику реализует. Если можешь — выполни его через audit_analyze.bat"
+  question: >-
+    Сгруппируй нарушения по кодам и покажи, какие коды встречаются чаще всего
+    и в скольких разных проверках. Запусти script violations_by_type через
+    skills/audit_analyzer/audit_analyze.bat.
   max_iterations: 20
   expect:
-    tools: ["read_file"]
-    keywords_include: ["violation_code", "ILIKE", "нарушен"]
+    tools: ["exec"]
+    
+    keywords_include: ["VIOL", "нарушений"]
 
-- id: "medium-effectiveness-script"
+- id: "medium-effectiveness"
   name: "Эффективность проверок"
   difficulty: 6
   category: "audit_analyzer"
   type: "single"
   new_session: true
-  question: "Прочитай скрипт audit_effectiveness в scripts_registry.py и объясни, как классифицируются проверки по уровню серьёзности (severity_level). Какие категории выделяются и по какому принципу?"
-  max_iterations: 15
+  question: >-
+    Проанализируй эффективность аудиторских проверок: для каждой проверки
+    посчитай число нарушений и уровень серьёзности (severity_level). Какие
+    проверки попали в категории «Критические» и «Без нарушений»? Запусти
+    предопределённый скрипт audit_effectiveness.
+  max_iterations: 40
   expect:
-    tools: ["read_file"]
-    keywords_include: ["критическ", "серьезн", "допустим"]
+    tools: ["exec"]
+    keywords_include: ["severity_level", "Критические"]
 
-- id: "medium-vector-search"
-  name: "Векторный поиск"
-  difficulty: 6
-  category: "audit_analyzer"
-  type: "single"
-  new_session: true
-  question: "Прочитай SKILL.md и config.json audit_analyzer и объясни, как работает векторный поиск по FAISS-индексам. Какие индексы существуют, какой моделью делаются эмбеддинги, какая размерность?"
-  max_iterations: 15
-  expect:
-    tools: ["read_file"]
-    keywords_include: ["FAISS", "embedding", "mxbai"]
-
-- id: "medium-dynamics-analysis"
+- id: "medium-dynamics"
   name: "Динамика проверок"
   difficulty: 5
   category: "audit_analyzer"
   type: "single"
   new_session: true
-  question: "Прочитай скрипт audit_dynamics в scripts_registry.py и объясни, какие периоды группировки поддерживаются, какие метрики рассчитываются. Какой SQL-запрос сгенерируется для period=quarter?"
-  max_iterations: 15
+  question: >-
+    Покажи динамику проведения проверок по месяцам 2024 года: в каких месяцах
+    прошли проверки и сколько их было. Запусти предопределённый скрипт
+    analytics_by_year_month с параметром year=2024.
+  max_iterations: 30
   expect:
-    tools: ["read_file"]
-    keywords_include: ["period", "квартал", "месяц"]
+    tools: ["exec"]
+    keywords_include: ["проверок", "2024"]
 
-- id: "medium-sql-mode"
-  name: "SQL-генерация"
-  difficulty: 7
+- id: "medium-top-objects"
+  name: "Топ проверяемых объектов"
+  difficulty: 6
   category: "audit_analyzer"
   type: "single"
   new_session: true
-  question: "Прочитай файл skills/audit_analyzer/scripts/sql_mode.py и объясни, как работает режим sql в audit_analyzer: как LLM генерирует SQL, как валидируется запрос, сколько попыток повторения при ошибке"
+  question: >-
+    Какие объекты чаще всего проверялись аудиторами? Запусти предопределённый
+    скрипт top_audited_objects и перечисли объекты с количеством проверок
+    по убыванию.
   max_iterations: 20
   expect:
-    tools: ["read_file"]
-    keywords_include: ["SELECT", "EXPLAIN", "retry"]
+    tools: ["exec"]
+    
+    keywords_include: ["объект", "проверок"]
