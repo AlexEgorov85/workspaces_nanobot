@@ -319,7 +319,7 @@ class TestPostgresChannelMedia:
         ch = _make_channel((PostgresChannel, None, None))
         raw = b"%PDF-1.4 fake content"
         data_url = "data:application/pdf;base64," + base64.b64encode(raw).decode()
-        with patch.object(pch, "_DATA_STORE_DIR", tmp_path):
+        with patch.object(ch, "_media_cache_dir", tmp_path):
             result = await ch._decode_media_from_db([data_url], "sess-1")
         assert len(result) == 1
         path = Path(result[0])
@@ -337,7 +337,7 @@ class TestPostgresChannelMedia:
         raw = b"hello world"
         data_url = "data:application/octet-stream;base64," + base64.b64encode(raw).decode()
         entry = {"filename": "отчёт.pdf", "data": data_url}
-        with patch.object(pch, "_DATA_STORE_DIR", tmp_path):
+        with patch.object(ch, "_media_cache_dir", tmp_path):
             result = await ch._decode_media_from_db([entry], "sess-1")
         assert isinstance(result[0], dict)
         assert result[0]["filename"] == "отчёт.pdf"
@@ -353,7 +353,7 @@ class TestPostgresChannelMedia:
         PostgresChannel, _, _ = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, None))
         entry = {"filename": "x.pdf", "path": "/tmp/x.pdf"}
-        with patch.object(pch, "_DATA_STORE_DIR", tmp_path):
+        with patch.object(ch, "_media_cache_dir", tmp_path):
             result = await ch._decode_media_from_db([entry], "sess-1")
         assert result == [entry]
 

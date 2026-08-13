@@ -23,6 +23,7 @@ class TestSpawnStreamlit:
         with patch("lib.services.subprocess_manager.subprocess.Popen", return_value=proc):
             assert mgr.spawn_streamlit(script, port=8501) is True
 
+        mgr.terminate_all()  # закрыть log_handle
         # Лог-файл создан
         assert (tmp_path / "streamlit.log").exists()
 
@@ -48,11 +49,10 @@ class TestTerminateAll:
         proc.wait = MagicMock()
         proc.kill = MagicMock()
 
-        mgr = SubprocessManager(log_dir=tmp_path)
-        with patch("lib.services.subprocess_manager.subprocess.Popen", return_value=proc):
-            mgr.spawn_streamlit(script)
+        with SubprocessManager(log_dir=tmp_path) as mgr:
+            with patch("lib.services.subprocess_manager.subprocess.Popen", return_value=proc):
+                mgr.spawn_streamlit(script)
 
-        mgr.terminate_all()
         proc.terminate.assert_called_once()
         proc.wait.assert_called_once()
 
@@ -64,11 +64,10 @@ class TestTerminateAll:
         proc.wait.side_effect = TimeoutError("wait timeout")
         proc.kill = MagicMock()
 
-        mgr = SubprocessManager(log_dir=tmp_path)
-        with patch("lib.services.subprocess_manager.subprocess.Popen", return_value=proc):
-            mgr.spawn_streamlit(script)
+        with SubprocessManager(log_dir=tmp_path) as mgr:
+            with patch("lib.services.subprocess_manager.subprocess.Popen", return_value=proc):
+                mgr.spawn_streamlit(script)
 
-        mgr.terminate_all()
         proc.kill.assert_called_once()
         # очередь процессов очищена
         assert mgr._processes == []
