@@ -189,17 +189,129 @@ def _check_file_content(file_path: str, expected_content: str, workspace: str | 
 
 
 def _check_llm_judge(expect: BenchExpect, response: str | None, hook: BenchmarkHook) -> CheckResult:
-    """Заглушка проверки LLM-судьёй.
+    """Оценка ответа LLM-судьёй через тот же провайдер, что использует агент.
+
+    Строит промпт с целью и ответом, запрашивает у LLM структурированный
+    JSON ``{"score": 0.0|0.5|1.0, "reason": "..."}`` и возвращает оценку.
+    При любом сбое (нет конфига, сеть, невалидный JSON) возвращает
+    нейтральный балл 0.5, чтобы падение судьи не ломало прогон.
 
     Args:
-        expect: Ожидаемые критерии.
+        expect: Ожидаемые критерии (используется поле ``goal``).
         response: Ответ агента.
         hook: Хук с метриками.
 
     Returns:
-        Результат с фиксированным баллом 0.5 (LLM-судья пока не реализован).
+        Результат LLM-судьи: 1.0/0.5/0.0 в зависимости от оценки.
     """
-    return CheckResult("llm_judge", True, 0.5, "LLM judge not available, skipped")
+    if not response:
+        return CheckResult("llm_judge", False, 0.0, "No response to judge")
+    goal = expect.goal or (", ".join(expect.keywords_include) if expect.keywords_include else "")
+    if not goal:
+        return CheckResult("llm_judge", True, 0.5, "No goal defined for llm_judge, skipped")
+
+    prompt = (
+        "Ты строгий судья выполнения задачи агентом. Оцени, достиг ли агент цели.\n"
+        f"Цель: {goal}\n"
+        f"Ответ агента:\n{response}\n"
+        "\nВерни ТОЛЬКО JSON без markdown-обёрток и пояснений:\n"
+        '{"score": 0.0, "reason": "кратко"}\n'
+        "score может быть ровно 0.0 (цель не достигнута), 0.5 (частично) или 1.0 (полностью)."
+    )
+    try:
+        result = _call_llm_json(prompt)
+    except Exception as e:
+        logger.warning("LLM judge failed for goal={!r}: {}", goal, e)
+        return CheckResult("llm_judge", True, 0.5, f"LLM judge error, fallback 0.5: {e}")
+
+    if result is None:
+        return CheckResult("llm_judge", True, 0.5, "LLM judge returned no parseable JSON, fallback 0.5")
+
+    raw_score = result.get("score", 0.5)
+    try:
+        score = float(raw_score)
+    except (TypeError, ValueError):
+        score = 0.5
+    # Нормализация к дискретной шкале {0.0, 0.5, 1.0}
+    if score >= 0.9:
+        score = 1.0
+    elif score <= 0.1:
+        score = 0.0
+    else:
+        score = 0.5
+    reason = str(result.get("reason", ""))
+    passed = score >= 0.5
+    detail = f"LLM judge: score={score:.1f}. {reason}" if reason else f"LLM judge: score={score:.1f}"
+    return CheckResult("llm_judge", passed, score, detail)
+
+
+def _call_llm_json(prompt: str) -> dict[str, Any] | None:
+    """Вызов LLM через общий конфиг агента и парсинг JSON-ответа.
+
+    Использует ``resolve_llm_config`` — тот же провайдер/модель/ключ, что и
+    агент в бенчмарке. При ошибке сети или невалидном JSON возвращает None.
+
+    Args:
+        prompt: Пользовательский промпт.
+
+    Returns:
+        Словарь с ключами ``score``/``reason`` или None при ошибке.
+    """
+    import json
+    import sys
+
+    import httpx
+
+    from lib.services.llm_config import resolve_llm_config
+
+    cfg = resolve_llm_config()
+    url = f"{cfg['api_base'].rstrip('/')}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if cfg.get("api_key"):
+        headers["Authorization"] = f"Bearer {cfg['api_key']}"
+    payload = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system", "content": "Отвечай строго в формате JSON."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 256,
+        "temperature": 0.0,
+    }
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        return None
+
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not content:
+        return None
+    # Очистка от markdown-обёрток ```json ... ``` и лишних символов
+    text = content.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+    text = text.strip()
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        # Пробуем вытащить JSON из фрагмента ответа
+        import re as _re
+
+        m = _re.search(r"\{.*\}", text, _re.DOTALL)
+        if not m:
+            return None
+        try:
+            result = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(result, dict):
+        return None
+    return result
 
 
 def _resolve_path(file_path: str, workspace: str | Path | None) -> Path:

@@ -50,20 +50,46 @@ class BenchmarkHook(BaseToolTrackingHook):
         if context.usage:
             self.usage = dict(context.usage)
 
-    async def after_iteration(self, context: AgentHookContext) -> None:
-        """Действие после каждой итерации: собирает данные о вызовах инструментов.
+    async def before_execute_tools(self, context: AgentHookContext) -> None:
+        """Снимок имён и аргументов инструментов перед их выполнением.
+
+        Нужен как fallback для статусов: статусы берутся из ``tool_events``
+        в ``after_iteration``, но если событий почему-то нет, имена всё равно
+        должны попасть в ``tools_used``.
 
         Args:
-            context: Контекст завершённой итерации агента.
+            context: Контекст итерации агента.
         """
         for call in self._iter_tool_calls(context):
             name = self._tool_call_name(call)
             self._tool_names.add(name)
-            self.tool_calls.append({
+
+    async def after_iteration(self, context: AgentHookContext) -> None:
+        """Действие после каждой итерации: собирает данные о вызовах инструментов.
+
+        Для каждого вызова фиксирует имя, параметры, номер итерации и статус
+        выполнения (ok/error/started/unknown) из ``context.tool_events``.
+
+        Args:
+            context: Контекст завершённой итерации агента.
+        """
+        events = getattr(context, "tool_events", None) or []
+        for idx, call in enumerate(self._iter_tool_calls(context)):
+            name = self._tool_call_name(call)
+            self._tool_names.add(name)
+            entry: dict[str, Any] = {
                 "name": name,
                 "params": self._tool_call_arguments(call),
                 "iteration": context.iteration,
-            })
+                "status": "unknown",
+            }
+            if idx < len(events):
+                ev = events[idx]
+                if isinstance(ev, dict):
+                    entry["status"] = ev.get("status", "unknown")
+                    if entry["status"] == "error":
+                        entry["error"] = ev.get("detail", "")
+            self.tool_calls.append(entry)
 
     def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
         """Финализация контента: фиксирует время окончания.

@@ -12,12 +12,14 @@
   context_files: []      # files to make available in workspace
   max_iterations: 30
   timeout: 60
+  cleanup: []            # optional globs/files to delete after test (no state leak)
   expect:
     tools: ["exec", "glob"]
     skills: []
     keywords_include: ["expected", "keyword"]
     keywords_exclude: ["error", "failed"]
     match_type: "keyword"  # keyword | functional | llm_judge
+    goal: null           # for match_type=llm_judge: short description of success criteria
     check_file: null
     check_file_content: null
 

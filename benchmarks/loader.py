@@ -122,6 +122,7 @@ def _parse_item(data: dict[str, Any]) -> BenchItem:
         context_files=data.get("context_files", []),
         max_iterations=data.get("max_iterations", 30),
         timeout=data.get("timeout", 60),
+        cleanup=data.get("cleanup", []),
         expect=_parse_expect(expect_raw),
         steps=[_parse_step(s, i + 1) for i, s in enumerate(steps_raw)],
     )
@@ -148,6 +149,7 @@ def _parse_expect(data: dict[str, Any]) -> BenchExpect:
         keywords_exclude=data.get("keywords_exclude", []),
         max_iterations=data.get("max_iterations", 30),
         match_type=data.get("match_type", "keyword"),
+        goal=data.get("goal"),
         check_file=data.get("check_file"),
         check_file_content=data.get("check_file_content"),
     )

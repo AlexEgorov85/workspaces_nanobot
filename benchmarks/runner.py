@@ -201,6 +201,11 @@ def _print_summary(suite_result: SuiteResult) -> None:
 def _cleanup_item(item: BenchItem, bot: Any) -> None:
     """Удаление файлов, созданных агентом во время выполнения задания.
 
+    Удаляет файлы, заявленные в ``expect.check_file`` (задания/шаги), а также
+    все пути/глобы из ``item.cleanup`` (например ``bench_test_report.txt`` или
+    ``logs/bench_*.txt``), чтобы избежать утечки состояния между тестами.
+    Пути резолвятся относительно workspace агента; ошибки игнорируются.
+
     Args:
         item: Задание бенчмарка.
         bot: Экземпляр агента Nanobot.
@@ -208,23 +213,39 @@ def _cleanup_item(item: BenchItem, bot: Any) -> None:
     workspace = Path(bot._loop.workspace) if hasattr(bot._loop, "workspace") else None
     if not workspace:
         return
-    files_to_check: list[str] = []
+    patterns: list[str] = list(item.cleanup or [])
     if item.type == "single" and item.expect:
         if item.expect.check_file:
-            files_to_check.append(item.expect.check_file)
-        if item.expect.check_file_content:
-            files_to_check.append(item.expect.check_file)
+            patterns.append(item.expect.check_file)
     elif item.type == "multi_step" and item.steps:
         for s in item.steps:
             if s.expect.check_file:
-                files_to_check.append(s.expect.check_file)
-            if s.expect.check_file_content:
-                files_to_check.append(s.expect.check_file)
-    for fname in set(files_to_check):
-        fpath = workspace / fname
-        if fpath.exists():
+                patterns.append(s.expect.check_file)
+    for pattern in set(patterns):
+        candidates: list[Path] = []
+        p = Path(pattern)
+        if p.is_absolute():
+            # Абсолютный путь/глоб
+            base = p.parent if any(ch in pattern for ch in "*?[") else p.parent
+            candidates = list(p.parent.glob(p.name)) if any(ch in pattern for ch in "*?[") else [p]
+        else:
+            # Глоб или относительный путь внутри workspace
+            if any(ch in pattern for ch in "*?["):
+                candidates = list(workspace.glob(pattern))
+            else:
+                candidates = [workspace / pattern]
+        for fpath in candidates:
             try:
-                fpath.unlink()
+                if fpath.is_dir():
+                    # Удаляем только пустые/созданные агентом деревья сверху вниз
+                    for leaf in sorted(fpath.rglob("*"), reverse=True):
+                        if leaf.is_file():
+                            leaf.unlink()
+                        elif leaf.is_dir():
+                            leaf.rmdir()
+                    fpath.rmdir()
+                elif fpath.exists():
+                    fpath.unlink()
             except Exception:
                 pass
 

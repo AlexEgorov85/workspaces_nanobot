@@ -12,11 +12,12 @@ def hook():
     return BenchmarkHook()
 
 
-def make_context(iteration=0, tool_calls=None, usage=None):
+def make_context(iteration=0, tool_calls=None, usage=None, tool_events=None):
     ctx = MagicMock()
     ctx.iteration = iteration
     ctx.tool_calls = tool_calls or []
     ctx.usage = usage
+    ctx.tool_events = tool_events or []
     return ctx
 
 
@@ -96,6 +97,45 @@ class TestBenchmarkHookAfterIteration:
         ctx = make_context(iteration=0, tool_calls=[])
         await hook.after_iteration(ctx)
         assert hook.tool_calls == []
+
+    @pytest.mark.asyncio
+    async def test_records_ok_status(self, hook):
+        call = MagicMock()
+        call.name = "read_file"
+        call.arguments = {"path": "/tmp/x"}
+        ctx = make_context(iteration=0, tool_calls=[call],
+                           tool_events=[{"status": "ok", "detail": "ok result"}])
+        await hook.after_iteration(ctx)
+        assert hook.tool_calls[0]["status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_records_error_status(self, hook):
+        call = MagicMock()
+        call.name = "bad_tool"
+        call.arguments = {}
+        ctx = make_context(iteration=0, tool_calls=[call],
+                           tool_events=[{"status": "error", "detail": "boom"}])
+        await hook.after_iteration(ctx)
+        assert hook.tool_calls[0]["status"] == "error"
+        assert hook.tool_calls[0]["error"] == "boom"
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_unknown_without_events(self, hook):
+        call = MagicMock()
+        call.name = "read_file"
+        call.arguments = {}
+        ctx = make_context(iteration=0, tool_calls=[call])
+        await hook.after_iteration(ctx)
+        assert hook.tool_calls[0]["status"] == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_before_execute_tools_tracks_names(self, hook):
+        call = MagicMock()
+        call.name = "exec"
+        call.arguments = {}
+        ctx = make_context(iteration=0, tool_calls=[call])
+        await hook.before_execute_tools(ctx)
+        assert hook.tools_used == ["exec"]
 
 
 class TestBenchmarkHookFinalizeContent:

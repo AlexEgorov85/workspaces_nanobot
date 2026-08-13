@@ -21,6 +21,7 @@ class BenchExpect:
         keywords_exclude: Запрещённые ключевые слова в ответе.
         max_iterations: Максимальное число итераций.
         match_type: Тип сопоставления ("keyword" или "llm_judge").
+        goal: Описание цели задания для LLM-судьи (только для llm_judge).
         check_file: Путь к файлу, который должен существовать.
         check_file_content: Ожидаемое содержимое файла.
     """
@@ -30,6 +31,7 @@ class BenchExpect:
     keywords_exclude: list[str] = field(default_factory=list)
     max_iterations: int = 30
     match_type: str = "keyword"
+    goal: str | None = None
     check_file: str | None = None
     check_file_content: str | None = None
 
@@ -67,6 +69,7 @@ class BenchItem:
         context_files: Файлы контекста, предоставляемые агенту.
         max_iterations: Максимальное количество итераций.
         timeout: Таймаут выполнения в секундах.
+        cleanup: Список путей/глоба файлов, которые нужно удалить после теста.
     """
     id: str
     name: str
@@ -80,6 +83,7 @@ class BenchItem:
     context_files: list[str] = field(default_factory=list)
     max_iterations: int = 30
     timeout: int = 60
+    cleanup: list[str] = field(default_factory=list)
 
     def __hash__(self) -> int:
         return hash(self.id)

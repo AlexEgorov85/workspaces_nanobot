@@ -7,6 +7,7 @@ import pytest
 
 from benchmarks.evaluator import (
     _aggregate_score,
+    _call_llm_json,
     _check_file_content,
     _check_file_exists,
     _check_iterations,
@@ -223,6 +224,89 @@ class TestCheckLlmJudge:
         assert result.check == "llm_judge"
         assert result.passed is True
         assert result.score == 0.5
+
+    def test_empty_response_fails(self, hook):
+        expect = BenchExpect(goal="some goal")
+        result = _check_llm_judge(expect, "", hook)
+        assert result.passed is False
+        assert result.score == 0.0
+
+    def test_no_goal_returns_neutral(self, hook):
+        expect = BenchExpect()
+        result = _check_llm_judge(expect, "response", hook)
+        assert result.score == 0.5
+
+    def test_judge_score_mapping(self, hook, monkeypatch):
+        from benchmarks.models import BenchExpect
+        expect = BenchExpect(goal="reach the goal")
+
+        monkeypatch.setattr("benchmarks.evaluator._call_llm_json",
+                            lambda prompt: {"score": 1.0, "reason": "done"})
+        r = _check_llm_judge(expect, "good answer", hook)
+        assert r.score == 1.0
+        assert r.passed is True
+
+        monkeypatch.setattr("benchmarks.evaluator._call_llm_json",
+                            lambda prompt: {"score": 0.0, "reason": "nope"})
+        r = _check_llm_judge(expect, "bad answer", hook)
+        assert r.score == 0.0
+        assert r.passed is False
+
+    def test_judge_exception_falls_back(self, hook, monkeypatch):
+        expect = BenchExpect(goal="reach the goal")
+
+        def boom(prompt):
+            raise RuntimeError("net down")
+        monkeypatch.setattr("benchmarks.evaluator._call_llm_json", boom)
+        r = _check_llm_judge(expect, "answer", hook)
+        assert r.score == 0.5
+        assert r.passed is True
+
+    def test_judge_none_falls_back(self, hook, monkeypatch):
+        expect = BenchExpect(goal="reach the goal")
+        monkeypatch.setattr("benchmarks.evaluator._call_llm_json",
+                            lambda prompt: None)
+        r = _check_llm_judge(expect, "answer", hook)
+        assert r.score == 0.5
+
+
+class TestCallLlmJson:
+    def test_parses_markdown_wrapped_json(self, monkeypatch):
+        class _FakeResp:
+            def raise_for_status(self):
+                return None
+            def json(self):
+                return {"choices": [{"message": {"content": '```json\n{"score": 1.0, "reason": "ok"}\n```'}}]}
+        class _FakeClient:
+            def __init__(self, *a, **k):
+                self.post = lambda *a, **k: _FakeResp()
+            def __enter__(self):
+                return self
+            def __exit__(self, *a, **k):
+                return None
+        monkeypatch.setattr("httpx.Client", _FakeClient)
+        monkeypatch.setattr("lib.services.llm_config.resolve_llm_config",
+                            lambda overrides=None: {"api_base": "http://x/v1", "api_key": "k", "model": "m"})
+        result = _call_llm_json("prompt")
+        assert result == {"score": 1.0, "reason": "ok"}
+
+    def test_returns_none_on_empty_content(self, monkeypatch):
+        class _FakeResp:
+            def raise_for_status(self):
+                return None
+            def json(self):
+                return {"choices": [{"message": {"content": ""}}]}
+        class _FakeClient:
+            def __init__(self, *a, **k):
+                pass
+            def __enter__(self):
+                return self
+            def __exit__(self, *a, **k):
+                return None
+        monkeypatch.setattr("httpx.Client", _FakeClient)
+        monkeypatch.setattr("lib.services.llm_config.resolve_llm_config",
+                            lambda overrides=None: {"api_base": "http://x/v1", "api_key": "k", "model": "m"})
+        assert _call_llm_json("prompt") is None
 
 
 class TestResolvePath:
