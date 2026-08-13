@@ -64,6 +64,19 @@
   `channels.postgres.media_cache_dir`.
 - `tools/build_vectors.py`: default'ы `--chunk-size` / `--chunk-overlap` /
   `--batch-pause` читаются из `skills.audit_analyzer.*`.
+- **Единый `agent_`-префикс для оставшихся таблиц агента.**
+  `public.predefined_scripts` → `public.agent_predefined_scripts`;
+  `conversation_messages` → `public.agent_conversation_messages` (канал Web/Streamlit);
+  векторные таблицы перенесены из `oarb` в `public`:
+  `oarb.vector_index_config` → `public.agent_vector_index_config`,
+  `oarb.vector_index_store` → `public.agent_vector_index_store`.
+  Данные переносятся миграцией `sql/migrations/migrate_agent_table_names_v1.sql`
+  (идемпотентно — сохраняет строки). Обновлены конфиг-ключи
+  `channels.postgres.table_name`, `skills.audit_analyzer.{predefined_scripts_table,
+  mode_vector_index_config_table, mode_vector_store_table}`, DDL, seed'ы,
+  комментарии, `generate_predefined_scripts_sql.py` и тесты. Доменные таблицы
+  навыка (`oarb.audits/violations/audit_reports/report_items/audit_vectors`)
+  и `audit_interactions` не затронуты.
 
 ### Migration notes
 - Если у вас уже есть `session_manager.json` с плоскими `min_conn`/`max_conn`/

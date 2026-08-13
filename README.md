@@ -1,4 +1,4 @@
-﻿# nanobot — Personal AI Agent (Deployment)
+# nanobot — Personal AI Agent (Deployment)
 
 Локальная инсталляция фреймворка **[nanobot-ai](https://github.com/HKUDS/nanobot)** (PyPI: `nanobot-ai`) — персонального AI-агента, запущенного с **кастомными доработками**: PostgreSQL-каналы, Redis-интеграция, Streamlit UI, система бенчмарков и пользовательский навык audit_analyzer.
 
@@ -356,7 +356,7 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 
 ### 6. PostgresChannel (`lib/channels/postgres_channel.py`)
 
-Канал через таблицу `conversation_messages`: поллинг новых сообщений (`status='pending'`), потоковая запись reasoning в `metadata.reasoning`, автоматическая разблокировка зависших сообщений (retry до 3 раз), медиа-файлы через data URL.
+Канал через таблицу `agent_conversation_messages`: поллинг новых сообщений (`status='pending'`), потоковая запись reasoning в `metadata.reasoning`, автоматическая разблокировка зависших сообщений (retry до 3 раз), медиа-файлы через data URL.
 
 **Полная документация:** [`lib/channels/README.md`](lib/channels/README.md) — диаграмма потоков, DDL колонок, конфигурация, инструкция «как добавить новый канал».
 
@@ -376,7 +376,7 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 ### 9. Streamlit UI (`streamlit_app.py`)
 
 Тонкий web-клиент, **не через `ApplicationContext`**:
-- INSERT в `conversation_messages` (`status='pending'`).
+- INSERT в `agent_conversation_messages` (`status='pending'`).
 - Блокирующий поллинг ответа с отображением reasoning в реальном времени.
 - Загружается gateway как subprocess на `:8501`, логи в `logs/streamlit.log`.
 
@@ -404,15 +404,15 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 |------|------|---------|--------|
 | **Сессии** | `sql/session/create_session_tables.sql` | `session_meta`, `session_messages` | рабочий (PG 9.4+) |
 | **Сессии (GP)** | `sql/session/create_session_tables_gp.sql` | то же + `DISTRIBUTED BY (session_key)` | рабочий (GP 6.25) |
-| **Канал** | создаётся автоматически | `conversation_messages` | авто |
+| **Канал** | создаётся автоматически | `agent_conversation_messages` | авто |
 | **Seed канала** | `sql/channels/seed_messages.sql` | 14 user + 4 assistant сообщений | тестовые данные |
 | **DbLoggingService** | `sql/logs/create_logs_table.sql` | `gateway_logs` (UUID, JSONB) | рабочий |
 | **Домен audit_analyzer (PG)** | `sql/audit_analyzer/create_audit_source_tables.sql` | `oarb.audits/violations/audit_reports/report_items` | REFERENCE — уточняет владелец данных |
 | **Домен audit_analyzer (GP)** | `sql/audit_analyzer/create_audit_source_tables_gp.sql` | то же + `DISTRIBUTED BY` | REFERENCE для GP 6.5 |
 | **Векторы (PG)** | `sql/audit_analyzer/create_audit_vectors_table.sql` | `oarb.audit_vectors` (BIGINT IDENTITY, TEXT pk_value) + 3 индекса | рабочий (PG 13+) |
 | **Векторы (GP)** | `sql/audit_analyzer/create_audit_vectors_table_gp.sql` | то же + `DISTRIBUTED BY (source)` | рабочий (GP 6.5) |
-| **Конфиг индексов (PG)** | `sql/audit_analyzer/create_vector_index_config.sql` | `oarb.vector_index_config` | рабочий (PG 13+) |
-| **Конфиг индексов (GP)** | `sql/audit_analyzer/create_vector_index_config_gp.sql` | то же + `DISTRIBUTED BY` | рабочий (GP 6.5) |
+| **Конфиг индексов (PG)** | `sql/audit_analyzer/create_agent_vector_index_config.sql` | `public.agent_vector_index_config` | рабочий (PG 13+) |
+| **Конфиг индексов (GP)** | `sql/audit_analyzer/create_agent_vector_index_config_gp.sql` | то же + `DISTRIBUTED BY` | рабочий (GP 6.5) |
 | **Бенчмарки** | `sql/benchmarks/create_benchmark_tables.sql` | `benchmark_runs`, `benchmark_results` | рабочий (PG 9.4+) |
 | **Бенчмарки (GP)** | `sql/benchmarks/create_benchmark_tables_gp.sql` | то же + `DISTRIBUTED BY` | рабочий (GP 6.25) |
 
@@ -424,13 +424,13 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 
 **v1.5.0:** Векторные индексы перенесены из файлов `.faiss` в PostgreSQL. Файловый мигратор удалён как legacy — новые индексы создаются сразу в БД.
 
-**v2.0.0:** Конфигурация индексов — в `oarb.vector_index_config` (БД), а не в `project.json`. Управление через SQL.
+**v2.0.0:** Конфигурация индексов — в `public.agent_vector_index_config` (БД), а не в `project.json`. Управление через SQL.
 
 | Таблица | Назначение |
 |---------|-----------|
 | `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (строит `tools/build_vectors.py`) |
-| `oarb.vector_index_store` | Сериализованный FAISS-индекс `BYTEA` (ищет провайдер `lib/services`) |
-| `oarb.vector_index_config` | Конфигурация индексов (таблицы/колонки, чанкование, автосинхронизация) |
+| `public.agent_vector_index_store` | Сериализованный FAISS-индекс `BYTEA` (ищет провайдер `lib/services`) |
+| `public.agent_vector_index_config` | Конфигурация индексов (таблицы/колонки, чанкование, автосинхронизация) |
 
 ### Дефолтные индексы
 
@@ -448,7 +448,7 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 # 1. DDL (таблицы домена + векторные таблицы + конфиг)
 psql -d nanobot -f sql/audit_analyzer/create_audit_source_tables_gp.sql
 psql -d nanobot -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
-psql -d nanobot -f sql/audit_analyzer/create_vector_index_config_gp.sql
+psql -d nanobot -f sql/audit_analyzer/create_agent_vector_index_config_gp.sql
 
 # 2. Зарегистрировать 3 дефолтных индекса
 psql -d nanobot -f sql/audit_analyzer/seed_default_indexes.sql
@@ -610,7 +610,7 @@ v2.0.0 — крупное обновление. Изменения в конфи
 | Секции проекта | смешаны в `.env` | `channels.*`, `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway`, `logging.db` — в `project.json` |
 | API-ключи | `.env` | `.secrets.env` (в `.gitignore`) |
 | DSN провайдеров | `LLM_API_KEY` в shell | `# providers: llm` секция в `.secrets.env` (pre-resolve через `ConfigService`) |
-| Параметры векторов | `vector_indexes.*`, `mode_vector_index_path` в `config.json` | `oarb.vector_index_config` в БД (таблица) |
+| Параметры векторов | `vector_indexes.*`, `mode_vector_index_path` в `config.json` | `public.agent_vector_index_config` в БД (таблица) |
 | DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
 | Навыки `data-analyzer`, `html_presentation_generator` | присутствовали | удалены |
 | `pg_agent_worker.py` | standalone DB API server | удалён |
@@ -619,7 +619,7 @@ v2.0.0 — крупное обновление. Изменения в конфи
 
 1. **Перенесите секреты** из `.env` в `.secrets.env` (формат секций `# providers: <name>`).
 2. **Создайте `project.json`** из секций `.env` (`channels.*`, `skills.*`, `cli`, ...). JSONC — можно копировать `project.json` из этого репо.
-3. **Удалите** `vector_indexes` / `mode_vector_index_path` из конфигов — теперь в `oarb.vector_index_config`.
+3. **Удалите** `vector_indexes` / `mode_vector_index_path` из конфигов — теперь в `public.agent_vector_index_config`.
 4. **Удалите** `data-analyzer`, `html_presentation_generator`, `pg_agent_worker.py` из импортов и конфигов.
 5. **Перезапустите gateway** — `ConfigService._pre_resolve_env_refs` подставит ключи в `os.environ` автоматически.
 6. **Проверьте health** — `gateway_logs` пустая, но `AuditSyncService.polls` > 0.
@@ -627,7 +627,7 @@ v2.0.0 — крупное обновление. Изменения в конфи
 ### Что НЕ изменилось
 
 - API точек входа: `python gateway.py`, `python cli_agent.py -P`.
-- Имена таблиц БД: `session_meta`, `session_messages`, `conversation_messages`, `oarb.audit_vectors`, `oarb.vector_index_store`, `benchmark_runs`, `benchmark_results`.
+- Имена таблиц БД: `session_meta`, `session_messages`, `agent_conversation_messages`, `oarb.audit_vectors`, `public.agent_vector_index_store`, `benchmark_runs`, `benchmark_results`.
 - `benchmarks/items/*.yaml` — формат совместим.
 - `audit_analyzer` режимы `predefined` / `sql` / `vector` — без изменений.
 

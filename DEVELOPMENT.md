@@ -42,8 +42,8 @@ flowchart LR
     subgraph PG["PostgreSQL (канон)"]
         AUDITS["oarb.audits<br/>oarb.violations<br/>oarb.audit_reports<br/>oarb.report_items"]
         VECTORS["oarb.audit_vectors"]
-        STORE["oarb.vector_index_store<br/>(FAISS в BYTEA)"]
-        CONFIG["oarb.vector_index_config"]
+        STORE["public.agent_vector_index_store<br/>(FAISS в BYTEA)"]
+        CONFIG["public.agent_vector_index_config"]
     end
 
     subgraph SERVICES["lib/services (универсальный слой данных)"]
@@ -94,7 +94,7 @@ flowchart LR
   (или напрямую по PG, если кеш выключен). Создание/обновление кеша его не
   касается. Единый интерфейс бэкенда: `get_schema / query_sql / explain`.
 - `--mode vector` — семантический поиск по FAISS-индексу: провайдер загружает
-  индекс из `oarb.vector_index_store` (BYTEA), при промахе пересобирает из
+  индекс из `public.agent_vector_index_store` (BYTEA), при промахе пересобирает из
   `oarb.audit_vectors`, эмбеддинг запроса получает через Ollama.
 
 ---
@@ -254,7 +254,7 @@ nanobot/
 │   │   ├── gateway_runner.py             #   run_forever с exponential backoff (1с → 30с)
 │   │   └── shutdown_coordinator.py       #   LIFO graceful shutdown
 │   ├── channels/                         #   каналы
-│   │   ├── postgres_channel.py           #     канал через таблицу conversation_messages
+│   │   ├── postgres_channel.py           #     канал через таблицу agent_conversation_messages
 │   │   └── redis_channel.py              #     канал через Redis-очереди (BRPOP/LPUSH)
 │   ├── session/                          #   хранилище сессий
 │   │   └── pg_session_manager.py         #     хранение сессий в PostgreSQL (замена JSONL)
@@ -306,7 +306,7 @@ nanobot/
   эмбеддинга) — без привязки к «аудиту».
 - Модульные функции: `get_embedding()` (Ollama `/api/embed`),
   `load_cache_from_postgres(cache_path, db_config)`, `check_cache_stale(...)`,
-  `read_vector_index_config(cfg)` (конфиг индексов из БД → fallback в настройках),
+  `read_agent_vector_index_config(cfg)` (конфиг индексов из БД → fallback в настройках),
   `read_embedding_config(cfg)`, `build_cache_provider(cfg, base_dir)` (фабрика
   провайдера из конфиг-секции навыка).
 - Тяжёлые зависимости (`duckdb`, `psycopg2`, `faiss`, `numpy`, `pyarrow`, `httpx`)
@@ -349,7 +349,7 @@ nanobot/
 | `embedding_model` | Модель эмбеддинга | `mxbai-embed-large:latest` |
 | `embedding_dimension` | Размерность вектора | `1024` |
 | `mode_vector_db_table` | Таблица сырых векторов (источник индекса) | `oarb.audit_vectors` (значение project.json; код по умолч. — пусто) |
-| `mode_vector_store_table` | Таблица сериализованных FAISS-индексов | `oarb.vector_index_store` |
+| `mode_vector_store_table` | Таблица сериализованных FAISS-индексов | `public.agent_vector_index_store` |
 | `cli_default_mode` | Режим по умолчанию (резерв; CLI требует `--mode`) | `predefined` |
 | `cli_max_retries` | Ретраи HTTP-запросов LLM-клиента (`llm.py`) | `3` |
 | `cli_timeout_sec` | Таймаут запроса к LLM (`llm.py`) | `60` |
@@ -570,7 +570,7 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ 1. Конфиг (oarb.vector_index_config)                                  │
+│ 1. Конфиг (public.agent_vector_index_config)                                  │
 │    - задаёт какие таблицы индексировать, какие колонки эмбеддить,    │
 │      параметры чанкования, track-колонку                             │
 └──────────────────────────────────────────────────────────────────────┘
@@ -586,19 +586,19 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 │    - NEW/CHANGED/DELETED классификация по (source, pk_value)         │
 │    - чанкование длинных текстов (lib/services/text_splitter.py)      │
 │    - батчевый эмбеддинг через Ollama /api/embed                       │
-│    - INSERT в oarb.audit_vectors + rebuild FAISS в oarb.vector_index_store
+│    - INSERT в oarb.audit_vectors + rebuild FAISS в public.agent_vector_index_store
 └──────────────────────────────────────────────────────────────────────┘
                               ↓
 ┌──────────────────────────────────────────────────────────────────────┐
 │ 4. Хранилище                                                         │
 │    - oarb.audit_vectors:  эмбеддинги REAL[] + метаданные             │
-│    - oarb.vector_index_store: сериализованный FAISS BYTEA (для поиска)│
+│    - public.agent_vector_index_store: сериализованный FAISS BYTEA (для поиска)│
 └──────────────────────────────────────────────────────────────────────┘
                               ↓
 ┌──────────────────────────────────────────────────────────────────────┐
 │ 5. Поиск (audit_analyzer --mode vector)                              │
 │    - PostgresDuckDbProvider.search_vector()                          │
-│    - десериализует FAISS из oarb.vector_index_store, ищет в памяти,  │
+│    - десериализует FAISS из public.agent_vector_index_store, ищет в памяти,  │
 │      при промахе пересобирает из oarb.audit_vectors                  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -607,11 +607,11 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 
 | Таблица | Назначение | Кто пишет | Кто читает |
 |---------|-----------|-----------|-----------|
-| `oarb.vector_index_config` | Конфиг индексов (имя, источник, колонки, чанки, track_column, enabled) | `seed_default_indexes.sql` (вручную) | `tools/build_vectors.py` |
+| `public.agent_vector_index_config` | Конфиг индексов (имя, источник, колонки, чанки, track_column, enabled) | `seed_default_indexes.sql` (вручную) | `tools/build_vectors.py` |
 | `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (chunk_index/count, content_hash, row_data JSONB, synced_at) | `tools/build_vectors.py` | `lib/services/cache_provider_impl.py:PostgresDuckDbProvider` |
-| `oarb.vector_index_store` | Сериализованный FAISS `BYTEA` + метаданные (dimension, vector_count, updated_at) | `provider.rebuild_and_store_index()` | `provider._INDEX_CACHE` (in-memory после preload) |
+| `public.agent_vector_index_store` | Сериализованный FAISS `BYTEA` + метаданные (dimension, vector_count, updated_at) | `provider.rebuild_and_store_index()` | `provider._INDEX_CACHE` (in-memory после preload) |
 
-DDL: `sql/audit_analyzer/create_vector_index_config_gp.sql`, `sql/audit_analyzer/create_audit_vectors_table_gp.sql`.
+DDL: `sql/audit_analyzer/create_agent_vector_index_config_gp.sql`, `sql/audit_analyzer/create_audit_vectors_table_gp.sql`.
 
 ### Дефолтные индексы
 
@@ -629,7 +629,7 @@ DDL: `sql/audit_analyzer/create_vector_index_config_gp.sql`, `sql/audit_analyzer
 
 | Цель | Команда | Что происходит |
 |------|---------|---------------|
-| **Добавить новый индекс** | 1. INSERT в `oarb.vector_index_config`<br>2. `--index <name> --full-rebuild` | Создаётся конфиг, собираются вектора + FAISS |
+| **Добавить новый индекс** | 1. INSERT в `public.agent_vector_index_config`<br>2. `--index <name> --full-rebuild` | Создаётся конфиг, собираются вектора + FAISS |
 | **Обновить один индекс (новые строки)** | `--index <name>` | Инкрементально: NEW/CHANGED/DELETED по `content_hash` |
 | **Обновить один индекс (изменился конфиг)** | UPDATE конфига + `--index <name> --full-rebuild` | TRUNCATE индекса + все строки заново |
 | **Обновить все индексы (новые строки)** | `build_vectors.py` (без флагов) | Все индексы из конфига, инкрементально |
@@ -638,8 +638,8 @@ DDL: `sql/audit_analyzer/create_vector_index_config_gp.sql`, `sql/audit_analyzer
 | **Обновить индекс после DDL таблицы** | `--index <name> --full-rebuild` | Схема таблицы изменилась → нужен полный пересчёт |
 | **Изменилась модель эмбеддинга** | UPDATE `embedding_*` в `project.json` + `--full-rebuild` | Старые FAISS с неправильной размерностью пересоберутся |
 | **Отключить индекс (без удаления данных)** | `UPDATE ... SET enabled = false` | `build_vectors` пропустит, вектора остаются |
-| **Удалить индекс полностью** | DELETE из 3 таблиц (`audit_vectors`, `vector_index_store`, `vector_index_config`) | Полное удаление |
-| **Удалить все индексы разом** | `TRUNCATE oarb.audit_vectors, oarb.vector_index_store` + `DELETE FROM oarb.vector_index_config` | Полная очистка |
+| **Удалить индекс полностью** | DELETE из 3 таблиц (`audit_vectors`, `agent_vector_index_store`, `agent_vector_index_config`) | Полное удаление |
+| **Удалить все индексы разом** | `TRUNCATE oarb.audit_vectors, public.agent_vector_index_store` + `DELETE FROM public.agent_vector_index_config` | Полная очистка |
 | **Восстановить случайно удалённый индекс** | Заново INSERT + `--full-rebuild` | Полная пересборка из источника |
 | **Сценарий «один и тот же текст в разных индексах»** | Два индекса с разными `index_name` на одной таблице | Поддерживается, поиск по `index_name` |
 | **Embedding провайдер недоступен** | `--check` (быстрее падает), проверить Ollama | Все строки → `errors=N` |
@@ -647,10 +647,10 @@ DDL: `sql/audit_analyzer/create_vector_index_config_gp.sql`, `sql/audit_analyzer
 
 ### Как добавить новый индекс
 
-**1. Опишите индекс в `oarb.vector_index_config`:**
+**1. Опишите индекс в `public.agent_vector_index_config`:**
 
 ```sql
-INSERT INTO oarb.vector_index_config
+INSERT INTO public.agent_vector_index_config
     (index_name, source_table, src_table, pk_column,
      content_cols, embedding_cols, track_column, enabled)
 VALUES (
@@ -692,7 +692,7 @@ python tools/build_vectors.py --full-rebuild
 python tools/build_vectors.py --status
 # objects_index: 100 векторов, размерность 1024
 
-psql -c "SELECT source, dimension, vector_count, updated_at FROM oarb.vector_index_store ORDER BY source"
+psql -c "SELECT source, dimension, vector_count, updated_at FROM public.agent_vector_index_store ORDER BY source"
 # objects_index | 1024 | 100 | 2026-08-12 ...
 ```
 
@@ -724,7 +724,7 @@ python tools/build_vectors.py --check
 #### Сценарий B: изменился список embedding_cols или content_cols
 
 ```sql
-UPDATE oarb.vector_index_config
+UPDATE public.agent_vector_index_config
 SET embedding_cols = '["title", "description", {"column":"body","chunk":true}]'::jsonb,
     content_cols = ARRAY['title', 'description']::text[],
     updated_at = NOW()
@@ -753,7 +753,7 @@ python tools/build_vectors.py --index audits_index --full-rebuild
 
 ```bash
 # 1. Удалить старые FAISS — у них неправильная размерность
-psql -c "DELETE FROM oarb.vector_index_store"
+psql -c "DELETE FROM public.agent_vector_index_store"
 
 # 2. Удалить старые вектора — у них неправильная размерность
 psql -c "TRUNCATE oarb.audit_vectors"
@@ -789,7 +789,7 @@ python tools/build_vectors.py --index audits_index
 python tools/build_vectors.py --index audits_index --full-rebuild
 ```
 
-**Если `embedding_cols` ссылается на колонку, которой больше нет** — будет ошибка `column "X" does not exist`. Решение: сначала обновите конфиг (`UPDATE oarb.vector_index_config SET embedding_cols = '[...]'::jsonb WHERE ...`), затем `--full-rebuild`.
+**Если `embedding_cols` ссылается на колонку, которой больше нет** — будет ошибка `column "X" does not exist`. Решение: сначала обновите конфиг (`UPDATE public.agent_vector_index_config SET embedding_cols = '[...]'::jsonb WHERE ...`), затем `--full-rebuild`.
 
 **Если DROP COLUMN `track_column`** (`updated_at`) — все индексы на этой таблице перестанут обновляться инкрементально. Решение: добавить новую `updated_at` + обновить конфиг.
 
@@ -851,24 +851,24 @@ python tools/build_vectors.py --index X --full-rebuild
 #### Отключить (без удаления собранных векторов)
 
 ```sql
-UPDATE oarb.vector_index_config SET enabled = false WHERE index_name = 'audits_index';
+UPDATE public.agent_vector_index_config SET enabled = false WHERE index_name = 'audits_index';
 ```
 
-`build_vectors.py` пропустит его при следующем запуске. Вектора остаются в `oarb.audit_vectors` и `oarb.vector_index_store`.
+`build_vectors.py` пропустит его при следующем запуске. Вектора остаются в `oarb.audit_vectors` и `public.agent_vector_index_store`.
 
 **Когда использовать:** временно не нужен (например, на время миграции источника), но потом восстановим.
 
-**Что произойдёт в навыке:** `--mode vector --index-name audits_index` **продолжит работать** — провайдер читает FAISS из `vector_index_store`, а не из конфига.
+**Что произойдёт в навыке:** `--mode vector --index-name audits_index` **продолжит работать** — провайдер читает FAISS из `agent_vector_index_store`, а не из конфига.
 
 #### Удалить полностью (один индекс)
 
 ```sql
 -- 1. Удалить собранные вектора (каскадно по source)
 DELETE FROM oarb.audit_vectors WHERE source = 'audits_index';
-DELETE FROM oarb.vector_index_store WHERE source = 'audits_index';
+DELETE FROM public.agent_vector_index_store WHERE source = 'audits_index';
 
 -- 2. Удалить конфиг
-DELETE FROM oarb.vector_index_config WHERE index_name = 'audits_index';
+DELETE FROM public.agent_vector_index_config WHERE index_name = 'audits_index';
 ```
 
 После этого `audit_analyze.bat --mode vector --index-name audits_index` вернёт **пустой результат** (нет FAISS-индекса). Чтобы восстановить — INSERT конфига + `--full-rebuild`.
@@ -882,8 +882,8 @@ DELETE FROM oarb.vector_index_config WHERE index_name = 'audits_index';
 ```sql
 -- Все собранные вектора + FAISS + конфиги
 TRUNCATE oarb.audit_vectors;
-TRUNCATE oarb.vector_index_store;
-TRUNCATE oarb.vector_index_config CASCADE;
+TRUNCATE public.agent_vector_index_store;
+TRUNCATE public.agent_vector_index_config CASCADE;
 ```
 
 После этого `audit_analyze --mode vector` **вернёт ошибку** «нет конфигурации индексов». Восстановление:
@@ -905,7 +905,7 @@ python tools/build_vectors.py --full-rebuild
 DELETE FROM oarb.audit_vectors
 WHERE source = 'audits_index';
 
-DELETE FROM oarb.vector_index_store
+DELETE FROM public.agent_vector_index_store
 WHERE source = 'audits_index';
 ```
 
@@ -913,7 +913,7 @@ WHERE source = 'audits_index';
 
 #### Восстановление (recovery) после случайного удаления
 
-**Если удалили только конфиг (`DELETE FROM vector_index_config`):**
+**Если удалили только конфиг (`DELETE FROM agent_vector_index_config`):**
 
 ```bash
 # 1. Восстановить конфиг (можно взять из бэкапа или из seed_default_indexes.sql)
@@ -937,7 +937,7 @@ python tools/build_vectors.py --full-rebuild
 
 ```bash
 psql -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
-psql -f sql/audit_analyzer/create_vector_index_config_gp.sql
+psql -f sql/audit_analyzer/create_agent_vector_index_config_gp.sql
 psql -f sql/audit_analyzer/seed_default_indexes.sql
 python tools/build_vectors.py --full-rebuild
 ```
@@ -963,16 +963,16 @@ audit_analyze.bat --mode vector --query "..." --index-name does_not_exist
 
 ```sql
 -- Удалить только конфиг одного индекса (без удаления векторов)
-DELETE FROM oarb.vector_index_config WHERE index_name = 'audits_index';
+DELETE FROM public.agent_vector_index_config WHERE index_name = 'audits_index';
 -- Вектора остаются, но build_vectors не будет их пересобирать
 -- (новые строки в источнике не подхватятся — нужен заново INSERT конфига)
 ```
 
 #### Что удалять нельзя
 
-- `oarb.vector_index_config` целиком `TRUNCATE ... CASCADE` — удалит все индексы разом (см. выше как восстановить).
+- `public.agent_vector_index_config` целиком `TRUNCATE ... CASCADE` — удалит все индексы разом (см. выше как восстановить).
 - `oarb.audit_vectors` без `WHERE` — удалит ВСЕ вектора всех индексов.
-- `oarb.vector_index_store` без `WHERE` — удалит ВСЕ FAISS-индексы.
+- `public.agent_vector_index_store` без `WHERE` — удалит ВСЕ FAISS-индексы.
 
 Если удалили случайно — см. **«Восстановление после случайного удаления»** выше.
 
@@ -980,12 +980,12 @@ DELETE FROM oarb.vector_index_config WHERE index_name = 'audits_index';
 
 ```bash
 # Временно отключить индекс (без потери данных)
-psql -c "UPDATE oarb.vector_index_config SET enabled = false WHERE index_name = 'audit_reports_index'"
+psql -c "UPDATE public.agent_vector_index_config SET enabled = false WHERE index_name = 'audit_reports_index'"
 
 # Полностью удалить индекс + пересобрать остальные
 psql -c "DELETE FROM oarb.audit_vectors WHERE source = 'audit_reports_index'"
-psql -c "DELETE FROM oarb.vector_index_store WHERE source = 'audit_reports_index'"
-psql -c "DELETE FROM oarb.vector_index_config WHERE index_name = 'audit_reports_index'"
+psql -c "DELETE FROM public.agent_vector_index_store WHERE source = 'audit_reports_index'"
+psql -c "DELETE FROM public.agent_vector_index_config WHERE index_name = 'audit_reports_index'"
 python tools/build_vectors.py --full-rebuild  # пересоберёт оставшиеся 2
 ```
 
@@ -1005,7 +1005,7 @@ python tools/build_vectors.py --full-rebuild  # пересоберёт оста�
 7. **INSERT в `oarb.audit_vectors`** (один INSERT на чанк).
 8. **Пересобрать FAISS**: `provider.invalidate_cache(index)` + `provider.rebuild_and_store_index(index, db_table)`.
 
-### Параметры конфигурации (oarb.vector_index_config)
+### Параметры конфигурации (public.agent_vector_index_config)
 
 | Поле | Тип | Назначение |
 |------|-----|-----------|
@@ -1054,7 +1054,7 @@ python tools/build_vectors.py --full-rebuild  # пересоберёт оста�
 | Все `content_cols` и `embedding_cols` существуют | Для чтения | `SELECT col1, col2 FROM table LIMIT 1` |
 | Доступ на `SELECT` | Сборщик должен читать | `GRANT SELECT ON table TO <user>` |
 | Доступ на `INSERT`/`DELETE` в `oarb.audit_vectors` | Запись результатов | `GRANT INSERT, DELETE ON oarb.audit_vectors` |
-| Доступ на `INSERT`/`UPDATE`/`DELETE` в `oarb.vector_index_store` | FAISS-сериализация | `GRANT ... ON oarb.vector_index_store` |
+| Доступ на `INSERT`/`UPDATE`/`DELETE` в `public.agent_vector_index_store` | FAISS-сериализация | `GRANT ... ON public.agent_vector_index_store` |
 
 ### Алгоритм чанкования
 
@@ -1089,7 +1089,7 @@ ORDER BY source;
 
 -- Состояние FAISS-индексов
 SELECT source, dimension, vector_count, updated_at
-FROM oarb.vector_index_store
+FROM public.agent_vector_index_store
 ORDER BY source;
 
 -- Сколько чанков у одного документа (для отладки)
@@ -1103,7 +1103,7 @@ LIMIT 10;
 -- Вектора без FAISS-индекса (несоответствие)
 SELECT v.source, COUNT(*) AS orphan_vectors
 FROM oarb.audit_vectors v
-LEFT JOIN oarb.vector_index_store s ON s.source = v.source
+LEFT JOIN public.agent_vector_index_store s ON s.source = v.source
 WHERE s.source IS NULL
 GROUP BY v.source;
 ```
@@ -1120,8 +1120,8 @@ GROUP BY v.source;
 | `ImportError: No module named 'utils'` или `No module named 'lib'` | Скрипт не из корня проекта | Запускать из корня: `cd /path/to/nanobot && python tools/build_vectors.py` |
 | `psycopg2.OperationalError: connection refused` | Неверный DSN или PostgreSQL не запущен | Проверьте `DATABASE_URL` в `.secrets.env`, `pg_isready` |
 | `psql: command not found` | Нет `psql` в PATH (только для seed/DDL) | Установите PostgreSQL client или используйте `python -c "from workspace.utils.db import execute; execute(open('sql/...').read())"` |
-| `permission denied for table oarb.vector_index_store` | Не хватает GRANT | `GRANT INSERT, UPDATE, DELETE ON oarb.vector_index_store TO <user>` |
-| `--status` показывает 0 индексов | `oarb.vector_index_config` пуст | Применить `sql/audit_analyzer/seed_default_indexes.sql` |
+| `permission denied for table public.agent_vector_index_store` | Не хватает GRANT | `GRANT INSERT, UPDATE, DELETE ON public.agent_vector_index_store TO <user>` |
+| `--status` показывает 0 индексов | `public.agent_vector_index_config` пуст | Применить `sql/audit_analyzer/seed_default_indexes.sql` |
 | `ERROR: таблица oarb.audit_vectors не создана` | DDL не применён | `psql -f sql/audit_analyzer/create_audit_vectors_table_gp.sql` |
 
 #### Ошибки при сборке
@@ -1188,7 +1188,7 @@ GROUP BY v.source;
 После смены **обязательно**:
 ```bash
 # 1. Удалить старые FAISS (они имеют старую размерность)
-psql -c "DELETE FROM oarb.vector_index_store"
+psql -c "DELETE FROM public.agent_vector_index_store"
 psql -c "TRUNCATE oarb.audit_vectors"
 
 # 2. Пересобрать с новой моделью
@@ -1211,7 +1211,7 @@ curl -X POST http://localhost:11434/api/embed \
 **Добавить колонку для индексации без пересоздания:**
 
 ```sql
-UPDATE oarb.vector_index_config
+UPDATE public.agent_vector_index_config
 SET embedding_cols = embedding_cols || '["new_column"]'::jsonb
 WHERE index_name = 'audits_index';
 ```
@@ -1222,7 +1222,7 @@ WHERE index_name = 'audits_index';
 
 ```sql
 TRUNCATE oarb.audit_vectors;
-TRUNCATE oarb.vector_index_store;
+TRUNCATE public.agent_vector_index_store;
 ```
 
 ```bash
@@ -1233,7 +1233,7 @@ python tools/build_vectors.py --full-rebuild
 
 ```sql
 -- Увеличить размер чанка для всех индексов с чанкованием
-UPDATE oarb.vector_index_config
+UPDATE public.agent_vector_index_config
 SET embedding_cols = jsonb_set(
     embedding_cols,
     '{0,chunk_size}',
@@ -1253,7 +1253,7 @@ WHERE jsonb_typeof(embedding_cols->0) = 'object'
 Поддерживается. Например, `audits_summary_index` (только title) и `audits_full_index` (description чанковано):
 
 ```sql
-INSERT INTO oarb.vector_index_config (..., index_name, embedding_cols, enabled) VALUES
+INSERT INTO public.agent_vector_index_config (..., index_name, embedding_cols, enabled) VALUES
 ('audits_summary_index', 'audits', 'oarb.audits', 'id',
  ARRAY['title']::text[],
  '["title"]'::jsonb, 'updated_at', true),
@@ -1306,9 +1306,9 @@ rm /tmp/build_vectors.pid
 ```bash
 # 1. Применить новые DDL (если ещё не)
 psql -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
-psql -f sql/audit_analyzer/create_vector_index_config_gp.sql
+psql -f sql/audit_analyzer/create_agent_vector_index_config_gp.sql
 
-# 2. Зарегистрировать индексы в oarb.vector_index_config
+# 2. Зарегистрировать индексы в public.agent_vector_index_config
 psql -f sql/audit_analyzer/seed_default_indexes.sql
 
 # 3. Пересобрать (старые файлы .faiss будут проигнорированы)
@@ -1350,7 +1350,7 @@ python tools/build_vectors.py --index audits_index --full-rebuild
 from workspace.skills.audit_analyzer.scripts.skill_config import build_cache_provider
 provider = build_cache_provider()
 
-# Сбросить in-memory FAISS для одного индекса (перечитает из oarb.vector_index_store)
+# Сбросить in-memory FAISS для одного индекса (перечитает из public.agent_vector_index_store)
 provider.invalidate_cache('audits_index')
 
 # Принудительно пересобрать (заново прочитает audit_vectors и сериализует)
@@ -1440,11 +1440,11 @@ journalctl -u ollama -f
 
 ```bash
 # 1. Удалить конфиг индексов
-psql -c "TRUNCATE oarb.vector_index_config CASCADE"
+psql -c "TRUNCATE public.agent_vector_index_config CASCADE"
 
 # 2. Удалить собранные вектора
 psql -c "TRUNCATE oarb.audit_vectors"
-psql -c "TRUNCATE oarb.vector_index_store"
+psql -c "TRUNCATE public.agent_vector_index_store"
 
 # 3. Заново применить seed
 psql -f sql/audit_analyzer/seed_default_indexes.sql
@@ -1509,7 +1509,7 @@ python tools/build_vectors.py --db-table my_app.vectors
 
 **Важно:** при первом запуске проверить, что установлены зависимости FAISS:
 `pip install faiss-cpu numpy`. Без них вектора вставляются в `audit_vectors`,
-но `oarb.vector_index_store` остаётся пустой, и `vector_mode` поиск не работает.
+но `public.agent_vector_index_store` остаётся пустой, и `vector_mode` поиск не работает.
 
 **Типичные сценарии:**
 - **После изменений в DDL таблиц** — `--full-rebuild`.
@@ -1546,7 +1546,7 @@ python tools/build_vectors.py --db-table my_app.vectors
 | PostgreSQL 13+ | `sql/migrations/migrate_vectors_v2.sql` |
 | Greenplum 6.5+ | `sql/migrations/migrate_vectors_v2_gp.sql` |
 
-⚠️ Миграция удаляет данные в `audit_vectors` и `vector_index_store`. После ОБЯЗАТЕЛЬНО:
+⚠️ Миграция удаляет данные в `audit_vectors` и `agent_vector_index_store`. После ОБЯЗАТЕЛЬНО:
 
 ```bash
 python tools/build_vectors.py --full-rebuild
@@ -1556,13 +1556,13 @@ python tools/build_vectors.py --full-rebuild
 
 ```sql
 -- PG 13+ вариант
-oarb.vector_index_config (
+public.agent_vector_index_config (
     index_name      TEXT PRIMARY KEY,         -- + 8 полей
     embedding_cols  JSONB NOT NULL,
     ...
 );
 
-oarb.vector_index_store (
+public.agent_vector_index_store (
     source       TEXT PRIMARY KEY,
     index_binary BYTEA NOT NULL,
     ...
@@ -1579,8 +1579,8 @@ oarb.audit_vectors (
 
 ```sql
 -- GP 6.5 вариант — добавляется распределение:
-DISTRIBUTED BY (index_name);     -- vector_index_config
-DISTRIBUTED REPLICATED;          -- vector_index_store (полная копия на каждом сегменте)
+DISTRIBUTED BY (index_name);     -- agent_vector_index_config
+DISTRIBUTED REPLICATED;          -- agent_vector_index_store (полная копия на каждом сегменте)
 DISTRIBUTED BY (source);         -- audit_vectors
 ```
 
@@ -1637,7 +1637,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | Файл | Что делает |
 |------|-----------|
 | `lib/session/pg_session_manager.py` | Хранение сессий в PostgreSQL (замена JSONL) |
-| `lib/channels/postgres_channel.py` | Канал через таблицу conversation_messages |
+| `lib/channels/postgres_channel.py` | Канал через таблицу agent_conversation_messages |
 | `lib/channels/redis_channel.py` | Канал через Redis-очереди (BRPOP/LPUSH) |
 | `lib/services/audit_sync_service.py` | Синхронизация audit-таблиц из PG в in-memory DuckDB |
 | `lib/services/audit_memory_store.py` | DuckDB-кеш + FAISS-индексы + publish-snapshot |
@@ -1764,7 +1764,7 @@ max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3
 |-----------|----------|
 | `.env` → `project.json` + `.secrets.env` | Скопировать секции `channels.*`, `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway` в `project.json` (JSONC). Секреты — в `.secrets.env` с провайдер-скоупинг форматом |
 | Провайдерские ключи больше не через `export` | Секция `# providers: llm` с `api_key=...` в `.secrets.env`. `ConfigService._pre_resolve_env_refs` подставит в `os.environ` автоматически (env-переменная — каноническая `LLM_API_KEY`) |
-| `vector_indexes` / `mode_vector_index_path` в `config.json` | Удалить; теперь в `oarb.vector_index_config` (см. [DEVELOPMENT.md → Векторная индексация](#векторная-индексация)) |
+| `vector_indexes` / `mode_vector_index_path` в `config.json` | Удалить; теперь в `public.agent_vector_index_config` (см. [DEVELOPMENT.md → Векторная индексация](#векторная-индексация)) |
 | DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
 | `data-analyzer`, `html_presentation_generator` | Удалены. Убрать из импортов и `config.json` |
 | `pg_agent_worker.py` | Удалён. Использовать `streamlit_app.py` + `PostgresChannel` |
@@ -1782,9 +1782,9 @@ max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3
 **Данные:**
 
 - **Сессии** (`session_meta`, `session_messages`) — без миграции, схема та же.
-- **Канал** (`conversation_messages`) — без миграции.
+- **Канал** (`agent_conversation_messages`) — без миграции.
 - **`audit_cache.duckdb`** — gateway пересоздаст автоматически (in-memory → новый snapshot).
-- **Векторные индексы** (`oarb.audit_vectors`, `oarb.vector_index_store`, `oarb.vector_index_config`) — без миграции (1.5.0 уже хранил их в БД).
+- **Векторные индексы** (`oarb.audit_vectors`, `public.agent_vector_index_store`, `public.agent_vector_index_config`) — без миграции (1.5.0 уже хранил их в БД).
 - **Бенчмарки** (`benchmark_runs`, `benchmark_results`) — без миграции.
 - **`gateway_logs`** — новая таблица, создаётся через `sql/logs/create_logs_table.sql`.
 
@@ -1803,7 +1803,7 @@ max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3
 | 2026-05-25 | 0.9.0 | nanobot-шлюз с `PostgresChannel`, инструментами, конфигурацией workspace |
 | 2026-05-27 | 1.0.0 | Навыки `db_analyzer` + `html_presentation_generator`, E2E-тесты |
 | 2026-05-27 | 1.1.0 | Модель `gpt-oss:20b-cloud`, кеш схемы в `db_analyzer` |
-| 2026-05-29 | 1.2.0 | Streamlit-чат, единотабличная архитектура `conversation_messages` |
+| 2026-05-29 | 1.2.0 | Streamlit-чат, единотабличная архитектура `agent_conversation_messages` |
 | 2026-06-10 | 1.3.0 | Self-review система, `ToolAuditHook`, бенчмарк-фреймворк, Redis-канал |
 | 2026-06-16 | 1.4.0 | Переход asyncpg → psycopg2, переименование `db_analyzer` → `audit_analyzer` |
 | 2026-07-22 | 1.5.0 | Векторные индексы в PostgreSQL, DuckDB-кеш, файловые → БД-секреты |

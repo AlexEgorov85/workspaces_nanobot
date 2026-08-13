@@ -29,10 +29,10 @@ sql/
 ├── audit_analyzer/                            # audit_analyzer + cache_provider
 │   ├── create_audit_source_tables_gp.sql      #   REFERENCE DDL oarb.* (GP 6.5)
 │   ├── create_audit_source_tables.sql         #   PG 13+ вариант (без DISTRIBUTED BY)
-│   ├── create_audit_vectors_table_gp.sql      #   oarb.audit_vectors + vector_index_store (GP 6.5)
+│   ├── create_audit_vectors_table_gp.sql      #   oarb.audit_vectors + agent_vector_index_store (GP 6.5)
 │   ├── create_audit_vectors_table.sql         #   PG 13+ вариант
-│   ├── create_vector_index_config_gp.sql      #   oarb.vector_index_config (GP 6.5)
-│   ├── create_vector_index_config.sql         #   PG 13+ вариант
+│   ├── create_agent_vector_index_config_gp.sql      #   public.agent_vector_index_config (GP 6.5)
+│   ├── create_agent_vector_index_config.sql         #   PG 13+ вариант
 │   └── seed_default_indexes.sql               #   3 дефолтных индекса (audits/violations/reports)
 ├── benchmarks/                                # Benchmarks
 │   ├── create_benchmark_tables.sql            #   PostgreSQL 9.4+
@@ -77,7 +77,7 @@ psql "$DATABASE_URL" -f sql/migrations/migrate_logs_v1_gp.sql
 # 4. Домен audit_analyzer (если используется навык)
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_audit_source_tables_gp.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
-psql "$DATABASE_URL" -f sql/audit_analyzer/create_vector_index_config_gp.sql
+psql "$DATABASE_URL" -f sql/audit_analyzer/create_agent_vector_index_config_gp.sql
 
 # 5. Дефолтные индексы (3 шт.: audits_index, violations_index, audit_reports_index)
 psql "$DATABASE_URL" -f sql/audit_analyzer/seed_default_indexes.sql
@@ -115,13 +115,13 @@ python tools/build_vectors.py --full-rebuild
 - **PostgreSQL 13+** — используйте файлы без суффикса `_gp`:
   - `sql/audit_analyzer/create_audit_source_tables.sql`
   - `sql/audit_analyzer/create_audit_vectors_table.sql`
-  - `sql/audit_analyzer/create_vector_index_config.sql`
+  - `sql/audit_analyzer/create_agent_vector_index_config.sql`
   - `sql/migrations/migrate_vectors_v2.sql`
 
 - **Greenplum 6.5+** — используйте файлы с суффиксом `_gp`:
   - `sql/audit_analyzer/create_audit_source_tables_gp.sql`
   - `sql/audit_analyzer/create_audit_vectors_table_gp.sql`
-  - `sql/audit_analyzer/create_vector_index_config_gp.sql`
+  - `sql/audit_analyzer/create_agent_vector_index_config_gp.sql`
   - `sql/migrations/migrate_vectors_v2_gp.sql`
 
 `seed_default_indexes.sql` — общий для обеих СУБД (только данные).
