@@ -425,13 +425,23 @@ async def _run_suite(
     from nanobot.config.loader import load_config, resolve_config_env_vars
     from nanobot.agent.loop import AgentLoop
     from nanobot.providers.image_generation import image_gen_provider_configs
+    from lib.services.llm_config import ensure_llm_env, resolve_llm_config
+
+    # Единая LLM-конфигурация агента (agents.defaults + providers.<provider> из
+    # config.json): бенчмарк использует ту же модель/провайдер/ключ, что и агент,
+    # без хардкода провайдера. ensure_llm_env() гарантирует LLM_API_KEY в env
+    # для резолва ${LLM_API_KEY} в config.json.
+    ensure_llm_env()
+    llm = resolve_llm_config({"llm_model": args.model} if args.model else None)
 
     config_path = args.config
     config = resolve_config_env_vars(load_config(config_path))
-    if args.model:
-        config.agents.defaults.model = args.model
-        if args.model == args.model:  # also set provider for local models
-            config.agents.defaults.provider = "ollama"
+    config.agents.defaults.model = llm["model"]
+    config.agents.defaults.provider = llm["provider"]
+    provider_cfg = getattr(config.providers, llm["provider"], None)
+    if provider_cfg is not None:
+        provider_cfg.api_key = llm["api_key"] or provider_cfg.api_key
+        provider_cfg.api_base = llm["api_base"] or provider_cfg.api_base
     loop = AgentLoop.from_config(
         config,
         image_generation_provider_configs=image_gen_provider_configs(config),
