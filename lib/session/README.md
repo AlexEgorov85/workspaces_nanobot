@@ -1,6 +1,6 @@
 # PGSessionManager — хранение сессий в PostgreSQL
 
-Замена штатному `SessionManager` (JSONL-файлы) на PostgreSQL/Greenplum.
+Замена штатного `SessionManager` (JSONL-файлы) на PostgreSQL/Greenplum.
 
 ## Зачем
 
@@ -10,6 +10,14 @@
 - Большом количестве сессий (JSONL не индексирован)
 
 PGSessionManager хранит все данные в двух таблицах и автоматически падает на JSONL при недоступности БД.
+
+> **v2.0.0:** таблицы переименованы в `agent_session_meta` /
+> `agent_session_messages` (единый `agent_`-префикс для таблиц агента).
+> DDL `sql/session/create_session_tables.sql` автоматически переименует
+> старые имена (`session_meta` → `agent_session_meta`,
+> `session_messages` → `agent_session_messages` + индекс
+> `idx_session_messages_sk_seq` → `idx_agent_session_messages_sk_seq`)
+> при первом применении — миграция идемпотентна, данные сохраняются.
 
 ## Использование
 
@@ -23,9 +31,24 @@ sm = PGSessionManager(
 agent = AgentLoop.from_config(config, bus, session_manager=sm)
 ```
 
+Имена таблиц настраиваются через `project.json → channels.postgres`:
+```json
+{
+    "channels": {
+        "postgres": {
+            "meta_table": "agent_session_meta",
+            "messages_table": "agent_session_messages"
+        }
+    }
+}
+```
+
+DSN собирается общим `utils.db.resolve_dsn()` из `channels.postgres.{host,port,
+dbname,user}` + `DB_PASSWORD` (или `dsn` override), а не передаётся напрямую.
+
 ## Схема БД
 
-### session_meta
+### agent_session_meta
 
 | Колонка | Тип | Описание |
 |---------|-----|----------|
@@ -35,7 +58,7 @@ agent = AgentLoop.from_config(config, bus, session_manager=sm)
 | `last_consolidated` | INT | Номер последней консолидации |
 | `metadata` | JSONB | Произвольные метаданные (title и т.д.) |
 
-### session_messages
+### agent_session_messages
 
 | Колонка | Тип | Описание |
 |---------|-----|----------|
@@ -58,7 +81,7 @@ agent = AgentLoop.from_config(config, bus, session_manager=sm)
 | `_channel_delivery` | BOOLEAN | Флаг доставки через канал |
 | `created_at` | TIMESTAMPTZ | Дата создания |
 
-Индекс: `(session_key, seq)` для быстрой загрузки.
+Индекс: `(session_key, seq)` (`idx_agent_session_messages_sk_seq`).
 
 ## Создание таблиц
 

@@ -239,7 +239,7 @@ nanobot/
 │   ├── channels/                          #   seed_messages.sql (тестовые данные)
 │   ├── logs/                              #   gateway_logs (DbLoggingService)
 │   ├── audit_analyzer/                    #   домен oarb.* + векторы (GP)
-│   ├── benchmarks/                        #   benchmark_runs + benchmark_results
+│   ├── benchmarks/                        #   agent_benchmark_runs + agent_benchmark_results
 │   └── migrations/                        #   инкрементальные миграции (например, logs)
 │
 ├── lib/                                  #  v2.0.0: сервисный слой
@@ -257,6 +257,7 @@ nanobot/
 │   │   ├── preload_service.py            #    FAISS preload + audit_cache refresh
 │   │   ├── db_logging_service.py         #    worker, batch INSERT, JSONL fallback, get_stats()
 │   │   ├── db_logging_bus.py             #    обёртки publish_inbound/outbound
+│   │   ├── llm_config.py                 #    resolve_llm_config() — общий резолв LLM для навыка/бенчмарка
 │   │   ├── audit_memory_store.py         #     in-memory DuckDB-зеркало + атомарный publish()
 │   │   ├── audit_sync_service.py         #     фоновый поллинг PG (worker-поток)
 │   │   ├── cache_provider.py             #     интерфейс CacheProvider + SearchResult
@@ -1527,7 +1528,8 @@ python tools/build_vectors.py --db-table my_app.vectors
 
 **Важно:** при первом запуске проверить, что установлены зависимости FAISS:
 `pip install faiss-cpu numpy`. Без них вектора вставляются в `audit_vectors`,
-но `public.agent_vector_index_store` остаётся пустой, и `vector_mode` поиск не работает.
+но `public.agent_vector_index_store` остаётся пустой, и `--mode vector` поиск
+через `lib/services/cache_provider_impl.py` не работает.
 
 **Типичные сценарии:**
 - **После изменений в DDL таблиц** — `--full-rebuild`.
@@ -1688,7 +1690,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | **Навык audit_analyzer** | Навык `audit_analyzer` (общее) | `workspace/skills/audit_analyzer/scripts/` + `lib/services/audit_*` (кеш) | `FileNotFoundError: audit_cache.duckdb` → `python gateway.py` (владелец кеша); LLM 429 → `cli_max_retries` (`project.json`) |
 | **Навык audit_analyzer** | Схема таблиц | `workspace/skills/audit_analyzer/scripts/database.py:_fetch_schema` (строки 188-237) | Таблица не видна → `db_tables` в `project.json` + `db_schema`; нет комментариев колонок → `pg_catalog.pg_description.objsubid`; тип `varchar(N)` без длины → `character_maximum_length` в `_fetch_schema` |
 | **Навык audit_analyzer** | DuckDB-кеш аудита | `lib/services/audit_memory_store.py` (in-memory) + `lib/services/audit_sync_service.py` (поллинг PG) | `нет данных в кэше` несмотря на строки в PG → callbacks ДО `ctx.start()` (см. `gateway.py:main`); удалённые в PG строки остаются в кеше → `full_resync_every: 0` отключает сверку; файл кеша не обновляется → `publish_path` пуст или `_dirty=False` |
-| **Навык audit_analyzer** | Векторный поиск | `lib/services/cache_provider_impl.py` (провайдер) + `tools/build_vectors.py` (индексатор) | `vector_mode` пустой результат → `python tools/build_vectors.py --status` + пересборка `--full-rebuild`; эмбеддинг не строится → Ollama на `embedding_base_url` (дефолт `http://localhost:11434/api/embed`); индекс пересобирается при каждом запросе → `invalidate_cache` не вызван, FAISS не в памяти |
+| **Навык audit_analyzer** | Векторный поиск | `lib/services/cache_provider_impl.py` (провайдер) + `tools/build_vectors.py` (индексатор) | `--mode vector` пустой результат → `python tools/build_vectors.py --status` + пересборка `--full-rebuild`; эмбеддинг не строится → Ollama на `embedding_base_url` (дефолт `http://localhost:11434/api/embed`); индекс пересобирается при каждом запросе → `invalidate_cache` не вызван, FAISS не в памяти |
 
 ---
 
@@ -1800,11 +1802,17 @@ max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3
 **Данные:**
 
 - **Сессии** (`session_meta`, `session_messages`) — без миграции, схема та же.
-- **Канал** (`agent_conversation_messages`) — без миграции.
+  DDL `sql/session/create_session_tables.sql` сам переименует их в
+  `agent_session_meta` / `agent_session_messages` при первом применении.
+- **Канал** (`agent_conversation_messages`) — без миграции (имя уже актуально).
 - **`audit_cache.duckdb`** — gateway пересоздаст автоматически (in-memory → новый snapshot).
 - **Векторные индексы** (`oarb.audit_vectors`, `public.agent_vector_index_store`, `public.agent_vector_index_config`) — без миграции (1.5.0 уже хранил их в БД).
-- **Бенчмарки** (`benchmark_runs`, `benchmark_results`) — без миграции.
-- **`gateway_logs`** — новая таблица, создаётся через `sql/logs/create_logs_table.sql`.
+- **Бенчмарки** (`agent_benchmark_runs`, `agent_benchmark_results`) — без миграции.
+- **`agent_gateway_logs`** — новая таблица, создаётся через `sql/logs/create_logs_table.sql`.
+- **Прочие `agent_`-переименования** (`predefined_scripts` → `agent_predefined_scripts`,
+  `conversation_messages` → `agent_conversation_messages`,
+  `oarb.vector_index_*` → `public.agent_vector_index_*`) — идемпотентная миграция
+  `sql/migrations/migrate_agent_table_names_v1.sql`.
 
 **Что НЕ изменилось:**
 

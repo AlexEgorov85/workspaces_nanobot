@@ -8,153 +8,51 @@
 
 ## [Unreleased]
 
-### Added
-- **Конфигурация: единый стиль settings-чтения.** Добавлен хелпер
-  `config.get_setting(*keys, default=...)` для безопасного доступа к вложенным
-  ключам `SETTINGS` с fallback.
-- **Тест-каркас `tests/test_config_keys.py`:** проверяет наличие и дефолты
-  всех обязательных ключей в `project.json` через JSONC-парсер из `config.py`.
-  При добавлении новой настройки — добавляйте запись в `REQUIRED_KEYS`.
-- **Новые ключи `project.json` (из рефакторинга hardcoded-значений):**
-  - `channels.postgres.{max_stuck_retries, msg_ctx_max_size, media_cache_dir}` и под-секция `pool.{min_conn, max_conn, pool_timeout}`;
-  - `channels.redis.{error_backoff_sec, reply_to_max_size, reply_to_trim_to}`;
-  - `skills.audit_analyzer.{sync_max_queue_size, reconnect_backoff_sec, reconnect_backoff_max_sec, cache_max_age_sec, cache_refresh_interval_sec, embedding_http_timeout_sec, mode_vector_store_table, vector_index_default_path, cli_default_format, text_chunk_size, text_chunk_overlap, build_batch_pause_sec}`;
-  - `cli.repl_idle_timeout_sec`;
-  - `streamlit.{files_dir, failed_window_sec}`;
-  - `gateway.{restart_initial_delay_sec, restart_max_delay_sec, streamlit_port, streamlit_log_filename, subprocess_shutdown_timeout_sec}`;
-  - `logging.db.{dialect, fallback_path, connect_backoff_sec, connect_backoff_max_sec, summary_max_chars}`.
-- **`agent_question_runs` хранит полный текст вопроса и ответа (без обрезки):**
-  добавлены колонки `question` (полный текст сообщения пользователя),
-  `response` (полный ответ агента) и `media` (JSON-список приложенных файлов).
-  `question`/`media` заполняются в `register_request` (inbound), `response` —
-  в `finish_request` (after_run/подагент). В `summary` остаётся краткая
-  версия (обрезанная) для быстрого просмотра.
-- **Логирование вложенных файлов (media):** `log_inbound`/`log_outbound`
-  теперь кладут `media` (список `media` из `InboundMessage`/`OutboundMessage`)
-  в `payload["media"]` события `agent_gateway_logs`. Файлы от пользователя
-  (inbound) и вложения агента (outbound) больше не теряются в логах.
-  В `register_request` media также сохраняется в `agent_question_runs.media`
-  (вопросные вложения не затираются при финализации через `COALESCE`).
-- **Колонки `question`/`response`/`media` покрыты миграциями** в
-  `create_logs_table.sql(+_gp)` и `migrate_logs_v1.sql(+_gp)` — идемпотентное
-  `ADD COLUMN` для существующих установок.
-
-### Changed
-- **Все ранее хардкоженные magic-числа и пути вынесены в `project.json`**:
-  timeout'ы, интервалы, retry-лимиты, пороги, размеры пулов и очередей,
-  пути к кешу/индексам, chunk-параметры — теперь управляются через настройки.
-- `cli_agent.py` (`--mode`): снят `required=True`. Значение по умолчанию
-  берётся из `skills.audit_analyzer.cli_default_mode` в `project.json`.
-- `channels.postgres.processing_timeout`: дефолт унифицирован на `120`
-  (раньше расходился между `project.json=120` и `postgres_channel.py=600`).
-- `skills.audit_analyzer.vector_index_default_path`: дефолт сменён с
-  `~/.nanobot/vectors/audits_index` на `workspace/data_store/vectors/audits_index`.
-- `DbLoggingService`: удалены мёртвые параметры `min_conn`/`max_conn`
-  (не подключались к реальному пулу).
-- **Удалены legacy-таблицы `public.agent_questions` и `public.agent_responses`.**
-  Они не использовались ни одним Python-модулем; их роль полностью покрыта
-  `agent_gateway_logs` (вопрос → `inbound`, ответ → `outbound_final` в
-  `payload.content`) + `agent_question_runs` (контекст).
-- **`DbLoggingService._render_sql` исправлена для PostgreSQL:** наивная
-  `replace("agent_gateway_logs", ...)` ломала `RENAME TO` в миграциях
-  (`RENAME TO "public"."agent_gateway_logs"`). Теперь цель `RENAME TO`
-  и schema-qualified `public.agent_gateway_logs` не квалифицируются повторно.
-- `lib/channels/postgres_channel.py`: `_session_media_dir` стал инстанс-методом
-  (раньше — static с глобальной `_DATA_STORE_DIR`); путь управляется ключом
-  `channels.postgres.media_cache_dir`.
-- `tools/build_vectors.py`: default'ы `--chunk-size` / `--chunk-overlap` /
-  `--batch-pause` читаются из `skills.audit_analyzer.*`.
-- **Единый `agent_`-префикс для оставшихся таблиц агента.**
-  `public.predefined_scripts` → `public.agent_predefined_scripts`;
-  `conversation_messages` → `public.agent_conversation_messages` (канал Web/Streamlit);
-  векторные таблицы перенесены из `oarb` в `public`:
-  `oarb.vector_index_config` → `public.agent_vector_index_config`,
-  `oarb.vector_index_store` → `public.agent_vector_index_store`.
-  Данные переносятся миграцией `sql/migrations/migrate_agent_table_names_v1.sql`
-  (идемпотентно — сохраняет строки). Обновлены конфиг-ключи
-  `channels.postgres.table_name`, `skills.audit_analyzer.{predefined_scripts_table,
-  mode_vector_index_config_table, mode_vector_store_table}`, DDL, seed'ы,
-  комментарии, `generate_predefined_scripts_sql.py` и тесты. Доменные таблицы
-  навыка (`oarb.audits/violations/audit_reports/report_items/audit_vectors`)
-  и `audit_interactions` не затронуты.
-
-### Migration notes
-- Если у вас уже есть `session_manager.json` с плоскими `min_conn`/`max_conn`/
-  `pool_timeout` — продолжает работать (legacy-fallback в `session_storage.py`).
-  Рекомендуется перенести в `channels.postgres.pool.*` в `project.json`.
-- Если вы переопределяли `~/.nanobot/vectors/audits_index` через свой скрипт —
-  теперь значение по умолчанию другое (`workspace/data_store/vectors/audits_index`).
-  Чтобы сохранить старое — задайте `vector_index_default_path` явно.
-- **`agent_question_runs`: новые колонки `question`/`response`/`media`.**
-  Для существующих установок выполните `create_logs_table.sql` (и
-  `migrate_logs_v1.sql`) — они содержат идемпотентное `ADD COLUMN`; или
-  вручную: `ALTER TABLE agent_question_runs ADD COLUMN IF NOT EXISTS
-  question TEXT, ADD COLUMN IF NOT EXISTS response TEXT,
-  ADD COLUMN IF NOT EXISTS media TEXT;`
-
-### Renamed
-- **Контракт LLM-провайдера нейтрализован.** Имя env-переменной для ключа
-  провайдера сменено: `MISTRAL_API_KEY` → `LLM_API_KEY`. Больше нет привязки
-  к конкретному вендору в имени переменной. Изменения:
-  - `config.py`: ключ из любой непустой `SETTINGS.providers.*.api_key`
-    всегда экспортируется как `LLM_API_KEY`.
-  - `config.json`: `${MISTRAL_API_KEY}` → `${LLM_API_KEY}` в
-    `providers.minimax.apiKey` и `providers.mistral.apiKey`.
-  - `lib/services/config_service.py:_pre_resolve_env_refs`:
-    `LLM_API_KEY` берётся из первой непустой `SETTINGS.providers.*.api_key`.
-  - Дефолты `project.json` (`llm_provider`, `llm_model`, `llm_api_base`)
-    нейтральны (`openai-compatible` / `gpt-4o-mini` / OpenAI URL); выбрать
-    Mistral/MiniMax/etc. — задать `llm_api_base` явно.
-  - `.secrets.env.example`: секция `# providers: mistral` →
-    `# providers: llm` (любое имя секции допустимо).
-- Действия при миграции:
-  - В `.secrets.env` переименуйте секцию `# providers: mistral` в
-    `# providers: llm` (необязательно, но рекомендуется для ясности).
-  - Если вы где-то задавали `MISTRAL_API_KEY` в shell через `export` —
-    переименуйте в `LLM_API_KEY`.
-  - В `project.json` при необходимости укажите свой `llm_api_base`
-    (например, `https://api.minimax.io/v1`).
-
-- **Навык `audit_analyzer` теперь читает ВСЕ данные из DuckDB-кэша.**
-  Прямой psycopg2 в read-only потоке навыка не используется.
-  Раньше `db_loader` ходил в PG через `utils.db.fetch` — теперь через
-  `cache_provider.query_sql(...)` (тот же DuckDB-файл, что и для аудит-данных).
-- `lib/services/cache_provider_impl.py`: копирование PG → DuckDB переведено
-  с `pd.DataFrame(records)` на `COPY ... TO STDOUT` + `read_csv_auto`
-  (без `pandas`, без pyarrow-IPC). Сохраняются типы JSONB → JSON,
-  TIMESTAMPTZ → TIMESTAMPTZ, NUMERIC → DECIMAL, UUID → UUID.
-- `lib/services/audit_memory_store.py`: `pd.DataFrame(records)` →
-  `pyarrow.Table.from_pylist` + `conn.register`. Сохраняет `list[float]`
-  как `DOUBLE[]` (раньше через `pd` → `DOUBLE[]`, через CSV → `VARCHAR`).
-- Удалён `workspace/skills/audit_analyzer/scripts/predefined_scripts.py`
-  (267 строк) — реестр перенесён в БД.
-- `cache_provider_impl.py` теперь поддерживает `additional_tables`
-  (минимальное расширение для копирования таблиц из произвольных схем).
-
-### Fixed
-- `audit_memory_store._replace_locked` / `_upsert_locked`: добавлены транзакции
-  `BEGIN/COMMIT/ROLLBACK` для DELETE + INSERT (ранее при ошибке INSERT
-  таблица оставалась пустой). DDL (ALTER/DROP) остаётся вне транзакции
-  (DuckDB не откатывает DDL).
-- `db_loader.get_provider()` теперь fail-fast без инжекции — ранее молча
-  создавал второй CacheProvider, что приводило к Windows-блокировкам файла.
-- `db_loader._parse_parameters()` корректно обрабатывает `None` и пустые
-  строки (раньше бросал `TypeError`).
-
-### Removed
-- `pandas` из `requirements.txt` (заменён на `pyarrow`).
-
----
-
-## [2.0.0] — 2026-08-12
+## [2.0.0] — 2026-08-13
 
 > **Главный релиз:** выделен сервисный слой и единый bootstrap-контекст
 > (`ApplicationContext`). `gateway.py` и `cli_agent.py` стали тонкими
 > оркестраторами. Аудит-инфраструктура (`audit_analyzer`) переехала в
 > универсальный слой `lib/services`, gateway — единственный владелец
-> DuckDB-кеша навыка.
+> DuckDB-кеша навыка. Расширен `agent_`-префикс на все таблицы агента,
+> вынесены magic-числа в `project.json`, нейтрализован LLM-провайдер.
 
 ### Added
+
+**Конфигурация: единый стиль settings-чтения.** Добавлен хелпер
+`config.get_setting(*keys, default=...)` для безопасного доступа к вложенным
+ключам `SETTINGS` с fallback.
+
+**Тест-каркас `tests/test_config_keys.py`:** проверяет наличие и дефолты
+всех обязательных ключей в `project.json` через JSONC-парсер из `config.py`.
+При добавлении новой настройки — добавляйте запись в `REQUIRED_KEYS`.
+
+**Новые ключи `project.json` (из рефакторинга hardcoded-значений):**
+- `channels.postgres.{max_stuck_retries, msg_ctx_max_size, media_cache_dir}` и под-секция `pool.{min_conn, max_conn, pool_timeout}`;
+- `channels.redis.{error_backoff_sec, reply_to_max_size, reply_to_trim_to}`;
+- `skills.audit_analyzer.{sync_max_queue_size, reconnect_backoff_sec, reconnect_backoff_max_sec, cache_max_age_sec, cache_refresh_interval_sec, embedding_http_timeout_sec, mode_vector_store_table, vector_index_default_path, cli_default_format, text_chunk_size, text_chunk_overlap, build_batch_pause_sec}`;
+- `cli.repl_idle_timeout_sec`;
+- `streamlit.{files_dir, failed_window_sec}`;
+- `gateway.{restart_initial_delay_sec, restart_max_delay_sec, streamlit_port, streamlit_log_filename, subprocess_shutdown_timeout_sec}`;
+- `logging.db.{dialect, fallback_path, connect_backoff_sec, connect_backoff_max_sec, summary_max_chars}`.
+
+**`agent_question_runs` хранит полный текст вопроса и ответа (без обрезки):**
+добавлены колонки `question` (полный текст сообщения пользователя),
+`response` (полный ответ агента) и `media` (JSON-список приложенных файлов).
+`question`/`media` заполняются в `register_request` (inbound), `response` —
+в `finish_request` (after_run/подагент). В `summary` остаётся краткая
+версия (обрезанная) для быстрого просмотра.
+
+**Логирование вложенных файлов (media):** `log_inbound`/`log_outbound`
+теперь кладут `media` (список `media` из `InboundMessage`/`OutboundMessage`)
+в `payload["media"]` события `agent_gateway_logs`. Файлы от пользователя
+(inbound) и вложения агента (outbound) больше не теряются в логах.
+В `register_request` media также сохраняется в `agent_question_runs.media`
+(вопросные вложения не затираются при финализации через `COALESCE`).
+
+**Колонки `question`/`response`/`media` покрыты миграциями** в
+`create_logs_table.sql(+_gp)` и `migrate_logs_v1.sql(+_gp)` — идемпотентное
+`ADD COLUMN` для существующих установок.
 
 **Сервисный слой v2.0.0 (`lib/`)**
 
@@ -280,9 +178,10 @@
   `export LLM_API_KEY=...` в shell — `ConfigService._pre_resolve_env_refs`
   кладёт ключи в `os.environ` ДО `_load_runtime_config`.
 - **`--force` в `audit_analyzer` удалён.**
-  `cli.py` завершается `FileNotFoundError`, указывающим на gateway.
+  `cli.py` завершается с `FileNotFoundError`, указывающим на gateway.
 - **`audit_analyzer.SCRIPTS_REGISTRY`** вынесен из `scripts_registry.py`
-  в отдельный `predefined_scripts.py`.
+  в отдельный `predefined_scripts.py` (позднее — реестр перенесён в БД,
+  см. ниже).
 - **`requirements.txt`** — убраны неиспользуемые пакеты (`requests`,
   `sentence-transformers`, `anthropic`, `openai`), версии — точные
   `=X.Y.Z` для полной воспроизводимости.
@@ -291,6 +190,54 @@
   комментарий обновлён.
 - **Документация:** ASCII-арт заменён на mermaid-диаграммы,
   `REFACTORING_PLAN.md` удалён (план завершён).
+- **Все ранее хардкоженные magic-числа и пути вынесены в `project.json`**:
+  timeout'ы, интервалы, retry-лимиты, пороги, размеры пулов и очередей,
+  пути к кешу/индексам, chunk-параметры — теперь управляются через настройки.
+- `cli_agent.py` (`--mode`): снят `required=True`. Значение по умолчанию
+  берётся из `skills.audit_analyzer.cli_default_mode` в `project.json`.
+- `channels.postgres.processing_timeout`: дефолт унифицирован на `120`
+  (раньше расходился между `project.json=120` и `postgres_channel.py=600`).
+- `skills.audit_analyzer.vector_index_default_path`: дефолт сменён с
+  `~/.nanobot/vectors/audits_index` на `workspace/data_store/vectors/audits_index`.
+- `DbLoggingService`: удалены мёртвые параметры `min_conn`/`max_conn`
+  (не подключались к реальному пулу).
+- **`DbLoggingService._render_sql` исправлена для PostgreSQL:** наивная
+  `replace("agent_gateway_logs", ...)` ломала `RENAME TO` в миграциях
+  (`RENAME TO "public"."agent_gateway_logs"`). Теперь цель `RENAME TO`
+  и schema-qualified `public.agent_gateway_logs` не квалифицируются повторно.
+- `lib/channels/postgres_channel.py`: `_session_media_dir` стал инстанс-методом
+  (раньше — static с глобальной `_DATA_STORE_DIR`); путь управляется ключом
+  `channels.postgres.media_cache_dir`.
+- `tools/build_vectors.py`: default'ы `--chunk-size` / `--chunk-overlap` /
+  `--batch-pause` читаются из `skills.audit_analyzer.*`.
+- **Единый `agent_`-префикс для оставшихся таблиц агента.**
+  `public.predefined_scripts` → `public.agent_predefined_scripts`;
+  `conversation_messages` → `public.agent_conversation_messages` (канал Web/Streamlit);
+  векторные таблицы перенесены из `oarb` в `public`:
+  `oarb.vector_index_config` → `public.agent_vector_index_config`,
+  `oarb.vector_index_store` → `public.agent_vector_index_store`.
+  Данные переносятся миграцией `sql/migrations/migrate_agent_table_names_v1.sql`
+  (идемпотентно — сохраняет строки). Обновлены конфиг-ключи
+  `channels.postgres.table_name`, `skills.audit_analyzer.{predefined_scripts_table,
+  mode_vector_index_config_table, mode_vector_store_table}`, DDL, seed'ы,
+  комментарии, `generate_predefined_scripts_sql.py` и тесты. Доменные таблицы
+  навыка (`oarb.audits/violations/audit_reports/report_items/audit_vectors`)
+  и `audit_interactions` не затронуты.
+- **Навык `audit_analyzer` теперь читает ВСЕ данные из DuckDB-кэша.**
+  Прямой psycopg2 в read-only потоке навыка не используется.
+  Раньше `db_loader` ходил в PG через `utils.db.fetch` — теперь через
+  `cache_provider.query_sql(...)` (тот же DuckDB-файл, что и для аудит-данных).
+- `lib/services/cache_provider_impl.py`: копирование PG → DuckDB переведено
+  с `pd.DataFrame(records)` на `COPY ... TO STDOUT` + `read_csv_auto`
+  (без `pandas`, без pyarrow-IPC). Сохраняются типы JSONB → JSON,
+  TIMESTAMPTZ → TIMESTAMPTZ, NUMERIC → DECIMAL, UUID → UUID.
+- `lib/services/audit_memory_store.py`: `pd.DataFrame(records)` →
+  `pyarrow.Table.from_pylist` + `conn.register`. Сохраняет `list[float]`
+  как `DOUBLE[]` (раньше через `pd` → `DOUBLE[]`, через CSV → `VARCHAR`).
+- Удалён `workspace/skills/audit_analyzer/scripts/predefined_scripts.py`
+  (267 строк) — реестр перенесён в БД.
+- `cache_provider_impl.py` теперь поддерживает `additional_tables`
+  (минимальное расширение для копирования таблиц из произвольных схем).
 
 ### Removed
 
@@ -310,6 +257,11 @@
 - Legacy `workspace/skills/audit_analyzer/DEVELOPMENT/*` —
   перенесены в корень (`DEVELOPMENT.md`) и `tools/build_vectors.py`.
 - Legacy мигратор `migrate_vectors_to_db.py`.
+- Legacy-таблицы **`public.agent_questions`** и **`public.agent_responses`**.
+  Они не использовались ни одним Python-модулем; их роль полностью покрыта
+  `agent_gateway_logs` (вопрос → `inbound`, ответ → `outbound_final` в
+  `payload.content`) + `agent_question_runs` (контекст).
+- `pandas` из `requirements.txt` (заменён на `pyarrow`).
 
 ### Fixed
 
@@ -343,6 +295,39 @@
 - **Тесты:** `test_exception` использует объект с `__getattr__`,
   поднимающим исключение (т.к. `_get` использует `getattr`, не `.get()`).
   Pre-resolve использует `patch.dict` для nanobot.
+- `audit_memory_store._replace_locked` / `_upsert_locked`: добавлены транзакции
+  `BEGIN/COMMIT/ROLLBACK` для DELETE + INSERT (ранее при ошибке INSERT
+  таблица оставалась пустой). DDL (ALTER/DROP) остаётся вне транзакции
+  (DuckDB не откатывает DDL).
+- `db_loader.get_provider()` теперь fail-fast без инжекции — ранее молча
+  создавал второй CacheProvider, что приводило к Windows-блокировкам файла.
+- `db_loader._parse_parameters()` корректно обрабатывает `None` и пустые
+  строки (раньше бросал `TypeError`).
+
+### Renamed
+
+- **Контракт LLM-провайдера нейтрализован.** Имя env-переменной для ключа
+  провайдера сменено: `MISTRAL_API_KEY` → `LLM_API_KEY`. Больше нет привязки
+  к конкретному вендору в имени переменной. Изменения:
+  - `config.py`: ключ из любой непустой `SETTINGS.providers.*.api_key`
+    всегда экспортируется как `LLM_API_KEY`.
+  - `config.json`: `${MISTRAL_API_KEY}` → `${LLM_API_KEY}` в
+    `providers.minimax.apiKey` и `providers.mistral.apiKey`.
+  - `lib/services/config_service.py:_pre_resolve_env_refs`:
+    `LLM_API_KEY` берётся из первой непустой `SETTINGS.providers.*.api_key`.
+  - Дефолты `project.json` (`llm_provider`, `llm_model`, `llm_api_base`)
+    нейтральны (`openai-compatible` / `gpt-4o-mini` / OpenAI URL); выбрать
+    Mistral/MiniMax/etc. — задать `llm_api_base` явно.
+  - `.secrets.env.example`: секция `# providers: mistral` →
+    `# providers: llm` (любое имя секции допустимо).
+
+  Действия при миграции:
+  - В `.secrets.env` переименуйте секцию `# providers: mistral` в
+    `# providers: llm` (необязательно, но рекомендуется для ясности).
+  - Если вы где-то задавали `MISTRAL_API_KEY` в shell через `export` —
+    переименуйте в `LLM_API_KEY`.
+  - В `project.json` при необходимости укажите свой `llm_api_base`
+    (например, `https://api.minimax.io/v1`).
 
 ### Security
 
@@ -366,6 +351,26 @@
 - Покрытие `audit_analyzer`: `TestSchema`, `TestReplace`,
   `TestSchemaAndResync`, `test_map_pg_type`, `publish()`,
   `on_sync_callback`.
+
+### Migration notes
+
+- Если у вас уже есть `session_manager.json` с плоскими `min_conn`/`max_conn`/
+  `pool_timeout` — продолжает работать (legacy-fallback в `session_storage.py`).
+  Рекомендуется перенести в `channels.postgres.pool.*` в `project.json`.
+- Если вы переопределяли `~/.nanobot/vectors/audits_index` через свой скрипт —
+  теперь значение по умолчанию другое (`workspace/data_store/vectors/audits_index`).
+  Чтобы сохранить старое — задайте `vector_index_default_path` явно.
+- **`agent_question_runs`: новые колонки `question`/`response`/`media`.**
+  Для существующих установок выполните `create_logs_table.sql` (и
+  `migrate_logs_v1.sql`) — они содержат идемпотентное `ADD COLUMN`; или
+  вручную: `ALTER TABLE agent_question_runs ADD COLUMN IF NOT EXISTS
+  question TEXT, ADD COLUMN IF NOT EXISTS response TEXT,
+  ADD COLUMN IF NOT EXISTS media TEXT;`
+- **Миграция `agent_`-префикса:** `sql/migrations/migrate_agent_table_names_v1.sql`
+  переименовывает/переносит `public.predefined_scripts`,
+  `public.conversation_messages`, `oarb.vector_index_config`,
+  `oarb.vector_index_store` под новые имена с сохранением данных.
+  Доменные таблицы навыка (`oarb.audits/violations/...`) не затрагиваются.
 
 ---
 

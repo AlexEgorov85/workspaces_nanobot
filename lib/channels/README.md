@@ -47,9 +47,23 @@
     "poll_interval": 2.0,
     "flush_interval": 2.0,
     "max_concurrent": 1,
-    "processing_timeout": 600
+    "processing_timeout": 120,
+    "max_stuck_retries": 3,
+    "msg_ctx_max_size": 100,
+    "media_cache_dir": "data_store/cache/sessions",
+    "pool": {
+        "min_conn": 1,
+        "max_conn": 4,
+        "pool_timeout": 5.0
+    }
 }
 ```
+
+> С версии 2.0.0 все параметры `channels.postgres.*` управляются через `project.json`.
+> В v1.x канал брал DSN напрямую из собственной секции конфига — теперь общий
+> `utils.db.resolve_dsn()` собирает DSN из `channels.postgres.{host,port,
+> dbname,user}` + `DB_PASSWORD` (или `dsn` override). Полный список ключей —
+> в `project.json → channels.postgres` и `channels.redis`.
 
 ### DDL
 
@@ -70,7 +84,7 @@
 | `created_at` | TIMESTAMPTZ | Дата создания |
 | `updated_at` | TIMESTAMPTZ | Дата обновления |
 
-Тестовые данные: `sql/seed_messages.sql` (14 user + 4 assistant сообщения).
+Тестовые данные: `sql/channels/seed_messages.sql` (14 user + 4 assistant сообщения).
 
 ---
 

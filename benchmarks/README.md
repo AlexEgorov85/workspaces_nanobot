@@ -752,8 +752,8 @@ Markdown-отчёт с:
 
 ### Таблицы
 
-- **benchmark_runs** — мета-информация о прогоне (имя, кол-во заданий, баллы, время)
-- **benchmark_results** — результаты по каждому вопросу
+- **agent_benchmark_runs** — мета-информация о прогоне (имя, кол-во заданий, баллы, время)
+- **agent_benchmark_results** — результаты по каждому вопросу
 
 ### Настройка
 
@@ -762,8 +762,8 @@ Markdown-отчёт с:
 {
   "benchmark": {
     "db_schema": "public",
-    "runs_table": "benchmark_runs",
-    "results_table": "benchmark_results"
+    "runs_table": "agent_benchmark_runs",
+    "results_table": "agent_benchmark_results"
   }
 }
 ```

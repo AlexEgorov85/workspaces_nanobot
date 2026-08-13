@@ -41,7 +41,8 @@ sql/
     ├── migrate_logs_v1.sql                    #   изменения gateway_logs (PG)
     ├── migrate_logs_v1_gp.sql                 #   GP-вариант
     ├── migrate_vectors_v2.sql                 #   vectors + config v2 (PG 13+)
-    └── migrate_vectors_v2_gp.sql              #   GP 6.5 вариант
+    ├── migrate_vectors_v2_gp.sql              #   GP 6.5 вариант
+    └── migrate_agent_table_names_v1.sql       #   agent_-префикс для таблиц агента (PG 13+)
 ```
 
 ---
@@ -87,6 +88,22 @@ psql "$DATABASE_URL" -f sql/benchmarks/create_benchmark_tables_gp.sql
 
 # 7. Сборка векторных индексов (если используется audit_analyzer)
 python tools/build_vectors.py --full-rebuild
+```
+
+### Обновление с v1.x → v2.0.0 (agent_-префикс)
+
+Если вы на v1.x — добавьте шаг миграции `agent_`-префикса:
+
+```bash
+# Переименовывает/переносит под единый agent_-префикс с сохранением данных:
+#   public.session_meta             → public.agent_session_meta
+#   public.session_messages         → public.agent_session_messages
+#   public.predefined_scripts       → public.agent_predefined_scripts
+#   public.conversation_messages    → public.agent_conversation_messages
+#   oarb.vector_index_config        → public.agent_vector_index_config
+#   oarb.vector_index_store         → public.agent_vector_index_store
+# (доменные таблицы навыка oarb.audits/violations/... не затрагиваются)
+psql "$DATABASE_URL" -f sql/migrations/migrate_agent_table_names_v1.sql
 ```
 
 ### Обновление существующей установки

@@ -624,6 +624,27 @@ v2.0.0 — крупное обновление. Изменения в конфи
 | DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
 | Навыки `data-analyzer`, `html_presentation_generator` | присутствовали | удалены |
 | `pg_agent_worker.py` | standalone DB API server | удалён |
+| Magic-числа (таймауты, retry, пулы) | захардкожены в `.py` | вынесены в `project.json` (`channels.*`, `skills.*`, `cli`, `gateway`, `streamlit`, `logging.db`) |
+| Секция провайдера в `.secrets.env` | `# providers: mistral` | `# providers: llm` (нейтральное имя) |
+
+### Переименования таблиц (запустите миграцию)
+
+В v2.0.0 расширен `agent_`-префикс на все таблицы агента. Идемпотентная миграция
+(сохраняет данные) — `sql/migrations/migrate_agent_table_names_v1.sql`:
+
+| Было | Стало |
+|------|-------|
+| `public.session_meta` | `public.agent_session_meta` |
+| `public.session_messages` | `public.agent_session_messages` |
+| `public.predefined_scripts` | `public.agent_predefined_scripts` |
+| `public.conversation_messages` | `public.agent_conversation_messages` |
+| `oarb.vector_index_config` | `public.agent_vector_index_config` |
+| `oarb.vector_index_store` | `public.agent_vector_index_store` |
+| `public.gateway_logs` | `public.agent_gateway_logs` |
+| `public.gateway_question_runs` | `public.agent_question_runs` |
+
+Доменные таблицы навыка (`oarb.audits/violations/audit_reports/report_items/audit_vectors`)
+**не затронуты** — это бизнес-данные владельца.
 
 ### Действия при обновлении
 
@@ -631,13 +652,15 @@ v2.0.0 — крупное обновление. Изменения в конфи
 2. **Создайте `project.json`** из секций `.env` (`channels.*`, `skills.*`, `cli`, ...). JSONC — можно копировать `project.json` из этого репо.
 3. **Удалите** `vector_indexes` / `mode_vector_index_path` из конфигов — теперь в `public.agent_vector_index_config`.
 4. **Удалите** `data-analyzer`, `html_presentation_generator`, `pg_agent_worker.py` из импортов и конфигов.
-5. **Перезапустите gateway** — `ConfigService._pre_resolve_env_refs` подставит ключи в `os.environ` автоматически.
-6. **Проверьте health** — `gateway_logs` пустая, но `AuditSyncService.polls` > 0.
+5. **Переименуйте секцию** `# providers: mistral` → `# providers: llm` в `.secrets.env` (опционально, для ясности).
+6. **Выполните миграцию** `sql/migrations/migrate_agent_table_names_v1.sql` — переименует таблицы под `agent_`-префикс.
+7. **Перезапустите gateway** — `ConfigService._pre_resolve_env_refs` подставит ключи в `os.environ` автоматически.
+8. **Проверьте health** — `agent_gateway_logs` пустая, но `AuditSyncService.polls` > 0.
 
 ### Что НЕ изменилось
 
 - API точек входа: `python gateway.py`, `python cli_agent.py -P`.
-- Имена таблиц БД: `session_meta`, `session_messages`, `agent_conversation_messages`, `oarb.audit_vectors`, `public.agent_vector_index_store`, `benchmark_runs`, `benchmark_results`.
+- Имена таблиц БД: `agent_session_meta`, `agent_session_messages`, `agent_conversation_messages`, `agent_predefined_scripts`, `agent_gateway_logs`, `agent_question_runs`, `oarb.audit_vectors`, `public.agent_vector_index_store`, `public.agent_vector_index_config`, `agent_benchmark_runs`, `agent_benchmark_results`.
 - `benchmarks/items/*.yaml` — формат совместим.
 - `audit_analyzer` режимы `predefined` / `sql` / `vector` — без изменений.
 
