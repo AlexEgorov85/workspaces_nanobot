@@ -8,6 +8,96 @@
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-08-14
+
+> **Patch-релиз:** регрессии и баги, обнаруженные сразу после выхода v2.0.0.
+> Совместимость с `nanobot 0.3.0`, восстановленный снапшот DuckDB-кеша,
+> починенный `build_vectors.py`, GP-6.5-only SQL.
+
+### Fixed
+
+- **Gateway: регресс публикации DuckDB-снапшота.** После `af37488`
+  (ApplicationContext-рефакторинг) callback `on_sync_callback` только
+  ставил `asyncio.Event` для FAISS-preload, но не вызывал
+  `memory_store.publish()` — данные копились в in-memory DuckDB
+  `AuditMemoryStore`, а файл
+  `workspace/skills/audit_analyzer/cache/audit_cache.duckdb` не создавался.
+  На Linux это было особенно заметно: CLI/skill читают снимок строго
+  с диска. Фикс: добавлен `memory_store.publish()` в обёртку
+  `on_sync_callback` (после установки Event) + финальный `publish()`
+  перед `ctx.stop()`. `gateway.py:73-83, 95-101`.
+- **Gateway: `connect_timeout=10` для PostgreSQL.** В `AuditSyncService`
+  выставлен таймаут 10с (раньше дефолтный ~2 минуты маскировал
+  DNS/файрвол-проблемы за счёт длинных задержек). Дополнительно
+  добавлено логирование и инкремент `stats` при неудачных PG-коннектах.
+  `lib/services/audit_sync_service.py:568`.
+- **`tools/build_vectors.py`: NameError на первом чанке.** После
+  переименования `_get_embeddings` → `_get_embedding` в `ba7bb58`
+  цикл `build_index` остался со старым именем — падал с `NameError`
+  при первом чанке. Дополнительно `_get_embedding` валидирует тип
+  первого вектора (`list[float]`) и логирует WARN, если сервер
+  эмбеддингов вернул >1 вектора на 1 текст. `tools/build_vectors.py:74-110, 380`.
+- **`PostgresChannel`: совместимость outbound-сигнатур с `nanobot 0.3.0`.**
+  До фикса `ChannelManager._send_reasoning_end` / `_send_delta` /
+  `_send_stream_event` бросали `TypeError: ... unexpected keyword
+  argument 'stream_id'`. Изменены сигнатуры:
+  - `send_reasoning_delta(chat_id, delta, metadata=None, *, stream_id=None)`
+  - `send_reasoning_end(chat_id, metadata=None, *, stream_id=None)`
+  - `send_delta(chat_id, delta, metadata=None, *, stream_id=None,
+    stream_end=False, resuming=False)`
+  Внутри `stream_id` принимается, но для рассуждений канал
+  ключуется по `assistant_msg_id`; `del stream_id` для совместимости.
+  Буфер `_stream_buffers` теперь ключуется по `stream_id`
+  (fallback: `meta["_stream_id"]` → `chat_id`).
+  `lib/channels/postgres_channel.py:618-830`.
+
+### Changed
+
+- **`build_vectors.py`: одиночные вызовы `/api/embed`.** Цикл
+  эмбеддинга переписан с батчей на одиночные запросы (`input=text`),
+  добавлен CLI-аргумент `--pause-sec` (default 5.0 или
+  `build_pause_sec` из `project.json`). Это даёт более ровную нагрузку
+  на Ollama при больших индексах.
+- **`sql/`: один файл = одна таблица, GP 6.5 only.** Объединённые
+  `create_*_tables.sql` разделены на отдельные скрипты по одной таблице
+  (`create_<schema>_<table>.sql`); удалены дубли PG13+ вариантов
+  (оставлен только GP 6.5). `COMMENT ON TABLE/COLUMN` перенесён
+  внутрь файлов создания. Все скрипты: `DISTRIBUTED BY`, `pgcrypto`,
+  `BIGINT IDENTITY`, без FK; `CREATE INDEX IF NOT EXISTS` заменён на
+  `DO`-блок с проверкой `pg_indexes`.
+- **Удалены устаревшие SQL-каталоги:** `sql/comments/`,
+  `sql/snapshot/`, `sql/migrations/` (DONE-миграции не нужны в
+  e2e-инсталляциях). Новый `sql/auto_migrate_1.4_2.0/` (см. ниже)
+  переехал с inline-SQL на Python-генераторы. Скрипты «обновлены»:
+  `sql/README.md`.
+
+### Added
+
+- **`sql/auto_migrate_1.4_2.0/` — генераторы миграции v1.4 → v2.0.**
+  - `generate_vector_indexes_migration.py` — перенос конфигов
+    vector-индексов из JSON v1.4 в `public.agent_vector_index_config`
+    (upsert через `DO`-блок, GP 6.5-совместимо).
+  - `generate_predefined_scripts_migration.py` — перенос реестра
+    SQL-скриптов из `scripts_registry.py` v1.4 в
+    `public.agent_predefined_scripts` (DELETE+INSERT, GP 6.5 совместимо).
+  - `created_tables.sql` — готовый DDL всех таблиц v2.0 для Greenplum 6.5
+    (UUID, `DISTRIBUTED BY`, комментарии). Применяется как отдельный
+    шаг перед миграцией данных.
+  Требование: `CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`
+
+### Migration notes
+
+- **С v2.0.0 → v2.0.1**: код-совместимо. Требуется перезапуск gateway,
+  если запущен на `nanobot >= 0.3.0` (signatures `send_*` изменились).
+- **Пользователям v1.4 → v2.0**: используйте генераторы из
+  `sql/auto_migrate_1.4_2.0/` (см. `sql/auto_migrate_1.4_2.0/README.md`).
+  Полный сценарий — три шага: создание таблиц → миграция
+  vector_indexes → миграция predefined_scripts.
+- **Обновите `tools/build_vectors.py`** — без фикса `81fbc28`
+  первая же попытка индексации упадёт с `NameError`.
+
+---
+
 ## [2.0.0] — 2026-08-13
 
 > **Главный релиз:** выделен сервисный слой и единый bootstrap-контекст

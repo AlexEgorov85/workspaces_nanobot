@@ -1834,5 +1834,6 @@ max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3
 | 2026-06-16 | 1.4.0 | Переход asyncpg → psycopg2, переименование `db_analyzer` → `audit_analyzer` |
 | 2026-07-22 | 1.5.0 | Векторные индексы в PostgreSQL, DuckDB-кеш, файловые → БД-секреты |
 | 2026-08-12 | 2.0.0 | `ApplicationContext` + сервисный слой, gateway — владелец кеша, JSONC, удаление навыков |
+| 2026-08-14 | 2.0.1 | Fix: gateway DuckDB-snapshot, build_vectors NameError, PostgresChannel ↔ nanobot 0.3.0; SQL: один файл = одна таблица (GP 6.5 only) |
 
 Подробный changelog — в [CHANGELOG.md](CHANGELOG.md).
