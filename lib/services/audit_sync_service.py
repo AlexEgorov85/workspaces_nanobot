@@ -58,7 +58,7 @@ class AuditSyncService:
         tables: Optional[List[str]] = None,
         vector_table: str = "",
         poll_interval_sec: float = 60.0,
-        write_table: str = "audit_interactions",
+        write_table: str = "",
         write_schema: str = "oarb",
         max_queue_size: int = 10000,
         reconnect_backoff: float = 1.0,
@@ -294,7 +294,7 @@ class AuditSyncService:
 
     def _track_column_for(self, table: str) -> str:
         """Вернуть колонку для инкрементального отслеживания изменений."""
-        if table == self._vector_table or table.endswith(".audit_vectors"):
+        if table == self._vector_table:
             return "id"
         return "updated_at"
 
@@ -317,6 +317,13 @@ class AuditSyncService:
             except (psycopg2.OperationalError, psycopg2.InterfaceError):
                 self._reconnect()
                 return
+            except psycopg2.errors.UndefinedTable:
+                logger.error(
+                    "AuditSyncService: таблица-источник не найдена: %s "
+                    "— пропускаю. Проверьте настройки skills.audit_analyzer.db_tables/"
+                    "db_additional_tables и создайте таблицу в PG.",
+                    table,
+                )
             except Exception:
                 with self._state_lock:
                     self._stats["errors"] += 1
@@ -334,6 +341,13 @@ class AuditSyncService:
             except (psycopg2.OperationalError, psycopg2.InterfaceError):
                 self._reconnect()
                 return
+            except psycopg2.errors.UndefinedTable:
+                logger.error(
+                    "AuditSyncService: таблица-источник не найдена при поллинге: %s "
+                    "— пропускаю. Проверьте настройки skills.audit_analyzer.db_tables/"
+                    "db_additional_tables.",
+                    table,
+                )
             except Exception:
                 with self._state_lock:
                     self._stats["errors"] += 1
@@ -514,22 +528,34 @@ class AuditSyncService:
     # ------------------------------------------------------------------
 
     def _ensure_write_table(self) -> None:
+        """Проверить существование целевой таблицы записи (без авто-создания).
+
+        Сервис не провижинит схему: если ``write_schema.write_table`` отсутствует
+        в PostgreSQL — логируем явную ошибку и помечаем write недоступным.
+        Создание таблицы — задача миграций/бootstrap, а не синхрон-сервиса.
+        """
         if not self._write_table or self._conn is None:
             return
         cur = self._conn.cursor()
         try:
-            cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{self._write_schema}"')
             cur.execute(
-                f'CREATE TABLE IF NOT EXISTS "{self._write_schema}"."{self._write_table}" ('
-                "id BIGSERIAL PRIMARY KEY, "
-                "session_id TEXT, "
-                "query_text TEXT, "
-                "answer_text TEXT, "
-                "metadata JSONB, "
-                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = %s",
+                [self._write_schema, self._write_table],
             )
+            exists = cur.fetchone()
         finally:
             cur.close()
+        if exists:
+            return
+        missing = f"{self._write_schema}.{self._write_table}"
+        self._write_table = ""
+        logger.error(
+            "AuditSyncService: таблица записи не найдена: %s "
+            "— запись ответов навыка в PG отключена. Создайте таблицу "
+            "(см. sql/created_tables.sql), сервис DDL не выполняет.",
+            missing,
+        )
 
     def _write_answer(self, payload: dict) -> None:
         if not self._write_table or self._conn is None:

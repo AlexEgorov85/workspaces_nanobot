@@ -82,7 +82,12 @@ class PostgresChannel(BaseChannel):
         # ---- настройки подключения к БД ----
         self._dsn: str = _get("dsn", "")
         self._schema: str = _get("schema", "public")
-        self._table_name: str = _get("table_name", "agent_conversation_messages")
+        self._table_name: str = _get("table_name", "")
+        if not self._table_name:
+            raise ValueError(
+                "PostgresChannel: channels.postgres.table_name обязателен "
+                "(нет авто-дефолтов в коде)"
+            )
         self._fq_table: str = f"{self._schema}.{self._table_name}"
 
         # ---- тайминги ----

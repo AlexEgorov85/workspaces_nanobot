@@ -130,12 +130,21 @@ class SessionStorageService:
                 )
             from lib.session.pg_session_manager import PGSessionManager
 
+            messages_table = pg_cfg.get("messages_table", "")
+            meta_table = pg_cfg.get("meta_table", "")
+            if not messages_table or not meta_table:
+                raise SessionStorageError(
+                    "storage=postgres: channels.postgres.messages_table и "
+                    "channels.postgres.meta_table обязательны "
+                    "(нет авто-дефолтов в коде). "
+                    f"messages_table={messages_table!r}, meta_table={meta_table!r}"
+                )
             manager = PGSessionManager(
                 workspace=workspace,
                 dsn=dsn,
                 schema=pg_cfg.get("schema", "public"),
-                messages_table=pg_cfg.get("messages_table", "agent_session_messages"),
-                meta_table=pg_cfg.get("meta_table", "agent_session_meta"),
+                messages_table=messages_table,
+                meta_table=meta_table,
                 min_conn=int(pool_cfg.get("min_conn", 1)),
                 max_conn=int(pool_cfg.get("max_conn", 4)),
                 pool_timeout=float(pool_cfg.get("pool_timeout", 5.0)),

@@ -204,10 +204,18 @@ class TestWrite:
         assert s.get_stats()["writes_written"] == 1
 
     def test_submitted_write_processed_by_worker(self):
-        conn = ScriptedConn(_standard_rows_for)
+        def rows_for(sql, params):
+            low = sql.lower()
+            if "information_schema.tables" in low:
+                # write-таблица существует (сервис DDL не выполняет)
+                return [("1",)]
+            return _standard_rows_for(sql, params)
+
+        conn = ScriptedConn(rows_for)
         s = AuditSyncService(
             dsn="postgresql://u@h/db",
             tables=["audits"],
+            write_table="audit_interactions",
             poll_interval_sec=0.05,
             reconnect_backoff=0.01,
         )

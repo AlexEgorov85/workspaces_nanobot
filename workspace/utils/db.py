@@ -50,56 +50,27 @@ _dsn: str = ""
 
 
 def resolve_dsn() -> str:
-    """Найти DSN из доступных источников в порядке приоритета.
+    """Вернуть явно сконфигурированный DSN без скрытых fallback.
 
-    1. configure(dsn) — явно заданный при запуске;
-    2. SETTINGS.postgresql.dsn — legacy-место из .env (удалено);
-    3. SETTINGS.channels.postgres.dsn — полный DSN в project.json (override);
-    4. SETTINGS.channels.postgres.{host,port,dbname,user} + os.environ DB_PASSWORD
-       — собрать DSN из частей (пароль в .secrets.env);
-    5. os.environ DATABASE_URL / PG_DSN.
+    Единственный источник — ``channels.postgres.dsn`` (project.json,
+    резолвится из ``${DATABASE_URL}``/.secrets.env). Никакой тихой сборки
+    из ``host/port/dbname/user`` или подстановки ``DATABASE_URL`` из
+    окружения не делается: отсутствие DSN — явная ошибка конфигурации,
+    а не повод незаметно подключиться куда-то ещё.
 
-    Возвращает пустую строку, если DSN нигде нет.
+    Возвращает пустую строку, если DSN не задан.
     """
     if _dsn:
         return _dsn
     try:
         from config import SETTINGS
-        cfg = SETTINGS
-        # Идём по секциям в порядке приоритета (поздний перекрывает ранний).
-        for section in ("postgresql", "channels.postgres"):
-            node = cfg
-            for part in section.split("."):
-                if isinstance(node, dict):
-                    node = node.get(part, {})
-                else:
-                    node = {}
-                    break
-            if not isinstance(node, dict):
-                continue
-            explicit = node.get("dsn") or ""
-            if explicit:
-                return explicit
-            if section == "channels.postgres":
-                # Собрать DSN из частей: host/port/dbname/user (из project.json)
-                # + пароль (из os.environ DB_PASSWORD / PGPASSWORD).
-                host = node.get("host")
-                if host:
-                    port = node.get("port") or 5432
-                    dbname = node.get("dbname") or ""
-                    user = node.get("user") or ""
-                    password = (
-                        os.environ.get("DB_PASSWORD")
-                        or os.environ.get("PGPASSWORD")
-                        or ""
-                    )
-                    return (
-                        f"postgresql://{user}:{password}"
-                        f"@{host}:{port}/{dbname}"
-                    )
+
+        node = SETTINGS.get("channels", {}).get("postgres", {})
+        if isinstance(node, dict):
+            return node.get("dsn") or ""
     except Exception:
         pass
-    return os.environ.get("DATABASE_URL", "") or os.environ.get("PG_DSN", "")
+    return ""
 
 
 def configure(dsn: str) -> None:

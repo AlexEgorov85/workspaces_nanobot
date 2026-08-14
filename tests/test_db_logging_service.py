@@ -13,6 +13,16 @@ import pytest
 from lib.services.db_logging_service import DbLoggingService, LogEvent
 
 
+def _svc(**kw):
+    kwargs = dict(
+        dsn="postgresql://x",
+        table_name="agent_gateway_logs",
+        question_runs_table="agent_question_runs",
+    )
+    kwargs.update(kw)
+    return DbLoggingService(**kwargs)
+
+
 @pytest.fixture
 def fake_psycopg2(monkeypatch):
     """Подменяем psycopg2/psycopg2.extras, чтобы не требовать установки."""
@@ -43,7 +53,7 @@ def fake_psycopg2(monkeypatch):
 
 class TestBasicLifecycle:
     def test_start_stop(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=0.05)
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=0.05)
         svc.start()
         try:
             assert svc.is_running()
@@ -52,7 +62,7 @@ class TestBasicLifecycle:
         assert not svc.is_running()
 
     def test_no_dsn_runs_with_fallback(self, tmp_path):
-        svc = DbLoggingService(
+        svc = _svc(
             dsn="",
             flush_interval_sec=0.05,
             fallback_path=tmp_path / "log.jsonl",
@@ -69,12 +79,12 @@ class TestBasicLifecycle:
 
 class TestNonBlocking:
     def test_log_inbound_enqueue(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         assert svc.log_inbound("cli:1", "cli", "hello") is True
         assert svc.get_stats()["queued"] >= 1
 
     def test_log_inbound_sender_and_chat(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         assert svc.log_inbound(
             "cli:1", "cli", "hello",
             sender_id="u42", chat_id="c7", message_id="m1",
@@ -86,25 +96,25 @@ class TestNonBlocking:
         assert event.payload["message_id"] == "m1"
 
     def test_log_inbound_default_actor_is_user(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_inbound("cli:1", "cli", "hello")
         assert svc._queue.queue[0].actor == "user"
 
     def test_log_inbound_request_id_defaults_to_message_id(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_inbound("cli:1", "cli", "hello", message_id="m1")
         event = svc._queue.queue[0]
         assert event.request_id == "m1"
         assert event.payload["message_id"] == "m1"
 
     def test_log_outbound_request_id(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_outbound("cli:1", "cli", "ok", request_id="m1")
         event = svc._queue.queue[0]
         assert event.request_id == "m1"
 
     def test_log_tool_event_request_id(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_tool_call("cli:1", "read", {"p": 1}, tool_call_id="t1", request_id="m1")
         svc.log_tool_result("cli:1", "read", "r", 10.0, tool_call_id="t1", request_id="m1")
         call, result = list(svc._queue.queue)
@@ -112,7 +122,7 @@ class TestNonBlocking:
         assert result.request_id == "m1" and result.name == "read"
 
     def test_request_index_lifecycle(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         assert svc.get_request_id("cli:1") is None
         svc.register_request(
             "cli:1", "m1", user_id="u1", chat_id="c1",
@@ -126,7 +136,7 @@ class TestNonBlocking:
         assert svc.get_request_id("") is None
 
     def test_question_run_records(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         # контекст вопроса + финиш — это _QuestionRunRecord'ы, не LogEvent'ы
         assert svc.register_request(
             "cli:1", "m1", user_id="u1", chat_id="c1",
@@ -144,7 +154,7 @@ class TestNonBlocking:
         assert records[1].response == "полный ответ"
 
     def test_log_tool_event_dimensions(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_tool_call(
             "cli:1", "read", {"p": 1}, tool_call_id="t1", request_id="m1",
         )
@@ -153,19 +163,19 @@ class TestNonBlocking:
         assert event.request_id == "m1"
 
     def test_log_event_min_level(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", min_level="WARN")
+        svc = _svc(dsn="postgresql://x", min_level="WARN")
         assert svc.log_event(LogEvent("x", "DEBUG")) is False
         assert svc.log_event(LogEvent("x", "INFO")) is False
         assert svc.log_event(LogEvent("x", "ERROR")) is True
 
     def test_log_outbound_with_meta(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x")
+        svc = _svc(dsn="postgresql://x")
         assert svc.log_outbound(
             "cli:1", "cli", "ok", latency_ms=12.5, tokens_used=42
         ) is True
 
     def test_log_media_in_payload(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
         svc.log_inbound("cli:1", "cli", "привет", media=["doc.pdf"])
         svc.log_outbound("cli:1", "cli", "ответ", media=["report.xlsx"])
         inbound, outbound = list(svc._queue.queue)
@@ -173,18 +183,18 @@ class TestNonBlocking:
         assert outbound.payload["media"] == ["report.xlsx"]
 
     def test_log_tool_call_and_result(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x")
+        svc = _svc(dsn="postgresql://x")
         assert svc.log_tool_call("cli:1", "read", {"path": "x"}) is True
         assert svc.log_tool_result(
             "cli:1", "read", "content", latency_ms=15.0
         ) is True
 
     def test_log_error(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x")
+        svc = _svc(dsn="postgresql://x")
         assert svc.log_error("boom", session_id="k", context={"k": "v"}) is True
 
     def test_queue_full_returns_false(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", queue_maxsize=2)
+        svc = _svc(dsn="postgresql://x", queue_maxsize=2)
         # Не запускаем worker — очередь наполнится до запуска.
         for _ in range(2):
             assert svc.log_event(LogEvent("x")) is True
@@ -194,7 +204,7 @@ class TestNonBlocking:
 
 class TestFlush:
     def test_batch_writes_to_db(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=0.05,
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=0.05,
                                 batch_size=3)
         svc.start()
         try:
@@ -209,7 +219,7 @@ class TestFlush:
         assert written >= 3
 
     def test_fallback_when_no_dsn(self, tmp_path):
-        svc = DbLoggingService(
+        svc = _svc(
             dsn="",
             flush_interval_sec=0.05,
             batch_size=2,
@@ -234,7 +244,7 @@ class TestFlush:
     def test_connect_failure_uses_fallback(self, fake_psycopg2, tmp_path):
         psycopg2 = sys.modules["psycopg2"]
         psycopg2.connect = MagicMock(side_effect=RuntimeError("no db"))
-        svc = DbLoggingService(
+        svc = _svc(
             dsn="postgresql://x",
             flush_interval_sec=0.05,
             batch_size=1,
@@ -249,7 +259,7 @@ class TestFlush:
         assert svc.get_stats()["failed"] + svc.get_stats()["fallback_written"] >= 1
 
     def test_stop_flushes_remaining(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x", flush_interval_sec=5.0,
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0,
                                 batch_size=100)
         svc.start()
         try:
@@ -261,7 +271,7 @@ class TestFlush:
 
 class TestGetStats:
     def test_keys_present(self, fake_psycopg2):
-        svc = DbLoggingService(dsn="postgresql://x")
+        svc = _svc(dsn="postgresql://x")
         stats = svc.get_stats()
         for k in ("running", "queued", "written", "failed", "queue_size",
                   "fallback_written", "batch_count", "queue_full",
@@ -269,38 +279,40 @@ class TestGetStats:
             assert k in stats
 
 
-class TestGreenplumDialect:
-    def test_schema_files_selected_by_dialect(self):
-        svc = DbLoggingService(dsn="x", dialect="greenplum")
-        ddl, mig = svc._schema_files()
-        assert ddl.name == "create_logs_table_gp.sql"
-        assert mig.name == "migrate_logs_v1_gp.sql"
+class TestSchemaCheck:
+    def test_ensure_schema_raises_when_missing_tables(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x")
+        conn = fake_psycopg2["conn"]
+        cursor = fake_psycopg2["cursor"]
+        cursor.fetchone.return_value = None  # таблиц нет ни в одном information_schema запросе
+        conn.cursor.reset_mock()
+        with pytest.raises(RuntimeError, match="таблица не найдена"):
+            svc._ensure_schema(conn)
 
-    def test_default_dialect_is_postgres(self):
-        svc = DbLoggingService(dsn="x")
-        ddl, mig = svc._schema_files()
-        assert ddl.name == "create_logs_table.sql"
-        assert mig.name == "migrate_logs_v1.sql"
+    def test_ensure_schema_passes_when_tables_exist(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x")
+        conn = fake_psycopg2["conn"]
+        cursor = fake_psycopg2["cursor"]
+        cursor.fetchone.return_value = ("1",)
+        conn.cursor.reset_mock()
+        svc._ensure_schema(conn)  # не должно падать
+        # проверяем обе таблицы
+        assert cursor.execute.call_count == 2
 
-    def test_render_sql_gp_placeholders(self):
-        svc = DbLoggingService(dsn="x", dialect="greenplum",
-                               table_name="gateway_logs", schema="public")
-        rendered = svc._render_sql(
-            svc._DDL_GP_PATH, '"public"."gateway_logs"'
-        )
-        # плейсхолдеры подставлены
-        assert "@@SCHEMA@@" not in rendered
-        assert "@@TABLE@@" not in rendered
-        assert "@@TABLE_DDL@@" not in rendered
-        # schema-qualified имя в CREATE TABLE
-        assert 'CREATE TABLE IF NOT EXISTS "public"."gateway_logs"' in rendered
-        # каталог-проверки в DO-блоках ссылаются на голое имя
-        assert "tablename = 'agent_question_runs'" in rendered
+    def test_no_ddl_executed(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x")
+        conn = fake_psycopg2["conn"]
+        cursor = fake_psycopg2["cursor"]
+        cursor.fetchone.return_value = ("1",)
+        conn.cursor.reset_mock()
+        svc._ensure_schema(conn)
+        for call in cursor.execute.call_args_list:
+            assert "CREATE" not in call.args[0].upper()
 
     def test_upsert_question_run_no_on_conflict(self, fake_psycopg2):
         from lib.services.db_logging_service import _QuestionRunRecord
 
-        svc = DbLoggingService(dsn="postgresql://x")
+        svc = _svc(dsn="postgresql://x")
         conn = fake_psycopg2["conn"]
         conn.cursor.reset_mock()
         cursor = fake_psycopg2["cursor"]
@@ -319,7 +331,7 @@ class TestGreenplumDialect:
     def test_upsert_question_run_update_only(self, fake_psycopg2):
         from lib.services.db_logging_service import _QuestionRunRecord
 
-        svc = DbLoggingService(dsn="postgresql://x")
+        svc = _svc(dsn="postgresql://x")
         conn = fake_psycopg2["conn"]
         conn.cursor.reset_mock()
         cursor = fake_psycopg2["cursor"]
@@ -339,7 +351,7 @@ class TestGreenplumDialect:
     def test_upsert_question_run_question_media(self, fake_psycopg2):
         from lib.services.db_logging_service import _QuestionRunRecord
 
-        svc = DbLoggingService(dsn="postgresql://x")
+        svc = _svc(dsn="postgresql://x")
         conn = fake_psycopg2["conn"]
         conn.cursor.reset_mock()
         cursor = fake_psycopg2["cursor"]

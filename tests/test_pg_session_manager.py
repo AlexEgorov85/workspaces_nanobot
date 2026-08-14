@@ -36,7 +36,15 @@ def mock_db_and_psycopg():
 
         from lib.session.pg_session_manager import PGSessionManager
 
-        yield PGSessionManager
+        def _make(**kwargs):
+            defaults = {
+                "messages_table": kwargs.pop("messages_table", "agent_session_messages"),
+                "meta_table": kwargs.pop("meta_table", "agent_session_meta"),
+            }
+            kwargs.setdefault("workspace", Path("/tmp/ws"))
+            return PGSessionManager(workspace=kwargs.pop("workspace"), **defaults, **kwargs)
+
+        yield _make
 
 
 class TestPGSessionManagerPure:

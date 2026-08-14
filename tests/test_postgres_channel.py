@@ -56,6 +56,7 @@ def _make_channel(mock_db, **overrides):
     PostgresChannel, _decode_jsonb, _ = mock_db
     config = {
         "dsn": "postgresql://localhost:5432/test",
+        "table_name": "agent_conversation_messages",
         "poll_interval": 0.1,
         "flush_interval": 0.1,
         "max_concurrent": 1,

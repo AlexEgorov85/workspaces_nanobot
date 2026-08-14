@@ -7,8 +7,9 @@
   * единственный worker-поток (``self._thread``) владеет psycopg2-соединением;
   * неблокирующие ``log_*`` методы ставят события в ``queue.Queue``;
   * worker батчем вставляет записи по ``flush_interval_sec`` или ``batch_size``;
-  * если подключение к БД недоступно — лог пишется в JSONL-файл
-    (``fallback_path``), сервис продолжает работу;
+  * если подключение к БД недоступно или вставка падает — события НЕ пишутся
+    в JSONL-файл: они выбрасываются, а ошибка фиксируется в ``stats``
+    (``failed`` / ``last_error``). Скрытой записи в файл нет;
   * ``stop(timeout_sec=15)`` отправляет SHUTDOWN-сентинел и дожидается
     опустошения очереди.
 """
@@ -77,21 +78,20 @@ class _QuestionRunRecord:
 
 
 class DbLoggingService:
-    """Фоновый writer событий агента в PostgreSQL с fallback-JSONL."""
+    """Фоновый writer событий агента в PostgreSQL (без fallback-JSONL)."""
 
     def __init__(
         self,
         dsn: Optional[str] = None,
         *,
-        table_name: str = "agent_gateway_logs",
-        question_runs_table: str = "agent_question_runs",
+        table_name: str,
+        question_runs_table: str,
         schema: str = "public",
         dialect: str = "postgres",
         flush_interval_sec: float = 5.0,
         batch_size: int = 100,
         queue_maxsize: int = 10000,
         min_level: str = "INFO",
-        fallback_path: Optional[Path] = None,
         connect_backoff_sec: float = 1.0,
         connect_backoff_max_sec: float = 60.0,
         summary_max_chars: int = 200,
@@ -104,7 +104,6 @@ class DbLoggingService:
         self._flush_interval = float(flush_interval_sec)
         self._batch_size = int(batch_size)
         self._min_level = min_level
-        self._fallback_path = Path(fallback_path) if fallback_path else None
         self._connect_backoff_sec = float(connect_backoff_sec)
         self._connect_backoff_max_sec = float(connect_backoff_max_sec)
         self._summary_max_chars = int(summary_max_chars)
@@ -120,7 +119,6 @@ class DbLoggingService:
             "written": 0,
             "queued": 0,
             "failed": 0,
-            "fallback_written": 0,
             "batch_count": 0,
             "queue_full": 0,
             "connected": False,
@@ -447,8 +445,10 @@ class DbLoggingService:
 
         При flush:
           * есть соединение → ``_flush_batch(conn, buffer)`` (psycopg2 INSERT);
-          * нет соединения → ``_flush_to_fallback(buffer)`` (JSONL-файл);
-          * при ошибке batch — fallback принимает весь батч (не теряем).
+          * нет соединения → события выбрасываются (счётчик ``failed``),
+            JSONL-файл не пишется;
+          * при ошибке batch — события выбрасываются (``failed``),
+            ``connected = False``.
 
         В блоке ``finally`` — финальный flush (иначе при штатной остановке
         теряем события из буфера).
@@ -486,11 +486,9 @@ class DbLoggingService:
                         conn = self._connect()
                     if conn is not None:
                         self._flush_batch(conn, buffer)
-                        buffer.clear()
                     else:
-                        # fallback: dump buffer to file
-                        self._flush_to_fallback(buffer)
-                        buffer.clear()
+                        self._drop_batch(buffer)
+                    buffer.clear()
                     deadline = time.time() + self._flush_interval
                 elif time.time() >= deadline:
                     if buffer:
@@ -499,7 +497,7 @@ class DbLoggingService:
                         if conn is not None:
                             self._flush_batch(conn, buffer)
                         else:
-                            self._flush_to_fallback(buffer)
+                            self._drop_batch(buffer)
                         buffer.clear()
                     deadline = time.time() + self._flush_interval
         finally:
@@ -510,33 +508,24 @@ class DbLoggingService:
                 if conn is not None:
                     self._flush_batch(conn, buffer)
                 else:
-                    self._flush_to_fallback(buffer)
+                    self._drop_batch(buffer)
             self._close(conn)
 
     # ------------------------------------------------------------------
-    # Подключение / запись / fallback
+    # Подключение / запись
     # ------------------------------------------------------------------
 
-    _SQL_DIR = Path(__file__).parents[2] / "sql" / "logs"
-    _MIGRATIONS_DIR = Path(__file__).parents[2] / "sql" / "migrations"
-
-    _DDL_PATH = _SQL_DIR / "create_logs_table.sql"
-    _MIGRATION_PATH = _MIGRATIONS_DIR / "migrate_logs_v1.sql"
-    _DDL_GP_PATH = _SQL_DIR / "create_logs_table_gp.sql"
-    _MIGRATION_GP_PATH = _MIGRATIONS_DIR / "migrate_logs_v1_gp.sql"
-
     def _connect(self):
-        """Открыть psycopg2-соединение к ``self._dsn`` и создать таблицу.
+        """Открыть psycopg2-соединение к ``self._dsn`` и проверить схему.
 
         Returns:
             ``psycopg2.connection`` (с ``autocommit=True``) или ``None``,
             если DSN не задан, psycopg2 не установлен или ``_running == False``.
 
         После успешного ``connect`` выполняется ``_ensure_schema`` —
-        таблица ``agent_gateway_logs`` (и индексы) создаются через
-        ``CREATE TABLE/INDEX IF NOT EXISTS``. Если DDL падает — соединение
-        закрывается и попытка повторяется с backoff (создание таблицы не
-        обязано происходить мгновенно, ретрай самодостаточен).
+        проверка существования таблиц логов. Если таблицы нет — соединение
+        закрывается и попытка повторяется с backoff; события в это время
+        уходят в fallback-JSONL. Сервис DDL не выполняет.
 
         При неудаче ``connect`` — экспоненциальный backoff
         (1с → 2с → 4с → ... → 60с) внутри ``while self._running``,
@@ -572,10 +561,9 @@ class DbLoggingService:
                 except Exception:
                     pass
                 logger.error(
-                    "DbLoggingService: таблицу %s.%s не удалось создать "
-                    "(DDL из %s): %s",
-                    self._schema, self._table_name,
-                    self._schema_files()[0], exc,
+                    "DbLoggingService: таблица %s.%s не найдена "
+                    "(проверка схемы): %s",
+                    self._schema, self._table_name, exc,
                 )
                 with self._state_lock:
                     self._stats["last_error"] = f"ensure schema: {exc}"
@@ -589,86 +577,40 @@ class DbLoggingService:
         return None
 
     def _ensure_schema(self, conn: Any) -> None:
-        """Создать таблицы ``agent_question_runs``/``agent_gateway_logs`` и индексы.
+        """Проверить существование таблиц логов/контекста вопросов.
 
-        DDL берётся ТОЛЬКО из отдельных SQL-файлов
-        ``lib/services/sql/*.sql``. Выбор набора файлов зависит от диалекта:
+        Сервис НЕ провижинит схему: таблицы ``agent_question_runs`` /
+        ``agent_gateway_logs`` (и индексы) должны быть созданы миграциями
+        заранее (``sql/created_tables.sql`` / ``lib/services/sql/*.sql``).
+        Если таблица логов отсутствует — поднимается исключение; ``_connect``
+        логирует его (``last_error`` + ``logger.error``), а события уходят в
+        fallback-JSONL (``_flush_to_fallback``).
 
-          * ``postgres`` (по умолчанию, PostgreSQL 13+) —
-            ``create_logs_table.sql`` + ``migrate_logs_v1.sql``, идемпотентность
-            через ``IF NOT EXISTS``;
-          * ``greenplum`` (Greenplum 6.x, база PostgreSQL 9.4) —
-            ``create_logs_table_gp.sql`` + ``migrate_logs_v1_gp.sql``:
-            ``IF NOT EXISTS`` для индексов/колонок там НЕ поддержан, поэтому
-            идемпотентность через DO-блоки с проверкой каталога, а обе
-            таблицы получают ``DISTRIBUTED BY (request_id)`` для co-located
-            join'ов.
-
-        В файлах имя таблицы логов подставляется через плейсхолдеры:
-          * PostgreSQL: строка ``agent_gateway_logs`` заменяется на
-            schema-qualified имя ``"schema"."table_name"``;
-          * Greenplum: ``@@SCHEMA@@`` / ``@@TABLE@@`` / ``@@TABLE_DDL@@``
-            (иначе ``agent_gateway_logs`` внутри каталог-запросов DO-блоков
-            сломает подстановку).
-
-        Inline-DDL в коде нет — файлы являются единственным источником
-        структуры. Если файла нет или выполнение падает — поднимается
-        исключение. ``_connect`` логирует ошибку (``last_error`` +
-        ``logger.error``), а события уходят в fallback-JSONL
-        (``_flush_to_fallback``), т.е. таблица не создаётся — пишем в файл.
+        Имя таблицы берётся из конструктора (``table_name``, параметр), а не
+        хардкодится. Инлайн-DDL в коде нет и не выполняется.
         """
-        ddl_path, migration_path = self._schema_files()
-        if not ddl_path.exists():
-            raise FileNotFoundError(f"agent_gateway_logs DDL file not found: {ddl_path}")
-        table = f'"{self._schema}"."{self._table_name}"'
+        check_tables = [self._table_name]
+        if self._question_runs_table:
+            check_tables.append(self._question_runs_table)
         cur = conn.cursor()
         try:
-            # 1) Базовая схема (CREATE TABLE/INDEX [IF NOT EXISTS])
-            sql = self._render_sql(ddl_path, table)
-            cur.execute(sql)
-            # 2) Миграция существующей таблицы. Игнорируем отсутствие файла —
-            #    для чистой установки он не нужен.
-            if migration_path.exists():
-                msql = self._render_sql(migration_path, table)
-                cur.execute(msql)
+            for tbl in check_tables:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = %s AND table_name = %s",
+                    [self._schema, tbl],
+                )
+                if cur.fetchone() is None:
+                    raise RuntimeError(
+                        f"DbLoggingService: таблица не найдена: "
+                        f"{self._schema}.{tbl} — создайте её миграцией, "
+                        "сервис DDL не выполняет"
+                    )
         finally:
             try:
                 cur.close()
             except Exception:
                 pass
-
-    def _schema_files(self) -> Tuple[Path, Optional[Path]]:
-        """Набор SQL-файлов (DDL, миграция) для текущего диалекта."""
-        if self._dialect == "greenplum":
-            return self._DDL_GP_PATH, self._MIGRATION_GP_PATH
-        return self._DDL_PATH, self._MIGRATION_PATH
-
-    def _render_sql(self, path: Path, table: str) -> str:
-        """Прочитать SQL-файл и подставить имя таблицы логов.
-
-        Для ``postgres``-диалекта (без плейсхолдеров) — замена
-        ``agent_gateway_logs`` → ``"schema"."table"``, но НЕ выше тех
-        вхождений, где это имя нельзя квалифицировать: цель ``RENAME TO``
-        и уже schema-qualified ``public.agent_gateway_logs``. Иначе наивная
-        замена ломает ``RENAME TO "public"."agent_gateway_logs"`` (невалидно)
-        и даёт ``public."public"."agent_gateway_logs"`` (дублирование схемы).
-        Для ``greenplum`` — подстановка ``@@SCHEMA@@``/``@@TABLE@@``/``@@TABLE_DDL@@``.
-        """
-        import re
-        sql = path.read_text(encoding="utf-8")
-        if self._dialect == "greenplum":
-            return (
-                sql
-                .replace("@@SCHEMA@@", self._schema)
-                .replace("@@TABLE@@", self._table_name)
-                .replace("@@TABLE_DDL@@", table)
-            )
-        needle = re.escape("agent_gateway_logs")
-        return re.sub(
-            rf"(?<!public\.)(?<!RENAME TO ){needle}",
-            lambda _m: table,
-            sql,
-        )
 
     def _flush_batch(self, conn: Any, batch: List[LogEvent]) -> None:
         """Вставить батч в PostgreSQL через ``psycopg2.extras.execute_batch``.

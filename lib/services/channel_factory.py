@@ -167,7 +167,7 @@ class ChannelFactory:
             "enabled": True,
             "dsn": dsn,
             "schema": pg.get("schema", "public"),
-            "table_name": pg.get("table_name", "agent_conversation_messages"),
+            "table_name": pg.get("table_name", ""),
             "poll_interval": pg.get("poll_interval", 2.0),
             "flush_interval": pg.get("flush_interval", 2.0),
             "max_concurrent": pg.get("max_concurrent", 1),

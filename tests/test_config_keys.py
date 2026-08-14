@@ -81,7 +81,11 @@ def _required_keys():
         ("skills.audit_analyzer.embedding_http_timeout_sec", 60),
         ("skills.audit_analyzer.mode_vector_db_table", "oarb.audit_vectors"),
         ("skills.audit_analyzer.mode_vector_store_table", "public.agent_vector_index_store"),
+        ("skills.audit_analyzer.mode_vector_index_config_table", "public.agent_vector_index_config"),
         ("skills.audit_analyzer.vector_index_default_path", "data_store/vectors/audits_index"),
+        ("skills.audit_analyzer.db_tables", ["audit_reports", "audits", "report_items", "violations"]),
+        ("skills.audit_analyzer.db_additional_tables", [["public", "agent_predefined_scripts"]]),
+        ("skills.audit_analyzer.predefined_scripts_table", "public.agent_predefined_scripts"),
         ("skills.audit_analyzer.cli_default_mode", "predefined"),
         ("skills.audit_analyzer.cli_default_format", "json"),
         ("skills.audit_analyzer.cli_max_retries", 3),
@@ -159,6 +163,32 @@ class TestGetSetting:
             assert get_setting("partial_section", "a", "b", default="X") == "X"
         finally:
             del SETTINGS["partial_section"]
+
+
+class TestRequireSetting:
+    """Строгий аксессор: отсутствие ключа — ошибка, а не тихий fallback."""
+
+    def test_missing_raises_configuration_error(self):
+        from config import ConfigurationError, require_setting
+        with pytest.raises(ConfigurationError):
+            require_setting("nonexistent_section_xyz", "key")
+
+    def test_partial_path_raises(self):
+        from config import SETTINGS, ConfigurationError, require_setting
+        SETTINGS["partial_section"] = {"a": {"b": 1}}
+        try:
+            with pytest.raises(ConfigurationError):
+                require_setting("partial_section", "a", "c")
+        finally:
+            del SETTINGS["partial_section"]
+
+    def test_existing_key_returns_value(self):
+        from config import SETTINGS, require_setting
+        SETTINGS["test_req_section"] = {"k": 42}
+        try:
+            assert require_setting("test_req_section", "k") == 42
+        finally:
+            del SETTINGS["test_req_section"]
 
 
 class TestProjectJsonShape:

@@ -47,13 +47,19 @@ def _config(workspace="C:/ws"):
     return cfg
 
 
+def _pg(*, dsn="postgresql://u@h/db", **extra):
+    cfg = {"dsn": dsn, "messages_table": "agent_session_messages", "meta_table": "agent_session_meta"}
+    cfg.update(extra)
+    return cfg
+
+
 class TestCreate:
     def test_postgres_mode_creates_pg_manager(self, fake_modules):
         service = SessionStorageService()
         mode, manager = service.create(
             _config(),
             storage="postgres",
-            pg={"dsn": "postgresql://u@h/db"},
+            pg=_pg(),
             configure_db=False,
         )
         assert mode == "postgres"
@@ -63,7 +69,7 @@ class TestCreate:
     def test_auto_with_dsn_creates_pg(self, fake_modules):
         service = SessionStorageService()
         mode, _ = service.create(
-            _config(), storage="auto", pg={"dsn": "postgresql://u@h/db"}, configure_db=False
+            _config(), storage="auto", pg=_pg(), configure_db=False
         )
         assert mode == "postgres"
 
@@ -101,7 +107,7 @@ class TestCreate:
             service.create(
                 _config(),
                 storage="postgres",
-                pg={"dsn": "postgresql://u@h/db"},
+                pg=_pg(),
                 configure_db=True,
             )
             fake_modules["configure"].assert_called_once_with("postgresql://u@h/db")
@@ -110,7 +116,7 @@ class TestCreate:
     def test_workspace_from_config(self, fake_modules):
         service = SessionStorageService()
         service.create(_config("C:/custom/ws"), storage="postgres",
-                       pg={"dsn": "postgresql://u@h/db"}, configure_db=False)
+                       pg=_pg(), configure_db=False)
         kwargs = fake_modules["PGSessionManager"].call_args.kwargs
         assert kwargs["workspace"] == Path("C:/custom/ws")
 
@@ -126,7 +132,7 @@ class TestSessionManagerJsonOverride:
         service.create(
             _config(),
             storage="postgres",
-            pg={"dsn": "postgresql://from/config", "schema": "public"},
+            pg=_pg(dsn="postgresql://from/config", schema="public"),
             configure_db=False,
         )
         kwargs = fake_modules["PGSessionManager"].call_args.kwargs
@@ -138,7 +144,7 @@ class TestSessionManagerJsonOverride:
         service = SessionStorageService(session_manager_json=tmp_path / "nope.json")
         mode, _ = service.create(
             _config(), storage="postgres",
-            pg={"dsn": "postgresql://u@h/db"}, configure_db=False,
+            pg=_pg(), configure_db=False,
         )
         assert mode == "postgres"
 
@@ -148,6 +154,6 @@ class TestSessionManagerJsonOverride:
         service = SessionStorageService(session_manager_json=sm_json)
         mode, _ = service.create(
             _config(), storage="postgres",
-            pg={"dsn": "postgresql://u@h/db"}, configure_db=False,
+            pg=_pg(), configure_db=False,
         )
         assert mode == "postgres"

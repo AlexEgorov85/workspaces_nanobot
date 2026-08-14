@@ -285,6 +285,17 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
     if not dsn:
         return None
 
+    table_name = db_cfg.get("table_name", "")
+    question_runs_table = db_cfg.get("question_runs_table", "")
+    if not table_name or not question_runs_table:
+        from config import ConfigurationError
+
+        raise ConfigurationError(
+            "logging.db.table_name и logging.db.question_runs_table "
+            "обязательны для DbLoggingService (нет авто-дефолтов в коде). "
+            f"table_name={table_name!r}, question_runs_table={question_runs_table!r}"
+        )
+
     fallback_path_raw = db_cfg.get("fallback_path", "logs/agent_gateway_logs_fallback.jsonl")
     fallback_path = Path(fallback_path_raw)
     if not fallback_path.is_absolute():
@@ -292,8 +303,8 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
 
     return DbLoggingService(
         dsn=dsn,
-        table_name=db_cfg.get("table_name", "agent_gateway_logs"),
-        question_runs_table=db_cfg.get("question_runs_table", "agent_question_runs"),
+        table_name=table_name,
+        question_runs_table=question_runs_table,
         schema=db_cfg.get("schema", "public"),
         dialect=db_cfg.get("dialect", "postgres"),
         flush_interval_sec=float(db_cfg.get("flush_interval_sec", 5.0)),
@@ -336,17 +347,35 @@ def _make_audit_services(ctx: "ApplicationContext") -> tuple:
     try:
         from lib.services.audit_memory_store import AuditMemoryStore
         from lib.services.audit_sync_service import AuditSyncService
+        from lib.services.audit_settings import (
+            audit_vector_settings,
+            normalize_additional_tables,
+        )
     except Exception:
         return None, None
 
-    tables = [t for t in (cfg.get("db_tables", []) or []) if t]
-    vector_table = cfg.get("mode_vector_db_table", "") or ""
-    schema = cfg.get("db_schema", "oarb") or "oarb"
-    if not vector_table and not tables:
+    s = audit_vector_settings()
+    db_tables = list(s.db_tables)                    # голые имена (schema = db_schema)
+    additional = normalize_additional_tables(s.db_additional_tables)  # "schema.table"
+    vector_table = s.mode_vector_db_table
+    schema = s.db_schema
+
+    # Страховка: реестр предопределённых скриптов, если не попал через db_additional_tables.
+    if s.predefined_scripts_table and s.predefined_scripts_table not in additional:
+        additional.append(s.predefined_scripts_table)
+
+    if not vector_table and not db_tables:
         return None, None
 
+    # store._tables = db_tables + additional (БЕЗ vector_table → publish без векторов).
+    store_tables = db_tables + additional
+    # sync таблицы: данные + доп. таблицы + вектор (векторный поток не ломаем).
+    sync_tables = db_tables + additional + (
+        [vector_table] if vector_table and vector_table not in db_tables + additional else []
+    )
+
     publish_path = ""
-    cp = cfg.get("in_memory_cache_path", "") or ""
+    cp = s.in_memory_cache_path
     if cp:
         p = Path(cp)
         publish_path = (
@@ -358,23 +387,24 @@ def _make_audit_services(ctx: "ApplicationContext") -> tuple:
         cache_path="",
         publish_path=publish_path,
         schema=schema,
-        tables=tables or None,
+        tables=store_tables or None,
         vector_db_table=vector_table,
-        embedding_base_url=cfg.get("embedding_base_url", "") or "",
-        embedding_model=cfg.get("embedding_model", "mxbai-embed-large:latest"),
+        embedding_base_url=s.embedding_base_url,
+        embedding_model=s.embedding_model,
+        embedding_dimension=s.embedding_dimension,
     )
     sync = AuditSyncService(
         dsn=dsn,
         schema=schema,
-        tables=(tables + [vector_table]) if vector_table else tables,
+        tables=sync_tables,
         vector_table=vector_table,
-        poll_interval_sec=float(cfg.get("poll_interval_sec", 60)),
-        write_table=cfg.get("sync_write_table", "audit_interactions"),
+        poll_interval_sec=s.poll_interval_sec,
+        write_table=s.sync_write_table,
         write_schema=schema,
-        max_queue_size=int(cfg.get("sync_max_queue_size", 10000)),
-        reconnect_backoff=float(cfg.get("reconnect_backoff_sec", 1.0)),
-        reconnect_backoff_max=float(cfg.get("reconnect_backoff_max_sec", 60.0)),
-        full_resync_every=int(cfg.get("full_resync_every", 10)),
+        max_queue_size=s.sync_max_queue_size,
+        reconnect_backoff=s.reconnect_backoff_sec,
+        reconnect_backoff_max=s.reconnect_backoff_max_sec,
+        full_resync_every=s.full_resync_every,
     )
     return sync, store
 

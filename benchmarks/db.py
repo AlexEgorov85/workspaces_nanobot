@@ -39,13 +39,22 @@ except ImportError:
 
 try:
     from config import SETTINGS as _S
-    _SCHEMA = _S.get("benchmark", {}).get("db_schema", "public") if isinstance(_S.get("benchmark", {}), dict) else "public"
-    _RUNS_TABLE = _S.get("benchmark", {}).get("runs_table", "agent_benchmark_runs") if isinstance(_S.get("benchmark", {}), dict) else "agent_benchmark_runs"
-    _RESULTS_TABLE = _S.get("benchmark", {}).get("results_table", "agent_benchmark_results") if isinstance(_S.get("benchmark", {}), dict) else "agent_benchmark_results"
+    _bench = _S.get("benchmark", {}) if isinstance(_S.get("benchmark", {}), dict) else {}
+    _SCHEMA = _bench.get("db_schema", "public")
+    _RUNS_TABLE = _bench.get("runs_table", "")
+    _RESULTS_TABLE = _bench.get("results_table", "")
 except Exception:
+    _bench = {}
     _SCHEMA = "public"
-    _RUNS_TABLE = "agent_benchmark_runs"
-    _RESULTS_TABLE = "agent_benchmark_results"
+    _RUNS_TABLE = ""
+    _RESULTS_TABLE = ""
+
+if not _RUNS_TABLE or not _RESULTS_TABLE:
+    raise ValueError(
+        "benchmark: benchmark.runs_table и benchmark.results_table "
+        "обязательны (нет авто-дефолтов в коде). "
+        f"runs_table={_RUNS_TABLE!r}, results_table={_RESULTS_TABLE!r}"
+    )
 
 SCHEMA = _SCHEMA
 RUNS_TABLE = _RUNS_TABLE

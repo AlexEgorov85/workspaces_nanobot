@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any
 
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
-_PROJECT_ROOT = _SKILL_ROOT.parents[2]  # workspace/ → .nanobot/
+_PROJECT_ROOT = _SKILL_ROOT.parents[2]  # workspace/ → корень проекта
 
 import sys
 if str(_PROJECT_ROOT) not in sys.path:
@@ -30,7 +30,7 @@ def get_tool_config() -> dict[str, Any]:
 
 
 def load_db_config() -> dict[str, Any]:
-    db_schema = _CFG.get("db_schema", "oarb")
+    db_schema = get_db_schema()
     tables = get_db_tables()
     return {"schema": db_schema, "tables": tables}
 
@@ -41,7 +41,12 @@ def get_db_tables() -> list[str]:
 
 
 def get_db_schema() -> str:
-    return _CFG.get("db_schema", "oarb")
+    if not _CFG.get("db_schema"):
+        raise ValueError(
+            "skill audit_analyzer: skills.audit_analyzer.db_schema обязателен "
+            "(нет авто-дефолта в коде)"
+        )
+    return _CFG["db_schema"]
 
 
 def get_predefined_scripts_table() -> str:
@@ -53,7 +58,13 @@ def get_predefined_scripts_table() -> str:
       - db_loader.load_registry()  — читает реестр из БД
       - tools/generate_predefined_scripts_sql.py — генерирует INSERT в эту таблицу
     """
-    return _CFG.get("predefined_scripts_table", "public.agent_predefined_scripts")
+    table = _CFG.get("predefined_scripts_table", "")
+    if not table:
+        raise ValueError(
+            "skill audit_analyzer: skills.audit_analyzer.predefined_scripts_table "
+            "обязателен (нет авто-дефолта в коде)"
+        )
+    return table
 
 
 def get_in_memory_config() -> dict[str, Any]:
@@ -73,9 +84,9 @@ def is_in_memory_enabled() -> bool:
 
 
 def get_vector_index_path() -> str:
-    path = _CFG.get("mode_vector_index_path", "")
+    path = _CFG.get("mode_vector_index_path", "") or _CFG.get("vector_index_default_path", "")
     if not path:
-        path = _CFG.get("vector_index_default_path", "data_store/vectors/audits_index")
+        return ""  # необязательно: навык строит индекс из локального кэша
     p = Path(path)
     return str(p) if p.is_absolute() else str(_SKILL_ROOT / path)
 
@@ -85,7 +96,13 @@ def get_vector_db_table() -> str:
 
 
 def get_vector_store_table() -> str:
-    return _CFG.get("mode_vector_store_table", "public.agent_vector_index_store")
+    table = _CFG.get("mode_vector_store_table", "")
+    if not table:
+        raise ValueError(
+            "skill audit_analyzer: skills.audit_analyzer.mode_vector_store_table "
+            "обязателен (нет авто-дефолта в коде)"
+        )
+    return table
 
 
 def build_cache_provider() -> Any:
