@@ -192,6 +192,7 @@ def build_index(
     batch_size: int,
     default_chunk_size: int,
     default_chunk_overlap: int,
+    pause_sec: float,
     full_rebuild: bool = False,
     dry_run: bool = False,
 ) -> dict:
@@ -354,58 +355,58 @@ def build_index(
 
     print(f"  Всего чанков: {len(all_chunks)}")
 
-    # 5. Отправляем батчами в Ollama и вставляем
-    for start in range(0, len(all_chunks), batch_size):
-        batch = all_chunks[start:start + batch_size]
-        texts = [c["search_text"] for c in batch]
+    # 5. Отправляем по одному тексту в Ollama и вставляем
+    for idx, chunk in enumerate(all_chunks, start=1):
+        text = chunk["search_text"]
 
-        print(f"  Батч {start // batch_size + 1}/{(len(all_chunks) - 1) // batch_size + 1}: "
-              f"{len(texts)} текстов...")
+        if idx == 1 or idx % max(batch_size, 1) == 0 or idx == len(all_chunks):
+            print(f"  Прогресс: {idx}/{len(all_chunks)} эмбеддингов...")
 
-        embeddings = _get_embeddings(texts)
-        if embeddings is None or len(embeddings) != len(texts):
-            print(f"    ! Ошибка получения эмбеддингов, батч пропущен")
-            errors += len(batch)
+        embeddings = _get_embeddings([text])
+        if embeddings is None or len(embeddings) != 1:
+            print(f"    ! Ошибка получения эмбеддинга для pk={chunk['pk']} "
+                  f"chunk={chunk['chunk_index'] + 1}/{chunk['chunk_count']}")
+            errors += 1
             continue
 
-        for chunk, emb in zip(batch, embeddings):
-            row_data = pk_row_map[chunk["pk"]]
+        emb = embeddings[0]
+        row_data = pk_row_map[chunk["pk"]]
 
-            if dry_run:
-                print(f"    [dry-run] pk={chunk['pk']}, chunk={chunk['chunk_index'] + 1}/"
-                      f"{chunk['chunk_count']}, content={chunk['content'][:60]}...")
-                inserted += 1
-                continue
+        if dry_run:
+            print(f"    [dry-run] pk={chunk['pk']}, chunk={chunk['chunk_index'] + 1}/"
+                  f"{chunk['chunk_count']}, content={chunk['content'][:60]}...")
+            inserted += 1
+            continue
 
-            try:
-                execute(
-                    f"""
-                    INSERT INTO {db_table}
-                        (source, content, search_text, "table", pk_value,
-                         chunk_index, chunk_count, row_data, embedding,
-                         content_hash, max_src_track, synced_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    index_name,
-                    chunk["content"],
-                    chunk["search_text"],
-                    source_table,
-                    chunk["pk"],
-                    chunk["chunk_index"],
-                    chunk["chunk_count"],
-                    json.dumps(row_data, ensure_ascii=False, default=str),
-                    emb,
-                    chunk["content_hash"],
-                    chunk["max_src_track"],
-                    chunk["synced_at"],
-                )
-                inserted += 1
-            except Exception as e:
-                print(f"    ! Ошибка вставки pk={chunk['pk']} chunk={chunk['chunk_index']}: {e}")
-                errors += 1
+        try:
+            execute(
+                f"""
+                INSERT INTO {db_table}
+                    (source, content, search_text, "table", pk_value,
+                     chunk_index, chunk_count, row_data, embedding,
+                     content_hash, max_src_track, synced_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                index_name,
+                chunk["content"],
+                chunk["search_text"],
+                source_table,
+                chunk["pk"],
+                chunk["chunk_index"],
+                chunk["chunk_count"],
+                json.dumps(row_data, ensure_ascii=False, default=str),
+                emb,
+                chunk["content_hash"],
+                chunk["max_src_track"],
+                chunk["synced_at"],
+            )
+            inserted += 1
+        except Exception as e:
+            print(f"    ! Ошибка вставки pk={chunk['pk']} chunk={chunk['chunk_index']}: {e}")
+            errors += 1
 
-        if start + batch_size < len(all_chunks):
-            time.sleep(float(_CFG.get("build_batch_pause_sec", 0.5)))
+        if idx < len(all_chunks):
+            time.sleep(pause_sec)
 
     print(f"  Вставлено векторов: {inserted}, удалено pk: {deleted}, ошибок: {errors}")
 
@@ -492,6 +493,10 @@ def main():
     parser.add_argument("--chunk-overlap", type=int,
                         default=int(_CFG.get("text_chunk_overlap", 80)),
                         help="Перекрытие чанков в символах (default из text_chunk_overlap)")
+    parser.add_argument("--pause-sec", type=float,
+                        default=float(_CFG.get("build_pause_sec", 5.0)),
+                        help="Пауза между запросами эмбеддинга, сек "
+                             "(default 5.0 или build_pause_sec из config.json)")
     parser.add_argument("--status", action="store_true",
                         help="Показать состояние всех индексов (кол-во векторов, размерность, актуальность)")
     parser.add_argument("--check", action="store_true",
@@ -576,7 +581,8 @@ def main():
 
     mode_label = "CHECK+SYNC" if args.check else "DRY-RUN" if args.dry_run else "FULL REBUILD" if args.full_rebuild else "INCREMENTAL"
     print(f"Режим: {mode_label}")
-    print(f"Батч: {args.batch_size}, чанк: {args.chunk_size} симв., перекрытие: {args.chunk_overlap}")
+    print(f"Батч: {args.batch_size}, чанк: {args.chunk_size} симв., перекрытие: {args.chunk_overlap}, "
+          f"пауза: {args.pause_sec}с")
     print(f"Индексы: {', '.join(enabled.keys())}")
     print("Источник конфига: таблица public.agent_vector_index_config -> config.json")
 
@@ -588,6 +594,7 @@ def main():
             batch_size=args.batch_size,
             default_chunk_size=args.chunk_size,
             default_chunk_overlap=args.chunk_overlap,
+            pause_sec=args.pause_sec,
             full_rebuild=args.full_rebuild,
             dry_run=args.dry_run,
         )
