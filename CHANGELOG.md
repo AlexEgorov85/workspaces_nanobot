@@ -8,6 +8,126 @@
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-08-14
+
+> **Minor-релиз:** строгие настройки (никаких тихих fallback в коде),
+> cache-only векторный поиск навыка, единый сервисный слой для FAISS-индексов
+> и генераторы миграции v1.4 → v2.0.
+
+### Added
+
+- **`config.require_setting(*keys)` + `ConfigurationError`.** Строгий доступ
+  к `SETTINGS`: отсутствие обязательного ключа — ошибка конфигурации, а не
+  молчаливая подстановка `default`. `get_setting` остаётся для случаев, где
+  fallback действительно нужен. `config.py:211-257`.
+- **`lib/services/audit_settings.py` — единый источник правды** для настроек
+  навыка `audit_analyzer`. Dataclass `AuditVectorSettings` читает все ключи
+  секции `skills.audit_analyzer` строго через `require_setting` (без литералов
+  в коде). Помощник `normalize_additional_tables` приводит
+  `db_additional_tables` к виду `schema.table`. Потребители: gateway,
+  `ApplicationContext`, `AuditSyncService`, `AuditMemoryStore`,
+  `cache_provider_impl`, `tools/build_vectors.py`.
+- **`lib/services/vector_index_service.py` — единый build-слой FAISS.**
+  - `get_embedding(text, ...)` — единственная точка создания эмбеддинга
+    (Ollama `/api/embed`); параметры берутся из `audit_vector_settings()`.
+  - `VectorIndexBuildService` — держит ОДИН `PostgresDuckDbProvider`,
+    пересобирает индекс (`rebuild_and_store`) и сохраняет blob в
+    `agent_vector_index_store`. Используется навыком и `build_vectors.py`.
+- **Cache-only векторный поиск навыка.** `PostgresDuckDbProvider.search_vector`
+  строит FAISS-индекс ТОЛЬКО из локального снимка DuckDB (`audit_cache.duckdb`,
+  `_load_index_from_cache`) — без обращения к PostgreSQL. Проверка размерности
+  индекса vs эмбеддинг запроса с понятной ошибкой. `cache_provider_impl.py:680-760`.
+- **`lib/utils/duckdb_query.py:build_faiss_index(records)`** — общий помощник
+  построения `IndexFlatIP` из записей (используется кэш-путе и памяти).
+- **Gateway: пересоздание снапшота при каждом старте.** Устаревший файл кеша
+  удаляется до `initial_load`, чтобы CLI/skill не читали данные прошлого
+  запуска. `gateway.py:57-64`.
+- **`AuditMemoryStore.publish(force=...)` + отчёт о публикации.** Первая
+  публикация после старта — принудительная (`force=True`), даже если
+  `initial_load` не нашёл строк. При публикации выводятся таблицы и число
+  строк. `audit_memory_store.py`.
+- **Генераторы миграции v1.4 → v2.0** (`sql/auto_migrate_1.4_2.0/`):
+  `vector_indexes_migration.sql`, `predefined_scripts_migration.sql`,
+  `populate_agent_vector_index_config.sql` (сгенерированы Python-скриптами);
+  добавлен сгенерированный `workspace/skills/audit_analyzer/scripts/generated/fetch_audit_title.py`.
+
+### Changed
+
+- **Убраны тихие fallback и авто-дефолты по всей кодовой базе:**
+  - `PGSessionManager` — исключён JSONL-fallback: ошибки БД пробрасываются
+    (раньше молча падали на файлы). `messages_table`/`meta_table` обязательны.
+    `lib/session/pg_session_manager.py`.
+  - `DbLoggingService` — удалён JSONL-fallback: при недоступности БД события
+    выбрасываются (счётчик `failed` + `last_error`), скрытой записи в файл нет.
+  - `session_storage.py` — невалидный `session_manager.json` теперь ошибка
+    (раньше тихо `{}`); отсутствие `messages_table`/`meta_table` → ошибка.
+  - `preload_service.py` — удалены `try/except`-обёртки: ошибки чтения конфига
+    больше не маскируются `(None, None)`.
+  - `benchmarks/db.py` — `benchmark.runs_table`/`results_table` обязательны.
+  - `benchmarks/evaluator.py` — LLM-судья больше не возвращает нейтральные
+    `0.5` при сбое: проверка считается НЕ пройденной (`0.0`).
+  - `streamlit_app.py` — `_get_extension_from_mime` не подставляет `.bin`
+    для неизвестного MIME (возвращает `""`).
+  - `postgres_channel.py` / `application_context.py` — `fallback_path` для
+    логов убран; обязательные таблицы проверяются явно.
+- **`project.json`: только DSN без частей.** `channels.postgres` больше не
+  содержит `host`/`port`/`dbname`/`user` — подключение только через
+  `"dsn": "${DATABASE_URL}"` (из `.secrets.env`). Удалён
+  `logging.db.fallback_path`.
+- **`cache_provider_impl.py` — конфиг только из БД.** `read_vector_index_config`
+  и `read_embedding_config` больше не имеют fallback на `cfg`/проектные
+  литералы — источник один: `agent_vector_index_config` + `audit_vector_settings()`.
+- **`AuditSyncService` не провижинит схему.** Удалено авто-создание таблицы
+  записи (`_ensure_write_table`): сервис проверяет существование и отключает
+  запись с явной ошибкой, если таблицы нет. Обработка `UndefinedTable` для
+  отсутствующих таблиц-источников. `audit_sync_service.py`.
+- **`build_vectors.py` — единый сервисный слой.** Вместо собственных
+  `httpx`/эмбеддинг-реализаций используется `vector_index_service.get_embedding`
+  и `VectorIndexBuildService.rebuild_and_store`. Убран прямой импорт `httpx`.
+
+### Fixed
+
+- **`db_loader.load_registry` падал на `ParamDefinition(**None)`** при
+  параметрах без явного определения (значение `null` в JSONB `parameters`).
+  Теперь такие параметры пропускаются, а не валят загрузку реестра.
+  `db_loader.py:156-166`.
+- **Тесты под новый строгий конфиг:** `test_session_storage` —
+  `test_invalid_json_is_ignored` → `test_invalid_json_raises` (невалидный
+  `session_manager.json` поднимает ошибку); `test_streamlit_app` —
+  `test_unknown_mime_gets_bin` → `test_unknown_mime_returns_empty`
+  (неизвестный MIME возвращает `""`). Это тесты, противоречившие новому
+  поведению, заявленному в этом релизе.
+
+### Tests
+
+- Обновлены: `test_audit_memory_store` (publish включает векторную таблицу,
+  поиск из опубликованного снимка, проверка размерности эмбеддинга),
+  `test_audit_sync_service`, `test_benchmarks_evaluator`, `test_config_keys`
+  (`require_setting`/`ConfigurationError`), `test_db_logging_service`,
+  `test_pg_session_manager`, `test_session_storage`, `test_postgres_channel`,
+  `test_utils_db` — под строгий конфиг и cache-only поиск.
+- **852 теста — все проходят** (после фикса `db_loader` из раздела Fixed).
+
+### Migration notes
+
+- **`channels.postgres.host/port/dbname/user` удалены.** Если вы задавали
+  подключение частями — переведите в полный DSN:
+  `"dsn": "${DATABASE_URL}"` в `project.json` + `DATABASE_URL=...` в
+  `.secrets.env`.
+- **Удалён `logging.db.fallback_path`.** Уберите его из `project.json`;
+  поведение при недоступности БД — дроп событий со счётчиком `failed`
+  (в `get_stats()`).
+- **`AuditSyncService` больше не создаёт таблицы.** Если `oarb.audit_interactions`
+  (или иная `sync_write_table`) отсутствует — запишите DDL из
+  `sql/created_tables.sql` заранее; иначе запись ответов навыка отключится
+  с явной ошибкой в логе.
+- **Векторный поиск навыка — только локальный снимок.** Индекс строится из
+  `audit_cache.duckdb`; убедитесь, что gateway публикует снапшот после
+  синхронизации (см. `047dc3b`). При расхождении размерностей пересоберите
+  снимок той же моделью эмбеддинга.
+
+---
+
 ## [2.0.1] — 2026-08-14
 
 > **Patch-релиз:** регрессии и баги, обнаруженные сразу после выхода v2.0.0.

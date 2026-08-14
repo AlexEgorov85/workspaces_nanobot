@@ -154,10 +154,13 @@ def load_registry(force_reload: bool = False) -> Dict[str, ScriptDefinition]:
     registry: Dict[str, ScriptDefinition] = {}
     for row in rows:
         params_json = _parse_parameters(row.get("parameters"))
-        parameters = {
-            pname: ParamDefinition(**pdef)
-            for pname, pdef in params_json.items()
-        }
+        parameters: Dict[str, ParamDefinition] = {}
+        for pname, pdef in params_json.items():
+            if pdef is None:
+                # Параметр упомянут в шаблоне, но без явного определения
+                # (null в JSONB) — в типизированный реестр не включаем.
+                continue
+            parameters[pname] = ParamDefinition(**pdef)
         registry[row["name"]] = ScriptDefinition(
             name=row["name"],
             description=row["description"],

@@ -311,8 +311,8 @@ class TestGetExtensionFromMime:
     def test_octet_stream_gets_bin(self, mock_all):
         assert mock_all["streamlit_app"]._get_extension_from_mime("application/octet-stream") == ".bin"
 
-    def test_unknown_mime_gets_bin(self, mock_all):
-        assert mock_all["streamlit_app"]._get_extension_from_mime("application/x-unknown-foo") == ".bin"
+    def test_unknown_mime_returns_empty(self, mock_all):
+        assert mock_all["streamlit_app"]._get_extension_from_mime("application/x-unknown-foo") == ""
 
     def test_empty(self, mock_all):
         assert mock_all["streamlit_app"]._get_extension_from_mime("") == ""

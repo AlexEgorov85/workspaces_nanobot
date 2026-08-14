@@ -148,12 +148,12 @@ class TestSessionManagerJsonOverride:
         )
         assert mode == "postgres"
 
-    def test_invalid_json_is_ignored(self, fake_modules, tmp_path):
+    def test_invalid_json_raises(self, fake_modules, tmp_path):
         sm_json = tmp_path / "session_manager.json"
         sm_json.write_text("{broken json", encoding="utf-8")
         service = SessionStorageService(session_manager_json=sm_json)
-        mode, _ = service.create(
-            _config(), storage="postgres",
-            pg=_pg(), configure_db=False,
-        )
-        assert mode == "postgres"
+        with pytest.raises(ValueError):
+            service.create(
+                _config(), storage="postgres",
+                pg=_pg(), configure_db=False,
+            )

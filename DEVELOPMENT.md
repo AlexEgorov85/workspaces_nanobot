@@ -120,7 +120,7 @@ flowchart TB
 
     CTX --> CFG_SVC["ConfigService<br/>(config.json, SETTINGS, pre-resolve env)"]
     CTX --> SESS["SessionStorageService<br/>(PGSessionManager / SessionManager)"]
-    CTX --> DB_LOG["DbLoggingService<br/>(worker, batch INSERT, JSONL fallback)"]
+    CTX --> DB_LOG["DbLoggingService<br/>(worker, batch INSERT, без JSONL-fallback)"]
     CTX --> AUDIT["AuditSyncService + AuditMemoryStore<br/>(audit_analyzer)"]
     CTX --> BUS["MessageBus<br/>(через BusFactory, с обёрткой под логгеры)"]
     CTX --> AGENT["AgentLoop<br/>(через AgentFactory,<br/>hooks=[ToolAudit, DbLogging])"]
@@ -255,7 +255,7 @@ nanobot/
 │   │   ├── transcription_service.py      #    openai/groq key/URL/language
 │   │   ├── subprocess_manager.py         #    Streamlit spawn + terminate/kill
 │   │   ├── preload_service.py            #    FAISS preload + audit_cache refresh
-│   │   ├── db_logging_service.py         #    worker, batch INSERT, JSONL fallback, get_stats()
+│   │   ├── db_logging_service.py         #    worker, batch INSERT, без JSONL-fallback, get_stats()
 │   │   ├── db_logging_bus.py             #    обёртки publish_inbound/outbound
 │   │   ├── llm_config.py                 #    resolve_llm_config() — общий резолв LLM для навыка/бенчмарка
 │   │   ├── audit_memory_store.py         #     in-memory DuckDB-зеркало + атомарный publish()
@@ -275,7 +275,7 @@ nanobot/
 │   │   ├── postgres_channel.py           #     канал через таблицу agent_conversation_messages
 │   │   └── redis_channel.py              #     канал через Redis-очереди (BRPOP/LPUSH)
 │   ├── session/                          #   хранилище сессий
-│   │   └── pg_session_manager.py         #     хранение сессий в PostgreSQL (замена JSONL)
+│   │   └── pg_session_manager.py         #     хранение сессий в PostgreSQL (без JSONL)
 │   └── (см. lib/core/, lib/cli/, lib/lifecycle/ выше)
 │
 ├── workspace/                            # runtime-данные и хуки
@@ -324,8 +324,9 @@ nanobot/
   эмбеддинга) — без привязки к «аудиту».
 - Модульные функции: `get_embedding()` (Ollama `/api/embed`),
   `load_cache_from_postgres(cache_path, db_config)`, `check_cache_stale(...)`,
-  `read_agent_vector_index_config(cfg)` (конфиг индексов из БД → fallback в настройках),
-  `read_embedding_config(cfg)`, `build_cache_provider(cfg, base_dir)` (фабрика
+  `read_vector_index_config(cfg)` (конфиг индексов — только из БД,
+  `agent_vector_index_config`), `read_embedding_config(cfg)` (через
+  `audit_vector_settings()`), `build_cache_provider(cfg, base_dir)` (фабрика
   провайдера из конфиг-секции навыка).
 - Тяжёлые зависимости (`duckdb`, `psycopg2`, `faiss`, `numpy`, `pyarrow`, `httpx`)
   импортируются **лениво** внутри методов — импорт модуля остаётся лёгким,
@@ -376,10 +377,10 @@ nanobot/
 > `sql_mode.py` (`MAX_RETRIES = 2` → до 3 попыток) и от `cli_max_retries`
 > не зависят.
 
-DSN подключается через `channels.postgres.{host,port,dbname,user}` в
-`project.json` + `DB_PASSWORD` в `.secrets.env` (или полный `dsn` override,
-или legacy `DATABASE_URL`) через `utils.db.resolve_dsn()`. Навык собственного
-DSN не хранит.
+DSN подключается только через `channels.postgres.dsn` в `project.json`
+(обычно `"${DATABASE_URL}"` из `.secrets.env`) через `utils.db.resolve_dsn()`.
+Частичные ключи `host`/`port`/`dbname`/`user` удалены с v2.1.0 — подключение
+без полного DSN невозможно. Навык собственного DSN не хранит.
 
 ---
 
@@ -1643,7 +1644,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | `lib/services/transcription_service.py` |  openai/groq key/URL/language |
 | `lib/services/subprocess_manager.py` |  Streamlit spawn + terminate/kill |
 | `lib/services/preload_service.py` |  FAISS preload + audit_cache refresh |
-| `lib/services/db_logging_service.py` |  Worker-поток, batch INSERT, JSONL fallback |
+| `lib/services/db_logging_service.py` |  Worker-поток, batch INSERT, без JSONL-fallback |
 | `lib/services/db_logging_bus.py` |  Обёртки publish_inbound/outbound для логгера |
 | `lib/cli/console_loop.py` |  REPL/typewriter/consume_outbound (вынесено из cli_agent.py) |
 | `lib/cli/display_config.py` |  DisplayConfig |
@@ -1656,7 +1657,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 
 | Файл | Что делает |
 |------|-----------|
-| `lib/session/pg_session_manager.py` | Хранение сессий в PostgreSQL (замена JSONL) |
+| `lib/session/pg_session_manager.py` | Хранение сессий в PostgreSQL (без JSONL-fallback) |
 | `lib/channels/postgres_channel.py` | Канал через таблицу agent_conversation_messages |
 | `lib/channels/redis_channel.py` | Канал через Redis-очереди (BRPOP/LPUSH) |
 | `lib/services/audit_sync_service.py` | Синхронизация audit-таблиц из PG в in-memory DuckDB |
@@ -1729,7 +1730,7 @@ E2E проверяет все режимы: predefined (реальный SQL п�
 - `test_config_service.py` — pre-resolve env, таймауты, SETTINGS-аксессор
 - `test_session_storage.py` — выбор PG/File/auto
 - `test_runtime_patcher.py` — оба monkey-patch'а с fallback
-- `test_db_logging_service.py` — worker, batch, JSONL fallback
+- `test_db_logging_service.py` — worker, batch, без JSONL-fallback
 - `test_bus_factory.py` — обёртки publish_inbound/outbound
 - `test_console_loop.py` — REPL/typewriter/print_tool_events
 - `test_gateway_runner.py` — exponential backoff
@@ -1744,7 +1745,10 @@ E2E проверяет все режимы: predefined (реальный SQL п�
 Если вы вводите новый параметр, который раньше был литералом в коде, следуйте правилу:
 
 1. **Объявите ключ в `project.json`** (JSONC, с дефолтом и комментарием) — в подходящей секции (`channels.*`, `skills.*`, `cli`, `gateway`, `logging.db` и т.п.).
-2. **Читайте через `config.get_setting(*keys, default=...)`** или `SETTINGS.<section>.<key>` с fallback. **Не хардкодьте литерал**.
+2. **Для обязательных настроек навыка `audit_analyzer` используйте
+   `lib/services/audit_settings.py` (`require_setting` → `ConfigurationError`)**
+   — это единый источник правды без литералов в коде. Для необязательных —
+   `config.get_setting(*keys, default=...)`. **Не хардкодьте литерал.**
 3. **Добавьте ключ в `REQUIRED_KEYS` в `tests/test_config_keys.py`** — иначе CI не поймает случайное удаление/переименование.
 4. **Перезапустите gateway / CLI** после правки `project.json`.
 
