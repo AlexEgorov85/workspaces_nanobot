@@ -58,9 +58,13 @@ def main() -> None:
             ctx.audit_memory_store.upsert_records
         )
         # Сохраняем оригинальный callback и подменяем на обёртку,
-        # которая set-ит Event при первом вызове.
+        # которая set-ит Event при первом вызове И публикует снимок
+        # DuckDB в publish_path после каждого цикла синхронизации.
+        # Без publish() файл workspace/skills/audit_analyzer/cache/
+        # audit_cache.duckdb не создаётся — CLI/skill читают пусто/404.
         prev_cb = getattr(ctx.audit_sync_service, "_on_sync_callback", None)
         first_sync_event = asyncio.Event()
+        memory_store = ctx.audit_memory_store
 
         def _on_first_sync() -> None:
             if first_sync_event is not None:
@@ -68,6 +72,10 @@ def main() -> None:
 
         def _wrapped() -> None:
             _on_first_sync()
+            try:
+                memory_store.publish()
+            except Exception:
+                pass
             if prev_cb is not None:
                 try:
                     prev_cb()
@@ -83,6 +91,14 @@ def main() -> None:
             lambda: asyncio.run(_run(ctx, first_sync_event))
         )
     finally:
+        # Финальный снимок в publish_path — гарантируем, что CLI/skill
+        # увидят свежие данные даже если цикл поллинга не успел
+        # отработать после последнего апдейта.
+        if ctx.audit_memory_store is not None:
+            try:
+                ctx.audit_memory_store.publish()
+            except Exception:
+                pass
         # Останавливаем фоновые сервисы, которые создал ApplicationContext,
         # но Streamlit/channels — отдельно (живут в shutdown(ctx))
         ctx.stop()

@@ -26,6 +26,7 @@ psycopg2-подключение (``self._conn``). Публичный API без�
 from __future__ import annotations
 
 import datetime
+import logging
 import queue
 import threading
 import time
@@ -33,6 +34,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import psycopg2
 import psycopg2.extras
+
+logger = logging.getLogger(__name__)
 
 COMMAND_WRITE = "WRITE_ANSWER"
 COMMAND_POLL = "POLL_CHANGES"
@@ -557,14 +560,29 @@ class AuditSyncService:
         if self._conn is not None and not self._conn.closed:
             return
         backoff = self._reconnect_backoff
+        attempt = 0
         while self._running and (self._conn is None or self._conn.closed):
+            attempt += 1
             try:
-                self._conn = psycopg2.connect(self._dsn, gssencmode="disable")
+                self._conn = psycopg2.connect(
+                    self._dsn, gssencmode="disable", connect_timeout=10,
+                )
                 self._conn.autocommit = True
                 with self._state_lock:
                     self._stats["reconnects"] += 1
+                if attempt > 1:
+                    logger.info(
+                        "AuditSyncService connected to PG on attempt %d", attempt
+                    )
                 return
-            except Exception:
+            except Exception as exc:
+                with self._state_lock:
+                    self._stats["errors"] += 1
+                logger.warning(
+                    "AuditSyncService PG connect failed (attempt %d, "
+                    "retry in %.1fs): %s",
+                    attempt, backoff, exc,
+                )
                 self._stop_event.wait(backoff)
                 backoff = min(backoff * 2, self._reconnect_backoff_max)
 
