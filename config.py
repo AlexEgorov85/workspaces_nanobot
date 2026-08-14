@@ -208,6 +208,15 @@ def _(s: str) -> str:
     return s.replace(" ", "_").replace("-", "_")
 
 
+class ConfigurationError(ValueError):
+    """Ошибка конфигурации: обязательный ключ отсутствует или некорректен.
+
+    В отличие от ``get_setting`` (тихий fallback), ``require_setting``
+    выбрасывает эту ошибку, чтобы отсутствие настройки не маскировалось
+    подставным значением. Единственный источник правды — project.json.
+    """
+
+
 def get_setting(*keys: str, default=None):
     """Безопасный доступ к вложенным ключам SETTINGS.
 
@@ -223,6 +232,24 @@ def get_setting(*keys: str, default=None):
             node = node[k]
         else:
             return default
+    return node
+
+
+def require_setting(*keys: str):
+    """Строгий доступ к ключам SETTINGS (единственный источник правды — project.json).
+
+    Возвращает значение по пути ``keys`` или поднимает ``ConfigurationError``,
+    если ключ (на любом уровне) отсутствует. Не возвращает fallback-литерал:
+    отсутствие настройки — ошибка, а не молчаливая подстановка.
+    """
+    node: object = SETTINGS
+    for k in keys:
+        if isinstance(node, dict) and k in node:
+            node = node[k]
+        else:
+            raise ConfigurationError(
+                "Отсутствует обязательный ключ конфига: " + ".".join(keys)
+            )
     return node
 
 
