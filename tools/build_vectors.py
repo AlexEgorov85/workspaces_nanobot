@@ -71,8 +71,8 @@ def fetchone(sql, *args):
 # EMBEDDING
 # =============================================================================
 
-def _get_embeddings(texts: list[str], retries: int = 3) -> Optional[list[list[float]]]:
-    """Получить эмбеддинги для списка текстов через Ollama /api/embed."""
+def _get_embeddings(text: str, retries: int = 3) -> Optional[list[float]]:
+    """Получить эмбеддинг для ОДНОГО текста через Ollama /api/embed."""
     cfg = read_embedding_config(_CFG)
     url = cfg.get("base_url")
     model = cfg.get("model", "mxbai-embed-large:latest")
@@ -82,7 +82,7 @@ def _get_embeddings(texts: list[str], retries: int = 3) -> Optional[list[list[fl
         print("  ОШИБКА: embedding base_url не задан в config.json")
         return None
 
-    payload = {"model": model, "input": texts}
+    payload = {"model": model, "input": text}
 
     for attempt in range(1, retries + 1):
         try:
@@ -92,8 +92,8 @@ def _get_embeddings(texts: list[str], retries: int = 3) -> Optional[list[list[fl
                 data = resp.json()
 
             embeddings = data.get("embeddings")
-            if embeddings and isinstance(embeddings, list) and len(embeddings) > 0:
-                return embeddings
+            if isinstance(embeddings, list) and len(embeddings) > 0:
+                return embeddings[0]
 
             print(f"  Пустой ответ эмбеддинга")
             return None
@@ -362,14 +362,13 @@ def build_index(
         if idx == 1 or idx % max(batch_size, 1) == 0 or idx == len(all_chunks):
             print(f"  Прогресс: {idx}/{len(all_chunks)} эмбеддингов...")
 
-        embeddings = _get_embeddings([text])
-        if embeddings is None or len(embeddings) != 1:
+        emb = _get_embeddings(text)
+        if emb is None or not isinstance(emb, list) or len(emb) == 0:
             print(f"    ! Ошибка получения эмбеддинга для pk={chunk['pk']} "
                   f"chunk={chunk['chunk_index'] + 1}/{chunk['chunk_count']}")
             errors += 1
             continue
 
-        emb = embeddings[0]
         row_data = pk_row_map[chunk["pk"]]
 
         if dry_run:
