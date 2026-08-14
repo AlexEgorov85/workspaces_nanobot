@@ -616,7 +616,12 @@ class PostgresChannel(BaseChannel):
     # ------------------------------------------------------------------
 
     async def send_reasoning_delta(
-        self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None
+        self,
+        chat_id: str,
+        delta: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        stream_id: str | None = None,
     ) -> None:
         """Получить чанк рассуждений от агента и добавить в буфер.
 
@@ -624,11 +629,14 @@ class PostgresChannel(BaseChannel):
             chat_id — ID чата (не используется, т.к. берём из metadata)
             delta — текст очередного чанка рассуждений
             metadata — может содержать answer_id (assistant_msg_id)
+            stream_id — наноtracing: идентификатор потока (на будущее,
+                сейчас ключом буфера остаётся assistant_msg_id)
 
         Поведение:
             — Если известен assistant_msg_id → пишем в ``_reasoning_buffers``
             — Иначе → буферизируем в ``_msg_ctx`` (будет поднят позже)
         """
+        del stream_id  # nanobot 0.3.0 передаёт; канал ключует по assistant_msg_id
         assistant_msg_id = self._resolve_assistant_msg_id(metadata)
         if assistant_msg_id:
             buf = self._reasoning_buffers.get(assistant_msg_id, "")
@@ -641,10 +649,18 @@ class PostgresChannel(BaseChannel):
             ctx.setdefault("reasoning_buf", []).append(delta)
 
     async def send_reasoning_end(
-        self, chat_id: str, metadata: dict[str, Any] | None = None
+        self,
+        chat_id: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        stream_id: str | None = None,
     ) -> None:
-        """Сигнал конца рассуждений. Не используется — финализация в send()."""
-        pass
+        """Сигнал конца рассуждений. Не используется — финализация в send().
+
+        Принимает ``stream_id`` для совместимости с ``nanobot 0.3.0``
+        (ChannelManager._send_reasoning_end передаёт его kwarg).
+        """
+        del stream_id
 
     # ------------------------------------------------------------------
     # Отправка ответа (outbound) — принимает сообщения от агента
@@ -786,24 +802,34 @@ class PostgresChannel(BaseChannel):
                 await self._mark_failed(msg_id, assistant_msg_id, "write_error")
 
     async def send_delta(
-        self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None
+        self,
+        chat_id: str,
+        delta: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        stream_id: str | None = None,
+        stream_end: bool = False,
+        resuming: bool = False,
     ) -> None:
         """Получить очередной чанк стримингового ответа от агента.
 
         Когда агент использует стриминг (потоковую генерацию),
         каждый фрагмент текста приходит через ``send_delta``.
 
-        Поведение:
-          — Если ``_stream_end`` отсутствует → накапливаем текст
-            в ``_stream_buffers[stream_id]``.
-          — Если ``_stream_end`` присутствует → финализируем:
-            достаём накопленный текст, пишем в БД как status='completed',
-            освобождаем слот.
-        """
-        meta = dict(metadata or {})
-        stream_id = meta.get("_stream_id", chat_id)
+        Совместимость с ``nanobot 0.3.0``: ``stream_id`` приходит как kwarg;
+        ``stream_end`` маркирует последний чанк; ``resuming`` — возобновление
+        потока (буфер не сбрасывается).
 
-        if meta.get("_stream_end"):
+        Поведение:
+          — ``stream_end=True`` → финализируем: достаём накопленный текст,
+            пишем в БД как status='completed', освобождаем слот.
+          — Иначе → накапливаем текст в ``_stream_buffers[stream_id]``.
+        """
+        del resuming  # на текущей стороне буфер ключуется по stream_id
+        meta = dict(metadata or {})
+        buf_key = stream_id or meta.get("_stream_id") or chat_id
+
+        if stream_end or meta.get("_stream_end"):
             msg_id = meta.get("origin_message_id") or meta.get("message_id")
             ctx = self._msg_ctx.pop(msg_id, {}) if msg_id else {}
             self._release_slot(msg_id)
@@ -812,7 +838,7 @@ class PostgresChannel(BaseChannel):
             if ctx.get("reasoning_buf"):
                 meta["reasoning"] = " ".join(ctx["reasoning_buf"])
 
-            content = self._stream_buffers.pop(stream_id, "")
+            content = self._stream_buffers.pop(buf_key, "")
             if content and assistant_msg_id:
                 async with transaction() as conn:
                     row = await conn.fetchrow(
@@ -833,8 +859,8 @@ class PostgresChannel(BaseChannel):
                             msg_id,
                         )
         else:
-            buf = self._stream_buffers.get(stream_id, "")
-            self._stream_buffers[stream_id] = buf + delta
+            buf = self._stream_buffers.get(buf_key, "")
+            self._stream_buffers[buf_key] = buf + delta
 
     # ------------------------------------------------------------------
     # Управление слотами параллельности
