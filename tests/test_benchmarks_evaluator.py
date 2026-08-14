@@ -222,8 +222,8 @@ class TestCheckLlmJudge:
         expect = BenchExpect()
         result = _check_llm_judge(expect, "response", hook)
         assert result.check == "llm_judge"
-        assert result.passed is True
-        assert result.score == 0.5
+        assert result.passed is False
+        assert result.score == 0.0
 
     def test_empty_response_fails(self, hook):
         expect = BenchExpect(goal="some goal")
@@ -231,10 +231,11 @@ class TestCheckLlmJudge:
         assert result.passed is False
         assert result.score == 0.0
 
-    def test_no_goal_returns_neutral(self, hook):
+    def test_no_goal_fails(self, hook):
         expect = BenchExpect()
         result = _check_llm_judge(expect, "response", hook)
-        assert result.score == 0.5
+        assert result.passed is False
+        assert result.score == 0.0
 
     def test_judge_score_mapping(self, hook, monkeypatch):
         from benchmarks.models import BenchExpect
@@ -252,22 +253,39 @@ class TestCheckLlmJudge:
         assert r.score == 0.0
         assert r.passed is False
 
-    def test_judge_exception_falls_back(self, hook, monkeypatch):
+    def test_judge_exception_fails(self, hook, monkeypatch):
         expect = BenchExpect(goal="reach the goal")
 
         def boom(prompt):
             raise RuntimeError("net down")
         monkeypatch.setattr("benchmarks.evaluator._call_llm_json", boom)
         r = _check_llm_judge(expect, "answer", hook)
-        assert r.score == 0.5
-        assert r.passed is True
+        assert r.score == 0.0
+        assert r.passed is False
 
-    def test_judge_none_falls_back(self, hook, monkeypatch):
+    def test_judge_none_fails(self, hook, monkeypatch):
         expect = BenchExpect(goal="reach the goal")
         monkeypatch.setattr("benchmarks.evaluator._call_llm_json",
                             lambda prompt: None)
         r = _check_llm_judge(expect, "answer", hook)
-        assert r.score == 0.5
+        assert r.score == 0.0
+        assert r.passed is False
+
+    def test_judge_missing_score_field_fails(self, hook, monkeypatch):
+        expect = BenchExpect(goal="reach the goal")
+        monkeypatch.setattr("benchmarks.evaluator._call_llm_json",
+                            lambda prompt: {"reason": "no score"})
+        r = _check_llm_judge(expect, "answer", hook)
+        assert r.score == 0.0
+        assert r.passed is False
+
+    def test_judge_non_numeric_score_fails(self, hook, monkeypatch):
+        expect = BenchExpect(goal="reach the goal")
+        monkeypatch.setattr("benchmarks.evaluator._call_llm_json",
+                            lambda prompt: {"score": "high"})
+        r = _check_llm_judge(expect, "answer", hook)
+        assert r.score == 0.0
+        assert r.passed is False
 
 
 class TestCallLlmJson:

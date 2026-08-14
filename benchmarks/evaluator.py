@@ -193,8 +193,8 @@ def _check_llm_judge(expect: BenchExpect, response: str | None, hook: BenchmarkH
 
     Строит промпт с целью и ответом, запрашивает у LLM структурированный
     JSON ``{"score": 0.0|0.5|1.0, "reason": "..."}`` и возвращает оценку.
-    При любом сбое (нет конфига, сеть, невалидный JSON) возвращает
-    нейтральный балл 0.5, чтобы падение судьи не ломало прогон.
+    При любом сбое (нет конфига, сеть, невалидный JSON) проверка считается
+    НЕ пройденной (0.0) — нейтральный балл не подставляется.
 
     Args:
         expect: Ожидаемые критерии (используется поле ``goal``).
@@ -208,7 +208,7 @@ def _check_llm_judge(expect: BenchExpect, response: str | None, hook: BenchmarkH
         return CheckResult("llm_judge", False, 0.0, "No response to judge")
     goal = expect.goal or (", ".join(expect.keywords_include) if expect.keywords_include else "")
     if not goal:
-        return CheckResult("llm_judge", True, 0.5, "No goal defined for llm_judge, skipped")
+        return CheckResult("llm_judge", False, 0.0, "No goal defined for llm_judge")
 
     prompt = (
         "Ты строгий судья выполнения задачи агентом. Оцени, достиг ли агент цели.\n"
@@ -222,16 +222,20 @@ def _check_llm_judge(expect: BenchExpect, response: str | None, hook: BenchmarkH
         result = _call_llm_json(prompt)
     except Exception as e:
         logger.warning("LLM judge failed for goal={!r}: {}", goal, e)
-        return CheckResult("llm_judge", True, 0.5, f"LLM judge error, fallback 0.5: {e}")
+        return CheckResult("llm_judge", False, 0.0, f"LLM judge error: {e}")
 
     if result is None:
-        return CheckResult("llm_judge", True, 0.5, "LLM judge returned no parseable JSON, fallback 0.5")
+        return CheckResult("llm_judge", False, 0.0, "LLM judge returned no parseable JSON")
 
-    raw_score = result.get("score", 0.5)
+    if "score" not in result:
+        return CheckResult("llm_judge", False, 0.0,
+                           f"LLM judge returned no score field: {result!r}")
+    raw_score = result["score"]
     try:
         score = float(raw_score)
     except (TypeError, ValueError):
-        score = 0.5
+        return CheckResult("llm_judge", False, 0.0,
+                           f"LLM judge returned non-numeric score: {raw_score!r}")
     # Нормализация к дискретной шкале {0.0, 0.5, 1.0}
     if score >= 0.9:
         score = 1.0

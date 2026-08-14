@@ -82,40 +82,38 @@ def read_embedding_config(cfg: dict) -> Dict[str, Any]:
 
 
 def read_vector_index_config(cfg: dict) -> Dict[str, Any]:
-    """Конфиг векторных индексов: таблица agent_vector_index_config → fallback в настройках."""
+    """Конфиг векторных индексов: таблица agent_vector_index_config (источник — БД).
+
+    Читается только из БД. При ошибке БД исключение пробрасывается —
+    тихой подстановки значений из ``cfg`` нет.
+    """
     from lib.services.audit_settings import audit_vector_settings
     from utils.db import fetch
 
     table = audit_vector_settings().mode_vector_index_config_table
-    try:
-        rows = fetch(
-            "SELECT index_name, source_table, src_table, pk_column, "
-            "content_cols, embedding_cols, track_column, enabled "
-            f"FROM {table} ORDER BY index_name"
-        )
-        if rows:
-            result = {}
-            for r in rows:
-                ec = r["embedding_cols"]
-                if isinstance(ec, str):
-                    try:
-                        ec = json.loads(ec)
-                    except (json.JSONDecodeError, TypeError):
-                        ec = {}
-                result[r["index_name"]] = {
-                    "table": r["src_table"],
-                    "pk": r["pk_column"],
-                    "source_table": r["source_table"],
-                    "content_columns": list(r["content_cols"]) if isinstance(r.get("content_cols"), (list, tuple)) else [],
-                    "embedding_columns": ec,
-                    "track_column": r["track_column"],
-                    "enabled": r["enabled"],
-                }
-            return result
-    except Exception:
-        pass
-    val = cfg.get("vector_indexes", {})
-    return dict(val) if isinstance(val, dict) else {}
+    rows = fetch(
+        "SELECT index_name, source_table, src_table, pk_column, "
+        "content_cols, embedding_cols, track_column, enabled "
+        f"FROM {table} ORDER BY index_name"
+    )
+    result = {}
+    for r in rows:
+        ec = r["embedding_cols"]
+        if isinstance(ec, str):
+            try:
+                ec = json.loads(ec)
+            except (json.JSONDecodeError, TypeError):
+                ec = {}
+        result[r["index_name"]] = {
+            "table": r["src_table"],
+            "pk": r["pk_column"],
+            "source_table": r["source_table"],
+            "content_columns": list(r["content_cols"]) if isinstance(r.get("content_cols"), (list, tuple)) else [],
+            "embedding_columns": ec,
+            "track_column": r["track_column"],
+            "enabled": r["enabled"],
+        }
+    return result
 
 
 def build_cache_provider(cfg: dict, base_dir: str = "") -> "PostgresDuckDbProvider":

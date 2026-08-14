@@ -263,8 +263,8 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
       * psycopg2 не импортируется (битое окружение).
 
     DSN берётся из ``channels.postgres.dsn`` (тот же, что для
-    PGSessionManager и PostgresChannel). Fallback на JSONL-файл
-    включается в ``DbLoggingService.stop()``-логике автоматически.
+    PGSessionManager и PostgresChannel). Резервной записи в JSONL-файл
+    нет: при недоступности БД события выбрасываются.
     """
     try:
         from lib.services.db_logging_service import DbLoggingService
@@ -296,11 +296,6 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
             f"table_name={table_name!r}, question_runs_table={question_runs_table!r}"
         )
 
-    fallback_path_raw = db_cfg.get("fallback_path", "logs/agent_gateway_logs_fallback.jsonl")
-    fallback_path = Path(fallback_path_raw)
-    if not fallback_path.is_absolute():
-        fallback_path = Path(ctx.script_dir) / fallback_path
-
     return DbLoggingService(
         dsn=dsn,
         table_name=table_name,
@@ -311,7 +306,6 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
         batch_size=int(db_cfg.get("batch_size", 100)),
         queue_maxsize=int(db_cfg.get("queue_maxsize", 10000)),
         min_level=db_cfg.get("min_level", "INFO"),
-        fallback_path=fallback_path,
         connect_backoff_sec=float(db_cfg.get("connect_backoff_sec", 1.0)),
         connect_backoff_max_sec=float(db_cfg.get("connect_backoff_max_sec", 60.0)),
         summary_max_chars=int(db_cfg.get("summary_max_chars", 200)),

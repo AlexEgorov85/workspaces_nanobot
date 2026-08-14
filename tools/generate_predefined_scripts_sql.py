@@ -46,24 +46,18 @@ for p in (str(_WORKSPACE), str(_ROOT)):
 # =============================================================================
 # КОНФИГУРАЦИЯ
 # =============================================================================
-# Значение по умолчанию; перекрывается:
-#   1) --table <schema.table> в CLI
-#   2) project.json → skills.audit_analyzer.predefined_scripts_table
-# Чтобы сменить «имя таблицы» — правьте project.json, см. skill_config.py.
-FALLBACK_TABLE = "public.agent_predefined_scripts"
+# Имя целевой таблицы берётся только из конфига:
+#   --table <schema.table> в CLI  (перекрывает конфиг)
+#   project.json → skills.audit_analyzer.predefined_scripts_table
+# Хардкод-подстановки таблицы нет: если конфиг не читается — ошибка.
 
 
 def get_target_table() -> str:
     """Прочитать имя таблицы из skill_config (читает project.json)."""
-    try:
-        from workspace.skills.audit_analyzer.scripts.skill_config import (
-            get_predefined_scripts_table,
-        )
-        return get_predefined_scripts_table()
-    except (ImportError, ModuleNotFoundError) as e:
-        print(f"[WARN] skill_config не найден ({e}); используем {FALLBACK_TABLE!r}",
-              file=sys.stderr)
-        return FALLBACK_TABLE
+    from workspace.skills.audit_analyzer.scripts.skill_config import (
+        get_predefined_scripts_table,
+    )
+    return get_predefined_scripts_table()
 
 
 # =============================================================================
@@ -175,7 +169,7 @@ def _sql_literal(value: Any) -> str:
 
 def render_insert(
     rows: Iterable[Dict[str, Any]],
-    table: str = FALLBACK_TABLE,
+    table: str,
     on_conflict_update: bool = True,
 ) -> str:
     """
@@ -242,7 +236,7 @@ def _dollar_quote(text: str) -> str:
 
 def render_full_migration(
     rows: Iterable[Dict[str, Any]],
-    table: str = FALLBACK_TABLE,
+    table: str,
     on_conflict_update: bool = True,
     include_drop: bool = False,
 ) -> str:
@@ -295,8 +289,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         default=None,
         help=(
             "Имя целевой таблицы (schema.table). По умолчанию берётся из "
-            "project.json → skills.audit_analyzer.predefined_scripts_table; "
-            "если не задано — 'public.agent_predefined_scripts'."
+            "project.json → skills.audit_analyzer.predefined_scripts_table."
         ),
     )
     p.add_argument("--out", type=Path, default=None,

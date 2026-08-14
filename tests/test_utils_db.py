@@ -39,12 +39,19 @@ def mock_psycopg2():
         mock_connect.return_value = mock_conn
         mock_rdc.return_value = MagicMock()
 
-        # Import the real utils.db (with psycopg2 mocked)
+        # Import the real utils.db (with psycopg2 mocked).
+        # Тут две конфликтующие папки `utils` (lib/utils и workspace/utils) —
+        # гарантируем, что workspace первым в sys.path и модуль не закэшен.
+        sys.path[:] = [p for p in sys.path if p != _workspace_path]
+        sys.path.insert(0, _workspace_path)
+        for _m in [m for m in sys.modules if m == "utils" or m.startswith("utils.")]:
+            del sys.modules[_m]
+
         from utils.db import (
             DB_RETRYABLE_ERRORS,
             _connect,
             _disconnect,
-            _get_dsn,
+            resolve_dsn,
             _retry,
             async_execute,
             async_fetch,
@@ -69,7 +76,7 @@ def mock_psycopg2():
             "configure": configure,
             "_connect": _connect,
             "_disconnect": _disconnect,
-            "_get_dsn": _get_dsn,
+            "resolve_dsn": resolve_dsn,
             "execute": execute,
             "fetch": fetch,
             "fetchone": fetchone,
@@ -88,24 +95,24 @@ def mock_psycopg2():
 class TestConfigure:
     def test_sets_dsn(self, mock_psycopg2):
         mock_psycopg2["configure"]("postgresql://u:p@h/db")
-        assert mock_psycopg2["_get_dsn"]() == "postgresql://u:p@h/db"
+        assert mock_psycopg2["resolve_dsn"]() == "postgresql://u:p@h/db"
 
     def test_empty_dsn_skips_set(self, mock_psycopg2):
         import utils.db as _db
 
         _db._dsn = "existing"
         mock_psycopg2["configure"]("")
-        assert mock_psycopg2["_get_dsn"]() == "existing"
+        assert mock_psycopg2["resolve_dsn"]() == "existing"
 
     def test_same_dsn_idempotent(self, mock_psycopg2):
         mock_psycopg2["configure"]("dsn1")
         mock_psycopg2["configure"]("dsn1")
-        assert mock_psycopg2["_get_dsn"]() == "dsn1"
+        assert mock_psycopg2["resolve_dsn"]() == "dsn1"
 
     def test_changes_dsn(self, mock_psycopg2):
         mock_psycopg2["configure"]("dsn1")
         mock_psycopg2["configure"]("dsn2")
-        assert mock_psycopg2["_get_dsn"]() == "dsn2"
+        assert mock_psycopg2["resolve_dsn"]() == "dsn2"
 
 
 class TestResolveDsn:
@@ -121,7 +128,7 @@ class TestResolveDsn:
             SETTINGS["channels"] = {
                 "postgres": {"dsn": "postgresql://explicit@x/y"}
             }
-            assert mock_psycopg2["_get_dsn"]() == "postgresql://explicit@x/y"
+            assert mock_psycopg2["resolve_dsn"]() == "postgresql://explicit@x/y"
         finally:
             SETTINGS["channels"] = original
 
@@ -136,7 +143,7 @@ class TestResolveDsn:
             SETTINGS["channels"] = {
                 "postgres": {"dsn": "postgresql://config@x/y"}
             }
-            assert mock_psycopg2["_get_dsn"]() == "postgresql://explicit@configured/db"
+            assert mock_psycopg2["resolve_dsn"]() == "postgresql://explicit@configured/db"
         finally:
             _db.configure("")
             SETTINGS["channels"] = original
@@ -161,7 +168,7 @@ class TestResolveDsn:
             with patch.dict(
                 "os.environ", {"DB_PASSWORD": "s3cret"}, clear=False
             ):
-                assert mock_psycopg2["_get_dsn"]() == ""
+                assert mock_psycopg2["resolve_dsn"]() == ""
         finally:
             SETTINGS["channels"] = original
 
@@ -177,7 +184,7 @@ class TestResolveDsn:
                 "os.environ", {"DATABASE_URL": "postgresql://env@x/y"}, clear=False
             ):
                 # DATABASE_URL в окружении НЕ подставляется молча — dsn берём только из конфига
-                assert mock_psycopg2["_get_dsn"]() == ""
+                assert mock_psycopg2["resolve_dsn"]() == ""
         finally:
             SETTINGS["channels"] = original
 
@@ -196,7 +203,7 @@ class TestResolveDsn:
                 "os.environ", {"DATABASE_URL": ""}, clear=False
             ):
                 assert (
-                    mock_psycopg2["_get_dsn"]()
+                    mock_psycopg2["resolve_dsn"]()
                     == "postgresql://postgres:secret@localhost:5432/postgres"
                 )
         finally:
@@ -216,7 +223,7 @@ class TestConnect:
         import utils.db as _db
 
         _db._dsn = ""
-        with patch("utils.db._get_dsn", return_value=""):
+        with patch("utils.db.resolve_dsn", return_value=""):
             with pytest.raises(RuntimeError, match="не инициализирован"):
                 mock_psycopg2["_connect"]()
 

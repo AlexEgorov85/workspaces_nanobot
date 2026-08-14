@@ -218,7 +218,6 @@
       "queue_maxsize": 10000,          // Макс. размер очереди
       "min_level": "INFO",             // Варианты: DEBUG | INFO | WARN | ERROR
       "dialect": "postgres",           // Диалект БД. Варианты: postgres | greenplum
-      "fallback_path": "logs/agent_gateway_logs_fallback.jsonl",  // Путь к JSONL-fallback
       "connect_backoff_sec": 1.0,      // Начальный backoff psycopg2.connect
       "connect_backoff_max_sec": 60.0, // Потолок backoff psycopg2.connect
       "summary_max_chars": 200         // Усечение summary до N символов

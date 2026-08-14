@@ -133,7 +133,6 @@ def _required_keys():
         ("logging.db.queue_maxsize", 10000),
         ("logging.db.min_level", "INFO"),
         ("logging.db.dialect", "postgres"),
-        ("logging.db.fallback_path", "logs/agent_gateway_logs_fallback.jsonl"),
         ("logging.db.connect_backoff_sec", 1.0),
         ("logging.db.connect_backoff_max_sec", 60.0),
         ("logging.db.summary_max_chars", 200),

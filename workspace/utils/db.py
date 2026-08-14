@@ -50,10 +50,11 @@ _dsn: str = ""
 
 
 def resolve_dsn() -> str:
-    """Вернуть явно сконфигурированный DSN без скрытых fallback.
+    """Вернуть явно сконфигурированный DSN без скрытых резервных источников.
 
-    Единственный источник — ``channels.postgres.dsn`` (project.json,
-    резолвится из ``${DATABASE_URL}``/.secrets.env). Никакой тихой сборки
+    Единственный источник — ``_dsn`` (задаётся через ``configure``),
+    иначе ``channels.postgres.dsn`` (project.json, резолвится из
+    ``${DATABASE_URL}``/.secrets.env). Никакой тихой сборки
     из ``host/port/dbname/user`` или подстановки ``DATABASE_URL`` из
     окружения не делается: отсутствие DSN — явная ошибка конфигурации,
     а не повод незаметно подключиться куда-то ещё.
@@ -83,11 +84,6 @@ def configure(dsn: str) -> None:
         _dsn = dsn
 
 
-def _get_dsn() -> str:
-    """Вернуть DSN: из configure() или fallback из SETTINGS/env."""
-    return resolve_dsn()
-
-
 def _connect() -> psycopg2.extensions.connection:
     """Создать новое соединение с БД с автоматическими retry.
 
@@ -97,12 +93,11 @@ def _connect() -> psycopg2.extensions.connection:
       — "too many connections": до 50 раз, backoff 2→30с
       — остальные ошибки: до 15 раз, backoff 1→15с
     """
-    resolved = _get_dsn()
+    resolved = resolve_dsn()
     if not resolved:
         raise RuntimeError(
-            "SharedDB не инициализирован: вызовите configure(dsn), "
-            "задайте channels.postgres (host/port/dbname/user) в project.json "
-            "+ DB_PASSWORD в .secrets.env, или DATABASE_URL в .secrets.env"
+            "SharedDB не инициализирован: вызовите configure(dsn) "
+            "или задайте channels.postgres.dsn в project.json"
         )
     # libpq в psycopg2-binary (≥ 2.9.x) пытается использовать
     # GSSAPI-шифрование по умолчанию, но GP 6.25 / PG 9.4 его не

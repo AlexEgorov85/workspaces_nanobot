@@ -53,9 +53,8 @@ class BenchmarkHook(BaseToolTrackingHook):
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         """Снимок имён и аргументов инструментов перед их выполнением.
 
-        Нужен как fallback для статусов: статусы берутся из ``tool_events``
-        в ``after_iteration``, но если событий почему-то нет, имена всё равно
-        должны попасть в ``tools_used``.
+        Сохраняет имена инструментов в ``tools_used`` независимо от их
+        последующего статуса.
 
         Args:
             context: Контекст итерации агента.

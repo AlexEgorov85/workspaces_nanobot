@@ -64,7 +64,7 @@ scripts/
     __init__.py              — этот файл, публичный API
     cli.py                   — точка входа, парсинг аргументов, маршрутизация
     skill_config.py          — конфигурация навыка из SETTINGS, фабрика провайдера
-    database.py              — PostgreSQL (fallback): схема, query, EXPLAIN
+    database.py              — PostgreSQL: схема, query, EXPLAIN (deprecated, in_memory_enabled=false)
     llm.py                   — LLM-клиент (OpenAI-compatible HTTP)
     output.py                — форматирование результата в JSON
     predefined.py            — обёртка над реестром скриптов (БД → DuckDB) + DynamicQueryBuilder

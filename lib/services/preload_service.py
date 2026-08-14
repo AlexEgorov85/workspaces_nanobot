@@ -59,17 +59,13 @@ class PreloadService:
         """Секция ``SETTINGS.skills.audit_analyzer`` (lazy).
 
         Если ``settings`` не передан в конструктор — читает глобальный
-        ``config.SETTINGS``. Исключения глотаются и дают ``{}``
-        (навык просто не будет предзагружаться).
+        ``config.SETTINGS``.
         """
         if self._settings is not None:
             return _get(self._settings, "skills", "audit_analyzer", default={})
-        try:
-            from config import SETTINGS
+        from config import SETTINGS
 
-            return _get(SETTINGS, "skills", "audit_analyzer", default={})
-        except Exception:
-            return {}
+        return _get(SETTINGS, "skills", "audit_analyzer", default={})
 
     def get_audit_cache_config(self, config: Any) -> Tuple[Optional[str], Optional[dict]]:
         """Вернуть ``(cache_file_path, db_config)`` для DuckDB-кеша навыка.
@@ -85,29 +81,23 @@ class PreloadService:
 
         Returns:
             ``(cache_file_path, db_config)`` или ``(None, None)``.
-
-        Все исключения глотаются → ``(None, None)`` (graceful
-        fallback: ошибка чтения конфига не должна ломать старт).
         """
-        try:
-            acfg = self._audit_settings
-            if not _get(acfg, "in_memory_enabled", default=False):
-                return None, None
-            cache_path = _get(acfg, "in_memory_cache_path", default="")
-            if not cache_path:
-                return None, None
-
-            cache_file = Path(cache_path)
-            if not cache_file.is_absolute():
-                cache_file = (
-                    config.workspace_path / "skills" / "audit_analyzer" / cache_file
-                )
-
-            from skills.audit_analyzer.scripts.skill_config import load_db_config
-
-            return str(cache_file), load_db_config()
-        except Exception:
+        acfg = self._audit_settings
+        if not _get(acfg, "in_memory_enabled", default=False):
             return None, None
+        cache_path = _get(acfg, "in_memory_cache_path", default="")
+        if not cache_path:
+            return None, None
+
+        cache_file = Path(cache_path)
+        if not cache_file.is_absolute():
+            cache_file = (
+                config.workspace_path / "skills" / "audit_analyzer" / cache_file
+            )
+
+        from skills.audit_analyzer.scripts.skill_config import load_db_config
+
+        return str(cache_file), load_db_config()
 
     def preload_audit_cache(self, config: Any) -> None:
         """Подгрузить DuckDB-кеш навыка, если он устарел (> 1 часа) или отсутствует.

@@ -110,26 +110,15 @@ def _load_chat_history(chat_id: str = _CHAT_ID) -> list[dict]:
 def _get_extension_from_mime(mime_type: str) -> str:
     """Получить расширение файла по MIME-типу.
 
-    Для неизвестного типа возвращается ``.bin`` — файл никогда не должен
-    оставаться без расширения (иначе скачивание агентских файлов даёт имя
-    вида ``file_1a2b3c4d`` без расширения).
+    Расширение определяется только через ``mimetypes.guess_extension``.
+    Для неизвестного типа возвращается пустая строка — принудительного
+    расширения не подставляется.
     """
     if not mime_type:
         return ""
     mime = mime_type.split(";")[0].strip().lower()
     ext = mimetypes.guess_extension(mime)
-    if ext:
-        return ext
-    fallback = {
-        "application/octet-stream": ".bin",
-        "text/markdown": ".md",
-        "text/html": ".html",
-        "text/xml": ".xml",
-        "application/x-7z-compressed": ".7z",
-        "application/x-rar-compressed": ".rar",
-        "application/vnd.rar": ".rar",
-    }
-    return fallback.get(mime, ".bin")
+    return ext or ""
 
 
 def _save_file_from_data_url(data_url: str, filename: str) -> str | None:

@@ -11,9 +11,9 @@ def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> Tuple[List[Any], 
     """Сканировать ``hooks_dir`` и вернуть (hooks, tool_audit_hook).
 
     Каждый ``*.py`` файл (исключая ``_*``) импортируется; классы-наследники
-    ``AgentHook`` (но не сам ``AgentHook`` и не ``_*``) — инстанцируются.
-    Конструктор с ``workspace_dir`` предпочтителен; если падает — fallback
-    на ``Hook()``.
+    ``AgentHook`` (но не сам ``AgentHook`` и не ``_*``) — инстанцируются
+    с ``workspace_dir``. Если конструктор падает — хук пропускается,
+    повторной инстанциации без аргументов нет.
 
     Также ищется ``ToolAuditHook`` для метаданных.
     """
@@ -43,12 +43,9 @@ def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> Tuple[List[Any], 
             ):
                 try:
                     hook = attr(workspace_dir=workspace_dir)
-                except Exception:
-                    try:
-                        hook = attr()
-                    except Exception as exc:
-                        _print_warn(f"{attr_name}: {exc}")
-                        continue
+                except Exception as exc:
+                    _print_warn(f"{attr_name}: {exc}")
+                    continue
                 hooks.append(hook)
                 _print_ok(f"{attr_name} loaded")
                 if tool_audit_hook is None and _is_tool_audit_hook(hook):

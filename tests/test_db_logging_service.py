@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 import threading
 import time
@@ -61,20 +60,17 @@ class TestBasicLifecycle:
             svc.stop(timeout_sec=2.0)
         assert not svc.is_running()
 
-    def test_no_dsn_runs_with_fallback(self, tmp_path):
-        svc = _svc(
-            dsn="",
-            flush_interval_sec=0.05,
-            fallback_path=tmp_path / "log.jsonl",
-        )
+    def test_no_dsn_drops_events(self, tmp_path):
+        svc = _svc(dsn="", flush_interval_sec=0.05)
         svc.start()
         try:
             assert svc.log_inbound("cli:1", "cli", "hi") is True
             time.sleep(0.2)
         finally:
             svc.stop(timeout_sec=2.0)
-        # В fallback нет записи (БД не было, fallback должен принять)
-        assert svc.get_stats()["fallback_written"] >= 0
+        # БД нет — события выбрасываются, JSONL-файл не создаётся
+        assert not (tmp_path / "log.jsonl").exists()
+        assert svc.get_stats()["failed"] >= 1
 
 
 class TestNonBlocking:
@@ -218,12 +214,11 @@ class TestFlush:
         written = svc.get_stats()["written"]
         assert written >= 3
 
-    def test_fallback_when_no_dsn(self, tmp_path):
+    def test_drop_when_no_dsn(self, tmp_path):
         svc = _svc(
             dsn="",
             flush_interval_sec=0.05,
             batch_size=2,
-            fallback_path=tmp_path / "log.jsonl",
         )
         svc.start()
         try:
@@ -233,22 +228,17 @@ class TestFlush:
         finally:
             svc.stop(timeout_sec=2.0)
 
-        assert (tmp_path / "log.jsonl").exists()
-        lines = (tmp_path / "log.jsonl").read_text(encoding="utf-8").strip().split("\n")
-        assert len(lines) >= 2
-        for ln in lines:
-            obj = json.loads(ln)
-            assert obj["event_type"] == "inbound"
-            assert obj["channel"] == "cli"
+        # Файл не создаётся, события помечаются как потерянные
+        assert not (tmp_path / "log.jsonl").exists()
+        assert svc.get_stats()["failed"] >= 2
 
-    def test_connect_failure_uses_fallback(self, fake_psycopg2, tmp_path):
+    def test_connect_failure_drops(self, fake_psycopg2, tmp_path):
         psycopg2 = sys.modules["psycopg2"]
         psycopg2.connect = MagicMock(side_effect=RuntimeError("no db"))
         svc = _svc(
             dsn="postgresql://x",
             flush_interval_sec=0.05,
             batch_size=1,
-            fallback_path=tmp_path / "log.jsonl",
         )
         svc.start()
         try:
@@ -256,7 +246,8 @@ class TestFlush:
             time.sleep(0.2)
         finally:
             svc.stop(timeout_sec=2.0)
-        assert svc.get_stats()["failed"] + svc.get_stats()["fallback_written"] >= 1
+        assert svc.get_stats()["failed"] >= 1
+        assert not (tmp_path / "log.jsonl").exists()
 
     def test_stop_flushes_remaining(self, fake_psycopg2):
         svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0,
@@ -274,7 +265,7 @@ class TestGetStats:
         svc = _svc(dsn="postgresql://x")
         stats = svc.get_stats()
         for k in ("running", "queued", "written", "failed", "queue_size",
-                  "fallback_written", "batch_count", "queue_full",
+                  "batch_count", "queue_full",
                   "connected", "last_error"):
             assert k in stats
 

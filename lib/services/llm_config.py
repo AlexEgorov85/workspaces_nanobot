@@ -22,11 +22,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-# Дефолты, совпадающие с прежними значениями навыка (fallback, если
-# в SETTINGS нет ни agents.defaults, ни providers).
-_DEFAULT_MODEL = "gpt-4o-mini"
-_DEFAULT_API_BASE = "https://api.openai.com/v1"
-
 
 def resolve_llm_config(overrides: Optional[dict] = None) -> Dict[str, Any]:
     """Собрать LLM-конфиг (provider/model/api_base/api_key/параметры).
@@ -38,6 +33,10 @@ def resolve_llm_config(overrides: Optional[dict] = None) -> Dict[str, Any]:
 
     Returns:
         Словарь: provider, model, api_base, api_key, max_tokens, temperature.
+
+    Raises:
+        RuntimeError: если не удаётся определить model или api_base
+            (никакой подстановки дефолтных значений нет).
     """
     from config import SETTINGS
 
@@ -47,14 +46,25 @@ def resolve_llm_config(overrides: Optional[dict] = None) -> Dict[str, Any]:
     provider = _cfg.get("llm_provider") or defaults.get("provider") or "openai-compatible"
     provider_cfg = SETTINGS.get("providers", {}).get(provider) or {}
 
-    model = _cfg.get("llm_model") or defaults.get("model") or _DEFAULT_MODEL
+    model = _cfg.get("llm_model") or defaults.get("model")
     api_base = _cfg.get("llm_api_base") or provider_cfg.get("apiBase") or ""
     api_key = _cfg.get("llm_api_key") or provider_cfg.get("apiKey") or ""
+
+    if not model:
+        raise RuntimeError(
+            "resolve_llm_config: не задана модель (agents.defaults.model "
+            "или llm_model в overrides)"
+        )
+    if not api_base:
+        raise RuntimeError(
+            f"resolve_llm_config: не задан api_base для провайдера {provider!r} "
+            "(providers.{provider}.apiBase или llm_api_base в overrides)"
+        )
 
     return {
         "provider": provider,
         "model": model,
-        "api_base": api_base or _DEFAULT_API_BASE,
+        "api_base": api_base,
         "api_key": api_key,
         "max_tokens": int(_cfg.get("llm_max_tokens", 8192)),
         "temperature": float(_cfg.get("llm_temperature", 0.1)),

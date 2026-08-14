@@ -45,15 +45,12 @@ class SessionStorageService:
             {"dsn": "postgresql://...", "schema": "audit", "max_conn": 8}
 
         Поля, заданные здесь, ПЕРЕБИВАЮТ ``pg`` параметр и ``SETTINGS``.
-        При отсутствии файла, невалидном JSON или любой ошибке чтения
-        возвращается ``{}`` (graceful fallback).
+        При отсутствии файла возвращается ``{}`` (файл опционален).
+        Невалидный JSON — ошибка, а не молчаливый ``{}``.
         """
         if self._sm_json is None or not self._sm_json.exists():
             return {}
-        try:
-            data = json.loads(self._sm_json.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        data = json.loads(self._sm_json.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
 
     def create(

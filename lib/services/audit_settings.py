@@ -63,7 +63,7 @@ class AuditVectorSettings:
     mode_vector_db_table: str          # оарb.audit_vectors (сырые векторы, REAL[])
     mode_vector_store_table: str       # public.agent_vector_index_store (FAISS-blob BYTEA)
     mode_vector_index_config_table: str  # public.agent_vector_index_config
-    vector_index_default_path: str     # путь к fallback FAISS-индексам
+    vector_index_default_path: str     # путь к FAISS-индексам
 
     # --- запись ответов навыка обратно в PG ---
     sync_write_table: str
@@ -112,7 +112,7 @@ def audit_vector_settings() -> AuditVectorSettings:
 
     Любой обязательный ключ, отсутствующий в конфиге, приводит к
     ``ConfigurationError`` — ошибка конфигурации видна сразу, а не
-    маскируется тихим fallback-значением.
+    маскируется подставным значением.
     """
     db_schema = _require(["db_schema"])
     db_tables = [t for t in (_require(["db_tables"]) or []) if t]
@@ -120,12 +120,6 @@ def audit_vector_settings() -> AuditVectorSettings:
     additional = [[str(s), str(t)] for s, t in additional] if isinstance(
         additional, list
     ) else []
-
-    def _get(key: str, default):
-        try:
-            return _require([key])
-        except Exception:
-            return default
 
     return AuditVectorSettings(
         db_schema=db_schema,
@@ -141,7 +135,7 @@ def audit_vector_settings() -> AuditVectorSettings:
         embedding_base_url=_require(["embedding_base_url"]),
         embedding_model=_require(["embedding_model"]),
         embedding_dimension=int(_require(["embedding_dimension"])),
-        embedding_http_timeout_sec=float(_get("embedding_http_timeout_sec", 60)),
+        embedding_http_timeout_sec=float(_require(["embedding_http_timeout_sec"])),
         poll_interval_sec=float(_require(["poll_interval_sec"])),
         full_resync_every=int(_require(["full_resync_every"])),
         sync_max_queue_size=int(_require(["sync_max_queue_size"])),

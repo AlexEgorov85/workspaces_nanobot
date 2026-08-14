@@ -8,8 +8,8 @@ embedding_columns помечена "chunk": true, её текст разбива
 row_data (JSONB) всегда содержит ПОЛНУЮ строку исходной таблицы,
 независимо от количества чанков.
 
-Конфиг читается из public.agent_vector_index_config (БД) с fallback
-на ключ vector_indexes в skills.audit_analyzer (project.json).
+Конфиг читается из public.agent_vector_index_config (БД) — единственный
+источник; конфигурация из project.json не подставляется.
 
 Запуск (из корня проекта):
     # Инкрементальное обновление (только новые строки)
@@ -556,7 +556,7 @@ def main():
     print(f"Батч: {args.batch_size}, чанк: {args.chunk_size} симв., перекрытие: {args.chunk_overlap}, "
           f"пауза: {args.pause_sec}с")
     print(f"Индексы: {', '.join(enabled.keys())}")
-    print("Источник конфига: таблица public.agent_vector_index_config -> config.json")
+    print("Источник конфига: таблица public.agent_vector_index_config (БД)")
 
     results = []
     for name, cfg in enabled.items():

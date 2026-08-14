@@ -50,13 +50,6 @@ def mock_db_and_psycopg():
 class TestPGSessionManagerPure:
     """Tests for pure (static) methods that don't need DB."""
 
-    def test_safe_key(self):
-        from lib.session.pg_session_manager import PGSessionManager
-
-        assert PGSessionManager.safe_key("hello:world") != ""
-        assert ":" not in PGSessionManager.safe_key("test:key")
-        assert PGSessionManager.safe_key("simple") == "simple"
-
     def test_validate_ident_valid(self):
         from lib.session.pg_session_manager import PGSessionManager
 
@@ -124,12 +117,6 @@ class TestPGSessionManagerPure:
         mgr = mock_db_and_psycopg(workspace=Path("/tmp/ws"))
         mgr.close()  # should not raise
 
-    def test_get_session_path(self, mock_db_and_psycopg):
-        mgr = mock_db_and_psycopg(workspace=Path("/tmp/ws"))
-        path = mgr._get_session_path("my-key")
-        assert "my-key" in str(path)
-        assert str(path).endswith(".jsonl")
-
 
 class TestPGSessionManagerGetOrCreate:
     def test_returns_cached(self, mock_db_and_psycopg):
@@ -196,19 +183,16 @@ class TestPGSessionManagerSave:
         assert len(insert_calls) == 0
 
     @patch("lib.session.pg_session_manager.transaction")
-    def test_save_db_fallback(self, mock_trans, mock_db_and_psycopg):
+    def test_save_db_error_raises(self, mock_trans, mock_db_and_psycopg):
         from lib.session.pg_session_manager import Session
 
         mgr = mock_db_and_psycopg(workspace=Path("/tmp/ws"))
         mock_trans.side_effect = Exception("DB down")
 
-        with patch.object(mgr, "save", wraps=mgr.save) as spy:
-            # We need to test that fallback to super().save() happens
-            # Since we mock the parent's save, just verify the DB error path
-            session = Session(key="s1")
-            with patch.object(type(mgr).__bases__[0], "save") as super_save:
-                mgr.save(session)
-                super_save.assert_called_once()
+        session = Session(key="s1")
+        # Ошибка БД пробрасывается — никакого JSONL-отката
+        with pytest.raises(Exception, match="DB down"):
+            mgr.save(session)
 
 
 class TestPGSessionManagerDelete:

@@ -95,7 +95,7 @@ def _parse_parameters(value: Any) -> Dict[str, Any]:
     JSONB-параметры приходят из DuckDB в одном из видов:
       - dict (нормальный JSON)
       - str в JSON-формате (двойные кавычки) — после read_csv_auto
-      - str в Python-repr (одинарные кавычки) — legacy fallback
+      - str в Python-repr (одинарные кавычки) — формат старых дампов
       - None / "" — пустые параметры
 
     Возвращает dict; бросает ValueError, если формат не удаётся распознать.
