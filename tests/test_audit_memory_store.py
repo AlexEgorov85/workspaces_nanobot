@@ -12,6 +12,16 @@ if _project_root not in sys.path:
 
 from lib.services.audit_memory_store import AuditMemoryStore
 
+_DIM = 1024
+
+
+def _vec(index: int) -> list[float]:
+    """Единичный вектор размерности _DIM с 1.0 на позиции index."""
+    v = [0.0] * _DIM
+    v[index] = 1.0
+    return v
+
+
 _VECTOR_RECORDS = [
     {
         "id": 10,
@@ -23,7 +33,7 @@ _VECTOR_RECORDS = [
         "chunk_index": 0,
         "chunk_count": 1,
         "row_data": json.dumps({"id": 1}),
-        "embedding": [0.1, 0.2, 0.3],
+        "embedding": _vec(0),
     },
     {
         "id": 11,
@@ -35,7 +45,7 @@ _VECTOR_RECORDS = [
         "chunk_index": 0,
         "chunk_count": 1,
         "row_data": json.dumps({"id": 2}),
-        "embedding": [0.4, 0.5, 0.6],
+        "embedding": _vec(1),
     },
 ]
 
@@ -140,6 +150,27 @@ class TestVector:
         store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
         assert store.search_vector("тест", index_name="audits_index") == []
 
+    def test_search_vector_faiss_returns_top_hit(self, store, monkeypatch):
+        import lib.services.cache_provider_impl as cp
+
+        monkeypatch.setattr(cp, "get_embedding", lambda *a, **k: _vec(0))
+        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        res = store.search_vector("тест", index_name="audits_index", top_k=1)
+        assert len(res) == 1
+        assert res[0].pk_value == 1
+        assert res[0].source == "audits_index"
+        assert res[0].score == pytest.approx(1.0)
+
+    def test_search_vector_faiss_threshold_filters(self, store, monkeypatch):
+        import lib.services.cache_provider_impl as cp
+
+        monkeypatch.setattr(cp, "get_embedding", lambda *a, **k: _vec(1))
+        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        # запись 2 (единичный на позиции 1) совпадает полностью; запись 0 — ортогональна
+        res = store.search_vector("тест", index_name="audits_index", threshold=0.5)
+        assert len(res) == 1
+        assert res[0].pk_value == 2
+
     def test_dirty_marking_invalidates_cache(self, store):
         store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
         assert store.preload_indexes()  # warm cache
@@ -157,6 +188,100 @@ class TestVector:
         store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
         assert store._dirty_sources == set()
         assert store.preload_indexes() == []
+
+
+# ---------------------------------------------------------------------------
+# Навык: поиск только из опубликованного снимка (без PostgreSQL)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillVectorFromCache:
+    def test_publish_includes_vector_table(self, tmp_path):
+        target = tmp_path / "out.duckdb"
+        store = AuditMemoryStore(
+            cache_path="",
+            publish_path=str(target),
+            schema="oarb",
+            tables=["audits"],
+            vector_db_table="oarb.audit_vectors",
+        )
+        store.open()
+        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        assert store.publish() is True
+        store.close()
+
+        import duckdb
+        ro = duckdb.connect(str(target), read_only=True)
+        rows = ro.execute(
+            "SELECT COUNT(*) AS c FROM oarb.audit_vectors"
+        ).fetchall()
+        ro.close()
+        assert rows == [(2,)]
+
+    def test_search_vector_builds_index_from_published_cache(self, tmp_path, monkeypatch):
+        import lib.services.cache_provider_impl as cp
+
+        target = tmp_path / "out.duckdb"
+        store = AuditMemoryStore(
+            cache_path="",
+            publish_path=str(target),
+            schema="oarb",
+            tables=["audits"],
+            vector_db_table="oarb.audit_vectors",
+        )
+        store.open()
+        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        assert store.publish() is True
+        store.close()
+
+        provider = cp.PostgresDuckDbProvider(
+            schema="oarb",
+            cache_path=str(target),
+            vector_db_table="oarb.audit_vectors",
+            vector_store_table="",  # у навыка нет PG store
+            embedding_base_url="",
+        )
+        monkeypatch.setattr(cp, "get_embedding", lambda *a, **k: _vec(0))
+        try:
+            res = provider.search_vector("тест", index_name="audits_index", top_k=1)
+            assert provider._search_error is None
+            assert len(res) == 1
+            assert res[0].pk_value == 1
+            assert res[0].source == "audits_index"
+            assert res[0].score == pytest.approx(1.0)
+        finally:
+            provider.close()
+
+    def test_search_vector_dimension_mismatch(self, tmp_path, monkeypatch):
+        import lib.services.cache_provider_impl as cp
+
+        target = tmp_path / "out.duckdb"
+        store = AuditMemoryStore(
+            cache_path="",
+            publish_path=str(target),
+            schema="oarb",
+            tables=["audits"],
+            vector_db_table="oarb.audit_vectors",
+        )
+        store.open()
+        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        assert store.publish() is True
+        store.close()
+
+        provider = cp.PostgresDuckDbProvider(
+            schema="oarb",
+            cache_path=str(target),
+            vector_db_table="oarb.audit_vectors",
+            vector_store_table="",
+            embedding_base_url="",
+        )
+        monkeypatch.setattr(cp, "get_embedding", lambda *a, **k: [0.1, 0.2, 0.3])
+        try:
+            res = provider.search_vector("тест", index_name="audits_index")
+            assert res == []
+            assert "Размерность" in (provider._search_error or "")
+        finally:
+            provider.close()
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +342,29 @@ class TestPublish:
         store.open()
         assert store.publish() is True
         assert not target.exists()
+        store.close()
+
+    def test_publish_force_recreates_when_not_dirty(self, tmp_path):
+        target = tmp_path / "out.duckdb"
+        store = AuditMemoryStore(
+            cache_path="",
+            publish_path=str(target),
+            schema="oarb",
+            tables=["audits"],
+        )
+        store.open()
+        # нет данных (store не грязный) — обычный publish no-op, force — создаёт снимок
+        assert store.publish() is True
+        assert not target.exists()
+        assert store.publish(force=True) is True
+        assert target.exists()
+        assert store.get_stats()["dirty"] is False
+        store.close()
+
+    def test_publish_force_noop_without_publish_path(self):
+        store = AuditMemoryStore(cache_path="", schema="oarb")
+        store.open()
+        assert store.publish(force=True) is True
         store.close()
 
     def test_publish_skips_missing_tables(self, tmp_path):
