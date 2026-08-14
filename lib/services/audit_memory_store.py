@@ -725,6 +725,7 @@ class AuditMemoryStore:
 
             import os
 
+            counts: Dict[str, int] = {}
             try:
                 tmp_literal = "'" + str(tmp).replace("'", "''") + "'"
                 self._conn.execute(f"ATTACH {tmp_literal} AS __out (READ_WRITE)")
@@ -747,6 +748,10 @@ class AuditMemoryStore:
                             f'AS SELECT * FROM "{schema}"."{name}"'
                         )
                         copied.add((schema, name))
+                        row_count = self._conn.execute(
+                            f'SELECT COUNT(*) FROM __out."{schema}"."{name}"'
+                        ).fetchone()[0]
+                        counts[f"{schema}.{name}"] = int(row_count)
                     # метаданные схемы (комментарии) — если есть что копировать
                     meta_exists = self._conn.execute(
                         f"SELECT 1 FROM information_schema.tables "
@@ -769,6 +774,17 @@ class AuditMemoryStore:
                 self._dirty = False
                 self._publishes += 1
                 self._last_publish_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                if counts:
+                    for table in sorted(counts):
+                        print(
+                            f"[memory_store] published {table}: {counts[table]} rows",
+                            file=sys.stderr,
+                        )
+                    print(
+                        f"[memory_store] cache snapshot -> {target} "
+                        f"({len(counts)} tables, {sum(counts.values())} rows total)",
+                        file=sys.stderr,
+                    )
                 return True
             except OSError as e:
                 # целевой файл открыт читателем (CLI) — повтор в следующем цикле
