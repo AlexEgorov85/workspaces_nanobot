@@ -525,7 +525,7 @@ class DbLoggingService:
         После успешного ``connect`` выполняется ``_ensure_schema`` —
         проверка существования таблиц логов. Если таблицы нет — соединение
         закрывается и попытка повторяется с backoff; события в это время
-        уходят в fallback-JSONL. Сервис DDL не выполняет.
+        выбрасываются (счётчик ``failed``). Сервис DDL не выполняет.
 
         При неудаче ``connect`` — экспоненциальный backoff
         (1с → 2с → 4с → ... → 60с) внутри ``while self._running``,
@@ -583,8 +583,8 @@ class DbLoggingService:
         ``agent_gateway_logs`` (и индексы) должны быть созданы миграциями
         заранее (``sql/created_tables.sql`` / ``lib/services/sql/*.sql``).
         Если таблица логов отсутствует — поднимается исключение; ``_connect``
-        логирует его (``last_error`` + ``logger.error``), а события уходят в
-        fallback-JSONL (``_flush_to_fallback``).
+        логирует его (``last_error`` + ``logger.error``), а события
+        выбрасываются (счётчик ``failed``).
 
         Имя таблицы берётся из конструктора (``table_name``, параметр), а не
         хардкодится. Инлайн-DDL в коде нет и не выполняется.
@@ -622,7 +622,7 @@ class DbLoggingService:
         ``payload``/``metadata`` как ``psycopg2.extras.Json`` (→ JSONB).
 
         При исключении (битый JSONB, отвалившееся соединение, deadlock):
-          * батч целиком уходит в ``_flush_to_fallback`` (не теряем);
+          * батч целиком выбрасывается (``failed += len(batch)``);
           * ``connected = False`` → следующий ``_flush_batch`` начнётся
             с попытки ``_connect()``.
 
@@ -657,27 +657,28 @@ class DbLoggingService:
                 self._stats["failed"] += len(batch)
                 self._stats["last_error"] = f"flush: {exc}"
                 self._stats["connected"] = False
-            # Fallback в файл — события не потеряются
-            self._flush_to_fallback(batch)
 
     def _handle_question_run(self, conn: Any, rec: _QuestionRunRecord) -> None:
         """Обработать контекст вопроса: upsert в agent_question_runs.
 
-        Если соединения нет — попробуем подключиться; при неудаче пишем
-        запись в fallback-JSONL (``_question_run_fallback``), не теряя её.
-        При ошибке upsert — тоже в fallback, ``connected = False``.
+        Если соединения нет — попробуем подключиться; при неудаче запись
+        выбрасывается (``failed++``), JSONL-файл не пишется. При ошибке
+        upsert — ``connected = False``.
         """
         if conn is None:
             conn = self._connect()
-        if conn is not None:
-            try:
-                self._upsert_question_run(conn, rec)
-                return
-            except Exception as exc:
-                with self._state_lock:
-                    self._stats["last_error"] = f"question_run upsert: {exc}"
-                    self._stats["connected"] = False
-        self._question_run_fallback(rec)
+        if conn is None:
+            with self._state_lock:
+                self._stats["failed"] += 1
+                self._stats["last_error"] = "question_run: нет соединения с БД"
+            return
+        try:
+            self._upsert_question_run(conn, rec)
+        except Exception as exc:
+            with self._state_lock:
+                self._stats["failed"] += 1
+                self._stats["last_error"] = f"question_run upsert: {exc}"
+                self._stats["connected"] = False
 
     def _upsert_question_run(self, conn: Any, rec: _QuestionRunRecord) -> None:
         """Upsert контекста вопроса в agent_question_runs (без ON CONFLICT).
