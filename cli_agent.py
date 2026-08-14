@@ -141,7 +141,7 @@ def _configure_logging(settings) -> None:
 
 
 def _migrate_cron_store(config) -> None:
-    """Перенос cron-задач из ``~/.nanobot/cron/`` в workspace."""
+    """Перенос cron-задач из глобальной cron-директории nanobot в workspace."""
     try:
         from nanobot.config.paths import get_cron_dir  # type: ignore
         legacy = get_cron_dir() / "jobs.json"
