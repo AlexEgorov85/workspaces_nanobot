@@ -37,7 +37,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 # Подключаем корень проекта и workspace/ в sys.path — там лежат utils.db, config и т.д.
-_ROOT = Path(__file__).resolve().parents[1]  # .nanobot/
+_ROOT = Path(__file__).resolve().parents[1]  # корень проекта
 _WORKSPACE = _ROOT / "workspace"
 for p in (str(_WORKSPACE), str(_ROOT)):
     if p not in sys.path:
