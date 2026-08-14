@@ -54,6 +54,15 @@ def main() -> None:
     first_sync_event: "asyncio.Event | None" = None
     if ctx.audit_sync_service is not None and ctx.audit_memory_store is not None:
         ctx.audit_memory_store.open()
+        # Пересоздаём снапшот при каждом старте: удаляем устаревший файл,
+        # чтобы CLI/skill не читали данные с прошлого запуска, пока
+        # initial_load не заполнит свежий снимок заново.
+        _old_snapshot = ctx.audit_memory_store.get_stats().get("publish_path")
+        if _old_snapshot:
+            try:
+                Path(_old_snapshot).unlink(missing_ok=True)
+            except OSError:
+                pass
         ctx.audit_sync_service.set_on_new_records_callback(
             ctx.audit_memory_store.upsert_records
         )
@@ -65,15 +74,21 @@ def main() -> None:
         prev_cb = getattr(ctx.audit_sync_service, "_on_sync_callback", None)
         first_sync_event = asyncio.Event()
         memory_store = ctx.audit_memory_store
+        _first_sync_done = False
 
         def _on_first_sync() -> None:
             if first_sync_event is not None:
                 first_sync_event.set()
 
         def _wrapped() -> None:
+            nonlocal _first_sync_done
             _on_first_sync()
             try:
-                memory_store.publish()
+                # Первая публикация — принудительная: снапшот пересоздаётся
+                # даже если initial_load не нашёл ни одной строки (иначе
+                # старый файл, удалённый при старте, не восстановится).
+                memory_store.publish(force=not _first_sync_done)
+                _first_sync_done = True
             except Exception:
                 pass
             if prev_cb is not None:
