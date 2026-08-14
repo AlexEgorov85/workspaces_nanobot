@@ -71,8 +71,15 @@ def fetchone(sql, *args):
 # EMBEDDING
 # =============================================================================
 
-def _get_embeddings(text: str, retries: int = 3) -> Optional[list[float]]:
-    """Получить эмбеддинг для ОДНОГО текста через Ollama /api/embed."""
+def _get_embedding(text: str, retries: int = 3) -> Optional[list[float]]:
+    """Получить эмбеддинг для ОДНОГО текста через Ollama /api/embed.
+
+    Ollama /api/embed принимает input как строку или список строк и всегда
+    возвращает {"embeddings": [[...]]}. Здесь мы шлём строку и берём первый
+    вектор из ответа. Если ответ содержит больше одного вектора
+    (нестандартное поведение сервера) — берём первый и логируем предупреждение,
+    чтобы ни один текст не был пропущен молча.
+    """
     cfg = read_embedding_config(_CFG)
     url = cfg.get("base_url")
     model = cfg.get("model", "mxbai-embed-large:latest")
@@ -93,7 +100,15 @@ def _get_embeddings(text: str, retries: int = 3) -> Optional[list[float]]:
 
             embeddings = data.get("embeddings")
             if isinstance(embeddings, list) and len(embeddings) > 0:
-                return embeddings[0]
+                first = embeddings[0]
+                if not isinstance(first, list):
+                    print(f"  Неожиданный формат ответа эмбеддинга: "
+                          f"ожидался list[float], получено {type(first).__name__}")
+                    return None
+                if len(embeddings) > 1:
+                    print(f"  WARN: сервер вернул {len(embeddings)} векторов "
+                          f"на 1 текст, используем первый")
+                return first
 
             print(f"  Пустой ответ эмбеддинга")
             return None
@@ -362,7 +377,7 @@ def build_index(
         if idx == 1 or idx % max(batch_size, 1) == 0 or idx == len(all_chunks):
             print(f"  Прогресс: {idx}/{len(all_chunks)} эмбеддингов...")
 
-        emb = _get_embeddings(text)
+        emb = _get_embedding(text)
         if emb is None or not isinstance(emb, list) or len(emb) == 0:
             print(f"    ! Ошибка получения эмбеддинга для pk={chunk['pk']} "
                   f"chunk={chunk['chunk_index'] + 1}/{chunk['chunk_count']}")
