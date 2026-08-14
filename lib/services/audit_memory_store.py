@@ -190,6 +190,7 @@ class AuditMemoryStore:
         vector_db_table: str = "",
         embedding_base_url: str = "",
         embedding_model: str = "mxbai-embed-large:latest",
+        embedding_dimension: int = 1024,
         embedding_timeout_sec: float = 60.0,
     ) -> None:
         self._cache_path = cache_path or ""      # строка; пустая => in-memory DuckDB
@@ -199,6 +200,7 @@ class AuditMemoryStore:
         self._vector_db_table = vector_db_table or ""
         self._embedding_base_url = embedding_base_url
         self._embedding_model = embedding_model or "mxbai-embed-large:latest"
+        self._embedding_dimension = int(embedding_dimension or 1024)
         self._embedding_timeout_sec = float(embedding_timeout_sec)
 
         self._lock = threading.RLock()
@@ -676,7 +678,9 @@ class AuditMemoryStore:
     # Публикация снимка для навыка (CLI читает файл на чтение)
     # ------------------------------------------------------------------
 
-    def publish(self, tables: Optional[List[str]] = None) -> bool:
+    def publish(
+        self, tables: Optional[List[str]] = None, *, force: bool = False
+    ) -> bool:
         """Атомарно записать снимок таблиц в ``publish_path``.
 
         Навык (CLI) открывает этот файл на чтение. Gateway НЕ держит его
@@ -685,19 +689,27 @@ class AuditMemoryStore:
         блокировок DuckDB (один писатель на файл) не возникает.
 
         Если данных с прошлой публикации не менялось (``_dirty``) или
-        ``publish_path`` не задан — метод ничего не делает (no-op True).
+        ``publish_path`` не задан — метод ничего не делает (no-op True) —
+        кроме случая ``force=True``, когда снимок пересоздаётся целиком
+        из текущего состояния кеша (используется при старте gateway, чтобы
+        файл не оставался устаревшим).
         При неудаче замены (файл занят читателем) снимок останется грязным
         и будет повторён в следующем цикле.
 
         Args:
             tables: какие таблицы включить в снимок (по умолчанию — конфиг).
+            force: пересоздать снимок, даже если данные не менялись.
         """
         if not self._publish_path:
             return True
         with self._lock:
-            if self._conn is None or not self._dirty:
+            if self._conn is None or (not self._dirty and not force):
                 return True
             out = [t for t in (tables or self._tables or []) if t]
+            # Навык работает только со своим снимком — ему нужны и векторные
+            # данные (oarb.audit_vectors), чтобы строить FAISS-индекс локально.
+            if self._vector_db_table and self._vector_db_table not in out:
+                out.append(self._vector_db_table)
             if not out:
                 self._dirty = False
                 return True
@@ -844,9 +856,6 @@ class AuditMemoryStore:
 
     def _load_source_index(self, source: str) -> tuple[Any, Optional[dict]]:
         """Прочитать векторы source из DuckDB и построить FAISS-индекс."""
-        import numpy as np
-        import faiss
-
         if not self._vector_db_table:
             return None, None
         schema, name = _split_table(self._vector_db_table)
@@ -862,42 +871,23 @@ class AuditMemoryStore:
         if not rows:
             return None, None
 
-        dimension = len(rows[0][9])
-        vectors = np.zeros((len(rows), dimension), dtype=np.float32)
-        metadata: dict = {"metadata": {}}
-
-        for i, row in enumerate(rows):
-            emb = row[9]
-            if isinstance(emb, (list, tuple)) and len(emb) == dimension:
-                vectors[i] = np.array(emb, dtype=np.float32)
-            else:
-                return None, None
-
-            row_data = row[8]
-            if isinstance(row_data, str):
-                try:
-                    row_data = json.loads(row_data)
-                except (json.JSONDecodeError, TypeError):
-                    row_data = {}
-            elif isinstance(row_data, dict):
-                pass
-            else:
-                row_data = {}
-
-            metadata["metadata"][str(i)] = {
-                "content": row[2] or row[3] or "",
-                "search_text": row[3] or "",
-                "source": row[1] or source,
-                "table": row[4] or "",
-                "pk_value": row[5] if row[5] is not None else i,
-                "chunk_index": row[6] or 0,
-                "chunk_count": row[7] or 1,
-                "row": row_data or {},
+        records = [
+            {
+                "source": r[1] or source,
+                "content": r[2] or "",
+                "search_text": r[3] or "",
+                "table": r[4] or "",
+                "pk_value": r[5] if r[5] is not None else i,
+                "chunk_index": r[6] or 0,
+                "chunk_count": r[7] or 1,
+                "row_data": r[8],
+                "embedding": r[9],
             }
+            for i, r in enumerate(rows)
+        ]
+        from lib.utils.duckdb_query import build_faiss_index
 
-        index = faiss.IndexFlatIP(dimension)
-        index.add(vectors)
-        return index, metadata
+        return build_faiss_index(records)
 
     def search_vector(
         self,

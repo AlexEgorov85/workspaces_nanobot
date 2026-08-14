@@ -35,27 +35,25 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-import httpx
-
 # Принудительно UTF-8 для консоли (надо chcp 65001 в PowerShell)
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-_ROOT = Path(__file__).resolve().parents[1]                    # .nanobot/
+_ROOT = Path(__file__).resolve().parents[1]                    # корень проекта
 _SKILL_ROOT = _ROOT / "workspace" / "skills" / "audit_analyzer"  # корень навыка (кэш/индексы)
 for p in [str(_ROOT), str(_SKILL_ROOT)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
 from config import SETTINGS
-from lib.services.cache_provider_impl import (
-    build_cache_provider as _build_provider,
-    read_vector_index_config,
-    read_embedding_config,
-)
+from lib.services.cache_provider_impl import read_vector_index_config
 from lib.services.text_splitter import build_chunks
+from lib.services.vector_index_service import (
+    VectorIndexBuildService,
+    get_embedding,
+)
 from utils.db import configure, execute, fetch, resolve_dsn
 
 _CFG = SETTINGS.get("skills", {}).get("audit_analyzer", {})
@@ -65,64 +63,6 @@ def fetchone(sql, *args):
     """Вернуть первую строку как dict или None."""
     rows = fetch(sql, *args)
     return rows[0] if rows else None
-
-
-# =============================================================================
-# EMBEDDING
-# =============================================================================
-
-def _get_embedding(text: str, retries: int = 3) -> Optional[list[float]]:
-    """Получить эмбеддинг для ОДНОГО текста через Ollama /api/embed.
-
-    Ollama /api/embed принимает input как строку или список строк и всегда
-    возвращает {"embeddings": [[...]]}. Здесь мы шлём строку и берём первый
-    вектор из ответа. Если ответ содержит больше одного вектора
-    (нестандартное поведение сервера) — берём первый и логируем предупреждение,
-    чтобы ни один текст не был пропущен молча.
-    """
-    cfg = read_embedding_config(_CFG)
-    url = cfg.get("base_url")
-    model = cfg.get("model", "mxbai-embed-large:latest")
-    timeout_sec = float(_CFG.get("embedding_http_timeout_sec", 60))
-
-    if not url:
-        print("  ОШИБКА: embedding base_url не задан в config.json")
-        return None
-
-    payload = {"model": model, "input": text}
-
-    for attempt in range(1, retries + 1):
-        try:
-            with httpx.Client(timeout=timeout_sec) as client:
-                resp = client.post(url, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-
-            embeddings = data.get("embeddings")
-            if isinstance(embeddings, list) and len(embeddings) > 0:
-                first = embeddings[0]
-                if not isinstance(first, list):
-                    print(f"  Неожиданный формат ответа эмбеддинга: "
-                          f"ожидался list[float], получено {type(first).__name__}")
-                    return None
-                if len(embeddings) > 1:
-                    print(f"  WARN: сервер вернул {len(embeddings)} векторов "
-                          f"на 1 текст, используем первый")
-                return first
-
-            print(f"  Пустой ответ эмбеддинга")
-            return None
-
-        except Exception as e:
-            if attempt < retries:
-                delay = 2 ** attempt
-                print(f"  Retry {attempt}/{retries} через {delay}с: {e}")
-                time.sleep(delay)
-            else:
-                print(f"  ОШИБКА эмбеддинга после {retries} попыток: {e}")
-                return None
-
-    return None
 
 
 # =============================================================================
@@ -194,6 +134,36 @@ def _normalize_cols(embedding_cols: list) -> list[str]:
         elif isinstance(c, str):
             out.append(c)
     return out
+
+
+def _rebuild_faiss(index_name: str, db_table: str, rebuilt_only_deletion: bool = False) -> None:
+    """Пересобрать FAISS-индекс через единый сервисный слой (vector_index_service).
+
+    Инвалидирует кэш провайдера, читает векторы ``index_name`` из
+    ``db_table``, строит индекс и сохраняет blob в
+    ``public.agent_vector_index_store``. faiss/numpy отсутствуют — не фатально:
+    векторы уже в БД, поиск просто будет недоступен до установки зависимостей.
+    """
+    try:
+        svc = VectorIndexBuildService(_CFG, str(_SKILL_ROOT))
+        count = svc.rebuild_and_store(index_name, db_table)
+    except (ImportError, ModuleNotFoundError) as exc:
+        print(f"  ! ПРЕДУПРЕЖДЕНИЕ: FAISS-индекс для '{index_name}' не собран — "
+              f"отсутствует зависимость ({exc.__class__.__name__}: {exc}). "
+              f"Поиск через vector_mode будет работать только после установки faiss-cpu + numpy.")
+        return
+    except Exception as exc:
+        print(f"  ! ОШИБКА сборки FAISS-индекса для '{index_name}': "
+              f"{exc.__class__.__name__}: {exc}")
+        return
+    if count is None:
+        print(f"  FAISS-индекс '{index_name}' не пересобран: нет векторов в {db_table}")
+        return
+    if rebuilt_only_deletion:
+        print(f"  FAISS-индекс '{index_name}' пересобран (только удаление): {count} векторов")
+    else:
+        print(f"  FAISS-индекс '{index_name}' собран в памяти и сохранён в "
+f"public.agent_vector_index_store ({count} векторов)")
 
 
 # =============================================================================
@@ -322,16 +292,7 @@ def build_index(
     if not to_insert:
         changed = bool(to_delete)
         if changed and not dry_run:
-            try:
-                _build_provider(_CFG, str(_SKILL_ROOT)).invalidate_cache(index_name)
-                _build_provider(_CFG, str(_SKILL_ROOT)).rebuild_and_store_index(index_name, db_table)
-                print(f"  FAISS-индекс '{index_name}' пересобран (только удаление)")
-            except (ImportError, ModuleNotFoundError) as exc:
-                print(f"  ! ПРЕДУПРЕЖДЕНИЕ: FAISS-индекс для '{index_name}' не пересобран — "
-                      f"отсутствует зависимость ({exc.__class__.__name__}: {exc})")
-            except Exception as exc:
-                print(f"  ! ОШИБКА пересборки FAISS-индекса для '{index_name}': "
-                      f"{exc.__class__.__name__}: {exc}")
+            _rebuild_faiss(index_name, db_table, rebuilt_only_deletion=True)
         return {
             "index_name": index_name,
             "total": 0,
@@ -377,7 +338,7 @@ def build_index(
         if idx == 1 or idx % max(batch_size, 1) == 0 or idx == len(all_chunks):
             print(f"  Прогресс: {idx}/{len(all_chunks)} эмбеддингов...")
 
-        emb = _get_embedding(text)
+        emb = get_embedding(text)
         if emb is None or not isinstance(emb, list) or len(emb) == 0:
             print(f"    ! Ошибка получения эмбеддинга для pk={chunk['pk']} "
                   f"chunk={chunk['chunk_index'] + 1}/{chunk['chunk_count']}")
@@ -425,18 +386,7 @@ def build_index(
     print(f"  Вставлено векторов: {inserted}, удалено pk: {deleted}, ошибок: {errors}")
 
     if not dry_run and (inserted > 0 or deleted > 0):
-        try:
-            provider = _build_provider(_CFG, str(_SKILL_ROOT))
-            provider.invalidate_cache(index_name)
-            provider.rebuild_and_store_index(index_name, db_table)
-            print(f"  FAISS-индекс '{index_name}' собран в памяти и сохранён в public.agent_vector_index_store")
-        except (ImportError, ModuleNotFoundError) as exc:
-            print(f"  ! ПРЕДУПРЕЖДЕНИЕ: FAISS-индекс для '{index_name}' не собран — "
-                  f"отсутствует зависимость ({exc.__class__.__name__}: {exc}). "
-                  f"Поиск через vector_mode будет работать только после установки faiss-cpu + numpy.")
-        except Exception as exc:
-            print(f"  ! ОШИБКА сборки FAISS-индекса для '{index_name}': "
-                  f"{exc.__class__.__name__}: {exc}")
+        _rebuild_faiss(index_name, db_table)
 
     return {
         "index_name": index_name,
@@ -518,8 +468,9 @@ def main():
                              "и запускает синхронизацию только если данные изменились")
     parser.add_argument("--dry-run", action="store_true",
                         help="Режим проверки без вставки")
-    parser.add_argument("--db-table", default="oarb.audit_vectors",
-                        help="Таблица векторов в БД")
+    parser.add_argument("--db-table",
+                        default=None,
+                        help="Таблица векторов в БД (default из конфига mode_vector_db_table)")
 
     args = parser.parse_args()
 
@@ -538,12 +489,19 @@ def main():
         sys.exit(1)
     configure(dsn)
 
+    from lib.services.audit_settings import audit_vector_settings
+    vec_cfg = audit_vector_settings()
+    db_schema, db_table = vec_cfg.vector_schema_table
+    if not args.db_table:
+        args.db_table = vec_cfg.mode_vector_db_table
+
     row = fetch(
         "SELECT 1 FROM information_schema.tables "
-        "WHERE table_schema = 'oarb' AND table_name = 'audit_vectors'"
+        "WHERE table_schema = %s AND table_name = %s",
+        db_schema, db_table,
     )
     if not row:
-        print("ОШИБКА: таблица oarb.audit_vectors не создана")
+        print(f"ОШИБКА: таблица {vec_cfg.mode_vector_db_table} не создана")
         print("Сначала выполните sql/create_audit_vectors_table_gp.sql")
         sys.exit(1)
 

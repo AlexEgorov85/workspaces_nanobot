@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 
 # Пути к проекту и workspace — чтобы `from utils.db import ...` работал
 # независимо от рабочего каталога.
-_ROOT = Path(__file__).resolve().parents[2]        # .nanobot/
+_ROOT = Path(__file__).resolve().parents[2]        # корень проекта
 _WORKSPACE = _ROOT / "workspace"
 for _p in (str(_ROOT), str(_WORKSPACE)):
     if _p not in sys.path:
@@ -72,18 +72,21 @@ def get_embedding(text: str, base_url: str = "", model: str = "mxbai-embed-large
 
 def read_embedding_config(cfg: dict) -> Dict[str, Any]:
     """Параметры Ollama-эмбеддинга из конфиг-секции навыка."""
+    from lib.services.audit_settings import audit_vector_settings
+    s = audit_vector_settings()
     return {
-        "base_url": cfg.get("embedding_base_url", "http://localhost:11434/api/embed"),
-        "model": cfg.get("embedding_model", "mxbai-embed-large:latest"),
-        "dimension": int(cfg.get("embedding_dimension", 1024)),
+        "base_url": s.embedding_base_url,
+        "model": s.embedding_model,
+        "dimension": s.embedding_dimension,
     }
 
 
 def read_vector_index_config(cfg: dict) -> Dict[str, Any]:
     """Конфиг векторных индексов: таблица agent_vector_index_config → fallback в настройках."""
+    from lib.services.audit_settings import audit_vector_settings
     from utils.db import fetch
 
-    table = cfg.get("mode_vector_index_config_table", "public.agent_vector_index_config")
+    table = audit_vector_settings().mode_vector_index_config_table
     try:
         rows = fetch(
             "SELECT index_name, source_table, src_table, pk_column, "
@@ -124,28 +127,29 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> "PostgresDuckDbProvid
     """
     base = Path(base_dir) if base_dir else Path.cwd()
 
-    cache_path = cfg.get("in_memory_cache_path", "cache/audit_cache.duckdb") or ""
+    from lib.services.audit_settings import audit_vector_settings
+    s = audit_vector_settings()
+
+    cache_path = s.in_memory_cache_path
     if cache_path and not Path(cache_path).is_absolute():
         cache_path = str(base / cache_path)
 
-    index_path = cfg.get("mode_vector_index_path", "") or ""
-    if not index_path:
-        index_path = str(Path.home() / ".nanobot" / "vectors" / "audits_index")
-    elif not Path(index_path).is_absolute():
+    index_path = s.vector_index_default_path or ""
+    if index_path and not Path(index_path).is_absolute():
         index_path = str(base / index_path)
 
     emb = read_embedding_config(cfg)
-    tables = cfg.get("db_tables", [])
-    additional = cfg.get("db_additional_tables", [])
+    tables = s.db_tables
+    additional = s.db_additional_tables
     return PostgresDuckDbProvider(
-        schema=cfg.get("db_schema", "oarb"),
+        schema=s.db_schema,
         tables=list(tables) if isinstance(tables, (list, tuple)) else None,
         additional_tables=_normalize_additional_tables(additional),
         cache_path=cache_path,
-        vector_db_table=cfg.get("mode_vector_db_table", ""),
+        vector_db_table=s.mode_vector_db_table,
         vector_index_path=index_path,
         vector_indexes=read_vector_index_config(cfg),
-        vector_store_table=cfg.get("mode_vector_store_table", "public.agent_vector_index_store"),
+        vector_store_table=s.mode_vector_store_table,
         embedding_base_url=emb.get("base_url", ""),
         embedding_model=emb.get("model", "mxbai-embed-large:latest"),
     )
@@ -651,8 +655,6 @@ class PostgresDuckDbProvider(CacheProvider):
     def _load_vectors_from_db(
         self, table_name: str, source: Optional[str] = None
     ) -> tuple[Any, Optional[dict]]:
-        import numpy as np
-        import faiss
         from utils.db import fetch
 
         where = " WHERE source = %s" if source else ""
@@ -671,38 +673,80 @@ class PostgresDuckDbProvider(CacheProvider):
         if not rows:
             return None, None
 
-        dimension = len(rows[0]["embedding"])
-        vectors = np.zeros((len(rows), dimension), dtype=np.float32)
-        metadata: dict = {"metadata": {}}
+        records = [
+            {
+                "source": r.get("source") or source or "",
+                "content": r.get("content") or "",
+                "search_text": r.get("search_text") or "",
+                "table": r.get("table") or "",
+                "pk_value": r.get("pk_value"),
+                "chunk_index": r.get("chunk_index") or 0,
+                "chunk_count": r.get("chunk_count") or 1,
+                "row_data": r.get("row_data"),
+                "embedding": r.get("embedding"),
+            }
+            for r in rows
+        ]
+        from lib.utils.duckdb_query import build_faiss_index
 
-        for i, row in enumerate(rows):
-            emb = row["embedding"]
-            if isinstance(emb, (list, tuple)):
-                vectors[i] = np.array(emb, dtype=np.float32)
-            else:
+        return build_faiss_index(records)
+
+    def _load_index_from_cache(
+        self, source: str,
+    ) -> tuple[Any, Optional[dict]]:
+        """Построить FAISS-индекс из локального DuckDB-кэша навыка.
+
+        Навык работает только со своим снимком (``audit_cache.duckdb``) — без
+        PostgreSQL. Индекс строится из ``oarb.audit_vectors`` файла кэша и
+        кешируется в ``_index_cache``.
+        """
+        if not self._vector_db_table:
+            return None, None
+        if self._conn is None:
+            if not self.open_cache():
                 return None, None
 
-            row_data = row.get("row_data")
-            if isinstance(row_data, str):
-                try:
-                    row_data = json.loads(row_data)
-                except (json.JSONDecodeError, TypeError):
-                    row_data = {}
+        cached = self._index_cache.get(source)
+        if cached is not None:
+            return cached
 
-            metadata["metadata"][str(i)] = {
-                "content": row.get("content") or row.get("search_text") or "",
-                "search_text": row.get("search_text") or "",
-                "source": row.get("source") or source or "",
-                "table": row.get("table") or "",
-                "pk_value": row.get("pk_value") or i,
-                "chunk_index": row.get("chunk_index", 0),
-                "chunk_count": row.get("chunk_count", 1),
-                "row": row_data or {},
+        schema, name = (
+            self._vector_db_table.split(".", 1)
+            if "." in self._vector_db_table else ("", self._vector_db_table)
+        )
+        full = f'"{schema}"."{name}"' if schema else f'"{name}"'
+        try:
+            rows = self._conn.execute(
+                f'SELECT id, source, content, search_text, "table", pk_value, '
+                f'chunk_index, chunk_count, row_data, embedding '
+                f'FROM {full} WHERE source = ? ORDER BY id',
+                [source],
+            ).fetchall()
+        except Exception:
+            return None, None
+        if not rows:
+            return None, None
+
+        records = [
+            {
+                "source": r[1] or source,
+                "content": r[2] or "",
+                "search_text": r[3] or "",
+                "table": r[4] or "",
+                "pk_value": r[5] if r[5] is not None else i,
+                "chunk_index": r[6] or 0,
+                "chunk_count": r[7] or 1,
+                "row_data": r[8],
+                "embedding": r[9],
             }
+            for i, r in enumerate(rows)
+        ]
+        from lib.utils.duckdb_query import build_faiss_index
 
-        index = faiss.IndexFlatIP(dimension)
-        index.add(vectors)
-        return index, metadata
+        idx, meta = build_faiss_index(records)
+        if idx is not None:
+            self._index_cache[source] = (idx, meta)
+        return idx, meta
 
     def _load_index(
         self,
@@ -785,20 +829,27 @@ class PostgresDuckDbProvider(CacheProvider):
             self._search_error = "Не установлены зависимости: faiss и numpy. Установите: pip install faiss-cpu numpy"
             return []
 
-        vpath = index_path or self._vector_index_path
-        idx_path = str(Path(vpath).resolve()) if vpath else ""
-        idx, meta = self._load_index(idx_path, index_name, db_table=self._vector_db_table)
+        # Индекс строится ТОЛЬКО из локального снимка кэша навыка (без PostgreSQL).
+        idx, meta = self._load_index_from_cache(index_name)
         if idx is None:
-            if self._vector_db_table:
-                self._search_error = f"Индекс '{index_name}' не найден в таблице {self._vector_db_table}"
-            else:
-                self._search_error = f"Индекс '{index_name}' не найден в {idx_path or 'файлах'}"
+            cache_txt = str(self._cache_path) if self._cache_path else "нет кэша"
+            self._search_error = (
+                f"Индекс '{index_name}' не найден в кэше ({cache_txt})"
+            )
             return []
 
         embedding = get_embedding(query, self._embedding_base_url, self._embedding_model,
                                   timeout_sec=self._embedding_timeout_sec)
         if embedding is None:
             self._search_error = "Не удалось получить эмбеддинг запроса."
+            return []
+
+        if idx.d != len(embedding):
+            self._search_error = (
+                f"Размерность индекса '{index_name}' ({idx.d}) не совпадает "
+                f"с размерностью эмбеддинга запроса ({len(embedding)}). Пересоберите "
+                f"снимок (gateway publish) той же моделью эмбеддинга."
+            )
             return []
 
         query_vec = np.array([embedding], dtype=np.float32)
@@ -826,14 +877,21 @@ class PostgresDuckDbProvider(CacheProvider):
             for r in results
         ]
 
-    def rebuild_and_store_index(self, source: str, db_table: str) -> None:
-        """Перестроить индекс для source и сохранить в store (для индексаторов)."""
+    def rebuild_and_store_index(self, source: str, db_table: str) -> Optional[int]:
+        """Перестроить индекс для source и сохранить в store (для индексаторов).
+
+        Returns:
+            Количество векторов построенного индекса, или ``None`` если данных
+            нет / индекс не собран.
+        """
         idx, meta = self._load_vectors_from_db(db_table, source=source)
         if idx is not None:
             self._save_index_to_store(source, idx, meta)
             self._index_cache.pop(source, None)
             print(f"[vector] Индекс '{source}' перестроен и сохранён в store "
                   f"({idx.ntotal} векторов)", file=sys.stderr)
+            return idx.ntotal
+        return None
 
     # -- resource --------------------------------------------------------
 

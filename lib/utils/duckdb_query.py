@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Callable, Dict, List, Optional
 
@@ -185,3 +186,57 @@ def group_vector_hits(
         r.pop("chunk_total", None)
 
     return results
+
+
+def build_faiss_index(
+    records: List[Dict[str, Any]],
+) -> tuple[Any, Optional[Dict[str, Any]]]:
+    """Построить FAISS ``IndexFlatIP`` + metadata из списка записей.
+
+    ``records`` — список словарей с ключами: ``source``, ``content``,
+    ``search_text``, ``table``, ``pk_value``, ``chunk_index``, ``chunk_count``,
+    ``row_data``, ``embedding``.
+
+    Возвращает ``(index, metadata)`` или ``(None, None)`` (пусто/несоответствие
+    размерности). Единая точка сборки FAISS для gateway-кэша и снимка навыка.
+    """
+    import numpy as np
+    import faiss
+
+    if not records:
+        return None, None
+    dimension = len(records[0]["embedding"])
+    vectors = np.zeros((len(records), dimension), dtype=np.float32)
+    metadata: Dict[str, Any] = {"metadata": {}}
+
+    for i, rec in enumerate(records):
+        emb = rec["embedding"]
+        if isinstance(emb, (list, tuple)) and len(emb) == dimension:
+            vectors[i] = np.array(emb, dtype=np.float32)
+        else:
+            return None, None
+
+        row_data = rec.get("row_data")
+        if isinstance(row_data, str):
+            try:
+                row_data = json.loads(row_data)
+            except (json.JSONDecodeError, TypeError):
+                row_data = {}
+        elif not isinstance(row_data, dict):
+            row_data = {}
+
+        metadata["metadata"][str(i)] = {
+            "content": rec.get("content") or rec.get("search_text") or "",
+            "search_text": rec.get("search_text") or "",
+            "source": rec.get("source") or "",
+            "table": rec.get("table") or "",
+            "pk_value": rec.get("pk_value") if rec.get("pk_value") is not None else i,
+            "chunk_index": rec.get("chunk_index") or 0,
+            "chunk_count": rec.get("chunk_count") or 1,
+            "row": row_data or {},
+        }
+
+    index = faiss.IndexFlatIP(dimension)
+    index.add(vectors)
+    return index, metadata
+

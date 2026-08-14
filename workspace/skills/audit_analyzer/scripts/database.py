@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Optional, Protocol, runtime_checkable
 
 _workspace_root = Path(__file__).resolve().parents[3]  # workspace/
-_nanobot_root = Path(__file__).resolve().parents[4]   # .nanobot/
+_nanobot_root = Path(__file__).resolve().parents[4]   # корень проекта
 for _p in [str(_nanobot_root), str(_workspace_root)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)

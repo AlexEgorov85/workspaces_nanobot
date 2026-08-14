@@ -755,81 +755,15 @@ class DbLoggingService:
             except Exception:
                 pass
 
-    def _question_run_fallback(self, rec: _QuestionRunRecord) -> None:
-        """Записать контекст вопроса в fallback-JSONL (если путь задан).
+    def _drop_batch(self, batch: List[LogEvent]) -> None:
+        """Выбросить батч, когда БД недоступна (без записи в JSONL-файл).
 
-        Используется, когда БД недоступна или upsert упал. Формат строки —
-        JSON с префиксом-маркером ``{"_qr": true, ...}``, чтобы можно было
-        отличить от событий agent_gateway_logs при re-import.
+        Увеличивает ``stats["failed"]`` и фиксирует ``last_error`` — скрытая
+        запись в файл не производится, событие считается потерянным.
         """
-        if not self._fallback_path:
-            return
-        try:
-            self._fallback_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._fallback_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "_qr": True,
-                    "request_id": rec.request_id,
-                    "session_id": rec.session_id,
-                    "user_id": rec.user_id,
-                    "chat_id": rec.chat_id,
-                    "channel": rec.channel,
-                    "parent_request_id": rec.parent_request_id,
-                    "agent_id": rec.agent_id,
-                    "parent_agent_id": rec.parent_agent_id,
-                    "is_subagent": rec.is_subagent,
-                    "status": rec.status,
-                    "summary": rec.summary,
-                    "question": rec.question,
-                    "response": rec.response,
-                    "media": rec.media,
-                    "update_only": rec.update_only,
-                }, ensure_ascii=False) + "\n")
-            with self._state_lock:
-                self._stats["fallback_written"] += 1
-        except Exception as exc:
-            with self._state_lock:
-                self._stats["failed"] += 1
-                self._stats["last_error"] = f"question_run fallback: {exc}"
-
-    def _flush_to_fallback(self, batch: List[LogEvent]) -> None:
-        """Сбросить батч в JSONL-файл ``self._fallback_path``.
-
-        Используется, когда:
-          * БД недоступна (psycopg2.connect упал);
-          * batch-вставка упала (битый JSON, deadlock, отвал соединения).
-
-        Формат строки — JSON (каждая ``LogEvent.id`` сохраняется, чтобы
-        можно было дедуплицировать при последующем re-import).
-
-        No-op если ``fallback_path`` не задан (тогда события просто
-        теряются — в логах это будет видно по ``stats["failed"]``).
-        """
-        if not self._fallback_path:
-            return
-        try:
-            self._fallback_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._fallback_path.open("a", encoding="utf-8") as f:
-                for e in batch:
-                    f.write(json.dumps({
-                        "id": e.id,
-                        "level": e.level,
-                        "event_type": e.event_type,
-                        "session_id": e.session_id,
-                        "channel": e.channel,
-                        "actor": e.actor,
-                        "summary": e.summary,
-                        "payload": e.payload,
-                        "metadata": e.metadata,
-                        "request_id": e.request_id,
-                        "name": e.name,
-                    }, ensure_ascii=False) + "\n")
-            with self._state_lock:
-                self._stats["fallback_written"] += len(batch)
-        except Exception as exc:
-            with self._state_lock:
-                self._stats["failed"] += len(batch)
-                self._stats["last_error"] = f"fallback: {exc}"
+        with self._state_lock:
+            self._stats["failed"] += len(batch)
+            self._stats["last_error"] = "flush: БД недоступна, батч выброшен"
 
     def _close(self, conn: Any) -> None:
         """Закрыть psycopg2-соединение (если оно было).
