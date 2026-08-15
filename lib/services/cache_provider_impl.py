@@ -36,6 +36,11 @@ for _p in (str(_ROOT), str(_WORKSPACE)):
 
 from lib.services.cache_provider import CacheProvider, SearchResult
 
+# Внутренняя таблица метаданных схемы (комментарии таблиц/колонок, PG-типы).
+# Та же структура, что в audit_memory_store, но в файле SQL-кэша навыка.
+_META_SCHEMA = "__nanobot_meta"
+_META_TABLE = "__schema_meta"
+
 
 # =============================================================================
 # СЛУЖЕБНЫЕ МОДУЛЬНЫЕ ФУНКЦИИ (используются провайдером и клиентами: gateway, навык)
@@ -214,6 +219,93 @@ def _store_meta(conn: Any, pg_conn: Any, schema: str, table_list: List[str]) -> 
     )
 
 
+def _capture_schema_meta(
+    conn: Any,
+    pg_conn: Any,
+    schema_pairs: List[tuple],
+) -> None:
+    """
+    Сохранить комментарии таблиц/колонок и исходные PG-типы в DuckDB-кэш.
+
+    ``schema_pairs`` — список ``(schema, [table, ...])``. Для каждой таблицы
+    из PostgreSQL снимаются ``COMMENT ON TABLE``/``COMMENT ON COLUMN`` и
+    ``data_type`` из ``information_schema``, результат кладётся в
+    ``__nanobot_meta.__schema_meta`` (строка с ``column_name = NULL`` — это
+    комментарий таблицы).
+
+    ``build_schema()`` (lib/utils/duckdb_query.py) подставляет эти комментарии
+    в промпт при формировании описания схемы, а ``pg_type`` (точнее инференса
+    DuckDB из CSV) использует вместо типов, выведенных ``read_csv_auto``.
+    """
+    conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{_META_SCHEMA}"')
+    conn.execute(f'DROP TABLE IF EXISTS "{_META_SCHEMA}"."{_META_TABLE}"')
+    conn.execute(
+        f'CREATE TABLE "{_META_SCHEMA}"."{_META_TABLE}" ('
+        "schema_name TEXT, table_name TEXT, column_name TEXT, "
+        "comment TEXT, pg_type TEXT)"
+    )
+
+    insert_rows: List[tuple] = []
+    for schema, table_list in schema_pairs:
+        if not table_list:
+            continue
+        cur = pg_conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT
+                    c.table_name,
+                    c.column_name,
+                    c.data_type,
+                    c.character_maximum_length,
+                    pgd.description AS column_comment,
+                    obj_description(pc.oid) AS table_comment
+                FROM information_schema.columns c
+                JOIN pg_class pc
+                    ON pc.relname = c.table_name
+                   AND pc.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = %s)
+                LEFT JOIN pg_catalog.pg_description pgd
+                    ON pgd.objsubid = c.ordinal_position
+                   AND pgd.objoid = pc.oid
+                WHERE c.table_schema = %s
+                  AND c.table_name = ANY(%s)
+                ORDER BY c.table_name, c.ordinal_position
+                """,
+                [schema, schema, table_list],
+            )
+            rows = cur.fetchall()
+        except Exception as e:
+            print(f"[LOAD] Не удалось снять схему-мета для {schema}: {e}",
+                  file=sys.stderr)
+            continue
+        finally:
+            cur.close()
+
+        per_table: Dict[str, tuple] = {}
+        for row in rows:
+            tbl, col, data_type, max_len, col_comment, table_comment = row
+            if tbl not in per_table:
+                per_table[tbl] = (table_comment, [])
+            col_type = data_type
+            if max_len and col_type in ("character varying", "character"):
+                col_type = f"varchar({max_len})"
+            per_table[tbl][1].append((col, col_type, col_comment))
+
+        for tbl, (table_comment, cols) in per_table.items():
+            if table_comment:
+                insert_rows.append((schema, tbl, None, table_comment, None))
+            for col, col_type, col_comment in cols:
+                insert_rows.append((schema, tbl, col, col_comment, col_type))
+
+    if insert_rows:
+        conn.executemany(
+            f'INSERT INTO "{_META_SCHEMA}"."{_META_TABLE}" '
+            "(schema_name, table_name, column_name, comment, pg_type) "
+            "VALUES (?, ?, ?, ?, ?)",
+            insert_rows,
+        )
+
+
 def _copy_table(
     pg_conn: Any,
     conn: Any,
@@ -334,6 +426,17 @@ def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
             _copy_table(pg_conn, conn, sch, tbl)
 
         _store_meta(conn, pg_conn, schema, table_list)
+
+        # Метаданные схемы (комментарии таблиц/колонок + исходные PG-типы)
+        # для основной и дополнительных схем — build_schema использует их при
+        # формировании описания таблиц в DuckDB-кэше.
+        schema_pairs: List[tuple] = [(schema, table_list)]
+        extra_by_schema: Dict[str, List[str]] = {}
+        for sch, tbl in additional_tables:
+            extra_by_schema.setdefault(sch, []).append(tbl)
+        schema_pairs.extend((sch, tbls) for sch, tbls in extra_by_schema.items())
+        _capture_schema_meta(conn, pg_conn, schema_pairs)
+
         print(f"[LOAD] Cache saved to {cache_path}", file=sys.stderr)
 
     finally:
