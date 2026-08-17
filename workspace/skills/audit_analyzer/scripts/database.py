@@ -25,7 +25,6 @@ PostgreSQL, когда in-memory кэш выключен.
     result = db.query_sql("SELECT * FROM oarb.audits LIMIT 5")
 """
 
-import re
 import sys
 import warnings
 from pathlib import Path
@@ -50,9 +49,6 @@ warnings.warn(
 _pg_dsn = resolve_dsn()
 if _pg_dsn:
     configure(_pg_dsn)
-
-# DuckDB не поддерживает TO_CHAR(date, 'Month') — переписываем в strftime.
-_REWRITE_TO_CHAR = re.compile(r"TO_CHAR\((\w+)\s*,\s*'Month'\)", re.IGNORECASE)
 
 
 @runtime_checkable
