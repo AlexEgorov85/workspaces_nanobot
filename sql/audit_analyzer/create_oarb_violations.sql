@@ -38,15 +38,3 @@ COMMENT ON COLUMN oarb.violations.responsible    IS 'Ответственное 
 COMMENT ON COLUMN oarb.violations.deadline       IS 'Плановая дата устранения.';
 COMMENT ON COLUMN oarb.violations.created_at     IS 'Время фиксации нарушения.';
 COMMENT ON COLUMN oarb.violations.updated_at     IS 'Время последнего изменения.';
-
-DO $body$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'oarb' AND indexname = 'idx_violations_audit_id'
-    ) THEN
-        CREATE INDEX idx_violations_audit_id
-            ON oarb.violations (audit_id);
-    END IF;
-END
-$body$;

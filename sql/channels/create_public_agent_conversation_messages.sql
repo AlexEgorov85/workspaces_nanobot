@@ -37,18 +37,3 @@ COMMENT ON COLUMN public.agent_conversation_messages.buttons    IS 'JSONB: ин�
 COMMENT ON COLUMN public.agent_conversation_messages.status     IS 'Статус: pending / processing / completed.';
 COMMENT ON COLUMN public.agent_conversation_messages.created_at IS 'Время создания сообщения.';
 COMMENT ON COLUMN public.agent_conversation_messages.updated_at IS 'Время последнего изменения (статус/reasoning).';
-
--- Индекс для поллера: новые user-сообщения со статусом pending.
-DO $body$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'public'
-          AND indexname  = 'idx_agent_conversation_messages_pending'
-    ) THEN
-        CREATE INDEX idx_agent_conversation_messages_pending
-            ON public.agent_conversation_messages (status, created_at)
-            WHERE status = 'pending';
-    END IF;
-END
-$body$;

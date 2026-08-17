@@ -41,29 +41,3 @@ COMMENT ON COLUMN oarb.audit_vectors.content_hash  IS 'MD5 от search_text — 
 COMMENT ON COLUMN oarb.audit_vectors.max_src_track IS 'MAX(track_column) в источнике на момент синхронизации.';
 COMMENT ON COLUMN oarb.audit_vectors.synced_at     IS 'Время последней синхронизации.';
 COMMENT ON COLUMN oarb.audit_vectors.created_at    IS 'Время создания записи.';
-
-DO $body$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'oarb' AND indexname = 'idx_audit_vectors_source_pk'
-    ) THEN
-        CREATE INDEX idx_audit_vectors_source_pk
-            ON oarb.audit_vectors (source, pk_value);
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'oarb' AND indexname = 'idx_audit_vectors_source_synced'
-    ) THEN
-        CREATE INDEX idx_audit_vectors_source_synced
-            ON oarb.audit_vectors (source, synced_at DESC);
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'oarb' AND indexname = 'idx_audit_vectors_source_hash'
-    ) THEN
-        CREATE INDEX idx_audit_vectors_source_hash
-            ON oarb.audit_vectors (source, content_hash);
-    END IF;
-END
-$body$;

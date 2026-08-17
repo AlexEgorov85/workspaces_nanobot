@@ -28,15 +28,3 @@ COMMENT ON COLUMN oarb.audit_reports.title         IS 'Название акта
 COMMENT ON COLUMN oarb.audit_reports.full_text     IS 'Полный текст акта (если без разбивки на пункты).';
 COMMENT ON COLUMN oarb.audit_reports.created_at    IS 'Время создания записи.';
 COMMENT ON COLUMN oarb.audit_reports.updated_at    IS 'Время последнего обновления.';
-
-DO $body$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'oarb' AND indexname = 'idx_audit_reports_audit_id'
-    ) THEN
-        CREATE INDEX idx_audit_reports_audit_id
-            ON oarb.audit_reports (audit_id);
-    END IF;
-END
-$body$;

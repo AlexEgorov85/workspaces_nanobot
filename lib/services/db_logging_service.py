@@ -514,8 +514,9 @@ class DbLoggingService:
         """Проверить существование таблиц логов/контекста вопросов.
 
         Сервис НЕ провижинит схему: таблицы ``agent_question_runs`` /
-        ``agent_gateway_logs`` (и индексы) должны быть созданы миграциями
-        заранее (``sql/created_tables.sql`` / ``lib/services/sql/*.sql``).
+        ``agent_gateway_logs`` должны быть созданы заранее
+        (``sql/logs/create_public_agent_question_runs.sql`` /
+        ``sql/logs/create_public_agent_gateway_logs.sql``).
         Если таблица логов отсутствует — поднимается исключение; вызывающий
         ``_flush_batch`` логирует его (``last_error`` + ``logger.error``),
         а события выбрасываются (счётчик ``failed``).

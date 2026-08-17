@@ -95,7 +95,7 @@
       ],
       "predefined_scripts_table": "public.agent_predefined_scripts",  // Реестр SQL-скриптов (sql_template + parameters)
       //   Источник истины для режима predefined. Заполняется через
-      //   sql/audit_analyzer/create_predefined_scripts_table.sql и
+      //   sql/audit_analyzer/create_public_agent_predefined_scripts.sql и
       //   tools/generate_predefined_scripts_sql.py.
       "mode_vector_index_config_table": "public.agent_vector_index_config",  // Конфиг FAISS-индексов (читается cache_provider_impl)
 

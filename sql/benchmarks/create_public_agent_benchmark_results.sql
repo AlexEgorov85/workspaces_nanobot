@@ -50,22 +50,3 @@ COMMENT ON COLUMN public.agent_benchmark_results.error            IS 'Текст
 COMMENT ON COLUMN public.agent_benchmark_results.llm_judge_score  IS 'Оценка LLM-judge (если использовался).';
 COMMENT ON COLUMN public.agent_benchmark_results.details          IS 'JSONB: произвольные детали прогона.';
 COMMENT ON COLUMN public.agent_benchmark_results.created_at       IS 'Время создания записи.';
-
-DO $body$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'public' AND indexname = 'idx_agent_benchmark_results_run'
-    ) THEN
-        CREATE INDEX idx_agent_benchmark_results_run
-            ON public.agent_benchmark_results (run_id);
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'public' AND indexname = 'idx_agent_benchmark_results_item'
-    ) THEN
-        CREATE INDEX idx_agent_benchmark_results_item
-            ON public.agent_benchmark_results (item_id, created_at DESC);
-    END IF;
-END
-$body$;

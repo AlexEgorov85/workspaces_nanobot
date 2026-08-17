@@ -31,18 +31,4 @@ COMMENT ON COLUMN public.agent_predefined_scripts.max_rows_default IS 'Лими�
 COMMENT ON COLUMN public.agent_predefined_scripts.returns          IS 'Что возвращает скрипт (для документации и LLM-промпта).';
 COMMENT ON COLUMN public.agent_predefined_scripts.long_description IS 'Подробное описание для LLM-промпта: что делает, когда использовать, edge cases.';
 COMMENT ON COLUMN public.agent_predefined_scripts.created_at       IS 'Время создания записи.';
-COMMENT ON COLUMN public.agent_predefined_scripts.updated_at       IS 'Время последнего изменения (обновляется триггером).';
-
-CREATE OR REPLACE FUNCTION public.agent_predefined_scripts_touch_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_agent_predefined_scripts_updated_at
-    ON public.agent_predefined_scripts;
-CREATE TRIGGER trg_agent_predefined_scripts_updated_at
-    BEFORE UPDATE ON public.agent_predefined_scripts
-    FOR EACH ROW EXECUTE FUNCTION public.agent_predefined_scripts_touch_updated_at();
+COMMENT ON COLUMN public.agent_predefined_scripts.updated_at       IS 'Время последнего изменения.';

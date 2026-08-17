@@ -47,18 +47,3 @@ COMMENT ON COLUMN public.agent_session_messages.injected_event    IS 'Марке
 COMMENT ON COLUMN public.agent_session_messages._command          IS 'Внутренний флаг: системная команда.';
 COMMENT ON COLUMN public.agent_session_messages._channel_delivery IS 'Внутренний флаг: доставлено в канал.';
 COMMENT ON COLUMN public.agent_session_messages.created_at        IS 'Время записи в БД.';
-
--- Индекс для быстрой загрузки сообщений сессии по порядку.
--- GP 6.5 не поддерживает CREATE INDEX IF NOT EXISTS, поэтому DO-блок.
-DO $body$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'public'
-          AND indexname  = 'idx_agent_session_messages_sk_seq'
-    ) THEN
-        CREATE INDEX idx_agent_session_messages_sk_seq
-            ON public.agent_session_messages (session_key, seq);
-    END IF;
-END
-$body$;

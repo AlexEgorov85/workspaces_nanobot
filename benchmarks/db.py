@@ -99,14 +99,17 @@ class BenchmarkDB:
             logger.warning("PostgreSQL not available, skipping table creation")
             return
         base = _ROOT / "sql" / "benchmarks"
-        is_gp = _is_greenplum()
-        sql_path = base / "create_benchmark_tables_gp.sql" if is_gp else base / "create_benchmark_tables.sql"
-        if sql_path.exists():
-            sql = sql_path.read_text(encoding="utf-8")
-            execute(sql)
-            logger.info("Benchmark tables ensured (gp={})", is_gp)
-        else:
-            logger.warning("SQL DDL file not found at {}", sql_path)
+        sql_paths = [
+            base / "create_public_agent_benchmark_runs.sql",
+            base / "create_public_agent_benchmark_results.sql",
+        ]
+        for sql_path in sql_paths:
+            if sql_path.exists():
+                sql = sql_path.read_text(encoding="utf-8")
+                execute(sql)
+                logger.info("Benchmark table ensured: {}", sql_path.name)
+            else:
+                logger.warning("SQL DDL file not found at {}", sql_path)
 
     def save_run(self, suite_result: SuiteResult) -> str | None:
         """Сохранение результатов прогона набора тестов.

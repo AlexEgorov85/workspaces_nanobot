@@ -26,15 +26,3 @@ COMMENT ON COLUMN oarb.report_items.item_content IS 'Текст содержан
 COMMENT ON COLUMN oarb.report_items.order_index  IS 'Порядковый индекс для сортировки.';
 COMMENT ON COLUMN oarb.report_items.created_at   IS 'Время создания.';
 COMMENT ON COLUMN oarb.report_items.updated_at   IS 'Время последнего обновления.';
-
-DO $body$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'oarb' AND indexname = 'idx_report_items_report_id'
-    ) THEN
-        CREATE INDEX idx_report_items_report_id
-            ON oarb.report_items (report_id);
-    END IF;
-END
-$body$;
