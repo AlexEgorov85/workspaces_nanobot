@@ -123,7 +123,7 @@ flowchart TB
     CTX --> DB_LOG["DbLoggingService<br/>(worker, batch INSERT, без JSONL-fallback)"]
     CTX --> AUDIT["AuditSyncService + AuditMemoryStore<br/>(audit_analyzer)"]
     CTX --> BUS["MessageBus<br/>(через BusFactory, с обёрткой под логгеры)"]
-    CTX --> AGENT["AgentLoop<br/>(через AgentFactory,<br/>hooks=[ToolAudit, DbLogging])"]
+    CTX --> AGENT["AgentLoop<br/>(через AgentFactory,<br/>hooks=[ToolAudit],<br/>hook_factories=[DbLogging per-turn])"]
     CTX --> PATCHER["RuntimePatcher<br/>(ContextGovernor + _assemble_outbound)"]
     CTX --> PRELOAD["PreloadService<br/>(FAISS / audit_cache)"]
     CTX --> TRANS["TranscriptionService"]
@@ -148,8 +148,12 @@ flowchart TB
   gateway/cli работают без него (с предупреждением в логах).
 - **`agent_factory.py:AgentFactory`** — `create(config, bus, session_manager=...,
   cron_service=..., db_logging_service=...)` → `(agent, hooks)`.
+  `DatabaseLoggingHook` подключается НЕ как общий инстанс, а как фабрика
+  оборота (`make_db_logging_hook_factory` в `hook_factories=`) — фреймворк
+  создаёт свежий инстанс на каждый оборот, изолируя состояние вопроса между
+  конкурентными сессиями (см. `database_logging_hook.py`).
   Lazy-import `workspace.hooks.database_logging_hook` через try/except
-  (если модуль не подключён — хук просто не добавляется).
+  (если модуль не подключён — фабрика просто не создаётся).
 - **`bus_factory.py:BusFactory`** — `create()` возвращает `MessageBus`,
   опционально обернув `publish_inbound`/`publish_outbound` async-логгерами
   из `db_logging_bus.py`. **Без monkey-patch'ей**: оригинальные методы
@@ -224,6 +228,42 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 `_do_initial_load` уже видит настроенные callbacks → `upsert_records`
 вызывается → FAISS preload находит данные.
 
+### Конкурентно-безопасное БД-логирование: per-turn инстанс `DatabaseLoggingHook`
+
+Обороты разных сессий (вопросов) обрабатываются конкурентно
+(`AgentLoop._dispatch` → `_concurrency_gate`, дефолт
+`NANOBOT_MAX_CONCURRENT_REQUESTS=3`). Проблема: фреймворковый
+`AgentRunHookContext` (для `after_run`) **не содержит `session_key`** —
+контекст вопроса приходится хранить в самом хуке.
+
+**Исторический баг:** один общий инстанс `DatabaseLoggingHook` на все
+сессии, контекст в плоских полях (`_run_session_key`/`_request_id`).
+При конкурентном переплетении оборотов чужой вопрос перезаписывал
+поля между `before_`/`after_execute_tool`, и:
+  * `log_tool_result` / `run_finished` получали request_id чужого вопроса;
+  * `after_run` мог `finish_request`/`clear_request` чужую сессию.
+
+**Решение — фабрика оборота.** `DatabaseLoggingHook` создаётся на
+КАЖДЫЙ оборот через `make_db_logging_hook_factory(db_logging_service,
+agent_id)` (`workspace/hooks/database_logging_hook.py`). Фабрика получает
+`AgentTurnHookContext` (там есть `session_key`), резолвит `request_id`
+через `service.get_request_id(session_key)` и запекает оба значения в
+конструкторе — состояние вопроса изолировано между сессиями, гонки нет.
+
+`AgentFactory.create` передаёт фабрику в `AgentLoop` через
+`hook_factories=[...]` (а не общий инстанс в `hooks=...`). `ToolAuditHook`
+остаётся в `hooks=` — он bucket-безопасен по `session_key`.
+
+`RuntimePatcher.patch_subagent_logging` использует тот же паттерн:
+каждый `_SubagentLoggingHook` создаёт СВОЙ `_db_hook` на запуск
+подагента (class-level shared `_db_hook` давал ту же гонку между
+конкурентными субагентами).
+
+Регрессионный тест: `tests/test_hooks_database_logging.py →
+TestDatabaseLoggingHookFactory.test_concurrent_sessions_do_not_mix_request_id`
+(переплетение двух сессий → `log_tool_result`/`after_run` несут свой
+`request_id`).
+
 ---
 
 ## 📁 Структура проекта
@@ -245,7 +285,7 @@ nanobot/
 ├── lib/                                  #  v2.0.0: сервисный слой
 │   ├── core/                             #   bootstrap ApplicationContext + фабрики
 │   │   ├── application_context.py        #     create/start/stop, связывает все общие сервисы
-│   │   ├── agent_factory.py              #     AgentLoop + ToolAudit + DatabaseLogging hooks
+│   │   ├── agent_factory.py              #     AgentLoop + ToolAudit hook + фабрика DatabaseLogging (per-turn)
 │   │   └── bus_factory.py                #     MessageBus + обёртки publish_inbound/outbound
 │   ├── services/                         #   сервисный слой (v2.0.0 + pre-existing)
 │   │   ├── config_service.py             #    SETTINGS-аксессор + pre-resolve env + таймауты
@@ -281,7 +321,7 @@ nanobot/
 ├── workspace/                            # runtime-данные и хуки
 │   ├── hooks/
 │   │   ├── tool_audit_hook.py            #   хук аудита вызовов инструментов
-│   │   └── database_logging_hook.py      #  AgentHook для tool-событий + run_finished в БД
+│   │   └── database_logging_hook.py      #  AgentHook для tool-событий + run_finished в БД; per-turn инстанс через make_db_logging_hook_factory
 │   └── skills/audit_analyzer/            # навык: тонкий CLI поверх провайдера
 │       ├── SKILL.md                      #   пользовательская документация
 │       ├── audit_analyze.bat / .sh       #   точки входа
@@ -1673,7 +1713,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | Файл | Что делает |
 |------|-----------|
 | `lib/core/application_context.py` |  Единый bootstrap всех общих сервисов |
-| `lib/core/agent_factory.py` |  Создание AgentLoop с хуками (ToolAudit + DatabaseLogging) |
+| `lib/core/agent_factory.py` |  Создание AgentLoop: `ToolAuditHook` в `hooks=`, `DatabaseLoggingHook` — как фабрика оборота в `hook_factories=` |
 | `lib/core/bus_factory.py` |  MessageBus + обёртки publish_inbound/outbound |
 | `lib/services/config_service.py` |  Загрузка конфига, SETTINGS-аксессор, pre-resolve env, таймауты |
 | `lib/services/session_storage.py` |  Выбор PGSessionManager / SessionManager |
@@ -1689,7 +1729,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | `lib/cli/hook_loader.py` |  Сканирование workspace/hooks/*.py |
 | `lib/lifecycle/gateway_runner.py` |  Цикл с exponential backoff |
 | `lib/lifecycle/shutdown_coordinator.py` |  LIFO graceful shutdown |
-| `workspace/hooks/database_logging_hook.py` |  AgentHook для tool-событий + run_finished |
+| `workspace/hooks/database_logging_hook.py` |  AgentHook для tool-событий + run_finished; per-turn инстансы через `make_db_logging_hook_factory` (конкурентно-безопасно) |
 | `workspace/hooks/session_file_redirect_hook.py` |  AgentHook: перенаправляет `write`/`edit` в `data_store/cache/sessions/<session_key>/` (политика хранения в `workspace/AGENTS.md`) |
 
 ### Pre-existing (не тронуты рефакторингом)
@@ -1722,7 +1762,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | **Bootstrap** | Bootstrap | `lib/core/application_context.py` | Контекст не создаётся → `lib/core/application_context.py:create` + флаги `enable_db_logging`/`enable_audit`; double-init воркеров → `lib/lifecycle/shutdown_coordinator.py` |
 | **Lifecycle** | Lifecycle (backoff/shutdown) | `lib/lifecycle/gateway_runner.py` / `shutdown_coordinator.py` | Gateway зацикливается на рестартах → `GatewayRunner.run_forever` (exponential backoff 1с→30с); процесс не умирает по Ctrl-C → `ShutdownCoordinator` (LIFO) |
 | **Каналы** | Канал связи | Написать класс унаследовав `BaseChannel`, подключить через `lib/services/channel_factory.py` | Сообщения не доходят → `allow_from` в `project.json`; reasoning не пишется → `PostgresChannel._flush_reasoning` (период `flush_interval`) |
-| **Хуки** | Хук агента | Создать файл в `workspace/hooks/` с подклассом `AgentHook` | Хук не вызывается → `lib/services/agent_factory.py:AgentFactory.create` (lazy-import + добавление в `AgentLoop.hooks`); `ImportError` из хука → `try/except` в `AgentFactory` (хук просто не добавится) |
+| **Хуки** | Хук агента | Создать файл в `workspace/hooks/` с подклассом `AgentHook` | Хук не вызывается → `lib/services/agent_factory.py:AgentFactory.create` (lazy-import); `ImportError` из хука → `try/except` в `AgentFactory` (хук/фабрика просто не подключится) |
 | **Хуки** | Перенаправление файлов сессии | `workspace/hooks/session_file_redirect_hook.py` (подключается автоматически) | Файлы уходят в корень workspace → проверить, что хук инстанцировался (`hook_loader` печатает `✓ SessionFileRedirectHook loaded`); whitelist пропускает `AGENTS.md`/`lib/`/`data_store/`/`*.py` — добавить в `_ALLOWED_PREFIXES` если нужно; не работает на `exec`-redirects (`>`, `>>`) — это вне `write`/`edit` |
 | **Файл-инструменты** | Контроль `write`/`edit` | `workspace/hooks/session_file_redirect_hook.py` | Без хука работает `data_store/cache/...` по правилу в `workspace/AGENTS.md`, но модель может его забыть; хук закрывает дыру независимо от подсказок в промпте |
 | **Бенчмарки** | Тест бенчмарка | YAML-файл в `benchmarks/items/` | Тест падает по `keyword` → перечитать `expect.keywords_include`; `multi_step` не переходит к следующему шагу → `new_session: true` (или `false` для общей истории) |
@@ -1845,7 +1885,7 @@ max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3
 | `cli_agent.py` | Было 865 строк, стало 165. То же самое |
 | `RuntimePatcher` | Оба monkey-patch'а (`ContextGovernor.normalize_tool_result`, `agent._assemble_outbound`) теперь в `lib/services/runtime_patcher.py` с fallback при изменении API nanobot |
 | `DbLoggingService` | Новый. Если раньше логировали вызовы иначе — мигрировать на `lib/services/db_logging_service.py` + `workspace/hooks/database_logging_hook.py` |
-| Хуки | `workspace/hooks/database_logging_hook.py` теперь встроен в `AgentLoop.hooks` через `AgentFactory` |
+| Хуки | `workspace/hooks/database_logging_hook.py` встроен в `AgentLoop` через `AgentFactory`: общий инстанс заменён на per-turn фабрику `hook_factories=` (см. `database_logging_hook.py:make_db_logging_hook_factory`) |
 
 **Данные:**
 

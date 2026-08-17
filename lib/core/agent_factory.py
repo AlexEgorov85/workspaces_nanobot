@@ -8,14 +8,18 @@
     patch_assemble_outbound``). Каналы и CLI рендерят их в UI.
 
   * ``DatabaseLoggingHook`` (если передан ``db_logging_service``) —
-    ``AgentHook`` из ``workspace.hooks.database_logging_hook``,
-    логирует tool-события и run-level summary в БД через
-    ``DbLoggingService``.
+    НЕ регистрируется как общий инстанс. Вместо этого в ``hook_factories``
+    передаётся ``make_db_logging_hook_factory``: фреймворк создаёт СВЕЖИЙ
+    ``DatabaseLoggingHook`` на КАЖДЫЙ оборот, запекая его session_key/
+    request_id. Это делает логирование конкурентно-безопасным (разные
+    вопросы не «путают» события) — см. ``workspace/hooks/
+    database_logging_hook.py``.
 
 Семантический патч ``_assemble_outbound`` применяет ``RuntimePatcher``
 после ``create()`` (т.е. на этапе ``ApplicationContext.create`` /
 ``start``). ``AgentFactory`` НЕ делает monkey-patch'ей — только
-регистрирует хуки в ``AgentLoop.from_config(hooks=[...])``.
+регистрирует хуки в ``AgentLoop.from_config(hooks=[...])`` и
+фабрики оборота в ``hook_factories=[...]``.
 
 Создаёт ли AgentFactory CronService? Нет — он приходит извне готовым.
 Обычно ``ApplicationContext._make_cron_service()`` создаёт ``CronService``
@@ -64,11 +68,15 @@ class AgentFactory:
             cron_service: ``CronService`` (опционально) — нужен CLI-режиму,
                 в gateway не подключается.
             db_logging_service: ``DbLoggingService`` (опционально) — если
-                передан, добавляется ``DatabaseLoggingHook``.
+                передан, ``AgentLoop`` получает фабрику оборота для
+                ``DatabaseLoggingHook`` (per-turn инстансы, конкурентно-безопасно).
+            agent_id: id агента для колонки ``agent_id`` в логах.
 
         Returns:
             ``(agent, hooks)`` — где ``hooks`` это СПИСОК переданных в
-            ``AgentLoop`` хуков (для тестов/диагностики).
+            ``AgentLoop`` хуков (для тестов/диагностики). ``DatabaseLoggingHook``
+            здесь НЕТ (он создаётся per-turn через ``hook_factories``);
+            ``hooks`` содержит только ``ToolAuditHook``.
         """
         from nanobot.agent.loop import AgentLoop
 
@@ -78,15 +86,22 @@ class AgentFactory:
         tool_audit_hook = self._import_tool_audit_hook()()
         hooks.append(tool_audit_hook)
 
-        # DatabaseLoggingHook — опционален, регистрируется только если
-        # реально передан db_logging_service. Если workspace.hooks
-        # недоступен (например, в тестах) — пропускаем без ошибки.
+        # DatabaseLoggingHook — опционален: регистрируется НЕ как общий
+        # инстанс, а как фабрика оборота (per-turn инстансы). Это
+        # изолирует состояние вопроса между конкурентными сессиями.
+        # Если workspace.hooks недоступен (например, в тестах) —
+        # пропускаем без ошибки.
+        hook_factories: List[Any] = []
         if db_logging_service is not None:
-            db_hook = self._build_database_logging_hook(db_logging_service, agent_id)
-            if db_hook is not None:
-                hooks.append(db_hook)
+            factory = self._build_database_logging_factory(db_logging_service, agent_id)
+            if factory is not None:
+                hook_factories.append(factory)
 
-        kwargs: dict = {"session_manager": session_manager, "hooks": hooks}
+        kwargs: dict = {
+            "session_manager": session_manager,
+            "hooks": hooks,
+            "hook_factories": hook_factories,
+        }
         if cron_service is not None:
             kwargs["cron_service"] = cron_service
 
@@ -107,27 +122,30 @@ class AgentFactory:
         return ToolAuditHook
 
     @staticmethod
-    def _build_database_logging_hook(
+    def _build_database_logging_factory(
         db_logging_service: Any, agent_id: Optional[str] = None
     ) -> Optional[Any]:
-        """Ленивое создание ``DatabaseLoggingHook``.
+        """Создать фабрику оборота ``DatabaseLoggingHook``.
 
         Импорт через try/except, чтобы:
           * ``AgentFactory`` не зависел жёстко от
             ``workspace.hooks.database_logging_hook`` (этот модуль
             импортирует ``nanobot.agent.AgentHook``, который нужен
             не всегда);
-          * в тестах без полного окружения хук просто не подключался.
+          * в тестах без полного окружения фабрика просто не создавалась.
 
         Args:
+            db_logging_service: ``DbLoggingService``.
             agent_id: идентификатор агента (для колонки ``agent_id`` в логах).
 
         Returns:
-            ``DatabaseLoggingHook(db_logging_service, agent_id)`` или ``None``,
-            если модуль недоступен.
+            ``make_db_logging_hook_factory(db_logging_service, agent_id)``
+            или ``None``, если модуль недоступен.
         """
         try:
-            from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+            from workspace.hooks.database_logging_hook import (
+                make_db_logging_hook_factory,
+            )
         except Exception:
             return None
-        return DatabaseLoggingHook(db_logging_service, agent_id)
+        return make_db_logging_hook_factory(db_logging_service, agent_id)

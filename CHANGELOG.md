@@ -6,6 +6,34 @@
 
 Релизные ветки именуются как `release/vX.Y`, теги патч-релизов — `vX.Y.Z`.
 
+## [Unreleased]
+
+### Fixed
+
+- **`DatabaseLoggingHook`: события разных вопросов больше не «путаются»
+  при конкурентной обработке.** Раньше на всех сессиях/оборотах использовался
+  ОДИН общий инстанс хука, а контекст вопроса (`session_key`/`request_id`)
+  кэшировался в плоских полях инстанса (`_run_session_key`/`_request_id`).
+  Обороты разных сессий обрабатываются конкурентно (`_concurrency_gate`,
+  дефолт `NANOBOT_MAX_CONCURRENT_REQUESTS=3`), поэтому чужой вопрос мог
+  перезаписать `_request_id` между `before_`/`after_execute_tool` — и
+  `log_tool_result`/`run_finished` получали request_id чужого оборота, а
+  `after_run` мог `finish_request`/`clear_request` чужую сессию. Причина:
+  фреймворковый `AgentRunHookContext` не содержит `session_key`, поэтому
+  состояние и кэшировалось в полях инстанса.
+  Теперь инстанс создаётся НА КАЖДЫЙ оборот через
+  `make_db_logging_hook_factory` (подключается через `hook_factories=`,
+  а не `hooks=`), который запекает свой `session_key`/`request_id` в
+  конструкторе — состояние вопроса изолировано между сессиями, гонки нет.
+  `_SubagentLoggingHook` в `RuntimePatcher.patch_subagent_logging` тоже
+  создаёт собственный `_db_hook` на запуск подагента (устранён class-level
+  race между конкурентными субагентами).
+  `workspace/hooks/database_logging_hook.py`, `lib/core/agent_factory.py`,
+  `lib/services/runtime_patcher.py`,
+  `tests/test_hooks_database_logging.py`
+  (`TestDatabaseLoggingHookFactory` + конкурентный регрессионный тест),
+  `tests/test_agent_factory.py`, `tests/test_runtime_patcher.py`.
+
 ## [2.2.0] — 2026-08-17
 
 > **Minor-релиз:** единый пул соединений PostgreSQL (одна очередь + N воркеров)

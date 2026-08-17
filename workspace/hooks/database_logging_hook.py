@@ -6,8 +6,10 @@ tool-событий, и использует ``BusFactory`` (обёртки ``pu
 sync-класс — он не подключается к циклу агента.
 
 Подключение:
-  * ``AgentFactory.create(..., db_logging_service=svc)`` — добавляет хук
-    в ``AgentLoop.from_config(hooks=[...])``;
+  * ``AgentFactory.create(..., db_logging_service=svc)`` — добавляет
+    фабрику оборота ``make_db_logging_hook_factory`` в
+    ``AgentLoop.from_config(hook_factories=[...])``. Фабрика создаёт
+    СВЕЖИЙ ``DatabaseLoggingHook`` на каждый оборот (конкурентно-безопасно);
   * ``BusFactory(inbound_logger=..., outbound_logger=...)`` — обёртки шины.
 """
 
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from nanobot.agent import AgentHookContext, AgentRunHookContext
 
@@ -24,23 +26,78 @@ from .base_tool_tracking_hook import BaseToolTrackingHook
 logger = logging.getLogger(__name__)
 
 
+def make_db_logging_hook_factory(
+    db_logging_service: Any, agent_id: Optional[str] = None
+) -> Callable[[Any], "DatabaseLoggingHook"]:
+    """Фабрика: создать СВЕЖИЙ ``DatabaseLoggingHook`` на КАЖДЫЙ оборот.
+
+    Передаётся в ``AgentLoop`` как ``hook_factories`` (``agent_factory.py``).
+    Фреймворк вызывает её с ``AgentTurnHookContext``, в котором есть
+    ``session_key`` текущего оборота. Фабрика резолвит ``request_id``
+    вопроса из индекса сервиса и запекает оба поля в инстанс.
+
+    Поскольку у каждого оборота СВОЙ инстанс, состояние вопроса
+    (``_run_session_key``/``_request_id``) не разделяется между
+    конкурентными сессиями — события не «путаются».
+
+    Args:
+        db_logging_service: ``DbLoggingService``.
+        agent_id: id агента для колонки ``agent_id`` в логах.
+
+    Returns:
+        Фабрика ``def(turn_context) -> DatabaseLoggingHook``.
+    """
+
+    def _factory(turn_context: Any) -> "DatabaseLoggingHook":
+        session_key = getattr(turn_context, "session_key", None) or None
+        request_id = None
+        if session_key:
+            request_id = db_logging_service.get_request_id(session_key)
+        return DatabaseLoggingHook(
+            db_logging_service,
+            agent_id=agent_id,
+            session_key=session_key,
+            request_id=request_id,
+        )
+
+    return _factory
+
+
 class DatabaseLoggingHook(BaseToolTrackingHook):
     """Агентский хук — пересылает tool- и run-события в DbLoggingService.
 
     Все методы НЕБЛОКИРУЮЩИЕ: ``DbLoggingService.log_*`` ставит события
     в очередь и возвращает ``True/False`` мгновенно.
+
+    Конкурентность: фреймворковый ``AgentRunHookContext`` (для ``after_run``)
+    не содержит ``session_key``, поэтому контекст вопроса раньше кэшировался
+    в полях инстанса (``_run_session_key``/``_request_id``). При конкурентной
+    обработке нескольких сессий одним общим инстансом поля перезаписывались
+    чужим вопросом — события «путались».
+
+    Теперь инстанс создаётся НА КАЖДЫЙ оборот через ``make_db_logging_hook_factory``
+    и запекает свой ``session_key``/``request_id`` в конструкторе: состояние
+    вопроса изолировано между сессиями, гонки нет.
     """
 
-    def __init__(self, db_logging_service: Any, agent_id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        db_logging_service: Any,
+        agent_id: Optional[str] = None,
+        *,
+        session_key: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
         super().__init__()
         self._service = db_logging_service
         self._tool_start_times: Dict[str, float] = {}
         self._agent_id = agent_id
-        # Контекст текущего оборота/вопроса: в AgentRunHookContext его нет,
-        # поэтому ловим из AgentHookContext (before_iteration/before_execute_tool)
-        # и прокидываем во все события вопроса.
-        self._run_session_key: Optional[str] = None
-        self._request_id: Optional[str] = None
+        # Контекст текущего оборота/вопроса. Запекается в фабрике на оборот,
+        # чтобы ``after_run`` (у которого в контексте нет session_key) знал
+        # свой вопрос. ``_capture_context`` дополнительно перечитывает
+        # request_id по session_key из индекса сервиса — самокорректно.
+        self._run_session_key = session_key
+        self._request_id = request_id
 
     # ------------------------------------------------------------------
     # Tool-события

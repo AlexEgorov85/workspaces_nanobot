@@ -234,7 +234,7 @@ flowchart TB
 
     BUS["MessageBus"]
     CTX --> BUS
-    BUS --> AGENT["AgentLoop<br>+ ToolAuditHook + DatabaseLoggingHook"]
+    BUS --> AGENT["AgentLoop<br>+ ToolAuditHook<br>+ DatabaseLoggingHook (per-turn)"]
 
     GATEWAY["gateway.py<br>(тонкий оркестратор)"]
     CLI["cli_agent.py<br>(тонкий оркестратор)"]
@@ -315,7 +315,7 @@ nanobot/
 - `DbLoggingService` (если `enable_db_logging=True` и есть DSN)
 - `AuditSyncService` + `AuditMemoryStore` (если `enable_audit=True`)
 - `MessageBus` (с обёрткой под логгеры, если есть `DbLoggingService`)
-- `AgentLoop` (через `AgentFactory`) с `ToolAuditHook` + `DatabaseLoggingHook`
+- `AgentLoop` (через `AgentFactory`) с `ToolAuditHook` + `DatabaseLoggingHook` (per-turn фабрика в `hook_factories=`, конкурентно-безопасно)
 - `RuntimePatcher.apply_all()` — все monkey-patch'и в одном месте
 - `PreloadService`, `TranscriptionService`
 
@@ -513,7 +513,7 @@ pytest tests/ --cov=lib --cov-report=term-missing
 | `test_subprocess_manager.py` | `SubprocessManager` — Streamlit spawn/terminate |
 | `test_preload_service.py` | `PreloadService` — FAISS + audit_cache |
 | `test_db_logging_service.py` | `DbLoggingService` — worker, batch, fallback |
-| `test_hooks_database_logging.py` | `DatabaseLoggingHook` — AgentHook для tool-событий |
+| `test_hooks_database_logging.py` | `DatabaseLoggingHook` — tool-события, per-turn фабрика, конкурентная изоляция сессий |
 | `test_gateway_runner.py` | `GatewayRunner` — exponential backoff |
 | `test_shutdown_coordinator.py` | `ShutdownCoordinator` — LIFO graceful shutdown |
 | `test_console_loop.py` | REPL/typewriter/print_tool_events |

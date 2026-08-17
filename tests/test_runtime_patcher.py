@@ -258,6 +258,24 @@ class TestPatchSubagentLogging:
         assert not ok
         assert "db_logging_service" in detail
 
+    def test_each_subagent_hook_has_own_db_hook(self):
+        import nanobot.agent.subagent as subagent_mod
+
+        original = subagent_mod._SubagentHook
+        try:
+            svc = MagicMock()
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_subagent_logging(svc, None)
+            assert ok
+
+            h1 = subagent_mod._SubagentHook("aa1")
+            h2 = subagent_mod._SubagentHook("aa2")
+            # Не разделяют _db_hook между запусками субагентов:
+            # иначе конкурентные субагенты перезаписывали бы чужой контекст.
+            assert h1._db_hook is not h2._db_hook
+        finally:
+            subagent_mod._SubagentHook = original
+
 
 class TestApplyAll:
     def test_report_contents(self):

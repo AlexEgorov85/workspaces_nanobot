@@ -15,6 +15,18 @@ def fake_modules(tmp_path):
         # nanobot.agent.loop
         sol = types.ModuleType("nanobot")
         sol.agent = types.ModuleType("nanobot.agent")
+
+        class _AgentHook:
+            def __init__(self, reraise=False):
+                self._reraise = reraise
+
+        sol.agent.AgentHook = _AgentHook
+        # workspace.hooks.database_logging_hook импортирует эти имена —
+        # фейковый nanobot.agent должен их предоставлять, чтобы фабрика
+        # оборота реально построилась (иначе import вернёт None).
+        sol.agent.AgentHookContext = types.SimpleNamespace
+        sol.agent.AgentRunHookContext = types.SimpleNamespace
+
         loop = types.ModuleType("nanobot.agent.loop")
         agent_instance = MagicMock()
         loop.AgentLoop = MagicMock()
@@ -86,16 +98,58 @@ class TestAgentFactory:
         from lib.core.agent_factory import AgentFactory
 
         factory = AgentFactory()
-        # Без db_logging_service — один hook (ToolAuditHook).
+        # Без db_logging_service — один hook (ToolAuditHook), без фабрик.
         _, hooks = factory.create(config=MagicMock(), bus=MagicMock())
         assert len(hooks) == 1
+        kwargs = fake_modules["from_config"].call_args.kwargs
+        assert kwargs["hook_factories"] == []
 
-        # С db_logging_service — шаг 9 может не существовать; исключение
-        # обрабатывается внутри фабрики, hooks остаётся прежним.
+        # С db_logging_service — фабрика оборота идёт в hook_factories,
+        # а не как общий инстанс в hooks (набор hooks не меняется).
         factory.create(
             config=MagicMock(), bus=MagicMock(),
             db_logging_service=MagicMock(),
         )
-        # Либо 1 (db_logging_hook ещё не реализован), либо 2 — оба варианта ОК.
         kwargs = fake_modules["from_config"].call_args.kwargs
-        assert len(kwargs["hooks"]) in (1, 2)
+        assert len(kwargs["hooks"]) == 1
+        assert len(kwargs["hook_factories"]) == 1
+
+    def test_db_logging_factory_creates_per_turn_hook(self, fake_modules):
+        from lib.core.agent_factory import AgentFactory
+
+        from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+
+        service = MagicMock()
+        # get_request_id возвращает request_id по session_key
+        def fake_get(sk):
+            return {"cli:1": "m1", "cli:2": "m2"}.get(sk)
+
+        service.get_request_id.side_effect = fake_get
+
+        factory = AgentFactory()
+        _, hooks = factory.create(
+            config=MagicMock(), bus=MagicMock(),
+            db_logging_service=service, agent_id="agent-7",
+        )
+        # hooks содержит только ToolAuditHook
+        assert len(hooks) == 1
+
+        kwargs = fake_modules["from_config"].call_args.kwargs
+        assert len(kwargs["hook_factories"]) == 1
+        factory_fn = kwargs["hook_factories"][0]
+
+        from types import SimpleNamespace
+
+        hook_a = factory_fn(SimpleNamespace(session_key="cli:1"))
+        hook_b = factory_fn(SimpleNamespace(session_key="cli:2"))
+
+        # Разные обороты -> разные инстансы (не разделяют состояние)
+        assert hook_a is not hook_b
+        assert isinstance(hook_a, DatabaseLoggingHook)
+
+        # Каждый запекает свой контекст вопроса
+        assert hook_a._request_id == "m1"
+        assert hook_b._request_id == "m2"
+        assert hook_a._run_session_key == "cli:1"
+        assert hook_b._run_session_key == "cli:2"
+        assert hook_a._agent_id == "agent-7"

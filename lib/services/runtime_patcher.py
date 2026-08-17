@@ -303,12 +303,9 @@ class RuntimePatcher:
         except Exception as exc:
             return False, f"import failed: {exc}"
 
-        db_hook = DatabaseLoggingHook(db_logging_service)
-
         class _SubagentLoggingHook(_SubagentHook):
             """_SubagentHook + БД-логирование + персист истории подагента."""
 
-            _db_hook = db_hook
             _sessions = session_manager
 
             def __init__(self, task_id, status=None):
@@ -316,10 +313,11 @@ class RuntimePatcher:
                 self._task_id = str(task_id)
                 self._session_id = f"subagent:{self._task_id}"
                 self._finalized = False
-                # Контекст подагента: собственный request_id (subagent:<task_id>),
-                # parent_request_id = вопрос-родитель, parent_agent_id = агент-родитель,
-                # is_subagent=True. Контекст живёт в agent_question_runs, в событиях
-                # agent_gateway_logs остаётся только request_id.
+                # Свой инстанс DatabaseLoggingHook на ЗАПУСК подагента.
+                # Не разделяется ни между субагентами, ни с основным
+                # оборотом — иначе конкурентные субагенты перезаписывали
+                # бы _request_id/_run_session_key друг друга.
+                self._db_hook = DatabaseLoggingHook(db_logging_service)
                 self._parent_rid = None
 
             def _subagent_session_key(self, context) -> str:
