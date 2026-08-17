@@ -364,6 +364,7 @@ class DBManager:
             if (
                 len(self._workers) > self._min_conn
                 and worker._lease_id == 0
+                and worker._idle_since is not None
                 and time.monotonic() - worker._idle_since > self._idle_timeout
             ):
                 self._workers.remove(worker)
@@ -566,6 +567,11 @@ class _CursorProxy:
         # данных (например, «16.7%» в контенте сообщения) — это ломает
         # ``execute_values`` для сессий с таким контентом.
         self._run(lambda cur: cur.execute(sql, params))
+
+    def __iter__(self) -> Any:
+        # Совместимость с psycopg2-протоколом: ``for row in cur:`` / ``list(cur)``.
+        # Весь результат вытаскиваем одним job-ом через fetchall().
+        return iter(self.fetchall())
 
     def mogrify(self, sql: str, params: Any = None) -> bytes:
         return self._run(lambda cur: cur.mogrify(sql, params))

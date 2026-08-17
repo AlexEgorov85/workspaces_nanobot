@@ -54,7 +54,7 @@ predefined_scripts = {
             "returns": "Что возвращает скрипт (для документации и LLM-промпта в --mode sql).",
             "long_description": "Подробное описание для LLM-промпта: что делает, когда использовать, edge cases.",
             "created_at": "Время создания записи (при первой INSERT).",
-            "updated_at": "Время последнего изменения (обновляется триггером agent_predefined_scripts_touch_updated_at).",
+            "updated_at": "Время последнего изменения (выставляется кодом при INSERT/UPDATE).",
         },
     )
 }

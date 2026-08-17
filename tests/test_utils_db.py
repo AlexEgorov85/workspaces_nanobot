@@ -332,6 +332,40 @@ class TestTransaction:
             pass
         assert mock_psycopg2["mock_conn"].autocommit is True
 
+    def test_transaction_cursor_iteration(self, mock_psycopg2):
+        """Курсор транзакции итерируется как psycopg2 (``for row in cur``).
+
+        Регрессия: ``PGSessionManager._list_sessions_inner`` итерирует
+        курсор напрямую — ``_CursorProxy`` должен поддерживать ``__iter__``.
+        """
+        mock_psycopg2["configure"]("dsn")
+        # _CursorProxy вызывает _worker._cursor(cid) напрямую (без __enter__),
+        # поэтому fetchall задаётся на том же объекте, что возвращает conn.cursor()
+        cur_mock = mock_psycopg2["mock_conn"].cursor.return_value
+        cur_mock.fetchall.return_value = [
+            ("user", "Hello!"),
+            ("assistant", "Hi!"),
+        ]
+        with mock_psycopg2["transaction"]() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT role, content FROM t")
+                rows = list(cur)
+        assert rows == [("user", "Hello!"), ("assistant", "Hi!")]
+
+    def test_execute_none_params_not_converted_to_tuple(self, mock_psycopg2):
+        """Баг-фикс 8d43dfb: execute(sql, None) не должен превращаться в ().
+
+        Если передать `()`, psycopg2 делает %-форматирование и падает на
+        литералах '%' в данных (например, «16.7%») — ломает execute_values
+        при сохранении сессий (IndexError: tuple index out of range).
+        """
+        mock_psycopg2["configure"]("dsn")
+        cur_mock = mock_psycopg2["mock_conn"].cursor.return_value
+        with mock_psycopg2["transaction"]() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO t VALUES ('16.7%', %s)", None)
+        cur_mock.execute.assert_called_once_with("INSERT INTO t VALUES ('16.7%', %s)", None)
+
 
 class TestPool:
     def test_single_connection_reused(self, mock_psycopg2):
@@ -398,6 +432,24 @@ class TestPool:
         assert tx_done.is_set()
         # воркер транзакции + второй воркер для обычной операции
         assert mock_psycopg2["mock_connect"].call_count == 2
+
+    def test_maybe_shrink_skips_never_idle_worker(self, mock_psycopg2):
+        """Воркер без _idle_since (старт/shutdown) не роняет _maybe_shrink:
+        TypeError: unsupported operand type(s) for -: 'float' and 'NoneType'."""
+        _db = mock_psycopg2["_db"]
+        from utils.db import DBManager
+
+        mgr = DBManager()
+        mgr._min_conn = 1
+        mgr._idle_timeout = 60.0
+
+        class FakeWorker:
+            _lease_id = 0
+            _idle_since = None
+
+        mgr._workers = [FakeWorker(), FakeWorker()]
+        # не должен бросать исключение и не должен «сжимать» не-идle-воркера
+        assert mgr._maybe_shrink(mgr._workers[0]) is False
 
     def test_queue_full_raises_timeout(self, mock_psycopg2):
         """Переполненная очередь → PoolTimeoutError, а не вечный блок."""

@@ -75,9 +75,8 @@ llm_api_key=ваш_LLM_API_KEY
 
 ```bash
 # Таблицы сессий (PGSessionManager)
-psql -d nanobot -f sql/session/create_session_tables.sql
-# Для Greenplum:
-psql -d nanobot -f sql/session/create_session_tables_gp.sql
+psql -d nanobot -f sql/session/create_public_agent_session_meta.sql
+psql -d nanobot -f sql/session/create_public_agent_session_messages.sql
 
 # Таблица канала (PostgresChannel) — создаётся автоматически
 psql -d nanobot -f sql/channels/seed_messages.sql   # тестовые данные
@@ -336,7 +335,7 @@ ctx.stop()            # LIFO graceful shutdown через ShutdownCoordinator
 
 **Мониторинг:** `get_stats()` → `written`, `failed`, `queue_size`, `fallback_written`, `connected`, `last_error`.
 
-**DDL:** `sql/logs/create_logs_table.sql` (UUID, JSONB, индексы по `timestamp` / `session_id` / `event_type` / `level`).
+**DDL:** `sql/logs/create_public_agent_gateway_logs.sql` (UUID, JSONB) и `sql/logs/create_public_agent_question_runs.sql` (полный текст вопроса/ответа). Индексы создаются отдельно при развёртывании.
 
 **Полезные SQL:**
 ```sql
@@ -408,23 +407,23 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 
 ## База данных
 
-Все DDL — в корневом `sql/` с подкаталогами по доменам: `sql/session/`, `sql/channels/`, `sql/logs/`, `sql/audit_analyzer/`, `sql/benchmarks/`, `sql/migrations/`. **Применяются вручную** — никаких `ensure_tables()` в коде больше нет. Полный каталог и порядок применения — в [`sql/README.md`](sql/README.md).
+Все DDL — в корневом `sql/` с подкаталогами по доменам: `sql/session/`, `sql/channels/`, `sql/logs/`, `sql/audit_analyzer/`, `sql/benchmarks/`. **Один файл = одна таблица** (`create_<schema>_<table>.sql`, только таблица + `COMMENT`, без индексов). Применяются вручную — никаких `ensure_tables()` в коде больше нет. Полный каталог и порядок применения — в [`sql/README.md`](sql/README.md).
 
 | Слой | Файл | Таблицы | Статус |
 |------|------|---------|--------|
-| **Сессии** | `sql/session/create_session_tables.sql` | `session_meta`, `session_messages` | рабочий (PG 9.4+) |
-| **Сессии (GP)** | `sql/session/create_session_tables_gp.sql` | то же + `DISTRIBUTED BY (session_key)` | рабочий (GP 6.25) |
-| **Канал** | создаётся автоматически | `agent_conversation_messages` | авто |
-| **Seed канала** | `sql/channels/seed_messages.sql` | 14 user + 4 assistant сообщений | тестовые данные |
-| **DbLoggingService** | `sql/logs/create_logs_table.sql` | `gateway_logs` (UUID, JSONB) | рабочий |
-| **Домен audit_analyzer (PG)** | `sql/audit_analyzer/create_audit_source_tables.sql` | `oarb.audits/violations/audit_reports/report_items` | REFERENCE — уточняет владелец данных |
-| **Домен audit_analyzer (GP)** | `sql/audit_analyzer/create_audit_source_tables_gp.sql` | то же + `DISTRIBUTED BY` | REFERENCE для GP 6.5 |
-| **Векторы (PG)** | `sql/audit_analyzer/create_audit_vectors_table.sql` | `oarb.audit_vectors` (BIGINT IDENTITY, TEXT pk_value) + 3 индекса | рабочий (PG 13+) |
-| **Векторы (GP)** | `sql/audit_analyzer/create_audit_vectors_table_gp.sql` | то же + `DISTRIBUTED BY (source)` | рабочий (GP 6.5) |
-| **Конфиг индексов (PG)** | `sql/audit_analyzer/create_agent_vector_index_config.sql` | `public.agent_vector_index_config` | рабочий (PG 13+) |
-| **Конфиг индексов (GP)** | `sql/audit_analyzer/create_agent_vector_index_config_gp.sql` | то же + `DISTRIBUTED BY` | рабочий (GP 6.5) |
-| **Бенчмарки** | `sql/benchmarks/create_benchmark_tables.sql` | `agent_benchmark_runs`, `agent_benchmark_results` | рабочий (PG 9.4+) |
-| **Бенчмарки (GP)** | `sql/benchmarks/create_benchmark_tables_gp.sql` | то же + `DISTRIBUTED BY` | рабочий (GP 6.25) |
+| **Сессии (meta)** | `sql/session/create_public_agent_session_meta.sql` | `public.agent_session_meta` | рабочий |
+| **Сессии (messages)** | `sql/session/create_public_agent_session_messages.sql` | `public.agent_session_messages` | рабочий |
+| **Канал** | `sql/channels/create_public_agent_conversation_messages.sql` | `public.agent_conversation_messages` | рабочий |
+| **Seed канала** | `sql/channels/seed_messages.sql` | тестовые сообщения | тестовые данные |
+| **Журнал (questions)** | `sql/logs/create_public_agent_question_runs.sql` | `public.agent_question_runs` (UUID, JSONB) | рабочий |
+| **Журнал (gateway)** | `sql/logs/create_public_agent_gateway_logs.sql` | `public.agent_gateway_logs` (UUID, JSONB) | рабочий |
+| **Домен audit_analyzer** | `sql/audit_analyzer/create_oarb_audits.sql` (+ `create_oarb_violations/_audit_reports/_report_items.sql`) | `oarb.audits/violations/audit_reports/report_items` | REFERENCE — уточняет владелец данных |
+| **Векторы** | `sql/audit_analyzer/create_oarb_audit_vectors.sql` | `oarb.audit_vectors` (BIGINT IDENTITY, TEXT pk_value) | рабочий |
+| **Predefined scripts** | `sql/audit_analyzer/create_public_agent_predefined_scripts.sql` | `public.agent_predefined_scripts` | рабочий |
+| **Конфиг индексов** | `sql/audit_analyzer/create_public_agent_vector_index_config.sql` | `public.agent_vector_index_config` | рабочий |
+| **Хранилище индексов** | `sql/audit_analyzer/create_public_agent_vector_index_store.sql` | `public.agent_vector_index_store` | рабочий |
+| **Бенчмарки (runs)** | `sql/benchmarks/create_public_agent_benchmark_runs.sql` | `public.agent_benchmark_runs` | рабочий |
+| **Бенчмарки (results)** | `sql/benchmarks/create_public_agent_benchmark_results.sql` | `public.agent_benchmark_results` | рабочий |
 
 Полный DDL с комментариями — в [DEVELOPMENT.md → SQL-скрипты](DEVELOPMENT.md#sql-скрипты-создание-таблиц).
 
@@ -456,9 +455,16 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 
 ```bash
 # 1. DDL (таблицы домена + векторные таблицы + конфиг)
-psql -d nanobot -f sql/audit_analyzer/create_audit_source_tables_gp.sql
-psql -d nanobot -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
-psql -d nanobot -f sql/audit_analyzer/create_agent_vector_index_config_gp.sql
+psql -d nanobot -f sql/audit_analyzer/create_oarb_audits.sql
+psql -d nanobot -f sql/audit_analyzer/create_oarb_violations.sql
+psql -d nanobot -f sql/audit_analyzer/create_oarb_audit_reports.sql
+psql -d nanobot -f sql/audit_analyzer/create_oarb_report_items.sql
+psql -d nanobot -f sql/audit_analyzer/create_oarb_audit_vectors.sql
+psql -d nanobot -f sql/audit_analyzer/create_public_agent_predefined_scripts.sql
+psql -d nanobot -f sql/audit_analyzer/create_public_agent_vector_index_config.sql
+psql -d nanobot -f sql/audit_analyzer/create_public_agent_vector_index_store.sql
+# 2. Дефолтные индексы
+psql -d nanobot -f sql/audit_analyzer/seed_default_indexes.sql
 
 # 2. Зарегистрировать 3 дефолтных индекса
 psql -d nanobot -f sql/audit_analyzer/seed_default_indexes.sql
@@ -629,8 +635,7 @@ v2.0.0 — крупное обновление. Изменения в конфи
 
 ### Переименования таблиц (запустите миграцию)
 
-В v2.0.0 расширен `agent_`-префикс на все таблицы агента. Идемпотентная миграция
-(сохраняет данные) — `sql/migrations/migrate_agent_table_names_v1.sql`:
+В v2.0.0 расширен `agent_`-префикс на все таблицы агента. Соответствие новых и старых имён — в таблице:
 
 | Было | Стало |
 |------|-------|
@@ -653,7 +658,8 @@ v2.0.0 — крупное обновление. Изменения в конфи
 3. **Удалите** `vector_indexes` / `mode_vector_index_path` из конфигов — теперь в `public.agent_vector_index_config`.
 4. **Удалите** `data-analyzer`, `html_presentation_generator`, `pg_agent_worker.py` из импортов и конфигов.
 5. **Переименуйте секцию** `# providers: mistral` → `# providers: llm` в `.secrets.env` (опционально, для ясности).
-6. **Выполните миграцию** `sql/migrations/migrate_agent_table_names_v1.sql` — переименует таблицы под `agent_`-префикс.
+6. **Переименуйте таблицы** под `agent_`-префикс вручную (скрипты миграции
+   удалены в v2.2.0; соответствие имён — в таблице выше).
 7. **Перезапустите gateway** — `ConfigService._pre_resolve_env_refs` подставит ключи в `os.environ` автоматически.
 8. **Проверьте health** — `agent_gateway_logs` пустая, но `AuditSyncService.polls` > 0.
 

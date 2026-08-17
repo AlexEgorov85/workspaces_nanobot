@@ -11,8 +11,9 @@
 
     agent = AgentLoop.from_config(config, bus, session_manager=session_manager)
 
-Таблицы ``agent_session_meta`` и ``agent_session_messages`` создаются вручную
-скриптом ``create_session_tables.sql``.
+Таблицы ``public.agent_session_meta`` и ``public.agent_session_messages``
+создаются вручную скриптами ``sql/session/create_public_agent_session_meta.sql``
+и ``sql/session/create_public_agent_session_messages.sql``.
 
 При недоступности БД ошибка пробрасывается — никакого скрытого падения
 на JSONL-файлы нет.
@@ -75,6 +76,9 @@ class PGSessionManager(SessionManager):
                 f"messages_table={messages_table!r}, meta_table={meta_table!r}"
             )
         self.workspace = Path(workspace).expanduser().resolve()
+        # Инициализируем базовый класс: задаёт sessions_dir (нужен фреймворку
+        # для WebUI-эндпоинтов /api/sessions и read_session_metadata), кеш и пр.
+        super().__init__(workspace=self.workspace)
         self._schema = schema
         # fully-qualified имена таблиц с кавычками (через _quote)
         self._fq_meta = self._quote(f"{schema}.{meta_table}")

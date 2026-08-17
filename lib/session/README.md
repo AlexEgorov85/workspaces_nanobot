@@ -11,13 +11,10 @@
 
 PGSessionManager хранит все данные в двух таблицах и автоматически падает на JSONL при недоступности БД.
 
-> **v2.0.0:** таблицы переименованы в `agent_session_meta` /
+> **v2.0.0+:** таблицы названы `agent_session_meta` /
 > `agent_session_messages` (единый `agent_`-префикс для таблиц агента).
-> DDL `sql/session/create_session_tables.sql` автоматически переименует
-> старые имена (`session_meta` → `agent_session_meta`,
-> `session_messages` → `agent_session_messages` + индекс
-> `idx_session_messages_sk_seq` → `idx_agent_session_messages_sk_seq`)
-> при первом применении — миграция идемпотентна, данные сохраняются.
+> DDL в `sql/session/` — `create_public_agent_session_meta.sql`,
+> `create_public_agent_session_messages.sql`.
 
 ## Использование
 
@@ -81,19 +78,17 @@ dbname,user}` + `DB_PASSWORD` (или `dsn` override), а не передаёт�
 | `_channel_delivery` | BOOLEAN | Флаг доставки через канал |
 | `created_at` | TIMESTAMPTZ | Дата создания |
 
-Индекс: `(session_key, seq)` (`idx_agent_session_messages_sk_seq`).
+Индекс `(session_key, seq)` в create-скриптах не создаётся (только таблица +
+COMMENT) — при необходимости подавайте его отдельно при развёртывании.
 
 ## Создание таблиц
 
 ```bash
-# PostgreSQL
-psql -d nanobot -f sql/session/create_session_tables.sql
-
-# Greenplum 6.25
-psql -d nanobot -f sql/session/create_session_tables_gp.sql
+psql -d nanobot -f sql/session/create_public_agent_session_meta.sql
+psql -d nanobot -f sql/session/create_public_agent_session_messages.sql
 ```
 
-Разница GP-версии: `DISTRIBUTED BY (session_key)`, `id BIGSERIAL` без `PRIMARY KEY` (для seq), нет FK.
+Оба скрипта — Greenplum 6.5: `DISTRIBUTED BY (...)`, `pgcrypto`, без FK.
 
 ## Graceful degradation
 

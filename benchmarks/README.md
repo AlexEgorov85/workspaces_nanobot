@@ -779,10 +779,12 @@ Markdown-отчёт с:
 
 ### SQL-файлы
 
-- `sql/benchmarks/create_benchmark_tables.sql` — для PostgreSQL 9.4+ (uuid-ossp)
-- `sql/benchmarks/create_benchmark_tables_gp.sql` — для Greenplum 6.25 (pgcrypto, DISTRIBUTED BY)
+- `sql/benchmarks/create_public_agent_benchmark_runs.sql` — таблица прогонов (GP 6.5)
+- `sql/benchmarks/create_public_agent_benchmark_results.sql` — таблица результатов (GP 6.5)
 
-Выбор SQL-файла происходит автоматически через `_is_greenplum()`.
+Применяются автоматически из `benchmarks/db.py:ensure_tables()` (по одному
+скрипту на таблицу, `_is_greenplum()` для выбора не требуется — оба скрипта
+GP-совместимы).
 
 ---
 

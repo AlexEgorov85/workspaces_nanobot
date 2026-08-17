@@ -6,43 +6,19 @@
 
 Релизные ветки именуются как `release/vX.Y`, теги патч-релизов — `vX.Y.Z`.
 
-## [Unreleased]
-
-### Fixed
-
-- **`DatabaseLoggingHook`: события разных вопросов больше не «путаются»
-  при конкурентной обработке.** Раньше на всех сессиях/оборотах использовался
-  ОДИН общий инстанс хука, а контекст вопроса (`session_key`/`request_id`)
-  кэшировался в плоских полях инстанса (`_run_session_key`/`_request_id`).
-  Обороты разных сессий обрабатываются конкурентно (`_concurrency_gate`,
-  дефолт `NANOBOT_MAX_CONCURRENT_REQUESTS=3`), поэтому чужой вопрос мог
-  перезаписать `_request_id` между `before_`/`after_execute_tool` — и
-  `log_tool_result`/`run_finished` получали request_id чужого оборота, а
-  `after_run` мог `finish_request`/`clear_request` чужую сессию. Причина:
-  фреймворковый `AgentRunHookContext` не содержит `session_key`, поэтому
-  состояние и кэшировалось в полях инстанса.
-  Теперь инстанс создаётся НА КАЖДЫЙ оборот через
-  `make_db_logging_hook_factory` (подключается через `hook_factories=`,
-  а не `hooks=`), который запекает свой `session_key`/`request_id` в
-  конструкторе — состояние вопроса изолировано между сессиями, гонки нет.
-  `_SubagentLoggingHook` в `RuntimePatcher.patch_subagent_logging` тоже
-  создаёт собственный `_db_hook` на запуск подагента (устранён class-level
-  race между конкурентными субагентами).
-  `workspace/hooks/database_logging_hook.py`, `lib/core/agent_factory.py`,
-  `lib/services/runtime_patcher.py`,
-  `tests/test_hooks_database_logging.py`
-  (`TestDatabaseLoggingHookFactory` + конкурентный регрессионный тест),
-  `tests/test_agent_factory.py`, `tests/test_runtime_patcher.py`.
-
 ## [2.2.0] — 2026-08-17
 
 > **Minor-релиз:** единый пул соединений PostgreSQL (одна очередь + N воркеров)
 > вместо connect-per-op, перенос записи сессий в `data_store/cache/sessions/`
 > через новый `SessionFileRedirectHook`, сохранение комментариев таблиц/колонок
 > и исходных PG-типов в DuckDB-кэш, единый dict-формат media в переписке.
-> Удалена неиспользуемая write-функциональность `AuditSyncService` (таблица
-> `audit_interactions` и конфиг-ключ `sync_write_table`); вопросы/ответы живут
-> только в `agent_question_runs`. Публичный API `utils.db` сохранён.
+> Конкурентно-безопасные хуки аудита: `ToolAuditHook` и `DatabaseLoggingHook`
+> изолируют состояние по сессии/обороту (при параллельных вопросах события
+> и аудит вызовов больше не «путаются»). Удалена неиспользуемая
+> write-функциональность `AuditSyncService` (таблица `audit_interactions` и
+> конфиг-ключ `sync_write_table`); вопросы/ответы живут только в
+> `agent_question_runs`. Удалены скрипты миграции v1.4→v2.0 и индексы из
+> create-скриптов (только таблица + COMMENT). Публичный API `utils.db` сохранён.
 
 ### Added
 
@@ -141,14 +117,29 @@
   `workspace/hooks/tool_audit_hook.py`, `lib/services/runtime_patcher.py`,
   `tests/test_hooks_tool_audit_hook.py` (`TestConcurrentSessionsIsolated`).
 
-- **`skills.audit_analyzer.sync_write_table` удалён** — уберите его из
-  `project.json` (оставленный ключ игнорируется, ошибки не вызовет). Таблица
-  `audit_interactions` больше не пишется: вопросы/ответы агента читайте из
-  `public.agent_question_runs` (`DbLoggingService`). Существующие строки
-  `audit_interactions` можно удалить вручную, если не нужны.
-- **Формат media изменился** на dict `{filename, data}` для новых записей.
-  Старые строковые data URL в `agent_conversation_messages.media` продолжают
-  читаться (`_decode_media_from_db` принимает оба варианта).
+- **`_CursorProxy` поддерживает итерацию (`workspace/utils/db.py`).**
+  Транзакционный курсор не реализовывал протокол iterable, из-за чего
+  `PGSessionManager` падал с `TypeError: '_CursorProxy' object is not
+  iterable` в `for row in cur:` (блокировало старт оборота после
+  auto-compact). Добавлен `__iter__`, выполняющий `fetchall()` одним job-ом —
+  поведение совпадает с psycopg2. Регрессия: `test_transaction_cursor_iteration`.
+- **`_CursorProxy.execute` больше не передаёт `()` вместо `None` (`8d43dfb`).**
+  psycopg2 при `params=()` пытается делать `%`-форматирование SQL и падает на
+  литералах `%` в данных (например, «16.7%» в контенте сообщения сессии) —
+  это ломало `execute_values` при сохранении таких сессий (иногда `IndexError:
+  tuple index out of range`). Теперь `params` передаётся as-is (`None` означает
+  «параметров нет», форматирование не выполняется). `workspace/utils/db.py`.
+- **`PGSessionManager` соблюдает контракт базового `SessionManager`.**
+  `__init__` теперь вызывает `super().__init__(workspace=self.workspace)`, что
+  задаёт `sessions_dir`/`legacy_sessions_dir`. Ранее фреймворковые
+  WebUI-эндпоинты (`/api/sessions`, `/api/sessions/<key>/webui-thread`)
+  падали с `AttributeError: 'PGSessionManager' object has no attribute
+  'sessions_dir'`. Регрессия: `test_init_sets_framework_contract`.
+- **Пул: `_maybe_shrink` не падает на воркере без `_idle_since`.**
+  При старте/shutdown `worker._idle_since` может быть `None` — вычитание
+  `time.monotonic() - None` роняло поток `TypeError` (всплывало как
+  предупреждение при teardown). Добавлен гард `_idle_since is not None`.
+  Регрессия: `test_maybe_shrink_skips_never_idle_worker`.
 
 ### Tests
 
@@ -168,7 +159,36 @@
   `fake_psycopg2` патчит реальный psycopg2 и сбрасывает пул в teardown),
   `test_postgres_channel.py` (`test_embed_data_wraps_in_dict`,
   `test_embed_local_file_wraps_in_dict`).
-- Итог: **856 passed**, `py_compile` всех изменённых модулей OK.
+- Регрессии рантайм-багов: `test_transaction_cursor_iteration`,
+  `test_execute_none_params_not_converted_to_tuple`,
+  `test_init_sets_framework_contract`, `test_maybe_shrink_skips_never_idle_worker`;
+  новые factory-тесты хуков `TestDatabaseLoggingHookFactory`
+  (`tests/test_hooks_database_logging.py`) и `TestConcurrentSessionsIsolated`
+  (`tests/test_hooks_tool_audit_hook.py`).
+- Итог: **868 passed**, `py_compile` всех изменённых модулей OK.
+
+### Migration notes
+
+- **Удалён каталог `sql/auto_migrate_1.4_2.0/` и DO-блоки `CREATE INDEX`.**
+  В `8f1ec22` убраны генераторы и скрипты миграции v1.4→v2.0, все
+  `DO`-блоки `CREATE INDEX` и триггер/функция из create-скриптов — остались
+  только `CREATE TABLE` + `COMMENT ON TABLE/COLUMN`. Если на развёртывании
+  нужны индексы/триггер, подавайте их отдельно (актуальные пути:
+  `sql/session/`, `sql/logs/`, `sql/benchmarks/`, `sql/channels/`,
+  `sql/audit_analyzer/`). `benchmarks/db.py:ensure_tables()` и
+  `DbLoggingService` ссылаются на обновлённые create-скрипты.
+- **`skills.audit_analyzer.sync_write_table` удалён** — уберите его из
+  `project.json` (оставленный ключ игнорируется, ошибки не вызовет). Таблица
+  `audit_interactions` больше не пишется: вопросы/ответы агента читайте из
+  `public.agent_question_runs` (`DbLoggingService`). Существующие строки
+  `audit_interactions` можно удалить вручную, если не нужны.
+- **Формат media изменился** на dict `{filename, data}` для новых записей.
+  Старые строковые data URL в `agent_conversation_messages.media` продолжают
+  читаться (`_decode_media_from_db` принимает оба варианта).
+- **`PGSessionManager` инициализирует базовый `SessionManager`** — заводит
+  служебную папку `<workspace>/sessions` (`sessions_dir`), требуемую
+  WebUI-эндпоинтам фреймворка. Рантайм-контракт сохранён; данные сессий
+  по-прежнему в PostgreSQL.
 
 ## [2.1.0] — 2026-08-14
 

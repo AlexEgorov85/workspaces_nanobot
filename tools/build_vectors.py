@@ -502,7 +502,7 @@ def main():
     )
     if not row:
         print(f"ОШИБКА: таблица {vec_cfg.mode_vector_db_table} не создана")
-        print("Сначала выполните sql/create_audit_vectors_table_gp.sql")
+        print("Сначала выполните sql/audit_analyzer/create_oarb_audit_vectors.sql")
         sys.exit(1)
 
     indexes = read_vector_index_config(_CFG)

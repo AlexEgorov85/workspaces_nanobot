@@ -34,14 +34,18 @@ htmlcov/
 history/
 
 # --- Артефакты удалённых навыков / legacy ---
-webui/                       # старый SPA-dist (удалён в v1.3.0, см. CHANGELOG)
-ws/                          # артефакты миграции data_store
-media/                       # выгрузка из удалённого WebSocket-канала
+# старый SPA-dist (удалён в v1.3.0, см. CHANGELOG)
+webui/
+# артефакты миграции data_store
+ws/
+# выгрузка из удалённого WebSocket-канала
+media/
 
 # --- Runtime-данные workspace ---
 # (workspace/.gitignore уже игнорирует data_store/cache/ и .nanobot/tool-results/ внутри workspace,
 #  поэтому в корне только то, что не закрыто вложенным .gitignore)
-workspace/sessions/           # JSONL-истории старого SessionManager
+# JSONL-истории старого SessionManager
+workspace/sessions/
 
 # --- DuckDB файлы (runtime-кеш) ---
 *.duckdb
@@ -63,3 +67,27 @@ Thumbs.db
 *.bak
 *.tmp
 *.pid
+
+# --- Агент-runtime: конфиг и память бота (не часть репозитория) ---
+.opencode/
+AGENTS.md
+HEARTBEAT.md
+SOUL.md
+USER.md
+memory/
+prompts/
+workspace/cron/
+workspace/memory/.cursor
+
+# --- Результаты бенчмарков (прогоны) ---
+bench_full/
+bench_full2/
+
+# --- Runtime-данные вне workspace/.gitignore ---
+data_store/
+workspace/cache/
+workspace/data_store/streamlit_files/
+workspace/skills/audit_analyzer/data_store/
+
+# --- Временные скрипты в кеше навыка ---
+workspace/skills/audit_analyzer/cache/_*.py

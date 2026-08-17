@@ -303,7 +303,7 @@ nanobot/
 │   │   ├── cache_provider.py             #     интерфейс CacheProvider + SearchResult
 │   │   ├── cache_provider_impl.py        #     PostgresDuckDbProvider + фабрика и модульные функции
 │   │   ├── text_splitter.py              #     чанкование текстов для индексаторов
-│   │   # DDL для DbLoggingService (gateway_logs) теперь в sql/logs/ и sql/migrations/
+│   │   # DDL для DbLoggingService (gateway_logs) — в sql/logs/
 │   ├── cli/                              #  вынесено из cli_agent.py
 │   │   ├── console_loop.py               #   REPL + typewriter + consume_outbound
 │   │   ├── display_config.py             #   DisplayConfig
@@ -709,7 +709,7 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 | `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (chunk_index/count, content_hash, row_data JSONB, synced_at) | `tools/build_vectors.py` | `lib/services/cache_provider_impl.py:PostgresDuckDbProvider` |
 | `public.agent_vector_index_store` | Сериализованный FAISS `BYTEA` + метаданные (dimension, vector_count, updated_at) | `provider.rebuild_and_store_index()` | `provider._INDEX_CACHE` (in-memory после preload) |
 
-DDL: `sql/audit_analyzer/create_agent_vector_index_config_gp.sql`, `sql/audit_analyzer/create_audit_vectors_table_gp.sql`.
+DDL: `sql/audit_analyzer/create_public_agent_vector_index_config.sql`, `sql/audit_analyzer/create_oarb_audit_vectors.sql`.
 
 ### Дефолтные индексы
 
@@ -1034,8 +1034,10 @@ python tools/build_vectors.py --full-rebuild
 **Если `TRUNCATE` всех таблиц:**
 
 ```bash
-psql -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
-psql -f sql/audit_analyzer/create_agent_vector_index_config_gp.sql
+psql -f sql/audit_analyzer/create_oarb_audit_vectors.sql
+psql -f sql/audit_analyzer/create_public_agent_predefined_scripts.sql
+psql -f sql/audit_analyzer/create_public_agent_vector_index_config.sql
+psql -f sql/audit_analyzer/create_public_agent_vector_index_store.sql
 psql -f sql/audit_analyzer/seed_default_indexes.sql
 python tools/build_vectors.py --full-rebuild
 ```
@@ -1220,7 +1222,7 @@ GROUP BY v.source;
 | `psql: command not found` | Нет `psql` в PATH (только для seed/DDL) | Установите PostgreSQL client или используйте `python -c "from workspace.utils.db import execute; execute(open('sql/...').read())"` |
 | `permission denied for table public.agent_vector_index_store` | Не хватает GRANT | `GRANT INSERT, UPDATE, DELETE ON public.agent_vector_index_store TO <user>` |
 | `--status` показывает 0 индексов | `public.agent_vector_index_config` пуст | Применить `sql/audit_analyzer/seed_default_indexes.sql` |
-| `ERROR: таблица oarb.audit_vectors не создана` | DDL не применён | `psql -f sql/audit_analyzer/create_audit_vectors_table_gp.sql` |
+| `ERROR: таблица oarb.audit_vectors не создана` | DDL не применён | `psql -f sql/audit_analyzer/create_oarb_audit_vectors.sql` |
 
 #### Ошибки при сборке
 
@@ -1403,8 +1405,9 @@ rm /tmp/build_vectors.pid
 
 ```bash
 # 1. Применить новые DDL (если ещё не)
-psql -f sql/audit_analyzer/create_audit_vectors_table_gp.sql
-psql -f sql/audit_analyzer/create_agent_vector_index_config_gp.sql
+psql -f sql/audit_analyzer/create_oarb_audit_vectors.sql
+psql -f sql/audit_analyzer/create_public_agent_vector_index_config.sql
+psql -f sql/audit_analyzer/create_public_agent_vector_index_store.sql
 
 # 2. Зарегистрировать индексы в public.agent_vector_index_config
 psql -f sql/audit_analyzer/seed_default_indexes.sql
@@ -1635,15 +1638,11 @@ python tools/build_vectors.py --db-table my_app.vectors
 
 | СУБД | Файлы |
 |------|-------|
-| PostgreSQL 13+ | `sql/audit_analyzer/create_*.sql` (без суффикса `_gp`) |
-| Greenplum 6.5+ | `sql/audit_analyzer/create_*_gp.sql` (с `DISTRIBUTED BY`) |
+| Все (PG/GP) | `sql/audit_analyzer/create_<schema>_<table>.sql` — один файл на таблицу, Greenplum 6.5 (`DISTRIBUTED BY`) |
 
-**Миграция со старой версии:**
-
-| СУБД | Файл |
-|------|------|
-| PostgreSQL 13+ | `sql/migrations/migrate_vectors_v2.sql` |
-| Greenplum 6.5+ | `sql/migrations/migrate_vectors_v2_gp.sql` |
+**Миграция со старой версии:** скрипты миграции векторов удалены (v2.2.0).
+Примените актуальные DDL из `sql/audit_analyzer/` и пересоберите индексы:
+`python tools/build_vectors.py --full-rebuild`.
 
 ⚠️ Миграция удаляет данные в `audit_vectors` и `agent_vector_index_store`. После ОБЯЗАТЕЛЬНО:
 
@@ -1889,18 +1888,20 @@ max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3
 
 **Данные:**
 
-- **Сессии** (`session_meta`, `session_messages`) — без миграции, схема та же.
-  DDL `sql/session/create_session_tables.sql` сам переименует их в
-  `agent_session_meta` / `agent_session_messages` при первом применении.
-- **Канал** (`agent_conversation_messages`) — без миграции (имя уже актуально).
+- **Сессии** (`public.agent_session_meta`, `public.agent_session_messages`) —
+  схема та же. DDL: `sql/session/create_public_agent_session_meta.sql`,
+  `sql/session/create_public_agent_session_messages.sql`.
+- **Канал** (`public.agent_conversation_messages`) — без миграции (имя уже актуально).
+  DDL: `sql/channels/create_public_agent_conversation_messages.sql`.
 - **`audit_cache.duckdb`** — gateway пересоздаст автоматически (in-memory → новый snapshot).
-- **Векторные индексы** (`oarb.audit_vectors`, `public.agent_vector_index_store`, `public.agent_vector_index_config`) — без миграции (1.5.0 уже хранил их в БД).
-- **Бенчмарки** (`agent_benchmark_runs`, `agent_benchmark_results`) — без миграции.
-- **`agent_gateway_logs`** — новая таблица, создаётся через `sql/logs/create_logs_table.sql`.
-- **Прочие `agent_`-переименования** (`predefined_scripts` → `agent_predefined_scripts`,
-  `conversation_messages` → `agent_conversation_messages`,
-  `oarb.vector_index_*` → `public.agent_vector_index_*`) — идемпотентная миграция
-  `sql/migrations/migrate_agent_table_names_v1.sql`.
+- **Векторные индексы** (`oarb.audit_vectors`, `public.agent_vector_index_store`,
+  `public.agent_vector_index_config`) — без миграции (1.5.0 уже хранил их в БД);
+  DDL в `sql/audit_analyzer/`.
+- **Бенчмарки** (`public.agent_benchmark_runs`, `public.agent_benchmark_results`) — без миграции;
+  DDL в `sql/benchmarks/`.
+- **`agent_gateway_logs` / `agent_question_runs`** — новые таблицы:
+  `sql/logs/create_public_agent_gateway_logs.sql`,
+  `sql/logs/create_public_agent_question_runs.sql`.
 
 **Что НЕ изменилось:**
 
