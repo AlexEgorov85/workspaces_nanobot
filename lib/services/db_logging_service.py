@@ -4,7 +4,10 @@
 для тестов с мок-подключением и для сред без psycopg2).
 
 Архитектура:
-  * единственный worker-поток (``self._thread``) владеет psycopg2-соединением;
+  * единственный worker-поток (``self._thread``) дренит очередь батчами;
+  * сам сервис НЕ держит psycopg2-соединение: вставки идут через общий
+    пул ``utils.db`` (``run(lambda conn: …)``) — воркер пула владеет
+    соединением, сервис не плодит лишних подключений;
   * неблокирующие ``log_*`` методы ставят события в ``queue.Queue``;
   * worker батчем вставляет записи по ``flush_interval_sec`` или ``batch_size``;
   * если подключение к БД недоступно или вставка падает — события НЕ пишутся
@@ -133,6 +136,7 @@ class DbLoggingService:
         # разные ключи — коллизий нет.
         self._request_index: Dict[str, Dict[str, Optional[str]]] = {}
         self._request_index_lock = threading.Lock()
+        self._schema_ok = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -443,8 +447,9 @@ class DbLoggingService:
              ``time.time() >= deadline`` — выполнить flush.
 
         При flush:
-          * есть соединение → ``_flush_batch(conn, buffer)`` (psycopg2 INSERT);
-          * нет соединения → события выбрасываются (счётчик ``failed``),
+          * запись идёт через общий пул ``utils.db`` (``run(lambda conn: …)``) —
+            сервис своего psycopg2-соединения не держит;
+          * нет DSN → события выбрасываются (счётчик ``failed``),
             JSONL-файл не пишется;
           * при ошибке batch — события выбрасываются (``failed``),
             ``connected = False``.
@@ -452,7 +457,6 @@ class DbLoggingService:
         В блоке ``finally`` — финальный flush (иначе при штатной остановке
         теряем события из буфера).
         """
-        conn = self._connect()
         buffer: List[LogEvent] = []
         deadline = time.time() + self._flush_interval
 
@@ -465,7 +469,7 @@ class DbLoggingService:
                     item = None
 
                 if isinstance(item, _FlushSentinel):
-                    self._flush_batch(conn, buffer)
+                    self._flush_batch(buffer)
                     buffer.clear()
                     if not self._running:
                         return
@@ -474,106 +478,37 @@ class DbLoggingService:
                 # Контекст вопроса — отдельный upsert в agent_question_runs,
                 # не смешивается с батчем событий agent_gateway_logs.
                 if isinstance(item, _QuestionRunRecord):
-                    self._handle_question_run(conn, item)
+                    self._handle_question_run(item)
                     continue
 
                 if item is not None:
                     buffer.append(item)
 
                 if len(buffer) >= self._batch_size:
-                    if conn is None:
-                        conn = self._connect()
-                    if conn is not None:
-                        self._flush_batch(conn, buffer)
-                    else:
-                        self._drop_batch(buffer)
+                    self._flush_batch(buffer)
                     buffer.clear()
                     deadline = time.time() + self._flush_interval
                 elif time.time() >= deadline:
                     if buffer:
-                        if conn is None:
-                            conn = self._connect()
-                        if conn is not None:
-                            self._flush_batch(conn, buffer)
-                        else:
-                            self._drop_batch(buffer)
+                        self._flush_batch(buffer)
                         buffer.clear()
                     deadline = time.time() + self._flush_interval
         finally:
             # Финальный флаш
             if buffer:
-                if conn is None:
-                    conn = self._connect()
-                if conn is not None:
-                    self._flush_batch(conn, buffer)
-                else:
-                    self._drop_batch(buffer)
-            self._close(conn)
+                self._flush_batch(buffer)
 
     # ------------------------------------------------------------------
-    # Подключение / запись
+    # Запись через общий пул utils.db
     # ------------------------------------------------------------------
 
-    def _connect(self):
-        """Открыть psycopg2-соединение к ``self._dsn`` и проверить схему.
+    def _db_run(self, fn):
+        """Выполнить ``fn(conn)`` на свободном соединении общего пула ``utils.db``."""
+        from utils.db import configure, run
 
-        Returns:
-            ``psycopg2.connection`` (с ``autocommit=True``) или ``None``,
-            если DSN не задан, psycopg2 не установлен или ``_running == False``.
-
-        После успешного ``connect`` выполняется ``_ensure_schema`` —
-        проверка существования таблиц логов. Если таблицы нет — соединение
-        закрывается и попытка повторяется с backoff; события в это время
-        выбрасываются (счётчик ``failed``). Сервис DDL не выполняет.
-
-        При неудаче ``connect`` — экспоненциальный backoff
-        (1с → 2с → 4с → ... → 60с) внутри ``while self._running``,
-        ``last_error`` пишется в статистику.
-        """
-        if not self._dsn:
-            return None
-        try:
-            import psycopg2
-            import psycopg2.extras
-        except Exception as exc:
-            with self._state_lock:
-                self._stats["last_error"] = f"psycopg2 import: {exc}"
-            return None
-
-        backoff = self._connect_backoff_sec
-        while self._running:
-            try:
-                conn = psycopg2.connect(self._dsn, gssencmode="disable")
-                conn.autocommit = True
-            except Exception as exc:
-                with self._state_lock:
-                    self._stats["last_error"] = f"connect: {exc}"
-                    self._stats["connected"] = False
-                self._stop_event.wait(backoff)
-                backoff = min(backoff * 2, self._connect_backoff_max_sec)
-                continue
-            try:
-                self._ensure_schema(conn)
-            except Exception as exc:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                logger.error(
-                    "DbLoggingService: таблица %s.%s не найдена "
-                    "(проверка схемы): %s",
-                    self._schema, self._table_name, exc,
-                )
-                with self._state_lock:
-                    self._stats["last_error"] = f"ensure schema: {exc}"
-                    self._stats["connected"] = False
-                self._stop_event.wait(backoff)
-                backoff = min(backoff * 2, self._connect_backoff_max_sec)
-                continue
-            with self._state_lock:
-                self._stats["connected"] = True
-            return conn
-        return None
+        if self._dsn:
+            configure(self._dsn)
+        return run(fn)
 
     def _ensure_schema(self, conn: Any) -> None:
         """Проверить существование таблиц логов/контекста вопросов.
@@ -581,9 +516,9 @@ class DbLoggingService:
         Сервис НЕ провижинит схему: таблицы ``agent_question_runs`` /
         ``agent_gateway_logs`` (и индексы) должны быть созданы миграциями
         заранее (``sql/created_tables.sql`` / ``lib/services/sql/*.sql``).
-        Если таблица логов отсутствует — поднимается исключение; ``_connect``
-        логирует его (``last_error`` + ``logger.error``), а события
-        выбрасываются (счётчик ``failed``).
+        Если таблица логов отсутствует — поднимается исключение; вызывающий
+        ``_flush_batch`` логирует его (``last_error`` + ``logger.error``),
+        а события выбрасываются (счётчик ``failed``).
 
         Имя таблицы берётся из конструктора (``table_name``, параметр), а не
         хардкодится. Инлайн-DDL в коде нет и не выполняется.
@@ -611,27 +546,53 @@ class DbLoggingService:
             except Exception:
                 pass
 
-    def _flush_batch(self, conn: Any, batch: List[LogEvent]) -> None:
-        """Вставить батч в PostgreSQL через ``psycopg2.extras.execute_batch``.
+    def _flush_batch(self, batch: List[LogEvent]) -> None:
+        """Вставить батч через общий пул ``utils.db`` (без своего соединения).
 
-        Использует ``page_size=self._batch_size`` для chunked-вставки —
-        ``execute_batch`` сам режет список на страницы и выполняет несколько
-        ``INSERT`` с одним statement. На каждой строке — ``id`` (UUID),
-        ``level``/``event_type``/``summary`` (простые VARCHAR/TEXT), и
-        ``payload``/``metadata`` как ``psycopg2.extras.Json`` (→ JSONB).
+        Использует ``psycopg2.extras.execute_batch`` с
+        ``page_size=self._batch_size`` для chunked-вставки — ``execute_batch``
+        сам режет список на страницы и выполняет несколько ``INSERT`` с одним
+        statement. На каждой строке — ``id`` (UUID), ``level``/``event_type``/
+        ``summary`` (простые VARCHAR/TEXT), и ``payload``/``metadata`` как
+        ``psycopg2.extras.Json`` (→ JSONB).
 
         При исключении (битый JSONB, отвалившееся соединение, deadlock):
           * батч целиком выбрасывается (``failed += len(batch)``);
-          * ``connected = False`` → следующий ``_flush_batch`` начнётся
-            с попытки ``_connect()``.
+          * ``connected = False``.
 
         No-op при пустом батче.
         """
         if not batch:
             return
+        if not self._dsn:
+            self._drop_batch(batch)
+            return
         try:
-            import psycopg2.extras
-            cur = conn.cursor()
+
+            def _work(conn: Any) -> None:
+                if not self._schema_ok:
+                    self._ensure_schema(conn)
+                    self._schema_ok = True
+                self._insert_batch(conn, batch)
+
+            self._db_run(_work)
+            with self._state_lock:
+                self._stats["written"] += len(batch)
+                self._stats["batch_count"] += 1
+                self._stats["connected"] = True
+        except Exception as exc:
+            self._schema_ok = False
+            with self._state_lock:
+                self._stats["failed"] += len(batch)
+                self._stats["last_error"] = f"flush: {exc}"
+                self._stats["connected"] = False
+
+    def _insert_batch(self, conn: Any, batch: List[LogEvent]) -> None:
+        """Выполнить ``execute_batch`` INSERT на данном соединении."""
+        import psycopg2.extras
+
+        cur = conn.cursor()
+        try:
             psycopg2.extras.execute_batch(
                 cur,
                 f'INSERT INTO "{self._schema}"."{self._table_name}" '
@@ -647,33 +608,38 @@ class DbLoggingService:
                 ) for e in batch],
                 page_size=self._batch_size,
             )
-            cur.close()
-            with self._state_lock:
-                self._stats["written"] += len(batch)
-                self._stats["batch_count"] += 1
-        except Exception as exc:
-            with self._state_lock:
-                self._stats["failed"] += len(batch)
-                self._stats["last_error"] = f"flush: {exc}"
-                self._stats["connected"] = False
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
 
-    def _handle_question_run(self, conn: Any, rec: _QuestionRunRecord) -> None:
+    def _handle_question_run(self, rec: _QuestionRunRecord) -> None:
         """Обработать контекст вопроса: upsert в agent_question_runs.
 
-        Если соединения нет — попробуем подключиться; при неудаче запись
-        выбрасывается (``failed++``), JSONL-файл не пишется. При ошибке
-        upsert — ``connected = False``.
+        Через общий пул ``utils.db``. При неудаче запись выбрасывается
+        (``failed++``), JSONL-файл не пишется. При ошибке upsert —
+        ``connected = False``.
         """
-        if conn is None:
-            conn = self._connect()
-        if conn is None:
+        if not self._dsn:
             with self._state_lock:
                 self._stats["failed"] += 1
                 self._stats["last_error"] = "question_run: нет соединения с БД"
             return
         try:
-            self._upsert_question_run(conn, rec)
+
+            def _work(conn: Any) -> None:
+                if not self._schema_ok:
+                    self._ensure_schema(conn)
+                    self._schema_ok = True
+                self._upsert_question_run(conn, rec)
+
+            self._db_run(_work)
+            with self._state_lock:
+                self._stats["question_runs"] += 1
+                self._stats["connected"] = True
         except Exception as exc:
+            self._schema_ok = False
             with self._state_lock:
                 self._stats["failed"] += 1
                 self._stats["last_error"] = f"question_run upsert: {exc}"
@@ -746,8 +712,6 @@ class DbLoggingService:
                         rec.summary, rec.question, media_json, rec.request_id,
                     ),
                 )
-            with self._state_lock:
-                self._stats["question_runs"] += 1
         finally:
             try:
                 cur.close()
@@ -763,19 +727,3 @@ class DbLoggingService:
         with self._state_lock:
             self._stats["failed"] += len(batch)
             self._stats["last_error"] = "flush: БД недоступна, батч выброшен"
-
-    def _close(self, conn: Any) -> None:
-        """Закрыть psycopg2-соединение (если оно было).
-
-        Исключения глотаются — некритично. После закрытия
-        ``stats["connected"] = False``, чтобы следующий ``_flush_batch``
-        пошёл через ``_connect()``.
-        """
-        if conn is None:
-            return
-        try:
-            conn.close()
-        except Exception:
-            pass
-        with self._state_lock:
-            self._stats["connected"] = False

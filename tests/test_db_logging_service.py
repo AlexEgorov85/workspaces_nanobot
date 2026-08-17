@@ -24,30 +24,45 @@ def _svc(**kw):
 
 @pytest.fixture
 def fake_psycopg2(monkeypatch):
-    """Подменяем psycopg2/psycopg2.extras, чтобы не требовать установки."""
+    """Подменяем connect/session в реальном psycopg2, чтобы не поднимать БД."""
+    real = __import__("psycopg2")
+    __import__("psycopg2.extras")
+    __import__("psycopg2.extensions")
+    real_extras = sys.modules["psycopg2.extras"]
+    real_extensions = sys.modules["psycopg2.extensions"]
+
     cursor = MagicMock()
     cursor.close = MagicMock()
-    cur_factory = MagicMock(return_value=cursor)
     conn = MagicMock()
-    conn.cursor = cur_factory
+    conn.cursor = MagicMock(return_value=cursor)
     conn.close = MagicMock()
     conn.closed = False
 
-    extras = types.ModuleType("psycopg2.extras")
-    extras.execute_batch = MagicMock()
-    extras.Json = lambda x: x
+    execute_batch = MagicMock()
 
-    psycopg2 = types.ModuleType("psycopg2")
-    psycopg2.connect = MagicMock(return_value=conn)
-    psycopg2.extras = extras
+    monkeypatch.setattr(real, "connect", MagicMock(return_value=conn), raising=False)
+    monkeypatch.setattr(real_extras, "Json", lambda x: x, raising=False)
+    monkeypatch.setattr(real_extras, "execute_batch", execute_batch, raising=False)
+    monkeypatch.setattr(real_extras, "register_json", MagicMock(), raising=False)
+    monkeypatch.setattr(real_extensions, "register_adapter", MagicMock(), raising=False)
 
-    monkeypatch.setitem(sys.modules, "psycopg2", psycopg2)
-    monkeypatch.setitem(sys.modules, "psycopg2.extras", extras)
-    return {
+    ws = str(Path(__file__).resolve().parent.parent / "workspace")
+    if ws not in sys.path:
+        sys.path.insert(0, ws)
+    import utils.db as _db
+
+    yield {
         "conn": conn,
         "cursor": cursor,
-        "execute_batch": extras.execute_batch,
+        "execute_batch": execute_batch,
     }
+
+    # Каждый тест получает свежее соединение/pool: воркер закрывается, конфиг
+    # и менеджер сбрасываются, чтобы не переиспользовать mock-conn и настройки
+    # из прошлого теста.
+    _db.shutdown()
+    _db._manager = None
+    _db._pool_cfg = dict(_db._DEFAULT_POOL)
 
 
 class TestBasicLifecycle:
@@ -233,6 +248,9 @@ class TestFlush:
         assert svc.get_stats()["failed"] >= 2
 
     def test_connect_failure_drops(self, fake_psycopg2, tmp_path):
+        from utils.db import set_pool_config
+
+        set_pool_config({"connect_max_retries": 1, "reconnect_backoff_sec": 0.05})
         psycopg2 = sys.modules["psycopg2"]
         psycopg2.connect = MagicMock(side_effect=RuntimeError("no db"))
         svc = _svc(
