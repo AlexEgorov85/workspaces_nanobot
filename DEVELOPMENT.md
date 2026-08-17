@@ -1697,6 +1697,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | `lib/lifecycle/gateway_runner.py` |  Цикл с exponential backoff |
 | `lib/lifecycle/shutdown_coordinator.py` |  LIFO graceful shutdown |
 | `workspace/hooks/database_logging_hook.py` |  AgentHook для tool-событий + run_finished |
+| `workspace/hooks/session_file_redirect_hook.py` |  AgentHook: перенаправляет `write`/`edit` в `data_store/cache/sessions/<session_key>/` (политика хранения в `workspace/AGENTS.md`) |
 
 ### Pre-existing (не тронуты рефакторингом)
 
@@ -1729,6 +1730,8 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | **Lifecycle** | Lifecycle (backoff/shutdown) | `lib/lifecycle/gateway_runner.py` / `shutdown_coordinator.py` | Gateway зацикливается на рестартах → `GatewayRunner.run_forever` (exponential backoff 1с→30с); процесс не умирает по Ctrl-C → `ShutdownCoordinator` (LIFO) |
 | **Каналы** | Канал связи | Написать класс унаследовав `BaseChannel`, подключить через `lib/services/channel_factory.py` | Сообщения не доходят → `allow_from` в `project.json`; reasoning не пишется → `PostgresChannel._flush_reasoning` (период `flush_interval`) |
 | **Хуки** | Хук агента | Создать файл в `workspace/hooks/` с подклассом `AgentHook` | Хук не вызывается → `lib/services/agent_factory.py:AgentFactory.create` (lazy-import + добавление в `AgentLoop.hooks`); `ImportError` из хука → `try/except` в `AgentFactory` (хук просто не добавится) |
+| **Хуки** | Перенаправление файлов сессии | `workspace/hooks/session_file_redirect_hook.py` (подключается автоматически) | Файлы уходят в корень workspace → проверить, что хук инстанцировался (`hook_loader` печатает `✓ SessionFileRedirectHook loaded`); whitelist пропускает `AGENTS.md`/`lib/`/`data_store/`/`*.py` — добавить в `_ALLOWED_PREFIXES` если нужно; не работает на `exec`-redirects (`>`, `>>`) — это вне `write`/`edit` |
+| **Файл-инструменты** | Контроль `write`/`edit` | `workspace/hooks/session_file_redirect_hook.py` | Без хука работает `data_store/cache/...` по правилу в `workspace/AGENTS.md`, но модель может его забыть; хук закрывает дыру независимо от подсказок в промпте |
 | **Бенчмарки** | Тест бенчмарка | YAML-файл в `benchmarks/items/` | Тест падает по `keyword` → перечитать `expect.keywords_include`; `multi_step` не переходит к следующему шагу → `new_session: true` (или `false` для общей истории) |
 | **Web UI** | Streamlit UI | `streamlit_app.py` | Чат не отвечает → `streamlit.max_wait` (дефолт 600с) и `poll_interval`; `st.rerun` лимит → блокирующий поллинг в `streamlit_app.py` (без `st.rerun`) |
 | **Агент** | Личность агента | `workspace/SOUL.md` | — |
