@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -49,30 +48,42 @@ _META_TABLE = "__schema_meta"
 
 def get_embedding(text: str, base_url: str = "", model: str = "mxbai-embed-large:latest",
                   retries: int = 3, timeout_sec: float = 60.0) -> Optional[List[float]]:
-    """Получить эмбеддинг текста через Ollama /api/embed."""
+    """Получить эмбеддинг текста через Ollama /api/embed.
+
+    Единый retry-цикл через ``retry_on_exception`` (exponential backoff),
+    как и в LLM-клиенте (``lib/services/llm_client.py``).
+    """
     if not base_url:
         return None
-    import httpx
 
-    payload = {"model": model, "input": text}
-    for attempt in range(1, retries + 1):
-        try:
-            with httpx.Client(timeout=timeout_sec) as client:
-                resp = client.post(base_url, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-            embeddings = data.get("embeddings")
-            if embeddings and isinstance(embeddings, list) and embeddings:
-                return embeddings[0]
-            return None
-        except Exception as e:
-            if attempt < retries:
-                time.sleep(2 ** attempt)
-            else:
-                print(f"[vector] Ошибка эмбеддинга после {retries} попыток: {e}",
-                      file=sys.stderr)
-                return None
-    return None
+    def _embed() -> Optional[List[float]]:
+        import httpx
+
+        payload = {"model": model, "input": text}
+        with httpx.Client(timeout=timeout_sec) as client:
+            resp = client.post(base_url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        embeddings = data.get("embeddings")
+        if embeddings and isinstance(embeddings, list) and embeddings:
+            return embeddings[0]
+        return None
+
+    from lib.utils.retry import retry_on_exception
+
+    try:
+        return retry_on_exception(
+            _embed,
+            exceptions=(Exception,),
+            max_retries=retries,
+            base_delay=1.0,
+            max_delay=16.0,
+            label="embedding",
+        )
+    except Exception as e:
+        print(f"[vector] Ошибка эмбеддинга после {retries} попыток: {e}",
+              file=sys.stderr)
+        return None
 
 
 def read_embedding_config(cfg: dict) -> Dict[str, Any]:
