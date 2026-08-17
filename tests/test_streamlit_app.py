@@ -54,8 +54,14 @@ def mock_all():
         utils_db.fetchone = MagicMock()
         utils_db.execute = MagicMock()
         utils_db.fetch = MagicMock(return_value=[])
-        sys.modules["utils"] = types.ModuleType("utils")
         sys.modules["utils.db"] = utils_db
+
+        # ``utils`` должен оставаться настоящим workspace-пакетом,
+        # чтобы streamlit_app мог импортировать ``utils.session_file_store``.
+        # Подменяем только ``utils.db`` через атрибут пакета.
+        import importlib
+        real_utils_pkg = importlib.import_module("utils")
+        real_utils_pkg.db = utils_db
 
         import streamlit_app
 

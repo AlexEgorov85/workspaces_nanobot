@@ -123,6 +123,26 @@ class TestRedisChannelSend:
         ch._redis.lpush.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_skips_tool_hint(self):
+        ch = _make_channel()
+        ch._redis = AsyncMock()
+        msg = MagicMock()
+        msg.metadata = {"_tool_hint": True}
+
+        await ch.send(msg)
+        ch._redis.lpush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_stream_end(self):
+        ch = _make_channel()
+        ch._redis = AsyncMock()
+        msg = MagicMock()
+        msg.metadata = {"_stream_end": True}
+
+        await ch.send(msg)
+        ch._redis.lpush.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_sends_to_redis(self):
         ch = _make_channel()
         ch._redis = AsyncMock()

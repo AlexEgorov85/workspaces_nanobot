@@ -36,24 +36,28 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from utils.db import async_fetchval as fetchval, async_execute as execute, async_fetchone as fetchone, async_transaction as transaction, async_fetch as fetch
+from utils.session_file_store import SessionFileStore
+from utils.jsonb import decode_jsonb as _decode_jsonb
+from lib.utils.outbound_meta import is_dropped
 from psycopg2.extras import Json
 
 _WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent / "workspace"
 
 
-def _decode_jsonb(val: Any) -> dict:
-    """Безопасно декодировать JSONB значение.
+def _resolve_sfs_base(media_cache_dir: str | Path) -> Path:
+    """Преобразовать ``channels.postgres.media_cache_dir`` в ``base_dir``
+    для ``SessionFileStore``.
 
-    psycopg2 с register_json возвращает dict.
-    Старые записи (сохранённые до перехода) могут быть строкой.
+    ``SessionFileStore(base_dir)`` размещает сессии в
+    ``base_dir/cache/sessions/``. Обычно ``media_cache_dir`` уже указывает
+    ровно на этот каталог (``data_store/cache/sessions``), значит ``base_dir``
+    = ``workspace``. Если задан абсолютный путь или другой относительный —
+    берём его родителя.
     """
-    if val is None:
-        return {}
-    if isinstance(val, str):
-        return json.loads(val)
-    if isinstance(val, dict):
-        return val
-    return dict(val) if val else {}
+    p = Path(media_cache_dir)
+    if not p.is_absolute():
+        p = _WORKSPACE_DIR / media_cache_dir
+    return p.parent if p.name == "sessions" else p
 
 
 class PostgresChannel(BaseChannel):
@@ -112,12 +116,18 @@ class PostgresChannel(BaseChannel):
         # сообщение в тот же чат, пока первое не 完成)
         self._chat_inflight: set[str] = set()
 
-        # ---- медиа-кеш ----
-        media_cache_dir = _get("media_cache_dir", "data_store/cache/sessions")
-        cache_path = Path(media_cache_dir)
-        if not cache_path.is_absolute():
-            cache_path = _WORKSPACE_DIR / media_cache_dir
-        self._media_cache_dir: Path = cache_path
+        # ---- единое хранилище файлов сессии ----
+        # Канал делит SessionFileStore со всем приложением. Это та же
+        # инстанция, через которую tools/streamlit/другие каналы кладут
+        # файлы в ``cache/sessions/{session_key}/attachments/`` и
+        # ``cache/sessions/{session_key}/results/``.
+        injected_store = _get("_file_store")
+        if isinstance(injected_store, SessionFileStore):
+            self._file_store: SessionFileStore = injected_store
+        else:
+            media_cache_dir = _get("media_cache_dir", "data_store/cache/sessions")
+            base = _resolve_sfs_base(media_cache_dir)
+            self._file_store = SessionFileStore(base, attachments_subdir="attachments")
 
         self._msg_chat: dict[str, str] = {}
 
@@ -140,20 +150,6 @@ class PostgresChannel(BaseChannel):
     # ------------------------------------------------------------------
     # Кодирование/декодирование медиа-файлов для передачи через БД
     # ------------------------------------------------------------------
-
-    def _session_media_dir(self, session_key: str) -> Path:
-        """Вернуть директорию для медиа-файлов сессии.
-
-        Путь: ``{media_cache_dir}/{session_key}/``.
-
-        ``session_key`` может содержать символы, недопустимые в именах
-        каталогов Windows (например, ``postgres:streamlit``) — они
-        заменяются на ``_``.
-        """
-        safe_key = re.sub(r"[^\w\- ]", "_", session_key or "").strip() or "default"
-        sdir = self._media_cache_dir / safe_key
-        sdir.mkdir(parents=True, exist_ok=True)
-        return sdir
 
     async def _embed_media_for_db(self, media: list[str]) -> list[Any]:
         """Прочитать локальные файлы и закодировать как data URL для БД.
@@ -218,12 +214,12 @@ class PostgresChannel(BaseChannel):
             сохраняется, чтобы агент знал, что приложил пользователь)
           — всё остальное (http-ссылки, локальные пути) → как есть
 
-        Файлы: ``data_store/cache/sessions/{session_key}/{uuid}_{имя}``.
+        Файлы пишутся через общий ``SessionFileStore`` →
+        ``cache/sessions/{session_key}/attachments/{uuid}_{имя}``.
         """
         if not media:
             return media
         resolved: list[Any] = []
-        sdir = self._session_media_dir(session_key)
         for entry in media:
             try:
                 if isinstance(entry, dict):
@@ -231,48 +227,26 @@ class PostgresChannel(BaseChannel):
                     if not isinstance(data, str) or not data.startswith("data:"):
                         resolved.append(entry)
                         continue
-                    filename = entry.get("filename") or ""
-                    dest = self._decode_data_url_to_file(data, sdir, filename=filename)
-                    resolved.append({
-                        "filename": filename or dest.name,
-                        "path": str(dest),
-                    })
+                    info = self._file_store.save_attachment(
+                        session_key, data, filename=entry.get("filename") or None,
+                    )
+                    if not info:
+                        resolved.append(entry)
+                        continue
+                    resolved.append({"filename": info["filename"], "path": info["path"]})
                     continue
                 if not isinstance(entry, str) or not entry.startswith("data:"):
                     resolved.append(entry)
                     continue
-                dest = self._decode_data_url_to_file(entry, sdir)
-                resolved.append(str(dest))
+                info = self._file_store.save_attachment(session_key, entry)
+                if not info:
+                    resolved.append(entry)
+                    continue
+                resolved.append(info["path"])
             except Exception:
                 self.logger.exception("Failed to decode media data URL")
                 resolved.append(entry)
         return resolved
-
-    def _decode_data_url_to_file(
-        self, data_url: str, sdir: Path, filename: str | None = None
-    ) -> Path:
-        """Декодировать один data URL в файл сессии и вернуть путь к нему.
-
-        Если передан ``filename`` (оригинальное имя пользователя), файл
-        сохраняется как ``{uuid}_{имя}`` — имя сохраняется в подсказке агенту.
-        """
-        mime_match = re.match(r"^data:([^;,]+)(?:;[^,]*)*;base64,(.+)$", data_url)
-        if not mime_match:
-            raise ValueError(f"Unsupported data URL: {data_url[:40]!r}")
-        mime_type = mime_match.group(1).strip().lower()
-        raw = base64.b64decode(mime_match.group(2))
-
-        base = ""
-        if filename:
-            base = Path(filename).name.strip()
-            base = re.sub(r"[^\w.\- ]", "_", base).strip()
-        if base:
-            dest = sdir / f"{uuid.uuid4().hex[:12]}_{base}"
-        else:
-            ext = mimetypes.guess_extension(mime_type) or ".bin"
-            dest = sdir / f"{uuid.uuid4().hex[:12]}{ext}"
-        dest.write_bytes(raw)
-        return dest
 
     @staticmethod
     def _resolve_media_paths_and_hints(
@@ -747,8 +721,8 @@ class PostgresChannel(BaseChannel):
                 ctx = self._msg_ctx.setdefault(msg_id, {"reasoning_buf": []})
             return
 
-        # --- Сигнал конца оборота ---
-        if meta.get("_turn_end"):
+        # --- Служебные сигналы runner'а (_turn_end, _tool_hint, _stream_end) ---
+        if is_dropped(meta):
             return
 
         # --- Финальный ответ — пишем в БД ---

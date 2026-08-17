@@ -1,6 +1,8 @@
+import base64
 import csv
 import io
 import json
+import mimetypes
 import re
 import uuid
 from pathlib import Path
@@ -24,6 +26,31 @@ _INVALID_FS_CHARS = re.compile(r'[\\/:*?"<>|]+')
 def safe_session_key(key: str) -> str:
     """Заменяет символы, небезопасные для имён директорий, на ``_``."""
     return _INVALID_FS_CHARS.sub("_", key)
+
+
+def guess_ext_from_mime(mime_type: str, default_ext: str = ".bin") -> str:
+    """Единая точка: от MIME-типа к расширению файла.
+
+    Эквивалент прежних ``SessionFileStore._guess_ext_from_mime`` и
+    ``streamlit_app._get_extension_from_mime`` (была одна и та же логика
+    ``mimetypes.guess_extension`` с разным дефолтом).
+    Отбирает параметры (``text/html; charset=utf-8`` → ``.html``).
+
+    Args:
+        mime_type: MIME-тип (или пустая строка).
+        default_ext: расширение при неизвестном типе — ``.bin`` для
+            хранилища вложений, ``""`` для Streamlit (без подстановки).
+
+    Returns:
+        Расширение с ведущей точкой (``.png``, ``.html``) или ``default_ext``.
+    """
+    if not mime_type:
+        return default_ext
+    mime = mime_type.split(";")[0].strip().lower()
+    ext = mimetypes.guess_extension(mime) or ""
+    if not ext:
+        return default_ext
+    return ext if ext.startswith(".") else f".{ext}"
 
 
 def _csv_val(v):
@@ -97,13 +124,24 @@ def _try_convert_to_csv(data) -> Optional[str]:
 
 
 class SessionFileStore:
-    def __init__(self, base_dir: Path, max_files: int = 0, max_age_hours: int = 0):
+    def __init__(
+        self,
+        base_dir: Path,
+        max_files: int = 0,
+        max_age_hours: int = 0,
+        attachments_subdir: str = "attachments",
+    ):
         """Инициализирует хранилище сессий.
 
         Аргументы:
             base_dir: Базовая директория (внутри неё создаются cache/sessions и cache/archive).
-            max_files: Максимальное количество файлов на сессию (0 — без ограничения).
-            max_age_hours: Максимальный возраст файлов в часах (0 — без ограничения).
+            max_files: Максимальное количество файлов результатов на сессию
+                (0 — без ограничения).
+            max_age_hours: Максимальный возраст файлов результатов в часах
+                (0 — без ограничения).
+            attachments_subdir: Имя подпапки под вложения пользователя внутри
+                директории сессии. Не пересекается с ``results`` и подчищается
+                общим ``cleanup`` для attachments.
         """
         cache = base_dir / "cache"
         self.base = cache / "sessions"
@@ -112,13 +150,110 @@ class SessionFileStore:
         self.archive_dir.mkdir(exist_ok=True)
         self.max_files = max_files
         self.max_age_hours = max_age_hours
+        self.attachments_subdir = attachments_subdir
 
     def _get_session_dir(self, session_key: str) -> Path:
         """Возвращает директорию сессии, создавая её при необходимости."""
         sdir = self.base / safe_session_key(session_key)
         sdir.mkdir(exist_ok=True)
         (sdir / "results").mkdir(exist_ok=True)
+        (sdir / self.attachments_subdir).mkdir(exist_ok=True)
         return sdir
+
+    def _resolve_attachments_dir(self, session_key: str) -> Path:
+        """Возвращает каталог вложений сессии, создавая при необходимости.
+
+        Лежит рядом с ``results/``: ``{base}/{safe_key}/{attachments_subdir}/``.
+        Удобно для разграничения источников: ``results/`` — выгрузки из
+        инструментов, ``{attachments_subdir}/`` — пользовательские вложения.
+        """
+        sdir = self._get_session_dir(session_key)
+        adir = sdir / self.attachments_subdir
+        adir.mkdir(exist_ok=True)
+        return adir
+
+    @staticmethod
+    def _sanitize_filename(name: Optional[str]) -> str:
+        """Очистить имя файла: оставить ``[\\w.-]``, пробелы, остальное в ``_``."""
+        if not name:
+            return ""
+        base = Path(name).name.strip()
+        return re.sub(r"[^\w.\- ]", "_", base).strip()
+
+    @staticmethod
+    def _guess_ext_from_mime(mime_type: str) -> str:
+        return guess_ext_from_mime(mime_type or "")
+
+    def save_attachment(
+        self,
+        session_key: str,
+        data_url: Optional[str],
+        *,
+        filename: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Сохранить вложение (data URL или путь/сырые байты) в каталоге сессии.
+
+        Принимает:
+          * ``data_url`` вида ``data:<mime>;base64,<payload>`` — кодированное
+            вложение от пользователя;
+          * строку локального пути — содержимое читается и копируется;
+          * строку-URL (http/https) — внешняя ссылка, не сохраняется
+            (возвращается ``None``, вызывающий решает как с ней быть).
+
+        Возвращает ``{"path", "filename", "size"}`` для использования в
+        подсказках агенту, либо ``None``, если сохранить нельзя.
+
+        Файл получает имя ``{uuid12}_{original_or_mime_ext}`` — выживает после
+        многих вложений с одинаковым именем и сохраняет оригинальное имя
+        пользователя в суффиксе.
+        """
+        if not data_url or not isinstance(data_url, str):
+            return None
+
+        if data_url.startswith(("http://", "https://")):
+            return None
+
+        if data_url.startswith("data:"):
+            m = re.match(r"^data:([^;,]+)(?:;[^,]*)*;base64,(.+)$", data_url)
+            if not m:
+                return None
+            mime_type = m.group(1).strip().lower()
+            try:
+                raw = base64.b64decode(m.group(2))
+            except Exception:
+                return None
+            clean = self._sanitize_filename(filename)
+            if clean:
+                dest_name = f"{uuid.uuid4().hex[:12]}_{clean}"
+            else:
+                dest_name = f"{uuid.uuid4().hex[:12]}{self._guess_ext_from_mime(mime_type)}"
+        else:
+            p = Path(data_url).expanduser()
+            if not p.is_file():
+                return None
+            raw = p.read_bytes()
+            mime_type, _ = mimetypes.guess_type(str(p))
+            mime_type = mime_type or "application/octet-stream"
+            clean = self._sanitize_filename(p.name)
+            dest_name = f"{uuid.uuid4().hex[:12]}_{clean or ('file' + self._guess_ext_from_mime(mime_type))}"
+
+        adir = self._resolve_attachments_dir(session_key)
+        dest = adir / dest_name
+        dest.write_bytes(raw)
+
+        self._ensure_metadata(session_key)
+        meta_path = self._get_session_dir(session_key) / "metadata.json"
+        meta = json.loads(meta_path.read_text())
+        meta["last_activity"] = datetime.now(UTC).isoformat()
+        meta["file_count"] = meta.get("file_count", 0) + 1
+        meta["total_bytes"] = meta.get("total_bytes", 0) + len(raw)
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+        return {
+            "path": str(dest),
+            "filename": clean or dest.name,
+            "size": len(raw),
+        }
 
     def _ensure_metadata(self, session_key: str) -> None:
         """Создаёт metadata.json для сессии, если его ещё нет."""

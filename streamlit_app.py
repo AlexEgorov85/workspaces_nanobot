@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import base64
 import json
-import mimetypes
 import sys
 import time
 import uuid
@@ -18,6 +17,9 @@ if _workspace not in sys.path:
     sys.path.insert(0, _workspace)
 
 from utils.db import configure, fetch, fetchone, execute
+from utils.session_file_store import SessionFileStore
+from utils.jsonb import decode_jsonb as _decode_jsonb
+from utils.jsonb import decode_json_list as _decode_media_list
 from config import SETTINGS
 
 _pg = (getattr(SETTINGS, "channels", {}) or {}).get("postgres", {})
@@ -31,41 +33,23 @@ _POLL_INTERVAL = SETTINGS.streamlit.get("poll_interval", 1.0)
 _CHAT_ID = SETTINGS.streamlit.get("chat_id", "streamlit")
 _USER_ID = SETTINGS.streamlit.get("user_id", "user")
 _FAILED_WINDOW = SETTINGS.streamlit.get("failed_window_sec", 300)
-_FILES_DIR_RAW = SETTINGS.streamlit.get("files_dir", "data_store/streamlit_files")
 
-# Папка для загруженных/скачанных файлов
-_FILES_DIR = Path(_FILES_DIR_RAW)
-if not _FILES_DIR.is_absolute():
-    _FILES_DIR = Path(__file__).parent / "workspace" / _FILES_DIR
-_FILES_DIR.mkdir(parents=True, exist_ok=True)
+# Единый стор файлов — ассистентские вложения (download) и пользовательские
+# upload-файлы (те, что стримлит кладёт в БД) хранятся здесь, в одной
+# иерархии с результатами инструментов агента. Никакого отдельного
+# "data_store/streamlit_files" больше нет.
+_session_cache_dir = SETTINGS.streamlit.get(
+    "files_dir",
+    _pg.get("media_cache_dir", "data_store/cache/sessions"),
+)
+_PATH = Path(_session_cache_dir)
+if not _PATH.is_absolute():
+    _PATH = Path(__file__).parent / "workspace" / _session_cache_dir
+_FILE_STORE_BASE = _PATH.parent if _PATH.name == "sessions" else _PATH
+_FILE_STORE = SessionFileStore(_FILE_STORE_BASE, attachments_subdir="attachments")
 
 if _dsn:
     configure(_dsn)
-
-
-def _decode_jsonb(val) -> dict:
-    """Распарсить JSONB-значение из PG в dict.
-
-    Принимает None, строку JSON, уже готовый dict или Mapping.
-    """
-    if val is None:
-        return {}
-    if isinstance(val, str):
-        return json.loads(val) if val else {}
-    if isinstance(val, dict):
-        return val
-    return dict(val) if val else {}
-
-
-def _decode_media_list(val) -> list[Any]:
-    """Распарсить JSONB-список media из БД."""
-    if val is None:
-        return []
-    if isinstance(val, str):
-        return json.loads(val) if val else []
-    if isinstance(val, list):
-        return val
-    return []
 
 
 def _load_chat_history(chat_id: str = _CHAT_ID) -> list[dict]:
@@ -108,56 +92,33 @@ def _load_chat_history(chat_id: str = _CHAT_ID) -> list[dict]:
 
 
 def _get_extension_from_mime(mime_type: str) -> str:
-    """Получить расширение файла по MIME-типу.
+    """Получить расширение файла по MIME-типу (без принудительного дефолта).
 
-    Расширение определяется только через ``mimetypes.guess_extension``.
-    Для неизвестного типа возвращается пустая строка — принудительного
-    расширения не подставляется.
+    Делегирует общей ``utils.session_file_store.guess_ext_from_mime``
+    с ``default_ext=""`` — для неизвестного типа возвращается пустая
+    строка (как и раньше, без подстановки ``.bin``).
     """
-    if not mime_type:
-        return ""
-    mime = mime_type.split(";")[0].strip().lower()
-    ext = mimetypes.guess_extension(mime)
-    return ext or ""
+    from utils.session_file_store import guess_ext_from_mime
+
+    return guess_ext_from_mime(mime_type or "", default_ext="")
 
 
 def _save_file_from_data_url(data_url: str, filename: str) -> str | None:
-    """Сохранить файл из data URL в локальную папку, вернуть путь."""
-    try:
-        if not data_url.startswith("data:"):
-            return None
-        
-        # Парсим data:MIME;base64,DATA
-        header, data = data_url.split(",", 1)
-        mime_part = header.split(":")[1].split(";")[0]
-        
-        file_data = base64.b64decode(data)
-        
-        # Создаём уникальный путь с правильным расширением
-        safe_filename = Path(filename).name
-        stem = Path(filename).stem
-        suffix = Path(filename).suffix
-        
-        # Если расширения нет в имени файла, пробуем получить его из MIME-типа
-        if not suffix:
-            ext = _get_extension_from_mime(mime_part)
-            if ext:
-                safe_filename = f"{stem}{ext}"
-        
-        file_path = _FILES_DIR / safe_filename
-        
-        # Если файл существует, добавляем суффикс
-        counter = 1
-        while file_path.exists():
-            stem = Path(safe_filename).stem
-            suffix = Path(safe_filename).suffix
-            file_path = _FILES_DIR / f"{stem}_{counter}{suffix}"
-            counter += 1
-        
-        file_path.write_bytes(file_data)
-        return str(file_path)
-    except Exception:
+    """Сохранить файл из data URL через общий ``SessionFileStore``.
+
+    Дисковая иерархия теперь совпадает с каналом PostgresChannel и
+    инструментами агента: ``cache/sessions/{session_key}/attachments/…``.
+    ``filename`` используется как подсказка для сохранения человеко-читаемого
+    суффикса; уникальность имени берёт на себя стор (``{uuid12}_{filename}``).
+    """
+    if not data_url or not isinstance(data_url, str):
         return None
+    info = _FILE_STORE.save_attachment(
+        session_key=f"streamlit:{_CHAT_ID}",
+        data_url=data_url,
+        filename=filename or None,
+    )
+    return info["path"] if info else None
 
 
 def _check_response(msg_id: str) -> tuple[str | None, dict | None]:
@@ -449,46 +410,87 @@ if processing:
 
             time.sleep(_POLL_INTERVAL)
 
-# Загрузка файлов пользователем
+# Загрузка файлов пользователем.
+# IMPORTANT: file_uploader делит состояние по key; в комбинации с
+# st.chat_input + st.rerun() есть окно гонки, в котором выбранные
+# файлы сбрасываются до INSERT. Решение — буферизовать выбранные
+# файлы в session_state СРАЗУ при изменении загрузчика через
+# callback on_change, и чистить буфер только после успешной записи.
 _upload_key = st.session_state.get("_upload_key", 0)
+
+
+def _buffer_uploads() -> None:
+    """on_change для file_uploader: переложить свежевыбранные файлы
+    в устойчивый буфер session_state, чтобы они пережили rerun."""
+    if "_pending_uploads" not in st.session_state:
+        st.session_state._pending_uploads = []
+    wkey = f"attachments_{st.session_state.get('_upload_key', 0)}"
+    w = st.session_state.get(wkey)
+    files = w if isinstance(w, list) else ([w] if w else [])
+    for f in files:
+        if f is None:
+            continue
+        try:
+            blob = f.getvalue()
+        except Exception:
+            continue
+        mime = getattr(f, "type", "") or "application/octet-stream"
+        st.session_state._pending_uploads.append({
+            "filename": f.name,
+            "mime": mime,
+            "data_b64": base64.b64encode(blob).decode("ascii"),
+        })
+
+
 uploaded_files = st.file_uploader(
     "Вложения",
     accept_multiple_files=True,
     key=f"attachments_{_upload_key}",
+    on_change=_buffer_uploads,
     disabled=processing,
 )
 
 prompt = st.chat_input("Напишите сообщение...", disabled=processing)
 
 if prompt and not processing:
-    # Сохраняем сообщение пользователя в БД
-    msg_id = str(uuid.uuid4())
-
     media_entries = []
-    if uploaded_files:
-        for f in uploaded_files:
+    pending = st.session_state.pop("_pending_uploads", []) or []
+    for item in pending:
+        if not isinstance(item, dict) or not item.get("data_b64"):
+            continue
+        media_entries.append({
+            "filename": item.get("filename") or "file",
+            "data": f"data:{item.get('mime') or 'application/octet-stream'};base64,{item['data_b64']}",
+        })
+
+    if uploaded_files and not pending:
+        # Fallback: буфер пуст (например, первый сабмит после выбора
+        # до того, как on_change успел отработать). Берём прямо из виджета.
+        for f in (uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]):
+            if f is None:
+                continue
             b64 = base64.b64encode(f.getvalue()).decode("ascii")
             mime = f.type or "application/octet-stream"
             media_entries.append({
                 "filename": f.name,
                 "data": f"data:{mime};base64,{b64}",
             })
-    
-    # Обновляем ключ загрузчика чтобы очистить список
-    st.session_state._upload_key = _upload_key + 1
 
-    # Вставляем сообщение в БД
+    msg_id = str(uuid.uuid4())
+
     execute(
         f"INSERT INTO {_fq_table} (id, chat_id, user_id, role, content, media, status) "
         f"VALUES (%s, %s, %s, 'user', %s, %s::jsonb, 'pending')",
         msg_id, _CHAT_ID, _USER_ID, prompt, json.dumps(media_entries),
     )
 
-    # Добавляем в session_state для немедленного отображения
     user_msg = {"role": "user", "content": prompt}
     if media_entries:
         user_msg["media"] = media_entries
     st.session_state.messages.append(user_msg)
+
+    st.session_state._upload_key = _upload_key + 1
+    st.session_state.pop("_pending_uploads", None)
 
     st.session_state["_msg_id"] = msg_id
     st.session_state._processing = True

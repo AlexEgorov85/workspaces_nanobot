@@ -331,3 +331,63 @@ class TestSessionFileStoreArchiveSession:
         store.archive_session("s1")
         result = store.archive_session("s1")
         assert result is False
+
+
+class TestSaveAttachment:
+    """save_attachment — единое хранилище вложений через SessionFileStore."""
+
+    @staticmethod
+    def _data_url(payload: bytes, mime: str = "text/plain") -> str:
+        import base64
+        return f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
+
+    def test_data_url_writes_into_attachments_dir(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path, attachments_subdir="attachments")
+        url = self._data_url(b"hello", "text/plain")
+        info = store.save_attachment("s1", url, filename="hi.txt")
+        assert info is not None
+        dest = Path(info["path"])
+        assert dest.exists()
+        assert dest.read_bytes() == b"hello"
+        assert dest.parent.name == "attachments"
+        assert info["filename"] == "hi.txt"
+
+    def test_falls_back_to_mime_extension_when_no_filename(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path)
+        url = self._data_url(b"abc", "image/png")
+        info = store.save_attachment("s1", url)
+        assert info is not None
+        dest = Path(info["path"])
+        assert dest.suffix == ".png"
+
+    def test_updates_metadata(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path)
+        store.save_attachment("s1", self._data_url(b"abc"))
+        meta_path = tmp_path / "cache" / "sessions" / "s1" / "metadata.json"
+        meta = json.loads(meta_path.read_text())
+        assert meta["file_count"] == 1
+        assert meta["total_bytes"] == 3
+
+    def test_external_url_returns_none(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path)
+        assert store.save_attachment("s1", "https://example.com/x.pdf") is None
+
+    def test_missing_local_path_returns_none(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path)
+        assert store.save_attachment("s1", str(tmp_path / "nope.bin")) is None
+
+    def test_invalid_data_url_returns_none(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path)
+        assert store.save_attachment("s1", "data:text/plain;base64,!!!notbase64!!!") is None
