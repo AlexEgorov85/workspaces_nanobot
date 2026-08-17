@@ -20,20 +20,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-
-def _get(node: Any, *path: str, default: Any = None) -> Any:
-    """Достать значение из вложенного dict-а или объекта с атрибутами."""
-    for key in path:
-        try:
-            if isinstance(node, dict):
-                node = node.get(key)
-            else:
-                node = getattr(node, key)
-        except (AttributeError, KeyError, TypeError):
-            return default
-        if node is None:
-            return default
-    return node
+from lib.utils.node_access import get_path as _get
 
 
 class ConfigService:
@@ -62,17 +49,13 @@ class ConfigService:
         """Вернуть top-level секцию SETTINGS как dict (пусто, если нет).
 
         SETTINGS может быть как dict-ом, так и объектом с атрибутами
-        (в зависимости от формата config.json/.env). Функция нормализует
-        любой из вариантов к dict.
+        (в зависимости от формата config.json/.env). Нормализует любой
+        вариант к dict — делегирует ``lib.utils.node_access.get_settings_section``
+        (единая точка вместе с ``ChannelFactory``).
         """
-        settings = self.settings
-        if isinstance(settings, dict):
-            node = settings.get(name)
-        else:
-            node = getattr(settings, name, None)
-        if isinstance(node, dict):
-            return node
-        return default or {}
+        from lib.utils.node_access import get_settings_section
+
+        return get_settings_section(self.settings, name, default=default)
 
     def get_int(self, *path: str, default: int = 0) -> int:
         """Достать int из вложенного dict/AttrDict по цепочке ``path``.

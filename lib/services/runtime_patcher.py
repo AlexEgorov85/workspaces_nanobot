@@ -20,20 +20,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional, Tuple
 
-
-def _get(node: Any, *path: str, default: Any = None) -> Any:
-    """Достать значение из вложенного dict-а или объекта с атрибутами."""
-    for key in path:
-        try:
-            if isinstance(node, dict):
-                node = node.get(key)
-            else:
-                node = getattr(node, key)
-        except (AttributeError, KeyError, TypeError):
-            return default
-        if node is None:
-            return default
-    return node
+from lib.utils.node_access import get_path as _get
 
 
 def _session_key_of(msg: Any) -> str:

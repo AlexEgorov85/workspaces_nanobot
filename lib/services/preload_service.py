@@ -19,19 +19,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
-
-def _get(node: Any, *path: str, default: Any = None) -> Any:
-    for key in path:
-        try:
-            if isinstance(node, dict):
-                node = node.get(key)
-            else:
-                node = getattr(node, key)
-        except (AttributeError, KeyError, TypeError):
-            return default
-        if node is None:
-            return default
-    return node
+from lib.utils.node_access import get_path as _get
 
 
 class PreloadService:

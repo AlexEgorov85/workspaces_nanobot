@@ -15,19 +15,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Tuple
 
-
-def _section(settings: Any, name: str, default: Optional[dict] = None) -> dict:
-    """Достать top-level секцию из dict-а или объекта с атрибутами.
-
-    Используется в ``_add_redis``/``_add_postgres`` — обе читают
-    ``settings.channels`` (либо как dict, либо как ``AttrDict``).
-    Если секция отсутствует или не dict — возвращает ``default or {}``.
-    """
-    if isinstance(settings, dict):
-        node = settings.get(name)
-    else:
-        node = getattr(settings, name, None)
-    return node if isinstance(node, dict) else (default or {})
+from lib.utils.node_access import get_settings_section as _section
 
 
 class ChannelFactory:
