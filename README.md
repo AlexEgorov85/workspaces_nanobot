@@ -524,7 +524,7 @@ pytest tests/ --cov=lib --cov-report=term-missing
 | `test_redis_channel.py` | `RedisChannel` (BRPOP/LPUSH) |
 | `test_audit_memory_store.py` / `test_audit_sync_service.py` | `AuditMemoryStore`, `AuditSyncService` |
 | `test_benchmarks_*.py` | Бенчмарки (loader, evaluator, scorer, reporter, runner, db) |
-| `test_utils_db.py` | Утилиты БД (sync/async коннекторы, retry) |
+| `test_utils_db.py` | Единый пул соединений БД (sync/async API, транзакции-аренда, поведение при недоступных подключениях) |
 | `test_hooks_tool_audit_hook.py` | `ToolAuditHook` |
 
 ---

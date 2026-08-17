@@ -47,7 +47,7 @@ flowchart LR
     end
 
     subgraph SERVICES["lib/services (универсальный слой данных)"]
-        SYNC["AuditSyncService<br/>(worker-поток,<br/>единственный psycopg2)"]
+        SYNC["AuditSyncService<br/>(worker-поток,<br/>SQL через общий пул)"]
         STORE_SVC["AuditMemoryStore<br/>(in-memory DuckDB+FAISS)"]
         PROV["PostgresDuckDbProvider<br/>(CacheProvider)"]
         EMBED["get_embedding<br/>(Ollama /api/embed)"]
@@ -345,6 +345,51 @@ nanobot/
 Навык делегирует ей через `scripts/skill_config.build_cache_provider()`, тот же
 набор настроек читает `gateway.py::_build_audit_services()` и индексатор
 `tools/build_vectors.py`.
+
+## 🔌 Единый пул соединений PostgreSQL (`workspace/utils/db.py`)
+
+Чтобы на сервере никогда не было десятков параллельных подключений к PG
+(проблема «too many connections» решается на уровне архитектуры, а не ретраями),
+все подсистемы пользуются **одним общим пулом** соединений:
+
+- **Одна job-очередь + пул воркеров** (по умолчанию `min_conn=1`, `max_conn=4`).
+  Каждый воркер — поток, владеющий ровно одним psycopg2-соединением; он берёт
+  задачи из общей очереди и выполняет их последовательно.
+- **Публичный API** сохраняется: `execute/fetch/fetchone/fetchval`, async-варианты
+  через `asyncio.to_thread`, `transaction()/async_transaction()`,
+  `configure/resolve_dsn/run/set_pool_config/get_stats/start/shutdown`.
+- **Транзакции — эксклюзивная аренда соединения** (`lease_id`): пока `with
+  transaction()` жив, воркер первого вызова выполняет только задачи этой
+  транзакции, а свободные воркеры продолжают обслуживать обычные задачи.
+  Транзакция работает через прокси-объекты `_ConnectionProxy/_CursorProxy`
+  (поддерживают справочные атрибуты psycopg2 — `autocommit`, `closed`,
+  `commit()/rollback()/cursor()` и т.п.).
+- **Реконнект с backoff** — внутри воркера: при обрыве соединение закрывается
+  и пересоздаётся с экспоненциальной паузой (`reconnect_backoff_sec` →
+  `reconnect_backoff_max_sec`); retry-able задачи переподнимаются до
+  `job_max_retries`. После `connect_max_retries` неудачных подключений воркер
+  сдаётся с ошибкой — сервисы, ждущие `run()`, не блокируются навсегда.
+- **Неподключённые воркеры уступают очередь подключённым.** Если часть
+  воркеров не смогла установить соединение (например, исчерпан лимит
+  `CONNECTION LIMIT` роли или БД недоступна), они не отнимают задачи у живых:
+  в `_take_job` такой воркер берёт обычную задачу, только когда в пуле нет ни
+  одного воркера с живым соединением. Пока хотя бы один воркер подключён —
+  вся очередь обслуживается им, неподключённые не тратят время на
+  retry-connect. При полной недоступности БД задачи быстро падают с ошибкой
+  подключения, а не висят в очереди вечно. Транзакции (`lease_id != 0`) на
+  это правило не влияют — их воркер забирает безусловно.
+- **Настройка** — `project.json → channels.postgres.pool`:
+  `min_conn`, `max_conn`, `pool_timeout`, `queue_maxsize`,
+  `reconnect_backoff_sec`, `reconnect_backoff_max_sec`, `connect_max_retries`,
+  `idle_timeout_sec`, `job_max_retries`. `ApplicationContext.create()` читает эту
+  секцию и применяет через `set_pool_config()`; `ctx.start()/stop()` вызывают
+  `utils.db.start()/shutdown()`.
+
+**Кто ходит в БД через пул:** `DbLoggingService`, `AuditSyncService`,
+`PGSessionManager`, `PostgresChannel`, `session_storage`, `streamlit_app.py`,
+инструменты и `cache_provider_impl` (bulk-load снимает соединение пула на всё
+время копирования). Ни один сервис-поток не держит собственного psycopg2-
+соединения — соединение выдаёт пул на время запроса/транзакции.
 
 ---
 
@@ -1644,7 +1689,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | `lib/services/transcription_service.py` |  openai/groq key/URL/language |
 | `lib/services/subprocess_manager.py` |  Streamlit spawn + terminate/kill |
 | `lib/services/preload_service.py` |  FAISS preload + audit_cache refresh |
-| `lib/services/db_logging_service.py` |  Worker-поток, batch INSERT, без JSONL-fallback |
+| `lib/services/db_logging_service.py` |  Worker-поток, batch INSERT через общий пул `utils.db`, без JSONL-fallback |
 | `lib/services/db_logging_bus.py` |  Обёртки publish_inbound/outbound для логгера |
 | `lib/cli/console_loop.py` |  REPL/typewriter/consume_outbound (вынесено из cli_agent.py) |
 | `lib/cli/display_config.py` |  DisplayConfig |
@@ -1660,12 +1705,12 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | `lib/session/pg_session_manager.py` | Хранение сессий в PostgreSQL (без JSONL-fallback) |
 | `lib/channels/postgres_channel.py` | Канал через таблицу agent_conversation_messages |
 | `lib/channels/redis_channel.py` | Канал через Redis-очереди (BRPOP/LPUSH) |
-| `lib/services/audit_sync_service.py` | Синхронизация audit-таблиц из PG в in-memory DuckDB |
+| `lib/services/audit_sync_service.py` | Синхронизация audit-таблиц из PG в in-memory DuckDB (SQL через общий пул `utils.db`) |
 | `lib/services/audit_memory_store.py` | DuckDB-кеш + FAISS-индексы + publish-snapshot |
 | `lib/services/cache_provider.py` | Интерфейс CacheProvider + SearchResult |
 | `lib/services/cache_provider_impl.py` | Реализация кеша (PostgresDuckDbProvider) |
 | `lib/services/text_splitter.py` | Чанкование текстов |
-| `workspace/utils/db.py` | Глобальный singleton `configure(dsn)` + sync/async коннекторы |
+| `workspace/utils/db.py` | Общий пул соединений PG: одна очередь + воркеры (1..N), sync/async API, транзакции-аренда (`lease`); неподключённые воркеры уступают очередь подключённым |
 | `workspace/skills/audit_analyzer/` | Навык: тонкий CLI поверх `lib/services` |
 
 ### Где что править
@@ -1674,7 +1719,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 |-----------|-----------------|------|------------------------------|
 | **Конфиг** | Сменить модель/провайдера | `config.json` → `agents.defaults.model` | `ValueError: LLM_API_KEY` → `.secrets.env` (секция `providers: llm`); gateway не находит ключ → `lib/services/config_service.py:_pre_resolve_env_refs` |
 | **Конфиг** | Настроить таймауты | `project.json` → секции `gateway`, `cli` или `streamlit` | LLM-запросы висят → `cli.llm_timeout` / `gateway.llm_timeout`; exec-команды обрываются на 60с → `tools.exec.timeout` (`config.json`) |
-| **Каналы / БД** | Подключение к БД | `project.json` → `channels.postgres` (`host`/`port`/`dbname`/`user` + опц. `dsn`) | `psycopg2.OperationalError` / `connection refused` → `DB_PASSWORD` в `.secrets.env` (DSN собирается в `utils.db.resolve_dsn()`); `gssencmode` ошибка на GP 6.25 → `lib/services/config_service.py` (kwargs `connect()`); `too many connections` → `lib/services/audit_sync_service.py` (ретраи) |
+| **Каналы / БД** | Подключение к БД | `project.json` → `channels.postgres` (`host`/`port`/`dbname`/`user` + опц. `dsn`) | `psycopg2.OperationalError` / `connection refused` → `DB_PASSWORD` в `.secrets.env` (DSN собирается в `utils.db.resolve_dsn()`); `gssencmode` ошибка на GP 6.25 → `lib/services/config_service.py` (kwargs `connect()`); `too many connections` → общий пул в `workspace/utils/db.py` (`channels.postgres.pool` → `min_conn`/`max_conn`/`pool_timeout`); проверить лимит честно можно через не-суперюзерную роль (`ALTER ROLE <role> CONNECTION LIMIT N`) — на superuser роли лимит PostgreSQL игнорирует |
 | **Каналы** | Включить Redis-канал | `project.json` → `channels.redis.enabled` | `Connection refused` → `host`/`port`/`password`; не приходят сообщения → `lib/channels/redis_channel.py` + `allow_from` |
 | **Навыки** | Настроить навык | `project.json` → `skills.<имя>` | Навык не подхватывается → `agents.defaults.disabledSkills` (`config.json`); навык стартует со старыми параметрами → `lib/services/runtime_patcher.py` (см. `RuntimePatcher.apply_all`) |
 | **Секреты** | Добавить API-ключ | `.secrets.env` (провайдер-скоупинг формат) | `nanobot._load_runtime_config` падает с `ValueError` → `lib/services/config_service.py:_pre_resolve_env_refs` (должен подставить `${VAR}` в `os.environ` ДО nanobot) |
@@ -1708,13 +1753,16 @@ python -m pytest tests/test_config_service.py tests/test_session_storage.py \
                     tests/test_shutdown_coordinator.py tests/test_console_loop.py \
                     tests/test_application_context.py -q
 
+# Пул соединений (mock psycopg2, БД не нужна)
+python -m pytest tests/test_utils_db.py -q
+
 # Тесты воркеров (некоторые требуют БД)
 python -m pytest tests/test_pg_session_manager.py -q
 
 # Юнит-тесты audit/кэша (sync+memory)
 python -m pytest tests/test_audit_memory_store.py tests/test_audit_sync_service.py -q
 
-# Полный набор (без БД; 701 passed после v2.0.0)
+# Полный набор (без БД; 860 passed после доработки пула)
 python -m pytest tests -q
 
 # Сквозной тест навыка (требует живого PostgreSQL)
@@ -1839,5 +1887,6 @@ max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3
 | 2026-07-22 | 1.5.0 | Векторные индексы в PostgreSQL, DuckDB-кеш, файловые → БД-секреты |
 | 2026-08-12 | 2.0.0 | `ApplicationContext` + сервисный слой, gateway — владелец кеша, JSONC, удаление навыков |
 | 2026-08-14 | 2.0.1 | Fix: gateway DuckDB-snapshot, build_vectors NameError, PostgresChannel ↔ nanobot 0.3.0; SQL: один файл = одна таблица (GP 6.5 only) |
+| 2026-08-17 | unreleased | Единый пул PG: DbLoggingService/AuditSyncService/cache_provider на `utils.db`, неподключённые воркеры уступают очередь подключённым; 860 тестов (см. `[Unreleased]` в CHANGELOG.md) |
 
 Подробный changelog — в [CHANGELOG.md](CHANGELOG.md).
