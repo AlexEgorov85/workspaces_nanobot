@@ -121,6 +121,15 @@ def _setup_fake_modules():
     settings.skills.audit_analyzer.get = MagicMock(return_value=False)
     settings.cli = {}
     settings.providers = MagicMock()
+    def _fake_get_setting(*keys, default=None):
+        cur = settings
+        for k in keys:
+            cur = cur[k] if isinstance(cur, dict) else getattr(cur, k, None)
+            if cur is None:
+                return default
+        return cur
+
+    cfg.get_setting = _fake_get_setting
     cfg.SETTINGS = settings
     cfg.ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
     sys.modules["config"] = cfg
