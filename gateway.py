@@ -204,18 +204,16 @@ async def _run(ctx: ApplicationContext, first_sync_event) -> None:
 
 
 def _configure_logging(settings) -> None:
-    """Настроить loguru из конфига."""
+    """Настроить loguru из конфига (gateway.log_level)."""
     try:
         from lib.services.config_service import ConfigService
 
         log_level = ConfigService().settings_section("gateway").get("log_level", "INFO")
     except Exception:
         log_level = "INFO"
-    try:
-        logger.remove()
-        logger.add(sys.stderr, level=log_level)
-    except Exception:
-        pass
+    from lib.utils.logging_utils import configure_loguru
+
+    configure_loguru(log_level)
 
 
 if __name__ == "__main__":

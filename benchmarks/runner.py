@@ -838,8 +838,9 @@ async def main_async(argv: list[str] | None = None) -> int:
         return 0
 
     log_level = "DEBUG" if args.verbose else "INFO"
-    logger.remove()
-    logger.add(sys.stderr, level=log_level)
+    from lib.utils.logging_utils import configure_loguru
+
+    configure_loguru(log_level)
 
     # Загрузка YAML с дружественной диагностикой ошибок
     try:

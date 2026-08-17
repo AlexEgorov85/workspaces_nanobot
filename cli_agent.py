@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -131,13 +130,9 @@ def _configure_logging(settings) -> None:
             level = cli.get("log_level", "WARNING")
         else:
             level = getattr(cli, "log_level", "WARNING")
-    os.environ.setdefault("NANOBOT_LOG_LEVEL", str(level))
-    try:
-        from loguru import logger
-        logger.remove()
-        logger.add(sys.stderr, level=level)
-    except Exception:
-        pass
+    from lib.utils.logging_utils import configure_loguru
+
+    configure_loguru(level, env_var="NANOBOT_LOG_LEVEL")
 
 
 def _migrate_cron_store(config) -> None:
