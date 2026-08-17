@@ -65,10 +65,6 @@ class AuditVectorSettings:
     mode_vector_index_config_table: str  # public.agent_vector_index_config
     vector_index_default_path: str     # путь к FAISS-индексам
 
-    # --- запись ответов навыка обратно в PG ---
-    sync_write_table: str
-    sync_write_schema: str
-
     # --- эмбеддинги ---
     embedding_base_url: str
     embedding_model: str
@@ -130,8 +126,6 @@ def audit_vector_settings() -> AuditVectorSettings:
         mode_vector_store_table=_require(["mode_vector_store_table"]),
         mode_vector_index_config_table=_require(["mode_vector_index_config_table"]),
         vector_index_default_path=_require(["vector_index_default_path"]),
-        sync_write_table=_require(["sync_write_table"]),
-        sync_write_schema=db_schema,
         embedding_base_url=_require(["embedding_base_url"]),
         embedding_model=_require(["embedding_model"]),
         embedding_dimension=int(_require(["embedding_dimension"])),

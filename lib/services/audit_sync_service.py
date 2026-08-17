@@ -3,7 +3,6 @@ AuditSyncService — фоновая синхронизация audit-данны�
 
 Отвечает за:
   * инкрементальную синхронизацию данных из PG в in-memory кэш (AuditMemoryStore);
-  * неблокирующую запись ответов/взаимодействий навыка обратно в PG через очередь;
   * корректное завершение (graceful shutdown) с гарантией сохранения очереди.
 
 Весь SQL-доступ идёт через общий пул ``utils.db`` (worker-поток не держит
@@ -17,12 +16,10 @@ AuditSyncService — фоновая синхронизация audit-данны�
     sync_service.set_on_new_records_callback(memory_store.upsert_records)
     sync_service.start(initial_load=True)
     ...
-    sync_service.submit_write(session_id=..., query_text=..., answer_text=...)
-    ...
     sync_service.stop(timeout_sec=10.0)
 
-Команды в очереди: ``WRITE_ANSWER`` (запись в PG), ``POLL_CHANGES``
-(немедленный поллинг), ``SHUTDOWN`` (sentinel завершения).
+Команды в очереди: ``POLL_CHANGES`` (немедленный поллинг), ``SHUTDOWN``
+(sentinel завершения).
 """
 
 from __future__ import annotations
@@ -39,7 +36,6 @@ import psycopg2.extras
 
 logger = logging.getLogger(__name__)
 
-COMMAND_WRITE = "WRITE_ANSWER"
 COMMAND_POLL = "POLL_CHANGES"
 COMMAND_SHUTDOWN = "SHUTDOWN"
 
@@ -60,8 +56,6 @@ class AuditSyncService:
         tables: Optional[List[str]] = None,
         vector_table: str = "",
         poll_interval_sec: float = 60.0,
-        write_table: str = "",
-        write_schema: str = "oarb",
         max_queue_size: int = 10000,
         reconnect_backoff: float = 1.0,
         reconnect_backoff_max: float = 60.0,
@@ -72,8 +66,6 @@ class AuditSyncService:
         self._tables = [t for t in (tables or []) if t]
         self._vector_table = vector_table
         self._poll_interval = float(poll_interval_sec)
-        self._write_table = write_table
-        self._write_schema = write_schema
         self._max_queue_size = max_queue_size
         self._reconnect_backoff = reconnect_backoff
         self._reconnect_backoff_max = reconnect_backoff_max
@@ -100,9 +92,6 @@ class AuditSyncService:
             "started_at": None,
             "polls": 0,
             "full_resyncs": 0,
-            "writes_queued": 0,
-            "writes_written": 0,
-            "writes_failed": 0,
             "queue_full": 0,
             "reconnects": 0,
             "errors": 0,
@@ -179,36 +168,6 @@ class AuditSyncService:
             self._thread = None
         self._close_connection()
 
-    def submit_write(
-        self,
-        session_id: str,
-        query_text: str,
-        answer_text: str,
-        metadata: Optional[dict] = None,
-    ) -> bool:
-        """Неблокирующе поставить запись в очередь (worker запишет в PG).
-
-        Returns:
-            True если запись принята в очередь, False если очередь переполнена.
-        """
-        if not self._running:
-            return False
-        payload = {
-            "session_id": session_id,
-            "query_text": query_text,
-            "answer_text": answer_text,
-            "metadata": metadata or {},
-        }
-        try:
-            self._queue.put_nowait((COMMAND_WRITE, payload))
-        except queue.Full:
-            with self._state_lock:
-                self._stats["queue_full"] += 1
-            return False
-        with self._state_lock:
-            self._stats["writes_queued"] += 1
-        return True
-
     def get_stats(self) -> Dict[str, Any]:
         """Мониторинг: размер очереди, счётчики, состояние подключения."""
         with self._state_lock:
@@ -242,7 +201,6 @@ class AuditSyncService:
     def _worker(self) -> None:
         try:
             self._ensure_connected()
-            self._ensure_write_table()
             if self._initial_load:
                 self._do_initial_load()
             self._fire_sync_callback()
@@ -282,16 +240,13 @@ class AuditSyncService:
             except queue.Empty:
                 return
             try:
-                if cmd == COMMAND_WRITE:
-                    self._write_answer(payload)
-                elif cmd == COMMAND_POLL:
+                if cmd == COMMAND_POLL:
                     self._poll_changes()
                 elif cmd == COMMAND_SHUTDOWN:
                     self._running = False
             except Exception:
                 with self._state_lock:
                     self._stats["errors"] += 1
-                    self._stats["writes_failed"] += 1
                 self._reconnect()
             finally:
                 self._queue.task_done()
@@ -549,69 +504,6 @@ class AuditSyncService:
     def _max_track(rows: List[dict], track_col: str) -> Any:
         values = [r.get(track_col) for r in rows if r.get(track_col) is not None]
         return max(values) if values else None
-
-    # ------------------------------------------------------------------
-    # Запись ответов (через очередь)
-    # ------------------------------------------------------------------
-
-    def _ensure_write_table(self) -> None:
-        """Проверить существование целевой таблицы записи (без авто-создания).
-
-        Сервис не провижинит схему: если ``write_schema.write_table`` отсутствует
-        в PostgreSQL — логируем явную ошибку и помечаем write недоступным.
-        Создание таблицы — задача миграций/бootstrap, а не синхрон-сервиса.
-        """
-        if not self._write_table:
-            return
-
-        def _work(conn: Any) -> bool:
-            cur = conn.cursor()
-            try:
-                cur.execute(
-                    "SELECT 1 FROM information_schema.tables "
-                    "WHERE table_schema = %s AND table_name = %s",
-                    [self._write_schema, self._write_table],
-                )
-                return cur.fetchone() is not None
-            finally:
-                cur.close()
-
-        exists = self._db_run(_work)
-        if exists:
-            return
-        missing = f"{self._write_schema}.{self._write_table}"
-        self._write_table = ""
-        logger.error(
-            "AuditSyncService: таблица записи не найдена: %s "
-            "— запись ответов навыка в PG отключена. Создайте таблицу "
-            "(см. sql/created_tables.sql), сервис DDL не выполняет.",
-            missing,
-        )
-
-    def _write_answer(self, payload: dict) -> None:
-        if not self._write_table:
-            return
-
-        def _work(conn: Any) -> None:
-            cur = conn.cursor()
-            try:
-                cur.execute(
-                    f'INSERT INTO "{self._write_schema}"."{self._write_table}" '
-                    "(session_id, query_text, answer_text, metadata, created_at) "
-                    "VALUES (%s, %s, %s, %s, NOW())",
-                    [
-                        payload.get("session_id"),
-                        payload.get("query_text"),
-                        payload.get("answer_text"),
-                        psycopg2.extras.Json(payload.get("metadata") or {}),
-                    ],
-                )
-            finally:
-                cur.close()
-
-        self._db_run(_work)
-        with self._state_lock:
-            self._stats["writes_written"] += 1
 
     # ------------------------------------------------------------------
     # Подключение (через общий пул)

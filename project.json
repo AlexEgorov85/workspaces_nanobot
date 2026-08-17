@@ -102,7 +102,6 @@
       // --- Фоновая синхронизация (gateway: AuditSyncService) ------------------
       "poll_interval_sec": 60,                // Поллинг новых/изменённых строк из PostgreSQL, сек
       "full_resync_every": 10,                // Полная перезагрузка таблицы каждые N циклов (сверка удалений; 0 = выкл)
-      "sync_write_table": "audit_interactions",  // Таблица записи ответов навыка в PG (создаётся автоматически)
       "sync_max_queue_size": 10000,           // Макс. размер очереди синхронизации (audit_sync_service.py)
       "reconnect_backoff_sec": 1.0,           // Начальный backoff после разрыва соединения
       "reconnect_backoff_max_sec": 60.0,      // Потолок reconnect-backoff (экспоненциально)

@@ -406,8 +406,6 @@ def _make_audit_services(ctx: "ApplicationContext") -> tuple:
         tables=sync_tables,
         vector_table=vector_table,
         poll_interval_sec=s.poll_interval_sec,
-        write_table=s.sync_write_table,
-        write_schema=schema,
         max_queue_size=s.sync_max_queue_size,
         reconnect_backoff=s.reconnect_backoff_sec,
         reconnect_backoff_max=s.reconnect_backoff_max_sec,

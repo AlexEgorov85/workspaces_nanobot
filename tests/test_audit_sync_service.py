@@ -113,18 +113,6 @@ def _standard_rows_for(sql, params):
 
 
 class TestLifecycle:
-    def test_submit_write_rejected_before_start(self):
-        s = AuditSyncService(dsn="postgresql://u@h/db")
-        assert s.submit_write("s1", "q", "a") is False
-
-    def test_submit_write_accepted_while_running(self):
-        s = AuditSyncService(dsn="postgresql://u@h/db")
-        s._running = True
-        assert s.submit_write("s1", "вопрос", "ответ") is True
-        st = s.get_stats()
-        assert st["writes_queued"] == 1
-        assert st["queue_size"] == 1
-
     def test_start_stop_with_invalid_dsn_no_hang(self, mock_pool):
         mock_pool["connected"] = False
         s = AuditSyncService(
@@ -208,52 +196,6 @@ class TestWorker:
         assert '"updated_at" > %s' in sql
         assert params == [_T1]
         assert s._last_sync["audits"] == _T2
-
-
-# ---------------------------------------------------------------------------
-# Запись ответов
-# ---------------------------------------------------------------------------
-
-
-class TestWrite:
-    def test_write_answer_inserts_into_table(self, mock_pool):
-        conn = ScriptedConn()
-        mock_pool["conn"] = conn
-        s = AuditSyncService(dsn="postgresql://u@h/db", write_table="audit_interactions")
-        s._conn = conn
-        s._write_answer(
-            {"session_id": "s1", "query_text": "вопрос", "answer_text": "ответ", "metadata": {"k": 1}}
-        )
-        sql = conn.executed[-1][0]
-        assert 'INSERT INTO "oarb"."audit_interactions"' in sql
-        assert s.get_stats()["writes_written"] == 1
-
-    def test_submitted_write_processed_by_worker(self, mock_pool):
-        def rows_for(sql, params):
-            low = sql.lower()
-            if "information_schema.tables" in low:
-                # write-таблица существует (сервис DDL не выполняет)
-                return [("1",)]
-            return _standard_rows_for(sql, params)
-
-        mock_pool["connected"] = True
-        mock_pool["conn"] = ScriptedConn(rows_for)
-        s = AuditSyncService(
-            dsn="postgresql://u@h/db",
-            tables=["audits"],
-            write_table="audit_interactions",
-            poll_interval_sec=0.05,
-            reconnect_backoff=0.01,
-        )
-        s.start(initial_load=False)
-        assert s.submit_write("s1", "вопрос", "ответ") is True
-        time.sleep(0.4)
-        s.stop(timeout_sec=2.0)
-
-        st = s.get_stats()
-        assert st["writes_queued"] == 1
-        assert st["writes_written"] == 1
-        assert any('INSERT INTO "oarb"."audit_interactions"' in sql for sql, _ in mock_pool["conn"].executed)
 
 
 # ---------------------------------------------------------------------------
