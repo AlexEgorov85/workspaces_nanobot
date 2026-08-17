@@ -155,42 +155,100 @@ class PostgresChannel(BaseChannel):
         sdir.mkdir(parents=True, exist_ok=True)
         return sdir
 
+    def _parse_data_url(self, data_url: str) -> tuple[str, int] | None:
+        """Извлечь ``(mime_type, file_size)`` из ``data:<mime>;base64,<payload>``.
+
+        Возвращает ``None`` для не-``data:``-URL и для битых строк (чтобы вызов
+        не падал с исключением — невалидный data URL всё равно попадёт в
+        ``file_id`` дальше).
+        """
+        if not isinstance(data_url, str) or not data_url.startswith("data:"):
+            return None
+        m = re.match(r"^data:([^;,]+)(?:;[^,]*)*;base64,(.+)$", data_url, re.DOTALL)
+        if not m:
+            return None
+        mime = m.group(1).strip().lower() or "application/octet-stream"
+        try:
+            size = len(base64.b64decode(m.group(2), validate=False))
+        except Exception:
+            size = 0
+        return mime, size
+
     async def _embed_media_for_db(self, media: list[str]) -> list[Any]:
         """Прочитать локальные файлы и закодировать как data URL для БД.
 
-        Единый формат хранения медиа в БД — dict-запись
-        ``{"filename": "<имя>", "data": "data:<mime>;base64,<содержимое>"}``
-        для каждого встраиваемого файла (см. ``_decode_media_from_db``).
+        Единый формат хранения медиа в БД — dict-запись с **AW-совместимыми
+        ключами**:
+
+        .. code-block:: python
+
+            {
+                "filename":  "<имя файла>",          # имя для UI
+                "file_id":   "data:<mime>;base64,...",  # data URL ИЛИ путь/URL
+                "mime_type": "<MIME-тип>",          # для иконки и блока image/file
+                "file_size": <int>,                 # для UI (>=0)
+            }
+
+        Это контракт, который читает ``audit_point_new`` в
+        ``app/domains/chat/services/agent_channel.py:map_answer_to_blocks``
+        (поля ``file_id``/``filename``/``mime_type``/``file_size``). Раньше
+        бот писал ``{"filename": ..., "data": ...}`` — AW такие блоки
+        маппил с пустым ``file_id``/``mime_type``/``file_size=0`` → фронт
+        не показывал кнопки «предпросмотр» и «скачать» (см.
+        ``audit_point_new/static/js/shared/chat/chat-renderer.js``: ``if (block.file_id)``).
+        См. ``docs/guides/chat-files-data-requirements.md``: §6 «Шина»,
+        §5.1 «Блоки файлов и изображений».
 
         Правила:
-          — локальный файл читается и кодируется в dict ``filename/data``
-            с оригинальным именем файла;
-          — уже готовый data URL оборачивается в тот же dict-формат
-            (имя генерируется из MIME-типа);
-          — HTTP/HTTPS-ссылки передаются как есть — это внешние ссылки,
-            а не встраиваемое содержимое.
+          — локальный файл читается и кодируется в dict с ``file_id`` =
+            ``data:<mime>;base64,<...>`` и ``mime_type``/``file_size`` из файла;
+          — уже готовый data URL переиспользуется как ``file_id``, ``mime_type``
+            и ``file_size`` восстанавливаются из data URL;
+          — HTTP/HTTPS-ссылки передаются как строки (валидный ``file_id`` для
+            AW — он их и так не показывает превью, но имя/mime/размер пустые).
         """
         if not media:
             return media
         embedded: list[Any] = []
         for path in media:
             if path.startswith("data:"):
+                # Восстанавливаем mime и размер из data URL.
+                parsed = self._parse_data_url(path)
+                mime_type = parsed[0] if parsed else "application/octet-stream"
+                file_size = parsed[1] if parsed else 0
                 base = "file"
-                mime_match = re.match(r"^data:([^;,]+)", path)
-                if mime_match:
-                    ext = mimetypes.guess_extension(mime_match.group(1)) or ""
+                if mime_type:
+                    ext = mimetypes.guess_extension(mime_type) or ""
                     if ext:
                         base = f"file{ext}"
-                embedded.append({"filename": base, "data": path})
+                embedded.append({
+                    "filename": base,
+                    "file_id": path,
+                    "mime_type": mime_type,
+                    "file_size": file_size,
+                })
                 continue
             if path.startswith(("http://", "https://")):
-                embedded.append(path)
+                # Внешняя ссылка: AW прочитает ``file_id`` как есть, остальные
+                # поля останутся пустыми — UI не сможет показать превью/скачивание,
+                # но и не упадёт (см. chat-files-data-requirements.md: §9).
+                embedded.append({
+                    "filename": "",
+                    "file_id": path,
+                    "mime_type": "",
+                    "file_size": 0,
+                })
                 continue
             try:
                 p = Path(path).expanduser()
                 if not p.is_file():
                     self.logger.warning("Media file not found, keeping path: {}", path)
-                    embedded.append(path)
+                    embedded.append({
+                        "filename": p.name,
+                        "file_id": path,
+                        "mime_type": "",
+                        "file_size": 0,
+                    })
                     continue
                 raw = p.read_bytes()
                 mime_type, _ = mimetypes.guess_type(str(p))
@@ -199,11 +257,18 @@ class PostgresChannel(BaseChannel):
                 b64 = base64.b64encode(raw).decode("ascii")
                 embedded.append({
                     "filename": p.name,
-                    "data": f"data:{mime_type};base64,{b64}",
+                    "file_id": f"data:{mime_type};base64,{b64}",
+                    "mime_type": mime_type,
+                    "file_size": len(raw),
                 })
             except Exception:
                 self.logger.exception("Failed to encode media file: {}", path)
-                embedded.append(path)
+                embedded.append({
+                    "filename": Path(path).name,
+                    "file_id": path,
+                    "mime_type": "",
+                    "file_size": 0,
+                })
         return embedded
 
     async def _decode_media_from_db(
@@ -213,9 +278,13 @@ class PostgresChannel(BaseChannel):
 
         Поддерживаемые элементы списка ``media``:
           — строка ``data:...;base64,...`` → строка с путём к файлу сессии
-          — dict ``{"filename": "отчёт.pdf", "data": "data:..."}`` → dict
-            ``{"filename": "отчёт.pdf", "path": "..."}`` (оригинальное имя
-            сохраняется, чтобы агент знал, что приложил пользователь)
+          — dict ``{"filename": "отчёт.pdf", "data": "data:..."}``
+            или новый AW-формат
+            ``{"filename": "отчёт.pdf", "file_id": "data:...",
+            "mime_type": "...", "file_size": N}`` →
+            dict ``{"filename": "отчёт.pdf", "path": "..."}``
+            (оригинальное имя сохраняется, чтобы агент знал,
+            что приложил пользователь)
           — всё остальное (http-ссылки, локальные пути) → как есть
 
         Файлы: ``data_store/cache/sessions/{session_key}/{uuid}_{имя}``.
@@ -227,7 +296,12 @@ class PostgresChannel(BaseChannel):
         for entry in media:
             try:
                 if isinstance(entry, dict):
-                    data = entry.get("data") or entry.get("path") or ""
+                    data = (
+                        entry.get("data")
+                        or entry.get("file_id")
+                        or entry.get("path")
+                        or ""
+                    )
                     if not isinstance(data, str) or not data.startswith("data:"):
                         resolved.append(entry)
                         continue

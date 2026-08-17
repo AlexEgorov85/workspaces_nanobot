@@ -280,25 +280,52 @@ class TestPostgresChannelMedia:
         PostgresChannel, _, _ = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, None))
         result = await ch._embed_media_for_db(["http://example.com/img.png"])
-        assert result == ["http://example.com/img.png"]
+        assert result == [{
+            "filename": "",
+            "file_id": "http://example.com/img.png",
+            "mime_type": "",
+            "file_size": 0,
+        }]
 
     @pytest.mark.asyncio
     async def test_embed_data_wraps_in_dict(self, mock_db_and_psycopg):
         PostgresChannel, _, _ = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, None))
-        result = await ch._embed_media_for_db(["data:image/png;base64,abc"])
-        assert result == [{"filename": "file.png", "data": "data:image/png;base64,abc"}]
+        # base64("ab") = "YWI=" (padded, 2 bytes).
+        result = await ch._embed_media_for_db(["data:image/png;base64,YWI="])
+        assert result == [{
+            "filename": "file.png",
+            "file_id": "data:image/png;base64,YWI=",
+            "mime_type": "image/png",
+            "file_size": 2,  # bytes("ab")
+        }]
 
     @pytest.mark.asyncio
     async def test_embed_local_file_wraps_in_dict(self, mock_db_and_psycopg, tmp_path):
         PostgresChannel, _, _ = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, None))
+        raw = b"%PDF-1.4 content"
         f = tmp_path / "report.pdf"
-        f.write_bytes(b"%PDF-1.4 content")
+        f.write_bytes(raw)
         result = await ch._embed_media_for_db([str(f)])
         assert isinstance(result[0], dict)
         assert result[0]["filename"] == "report.pdf"
-        assert result[0]["data"].startswith("data:application/pdf;base64,")
+        assert result[0]["file_id"].startswith("data:application/pdf;base64,")
+        assert result[0]["mime_type"] == "application/pdf"
+        assert result[0]["file_size"] == len(raw)
+
+    @pytest.mark.asyncio
+    async def test_embed_local_file_missing_falls_back_to_path(self, mock_db_and_psycopg, tmp_path):
+        PostgresChannel, _, _ = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, None))
+        missing = tmp_path / "nope.pdf"
+        result = await ch._embed_media_for_db([str(missing)])
+        assert result == [{
+            "filename": "nope.pdf",
+            "file_id": str(missing),
+            "mime_type": "",
+            "file_size": 0,
+        }]
 
     @pytest.mark.asyncio
     async def test_embed_empty(self, mock_db_and_psycopg):
@@ -341,14 +368,40 @@ class TestPostgresChannelMedia:
         assert path.parent == tmp_path / "sess-1"
 
     @pytest.mark.asyncio
-    async def test_decode_dict_with_filename_keeps_name(self, mock_db_and_psycopg, tmp_path):
+    async def test_decode_dict_legacy_data_keeps_name(self, mock_db_and_psycopg, tmp_path):
         import lib.channels.postgres_channel as pch
 
         PostgresChannel, _, _ = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, None))
         raw = b"hello world"
         data_url = "data:application/octet-stream;base64," + base64.b64encode(raw).decode()
+        # Legacy dict: {"filename": ..., "data": "data:..."}
         entry = {"filename": "отчёт.pdf", "data": data_url}
+        with patch.object(ch, "_media_cache_dir", tmp_path):
+            result = await ch._decode_media_from_db([entry], "sess-1")
+        assert isinstance(result[0], dict)
+        assert result[0]["filename"] == "отчёт.pdf"
+        saved = Path(result[0]["path"])
+        assert saved.is_file()
+        assert saved.read_bytes() == raw
+        assert "_отчёт.pdf" in saved.name
+
+    @pytest.mark.asyncio
+    async def test_decode_dict_aw_file_id_keeps_name(self, mock_db_and_psycopg, tmp_path):
+        import lib.channels.postgres_channel as pch
+
+        PostgresChannel, _, _ = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, None))
+        raw = b"hello world"
+        data_url = "data:application/octet-stream;base64," + base64.b64encode(raw).decode()
+        # AW-формат (новый): {"filename": ..., "file_id": "data:...",
+        # "mime_type": "...", "file_size": N}
+        entry = {
+            "filename": "отчёт.pdf",
+            "file_id": data_url,
+            "mime_type": "application/octet-stream",
+            "file_size": len(raw),
+        }
         with patch.object(ch, "_media_cache_dir", tmp_path):
             result = await ch._decode_media_from_db([entry], "sess-1")
         assert isinstance(result[0], dict)

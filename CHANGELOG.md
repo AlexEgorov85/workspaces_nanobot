@@ -6,6 +6,36 @@
 
 Релизные ветки именуются как `release/vX.Y`, теги патч-релизов — `vX.Y.Z`.
 
+## [Unreleased] — chat_files_fix
+
+### Fixed
+
+- **КРИТИЧЕСКИЙ БАГ: файлы в чате не показывали превью/скачивание.**
+  `lib/channels/postgres_channel.py:_embed_media_for_db` писал в
+  `agent_conversation_messages.media` dict с ключами `{"filename", "data"}`,
+  а `audit_point_new` (`app/domains/chat/services/agent_channel.py:map_answer_to_blocks:155-156`)
+  читает `mime_type` / `file_id` / `filename` / `file_size` — не зная про `data`.
+  В результате блоки `chat_messages.content` создавались с пустым `file_id`
+  и `mime_type` и `file_size=0`, фронт (`chat-renderer.js:835`
+  `if (block.file_id)`) не показывал кнопок «предпросмотр» и «скачать».
+  Проявлялось только на проде — локально маскировалось
+  триггером `audit_bridge/sql/03_normalize_media.sql`.
+  - **Фикс**: `_embed_media_for_db` теперь пишет в AW-совместимый формат
+    `{"filename", "file_id", "mime_type", "file_size"}` — для data URL
+    `mime_type`/`file_size` восстанавливаются из самого data URL
+    (через новый `_parse_data_url`).
+  - **Фикс**: `_decode_media_from_db` теперь читает data URL из
+    `entry["file_id"]` (новый AW-формат) — раньше читалось только
+    из `entry["data"]`. Legacy-формат `{"data": ...}` сохранён как
+    fallback для обратной совместимости.
+  - **Тесты**: `test_postgres_channel.py` — `test_embed_http_passthrough`,
+    `test_embed_data_wraps_in_dict`, `test_embed_local_file_wraps_in_dict`,
+    `test_embed_local_file_missing_falls_back_to_path` обновлены под
+    новый 4-ключевой dict-формат; добавлен
+    `test_decode_dict_aw_file_id_keeps_name` для нового AW-формата
+    на входе. `test_decode_dict_legacy_data_keeps_name` оставлен для
+    совместимости.
+
 ## [2.2.0] — 2026-08-17
 
 > **Minor-релиз:** единый пул соединений PostgreSQL (одна очередь + N воркеров)
