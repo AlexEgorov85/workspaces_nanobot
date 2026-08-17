@@ -14,6 +14,7 @@ from typing import Any, Optional
 from rich.console import Console
 
 from lib.cli.display_config import DisplayConfig
+from lib.utils.outbound_meta import is_stream_delta
 
 console = Console()
 
@@ -154,7 +155,7 @@ async def run_repl(
                 continue
             if meta.get("_reasoning_end") or meta.get("_stream_end"):
                 continue
-            if meta.get("_stream_delta"):
+            if is_stream_delta(meta):
                 if msg.content:
                     sys.stdout.write(msg.content)
                     sys.stdout.flush()

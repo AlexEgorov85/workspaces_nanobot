@@ -19,17 +19,15 @@ async-callable-логгеры в ``BusFactory`` — и они оборачива
     nanobot bus.publish_outbound(msg)
       → wrapper (BusFactory)
         → make_outbound_logger(service)(msg)
-          → фильтр по ``_OUTBOUND_DROPPED_KEYS`` (reasoning/tool_hint/progress/...)
-            если есть — drop;
-          → если ``_stream_delta`` — логируем как ``outbound_delta``;
+          → ``is_dropped(meta)`` (reasoning/tool_hint/progress/...) — drop;
+          → ``is_stream_delta(meta)`` — логируем как ``outbound_delta``;
           → иначе — ``outbound_final``;
           → service.log_outbound(...)
         → original publish_outbound(msg)
 
-``_OUTBOUND_DROPPED_KEYS`` — служебные сигналы, которые генерирует runner
-в течение оборота. Их много (десятки на один user-сообщение), и они не
-представляют интереса для аудита в БД. Финальный ответ и промежуточные
-стрим-чанки пишутся.
+Фильтрация служебных сигналов runner'а выполняется через единый
+``lib.utils.outbound_meta`` — добавление новых флагов правится в одном
+месте.
 
 ``latency_ms`` / ``tokens_used`` берутся из ``msg.metadata._turn`` (если
 runner туда положил) — иначе None.
@@ -39,18 +37,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Optional
 
-# Служебные ключи в OutboundMessage.metadata, которые НЕ логируем.
-# Подавляющее большинство outbound-сообщений — это промежуточные сигналы
-# прогресса/runner'а, а не реальный контент. Попадают в БД только финал
-# (kind="outbound_final") и стрим-чанки (kind="outbound_delta", см. ниже).
-_OUTBOUND_DROPPED_KEYS = (
-    "_reasoning_delta",   # очередной фрагмент chain-of-thought
-    "_reasoning_end",     # маркер конца размышлений
-    "_tool_hint",         # визуальный разделитель (UI-подсказка)
-    "_progress",          # обновление прогресс-бара
-    "_turn_end",          # сигнал окончания оборота
-    "_stream_end",        # сигнал конца стрим-чанка
-)
+from lib.utils.outbound_meta import is_dropped, is_stream_delta, msg_session_key
 
 
 def make_inbound_logger(
@@ -77,7 +64,7 @@ def make_inbound_logger(
     """
     async def _log(msg: Any) -> None:
         try:
-            session_key = getattr(msg, "session_key", "") or ""
+            session_key = msg_session_key(msg)
             channel = getattr(msg, "channel", "") or ""
             message_id = (getattr(msg, "metadata", {}) or {}).get("message_id")
             sender_id = getattr(msg, "sender_id", None) or None
@@ -115,9 +102,9 @@ def make_outbound_logger(
     Получает ``OutboundMessage`` (см. ``nanobot.bus.events``) и решает,
     писать ли его в БД:
 
-      1. Если в ``msg.metadata`` есть любой ключ из ``_OUTBOUND_DROPPED_KEYS``
-         — drop (reasoning/tool_hint/progress/turn_end/stream_end);
-      2. Если ``_stream_delta`` присутствует — это очередной чанк
+      1. Если ``is_dropped(msg.metadata)`` — drop
+         (reasoning/tool_hint/progress/turn_end/stream_end);
+      2. Если ``is_stream_delta(msg.metadata)`` — это очередной чанк
          стриминг-ответа, логируем с ``kind="outbound_delta"``;
       3. Иначе — это финальный ответ оборота, логируем с
          ``kind="outbound_final"``.
@@ -134,12 +121,9 @@ def make_outbound_logger(
     async def _log(msg: Any) -> None:
         try:
             meta = getattr(msg, "metadata", {}) or {}
-            if any(k in meta for k in _OUTBOUND_DROPPED_KEYS):
+            if is_dropped(meta):
                 return
-            if meta.get("_stream_delta"):
-                kind = "outbound_delta"
-            else:
-                kind = "outbound_final"
+            kind = "outbound_delta" if is_stream_delta(meta) else "outbound_final"
             latency = None
             tokens = None
             turn_meta = meta.get("_turn") or {}

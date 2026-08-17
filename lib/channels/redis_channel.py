@@ -94,6 +94,7 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from lib.utils.outbound_meta import is_dropped
 
 
 class RedisChannel(BaseChannel):
@@ -296,11 +297,7 @@ class RedisChannel(BaseChannel):
         meta = dict(msg.metadata or {})
 
         # ---- фильтрация служебных сообщений ----
-        if meta.get("_reasoning_delta") or meta.get("_reasoning_end"):
-            return
-        if meta.get("_progress"):
-            return
-        if meta.get("_turn_end"):
+        if is_dropped(meta):
             return
 
         # ---- reply_to: сначала из OutboundMessage, иначе из сохранённого ----
