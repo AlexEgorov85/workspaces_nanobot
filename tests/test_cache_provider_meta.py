@@ -113,9 +113,7 @@ def test_load_cache_from_postgres_captures_meta(tmp_path):
         [("predefined_scripts", "name", "text", None, "Имя скрипта", "Реестр скриптов")],
     ]
     pg_conn.cursor.return_value = cur
-    with patch("utils.db.resolve_dsn",
-               return_value="postgres://user:pass@localhost/db"), \
-         patch("psycopg2.connect", return_value=pg_conn), \
+    with patch("utils.db.run", lambda fn: fn(pg_conn)), \
          patch("lib.services.cache_provider_impl._copy_table"), \
          patch("lib.services.cache_provider_impl._store_meta"):
         load_cache_from_postgres(cache_path, db_config)

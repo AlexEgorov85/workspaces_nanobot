@@ -390,16 +390,11 @@ def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
                           произвольных схем (метаданные, реестры и т.п.)
     """
     import duckdb
-    import psycopg2
-    from utils.db import resolve_dsn
+    from utils.db import run
 
     schema = db_config.get("schema", "public")
     tables = db_config.get("tables")
     additional_tables = db_config.get("additional_tables") or []
-
-    dsn = resolve_dsn()
-    if not dsn:
-        raise RuntimeError("DSN is not configured")
 
     path = Path(cache_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -412,10 +407,7 @@ def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
     for sch in extra_schemas:
         conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{sch}"')
 
-    pg_conn = psycopg2.connect(dsn)
-    pg_conn.autocommit = True
-
-    try:
+    def _load(pg_conn) -> None:
         table_list = tables or _discover_tables(pg_conn, schema)
 
         for tbl in table_list:
@@ -437,10 +429,10 @@ def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
         schema_pairs.extend((sch, tbls) for sch, tbls in extra_by_schema.items())
         _capture_schema_meta(conn, pg_conn, schema_pairs)
 
+    try:
+        run(_load)
         print(f"[LOAD] Cache saved to {cache_path}", file=sys.stderr)
-
     finally:
-        pg_conn.close()
         conn.close()
 
 
@@ -449,8 +441,7 @@ def check_cache_stale(cache_path: str, db_config: dict) -> Dict[str, Any]:
     Проверить, устарел ли кэш, сравнив MAX(updated) с канонической БД.
     """
     import duckdb
-    import psycopg2
-    from utils.db import resolve_dsn
+    from utils.db import run
 
     schema = db_config.get("schema", "public")
     path = Path(cache_path)
@@ -470,15 +461,11 @@ def check_cache_stale(cache_path: str, db_config: dict) -> Dict[str, Any]:
                 "error": "No cache metadata found"}
     cache_conn.close()
 
-    dsn = resolve_dsn()
-    if not dsn:
-        return {"fresh": False, "stale_tables": [], "cache_meta": cache_meta, "pg_meta": {},
-                "error": "DSN is not configured"}
+    if not cache_meta:
+        return {"fresh": False, "stale_tables": [], "cache_meta": {}, "pg_meta": {},
+                "error": "No cache metadata"}
 
-    pg_conn = psycopg2.connect(dsn)
-    try:
-        pg_meta = {}
-        stale = []
+    def _check(pg_conn) -> None:
         for tbl in cache_meta:
             cur = pg_conn.cursor()
             try:
@@ -492,8 +479,13 @@ def check_cache_stale(cache_path: str, db_config: dict) -> Dict[str, Any]:
                 stale.append(tbl)
             finally:
                 cur.close()
-    finally:
-        pg_conn.close()
+
+    pg_meta = {}
+    stale = []
+    try:
+        run(_check)
+    except Exception:
+        pass
 
     return {
         "fresh": len(stale) == 0,
