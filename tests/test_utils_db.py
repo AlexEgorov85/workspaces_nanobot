@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
 import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,7 +24,7 @@ if _user_site not in sys.path:
 
 @pytest.fixture(autouse=True)
 def mock_psycopg2():
-    """Mock psycopg2 before importing utils.db."""
+    """Mock psycopg2 before importing utils.db; teardown = shutdown пула."""
     with (
         patch.dict("sys.modules"),
         patch("psycopg2.connect") as mock_connect,
@@ -33,6 +34,7 @@ def mock_psycopg2():
         patch("psycopg2.extensions.register_adapter"),
     ):
         mock_conn = MagicMock()
+        mock_conn.closed = False
         mock_cur = MagicMock()
         mock_cur.__enter__.return_value = mock_cur
         mock_conn.cursor.return_value.__enter__.return_value = mock_cur
@@ -47,12 +49,9 @@ def mock_psycopg2():
         for _m in [m for m in sys.modules if m == "utils" or m.startswith("utils.")]:
             del sys.modules[_m]
 
+        import utils.db as _db
         from utils.db import (
-            DB_RETRYABLE_ERRORS,
-            _connect,
-            _disconnect,
-            resolve_dsn,
-            _retry,
+            PoolTimeoutError,
             async_execute,
             async_fetch,
             async_fetchone,
@@ -63,19 +62,22 @@ def mock_psycopg2():
             fetch,
             fetchone,
             fetchval,
+            get_stats,
+            resolve_dsn,
+            run,
+            set_pool_config,
             transaction,
         )
 
-        # Reset _dsn before each test
+        # Reset DSN и пул перед каждым тестом
         configure("")
+        _db._pool_cfg = dict(_db._DEFAULT_POOL)
 
         yield {
             "mock_connect": mock_connect,
             "mock_conn": mock_conn,
             "mock_cur": mock_cur,
             "configure": configure,
-            "_connect": _connect,
-            "_disconnect": _disconnect,
             "resolve_dsn": resolve_dsn,
             "execute": execute,
             "fetch": fetch,
@@ -87,9 +89,16 @@ def mock_psycopg2():
             "async_fetchone": async_fetchone,
             "async_fetchval": async_fetchval,
             "async_transaction": async_transaction,
-            "DB_RETRYABLE_ERRORS": DB_RETRYABLE_ERRORS,
-            "_retry": _retry,
+            "run": run,
+            "get_stats": get_stats,
+            "set_pool_config": set_pool_config,
+            "PoolTimeoutError": PoolTimeoutError,
+            "_db": _db,
         }
+
+        # Teardown: остановить воркеры, чтобы они не жили между тестами
+        _db.shutdown()
+        _db._manager = None
 
 
 class TestConfigure:
@@ -210,37 +219,6 @@ class TestResolveDsn:
             SETTINGS["channels"] = original
 
 
-class TestConnect:
-    def test_connect_success(self, mock_psycopg2):
-        mock_psycopg2["configure"]("postgresql://u:p@h/db")
-        conn = mock_psycopg2["_connect"]()
-        assert conn is mock_psycopg2["mock_conn"]
-        mock_psycopg2["mock_connect"].assert_called_with(
-            "postgresql://u:p@h/db", gssencmode="disable"
-        )
-
-    def test_connect_no_dsn_raises(self, mock_psycopg2):
-        import utils.db as _db
-
-        _db._dsn = ""
-        with patch("utils.db.resolve_dsn", return_value=""):
-            with pytest.raises(RuntimeError, match="не инициализирован"):
-                mock_psycopg2["_connect"]()
-
-    def test_connect_non_retryable_error(self, mock_psycopg2):
-        mock_psycopg2["configure"]("dsn")
-        mock_psycopg2["mock_connect"].side_effect = ValueError("bad")
-        with pytest.raises(ValueError, match="bad"):
-            mock_psycopg2["_connect"]()
-
-
-class TestDisconnect:
-    def test_closes_connection(self, mock_psycopg2):
-        conn = MagicMock()
-        mock_psycopg2["_disconnect"](conn)
-        conn.close.assert_called_once()
-
-
 class TestExecute:
     def test_execute_returns_status(self, mock_psycopg2):
         mock_psycopg2["configure"]("dsn")
@@ -257,15 +235,26 @@ class TestExecute:
         result = mock_psycopg2["execute"]("")
         assert result is None
 
+    def test_execute_no_dsn_raises(self, mock_psycopg2):
+        import utils.db as _db
+
+        _db._dsn = ""
+        with patch("utils.db.resolve_dsn", return_value=""):
+            with pytest.raises(RuntimeError, match="не инициализирован"):
+                mock_psycopg2["execute"]("SELECT 1")
+
     def test_execute_retry_on_operational_error(self, mock_psycopg2):
+        """Ретраябельная ошибка → воркер пересоздаёт соединение и повторяет job."""
         mock_psycopg2["configure"]("dsn")
-        mock_psycopg2["mock_connect"].side_effect = [
+        mock_psycopg2["mock_cur"].execute.side_effect = [
             __import__("psycopg2").OperationalError("conn lost"),
-            mock_psycopg2["mock_conn"],
+            None,
         ]
         mock_psycopg2["mock_cur"].statusmessage = "UPDATE 5"
         result = mock_psycopg2["execute"]("UPDATE t SET x=1")
         assert result == "UPDATE 5"
+        # соединение было пересоздано после обрыва
+        assert mock_psycopg2["mock_connect"].call_count == 2
 
 
 class TestFetch:
@@ -312,13 +301,21 @@ class TestFetchVal:
         assert result is None
 
 
+class TestRun:
+    def test_run_executes_fn_with_conn(self, mock_psycopg2):
+        mock_psycopg2["configure"]("dsn")
+        result = mock_psycopg2["run"](lambda conn: conn.encoding)
+        assert result == mock_psycopg2["mock_conn"].encoding
+
+
 class TestTransaction:
     def test_transaction_commits(self, mock_psycopg2):
         mock_psycopg2["configure"]("dsn")
         with mock_psycopg2["transaction"]() as conn:
             conn.cursor().execute("INSERT INTO t VALUES (1)")
         mock_psycopg2["mock_conn"].commit.assert_called_once()
-        mock_psycopg2["mock_conn"].close.assert_called_once()
+        # соединение остаётся в пуле — не закрывается после транзакции
+        mock_psycopg2["mock_conn"].close.assert_not_called()
 
     def test_transaction_rollback_on_error(self, mock_psycopg2):
         mock_psycopg2["configure"]("dsn")
@@ -327,45 +324,191 @@ class TestTransaction:
                 conn.cursor().execute("INSERT INTO t VALUES (1)")
                 raise ValueError("fail")
         mock_psycopg2["mock_conn"].rollback.assert_called_once()
-        mock_psycopg2["mock_conn"].close.assert_called_once()
 
-    def test_transaction_sets_autocommit_false(self, mock_psycopg2):
+    def test_transaction_restores_autocommit(self, mock_psycopg2):
+        """После транзакции autocommit возвращается в True (воркер свободен)."""
         mock_psycopg2["configure"]("dsn")
         with mock_psycopg2["transaction"]():
             pass
-        assert mock_psycopg2["mock_conn"].autocommit is False
+        assert mock_psycopg2["mock_conn"].autocommit is True
 
 
-class TestRetry:
-    def test_retry_succeeds_first_time(self, mock_psycopg2):
-        fn = MagicMock(return_value="ok")
-        result = mock_psycopg2["_retry"](fn)
-        assert result == "ok"
-        fn.assert_called_once()
+class TestPool:
+    def test_single_connection_reused(self, mock_psycopg2):
+        """Пул N=1: все операции на одном соединении."""
+        mock_psycopg2["set_pool_config"]({"min_conn": 1, "max_conn": 1})
+        mock_psycopg2["configure"]("dsn")
+        mock_psycopg2["mock_cur"].fetchone.return_value = (1,)
+        for _ in range(5):
+            mock_psycopg2["fetchval"]("SELECT 1")
+        assert mock_psycopg2["mock_connect"].call_count == 1
 
-    def test_retry_eventually_succeeds(self, mock_psycopg2):
-        fn = MagicMock()
-        fn.side_effect = [
-            __import__("psycopg2").OperationalError("fail"),
-            __import__("psycopg2").OperationalError("fail"),
-            "ok",
-        ]
-        result = mock_psycopg2["_retry"](fn)
-        assert result == "ok"
+    def test_connection_not_closed_between_ops(self, mock_psycopg2):
+        """Соединение живёт в пуле, close не вызывается между операциями."""
+        mock_psycopg2["configure"]("dsn")
+        mock_psycopg2["fetchval"]("SELECT 1")
+        mock_psycopg2["fetchval"]("SELECT 2")
+        mock_psycopg2["mock_conn"].close.assert_not_called()
 
-    def test_retry_non_retryable_raises(self, mock_psycopg2):
-        fn = MagicMock(side_effect=ValueError("bad"))
-        with pytest.raises(ValueError, match="bad"):
-            mock_psycopg2["_retry"](fn)
+    def test_parallel_transactions_use_separate_connections(self, mock_psycopg2):
+        """Две параллельные транзакции получают разные соединения (max_conn=2)."""
+        mock_psycopg2["set_pool_config"]({"min_conn": 1, "max_conn": 2})
+        mock_psycopg2["configure"]("dsn")
 
-    def test_retry_exhausted_raises(self, mock_psycopg2):
-        import utils.db as _db
+        results: list = []
+        # барьер внутри транзакции гарантирует, что обе открыты одновременно
+        inside = threading.Barrier(2)
 
-        _db._MAX_RETRIES = 2
-        _db._RETRY_DELAY = 0.001
-        fn = MagicMock(side_effect=__import__("psycopg2").OperationalError("persistent"))
-        with pytest.raises(__import__("psycopg2").OperationalError):
-            mock_psycopg2["_retry"](fn)
+        def _tx():
+            with mock_psycopg2["transaction"]() as conn:
+                conn.execute("UPDATE t SET x=1")
+                inside.wait(timeout=5)
+                results.append("ok")
+
+        t1 = threading.Thread(target=_tx)
+        t2 = threading.Thread(target=_tx)
+        t1.start(); t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        assert len(results) == 2
+        assert mock_psycopg2["mock_connect"].call_count == 2
+
+    def test_auto_scale_when_worker_leased(self, mock_psycopg2):
+        """Пока транзакция держит воркер, обычная операция уходит на новый."""
+        mock_psycopg2["set_pool_config"]({"min_conn": 1, "max_conn": 3})
+        mock_psycopg2["configure"]("dsn")
+
+        tx_done = threading.Event()
+        tx_acquired = threading.Event()
+
+        def _tx():
+            with mock_psycopg2["transaction"]() as conn:
+                conn.execute("UPDATE t SET x=1")
+                tx_acquired.set()
+                time.sleep(0.2)
+            tx_done.set()
+
+        t = threading.Thread(target=_tx)
+        t.start()
+        assert tx_acquired.wait(timeout=5)
+        # обычная операция из главного потока — пока lease занят
+        mock_psycopg2["execute"]("UPDATE other SET x=1")
+        t.join(timeout=5)
+        assert tx_done.is_set()
+        # воркер транзакции + второй воркер для обычной операции
+        assert mock_psycopg2["mock_connect"].call_count == 2
+
+    def test_queue_full_raises_timeout(self, mock_psycopg2):
+        """Переполненная очередь → PoolTimeoutError, а не вечный блок."""
+        mock_psycopg2["set_pool_config"](
+            {"min_conn": 1, "max_conn": 1, "queue_maxsize": 1, "pool_timeout": 0.2}
+        )
+        mock_psycopg2["configure"]("dsn")
+        lock = threading.Lock()
+        lock.acquire()  # держим воркера занятым
+
+        def _block(conn):
+            with lock:
+                return "released"
+
+        holder = threading.Thread(target=lambda: mock_psycopg2["run"](_block))
+        holder.start()
+        time.sleep(0.05)  # воркер уже исполняет _block и ждёт lock
+
+        # первая операция заполняет очередь (воркер занят — её никто не заберёт)
+        queued = threading.Thread(
+            target=mock_psycopg2["fetchval"], args=("SELECT 1",)
+        )
+        queued.start()
+        time.sleep(0.05)
+
+        # вторая операция: очередь переполнена → PoolTimeoutError
+        with pytest.raises(mock_psycopg2["PoolTimeoutError"]):
+            mock_psycopg2["fetchval"]("SELECT 1")
+        lock.release()
+        holder.join(timeout=5)
+        queued.join(timeout=5)
+
+    def test_unconnected_worker_yields_to_connected(self, mock_psycopg2):
+        """Неподключённый воркер не отнимает задачи у подключённых.
+
+        Симуляция лимита БД (например CONNECTION LIMIT): первый connect
+        успешен, все последующие падают. Подключённый воркер обслуживает
+        все задачи, а неподключённые не жгут время на retry-connect.
+        """
+        mock_psycopg2["set_pool_config"](
+            {
+                "min_conn": 1,
+                "max_conn": 5,
+                "connect_max_retries": 1,
+                "reconnect_backoff_sec": 0.01,
+            }
+        )
+        mock_psycopg2["configure"]("dsn")
+        import psycopg2
+
+        real_connect = mock_psycopg2["mock_connect"]
+        calls = {"n": 0}
+
+        def _connect(*a, **k):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise psycopg2.OperationalError("too many connections")
+            return mock_psycopg2["mock_conn"]
+
+        real_connect.side_effect = _connect
+        mock_psycopg2["mock_cur"].fetchone.return_value = (1,)
+
+        # прогрев: воркер 0 подключается и живёт в пуле
+        assert mock_psycopg2["fetchval"]("SELECT 1") == 1
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                results.append(mock_psycopg2["fetchval"]("SELECT 1"))
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert errors == []
+        assert len(results) == 6
+        # новые воркеры даже не пытались подключиться: работал только воркер 0
+        assert real_connect.call_count == 1
+
+    def test_connect_failure_returns_error_fast(self, mock_psycopg2):
+        """Полная недоступность БД: задача падает с ошибкой, а не висит."""
+        mock_psycopg2["set_pool_config"](
+            {
+                "min_conn": 1,
+                "max_conn": 1,
+                "connect_max_retries": 2,
+                "reconnect_backoff_sec": 0.01,
+            }
+        )
+        mock_psycopg2["configure"]("dsn")
+        import psycopg2
+
+        mock_psycopg2["mock_connect"].side_effect = psycopg2.OperationalError(
+            "db down"
+        )
+        with pytest.raises(psycopg2.OperationalError, match="db down"):
+            mock_psycopg2["fetchval"]("SELECT 1")
+
+    def test_get_stats_keys(self, mock_psycopg2):
+        stats = mock_psycopg2["get_stats"]()
+        for k in (
+            "workers", "queue_size", "running", "min_conn", "max_conn",
+            "pool_timeout", "jobs", "lease_acquired",
+        ):
+            assert k in stats
 
 
 class TestAsyncAPI:
@@ -405,7 +548,7 @@ class TestAsyncTransaction:
         async with mock_psycopg2["async_transaction"]() as wrapper:
             await wrapper.execute("INSERT INTO t VALUES (1)")
         mock_psycopg2["mock_conn"].commit.assert_called_once()
-        mock_psycopg2["mock_conn"].close.assert_called_once()
+        mock_psycopg2["mock_conn"].close.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_async_transaction_rollback(self, mock_psycopg2):
@@ -415,7 +558,6 @@ class TestAsyncTransaction:
                 await wrapper.execute("INSERT INTO t VALUES (1)")
                 raise ValueError("fail")
         mock_psycopg2["mock_conn"].rollback.assert_called_once()
-        mock_psycopg2["mock_conn"].close.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_async_connection_wrapper_fetch(self, mock_psycopg2):
