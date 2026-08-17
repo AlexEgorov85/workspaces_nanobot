@@ -6,32 +6,141 @@
 
 Релизные ветки именуются как `release/vX.Y`, теги патч-релизов — `vX.Y.Z`.
 
-## [Unreleased]
+## [2.2.0] — 2026-08-17
 
-### Changed
-
-- **Единый пул соединений PostgreSQL (`workspace/utils/db.py`): неподключённые
-  воркеры уступают очередь подключённым.** В `_take_job` воркер без живого
-  соединения берёт обычную задачу, только когда в пуле нет ни одного воркера
-  с живым соединением — иначе задачи обслуживает подключённый воркер, а
-  неподключённые не тратят время на retry-connect. При полной недоступности
-  БД задачи быстро падают с ошибкой подключения, а не висят в очереди вечно.
-  Транзакции (`lease_id != 0`) не затрагиваются.
+> **Minor-релиз:** единый пул соединений PostgreSQL (одна очередь + N воркеров)
+> вместо connect-per-op, перенос записи сессий в `data_store/cache/sessions/`
+> через новый `SessionFileRedirectHook`, сохранение комментариев таблиц/колонок
+> и исходных PG-типов в DuckDB-кэш, единый dict-формат media в переписке.
+> Удалена неиспользуемая write-функциональность `AuditSyncService` (таблица
+> `audit_interactions` и конфиг-ключ `sync_write_table`); вопросы/ответы живут
+> только в `agent_question_runs`. Публичный API `utils.db` сохранён.
 
 ### Added
 
-- **Тесты поведения пула при недоступных подключениях**
-  (`tests/test_utils_db.py`): `test_unconnected_worker_yields_to_connected`
-  (симуляция `CONNECTION LIMIT` роли: все задачи обслуживает единственный
-  живой воркер) и `test_connect_failure_returns_error_fast` (полная
-  недоступность БД → быстрый фейл задачи). Исправлена гонка в
-  `test_parallel_transactions_use_separate_connections` (барьер перенесён
-  внутрь транзакций). Итог: **860 passed**, `py_compile` OK.
+- **Единый пул соединений PostgreSQL (`workspace/utils/db.py`).** Вместо
+  connect-per-op — общая job-очередь + пул воркеров (`min_conn`/`max_conn`,
+  по умолчанию `1`/`4`); каждый воркер владеет единственным psycopg2-соединением
+  и выполняет задачи последовательно. Транзакции (`transaction()` /
+  `async_transaction()`) получают эксклюзивную аренду соединения (`lease_id`).
+  Реконнект с backoff внутри воркера, retry-able задачи переподнимаются до
+  `job_max_retries`. Проблема «too many connections» решается на уровне
+  архитектуры (не больше `max_conn` соединений с процесса), а не ретраями.
+  Публичный API сохранён: `configure/resolve_dsn/run/set_pool_config/get_stats/
+  start/shutdown` + sync/async `execute/fetch/fetchone/fetchval/transaction`.
+- **Неподключённые воркеры уступают очередь подключённым.** В `_take_job`
+  воркер без живого соединения берёт обычную задачу, только когда в пуле нет
+  ни одного воркера с живым соединением — иначе задачи обслуживает подключённый
+  воркер, а неподключённые не тратят время на retry-connect. При полной
+  недоступности БД задачи быстро падают с ошибкой подключения, а не висят
+  в очереди вечно. Транзакции (`lease_id != 0`) не затрагиваются.
+- **`ApplicationContext`: конфигурация и жизненный цикл общего пула.** `create()`
+  читает секцию `channels.postgres.pool` и применяет через `set_pool_config()`;
+  `start()/stop()` вызывают `utils.db.start()/shutdown()`. Хелперы
+  `_configure_db_pool` / `_start_db_pool` / `_stop_db_pool`;
+  тест `test_pool_config_applied_from_settings`. `lib/core/application_context.py`.
+- **`workspace/hooks/session_file_redirect_hook.py` — `SessionFileRedirectHook`.**
+  AgentHook, подключаемый автоматически через `hook_loader`. Перехватывает
+  `write`/`edit`/`create_file`/`write_file` в `before_execute_tool` и
+  перенаправляет целевой путь в `data_store/cache/sessions/<session_key>/<file>`,
+  если исходный не попадает в whitelist служебных путей (`AGENTS.md`, `lib/`,
+  `tests/`, `benchmarks/`, `data_store/`, `**/*.py` и т.д.). Имя папки — из
+  `context.session_key` (`cli:1`, `telegram:8281248569`). Кросс-платформенный:
+  зарезервированные Windows-имена (`CON`, `PRN`, `NUL`, `COM*`, `LPT*`)
+  санитизируются, недопустимые символы вырезаются. Реализует политику
+  `workspace/AGENTS.md` «new files must be saved under `data_store/cache/`».
+- **Сохранение комментариев таблиц/колонок и исходных PG-типов в DuckDB-кэш.**
+  `cache_provider_impl._capture_schema_meta` снимает с PG `COMMENT ON
+  TABLE/COLUMN` и `data_type` (включая `varchar(N)`) и кладёт в
+  `__nanobot_meta.__schema_meta` файла-снимка. `build_schema()` (`
+  lib/utils/duckdb_query.py`) подставляет эти комментарии в описание схемы
+  и использует `pg_type` вместо инференса DuckDB. Тесты `tests/test_cache_provider_meta.py`.
 - **Проверка «too many connections» на живой БД.** Лимит воспроизведён через
   не-суперюзерную роль (`ALTER ROLE ... CONNECTION LIMIT N`): при `max_conn=10`
   пул держит ровно N подключений, задачи сверх лимита получают ошибку без
   зависания. Замечание: PostgreSQL игнорирует `CONNECTION LIMIT` для ролей
   superuser — проверять только на не-привилегированных ролях.
+
+### Changed
+
+- **`DbLoggingService` — вставки через общий пул `utils.db`.** Убраны собственные
+  `_conn/_connect/_close`; `_flush_batch` уходит в пул через `run(...)`. Добавлены
+  счётчики `written` / `batch_count` / `question_runs` и кэш `_schema_ok`.
+  `lib/services/db_logging_service.py`.
+- **`AuditSyncService` — синхронизация через общий пул `utils.db`.** Весь SQL
+  через `run(lambda conn: ...)` (`_fetch_all`, `_fetch_incremental`,
+  `_fetch_schema`); убраны
+  `_conn/_connect/_close_connection`; `_reconnect` сбрасывает `_last_sync`;
+  `connected` в `get_stats()` читается из `utils.db.get_stats()`.
+  `lib/services/audit_sync_service.py`.
+- **`cache_provider_impl` — bulk-load через общий пул `utils.db`.**
+  `load_cache_from_postgres`/`check_cache_stale` переведены на
+  `utils.db.run(lambda pg_conn: ...)` вместо прямого `psycopg2.connect(dsn)`;
+  сообщение `'DSN is not configured'` заменено на `'No cache metadata'`.
+  `lib/services/cache_provider_impl.py`.
+- **Единый формат media в переписке — dict `{filename, data}`.**
+  `PostgresChannel._embed_media_for_db` больше не пишет «голые» data URL:
+  локальный файл и уже готовый `data:`-URL оборачиваются в dict
+  `{"filename": "<имя>", "data": "data:<mime>;base64,..."}` (имя файла
+  сохраняется для агента); HTTP/HTTPS-ссылки остаются строками.
+  Чтение (`_decode_media_from_db`) по-прежнему принимает и старые строковые
+  data URL — обратная совместимость сохранена. Streamlit уже работал с
+  dict-форматом. `lib/channels/postgres_channel.py`.
+
+### Removed
+
+- **Убрана write-функциональность `AuditSyncService`** (`f85b8ed`):
+  `submit_write()` / `_write_answer()` / `_ensure_write_table()` / `COMMAND_WRITE`,
+  параметры `write_table`/`write_schema`, конфиг-ключ
+  `skills.audit_analyzer.sync_write_table` и связанные тесты. Вопросы/ответы
+  агента — единственный источник в `public.agent_question_runs`
+  (`DbLoggingService`); дублирующая запись в `audit_interactions` удалена.
+  `lib/services/audit_sync_service.py`, `lib/services/audit_settings.py`,
+  `project.json`, `lib/core/application_context.py`.
+
+### Fixed
+
+- **`ToolAuditHook`: конкурентные вопросы больше не путают `_tool_audit`.**
+  Раньше всё состояние хука (записи вызовов, снимки аргументов, счётчик
+  пачки) лежало в общих для всех оборотов списках. Обороты разных сессий
+  (вопросов) обрабатываются конкурентно, поэтому в `_entries` смешивались
+  вызовы разных обсуждений, а `drain()` в конце оборота отдавал чужие
+  записи в `metadata._tool_audit`. Теперь состояние изолируется по
+  `session_key` (`_entries`/`_calls`/`_pending_start` — словари с bucket-ом
+  на сессию), а `drain(session_key)`/`drain_calls(session_key)` забирают
+  только записи текущего вопроса. Обёртка `_assemble_outbound` в
+  `RuntimePatcher.patch_assemble_outbound` передаёт ключ из `msg.session_key`.
+  `workspace/hooks/tool_audit_hook.py`, `lib/services/runtime_patcher.py`,
+  `tests/test_hooks_tool_audit_hook.py` (`TestConcurrentSessionsIsolated`).
+
+- **`skills.audit_analyzer.sync_write_table` удалён** — уберите его из
+  `project.json` (оставленный ключ игнорируется, ошибки не вызовет). Таблица
+  `audit_interactions` больше не пишется: вопросы/ответы агента читайте из
+  `public.agent_question_runs` (`DbLoggingService`). Существующие строки
+  `audit_interactions` можно удалить вручную, если не нужны.
+- **Формат media изменился** на dict `{filename, data}` для новых записей.
+  Старые строковые data URL в `agent_conversation_messages.media` продолжают
+  читаться (`_decode_media_from_db` принимает оба варианта).
+
+### Tests
+
+- **Тесты пула переписаны полностью** (`tests/test_utils_db.py`, 40):
+  `TestPool` (переиспользование соединения, не-закрытие между операциями,
+  параллельные транзакции на разных соединениях, авто-масштаб при аренде,
+  переполнение очереди, `get_stats`), `TestTransaction`, `TestAsyncAPI`,
+  `TestAsyncTransaction`. Новые тесты поведения при недоступных подключениях:
+  `test_unconnected_worker_yields_to_connected` (симуляция `CONNECTION LIMIT`
+  роли) и `test_connect_failure_returns_error_fast`. Исправлена гонка в
+  `test_parallel_transactions_use_separate_connections` (барьер перенесён
+  внутрь транзакций).
+- Новые/обновлённые: `test_cache_provider_meta.py` (schema-meta в кэш),
+  `test_application_context.py` (`test_pool_config_applied_from_settings`),
+  `test_audit_sync_service.py` (в т.ч. −58 строк удалённой write-функциональности),
+  `test_db_logging_service.py` (фикстура
+  `fake_psycopg2` патчит реальный psycopg2 и сбрасывает пул в teardown),
+  `test_postgres_channel.py` (`test_embed_data_wraps_in_dict`,
+  `test_embed_local_file_wraps_in_dict`).
+- Итог: **856 passed**, `py_compile` всех изменённых модулей OK.
 
 ## [2.1.0] — 2026-08-14
 

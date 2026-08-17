@@ -408,7 +408,6 @@ nanobot/
 | `in_memory_cache_path` | Путь к файлу кеша (отн. навыка) | `cache/audit_cache.duckdb` |
 | `poll_interval_sec` | Период инкрементального поллинга PG в `AuditSyncService` | `60` |
 | `full_resync_every` | Полная перезагрузка таблицы каждые N циклов (сверка удалений) | `10` |
-| `sync_write_table` | Таблица журнала взаимодействий (создаётся автоматически) | `audit_interactions` |
 | `embedding_base_url` | Ollama `/api/embed` | `http://localhost:11434/api/embed` |
 | `embedding_model` | Модель эмбеддинга | `mxbai-embed-large:latest` |
 | `embedding_dimension` | Размерность вектора | `1024` |
@@ -493,8 +492,6 @@ gateway автоматически — запустите его (python gateway
   Каждые `full_resync_every` циклов (по умолч. 10) делает полную перезагрузку
   таблицы через `on_replace_records` → `AuditMemoryStore.replace_records`
   (сверка удалённых строк; курсор поллинга не откатывается).
-  Дополнительно создаёт таблицу журнала `oarb.audit_interactions`
-  (`sync_write_table`), куда через `submit_write()` пишутся ответы агента.
 - **`AuditMemoryStore`** — живое зеркало в чисто in-memory DuckDB
   (`cache_path=""`) + FAISS-индексы. `ensure_schema()` создаёт таблицы с типами
   из PG и сохраняет комментарии + исходные PG-типы в мета-таблицу
@@ -557,10 +554,7 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
    перезаписывается целиком (структура и типы сохраняются), удалённые в PG
    строки исчезают. Курсор поллинга не откатывается (новое значение только если
    больше текущего).
-6. **Журнал ответов**: при старте создаётся таблица
-   `"<schema>"."<sync_write_table>"` (`audit_interactions`); ответы агента
-   ставятся в очередь через `submit_write()` и записываются worker-потоком.
-7. **Завершение**: при остановке gateway `sync_service.stop()` дописывает
+6. **Завершение**: при остановке gateway `sync_service.stop()` дописывает
    очередь, затем в `finally` — финальный `store.publish()` и `store.close()`.
 
 #### Как связаны компоненты (callbacks)
@@ -587,7 +581,6 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 | `db_schema` / `db_tables` | `gateway.py:516-518` | `oarb` / 4 таблицы | Какие таблицы синхронизировать. Список — массив строк; добавил таблицу → она появится в кеше после следующего цикла |
 | `poll_interval_sec` | `gateway.py:549` | `60` | Частота инкрементального поллинга, сек. Меньше → свежее кеш, больше запросов к PG |
 | `full_resync_every` | `gateway.py:552` | `10` | Полная перезагрузка таблиц каждые N циклов поллинга. `0` — отключить (удалённые строки останутся в кеше) |
-| `sync_write_table` | `gateway.py:550` | `audit_interactions` | Таблица журнала ответов агента (создаётся автоматически в схеме `db_schema`) |
 | `mode_vector_db_table` | `gateway.py:517` | `oarb.audit_vectors` | Таблица векторов, включается в синхронизацию и прогревается в FAISS |
 
 `config.py` мержит `project.json` в `SETTINGS`; после правки `project.json`
@@ -1459,7 +1452,7 @@ journalctl -u ollama -f
 
 #### Параллельные запуски в gateway
 
-`AuditSyncService` и `build_vectors.py` могут работать одновременно. Они **не конфликтуют** (разные таблицы: `audit_interactions` vs `audit_vectors`), но:
+`AuditSyncService` и `build_vectors.py` могут работать одновременно. Они **не конфликтуют** (разные таблицы: `oarb.audit_vectors` и доменные таблицы аудита), но:
 
 - Если источник (`oarb.audits`) сильно меняется во время `--full-rebuild` — могут появиться пропущенные строки (сигнатура уже посчитана).
 - Решение: запускать `build_vectors.py` в период минимальной нагрузки (ночью).
@@ -1765,7 +1758,7 @@ python -m pytest tests/test_pg_session_manager.py -q
 # Юнит-тесты audit/кэша (sync+memory)
 python -m pytest tests/test_audit_memory_store.py tests/test_audit_sync_service.py -q
 
-# Полный набор (без БД; 860 passed после доработки пула)
+# Полный набор (без БД; 856 passed после доработки пула)
 python -m pytest tests -q
 
 # Сквозной тест навыка (требует живого PostgreSQL)
@@ -1890,6 +1883,6 @@ max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3
 | 2026-07-22 | 1.5.0 | Векторные индексы в PostgreSQL, DuckDB-кеш, файловые → БД-секреты |
 | 2026-08-12 | 2.0.0 | `ApplicationContext` + сервисный слой, gateway — владелец кеша, JSONC, удаление навыков |
 | 2026-08-14 | 2.0.1 | Fix: gateway DuckDB-snapshot, build_vectors NameError, PostgresChannel ↔ nanobot 0.3.0; SQL: один файл = одна таблица (GP 6.5 only) |
-| 2026-08-17 | unreleased | Единый пул PG: DbLoggingService/AuditSyncService/cache_provider на `utils.db`, неподключённые воркеры уступают очередь подключённым; 860 тестов (см. `[Unreleased]` в CHANGELOG.md) |
+| 2026-08-17 | v2.2.0 | Единый пул PG: DbLoggingService/AuditSyncService/cache_provider на `utils.db`, неподключённые воркеры уступают очередь подключённым; `SessionFileRedirectHook`; schema-meta в кэше; dict-media; удалена write-функциональность `AuditSyncService`; 856 тестов (см. `[2.2.0]` в CHANGELOG.md) |
 
 Подробный changelog — в [CHANGELOG.md](CHANGELOG.md).

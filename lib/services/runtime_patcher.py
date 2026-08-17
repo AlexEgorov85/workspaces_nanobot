@@ -36,6 +36,18 @@ def _get(node: Any, *path: str, default: Any = None) -> Any:
     return node
 
 
+def _session_key_of(msg: Any) -> str:
+    """Вернуть session_key сообщения (``""`` если его нет/не строка).
+
+    Нужен для дренажа аудита конкретной сессии: разные сессии (вопросы)
+    обрабатываются конкурентно, и аудит одной сессии не должен попадать
+    в ответ другой. ``msg.session_key`` уже равен эффективному ключу —
+    ``_dispatch`` нормализует сообщение через ``session_key_override``.
+    """
+    key = getattr(msg, "session_key", None)
+    return key if isinstance(key, str) else ""
+
+
 class PatchReport:
     """Отчёт о применении патчей: что применено / пропущено / упало."""
 
@@ -207,9 +219,12 @@ class RuntimePatcher:
 
         ``_assemble_outbound`` (см. ``nanobot/agent/loop.py``) формирует
         финальный ``OutboundMessage``. Обёртка вызывает оригинальный метод,
-        затем ``tool_audit_hook.drain()`` (см.
+        затем ``tool_audit_hook.drain(session_key)`` (см.
         ``workspace/hooks/tool_audit_hook.py``) — он возвращает и
-        обнуляет накопленные за оборот записи вызовов инструментов.
+        обнуляет записи вызовов инструментов, накопленные за оборот
+        конкретной сессии. Сессия определяется из ``msg``: разные сессии
+        (вопросы) обрабатываются конкурентно, поэтому дренируется только
+        аудит текущего вопроса.
         Если записи есть — кладём их в ``result.metadata["_tool_audit"]``.
 
         Каналы и CLI читают этот ключ и рендерят записи в UI
@@ -233,7 +248,7 @@ class RuntimePatcher:
                 on_stream, turn_latency_ms=turn_latency_ms,
             )
             if result is not None:
-                entries = tool_audit_hook.drain()
+                entries = tool_audit_hook.drain(_session_key_of(msg))
                 if entries:
                     result.metadata["_tool_audit"] = entries
             return result

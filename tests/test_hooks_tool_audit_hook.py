@@ -46,9 +46,9 @@ def make_ev(status="ok", detail=""):
 class TestToolAuditHookInit:
     def test_empty_state(self, mock_nanobot_agent):
         hook = mock_nanobot_agent["ToolAuditHook"]()
-        assert hook._entries == []
-        assert hook._calls == []
-        assert hook._pending_start == 0
+        assert hook._entries == {}
+        assert hook._calls == {}
+        assert hook._pending_start == {}
 
 
 class TestBeforeExecuteTools:
@@ -62,11 +62,12 @@ class TestBeforeExecuteTools:
         import asyncio
         asyncio.run(hook.before_execute_tools(ctx))
 
-        assert len(hook._entries) == 2
-        assert hook._entries[0]["name"] == "read_file"
-        assert hook._entries[0]["status"] == "started"
-        assert hook._entries[0]["iteration"] == 1
-        assert hook._entries[1]["name"] == "write_file"
+        # ctx без session_key → bucket ""
+        assert len(hook._entries[""]) == 2
+        assert hook._entries[""][0]["name"] == "read_file"
+        assert hook._entries[""][0]["status"] == "started"
+        assert hook._entries[""][0]["iteration"] == 1
+        assert hook._entries[""][1]["name"] == "write_file"
 
     def test_captures_calls(self, mock_nanobot_agent):
         hook = mock_nanobot_agent["ToolAuditHook"]()
@@ -77,8 +78,8 @@ class TestBeforeExecuteTools:
         import asyncio
         asyncio.run(hook.before_execute_tools(ctx))
 
-        assert len(hook._calls) == 1
-        assert hook._calls[0]["name"] == "read"
+        assert len(hook._calls[""]) == 1
+        assert hook._calls[""][0]["name"] == "read"
 
     def test_empty_tool_calls(self, mock_nanobot_agent):
         hook = mock_nanobot_agent["ToolAuditHook"]()
@@ -89,7 +90,7 @@ class TestBeforeExecuteTools:
         import asyncio
         asyncio.run(hook.before_execute_tools(ctx))
 
-        assert hook._entries == []
+        assert hook._entries[""] == []
 
 
 class TestAfterIteration:
@@ -105,8 +106,8 @@ class TestAfterIteration:
         ctx.tool_events = [make_ev("ok", "file content")]
         asyncio.run(hook.after_iteration(ctx))
 
-        assert hook._entries[0]["status"] == "ok"
-        assert hook._entries[0]["result_preview"] == "file content"
+        assert hook._entries[""][0]["status"] == "ok"
+        assert hook._entries[""][0]["result_preview"] == "file content"
 
     def test_sets_error(self, mock_nanobot_agent):
         hook = mock_nanobot_agent["ToolAuditHook"]()
@@ -120,8 +121,8 @@ class TestAfterIteration:
         ctx.tool_events = [make_ev("error", "permission denied")]
         asyncio.run(hook.after_iteration(ctx))
 
-        assert hook._entries[0]["status"] == "error"
-        assert hook._entries[0]["error"] == "permission denied"
+        assert hook._entries[""][0]["status"] == "error"
+        assert hook._entries[""][0]["error"] == "permission denied"
 
     def test_truncates_long_preview(self, mock_nanobot_agent):
         hook = mock_nanobot_agent["ToolAuditHook"]()
@@ -136,7 +137,7 @@ class TestAfterIteration:
         ctx.tool_events = [make_ev("ok", long_detail)]
         asyncio.run(hook.after_iteration(ctx))
 
-        assert len(hook._entries[0]["result_preview"]) == 200
+        assert len(hook._entries[""][0]["result_preview"]) == 200
 
     def test_no_tool_events(self, mock_nanobot_agent):
         hook = mock_nanobot_agent["ToolAuditHook"]()
@@ -150,30 +151,38 @@ class TestAfterIteration:
         ctx.tool_events = []
         asyncio.run(hook.after_iteration(ctx))
 
-        assert hook._entries[0]["status"] == "started"
+        assert hook._entries[""][0]["status"] == "started"
 
 
 class TestDrain:
     def test_returns_and_clears_entries(self, mock_nanobot_agent):
         hook = mock_nanobot_agent["ToolAuditHook"]()
-        hook._entries = [{"name": "t1"}]
+        hook._entries = {"": [{"name": "t1"}]}
         entries = hook.drain()
         assert entries == [{"name": "t1"}]
-        assert hook._entries == []
+        assert hook._entries == {}
 
     def test_drain_empty(self, mock_nanobot_agent):
         hook = mock_nanobot_agent["ToolAuditHook"]()
         entries = hook.drain()
         assert entries == []
 
+    def test_drain_by_session(self, mock_nanobot_agent):
+        hook = mock_nanobot_agent["ToolAuditHook"]()
+        hook._entries = {"s1": [{"name": "a"}], "s2": [{"name": "b"}]}
+        assert hook.drain("s1") == [{"name": "a"}]
+        # s2 не затронута чужим дренажом
+        assert hook.drain("s2") == [{"name": "b"}]
+        assert hook._entries == {}
+
 
 class TestDrainCalls:
     def test_returns_and_clears_calls(self, mock_nanobot_agent):
         hook = mock_nanobot_agent["ToolAuditHook"]()
-        hook._calls = [{"name": "t1"}]
+        hook._calls = {"": [{"name": "t1"}]}
         calls = hook.drain_calls()
         assert calls == [{"name": "t1"}]
-        assert hook._calls == []
+        assert hook._calls == {}
 
     def test_drain_calls_empty(self, mock_nanobot_agent):
         hook = mock_nanobot_agent["ToolAuditHook"]()
@@ -203,6 +212,64 @@ class TestFullCycle:
         calls = hook.drain_calls()
         assert len(calls) == 1
         assert calls[0]["name"] == "search"
+
+
+class TestConcurrentSessionsIsolated:
+    """Регрессионный тест: конкурентные вопросы (разные сессии) не путают
+    ``_tool_audit`` — каждый дренируется отдельно."""
+
+    def test_drain_isolates_sessions(self, mock_nanobot_agent):
+        hook = mock_nanobot_agent["ToolAuditHook"]()
+        import asyncio
+
+        ctx_a = MagicMock()
+        ctx_a.session_key = "telegram:1"
+        ctx_a.tool_calls = [make_tc("read", arguments={"path": "/a"})]
+        ctx_a.iteration = 0
+
+        ctx_b = MagicMock()
+        ctx_b.session_key = "telegram:2"
+        ctx_b.tool_calls = [make_tc("write", arguments={"content": "b"})]
+        ctx_b.iteration = 0
+
+        asyncio.run(hook.before_execute_tools(ctx_a))
+        asyncio.run(hook.before_execute_tools(ctx_b))
+
+        # каждый оборот видит только свои вызовы
+        assert len(hook.drain("telegram:1")) == 1
+        assert hook.drain("telegram:1") == []
+        assert hook.drain("telegram:2")[0]["name"] == "write"
+        assert hook.drain("telegram:2") == []
+
+    def test_after_iteration_updates_only_own_session(self, mock_nanobot_agent):
+        hook = mock_nanobot_agent["ToolAuditHook"]()
+        import asyncio
+
+        ctx_a = MagicMock()
+        ctx_a.session_key = "s1"
+        ctx_a.tool_calls = [make_tc("read")]
+        ctx_a.iteration = 0
+
+        ctx_b = MagicMock()
+        ctx_b.session_key = "s2"
+        ctx_b.tool_calls = [make_tc("write")]
+        ctx_b.iteration = 1
+
+        asyncio.run(hook.before_execute_tools(ctx_a))
+        asyncio.run(hook.before_execute_tools(ctx_b))
+
+        ctx_a.tool_events = [make_ev("ok", "A result")]
+        ctx_b.tool_events = [make_ev("ok", "B result")]
+
+        asyncio.run(hook.after_iteration(ctx_a))
+        asyncio.run(hook.after_iteration(ctx_b))
+
+        entries_a = hook.drain("s1")
+        entries_b = hook.drain("s2")
+        assert entries_a[0]["result_preview"] == "A result"
+        assert entries_b[0]["result_preview"] == "B result"
+        assert entries_a[0]["iteration"] == 0
+        assert entries_b[0]["iteration"] == 1
 
 
 class TestFormatToolParams:
