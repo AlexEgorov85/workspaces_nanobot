@@ -252,8 +252,10 @@ def _check_llm_judge(expect: BenchExpect, response: str | None, hook: BenchmarkH
 def _call_llm_json(prompt: str) -> dict[str, Any] | None:
     """Вызов LLM через общий конфиг агента и парсинг JSON-ответа.
 
-    Использует ``resolve_llm_config`` — тот же провайдер/модель/ключ, что и
-    агент в бенчмарке. При ошибке сети или невалидном JSON возвращает None.
+    Делегирует единому клиенту ``lib.services.llm_client.call_llm_json`` —
+    тот же провайдер/модель/ключ, что и агент в бенчмарке
+    (``resolve_llm_config`` без переопределений). При ошибке сети или
+    невалидном JSON возвращает None.
 
     Args:
         prompt: Пользовательский промпт.
@@ -261,61 +263,18 @@ def _call_llm_json(prompt: str) -> dict[str, Any] | None:
     Returns:
         Словарь с ключами ``score``/``reason`` или None при ошибке.
     """
-    import json
-    import sys
+    from lib.services.llm_client import call_llm_json
 
-    import httpx
-
-    from lib.services.llm_config import resolve_llm_config
-
-    cfg = resolve_llm_config()
-    url = f"{cfg['api_base'].rstrip('/')}/chat/completions"
-    headers = {"Content-Type": "application/json"}
-    if cfg.get("api_key"):
-        headers["Authorization"] = f"Bearer {cfg['api_key']}"
-    payload = {
-        "model": cfg["model"],
-        "messages": [
+    return call_llm_json(
+        [
             {"role": "system", "content": "Отвечай строго в формате JSON."},
             {"role": "user", "content": prompt},
         ],
-        "max_tokens": 256,
-        "temperature": 0.0,
-    }
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            resp = client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception:
-        return None
-
-    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    if not content:
-        return None
-    # Очистка от markdown-обёрток ```json ... ``` и лишних символов
-    text = content.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-    text = text.strip()
-    try:
-        result = json.loads(text)
-    except json.JSONDecodeError:
-        # Пробуем вытащить JSON из фрагмента ответа
-        import re as _re
-
-        m = _re.search(r"\{.*\}", text, _re.DOTALL)
-        if not m:
-            return None
-        try:
-            result = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(result, dict):
-        return None
-    return result
+        max_tokens=256,
+        temperature=0.0,
+        max_retries=0,
+        timeout=60.0,
+    )
 
 
 def _resolve_path(file_path: str, workspace: str | Path | None) -> Path:
