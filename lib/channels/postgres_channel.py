@@ -155,18 +155,35 @@ class PostgresChannel(BaseChannel):
         sdir.mkdir(parents=True, exist_ok=True)
         return sdir
 
-    async def _embed_media_for_db(self, media: list[str]) -> list[str]:
+    async def _embed_media_for_db(self, media: list[str]) -> list[Any]:
         """Прочитать локальные файлы и закодировать как data URL для БД.
 
-        Каждый путь к локальному файлу заменяется на data URL вида
-        ``data:<mime>;base64,<содержимое>``.
-        HTTP/HTTPS/data URL передаются как есть.
+        Единый формат хранения медиа в БД — dict-запись
+        ``{"filename": "<имя>", "data": "data:<mime>;base64,<содержимое>"}``
+        для каждого встраиваемого файла (см. ``_decode_media_from_db``).
+
+        Правила:
+          — локальный файл читается и кодируется в dict ``filename/data``
+            с оригинальным именем файла;
+          — уже готовый data URL оборачивается в тот же dict-формат
+            (имя генерируется из MIME-типа);
+          — HTTP/HTTPS-ссылки передаются как есть — это внешние ссылки,
+            а не встраиваемое содержимое.
         """
         if not media:
             return media
-        embedded: list[str] = []
+        embedded: list[Any] = []
         for path in media:
-            if path.startswith(("http://", "https://", "data:")):
+            if path.startswith("data:"):
+                base = "file"
+                mime_match = re.match(r"^data:([^;,]+)", path)
+                if mime_match:
+                    ext = mimetypes.guess_extension(mime_match.group(1)) or ""
+                    if ext:
+                        base = f"file{ext}"
+                embedded.append({"filename": base, "data": path})
+                continue
+            if path.startswith(("http://", "https://")):
                 embedded.append(path)
                 continue
             try:
@@ -180,7 +197,10 @@ class PostgresChannel(BaseChannel):
                 if mime_type is None:
                     mime_type = "application/octet-stream"
                 b64 = base64.b64encode(raw).decode("ascii")
-                embedded.append(f"data:{mime_type};base64,{b64}")
+                embedded.append({
+                    "filename": p.name,
+                    "data": f"data:{mime_type};base64,{b64}",
+                })
             except Exception:
                 self.logger.exception("Failed to encode media file: {}", path)
                 embedded.append(path)

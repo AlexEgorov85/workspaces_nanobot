@@ -283,11 +283,22 @@ class TestPostgresChannelMedia:
         assert result == ["http://example.com/img.png"]
 
     @pytest.mark.asyncio
-    async def test_embed_data_passthrough(self, mock_db_and_psycopg):
+    async def test_embed_data_wraps_in_dict(self, mock_db_and_psycopg):
         PostgresChannel, _, _ = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, None))
         result = await ch._embed_media_for_db(["data:image/png;base64,abc"])
-        assert result == ["data:image/png;base64,abc"]
+        assert result == [{"filename": "file.png", "data": "data:image/png;base64,abc"}]
+
+    @pytest.mark.asyncio
+    async def test_embed_local_file_wraps_in_dict(self, mock_db_and_psycopg, tmp_path):
+        PostgresChannel, _, _ = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, None))
+        f = tmp_path / "report.pdf"
+        f.write_bytes(b"%PDF-1.4 content")
+        result = await ch._embed_media_for_db([str(f)])
+        assert isinstance(result[0], dict)
+        assert result[0]["filename"] == "report.pdf"
+        assert result[0]["data"].startswith("data:application/pdf;base64,")
 
     @pytest.mark.asyncio
     async def test_embed_empty(self, mock_db_and_psycopg):

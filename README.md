@@ -366,7 +366,7 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 
 ### 6. PostgresChannel (`lib/channels/postgres_channel.py`)
 
-Канал через таблицу `agent_conversation_messages`: поллинг новых сообщений (`status='pending'`), потоковая запись reasoning в `metadata.reasoning`, автоматическая разблокировка зависших сообщений (retry до 3 раз), медиа-файлы через data URL.
+Канал через таблицу `agent_conversation_messages`: поллинг новых сообщений (`status='pending'`), потоковая запись reasoning в `metadata.reasoning`, автоматическая разблокировка зависших сообщений (retry до 3 раз), медиа-файлы в едином формате `{"filename", "data"}` (data URL).
 
 **Полная документация:** [`lib/channels/README.md`](lib/channels/README.md) — диаграмма потоков, DDL колонок, конфигурация, инструкция «как добавить новый канал».
 

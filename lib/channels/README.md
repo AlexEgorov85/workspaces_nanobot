@@ -32,7 +32,7 @@
 | **Поллинг** | `_poll_loop` опрашивает БД каждые `poll_interval` секунд. Берёт самое старое `pending`-сообщение через `UPDATE ... RETURNING` (атомарный захват) |
 | **Параллельность** | `max_concurrent` (asyncio.Semaphore). Пока сообщение обрабатывается, другие из того же `chat_id` откладываются |
 | **Reasoning** | Чанки рассуждений буферизируются и сбрасываются в `metadata.reasoning` каждые `flush_interval` секунд. Race condition исключается через `asyncio.Lock` |
-| **Медиа** | Локальные файлы кодируются в `data:<mime>;base64,<...>` для хранения в БД; при загрузке декодируются обратно в `data_store/cache/sessions/` |
+| **Медиа** | Каждый файл кодируется в dict `{"filename": "<имя>", "data": "data:<mime>;base64,<...>"}` и сохраняется в `media`. При загрузке декодируется обратно в `data_store/cache/sessions/`. HTTP/HTTPS-ссылки остаются строками |
 | **Unstick** | Сообщения, зависшие в `processing` дольше `processing_timeout`, возвращаются в `pending` (до 3 retries), затем — `failed` |
 | **Placeholder** | При захвате сообщения сразу создаётся assistant-запись (`status=processing`), чтобы Streamlit мог начать опрос до завершения генерации |
 
@@ -76,7 +76,7 @@
 | `user_id` | TEXT | ID отправителя |
 | `role` | TEXT | `user` / `assistant` |
 | `content` | TEXT | Текст сообщения |
-| `media` | JSONB | Массив data URL / ссылок |
+| `media` | JSONB | Массив вложений `{"filename": ..., "data": "data:..."}` (HTTP/HTTPS-ссылки — строкой) |
 | `buttons` | JSONB | Массив кнопок (только assistant) |
 | `metadata` | JSONB | Reasoning, retry_count, и т.д. |
 | `reply_to` | UUID | Ссылка на parent-сообщение |
