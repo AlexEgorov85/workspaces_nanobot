@@ -206,15 +206,14 @@ class TestPostgresChannelReleaseSlot:
 
     def test_releases_slot(self, mock_db_and_psycopg):
         ch = _make_channel(mock_db_and_psycopg)
-        ch._inflight = {"msg-1"}
+        ch.exchange.add_inflight("msg-1")
         ch._chat_inflight = {"chat-1"}
         ch._msg_chat = {"msg-1": "chat-1"}
         # Bypass semaphore for testing
-        ch._semaphore = MagicMock()
-        ch._semaphore.release = MagicMock()
+        ch.exchange._semaphore.release = MagicMock()
 
         ch._release_slot("msg-1")
-        assert "msg-1" not in ch._inflight
+        assert "msg-1" not in ch.exchange.inflight
         assert "chat-1" not in ch._chat_inflight
 
     def test_idempotent(self, mock_db_and_psycopg):
@@ -359,25 +358,39 @@ class TestPostgresChannelMedia:
         PostgresChannel, _, _ = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, None))
         result = await ch._embed_media_for_db(["http://example.com/img.png"])
-        assert result == ["http://example.com/img.png"]
+        assert result == [{
+            "filename": "",
+            "file_id": "http://example.com/img.png",
+            "mime_type": "",
+            "file_size": 0,
+        }]
 
     @pytest.mark.asyncio
     async def test_embed_data_wraps_in_dict(self, mock_db_and_psycopg):
         PostgresChannel, _, _ = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, None))
-        result = await ch._embed_media_for_db(["data:image/png;base64,abc"])
-        assert result == [{"filename": "file.png", "data": "data:image/png;base64,abc"}]
+        # base64("ab") = "YWI=" (padded, 2 bytes).
+        result = await ch._embed_media_for_db(["data:image/png;base64,YWI="])
+        assert result == [{
+            "filename": "file.png",
+            "file_id": "data:image/png;base64,YWI=",
+            "mime_type": "image/png",
+            "file_size": 2,
+        }]
 
     @pytest.mark.asyncio
     async def test_embed_local_file_wraps_in_dict(self, mock_db_and_psycopg, tmp_path):
         PostgresChannel, _, _ = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, None))
+        raw = b"%PDF-1.4 content"
         f = tmp_path / "report.pdf"
-        f.write_bytes(b"%PDF-1.4 content")
+        f.write_bytes(raw)
         result = await ch._embed_media_for_db([str(f)])
         assert isinstance(result[0], dict)
         assert result[0]["filename"] == "report.pdf"
-        assert result[0]["data"].startswith("data:application/pdf;base64,")
+        assert result[0]["file_id"].startswith("data:application/pdf;base64,")
+        assert result[0]["mime_type"] == "application/pdf"
+        assert result[0]["file_size"] == len(raw)
 
     @pytest.mark.asyncio
     async def test_embed_empty(self, mock_db_and_psycopg):

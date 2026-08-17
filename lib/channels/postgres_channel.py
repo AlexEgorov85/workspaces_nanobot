@@ -38,6 +38,12 @@ from nanobot.channels.base import BaseChannel
 from utils.db import async_fetchval as fetchval, async_execute as execute, async_fetchone as fetchone, async_transaction as transaction, async_fetch as fetch
 from utils.session_file_store import SessionFileStore
 from utils.jsonb import decode_jsonb as _decode_jsonb
+from utils.media import (
+    serialize as media_serialize,
+    deserialize as media_deserialize,
+    resolve_paths_and_hints as media_resolve_paths_and_hints,
+)
+from lib.channels.message_exchange import MessageExchange
 from lib.utils.outbound_meta import is_dropped
 from psycopg2.extras import Json
 
@@ -107,13 +113,17 @@ class PostgresChannel(BaseChannel):
         self._flush_interval: float = float(_get("flush_interval", 2.0))
 
         # ---- параллельность ----
-        # максимум одновременных сообщений в обработке у агента
         self._max_concurrent: int = int(_get("max_concurrent", 1))
-        self._semaphore = asyncio.Semaphore(self._max_concurrent)
-        # user_msg_id сообщений, которые сейчас в обработке
-        self._inflight: set[str] = set()
+        self._error_backoff_sec: float = float(_get("error_backoff_sec", 1.0))
+        # Общий движок обмена: поллинг, конкуренция, кодек media.
+        self.exchange = MessageExchange(
+            self,
+            max_concurrent=self._max_concurrent,
+            poll_interval=self._poll_interval,
+            error_backoff=self._error_backoff_sec,
+        )
         # chat_id, которые сейчас заняты (чтобы не диспатчить второе
-        # сообщение в тот же чат, пока первое не 完成)
+        # сообщение в тот же чат, пока первое не завершено)
         self._chat_inflight: set[str] = set()
 
         # ---- единое хранилище файлов сессии ----
@@ -132,7 +142,6 @@ class PostgresChannel(BaseChannel):
         self._msg_chat: dict[str, str] = {}
 
         # ---- стриминг (потоковая передача ответа) ----
-        self._poll_task: asyncio.Task | None = None
         # stream_id → накопленный текст (для send_delta)
         self._stream_buffers: dict[str, str] = {}
 
@@ -152,101 +161,24 @@ class PostgresChannel(BaseChannel):
     # ------------------------------------------------------------------
 
     async def _embed_media_for_db(self, media: list[str]) -> list[Any]:
-        """Прочитать локальные файлы и закодировать как data URL для БД.
+        """Прочитать локальные файлы и закодировать для БД (AW-формат).
 
-        Единый формат хранения медиа в БД — dict-запись
-        ``{"filename": "<имя>", "data": "data:<mime>;base64,<содержимое>"}``
-        для каждого встраиваемого файла (см. ``_decode_media_from_db``).
-
-        Правила:
-          — локальный файл читается и кодируется в dict ``filename/data``
-            с оригинальным именем файла;
-          — уже готовый data URL оборачивается в тот же dict-формат
-            (имя генерируется из MIME-типа);
-          — HTTP/HTTPS-ссылки передаются как есть — это внешние ссылки,
-            а не встраиваемое содержимое.
+        Делегирует общему ``utils.media.serialize`` — единая схема
+        ``{"filename", "file_id", "mime_type", "file_size"}`` для всех каналов.
         """
-        if not media:
-            return media
-        embedded: list[Any] = []
-        for path in media:
-            if path.startswith("data:"):
-                base = "file"
-                mime_match = re.match(r"^data:([^;,]+)", path)
-                if mime_match:
-                    ext = mimetypes.guess_extension(mime_match.group(1)) or ""
-                    if ext:
-                        base = f"file{ext}"
-                embedded.append({"filename": base, "data": path})
-                continue
-            if path.startswith(("http://", "https://")):
-                embedded.append(path)
-                continue
-            try:
-                p = Path(path).expanduser()
-                if not p.is_file():
-                    self.logger.warning("Media file not found, keeping path: {}", path)
-                    embedded.append(path)
-                    continue
-                raw = p.read_bytes()
-                mime_type, _ = mimetypes.guess_type(str(p))
-                if mime_type is None:
-                    mime_type = "application/octet-stream"
-                b64 = base64.b64encode(raw).decode("ascii")
-                embedded.append({
-                    "filename": p.name,
-                    "data": f"data:{mime_type};base64,{b64}",
-                })
-            except Exception:
-                self.logger.exception("Failed to encode media file: {}", path)
-                embedded.append(path)
-        return embedded
+        return media_serialize(media)
 
     async def _decode_media_from_db(
         self, media: list[Any], session_key: str = "default"
     ) -> list[Any]:
-        """Декодировать data URL из БД обратно в локальные файлы сессии.
+        """Декодировать storage-медиа обратно в локальные файлы сессии.
 
-        Поддерживаемые элементы списка ``media``:
-          — строка ``data:...;base64,...`` → строка с путём к файлу сессии
-          — dict ``{"filename": "отчёт.pdf", "data": "data:..."}`` → dict
-            ``{"filename": "отчёт.pdf", "path": "..."}`` (оригинальное имя
-            сохраняется, чтобы агент знал, что приложил пользователь)
-          — всё остальное (http-ссылки, локальные пути) → как есть
-
-        Файлы пишутся через общий ``SessionFileStore`` →
+        Делегирует общему ``utils.media.deserialize`` — терпит legacy
+        ``{filename, data}``, новый AW ``{filename, file_id, ...}`` и
+        ``{filename, path}``. Файлы пишутся через ``SessionFileStore`` →
         ``cache/sessions/{session_key}/attachments/{uuid}_{имя}``.
         """
-        if not media:
-            return media
-        resolved: list[Any] = []
-        for entry in media:
-            try:
-                if isinstance(entry, dict):
-                    data = entry.get("data") or entry.get("path") or ""
-                    if not isinstance(data, str) or not data.startswith("data:"):
-                        resolved.append(entry)
-                        continue
-                    info = self._file_store.save_attachment(
-                        session_key, data, filename=entry.get("filename") or None,
-                    )
-                    if not info:
-                        resolved.append(entry)
-                        continue
-                    resolved.append({"filename": info["filename"], "path": info["path"]})
-                    continue
-                if not isinstance(entry, str) or not entry.startswith("data:"):
-                    resolved.append(entry)
-                    continue
-                info = self._file_store.save_attachment(session_key, entry)
-                if not info:
-                    resolved.append(entry)
-                    continue
-                resolved.append(info["path"])
-            except Exception:
-                self.logger.exception("Failed to decode media data URL")
-                resolved.append(entry)
-        return resolved
+        return media_deserialize(media, self._file_store, session_key)
 
     @staticmethod
     def _resolve_media_paths_and_hints(
@@ -254,33 +186,22 @@ class PostgresChannel(BaseChannel):
     ) -> tuple[list[str], list[str]]:
         """Из декодированных media (строки-пути или dict filename/path)
         извлечь пути для агента и подсказки «файл лежит там-то»."""
-        media_paths: list[str] = []
-        hints: list[str] = []
-        for entry in media:
-            if isinstance(entry, dict):
-                path = str(entry.get("path") or "")
-                name = str(entry.get("filename") or (Path(path).name if path else ""))
-            else:
-                path = str(entry) if entry else ""
-                name = Path(path).name if path else ""
-            if not path:
-                continue
-            media_paths.append(path)
-            if name:
-                hints.append(f"[Attachment: {name} (saved at {path})]")
-            else:
-                hints.append(f"[Attachment: saved at {path}]")
-        return media_paths, hints
+        return media_resolve_paths_and_hints(media)
 
     # ------------------------------------------------------------------
     # Жизненный цикл (start / stop)
     # ------------------------------------------------------------------
 
+    @property
+    def file_store(self) -> SessionFileStore:
+        """Хранилище вложений для ``MessageExchange`` (кодек media)."""
+        return self._file_store
+
     async def start(self) -> None:
         """Запустить циклы опроса БД и сброса рассуждений."""
         self._running = True
         self._flush_task = asyncio.create_task(self._flush_reasoning_loop())
-        self._poll_task = asyncio.create_task(self._poll_loop())
+        await self.exchange.start()
         self.logger.info(
             "Polling {} every {}s (processing timeout {}s)",
             self._fq_table,
@@ -291,15 +212,12 @@ class PostgresChannel(BaseChannel):
     async def stop(self) -> None:
         """Остановить все циклы и сбросить оставшиеся рассуждения."""
         self._running = False
+        await self.exchange.stop()
         await self._flush_reasoning()
         if self._flush_task:
             self._flush_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._flush_task
-        if self._poll_task:
-            self._poll_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._poll_task
         # db — глобальный singleton из utils.db, закрывается при выходе
         # из процесса. Явно не закрываем, чтобы не сломать другие каналы.
 
@@ -354,25 +272,21 @@ class PostgresChannel(BaseChannel):
     # Цикл опроса БД
     # ------------------------------------------------------------------
 
-    async def _poll_loop(self) -> None:
-        """Фоновая задача: бесконечно опрашивает БД.
+    async def poll_inbound(self, exchange: MessageExchange) -> bool:
+        """Хук транспорта для ``MessageExchange``: берет новое сообщение из БД.
 
-        На каждой итерации:
+        Каждая итерация:
           1. ``_unstick_processing`` — разблокировать зависшие сообщения
           2. Если есть свободный слот → ``_poll_once`` — взять новое сообщение
 
-        Ошибки логируются, цикл продолжается.
+        Возвращает True, если сообщение обработано (тогда движок опрашивает
+        следующее без ожидания).
         """
-        while self._running:
-            try:
-                await self._unstick_processing()
-                if len(self._inflight) < self._max_concurrent:
-                    await self._poll_once()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error("Poll error: {}", e)
-            await asyncio.sleep(self._poll_interval)
+        await self._unstick_processing()
+        if not exchange.is_slot_free():
+            return False
+        had = await self._poll_once(exchange)
+        return bool(had)
 
     async def _unstick_processing(self) -> None:
         """Освободить сообщения, зависшие в ``processing`` дольше таймаута.
@@ -453,17 +367,19 @@ class PostgresChannel(BaseChannel):
                 timeout_s,
             )
 
-    async def _poll_once(self) -> None:
+    async def _poll_once(self, exchange: MessageExchange) -> bool:
         """Забрать самое старое pending-сообщение и отправить агенту.
 
         Алгоритм:
           1. UPDATE ... RETURNING — атомарно захватываем сообщение
           2. Проверяем, не занят ли chat_id (chat_inflight)
           3. Создаём assistant-placeholder (чтобы web-клиент мог опрашивать)
-          4. Захватываем слот семафора → _handle_message
+          4. Захватываем слот (exchange) → _handle_message
 
         Если из этого chat_id уже есть активное сообщение, возвращаем
         статус в 'pending' — не диспатчим второе до завершения первого.
+
+        Возвращает True, если сообщение взято в обработку.
         """
         row = await fetchone(
             f"""
@@ -480,7 +396,7 @@ class PostgresChannel(BaseChannel):
             """
         )
         if row is None:
-            return  # нет новых сообщений
+            return False  # нет новых сообщений
 
         user_msg_id = str(row["id"])
         chat_id = str(row["chat_id"]) if row["chat_id"] else str(row["user_id"])
@@ -519,8 +435,8 @@ class PostgresChannel(BaseChannel):
         # Создаём assistant-placeholder, чтобы Streamlit мог начать опрос
         assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id)
 
-        await self._semaphore.acquire()
-        self._inflight.add(user_msg_id)
+        await exchange.acquire_slot()
+        exchange.add_inflight(user_msg_id)
         self._chat_inflight.add(chat_id)
         self._msg_chat[user_msg_id] = chat_id
 
@@ -541,6 +457,7 @@ class PostgresChannel(BaseChannel):
         except Exception:
             self.logger.exception("Failed to dispatch user message {}", user_msg_id)
             await self._mark_failed(user_msg_id, assistant_msg_id, "dispatch_error")
+        return True
 
     async def _insert_assistant_message(self, user_msg_id: str, chat_id: str) -> str:
         """Создать assistant-заглушку (status='processing') и сохранить её id.
@@ -715,7 +632,7 @@ class PostgresChannel(BaseChannel):
                 # защита от утечки _msg_ctx: удаляем только те записи,
                 # которые уже не в полёте (не в _inflight)
                 if len(self._msg_ctx) > 100:
-                    stale = [k for k in self._msg_ctx if k not in self._inflight]
+                    stale = [k for k in self._msg_ctx if k not in self.exchange.inflight]
                     for k in stale:
                         self._msg_ctx.pop(k, None)
                 ctx = self._msg_ctx.setdefault(msg_id, {"reasoning_buf": []})
@@ -880,7 +797,7 @@ class PostgresChannel(BaseChannel):
         """Освободить слот параллельности для указанного сообщения.
 
         Идемпотентен: можно вызывать多次 для одного id —
-        второй вызов будет no-op (проверка ``user_msg_id not in _inflight``).
+        второй вызов будет no-op (проверка в ``exchange.release_slot``).
 
         Дополнительно:
           — удаляет chat_id из ``_chat_inflight`` (если был)
@@ -888,10 +805,7 @@ class PostgresChannel(BaseChannel):
         """
         if not user_msg_id:
             return
-        if user_msg_id not in self._inflight:
-            return
-        self._inflight.discard(user_msg_id)
-        self._semaphore.release()
+        self.exchange.release_slot(user_msg_id)
         chat_id = self._msg_chat.pop(user_msg_id, None)
         if chat_id:
             self._chat_inflight.discard(chat_id)

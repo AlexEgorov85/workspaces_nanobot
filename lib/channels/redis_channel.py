@@ -26,7 +26,8 @@ Redis-канал для nanobot.
     sender_id     (обяз) — ID отправителя
     chat_id       (обяз) — ID чата/диалога
     content             — текст сообщения (строка)
-    media               — массив URL медиафайлов
+    media               — вложения: массив (строки-пути/URL на входе;
+                           принимает и dict-схему AW на чтение)
     metadata            — произвольный JSON-объект
     session_key_override — если указан, сессия привязывается к этому
                            ключу вместо "{channel}:{chat_id}"
@@ -55,7 +56,7 @@ Redis-канал для nanobot.
     chat_id     — ID чата (копия из запроса)
     content     — текст ответа
     reply_to    — message_id из запроса (если был)
-    media       — массив URL медиафайлов
+    media       — вложения в AW-формате (list[dict]: filename/file_id/mime_type/file_size)
     metadata    — служебные данные (reasoning, tool_events и т.д.)
     buttons     — массив массивов кнопок (см. OutboundMessage)
 
@@ -87,6 +88,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -94,7 +96,21 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from utils.session_file_store import SessionFileStore
+from utils.media import serialize as media_serialize
+from lib.channels.message_exchange import MessageExchange
 from lib.utils.outbound_meta import is_dropped
+
+_WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent / "workspace"
+
+
+def _resolve_sfs_base(media_cache_dir: str | Path) -> Path:
+    """Преобразовать ``channels.redis.media_cache_dir`` в ``base_dir`` для
+    ``SessionFileStore`` (колонка media → cache/sessions/{key}/attachments)."""
+    p = Path(media_cache_dir)
+    if not p.is_absolute():
+        p = _WORKSPACE_DIR / media_cache_dir
+    return p.parent if p.name == "sessions" else p
 
 
 class RedisChannel(BaseChannel):
@@ -129,6 +145,12 @@ class RedisChannel(BaseChannel):
         self._db: int = int(_get("db", 0))
         self._password: str | None = _get("password", None)
 
+        # ---- медиа-файлы (вложения декодируются в cache/sessions/{key}) ----
+        media_cache_dir = _get("media_cache_dir", "data_store/cache/sessions")
+        self._file_store = SessionFileStore(
+            _resolve_sfs_base(media_cache_dir), attachments_subdir="attachments"
+        )
+
         # ---- Ключи Redis ----
         # inbox — список, откуда канал читает входящие (BRPOP)
         self._incoming_key: str = _get("incoming_key", "nanobot:inbox")
@@ -141,37 +163,43 @@ class RedisChannel(BaseChannel):
         self._error_backoff_sec: float = float(_get("error_backoff_sec", 1.0))
         self._reply_to_max_size: int = int(_get("reply_to_max_size", 10000))
         self._reply_to_trim_to: int = int(_get("reply_to_trim_to", 5000))
-        self._semaphore = asyncio.Semaphore(self._max_concurrent)
 
         # ---- Состояние ----
-        self._inflight: set[str] = set()
+        # Общий движок обмена: поллинг, конкуренция, кодек media.
+        self.exchange = MessageExchange(
+            self,
+            max_concurrent=self._max_concurrent,
+            poll_interval=self._poll_timeout,
+            error_backoff=self._error_backoff_sec,
+        )
         # хранит message_id последнего входящего сообщения на chat_id
         # используется для заполнения reply_to в ответе
         self._reply_to_map: dict[str, str | None] = {}
         self._redis: Any = None
-        self._poll_task: asyncio.Task | None = None
 
     # ══════════════════════════════════════════════════════════════════
     # Жизненный цикл
     # ══════════════════════════════════════════════════════════════════
 
+    @property
+    def file_store(self):
+        """Хранилище вложений для ``MessageExchange`` (кодек media)."""
+        return self._file_store
+
     async def start(self) -> None:
-        """Подключиться к Redis и запустить цикл опроса."""
+        """Подключиться к Redis и запустить общий движок обмена."""
         self._running = True
         self._redis = await self._connect()
-        self._poll_task = asyncio.create_task(self._poll_loop())
+        await self.exchange.start()
         self.logger.info(
             "Redis channel started: {}:{}/{} inbox={}",
             self._host, self._port, self._db, self._incoming_key,
         )
 
     async def stop(self) -> None:
-        """Остановить опрос и закрыть соединение с Redis."""
+        """Остановить общий движок обмена и закрыть соединение с Redis."""
         self._running = False
-        if self._poll_task:
-            self._poll_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._poll_task
+        await self.exchange.stop()
         if self._redis:
             await self._redis.aclose()
             self._redis = None
@@ -191,35 +219,20 @@ class RedisChannel(BaseChannel):
         )
 
     # ══════════════════════════════════════════════════════════════════
-    # Цикл опроса входящих сообщений
+    # Хук транспорта для MessageExchange (поллинг входящих)
     # ══════════════════════════════════════════════════════════════════
 
-    async def _poll_loop(self) -> None:
+    async def poll_inbound(self, exchange) -> bool:
         """
-        Бесконечный цикл: ждёт новые сообщения из Redis и диспатчит их
-        агенту. Уважает max_concurrent — не берёт новое сообщение, пока
-        не освободится слот.
-        """
-        while self._running:
-            try:
-                if len(self._inflight) < self._max_concurrent:
-                    await self._poll_once()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error("Redis poll error: {}", e)
-                await asyncio.sleep(self._error_backoff_sec)
-
-    async def _poll_once(self) -> None:
-        """
-        Прочитать одно сообщение из Redis (BRPOP), распарсить JSON
-        и отправить агенту через _handle_message.
+        Забрать одно сообщение из Redis (BRPOP), распарсить JSON,
+        декодировать вложения и отправить агенту через _handle_message.
+        Возвращает True, если сообщение обработано.
         """
         result = await self._redis.brpop(
             self._incoming_key, timeout=int(self._poll_timeout)
         )
         if result is None:
-            return  # таймаут — ничего не пришло
+            return False  # таймаут — ничего не пришло
 
         _key, raw = result
 
@@ -228,13 +241,13 @@ class RedisChannel(BaseChannel):
             data = json.loads(raw)
         except json.JSONDecodeError as e:
             self.logger.warning("Invalid JSON in Redis inbox: {}", e)
-            return
+            return False
 
         # ---- извлечение полей (все поля InboundMessage) ----
         sender_id = str(data.get("sender_id", "unknown"))
         chat_id = str(data.get("chat_id", sender_id))
         content = data.get("content", "")
-        media: list[str] = data.get("media", [])
+        raw_media: Any = data.get("media", [])
         raw_meta = data.get("metadata", {})
         session_key_override: str | None = data.get("session_key_override")
         # message_id сохраняется для подстановки в reply_to ответа
@@ -244,10 +257,19 @@ class RedisChannel(BaseChannel):
         self._reply_to_map[chat_id] = message_id if message_id else data.get("id")
 
         # ---- типизация ----
-        if not isinstance(media, list):
-            media = []
+        if not isinstance(raw_media, list):
+            raw_media = []
         if not isinstance(raw_meta, dict):
             raw_meta = {}
+
+        # ---- декодирование вложений (единый кодек) ----
+        session_key = session_key_override or f"redis:{chat_id}"
+        media = exchange.decode(raw_media, session_key)
+        media_paths, hints = exchange.resolve(media)
+        if hints:
+            suffix = "\n".join(hints)
+            content = f"{content}\n\n{suffix}" if content else suffix
+        media = media_paths
 
         # ---- метаданные для агента ----
         meta: dict[str, Any] = {
@@ -256,8 +278,8 @@ class RedisChannel(BaseChannel):
         }
 
         # ---- захват слота (concurrency) ----
-        await self._semaphore.acquire()
-        self._inflight.add(chat_id)
+        await exchange.acquire_slot()
+        exchange.add_inflight(chat_id)
 
         try:
             await self._handle_message(
@@ -272,11 +294,12 @@ class RedisChannel(BaseChannel):
             self.logger.exception("Failed to dispatch Redis message from {}", sender_id)
             self._reply_to_map.pop(chat_id, None)
         finally:
-            self._inflight.discard(chat_id)
-            self._semaphore.release()
+            exchange.discard_inflight(chat_id)
+            exchange.release_slot()
             if len(self._reply_to_map) > self._reply_to_max_size:
                 while len(self._reply_to_map) > self._reply_to_trim_to:
                     self._reply_to_map.pop(next(iter(self._reply_to_map)), None)
+        return True
 
     # ══════════════════════════════════════════════════════════════════
     # Отправка ответа (OutboundMessage → Redis)
@@ -304,12 +327,15 @@ class RedisChannel(BaseChannel):
         reply_to = msg.reply_to or self._reply_to_map.pop(msg.chat_id, None)
 
         # ---- сборка payload (поля OutboundMessage) ----
+        # Вложения сериализуются единым кодеком в AW-формат (как у
+        # postgres_channel: {"filename","file_id","mime_type","file_size"}),
+        # чтобы потребитель видел превью/скачивание, а не «голые» пути.
         payload = {
             "channel": msg.channel,
             "chat_id": msg.chat_id,
             "content": msg.content,
             "reply_to": reply_to,
-            "media": msg.media or [],
+            "media": media_serialize(msg.media or []),
             "metadata": meta,
             "buttons": msg.buttons or [],
         }
@@ -346,6 +372,7 @@ class RedisChannel(BaseChannel):
             "port": 6379,
             "db": 0,
             "password": None,
+            "media_cache_dir": "data_store/cache/sessions",
             "incoming_key": "nanobot:inbox",
             "outgoing_prefix": "nanobot:outbox",
             "poll_timeout": 5.0,

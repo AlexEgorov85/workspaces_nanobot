@@ -32,7 +32,7 @@ class TestRedisChannelInit:
         assert ch._outgoing_prefix == "nanobot:outbox"
         assert ch._max_concurrent == 1
         assert ch._poll_timeout == 1.0
-        assert ch._semaphore._value == 1
+        assert ch.exchange._max_concurrent == 1
 
     def test_custom_config(self):
         ch = _make_channel(
@@ -207,14 +207,14 @@ class TestRedisChannelPollOnce:
         ch = _make_channel()
         ch._redis = AsyncMock()
         ch._redis.brpop.return_value = None
-        await ch._poll_once()  # should not raise
+        await ch.poll_inbound(ch.exchange)  # should not raise
 
     @pytest.mark.asyncio
     async def test_invalid_json_ignored(self):
         ch = _make_channel()
         ch._redis = AsyncMock()
         ch._redis.brpop.return_value = ("nanobot:inbox", "not-json")
-        await ch._poll_once()  # should not raise
+        await ch.poll_inbound(ch.exchange)  # should not raise
 
     @pytest.mark.asyncio
     async def test_dispatches_valid_message(self):
@@ -226,7 +226,7 @@ class TestRedisChannelPollOnce:
         )
         ch._handle_message = AsyncMock()
 
-        await ch._poll_once()
+        await ch.poll_inbound(ch.exchange)
         ch._handle_message.assert_called_once()
         # reply_to is set before dispatch and preserved afterwards
         assert ch._reply_to_map.get("c1") == "m1"
@@ -241,7 +241,7 @@ class TestRedisChannelPollOnce:
         )
         ch._handle_message = AsyncMock()
 
-        await ch._poll_once()
+        await ch.poll_inbound(ch.exchange)
         _, kwargs = ch._handle_message.call_args
         assert kwargs["session_key"] == "custom-session"
 
@@ -255,7 +255,7 @@ class TestRedisChannelPollOnce:
         )
         ch._handle_message = AsyncMock(side_effect=Exception("Dispatch error"))
 
-        await ch._poll_once()  # should not raise
+        await ch.poll_inbound(ch.exchange)  # should not raise
 
     @pytest.mark.asyncio
     async def test_media_list_validation(self):
@@ -267,7 +267,7 @@ class TestRedisChannelPollOnce:
         )
         ch._handle_message = AsyncMock()
 
-        await ch._poll_once()  # should not raise, media coerced to []
+        await ch.poll_inbound(ch.exchange)  # should not raise, media coerced to []
 
     @pytest.mark.asyncio
     async def test_metadata_is_dict(self):
@@ -279,7 +279,7 @@ class TestRedisChannelPollOnce:
         )
         ch._handle_message = AsyncMock()
 
-        await ch._poll_once()  # should not raise
+        await ch.poll_inbound(ch.exchange)  # should not raise
 
     @pytest.mark.asyncio
     async def test_reply_to_map_cleanup(self):
@@ -295,6 +295,6 @@ class TestRedisChannelPollOnce:
         for i in range(10005):
             ch._reply_to_map[f"chat-{i}"] = f"msg-{i}"
 
-        await ch._poll_once()
+        await ch.poll_inbound(ch.exchange)
         # Should have cleaned up to 5000 entries
         assert len(ch._reply_to_map) <= 5001  # 5000 + the new one

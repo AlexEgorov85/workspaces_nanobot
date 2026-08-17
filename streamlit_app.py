@@ -20,6 +20,9 @@ from utils.db import configure, fetch, fetchone, execute
 from utils.session_file_store import SessionFileStore
 from utils.jsonb import decode_jsonb as _decode_jsonb
 from utils.jsonb import decode_json_list as _decode_media_list
+from utils.media import serialize as _media_serialize
+from utils.media import read_for_ui as _media_read_for_ui
+from utils.media import entry_from_data_url as _media_entry_from_data_url
 from config import SETTINGS
 
 _pg = (getattr(SETTINGS, "channels", {}) or {}).get("postgres", {})
@@ -291,10 +294,9 @@ for entry in st.session_state.messages:
                         # Просто показываем как текст (URL или имя)
                         st.markdown(f"📎 `{media_item}`")
                 elif isinstance(media_item, dict):
-                    # Dict с filename/path/data
-                    filename = media_item.get("filename", "file")
-                    data_url = media_item.get("data", "")
-                    path = media_item.get("path", "")
+                    # Толерантный читатель: file_id (новый AW) → data (legacy)
+                    # → path (после декодинга). Схему UI здесь не знает.
+                    data_url, path, filename = _media_read_for_ui(media_item)
                     
                     if data_url and data_url.startswith("data:"):
                         # Извлекаем MIME-тип из data URL для определения расширения
@@ -458,10 +460,10 @@ if prompt and not processing:
     for item in pending:
         if not isinstance(item, dict) or not item.get("data_b64"):
             continue
-        media_entries.append({
-            "filename": item.get("filename") or "file",
-            "data": f"data:{item.get('mime') or 'application/octet-stream'};base64,{item['data_b64']}",
-        })
+        data_url = f"data:{item.get('mime') or 'application/octet-stream'};base64,{item['data_b64']}"
+        media_entries.append(
+            _media_entry_from_data_url(data_url, item.get("filename") or "file")
+        )
 
     if uploaded_files and not pending:
         # Fallback: буфер пуст (например, первый сабмит после выбора
@@ -471,10 +473,8 @@ if prompt and not processing:
                 continue
             b64 = base64.b64encode(f.getvalue()).decode("ascii")
             mime = f.type or "application/octet-stream"
-            media_entries.append({
-                "filename": f.name,
-                "data": f"data:{mime};base64,{b64}",
-            })
+            data_url = f"data:{mime};base64,{b64}"
+            media_entries.append(_media_entry_from_data_url(data_url, f.name))
 
     msg_id = str(uuid.uuid4())
 
