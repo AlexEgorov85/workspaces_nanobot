@@ -560,7 +560,12 @@ class _CursorProxy:
         return self._run(lambda cur: cur.statusmessage)
 
     def execute(self, sql: str, params: Any = None) -> None:
-        self._run(lambda cur: cur.execute(sql, params if params is not None else ()))
+        # NB: передаём params as-is (psycopg2 трактует None как «нет
+        # параметров» и НЕ пытается делать %-форматирование). Если передать
+        # `()`, psycopg2 выполнит подстановку и упадёт на литералах '%' в
+        # данных (например, «16.7%» в контенте сообщения) — это ломает
+        # ``execute_values`` для сессий с таким контентом.
+        self._run(lambda cur: cur.execute(sql, params))
 
     def mogrify(self, sql: str, params: Any = None) -> bytes:
         return self._run(lambda cur: cur.mogrify(sql, params))
