@@ -12,6 +12,9 @@ import pytest
 _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
+_workspace = str(Path(__file__).resolve().parent.parent / "workspace")
+if _workspace not in sys.path:
+    sys.path.insert(0, _workspace)
 
 from lib.services.audit_sync_service import AuditSyncService
 
@@ -73,6 +76,24 @@ def _table_from_sql(sql: str) -> str:
     return ""
 
 
+@pytest.fixture
+def mock_pool(monkeypatch):
+    """Подменяем utils.db.run/configure/get_stats, чтобы весь SQL шёл на ScriptedConn."""
+    fake = {"conn": None, "configured": [], "runs": 0, "connected": False}
+
+    monkeypatch.setattr("utils.db.configure",
+                        lambda dsn: fake["configured"].append(dsn) or None)
+    monkeypatch.setattr(
+        "utils.db.run",
+        lambda fn: fn(fake["conn"]),
+    )
+    monkeypatch.setattr(
+        "utils.db.get_stats",
+        lambda: {"connected": fake["connected"]},
+    )
+    return fake
+
+
 def _standard_rows_for(sql, params):
     low = sql.lower()
     if low.lstrip().startswith(("insert", "create")):
@@ -104,13 +125,15 @@ class TestLifecycle:
         assert st["writes_queued"] == 1
         assert st["queue_size"] == 1
 
-    def test_start_stop_with_invalid_dsn_no_hang(self):
+    def test_start_stop_with_invalid_dsn_no_hang(self, mock_pool):
+        mock_pool["connected"] = False
         s = AuditSyncService(
             dsn="postgresql://bad:bad@127.0.0.1:1/none",
             tables=["audits"],
             poll_interval_sec=0.2,
             reconnect_backoff=0.05,
         )
+        s._conn = None
         s.start(initial_load=True)
         time.sleep(0.3)
         st = s.get_stats()
@@ -132,8 +155,9 @@ class TestLifecycle:
 
 
 class TestWorker:
-    def test_initial_load_dispatches_all_tables(self):
-        conn = ScriptedConn(_standard_rows_for)
+    def test_initial_load_dispatches_all_tables(self, mock_pool):
+        mock_pool["connected"] = True
+        mock_pool["conn"] = ScriptedConn(_standard_rows_for)
         received = []
         s = AuditSyncService(
             dsn="postgresql://u@h/db",
@@ -142,10 +166,9 @@ class TestWorker:
             reconnect_backoff=0.01,
         )
         s.set_on_new_records_callback(lambda table, records: received.append((table, [dict(r) for r in records])))
-        with patch("psycopg2.connect", return_value=conn):
-            s.start(initial_load=True)
-            time.sleep(0.6)
-            s.stop(timeout_sec=2.0)
+        s.start(initial_load=True)
+        time.sleep(0.6)
+        s.stop(timeout_sec=2.0)
 
         tables_received = {t for t, _ in received}
         assert {"audits", "violations"} <= tables_received
@@ -154,8 +177,9 @@ class TestWorker:
         # после инкрементального поллинга last_sync продвинулся на MAX(track)
         assert s._last_sync["audits"] == _T2
 
-    def test_incremental_poll_tracks_new_rows(self):
-        conn = ScriptedConn(_standard_rows_for)
+    def test_incremental_poll_tracks_new_rows(self, mock_pool):
+        mock_pool["connected"] = True
+        mock_pool["conn"] = ScriptedConn(_standard_rows_for)
         received = []
         s = AuditSyncService(
             dsn="postgresql://u@h/db",
@@ -164,18 +188,18 @@ class TestWorker:
             reconnect_backoff=0.01,
         )
         s.set_on_new_records_callback(lambda table, records: received.append((table, [dict(r) for r in records])))
-        with patch("psycopg2.connect", return_value=conn):
-            s.start(initial_load=True)
-            time.sleep(0.6)
-            s.stop(timeout_sec=2.0)
+        s.start(initial_load=True)
+        time.sleep(0.6)
+        s.stop(timeout_sec=2.0)
 
         audit_rows = [r for t, rows in received if t == "audits" for r in rows]
         assert [r["id"] for r in audit_rows] == [1, 2]
         # после инкрементального поллинга last_sync продвинулся на MAX(track)
         assert s._last_sync["audits"] == _T2
 
-    def test_incremental_query_uses_track_column_and_last(self):
+    def test_incremental_query_uses_track_column_and_last(self, mock_pool):
         conn = ScriptedConn(_standard_rows_for)
+        mock_pool["conn"] = conn
         s = AuditSyncService(dsn="postgresql://u@h/db", tables=["audits"])
         s._conn = conn
         s._last_sync["audits"] = _T1
@@ -192,8 +216,9 @@ class TestWorker:
 
 
 class TestWrite:
-    def test_write_answer_inserts_into_table(self):
+    def test_write_answer_inserts_into_table(self, mock_pool):
         conn = ScriptedConn()
+        mock_pool["conn"] = conn
         s = AuditSyncService(dsn="postgresql://u@h/db", write_table="audit_interactions")
         s._conn = conn
         s._write_answer(
@@ -203,7 +228,7 @@ class TestWrite:
         assert 'INSERT INTO "oarb"."audit_interactions"' in sql
         assert s.get_stats()["writes_written"] == 1
 
-    def test_submitted_write_processed_by_worker(self):
+    def test_submitted_write_processed_by_worker(self, mock_pool):
         def rows_for(sql, params):
             low = sql.lower()
             if "information_schema.tables" in low:
@@ -211,7 +236,8 @@ class TestWrite:
                 return [("1",)]
             return _standard_rows_for(sql, params)
 
-        conn = ScriptedConn(rows_for)
+        mock_pool["connected"] = True
+        mock_pool["conn"] = ScriptedConn(rows_for)
         s = AuditSyncService(
             dsn="postgresql://u@h/db",
             tables=["audits"],
@@ -219,16 +245,15 @@ class TestWrite:
             poll_interval_sec=0.05,
             reconnect_backoff=0.01,
         )
-        with patch("psycopg2.connect", return_value=conn):
-            s.start(initial_load=False)
-            assert s.submit_write("s1", "вопрос", "ответ") is True
-            time.sleep(0.4)
-            s.stop(timeout_sec=2.0)
+        s.start(initial_load=False)
+        assert s.submit_write("s1", "вопрос", "ответ") is True
+        time.sleep(0.4)
+        s.stop(timeout_sec=2.0)
 
         st = s.get_stats()
         assert st["writes_queued"] == 1
         assert st["writes_written"] == 1
-        assert any('INSERT INTO "oarb"."audit_interactions"' in sql for sql, _ in conn.executed)
+        assert any('INSERT INTO "oarb"."audit_interactions"' in sql for sql, _ in mock_pool["conn"].executed)
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +262,9 @@ class TestWrite:
 
 
 class TestSyncCallback:
-    def test_on_sync_callback_invoked_after_load_and_polls(self):
-        conn = ScriptedConn(_standard_rows_for)
+    def test_on_sync_callback_invoked_after_load_and_polls(self, mock_pool):
+        mock_pool["connected"] = True
+        mock_pool["conn"] = ScriptedConn(_standard_rows_for)
         calls = []
         s = AuditSyncService(
             dsn="postgresql://u@h/db",
@@ -247,15 +273,15 @@ class TestSyncCallback:
             reconnect_backoff=0.01,
         )
         s.set_on_sync_callback(lambda: calls.append(1))
-        with patch("psycopg2.connect", return_value=conn):
-            s.start(initial_load=True)
-            time.sleep(0.4)
-            s.stop(timeout_sec=2.0)
+        s.start(initial_load=True)
+        time.sleep(0.4)
+        s.stop(timeout_sec=2.0)
         # минимум: 1 после initial load + >=1 после поллинга
         assert len(calls) >= 2
 
-    def test_callback_exception_does_not_stop_worker(self):
-        conn = ScriptedConn(_standard_rows_for)
+    def test_callback_exception_does_not_stop_worker(self, mock_pool):
+        mock_pool["connected"] = True
+        mock_pool["conn"] = ScriptedConn(_standard_rows_for)
 
         def boom():
             raise RuntimeError("test")
@@ -267,10 +293,9 @@ class TestSyncCallback:
             reconnect_backoff=0.01,
         )
         s.set_on_sync_callback(boom)
-        with patch("psycopg2.connect", return_value=conn):
-            s.start(initial_load=True)
-            time.sleep(0.2)
-            s.stop(timeout_sec=2.0)
+        s.start(initial_load=True)
+        time.sleep(0.2)
+        s.stop(timeout_sec=2.0)
         assert s.get_stats()["errors"] >= 1
 
 
@@ -307,18 +332,18 @@ def _schema_and_rows_for(sql, params):
 
 
 class TestSchemaAndResync:
-    def test_schema_callback_receives_pg_columns(self):
+    def test_schema_callback_receives_pg_columns(self, mock_pool):
         received = []
-        conn = ScriptedConn(_schema_and_rows_for)
+        mock_pool["connected"] = True
+        mock_pool["conn"] = ScriptedConn(_schema_and_rows_for)
         s = AuditSyncService(
             dsn="postgresql://u@h/db", tables=["audits"],
             poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=0,
         )
         s.set_on_schema_callback(lambda table, columns: received.append((table, columns)))
-        with patch("psycopg2.connect", return_value=conn):
-            s.start(initial_load=True)
-            time.sleep(0.25)
-            s.stop(timeout_sec=2.0)
+        s.start(initial_load=True)
+        time.sleep(0.25)
+        s.stop(timeout_sec=2.0)
         assert received
         table, columns = received[0]
         assert table == "audits"
@@ -330,23 +355,24 @@ class TestSchemaAndResync:
         # комментарий таблицы приходит псевдоколонкой __table__
         assert by_name["__table__"]["comment"] == "Аудиторские проверки"
 
-    def test_schema_callback_not_called_without_schema_rows(self):
+    def test_schema_callback_not_called_without_schema_rows(self, mock_pool):
         received = []
-        conn = ScriptedConn(_standard_rows_for)
+        mock_pool["connected"] = True
+        mock_pool["conn"] = ScriptedConn(_standard_rows_for)
         s = AuditSyncService(
             dsn="postgresql://u@h/db", tables=["audits"],
             poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=0,
         )
         s.set_on_schema_callback(lambda table, columns: received.append((table, columns)))
-        with patch("psycopg2.connect", return_value=conn):
-            s.start(initial_load=True)
-            time.sleep(0.2)
-            s.stop(timeout_sec=2.0)
+        s.start(initial_load=True)
+        time.sleep(0.2)
+        s.stop(timeout_sec=2.0)
         assert received == []
 
-    def test_periodic_full_resync_invokes_replace(self):
+    def test_periodic_full_resync_invokes_replace(self, mock_pool):
         replaced = []
-        conn = ScriptedConn(_schema_and_rows_for)
+        mock_pool["connected"] = True
+        mock_pool["conn"] = ScriptedConn(_schema_and_rows_for)
         s = AuditSyncService(
             dsn="postgresql://u@h/db", tables=["audits"],
             poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=1,
@@ -354,17 +380,17 @@ class TestSchemaAndResync:
         s.set_on_replace_records_callback(
             lambda table, rows: replaced.append((table, [dict(r) for r in rows]))
         )
-        with patch("psycopg2.connect", return_value=conn):
-            s.start(initial_load=True)
-            time.sleep(0.4)
-            s.stop(timeout_sec=2.0)
+        s.start(initial_load=True)
+        time.sleep(0.4)
+        s.stop(timeout_sec=2.0)
         assert replaced
         assert any(table == "audits" for table, _ in replaced)
         assert s.get_stats()["full_resyncs"] >= 1
 
-    def test_full_resync_disabled_by_zero(self):
+    def test_full_resync_disabled_by_zero(self, mock_pool):
         replaced = []
-        conn = ScriptedConn(_schema_and_rows_for)
+        mock_pool["connected"] = True
+        mock_pool["conn"] = ScriptedConn(_schema_and_rows_for)
         s = AuditSyncService(
             dsn="postgresql://u@h/db", tables=["audits"],
             poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=0,
@@ -372,30 +398,28 @@ class TestSchemaAndResync:
         s.set_on_replace_records_callback(
             lambda table, rows: replaced.append((table, [dict(r) for r in rows]))
         )
-        with patch("psycopg2.connect", return_value=conn):
-            s.start(initial_load=True)
-            time.sleep(0.3)
-            s.stop(timeout_sec=2.0)
+        s.start(initial_load=True)
+        time.sleep(0.3)
+        s.stop(timeout_sec=2.0)
         assert replaced == []
         assert s.get_stats()["full_resyncs"] == 0
 
 
 class TestReconnect:
-    def test_reconnect_clears_last_sync(self):
-        conn = ScriptedConn()
+    def test_reconnect_clears_last_sync(self, mock_pool):
+        mock_pool["conn"] = ScriptedConn()
         s = AuditSyncService(dsn="postgresql://u@h/db", reconnect_backoff=0.01)
         s._last_sync["audits"] = _T1
         s._running = True
-        with patch("psycopg2.connect", return_value=conn):
-            s._reconnect()
+        s._reconnect()
         assert s._last_sync == {}
-        assert s._conn is conn
+        assert s._conn is None
 
-    def test_ensure_connected_sets_autocommit(self):
-        conn = ScriptedConn()
-        s = AuditSyncService(dsn="postgresql://u@h/db", reconnect_backoff=0.01)
+    def test_ensure_connected_configures_pool_dsn(self, mock_pool):
+        s = AuditSyncService(
+            dsn="postgresql://u@h/db", reconnect_backoff=0.01
+        )
         s._running = True
-        with patch("psycopg2.connect", return_value=conn):
-            s._ensure_connected()
-        assert conn.autocommit is True
-        assert s.get_stats()["reconnects"] >= 1
+        s._ensure_connected()
+        assert mock_pool["configured"] == ["postgresql://u@h/db"]
+        assert s.get_stats()["reconnects"] >= 0

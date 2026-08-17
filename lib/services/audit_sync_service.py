@@ -1,14 +1,16 @@
 """
-AuditSyncService — единственный владелец подключения к PostgreSQL в gateway.
+AuditSyncService — фоновая синхронизация audit-данных из PostgreSQL в кэш.
 
 Отвечает за:
   * инкрементальную синхронизацию данных из PG в in-memory кэш (AuditMemoryStore);
   * неблокирующую запись ответов/взаимодействий навыка обратно в PG через очередь;
-  * автоматическое переподключение при обрывах связи;
   * корректное завершение (graceful shutdown) с гарантией сохранения очереди.
 
-Вся работа выполняется в одном worker-потоке, который держит единственное
-psycopg2-подключение (``self._conn``). Публичный API безопасен для вызова
+Весь SQL-доступ идёт через общий пул ``utils.db`` (worker-поток не держит
+собственного psycopg2-соединения — соединение выдаёт пул на время запроса,
+обрыв и переподключение обслуживает сам пул). Инкрементальные метки
+(``_last_sync``) живут в сервисе и сбрасываются при обрыве, чтобы
+перезагрузить таблицы целиком. Публичный API безопасен для вызова
 из asyncio/любого потока:
 
     sync_service = AuditSyncService(dsn=dsn, tables=[...])
@@ -211,7 +213,13 @@ class AuditSyncService:
         """Мониторинг: размер очереди, счётчики, состояние подключения."""
         with self._state_lock:
             stats = dict(self._stats)
-        connected = self._conn is not None and not self._conn.closed
+        connected = False
+        try:
+            from utils.db import get_stats as _pool_stats
+
+            connected = _pool_stats().get("connected", 0) > 0
+        except Exception:
+            pass
         stats.update(
             {
                 "running": self._running,
@@ -421,37 +429,41 @@ class AuditSyncService:
         schema, name = self._split_table(table)
         if not name:
             return []
-        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        try:
-            cur.execute(
-                "SELECT c.column_name, c.data_type, c.is_nullable, "
-                "c.character_maximum_length, c.numeric_precision, c.numeric_scale, "
-                "pgd.description AS column_comment "
-                "FROM information_schema.columns c "
-                "JOIN pg_class pc ON pc.relname = c.table_name "
-                "AND pc.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = %s) "
-                "LEFT JOIN pg_catalog.pg_description pgd "
-                "ON pgd.objsubid = c.ordinal_position AND pgd.objoid = pc.oid "
-                "WHERE c.table_schema = %s AND c.table_name = %s "
-                "ORDER BY c.ordinal_position",
-                [schema, name],
-            )
-            col_rows = [dict(r) for r in cur.fetchall()]
-        finally:
-            cur.close()
 
-        cur = self._conn.cursor()
-        try:
-            cur.execute(
-                "SELECT obj_description(pc.oid) FROM pg_class pc "
-                "JOIN pg_namespace n ON n.oid = pc.relnamespace "
-                "WHERE n.nspname = %s AND pc.relname = %s",
-                [schema, name],
-            )
-            row = cur.fetchone()
-        finally:
-            cur.close()
-        table_comment = row[0] if row else None
+        def _work(conn: Any) -> List[dict]:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            try:
+                cur.execute(
+                    "SELECT c.column_name, c.data_type, c.is_nullable, "
+                    "c.character_maximum_length, c.numeric_precision, c.numeric_scale, "
+                    "pgd.description AS column_comment "
+                    "FROM information_schema.columns c "
+                    "JOIN pg_class pc ON pc.relname = c.table_name "
+                    "AND pc.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = %s) "
+                    "LEFT JOIN pg_catalog.pg_description pgd "
+                    "ON pgd.objsubid = c.ordinal_position AND pgd.objoid = pc.oid "
+                    "WHERE c.table_schema = %s AND c.table_name = %s "
+                    "ORDER BY c.ordinal_position",
+                    [schema, name],
+                )
+                col_rows = [dict(r) for r in cur.fetchall()]
+            finally:
+                cur.close()
+
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT obj_description(pc.oid) FROM pg_class pc "
+                    "JOIN pg_namespace n ON n.oid = pc.relnamespace "
+                    "WHERE n.nspname = %s AND pc.relname = %s",
+                    [schema, name],
+                )
+                row = cur.fetchone()
+            finally:
+                cur.close()
+            return col_rows, (row[0] if row else None)
+
+        col_rows, table_comment = self._db_run(_work)
 
         columns: List[dict] = []
         if table_comment:
@@ -483,7 +495,7 @@ class AuditSyncService:
         return self._schema, table
 
     # ------------------------------------------------------------------
-    # SQL-доступ (единственное подключение)
+    # SQL-доступ (через общий пул utils.db)
     # ------------------------------------------------------------------
 
     def _fq_table(self, table: str) -> str:
@@ -492,13 +504,25 @@ class AuditSyncService:
             return f'"{table.split(".", 1)[0]}"."{table.split(".", 1)[1]}"'
         return f'"{self._schema}"."{table}"'
 
+    def _db_run(self, fn):
+        """Выполнить ``fn(conn)`` на свободном соединении общего пула ``utils.db``."""
+        from utils.db import configure, run
+
+        if self._dsn:
+            configure(self._dsn)
+        return run(fn)
+
     def _fetch_all(self, table: str) -> tuple[List[dict], Any]:
-        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        try:
-            cur.execute(f'SELECT * FROM {self._fq_table(table)}')
-            rows = [dict(r) for r in cur.fetchall()]
-        finally:
-            cur.close()
+        def _work(conn: Any) -> tuple[List[dict], Any]:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            try:
+                cur.execute(f'SELECT * FROM {self._fq_table(table)}')
+                rows = [dict(r) for r in cur.fetchall()]
+            finally:
+                cur.close()
+            return rows
+
+        rows = self._db_run(_work)
         track_col = self._track_column_for(table)
         last = self._max_track(rows, track_col)
         return rows, last
@@ -506,16 +530,19 @@ class AuditSyncService:
     def _fetch_incremental(
         self, table: str, track_col: str, last: Any
     ) -> tuple[List[dict], Any]:
-        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        try:
-            cur.execute(
-                f'SELECT * FROM {self._fq_table(table)} '
-                f'WHERE "{track_col}" > %s ORDER BY "{track_col}"',
-                [last],
-            )
-            rows = [dict(r) for r in cur.fetchall()]
-        finally:
-            cur.close()
+        def _work(conn: Any) -> List[dict]:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            try:
+                cur.execute(
+                    f'SELECT * FROM {self._fq_table(table)} '
+                    f'WHERE "{track_col}" > %s ORDER BY "{track_col}"',
+                    [last],
+                )
+                return [dict(r) for r in cur.fetchall()]
+            finally:
+                cur.close()
+
+        rows = self._db_run(_work)
         return rows, self._max_track(rows, track_col)
 
     @staticmethod
@@ -534,18 +561,22 @@ class AuditSyncService:
         в PostgreSQL — логируем явную ошибку и помечаем write недоступным.
         Создание таблицы — задача миграций/бootstrap, а не синхрон-сервиса.
         """
-        if not self._write_table or self._conn is None:
+        if not self._write_table:
             return
-        cur = self._conn.cursor()
-        try:
-            cur.execute(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_schema = %s AND table_name = %s",
-                [self._write_schema, self._write_table],
-            )
-            exists = cur.fetchone()
-        finally:
-            cur.close()
+
+        def _work(conn: Any) -> bool:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = %s AND table_name = %s",
+                    [self._write_schema, self._write_table],
+                )
+                return cur.fetchone() is not None
+            finally:
+                cur.close()
+
+        exists = self._db_run(_work)
         if exists:
             return
         missing = f"{self._write_schema}.{self._write_table}"
@@ -558,74 +589,50 @@ class AuditSyncService:
         )
 
     def _write_answer(self, payload: dict) -> None:
-        if not self._write_table or self._conn is None:
+        if not self._write_table:
             return
-        cur = self._conn.cursor()
-        try:
-            cur.execute(
-                f'INSERT INTO "{self._write_schema}"."{self._write_table}" '
-                "(session_id, query_text, answer_text, metadata, created_at) "
-                "VALUES (%s, %s, %s, %s, NOW())",
-                [
-                    payload.get("session_id"),
-                    payload.get("query_text"),
-                    payload.get("answer_text"),
-                    psycopg2.extras.Json(payload.get("metadata") or {}),
-                ],
-            )
-        finally:
-            cur.close()
+
+        def _work(conn: Any) -> None:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    f'INSERT INTO "{self._write_schema}"."{self._write_table}" '
+                    "(session_id, query_text, answer_text, metadata, created_at) "
+                    "VALUES (%s, %s, %s, %s, NOW())",
+                    [
+                        payload.get("session_id"),
+                        payload.get("query_text"),
+                        payload.get("answer_text"),
+                        psycopg2.extras.Json(payload.get("metadata") or {}),
+                    ],
+                )
+            finally:
+                cur.close()
+
+        self._db_run(_work)
         with self._state_lock:
             self._stats["writes_written"] += 1
 
     # ------------------------------------------------------------------
-    # Подключение / переподключение
+    # Подключение (через общий пул)
     # ------------------------------------------------------------------
 
     def _ensure_connected(self) -> None:
-        if self._conn is not None and not self._conn.closed:
-            return
-        backoff = self._reconnect_backoff
-        attempt = 0
-        while self._running and (self._conn is None or self._conn.closed):
-            attempt += 1
-            try:
-                self._conn = psycopg2.connect(
-                    self._dsn, gssencmode="disable", connect_timeout=10,
-                )
-                self._conn.autocommit = True
-                with self._state_lock:
-                    self._stats["reconnects"] += 1
-                if attempt > 1:
-                    logger.info(
-                        "AuditSyncService connected to PG on attempt %d", attempt
-                    )
-                return
-            except Exception as exc:
-                with self._state_lock:
-                    self._stats["errors"] += 1
-                logger.warning(
-                    "AuditSyncService PG connect failed (attempt %d, "
-                    "retry in %.1fs): %s",
-                    attempt, backoff, exc,
-                )
-                self._stop_event.wait(backoff)
-                backoff = min(backoff * 2, self._reconnect_backoff_max)
+        """Убедиться, что DNS пула настроен; воркеры подключаются лениво."""
+        from utils.db import configure
+
+        if self._dsn:
+            configure(self._dsn)
 
     def _reconnect(self) -> None:
-        """Закрыть соединение и сбросить инкрементальные метки.
+        """Сбросить инкрементальные метки после обрыва соединения.
 
         После обрыва перезагружаем таблицы целиком, чтобы не пропустить
-        изменения, произошедшие во время недоступности БД.
+        изменения, произошедшие во время недоступности БД. Само соединение
+        (и его переподключение) живёт в общем пуле ``utils.db``.
         """
-        self._close_connection()
         self._last_sync.clear()
         self._ensure_connected()
 
     def _close_connection(self) -> None:
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
+        """Больше не владеем соединением — пул закрывается сам."""
