@@ -110,6 +110,13 @@ class ApplicationContext:
         pg_section = ctx.config_service.settings_section("channels").get(
             "postgres", {}
         )
+
+        # Конфигурация общего пула соединений (channels.postgres.pool) —
+        # применяется ДО создания сервисов, чтобы воркеры пула использовали
+        # заданные min_conn/max_conn/pool_timeout и т.п.
+        if isinstance(pg_section, dict) and isinstance(pg_section.get("pool"), dict):
+            _configure_db_pool(pg_section.get("pool", {}))
+
         try:
             storage_mode, session_manager = ctx.session_storage_service.create(
                 ctx.config,
@@ -202,6 +209,10 @@ class ApplicationContext:
 
         self._shutdown = ShutdownCoordinator()
 
+        # Стартуем общий пул соединений (воркеры подключаются лениво при
+        # первой задаче, но пул уже создан и подхватил pool-конфиг).
+        _start_db_pool()
+
         if self.db_logging_service is not None:
             self.db_logging_service.start()
             self._shutdown.register("db_logging_service", self.db_logging_service)
@@ -221,6 +232,8 @@ class ApplicationContext:
             return
         if self._shutdown is not None:
             self._shutdown.shutdown_all()
+        # После остановки сервисов закрываем общий пул соединений.
+        _stop_db_pool()
         self._started = False
 
 
@@ -435,3 +448,44 @@ def _make_cron_service(config: Any) -> Any:
     from nanobot.cron.service import CronService
 
     return CronService(config.workspace_path / "cron" / "jobs.json")
+
+
+# ----------------------------------------------------------------------
+# Общий пул соединений utils.db
+# ----------------------------------------------------------------------
+
+
+def _configure_db_pool(pool_cfg: dict) -> None:
+    """Применить ``channels.postgres.pool`` к общему пулу ``utils.db``.
+
+    ``pool_cfg`` — словарь с ключами ``min_conn/max_conn/pool_timeout/
+    queue_maxsize/reconnect_backoff_sec/reconnect_backoff_max_sec/
+    connect_max_retries/idle_timeout_sec/job_max_retries``. Неизвестные
+    ключи игнорируются (``set_pool_config`` принимает только известные).
+    """
+    try:
+        from utils.db import set_pool_config
+
+        set_pool_config(dict(pool_cfg))
+    except Exception as exc:
+        logger.warning("utils.db pool config ignored: %s", exc)
+
+
+def _start_db_pool() -> None:
+    """Запустить общий пул ``utils.db`` (воркеры подключаются лениво)."""
+    try:
+        from utils.db import start
+
+        start()
+    except Exception as exc:
+        logger.warning("utils.db pool start failed: %s", exc)
+
+
+def _stop_db_pool() -> None:
+    """Остановить общий пул ``utils.db`` и закрыть все соединения."""
+    try:
+        from utils.db import shutdown
+
+        shutdown()
+    except Exception as exc:
+        logger.warning("utils.db pool shutdown failed: %s", exc)

@@ -186,6 +186,30 @@ class TestCreate:
         )
         assert ctx.storage_mode == "file"
 
+    def test_pool_config_applied_from_settings(self, full_fake_modules):
+        from unittest.mock import MagicMock
+
+        utils_db = sys.modules["utils.db"]
+        utils_db.set_pool_config = MagicMock()
+        full_fake_modules["settings"].channels = {
+            "postgres": {
+                "dsn": "",
+                "pool": {"min_conn": 1, "max_conn": 3, "pool_timeout": 7.5},
+            },
+        }
+        from lib.core.application_context import ApplicationContext
+
+        script = Path(__file__).resolve().parent.parent
+        ApplicationContext.create(
+            script_dir=script,
+            workspace_dir=script / "workspace",
+            enable_db_logging=False,
+            enable_audit=False,
+        )
+        utils_db.set_pool_config.assert_called_once_with(
+            {"min_conn": 1, "max_conn": 3, "pool_timeout": 7.5}
+        )
+
     def test_storage_override_postgres_without_dsn(self, full_fake_modules):
         from lib.core.application_context import ApplicationContext
 
