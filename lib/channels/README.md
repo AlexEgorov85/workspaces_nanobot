@@ -76,7 +76,7 @@
 | `user_id` | TEXT | ID отправителя |
 | `role` | TEXT | `user` / `assistant` |
 | `content` | TEXT | Текст сообщения |
-| `media` | JSONB | Массив вложений `{"filename": ..., "data": "data:..."}` (HTTP/HTTPS-ссылки — строкой) |
+| `media` | JSONB | AW-формат `{"filename": ..., "file_id": ..., "mime_type": ..., "file_size": ...}` (с v2.3.0); старые dict `{filename, data}` и data-URL продолжают читаться через `lib/utils/media.py` (HTTP/HTTPS-ссылки — строкой) |
 | `buttons` | JSONB | Массив кнопок (только assistant) |
 | `metadata` | JSONB | Reasoning, retry_count, и т.д. |
 | `reply_to` | UUID | Ссылка на parent-сообщение |
@@ -161,8 +161,25 @@
 
 ---
 
+## MessageExchange — общий движок (v2.3.0)
+
+`lib/channels/message_exchange.py` — общий `MessageExchange` для всех каналов
+(Postgres / Redis / Streamlit) и для чтения истории. Инкапсулирует:
+
+- кодирование/декодирование `InboundMessage` / `OutboundMessage`;
+- JSONB-кодек медиа (`lib/utils/media_jsonb.py`);
+- поллинг и публикацию outbound;
+- фильтрацию служебных outbound (`lib/utils/outbound_filter.py`).
+
+`PostgresChannel` и `RedisChannel` — тонкие обёртки над `MessageExchange`;
+публичный API не изменился. `streamlit_app.py` использует тот же движок для
+чтения истории, поэтому поведение в Streamlit и в каналах синхронизировано.
+
 ## Как добавить новый канал
 
-1. Создать класс, унаследовав `nanobot.channels.base.BaseChannel`
-2. Реализовать `start()`, `stop()`, `send()`, `send_delta()`
-3. Подключить в `gateway.py` по аналогии с PostgresChannel/RedisChannel
+1. Создать класс, унаследовав `nanobot.channels.base.BaseChannel`.
+2. Делегировать `start()` / `stop()` / `send()` / `send_delta()` в
+   `MessageExchange` — иначе поведение канала разъедется с Postgres/Redis.
+3. Подключить в `gateway.py` через `ChannelFactory.create_all()` (по аналогии
+   с PostgresChannel/RedisChannel). Если новый канал — только читатель истории
+   (как Streamlit), достаточно обёртки над `MessageExchange.poll_once(...)`.

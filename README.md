@@ -78,7 +78,8 @@ llm_api_key=ваш_LLM_API_KEY
 psql -d nanobot -f sql/session/create_public_agent_session_meta.sql
 psql -d nanobot -f sql/session/create_public_agent_session_messages.sql
 
-# Таблица канала (PostgresChannel) — создаётся автоматически
+# Таблица канала (PostgresChannel) — DDL применяется вручную
+psql -d nanobot -f sql/channels/create_public_agent_conversation_messages.sql
 psql -d nanobot -f sql/channels/seed_messages.sql   # тестовые данные
 ```
 
@@ -152,7 +153,7 @@ llm_api_key=...llm_api_key...
 python gateway.py
 ```
 
-Что делает `gateway.py` (тонкий оркестратор, 132 строки):
+Что делает `gateway.py` (тонкий оркестратор):
 - `ApplicationContext.create(...)` — собирает конфиг, сессии, агента, аудит-сервисы, БД-логирование.
 - Регистрирует callbacks на `AuditSyncService` **ДО** `ctx.start()` — иначе FAISS preload видит «нет данных» (race condition).
 - `ChannelFactory.create_all()` — `ChannelManager` + Redis + Postgres каналы + транскрипция.
@@ -273,8 +274,8 @@ nanobot/
 ├── project.json            # проект: channels.*, skills.*, cli, gateway, logging.db
 ├── config.py               # сборка SETTINGS (JSONC + .secrets.env)
 │
-├── gateway.py              # 132 строки, тонкий оркестратор
-├── cli_agent.py            # 165 строк, тонкий оркестратор
+├── gateway.py              # тонкий оркестратор
+├── cli_agent.py            # тонкий оркестратор
 ├── streamlit_app.py        # [web-клиент, не через ApplicationContext]
 │
 ├── lib/                    # v2.0.0: сервисный слой
@@ -282,12 +283,13 @@ nanobot/
 │   ├── services/           #   сервисы (db_logging, audit, channels, ...)
 │   ├── cli/                #   REPL/typewriter/hook_loader
 │   ├── lifecycle/          #   gateway_runner + shutdown_coordinator
-│   ├── channels/           #   postgres_channel, redis_channel
+│   ├── channels/           #   postgres_channel, redis_channel, message_exchange
 │   └── session/            #   pg_session_manager
 ├── workspace/              # runtime-данные, hooks/, skills/, memory/
-├── tests/                  # 859 unit-теста
+├── tests/                  # 859 unit-тестов
 ├── benchmarks/             # YAML-тесты, runner, scorer, reporter
 ├── tools/                  # инфраструктурные CLI (build_vectors.py)
+├── scripts/                # утилиты (backfill_media_aw.py)
 ├── sql/                    # DDL всех таблиц
 ├── requirements.txt
 ```
@@ -365,7 +367,7 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 
 ### 6. PostgresChannel (`lib/channels/postgres_channel.py`)
 
-Канал через таблицу `agent_conversation_messages`: поллинг новых сообщений (`status='pending'`), потоковая запись reasoning в `metadata.reasoning`, автоматическая разблокировка зависших сообщений (retry до 3 раз), медиа-файлы в едином формате `{"filename", "data"}` (data URL).
+Канал через таблицу `agent_conversation_messages`: поллинг новых сообщений (`status='pending'`), потоковая запись reasoning в `metadata.reasoning`, автоматическая разблокировка зависших сообщений (retry до 3 раз), медиа-файлы в едином AW-формате `{"filename", "file_id", "mime_type", "file_size"}` через общий кодек `utils.media` и движок `MessageExchange` (`lib/channels/message_exchange.py`).
 
 **Полная документация:** [`lib/channels/README.md`](lib/channels/README.md) — диаграмма потоков, DDL колонок, конфигурация, инструкция «как добавить новый канал».
 
@@ -375,6 +377,7 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 - **Inbox:** `BRPOP nanobot:inbox`
 - **Outbox:** `LPUSH nanobot:outbox:{chat_id}`
 - Формат JSON повторяет `InboundMessage`/`OutboundMessage`.
+- Медиа и поллинг — через общий `MessageExchange` + кодек `utils.media` (как PostgresChannel).
 
 **Полная документация:** [`lib/channels/README.md`](lib/channels/README.md).
 
@@ -608,7 +611,7 @@ PowerShell интерпретирует `=` по-своему. Использу�
 
 ### Тесты падают на импорте `nanobot`
 
-`nanobot>=0.2.2` нужен. Проверьте: `pip show nanobot`. Если ниже — `pip install --upgrade nanobot`.
+`nanobot==0.3.0` нужен (закреплён в `requirements.txt`). Проверьте: `pip show nanobot`. Если ниже — `pip install --upgrade 'nanobot==0.3.0'`.
 
 ### JSONC в `project.json` не парсится
 
@@ -616,63 +619,35 @@ PowerShell интерпретирует `=` по-своему. Использу�
 
 ---
 
-## Миграция с 1.5.0 на 2.0.0
+## Что нового в v2.3.0
 
-v2.0.0 — крупное обновление. Изменения в конфигурации и структуре:
+v2.3.0 — MINOR поверх v2.2.0 (обратно совместимо, прямого апгрейда с 1.5.0 нет —
+сначала v2.0.0). Главное:
 
-### Конфигурация
+- **Медиа-платформа:** единый кодек `lib.utils.media`, общий `MessageExchange`
+  для Postgres/Redis/Streamlit, `SessionFileStore` под
+  `data_store/cache/sessions/<key>/attachments/`. Формат в
+  `agent_conversation_messages.media` обновлён до AW
+  `{filename, file_id, mime_type, file_size}`; старые записи читаются.
+  Миграция существующих данных — `python scripts/backfill_media_aw.py [--dry-run]`
+  (идемпотентно).
+- **`nanobot==0.3.0`** закреплён в `requirements.txt`. Если развёртывание на
+  более старой версии — `pip install --upgrade 'nanobot==0.3.0'`.
+- **Единый LLM-клиент** `lib.services.llm_client` вместо разрозненных
+  `httpx`-вызовов; параметры только из `config.require_setting("providers", "llm")`.
+- **Унификация инфраструктуры:** `lib.utils.node_access` (доступ к настройкам),
+  `lib.utils.logging_utils` (настройка `loguru`), `lib.utils.outbound_filter`
+  (фильтрация служебных outbound).
+- **Пул PostgreSQL (с v2.2.0):** общая job-очередь + пул воркеров вместо
+  connect-per-op; `ApplicationContext` применяет `channels.postgres.pool` из
+  `project.json`.
+- **Чистка тестов:** 900 → **859** (42 «теста-галочки» удалены, 1 сломанный
+  `assert True` починен).
 
-| Что | Было (1.5.0) | Стало (2.0.0) |
-|-----|---------------|----------------|
-| Формат конфига | `.env` (только переменные) | `project.json` (JSONC) + `config.json` + `.secrets.env` |
-| Секции проекта | смешаны в `.env` | `channels.*`, `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway`, `logging.db` — в `project.json` |
-| API-ключи | `.env` | `.secrets.env` (в `.gitignore`) |
-| DSN провайдеров | `LLM_API_KEY` в shell | `# providers: llm` секция в `.secrets.env` (pre-resolve через `ConfigService`) |
-| Параметры векторов | `vector_indexes.*`, `mode_vector_index_path` в `config.json` | `public.agent_vector_index_config` в БД (таблица) |
-| DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
-| Навыки `data-analyzer`, `html_presentation_generator` | присутствовали | удалены |
-| `pg_agent_worker.py` | standalone DB API server | удалён |
-| Magic-числа (таймауты, retry, пулы) | захардкожены в `.py` | вынесены в `project.json` (`channels.*`, `skills.*`, `cli`, `gateway`, `streamlit`, `logging.db`) |
-| Секция провайдера в `.secrets.env` | `# providers: mistral` | `# providers: llm` (нейтральное имя) |
-
-### Переименования таблиц (запустите миграцию)
-
-В v2.0.0 расширен `agent_`-префикс на все таблицы агента. Соответствие новых и старых имён — в таблице:
-
-| Было | Стало |
-|------|-------|
-| `public.session_meta` | `public.agent_session_meta` |
-| `public.session_messages` | `public.agent_session_messages` |
-| `public.predefined_scripts` | `public.agent_predefined_scripts` |
-| `public.conversation_messages` | `public.agent_conversation_messages` |
-| `oarb.vector_index_config` | `public.agent_vector_index_config` |
-| `oarb.vector_index_store` | `public.agent_vector_index_store` |
-| `public.gateway_logs` | `public.agent_gateway_logs` |
-| `public.gateway_question_runs` | `public.agent_question_runs` |
-
-Доменные таблицы навыка (`oarb.audits/violations/audit_reports/report_items/audit_vectors`)
-**не затронуты** — это бизнес-данные владельца.
-
-### Действия при обновлении
-
-1. **Перенесите секреты** из `.env` в `.secrets.env` (формат секций `# providers: <name>`).
-2. **Создайте `project.json`** из секций `.env` (`channels.*`, `skills.*`, `cli`, ...). JSONC — можно копировать `project.json` из этого репо.
-3. **Удалите** `vector_indexes` / `mode_vector_index_path` из конфигов — теперь в `public.agent_vector_index_config`.
-4. **Удалите** `data-analyzer`, `html_presentation_generator`, `pg_agent_worker.py` из импортов и конфигов.
-5. **Переименуйте секцию** `# providers: mistral` → `# providers: llm` в `.secrets.env` (опционально, для ясности).
-6. **Переименуйте таблицы** под `agent_`-префикс вручную (скрипты миграции
-   удалены в v2.2.0; соответствие имён — в таблице выше).
-7. **Перезапустите gateway** — `ConfigService._pre_resolve_env_refs` подставит ключи в `os.environ` автоматически.
-8. **Проверьте health** — `agent_gateway_logs` пустая, но `AuditSyncService.polls` > 0.
-
-### Что НЕ изменилось
-
-- API точек входа: `python gateway.py`, `python cli_agent.py -P`.
-- Имена таблиц БД: `agent_session_meta`, `agent_session_messages`, `agent_conversation_messages`, `agent_predefined_scripts`, `agent_gateway_logs`, `agent_question_runs`, `oarb.audit_vectors`, `public.agent_vector_index_store`, `public.agent_vector_index_config`, `agent_benchmark_runs`, `agent_benchmark_results`.
-- `benchmarks/items/*.yaml` — формат совместим.
-- `audit_analyzer` режимы `predefined` / `sql` / `vector` — без изменений.
-
-Полный changelog — в [CHANGELOG.md](CHANGELOG.md).
+Полный changelog, migration notes и точные имена таблиц — в
+[CHANGELOG.md → Unreleased](CHANGELOG.md#unreleased). История миграции
+1.5.0 → 2.0.0 (config, переименование таблиц под `agent_`-префикс, удалённые
+скрипты миграции) — в [CHANGELOG.md → 2.0.0](CHANGELOG.md#200--2026-07-xx).
 
 ---
 

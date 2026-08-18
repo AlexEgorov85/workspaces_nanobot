@@ -8,9 +8,148 @@
 
 ## [Unreleased]
 
-> **QA-поддержка:** чистка тестов от «заглушек на галочку» и исправление
-> сломанного assert'а. Из 900 собранных тестов удалено 42, не дававших
-> реальной проверки; общий итог — **859 passed**.
+> **MINOR-релиз:** единая платформа медиа-вложений (кодек + `MessageExchange` +
+> `SessionFileStore`), backfill-скрипт для миграции legacy-формата в AW, единый
+> LLM-клиент в `lib.services.llm_client`, унификация служебных путей настроек
+> (`lib.utils.node_access`), логирования (`lib.utils.logging_utils`) и фильтрации
+> outbound, чистка тестов от заглушек. Итог тестов: **859 passed** (900 собранных
+> − 42 удалённых).
+
+### Added
+
+- **`lib/channels/message_exchange.py` — общий `MessageExchange` для
+  PostgresChannel / RedisChannel / Streamlit.** Раньше у каждого канала был
+  свой кодинг inbound/outbound + локальный поллер, что вело к дрейфу поведения.
+  Новый движок инкапсулирует: кодирование/декодирование сообщений (включая
+  общий JSONB-кодек `lib/utils/media_jsonb.py`), поллинг и публикацию outbound.
+  `PostgresChannel` и `RedisChannel` переведены на `MessageExchange`;
+  `streamlit_app.py` использует тот же движок для чтения истории.
+- **`lib/utils/media.py` — единый кодек media и `SessionFileStore`.**
+  Раньше `_embed_media_for_db` / `_decode_media_from_db` жили в каждом канале
+  отдельно, а вложения сессий сохранялись рядом с `pg_session_manager`.
+  Теперь: (1) `media` принимает и dict AW-формата `{filename, file_id,
+  mime_type, file_size}`, и старый dict `{filename, data}`, и строку
+  `data:<mime>;base64,…`, и URL; (2) `SessionFileStore` — общий стор
+  вложений под `data_store/cache/sessions/<key>/attachments/`, переиспользует
+  `SessionFileRedirectHook` для определения папки; (3) `JSONB-декодер` для
+  media вынесен в `lib/utils/media_jsonb.py` и тестируется отдельно.
+- **`scripts/backfill_media_aw.py` — AW-миграция legacy-медиа в
+  `agent_conversation_messages`.** Скрипт читает существующие строки,
+  конвертирует старый dict-формат `{filename, data}` (data URL) в AW-формат
+  `{filename, file_id, mime_type, file_size}`: payload сохраняется в
+  `data_store/cache/sessions/_shared/attachments/`, в БД пишется только
+  `file_id`. Идемпотентен: записи с уже проставленным `file_id` пропускаются,
+  HTTP/HTTPS-ссылки не трогает. CLI: `python scripts/backfill_media_aw.py
+  [--dry-run]`.
+- **`lib/services/llm_client.py` — единая точка вызова LLM.** Вместо разрозненных
+  `httpx`-вызовов в навыках и утилитах — один клиент с ретраями, таймаутами
+  и общим логированием (через `loguru`). Параметры читаются из
+  `config.require_setting("providers", "llm")`. Потребители: `tools/`,
+  навык `audit_analyzer`, future-proof для остальных мест.
+- **`lib/utils/node_access.py` — единый доступ к настройкам.** Хелперы для
+  безопасного обхода `SETTINGS`/`config.json`/`project.json` с поддержкой
+  `require_setting` и `get_setting`-fallback. Удалены дублирующие ad-hoc
+  обращения в `audit_settings.py`, `application_context.py`,
+  `cache_provider_impl.py`.
+- **`lib/utils/logging_utils.py` — единая настройка `loguru`.** Раньше
+  конфигурация логгера была inline в каждом entry-point (`cli_agent.py`,
+  `gateway.py`, `streamlit_app.py`). Теперь — один модуль с пресетами
+  (`setup(level=..., json=..., redact_keys=...)`), вызываемый из
+  `ApplicationContext.create()` и из CLI-цикла. Гарантирует одинаковый
+  формат и redaction секретов во всех точках входа.
+- **`lib/utils/outbound_filter.py` — единая фильтрация служебных outbound.**
+  Скрывает internal-сообщения (`system`, `audit`, `tool_audit`,
+  `_assemble_outbound`-артефакты) из пользовательского потока. Раньше каждый
+  канал фильтровал по-своему, и поведение в `Streamlit` расходилось с
+  `PostgresChannel`. Теперь фильтр один — через `MessageExchange`.
+- **`tools/build_vectors.py` — параметры эмбеддинга только из настроек.**
+  Удалён параметр `--model`/fallback на локальный default; всё через
+  `audit_vector_settings()`. Это закрывает класс ошибок «модель в CLI
+  перебивает БД».
+
+### Changed
+
+- **AW-формат media в переписке: `{filename, data}` → `{filename, file_id,
+  mime_type, file_size}`.** Старые dict-форматы продолжают читаться
+  (обратная совместимость через `lib/utils/media.py`); новые записи и
+  Streamlit используют AW-формат. См. backfill-скрипт для миграции
+  существующих данных.
+- **`MessageExchange` заменил inline-реализации в `PostgresChannel` и
+  `RedisChannel`.** Внутренние методы `_embed_media_for_db`,
+  `_decode_media_from_db`, `poll_once` остались как тонкие обёртки над
+  общим движком; публичный API каналов не изменился.
+- **`get_embedding` унифицирован в `lib.services.vector_index_service`.**
+  Параметры (модель, размерность, retry) — только из
+  `audit_vector_settings()`; единый `retry_on_exception` декоратор вместо
+  локальных `try/except` в каждом вызове.
+- **`audit_sync_service.database` — убран дубль `_REWRITE_TO_CHAR`.** SQL
+  переписан так, что экранирование выполняется на уровне параметров
+  psycopg2, а не вручную в коде.
+
+### Fixed
+
+- **`tests/test_gateway.py` — `fake_config` обзавёлся `get_setting`.** Раньше
+  тест падал `AttributeError`, потому что импортируемая зависимость
+  (`ApplicationContext.create`) зовёт `get_setting(...)` напрямую.
+  Добавлен stub, восстанавливающий ожидаемое поведение фикстуры.
+- **`config.py` — добавлен импорт `Any`.** Сломанный `list[tuple[str, Any]]`
+  в подсказках типа (до правки падал `NameError: name 'Any' is not defined`
+  при импорте в `py 3.14`).
+
+### Tests
+
+- **Удалены 42 «теста-галочки»** (не давали никакой проверки или дублировали
+  код под тестом). Разбор всех 42 файлов тестов vs исходники показал: ~87% тестов
+  реальные, но ~13% — mock-only или пустые. Удалённое поквартально:
+  - `test_benchmarks_models.py` — убраны 11 тестов, пересказывавших дефолты
+    датаклассов (сломанный дефолт «чинился» правкой самого теста); остался
+    осмысленный `test_hash` (`__hash__`/`__eq__`).
+  - `test_cli_agent.py` — `test_defaults` датакласса `DisplayConfig`,
+    `test_empty_noop` и `test_dict_settings` (без assert'ов).
+  - `test_benchmarks_runner.py` — 3 smoke-теста без assert'ов
+    (`test_no_workspace_returns_early`, `test_skips_nonexistent_file`,
+    `test_cleanup_called_on_success`).
+  - `test_config_service.py` — 5 тестов «не должно упасть» без проверок
+    (`test_no_providers_attribute_noop`, `test_missing_provider_section_skipped`,
+    `test_exec_timeout_errors_suppressed`, `test_no_config_json_noop`,
+    `test_invalid_json_noop`).
+  - `test_application_context.py` — 3 lifecycle-теста без единого assert'а
+    (`test_start_runs_and_stops`, `test_double_start_is_safe`,
+    `test_double_stop_is_safe`).
+  - `test_pg_session_manager.py` — 6 тестов (`test_init_defaults`,
+    `test_close_noop`, `test_invalidate_removes_from_cache`,
+    `test_invalidate_missing`, и два, мокавших саму `_load`:
+    `test_read_session_file_found`/`test_read_session_file_not_found`).
+  - `test_utils_session_file_store.py` — `TestCsvVal` (4 эхо-теста однострочной
+    функции `_csv_val`) и `test_default_limits` (дефолты конструктора).
+  - по 1 тесту: `test_console_loop` (`test_empty_noop`),
+    `test_subprocess_manager` (`test_terminate_all_with_no_processes`),
+    `test_hooks_tool_audit_hook` (`test_empty_state`), `test_benchmarks_db`
+    (`test_db_ok_true` — трюизм из мок-фикстуры), `test_streamlit_app`
+    (`test_default_fq_table` — дублирует format-string), `test_config`
+    (`test_settings_is_attrdict`.
+- **Починен сломанный assert в `test_cli_agent.py:317`.**
+  `assert os.environ[...] == "WARNING" if False else True` из-за приоритета
+  тернарника всегда сводился к `assert True` (ветка вообще не читала `os`).
+  Заменён на реальную проверку `NANOBOT_LOG_LEVEL`; добавлен второй тест
+  `test_defaults_to_warning`.
+- **`test_shutdown_coordinator::test_clear` усилен** — вместо пустого вызова
+  теперь `assert order == []` (после `clear()` хендлеры не выполняются).
+- **`test_db_loader.py` оставлен с `pytest.skip`** при отсутствии DuckDB-кэша:
+  это честный портабельный guard интеграционных тестов, а не заглушка
+  (при наличии кэша тесты реально выполняются). Заглушек и «мёртвых»
+  assert'ов в наборе не осталось.
+- Итог: **900 → 859 тестов, все проходят** (857 удалено/исправлено + 1 новый).
+
+### Migration notes
+
+- **Формат media в `agent_conversation_messages` обновлён до AW.**
+  Новые записи пишутся в `{filename, file_id, mime_type, file_size}`;
+  старые записи `{filename, data}` продолжают читаться. Для перевода
+  существующих данных в новый формат — `python scripts/backfill_media_aw.py`
+  (поддерживает `--dry-run`; идемпотентен).
+- **`nanobot==0.3.0` закреплён в `requirements.txt`.** Если развёртывание
+  на `nanobot<0.3.0` — обновите: `pip install --upgrade 'nanobot==0.3.0'`.
 
 ### Tests
 

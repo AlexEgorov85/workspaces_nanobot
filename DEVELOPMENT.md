@@ -266,6 +266,73 @@ TestDatabaseLoggingHookFactory.test_concurrent_sessions_do_not_mix_request_id`
 
 ---
 
+## 🆕 Сервисный слой v2.3.0 (MessageExchange + LLM-клиент + утилиты)
+
+v2.3.0 добавляет поверх сервисного слоя v2.0.0 набор общих модулей, чтобы
+устранить дрейф поведения между каналами, навыками и CLI-инструментами.
+
+### `lib/channels/message_exchange.py` — общий движок каналов
+
+`MessageExchange` — единая точка кодирования/декодирования `InboundMessage` /
+`OutboundMessage`, поллинга и публикации outbound, фильтрации служебных
+сообщений. `PostgresChannel` и `RedisChannel` — тонкие обёртки над ним,
+`streamlit_app.py` использует тот же движок для чтения истории. Запрещено
+дублировать логику polling/encoding в новых каналах — только через
+`MessageExchange`.
+
+Зависимости модуля:
+- `lib/utils/media.py` — кодек media (AW-формат `{filename, file_id, mime_type,
+  file_size}` + обратная совместимость со старым `{filename, data}` и
+  data-URL).
+- `lib/utils/media_jsonb.py` — JSONB-декодер media для PG.
+- `lib/utils/outbound_filter.py` — единый фильтр служебных outbound
+  (`system`, `audit`, `tool_audit`, `_assemble_outbound`-артефакты).
+- `SessionFileStore` (`lib/utils/session_file_store.py`) — общий стор
+  вложений под `data_store/cache/sessions/<key>/attachments/`.
+
+При добавлении нового канала: наследовать `nanobot.channels.base.BaseChannel`
+и делегировать `start/stop/send/send_delta/poll_once` в `MessageExchange`.
+Подробнее — [`lib/channels/README.md`](lib/channels/README.md).
+
+### `lib/services/llm_client.py` — единая точка вызова LLM
+
+Единственное место, откуда делаются запросы к LLM-провайдеру: ретраи,
+таймауты, логирование через `loguru`, redaction секретов. Параметры
+(API-ключ, base URL, модель) — через `config.require_setting("providers",
+"llm")`. Используется навыком `audit_analyzer`, утилитой `tools/build_vectors.py`
+и другими потребителями. Прямые `httpx`-вызовы к LLM в новом коде запрещены.
+
+### `lib/utils/node_access.py` — обход настроек
+
+Хелперы для безопасного обхода `SETTINGS` / `config.json` / `project.json`
+с поддержкой `require_setting` (строгий) и `get_setting` (с fallback).
+Удаляет ad-hoc `cfg.get("a", {}).get("b", default)` по кодовой базе. Потребители:
+`audit_settings.py`, `application_context.py`, `cache_provider_impl.py`.
+
+### `lib/utils/logging_utils.py` — настройка `loguru`
+
+Один модуль с пресетами `setup(level=..., json=..., redact_keys=...)`,
+вызываемый из `ApplicationContext.create()` и CLI-цикла. Гарантирует
+одинаковый формат логов и redaction секретов во всех точках входа
+(`gateway.py`, `cli_agent.py`, `streamlit_app.py`).
+
+### `lib/utils/outbound_filter.py` — фильтрация outbound
+
+Скрывает internal-сообщения из пользовательского потока. Раньше фильтр
+был в каждом канале свой → поведение в Streamlit расходилось с
+Postgres/Redis. Теперь — один, через `MessageExchange`.
+
+### `scripts/backfill_media_aw.py` — миграция media в AW-формат
+
+Утилита для существующих развёртываний: читает `agent_conversation_messages`,
+конвертирует старые `{filename, data}` в `{filename, file_id, mime_type,
+file_size}` (payload → `data_store/cache/sessions/_shared/attachments/`,
+в БД — только `file_id`). Идемпотентна: записи с уже проставленным
+`file_id` пропускаются, HTTP/HTTPS-ссылки не трогает. CLI:
+`python scripts/backfill_media_aw.py [--dry-run]`.
+
+---
+
 ## 📁 Структура проекта
 
 ```
