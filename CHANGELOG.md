@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-08-18
+
 > **MINOR-релиз:** единая платформа медиа-вложений (кодек + `MessageExchange` +
 > `SessionFileStore`), backfill-скрипт для миграции legacy-формата в AW, единый
 > LLM-клиент в `lib.services.llm_client`, унификация служебных путей настроек
