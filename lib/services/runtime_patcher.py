@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from lib.utils.node_access import get_path as _get
@@ -64,6 +65,7 @@ class RuntimePatcher:
         *,
         db_logging_service: Any = None,
         session_manager: Any = None,
+        recent_files_hook: Any = None,
     ) -> PatchReport:
         """Применить все патчи и вернуть отчёт.
 
@@ -74,6 +76,9 @@ class RuntimePatcher:
             workspace_dir: ``Path`` — корень workspace (для ``data_store/``).
             agent: ``AgentLoop`` (для ``patch_assemble_outbound``).
             tool_audit_hook: ``ToolAuditHook`` (для ``patch_assemble_outbound``).
+            recent_files_hook: ``RecentFilesHook`` (опционально, для
+                ``patch_assemble_outbound`` — auto-attach созданных файлов
+                в ``OutboundMessage.media``).
             db_logging_service: ``DbLoggingService`` (для ``patch_subagent_logging``;
                 ``None`` — патч пропускается).
             session_manager: ``SessionManager``/``PGSessionManager`` — для
@@ -86,7 +91,7 @@ class RuntimePatcher:
         self._record(report, "context_governor", self.patch_context_governor(
             config, settings, workspace_dir))
         self._record(report, "assemble_outbound", self.patch_assemble_outbound(
-            agent, tool_audit_hook))
+            agent, tool_audit_hook, recent_files_hook=recent_files_hook))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager))
         return report
@@ -200,22 +205,46 @@ class RuntimePatcher:
     # ------------------------------------------------------------------
 
     def patch_assemble_outbound(
-        self, agent: Any, tool_audit_hook: Any
+        self,
+        agent: Any,
+        tool_audit_hook: Any,
+        recent_files_hook: Any = None,
     ) -> Tuple[bool, str]:
         """Подменить ``agent._assemble_outbound`` обёрткой, дописывающей аудит.
 
         ``_assemble_outbound`` (см. ``nanobot/agent/loop.py``) формирует
         финальный ``OutboundMessage``. Обёртка вызывает оригинальный метод,
-        затем ``tool_audit_hook.drain(session_key)`` (см.
-        ``workspace/hooks/tool_audit_hook.py``) — он возвращает и
-        обнуляет записи вызовов инструментов, накопленные за оборот
-        конкретной сессии. Сессия определяется из ``msg``: разные сессии
-        (вопросы) обрабатываются конкурентно, поэтому дренируется только
-        аудит текущего вопроса.
-        Если записи есть — кладём их в ``result.metadata["_tool_audit"]``.
+        затем:
 
-        Каналы и CLI читают этот ключ и рендерят записи в UI
-        (``✓ read(x.txt) → content`` / ``✗ exec: timeout``).
+          * ``tool_audit_hook.drain(session_key)`` (см.
+            ``workspace/hooks/tool_audit_hook.py``) — возвращает и
+            обнуляет записи вызовов инструментов, накопленные за оборот
+            конкретной сессии. Если они есть — кладём их в
+            ``result.metadata["_tool_audit"]``. Каналы и CLI рендерят их в UI.
+          * ``recent_files_hook.drain(session_key)`` (если передан; см.
+            ``workspace/hooks/recent_files_hook.py``) — возвращает пути
+            ко всем файлам, которые агент записал через ``write_file``
+            за этот оборот. Если они есть и отсутствуют в ``result.media``
+            (по basename) и реально существуют на диске — подмешиваем их
+            в ``result.media``. Закрывает три сценария:
+
+            1. модель забыла приложить созданный файл (``message({...})``
+               без ``media``);
+            2. модель приложила несуществующий путь (``test.docx`` после
+               блокировки ``pip install``) — отбрасываем через
+               ``Path(p).is_file()``;
+            3. модель приложила нереальный абсолютный путь — мы берём
+               ``params["path"]`` ПОСЛЕ ``SessionFileRedirectHook``, т.е.
+               уже реальный локальный путь.
+
+        Порядок важен: ``RecentFilesHook`` должен идти **раньше**
+        ``ToolAuditHook`` в ``AgentLoop.hooks`` (см. ``ApplicationContext``).
+
+        Args:
+            agent: ``AgentLoop``.
+            tool_audit_hook: ``ToolAuditHook``.
+            recent_files_hook: ``RecentFilesHook`` (опционально; если
+                ``None`` — auto-attach отключён).
 
         Returns:
             ``(True, "agent._assemble_outbound patched")`` при успехе;
@@ -234,10 +263,32 @@ class RuntimePatcher:
                 msg, final_content, all_msgs, stop_reason, had_injections,
                 on_stream, turn_latency_ms=turn_latency_ms,
             )
-            if result is not None:
-                entries = tool_audit_hook.drain(_session_key_of(msg))
+            if result is None:
+                return result
+            session_key = _session_key_of(msg)
+
+            # 1) Tool audit → result.metadata["_tool_audit"]
+            if tool_audit_hook is not None:
+                entries = tool_audit_hook.drain(session_key)
                 if entries:
                     result.metadata["_tool_audit"] = entries
+
+            # 2) Auto-attach recent files → result.media
+            if recent_files_hook is not None:
+                recent = recent_files_hook.drain(session_key)
+                if recent:
+                    existing_names = {
+                        Path(p).name for p in (result.media or [])
+                    }
+                    for p in recent:
+                        p_path = Path(p)
+                        if p_path.name in existing_names:
+                            continue
+                        if not p_path.is_file():
+                            continue
+                        result.media = list(result.media or []) + [str(p_path)]
+                        existing_names.add(p_path.name)
+
             return result
 
         agent._assemble_outbound = _wrap
