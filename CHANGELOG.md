@@ -8,6 +8,70 @@
 
 ## [Unreleased]
 
+> **media_files_fix (ветка):** бот не прикреплял сгенерированные файлы
+> в чат (только описание в тексте) + правки под Linux-сервер, на
+> котором часть логики не работала.
+
+### Auto-attach к чату (главное)
+
+- **`workspace/hooks/auto_attach_hook.py`** — новый per-turn
+  `AgentHook`. Отслеживает пути, в которые пишет агент через
+  `write_file` / `edit_file` / `apply_patch` / `exec`, и кладёт
+  подтверждённые файлы в общий `AutoAttachRegistry` (split by
+  `session_key`). Per-turn инстансы через `make_auto_attach_hook_factory`
+  → конкурентно-безопасно (как `DatabaseLoggingHook`).
+- **`lib/services/runtime_patcher.py`** — `patch_assemble_outbound`
+  дренирует registry и добавляет файлы в `OutboundMessage.media` с
+  дедупликацией: если бот сам прикрепил через `message(content, media=[path])`,
+  auto-attach не дублирует. Дополняет уже существующую защиту
+  `final_media = db_media if db_media else existing_media` в
+  `PostgresChannel.send()`.
+- **`lib/core/agent_factory.py`** — `AutoAttachHookFactory` всегда
+  регистрируется (страховка). Тесты обновлены (теперь 2 фабрики
+  при `db_logging_service`, 1 — без).
+- **`workspace/AGENTS.md`** — явные инструкции для LLM: для отправки
+  локального файла в текущий чат бот ДОЛЖЕН вызывать `message(content,
+  media=[path])` без явных `channel`/`chat_id` (иначе уходит в чужой
+  чат). Без инструкции LLM часто описывает файл в тексте и забывает
+  про tool.
+
+### Linux
+
+- **`workspace/skills/audit_analyzer/audit_analyze.sh`** — переписан
+  для кросс-платформенности:
+  - shebang `#!/usr/bin/env bash` (переносимо между дистрибутивами);
+  - fallback `python3` → `python` (на RHEL/Ubuntu-контейнерах алиаса
+    `python` нет, скрипт падал с `python: command not found`);
+  - `LANG`/`LC_ALL` = `C.UTF-8` (на Linux с POSIX-локалью Cyrillic в
+    выводе skill'а и DuckDB-дампах падал с `UnicodeEncodeError`);
+  - `set -e` для fail-fast;
+  - `umask 022` до `chmod +x`, чтобы `.py` оставались читаемыми
+    группой/всеми.
+- **`tests/test_audit_analyze_sh.py`** — 6 smoke-тестов: shebang,
+  python3-fallback, UTF-8 locale, нет Windows-токенов вне комментариев,
+  проброс `"$@"`, `set -e`.
+
+### Tests / Docs
+
+- **`tests/test_auto_attach_hook.py`** — 13 unit-тестов: registry
+  lifecycle, per-turn factory, `PurePath` platform-safety (Linux →
+  `PurePosixPath`, Windows → `PureWindowsPath`), `exists()`/`stat()`
+  через `Path`, дедупликация в `patch_assemble_outbound`.
+- **`tests/test_agent_factory.py`** — обновлены под новые фабрики
+  (1 для auto_attach, 2 для db_logging+auto_attach).
+- **92/92 профильных тестов** (postgres_channel, redis_channel,
+  runtime_patcher, agent_factory, auto_attach_hook) — passed.
+
+### Что НЕ изменилось
+
+- Поведение `nanobot` 0.3.0: `message` tool по-прежнему работает как
+  для нормальных ответов, так и для proactive-отправки (auto-attach
+  лишь страховка).
+- `media` формат в `agent_conversation_messages`: AW-совместимый
+  `{filename, file_id, mime_type, file_size}` (см. `93d4b77`).
+- `nanobot` зависимости: не пиновали новых версий.
+- API `gateway.py` / `cli_agent.py` — без изменений.
+
 > **QA-поддержка:** чистка тестов от «заглушек на галочку» и исправление
 > сломанного assert'а. Из 900 собранных тестов удалено 42, не дававших
 > реальной проверки; общий итог — **859 passed**.
