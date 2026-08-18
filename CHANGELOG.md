@@ -36,6 +36,21 @@
 
 ### Fixed
 
+- **auto-attach: устаревшие пути в `message(media=...)` после
+  `SessionFileRedirectHook` теперь заменяются реальными.**
+  Агент записывает файл через `write_file`, хук перенаправляет его в
+  `data_store/cache/sessions/<key>/`, но модель в `message()` прикладывает
+  исходный (до редиректа) путь — `utils.media.serialize` не находил файл
+  (`Media file not found, keeping path`), и в БД уходил AW-dict с пустым
+  `mime_type`/`file_size`. Раньше auto-attach (по basename) пропускал
+  такой путь как «уже есть» в `result.media` и оставлял битую ссылку.
+  Теперь `RuntimePatcher._wrap` заменяет первую несуществующую запись с
+  тем же basename реальным перенаправленным путём из
+  `recent_files_hook.drain(session_key)` (живые файлы не дублируются,
+  отсутствующие вложения по-прежнему отбрасываются). Тесты:
+  `tests/test_recent_files_hook.py` (новый
+  `test_patcher_replaces_stale_redirected_path`).
+
 - **gateway: `SessionFileRedirectHook` теперь подключается автоматически.**
   До фикса `lib.cli.hook_loader.scan_and_register` вызывался только в
   `cli_agent.py`, и в gateway-режиме `write`/`edit`/`create_file`/`write_file`
@@ -46,16 +61,46 @@
   (особенно на Linux с абсолютными NFS-путями, где `Path(p).is_file()`
   возвращал `False` к моменту сериализации). Теперь auto-scan выполняется в
   `ApplicationContext.create()` для всех точек входа (gateway, cli_agent,
-  streamlit) и пересобирает `AgentLoop` с объединённым списком хуков
-  (`SessionFileRedirectHook` — первым, чтобы его правки `params["path"]`
-  были видны в `ToolAuditHook`). `AgentFactory.create()` возвращает
-  `(agent, hooks, hook_factories)` вместо `(agent, hooks)`, чтобы ctx мог
-  переиспользовать `hook_factories` при пересборке без потери
-  `DatabaseLoggingHook`. `cli_agent.py` упрощён: убран дублирующий
+  streamlit) до создания агента: плагины передаются в `AgentFactory.create(
+  project_hooks=...)`, который ставит их первыми в `hooks` (правки
+  `params["path"]` видны в `ToolAuditHook`) и создаёт `AgentLoop` один раз.
+  `AgentFactory.create()` возвращает `(agent, hooks, hook_factories)`.
+  `cli_agent.py` упрощён: убран дублирующий
   `scan_and_register` + `from_config(hooks=...)`. Тесты: `test_agent_factory.py`,
   `test_cli_agent.py`, `test_application_context.py` (новые регрессионные
   `test_auto_scan_hooks_includes_session_file_redirect` и
-  `test_agent_rebuilt_after_hook_auto_scan`).
+  `test_agent_created_once_with_merged_hooks`).
+
+### Changed
+
+- **Attack на корень Warning'ов: фреймворковые хуки переехали из
+  `workspace/hooks/` в `lib/hooks/`.** `workspace/hooks/` — теперь только
+  плагины с жёстким контрактом `cls(workspace_dir=...)`. `base_tool_tracking_hook.py`,
+  `tool_audit_hook.py`, `database_logging_hook.py` (и `DatabaseLoggingHook`)
+  перенесены в `lib/hooks/` и провязываются явно через `AgentFactory`/
+  `ApplicationContext`. Это устранило сами причины gateway-warning'ов
+  `__init__() got an unexpected keyword argument 'workspace_dir'` и
+  `missing required positional argument: 'db_logging_service'`:
+  `lib/cli/hook_loader.scan_and_register` больше не нуждается ни в маркере
+  `_skip_auto_register`, ни в `inspect.signature`, ни в поиске
+  `ToolAuditHook` — теперь он инстанцирует каждый найденный плагин
+  единообразно. Заодно починен дубль `ToolAuditHook` в `AgentLoop.hooks`
+  (сканированный инстанс + инстанс от `AgentFactory`). Ранее ломался
+  `database_logging_hook.py` (эм-даш в разорванном docstring давал
+  `SyntaxError`). Сигнатуры `scan_and_register` упрощены до возврата
+  списка хуков. **`AgentLoop` теперь создаётся ровно один раз**: плагины
+  сканируются ДО создания агента и передаются в `AgentFactory.create(
+  project_hooks=...)`, который собирает `hooks = project_hooks +
+  [ToolAuditHook]` и вызывает `from_config` однократно — убран двойной
+  лог `Registered N tools` при старте (раньше агент строился дважды:
+  в `AgentFactory` и в пересборке после auto-scan). Полный список
+  подключённых хуков выводится ОДНОЙ строкой один раз после создания
+  агента (`Hooks connected: RecentFilesHook, SessionFileRedirectHook,
+  ToolAuditHook [+ N hook factory (per-turn)]`) — единая точка вывода,
+  сканер успех молчит (раньше печатался только сканированные плагины,
+  а фреймворковые хуки в лог не попадали). Обновлены импорты:
+  `agent_factory.py`, `runtime_patcher.py`, `benchmarks/hooks.py`, тесты.
+  Итог: **905 passed**.
 
 ## [2.3.0] — 2026-08-18
 

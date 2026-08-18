@@ -282,10 +282,11 @@ nanobot/
 │   ├── core/               #   ApplicationContext + фабрики
 │   ├── services/           #   сервисы (db_logging, audit, channels, ...)
 │   ├── cli/                #   REPL/typewriter/hook_loader
+│   ├── hooks/              #   фреймворковые хуки (tool_audit, database_logging)
 │   ├── lifecycle/          #   gateway_runner + shutdown_coordinator
 │   ├── channels/           #   postgres_channel, redis_channel, message_exchange
 │   └── session/            #   pg_session_manager
-├── workspace/              # runtime-данные, hooks/, skills/, memory/
+├── workspace/              # runtime-данные, hooks-плагины/, skills/, memory/
 ├── tests/                  # 859 unit-тестов
 ├── benchmarks/             # YAML-тесты, runner, scorer, reporter
 ├── tools/                  # инфраструктурные CLI (build_vectors.py)
