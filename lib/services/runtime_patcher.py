@@ -90,6 +90,9 @@ class RuntimePatcher:
             agent, tool_audit_hook))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager))
+        # Патч 4: MessageTool.execute — лечение, не костыль: подмешиваем
+        # в media свежие файлы, если бот вызвал message без media.
+        self._record(report, "message_tool", self.patch_message_tool(agent))
         return report
 
     @staticmethod
@@ -528,3 +531,136 @@ class RuntimePatcher:
         except Exception as exc:
             return False, f"patch failed: {exc}"
         return True, "SubagentManager._SubagentHook patched for DB logging"
+
+    # ------------------------------------------------------------------
+    # Патч 4: MessageTool.execute — автоприкрепление файлов
+    # ------------------------------------------------------------------
+    #
+    # ЛЕЧЕНИЕ, а не костыль: tool ``message`` в nanobot 0.3.0 имеет системный
+    # промпт, который разрешает вызывать его в текущем чате **только** по
+    # явной просьбе пользователя. LLM читает «Do not use this for the normal
+    # reply in the current chat» и интерпретирует «создай файл и прикрепи
+    # в чат» как «normal reply» → message не вызывается → файл остаётся
+    # только в ``data_store/cache/``, в ``agent_conversation_messages.media``
+    # пусто, Streamlit вложение не показывает.
+    #
+    # Чтобы вылечить это без правки upstream (nanobot) и без нового tool,
+    # мы wrap'аем ``MessageTool.execute``: если бот вызвал ``message``
+    # БЕЗ media (что и есть «забыл»), мы подмешиваем в media свежие
+    # файлы из ``AutoAttachRegistry`` (per-turn bucket). Это эквивалентно
+    # тому, как если бы LLM сам вызвал ``message(content, media=[path])``,
+    # но без требования помнить про параметр.
+    #
+    # Дедупликация: если бот всё-таки передал часть файлов, мы добавляем
+    # только те свежие, которых нет в его media. Никаких дублей.
+    #
+    # Patch применяется в ``apply_all`` после остальных; если tool
+    # ``message`` отсутствует (CLI-режим без MessageTool) — патч
+    # пропускается без ошибки.
+
+    def patch_message_tool(self, agent: Any) -> Tuple[bool, str]:
+        """Wrap ``MessageTool.execute`` — подмешивает свежие файлы в media.
+
+        Условия:
+          * tool ``message`` зарегистрирован в ``agent.tools`` и это
+            ``nanobot.agent.tools.message.MessageTool``;
+          * ``MessageTool.execute`` ещё не wrapped (idempotent patch).
+
+        Returns:
+            ``(True, "MessageTool.execute wrapped")`` при успехе;
+            ``(False, <причина>)`` если tool отсутствует или API
+            nanobot изменился.
+        """
+        if agent is None:
+            return False, "agent is None"
+        try:
+            from nanobot.agent.tools.message import MessageTool
+        except Exception as exc:
+            return False, f"import failed: {exc}"
+
+        message_tool = agent.tools.get("message")
+        if not isinstance(message_tool, MessageTool):
+            return False, "message tool is missing or not MessageTool"
+
+        # Idempotent: если уже wrapped — повторно не накатываем.
+        if getattr(message_tool.execute, "_audit_track_attached", False):
+            return True, "MessageTool.execute already wrapped"
+
+        # Ленивый импорт AutoAttachRegistry — без него патч no-op,
+        # MessageTool работает ровно как раньше.
+        try:
+            from workspace.hooks.auto_attach_hook import AutoAttachRegistry
+        except Exception:
+            AutoAttachRegistry = None  # type: ignore[assignment]
+
+        original_execute = message_tool.execute
+
+        async def _wrapped_execute(
+            content: str,
+            channel: Optional[str] = None,
+            chat_id: Optional[str] = None,
+            message_id: Optional[str] = None,
+            media: Optional[list] = None,
+            buttons: Any = None,
+            **kwargs: Any,
+        ):
+            """Wrap execute: подмешать свежие файлы в media, если бот забыл.
+
+            Логика:
+              1. ``media`` пустой (None или [])?
+              2. Узнаём ``session_key`` текущего оборота через
+                 ``MessageTool._fallback_*`` (выставляется gateway'ом)
+                 или через ``current_request_context()``.
+              3. Дренируем ``AutoAttachRegistry.drain(session_key)``.
+              4. Если есть свежие файлы — добавляем в ``media`` (дедуп
+                 по ``os.path.normpath``).
+              5. Делегируем ``original_execute`` с дополненным media.
+            """
+            if AutoAttachRegistry is not None:
+                # Шаг 1-2: session_key.
+                session_key: Optional[str] = None
+                try:
+                    from nanobot.agent.tools.context import current_request_context
+                    ctx = current_request_context()
+                    if ctx is not None:
+                        session_key = getattr(ctx, "session_key", None)
+                except Exception:
+                    pass
+                if not session_key and (
+                    message_tool._fallback_channel
+                    and message_tool._fallback_chat_id
+                ):
+                    session_key = (
+                        f"{message_tool._fallback_channel}:"
+                        f"{message_tool._fallback_chat_id}"
+                    )
+
+                # Шаг 3: дренировать свежие файлы.
+                if session_key:
+                    fresh = AutoAttachRegistry.drain(session_key)
+                    if fresh:
+                        # Шаг 4: дедуп по нормализованному пути.
+                        existing = list(media or [])
+                        seen = {os.path.normpath(p) for p in existing}
+                        for path in fresh:
+                            np = os.path.normpath(path)
+                            if np in seen:
+                                continue
+                            existing.append(path)
+                            seen.add(np)
+                        media = existing
+
+            return await original_execute(
+                content,
+                channel=channel,
+                chat_id=chat_id,
+                message_id=message_id,
+                media=media,
+                buttons=buttons,
+                **kwargs,
+            )
+
+        # Маркер для идемпотентности.
+        _wrapped_execute._audit_track_attached = True  # type: ignore[attr-defined]
+        message_tool.execute = _wrapped_execute  # type: ignore[method-assign]
+        return True, "MessageTool.execute wrapped (auto-attach for message tool)"

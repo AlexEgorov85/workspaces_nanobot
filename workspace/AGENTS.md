@@ -41,6 +41,28 @@ Skeleton of a correct delivery turn:
            in the Streamlit chat (and as a Telegram document, etc.)
 ```
 
+### Защита от забывчивости (auto-attach)
+
+Если ты вызвал `message(content="...")` БЕЗ `media`, а в текущем
+обороте записывал файлы через `write_file` / `edit_file` / `exec` —
+`patch_message_tool` (`RuntimePatcher.patch_message_tool`) автоматически
+подмешает свежие файлы в `media`. Это ЛЕЧЕНИЕ, а не костыль: tool
+`message` сам знает, что при ответе в текущий чат нужно прикрепить
+свежие файлы. Раньше LLM забывал про media-параметр (потому что
+описание tool "message" в nanobot 0.3.0 запрещает использовать его
+для normal reply в текущем чате), и файлы терялись.
+
+Так что:
+- **Всегда вызывай `message` для отправки файлов** — это правильно.
+- Если забыл `media` — патч подстрахует.
+- Если бот вообще не вызвал `message` (только текст-ответ) — есть
+  fallback в `patch_assemble_outbound`, который дополнит media
+  свежими файлами перед записью в `agent_conversation_messages`.
+
+Файл **создаётся** в `data_store/cache/` (см. File Storage Policy
+выше). Запиши путь в первой строке размышлений — тогда ты не
+потеряешь его между итерациями.
+
 ## Scheduled Reminders
 
 Before scheduling reminders, check available skills and follow skill guidance first.

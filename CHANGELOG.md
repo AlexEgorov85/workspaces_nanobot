@@ -20,20 +20,32 @@
   подтверждённые файлы в общий `AutoAttachRegistry` (split by
   `session_key`). Per-turn инстансы через `make_auto_attach_hook_factory`
   → конкурентно-безопасно (как `DatabaseLoggingHook`).
-- **`lib/services/runtime_patcher.py`** — `patch_assemble_outbound`
-  дренирует registry и добавляет файлы в `OutboundMessage.media` с
-  дедупликацией: если бот сам прикрепил через `message(content, media=[path])`,
-  auto-attach не дублирует. Дополняет уже существующую защиту
-  `final_media = db_media if db_media else existing_media` в
-  `PostgresChannel.send()`.
+- **`lib/services/runtime_patcher.py`** — два патча:
+  - `patch_assemble_outbound` (страховка) дренирует registry и
+    добавляет файлы в `OutboundMessage.media` с дедупликацией: если
+    бот сам прикрепил через `message(content, media=[path])`, тут уже
+    пусто, fallback пропускает. Дополняет защиту
+    `final_media = db_media if db_media else existing_media` в
+    `PostgresChannel.send()`.
+  - **`patch_message_tool` (лечение) — wrap `MessageTool.execute`**:
+    если бот вызвал `message(content)` без `media`, обёртка подмешивает
+    в media свежие файлы из `AutoAttachRegistry` (по текущему
+    `session_key`). Дедуп: если бот передал часть файлов сам —
+    дублей не будет. **Это правильное лечение, а не костыль**:
+    LLM забывал про media-параметр, потому что описание tool `message`
+    в nanobot 0.3.0 запрещает использовать его для normal reply в
+    текущем чате ("Do not use this for the normal reply: answer
+    naturally instead"). Правкой upstream (nanobot) мы не можем,
+    поэтому подмешиваем на уровне tool-обёртки. Идемпотентно
+    (`_audit_track_attached` маркер).
 - **`lib/core/agent_factory.py`** — `AutoAttachHookFactory` всегда
   регистрируется (страховка). Тесты обновлены (теперь 2 фабрики
   при `db_logging_service`, 1 — без).
 - **`workspace/AGENTS.md`** — явные инструкции для LLM: для отправки
   локального файла в текущий чат бот ДОЛЖЕН вызывать `message(content,
   media=[path])` без явных `channel`/`chat_id` (иначе уходит в чужой
-  чат). Без инструкции LLM часто описывает файл в тексте и забывает
-  про tool.
+  чат). Дополнительно — раздел «Защита от забывчивости» с пояснением,
+  что патч подстрахует, если бот забыл `media`.
 
 ### Linux
 
@@ -57,10 +69,15 @@
   lifecycle, per-turn factory, `PurePath` platform-safety (Linux →
   `PurePosixPath`, Windows → `PureWindowsPath`), `exists()`/`stat()`
   через `Path`, дедупликация в `patch_assemble_outbound`.
+- **`tests/test_runtime_patcher_message_tool.py`** — 10 unit-тестов
+  для `patch_message_tool`: idempotent-метка, поведение при пустом
+  registry, автоподмес файлов, дедуп при частичном пересечении,
+  разделение по `session_key` (чужой файл не утекает).
 - **`tests/test_agent_factory.py`** — обновлены под новые фабрики
   (1 для auto_attach, 2 для db_logging+auto_attach).
-- **92/92 профильных тестов** (postgres_channel, redis_channel,
-  runtime_patcher, agent_factory, auto_attach_hook) — passed.
+- **52/52 профильных тестов** (postgres_channel, redis_channel,
+  runtime_patcher, runtime_patcher_message_tool, agent_factory,
+  auto_attach_hook) — passed.
 
 ### Что НЕ изменилось
 
