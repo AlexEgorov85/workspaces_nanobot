@@ -8,3 +8,4 @@ numpy==2.4.2
 pyarrow==23.0.1
 PyYAML==6.0.3
 redis==8.0.0
+nanobot==0.3.0
