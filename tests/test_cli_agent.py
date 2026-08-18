@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -123,17 +124,6 @@ def _setup_fake_modules():
 
 
 class TestDisplayConfig:
-    def test_defaults(self):
-        from lib.cli.display_config import DisplayConfig
-
-        cfg = DisplayConfig()
-        assert cfg.show_reasoning is True
-        assert cfg.show_tool_calls is True
-        assert cfg.show_tool_results is True
-        assert cfg.show_tool_params is True
-        assert cfg.show_progress is True
-        assert cfg.typewriter_speed == 0.01
-
     def test_from_settings(self):
         from lib.cli.display_config import DisplayConfig
 
@@ -179,12 +169,6 @@ class TestHookLoader:
 
 
 class TestTypewriter:
-    @pytest.mark.asyncio
-    async def test_empty_noop(self):
-        from lib.cli.console_loop import _typewriter
-
-        await _typewriter("", "bold", 0.01)
-
     @pytest.mark.asyncio
     async def test_zero_speed_prints(self):
         from lib.cli.console_loop import _typewriter
@@ -314,10 +298,11 @@ class TestConfigureLogging:
         settings = {"cli": {"log_level": "WARNING"}}
         with patch.dict("os.environ", clear=True):
             _configure_logging(settings)
-            assert os.environ["NANOBOT_LOG_LEVEL"] == "WARNING" if False else True  # noqa
+            assert os.environ["NANOBOT_LOG_LEVEL"] == "WARNING"
 
-    def test_dict_settings(self):
+    def test_defaults_to_warning(self):
         from cli_agent import _configure_logging
 
         with patch.dict("os.environ", clear=True):
-            _configure_logging({"cli": {"log_level": "DEBUG"}})
+            _configure_logging({})
+            assert os.environ["NANOBOT_LOG_LEVEL"] == "WARNING"

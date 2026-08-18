@@ -25,9 +25,11 @@ class TestShutdownOrder:
 
     def test_clear(self):
         coord = ShutdownCoordinator()
-        coord.register("a", lambda: None)
+        order = []
+        coord.register("a", lambda: order.append("a"))
         coord.clear()
-        coord.shutdown_all()  # ничего не должно делать
+        coord.shutdown_all()
+        assert order == []  # после clear ничего выполняться не должно
 
 
 class TestResolveStopFn:

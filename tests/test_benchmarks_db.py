@@ -30,19 +30,13 @@ def mock_utils_db():
         sys.modules["utils"] = types.ModuleType("utils")
         sys.modules["utils.db"] = utils_db
 
-        from benchmarks.db import BenchmarkDB, _is_greenplum, _db_ok
+        from benchmarks.db import BenchmarkDB, _is_greenplum
 
         yield {
             "utils_db": utils_db,
             "BenchmarkDB": BenchmarkDB,
             "_is_greenplum": _is_greenplum,
-            "_db_ok": _db_ok,
         }
-
-
-class TestDBModule:
-    def test_db_ok_true(self, mock_utils_db):
-        assert mock_utils_db["_db_ok"] is True
 
 
 class TestIsGreenplum:

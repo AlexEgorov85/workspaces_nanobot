@@ -71,6 +71,3 @@ class TestTerminateAll:
         proc.kill.assert_called_once()
         # очередь процессов очищена
         assert mgr._processes == []
-
-    def test_terminate_all_with_no_processes(self):
-        SubprocessManager().terminate_all()  # не должно упасть

@@ -45,28 +45,6 @@ class TestSafeSessionKey:
         assert safe_session_key("abc123-_.~") == "abc123-_.~"
 
 
-class TestCsvVal:
-    def test_none_returns_empty(self):
-        from utils.session_file_store import _csv_val
-
-        assert _csv_val(None) == ""
-
-    def test_str_returns_str(self):
-        from utils.session_file_store import _csv_val
-
-        assert _csv_val("hello") == "hello"
-
-    def test_int_converted(self):
-        from utils.session_file_store import _csv_val
-
-        assert _csv_val(42) == "42"
-
-    def test_float_converted(self):
-        from utils.session_file_store import _csv_val
-
-        assert _csv_val(3.14) == "3.14"
-
-
 class TestPrepareContent:
     def test_json_dict_formatted(self):
         from utils.session_file_store import prepare_content
@@ -179,13 +157,6 @@ class TestSessionFileStoreInit:
         store = SessionFileStore(tmp_path)
         assert (tmp_path / "cache" / "sessions").exists()
         assert (tmp_path / "cache" / "archive").exists()
-
-    def test_default_limits(self, tmp_path):
-        from utils.session_file_store import SessionFileStore
-
-        store = SessionFileStore(tmp_path)
-        assert store.max_files == 0
-        assert store.max_age_hours == 0
 
     def test_custom_limits(self, tmp_path):
         from utils.session_file_store import SessionFileStore

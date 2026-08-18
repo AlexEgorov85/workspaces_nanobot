@@ -43,14 +43,6 @@ def make_ev(status="ok", detail=""):
     return {"status": status, "detail": detail}
 
 
-class TestToolAuditHookInit:
-    def test_empty_state(self, mock_nanobot_agent):
-        hook = mock_nanobot_agent["ToolAuditHook"]()
-        assert hook._entries == {}
-        assert hook._calls == {}
-        assert hook._pending_start == {}
-
-
 class TestBeforeExecuteTools:
     def test_adds_entries(self, mock_nanobot_agent):
         hook = mock_nanobot_agent["ToolAuditHook"]()

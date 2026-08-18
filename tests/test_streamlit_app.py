@@ -337,6 +337,3 @@ class TestModuleConfig:
         assert mock_all["streamlit_app"]._POLL_INTERVAL == 1.0
         assert mock_all["streamlit_app"]._dsn == ""
         assert mock_all["streamlit_app"]._schema == "public"
-
-    def test_default_fq_table(self, mock_all):
-        assert "public.agent_conversation_messages" in mock_all["streamlit_app"]._fq_table

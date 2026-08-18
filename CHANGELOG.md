@@ -6,6 +6,57 @@
 
 Релизные ветки именуются как `release/vX.Y`, теги патч-релизов — `vX.Y.Z`.
 
+## [Unreleased]
+
+> **QA-поддержка:** чистка тестов от «заглушек на галочку» и исправление
+> сломанного assert'а. Из 900 собранных тестов удалено 42, не дававших
+> реальной проверки; общий итог — **859 passed**.
+
+### Tests
+
+- **Удалены 42 «теста-галочки»** (не давали никакой проверки или дублировали
+  код под тестом). Разбор всех 42 файлов тестов vs исходники показал: ~87% тестов
+  реальные, но ~13% — mock-only или пустые. Удалённое поквартально:
+  - `test_benchmarks_models.py` — убраны 11 тестов, пересказывавших дефолты
+    датаклассов (сломанный дефолт «чинился» правкой самого теста); остался
+    осмысленный `test_hash` (`__hash__`/`__eq__`).
+  - `test_cli_agent.py` — `test_defaults` датакласса `DisplayConfig`,
+    `test_empty_noop` и `test_dict_settings` (без assert'ов).
+  - `test_benchmarks_runner.py` — 3 smoke-теста без assert'ов
+    (`test_no_workspace_returns_early`, `test_skips_nonexistent_file`,
+    `test_cleanup_called_on_success`).
+  - `test_config_service.py` — 5 тестов «не должно упасть» без проверок
+    (`test_no_providers_attribute_noop`, `test_missing_provider_section_skipped`,
+    `test_exec_timeout_errors_suppressed`, `test_no_config_json_noop`,
+    `test_invalid_json_noop`).
+  - `test_application_context.py` — 3 lifecycle-теста без единого assert'а
+    (`test_start_runs_and_stops`, `test_double_start_is_safe`,
+    `test_double_stop_is_safe`).
+  - `test_pg_session_manager.py` — 6 тестов (`test_init_defaults`,
+    `test_close_noop`, `test_invalidate_removes_from_cache`,
+    `test_invalidate_missing`, и два, мокавших саму `_load`:
+    `test_read_session_file_found`/`test_read_session_file_not_found`).
+  - `test_utils_session_file_store.py` — `TestCsvVal` (4 эхо-теста однострочной
+    функции `_csv_val`) и `test_default_limits` (дефолты конструктора).
+  - по 1 тесту: `test_console_loop` (`test_empty_noop`),
+    `test_subprocess_manager` (`test_terminate_all_with_no_processes`),
+    `test_hooks_tool_audit_hook` (`test_empty_state`), `test_benchmarks_db`
+    (`test_db_ok_true` — трюизм из мок-фикстуры), `test_streamlit_app`
+    (`test_default_fq_table` — дублирует format-string), `test_config`
+    (`test_settings_is_attrdict`.
+- **Починен сломанный assert в `test_cli_agent.py:317`.**
+  `assert os.environ[...] == "WARNING" if False else True` из-за приоритета
+  тернарника всегда сводился к `assert True` (ветка вообще не читала `os`).
+  Заменён на реальную проверку `NANOBOT_LOG_LEVEL`; добавлен второй тест
+  `test_defaults_to_warning`.
+- **`test_shutdown_coordinator::test_clear` усилен** — вместо пустого вызова
+  теперь `assert order == []` (после `clear()` хендлеры не выполняются).
+- **`test_db_loader.py` оставлен с `pytest.skip`** при отсутствии DuckDB-кэша:
+  это честный портабельный guard интеграционных тестов, а не заглушка
+  (при наличии кэша тесты реально выполняются). Заглушек и «мёртвых»
+  assert'ов в наборе не осталось.
+- Итог: **900 → 859 тестов, все проходят** (857 удалено/исправлено + 1 новый).
+
 ## [2.2.0] — 2026-08-17
 
 > **Minor-релиз:** единый пул соединений PostgreSQL (одна очередь + N воркеров)

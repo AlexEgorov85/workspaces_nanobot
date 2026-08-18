@@ -92,29 +92,6 @@ class TestApplyProviderKeys:
         svc.apply_provider_keys(config)
         assert config.providers.openai.api_key == "sk-secret"
 
-    def test_no_providers_attribute_noop(self, fake_config_module):
-        from lib.services.config_service import ConfigService
-
-        settings = MagicMock()
-        del settings.providers
-        fake_config_module.SETTINGS = settings
-
-        config = MagicMock()
-        svc = ConfigService()
-        svc.apply_provider_keys(config)  # не должно упасть
-
-    def test_missing_provider_section_skipped(self, fake_config_module):
-        from lib.services.config_service import ConfigService
-
-        settings = MagicMock()
-        settings.providers = {"openai": {"api_key": "sk-secret"}}
-        fake_config_module.SETTINGS = settings
-
-        config = MagicMock()
-        config.providers.openai = None
-        svc = ConfigService()
-        svc.apply_provider_keys(config)  # не должно упасть
-
 
 class TestApplyTimeouts:
     def test_llm_timeout_sets_env(self, fake_config_module):
@@ -148,14 +125,6 @@ class TestApplyTimeouts:
         svc = ConfigService()
         svc.apply_timeouts(config, max_iterations=10)
         assert config.agents.defaults.max_tool_iterations == 10
-
-    def test_exec_timeout_errors_suppressed(self, fake_config_module):
-        from lib.services.config_service import ConfigService
-
-        config = MagicMock()
-        config.tools.exec.timeout.side_effect = AttributeError("no tools")
-        svc = ConfigService()
-        svc.apply_timeouts(config, exec_timeout=99)  # не должно упасть
 
 
 class TestLoad:
@@ -254,20 +223,3 @@ class TestPreResolveEnvRefs:
             svc = ConfigService()
             svc._pre_resolve_env_refs(script_dir=tmp_path)
             assert "LLM_API_KEY" not in os.environ
-
-    def test_no_config_json_noop(self, fake_config_module, tmp_path):
-        from lib.services.config_service import ConfigService
-
-        fake_config_module.SETTINGS = {}
-        with patch.dict("os.environ", clear=True):
-            svc = ConfigService()
-            svc._pre_resolve_env_refs(script_dir=tmp_path)  # не должно упасть
-
-    def test_invalid_json_noop(self, fake_config_module, tmp_path):
-        from lib.services.config_service import ConfigService
-
-        cfg = tmp_path / "config.json"
-        cfg.write_text("{broken", encoding="utf-8")
-        with patch.dict("os.environ", clear=True):
-            svc = ConfigService()
-            svc._pre_resolve_env_refs(script_dir=tmp_path)  # не должно упасть

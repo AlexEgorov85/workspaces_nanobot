@@ -11,12 +11,6 @@ from lib.cli.display_config import DisplayConfig
 
 class TestPrintReasoningBlock:
     @pytest.mark.asyncio
-    async def test_empty_noop(self):
-        from lib.cli.console_loop import _print_reasoning_block
-
-        await _print_reasoning_block("  ", DisplayConfig())
-
-    @pytest.mark.asyncio
     async def test_disabled_noop(self):
         from lib.cli.console_loop import _print_reasoning_block
 

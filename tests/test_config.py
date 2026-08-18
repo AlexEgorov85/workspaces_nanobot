@@ -324,10 +324,6 @@ class TestLoadConfigJson:
 class TestSettingsModule:
     """Smoke test: the SETTINGS global loads without crashing."""
 
-    def test_settings_is_attrdict(self):
-        from config import SETTINGS
-        assert isinstance(SETTINGS, AttrDict)
-
     def test_env_vars_set(self):
         from config import SETTINGS
         for key, val in _flatten_env(SETTINGS).items():

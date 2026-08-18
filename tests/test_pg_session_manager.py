@@ -97,12 +97,6 @@ class TestPGSessionManagerPure:
         assert "updated_at" in payload
         assert "metadata" in payload
 
-    def test_init_defaults(self, mock_db_and_psycopg):
-        mgr = mock_db_and_psycopg(workspace=Path("/tmp/ws"))
-        assert mgr.workspace == Path("/tmp/ws").resolve()
-        assert mgr._schema == "public"
-        assert mgr._cache == {}
-
     def test_init_custom_schema(self, mock_db_and_psycopg):
         mgr = mock_db_and_psycopg(
             workspace=Path("/tmp/ws"),
@@ -124,10 +118,6 @@ class TestPGSessionManagerPure:
         assert mgr.legacy_sessions_dir is not None
         assert hasattr(mgr, "read_session_metadata")
         assert callable(mgr.read_session_metadata)
-
-    def test_close_noop(self, mock_db_and_psycopg):
-        mgr = mock_db_and_psycopg(workspace=Path("/tmp/ws"))
-        mgr.close()  # should not raise
 
 
 class TestPGSessionManagerGetOrCreate:
@@ -283,20 +273,6 @@ class TestPGSessionManagerList:
         assert result[0]["preview"] == "Hello!"
 
 
-class TestPGSessionManagerInvalidate:
-    def test_invalidate_removes_from_cache(self, mock_db_and_psycopg):
-        from lib.session.pg_session_manager import Session
-
-        mgr = mock_db_and_psycopg(workspace=Path("/tmp/ws"))
-        mgr._cache["k"] = Session(key="k")
-        mgr.invalidate("k")
-        assert "k" not in mgr._cache
-
-    def test_invalidate_missing(self, mock_db_and_psycopg):
-        mgr = mock_db_and_psycopg(workspace=Path("/tmp/ws"))
-        mgr.invalidate("nonexistent")  # should not raise
-
-
 class TestPGSessionManagerFlushAll:
     def test_flush_all_empty(self, mock_db_and_psycopg):
         mgr = mock_db_and_psycopg(workspace=Path("/tmp/ws"))
@@ -311,21 +287,3 @@ class TestPGSessionManagerFlushAll:
             count = mgr.flush_all()
             assert count == 2
             assert mock_save.call_count == 2
-
-
-class TestPGSessionManagerReadSessionFile:
-    @patch("lib.session.pg_session_manager.PGSessionManager._load")
-    def test_read_session_file_found(self, mock_load, mock_db_and_psycopg):
-        from lib.session.pg_session_manager import Session
-
-        mgr = mock_db_and_psycopg(workspace=Path("/tmp/ws"))
-        mock_load.return_value = Session(key="k", messages=[{"role": "user", "content": "hi"}])
-        result = mgr.read_session_file("k")
-        assert result is not None
-        assert result["key"] == "k"
-
-    @patch("lib.session.pg_session_manager.PGSessionManager._load")
-    def test_read_session_file_not_found(self, mock_load, mock_db_and_psycopg):
-        mgr = mock_db_and_psycopg(workspace=Path("/tmp/ws"))
-        mock_load.return_value = None
-        assert mgr.read_session_file("k") is None

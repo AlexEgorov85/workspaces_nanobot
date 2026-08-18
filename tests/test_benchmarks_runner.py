@@ -423,13 +423,6 @@ class TestPrintSummary:
 # ===================================================================
 
 class TestCleanupItem:
-    def test_no_workspace_returns_early(self):
-        from benchmarks.runner import _cleanup_item
-        item = _make_item("a", check_file="out.txt")
-        bot = MagicMock()
-        del bot._loop.workspace
-        _cleanup_item(item, bot)
-
     def test_deletes_check_file(self, tmp_path):
         from benchmarks.runner import _cleanup_item
         f = tmp_path / "out.txt"
@@ -439,13 +432,6 @@ class TestCleanupItem:
         bot._loop.workspace = str(tmp_path)
         _cleanup_item(item, bot)
         assert not f.exists()
-
-    def test_skips_nonexistent_file(self):
-        from benchmarks.runner import _cleanup_item
-        item = _make_item("a", check_file="out.txt")
-        bot = MagicMock()
-        bot._loop.workspace = "/nonexistent"
-        _cleanup_item(item, bot)
 
     def test_multi_step_items_cleaned(self, tmp_path):
         from benchmarks.runner import _cleanup_item
@@ -570,15 +556,6 @@ class TestRunItem:
             result = await _run_item(item, "run-1", bot, False)
             assert result == "multi_result"
             mock_run.assert_called_once_with(item, "run-1", bot, False)
-
-    @pytest.mark.asyncio
-    async def test_cleanup_called_on_success(self):
-        from benchmarks.runner import _run_item
-        item = _make_item("a", type_="single")
-        bot = MagicMock()
-        bot._loop.workspace = "/tmp"
-        with patch("benchmarks.runner._run_single", return_value="ok"):
-            await _run_item(item, "run-1", bot, False)
 
     @pytest.mark.asyncio
     async def test_cleanup_called_on_error(self):

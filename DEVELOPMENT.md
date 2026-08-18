@@ -1797,7 +1797,7 @@ python -m pytest tests/test_pg_session_manager.py -q
 # Юнит-тесты audit/кэша (sync+memory)
 python -m pytest tests/test_audit_memory_store.py tests/test_audit_sync_service.py -q
 
-# Полный набор (без БД; 856 passed после доработки пула)
+# Полный набор (без БД; 859 passed после QA-чистки тестов)
 python -m pytest tests -q
 
 # Сквозной тест навыка (требует живого PostgreSQL)
@@ -1820,6 +1820,14 @@ E2E проверяет все режимы: predefined (реальный SQL п�
 - `test_shutdown_coordinator.py` — LIFO graceful shutdown
 - `test_subprocess_manager.py` — Streamlit spawn/terminate
 - ... и т.д.
+
+> **Стандарт качества тестов (QA-чистка 2026-08-18).** Набор проревизован —
+> each test должен давать реальную проверку, а не «галочку». Не оставляем:
+> smoke-тесты без `assert` (одно «не должно упасть»), тесты, пересказывающие
+> дефолты датаклассов/конструкторов, и тесты, мокающие саму тестируемую
+> функцию. Удалено 42 таких теста, исправлен `assert ... if False else True`.
+> `test_db_loader.py` намеренно использует `pytest.skip` без DuckDB-кэша —
+> это портабельный guard интеграционных тестов, не заглушка.
 
 ---
 

@@ -285,7 +285,7 @@ nanobot/
 │   ├── channels/           #   postgres_channel, redis_channel
 │   └── session/            #   pg_session_manager
 ├── workspace/              # runtime-данные, hooks/, skills/, memory/
-├── tests/                  # 683 unit-теста (после v2.0.0)
+├── tests/                  # 859 unit-теста
 ├── benchmarks/             # YAML-тесты, runner, scorer, reporter
 ├── tools/                  # инфраструктурные CLI (build_vectors.py)
 ├── sql/                    # DDL всех таблиц
@@ -494,7 +494,9 @@ python tools/build_vectors.py --full-rebuild
 
 ## Тестирование
 
-**683 unit-теста** в `tests/` (после удаления `test_pg_agent_worker.py` в v2.0.0).
+**859 unit-тестов** в `tests/` (после QA-чистки: удалены 42 теста, не дававших
+реальной проверки, и исправлен сломанный `assert True`; подробнее — в
+[CHANGELOG.md → Unreleased](CHANGELOG.md#unreleased)).
 
 ### Запуск
 
