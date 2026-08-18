@@ -8,6 +8,7 @@ import pytest
 from utils.media import (
     data_url_info,
     entry_from_data_url,
+    normalize_storage_entry,
     read_for_ui,
     resolve_paths_and_hints,
     serialize,
@@ -117,6 +118,35 @@ class TestReadForUi:
     def test_string_data_url(self):
         url = "data:image/png;base64,YWI="
         assert read_for_ui(url) == (url, "", "file")
+
+
+class TestNormalizeStorageEntry:
+    def test_legacy_data_dict_becomes_aw_format(self):
+        url = "data:image/png;base64,YWI="
+        entry = {"filename": "a.png", "data": url}
+        out = normalize_storage_entry(entry)
+        assert out == {
+            "filename": "a.png",
+            "file_id": url,
+            "mime_type": "image/png",
+            "file_size": 2,
+        }
+        assert "data" not in out
+
+    def test_already_aw_format_untouched(self):
+        url = "data:image/png;base64,YWI="
+        e = {"filename": "a.png", "file_id": url, "mime_type": "image/png", "file_size": 2}
+        assert normalize_storage_entry(e) == e
+
+    def test_path_dict_untouched(self):
+        e = {"filename": "a.pdf", "path": "/cache/s/a.pdf"}
+        assert normalize_storage_entry(e) == e
+
+    def test_string_untouched(self):
+        assert normalize_storage_entry("https://example.com/i.png") == "https://example.com/i.png"
+
+    def test_no_data_key_untouched(self):
+        assert normalize_storage_entry({"filename": "a.png"}) == {"filename": "a.png"}
 
 
 class TestResolvePathsAndHints:

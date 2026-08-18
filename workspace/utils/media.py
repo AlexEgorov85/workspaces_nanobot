@@ -202,6 +202,24 @@ def resolve_paths_and_hints(media: list[Any]) -> tuple[list[str], list[str]]:
     return media_paths, hints
 
 
+def normalize_storage_entry(entry: Any) -> Any:
+    """Нормализовать один legacy-элемент media в AW-формат (для backfill).
+
+    ``dict {"filename", "data": "data:..."}`` → ``{"filename", "file_id",
+    "mime_type", "file_size"}`` (mime/размер выводятся из data URL).
+    Всё остальное (dict с ``file_id``, dict с ``path``, строки-URL/пути)
+    возвращается без изменений — идемпотентно.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    data = entry.get("data")
+    if not (isinstance(data, str) and data.startswith("data:")):
+        return entry
+    if entry.get("file_id"):
+        return entry
+    return entry_from_data_url(data, entry.get("filename") or None)
+
+
 def read_for_ui(entry: Any) -> tuple[str, str, str]:
     """Толерантный читатель любого спорный shape для отрисовки.
 
@@ -237,4 +255,5 @@ __all__ = [
     "deserialize",
     "resolve_paths_and_hints",
     "read_for_ui",
+    "normalize_storage_entry",
 ]
