@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import importlib
+import importlib.util
+import sys
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -10,10 +11,17 @@ from typing import Any, List, Tuple
 def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> Tuple[List[Any], Any]:
     """Сканировать ``hooks_dir`` и вернуть (hooks, tool_audit_hook).
 
-    Каждый ``*.py`` файл (исключая ``_*``) импортируется; классы-наследники
-    ``AgentHook`` (но не сам ``AgentHook`` и не ``_*``) — инстанцируются
-    с ``workspace_dir``. Если конструктор падает — хук пропускается,
-    повторной инстанциации без аргументов нет.
+    Каждый ``*.py`` файл (исключая ``_*``) импортируется через
+    ``importlib.util.spec_from_file_location`` под уникальным именем
+    ``hooks.<basename>`` — это работает без зависимости от того, в каком
+    порядке ``workspace/`` и ``workspace/hooks/`` добавлены в ``sys.path``
+    (раньше код делал ``importlib.import_module(path.name[:-3])``, что
+    требовало ``hooks/`` в ``sys.path`` как top-level — и в gateway это
+    ломалось: warning No module named 'session_file_redirect_hook').
+
+    Классы-наследники ``AgentHook`` (но не сам ``AgentHook`` и не ``_*``) —
+    инстанцируются с ``workspace_dir``. Если конструктор падает — хук
+    пропускается, повторной инстанциации без аргументов нет.
 
     Также ищется ``ToolAuditHook`` для метаданных.
     """
@@ -25,11 +33,21 @@ def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> Tuple[List[Any], 
     if not hooks_dir.is_dir():
         return hooks, tool_audit_hook
 
+    # Кэшируем индекс hooks-dir: importlib.util требует уникальное имя
+    # модуля в sys.modules; используем индекс, чтобы повторный вызов
+    # scan_and_register (например, в тестах) переиспользовал модули.
     for path in sorted(hooks_dir.iterdir()):
         if not path.is_file() or not path.name.endswith(".py") or path.name.startswith("_"):
             continue
+        module_name = f"hooks.{path.stem}"
         try:
-            mod = importlib.import_module(path.name[:-3])
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                _print_warn(f"{path.name}: spec_from_file_location failed")
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = mod
+            spec.loader.exec_module(mod)
         except Exception as exc:
             _print_warn(f"{path.name}: {exc}")
             continue

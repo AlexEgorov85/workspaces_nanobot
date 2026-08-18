@@ -112,6 +112,9 @@ def full_fake_modules(tmp_path):
         ws = str(Path(__file__).resolve().parent.parent / "workspace")
         if ws not in sys.path:
             sys.path.insert(0, ws)
+        # ``hooks`` namespace-пакет для импорта ``from hooks.tool_audit_hook``.
+        # ToolAuditHook здесь — фейк (AgentFactory.create() всё равно
+        # создаёт экземпляр через свой импорт, см. _import_tool_audit_hook).
         hooks = types.ModuleType("hooks")
         hooks.__path__ = []
         tah = types.ModuleType("hooks.tool_audit_hook")
@@ -124,37 +127,15 @@ def full_fake_modules(tmp_path):
         sys.modules["hooks"] = hooks
         sys.modules["hooks.tool_audit_hook"] = tah
 
-        # Top-level алиасы для hook_loader.scan_and_register: он импортирует
-        # по имени файла без расширения (importlib.import_module("session_file_redirect_hook")),
-        # а реальные модули лежат в workspace/hooks/. В рабочем окружении
-        # workspace добавлен в sys.path и import работает; здесь мы добавляем
-        # фиктивные top-level модули, чтобы auto-scan не падал и тесты
-        # могли проверить, что ApplicationContext вызвал from_config дважды.
-        srh = types.ModuleType("session_file_redirect_hook")
+        # session_file_store нужен для SessionStorageService; мокаем.
         sfr = types.ModuleType("session_file_store")
         sfr.SessionFileStore = MagicMock()
         sys.modules["session_file_store"] = sfr
 
-        class _SessionFileRedirectHook(hook.AgentHook):
-            instances: list = []
-
-            def __init__(self, workspace_dir=None):
-                super().__init__()
-                self.workspace_dir = workspace_dir
-                self._sessions_root = None
-                type(self).instances.append(self)
-
-        srh.SessionFileRedirectHook = _SessionFileRedirectHook
-        sys.modules["session_file_redirect_hook"] = srh
-        # tool_audit_hook top-level (hook_loader ищет ToolAuditHook-подкласс)
-        tah_top = types.ModuleType("tool_audit_hook")
-
-        class _ToolAuditHookTop:
-            def __init__(self):
-                self.drained = []
-
-        tah_top.ToolAuditHook = _ToolAuditHookTop
-        sys.modules["tool_audit_hook"] = tah_top
+        # hook_loader.scan_and_register теперь использует
+        # importlib.util.spec_from_file_location, поэтому ему не нужны
+        # top-level алиасы session_file_redirect_hook / tool_audit_hook
+        # в sys.modules — он грузит модули по абсолютному пути.
 
         # lib.services
         for name in [
@@ -291,14 +272,10 @@ class TestCreate:
             enable_db_logging=False,
             enable_audit=False,
         )
-        # Берём класс из зарегистрированного top-level модуля, чтобы
-        # isinstance работал в условиях фикстуры (workspace.hooks.* в тестах
-        # подменены фейками в sys.modules).
-        SessionFileRedirectHook = sys.modules[
-            "session_file_redirect_hook"
-        ].SessionFileRedirectHook
-
-        redirect_hooks = [h for h in ctx.hooks if isinstance(h, SessionFileRedirectHook)]
+        # Берём по имени класса — hook_loader использует
+        # spec_from_file_location, и isinstance через фейковый
+        # sys.modules["session_file_redirect_hook"] уже не работает.
+        redirect_hooks = [h for h in ctx.hooks if type(h).__name__ == "SessionFileRedirectHook"]
         assert len(redirect_hooks) == 1, (
             f"Ожидался один SessionFileRedirectHook в ctx.hooks, "
             f"найдено: {len(redirect_hooks)}. hooks={[type(h).__name__ for h in ctx.hooks]}"
@@ -333,8 +310,7 @@ class TestCreate:
         )
         # В последнем вызове в hooks=merged должен быть SessionFileRedirectHook
         last_kwargs = from_config.call_args.kwargs
-        SessionFileRedirectHook = sys.modules[
-            "session_file_redirect_hook"
-        ].SessionFileRedirectHook
-
-        assert any(isinstance(h, SessionFileRedirectHook) for h in last_kwargs["hooks"])
+        assert any(
+            type(h).__name__ == "SessionFileRedirectHook"
+            for h in last_kwargs["hooks"]
+        )

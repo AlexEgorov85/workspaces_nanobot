@@ -162,6 +162,69 @@ class TestHookLoader:
         hooks, _ = scan_and_register(tmp_path, _project_root / "workspace")
         assert hooks == []  # real.py fails to import → ignored
 
+    def test_finds_workspace_hooks_without_hooks_dir_in_syspath(self, tmp_path):
+        """Регрессия: importlib.import_module(path.name[:-3]) требовал,
+        чтобы ``hooks_dir`` был в sys.path как top-level. В gateway это
+        не выполнялось (в sys.path только workspace/), и в логе шли
+        warning'и ``No module named 'session_file_redirect_hook'``.
+        Фикс: spec_from_file_location под именем ``hooks.<stem>``.
+        """
+        from lib.cli.hook_loader import scan_and_register
+
+        # Создать поддельный ``hooks/`` с одним валидным хуком и убедиться,
+        # что sys.path НЕ содержит tmp_path (имитируем реальный gateway).
+        real_path = sys.path[:]
+        try:
+            sys.path[:] = [p for p in sys.path if str(tmp_path) not in p]
+            fake_hook = tmp_path / "my_hook.py"
+            fake_hook.write_text(
+                "from nanobot.agent import AgentHook\n"
+                "class MyHook(AgentHook):\n"
+                "    def __init__(self, workspace_dir=None):\n"
+                "        super().__init__()\n"
+                "        self.workspace_dir = workspace_dir\n"
+            )
+            hooks, _ = scan_and_register(tmp_path, tmp_path)
+            assert any(type(h).__name__ == "MyHook" for h in hooks), (
+                f"Хук должен найтись даже без tmp_path в sys.path. "
+                f"Найдено: {[type(h).__name__ for h in hooks]}"
+            )
+        finally:
+            sys.path[:] = real_path
+
+    def test_finds_real_workspace_hooks(self):
+        """Интеграционная проверка: реальные хуки в workspace/hooks/
+        должны находиться через scan_and_register. До фикса в gateway
+        они не находились.
+        """
+        from lib.cli.hook_loader import scan_and_register
+
+        hooks_dir = _project_root / "workspace" / "hooks"
+        if not hooks_dir.is_dir():
+            import pytest
+            pytest.skip("workspace/hooks не существует")
+
+        # Убираем workspace/hooks из sys.path, чтобы убедиться, что
+        # фикс работает без зависимости от path.
+        real_path = sys.path[:]
+        try:
+            sys.path[:] = [
+                p for p in sys.path
+                if not p.endswith("workspace") and not p.endswith("hooks")
+            ]
+            hooks, _ = scan_and_register(hooks_dir, _project_root / "workspace")
+            names = sorted(type(h).__name__ for h in hooks)
+            assert "SessionFileRedirectHook" in names, (
+                f"SessionFileRedirectHook должен загружаться из workspace/hooks/. "
+                f"Найдены: {names}"
+            )
+            assert "RecentFilesHook" in names, (
+                f"RecentFilesHook должен загружаться из workspace/hooks/. "
+                f"Найдены: {names}"
+            )
+        finally:
+            sys.path[:] = real_path
+
 
 # =================================================================
 # console_loop.typewriter
