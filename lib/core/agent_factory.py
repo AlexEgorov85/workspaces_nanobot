@@ -15,11 +15,19 @@
     вопросы не «путают» события) — см. ``workspace/hooks/
     database_logging_hook.py``.
 
-Семантический патч ``_assemble_outbound`` применяет ``RuntimePatcher``
+Семантический патч ``_assemble_outbound`` применяется ``RuntimePatcher``
 после ``create()`` (т.е. на этапе ``ApplicationContext.create`` /
 ``start``). ``AgentFactory`` НЕ делает monkey-patch'ей — только
 регистрирует хуки в ``AgentLoop.from_config(hooks=[...])`` и
 фабрики оборота в ``hook_factories=[...]``.
+
+Проектные хуки из ``workspace/hooks/*.py`` (например,
+``SessionFileRedirectHook``) сюда НЕ подмешиваются — это делает
+``ApplicationContext.create()`` через ``lib.cli.hook_loader.scan_and_register``
+после нашего ``create()``, пересобирая ``AgentLoop`` через
+``AgentLoop.from_config(hooks=merged, hook_factories=factory_list)``.
+Здесь factory возвращает и список фабрик, чтобы ctx мог переиспользовать
+их при пересборке.
 
 Создаёт ли AgentFactory CronService? Нет — он приходит извне готовым.
 Обычно ``ApplicationContext._make_cron_service()`` создаёт ``CronService``
@@ -34,13 +42,13 @@ from typing import Any, List, Optional, Tuple
 class AgentFactory:
     """Фабрика AgentLoop с консистентно настроенными хуками.
 
-    Управляет только составом ``hooks=`` в ``AgentLoop.from_config``.
-    Дополнительные параметры (``session_manager``, ``cron_service``)
-    пробрасываются как ``**kwargs`` в ``from_config``.
+    Управляет только составом ``hooks=`` и ``hook_factories=`` в
+    ``AgentLoop.from_config``. Дополнительные параметры (``session_manager``,
+    ``cron_service``) пробрасываются как ``**kwargs`` в ``from_config``.
 
     Пример::
 
-        agent, hooks = AgentFactory().create(
+        agent, hooks, hook_factories = AgentFactory().create(
             config, bus,
             session_manager=pg_session_manager,
             cron_service=cron,
@@ -56,7 +64,7 @@ class AgentFactory:
         cron_service: Optional[Any] = None,
         db_logging_service: Optional[Any] = None,
         agent_id: Optional[str] = None,
-    ) -> Tuple[Any, List[Any]]:
+    ) -> Tuple[Any, List[Any], List[Any]]:
         """Создать AgentLoop с подключёнными хуками.
 
         Args:
@@ -73,10 +81,21 @@ class AgentFactory:
             agent_id: id агента для колонки ``agent_id`` в логах.
 
         Returns:
-            ``(agent, hooks)`` — где ``hooks`` это СПИСОК переданных в
-            ``AgentLoop`` хуков (для тестов/диагностики). ``DatabaseLoggingHook``
-            здесь НЕТ (он создаётся per-turn через ``hook_factories``);
-            ``hooks`` содержит только ``ToolAuditHook``.
+            ``(agent, hooks, hook_factories)``:
+
+              * ``agent`` — созданный ``AgentLoop``;
+              * ``hooks`` — общие хуки, переданные в ``AgentLoop.hooks=``
+                (сейчас только ``ToolAuditHook``). Проектные хуки из
+                ``workspace/hooks/`` сюда не входят — их подмешивает
+                ``ApplicationContext`` после ``create()``;
+              * ``hook_factories`` — список per-turn фабрик, переданный в
+                ``AgentLoop.hook_factories=`` (для ``DatabaseLoggingHook``
+                или ``None``). Возвращается явно, чтобы ``ApplicationContext``
+                мог пересоздать ``AgentLoop`` после auto-scan ``hooks``
+                без потери фабрик.
+
+            ``DatabaseLoggingHook`` в ``hooks`` НЕ попадает — он создаётся
+            per-turn через ``hook_factories``.
         """
         from nanobot.agent.loop import AgentLoop
 
@@ -106,7 +125,7 @@ class AgentFactory:
             kwargs["cron_service"] = cron_service
 
         agent = AgentLoop.from_config(config, bus, **kwargs)
-        return agent, hooks
+        return agent, hooks, hook_factories
 
     @staticmethod
     def _import_tool_audit_hook():

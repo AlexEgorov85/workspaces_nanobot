@@ -62,11 +62,12 @@ class TestAgentFactory:
         from lib.core.agent_factory import AgentFactory
 
         factory = AgentFactory()
-        agent, hooks = factory.create(
+        agent, hooks, hook_factories = factory.create(
             config=MagicMock(), bus=MagicMock(),
         )
         assert agent is fake_modules["agent_instance"]
         assert all(getattr(h, "created", True) for h in hooks)
+        assert hook_factories == []
         kwargs = fake_modules["from_config"].call_args.kwargs
         assert "session_manager" in kwargs
         assert "hooks" in kwargs
@@ -99,8 +100,11 @@ class TestAgentFactory:
 
         factory = AgentFactory()
         # Без db_logging_service — один hook (ToolAuditHook), без фабрик.
-        _, hooks = factory.create(config=MagicMock(), bus=MagicMock())
+        _, hooks, hook_factories = factory.create(
+            config=MagicMock(), bus=MagicMock(),
+        )
         assert len(hooks) == 1
+        assert hook_factories == []
         kwargs = fake_modules["from_config"].call_args.kwargs
         assert kwargs["hook_factories"] == []
 
@@ -127,12 +131,13 @@ class TestAgentFactory:
         service.get_request_id.side_effect = fake_get
 
         factory = AgentFactory()
-        _, hooks = factory.create(
+        _, hooks, hook_factories = factory.create(
             config=MagicMock(), bus=MagicMock(),
             db_logging_service=service, agent_id="agent-7",
         )
         # hooks содержит только ToolAuditHook
         assert len(hooks) == 1
+        assert len(hook_factories) == 1
 
         kwargs = fake_modules["from_config"].call_args.kwargs
         assert len(kwargs["hook_factories"]) == 1

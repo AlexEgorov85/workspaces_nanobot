@@ -54,6 +54,12 @@ class ApplicationContext:
     subprocess_manager: Any = None
     preload_service: Any = None
 
+    # Per-turn hook factories (для DatabaseLoggingHook и т.п.), которые
+    # ``AgentFactory`` собрала из конфигурации и передала в
+    # ``AgentLoop.from_config(hook_factories=...)``. Нужны для
+    # пересборки ``AgentLoop`` после auto-scan проектных хуков.
+    hook_factories: list = None  # type: ignore[assignment]
+
     # Lifecycle
     _started: bool = False
     _shutdown: Optional[Any] = None  # ShutdownCoordinator
@@ -170,7 +176,7 @@ class ApplicationContext:
             cron_service = _make_cron_service(ctx.config)
 
         agent_factory = AgentFactory()
-        ctx.agent, ctx.hooks = agent_factory.create(
+        ctx.agent, ctx.hooks, ctx.hook_factories = agent_factory.create(
             ctx.config,
             ctx.bus,
             session_manager=ctx.session_manager,
@@ -180,13 +186,75 @@ class ApplicationContext:
         )
         ctx.tool_audit_hook = ctx.hooks[0]
 
+        # 6a. Auto-scan проектных хуков из ``workspace/hooks/*.py``.
+        # ``AgentFactory`` создаёт только обязательные хуки (``ToolAudit``,
+        # ``DatabaseLogging``); проектные (например, ``SessionFileRedirectHook``)
+        # подключаются здесь единым механизмом для всех точек входа
+        # (gateway, cli_agent, streamlit). Порядок важен: проектные хуки
+        # должны идти **до** ``ToolAuditHook``, чтобы их правки
+        # ``params["path"]`` уже были видны в аудите. Если папки
+        # ``hooks/`` нет или она пуста (например, в юнит-тестах) —
+        # пропускаем без ошибки, оставляем ``ctx.agent`` как есть.
+        try:
+            from lib.cli.hook_loader import scan_and_register
+
+            project_hooks, _ = scan_and_register(
+                ctx.workspace_dir / "hooks", ctx.workspace_dir
+            )
+        except Exception as exc:
+            logger.warning("hook_loader.scan_and_register failed: %s", exc)
+            project_hooks = []
+
+        if project_hooks:
+            tool_audit = ctx.tool_audit_hook
+            merged = list(project_hooks)
+            for h in ctx.hooks:
+                if h is tool_audit:
+                    continue
+                merged.append(h)
+            if tool_audit is not None and tool_audit not in merged:
+                merged.append(tool_audit)
+            ctx.hooks = merged
+            # ``ctx.agent.__class__.from_config`` может не быть в моках
+            # (тесты подменяют ``AgentLoop`` через ``MagicMock`` без атрибута
+            # на классе); в реальном окружении ``AgentLoop.from_config`` —
+            # classmethod. Достаём ``AgentLoop`` через ``sys.modules`` —
+            # ``AgentFactory.create()`` уже зарегистрировала модуль там
+            # (или это настоящий ``nanobot.agent.loop``).
+            import sys as _sys
+            from nanobot.agent.loop import AgentLoop as _AgentLoop
+
+            agent_loop_mod = _sys.modules.get(
+                "nanobot.agent.loop", _sys.modules[__name__]
+            )
+            AgentLoop_cls = getattr(agent_loop_mod, "AgentLoop", _AgentLoop)
+            ctx.agent = AgentLoop_cls.from_config(
+                ctx.config,
+                ctx.bus,
+                session_manager=ctx.session_manager,
+                cron_service=cron_service,
+                hooks=merged,
+                hook_factories=ctx.hook_factories or [],
+            )
+
         # 7. RuntimePatcher
         from lib.services.runtime_patcher import RuntimePatcher
+
+        # Найти RecentFilesHook среди зарегистрированных хуков (если
+        # был подключён через auto-scan). Используется RuntimePatcher'ом
+        # для auto-attach созданных файлов в ``OutboundMessage.media``.
+        recent_files_hook = None
+        for h in ctx.hooks:
+            cls_name = type(h).__name__
+            if cls_name == "RecentFilesHook":
+                recent_files_hook = h
+                break
 
         ctx.runtime_patcher = RuntimePatcher()
         ctx.runtime_patcher.apply_all(
             ctx.config, ctx.settings, ctx.workspace_dir,
             ctx.agent, ctx.tool_audit_hook,
+            recent_files_hook=recent_files_hook,
             db_logging_service=ctx.db_logging_service,
             session_manager=ctx.session_manager,
         )

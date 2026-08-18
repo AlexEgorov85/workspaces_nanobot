@@ -24,6 +24,9 @@ def full_fake_modules(tmp_path):
         hook.AgentHook = type("AgentHook", (), {})
         hook.AgentHookContext = type("AgentHookContext", (), {})
         hook.AgentRunHookContext = type("AgentRunHookContext", (), {})
+        # ``workspace/hooks/session_file_redirect_hook`` импортирует
+        # ``from nanobot.agent import AgentHook``; нужен атрибут в моке.
+        sol.agent.AgentHook = hook.AgentHook
         agent_instance = MagicMock()
         loop.AgentLoop = MagicMock()
         loop.AgentLoop.from_config = MagicMock(return_value=agent_instance)
@@ -120,6 +123,38 @@ def full_fake_modules(tmp_path):
         tah.ToolAuditHook = _ToolAuditHook
         sys.modules["hooks"] = hooks
         sys.modules["hooks.tool_audit_hook"] = tah
+
+        # Top-level алиасы для hook_loader.scan_and_register: он импортирует
+        # по имени файла без расширения (importlib.import_module("session_file_redirect_hook")),
+        # а реальные модули лежат в workspace/hooks/. В рабочем окружении
+        # workspace добавлен в sys.path и import работает; здесь мы добавляем
+        # фиктивные top-level модули, чтобы auto-scan не падал и тесты
+        # могли проверить, что ApplicationContext вызвал from_config дважды.
+        srh = types.ModuleType("session_file_redirect_hook")
+        sfr = types.ModuleType("session_file_store")
+        sfr.SessionFileStore = MagicMock()
+        sys.modules["session_file_store"] = sfr
+
+        class _SessionFileRedirectHook(hook.AgentHook):
+            instances: list = []
+
+            def __init__(self, workspace_dir=None):
+                super().__init__()
+                self.workspace_dir = workspace_dir
+                self._sessions_root = None
+                type(self).instances.append(self)
+
+        srh.SessionFileRedirectHook = _SessionFileRedirectHook
+        sys.modules["session_file_redirect_hook"] = srh
+        # tool_audit_hook top-level (hook_loader ищет ToolAuditHook-подкласс)
+        tah_top = types.ModuleType("tool_audit_hook")
+
+        class _ToolAuditHookTop:
+            def __init__(self):
+                self.drained = []
+
+        tah_top.ToolAuditHook = _ToolAuditHookTop
+        sys.modules["tool_audit_hook"] = tah_top
 
         # lib.services
         for name in [
@@ -240,3 +275,66 @@ class TestCreate:
         # cron_service passed to AgentLoop
         kwargs = __import__("nanobot.agent.loop", fromlist=["AgentLoop"]).AgentLoop.from_config.call_args.kwargs
         assert "cron_service" in kwargs
+
+    def test_auto_scan_hooks_includes_session_file_redirect(self, full_fake_modules):
+        """Регрессия: SessionFileRedirectHook должен попадать в ctx.hooks
+        через auto-scan workspace/hooks/*.py. До фикса он был только в CLI
+        (cli_agent.py вызывал scan_and_register вручную), и в gateway
+        не работал.
+        """
+        from lib.core.application_context import ApplicationContext
+
+        script = Path(__file__).resolve().parent.parent
+        ctx = ApplicationContext.create(
+            script_dir=script,
+            workspace_dir=script / "workspace",
+            enable_db_logging=False,
+            enable_audit=False,
+        )
+        # Берём класс из зарегистрированного top-level модуля, чтобы
+        # isinstance работал в условиях фикстуры (workspace.hooks.* в тестах
+        # подменены фейками в sys.modules).
+        SessionFileRedirectHook = sys.modules[
+            "session_file_redirect_hook"
+        ].SessionFileRedirectHook
+
+        redirect_hooks = [h for h in ctx.hooks if isinstance(h, SessionFileRedirectHook)]
+        assert len(redirect_hooks) == 1, (
+            f"Ожидался один SessionFileRedirectHook в ctx.hooks, "
+            f"найдено: {len(redirect_hooks)}. hooks={[type(h).__name__ for h in ctx.hooks]}"
+        )
+        # И он должен быть ПЕРЕД tool_audit_hook (порядок критичен: редирект
+        # params["path"] должен случиться до того, как ToolAudit сохранит снимок).
+        idx_redirect = ctx.hooks.index(redirect_hooks[0])
+        idx_audit = ctx.hooks.index(ctx.tool_audit_hook)
+        assert idx_redirect < idx_audit, (
+            "SessionFileRedirectHook должен идти раньше ToolAuditHook, "
+            f"но порядок: {[type(h).__name__ for h in ctx.hooks]}"
+        )
+
+    def test_agent_rebuilt_after_hook_auto_scan(self, full_fake_modules):
+        """AgentLoop.from_config должен быть вызван как минимум дважды:
+        один раз из AgentFactory.create(), второй — после auto-scan
+        проектных хуков в ApplicationContext.
+        """
+        from lib.core.application_context import ApplicationContext
+
+        script = Path(__file__).resolve().parent.parent
+        ApplicationContext.create(
+            script_dir=script,
+            workspace_dir=script / "workspace",
+            enable_db_logging=False,
+            enable_audit=False,
+        )
+        from_config = sys.modules["nanobot.agent.loop"].AgentLoop.from_config
+        assert from_config.call_count >= 2, (
+            "Ожидалось >= 2 вызова AgentLoop.from_config (factory + post-scan), "
+            f"получено: {from_config.call_count}"
+        )
+        # В последнем вызове в hooks=merged должен быть SessionFileRedirectHook
+        last_kwargs = from_config.call_args.kwargs
+        SessionFileRedirectHook = sys.modules[
+            "session_file_redirect_hook"
+        ].SessionFileRedirectHook
+
+        assert any(isinstance(h, SessionFileRedirectHook) for h in last_kwargs["hooks"])

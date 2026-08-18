@@ -1,9 +1,9 @@
 """cli_agent.py — терминальный режим работы агента (REPL).
 
-Тонкий оркестратор: загрузка конфига и сервисов — в ``ApplicationContext``,
-REPL/typewriter — в ``lib.cli.console_loop``, авто-сканирование хуков — в
-``lib.cli.hook_loader``. Этот файл — CLI-аргументы, миграция cron,
-preload аудит-кеша навыка, vanilla/patched-режимы.
+Тонкий оркестратор: загрузка конфига и сервисов — в ``ApplicationContext``
+(включая auto-scan проектных хуков из ``workspace/hooks/``),
+REPL/typewriter — в ``lib.cli.console_loop``. Этот файл — CLI-аргументы,
+миграция cron, preload аудит-кеша навыка, vanilla/patched-режимы.
 """
 
 from __future__ import annotations
@@ -18,12 +18,10 @@ from rich.console import Console
 
 from lib.cli.console_loop import run_repl
 from lib.cli.display_config import DisplayConfig
-from lib.cli.hook_loader import scan_and_register
 from lib.core.application_context import ApplicationContext
 
 _SCRIPT_DIR = Path(__file__).parent
 _WORKSPACE_DIR = _SCRIPT_DIR / "workspace"
-_HOOKS_DIR = _WORKSPACE_DIR / "hooks"
 
 # Добавляем корень проекта и workspace в sys.path (для hooks.* импортов).
 sys.path.insert(0, str(_SCRIPT_DIR))
@@ -76,16 +74,9 @@ def _run_patched(args: argparse.Namespace) -> None:
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)
 
-    hooks, _ = scan_and_register(_HOOKS_DIR, _WORKSPACE_DIR)
-    if ctx.tool_audit_hook not in hooks:
-        hooks.append(ctx.tool_audit_hook)
-    ctx.agent = ctx.agent.__class__.from_config(
-        ctx.config,
-        ctx.bus,
-        session_manager=ctx.session_manager,
-        cron_service=__get_cron(ctx),
-        hooks=hooks,
-    )
+    # ctx.agent уже содержит проектные хуки (SessionFileRedirectHook и др.) —
+    # ApplicationContext.create() сделал auto-scan и пересобрал AgentLoop.
+    # Здесь только финальный семантический патч _assemble_outbound.
     ctx.runtime_patcher.patch_assemble_outbound(ctx.agent, ctx.tool_audit_hook)
 
     asyncio.create_task(_run_patched_repl(ctx, args))
