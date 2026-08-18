@@ -8,6 +8,55 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`workspace/hooks/recent_files_hook.py` — `RecentFilesHook` + auto-attach
+  в `OutboundMessage.media`.** Закрывает два системных бага:
+  (1) агент создаёт файл через `write_file`, но **забывает** приложить
+  его в `message({"media": [...]})` — в БД уходит пустой `media` и в
+  таблице нет вложения;
+  (2) агент прикладывает несуществующий путь (например, `.docx` после
+  блокировки `pip install` SSRF-guard'ом) — `media.py:serialize` пишет
+  warning `Media file not found, keeping path`, а в БД уходит dict с
+  пустым `mime_type`/`file_size`, и UI его не отображает. Хук в
+  `after_execute_tool` собирает `params["path"]` (уже перенаправленный
+  `SessionFileRedirectHook`, поэтому путь **реальный**), а в
+  `RuntimePatcher._wrap` после `tool_audit_hook.drain` мы дренируем
+  `recent_files_hook.drain(session_key)` и подмешиваем в `result.media`
+  только то, чего там ещё нет (по `Path(p).name`) и что существует на
+  диске (`Path(p).is_file()`). Сессионная изоляция по `session_key` —
+  конкурентные вопросы не путают файлы. Хук auto-discover'ится тем же
+  `ApplicationContext.scan_and_register`, что и `SessionFileRedirectHook`;
+  порядок в `AgentLoop.hooks`: `RecentFilesHook` → `SessionFileRedirectHook`
+  → `ToolAuditHook` (чтобы `params["path"]` уже был перенаправлен к моменту
+  `after_execute_tool` `RecentFilesHook`).
+  `RuntimePatcher.apply_all` теперь принимает `recent_files_hook` как
+  keyword-only параметр. Тесты: `tests/test_recent_files_hook.py` (12)
+  + `tests/test_smoke_postgres_channel_media.py` (3 e2e).
+
+### Fixed
+
+- **gateway: `SessionFileRedirectHook` теперь подключается автоматически.**
+  До фикса `lib.cli.hook_loader.scan_and_register` вызывался только в
+  `cli_agent.py`, и в gateway-режиме `write`/`edit`/`create_file`/`write_file`
+  шли в исходный путь (`/home/<user>/<project>/workspace/<file>` или
+  `C:\Users\<user>\workspace\<file>`), минуя политику
+  `data_store/cache/sessions/<session_key>/`. Симптом — `Media file not found,
+  keeping path` в `utils.media.serialize` и потеря вложений в таблице сообщений
+  (особенно на Linux с абсолютными NFS-путями, где `Path(p).is_file()`
+  возвращал `False` к моменту сериализации). Теперь auto-scan выполняется в
+  `ApplicationContext.create()` для всех точек входа (gateway, cli_agent,
+  streamlit) и пересобирает `AgentLoop` с объединённым списком хуков
+  (`SessionFileRedirectHook` — первым, чтобы его правки `params["path"]`
+  были видны в `ToolAuditHook`). `AgentFactory.create()` возвращает
+  `(agent, hooks, hook_factories)` вместо `(agent, hooks)`, чтобы ctx мог
+  переиспользовать `hook_factories` при пересборке без потери
+  `DatabaseLoggingHook`. `cli_agent.py` упрощён: убран дублирующий
+  `scan_and_register` + `from_config(hooks=...)`. Тесты: `test_agent_factory.py`,
+  `test_cli_agent.py`, `test_application_context.py` (новые регрессионные
+  `test_auto_scan_hooks_includes_session_file_redirect` и
+  `test_agent_rebuilt_after_hook_auto_scan`).
+
 ## [2.3.0] — 2026-08-18
 
 > **MINOR-релиз:** единая платформа медиа-вложений (кодек + `MessageExchange` +
