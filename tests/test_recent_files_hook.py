@@ -213,6 +213,45 @@ def test_patcher_skips_recent_files_that_dont_exist(tmp_path):
     )
 
 
+def test_patcher_replaces_stale_redirected_path(tmp_path):
+    """Сценарий 4: модель приложила путь ДО SessionFileRedirectHook.
+
+    write_file перенаправил файл в ``data_store/cache/sessions/<key>/``,
+    а ``message(media=[исходный путь])`` ссылается на старый путь,
+    которого на диске нет. basename совпадает — auto-attach должен
+    ЗАМЕНИТЬ устаревший путь реальным (перенаправленным), а не
+    пропустить его как «уже есть».
+    """
+    from lib.services.runtime_patcher import RuntimePatcher
+
+    real = tmp_path / "borskie_bani_minimal.html"
+    real.write_bytes(b"<h1>real</h1>")
+    # Путь «до редиректа»: тот же basename, но файла нет.
+    stale = str(tmp_path / ".." / "data_store" / "cache" / "borskie_bani_minimal.html")
+
+    recent = MagicMock()
+    recent.drain = MagicMock(return_value=[str(real)])
+
+    patcher = RuntimePatcher()
+    agent = MagicMock()
+
+    def original_assemble(*args, **kwargs):
+        return _make_outbound(content="Готово!", media=[stale])
+
+    agent._assemble_outbound = original_assemble
+    ok, _ = patcher.patch_assemble_outbound(agent, MagicMock(), recent)
+    assert ok
+
+    msg = MagicMock()
+    msg.metadata = {"session_key": "postgres_streamlit"}
+    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+
+    assert result.media == [str(real)], (
+        f"Устаревший путь должен быть заменён реальным: {result.media!r}"
+    )
+    assert stale not in result.media
+
+
 def test_patcher_does_not_duplicate_existing_media(tmp_path):
     """Сценарий 3: модель приложила существующий файл → не дублируем."""
     from lib.services.runtime_patcher import RuntimePatcher

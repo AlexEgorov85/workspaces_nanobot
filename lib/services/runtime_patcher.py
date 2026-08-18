@@ -224,18 +224,22 @@ class RuntimePatcher:
           * ``recent_files_hook.drain(session_key)`` (если передан; см.
             ``workspace/hooks/recent_files_hook.py``) — возвращает пути
             ко всем файлам, которые агент записал через ``write_file``
-            за этот оборот. Если они есть и отсутствуют в ``result.media``
-            (по basename) и реально существуют на диске — подмешиваем их
-            в ``result.media``. Закрывает три сценария:
+            за этот оборот (уже ПОСЛЕ ``SessionFileRedirectHook``, т.е.
+            реальные). Подмешиваем их в ``result.media``, сравнивая по
+            basename. Закрывает сценарии:
 
             1. модель забыла приложить созданный файл (``message({...})``
-               без ``media``);
+               без ``media``) — добавляем реальный путь;
             2. модель приложила несуществующий путь (``test.docx`` после
                блокировки ``pip install``) — отбрасываем через
                ``Path(p).is_file()``;
             3. модель приложила нереальный абсолютный путь — мы берём
                ``params["path"]`` ПОСЛЕ ``SessionFileRedirectHook``, т.е.
-               уже реальный локальный путь.
+               уже реальный локальный путь;
+            4. модель приложила путь, который ЭТИМ же редиректом был
+               перенесён в ``data_store/cache/sessions/<key>/`` (basename
+               совпадает, но указанный путь не существует на диске) —
+               заменяем этот устаревший путь реальным.
 
         Порядок важен: ``RecentFilesHook`` должен идти **раньше**
         ``ToolAuditHook`` в ``AgentLoop.hooks`` (см. ``ApplicationContext``).
@@ -277,17 +281,48 @@ class RuntimePatcher:
             if recent_files_hook is not None:
                 recent = recent_files_hook.drain(session_key)
                 if recent:
-                    existing_names = {
-                        Path(p).name for p in (result.media or [])
-                    }
+                    media = list(result.media or [])
+                    # basename -> индексы уже указанных media-путей.
+                    by_name: dict = {}
+                    for i, m in enumerate(media):
+                        if isinstance(m, str) and m:
+                            by_name.setdefault(Path(m).name, []).append(i)
+
+                    seen: set = set()
                     for p in recent:
                         p_path = Path(p)
-                        if p_path.name in existing_names:
-                            continue
                         if not p_path.is_file():
                             continue
-                        result.media = list(result.media or []) + [str(p_path)]
-                        existing_names.add(p_path.name)
+                        name = p_path.name
+                        if name in seen:
+                            continue
+                        idxs = by_name.get(name)
+                        if idxs is None:
+                            # Нет записи с таким именем — просто добавляем
+                            # реальный путь.
+                            media.append(str(p_path))
+                            seen.add(name)
+                            continue
+                        # Запись с этим basename уже есть в media.
+                        if any(
+                            isinstance(media[i], str) and Path(media[i]).is_file()
+                            for i in idxs
+                        ):
+                            # Среди указанных путей уже есть живой файл с этим
+                            # именем — не дублируем.
+                            seen.add(name)
+                            continue
+                        # Модель приложила путь ДО SessionFileRedirectHook, т.е.
+                        # реальный файл лежит по перенаправленному пути, а в
+                        # media — устаревший (несуществующий). Заменяем первый
+                        # такой путь реальным.
+                        for i in idxs:
+                            if isinstance(media[i], str) and not Path(media[i]).is_file():
+                                media[i] = str(p_path)
+                                break
+                        seen.add(name)
+
+                    result.media = media
 
             return result
 
