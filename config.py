@@ -2,6 +2,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 _CONFIG_FILE = Path(__file__).parent / "config.json"
 _PROJECT_FILE = Path(__file__).parent / "project.json"
