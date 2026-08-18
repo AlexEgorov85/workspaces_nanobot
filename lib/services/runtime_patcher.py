@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Optional, Tuple
 
 from lib.utils.node_access import get_path as _get
@@ -217,6 +218,15 @@ class RuntimePatcher:
         Каналы и CLI читают этот ключ и рендерят записи в UI
         (``✓ read(x.txt) → content`` / ``✗ exec: timeout``).
 
+        Дополнительно: обёртка дренирует ``AutoAttachRegistry`` (см.
+        ``workspace/hooks/auto_attach_hook.py``) и прикрепляет свежие
+        файлы к ``result.media`` — на случай если бот забыл вызвать
+        ``message(content, media=[path])``. Это страховка от рассинхрона
+        LLM-инструкций и поведения: в большинстве случаев бот всё же
+        прикрепляет файлы сам (``message`` tool кладёт ``media`` в
+        ``OutboundMessage.media`` через ``publisher``), тогда мы не
+        дописываем дубликаты — список дедуплицируется.
+
         Returns:
             ``(True, "agent._assemble_outbound patched")`` при успехе;
             ``(False, <причина>)`` если ``agent is None`` или
@@ -228,16 +238,42 @@ class RuntimePatcher:
         if original is None:
             return False, "agent._assemble_outbound is missing"
 
+        # Ленивый импорт ``AutoAttachRegistry`` — модуль может быть
+        # недоступен в тестах без полного workspace, и тогда auto-attach
+        # просто не работает (это безопасно: старый путь через
+        # ``message(content, media=[path])`` остаётся).
+        try:
+            from workspace.hooks.auto_attach_hook import AutoAttachRegistry
+        except Exception:
+            AutoAttachRegistry = None  # type: ignore[assignment]
+
         def _wrap(msg, final_content, all_msgs, stop_reason, had_injections,
                   on_stream, *, turn_latency_ms=None):
             result = original(
                 msg, final_content, all_msgs, stop_reason, had_injections,
                 on_stream, turn_latency_ms=turn_latency_ms,
             )
-            if result is not None:
-                entries = tool_audit_hook.drain(_session_key_of(msg))
-                if entries:
-                    result.metadata["_tool_audit"] = entries
+            if result is None:
+                return result
+            sk = _session_key_of(msg)
+            entries = tool_audit_hook.drain(sk)
+            if entries:
+                result.metadata["_tool_audit"] = entries
+            # Auto-attach: добавляем свежие файлы, если бот не прикрепил
+            # их сам через ``message``. Дубликаты убираем.
+            if AutoAttachRegistry is not None:
+                fresh = AutoAttachRegistry.drain(sk)
+                if fresh:
+                    existing = list(result.media or [])
+                    seen = {os.path.normpath(p) for p in existing}
+                    for path in fresh:
+                        np = os.path.normpath(path)
+                        if np in seen:
+                            continue
+                        existing.append(path)
+                        seen.add(np)
+                    if existing:
+                        result.media = existing
             return result
 
         agent._assemble_outbound = _wrap

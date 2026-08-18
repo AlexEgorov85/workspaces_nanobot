@@ -75,8 +75,8 @@ class AgentFactory:
         Returns:
             ``(agent, hooks)`` — где ``hooks`` это СПИСОК переданных в
             ``AgentLoop`` хуков (для тестов/диагностики). ``DatabaseLoggingHook``
-            здесь НЕТ (он создаётся per-turn через ``hook_factories``);
-            ``hooks`` содержит только ``ToolAuditHook``.
+            и ``AutoAttachHook`` здесь НЕТ (они создаются per-turn через
+            ``hook_factories``); ``hooks`` содержит только ``ToolAuditHook``.
         """
         from nanobot.agent.loop import AgentLoop
 
@@ -86,16 +86,26 @@ class AgentFactory:
         tool_audit_hook = self._import_tool_audit_hook()()
         hooks.append(tool_audit_hook)
 
-        # DatabaseLoggingHook — опционален: регистрируется НЕ как общий
-        # инстанс, а как фабрика оборота (per-turn инстансы). Это
-        # изолирует состояние вопроса между конкурентными сессиями.
-        # Если workspace.hooks недоступен (например, в тестах) —
-        # пропускаем без ошибки.
+        # Per-turn фабрики хуков (см. ``hook_factories``).
         hook_factories: List[Any] = []
+
+        # DatabaseLoggingHook — опционален: НЕ общий инстанс, а фабрика
+        # per-turn (конкурентная изоляция состояния вопроса).
         if db_logging_service is not None:
             factory = self._build_database_logging_factory(db_logging_service, agent_id)
             if factory is not None:
                 hook_factories.append(factory)
+
+        # AutoAttachHook — per-turn: если бот создал файл через
+        # write/edit/exec, но забыл вызвать ``message(content, media=[path])``,
+        # этот хук автоматически прикрепит файл к финальному ответу
+        # через ``RuntimePatcher.patch_assemble_outbound``. Импорт через
+        # try/except, чтобы ``AgentFactory`` не зависел жёстко от
+        # ``workspace/hooks/auto_attach_hook`` (в тестах без полного
+        # workspace hook просто не создаётся).
+        auto_attach_factory = self._build_auto_attach_factory()
+        if auto_attach_factory is not None:
+            hook_factories.append(auto_attach_factory)
 
         kwargs: dict = {
             "session_manager": session_manager,
@@ -149,3 +159,24 @@ class AgentFactory:
         except Exception:
             return None
         return make_db_logging_hook_factory(db_logging_service, agent_id)
+
+    @staticmethod
+    def _build_auto_attach_factory() -> Optional[Any]:
+        """Создать фабрику оборота ``AutoAttachHook``.
+
+        Без жёсткой зависимости от ``workspace/hooks/auto_attach_hook``:
+        если модуль недоступен (тесты без полного workspace) — фабрика
+        не создаётся, и бот просто не получает auto-attach. Это безопасно:
+        старый путь (через ``message(content, media=[path])``) по-прежнему
+        работает.
+
+        Returns:
+            ``make_auto_attach_hook_factory()`` или ``None``.
+        """
+        try:
+            from workspace.hooks.auto_attach_hook import (
+                make_auto_attach_hook_factory,
+            )
+        except Exception:
+            return None
+        return make_auto_attach_hook_factory()

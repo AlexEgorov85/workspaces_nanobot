@@ -98,13 +98,15 @@ class TestAgentFactory:
         from lib.core.agent_factory import AgentFactory
 
         factory = AgentFactory()
-        # Без db_logging_service — один hook (ToolAuditHook), без фабрик.
+        # Без db_logging_service — один hook (ToolAuditHook), но
+        # auto_attach_factory всегда регистрируется (страховка
+        # прикрепления файлов в чат).
         _, hooks = factory.create(config=MagicMock(), bus=MagicMock())
         assert len(hooks) == 1
         kwargs = fake_modules["from_config"].call_args.kwargs
-        assert kwargs["hook_factories"] == []
+        assert len(kwargs["hook_factories"]) == 1  # auto_attach
 
-        # С db_logging_service — фабрика оборота идёт в hook_factories,
+        # С db_logging_service — добавляется ещё фабрика оборота,
         # а не как общий инстанс в hooks (набор hooks не меняется).
         factory.create(
             config=MagicMock(), bus=MagicMock(),
@@ -112,7 +114,7 @@ class TestAgentFactory:
         )
         kwargs = fake_modules["from_config"].call_args.kwargs
         assert len(kwargs["hooks"]) == 1
-        assert len(kwargs["hook_factories"]) == 1
+        assert len(kwargs["hook_factories"]) == 2
 
     def test_db_logging_factory_creates_per_turn_hook(self, fake_modules):
         from lib.core.agent_factory import AgentFactory
@@ -135,7 +137,9 @@ class TestAgentFactory:
         assert len(hooks) == 1
 
         kwargs = fake_modules["from_config"].call_args.kwargs
-        assert len(kwargs["hook_factories"]) == 1
+        # db_logging + auto_attach = 2 фабрики
+        assert len(kwargs["hook_factories"]) == 2
+        # Первая фабрика — db_logging (старое поведение)
         factory_fn = kwargs["hook_factories"][0]
 
         from types import SimpleNamespace
@@ -153,3 +157,27 @@ class TestAgentFactory:
         assert hook_a._run_session_key == "cli:1"
         assert hook_b._run_session_key == "cli:2"
         assert hook_a._agent_id == "agent-7"
+
+    def test_auto_attach_factory_creates_per_turn_hook(self, fake_modules):
+        """Фабрика auto_attach всегда регистрируется и делает per-turn хуки."""
+        from lib.core.agent_factory import AgentFactory
+
+        from workspace.hooks.auto_attach_hook import AutoAttachHook
+
+        factory = AgentFactory()
+        factory.create(config=MagicMock(), bus=MagicMock())
+        kwargs = fake_modules["from_config"].call_args.kwargs
+
+        assert len(kwargs["hook_factories"]) == 1
+        factory_fn = kwargs["hook_factories"][0]
+
+        from types import SimpleNamespace
+
+        hook_a = factory_fn(SimpleNamespace(session_key="cli:1"))
+        hook_b = factory_fn(SimpleNamespace(session_key="cli:2"))
+
+        # Per-turn: разные инстансы для разных session_key
+        assert hook_a is not hook_b
+        assert isinstance(hook_a, AutoAttachHook)
+        assert hook_a._session_key == "cli:1"
+        assert hook_b._session_key == "cli:2"
