@@ -31,10 +31,31 @@
   → `ToolAuditHook` (чтобы `params["path"]` уже был перенаправлен к моменту
   `after_execute_tool` `RecentFilesHook`).
   `RuntimePatcher.apply_all` теперь принимает `recent_files_hook` как
-  keyword-only параметр. Тесты: `tests/test_recent_files_hook.py` (12)
+  keyword-only параметр. Тесты: `tests/test_recent_files_hook.py` (13)
   + `tests/test_smoke_postgres_channel_media.py` (3 e2e).
 
+- **`workspace/skills/office_files/` — skill чтения офисных файлов.**
+  `workspace/utils/office_files.py` (`extract_text` / `extract_tables` /
+  `summarize` / `read_xlsx_sheet`): маршрутизация по расширению через
+  `mimetypes`, чтение `.docx`/`.xlsx`/`.xls`/`.pdf`/`.pptx`/`.csv`/`.txt`.
+  Зависимости добавлены в `requirements.txt` (`python-docx`, `openpyxl`,
+  `xlrd`, `pypdf`, `pdfplumber`, `python-pptx`, `Pillow`, `chardet`) — в
+  контракте явно запрещён `pip install` на лету (SSRF-guard режет зеркало
+  PyPI). Документация: `workspace/skills/office_files/SKILL.md`. Тесты:
+  `tests/test_office_files.py` (196 строк).
+
 ### Fixed
+
+- **`hook_loader.scan_and_register`: `importlib.import_module` →
+  `importlib.util.spec_from_file_location`.** Раньше плагины
+  `workspace/hooks/*.py` импортировались top-level по имени файла, и при
+  запуске gateway (в `sys.path` только `workspace/`, без `workspace/hooks/`)
+  падало `No module named 'session_file_redirect_hook'` / `'recent_files_hook'`.
+  Теперь каждый файл загружается через `spec_from_file_location` под именем
+  `hooks.<stem>` (кэшируется индексом в `sys.modules`) — не зависит от порядка
+  добавления `workspace/` и `workspace/hooks/` в `sys.path`. Тесты:
+  `test_cli_agent.py` (`test_finds_workspace_hooks_without_hooks_dir_in_syspath`,
+  `test_finds_real_workspace_hooks`), `test_application_context.py` адаптирован.
 
 - **auto-attach: устаревшие пути в `message(media=...)` после
   `SessionFileRedirectHook` теперь заменяются реальными.**
@@ -100,7 +121,7 @@
   сканер успех молчит (раньше печатался только сканированные плагины,
   а фреймворковые хуки в лог не попадали). Обновлены импорты:
   `agent_factory.py`, `runtime_patcher.py`, `benchmarks/hooks.py`, тесты.
-  Итог: **905 passed**.
+  Итог: **906 passed**.
 
 ## [2.3.0] — 2026-08-18
 

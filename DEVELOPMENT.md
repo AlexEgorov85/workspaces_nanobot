@@ -395,21 +395,24 @@ nanobot/
 │   ├── hooks/                            # плагины: самодостаточные AgentHook (cls(workspace_dir=...))
 │   │   ├── session_file_redirect_hook.py #     перенаправление write/edit в data_store/cache/sessions/
 │   │   └── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
-│   └── skills/audit_analyzer/            # навык: тонкий CLI поверх провайдера
+│   ├── skills/audit_analyzer/            # навык: тонкий CLI поверх провайдера
+│   │   ├── SKILL.md                      #   пользовательская документация
+│   │   ├── audit_analyze.bat / .sh       #   точки входа
+│   │   ├── scripts/
+│   │   │   ├── cli.py                    #   парсинг аргументов, маршрутизация режимов
+│   │   │   ├── skill_config.py           #   конфиг из SETTINGS + build_cache_provider()
+│   │   │   ├── database.py               #   Database (прямой PG, fallback) + QueryBackend
+│   │   │   ├── sql_mode.py               #   режим sql: LLM → SQL → EXPLAIN → выполнение
+│   │   │   ├── predefined_mode.py        #   режим predefined: готовые SQL-шаблоны
+│   │   │   ├── predefined.py             #   резолв параметров (+ векторный поиск по source)
+│   │   │   ├── scripts_registry.py       #   ScriptDefinition / ParamDefinition / реестр
+│   │   │   ├── llm.py                    #   LLM-клиент (OpenAI-compatible HTTP)
+│   │   │   └── output.py                 #   форматирование JSON-вывода
+│   │   └── tests/
+│   │       └── e2e_test.py               #   сквозной тест навыка (нужна живая БД)
+│   └── skills/office_files/              # навык: чтение docx/xlsx/xls/pdf/pptx/csv/txt
 │       ├── SKILL.md                      #   пользовательская документация
-│       ├── audit_analyze.bat / .sh       #   точки входа
-│       ├── scripts/
-│       │   ├── cli.py                    #   парсинг аргументов, маршрутизация режимов
-│       │   ├── skill_config.py           #   конфиг из SETTINGS + build_cache_provider()
-│       │   ├── database.py               #   Database (прямой PG, fallback) + QueryBackend
-│       │   ├── sql_mode.py               #   режим sql: LLM → SQL → EXPLAIN → выполнение
-│       │   ├── predefined_mode.py        #   режим predefined: готовые SQL-шаблоны
-│       │   ├── predefined.py             #   резолв параметров (+ векторный поиск по source)
-│       │   ├── scripts_registry.py       #   ScriptDefinition / ParamDefinition / реестр
-│       │   ├── llm.py                    #   LLM-клиент (OpenAI-compatible HTTP)
-│       │   └── output.py                 #   форматирование JSON-вывода
-│       └── tests/
-│           └── e2e_test.py               #   сквозной тест навыка (нужна живая БД)
+│       └── (utils: workspace/utils/office_files.py)
 │
 ├── gateway.py                            #  v2.0.0: 132 строки, тонкий оркестратор
 ├── cli_agent.py                          #  v2.0.0: 165 строк, тонкий оркестратор
