@@ -9,3 +9,13 @@ pyarrow==23.0.1
 PyYAML==6.0.3
 redis==8.0.0
 nanobot==0.3.0
+
+# Office files (skill: workspace/skills/office_files/)
+python-docx==1.2.0
+openpyxl==3.1.5
+xlrd==2.0.2
+pypdf==6.16.1
+pdfplumber==0.11.10
+python-pptx==1.0.2
+Pillow==12.3.0
+chardet==7.6.0
