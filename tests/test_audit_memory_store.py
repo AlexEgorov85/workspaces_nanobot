@@ -146,7 +146,10 @@ class TestVector:
         assert meta["metadata"]["0"]["pk_value"] == 1
         assert meta["metadata"]["1"]["source"] == "audits_index"
 
-    def test_search_without_embedder_returns_empty(self, store):
+    def test_search_without_embedder_returns_empty(self, store, monkeypatch):
+        import lib.services.cache_provider_impl as cp
+
+        monkeypatch.setattr(cp, "get_embedding", lambda *a, **k: None)
         store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
         assert store.search_vector("тест", index_name="audits_index") == []
 

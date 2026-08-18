@@ -46,13 +46,29 @@ _META_TABLE = "__schema_meta"
 # =============================================================================
 
 
-def get_embedding(text: str, base_url: str = "", model: str = "mxbai-embed-large:latest",
-                  retries: int = 3, timeout_sec: float = 60.0) -> Optional[List[float]]:
-    """Получить эмбеддинг текста через Ollama /api/embed.
+def get_embedding(text: str) -> Optional[List[float]]:
+    """Единая точка получения эмбеддинга текста через Ollama /api/embed.
 
-    Единый retry-цикл через ``retry_on_exception`` (exponential backoff),
-    как и в LLM-клиенте (``lib/services/llm_client.py``).
+    Параметры (``embedding_base_url`` / ``embedding_model`` /
+    ``embedding_http_timeout_sec``) всегда читаются из
+    ``skills.audit_analyzer`` (project.json). Единый retry-цикл через
+    ``retry_on_exception`` (exponential backoff), как и в LLM-клиенте
+    (``lib/services/llm_client.py``).
+
+    Возвращает ``None`` при отсутствии base_url, ошибке конфигурации
+    или ошибке после ``retries`` попыток — вызывающий код не должен
+    перехватывать исключения.
     """
+    try:
+        from lib.services.audit_settings import audit_vector_settings
+        s = audit_vector_settings()
+        base_url = s.embedding_base_url
+        model = s.embedding_model
+        timeout_sec = s.embedding_http_timeout_sec
+        retries = 3
+    except Exception:
+        return None
+
     if not base_url:
         return None
 
@@ -942,8 +958,7 @@ class PostgresDuckDbProvider(CacheProvider):
             )
             return []
 
-        embedding = get_embedding(query, self._embedding_base_url, self._embedding_model,
-                                  timeout_sec=self._embedding_timeout_sec)
+        embedding = get_embedding(query)
         if embedding is None:
             self._search_error = "Не удалось получить эмбеддинг запроса."
             return []

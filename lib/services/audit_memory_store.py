@@ -939,8 +939,7 @@ class AuditMemoryStore:
             if idx is None:
                 return []
 
-        embedding = get_embedding(query, self._embedding_base_url, self._embedding_model,
-                                  timeout_sec=self._embedding_timeout_sec)
+        embedding = get_embedding(query)
         if embedding is None:
             return []
 

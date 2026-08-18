@@ -2,6 +2,7 @@
 
 Собирает в одном месте все операции над FAISS-индексами:
   * создание эмбеддинга (Ollama /api/embed)         — ``get_embedding``
+    (re-export из ``lib/services/cache_provider_impl`` — единая функция)
   * пересборка индекса из сырых векторов и персист
     в store (public.agent_vector_index_store)        — ``VectorIndexBuildService``
 
@@ -19,6 +20,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+# Единая функция эмбеддинга (сами резолвит настройки из project.json).
+# Re-export сохранён, чтобы импорт `from ...vector_index_service import
+# get_embedding` у внешних потребителей (tools/build_vectors.py и пр.)
+# продолжал работать без изменений.
+from lib.services.cache_provider_impl import get_embedding as get_embedding
+
 # Пути к проекту и workspace — чтобы `from utils.db import ...` работал
 # независимо от рабочего каталога (как в cache_provider_impl).
 import sys
@@ -29,45 +36,6 @@ _WORKSPACE = _ROOT / "workspace"
 for _p in (str(_ROOT), str(_WORKSPACE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-
-
-def get_embedding(
-    text: str,
-    *,
-    base_url: Optional[str] = None,
-    model: Optional[str] = None,
-    timeout_sec: Optional[float] = None,
-) -> Optional[list[float]]:
-    """Получить эмбеддинг текста через Ollama /api/embed.
-
-    Параметры эмбеддинга (embedding_base_url / embedding_model /
-    embedding_http_timeout_sec) читаются из ``skills.audit_analyzer``,
-    если не переданы явно. Единая точка создания эмбеддинга для
-    навыка и инструментов. Возвращает ``None`` при любой ошибке.
-    """
-    from lib.services import cache_provider_impl as _cp
-    from lib.services.audit_settings import audit_vector_settings
-
-    if not base_url or not model or timeout_sec is None:
-        try:
-            s = audit_vector_settings()
-        except Exception:
-            s = None
-        if s is not None:
-            base_url = base_url or s.embedding_base_url
-            model = model or s.embedding_model
-            timeout_sec = timeout_sec if timeout_sec is not None else s.embedding_http_timeout_sec
-        else:
-            base_url = base_url or ""
-            model = model or "mxbai-embed-large:latest"
-            timeout_sec = timeout_sec if timeout_sec is not None else 60.0
-
-    return _cp.get_embedding(
-        text,
-        base_url=base_url,
-        model=model,
-        timeout_sec=timeout_sec,
-    )
 
 
 class VectorIndexBuildService:
