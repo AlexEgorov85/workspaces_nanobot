@@ -8,6 +8,14 @@
 
 ## [Unreleased]
 
+## [2.3.1] — 2026-08-18
+
+> **PATCH-релиз:** закрытые системные баги медиа-вложений (auto-attach устаревших
+> путей, авто-подключение `SessionFileRedirectHook` в gateway) и перенос фреймворковых
+> хуков в `lib/hooks/` (один `AgentLoop`); новый skill `office_files` — решение
+> проблемы чтения офисных файлов (docx/xlsx/xls/pdf/pptx/csv/txt). Итог тестов:
+> **906 passed**.
+
 ### Added
 
 - **`workspace/hooks/recent_files_hook.py` — `RecentFilesHook` + auto-attach
@@ -34,8 +42,8 @@
   keyword-only параметр. Тесты: `tests/test_recent_files_hook.py` (13)
   + `tests/test_smoke_postgres_channel_media.py` (3 e2e).
 
-- **`workspace/skills/office_files/` — skill чтения офисных файлов.**
-  `workspace/utils/office_files.py` (`extract_text` / `extract_tables` /
+- **`workspace/skills/office_files/` — решение проблемы чтения офисных
+  файлов.** `workspace/utils/office_files.py` (`extract_text` / `extract_tables` /
   `summarize` / `read_xlsx_sheet`): маршрутизация по расширению через
   `mimetypes`, чтение `.docx`/`.xlsx`/`.xls`/`.pdf`/`.pptx`/`.csv`/`.txt`.
   Зависимости добавлены в `requirements.txt` (`python-docx`, `openpyxl`,
