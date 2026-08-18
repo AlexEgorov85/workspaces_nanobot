@@ -59,7 +59,11 @@ class RecentFilesHook(AgentHook):
     ``OutboundMessage.media``.
     """
 
-    def __init__(self, workspace_dir: Optional[str] = None) -> None:
+    def __init__(self, workspace_dir: "str | None" = None) -> None:
+        # ``workspace_dir`` принимается для совместимости с единым контрактом
+        # ``hook_loader.scan_and_register``; ``RecentFilesHook`` хранит пути
+        # из ``params["path"]`` после ``SessionFileRedirectHook`` — путь уже
+        # абсолютный, workspace_dir не нужен.
         super().__init__()
         self._paths: dict[str, list[str]] = {}
 

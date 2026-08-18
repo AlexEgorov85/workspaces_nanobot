@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 import types
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -35,22 +34,10 @@ def fake_modules(tmp_path):
         sys.modules["nanobot.agent"] = sol.agent
         sys.modules["nanobot.agent.loop"] = loop
 
-        # hooks.tool_audit_hook
-        hooks_dir = str(Path(__file__).resolve().parent.parent / "workspace")
-        if hooks_dir not in sys.path:
-            sys.path.insert(0, hooks_dir)
-        hooks_pkg = types.ModuleType("hooks")
-        hooks_pkg.__path__ = []  # namespace
-        tah_mod = types.ModuleType("hooks.tool_audit_hook")
-
-        class _ToolAuditHook:
-            def __init__(self):
-                self.created = True
-
-        tah_mod.ToolAuditHook = _ToolAuditHook
-        sys.modules["hooks"] = hooks_pkg
-        sys.modules["hooks.tool_audit_hook"] = tah_mod
-
+        # hooks.tool_audit_hook больше не существует: фреймворковые хуки
+        # (ToolAuditHook, DatabaseLoggingHook) переехали в lib/hooks/ и
+        # импортируются через ``from lib.hooks.*`` (реальные модули — при
+        # фейковом nanobot.agent они импортируются успешно).
         yield {
             "agent_instance": agent_instance,
             "from_config": loop.AgentLoop.from_config,
@@ -81,6 +68,24 @@ class TestAgentFactory:
         factory.create(config=MagicMock(), bus=MagicMock(), session_manager=sm)
         kwargs = fake_modules["from_config"].call_args.kwargs
         assert kwargs["session_manager"] is sm
+
+    def test_project_hooks_prepended_before_tool_audit(self, fake_modules):
+        from lib.core.agent_factory import AgentFactory
+
+        factory = AgentFactory()
+        plugin_a = MagicMock()
+        plugin_a.__class__.__name__ = "PluginA"
+        project_hooks = [plugin_a]
+        _, hooks, _ = factory.create(
+            config=MagicMock(), bus=MagicMock(),
+            project_hooks=project_hooks,
+        )
+        # Плагины идут ПЕРЕД ToolAuditHook (правки params видны в аудите).
+        assert len(hooks) == 2
+        assert hooks[0] is plugin_a
+        assert type(hooks[1]).__name__ == "ToolAuditHook"
+        kwargs = fake_modules["from_config"].call_args.kwargs
+        assert kwargs["hooks"] == hooks
 
     def test_cron_service_only_when_provided(self, fake_modules):
         from lib.core.agent_factory import AgentFactory
@@ -121,7 +126,7 @@ class TestAgentFactory:
     def test_db_logging_factory_creates_per_turn_hook(self, fake_modules):
         from lib.core.agent_factory import AgentFactory
 
-        from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
         # get_request_id возвращает request_id по session_key

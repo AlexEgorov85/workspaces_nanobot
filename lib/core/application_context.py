@@ -175,6 +175,26 @@ class ApplicationContext:
         if enable_cron:
             cron_service = _make_cron_service(ctx.config)
 
+        # 6a. Auto-scan проектных хуков из ``workspace/hooks/*.py`` (ПЛАГИНЫ).
+        # Фреймворковые хуки (``ToolAudit``, ``DatabaseLogging`` — живут
+        # в ``lib/hooks/``) провязывает ``AgentFactory``; плагины
+        # (например, ``SessionFileRedirectHook``, ``RecentFilesHook``)
+        # сканируются здесь единым механизмом для всех точек входа
+        # (gateway, cli_agent, streamlit). Сканирование идёт ДО создания
+        # ``AgentLoop``, чтобы агент создавался ровно один раз с полным
+        # списком хуков (иначе был двойной лог ``Registered N tools``).
+        # Если папки ``hooks/`` нет или она пуста (например, в юнит-тестах) —
+        # пропускаем без ошибки.
+        project_hooks: list = []
+        try:
+            from lib.cli.hook_loader import scan_and_register
+
+            project_hooks = scan_and_register(
+                ctx.workspace_dir / "hooks", ctx.workspace_dir
+            )
+        except Exception as exc:
+            logger.warning("hook_loader.scan_and_register failed: %s", exc)
+
         agent_factory = AgentFactory()
         ctx.agent, ctx.hooks, ctx.hook_factories = agent_factory.create(
             ctx.config,
@@ -183,59 +203,21 @@ class ApplicationContext:
             cron_service=cron_service,
             db_logging_service=ctx.db_logging_service,
             agent_id=agent_id,
+            project_hooks=project_hooks or None,
         )
-        ctx.tool_audit_hook = ctx.hooks[0]
 
-        # 6a. Auto-scan проектных хуков из ``workspace/hooks/*.py``.
-        # ``AgentFactory`` создаёт только обязательные хуки (``ToolAudit``,
-        # ``DatabaseLogging``); проектные (например, ``SessionFileRedirectHook``)
-        # подключаются здесь единым механизмом для всех точек входа
-        # (gateway, cli_agent, streamlit). Порядок важен: проектные хуки
-        # должны идти **до** ``ToolAuditHook``, чтобы их правки
-        # ``params["path"]`` уже были видны в аудите. Если папки
-        # ``hooks/`` нет или она пуста (например, в юнит-тестах) —
-        # пропускаем без ошибки, оставляем ``ctx.agent`` как есть.
-        try:
-            from lib.cli.hook_loader import scan_and_register
+        # ToolAuditHook — фреймворковый, входит в ``ctx.hooks`` последним
+        # (после плагинов). Нужен RuntimePatcher'у для внедрения аудита.
+        ctx.tool_audit_hook = next(
+            (h for h in ctx.hooks if type(h).__name__ == "ToolAuditHook"),
+            None,
+        )
 
-            project_hooks, _ = scan_and_register(
-                ctx.workspace_dir / "hooks", ctx.workspace_dir
-            )
-        except Exception as exc:
-            logger.warning("hook_loader.scan_and_register failed: %s", exc)
-            project_hooks = []
-
-        if project_hooks:
-            tool_audit = ctx.tool_audit_hook
-            merged = list(project_hooks)
-            for h in ctx.hooks:
-                if h is tool_audit:
-                    continue
-                merged.append(h)
-            if tool_audit is not None and tool_audit not in merged:
-                merged.append(tool_audit)
-            ctx.hooks = merged
-            # ``ctx.agent.__class__.from_config`` может не быть в моках
-            # (тесты подменяют ``AgentLoop`` через ``MagicMock`` без атрибута
-            # на классе); в реальном окружении ``AgentLoop.from_config`` —
-            # classmethod. Достаём ``AgentLoop`` через ``sys.modules`` —
-            # ``AgentFactory.create()`` уже зарегистрировала модуль там
-            # (или это настоящий ``nanobot.agent.loop``).
-            import sys as _sys
-            from nanobot.agent.loop import AgentLoop as _AgentLoop
-
-            agent_loop_mod = _sys.modules.get(
-                "nanobot.agent.loop", _sys.modules[__name__]
-            )
-            AgentLoop_cls = getattr(agent_loop_mod, "AgentLoop", _AgentLoop)
-            ctx.agent = AgentLoop_cls.from_config(
-                ctx.config,
-                ctx.bus,
-                session_manager=ctx.session_manager,
-                cron_service=cron_service,
-                hooks=merged,
-                hook_factories=ctx.hook_factories or [],
-            )
+        # Единственная точка вывода полного списка подключённых хуков:
+        # плагины + фреймворковые (ToolAuditHook) + per-turn factories
+        # (DatabaseLoggingHook). Печатается один раз — двойных сообщений
+        # нет (сканер успех молчит).
+        _log_connected_hooks(ctx)
 
         # 7. RuntimePatcher
         from lib.services.runtime_patcher import RuntimePatcher
@@ -308,6 +290,28 @@ class ApplicationContext:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
+
+def _log_connected_hooks(ctx: "ApplicationContext") -> None:
+    """Однократно вывести полный список подключённых хуков.
+
+    Единая точка вывода: плагины ``workspace/hooks/`` + фреймворковые
+    хуки (``ToolAuditHook`` — в ``ctx.hooks``) + per-turn hook factories
+    (``DatabaseLoggingHook`` — в ``ctx.hook_factories``). Вызывается один
+    раз после создания ``AgentLoop``, поэтому двойных сообщений нет.
+    """
+    names = [type(h).__name__ for h in ctx.hooks]
+    if ctx.hook_factories:
+        names.append(f"{len(ctx.hook_factories)} hook factory (per-turn)")
+    label = ", ".join(names) or "(no hooks connected)"
+    try:
+        from rich.console import Console
+
+        Console().print(f"[green]✓[/green] Hooks connected: {label}")
+    except Exception:
+        # Старые Windows-консоли (cp1251) не умеют ✓ (U+2713) — выводим
+        # тот же список обычным print, чтобы информация не пропадала.
+        print(f"Hooks connected: {label}")
 
 
 def _make_config_service(script_dir: Path, workspace_dir: Path) -> Any:

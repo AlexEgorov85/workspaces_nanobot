@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -10,7 +10,7 @@ import pytest
 def sys_path():
     import sys
     from pathlib import Path
-    p = str(Path(__file__).resolve().parent.parent / "workspace")
+    p = str(Path(__file__).resolve().parent.parent)
     if p not in sys.path:
         sys.path.insert(0, p)
     return p
@@ -18,7 +18,7 @@ def sys_path():
 
 class TestDatabaseLoggingHook:
     def test_before_execute_tool(self, sys_path):
-        from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
         service.get_request_id.return_value = "m1"
@@ -41,7 +41,7 @@ class TestDatabaseLoggingHook:
         assert kwargs["request_id"] == "m1"
 
     def test_after_execute_tool_records_latency(self, sys_path):
-        from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
         service.get_request_id.return_value = "m1"
@@ -57,7 +57,7 @@ class TestDatabaseLoggingHook:
         hook._tool_start_times["tc2"] = 0.0
 
         with __import__("unittest.mock").mock.patch(
-            "workspace.hooks.database_logging_hook.time.time", return_value=0.1
+            "lib.hooks.database_logging_hook.time.time", return_value=0.1
         ):
             asyncio.run(hook.after_execute_tool(ctx, tool_call, tool, params, "ok"))
 
@@ -67,7 +67,7 @@ class TestDatabaseLoggingHook:
         assert kwargs["status"] == "ok"
 
     def test_on_execute_tool_error(self, sys_path):
-        from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
         service.get_request_id.return_value = "m1"
@@ -89,7 +89,7 @@ class TestDatabaseLoggingHook:
         assert kwargs["level"] == "ERROR"
 
     def test_after_run_emits_event(self, sys_path):
-        from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
         service.get_request_id.return_value = "m1"
@@ -118,7 +118,7 @@ class TestDatabaseLoggingHook:
         service.clear_request.assert_called_once_with("cli:1")
 
     def test_before_execute_tool_captures_session_key(self, sys_path):
-        from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
         service.get_request_id.return_value = "m1"
@@ -136,7 +136,7 @@ class TestDatabaseLoggingHook:
 
 class TestDatabaseLoggingHookFactory:
     def _factory(self, service):
-        from workspace.hooks.database_logging_hook import make_db_logging_hook_factory
+        from lib.hooks.database_logging_hook import make_db_logging_hook_factory
 
         return make_db_logging_hook_factory(service, agent_id="agent-9")
 
@@ -146,7 +146,7 @@ class TestDatabaseLoggingHookFactory:
         return SimpleNamespace(session_key=session_key)
 
     def test_creates_fresh_instance_per_turn(self, sys_path):
-        from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
 
         service = MagicMock()
         service.get_request_id.side_effect = lambda sk: {"cli:1": "m1", "cli:2": "m2"}.get(sk)

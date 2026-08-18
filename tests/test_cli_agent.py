@@ -98,17 +98,6 @@ def _setup_fake_modules():
     ws = str(_project_root / "workspace")
     if ws not in sys.path:
         sys.path.insert(0, ws)
-    hooks = types.ModuleType("hooks")
-    hooks.__path__ = []
-    tah = types.ModuleType("hooks.tool_audit_hook")
-
-    class _ToolAuditHook:
-        def __init__(self):
-            self.drained = []
-
-    tah.ToolAuditHook = _ToolAuditHook
-    sys.modules["hooks"] = hooks
-    sys.modules["hooks.tool_audit_hook"] = tah
 
     utils_pkg = types.ModuleType("utils")
     utils_db = types.ModuleType("utils.db")
@@ -141,16 +130,14 @@ class TestHookLoader:
     def test_no_hooks_dir(self, tmp_path):
         from lib.cli.hook_loader import scan_and_register
 
-        hooks, tah = scan_and_register(tmp_path / "nope", _project_root / "workspace")
+        hooks = scan_and_register(tmp_path / "nope", _project_root / "workspace")
         assert hooks == []
-        assert tah is None
 
     def test_empty_dir(self, tmp_path):
         from lib.cli.hook_loader import scan_and_register
 
-        hooks, tah = scan_and_register(tmp_path, _project_root / "workspace")
+        hooks = scan_and_register(tmp_path, _project_root / "workspace")
         assert hooks == []
-        assert tah is None
 
     def test_skips_underscore_files(self, tmp_path):
         from lib.cli.hook_loader import scan_and_register
@@ -159,7 +146,7 @@ class TestHookLoader:
         (tmp_path / "real.py").write_text("class AgentHook: pass")
         # Module import of real.py will fail (no AgentHook base), but the
         # underscore file should be skipped without raising.
-        hooks, _ = scan_and_register(tmp_path, _project_root / "workspace")
+        hooks = scan_and_register(tmp_path, _project_root / "workspace")
         assert hooks == []  # real.py fails to import → ignored
 
     def test_finds_workspace_hooks_without_hooks_dir_in_syspath(self, tmp_path):
@@ -184,7 +171,7 @@ class TestHookLoader:
                 "        super().__init__()\n"
                 "        self.workspace_dir = workspace_dir\n"
             )
-            hooks, _ = scan_and_register(tmp_path, tmp_path)
+            hooks = scan_and_register(tmp_path, tmp_path)
             assert any(type(h).__name__ == "MyHook" for h in hooks), (
                 f"Хук должен найтись даже без tmp_path в sys.path. "
                 f"Найдено: {[type(h).__name__ for h in hooks]}"
@@ -212,7 +199,7 @@ class TestHookLoader:
                 p for p in sys.path
                 if not p.endswith("workspace") and not p.endswith("hooks")
             ]
-            hooks, _ = scan_and_register(hooks_dir, _project_root / "workspace")
+            hooks = scan_and_register(hooks_dir, _project_root / "workspace")
             names = sorted(type(h).__name__ for h in hooks)
             assert "SessionFileRedirectHook" in names, (
                 f"SessionFileRedirectHook должен загружаться из workspace/hooks/. "
@@ -224,6 +211,36 @@ class TestHookLoader:
             )
         finally:
             sys.path[:] = real_path
+
+    def test_plugin_dir_has_only_self_instantiable_hooks(self):
+        """Вариант А: workspace/hooks/ — только плагины. Фреймворковые
+        хуки (ToolAuditHook, DatabaseLoggingHook, BaseToolTrackingHook)
+        переехали в lib/hooks/ и не должны сканироваться как плагины.
+        Раньше это было причиной warning'ов
+        ``__init__() got an unexpected keyword argument 'workspace_dir'``
+        и ``missing required positional argument: 'db_logging_service'``
+        в gateway-логе.
+        """
+        from lib.cli.hook_loader import scan_and_register
+
+        hooks_dir = _project_root / "workspace" / "hooks"
+        if not hooks_dir.is_dir():
+            import pytest
+            pytest.skip("workspace/hooks не существует")
+
+        files = {py.name for py in hooks_dir.glob("*.py") if not py.name.startswith("_")}
+        assert "tool_audit_hook.py" not in files, files
+        assert "database_logging_hook.py" not in files, files
+        assert "base_tool_tracking_hook.py" not in files, files
+
+        hooks = scan_and_register(hooks_dir, _project_root / "workspace")
+        loaded = sorted(type(h).__name__ for h in hooks)
+        assert "ToolAuditHook" not in loaded, loaded
+        assert "DatabaseLoggingHook" not in loaded, loaded
+        assert "BaseToolTrackingHook" not in loaded, loaded
+        # Оба реальных плагина должны загрузиться без warning'ов.
+        assert "SessionFileRedirectHook" in loaded, loaded
+        assert "RecentFilesHook" in loaded, loaded
 
 
 # =================================================================

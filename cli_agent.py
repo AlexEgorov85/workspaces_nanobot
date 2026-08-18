@@ -23,7 +23,7 @@ from lib.core.application_context import ApplicationContext
 _SCRIPT_DIR = Path(__file__).parent
 _WORKSPACE_DIR = _SCRIPT_DIR / "workspace"
 
-# Добавляем корень проекта и workspace в sys.path (для hooks.* импортов).
+# Добавляем корень проекта и workspace в sys.path (для lib.* / workspace.utils.*).
 sys.path.insert(0, str(_SCRIPT_DIR))
 sys.path.insert(0, str(_WORKSPACE_DIR))
 

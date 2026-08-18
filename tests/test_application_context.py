@@ -24,9 +24,11 @@ def full_fake_modules(tmp_path):
         hook.AgentHook = type("AgentHook", (), {})
         hook.AgentHookContext = type("AgentHookContext", (), {})
         hook.AgentRunHookContext = type("AgentRunHookContext", (), {})
-        # ``workspace/hooks/session_file_redirect_hook`` импортирует
-        # ``from nanobot.agent import AgentHook``; нужен атрибут в моке.
+        # ``workspace/hooks/session_file_redirect_hook`` и ``lib/hooks/*``
+        # импортируют имена из ``nanobot.agent``; нужны атрибуты в моке.
         sol.agent.AgentHook = hook.AgentHook
+        sol.agent.AgentHookContext = hook.AgentHookContext
+        sol.agent.AgentRunHookContext = hook.AgentRunHookContext
         agent_instance = MagicMock()
         loop.AgentLoop = MagicMock()
         loop.AgentLoop.from_config = MagicMock(return_value=agent_instance)
@@ -112,30 +114,17 @@ def full_fake_modules(tmp_path):
         ws = str(Path(__file__).resolve().parent.parent / "workspace")
         if ws not in sys.path:
             sys.path.insert(0, ws)
-        # ``hooks`` namespace-пакет для импорта ``from hooks.tool_audit_hook``.
-        # ToolAuditHook здесь — фейк (AgentFactory.create() всё равно
-        # создаёт экземпляр через свой импорт, см. _import_tool_audit_hook).
-        hooks = types.ModuleType("hooks")
-        hooks.__path__ = []
-        tah = types.ModuleType("hooks.tool_audit_hook")
-
-        class _ToolAuditHook:
-            def __init__(self):
-                self.drained = []
-
-        tah.ToolAuditHook = _ToolAuditHook
-        sys.modules["hooks"] = hooks
-        sys.modules["hooks.tool_audit_hook"] = tah
+        # Фреймворковые хуки (ToolAuditHook и др.) теперь живут в lib/hooks/
+        # и импортируются как реальные модули — при фейковом nanobot.agent
+        # (AgentHook/AgentHookContext выше) они импортируются успешно.
+        # hook_loader.scan_and_register использует
+        # importlib.util.spec_from_file_location, поэтому ему не нужны
+        # top-level алиасы в sys.modules — он грузит модули по абсолютному пути.
 
         # session_file_store нужен для SessionStorageService; мокаем.
         sfr = types.ModuleType("session_file_store")
         sfr.SessionFileStore = MagicMock()
         sys.modules["session_file_store"] = sfr
-
-        # hook_loader.scan_and_register теперь использует
-        # importlib.util.spec_from_file_location, поэтому ему не нужны
-        # top-level алиасы session_file_redirect_hook / tool_audit_hook
-        # в sys.modules — он грузит модули по абсолютному пути.
 
         # lib.services
         for name in [
@@ -289,10 +278,12 @@ class TestCreate:
             f"но порядок: {[type(h).__name__ for h in ctx.hooks]}"
         )
 
-    def test_agent_rebuilt_after_hook_auto_scan(self, full_fake_modules):
-        """AgentLoop.from_config должен быть вызван как минимум дважды:
-        один раз из AgentFactory.create(), второй — после auto-scan
-        проектных хуков в ApplicationContext.
+    def test_agent_created_once_with_merged_hooks(self, full_fake_modules):
+        """AgentLoop.from_config вызывается РОВНО ОДИН раз, и в его
+        hooks= уже лежат и плагины (SessionFileRedirectHook), и
+        фреймворковый ToolAuditHook. Раньше агент создавался дважды
+        (AgentFactory + пересборка после auto-scan) — двойной лог
+        ``Registered N tools``.
         """
         from lib.core.application_context import ApplicationContext
 
@@ -304,13 +295,15 @@ class TestCreate:
             enable_audit=False,
         )
         from_config = sys.modules["nanobot.agent.loop"].AgentLoop.from_config
-        assert from_config.call_count >= 2, (
-            "Ожидалось >= 2 вызова AgentLoop.from_config (factory + post-scan), "
+        assert from_config.call_count == 1, (
+            "Ожидался 1 вызов AgentLoop.from_config (плагины известны заранее), "
             f"получено: {from_config.call_count}"
         )
-        # В последнем вызове в hooks=merged должен быть SessionFileRedirectHook
-        last_kwargs = from_config.call_args.kwargs
-        assert any(
-            type(h).__name__ == "SessionFileRedirectHook"
-            for h in last_kwargs["hooks"]
+        kwargs = from_config.call_args.kwargs
+        names = [type(h).__name__ for h in kwargs["hooks"]]
+        assert "SessionFileRedirectHook" in names, names
+        assert "ToolAuditHook" in names, names
+        assert names.index("SessionFileRedirectHook") < names.index("ToolAuditHook"), (
+            "SessionFileRedirectHook должен идти раньше ToolAuditHook, "
+            f"но порядок: {names}"
         )

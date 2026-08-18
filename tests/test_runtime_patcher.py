@@ -165,7 +165,6 @@ class TestPatchSubagentLogging:
 
     def test_db_logging_applied_and_tool_events_logged(self):
         import nanobot.agent.subagent as subagent_mod
-        from workspace.hooks.database_logging_hook import DatabaseLoggingHook
 
         original = subagent_mod._SubagentHook
         try:

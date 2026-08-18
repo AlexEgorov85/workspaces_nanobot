@@ -31,6 +31,10 @@ def _setup_fake_modules():
     # nanobot.agent.loop
     sol = types.ModuleType("nanobot")
     sol.agent = types.ModuleType("nanobot.agent")
+    # lib/hooks/* импортируют имена из nanobot.agent при реальном импорте.
+    sol.agent.AgentHook = type("AgentHook", (), {"__init__": lambda self: None})
+    sol.agent.AgentHookContext = MagicMock()
+    sol.agent.AgentRunHookContext = MagicMock()
     loop = types.ModuleType("nanobot.agent.loop")
     agent = MagicMock()
     agent.run = AsyncMock()
@@ -138,17 +142,8 @@ def _setup_fake_modules():
     ws = str(Path(__file__).resolve().parent.parent / "workspace")
     if ws not in sys.path:
         sys.path.insert(0, ws)
-    hooks = types.ModuleType("hooks")
-    hooks.__path__ = []
-    tah = types.ModuleType("hooks.tool_audit_hook")
-
-    class _ToolAuditHook:
-        def __init__(self):
-            self.drained = []
-
-    tah.ToolAuditHook = _ToolAuditHook
-    sys.modules["hooks"] = hooks
-    sys.modules["hooks.tool_audit_hook"] = tah
+    # Фреймворковые хуки живут в lib/hooks/ и импортируются как реальные
+    # модули (при фейковом nanobot.agent они импортируются успешно).
 
     # utils.db
     utils_mod = types.ModuleType("utils")

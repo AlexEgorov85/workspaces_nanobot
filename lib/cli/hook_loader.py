@@ -1,15 +1,28 @@
-"""HookLoader — авто-сканирование workspace/hooks/*.py для AgentHook-подклассов."""
+"""HookLoader — авто-сканирование workspace/hooks/*.py для AgentHook-подклассов.
+
+``workspace/hooks/`` — это директория ПЛАГИНОВ проекта: каждый ``*.py`` файл
+должен содержать самодостаточный ``AgentHook``-подкласс, который можно
+инстанцировать через ``cls(workspace_dir=workspace_dir)`` (единый контракт
+для всех плагинов). Фреймворковые хуки (``lib/hooks/``: ``ToolAuditHook``,
+``DatabaseLoggingHook``, ``BaseToolTrackingHook``) сюда НЕ входят — их
+провязывает ``AgentFactory``/``ApplicationContext`` явно, поэтому здесь
+не нужны ни ``inspect.signature``, ни маркеры-исключения, ни чёрные списки.
+
+Сканер на успех молчит: полный список подключённых хуков (плагины +
+фреймворковые) печатает ``ApplicationContext`` один раз после создания
+агента — единая точка, без дублирующих сообщений.
+"""
 
 from __future__ import annotations
 
 import importlib.util
 import sys
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List
 
 
-def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> Tuple[List[Any], Any]:
-    """Сканировать ``hooks_dir`` и вернуть (hooks, tool_audit_hook).
+def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> List[Any]:
+    """Сканировать ``hooks_dir`` и вернуть список инстанцированных плагинов.
 
     Каждый ``*.py`` файл (исключая ``_*``) импортируется через
     ``importlib.util.spec_from_file_location`` под уникальным именем
@@ -19,19 +32,18 @@ def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> Tuple[List[Any], 
     требовало ``hooks/`` в ``sys.path`` как top-level — и в gateway это
     ломалось: warning No module named 'session_file_redirect_hook').
 
-    Классы-наследники ``AgentHook`` (но не сам ``AgentHook`` и не ``_*``) —
-    инстанцируются с ``workspace_dir``. Если конструктор падает — хук
-    пропускается, повторной инстанциации без аргументов нет.
-
-    Также ищется ``ToolAuditHook`` для метаданных.
+    Каждый найденный ``AgentHook``-подкласс инстанцируется единообразно
+    через ``cls(workspace_dir=workspace_dir)``. Классы, которые не удалось
+    импортировать или инстанцировать, пропускаются с warning'ом — сканер
+    не ломает старт из-за одного битого плагина. На успехе не печатает
+    ничего (см. docstring модуля).
     """
     from nanobot.agent import AgentHook
 
     hooks: List[Any] = []
-    tool_audit_hook: Any = None
 
     if not hooks_dir.is_dir():
-        return hooks, tool_audit_hook
+        return hooks
 
     # Кэшируем индекс hooks-dir: importlib.util требует уникальное имя
     # модуля в sys.modules; используем индекс, чтобы повторный вызов
@@ -65,31 +77,12 @@ def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> Tuple[List[Any], 
                     _print_warn(f"{attr_name}: {exc}")
                     continue
                 hooks.append(hook)
-                _print_ok(f"{attr_name} loaded")
-                if tool_audit_hook is None and _is_tool_audit_hook(hook):
-                    tool_audit_hook = hook
-    return hooks, tool_audit_hook
-
-
-def _is_tool_audit_hook(hook: Any) -> bool:
-    try:
-        from hooks.tool_audit_hook import ToolAuditHook
-        return isinstance(hook, ToolAuditHook)
-    except Exception:
-        return False
+    return hooks
 
 
 def _print_warn(msg: str) -> None:
     try:
         from rich.console import Console
         Console().print(f"[yellow]⚠[/yellow] {msg}")
-    except Exception:
-        pass
-
-
-def _print_ok(msg: str) -> None:
-    try:
-        from rich.console import Console
-        Console().print(f"[green]✓[/green] {msg}")
     except Exception:
         pass

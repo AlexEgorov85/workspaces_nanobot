@@ -12,7 +12,7 @@
     передаётся ``make_db_logging_hook_factory``: фреймворк создаёт СВЕЖИЙ
     ``DatabaseLoggingHook`` на КАЖДЫЙ оборот, запекая его session_key/
     request_id. Это делает логирование конкурентно-безопасным (разные
-    вопросы не «путают» события) — см. ``workspace/hooks/
+    вопросы не «путают» события) — см. ``lib/hooks/
     database_logging_hook.py``.
 
 Семантический патч ``_assemble_outbound`` применяется ``RuntimePatcher``
@@ -22,12 +22,12 @@
 фабрики оборота в ``hook_factories=[...]``.
 
 Проектные хуки из ``workspace/hooks/*.py`` (например,
-``SessionFileRedirectHook``) сюда НЕ подмешиваются — это делает
-``ApplicationContext.create()`` через ``lib.cli.hook_loader.scan_and_register``
-после нашего ``create()``, пересобирая ``AgentLoop`` через
-``AgentLoop.from_config(hooks=merged, hook_factories=factory_list)``.
-Здесь factory возвращает и список фабрик, чтобы ctx мог переиспользовать
-их при пересборке.
+``SessionFileRedirectHook``) подмешивает сам ``ApplicationContext``: он
+сканирует их через ``lib.cli.hook_loader.scan_and_register`` и передаёт
+в ``AgentFactory.create(project_hooks=...)``. Фабрика складывает их
+перед ``ToolAuditHook`` и создаёт ``AgentLoop`` ОДИН раз
+(``AgentLoop.from_config(hooks=merged, hook_factories=factory_list)``) —
+без повторной пересборки в ``ApplicationContext``.
 
 Создаёт ли AgentFactory CronService? Нет — он приходит извне готовым.
 Обычно ``ApplicationContext._make_cron_service()`` создаёт ``CronService``
@@ -64,6 +64,7 @@ class AgentFactory:
         cron_service: Optional[Any] = None,
         db_logging_service: Optional[Any] = None,
         agent_id: Optional[str] = None,
+        project_hooks: Optional[List[Any]] = None,
     ) -> Tuple[Any, List[Any], List[Any]]:
         """Создать AgentLoop с подключёнными хуками.
 
@@ -79,23 +80,27 @@ class AgentFactory:
                 передан, ``AgentLoop`` получает фабрику оборота для
                 ``DatabaseLoggingHook`` (per-turn инстансы, конкурентно-безопасно).
             agent_id: id агента для колонки ``agent_id`` в логах.
+            project_hooks: плагины из ``workspace/hooks/`` (после auto-scan).
+                ``None``/``[]`` — только фреймворковые хуки.
 
         Returns:
             ``(agent, hooks, hook_factories)``:
 
               * ``agent`` — созданный ``AgentLoop``;
-              * ``hooks`` — общие хуки, переданные в ``AgentLoop.hooks=``
-                (сейчас только ``ToolAuditHook``). Проектные хуки из
-                ``workspace/hooks/`` сюда не входят — их подмешивает
-                ``ApplicationContext`` после ``create()``;
+              * ``hooks`` — общие хуки, переданные в ``AgentLoop.hooks=``.
+                Порядок: ``project_hooks`` (если есть) → ``ToolAuditHook``
+                (чтобы правки плагинов ``params["path"]`` были видны в аудите);
               * ``hook_factories`` — список per-turn фабрик, переданный в
                 ``AgentLoop.hook_factories=`` (для ``DatabaseLoggingHook``
-                или ``None``). Возвращается явно, чтобы ``ApplicationContext``
-                мог пересоздать ``AgentLoop`` после auto-scan ``hooks``
-                без потери фабрик.
+                или ``None``).
 
             ``DatabaseLoggingHook`` в ``hooks`` НЕ попадает — он создаётся
             per-turn через ``hook_factories``.
+
+            ``AgentLoop`` создаётся РОВНО ОДИН раз (полные хуки известны
+            заранее): старый двушаговый ``AgentFactory.create`` → пересборка
+            в ``ApplicationContext`` создавал агента дважды (двойной лог
+            ``Registered N tools`` при старте).
         """
         from nanobot.agent.loop import AgentLoop
 
@@ -104,6 +109,11 @@ class AgentFactory:
         # в UI ("✓ read(x.txt) → content" / "✗ exec: timeout").
         tool_audit_hook = self._import_tool_audit_hook()()
         hooks.append(tool_audit_hook)
+
+        # Плагины workspace/hooks/ идут ПЕРЕД ToolAuditHook, чтобы их
+        # правки ``params["path"]`` уже были видны в аудите.
+        if project_hooks:
+            hooks = list(project_hooks) + hooks
 
         # DatabaseLoggingHook — опционален: регистрируется НЕ как общий
         # инстанс, а как фабрика оборота (per-turn инстансы). Это
@@ -129,14 +139,14 @@ class AgentFactory:
 
     @staticmethod
     def _import_tool_audit_hook():
-        """Ленивый импорт ``ToolAuditHook`` из ``workspace/hooks/``.
+        """Ленивый импорт ``ToolAuditHook`` из ``lib/hooks/``.
 
-        ``ToolAuditHook`` живёт в ``workspace/hooks/tool_audit_hook.py``
-        (вне ``lib/``), потому что это проектный код, а не библиотечный.
-        Импортируем лениво, чтобы ``lib.core.agent_factory`` не зависел
-        от наличия workspace на ``sys.path`` во время старта Python.
+        ``ToolAuditHook`` — фреймворковый хук (живёт в ``lib/hooks/``,
+        а не в плагин-директории ``workspace/hooks/``). Импортируем
+        лениво, чтобы ``lib.core.agent_factory`` не зависел от наличия
+        nanobot на ``sys.path`` во время старта Python.
         """
-        from hooks.tool_audit_hook import ToolAuditHook
+        from lib.hooks.tool_audit_hook import ToolAuditHook
 
         return ToolAuditHook
 
@@ -148,7 +158,7 @@ class AgentFactory:
 
         Импорт через try/except, чтобы:
           * ``AgentFactory`` не зависел жёстко от
-            ``workspace.hooks.database_logging_hook`` (этот модуль
+            ``lib.hooks.database_logging_hook`` (этот модуль
             импортирует ``nanobot.agent.AgentHook``, который нужен
             не всегда);
           * в тестах без полного окружения фабрика просто не создавалась.
@@ -162,7 +172,7 @@ class AgentFactory:
             или ``None``, если модуль недоступен.
         """
         try:
-            from workspace.hooks.database_logging_hook import (
+            from lib.hooks.database_logging_hook import (
                 make_db_logging_hook_factory,
             )
         except Exception:

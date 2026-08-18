@@ -66,6 +66,16 @@ def make_db_logging_hook_factory(
 class DatabaseLoggingHook(BaseToolTrackingHook):
     """Агентский хук — пересылает tool- и run-события в DbLoggingService.
 
+    Живёт в ``lib/hooks/``: это фреймворковый хук, а не плагин
+    ``workspace/hooks/``. Он требует обязательный ``db_logging_service``
+    в конструкторе, который ``hook_loader`` предоставить не может,
+    поэтому в auto-scan ``workspace/hooks/`` не участвует (он и не
+    сканируется — плагин-директория содержит только самодостаточные
+    хуки с контрактом ``cls(workspace_dir=...)``).
+
+    Создаётся per-turn через ``make_db_logging_hook_factory`` в
+    ``AgentFactory`` или явно в ``RuntimePatcher.patch_subagent_logging``.
+
     Все методы НЕБЛОКИРУЮЩИЕ: ``DbLoggingService.log_*`` ставит события
     в очередь и возвращает ``True/False`` мгновенно.
 

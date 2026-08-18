@@ -336,7 +336,7 @@ class RuntimePatcher:
             return False, "db_logging_service is None"
         try:
             from nanobot.agent.subagent import _SubagentHook
-            from workspace.hooks.database_logging_hook import DatabaseLoggingHook
+            from lib.hooks.database_logging_hook import DatabaseLoggingHook
             from lib.services.db_logging_service import LogEvent
         except Exception as exc:
             return False, f"import failed: {exc}"

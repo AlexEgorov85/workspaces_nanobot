@@ -10,8 +10,8 @@ import time
 from pathlib import Path as _Path
 from typing import Any
 
-# Корень проекта + workspace — чтобы импорты lib.workspace / hooks работали
-# независимо от рабочего каталога (тот же паттерн, что и в benchmarks/db.py).
+# Корень проекта — чтобы импорты lib.* / hooks работали независимо от
+# рабочего каталога (тот же паттерн, что и в benchmarks/db.py).
 _ROOT = _Path(__file__).resolve().parents[1]
 _WORKSPACE = _ROOT / "workspace"
 for _p in (str(_ROOT), str(_WORKSPACE)):
@@ -20,7 +20,7 @@ for _p in (str(_ROOT), str(_WORKSPACE)):
 
 from nanobot.agent.hook import AgentHookContext
 
-from hooks.base_tool_tracking_hook import BaseToolTrackingHook
+from lib.hooks.base_tool_tracking_hook import BaseToolTrackingHook
 
 
 class BenchmarkHook(BaseToolTrackingHook):

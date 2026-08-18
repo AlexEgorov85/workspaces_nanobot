@@ -24,7 +24,7 @@ _SCRIPT_DIR = Path(__file__).parent
 _WORKSPACE_DIR = _SCRIPT_DIR / "workspace"
 
 # Добавляем корень проекта и workspace в sys.path, чтобы импортировать
-# hooks.tool_audit_hook и workspace.utils.*. Префикс (0) — приоритет
+# lib.hooks.* и workspace.utils.*. Префикс (0) — приоритет
 # над site-packages (нужно для подмены модулей в тестах).
 sys.path.insert(0, str(_SCRIPT_DIR))
 sys.path.insert(0, str(_WORKSPACE_DIR))

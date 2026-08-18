@@ -24,7 +24,7 @@ def mock_nanobot_agent():
         sys.modules["nanobot"] = nanobot
         sys.modules["nanobot.agent"] = nanobot.agent
 
-        from workspace.hooks.tool_audit_hook import ToolAuditHook, format_tool_params
+        from lib.hooks.tool_audit_hook import ToolAuditHook, format_tool_params
 
         yield {"ToolAuditHook": ToolAuditHook, "format_tool_params": format_tool_params}
 
