@@ -1,6 +1,6 @@
 # nanobot — Personal AI Agent (Deployment)
 
-Локальная инсталляция фреймворка **[nanobot-ai](https://github.com/HKUDS/nanobot)** (PyPI: `nanobot-ai`) — персонального AI-агента, запущенного с **кастомными доработками**: PostgreSQL-каналы, Redis-интеграция, Streamlit UI, система бенчмарков и пользовательский навык audit_analyzer.
+Локальная инсталляция фреймворка **[nanobot-ai](https://github.com/HKUDS/nanobot)** (PyPI: `nanobot-ai`) — персонального AI-агента, запущенного с **кастомными доработками**: PostgreSQL-каналы, Redis-интеграция, Streamlit UI, система бенчмарков и пользовательские навыки audit_analyzer и office_files.
 
 > **Имя агента:** Aura (🐈)  
 > **Базовая модель:** OpenAI-compatible (задаётся в `config.json`/`project.json`)  
@@ -166,7 +166,7 @@ python gateway.py
 | Режим | Флаг | Хранилище | Хуки |
 |-------|------|-----------|------|
 | **vanilla** | (по умолчанию) | JSONL-файлы | ToolAuditHook |
-| **patched** | `--patched / -P` | PGSessionManager (или file) | ToolAuditHook + из `workspace/hooks/` |
+| **patched** | `--patched / -P` | PGSessionManager (или file) | ToolAuditHook + фреймворковые (`lib/hooks/`) + плагины (`workspace/hooks/`) |
 
 ```bash
 python cli_agent.py                           # vanilla
@@ -282,12 +282,12 @@ nanobot/
 │   ├── core/               #   ApplicationContext + фабрики
 │   ├── services/           #   сервисы (db_logging, audit, channels, ...)
 │   ├── cli/                #   REPL/typewriter/hook_loader
-│   ├── hooks/              #   фреймворковые хуки (tool_audit, database_logging)
+│   ├── hooks/              #   фреймворковые хуки (base_tool_tracking, tool_audit, database_logging)
 │   ├── lifecycle/          #   gateway_runner + shutdown_coordinator
 │   ├── channels/           #   postgres_channel, redis_channel, message_exchange
 │   └── session/            #   pg_session_manager
 ├── workspace/              # runtime-данные, hooks-плагины/, skills/, memory/
-├── tests/                  # 859 unit-тестов
+├── tests/                  # 906 unit-тестов
 ├── benchmarks/             # YAML-тесты, runner, scorer, reporter
 ├── tools/                  # инфраструктурные CLI (build_vectors.py)
 ├── scripts/                # утилиты (backfill_media_aw.py)
@@ -399,6 +399,9 @@ GROUP BY payload->>'tool' ORDER BY avg_ms DESC;
 
 Подробная документация навыков и режимов — в:
 - `workspace/skills/audit_analyzer/SKILL.md` — пользовательская документация навыка.
+- `workspace/skills/office_files/SKILL.md` — чтение офисных файлов
+  (docx/xlsx/xls/pdf/pptx/csv/txt) через `workspace/utils/office_files.py`
+  (`extract_text` / `extract_tables` / `summarize` / `read_xlsx_sheet`).
 - [DEVELOPMENT.md → audit_analyzer и lib/services](DEVELOPMENT.md) — архитектура и жизненный цикл кеша.
 
 ### 11. Benchmarks (`benchmarks/`)
@@ -498,9 +501,9 @@ python tools/build_vectors.py --full-rebuild
 
 ## Тестирование
 
-**859 unit-тестов** в `tests/` (после QA-чистки: удалены 42 теста, не дававших
-реальной проверки, и исправлен сломанный `assert True`; подробнее — в
-[CHANGELOG.md → Unreleased](CHANGELOG.md#unreleased)).
+**906 unit-тестов** в `tests/` (после QA-чистки и добавления тестов для
+`RecentFilesHook`, auto-attach-патчей, `office_files` и smoke e2e; подробнее —
+в [CHANGELOG.md → 2.3.1](CHANGELOG.md#231--2026-08-18)).
 
 ### Запуск
 
@@ -538,6 +541,10 @@ pytest tests/ --cov=lib --cov-report=term-missing
 | `test_benchmarks_*.py` | Бенчмарки (loader, evaluator, scorer, reporter, runner, db) |
 | `test_utils_db.py` | Единый пул соединений БД (sync/async API, транзакции-аренда, поведение при недоступных подключениях) |
 | `test_hooks_tool_audit_hook.py` | `ToolAuditHook` |
+| `test_recent_files_hook.py` | `RecentFilesHook` + auto-attach, замена устаревших путей |
+| `test_office_files.py` | `office_files` — чтение docx/xlsx/xls/pdf/pptx/csv/txt |
+| `test_diagnose_media_v22_vs_v23.py` | Диагностика/сверка AW-формата media v2.2 vs v2.3 |
+| `test_smoke_postgres_channel_media.py` | Smoke e2e: media-вложения через Postgres-канал |
 
 ---
 
@@ -620,6 +627,24 @@ PowerShell интерпретирует `=` по-своему. Использу�
 
 ---
 
+## Что нового в v2.3.1
+
+v2.3.1 — PATCH поверх v2.3.0. Главное:
+
+- **Auto-attach медиа-вложений** (`RecentFilesHook`): созданные через
+  `write_file` файлы автоматически подмешиваются в `OutboundMessage.media`;
+  устаревшие пути (до `SessionFileRedirectHook`) заменяются реальными,
+  несуществующие вложения отбрасываются.
+- **`SessionFileRedirectHook` подключается автоматически** во всех точках
+  входа (gateway/cli/streamlit) через `ApplicationContext.create()` +
+  `hook_loader.scan_and_register`.
+- **Фреймворковые хуки переехали в `lib/hooks/`** (`base_tool_tracking`,
+  `tool_audit`, `database_logging`); `workspace/hooks/` — только плагины.
+  `AgentLoop` создаётся ровно один раз (убран двойной лог `Registered N tools`).
+- **`office_files` skill** — чтение docx/xlsx/xls/pdf/pptx/csv/txt (см. выше).
+- **`hook_loader`: `importlib.util.spec_from_file_location`** — плагины
+  `workspace/hooks/` больше не требуют `workspace/hooks/` в `sys.path`.
+
 ## Что нового в v2.3.0
 
 v2.3.0 — MINOR поверх v2.2.0 (обратно совместимо, прямого апгрейда с 1.5.0 нет —
@@ -663,6 +688,7 @@ v2.3.0 — MINOR поверх v2.2.0 (обратно совместимо, пр�
 | **[lib/channels/README.md](lib/channels/README.md)** | каналы (Postgres/Redis): DDL, поток сообщений, конфиг |
 | **[lib/session/README.md](lib/session/README.md)** | `PGSessionManager`: схема, graceful degradation, методы |
 | **workspace/skills/audit_analyzer/SKILL.md** | пользовательская документация навыка |
+| **workspace/skills/office_files/SKILL.md** | документация навыка чтения офисных файлов |
 | **workspace/AGENTS.md** | инструкции для агента: storage, cron, heartbeat |
 | **.secrets.env.example** | шаблон переменных окружения |
 

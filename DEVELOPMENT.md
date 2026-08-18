@@ -1877,7 +1877,7 @@ python -m pytest tests/test_pg_session_manager.py -q
 # Юнит-тесты audit/кэша (sync+memory)
 python -m pytest tests/test_audit_memory_store.py tests/test_audit_sync_service.py -q
 
-# Полный набор (без БД; 859 passed после QA-чистки тестов)
+# Полный набор (без БД; 906 passed)
 python -m pytest tests -q
 
 # Сквозной тест навыка (требует живого PostgreSQL)
