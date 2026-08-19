@@ -1,9 +1,16 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+# db_logging_bus импортирует utils.media (workspace на sys.path).
+_workspace_path = str(Path(__file__).resolve().parent.parent / "workspace")
+if _workspace_path not in sys.path:
+    sys.path.insert(0, _workspace_path)
 
 
 @pytest.fixture
@@ -261,9 +268,15 @@ class TestBusLoggers:
         asyncio.run(logger(msg))
         kwargs = service.register_request.call_args.kwargs
         assert kwargs["question"] == "см. файл"
-        assert kwargs["media"] == ["doc.pdf"]
+        expected = [{
+            "filename": "doc.pdf",
+            "file_id": "doc.pdf",
+            "mime_type": "",
+            "file_size": 0,
+        }]
+        assert kwargs["media"] == expected
         kwargs = service.log_inbound.call_args.kwargs
-        assert kwargs["media"] == ["doc.pdf"]
+        assert kwargs["media"] == expected
 
     def test_outbound_logger_drops_reasoning(self):
         from lib.services.db_logging_bus import make_outbound_logger
@@ -297,3 +310,24 @@ class TestBusLoggers:
         assert kwargs["session_id"] == "cli:42"
         assert kwargs["request_id"] == "m1"
         assert kwargs["media"] is None
+
+    def test_outbound_logger_with_media(self):
+        from lib.services.db_logging_bus import make_outbound_logger
+
+        service = MagicMock()
+        service.get_request_id.return_value = "m1"
+        logger = make_outbound_logger(service)
+        msg = MagicMock()
+        msg.channel = "cli"
+        msg.chat_id = "42"
+        msg.content = "final answer"
+        msg.metadata = {"message_id": "m1"}
+        msg.media = ["https://example.com/out.png"]
+        asyncio.run(logger(msg))
+        kwargs = service.log_outbound.call_args.kwargs
+        assert kwargs["media"] == [{
+            "filename": "",
+            "file_id": "https://example.com/out.png",
+            "mime_type": "",
+            "file_size": 0,
+        }]

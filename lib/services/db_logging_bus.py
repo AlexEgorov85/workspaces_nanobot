@@ -38,6 +38,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable, Optional
 
 from lib.utils.outbound_meta import is_dropped, is_stream_delta, msg_session_key
+from utils.media import serialize as media_serialize
 
 
 def make_inbound_logger(
@@ -71,6 +72,7 @@ def make_inbound_logger(
             chat_id = getattr(msg, "chat_id", None) or None
             content = getattr(msg, "content", "") or ""
             media = [p for p in (getattr(msg, "media", None) or []) if isinstance(p, str) and p]
+            media = media_serialize(media) if media else None
             if session_key and message_id:
                 service.register_request(
                     session_key, message_id,
@@ -135,6 +137,7 @@ def make_outbound_logger(
             session_id = f"{ch}:{cid}" if (ch or cid) else ""
             request_id = meta.get("message_id") or service.get_request_id(session_id)
             media = [p for p in (getattr(msg, "media", None) or []) if isinstance(p, str) and p]
+            media = media_serialize(media) if media else None
             service.log_outbound(
                 session_id=session_id,
                 channel=ch,
