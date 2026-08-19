@@ -1,5 +1,6 @@
 import base64
 import csv
+import hashlib
 import io
 import json
 import mimetypes
@@ -269,7 +270,32 @@ class SessionFileStore:
                 "total_bytes": 0
             }, indent=2), encoding="utf-8")
 
-    def save(self, session_key: str, content: str, source_tool: str, ext: str = ".json") -> dict:
+    def _find_existing_for_hash(self, session_key: str, content_hash: str, ext: str) -> Optional[str]:
+        """Вернуть путь уже сохранённого файла с таким хешем содержимого.
+
+        Сканирует ``results/`` сессии в поисках файла с суффиксом ``__<hash>``
+        и подходящим расширением. Сканирование ограничено одной сессией.
+        """
+        sdir = self._get_session_dir(session_key)
+        results_dir = sdir / "results"
+        if not results_dir.exists():
+            return None
+        marker = f"__{content_hash}{ext}"
+        for f in results_dir.iterdir():
+            if not f.is_file():
+                continue
+            if f.name.endswith(marker):
+                return str(f.name)
+        return None
+
+    def save(
+        self,
+        session_key: str,
+        content: str,
+        source_tool: str,
+        ext: str = ".json",
+        dedupe: bool = True,
+    ) -> dict:
         """Сохраняет содержимое как файл результата в сессии.
 
         Аргументы:
@@ -277,16 +303,40 @@ class SessionFileStore:
             content: Содержимое файла.
             source_tool: Имя инструмента-источника.
             ext: Расширение файла (по умолчанию .json).
+            dedupe: Если True, при повторном сохранении содержимого с тем же
+                хешем возвращается уже существующий файл (без новой записи).
 
         Возвращает словарь с информацией о сохранённом файле
-        (ключ сессии, id, путь, размер, формат).
+        (ключ сессии, id, путь, размер, формат). При dedupe-совпадении
+        ``id``/``path`` указывают на уже существующий файл, ``deduped=True``.
         """
+        content_hash = hashlib.sha1(content.encode("utf-8")).hexdigest()[:12]
         self._ensure_metadata(session_key)
         sdir = self._get_session_dir(session_key)
 
+        existing = (
+            self._find_existing_for_hash(session_key, content_hash, ext)
+            if dedupe
+            else None
+        )
+        if existing is not None:
+            existing_path = sdir / "results" / existing
+            try:
+                size = existing_path.stat().st_size
+            except OSError:
+                size = len(content.encode("utf-8"))
+            return {
+                "session_key": session_key,
+                "id": existing.split("_")[-1].split(".")[0],
+                "path": f"cache/sessions/{safe_session_key(session_key)}/results/{existing}",
+                "size_kb": round(size / 1024, 2),
+                "format": ext.lstrip("."),
+                "deduped": True,
+            }
+
         ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         entry_id = uuid.uuid4().hex[:8]
-        filename = f"{ts}_{source_tool}_{entry_id}{ext}"
+        filename = f"{ts}_{source_tool}_{entry_id}__{content_hash}{ext}"
         filepath = sdir / "results" / filename
 
         filepath.write_text(content, encoding="utf-8")
@@ -306,7 +356,8 @@ class SessionFileStore:
             "id": entry_id,
             "path": f"cache/sessions/{safe_session_key(session_key)}/results/{filename}",
             "size_kb": round(size / 1024, 2),
-            "format": ext.lstrip(".")
+            "format": ext.lstrip("."),
+            "deduped": False,
         }
 
     def cleanup(self, session_key: str) -> None:
