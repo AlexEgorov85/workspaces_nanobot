@@ -65,6 +65,28 @@
 
 ### Fixed
 
+- **`SessionFileRedirectHook` теперь перенаправляет и `media` тула
+  `message`, а не только write-инструменты.** `MessageTool` в nanobot
+  резолвит относительные пути относительно корня workspace
+  (`workspace / path`), а файлы, созданные агентом, живут в
+  `data_store/cache/sessions/<session_key>/`. Из-за этого прикрепление
+  файла по относительному пути (как велит `workspace/AGENTS.md`) — или по
+  «абсолютному» пути чужого workspace (`/home/<user>/<project>/workspace/
+  <file>`) — не находило файл: `utils.media.serialize` писал `Media file
+  not found, keeping path`, и в БД уходил AW-dict с пустым
+  `mime_type`/`file_size`. Раньше коррекция была только в auto-attach
+  `RuntimePatcher._wrap`, который не срабатывает, когда агент сам вызвал
+  `message()` (`MessageTool._sent_in_turn` → `_assemble_outbound` → `None`).
+  Теперь `before_execute_tool` для тула `message` переписывает каждый
+  media-элемент, который не существует в том виде, как его увидит
+  `_resolve_media`: ищет реальный файл в текущей session-папке (по
+  относительному пути и по basename, включая `attachments/` и `results/`)
+  и подставляет его. URL/`data:`-схемы и существующие пути не трогаются.
+  Тесты: `tests/test_session_file_redirect_hook.py` (10, включая 2 e2e через
+  реальный `MessageTool._resolve_media`) + live e2e
+  `tests/test_gateway_live_media_e2e.py` (реальный gateway + живой Postgres
+  + живой LLM на изолированной таблице; опт-ин через `NANOBOT_LIVE_E2E=1`).
+
 - **`hook_loader.scan_and_register`: `importlib.import_module` →
   `importlib.util.spec_from_file_location`.** Раньше плагины
   `workspace/hooks/*.py` импортировались top-level по имени файла, и при

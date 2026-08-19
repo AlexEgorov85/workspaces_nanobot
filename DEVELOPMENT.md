@@ -456,7 +456,7 @@ nanobot/
 │
 ├── workspace/                            # runtime-данные и плагины-хуки
 │   ├── hooks/                            # плагины: самодостаточные AgentHook (cls(workspace_dir=...))
-│   │   ├── session_file_redirect_hook.py #     перенаправление write/edit в data_store/cache/sessions/
+│   │   ├── session_file_redirect_hook.py #     перенаправление write/edit + media тула message в data_store/cache/sessions/
 │   │   └── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
 │   ├── skills/audit_analyzer/            # навык: тонкий CLI поверх провайдера
 │   │   ├── SKILL.md                      #   пользовательская документация
@@ -1870,7 +1870,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | `lib/hooks/database_logging_hook.py` |  AgentHook для tool-событий + run_finished; per-turn инстансы через `make_db_logging_hook_factory` (конкурентно-безопасно) |
 | `lib/lifecycle/gateway_runner.py` |  Цикл с exponential backoff |
 | `lib/lifecycle/shutdown_coordinator.py` |  LIFO graceful shutdown |
-| `workspace/hooks/session_file_redirect_hook.py` |  AgentHook: перенаправляет `write`/`edit` в `data_store/cache/sessions/<session_key>/` (политика хранения в `workspace/AGENTS.md`) |
+| `workspace/hooks/session_file_redirect_hook.py` |  AgentHook: перенаправляет `write`/`edit`/`create_file`/`write_file` и `media` тула `message` в `data_store/cache/sessions/<session_key>/` (политика хранения в `workspace/AGENTS.md`) |
 | `workspace/hooks/recent_files_hook.py` |  Сбор созданных файлов для auto-attach в `OutboundMessage.media` |
 
 ### Pre-existing (не тронуты рефакторингом)
@@ -1904,7 +1904,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | **Lifecycle** | Lifecycle (backoff/shutdown) | `lib/lifecycle/gateway_runner.py` / `shutdown_coordinator.py` | Gateway зацикливается на рестартах → `GatewayRunner.run_forever` (exponential backoff 1с→30с); процесс не умирает по Ctrl-C → `ShutdownCoordinator` (LIFO) |
 | **Каналы** | Канал связи | Написать класс унаследовав `BaseChannel`, подключить через `lib/services/channel_factory.py` | Сообщения не доходят → `allow_from` в `project.json`; reasoning не пишется → `PostgresChannel._flush_reasoning` (период `flush_interval`) |
 | **Хуки** | Хук агента | Создать файл в `workspace/hooks/` с подклассом `AgentHook` | Хук не вызывается → `lib/services/agent_factory.py:AgentFactory.create` (lazy-import); `ImportError` из хука → `try/except` в `AgentFactory` (хук/фабрика просто не подключится) |
-| **Хуки** | Перенаправление файлов сессии | `workspace/hooks/session_file_redirect_hook.py` (подключается автоматически через `lib/core/application_context.py:ApplicationContext.create` → `lib.cli.hook_loader.scan_and_register`; плагины передаются в `AgentFactory.create(project_hooks=...)`, который один раз вызывает `AgentLoop.from_config(hooks=merged, hook_factories=...)`) | Файлы уходят в корень workspace → проверить, что хук инстанцировался: `ApplicationContext.create` печатает один раз `Hooks connected: RecentFilesHook, SessionFileRedirectHook, ToolAuditHook` (полный список подключённых хуков — плагины + фреймворковые + per-turn factories; сканер успех молчит); whitelist пропускает `AGENTS.md`/`lib/`/`data_store/`/`*.py` — добавить в `_ALLOWED_PREFIXES` если нужно; не работает на `exec`-redirects (`>`, `>>`) — это вне `write`/`edit`; если добавляете новый хук в `workspace/hooks/` — он должен быть самодостаточным плагином (контракт `cls(workspace_dir=...)`); больше ничего делать не нужно, он подхватится на следующем старте |
+| **Хуки** | Перенаправление файлов сессии | `workspace/hooks/session_file_redirect_hook.py` (подключается автоматически через `lib/core/application_context.py:ApplicationContext.create` → `lib.cli.hook_loader.scan_and_register`; плагины передаются в `AgentFactory.create(project_hooks=...)`, который один раз вызывает `AgentLoop.from_config(hooks=merged, hook_factories=...)`) | Файлы уходят в корень workspace → проверить, что хук инстанцировался: `ApplicationContext.create` печатает один раз `Hooks connected: RecentFilesHook, SessionFileRedirectHook, ToolAuditHook` (полный список подключённых хуков — плагины + фреймворковые + per-turn factories; сканер успех молчит); whitelist пропускает `AGENTS.md`/`lib/`/`data_store/`/`*.py` — добавить в `_ALLOWED_PREFIXES` если нужно; не работает на `exec`-redirects (`>`, `>>`) — это вне `write`/`edit`; для тула `message` хук перенаправляет и `media`: ищет файл в текущей session-папке по относительному пути и по basename (включая `attachments/`, `results/`) и подставляет реальный — закрывает `Media file not found, keeping path` при attach (агент приложил относительный путь или «абсолютный» путь чужого workspace); URL/`data:`/уже существующие пути не трогаются; если добавляете новый хук в `workspace/hooks/` — он должен быть самодостаточным плагином (контракт `cls(workspace_dir=...)`); больше ничего делать не нужно, он подхватится на следующем старте |
 | **Хуки** | Auto-attach созданных файлов в `OutboundMessage.media` | `workspace/hooks/recent_files_hook.py` (тот же auto-scan; `RuntimePatcher._wrap` дренажит `recent_files_hook.drain(session_key)` после `tool_audit_hook.drain`) | Агент создал файл через `write_file`, но забыл приложить в `message()` → auto-attach добавляет; агент приложил несуществующий путь (после SSRF-блокировки `pip install`) → отбрасывается через `Path.is_file()`; агент приложил путь ДО `SessionFileRedirectHook` (basename совпадает, но указанный путь не существует — файл уехал в `data_store/cache/sessions/<key>/`) → auto-attach ЗАМЕНЯЕТ устаревший путь реальным; порядок хуков: `RecentFilesHook` ДО `SessionFileRedirectHook` (тогда `params["path"]` уже финальный к моменту `after_execute_tool`); отключить — передать `recent_files_hook=None` в `RuntimePatcher.apply_all()` |
 | **Файл-инструменты** | Контроль `write`/`edit` | `workspace/hooks/session_file_redirect_hook.py` | Без хука работает `data_store/cache/...` по правилу в `workspace/AGENTS.md`, но модель может его забыть; хук закрывает дыру независимо от подсказок в промпте |
 | **Бенчмарки** | Тест бенчмарка | YAML-файл в `benchmarks/items/` | Тест падает по `keyword` → перечитать `expect.keywords_include`; `multi_step` не переходит к следующему шагу → `new_session: true` (или `false` для общей истории) |
@@ -1945,6 +1945,11 @@ python -m pytest tests -q
 
 # Сквозной тест навыка (требует живого PostgreSQL)
 python workspace/skills/audit_analyzer/tests/e2e_test.py
+
+# Live e2e media-фикса (реальный gateway + живая БД + живой LLM)
+# Опт-ин: без NANOBOT_LIVE_E2E=1 тест пропускается. Пишет в изолированную
+# таблицу public.agent_conversation_messages_e2e (боевая очередь не трогается).
+$env:NANOBOT_LIVE_E2E="1"; python -m pytest tests/test_gateway_live_media_e2e.py -q
 ```
 
 E2E проверяет все режимы: predefined (реальный SQL по шаблонам), sql
