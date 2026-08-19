@@ -12,6 +12,10 @@ filterwarnings = [
     # importlib._bootstrap при загрузке C-расширения _faiss (не наш код).
     "ignore:builtin type .* has no __module__ attribute:DeprecationWarning",
 ]
+markers = [
+    "live: live e2e (real gateway / live DB / live LLM); needs NANOBOT_LIVE_E2E=1",
+    "integration: worker pool on real DB; needs NANOBOT_INTEGRATION=1 (+ DATABASE_URL)"
+]
 
 [tool.coverage.run]
 source = ["config.py", "benchmarks", "lib"]
