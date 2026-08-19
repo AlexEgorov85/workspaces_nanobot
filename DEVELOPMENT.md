@@ -170,7 +170,7 @@ flowchart TB
 |--------|---------------------------|
 | `config_service.py` | Дубликат `_load_runtime_config` + `SETTINGS`-аксессора между gateway и cli. Pre-resolve `${PROVIDER_API_KEY}` от .secrets.env (см. ниже). |
 | `session_storage.py` | Выбор `PGSessionManager` / `SessionManager` (auto / postgres / file) с поддержкой `session_manager.json` override. |
-| `runtime_patcher.py` | `ContextGovernor.normalize_tool_result` + `agent._assemble_outbound` — оба monkey-patch'а в одном классе с fallback при изменении API nanobot. |
+| `runtime_patcher.py` | Все monkey-patch'и фреймворка в одном классе с fallback при изменении API nanobot: `ContextGovernor.normalize_tool_result` (persist больших результатов), `AgentLoop._save_turn` (архивация вместо усечения, см. «Ликвидация потери данных»), ограничения вывода exec/tool (`patch_exec_limits`/`patch_tool_limits`), `agent._assemble_outbound` (внедрение `_tool_audit`). |
 | `channel_factory.py` | `ChannelManager` + Redis + Postgres каналы + транскрипция (вынесено из gateway). |
 | `transcription_service.py` | openai/groq key/URL/language (вынесено из gateway). |
 | `subprocess_manager.py` | Streamlit spawn + terminate/kill. |
@@ -265,6 +265,59 @@ agent_id)` (`lib/hooks/database_logging_hook.py`). Фабрика получае
 TestDatabaseLoggingHookFactory.test_concurrent_sessions_do_not_mix_request_id`
 (переплетение двух сессий → `log_tool_result`/`after_run` несут свой
 `request_id`).
+
+### Ликвидация потери данных при усечении больших результатов инструментов
+
+**Проблема.** Результаты больших инструментов терялись на нескольких уровнях:
+
+1. **exec/shell**: nanobot режет вывод команды до
+   `MAX_OUTPUT_CHARS = 50K` символов и вставляет маркер
+   `... (19,761 chars truncated) ...` (`nanobot/agent/tools/shell.py`,
+   `exec_session.py`), отбрасывая середину. Persist потом сохраняет
+   «голову+хвост» — данные теряются безвозвратно.
+2. **История сессии**: `AgentLoop._save_turn` усекает строковый результат
+   инструмента до `max_tool_result_chars = 16K` символов, если результат не
+   ушёл в persist раньше (в первую очередь это `read_file`).
+3. **Вторичные инструменты** (`read_file`/`grep`/`list_dir`) имеют свои
+   потолки с маркерами `truncated`.
+
+**Решение (все уровни закрыты патчами `RuntimePatcher`):**
+
+| Патч | Что делает |
+|------|-----------|
+| `patch_exec_limits` | Поднимает `MAX_OUTPUT_CHARS` (дефолт 500K), `DEFAULT_MAX_OUTPUT_CHARS` (100K), `ExecTool._MAX_OUTPUT`, а также подменяет `maximum` в JSON-Schema параметра `max_output_chars`/`max_output_tokens` (модель может запросить вывод >50K). Безопасно для контекста: вывод exec не exempt в persist → >`persist_threshold` уходит полным файлом в `data_store`, в контекст — ссылка. |
+| `patch_tool_limits` | Поднимает `ReadFileTool._MAX_CHARS` (512K), `search._DEFAULT_HEAD_LIMIT` / `_DEFAULT_FILE_HEAD_LIMIT` (500/400), `GrepTool._MAX_FILE_BYTES` (20MB), `ListDirTool._DEFAULT_MAX` (500). |
+| `patch_save_turn` | Оборачивает `AgentLoop._save_turn`: любой большой результат `role == "tool"` (строка или JSON-сериализуемый список) пишется **полным** файлом в `data_store` через `SessionFileStore` (суффикс `__<hash>` — dedupe), в историю кладётся ссылка `[Result saved to data_store/<path> (<size> KB)]` — тот же формат, что кастомный persist. Оригинальный `_save_turn` вызывается с копией сообщений, логика nanobot не дублируется. |
+| `save(..., dedupe=True)` | Новый параметр `SessionFileStore.save`: повторное сохранение того же содержимого (sha1, первые 12 hex) возвращает уже существующий файл (`deduped=True`), чтобы повторные/конкурентные обороты не плодили копии. |
+
+**Конфигурация** — `gateway.tool_result_limits` в `project.json`
+(все ключи опциональны, дефолты в коде):
+
+```jsonc
+"tool_result_limits": {
+  "exec_max_output_chars": 500000,
+  "exec_default_output_chars": 100000,
+  "read_file_max_chars": 512000,
+  "grep_head_limit": 500,
+  "grep_file_head_limit": 400,
+  "grep_max_file_bytes": 20000000,
+  "list_dir_max_entries": 500
+}
+```
+
+**Fallback-поведение**: каждый патч в try/except; при изменении API nanobot —
+`(False, <причина>)` в `PatchReport`, процесс не падает. `_save_turn`-обёртка
+при `OSError` в persist грейсит — вызывает оригинал (поведение «как раньше»).
+`read_file` остаётся exempt в `normalize_tool_result` (избегаем
+read→persist→read петли).
+
+**Реальные проверки** — `tests/test_runtime_patcher_e2e.py` (9 тестов):
+настоящий `ExecTool` исполняет команду с выводом >лимита и проверяет
+отсутствие маркера `chars truncated` после патча; настоящий `ReadFileTool`
+читает файл >дефолтного потолка целиком; `_save_turn`-обёртка и
+`ContextGovernor.normalize_tool_result` пишут **полные** файлы на диск в
+`data_store/` и подменяют историю ссылкой. Каждый тест сам восстанавливает
+состояние фреймворка в `finally`.
 
 ---
 

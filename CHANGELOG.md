@@ -10,6 +10,23 @@
 
 ### Added
 
+- **Закрыта потеря данных при усечении больших результатов инструментов.**
+  Раньше вывод exec/shell резался до 50K символов с маркером
+  `... (N chars truncated) ...` (`nanobot/agent/tools/shell.py`)
+  и середина пропадала безвозвратно; история сессии (`_save_turn`) усекала
+  строковые результаты до 16K символов. Теперь (все уровни через
+  `RuntimePatcher`): `patch_exec_limits` поднимает потолки вывода exec
+  и `maximum` в JSON-Schema параметров `max_output_chars`/`max_output_tokens`;
+  `patch_save_turn` пишет большой `role=="tool"` результат **полным** файлом
+  в `data_store` через `SessionFileStore` (ссылка
+  `[Result saved to data_store/<path> (<size> KB)]` в истории вместо
+  усечённого текста); `patch_tool_limits` поднимает потолки
+  `read_file`/`grep`/`list_dir`. `SessionFileStore.save` получил параметр
+  `dedupe=True` (sha1) — повторные обороты не плодят копии файлов.
+  Конфигурация — `gateway.tool_result_limits` в `project.json`
+  (все ключи опциональны, дефолты в коде). Каждый патч с fallback:
+  при изменении API nanobot — причина в `PatchReport`, процесс не падает.
+
 - **Мульти-машинный пул воркеров в `PostgresChannel` (таблица
   `agent_worker_claims`).** Устраняет двойной захват одной задачи в
   Greenplum 6.5: эксклюзивность аренды гарантирует **UNIQUE PK `(task_id)`
