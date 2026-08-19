@@ -35,7 +35,7 @@ _MAX_WAIT = SETTINGS.streamlit.get("max_wait", 600)
 _POLL_INTERVAL = SETTINGS.streamlit.get("poll_interval", 1.0)
 _CHAT_ID = SETTINGS.streamlit.get("chat_id", "streamlit")
 _USER_ID = SETTINGS.streamlit.get("user_id", "user")
-_FAILED_WINDOW = SETTINGS.streamlit.get("failed_window_sec", 300)
+_ERROR_WINDOW = SETTINGS.streamlit.get("error_window_sec", 300)
 
 # Единый стор файлов — ассистентские вложения (download) и пользовательские
 # upload-файлы (те, что стримлит кладёт в БД) хранятся здесь, в одной
@@ -343,7 +343,7 @@ if processing:
     with st.status("⏳ Агент думает...", expanded=True) as status:
         placeholder = st.empty()
         start_time = time.time()
-        failed_since: float | None = None
+        error_since: float | None = None
 
         while True:
             elapsed = int(time.time() - start_time)
@@ -373,26 +373,34 @@ if processing:
                 st.rerun()
 
             if cur_status == "failed":
-                # Статус может вернуться в работу (retry канала). Даём окно
-                # в 5 минут на повторную обработку, и только после него
-                # показываем ошибку окончательно.
-                if failed_since is None:
-                    failed_since = time.time()
-                failed_elapsed = int(time.time() - failed_since)
-                if failed_elapsed >= _FAILED_WINDOW:
+                # failed — терминальный статус: канал больше не будет
+                # обрабатывать задачу, показываем ошибку сразу.
+                status.update(label="❌ Ошибка", state="error")
+                placeholder.markdown("⚠️ Ошибка обработки. Ответ не получен.")
+                st.session_state._processing = False
+                st.rerun()
+
+            if cur_status == "error":
+                # error — повторяемая ошибка: канал вернёт задачу в пул
+                # после backoff (error_retry_delay). Даём окно на повторную
+                # обработку, и только после него — ошибка окончательно.
+                if error_since is None:
+                    error_since = time.time()
+                error_elapsed = int(time.time() - error_since)
+                if error_elapsed >= _ERROR_WINDOW:
                     status.update(label="❌ Ошибка", state="error")
                     placeholder.markdown("⚠️ Ошибка обработки. Ответ не получен.")
                     st.session_state._processing = False
                     st.rerun()
                 placeholder.markdown(
-                    f"⚠️ Получена ошибка, перепроверяю... {failed_elapsed}с из {_FAILED_WINDOW}с"
+                    f"⚠️ Временная ошибка, повторяю... {error_elapsed}с из {_ERROR_WINDOW}с"
                 )
                 time.sleep(_POLL_INTERVAL)
                 continue
 
             # status in ('pending', 'processing') — сообщение в работе,
             # ждём бесконечно, без таймаута.
-            failed_since = None
+            error_since = None
 
             # Показываем live-состояние: размышления, черновик или просто счётчик
             state = _get_processing_state(msg_id)
