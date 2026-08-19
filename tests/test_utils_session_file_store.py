@@ -235,6 +235,63 @@ class TestSessionFileStoreSave:
         assert meta["file_count"] == 2
 
 
+class TestSessionFileStoreDedupe:
+    def test_second_save_returns_existing(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path)
+        first = store.save("s1", "same content", "t1", ext=".txt")
+        second = store.save("s1", "same content", "t1", ext=".txt")
+        assert second["deduped"] is True
+        assert second["path"] == first["path"]
+        assert first["deduped"] is False
+
+    def test_no_new_file_on_dedupe(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path)
+        store.save("s1", "same", "t1", ext=".txt")
+        store.save("s1", "same", "t1", ext=".txt")
+        results_dir = tmp_path / "cache" / "sessions" / "s1" / "results"
+        assert len(list(results_dir.iterdir())) == 1
+
+    def test_metadata_count_not_incremented_on_dedupe(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path)
+        store.save("s1", "same", "t1", ext=".txt")
+        store.save("s1", "same", "t1", ext=".txt")
+        meta_path = tmp_path / "cache" / "sessions" / "s1" / "metadata.json"
+        meta = json.loads(meta_path.read_text())
+        assert meta["file_count"] == 1
+
+    def test_different_content_saves_separately(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path)
+        store.save("s1", "alpha", "t1", ext=".txt")
+        store.save("s1", "beta", "t1", ext=".txt")
+        results_dir = tmp_path / "cache" / "sessions" / "s1" / "results"
+        assert len(list(results_dir.iterdir())) == 2
+
+    def test_dedupe_false_always_writes(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path)
+        store.save("s1", "twice", "t1", ext=".txt", dedupe=False)
+        store.save("s1", "twice", "t1", ext=".txt", dedupe=False)
+        results_dir = tmp_path / "cache" / "sessions" / "s1" / "results"
+        assert len(list(results_dir.iterdir())) == 2
+
+    def test_dedupe_scoped_to_session(self, tmp_path):
+        from utils.session_file_store import SessionFileStore
+
+        store = SessionFileStore(tmp_path)
+        store.save("s1", "shared", "t1", ext=".txt")
+        second = store.save("s2", "shared", "t1", ext=".txt")
+        assert second["deduped"] is False
+
+
 class TestSessionFileStoreCleanup:
     def test_noop_when_no_limits(self, tmp_path):
         from utils.session_file_store import SessionFileStore

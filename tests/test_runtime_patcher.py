@@ -174,6 +174,225 @@ class TestPatchContextGovernor:
             assert "import failed" in detail
 
 
+class TestPatchExecLimits:
+    def test_patches_module_constants_and_schema(self):
+        esm = types.ModuleType("nanobot.agent.tools.exec_session")
+        esm.MAX_OUTPUT_CHARS = 50_000
+        esm.DEFAULT_MAX_OUTPUT_CHARS = 10_000
+        esm.WriteStdinTool = type(
+            "WriteStdinTool", (),
+            {"parameters": property(lambda s: {"properties": {
+                "max_output_chars": {"maximum": 50_000},
+                "max_output_tokens": {"maximum": 50_000},
+            }})},
+        )
+        shellm = types.ModuleType("nanobot.agent.tools.shell")
+        shellm.MAX_OUTPUT_CHARS = 50_000
+        shellm.ExecTool = type(
+            "ExecTool", (),
+            {"_MAX_OUTPUT": 10_000, "parameters": property(lambda s: {"properties": {
+                "max_output_chars": {"maximum": 50_000},
+                "max_output_tokens": {"maximum": 50_000},
+            }})},
+        )
+        hidden = {
+            "nanobot.agent.tools.exec_session": esm,
+            "nanobot.agent.tools.shell": shellm,
+        }
+        with patch.dict("sys.modules", hidden):
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_exec_limits(_settings())
+            assert ok
+            assert esm.MAX_OUTPUT_CHARS == 500_000
+            assert esm.DEFAULT_MAX_OUTPUT_CHARS == 100_000
+            assert shellm.MAX_OUTPUT_CHARS == 500_000
+            assert shellm.ExecTool._MAX_OUTPUT == 100_000
+            schema = shellm.ExecTool.parameters.fget(shellm.ExecTool)
+            assert schema["properties"]["max_output_chars"]["maximum"] == 500_000
+            schema2 = esm.WriteStdinTool.parameters.fget(esm.WriteStdinTool)
+            assert schema2["properties"]["max_output_tokens"]["maximum"] == 500_000
+
+    def test_custom_limits(self):
+        esm = types.ModuleType("nanobot.agent.tools.exec_session")
+        esm.MAX_OUTPUT_CHARS = 50_000
+        esm.DEFAULT_MAX_OUTPUT_CHARS = 10_000
+        esm.WriteStdinTool = type("WriteStdinTool", (), {"parameters": property(lambda s: {"properties": {}})})
+        shellm = types.ModuleType("nanobot.agent.tools.shell")
+        shellm.MAX_OUTPUT_CHARS = 50_000
+        shellm.ExecTool = type("ExecTool", (), {"_MAX_OUTPUT": 10_000, "parameters": property(lambda s: {"properties": {}})})
+        hidden = {
+            "nanobot.agent.tools.exec_session": esm,
+            "nanobot.agent.tools.shell": shellm,
+        }
+        with patch.dict("sys.modules", hidden):
+            patcher = RuntimePatcher()
+            settings = _settings(tool_result_limits={
+                "exec_max_output_chars": 999_999,
+                "exec_default_output_chars": 88_888,
+            })
+            ok, _ = patcher.patch_exec_limits(settings)
+            assert ok
+            assert esm.MAX_OUTPUT_CHARS == 999_999
+            assert esm.DEFAULT_MAX_OUTPUT_CHARS == 88_888
+            assert shellm.ExecTool._MAX_OUTPUT == 88_888
+
+
+class TestPatchToolLimits:
+    def test_patches_module_limits(self):
+        fsm = types.ModuleType("nanobot.agent.tools.filesystem")
+        fsm.ReadFileTool = type("ReadFileTool", (), {"_MAX_CHARS": 128_000})
+        fsm.ListDirTool = type("ListDirTool", (), {"_DEFAULT_MAX": 200})
+        srm = types.ModuleType("nanobot.agent.tools.search")
+        srm._DEFAULT_HEAD_LIMIT = 250
+        srm._DEFAULT_FILE_HEAD_LIMIT = 200
+        srm.GrepTool = type("GrepTool", (), {"_MAX_FILE_BYTES": 5_000_000})
+        hidden = {
+            "nanobot.agent.tools.filesystem": fsm,
+            "nanobot.agent.tools.search": srm,
+        }
+        with patch.dict("sys.modules", hidden):
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_tool_limits(_settings())
+            assert ok
+            assert fsm.ReadFileTool._MAX_CHARS == 512_000
+            assert fsm.ListDirTool._DEFAULT_MAX == 500
+            assert srm._DEFAULT_HEAD_LIMIT == 500
+            assert srm._DEFAULT_FILE_HEAD_LIMIT == 400
+            assert srm.GrepTool._MAX_FILE_BYTES == 20_000_000
+
+    def test_custom_limits(self):
+        fsm = types.ModuleType("nanobot.agent.tools.filesystem")
+        fsm.ReadFileTool = type("ReadFileTool", (), {"_MAX_CHARS": 128_000})
+        fsm.ListDirTool = type("ListDirTool", (), {"_DEFAULT_MAX": 200})
+        srm = types.ModuleType("nanobot.agent.tools.search")
+        srm._DEFAULT_HEAD_LIMIT = 250
+        srm._DEFAULT_FILE_HEAD_LIMIT = 200
+        srm.GrepTool = type("GrepTool", (), {"_MAX_FILE_BYTES": 5_000_000})
+        hidden = {
+            "nanobot.agent.tools.filesystem": fsm,
+            "nanobot.agent.tools.search": srm,
+        }
+        with patch.dict("sys.modules", hidden):
+            patcher = RuntimePatcher()
+            settings = _settings(tool_result_limits={
+                "read_file_max_chars": 999_999,
+                "grep_head_limit": 10,
+                "grep_file_head_limit": 20,
+                "grep_max_file_bytes": 30,
+                "list_dir_max_entries": 40,
+            })
+            ok, _ = patcher.patch_tool_limits(settings)
+            assert ok
+            assert fsm.ReadFileTool._MAX_CHARS == 999_999
+            assert fsm.ListDirTool._DEFAULT_MAX == 40
+            assert srm._DEFAULT_HEAD_LIMIT == 10
+            assert srm._DEFAULT_FILE_HEAD_LIMIT == 20
+            assert srm.GrepTool._MAX_FILE_BYTES == 30
+
+
+class TestPatchSaveTurn:
+    def test_threshold_zero_skipped(self):
+        patcher = RuntimePatcher()
+        ok, detail = patcher.patch_save_turn(
+            _settings(), Path("ws"), MagicMock()
+        )
+        assert not ok
+        assert "persist_threshold" in detail
+
+    def test_agent_none_skipped(self):
+        patcher = RuntimePatcher()
+        ok, detail = patcher.patch_save_turn(
+            _settings(persist_threshold=5), Path("ws"), None
+        )
+        assert not ok
+        assert "agent" in detail
+
+    def test_archives_large_tool_result(self, tmp_path):
+        store = MagicMock()
+        store.save.return_value = {
+            "path": "cache/sessions/s1/results/x.txt",
+            "size_kb": 100.0,
+        }
+        utils_mod = types.ModuleType("utils")
+        store_mod = types.ModuleType("utils.session_file_store")
+        store_mod.SessionFileStore = lambda root, **kw: store
+        store_mod.prepare_content = lambda text: (text, "txt")
+        utils_mod.session_file_store = store_mod
+        hidden = {
+            "utils": utils_mod,
+            "utils.session_file_store": store_mod,
+        }
+
+        class _Session:
+            key = "s1"
+
+        big = "x" * 100_000
+        msg = {"role": "tool", "content": big, "tool_call_id": "t1", "name": "exec"}
+        captured = {}
+
+        def _fake_save_turn(session, messages, skip, *, turn_latency_ms=None):
+            captured["messages"] = messages
+            captured["turn_latency_ms"] = turn_latency_ms
+            return None
+
+        agent = MagicMock()
+        agent.max_tool_result_chars = 16_000
+        agent._save_turn = _fake_save_turn
+
+        with patch.dict("sys.modules", hidden):
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_save_turn(
+                _settings(persist_threshold=5), tmp_path, agent
+            )
+            assert ok
+            agent._save_turn(_Session(), [msg], 0, turn_latency_ms=42)
+
+        store.save.assert_called_once()
+        call_kwargs = store.save.call_args.kwargs
+        assert call_kwargs["session_key"] == "s1"
+        assert call_kwargs["dedupe"] is True
+        assert call_kwargs["source_tool"] == "exec"
+        # история подменена на ссылку
+        assert captured["messages"][0]["content"].startswith("[Result saved to data_store/")
+        assert captured["turn_latency_ms"] == 42
+
+    def test_small_result_passes_through(self, tmp_path):
+        store = MagicMock()
+        utils_mod = types.ModuleType("utils")
+        store_mod = types.ModuleType("utils.session_file_store")
+        store_mod.SessionFileStore = lambda root, **kw: store
+        store_mod.prepare_content = lambda text: (text, "txt")
+        utils_mod.session_file_store = store_mod
+        hidden = {
+            "utils": utils_mod,
+            "utils.session_file_store": store_mod,
+        }
+
+        class _Session:
+            key = "s1"
+
+        msg = {"role": "tool", "content": "small", "tool_call_id": "t1", "name": "read"}
+        captured = {}
+
+        def _fake_save_turn(session, messages, skip, **kw):
+            captured["messages"] = messages
+
+        agent = MagicMock()
+        agent.max_tool_result_chars = 16_000
+        agent._save_turn = _fake_save_turn
+
+        with patch.dict("sys.modules", hidden):
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_save_turn(
+                _settings(persist_threshold=5), tmp_path, agent
+            )
+            assert ok
+            agent._save_turn(_Session(), [msg], 0)
+
+        store.save.assert_not_called()
+        assert captured["messages"][0]["content"] == "small"
+
+
 class TestPatchSubagentLogging:
     def _context(self, **overrides):
         base = {
