@@ -39,6 +39,9 @@ sql/
 │   ├── create_public_agent_benchmark_runs.sql           #   public.agent_benchmark_runs
 │   └── create_public_agent_benchmark_results.sql        #   public.agent_benchmark_results
 │
+├── workers/                                             # Мульти-машинный пул воркеров
+│   └── create_public_agent_worker_claims.sql            #   public.agent_worker_claims (аренда задач)
+│
 └── audit_analyzer/                                      # навык audit_analyzer
     ├── create_oarb_audits.sql                           #   oarb.audits          (REFERENCE)
     ├── create_oarb_violations.sql                       #   oarb.violations      (REFERENCE)
@@ -63,6 +66,16 @@ psql "$DATABASE_URL" -f sql/session/create_public_agent_session_messages.sql
 psql "$DATABASE_URL" -f sql/channels/create_public_agent_conversation_messages.sql
 ```
 
+### Мульти-машинный пул воркеров (аренда задач)
+
+Таблица аренды добавляется на любую БД (и свежую, и существующую) одним
+скриптом — колонка в `agent_conversation_messages` для этого не нужна
+(владелец задачи живёт только в `agent_worker_claims.worker_id`):
+
+```bash
+psql "$DATABASE_URL" -f sql/workers/create_public_agent_worker_claims.sql
+```
+
 ### Полная установка (gateway + audit_analyzer + benchmarks)
 
 ```bash
@@ -73,30 +86,33 @@ psql "$DATABASE_URL" -f sql/session/create_public_agent_session_messages.sql
 # 2. Канал
 psql "$DATABASE_URL" -f sql/channels/create_public_agent_conversation_messages.sql
 
-# 3. Журнал событий (DbLoggingService)
+# 3. Мульти-машинный пул воркеров (аренда задач)
+psql "$DATABASE_URL" -f sql/workers/create_public_agent_worker_claims.sql
+
+# 4. Журнал событий (DbLoggingService)
 psql "$DATABASE_URL" -f sql/logs/create_public_agent_question_runs.sql
 psql "$DATABASE_URL" -f sql/logs/create_public_agent_gateway_logs.sql
 
-# 4. Бенчмарки
+# 5. Бенчмарки
 psql "$DATABASE_URL" -f sql/benchmarks/create_public_agent_benchmark_runs.sql
 psql "$DATABASE_URL" -f sql/benchmarks/create_public_agent_benchmark_results.sql
 
-# 5. Домен audit_analyzer — reference таблицы (если нет в существующей БД)
+# 6. Домен audit_analyzer — reference таблицы (если нет в существующей БД)
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_audits.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_violations.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_audit_reports.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_report_items.sql
 
-# 6. Домен audit_analyzer — таблицы навыка
+# 7. Домен audit_analyzer — таблицы навыка
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_audit_vectors.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_public_agent_predefined_scripts.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_public_agent_vector_index_config.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_public_agent_vector_index_store.sql
 
-# 7. Дефолтные индексы (3 шт.: audits_index, violations_index, audit_reports_index)
+# 8. Дефолтные индексы (3 шт.: audits_index, violations_index, audit_reports_index)
 psql "$DATABASE_URL" -f sql/audit_analyzer/seed_default_indexes.sql
 
-# 8. Сборка векторных индексов
+# 9. Сборка векторных индексов
 python tools/build_vectors.py --full-rebuild
 ```
 
@@ -107,6 +123,7 @@ python tools/build_vectors.py --full-rebuild
 | Ситуация                                                | Куда класть                                              |
 |---------------------------------------------------------|----------------------------------------------------------|
 | Таблица для новой фичи runtime                          | подкаталог по домену: `sql/<domain>/create_<schema>_<table>.sql` |
+| Таблица аренды задач воркеров (пул)                     | `sql/workers/create_public_agent_worker_claims.sql`      |
 | Доменная таблица для навыка                             | `sql/<skill>/create_<schema>_<table>.sql`                |
 | Тестовые данные                                         | `sql/<domain>/seed_<table>.sql`                          |
 

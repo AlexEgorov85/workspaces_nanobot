@@ -34,6 +34,6 @@ COMMENT ON COLUMN public.agent_conversation_messages.media      IS 'JSONB: вл�
 COMMENT ON COLUMN public.agent_conversation_messages.metadata   IS 'JSONB: дополнительные метаданные (reasoning, session, ...).';
 COMMENT ON COLUMN public.agent_conversation_messages.reply_to   IS 'ID родительского сообщения (для связки ответ—вопрос).';
 COMMENT ON COLUMN public.agent_conversation_messages.buttons    IS 'JSONB: интерактивные кнопки / инлайн-клавиатура.';
-COMMENT ON COLUMN public.agent_conversation_messages.status     IS 'Статус: pending / processing / completed.';
+COMMENT ON COLUMN public.agent_conversation_messages.status     IS 'Статус: pending / processing / completed / error (повторяемая ошибка) / failed (терминальный, не меняется).';
 COMMENT ON COLUMN public.agent_conversation_messages.created_at IS 'Время создания сообщения.';
 COMMENT ON COLUMN public.agent_conversation_messages.updated_at IS 'Время последнего изменения (статус/reasoning).';

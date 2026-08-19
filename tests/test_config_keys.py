@@ -47,6 +47,10 @@ def _required_keys():
         ("channels.postgres.schema", "public"),
         ("channels.postgres.max_stuck_retries", 3),
         ("channels.postgres.msg_ctx_max_size", 100),
+        ("channels.postgres.worker_id", ""),
+        ("channels.postgres.claims_table", "agent_worker_claims"),
+        ("channels.postgres.lease_interval", 15.0),
+        ("channels.postgres.error_retry_delay", 60.0),
         ("channels.postgres.media_cache_dir", "data_store/cache/sessions"),
         # channels.postgres.pool
         ("channels.postgres.pool.min_conn", 1),
@@ -109,7 +113,7 @@ def _required_keys():
         ("streamlit.max_wait", 600),
         ("streamlit.poll_interval", 1.0),
         ("streamlit.files_dir", "data_store/streamlit_files"),
-        ("streamlit.failed_window_sec", 300),
+        ("streamlit.error_window_sec", 300),
         # gateway
         ("gateway.storage", "auto"),
         ("gateway.persist_threshold", 5000),

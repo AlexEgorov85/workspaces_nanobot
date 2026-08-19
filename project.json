@@ -41,9 +41,13 @@
       "poll_interval": 2.0,                   // Поллинг новых сообщений, сек
       "flush_interval": 2.0,                  // Сброс reasoning в metadata, сек
       "max_concurrent": 1,                    // Макс. параллельно обрабатываемых сообщений
-      "processing_timeout": 120,              // Зависшее сообщение → retry (до 3 раз), сек
+      "processing_timeout": 120,              // Зависшее сообщение → reclaim/retry (см. lease), сек
       "max_stuck_retries": 3,                 // Лимит retry зависшего сообщения (postgres_channel.py)
       "msg_ctx_max_size": 100,                // Защитный лимит размера _msg_ctx (postgres_channel.py)
+      "worker_id": "",                        // ID воркера в мульти-машинном пуле. Пусто → авто: {hostname}:{pid}:{uuid8}
+      "claims_table": "agent_worker_claims",  // Таблица аренды задач (мульти-машинный пул)
+      "lease_interval": 15.0,                 // Период heartbeat-продления аренды, сек
+      "error_retry_delay": 60.0,              // Пауза перед повтором задачи со статусом error, сек
       "media_cache_dir": "data_store/cache/sessions",  // Кеш медиа-файлов сессий
       "allow_from": ["*"],                    // Допустимые отправители. Варианты: ["*"] — все | ["<sender_id>", ...] — точное совпадение (nanobot/channels/base.py:203)
       "pool": {                               // Параметры пула psycopg2 (session_storage.py)
@@ -179,7 +183,7 @@
     "max_wait": 600,                  // Макс. ожидание ответа агента, сек
     "poll_interval": 1.0,             // Интервал поллинга статуса, сек
     "files_dir": "data_store/streamlit_files",  // Папка загруженных файлов
-    "failed_window_sec": 300          // Окно retry для failed-сообщений (5 мин)
+    "error_window_sec": 300           // Окно повтора для error-сообщений (5 мин)
   },
 
   // ---------------------------------------------------------------------------
