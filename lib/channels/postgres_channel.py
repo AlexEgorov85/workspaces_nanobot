@@ -11,9 +11,14 @@
         "dsn": "postgresql://user:pass@localhost:5432/nanobot",
         "schema": "public",
         "table_name": "agent_conversation_messages",
+        "claims_table": "agent_worker_claims",
         "poll_interval": 2.0,
         "max_concurrent": 1,
-        "processing_timeout": 300
+        "processing_timeout": 300,
+        "lease_interval": 15.0,
+        "error_retry_delay": 60.0,
+        "max_stuck_retries": 3,
+        "worker_id": ""
     }
 """
 
@@ -23,13 +28,16 @@ import asyncio
 import base64
 import json
 import mimetypes
+import os
 import re
+import socket
 import uuid
 from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg2
 from loguru import logger
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
@@ -73,9 +81,12 @@ class PostgresChannel(BaseChannel):
     Жизненный цикл сообщения:
 
         1. Пользователь пишет сообщение → INSERT с status='pending'
-        2. ``_poll_once`` забирает его (UPDATE status='processing')
+        2. ``_claim_one`` атомарно захватывает задачу: INSERT claim в
+           ``agent_worker_claims`` (UNIQUE PK — арбитр эксклюзивности) +
+           UPDATE status='processing'
         3. ``_handle_message`` отправляет в шину → агенту
         4. Агент формирует ответ → ``send()`` пишет status='completed'
+           и удаляет claim
         5. Web-сервер (Streamlit) видит completed и показывает ответ
 
     Рассуждения агента (reasoning) пишутся в real-time через
@@ -83,6 +94,9 @@ class PostgresChannel(BaseChannel):
     периодически сбрасывает в ``metadata.reasoning``.
 
     Параллельность ограничена ``max_concurrent`` через asyncio.Semaphore.
+    Мульти-машинная аренда задач: claim+lease/heartbeat, reclaim+heal,
+    статусы ``error`` (повторяется) и ``failed`` (терминал). См. Документация
+    DEVELOPMENT.md » «Мульти-машинный пул воркеров».
     """
 
     def __init__(self, config: dict, bus: MessageBus) -> None:
@@ -111,6 +125,24 @@ class PostgresChannel(BaseChannel):
         self._msg_ctx_max_size: int = int(_get("msg_ctx_max_size", 100))
         # как часто сбрасывать буферы reasoning в БД (сек)
         self._flush_interval: float = float(_get("flush_interval", 2.0))
+
+        # ---- мульти-машинный пул воркеров (аренда задач через claims) ----
+        # Уникальный идентификатор этого воркера: либо явный из конфига,
+        # либо авто-генерируемый {hostname}:{pid}:{rand8}.
+        self._worker_id: str = (_get("worker_id") or "").strip()
+        if not self._worker_id:
+            self._worker_id = (
+                f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+            )
+        self._claims_table: str = _get("claims_table", "agent_worker_claims")
+        self._fq_claims: str = f"{self._schema}.{self._claims_table}"
+        # период heartbeat-продления аренды (сек)
+        self._lease_interval: float = float(_get("lease_interval", 15.0))
+        # пауза перед повторным захватом задачи со статусом error (сек)
+        self._error_retry_delay: int = int(_get("error_retry_delay", 60))
+        # task_id задач, аренда которых сейчас принадлежит этому воркеру
+        self._leases: set[str] = set()
+        self._lease_task: asyncio.Task | None = None
 
         # ---- параллельность ----
         self._max_concurrent: int = int(_get("max_concurrent", 1))
@@ -198,19 +230,21 @@ class PostgresChannel(BaseChannel):
         return self._file_store
 
     async def start(self) -> None:
-        """Запустить циклы опроса БД и сброса рассуждений."""
+        """Запустить циклы опроса БД, продления аренды и сброса рассуждений."""
         self._running = True
         self._flush_task = asyncio.create_task(self._flush_reasoning_loop())
+        self._lease_task = asyncio.create_task(self._lease_loop())
         await self.exchange.start()
         self.logger.info(
-            "Polling {} every {}s (processing timeout {}s)",
+            "Polling {} every {}s (processing timeout {}s, worker_id={})",
             self._fq_table,
             self._poll_interval,
             self._processing_timeout,
+            self._worker_id,
         )
 
     async def stop(self) -> None:
-        """Остановить все циклы и сбросить оставшиеся рассуждения."""
+        """Остановить все циклы, освободить аренды и сбросить рассуждения."""
         self._running = False
         await self.exchange.stop()
         await self._flush_reasoning()
@@ -218,8 +252,158 @@ class PostgresChannel(BaseChannel):
             self._flush_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._flush_task
+        if self._lease_task:
+            self._lease_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._lease_task
+            self._lease_task = None
+        # Вернуть незавершённые задачи в пул (другие воркеры их подберут).
+        await self._release_all_leases()
         # db — глобальный singleton из utils.db, закрывается при выходе
         # из процесса. Явно не закрываем, чтобы не сломать другие каналы.
+
+    # ------------------------------------------------------------------
+    # Аренда задач (lease) — heartbeat и reclaim
+    # ------------------------------------------------------------------
+
+    async def _lease_loop(self) -> None:
+        """Фоновая задача: периодически продлевает аренды и возвращает
+        задачи с истёкшими арендами обратно в пул.
+
+        Каждые ``_lease_interval`` секунд:
+          1. ``_reclaim_and_heal`` — вернуть в пул задачи, чьи lease истекли;
+          2. heartbeat — продлить ``lease_until`` для своих аренд.
+        """
+        while self._running:
+            await asyncio.sleep(self._lease_interval)
+            try:
+                await self._reclaim_and_heal()
+                if self._leases:
+                    await execute(
+                        f"UPDATE {self._fq_claims} SET lease_until = "
+                        f"NOW() + interval '1 second' * %s WHERE worker_id = %s",
+                        self._processing_timeout, self._worker_id,
+                    )
+            except Exception as e:
+                self.logger.error("Lease loop error: {}", e)
+
+    async def _reclaim_and_heal(self) -> None:
+        """Вернуть задачи с истёкшими арендами и вылечить рассинхроны claims.
+
+        Инвариант: ``processing ⇔ claim``. Нарушения чинятся в одной
+        транзакции:
+
+          1. Reclaim: истёкшие lease удаляются, их задачи возвращаются в
+             ``pending`` (или ``failed`` при исчерпании лимита retry),
+             assistant-placeholder удаляется.
+          2. Heal: ``processing`` без claim → ``error`` (аномалия, будет
+             повторена после ``error_retry_delay``).
+          3. Orphaned assistant (``processing`` без живой user-пары) →
+             ``failed``.
+          4. Висячая аренда: claim есть, а задача не в ``processing``
+             (уже completed/pending/error) — удаляется как мусор.
+        """
+        async with transaction() as conn:
+            # 1. Reclaim по истечению lease
+            rows = await conn.fetch(
+                f"DELETE FROM {self._fq_claims} WHERE lease_until < NOW() "
+                f"RETURNING task_id, worker_id"
+            )
+            for r in rows:
+                msg_id = str(r["task_id"])
+                meta_row = await conn.fetchrow(
+                    f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
+                    msg_id,
+                )
+                meta = _decode_jsonb(meta_row["metadata"]) if meta_row else {}
+                retry_count = meta.get("retry_count", 0) + 1
+                meta["retry_count"] = retry_count
+                if retry_count >= self._max_stuck_retries:
+                    await conn.execute(
+                        f"UPDATE {self._fq_table} SET status = 'failed', "
+                        f"metadata = %s, updated_at = NOW() "
+                        f"WHERE id = %s AND status = 'processing'",
+                        meta, msg_id,
+                    )
+                    await conn.execute(
+                        f"UPDATE {self._fq_table} SET status = 'failed', "
+                        f"updated_at = NOW() WHERE reply_to = %s "
+                        f"AND role = 'assistant' AND status = 'processing'",
+                        msg_id,
+                    )
+                    self.logger.warning(
+                        "Reclaimed user msg {} exceeded max retries ({}/{})",
+                        msg_id, retry_count, self._max_stuck_retries,
+                    )
+                else:
+                    await conn.execute(
+                        f"UPDATE {self._fq_table} SET status = 'pending', "
+                        f"metadata = %s, updated_at = NOW() "
+                        f"WHERE id = %s AND status = 'processing'",
+                        meta, msg_id,
+                    )
+                    await conn.execute(
+                        f"DELETE FROM {self._fq_table} WHERE reply_to = %s "
+                        f"AND role = 'assistant' AND status IN ('processing', 'failed')",
+                        msg_id,
+                    )
+                    self.logger.warning(
+                        "Reclaimed stuck user msg {} (retry {}/{})",
+                        msg_id, retry_count, self._max_stuck_retries,
+                    )
+
+            # 2. Heal: processing без claim — повторяемая ошибка
+            await conn.execute(
+                f"UPDATE {self._fq_table} SET status = 'error', "
+                f"updated_at = NOW() "
+                f"WHERE role = 'user' AND status = 'processing' "
+                f"AND NOT EXISTS (SELECT 1 FROM {self._fq_claims} c "
+                f"WHERE c.task_id = {self._fq_table}.id)"
+            )
+
+            # 3. Orphaned assistant-сообщения (без живой user-пары)
+            await conn.execute(
+                f"UPDATE {self._fq_table} SET status = 'failed', "
+                f"updated_at = NOW() WHERE role = 'assistant' "
+                f"AND status = 'processing' AND NOT EXISTS "
+                f"(SELECT 1 FROM {self._fq_table} u "
+                f"WHERE u.id = {self._fq_table}.reply_to AND u.role = 'user')"
+            )
+
+            # 4. Висячие аренды: claim есть, а задача не в обработке — мусор
+            await conn.execute(
+                f"DELETE FROM {self._fq_claims} c "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {self._fq_table} m "
+                f"WHERE m.id = c.task_id AND m.status = 'processing')"
+            )
+
+    async def _release_all_leases(self) -> None:
+        """Освободить все аренды этого воркера при остановке.
+
+        Задачи возвращаются в ``pending`` (если всё ещё ``processing``),
+        claims удаляются, assistant-placeholder — тоже.
+        """
+        if not self._leases:
+            return
+        async with transaction() as conn:
+            for task_id in list(self._leases):
+                await conn.execute(
+                    f"UPDATE {self._fq_table} SET status = 'pending', "
+                    f"updated_at = NOW() "
+                    f"WHERE id = %s AND status = 'processing'",
+                    task_id,
+                )
+                await conn.execute(
+                    f"DELETE FROM {self._fq_claims} "
+                    f"WHERE task_id = %s AND worker_id = %s",
+                    task_id, self._worker_id,
+                )
+                await conn.execute(
+                    f"DELETE FROM {self._fq_table} WHERE reply_to = %s "
+                    f"AND role = 'assistant' AND status = 'processing'",
+                    task_id,
+                )
+        self._leases.clear()
 
     # ------------------------------------------------------------------
     # Сброс рассуждений (reasoning flush)
@@ -276,142 +460,127 @@ class PostgresChannel(BaseChannel):
         """Хук транспорта для ``MessageExchange``: берет новое сообщение из БД.
 
         Каждая итерация:
-          1. ``_unstick_processing`` — разблокировать зависшие сообщения
+          1. ``_reclaim_and_heal`` — вернуть в пул задачи с истёкшими арендами
           2. Если есть свободный слот → ``_poll_once`` — взять новое сообщение
 
         Возвращает True, если сообщение обработано (тогда движок опрашивает
         следующее без ожидания).
         """
-        await self._unstick_processing()
+        await self._reclaim_and_heal()
         if not exchange.is_slot_free():
             return False
         had = await self._poll_once(exchange)
         return bool(had)
 
-    async def _unstick_processing(self) -> None:
-        """Освободить сообщения, зависшие в ``processing`` дольше таймаута.
+    async def _claim_one(self) -> dict | None:
+        """Атомарно захватить одну задачу: клейм + status='processing'.
 
-        Механизм:
-          — Если сообщение в processing > ``_processing_timeout`` секунд,
-            оно считается зависшим.
-          — Счётчик retry_count в metadata увеличивается.
-          — Если retry_count >= 3 → status = 'failed' (окончательно).
-          — Иначе → status = 'pending' (повторная попытка).
-          — Старый assistant-placeholder удаляется (вместо failed), чтобы
-            пользователь не видел ошибочный статус до повторной обработки.
+        В одной транзакции:
+          1. SELECT самого старого кандидата (``pending`` или ``error`` с
+             истёкшим backoff) без активного claim и из чата без активной
+             user-задачи;
+          2. INSERT claim — арбитр эксклюзивности: PK (task_id) не даёт
+             второму воркеру захватить ту же задачу (UniqueViolation);
+          3. UPDATE сообщения → status='processing'.
 
-        Это защита от ситуаций, когда агент упал, а сообщение осталось
-        висеть в processing навсегда.
+        При UniqueViolation (задачу только что захватил другой воркер)
+        транзакция откатывается и пробуем следующего кандидата.
+        Возвращает строку-кандидата или None, если задач нет.
         """
-        max_retries = self._max_stuck_retries
-        timeout_s = self._processing_timeout
-
-        async with transaction() as conn:
-            rows = await conn.fetch(
-                f"""
-                SELECT id, metadata FROM {self._fq_table}
-                WHERE role = 'user' AND status = 'processing'
-                AND updated_at + interval '1 second' * %s < NOW()
-                """,
-                timeout_s,
-            )
-
-            for row in rows:
-                msg_id = str(row["id"])
-                meta = _decode_jsonb(row["metadata"])
-                retry_count = meta.get("retry_count", 0) + 1
-                meta["retry_count"] = retry_count
-
-                if retry_count >= max_retries:
-                    # исчерпали лимит попыток — окончательно failed
+        while True:
+            try:
+                async with transaction() as conn:
+                    row = await conn.fetchrow(
+                        f"""
+                        SELECT id, chat_id, user_id, content, media,
+                               metadata, created_at
+                        FROM {self._fq_table}
+                        WHERE role = 'user'
+                          AND (
+                              status = 'pending'
+                              OR (status = 'error'
+                                  AND updated_at + interval '1 second' * %s < NOW())
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM {self._fq_claims} c
+                              WHERE c.task_id = {self._fq_table}.id
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM {self._fq_table} m2
+                              WHERE m2.chat_id = {self._fq_table}.chat_id
+                                AND m2.role = 'user'
+                                AND m2.status = 'processing'
+                          )
+                        ORDER BY created_at ASC
+                        LIMIT 1
+                        """,
+                        self._error_retry_delay,
+                    )
+                    if row is None:
+                        return None
+                    task_id = str(row["id"])
                     await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'failed', "
-                        f"metadata = %s, updated_at = NOW() WHERE id = %s",
-                        meta, msg_id,
+                        f"INSERT INTO {self._fq_claims} "
+                        f"(task_id, worker_id, claimed_at, lease_until, created_at) "
+                        f"VALUES (%s, %s, NOW(), "
+                        f"NOW() + interval '1 second' * %s, NOW())",
+                        task_id, self._worker_id, self._processing_timeout,
                     )
                     await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'failed', "
-                        f"updated_at = NOW() WHERE reply_to = %s AND role = 'assistant' AND status = 'processing'",
-                        msg_id,
+                        f"UPDATE {self._fq_table} SET status = 'processing', "
+                        f"updated_at = NOW() WHERE id = %s",
+                        task_id,
                     )
-                    self.logger.warning(
-                        "User msg {} exceeded max retries ({}/{})",
-                        msg_id, retry_count, max_retries,
-                    )
-                else:
-                    # возвращаем в pending для повторной попытки
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'pending', "
-                        f"metadata = %s, updated_at = NOW() WHERE id = %s",
-                        meta, msg_id,
-                    )
-                    # Удаляем старый assistant-placeholder, чтобы пользователь
-                    # не увидел "Ошибка обработки" до того, как новый ответ будет готов.
-                    # Удаляем как processing (текущий зависший), так и failed (если
-                    # _mark_failed частично записал ошибку до того, как мы решили retry).
-                    await conn.execute(
-                        f"DELETE FROM {self._fq_table} "
-                        f"WHERE reply_to = %s AND role = 'assistant' AND status IN ('processing', 'failed')",
-                        msg_id,
-                    )
-                    self.logger.warning(
-                        "Released stuck user msg {} (retry {}/{})",
-                        msg_id, retry_count, max_retries,
-                    )
-
-            # также помечаем failed orphaned assistant-сообщения (без user)
-            await conn.execute(
-                f"UPDATE {self._fq_table} SET status = 'failed', "
-                f"updated_at = NOW() WHERE role = 'assistant' AND status = 'processing' "
-                f"AND updated_at + interval '1 second' * %s < NOW()",
-                timeout_s,
-            )
+                    return row
+            except psycopg2.IntegrityError:
+                # другой воркер только что захватил этого кандидата —
+                # транзакция откачена, пробуем следующего
+                self.logger.debug("Claim lost (unique violation), retrying")
 
     async def _poll_once(self, exchange: MessageExchange) -> bool:
-        """Забрать самое старое pending-сообщение и отправить агенту.
+        """Забрать самое старое сообщение (через клейм) и отправить агенту.
 
         Алгоритм:
-          1. UPDATE ... RETURNING — атомарно захватываем сообщение
-          2. Проверяем, не занят ли chat_id (chat_inflight)
+          1. ``_claim_one`` — атомарный клейм задачи (INSERT claim + processing)
+          2. Проверяем, не занят ли chat_id в этом процессе (chat_inflight)
           3. Создаём assistant-placeholder (чтобы web-клиент мог опрашивать)
           4. Захватываем слот (exchange) → _handle_message
 
-        Если из этого chat_id уже есть активное сообщение, возвращаем
-        статус в 'pending' — не диспатчим второе до завершения первого.
+        Если из этого chat_id уже есть активное сообщение в этом процессе,
+        возвращаем claim и статус в 'pending' — не диспатчим второе.
+        Эксклюзивность клейма (PK claims) гарантирует, что одна задача не
+        обрабатывается двумя воркерами одновременно.
 
         Возвращает True, если сообщение взято в обработку.
         """
-        row = await fetchone(
-            f"""
-            UPDATE {self._fq_table}
-            SET status = 'processing', updated_at = NOW()
-            WHERE id = (
-                SELECT id FROM {self._fq_table}
-                WHERE role = 'user' AND status = 'pending'
-                ORDER BY created_at ASC
-                LIMIT 1
-            )
-            AND status = 'pending'
-            RETURNING id, chat_id, user_id, content, media, metadata, created_at
-            """
-        )
+        row = await self._claim_one()
         if row is None:
             return False  # нет новых сообщений
 
         user_msg_id = str(row["id"])
+        self._leases.add(user_msg_id)
         chat_id = str(row["chat_id"]) if row["chat_id"] else str(row["user_id"])
         user_id = str(row["user_id"]) if row["user_id"] else chat_id
 
         # Не диспатчим, если из этого chat_id уже есть активное сообщение
+        # в этом же процессе (в БД chat уже считается занятым, но защищаемся
+        # от гонки между клеймом и фактическим диспатчем).
         if chat_id in self._chat_inflight:
             await execute(
-                f"UPDATE {self._fq_table} SET status = 'pending', updated_at = NOW() WHERE id = %s",
+                f"UPDATE {self._fq_table} SET status = 'pending', "
+                f"updated_at = NOW() WHERE id = %s",
                 user_msg_id,
             )
+            await execute(
+                f"DELETE FROM {self._fq_claims} "
+                f"WHERE task_id = %s AND worker_id = %s",
+                user_msg_id, self._worker_id,
+            )
+            self._leases.discard(user_msg_id)
             self.logger.debug(
                 "Deferred msg {} from busy chat {}", user_msg_id, chat_id,
             )
-            return
+            return False
 
         content = row["content"] or ""
 
@@ -433,7 +602,24 @@ class PostgresChannel(BaseChannel):
         media = media_paths
 
         # Создаём assistant-placeholder, чтобы Streamlit мог начать опрос
-        assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id)
+        try:
+            assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id)
+        except Exception:
+            self.logger.exception(
+                "Failed to insert assistant placeholder for {}", user_msg_id,
+            )
+            await execute(
+                f"UPDATE {self._fq_table} SET status = 'pending', "
+                f"updated_at = NOW() WHERE id = %s",
+                user_msg_id,
+            )
+            await execute(
+                f"DELETE FROM {self._fq_claims} "
+                f"WHERE task_id = %s AND worker_id = %s",
+                user_msg_id, self._worker_id,
+            )
+            self._leases.discard(user_msg_id)
+            return False
 
         await exchange.acquire_slot()
         exchange.add_inflight(user_msg_id)
@@ -490,28 +676,80 @@ class PostgresChannel(BaseChannel):
         return assistant_msg_id
 
     async def _mark_failed(self, user_msg_id: str, assistant_msg_id: str | None, reason: str) -> None:
-        """Пометить пользовательское сообщение и ответ ассистента как failed.
+        """Зафиксировать ошибку обработки пользовательского сообщения.
 
         Вызывается при:
           — ошибке диспетчеризации (\"dispatch_error\")
           — ошибке записи ответа (\"write_error\")
 
+        Семантика статусов:
+          — пока ``retry_count < max_stuck_retries`` → user='error'
+            (повторяемая ошибка; задача вернётся в пул после
+            ``error_retry_delay``), assistant-placeholder удаляется, чтобы
+            пользователь не видел ошибочный статус до повторной обработки;
+          — иначе → user='failed' (терминальный, не повторяется),
+            assistant помечается failed с текстом ошибки.
+
         Дополнительно:
+          — удаляет claim задачи (аренда завершена)
           — удаляет контекст из ``_msg_ctx``
           — освобождает слот (``_release_slot``)
           — чистит буфер рассуждений для этого assistant_msg_id
         """
         async with transaction() as conn:
-            if assistant_msg_id:
-                await conn.execute(
-                    f"UPDATE {self._fq_table} SET content = %s, metadata = %s, "
-                    f"status = 'failed', updated_at = NOW() WHERE id = %s",
-                    f"Internal error: {reason}", {"error": reason}, assistant_msg_id,
-                )
-            await conn.execute(
-                f"UPDATE {self._fq_table} SET status = 'failed', updated_at = NOW() WHERE id = %s",
+            meta_row = await conn.fetchrow(
+                f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
                 user_msg_id,
             )
+            meta = _decode_jsonb(meta_row["metadata"]) if meta_row else {}
+            retry_count = meta.get("retry_count", 0) + 1
+            meta["retry_count"] = retry_count
+            meta["error"] = reason
+
+            if retry_count < self._max_stuck_retries:
+                # повторяемая ошибка — error + backoff
+                if assistant_msg_id:
+                    await conn.execute(
+                        f"DELETE FROM {self._fq_table} WHERE id = %s "
+                        f"AND role = 'assistant'",
+                        assistant_msg_id,
+                    )
+                await conn.execute(
+                    f"UPDATE {self._fq_table} SET status = 'error', "
+                    f"metadata = %s, updated_at = NOW() "
+                    f"WHERE id = %s",
+                    meta, user_msg_id,
+                )
+                self.logger.warning(
+                    "User msg {} error ({}/{}) [{}]",
+                    user_msg_id, retry_count, self._max_stuck_retries, reason,
+                )
+            else:
+                # терминальный failed
+                if assistant_msg_id:
+                    await conn.execute(
+                        f"UPDATE {self._fq_table} SET content = %s, "
+                        f"metadata = %s, status = 'failed', updated_at = NOW() "
+                        f"WHERE id = %s",
+                        f"Internal error: {reason}", {"error": reason},
+                        assistant_msg_id,
+                    )
+                await conn.execute(
+                    f"UPDATE {self._fq_table} SET status = 'failed', "
+                    f"metadata = %s, updated_at = NOW() "
+                    f"WHERE id = %s",
+                    meta, user_msg_id,
+                )
+                self.logger.error(
+                    "User msg {} failed ({}/{}) [{}]",
+                    user_msg_id, retry_count, self._max_stuck_retries, reason,
+                )
+            await conn.execute(
+                f"DELETE FROM {self._fq_claims} "
+                f"WHERE task_id = %s AND worker_id = %s",
+                user_msg_id, self._worker_id,
+            )
+        self._leases.discard(user_msg_id)
         self._msg_ctx.pop(user_msg_id, None)
         self._release_slot(user_msg_id)
         if assistant_msg_id:
@@ -712,6 +950,11 @@ class PostgresChannel(BaseChannel):
                         f"updated_at = NOW() WHERE id = %s",
                         msg_id,
                     )
+                    await conn.execute(
+                        f"DELETE FROM {self._fq_claims} "
+                        f"WHERE task_id = %s AND worker_id = %s",
+                        msg_id, self._worker_id,
+                    )
         except Exception:
             self.logger.exception("Failed to write response for {}", chat_id)
             if msg_id:
@@ -774,6 +1017,11 @@ class PostgresChannel(BaseChannel):
                             f"updated_at = NOW() WHERE id = %s",
                             msg_id,
                         )
+                        await conn.execute(
+                            f"DELETE FROM {self._fq_claims} "
+                            f"WHERE task_id = %s AND worker_id = %s",
+                            msg_id, self._worker_id,
+                        )
         else:
             buf = self._stream_buffers.get(buf_key, "")
             self._stream_buffers[buf_key] = buf + delta
@@ -802,10 +1050,12 @@ class PostgresChannel(BaseChannel):
         Дополнительно:
           — удаляет chat_id из ``_chat_inflight`` (если был)
           — удаляет запись из ``_msg_chat``
+          — снимает задачу с аренды этого воркера (``_leases``)
         """
         if not user_msg_id:
             return
         self.exchange.release_slot(user_msg_id)
+        self._leases.discard(user_msg_id)
         chat_id = self._msg_chat.pop(user_msg_id, None)
         if chat_id:
             self._chat_inflight.discard(chat_id)
@@ -846,9 +1096,14 @@ class PostgresChannel(BaseChannel):
             "dsn": "postgresql://user:pass@localhost:5432/nanobot",
             "schema": "public",
             "table_name": "agent_conversation_messages",
+            "claims_table": "agent_worker_claims",
             "poll_interval": 2.0,
             "flush_interval": 2.0,
             "max_concurrent": 1,
             "processing_timeout": 600,
+            "lease_interval": 15.0,
+            "error_retry_delay": 60.0,
+            "max_stuck_retries": 3,
+            "worker_id": "",
             "allow_from": ["*"],
         }

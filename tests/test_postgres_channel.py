@@ -496,38 +496,38 @@ class TestPostgresChannelMedia:
         assert ch._resolve_media_paths_and_hints([]) == ([], [])
 
 
-class TestPostgresChannelUnstickProcessing:
+class TestPostgresChannelReclaimAndHeal:
     @pytest.mark.asyncio
     async def test_no_stuck_messages(self, mock_db_and_psycopg):
         PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_db.async_fetch.return_value = []
+        mock_conn = AsyncMock()
+        mock_conn.fetch.return_value = []
+        mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
         ch = _make_channel((PostgresChannel, None, mock_db))
-        await ch._unstick_processing()  # should not raise
+        await ch._reclaim_and_heal()  # should not raise
 
     @pytest.mark.asyncio
     async def test_stuck_message_retried(self, mock_db_and_psycopg):
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         mock_conn = AsyncMock()
-        mock_conn.fetch.return_value = [
-            {"id": 1, "metadata": "{}"}
-        ]
+        mock_conn.fetch.return_value = [{"task_id": "1", "worker_id": "w-1"}]
+        mock_conn.fetchrow.return_value = {"metadata": "{}"}
         mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
 
         ch = _make_channel((PostgresChannel, None, mock_db))
-        await ch._unstick_processing()
-        # Should UPDATE to 'pending' and DELETE old assistant placeholder
-        assert mock_conn.execute.call_count >= 2
+        await ch._reclaim_and_heal()
+        # вернул в pending, удалил placeholder, heal + orphan + cleanup
+        assert mock_conn.execute.call_count >= 3
 
     @pytest.mark.asyncio
     async def test_stuck_message_max_retries(self, mock_db_and_psycopg):
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         mock_conn = AsyncMock()
-        mock_conn.fetch.return_value = [
-            {"id": 1, "metadata": '{"retry_count": 2}'}
-        ]
+        mock_conn.fetch.return_value = [{"task_id": "1", "worker_id": "w-1"}]
+        mock_conn.fetchrow.return_value = {"metadata": '{"retry_count": 2}'}
         mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
 
         ch = _make_channel((PostgresChannel, None, mock_db))
-        await ch._unstick_processing()
-        # Should UPDATE to 'failed'
-        assert mock_conn.execute.call_count >= 1
+        await ch._reclaim_and_heal()
+        # исчерпан лимит → failed
+        assert mock_conn.execute.call_count >= 2

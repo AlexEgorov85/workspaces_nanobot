@@ -29,11 +29,13 @@
 
 | Механизм | Описание |
 |----------|----------|
-| **Поллинг** | `_poll_loop` опрашивает БД каждые `poll_interval` секунд. Берёт самое старое `pending`-сообщение через `UPDATE ... RETURNING` (атомарный захват) |
+| **Поллинг** | `_poll_loop` опрашивает БД каждые `poll_interval` секунд. Захват — через `_claim_one`: INSERT в `agent_worker_claims` (UNIQUE PK `task_id` — арбитр эксклюзивности) + UPDATE `processing`, в одной транзакции |
 | **Параллельность** | `max_concurrent` (asyncio.Semaphore). Пока сообщение обрабатывается, другие из того же `chat_id` откладываются |
 | **Reasoning** | Чанки рассуждений буферизируются и сбрасываются в `metadata.reasoning` каждые `flush_interval` секунд. Race condition исключается через `asyncio.Lock` |
 | **Медиа** | Каждый файл кодируется в dict `{"filename": "<имя>", "data": "data:<mime>;base64,<...>"}` и сохраняется в `media`. При загрузке декодируется обратно в `data_store/cache/sessions/`. HTTP/HTTPS-ссылки остаются строками |
-| **Unstick** | Сообщения, зависшие в `processing` дольше `processing_timeout`, возвращаются в `pending` (до 3 retries), затем — `failed` |
+| **Аренда (пул воркеров)** | Каждая задача защищена lease (`lease_until = NOW() + processing_timeout`), heartbeat продлевает её каждые `lease_interval` сек. Мульти-машинная схема: одна задача физически не может обрабатываться двумя воркерами (UNIQUE PK `claims`) |
+| **Reclaim+heal** | Истёкшие lease возвращают задачи в `pending` (или `failed` при исчерпании `max_stuck_retries`); `processing`-без-claim → `error`; висячие аренды и orphaned-placeholder чистятся. См. `_reclaim_and_heal` |
+| **Ошибки** | Разведены статусы: `error` — повторяемая ошибка (повтор после `error_retry_delay`), `failed` — терминальный (не повторяется) |
 | **Placeholder** | При захвате сообщения сразу создаётся assistant-запись (`status=processing`), чтобы Streamlit мог начать опрос до завершения генерации |
 
 ### Конфигурация
@@ -44,11 +46,15 @@
     "dsn": "postgresql://user:pass@localhost:5432/nanobot",
     "schema": "public",
     "table_name": "agent_conversation_messages",
+    "claims_table": "agent_worker_claims",
     "poll_interval": 2.0,
     "flush_interval": 2.0,
     "max_concurrent": 1,
     "processing_timeout": 120,
     "max_stuck_retries": 3,
+    "lease_interval": 15.0,
+    "error_retry_delay": 60.0,
+    "worker_id": "",
     "msg_ctx_max_size": 100,
     "media_cache_dir": "data_store/cache/sessions",
     "pool": {
