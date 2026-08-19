@@ -86,7 +86,7 @@
 | `buttons` | JSONB | Массив кнопок (только assistant) |
 | `metadata` | JSONB | Reasoning, retry_count, и т.д. |
 | `reply_to` | UUID | Ссылка на parent-сообщение |
-| `status` | TEXT | `pending` / `processing` / `completed` / `failed` |
+| `status` | TEXT | `pending` / `processing` / `completed` / `error` (повторяемая) / `failed` (терминал) |
 | `created_at` | TIMESTAMPTZ | Дата создания |
 | `updated_at` | TIMESTAMPTZ | Дата обновления |
 

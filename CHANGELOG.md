@@ -772,7 +772,7 @@
 - `channels.redis.{error_backoff_sec, reply_to_max_size, reply_to_trim_to}`;
 - `skills.audit_analyzer.{sync_max_queue_size, reconnect_backoff_sec, reconnect_backoff_max_sec, cache_max_age_sec, cache_refresh_interval_sec, embedding_http_timeout_sec, mode_vector_store_table, vector_index_default_path, cli_default_format, text_chunk_size, text_chunk_overlap, build_batch_pause_sec}`;
 - `cli.repl_idle_timeout_sec`;
-- `streamlit.{files_dir, failed_window_sec}`;
+- `streamlit.{files_dir, failed_window_sec}` (теперь `error_window_sec`);
 - `gateway.{restart_initial_delay_sec, restart_max_delay_sec, streamlit_port, streamlit_log_filename, subprocess_shutdown_timeout_sec}`;
 - `logging.db.{dialect, fallback_path, connect_backoff_sec, connect_backoff_max_sec, summary_max_chars}`.
 
