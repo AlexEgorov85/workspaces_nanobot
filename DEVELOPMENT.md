@@ -296,6 +296,69 @@ v2.3.0 добавляет поверх сервисного слоя v2.0.0 на
 и делегировать `start/stop/send/send_delta/poll_once` в `MessageExchange`.
 Подробнее — [`lib/channels/README.md`](lib/channels/README.md).
 
+### Мульти-машинный пул воркеров (аренда задач через `agent_worker_claims`)
+
+`PostgresChannel` разворачивается на нескольких машинах как полный gateway,
+читающий одну таблицу `public.agent_conversation_messages`. Чтобы одна задача
+(сообщение веб-чата) физически не обрабатывалась двумя воркерами, введена
+таблица аренд `public.agent_worker_claims` (`sql/workers/`, DDL — см.
+`sql/README.md`). Эксклюзивность гарантирует **UNIQUE PK `(task_id)`, а не
+MVCC/`UPDATE ... WHERE status='pending'`**: два `INSERT` с одним `task_id`
+невозможны, второй падает на unique-индексе.
+
+**Инвариант:** `status='processing' ⇔ существует ровно одна claim-запись с
+живым lease` для этого `task_id`.
+
+**Статусы задач:**
+
+| Статус | Значение | Повторяется? |
+|---|---|---|
+| `pending` | готова к обработке | да, сразу |
+| `processing` | в работе воркера (держит claim) | нет — защищена lease |
+| `error` | повторяемая ошибка | да, после `error_retry_delay` |
+| `failed` | терминальный (не меняется) | нет — окончательно |
+| `completed` | успешно завершена | — |
+
+`error` и `failed` разведены: `error` (retry-каунтер в `metadata.retry_count`
+не исчерпан) возвращается в пул после паузы; `failed` — immutable-терминал.
+Раньше обе ситуации сводились к `failed`, и web-клиент ждал оконное время на
+«появление в работе», которое могло никогда не наступить.
+
+**Клейм (`_claim_one`) — одна транзакция:**
+1. `SELECT` самого старого кандидата (`pending` или `error` с истёкшим
+   backoff) без активного claim и из чата без активной `user`-задачи
+   (`status='processing'`);
+2. `INSERT INTO agent_worker_claims ...` — арбитр эксклюзивности; при
+   `UniqueViolation` транзакция откатывается и выбирается следующий кандидат;
+3. `UPDATE messages SET status='processing'` — владелец задачи живёт только
+   в `agent_worker_claims.worker_id`, колонка в сообщениях не используется.
+
+**Lease и heartbeat:** срок аренды = `processing_timeout`. Фоновая задача
+`_lease_loop` каждые `lease_interval` продлевает `lease_until` своим арендам и
+запускает `_reclaim_and_heal`.
+
+**`_reclaim_and_heal` (одна транзакция):**
+1. `DELETE FROM claims WHERE lease_until < NOW()` — «мёртвый» воркер
+   освобождает задачи: задача → `pending` (или `failed` при исчерпании
+   `max_stuck_retries`), assistant-placeholder удаляется;
+2. `processing`-без-claim → `error` (аномалия, повторится после backoff);
+3. orphaned assistant-placeholder (без user-пары) → `failed`;
+4. висячая аренда (claim есть, а задача не в `processing`) — удаляется.
+
+**Освобождение аренды:** `send()` / `send_delta(stream_end)` / `_mark_failed`
+удаляют claim в той же транзакции, что и запись `completed`/`error`/`failed`.
+`stop()` возвращает незавершённые задачи в пул (`_release_all_leases`).
+
+**Конфиг (`channels.postgres`):** `worker_id` (пусто → авто
+`{hostname}:{pid}:{rand8}`, идентификация воркера в claims), `claims_table`,
+`lease_interval`, `error_retry_delay`. **`streamlit.error_window_sec`** — окно
+ожидания повтора `error`-задач (быв. `failed_window_sec`).
+
+**Диагностика:** `tools/check_worker_pool_integrity.py --fix` — read-only отчёт
+об инварианте `processing ⇔ claim` (или repair). Ключевой гейт — оптимизированный
+интеграционный тест `tests/integration/test_worker_pool_concurrency.py`
+(кейсы C1–C5, opt-in через `NANOBOT_INTEGRATION=1`).
+
 ### `lib/services/llm_client.py` — единая точка вызова LLM
 
 Единственное место, откуда делаются запросы к LLM-провайдеру: ретраи,

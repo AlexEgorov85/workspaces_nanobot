@@ -10,6 +10,25 @@
 
 ### Added
 
+- **Мульти-машинный пул воркеров в `PostgresChannel` (таблица
+  `agent_worker_claims`).** Устраняет двойной захват одной задачи в
+  Greenplum 6.5: эксклюзивность аренды гарантирует **UNIQUE PK `(task_id)`
+  `INSERT ... RETURNING`**, а не MVCC-перепроверку `UPDATE ... WHERE
+  status='pending'`. Каждая задача защищена lease (срок = `processing_timeout`),
+  heartbeat обновляет `lease_until`; reclaim возвращает задачи «мёртвого»
+  воркера в пул. Разведены статусы `error` (повторяемая ошибка, повтор после
+  `error_retry_delay`) и `failed` (терминальный, не повторяется) — раньше оба
+  сводились к `failed`. `stop()` освобождает аренды. Владелец задачи
+  определяется только по `agent_worker_claims.worker_id` — колонка в
+  `agent_conversation_messages` не требуется. Новые ключи
+  `channels.postgres.{worker_id, claims_table, lease_interval,
+  error_retry_delay}`; `streamlit.error_window_sec` (быв. `failed_window_sec`,
+  теперь окно повтора `error`-задач). Диагностика:
+  `tools/check_worker_pool_integrity.py --fix`. DDL:
+  `sql/workers/create_public_agent_worker_claims.sql`.
+  Гейт-тесты: `tests/integration/test_worker_pool_concurrency.py` (C1–C5,
+  opt-in `NANOBOT_INTEGRATION=1`) — 5 зелёных против реального PostgreSQL.
+
 - **`workspace/hooks/recent_files_hook.py` — `RecentFilesHook` + auto-attach
   в `OutboundMessage.media`.** Закрывает два системных бага:
   (1) агент создаёт файл через `write_file`, но **забывает** приложить
