@@ -26,6 +26,7 @@
 10. [Полная таблица связей между файлами (v2.0.0)](#полная-таблица-связей-между-файлами-v200)
 11. [Тестирование](#тестирование)
 12. [Изменения и миграции](#изменения-и-миграции)
+13. [Конфигурация `tools.exec` (запуск команд)](#конфигурация-tools-exec)
 
 ---
 
@@ -553,6 +554,70 @@ nanobot/
 ├── config.py                             # SETTINGS (project.json + config.json + .secrets.env)
 └── project.json                          # конфигурация (channels.*, skills.*, gateway, cli, logging.db)
 ```
+
+---
+
+## ⚙️ Конфигурация `tools.exec` (запуск команд)
+
+Секция `tools.exec` в `config.json` управляет инструментом `exec` (запуск shell-команд).
+Реализация — `nanobot/agent/tools/shell.py` (`ExecTool`, `ExecToolConfig`), точка запуска
+процесса — `ExecTool._spawn()` (shell.py:515), сборка окружения — `_build_env()`
+(shell.py:695).
+
+### Как процесс реально запускается
+
+- **Windows**: `exec` не наследует окружение родителя целиком — запускается
+  `pwsh`/`powershell` через `asyncio.create_subprocess_exec(..., env=env)` (shell.py:548).
+  `env` — **минимальный** набор: `SYSTEMROOT`, `COMSPEC`, `USERPROFILE`, `TEMP`, `PATHEXT`,
+  `PATH`, `PYTHONUNBUFFERED` и т.д. (shell.py:706), плюс переменные из `allowedEnvKeys`
+  (shell.py:726).
+- **Linux**: запускается `bash -c "<command>"` (shell.py:556). Linux-ветка `_build_env()`
+  (shell.py:731) передаёт **ещё меньше**: только `HOME`, `LANG`, `TERM`, `PYTHONUNBUFFERED`
+  + `allowedEnvKeys`. Родительский `PATH` и прочие переменные **не пробрасываются**.
+- Привязка к конкретному Python-окружению — через `pathPrepend` + `allowedEnvKeys`
+  (на Linux), либо `login: true` для pyenv/conda (bash с `-l` прочитает профиль юзера,
+  shell.py:559).
+
+### Параметры (JSONC `config.json`, `tools.exec`)
+
+| Ключ | Тип / дефолт | Назначение |
+|---|---|---|
+| `enable` | `bool` (`true`) | Включает/отключает `exec`. `false` — модель не запускает команды (`ExecTool.enabled`, shell.py:176). |
+| `timeout` | `int` (`60`) | Жёсткий таймаут команды в секундах; `0` — без лимита (`_resolve_timeout`, shell.py:400). Таймаут по вызову модели капится до 600 (shell.py:247), конфиговый капки не имеет. |
+| `pathPrepend` | `str` (`""`) | Дополняет `PATH` в **начале**. Linux: инъекция `export PATH="<prepend>:$PATH"` в команду (`_wrap_path_export`, shell.py:502); Windows: дописывает в `env["PATH"]` (`_compose_path`, shell.py:474). |
+| `pathAppend` | `str` (`""`) | Дополняет `PATH` в **конце** (`$NANOBOT_PATH_APPEND`). |
+| `sandbox` | `str` (`""`) | Обёртка команды в песочницу через `wrap_command` (shell.py:31, 467). На Windows не поддерживается — логируется warning, запуск без песочницы (shell.py:460). |
+| `allowedEnvKeys` | `list[str]` (`[]`) | Какие переменные из окружения родителя дописать в минимальное `env` субпроцесса. На Linux почти ничего не наследуется, поэтому сюда передают `VIRTUAL_ENV`, `PYTHONPATH`, секреты (`DATABASE_URL`) и т.д. Секреты вне списка в субпроцесс не попадают (изоляция, shell.py:703). |
+| `allowPatterns` | `list[str]` (`[]`) | Regex-паттерны команд, **явно разрешённые**. Приоритет над `denyPatterns`. Если задан — команда выполняется только когда **каждый** топ-сегмент (`&&`, `||`, `;`, `|`) матчится под один из паттернов (shell.py:761). |
+| `denyPatterns` | `list[str]` (`[]`) | Regex-паттерны запрещённых команд (RE-search по команде в нижнем регистре, shell.py:766). Добавляются к жёстко зашитому дефолтному списку (`rm -rf`, `del /f`, `mkfs`, `dd if=`, `shutdown`, fork bomb и т.д., shell.py:214-232). |
+
+### Пример: привязка к конкретному venv (Linux)
+
+```json
+"exec": {
+  "enable": true,
+  "timeout": 120,
+  "pathPrepend": "/home/user/venv/bin",
+  "pathAppend": "",
+  "sandbox": "",
+  "allowedEnvKeys": ["DATABASE_URL", "VIRTUAL_ENV", "PYTHONPATH"],
+  "allowPatterns": [],
+  "denyPatterns": []
+}
+```
+
+- `pathPrepend` → `python`/`pip`/`activate` резолвятся из `/home/user/venv/bin`.
+- `allowedEnvKeys` → в субпроцесс попадают `VIRTUAL_ENV`, `PYTHONPATH`, `DATABASE_URL`.
+- Для pyenv/conda, где PATH собирается в профиле, надёжнее `login: true` (bash с `-l`,
+  shell.py:559) — но отдельного конфиг-ключа нет, нужна правка `ExecToolConfig`.
+
+### Примеры `allowPatterns` / `denyPatterns`
+
+- `allowPatterns`: `["^git .*", "^python .*", "^ls .*"]` — пропускает цепочки вида
+  `git add . && python run.py` (оба сегмента матчатся); `python run.py && rm -rf x`
+  **заблокируется**, т.к. `rm` нет в allowlist.
+- `denyPatterns`: `["rm -rf /", "drop database", "curl http://"]` — запрещает конкретные
+  команды в дополнение к встроенному списку.
 
 ---
 
