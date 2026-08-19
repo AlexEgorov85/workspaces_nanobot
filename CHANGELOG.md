@@ -65,6 +65,27 @@
 
 ### Fixed
 
+- **Ответ «терялся» (статус `failed`), когда агент завершал оборот
+  инструментом `message(...)` без последующего plain-text.** Тул публикует
+  свой outbound через шину **промежуточно** — в момент исполнения, до конца
+  оборота, а `PostgresChannel.send()` трактовал любое сообщение как финал:
+  снимал `_msg_ctx` (`pop`), освобождал слот и удалял claim, помечал `completed`,
+  а `_release_slot` снимал задачу с heartbeat ещё ДО записи в БД. Оборот при
+  этом не завершён → другой воркер мог reclaim-нуть задачу и довести до
+  `failed`; финальный `_assemble_outbound` при подавлении (`_sent_in_turn` +
+  «пустой финал») вообще не публиковался, и корректной финализации не было.
+  Теперь: патч `RuntimePatcher.patch_assemble_outbound` ставит на финальный
+  outbound маркер `metadata["_final_turn"]` (а при подавленном финале — шлёт
+  синтетический outbound с этим маркером, чтобы канал закрыл оборот).
+  `PostgresChannel.send()` финализирует (completed + claim + слот + `_msg_ctx`)
+  **только** на этом маркере (или на legacy `_turn_end`/`latency_ms`),
+  а промежуточные публикации `message(...)` merge'ит в assistant-строку
+  (накопление `content` + media без дублей), не трогая слот/claim/аренду.
+  `_release_slot` в финализации перенесён ПОСЛЕ успешной записи (и на ошибке
+  через `_mark_failed`), закрывая гонку с reclaim на другом воркере.
+  Метаданные `utils/outbound_meta.py` получили контрактный ключ `FINAL_TURN_KEY`.
+  Тесты: `tests/test_postgres_channel.py`, `tests/test_runtime_patcher.py`.
+
 - **`SessionFileRedirectHook` теперь перенаправляет и `media` тула
   `message`, а не только write-инструменты.** `MessageTool` в nanobot
   резолвит относительные пути относительно корня workspace

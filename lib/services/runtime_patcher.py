@@ -263,12 +263,40 @@ class RuntimePatcher:
 
         def _wrap(msg, final_content, all_msgs, stop_reason, had_injections,
                   on_stream, *, turn_latency_ms=None):
+            from lib.utils.outbound_meta import FINAL_TURN_KEY as _FINAL_TURN
             result = original(
                 msg, final_content, all_msgs, stop_reason, had_injections,
                 on_stream, turn_latency_ms=turn_latency_ms,
             )
             if result is None:
-                return result
+                # ``_assemble_outbound`` возвращает None только при подавлении
+                # финала из-за ``MessageTool`` (``_sent_in_turn`` +
+                # «пустой финал»). Тогда канал НЕ получит финального outbound
+                # и не сможет корректно финализировать слот/клейм — оборот
+                # зависнет и упрётся в reclaim → failed. Публикуем
+                # синтетический маркер конца оборота, чтобы канал закрыл
+                # оборот (см. ``PostgresChannel.send``).
+                if msg is None:
+                    return None  # unittest-путь; строить синтетику не из чего
+                try:
+                    from nanobot.bus.events import OutboundMessage
+                except Exception:
+                    return None
+                result = OutboundMessage(
+                    channel=getattr(msg, "channel", None),
+                    chat_id=getattr(msg, "chat_id", None),
+                    content="",
+                    metadata={
+                        **(getattr(msg, "metadata", None) or {}),
+                        _FINAL_TURN: True,
+                    },
+                )
+            else:
+                # Маркер конца оборота: канал отличает финальный outbound
+                # от промежуточных публикаций ``message(...)``.
+                metadata = dict(result.metadata or {})
+                metadata[_FINAL_TURN] = True
+                result.metadata = metadata
             session_key = _session_key_of(msg)
 
             # 1) Tool audit → result.metadata["_tool_audit"]

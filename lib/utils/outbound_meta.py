@@ -24,6 +24,14 @@ OUTBOUND_DROPPED_KEYS: tuple[str, ...] = (
     "_stream_end",        # сигнал конца стрим-чанка
 )
 
+#: Маркер финального outbound оборота, который ставит патч
+#: ``RuntimePatcher.patch_assemble_outbound``. НЕ входит в
+#: ``OUTBOUND_DROPPED_KEYS`` намеренно: каналы должны финализировать оборот
+#: на нём (а не бросать), а потоковые каналы (Redis) — передавать ответ
+#: пользователю как обычно. Отличает финал от промежуточных публикаций тула
+#: ``message(...)``, которые приходят в течение оборота.
+FINAL_TURN_KEY: str = "_final_turn"
+
 
 def is_dropped(metadata: Mapping[str, Any] | None) -> bool:
     """True, если в metadata есть любой из ``OUTBOUND_DROPPED_KEYS``.

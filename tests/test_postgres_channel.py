@@ -291,7 +291,12 @@ class TestPostgresChannelSend:
         assert "m-1" in ch._msg_ctx
 
     @pytest.mark.asyncio
-    async def test_turn_end_is_ignored(self, mock_db_and_psycopg):
+    async def test_turn_end_without_ids_noop(self, mock_db_and_psycopg):
+        """Голый ``_turn_end`` без message_id/answer_id не падает.
+
+        Маркер конца оборота ведёт на финализацию; без известного
+        assistant_msg_id финализация становится no-op (только warning).
+        """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, mock_db))
 
@@ -302,7 +307,8 @@ class TestPostgresChannelSend:
         await ch.send(msg)  # should not raise
 
     @pytest.mark.asyncio
-    async def test_final_answer_writes_to_db(self, mock_db_and_psycopg):
+    async def test_final_turn_finalizes_and_cleans_ctx(self, mock_db_and_psycopg):
+        """Финальный outbound (маркер ``_final_turn``) финализирует оборот."""
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         mock_db.async_fetchone.return_value = {"metadata": "{}"}
         mock_db.async_transaction.return_value.__aenter__.return_value = AsyncMock()
@@ -314,12 +320,170 @@ class TestPostgresChannelSend:
         msg.event = None
         msg.content = "Final answer"
         msg.chat_id = "chat-1"
-        msg.metadata = {"origin_message_id": "m-1", "answer_id": "a-1"}
+        msg.metadata = {
+            "origin_message_id": "m-1",
+            "answer_id": "a-1",
+            "_final_turn": True,
+        }
         msg.media = []
         msg.buttons = []
 
         await ch.send(msg)
         assert "m-1" not in ch._msg_ctx  # ctx cleaned up
+
+    @pytest.mark.asyncio
+    async def test_legacy_final_with_latency_ms_finalizes(self, mock_db_and_psycopg):
+        """Legacy-финал без ``_final_turn``, но с ``latency_ms`` — финализирует."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        mock_db.async_fetchone.return_value = {"metadata": "{}"}
+        mock_db.async_transaction.return_value.__aenter__.return_value = AsyncMock()
+
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
+
+        msg = MagicMock()
+        msg.event = None
+        msg.content = "Final answer"
+        msg.chat_id = "chat-1"
+        msg.metadata = {
+            "origin_message_id": "m-1",
+            "answer_id": "a-1",
+            "latency_ms": 42,
+        }
+        msg.media = []
+        msg.buttons = []
+
+        await ch.send(msg)
+        assert "m-1" not in ch._msg_ctx
+
+    @pytest.mark.asyncio
+    async def test_message_tool_delivery_merges_not_finalizes(self, mock_db_and_psycopg):
+        """Промежуточная публикация message(...) merge'ится, слот/клейм не трогаются."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
+        ch.exchange.add_inflight("m-1")
+        ch._msg_chat["m-1"] = "chat-1"
+
+        msg = MagicMock()
+        msg.event = None
+        msg.content = "Hello from tool"
+        msg.chat_id = "chat-1"
+        msg.metadata = {
+            "origin_message_id": "m-1",
+            "answer_id": "a-1",
+            "_record_channel_delivery": True,
+        }
+        msg.media = []
+        msg.buttons = []
+
+        await ch.send(msg)
+        # ctx не снят, слот/lease не отпущены — оборот продолжается
+        assert "m-1" in ch._msg_ctx
+        assert "m-1" in ch.exchange.inflight
+        # в assistant-строку дописан content через UPDATE
+        calls = conn.execute.call_args_list
+        assert calls, "UPDATE должен вызываться"
+        assert any("UPDATE" in c.args[0] for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_plain_text_message_tool_merges(self, mock_db_and_psycopg):
+        """message('текст') без media/флагов — тоже merge, а не финал."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": "First"}
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
+
+        msg = MagicMock()
+        msg.event = None
+        msg.content = "Second"
+        msg.chat_id = "chat-1"
+        msg.metadata = {"origin_message_id": "m-1", "answer_id": "a-1"}
+        msg.media = []
+        msg.buttons = []
+
+        await ch.send(msg)
+        assert "m-1" in ch._msg_ctx  # не финализировано
+        # content = "First" + "\n\n" + "Second"
+        recorded = conn.execute.call_args.args[1]
+        assert "First" in recorded and "Second" in recorded
+
+    @pytest.mark.asyncio
+    async def test_message_tool_then_final_turn_preserves_content(self, mock_db_and_psycopg):
+        """Сквозной баг-сценарий: message(...) → merge → синтетический ``_final_turn``.
+
+        Первый вызов send() (публикация тула без финальных флагов) должен
+        только merge'нуть контент, а второй (синтетический ``_final_turn`` с
+        пустым content, который шлёт патч ``_assemble_outbound`` при
+        подавленном финале) — зафинализировать оборот, сохранив накопленный
+        текст и закрыв claim/слот/``_msg_ctx``.
+        """
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        # Первый fetchrow — при чтении перед merge (пустая заглушка),
+        # второй — при финализации (уже накопленный content).
+        conn.fetchrow.side_effect = [
+            {"metadata": "{}", "media": [], "content": ""},
+            {"metadata": "{}", "media": [], "content": "Hello from tool"},
+        ]
+        written: dict = {}
+
+        def fake_execute(sql, *args):
+            if "status = 'completed'" in sql and "content" in sql:
+                written["final_content"] = args[0]
+
+        conn.execute.side_effect = fake_execute
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
+        ch.exchange.add_inflight("m-1")
+        ch._msg_chat["m-1"] = "chat-1"
+        ch._leases.add("m-1")
+
+        # 1) Промежуточная публикация тула message(...)
+        tool_msg = MagicMock()
+        tool_msg.event = None
+        tool_msg.content = "Hello from tool"
+        tool_msg.chat_id = "chat-1"
+        tool_msg.metadata = {"origin_message_id": "m-1", "answer_id": "a-1"}
+        tool_msg.media = []
+        tool_msg.buttons = []
+
+        await ch.send(tool_msg)
+        assert "m-1" in ch._msg_ctx
+        assert "m-1" in ch.exchange.inflight
+        assert "m-1" in ch._leases  # аренда/слот не тронуты
+
+        # 2) Синтетический финал с пустым content и маркером конца оборота
+        final_msg = MagicMock()
+        final_msg.event = None
+        final_msg.content = ""
+        final_msg.chat_id = "chat-1"
+        final_msg.metadata = {
+            "origin_message_id": "m-1",
+            "answer_id": "a-1",
+            "_final_turn": True,
+        }
+        final_msg.media = []
+        final_msg.buttons = []
+
+        await ch.send(final_msg)
+        assert "m-1" not in ch._msg_ctx  # финализировано
+        assert "m-1" not in ch.exchange.inflight
+        assert "m-1" not in ch._leases
+        # Накопленный merge'ом контент сохранён в финальном UPDATE
+        assert written["final_content"] == "Hello from tool"
+        # claim удалён
+        calls = conn.execute.call_args_list
+        assert any("DELETE FROM" in c.args[0] for c in calls)
 
 
 class TestPostgresChannelSendDelta:

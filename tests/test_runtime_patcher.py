@@ -58,6 +58,38 @@ class TestPatchAssembleOutbound:
         hook.drain.assert_not_called()
         assert ok
 
+    def test_stamps_final_turn_marker(self):
+        agent = MagicMock()
+        original_return = MagicMock()
+        original_return.metadata = {}
+        agent._assemble_outbound.return_value = original_return
+
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_assemble_outbound(agent, MagicMock())
+
+        result = agent._assemble_outbound(MagicMock(), "x", [], "stop", False, None)
+        assert ok
+        assert result.metadata["_final_turn"] is True
+
+    def test_none_result_synthesizes_marker_outbound(self):
+        agent = MagicMock()
+        agent._assemble_outbound.return_value = None
+
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_assemble_outbound(agent, MagicMock())
+
+        msg = MagicMock()
+        msg.channel = "postgres"
+        msg.chat_id = "chat-1"
+        msg.metadata = {"message_id": "m-1", "answer_id": "a-1"}
+
+        result = agent._assemble_outbound(msg, "", [], "stop", False, None)
+        assert ok
+        assert result is not None
+        assert result.metadata["_final_turn"] is True
+        assert result.content == ""
+        assert result.chat_id == "chat-1"
+
     def test_agent_none_skipped(self):
         patcher = RuntimePatcher()
         ok, detail = patcher.patch_assemble_outbound(None, MagicMock())

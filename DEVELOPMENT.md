@@ -345,9 +345,26 @@ MVCC/`UPDATE ... WHERE status='pending'`**: два `INSERT` с одним `task_
 3. orphaned assistant-placeholder (без user-пары) → `failed`;
 4. висячая аренда (claim есть, а задача не в `processing`) — удаляется.
 
-**Освобождение аренды:** `send()` / `send_delta(stream_end)` / `_mark_failed`
-удаляют claim в той же транзакции, что и запись `completed`/`error`/`failed`.
-`stop()` возвращает незавершённые задачи в пул (`_release_all_leases`).
+**Освобождение аренды:** `send()` (только на финальном outbound) /
+`send_delta(stream_end)` / `_mark_failed` удаляют claim в той же транзакции,
+что и запись `completed`/`error`/`failed`. `stop()` возвращает незавершённые
+задачи в пул (`_release_all_leases`).
+
+**Промежуточные публикации тула `message(...)` vs финал оборота.**
+`MessageTool` в nanobot публикует свой outbound через шину **в момент
+исполнения тула**, т.е. до завершения оборота. `send()` финализирует оборот
+(claim + слот + `_msg_ctx`) **только** на маркере `metadata["_final_turn"]`
+(или legacy `_turn_end` / `latency_ms`), который ставит патч
+`RuntimePatcher.patch_assemble_outbound` (при подавленном финале — синтетическим
+outbound). Все остальные сообщения `send()` merge'ит в assistant-строку
+(`_merge_tool_delivery`): накопление `content` + media без дублей, status
+остаётся `processing`, слот/claim/аренда не трогаются. Это исключает ситуацию,
+когда оборот «завершался» на промежуточной публикации, а затем уходил в
+`failed` через reclaim. Маркер объявлен в `lib/utils/outbound_meta.py` как
+`FINAL_TURN_KEY` (не входит в `OUTBOUND_DROPPED_KEYS`, чтобы потоковые каналы
+вроде Redis передавали финальный ответ как обычно). `_release_slot` в
+финализации вызывается после успешной записи, а не до неё — иначе задача
+снималась с heartbeat, пока claim ещё жив, и другой воркер мог её reclaim-нуть.
 
 **Конфиг (`channels.postgres`):** `worker_id` (пусто → авто
 `{hostname}:{pid}:{rand8}`, идентификация воркера в claims), `claims_table`,

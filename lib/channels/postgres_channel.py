@@ -52,7 +52,7 @@ from utils.media import (
     resolve_paths_and_hints as media_resolve_paths_and_hints,
 )
 from lib.channels.message_exchange import MessageExchange
-from lib.utils.outbound_meta import is_dropped
+from lib.utils.outbound_meta import is_dropped, FINAL_TURN_KEY
 from psycopg2.extras import Json
 
 _WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent / "workspace"
@@ -826,11 +826,21 @@ class PostgresChannel(BaseChannel):
     #   ``_reasoning_delta`` — чанк рассуждений → буфер → БД
     #   ``_reasoning_end``   — конец рассуждений (игнорируется)
     #   ``_progress``        — промежуточный прогресс (тул-коллы)
-    #   ``_turn_end``        — маркер конца оборота (игнорируется)
-    #   (без флагов)         — финальный ответ → пишем в БД
+    #   ``FINAL_TURN_KEY`` (``_final_turn``) — МАРКЕР КОНЦА ОБОРОТА → финал
+    #   ``_record_channel_delivery`` — промежуточная публикация тула
+    #                          ``message(...)`` → только merge, не финал
+    #   ``latency_ms``       — признак legacy-финала без ``_final_turn``
+    #   (без флагов)         — merge (промежуточная публикация)
     #
-    # Финальный ответ: читаем metadata assistant-заглушки, мержим
-    # с текущими metadata, пишем content + status='completed'.
+    # Ключевой контракт: финализировать (статус completed + удалить claim +
+    # освободить слот + убрать ``_msg_ctx``) можно ТОЛЬКО один раз за оборот
+    # и только на финальном outbound. Публикации тула ``message(...)``
+    # приходят ПОСЛЕДОВАТЕЛЬНО в течение оборота (до его завершения) и НЕ
+    # должны трогать слот/клейм/аренду/_msg_ctx — иначе оборот рвётся и
+    # задача уходит в ``failed`` через reclaim. Поэтому промежуточные
+    # публикации merge'ятся в существующую assistant-строку, а завершение
+    # делается на маркере ``_final_turn`` (ставится патчем
+    # ``_assemble_outbound``, см. ``runtime_patcher``).
     # ------------------------------------------------------------------
 
     async def send(self, msg: OutboundMessage) -> None:
@@ -876,15 +886,121 @@ class PostgresChannel(BaseChannel):
                 ctx = self._msg_ctx.setdefault(msg_id, {"reasoning_buf": []})
             return
 
-        # --- Служебные сигналы runner'а (_turn_end, _tool_hint, _stream_end) ---
+        # --- Конец оборота — финализируем слот/клейм/статус ---
+        # Маркер ``_final_turn`` ставит патч ``_assemble_outbound`` (или
+        # приходит как синтетический outbound при подавленном финале после
+        # message(...)). ``_turn_end`` — legacy-сигнал runner'а, тоже финал.
+        if meta.get(FINAL_TURN_KEY) or meta.get("_turn_end"):
+            await self._finalize_turn(msg, meta, msg_id)
+            return
+
+        # --- Промежуточная публикация тула message(...) — merge, НЕ финал ---
+        # Сообщение пришло до завершения оборота: дописываем content/media
+        # в assistant-строку, но не трогаем слот/клейм/аренду/_msg_ctx.
+        if meta.get("_record_channel_delivery"):
+            await self._merge_tool_delivery(msg, meta, msg_id)
+            return
+
+        # --- Прочие служебные сигналы runner'а (_tool_hint, _stream_end...) ---
         if is_dropped(meta):
             return
 
-        # --- Финальный ответ — пишем в БД ---
+        # --- Legacy-финал без ``_turn_end`` (патч не применился) ---
+        # Реальный ``_assemble_outbound`` ВСЕГДА кладёт ``latency_ms``;
+        # промежуточные публикации ``message(...)`` его не несут.
+        if meta.get("latency_ms") is not None:
+            await self._finalize_turn(msg, meta, msg_id)
+            return
+
+        # --- Обычная промежуточная публикация без явных флагов ---
+        # (напр. ``message("text")`` без media, где ``_record_channel_delivery``
+        # не выставлен). До завершения оборота — только merge.
+        await self._merge_tool_delivery(msg, meta, msg_id)
+
+    async def _merge_tool_delivery(
+        self, msg: OutboundMessage, meta: dict[str, Any], msg_id: str | None,
+    ) -> None:
+        """Дописать промежуточную публикацию тула ``message(...)`` в сроку.
+
+        Вызывается на outbound, пришедших ДО завершения оборота. В отличие
+        от ``_finalize_turn`` НЕ трогает слот, клейм, аренду и ``_msg_ctx``:
+        оборот ещё продолжается, финализация произойдёт на ``_turn_end``.
+
+        content накапливается (через newline), media — мержится без дублей,
+        metadata обновляется. status остаётся ``processing``.
+        """
+        assistant_msg_id = self._resolve_assistant_msg_id(meta)
+        if not assistant_msg_id and msg_id:
+            assistant_msg_id = (self._msg_ctx.get(msg_id) or {}).get("assistant_msg_id")
+        if not assistant_msg_id:
+            self.logger.warning(
+                "send: merge skipped, no assistant_msg_id for msg_id={}", msg_id,
+            )
+            return
+
+        db_media = await self._embed_media_for_db(msg.media or [])
+        try:
+            async with transaction() as conn:
+                row = await conn.fetchrow(
+                    f"SELECT metadata, media, content FROM {self._fq_table} "
+                    f"WHERE id = %s",
+                    assistant_msg_id,
+                )
+                existing_meta = _decode_jsonb(row["metadata"]) if row else {}
+                existing_meta.update(meta)
+
+                existing_media = row["media"] if row else []
+                if isinstance(existing_media, str):
+                    existing_media = json.loads(existing_media) if existing_media else []
+                if not isinstance(existing_media, list):
+                    existing_media = []
+                merged_media = list(existing_media)
+                for m in db_media:
+                    if m not in merged_media:
+                        merged_media.append(m)
+
+                existing_content = row["content"] if row else ""
+                if not isinstance(existing_content, str):
+                    existing_content = ""
+                if msg.content and msg.content != existing_content:
+                    existing_content = (
+                        f"{existing_content}\n\n{msg.content}" if existing_content
+                        else msg.content
+                    )
+
+                await conn.execute(
+                    f"UPDATE {self._fq_table} "
+                    f"SET content = %s, metadata = %s, buttons = %s, media = %s, "
+                    f"updated_at = NOW() WHERE id = %s",
+                    existing_content, existing_meta,
+                    Json(msg.buttons or []), Json(merged_media),
+                    assistant_msg_id,
+                )
+        except Exception:
+            self.logger.exception(
+                "Failed to merge tool delivery for msg_id={}", msg_id,
+            )
+
+    async def _finalize_turn(
+        self, msg: OutboundMessage, meta: dict[str, Any], msg_id: str | None,
+    ) -> None:
+        """Зафинализировать оборот: записать ответ, закрыть claim и слот.
+
+        Вызывается один раз за оборот — на маркере ``_turn_end`` (или на
+        legacy-финале с ``latency_ms``). Единственное место, где:
+          — снимается ``_msg_ctx`` (``pop``);
+          — ``status='completed'`` и удаляется claim;
+          — освобождается слот параллельности.
+
+        ``_release_slot`` вызывается ПОСЛЕ успешной записи (и на ошибке через
+        ``_mark_failed``). Раньше его вызывали до транзакции — задача снималась
+        с heartbeat (``_leases``), claim ещё жил, и ``_reclaim_and_heal`` на
+        другом воркере мог забрать задачу и довести до ``failed``.
+        """
         ctx = self._msg_ctx.pop(msg_id, {}) if msg_id else {}
-        self._release_slot(msg_id)
         assistant_msg_id = ctx.get("assistant_msg_id") or meta.get("answer_id")
         if not assistant_msg_id:
+            self._release_slot(msg_id)
             self.logger.warning("send: no assistant_msg_id for msg_id={}", msg_id)
             return
 
@@ -921,7 +1037,7 @@ class PostgresChannel(BaseChannel):
         try:
             async with transaction() as conn:
                 row = await conn.fetchrow(
-                    f"SELECT metadata, media FROM {self._fq_table} WHERE id = %s",
+                    f"SELECT metadata, media, content FROM {self._fq_table} WHERE id = %s",
                     assistant_msg_id,
                 )
                 existing_meta = _decode_jsonb(row["metadata"]) if row else {}
@@ -935,12 +1051,18 @@ class PostgresChannel(BaseChannel):
                 if not isinstance(existing_media, list):
                     existing_media = []
                 final_media = db_media if db_media else existing_media
+                # Если финальный outbound пуст (синтетический ``_turn_end``
+                # после message(...)), сохраняем контент, накопленный merge'ем.
+                existing_content = row["content"] if row else ""
+                if not isinstance(existing_content, str):
+                    existing_content = ""
+                final_content = msg.content if msg.content else existing_content
                 await conn.execute(
                     f"UPDATE {self._fq_table} "
                     f"SET content = %s, metadata = %s, buttons = %s, "
                     f"media = %s, "
                     f"status = 'completed', updated_at = NOW() WHERE id = %s",
-                    msg.content, existing_meta,
+                    final_content, existing_meta,
                     Json(msg.buttons or []), Json(final_media),
                     assistant_msg_id,
                 )
@@ -955,6 +1077,8 @@ class PostgresChannel(BaseChannel):
                         f"WHERE task_id = %s AND worker_id = %s",
                         msg_id, self._worker_id,
                     )
+            # Слот освобождаем ПОСЛЕ успешной записи клейма/статуса.
+            self._release_slot(msg_id)
         except Exception:
             self.logger.exception("Failed to write response for {}", chat_id)
             if msg_id:
