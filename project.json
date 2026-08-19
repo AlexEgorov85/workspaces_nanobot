@@ -197,6 +197,17 @@
     "persist_threshold": 5000,        // Порог байт для выноса результата в файл
     "persist_max_files": 100,         // Макс. файлов в data_store/cache/sessions/
     "persist_max_age_hours": 0,       // 0 = хранить бессрочно
+    //  tool_result_limits.* — потолки вывода инструментов (runtime_patcher.py).
+    //  Все ключи опциональны; дефолты ниже совпадают с теми, что уже в коде.
+    "tool_result_limits": {
+      "exec_max_output_chars": 500000,      // Потолок вывода exec/shell (MAX_OUTPUT_CHARS)
+      "exec_default_output_chars": 100000,  // Дефолт разового exec (ExecTool._MAX_OUTPUT)
+      "read_file_max_chars": 512000,        // ReadFileTool._MAX_CHARS (маркер truncated)
+      "grep_head_limit": 500,               // search._DEFAULT_HEAD_LIMIT
+      "grep_file_head_limit": 400,          // search._DEFAULT_FILE_HEAD_LIMIT
+      "grep_max_file_bytes": 20000000,      // GrepTool._MAX_FILE_BYTES
+      "list_dir_max_entries": 500           // ListDirTool._DEFAULT_MAX (marker truncated)
+    },
     "llm_timeout": 300,               // Таймаут LLM, сек
     "exec_timeout": 60,               // Таймаут exec, сек
     "log_level": "INFO",              // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR

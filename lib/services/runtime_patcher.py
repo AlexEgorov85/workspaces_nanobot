@@ -19,9 +19,22 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys as _sys
 from typing import Any, Optional, Tuple
 
 from lib.utils.node_access import get_path as _get
+
+
+def _getloaded(name: str):
+    """Вернуть уже импортированный модуль либо None.
+
+    Используем ``sys.modules`` вместо ``import``: ``import nanobot...``
+    резолвит всю цепочку родителей и может падать, если пакет-родитель не
+    реэкспортирует вложенный подмодуль. В runtime фреймворк уже импортировал
+    целевые модули (shell/exec_session/filesystem/search загружены на старте),
+    поэтому они доступны в ``sys.modules``.
+    """
+    return _sys.modules.get(name)
 
 
 def _session_key_of(msg: Any) -> str:
@@ -90,6 +103,10 @@ class RuntimePatcher:
         report = PatchReport()
         self._record(report, "context_governor", self.patch_context_governor(
             config, settings, workspace_dir))
+        self._record(report, "save_turn", self.patch_save_turn(
+            settings, workspace_dir, agent))
+        self._record(report, "exec_limits", self.patch_exec_limits(settings))
+        self._record(report, "tool_limits", self.patch_tool_limits(settings))
         self._record(report, "assemble_outbound", self.patch_assemble_outbound(
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
@@ -199,6 +216,235 @@ class RuntimePatcher:
             return True, "ContextGovernor.normalize_tool_result patched"
         except Exception as exc:
             return False, f"patch failed: {exc}"
+
+    # ------------------------------------------------------------------
+    # Патч 1b: AgentLoop._save_turn → архивация вместо усечения
+    # ------------------------------------------------------------------
+
+    def patch_save_turn(
+        self, settings: Any, workspace_dir: Any, agent: Any
+    ) -> Tuple[bool, str]:
+        """Архивировать большие результаты инструментов вместо усечения.
+
+        ``_save_turn`` (nanobot/agent/loop.py) при сохранении истории оборота
+        усекает строковые результаты инструментов до ``max_tool_result_chars``
+        (по умолчанию 16000 символов), если они не ушли в persist раньше
+        (в первую очередь это ``read_file`` и результаты, «проскочившие» мимо
+        ``normalize_tool_result``). Это потеря данных: усечённый блоб остаётся
+        единственной копией.
+
+        Патч оборачивает ``_save_turn``: любой большой результат
+        ``role == "tool"`` (строка или JSON-сериализуемый список) пишется
+        **полным** файлом в ``data_store/`` через ``SessionFileStore``, в историю
+        кладётся ссылка ``[Result saved to data_store/<path> (<size> KB)]`` —
+        в том же формате, что и кастомный persist. Оригинальный ``_save_turn``
+        вызывается с копией сообщений (логика nanobot не дублируется).
+
+        Гейт тот же, что у ``patch_context_governor``: при
+        ``persist_threshold <= 0`` патч — no-op.
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+        """
+        persist_threshold = int(_get(settings, "gateway", "persist_threshold", default=0) or 0)
+        if persist_threshold <= 0:
+            return False, "persist_threshold <= 0"
+        if agent is None:
+            return False, "agent is None"
+        original = getattr(agent, "_save_turn", None)
+        if original is None:
+            return False, "agent._save_turn is missing"
+
+        max_files = int(_get(settings, "gateway", "persist_max_files", default=100) or 100)
+        max_age_hours = int(_get(settings, "gateway", "persist_max_age_hours", default=0) or 0)
+
+        try:
+            from utils.session_file_store import SessionFileStore, prepare_content
+        except Exception as exc:
+            return False, f"import failed: {exc}"
+
+        char_limit = int(getattr(agent, "max_tool_result_chars", 16_000) or 16_000)
+        try:
+            store = SessionFileStore(
+                Path(workspace_dir) / "data_store",
+                max_files=max_files,
+                max_age_hours=max_age_hours,
+            )
+        except Exception as exc:
+            return False, f"store init failed: {exc}"
+
+        def _serialize(content: Any) -> Optional[str]:
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                try:
+                    return json.dumps(content, ensure_ascii=False, indent=2)
+                except (TypeError, ValueError):
+                    return None
+            return None
+
+        def _wrap(session, messages, skip, *, turn_latency_ms=None):
+            archived = list(messages)
+            for idx in range(skip, len(archived)):
+                m = archived[idx]
+                if not isinstance(m, dict) or m.get("role") != "tool":
+                    continue
+                text = _serialize(m.get("content"))
+                if text is None or len(text.encode("utf-8")) <= char_limit:
+                    continue
+                try:
+                    body, ext = prepare_content(text)
+                    session_key = (
+                        getattr(session, "key", None)
+                        or getattr(session, "session_key", "default")
+                        or "default"
+                    )
+                    info = store.save(
+                        session_key=session_key,
+                        content=body,
+                        source_tool=str(m.get("name") or "tool"),
+                        ext=ext,
+                        dedupe=True,
+                    )
+                    m["content"] = (
+                        f"[Result saved to data_store/{info['path']} "
+                        f"({info['size_kb']} KB)]"
+                    )
+                except OSError:
+                    continue
+            return original(session, archived, skip, turn_latency_ms=turn_latency_ms)
+
+        agent._save_turn = _wrap
+        return True, "AgentLoop._save_turn patched for archiving"
+
+    @staticmethod
+    def _bump_schema_max(cls: Any, names: tuple, maximum: int) -> bool:
+        """Поднять ``maximum`` у параметров схемы инструмента.
+
+        ``tool_parameters`` хранит схему в замыкании ``parameters``-проперти,
+        поэтому мутация исходных ``IntegerSchema`` недоступна. Вместо этого
+        оборачиваем ``fget``: после рендера JSON-Schema подменяем ``maximum``
+        у нужных параметров. Это влияет и на видимое модели описание, и на
+        валидацию (``validate_params`` читает ``parameters``).
+        """
+        prop = getattr(cls, "parameters", None)
+        if not isinstance(prop, property):
+            return False
+        original = prop.fget
+        if original is None:
+            return False
+
+        def patched(self):
+            d = original(self)
+            if isinstance(d, dict):
+                props = d.get("properties")
+                if isinstance(props, dict):
+                    for name in names:
+                        frag = props.get(name)
+                        if isinstance(frag, dict):
+                            frag["maximum"] = maximum
+            return d
+
+        cls.parameters = property(patched)
+        return True
+
+    # ------------------------------------------------------------------
+    # Патч 1c: лимит вывода exec-инструмента (конфигурируемый)
+    # ------------------------------------------------------------------
+
+    def patch_exec_limits(self, settings: Any) -> Tuple[bool, str]:
+        """Поднять лимит вывода exec/shell-инструмента.
+
+        nanobot режет вывод команды до ``MAX_OUTPUT_CHARS`` (50K символов) и
+        вставляет маркер ``... (N chars truncated) ...``, выбрасывая середину
+        (``nanobot/agent/tools/shell.py:354-361``, ``exec_session.py:403-413``).
+        Output «голова+хвост» потом persist кладёт в файл — данные теряются.
+
+        Патч поднимает потолки вывода из ``settings.gateway.tool_result_limits``
+        и делает их конфигурируемыми. В этом проекте это безопасно для контекста:
+        вывод exec > ``persist_threshold`` и так уходит полным файлом в
+        ``data_store``, а в контекст ставится ссылка (exec не exempt).
+
+        Читаемые ключи:
+          * ``exec_max_output_chars`` (дефолт 500_000) — потолок ``MAX_OUTPUT_CHARS``;
+          * ``exec_default_output_chars`` (дефолт 100_000) — дефолт ``_MAX_OUTPUT``.
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+        """
+        limits = _get(settings, "gateway", "tool_result_limits", default={}) or {}
+        max_out = int(limits.get("exec_max_output_chars", 500_000) or 500_000)
+        default_out = int(limits.get("exec_default_output_chars", 100_000) or 100_000)
+        if max_out <= 0:
+            return False, "exec_max_output_chars <= 0"
+
+        try:
+            es = _getloaded("nanobot.agent.tools.exec_session")
+            shell = _getloaded("nanobot.agent.tools.shell")
+            if es is None or shell is None:
+                return False, "exec_session/shell module not loaded"
+
+            # Модульная константа, участвующая в clamp_session_int.
+            es.MAX_OUTPUT_CHARS = max_out
+            es.DEFAULT_MAX_OUTPUT_CHARS = default_out
+            # В shell.py константа импортирована по имени — патчим свою привязку.
+            shell.MAX_OUTPUT_CHARS = max_out
+            # Дефолт разового exec (когда модель не передаёт max_output_chars).
+            shell.ExecTool._MAX_OUTPUT = default_out
+            # Схема: чтобы модель могла запросить больше 50K.
+            self._bump_schema_max(
+                shell.ExecTool, ("max_output_chars", "max_output_tokens"), max_out
+            )
+            self._bump_schema_max(
+                es.WriteStdinTool, ("max_output_chars", "max_output_tokens"), max_out
+            )
+        except Exception as exc:
+            return False, f"patch failed: {exc}"
+        return True, "exec output limits patched"
+
+    # ------------------------------------------------------------------
+    # Патч 1d: лимиты read_file / grep / list_dir (конфигурируемые)
+    # ------------------------------------------------------------------
+
+    def patch_tool_limits(self, settings: Any) -> Tuple[bool, str]:
+        """Поднять потолки инструментов, которые усекают вывод с маркером.
+
+        Читаемые ключи из ``settings.gateway.tool_result_limits``:
+          * ``read_file_max_chars`` (дефолт 512_000) — ``ReadFileTool._MAX_CHARS``
+            (маркер ``Document text truncated at ~128K chars``);
+          * ``grep_head_limit`` (дефолт 500) — ``search._DEFAULT_HEAD_LIMIT``;
+          * ``grep_file_head_limit`` (дефолт 400) — ``search._DEFAULT_FILE_HEAD_LIMIT``;
+          * ``grep_max_file_bytes`` (дефолт 20_000_000) — ``GrepTool._MAX_FILE_BYTES``
+            (файлы больше этого grep пропускает целиком);
+          * ``list_dir_max_entries`` (дефолт 500) — ``ListDirTool._DEFAULT_MAX``
+            (маркер ``(truncated, showing first N of M entries)``).
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+        """
+        limits = _get(settings, "gateway", "tool_result_limits", default={}) or {}
+        read_max = int(limits.get("read_file_max_chars", 512_000) or 512_000)
+        grep_head = int(limits.get("grep_head_limit", 500) or 500)
+        grep_file_head = int(limits.get("grep_file_head_limit", 400) or 400)
+        grep_max_bytes = int(limits.get("grep_max_file_bytes", 20_000_000) or 20_000_000)
+        list_max = int(limits.get("list_dir_max_entries", 500) or 500)
+        if read_max <= 0:
+            return False, "read_file_max_chars <= 0"
+
+        try:
+            fs = _getloaded("nanobot.agent.tools.filesystem")
+            srch = _getloaded("nanobot.agent.tools.search")
+            if fs is None or srch is None:
+                return False, "filesystem/search module not loaded"
+
+            fs.ReadFileTool._MAX_CHARS = read_max
+            fs.ListDirTool._DEFAULT_MAX = list_max
+            srch._DEFAULT_HEAD_LIMIT = grep_head
+            srch._DEFAULT_FILE_HEAD_LIMIT = grep_file_head
+            srch.GrepTool._MAX_FILE_BYTES = grep_max_bytes
+        except Exception as exc:
+            return False, f"patch failed: {exc}"
+        return True, "tool limits patched"
 
     # ------------------------------------------------------------------
     # Патч 2: agent._assemble_outbound → внедрение _tool_audit
