@@ -45,8 +45,12 @@ def main() -> None:
     _configure_logging(ctx.settings)
 
     from nanobot.cli.commands import __logo__, __version__
+    from lib.utils.project_version import project_version
 
-    console.print(f"{__logo__} Starting nanobot gateway v{__version__}...")
+    console.print(
+        f"{__logo__} Starting nanobot gateway v{__version__} "
+        f"(project v{project_version()})..."
+    )
 
     # Назначаем callbacks и подменяем on_sync ДО ctx.start() — иначе
     # AuditSyncService.worker-тред успеет сделать initial_load раньше,

@@ -456,6 +456,18 @@ outbound). Все остальные сообщения `send()` merge'ит в a
 одинаковый формат логов и redaction секретов во всех точках входа
 (`gateway.py`, `cli_agent.py`, `streamlit_app.py`).
 
+### `lib/utils/project_version.py` — версия проекта
+
+`project_version()` возвращает версию текущего проекта. Канонический источник —
+`project.json` → `project.version` (актуальный релизный тег `vX.Y.Z` без префикса
+`v`), закоммичен на `master` и распространяется во все релизные ветки.
+Git-теги и CHANGELOG для этого ненадёжны: релизные ветки `release/vX.Y`
+ответвляются от `master` и не мержатся обратно, поэтому `git describe` и первый
+релизный блок `CHANGELOG.md` на `master` отстают от актуального тега.
+Fallback при отсутствии ключа — `git describe --tags`, затем `"dev"`.
+Используется в стартовом баннере `gateway.py`, чтобы показать версию проекта
+рядом с версией библиотеки nanobot (`__version__`).
+
 ### `lib/utils/outbound_filter.py` — фильтрация outbound
 
 Скрывает internal-сообщения из пользовательского потока. Раньше фильтр
