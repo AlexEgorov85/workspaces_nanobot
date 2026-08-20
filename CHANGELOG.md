@@ -180,13 +180,64 @@
   (наследники `nanobot.agent.tools.base.Tool`, у которых
   `__module__` начинается с `workspace.tools.`) и регистрирует их в
   `agent.tools` через `Tool.create(ctx)` + `enabled(ctx)`. Конфиг per-tool
-  в `config.json` через стандартные `config_key` + pydantic `config_cls`
-  (конвенции nanobot, без своего базового класса). `ToolContext` собирается
-  из полей `AgentLoop` тем же способом, что
-  `AgentLoop._register_default_tools` (`loop.py:597-630`); `agent`
-  дополнительно доступен как `ctx._agent_ref`. Шаблон:
+  в `config.json`/`project.json` через стандартные `config_key` + pydantic
+  `config_cls` (конвенции nanobot, без своего базового класса). `ToolContext`
+  собирается из полей `AgentLoop` тем же способом, что
+  `AgentLoop._register_default_tools` (`loop.py:597-630`); `agent` и
+  `settings` дополнительно пробрасываются через `setattr` как
+  `ctx._agent_ref` / `ctx._settings_ref` (в вашей версии nanobot
+  `ToolContext.__init__` не принимает `metadata`). Шаблон:
   `workspace/tools/example.py`. Тесты:
   `tests/test_tools_project_loader.py`.
+
+- **Tool `compact_context` переведён на стандартный nanobot-паттерн**
+  (без своего DI-сервиса) и перенесён из `lib/tools/compact_context_tool.py`
+  в `workspace/tools/compact_context.py`. Регистрируется через
+  `patch_project_tools` (а не через отдельный `patch_compact_tool`,
+  который удалён). Использует `ctx._agent_ref` и `ctx._settings_ref` для
+  доступа к `AgentLoop` и `SETTINGS` (читает `gateway.compact.*` через
+  стандартный pydantic-путь). Конфиг в `project.json` →
+  `gateway.compact.*` (обратно совместимо). `lib/tools/` удалён как
+  каталог.
+
+- **Tool'ы `audit_run_predefined_script` и `audit_search_vector`** — нативный
+  дубль skill'а `audit_analyzer`. По конвенции nanobot (один tool = одно
+  действие, см. `_FsTool` в `nanobot/agent/tools/filesystem.py`) разделены
+  на два tool-класса с общим приватным базовым `_AuditToolBase`:
+
+    * `AuditRunPredefinedScriptTool` (`audit_run_predefined_script`) —
+      выполнить готовый SQL-скрипт из реестра
+      `public.agent_predefined_scripts`. Параметры: `script` (обязательно),
+      `params` (опционально).
+    * `AuditSearchVectorTool` (`audit_search_vector`) — семантический поиск
+      по FAISS-индексу. Параметры: `query` (обязательно), `index_name`,
+      `top_k`, `threshold`.
+
+  Оба наследуют логику skill'а (тот же DuckDB-кэш, тот же реестр скриптов,
+  тот же `CacheProvider.search_vector`) через
+  `importlib.util.spec_from_file_location`. Skill остаётся работоспособным
+  для CLI/sql-режима (LLM-генерация SELECT не переносится). Конфиг в
+  `project.json` → `gateway.audit_predefined.*` (`enable`,
+  `max_result_chars`) и `gateway.audit_vector.*` (`enable`,
+  `default_top_k`, `default_index_name`, `max_result_chars`). Реализация:
+  `workspace/tools/audit_analyzer_tool.py`. Тесты:
+  `tests/test_tools_audit_analyzer.py` (32 теста, включая общую
+  базу `_AuditToolBase` и изоляцию между двумя tool'ами).
+
+- **`runtime_context_provider` для `audit_run_predefined_script`** —
+  встроенный механизм nanobot (см. `nanobot/runtime_context.py:47-49`),
+  через который `AgentLoop` (`loop.py:744-752`) добавляет в system prompt
+  список доступных предопределённых скриптов **до** любого вызова tool'а.
+  Это избавляет LLM от необходимости угадывать имена скриптов и не
+  требует отдельного tool'а `audit_list_predefined_scripts` (который бы
+  добавлял лишний round-trip). Реализация: `_PredefinedScriptsProvider`
+  в `workspace/tools/audit_analyzer_tool.py`. Список скриптов
+  загружается через `predefined.list_all_scripts()` (skill'овский
+  реестр) и кешируется на уровне класса; сбросить можно через
+  `tool.invalidate_scripts_cache()`. Тесты:
+  `tests/test_tools_audit_analyzer.py::TestPredefinedScriptsProvider`
+  (9 тестов: форматирование, кеш, обработка ошибок, корректный
+  `RuntimeContextBlock`).
 
 ### Fixed
 

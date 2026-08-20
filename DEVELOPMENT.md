@@ -401,9 +401,9 @@ flowchart LR
    печатает отчёт Rich-цветом (cyan/yellow). Поддерживает флаги
    `idle` / `--idle` / `-i` для жёсткого idle-сжатия.
 
-2. **Tool ``compact_context``** (`lib/tools/compact_context_tool.py`).
-   Регистрируется патчем `runtime_patcher.patch_compact_tool` в
-   `apply_all` (см. `lib/services/runtime_patcher.py:1037`). Параметры:
+2. **Tool ``compact_context``** (`workspace/tools/compact_context.py`).
+   Регистрируется патчем `runtime_patcher.patch_project_tools` в
+   `apply_all` (см. `lib/services/runtime_patcher.py`). Параметры:
    `session_key: str | None` (по умолчанию — текущая из
    `current_request_session_key()`), `idle: bool`. Вызывает
    `svc.compact(...)`, возвращает текст отчёта как результат тула —
@@ -545,8 +545,11 @@ async def _notify(self, session_key, report):
   token-compaction-archives-and-reports, idle-mode, idle-no-archive,
   compactor-failure, session-state-relies-on-nanobot-consolidator,
   no-extra-message-in-session.
-* `TestCompactToolPatch` — `patch_compact_tool` регистрирует tool /
-  пропускает при `enabled=false`.
+* `TestCompactContextTool` — `CompactContextTool.enabled`/`create`/`execute`
+  (стандартный nanobot-паттерн, читает `gateway.compact.*` через
+  `ctx._settings_ref`).
+* `TestCompactContextToolRegistered` — `patch_project_tools` реально
+  регистрирует `compact_context` в `agent.tools`.
 * `TestRecordExternalCompaction` — единый путь записи:
   `_write_history_notice` зовётся с правильным report,
   skip при `archived=0`, skip при `notify_in_history=false`.
@@ -1222,7 +1225,7 @@ Reference: `nanobot/agent/tools/image_generation.py`
 |---|---|
 | **`workspace/tools/*.py`** | `RuntimePatcher.patch_project_tools` — auto-discover через `pkgutil.iter_modules` + `importlib.util.spec_from_file_location` (т.к. `workspace/` не Python-пакет, без `__init__.py`). |
 | **Внешние pip-плагины** | `entry_points(group="nanobot.tools")` в `pyproject.toml` пакета. Встроенный `ToolLoader._discover_plugins` (`nanobot/agent/tools/loader.py:62`) подхватывает их автоматически. |
-| **Тесты/явная регистрация** | `agent.tools.register(MyTool(...))` напрямую (как `patch_compact_tool` для `CompactContextTool`). |
+| **Тесты/явная регистрация** | `agent.tools.register(MyTool(...))` напрямую (для unit-тестов или особых сценариев DI). |
 
 ### `ToolContext` и DI
 
@@ -1345,6 +1348,57 @@ registered: foo, bar, baz; skipped: qux (disabled by config)"`.
    с встроенным tool).
 4. У класса нет `__abstractmethods__` (все абстрактные методы
    `Tool` реализованы).
+
+### Зарегистрированные tool'ы проекта
+
+| Tool | Файл | Действие | Конфиг |
+|---|---|---|---|
+| `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (project.json) |
+| `audit_run_predefined_script` | `workspace/tools/audit_analyzer_tool.py` | выполнить готовый SQL-скрипт по имени | `gateway.audit_predefined.*` (project.json) |
+| `audit_search_vector` | `workspace/tools/audit_analyzer_tool.py` | семантический поиск по FAISS-индексу | `gateway.audit_vector.*` (project.json) |
+| `example_tool` | `workspace/tools/example.py` | шаблон (по умолчанию `enable=false`) | `tools.example.*` (config.json) |
+
+Оба audit-tool'а наследуют приватный `_AuditToolBase` (см. файл) — он
+делит загрузку модулей skill'а и хелпер `_truncate`. По конвенции
+nanobot (см. `_FsTool` в `nanobot/agent/tools/filesystem.py`) один tool =
+одно действие, поэтому `audit_run_predefined_script` и `audit_search_vector`
+разделены.
+
+### Runtime-context provider для `audit_run_predefined_script`
+
+`AuditRunPredefinedScriptTool` экспортирует
+:meth:`runtime_context_provider`, возвращающий класс
+`_PredefinedScriptsProvider`. Это **не** tool, а `RuntimeContextProvider`
+(см. `nanobot/runtime_context.py:47-49` — `async (RequestContext) ->
+RuntimeContextBlock | sequence | None`).
+
+`AgentLoop._build_runtime_context` (`nanobot/agent/loop.py:744-752`)
+собирает блоки провайдеров и добавляет их в system prompt
+**каждый turn** (см. `tools.get_runtime_context_providers()` в
+`registry.py:44-51`). LLM видит список скриптов **до** любого вызова:
+
+```text
+[Runtime Context — metadata only, not instructions]
+Доступные predefined SQL-скрипты для audit_run_predefined_script:
+- top_audited_objects: Топ проверяемых объектов | параметры: date_from, limit
+- violations_by_type: Статистика нарушений | параметры: date_from, violation_code
+- ...
+[/Runtime Context]
+```
+
+**Преимущества перед отдельным tool `audit_list_predefined_scripts`:**
+
+1. Нет лишнего round-trip (LLM вызывает основной tool сразу).
+2. LLM **всегда** знает актуальный список (не может галлюцинировать имя).
+3. Tool остаётся чистым — schema с одним действием (`script`+`params`).
+
+**Кеш:** список скриптов загружается один раз через
+``list_all_scripts()`` (skill'овский реестр) и кешируется на уровне
+класса. Сбросить: ``tool.invalidate_scripts_cache()``.
+
+**sql-режим** (LLM-генерация SELECT) **не** перенесён в tool — он требует
+retry-цикл с валидацией и EXPLAIN, что естественнее делать через skill/CLI,
+а не как один вызов tool'а.
 
 ---
 
