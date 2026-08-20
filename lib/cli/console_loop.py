@@ -89,6 +89,65 @@ async def _print_tool_events(events: list, cfg: DisplayConfig) -> None:
             await _typewriter(label, "dim", cfg.typewriter_speed)
 
 
+async def _print_context_window(block: Any, cfg: DisplayConfig) -> None:
+    """Напечатать компактную строку занятости контекстного окна (M1 UI).
+
+    Блок ``{used, limit, pct, model}`` кладётся в ``metadata.context_window``
+    патчем ``RuntimePatcher.patch_assemble_outbound``. В CLI выводим
+    однострочно, гейтом ``cfg.show_context_window`` (по умолчанию вкл).
+
+    pct уже clamp'нут в 0..1 и округлён в патче; здесь только защита
+    от нечисловых значений (если блок пришёл не из патча).
+    """
+    if not cfg.show_context_window or not isinstance(block, dict):
+        return
+    try:
+        used = int(block.get("used") or 0)
+        limit = int(block.get("limit") or 0)
+    except (TypeError, ValueError):
+        return
+    if limit <= 0 or used < 0:
+        return
+    try:
+        pct = float(block.get("pct", 0.0))
+    except (TypeError, ValueError):
+        pct = 0.0
+    pct = max(0.0, min(1.0, pct))
+    model = block.get("model") or ""
+    label = f"📊 Контекст: {used} / {limit} · {int(round(pct * 100))}%"
+    if model:
+        label = f"{label} · {model}"
+    console.print(f"[dim]{label}[/dim]")
+
+
+async def _run_cli_compact(
+    agent: Any,
+    command: str,
+    chat_id: str,
+    cli_channel: str,
+) -> None:
+    """Обработать CLI-команду ``/compact``: сжать контекст и напечатать отчёт.
+
+    ``command`` — полная входная строка (``/compact`` или ``/compact idle``).
+    ``idle`` включается флагами ``idle``/``--idle``/``-i`` в любом месте строки.
+    Session key собирается как ``"<cli_channel>:<chat_id>"`` — он совпадает
+    с ключом, который nanobot создаёт при ``publish_inbound`` (формат
+    ``<channel>:<chat_id>``).
+    """
+    from lib.services.context_compaction import ContextCompactionService
+
+    tokens = command.split()
+    idle = any(t in ("idle", "--idle", "-i") for t in tokens[1:])
+    svc = ContextCompactionService(agent, settings=None)
+    session_key = f"{cli_channel}:{chat_id}"
+    report = await svc.compact(session_key=session_key, idle=idle)
+    text = svc.format_report(report)
+    if not report.get("ok"):
+        console.print(f"[yellow]🗜️ {text}[/yellow]")
+    else:
+        console.print(f"[cyan]🗜️ {text}[/cyan]")
+
+
 async def run_repl(
     agent: Any,
     config: Any,
@@ -188,6 +247,9 @@ async def run_repl(
                     _restore_terminal()
                     console.print("\nGoodbye!")
                     break
+                if command == "/compact" or command.startswith("/compact "):
+                    await _run_cli_compact(agent, command, chat_id, cli_channel)
+                    continue
                 await bus.publish_inbound(InboundMessage(
                     channel=cli_channel,
                     sender_id="user",
@@ -199,6 +261,8 @@ async def run_repl(
                     await _print_tool_events(meta["_tool_audit"], cfg)
                 if content and not meta.get("_stream_delta"):
                     await _typewriter(content, "", cfg.typewriter_speed)
+                if isinstance(meta.get("context_window"), dict):
+                    await _print_context_window(meta["context_window"], cfg)
             except (KeyboardInterrupt, EOFError):
                 _restore_terminal()
                 console.print("\nGoodbye!")
