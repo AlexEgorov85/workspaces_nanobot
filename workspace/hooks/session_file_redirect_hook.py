@@ -18,9 +18,8 @@ workspace (``workspace / path``), а файлы, созданные агенто
 session-папке (по относительному пути и по basename) и подставляем его.
 Так media-редирект симметричен write-редиректу.
 
-Имя папки — это ``context.session_key`` (например ``cli:1``,
-``telegram:8281248569``). Это стабильный ASCII-идентификатор,
-уникальный в пределах канала.
+Имя папки — это ``context.session_key`` (например ``cli:1``).
+Это стабильный ASCII-идентификатор, уникальный в пределах канала.
 
 Белый список (не перенаправляются):
     - AGENTS.md, SOUL.md, USER.md, TOOLS.md, HEARTBEAT.md, MEMORY.md
@@ -360,8 +359,8 @@ class SessionFileRedirectHook(AgentHook):
         """Собрать новый путь в ``data_store/cache/sessions/<session_key>/``.
 
         Имя папки берётся из ``context.session_key`` (например
-        ``cli:1``, ``telegram:8281248569``). Это стабильный,
-        ASCII-only идентификатор, уникальный в пределах канала.
+        ``cli:1``). Это стабильный, ASCII-only идентификатор,
+        уникальный в пределах канала.
         """
         try:
             self._sessions_root.mkdir(parents=True, exist_ok=True)
@@ -397,8 +396,7 @@ class SessionFileRedirectHook(AgentHook):
     def _sanitize_session_key(key: str) -> str:
         """Сделать из session_key имя директории, валидное на Windows и Linux.
 
-        ``cli:1`` → ``cli_1``, ``telegram:8281248569`` → ``telegram_8281248569``,
-        пустая строка → ``__nosession__``.
+        ``cli:1`` → ``cli_1``, пустая строка → ``__nosession__``.
         """
         cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", key).strip("._-")
         return cleaned or "__nosession__"
