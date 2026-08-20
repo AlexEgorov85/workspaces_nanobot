@@ -133,3 +133,26 @@ class TestPostgres:
         channels = fake_modules["cm"]
         factory._add_redis(channels, _config(), settings, MagicMock())
         assert "redis" in channels.channels
+
+    def test_print_worker_activity_forwarded_to_channel(self, fake_modules):
+        factory = ChannelFactory(print_worker_activity=True)
+        channels = fake_modules["cm"]
+        factory._add_postgres(
+            channels, _config(),
+            _settings({"postgres": {"enabled": True, "dsn": "postgresql://u@h/db"}}),
+            MagicMock(),
+        )
+        fake_modules["PostgresChannel"].assert_called_once()
+        cfg = fake_modules["PostgresChannel"].call_args.args[0]
+        assert cfg.get("print_worker_activity") is True
+
+    def test_print_worker_activity_default_false(self, fake_modules):
+        factory = ChannelFactory()
+        channels = fake_modules["cm"]
+        factory._add_postgres(
+            channels, _config(),
+            _settings({"postgres": {"enabled": True, "dsn": "postgresql://u@h/db"}}),
+            MagicMock(),
+        )
+        cfg = fake_modules["PostgresChannel"].call_args.args[0]
+        assert cfg.get("print_worker_activity") is False

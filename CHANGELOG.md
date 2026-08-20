@@ -10,6 +10,27 @@
 
 ### Added
 
+- **Полное логирование промпта и ответа LLM** — событие `llm_call`
+  в `agent_gateway_logs`: `DbLoggingService.log_llm_call` (payload
+  `prompt`/`response`, метаданные `iteration`/`model`/`finish_reason`/`usage`)
+  и `DatabaseLoggingHook.after_iteration`, которое на каждую итерацию
+  пишет полные `messages` и `LLMResponse` (через `_json_safe` — несеризуемые
+  объекты сводятся к строке, батч не теряется).
+- **Токены LLM в терминале** — при `print_llm_calls=True`
+  `DatabaseLoggingHook` выводит на каждую итерацию две строки:
+  `→ LLM: отправлен промпт (X токенов)` и `← LLM: получен ответ (Y токенов)`
+  из `usage.prompt_tokens` / `usage.completion_tokens`. В CLI включается в
+  `cli_agent.py`; в gateway — отключаемой опцией `gateway.print_llm_calls`
+  (`project.json`, `false` по умолчанию).
+- **Активность пула воркеров в терминале gateway** — отключаемая опция
+  `gateway.print_worker_activity` (`project.json`, `false` по умолчанию).
+  `PostgresChannel` выводит через Rich-консоль: `→ worker <id> взял задачу
+  <task_id> (chat ...)`, `← worker <id> закончил задачу ... [completed]`
+  (а также `[error]`/`[failed]`, `[streamed/completed]`) и строку размера
+  очереди `очередь: pending=N, error=M (итого K)` (печатается при изменении).
+  Флаг пробрасывается из `gateway.py` через `ChannelFactory(print_worker_activity=...)`
+  в конфиг канала.
+
 - **Live e2e пула воркеров: реальный `gateway.py` + живой LLM**
   (`tests/integration/test_worker_pool_real_bot.py`, opt-in через
   `NANOBOT_LIVE_E2E=1`). Три сценария: (1) один gateway обрабатывает

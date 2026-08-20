@@ -122,6 +122,8 @@ def _required_keys():
         ("gateway.llm_timeout", 300),
         ("gateway.exec_timeout", 60),
         ("gateway.log_level", "INFO"),
+        ("gateway.print_llm_calls", True),
+        ("gateway.print_worker_activity", True),
         ("gateway.restart_initial_delay_sec", 1.0),
         ("gateway.restart_max_delay_sec", 30.0),
         ("gateway.streamlit_port", 8501),

@@ -39,6 +39,7 @@ from typing import Any
 
 import psycopg2
 from loguru import logger
+from rich.console import Console
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -56,6 +57,8 @@ from lib.utils.outbound_meta import is_dropped, FINAL_TURN_KEY
 from psycopg2.extras import Json
 
 _WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent / "workspace"
+
+console = Console()
 
 
 def _resolve_sfs_base(media_cache_dir: str | Path) -> Path:
@@ -143,6 +146,13 @@ class PostgresChannel(BaseChannel):
         # task_id задач, аренда которых сейчас принадлежит этому воркеру
         self._leases: set[str] = set()
         self._lease_task: asyncio.Task | None = None
+
+        # ---- вывод активности пула воркеров в терминал ----
+        # Включается в gateway отключаемой опцией `gateway.print_worker_activity`
+        # (project.json). Печатает: взял задачу / закончил / размер очереди.
+        self._print_worker_activity: bool = bool(_get("print_worker_activity", False))
+        # последний напечатанный (pending, error) — чтобы не спамить строку очереди
+        self._last_queue_summary: tuple[int, int] | None = None
 
         # ---- параллельность ----
         self._max_concurrent: int = int(_get("max_concurrent", 1))
@@ -271,19 +281,23 @@ class PostgresChannel(BaseChannel):
         задачи с истёкшими арендами обратно в пул.
 
         Каждые ``_lease_interval`` секунд:
-          1. ``_reclaim_and_heal`` — вернуть в пул задачи, чьи lease истекли;
-          2. heartbeat — продлить ``lease_until`` для своих аренд.
+          1. heartbeat — продлить ``lease_until`` для своих аренд;
+          2. ``_reclaim_and_heal`` — вернуть в пул задачи, чьи lease истекли.
+
+        Порядок важен: heartbeat идёт **первым**, иначе задержка тика
+        (заблокированный event loop, медленная БД) приведёт к тому, что
+        воркер отзовёт собственную живую задачу.
         """
         while self._running:
             await asyncio.sleep(self._lease_interval)
             try:
-                await self._reclaim_and_heal()
                 if self._leases:
                     await execute(
                         f"UPDATE {self._fq_claims} SET lease_until = "
                         f"NOW() + interval '1 second' * %s WHERE worker_id = %s",
                         self._processing_timeout, self._worker_id,
                     )
+                await self._reclaim_and_heal()
             except Exception as e:
                 self.logger.error("Lease loop error: {}", e)
 
@@ -302,13 +316,27 @@ class PostgresChannel(BaseChannel):
              ``failed``.
           4. Висячая аренда: claim есть, а задача не в ``processing``
              (уже completed/pending/error) — удаляется как мусор.
+
+        Аренды, которые этот воркер держит в памяти (``_leases``), из
+        reclaim исключаются: задача физически обрабатывается здесь, и
+        отзыв истёкшего lease привёл бы к дублю обработки и удалению
+        живого assistant-placeholder.
         """
         async with transaction() as conn:
-            # 1. Reclaim по истечению lease
-            rows = await conn.fetch(
-                f"DELETE FROM {self._fq_claims} WHERE lease_until < NOW() "
-                f"RETURNING task_id, worker_id"
-            )
+            # 1. Reclaim по истечению lease (кроме своих живых аренд)
+            own = list(self._leases)
+            if own:
+                rows = await conn.fetch(
+                    f"DELETE FROM {self._fq_claims} WHERE lease_until < NOW() "
+                    f"AND NOT (task_id = ANY(%s) AND worker_id = %s) "
+                    f"RETURNING task_id, worker_id",
+                    own, self._worker_id,
+                )
+            else:
+                rows = await conn.fetch(
+                    f"DELETE FROM {self._fq_claims} WHERE lease_until < NOW() "
+                    f"RETURNING task_id, worker_id"
+                )
             for r in rows:
                 msg_id = str(r["task_id"])
                 meta_row = await conn.fetchrow(
@@ -406,6 +434,55 @@ class PostgresChannel(BaseChannel):
         self._leases.clear()
 
     # ------------------------------------------------------------------
+    # Активность пула воркеров (опциональный вывод в терминал gateway)
+    # ------------------------------------------------------------------
+    #
+    # Включается отключаемой опцией ``gateway.print_worker_activity``
+    # (project.json). Печатает через Rich-консоль, когда воркер взял
+    # задачу, закончил её (completed/error/failed) и текущий размер
+    # очереди (pending/error). Форматом повторяет вывод токенов LLM.
+
+    def _activity_print(self, line: str) -> None:
+        """Напечатать строку активности воркера, если флаг включён."""
+        if self._print_worker_activity:
+            console.print(f"[dim]{line}[/dim]")
+
+    @staticmethod
+    def _preview(content: Any, limit: int = 60) -> str:
+        """Короткий однострочный превью контента задачи для лога."""
+        if not content:
+            return ""
+        text = " ".join(str(content).split())
+        return text if len(text) <= limit else text[: limit - 1] + "…"
+
+    async def _report_queue(self) -> None:
+        """Одноразовая (по изменению) печать размера очереди задач.
+
+        Считает по ``agent_conversation_messages`` число ожидающих
+        (``pending``) и повторяемых (``error``) user-задач. Печатает строку
+        только когда суммарное значение изменилось с прошлого опроса.
+        """
+        try:
+            if not self._print_worker_activity:
+                return
+            row = await fetchone(
+                f"SELECT count(*) FILTER (WHERE status = 'pending') AS pending, "
+                f"count(*) FILTER (WHERE status = 'error') AS error "
+                f"FROM {self._fq_table} WHERE role = 'user'"
+            )
+            pending = int((row or {}).get("pending") or 0)
+            error = int((row or {}).get("error") or 0)
+            summary = (pending, error)
+            if summary != self._last_queue_summary:
+                self._last_queue_summary = summary
+                total = pending + error
+                self._activity_print(
+                    f"очередь: pending={pending}, error={error} (итого {total})"
+                )
+        except Exception as e:
+            self.logger.debug("Worker queue stats error: {}", e)
+
+    # ------------------------------------------------------------------
     # Сброс рассуждений (reasoning flush)
     # ------------------------------------------------------------------
 
@@ -467,6 +544,8 @@ class PostgresChannel(BaseChannel):
         следующее без ожидания).
         """
         await self._reclaim_and_heal()
+        if self._print_worker_activity:
+            await self._report_queue()
         if not exchange.is_slot_free():
             return False
         had = await self._poll_once(exchange)
@@ -625,6 +704,10 @@ class PostgresChannel(BaseChannel):
         exchange.add_inflight(user_msg_id)
         self._chat_inflight.add(chat_id)
         self._msg_chat[user_msg_id] = chat_id
+        self._activity_print(
+            f"→ worker {self._worker_id} взял задачу {user_msg_id} "
+            f"(chat {chat_id}): {self._preview(content)}"
+        )
 
         meta: dict[str, Any] = {
             "message_id": user_msg_id,
@@ -696,6 +779,7 @@ class PostgresChannel(BaseChannel):
           — освобождает слот (``_release_slot``)
           — чистит буфер рассуждений для этого assistant_msg_id
         """
+        chat_id = self._msg_chat.get(user_msg_id)
         async with transaction() as conn:
             meta_row = await conn.fetchrow(
                 f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
@@ -754,6 +838,11 @@ class PostgresChannel(BaseChannel):
         self._release_slot(user_msg_id)
         if assistant_msg_id:
             self._reasoning_buffers.pop(assistant_msg_id, None)
+        status = "error" if retry_count < self._max_stuck_retries else "failed"
+        self._activity_print(
+            f"← worker {self._worker_id} закончил задачу {user_msg_id} "
+            f"(chat {chat_id or '?'}) [{status}]: {reason}"
+        )
 
     # ------------------------------------------------------------------
     # Рассуждения (reasoning) — потоковая запись в metadata.reasoning
@@ -1079,6 +1168,10 @@ class PostgresChannel(BaseChannel):
                     )
             # Слот освобождаем ПОСЛЕ успешной записи клейма/статуса.
             self._release_slot(msg_id)
+            self._activity_print(
+                f"← worker {self._worker_id} закончил задачу {msg_id} "
+                f"(chat {chat_id}) [completed]"
+            )
         except Exception:
             self.logger.exception("Failed to write response for {}", chat_id)
             if msg_id:
@@ -1115,6 +1208,7 @@ class PostgresChannel(BaseChannel):
         if stream_end or meta.get("_stream_end"):
             msg_id = meta.get("origin_message_id") or meta.get("message_id")
             ctx = self._msg_ctx.pop(msg_id, {}) if msg_id else {}
+            stream_chat_id = self._msg_chat.get(msg_id) if msg_id else None
             self._release_slot(msg_id)
             assistant_msg_id = ctx.get("assistant_msg_id") or meta.get("answer_id")
 
@@ -1145,6 +1239,10 @@ class PostgresChannel(BaseChannel):
                             f"DELETE FROM {self._fq_claims} "
                             f"WHERE task_id = %s AND worker_id = %s",
                             msg_id, self._worker_id,
+                        )
+                        self._activity_print(
+                            f"← worker {self._worker_id} закончил задачу {msg_id} "
+                            f"(chat {stream_chat_id or '?'}) [streamed/completed]"
                         )
         else:
             buf = self._stream_buffers.get(buf_key, "")

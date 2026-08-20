@@ -211,6 +211,8 @@
     "llm_timeout": 300,               // Таймаут LLM, сек
     "exec_timeout": 60,               // Таймаут exec, сек
     "log_level": "INFO",              // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR
+    "print_llm_calls": true,          // Выводить в терминал токены LLM-итераций (→ промпт / ← ответ). Варианты: true | false
+    "print_worker_activity": true,    // Выводить в терминал активность пула воркеров: взял задачу / закончил / размер очереди. Варианты: true | false
     "restart_initial_delay_sec": 1.0, // Начальная пауза backoff при перезапуске (gateway_runner.py)
     "restart_max_delay_sec": 30.0,    // Потолок backoff при перезапуске
     "streamlit_port": 8501,           // Порт Streamlit subprocess (subprocess_manager.py)

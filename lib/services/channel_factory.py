@@ -31,8 +31,13 @@ class ChannelFactory:
             в ``PostgresChannel`` для транскрипции голосовых сообщений.
     """
 
-    def __init__(self, transcription: Optional[Any] = None) -> None:
+    def __init__(
+        self,
+        transcription: Optional[Any] = None,
+        print_worker_activity: bool = False,
+    ) -> None:
         self._transcription = transcription
+        self._print_worker_activity = print_worker_activity
 
     def create_all(
         self,
@@ -161,6 +166,7 @@ class ChannelFactory:
             "max_concurrent": pg.get("max_concurrent", 1),
             "processing_timeout": pg.get("processing_timeout", 120),
             "allow_from": pg.get("allow_from", ["*"]),
+            "print_worker_activity": self._print_worker_activity,
         }
         pg_channel = PostgresChannel(ch_cfg, bus)
         if self._transcription is not None:

@@ -695,3 +695,195 @@ class TestPostgresChannelReclaimAndHeal:
         await ch._reclaim_and_heal()
         # исчерпан лимит → failed
         assert mock_conn.execute.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_own_live_lease_not_reclaimed(self, mock_db_and_psycopg):
+        """Задача, которую воркер держит в ``_leases``, не должна
+        отзываться даже при истёкшем lease — это вызвало бы дубль
+        обработки и удаление живого assistant-placeholder.
+        """
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        mock_conn = AsyncMock()
+        # _reclaim_and_heal читает lease_until < NOW() с фильтром self
+        mock_conn.fetch.return_value = []
+        mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch._leases.add("own-msg-1")
+        await ch._reclaim_and_heal()
+        call = mock_conn.fetch.call_args
+        sql, params = call.args[0], call.args[1]
+        assert "NOT" in sql
+        assert "task_id = ANY(%s)" in sql
+        assert "own-msg-1" in params
+
+
+class TestPostgresChannelWorkerActivity:
+    """Отключаемый вывод активности пула воркеров в терминал gateway.
+
+    Включается флагом ``print_worker_activity`` в конфиге канала
+    (gateway передаёт его из ``gateway.print_worker_activity``).
+    """
+
+    async def _channel(self, ch_cls, mock_db, enabled: bool):
+        ch = _make_channel(
+            (ch_cls, None, mock_db), print_worker_activity=enabled
+        )
+        return ch
+
+    @pytest.mark.asyncio
+    async def test_activity_print_disabled_silent(self, mock_db_and_psycopg):
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = await self._channel(PostgresChannel, mock_db, enabled=False)
+        with patch("lib.channels.postgres_channel.console") as console:
+            ch._activity_print("hello")
+            console.print.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_activity_print_enabled_prints(self, mock_db_and_psycopg):
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = await self._channel(PostgresChannel, mock_db, enabled=True)
+        with patch("lib.channels.postgres_channel.console") as console:
+            ch._activity_print("hello")
+            console.print.assert_called_once()
+            assert "hello" in console.print.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_report_queue_prints_on_change_only(self, mock_db_and_psycopg):
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = await self._channel(PostgresChannel, mock_db, enabled=True)
+        mock_db.async_fetchone.return_value = {"pending": 3, "error": 1}
+        with patch("lib.channels.postgres_channel.console") as console:
+            await ch._report_queue()
+            console.print.assert_called_once()
+            assert "pending=3" in console.print.call_args.args[0]
+            assert "error=1" in console.print.call_args.args[0]
+            # то же значение — повторно не печатаем
+            await ch._report_queue()
+            assert console.print.call_count == 1
+            # изменилось — печатаем
+            mock_db.async_fetchone.return_value = {"pending": 4, "error": 0}
+            await ch._report_queue()
+            assert console.print.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_report_queue_disabled_skips_query(self, mock_db_and_psycopg):
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = await self._channel(PostgresChannel, mock_db, enabled=False)
+        mock_db.async_fetchone.side_effect = AssertionError("query must be skipped")
+        await ch._report_queue()  # не падает и не ходит в БД
+
+    @pytest.mark.asyncio
+    async def test_poll_once_prints_took_task(self, mock_db_and_psycopg):
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = await self._channel(PostgresChannel, mock_db, enabled=True)
+
+        ch._claim_one = AsyncMock(
+            return_value={
+                "id": "m-1",
+                "chat_id": "chat-1",
+                "user_id": "user-1",
+                "content": "Привет!",
+                "metadata": "{}",
+                "media": [],
+            }
+        )
+        ch._decode_media_from_db = AsyncMock(return_value=[])
+        ch._resolve_media_paths_and_hints = lambda media: ([], [])
+        ch._insert_assistant_message = AsyncMock(return_value="a-1")
+        ch._handle_message = AsyncMock()
+
+        exchange = MagicMock()
+        exchange.acquire_slot = AsyncMock()
+        exchange.is_slot_free = lambda: True
+
+        with patch("lib.channels.postgres_channel.console") as console:
+            result = await ch._poll_once(exchange)
+            assert result is True
+            console.print.assert_called_once()
+            text = console.print.call_args.args[0]
+            assert "взял задачу m-1" in text
+            assert "chat-1" in text
+            assert "Привет!" in text
+
+    @pytest.mark.asyncio
+    async def test_poll_once_took_disabled_not_printed(self, mock_db_and_psycopg):
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = await self._channel(PostgresChannel, mock_db, enabled=False)
+
+        ch._claim_one = AsyncMock(
+            return_value={
+                "id": "m-1",
+                "chat_id": "chat-1",
+                "user_id": "user-1",
+                "content": "x",
+                "metadata": "{}",
+                "media": [],
+            }
+        )
+        ch._decode_media_from_db = AsyncMock(return_value=[])
+        ch._resolve_media_paths_and_hints = lambda media: ([], [])
+        ch._insert_assistant_message = AsyncMock(return_value="a-1")
+        ch._handle_message = AsyncMock()
+
+        exchange = MagicMock()
+        exchange.acquire_slot = AsyncMock()
+        exchange.is_slot_free = lambda: True
+
+        with patch("lib.channels.postgres_channel.console") as console:
+            result = await ch._poll_once(exchange)
+            assert result is True
+            console.print.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mark_failed_prints_finished(self, mock_db_and_psycopg):
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = await self._channel(PostgresChannel, mock_db, enabled=True)
+
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {"metadata": "{}"}
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch._msg_chat["m-1"] = "chat-1"
+        exchange = MagicMock()
+        exchange.acquire_slot = AsyncMock()
+        exchange.is_slot_free = lambda: True
+        ch.exchange = exchange
+
+        with patch("lib.channels.postgres_channel.console") as console:
+            await ch._mark_failed("m-1", "a-1", "dispatch_error")
+            console.print.assert_called_once()
+            text = console.print.call_args.args[0]
+            assert "закончил задачу m-1" in text
+            assert "[error]" in text
+            assert "chat-1" in text
+
+    @pytest.mark.asyncio
+    async def test_finalize_turn_prints_completed(self, mock_db_and_psycopg):
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = await self._channel(PostgresChannel, mock_db, enabled=True)
+        mock_db.async_fetchone.return_value = {"metadata": "{}"}
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
+        ch._msg_chat["m-1"] = "chat-1"
+
+        msg = MagicMock()
+        msg.event = None
+        msg.content = "Final answer"
+        msg.chat_id = "chat-1"
+        msg.metadata = {
+            "origin_message_id": "m-1",
+            "answer_id": "a-1",
+            "_final_turn": True,
+        }
+        msg.media = []
+        msg.buttons = []
+
+        with patch("lib.channels.postgres_channel.console") as console:
+            await ch.send(msg)
+            console.print.assert_called_once()
+            text = console.print.call_args.args[0]
+            assert "закончил задачу m-1" in text
+            assert "[completed]" in text

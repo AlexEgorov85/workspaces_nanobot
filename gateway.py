@@ -39,6 +39,7 @@ def main() -> None:
         workspace_dir=_WORKSPACE_DIR,
         enable_db_logging=True,
         enable_audit=True,
+        print_llm_calls=_gateway_print_llm_calls(),
     )
 
     _configure_logging(ctx.settings)
@@ -123,7 +124,10 @@ async def _run(ctx: ApplicationContext, first_sync_event) -> None:
     """Основной рабочий цикл gateway: каналы + Streamlit + агент."""
     from lib.services.channel_factory import ChannelFactory
 
-    channel_factory = ChannelFactory(transcription=ctx.transcription_service)
+    channel_factory = ChannelFactory(
+        transcription=ctx.transcription_service,
+        print_worker_activity=_gateway_print_worker_activity(),
+    )
     channels, messages = channel_factory.create_all(
         ctx.config, ctx.settings, ctx.bus, ctx.session_manager,
     )
@@ -214,6 +218,35 @@ def _configure_logging(settings) -> None:
     from lib.utils.logging_utils import configure_loguru
 
     configure_loguru(log_level)
+
+
+def _gateway_print_llm_calls() -> bool:
+    """Прочитать флаг вывода токенов LLM в терминал из ``gateway.print_llm_calls``.
+
+    Отключаемая опция: `false` по умолчанию, включается в `project.json`.
+    """
+    try:
+        from lib.services.config_service import ConfigService
+
+        value = ConfigService().settings_section("gateway").get("print_llm_calls", False)
+    except Exception:
+        return False
+    return bool(value)
+
+
+def _gateway_print_worker_activity() -> bool:
+    """Прочитать флаг вывода активности пула воркеров в терминал.
+
+    Читает ``gateway.print_worker_activity`` из `project.json` (секция gateway).
+    Отключаемая опция: `false` по умолчанию.
+    """
+    try:
+        from lib.services.config_service import ConfigService
+
+        value = ConfigService().settings_section("gateway").get("print_worker_activity", False)
+    except Exception:
+        return False
+    return bool(value)
 
 
 if __name__ == "__main__":

@@ -112,7 +112,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    GW["gateway.py<br/>132 строки<br/>(тонкий оркестратор)"]
+    GW["gateway.py<br/>232 строки<br/>(тонкий оркестратор)"]
     CLI["cli_agent.py<br/>165 строк<br/>(тонкий оркестратор)"]
     CTX["lib/core/ApplicationContext<br/>(create/start/stop)"]
 
@@ -157,6 +157,10 @@ flowchart TB
   конкурентными сессиями (см. `database_logging_hook.py`).
   Lazy-import `lib.hooks.database_logging_hook` через try/except
   (если модуль не подключён — фабрика просто не создаётся).
+  Флаг `print_llm_calls` пробрасывается в фабрику оборота: при `True`
+  хук печатает в терминал токены каждой LLM-итерации (включается всегда
+  в CLI-режиме через `cli_agent.py`; в gateway — опцией
+  `gateway.print_llm_calls`).
 - **`bus_factory.py:BusFactory`** — `create()` возвращает `MessageBus`,
   опционально обернув `publish_inbound`/`publish_outbound` async-логгерами
   из `db_logging_bus.py`. **Без monkey-patch'ей**: оригинальные методы
@@ -172,7 +176,7 @@ flowchart TB
 | `config_service.py` | Дубликат `_load_runtime_config` + `SETTINGS`-аксессора между gateway и cli. Pre-resolve `${PROVIDER_API_KEY}` от .secrets.env (см. ниже). |
 | `session_storage.py` | Выбор `PGSessionManager` / `SessionManager` (auto / postgres / file) с поддержкой `session_manager.json` override. |
 | `runtime_patcher.py` | Все monkey-patch'и фреймворка в одном классе с fallback при изменении API nanobot: `ContextGovernor.normalize_tool_result` (persist больших результатов), `AgentLoop._save_turn` (архивация вместо усечения, см. «Ликвидация потери данных»), ограничения вывода exec/tool (`patch_exec_limits`/`patch_tool_limits`), `agent._assemble_outbound` (внедрение `_tool_audit`). |
-| `channel_factory.py` | `ChannelManager` + Redis + Postgres каналы + транскрипция (вынесено из gateway). |
+| `channel_factory.py` | `ChannelManager` + Redis + Postgres каналы + транскрипция (вынесено из gateway). Конструктор принимает `print_worker_activity` (пробрасывается в `PostgresChannel` из `gateway.print_worker_activity`). |
 | `transcription_service.py` | openai/groq key/URL/language (вынесено из gateway). |
 | `subprocess_manager.py` | Streamlit spawn + terminate/kill. |
 | `preload_service.py` | Разделяет FAISS preload (gateway) и audit_cache refresh (cli). |
@@ -980,7 +984,7 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 | Таблица | Назначение | Кто пишет | Кто читает |
 |---------|-----------|-----------|-----------|
 | `public.agent_vector_index_config` | Конфиг индексов (имя, источник, колонки, чанки, track_column, enabled) | `seed_default_indexes.sql` (вручную) | `tools/build_vectors.py` |
-| `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (chunk_index/count, content_hash, row_data JSONB, synced_at) | `tools/build_vectors.py` | `lib/services/cache_provider_impl.py:PostgresDuckDbProvider` |
+| `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (chunk_index/count, content_hash, row_data JSONB, synced_at) | `tools/build_vectors.py` | `lib/services/cache_provider_impl.py:PostgresDuckDbProvider` (агент читает только через DuckDB-снимок `audit_cache.duckdb`; канон — PG) |
 | `public.agent_vector_index_store` | Сериализованный FAISS `BYTEA` + метаданные (dimension, vector_count, updated_at) | `provider.rebuild_and_store_index()` | `provider._INDEX_CACHE` (in-memory после preload) |
 
 DDL: `sql/audit_analyzer/create_public_agent_vector_index_config.sql`, `sql/audit_analyzer/create_oarb_audit_vectors.sql`.
@@ -2001,8 +2005,8 @@ DISTRIBUTED BY (source);         -- audit_vectors
 
 | Файл | Строк | Что делает | Настраивается через |
 |------|------:|-----------|-------------------|
-| `gateway.py` | 132 | Сервер: каналы, Streamlit, FAISS preload, restart-loop | `project.json` (`channels.*`, `gateway`, `logging.db`) |
-| `cli_agent.py` | 165 | REPL: ввод → `MessageBus` → `AgentLoop` | CLI-аргументы, `project.json` (`cli`) |
+| `gateway.py` | 232 | Сервер: каналы, Streamlit, FAISS preload, restart-loop. Токены LLM-итераций — опционально через `gateway.print_llm_calls` (`project.json`, `false` по умолчанию) → `ApplicationContext.create(print_llm_calls=...)`. Активность пула воркеров — через `gateway.print_worker_activity` → `ChannelFactory(print_worker_activity=...)` → `PostgresChannel` | `project.json` (`channels.*`, `gateway`, `logging.db`) |
+| `cli_agent.py` | 165 | REPL: ввод → `MessageBus` → `AgentLoop`. Запускает `ApplicationContext.create(print_llm_calls=True)` — в терминале выводятся токены LLM-итераций (`→ LLM: отправлен промпт (X токенов)` / `← LLM: получен ответ (Y токенов)`) | CLI-аргументы, `project.json` (`cli`) |
 | `streamlit_app.py` | 502 | Тонкий web-клиент (НЕ через ApplicationContext) | `project.json` → `channels.postgres`, `streamlit` |
 
 ### Bootstrap и сервисный слой
@@ -2019,14 +2023,14 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | `lib/services/transcription_service.py` |  openai/groq key/URL/language |
 | `lib/services/subprocess_manager.py` |  Streamlit spawn + terminate/kill |
 | `lib/services/preload_service.py` |  FAISS preload + audit_cache refresh |
-| `lib/services/db_logging_service.py` |  Worker-поток, batch INSERT через общий пул `utils.db`, без JSONL-fallback |
+| `lib/services/db_logging_service.py` |  Worker-поток, batch INSERT через общий пул `utils.db`, без JSONL-fallback. Событие `llm_call` (`log_llm_call`) пишет полный промпт + ответ LLM в `payload` |
 | `lib/services/db_logging_bus.py` |  Обёртки publish_inbound/outbound для логгера |
 | `lib/cli/console_loop.py` |  REPL/typewriter/consume_outbound (вынесено из cli_agent.py) |
 | `lib/cli/display_config.py` |  DisplayConfig |
 | `lib/cli/hook_loader.py` |  Сканирование workspace/hooks/*.py (плагины) |
 | `lib/hooks/base_tool_tracking_hook.py` |  Общий каркас для tool-хуков |
 | `lib/hooks/tool_audit_hook.py` |  Хук аудита вызовов инструментов |
-| `lib/hooks/database_logging_hook.py` |  AgentHook для tool-событий + run_finished; per-turn инстансы через `make_db_logging_hook_factory` (конкурентно-безопасно) |
+| `lib/hooks/database_logging_hook.py` |  AgentHook для tool-событий + run_finished + `llm_call` (полный промпт/ответ на итерацию через `before_iteration`/`after_iteration`); при `print_llm_calls=True` выводит в терминал токены итерации (включается в CLI через `ApplicationContext.create(print_llm_calls=True)`); per-turn инстансы через `make_db_logging_hook_factory` (конкурентно-безопасно) |
 | `lib/lifecycle/gateway_runner.py` |  Цикл с exponential backoff |
 | `lib/lifecycle/shutdown_coordinator.py` |  LIFO graceful shutdown |
 | `workspace/hooks/session_file_redirect_hook.py` |  AgentHook: перенаправляет `write`/`edit`/`create_file`/`write_file` и `media` тула `message` в `data_store/cache/sessions/<session_key>/` (политика хранения в `workspace/AGENTS.md`) |
@@ -2057,7 +2061,7 @@ DISTRIBUTED BY (source);         -- audit_vectors
 | **Каналы** | Включить Redis-канал | `project.json` → `channels.redis.enabled` | `Connection refused` → `host`/`port`/`password`; не приходят сообщения → `lib/channels/redis_channel.py` + `allow_from` |
 | **Навыки** | Настроить навык | `project.json` → `skills.<имя>` | Навык не подхватывается → `agents.defaults.disabledSkills` (`config.json`); навык стартует со старыми параметрами → `lib/services/runtime_patcher.py` (см. `RuntimePatcher.apply_all`) |
 | **Секреты** | Добавить API-ключ | `.secrets.env` (провайдер-скоупинг формат) | `nanobot._load_runtime_config` падает с `ValueError` → `lib/services/config_service.py:_pre_resolve_env_refs` (должен подставить `${VAR}` в `os.environ` ДО nanobot) |
-| **Логирование** | БД-логирование | `project.json` → `logging.db` (`enabled`, `flush_interval_sec`, `batch_size`, `min_level`) | В таблице `gateway_logs` пусто → `lib/services/db_logging_service.py:get_stats()` (`queue_size`, `connected`, `last_error`); при недоступности БД события дропаются (счётчик `failed`) |
+| **Логирование** | БД-логирование | `project.json` → `logging.db` (`enabled`, `flush_interval_sec`, `batch_size`, `min_level`) | В таблице `gateway_logs` пусто → `lib/services/db_logging_service.py:get_stats()` (`queue_size`, `connected`, `last_error`); при недоступности БД события дропаются (счётчик `failed`). Полный промпт и ответ LLM на каждую итерацию — событие `llm_call` (payload: `prompt`/`response`, metadata: `iteration`/`model`/`finish_reason`/`usage`) |
 | **Сервисный слой** | Сервисный слой | `lib/services/<service>.py` (например, `db_logging_service.py`) | `ctx.start()` падает → сервис в `None` (graceful degradation, см. `lib/core/application_context.py:create`); race-condition `нет данных в кэше` → callbacks на `AuditSyncService` ДО `ctx.start()` (см. `gateway.py:main`) |
 | **Bootstrap** | Bootstrap | `lib/core/application_context.py` | Контекст не создаётся → `lib/core/application_context.py:create` + флаги `enable_db_logging`/`enable_audit`; double-init воркеров → `lib/lifecycle/shutdown_coordinator.py` |
 | **Lifecycle** | Lifecycle (backoff/shutdown) | `lib/lifecycle/gateway_runner.py` / `shutdown_coordinator.py` | Gateway зацикливается на рестартах → `GatewayRunner.run_forever` (exponential backoff 1с→30с); процесс не умирает по Ctrl-C → `ShutdownCoordinator` (LIFO) |
