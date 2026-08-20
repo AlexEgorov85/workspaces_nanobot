@@ -52,6 +52,51 @@ def _session_key_of(msg: Any) -> str:
     key = getattr(msg, "session_key", None)
     return key if isinstance(key, str) else ""
 
+def _attach_context_window(agent: Any, session_key: str, result: Any) -> None:
+    """Внедрить ``metadata["context_window"]`` в финальный outbound.
+
+    Метрика M1 (занятость окна): ``prompt_tokens`` последней итерации
+    оборота (свежий по-итерационный usage из моста ``DatabaseLoggingHook``)
+    поделённый на лимит окна модели (``agent.context_window_tokens``).
+
+    Если мост пуст (например, DB-логирование выключено и хука нет), делаем
+    фолбэк на накопленный ``agent._last_usage`` — он завышает занятость на
+    многоитеративных оборотах (сумма prompt_tokens по всем итерациям),
+    поэтому считается запасным вариантом.
+
+    Готовый блок дополнительно кладём в мост: канал читает его в фоновом
+    цикле живого обновления и пишет в processing-строку ТОЛЬКО блок (без
+    лимита — лимит знает только агент).
+    """
+    from lib.hooks.database_logging_hook import (
+        _store_context_window,
+        get_iteration_usage,
+    )
+    usage = get_iteration_usage(session_key)
+    if not usage:
+        usage = getattr(agent, "_last_usage", None) or {}
+    limit = getattr(agent, "context_window_tokens", None) or 0
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return
+    raw_used = (usage or {}).get("prompt_tokens") if isinstance(usage, dict) else None
+    try:
+        used = int(raw_used or 0)
+    except (TypeError, ValueError):
+        return
+    if used <= 0:
+        return
+    model = getattr(agent, "model", None)
+    block = {
+        "used": used,
+        "limit": int(limit),
+        "pct": round(min(1.0, used / float(limit)), 4),
+        "model": model if isinstance(model, str) else "",
+    }
+    metadata = dict(result.metadata or {})
+    metadata["context_window"] = block
+    result.metadata = metadata
+    _store_context_window(session_key, block)
+
 
 class PatchReport:
     """Отчёт о применении патчей: что применено / пропущено / упало."""
@@ -113,9 +158,14 @@ class RuntimePatcher:
         self._record(report, "tool_limits", self.patch_tool_limits(settings))
         self._record(report, "assemble_outbound", self.patch_assemble_outbound(
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
+        self._record(report, "context_bridge_seed", self.patch_context_bridge_seed(agent))
         self._record(report, "async_save", self.patch_async_session_saves(agent))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager))
+        self._record(report, "compact_tool", self.patch_compact_tool(
+            agent, settings))
+        self._record(report, "compact_tracking", self.patch_compaction_tracking(
+            agent, settings))
         return report
 
     @staticmethod
@@ -129,6 +179,53 @@ class RuntimePatcher:
             report.applied.append(name)
         else:
             report.skipped.append((name, detail))
+
+    # ------------------------------------------------------------------
+    # Патч 2b: seed лимита окна в мост контекста на старте оборота
+    # ------------------------------------------------------------------
+
+    def patch_context_bridge_seed(self, agent: Any) -> Tuple[bool, str]:
+        """Засеять лимит окна/модель в мост контекста на старте оборота.
+
+        Для ЖИВОГО (по-итерационного) обновления занятости окна канал
+        должен знать лимит модели, но знает его только агент. Патч оборачивает
+        ``agent._state_build``: каждый оборот (до первых итераций) кладёт
+        ``runtime.context_window_tokens`` и модель в мост
+        (``lib.hooks.database_logging_hook.seed_context_window``). Хук пишет
+        usage каждой итерации, и канал собирает блок на лету.
+
+        Best-effort: при любой ошибке старт оборота продолжается без seed
+        (тогда живое обновление недоступно, но финальный снапшот собирает
+        ``_attach_context_window`` из фолбэка ``agent._last_usage``).
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+        """
+        if agent is None:
+            return False, "agent is None"
+        original = getattr(agent, "_state_build", None)
+        if original is None:
+            return False, "agent._state_build is missing"
+        try:
+            from lib.hooks.database_logging_hook import seed_context_window
+        except Exception as exc:
+            return False, f"import failed: {exc}"
+
+        async def _state_build_with_seed(ctx: Any) -> Any:
+            try:
+                runtime = ctx.runtime or agent.runtime_for_session(ctx.session)
+                limit = getattr(runtime, "context_window_tokens", 0) or 0
+                model = getattr(runtime, "model", None) or None
+                session_key = getattr(ctx, "session_key", None) or getattr(
+                    ctx.session, "key", None
+                )
+                seed_context_window(session_key, limit=limit, model=model)
+            except Exception:
+                pass
+            return await original(ctx)
+
+        agent._state_build = _state_build_with_seed
+        return True, "agent._state_build patched for context-bridge seed"
 
     # ------------------------------------------------------------------
     # Патч 1: ContextGovernor.normalize_tool_result
@@ -679,6 +776,9 @@ class RuntimePatcher:
 
                     result.media = media
 
+            # 3) Контекстное окно → result.metadata["context_window"]
+            _attach_context_window(agent, session_key, result)
+
             return result
 
         agent._assemble_outbound = _wrap
@@ -933,3 +1033,159 @@ class RuntimePatcher:
         except Exception as exc:
             return False, f"patch failed: {exc}"
         return True, "SubagentManager._SubagentHook patched for DB logging"
+
+    # ------------------------------------------------------------------
+    # Патч 4: agent.tools.register(CompactContextTool) — ручное сжатие
+    # ------------------------------------------------------------------
+
+    def patch_compact_tool(
+        self, agent: Any, settings: Any
+    ) -> Tuple[bool, str]:
+        """Зарегистрировать tool ``compact_context`` (ручное сжатие контекста).
+
+        Регистрирует ``CompactContextTool`` в ``agent.tools``. Tool вызывает
+        штатный ``Consolidator`` через ``ContextCompactionService`` (см.
+        ``lib/services/context_compaction.py``). Управляется секцией
+        ``gateway.compact.*`` в ``project.json``; при
+        ``gateway.compact.enabled=false`` патч — no-op.
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+        """
+        if agent is None:
+            return False, "agent is None"
+        try:
+            from lib.services.context_compaction import ContextCompactionService
+            from lib.tools.compact_context_tool import CompactContextTool
+        except Exception as exc:
+            return False, f"import failed: {exc}"
+        try:
+            svc = ContextCompactionService(agent, settings=settings)
+            if not svc.enabled:
+                return False, "gateway.compact.enabled=false"
+            agent.tools.register(CompactContextTool(svc))
+        except Exception as exc:
+            return False, f"patch failed: {exc}"
+        return True, "compact_context tool registered"
+
+    # ------------------------------------------------------------------
+    # Патч 5: авто-сжатие → заметка в agent_conversation_messages
+    # ------------------------------------------------------------------
+
+    def patch_compaction_tracking(
+        self, agent: Any, settings: Any
+    ) -> Tuple[bool, str]:
+        """Обернуть авто-сжатие так, чтобы оно шло через тот же путь,
+        что и ручной ``/compact``: тот же отчёт, та же запись в историю.
+
+        Оборачивает две штатные точки nanobot:
+
+          * ``agent.auto_compact._archive`` — idle-сжатие простаивающих
+            сессий (``AutoCompact.check_expired`` → ``_archive``);
+          * ``agent.consolidator.maybe_consolidate_by_tokens`` —
+            token-budget/replay-window сжатие на каждом ``_state_build``
+            /``_state_save``.
+
+        После оригинального метода обёртка сравнивает состояние сессии
+        (``last_consolidated`` до/после) и при факте архивации зовёт
+        ``ContextCompactionService.record_external_compaction(...)``,
+        который собирает отчёт и пишет заметку в ``agent_conversation_messages``
+        ровно тем же кодом, что и ручной ``compact()`` (та же функция
+        ``_write_history_notice``, тот же ``format_report``).
+
+        При ``gateway.compact.enabled=false`` или
+        ``gateway.compact.notify_in_history=false`` патч — no-op.
+        """
+        if agent is None:
+            return False, "agent is None"
+        try:
+            from lib.services.context_compaction import ContextCompactionService
+        except Exception as exc:
+            return False, f"import failed: {exc}"
+        try:
+            svc = ContextCompactionService(agent, settings=settings)
+            if not svc.enabled:
+                return False, "gateway.compact.enabled=false"
+            if not svc.notify_in_history:
+                return False, "gateway.compact.notify_in_history=false"
+            self._wrap_auto_compact_archive(agent, svc)
+            self._wrap_maybe_consolidate_by_tokens(agent, svc)
+        except Exception as exc:
+            return False, f"patch failed: {exc}"
+        return True, "auto compaction tracking patched"
+
+    @staticmethod
+    def _wrap_auto_compact_archive(agent: Any, svc: Any) -> None:
+        """Обернуть ``AutoCompact._archive`` (idle auto-compact)."""
+        auto = getattr(agent, "auto_compact", None)
+        if auto is None:
+            return
+        original = getattr(auto, "_archive", None)
+        if original is None:
+            return
+
+        async def _wrapped(key: str, *, runtime: Any) -> Any:
+            sessions = agent.sessions
+            before_session = sessions.get_or_create(key)
+            before_cursor = int(getattr(before_session, "last_consolidated", 0) or 0)
+            before_tokens, _ = await svc._estimate(before_session, runtime)
+            result = await original(key, runtime=runtime)
+            fresh = sessions.get_or_create(key)
+            after_cursor = int(getattr(fresh, "last_consolidated", 0) or 0)
+            if after_cursor > before_cursor and result not in (None, "", "(nothing)"):
+                after_tokens, _ = await svc._estimate(fresh, runtime)
+                await svc.record_external_compaction(
+                    session_key=key, mode="idle",
+                    summary=result,
+                    archived_msgs=after_cursor - before_cursor,
+                    kept_msgs=len(getattr(fresh, "messages", []) or []),
+                    tokens_before=before_tokens,
+                    tokens_after=after_tokens,
+                )
+            return result
+
+        auto._archive = _wrapped
+
+    @staticmethod
+    def _wrap_maybe_consolidate_by_tokens(agent: Any, svc: Any) -> None:
+        """Обернуть ``Consolidator.maybe_consolidate_by_tokens`` (token auto-compact)."""
+        consolidator = getattr(agent, "consolidator", None)
+        if consolidator is None:
+            return
+        original = getattr(consolidator, "maybe_consolidate_by_tokens", None)
+        if original is None:
+            return
+
+        async def _wrapped(session: Any, **kwargs: Any) -> Any:
+            sessions = agent.sessions
+            key = getattr(session, "key", None)
+            before_cursor = int(getattr(session, "last_consolidated", 0) or 0)
+            runtime = kwargs.get("runtime")
+            before_tokens, _ = (
+                await svc._estimate(session, runtime) if runtime else (0, "")
+            )
+            await original(session, **kwargs)
+            if not key:
+                return
+            fresh = sessions.get_or_create(key)
+            after_cursor = int(getattr(fresh, "last_consolidated", 0) or 0)
+            if after_cursor > before_cursor:
+                after_meta = (getattr(fresh, "metadata", {}) or {})
+                summary_obj = after_meta.get("_last_summary")
+                summary = (
+                    summary_obj.get("text") if isinstance(summary_obj, dict)
+                    else summary_obj if isinstance(summary_obj, str) else None
+                )
+                after_tokens, _ = (
+                    await svc._estimate(fresh, runtime) if runtime else (0, "")
+                )
+                await svc.record_external_compaction(
+                    session_key=key, mode="token",
+                    summary=summary,
+                    archived_msgs=after_cursor - before_cursor,
+                    kept_msgs=len(getattr(fresh, "messages", []) or []),
+                    tokens_before=before_tokens,
+                    tokens_after=after_tokens,
+                )
+
+        consolidator.maybe_consolidate_by_tokens = _wrapped
