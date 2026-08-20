@@ -38,7 +38,7 @@ def _required_keys():
         # channels.postgres
         ("channels.postgres.poll_interval", 2.0),
         ("channels.postgres.flush_interval", 2.0),
-        ("channels.postgres.processing_timeout", 120),
+        ("channels.postgres.processing_timeout", 600),
         ("channels.postgres.max_concurrent", 1),
         ("channels.postgres.allow_from", ["*"]),
         ("channels.postgres.messages_table", "agent_session_messages"),

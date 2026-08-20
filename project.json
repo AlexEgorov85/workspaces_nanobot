@@ -46,7 +46,7 @@
       "poll_interval": 2.0,                   // Поллинг новых сообщений, сек
       "flush_interval": 2.0,                  // Сброс reasoning в metadata, сек
       "max_concurrent": 1,                    // Макс. параллельно обрабатываемых сообщений
-      "processing_timeout": 120,              // Зависшее сообщение → reclaim/retry (см. lease), сек
+      "processing_timeout": 600,              // Зависшее сообщение → reclaim/retry (см. lease), сек
       "max_stuck_retries": 3,                 // Лимит retry зависшего сообщения (postgres_channel.py)
       "msg_ctx_max_size": 100,                // Защитный лимит размера _msg_ctx (postgres_channel.py)
       "worker_id": "",                        // ID воркера в мульти-машинном пуле. Пусто → авто: {hostname}:{pid}:{uuid8}
@@ -58,7 +58,7 @@
       "pool": {                               // Параметры пула psycopg2 (session_storage.py)
         "min_conn": 1,
         "max_conn": 4,
-        "pool_timeout": 5.0
+        "pool_timeout": 5.0                    // Порог diagnostic-warning о долгом ожидании транзакции в очереди (не лимит!)
       }
     },
     "redis": {
