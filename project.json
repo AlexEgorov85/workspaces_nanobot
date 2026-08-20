@@ -164,6 +164,7 @@
     "show_tool_results": true,    // Показывать результаты инструментов
     "show_tool_params": true,     // Показывать параметры вызовов
     "show_progress": true,        // Прогресс обработки
+    "show_context_window": true,  // Печатать занятость контекстного окна (M1 UI в console_loop.py)
     "typewriter_speed": 0.01,     // Скорость "печатания" ответа, сек/символ
     "llm_timeout": 300,           // Таймаут LLM-запроса, сек
     "exec_timeout": 60,           // Таймаут exec-инструмента, сек
@@ -222,7 +223,15 @@
     "restart_max_delay_sec": 30.0,    // Потолок backoff при перезапуске
     "streamlit_port": 8501,           // Порт Streamlit subprocess (subprocess_manager.py)
     "streamlit_log_filename": "streamlit.log",  // Имя лог-файла Streamlit
-    "subprocess_shutdown_timeout_sec": 5.0  // Таймаут graceful shutdown subprocess'а
+    "subprocess_shutdown_timeout_sec": 5.0,  // Таймаут graceful shutdown subprocess'а
+    //  compact.* — ручное сжатие контекста сессии (ContextCompactionService).
+    //  Подробности: lib/services/context_compaction.py, lib/tools/compact_context_tool.py.
+    //  Все ключи опциональны; дефолты указаны в коде.
+    "compact": {
+      "enabled": true,                 // Зарегистрировать tool compact_context и обрабатывать /compact в CLI
+      "notify_in_history": true,       // Писать заметку о сжатии в agent_conversation_messages (видно в Streamlit)
+      "print_to_terminal": false       // Дублировать заметку в терминал gateway (по образцу print_worker_activity)
+    }
   },
 
   // ---------------------------------------------------------------------------
