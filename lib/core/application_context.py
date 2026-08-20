@@ -124,7 +124,14 @@ class ApplicationContext:
         # применяется ДО создания сервисов, чтобы воркеры пула использовали
         # заданные min_conn/max_conn/pool_timeout и т.п.
         if isinstance(pg_section, dict) and isinstance(pg_section.get("pool"), dict):
-            _configure_db_pool(pg_section.get("pool", {}))
+            _db_print = bool(
+                ctx.config_service.settings_section("gateway").get(
+                    "print_db_activity", False
+                )
+            )
+            _configure_db_pool(
+                pg_section.get("pool", {}), print_activity=_db_print
+            )
 
         try:
             storage_mode, session_manager = ctx.session_storage_service.create(
@@ -540,18 +547,24 @@ def _make_cron_service(config: Any) -> Any:
 # ----------------------------------------------------------------------
 
 
-def _configure_db_pool(pool_cfg: dict) -> None:
+def _configure_db_pool(pool_cfg: dict, print_activity: bool = False) -> None:
     """Применить ``channels.postgres.pool`` к общему пулу ``utils.db``.
 
     ``pool_cfg`` — словарь с ключами ``min_conn/max_conn/pool_timeout/
     queue_maxsize/reconnect_backoff_sec/reconnect_backoff_max_sec/
     connect_max_retries/idle_timeout_sec/job_max_retries``. Неизвестные
     ключи игнорируются (``set_pool_config`` принимает только известные).
+
+    ``print_activity`` — вывод активности db-worker'ов (гейт
+    ``gateway.print_db_activity``), кладётся в конфиг пула как
+    ``print_activity``.
     """
     try:
         from utils.db import set_pool_config
 
-        set_pool_config(dict(pool_cfg))
+        merged = dict(pool_cfg)
+        merged["print_activity"] = bool(print_activity)
+        set_pool_config(merged)
     except Exception as exc:
         logger.warning("utils.db pool config ignored: %s", exc)
 

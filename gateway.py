@@ -106,6 +106,8 @@ def main() -> None:
 
     ctx.start()
 
+    _report_db_pool_startup()
+
     try:
         GatewayRunner().run_forever(
             lambda: asyncio.run(_run(ctx, first_sync_event))
@@ -141,7 +143,7 @@ async def _run(ctx: ApplicationContext, first_sync_event) -> None:
     from lib.services.subprocess_manager import SubprocessManager
     subprocess_manager = SubprocessManager(log_dir=_SCRIPT_DIR / "logs")
     streamlit_script = _SCRIPT_DIR / "streamlit_app.py"
-    if subprocess_manager.spawn_streamlit(streamlit_script):
+    if _streamlit_enabled() and subprocess_manager.spawn_streamlit(streamlit_script):
         console.print("[green]✓[/green] Streamlit UI started on :8501")
 
     audit_memory_store = ctx.audit_memory_store
@@ -251,6 +253,59 @@ def _gateway_print_worker_activity() -> bool:
     except Exception:
         return False
     return bool(value)
+
+
+def _streamlit_enabled() -> bool:
+    """Прочитать флаг включения Streamlit UI.
+
+    Читает ``streamlit.enabled`` из `project.json` (секция streamlit).
+    ``false`` — gateway не поднимает веб-чат на :8501; ``true`` (по умолчанию)
+    — поднимает.
+    """
+    try:
+        from lib.services.config_service import ConfigService
+
+        value = ConfigService().settings_section("streamlit").get("enabled", True)
+    except Exception:
+        return True
+    return bool(value)
+
+
+def _report_db_pool_startup() -> None:
+    """Прогреть пул соединений БД и вывести отчёт о его воркерах.
+
+    Воркеры ``utils.db`` подключаются лениво, поэтому перед отчётом
+    заставляем их реально подключиться (``probe_connections``), чтобы
+    на старте gateway было видно: сколько воркеров должно быть, сколько
+    запустилось и сколько не смогли подключиться к БД.
+
+    ``timeout=None`` — ждём реального исхода подключения каждого воркера
+    (при недоступной БД это честно выявляет ошибку вместо «0 connected»).
+    """
+    try:
+        from utils.db import probe_connections, get_stats
+
+        probe_connections()
+        s = get_stats()
+        expected = int(s.get("min_conn", 1))
+        max_conn = int(s.get("max_conn", 4))
+        started = int(s.get("workers", 0))
+        connected = int(s.get("connected_workers", 0))
+        failed = int(s.get("failed_workers", 0))
+        if failed:
+            errors = int(s.get("connect_errors", 0))
+            console.print(
+                f"[red]✗[/red] DB pool: workers {started}/{expected} "
+                f"(max {max_conn}), connected {connected}, "
+                f"failed {failed} (connect errors {errors})"
+            )
+        else:
+            console.print(
+                f"[green]✓[/green] DB pool: workers {started}/{expected} "
+                f"(max {max_conn}), connected {connected}"
+            )
+    except Exception:
+        console.print("[red]✗[/red] DB pool: статус недоступен")
 
 
 if __name__ == "__main__":

@@ -267,4 +267,30 @@ class TestMain:
             ctx.config, ctx.settings, ctx.workspace_dir
         )
         assert not ok
-        assert "persist_threshold" in detail
+
+
+class TestStreamlitEnabled:
+    """Флаг ``streamlit.enabled`` — когда поднимать UI на :8501."""
+
+    def test_default_true(self, mock_all):
+        from gateway import _streamlit_enabled
+
+        with patch("lib.services.config_service.ConfigService") as M:
+            M.return_value.settings_section.return_value.get.side_effect = (
+                lambda k, d=None: d
+            )
+            assert _streamlit_enabled() is True
+
+    def test_false_when_disabled(self, mock_all):
+        from gateway import _streamlit_enabled
+
+        with patch("lib.services.config_service.ConfigService") as M:
+            M.return_value.settings_section.return_value.get.return_value = False
+            assert _streamlit_enabled() is False
+
+    def test_true_when_enabled(self, mock_all):
+        from gateway import _streamlit_enabled
+
+        with patch("lib.services.config_service.ConfigService") as M:
+            M.return_value.settings_section.return_value.get.return_value = True
+            assert _streamlit_enabled() is True

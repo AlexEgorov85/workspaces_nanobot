@@ -90,6 +90,7 @@ _DEFAULT_POOL = {
     "connect_max_retries": 5,
     "idle_timeout_sec": 60.0,
     "job_max_retries": 3,
+    "print_activity": False,
 }
 
 _pool_cfg: Dict[str, Any] = dict(_DEFAULT_POOL)
@@ -176,6 +177,8 @@ class _Worker(threading.Thread):
         self._next_cursor_id: int = 0
         self._idle_since: Optional[float] = None
         self._connect_error: Optional[BaseException] = None
+        self._print_activity = manager._print_activity
+        self._activity_lock = manager._activity_lock
 
     # -- соединение ---------------------------------------------------------
 
@@ -266,7 +269,29 @@ class _Worker(threading.Thread):
             self._execute_job(job)
         self._drop_connection()
 
+    def _activity_print(self, line: str) -> None:
+        """Напечатать строку активности db-worker, если флаг включён."""
+        if not self._print_activity:
+            return
+        # cp1251-консоль Windows не переваривает юникодные стрелки —
+        # заменяем на ASCII-эквивалент до вывода.
+        line = line.replace("←", "<-").replace("→", "->")
+        with self._activity_lock:
+            try:
+                from rich.console import Console
+
+                Console().print(f"[db-worker] {line}",
+                                style="dim", markup=False)
+            except Exception:
+                print(f"[db-worker] {line}")
+
     def _execute_job(self, job: _Job) -> None:
+        t0 = time.monotonic()
+        if self._print_activity:
+            self._activity_print(
+                f"→ db-worker {self._index} взял job "
+                f"([очередь-БД] {len(self._manager._queue) + 1})"
+            )
         try:
             if not self._ensure_connected():
                 job.result.set_error(
@@ -289,6 +314,13 @@ class _Worker(threading.Thread):
                 job.result.set_error(exc)
         except Exception as exc:
             job.result.set_error(exc)
+        finally:
+            if self._print_activity:
+                dur_ms = int((time.monotonic() - t0) * 1000)
+                self._activity_print(
+                    f"← db-worker {self._index} закончил job ({dur_ms}ms, "
+                    f"[очередь-БД] {len(self._manager._queue)})"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +352,12 @@ class DBManager:
         self._job_max_retries = int(_pool_cfg.get("job_max_retries", 3))
         self._connect_max_retries = int(_pool_cfg.get("connect_max_retries", 5))
         self._lifecycle_lock = threading.Lock()
+
+        # Вывод активности db-worker'ов в терминал (по образцу
+        # print_worker_activity для воркеров задач канала). Включается
+        # `gateway.print_db_activity` (project.json).
+        self._print_activity = bool(_pool_cfg.get("print_activity", False))
+        self._activity_lock = threading.Lock()
 
         self._stats = {
             "connected": 0,

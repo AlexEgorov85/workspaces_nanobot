@@ -445,7 +445,11 @@ class PostgresChannel(BaseChannel):
     def _activity_print(self, line: str) -> None:
         """Напечатать строку активности воркера, если флаг включён."""
         if self._print_worker_activity:
-            console.print(f"[dim]{line}[/dim]")
+            # cp1251-консоль Windows не переваривает юникодные стрелки —
+            # заменяем на ASCII-эквивалент до вывода. markup=False держит
+            # квадратные метки ([task-worker], [очередь-задач]) как текст.
+            safe = line.replace("←", "<-").replace("→", "->")
+            console.print(safe, style="dim", markup=False)
 
     @staticmethod
     def _preview(content: Any, limit: int = 60) -> str:
@@ -477,7 +481,7 @@ class PostgresChannel(BaseChannel):
                 self._last_queue_summary = summary
                 total = pending + error
                 self._activity_print(
-                    f"очередь: pending={pending}, error={error} (итого {total})"
+                    f"[очередь-задач] pending={pending}, error={error} (итого {total})"
                 )
         except Exception as e:
             self.logger.debug("Worker queue stats error: {}", e)
@@ -750,7 +754,7 @@ class PostgresChannel(BaseChannel):
         self._chat_inflight.add(chat_id)
         self._msg_chat[user_msg_id] = chat_id
         self._activity_print(
-            f"→ worker {self._worker_id} взял задачу {user_msg_id} "
+            f"→ [task-worker] {self._worker_id} взял задачу {user_msg_id} "
             f"(chat {chat_id}): {self._preview(content)}"
         )
 
@@ -886,7 +890,7 @@ class PostgresChannel(BaseChannel):
         self._drop_context_bridge(chat_id)
         status = "error" if retry_count < self._max_stuck_retries else "failed"
         self._activity_print(
-            f"← worker {self._worker_id} закончил задачу {user_msg_id} "
+            f"← [task-worker] {self._worker_id} закончил задачу {user_msg_id} "
             f"(chat {chat_id or '?'}) [{status}]: {reason}"
         )
 
@@ -1233,7 +1237,7 @@ class PostgresChannel(BaseChannel):
             # Слот освобождаем ПОСЛЕ успешной записи клейма/статуса.
             self._release_slot(msg_id)
             self._activity_print(
-                f"← worker {self._worker_id} закончил задачу {msg_id} "
+                f"← [task-worker] {self._worker_id} закончил задачу {msg_id} "
                 f"(chat {chat_id}) [completed]"
             )
         except Exception:
@@ -1308,7 +1312,7 @@ class PostgresChannel(BaseChannel):
                             msg_id, self._worker_id,
                         )
                         self._activity_print(
-                            f"← worker {self._worker_id} закончил задачу {msg_id} "
+                            f"← [task-worker] {self._worker_id} закончил задачу {msg_id} "
                             f"(chat {stream_chat_id or '?'}) [streamed/completed]"
                         )
         else:

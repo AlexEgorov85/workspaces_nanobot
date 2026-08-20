@@ -508,8 +508,10 @@ class TestPool:
         assert both_held.wait(timeout=10)
 
         third_result = []
+        third_started = threading.Event()
 
         def _third():
+            third_started.set()
             try:
                 with mock_psycopg2["transaction"]() as conn:
                     conn.execute("UPDATE t SET x=2")
@@ -519,9 +521,16 @@ class TestPool:
 
         tc = threading.Thread(target=_third)
         tc.start()
-        time.sleep(0.3)
-        # третья ещё ждёт в очереди, но НЕ падает с ошибкой
-        assert third_result == []
+        # Детерминированно ждём, что третья транзакция реально началась
+        # (а не «прошло 0.3с от старта потока» — на загруженной машине поток
+        # мог не успеть стартовать, и 3-я операция успевала завершиться, что
+        # давало ложный флейк). Затем наблюдаем окно ~0.5с: третья должна
+        # ждать в очереди (workers=2 заняты), не падая с ошибкой.
+        assert third_started.wait(timeout=5)
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            assert third_result == []
+            time.sleep(0.02)
         release.set()
         ta.join(timeout=10); tb.join(timeout=10)
         tc.join(timeout=10)
@@ -662,9 +671,66 @@ class TestPool:
         stats = mock_psycopg2["get_stats"]()
         for k in (
             "workers", "queue_size", "running", "min_conn", "max_conn",
-            "pool_timeout", "jobs", "lease_acquired",
+            "pool_timeout", "jobs", "lease_acquired", "connected_workers",
         ):
             assert k in stats
+
+    def test_probe_connections_verifies_connectivity(self, mock_psycopg2):
+        """probe_connections поднимает реальное соединение и отчитывается.
+
+        Ленивый пул подключает лишь столько воркеров, сколько нужно под
+        нагрузкой (неподключённые уступают подключённым), поэтому после
+        warm-up может быть 1 живое соединение — суть probe в проверке
+        доступности БД, а не в прогреве всех min_conn.
+        """
+        mock_psycopg2["set_pool_config"]({"min_conn": 2, "max_conn": 2})
+        mock_psycopg2["configure"]("dsn")
+        _db = mock_psycopg2["_db"]
+        _db.probe_connections(timeout=5)
+        stats = mock_psycopg2["get_stats"]()
+        assert stats["workers"] == 2
+        assert stats["connected_workers"] >= 1
+        assert stats["failed_workers"] == 0
+
+    def test_probe_connections_db_down_reports_failed(self, mock_psycopg2):
+        """При недоступной БД probe_connections не бросает ошибку;
+        воркеры помечаются как failed, счётчик connect_errors растёт."""
+        import psycopg2
+
+        mock_psycopg2["set_pool_config"](
+            {
+                "min_conn": 2,
+                "max_conn": 2,
+                "connect_max_retries": 1,
+                "reconnect_backoff_sec": 0.01,
+            }
+        )
+        mock_psycopg2["configure"]("dsn")
+        mock_psycopg2["mock_connect"].side_effect = psycopg2.OperationalError("down")
+        _db = mock_psycopg2["_db"]
+        _db.probe_connections(timeout=5)  # не должно упасть
+        stats = mock_psycopg2["get_stats"]()
+        assert stats["connected_workers"] == 0
+        assert stats["failed_workers"] >= 1
+        assert stats["connect_errors"] > 0
+
+    def test_db_activity_flag_enables_printing(self, mock_psycopg2, capsys):
+        """print_activity включает вывод [db-worker] активности при выполнении job."""
+        mock_psycopg2["set_pool_config"](
+            {"min_conn": 1, "max_conn": 1, "print_activity": True}
+        )
+        mock_psycopg2["configure"]("dsn")
+        mgr = mock_psycopg2["_db"]._get_manager()
+        assert mgr._print_activity is True
+        mock_psycopg2["fetchval"]("SELECT 1")
+        out = capsys.readouterr().out
+        assert "[db-worker]" in out
+
+    def test_set_pool_config_accepts_print_activity(self, mock_psycopg2):
+        """print_activity — известный ключ конфига пула (не глотается)."""
+        mock_psycopg2["_db"].set_pool_config({"print_activity": True})
+        _db = mock_psycopg2["_db"]
+        assert _db._pool_cfg.get("print_activity") is True
 
 
 class TestAsyncAPI:

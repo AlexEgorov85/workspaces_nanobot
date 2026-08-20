@@ -36,10 +36,10 @@ def _required_keys():
     """
     return [
         # channels.postgres
-        ("channels.postgres.poll_interval", 2.0),
-        ("channels.postgres.flush_interval", 2.0),
+        ("channels.postgres.poll_interval", 10.0),
+        ("channels.postgres.flush_interval", 5.0),
         ("channels.postgres.processing_timeout", 600),
-        ("channels.postgres.max_concurrent", 1),
+        ("channels.postgres.max_concurrent", 2),
         ("channels.postgres.allow_from", ["*"]),
         ("channels.postgres.messages_table", "agent_session_messages"),
         ("channels.postgres.meta_table", "agent_session_meta"),
@@ -111,8 +111,9 @@ def _required_keys():
         ("benchmark.runs_table", "agent_benchmark_runs"),
         ("benchmark.results_table", "agent_benchmark_results"),
         # streamlit
+        ("streamlit.enabled", True),
         ("streamlit.max_wait", 600),
-        ("streamlit.poll_interval", 1.0),
+        ("streamlit.poll_interval", 10.0),
         ("streamlit.files_dir", "data_store/streamlit_files"),
         ("streamlit.error_window_sec", 300),
         # gateway
@@ -125,6 +126,7 @@ def _required_keys():
         ("gateway.log_level", "INFO"),
         ("gateway.print_llm_calls", True),
         ("gateway.print_worker_activity", True),
+        ("gateway.print_db_activity", True),
         ("gateway.restart_initial_delay_sec", 1.0),
         ("gateway.restart_max_delay_sec", 30.0),
         ("gateway.streamlit_port", 8501),
