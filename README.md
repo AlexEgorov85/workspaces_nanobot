@@ -287,7 +287,7 @@ nanobot/
 │   ├── channels/           #   postgres_channel, redis_channel, message_exchange
 │   └── session/            #   pg_session_manager
 ├── workspace/              # runtime-данные, hooks-плагины/, skills/, memory/
-├── tests/                  # 906 unit-тестов
+├── tests/                  # 1137 unit-тестов (+14 интеграционных skipped)
 ├── benchmarks/             # YAML-тесты, runner, scorer, reporter
 ├── tools/                  # инфраструктурные CLI (build_vectors.py)
 ├── scripts/                # утилиты (backfill_media_aw.py)
@@ -501,9 +501,9 @@ python tools/build_vectors.py --full-rebuild
 
 ## Тестирование
 
-**906 unit-тестов** в `tests/` (после QA-чистки и добавления тестов для
-`RecentFilesHook`, auto-attach-патчей, `office_files` и smoke e2e; подробнее —
-в [CHANGELOG.md → 2.3.1](CHANGELOG.md#231--2026-08-18)).
+**1137 unit-тестов** в `tests/` (14 интеграционных пропущены без живого
+PostgreSQL/LLM; подробнее — в
+[CHANGELOG.md → 2.4.0](CHANGELOG.md#240----2026-08-20)).
 
 ### Запуск
 
@@ -626,6 +626,29 @@ PowerShell интерпретирует `=` по-своему. Использу�
 Только `//` и `/* */` поддерживаются. Хэштеги `#` — нет. Кавычки в DSN не должны пересекаться с комментариями.
 
 ---
+
+## Что нового в v2.4.0
+
+v2.4.0 — MINOR поверх v2.3.1. Главное:
+
+- **Метрика занятости контекстного окна** (`metadata.context_window`) —
+  прогресс-бар в Streamlit и однострочная метка в CLI; live-обновление
+  processing-строки.
+- **Ручное сжатие контекста**: slash-команда `/compact`, CLI-команда
+  `/compact`, tool `compact_context` и отслеживание авто-сжатия nanobot —
+  единый сервис `ContextCompactionService`, заметка `.compact-notice`
+  в истории.
+- **Кастомные tool'ы из `workspace/tools/*.py`** (патч `patch_project_tools`):
+  `compact_context`, `audit_run_predefined_script`, `audit_search_vector`.
+- **Мульти-машинный пул воркеров в `PostgresChannel`** (таблица
+  `agent_worker_claims`, lease/heartbeat, статусы `error`/`failed`);
+  activity в терминал (`[task-worker]`, `[db-worker]`, токены LLM) и
+  `probe_connections` при старте.
+- **Кастомизация шаблонов nanobot** через `workspace/overrides/`
+  (`consolidator_locale.py`).
+- **Оптимизация БД-пула**: метки-теги db-job'ов, быстрый гейт `_reclaim_needed`,
+  idle-guard от `list_sessions`-шторма, кеш чтения сессий.
+- **Полное логирование промпта/ответа LLM** в `agent_gateway_logs`.
 
 ## Что нового в v2.3.1
 
