@@ -80,7 +80,22 @@ def _load_chat_history(chat_id: str = _CHAT_ID) -> list[dict]:
             continue
         
         msg_entry: dict = {"role": role, "content": content}
-        
+
+        # Служебная заметка о сжатии контекста (ContextCompactionService).
+        # Пишется в metadata.kind="context_compact" самим сервисом при
+        # ручном или автоматическом сжатии, если это сделал
+        # ContextCompactionService. UI выделяет такие записи стилем
+        # ``.compact-notice`` (см. CSS ниже).
+        if metadata.get("kind") == "context_compact":
+            msg_entry["compact_notice"] = True
+
+        # Метрика занятости контекстного окна (M1+T1+S1).
+        # Блок ``context_window`` кладётся в metadata финального outbound
+        # патчем ``RuntimePatcher.patch_assemble_outbound`` и сливается
+        # в БД каналом. UI рисует прогресс-бар и подпись (used/limit, %).
+        if role == "assistant" and isinstance(metadata.get("context_window"), dict):
+            msg_entry["context_window"] = metadata["context_window"]
+
         # Добавляем reasoning если есть
         if role == "assistant" and metadata.get("reasoning"):
             msg_entry["reasoning"] = metadata["reasoning"]
@@ -158,7 +173,42 @@ def _get_processing_state(msg_id: str) -> dict | None:
     if not row or row["status"] != "processing":
         return None
     meta = _decode_jsonb(row["metadata"])
-    return {"content": row["content"] or "", "reasoning": meta.get("reasoning", "")}
+    state: dict = {"content": row["content"] or "", "reasoning": meta.get("reasoning", "")}
+    cw = meta.get("context_window")
+    if isinstance(cw, dict):
+        state["context_window"] = cw
+    return state
+
+
+def _render_context_window(block: dict) -> None:
+    """Отрисовать прогресс-бар занятости контекстного окна (M1 UI).
+
+    Блок ``{used, limit, pct, model}`` кладётся в ``metadata.context_window``
+    финального outbound (S1) и обновляется в processing-строке в фоне
+    (T2) — UI для обоих случаев рисует одну и ту же полосу.
+
+    pct уже clamp'нут в 0..1 на стороне патча; тут только дефолт-страховка
+    на случай неполного блока (если metadata писалась вручную/миграцией).
+    """
+    if not isinstance(block, dict):
+        return
+    try:
+        used = int(block.get("used") or 0)
+        limit = int(block.get("limit") or 0)
+    except (TypeError, ValueError):
+        return
+    if limit <= 0 or used < 0:
+        return
+    try:
+        pct = float(block.get("pct", 0.0))
+    except (TypeError, ValueError):
+        pct = 0.0
+    pct = max(0.0, min(1.0, pct))
+    model = block.get("model") or ""
+    label = f"Контекст: {used} / {limit} · {int(round(pct * 100))}%"
+    if model:
+        label = f"{label} · {model}"
+    st.progress(pct, text=label)
 
 
 st.set_page_config(page_title="Чат с агентом", page_icon="💬", layout="wide")
@@ -207,6 +257,16 @@ st.markdown("""
         background: #d0e8f8;
         text-decoration: underline;
     }
+    /* Служебная заметка о сжатии контекста (ContextCompactionService). */
+    .compact-notice {
+        background: #fff8e1;
+        border-left: 3px solid #f0c040;
+        border-radius: 0 8px 8px 0;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.85rem;
+        color: #7a5c00;
+        white-space: pre-wrap;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -251,7 +311,17 @@ for entry in st.session_state.messages:
                 f'</details>',
                 unsafe_allow_html=True,
             )
-        st.markdown(entry["content"])
+        if entry.get("compact_notice"):
+            st.markdown(
+                f'<div class="compact-notice">🗜️ {entry["content"]}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(entry["content"])
+
+        cw = entry.get("context_window")
+        if isinstance(cw, dict):
+            _render_context_window(cw)
         
         # Отображение файлов если есть
         media = entry.get("media", [])
@@ -417,6 +487,14 @@ if processing:
                 placeholder.markdown(f"✍️ {state['content'][:200]}...")
             else:
                 placeholder.markdown(f"⏳ Ожидание... {elapsed}с")
+
+            # Живой прогресс-бар занятости контекста (T2): канал обновляет
+            # ``metadata.context_window`` в processing-строке каждые
+            # ``_flush_interval`` секунд. Отдельный placeholder, чтобы
+            # маркдаун выше не перетирал бар.
+            cw = state.get("context_window") if state else None
+            if isinstance(cw, dict):
+                _render_context_window(cw)
 
             time.sleep(_POLL_INTERVAL)
 
