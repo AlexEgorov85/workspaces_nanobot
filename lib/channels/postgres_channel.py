@@ -495,6 +495,10 @@ class PostgresChannel(BaseChannel):
                 await self._flush_reasoning()
             except Exception as e:
                 self.logger.error("Flush reasoning error: {}", e)
+            try:
+                await self._flush_live_context()
+            except Exception as e:
+                self.logger.debug("Flush live context error: {}", e)
 
     async def _flush_reasoning(self) -> None:
         """Сбросить все грязные буферы рассуждений в БД одной пачкой.
@@ -528,6 +532,47 @@ class PostgresChannel(BaseChannel):
                         f"UPDATE {self._fq_table} SET metadata = %s, updated_at = NOW() WHERE id = %s",
                         meta, assistant_msg_id,
                     )
+
+    async def _flush_live_context(self) -> None:
+        """Живое обновление занятости контекста в processing-строки.
+
+        Каждые ``_flush_interval`` секунд читает блок ``context_window`` из
+        моста per-iteration usage (``lib.hooks.database_logging_hook``) и
+        пишет его в metadata processing assistant-строки. UI (Streamlit)
+        через свой поллинг видит его ДО финализации ответа — прогресс-бар
+        заполняется «вживую» по мере роста промпта.
+
+        Блок собирается патчем ``agent._assemble_outbound`` на финале
+        оборота, а на лету — из usage последней итерации и лимита,
+        засеянного на старте оборота (патч ``agent._state_build``). После
+        финализации/ошибки мост очищается (``_drop_context_bridge``), и
+        финальный ответ перезаписывает блок тем же значением.
+        """
+        from lib.hooks.database_logging_hook import get_context_window
+        for msg_id, chat_id in list(self._msg_chat.items()):
+            ctx = self._msg_ctx.get(msg_id) or {}
+            assistant_msg_id = ctx.get("assistant_msg_id")
+            if not assistant_msg_id:
+                continue
+            block = get_context_window(f"postgres:{chat_id}")
+            if not block:
+                continue
+            async with self._reasoning_io_lock:
+                row = await fetchone(
+                    f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
+                    assistant_msg_id,
+                )
+                if not row:
+                    continue
+                meta = _decode_jsonb(row["metadata"])
+                if meta.get("context_window") == block:
+                    continue
+                meta["context_window"] = block
+                await execute(
+                    f"UPDATE {self._fq_table} SET metadata = %s, updated_at = NOW() "
+                    f"WHERE id = %s",
+                    meta, assistant_msg_id,
+                )
 
     # ------------------------------------------------------------------
     # Цикл опроса БД
@@ -838,11 +883,28 @@ class PostgresChannel(BaseChannel):
         self._release_slot(user_msg_id)
         if assistant_msg_id:
             self._reasoning_buffers.pop(assistant_msg_id, None)
+        self._drop_context_bridge(chat_id)
         status = "error" if retry_count < self._max_stuck_retries else "failed"
         self._activity_print(
             f"← worker {self._worker_id} закончил задачу {user_msg_id} "
             f"(chat {chat_id or '?'}) [{status}]: {reason}"
         )
+
+    def _drop_context_bridge(self, chat_id: str | None) -> None:
+        """Снять per-iteration мост контекста для чата (анти-stale).
+
+        Вызывается в финалах оборота (``_finalize_turn``, ``_mark_failed``):
+        мост живёт ровно столько, сколько идёт активный оборот. Без
+        ``pop`` следующий оборот того же чата унаследовал бы data от
+        предыдущего (старый лимит/usage) при гонке рестарта воркера.
+        """
+        if not chat_id:
+            return
+        try:
+            from lib.hooks.database_logging_hook import pop_context_bridge
+            pop_context_bridge(f"postgres:{chat_id}")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Рассуждения (reasoning) — потоковая запись в metadata.reasoning
@@ -1091,6 +1153,8 @@ class PostgresChannel(BaseChannel):
         if not assistant_msg_id:
             self._release_slot(msg_id)
             self.logger.warning("send: no assistant_msg_id for msg_id={}", msg_id)
+            if msg.chat_id:
+                self._drop_context_bridge(msg.chat_id)
             return
 
         # Дописываем остатки рассуждений перед финальным ответом
@@ -1176,6 +1240,9 @@ class PostgresChannel(BaseChannel):
             self.logger.exception("Failed to write response for {}", chat_id)
             if msg_id:
                 await self._mark_failed(msg_id, assistant_msg_id, "write_error")
+        finally:
+            if chat_id:
+                self._drop_context_bridge(chat_id)
 
     async def send_delta(
         self,
