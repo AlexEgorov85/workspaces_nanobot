@@ -16,17 +16,137 @@ sync-класс — он не подключается к циклу агент�
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
-from nanobot.agent import AgentHookContext, AgentRunHookContext
 from rich.console import Console
 
 from .base_tool_tracking_hook import BaseToolTrackingHook
 
+if TYPE_CHECKING:
+    from nanobot.agent import AgentHookContext, AgentRunHookContext
+
 logger = logging.getLogger(__name__)
 
 console = Console()
+
+# ---------------------------------------------------------------------------
+# Мост per-iteration usage между хуком и патчами RuntimePatcher.
+#
+# Нужен для метрики занятости контекстного окна (``metadata.context_window``).
+# Три участника:
+#   * ``seed_context_window`` — патч ``agent._state_build`` (старт оборота)
+#     кладёт лимит окна и модель в мост (канал сам лимит не знает);
+#   * ``DatabaseLoggingHook.after_iteration`` пишет СВЕЖИЙ по-итерационный
+#     ``context.usage`` (именно последняя итерация = то, что модель реально
+#     видела в финальном запросе);
+#   * ``RuntimePatcher.patch_assemble_outbound`` собирает готовый блок
+#     ``context_window`` (usage посл. итерации ÷ лимит окна) и кладёт его
+#     в metadata финального ответа;
+#   * канал (postgres_channel) в фоновом цикле живого обновления читает
+#     блок из моста (готовый либо собранный на лету) и пишет его в
+#     processing-строку до финализации оборота.
+#
+# Ключ — session_key (например, ``postgres:chat_id``): разные сессии
+# обрабатываются конкурентно как отдельные asyncio-задачи, без keying по
+# сессии события разных чатов «перепутаются». Один проход оборота одной
+# сессии выполняется последовательно (новая итерация не стартует, пока не
+# окончена предыдущая), поэтому последняя запись перед ``_assemble_outbound``
+# — это usage финальной итерации.
+# ---------------------------------------------------------------------------
+_CONTEXT_BRIDGE: dict[str, dict] = {}
+_CONTEXT_BRIDGE_LOCK = threading.Lock()
+
+
+def seed_context_window(
+    session_key: Optional[str], *, limit: int = 0, model: str = ""
+) -> None:
+    """Засеять лимит окна/модель в мост на старте оборота.
+
+    Вызывается из патча ``agent._state_build`` (RuntimePatcher.patch_
+    context_bridge_seed): канал не знает лимит окна модели, поэтому на
+    старте оборота кладём его в мост — дальше хук пишет usage каждой
+    итерации, а канал собирает блок на лету (живое обновление).
+    """
+    if not session_key:
+        return
+    with _CONTEXT_BRIDGE_LOCK:
+        entry = _CONTEXT_BRIDGE.setdefault(session_key, {})
+        entry["limit"] = int(limit or 0)
+        entry["model"] = model if isinstance(model, str) else ""
+
+
+def _store_iteration_usage(session_key: Optional[str], usage: Optional[dict]) -> None:
+    """Записать по-итерационный usage оборота для сессии (неблокирующий)."""
+    if not session_key:
+        return
+    with _CONTEXT_BRIDGE_LOCK:
+        entry = _CONTEXT_BRIDGE.setdefault(session_key, {})
+        entry["usage"] = dict(usage or {})
+        entry["ts"] = time.time()
+
+
+def _store_context_window(session_key: Optional[str], block: Optional[dict]) -> None:
+    """Записать готовый блок ``context_window`` для сессии (из патча)."""
+    if not session_key or not block:
+        return
+    with _CONTEXT_BRIDGE_LOCK:
+        entry = _CONTEXT_BRIDGE.setdefault(session_key, {})
+        entry["block"] = dict(block)
+        entry["ts"] = time.time()
+
+
+def get_context_window(session_key: Optional[str]) -> Optional[dict]:
+    """Вернуть блок ``context_window`` сессии (без удаления).
+
+    Предпочитаем готовый блок, собранный патчем ``_assemble_outbound``
+    (точный clamp с учётом реального лимита). До финализации оборота его
+    ещё нет — собираем на лету из usage последней итерации и лимита,
+    засеянного на старте оборота (``seed_context_window``).
+    """
+    if not session_key:
+        return None
+    with _CONTEXT_BRIDGE_LOCK:
+        entry = dict(_CONTEXT_BRIDGE.get(session_key) or {})
+    block = entry.get("block")
+    if isinstance(block, dict):
+        return dict(block)
+    usage = entry.get("usage")
+    limit = int(entry.get("limit") or 0)
+    if not isinstance(usage, dict) or limit <= 0:
+        return None
+    raw_used = usage.get("prompt_tokens")
+    try:
+        used = int(raw_used or 0)
+    except (TypeError, ValueError):
+        return None
+    if used <= 0:
+        return None
+    return {
+        "used": used,
+        "limit": limit,
+        "pct": round(min(1.0, used / float(limit)), 4),
+        "model": entry.get("model") or "",
+    }
+
+
+def get_iteration_usage(session_key: Optional[str]) -> Optional[dict]:
+    """Прочитать по-итерационный usage сессии (без удаления)."""
+    if not session_key:
+        return None
+    with _CONTEXT_BRIDGE_LOCK:
+        entry = _CONTEXT_BRIDGE.get(session_key) or {}
+        usage = entry.get("usage")
+        return dict(usage) if isinstance(usage, dict) else None
+
+
+def pop_context_bridge(session_key: Optional[str]) -> None:
+    """Снять с моста все данные сессии (финализация/ошибка оборота)."""
+    if not session_key:
+        return
+    with _CONTEXT_BRIDGE_LOCK:
+        _CONTEXT_BRIDGE.pop(session_key, None)
 
 
 def make_db_logging_hook_factory(
@@ -228,6 +348,9 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
 
     async def after_iteration(self, context: Any) -> None:
         self._capture_context(context)
+        # Свежий по-итерационный usage — мост для метрики занятости окна
+        # (последняя запись перед финалом = usage финальной итерации).
+        _store_iteration_usage(self._run_session_key, getattr(context, "usage", None))
         response = getattr(context, "response", None)
         if response is None:
             return
