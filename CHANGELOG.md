@@ -173,6 +173,21 @@
   default **5** с) и повторяет запрос ещё раз; при повторной неудаче — ошибка
   фиксируется, прогон продолжается. `get_embedding` не изменялся.
 
+- **Поддержка кастомных tool'ов из `workspace/tools/*.py`** — патч
+  `RuntimePatcher.patch_project_tools` (см. `lib/services/runtime_patcher.py`)
+  сканирует `workspace/tools/` тем же механизмом, что встроенный
+  `ToolLoader.discover` (`nanobot/agent/tools/loader.py`), собирает tool-классы
+  (наследники `nanobot.agent.tools.base.Tool`, у которых
+  `__module__` начинается с `workspace.tools.`) и регистрирует их в
+  `agent.tools` через `Tool.create(ctx)` + `enabled(ctx)`. Конфиг per-tool
+  в `config.json` через стандартные `config_key` + pydantic `config_cls`
+  (конвенции nanobot, без своего базового класса). `ToolContext` собирается
+  из полей `AgentLoop` тем же способом, что
+  `AgentLoop._register_default_tools` (`loop.py:597-630`); `agent`
+  дополнительно доступен как `ctx._agent_ref`. Шаблон:
+  `workspace/tools/example.py`. Тесты:
+  `tests/test_tools_project_loader.py`.
+
 ### Fixed
 
 - **Ответ «терялся» (статус `failed`), когда агент завершал оборот

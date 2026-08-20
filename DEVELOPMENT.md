@@ -2,7 +2,7 @@
 
 > **Назначение:** техническая документация для разработчиков. Описывает архитектуру
 > навыка `audit_analyzer`, универсальный инфраструктурный слой данных
-> (`lib/services`), а также **v2.0.0 bootstrap-слой** (`lib/core/ApplicationContext`,
+> (`lib/services`), а также **bootstrap-слой** (`lib/core/ApplicationContext`,
 > `lib/lifecycle/`, `lib/cli/`, `lib/services/DbLoggingService`/`RuntimePatcher`/...)
 > — общий для `gateway.py` и `cli_agent.py`. Управление DuckDB-кешем,
 > векторными индексами и SQL-скрипты для развёртывания нужных таблиц.
@@ -14,8 +14,9 @@
 ## 📋 Оглавление
 
 1. [Архитектура](#архитектура)
-2. [Сервисный слой v2.0.0 (ApplicationContext + lib/)](#сервисный-слой-v200-applicationcontext--lib)
+2. [Сервисный слой (ApplicationContext + lib/)](#сервисный-слой-applicationcontext--lib)
    - [Управление сжатием контекста: `ContextCompactionService`](#управление-сжатием-контекста-contextcompactionservice)
+     - [`metadata` JSONB в `agent_conversation_messages`: полный справочник](#metadata-jsonb-в-agent_conversation_messages-полный-справочник)
 3. [Структура проекта](#структура-проекта)
 4. [Универсальный слой данных lib/services](#универсальный-слой-данных-libservices)
 5. [Конфигурация навыка](#конфигурация-навыка)
@@ -24,7 +25,7 @@
    - [Управление синхронизацией](#управление-синхронизацией)
 8. [Векторная индексация](#векторная-индексация)
 9. [SQL-скрипты: создание таблиц](#sql-скрипты-создание-таблиц)
-10. [Полная таблица связей между файлами (v2.0.0)](#полная-таблица-связей-между-файлами-v200)
+10. [Структура проекта](#структура-проекта)
 11. [Тестирование](#тестирование)
 12. [Изменения и миграции](#изменения-и-миграции)
 13. [Конфигурация `tools.exec` (запуск команд)](#конфигурация-tools-exec)
@@ -101,11 +102,11 @@ flowchart LR
 
 ---
 
-## 🆕 Сервисный слой v2.0.0 (ApplicationContext + lib/)
+## Сервисный слой (ApplicationContext + lib/)
 
-В v2.0.0 gateway и cli_agent сократились с 696/865 до 132/165 строк за счёт
+После выделения сервисного слоя gateway и cli_agent сократились с 696/865 до 132/165 строк за счёт
 вынесения всей инициализации в `ApplicationContext` (см. подробности в
-`README.md` v2.0.0 changelog). Этот раздел — про
+Подробности в `CHANGELOG.md`. Этот раздел — про
 **внутреннее устройство** нового слоя, нужно при добавлении новых
 сервисов или изменении lifecycle.
 
@@ -167,10 +168,10 @@ flowchart TB
   из `db_logging_bus.py`. **Без monkey-patch'ей**: оригинальные методы
   шины сохраняются в замыкании.
 
-### `lib/services/` (новые сервисы v2.0.0 + старые audit/кэш)
+### `lib/services/`
 
-Полный список модулей (новые и pre-existing) — см. раздел [«Полная таблица связей»](#полная-таблица-связей-между-файлами-v200) ниже. Здесь — только
-**новые** (v2.0.0), с краткой мотивацией:
+Полный список модулей — см. раздел [«Структура проекта»](#структура-проекта) ниже. Здесь — только
+**Новые**, с краткой мотивацией:
 
 | Сервис | Мотивация (почему выделен) |
 |--------|---------------------------|
@@ -555,6 +556,279 @@ async def _notify(self, session_key, report):
   skip когда авто не архивирует,
   maybe-consolidate-wrapper зовёт `record_external_compaction`.
 
+#### `metadata` JSONB в `agent_conversation_messages`: полный справочник
+
+`metadata` — JSONB-колонка таблицы обмена. Это **основной канал
+передачи сервисных данных от бэкенда к UI** (помимо `content`,
+`media`, `buttons`, `reply_to`). Любой UI, читающий
+`agent_conversation_messages`, может отличить служебные записи
+от обычных диалоговых по `metadata.kind`.
+
+DDL: `metadata JSONB DEFAULT '{}'::jsonb` (см.
+`sql/channels/create_public_agent_conversation_messages.sql`).
+Чтение — `_decode_jsonb(metadata)` (из `utils.jsonb`).
+
+##### 1. Жизненный цикл `metadata` одной строки
+
+Одна строка проходит несколько фаз, в каждой из которых
+`metadata` дополняется:
+
+```
+INSERT (user/assistant placeholder, status='pending'/'processing')
+   │   metadata = {}   (или raw_meta от UI — см. §3)
+   ▼
+status='processing' (работает канал PostgresChannel)
+   │   metadata += {message_id, answer_id, session_key, retry_count}
+   │   metadata += {reasoning}            (live, в процессе оборота)
+   │   metadata += {context_window}       (live, каждые flush_interval)
+   ▼
+status='completed'   (финал оборота)
+   │   metadata += {_tool_audit}          (в патче _assemble_outbound)
+   │   metadata уже содержит reasoning, context_window, message_id, answer_id
+   ▼
+статус меняется: error/failed (см. §4)
+   │   metadata += {error: <reason>}      (только error/failed)
+   │   metadata.retry_count инкрементируется
+```
+
+То есть в `metadata` **накапливаются** ключи от разных подсистем;
+UI читает то, что есть, и не обязан понимать каждый ключ.
+
+##### 2. Все ключи `metadata` — таблица
+
+| Ключ | Тип значения | Где создаётся | Где обновляется | Удаляется? | Назначение |
+|---|---|---|---|---|---|
+| `kind` | `str` | `ContextCompactionService._write_history_notice` | — | никогда | Маркер «служебная заметка». Сейчас единственное значение — `"context_compact"`. Используется UI для условного рендера. |
+| `compact` | `dict` | `ContextCompactionService._write_history_notice` | — | никогда | Словарь со статистикой сжатия. Только при `kind == "context_compact"`. См. подсекцию ниже. |
+| `message_id` | `str` (UUID) | `PostgresChannel._poll_once` (в `meta` для assistant-placeholder) | — | никогда | ID user-сообщения, на которое это assistant-сообщение — ответ. Пара `message_id ↔ answer_id` (взаимные ссылки в соседних строках). |
+| `answer_id` | `str` (UUID) | `PostgresChannel._poll_once` (в `meta` для user-строки) | — | никогда | ID assistant-placeholder, созданного сразу при клейме. Позволяет каналу находить строку для обновления. |
+| `session_key` | `str` | Передаётся в `raw_meta` (UI/внешний клиент) | — | никогда | Полный ключ сессии nanobot, формат `<channel>:<chat_id>`. Если не передан в raw_meta, канал подставляет `f"postgres:{chat_id}"` (см. `postgres_channel.py:718`). |
+| `retry_count` | `int` | `PostgresChannel._reclaim_and_heal` / `_mark_failed` | инкрементируется при каждом `error`/`stuck` | никогда | Сколько раз задача была в `error`. При `>= max_stuck_retries` → `failed`. |
+| `error` | `str` | `PostgresChannel._mark_failed` | — | никогда | Только в строках со статусом `error` или `failed`. Краткое описание причины: `"dispatch_error"`, `"write_error"`. |
+| `reasoning` | `str` | `PostgresChannel._flush_reasoning` (live) + `_finalize_turn` (atomic append) | дописывается через `_reasoning_io_lock` | никогда | Полный текст рассуждений модели (chain-of-thought). Может быть очень длинным. |
+| `context_window` | `dict` | `PostgresChannel._flush_live_context` (live) | перезаписывается каждые `_flush_interval` сек | никогда | Метрика занятости контекстного окна: `{used: int, limit: int, pct: float (0..1, 4 знака), model: str}`. См. подсекцию «Метрика занятости контекстного окна» выше. |
+| `_tool_audit` | `list[dict]` | `RuntimePatcher.patch_assemble_outbound` (финальный outbound) | — | никогда | Массив записей вызовов инструментов за оборот. Рендерится в UI (Streamlit) и CLI. |
+
+**Не пишется в `metadata`:** `_final_turn` (флаг протокола канала,
+в БД не пишется как значимое поле), `latency_ms` (для логов).
+
+##### 3. `raw_meta` от UI (что кладёт источник)
+
+Когда внешний клиент (Streamlit, REST, Telegram-бот) пишет
+**новое** user-сообщение, он может положить любые поля в `metadata`
+INSERT-а. Канал их читает и мерджит с собственными ключами:
+
+```python
+# postgres_channel.py:711-716
+raw_meta = _decode_jsonb(row["metadata"])
+# ...
+meta: dict[str, Any] = {
+    "message_id": user_msg_id,
+    "answer_id": assistant_msg_id,
+    **raw_meta,
+}
+```
+
+**Конвенция** для `raw_meta` от UI: только поля, описывающие
+маршрутизацию. Сейчас в проекте используется `session_key`
+(потенциально; Streamlit-INSERT не пишет `metadata` — DEFAULT `'{}'`).
+Любые `kind`/`compact`/`reasoning`/`context_window` от UI
+**игнорируются** (будут перезаписаны каналом/патчами на следующих
+стадиях жизненного цикла).
+
+Пример валидного `raw_meta` для внешнего клиента:
+```json
+{"session_key": "telegram:123456", "client_meta": {"thread": "..."}}
+```
+
+##### 4. Кто пишет и когда
+
+| Источник | Файл | Когда | Что пишет в `metadata` |
+|---|---|---|---|
+| UI (INSERT) | `streamlit_app.py:567` и аналоги | при отправке user-сообщения | `raw_meta` (опционально, `session_key` и прочее) |
+| `PostgresChannel._poll_once` | `lib/channels/postgres_channel.py:758` | при клейме задачи | `message_id` (в assistant-строке), `answer_id` (в user-строке) |
+| `PostgresChannel._flush_reasoning` | `postgres_channel.py:530` | live, каждые `_flush_interval` сек | `reasoning` (дописывается) |
+| `PostgresChannel._finalize_turn` | `postgres_channel.py:1156` | на `_turn_end` | `reasoning` (atomic append остатков) |
+| `PostgresChannel._flush_live_context` | `postgres_channel.py:560-570` | live, каждые `_flush_interval` сек | `context_window` (перезаписывается) |
+| `PostgresChannel._reclaim_and_heal` | `postgres_channel.py:347-348` | lease-loop, истёк lease | `retry_count++` (затем `status='error'` или `'failed'`) |
+| `PostgresChannel._mark_failed` | `postgres_channel.py:835-836` | ошибка диспетчера/записи | `retry_count++`, `error=<reason>` |
+| `RuntimePatcher.patch_assemble_outbound` | `lib/services/runtime_patcher.py:730, 722, 96` | на финальном outbound | `_tool_audit` (если есть), `_final_turn: true` (внутренний протокол), `context_window` (если есть) |
+| `ContextCompactionService._write_history_notice` | `lib/services/context_compaction.py:332` | после успешного сжатия (ручного или авто) | `kind: "context_compact"`, `compact: {…}` |
+
+##### 5. Маркер `metadata.kind` — версионирование служебных заметок
+
+`metadata.kind` — **точка расширения**: если в будущем добавятся
+другие типы служебных заметок (например, `metrics_summary`,
+`compaction_failure`, `tool_error_highlight`), они идут по тому же
+контракту:
+
+```json
+{"kind": "<type>", "<type>": {<payload>}, "...": "..."}
+```
+
+**Конвенция:**
+
+* `kind` — короткая строка-идентификатор, `lower_snake_case`.
+* `<type>` (то же имя в `payload` ключе) — основной машино-читаемый
+  блок.
+* `content` строки — уже отформатированный человеком текст для
+  показа. UI может рендерить **только** `content` без чтения payload.
+* Для UI-клиента: `if metadata.get("kind") == "X": render_special()`
+  иначе обычное сообщение.
+
+**Версионирование:** при изменении формата payload — менять `kind`
+на `<type>_v2`. Старые записи остаются с `kind = "<type>"` для
+обратной совместимости. UI читает обе версии.
+
+**Сейчас единственное значение `kind` — `"context_compact"`.**
+
+##### 6. `metadata.compact` — payload для `kind == "context_compact"`
+
+Только при `kind == "context_compact"`. Записывается
+`ContextCompactionService._write_history_notice` после успешного
+ручного или автоматического сжатия.
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `session_key` | `str` | Полный ключ сессии (например, `postgres:streamlit`) |
+| `mode` | `"token"` \| `"idle"` | Режим: token-budget (`maybe_consolidate_by_tokens`) или idle (`compact_idle_session`) |
+| `ok` | `bool` | `true` если сжатие успешно |
+| `archived_msgs` | `int` | Сколько сообщений заархивировано (≥ 1 для записи) |
+| `kept_msgs` | `int` | Сколько сообщений осталось в сессии |
+| `tokens_before` | `int` | Размер промпта до сжатия (estimated) |
+| `tokens_after` | `int` | Размер промпта после сжатия (estimated) |
+| `summary` | `str \| null` | Текст LLM-сводки (если был; при `raw_dump=true` — отсутствует) |
+| `raw_dump` | `bool` | `true` если LLM-саммарайзер упал, сделана raw-выгрузка без сводки |
+
+**Правила:**
+
+* `archived_msgs > 0` — иначе заметка **не пишется** (нет смысла).
+* `metadata.compact.session_key` есть, даже если в `content` не упомянут.
+* Для UI-клиента: `pct = (1 - compact.tokens_after / compact.tokens_before) * 100`
+  — процент экономии.
+
+##### 7. Примеры UI-логики
+
+**Streamlit** (`streamlit_app.py`) — три места с условным рендером:
+
+```python
+# _load_chat_history (строки 89, 96, 100)
+if metadata.get("kind") == "context_compact":
+    msg_entry["compact_notice"] = True
+if isinstance(metadata.get("context_window"), dict):
+    msg_entry["context_window"] = metadata["context_window"]
+if role == "assistant" and metadata.get("reasoning"):
+    msg_entry["reasoning"] = metadata["reasoning"]
+
+# _check_response (строка 157-159) — для одного ответа
+metadata = _decode_jsonb(row["metadata"])
+result = {"content": row["content"] or "", "metadata": metadata, "media": media}
+
+# _get_processing_state (строки 175-177) — для live-обновления
+meta = _decode_jsonb(row["metadata"])
+return {"content": ..., "reasoning": meta.get("reasoning", "")}
+```
+
+UI читает **только** то, что знает (`reasoning`, `context_window`,
+`kind`/`compact_notice`). Не знакомые ключи просто игнорируются.
+
+**React/Telegram-бот — минимальный рендер `kind`:**
+
+```tsx
+{msg.metadata?.kind === "context_compact" ? (
+  <div className="compact-notice">
+    <span>🗜️</span>
+    <span>{msg.content}</span>
+    {msg.metadata.compact.archived_msgs > 0 && (
+      <span className="badge">
+        -{Math.round(
+          (1 - msg.metadata.compact.tokens_after /
+               msg.metadata.compact.tokens_before) * 100
+        )}%
+      </span>
+    )}
+  </div>
+) : (
+  <div className="message">{msg.content}</div>
+)}
+```
+
+```python
+# Telegram-бот
+if row["metadata"].get("kind") == "context_compact":
+    compact = row["metadata"].get("compact", {})
+    pct = (1 - compact.get("tokens_after", 0) /
+                max(compact.get("tokens_before", 1), 1)) * 100
+    await bot.send_message(
+        chat_id,
+        f"🗜️ {row['content']}\n\n_экономия ≈{pct:.0f}%_",
+        parse_mode="Markdown",
+    )
+else:
+    await bot.send_message(chat_id, row["content"])
+```
+
+**Стиль в Streamlit** для `compact_notice`:
+
+* CSS-класс `.compact-notice` — жёлтый фон `#fff8e1`,
+  левая полоска `#f0c040`, мелкий шрифт, скругления. Определён в
+  `<style>` блоке.
+* В `_load_chat_history` поднимается флаг `compact_notice=True`.
+* В цикле рендера — отдельный HTML-блок
+  `<div class="compact-notice">🗜️ {content}</div>` через
+  `st.markdown(..., unsafe_allow_html=True)`. Без акцента текст
+  заметки читаем, но визуально сливается с обычными ответами.
+
+##### 8. Что НЕ делается (явные «нет»)
+
+* **Нет глобальной схемы** — `metadata` это JSONB, схема **описывается
+  в коде и в этой документации**, а не в DDL. Дрейф возможен —
+  при появлении нового ключа обновляйте эту секцию.
+* **Нет валидации** на стороне записи — UI может положить любые
+  поля в `raw_meta` (см. §3), но канал/патчи перезапишут конфликтующие
+  ключи своими значениями.
+* **`_final_turn` в БД не сохраняется** — это флаг протокола
+  (`OutboundMessage.metadata["_final_turn"] = True`), используется
+  каналом для решения «merge vs finalize». При записи в БД он
+  не несёт полезной нагрузки и не документируется как часть
+  контракта.
+* **Заметка `kind == "context_compact"` не сортируется отдельно** от
+  обычных сообщений — она появляется в `created_at` хронологии,
+  как любой `assistant`-ответ. Если UI хочет группировать
+  «последний сжатый ответ отдельно» — это на стороне UI.
+* **Заметка `kind == "context_compact"` не фильтруется по `role`**
+  — она `assistant`, как обычные ответы. UI, которые ограничивают
+  `role IN ('user', 'assistant')`, покажут её автоматически.
+
+##### 9. Совместимость и обратная совместимость
+
+* Если `metadata` не содержит ключа, который UI ожидает — UI должен
+  обрабатывать отсутствие (`metadata.get("X")` / `?.` / `metadata?.X`).
+* `metadata.reasoning` может быть очень длинным — UI может рендерить
+  свёрнутым `<details>` (как делает Streamlit).
+* `metadata.context_window.pct` уже clamp 0..1, 4 знака — можно
+  умножать на 100 сразу, не нормализуя.
+* `metadata.compact.tokens_before/after` — `0` допустимо (если
+  замер не удался, `_estimate` вернул `(0, "")`); UI должен делить
+  осторожно (`max(compact.tokens_before, 1)` для pct).
+* Старые строки в `agent_conversation_messages` без `metadata.kind`
+  — это нормально, читается как `null` → рендер как обычное сообщение.
+
+##### 10. Тесты
+
+* `tests/test_postgres_channel.py::TestPostgresChannelReasoning` —
+  `reasoning` live + atomic append в `_finalize_turn`.
+* `tests/test_postgres_channel.py::TestPostgresChannelContextWindow` —
+  `context_window` live-update + drop.
+* `tests/test_streamlit_app.py::TestRenderContextWindow` —
+  UI-рендер `context_window`.
+* `tests/test_console_loop.py::TestPrintContextWindow` —
+  CLI-рендер `context_window`.
+* `tests/test_context_compaction.py` — запись `kind == "context_compact"`,
+  `compact`-payload, skip-правила.
+* `tests/test_runtime_patcher.py::TestPatchAssembleOutbound` —
+  внедрение `_tool_audit` в `metadata`.
+
 ### Ликвидация потери данных при усечении больших результатов инструментов
 
 **Проблема.** Результаты больших инструментов терялись на нескольких уровнях:
@@ -610,9 +884,9 @@ read→persist→read петли).
 
 ---
 
-## 🆕 Сервисный слой v2.3.0 (MessageExchange + LLM-клиент + утилиты)
+## Сервисный слой (MessageExchange + LLM-клиент + утилиты)
 
-v2.3.0 добавляет поверх сервисного слоя v2.0.0 набор общих модулей, чтобы
+Этот раздел добавляет поверх сервисного слоя набор общих модулей, чтобы
 устранить дрейф поведения между каналами, навыками и CLI-инструментами.
 
 ### `lib/channels/message_exchange.py` — общий движок каналов
@@ -776,7 +1050,7 @@ nanobot/
 ├── DEVELOPMENT.md                        # этот документ
 ├── tools/                                # инфраструктурные CLI-утилиты
 │   └── build_vectors.py                  #   сборка векторных индексов (вне навыка)
-├── sql/                                  # v2.0.0: все DDL сгруппированы по доменам
+├── sql/                                  # DDL сгруппированы по доменам
 │   ├── README.md                          #   порядок применения, каталог
 │   ├── session/                           #   session_meta + session_messages
 │   ├── channels/                          #   seed_messages.sql (тестовые данные)
@@ -785,12 +1059,12 @@ nanobot/
 │   ├── benchmarks/                        #   agent_benchmark_runs + agent_benchmark_results
 │   └── migrations/                        #   инкрементальные миграции (например, logs)
 │
-├── lib/                                  #  v2.0.0: сервисный слой
+├── lib/                                  # сервисный слой
 │   ├── core/                             #   bootstrap ApplicationContext + фабрики
 │   │   ├── application_context.py        #     create/start/stop, связывает все общие сервисы
 │   │   ├── agent_factory.py              #     AgentLoop + ToolAudit hook + фабрика DatabaseLogging (per-turn)
 │   │   └── bus_factory.py                #     MessageBus + обёртки publish_inbound/outbound
-│   ├── services/                         #   сервисный слой (v2.0.0 + pre-existing)
+│   ├── services/                         #   сервисный слой
 │   │   ├── config_service.py             #    SETTINGS-аксессор + pre-resolve env + таймауты
 │   │   ├── session_storage.py            #    выбор PGSessionManager / SessionManager
 │   │   ├── runtime_patcher.py            #    все monkey-patch'и (ContextGovernor + _assemble_outbound)
@@ -848,8 +1122,8 @@ nanobot/
 │       ├── SKILL.md                      #   пользовательская документация
 │       └── (utils: workspace/utils/office_files.py)
 │
-├── gateway.py                            #  v2.0.0: 132 строки, тонкий оркестратор
-├── cli_agent.py                          #  v2.0.0: 165 строк, тонкий оркестратор
+├── gateway.py                            #  тонкий оркестратор
+├── cli_agent.py                          #  тонкий оркестратор
 ├── streamlit_app.py                      # [web-клиент, не через ApplicationContext]
 ├── config.py                             # SETTINGS (project.json + config.json + .secrets.env)
 └── project.json                          # конфигурация (channels.*, skills.*, gateway, cli, logging.db)
@@ -918,6 +1192,159 @@ nanobot/
   **заблокируется**, т.к. `rm` нет в allowlist.
 - `denyPatterns`: `["rm -rf /", "drop database", "curl http://"]` — запрещает конкретные
   команды в дополнение к встроенному списку.
+
+---
+
+## 🛠 Кастомные tool'ы (`workspace/tools/*.py`)
+
+Кастомные tool'ы проекта следуют конвенциям **встроенного nanobot** —
+без отдельного базового класса и без своей обёртки над `Tool`. Это
+намеренно: чтобы добавить новый tool, нужно скопировать шаблон и
+переименовать класс — как и для встроенных `ExecTool`/`ImageGenerationTool`.
+
+### Контракт tool-класса
+
+* Наследник `nanobot.agent.tools.base.Tool`.
+* `config_key = "<name>"` — секция в `config.json` (`tools.<name>.*`).
+* `config_cls()` возвращает pydantic-модель секции (`BaseModel`).
+* `enabled(ctx)` читает `ctx.config.<name>.enable`.
+* `create(ctx)` собирает инстанс через DI из `ToolContext` (см. ниже).
+* `name` / `description` / `parameters` — стандартные абстрактные проперти.
+* `async execute(...)` возвращает `str` или `ToolResult.error(...)`.
+
+Reference: `nanobot/agent/tools/image_generation.py`
+(`ImageGenerationTool` — самый полный пример) и
+`workspace/tools/example.py` (минимальный шаблон).
+
+### Где живут tool'ы
+
+| Источник | Как подхватывается |
+|---|---|
+| **`workspace/tools/*.py`** | `RuntimePatcher.patch_project_tools` — auto-discover через `pkgutil.iter_modules` + `importlib.util.spec_from_file_location` (т.к. `workspace/` не Python-пакет, без `__init__.py`). |
+| **Внешние pip-плагины** | `entry_points(group="nanobot.tools")` в `pyproject.toml` пакета. Встроенный `ToolLoader._discover_plugins` (`nanobot/agent/tools/loader.py:62`) подхватывает их автоматически. |
+| **Тесты/явная регистрация** | `agent.tools.register(MyTool(...))` напрямую (как `patch_compact_tool` для `CompactContextTool`). |
+
+### `ToolContext` и DI
+
+`RuntimePatcher.patch_project_tools` собирает `ToolContext` из полей
+`AgentLoop` тем же способом, что `AgentLoop._register_default_tools`
+(`loop.py:597-630`):
+
+```python
+ctx = ToolContext(
+    config=agent.tools_config,                   # секции config.tools.*
+    workspace=str(agent.workspace),
+    bus=agent.bus,
+    subagent_manager=agent.subagents,
+    cron_service=agent.cron_service,
+    exec_session_manager=agent._exec_session_manager,
+    sessions=agent.sessions,
+    file_state_store=agent.file_states,
+    provider_snapshot_loader=agent.provider_snapshot_loader,
+    image_generation_provider_configs=agent._image_generation_provider_configs,
+    timezone=agent.context.timezone or "UTC",
+    workspace_sandbox=agent.workspace_scopes.sandbox_status,
+    runtime_events=agent.runtime_events,
+)
+setattr(ctx, "_agent_ref", agent)   # для tool'ов, которым нужен AgentLoop
+```
+
+В вашей версии nanobot `ToolContext.__init__` **не принимает `metadata`**,
+поэтому `agent` пробрасывается отдельным атрибутом `_agent_ref`. Tool
+получает его через `getattr(ctx, "_agent_ref", None)` (пример —
+`CompactContextTool.create`).
+
+### Окружение и лимиты
+
+У tool'а **нет** своих встроенных политик (timeout, env-фильтр, sandbox)
+— это in-process Python-coroutine в event-loop gateway/CLI. Если нужны
+лимиты, оборачивайте вручную:
+
+* `asyncio.wait_for(...)` — таймаут.
+* Обрезка длинного вывода — общий `ContextGovernor.normalize_tool_result`
+  (патч `patch_context_governor`) с лимитом `gateway.tool_result_limits.*`
+  (см. `project.json` → `gateway.tool_result_limits.*`).
+* Sandbox/allow-deny — если tool дёргает subprocess, наследуйте политики
+  `tools.exec.*` через явный `subprocess.run` с собственными аргументами.
+
+### Конфликты имён
+
+`patch_project_tools` пропускает tool, если `agent.tools.get(name)`
+уже возвращает не-`None` (т.е. встроенный loader его зарегистрировал
+первым через `_register_default_tools`). Это страхует от случайного
+затирания встроенных tool'ов.
+
+### Пример: минимальный tool
+
+```python
+# workspace/tools/my_tool.py
+from nanobot.agent.tools.base import Tool, tool_parameters
+from pydantic import BaseModel
+
+
+class MyToolConfig(BaseModel):
+    enable: bool = True
+    max_chars: int = 8_000
+
+
+@tool_parameters({
+    "type": "object",
+    "properties": {"text": {"type": "string"}},
+    "required": ["text"],
+})
+class MyTool(Tool):
+    config_key = "my_tool"
+
+    @classmethod
+    def config_cls(cls): return MyToolConfig
+
+    @classmethod
+    def enabled(cls, ctx): return ctx.config.my_tool.enable
+
+    @classmethod
+    def create(cls, ctx): return cls(config=ctx.config.my_tool)
+
+    def __init__(self, *, config: MyToolConfig) -> None:
+        self.config = config
+
+    @property
+    def name(self) -> str: return "my_tool"
+
+    @property
+    def description(self) -> str: return "Что делает tool (LLM видит это)."
+
+    async def execute(self, *, text: str, **_kwargs):
+        result = text.upper()
+        return result[:self.config.max_chars]
+```
+
+Конфиг в `config.json`:
+
+```jsonc
+{
+  "tools": {
+    "myTool": {            // config_key="my_tool" → tools.my_tool в config
+      "enable": true,
+      "maxChars": 8000
+    }
+  }
+}
+```
+
+### Отладка
+
+`RuntimePatcher.apply_all` пишет результат `patch_project_tools` в
+`PatchReport` (логируется через loguru): `"3 project tools
+registered: foo, bar, baz; skipped: qux (disabled by config)"`.
+
+Если tool не регистрируется — проверьте:
+1. `cls.__module__` начинается с `workspace.tools.` (имена в
+   `importlib.util.spec_from_file_location`).
+2. `cls.enabled(ctx)` возвращает `True` для текущего конфига.
+3. `agent.tools.get(tool.name)` возвращает `None` (нет коллизии
+   с встроенным tool).
+4. У класса нет `__abstractmethods__` (все абстрактные методы
+   `Tool` реализованы).
 
 ---
 
@@ -1043,8 +1470,10 @@ nanobot/
 
 DSN подключается только через `channels.postgres.dsn` в `project.json`
 (обычно `"${DATABASE_URL}"` из `.secrets.env`) через `utils.db.resolve_dsn()`.
-Частичные ключи `host`/`port`/`dbname`/`user` удалены с v2.1.0 — подключение
-без полного DSN невозможно. Навык собственного DSN не хранит.
+Подключение возможно только через полный DSN (`channels.postgres.dsn`
+в `project.json`, обычно `"${DATABASE_URL}"` из `.secrets.env` через
+`utils.db.resolve_dsn()`). Частичные ключи `host`/`port`/`dbname`/`user`
+не поддерживаются. Навык собственного DSN не хранит.
 
 ---
 
@@ -1979,7 +2408,7 @@ rm /tmp/build_vectors.pid
 
 Параллельная сборка **разных** индексов безопасна (разные `source`).
 
-#### Миграция со старой версии (v1.x → v2.0.0)
+#### Миграция со старого формата (FAISS-файлы)
 
 Если у вас остались FAISS-индексы в файлах `.faiss` (не в БД) — мигрируйте:
 
@@ -2229,14 +2658,7 @@ python tools/build_vectors.py --verbose
 
 ### Совместимость с Greenplum 6.5+
 
-В v2.0.0 таблицы `oarb.audit_vectors` и `oarb.vector_index_*` переработаны для полной совместимости с **Greenplum 6.5** (PostgreSQL 9.4 ядро).
-
-| Изменение | Было (v1.5) | Стало (v2.0) | Зачем |
-|-----------|--------------|---------------|-------|
-| `id` тип | `SERIAL` (int4 + sequence) | `BIGINT GENERATED BY DEFAULT AS IDENTITY` | Нет переполнения на 2.1B записей |
-| `pk_value` тип | `INTEGER` | `TEXT` | Поддержка UUID, BIGINT и других PK |
-| Распределение GP | нет (рандом по 1-й колонке) | явные `DISTRIBUTED BY (source)` / `REPLICATED` | Контролируемая сегментация, локальные JOIN |
-| Индексы `audit_vectors` | 2 (source, source+pk) | 3 (+source+synced, +source+hash) | Быстрые запросы «последние sync», дедупликация |
+Таблицы `oarb.audit_vectors` и `oarb.vector_index_*` разработаны для полной совместимости с **Greenplum 6.5** (PostgreSQL 9.4 ядро): `BIGINT GENERATED BY DEFAULT AS IDENTITY` для PK (нет переполнения), `TEXT` для `pk_value` (UUID/BIGINT), `DISTRIBUTED BY (source)` / `REPLICATED` для управляемой сегментации.
 
 **Использование:**
 
@@ -2244,7 +2666,7 @@ python tools/build_vectors.py --verbose
 |------|-------|
 | Все (PG/GP) | `sql/audit_analyzer/create_<schema>_<table>.sql` — один файл на таблицу, Greenplum 6.5 (`DISTRIBUTED BY`) |
 
-**Миграция со старой версии:** скрипты миграции векторов удалены (v2.2.0).
+**Миграция со старой версии:** скрипты миграции векторов удалены (см. `CHANGELOG.md`).
 Примените актуальные DDL из `sql/audit_analyzer/` и пересоберите индексы:
 `python tools/build_vectors.py --full-rebuild`.
 
@@ -2254,7 +2676,7 @@ python tools/build_vectors.py --verbose
 python tools/build_vectors.py --full-rebuild
 ```
 
-### Структура v2.0
+### Структура (DDL)
 
 ```sql
 -- PG 13+ вариант
@@ -2301,92 +2723,14 @@ DISTRIBUTED BY (source);         -- audit_vectors
 
 ---
 
-## 🔗 Полная таблица связей между файлами (v2.0.0)
-
-### Точки входа (тонкие оркестраторы)
-
-| Файл | Строк | Что делает | Настраивается через |
-|------|------:|-----------|-------------------|
-| `gateway.py` | 232 | Сервер: каналы, Streamlit, FAISS preload, restart-loop. Токены LLM-итераций — опционально через `gateway.print_llm_calls` (`project.json`, `false` по умолчанию) → `ApplicationContext.create(print_llm_calls=...)`. Активность пула воркеров — через `gateway.print_worker_activity` → `ChannelFactory(print_worker_activity=...)` → `PostgresChannel` | `project.json` (`channels.*`, `gateway`, `logging.db`) |
-| `cli_agent.py` | 165 | REPL: ввод → `MessageBus` → `AgentLoop`. Запускает `ApplicationContext.create(print_llm_calls=True)` — в терминале выводятся токены LLM-итераций (`→ LLM: отправлен промпт (X токенов)` / `← LLM: получен ответ (Y токенов)`) | CLI-аргументы, `project.json` (`cli`) |
-| `streamlit_app.py` | 502 | Тонкий web-клиент (НЕ через ApplicationContext) | `project.json` → `channels.postgres`, `streamlit` |
-
-### Bootstrap и сервисный слой
-
-| Файл | Что делает |
-|------|-----------|
-| `lib/core/application_context.py` |  Единый bootstrap всех общих сервисов |
-| `lib/core/agent_factory.py` |  Создание AgentLoop: `ToolAuditHook` в `hooks=`, `DatabaseLoggingHook` — как фабрика оборота в `hook_factories=` |
-| `lib/core/bus_factory.py` |  MessageBus + обёртки publish_inbound/outbound |
-| `lib/services/config_service.py` |  Загрузка конфига, SETTINGS-аксессор, pre-resolve env, таймауты |
-| `lib/services/session_storage.py` |  Выбор PGSessionManager / SessionManager |
-| `lib/services/runtime_patcher.py` |  Все monkey-patch'и (ContextGovernor + _assemble_outbound) |
-| `lib/services/channel_factory.py` |  ChannelManager + Redis/Postgres |
-| `lib/services/transcription_service.py` |  openai/groq key/URL/language |
-| `lib/services/subprocess_manager.py` |  Streamlit spawn + terminate/kill |
-| `lib/services/preload_service.py` |  FAISS preload + audit_cache refresh |
-| `lib/services/db_logging_service.py` |  Worker-поток, batch INSERT через общий пул `utils.db`, без JSONL-fallback. Событие `llm_call` (`log_llm_call`) пишет полный промпт + ответ LLM в `payload` |
-| `lib/services/db_logging_bus.py` |  Обёртки publish_inbound/outbound для логгера |
-| `lib/cli/console_loop.py` |  REPL/typewriter/consume_outbound (вынесено из cli_agent.py) |
-| `lib/cli/display_config.py` |  DisplayConfig |
-| `lib/cli/hook_loader.py` |  Сканирование workspace/hooks/*.py (плагины) |
-| `lib/hooks/base_tool_tracking_hook.py` |  Общий каркас для tool-хуков |
-| `lib/hooks/tool_audit_hook.py` |  Хук аудита вызовов инструментов |
-| `lib/hooks/database_logging_hook.py` |  AgentHook для tool-событий + run_finished + `llm_call` (полный промпт/ответ на итерацию через `before_iteration`/`after_iteration`); при `print_llm_calls=True` выводит в терминал токены итерации (включается в CLI через `ApplicationContext.create(print_llm_calls=True)`); per-turn инстансы через `make_db_logging_hook_factory` (конкурентно-безопасно) |
-| `lib/lifecycle/gateway_runner.py` |  Цикл с exponential backoff |
-| `lib/lifecycle/shutdown_coordinator.py` |  LIFO graceful shutdown |
-| `workspace/hooks/session_file_redirect_hook.py` |  AgentHook: перенаправляет `write`/`edit`/`create_file`/`write_file` и `media` тула `message` в `data_store/cache/sessions/<session_key>/` (политика хранения в `workspace/AGENTS.md`) |
-| `workspace/hooks/recent_files_hook.py` |  Сбор созданных файлов для auto-attach в `OutboundMessage.media` |
-
-### Pre-existing (не тронуты рефакторингом)
-
-| Файл | Что делает |
-|------|-----------|
-| `lib/session/pg_session_manager.py` | Хранение сессий в PostgreSQL (без JSONL-fallback) |
-| `lib/channels/postgres_channel.py` | Канал через таблицу agent_conversation_messages |
-| `lib/channels/redis_channel.py` | Канал через Redis-очереди (BRPOP/LPUSH) |
-| `lib/services/audit_sync_service.py` | Синхронизация audit-таблиц из PG в in-memory DuckDB (SQL через общий пул `utils.db`) |
-| `lib/services/audit_memory_store.py` | DuckDB-кеш + FAISS-индексы + publish-snapshot |
-| `lib/services/cache_provider.py` | Интерфейс CacheProvider + SearchResult |
-| `lib/services/cache_provider_impl.py` | Реализация кеша (PostgresDuckDbProvider) |
-| `lib/services/text_splitter.py` | Чанкование текстов |
-| `workspace/utils/db.py` | Общий пул соединений PG: одна очередь + воркеры (1..N), sync/async API, транзакции-аренда (`lease`); неподключённые воркеры уступают очередь подключённым |
-| `workspace/skills/audit_analyzer/` | Навык: тонкий CLI поверх `lib/services` |
-
-### Где что править
-
-| Компонент | Что нужно сделать | Файл | Если сломалось — где смотреть |
-|-----------|-----------------|------|------------------------------|
-| **Конфиг** | Сменить модель/провайдера | `config.json` → `agents.defaults.model` | `ValueError: LLM_API_KEY` → `.secrets.env` (секция `providers: llm`); gateway не находит ключ → `lib/services/config_service.py:_pre_resolve_env_refs` |
-| **Конфиг** | Настроить таймауты | `project.json` → секции `gateway`, `cli` или `streamlit` | LLM-запросы висят → `cli.llm_timeout` / `gateway.llm_timeout`; exec-команды обрываются на 60с → `tools.exec.timeout` (`config.json`) |
-| **Каналы / БД** | Подключение к БД | `project.json` → `channels.postgres` (`host`/`port`/`dbname`/`user` + опц. `dsn`) | `psycopg2.OperationalError` / `connection refused` → `DB_PASSWORD` в `.secrets.env` (DSN собирается в `utils.db.resolve_dsn()`); `gssencmode` ошибка на GP 6.25 → `lib/services/config_service.py` (kwargs `connect()`); `too many connections` → общий пул в `workspace/utils/db.py` (`channels.postgres.pool` → `min_conn`/`max_conn`/`pool_timeout`); проверить лимит честно можно через не-суперюзерную роль (`ALTER ROLE <role> CONNECTION LIMIT N`) — на superuser роли лимит PostgreSQL игнорирует |
-| **Каналы** | Включить Redis-канал | `project.json` → `channels.redis.enabled` | `Connection refused` → `host`/`port`/`password`; не приходят сообщения → `lib/channels/redis_channel.py` + `allow_from` |
-| **Навыки** | Настроить навык | `project.json` → `skills.<имя>` | Навык не подхватывается → `agents.defaults.disabledSkills` (`config.json`); навык стартует со старыми параметрами → `lib/services/runtime_patcher.py` (см. `RuntimePatcher.apply_all`) |
-| **Секреты** | Добавить API-ключ | `.secrets.env` (провайдер-скоупинг формат) | `nanobot._load_runtime_config` падает с `ValueError` → `lib/services/config_service.py:_pre_resolve_env_refs` (должен подставить `${VAR}` в `os.environ` ДО nanobot) |
-| **Логирование** | БД-логирование | `project.json` → `logging.db` (`enabled`, `flush_interval_sec`, `batch_size`, `min_level`) | В таблице `gateway_logs` пусто → `lib/services/db_logging_service.py:get_stats()` (`queue_size`, `connected`, `last_error`); при недоступности БД события дропаются (счётчик `failed`). Полный промпт и ответ LLM на каждую итерацию — событие `llm_call` (payload: `prompt`/`response`, metadata: `iteration`/`model`/`finish_reason`/`usage`) |
-| **Сервисный слой** | Сервисный слой | `lib/services/<service>.py` (например, `db_logging_service.py`) | `ctx.start()` падает → сервис в `None` (graceful degradation, см. `lib/core/application_context.py:create`); race-condition `нет данных в кэше` → callbacks на `AuditSyncService` ДО `ctx.start()` (см. `gateway.py:main`) |
-| **Bootstrap** | Bootstrap | `lib/core/application_context.py` | Контекст не создаётся → `lib/core/application_context.py:create` + флаги `enable_db_logging`/`enable_audit`; double-init воркеров → `lib/lifecycle/shutdown_coordinator.py` |
-| **Lifecycle** | Lifecycle (backoff/shutdown) | `lib/lifecycle/gateway_runner.py` / `shutdown_coordinator.py` | Gateway зацикливается на рестартах → `GatewayRunner.run_forever` (exponential backoff 1с→30с); процесс не умирает по Ctrl-C → `ShutdownCoordinator` (LIFO) |
-| **Каналы** | Канал связи | Написать класс унаследовав `BaseChannel`, подключить через `lib/services/channel_factory.py` | Сообщения не доходят → `allow_from` в `project.json`; reasoning не пишется → `PostgresChannel._flush_reasoning` (период `flush_interval`) |
-| **Хуки** | Хук агента | Создать файл в `workspace/hooks/` с подклассом `AgentHook` | Хук не вызывается → `lib/services/agent_factory.py:AgentFactory.create` (lazy-import); `ImportError` из хука → `try/except` в `AgentFactory` (хук/фабрика просто не подключится) |
-| **Хуки** | Перенаправление файлов сессии | `workspace/hooks/session_file_redirect_hook.py` (подключается автоматически через `lib/core/application_context.py:ApplicationContext.create` → `lib.cli.hook_loader.scan_and_register`; плагины передаются в `AgentFactory.create(project_hooks=...)`, который один раз вызывает `AgentLoop.from_config(hooks=merged, hook_factories=...)`) | Файлы уходят в корень workspace → проверить, что хук инстанцировался: `ApplicationContext.create` печатает один раз `Hooks connected: RecentFilesHook, SessionFileRedirectHook, ToolAuditHook` (полный список подключённых хуков — плагины + фреймворковые + per-turn factories; сканер успех молчит); whitelist пропускает `AGENTS.md`/`lib/`/`data_store/`/`*.py` — добавить в `_ALLOWED_PREFIXES` если нужно; не работает на `exec`-redirects (`>`, `>>`) — это вне `write`/`edit`; для тула `message` хук перенаправляет и `media`: ищет файл в текущей session-папке по относительному пути и по basename (включая `attachments/`, `results/`) и подставляет реальный — закрывает `Media file not found, keeping path` при attach (агент приложил относительный путь или «абсолютный» путь чужого workspace); URL/`data:`/уже существующие пути не трогаются; если добавляете новый хук в `workspace/hooks/` — он должен быть самодостаточным плагином (контракт `cls(workspace_dir=...)`); больше ничего делать не нужно, он подхватится на следующем старте |
-| **Хуки** | Auto-attach созданных файлов в `OutboundMessage.media` | `workspace/hooks/recent_files_hook.py` (тот же auto-scan; `RuntimePatcher._wrap` дренажит `recent_files_hook.drain(session_key)` после `tool_audit_hook.drain`) | Агент создал файл через `write_file`, но забыл приложить в `message()` → auto-attach добавляет; агент приложил несуществующий путь (после SSRF-блокировки `pip install`) → отбрасывается через `Path.is_file()`; агент приложил путь ДО `SessionFileRedirectHook` (basename совпадает, но указанный путь не существует — файл уехал в `data_store/cache/sessions/<key>/`) → auto-attach ЗАМЕНЯЕТ устаревший путь реальным; порядок хуков: `RecentFilesHook` ДО `SessionFileRedirectHook` (тогда `params["path"]` уже финальный к моменту `after_execute_tool`); отключить — передать `recent_files_hook=None` в `RuntimePatcher.apply_all()` |
-| **Файл-инструменты** | Контроль `write`/`edit` | `workspace/hooks/session_file_redirect_hook.py` | Без хука работает `data_store/cache/...` по правилу в `workspace/AGENTS.md`, но модель может его забыть; хук закрывает дыру независимо от подсказок в промпте |
-| **Бенчмарки** | Тест бенчмарка | YAML-файл в `benchmarks/items/` | Тест падает по `keyword` → перечитать `expect.keywords_include`; `multi_step` не переходит к следующему шагу → `new_session: true` (или `false` для общей истории) |
-| **Web UI** | Streamlit UI | `streamlit_app.py` | Чат не отвечает → `streamlit.max_wait` (дефолт 600с) и `poll_interval`; `st.rerun` лимит → блокирующий поллинг в `streamlit_app.py` (без `st.rerun`) |
-| **Агент** | Личность агента | `workspace/SOUL.md` | — |
-| **Агент** | Инструкции агенту | `workspace/AGENTS.md` | Инструкции не подхватываются → путь `agents.defaults.workspace` (`config.json`); конфликт с глобальным `AGENTS.md` → файлы мерджатся в порядке: `~/.nanobot/AGENTS.md` < `workspace/AGENTS.md` |
-| **Навык audit_analyzer** | Навык `audit_analyzer` (общее) | `workspace/skills/audit_analyzer/scripts/` + `lib/services/audit_*` (кеш) | `FileNotFoundError: audit_cache.duckdb` → `python gateway.py` (владелец кеша); LLM 429 → `cli_max_retries` (`project.json`) |
-| **Навык audit_analyzer** | Схема таблиц | `workspace/skills/audit_analyzer/scripts/database.py:_fetch_schema` (строки 188-237) | Таблица не видна → `db_tables` в `project.json` + `db_schema`; нет комментариев колонок → `pg_catalog.pg_description.objsubid`; тип `varchar(N)` без длины → `character_maximum_length` в `_fetch_schema` |
-| **Навык audit_analyzer** | DuckDB-кеш аудита | `lib/services/audit_memory_store.py` (in-memory) + `lib/services/audit_sync_service.py` (поллинг PG) | `нет данных в кэше` несмотря на строки в PG → callbacks ДО `ctx.start()` (см. `gateway.py:main`); удалённые в PG строки остаются в кеше → `full_resync_every: 0` отключает сверку; файл кеша не обновляется → `publish_path` пуст или `_dirty=False` |
-| **Навык audit_analyzer** | Векторный поиск | `lib/services/cache_provider_impl.py` (провайдер) + `tools/build_vectors.py` (индексатор) | `--mode vector` пустой результат → `python tools/build_vectors.py --status` + пересборка `--full-rebuild`; эмбеддинг не строится → Ollama на `embedding_base_url` (дефолт `http://localhost:11434/api/embed`); индекс пересобирается при каждом запросе → `invalidate_cache` не вызван, FAISS не в памяти |
-
----
-
 ## 🧪 Тестирование
 
+Полный текущий набор — через `pytest -q` (см. `tests/`).
+Разбивка по категориям и командам — в `README.md` (раздел «Тестирование»),
+там же список test-файлов.
+
 ```bash
-# Юнит-тесты v2.0.0 сервисного слоя (не требуют БД)
+# Юнит-тесты сервисного слоя (не требуют БД)
 python -m pytest tests/test_config_service.py tests/test_session_storage.py \
                     tests/test_runtime_patcher.py tests/test_transcription_service.py \
                     tests/test_channel_factory.py tests/test_subprocess_manager.py \
@@ -2405,7 +2749,7 @@ python -m pytest tests/test_pg_session_manager.py -q
 # Юнит-тесты audit/кэша (sync+memory)
 python -m pytest tests/test_audit_memory_store.py tests/test_audit_sync_service.py -q
 
-# Полный набор (без БД; 906 passed)
+# Полный набор (без БД)
 python -m pytest tests -q
 
 # Сквозной тест навыка (требует живого PostgreSQL)
@@ -2420,19 +2764,6 @@ $env:NANOBOT_LIVE_E2E="1"; python -m pytest tests/test_gateway_live_media_e2e.py
 E2E проверяет все режимы: predefined (реальный SQL по шаблонам), sql
 (LLM → EXPLAIN → выполнение), vector (FAISS + Ollama embedding), а также
 резолв параметров через семантический поиск.
-
-**Новые test-файлы v2.0.0** (полный список в `README.md`):
-- `test_application_context.py` — bootstrap и lifecycle
-- `test_config_service.py` — pre-resolve env, таймауты, SETTINGS-аксессор
-- `test_session_storage.py` — выбор PG/File/auto
-- `test_runtime_patcher.py` — оба monkey-patch'а с fallback
-- `test_db_logging_service.py` — worker, batch, без JSONL-fallback
-- `test_bus_factory.py` — обёртки publish_inbound/outbound
-- `test_console_loop.py` — REPL/typewriter/print_tool_events
-- `test_gateway_runner.py` — exponential backoff
-- `test_shutdown_coordinator.py` — LIFO graceful shutdown
-- `test_subprocess_manager.py` — Streamlit spawn/terminate
-- ... и т.д.
 
 > **Стандарт качества тестов (QA-чистка 2026-08-18).** Набор проревизован —
 > each test должен давать реальную проверку, а не «галочку». Не оставляем:
@@ -2532,19 +2863,4 @@ max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3
 - `audit_analyzer` режимы `predefined` / `sql` / `vector`.
 - Параметры CLI `audit_analyzer` (`--top-k`, `--threshold`, `--index-name`).
 
-### Краткий таймлайн
-
-| Дата | Версия | Что |
-|------|--------|-----|
-| 2026-05-25 | 0.9.0 | nanobot-шлюз с `PostgresChannel`, инструментами, конфигурацией workspace |
-| 2026-05-27 | 1.0.0 | Навыки `db_analyzer` + `html_presentation_generator`, E2E-тесты |
-| 2026-05-27 | 1.1.0 | Модель `gpt-oss:20b-cloud`, кеш схемы в `db_analyzer` |
-| 2026-05-29 | 1.2.0 | Streamlit-чат, единотабличная архитектура `agent_conversation_messages` |
-| 2026-06-10 | 1.3.0 | Self-review система, `ToolAuditHook`, бенчмарк-фреймворк, Redis-канал |
-| 2026-06-16 | 1.4.0 | Переход asyncpg → psycopg2, переименование `db_analyzer` → `audit_analyzer` |
-| 2026-07-22 | 1.5.0 | Векторные индексы в PostgreSQL, DuckDB-кеш, файловые → БД-секреты |
-| 2026-08-12 | 2.0.0 | `ApplicationContext` + сервисный слой, gateway — владелец кеша, JSONC, удаление навыков |
-| 2026-08-14 | 2.0.1 | Fix: gateway DuckDB-snapshot, build_vectors NameError, PostgresChannel ↔ nanobot 0.3.0; SQL: один файл = одна таблица (GP 6.5 only) |
-| 2026-08-17 | v2.2.0 | Единый пул PG: DbLoggingService/AuditSyncService/cache_provider на `utils.db`, неподключённые воркеры уступают очередь подключённым; `SessionFileRedirectHook`; schema-meta в кэше; dict-media; удалена write-функциональность `AuditSyncService`; 856 тестов (см. `[2.2.0]` в CHANGELOG.md) |
-
-Подробный changelog — в [CHANGELOG.md](CHANGELOG.md).
+Краткий таймлайн релизов — в [CHANGELOG.md](CHANGELOG.md).
