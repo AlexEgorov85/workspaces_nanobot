@@ -168,6 +168,7 @@ class RuntimePatcher:
             agent, settings))
         self._record(report, "compact_command", self.patch_compact_command(
             agent, settings))
+        self._record(report, "session_content_cleanup", self.patch_session_content_cleanup())
         return report
 
     @staticmethod
@@ -441,6 +442,45 @@ class RuntimePatcher:
 
         agent._save_turn = _wrap
         return True, "AgentLoop._save_turn patched for archiving"
+
+    # ------------------------------------------------------------------
+    # Патч 1b: санитизация контента на источнике (Session.add_message)
+    # ------------------------------------------------------------------
+
+    def patch_session_content_cleanup(self) -> Tuple[bool, str]:
+        """Вычищать невалидные символы из контента при добавлении сообщения.
+
+        ``nanobot.session.manager.Session.add_message`` — единая точка, через
+        которую в сессию попадают все сообщения (user/assistant/tool), в т.ч.
+        из web/websocket, подагентов и инструментов. NUL-байт (0x00) и
+        литеральные Unicode-escape ``\\u0000``..\\u0003`` могут попасть в
+        контент из бинарного вывода инструментов / LLM-вывода и валят запись
+        в PostgreSQL (``A string literal cannot contain NUL...``).
+
+        Оборачиваем ``add_message`` и чистим ``content`` и ``**kwargs`` на
+        источнике (канонический ``clean_text`` из ``utils.clean_text``), чтобы
+        мусор не оседал ни в памяти сессии, ни в JSON-истории, ни в БД.
+        Обратный вызов вызывается с очищенными значениями.
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+        """
+        try:
+            from nanobot.session.manager import Session
+            from utils.clean_text import clean_text
+        except Exception as exc:
+            return False, f"import failed: {exc}"
+        original = getattr(Session, "add_message", None)
+        if original is None:
+            return False, "Session.add_message is missing"
+
+        def _add_message_clean(                       self: Any,
+            role: Any, content: Any, **kwargs: Any,
+        ) -> Any:
+            return original(self, role, clean_text(content), **clean_text(kwargs))
+
+        Session.add_message = _add_message_clean
+        return True, "Session.add_message patched for content cleanup"
 
     # ------------------------------------------------------------------
     # Патч 1c: синхронный sessions.save из async-контекста → executor

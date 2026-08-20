@@ -60,6 +60,8 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.extensions
 
+from utils.clean_text import clean_text
+
 # Глобальный адаптер: psycopg2 автоматически сериализует dict → JSONB
 psycopg2.extensions.register_adapter(dict, psycopg2.extras.Json)
 
@@ -129,8 +131,9 @@ class _JobResult:
         self._error = exc
         self._event.set()
 
-    def get(self) -> Any:
-        self._event.wait()
+    def get(self, timeout: Optional[float] = None) -> Any:
+        if not self._event.wait(timeout):
+            return None  # таймаут — результат ещё не готов
         if self._error is not None:
             raise self._error
         return self._value
@@ -540,6 +543,20 @@ class DBManager:
         with self._cond:
             stats["queue_size"] = len(self._queue)
             stats["workers"] = len(self._workers)
+            # живое число воркеров с живым соединением в этот момент времени
+            stats["connected_workers"] = sum(
+                1
+                for w in self._workers
+                if w._conn is not None and not w._conn.closed
+            )
+            # воркеры, которые не смогли установить соединение (последняя
+            # попытка закончилась ошибкой) — «запустились с ошибкой»
+            stats["failed_workers"] = sum(
+                1
+                for w in self._workers
+                if (w._conn is None or w._conn.closed)
+                and w._connect_error is not None
+            )
             stats["running"] = self._running
         stats["min_conn"] = self._min_conn
         stats["max_conn"] = self._max_conn
@@ -553,24 +570,19 @@ class DBManager:
 # ---------------------------------------------------------------------------
 
 
-_UNSUPPORTED_ESCAPES = ("\\u0000", "\\u0001", "\\u0002", "\\u0003")
-
-
 def _sanitize_param(value: Any) -> Any:
-    """Заменяет невалидные Unicode-escape'ы в строковых параметрах.
+    """Страховка: вычистить недопустимые для PostgreSQL управляющие символы.
 
-    psycopg2 парсит строки-параметры на наличие ``\\u0000``/и т.п. как
-    Unicode-escape и падает с ``UntranslatableCharacter`` ещё до отправки
-    в PostgreSQL (если в данных встречается, например, JSON-литерал
-    ``"\\u0000..."``). Заменяем ``\\u0000`` на реальный NUL — это
-    корректное и идемпотентное значение, безопасное и для psycopg2,
-    и для PostgreSQL.
+    Единая глобальная точка санитизации всех параметров, идущих в psycopg2
+    (``execute``/``mogrify``, в т.ч. ``execute_values`` для сессий).
+
+    Каноническая логика вычистки — в ``utils.clean_text.clean_text`` (её же
+    применяет патч ``Session.add_message`` на источнике). Здесь — только
+    страховка на границе БД для контента, который мог обойти живой патч.
     """
     if isinstance(value, (bytes, bytearray, memoryview)):
         return value
-    if isinstance(value, str) and any(seq in value for seq in _UNSUPPORTED_ESCAPES):
-        return value.replace("\\u0000", "\u0000")
-    return value
+    return clean_text(value)
 
 
 def _sanitize_params(params: Any) -> Any:
@@ -791,6 +803,38 @@ def shutdown() -> None:
 
 def get_stats() -> dict:
     return _get_manager().get_stats()
+
+
+def probe_connections(
+    count: Optional[int] = None, timeout: Optional[float] = None
+) -> None:
+    """Прогреть пул: заставить воркеров реально подключиться к БД.
+
+    Воркеры пула подключаются **лениво** — при первой задаче. Поэтому
+    сразу после ``start()`` отчёт ``get_stats()`` показал бы 0 живых
+    соединений даже при доступной БД. Чтобы отчёт о старте gateway
+    отражал реальное состояние, функция отправляет в пул ``count``
+    (по умолчанию ``min_conn``) лёгких задач — каждый воркер инициирует
+    подключение. Ошибки подключений наружу НЕ бросаются: их состояние
+    видно через ``get_stats()`` (``connected_workers``/``connect_errors``).
+
+    ``timeout`` — максимальное время ожидания каждого соединения (по
+    умолчанию ждём до фактического исхода: успех или исчерпание
+    ``connect_max_retries``).
+    """
+    mgr = _get_manager()
+    target = int(count if count is not None else mgr._min_conn)
+    results = []
+    for _ in range(target):
+        job = _Job(lambda conn: None)  # подключение происходит в _ensure_connected
+        mgr._submit(job)
+        results.append(job.result)
+    for res in results:
+        try:
+            res.get(timeout=timeout)
+        except Exception:
+            # подключение не удалось — состояние видно через get_stats()
+            pass
 
 
 def run(fn: Callable[[Any], Any]) -> Any:

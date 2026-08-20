@@ -250,6 +250,17 @@
 
 ### Fixed
 
+- **Сохранение сессии падало с `A string literal cannot contain NUL (0x00)`**
+  когда в контент сообщения (бинарь из `exec`/`read_file` или LLM-вывод)
+  попадал NUL-байт при записи в PostgreSQL. Введён канонический
+  `workspace/utils/clean_text.py` (убирает NUL и литеральные `\u0000`..`\u0003`),
+  который применяется на двух уровнях: патч `RuntimePatcher.patch_session_content_cleanup`
+  чистит контент на источнике через `Session.add_message`, а
+  `utils.db._sanitize_param` — страховка на границе БД для всех параметров
+  `execute`/`mogrify` (в т.ч. `execute_values`). Раньше `_sanitize_param`
+  наоборот *превращал* escape `\u0000` в настоящий NUL, что и порождало ошибку.
+  Документация: раздел «Санитизация NUL-байта» в `DEVELOPMENT.md`.
+
 - **Ответ «терялся» (статус `failed`), когда агент завершал оборот
   инструментом `message(...)` без последующего plain-text.** Тул публикует
   свой outbound через шину **промежуточно** — в момент исполнения, до конца
