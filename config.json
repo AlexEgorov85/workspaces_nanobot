@@ -711,6 +711,10 @@
       "maxImagesPerTurn": 4,
       "saveDir": "generated"
     },
+    "example": {
+      "enable": false,
+      "maxChars": 8000
+    },
     "restrictToWorkspace": false,
     "webuiAllowLocalServiceAccess": true,
     "webuiAllowRemotePackageInstall": false,

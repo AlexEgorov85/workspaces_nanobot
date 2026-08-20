@@ -262,46 +262,247 @@ class TestCompact:
         assert "LLM down" in report["reason"]
 
 
-class TestCompactToolPatch:
-    def test_registers_tool_when_enabled(self, monkeypatch):
-        agent = MagicMock()
-        agent.tools.register = MagicMock()
+class TestCompactContextTool:
+    """Тесты ``CompactContextTool`` (workspace/tools/compact_context.py).
 
-        class FakeTool:
-            def __init__(self, svc):
-                self.svc = svc
-                self.name = "compact_context"
+    После переноса в ``workspace/tools/`` tool регистрируется через
+    ``RuntimePatcher.patch_project_tools``. Эти тесты проверяют
+    стандартный паттерн: ``enabled(ctx)`` / ``create(ctx)``.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self):
+        """Убрать загруженный модуль из sys.modules между тестами."""
+        import sys
+        to_drop = [k for k in sys.modules if k.startswith("workspace.tools.compact_context")]
+        for k in to_drop:
+            del sys.modules[k]
+        yield
+        for k in to_drop:
+            sys.modules.pop(k, None)
+
+    def test_enabled_true_from_settings(self):
+        from workspace.tools.compact_context import CompactContextTool
+        from types import SimpleNamespace
+
+        gw_section = SimpleNamespace(enabled=True)
+        gateway = SimpleNamespace(compact=gw_section)
+        settings = SimpleNamespace(gateway=gateway)
+        ctx = SimpleNamespace(_settings_ref=settings)
+
+        assert CompactContextTool.enabled(ctx) is True
+
+    def test_enabled_false_from_settings(self):
+        from workspace.tools.compact_context import CompactContextTool
+        from types import SimpleNamespace
+
+        gw_section = SimpleNamespace(enabled=False)
+        gateway = SimpleNamespace(compact=gw_section)
+        settings = SimpleNamespace(gateway=gateway)
+        ctx = SimpleNamespace(_settings_ref=settings)
+
+        assert CompactContextTool.enabled(ctx) is False
+
+    def test_enabled_default_true_when_no_settings(self):
+        """Без ``_settings_ref`` — tool включён (дефолтное поведение)."""
+        from workspace.tools.compact_context import CompactContextTool
+
+        class _Ctx:
+            _settings_ref = None
+
+        assert CompactContextTool.enabled(_Ctx()) is True
+
+    def test_create_builds_service(self, monkeypatch):
+        """``create(ctx)`` создаёт ``ContextCompactionService`` из DI."""
+        from workspace.tools.compact_context import CompactContextTool
+
+        captured = {}
+
+        class FakeService:
+            def __init__(self, agent, settings=None):
+                captured["agent"] = agent
+                captured["settings"] = settings
+                self.enabled = True
+                self.compact_called = False
+
+            async def compact(self, **kwargs):
+                self.compact_called = True
+                return {"ok": True, "archived_msgs": 3}
+
+            def format_report(self, report):
+                return f"OK: archived={report['archived_msgs']}"
 
         monkeypatch.setattr(
             "lib.services.context_compaction.ContextCompactionService",
-            lambda *_a, **_k: SimpleNamespace(enabled=True),
+            FakeService,
         )
-        monkeypatch.setattr(
-            "lib.tools.compact_context_tool.CompactContextTool", FakeTool,
-        )
+
+        agent = MagicMock(name="agent")
+        settings = MagicMock(name="settings")
+
+        class _Ctx:
+            _agent_ref = agent
+            _settings_ref = settings
+
+        tool = CompactContextTool.create(_Ctx())
+        assert isinstance(tool, CompactContextTool)
+        assert captured["agent"] is agent
+        assert captured["settings"] is settings
+
+    def test_create_raises_without_agent(self):
+        """Без ``_agent_ref`` — RuntimeError (явный fail-fast)."""
+        from workspace.tools.compact_context import CompactContextTool
+
+        class _Ctx:
+            _agent_ref = None
+            _settings_ref = None
+
+        with pytest.raises(RuntimeError, match="_agent_ref is None"):
+            CompactContextTool.create(_Ctx())
+
+    def test_execute_disabled_service(self):
+        """Если сервис disabled — возвращает строку, не ошибку."""
+        from workspace.tools.compact_context import CompactContextTool
+
+        class DisabledService:
+            enabled = False
+
+            async def compact(self, **_):
+                raise AssertionError("should not be called")
+
+            def format_report(self, _):
+                raise AssertionError("should not be called")
+
+        tool = CompactContextTool(service=DisabledService())
+        import asyncio
+        result = asyncio.run(tool.execute(session_key="cli:1"))
+        assert "Сжатие контекста отключено" in result
+
+    def test_execute_success_returns_report(self):
+        """Успех — возвращает format_report(report)."""
+        from workspace.tools.compact_context import CompactContextTool
+
+        class OkService:
+            enabled = True
+
+            async def compact(self, **_):
+                return {"ok": True, "archived_msgs": 5}
+
+            def format_report(self, report):
+                return f"archived={report['archived_msgs']}"
+
+        tool = CompactContextTool(service=OkService())
+        import asyncio
+        result = asyncio.run(tool.execute(session_key="cli:1"))
+        assert result == "archived=5"
+
+    def test_execute_service_exception_returns_tool_error(self):
+        """Ошибка сервиса — ToolResult.error (не raise)."""
+        from workspace.tools.compact_context import CompactContextTool
+
+        class FailingService:
+            enabled = True
+
+            async def compact(self, **_):
+                raise RuntimeError("boom")
+
+            def format_report(self, _):
+                return ""
+
+        tool = CompactContextTool(service=FailingService())
+        import asyncio
+        result = asyncio.run(tool.execute(session_key="cli:1"))
+        from nanobot.agent.tools.base import ToolResult
+        assert isinstance(result, ToolResult)
+        assert result.is_error is True
+        assert "boom" in str(result)
+
+    def test_tool_metadata(self):
+        """name/description/parameters — стабильный контракт для LLM."""
+        from workspace.tools.compact_context import CompactContextTool
+
+        assert CompactContextTool.name.fget(CompactContextTool) == "compact_context"
+        desc = CompactContextTool.description.fget(CompactContextTool)
+        assert "сжать" in desc.lower()
+        params = CompactContextTool.parameters.fget(CompactContextTool)
+        assert params["type"] == "object"
+        assert "session_key" in params["properties"]
+        assert "idle" in params["properties"]
+
+
+class TestCompactContextToolRegistered:
+    """Проверка, что tool реально регистрируется через ``patch_project_tools``."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self):
+        import sys
+        to_drop = [k for k in sys.modules if k.startswith("workspace.tools.")]
+        for k in to_drop:
+            del sys.modules[k]
+        yield
+        for k in to_drop:
+            sys.modules.pop(k, None)
+
+    def test_patch_project_tools_registers_compact_context(self, tmp_path, monkeypatch):
+        """Если ``gateway.compact.enabled=true`` — tool появляется в agent.tools."""
         from lib.services.runtime_patcher import RuntimePatcher
 
-        ok, _detail = RuntimePatcher().patch_compact_tool(
-            agent, settings=_settings(enabled=True),
-        )
-        assert ok is True
-        agent.tools.register.assert_called_once()
+        # Минимальный workspace с компактным tool
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "__init__.py").write_text("")
+        # Копируем реальный модуль в tmp_path
+        import shutil
+        src = Path(__file__).parent.parent / "workspace" / "tools" / "compact_context.py"
+        shutil.copy(src, tools_dir / "compact_context.py")
 
-    def test_skips_when_disabled(self, monkeypatch):
+        # Mock agent + settings
         agent = MagicMock()
-        agent.tools.register = MagicMock()
-        monkeypatch.setattr(
-            "lib.services.context_compaction.ContextCompactionService",
-            lambda *_a, **_k: SimpleNamespace(enabled=False),
-        )
-        from lib.services.runtime_patcher import RuntimePatcher
+        agent.tools.get.return_value = None
 
-        ok, detail = RuntimePatcher().patch_compact_tool(
-            agent, settings=_settings(enabled=False),
+        class _CompactSec:
+            enabled = True
+        class _Gw:
+            compact = _CompactSec()
+        class _Settings:
+            gateway = _Gw()
+        settings = _Settings()
+
+        # Настраиваем tools_config: только compact (для enabled())
+        class _TCSec:
+            enable = True
+        class _TC:
+            compact = _TCSec()
+        agent.tools_config = _TC()
+
+        # Workspace_ctx
+        agent.workspace = str(tmp_path)
+        agent.bus = MagicMock()
+        agent.subagents = MagicMock()
+        agent.cron_service = MagicMock()
+        agent._exec_session_manager = MagicMock()
+        agent.sessions = MagicMock()
+        agent.file_states = MagicMock()
+        agent.provider_snapshot_loader = MagicMock()
+        agent._image_generation_provider_configs = {}
+        ctx_obj = MagicMock()
+        ctx_obj.timezone = "UTC"
+        agent.context = ctx_obj
+        agent.workspace_scopes = MagicMock()
+        agent.workspace_scopes.sandbox_status = None
+        agent.runtime_events = MagicMock()
+
+        ok, msg = RuntimePatcher().patch_project_tools(
+            agent, tmp_path, settings=settings,
         )
-        assert ok is False
-        assert "enabled=false" in detail
-        agent.tools.register.assert_not_called()
+        assert ok is True, msg
+        registered = [
+            c.args[0].name for c in agent.tools.register.call_args_list
+        ]
+        assert "compact_context" in registered, msg
+
+
+from pathlib import Path
 
 
 class TestRecordExternalCompaction:

@@ -231,6 +231,22 @@
       "enabled": true,                 // Зарегистрировать tool compact_context и обрабатывать /compact в CLI
       "notify_in_history": true,       // Писать заметку о сжатии в agent_conversation_messages (видно в Streamlit)
       "print_to_terminal": false       // Дублировать заметку в терминал gateway (по образцу print_worker_activity)
+    },
+    //  audit_predefined.* — tool audit_run_predefined_script (workspace/tools/audit_analyzer_tool.py).
+    //  Выполнение готовых SQL-скриптов из реестра public.agent_predefined_scripts.
+    //  Все ключи опциональны; дефолты в AuditPredefinedToolConfig.
+    "audit_predefined": {
+      "enable": true,                  // Зарегистрировать tool audit_run_predefined_script
+      "max_result_chars": 16000        // Обрезка вывода в контекст LLM
+    },
+    //  audit_vector.* — tool audit_search_vector (workspace/tools/audit_analyzer_tool.py).
+    //  Семантический поиск по FAISS-индексу (Ollama embeddings).
+    //  Все ключи опциональны; дефолты в AuditVectorToolConfig.
+    "audit_vector": {
+      "enable": true,                  // Зарегистрировать tool audit_search_vector
+      "default_top_k": 5,              // Дефолт количества результатов
+      "default_index_name": "audits_index",
+      "max_result_chars": 16000        // Обрезка вывода в контекст LLM
     }
   },
 

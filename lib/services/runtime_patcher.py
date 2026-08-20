@@ -162,8 +162,8 @@ class RuntimePatcher:
         self._record(report, "async_save", self.patch_async_session_saves(agent))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager))
-        self._record(report, "compact_tool", self.patch_compact_tool(
-            agent, settings))
+        self._record(report, "project_tools", self.patch_project_tools(
+            agent, workspace_dir, settings=settings))
         self._record(report, "compact_tracking", self.patch_compaction_tracking(
             agent, settings))
         return report
@@ -179,6 +179,27 @@ class RuntimePatcher:
             report.applied.append(name)
         else:
             report.skipped.append((name, detail))
+
+    @staticmethod
+    def _format_workspace_hint(workspace_dir: Any) -> str:
+        """Краткая подсказка с путём до workspace/tools в лог-сообщении.
+
+        Используется в логах ``patch_project_tools``, чтобы оператор сразу
+        видел, откуда грузились tool'ы. Если пути нет — пустая строка.
+        """
+        if not workspace_dir:
+            return ""
+        from pathlib import Path as _P
+
+        path = _P(workspace_dir)
+        tools_dir = path / "tools"
+        if not tools_dir.is_dir():
+            return f"(searched: {tools_dir} — not found)"
+        count = sum(
+            1 for f in tools_dir.glob("*.py") if not f.name.startswith("_")
+        )
+        plural = "module" if count == 1 else "modules"
+        return f"scanned {tools_dir} ({count} {plural})"
 
     # ------------------------------------------------------------------
     # Патч 2b: seed лимита окна в мост контекста на старте оборота
@@ -1035,38 +1056,204 @@ class RuntimePatcher:
         return True, "SubagentManager._SubagentHook patched for DB logging"
 
     # ------------------------------------------------------------------
-    # Патч 4: agent.tools.register(CompactContextTool) — ручное сжатие
+    # Патч 4: auto-discover и регистрация пользовательских tool'ов
+    #         из workspace/tools/*.py
     # ------------------------------------------------------------------
 
-    def patch_compact_tool(
-        self, agent: Any, settings: Any
+    def patch_project_tools(
+        self, agent: Any, workspace_dir: Any,
+        *, settings: Any = None,
     ) -> Tuple[bool, str]:
-        """Зарегистрировать tool ``compact_context`` (ручное сжатие контекста).
+        """Зарегистрировать кастомные tool'ы из ``workspace/tools/*.py``.
 
-        Регистрирует ``CompactContextTool`` в ``agent.tools``. Tool вызывает
-        штатный ``Consolidator`` через ``ContextCompactionService`` (см.
-        ``lib/services/context_compaction.py``). Управляется секцией
-        ``gateway.compact.*`` в ``project.json``; при
-        ``gateway.compact.enabled=false`` патч — no-op.
+        Использует встроенные механизмы nanobot:
+
+          * ``pkgutil.iter_modules`` по ``workspace/tools/`` (как
+            ``ToolLoader.discover`` в ``nanobot/agent/tools/loader.py:37``);
+          * ``Tool.enabled(ctx)`` / ``Tool.create(ctx)`` (как
+            ``ToolLoader.load`` в ``loader.py:86-118``);
+          * ``ToolRegistry.register`` (см.
+            ``nanobot/agent/tools/registry.py:30``).
+
+        ``ToolContext`` собирается из полей ``AgentLoop`` тем же способом,
+        что в ``AgentLoop._register_default_tools`` (``loop.py:597-630``).
+        В вашей версии nanobot ``ToolContext.__init__`` не принимает
+        ``metadata``, поэтому дополнительные DI-ссылки (``agent``,
+        ``settings``) пробрасываются через ``setattr``:
+
+          * ``ctx._agent_ref`` — ``AgentLoop`` (для tool'ов, которым нужен
+            ``agent.consolidator`` и т.п.);
+          * ``ctx._settings_ref`` — ``SETTINGS`` (для чтения ``gateway.*``
+            секций, не дублированных в ``config.tools.*``).
+
+        Конфликты имён (например, если свой tool назван ``exec``) не
+        затирают встроенные — те, что уже в ``agent.tools``, пропускаются.
+
+        Args:
+            agent: ``AgentLoop``.
+            workspace_dir: ``Path`` — корень workspace, в нём лежит
+                ``tools/`` с модулями кастомных tool'ов.
+            settings: ``SETTINGS`` (опционально) — для ``ctx._settings_ref``.
+                Если ``None``, tool'ы, которым нужен settings, получат
+                ``None`` и сами решают, как с этим жить.
 
         Returns:
-            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+            ``(True, "<N> tools registered: <names>")`` или
+            ``(False, "<причина>")``.
         """
         if agent is None:
             return False, "agent is None"
         try:
-            from lib.services.context_compaction import ContextCompactionService
-            from lib.tools.compact_context_tool import CompactContextTool
+            import importlib.util
+            import pkgutil
+            import sys as _sys
+
+            from pathlib import Path as _P
+
+            tools_dir = _P(workspace_dir) / "tools"
+            if not tools_dir.is_dir():
+                return True, "workspace/tools not found — skip"
+
+            imported: list[str] = []
+            for _imp, mod_name, _ispkg in pkgutil.iter_modules([str(tools_dir)]):
+                if mod_name.startswith("_"):
+                    continue
+                full = f"workspace.tools.{mod_name}"
+                if full in _sys.modules:
+                    continue
+                try:
+                    file_path = tools_dir / f"{mod_name}.py"
+                    spec = importlib.util.spec_from_file_location(
+                        full, str(file_path)
+                    )
+                    if spec is None or spec.loader is None:
+                        logger.warning(
+                            "Failed to build spec for {}", full
+                        )
+                        continue
+                    module = importlib.util.module_from_spec(spec)
+                    _sys.modules[full] = module
+                    try:
+                        spec.loader.exec_module(module)
+                        imported.append(full)
+                    except Exception:
+                        _sys.modules.pop(full, None)
+                        raise
+                except Exception:
+                    logger.exception("Failed to import {}", full)
+
+            from nanobot.agent.tools.base import Tool as _T
+
+            candidates: list[type] = []
+            seen_ids: set[int] = set()
+            for mod_name in list(_sys.modules):
+                if not mod_name.startswith("workspace.tools."):
+                    continue
+                module = _sys.modules.get(mod_name)
+                if module is None:
+                    continue
+                for attr_name in dir(module):
+                    cls = getattr(module, attr_name, None)
+                    if not (isinstance(cls, type) and issubclass(cls, _T)):
+                        continue
+                    if cls is _T:
+                        continue
+                    if getattr(cls, "__abstractmethods__", None):
+                        continue
+                    if id(cls) in seen_ids:
+                        continue
+                    seen_ids.add(id(cls))
+                    candidates.append(cls)
+
+            if not candidates:
+                return True, (
+                    "no project tools found" + (
+                        f" (imported: {', '.join(imported)})" if imported else ""
+                    )
+                )
+
+            from nanobot.agent.tools.context import ToolContext
+
+            ctx = ToolContext(
+                config=getattr(agent, "tools_config", None),
+                workspace=str(getattr(agent, "workspace", workspace_dir)),
+                bus=getattr(agent, "bus", None),
+                subagent_manager=getattr(agent, "subagents", None),
+                cron_service=getattr(agent, "cron_service", None),
+                exec_session_manager=getattr(agent, "_exec_session_manager", None),
+                sessions=getattr(agent, "sessions", None),
+                file_state_store=getattr(agent, "file_states", None),
+                provider_snapshot_loader=getattr(
+                    agent, "provider_snapshot_loader", None
+                ),
+                image_generation_provider_configs=getattr(
+                    agent, "_image_generation_provider_configs", None
+                ),
+                timezone=getattr(
+                    getattr(agent, "context", None), "timezone", "UTC"
+                ) or "UTC",
+                workspace_sandbox=getattr(
+                    getattr(agent, "workspace_scopes", None),
+                    "sandbox_status", None
+                ),
+                runtime_events=getattr(agent, "runtime_events", None),
+            )
+            # ``agent`` не входит в ToolContext по контракту nanobot — кладём
+            # отдельным атрибутом, чтобы tool'ы с DI-сервисами (например,
+            # CompactContextTool) могли его получить через
+            # ``getattr(ctx, "_agent_ref", None)``.
+            setattr(ctx, "_agent_ref", agent)
+            if settings is not None:
+                setattr(ctx, "_settings_ref", settings)
+
+            registered: list[str] = []
+            skipped_disabled: list[str] = []
+            skipped_duplicate: list[str] = []
+            failed: list[str] = []
+            for cls in candidates:
+                try:
+                    if not cls.enabled(ctx):
+                        skipped_disabled.append(cls.__name__)
+                        continue
+                    tool = cls.create(ctx)
+                    if agent.tools.get(tool.name) is not None:
+                        skipped_duplicate.append(tool.name)
+                        continue
+                    agent.tools.register(tool)
+                    registered.append(tool.name)
+                except Exception:
+                    logger.exception("Failed to register {}", cls.__name__)
+                    failed.append(cls.__name__)
+
+            detail = f"{len(registered)} project tools registered"
+            if registered:
+                detail += f": {', '.join(registered)}"
+            if skipped_disabled:
+                detail += (
+                    f"; {len(skipped_disabled)} disabled by config: "
+                    f"{', '.join(skipped_disabled)}"
+                )
+            if skipped_duplicate:
+                detail += (
+                    f"; {len(skipped_duplicate)} already registered: "
+                    f"{', '.join(skipped_duplicate)}"
+                )
+            if failed:
+                detail += f"; {len(failed)} failed: {', '.join(failed)}"
+            # Логируем итог через INFO — иначе пользователь не видит,
+            # что проектные tool'ы реально подхватились (в nanobot
+            # ``Registered N tools`` логируется только для builtin
+            # внутри ``AgentLoop._register_default_tools``).
+            logger.info(
+                "Custom (project) tools: {} — {}",
+                detail,
+                self._format_workspace_hint(workspace_dir),
+            )
+            return True, detail
+
         except Exception as exc:
-            return False, f"import failed: {exc}"
-        try:
-            svc = ContextCompactionService(agent, settings=settings)
-            if not svc.enabled:
-                return False, "gateway.compact.enabled=false"
-            agent.tools.register(CompactContextTool(svc))
-        except Exception as exc:
+            logger.exception("patch_project_tools failed: {}", exc)
             return False, f"patch failed: {exc}"
-        return True, "compact_context tool registered"
 
     # ------------------------------------------------------------------
     # Патч 5: авто-сжатие → заметка в agent_conversation_messages
