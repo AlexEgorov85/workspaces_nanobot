@@ -328,7 +328,7 @@ class PostgresChannel(BaseChannel):
             if own:
                 rows = await conn.fetch(
                     f"DELETE FROM {self._fq_claims} WHERE lease_until < NOW() "
-                    f"AND NOT (task_id = ANY(%s) AND worker_id = %s) "
+                    f"AND NOT (task_id = ANY(%s::uuid[]) AND worker_id = %s) "
                     f"RETURNING task_id, worker_id",
                     own, self._worker_id,
                 )

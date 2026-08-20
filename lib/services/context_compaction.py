@@ -3,9 +3,11 @@
 Три входа — один путь записи (заметка в ``agent_conversation_messages``,
 loguru INFO, опциональный Rich-вывод в терминал gateway):
 
-  1. **Ручной запуск** через CLI-команду ``/compact``
+  1. **Ручной запуск**: slash-команда ``/compact``
+     (``lib/commands/compact_command.py`` + регистрация
+     ``RuntimePatcher.patch_compact_command``), CLI-команда ``/compact``
      (``lib/cli/console_loop.py::_run_cli_compact``) или tool агента
-     ``compact_context`` (``lib/tools/compact_context_tool.py``).
+     ``compact_context`` (``workspace/tools/compact_context.py``).
      Метод :py:meth:`compact` сам зовёт штатный ``Consolidator`` из
      nanobot 0.3.0 (``maybe_consolidate_by_tokens`` /
      ``compact_idle_session``), замеряет состояние сессии до/после
@@ -82,6 +84,7 @@ class ContextCompactionService:
         session_key: Optional[str] = None,
         *,
         idle: bool = False,
+        force: bool = False,
         max_suffix: int = 8,
     ) -> dict:
         """Сжать контекст сессии и вернуть отчёт.
@@ -91,6 +94,11 @@ class ContextCompactionService:
                 context (когда tool вызван внутри оборота).
             idle: ``True`` — жёсткое idle-сжатие (``compact_idle_session``),
                 ``False`` — token-budget сжатие (``maybe_consolidate_by_tokens``).
+            force: ``True`` — ручной запуск: жёстко сжать сессию
+                (``compact_idle_session``) **независимо от порога токенов**.
+                ``idle`` указывать необязательно: ``force`` уже подразумевает
+                жёсткое усечение. Используется CLI-командой ``/compact`` и
+                tool'ом ``compact_context`` при пустых аргументах.
             max_suffix: сколько последних сообщений оставить при idle-сжатии.
 
         Returns:
@@ -119,9 +127,10 @@ class ContextCompactionService:
         before_cursor = int(getattr(session, "last_consolidated", 0) or 0)
         before_tokens, _ = await self._estimate(session, runtime)
 
+        use_idle = bool(idle or force)
         summary: Optional[str] = None
         try:
-            if idle:
+            if use_idle:
                 result = await consolidator.compact_idle_session(
                     session_key, runtime=runtime, max_suffix=max_suffix,
                 )
@@ -150,14 +159,14 @@ class ContextCompactionService:
         after_msgs = len(getattr(fresh, "messages", []) or [])
         after_tokens, _ = await self._estimate(fresh, runtime)
 
-        if idle:
+        if use_idle:
             archived = max(0, before_msgs - after_msgs)
         else:
             archived = max(0, after_cursor - before_cursor)
 
         report = {
             "session_key": session_key,
-            "mode": "idle" if idle else "token",
+            "mode": "idle" if use_idle else "token",
             "ok": True,
             "archived_msgs": archived,
             "kept_msgs": after_msgs,
@@ -216,11 +225,53 @@ class ContextCompactionService:
 
     async def _estimate(self, session: Any, runtime: Any) -> tuple[int, str]:
         try:
-            return await self.agent.consolidator.estimate_session_prompt_tokens(
+            est = self.agent.consolidator.estimate_session_prompt_tokens(
                 session, runtime=runtime,
             )
+            if hasattr(est, "__await__"):
+                est = await est
+            if not isinstance(est, tuple) or len(est) != 2:
+                raise TypeError(
+                    f"estimate_session_prompt_tokens returned {type(est).__name__}, expected tuple"
+                )
+            return est
         except Exception as exc:
-            logger.debug("estimate_session_prompt_tokens failed: {}", exc)
+            logger.warning(
+                "estimate_session_prompt_tokens failed for {}: {}",
+                getattr(session, "key", "?"), exc,
+            )
+            return self._estimate_fallback(session, runtime)
+
+    @staticmethod
+    def _estimate_fallback(session: Any, runtime: Any) -> tuple[int, str]:
+        """Грубая fallback-оценка токенов, если ``estimate_session_prompt_tokens`` упал.
+
+        Считаем примерный размер по ``messages``: ~4 символа ≈ 1 токен (общепринятая
+        эвристика для англоязычных и смешанных текстов). Используется только когда
+        нативный метод бросил исключение — чтобы логи/отчёт не врали «0 токенов» при
+        реальном размере промпта в десятки тысяч токенов.
+        """
+        try:
+            msgs = getattr(session, "messages", []) or []
+            total_chars = 0
+            for m in msgs:
+                content = ""
+                if isinstance(m, dict):
+                    content = m.get("content") or ""
+                else:
+                    content = getattr(m, "content", "") or ""
+                if isinstance(content, list):
+                    content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+                total_chars += len(str(content))
+            approx_tokens = max(1, total_chars // 4)
+            limit = int(getattr(runtime, "context_window_tokens", 0) or 0)
+            used_pct = (approx_tokens / limit * 100.0) if limit > 0 else 0.0
+            chain = (
+                f"[fallback] ~{approx_tokens} токенов по {len(msgs)} сообщ., "
+                f"{used_pct:.0f}% от {limit}"
+            )
+            return approx_tokens, chain
+        except Exception:
             return 0, ""
 
     @staticmethod
@@ -329,6 +380,7 @@ class ContextCompactionService:
 
         text = self.format_report(report)
         try:
+            import asyncio as _asyncio
             from psycopg2.extras import Json
             from utils.db import configure, execute
         except Exception as exc:
@@ -337,7 +389,13 @@ class ContextCompactionService:
 
         try:
             configure(dsn)
-            await execute(
+            # ``utils.db.execute`` — sync-функция (DEVELOPMENT.md § ``ctx.config``
+            # vs ``ctx._settings_ref``: используем ~тот же threading-обход,
+            # что и для sync-IO в ``postgres_channel``). Без ``asyncio.to_thread``
+            # ``await execute(...)`` падает на ``'str' object can't be awaited``
+            # (execute возвращает command tag, а не корутину).
+            await _asyncio.to_thread(
+                execute,
                 f'INSERT INTO "{schema}"."{table}" '
                 "(chat_id, user_id, role, content, media, metadata, "
                 "buttons, status, created_at, updated_at) "

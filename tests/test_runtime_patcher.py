@@ -597,6 +597,62 @@ class TestPatchAsyncSessionSaves:
         sessions._async_save_executor.shutdown(wait=True)
 
 
+class TestPatchCompactCommand:
+    """``patch_compact_command`` — регистрация ``/compact`` как slash-команды."""
+
+    def test_registers_exact_and_prefix(self):
+        from functools import partial
+
+        from lib.commands.compact_command import cmd_compact
+
+        class _Commands:
+            def __init__(self):
+                self.exact_reg = {}
+                self.prefix_reg = []
+
+            def exact(self, cmd, handler):
+                self.exact_reg[cmd] = handler
+
+            def prefix(self, pfx, handler):
+                self.prefix_reg.append((pfx, handler))
+
+        class _Agent:
+            commands = _Commands()
+
+        patcher = RuntimePatcher()
+        ok, detail = patcher.patch_compact_command(_Agent(), _settings())
+        assert ok, detail
+        assert "/compact" in _Agent.commands.exact_reg
+        handler = _Agent.commands.exact_reg["/compact"]
+        assert isinstance(handler, partial)
+        assert handler.func is cmd_compact
+        assert any(pfx == "/compact " for pfx, _ in _Agent.commands.prefix_reg)
+
+    def test_missing_commands_skipped(self):
+        class _Agent:
+            pass
+
+        patcher = RuntimePatcher()
+        ok, detail = patcher.patch_compact_command(_Agent(), _settings())
+        assert ok is False
+        assert "commands" in detail
+
+    def test_apply_all_includes_compact_command(self):
+        agent = MagicMock()
+        original_return = MagicMock()
+        original_return.metadata = {}
+        agent._assemble_outbound.return_value = original_return
+        hook = MagicMock()
+        hook.drain.return_value = []
+
+        patcher = RuntimePatcher()
+        report = patcher.apply_all(
+            MagicMock(), _settings(persist_threshold=0), Path("ws"), agent, hook,
+            db_logging_service=None,
+        )
+        assert "compact_command" in report.to_dict()["applied"]
+
+
 class TestApplyAll:
     def test_report_contents(self):
         agent = MagicMock()

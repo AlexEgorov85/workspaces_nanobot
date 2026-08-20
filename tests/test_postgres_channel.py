@@ -713,7 +713,7 @@ class TestPostgresChannelReclaimAndHeal:
         call = mock_conn.fetch.call_args
         sql, params = call.args[0], call.args[1]
         assert "NOT" in sql
-        assert "task_id = ANY(%s)" in sql
+        assert "task_id = ANY(%s::uuid[])" in sql
         assert "own-msg-1" in params
 
 

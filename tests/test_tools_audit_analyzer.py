@@ -521,7 +521,17 @@ class TestPredefinedScriptsProvider:
         # ``_load_scripts_list`` ждёт dict с ключом ``"predefined"``,
         # у которого есть метод ``list_all_scripts()``.
         def fake_load(cls):
-            return {"predefined": SimpleNamespace(list_all_scripts=fake_list)}
+            # ``_load_scripts_list`` ожидает ``db_loader`` (для ``set_provider``)
+            # и ``skill_config`` (для ``build_cache_provider``).
+            return {
+                "predefined": SimpleNamespace(list_all_scripts=fake_list),
+                "db_loader": SimpleNamespace(set_provider=lambda _p: None),
+                "skill_config": SimpleNamespace(
+                    build_cache_provider=lambda: SimpleNamespace(
+                        open_cache=lambda: True
+                    )
+                ),
+            }
 
         monkeypatch.setattr(
             _AuditToolBase,
@@ -553,6 +563,41 @@ class TestPredefinedScriptsProvider:
             _AuditToolBase,
             "_load_predefined_modules",
             classmethod(fake_load_raises),
+        )
+
+        AuditRunPredefinedScriptTool._scripts_cache = None
+        result = AuditRunPredefinedScriptTool._load_scripts_list()
+        assert result == []
+
+    def test_load_scripts_list_skips_when_cache_not_openable(self, monkeypatch):
+        """Если DuckDB-кэш открыть не удалось — пустой список, не raise."""
+        import workspace.skills.audit_analyzer.scripts.skill_config as skill_config_mod
+
+        from workspace.tools.audit_analyzer_tool import (
+            AuditRunPredefinedScriptTool,
+            _AuditToolBase,
+        )
+
+        # ``_load_scripts_list`` импортирует ``build_cache_provider`` из
+        # реального модуля skill_config — патчим атрибут модуля, чтобы
+        # подменить провайдера (фейк внутри ``_load_predefined_modules``
+        # реальный модуль не читает).
+        monkeypatch.setattr(
+            skill_config_mod,
+            "build_cache_provider",
+            lambda: SimpleNamespace(open_cache=lambda: False),
+        )
+
+        def fake_load(cls):
+            return {
+                "predefined": SimpleNamespace(list_all_scripts=lambda: ["bad"]),
+                "db_loader": SimpleNamespace(set_provider=lambda _p: None),
+            }
+
+        monkeypatch.setattr(
+            _AuditToolBase,
+            "_load_predefined_modules",
+            classmethod(fake_load),
         )
 
         AuditRunPredefinedScriptTool._scripts_cache = None

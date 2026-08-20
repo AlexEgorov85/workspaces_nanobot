@@ -60,16 +60,37 @@ class CompactToolConfig(BaseModel):
         },
         "idle": {
             "type": "boolean",
+            "default": False,
             "description": (
                 "Жёсткое idle-сжатие: оставить последние сообщения, "
-                "остальное суммаризовать. По умолчанию false — "
-                "token-budget сжатие (``maybe_consolidate_by_tokens``)."
+                "остальное суммаризовать. Аналог ``force=true`` ниже; "
+                "оставлено для обратной совместимости."
+            ),
+        },
+        "force": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Ручной запуск — безоговорочно сжать сессию жёстко "
+                "(``compact_idle_session``), игнорируя порог токенов. "
+                "Дефолт ``true`` соответствует семантике команды "
+                "``/compact``: пользователь явно попросил сжать, а пустой "
+                "вызов ``compact_context({})`` трактуется как ручной запрос. "
+                "Передайте явно ``false``, чтобы вернуться к token-budget "
+                "режиму (``maybe_consolidate_by_tokens``)."
             ),
         },
     },
 })
 class CompactContextTool(Tool):
-    """Сжать контекст текущего (или указанного) диалога."""
+    """Сжать контекст текущего (или указанного) диалога.
+
+    По умолчанию сжимает жёстко (``force=true``): пользователь явно
+    позвал tool — значит, нужно сжать сейчас, независимо от размера.
+    ``idle`` — алиас ``force``. ``force=false`` переключает в token-budget
+    режим (``maybe_consolidate_by_tokens``), который пропустит сессию,
+    если она ниже ``consolidationRatio``.
+    """
 
     config_key: ClassVar[str] = "compact"
     _plugin_discoverable: ClassVar[bool] = False
@@ -127,13 +148,16 @@ class CompactContextTool(Tool):
         self,
         session_key: str | None = None,
         idle: bool = False,
+        force: bool = True,
         **_kwargs: Any,
     ) -> str:
         if not getattr(self._service, "enabled", True):
             return "Сжатие контекста отключено (gateway.compact.enabled=false)."
         try:
             report = await self._service.compact(
-                session_key=session_key, idle=bool(idle),
+                session_key=session_key,
+                idle=bool(idle),
+                force=bool(force),
             )
         except Exception as exc:
             return ToolResult.error(f"Error: compact failed: {exc}")

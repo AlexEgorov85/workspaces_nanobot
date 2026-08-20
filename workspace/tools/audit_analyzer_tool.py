@@ -409,7 +409,23 @@ class AuditRunPredefinedScriptTool(_AuditToolBase):
             )
 
             provider = build_cache_provider()
+            # Провайдер собирается с закрытым DuckDB-кэшем (_conn=None);
+            # до чтения реестра его нужно открыть, иначе query_sql вернёт
+            # "Cache is not ready".
+            if not provider.open_cache():
+                raise RuntimeError(
+                    "SQL-кэш не готов: не удалось открыть DuckDB-кэш "
+                    "(файл создаёт/обновляет gateway — AuditSyncService)."
+                )
+            # predefined.py внутренне импортирует ``from db_loader import
+            # load_registry`` под обычным именем ``db_loader`` — это отдельный
+            # инстанс модуля в sys.modules, НЕ наш ``_audit_db_loader``.
+            # Поэтому провайдера нужно инжектировать и в него, иначе
+            # get_provider() внутри load_registry() бросит "провайдер не задан".
             mods["db_loader"].set_provider(provider)
+            plain_loader = sys.modules.get("db_loader")
+            if plain_loader is not None and plain_loader is not mods["db_loader"]:
+                plain_loader.set_provider(provider)
             scripts = mods["predefined"].list_all_scripts()
         except Exception as exc:
             logger.warning(

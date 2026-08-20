@@ -126,10 +126,17 @@ async def _run_cli_compact(
     chat_id: str,
     cli_channel: str,
 ) -> None:
-    """Обработать CLI-команду ``/compact``: сжать контекст и напечатать отчёт.
+    """Обработать CLI-команду ``/compact``: безоговорочно сжать контекст.
 
     ``command`` — полная входная строка (``/compact`` или ``/compact idle``).
-    ``idle`` включается флагами ``idle``/``--idle``/``-i`` в любом месте строки.
+
+    Ручной запуск **всегда** сжимает сессию жёстко (``compact_idle_session``),
+    независимо от текущего размера контекста и порога ``consolidationRatio``.
+    Это требование явного пользовательского действия: ``/compact`` = «хочу
+    уменьшить контекст прямо сейчас». Флаги ``idle``/``--idle``/``-i``
+    допустимы для совместимости и поведения не меняют (``force=True`` уже
+    подразумевает ``idle``).
+
     Session key собирается как ``"<cli_channel>:<chat_id>"`` — он совпадает
     с ключом, который nanobot создаёт при ``publish_inbound`` (формат
     ``<channel>:<chat_id>``).
@@ -140,7 +147,7 @@ async def _run_cli_compact(
     idle = any(t in ("idle", "--idle", "-i") for t in tokens[1:])
     svc = ContextCompactionService(agent, settings=None)
     session_key = f"{cli_channel}:{chat_id}"
-    report = await svc.compact(session_key=session_key, idle=idle)
+    report = await svc.compact(session_key=session_key, idle=idle, force=True)
     text = svc.format_report(report)
     if not report.get("ok"):
         console.print(f"[yellow]🗜️ {text}[/yellow]")

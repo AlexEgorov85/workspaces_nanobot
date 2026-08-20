@@ -166,6 +166,8 @@ class RuntimePatcher:
             agent, workspace_dir, settings=settings))
         self._record(report, "compact_tracking", self.patch_compaction_tracking(
             agent, settings))
+        self._record(report, "compact_command", self.patch_compact_command(
+            agent, settings))
         return report
 
     @staticmethod
@@ -1300,6 +1302,42 @@ class RuntimePatcher:
         except Exception as exc:
             return False, f"patch failed: {exc}"
         return True, "auto compaction tracking patched"
+
+    def patch_compact_command(
+        self, agent: Any, settings: Any
+    ) -> Tuple[bool, str]:
+        """Зарегистрировать команду ``/compact`` в ``CommandRouter`` агента.
+
+        ``/compact`` — это настоящая slash-команда (по образцу ``cmd_new``
+        из ``nanobot/command/builtin.py``). На любом канале (postgres,
+        streamlit, telegram) она срабатывает ДЕТЕРМИНИРОВАННО ДО LLM:
+        ``run()`` видит зарегистрированную команду в router'е и
+        обрабатывает её через ``_state_command`` / ``_dispatch_command_inline``,
+        не отправляя сообщение модели. Так ``/compact`` всегда сжимает
+        сессию безоговорочно (``force=True``), а не «по усмотрению» LLM.
+
+        Без этой регистрации ``/compact`` уходит в LLM как обычное
+        user-сообщение, и модель часто отвечает текстом «сжатие не
+        требуется», не вызывая tool — это и есть исходная проблема.
+
+        Регистрируем:
+          * ``exact("/compact")`` — точное совпадение;
+          * ``prefix("/compact ")`` — ``/compact idle`` (для совместимости).
+        """
+        from functools import partial
+
+        from lib.commands.compact_command import cmd_compact
+
+        commands = getattr(agent, "commands", None)
+        if commands is None:
+            return False, "agent.commands is missing"
+        handler = partial(cmd_compact, settings=settings)
+        try:
+            commands.exact("/compact", handler)
+            commands.prefix("/compact ", handler)
+        except Exception as exc:
+            return False, f"register failed: {exc}"
+        return True, "/compact registered as slash command"
 
     @staticmethod
     def _wrap_auto_compact_archive(agent: Any, svc: Any) -> None:

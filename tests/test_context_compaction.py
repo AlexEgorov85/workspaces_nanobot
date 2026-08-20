@@ -262,6 +262,197 @@ class TestCompact:
         assert "LLM down" in report["reason"]
 
 
+class TestEstimateFallback:
+    """``_estimate_fallback`` возвращает грубую оценку, если нативный метод упал."""
+
+    def test_estimate_fallback_by_chars(self):
+        msgs = [
+            {"role": "user", "content": "x" * 4000},
+            {"role": "assistant", "content": "y" * 4000},
+        ]
+        session = SimpleNamespace(messages=msgs)
+        runtime = SimpleNamespace(context_window_tokens=65536)
+        tokens, chain = ContextCompactionService._estimate_fallback(session, runtime)
+        assert tokens == 2000
+        assert "fallback" in chain
+        assert "2 сообщ" in chain
+
+    def test_estimate_fallback_empty_messages(self):
+        session = SimpleNamespace(messages=[])
+        runtime = SimpleNamespace(context_window_tokens=65536)
+        tokens, _ = ContextCompactionService._estimate_fallback(session, runtime)
+        assert tokens == 1  # max(1, 0)
+
+    def test_estimate_uses_fallback_when_native_fails(self):
+        consolidator = MagicMock()
+        consolidator.estimate_session_prompt_tokens = AsyncMock(
+            side_effect=RuntimeError("provider not ready"),
+        )
+        consolidator.maybe_consolidate_by_tokens = AsyncMock()
+        sessions = MagicMock()
+        before = SimpleNamespace(
+            key="cli:1", messages=[{"role": "user", "content": "x" * 4000}],
+            last_consolidated=0, metadata={},
+        )
+        after = SimpleNamespace(
+            key="cli:1", messages=[{"role": "user", "content": "x" * 4000}],
+            last_consolidated=0, metadata={},
+        )
+        sessions.get_or_create = MagicMock(side_effect=[before, after])
+        runtime = MagicMock()
+        runtime.context_window_tokens = 65536
+
+        agent = MagicMock()
+        agent.consolidator = consolidator
+        agent.sessions = sessions
+        agent.runtime_for_session = MagicMock(return_value=runtime)
+
+        svc = ContextCompactionService(agent, settings=_settings())
+        report = asyncio.run(svc.compact(session_key="cli:1"))
+        assert report["ok"] is True
+        # Оценка теперь не 0, а ~1000 токенов (4000 chars / 4)
+        assert report["tokens_before"] == 1000
+        assert report["tokens_after"] == 1000
+
+
+class TestCmdCompact:
+    """``cmd_compact`` (lib/commands/compact_command.py) — slash-команда /compact.
+
+    Возвращает ``OutboundMessage`` и всегда вызывает ``svc.compact(force=True)``,
+    независимо от размера контекста (детерминированно, до LLM).
+    """
+
+    def _ctx(self, **svc_cls):
+        from types import SimpleNamespace
+
+        msg = SimpleNamespace(channel="postgres", chat_id="streamlit", metadata={})
+        loop = SimpleNamespace(key="postgres:streamlit")
+        return SimpleNamespace(
+            loop=loop,
+            key="postgres:streamlit",
+            raw="/compact",
+            msg=msg,
+        ), svc_cls
+
+    def test_returns_outbound_message(self, monkeypatch):
+        from lib.commands.compact_command import cmd_compact
+
+        class FakeService:
+            enabled = True
+
+            def __init__(self, agent, settings=None):
+                pass
+
+            async def compact(self, **kwargs):
+                return {
+                    "ok": True, "archived_msgs": 5, "kept_msgs": 4,
+                    "tokens_before": 100, "tokens_after": 10,
+                    "summary": "x", "mode": "idle",
+                }
+
+            def format_report(self, report):
+                return f"ok archived={report['archived_msgs']}"
+
+        monkeypatch.setattr(
+            "lib.services.context_compaction.ContextCompactionService", FakeService,
+        )
+
+        import asyncio
+        ctx, _ = self._ctx()
+        result = asyncio.run(cmd_compact(ctx))
+
+        from nanobot.bus.events import OutboundMessage
+        from lib.utils.outbound_meta import FINAL_TURN_KEY
+        assert isinstance(result, OutboundMessage)
+        assert "archived=5" in result.content
+        assert result.metadata.get(FINAL_TURN_KEY) is True
+
+    def test_always_force_true_and_idle_parsed(self, monkeypatch):
+        from lib.commands.compact_command import cmd_compact
+
+        captured = {}
+
+        class FakeService:
+            enabled = True
+
+            def __init__(self, agent, settings=None):
+                pass
+
+            async def compact(self, **kwargs):
+                captured["kwargs"] = kwargs
+                return {
+                    "ok": True, "archived_msgs": 1, "kept_msgs": 1,
+                    "tokens_before": 100, "tokens_after": 10,
+                    "summary": None, "mode": "idle",
+                }
+
+            def format_report(self, report):
+                return f"ok"
+
+        monkeypatch.setattr(
+            "lib.services.context_compaction.ContextCompactionService", FakeService,
+        )
+
+        import asyncio
+        ctx, _ = self._ctx()
+        ctx.raw = "/compact idle"
+        asyncio.run(cmd_compact(ctx))
+        assert captured["kwargs"]["force"] is True
+        assert captured["kwargs"]["idle"] is True
+
+    def test_disabled_reports_disabled(self, monkeypatch):
+        from lib.commands.compact_command import cmd_compact
+
+        class FakeService:
+            enabled = False
+
+            def __init__(self, agent, settings=None):
+                pass
+
+        monkeypatch.setattr(
+            "lib.services.context_compaction.ContextCompactionService", FakeService,
+        )
+
+        import asyncio
+        ctx, _ = self._ctx()
+        result = asyncio.run(cmd_compact(ctx))
+        assert "отключено" in result.content
+
+    def test_partial_passes_settings(self, monkeypatch):
+        from functools import partial
+
+        from lib.commands.compact_command import cmd_compact
+
+        seen = {}
+
+        class FakeService:
+            enabled = True
+
+            def __init__(self, agent, settings=None):
+                seen["settings"] = settings
+
+            async def compact(self, **kwargs):
+                return {
+                    "ok": True, "archived_msgs": 1, "kept_msgs": 1,
+                    "tokens_before": 1, "tokens_after": 1,
+                    "summary": None, "mode": "idle",
+                }
+
+            def format_report(self, report):
+                return "ok"
+
+        monkeypatch.setattr(
+            "lib.services.context_compaction.ContextCompactionService", FakeService,
+        )
+
+        settings = object()
+        handler = partial(cmd_compact, settings=settings)
+        import asyncio
+        ctx, _ = self._ctx()
+        asyncio.run(handler(ctx))
+        assert seen["settings"] is settings
+
+
 class TestCompactContextTool:
     """Тесты ``CompactContextTool`` (workspace/tools/compact_context.py).
 
@@ -395,6 +586,56 @@ class TestCompactContextTool:
         import asyncio
         result = asyncio.run(tool.execute(session_key="cli:1"))
         assert result == "archived=5"
+
+    def test_execute_empty_call_defaults_to_force(self):
+        """Пустой вызов ``compact_context({})`` (= ручная просьба) → ``force=True``.
+
+        Воспроизводит реальный сценарий из логов: LLM зовёт tool без
+        аргументов, и Python-сигнатура должна подставить ``force=True``
+        (не ``False``), иначе сжатие возвращается к token-budget режиму
+        и «нечего сжимать». JSON-schema-дефолт nanobot НЕ применяется.
+        """
+        from workspace.tools.compact_context import CompactContextTool
+
+        captured = {}
+
+        class OkService:
+            enabled = True
+
+            async def compact(self, **kwargs):
+                captured["kwargs"] = kwargs
+                return {"ok": True, "archived_msgs": 7}
+
+            def format_report(self, report):
+                return f"archived={report['archived_msgs']}"
+
+        tool = CompactContextTool(service=OkService())
+        import asyncio
+        result = asyncio.run(tool.execute())
+        assert result == "archived=7"
+        assert captured["kwargs"].get("force") is True
+        assert captured["kwargs"].get("idle") is False
+
+    def test_execute_explicit_force_false_allows_token_mode(self):
+        """Явный ``force=False`` переключает в token-budget режим."""
+        from workspace.tools.compact_context import CompactContextTool
+
+        captured = {}
+
+        class OkService:
+            enabled = True
+
+            async def compact(self, **kwargs):
+                captured["kwargs"] = kwargs
+                return {"ok": True, "archived_msgs": 0}
+
+            def format_report(self, report):
+                return f"archived={report['archived_msgs']}"
+
+        tool = CompactContextTool(service=OkService())
+        import asyncio
+        asyncio.run(tool.execute(force=False))
+        assert captured["kwargs"].get("force") is False
 
     def test_execute_service_exception_returns_tool_error(self):
         """Ошибка сервиса — ToolResult.error (не raise)."""

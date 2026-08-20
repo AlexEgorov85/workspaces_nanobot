@@ -368,7 +368,8 @@ TestDatabaseLoggingHookFactory.test_concurrent_sessions_do_not_mix_request_id`
 flowchart LR
     subgraph manual["Ручной запуск"]
         TOOL["compact_context<br/>(AgentTool)"]
-        CLI["/compact<br/>(console_loop)"]
+        SLASH["/compact<br/>(slash-command)"]
+        CLI["/compact<br/>(console_loop REPL)"]
     end
     subgraph auto["Авто-сжатие nanobot"]
         AC["AutoCompact._archive<br/>(idle)"]
@@ -376,6 +377,7 @@ flowchart LR
     end
 
     TOOL --> SVC
+    SLASH --> SVC
     CLI --> SVC
     AC --> W1["runtime_patcher.<br/>_wrap_auto_compact_archive"]
     MC --> W2["runtime_patcher.<br/>_wrap_maybe_consolidate_by_tokens"]
@@ -392,24 +394,39 @@ flowchart LR
 
 **Точки входа:**
 
-1. **CLI-команда ``/compact``** (`lib/cli/console_loop.py::_run_cli_compact`).
-   В `run_repl` после проверки `_is_exit_command` добавлен перехват:
-   ``if command == "/compact" or command.startswith("/compact ")``.
+1. **Настоящая slash-команда ``/compact``** —
+   `lib/commands/compact_command.py::cmd_compact`, регистрируется
+   `RuntimePatcher.patch_compact_command` в `agent.commands`
+   (`CommandRouter`), где это единственный путь, общий для всех каналов
+   (postgres, streamlit, telegram). В `run()` зарегистрированные команды
+   перехватываются **до** LLM (``_dispatch_command_inline`` /
+   ``_state_command``), поэтому сжатие срабатывает детерминированно и
+   безоговорочно, а не «по усмотрению» модели. Handler ставит
+   ``FINAL_TURN_KEY="_final_turn"`` в outbound (см. «Воркеры не берут
+   задачи»), зовёт ``svc.compact(session_key=ctx.key, idle=..., force=True)``.
+
+2. **CLI-команда ``/compact``** (`lib/cli/console_loop.py::_run_cli_compact`).
+   Приватный путь REPL: в `run_repl` после проверки `_is_exit_command`
+   перехват ``if command == "/compact" or command.startswith("/compact ")``.
    Создаёт локальный `ContextCompactionService(agent, settings=None)`
    (в CLI нет `SETTINGS`, но `_write_history_notice` сам отключается —
-   нет `channels.postgres.dsn`), зовёт `compact(session_key="cli:<chat_id>")`,
-   печатает отчёт Rich-цветом (cyan/yellow). Поддерживает флаги
-   `idle` / `--idle` / `-i` для жёсткого idle-сжатия.
+   нет `channels.postgres.dsn`), зовёт
+   ``svc.compact(session_key="cli:<chat_id>", force=True)``, печатает
+   отчёт Rich-цветом (cyan/yellow). Флаги `idle` / `--idle` / `-i`
+   допустимы для совместимости, поведение не меняют (``force=True``
+   уже подразумевает жёсткое idle-сжатие).
 
-2. **Tool ``compact_context``** (`workspace/tools/compact_context.py`).
-   Регистрируется патчем `runtime_patcher.patch_project_tools` в
-   `apply_all` (см. `lib/services/runtime_patcher.py`). Параметры:
+3. **Tool ``compact_context``** (`workspace/tools/compact_context.py`),
+   регистрируется `RuntimePatcher.patch_project_tools` в `apply_all`
+   (см. `lib/services/runtime_patcher.py`). Параметры:
    `session_key: str | None` (по умолчанию — текущая из
-   `current_request_session_key()`), `idle: bool`. Вызывает
-   `svc.compact(...)`, возвращает текст отчёта как результат тула —
-   агент может его пересказать пользователю.
+   `current_request_session_key()`), ``idle: bool=False``, ``force: bool=True``.
+   Пустой вызов ``compact_context({})`` (= ручная просьба пользователя)
+   трактуется как ``force=True`` — жёсткое сжатие независимо от порога
+   токенов (JSON-schema-дефолт nanobot не применяется, значение подставляет
+   Python-сигнатура). Явный ``force=False`` возвращает в token-budget режим.
 
-3. **Авто-сжатие** — обёртки `patch_compaction_tracking` в
+4. **Авто-сжатие** — обёртки `patch_compaction_tracking` в
    `runtime_patcher`:
    * `_wrap_auto_compact_archive` (`agent.auto_compact._archive`) —
      перед/после вызова замеряет `last_consolidated` и `tokens`,
@@ -419,6 +436,27 @@ flowchart LR
      (`agent.consolidator.maybe_consolidate_by_tokens`) — то же:
      diff `last_consolidated` до/после; если сдвинулся — пишет
      заметку через `record_external_compaction`.
+
+Ручной вход ``/compact`` имеет два обработчика одного слова: slash-команда
+в ``CommandRouter`` (сетевые каналы) и перехват в REPL. Оба ставят
+``force=True``.
+
+**Семантика ``force``.** ``ContextCompactionService.compact(session_key, *,
+idle=False, force=False, max_suffix=8)``: если ``idle or force`` — идёт
+жёсткое усечение ``consolidator.compact_idle_session``, иначе — token-budget
+``maybe_consolidate_by_tokens`` (пропустит сессию ниже ``consolidationRatio``).
+``force=True`` выражает явное пользовательское действие (``/compact`` или
+ручной вызов tool'а) и игнорирует порог токенов. Ручные пути (slash-команда,
+CLI, пустой вызов tool'а) всегда ``force=True``; только явный
+``force=False`` возвращает в token-budget режим.
+
+**Оценка размера сессии.** ``_estimate`` зовёт нативный
+``consolidator.estimate_session_prompt_tokens`` (может быть sync или async).
+Если он бросил исключение — ``_estimate_fallback`` даёт грубую оценку по
+``~4 символа = 1 токен`` из ``session.messages`` (chain-строка помечается
+``[fallback]``), чтобы отчёт/логи не писали «0 токенов» при реальном размере
+в десятки тысяч. Fallback-значение идёт и в ``tokens_before``/``tokens_after``,
+и в заметку ``metadata.compact``.
 
 **Единый путь записи.** Ручной запуск зовёт `compact()`, авто —
 `record_external_compaction(...)`. Оба заканчиваются вызовом
@@ -487,7 +525,7 @@ async def _notify(self, session_key, report):
 
 | Ключ | Дефолт | Эффект |
 |---|---|---|
-| `gateway.compact.enabled` | `true` | Регистрировать tool `compact_context` и обрабатывать `/compact` в CLI. При `false` патч пропускается, CLI-команда возвращает «отключено». |
+| `gateway.compact.enabled` | `true` | Регистрировать tool `compact_context`, slash-команду `/compact` и обрабатывать `/compact` в CLI. При `false` патчи пропускаются, все пути возвращают «отключено». |
 | `gateway.compact.notify_in_history` | `true` | Писать заметки в `agent_conversation_messages` (ручные и авто). |
 | `gateway.compact.print_to_terminal` | `false` | Дублировать отчёт в Rich-вывод gateway (по образцу `print_worker_activity`). |
 
@@ -536,15 +574,20 @@ async def _notify(self, session_key, report):
 сессии serialized. Обёртки `runtime_patcher` не добавляют
 синхронизации и не делают двойных вызовов.
 
-**Тесты:** `tests/test_context_compaction.py` (24 теста):
+**Тесты:** `tests/test_context_compaction.py` (41 тест):
 
 * `TestFormatReport` — формат отчёта: failure, idle-no-archive,
   with-archive+summary, summary-truncation, summary-`nothing`-marker,
   archive-no-summary.
+* `TestEstimateFallback` — `_estimate_fallback` по символам, пустые
+  сообщения, использование fallback, когда нативный метод падает.
 * `TestCompact` — ручной путь: disabled-failure, missing-session-key,
   token-compaction-archives-and-reports, idle-mode, idle-no-archive,
   compactor-failure, session-state-relies-on-nanobot-consolidator,
   no-extra-message-in-session.
+* `TestCmdCompact` — `cmd_compact` (slash-команда): возвращает
+  `OutboundMessage` с `_final_turn`, всегда `force=True`, парсит `idle`,
+  почитает `enabled=false`, прокидывает `settings` через `partial`.
 * `TestCompactContextTool` — `CompactContextTool.enabled`/`create`/`execute`
   (стандартный nanobot-паттерн, читает `gateway.compact.*` через
   `ctx._settings_ref`).
@@ -558,6 +601,37 @@ async def _notify(self, session_key, report):
   archive-wrapper зовёт `record_external_compaction`,
   skip когда авто не архивирует,
   maybe-consolidate-wrapper зовёт `record_external_compaction`.
+
+#### Переопределение шаблонов nanobot: `workspace/overrides/`
+
+`lib/services/consolidator_locale.py` подкладывает каталог `workspace/overrides/`
+в Jinja2-loader шаблонов nanobot на старте приложения (`ApplicationContext.start()`),
+поэтому любой системный промпт можно переопределить без правки пакета.
+
+**Механизм.** `nanobot.utils.prompt_templates._environment()` кэшируется
+`@lru_cache` и возвращает один и тот же `Environment`; `apply_template_overrides()`
+меняет у него `loader` на `ChoiceLoader`, который сначала ищет файл в
+`workspace/overrides/`, затем в штатных `templates/`. Мутация того же объекта
+видна всем `render_template(...)`, патчить функцию не нужно. Идемпотентен;
+при отсутствии каталога — no-op (используются штатные шаблоны).
+
+**Правило размещения.** Файлы кладутся под
+`workspace/overrides/<имя шаблона, как оно передаётся в render_template>`,
+например `workspace/overrides/agent/consolidator_archive.md` переопределяет
+`agent/consolidator_archive.md`.
+
+**Сейчас в `workspace/overrides/`:**
+
+* `agent/consolidator_archive.md` — русскоязычная инструкция Consolidator
+  (базовая часть шаблона + правило «пиши факты на языке диалога»). Без него
+  Consolidator извлекал бы факты на английском даже из русских диалогов.
+  Это делает его единственным источником инструкции для
+  `Consolidator.compact_idle_session` / `maybe_consolidate_by_tokens`
+  (render `nanobot/agent/memory.py` при каждом сжатии).
+
+**Тесты:** `tests/test_consolidator_locale.py` — приоритет override-файла,
+fallback на штатный шаблон при отсутствии файла, идемпотентность, no-op при
+отсутствии каталога, корректный путь по умолчанию.
 
 #### `metadata` JSONB в `agent_conversation_messages`: полный справочник
 
@@ -994,6 +1068,60 @@ outbound). Все остальные сообщения `send()` merge'ит в a
 об инварианте `processing ⇔ claim` (или repair). Ключевой гейт — оптимизированный
 интеграционный тест `tests/integration/test_worker_pool_concurrency.py`
 (кейсы C1–C5, opt-in через `NANOBOT_INTEGRATION=1`).
+
+#### Воркеры не берут задачи — «зависшая» `processing`-задача блокирует чат
+
+**Симптом.** `очередь: pending=1, pending=2, …` растёт, но в логе нет строки
+`→ worker … взял задачу`, и задачи не уходят из `pending`.
+
+**Первопричина.** `_claim_one` выбирает кандидата только из чата БЕЗ активной
+`user`-задачи в статусе `processing` (условие `NOT EXISTS (... m2.status='processing'
+в том же chat_id)`, `postgres_channel.py`). Если в чате застряла хоть одна задача в
+`processing`, **весь чат блокируется** — все его новые `pending`-сообщения не берутся.
+
+**Почему задача зависает в `processing`:**
+- воркер (gateway-процесс) был убит жёстко (`Ctrl+Break`, `kill -9`, отвал хоста),
+  не успев `_release_all_leases`/`_finalize_turn` — claim остался живым на время
+  `processing_timeout` (lease ещё не истёк), задача висит `processing`;
+- shortcut slash-команда (например, `/compact`), которая **минует**
+  `_assemble_outbound`, не кладётся `_final_turn` и не финализируется →
+  `send()` merge'ит ответ, `status` остаётся `processing`, claim не освобождается.
+
+**Важно про `check_worker_pool_integrity.py`.** Он находит рассинхроны инварианта
+`processing ⇔ claim` и **истёкшие** lease. Случай «живой lease мёртвого воркера» он
+НЕ видит: инвариант соблюдён (задача `processing`, claim есть, lease не истёк), поэтому
+отчитывается `[OK]`, хотя чат фактически заблокирован. Только после истечения lease
+`_reclaim_and_heal` вернёт задачу в пул и разблокирует чат (до `processing_timeout`).
+
+**Найти заблокированный чат (read-only):**
+```sql
+-- какие user-задачи висят в processing и у кого их claim
+SELECT id, chat_id FROM public.agent_conversation_messages
+WHERE role='user' AND status='processing';
+
+SELECT c.task_id, c.worker_id, c.lease_until > NOW() AS live_lease, c.lease_until
+FROM public.agent_worker_claims c ORDER BY c.claimed_at DESC;
+```
+Если `live_lease = true` у claim, чей `worker_id` — уже несуществующий процесс
+(мёртвый gateway), значит воркер не вернёт его, пока lease не истёк.
+
+**Разблокировать сейчас (сброс зависшей задачи в пул, заменяет ожидание lease):**
+```sql
+-- 1. снять claim мёртвого воркера
+DELETE FROM public.agent_worker_claims WHERE task_id = '<task_id>';
+-- 2. вернуть задачу в пул, чтобы её репроцессил живый воркер
+UPDATE public.agent_conversation_messages
+SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
+```
+После этого живой воркер возьмёт задачу в течение `poll_interval`, и чат разблокируется.
+
+**Профилактика (правило `_final_turn`).** Любой обработчик, возвращающий финальный
+`OutboundMessage` в обход `_assemble_outbound` (shortcut-команда, синтетический финал),
+обязан ставить в `metadata` `FINAL_TURN_KEY="_final_turn"` (из `lib/utils/outbound_meta.py`).
+Иначе `postgres_channel.send()` трактует ответ как промежуточную публикацию и НЕ
+финализирует оборот → `status='completed'` не ставится, claim/слот не освобождаются,
+чата блокируется. Пример корректного паттерна — `lib/commands/compact_command.py`
+(ставит `_final_turn` во все свои `OutboundMessage`).
 
 ### `lib/services/llm_client.py` — единая точка вызова LLM
 

@@ -28,20 +28,39 @@
   `tests/test_console_loop.py::TestPrintContextWindow`.
 
 - **Ручное сжатие контекста** — `ContextCompactionService`
-  (`lib/services/context_compaction.py`) + `CompactContextTool`
-  (`lib/tools/compact_context_tool.py`, регистрация через
-  `runtime_patcher.patch_compact_tool`) + CLI-команда `/compact`
-  (`lib/cli/console_loop.py`). Обёртка над штатным
-  `Consolidator.maybe_consolidate_by_tokens` / `compact_idle_session`
-  nanobot 0.3.0: замеряет `tokens_before`/`tokens_after`, `archived_msgs`,
-  возвращает отчёт и при `archived > 0` пишет заметку
-  (`metadata.kind="context_compact"`, `role='assistant'`,
-  `status='completed'`) в `agent_conversation_messages` — она видна в
-  Streamlit как стиль `.compact-notice`, но НЕ попадает в контекст
-  промпта (контекст строится из `PGSessionManager`). Управляется
-  секцией `gateway.compact.*` в `project.json` (`enabled`,
-  `notify_in_history`, `print_to_terminal`; все опциональны,
-  дефолт `true`/`true`/`false`).
+  (`lib/services/context_compaction.py`) — единая точка записи факта
+  сжатия. Четыре ручных/авто-входа: настоящая slash-команда `/compact`
+  (`lib/commands/compact_command.py`, регистрация через
+  `RuntimePatcher.patch_compact_command` в `CommandRouter` — детерминированно
+  **до** LLM на любом канале: postgres, streamlit, telegram), CLI-команда
+  `/compact` (`lib/cli/console_loop.py`), tool `compact_context`
+  (`workspace/tools/compact_context.py`; старый `lib/tools/compact_context_tool.py`
+  и `patch_compact_tool` удалены, регистрация через `patch_project_tools`)
+  и авто-сжатие nanobot (обёртки `patch_compaction_tracking`). Обёртка над
+  штатным `Consolidator.maybe_consolidate_by_tokens` / `compact_idle_session`
+  nanobot 0.3.0: замеряет `tokens_before`/`tokens_after` (при падении нативного
+  `estimate_session_prompt_tokens` — `_estimate_fallback` по символам),
+  `archived_msgs` и возвращает отчёт. Ручные пути ставят `force=True`
+  (жёсткое сжатие независимо от порога токенов — явная команда пользователя);
+  явный `force=False` возвращает в token-budget режим. При `archived > 0`
+  пишется заметка (`metadata.kind="context_compact"`, `role='assistant'`,
+  `status='completed'`) в `agent_conversation_messages` — видна в Streamlit
+  как стиль `.compact-notice`, но НЕ попадает в контекст промпта (контекст
+  строится из `PGSessionManager`). Управляется секцией `gateway.compact.*`
+  в `project.json` (`enabled`, `notify_in_history`, `print_to_terminal`;
+  все опциональны, дефолт `true`/`true`/`false`).
+- **Переопределение системных шаблонов nanobot из `workspace/overrides/`** —
+  `lib/services/consolidator_locale.py` на старте приложения
+  (`ApplicationContext.start()`) подкладывает каталог `workspace/overrides/`
+  в Jinja2-loader шаблонов nanobot (`ChoiceLoader` с приоритетом
+  переопределений; `_environment()` кэшируется, поэтому правится тот же
+  объект; идемпотентно, при отсутствии каталога — no-op). Файлы кладутся
+  по имени шаблона, как в `render_template`, например
+  `workspace/overrides/agent/consolidator_archive.md`. Сейчас переопределён
+  `agent/consolidator_archive.md` — русскоязычная инструкция Consolidator
+  (правило «пиши факты на языке диалога»), чтобы факты из русских диалогов
+  извлекались на русском. Тесты: `tests/test_consolidator_locale.py`.
+
 - **Заметки о сжатии в истории диалога для всех путей** — патч
   `runtime_patcher.patch_compaction_tracking` оборачивает
   `AutoCompact._archive` (idle) и `Consolidator.maybe_consolidate_by_tokens`
@@ -190,16 +209,6 @@
   `workspace/tools/example.py`. Тесты:
   `tests/test_tools_project_loader.py`.
 
-- **Tool `compact_context` переведён на стандартный nanobot-паттерн**
-  (без своего DI-сервиса) и перенесён из `lib/tools/compact_context_tool.py`
-  в `workspace/tools/compact_context.py`. Регистрируется через
-  `patch_project_tools` (а не через отдельный `patch_compact_tool`,
-  который удалён). Использует `ctx._agent_ref` и `ctx._settings_ref` для
-  доступа к `AgentLoop` и `SETTINGS` (читает `gateway.compact.*` через
-  стандартный pydantic-путь). Конфиг в `project.json` →
-  `gateway.compact.*` (обратно совместимо). `lib/tools/` удалён как
-  каталог.
-
 - **Tool'ы `audit_run_predefined_script` и `audit_search_vector`** — нативный
   дубль skill'а `audit_analyzer`. По конвенции nanobot (один tool = одно
   действие, см. `_FsTool` в `nanobot/agent/tools/filesystem.py`) разделены
@@ -329,6 +338,24 @@
   `test_cli_agent.py`, `test_application_context.py` (новые регрессионные
   `test_auto_scan_hooks_includes_session_file_redirect` и
   `test_agent_created_once_with_merged_hooks`).
+
+- **Reclaim-запрос неверно собирался на PostgreSQL без явного каста типа.**
+  `PostgresChannel._release_all_leases` строил `task_id = ANY(%s)` без
+  приведения к `uuid[]`; на некоторых БД (psycopg2/greenplum) параметр
+  интерпретировался как `text[]`, и очистка чужих истёкших lease не
+  срабатывала. Каст явно указан: `ANY(%s::uuid[])`.
+
+- **`ContextCompactionService._write_history_notice` вызывал sync-функцию
+  через `await`.** `utils.db.execute` возвращает command tag, а не корутину —
+  `await execute(...)` падал на `'str' object can't be awaited`. Теперь вызов
+  обёрнут в `asyncio.to_thread` (как sync-IO в `postgres_channel`).
+
+- **`AuditRunPredefinedScriptTool` мог вернуть «Cache is not ready» на
+  пустом кэше.** Провайдер собирался с закрытым DuckDB-кэшем; перед чтением
+  реестра теперь вызывается `provider.open_cache()`, а провайдер дополнительно
+  инжектируется и в «плоский» `sys.modules["db_loader"]` (отдельный инстанс
+  модуля внутри `predefined.py`), иначе `get_provider()` внутри
+  `load_registry()` бросал «провайдер не задан».
 
 ### Changed
 

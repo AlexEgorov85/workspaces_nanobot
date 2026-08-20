@@ -263,6 +263,17 @@ class ApplicationContext:
 
         self._shutdown = ShutdownCoordinator()
 
+        # Переопределения системных шаблонов nanobot из workspace/overrides/
+        # (например, русская инструкция Consolidator). Безопасно-идемпотентно;
+        # при отсутствии каталога молча пропускается.
+        try:
+            from lib.services.consolidator_locale import apply_template_overrides
+
+            if apply_template_overrides():
+                logger.info("Template overrides active: workspace/overrides")
+        except Exception as exc:
+            logger.warning("Template overrides not applied: %s", exc)
+
         # Стартуем общий пул соединений (воркеры подключаются лениво при
         # первой задаче, но пул уже создан и подхватил pool-конфиг).
         _start_db_pool()
