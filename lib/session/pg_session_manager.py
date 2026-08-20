@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -85,6 +86,7 @@ class PGSessionManager(SessionManager):
         self._fq_messages = self._quote(f"{schema}.{messages_table}")
         # кеш загруженных сессий (Session → key)
         self._cache: dict[str, Session] = {}
+        self._cache_lock = threading.RLock()
         if dsn:
             from utils.db import configure as _cfg
             _cfg(dsn)
@@ -99,12 +101,14 @@ class PGSessionManager(SessionManager):
 
     def get_or_create(self, key: str) -> Session:
         """Вернуть сессию по ключу (из кеша или из БД), создав если нет."""
-        if key in self._cache:
-            return self._cache[key]
+        with self._cache_lock:
+            if key in self._cache:
+                return self._cache[key]
         session = self._load(key)
         if session is None:
             session = Session(key=key)
-        self._cache[key] = session
+        with self._cache_lock:
+            self._cache[key] = session
         return session
 
     def _load(self, key: str) -> Session | None:
@@ -237,7 +241,8 @@ class PGSessionManager(SessionManager):
 
     def invalidate(self, key: str) -> None:
         """Удалить сессию из кеша (не из БД)."""
-        self._cache.pop(key, None)
+        with self._cache_lock:
+            self._cache.pop(key, None)
 
     def delete_session(self, key: str) -> bool:
         """Удалить сессию из БД и из кеша. Ошибка БД пробрасывается.
@@ -342,7 +347,9 @@ class PGSessionManager(SessionManager):
         упало, остальные всё равно сохраняются (ошибка логируется).
         """
         flushed = 0
-        for key, session in list(self._cache.items()):
+        with self._cache_lock:
+            items = list(self._cache.items())
+        for key, session in items:
             try:
                 self.save(session)
                 flushed += 1

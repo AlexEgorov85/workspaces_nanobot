@@ -482,6 +482,110 @@ class TestPool:
         holder.join(timeout=5)
         queued.join(timeout=5)
 
+    def test_third_transaction_waits_for_free_worker(self, mock_psycopg2):
+        """Сценарий из прода: при занятых 2 воркерах 3-я транзакция
+        ждёт в очереди и дожидается (вместо PoolTimeoutError)."""
+        mock_psycopg2["set_pool_config"]({"min_conn": 2, "max_conn": 2})
+        mock_psycopg2["configure"]("dsn")
+
+        both_held = threading.Event()
+        release = threading.Event()
+        results = []
+
+        def _tx(name):
+            try:
+                with mock_psycopg2["transaction"]() as conn:
+                    conn.execute("UPDATE t SET x=1 WHERE name=%s", name)
+                    both_held.set()
+                    assert release.wait(timeout=10)
+                    results.append(name)
+            except Exception as exc:  # pragma: no cover
+                results.append(f"{name}:{exc!r}")
+
+        ta = threading.Thread(target=_tx, args=("a",))
+        tb = threading.Thread(target=_tx, args=("b",))
+        ta.start(); tb.start()
+        assert both_held.wait(timeout=10)
+
+        third_result = []
+
+        def _third():
+            try:
+                with mock_psycopg2["transaction"]() as conn:
+                    conn.execute("UPDATE t SET x=2")
+                third_result.append("ok")
+            except Exception as exc:
+                third_result.append(f"err:{exc!r}")
+
+        tc = threading.Thread(target=_third)
+        tc.start()
+        time.sleep(0.3)
+        # третья ещё ждёт в очереди, но НЕ падает с ошибкой
+        assert third_result == []
+        release.set()
+        ta.join(timeout=10); tb.join(timeout=10)
+        tc.join(timeout=10)
+        assert third_result == ["ok"]
+        assert sorted(results) == ["a", "b"]
+
+    def test_lease_released_when_begin_fails(self, mock_psycopg2):
+        """Утечка лиза: если begin-задача падает, воркер возвращается в пул."""
+        mock_psycopg2["set_pool_config"]({"min_conn": 1, "max_conn": 1})
+        mock_psycopg2["configure"]("dsn")
+        mock_psycopg2["mock_cur"].fetchone.return_value = (1,)
+        _db = mock_psycopg2["_db"]
+
+        with patch(
+            "utils.db.DBManager._begin_tx",
+            side_effect=RuntimeError("begin boom"),
+        ):
+            with pytest.raises(RuntimeError, match="begin boom"):
+                with mock_psycopg2["transaction"]() as conn:
+                    pass
+
+        mgr = _db._get_manager()
+        assert mgr._lease_workers == {}
+        assert all(w._lease_id == 0 for w in mgr._workers)
+        # пул снова работает: обычная операция выполняется
+        assert mock_psycopg2["fetchval"]("SELECT 1") == 1
+
+    def test_lease_waiter_released_on_shutdown(self, mock_psycopg2):
+        """Ждущая транзакция при shutdown не висит вечно — получает
+        RuntimeError, а не блокируется навсегда."""
+        mock_psycopg2["set_pool_config"]({"min_conn": 1, "max_conn": 1})
+        mock_psycopg2["configure"]("dsn")
+        _db = mock_psycopg2["_db"]
+        mgr = _db._get_manager()
+
+        held = threading.Event()
+
+        def _keeper():
+            with mock_psycopg2["transaction"]() as conn:
+                conn.execute("UPDATE t SET x=1")
+                held.set()
+                time.sleep(10)
+
+        t = threading.Thread(target=_keeper, daemon=True)
+        t.start()
+        assert held.wait(timeout=5)
+
+        waiter_result = []
+
+        def _waiter():
+            try:
+                with mock_psycopg2["transaction"]() as conn:
+                    conn.execute("SELECT 1")
+                waiter_result.append("ok")
+            except Exception as exc:
+                waiter_result.append(type(exc).__name__)
+
+        w = threading.Thread(target=_waiter, daemon=True)
+        w.start()
+        time.sleep(0.3)  # waiter уже в queue-ожидании lease
+        mgr.shutdown()
+        w.join(timeout=5)
+        assert waiter_result == ["RuntimeError"]
+
     def test_unconnected_worker_yields_to_connected(self, mock_psycopg2):
         """Неподключённый воркер не отнимает задачи у подключённых.
 

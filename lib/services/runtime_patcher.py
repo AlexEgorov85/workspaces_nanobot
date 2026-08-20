@@ -17,10 +17,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys as _sys
 from typing import Any, Optional, Tuple
+
+from loguru import logger
 
 from lib.utils.node_access import get_path as _get
 
@@ -109,6 +113,7 @@ class RuntimePatcher:
         self._record(report, "tool_limits", self.patch_tool_limits(settings))
         self._record(report, "assemble_outbound", self.patch_assemble_outbound(
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
+        self._record(report, "async_save", self.patch_async_session_saves(agent))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager))
         return report
@@ -316,6 +321,82 @@ class RuntimePatcher:
 
         agent._save_turn = _wrap
         return True, "AgentLoop._save_turn patched for archiving"
+
+    # ------------------------------------------------------------------
+    # Патч 1c: синхронный sessions.save из async-контекста → executor
+    # ------------------------------------------------------------------
+
+    def patch_async_session_saves(self, agent: Any) -> Tuple[bool, str]:
+        """Не блокировать event loop синхронным ``sessions.save()``.
+
+        ``nanobot.agent.loop`` вызывает ``self.sessions.save(...)`` синхронно
+        из async-методов (``_state_restore``/``_state_build``/
+        ``_state_command``/``_state_save``/``_dispatch``). Пока save ждёт
+        в очереди пула БД, event loop заморожен, а async-транзакции канала
+        (poll/flush/lease) в это время не могут завершиться — возникает
+        взаимная блокировка.
+
+        Патч оборачивает ``agent.sessions.save``:
+
+          * из потока event loop — реальное сохранение выполняется в едином
+            последовательном executor (снимок сессии фиксируется на момент
+            вызова), вызывающий код возвращается сразу; порядок сохранений
+            гарантирован очередью executor'а; ошибки логируются;
+          * из остальных потоков (``flush_all``, shutdown, REST-хендлеры) —
+            исполняется синхронно, как раньше.
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+        """
+        if agent is None:
+            return False, "agent is None"
+        sessions = getattr(agent, "sessions", None)
+        if sessions is None:
+            return False, "agent.sessions is missing"
+        original = getattr(sessions, "save", None)
+        if original is None:
+            return False, "agent.sessions.save is missing"
+        try:
+            from nanobot.session.manager import Session
+        except Exception as exc:
+            return False, f"import failed: {exc}"
+
+        executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="session-save",
+        )
+
+        def _snapshot(session: Any) -> Any:
+            return Session(
+                key=session.key,
+                messages=list(session.messages),
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+                metadata=dict(session.metadata or {}),
+                last_consolidated=session.last_consolidated,
+            )
+
+        def _log_save_error(future) -> None:
+            exc = future.exception()
+            if exc is not None:
+                logger.opt(exception=exc).error(
+                    "Async session save failed"
+                )
+
+        def _wrapped_save(session: Any, fsync: bool = False) -> Any:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # вне loop — синхронный вызов, как раньше
+                return original(session, fsync=fsync)
+            snapshot = _snapshot(session)
+            future = executor.submit(original, snapshot, fsync=fsync)
+            future.add_done_callback(_log_save_error)
+            return None
+
+        sessions.save = _wrapped_save
+        sessions._async_save_executor = executor
+        return True, "agent.sessions.save wrapped with background executor"
 
     @staticmethod
     def _bump_schema_max(cls: Any, names: tuple, maximum: int) -> bool:

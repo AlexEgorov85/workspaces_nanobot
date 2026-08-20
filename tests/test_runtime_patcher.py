@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -525,6 +527,74 @@ class TestPatchSubagentLogging:
             assert h1._db_hook is not h2._db_hook
         finally:
             subagent_mod._SubagentHook = original
+
+
+class TestPatchAsyncSessionSaves:
+    def test_agent_none_skipped(self):
+        patcher = RuntimePatcher()
+        ok, detail = patcher.patch_async_session_saves(None)
+        assert not ok
+        assert "agent is None" in detail
+
+    def test_missing_sessions_skipped(self):
+        agent = MagicMock()
+        agent.sessions = None
+        patcher = RuntimePatcher()
+        ok, detail = patcher.patch_async_session_saves(agent)
+        assert not ok
+        assert "agent.sessions is missing" in detail
+
+    def test_non_loop_call_runs_synchronously(self):
+        agent = MagicMock()
+        sessions = MagicMock()
+        agent.sessions = sessions
+        calls = []
+
+        def _fake_save(session, fsync=False):
+            calls.append(("save", getattr(session, "key", "?"), fsync))
+
+        sessions.save = _fake_save
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_async_session_saves(agent)
+        assert ok
+
+        session = MagicMock()
+        session.key = "k"
+        sessions.save(session, fsync=True)
+        assert calls == [("save", "k", True)]
+
+    @pytest.mark.asyncio
+    async def test_loop_call_deferred_to_executor(self):
+        agent = MagicMock()
+        sessions = MagicMock()
+        agent.sessions = sessions
+        fired = threading.Event()
+        received = []
+
+        def _fake_save(session, fsync=False):
+            received.append((session.key, fsync))
+            time.sleep(0.05)
+            fired.set()
+
+        sessions.save = _fake_save
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_async_session_saves(agent)
+        assert ok
+
+        session = MagicMock()
+        session.key = "k1"
+        session.messages = [{"role": "user", "content": "hi"}]
+        session.metadata = {"a": 1}
+        session.created_at = 123
+        session.updated_at = 124
+        session.last_consolidated = 0
+
+        result = sessions.save(session, fsync=False)
+        assert result is None  # вызывает только возвращается сразу, не блокируя loop
+        await asyncio.sleep(0.15)
+        assert fired.is_set()
+        assert received == [("k1", False)]
+        sessions._async_save_executor.shutdown(wait=True)
 
 
 class TestApplyAll:

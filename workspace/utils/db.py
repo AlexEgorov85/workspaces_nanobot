@@ -11,7 +11,9 @@
     последовательно;
   * ``transaction()`` / ``async_transaction()`` получают ЭКСКЛЮЗИВНУЮ аренду
     конкретного соединения (lease_id): пока транзакция открыта, это
-    соединение не берёт чужие задачи;
+    соединение не берёт чужие задачи; при исчерпании пула транзакция
+    ЧЕСТНО ЖДЁТ в очереди освобождения воркера (``pool_timeout`` — порог
+    диагностического warning, а не лимит ожидания);
   * при обрыве соединение закрывается и пересоздаётся с backoff — без
     «шторма» из десятков параллельных connect;
   * воркер без живого соединения (не смог подключиться после
@@ -457,9 +459,14 @@ class DBManager:
 
     def _acquire_lease(self) -> int:
         self._ensure_started()
+        waited = 0.0
+        warned_steps = -1
         with self._cond:
-            deadline = time.monotonic() + self._pool_timeout
             while True:
+                if not self._running:
+                    raise RuntimeError(
+                        "DB pool is shutting down while waiting for lease"
+                    )
                 free = next((w for w in self._workers if w._lease_id == 0), None)
                 if free is None and len(self._workers) < self._max_conn:
                     free = self._spawn_worker()
@@ -470,17 +477,35 @@ class DBManager:
                     self._lease_workers[lease_id] = free
                     self._stats["lease_acquired"] += 1
                     break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise PoolTimeoutError(
-                        f"no free DB connection after {self._pool_timeout}s "
-                        f"(pool {len(self._workers)}/{self._max_conn})"
+                # Транзакция честно ждёт в очереди освобождения воркера
+                # (как обычные job-ы), вместо таймаута с ошибкой. pool_timeout
+                # теперь — порог диагностического warning, а не лимит ожидания.
+                t0 = time.monotonic()
+                self._cond.wait(0.5)
+                waited += time.monotonic() - t0
+                step = int(waited // self._pool_timeout) if self._pool_timeout > 0 else waited
+                if step > warned_steps:
+                    warned_steps = step
+                    logger.warning(
+                        "db-pool: no free worker for lease after %.0fs "
+                        "(pool %d/%d, queue %d)",
+                        waited, len(self._workers), self._max_conn,
+                        len(self._queue),
                     )
-                self._cond.wait(0.2)
         # перевод соединения в транзакционный режим — первый job этой аренды
         begin = _Job(lambda conn: self._begin_tx(conn), lease_id=lease_id)
-        self._submit(begin)
-        begin.result.get()
+        try:
+            self._submit(begin)
+            begin.result.get()
+        except BaseException:
+            # не оставляем воркер зализованным, если begin упал (обрыв
+            # соединения, полная очередь) — иначе пул деградирует навсегда
+            with self._cond:
+                w = self._lease_workers.pop(lease_id, None)
+                if w is not None:
+                    w._lease_id = 0
+                self._cond.notify_all()
+            raise
         return lease_id
 
     @staticmethod
