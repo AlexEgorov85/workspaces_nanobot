@@ -14,6 +14,7 @@ class DisplayConfig:
     show_tool_results: bool = True
     show_tool_params: bool = True
     show_progress: bool = True
+    show_context_window: bool = True
     typewriter_speed: float = 0.01
 
     @classmethod
@@ -24,5 +25,6 @@ class DisplayConfig:
             show_tool_results=cli_settings.get("show_tool_results", True),
             show_tool_params=cli_settings.get("show_tool_params", True),
             show_progress=cli_settings.get("show_progress", True),
+            show_context_window=cli_settings.get("show_context_window", True),
             typewriter_speed=float(cli_settings.get("typewriter_speed", 0.01)),
         )
