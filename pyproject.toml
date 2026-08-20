@@ -5,7 +5,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-pythonpath = ["."]
+pythonpath = [".", "workspace"]
 asyncio_mode = "auto"
 filterwarnings = [
     # FAISS SWIG-биндинги не имеют __module__; предупреждение приходит из

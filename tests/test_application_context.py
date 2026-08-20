@@ -143,6 +143,14 @@ def full_fake_modules(tmp_path):
         sys.modules["utils"] = utils_mod
         sys.modules["utils.db"] = utils_db
 
+        # utils.media — db_logging_bus делает ``from utils.media import
+        # serialize``; без мока «utils» — голый ModuleType без __path__
+        # (не пакет), и импорт падает «utils is not a package».
+        utils_media = types.ModuleType("utils.media")
+        utils_media.serialize = MagicMock(return_value=None)
+        utils_mod.media = utils_media
+        sys.modules["utils.media"] = utils_media
+
         # utils.session_file_store
         sfs = types.ModuleType("utils.session_file_store")
         sfs.SessionFileStore = MagicMock()
@@ -212,7 +220,12 @@ class TestCreate:
             enable_audit=False,
         )
         utils_db.set_pool_config.assert_called_once_with(
-            {"min_conn": 1, "max_conn": 3, "pool_timeout": 7.5}
+            {
+                "min_conn": 1,
+                "max_conn": 3,
+                "pool_timeout": 7.5,
+                "print_activity": False,
+            }
         )
 
     def test_storage_override_postgres_without_dsn(self, full_fake_modules):

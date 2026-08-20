@@ -518,18 +518,29 @@ class TestPredefinedScriptsProvider:
                 {"name": "x", "description": "x", "parameters": []},
             ]
 
+        fake_provider = SimpleNamespace(open_cache=lambda: True)
+        # ``_load_scripts_list`` внутри хард-импортирует реальный
+        # build_cache_provider из skill_config и инжектит провайдера и в
+        # «плоский» sys.modules['db_loader']. Мокаем оба пути, чтобы тест
+        # не зависел от порядка других тестов и не трогал реальную БД
+        # (иначе подхватывается глобальный DSN пула utils.db → host "x").
+        import workspace.skills.audit_analyzer.scripts.skill_config as sc_mod
+
+        monkeypatch.setattr(sc_mod, "build_cache_provider", lambda: fake_provider)
+        monkeypatch.setitem(
+            sys.modules,
+            "db_loader",
+            SimpleNamespace(set_provider=lambda _p: None),
+        )
+
         # ``_load_scripts_list`` ждёт dict с ключом ``"predefined"``,
         # у которого есть метод ``list_all_scripts()``.
         def fake_load(cls):
-            # ``_load_scripts_list`` ожидает ``db_loader`` (для ``set_provider``)
-            # и ``skill_config`` (для ``build_cache_provider``).
             return {
                 "predefined": SimpleNamespace(list_all_scripts=fake_list),
                 "db_loader": SimpleNamespace(set_provider=lambda _p: None),
                 "skill_config": SimpleNamespace(
-                    build_cache_provider=lambda: SimpleNamespace(
-                        open_cache=lambda: True
-                    )
+                    build_cache_provider=lambda: fake_provider
                 ),
             }
 
