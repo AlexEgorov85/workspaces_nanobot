@@ -244,9 +244,71 @@
   загружается через `predefined.list_all_scripts()` (skill'овский
   реестр) и кешируется на уровне класса; сбросить можно через
   `tool.invalidate_scripts_cache()`. Тесты:
-  `tests/test_tools_audit_analyzer.py::TestPredefinedScriptsProvider`
-  (9 тестов: форматирование, кеш, обработка ошибок, корректный
-  `RuntimeContextBlock`).
+`tests/test_tools_audit_analyzer.py::TestPredefinedScriptsProvider`
+   (9 тестов: форматирование, кеш, обработка ошибок, корректный
+   `RuntimeContextBlock`).
+
+- **Версия проекта в стартовом баннере gateway.** `gateway.py` выводит
+  `project.version` из `project.json` (канонический источник версии, без
+  префикса `v`; читается через `lib/utils/project_version.py`). Раньше
+  баннер был статичным и расходился с фактической версией репозитория.
+- **Активность db-worker пула соединений в терминале gateway.** Флаг
+  `gateway.print_db_activity` (`project.json`, `false` по умолчанию) включает
+  вывод через Rich: `→ db-worker <N> [<тег вызывающего>] взял job
+  [очередь-БД] M`, `← db-worker <N> закончил job ... [ok]`. Флаг
+  пробрасывается из `ApplicationContext` в конфиг пула
+  `workspace/utils/db.py` как ключ `print_activity` (`set_pool_config`).
+- **`probe_connections` — прогрев пула соединений при старте gateway.**
+  `workspace/utils/db.py::probe_connections(count, timeout)` принудительно
+  поднимает `count` соединений (по умолчанию `min_conn`) и фактически
+  проверяет доступность БД, не бросая исключение при недоступности, а
+  собирая статус по каждому соединению. `gateway.py` на старте зовёт
+  `probe_connections()` — если БД недоступна, воркеры/каналы не стартуют
+  вслепую. Тесты: `tests/test_utils_db.py::TestPool`.
+- **Гейт Streamlit `streamlit.enabled`.** `false` полностью выключает
+  запуск Streamlit-subprocess и стриминговый endpoint (UI на :8501 не
+  стартует), а не только скрывает его из меню. Дефолт в `project.json` и в
+  `REQUIRED_KEYS` (`tests/test_config_keys.py`) синхронизирован.
+- **Метки-теги каждого db-job'а в пуле (`Job.tag` / `_caller_tag`).**
+  Публичные функции `db.execute/fetch/fetchone/fetchval` (sync/async),
+  `db.run`, транзакции begin/end и `probe_connections` помечают свой job
+  меткой `файл:строка` вызывающей стороны (`_caller_tag(frames_back=2)`);
+  прокси транзакций (`_ConnectionProxy._run`) — цепочкой внешних фреймов
+  `файл:строка <- файл:строка …` (для поиска корня цикла). Метка печатается
+  в активности `[db-worker]` и в loguru-строке воркера — по ней видно,
+  какой модуль генерирует запрос (например, постоянный поток
+  `nanobot/agent/loop.py` → `list_sessions`). Теги не меняют публичный API:
+  необязательный аргумент `_tag`/точное позиционное поведение сохранены.
+- **Быстрый гейт `_reclaim_needed` + перенос reclaim из горячего пути.**
+  Тяжёлый `_reclaim_and_heal` (одна транзакция из 4 UPDATE/DELETE) больше
+  НЕ выполняется в `poll_inbound` (читается каждые `poll_interval`) — он
+  вынесен в фоновый `_lease_loop` по таймеру `lease_interval`, став
+  единственным источником reclaim/heal. Перед запуском `_lease_loop`
+  проверяет `_reclaim_needed` (есть ли хоть одна `processing`-строка или
+  хоть один claim): на пустом столе транзакция пропускается целиком
+  (остаётся один лёгкий `SELECT ... EXISTS` на тик). Снижает нагрузку на БД
+  при простое и задержке поллинга. Тесты:
+  `tests/test_postgres_channel.py`.
+- **Заглушка бесполезного перечисления сессий при выключенном idle-компакте
+  (`RuntimePatcher.patch_auto_compact_idle_guard`).** `AgentLoop.run` при
+  отсутствии входящих раз в секунду зовёт `AutoCompact.check_expired()`
+  (`nanobot/agent/loop.py:1034`), а тот даже при `idleCompactAfterMinutes=0`
+  делает `sessions.list_sessions()` — дорогой N+1 (перечисление всех сессий
+  + отдельный запрос превью каждой), сотни запросов в секунду вхолостую.
+  Патч при `auto_compact._ttl <= 0` заменяет `check_expired` на no-op
+  (нагрузка практически обнуляется, остаётся легитимный поллинг каналов);
+  при `ttl > 0` патч пропускается, token-budget сжатие не затронуто.
+  Тесты: `tests/test_runtime_patcher.py::TestAutoCompactIdleGuard`.
+- **Оптимизация чтения сессий (`PGSessionManager`).** (1) `_load` теперь
+  выполняет транзакционное чтение (meta + messages) целиком ОДНИМ `run`-job'ом
+  пула на сыром psycopg-соединении вместо ~15 обращений через прокси-курсор
+  (execute/description/fetchone/fetchall + begin/commit) — уходят «пачки»
+  строк в логе `[db-worker]`; (2) `read_session_file` для активной сессии
+  возвращает payload из in-memory кэша (как `get_or_create`), не читая БД
+  повторно — повторные вызовы web/REST не порождают лишних обращений;
+  при промахе грузит из БД и кладёт в кэш; несуществующая сессия → `None`.
+  Ошибка БД пробрасывается (без JSONL-отката). Тесты:
+  `tests/test_pg_session_manager.py`.
 
 ### Fixed
 
@@ -397,7 +459,19 @@
   сканер успех молчит (раньше печатался только сканированные плагины,
   а фреймворковые хуки в лог не попадали). Обновлены импорты:
   `agent_factory.py`, `runtime_patcher.py`, `benchmarks/hooks.py`, тесты.
-  Итог: **906 passed**.
+
+### Tests
+
+- Итоговое состояние набора: **1137 passed, 14 skipped** (`pytest`).
+  К покрытию релиза добавлены: `tests/test_tools_project_loader.py`,
+  `tests/test_tools_audit_analyzer.py`, `tests/test_consolidator_locale.py`,
+  `tests/test_recent_files_hook.py`, `tests/test_runtime_patcher.py`
+  (`TestAutoCompactIdleGuard`), `tests/test_postgres_channel.py`
+  (`_reclaim_needed`), `tests/test_pg_session_manager.py` (кеш
+  `read_session_file`), `tests/test_utils_db.py` (теги db-job'ов,
+  `probe_connections`) и интеграционные
+  `tests/integration/test_worker_pool_concurrency.py`,
+  `tests/integration/test_worker_pool_real_bot.py`.
 
 ## [2.3.0] — 2026-08-18
 
