@@ -528,6 +528,36 @@ class DBManager:
 # ---------------------------------------------------------------------------
 
 
+_UNSUPPORTED_ESCAPES = ("\\u0000", "\\u0001", "\\u0002", "\\u0003")
+
+
+def _sanitize_param(value: Any) -> Any:
+    """Заменяет невалидные Unicode-escape'ы в строковых параметрах.
+
+    psycopg2 парсит строки-параметры на наличие ``\\u0000``/и т.п. как
+    Unicode-escape и падает с ``UntranslatableCharacter`` ещё до отправки
+    в PostgreSQL (если в данных встречается, например, JSON-литерал
+    ``"\\u0000..."``). Заменяем ``\\u0000`` на реальный NUL — это
+    корректное и идемпотентное значение, безопасное и для psycopg2,
+    и для PostgreSQL.
+    """
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return value
+    if isinstance(value, str) and any(seq in value for seq in _UNSUPPORTED_ESCAPES):
+        return value.replace("\\u0000", "\u0000")
+    return value
+
+
+def _sanitize_params(params: Any) -> Any:
+    if params is None:
+        return None
+    if isinstance(params, (tuple, list)):
+        return tuple(_sanitize_param(p) for p in params)
+    if isinstance(params, dict):
+        return {k: _sanitize_param(v) for k, v in params.items()}
+    return _sanitize_param(params)
+
+
 class _CursorProxy:
     """Прокси psycopg2-курсора: каждая операция — job на соединение аренды."""
 
@@ -566,15 +596,17 @@ class _CursorProxy:
         # `()`, psycopg2 выполнит подстановку и упадёт на литералах '%' в
         # данных (например, «16.7%» в контенте сообщения) — это ломает
         # ``execute_values`` для сессий с таким контентом.
-        self._run(lambda cur: cur.execute(sql, params))
+        safe = _sanitize_params(params)
+        self._run(lambda cur: cur.execute(sql, safe))
+
+    def mogrify(self, sql: str, params: Any = None) -> bytes:
+        safe = _sanitize_params(params)
+        return self._run(lambda cur: cur.mogrify(sql, safe))
 
     def __iter__(self) -> Any:
         # Совместимость с psycopg2-протоколом: ``for row in cur:`` / ``list(cur)``.
         # Весь результат вытаскиваем одним job-ом через fetchall().
         return iter(self.fetchall())
-
-    def mogrify(self, sql: str, params: Any = None) -> bytes:
-        return self._run(lambda cur: cur.mogrify(sql, params))
 
     def fetchone(self) -> Any:
         return self._run(lambda cur: cur.fetchone())
@@ -611,23 +643,29 @@ class _ConnectionProxy:
         return _CursorProxy(self, cid)
 
     def execute(self, sql: str, *args: Any) -> Any:
+        params = _sanitize_params(args if args else None)
+
         def _work(conn: Any) -> Any:
             with conn.cursor() as cur:
-                cur.execute(sql, args if args else None)
+                cur.execute(sql, params)
                 return cur.statusmessage
         return self._run(_work)
 
     def fetch(self, sql: str, *args: Any) -> list:
+        params = _sanitize_params(args if args else None)
+
         def _work(conn: Any) -> list:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, args if args else None)
+                cur.execute(sql, params)
                 return [dict(r) for r in cur.fetchall()]
         return self._run(_work)
 
     def fetchrow(self, sql: str, *args: Any) -> Optional[dict]:
+        params = _sanitize_params(args if args else None)
+
         def _work(conn: Any) -> Optional[dict]:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, args if args else None)
+                cur.execute(sql, params)
                 row = cur.fetchone()
                 return dict(row) if row else None
         return self._run(_work)
@@ -636,9 +674,11 @@ class _ConnectionProxy:
         return self.fetchrow(sql, *args)
 
     def fetchval(self, sql: str, *args: Any) -> Any:
+        params = _sanitize_params(args if args else None)
+
         def _work(conn: Any) -> Any:
             with conn.cursor() as cur:
-                cur.execute(sql, args if args else None)
+                cur.execute(sql, params)
                 row = cur.fetchone()
                 return row[0] if row else None
         return self._run(_work)
@@ -745,30 +785,33 @@ def run(fn: Callable[[Any], Any]) -> Any:
 
 def execute(sql: str, *args: Any) -> Optional[str]:
     """Выполнить INSERT/UPDATE/DELETE, вернуть command tag."""
+    params = _sanitize_params(args if args else None)
 
     def _work(conn: Any) -> Optional[str]:
         with conn.cursor() as cur:
-            cur.execute(sql, args if args else None)
+            cur.execute(sql, params)
             return cur.statusmessage
     return _get_manager()._submit(_Job(_work)).get()
 
 
 def fetch(sql: str, *args: Any) -> list:
     """Выполнить SELECT, вернуть список строк как dict."""
+    params = _sanitize_params(args if args else None)
 
     def _work(conn: Any) -> list:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, args if args else None)
+            cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
     return _get_manager()._submit(_Job(_work)).get()
 
 
 def fetchone(sql: str, *args: Any) -> Optional[dict]:
     """Выполнить SELECT, вернуть одну строку как dict или None."""
+    params = _sanitize_params(args if args else None)
 
     def _work(conn: Any) -> Optional[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, args if args else None)
+            cur.execute(sql, params)
             row = cur.fetchone()
             return dict(row) if row else None
     return _get_manager()._submit(_Job(_work)).get()
@@ -776,10 +819,11 @@ def fetchone(sql: str, *args: Any) -> Optional[dict]:
 
 def fetchval(sql: str, *args: Any) -> Any:
     """Выполнить SELECT, вернуть первую колонку первой строки или None."""
+    params = _sanitize_params(args if args else None)
 
     def _work(conn: Any) -> Any:
         with conn.cursor() as cur:
-            cur.execute(sql, args if args else None)
+            cur.execute(sql, params)
             row = cur.fetchone()
             return row[0] if row else None
     return _get_manager()._submit(_Job(_work)).get()
