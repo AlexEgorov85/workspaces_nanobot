@@ -103,3 +103,75 @@ class TestPrintToolEvents:
             text = tw.call_args[0][0]
             assert "q=" not in text
             assert "→" not in text
+
+
+class TestPrintContextWindow:
+    """``_print_context_window`` — метрика M1 в CLI."""
+
+    @pytest.mark.asyncio
+    async def test_disabled_noop(self):
+        from lib.cli.console_loop import _print_context_window
+
+        with patch("lib.cli.console_loop.console") as console:
+            await _print_context_window(
+                {"used": 1, "limit": 10, "pct": 0.1, "model": "x"},
+                DisplayConfig(show_context_window=False),
+            )
+            console.print.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_block_noop(self):
+        from lib.cli.console_loop import _print_context_window
+
+        with patch("lib.cli.console_loop.console") as console:
+            await _print_context_window(None, DisplayConfig())
+            await _print_context_window({}, DisplayConfig())
+            await _print_context_window(
+                {"used": 1, "limit": 0, "pct": 0.1, "model": "x"}, DisplayConfig(),
+            )
+            await _print_context_window(
+                {"used": -1, "limit": 10, "pct": 0.1, "model": "x"}, DisplayConfig(),
+            )
+            console.print.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_renders_label_with_used_limit_pct_model(self):
+        from lib.cli.console_loop import _print_context_window
+
+        with patch("lib.cli.console_loop.console") as console:
+            await _print_context_window(
+                {"used": 12345, "limit": 65536, "pct": 0.1883, "model": "MiniMax-M3"},
+                DisplayConfig(),
+            )
+            console.print.assert_called_once()
+            text = console.print.call_args.args[0]
+            assert "12345" in text
+            assert "65536" in text
+            assert "19%" in text
+            assert "MiniMax-M3" in text
+
+    @pytest.mark.asyncio
+    async def test_clamps_pct(self):
+        from lib.cli.console_loop import _print_context_window
+
+        with patch("lib.cli.console_loop.console") as console:
+            await _print_context_window(
+                {"used": 999, "limit": 10, "pct": 1.5, "model": "x"},
+                DisplayConfig(),
+            )
+            text = console.print.call_args.args[0]
+            assert "100%" in text
+
+    @pytest.mark.asyncio
+    async def test_no_model_omits_model_suffix(self):
+        from lib.cli.console_loop import _print_context_window
+
+        with patch("lib.cli.console_loop.console") as console:
+            await _print_context_window(
+                {"used": 1, "limit": 10, "pct": 0.1, "model": ""},
+                DisplayConfig(),
+            )
+            text = console.print.call_args.args[0]
+            assert "10%" in text
+            # Без модели — только один разделитель `·` (limit→pct).
+            assert text.count("·") == 1

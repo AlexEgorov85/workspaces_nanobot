@@ -887,3 +887,154 @@ class TestPostgresChannelWorkerActivity:
             text = console.print.call_args.args[0]
             assert "закончил задачу m-1" in text
             assert "[completed]" in text
+
+
+class TestPostgresChannelContextWindow:
+    """T2 live-update + cleanup: мост ``context_window`` → processing-строка."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_bridge(self):
+        """Чистить мост до/после теста, чтобы ключи не утекали между тестами."""
+        from lib.hooks.database_logging_hook import pop_context_bridge, seed_context_window
+        pop_context_bridge("postgres:chat-1")
+        pop_context_bridge("postgres:chat-2")
+        yield
+        pop_context_bridge("postgres:chat-1")
+        pop_context_bridge("postgres:chat-2")
+
+    @pytest.mark.asyncio
+    async def test_flush_live_context_writes_block_to_processing_row(
+        self, mock_db_and_psycopg,
+    ):
+        """Готовый блок в мосте → UPDATE processing-строки."""
+        from lib.hooks.database_logging_hook import (
+            _store_context_window,
+            _store_iteration_usage,
+            seed_context_window,
+        )
+
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch._msg_chat = {"m-1": "chat-1"}
+        ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
+        seed_context_window("postgres:chat-1", limit=65536, model="MiniMax-M3")
+        _store_iteration_usage("postgres:chat-1", {"prompt_tokens": 12345})
+        _store_context_window(
+            "postgres:chat-1",
+            {"used": 12345, "limit": 65536, "pct": 0.1883, "model": "MiniMax-M3"},
+        )
+        mock_db.async_fetchone.return_value = {"metadata": {"reasoning": "..."}}
+
+        await ch._flush_live_context()
+
+        assert mock_db.async_execute.called
+        sql = mock_db.async_execute.call_args.args[0]
+        args = mock_db.async_execute.call_args.args[1:]
+        assert "UPDATE" in sql
+        assert "metadata" in sql
+        meta = args[0]
+        assert meta["context_window"]["used"] == 12345
+        assert meta["context_window"]["limit"] == 65536
+        assert meta["context_window"]["pct"] == 0.1883
+        assert args[1] == "a-1"
+
+    @pytest.mark.asyncio
+    async def test_flush_live_context_composes_on_the_fly_from_bridge(
+        self, mock_db_and_psycopg,
+    ):
+        """Нет готового блока — собираем на лету из usage+limit."""
+        from lib.hooks.database_logging_hook import (
+            _store_iteration_usage,
+            seed_context_window,
+        )
+
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch._msg_chat = {"m-1": "chat-1"}
+        ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
+        seed_context_window("postgres:chat-1", limit=65536, model="MiniMax-M3")
+        _store_iteration_usage("postgres:chat-1", {"prompt_tokens": 32768})
+        mock_db.async_fetchone.return_value = {"metadata": {}}
+
+        await ch._flush_live_context()
+
+        assert mock_db.async_execute.called
+        meta = mock_db.async_execute.call_args.args[1]
+        assert meta["context_window"]["used"] == 32768
+        assert meta["context_window"]["limit"] == 65536
+        assert meta["context_window"]["pct"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_flush_live_context_no_block_no_update(self, mock_db_and_psycopg):
+        """Пустой мост → UPDATE не пишется."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch._msg_chat = {"m-1": "chat-1"}
+        ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
+        mock_db.async_fetchone.return_value = {"metadata": {}}
+
+        await ch._flush_live_context()
+
+        mock_db.async_fetchone.assert_not_called()
+        mock_db.async_execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_flush_live_context_skips_when_no_assistant_msg_id(
+        self, mock_db_and_psycopg,
+    ):
+        """Нет assistant_msg_id → fetchone/execute не дёргаются."""
+        from lib.hooks.database_logging_hook import _store_context_window
+
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch._msg_chat = {"m-1": "chat-1"}
+        ch._msg_ctx = {"m-1": {}}
+        _store_context_window(
+            "postgres:chat-1",
+            {"used": 1, "limit": 10, "pct": 0.1, "model": "x"},
+        )
+
+        await ch._flush_live_context()
+
+        mock_db.async_fetchone.assert_not_called()
+        mock_db.async_execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_drop_context_bridge_clears_session(self, mock_db_and_psycopg):
+        """``_drop_context_bridge(chat_id)`` чистит мост для сессии."""
+        from lib.hooks.database_logging_hook import (
+            _store_context_window,
+            get_context_window,
+            seed_context_window,
+        )
+
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        seed_context_window("postgres:chat-1", limit=10, model="x")
+        _store_context_window(
+            "postgres:chat-1", {"used": 1, "limit": 10, "pct": 0.1, "model": "x"},
+        )
+        assert get_context_window("postgres:chat-1") is not None
+
+        ch._drop_context_bridge("chat-1")
+
+        assert get_context_window("postgres:chat-1") is None
+
+    def test_drop_context_bridge_no_chat_id_is_noop(self, mock_db_and_psycopg):
+        """``_drop_context_bridge(None)`` не падает и не трогает мост."""
+        from lib.hooks.database_logging_hook import (
+            _store_context_window,
+            get_context_window,
+            seed_context_window,
+        )
+
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        seed_context_window("postgres:chat-1", limit=10, model="x")
+        _store_context_window(
+            "postgres:chat-1", {"used": 1, "limit": 10, "pct": 0.1, "model": "x"},
+        )
+
+        ch._drop_context_bridge(None)
+
+        assert get_context_window("postgres:chat-1") is not None

@@ -105,6 +105,7 @@ def _required_keys():
         ("cli.max_iterations", 200),
         ("cli.log_level", "WARNING"),
         ("cli.repl_idle_timeout_sec", 1.0),
+        ("cli.show_context_window", True),
         # benchmark
         ("benchmark.db_schema", "public"),
         ("benchmark.runs_table", "agent_benchmark_runs"),

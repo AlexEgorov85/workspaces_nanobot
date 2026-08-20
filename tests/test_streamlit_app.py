@@ -39,6 +39,7 @@ def mock_all():
         st.set_page_config = MagicMock()
         st.empty = MagicMock()
         st.download_button = MagicMock()
+        st.progress = MagicMock()
         sys.modules["streamlit"] = st
 
         class MockSettings:
@@ -337,3 +338,152 @@ class TestModuleConfig:
         assert mock_all["streamlit_app"]._POLL_INTERVAL == 1.0
         assert mock_all["streamlit_app"]._dsn == ""
         assert mock_all["streamlit_app"]._schema == "public"
+
+
+# ===================================================================
+# context_window — M1 UI: блок в metadata + рендер прогресс-бара
+# ===================================================================
+
+
+class TestLoadChatHistoryContextWindow:
+    """``_load_chat_history`` должен передавать ``context_window`` в msg_entry."""
+
+    def test_includes_context_window_for_assistant(self, mock_all):
+        mock_all["utils_db"].fetch.return_value = [
+            {
+                "id": "a-1",
+                "role": "assistant",
+                "content": "ok",
+                "media": None,
+                "metadata": json.dumps({
+                    "context_window": {
+                        "used": 12345, "limit": 65536, "pct": 0.1883, "model": "MiniMax-M3",
+                    },
+                }),
+                "reply_to": None,
+                "status": "completed",
+                "created_at": None,
+            },
+        ]
+        result = mock_all["streamlit_app"]._load_chat_history("test-chat")
+        assert result[0]["context_window"] == {
+            "used": 12345, "limit": 65536, "pct": 0.1883, "model": "MiniMax-M3",
+        }
+
+    def test_no_context_window_key_omitted(self, mock_all):
+        """Без блока — ключ ``context_window`` в msg_entry не появляется."""
+        mock_all["utils_db"].fetch.return_value = [
+            {
+                "id": "a-1",
+                "role": "assistant",
+                "content": "ok",
+                "media": None,
+                "metadata": json.dumps({}),
+                "reply_to": None,
+                "status": "completed",
+                "created_at": None,
+            },
+        ]
+        result = mock_all["streamlit_app"]._load_chat_history("test-chat")
+        assert "context_window" not in result[0]
+
+    def test_user_message_ignored(self, mock_all):
+        """``context_window`` кладётся только в assistant-сообщения."""
+        mock_all["utils_db"].fetch.return_value = [
+            {
+                "id": "u-1",
+                "role": "user",
+                "content": "hi",
+                "media": None,
+                "metadata": json.dumps({
+                    "context_window": {"used": 1, "limit": 1, "pct": 1.0, "model": "x"},
+                }),
+                "reply_to": None,
+                "status": "completed",
+                "created_at": None,
+            },
+        ]
+        result = mock_all["streamlit_app"]._load_chat_history("test-chat")
+        assert "context_window" not in result[0]
+
+
+class TestGetProcessingStateContextWindow:
+    """``_get_processing_state`` поднимает ``context_window`` (T2 live-update)."""
+
+    def test_returns_block_when_present(self, mock_all):
+        mock_all["utils_db"].fetchone.return_value = {
+            "content": "draft",
+            "metadata": json.dumps({
+                "reasoning": "thinking...",
+                "context_window": {"used": 999, "limit": 65536, "pct": 0.0152, "model": "MiniMax-M3"},
+            }),
+            "status": "processing",
+        }
+        result = mock_all["streamlit_app"]._get_processing_state("msg-1")
+        assert result["context_window"]["used"] == 999
+        assert result["context_window"]["pct"] == 0.0152
+
+    def test_no_block_omits_key(self, mock_all):
+        mock_all["utils_db"].fetchone.return_value = {
+            "content": "draft",
+            "metadata": json.dumps({"reasoning": "thinking..."}),
+            "status": "processing",
+        }
+        result = mock_all["streamlit_app"]._get_processing_state("msg-1")
+        assert "context_window" not in result
+
+
+class TestRenderContextWindow:
+    """``_render_context_window`` рисует прогресс-бар с правильной подписью."""
+
+    def test_renders_progress_with_label(self, mock_all):
+        st = mock_all["st"]
+        sa = mock_all["streamlit_app"]
+        sa._render_context_window({
+            "used": 12345, "limit": 65536, "pct": 0.1883, "model": "MiniMax-M3",
+        })
+        st.progress.assert_called_once()
+        args, kwargs = st.progress.call_args
+        assert args[0] == 0.1883
+        assert "12345" in kwargs["text"]
+        assert "65536" in kwargs["text"]
+        assert "19%" in kwargs["text"]
+        assert "MiniMax-M3" in kwargs["text"]
+
+    def test_clamps_pct_above_one(self, mock_all):
+        """``pct`` > 1.0 защитно clamp'ится в 1.0."""
+        st = mock_all["st"]
+        sa = mock_all["streamlit_app"]
+        sa._render_context_window({
+            "used": 999, "limit": 10, "pct": 1.5, "model": "x",
+        })
+        args, kwargs = st.progress.call_args
+        assert args[0] == 1.0
+        assert "100%" in kwargs["text"]
+
+    def test_clamps_pct_below_zero(self, mock_all):
+        """``pct`` < 0.0 защитно clamp'ится в 0.0."""
+        st = mock_all["st"]
+        sa = mock_all["streamlit_app"]
+        sa._render_context_window({
+            "used": 0, "limit": 10, "pct": -0.1, "model": "x",
+        })
+        args, kwargs = st.progress.call_args
+        assert args[0] == 0.0
+
+    def test_no_render_when_block_invalid(self, mock_all):
+        """Некорректный блок (не dict, limit<=0, used<0) → без рендера."""
+        st = mock_all["st"]
+        sa = mock_all["streamlit_app"]
+        sa._render_context_window(None)
+        sa._render_context_window({})
+        sa._render_context_window({"used": 1, "limit": 0, "pct": 0.1, "model": "x"})
+        sa._render_context_window({"used": -1, "limit": 10, "pct": 0.1, "model": "x"})
+        st.progress.assert_not_called()
+
+    def test_no_model_in_label_when_missing(self, mock_all):
+        st = mock_all["st"]
+        sa = mock_all["streamlit_app"]
+        sa._render_context_window({"used": 1, "limit": 10, "pct": 0.1, "model": ""})
+        kwargs = st.progress.call_args.kwargs
+        assert "·" not in kwargs["text"].rstrip().split("·")[-1] or "Контекст" in kwargs["text"]

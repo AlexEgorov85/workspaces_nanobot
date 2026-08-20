@@ -6,7 +6,7 @@ import threading
 import time
 import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -613,5 +613,89 @@ class TestApplyAll:
         )
         d = report.to_dict()
         assert "assemble_outbound" in d["applied"]
+        assert "context_bridge_seed" in d["applied"]
         assert any(name == "context_governor" for name, _ in d["skipped"])
         assert any(name == "subagent_logging" for name, _ in d["skipped"])
+
+
+class TestPatchContextBridgeSeed:
+    """``patch_context_bridge_seed`` — патч ``agent._state_build`` для live-update."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_bridge(self):
+        from lib.hooks.database_logging_hook import pop_context_bridge
+        pop_context_bridge("postgres:chat-1")
+        yield
+        pop_context_bridge("postgres:chat-1")
+
+    def test_no_agent_skipped(self):
+        from lib.services.runtime_patcher import RuntimePatcher
+
+        ok, detail = RuntimePatcher().patch_context_bridge_seed(None)
+        assert ok is False
+        assert "agent is None" in detail
+
+    def test_no_state_build_skipped(self):
+        from lib.services.runtime_patcher import RuntimePatcher
+
+        agent = MagicMock(spec=[])
+        ok, detail = RuntimePatcher().patch_context_bridge_seed(agent)
+        assert ok is False
+        assert "_state_build is missing" in detail
+
+    @pytest.mark.asyncio
+    async def test_patches_state_build_and_seeds_bridge(self):
+        from lib.hooks.database_logging_hook import _CONTEXT_BRIDGE
+        from lib.services.runtime_patcher import RuntimePatcher
+
+        call_count = {"n": 0}
+
+        async def original_state_build(c):
+            call_count["n"] += 1
+            return {"fresh": True, "got": c}
+
+        agent = MagicMock()
+        agent._state_build = original_state_build
+
+        runtime = MagicMock()
+        runtime.context_window_tokens = 65536
+        runtime.model = "MiniMax-M3"
+
+        ctx = MagicMock()
+        ctx.runtime = runtime
+        ctx.session_key = "postgres:chat-1"
+
+        ok, detail = RuntimePatcher().patch_context_bridge_seed(agent)
+        assert ok is True
+
+        result = await agent._state_build(ctx)
+        assert result == {"fresh": True, "got": ctx}
+        assert call_count["n"] == 1
+
+        entry = _CONTEXT_BRIDGE.get("postgres:chat-1") or {}
+        assert entry.get("limit") == 65536
+        assert entry.get("model") == "MiniMax-M3"
+
+    @pytest.mark.asyncio
+    async def test_seed_errors_do_not_break_state_build(self):
+        """Любой сбой внутри seed → оригинальный ``_state_build`` всё равно вызван."""
+        from lib.services.runtime_patcher import RuntimePatcher
+
+        called = {"n": 0}
+
+        async def original_state_build(c):
+            called["n"] += 1
+            return {"fresh": True}
+
+        agent = MagicMock()
+        agent._state_build = original_state_build
+        agent.runtime_for_session = MagicMock(side_effect=RuntimeError("boom"))
+
+        ctx = MagicMock()
+        ctx.runtime = None
+        ctx.session_key = "postgres:chat-1"
+
+        RuntimePatcher().patch_context_bridge_seed(agent)
+        result = await agent._state_build(ctx)
+        assert called["n"] == 1
+        assert result == {"fresh": True}
