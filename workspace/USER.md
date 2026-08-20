@@ -41,11 +41,6 @@ Information about the user to help personalize interactions.
 ## Work Context
 
 - **Primary Role**: Developer
-- **Current Project**: Folder Analyzer Skill (file/folder analysis with Pandas support)
-- **Working Directory**: `C:\Users\Алексей\.nanobot\workspace\skills\folder-analyzer\`
-- **Tools You Use**: Python, Pandas, command line, Windows console
-- **Script Management**: Generates reusable Python scripts from templates (e.g., `structured.py`)
-- **Script Storage**: Stores generated scripts in `scripts/generated/`
 
 ## Technical Challenges
 

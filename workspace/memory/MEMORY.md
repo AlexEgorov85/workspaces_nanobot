@@ -2,7 +2,13 @@
 
 This file stores important information that should persist across sessions.
 
-## Project Context
+## Projects
+
+### Active
+
+- **Audit Analyzer**: Working with `audit.db` via `audit_analyze.bat`/`.sh` CLI. Common modes: `predefined` (named scripts), `sql` (LLM-generated queries from natural language), `vector` (FAISS semantic search). Typical queries: counts by year, top violations by type, audit dynamics.
+
+### Completed
 
 - **Folder Analyzer Skill**: All 8 stages completed (2026-05-20).
 
