@@ -653,6 +653,41 @@ class TestPatchCompactCommand:
         assert "compact_command" in report.to_dict()["applied"]
 
 
+class TestAutoCompactIdleGuard:
+    """``patch_auto_compact_idle_guard`` — глушит list_sessions при ttl=0."""
+
+    def test_disabled_ttl_makes_check_expired_noop(self):
+        calls = []
+
+        def _original(*a, **k):
+            calls.append(a)
+
+        class _Auto:
+            _ttl = 0
+            check_expired = _original
+
+        class _Agent:
+            auto_compact = _Auto()
+
+        ok, detail = RuntimePatcher().patch_auto_compact_idle_guard(_Agent())
+        assert ok, detail
+        _Agent.auto_compact.check_expired("ignored")
+        assert calls == []  # оригинал не вызван — list_sessions не идёт
+
+    def test_enabled_ttl_keeps_original(self):
+        class _Auto:
+            _ttl = 30
+            check_expired = lambda *a, **k: "original"
+
+        class _Agent:
+            auto_compact = _Auto()
+
+        ok, detail = RuntimePatcher().patch_auto_compact_idle_guard(_Agent())
+        assert ok is False
+        assert "idle compact enabled" in detail
+        assert _Agent.auto_compact.check_expired() == "original"
+
+
 class TestApplyAll:
     def test_report_contents(self):
         agent = MagicMock()

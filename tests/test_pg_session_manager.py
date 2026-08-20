@@ -31,6 +31,7 @@ def mock_db_and_psycopg():
         utils_db = types.ModuleType("utils.db")
         utils_db.DB_RETRYABLE_ERRORS = (Exception,)
         utils_db.transaction = MagicMock()
+        utils_db.run = MagicMock()
         sys.modules["utils.db"] = utils_db
         sys.modules["utils"] = types.ModuleType("utils")
 
@@ -129,16 +130,9 @@ class TestPGSessionManagerGetOrCreate:
         mgr._cache["cached-key"] = session
         assert mgr.get_or_create("cached-key") is session
 
-    @patch("lib.session.pg_session_manager.transaction")
-    def test_creates_new_when_not_found(self, mock_trans, mock_db_and_psycopg):
+    @patch("lib.session.pg_session_manager.run", return_value=None)
+    def test_creates_new_when_not_found(self, mock_run, mock_db_and_psycopg):
         mgr = mock_db_and_psycopg(workspace=Path("/tmp/ws"))
-        mock_conn = MagicMock()
-        mock_cur = MagicMock()
-        mock_cur.__enter__.return_value = mock_cur
-        mock_cur.fetchone.return_value = None  # no meta row
-        mock_conn.cursor.return_value = mock_cur
-        mock_trans.return_value.__enter__.return_value = mock_conn
-
         session = mgr.get_or_create("new-key")
         assert session.key == "new-key"
         assert mgr._cache["new-key"] is session

@@ -168,6 +168,7 @@ class RuntimePatcher:
             agent, settings))
         self._record(report, "compact_command", self.patch_compact_command(
             agent, settings))
+        self._record(report, "idle_guard", self.patch_auto_compact_idle_guard(agent))
         self._record(report, "session_content_cleanup", self.patch_session_content_cleanup())
         return report
 
@@ -1454,3 +1455,32 @@ class RuntimePatcher:
                 )
 
         consolidator.maybe_consolidate_by_tokens = _wrapped
+
+    def patch_auto_compact_idle_guard(self, agent: Any) -> Tuple[bool, str]:
+        """Заглушить бесполезное перечисление сессий при выключенном idle-компакте.
+
+        ``AgentLoop.run`` при отсутствии входящих сообщений раз в секунду
+        зовёт ``AutoCompact.check_expired()`` (nanobot/agent/loop.py:1034).
+        Тот ВСЕГДА делает ``sessions.list_sessions()`` — дорогой N+1
+        (перечисление всех сессий + отдельный запрос превью каждой), даже
+        когда ``idleCompactAfterMinutes=0`` (idle-компакт выключен: сборка
+        ``_is_expired`` всегда возвращает False и ничего не архивируется).
+        При нескольких сессиях это сотни запросов в секунду вхолостую.
+
+        При выключенном idle-компакте заменяем ``check_expired`` на no-op.
+        """
+        auto = getattr(agent, "auto_compact", None)
+        if auto is None:
+            return False, "agent.auto_compact is missing"
+        original = getattr(auto, "check_expired", None)
+        if original is None:
+            return False, "auto_compact.check_expired is missing"
+        try:
+            ttl = int(getattr(auto, "_ttl", 0))
+        except Exception:
+            ttl = 0
+        if ttl > 0:
+            return False, f"idle compact enabled (ttl={ttl})"
+
+        auto.check_expired = lambda *a, **k: None
+        return True, "idle auto-compact enumeration disabled (ttl=0)"

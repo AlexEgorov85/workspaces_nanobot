@@ -111,7 +111,7 @@ def _required_keys():
         ("benchmark.runs_table", "agent_benchmark_runs"),
         ("benchmark.results_table", "agent_benchmark_results"),
         # streamlit
-        ("streamlit.enabled", True),
+        ("streamlit.enabled", False),
         ("streamlit.max_wait", 600),
         ("streamlit.poll_interval", 10.0),
         ("streamlit.files_dir", "data_store/streamlit_files"),

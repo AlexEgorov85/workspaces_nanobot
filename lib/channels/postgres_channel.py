@@ -282,7 +282,10 @@ class PostgresChannel(BaseChannel):
 
         Каждые ``_lease_interval`` секунд:
           1. heartbeat — продлить ``lease_until`` для своих аренд;
-          2. ``_reclaim_and_heal`` — вернуть в пул задачи, чьи lease истекли.
+          2. ``_reclaim_and_heal`` — вернуть в пул задачи, чьи lease истекли
+             (с быстрым гейтом ``_reclaim_needed``: на пустом столе, где нет
+             ни ``processing``-строк, ни claims, тяжёлая транзакция из
+             4 UPDATE/DELETE пропускается).
 
         Порядок важен: heartbeat идёт **первым**, иначе задержка тика
         (заблокированный event loop, медленная БД) приведёт к тому, что
@@ -297,9 +300,33 @@ class PostgresChannel(BaseChannel):
                         f"NOW() + interval '1 second' * %s WHERE worker_id = %s",
                         self._processing_timeout, self._worker_id,
                     )
-                await self._reclaim_and_heal()
+                if await self._reclaim_needed():
+                    await self._reclaim_and_heal()
             except Exception as e:
                 self.logger.error("Lease loop error: {}", e)
+
+    async def _reclaim_needed(self) -> bool:
+        """Быстрый гейт перед тяжёлым reclaim: есть ли вообще работа.
+
+        Возвращает False, если в таблице нет ни одной ``processing``-строки и
+        в ``claims`` нет ни одной аренды — тогда полному ``_reclaim_and_heal``
+        (транзакция из 4 UPDATE/DELETE) делать нечего, и он пропускается.
+        Это убирает лишние обращения к БД на пустом столе при каждом тике
+        ``_lease_loop``.
+
+        При ошибке проверки возвращает True — безопаснее прогнать полный
+        reclaim, чем пропустить что-то зависшее.
+        """
+        try:
+            return bool(
+                await fetchval(
+                    f"SELECT EXISTS (SELECT 1 FROM {self._fq_table} "
+                    f"WHERE status = 'processing') "
+                    f"OR EXISTS (SELECT 1 FROM {self._fq_claims})"
+                )
+            )
+        except Exception:
+            return True
 
     async def _reclaim_and_heal(self) -> None:
         """Вернуть задачи с истёкшими арендами и вылечить рассинхроны claims.
@@ -585,14 +612,14 @@ class PostgresChannel(BaseChannel):
     async def poll_inbound(self, exchange: MessageExchange) -> bool:
         """Хук транспорта для ``MessageExchange``: берет новое сообщение из БД.
 
-        Каждая итерация:
-          1. ``_reclaim_and_heal`` — вернуть в пул задачи с истёкшими арендами
-          2. Если есть свободный слот → ``_poll_once`` — взять новое сообщение
+        Каждая итерация — только взятие нового сообщения. Reclaim истёкших
+        аренд и heal рассинхронов НЕ выполняются здесь (это тяжёлая
+        транзакция из 4 UPDATE/DELETE на каждый тик опроса) — они живут в
+        фоновом ``_lease_loop`` по таймеру ``lease_interval``.
 
         Возвращает True, если сообщение обработано (тогда движок опрашивает
         следующее без ожидания).
         """
-        await self._reclaim_and_heal()
         if self._print_worker_activity:
             await self._report_queue()
         if not exchange.is_slot_free():

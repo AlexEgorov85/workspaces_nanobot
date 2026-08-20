@@ -34,7 +34,7 @@ from loguru import logger
 
 from nanobot.session.manager import Session, SessionManager, _message_preview_text
 
-from utils.db import transaction
+from utils.db import run, transaction
 from psycopg2.extras import Json, execute_values
 
 
@@ -112,9 +112,24 @@ class PGSessionManager(SessionManager):
         return session
 
     def _load(self, key: str) -> Session | None:
-        """Загрузить сессию из БД. Ошибка БД пробрасывается — без JSONL-отката."""
-        with transaction() as conn:
-            return self._load_inner(conn, key)
+        """Загрузить сессию из БД **одним job'ом** пула.
+
+        Выполняет транзакционное чтение (meta + messages) целиком в одном
+        ``run`` на сыром psycopg-соединении. Раньше ``transaction()`` +
+        прокси-курсор дробили ту же загрузку на ~15 отдельных db-job
+        (execute/description/fetchone/fetchall для каждого SELECT + begin/commit) —
+        это и давало «пачки» строк в логе ``[db-worker]``.
+
+        Ошибка БД пробрасывается — без JSONL-отката.
+        """
+        def _work(conn) -> Session | None:
+            conn.autocommit = False
+            try:
+                return self._load_inner(conn, key)
+            finally:
+                conn.rollback()
+                conn.autocommit = True
+        return run(_work)
 
     def _load_inner(self, conn, key: str) -> Session | None:
         """Загрузить сессию из БД.
@@ -322,11 +337,26 @@ class PGSessionManager(SessionManager):
     def read_session_file(self, key: str) -> dict[str, Any] | None:
         """Вернуть полный payload сессии (meta + все сообщения).
 
+        Для активных сессий возвращает данные из in-memory кэша (как
+        ``get_or_create``), не читая БД повторно — повторные вызовы web/REST
+        не порождают лишних обращений. При промахе кэша грузим из БД и
+        кладём в кэш. Несуществующая сессия → ``None`` (как раньше по
+        ``_load``).
+
         Ошибка БД пробрасывается — без JSONL-отката.
         """
+        with self._cache_lock:
+            cached = self._cache.get(key)
+        if cached is not None:
+            return self._session_payload(cached)
         session = self._load(key)
         if session is None:
             return None
+        with self._cache_lock:
+            existing = self._cache.get(key)
+            if existing is not None:
+                return self._session_payload(existing)
+            self._cache[key] = session
         return self._session_payload(session)
 
     @staticmethod

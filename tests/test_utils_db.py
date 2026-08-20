@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -725,6 +726,23 @@ class TestPool:
         mock_psycopg2["fetchval"]("SELECT 1")
         out = capsys.readouterr().out
         assert "[db-worker]" in out
+        assert "взял job" in out
+        # tag «кто» — вызывающая сторона: файл:строка (тест-файл)
+        assert re.search(r"test_utils_db\.py:\d+", out)
+
+    def test_transaction_jobs_have_tag_not_unknown(self, mock_psycopg2, capsys):
+        """begin/end транзакции тегируются, без [unknown] (никто не остаётся без метки)."""
+        mock_psycopg2["set_pool_config"](
+            {"min_conn": 1, "max_conn": 1, "print_activity": True}
+        )
+        mock_psycopg2["configure"]("dsn")
+        with mock_psycopg2["transaction"]() as conn:
+            conn.fetchval("SELECT 1")
+        out = capsys.readouterr().out
+        assert "[db-worker]" in out
+        assert "[unknown]" not in out
+        # begin/end + fetch — все job-ы несут метку вызывающей стороны
+        assert re.search(r"test_utils_db\.py:\d+", out)
 
     def test_set_pool_config_accepts_print_activity(self, mock_psycopg2):
         """print_activity — известный ключ конфига пула (не глотается)."""

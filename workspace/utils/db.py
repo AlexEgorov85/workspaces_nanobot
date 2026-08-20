@@ -51,9 +51,11 @@ import asyncio
 import collections
 import logging
 import os
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
+from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
 
 import psycopg2
@@ -143,18 +145,45 @@ class _JobResult:
 class _Job:
     """Задача для воркера. ``lease_id != 0`` — задача эксклюзивной транзакции."""
 
-    __slots__ = ("fn", "lease_id", "result", "retries")
+    __slots__ = ("fn", "lease_id", "result", "retries", "tag")
 
     def __init__(
         self,
         fn: Callable[[Any], Any],
         lease_id: int = 0,
         result: Optional[_JobResult] = None,
+        tag: str = "",
     ) -> None:
         self.fn = fn
         self.lease_id = lease_id
         self.result = result or _JobResult()
         self.retries = 0
+        self.tag = tag
+
+
+def _caller_tag(frames_back: int = 2, chain: int = 0) -> str:
+    """Короткая метка вызывающей стороны job'а: ``базовое_имя_файла:строка``.
+
+    Фрейм(0) — сама ``_caller_tag``, фрейм(1) — публичная функция пула
+    (``execute``/``fetchone``/async-вариант/метод прокси), фрейм(2) —
+    фактический потребитель запроса (например, ``postgres_channel.py:297``).
+    ``chain > 0`` — дополнительно собрать цепочку внешних фреймов от вызова
+    вверх (``файл:линия <- файл:линия ...``), помогает найти корень цикла.
+
+    Передаётся в ``_Job.tag`` и печатается в лог активности db-worker при
+    включённом ``print_activity`` — чтобы понять, кто постоянно ходит в БД.
+    """
+    try:
+        parts = []
+        f = sys._getframe(frames_back)
+        for _ in range(chain + 1):
+            if f is None:
+                break
+            parts.append(f"{Path(f.f_code.co_filename).name}:{f.f_lineno}")
+            f = f.f_back
+        return " <- ".join(parts)
+    except Exception:
+        return "unknown"
 
 
 class PoolTimeoutError(RuntimeError):
@@ -289,7 +318,7 @@ class _Worker(threading.Thread):
         t0 = time.monotonic()
         if self._print_activity:
             self._activity_print(
-                f"→ db-worker {self._index} взял job "
+                f"→ db-worker {self._index} [{job.tag or 'unknown'}] взял job "
                 f"([очередь-БД] {len(self._manager._queue) + 1})"
             )
         try:
@@ -498,7 +527,7 @@ class DBManager:
 
     # -- транзакции: эксклюзивная аренда соединения -------------------------
 
-    def _acquire_lease(self) -> int:
+    def _acquire_lease(self, tag: str = "") -> int:
         self._ensure_started()
         waited = 0.0
         warned_steps = -1
@@ -534,7 +563,11 @@ class DBManager:
                         len(self._queue),
                     )
         # перевод соединения в транзакционный режим — первый job этой аренды
-        begin = _Job(lambda conn: self._begin_tx(conn), lease_id=lease_id)
+        begin = _Job(
+            lambda conn: self._begin_tx(conn),
+            lease_id=lease_id,
+            tag=tag or _caller_tag(),
+        )
         try:
             self._submit(begin)
             begin.result.get()
@@ -561,10 +594,11 @@ class DBManager:
             conn.rollback()
         conn.autocommit = True
 
-    def _release_lease(self, lease_id: int, commit: bool) -> None:
+    def _release_lease(self, lease_id: int, commit: bool, tag: str = "") -> None:
         job = _Job(
             lambda conn: self._end_tx(conn, commit),
             lease_id=lease_id,
+            tag=tag or _caller_tag(),
         )
         try:
             self._submit(job).get()
@@ -704,59 +738,66 @@ class _ConnectionProxy:
         self._lease_id = lease_id
         self._worker = self._manager._lease_workers[lease_id]
 
-    def _run(self, fn: Callable[[Any], Any]) -> Any:
-        job = _Job(fn, lease_id=self._lease_id)
+    def _run(self, fn: Callable[[Any], Any], tag: Optional[str] = None) -> Any:
+        job = _Job(fn, lease_id=self._lease_id, tag=tag or _caller_tag(2, chain=8))
         self._manager._submit(job)
         return job.result.get()
 
     @property
     def encoding(self) -> str:
-        return self._run(lambda conn: conn.encoding)
+        return self._run(lambda conn: conn.encoding, tag=_caller_tag(2))
 
     def cursor(self, *args: Any, **kwargs: Any) -> _CursorProxy:
-        cid = self._run(lambda conn: self._worker._open_cursor(conn, args, kwargs))
+        cid = self._run(
+            lambda conn: self._worker._open_cursor(conn, args, kwargs),
+            tag=_caller_tag(2),
+        )
         return _CursorProxy(self, cid)
 
-    def execute(self, sql: str, *args: Any) -> Any:
+    def execute(self, sql: str, *args: Any, _tag: Optional[str] = None) -> Any:
         params = _sanitize_params(args if args else None)
+        tag = _tag if _tag is not None else _caller_tag(2)
 
         def _work(conn: Any) -> Any:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 return cur.statusmessage
-        return self._run(_work)
+        return self._run(_work, tag=tag)
 
-    def fetch(self, sql: str, *args: Any) -> list:
+    def fetch(self, sql: str, *args: Any, _tag: Optional[str] = None) -> list:
         params = _sanitize_params(args if args else None)
+        tag = _tag if _tag is not None else _caller_tag(2)
 
         def _work(conn: Any) -> list:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(sql, params)
                 return [dict(r) for r in cur.fetchall()]
-        return self._run(_work)
+        return self._run(_work, tag=tag)
 
-    def fetchrow(self, sql: str, *args: Any) -> Optional[dict]:
+    def fetchrow(self, sql: str, *args: Any, _tag: Optional[str] = None) -> Optional[dict]:
         params = _sanitize_params(args if args else None)
+        tag = _tag if _tag is not None else _caller_tag(2)
 
         def _work(conn: Any) -> Optional[dict]:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(sql, params)
                 row = cur.fetchone()
                 return dict(row) if row else None
-        return self._run(_work)
+        return self._run(_work, tag=tag)
 
-    def fetchone(self, sql: str, *args: Any) -> Optional[dict]:
-        return self.fetchrow(sql, *args)
+    def fetchone(self, sql: str, *args: Any, _tag: Optional[str] = None) -> Optional[dict]:
+        return self.fetchrow(sql, *args, _tag=_tag)
 
-    def fetchval(self, sql: str, *args: Any) -> Any:
+    def fetchval(self, sql: str, *args: Any, _tag: Optional[str] = None) -> Any:
         params = _sanitize_params(args if args else None)
+        tag = _tag if _tag is not None else _caller_tag(2)
 
         def _work(conn: Any) -> Any:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 row = cur.fetchone()
                 return row[0] if row else None
-        return self._run(_work)
+        return self._run(_work, tag=tag)
 
 
 class _AsyncConnectionWrapper:
@@ -766,16 +807,16 @@ class _AsyncConnectionWrapper:
         self._proxy = proxy
 
     async def fetch(self, sql: str, *args: Any) -> list:
-        return await asyncio.to_thread(self._proxy.fetch, sql, *args)
+        return await asyncio.to_thread(self._proxy.fetch, sql, *args, _tag=_caller_tag())
 
     async def fetchrow(self, sql: str, *args: Any) -> Optional[dict]:
-        return await asyncio.to_thread(self._proxy.fetchrow, sql, *args)
+        return await asyncio.to_thread(self._proxy.fetchrow, sql, *args, _tag=_caller_tag())
 
     async def execute(self, sql: str, *args: Any) -> Any:
-        return await asyncio.to_thread(self._proxy.execute, sql, *args)
+        return await asyncio.to_thread(self._proxy.execute, sql, *args, _tag=_caller_tag())
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
-        return await asyncio.to_thread(self._proxy.fetchval, sql, *args)
+        return await asyncio.to_thread(self._proxy.fetchval, sql, *args, _tag=_caller_tag())
 
 
 # ---------------------------------------------------------------------------
@@ -864,7 +905,7 @@ def probe_connections(
     target = int(count if count is not None else mgr._min_conn)
     results = []
     for _ in range(target):
-        job = _Job(lambda conn: None)  # подключение происходит в _ensure_connected
+        job = _Job(lambda conn: None, tag=_caller_tag())
         mgr._submit(job)
         results.append(job.result)
     for res in results:
@@ -881,7 +922,7 @@ def run(fn: Callable[[Any], Any]) -> Any:
     ``fn`` получает сырой psycopg2-conn в воркер-потоке; НЕ вызывайте внутри
     публичный API этого модуля (тупик).
     """
-    job = _Job(fn)
+    job = _Job(fn, tag=_caller_tag())
     return _get_manager()._submit(job).get()
 
 
@@ -890,50 +931,54 @@ def run(fn: Callable[[Any], Any]) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def execute(sql: str, *args: Any) -> Optional[str]:
+def execute(sql: str, *args: Any, _tag: Optional[str] = None) -> Optional[str]:
     """Выполнить INSERT/UPDATE/DELETE, вернуть command tag."""
     params = _sanitize_params(args if args else None)
+    tag = _tag if _tag is not None else _caller_tag()
 
     def _work(conn: Any) -> Optional[str]:
         with conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.statusmessage
-    return _get_manager()._submit(_Job(_work)).get()
+    return _get_manager()._submit(_Job(_work, tag=tag)).get()
 
 
-def fetch(sql: str, *args: Any) -> list:
+def fetch(sql: str, *args: Any, _tag: Optional[str] = None) -> list:
     """Выполнить SELECT, вернуть список строк как dict."""
     params = _sanitize_params(args if args else None)
+    tag = _tag if _tag is not None else _caller_tag()
 
     def _work(conn: Any) -> list:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
-    return _get_manager()._submit(_Job(_work)).get()
+    return _get_manager()._submit(_Job(_work, tag=tag)).get()
 
 
-def fetchone(sql: str, *args: Any) -> Optional[dict]:
+def fetchone(sql: str, *args: Any, _tag: Optional[str] = None) -> Optional[dict]:
     """Выполнить SELECT, вернуть одну строку как dict или None."""
     params = _sanitize_params(args if args else None)
+    tag = _tag if _tag is not None else _caller_tag()
 
     def _work(conn: Any) -> Optional[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
             return dict(row) if row else None
-    return _get_manager()._submit(_Job(_work)).get()
+    return _get_manager()._submit(_Job(_work, tag=tag)).get()
 
 
-def fetchval(sql: str, *args: Any) -> Any:
+def fetchval(sql: str, *args: Any, _tag: Optional[str] = None) -> Any:
     """Выполнить SELECT, вернуть первую колонку первой строки или None."""
     params = _sanitize_params(args if args else None)
+    tag = _tag if _tag is not None else _caller_tag()
 
     def _work(conn: Any) -> Any:
         with conn.cursor() as cur:
             cur.execute(sql, params)
             row = cur.fetchone()
             return row[0] if row else None
-    return _get_manager()._submit(_Job(_work)).get()
+    return _get_manager()._submit(_Job(_work, tag=tag)).get()
 
 
 @contextmanager
@@ -944,15 +989,16 @@ def transaction():
     job-ами в воркер на том же соединении, чужие задачи в это время ждут.
     """
     manager = _get_manager()
-    lease_id = manager._acquire_lease()
+    tag = _caller_tag()
+    lease_id = manager._acquire_lease(tag)
     proxy = _ConnectionProxy(manager, lease_id)
     try:
         yield proxy
     except BaseException:
-        manager._release_lease(lease_id, commit=False)
+        manager._release_lease(lease_id, commit=False, tag=tag)
         raise
     else:
-        manager._release_lease(lease_id, commit=True)
+        manager._release_lease(lease_id, commit=True, tag=tag)
 
 
 # ---------------------------------------------------------------------------
@@ -961,19 +1007,19 @@ def transaction():
 
 
 async def async_execute(sql: str, *args: Any) -> Optional[str]:
-    return await asyncio.to_thread(execute, sql, *args)
+    return await asyncio.to_thread(execute, sql, *args, _tag=_caller_tag())
 
 
 async def async_fetch(sql: str, *args: Any) -> list:
-    return await asyncio.to_thread(fetch, sql, *args)
+    return await asyncio.to_thread(fetch, sql, *args, _tag=_caller_tag())
 
 
 async def async_fetchone(sql: str, *args: Any) -> Optional[dict]:
-    return await asyncio.to_thread(fetchone, sql, *args)
+    return await asyncio.to_thread(fetchone, sql, *args, _tag=_caller_tag())
 
 
 async def async_fetchval(sql: str, *args: Any) -> Any:
-    return await asyncio.to_thread(fetchval, sql, *args)
+    return await asyncio.to_thread(fetchval, sql, *args, _tag=_caller_tag())
 
 
 @asynccontextmanager
@@ -983,13 +1029,14 @@ async def async_transaction():
     Возвращает async-обёртку прокси: ``await conn.fetch(...)`` и т.п.
     """
     manager = _get_manager()
-    lease_id = await asyncio.to_thread(manager._acquire_lease)
+    tag = _caller_tag()
+    lease_id = await asyncio.to_thread(manager._acquire_lease, tag)
     proxy = _ConnectionProxy(manager, lease_id)
     wrapper = _AsyncConnectionWrapper(proxy)
     try:
         yield wrapper
     except BaseException:
-        await asyncio.to_thread(manager._release_lease, lease_id, False)
+        await asyncio.to_thread(manager._release_lease, lease_id, False, tag)
         raise
     else:
-        await asyncio.to_thread(manager._release_lease, lease_id, True)
+        await asyncio.to_thread(manager._release_lease, lease_id, True, tag)
