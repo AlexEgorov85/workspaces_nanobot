@@ -31,6 +31,30 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _json_safe(value: Any) -> Any:
+    """Рекурсивно привести значение к JSON-серизуемому виду.
+
+    Промпт/ответ могут содержать несеризуемые объекты (dataclass, Path,
+    bytes и т.п.). Рекурсивно обходим структуры; неподдерживаемые скаляры
+    сводим к ``str(value)``, чтобы ``psycopg2.extras.Json`` не уронил весь
+    батч событий.
+    """
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        try:
+            return str(value)
+        except Exception:
+            return None
+
+
 @dataclass
 class LogEvent:
     """Одно событие для записи в БД (стройная таблица agent_gateway_logs).
@@ -375,6 +399,45 @@ class DbLoggingService:
             metadata={"latency_ms": latency_ms, "tool_call_id": tool_call_id},
             request_id=request_id,
             name=tool_name,
+        ))
+
+    def log_llm_call(
+        self,
+        session_id: str,
+        prompt: Any,
+        response: Any,
+        *,
+        iteration: Optional[int] = None,
+        model: Optional[str] = None,
+        finish_reason: Optional[str] = None,
+        usage: Optional[dict] = None,
+        request_id: Optional[str] = None,
+        level: str = "INFO",
+    ) -> bool:
+        """Записать полный запрос и ответ LLM за одну итерацию.
+
+        Полный ``messages`` (промпт) передаётся в ``payload["prompt"]``,
+        ответ модели (``LLMResponse``/asdict) — в ``payload["response"]``.
+        Оба значения рекурсивно приводятся к JSON-серизуемому виду
+        (``_json_safe``), поэтому писать можно сразу на оборот агента.
+        """
+        return self.log_event(LogEvent(
+            event_type="llm_call",
+            level=level,
+            session_id=session_id,
+            actor="agent",
+            summary=finish_reason or "llm_call",
+            payload={
+                "prompt": _json_safe(prompt),
+                "response": _json_safe(response),
+            },
+            metadata={
+                "iteration": iteration,
+                "model": model,
+                "finish_reason": finish_reason,
+                "usage": usage or {},
+            },
+            request_id=request_id,
         ))
 
     def log_error(

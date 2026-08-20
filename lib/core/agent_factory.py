@@ -65,6 +65,7 @@ class AgentFactory:
         db_logging_service: Optional[Any] = None,
         agent_id: Optional[str] = None,
         project_hooks: Optional[List[Any]] = None,
+        print_llm_calls: bool = False,
     ) -> Tuple[Any, List[Any], List[Any]]:
         """Создать AgentLoop с подключёнными хуками.
 
@@ -122,7 +123,9 @@ class AgentFactory:
         # пропускаем без ошибки.
         hook_factories: List[Any] = []
         if db_logging_service is not None:
-            factory = self._build_database_logging_factory(db_logging_service, agent_id)
+            factory = self._build_database_logging_factory(
+                db_logging_service, agent_id, print_llm_calls=print_llm_calls
+            )
             if factory is not None:
                 hook_factories.append(factory)
 
@@ -152,7 +155,9 @@ class AgentFactory:
 
     @staticmethod
     def _build_database_logging_factory(
-        db_logging_service: Any, agent_id: Optional[str] = None
+        db_logging_service: Any,
+        agent_id: Optional[str] = None,
+        print_llm_calls: bool = False,
     ) -> Optional[Any]:
         """Создать фабрику оборота ``DatabaseLoggingHook``.
 
@@ -177,4 +182,6 @@ class AgentFactory:
             )
         except Exception:
             return None
-        return make_db_logging_hook_factory(db_logging_service, agent_id)
+        return make_db_logging_hook_factory(
+            db_logging_service, agent_id, print_llm_calls=print_llm_calls
+        )

@@ -75,6 +75,7 @@ class ApplicationContext:
         enable_cron: bool = False,
         storage_override: Optional[str] = None,
         session_override: Optional[str] = None,
+        print_llm_calls: bool = False,
     ) -> "ApplicationContext":
         """Собрать контекст приложения.
 
@@ -86,6 +87,8 @@ class ApplicationContext:
             enable_cron: подключить CronService (CLI).
             storage_override: режим хранилища из CLI (auto/postgres/file).
             session_override: имя сессии (CLI).
+            print_llm_calls: выводить в терминал токены LLM-итераций
+                (включается только в CLI-REPL через DatabaseLoggingHook).
         """
         ctx = cls()
         ctx.script_dir = Path(script_dir)
@@ -204,6 +207,7 @@ class ApplicationContext:
             db_logging_service=ctx.db_logging_service,
             agent_id=agent_id,
             project_hooks=project_hooks or None,
+            print_llm_calls=print_llm_calls,
         )
 
         # ToolAuditHook — фреймворковый, входит в ``ctx.hooks`` последним

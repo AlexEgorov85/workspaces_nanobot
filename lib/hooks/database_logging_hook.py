@@ -20,14 +20,19 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from nanobot.agent import AgentHookContext, AgentRunHookContext
+from rich.console import Console
 
 from .base_tool_tracking_hook import BaseToolTrackingHook
 
 logger = logging.getLogger(__name__)
 
+console = Console()
+
 
 def make_db_logging_hook_factory(
-    db_logging_service: Any, agent_id: Optional[str] = None
+    db_logging_service: Any,
+    agent_id: Optional[str] = None,
+    print_llm_calls: bool = False,
 ) -> Callable[[Any], "DatabaseLoggingHook"]:
     """Фабрика: создать СВЕЖИЙ ``DatabaseLoggingHook`` на КАЖДЫЙ оборот.
 
@@ -58,6 +63,7 @@ def make_db_logging_hook_factory(
             agent_id=agent_id,
             session_key=session_key,
             request_id=request_id,
+            print_llm_calls=print_llm_calls,
         )
 
     return _factory
@@ -97,17 +103,23 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         *,
         session_key: Optional[str] = None,
         request_id: Optional[str] = None,
+        print_llm_calls: bool = False,
     ) -> None:
         super().__init__()
         self._service = db_logging_service
         self._tool_start_times: Dict[str, float] = {}
         self._agent_id = agent_id
+        self._print_llm_calls = print_llm_calls
         # Контекст текущего оборота/вопроса. Запекается в фабрике на оборот,
         # чтобы ``after_run`` (у которого в контексте нет session_key) знал
         # свой вопрос. ``_capture_context`` дополнительно перечитывает
         # request_id по session_key из индекса сервиса — самокорректно.
         self._run_session_key = session_key
         self._request_id = request_id
+        # Снимок промпта текущей итерации (полный messages), чтобы
+        # ``after_iteration`` мог упаковать его вместе с ответом в llm_call.
+        self._pending_prompt: Optional[list] = None
+        self._pending_iteration: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Tool-события
@@ -209,6 +221,47 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         # AgentRunHookContext не содержит session_key, ловим его здесь
         # (передаётся AgentHookContext со spec.session_key)
         self._capture_context(context)
+        # Полный промпт (messages) этой итерации — снимок до ответа,
+        # чтобы ``after_iteration`` упаковал его вместе с LLMResponse.
+        self._pending_prompt = list(getattr(context, "messages", None) or [])
+        self._pending_iteration = getattr(context, "iteration", None)
+
+    async def after_iteration(self, context: Any) -> None:
+        self._capture_context(context)
+        response = getattr(context, "response", None)
+        if response is None:
+            return
+        try:
+            from dataclasses import asdict
+
+            self._service.log_llm_call(
+                session_id=self._run_session_key or "",
+                prompt=self._pending_prompt or [],
+                response=asdict(response),
+                iteration=self._pending_iteration or getattr(context, "iteration", None),
+                model=getattr(response, "model", None),
+                finish_reason=getattr(response, "finish_reason", None),
+                usage=dict(getattr(context, "usage", None) or {}),
+                request_id=self._request_id,
+            )
+        except Exception as exc:
+            logger.warning("DbLoggingHook.after_iteration llm_call failed: %s", exc)
+        if self._print_llm_calls:
+            self._print_llm_tokens(context)
+
+    def _print_llm_tokens(self, context: Any) -> None:
+        """Вывести в терминал две строки о токенах итерации (CLI-режим)."""
+        usage = dict(getattr(context, "usage", None) or {})
+        if not usage:
+            return
+        prompt = usage.get("prompt_tokens")
+        completion = usage.get("completion_tokens")
+        if prompt is None and completion is None:
+            return
+        if prompt is not None:
+            console.print(f"[dim]→ LLM: отправлен промпт ({prompt} токенов)[/dim]")
+        if completion is not None:
+            console.print(f"[dim]← LLM: получен ответ ({completion} токенов)[/dim]")
 
     async def after_run(self, context: AgentRunHookContext) -> None:
         try:

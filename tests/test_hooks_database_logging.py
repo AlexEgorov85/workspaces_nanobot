@@ -124,6 +124,90 @@ class TestDatabaseLoggingHook:
         )
         service.clear_request.assert_called_once_with("cli:1")
 
+    def test_after_iteration_emits_llm_call(self, sys_path):
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
+        from nanobot.providers.base import LLMResponse, ToolCallRequest
+
+        service = MagicMock()
+        hook = DatabaseLoggingHook(service)
+        ctx = MagicMock()
+        ctx.session_key = "cli:1"
+        ctx.iteration = 1
+        ctx.messages = [{"role": "user", "content": "привет"}]
+        ctx.usage = {"total_tokens": 7}
+        ctx.response = LLMResponse(
+            content="ответ",
+            finish_reason="stop",
+            usage={"output_tokens": 3},
+            tool_calls=[ToolCallRequest(id="t1", name="read", arguments={})],
+        )
+
+        asyncio.run(hook.before_iteration(ctx))
+        asyncio.run(hook.after_iteration(ctx))
+        service.log_llm_call.assert_called_once()
+        kwargs = service.log_llm_call.call_args.kwargs
+        assert kwargs["session_id"] == "cli:1"
+        assert kwargs["prompt"] == [{"role": "user", "content": "привет"}]
+        assert kwargs["iteration"] == 1
+        assert kwargs["finish_reason"] == "stop"
+        assert kwargs["usage"] == {"total_tokens": 7}
+        resp = kwargs["response"]
+        assert resp["content"] == "ответ"
+        assert resp["finish_reason"] == "stop"
+        assert resp["tool_calls"][0]["name"] == "read"
+
+    def test_after_iteration_no_response_skips(self, sys_path):
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
+
+        service = MagicMock()
+        hook = DatabaseLoggingHook(service)
+        ctx = MagicMock()
+        ctx.session_key = "cli:1"
+        ctx.response = None
+        asyncio.run(hook.before_iteration(ctx))
+        asyncio.run(hook.after_iteration(ctx))
+        service.log_llm_call.assert_not_called()
+
+    def test_after_iteration_prints_llm_tokens(self, sys_path, monkeypatch):
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
+        from nanobot.providers.base import LLMResponse
+
+        fake_console = MagicMock()
+        monkeypatch.setattr(
+            "lib.hooks.database_logging_hook.console", fake_console
+        )
+        service = MagicMock()
+        hook = DatabaseLoggingHook(service, print_llm_calls=True)
+        ctx = MagicMock()
+        ctx.session_key = "cli:1"
+        ctx.usage = {"prompt_tokens": 120, "completion_tokens": 45}
+        ctx.response = LLMResponse(content="ответ", finish_reason="stop")
+
+        asyncio.run(hook.before_iteration(ctx))
+        asyncio.run(hook.after_iteration(ctx))
+        printed = [c.args[0] for c in fake_console.print.call_args_list]
+        assert any("отправлен промпт (120 токенов)" in p for p in printed)
+        assert any("получен ответ (45 токенов)" in p for p in printed)
+
+    def test_after_iteration_does_not_print_when_disabled(self, sys_path, monkeypatch):
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
+        from nanobot.providers.base import LLMResponse
+
+        fake_console = MagicMock()
+        monkeypatch.setattr(
+            "lib.hooks.database_logging_hook.console", fake_console
+        )
+        service = MagicMock()
+        hook = DatabaseLoggingHook(service, print_llm_calls=False)
+        ctx = MagicMock()
+        ctx.session_key = "cli:1"
+        ctx.usage = {"prompt_tokens": 100, "completion_tokens": 50}
+        ctx.response = LLMResponse(content="ответ", finish_reason="stop")
+
+        asyncio.run(hook.before_iteration(ctx))
+        asyncio.run(hook.after_iteration(ctx))
+        fake_console.print.assert_not_called()
+
     def test_before_execute_tool_captures_session_key(self, sys_path):
         from lib.hooks.database_logging_hook import DatabaseLoggingHook
 
@@ -177,6 +261,17 @@ class TestDatabaseLoggingHookFactory:
         hook = factory(self._turn(None))
         assert hook._run_session_key is None
         assert hook._request_id is None
+
+    def test_factory_passes_print_llm_calls(self, sys_path):
+        from lib.hooks.database_logging_hook import make_db_logging_hook_factory
+
+        service = MagicMock()
+        factory = make_db_logging_hook_factory(
+            service, agent_id="agent-9", print_llm_calls=True
+        )
+        assert factory(self._turn("cli:1"))._print_llm_calls is True
+        default = make_db_logging_hook_factory(service, agent_id="agent-9")
+        assert default(self._turn("cli:1"))._print_llm_calls is False
 
     def test_concurrent_sessions_do_not_mix_request_id(self, sys_path):
         """Регрессия: после т.зр. общей shared-инстанса после_execute_tool

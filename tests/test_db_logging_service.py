@@ -204,6 +204,41 @@ class TestNonBlocking:
         svc = _svc(dsn="postgresql://x")
         assert svc.log_error("boom", session_id="k", context={"k": "v"}) is True
 
+    def test_log_llm_call_fields(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        prompt = [{"role": "user", "content": "привет"}]
+        response = {"content": "ответ", "tool_calls": [], "finish_reason": "stop"}
+        svc.log_llm_call(
+            "cli:1", prompt, response,
+            iteration=2, model="mini", finish_reason="stop",
+            usage={"total_tokens": 10}, request_id="m1",
+        )
+        event = svc._queue.queue[0]
+        assert event.event_type == "llm_call"
+        assert event.actor == "agent"
+        assert event.request_id == "m1"
+        assert event.summary == "stop"
+        assert event.payload["prompt"] == prompt
+        assert event.payload["response"] == response
+        assert event.metadata["iteration"] == 2
+        assert event.metadata["model"] == "mini"
+        assert event.metadata["finish_reason"] == "stop"
+        assert event.metadata["usage"] == {"total_tokens": 10}
+
+    def test_log_llm_call_sanitizes_non_json(self, fake_psycopg2):
+        from pathlib import Path
+
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        prompt = [{
+            "role": "tool",
+            "content": Path("x.txt"),  # несеризуемый объект
+        }]
+        response = {"content": "ок", "finish_reason": "stop"}
+        svc.log_llm_call("cli:1", prompt, response)
+        event = svc._queue.queue[0]
+        assert event.payload["prompt"] == [{"role": "tool", "content": "x.txt"}]
+        assert event.payload["response"] == {"content": "ок", "finish_reason": "stop"}
+
     def test_queue_full_returns_false(self, fake_psycopg2):
         svc = _svc(dsn="postgresql://x", queue_maxsize=2)
         # Не запускаем worker — очередь наполнится до запуска.

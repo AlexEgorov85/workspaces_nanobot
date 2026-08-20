@@ -47,6 +47,7 @@ def _run_vanilla(args: argparse.Namespace) -> None:
         enable_audit=False,
         enable_cron=True,
         session_override=args.session,
+        print_llm_calls=True,
     )
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)
@@ -70,6 +71,7 @@ def _run_patched(args: argparse.Namespace) -> None:
         enable_cron=True,
         storage_override=args.storage,
         session_override=args.session,
+        print_llm_calls=True,
     )
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)
