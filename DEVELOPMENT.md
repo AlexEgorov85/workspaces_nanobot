@@ -15,6 +15,7 @@
 
 1. [Архитектура](#архитектура)
 2. [Сервисный слой v2.0.0 (ApplicationContext + lib/)](#сервисный-слой-v200-applicationcontext--lib)
+   - [Управление сжатием контекста: `ContextCompactionService`](#управление-сжатием-контекста-contextcompactionservice)
 3. [Структура проекта](#структура-проекта)
 4. [Универсальный слой данных lib/services](#универсальный-слой-данных-libservices)
 5. [Конфигурация навыка](#конфигурация-навыка)
@@ -270,6 +271,289 @@ agent_id)` (`lib/hooks/database_logging_hook.py`). Фабрика получае
 TestDatabaseLoggingHookFactory.test_concurrent_sessions_do_not_mix_request_id`
 (переплетение двух сессий → `log_tool_result`/`after_run` несут свой
 `request_id`).
+
+### Метрика занятости контекстного окна (`metadata.context_window`)
+
+**Задача.** Видеть в UI, сколько процентов контекстного окна модели
+занято финальным запросом — и обновлять это пока агент ещё думает
+(живое обновление processing-строки), не дожидаясь конца оборота.
+
+**Решение — три компонента + мост:**
+
+1. **Мост per-iteration usage** (`lib/hooks/database_logging_hook.py`).
+   Потокобезопасный словарь `_CONTEXT_BRIDGE: dict[str, dict]` под
+   `threading.Lock`. Ключ = `session_key` (`postgres:<chat_id>`), чтобы
+   конкурентные сессии не «перепутались». Публичные функции:
+   * `seed_context_window(session_key, limit=, model=)` — патч на
+     старте оборота кладёт лимит окна и модель (знает только агент).
+   * `DatabaseLoggingHook.after_iteration` → `_store_iteration_usage`
+     пишет СВЕЖИЙ по-итерационный `context.usage` (именно последняя
+     итерация — то, что модель реально видела в финальном запросе).
+   * `_store_context_window` — финальный готовый блок, его кладёт
+     `_attach_context_window` (патч 2a).
+   * `get_context_window(session_key)` — канал читает для live-update;
+     предпочитает готовый блок, иначе собирает на лету из
+     usage+limit.
+   * `pop_context_bridge(session_key)` — анти-stale, чистится при
+     `_finalize_turn` и `_mark_failed`.
+
+2. **Патчи `RuntimePatcher`** (`lib/services/runtime_patcher.py`):
+   * `patch_context_bridge_seed` (патч 2b) — оборачивает
+     `agent._state_build`: на старте оборота сеет лимит/модель в мост
+     (best-effort, ошибки не мешают обороте).
+   * `_attach_context_window` в `_wrap` `_assemble_outbound` (патч 2a)
+     собирает блок `{used: int, limit: int, pct: float (4 знака, clamp 0..1),
+     model: str}` из usage последней итерации ÷ лимит окна и кладёт в
+     `result.metadata["context_window"]`. Готовый блок дополнительно
+     кладётся в мост для канала. Если мост пуст (DB-логирование
+     выключено), фолбэк на `agent._last_usage` (сумма по итерациям —
+     завышает, но лучше чем ничего).
+
+3. **Живое обновление в канале** (`lib/channels/postgres_channel.py`):
+   `_flush_live_context` в `_flush_reasoning_loop` (каждые
+   `_flush_interval` секунд) читает `get_context_window(session_key)` и
+   пишет блок в `metadata.context_window` processing-ассистент строки
+   в БД. UI (Streamlit) видит его через свой поллинг
+   `metadata.context_window` и рисует прогресс-бар, который
+   заполняется «вживую» по мере роста промпта. После финализации
+   оборота `_drop_context_bridge(chat_id)` снимает мост.
+
+**Место хранения:** `metadata.context_window` в JSONB
+`agent_conversation_messages` (S1). Без миграций: канал уже сливает
+`metadata` целиком в `_finalize_turn`.
+
+**UI:**
+* **Streamlit** (`streamlit_app.py`): `_render_context_window(block)` —
+  `st.progress(pct, text="Контекст: used / limit · NN% · model")`.
+  Рисуется один раз для финальной строки (после загрузки истории)
+  и live для processing-строки (каждый poll). Метка `metadata.kind ==
+  "context_compact"` (ContextCompactionService) даёт отдельный стиль
+  `.compact-notice`.
+* **CLI** (`lib/cli/console_loop.py`): `_print_context_window(block)` —
+  одна строка `[dim]📊 Контекст: used / limit · NN% · model[/dim]`
+  после `_typewriter(content)`. Гейт `cfg.show_context_window`
+  (по умолчанию `true`).
+
+**Конфигурация** (`project.json`):
+* `cli.show_context_window` (bool, дефолт `true`) — печатать в CLI.
+  В `REQUIRED_KEYS` (`tests/test_config_keys.py`).
+
+**Что не делается (явные «нет»):**
+* Не суммируется usage по итерациям — `agent._last_usage` слишком
+  завышает занятость на многоитеративных оборотах (токены
+  накапливаются, но окно модели — снапшот последней итерации).
+* Не рисуется в UI из `agent._last_usage` (только из моста) — иначе
+  будет рассинхрон с финальным блоком.
+* Нет auto-tighten окна (сжатие) — это задача
+  `ContextCompactionService` (`lib/services/context_compaction.py`),
+  отдельный поток.
+
+**Тесты:** `tests/test_database_logging_bridge.py` (мост),
+`tests/test_runtime_patcher.py::TestPatchContextBridgeSeed` (патч 2b),
+`tests/test_postgres_channel.py::TestPostgresChannelContextWindow`
+(live-update + drop), `tests/test_streamlit_app.py::TestRenderContextWindow`
+(UI), `tests/test_console_loop.py::TestPrintContextWindow` (CLI).
+
+### Управление сжатием контекста: `ContextCompactionService`
+
+**Задача.** Дать пользователю и оператору видимый след любого сжатия
+контекста диалога — и ручного (``/compact``, ``compact_context``),
+и автоматического (idle, token-budget). Один и тот же формат,
+один и тот же путь записи.
+
+**Архитектура (один путь — три входа):**
+
+```mermaid
+flowchart LR
+    subgraph manual["Ручной запуск"]
+        TOOL["compact_context<br/>(AgentTool)"]
+        CLI["/compact<br/>(console_loop)"]
+    end
+    subgraph auto["Авто-сжатие nanobot"]
+        AC["AutoCompact._archive<br/>(idle)"]
+        MC["Consolidator.maybe_<br/>consolidate_by_tokens<br/>(token)"]
+    end
+
+    TOOL --> SVC
+    CLI --> SVC
+    AC --> W1["runtime_patcher.<br/>_wrap_auto_compact_archive"]
+    MC --> W2["runtime_patcher.<br/>_wrap_maybe_consolidate_by_tokens"]
+    W1 --> SVC
+    W2 --> SVC
+
+    SVC["ContextCompactionService<br/>(lib/services/context_compaction.py)"]
+    SVC -->|_notify| FMT["format_report(report)"]
+    FMT --> LOG["loguru INFO"]
+    FMT --> RICH["Rich-вывод в терминал<br/>(print_to_terminal)"]
+    FMT --> DB["INSERT в agent_conversation_<br/>messages (metadata.kind='context_compact')"]
+    DB --> ST["Streamlit UI<br/>.compact-notice"]
+```
+
+**Точки входа:**
+
+1. **CLI-команда ``/compact``** (`lib/cli/console_loop.py::_run_cli_compact`).
+   В `run_repl` после проверки `_is_exit_command` добавлен перехват:
+   ``if command == "/compact" or command.startswith("/compact ")``.
+   Создаёт локальный `ContextCompactionService(agent, settings=None)`
+   (в CLI нет `SETTINGS`, но `_write_history_notice` сам отключается —
+   нет `channels.postgres.dsn`), зовёт `compact(session_key="cli:<chat_id>")`,
+   печатает отчёт Rich-цветом (cyan/yellow). Поддерживает флаги
+   `idle` / `--idle` / `-i` для жёсткого idle-сжатия.
+
+2. **Tool ``compact_context``** (`lib/tools/compact_context_tool.py`).
+   Регистрируется патчем `runtime_patcher.patch_compact_tool` в
+   `apply_all` (см. `lib/services/runtime_patcher.py:1037`). Параметры:
+   `session_key: str | None` (по умолчанию — текущая из
+   `current_request_session_key()`), `idle: bool`. Вызывает
+   `svc.compact(...)`, возвращает текст отчёта как результат тула —
+   агент может его пересказать пользователю.
+
+3. **Авто-сжатие** — обёртки `patch_compaction_tracking` в
+   `runtime_patcher`:
+   * `_wrap_auto_compact_archive` (`agent.auto_compact._archive`) —
+     перед/после вызова замеряет `last_consolidated` и `tokens`,
+     если курсор сдвинулся и `result` непустой — зовёт
+     `svc.record_external_compaction(...)`.
+   * `_wrap_maybe_consolidate_by_tokens`
+     (`agent.consolidator.maybe_consolidate_by_tokens`) — то же:
+     diff `last_consolidated` до/после; если сдвинулся — пишет
+     заметку через `record_external_compaction`.
+
+**Единый путь записи.** Ручной запуск зовёт `compact()`, авто —
+`record_external_compaction(...)`. Оба заканчиваются вызовом
+`ContextCompactionService._notify(report)`:
+
+```python
+async def _notify(self, session_key, report):
+    text = self.format_report(report)
+    logger.info("Context compaction [{}] {}: archived={}, tokens {}→{}", ...)
+    if self.print_to_terminal:
+        Console().print(f"[dim]🗜️ {text}[/dim]")
+    if self.notify_in_history:
+        await self._write_history_notice(session_key, report)
+```
+
+`format_report`, loguru-строка и `_write_history_notice` — **общие**
+для всех путей. Ручное и автоматическое сжатие неразличимы по
+формату и по содержимому в БД/логах/консоли.
+
+**Формат `format_report`** (`ContextCompactionService.format_report`):
+
+Для ``archived > 0``:
+
+```
+<текст LLM-сводки (если есть)>
+
+Итог: заархивировано N сообщений (осталось K), BEFORE → AFTER токенов (экономия ≈P%).
+```
+
+Для ``archived == 0`` (сжатие не потребовалось):
+
+```
+Сжатие сессии «<key>» не потребовалось: контекст уже в пределах бюджета (N токенов).
+```
+
+Для ошибки:
+
+```
+Сжатие не выполнено: <причина>
+```
+
+**Что пишется в `agent_conversation_messages`:**
+
+| Поле | Значение |
+|---|---|
+| `chat_id` | из `session_key` (`postgres:<chat>` или `streamlit:<chat>`) |
+| `role` | `assistant` |
+| `status` | `completed` |
+| `content` | результат `format_report(report)` (полный текст) |
+| `metadata.kind` | `context_compact` (метка для UI/аналитики) |
+| `metadata.compact` | весь `report` (archived_msgs, kept_msgs, tokens, summary, mode) |
+
+Поддерживаются **только** префиксы `postgres:` и `streamlit:` — это
+единственные каналы с таблицей обмена. Для CLI-сессий (`cli:`)
+запись пропускается: REPL сам показывает отчёт в терминале, в БД
+идти нечему.
+
+**Почему `agent_conversation_messages`, а не `agent_session_messages`:**
+контекст промпта строится из `PGSessionManager` (таблица
+`agent_session_messages`). Если бы заметка попадала туда — она бы
+съедала токены, которые сжатие только что освободило. Заметка
+видна в чате, но не загружается в LLM-промпт.
+
+**Конфигурация** (`project.json` → `gateway.compact.*`, все ключи
+опциональны, дефолты прямо в коде):
+
+| Ключ | Дефолт | Эффект |
+|---|---|---|
+| `gateway.compact.enabled` | `true` | Регистрировать tool `compact_context` и обрабатывать `/compact` в CLI. При `false` патч пропускается, CLI-команда возвращает «отключено». |
+| `gateway.compact.notify_in_history` | `true` | Писать заметки в `agent_conversation_messages` (ручные и авто). |
+| `gateway.compact.print_to_terminal` | `false` | Дублировать отчёт в Rich-вывод gateway (по образцу `print_worker_activity`). |
+
+На уровне nanobot (`config.json`) поведение сжатия управляется
+стандартными ключами `consolidationRatio` (дефолт `0.5`) и
+`idleCompactAfterMinutes` (в этом проекте `0` — auto-compact idle
+выключен; см. `nanobot/config/schema.py:151-163`). См. также
+**[Конфигурация](#конфигурация-навыка)** и
+**[Структура проекта](#структура-проекта)**.
+
+**UI:**
+
+* **Streamlit** (`streamlit_app.py`):
+  * `_load_chat_history` поднимает флаг `compact_notice=True`, если
+    `metadata.kind == "context_compact"`.
+  * В рендере (строка ~290): ``<div class="compact-notice">🗜️ {content}</div>``
+    через CSS-стиль — жёлтый фон, левая полоска `#f0c040`,
+    мелкий шрифт, отступы. Не путается с обычными
+    assistant-сообщениями.
+* **CLI** (`lib/cli/console_loop.py`): `_run_cli_compact` печатает
+  через Rich: `[cyan]🗜️ {text}[/cyan]` при успехе, `[yellow]🗜️ ...`
+  при ошибке.
+* **Терминал gateway** (`lib/services/context_compaction.py`):
+  если `print_to_terminal=true`, Rich-вывод `[dim]🗜️ {text}[/dim]`
+  (по образцу `print_worker_activity`).
+* **loguru**: всегда пишется INFO-строка вида
+  `Context compaction [token] postgres:streamlit: archived=12, tokens 34500→12300`
+  (и аналогично для авто — `Auto context compaction [idle] ...`).
+
+**Что не делается (явные «нет»):**
+
+* Не добавляются служебные сообщения в `session.messages` при
+  ручном `/compact` — это намеренно: иначе освобождённые токены
+  сразу бы съела новая запись в истории. Состояние сессии
+  (`last_consolidated`, `_last_summary`) правит штатный
+  `Consolidator` nanobot (`memory.py::_persist_last_summary`),
+  а наш сервис лишь пишет UI-заметку.
+* Не отправляется пользователю уведомление через cron/heartbeat —
+  сжатие не требует реакции.
+* Не суммируется экономия по сессиям в отдельную таблицу — для
+  аудита достаточно `metadata.compact` в `agent_conversation_messages`
+  и loguru-логов.
+
+**Безопасность:** вся блокировка уже внутри консолидатора
+(`Consolidator.get_lock(session_key)`) — параллельные сжатия одной
+сессии serialized. Обёртки `runtime_patcher` не добавляют
+синхронизации и не делают двойных вызовов.
+
+**Тесты:** `tests/test_context_compaction.py` (24 теста):
+
+* `TestFormatReport` — формат отчёта: failure, idle-no-archive,
+  with-archive+summary, summary-truncation, summary-`nothing`-marker,
+  archive-no-summary.
+* `TestCompact` — ручной путь: disabled-failure, missing-session-key,
+  token-compaction-archives-and-reports, idle-mode, idle-no-archive,
+  compactor-failure, session-state-relies-on-nanobot-consolidator,
+  no-extra-message-in-session.
+* `TestCompactToolPatch` — `patch_compact_tool` регистрирует tool /
+  пропускает при `enabled=false`.
+* `TestRecordExternalCompaction` — единый путь записи:
+  `_write_history_notice` зовётся с правильным report,
+  skip при `archived=0`, skip при `notify_in_history=false`.
+* `TestPatchCompactionTracking` — `patch_compaction_tracking`:
+  skip при `enabled=false` / `notify_in_history=false`,
+  archive-wrapper зовёт `record_external_compaction`,
+  skip когда авто не архивирует,
+  maybe-consolidate-wrapper зовёт `record_external_compaction`.
 
 ### Ликвидация потери данных при усечении больших результатов инструментов
 

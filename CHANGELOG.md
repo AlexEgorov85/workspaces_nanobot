@@ -10,6 +10,48 @@
 
 ### Added
 
+- **Метрика занятости контекстного окна (`metadata.context_window`)** —
+  блок `{used, limit, pct (4 знака, clamp 0..1), model}` в metadata
+  финального outbound (S1) + живое обновление processing-строки (T2) +
+  рендер прогресс-бара в Streamlit и однострочной метки в CLI (M1).
+  Канал `postgres_channel` пишет блок в `agent_conversation_messages`
+  JSONB через `_flush_live_context` (мост per-iteration usage
+  `lib/hooks/database_logging_hook._CONTEXT_BRIDGE`); патч
+  `RuntimePatcher.patch_context_bridge_seed` сеет лимит/модель на
+  старте оборота; `_attach_context_window` в `_wrap` `_assemble_outbound`
+  собирает блок из usage последней итерации ÷ лимит окна. Управление
+  UI: `cli.show_context_window` в `project.json` (bool, дефолт `true`).
+  Тесты: `tests/test_database_logging_bridge.py`,
+  `tests/test_runtime_patcher.py::TestPatchContextBridgeSeed`,
+  `tests/test_postgres_channel.py::TestPostgresChannelContextWindow`,
+  `tests/test_streamlit_app.py::TestRenderContextWindow`,
+  `tests/test_console_loop.py::TestPrintContextWindow`.
+
+- **Ручное сжатие контекста** — `ContextCompactionService`
+  (`lib/services/context_compaction.py`) + `CompactContextTool`
+  (`lib/tools/compact_context_tool.py`, регистрация через
+  `runtime_patcher.patch_compact_tool`) + CLI-команда `/compact`
+  (`lib/cli/console_loop.py`). Обёртка над штатным
+  `Consolidator.maybe_consolidate_by_tokens` / `compact_idle_session`
+  nanobot 0.3.0: замеряет `tokens_before`/`tokens_after`, `archived_msgs`,
+  возвращает отчёт и при `archived > 0` пишет заметку
+  (`metadata.kind="context_compact"`, `role='assistant'`,
+  `status='completed'`) в `agent_conversation_messages` — она видна в
+  Streamlit как стиль `.compact-notice`, но НЕ попадает в контекст
+  промпта (контекст строится из `PGSessionManager`). Управляется
+  секцией `gateway.compact.*` в `project.json` (`enabled`,
+  `notify_in_history`, `print_to_terminal`; все опциональны,
+  дефолт `true`/`true`/`false`).
+- **Заметки о сжатии в истории диалога для всех путей** — патч
+  `runtime_patcher.patch_compaction_tracking` оборачивает
+  `AutoCompact._archive` (idle) и `Consolidator.maybe_consolidate_by_tokens`
+  (token-budget). После каждого успешного авто-сжатия пишется
+  заметка в `agent_conversation_messages` через общий метод
+  `ContextCompactionService.record_external_compaction`, который
+  сводит замеры и зовёт тот же `_notify` + `_write_history_notice`,
+  что и ручной `compact()`. Один путь, один формат, один и тот же
+  текст `format_report` — для пользователя и для логов ручное и
+  автоматическое сжатие неразличимы.
 - **Полное логирование промпта и ответа LLM** — событие `llm_call`
   в `agent_gateway_logs`: `DbLoggingService.log_llm_call` (payload
   `prompt`/`response`, метаданные `iteration`/`model`/`finish_reason`/`usage`)
