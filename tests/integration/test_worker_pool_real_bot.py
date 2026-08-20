@@ -160,6 +160,12 @@ def _terminate(proc: subprocess.Popen):
             proc.send_signal(signal.CTRL_BREAK_EVENT)
             proc.wait(timeout=8)
             return
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        return
     proc.terminate()
     try:
         proc.wait(timeout=8)
