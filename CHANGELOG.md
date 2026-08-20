@@ -486,7 +486,7 @@
   перенаправляет целевой путь в `data_store/cache/sessions/<session_key>/<file>`,
   если исходный не попадает в whitelist служебных путей (`AGENTS.md`, `lib/`,
   `tests/`, `benchmarks/`, `data_store/`, `**/*.py` и т.д.). Имя папки — из
-  `context.session_key` (`cli:1`, `telegram:8281248569`). Кросс-платформенный:
+  `context.session_key` (`cli:1`). Кросс-платформенный:
   зарезервированные Windows-имена (`CON`, `PRN`, `NUL`, `COM*`, `LPT*`)
   санитизируются, недопустимые символы вырезаются. Реализует политику
   `workspace/AGENTS.md` «new files must be saved under `data_store/cache/`».
