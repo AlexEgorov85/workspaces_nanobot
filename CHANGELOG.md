@@ -8,6 +8,17 @@
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-08-20
+
+> **MINOR-релиз:** метрика занятости контекстного окна (`metadata.context_window`),
+> ручное сжатие контекста (`/compact` + tool), поддержка кастомных tool'ов из
+> `workspace/tools/` (включая audit-tool'ы), мульти-машинный пул воркеров в
+> `PostgresChannel`, терминальная наблюдаемость (`[task-worker]`/`[db-worker]`,
+> токены LLM, `probe_connections`), кастомизация шаблонов nanobot через
+> `workspace/overrides/`, закрытие потери данных при усечении больших результатов
+> инструментов и оптимизации БД-пула (теги db-job'ов, гейт reclaim, idle-guard, кеш
+> чтения сессий). Итог тестов: **1137 passed, 14 skipped**.
+
 ### Added
 
 - **Метрика занятости контекстного окна (`metadata.context_window`)** —
@@ -139,40 +150,6 @@
   `sql/workers/create_public_agent_worker_claims.sql`.
   Гейт-тесты: `tests/integration/test_worker_pool_concurrency.py` (C1–C5,
   opt-in `NANOBOT_INTEGRATION=1`) — 5 зелёных против реального PostgreSQL.
-
-- **`workspace/hooks/recent_files_hook.py` — `RecentFilesHook` + auto-attach
-  в `OutboundMessage.media`.** Закрывает два системных бага:
-  (1) агент создаёт файл через `write_file`, но **забывает** приложить
-  его в `message({"media": [...]})` — в БД уходит пустой `media` и в
-  таблице нет вложения;
-  (2) агент прикладывает несуществующий путь (например, `.docx` после
-  блокировки `pip install` SSRF-guard'ом) — `media.py:serialize` пишет
-  warning `Media file not found, keeping path`, а в БД уходит dict с
-  пустым `mime_type`/`file_size`, и UI его не отображает. Хук в
-  `after_execute_tool` собирает `params["path"]` (уже перенаправленный
-  `SessionFileRedirectHook`, поэтому путь **реальный**), а в
-  `RuntimePatcher._wrap` после `tool_audit_hook.drain` мы дренируем
-  `recent_files_hook.drain(session_key)` и подмешиваем в `result.media`
-  только то, чего там ещё нет (по `Path(p).name`) и что существует на
-  диске (`Path(p).is_file()`). Сессионная изоляция по `session_key` —
-  конкурентные вопросы не путают файлы. Хук auto-discover'ится тем же
-  `ApplicationContext.scan_and_register`, что и `SessionFileRedirectHook`;
-  порядок в `AgentLoop.hooks`: `RecentFilesHook` → `SessionFileRedirectHook`
-  → `ToolAuditHook` (чтобы `params["path"]` уже был перенаправлен к моменту
-  `after_execute_tool` `RecentFilesHook`).
-  `RuntimePatcher.apply_all` теперь принимает `recent_files_hook` как
-  keyword-only параметр. Тесты: `tests/test_recent_files_hook.py` (13)
-  + `tests/test_smoke_postgres_channel_media.py` (3 e2e).
-
-- **`workspace/skills/office_files/` — skill чтения офисных файлов.**
-  `workspace/utils/office_files.py` (`extract_text` / `extract_tables` /
-  `summarize` / `read_xlsx_sheet`): маршрутизация по расширению через
-  `mimetypes`, чтение `.docx`/`.xlsx`/`.xls`/`.pdf`/`.pptx`/`.csv`/`.txt`.
-  Зависимости добавлены в `requirements.txt` (`python-docx`, `openpyxl`,
-  `xlrd`, `pypdf`, `pdfplumber`, `python-pptx`, `Pillow`, `chardet`) — в
-  контракте явно запрещён `pip install` на лету (SSRF-guard режет зеркало
-  PyPI). Документация: `workspace/skills/office_files/SKILL.md`. Тесты:
-  `tests/test_office_files.py` (196 строк).
 
 - **Подробное поэтапное логирование и доработка инкрементальности
   `tools/build_vectors.py`.** Все сообщения — через `loguru` в stderr (без
@@ -366,6 +343,83 @@
   `tests/test_gateway_live_media_e2e.py` (реальный gateway + живой Postgres
   + живой LLM на изолированной таблице; опт-ин через `NANOBOT_LIVE_E2E=1`).
 
+- **Reclaim-запрос неверно собирался на PostgreSQL без явного каста типа.**
+  `PostgresChannel._release_all_leases` строил `task_id = ANY(%s)` без
+  приведения к `uuid[]`; на некоторых БД (psycopg2/greenplum) параметр
+  интерпретировался как `text[]`, и очистка чужих истёкших lease не
+  срабатывала. Каст явно указан: `ANY(%s::uuid[])`.
+
+- **`ContextCompactionService._write_history_notice` вызывал sync-функцию
+  через `await`.** `utils.db.execute` возвращает command tag, а не корутину —
+  `await execute(...)` падал на `'str' object can't be awaited`. Теперь вызов
+  обёрнут в `asyncio.to_thread` (как sync-IO в `postgres_channel`).
+
+- **`AuditRunPredefinedScriptTool` мог вернуть «Cache is not ready» на
+  пустом кэше.** Провайдер собирался с закрытым DuckDB-кэшем; перед чтением
+  реестра теперь вызывается `provider.open_cache()`, а провайдер дополнительно
+  инжектируется и в «плоский» `sys.modules["db_loader"]` (отдельный инстанс
+  модуля внутри `predefined.py`), иначе `get_provider()` внутри
+  `load_registry()` бросал «провайдер не задан».
+
+### Tests
+
+- Итоговое состояние набора: **1137 passed, 14 skipped** (`pytest`).
+  К покрытию релиза добавлены: `tests/test_tools_project_loader.py`,
+  `tests/test_tools_audit_analyzer.py`, `tests/test_consolidator_locale.py`,
+  `tests/test_recent_files_hook.py`, `tests/test_runtime_patcher.py`
+  (`TestAutoCompactIdleGuard`), `tests/test_postgres_channel.py`
+  (`_reclaim_needed`), `tests/test_pg_session_manager.py` (кеш
+  `read_session_file`), `tests/test_utils_db.py` (теги db-job'ов,
+  `probe_connections`) и интеграционные
+  `tests/integration/test_worker_pool_concurrency.py`,
+  `tests/integration/test_worker_pool_real_bot.py`.
+
+## [2.3.1] — 2026-08-18
+
+> **PATCH-релиз:** закрытые системные баги медиа-вложений (auto-attach устаревших
+> путей, авто-подключение `SessionFileRedirectHook` в gateway) и перенос фреймворковых
+> хуков в `lib/hooks/` (один `AgentLoop`); новый skill `office_files` — решение
+> проблемы чтения офисных файлов (docx/xlsx/xls/pdf/pptx/csv/txt). Итог тестов:
+> **906 passed**.
+
+### Added
+
+- **`workspace/hooks/recent_files_hook.py` — `RecentFilesHook` + auto-attach
+  в `OutboundMessage.media`.** Закрывает два системных бага:
+  (1) агент создаёт файл через `write_file`, но **забывает** приложить
+  его в `message({"media": [...]})` — в БД уходит пустой `media` и в
+  таблице нет вложения;
+  (2) агент прикладывает несуществующий путь (например, `.docx` после
+  блокировки `pip install` SSRF-guard'ом) — `media.py:serialize` пишет
+  warning `Media file not found, keeping path`, а в БД уходит dict с
+  пустым `mime_type`/`file_size`, и UI его не отображает. Хук в
+  `after_execute_tool` собирает `params["path"]` (уже перенаправленный
+  `SessionFileRedirectHook`, поэтому путь **реальный**), а в
+  `RuntimePatcher._wrap` после `tool_audit_hook.drain` мы дренируем
+  `recent_files_hook.drain(session_key)` и подмешиваем в `result.media`
+  только то, чего там ещё нет (по `Path(p).name`) и что существует на
+  диске (`Path(p).is_file()`). Сессионная изоляция по `session_key` —
+  конкурентные вопросы не путают файлы. Хук auto-discover'ится тем же
+  `ApplicationContext.scan_and_register`, что и `SessionFileRedirectHook`;
+  порядок в `AgentLoop.hooks`: `RecentFilesHook` → `SessionFileRedirectHook`
+  → `ToolAuditHook` (чтобы `params["path"]` уже был перенаправлен к моменту
+  `after_execute_tool` `RecentFilesHook`).
+  `RuntimePatcher.apply_all` теперь принимает `recent_files_hook` как
+  keyword-only параметр. Тесты: `tests/test_recent_files_hook.py` (13)
+  + `tests/test_smoke_postgres_channel_media.py` (3 e2e).
+
+- **`workspace/skills/office_files/` — решение проблемы чтения офисных
+  файлов.** `workspace/utils/office_files.py` (`extract_text` / `extract_tables` /
+  `summarize` / `read_xlsx_sheet`): маршрутизация по расширению через
+  `mimetypes`, чтение `.docx`/`.xlsx`/`.xls`/`.pdf`/`.pptx`/`.csv`/`.txt`.
+  Зависимости добавлены в `requirements.txt` (`python-docx`, `openpyxl`,
+  `xlrd`, `pypdf`, `pdfplumber`, `python-pptx`, `Pillow`, `chardet`) — в
+  контракте явно запрещён `pip install` на лету (SSRF-guard режет зеркало
+  PyPI). Документация: `workspace/skills/office_files/SKILL.md`. Тесты:
+  `tests/test_office_files.py` (196 строк).
+
+### Fixed
+
 - **`hook_loader.scan_and_register`: `importlib.import_module` →
   `importlib.util.spec_from_file_location`.** Раньше плагины
   `workspace/hooks/*.py` импортировались top-level по имени файла, и при
@@ -412,24 +466,6 @@
   `test_auto_scan_hooks_includes_session_file_redirect` и
   `test_agent_created_once_with_merged_hooks`).
 
-- **Reclaim-запрос неверно собирался на PostgreSQL без явного каста типа.**
-  `PostgresChannel._release_all_leases` строил `task_id = ANY(%s)` без
-  приведения к `uuid[]`; на некоторых БД (psycopg2/greenplum) параметр
-  интерпретировался как `text[]`, и очистка чужих истёкших lease не
-  срабатывала. Каст явно указан: `ANY(%s::uuid[])`.
-
-- **`ContextCompactionService._write_history_notice` вызывал sync-функцию
-  через `await`.** `utils.db.execute` возвращает command tag, а не корутину —
-  `await execute(...)` падал на `'str' object can't be awaited`. Теперь вызов
-  обёрнут в `asyncio.to_thread` (как sync-IO в `postgres_channel`).
-
-- **`AuditRunPredefinedScriptTool` мог вернуть «Cache is not ready» на
-  пустом кэше.** Провайдер собирался с закрытым DuckDB-кэшем; перед чтением
-  реестра теперь вызывается `provider.open_cache()`, а провайдер дополнительно
-  инжектируется и в «плоский» `sys.modules["db_loader"]` (отдельный инстанс
-  модуля внутри `predefined.py`), иначе `get_provider()` внутри
-  `load_registry()` бросал «провайдер не задан».
-
 ### Changed
 
 - **Attack на корень Warning'ов: фреймворковые хуки переехали из
@@ -459,19 +495,7 @@
   сканер успех молчит (раньше печатался только сканированные плагины,
   а фреймворковые хуки в лог не попадали). Обновлены импорты:
   `agent_factory.py`, `runtime_patcher.py`, `benchmarks/hooks.py`, тесты.
-
-### Tests
-
-- Итоговое состояние набора: **1137 passed, 14 skipped** (`pytest`).
-  К покрытию релиза добавлены: `tests/test_tools_project_loader.py`,
-  `tests/test_tools_audit_analyzer.py`, `tests/test_consolidator_locale.py`,
-  `tests/test_recent_files_hook.py`, `tests/test_runtime_patcher.py`
-  (`TestAutoCompactIdleGuard`), `tests/test_postgres_channel.py`
-  (`_reclaim_needed`), `tests/test_pg_session_manager.py` (кеш
-  `read_session_file`), `tests/test_utils_db.py` (теги db-job'ов,
-  `probe_connections`) и интеграционные
-  `tests/integration/test_worker_pool_concurrency.py`,
-  `tests/integration/test_worker_pool_real_bot.py`.
+  Итог: **906 passed**.
 
 ## [2.3.0] — 2026-08-18
 
