@@ -1091,7 +1091,7 @@ outbound). Все остальные сообщения `send()` merge'ит в a
 
 | Значение | Описание |
 |---|---|
-| `"single"` (дефолт) | Один инстанс gateway. Захват задачи через `UPDATE ... RETURNING` (как в v2.3.1). `agent_worker_claims` НЕ используется, lease-loop не запускается. Защита от зависших `processing` — `_unstick_processing` на каждом poll. |
+| `"single"` (дефолт) | Один инстанс gateway. Захват задачи через `UPDATE ... RETURNING` (как в v2.3.1). `agent_worker_claims` НЕ используется, lease-loop не запускается. Защита от зависших `processing` — фоновая `_unstick_loop` с интервалом `channels.postgres.unstick_interval` (по умолчанию `max(60, processing_timeout/5)` = 120 сек). |
 | `"worker_pool"` | Мульти-машинный пул. Захват через `INSERT INTO agent_worker_claims` + lease/heartbeat (см. предыдущую секцию «Мульти-машинный пул воркеров»). Используется, если запущено несколько инстансов gateway с общей таблицей `agent_conversation_messages`. |
 
 **Когда переключать:**
