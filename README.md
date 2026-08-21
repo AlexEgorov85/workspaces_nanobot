@@ -642,6 +642,8 @@ v2.4.0 — MINOR поверх v2.3.1. Главное:
   `compact_context`, `audit_run_predefined_script`, `audit_search_vector`.
 - **Мульти-машинный пул воркеров в `PostgresChannel`** (таблица
   `agent_worker_claims`, lease/heartbeat, статусы `error`/`failed`);
+  переключатель режимов аренды `channels.postgres.claim_strategy` —
+  `single` (по умолчанию, как в v2.3.1) или `worker_pool`;
   activity в терминал (`[task-worker]`, `[db-worker]`, токены LLM) и
   `probe_connections` при старте.
 - **Кастомизация шаблонов nanobot** через `workspace/overrides/`
