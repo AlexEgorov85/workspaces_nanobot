@@ -70,6 +70,8 @@ Thumbs.db
 
 # --- Локальный runtime ---
 gw_pid.txt
+gw_err.log
+gw_out.log
 workspace/config.json
 
 # --- Агент-runtime: конфиг и память бота (не часть репозитория) ---
