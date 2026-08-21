@@ -39,6 +39,7 @@ def _required_keys():
         ("channels.postgres.poll_interval", 10.0),
         ("channels.postgres.flush_interval", 5.0),
         ("channels.postgres.processing_timeout", 600),
+        ("channels.postgres.unstick_interval", 120.0),
         ("channels.postgres.max_concurrent", 2),
         ("channels.postgres.allow_from", ["*"]),
         ("channels.postgres.messages_table", "agent_session_messages"),
@@ -51,6 +52,7 @@ def _required_keys():
         ("channels.postgres.claims_table", "agent_worker_claims"),
         ("channels.postgres.lease_interval", 15.0),
         ("channels.postgres.error_retry_delay", 60.0),
+        ("channels.postgres.claim_strategy", "single"),
         ("channels.postgres.media_cache_dir", "data_store/cache/sessions"),
         # channels.postgres.pool
         ("channels.postgres.pool.min_conn", 1),

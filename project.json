@@ -47,12 +47,33 @@
       "flush_interval": 5.0,                  // Сброс reasoning в metadata, сек
       "max_concurrent": 2,                    // Макс. параллельно обрабатываемых сообщений
       "processing_timeout": 600,              // Зависшее сообщение → reclaim/retry (см. lease), сек
+      "unstick_interval": 120.0,              // single-режим: интервал фонового _unstick_loop (сек).
+                                             //   По дефолту max(60, processing_timeout/5) = 120 сек.
+                                             //   Уменьшает нагрузку на БД на пустом столе (вместо
+                                             //   SELECT+UPDATE каждые poll_interval).
+                                             //   В worker_pool-режиме не используется (lease_loop чаще).
       "max_stuck_retries": 3,                 // Лимит retry зависшего сообщения (postgres_channel.py)
       "msg_ctx_max_size": 100,                // Защитный лимит размера _msg_ctx (postgres_channel.py)
       "worker_id": "",                        // ID воркера в мульти-машинном пуле. Пусто → авто: {hostname}:{pid}:{uuid8}
       "claims_table": "agent_worker_claims",  // Таблица аренды задач (мульти-машинный пул)
       "lease_interval": 15.0,                 // Период heartbeat-продления аренды, сек
       "error_retry_delay": 60.0,              // Пауза перед повтором задачи со статусом error, сек
+      "claim_strategy": "single",             // Режим аренды задач.
+                                             //   "single" (активен) — один инстанс gateway, захват задачи
+                                             //     через UPDATE ... RETURNING без таблицы agent_worker_claims.
+                                             //     Подходит для типичного деплоя (как в v2.3.1).
+                                             //   "worker_pool" — мульти-машинный пул: захват через
+                                             //     INSERT INTO agent_worker_claims + lease/heartbeat.
+                                             //     Используется, если запущено несколько инстансов gateway
+                                             //     с общей таблицей agent_conversation_messages.
+                                             //   Параметры worker_id/claims_table/lease_interval/
+                                             //   error_retry_delay актуальны только в режиме "worker_pool".
+                                             //   "worker_pool" — мульти-машинный пул: захват через
+                                             //     INSERT INTO agent_worker_claims + lease/heartbeat.
+                                             //     Используется, если запущено несколько инстансов gateway
+                                             //     с общей таблицей agent_conversation_messages.
+                                             //   Параметры worker_id/claims_table/lease_interval/
+                                             //   error_retry_delay актуальны только в режиме "worker_pool".
       "media_cache_dir": "data_store/cache/sessions",  // Кеш медиа-файлов сессий
       "allow_from": ["*"],                    // Допустимые отправители. Варианты: ["*"] — все | ["<sender_id>", ...] — точное совпадение (nanobot/channels/base.py:203)
       "pool": {                               // Параметры пула psycopg2 (session_storage.py)

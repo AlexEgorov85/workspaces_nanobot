@@ -80,7 +80,7 @@ class ChannelFactory:
     # ------------------------------------------------------------------
 
     def _add_redis(
-        self, channels: Any, config: Any, settings: Any, bus: Any
+        self, channels: Any, config: Any, settings: Any, bus: Any,
     ) -> List[str]:
         """Зарегистрировать Redis-канал (если включён в ``settings.channels.redis``).
 
@@ -125,7 +125,7 @@ class ChannelFactory:
     # ------------------------------------------------------------------
 
     def _add_postgres(
-        self, channels: Any, config: Any, settings: Any, bus: Any
+        self, channels: Any, config: Any, settings: Any, bus: Any,
     ) -> List[str]:
         """Зарегистрировать Postgres-канал (если включён в ``settings.channels.postgres``).
 
@@ -142,6 +142,11 @@ class ChannelFactory:
             (для распознавания голосовых вложений);
           * ``enabled=True`` + нет ``dsn`` — сообщение об ошибке в
             консоль, канал НЕ создаётся (это явная ошибка конфига).
+
+        ``claim_strategy`` (``channels.postgres.claim_strategy``) управляет
+        режимом аренды задач:
+          * ``"single"`` (дефолт) — один инстанс, без ``agent_worker_claims``;
+          * ``"worker_pool"`` — мульти-машинный пул с lease/heartbeat.
         """
         pg = _section(settings, "channels").get("postgres", {})
         if not pg.get("enabled", False):
@@ -167,6 +172,7 @@ class ChannelFactory:
             "processing_timeout": pg.get("processing_timeout", 120),
             "allow_from": pg.get("allow_from", ["*"]),
             "print_worker_activity": self._print_worker_activity,
+            "claim_strategy": pg.get("claim_strategy", "single"),
         }
         pg_channel = PostgresChannel(ch_cfg, bus)
         if self._transcription is not None:

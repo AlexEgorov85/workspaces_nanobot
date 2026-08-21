@@ -8,6 +8,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Переключатель режима аренды задач `channels.postgres.claim_strategy`**
+  (`"single"` (дефолт) | `"worker_pool"`). Возвращает поведение
+  одиночного инстанса из v2.3.1 — захват задачи через `UPDATE ... RETURNING`
+  без таблицы `agent_worker_claims` — как опциональную настройку
+  (по умолчанию), в дополнение к существующему мульти-машинному пулу
+  воркеров (`worker_pool` с `INSERT INTO claims` + lease/heartbeat).
+  Single-режим использует `_claim_one_single` (один SQL через `fetchone`)
+  и `_unstick_processing` в фоновой задаче вместо lease-loop. Физически
+  0 INSERT/SELECT/UPDATE/DELETE к `agent_worker_claims` в hot-path. Тесты:
+  `tests/test_parallel_modes.py` (12), `tests/test_single_mode_audit.py`
+  (14 — runtime-перехват SQL), `tests/test_postgres_channel_static_audit.py`
+  (8 — статический AST-аудит гардов).
+
+- **Фоновый unstick `processing`-сообщений в single-режиме**
+  (`channels.postgres.unstick_interval`, дефолт `max(60, processing_timeout/5)
+  = 120 сек`). Раньше `_unstick_processing` запускался на каждом poll
+  (каждые 10 сек — 5-6 лишних SQL при пустой таблице). Теперь фоновая
+  задача с интервалом `unstick_interval`. Снижает нагрузку на БД
+  в ~5 раз на пустом столе.
+
 ## [2.4.0] — 2026-08-20
 
 > **MINOR-релиз:** метрика занятости контекстного окна (`metadata.context_window`),

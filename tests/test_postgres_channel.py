@@ -442,7 +442,11 @@ class TestPostgresChannelSend:
         conn.execute.side_effect = fake_execute
         mock_db.async_transaction.return_value.__aenter__.return_value = conn
 
-        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db),
+            claim_strategy="worker_pool",
+            parallel_enabled=True,
+        )
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
         ch.exchange.add_inflight("m-1")
         ch._msg_chat["m-1"] = "chat-1"
@@ -661,13 +665,18 @@ class TestPostgresChannelMedia:
 
 
 class TestPostgresChannelReclaimAndHeal:
+    """Тесты ``_reclaim_and_heal`` — только в worker_pool-режиме."""
+
     @pytest.mark.asyncio
     async def test_no_stuck_messages(self, mock_db_and_psycopg):
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         mock_conn = AsyncMock()
         mock_conn.fetch.return_value = []
         mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
-        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db),
+            claim_strategy="worker_pool",
+        )
         await ch._reclaim_and_heal()  # should not raise
 
     @pytest.mark.asyncio
@@ -678,7 +687,10 @@ class TestPostgresChannelReclaimAndHeal:
         mock_conn.fetchrow.return_value = {"metadata": "{}"}
         mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
 
-        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db),
+            claim_strategy="worker_pool",
+        )
         await ch._reclaim_and_heal()
         # вернул в pending, удалил placeholder, heal + orphan + cleanup
         assert mock_conn.execute.call_count >= 3
@@ -691,7 +703,10 @@ class TestPostgresChannelReclaimAndHeal:
         mock_conn.fetchrow.return_value = {"metadata": '{"retry_count": 2}'}
         mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
 
-        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db),
+            claim_strategy="worker_pool",
+        )
         await ch._reclaim_and_heal()
         # исчерпан лимит → failed
         assert mock_conn.execute.call_count >= 2
@@ -707,7 +722,10 @@ class TestPostgresChannelReclaimAndHeal:
         # _reclaim_and_heal читает lease_until < NOW() с фильтром self
         mock_conn.fetch.return_value = []
         mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
-        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db),
+            claim_strategy="worker_pool",
+        )
         ch._leases.add("own-msg-1")
         await ch._reclaim_and_heal()
         call = mock_conn.fetch.call_args

@@ -68,6 +68,10 @@ Thumbs.db
 *.tmp
 *.pid
 
+# --- Локальный runtime ---
+gw_pid.txt
+workspace/config.json
+
 # --- Агент-runtime: конфиг и память бота (не часть репозитория) ---
 .opencode/
 AGENTS.md

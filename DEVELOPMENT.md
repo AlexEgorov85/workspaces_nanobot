@@ -1079,6 +1079,71 @@ outbound). Все остальные сообщения `send()` merge'ит в a
 `lease_interval`, `error_retry_delay`. **`streamlit.error_window_sec`** — окно
 ожидания повтора `error`-задач (быв. `failed_window_sec`).
 
+Этот режим включается через `channels.postgres.claim_strategy="worker_pool"`.
+По умолчанию `claim_strategy="single"` (см. следующую секцию) — захват
+без таблицы `agent_worker_claims`, как в v2.3.1.
+
+### Режим аренды задач (`channels.postgres.claim_strategy`)
+
+`channels.postgres.claim_strategy` — настройка режима аренды задач в
+`PostgresChannel`. Управляет только арендой, не затрагивая `max_concurrent`
+(локальная конкуренция через `asyncio.Semaphore` в `MessageExchange`).
+
+| Значение | Описание |
+|---|---|
+| `"single"` (дефолт) | Один инстанс gateway. Захват задачи через `UPDATE ... RETURNING` (как в v2.3.1). `agent_worker_claims` НЕ используется, lease-loop не запускается. Защита от зависших `processing` — `_unstick_processing` на каждом poll. |
+| `"worker_pool"` | Мульти-машинный пул. Захват через `INSERT INTO agent_worker_claims` + lease/heartbeat (см. предыдущую секцию «Мульти-машинный пул воркеров»). Используется, если запущено несколько инстансов gateway с общей таблицей `agent_conversation_messages`. |
+
+**Когда переключать:**
+
+* Один инстанс gateway (типичный деплой) — оставьте `single` (дефолт).
+  Это ровно поведение v2.3.1, минус лишние SQL-запросы к `agent_worker_claims`.
+* Несколько инстансов — поставьте `worker_pool`. Тогда захват задач между
+  инстансами координируется через `agent_worker_claims` (UNIQUE PK +
+  lease/heartbeat).
+
+**Реализация (`lib/channels/postgres_channel.py`):**
+
+* `claim_strategy` читается в `__init__` из конфига канала (по умолчанию
+  `"single"`).
+* `_claim_one` ветвится: в `single` делегирует в `_claim_one_single` (один
+  `UPDATE ... RETURNING` через `fetchone`); в `worker_pool` — старая логика
+  с `INSERT INTO claims` + `UPDATE`.
+* `_delete_claim(conn, task_id)` — единая точка гарда: в `single` — no-op,
+  в `worker_pool` пишет DELETE.
+* `_lease_loop` / `_reclaim_needed` / `_reclaim_and_heal` — гарды в начале:
+  в `single` сразу `return` / `return False`.
+* В `single` `_lease_task` не создаётся в `start()`, а в `poll_inbound`
+  вызывается `_unstick_processing` для отката зависших `processing`.
+
+**Поток данных в single-режиме:**
+
+1. `PostgresChannel._poll_once()` → `_claim_one()` → `_claim_one_single()`
+   (один `UPDATE ... RETURNING` через `fetchone`, без INSERT в claims).
+2. После обработки `_finalize_turn()` → `UPDATE SET status='completed'` и
+   `_delete_claim(conn, msg_id)` (no-op в single).
+3. На каждом poll `poll_inbound` вызывает `_unstick_processing()` —
+   откат зависших `processing` (retry/failed счётчик в metadata).
+
+**Поток данных в worker_pool** — см. предыдущую секцию «Мульти-машинный пул
+воркеров»; `claim_strategy="worker_pool"` восстанавливает эту логику 1-в-1.
+
+Все 5 точек `DELETE FROM agent_worker_claims` в `_poll_once`, `_mark_failed`,
+`_finalize_turn`, `send_delta`, `_release_all_leases` проходят через
+`_delete_claim` — единую точку гарда. В single-режиме они физически
+не выполняются.
+
+**Когда включать `worker_pool`:** несколько инстансов gateway читают общую
+таблицу `agent_conversation_messages`. `UNIQUE PK (task_id)` в
+`agent_worker_claims` гарантирует, что одна задача не обрабатывается двумя
+инстансами одновременно; lease/heartbeat (`lease_interval`) подхватывает
+мёртвые воркеры; `_reclaim_and_heal` чинит рассинхроны инварианта
+`processing ⇔ claim`.
+
+**Когда использовать single:** один инстанс на машину, простые деплои,
+горизонтальное масштабирование не планируется — выигрываем на одном
+SQL-запросе (INSERT в claims) на каждое сообщение.
+
 **Диагностика:** `tools/check_worker_pool_integrity.py --fix` — read-only отчёт
 об инварианте `processing ⇔ claim` (или repair). Ключевой гейт — оптимизированный
 интеграционный тест `tests/integration/test_worker_pool_concurrency.py`
