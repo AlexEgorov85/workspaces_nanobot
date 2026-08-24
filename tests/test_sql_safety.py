@@ -114,12 +114,12 @@ class TestAstPolicy:
     def test_report_structure(self) -> None:
         report = validate_sql_report("SELECT pg_sleep(1)")
         assert report.allowed is False
-        assert report.violations
+        assert report.issues
         assert report.normalized_sql == "SELECT pg_sleep(1)"
         assert len(report.query_hash) == 64
         payload = report.to_dict()
         assert payload["allowed"] is False
-        assert isinstance(payload["violations"], list)
+        assert isinstance(payload["issues"], list)
 
     def test_normalize_and_hash_stable(self) -> None:
         a = normalize_sql("SELECT /* c */\n   1")

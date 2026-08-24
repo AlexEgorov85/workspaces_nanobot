@@ -145,7 +145,7 @@ class ValidationReport:
     reason: Optional[str] = None
     normalized_sql: str = ""
     query_hash: str = ""
-    violations: list[str] = field(default_factory=list)
+    issues: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -153,7 +153,7 @@ class ValidationReport:
             "reason": self.reason,
             "normalized_sql": self.normalized_sql,
             "query_hash": self.query_hash,
-            "violations": list(self.violations),
+            "issues": list(self.issues),
         }
 
 
@@ -212,16 +212,16 @@ def _func_name(node: Any) -> str:
     return re.sub(r"^\"|\"$", "", (candidate or "").lower())
 
 
-def _walk_violations(
+def _walk_policy_issues(
     ast_roots: list[Any],
     policy: SqlPolicy,
     depth: int = 0,
 ) -> list[str]:
     """Обойти AST и собрать структурные нарушения политики."""
-    violations: list[str] = []
+    issues: list[str] = []
     exp = _get_exp()
     if exp is None or depth > 3:  # защита от рекурсии EXPLAIN
-        return violations
+        return issues
 
     allowed_roots: tuple[type, ...] = (
         exp.Select,
@@ -239,32 +239,32 @@ def _walk_violations(
         if isinstance(root, exp.Command):
             cmd = str(getattr(root, "this", "") or "").strip().upper()
             if cmd != "EXPLAIN":
-                violations.append(f"Statement is not allowed: {cmd or 'COMMAND'}")
+                issues.append(f"Statement is not allowed: {cmd or 'COMMAND'}")
                 continue
             inner = getattr(root, "expression", None)
             inner_sql = getattr(inner, "this", "")
             if isinstance(inner_sql, str) and inner_sql.strip():
                 sub_roots = _parse_ast(inner_sql)
                 if sub_roots:
-                    violations.extend(
-                        _walk_violations(sub_roots, policy, depth + 1)
+                    issues.extend(
+                        _walk_policy_issues(sub_roots, policy, depth + 1)
                     )
             continue
         if not isinstance(root, allowed_roots):
-            violations.append(
+            issues.append(
                 f"Statement type not allowed: {type(root).__name__.upper()}"
             )
             continue
 
         # SELECT ... INTO (out-of-band запись результата в таблицу)
         if root.args.get("into"):
-            violations.append("SELECT INTO is not allowed")
+            issues.append("SELECT INTO is not allowed")
 
         for node in root.walk():
             if isinstance(node, exp.Func):
                 fname = _func_name(node)
                 if fname in policy.blocked_functions:
-                    violations.append(
+                    issues.append(
                         f"Function is not allowed: {fname.upper()}()"
                     )
             elif isinstance(node, exp.Table):
@@ -275,10 +275,10 @@ def _walk_violations(
                     not policy.allow_catalog_access
                     and target in policy.system_schemas
                 ):
-                    violations.append(
+                    issues.append(
                         f"Access to system schema is not allowed: {target}"
                     )
-    return violations
+    return issues
 
 
 def _regex_fallback_checks(sql: str, policy: SqlPolicy) -> Optional[str]:
@@ -307,7 +307,7 @@ def validate_sql_report(
         policy: политика (см. :class:`SqlPolicy`).
 
     Returns:
-        ``ValidationReport`` c полями allowed/reason/violations/нормализация/хеш.
+        ``ValidationReport`` c полями allowed/reason/issues/нормализация/хеш.
     """
     normalized = normalize_sql(sql)
     qhash = query_hash(normalized)
@@ -324,11 +324,11 @@ def validate_sql_report(
     word = _first_word(stripped_upper).rstrip(";")
     if word in _DDL_DML_FIRST_WORDS:
         report.reason = f"DML/DDL statements are not allowed: {word}"
-        report.violations.append(report.reason)
+        report.issues.append(report.reason)
         return report
     if word in _EXTRA_BLOCKED_FIRST_WORDS:
         report.reason = f"Statement is not allowed: {word}"
-        report.violations.append(report.reason)
+        report.issues.append(report.reason)
         return report
 
     roots = _parse_ast(sql)
@@ -345,14 +345,14 @@ def validate_sql_report(
     real_roots = [r for r in roots if r is not None]
     if len(real_roots) > 1:
         report.reason = "Multiple SQL statements are not allowed"
-        report.violations.append(report.reason)
+        report.issues.append(report.reason)
         return report
 
     if real_roots:
-        violations = _walk_violations(real_roots, policy)
-        if violations:
-            report.reason = violations[0]
-            report.violations = violations
+        issues = _walk_policy_issues(real_roots, policy)
+        if issues:
+            report.reason = issues[0]
+            report.issues = issues
             return report
     # Пустой список корней = синтаксическая ошибка парсера: политика не
     # нарушена, исполнение упадёт на стороне БД.
