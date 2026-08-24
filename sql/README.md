@@ -42,6 +42,10 @@ sql/
 ├── workers/                                             # Мульти-машинный пул воркеров
 │   └── create_public_agent_worker_claims.sql            #   public.agent_worker_claims (аренда задач)
 │
+├── vectors/                                             # Generic FAISS infrastructure
+│   ├── create_vector_index_config.sql                   #   public.agent_vector_index_config
+│   └── create_vector_index_store.sql                    #   public.agent_vector_index_store (FAISS blob)
+│
 └── audit_analyzer/                                      # навык audit_analyzer
     ├── create_oarb_audits.sql                           #   oarb.audits          (REFERENCE)
     ├── create_oarb_violations.sql                       #   oarb.violations      (REFERENCE)
@@ -49,8 +53,6 @@ sql/
     ├── create_oarb_report_items.sql                     #   oarb.report_items    (REFERENCE)
     ├── create_oarb_audit_vectors.sql                    #   oarb.audit_vectors
     ├── create_public_agent_predefined_scripts.sql       #   public.agent_predefined_scripts
-    ├── create_public_agent_vector_index_config.sql      #   public.agent_vector_index_config
-    ├── create_public_agent_vector_index_store.sql       #   public.agent_vector_index_store
     └── seed_default_indexes.sql                         #   3 дефолтных индекса (audits/violations/reports)
 ```
 
@@ -103,16 +105,18 @@ psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_violations.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_audit_reports.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_report_items.sql
 
-# 7. Домен audit_analyzer — таблицы навыка
+# 7. Generic FAISS infrastructure (vectors/) — обязательно до audit_analyzer
+psql "$DATABASE_URL" -f sql/vectors/create_vector_index_config.sql
+psql "$DATABASE_URL" -f sql/vectors/create_vector_index_store.sql
+
+# 8. Домен audit_analyzer — таблицы навыка
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_audit_vectors.sql
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_public_agent_predefined_scripts.sql
-psql "$DATABASE_URL" -f sql/audit_analyzer/create_public_agent_vector_index_config.sql
-psql "$DATABASE_URL" -f sql/audit_analyzer/create_public_agent_vector_index_store.sql
 
-# 8. Дефолтные индексы (3 шт.: audits_index, violations_index, audit_reports_index)
+# 9. Дефолтные индексы (3 шт.: audits_index, violations_index, audit_reports_index)
 psql "$DATABASE_URL" -f sql/audit_analyzer/seed_default_indexes.sql
 
-# 9. Сборка векторных индексов
+# 10. Сборка векторных индексов
 python tools/build_vectors.py --full-rebuild
 ```
 

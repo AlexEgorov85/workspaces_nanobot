@@ -181,7 +181,7 @@ flowchart TB
 | `channel_factory.py` | `ChannelManager` + Redis + Postgres каналы + транскрипция (вынесено из gateway). Конструктор принимает `print_worker_activity` (пробрасывается в `PostgresChannel` из `gateway.print_worker_activity`). |
 | `transcription_service.py` | openai/groq key/URL/language (вынесено из gateway). |
 | `subprocess_manager.py` | Streamlit spawn + terminate/kill. |
-| `preload_service.py` | Разделяет FAISS preload (gateway) и audit_cache refresh (cli). |
+| `preload_service.py` | Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель `audit_cache.duckdb` — `AuditMemoryStore.publish()` через gateway. |
 | `db_logging_service.py` | **Новый** — структурированный журнал агента в `gateway_logs`. |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
 
