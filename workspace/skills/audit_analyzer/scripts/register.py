@@ -22,12 +22,13 @@ def register(table_registry: Any) -> None:
 
     cfg = _load_cfg()
 
-    additional: list[str] = list(cfg.get("db_additional_tables") or [])
+    from lib.services.table_registry import SkillRegistration
+    from lib.utils.table_utils import normalize_table_names
+
+    additional = normalize_table_names(cfg.get("db_additional_tables"))
     predefined = cfg.get("predefined_scripts_table", "")
     if predefined and predefined not in additional:
         additional.append(predefined)
-
-    from lib.services.table_registry import SkillRegistration
 
     table_registry.register(SkillRegistration(
         name="audit_analyzer",

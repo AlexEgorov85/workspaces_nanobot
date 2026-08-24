@@ -19,14 +19,14 @@ Pipeline с ретраями:
 from typing import Optional
 
 from skill_config import get_db_schema, get_db_tables
-from database import QueryBackend, format_schema, validate_sql
+from lib.utils.sql_safety import validate_sql, format_schema
 from llm import chat
 
 
 MAX_RETRIES = 2
 
 
-def run(query: str, db: QueryBackend, context: Optional[list[dict]] = None) -> dict:
+def run(query: str, db, context: Optional[list[dict]] = None) -> dict:
     """
     Сгенерировать SQL через LLM, проверить, выполнить (с retry-циклом).
 
@@ -36,7 +36,7 @@ def run(query: str, db: QueryBackend, context: Optional[list[dict]] = None) -> d
     Args:
         query: Запрос на естественном языке (например,
                'сколько проверок было в 2024 году по каждому объекту').
-        db: Бэкенд запросов (PostgreSQL напрямую или DuckDB-кэш).
+        db: Бэкенд запросов с методами query_sql(), explain(), get_schema().
         context: История чата (опционально — список сообщений).
 
     Returns:

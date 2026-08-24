@@ -36,19 +36,10 @@ for _p in [str(_nanobot_root), str(_workspace_root)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from config import SETTINGS
-from utils.db import configure, fetch, resolve_dsn
-
-warnings.warn(
-    "database.Database is deprecated; use CacheProvider (lib.services) instead. "
-    "The skill now reads everything from DuckDB cache.",
-    DeprecationWarning,
-    stacklevel=2,
-)
-
-_pg_dsn = resolve_dsn()
-if _pg_dsn:
-    configure(_pg_dsn)
+# Back-compat re-export: ранее здесь жили ``validate_sql`` и ``format_schema``.
+# Реализация перенесена в ``lib.utils.sql_safety`` (TARGET_ARCHITECTURE.md §4 —
+# shared infrastructure). Здесь — тонкие обёртки для обратной совместимости.
+from lib.utils.sql_safety import validate_sql, format_schema  # noqa: E402, F401
 
 
 @runtime_checkable
@@ -63,16 +54,17 @@ class QueryBackend(Protocol):
 
     def query_sql(self, sql: str, params: Optional[list] = None) -> dict: ...
 
-def explain(self, sql: str) -> dict: ...
+    def explain(self, sql: str) -> dict: ...
 
 
-# Back-compat re-export: ранее здесь жили ``validate_sql`` и ``format_schema``.
-# Реализация перенесена в ``lib.utils.sql_safety`` (TARGET_ARCHITECTURE.md §4 —
-# shared infrastructure). Здесь — тонкие обёртки для обратной совместимости.
-from lib.utils.sql_safety import (  # noqa: E402, F401
-    validate_sql,
-    format_schema,
-)
+def warn_once() -> None:
+    """Выдать DeprecationWarning один раз при первом импорте database."""
+    warnings.warn(
+        "database.Database is deprecated; use CacheProvider (lib.services) instead. "
+        "The skill now reads everything from DuckDB cache.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
 
 class Database(QueryBackend):

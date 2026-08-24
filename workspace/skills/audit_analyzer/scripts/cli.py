@@ -78,10 +78,9 @@ def _parse_params(raw: str) -> dict[str, Any]:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from skill_config import (
-    get_vector_index_path, get_max_retries, load_db_config,
-    is_in_memory_enabled, get_in_memory_config, build_cache_provider,
+    get_vector_index_path, is_in_memory_enabled,
+    get_in_memory_config, build_cache_provider,
 )
-from database import Database, QueryBackend
 from output import _sanitize_value, prepare_output
 import predefined_mode
 import sql_mode
@@ -162,32 +161,24 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _open_db() -> QueryBackend:
-    cfg = load_db_config()
-    if is_in_memory_enabled():
-        im_cfg = get_in_memory_config()
-        provider = build_cache_provider()
-        if not provider.open_cache():
-            cache_path = im_cfg.get("cache_path", "?")
-            raise FileNotFoundError(
-                f"DuckDB-кеш не найден: {cache_path}. "
-                "Кеш создаёт и обновляет gateway автоматически — "
-                "запустите его (python gateway.py)."
-            )
-        print(f"[DB] DuckDB in-memory cache ({im_cfg.get('cache_path', '?')})", file=sys.stderr)
-        return provider
-    print("[DB] PostgreSQL (direct)", file=sys.stderr)
-    return Database(cfg)
+def _open_db():
+    im_cfg = get_in_memory_config()
+    provider = build_cache_provider()
+    if not provider.open_cache():
+        cache_path = im_cfg.get("cache_path", "?")
+        raise FileNotFoundError(
+            f"DuckDB-кеш не найден: {cache_path}. "
+            "Кеш создаёт и обновляет gateway автоматически — "
+            "запустите его (python gateway.py)."
+        )
+    print(f"[DB] DuckDB in-memory cache ({im_cfg.get('cache_path', '?')})", file=sys.stderr)
+    return provider
 
 
 def _run(args: argparse.Namespace) -> dict:
-    """
-    Маршрутизация выполнения по режиму (predefined/sql/vector).
-    Для predefined проверяет наличие --script, для sql/vector — --query.
-    Возвращает dict-результат от соответствующего модуля.
-    """
-    with _open_db() as db:
-
+    """Маршрутизация выполнения по режиму (predefined/sql/vector)."""
+    db = _open_db()
+    try:
         if args.mode == "predefined":
             if not args.script:
                 return {"status": "error", "data": {"message": "Для mode=predefined укажите --script"}}
@@ -200,29 +191,30 @@ def _run(args: argparse.Namespace) -> dict:
         if args.mode == "sql":
             return sql_mode.run(args.query, db, context=args.context)
 
-    if args.mode == "vector":
-        from dataclasses import asdict
-        provider = build_cache_provider()
-        results = provider.search_vector(
-            args.query,
-            index_name=args.index_name or "audits_index",
-            index_path=args.vector_index or get_vector_index_path(),
-            top_k=args.top_k or 5,
-            threshold=args.threshold,
-        )
-        if provider._search_error:
-            return {"status": "error", "data": {"message": provider._search_error}}
-        if not results:
+        if args.mode == "vector":
+            from dataclasses import asdict
+            results = db.search_vector(
+                args.query,
+                index_name=args.index_name or "audits_index",
+                index_path=args.vector_index or get_vector_index_path(),
+                top_k=args.top_k or 5,
+                threshold=args.threshold,
+            )
+            if getattr(db, "_search_error", None):
+                return {"status": "error", "data": {"message": db._search_error}}
+            if not results:
+                return {
+                    "status": "success",
+                    "data": {"message": "Документы не найдены", "results": [], "count": 0},
+                }
             return {
                 "status": "success",
-                "data": {"message": "Документы не найдены", "results": [], "count": 0},
+                "data": {"results": [asdict(r) for r in results], "count": len(results)},
             }
-        return {
-            "status": "success",
-            "data": {"results": [asdict(r) for r in results], "count": len(results)},
-        }
 
-    return {"status": "error", "data": {"message": f"Неизвестный режим: {args.mode}"}}
+        return {"status": "error", "data": {"message": f"Неизвестный режим: {args.mode}"}}
+    finally:
+        db.close()
 
 
 def main() -> None:
