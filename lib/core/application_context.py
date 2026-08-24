@@ -492,11 +492,11 @@ def _make_sync_services(ctx: "ApplicationContext") -> tuple:
     # skills.audit_analyzer (историческая локация). Это generic-параметры
     # синхронизации, не относятся к конкретному навыку.
     sync_cfg = ctx.config_service.settings_section("skills").get("audit_analyzer", {})
-    poll_interval_sec = float(sync_cfg.get("poll_interval_sec", 60.0))
-    max_queue_size = int(sync_cfg.get("sync_max_queue_size", 10000))
-    reconnect_backoff = float(sync_cfg.get("reconnect_backoff_sec", 1.0))
-    reconnect_backoff_max = float(sync_cfg.get("reconnect_backoff_max_sec", 60.0))
-    full_resync_every = int(sync_cfg.get("full_resync_every", 10))
+    poll_interval_sec = float(sync_cfg["poll_interval_sec"])
+    max_queue_size = int(sync_cfg["sync_max_queue_size"])
+    reconnect_backoff = float(sync_cfg["reconnect_backoff_sec"])
+    reconnect_backoff_max = float(sync_cfg["reconnect_backoff_max_sec"])
+    full_resync_every = int(sync_cfg["full_resync_every"])
 
     store = AuditMemoryStore(
         cache_path="",

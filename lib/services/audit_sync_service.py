@@ -57,16 +57,18 @@ class AuditSyncService:
         schema: str = "main",
         tables: Optional[List[str]] = None,
         vector_table: str = "",
-        poll_interval_sec: float = 60.0,
-        max_queue_size: int = 10000,
-        reconnect_backoff: float = 1.0,
-        reconnect_backoff_max: float = 60.0,
-        full_resync_every: int = 10,
+        poll_interval_sec: float = 0.0,
+        max_queue_size: int = 0,
+        reconnect_backoff: float = 0.0,
+        reconnect_backoff_max: float = 0.0,
+        full_resync_every: int = 0,
     ) -> None:
         self._dsn = dsn
         self._schema = schema
         self._tables = [t for t in (tables or []) if t]
         self._vector_table = vector_table
+        # Все параметры — обязательны, передаются явно из settings (project.json).
+        # Никаких defaults в коде (TARGET: конфигурация только в settings).
         self._poll_interval = float(poll_interval_sec)
         self._max_queue_size = max_queue_size
         self._reconnect_backoff = reconnect_backoff
@@ -258,64 +260,113 @@ class AuditSyncService:
     # ------------------------------------------------------------------
 
     def _track_column_for(self, table: str) -> str:
-        """Вернуть колонку для инкрементального отслеживания изменений."""
+        """Вернуть колонку для инкрементального отслеживания изменений.
+
+        Источник истины — ``lib.services.table_registry`` (через
+        ``SkillRegistration.track_column_for(table)``). Это позволяет
+        skill'ам задавать per-table track-колонку без правок core.
+        Fallback — ``updated_at`` / ``id`` для совместимости.
+        """
+        try:
+            from lib.services.table_registry import skill_for_table, table_registry
+            reg = skill_for_table(table)
+            if reg is not None:
+                return reg.track_column_for(table)
+        except Exception:
+            pass
         if table == self._vector_table:
             return "id"
         return "updated_at"
 
     def _do_initial_load(self) -> None:
-        for table in self._tables:
-            if not self._running:
-                return
-            try:
-                self._ensure_table_schema(table)
-                rows, last = self._fetch_all(table)
-                self._dispatch(table, rows)
-                if last is not None:
-                    self._last_sync[table] = last
-                else:
-                    # Пустая таблица: запоминаем "сейчас", чтобы дальше
-                    # поллить инкрементально, а не перечитывать всё.
-                    self._last_sync[table] = datetime.datetime.now(
-                        datetime.timezone.utc
+        """Параллельная начальная загрузка всех таблиц через thread-pool.
+
+        Каждая таблица полльится в отдельном потоке (psycopg2 connections
+        берутся из общего пула utils.db, который thread-safe).
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if not self._tables:
+            return
+
+        # max_workers = число таблиц (но не более 8, чтобы не утилизировать пул)
+        max_workers = min(len(self._tables), 8)
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="audit-sync-init") as ex:
+            futures = {
+                ex.submit(self._poll_table_initial, table): table
+                for table in self._tables
+            }
+            for future in as_completed(futures):
+                if not self._running:
+                    return
+                table = futures[future]
+                try:
+                    future.result()
+                except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                    self._reconnect()
+                    return
+                except psycopg2.errors.UndefinedTable:
+                    logger.error(
+                        "AuditSyncService: таблица-источник не найдена: %s "
+                        "— пропускаю. Проверьте настройки skills.audit_analyzer.db_tables/"
+                        "db_additional_tables и создайте таблицу в PG.",
+                        table,
                     )
-            except (psycopg2.OperationalError, psycopg2.InterfaceError):
-                self._reconnect()
-                return
-            except psycopg2.errors.UndefinedTable:
-                logger.error(
-                    "AuditSyncService: таблица-источник не найдена: %s "
-                    "— пропускаю. Проверьте настройки skills.audit_analyzer.db_tables/"
-                    "db_additional_tables и создайте таблицу в PG.",
-                    table,
+                except Exception:
+                    with self._state_lock:
+                        self._stats["errors"] += 1
+
+    def _poll_table_initial(self, table: str) -> None:
+        """Начальная загрузка одной таблицы (для ThreadPoolExecutor)."""
+        self._ensure_table_schema(table)
+        rows, last = self._fetch_all(table)
+        self._dispatch(table, rows)
+        with self._state_lock:
+            if last is not None:
+                self._last_sync[table] = last
+            else:
+                # Пустая таблица: запоминаем "сейчас", чтобы дальше
+                # поллить инкрементально, а не перечитывать всё.
+                self._last_sync[table] = datetime.datetime.now(
+                    datetime.timezone.utc
                 )
-            except Exception:
-                with self._state_lock:
-                    self._stats["errors"] += 1
 
     def _poll_changes(self) -> None:
+        """Параллельный инкрементальный поллинг всех таблиц."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         if not self._running:
             return
-        for table in self._tables:
-            if not self._running:
-                return
-            try:
-                self._poll_table(table)
-                with self._state_lock:
-                    self._stats["polls"] += 1
-            except (psycopg2.OperationalError, psycopg2.InterfaceError):
-                self._reconnect()
-                return
-            except psycopg2.errors.UndefinedTable:
-                logger.error(
-                    "AuditSyncService: таблица-источник не найдена при поллинге: %s "
-                    "— пропускаю. Проверьте настройки skills.audit_analyzer.db_tables/"
-                    "db_additional_tables.",
-                    table,
-                )
-            except Exception:
-                with self._state_lock:
-                    self._stats["errors"] += 1
+        if not self._tables:
+            return
+
+        max_workers = min(len(self._tables), 8)
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="audit-sync-poll") as ex:
+            futures = {
+                ex.submit(self._poll_table, table): table
+                for table in self._tables
+            }
+            for future in as_completed(futures):
+                if not self._running:
+                    return
+                table = futures[future]
+                try:
+                    future.result()
+                    with self._state_lock:
+                        self._stats["polls"] += 1
+                except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                    self._reconnect()
+                    return
+                except psycopg2.errors.UndefinedTable:
+                    logger.error(
+                        "AuditSyncService: таблица-источник не найдена при поллинге: %s "
+                        "— пропускаю. Проверьте настройки skills.audit_analyzer.db_tables/"
+                        "db_additional_tables.",
+                        table,
+                    )
+                except Exception:
+                    with self._state_lock:
+                        self._stats["errors"] += 1
 
     def _poll_table(self, table: str) -> None:
         # Периодическая полная пересинхронизация — сверка удалённых строк.

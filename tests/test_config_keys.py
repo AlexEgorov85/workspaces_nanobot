@@ -75,7 +75,7 @@ def _required_keys():
         ("skills.audit_analyzer.in_memory_enabled", True),
         ("skills.audit_analyzer.in_memory_engine", "duckdb"),
         ("skills.audit_analyzer.in_memory_cache_path", "cache/audit_cache.duckdb"),
-        ("skills.audit_analyzer.poll_interval_sec", 60),
+        ("skills.audit_analyzer.poll_interval_sec", 14400),
         ("skills.audit_analyzer.full_resync_every", 10),
         ("skills.audit_analyzer.sync_max_queue_size", 10000),
         ("skills.audit_analyzer.reconnect_backoff_sec", 1.0),

@@ -130,7 +130,9 @@
       "mode_vector_index_config_table": "public.agent_vector_index_config",  // Конфиг FAISS-индексов (читается cache_provider_impl)
 
       // --- Фоновая синхронизация (gateway: AuditSyncService) ------------------
-      "poll_interval_sec": 60,                // Поллинг новых/изменённых строк из PostgreSQL, сек
+      "poll_interval_sec": 14400,            // Поллинг новых/изменённых строк из PostgreSQL, сек.
+                                             // Минимум 4 часа (14400 сек) — AuditSyncService отвергает
+                                             // значения меньше минимума.
       "full_resync_every": 10,                // Полная перезагрузка таблицы каждые N циклов (сверка удалений; 0 = выкл)
       "sync_max_queue_size": 10000,           // Макс. размер очереди синхронизации (audit_sync_service.py)
       "reconnect_backoff_sec": 1.0,           // Начальный backoff после разрыва соединения
@@ -240,8 +242,8 @@
     "exec_timeout": 60,               // Таймаут exec, сек
     "log_level": "INFO",              // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR
     "print_llm_calls": true,          // Выводить в терминал токены LLM-итераций (→ промпт / ← ответ). Варианты: true | false
-    "print_worker_activity": true,    // Выводить в терминал активность пула воркеров [task-worker]/[очередь-задач]: взял/закончил задачу, размер очереди. Варианты: true | false
-    "print_db_activity": true,        // Выводить в терминал активность воркеров соединений БД [db-worker]/[очередь-БД]: взял/закончил job. Варианты: true | false
+    "print_worker_activity": false,    // Выводить в терминал активность пула воркеров [task-worker]/[очередь-задач]: взял/закончил задачу, размер очереди. Варианты: true | false
+    "print_db_activity": false,        // Выводить в терминал активность воркеров соединений БД [db-worker]/[очередь-БД]: взял/закончил job. Варианты: true | false
     "restart_initial_delay_sec": 1.0, // Начальная пауза backoff при перезапуске (gateway_runner.py)
     "restart_max_delay_sec": 30.0,    // Потолок backoff при перезапуске
     "streamlit_port": 8501,           // Порт Streamlit subprocess (subprocess_manager.py)
