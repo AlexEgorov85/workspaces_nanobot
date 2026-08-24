@@ -29,6 +29,7 @@
 11. [Тестирование](#тестирование)
 12. [Изменения и миграции](#изменения-и-миграции)
 13. [Конфигурация `tools.exec` (запуск команд)](#конфигурация-tools-exec)
+14. [Инфраструктурные границы P0 (stabilization)](#инфраструктурные-границы-p0-stabilization)
 
 ---
 
@@ -3221,3 +3222,56 @@ max_retries = get_setting("channels", "postgres", "max_stuck_retries", default=3
 - Параметры CLI `audit_analyzer` (`--top-k`, `--threshold`, `--index-name`).
 
 Краткий таймлайн релизов — в [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## 🛡 Инфраструктурные границы P0 (stabilization)
+
+Четыре инфраструктурные границы, не зависящие от домена навыков
+(TARGET_ARCHITECTURE §16/§20/§28/§29).
+
+### SQL Security Guard — `lib/utils/sql_safety.py`
+
+AST-политика read-only SQL на `sqlglot` (dialect postgres). Контракт
+`validate_sql(sql) -> None|str` сохранён (None = безопасен); внутри:
+
+- разрешены SELECT / WITH...SELECT / UNION (и EXPLAIN от них);
+- запрещены DML/DDL по первому слову (быстрый путь) и структурно:
+  `SELECT INTO`, опасные функции (`pg_read_file`, `pg_sleep`,
+  `dblink`, `nextval/setval`...), системные каталоги
+  (`pg_catalog`/`information_schema`; флаг `SqlPolicy.allow_catalog_access`);
+- multi-statement запрещён; EXPLAIN валидирует внутренний statement рекурсивно;
+- `validate_sql_report()` возвращает `ValidationReport` (allowed/reason/
+  issues + `normalize_sql()`/`query_hash()`) для audit trail вызывающей стороны;
+- при недоступном sqlglot — graceful degradation на regex-проверки.
+
+Потребители: `workspace/tools/duckdb_query_tool.py`,
+skill `audit_analyzer` (`sql_mode`, `database`). Тесты: `tests/test_sql_safety.py`.
+
+### Contract tests nanobot API — `tests/contract/`
+
+Фиксируют поверхность `nanobot-ai==0.3.0`, от которой зависит адаптер:
+импорт-пути, сигнатуры `AgentLoop.from_config/_assemble_outbound/_save_turn`,
+hook-протокол, MessageBus, SessionManager, BaseChannel ABC, CommandRouter,
+AutoCompact/Consolidator, ключи консолидации конфига, ToolContext,
+`_SubagentHook`, `prompt_templates._environment`. Падение набора при
+обновлении nanobot = сигнал к ревизии RuntimePatcher. Запуск в CI:
+job `upgrade-readiness`.
+
+### Валидация проектных настроек — `lib/core/project_settings.py`
+
+Pydantic-модель `ProjectSettings` поверх merged SETTINGS; вызывается из
+`ApplicationContext.create()` сразу после загрузки конфига. Все ключи
+опциональны с дефолтами (отсутствие — не ошибка), но неверный ТИП или
+значение поднимает `ConfigurationError` со списком всех проблем сразу.
+Неизвестные ключи разрешены (extra=allow). Тесты: `tests/test_project_settings.py`.
+
+### Миграции схемы — `sql/migrations/` + `tools/migrate.py`
+
+Версионные миграции `V<N>__<name>.sql` с tracking-таблицей
+`public.schema_migrations` (version PK, SHA256-checksum, applied_at).
+Runner: `python tools/migrate.py --status|--dry-run|--apply|--verify|--baseline`
+(DSN: `DATABASE_URL` или `channels.postgres.dsn`). Drift применённого
+файла блокирует apply без `--force`. Существующая БД штампуется через
+`--baseline` (V001 не содержит DDL). Подробности: [sql/README.md](sql/README.md).
+Тесты: `tests/test_migrations.py`.
