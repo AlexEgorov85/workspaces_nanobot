@@ -268,8 +268,8 @@ class AuditSyncService:
         Fallback — ``updated_at`` / ``id`` для совместимости.
         """
         try:
-            from lib.services.table_registry import skill_for_table, table_registry
-            reg = skill_for_table(table)
+            from lib.services.table_registry import table_registry
+            reg = table_registry.skill_for_table(table)
             if reg is not None:
                 return reg.track_column_for(table)
         except Exception:

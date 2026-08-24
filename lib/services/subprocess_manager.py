@@ -22,7 +22,6 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 from config import get_setting
 
@@ -35,7 +34,7 @@ class SubprocessManager:
             ``terminate_all()`` и закрытия file-handle.
     """
 
-    def __init__(self, log_dir: Optional[Path] = None) -> None:
+    def __init__(self, log_dir: Path | None = None) -> None:
         self._log_dir = log_dir or Path.cwd() / "logs"
         self._default_port: int = int(get_setting("gateway", "streamlit_port", default=8501))
         self._log_filename: str = str(
@@ -44,13 +43,13 @@ class SubprocessManager:
         self._shutdown_timeout: float = float(
             get_setting("gateway", "subprocess_shutdown_timeout_sec", default=5.0)
         )
-        self._processes: List[Tuple[subprocess.Popen, Optional[object]]] = []
+        self._processes: list[tuple[subprocess.Popen, object | None]] = []
 
     # ------------------------------------------------------------------
     # Streamlit
     # ------------------------------------------------------------------
 
-    def spawn_streamlit(self, script_path: Path, port: Optional[int] = None) -> bool:
+    def spawn_streamlit(self, script_path: Path, port: int | None = None) -> bool:
         """Запустить Streamlit UI как subprocess.
 
         Args:
@@ -96,7 +95,7 @@ class SubprocessManager:
         self._processes.append((proc, log_handle))
         return True
 
-    def __enter__(self) -> "SubprocessManager":
+    def __enter__(self) -> SubprocessManager:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -106,7 +105,7 @@ class SubprocessManager:
     # Завершение
     # ------------------------------------------------------------------
 
-    def terminate_all(self, timeout_sec: Optional[float] = None) -> None:
+    def terminate_all(self, timeout_sec: float | None = None) -> None:
         """Корректно завершить все subprocess'ы.
 
         Алгоритм для каждого процесса:

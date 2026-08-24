@@ -7,15 +7,13 @@ LLM-клиент (OpenAI-compatible HTTP API) — тонкая обёртка н
 источник конфигурации навыка (``get_llm_config()`` / ``get_cli_config()``).
 """
 
-import time
-from typing import Optional
+
+from skill_config import get_cli_config, get_llm_config
 
 from lib.services.llm_client import call_llm
 
-from skill_config import get_llm_config, get_cli_config
 
-
-def chat(messages: list[dict], *, context: Optional[list[dict]] = None, **kwargs) -> str:
+def chat(messages: list[dict], *, context: list[dict] | None = None, **kwargs) -> str:
     """
     Отправить сообщения в LLM и получить текстовый ответ.
 

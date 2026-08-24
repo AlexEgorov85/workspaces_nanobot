@@ -26,7 +26,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +66,14 @@ class LogEvent:
 
     event_type: str
     level: str = "INFO"
-    session_id: Optional[str] = None
-    channel: Optional[str] = None
-    actor: Optional[str] = None
-    summary: Optional[str] = None
-    payload: Optional[dict] = None
-    metadata: Optional[dict] = None
-    request_id: Optional[str] = None
-    name: Optional[str] = None
+    session_id: str | None = None
+    channel: str | None = None
+    actor: str | None = None
+    summary: str | None = None
+    payload: dict | None = None
+    metadata: dict | None = None
+    request_id: str | None = None
+    name: str | None = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
@@ -87,19 +87,19 @@ class _QuestionRunRecord:
     """Контекст вопроса для upsert в agent_question_runs (не в agent_gateway_logs)."""
 
     request_id: str
-    session_id: Optional[str] = None
-    user_id: Optional[str] = None
-    chat_id: Optional[str] = None
-    channel: Optional[str] = None
-    parent_request_id: Optional[str] = None
-    agent_id: Optional[str] = None
-    parent_agent_id: Optional[str] = None
+    session_id: str | None = None
+    user_id: str | None = None
+    chat_id: str | None = None
+    channel: str | None = None
+    parent_request_id: str | None = None
+    agent_id: str | None = None
+    parent_agent_id: str | None = None
     is_subagent: bool = False
-    status: Optional[str] = None
-    summary: Optional[str] = None
-    question: Optional[str] = None
-    response: Optional[str] = None
-    media: Optional[list] = None
+    status: str | None = None
+    summary: str | None = None
+    question: str | None = None
+    response: str | None = None
+    media: list | None = None
     update_only: bool = False
 
 
@@ -108,7 +108,7 @@ class DbLoggingService:
 
     def __init__(
         self,
-        dsn: Optional[str] = None,
+        dsn: str | None = None,
         *,
         table_name: str,
         question_runs_table: str,
@@ -134,13 +134,13 @@ class DbLoggingService:
         self._connect_backoff_max_sec = float(connect_backoff_max_sec)
         self._summary_max_chars = int(summary_max_chars)
 
-        self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=queue_maxsize)
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=queue_maxsize)
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._running = False
 
-        self._stats: Dict[str, Any] = {
+        self._stats: dict[str, Any] = {
             "started_at": None,
             "written": 0,
             "queued": 0,
@@ -158,7 +158,7 @@ class DbLoggingService:
         # даже если сами события не несут этих полей.
         # В рамках сессии прогоны последовательны, разные сессии имеют
         # разные ключи — коллизий нет.
-        self._request_index: Dict[str, Dict[str, Optional[str]]] = {}
+        self._request_index: dict[str, dict[str, str | None]] = {}
         self._request_index_lock = threading.Lock()
         self._schema_ok = False
 
@@ -218,20 +218,20 @@ class DbLoggingService:
 
     def register_request(
         self,
-        session_key: Optional[str],
-        request_id: Optional[str],
+        session_key: str | None,
+        request_id: str | None,
         *,
-        user_id: Optional[str] = None,
-        chat_id: Optional[str] = None,
-        channel: Optional[str] = None,
-        parent_request_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        parent_agent_id: Optional[str] = None,
+        user_id: str | None = None,
+        chat_id: str | None = None,
+        channel: str | None = None,
+        parent_request_id: str | None = None,
+        agent_id: str | None = None,
+        parent_agent_id: str | None = None,
         is_subagent: bool = False,
-        status: Optional[str] = "running",
-        summary: Optional[str] = None,
-        question: Optional[str] = None,
-        media: Optional[list] = None,
+        status: str | None = "running",
+        summary: str | None = None,
+        question: str | None = None,
+        media: list | None = None,
     ) -> bool:
         """Зарегистрировать контекст вопроса (upsert в agent_question_runs).
 
@@ -259,14 +259,14 @@ class DbLoggingService:
             media=media,
         ))
 
-    def get_request_id(self, session_key: Optional[str]) -> Optional[str]:
+    def get_request_id(self, session_key: str | None) -> str | None:
         """Получить request_id текущего вопроса для сессии."""
         if not session_key:
             return None
         with self._request_index_lock:
             return self._request_index.get(session_key)
 
-    def clear_request(self, session_key: Optional[str]) -> None:
+    def clear_request(self, session_key: str | None) -> None:
         """Снять привязку вопроса по завершении прогона."""
         if not session_key:
             return
@@ -275,12 +275,12 @@ class DbLoggingService:
 
     def finish_request(
         self,
-        request_id: Optional[str],
+        request_id: str | None,
         *,
         status: str = "finished",
-        summary: Optional[str] = None,
-        response: Optional[str] = None,
-        media: Optional[list] = None,
+        summary: str | None = None,
+        response: str | None = None,
+        media: list | None = None,
     ) -> bool:
         """Обновить статус/summary/response вопроса (upsert в agent_question_runs)."""
         if not request_id:
@@ -300,16 +300,16 @@ class DbLoggingService:
         channel: str,
         content: str,
         *,
-        message_id: Optional[str] = None,
-        sender_id: Optional[str] = None,
-        chat_id: Optional[str] = None,
-        actor: Optional[str] = None,
-        request_id: Optional[str] = None,
+        message_id: str | None = None,
+        sender_id: str | None = None,
+        chat_id: str | None = None,
+        actor: str | None = None,
+        request_id: str | None = None,
         level: str = "INFO",
-        media: Optional[list] = None,
+        media: list | None = None,
     ) -> bool:
         actor_val = actor or sender_id or "user"
-        payload: Dict[str, Any] = {"content": content, "message_id": message_id}
+        payload: dict[str, Any] = {"content": content, "message_id": message_id}
         if sender_id:
             payload["sender_id"] = sender_id
         if chat_id:
@@ -333,14 +333,14 @@ class DbLoggingService:
         channel: str,
         content: str,
         *,
-        latency_ms: Optional[float] = None,
-        tokens_used: Optional[int] = None,
+        latency_ms: float | None = None,
+        tokens_used: int | None = None,
         kind: str = "outbound_final",
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         level: str = "INFO",
-        media: Optional[list] = None,
+        media: list | None = None,
     ) -> bool:
-        payload: Dict[str, Any] = {"content": content}
+        payload: dict[str, Any] = {"content": content}
         if media:
             payload["media"] = list(media)
         return self.log_event(LogEvent(
@@ -359,10 +359,10 @@ class DbLoggingService:
         self,
         session_id: str,
         tool_name: str,
-        args: Optional[dict] = None,
+        args: dict | None = None,
         *,
-        tool_call_id: Optional[str] = None,
-        request_id: Optional[str] = None,
+        tool_call_id: str | None = None,
+        request_id: str | None = None,
         level: str = "INFO",
     ) -> bool:
         return self.log_event(LogEvent(
@@ -383,10 +383,10 @@ class DbLoggingService:
         result: Any,
         latency_ms: float,
         *,
-        tool_call_id: Optional[str] = None,
+        tool_call_id: str | None = None,
         status: str = "ok",
-        error: Optional[str] = None,
-        request_id: Optional[str] = None,
+        error: str | None = None,
+        request_id: str | None = None,
         level: str = "INFO",
     ) -> bool:
         return self.log_event(LogEvent(
@@ -407,11 +407,11 @@ class DbLoggingService:
         prompt: Any,
         response: Any,
         *,
-        iteration: Optional[int] = None,
-        model: Optional[str] = None,
-        finish_reason: Optional[str] = None,
-        usage: Optional[dict] = None,
-        request_id: Optional[str] = None,
+        iteration: int | None = None,
+        model: str | None = None,
+        finish_reason: str | None = None,
+        usage: dict | None = None,
+        request_id: str | None = None,
         level: str = "INFO",
     ) -> bool:
         """Записать полный запрос и ответ LLM за одну итерацию.
@@ -444,9 +444,9 @@ class DbLoggingService:
         self,
         error: str,
         *,
-        session_id: Optional[str] = None,
-        context: Optional[dict] = None,
-        request_id: Optional[str] = None,
+        session_id: str | None = None,
+        context: dict | None = None,
+        request_id: str | None = None,
         level: str = "ERROR",
     ) -> bool:
         return self.log_event(LogEvent(
@@ -458,7 +458,7 @@ class DbLoggingService:
             request_id=request_id,
         ))
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         with self._state_lock:
             s = dict(self._stats)
         s.update({
@@ -520,7 +520,7 @@ class DbLoggingService:
         В блоке ``finally`` — финальный flush (иначе при штатной остановке
         теряем события из буфера).
         """
-        buffer: List[LogEvent] = []
+        buffer: list[LogEvent] = []
         deadline = time.time() + self._flush_interval
 
         try:
@@ -610,7 +610,7 @@ class DbLoggingService:
             except Exception:
                 pass
 
-    def _flush_batch(self, batch: List[LogEvent]) -> None:
+    def _flush_batch(self, batch: list[LogEvent]) -> None:
         """Вставить батч через общий пул ``utils.db`` (без своего соединения).
 
         Использует ``psycopg2.extras.execute_batch`` с
@@ -651,7 +651,7 @@ class DbLoggingService:
                 self._stats["last_error"] = f"flush: {exc}"
                 self._stats["connected"] = False
 
-    def _insert_batch(self, conn: Any, batch: List[LogEvent]) -> None:
+    def _insert_batch(self, conn: Any, batch: list[LogEvent]) -> None:
         """Выполнить ``execute_batch`` INSERT на данном соединении."""
         import psycopg2.extras
 
@@ -782,7 +782,7 @@ class DbLoggingService:
             except Exception:
                 pass
 
-    def _drop_batch(self, batch: List[LogEvent]) -> None:
+    def _drop_batch(self, batch: list[LogEvent]) -> None:
         """Выбросить батч, когда БД недоступна (без записи в JSONL-файл).
 
         Увеличивает ``stats["failed"]`` и фиксирует ``last_error`` — скрытая

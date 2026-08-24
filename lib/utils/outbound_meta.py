@@ -10,8 +10,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
-
+from collections.abc import Mapping
+from typing import Any
 
 #: Метаданные с любым из этих ключей — служебный сигнал,
 #: не предназначенный для конечного пользователя.

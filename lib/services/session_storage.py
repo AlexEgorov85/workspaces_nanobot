@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any
 
 
 class SessionStorageError(Exception):
@@ -30,7 +30,7 @@ class SessionStorageError(Exception):
 class SessionStorageService:
     """Фабрика SessionManager / PGSessionManager на основе конфигурации."""
 
-    def __init__(self, session_manager_json: Optional[Path] = None) -> None:
+    def __init__(self, session_manager_json: Path | None = None) -> None:
         self._sm_json = Path(session_manager_json) if session_manager_json else None
 
     # ------------------------------------------------------------------
@@ -58,11 +58,11 @@ class SessionStorageService:
         config: Any,
         *,
         storage: str = "auto",
-        pg: Optional[dict] = None,
+        pg: dict | None = None,
         configure_db: bool = True,
-        workspace_dir: Optional[Path] = None,
+        workspace_dir: Path | None = None,
         return_file_manager: bool = False,
-    ) -> Tuple[str, Optional[Any]]:
+    ) -> tuple[str, Any | None]:
         """Создать SessionManager подходящего типа.
 
         Алгоритм:

@@ -28,6 +28,7 @@ class ApplicationContext:
     # Конфигурация
     config: Any
     settings: Any
+    project_settings: Any = None
 
     # Шина
     bus: Any
@@ -101,6 +102,11 @@ class ApplicationContext:
         ctx.config_service = _make_config_service(ctx.script_dir, ctx.workspace_dir)
         ctx.config = ctx.config_service.load()
         ctx.settings = ctx.config_service.settings
+
+        # 1a. Fail-fast валидация проектных настроек (типы/значения).
+        from lib.core.project_settings import validate_project_settings
+
+        ctx.project_settings = validate_project_settings(ctx.settings)
 
         # 2. Таймауты
         ctx.config_service.apply_timeouts(
@@ -474,7 +480,9 @@ def _make_sync_services(ctx: "ApplicationContext") -> tuple:
         return None, None
 
     # store._tables = db_tables + additional (БЕЗ vector_table → publish без векторов).
-    store_tables = db_tables + additional
+    # Дедупликация с сохранением порядка: одна и та же таблица может прийти
+    # из разных skill'ов или дважды из одного (db_tables ∩ additional).
+    store_tables = list(dict.fromkeys(db_tables + additional))
     # sync таблицы: данные + доп. таблицы + вектор (векторный поток не ломаем).
     sync_tables = list(store_tables)
     if vector_table and vector_table not in sync_tables:

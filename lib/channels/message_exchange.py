@@ -26,9 +26,13 @@ from contextlib import suppress
 from typing import Any
 
 from utils.media import (
-    serialize as media_serialize,
     deserialize as media_deserialize,
+)
+from utils.media import (
     resolve_paths_and_hints as media_resolve_paths_and_hints,
+)
+from utils.media import (
+    serialize as media_serialize,
 )
 
 

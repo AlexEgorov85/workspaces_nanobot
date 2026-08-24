@@ -2,10 +2,10 @@
 Режим: predefined — выполнение готовых SQL-шаблонов по имени скрипта.
 """
 
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    pass
 
 from db_loader import set_provider
 from predefined import build_sql, get_script_by_name, list_available, resolve_params_with_vector
@@ -14,11 +14,10 @@ from predefined import build_sql, get_script_by_name, list_available, resolve_pa
 def run(
     script_name: str,
     db: Any,
-    params: Optional[Dict[str, Any]] = None,
+    params: dict[str, Any] | None = None,
     index_dir: str = "",
 ) -> dict:
     """Выполнить предопределённый SQL-скрипт."""
-    from collections.abc import Sequence as _Seq
     if not isinstance(script_name, (str,)):
         return {
             "status": "error",

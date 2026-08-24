@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path, PurePosixPath
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 
 from nanobot.agent import AgentHook
 
@@ -100,7 +100,7 @@ _TRAILING_DOTS_RE: ClassVar[re.Pattern[str]] = re.compile(r"\.+$")
 class SessionFileRedirectHook(AgentHook):
     """Перенаправляет write/edit агентских файлов в data_store/cache/sessions/."""
 
-    def __init__(self, workspace_dir: Optional[str] = None) -> None:
+    def __init__(self, workspace_dir: str | None = None) -> None:
         super().__init__()
         self._workspace: Path = Path(workspace_dir).resolve() if workspace_dir else Path.cwd().resolve()
         self._sessions_root: Path = self._workspace / "data_store" / "cache" / "sessions"
@@ -236,7 +236,7 @@ class SessionFileRedirectHook(AgentHook):
             return p.is_file()
         return (self._workspace / p).is_file()
 
-    def _resolve_media_entry(self, entry: Any, session_sub: Path) -> Optional[str]:
+    def _resolve_media_entry(self, entry: Any, session_sub: Path) -> str | None:
         """Найти реальный файл сессии для media-элемента.
 
         Возвращает абсолютный путь, если файл найден в одной из известных
@@ -295,7 +295,7 @@ class SessionFileRedirectHook(AgentHook):
         return str(name) if name else ""
 
     @staticmethod
-    def _extract_path(params: dict) -> Optional[str]:
+    def _extract_path(params: dict) -> str | None:
         for key in _PATH_KEYS:
             if key in params and isinstance(params[key], str) and params[key]:
                 return params[key]
@@ -356,7 +356,7 @@ class SessionFileRedirectHook(AgentHook):
                 return "/".join(parts)
         return str(path)
 
-    def _redirect(self, target: str, session_key: str) -> Optional[str]:
+    def _redirect(self, target: str, session_key: str) -> str | None:
         """Собрать новый путь в ``data_store/cache/sessions/<session_key>/``.
 
         Имя папки берётся из ``context.session_key`` (например

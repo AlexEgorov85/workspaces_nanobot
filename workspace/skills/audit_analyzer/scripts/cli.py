@@ -33,7 +33,7 @@ import json
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 
 def _parse_params(raw: str) -> dict[str, Any]:
@@ -64,7 +64,7 @@ def _parse_params(raw: str) -> dict[str, Any]:
         try:
             return json.loads(raw)
         except json.JSONDecodeError as e:
-            raise argparse.ArgumentTypeError(f"Неверный JSON в --params: {e}")
+            raise argparse.ArgumentTypeError(f"Неверный JSON в --params: {e}") from e
     result: dict[str, Any] = {}
     for pair in raw.split(","):
         pair = pair.strip()
@@ -77,13 +77,14 @@ def _parse_params(raw: str) -> dict[str, Any]:
 # Add scripts dir to path so sibling modules are importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from skill_config import (
-    get_vector_index_path, is_in_memory_enabled,
-    get_in_memory_config, build_cache_provider,
+import predefined_mode  # noqa: E402
+import sql_mode  # noqa: E402
+from output import _sanitize_value, prepare_output  # noqa: E402
+from skill_config import (  # noqa: E402
+    build_cache_provider,
+    get_in_memory_config,
+    get_vector_index_path,
 )
-from output import _sanitize_value, prepare_output
-import predefined_mode
-import sql_mode
 
 
 def _build_parser() -> argparse.ArgumentParser:

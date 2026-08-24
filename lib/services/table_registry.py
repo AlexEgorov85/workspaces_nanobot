@@ -21,17 +21,43 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class SkillRegistration:
-    """Описание таблиц и метаданных одного skill'а."""
+    """Описание таблиц и метаданных одного skill'а.
+
+    Поля:
+        name: уникальное имя skill'а.
+        tables: список таблиц для синхронизации (формат ``schema.table``).
+        additional_tables: доп. таблицы (например, реестры из других схем).
+        vector_table: таблица сырых эмбеддингов (если есть).
+        db_schema: основная схема навыка (default schema для голых имён).
+        track_column: колонка для инкрементального отслеживания изменений.
+            По умолчанию ``updated_at``. Для таблиц без этой колонки —
+            использовать ``track_column_overrides``.
+        track_column_overrides: per-table track-колонка. Например,
+            ``{"oarb.audit_vectors": "id"}``.
+        poll_interval_sec: per-skill интервал поллинга. По умолчанию
+            берётся из глобального settings (если None).
+        enabled: если False — таблицы этого skill'а пропускаются при sync.
+    """
 
     name: str
     tables: tuple[str, ...] = ()
     additional_tables: tuple[str, ...] = ()
     vector_table: str = ""
     db_schema: str = "main"
+    track_column: str = "updated_at"
+    track_column_overrides: dict[str, str] = field(default_factory=dict)
+    poll_interval_sec: Optional[float] = None
+    enabled: bool = True
 
     def __post_init__(self) -> None:
         if not self.name:
             raise ValueError("SkillRegistration.name is required")
+
+    def track_column_for(self, table: str) -> str:
+        """Вернуть track-колонку для конкретной таблицы."""
+        if table in self.track_column_overrides:
+            return self.track_column_overrides[table]
+        return self.track_column
 
 
 @dataclass
@@ -84,6 +110,24 @@ class TableRegistry:
 
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._registrations.keys()))
+
+    def enabled_names(self) -> tuple[str, ...]:
+        """Имена только enabled-registrations (для sync-планировщика)."""
+        return tuple(
+            sorted(name for name, reg in self._registrations.items() if reg.enabled)
+        )
+
+    def skill_for_table(self, table: str) -> Optional[SkillRegistration]:
+        """Найти регистрацию, владеющую данной таблицей."""
+        for reg in self._registrations.values():
+            if not reg.enabled:
+                continue
+            all_tables = list(reg.tables) + list(reg.additional_tables)
+            if reg.vector_table:
+                all_tables.append(reg.vector_table)
+            if table in all_tables:
+                return reg
+        return None
 
     def all_tables(self) -> tuple[str, ...]:
         """Все таблицы для синхронизации PG → DuckDB (включая additional и vector)."""

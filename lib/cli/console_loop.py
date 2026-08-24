@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import re
 import sys
-from typing import Any, Optional
+from typing import Any
 
 from rich.console import Console
 
@@ -31,6 +31,7 @@ async def _typewriter(text: str, style: str, speed: float) -> None:
             console.print(text)
         return
     from io import StringIO
+
     from rich.console import Console as RichConsole
     buf = StringIO()
     tmp = RichConsole(file=buf, force_terminal=True)
@@ -159,9 +160,9 @@ async def run_repl(
     agent: Any,
     config: Any,
     *,
-    session: Optional[str] = None,
-    display: Optional[DisplayConfig] = None,
-    background_task_factory: Optional[Any] = None,
+    session: str | None = None,
+    display: DisplayConfig | None = None,
+    background_task_factory: Any | None = None,
 ) -> None:
     """Главный REPL: ввод → publish_inbound → consume_outbound → рендер.
 
@@ -175,14 +176,14 @@ async def run_repl(
     """
     from nanobot.bus.events import InboundMessage
     from nanobot.cli.commands import (
+        __logo__,
+        __version__,
         _init_prompt_session,
         _is_exit_command,
         _model_display,
         _read_interactive_input_async,
         _restore_terminal,
         _sanitize_surrogates,
-        __logo__,
-        __version__,
     )
 
     cfg = display or DisplayConfig()
@@ -210,7 +211,7 @@ async def run_repl(
         while True:
             try:
                 msg = await asyncio.wait_for(bus.consume_outbound(), timeout=repl_idle_timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 return full_response, response_meta
@@ -232,7 +233,7 @@ async def run_repl(
             response_meta = meta
             return full_response, response_meta
 
-    bus_task = asyncio.create_task(agent.run())
+    bus_task = asyncio.create_task(agent.run())  # noqa: F841 — держит ссылку (anti-GC)
     if background_task_factory is not None:
         try:
             bg = background_task_factory()

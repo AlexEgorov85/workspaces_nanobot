@@ -24,7 +24,7 @@ from __future__ import annotations
 import ast
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 _workspace_root = Path(__file__).resolve().parents[3]
 _nanobot_root = Path(__file__).resolve().parents[4]
@@ -35,9 +35,8 @@ for _p in (str(_nanobot_root), str(_workspace_root)):
 from scripts_registry import ParamDefinition, ScriptDefinition  # noqa: E402
 from skill_config import get_predefined_scripts_table  # noqa: E402
 
-
-_provider: Optional[Any] = None
-_cache: Dict[str, ScriptDefinition] | None = None
+_provider: Any | None = None
+_cache: dict[str, ScriptDefinition] | None = None
 
 
 def set_provider(provider: Any) -> None:
@@ -90,7 +89,7 @@ def _build_query() -> str:
     """
 
 
-def _parse_parameters(value: Any) -> Dict[str, Any]:
+def _parse_parameters(value: Any) -> dict[str, Any]:
     """
     JSONB-параметры приходят из DuckDB в одном из видов:
       - dict (нормальный JSON)
@@ -120,7 +119,7 @@ def _parse_parameters(value: Any) -> Dict[str, Any]:
     return ast.literal_eval(s)
 
 
-def load_registry(force_reload: bool = False) -> Dict[str, ScriptDefinition]:
+def load_registry(force_reload: bool = False) -> dict[str, ScriptDefinition]:
     """
     Загрузить реестр скриптов из DuckDB-кэша.
 
@@ -151,10 +150,10 @@ def load_registry(force_reload: bool = False) -> Dict[str, ScriptDefinition]:
             "Перезалейте кэш: python gateway.py (AuditSyncService / cache init)."
         )
 
-    registry: Dict[str, ScriptDefinition] = {}
+    registry: dict[str, ScriptDefinition] = {}
     for row in rows:
         params_json = _parse_parameters(row.get("parameters"))
-        parameters: Dict[str, ParamDefinition] = {}
+        parameters: dict[str, ParamDefinition] = {}
         for pname, pdef in params_json.items():
             if pdef is None:
                 # Параметр упомянут в шаблоне, но без явного определения

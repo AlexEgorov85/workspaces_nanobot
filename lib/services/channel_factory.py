@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 from lib.utils.node_access import get_settings_section as _section
 
@@ -33,7 +33,7 @@ class ChannelFactory:
 
     def __init__(
         self,
-        transcription: Optional[Any] = None,
+        transcription: Any | None = None,
         print_worker_activity: bool = False,
     ) -> None:
         self._transcription = transcription
@@ -45,7 +45,7 @@ class ChannelFactory:
         settings: Any,
         bus: Any,
         session_manager: Any,
-    ) -> Tuple[Any, List[str]]:
+    ) -> tuple[Any, list[str]]:
         """Создать и настроить все каналы.
 
         Args:
@@ -65,7 +65,7 @@ class ChannelFactory:
         from nanobot.channels.manager import ChannelManager
 
         channels = ChannelManager(config, bus, session_manager=session_manager)
-        messages: List[str] = []
+        messages: list[str] = []
 
         messages.extend(self._add_redis(channels, config, settings, bus))
         messages.extend(self._add_postgres(channels, config, settings, bus))
@@ -81,7 +81,7 @@ class ChannelFactory:
 
     def _add_redis(
         self, channels: Any, config: Any, settings: Any, bus: Any,
-    ) -> List[str]:
+    ) -> list[str]:
         """Зарегистрировать Redis-канал (если включён в ``settings.channels.redis``).
 
         Канал поверх Redis pub/sub: читает сообщения из ``incoming_key``
@@ -126,7 +126,7 @@ class ChannelFactory:
 
     def _add_postgres(
         self, channels: Any, config: Any, settings: Any, bus: Any,
-    ) -> List[str]:
+    ) -> list[str]:
         """Зарегистрировать Postgres-канал (если включён в ``settings.channels.postgres``).
 
         Канал поверх таблицы ``agent_conversation_messages``: агент отвечает,

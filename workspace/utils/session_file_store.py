@@ -6,10 +6,10 @@ import json
 import mimetypes
 import re
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
-UTC = timezone.utc
-from typing import Optional
+
+UTC = UTC
 
 """Модуль для хранения сессий в файловой системе.
 
@@ -80,7 +80,7 @@ def prepare_content(content: str) -> tuple[str, str]:
     return content, ".txt"
 
 
-def _try_convert_to_csv(data) -> Optional[str]:
+def _try_convert_to_csv(data) -> str | None:
     """Пытается преобразовать данные (list/dict) в CSV с BOM.
 
     Проверяет несколько распространённых структур: список словарей,
@@ -174,7 +174,7 @@ class SessionFileStore:
         return adir
 
     @staticmethod
-    def _sanitize_filename(name: Optional[str]) -> str:
+    def _sanitize_filename(name: str | None) -> str:
         """Очистить имя файла: оставить ``[\\w.-]``, пробелы, остальное в ``_``."""
         if not name:
             return ""
@@ -188,10 +188,10 @@ class SessionFileStore:
     def save_attachment(
         self,
         session_key: str,
-        data_url: Optional[str],
+        data_url: str | None,
         *,
-        filename: Optional[str] = None,
-    ) -> Optional[dict]:
+        filename: str | None = None,
+    ) -> dict | None:
         """Сохранить вложение (data URL или путь/сырые байты) в каталоге сессии.
 
         Принимает:
@@ -270,7 +270,7 @@ class SessionFileStore:
                 "total_bytes": 0
             }, indent=2), encoding="utf-8")
 
-    def _find_existing_for_hash(self, session_key: str, content_hash: str, ext: str) -> Optional[str]:
+    def _find_existing_for_hash(self, session_key: str, content_hash: str, ext: str) -> str | None:
         """Вернуть путь уже сохранённого файла с таким хешем содержимого.
 
         Сканирует ``results/`` сессии в поисках файла с суффиксом ``__<hash>``

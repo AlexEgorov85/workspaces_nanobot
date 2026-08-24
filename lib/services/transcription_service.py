@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 
 class TranscriptionService:
@@ -69,7 +69,7 @@ class TranscriptionService:
         except AttributeError:
             return ""
 
-    def get_language(self) -> Optional[str]:
+    def get_language(self) -> str | None:
         """Язык распознавания (``"ru"``, ``"en"`` и т.п.) или ``None``.
 
         ``None`` — автоопределение языка провайдером. ``""`` (пустая

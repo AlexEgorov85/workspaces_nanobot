@@ -9,10 +9,9 @@
 from __future__ import annotations
 
 import sys
-from typing import Optional
 
 
-def configure_loguru(level: str, *, env_var: Optional[str] = None) -> None:
+def configure_loguru(level: str, *, env_var: str | None = None) -> None:
     """Настроить loguru на вывод в ``sys.stderr`` с указанным уровнем.
 
     Args:

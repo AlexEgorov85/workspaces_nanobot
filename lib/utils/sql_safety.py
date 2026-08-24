@@ -30,7 +30,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 __all__ = [
     "validate_sql",
@@ -142,7 +142,7 @@ class ValidationReport:
     """Структурированный результат валидации (для audit trail вызывающей стороны)."""
 
     allowed: bool
-    reason: Optional[str] = None
+    reason: str | None = None
     normalized_sql: str = ""
     query_hash: str = ""
     issues: list[str] = field(default_factory=list)
@@ -175,7 +175,7 @@ def _get_exp() -> Any:
         return None
 
 
-def _parse_ast(sql: str) -> Optional[list[Any]]:
+def _parse_ast(sql: str) -> list[Any] | None:
     """Разобрать SQL через sqlglot; список корней или None при недоступности.
 
     Ошибка парсинга не трактуется как нарушение сама по себе: исполнение
@@ -281,7 +281,7 @@ def _walk_policy_issues(
     return issues
 
 
-def _regex_fallback_checks(sql: str, policy: SqlPolicy) -> Optional[str]:
+def _regex_fallback_checks(sql: str, policy: SqlPolicy) -> str | None:
     """Резервные проверки без AST (когда sqlglot недоступен)."""
     stripped_upper = _COMMENT_RE.sub(" ", sql or "").upper()
     body = stripped_upper.strip().rstrip(";").rstrip()
@@ -361,7 +361,7 @@ def validate_sql_report(
     return report
 
 
-def validate_sql(sql: str) -> Optional[str]:
+def validate_sql(sql: str) -> str | None:
     """Проверить SQL на безопасность: только SELECT-подобные, один statement.
 
     Обратно совместимый контракт: ``None`` если SQL безопасен, иначе строка

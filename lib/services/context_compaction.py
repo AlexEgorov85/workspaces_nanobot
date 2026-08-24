@@ -38,7 +38,7 @@ loguru INFO, опциональный Rich-вывод в терминал gatewa
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from loguru import logger
 
@@ -81,7 +81,7 @@ class ContextCompactionService:
 
     async def compact(
         self,
-        session_key: Optional[str] = None,
+        session_key: str | None = None,
         *,
         idle: bool = False,
         force: bool = False,
@@ -128,7 +128,7 @@ class ContextCompactionService:
         before_tokens, _ = await self._estimate(session, runtime)
 
         use_idle = bool(idle or force)
-        summary: Optional[str] = None
+        summary: str | None = None
         try:
             if use_idle:
                 result = await consolidator.compact_idle_session(
@@ -275,7 +275,7 @@ class ContextCompactionService:
             return 0, ""
 
     @staticmethod
-    def _current_session_key() -> Optional[str]:
+    def _current_session_key() -> str | None:
         try:
             from nanobot.agent.tools.context import current_request_session_key
             return current_request_session_key()
@@ -317,7 +317,7 @@ class ContextCompactionService:
         *,
         session_key: str,
         mode: str,
-        summary: Optional[str],
+        summary: str | None,
         archived_msgs: int,
         kept_msgs: int,
         tokens_before: int,
@@ -381,6 +381,7 @@ class ContextCompactionService:
         text = self.format_report(report)
         try:
             import asyncio as _asyncio
+
             from psycopg2.extras import Json
             from utils.db import configure, execute
         except Exception as exc:

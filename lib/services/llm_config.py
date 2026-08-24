@@ -20,10 +20,10 @@ SETTINGS уже прошли резолв ``${VAR}`` в ``config.py``, поэт�
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 
-def resolve_llm_config(overrides: Optional[dict] = None) -> Dict[str, Any]:
+def resolve_llm_config(overrides: dict | None = None) -> dict[str, Any]:
     """Собрать LLM-конфиг (provider/model/api_base/api_key/параметры).
 
     Args:

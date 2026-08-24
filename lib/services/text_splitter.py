@@ -12,7 +12,6 @@
 """
 
 import re
-from typing import Any, Optional
 
 
 def split_text(text: str, chunk_size: int = 500, chunk_overlap: int = 80) -> list[str]:
@@ -61,7 +60,7 @@ def _recursive_split(text: str, chunk_size: int, chunk_overlap: int) -> list[str
     return [text]
 
 
-def _split_by_separator(text: str, pattern: str, chunk_size: int, chunk_overlap: int) -> Optional[list[str]]:
+def _split_by_separator(text: str, pattern: str, chunk_size: int, chunk_overlap: int) -> list[str] | None:
     """Попробовать разбить по разделителю pattern."""
     if pattern == '':
         return _split_by_chars(text, chunk_size, chunk_overlap)

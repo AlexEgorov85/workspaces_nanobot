@@ -35,14 +35,16 @@ runner туда положил) — иначе None.
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from utils.media import serialize as media_serialize
 
 from lib.utils.outbound_meta import is_dropped, is_stream_delta, msg_session_key
-from utils.media import serialize as media_serialize
 
 
 def make_inbound_logger(
-    service: Any, agent_id: Optional[str] = None
+    service: Any, agent_id: str | None = None
 ) -> Callable[[Any], Awaitable[None]]:
     """Создать async-логгер для ``MessageBus.publish_inbound``.
 
@@ -97,7 +99,7 @@ def make_inbound_logger(
 
 
 def make_outbound_logger(
-    service: Any, agent_id: Optional[str] = None
+    service: Any, agent_id: str | None = None
 ) -> Callable[[Any], Awaitable[None]]:
     """Создать async-логгер для ``MessageBus.publish_outbound``.
 

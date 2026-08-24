@@ -16,17 +16,16 @@ Pipeline с ретраями:
     audit_analyze --mode sql --query 'среднее количество нарушений на проверку'
 """
 
-from typing import Optional
 
-from skill_config import get_db_schema, get_db_tables
-from lib.utils.sql_safety import validate_sql, format_schema
 from llm import chat
+from skill_config import get_db_schema, get_db_tables
 
+from lib.utils.sql_safety import format_schema, validate_sql
 
 MAX_RETRIES = 2
 
 
-def run(query: str, db, context: Optional[list[dict]] = None) -> dict:
+def run(query: str, db, context: list[dict] | None = None) -> dict:
     """
     Сгенерировать SQL через LLM, проверить, выполнить (с retry-циклом).
 
@@ -63,7 +62,7 @@ def run(query: str, db, context: Optional[list[dict]] = None) -> dict:
         {"role": "user", "content": f"Schema:\n{schema_text}\n\nRequest: {query}"},
     ]
 
-    last_error: Optional[dict] = None
+    last_error: dict | None = None
 
     for attempt in range(MAX_RETRIES + 1):
         messages = list(base_messages)

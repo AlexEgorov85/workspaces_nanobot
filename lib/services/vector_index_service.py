@@ -18,18 +18,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+# Пути к проекту и workspace — чтобы `from utils.db import ...` работал
+# независимо от рабочего каталога (как в cache_provider_impl).
+import sys
+from pathlib import Path
+from typing import Any
 
 # Единая функция эмбеддинга (сами резолвит настройки из project.json).
 # Re-export сохранён, чтобы импорт `from ...vector_index_service import
 # get_embedding` у внешних потребителей (tools/build_vectors.py и пр.)
 # продолжал работать без изменений.
 from lib.services.cache_provider_impl import get_embedding as get_embedding
-
-# Пути к проекту и workspace — чтобы `from utils.db import ...` работал
-# независимо от рабочего каталога (как в cache_provider_impl).
-import sys
-from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]        # корень проекта
 _WORKSPACE = _ROOT / "workspace"
@@ -51,7 +50,7 @@ class VectorIndexBuildService:
         >>> n = svc.rebuild_and_store("audits_index", "oarb.audit_vectors")
     """
 
-    def __init__(self, cfg: Optional[Dict[str, Any]] = None, base_dir: str = "") -> None:
+    def __init__(self, cfg: dict[str, Any] | None = None, base_dir: str = "") -> None:
         from lib.services.cache_provider_impl import build_cache_provider
 
         self._cfg = cfg if cfg is not None else {}
@@ -63,7 +62,7 @@ class VectorIndexBuildService:
         """Общий провайдер (PostgresDuckDbProvider) — для чтения/поиска."""
         return self._provider
 
-    def rebuild_and_store(self, source: str, db_table: str) -> Optional[int]:
+    def rebuild_and_store(self, source: str, db_table: str) -> int | None:
         """Перестроить индекс ``source`` из сырых векторов и сохранить в store.
 
         Инвалидирует кэш, читает векторы ``source`` из ``db_table``,

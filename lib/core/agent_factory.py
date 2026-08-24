@@ -36,7 +36,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 
 class AgentFactory:
@@ -60,13 +60,13 @@ class AgentFactory:
         self,
         config: Any,
         bus: Any,
-        session_manager: Optional[Any] = None,
-        cron_service: Optional[Any] = None,
-        db_logging_service: Optional[Any] = None,
-        agent_id: Optional[str] = None,
-        project_hooks: Optional[List[Any]] = None,
+        session_manager: Any | None = None,
+        cron_service: Any | None = None,
+        db_logging_service: Any | None = None,
+        agent_id: str | None = None,
+        project_hooks: list[Any] | None = None,
         print_llm_calls: bool = False,
-    ) -> Tuple[Any, List[Any], List[Any]]:
+    ) -> tuple[Any, list[Any], list[Any]]:
         """Создать AgentLoop с подключёнными хуками.
 
         Args:
@@ -105,7 +105,7 @@ class AgentFactory:
         """
         from nanobot.agent.loop import AgentLoop
 
-        hooks: List[Any] = []
+        hooks: list[Any] = []
         # ToolAuditHook — обязателен: каналы и CLI рендерят его записи
         # в UI ("✓ read(x.txt) → content" / "✗ exec: timeout").
         tool_audit_hook = self._import_tool_audit_hook()()
@@ -121,7 +121,7 @@ class AgentFactory:
         # изолирует состояние вопроса между конкурентными сессиями.
         # Если workspace.hooks недоступен (например, в тестах) —
         # пропускаем без ошибки.
-        hook_factories: List[Any] = []
+        hook_factories: list[Any] = []
         if db_logging_service is not None:
             factory = self._build_database_logging_factory(
                 db_logging_service, agent_id, print_llm_calls=print_llm_calls
@@ -156,9 +156,9 @@ class AgentFactory:
     @staticmethod
     def _build_database_logging_factory(
         db_logging_service: Any,
-        agent_id: Optional[str] = None,
+        agent_id: str | None = None,
         print_llm_calls: bool = False,
-    ) -> Optional[Any]:
+    ) -> Any | None:
         """Создать фабрику оборота ``DatabaseLoggingHook``.
 
         Импорт через try/except, чтобы:

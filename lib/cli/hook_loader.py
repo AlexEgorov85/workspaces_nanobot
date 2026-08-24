@@ -18,10 +18,10 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 
 
-def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> List[Any]:
+def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> list[Any]:
     """Сканировать ``hooks_dir`` и вернуть список инстанцированных плагинов.
 
     Каждый ``*.py`` файл (исключая ``_*``) импортируется через
@@ -40,7 +40,7 @@ def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> List[Any]:
     """
     from nanobot.agent import AgentHook
 
-    hooks: List[Any] = []
+    hooks: list[Any] = []
 
     if not hooks_dir.is_dir():
         return hooks

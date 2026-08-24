@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # Пути к проекту и workspace — чтобы `from utils.db import ...` работал
 # независимо от рабочего каталога.
@@ -33,7 +33,7 @@ for _p in (str(_ROOT), str(_WORKSPACE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from lib.services.cache_provider import CacheProvider, SearchResult
+from lib.services.cache_provider import CacheProvider, SearchResult  # noqa: E402
 
 # Внутренняя таблица метаданных схемы (комментарии таблиц/колонок, PG-типы).
 # Та же структура, что в audit_memory_store, но в файле SQL-кэша навыка.
@@ -46,7 +46,7 @@ _META_TABLE = "__schema_meta"
 # =============================================================================
 
 
-def get_embedding(text: str) -> Optional[List[float]]:
+def get_embedding(text: str) -> list[float] | None:
     """Единая точка получения эмбеддинга текста через Ollama /api/embed.
 
     Конфиг (``base_url`` / ``model`` / ``timeout_sec``) читается из
@@ -69,7 +69,7 @@ def get_embedding(text: str) -> Optional[List[float]]:
     timeout_sec = float(cfg.get("timeout_sec") or 60.0)
     retries = int(cfg.get("max_retries") or 3)
 
-    def _embed() -> Optional[List[float]]:
+    def _embed() -> list[float] | None:
         import httpx
 
         payload = {"model": model, "input": text}
@@ -99,7 +99,7 @@ def get_embedding(text: str) -> Optional[List[float]]:
         return None
 
 
-def read_embedding_config(cfg: dict) -> Dict[str, Any]:
+def read_embedding_config(cfg: dict) -> dict[str, Any]:
     """Параметры Ollama-эмбеддинга из конфиг-секции навыка (dict)."""
     return {
         "base_url": cfg.get("embedding_base_url", ""),
@@ -108,7 +108,7 @@ def read_embedding_config(cfg: dict) -> Dict[str, Any]:
     }
 
 
-def read_vector_index_config(cfg: dict) -> Dict[str, Any]:
+def read_vector_index_config(cfg: dict) -> dict[str, Any]:
     """Конфиг векторных индексов: таблица agent_vector_index_config (источник — БД).
 
     Имя таблицы берётся из ``cfg["mode_vector_index_config_table"]``.
@@ -142,7 +142,7 @@ def read_vector_index_config(cfg: dict) -> Dict[str, Any]:
     return result
 
 
-def build_cache_provider(cfg: dict, base_dir: str = "") -> "PostgresDuckDbProvider":
+def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvider:
     """Универсальная фабрика: собрать провайдера из конфиг-секции навыка.
 
     cfg — секция skills.<name> (например, skills.audit_analyzer из project.json).
@@ -192,7 +192,7 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> "PostgresDuckDbProvid
     )
 
 
-def _normalize_additional_tables(value: Any) -> List[Tuple[str, str]]:
+def _normalize_additional_tables(value: Any) -> list[tuple[str, str]]:
     """
     Приводит db_additional_tables к канону: List[Tuple[schema, table]].
 
@@ -200,7 +200,7 @@ def _normalize_additional_tables(value: Any) -> List[Tuple[str, str]]:
       - [["public", "predefined_scripts"], {"schema": "audit", "table": "rules"}]
       - ["public.predefined_scripts", "audit.rules"]
     """
-    out: List[Tuple[str, str]] = []
+    out: list[tuple[str, str]] = []
     if not value:
         return out
     for item in value:
@@ -217,7 +217,7 @@ def _normalize_additional_tables(value: Any) -> List[Tuple[str, str]]:
     return out
 
 
-def _discover_tables(pg_conn, schema: str) -> List[str]:
+def _discover_tables(pg_conn, schema: str) -> list[str]:
     cur = pg_conn.cursor()
     cur.execute(
         "SELECT table_name FROM information_schema.tables "
@@ -230,11 +230,11 @@ def _discover_tables(pg_conn, schema: str) -> List[str]:
     return tables
 
 
-def _store_meta(conn: Any, pg_conn: Any, schema: str, table_list: List[str]) -> None:
+def _store_meta(conn: Any, pg_conn: Any, schema: str, table_list: list[str]) -> None:
     """Сохранить метку MAX(updated) для каждой таблицы в __cache_meta."""
     conn.execute("DROP TABLE IF EXISTS __cache_meta")
 
-    meta_rows: List[Tuple[str, Optional[str]]] = []
+    meta_rows: list[tuple[str, str | None]] = []
     for tbl in table_list:
         cur = pg_conn.cursor()
         try:
@@ -256,7 +256,7 @@ def _store_meta(conn: Any, pg_conn: Any, schema: str, table_list: List[str]) -> 
 def _capture_schema_meta(
     conn: Any,
     pg_conn: Any,
-    schema_pairs: List[tuple],
+    schema_pairs: list[tuple],
 ) -> None:
     """
     Сохранить комментарии таблиц/колонок и исходные PG-типы в DuckDB-кэш.
@@ -279,7 +279,7 @@ def _capture_schema_meta(
         "comment TEXT, pg_type TEXT)"
     )
 
-    insert_rows: List[tuple] = []
+    insert_rows: list[tuple] = []
     for schema, table_list in schema_pairs:
         if not table_list:
             continue
@@ -315,7 +315,7 @@ def _capture_schema_meta(
         finally:
             cur.close()
 
-        per_table: Dict[str, tuple] = {}
+        per_table: dict[str, tuple] = {}
         for row in rows:
             tbl, col, data_type, max_len, col_comment, table_comment = row
             if tbl not in per_table:
@@ -359,7 +359,6 @@ def _copy_table(
       - DuckDB сам выводит типы из CSV-выборки (sniff_rows);
       - работает на psycopg2-binary (не требует пересборки).
     """
-    import io
     import tempfile
     from pathlib import Path as _P
 
@@ -456,8 +455,8 @@ def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
         # Метаданные схемы (комментарии таблиц/колонок + исходные PG-типы)
         # для основной и дополнительных схем — build_schema использует их при
         # формировании описания таблиц в DuckDB-кэше.
-        schema_pairs: List[tuple] = [(schema, table_list)]
-        extra_by_schema: Dict[str, List[str]] = {}
+        schema_pairs: list[tuple] = [(schema, table_list)]
+        extra_by_schema: dict[str, list[str]] = {}
         for sch, tbl in additional_tables:
             extra_by_schema.setdefault(sch, []).append(tbl)
         schema_pairs.extend((sch, tbls) for sch, tbls in extra_by_schema.items())
@@ -470,7 +469,7 @@ def load_cache_from_postgres(cache_path: str, db_config: dict) -> None:
         conn.close()
 
 
-def check_cache_stale(cache_path: str, db_config: dict) -> Dict[str, Any]:
+def check_cache_stale(cache_path: str, db_config: dict) -> dict[str, Any]:
     """
     Проверить, устарел ли кэш, сравнив MAX(updated) с канонической БД.
     """
@@ -547,12 +546,12 @@ class PostgresDuckDbProvider(CacheProvider):
         *,
         dsn: str = "",
         schema: str = "public",
-        tables: Optional[List[str]] = None,
-        additional_tables: Optional[List[Tuple[str, str]]] = None,
+        tables: list[str] | None = None,
+        additional_tables: list[tuple[str, str]] | None = None,
         cache_path: str = "",
         vector_db_table: str = "",
         vector_index_path: str = "",
-        vector_indexes: Optional[Dict[str, Any]] = None,
+        vector_indexes: dict[str, Any] | None = None,
         vector_store_table: str = "",
         embedding_base_url: str = "",
         embedding_model: str = "mxbai-embed-large:latest",
@@ -578,8 +577,8 @@ class PostgresDuckDbProvider(CacheProvider):
 
         self._conn = None          # DuckDB read-only connection
         self._is_ready = False     # кэш открыт (файл существует и прочитан)
-        self._index_cache: Dict[str, tuple[Any, Optional[dict]]] = {}
-        self._search_error: Optional[str] = None  # последняя ошибка search_vector
+        self._index_cache: dict[str, tuple[Any, dict | None]] = {}
+        self._search_error: str | None = None  # последняя ошибка search_vector
 
     # -- config --------------------------------------------------------
 
@@ -617,7 +616,7 @@ class PostgresDuckDbProvider(CacheProvider):
             self._is_ready = False
             return False
 
-    def check_stale(self) -> Dict[str, Any]:
+    def check_stale(self) -> dict[str, Any]:
         if not self._cache_path:
             return {"fresh": False, "stale_tables": [], "cache_meta": {}, "pg_meta": {},
                     "error": "no cache path"}
@@ -646,9 +645,9 @@ class PostgresDuckDbProvider(CacheProvider):
 
     def get_schema(
         self,
-        schema_name: Optional[str] = None,
-        table_names: Optional[list[str]] = None,
-    ) -> Dict[str, Any]:
+        schema_name: str | None = None,
+        table_names: list[str] | None = None,
+    ) -> dict[str, Any]:
         schema = schema_name or self._schema
         tables = table_names if table_names is not None else self._tables
         if self._conn is None:
@@ -658,9 +657,9 @@ class PostgresDuckDbProvider(CacheProvider):
 
         return build_schema(self._conn, schema, tables, self._read_schema_meta)
 
-    def _read_schema_meta(self, schema: str) -> Dict[tuple, tuple]:
+    def _read_schema_meta(self, schema: str) -> dict[tuple, tuple]:
         """Комментарии и исходные PG-типы из __nanobot_meta.__schema_meta (снимка)."""
-        result: Dict[tuple, tuple] = {}
+        result: dict[tuple, tuple] = {}
         try:
             rows = self._conn.execute(
                 'SELECT table_name, column_name, comment, pg_type '
@@ -673,7 +672,7 @@ class PostgresDuckDbProvider(CacheProvider):
             result[(table, column)] = (comment, pg_type)
         return result
 
-    def query_sql(self, sql: str, params: Optional[list] = None) -> Dict[str, Any]:
+    def query_sql(self, sql: str, params: list | None = None) -> dict[str, Any]:
         if self._conn is None:
             return {"status": "error", "row_count": 0, "columns": [], "rows": [],
                     "error": "Cache is not ready"}
@@ -681,7 +680,7 @@ class PostgresDuckDbProvider(CacheProvider):
 
         return run_query(self._conn, sql, params)
 
-    def explain(self, sql: str) -> Dict[str, Any]:
+    def explain(self, sql: str) -> dict[str, Any]:
         """EXPLAIN на DuckDB-кэше — синтаксическая проверка без выполнения."""
         if self._conn is None:
             return {"valid": False, "error": "Cache is not ready"}
@@ -691,11 +690,12 @@ class PostgresDuckDbProvider(CacheProvider):
 
     # -- vector indexes --------------------------------------------------
 
-    def _load_index_from_files(self, index_dir: str, index_name: str) -> tuple[Any, Optional[dict]]:
-        import faiss
+    def _load_index_from_files(self, index_dir: str, index_name: str) -> tuple[Any, dict | None]:
         import os
         import shutil
         import tempfile
+
+        import faiss
 
         index_path = os.path.join(index_dir, f"{index_name}.faiss")
         meta_path = os.path.join(index_dir, f"{index_name}_metadata.json")
@@ -753,11 +753,11 @@ class PostgresDuckDbProvider(CacheProvider):
                 source, blob, meta_json, dim, ntotal,
             )
 
-    def _load_index_from_store(self, source: str) -> tuple[Any, Optional[dict]]:
+    def _load_index_from_store(self, source: str) -> tuple[Any, dict | None]:
         if not self._vector_store_table:
             return None, None
-        import numpy as np
         import faiss
+        import numpy as np
         from utils.db import fetch
 
         store = self._vector_store_table
@@ -780,8 +780,8 @@ class PostgresDuckDbProvider(CacheProvider):
             return None, None
 
     def _load_vectors_from_db(
-        self, table_name: str, source: Optional[str] = None
-    ) -> tuple[Any, Optional[dict]]:
+        self, table_name: str, source: str | None = None
+    ) -> tuple[Any, dict | None]:
         from utils.db import fetch
 
         where = " WHERE source = %s" if source else ""
@@ -820,7 +820,7 @@ class PostgresDuckDbProvider(CacheProvider):
 
     def _load_index_from_cache(
         self, source: str,
-    ) -> tuple[Any, Optional[dict]]:
+    ) -> tuple[Any, dict | None]:
         """Построить FAISS-индекс из локального DuckDB-кэша навыка.
 
         Навык работает только со своим снимком (``audit_cache.duckdb``) — без
@@ -879,8 +879,8 @@ class PostgresDuckDbProvider(CacheProvider):
         self,
         index_dir: str,
         index_name: str,
-        db_table: Optional[str] = None,
-    ) -> tuple[Any, Optional[dict]]:
+        db_table: str | None = None,
+    ) -> tuple[Any, dict | None]:
         table = db_table or self._vector_db_table
         if table:
             cached = self._index_cache.get(index_name)
@@ -900,7 +900,7 @@ class PostgresDuckDbProvider(CacheProvider):
 
         return self._load_index_from_files(index_dir, index_name)
 
-    def preload_indexes(self, db_table: Optional[str] = None) -> List[Dict[str, Any]]:
+    def preload_indexes(self, db_table: str | None = None) -> list[dict[str, Any]]:
         """Прогреть кеш индексов в память."""
         from utils.db import fetch
 
@@ -908,7 +908,7 @@ class PostgresDuckDbProvider(CacheProvider):
         if not table:
             return []
 
-        names: Dict[str, bool] = {}
+        names: dict[str, bool] = {}
         cfg = self._vector_indexes or {}
         for name, c in cfg.items():
             names[name] = not (isinstance(c, dict) and c.get("enabled") is False)
@@ -928,7 +928,7 @@ class PostgresDuckDbProvider(CacheProvider):
                 loaded.append({"index_name": name, "vectors": idx.ntotal})
         return loaded
 
-    def invalidate_cache(self, source: Optional[str] = None) -> None:
+    def invalidate_cache(self, source: str | None = None) -> None:
         """Сбросить кеш индекса (после обновления данных)."""
         if source:
             self._index_cache.pop(source, None)
@@ -939,10 +939,10 @@ class PostgresDuckDbProvider(CacheProvider):
         self,
         query: str,
         index_name: str = "default_index",
-        index_path: Optional[str] = None,
+        index_path: str | None = None,
         top_k: int = 5,
-        threshold: Optional[float] = None,
-    ) -> List[SearchResult]:
+        threshold: float | None = None,
+    ) -> list[SearchResult]:
         """Семантический поиск по векторному индексу FAISS.
 
         Возвращает пустой список при отсутствии эмбеддинга, индекса или результатов.
@@ -950,8 +950,8 @@ class PostgresDuckDbProvider(CacheProvider):
         """
         self._search_error = None
         try:
-            import numpy as np
             import faiss  # noqa: F401
+            import numpy as np
         except ImportError:
             self._search_error = "Не установлены зависимости: faiss и numpy. Установите: pip install faiss-cpu numpy"
             return []
@@ -1003,7 +1003,7 @@ class PostgresDuckDbProvider(CacheProvider):
             for r in results
         ]
 
-    def rebuild_and_store_index(self, source: str, db_table: str) -> Optional[int]:
+    def rebuild_and_store_index(self, source: str, db_table: str) -> int | None:
         """Перестроить индекс для source и сохранить в store (для индексаторов).
 
         Returns:
@@ -1030,7 +1030,7 @@ class PostgresDuckDbProvider(CacheProvider):
             self._conn = None
         self._is_ready = False
 
-    def __enter__(self) -> "PostgresDuckDbProvider":
+    def __enter__(self) -> PostgresDuckDbProvider:
         return self
 
     def __exit__(self, *args) -> None:

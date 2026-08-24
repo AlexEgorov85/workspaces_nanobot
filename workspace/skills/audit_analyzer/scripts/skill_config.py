@@ -4,11 +4,12 @@ from typing import Any
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _SKILL_ROOT.parents[2]  # workspace/ → корень проекта
 
-import sys
+import sys  # noqa: E402
+
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from config import SETTINGS
+from config import SETTINGS  # noqa: E402
 
 _CFG = SETTINGS.get("skills", {}).get("audit_analyzer", {})
 

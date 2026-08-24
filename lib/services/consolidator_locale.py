@@ -22,10 +22,8 @@ monkeypatch Jinja2-loader'а на старте приложения.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Union
 
 from jinja2 import ChoiceLoader, FileSystemLoader
-
 from loguru import logger
 
 
@@ -36,7 +34,7 @@ def _overrides_dir() -> Path:
 
 
 def apply_template_overrides(
-    overrides_dir: Optional[Union[str, Path]] = None,
+    overrides_dir: str | Path | None = None,
 ) -> bool:
     """Подложить каталог переопределений в loader шаблонов nanobot.
 

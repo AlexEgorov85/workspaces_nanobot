@@ -18,7 +18,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
@@ -60,7 +61,7 @@ _CONTEXT_BRIDGE_LOCK = threading.Lock()
 
 
 def seed_context_window(
-    session_key: Optional[str], *, limit: int = 0, model: str = ""
+    session_key: str | None, *, limit: int = 0, model: str = ""
 ) -> None:
     """Засеять лимит окна/модель в мост на старте оборота.
 
@@ -77,7 +78,7 @@ def seed_context_window(
         entry["model"] = model if isinstance(model, str) else ""
 
 
-def _store_iteration_usage(session_key: Optional[str], usage: Optional[dict]) -> None:
+def _store_iteration_usage(session_key: str | None, usage: dict | None) -> None:
     """Записать по-итерационный usage оборота для сессии (неблокирующий)."""
     if not session_key:
         return
@@ -87,7 +88,7 @@ def _store_iteration_usage(session_key: Optional[str], usage: Optional[dict]) ->
         entry["ts"] = time.time()
 
 
-def _store_context_window(session_key: Optional[str], block: Optional[dict]) -> None:
+def _store_context_window(session_key: str | None, block: dict | None) -> None:
     """Записать готовый блок ``context_window`` для сессии (из патча)."""
     if not session_key or not block:
         return
@@ -97,7 +98,7 @@ def _store_context_window(session_key: Optional[str], block: Optional[dict]) -> 
         entry["ts"] = time.time()
 
 
-def get_context_window(session_key: Optional[str]) -> Optional[dict]:
+def get_context_window(session_key: str | None) -> dict | None:
     """Вернуть блок ``context_window`` сессии (без удаления).
 
     Предпочитаем готовый блок, собранный патчем ``_assemble_outbound``
@@ -131,7 +132,7 @@ def get_context_window(session_key: Optional[str]) -> Optional[dict]:
     }
 
 
-def get_iteration_usage(session_key: Optional[str]) -> Optional[dict]:
+def get_iteration_usage(session_key: str | None) -> dict | None:
     """Прочитать по-итерационный usage сессии (без удаления)."""
     if not session_key:
         return None
@@ -141,7 +142,7 @@ def get_iteration_usage(session_key: Optional[str]) -> Optional[dict]:
         return dict(usage) if isinstance(usage, dict) else None
 
 
-def pop_context_bridge(session_key: Optional[str]) -> None:
+def pop_context_bridge(session_key: str | None) -> None:
     """Снять с моста все данные сессии (финализация/ошибка оборота)."""
     if not session_key:
         return
@@ -151,9 +152,9 @@ def pop_context_bridge(session_key: Optional[str]) -> None:
 
 def make_db_logging_hook_factory(
     db_logging_service: Any,
-    agent_id: Optional[str] = None,
+    agent_id: str | None = None,
     print_llm_calls: bool = False,
-) -> Callable[[Any], "DatabaseLoggingHook"]:
+) -> Callable[[Any], DatabaseLoggingHook]:
     """Фабрика: создать СВЕЖИЙ ``DatabaseLoggingHook`` на КАЖДЫЙ оборот.
 
     Передаётся в ``AgentLoop`` как ``hook_factories`` (``agent_factory.py``).
@@ -173,7 +174,7 @@ def make_db_logging_hook_factory(
         Фабрика ``def(turn_context) -> DatabaseLoggingHook``.
     """
 
-    def _factory(turn_context: Any) -> "DatabaseLoggingHook":
+    def _factory(turn_context: Any) -> DatabaseLoggingHook:
         session_key = getattr(turn_context, "session_key", None) or None
         request_id = None
         if session_key:
@@ -219,15 +220,15 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
     def __init__(
         self,
         db_logging_service: Any,
-        agent_id: Optional[str] = None,
+        agent_id: str | None = None,
         *,
-        session_key: Optional[str] = None,
-        request_id: Optional[str] = None,
+        session_key: str | None = None,
+        request_id: str | None = None,
         print_llm_calls: bool = False,
     ) -> None:
         super().__init__()
         self._service = db_logging_service
-        self._tool_start_times: Dict[str, float] = {}
+        self._tool_start_times: dict[str, float] = {}
         self._agent_id = agent_id
         self._print_llm_calls = print_llm_calls
         # Контекст текущего оборота/вопроса. Запекается в фабрике на оборот,
@@ -238,8 +239,8 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         self._request_id = request_id
         # Снимок промпта текущей итерации (полный messages), чтобы
         # ``after_iteration`` мог упаковать его вместе с ответом в llm_call.
-        self._pending_prompt: Optional[list] = None
-        self._pending_iteration: Optional[int] = None
+        self._pending_prompt: list | None = None
+        self._pending_iteration: int | None = None
 
     # ------------------------------------------------------------------
     # Tool-события
@@ -253,7 +254,7 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         self._run_session_key = session_key
         self._request_id = self._service.get_request_id(session_key)
 
-    def _ctx(self, key: str) -> Optional[str]:
+    def _ctx(self, key: str) -> str | None:
         # Упрощено: контекст вопроса теперь живёт в question_runs,
         # в события gateway_logs идёт только request_id.
         if key == "request_id":
@@ -408,15 +409,15 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
 
 def _make_run_event(
     context: AgentRunHookContext,
-    session_key: Optional[str] = None,
-    request_id: Optional[str] = None,
+    session_key: str | None = None,
+    request_id: str | None = None,
 ):
     """Сформировать LogEvent из AgentRunHookContext (без жёсткой связки)."""
     from lib.services.db_logging_service import LogEvent
 
     final = context.final_content or ""
     tools = context.tools_used or []
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "final_content": final,
         "tools_used": tools,
         "stop_reason": context.stop_reason,

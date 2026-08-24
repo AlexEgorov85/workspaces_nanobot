@@ -13,18 +13,18 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Protocol
 
 
 class QueryBackend(Protocol):
     """Интерфейс бэкенда запросов (какой возвращает build_cache_provider())."""
 
-    def query_sql(self, sql: str, params: Optional[list] = None) -> Dict[str, Any]: ...
+    def query_sql(self, sql: str, params: list | None = None) -> dict[str, Any]: ...
 
-    def explain(self, sql: str) -> Dict[str, Any]: ...
+    def explain(self, sql: str) -> dict[str, Any]: ...
 
     def get_schema(
         self,
-        schema_name: Optional[str] = None,
-        table_names: Optional[List[str]] = None,
-    ) -> Dict[str, Any]: ...
+        schema_name: str | None = None,
+        table_names: list[str] | None = None,
+    ) -> dict[str, Any]: ...

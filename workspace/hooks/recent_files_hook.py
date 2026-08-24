@@ -29,11 +29,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 
 from nanobot.agent import AgentHook
-
 
 # Полный список файловых инструментов, которые могут оставлять файлы
 # в ``data_store/cache/sessions/<key>/``*. Любой из них после нашего
@@ -59,7 +57,7 @@ class RecentFilesHook(AgentHook):
     ``OutboundMessage.media``.
     """
 
-    def __init__(self, workspace_dir: "str | None" = None) -> None:
+    def __init__(self, workspace_dir: str | None = None) -> None:
         # ``workspace_dir`` принимается для совместимости с единым контрактом
         # ``hook_loader.scan_and_register``; ``RecentFilesHook`` хранит пути
         # из ``params["path"]`` после ``SessionFileRedirectHook`` — путь уже
@@ -74,7 +72,7 @@ class RecentFilesHook(AgentHook):
         return key if isinstance(key, str) else ""
 
     @staticmethod
-    def _extract_path(params: Any) -> Optional[str]:
+    def _extract_path(params: Any) -> str | None:
         """Извлечь путь из ``params`` (поддержка dict- и kwargs-вариантов)."""
         if isinstance(params, dict):
             for key in _PATH_KEYS:
@@ -110,7 +108,7 @@ class RecentFilesHook(AgentHook):
             return
         self._paths.setdefault(key, []).append(path)
 
-    def drain(self, session_key: Optional[str] = None) -> list[str]:
+    def drain(self, session_key: str | None = None) -> list[str]:
         """Вернуть и обнулить список путей текущей сессии.
 
         Порядок путей сохраняется (в порядке их создания агентом).
@@ -121,7 +119,7 @@ class RecentFilesHook(AgentHook):
         key = session_key if isinstance(session_key, str) else ""
         return self._paths.pop(key, [])
 
-    def collected(self, session_key: Optional[str] = None) -> list[str]:
+    def collected(self, session_key: str | None = None) -> list[str]:
         """Снимок путей без обнуления (для тестов/диагностики)."""
         key = session_key if isinstance(session_key, str) else ""
         return list(self._paths.get(key, []))

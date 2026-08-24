@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # DuckDB не поддерживает TO_CHAR(date, 'Month') — переписываем в strftime
 # (общая логика — в lib.utils.duckdb_query.rewrite_duck_sql).
@@ -61,7 +61,7 @@ def _infer_duckdb_type(values) -> str:
     return "VARCHAR"
 
 
-def _records_to_arrow(records: List[Dict[str, Any]]):
+def _records_to_arrow(records: list[dict[str, Any]]):
     """
     Сериализовать list[dict] в pyarrow.Table (без pandas).
 
@@ -79,7 +79,7 @@ def _records_to_arrow(records: List[Dict[str, Any]]):
         return None
 
     # Собираем уникальные ключи в порядке появления
-    cols: List[str] = []
+    cols: list[str] = []
     seen = set()
     for r in records:
         if not isinstance(r, dict):
@@ -105,7 +105,7 @@ def _records_to_arrow(records: List[Dict[str, Any]]):
     return pa.table(arrays)
 
 
-def _safe_str(v: Any) -> Optional[str]:
+def _safe_str(v: Any) -> str | None:
     """Строковое представление для гетерогенных/нестандартных значений."""
     if v is None:
         return None
@@ -190,7 +190,7 @@ class AuditMemoryStore:
         cache_path: str = "",
         publish_path: str = "",
         schema: str = "main",
-        tables: Optional[List[str]] = None,
+        tables: list[str] | None = None,
         vector_db_table: str = "",
         embedding_base_url: str = "",
         embedding_model: str = "mxbai-embed-large:latest",
@@ -210,20 +210,20 @@ class AuditMemoryStore:
         self._lock = threading.RLock()
         self._conn: Any = None            # DuckDB (read-write)
         self._is_ready = False
-        self._index_cache: Dict[str, tuple[Any, Optional[dict]]] = {}
+        self._index_cache: dict[str, tuple[Any, dict | None]] = {}
         self._dirty_sources: set[str] = set()
         self._dirty = False               # были новые данные с момента последнего publish
         # Описания колонок (из PG information_schema) для пересоздания пустых таблиц
-        self._schema_defs: Dict[str, List[Dict[str, Any]]] = {}
+        self._schema_defs: dict[str, list[dict[str, Any]]] = {}
 
         # статистика для мониторинга
         self._upserts = 0
         self._upsert_errors = 0
         self._publishes = 0
         self._publish_errors = 0
-        self._last_upsert_at: Optional[str] = None
-        self._last_publish_at: Optional[str] = None
-        self._last_error: Optional[str] = None
+        self._last_upsert_at: str | None = None
+        self._last_publish_at: str | None = None
+        self._last_error: str | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -270,7 +270,7 @@ class AuditMemoryStore:
             self._dirty_sources.clear()
             self._is_ready = False
 
-    def __enter__(self) -> "AuditMemoryStore":
+    def __enter__(self) -> AuditMemoryStore:
         return self
 
     def __exit__(self, *args) -> None:
@@ -280,7 +280,7 @@ class AuditMemoryStore:
     # Приём данных (вызывается из AuditSyncService/worker-потока)
     # ------------------------------------------------------------------
 
-    def upsert_records(self, table: str, records: List[Dict[str, Any]]) -> bool:
+    def upsert_records(self, table: str, records: list[dict[str, Any]]) -> bool:
         """Добавить/обновить строки таблицы в локальный кэш.
 
         Батч заменяет существующие записи с теми же id (upsert по ключу),
@@ -311,7 +311,7 @@ class AuditMemoryStore:
                 print(f"[memory_store] Ошибка upsert {table}: {e}", file=sys.stderr)
                 return False
 
-    def ensure_schema(self, table: str, columns: List[Dict[str, Any]]) -> bool:
+    def ensure_schema(self, table: str, columns: list[dict[str, Any]]) -> bool:
         """Создать таблицу по описанию колонок из источника (типы, NOT NULL, комментарии).
 
         Используется вместо вывода структуры из значений: так в снимок попадают
@@ -340,7 +340,7 @@ class AuditMemoryStore:
                 print(f"[memory_store] Ошибка ensure_schema {table}: {e}", file=sys.stderr)
                 return False
 
-    def _ensure_schema_locked(self, table: str, columns: List[Dict[str, Any]]) -> None:
+    def _ensure_schema_locked(self, table: str, columns: list[dict[str, Any]]) -> None:
         schema, name = _split_table(table)
         schema = schema or self._schema
         if not name:
@@ -378,7 +378,7 @@ class AuditMemoryStore:
 
         self._save_schema_meta(schema, name, columns)
 
-    def replace_records(self, table: str, records: List[Dict[str, Any]]) -> bool:
+    def replace_records(self, table: str, records: list[dict[str, Any]]) -> bool:
         """Полностью пересоздать содержимое таблицы из полного батча.
 
         Используется при полной пересинхронизации (сверка удалённых строк):
@@ -403,7 +403,7 @@ class AuditMemoryStore:
                 print(f"[memory_store] Ошибка replace {table}: {e}", file=sys.stderr)
                 return False
 
-    def _replace_locked(self, table: str, records: List[Dict[str, Any]]) -> None:
+    def _replace_locked(self, table: str, records: list[dict[str, Any]]) -> None:
         schema, name = _split_table(table)
         schema = schema or self._schema
         if not name:
@@ -473,7 +473,7 @@ class AuditMemoryStore:
             "comment TEXT, pg_type TEXT)"
         )
 
-    def _save_schema_meta(self, schema: str, table: str, columns: List[Dict[str, Any]]) -> None:
+    def _save_schema_meta(self, schema: str, table: str, columns: list[dict[str, Any]]) -> None:
         conn = self._conn
         self._ensure_meta_table()
         table_comment = next((c.get("comment") for c in columns if c.get("name") == "__table__"), None)
@@ -496,9 +496,9 @@ class AuditMemoryStore:
                 rows,
             )
 
-    def _load_schema_meta(self, schema: str) -> Dict[tuple, tuple]:
+    def _load_schema_meta(self, schema: str) -> dict[tuple, tuple]:
         """Метаданные схемы: {(table, col|None) -> (comment, pg_type)}."""
-        result: Dict[tuple, tuple] = {}
+        result: dict[tuple, tuple] = {}
         if self._conn is None:
             return result
         try:
@@ -514,7 +514,7 @@ class AuditMemoryStore:
             result[(table, column)] = (comment, pg_type)
         return result
 
-    def _upsert_locked(self, table: str, records: List[Dict[str, Any]]) -> None:
+    def _upsert_locked(self, table: str, records: list[dict[str, Any]]) -> None:
         schema, name = _split_table(table)
         schema = schema or self._schema
         if not name:
@@ -524,7 +524,7 @@ class AuditMemoryStore:
             return
 
         # Колонки — из объединения ключей records (порядок появления)
-        df_cols: List[str] = []
+        df_cols: list[str] = []
         seen = set()
         for r in records:
             if not isinstance(r, dict):
@@ -611,8 +611,8 @@ class AuditMemoryStore:
     def _ingest_arrow(
         self,
         table: str,
-        records: List[Dict[str, Any]],
-        cols: List[str],
+        records: list[dict[str, Any]],
+        cols: list[str],
         create_table: bool,
     ) -> None:
         """
@@ -665,7 +665,7 @@ class AuditMemoryStore:
         finally:
             self._conn.unregister("_upsert_arrow")
 
-    def _mark_vector_sources_dirty(self, table: str, records: List[Dict[str, Any]]) -> None:
+    def _mark_vector_sources_dirty(self, table: str, records: list[dict[str, Any]]) -> None:
         if not self._vector_db_table:
             return
         _, vec_name = _split_table(self._vector_db_table)
@@ -683,7 +683,7 @@ class AuditMemoryStore:
     # ------------------------------------------------------------------
 
     def publish(
-        self, tables: Optional[List[str]] = None, *, force: bool = False
+        self, tables: list[str] | None = None, *, force: bool = False
     ) -> bool:
         """Атомарно записать снимок таблиц в ``publish_path``.
 
@@ -729,7 +729,7 @@ class AuditMemoryStore:
 
             import os
 
-            counts: Dict[str, int] = {}
+            counts: dict[str, int] = {}
             try:
                 tmp_literal = "'" + str(tmp).replace("'", "''") + "'"
                 self._conn.execute(f"ATTACH {tmp_literal} AS __out (READ_WRITE)")
@@ -758,8 +758,8 @@ class AuditMemoryStore:
                         counts[f"{schema}.{name}"] = int(row_count)
                     # метаданные схемы (комментарии) — если есть что копировать
                     meta_exists = self._conn.execute(
-                        f"SELECT 1 FROM information_schema.tables "
-                        f"WHERE table_schema = ? AND table_name = ?",
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema = ? AND table_name = ?",
                         [_META_SCHEMA, _META_TABLE],
                     ).fetchone()
                     if meta_exists is not None and copied:
@@ -805,9 +805,9 @@ class AuditMemoryStore:
 
     def get_schema(
         self,
-        schema_name: Optional[str] = None,
-        table_names: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        schema_name: str | None = None,
+        table_names: list[str] | None = None,
+    ) -> dict[str, Any]:
         schema = schema_name or self._schema
         tables = table_names if table_names is not None else self._tables
         with self._lock:
@@ -818,7 +818,7 @@ class AuditMemoryStore:
 
             return build_schema(self._conn, schema, tables, self._load_schema_meta)
 
-    def query_sql(self, sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
+    def query_sql(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
         with self._lock:
             if self._conn is None:
                 return {"status": "error", "row_count": 0, "columns": [], "rows": [],
@@ -828,7 +828,7 @@ class AuditMemoryStore:
 
             return run_query(self._conn, sql, params)
 
-    def explain(self, sql: str) -> Dict[str, Any]:
+    def explain(self, sql: str) -> dict[str, Any]:
         with self._lock:
             if self._conn is None:
                 return {"valid": False, "error": "AuditMemoryStore is not ready"}
@@ -841,13 +841,13 @@ class AuditMemoryStore:
     # Векторные индексы (FAISS)
     # ------------------------------------------------------------------
 
-    def preload_indexes(self) -> List[Dict[str, Any]]:
+    def preload_indexes(self) -> list[dict[str, Any]]:
         """Прогреть FAISS-индексы всех источников из DuckDB-кэша в память.
 
         Returns:
             Список построенных индексов [{"index_name", "vectors"}, ...].
         """
-        loaded: List[Dict[str, Any]] = []
+        loaded: list[dict[str, Any]] = []
         with self._lock:
             if self._conn is None or not self._vector_db_table:
                 return loaded
@@ -874,7 +874,7 @@ class AuditMemoryStore:
                 loaded.append({"index_name": src, "vectors": idx.ntotal})
         return loaded
 
-    def _load_source_index(self, source: str) -> tuple[Any, Optional[dict]]:
+    def _load_source_index(self, source: str) -> tuple[Any, dict | None]:
         """Прочитать векторы source из DuckDB и построить FAISS-индекс."""
         if not self._vector_db_table:
             return None, None
@@ -913,10 +913,10 @@ class AuditMemoryStore:
         self,
         query: str,
         index_name: str = "default_index",
-        index_path: Optional[str] = None,
+        index_path: str | None = None,
         top_k: int = 5,
-        threshold: Optional[float] = None,
-    ) -> List[Any]:
+        threshold: float | None = None,
+    ) -> list[Any]:
         """Семантический поиск по локальному FAISS-индексу.
 
         Возвращает список ``SearchResult`` (lib.services.cache_provider).
@@ -978,7 +978,7 @@ class AuditMemoryStore:
     # Статистика / мониторинг
     # ------------------------------------------------------------------
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Снимок состояния хранилища для мониторинга."""
         with self._lock:
             tables = {}

@@ -31,12 +31,9 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
-
 from nanobot.session.manager import Session, SessionManager, _message_preview_text
-
-from utils.db import run, transaction
 from psycopg2.extras import Json, execute_values
-
+from utils.db import run, transaction
 
 # Все колонки, которые могут появиться в сообщении сессии (кроме базовых)
 _MESSAGE_COLUMNS = (
@@ -149,12 +146,12 @@ class PGSessionManager(SessionManager):
             meta_row = cur.fetchone()
             if meta_row is None:
                 return None
-            meta = dict(zip(col_names, meta_row))
+            meta = dict(zip(col_names, meta_row, strict=False))
 
         with conn.cursor() as cur:
             cur.execute(f"SELECT * FROM {self._fq_messages} WHERE session_key = %s ORDER BY seq ASC", (key,))
             col_names = [desc[0] for desc in cur.description]
-            rows_raw_list = [dict(zip(col_names, r)) for r in cur.fetchall()]
+            rows_raw_list = [dict(zip(col_names, r, strict=False)) for r in cur.fetchall()]
 
         messages: list[dict[str, Any]] = []
         for r in rows_raw_list:
@@ -298,7 +295,7 @@ class PGSessionManager(SessionManager):
             col_names = [desc[0] for desc in cur.description]
             meta_rows_raw = cur.fetchall()
 
-        meta_rows = [dict(zip(col_names, r)) for r in meta_rows_raw]
+        meta_rows = [dict(zip(col_names, r, strict=False)) for r in meta_rows_raw]
 
         out: list[dict[str, Any]] = []
         for meta in meta_rows:

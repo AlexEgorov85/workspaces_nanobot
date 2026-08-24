@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys as _sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-import sys as _sys
-from typing import Any, Optional, Tuple
+from typing import Any
 
 from loguru import logger
 
@@ -103,8 +103,8 @@ class PatchReport:
 
     def __init__(self) -> None:
         self.applied: list[str] = []
-        self.skipped: list[Tuple[str, str]] = []
-        self.failed: list[Tuple[str, str]] = []
+        self.skipped: list[tuple[str, str]] = []
+        self.failed: list[tuple[str, str]] = []
 
     def to_dict(self) -> dict:
         return {
@@ -173,7 +173,7 @@ class RuntimePatcher:
         return report
 
     @staticmethod
-    def _record(report: PatchReport, name: str, result: Tuple[bool, str]) -> None:
+    def _record(report: PatchReport, name: str, result: tuple[bool, str]) -> None:
         """Записать результат одного патча в ``PatchReport``.
 
         True → ``applied``, False → ``skipped`` (с деталью-причиной).
@@ -209,7 +209,7 @@ class RuntimePatcher:
     # Патч 2b: seed лимита окна в мост контекста на старте оборота
     # ------------------------------------------------------------------
 
-    def patch_context_bridge_seed(self, agent: Any) -> Tuple[bool, str]:
+    def patch_context_bridge_seed(self, agent: Any) -> tuple[bool, str]:
         """Засеять лимит окна/модель в мост контекста на старте оборота.
 
         Для ЖИВОГО (по-итерационного) обновления занятости окна канал
@@ -258,7 +258,7 @@ class RuntimePatcher:
 
     def patch_context_governor(
         self, config: Any, settings: Any, workspace_dir: Any
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Выгружать большие результаты инструментов в data_store/.
 
         Алгоритм обёртки ``ContextGovernor.normalize_tool_result``:
@@ -350,7 +350,7 @@ class RuntimePatcher:
 
     def patch_save_turn(
         self, settings: Any, workspace_dir: Any, agent: Any
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Архивировать большие результаты инструментов вместо усечения.
 
         ``_save_turn`` (nanobot/agent/loop.py) при сохранении истории оборота
@@ -400,7 +400,7 @@ class RuntimePatcher:
         except Exception as exc:
             return False, f"store init failed: {exc}"
 
-        def _serialize(content: Any) -> Optional[str]:
+        def _serialize(content: Any) -> str | None:
             if isinstance(content, str):
                 return content
             if isinstance(content, list):
@@ -448,7 +448,7 @@ class RuntimePatcher:
     # Патч 1b: санитизация контента на источнике (Session.add_message)
     # ------------------------------------------------------------------
 
-    def patch_session_content_cleanup(self) -> Tuple[bool, str]:
+    def patch_session_content_cleanup(self) -> tuple[bool, str]:
         """Вычищать невалидные символы из контента при добавлении сообщения.
 
         ``nanobot.session.manager.Session.add_message`` — единая точка, через
@@ -487,7 +487,7 @@ class RuntimePatcher:
     # Патч 1c: синхронный sessions.save из async-контекста → executor
     # ------------------------------------------------------------------
 
-    def patch_async_session_saves(self, agent: Any) -> Tuple[bool, str]:
+    def patch_async_session_saves(self, agent: Any) -> tuple[bool, str]:
         """Не блокировать event loop синхронным ``sessions.save()``.
 
         ``nanobot.agent.loop`` вызывает ``self.sessions.save(...)`` синхронно
@@ -594,7 +594,7 @@ class RuntimePatcher:
     # Патч 1c: лимит вывода exec-инструмента (конфигурируемый)
     # ------------------------------------------------------------------
 
-    def patch_exec_limits(self, settings: Any) -> Tuple[bool, str]:
+    def patch_exec_limits(self, settings: Any) -> tuple[bool, str]:
         """Поднять лимит вывода exec/shell-инструмента.
 
         nanobot режет вывод команды до ``MAX_OUTPUT_CHARS`` (50K символов) и
@@ -648,7 +648,7 @@ class RuntimePatcher:
     # Патч 1d: лимиты read_file / grep / list_dir (конфигурируемые)
     # ------------------------------------------------------------------
 
-    def patch_tool_limits(self, settings: Any) -> Tuple[bool, str]:
+    def patch_tool_limits(self, settings: Any) -> tuple[bool, str]:
         """Поднять потолки инструментов, которые усекают вывод с маркером.
 
         Читаемые ключи из ``settings.gateway.tool_result_limits``:
@@ -697,7 +697,7 @@ class RuntimePatcher:
         agent: Any,
         tool_audit_hook: Any,
         recent_files_hook: Any = None,
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Подменить ``agent._assemble_outbound`` обёрткой, дописывающей аудит.
 
         ``_assemble_outbound`` (см. ``nanobot/agent/loop.py``) формирует
@@ -854,7 +854,7 @@ class RuntimePatcher:
 
     def patch_subagent_logging(
         self, db_logging_service: Any, session_manager: Any = None
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Логировать подагентов: tool-события, итог запуска и историю.
 
         ``SubagentManager._run_subagent`` (``nanobot/agent/subagent.py``)
@@ -890,6 +890,7 @@ class RuntimePatcher:
             return False, "db_logging_service is None"
         try:
             from nanobot.agent.subagent import _SubagentHook
+
             from lib.hooks.database_logging_hook import DatabaseLoggingHook
             from lib.services.db_logging_service import LogEvent
         except Exception as exc:
@@ -1046,7 +1047,7 @@ class RuntimePatcher:
                     self._db_hook._service.clear_request(key)
 
             @staticmethod
-            def _extract_task(context) -> Optional[str]:
+            def _extract_task(context) -> str | None:
                 """Извлечь описание задачи подагента (первое user-сообщение)."""
                 msgs = list(getattr(context, "messages", None) or [])
                 for m in msgs:
@@ -1106,7 +1107,7 @@ class RuntimePatcher:
     def patch_project_tools(
         self, agent: Any, workspace_dir: Any,
         *, settings: Any = None,
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Зарегистрировать кастомные tool'ы из ``workspace/tools/*.py``.
 
         Использует встроенные механизмы nanobot:
@@ -1150,7 +1151,6 @@ class RuntimePatcher:
             import importlib.util
             import pkgutil
             import sys as _sys
-
             from pathlib import Path as _P
 
             tools_dir = _P(workspace_dir) / "tools"
@@ -1245,9 +1245,9 @@ class RuntimePatcher:
             # отдельным атрибутом, чтобы tool'ы с DI-сервисами (например,
             # CompactContextTool) могли его получить через
             # ``getattr(ctx, "_agent_ref", None)``.
-            setattr(ctx, "_agent_ref", agent)
+            ctx._agent_ref = agent
             if settings is not None:
-                setattr(ctx, "_settings_ref", settings)
+                ctx._settings_ref = settings
 
             registered: list[str] = []
             skipped_disabled: list[str] = []
@@ -1304,7 +1304,7 @@ class RuntimePatcher:
 
     def patch_compaction_tracking(
         self, agent: Any, settings: Any
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Обернуть авто-сжатие так, чтобы оно шло через тот же путь,
         что и ручной ``/compact``: тот же отчёт, та же запись в историю.
 
@@ -1346,7 +1346,7 @@ class RuntimePatcher:
 
     def patch_compact_command(
         self, agent: Any, settings: Any
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Зарегистрировать команду ``/compact`` в ``CommandRouter`` агента.
 
         ``/compact`` — это настоящая slash-команда (по образцу ``cmd_new``
@@ -1456,7 +1456,7 @@ class RuntimePatcher:
 
         consolidator.maybe_consolidate_by_tokens = _wrapped
 
-    def patch_auto_compact_idle_guard(self, agent: Any) -> Tuple[bool, str]:
+    def patch_auto_compact_idle_guard(self, agent: Any) -> tuple[bool, str]:
         """Заглушить бесполезное перечисление сессий при выключенном idle-компакте.
 
         ``AgentLoop.run`` при отсутствии входящих сообщений раз в секунду

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from lib.utils.node_access import get_path as _get
 
@@ -28,8 +28,8 @@ class ConfigService:
 
     def __init__(
         self,
-        script_dir: Optional[Path] = None,
-        workspace_dir: Optional[Path] = None,
+        script_dir: Path | None = None,
+        workspace_dir: Path | None = None,
     ) -> None:
         self.script_dir = Path(script_dir) if script_dir else None
         self.workspace_dir = Path(workspace_dir) if workspace_dir else None
@@ -45,7 +45,7 @@ class ConfigService:
 
         return SETTINGS
 
-    def settings_section(self, name: str, default: Optional[dict] = None) -> dict:
+    def settings_section(self, name: str, default: dict | None = None) -> dict:
         """Вернуть top-level секцию SETTINGS как dict (пусто, если нет).
 
         SETTINGS может быть как dict-ом, так и объектом с атрибутами
@@ -85,8 +85,8 @@ class ConfigService:
 
     def load(
         self,
-        script_dir: Optional[Path] = None,
-        workspace_dir: Optional[Path] = None,
+        script_dir: Path | None = None,
+        workspace_dir: Path | None = None,
         *,
         sync_templates: bool = True,
     ) -> Any:
@@ -129,7 +129,7 @@ class ConfigService:
         self.apply_provider_keys(config)
         return config
 
-    def _pre_resolve_env_refs(self, script_dir: Optional[Path]) -> None:
+    def _pre_resolve_env_refs(self, script_dir: Path | None) -> None:
         """Pre-resolve ``${VAR}`` placeholders in config.json from SETTINGS.
 
         nanobot's ``_load_runtime_config`` resolves ``${VAR}`` от ``os.environ``.
@@ -233,9 +233,9 @@ class ConfigService:
         self,
         config: Any,
         *,
-        llm_timeout: Optional[int] = -1,
-        exec_timeout: Optional[int] = -1,
-        max_iterations: Optional[int] = None,
+        llm_timeout: int | None = -1,
+        exec_timeout: int | None = -1,
+        max_iterations: int | None = None,
     ) -> None:
         """Применить таймауты к конфигу и переменным окружения.
 

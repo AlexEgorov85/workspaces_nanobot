@@ -28,7 +28,7 @@ PostgreSQL, когда in-memory кэш выключен.
 import sys
 import warnings
 from pathlib import Path
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 _workspace_root = Path(__file__).resolve().parents[3]  # workspace/
 _nanobot_root = Path(__file__).resolve().parents[4]   # корень проекта
@@ -39,7 +39,8 @@ for _p in [str(_nanobot_root), str(_workspace_root)]:
 # Back-compat re-export: ранее здесь жили ``validate_sql`` и ``format_schema``.
 # Реализация перенесена в ``lib.utils.sql_safety`` (TARGET_ARCHITECTURE.md §4 —
 # shared infrastructure). Здесь — тонкие обёртки для обратной совместимости.
-from lib.utils.sql_safety import validate_sql, format_schema  # noqa: E402, F401
+from lib.utils.sql_safety import format_schema, validate_sql  # noqa: E402, F401
+from workspace.utils.db import fetch  # noqa: E402
 
 
 @runtime_checkable
@@ -48,11 +49,11 @@ class QueryBackend(Protocol):
 
     def get_schema(
         self,
-        schema_name: Optional[str] = None,
-        table_names: Optional[list[str]] = None,
+        schema_name: str | None = None,
+        table_names: list[str] | None = None,
     ) -> dict: ...
 
-    def query_sql(self, sql: str, params: Optional[list] = None) -> dict: ...
+    def query_sql(self, sql: str, params: list | None = None) -> dict: ...
 
     def explain(self, sql: str) -> dict: ...
 
@@ -82,7 +83,7 @@ class Database(QueryBackend):
 
     def __init__(self, db_config: dict):
         self._schema_name = db_config.get("schema", "public")
-        self._table_names: Optional[list[str]] = db_config.get("tables") or None
+        self._table_names: list[str] | None = db_config.get("tables") or None
 
     # ------------------------------------------------------------------
     # Lifecycle (no-op, подключение через utils.db)
@@ -106,8 +107,8 @@ class Database(QueryBackend):
 
     def get_schema(
         self,
-        schema_name: Optional[str] = None,
-        table_names: Optional[list[str]] = None,
+        schema_name: str | None = None,
+        table_names: list[str] | None = None,
     ) -> dict:
         """
         Получить структуру таблиц из information_schema.
@@ -123,7 +124,7 @@ class Database(QueryBackend):
         tables = table_names if table_names is not None else self._table_names
         return self._fetch_schema(schema, tables)
 
-    def _fetch_schema(self, schema: str, tables: Optional[list[str]]) -> dict:
+    def _fetch_schema(self, schema: str, tables: list[str] | None) -> dict:
         """
         Выполнить сложный SQL-запрос с JOIN к information_schema и pg_catalog
         для получения структуры таблиц: колонки, типы, NOT/NULL, комментарии.
@@ -178,7 +179,7 @@ class Database(QueryBackend):
     # Query execution
     # ------------------------------------------------------------------
 
-    def query_sql(self, sql: str, params: Optional[list] = None) -> dict:
+    def query_sql(self, sql: str, params: list | None = None) -> dict:
         """
         Выполнить SELECT-запрос, вернуть колонки и строки.
 

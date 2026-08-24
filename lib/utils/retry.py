@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, Optional, Tuple, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +25,12 @@ T = TypeVar("T")
 def retry_on_exception(
     fn: Callable[[], T],
     *,
-    exceptions: Tuple[type, ...],
+    exceptions: tuple[type, ...],
     max_retries: int = 3,
     base_delay: float = 1.0,
     max_delay: float = 15.0,
     label: str = "retry",
-    on_retry: Optional[Callable[[int, int, float, Exception], Optional[float]]] = None,
+    on_retry: Callable[[int, int, float, Exception], float | None] | None = None,
 ) -> T:
     """Повторить ``fn`` при ошибках из ``exceptions`` с exponential backoff.
 

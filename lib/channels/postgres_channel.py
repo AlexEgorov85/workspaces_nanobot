@@ -25,36 +25,39 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
-import mimetypes
 import os
-import re
 import socket
 import uuid
 from contextlib import suppress
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import psycopg2
-from loguru import logger
-from rich.console import Console
-
-from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from utils.db import async_fetchval as fetchval, async_execute as execute, async_fetchone as fetchone, async_transaction as transaction, async_fetch as fetch
-from utils.session_file_store import SessionFileStore
+from psycopg2.extras import Json
+from rich.console import Console
+from utils.db import async_execute as execute
+from utils.db import async_fetch as fetch  # noqa: F401 — атрибут модуля патчится тестами
+from utils.db import async_fetchone as fetchone
+from utils.db import async_fetchval as fetchval
+from utils.db import async_transaction as transaction
 from utils.jsonb import decode_jsonb as _decode_jsonb
 from utils.media import (
-    serialize as media_serialize,
     deserialize as media_deserialize,
+)
+from utils.media import (
     resolve_paths_and_hints as media_resolve_paths_and_hints,
 )
+from utils.media import (
+    serialize as media_serialize,
+)
+from utils.session_file_store import SessionFileStore
+
 from lib.channels.message_exchange import MessageExchange
-from lib.utils.outbound_meta import is_dropped, FINAL_TURN_KEY
-from psycopg2.extras import Json
+from lib.utils.outbound_meta import FINAL_TURN_KEY, is_dropped
 
 _WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent / "workspace"
 

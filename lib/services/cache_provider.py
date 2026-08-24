@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -38,7 +38,7 @@ class SearchResult:
     pk_value: Any = None
     chunk: str = ""
     matched_chunks: int = 1
-    row: Dict[str, Any] = field(default_factory=dict)
+    row: dict[str, Any] = field(default_factory=dict)
 
 
 class CacheProvider(ABC):
@@ -57,7 +57,7 @@ class CacheProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def check_stale(self) -> Dict[str, Any]:
+    def check_stale(self) -> dict[str, Any]:
         """Сверить метки изменений (MAX updated) у таблиц кэша с источником.
 
         Возвращает dict с ключами: fresh, stale_tables, cache_meta, pg_meta.
@@ -65,7 +65,7 @@ class CacheProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def preload_indexes(self) -> List[Dict[str, Any]]:
+    def preload_indexes(self) -> list[dict[str, Any]]:
         """Прогреть векторные индексы из БД/файлов в память.
 
         Returns:
@@ -80,10 +80,10 @@ class CacheProvider(ABC):
         self,
         query: str,
         index_name: str = "default_index",
-        index_path: Optional[str] = None,
+        index_path: str | None = None,
         top_k: int = 5,
-        threshold: Optional[float] = None,
-    ) -> List[SearchResult]:
+        threshold: float | None = None,
+    ) -> list[SearchResult]:
         """Семантический поиск по векторному индексу.
 
         Возвращает пустой список, если ничего не найдено или поиск
@@ -92,7 +92,7 @@ class CacheProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def query_sql(self, sql: str, params: Optional[list] = None) -> Dict[str, Any]:
+    def query_sql(self, sql: str, params: list | None = None) -> dict[str, Any]:
         """Выполнить SELECT-запрос к SQL-кэшу (агрегации/отчёты).
 
         Returns:
@@ -101,7 +101,7 @@ class CacheProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def explain(self, sql: str) -> Dict[str, Any]:
+    def explain(self, sql: str) -> dict[str, Any]:
         """EXPLAIN на SQL-кэше — синтаксическая проверка без выполнения.
 
         Returns:
@@ -112,9 +112,9 @@ class CacheProvider(ABC):
     @abstractmethod
     def get_schema(
         self,
-        schema_name: Optional[str] = None,
-        table_names: Optional[list[str]] = None,
-    ) -> Dict[str, Any]:
+        schema_name: str | None = None,
+        table_names: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Получить структуру таблиц кэша (information_schema)."""
         raise NotImplementedError
 

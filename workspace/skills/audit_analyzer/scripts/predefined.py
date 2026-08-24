@@ -14,8 +14,8 @@ db_loader. Все хелперы ниже остаются API-стабильн�
     audit_analyze --mode predefined --script top_audited_objects --params '{"limit": 5}'
 """
 
-from typing import Any, Dict, List, Optional, Tuple
 import sys
+from typing import Any
 
 from db_loader import load_registry
 from scripts_registry import (
@@ -24,12 +24,12 @@ from scripts_registry import (
 )
 
 
-def _get_registry() -> Dict[str, ScriptDefinition]:
+def _get_registry() -> dict[str, ScriptDefinition]:
     """Ленивая загрузка реестра из БД (с кешем внутри db_loader)."""
     return load_registry()
 
 
-def get_script_by_name(name: str) -> Optional[ScriptDefinition]:
+def get_script_by_name(name: str) -> ScriptDefinition | None:
     """
     Получить ScriptDefinition по имени из реестра (БД).
 
@@ -44,8 +44,8 @@ def get_script_by_name(name: str) -> Optional[ScriptDefinition]:
 
 def build_sql(
     script: ScriptDefinition,
-    params: Dict[str, Any],
-) -> Tuple[str, List[Any]]:
+    params: dict[str, Any],
+) -> tuple[str, list[Any]]:
     """
     Собрать SQL из шаблона скрипта с переданными параметрами.
 
@@ -75,7 +75,7 @@ def build_sql(
     return DynamicQueryBuilder.build(script, params)
 
 
-def list_all_scripts() -> List[Dict[str, Any]]:
+def list_all_scripts() -> list[dict[str, Any]]:
     """
     Список всех скриптов с метаданными.
 

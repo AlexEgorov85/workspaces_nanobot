@@ -15,8 +15,7 @@ predefined.py при каждом вызове get_script_by_name.
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Tuple
-
+from typing import Any, Literal
 
 # =============================================================================
 # ТИПИЗИРОВАННЫЕ МОДЕЛИ
@@ -57,7 +56,7 @@ class ParamDefinition:
     required: bool = False
     default: Any = None
     description: str = ""
-    validation: Optional[Dict[str, Any]] = None
+    validation: dict[str, Any] | None = None
 
 
 @dataclass
@@ -86,7 +85,7 @@ class ScriptDefinition:
     name: str
     description: str
     sql_template: str
-    parameters: Dict[str, ParamDefinition] = field(default_factory=dict)
+    parameters: dict[str, ParamDefinition] = field(default_factory=dict)
     max_rows_default: int = 1000
     returns: str = ""
     long_description: str = ""
@@ -110,7 +109,7 @@ class DynamicQueryBuilder:
     """
 
     @staticmethod
-    def _render_template(sql_template: str, params: Dict[str, Any]) -> str:
+    def _render_template(sql_template: str, params: dict[str, Any]) -> str:
         """
         Рендеринг Jinja2-подобных условных блоков.
 
@@ -160,7 +159,7 @@ class DynamicQueryBuilder:
 
         # Удаляем пустые строки
         lines = result.split('\n')
-        cleaned_lines = [l.strip() for l in lines if l.strip()]
+        cleaned_lines = [ln.strip() for ln in lines if ln.strip()]
         result = '\n'.join(cleaned_lines)
 
         # Чистка WHERE 1=1
@@ -171,7 +170,7 @@ class DynamicQueryBuilder:
         return result
 
     @staticmethod
-    def _convert_to_positional(sql: str, params: Dict[str, Any]) -> Tuple[str, List[Any]]:
+    def _convert_to_positional(sql: str, params: dict[str, Any]) -> tuple[str, list[Any]]:
         """
         Конвертация :param_name → %s для psycopg2.
 
@@ -216,8 +215,8 @@ class DynamicQueryBuilder:
     def build(
         cls,
         script: ScriptDefinition,
-        params: Dict[str, Any]
-    ) -> Tuple[str, List[Any]]:
+        params: dict[str, Any]
+    ) -> tuple[str, list[Any]]:
         """
         Полный цикл сборки SQL из шаблона скрипта.
 
@@ -249,7 +248,7 @@ class DynamicQueryBuilder:
             >>> DynamicQueryBuilder.build(script2, {"violation_code": "финан"})
             ('SELECT ... WHERE ... ILIKE %s\\nLIMIT %s', ['%финан%', 100])
         """
-        clean_params: Dict[str, Any] = {}
+        clean_params: dict[str, Any] = {}
         final_sql = script.sql_template
 
         # Шаг 1: значения по умолчанию для отсутствующих параметров

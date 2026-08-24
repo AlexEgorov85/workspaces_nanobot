@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 # DuckDB не поддерживает TO_CHAR(date, 'Month') — переписываем в strftime.
 REWRITE_TO_CHAR = re.compile(r"TO_CHAR\((\w+)\s*,\s*'Month'\)", re.IGNORECASE)
@@ -31,8 +32,8 @@ def rewrite_duck_sql(sql: str) -> str:
 def run_query(
     conn: Any,
     sql: str,
-    params: Optional[List[Any]] = None,
-) -> Dict[str, Any]:
+    params: list[Any] | None = None,
+) -> dict[str, Any]:
     """Выполнить запрос на DuckDB-соединении, вернуть нормализованный результат."""
     duck_sql = rewrite_duck_sql(sql)
     try:
@@ -51,17 +52,17 @@ def run_query(
         "status": "success",
         "row_count": len(rows),
         "columns": columns,
-        "rows": [dict(zip(columns, r)) for r in rows],
+        "rows": [dict(zip(columns, r, strict=False)) for r in rows],
     }
 
 
-def explain_query(conn: Any, sql: str) -> Dict[str, Any]:
+def explain_query(conn: Any, sql: str) -> dict[str, Any]:
     """EXPLAIN на DuckDB — синтаксическая проверка без выполнения."""
     duck_sql = rewrite_duck_sql(sql)
     try:
         result = conn.execute(f"EXPLAIN {duck_sql}")
         columns = [desc[0] for desc in result.description]
-        plan = [dict(zip(columns, r)) for r in result.fetchall()]
+        plan = [dict(zip(columns, r, strict=False)) for r in result.fetchall()]
         return {"valid": True, "plan": plan}
     except Exception as e:
         return {"valid": False, "error": f"EXPLAIN failed: {e}"}
@@ -70,9 +71,9 @@ def explain_query(conn: Any, sql: str) -> Dict[str, Any]:
 def build_schema(
     conn: Any,
     schema: str,
-    tables: Optional[List[str]],
-    meta_reader: Callable[[str], Dict[tuple, tuple]],
-) -> Dict[str, Any]:
+    tables: list[str] | None,
+    meta_reader: Callable[[str], dict[tuple, tuple]],
+) -> dict[str, Any]:
     """Собрать схему таблиц из ``information_schema`` DuckDB.
 
     ``meta_reader(schema)`` возвращает ``{(table, column): (comment, pg_type)}``
@@ -84,7 +85,7 @@ def build_schema(
         "character_maximum_length "
         "FROM information_schema.columns WHERE table_schema = ?"
     )
-    params: List[Any] = [schema]
+    params: list[Any] = [schema]
     if tables:
         placeholders = ",".join("?" for _ in tables)
         sql += f" AND table_name IN ({placeholders})"
@@ -94,11 +95,11 @@ def build_schema(
     rows = conn.execute(sql, params).fetchall()
     meta = meta_reader(schema)
 
-    def meta_value(table: str, column: Optional[str], idx: int) -> Any:
+    def meta_value(table: str, column: str | None, idx: int) -> Any:
         val = meta.get((table, column))
         return val[idx] if val else None
 
-    result: Dict[str, Any] = {}
+    result: dict[str, Any] = {}
     for row in rows:
         tbl = row[0]
         if tbl not in result:
@@ -122,15 +123,15 @@ def build_schema(
 
 
 def build_raw_items(
-    meta_items: Dict[str, Any],
+    meta_items: dict[str, Any],
     scores,
     ids,
     index_name: str,
-    threshold: Optional[float],
-) -> List[Dict[str, Any]]:
+    threshold: float | None,
+) -> list[dict[str, Any]]:
     """Собрать сырые чанки-строки из результатов поиска FAISS."""
-    raw: List[Dict[str, Any]] = []
-    for score, doc_id in zip(scores[0], ids[0]):
+    raw: list[dict[str, Any]] = []
+    for score, doc_id in zip(scores[0], ids[0], strict=False):
         if doc_id < 0:
             continue
         if threshold is not None and score < threshold:
@@ -157,17 +158,17 @@ def build_raw_items(
 
 
 def group_vector_hits(
-    raw: List[Dict[str, Any]],
+    raw: list[dict[str, Any]],
     top_k: int = 5,
-    threshold: Optional[float] = None,
-) -> List[Dict[str, Any]]:
+    threshold: float | None = None,
+) -> list[dict[str, Any]]:
     """Группировка чанков: один документ = одно место в top_k.
 
     Принимает сырые чанки (содержат ``source``, ``table``, ``pk_value``,
     ``score``, ``chunk_index``, ``chunk_total``) и возвращает документы с
     ``matched_chunks``, отсортированные по ``score`` (срезанные до ``top_k``).
     """
-    doc_groups: Dict[tuple, Dict[str, Any]] = {}
+    doc_groups: dict[tuple, dict[str, Any]] = {}
     for r in raw:
         key = (r["source"], r["table"], r["pk_value"])
         if key not in doc_groups or r["score"] > doc_groups[key]["score"]:
@@ -189,8 +190,8 @@ def group_vector_hits(
 
 
 def build_faiss_index(
-    records: List[Dict[str, Any]],
-) -> tuple[Any, Optional[Dict[str, Any]]]:
+    records: list[dict[str, Any]],
+) -> tuple[Any, dict[str, Any] | None]:
     """Построить FAISS ``IndexFlatIP`` + metadata из списка записей.
 
     ``records`` — список словарей с ключами: ``source``, ``content``,
@@ -200,14 +201,14 @@ def build_faiss_index(
     Возвращает ``(index, metadata)`` или ``(None, None)`` (пусто/несоответствие
     размерности). Единая точка сборки FAISS для gateway-кэша и снимка навыка.
     """
-    import numpy as np
     import faiss
+    import numpy as np
 
     if not records:
         return None, None
     dimension = len(records[0]["embedding"])
     vectors = np.zeros((len(records), dimension), dtype=np.float32)
-    metadata: Dict[str, Any] = {"metadata": {}}
+    metadata: dict[str, Any] = {"metadata": {}}
 
     for i, rec in enumerate(records):
         emb = rec["embedding"]

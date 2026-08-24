@@ -16,7 +16,7 @@ gateway (AuditSyncService → in-memory mirror → snapshot file). CLI-аген�
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from typing import Any
 
 
 class PreloadService:
@@ -31,7 +31,7 @@ class PreloadService:
     def __init__(self, settings: Any = None) -> None:
         self._settings = settings
 
-    async def preload_vector_indexes(self, store: Any) -> Optional[list]:
+    async def preload_vector_indexes(self, store: Any) -> list | None:
         """Прогреть FAISS-индексы из DuckDB-кэша в память (gateway).
 
         ``store.preload_indexes()`` — тяжёлая синхронная операция

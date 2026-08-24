@@ -29,7 +29,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, List, Tuple
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ class ShutdownCoordinator:
     """
 
     def __init__(self) -> None:
-        self._components: List[Tuple[str, Callable[[], None]]] = []
+        self._components: list[tuple[str, Callable[[], None]]] = []
 
     def register(self, name: str, component: Any) -> None:
         """Зарегистрировать компонент для последующей остановки.

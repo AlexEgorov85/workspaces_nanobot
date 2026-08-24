@@ -18,7 +18,7 @@ class DisplayConfig:
     typewriter_speed: float = 0.01
 
     @classmethod
-    def from_settings(cls, cli_settings: dict) -> "DisplayConfig":
+    def from_settings(cls, cli_settings: dict) -> DisplayConfig:
         return cls(
             show_reasoning=cli_settings.get("show_reasoning", True),
             show_tool_calls=cli_settings.get("show_tool_calls", True),

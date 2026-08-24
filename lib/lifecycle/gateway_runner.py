@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import time
 import traceback
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from config import get_setting
 
@@ -51,9 +51,9 @@ class GatewayRunner:
     def __init__(
         self,
         *,
-        initial_delay: Optional[float] = None,
-        max_delay: Optional[float] = None,
-        sleep: Optional[Callable[[float], None]] = None,
+        initial_delay: float | None = None,
+        max_delay: float | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         """Args:
             initial_delay: секунды перед первым рестартом после падения.

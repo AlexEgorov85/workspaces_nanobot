@@ -30,8 +30,8 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 
 class BusFactory:
@@ -53,8 +53,8 @@ class BusFactory:
 
     def __init__(
         self,
-        inbound_logger: Optional[Callable[[Any], Awaitable[None]]] = None,
-        outbound_logger: Optional[Callable[[Any], Awaitable[None]]] = None,
+        inbound_logger: Callable[[Any], Awaitable[None]] | None = None,
+        outbound_logger: Callable[[Any], Awaitable[None]] | None = None,
     ) -> None:
         self._inbound_logger = inbound_logger
         self._outbound_logger = outbound_logger

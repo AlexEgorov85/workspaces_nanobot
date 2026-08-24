@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from lib.utils.retry import retry_on_exception
 
 
-def _resolve_cfg(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _resolve_cfg(cfg: dict[str, Any] | None) -> dict[str, Any]:
     """Вернуть переданный конфиг или резолвнуть агентский (без переопределений).
 
     ``resolve_llm_config`` импортируется лениво, чтобы тесты могли
@@ -42,13 +42,13 @@ def _resolve_cfg(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def call_llm(
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     *,
-    cfg: Optional[Dict[str, Any]] = None,
-    context: Optional[List[Dict[str, Any]]] = None,
-    model: Optional[str] = None,
-    max_tokens: Optional[int] = None,
-    temperature: Optional[float] = None,
+    cfg: dict[str, Any] | None = None,
+    context: list[dict[str, Any]] | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
     max_retries: int = 3,
     timeout: float = 60.0,
 ) -> str:
@@ -98,16 +98,16 @@ def call_llm(
 
 
 def call_llm_json(
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     *,
-    cfg: Optional[Dict[str, Any]] = None,
-    context: Optional[List[Dict[str, Any]]] = None,
-    model: Optional[str] = None,
-    max_tokens: Optional[int] = None,
-    temperature: Optional[float] = None,
+    cfg: dict[str, Any] | None = None,
+    context: list[dict[str, Any]] | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
     max_retries: int = 0,
     timeout: float = 60.0,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Вызвать LLM и распарсить ответ как JSON-объект.
 
     При любом сбое (сеть, невалидный JSON, не dict) возвращает ``None`` —
@@ -142,11 +142,11 @@ def call_llm_json(
 
 def _post_json(
     url: str,
-    payload: Dict[str, Any],
-    headers: Dict[str, str],
+    payload: dict[str, Any],
+    headers: dict[str, str],
     timeout: float,
     max_retries: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """httpx POST + retry-цикл с exponential backoff через ``retry_on_exception``.
 
     Ретраит только 429 / TimeoutException / ConnectError; остальные
@@ -158,7 +158,7 @@ def _post_json(
         if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code != 429:
             raise exc
 
-    def _request() -> Dict[str, Any]:
+    def _request() -> dict[str, Any]:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
@@ -175,7 +175,7 @@ def _post_json(
     )
 
 
-def _parse_json_object(text: str) -> Optional[Dict[str, Any]]:
+def _parse_json_object(text: str) -> dict[str, Any] | None:
     """Распарсить ответ LLM в JSON-объект (с чисткой markdown-обёрток)."""
     cleaned = text.strip()
     if cleaned.startswith("```"):

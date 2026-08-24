@@ -85,19 +85,16 @@ Redis-канал для nanobot.
 
 from __future__ import annotations
 
-import asyncio
 import json
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
-from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from utils.session_file_store import SessionFileStore
 from utils.media import serialize as media_serialize
+from utils.session_file_store import SessionFileStore
+
 from lib.channels.message_exchange import MessageExchange
 from lib.utils.outbound_meta import is_dropped
 
