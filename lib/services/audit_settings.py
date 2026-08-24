@@ -9,16 +9,21 @@
 
 Потребители: gateway.py, application_context, AuditSyncService,
 AuditMemoryStore, cache_provider_impl, tools/build_vectors.py.
+
+Параметр ``section`` позволяет читать настройки из произвольной секции
+project.json (по умолчанию ``("skills", "audit_analyzer")`` — back-compat).
+Будущие skills с похожей структурой могут передавать свою секцию, не
+дублируя формат dataclass'а.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, List, Tuple
 
 from config import require_setting
 
-_SECTION = ("skills", "audit_analyzer")
+_DEFAULT_SECTION: Tuple[str, ...] = ("skills", "audit_analyzer")
 
 
 def normalize_additional_tables(value: Any) -> List[str]:
@@ -99,20 +104,28 @@ class AuditVectorSettings:
         return self.db_schema, self.mode_vector_db_table
 
 
-def _require(keys: List[str]):
-    return require_setting(*(_SECTION + tuple(keys)))
+def _require(keys: List[str], section: Tuple[str, ...] = _DEFAULT_SECTION):
+    return require_setting(*(section + tuple(keys)))
 
 
-def audit_vector_settings() -> AuditVectorSettings:
+def audit_vector_settings(
+    section: Tuple[str, ...] = _DEFAULT_SECTION,
+) -> AuditVectorSettings:
     """Прочитать настройки audit_analyzer строго из project.json.
 
     Любой обязательный ключ, отсутствующий в конфиге, приводит к
     ``ConfigurationError`` — ошибка конфигурации видна сразу, а не
     маскируется подставным значением.
+
+    Args:
+        section: Кортеж ключей секции в ``project.json``. По умолчанию
+            ``("skills", "audit_analyzer")``. Будущие skills с похожей
+            структурой могут передать свою секцию без дублирования
+            dataclass'а (TARGET_ARCHITECTURE.md §4 — shared infrastructure).
     """
-    db_schema = _require(["db_schema"])
-    db_tables = [t for t in (_require(["db_tables"]) or []) if t]
-    additional = _require(["db_additional_tables"]) or []
+    db_schema = _require(["db_schema"], section)
+    db_tables = [t for t in (_require(["db_tables"], section) or []) if t]
+    additional = _require(["db_additional_tables"], section) or []
     additional = [[str(s), str(t)] for s, t in additional] if isinstance(
         additional, list
     ) else []
@@ -121,23 +134,23 @@ def audit_vector_settings() -> AuditVectorSettings:
         db_schema=db_schema,
         db_tables=db_tables,
         db_additional_tables=additional,
-        predefined_scripts_table=_require(["predefined_scripts_table"]),
-        mode_vector_db_table=_require(["mode_vector_db_table"]),
-        mode_vector_store_table=_require(["mode_vector_store_table"]),
-        mode_vector_index_config_table=_require(["mode_vector_index_config_table"]),
-        vector_index_default_path=_require(["vector_index_default_path"]),
-        embedding_base_url=_require(["embedding_base_url"]),
-        embedding_model=_require(["embedding_model"]),
-        embedding_dimension=int(_require(["embedding_dimension"])),
-        embedding_http_timeout_sec=float(_require(["embedding_http_timeout_sec"])),
-        poll_interval_sec=float(_require(["poll_interval_sec"])),
-        full_resync_every=int(_require(["full_resync_every"])),
-        sync_max_queue_size=int(_require(["sync_max_queue_size"])),
-        reconnect_backoff_sec=float(_require(["reconnect_backoff_sec"])),
-        reconnect_backoff_max_sec=float(_require(["reconnect_backoff_max_sec"])),
-        in_memory_enabled=bool(_require(["in_memory_enabled"])),
-        in_memory_engine=_require(["in_memory_engine"]),
-        in_memory_cache_path=_require(["in_memory_cache_path"]),
-        cache_max_age_sec=int(_require(["cache_max_age_sec"])),
-        cache_refresh_interval_sec=int(_require(["cache_refresh_interval_sec"])),
+        predefined_scripts_table=_require(["predefined_scripts_table"], section),
+        mode_vector_db_table=_require(["mode_vector_db_table"], section),
+        mode_vector_store_table=_require(["mode_vector_store_table"], section),
+        mode_vector_index_config_table=_require(["mode_vector_index_config_table"], section),
+        vector_index_default_path=_require(["vector_index_default_path"], section),
+        embedding_base_url=_require(["embedding_base_url"], section),
+        embedding_model=_require(["embedding_model"], section),
+        embedding_dimension=int(_require(["embedding_dimension"], section)),
+        embedding_http_timeout_sec=float(_require(["embedding_http_timeout_sec"], section)),
+        poll_interval_sec=float(_require(["poll_interval_sec"], section)),
+        full_resync_every=int(_require(["full_resync_every"], section)),
+        sync_max_queue_size=int(_require(["sync_max_queue_size"], section)),
+        reconnect_backoff_sec=float(_require(["reconnect_backoff_sec"], section)),
+        reconnect_backoff_max_sec=float(_require(["reconnect_backoff_max_sec"], section)),
+        in_memory_enabled=bool(_require(["in_memory_enabled"], section)),
+        in_memory_engine=_require(["in_memory_engine"], section),
+        in_memory_cache_path=_require(["in_memory_cache_path"], section),
+        cache_max_age_sec=int(_require(["cache_max_age_sec"], section)),
+        cache_refresh_interval_sec=int(_require(["cache_refresh_interval_sec"], section)),
     )

@@ -173,11 +173,15 @@ def _map_pg_type(pg_type: str) -> str:
 
 
 class AuditMemoryStore:
-    """Локальное хранилище данных аудита: DuckDB-кэш + FAISS-индексы.
+    """Локальное in-memory mirror + FAISS: PostgreSQL → DuckDB + индексы.
 
-    Питается записями через :meth:`upsert_records` (из AuditSyncService),
-    отвечает на SQL-запросы и семантический поиск. Не имеет доступа к
+    Generic infrastructure component: получает записи через
+    :meth:`upsert_records` (от любого синхронизатора), отвечает на
+    SQL-запросы и семантический поиск. Не имеет прямого доступа к
     PostgreSQL — это граница инфраструктуры, управляемая из gateway.
+
+    Имя класса сохранено для back-compat (см. TARGET_ARCHITECTURE.md §15,
+    §34 — KEEP existing working behavior).
     """
 
     def __init__(
@@ -185,7 +189,7 @@ class AuditMemoryStore:
         *,
         cache_path: str = "",
         publish_path: str = "",
-        schema: str = "oarb",
+        schema: str = "main",
         tables: Optional[List[str]] = None,
         vector_db_table: str = "",
         embedding_base_url: str = "",
@@ -193,9 +197,9 @@ class AuditMemoryStore:
         embedding_dimension: int = 1024,
         embedding_timeout_sec: float = 60.0,
     ) -> None:
-        self._cache_path = cache_path or ""      # строка; пустая => in-memory DuckDB
-        self._publish_path = publish_path or ""  # целевой файл снимка для навыка (CLI)
-        self._schema = schema or "oarb"
+        self._cache_path = cache_path or ""      # пустая строка → in-memory DuckDB
+        self._publish_path = publish_path or ""  # целевой файл снимка для CLI-читателей
+        self._schema = schema or "main"
         self._tables = list(tables) if tables else None
         self._vector_db_table = vector_db_table or ""
         self._embedding_base_url = embedding_base_url

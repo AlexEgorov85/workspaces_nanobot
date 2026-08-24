@@ -41,18 +41,20 @@ COMMAND_SHUTDOWN = "SHUTDOWN"
 
 
 class AuditSyncService:
-    """Фоновая синхронизация audit-данных из PostgreSQL в in-memory кэш.
+    """Фоновая синхронизация произвольных таблиц из PostgreSQL в in-memory кэш.
 
     Worker-поток владеет единственным подключением к PG. Поллинг таблиц
     инкрементален (по track-колонке), новые/изменённые строки передаются
     в callback ``on_new_records(table, records)`` — обычно это
-    ``AuditMemoryStore.upsert_records``.
+    :class:`AuditMemoryStore.upsert_records`.
+
+    Имя класса сохранено для back-compat (см. TARGET_ARCHITECTURE.md §15).
     """
 
     def __init__(
         self,
         dsn: str,
-        schema: str = "oarb",
+        schema: str = "main",
         tables: Optional[List[str]] = None,
         vector_table: str = "",
         poll_interval_sec: float = 60.0,

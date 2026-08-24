@@ -82,6 +82,66 @@
 - **`workspace/skills/audit_analyzer/SKILL.md`** — DEPRECATED-блок
   для agent-flow снят.
 
+## [Unreleased] — `refactor/core-extract-duckdb-faiss`
+
+### Changed
+
+- **`lib/services/audit_memory_store.py`** — `schema` default
+  `"oarb"` → `"main"`; docstring переписан как generic
+  infrastructure (имя класса сохранено для back-compat).
+
+- **`lib/services/audit_sync_service.py`** — `schema` default
+  `"oarb"` → `"main"`; docstring переписан.
+
+- **`lib/services/audit_settings.py`** — функция `audit_vector_settings`
+  принимает optional kwarg `section: Tuple[str, ...]` (по умолчанию
+  `("skills", "audit_analyzer")`). Позволяет будущим skills читать
+  настройки из произвольной секции.
+
+### Removed
+
+- **`lib/services/preload_service.preload_audit_cache`** —
+  legacy CLI-путь к `audit_cache.duckdb` (не вызывается ни в одном
+  production-runtime). Единственный писатель — `AuditMemoryStore.publish()`
+  через gateway.
+
+- **`lib/services/preload_service.background_audit_cache_refresh`** —
+  legacy фоновая задача.
+
+- **`lib/services/preload_service.start_audit_cache_tasks`** /
+  **`stop_tasks`** — обёртки для удалённых методов.
+
+- **`lib/services/preload_service.get_audit_cache_config`** /
+  **`_audit_settings`** — настройки кеша навыка теперь читаются
+  только через `audit_vector_settings()` (см. ниже).
+
+- **`cli_agent.py::_run_patched_repl`** — убраны вызовы удалённых
+  preload-методов; CLI больше не пытается обновлять
+  `audit_cache.duckdb` локально (по дизайну).
+
+### Moved
+
+- **`sql/audit_analyzer/create_public_agent_vector_index_config.sql`** →
+  **`sql/vectors/create_vector_index_config.sql`**.
+
+- **`sql/audit_analyzer/create_public_agent_vector_index_store.sql`** →
+  **`sql/vectors/create_vector_index_store.sql`**.
+
+Эти таблицы — generic FAISS-метаданные, исторически лежали в
+`sql/audit_analyzer/`. После переноса `sql/README.md` обновлён:
+векторы — отдельный раздел, audit_analyzer — только доменные таблицы.
+
+### Added
+
+- **`tests/test_core_infrastructure_independence.py`** — архитектурные
+  тесты: core services не должны импортировать `workspace.skills/*`
+  (TARGET §4, §22.9), не должны иметь caller/skill/domain routing
+  (§22.9), не должны содержать audit-домен в коде (§22.3),
+  default-схема должна быть generic (`"main"`, не `"oarb"`).
+
+- **`docs/core-infrastructure.md`** (если будет создан в будущем
+  PR) — границы ответственности core vs skill.
+
 - **`workspace/skills/audit_analyzer/SKILL.md`** — добавлен баннер
   DEPRECATED для agent-flow; ссылки на соответствующие tool'ы
   (`audit_run_predefined_script`, `audit_search_vector`,

@@ -3,7 +3,8 @@
 -- Описывает ЧТО строить: имя индекса, исходная таблица, колонки для
 -- content/embedding, колонка-маркер изменений.
 -- Не содержит самих векторов — только метаданные сборки.
--- Используется: tools/build_vectors.py.
+-- Используется: tools/build_vectors.py, lib/services/cache_provider_impl.py.
+-- Generic infrastructure: применимо к любому домену с эмбеддингами.
 -- Совместимость: Greenplum 6.5.
 -- ============================================================================
 
@@ -22,7 +23,7 @@ CREATE TABLE IF NOT EXISTS public.agent_vector_index_config (
 )
 DISTRIBUTED BY (index_name);
 
-COMMENT ON TABLE  public.agent_vector_index_config IS 'Конфигурация сборки векторных индексов (audit_analyzer).';
+COMMENT ON TABLE  public.agent_vector_index_config IS 'Конфигурация сборки векторных индексов (generic).';
 COMMENT ON COLUMN public.agent_vector_index_config.index_name     IS 'PK — уникальное имя индекса (= source в audit_vectors, = source в agent_vector_index_store).';
 COMMENT ON COLUMN public.agent_vector_index_config.source_table   IS 'Короткое имя для колонки source в audit_vectors. Должно совпадать с index_name.';
 COMMENT ON COLUMN public.agent_vector_index_config.src_table      IS 'Исходная таблица (schema.table).';
