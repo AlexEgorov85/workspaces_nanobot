@@ -49,28 +49,25 @@ _META_TABLE = "__schema_meta"
 def get_embedding(text: str) -> Optional[List[float]]:
     """Единая точка получения эмбеддинга текста через Ollama /api/embed.
 
-    Параметры (``embedding_base_url`` / ``embedding_model`` /
-    ``embedding_http_timeout_sec``) всегда читаются из
-    ``skills.audit_analyzer`` (project.json). Единый retry-цикл через
-    ``retry_on_exception`` (exponential backoff), как и в LLM-клиенте
-    (``lib/services/llm_client.py``).
+    Конфиг (``base_url`` / ``model`` / ``timeout_sec``) читается из
+    ``lib.services.table_registry``. Это generic инфраструктурный слой —
+    ``lib/`` не зависит от конкретного навыка (TARGET §4, §22.9).
 
-    Возвращает ``None`` при отсутствии base_url, ошибке конфигурации
-    или ошибке после ``retries`` попыток — вызывающий код не должен
-    перехватывать исключения.
+    Если ни один skill не зарегистрирован через ``table_registry``
+    с заполненным embedding-конфигом — функция возвращает ``None``.
     """
     try:
-        from lib.services.audit_settings import audit_vector_settings
-        s = audit_vector_settings()
-        base_url = s.embedding_base_url
-        model = s.embedding_model
-        timeout_sec = s.embedding_http_timeout_sec
-        retries = 3
+        from lib.services.table_registry import table_registry
+        cfg = table_registry.embedding_config()
     except Exception:
         return None
 
+    base_url = cfg.get("base_url") or ""
     if not base_url:
         return None
+    model = cfg.get("model") or "mxbai-embed-large:latest"
+    timeout_sec = float(cfg.get("timeout_sec") or 60.0)
+    retries = int(cfg.get("max_retries") or 3)
 
     def _embed() -> Optional[List[float]]:
         import httpx
@@ -103,26 +100,23 @@ def get_embedding(text: str) -> Optional[List[float]]:
 
 
 def read_embedding_config(cfg: dict) -> Dict[str, Any]:
-    """Параметры Ollama-эмбеддинга из конфиг-секции навыка."""
-    from lib.services.audit_settings import audit_vector_settings
-    s = audit_vector_settings()
+    """Параметры Ollama-эмбеддинга из конфиг-секции навыка (dict)."""
     return {
-        "base_url": s.embedding_base_url,
-        "model": s.embedding_model,
-        "dimension": s.embedding_dimension,
+        "base_url": cfg.get("embedding_base_url", ""),
+        "model": cfg.get("embedding_model", "mxbai-embed-large:latest"),
+        "dimension": cfg.get("embedding_dimension", 1024),
     }
 
 
 def read_vector_index_config(cfg: dict) -> Dict[str, Any]:
     """Конфиг векторных индексов: таблица agent_vector_index_config (источник — БД).
 
-    Читается только из БД. При ошибке БД исключение пробрасывается —
-    тихой подстановки значений из ``cfg`` нет.
+    Имя таблицы берётся из ``cfg["mode_vector_index_config_table"]``.
+    При ошибке БД исключение пробрасывается.
     """
-    from lib.services.audit_settings import audit_vector_settings
     from utils.db import fetch
 
-    table = audit_vector_settings().mode_vector_index_config_table
+    table = cfg.get("mode_vector_index_config_table", "public.agent_vector_index_config")
     rows = fetch(
         "SELECT index_name, source_table, src_table, pk_column, "
         "content_cols, embedding_cols, track_column, enabled "
@@ -154,32 +148,45 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> "PostgresDuckDbProvid
     cfg — секция skills.<name> (например, skills.audit_analyzer из project.json).
     base_dir — каталог, относительно которого разрешаются относительные пути
     кэша/индексов (для навыка это корень навыка).
+
+    Использует ``cfg`` напрямую + ``lib.services.table_registry`` для путей.
+    Не зависит от ``lib.services.audit_settings`` (TARGET §4, §22.9).
     """
     base = Path(base_dir) if base_dir else Path.cwd()
 
-    from lib.services.audit_settings import audit_vector_settings
-    s = audit_vector_settings()
+    # Cache path — приоритет:
+    # 1. cfg["in_memory_cache_path"] (если задан явно — back-compat).
+    # 2. table_registry.snapshot_path(workspace_root) — единый runtime snapshot
+    #    в workspace/data_store/duckdb/cache.duckdb.
+    # base_dir указывает на skill_root; workspace_root = base_dir.parent.parent
+    # для skill `workspace/skills/<name>/`.
+    cache_path_cfg = cfg.get("in_memory_cache_path") or ""
+    if cache_path_cfg:
+        cache_path = cache_path_cfg if Path(cache_path_cfg).is_absolute() else str(base / cache_path_cfg)
+    else:
+        try:
+            from lib.services.table_registry import table_registry
+            workspace_root = base.parent.parent if base.name == "scripts" else base.parent
+            cache_path = str(table_registry.snapshot_path(workspace_root))
+        except Exception:
+            cache_path = str(base / "cache" / "audit_cache.duckdb")
 
-    cache_path = s.in_memory_cache_path
-    if cache_path and not Path(cache_path).is_absolute():
-        cache_path = str(base / cache_path)
-
-    index_path = s.vector_index_default_path or ""
+    index_path = cfg.get("vector_index_default_path") or ""
     if index_path and not Path(index_path).is_absolute():
         index_path = str(base / index_path)
 
     emb = read_embedding_config(cfg)
-    tables = s.db_tables
-    additional = s.db_additional_tables
+    tables = cfg.get("db_tables") or []
+    additional = cfg.get("db_additional_tables") or []
     return PostgresDuckDbProvider(
-        schema=s.db_schema,
+        schema=cfg.get("db_schema", "main"),
         tables=list(tables) if isinstance(tables, (list, tuple)) else None,
         additional_tables=_normalize_additional_tables(additional),
         cache_path=cache_path,
-        vector_db_table=s.mode_vector_db_table,
+        vector_db_table=cfg.get("mode_vector_db_table", ""),
         vector_index_path=index_path,
         vector_indexes=read_vector_index_config(cfg),
-        vector_store_table=s.mode_vector_store_table,
+        vector_store_table=cfg.get("mode_vector_store_table", ""),
         embedding_base_url=emb.get("base_url", ""),
         embedding_model=emb.get("model", "mxbai-embed-large:latest"),
     )

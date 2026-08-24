@@ -74,6 +74,27 @@ from utils.db import configure, execute, fetch, resolve_dsn
 
 _CFG = SETTINGS.get("skills", {}).get("audit_analyzer", {})
 
+# Регистрируем таблицы в table_registry, чтобы vector_table() и
+# embedding_config() работали без зависимости от audit_settings.
+from lib.services.table_registry import (
+    SkillRegistration,
+    table_registry,
+)
+if not table_registry.get("audit_analyzer"):
+    table_registry.register(SkillRegistration(
+        name="audit_analyzer",
+        tables=tuple(_CFG.get("db_tables") or ()),
+        additional_tables=tuple(_CFG.get("db_additional_tables") or ()),
+        vector_table=_CFG.get("mode_vector_db_table", ""),
+        db_schema=_CFG.get("db_schema", "main"),
+    ))
+    table_registry.set_embedding_config(
+        base_url=_CFG.get("embedding_base_url", ""),
+        model=_CFG.get("embedding_model", "mxbai-embed-large:latest"),
+        dimension=_CFG.get("embedding_dimension", 1024),
+        timeout_sec=_CFG.get("embedding_http_timeout_sec", 60.0),
+    )
+
 
 def fetchone(sql, *args):
     """Вернуть первую строку как dict или None."""
@@ -594,11 +615,20 @@ def main():
     configure(dsn)
     logger.info(f"Подключение к БД настроено (dsn={dsn.split('@')[-1] if '@' in dsn else ''})")
 
-    from lib.services.audit_settings import audit_vector_settings
-    vec_cfg = audit_vector_settings()
-    db_schema, db_table = vec_cfg.vector_schema_table
-    if not args.db_table:
-        args.db_table = vec_cfg.mode_vector_db_table
+    from lib.services.table_registry import table_registry
+    vector_table = table_registry.vector_table() or ""
+    if not vector_table:
+        logger.error(
+            "table_registry.vector_table() пуст — зарегистрируйте skill "
+            "через table_registry.register(...) или укажите --db-table."
+        )
+        return 1
+    if "." not in vector_table:
+        logger.error(f"vector_table должен быть в формате 'schema.table': {vector_table}")
+        return 1
+    db_schema, db_table = vector_table.split(".", 1)
+    if args.db_table:
+        db_table = args.db_table
 
     row = fetch(
         "SELECT 1 FROM information_schema.tables "

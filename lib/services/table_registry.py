@@ -61,6 +61,7 @@ class TableRegistry:
     """
 
     _registrations: dict[str, SkillRegistration] = field(default_factory=dict)
+    _embedding: dict[str, Any] = field(default_factory=dict)
 
     def register(self, registration: SkillRegistration) -> None:
         """Зарегистрировать skill.
@@ -136,6 +137,24 @@ class TableRegistry:
         файл для всех навыков. Это даёт cross-skill запросы через ``duckdb_query``.
         """
         return workspace_path / "data_store" / "duckdb" / filename
+
+    def set_embedding_config(self, **kwargs: Any) -> None:
+        """Установить embedding-конфиг, общий для всех навыков.
+
+        Generic-инфраструктура: ``lib/`` не знает, какой именно skill
+        регистрирует конфиг. Skill вызывает ``table_registry.set_embedding_config(...)``
+        при старте (например, из своего startup-модуля).
+
+        Поддерживаемые ключи: ``base_url``, ``model``, ``timeout_sec``,
+        ``max_retries``, ``dimension``.
+        """
+        merged = dict(self._embedding)
+        merged.update(kwargs)
+        self._embedding = merged
+
+    def embedding_config(self) -> dict[str, Any]:
+        """Текущий embedding-конфиг (пустой dict, если не настроен)."""
+        return dict(self._embedding)
 
 
 # Глобальный singleton — skill'ы регистрируются в нём при старте.

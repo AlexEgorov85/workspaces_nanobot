@@ -68,10 +68,23 @@ def get_predefined_scripts_table() -> str:
 
 
 def get_in_memory_config() -> dict[str, Any]:
-    path = _CFG.get("in_memory_cache_path", "cache/audit_cache.duckdb")
-    p = Path(path)
-    if not p.is_absolute():
-        path = str(_SKILL_ROOT / path)
+    """Конфиг in-memory кеша для CLI.
+
+    Если навык зарегистрирован в ``table_registry``, путь берётся
+    оттуда (единый snapshot в workspace/data_store/duckdb/). Иначе —
+    legacy-путь ``cache/audit_cache.duckdb`` относительно навыка.
+    """
+    from lib.services.table_registry import table_registry
+
+    registered = table_registry.get("audit_analyzer") is not None
+    if registered:
+        workspace_root = _SKILL_ROOT.parent.parent
+        path = str(table_registry.snapshot_path(workspace_root))
+    else:
+        path = _CFG.get("in_memory_cache_path", "cache/audit_cache.duckdb")
+        p = Path(path)
+        if not p.is_absolute():
+            path = str(_SKILL_ROOT / path)
     return {
         "enabled": bool(_CFG.get("in_memory_enabled", True)),
         "engine": _CFG.get("in_memory_engine", "duckdb"),
@@ -111,10 +124,32 @@ def build_cache_provider() -> Any:
     Конфигурируется из skills.audit_analyzer: DuckDB-кэш (in_memory_*)
     и векторные индексы (mode_vector_*). Используется CLI навыка напрямую —
     без промежуточных обёрток.
+
+    Lazy-регистрирует навык через ``scripts/register.py`` —
+    тот же код, что вызывает ``ApplicationContext._auto_register_skills``.
     """
     from lib.services.cache_provider_impl import build_cache_provider as _build
+    from lib.services.table_registry import table_registry
 
+    _register_skill(table_registry)
     return _build(_CFG, str(_SKILL_ROOT))
+
+
+def _register_skill(table_registry: Any) -> None:
+    """Зарегистрировать audit_analyzer в table_registry через register.py."""
+    import importlib.util
+    register_path = _SKILL_ROOT / "scripts" / "register.py"
+    spec = importlib.util.spec_from_file_location(
+        "_skill_register_audit_analyzer",
+        register_path,
+    )
+    if spec is None or spec.loader is None:
+        return
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    register_fn = getattr(mod, "register", None)
+    if callable(register_fn):
+        register_fn(table_registry)
 
 
 def get_vector_indexes() -> dict[str, Any]:

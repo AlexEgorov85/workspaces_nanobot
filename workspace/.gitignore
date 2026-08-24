@@ -1,2 +1,3 @@
 data_store/cache/
+data_store/duckdb/
 .nanobot/tool-results/

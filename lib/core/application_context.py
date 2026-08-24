@@ -155,6 +155,7 @@ class ApplicationContext:
 
         # 5. AuditSyncService + AuditMemoryStore
         if enable_audit:
+            _auto_register_skills(ctx)
             ctx.audit_sync_service, ctx.audit_memory_store = _make_audit_services(ctx)
 
         # 6. BusFactory + AgentFactory
@@ -419,51 +420,55 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
     )
 
 
-def _make_audit_services(ctx: "ApplicationContext") -> tuple:
-    """Собрать (AuditSyncService, AuditMemoryStore) для audit_analyzer.
+def _make_sync_services(ctx: "ApplicationContext") -> tuple:
+    """Собрать ``(AuditSyncService, AuditMemoryStore)`` для всех зарегистрированных навыков.
 
-    Читает секцию ``skills.audit_analyzer`` (там же, где CLI preload
-    читает) и создаёт пару ``sync_service`` + ``store``. ``store``
-    держит in-memory DuckDB-зеркало таблиц из PG, ``sync_service``
-    инкрементально догружает изменения.
+    Использует ``lib.services.table_registry`` — собирает таблицы и метаданные
+    со ВСЕХ навыков, зарегистрированных через ``table_registry.register(...)``.
+    Core не знает имён конкретных навыков (TARGET §4, §22.9): новый skill
+    добавляется через ``register()``, без правок ``application_context.py``.
 
     Возвращает ``(None, None)`` если:
-      * ``in_memory_enabled != True`` (явно отключено);
+      * реестр пуст (ни один skill не зарегистрирован);
       * нет DSN (некуда подключаться);
-      * не указаны ни ``db_tables`` ни ``mode_vector_db_table``
-        (нечего синхронизировать);
       * ``audit_memory_store`` или ``audit_sync_service`` не импортируются.
 
-    Publish path для snapshot'a — ``workspace/skills/audit_analyzer/<cp>``
-    (CLI skill читает этот файл на чтение; gateway пишет атомарно через
-    temp+os.replace).
+    Snapshot путь — общий ``<workspace>/data_store/duckdb/cache.duckdb``
+    (см. ``TableRegistry.snapshot_path``).
     """
+    from lib.services.table_registry import table_registry
+
     pg = ctx.config_service.settings_section("channels").get("postgres", {})
     dsn = ""
     if isinstance(pg, dict):
         dsn = pg.get("dsn", "") or ""
-    cfg = ctx.config_service.settings_section("skills").get("audit_analyzer", {})
-    if not cfg.get("in_memory_enabled", False) or not dsn:
+
+    if not table_registry.names() or not dsn:
         return None, None
+
     try:
         from lib.services.audit_memory_store import AuditMemoryStore
         from lib.services.audit_sync_service import AuditSyncService
-        from lib.services.audit_settings import (
-            audit_vector_settings,
-            normalize_additional_tables,
-        )
+        from lib.utils.table_utils import normalize_table_names
     except Exception:
         return None, None
 
-    s = audit_vector_settings()
-    db_tables = list(s.db_tables)                    # голые имена (schema = db_schema)
-    additional = normalize_additional_tables(s.db_additional_tables)  # "schema.table"
-    vector_table = s.mode_vector_db_table
-    schema = s.db_schema
+    # Собираем таблицы со всех зарегистрированных skill'ов.
+    db_tables: list[str] = []
+    additional: list[str] = []
+    vector_table: str = table_registry.vector_table() or ""
+    schemas: list[str] = []
 
-    # Страховка: реестр предопределённых скриптов, если не попал через db_additional_tables.
-    if s.predefined_scripts_table and s.predefined_scripts_table not in additional:
-        additional.append(s.predefined_scripts_table)
+    for reg_name in table_registry.names():
+        reg = table_registry.get(reg_name)
+        if reg is None:
+            continue
+        db_tables.extend(reg.tables)
+        additional.extend(reg.additional_tables)
+        if reg.db_schema and reg.db_schema not in schemas:
+            schemas.append(reg.db_schema)
+
+    additional = normalize_table_names(additional)
 
     if not vector_table and not db_tables:
         return None, None
@@ -471,41 +476,111 @@ def _make_audit_services(ctx: "ApplicationContext") -> tuple:
     # store._tables = db_tables + additional (БЕЗ vector_table → publish без векторов).
     store_tables = db_tables + additional
     # sync таблицы: данные + доп. таблицы + вектор (векторный поток не ломаем).
-    sync_tables = db_tables + additional + (
-        [vector_table] if vector_table and vector_table not in db_tables + additional else []
-    )
+    sync_tables = list(store_tables)
+    if vector_table and vector_table not in sync_tables:
+        sync_tables.append(vector_table)
 
-    publish_path = ""
-    cp = s.in_memory_cache_path
-    if cp:
-        p = Path(cp)
-        publish_path = (
-            str(ctx.config.workspace_path / "skills" / "audit_analyzer" / cp)
-            if not p.is_absolute() else str(p)
-        )
+    publish_path = str(table_registry.snapshot_path(ctx.config.workspace_path))
+
+    # Embedding-конфиг — из table_registry (generic, не зависит от skill).
+    emb = table_registry.embedding_config()
+    embedding_base_url = emb.get("base_url", "")
+    embedding_model = emb.get("model", "mxbai-embed-large:latest")
+    embedding_dimension = int(emb.get("dimension", 1024))
+
+    # Sync-параметры (poll, reconnect, full_resync) — из project.json, секция
+    # skills.audit_analyzer (историческая локация). Это generic-параметры
+    # синхронизации, не относятся к конкретному навыку.
+    sync_cfg = ctx.config_service.settings_section("skills").get("audit_analyzer", {})
+    poll_interval_sec = float(sync_cfg.get("poll_interval_sec", 60.0))
+    max_queue_size = int(sync_cfg.get("sync_max_queue_size", 10000))
+    reconnect_backoff = float(sync_cfg.get("reconnect_backoff_sec", 1.0))
+    reconnect_backoff_max = float(sync_cfg.get("reconnect_backoff_max_sec", 60.0))
+    full_resync_every = int(sync_cfg.get("full_resync_every", 10))
 
     store = AuditMemoryStore(
         cache_path="",
         publish_path=publish_path,
-        schema=schema,
+        schema=schemas[0] if schemas else "main",
         tables=store_tables or None,
         vector_db_table=vector_table,
-        embedding_base_url=s.embedding_base_url,
-        embedding_model=s.embedding_model,
-        embedding_dimension=s.embedding_dimension,
+        embedding_base_url=embedding_base_url,
+        embedding_model=embedding_model,
+        embedding_dimension=embedding_dimension,
     )
     sync = AuditSyncService(
         dsn=dsn,
-        schema=schema,
+        schema=schemas[0] if schemas else "main",
         tables=sync_tables,
         vector_table=vector_table,
-        poll_interval_sec=s.poll_interval_sec,
-        max_queue_size=s.sync_max_queue_size,
-        reconnect_backoff=s.reconnect_backoff_sec,
-        reconnect_backoff_max=s.reconnect_backoff_max_sec,
-        full_resync_every=s.full_resync_every,
+        poll_interval_sec=poll_interval_sec,
+        max_queue_size=max_queue_size,
+        reconnect_backoff=reconnect_backoff,
+        reconnect_backoff_max=reconnect_backoff_max,
+        full_resync_every=full_resync_every,
     )
     return sync, store
+
+
+# Back-compat alias (старый код мог ссылаться).
+_make_audit_services = _make_sync_services
+
+
+def _auto_register_skills(ctx: "ApplicationContext") -> None:
+    """Auto-discover: найти все skill'ы с ``register()`` и зарегистрировать их.
+
+    Каждый skill может содержать ``scripts/register.py`` с функцией
+    ``register(table_registry)``, которая вызывается при старте gateway.
+    Это pluggable способ подключения новых навыков без правок
+    ``ApplicationContext`` (TARGET §4, §22.9).
+
+    Если skill не имеет ``register.py``, он просто не участвует в
+    runtime-sync (это OK — он может быть pure-utility).
+    """
+    import importlib
+    import importlib.util
+    from pathlib import Path
+
+    from lib.services.table_registry import table_registry
+
+    workspace = ctx.config.workspace_path
+    skills_dir = workspace / "workspace" / "skills"
+    if not skills_dir.exists():
+        # Fallback: workspace может быть = корень проекта (для тестов).
+        candidates = [
+            workspace / "skills",
+            workspace / "workspace" / "skills",
+        ]
+        for c in candidates:
+            if c.exists():
+                skills_dir = c
+                break
+        else:
+            return
+
+    for skill_dir in sorted(skills_dir.iterdir()):
+        if not skill_dir.is_dir() or skill_dir.name.startswith("_"):
+            continue
+        register_path = skill_dir / "scripts" / "register.py"
+        if not register_path.exists():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f"_skill_register_{skill_dir.name}",
+                register_path,
+            )
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            register_fn = getattr(mod, "register", None)
+            if callable(register_fn):
+                register_fn(table_registry)
+        except Exception as exc:
+            import logging
+            logging.getLogger("application_context").warning(
+                "skill %s: failed to register: %s", skill_dir.name, exc
+            )
 
 
 def _make_transcription(config: Any) -> Any:

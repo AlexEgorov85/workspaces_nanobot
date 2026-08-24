@@ -19,12 +19,13 @@ CORE_SERVICES = [
     "lib/services/cache_provider_impl.py",
     "lib/services/audit_memory_store.py",
     "lib/services/audit_sync_service.py",
-    "lib/services/audit_settings.py",
     "lib/services/preload_service.py",
+    "lib/services/table_registry.py",
     "lib/services/vector_index_service.py",
     "lib/utils/duckdb_query.py",
     "lib/utils/sql_safety.py",
     "lib/utils/text_utils.py",
+    "lib/utils/table_utils.py",
 ]
 
 FORBIDDEN_TOKENS = {"audit", "violations", "audits_index", "audit_analyzer"}
