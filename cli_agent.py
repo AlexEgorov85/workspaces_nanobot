@@ -85,21 +85,14 @@ def _run_patched(args: argparse.Namespace) -> None:
 
 
 def _run_patched_repl(ctx: ApplicationContext, args: argparse.Namespace) -> None:
-    """REPL для patched-режима (фоновая подгрузка кеша + REPL)."""
+    """REPL для patched-режима."""
     import asyncio
-    from lib.services.preload_service import PreloadService
-
-    preload = PreloadService(settings=ctx.settings)
 
     async def bg():
-        reload_task = await preload.start_audit_cache_tasks(ctx.config)
-        try:
-            await run_repl(ctx.agent, ctx.config, session=args.session,
-                           display=DisplayConfig.from_settings(
-                               ctx.config_service.settings_section("cli")),
-                           background_task_factory=lambda: asyncio.sleep(1))
-        finally:
-            await preload.stop_tasks(reload_task)
+        await run_repl(ctx.agent, ctx.config, session=args.session,
+                       display=DisplayConfig.from_settings(
+                           ctx.config_service.settings_section("cli")),
+                       background_task_factory=lambda: asyncio.sleep(1))
 
     ctx.start()
     try:
