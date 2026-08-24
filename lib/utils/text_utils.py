@@ -1,8 +1,7 @@
 """Text-и JSON-safe value helpers shared by tools and skills.
 
 Перенесено из ``workspace/skills/audit_analyzer/scripts/output.py::_sanitize_value``
-и ``workspace/tools/audit_analyzer_tool.py::_AuditToolBase._truncate`` без
-изменения контракта. Дублирование заменено единой реализацией.
+без изменения контракта. Дублирование заменено единой реализацией.
 """
 
 from __future__ import annotations

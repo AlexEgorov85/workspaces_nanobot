@@ -6,75 +6,106 @@ metadata: {"nanobot":{"emoji":"📊","always":true}}
 
 # Audit Analyzer
 
-> ⚠️ **DEPRECATED для agent-flow.** Режимы `predefined` и `vector`
-> доступны агенту через tool'ы `audit_run_predefined_script` и
-> `audit_search_vector` (см. `workspace/tools/audit_analyzer_tool.py`).
-> Режим `sql` — через tool `audit_generate_sql`.
-> Этот SKILL.md сохранён для CLI (`audit_analyze.bat/.sh`),
-> бенчмарка и e2e-тестов. Списки скриптов и схема БД подаются
-> агенту через runtime-context providers (см. DEVELOPMENT.md).
+Domain Skill для анализа аудиторских проверок (нарушения, отчёты, плановые/фактические даты).
 
-Три режима анализа аудиторских проверок.
+Этот skill использует **общие infrastructure tools** (`duckdb_query`, `vector_search`)
+через агентский runtime. Skill не импортирует эти tool'ы напрямую — он описывает
+процедуру выбора в `SKILL.md` и передаёт параметры в `tool_call`.
 
-## Режимы
+## Decision procedure
 
-| Режим | Когда использовать | Для агента |
-|:------|:-------------------|:-----------|
-| `predefined` | Стандартные отчёты по имени скрипта + параметры | tool `audit_run_predefined_script` |
-| `vector` | Семантический поиск по FAISS-индексу | tool `audit_search_vector` |
-| `sql` | Сложные нестандартные запросы — LLM генерирует SELECT | tool `audit_generate_sql` |
-
-## Реестр скриптов (predefined)
-
-### `analytics_by_year_month`
-- **Описание:** Аналитика проверок по годам и месяцам
-- **Параметры:** `year` (number) — год проверки
-
-### `violations_by_type`
-- **Описание:** Статистика нарушений по кодам
-- **Параметры:** `date_from` (date), `violation_code` (like)
-
-### `top_audited_objects`
-- **Описание:** Топ проверяемых объектов
-- **Параметры:** `auditee_entity` (like), `date_from` (date), `limit` (number)
-
-### `audit_effectiveness`
-- **Описание:** Оценка эффективности проверок
-- **Параметры:** `date_from` (date), `date_to` (date), `min_violations` (number)
-
-### `audit_dynamics`
-- **Описание:** Динамика проверок по периодам
-- **Параметры:** `period` (month/quarter/week), `date_from` (date)
-
-### `audit_types_stats`
-- **Описание:** Статистика по типам проверок
-- **Параметры:** `audit_type` (like), `date_from` (date)
-
-## Режим sql — генерация SQL через LLM
-
-```
-Запрос → Схема БД → LLM генерирует SELECT
-  → validate_sql → EXPLAIN (FORMAT JSON) — проверка
-  → ошибка → retry до 3 раз → query_sql
+```text
+User request
+   |
+   +-- structured aggregation / filter / grouping / numeric analysis
+   |       -> use duckdb_query with explicit SELECT
+   |
+   +-- semantic similarity / find similar violations / reports
+   |       -> use vector_search with index_name
+   |
+   +-- find similar docs, then aggregate
+   |       -> vector_search first, then duckdb_query
+   |
+   +-- predefined report (analytics_by_year_month, top_audited_objects, ...)
+   |       -> run via scripts/predefined_mode.py (CLI / internal)
+   |
+   +-- NL -> SELECT (free-form question about the data)
+   |       -> compose SELECT per references/sql_guidance.md,
+   |          then duckdb_query
+   |
+   +-- do not use unknown tables or indexes
+   +-- do not use DDL/DML (read-only — enforced by duckdb_query)
 ```
 
-> ⚠️ Для агента этот режим доступен как tool
-> `audit_generate_sql` (см. `workspace/tools/audit_analyzer_tool.py`).
-> Схема БД подаётся в system prompt через runtime-context provider
-> (`source='audit_db_schema'`), retry-цикл инкапсулирован внутри
-> одного вызова (`gateway.audit_sql.max_retries`).
-> Этот раздел SKILL.md описывает CLI-реализацию (`audit_analyze --mode sql`).
+## Доступные данные (домен)
 
-## Векторные индексы (vector)
+Skill владеет следующими знаниями:
 
-Семантический поиск по FAISS-индексу через Ollama embeddings.
+- **Таблицы** (см. `references/schema.md`):
+  - `oarb.audits`, `oarb.audit_reports`, `oarb.report_items`, `oarb.violations`.
+- **Vector indexes** (см. `references/vector_indexes.md`):
+  - `audits_index`, `violations_index`, `audit_reports_index`.
+- **Predefined reports** (реестр `public.agent_predefined_scripts`):
+  - `analytics_by_year_month`, `violations_by_type`, `top_audited_objects`,
+    `audit_effectiveness`, `audit_dynamics`, `audit_types_stats`.
 
-**Параметры CLI:**
-- `--index-name` — имя индекса: `audits_index`, `violations_index`
-- `--top-k N` — ровно N лучших результатов (по умолч. 5)
-- `--threshold X` — все результаты выше порога X (0.0–1.0), `--top-k` игнорируется
+Skill **не знает** Python-реализацию tool'ов и не вызывает их программно.
 
----
+## Workflows
+
+### 1. Аггрегация / фильтр / группировка
+
+Использовать tool `duckdb_query` с явным SELECT.
+
+Пример (агрегация по годам):
+
+```text
+tool_call: duckdb_query(
+    sql="SELECT EXTRACT(year FROM actual_date) AS year, COUNT(*) "
+        "FROM audits GROUP BY year ORDER BY year",
+    max_rows=10,
+)
+```
+
+### 2. Семантический поиск
+
+Использовать tool `vector_search` с явным `index_name`.
+
+Пример (поиск похожих нарушений):
+
+```text
+tool_call: vector_search(
+    query="нарушения пожарной безопасности",
+    index_name="violations_index",
+    top_k=5,
+)
+```
+
+### 3. Поиск + аггрегация
+
+```text
+1. vector_search(query=..., index_name=...) -> ids
+2. duckdb_query(sql="SELECT ... WHERE id IN (...) GROUP BY ...")
+```
+
+### 4. Predefined reports (реестр)
+
+Использовать `scripts/predefined_mode.py` через CLI:
+
+```bash
+audit_analyze.sh --mode predefined --script analytics_by_year_month \
+                 --params '{"year": 2024}'
+```
+
+Агенту использовать CLI-обёртку через свой shell-tool (см. SKILL.md в исходной
+редакции — режим не выделен в отдельный tool, т.к. это deterministic workflow
+skill'а, см. TARGET_ARCHITECTURE.md §9).
+
+### 5. NL → SELECT
+
+Прочитать `references/sql_guidance.md`, сформулировать SELECT,
+передать в `duckdb_query`. Финальная граница безопасности — в tool'е
+(`lib/utils/sql_safety.py::validate_sql`).
 
 ## CLI (standalone)
 
@@ -83,32 +114,32 @@ metadata: {"nanobot":{"emoji":"📊","always":true}}
 ```bash
 # Windows (PowerShell / cmd) — key=value без кавычек:
 audit_analyze.bat --mode predefined --script analytics_by_year_month --params year=2024
-audit_analyze.bat --mode predefined --script violations_by_type --params violation_code=финансовые
 audit_analyze.bat --mode sql --query "топ-10 объектов по нарушениям"
 
-# Векторный поиск: top-3 результата
-audit_analyze.bat --mode vector --query "финансовые нарушения" --index-name violations_index --top-k 3
-
-# Векторный поиск: всё выше порога 0.5
-audit_analyze.bat --mode vector --query "статусы аудитов" --index-name audits_index --threshold 0.5
+# Векторный поиск:
+audit_analyze.bat --mode vector --query "финансовые нарушения" \
+                   --index-name violations_index --top-k 3
 
 # Linux:
-audit_analyzer.sh --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
-audit_analyzer.sh --mode sql --query "топ-10 объектов по нарушениям"
-audit_analyzer.sh --mode vector --query "финансовые нарушения" --index-name violations_index --top-k 3
-audit_analyzer.sh --mode vector --query "статусы аудитов" --index-name audits_index --threshold 0.5
+audit_analyzer.sh --mode predefined --script analytics_by_year_month \
+                   --params '{"year": 2024}'
 ```
 
-Параметры:
+CLI — это не Tool. CLI использует `scripts/cli.py` напрямую и не зависит от
+nanobot runtime (TARGET_ARCHITECTURE.md §11).
 
-| Аргумент          | Обязательный | Описание |
-|:------------------|:------------:|:---------|
-| `--mode`          | да | Режим: `predefined`, `sql`, `vector` (анализ). DuckDB-кеш создаёт и обновляет gateway автоматически |
-| `--script`        | для `predefined` | Имя скрипта из реестра |
-| `--params`        | нет | Параметры: `year=2024` (key=value) или `'{"year":2024}'` (JSON, Linux) |
-| `--query`         | для `sql`/`vector` | Запрос на естественном языке |
-| `--index-name`    | для `vector` | Имя индекса (`audits_index`, `violations_index`) |
-| `--top-k`         | нет | Количество результатов (по умолч. 5). Для `vector` |
-| `--threshold`     | нет | Порог схожести 0.0–1.0. Если задан — все результаты выше порога, `--top-k` игнорируется |
-| `--vector-index`  | нет | Директория с индексами (переопределяет config.json) |
-| `--context`       | нет | Контекст чата в формате JSON |
+## References
+
+Progressive disclosure (TARGET_ARCHITECTURE.md §10):
+
+- `references/schema.md` — структура таблиц `oarb.*`.
+- `references/vector_indexes.md` — назначение и метаданные FAISS-индексов.
+- `references/sql_guidance.md` — правила NL→SELECT.
+
+## Runtime context
+
+Списки скриптов (`source='audit_predefined_scripts'`) и схема БД
+(`source='audit_db_schema'`) подаются агенту через runtime-context providers
+(см. `workspace/skills/audit_analyzer/providers.py`). Регистрация провайдеров
+выполняется из `lib/core/application_context.py` при старте gateway,
+если skill включён через `skills.audit_analyzer.*`.

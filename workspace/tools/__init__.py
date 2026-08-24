@@ -9,7 +9,7 @@
 
 * ``config_key: ClassVar[str] = "<name>"`` → секция
   ``tools.<name>.*`` в ``config.json`` (или ``gateway.<name>.*``, если
-  так сложилась история — см. ``compact_context`` / ``audit_analyzer_tool``);
+  так сложилась история — см. ``compact_context``);
 * ``config_cls()`` возвращает pydantic-модель секции;
 * ``enabled(ctx)`` и ``create(ctx)`` читают настройки через
   ``ctx._settings_ref`` (полный ``Settings``), а НЕ через
