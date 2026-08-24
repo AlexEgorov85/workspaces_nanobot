@@ -8,6 +8,35 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Tool `audit_generate_sql` — миграция sql-режима skill → tool**
+  (`workspace/tools/audit_analyzer_tool.py`). Агент теперь может вызывать
+  генерацию SELECT через LLM с EXPLAIN-валидацией и retry-циклом через
+  типизированный function-call. Полный pipeline (LLM-генерация →
+  `validate_sql` → `provider.explain()` → `provider.query_sql()` →
+  retry на ошибке с возвратом ошибки в LLM) инкапсулирован внутри
+  одного tool-call. Параметры: `query: str` (запрос на естественном
+  языке), `context: list[dict] | None` (история чата), `tables: str |
+  None` (фильтр таблиц). Конфиг: `gateway.audit_sql.*` (`enable`,
+  `max_result_chars`, `max_retries`, `schema_max_chars`).
+
+- **Runtime-context provider схемы БД (`_AuditSchemaProvider`)** —
+  tool `audit_generate_sql` экспортирует провайдер со схемой таблиц в
+  формате LLM-промпта (тег `source='audit_db_schema'`). Схема
+  загружается через `provider.get_schema()` + skill'овский
+  `format_schema`, кешируется на уровне класса с TTL 60 сек, сброс
+  через `tool.invalidate_schema_cache()`. Это закрывает замечание
+  DEVELOPMENT.md:1540 «sql-режим не перенесён в tool».
+
+### Changed
+
+- **`workspace/skills/audit_analyzer/SKILL.md`** — добавлен баннер
+  DEPRECATED для agent-flow; ссылки на соответствующие tool'ы
+  (`audit_run_predefined_script`, `audit_search_vector`,
+  `audit_generate_sql`). Skill сохранён для CLI (`audit_analyze.bat/.sh`),
+  бенчмарка и e2e-тестов.
+
 ## [2.4.0] — 2026-08-20
 
 > **MINOR-релиз:** метрика занятости контекстного окна (`metadata.context_window`),

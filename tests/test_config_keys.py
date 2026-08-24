@@ -134,6 +134,18 @@ def _required_keys():
         ("gateway.streamlit_port", 8501),
         ("gateway.streamlit_log_filename", "streamlit.log"),
         ("gateway.subprocess_shutdown_timeout_sec", 5.0),
+        # gateway.audit_* — tool'ы миграции skill audit_analyzer
+        # (workspace/tools/audit_analyzer_tool.py).
+        ("gateway.audit_predefined.enable", True),
+        ("gateway.audit_predefined.max_result_chars", 16000),
+        ("gateway.audit_vector.enable", True),
+        ("gateway.audit_vector.default_top_k", 5),
+        ("gateway.audit_vector.default_index_name", "audits_index"),
+        ("gateway.audit_vector.max_result_chars", 16000),
+        ("gateway.audit_sql.enable", True),
+        ("gateway.audit_sql.max_result_chars", 16000),
+        ("gateway.audit_sql.max_retries", 2),
+        ("gateway.audit_sql.schema_max_chars", 8000),
         # logging.db
         ("logging.db.enabled", True),
         ("logging.db.table_name", "agent_gateway_logs"),

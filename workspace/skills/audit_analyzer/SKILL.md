@@ -6,15 +6,23 @@ metadata: {"nanobot":{"emoji":"📊","always":true}}
 
 # Audit Analyzer
 
+> ⚠️ **DEPRECATED для agent-flow.** Режимы `predefined` и `vector`
+> доступны агенту через tool'ы `audit_run_predefined_script` и
+> `audit_search_vector` (см. `workspace/tools/audit_analyzer_tool.py`).
+> Режим `sql` — через tool `audit_generate_sql`.
+> Этот SKILL.md сохранён для CLI (`audit_analyze.bat/.sh`),
+> бенчмарка и e2e-тестов. Списки скриптов и схема БД подаются
+> агенту через runtime-context providers (см. DEVELOPMENT.md).
+
 Три режима анализа аудиторских проверок.
 
 ## Режимы
 
-| Режим | Когда использовать |
-|:------|:-------------------|
-| `predefined` | Стандартные отчёты по имени скрипта + параметры |
-| `vector` | Семантический поиск по FAISS-индексу |
-| `sql` | Сложные нестандартные запросы — LLM генерирует SELECT |
+| Режим | Когда использовать | Для агента |
+|:------|:-------------------|:-----------|
+| `predefined` | Стандартные отчёты по имени скрипта + параметры | tool `audit_run_predefined_script` |
+| `vector` | Семантический поиск по FAISS-индексу | tool `audit_search_vector` |
+| `sql` | Сложные нестандартные запросы — LLM генерирует SELECT | tool `audit_generate_sql` |
 
 ## Реестр скриптов (predefined)
 
@@ -49,6 +57,13 @@ metadata: {"nanobot":{"emoji":"📊","always":true}}
   → validate_sql → EXPLAIN (FORMAT JSON) — проверка
   → ошибка → retry до 3 раз → query_sql
 ```
+
+> ⚠️ Для агента этот режим доступен как tool
+> `audit_generate_sql` (см. `workspace/tools/audit_analyzer_tool.py`).
+> Схема БД подаётся в system prompt через runtime-context provider
+> (`source='audit_db_schema'`), retry-цикл инкапсулирован внутри
+> одного вызова (`gateway.audit_sql.max_retries`).
+> Этот раздел SKILL.md описывает CLI-реализацию (`audit_analyze --mode sql`).
 
 ## Векторные индексы (vector)
 

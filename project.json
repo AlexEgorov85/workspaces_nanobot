@@ -270,6 +270,17 @@
       "default_top_k": 5,              // Дефолт количества результатов
       "default_index_name": "audits_index",
       "max_result_chars": 16000        // Обрезка вывода в контекст LLM
+    },
+    //  audit_sql.* — tool audit_generate_sql (workspace/tools/audit_analyzer_tool.py).
+    //  Генерация SELECT через LLM с EXPLAIN-валидацией и retry-циклом.
+    //  Миграция режима sql из skill audit_analyzer (scripts/sql_mode.py).
+    //  Схема БД для LLM подаётся через runtime-context provider (source='audit_db_schema').
+    //  Все ключи опциональны; дефолты в AuditSqlToolConfig.
+    "audit_sql": {
+      "enable": true,                  // Зарегистрировать tool audit_generate_sql
+      "max_result_chars": 16000,       // Обрезка вывода в контекст LLM
+      "max_retries": 2,                // Число retry на неудачный EXPLAIN (соответствует MAX_RETRIES в sql_mode.py)
+      "schema_max_chars": 8000         // Лимит размера runtime-контекстного блока со схемой БД
     }
   },
 

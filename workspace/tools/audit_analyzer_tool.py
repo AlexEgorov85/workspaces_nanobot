@@ -1,10 +1,10 @@
 """AuditAnalyzerTool — набор tool'ов для навыка ``audit_analyzer``.
 
 Регистрируется автоматически через ``RuntimePatcher.patch_project_tools``.
-Дубль skill'а ``audit_analyzer`` (см. ``workspace/skills/audit_analyzer/``):
-старый skill по-прежнему доступен для sql-режима (LLM-генерация SELECT) и
-для CLI-вызовов ``audit_analyze.bat/.sh``. Эти tool'ы — для агента через
-типизированный function-call.
+Миграция skill'а ``audit_analyzer`` (см. ``workspace/skills/audit_analyzer/``)
+в tool'ы: skill по-прежнему доступен для CLI-вызовов
+``audit_analyze.bat/.sh``, бенчмарка и e2e-тестов; агенты работают
+через типизированный function-call.
 
 Состав (по конвенциям nanobot — один tool = одно действие, см.
 ``nanobot/agent/tools/filesystem.py`` с базой ``_FsTool``):
@@ -15,8 +15,12 @@
 * :class:`AuditSearchVectorTool` (``audit_search_vector``) — семантический
   поиск по FAISS-индексу (см. ``lib/services/cache_provider_impl.py`` →
   ``search_vector``).
+* :class:`AuditGenerateSqlTool` (``audit_generate_sql``) — сгенерировать
+  SELECT через LLM по запросу на естественном языке, провалидировать
+  через ``EXPLAIN (FORMAT JSON)`` и выполнить. Миграция режима ``sql``
+  из skill'а (``scripts/sql_mode.py``).
 
-Оба tool'а наследуют :class:`_AuditToolBase`, который:
+Все три tool'а наследуют :class:`_AuditToolBase`, который:
 
 * читает общие настройки (``skills.audit_analyzer.*`` — обязательны для
   доступа к БД/кешу);
@@ -27,25 +31,32 @@
 
 * ``gateway.audit_predefined.*`` — ``enable``, ``max_result_chars``;
 * ``gateway.audit_vector.*`` — ``enable``, ``default_top_k``,
-  ``default_index_name``, ``max_result_chars``.
+  ``default_index_name``, ``max_result_chars``;
+* ``gateway.audit_sql.*`` — ``enable``, ``max_result_chars``,
+  ``max_retries`` (LLM retry на неудачном EXPLAIN), ``schema_max_chars``.
 
 Поведение унаследовано от skill'а (те же модули, те же таблицы, та же
-DuckDB-кэш). Tool'ы не дублируют логику, а служат тонкими обёртками.
+DuckDB-кэш). Tool'ы не дублируют логику, а служат тонкими обёртками;
+специфичные функции (``validate_sql``, ``format_schema``, LLM-обёртка)
+остаются в skill'е и подгружаются через ``importlib``.
 
-Runtime-context provider
-------------------------
+Runtime-context providers
+-------------------------
 
-:class:`AuditRunPredefinedScriptTool` экспортирует
-:meth:`runtime_context_provider` — провайдер, который добавляет в
-system prompt список доступных предопределённых скриптов с описаниями
-и параметрами. Это позволяет LLM выбрать имя скрипта **без
-дополнительного вызова tool'а** (в отличие от отдельного
-``audit_list_predefined_scripts``). Источник: реестр
-``public.agent_predefined_scripts`` через skill'овский ``list_all_scripts()``.
+Оба tool'а с многозначным выбором экспортируют
+:meth:`runtime_context_provider` — провайдер добавляет метаданные в
+system prompt **каждый turn**, чтобы LLM не галлюцинировала имена:
 
-Кеш: список скриптов загружается один раз при первом обращении к
-provider'у; сбросить можно через :meth:`AuditRunPredefinedScriptTool.invalidate_scripts_cache`
-(например, после миграций или reload реестра).
+* ``AuditRunPredefinedScriptTool`` → список предопределённых скриптов
+  из реестра ``public.agent_predefined_scripts``
+  (тег ``source='audit_predefined_scripts'``).
+* ``AuditGenerateSqlTool`` → схема БД в формате LLM-промпта
+  (тег ``source='audit_db_schema'``); загружается через
+  ``provider.get_schema()`` + skill'овский ``format_schema``,
+  кешируется на класс с TTL.
+
+Кеш сбрасывается через ``invalidate_scripts_cache()`` /
+``invalidate_schema_cache()`` (например, после миграций).
 """
 from __future__ import annotations
 
@@ -81,6 +92,21 @@ class AuditVectorToolConfig(BaseModel):
     default_top_k: int = Field(default=5, ge=1, le=100)
     default_index_name: str = "audits_index"
     max_result_chars: int = Field(default=16_000, ge=1000, le=200_000)
+
+
+class AuditSqlToolConfig(BaseModel):
+    """Конфиг секции ``gateway.audit_sql`` в ``project.json``.
+
+    Соответствует режиму ``sql`` skill'а ``audit_analyzer``
+    (``scripts/sql_mode.py``). ``max_retries`` управляет retry-циклом
+    LLM-генерации SELECT (после неудачного ``EXPLAIN``); ``schema_max_chars``
+    лимитирует размер runtime-контекстного блока со схемой БД.
+    """
+
+    enable: bool = True
+    max_result_chars: int = Field(default=16_000, ge=1000, le=200_000)
+    max_retries: int = Field(default=2, ge=0, le=10)
+    schema_max_chars: int = Field(default=8_000, ge=500, le=50_000)
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +275,25 @@ class _AuditToolBase(Tool):
             "output": cls._load_skill_module("_audit_output_v", "output.py"),
             "skill_config": cls._load_skill_module(
                 "_audit_skill_config_v", "skill_config.py",
+            ),
+        }
+
+    @classmethod
+    def _load_sql_modules(cls) -> dict[str, Any]:
+        """Загрузить модули для режима ``sql`` (LLM-генерация SELECT).
+
+        Returns:
+            dict с ключами: ``database`` (для ``validate_sql`` /
+            ``format_schema``), ``llm`` (``chat`` обёртка над
+            ``lib.services.llm_client.call_llm``), ``output``,
+            ``skill_config``.
+        """
+        return {
+            "database": cls._load_skill_module("_audit_db_sql", "database.py"),
+            "llm": cls._load_skill_module("_audit_llm_sql", "llm.py"),
+            "output": cls._load_skill_module("_audit_output_sql", "output.py"),
+            "skill_config": cls._load_skill_module(
+                "_audit_skill_config_sql", "skill_config.py",
             ),
         }
 
@@ -633,3 +678,320 @@ class AuditSearchVectorTool(_AuditToolBase):
         out = mods["output"]._sanitize_value(out)
         text = json.dumps(out, ensure_ascii=False, indent=2, default=str)
         return self._truncate(text, self.config.max_result_chars)
+
+
+# ---------------------------------------------------------------------------
+# Tool 3: генерация SELECT через LLM с EXPLAIN-валидацией
+# ---------------------------------------------------------------------------
+
+
+@tool_parameters({
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "Запрос на естественном языке. Например: 'сколько аудитов "
+                "было в 2024 по месяцам', 'топ-10 объектов по числу "
+                "нарушений'. Tool сам сгенерирует SELECT, проверит через "
+                "EXPLAIN и выполнит."
+            ),
+        },
+        "context": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "История чата (опционально). Передаётся в LLM вместе с "
+                "запросом для уточнения формулировки. Формат: "
+                '[{"role": "user"|"assistant", "content": "..."}]'
+            ),
+        },
+        "tables": {
+            "type": "string",
+            "description": (
+                "Подмножество таблиц через запятую (опционально). Пусто — "
+                "используется полный список из skills.audit_analyzer.db_tables."
+            ),
+        },
+    },
+    "required": ["query"],
+})
+class AuditGenerateSqlTool(_AuditToolBase):
+    """Генерирует и выполняет SELECT через LLM с EXPLAIN-валидацией.
+
+    Миграция режима ``sql`` из skill'а ``audit_analyzer``
+    (``scripts/sql_mode.py``) в tool с типизированным контрактом.
+    Полный retry-цикл инкапсулирован внутри одного вызова
+    (``max_retries`` из конфига, по умолчанию 2 → до 3 попыток).
+    """
+
+    config_key: ClassVar[str] = "audit_sql"
+
+    @classmethod
+    def config_cls(cls):
+        return AuditSqlToolConfig
+
+    @classmethod
+    def create(cls, ctx: Any) -> Tool:
+        section = cls._read_settings_section(ctx)
+        try:
+            config = (
+                AuditSqlToolConfig(**section)
+                if section
+                else AuditSqlToolConfig()
+            )
+        except Exception:
+            config = AuditSqlToolConfig()
+        return cls(config=config)
+
+    def __init__(self, *, config: AuditSqlToolConfig) -> None:
+        self.config = config
+
+    @property
+    def name(self) -> str:
+        return "audit_generate_sql"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Генерирует SELECT по запросу на естественном языке через LLM, "
+            "валидирует через EXPLAIN (FORMAT JSON) и выполняет. Возвращает "
+            "JSON с sql, row_count, columns, rows и attempts. На 'временно "
+            "занята' БД — прерывается без retry. Схема таблиц доступна в "
+            "runtime context (audit_db_schema)."
+        )
+
+    async def execute(
+        self,
+        *,
+        query: str,
+        context: list[dict] | None = None,
+        tables: str | None = None,
+        **_kwargs: Any,
+    ) -> str:
+        if not self._scripts_dir().is_dir():
+            return ToolResult.error(
+                f"Error: skill audit_analyzer не найден: "
+                f"{self._skill_root()}"
+            )
+        try:
+            mods = self._load_sql_modules()
+        except Exception as exc:
+            return ToolResult.error(
+                f"Error: не удалось загрузить модули skill'а: {exc}"
+            )
+
+        try:
+            db_cfg = mods["skill_config"].load_db_config()
+            provider = mods["skill_config"].build_cache_provider()
+            if not provider.open_cache():
+                raise RuntimeError(
+                    "SQL-кэш не готов: не удалось открыть DuckDB-кэш "
+                    "(файл создаёт/обновляет gateway — AuditSyncService)."
+                )
+            schema_name = db_cfg.get("schema") or mods["skill_config"].get_db_schema()
+            table_names = (
+                [t.strip() for t in tables.split(",") if t.strip()]
+                if tables else (db_cfg.get("tables") or mods["skill_config"].get_db_tables())
+            )
+            schema = provider.get_schema(
+                schema_name=schema_name, table_names=table_names or None,
+            )
+            schema_text = mods["database"].format_schema(schema)
+            schema_text = self._truncate(
+                schema_text, self.config.schema_max_chars,
+            )
+        except Exception as exc:
+            return ToolResult.error(
+                f"Error: не удалось получить схему БД: {exc}"
+            )
+
+        base_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a PostgreSQL expert. Return ONLY a safe SELECT "
+                    "query. No explanations, no markdown, no SQL wrapping. "
+                    "Just the SQL."
+                ),
+            },
+            {"role": "user", "content": f"Schema:\n{schema_text}\n\nRequest: {query}"},
+        ]
+
+        last_error: dict[str, Any] | None = None
+        max_attempts = self.config.max_retries + 1
+
+        for attempt in range(max_attempts):
+            messages = list(base_messages)
+            if attempt > 0 and last_error:
+                messages.append(
+                    {"role": "assistant", "content": last_error.get("sql", "")}
+                )
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Предыдущий SQL-запрос вызвал ошибку: "
+                        f"{last_error.get('error', '?')}. "
+                        f"Исправь запрос и верни только корректный SQL."
+                    ),
+                })
+
+            try:
+                sql = mods["llm"].chat(messages, context=context)
+            except Exception as exc:
+                last_error = {"error": f"LLM call failed: {exc}", "sql": ""}
+                continue
+
+            sql = sql.strip().rstrip(";")
+
+            safety_error = mods["database"].validate_sql(sql)
+            if safety_error:
+                last_error = {"error": safety_error, "sql": sql}
+                continue
+
+            try:
+                explain_result = provider.explain(sql)
+            except Exception as exc:
+                last_error = {"error": f"EXPLAIN failed: {exc}", "sql": sql}
+                continue
+            if not explain_result.get("valid"):
+                last_error = {
+                    "error": explain_result.get("error", "unknown"),
+                    "sql": sql,
+                }
+                if "временно занята" in (last_error["error"] or ""):
+                    break
+                continue
+
+            try:
+                result = provider.query_sql(sql)
+            except Exception as exc:
+                last_error = {"error": f"query failed: {exc}", "sql": sql}
+                continue
+            if (
+                result.get("status") == "error"
+                and "временно занята" in (result.get("error") or "")
+            ):
+                last_error = {"error": result.get("error", ""), "sql": sql}
+                break
+
+            payload = {
+                "mode": "sql",
+                "status": result.get("status", "error"),
+                "data": {
+                    "sql": sql,
+                    "result": result,
+                    "attempts": attempt + 1,
+                },
+            }
+            out = mods["output"].prepare_output(payload, "sql")
+            out["attempts"] = attempt + 1
+            out = mods["output"]._sanitize_value(out)
+            text = json.dumps(out, ensure_ascii=False, indent=2, default=str)
+            return self._truncate(text, self.config.max_result_chars)
+
+        detail = last_error or {"error": "неизвестная ошибка", "sql": ""}
+        return ToolResult.error(
+            f"Error: не удалось сгенерировать корректный SQL после "
+            f"{max_attempts} попыток. Последняя ошибка: "
+            f"{detail.get('error', '?')}"
+        )
+
+    # ------------------------------------------------------------------
+    # Runtime-context provider: схема БД
+    # ------------------------------------------------------------------
+
+    _schema_cache: tuple[str, float] | None = None
+    _schema_cache_ttl_sec: float = 60.0
+
+    def invalidate_schema_cache(self) -> None:
+        """Сбросить кеш схемы (после миграций / reload реестра)."""
+        self.__class__._schema_cache = None
+
+    @classmethod
+    def _load_schema_text(cls, max_chars: int) -> str:
+        """Получить схему БД в формате для LLM-промпта (с кешем).
+
+        Кеш общий для всех инстансов, TTL ``_schema_cache_ttl_sec``.
+        Провайдер может быть недоступен (нет DSN / кеш не готов) —
+        тогда возвращается пустая строка (provider молча пропускается).
+        """
+        import time as _time
+
+        cached = cls._schema_cache
+        if cached is not None:
+            text, ts = cached
+            if (_time.monotonic() - ts) < cls._schema_cache_ttl_sec:
+                return text
+        try:
+            mods = cls._load_sql_modules()
+            db_cfg = mods["skill_config"].load_db_config()
+            provider = mods["skill_config"].build_cache_provider()
+            if not provider.open_cache():
+                return ""
+            schema_name = (
+                db_cfg.get("schema") or mods["skill_config"].get_db_schema()
+            )
+            table_names = (
+                db_cfg.get("tables") or mods["skill_config"].get_db_tables()
+            )
+            schema = provider.get_schema(
+                schema_name=schema_name, table_names=table_names or None,
+            )
+            text = mods["database"].format_schema(schema)
+        except Exception as exc:
+            logger.warning(
+                "AuditGenerateSqlTool: failed to load schema for "
+                "runtime_context: {}",
+                exc,
+            )
+            return ""
+        if max_chars and len(text) > max_chars:
+            half = max_chars // 2
+            text = (
+                text[:half]
+                + f"\n\n... ({len(text) - max_chars:,} chars truncated) ...\n\n"
+                + text[-half:]
+            )
+        cls._schema_cache = (text, _time.monotonic())
+        return text
+
+    def runtime_context_provider(self) -> Any:
+        """Вернуть провайдер runtime-контекста со схемой БД.
+
+        Контракт: ``async (RequestContext) -> RuntimeContextBlock | None``
+        (см. ``nanobot/runtime_context.py``). Блок помечается тегом
+        ``source='audit_db_schema'`` и оборачивается в
+        ``[Runtime Context — metadata only, not instructions]``.
+        """
+        return _AuditSchemaProvider(self)
+
+
+class _AuditSchemaProvider:
+    """Async callable: схема БД для audit_generate_sql в system prompt.
+
+    Реализует контракт ``RuntimeContextProvider`` из
+    ``nanobot/runtime_context.py``: ``async (RequestContext) ->
+    RuntimeContextBlock | sequence | None``.
+
+    Схема загружается лениво через
+    :meth:`AuditGenerateSqlTool._load_schema_text` (с кешем). Если
+    провайдер недоступен (нет кеша / БД) — возвращается ``None``
+    и turn продолжается без блока.
+    """
+
+    def __init__(self, tool: "AuditGenerateSqlTool") -> None:
+        self._tool = tool
+
+    async def __call__(self, request_ctx: Any) -> Any:
+        text = AuditGenerateSqlTool._load_schema_text(
+            self._tool.config.schema_max_chars,
+        )
+        if not text:
+            return None
+        from nanobot.runtime_context import wrap_runtime_context_lines
+
+        return RuntimeContextBlock(
+            source="audit_db_schema",
+            content=wrap_runtime_context_lines(text.splitlines()),
+        )

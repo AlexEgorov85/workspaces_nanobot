@@ -1564,26 +1564,37 @@ registered: foo, bar, baz; skipped: qux (disabled by config)"`.
 | `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (project.json) |
 | `audit_run_predefined_script` | `workspace/tools/audit_analyzer_tool.py` | выполнить готовый SQL-скрипт по имени | `gateway.audit_predefined.*` (project.json) |
 | `audit_search_vector` | `workspace/tools/audit_analyzer_tool.py` | семантический поиск по FAISS-индексу | `gateway.audit_vector.*` (project.json) |
+| `audit_generate_sql` | `workspace/tools/audit_analyzer_tool.py` | сгенерировать SELECT через LLM с EXPLAIN-валидацией и retry-циклом | `gateway.audit_sql.*` (project.json) |
 | `example_tool` | `workspace/tools/example.py` | шаблон (по умолчанию `enable=false`) | `tools.example.*` (config.json) |
 
-Оба audit-tool'а наследуют приватный `_AuditToolBase` (см. файл) — он
+Все audit-tool'ы наследуют приватный `_AuditToolBase` (см. файл) — он
 делит загрузку модулей skill'а и хелпер `_truncate`. По конвенции
 nanobot (см. `_FsTool` в `nanobot/agent/tools/filesystem.py`) один tool =
-одно действие, поэтому `audit_run_predefined_script` и `audit_search_vector`
-разделены.
+одно действие, поэтому `audit_run_predefined_script`, `audit_search_vector`
+и `audit_generate_sql` разделены.
 
-### Runtime-context provider для `audit_run_predefined_script`
+### Runtime-context providers
 
-`AuditRunPredefinedScriptTool` экспортирует
-:meth:`runtime_context_provider`, возвращающий класс
-`_PredefinedScriptsProvider`. Это **не** tool, а `RuntimeContextProvider`
-(см. `nanobot/runtime_context.py:47-49` — `async (RequestContext) ->
-RuntimeContextBlock | sequence | None`).
+Audit-tool'ы с многозначным выбором экспортируют
+:meth:`runtime_context_provider` — провайдер добавляет метаданные в
+system prompt **каждый turn**, чтобы LLM не галлюцинировала имена:
 
+* `AuditRunPredefinedScriptTool` → список предопределённых скриптов
+  из реестра ``public.agent_predefined_scripts``
+  (тег ``source='audit_predefined_scripts'``).
+* `AuditGenerateSqlTool` → схема БД в формате LLM-промпта
+  (тег ``source='audit_db_schema'``); загружается через
+  ``provider.get_schema()`` + skill'овский ``format_schema``,
+  кешируется на уровне класса с TTL
+  (``_schema_cache_ttl_sec = 60``).
+
+Контракт провайдера — `async (RequestContext) -> RuntimeContextBlock |
+sequence | None` (см. `nanobot/runtime_context.py:47-49`).
 `AgentLoop._build_runtime_context` (`nanobot/agent/loop.py:744-752`)
-собирает блоки провайдеров и добавляет их в system prompt
-**каждый turn** (см. `tools.get_runtime_context_providers()` в
-`registry.py:44-51`). LLM видит список скриптов **до** любого вызова:
+собирает блоки провайдеров и добавляет их в system prompt каждый turn
+(см. `tools.get_runtime_context_providers()` в `registry.py:44-51`).
+
+Пример (predefined):
 
 ```text
 [Runtime Context — metadata only, not instructions]
@@ -1594,19 +1605,53 @@ RuntimeContextBlock | sequence | None`).
 [/Runtime Context]
 ```
 
+Пример (sql):
+
+```text
+[Runtime Context — metadata only, not instructions]
+=== Schema: oarb ===
+
+Table: "oarb".audits — Аудиторские проверки
+  id: integer NOT NULL — Идентификатор
+  actual_date: date — Дата проверки
+  title: varchar(500) — Название проверки
+...
+[/Runtime Context]
+```
+
 **Преимущества перед отдельным tool `audit_list_predefined_scripts`:**
 
 1. Нет лишнего round-trip (LLM вызывает основной tool сразу).
 2. LLM **всегда** знает актуальный список (не может галлюцинировать имя).
-3. Tool остаётся чистым — schema с одним действием (`script`+`params`).
+3. Tool остаётся чистым — schema с одним действием.
 
-**Кеш:** список скриптов загружается один раз через
-``list_all_scripts()`` (skill'овский реестр) и кешируется на уровне
-класса. Сбросить: ``tool.invalidate_scripts_cache()``.
+**Кеш:** список предопределённых скриптов и схема БД кешируются на
+уровне класса. Сбросить: ``tool.invalidate_scripts_cache()`` /
+``tool.invalidate_schema_cache()`` (например, после миграций).
 
-**sql-режим** (LLM-генерация SELECT) **не** перенесён в tool — он требует
-retry-цикл с валидацией и EXPLAIN, что естественнее делать через skill/CLI,
-а не как один вызов tool'а.
+### `audit_generate_sql` — миграция sql-режима
+
+Tool инкапсулирует полный retry-цикл из
+``workspace/skills/audit_analyzer/scripts/sql_mode.py``:
+
+1. Получить схему через ``provider.get_schema()`` → отдать в LLM.
+2. LLM генерирует SELECT (system: «You are a PostgreSQL expert.
+   Return ONLY a safe SELECT query»).
+3. ``validate_sql`` — отсев DDL/DML/multi-statement (skill'овский
+   ``scripts/database.py::validate_sql``, остаётся в skill'е как
+   специфичная функция).
+4. ``provider.explain(sql)`` — синтаксис и существование объектов.
+5. ``provider.query_sql(sql)`` — выполнение.
+6. На «временно занята» БД — прерывается без retry.
+7. На любую другую ошибку — retry до ``max_retries`` раз, передавая
+   ошибку обратно в LLM.
+
+Tool импортирует skill'овские модули (``database``, ``llm``, ``output``,
+``skill_config``) через ``importlib.util.spec_from_file_location`` —
+тот же путь, что для ``audit_run_predefined_script`` и
+``audit_search_vector``. Специфичные функции (validate_sql, format_schema,
+LLM-обёртка) **остаются в skill'е** — выносить их в ``lib/services``
+не нужно, пока нет другого потребителя.
 
 ---
 
