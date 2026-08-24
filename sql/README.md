@@ -46,6 +46,10 @@ sql/
 │   ├── create_vector_index_config.sql                   #   public.agent_vector_index_config
 │   └── create_vector_index_store.sql                    #   public.agent_vector_index_store (FAISS blob)
 │
+├── migrations/                                          # версионные миграции схемы
+│   ├── schema_migrations.sql                            #   tracking-таблица public.schema_migrations
+│   └── V001__baseline.sql                               #   базовая линия (штамп, без DDL)
+│
 └── audit_analyzer/                                      # навык audit_analyzer
     ├── create_oarb_audits.sql                           #   oarb.audits          (REFERENCE)
     ├── create_oarb_violations.sql                       #   oarb.violations      (REFERENCE)
@@ -55,6 +59,32 @@ sql/
     ├── create_public_agent_predefined_scripts.sql       #   public.agent_predefined_scripts
     └── seed_default_indexes.sql                         #   3 дефолтных индекса (audits/violations/reports)
 ```
+
+---
+
+## Миграции схемы (tools/migrate.py)
+
+Инфраструктурные изменения схемы, начиная с baseline, оформляются
+версионными миграциями `sql/migrations/V<N>__<name>.sql` и применяются
+runner'ом (psycopg2, DSN: `DATABASE_URL` или `channels.postgres.dsn`):
+
+```bash
+python tools/migrate.py --status            # состояние: PENDING/applied/DRIFT!
+python tools/migrate.py --dry-run           # показать SQL ожидающих
+python tools/migrate.py --apply             # применить ожидающие по порядку (транзакционно)
+python tools/migrate.py --apply --target 3  # до V003 включительно
+python tools/migrate.py --verify            # сверить checksums применённых с файлами
+python tools/migrate.py --baseline          # штамповать существующие версии без выполнения
+```
+
+Правила:
+- каждая применённая версия фиксируется в `public.schema_migrations`
+  с SHA256-checksum содержимого; изменение применённого файла = DRIFT
+  (ошибка при `--apply`, обход — осознанный `--force`);
+- существующая БД: после первой установки выполнить `--baseline`
+  (V001 не содержит DDL — только точка отсчёта);
+- новые изменения схемы — новый файл `V002__*.sql` и далее; ретроактивно
+  менять применённые миграции нельзя.
 
 ---
 
