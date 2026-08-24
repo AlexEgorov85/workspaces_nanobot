@@ -50,7 +50,8 @@
   question: >-
     Покажи, сколько аудиторских проверок прошло в 2024 году по месяцам.
     Воспользуйся навыком audit_analyzer: запусти скрипт analytics_by_year_month
-    с параметром year=2024 через skills/audit_analyzer/audit_analyze.bat.
+    с параметром year=2024 через skills/audit_analyzer/scripts/cli.py
+    (режим predefined).
   max_iterations: 15
   expect:
     tools: ["exec"]

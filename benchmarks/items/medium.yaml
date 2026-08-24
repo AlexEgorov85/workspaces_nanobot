@@ -25,7 +25,8 @@
   question: >-
     Какие типы аудиторских проверок встречаются в базе и как часто?
     Запусти предопределённый скрипт audit_types_stats через
-    skills/audit_analyzer/audit_analyze.bat и перечисли типы с их количеством.
+    skills/audit_analyzer/scripts/cli.py (режим predefined) и
+    перечисли типы с их количеством.
   max_iterations: 40
   expect:
     tools: ["exec"]
@@ -40,7 +41,7 @@
   question: >-
     Сгруппируй нарушения по кодам и покажи, какие коды встречаются чаще всего
     и в скольких разных проверках. Запусти script violations_by_type через
-    skills/audit_analyzer/audit_analyze.bat.
+    skills/audit_analyzer/scripts/cli.py (режим predefined).
   max_iterations: 20
   expect:
     tools: ["exec"]

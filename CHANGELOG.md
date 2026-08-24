@@ -11,6 +11,76 @@
 ### Added
 
 - **Tool `duckdb_query`** (`workspace/tools/duckdb_query_tool.py`) —
+  generic read-only SQL-tool, выполняет SELECT-запросы в DuckDB-кэш.
+  Не знает конкретных таблиц / Skills. Использует
+  `lib.utils.sql_safety.validate_sql` как последнюю границу безопасности
+  (SELECT-only, multi-statement запрещён). Параметры: `sql`, `params`,
+  `max_rows`. Конфиг: `gateway.duckdb_query.*`.
+
+- **Tool `vector_search`** (`workspace/tools/vector_search_tool.py`) —
+  generic семантический поиск по указанному FAISS-индексу. Не знает
+  имён конкретных индексов; получает `index_name` от вызывающей стороны.
+
+- **Утилиты `lib/utils/sql_safety.py`** и **`lib/utils/text_utils.py`** —
+  перенесены из skill'а `audit_analyzer` (бывших
+  `scripts/database.py`/`scripts/output.py`) для переиспользования
+  обоими tool'ами и skill'ами.
+
+- **`tests/test_duckdb_query_tool.py`**,
+  **`tests/test_vector_search_tool.py`**,
+  **`tests/test_skill_tool_independence.py`**,
+  **`tests/test_architecture_tool_domain_free.py`**,
+  **`tests/test_skill_tool_integration.py`**,
+  **`tests/test_core_infrastructure_independence.py`**,
+  **`tests/test_sql_safety.py`**,
+  **`tests/test_text_utils.py`** — тесты для новых tool'ов и утилит
+  + архитектурные тесты (TARGET §28).
+
+- **`docs/skill-tool-architecture.md`**, **`docs/refactor_baseline.md`**,
+  **`docs/skill-tool-inventory.md`**, **`docs/runtime_patches.md`** —
+  документация (TARGET §20, §33).
+
+### Changed
+
+- **`workspace/skills/audit_analyzer/SKILL.md`** переписан: убраны
+  дубли с разделами, добавлен «Контракт зависимостей» (явно указано,
+  что skill использует `lib/utils/` через back-compat re-export).
+  Удалён раздел «Runtime context» (он врал — providers.py нигде не
+  регистрировались).
+- **`workspace/skills/audit_analyzer/scripts/database.py`** — дубли
+  `validate_sql`/`format_schema` удалены; реализация теперь только в
+  `lib/utils/sql_safety.py` (TARGET §4). Оставлен back-compat
+  re-export для публичного API skill'а.
+- **`workspace/skills/audit_analyzer/scripts/output.py`** — дубль
+  `_sanitize_value` удалён; реализация только в
+  `lib/utils/text_utils.py`. Оставлен back-compat re-export.
+- **`benchmarks/items/{simple,medium,hard}.yaml`** — вызовы
+  `audit_analyze.bat` заменены на `python scripts/cli.py`.
+
+### Removed
+
+- **`workspace/skills/audit_analyzer/audit_analyze.bat`** и
+  **`audit_analyze.sh`** — обёртки вокруг `scripts/cli.py` удалены.
+  CLI теперь запускается напрямую: `python scripts/cli.py --mode ...`.
+- **`workspace/skills/audit_analyzer/data_store/cache/*`** — ad-hoc
+  артефакты одного прогона (`fetch_shell.py`, `_dump_report_text.py`,
+  `_explore_audit7.py`, `_verify_audit7.{py,out}`,
+  `audit_types_query.py`, отчёты в `.md`/`.json`). Не runtime, уже
+  в `.gitignore`.
+- **`workspace/skills/audit_analyzer/scripts/generated/`** — каталог с
+  одноразовым dump-скриптом `fetch_audit_title.py`. Никем не вызывался.
+- **`workspace/skills/audit_analyzer/tests/e2e_test.py`** — standalone
+  скрипт (не pytest, не CI).
+- **`workspace/skills/audit_analyzer/scripts/__init__.py`** —
+  legacy-фасад с `run_predefined`/`run_sql`/`run_vector`. Никем не
+  импортировался.
+- **`workspace/skills/audit_analyzer/providers.py`** — runtime-context
+  providers, которые были описаны в `SKILL.md`, но никем не
+  регистрировались. Регистрация через `ApplicationContext.start()`
+  нарушила бы TARGET_ARCHITECTURE.md §4 (lib не должен зависеть от
+  skill).
+
+- **Tool `duckdb_query`** (`workspace/tools/duckdb_query_tool.py`) —
   generic read-only SQL- tool, выполняет SELECT-запросы в DuckDB-кэш.
   Не знает конкретных таблиц / Skills. Использует
   `lib.utils.sql_safety.validate_sql` как последнюю границу безопасности

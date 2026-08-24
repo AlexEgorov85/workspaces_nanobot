@@ -14,7 +14,7 @@
       weight: 0.3
       question: >-
         Запусти предопределённый скрипт analytics_by_year_month с параметром
-        year=2024 через skills/audit_analyzer/audit_analyze.bat и покажи,
+        year=2024 через skills/audit_analyzer/scripts/cli.py и покажи,
         сколько проверок прошло по месяцам.
       expect:
         tools: ["exec"]
@@ -53,7 +53,7 @@
       weight: 0.3
       question: >-
         Запусти предопределённый скрипт analytics_by_year_month с параметром
-        year=2024 через skills/audit_analyzer/audit_analyze.bat и покажи,
+        year=2024 через skills/audit_analyzer/scripts/cli.py и покажи,
         в каких месяцах 2024 года проходили проверки и сколько их было.
       expect:
         tools: ["exec"]
@@ -91,7 +91,7 @@
       weight: 0.3
       question: >-
         Запусти предопределённый скрипт violations_by_type через
-        skills/audit_analyzer/audit_analyze.bat и покажи распределение
+        skills/audit_analyzer/scripts/cli.py и покажи распределение
         нарушений по кодам.
       expect:
         tools: ["exec"]

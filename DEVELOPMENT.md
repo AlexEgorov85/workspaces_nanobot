@@ -1316,9 +1316,8 @@ nanobot/
 │   │   └── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
 │   ├── skills/audit_analyzer/            # навык: тонкий CLI поверх провайдера
 │   │   ├── SKILL.md                      #   пользовательская документация
-│   │   ├── audit_analyze.bat / .sh       #   точки входа
 │   │   ├── scripts/
-│   │   │   ├── cli.py                    #   парсинг аргументов, маршрутизация режимов
+│   │   │   ├── cli.py                    #   точка входа (python scripts/cli.py ...)
 │   │   │   ├── skill_config.py           #   конфиг из SETTINGS + build_cache_provider()
 │   │   │   ├── database.py               #   Database (прямой PG, fallback) + QueryBackend
 │   │   │   ├── sql_mode.py               #   режим sql: LLM → SQL → EXPLAIN → выполнение
@@ -1838,8 +1837,7 @@ DSN подключается только через `channels.postgres.dsn` в 
 
 ## 🚀 CLI навыка: режимы
 
-Точка входа: `workspace/skills/audit_analyzer/audit_analyze.bat` (или
-`.sh`), либо `python scripts/cli.py`.
+Точка входа: `python scripts/cli.py` (кросс-платформенный).
 
 ```
 audit_analyze --mode {predefined,sql,vector} [опции]
@@ -2165,7 +2163,7 @@ psql -c "SELECT source, dimension, vector_count, updated_at FROM public.agent_ve
 **5. Используйте в CLI:**
 
 ```bash
-audit_analyze.bat --mode vector --query "объект с нарушениями" --index-name objects_index --top-k 5
+python scripts/cli.py --mode vector --query "объект с нарушениями" --index-name objects_index --top-k 5
 ```
 
 ### Как обновить существующий индекс
@@ -2337,7 +2335,7 @@ DELETE FROM public.agent_vector_index_store WHERE source = 'audits_index';
 DELETE FROM public.agent_vector_index_config WHERE index_name = 'audits_index';
 ```
 
-После этого `audit_analyze.bat --mode vector --index-name audits_index` вернёт **пустой результат** (нет FAISS-индекса). Чтобы восстановить — INSERT конфига + `--full-rebuild`.
+После этого `python scripts/cli.py --mode vector --index-name audits_index` вернёт **пустой результат** (нет FAISS-индекса). Чтобы восстановить — INSERT конфига + `--full-rebuild`.
 
 **Что НЕ удаляется:**
 - Исходная таблица `oarb.audits` — не трогается.
@@ -2413,13 +2411,13 @@ python tools/build_vectors.py --full-rebuild
 #### Что будет если `--index-name` указывает на несуществующий индекс
 
 ```bash
-audit_analyze.bat --mode vector --query "..." --index-name does_not_exist
+python scripts/cli.py --mode vector --query "..." --index-name does_not_exist
 # "Индекс 'does_not_exist' не найден или отключён"
 ```
 
 Вектора в БД не затрагиваются. Ошибка показывается пользователю.
 
-#### Что будет если удалить индекс, а в `audit_analyze.bat` ссылка
+#### Что будет если удалить индекс, а в `python scripts/cli.py` ссылка
 
 **Если индекс был в реестре предопределённых скриптов (`predefined.py`):** поиск перестанет находить `vector_source` параметры для этого индекса (ошибка `CacheProvider.search_vector` → `[]`).
 
@@ -2731,7 +2729,7 @@ INSERT INTO public.agent_vector_index_config (..., index_name, embedding_cols, e
  'updated_at', true);
 ```
 
-Поиск: `audit_analyze.bat --mode vector --query "..." --index-name audits_full_index --top-k 5`.
+Поиск: `python scripts/cli.py --mode vector --query "..." --index-name audits_full_index --top-k 5`.
 
 #### Инкрементальная сборка vs `--check` — разница
 

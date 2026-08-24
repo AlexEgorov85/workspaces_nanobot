@@ -178,7 +178,7 @@ python cli_agent.py -S file                   # patched, принудитель�
 
 ### `audit_analyzer` (навык) {#audit-analyzer}
 
-Точка входа: `workspace/skills/audit_analyzer/audit_analyze.bat` (Windows) или `audit_analyze.sh` (Linux). **CLI требует `--mode` явно.** Пользовательская документация навыка — `workspace/skills/audit_analyzer/SKILL.md`.
+Точка входа: `python workspace/skills/audit_analyzer/scripts/cli.py` (кросс-платформенный). **CLI требует `--mode` явно.** Пользовательская документация навыка — `workspace/skills/audit_analyzer/SKILL.md`.
 
 | Режим | Описание | Пример |
 |-------|----------|--------|
