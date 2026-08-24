@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from lib.utils.sql_safety import format_schema, validate_sql
+from lib.utils.sql_safety import (
+    SqlPolicy,
+    format_schema,
+    normalize_sql,
+    query_hash,
+    validate_sql,
+    validate_sql_report,
+)
 
 
 class TestValidateSql:
@@ -54,6 +61,71 @@ class TestValidateSql:
 
     def test_single_trailing_semicolon_allowed(self) -> None:
         assert validate_sql("SELECT 1;") is None
+
+
+class TestAstPolicy:
+    """AST-политика: SELECT INTO, опасные функции, системные каталоги."""
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT * INTO backups FROM audits",
+            "SELECT pg_read_file('/etc/passwd')",
+            "SELECT pg_sleep(10)",
+            "SELECT dblink('dbname=x', 'SELECT 1')",
+            "SELECT nextval('seq')",
+            "SELECT setval('seq', 100)",
+            "SELECT * FROM information_schema.tables",
+            "SELECT * FROM pg_catalog.pg_tables",
+        ],
+    )
+    def test_ast_violations_rejected(self, sql: str) -> None:
+        err = validate_sql(sql)
+        assert err is not None
+
+    def test_select_into_reason(self) -> None:
+        assert "INTO" in (validate_sql("SELECT 1 INTO x") or "")
+
+    def test_function_reason(self) -> None:
+        assert "PG_SLEEP" in (validate_sql("SELECT pg_sleep(1)") or "")
+
+    def test_catalog_reason(self) -> None:
+        assert "information_schema" in (
+            validate_sql("SELECT * FROM information_schema.columns") or ""
+        )
+
+    def test_union_allowed(self) -> None:
+        assert validate_sql("SELECT 1 UNION SELECT 2") is None
+
+    def test_explain_inner_statement_validated(self) -> None:
+        assert validate_sql("EXPLAIN SELECT 1") is None
+        assert "PG_SLEEP" in (validate_sql("EXPLAIN SELECT pg_sleep(1)") or "")
+
+    def test_explain_of_ddl_rejected(self) -> None:
+        assert validate_sql("EXPLAIN INSERT INTO t VALUES (1)") is not None
+
+    def test_policy_allow_catalog(self) -> None:
+        policy = SqlPolicy(allow_catalog_access=True)
+        report = validate_sql_report(
+            "SELECT * FROM information_schema.tables", policy=policy
+        )
+        assert report.allowed is True
+
+    def test_report_structure(self) -> None:
+        report = validate_sql_report("SELECT pg_sleep(1)")
+        assert report.allowed is False
+        assert report.violations
+        assert report.normalized_sql == "SELECT pg_sleep(1)"
+        assert len(report.query_hash) == 64
+        payload = report.to_dict()
+        assert payload["allowed"] is False
+        assert isinstance(payload["violations"], list)
+
+    def test_normalize_and_hash_stable(self) -> None:
+        a = normalize_sql("SELECT /* c */\n   1")
+        b = normalize_sql("SELECT 1")
+        assert a == b
+        assert query_hash(a) == query_hash(b)
 
 
 class TestFormatSchema:
