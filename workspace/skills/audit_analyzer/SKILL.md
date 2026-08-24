@@ -136,10 +136,20 @@ Progressive disclosure (TARGET_ARCHITECTURE.md §10):
 - `references/vector_indexes.md` — назначение и метаданные FAISS-индексов.
 - `references/sql_guidance.md` — правила NL→SELECT.
 
-## Runtime context
+Агент загружает reference при необходимости — когда уже решил, какую
+capability вызвать, и хочет уточнить параметры (имена таблиц/колонок,
+имена индексов, формат SELECT). Не нужно держать всё содержимое в
+контексте сразу.
 
-Списки скриптов (`source='audit_predefined_scripts'`) и схема БД
-(`source='audit_db_schema'`) подаются агенту через runtime-context providers
-(см. `workspace/skills/audit_analyzer/providers.py`). Регистрация провайдеров
-выполняется из `lib/core/application_context.py` при старте gateway,
-если skill включён через `skills.audit_analyzer.*`.
+## Predefined reports
+
+Реестр `public.agent_predefined_scripts` содержит 6 именованных отчётов.
+Skill знает их имена и параметры; агенту они известны из `SKILL.md`/decision
+procedure. При необходимости — загрузить `references/schema.md` для уточнения
+колонок.
+
+## Контракт зависимостей
+
+Skill не зависит от `lib/`, `workspace/tools/`, `nanobot`. Это позволяет
+запускать CLI skill'а (см. `audit_analyze.bat/.sh`) в изоляции — без
+запущенного gateway или других частей проекта (TARGET_ARCHITECTURE.md §11).
