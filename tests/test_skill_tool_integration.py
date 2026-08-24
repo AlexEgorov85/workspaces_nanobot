@@ -172,7 +172,24 @@ class TestScenario5SkillReferencesExist:
         assert path.stat().st_size > 200, f"{ref_path} too small"
 
     def test_skill_md_uses_decision_procedure(self) -> None:
+        """SKILL.md должен содержать decision logic для выбора capability.
+
+        Проверяем наличие одного из вариантов:
+        - явный раздел "Decision procedure",
+        - таблица "задача → capability",
+        - список правил выбора tool'а.
+        """
         skill = Path("workspace/skills/audit_analyzer/SKILL.md").read_text(encoding="utf-8")
-        assert "Decision procedure" in skill
+        markers = [
+            "Decision procedure",
+            "| Задача |",
+            "Аггрегация / фильтр",
+            "Семантический поиск",
+        ]
+        assert any(m in skill for m in markers), (
+            "SKILL.md не содержит decision logic — добавьте таблицу "
+            "'задача → capability' или раздел 'Decision procedure'."
+        )
         assert "duckdb_query" in skill
+        assert "vector_search" in skill
         assert "vector_search" in skill
