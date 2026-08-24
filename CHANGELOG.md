@@ -10,26 +10,77 @@
 
 ### Added
 
-- **Tool `audit_generate_sql` — миграция sql-режима skill → tool**
-  (`workspace/tools/audit_analyzer_tool.py`). Агент теперь может вызывать
-  генерацию SELECT через LLM с EXPLAIN-валидацией и retry-циклом через
-  типизированный function-call. Полный pipeline (LLM-генерация →
-  `validate_sql` → `provider.explain()` → `provider.query_sql()` →
-  retry на ошибке с возвратом ошибки в LLM) инкапсулирован внутри
-  одного tool-call. Параметры: `query: str` (запрос на естественном
-  языке), `context: list[dict] | None` (история чата), `tables: str |
-  None` (фильтр таблиц). Конфиг: `gateway.audit_sql.*` (`enable`,
-  `max_result_chars`, `max_retries`, `schema_max_chars`).
+- **Tool `duckdb_query`** (`workspace/tools/duckdb_query_tool.py`) —
+  generic read-only SQL- tool, выполняет SELECT-запросы в DuckDB-кэш.
+  Не знает конкретных таблиц / Skills. Использует
+  `lib.utils.sql_safety.validate_sql` как последнюю границу безопасности
+  (SELECT-only, multi-statement запрещён). Параметры: `sql`, `params`,
+  `max_rows`. Конфиг: `gateway.duckdb_query.*`.
 
-- **Runtime-context provider схемы БД (`_AuditSchemaProvider`)** —
-  tool `audit_generate_sql` экспортирует провайдер со схемой таблиц в
-  формате LLM-промпта (тег `source='audit_db_schema'`). Схема
-  загружается через `provider.get_schema()` + skill'овский
-  `format_schema`, кешируется на уровне класса с TTL 60 сек, сброс
-  через `tool.invalidate_schema_cache()`. Это закрывает замечание
-  DEVELOPMENT.md:1540 «sql-режим не перенесён в tool».
+- **Tool `vector_search`** (`workspace/tools/vector_search_tool.py`) —
+  generic семантический поиск по указанному FAISS-индексу. Не знает
+  имён конкретных индексов; получает `index_name` от вызывающей стороны.
+  Использует `lib.services.cache_provider.CacheProvider.search_vector`.
+  Параметры: `query`, `index_name`, `top_k`, `threshold`. Конфиг:
+  `gateway.vector_search.*`.
+
+- **Утилиты `lib/utils/sql_safety.py` и `lib/utils/text_utils.py`** —
+  перенесены из skill'а `audit_analyzer` (бывших `scripts/database.py`,
+  `scripts/output.py`) для переиспользования обоими tool'ами и skill'ами.
+  Контракты сохранены 1:1.
+
+- **Skill `audit_analyzer/references/`** — progressive disclosure:
+  `schema.md`, `vector_indexes.md`, `sql_guidance.md`. Позволяют
+  агенту загружать детальные знания по необходимости, не раздувая
+  `SKILL.md` (см. TARGET_ARCHITECTURE.md §10).
+
+- **Архитектурные тесты:**
+  `tests/test_skill_tool_independence.py` (Skill↔Tool импорты),
+  `tests/test_architecture_tool_domain_free.py` (generic tools без
+  audit-домена), `tests/test_skill_tool_integration.py` (сценарии
+  из TARGET §8).
+
+- **Документация:**
+  `docs/skill-tool-architecture.md` (архитектурный контракт),
+  `docs/skill-tool-inventory.md` (инвентаризация до/после),
+  `docs/runtime_patches.md` (каталог monkey-patches по TARGET §20).
 
 ### Changed
+
+- **`workspace/skills/audit_analyzer/SKILL.md`** переписан:
+  decision procedure для выбора tool'ов (TARGET §8), ссылки на
+  `references/`, явное отделение от Python-реализаций tool'ов.
+
+- **`workspace/skills/audit_analyzer/providers.py`** (новый) —
+  runtime-context providers (`predefined_scripts_provider`,
+  `db_schema_provider`) перенесены из удалённого
+  `audit_analyzer_tool.py`. Регистрация — через
+  `ApplicationContext.start()` если skill включён.
+
+- **`project.json`** — секции `gateway.audit_predefined.*`,
+  `gateway.audit_vector.*`, `gateway.audit_sql.*` заменены на
+  `gateway.duckdb_query.*` и `gateway.vector_search.*`.
+
+- **`lib/utils/text_utils.py`** — добавлены `sanitize_value`,
+  `truncate_middle`; дублирование `_sanitize_value`/`_truncate` в skill
+  и tool устранено.
+
+### Removed
+
+- **`workspace/tools/audit_analyzer_tool.py`** — три tool'а
+  (`audit_run_predefined_script`, `audit_search_vector`,
+  `audit_generate_sql`) удалены. Они нарушали §3, §22.1, §22.2
+  TARGET_ARCHITECTURE.md (импортировали skill через `importlib`).
+  Функциональность перенесена в skill workflow + generic tools.
+
+- **`tests/test_tools_audit_analyzer.py`** — 1326 строк тестов
+  удалённого file. Заменён на targeted-тесты (`test_duckdb_query_tool.py`,
+  `test_vector_search_tool.py`) + architectural tests.
+
+### Changed (legacy wip)
+
+- **`workspace/skills/audit_analyzer/SKILL.md`** — DEPRECATED-блок
+  для agent-flow снят.
 
 - **`workspace/skills/audit_analyzer/SKILL.md`** — добавлен баннер
   DEPRECATED для agent-flow; ссылки на соответствующие tool'ы

@@ -14,16 +14,44 @@ filterwarnings = [
 ]
 markers = [
     "live: live e2e (real gateway / live DB / live LLM); needs NANOBOT_LIVE_E2E=1",
-    "integration: worker pool on real DB; needs NANOBOT_INTEGRATION=1 (+ DATABASE_URL)"
+    "integration: worker pool on real DB; needs NANOBOT_INTEGRATION=1 (+ DATABASE_URL)",
+    "contract: nanobot-ai compatibility checks; runs in CI always (not gated)",
+    "unit: fast unit tests; default",
 ]
 
 [tool.coverage.run]
-source = ["config.py", "benchmarks", "lib"]
-omit = ["*/__pycache__/*", "*.pyc"]
+source = ["config.py", "lib", "workspace"]
+omit = [
+    "*/__pycache__/*",
+    "*.pyc",
+    "tools/*",
+    "benchmarks/*",
+    "tests/*",
+]
+branch = true
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["tests", "tools", "benchmarks", "*.egg-info"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "E501",  # line too long — handled by formatter
+    "B008",  # function call in defaults (pydantic Field pattern)
+    "UP038", # isinstance tuple form (3.12 deprecation, fix later)
+]
 
 [tool.pylint]
 disable = ["C0114", "C0115", "C0116", "R0903", "R0913"]

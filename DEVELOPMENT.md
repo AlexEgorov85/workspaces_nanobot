@@ -1562,31 +1562,40 @@ registered: foo, bar, baz; skipped: qux (disabled by config)"`.
 | Tool | Файл | Действие | Конфиг |
 |---|---|---|---|
 | `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (project.json) |
-| `audit_run_predefined_script` | `workspace/tools/audit_analyzer_tool.py` | выполнить готовый SQL-скрипт по имени | `gateway.audit_predefined.*` (project.json) |
-| `audit_search_vector` | `workspace/tools/audit_analyzer_tool.py` | семантический поиск по FAISS-индексу | `gateway.audit_vector.*` (project.json) |
-| `audit_generate_sql` | `workspace/tools/audit_analyzer_tool.py` | сгенерировать SELECT через LLM с EXPLAIN-валидацией и retry-циклом | `gateway.audit_sql.*` (project.json) |
+| `duckdb_query` | `workspace/tools/duckdb_query_tool.py` | read-only SELECT-запрос в DuckDB-кэш | `gateway.duckdb_query.*` (project.json) |
+| `vector_search` | `workspace/tools/vector_search_tool.py` | семантический поиск по FAISS-индексу | `gateway.vector_search.*` (project.json) |
 | `example_tool` | `workspace/tools/example.py` | шаблон (по умолчанию `enable=false`) | `tools.example.*` (config.json) |
 
-Все audit-tool'ы наследуют приватный `_AuditToolBase` (см. файл) — он
-делит загрузку модулей skill'а и хелпер `_truncate`. По конвенции
-nanobot (см. `_FsTool` в `nanobot/agent/tools/filesystem.py`) один tool =
-одно действие, поэтому `audit_run_predefined_script`, `audit_search_vector`
-и `audit_generate_sql` разделены.
+`duckdb_query` и `vector_search` — generic infrastructure tools, не знают
+конкретных Skills. Они используются skill'ом `audit_analyzer` через
+процедуру, описанную в `SKILL.md` (см. TARGET_ARCHITECTURE.md §5, §6, §8).
+
+`audit_run_predefined_script` / `audit_search_vector` / `audit_generate_sql`
+**удалены** в рефакторинге `refactor/skills-tools-cleanup`. Их функциональность
+перенесена:
+
+- predefined — в CLI-режим skill'а (`scripts/cli.py` --mode predefined);
+- vector search — в tool `vector_search` (с указанием `index_name`);
+- NL→SELECT — в skill workflow с tool `duckdb_query` (см.
+  `references/sql_guidance.md`).
 
 ### Runtime-context providers
 
-Audit-tool'ы с многозначным выбором экспортируют
-:meth:`runtime_context_provider` — провайдер добавляет метаданные в
-system prompt **каждый turn**, чтобы LLM не галлюцинировала имена:
+Skill `audit_analyzer` экспортирует runtime-context providers через
+`workspace/skills/audit_analyzer/providers.py`. Регистрация вызывается
+из `lib/core/application_context.py::start()` если skill включён.
 
-* `AuditRunPredefinedScriptTool` → список предопределённых скриптов
-  из реестра ``public.agent_predefined_scripts``
-  (тег ``source='audit_predefined_scripts'``).
-* `AuditGenerateSqlTool` → схема БД в формате LLM-промпта
-  (тег ``source='audit_db_schema'``); загружается через
-  ``provider.get_schema()`` + skill'овский ``format_schema``,
-  кешируется на уровне класса с TTL
-  (``_schema_cache_ttl_sec = 60``).
+* `predefined_scripts_provider` → список предопределённых скриптов
+  из реестра `public.agent_predefined_scripts`
+  (тег `source='audit_predefined_scripts'`).
+* `db_schema_provider` → схема БД в формате LLM-промпта
+  (тег `source='audit_db_schema'`); загружается через
+  `provider.get_schema()` + `lib.utils.sql_safety.format_schema`,
+  кешируется на уровне модуля.
+
+Skill владеет domain knowledge (имена таблиц, индексов, скриптов),
+tool `duckdb_query` / `vector_search` это не знают
+(см. TARGET_ARCHITECTURE.md §4).
 
 Контракт провайдера — `async (RequestContext) -> RuntimeContextBlock |
 sequence | None` (см. `nanobot/runtime_context.py:47-49`).
