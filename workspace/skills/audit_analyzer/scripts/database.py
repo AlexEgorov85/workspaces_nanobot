@@ -63,57 +63,16 @@ class QueryBackend(Protocol):
 
     def query_sql(self, sql: str, params: Optional[list] = None) -> dict: ...
 
-    def explain(self, sql: str) -> dict: ...
+def explain(self, sql: str) -> dict: ...
 
 
-def validate_sql(sql: str) -> Optional[str]:
-    """
-    Проверить SQL на безопасность: только SELECT, один statement.
-
-    Returns:
-        None если всё в порядке, str с ошибкой иначе.
-    """
-    stripped = sql.strip().upper()
-    if not stripped:
-        return "SQL query is empty"
-    first_word = stripped.split(maxsplit=1)[0] if stripped else ""
-    ddl = {
-        "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
-        "TRUNCATE", "EXECUTE", "CALL", "MERGE", "REPLACE",
-    }
-    if first_word in ddl:
-        return f"DML/DDL statements are not allowed: {first_word}"
-    if stripped.count(";") > 1:
-        return "Multiple SQL statements are not allowed"
-    return None
-
-
-def format_schema(schema: dict) -> str:
-    """
-    Преобразовать схему БД в промпт для LLM.
-
-    Пример:
-        === Schema: oarb ===
-
-        Table: audits — Аудиторские проверки
-          id: integer NOT NULL — Идентификатор
-          actual_date: date — Дата проверки
-          title: varchar(500) — Название проверки
-    """
-    schema_name = schema.get("schema", "?")
-    parts: list[str] = [f"=== Schema: {schema_name} ===", ""]
-    for tbl, info in schema.get("tables", {}).items():
-        comment = info.get("comment") or ""
-        parts.append(f"Table: \"{schema_name}\".{tbl} — {comment}")
-        for col, cinfo in info.get("columns", {}).items():
-            nn = " NOT NULL" if cinfo.get("not_null") else ""
-            col_comment = cinfo.get("comment") or ""
-            if col_comment:
-                parts.append(f"  {col}: {cinfo['type']}{nn} — {col_comment}")
-            else:
-                parts.append(f"  {col}: {cinfo['type']}{nn}")
-        parts.append("")
-    return "\n".join(parts)
+# Back-compat re-export: ранее здесь жили ``validate_sql`` и ``format_schema``.
+# Реализация перенесена в ``lib.utils.sql_safety`` (TARGET_ARCHITECTURE.md §4 —
+# shared infrastructure). Здесь — тонкие обёртки для обратной совместимости.
+from lib.utils.sql_safety import (  # noqa: E402, F401
+    validate_sql,
+    format_schema,
+)
 
 
 class Database(QueryBackend):

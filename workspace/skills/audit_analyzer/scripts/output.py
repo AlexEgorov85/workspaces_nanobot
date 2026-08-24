@@ -10,82 +10,15 @@
 И дополнительные поля в зависимости от режима:
     - predefined/sql: row_count, columns, rows, sql [, script_name]
     - vector: vector_results, count
+
+JSON-сериализация значений (datetime/Decimal/NaN/bytes) — через
+``_sanitize_value`` (тонкая обёртка над ``lib.utils.text_utils.sanitize_value``,
+сохранена для back-compat).
 """
 
-import decimal
-import math
-import uuid
-from datetime import date, datetime, time, timedelta
 from typing import Any
 
-
-def _sanitize_value(obj: Any) -> Any:
-    """
-    Рекурсивно привести объект к JSON-совместимому виду.
-
-    Проблема: стандартный json.dumps обрабатывает float('nan')/inf на уровне
-    C-коде encoder'а и выводит NaN/Infinity (невалидный JSON), НЕ вызывая
-    default. Поэтому мы делаем предварительную обработку.
-
-    Поддерживает:
-        datetime / date / time → .isoformat()
-        timedelta              → str()
-        Decimal                → float или int
-        UUID                   → str
-        bytes                  → str (utf-8 decode)
-        float (nan/inf)        → None
-        list / tuple / dict    → рекурсивно
-        всё остальное          → str()
-
-    Args:
-        obj: Любой объект.
-
-    Returns:
-        JSON-совместимое значение (None, bool, int, float, str, list, dict).
-
-    Пример:
-        >>> _sanitize_value(datetime(2024, 1, 15, 10, 30))
-        '2024-01-15T10:30:00'
-        >>> _sanitize_value(float('nan')) is None
-        True
-        >>> _sanitize_value(decimal.Decimal('1.23'))
-        1.23
-        >>> _sanitize_value(b'hello')
-        'hello'
-    """
-    if obj is None:
-        return None
-    if isinstance(obj, (datetime, date, time)):
-        return obj.isoformat()
-    if isinstance(obj, timedelta):
-        return str(obj)
-    if isinstance(obj, decimal.Decimal):
-        if obj == obj.to_integral_value():
-            return int(obj)
-        return float(obj)
-    if isinstance(obj, uuid.UUID):
-        return str(obj)
-    if isinstance(obj, bytes):
-        return obj.decode("utf-8", errors="replace")
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    if isinstance(obj, (int, str, bool)):
-        return obj
-    if isinstance(obj, (list, tuple)):
-        return [_sanitize_value(v) for v in obj]
-    if isinstance(obj, dict):
-        return {str(k): _sanitize_value(v) for k, v in obj.items()}
-    if hasattr(obj, "isoformat"):
-        try:
-            return obj.isoformat()
-        except Exception:
-            return str(obj)
-    try:
-        return str(obj)
-    except Exception:
-        return repr(obj)
+from lib.utils.text_utils import sanitize_value as _sanitize_value  # noqa: F401
 
 
 def prepare_output(result: dict, mode: str) -> dict:
