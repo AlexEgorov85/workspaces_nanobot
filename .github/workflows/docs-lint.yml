@@ -1,0 +1,82 @@
+name: Docs Lint
+
+on:
+  push:
+    branches: [master, release/**]
+  pull_request:
+    branches: [master, release/**]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs-size:
+    name: README.md size
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check README.md size (≤ 250 строк)
+        run: |
+          lines=$(wc -l < README.md)
+          echo "README.md: ${lines} lines"
+          if [ "$lines" -gt 250 ]; then
+            echo "::error::README.md is too large (${lines} > 250 lines). Move content to docs/"
+            exit 1
+          fi
+
+      - name: Check no Pandoc anchors
+        run: |
+          if grep -nE '\(#[^)]+\)\{#' README.md docs/*.md docs/**/*.md 2>/dev/null; then
+            echo "::error::Found Pandoc anchors (#[..]{..}). GitHub Markdown does not support them — use header slugs."
+            exit 1
+          fi
+
+      - name: Check no broken seed_default_indexes duplicates
+        run: |
+          count=$(grep -c "psql -d nanobot -f sql/audit_analyzer/seed_default_indexes.sql" README.md || true)
+          if [ "$count" -gt 1 ]; then
+            echo "::error::Found ${count} duplicates of 'psql ... seed_default_indexes.sql'. Should be 1."
+            exit 1
+          fi
+
+  docs-link-check:
+    name: Markdown link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gaurav-nelson/github-action-markdown-link-check@v1
+        with:
+          use-quiet-mode: 'yes'
+          config-file: '.markdown-link-check.json'
+        continue-on-error: true
+
+  code-blocks:
+    name: Code blocks have language
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect code blocks without language
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          pattern = re.compile(r'^```\s*$')
+          bad = []
+          for root, _, files in os.walk('.'):
+              if any(p in root for p in ('.git', '.venv', 'node_modules')):
+                  continue
+              for fn in files:
+                  if not fn.endswith('.md'):
+                      continue
+                  path = os.path.join(root, fn)
+                  with open(path, encoding='utf-8') as f:
+                      for n, line in enumerate(f, 1):
+                          if pattern.match(line):
+                              bad.append(f'{path}:{n}: fenced block without language')
+          if bad:
+              for b in bad:
+                  print(f'::error::{b}')
+              sys.exit(1)
+          print('All code blocks have language hints.')
+          PY
