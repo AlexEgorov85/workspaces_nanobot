@@ -81,10 +81,11 @@ from lib.services.table_registry import (
     table_registry,
 )
 if not table_registry.get("audit_analyzer"):
+    from lib.utils.table_utils import normalize_table_names
     table_registry.register(SkillRegistration(
         name="audit_analyzer",
         tables=tuple(_CFG.get("db_tables") or ()),
-        additional_tables=tuple(_CFG.get("db_additional_tables") or ()),
+        additional_tables=tuple(normalize_table_names(_CFG.get("db_additional_tables"))),
         vector_table=_CFG.get("mode_vector_db_table", ""),
         db_schema=_CFG.get("db_schema", "main"),
     ))
