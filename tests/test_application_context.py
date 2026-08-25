@@ -108,6 +108,11 @@ def full_fake_modules(tmp_path):
         settings.providers = MagicMock()
         cfg_mod.SETTINGS = settings
         cfg_mod.ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+        class ConfigurationError(ValueError):
+            pass
+
+        cfg_mod.ConfigurationError = ConfigurationError
         sys.modules["config"] = cfg_mod
 
         # workspace
