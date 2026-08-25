@@ -8,7 +8,7 @@
 
 ## [Unreleased]
 
-> Состояние тестов на момент правки: **1583 passed, 14 skipped** (`pytest`).
+> Состояние тестов на момент правки: **1590 passed, 14 skipped** (`pytest`).
 > Содержит три больших блока: `refactor/skills-tools-cleanup`
 > (generic tools + audit_analyzer cleanup, +архитектурные тесты),
 > `refactor/core-extract-duckdb-faiss` (lib → generic, table_registry,
@@ -217,6 +217,14 @@
   уже корректный `split('.', 1)`, в результате скрипт сообщал
   `oarb.oarb.audit_vectors`. Парсинг `--db-table` теперь поддерживает
   полное имя (`schema.table`) и обрезанное (`table` в той же схеме).
+- **`build_cache_provider` (`lib/services/cache_provider_impl.py`)** —
+  читал `storage_table`/`default_root` из `cfg["gateway"]` (skill-секции),
+  а не из глобального `gateway.vector_index` (инфра-секция). В результате
+  провайдер строился с пустым `vector_db_table=""`, и `search_vector`
+  молча возвращал 0 результатов с сообщением
+  `Индекс '<name>' не найден в кэше`. Теперь источник — глобальный
+  `SETTINGS["gateway"]["vector_index"]` (приоритет), fallback —
+  `cfg["tables"][type="vector"]` для standalone-режима.
 
 ## [2.4.0] — 2026-08-20
 

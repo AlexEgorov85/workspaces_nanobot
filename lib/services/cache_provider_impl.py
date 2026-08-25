@@ -156,14 +156,26 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
     base_dir — каталог, относительно которого разрешаются относительные пути
     кэша/индексов (для навыка это корень навыка).
 
-    ``vector_db_table`` (таблица-хранилище сырых векторов) определяется
-    элементом ``tables[]`` с ``type="vector"``. ``vector_indexes[]``
-    используется только для индексов (имя + source-таблица), не для
-    storage-таблицы.
+    ``vector_db_table`` (таблица-хранилище сырых векторов) определяется:
+      1. ``gateway.vector_index.storage_table`` (глобальная runtime-БД
+         декларация в ``SETTINGS['gateway']['vector_index']`` — основной
+         источник; заполняется через
+         ``lib.core.infra_registration.register_vector_storage``).
+      2. Fallback: ``cfg["tables"][type="vector"]`` — для standalone-утилит
+         и обратной совместимости, когда ``gateway.*`` ещё не прочитан.
+
+    Аналогично ``default_root`` для FAISS-индексов читается из глобального
+    ``gateway.vector_index.default_root`` (fallback — относительный путь
+    ``data_store/vectors``).
+
+    ``vector_indexes[]`` используется только для индексов (имя + source-
+    таблица), не для storage-таблицы.
 
     Использует ``cfg`` напрямую + ``lib.services.table_registry`` для путей.
     Не зависит от ``lib.services.audit_settings`` (TARGET §4, §22.9).
     """
+    from config import SETTINGS as _SETTINGS
+
     base = Path(base_dir) if base_dir else Path.cwd()
 
     cache = cfg.get("cache") or {}
@@ -171,7 +183,7 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
     storage_table = ""
     schemas: list[str] = []
 
-    vi_cfg = (cfg.get("gateway") or {}).get("vector_index") or {}
+    vi_cfg = (_SETTINGS.get("gateway") or {}).get("vector_index") or {}
     storage_table = vi_cfg.get("storage_table") or ""
 
     for entry in cfg.get("tables") or []:
@@ -204,7 +216,7 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
     index_path = ""
     vi_name = vi_first.get("name", "")
     if vi_name:
-        vi_cfg = (cfg.get("gateway", {}) or {}).get("vector_index") or {}
+        vi_cfg = (_SETTINGS.get("gateway") or {}).get("vector_index") or {}
         root = vi_cfg.get("default_root") or "data_store/vectors"
         idx = Path(root) / vi_name
         index_path = str(idx) if idx.is_absolute() else str(base / idx)
