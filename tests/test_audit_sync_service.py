@@ -136,6 +136,39 @@ class TestLifecycle:
         assert s._track_column_for("audits") == "updated_at"
         assert s._track_column_for("oarb.audit_vectors") == "id"
 
+    def test_track_column_from_registry_overrides(self):
+        from lib.services.table_registry import SkillRegistration, table_registry
+
+        table_registry.register(SkillRegistration(
+            name="audit_analyzer",
+            tables=("oarb.audits", "oarb.report_items"),
+            vector_table="oarb.audit_vectors",
+            db_schema="oarb",
+            track_column_overrides={"oarb.report_items": "modified_at"},
+        ))
+        try:
+            s = AuditSyncService(dsn="postgresql://u@h/db", vector_table="oarb.audit_vectors")
+            assert s._track_column_for("oarb.report_items") == "modified_at"
+            assert s._track_column_for("oarb.audits") == "updated_at"
+            assert s._track_column_for("oarb.unknown") == "updated_at"
+        finally:
+            table_registry.unregister("audit_analyzer")
+
+    def test_track_column_disabled_skill_falls_back(self):
+        from lib.services.table_registry import SkillRegistration, table_registry
+
+        table_registry.register(SkillRegistration(
+            name="audit_analyzer",
+            tables=("oarb.report_items",),
+            enabled=False,
+            track_column_overrides={"oarb.report_items": "modified_at"},
+        ))
+        try:
+            s = AuditSyncService(dsn="postgresql://u@h/db")
+            assert s._track_column_for("oarb.report_items") == "updated_at"
+        finally:
+            table_registry.unregister("audit_analyzer")
+
 
 # ---------------------------------------------------------------------------
 # Worker: поллинг и диспатч
