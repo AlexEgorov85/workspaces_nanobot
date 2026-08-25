@@ -363,6 +363,106 @@ class TestSingleton:
         assert "x.y" in table_registry.table_names()
 
 
+class TestRegisterInfra:
+    """Инфраструктурные ресурсы (общий runtime, не skill).
+
+    Контракт:
+      * отдельный namespace ``_infra``;
+      * агрегаторы (``table_names``, ``vector_names``, ``resources``,
+        ``tracking_column_for``) объединяют skills + infra;
+      * ``resources_by_label`` инфру **не** смотрит (label — доменная метка).
+    """
+
+    def test_register_infra_basic(self) -> None:
+        table_registry.register_infra(
+            "vector_index.storage",
+            (VectorResource(name="oarb.audit_vectors"),),
+        )
+        assert "oarb.audit_vectors" in table_registry.vector_names()
+        assert table_registry.get_infra("vector_index.storage") != ()
+
+    def test_register_infra_replaces_same_key(self) -> None:
+        table_registry.register_infra("k", (VectorResource(name="a.v1"),))
+        table_registry.register_infra("k", (VectorResource(name="a.v2"),))
+        assert table_registry.get_infra("k")[0].name == "a.v2"
+        assert "a.v1" not in table_registry.vector_names()
+
+    def test_register_infra_validates_key(self) -> None:
+        with pytest.raises(ValueError, match="key"):
+            table_registry.register_infra("", (VectorResource(name="a.v"),))
+
+    def test_register_infra_validates_resources_type(self) -> None:
+        with pytest.raises(TypeError, match="tuple"):
+            table_registry.register_infra("k", [VectorResource(name="a.v")])
+        with pytest.raises(TypeError, match="TableResource/VectorResource"):
+            table_registry.register_infra("k", ("not-a-resource",))
+
+    def test_infra_does_not_conflict_with_skill_namespace(self) -> None:
+        table_registry.register_infra("audit_analyzer", (VectorResource(name="a.v"),))
+        table_registry.register(SkillRegistration(name="audit_analyzer"))
+        assert table_registry.get("audit_analyzer") is not None
+        assert table_registry.get_infra("audit_analyzer") != ()
+
+    def test_unregister_infra(self) -> None:
+        table_registry.register_infra("k", (VectorResource(name="a.v"),))
+        assert "a.v" in table_registry.vector_names()
+        table_registry.unregister_infra("k")
+        assert "a.v" not in table_registry.vector_names()
+
+    def test_clear_resets_infra(self) -> None:
+        table_registry.register_infra("k", (VectorResource(name="a.v"),))
+        table_registry.clear()
+        assert table_registry.get_infra("k") == ()
+        assert table_registry.infra_keys() == ()
+
+    def test_infra_keys_sorted(self) -> None:
+        table_registry.register_infra("b", (VectorResource(name="a.v1"),))
+        table_registry.register_infra("a", (VectorResource(name="a.v2"),))
+        assert table_registry.infra_keys() == ("a", "b")
+
+    def test_infra_combined_with_skills(self) -> None:
+        table_registry.register(SkillRegistration(
+            name="s1",
+            resources=(
+                TableResource(name="s.t1"),
+                VectorResource(name="s.v1"),
+            ),
+        ))
+        table_registry.register_infra(
+            "vector_index.storage",
+            (VectorResource(name="i.v2"),),
+        )
+        assert "s.t1" in table_registry.table_names()
+        assert "s.v1" in table_registry.vector_names()
+        assert "i.v2" in table_registry.vector_names()
+
+    def test_resources_by_label_ignores_infra(self) -> None:
+        table_registry.register_infra(
+            "vector_index.storage",
+            (VectorResource(name="i.v"),),
+        )
+        table_registry.register(SkillRegistration(
+            name="s1",
+            resources=(TableResource(name="s.t1", label="scripts_registry"),),
+        ))
+        found = table_registry.resources_by_label("scripts_registry")
+        assert {r.name for r in found} == {"s.t1"}
+
+    def test_tracking_column_for_infra_vector(self) -> None:
+        table_registry.register_infra("k", (VectorResource(name="i.v"),))
+        assert table_registry.tracking_column_for("i.v") == "id"
+
+    def test_tracking_column_for_infra_table_with_explicit(self) -> None:
+        table_registry.register_infra(
+            "k",
+            (TableResource(name="i.t", tracking_column="created_at"),),
+        )
+        assert table_registry.tracking_column_for("i.t") == "created_at"
+
+    def test_tracking_column_for_unknown_defaults_updated_at(self) -> None:
+        assert table_registry.tracking_column_for("unknown.tbl") == "updated_at"
+
+
 class TestNoLegacyAPI:
     """Реестр не должен предоставлять legacy-методов или legacy-полей."""
 
