@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -46,7 +46,7 @@ class SkillRegistration:
     db_schema: str = "main"
     track_column: str = "updated_at"
     track_column_overrides: dict[str, str] = field(default_factory=dict)
-    poll_interval_sec: Optional[float] = None
+    poll_interval_sec: float | None = None
     enabled: bool = True
 
     def __post_init__(self) -> None:
@@ -105,7 +105,7 @@ class TableRegistry:
         """Удалить регистрацию skill'а (для graceful shutdown)."""
         self._registrations.pop(name, None)
 
-    def get(self, name: str) -> Optional[SkillRegistration]:
+    def get(self, name: str) -> SkillRegistration | None:
         return self._registrations.get(name)
 
     def names(self) -> tuple[str, ...]:
@@ -117,7 +117,7 @@ class TableRegistry:
             sorted(name for name, reg in self._registrations.items() if reg.enabled)
         )
 
-    def skill_for_table(self, table: str) -> Optional[SkillRegistration]:
+    def skill_for_table(self, table: str) -> SkillRegistration | None:
         """Найти регистрацию, владеющую данной таблицей."""
         for reg in self._registrations.values():
             if not reg.enabled:
@@ -151,7 +151,7 @@ class TableRegistry:
         """Таблицы для синка (все, включая vector_table)."""
         return self.all_tables()
 
-    def vector_table(self) -> Optional[str]:
+    def vector_table(self) -> str | None:
         """Первая зарегистрированная vector_table (для FAISS)."""
         for reg in self._registrations.values():
             if reg.vector_table:
