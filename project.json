@@ -160,25 +160,21 @@
         {"name": "public.agent_predefined_scripts", "tracking_column": "updated_at", "label": "scripts_registry"}
       ],
 
-      "vector_indexes": [                            // Какие индексы относятся к навыку.
-                                                  //   name   — логическое имя индекса (как его
-                                                  //            видит tool vector_search и
-                                                  //            <gateway.vector_index.default_root>/<name>
-                                                  //            даёт путь к FAISS-файлу).
-                                                  //   source — PG-таблица, из которой
-                                                  //            tools/build_vectors.py берёт строки
-                                                  //            для эмбеддингов (→ oarb.audit_vectors).
+      "vector_indexes": [                            // Имена индексов, используемых навыком.
+                                                   //   name — логическое имя индекса (как его
+                                                   //          видит tool vector_search и
+                                                   //          <default_root>/<name> даёт путь к FAISS).
+                                                   //   source-таблица (PG-таблица исходных строк)
+                                                   //   хранится в public.agent_vector_index_config
+                                                   //   (runtime-БД, инфраструктурная декларация).
         {
-          "name": "audits_index",
-          "source": "oarb.audits"
+          "name": "audits_index"
         },
         {
-          "name": "violations_index",
-          "source": "oarb.violations"
+          "name": "violations_index"
         },
         {
-          "name": "audit_reports_index",
-          "source": "oarb.audit_reports"
+          "name": "audit_reports_index"
         }
       ],
 

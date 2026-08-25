@@ -77,9 +77,9 @@ def _required_keys():
             {"name": "public.agent_predefined_scripts", "tracking_column": "updated_at", "label": "scripts_registry"},
         ]),
         ("skills.audit_analyzer.vector_indexes", [
-            {"name": "audits_index", "source": "oarb.audits"},
-            {"name": "violations_index", "source": "oarb.violations"},
-            {"name": "audit_reports_index", "source": "oarb.audit_reports"},
+            {"name": "audits_index"},
+            {"name": "violations_index"},
+            {"name": "audit_reports_index"},
         ]),
         # Sync-параметры глобальные, живут в gateway.sync.* (Phase 6 рефакторинга).
         ("gateway.sync.poll_interval_sec", 14400),

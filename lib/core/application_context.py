@@ -162,6 +162,7 @@ class ApplicationContext:
         # 5. PgDuckDbSyncService + DuckDbCacheStore
         if enable_audit:
             _auto_register_skills(ctx)
+            _register_infra_resources(ctx)
             ctx.sync_service, ctx.cache_store = _make_sync_services(ctx)
 
         # 6. BusFactory + AgentFactory
@@ -427,20 +428,13 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
 
 
 def _make_sync_services(ctx: ApplicationContext) -> tuple:
-    """Собрать ``(PgDuckDbSyncService, DuckDbCacheStore)`` для всех зарегистрированных навыков.
+    """Собрать ``(PgDuckDbSyncService, DuckDbCacheStore)``.
 
-    Использует ``lib.services.table_registry`` — собирает ресурсы со ВСЕХ
-    навыков, зарегистрированных через ``_auto_register_skills`` из
-    ``project.json::skills.*``. Sync-параметры берутся из глобальной секции
-    ``gateway.sync.*`` (один SyncService на все skills, потому что sync —
-    это свойство runtime infrastructure, а не skill-домена).
+    Список таблиц берётся из ``TableRegistry`` (skills + infra).
+    Sync-параметры — из ``gateway.sync.*``. Snapshot — общий
+    ``<workspace>/data_store/duckdb/cache.duckdb``.
 
-    Возвращает ``(None, None)`` если:
-      * реестр пуст (ни один skill не зарегистрирован);
-      * нет DSN (некуда подключаться).
-
-    Snapshot путь — общий ``<workspace>/data_store/duckdb/cache.duckdb``
-    (см. ``TableRegistry.snapshot_path``).
+    Возвращает ``(None, None)`` если реестр пуст или нет DSN.
     """
     from lib.services.table_registry import table_registry
 
@@ -449,7 +443,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     if isinstance(pg, dict):
         dsn = pg.get("dsn", "") or ""
 
-    if not table_registry.names() or not dsn:
+    if not table_registry.resources() or not dsn:
         return None, None
 
     from lib.services.duckdb_cache_store import DuckDbCacheStore
@@ -461,7 +455,6 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     if not all_table_names and not vector_names:
         return None, None
 
-    # Схемы для in-memory store — берём уникальные схемы из имён ресурсов.
     schemas: list[str] = []
     for r in (*table_registry.table_resources(), *table_registry.vector_resources()):
         if "." in r.name:
@@ -471,13 +464,11 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
 
     publish_path = str(table_registry.snapshot_path(ctx.config.workspace_path))
 
-    # Embedding-конфиг — из table_registry (generic, не зависит от skill).
     emb = table_registry.embedding_config()
     embedding_base_url = emb.get("base_url", "")
     embedding_model = emb.get("model", "mxbai-embed-large:latest")
     embedding_dimension = int(emb.get("dimension", 1024))
 
-    # Sync-параметры: глобальная runtime-секция ``gateway.sync.*``.
     sync_cfg = (ctx.config_service.settings_section("gateway") or {}).get("sync") or {}
     poll_interval_sec = float(sync_cfg.get("poll_interval_sec", 0) or 0)
     max_queue_size = int(sync_cfg.get("max_queue_size", 0) or 0)
@@ -485,9 +476,6 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     reconnect_backoff_max = float(sync_cfg.get("reconnect_backoff_max_sec", 0) or 0)
     full_resync_every = int(sync_cfg.get("full_resync_every", 0) or 0)
 
-    # Sync получает единый список: все таблицы + все vector-таблицы.
-    # PgDuckDbSyncService различает «обычная vs vector» через track_column_for()
-    # (vector → "id", обычная → "updated_at"), который читает ресурсы skill'а.
     sync_tables = list(dict.fromkeys(all_table_names + vector_names))
 
     store = DuckDbCacheStore(
@@ -517,13 +505,9 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
 
 
 def _auto_register_skills(ctx: ApplicationContext) -> None:
-    """Зарегистрировать все skills из ``project.json::skills.*`` в ``table_registry``.
+    """Зарегистрировать skills из ``project.json::skills.*`` в ``table_registry``.
 
-    Делегирует ``lib.core.skill_registration.register_skill_from_config`` —
-    общая логика для runtime (``ApplicationContext``) и standalone-утилит
-    (``tools/build_vectors.py``).
-
-    Чтобы добавить новый skill, достаточно добавить секцию в ``project.json``.
+    Делегирует ``lib.core.skill_registration.register_skill_from_config``.
     """
     from lib.core.skill_registration import register_skill_from_config
 
@@ -533,6 +517,37 @@ def _auto_register_skills(ctx: ApplicationContext) -> None:
 
     for name, cfg in skills.items():
         register_skill_from_config(name, cfg)
+
+
+_INFRA_KEY_VECTOR_STORAGE = "vector_index.storage"
+
+
+def _register_infra_resources(ctx: ApplicationContext) -> None:
+    """Зарегистрировать инфраструктурные ресурсы runtime'а.
+
+    Сейчас: ``vector_index.storage`` — единая PG-таблица-хранилище сырых
+    эмбеддингов (``gateway.vector_index.storage_table``). Регистрируется
+    как ``VectorResource`` и попадает в DuckDB-кэш через sync, чтобы
+    ``vector_search`` мог читать вектора из локального снимка.
+
+    Какие индексы строить и из каких source-таблиц — описывается в
+    ``public.agent_vector_index_config`` (runtime-БД).
+    """
+    from lib.services.table_registry import VectorResource, table_registry
+
+    gateway_cfg = ctx.config_service.settings_section("gateway") or {}
+    vi_cfg = gateway_cfg.get("vector_index") or {} if isinstance(gateway_cfg, dict) else {}
+    storage_table = vi_cfg.get("storage_table") if isinstance(vi_cfg, dict) else None
+
+    if (
+        isinstance(storage_table, str)
+        and "." in storage_table
+        and not table_registry.get_infra(_INFRA_KEY_VECTOR_STORAGE)
+    ):
+        table_registry.register_infra(
+            _INFRA_KEY_VECTOR_STORAGE,
+            (VectorResource(name=storage_table, tracking_column="id"),),
+        )
 
 
 def _make_transcription(config: Any) -> Any:

@@ -159,18 +159,37 @@ class TestAutoRegisterTypeVector:
 
 
 class TestAutoRegisterVectorIndexes:
-    """``vector_indexes: []`` → ``VectorResource`` с ``tracking_column='id'``."""
+    """``vector_indexes: []`` — список имён индексов, не регистрирует ресурс.
 
-    def test_vector_index_registered(self) -> None:
+    В новой архитектуре storage-таблица векторов — инфраструктурный ресурс
+    (``gateway.vector_index.storage_table`` → ``TableRegistry.register_infra``).
+    ``vector_indexes[].source`` (PG-таблица исходных строк) — тоже
+    инфраструктурный (хранится в ``public.agent_vector_index_config``),
+    skill его не знает.
+    """
+
+    def test_vector_index_source_not_registered_as_resource(self) -> None:
         ctx = _make_ctx({"x": {"tables": [{"name": "public.t1"}], "vector_indexes": [
             {"name": "audits_index", "source": "oarb.audit_vectors"},
         ]}})
         _auto_register_skills(ctx)
         reg = table_registry.get("x")
-        vectors = reg.vector_resources()
-        assert len(vectors) == 1
-        assert vectors[0].name == "oarb.audit_vectors"
-        assert vectors[0].tracking_column == "id"
+        assert reg.vector_resources() == ()
+        assert {r.name for r in reg.table_resources()} == {"public.t1"}
+
+    def test_vector_index_names_preserved_in_config(self) -> None:
+        """Имена индексов остаются в конфиге skill'а — build-tools их читают."""
+        cfg = {
+            "tables": [],
+            "vector_indexes": [
+                {"name": "audits_index"},
+                {"name": "violations_index"},
+            ],
+        }
+        ctx = _make_ctx({"x": cfg})
+        _auto_register_skills(ctx)
+        names = [v["name"] for v in cfg["vector_indexes"]]
+        assert names == ["audits_index", "violations_index"]
 
 
 class TestAutoRegisterScriptsRegistry:

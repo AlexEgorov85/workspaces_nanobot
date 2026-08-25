@@ -1,17 +1,18 @@
-"""Утилиты для декларативной регистрации Skill'ов в ``table_registry``.
+"""Утилиты для регистрации skill'ов в ``table_registry``.
 
-Это переиспользуемая часть логики, которая живёт в ``ApplicationContext._auto_register_skills``
-для runtime-старта и в standalone-утилитах (``tools/build_vectors.py``) для
-запуска вне полного ApplicationContext.
+Используется в ``ApplicationContext._auto_register_skills`` (runtime старт
+gateway) и в standalone-утилитах (``tools/build_vectors.py``).
 
-Здесь нет runtime-инфраструктуры (PG, DuckDB, FAISS) — только преобразование
-конфиг-секции в набор ``TableResource``/``VectorResource`` и регистрация.
+Контракт декларации skill'а в ``project.json``:
 
-Новая модель (v7):
-  - ``SkillSettings.tables: list[str | TableEntry]`` — единый список ресурсов.
-  - ``SkillSettings.vector_indexes: list[VectorIndexEntry]`` — vector-индексы.
-  - ``db.*`` удалён; ``schema`` удалён (имена fully qualified).
-  - ``register.py`` удалён; декларация только через ``project.json``.
+* ``tables`` — единый список ресурсов (str | dict). Поле ``type="vector"``
+  определяет, что ресурс — ``VectorResource`` (а не ``TableResource``).
+* ``vector_indexes`` — список имён индексов, которые использует skill
+  (для ``get_vector_index_path()`` и build-tool'ов). НЕ регистрирует
+  ресурс: storage-таблица векторов — инфраструктурный ресурс
+  (``gateway.vector_index.storage_table`` → ``TableRegistry.register_infra``),
+  source-таблица — инфраструктурный (хранится в
+  ``public.agent_vector_index_config``).
 """
 
 from __future__ import annotations
@@ -29,16 +30,8 @@ from lib.services.table_registry import (
 def build_resources_for_skill(skill_cfg: dict) -> list:
     """Построить список ресурсов для одного skill'а из его секции ``project.json``.
 
-    Новая модель (Phase 7):
-      * ``skill_cfg["tables"]`` — единый список ресурсов (str | TableEntry).
-        Поле ``type="vector"`` определяет, что ресурс — ``VectorResource``
-        (а не обычный ``TableResource``); остальные — ``TableResource``.
-      * ``skill_cfg["vector_indexes"]`` — список VectorIndexEntry
-        (min-контракт: ``name`` + ``source``; backend-specific поля —
-        ``extra="allow"``, runtime читает напрямую).
-
     Дедупликация: если ``name`` встречается дважды, второй экземпляр
-    пропускается (первый выигрывает).
+    пропускается.
     """
     resources: list = []
     seen_names: set[str] = set()
@@ -63,39 +56,24 @@ def build_resources_for_skill(skill_cfg: dict) -> list:
                 ))
             seen_names.add(name)
 
-    for idx in skill_cfg.get("vector_indexes") or []:
-        if not isinstance(idx, dict):
-            continue
-        source = idx.get("source")
-        if not source or source in seen_names:
-            continue
-        resources.append(VectorResource(name=source, tracking_column="id"))
-        seen_names.add(source)
-
     return resources
 
 
 def register_skill_from_config(skill_name: str, cfg: dict, registry=None) -> SkillRegistration | None:
     """Зарегистрировать skill в ``table_registry`` из его ``project.json``-секции.
 
-    Используется в двух контекстах:
-      * ``ApplicationContext._auto_register_skills`` (runtime старт gateway);
-      * standalone-утилиты (``tools/build_vectors.py``) для запуска без
-        полного ApplicationContext.
-
-    Поведение:
-      * ``enabled=False`` → skill пропускается (None возвращается);
-      * skill уже зарегистрирован в ``table_registry`` → не перезаписывается;
-      * embedding-конфиг (``base_url``, ``model``, ``dimension``, ``timeout_sec``)
-        ставится в ``registry.set_embedding_config(...)``, если задан.
+    ``enabled=False`` → skill пропускается (``None``).
+    Skill уже зарегистрирован → возвращается существующая запись.
+    Embedding-конфиг (``base_url``, ``model``, ``dimension``, ``timeout_sec``)
+    ставится в ``registry.set_embedding_config(...)``, если задан.
 
     Args:
-        skill_name: имя skill'а (для регистрации в реестре).
-        cfg: секция ``skills.<skill_name>`` из project.json (сырая dict-форма).
-        registry: реестр для регистрации (по умолчанию — singleton ``table_registry``).
+        skill_name: имя skill'а.
+        cfg: секция ``skills.<skill_name>`` из project.json.
+        registry: реестр для регистрации (по умолчанию — singleton).
 
     Returns:
-        Зарегистрированный ``SkillRegistration`` или ``None``, если skill пропущен.
+        ``SkillRegistration`` или ``None``, если skill пропущен.
     """
     if not isinstance(cfg, dict):
         return None
