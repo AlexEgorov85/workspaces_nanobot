@@ -321,15 +321,10 @@
       "max_result_chars": 16000,
       "timeout_sec": 30
     },
-    //  vector_index.* — общая инфраструктура FAISS и связанных storage-таблиц.
-    //  Раньше всё это жило в skill'е (vector_indexes[].default_path + tables[]
-    //  с type="vector"), что смешивало инфраструктуру и домен навыка. Теперь:
+    //  vector_index.* — общая инфраструктура FAISS.
     //    storage_tables — PG-таблицы-хранилища сырых эмбеддингов (по
     //                     формату "schema.table"); регистрируются как
     //                     VectorResource и попадают в DuckDB-кэш.
-    //    cache_tables   — PG-таблицы, реплицируемые в DuckDB-кэш
-    //                     (workspace/data_store/duckdb/cache.duckdb) — это
-    //                     storage_tables + доменные таблицы, нужные runtime'у.
     //    default_root   — корневая папка FAISS-индексов; путь к индексу =
     //                     <default_root>/<index_name>.
     //    backend        — runtime-бэкенд построения индексов ("faiss" и т.п.).
@@ -337,13 +332,6 @@
     "vector_index": {
       "enable": true,
       "storage_tables": [
-        "oarb.audit_vectors"
-      ],
-      "cache_tables": [
-        "oarb.audit_reports",
-        "oarb.audits",
-        "oarb.report_items",
-        "oarb.violations",
         "oarb.audit_vectors"
       ],
       "default_root": "data_store/vectors",

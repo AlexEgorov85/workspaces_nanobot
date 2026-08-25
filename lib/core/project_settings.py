@@ -88,9 +88,6 @@ class VectorIndexSettings(_StrictOptional):
 
       * ``storage_tables`` — список PG-таблиц-хранилищ сырых эмбеддингов
         (одна общая или несколько; имя в формате ``schema.table``).
-      * ``cache_tables`` — список PG-таблиц, которые runtime-sync
-        (PgDuckDbSyncService) реплицирует в локальный DuckDB-кэш
-        (``workspace/data_store/duckdb/cache.duckdb``).
       * ``default_root`` — корневая папка FAISS-индексов; путь к индексу =
         ``<default_root>/<index_name>``.
 
@@ -104,16 +101,12 @@ class VectorIndexSettings(_StrictOptional):
             (по схеме-имени, например ``["oarb.audit_vectors"]``). Эти
             таблицы регистрируются как ``VectorResource`` в table_registry
             и попадают в DuckDB-кэш.
-        cache_tables: список PG-таблиц для репликации в DuckDB-кэш
-            (доменные таблицы, из которых считаются эмбеддинги, плюс
-            хранилища). По схеме-имени.
     """
 
     enable: bool | None = None
     default_root: str | None = None
     backend: str | None = None
     storage_tables: list[str] | None = None
-    cache_tables: list[str] | None = None
 
 
 class HeartbeatSettings(_StrictOptional):

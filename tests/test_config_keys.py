@@ -149,13 +149,6 @@ def _required_keys():
         ("gateway.vector_index.default_root", "data_store/vectors"),
         ("gateway.vector_index.backend", "faiss"),
         ("gateway.vector_index.storage_tables", ["oarb.audit_vectors"]),
-        ("gateway.vector_index.cache_tables", [
-            "oarb.audit_reports",
-            "oarb.audits",
-            "oarb.report_items",
-            "oarb.violations",
-            "oarb.audit_vectors",
-        ]),
         # logging.db
         ("logging.db.enabled", True),
         ("logging.db.table_name", "agent_gateway_logs"),
