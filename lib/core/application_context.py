@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +43,9 @@ class ApplicationContext:
     storage_mode: str
 
     # Сервисы (опциональные)
-    db_logging_service: Optional[Any] = None
-    audit_sync_service: Optional[Any] = None
-    audit_memory_store: Optional[Any] = None
+    db_logging_service: Any | None = None
+    audit_sync_service: Any | None = None
+    audit_memory_store: Any | None = None
 
     # Помощники
     config_service: Any = None
@@ -63,7 +63,7 @@ class ApplicationContext:
 
     # Lifecycle
     _started: bool = False
-    _shutdown: Optional[Any] = None  # ShutdownCoordinator
+    _shutdown: Any | None = None  # ShutdownCoordinator
 
     @classmethod
     def create(
@@ -74,10 +74,10 @@ class ApplicationContext:
         enable_db_logging: bool = True,
         enable_audit: bool = True,
         enable_cron: bool = False,
-        storage_override: Optional[str] = None,
-        session_override: Optional[str] = None,
+        storage_override: str | None = None,
+        session_override: str | None = None,
         print_llm_calls: bool = False,
-    ) -> "ApplicationContext":
+    ) -> ApplicationContext:
         """Собрать контекст приложения.
 
         Args:
@@ -321,7 +321,7 @@ class ApplicationContext:
 # ----------------------------------------------------------------------
 
 
-def _log_connected_hooks(ctx: "ApplicationContext") -> None:
+def _log_connected_hooks(ctx: ApplicationContext) -> None:
     """Однократно вывести полный список подключённых хуков.
 
     Единая точка вывода: плагины ``workspace/hooks/`` + фреймворковые
@@ -368,7 +368,7 @@ def _resolve_agent_id(config: Any) -> str:
     return "main"
 
 
-def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
+def _make_db_logging(ctx: ApplicationContext) -> Any | None:
     """Собрать ``DbLoggingService`` из секции ``logging.db`` в settings.
 
     Возвращает ``None`` если:
@@ -381,8 +381,8 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
     нет: при недоступности БД события выбрасываются.
     """
     try:
-        from lib.services.db_logging_service import DbLoggingService
         from lib.services.config_service import ConfigService  # noqa: F401
+        from lib.services.db_logging_service import DbLoggingService
     except Exception as exc:
         logger.warning("DbLoggingService unavailable: %s", exc)
         return None
@@ -426,7 +426,7 @@ def _make_db_logging(ctx: "ApplicationContext") -> Optional[Any]:
     )
 
 
-def _make_sync_services(ctx: "ApplicationContext") -> tuple:
+def _make_sync_services(ctx: ApplicationContext) -> tuple:
     """Собрать ``(AuditSyncService, AuditMemoryStore)`` для всех зарегистрированных навыков.
 
     Использует ``lib.services.table_registry`` — собирает таблицы и метаданные
@@ -534,7 +534,7 @@ def _make_sync_services(ctx: "ApplicationContext") -> tuple:
 _make_audit_services = _make_sync_services
 
 
-def _auto_register_skills(ctx: "ApplicationContext") -> None:
+def _auto_register_skills(ctx: ApplicationContext) -> None:
     """Auto-discover: найти все skill'ы с ``register()`` и зарегистрировать их.
 
     Каждый skill может содержать ``scripts/register.py`` с функцией
@@ -547,7 +547,6 @@ def _auto_register_skills(ctx: "ApplicationContext") -> None:
     """
     import importlib
     import importlib.util
-    from pathlib import Path
 
     from lib.services.table_registry import table_registry
 

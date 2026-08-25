@@ -29,7 +29,8 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 import psycopg2
 import psycopg2.extras
@@ -55,7 +56,7 @@ class AuditSyncService:
         self,
         dsn: str,
         schema: str = "main",
-        tables: Optional[List[str]] = None,
+        tables: list[str] | None = None,
         vector_table: str = "",
         poll_interval_sec: float = 0.0,
         max_queue_size: int = 0,
@@ -76,23 +77,23 @@ class AuditSyncService:
         self._full_resync_every = max(0, int(full_resync_every))
         self._resync_counter = 0
 
-        self._queue: "queue.Queue[tuple[str, Any]]" = queue.Queue(maxsize=max_queue_size)
+        self._queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=max_queue_size)
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
 
-        self._conn: Optional[psycopg2.extensions.connection] = None
-        self._thread: Optional[threading.Thread] = None
+        self._conn: psycopg2.extensions.connection | None = None
+        self._thread: threading.Thread | None = None
         self._running = False
         self._initial_load = True
 
         # Инкрементальный поллинг: {table: последнее значение track-колонки}
-        self._last_sync: Dict[str, Any] = {}
-        self._on_new_records: Optional[Callable[[str, List[dict]], None]] = None
-        self._on_replace_records: Optional[Callable[[str, List[dict]], None]] = None
-        self._on_schema: Optional[Callable[[str, List[dict]], None]] = None
-        self._on_sync_callback: Optional[Callable[[], None]] = None
+        self._last_sync: dict[str, Any] = {}
+        self._on_new_records: Callable[[str, list[dict]], None] | None = None
+        self._on_replace_records: Callable[[str, list[dict]], None] | None = None
+        self._on_schema: Callable[[str, list[dict]], None] | None = None
+        self._on_sync_callback: Callable[[], None] | None = None
 
-        self._stats: Dict[str, Any] = {
+        self._stats: dict[str, Any] = {
             "started_at": None,
             "polls": 0,
             "full_resyncs": 0,
@@ -107,13 +108,13 @@ class AuditSyncService:
     # ------------------------------------------------------------------
 
     def set_on_new_records_callback(
-        self, callback: Callable[[str, List[dict]], None]
+        self, callback: Callable[[str, list[dict]], None]
     ) -> None:
         """Задать callback для новых/изменённых строк: ``callback(table, records)``."""
         self._on_new_records = callback
 
     def set_on_replace_records_callback(
-        self, callback: Callable[[str, List[dict]], None]
+        self, callback: Callable[[str, list[dict]], None]
     ) -> None:
         """Задать callback для полной пересинхронизации: ``callback(table, records)``.
 
@@ -123,7 +124,7 @@ class AuditSyncService:
         self._on_replace_records = callback
 
     def set_on_schema_callback(
-        self, callback: Callable[[str, List[dict]], None]
+        self, callback: Callable[[str, list[dict]], None]
     ) -> None:
         """Задать callback для описания колонок таблицы из PG information_schema.
 
@@ -172,7 +173,7 @@ class AuditSyncService:
             self._thread = None
         self._close_connection()
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Мониторинг: размер очереди, счётчики, состояние подключения."""
         with self._state_lock:
             stats = dict(self._stats)
@@ -194,7 +195,7 @@ class AuditSyncService:
         )
         return stats
 
-    def get_sync_stats(self) -> Dict[str, Any]:
+    def get_sync_stats(self) -> dict[str, Any]:
         """Псевдоним ``get_stats`` (используется в мониторинге/логах)."""
         return self.get_stats()
 
@@ -328,7 +329,7 @@ class AuditSyncService:
                 # Пустая таблица: запоминаем "сейчас", чтобы дальше
                 # поллить инкрементально, а не перечитывать всё.
                 self._last_sync[table] = datetime.datetime.now(
-                    datetime.timezone.utc
+                    datetime.UTC
                 )
 
     def _poll_changes(self) -> None:
@@ -396,7 +397,7 @@ class AuditSyncService:
         if last is not None:
             self._last_sync[table] = last
 
-    def _dispatch(self, table: str, rows: List[dict]) -> None:
+    def _dispatch(self, table: str, rows: list[dict]) -> None:
         if not rows:
             return
         callback = self._on_new_records
@@ -407,7 +408,7 @@ class AuditSyncService:
                 with self._state_lock:
                     self._stats["errors"] += 1
 
-    def _dispatch_replace(self, table: str, rows: List[dict]) -> None:
+    def _dispatch_replace(self, table: str, rows: list[dict]) -> None:
         """Полная пересинхронизация: заменить содержимое таблицы целиком."""
         callback = self._on_replace_records
         if callback is None:
@@ -432,13 +433,13 @@ class AuditSyncService:
             with self._state_lock:
                 self._stats["errors"] += 1
 
-    def _fetch_schema(self, table: str) -> List[dict]:
+    def _fetch_schema(self, table: str) -> list[dict]:
         """Описание колонок таблицы из PG: типы, NOT NULL, комментарии."""
         schema, name = self._split_table(table)
         if not name:
             return []
 
-        def _work(conn: Any) -> List[dict]:
+        def _work(conn: Any) -> list[dict]:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             try:
                 cur.execute(
@@ -473,7 +474,7 @@ class AuditSyncService:
 
         col_rows, table_comment = self._db_run(_work)
 
-        columns: List[dict] = []
+        columns: list[dict] = []
         if table_comment:
             columns.append({
                 "name": "__table__", "type": "", "not_null": False,
@@ -520,8 +521,8 @@ class AuditSyncService:
             configure(self._dsn)
         return run(fn)
 
-    def _fetch_all(self, table: str) -> tuple[List[dict], Any]:
-        def _work(conn: Any) -> tuple[List[dict], Any]:
+    def _fetch_all(self, table: str) -> tuple[list[dict], Any]:
+        def _work(conn: Any) -> tuple[list[dict], Any]:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             try:
                 cur.execute(f'SELECT * FROM {self._fq_table(table)}')
@@ -537,8 +538,8 @@ class AuditSyncService:
 
     def _fetch_incremental(
         self, table: str, track_col: str, last: Any
-    ) -> tuple[List[dict], Any]:
-        def _work(conn: Any) -> List[dict]:
+    ) -> tuple[list[dict], Any]:
+        def _work(conn: Any) -> list[dict]:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             try:
                 cur.execute(
@@ -554,7 +555,7 @@ class AuditSyncService:
         return rows, self._max_track(rows, track_col)
 
     @staticmethod
-    def _max_track(rows: List[dict], track_col: str) -> Any:
+    def _max_track(rows: list[dict], track_col: str) -> Any:
         values = [r.get(track_col) for r in rows if r.get(track_col) is not None]
         return max(values) if values else None
 
