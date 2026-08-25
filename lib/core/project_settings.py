@@ -79,34 +79,28 @@ class VectorSearchSettings(_StrictOptional):
 
 
 class VectorIndexSettings(_StrictOptional):
-    """Параметры FAISS-хранилища индексов (общая инфраструктура).
+    """Параметры FAISS-инфраструктуры.
 
-    До рефакторинга backend-specific поля (default_path, storage-таблица
-    ``oarb.audit_vectors``) жили прямо в skill'е через ``tables[]`` с
-    ``type="vector"``. Это смешивало инфраструктуру и домен навыка: storage
-    общий на все skill'ы, не относится к конкретному навыку. Теперь:
-
-      * ``storage_tables`` — список PG-таблиц-хранилищ сырых эмбеддингов
-        (одна общая или несколько; имя в формате ``schema.table``).
-      * ``default_root`` — корневая папка FAISS-индексов; путь к индексу =
-        ``<default_root>/<index_name>``.
+    Хранилище эмбеддингов и сами индексы — общий runtime, не привязанный
+    к домену skill'а. Доменные таблицы, нужные в DuckDB-кэше, декларируются
+    в ``skills.<name>.tables[]``. Какие индексы строить и из каких
+    source-таблиц — описывается в ``public.agent_vector_index_config``
+    (runtime-БД).
 
     Attributes:
         enable: включён ли vector-indexing слой. ``None`` → дефолт ``True``.
         default_root: корневая папка FAISS-индексов. Дефолт
             ``"data_store/vectors"``. Путь к индексу = ``<root>/<name>``.
-        backend: runtime-бэкенд построения индексов. ``"faiss"`` (по
-            умолчанию), ``"pgvector"``, ``"qdrant"`` и т.п.
-        storage_tables: список PG-таблиц-хранилищ сырых эмбеддингов
-            (по схеме-имени, например ``["oarb.audit_vectors"]``). Эти
-            таблицы регистрируются как ``VectorResource`` в table_registry
-            и попадают в DuckDB-кэш.
+        backend: runtime-бэкенд (``"faiss"``, ``"pgvector"``, ``"qdrant"``).
+        storage_table: единая PG-таблица-хранилище сырых эмбеддингов.
+            Регистрируется в ``TableRegistry`` через ``register_infra``
+            и попадает в DuckDB-кэш через ``PgDuckDbSyncService``.
     """
 
     enable: bool | None = None
     default_root: str | None = None
     backend: str | None = None
-    storage_tables: list[str] | None = None
+    storage_table: str | None = None
 
 
 class HeartbeatSettings(_StrictOptional):

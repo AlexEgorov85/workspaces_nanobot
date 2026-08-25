@@ -122,13 +122,13 @@ def get_vector_index_path() -> str:
 def get_vector_db_table() -> str:
     """Имя таблицы-хранилища векторов (для ``PostgresDuckDbProvider.vector_db_table``).
 
-    Источник: ``gateway.vector_index.storage_tables[0]``. Storage-таблица —
+    Источник: ``gateway.vector_index.storage_table``. Storage-таблица —
     общая инфраструктура, не относится к конкретному навыку.
     """
     vi_cfg = SETTINGS.get("gateway", {}).get("vector_index") or {}
-    storage_tables = vi_cfg.get("storage_tables") or []
-    if storage_tables:
-        return storage_tables[0]
+    storage_table = vi_cfg.get("storage_table") or ""
+    if storage_table:
+        return storage_table
 
     for t in _tables_list():
         if t.get("type") == "vector" and t.get("name"):

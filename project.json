@@ -322,18 +322,18 @@
       "timeout_sec": 30
     },
     //  vector_index.* — общая инфраструктура FAISS.
-    //    storage_tables — PG-таблицы-хранилища сырых эмбеддингов (по
-    //                     формату "schema.table"); регистрируются как
-    //                     VectorResource и попадают в DuckDB-кэш.
+    //    storage_table  — единая PG-таблица-хранилище сырых эмбеддингов
+    //                     (формат "schema.table"); регистрируется в
+    //                     TableRegistry через register_infra.
     //    default_root   — корневая папка FAISS-индексов; путь к индексу =
     //                     <default_root>/<index_name>.
     //    backend        — runtime-бэкенд построения индексов ("faiss" и т.п.).
+    //  Какие именно индексы строить и из каких source-таблиц — описывается
+    //  в public.agent_vector_index_config (runtime-БД).
     //  Все ключи опциональны; дефолты в VectorIndexSettings.
     "vector_index": {
       "enable": true,
-      "storage_tables": [
-        "oarb.audit_vectors"
-      ],
+      "storage_table": "oarb.audit_vectors",
       "default_root": "data_store/vectors",
       "backend": "faiss"
     }

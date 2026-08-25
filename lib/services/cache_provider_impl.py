@@ -172,9 +172,7 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
     schemas: list[str] = []
 
     vi_cfg = (cfg.get("gateway") or {}).get("vector_index") or {}
-    storage_tables = vi_cfg.get("storage_tables") or []
-    if storage_tables:
-        storage_table = storage_tables[0]
+    storage_table = vi_cfg.get("storage_table") or ""
 
     for entry in cfg.get("tables") or []:
         if isinstance(entry, dict):
