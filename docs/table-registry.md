@@ -23,12 +23,26 @@ Resource Model решает это так: skill — это **деклараци
 
 ## Короткий ответ
 
-Единый список ресурсов `tables: [...]` хранится в `project.json` в секции
-`skills.<name>`. Vector-индексы — в `vector_indexes: [...]`. Регистрация
-ресурсов происходит автоматически при старте шлюза/CLI.
+Декларация ресурсов split по доменам:
+
+- **Доменные таблицы** skill'а (что нужно в DuckDB-кэше) — в
+  `skills.<name>.tables[]`. Регистрируются как `TableResource` /
+  `VectorResource` через `skill_registration`.
+- **Имена индексов**, которые использует skill — в
+  `skills.<name>.vector_indexes[]` (только `name`).
+- **Storage сырых эмбеддингов** (общий runtime, не привязан к skill'у) —
+  в `gateway.vector_index.storage_table`. Регистрируется через
+  `TableRegistry.register_infra`.
 
 ```jsonc
 // project.json
+"gateway": {
+  "vector_index": {
+    "storage_table": "oarb.audit_vectors",
+    "default_root": "data_store/vectors",
+    "backend": "faiss"
+  }
+},
 "skills": {
   "audit_analyzer": {
     "enabled": true,
@@ -36,15 +50,20 @@ Resource Model решает это так: skill — это **деклараци
       {"name": "oarb.audit_reports"},
       {"name": "oarb.audits"},
       {"name": "oarb.violations"},
-      {"name": "public.agent_predefined_scripts", "label": "scripts_registry"},
-      {"name": "oarb.audit_vectors", "tracking_column": "id"}
+      {"name": "public.agent_predefined_scripts", "label": "scripts_registry"}
     ],
     "vector_indexes": [
-      {"name": "audits_index", "source": "oarb.audit_vectors"}
+      {"name": "audits_index"},
+      {"name": "violations_index"},
+      {"name": "audit_reports_index"}
     ]
   }
 }
 ```
+
+Какие индексы строить и из каких source-таблиц — описывается в
+`public.agent_vector_index_config` (runtime-БД), это **инфраструктурная
+декларация**, не часть skill'а.
 
 ## Resource: декларативная модель
 
@@ -87,19 +106,20 @@ table-sync (PG → DuckDB) и vector-индексация (FAISS / pgvector / Qd
 
 ### VectorIndexEntry
 
-Один vector-storage индекс в `vector_indexes: [...]`. Минимальный контракт:
-имя индекса + источник данных. Алгоритм построения (FAISS / pgvector / Qdrant)
-— runtime-параметр конкретного бэкенда, не часть декларации.
+Один vector-storage индекс в `vector_indexes: [...]`. Минимальный контракт —
+имя индекса. Алгоритм построения (FAISS / pgvector / Qdrant) — runtime-параметр
+конкретного бэкенда, не часть декларации.
 
 - `name` — логическое имя индекса (`"audits_index"`).
-- `source` — PG-таблица-источник (сырые эмбеддинги).
-- `backend` — `"faiss"` (по умолчанию), `"pgvector"`, `"qdrant"` и т.п.
-- `default_path` — путь к файлу индекса (для FAISS).
+
+Storage сырых эмбеддингов — **не** здесь (см. `gateway.vector_index.storage_table`
+и `register_infra`). Source-таблица (PG-таблица, из которой `tools/build_vectors.py`
+читает строки для эмбеддингов) — тоже **не** здесь; это инфраструктурная
+декларация в `public.agent_vector_index_config`.
 
 Backend-specific параметры (для FAISS: `text_chunk_size`, `text_chunk_overlap`,
-`build_batch_pause_sec`; для Qdrant: `collection_name`) — это OPTIONAL ключи
-с `extra="allow"`. Они читаются конкретным runtime-бэкендом, не валидируются
-на уровне pydantic.
+`build_batch_pause_sec`; для Qdrant: `collection_name`) — OPTIONAL ключи
+с `extra="allow"`. Читаются конкретным runtime-бэкендом, не валидируются.
 
 ### SkillRegistration
 
@@ -120,7 +140,7 @@ Backend-specific параметры (для FAISS: `text_chunk_size`, `text_chun
 {
   "enabled": true,             // OPTIONAL; false — skill пропускается при регистрации
   "tables": [ ... ],           // единый список ресурсов (str | TableEntry)
-  "vector_indexes": [ ... ],   // vector-индексы (min-контракт: name + source)
+  "vector_indexes": [ ... ],   // OPTIONAL; список имён индексов (только name)
   "embedding": { ... },        // OPTIONAL; параметры эмбеддинга
   "cache": { ... },            // OPTIONAL; параметры in-memory кэша
   "cli": { ... },              // OPTIONAL; параметры CLI
@@ -167,26 +187,31 @@ pydantic-модели `TableEntry`) — опечатку `trackin_column` pydant
 
 ### Секция vector_indexes
 
-Список vector-индексов skill'а. Каждый элемент — объект `VectorIndexEntry`
-с обязательными полями `name` и `source`. Все остальные поля — optional
-и backend-specific (read-only через `extra="allow"`):
+Список имён индексов, которые использует skill. Каждый элемент — объект
+`VectorIndexEntry` с обязательным полем `name`. Все остальные поля —
+optional и backend-specific (read-only через `extra="allow"`):
 
 ```json
 "vector_indexes": [
-  {
-    "name": "audits_index",
-    "source": "oarb.audit_vectors",
-    "default_path": "data_store/vectors/audits_index",
-    "text_chunk_size": 500,
-    "text_chunk_overlap": 80,
-    "build_batch_pause_sec": 0.5
-  }
+  {"name": "audits_index"},
+  {"name": "violations_index"},
+  {"name": "audit_reports_index"}
 ]
 ```
+
+Имена читаются build-tool'ами (`tools/build_vectors.py`) и `get_vector_index_path()`
+для вычисления пути к FAISS-файлу (`<default_root>/<name>`).
 
 ## Пример: audit_analyzer (реальный сниппет из project.json)
 
 ```jsonc
+"gateway": {
+  "vector_index": {
+    "storage_table": "oarb.audit_vectors",
+    "default_root": "data_store/vectors",
+    "backend": "faiss"
+  }
+},
 "skills": {
   "audit_analyzer": {
     "enabled": true,
@@ -195,14 +220,12 @@ pydantic-модели `TableEntry`) — опечатку `trackin_column` pydant
       {"name": "oarb.audits"},
       {"name": "oarb.report_items"},
       {"name": "oarb.violations"},
-      {"name": "public.agent_predefined_scripts", "label": "scripts_registry"},
-      {"name": "oarb.audit_vectors", "tracking_column": "id"}
+      {"name": "public.agent_predefined_scripts", "label": "scripts_registry"}
     ],
     "vector_indexes": [
-      {
-        "name": "audits_index",
-        "source": "oarb.audit_vectors"
-      }
+      {"name": "audits_index"},
+      {"name": "violations_index"},
+      {"name": "audit_reports_index"}
     ],
     "embedding": {
       "base_url": "http://localhost:11434/api/embed",
@@ -217,11 +240,11 @@ pydantic-модели `TableEntry`) — опечатку `trackin_column` pydant
 Что попадает в `table_registry`:
 
 - `TableResource(name="oarb.audit_reports")`, `oarb.audits`, `oarb.report_items`,
-  `oarb.violations` — из `tables[]` (строковые и объектные элементы);
+  `oarb.violations` — из `tables[]`;
 - `TableResource(name="public.agent_predefined_scripts", label="scripts_registry")` —
   из `tables[]` с явным label;
-- `VectorResource(name="oarb.audit_vectors", tracking_column="id")` — из
-  `tables[]` с `type="vector"`.
+- `VectorResource(name="oarb.audit_vectors")` — из `gateway.vector_index.storage_table`
+  через `register_infra("vector_index.storage", ...)`.
 
 ## Примеры для новых skill'ов
 
@@ -242,21 +265,27 @@ pydantic-модели `TableEntry`) — опечатку `trackin_column` pydant
 
 Никакого кода на Python — skill готов к регистрации.
 
-### knowledge: объектный формат + vector + label
+### knowledge: объектный формат + label
 
 ```jsonc
+"gateway": {
+  "vector_index": {
+    "storage_table": "kb.kb_embeddings",
+    "default_root": "data_store/vectors",
+    "backend": "faiss"
+  }
+},
 "skills": {
   "knowledge": {
     "enabled": true,
     "tables": [
       {"name": "kb.articles"},
       {"name": "kb.tags"},
-      {"name": "kb.kb_embeddings", "tracking_column": "ingested_at", "type": "vector"},
       {"name": "kb.kb_search_index", "label": "scripts_registry"},
       {"name": "public.kb_user_collections"}
     ],
     "vector_indexes": [
-      {"name": "kb_index", "source": "kb.kb_embeddings"}
+      {"name": "kb_index"}
     ],
     "embedding": {
       "base_url": "http://localhost:11434/api/embed",
@@ -270,10 +299,10 @@ pydantic-модели `TableEntry`) — опечатку `trackin_column` pydant
 Здесь:
 
 - `kb.articles`, `kb.tags` — обычные таблицы, дефолтный `tracking_column`;
-- `kb.kb_embeddings` — vector-источник (`type="vector"`, `tracking_column="ingested_at"`);
-  одновременно объявлен и как TableResource, и как источник для `vector_indexes[]`;
 - `kb.kb_search_index` помечен `label="scripts_registry"`;
-- `public.kb_user_collections` — внешняя таблица.
+- `public.kb_user_collections` — внешняя таблица;
+- `kb.kb_embeddings` (vector-storage) — общий runtime, объявлен в
+  `gateway.vector_index.storage_table`, регистрируется через `register_infra`.
 
 ## label как opaque marker
 
@@ -303,32 +332,58 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 
 ## auto-register: как декларация попадает в реестр
 
-`ApplicationContext.create()` вызывает `_auto_register_skills(ctx)`
-(`lib/core/application_context.py`). Эта функция делегирует
+`ApplicationContext.create()` вызывает `_auto_register_skills(ctx)` →
+`_register_infra_resources(ctx)` (`lib/core/application_context.py`).
+
+**`_auto_register_skills`** делегирует
 `lib/core/skill_registration.register_skill_from_config`, который:
 
 1. Читает `skill_cfg["tables"]` — единый список ресурсов (str | dict).
 2. Для каждого элемента создаёт `TableResource(name, label?, tracking_column?)`.
-3. Читает `skill_cfg["vector_indexes"]` — для каждого элемента создаёт
-   `VectorResource(name=source, tracking_column="id")` (если source ещё
-   не зарегистрирован как TableResource).
+3. `vector_indexes[]` **не** регистрирует ресурсы (это инфраструктурная
+   зона — storage и source-table).
 4. Дедупликация по имени: если имя встречается дважды, второй пропускается.
 5. Регистрирует результат через `table_registry.register(SkillRegistration(...))`.
 6. Если задан `embedding.*`, пишет его в embedding-конфиг реестра.
 
+**`_register_infra_resources`** делегирует
+`lib/core/infra_registration.register_vector_storage()`, который:
+
+1. Читает `gateway.vector_index.storage_table`.
+2. Регистрирует `VectorResource(name=storage_table, tracking_column="id")`
+   через `table_registry.register_infra("vector_index.storage", ...)`.
+
+Та же логика используется в standalone-режиме (`tools/build_vectors.py`)
+— `register_vector_storage()` вызывается там явно, чтобы реестр был
+заполнен при ручном запуске без `ApplicationContext`.
+
 ## lookup API: TableRegistry
 
 Глобальный singleton `table_registry` живёт в
-`lib/services/table_registry.py`. Основные методы:
+`lib/services/table_registry.py`. Два независимых namespace'а:
+
+- `_registrations` — skill-ресурсы (через `register(SkillRegistration(...))`);
+- `_infra` — runtime-ресурсы общего назначения (через
+  `register_infra(key, resources)`).
+
+Агрегаторы (`table_names`, `vector_names`, `resources`,
+`tracking_column_for`) **объединяют** оба namespace'а — сборка runtime'а
+(`_make_sync_services`) не различает источник ресурса.
+
+Основные методы:
 
 | Метод | Назначение |
 |---|---|
-| `table_names()` | Имена всех `TableResource` всех enabled-registrations, в порядке регистрации. |
-| `vector_names()` | Имена всех `VectorResource` всех enabled-registrations. |
+| `register(SkillRegistration)` | Регистрация skill'а (доменные таблицы + вектора). |
+| `register_infra(key, resources)` | Регистрация runtime-ресурса общего назначения (storage сырых эмбеддингов). |
+| `unregister_infra(key)` | Удалить инфра-регистрацию. |
+| `get_infra(key)` / `infra_keys()` | Lookup инфра-ресурсов по ключу namespace'а. |
+| `table_names()` | Имена всех `TableResource` (skills + infra), в порядке регистрации. |
+| `vector_names()` | Имена всех `VectorResource` (skills + infra). |
 | `resources()` | Все ресурсы (таблицы + векторы) одной плоской tuple. |
-| `resources_by_label(label)` | `TableResource` с указанным `label` (enabled только). |
-| `skill_for_table(table)` | `SkillRegistration`, владеющая таблицей (включая vector). |
-| `tracking_column_for(table)` | Track-колонка для таблицы (per-resource override, иначе `updated_at` для таблиц, `id` для vector). |
+| `resources_by_label(label)` | `TableResource` skill'ов с указанным `label` (инфру **не** смотрит — label доменная метка). |
+| `skill_for_table(table)` | `SkillRegistration`, владеющая таблицей (только skill-ресурсы). |
+| `tracking_column_for(table)` | Track-колонка для таблицы (skills + infra; `id` для vector). |
 | `names()` / `enabled_names()` | Имена зарегистрированных skill'ов (все/только enabled). |
 | `set_embedding_config(**kwargs)` / `embedding_config()` | Generic-конфиг эмбеддингов (не per-skill). |
 | `snapshot_path(workspace_path)` | Путь к общему DuckDB-снапшоту. |
@@ -373,28 +428,34 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 Чек-лист:
 
 1. В `project.json` добавлена секция `skills.<name>` с `tables: [...]`
-   (fully qualified имена) и при необходимости `vector_indexes: [...]`.
+   (fully qualified имена). Если используются индексы — также
+   `vector_indexes: [{name: ...}]` (только имена).
 2. Если используется role-based lookup (например, реестр SQL-шаблонов) —
    элемент в `tables[]` помечен `label` через объектную форму.
 3. Если у таблицы нестандартная track-колонка — задана per-resource
    через `TableEntry.tracking_column`.
-4. Если есть vector — элемент в `tables[]` с `type="vector"` + секция
-   `vector_indexes[]` + `embedding.*`.
+4. Если используются эмбеддинги — `embedding.*` в корне skill'а.
 5. Если skill отключён — `enabled: false` в корне секции.
-6. Регрессионный тест: `tests/test_resource_universality.py`.
-7. Smoke: `python cli_agent.py` стартует без ошибок.
+6. Runtime API skill'а — через `lib.core.skill_config` (параметризован
+   по `skill_name`), не собственный `skill_config.py`.
+7. Регрессионный тест: `tests/test_resource_universality.py`.
+8. Smoke: `python cli_agent.py` стартует без ошибок.
 
 ## Релевантные тесты
 
 - `tests/test_table_registry.py` — поведение `TableResource`/`VectorResource`/
-  `SkillRegistration`/`TableRegistry`.
+  `SkillRegistration`/`TableRegistry`/`register_infra`.
 - `tests/test_resource_universality.py` — DoD «новый skill без правок `lib/`».
 - `tests/test_auto_register_skills.py` — поведение `_auto_register_skills`:
-  парсинг `tables[]` и `vector_indexes[]`.
+  парсинг `tables[]`; `vector_indexes[].source` не регистрируется как ресурс.
+- `tests/test_infra_registration.py` — `register_vector_storage` через
+  `gateway.vector_index.storage_table`.
 - `tests/test_project_settings.py` — pydantic-валидация `TableEntry`/
   `VectorIndexEntry`, fail-fast на опечатках.
 - `tests/test_skill_config_lookup.py` — `resources_by_label("scripts_registry")`
   в skill-коде (audit_analyzer).
+- `tests/test_skill_config_api.py` — единый `lib.core.skill_config` API,
+  multi-skill сценарии.
 - `tests/test_config_keys.py` — обязательные ключи конфига.
 
 Полный test-run: `python -m pytest tests/ -q` — без регрессий.

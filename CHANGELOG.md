@@ -8,16 +8,17 @@
 
 ## [Unreleased]
 
-> Состояние тестов на момент правки: **1480 passed, 22 skipped** (`pytest`).
-> Содержит два больших блока: `refactor/skills-tools-cleanup`
-> (generic tools + audit_analyzer cleanup, +архитектурные тесты) и
+> Состояние тестов на момент правки: **1583 passed, 14 skipped** (`pytest`).
+> Содержит три больших блока: `refactor/skills-tools-cleanup`
+> (generic tools + audit_analyzer cleanup, +архитектурные тесты),
 > `refactor/core-extract-duckdb-faiss` (lib → generic, table_registry,
-> AST-SQL-guard, миграции схемы). Ключевые совместимости: skill
-> `audit_analyzer` сохранён для CLI/бенчмарка/e2e; snapshot DuckDB
-> теперь публикуется по пути `table_registry.snapshot_path()` →
-> `workspace/data_store/duckdb/cache.duckdb` (старое поле
-> `in_memory_cache_path` в `project.json` оставлено для истории, но
-> игнорируется).
+> AST-SQL-guard, миграции схемы) и **`refactor/vector-index-infra`**
+> (vector-storage как инфраструктурный ресурс через `register_infra`).
+> Ключевые совместимости: skill `audit_analyzer` сохранён для
+> CLI/бенчмарка/e2e; snapshot DuckDB публикуется по пути
+> `table_registry.snapshot_path()` → `workspace/data_store/duckdb/cache.duckdb`.
+> `audit_vectors` теперь попадает в DuckDB-кэш через инфра-регистрацию
+> (`gateway.vector_index.storage_table`).
 
 ### Added
 
@@ -157,6 +158,65 @@
   Эти таблицы — generic FAISS-метаданные, исторически лежали в
   `sql/audit_analyzer/`. После переноса `sql/README.md` обновлён:
   векторы — отдельный раздел, audit_analyzer — только доменные таблицы.
+
+### Block: vector-index-infra
+
+#### Added
+
+- **`TableRegistry.register_infra(key, resources)`** — отдельный namespace
+  для инфраструктурных ресурсов runtime'а (не привязан к домену skill'а).
+  Парные методы: `unregister_infra`, `get_infra`, `infra_keys`. Агрегаторы
+  (`table_names`, `vector_names`, `resources`, `tracking_column_for`)
+  объединяют skills + infra; `resources_by_label` смотрит только skills
+  (label — доменная метка).
+- **`lib.core.infra_registration.register_vector_storage()`** — единая
+  точка регистрации vector-storage через `gateway.vector_index.storage_table`.
+  Делегируется из `ApplicationContext._register_infra_resources` и из
+  standalone `tools/build_vectors.py`.
+- **`lib.core.skill_config`** — параметризованный runtime API для skill'ов
+  (`get_db_tables(skill_name)`, `get_llm_config(skill_name)`,
+  `get_embedding_config(skill_name)`, `get_vector_*` и т.д.). Единая точка
+  для всех skill'ов — подготовка к N skill'ам. Старый
+  `workspace/skills/audit_analyzer/scripts/skill_config.py` стал тонкой
+  обёрткой с `_SKILL_NAME="audit_analyzer"`.
+- **Тесты:** `tests/test_register_infra` (12 кейсов), `tests/test_infra_registration.py`
+  (6 кейсов), `tests/test_skill_config_api.py` (16 кейсов multi-skill).
+- **Документация:** `docs/table-registry.md` переписан (vector_indexes[]
+  больше не имеет `source`; раздел `lookup API` дополнен `register_infra`).
+
+#### Changed
+
+- **`gateway.vector_index.storage_tables` (list) → `gateway.vector_index.storage_table`**
+  (str) — единая общая storage-таблица для runtime'а. Мигрированы
+  все 4 читателя: `lib/services/cache_provider_impl.py`,
+  `tools/build_vectors.py`, `workspace/skills/audit_analyzer/scripts/skill_config.py`,
+  `lib/core/project_settings.py`.
+- **`skills.<name>.vector_indexes[].source` — поле удалено.** PG-таблица
+  исходных строк — инфраструктурная декларация, живёт в
+  `public.agent_vector_index_config` (runtime-БД). Имена индексов (`name`)
+  остаются в `vector_indexes[]`.
+- **`audit_vectors` теперь попадает в DuckDB-кэш.** `ApplicationContext._register_infra_resources`
+  читает `gateway.vector_index.storage_table` и регистрирует
+  `VectorResource` через `register_infra("vector_index.storage", ...)`.
+  `_make_sync_services` использует `table_registry.resources()` (skills + infra).
+- **`tools/build_vectors.py`** — теперь явно вызывает `register_vector_storage()`
+  (был standalone-запуск с пустым реестром, `vector_names()` был пуст,
+  скрипт выходил с ошибкой).
+
+#### Removed
+
+- **`gateway.vector_index.cache_tables` — удалён.** Ключ никем не читался
+  (sync берёт список из `TableRegistry` → `skills.*.tables[]`).
+  Мигрированы: `project.json`, `VectorIndexSettings`, `test_config_keys`.
+
+#### Fixed
+
+- **`tests/test_application_context.py`** — мок `ConfigurationError` добавлен
+  в fake `config` модуль (был пропуск теста; 7 тестов падали).
+- **`tools/build_vectors.py`** — `db_table = args.db_table` перезаписывал
+  уже корректный `split('.', 1)`, в результате скрипт сообщал
+  `oarb.oarb.audit_vectors`. Парсинг `--db-table` теперь поддерживает
+  полное имя (`schema.table`) и обрезанное (`table` в той же схеме).
 
 ## [2.4.0] — 2026-08-20
 

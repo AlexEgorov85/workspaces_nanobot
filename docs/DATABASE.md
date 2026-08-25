@@ -149,7 +149,7 @@
 | `db.tables` | Таблицы, доступные агенту (`str` ИЛИ `{name, label?, tracking_column?}`) | `audit_reports, audits, report_items, violations` (значение project.json; код по умолч. — пустой список) |
 | `db.additional_tables` | Таблицы других схем (`[schema, table]` ИЛИ `"schema.table"` ИЛИ `{schema, table}`) | `[["public", "agent_predefined_scripts"]]` |
 | `db.predefined_scripts_table` | Таблица реестра SQL-скриптов (audit_analyzer-специфика) → label `"scripts_registry"` | `public.agent_predefined_scripts` |
-| `db.vector_table` | Vector-таблица (сырые эмбеддинги) → `VectorResource` | `oarb.audit_vectors` |
+| `gateway.vector_index.storage_table` | Vector-таблица сырых эмбеддингов (`oarb.audit_vectors`); регистрируется через `lib.core.infra_registration.register_vector_storage` → `TableRegistry.register_infra` | `oarb.audit_vectors` |
 | `sync.poll_interval_sec` | Интервал инкрементального полла PG | `14400` |
 | `sync.full_resync_every` | Каждые N поллов — полная пересинхронизация | `10` |
 | `embedding.base_url` | URL Ollama `/api/embed` | `http://localhost:11434/api/embed` |

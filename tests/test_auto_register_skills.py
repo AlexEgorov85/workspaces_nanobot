@@ -5,10 +5,14 @@
 
 * ``tables: []`` — единый список ресурсов (str | TableEntry);
   имена fully qualified, без ``schema``;
-* ``vector_indexes: []`` — вектор-индексы (min-контракт: name + source);
+* ``vector_indexes: []`` — список имён индексов (только name);
+  ``source`` больше не регистрируется как ресурс — это инфраструктурная
+  декларация в ``public.agent_vector_index_config``;
 * ``label`` / ``tracking_column`` пробрасываются в dataclass.
 
-Новая модель (Phase 7): ``db.*`` удалён; ``register.py`` удалён.
+Инфраструктурные ресурсы (vector-storage) живут в
+``TableRegistry.register_infra`` — отдельный тестовый файл
+``test_infra_registration.py``.
 """
 
 from __future__ import annotations
@@ -146,7 +150,9 @@ class TestAutoRegisterTypeVector:
         assert table_registry.get("x").vector_resources()[0].tracking_column == "id"
 
     def test_type_vector_dedup_with_vector_indexes(self) -> None:
-        """``type="vector"`` в ``tables[]`` + source в ``vector_indexes[]`` → один VectorResource."""
+        """``type="vector"`` в ``tables[]`` даёт VectorResource; ``vector_indexes[].source``
+        не регистрируется (инфра). Итог: один ресурс от tables[], source игнорируется.
+        """
         ctx = _make_ctx({"x": {"tables": [
             {"name": "oarb.audit_vectors", "type": "vector", "tracking_column": "id"},
         ], "vector_indexes": [

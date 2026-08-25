@@ -108,8 +108,11 @@
   //  Секции (все OPTIONAL):
   //      enabled            — отключить skill без удаления секции (default: true)
   //      tables             — единый список ресурсов skill'а (см. ниже "Структура tables")
-  //      vector_indexes     — массив {name, source}: декларация принадлежности
-  //                           индексов к навыку. backend и путь хранения — общая
+  //      vector_indexes     — массив {name}: имена индексов, используемых навыком.
+  //                           Source-таблица (PG-таблица исходных строк для
+  //                           эмбеддингов) — инфраструктурная декларация в
+  //                           public.agent_vector_index_config. backend и путь
+  //                           хранения — общая
   //                           инфраструктура (см. gateway.vector_index.*).
   //      embedding.*        — Ollama /api/embed (для vector-таблиц)
   //      cache.*            — in-memory кэш (DuckDB): enabled, engine, max_age_sec, refresh_interval_sec
