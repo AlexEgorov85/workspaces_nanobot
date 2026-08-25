@@ -8,6 +8,17 @@
 
 ## [Unreleased]
 
+> Состояние тестов на момент правки: **1480 passed, 22 skipped** (`pytest`).
+> Содержит два больших блока: `refactor/skills-tools-cleanup`
+> (generic tools + audit_analyzer cleanup, +архитектурные тесты) и
+> `refactor/core-extract-duckdb-faiss` (lib → generic, table_registry,
+> AST-SQL-guard, миграции схемы). Ключевые совместимости: skill
+> `audit_analyzer` сохранён для CLI/бенчмарка/e2e; snapshot DuckDB
+> теперь публикуется по пути `table_registry.snapshot_path()` →
+> `workspace/data_store/duckdb/cache.duckdb` (старое поле
+> `in_memory_cache_path` в `project.json` оставлено для истории, но
+> игнорируется).
+
 ### Added
 
 - **Tool `duckdb_query`** (`workspace/tools/duckdb_query_tool.py`) —
@@ -20,39 +31,59 @@
 - **Tool `vector_search`** (`workspace/tools/vector_search_tool.py`) —
   generic семантический поиск по указанному FAISS-индексу. Не знает
   имён конкретных индексов; получает `index_name` от вызывающей стороны.
+  Использует `lib.services.cache_provider.CacheProvider.search_vector`.
+  Параметры: `query`, `index_name`, `top_k`, `threshold`. Конфиг:
+  `gateway.vector_search.*`.
 
 - **Утилиты `lib/utils/sql_safety.py`** и **`lib/utils/text_utils.py`** —
   перенесены из skill'а `audit_analyzer` (бывших
   `scripts/database.py`/`scripts/output.py`) для переиспользования
-  обоими tool'ами и skill'ами.
+  обоими tool'ами и skill'ами. Контракты сохранены 1:1.
 
-- **`tests/test_duckdb_query_tool.py`**,
-  **`tests/test_vector_search_tool.py`**,
-  **`tests/test_skill_tool_independence.py`**,
-  **`tests/test_architecture_tool_domain_free.py`**,
-  **`tests/test_skill_tool_integration.py`**,
-  **`tests/test_core_infrastructure_independence.py`**,
-  **`tests/test_sql_safety.py`**,
-  **`tests/test_text_utils.py`** — тесты для новых tool'ов и утилит
-  + архитектурные тесты (TARGET §28).
+- **`Skill audit_analyzer/references/`** — progressive disclosure:
+  `schema.md`, `vector_indexes.md`, `sql_guidance.md`. Позволяют
+  агенту загружать детальные знания по необходимости, не раздувая
+  `SKILL.md` (см. TARGET_ARCHITECTURE.md §10).
 
-- **`docs/skill-tool-architecture.md`**, **`docs/refactor_baseline.md`**,
-  **`docs/skill-tool-inventory.md`**, **`docs/runtime_patches.md`** —
-  документация (TARGET §20, §33).
+- **AST-политика SQL Security Guard (`lib/utils/sql_safety.py`)** —
+  read-only SQL-валидация на sqlglot (вместо строковых эвристик):
+  запрет SELECT INTO / опасных функций / системных каталогов /
+  multi-statement; `validate_sql_report` для audit trail. См.
+  docs/DATABASE.md § «Инфраструктурные границы P0».
 
-- **`docs/table-registry.md`** — как хранятся списки таблиц для
-  синхронизации PG → DuckDB (`project.json` → `scripts/register.py` →
-  `table_registry`), рецепты добавления таблиц, track-колонки,
-  параметры контроля синхронизации. Ссылка добавлена в Project Layout
-  `AGENTS.md`.
+- **Migration framework (`tools/migrate.py`)** — версионные миграции
+  схемы: `sql/migrations/schema_migrations.sql` (tracking-таблица
+  `public.schema_migrations` с SHA256-checksum) и `V001__baseline.sql`
+  (точка отсчёта, без DDL). Runner применяет ожидающие миграции
+  транзакционно (`python tools/migrate.py --apply`), поддерживает
+  `--status` / `--dry-run` / `--verify` / `--baseline` / `--force`.
+  Порядок и правила — в `sql/README.md` § «Миграции схемы».
+
+- **Тесты:** `tests/test_duckdb_query_tool.py`,
+  `tests/test_vector_search_tool.py`, `tests/test_skill_tool_independence.py`,
+  `tests/test_architecture_tool_domain_free.py`,
+  `tests/test_skill_tool_integration.py`,
+  `tests/test_core_infrastructure_independence.py`,
+  `tests/test_sql_safety.py`, `tests/test_text_utils.py`,
+  `tests/test_contract/` (контракт поверхности nanobot 0.3.0) —
+  тесты новых tool'ов, утилит и архитектурные тесты (TARGET §28).
+
+- **Документация:** `docs/skill-tool-architecture.md`,
+  `docs/refactor_baseline.md`, `docs/skill-tool-inventory.md`,
+  `docs/runtime_patches.md`, `docs/table-registry.md`,
+  `docs/architecture/nanobot-inventory.md` (JSON + сканер
+  `tools/scan_nanobot_inventory.py`), `docs/core-infrastructure.md`
+  (границы core vs skill).
 
 ### Changed
 
 - **`workspace/skills/audit_analyzer/SKILL.md`** переписан: убраны
   дубли с разделами, добавлен «Контракт зависимостей» (явно указано,
-  что skill использует `lib/utils/` через back-compat re-export).
-  Удалён раздел «Runtime context» (он врал — providers.py нигде не
-  регистрировались).
+  что skill использует `lib/utils/` через back-compat re-export);
+  decision procedure для выбора tool'ов (TARGET §8); ссылки на
+  `references/`; явное отделение от Python-реализаций tool'ов;
+  снят DEPRECATED-блок для agent-flow. Удалён раздел «Runtime context»
+  (он врал — providers не регистрировались).
 - **`workspace/skills/audit_analyzer/scripts/database.py`** — дубли
   `validate_sql`/`format_schema` удалены; реализация теперь только в
   `lib/utils/sql_safety.py` (TARGET §4). Оставлен back-compat
@@ -60,11 +91,34 @@
 - **`workspace/skills/audit_analyzer/scripts/output.py`** — дубль
   `_sanitize_value` удалён; реализация только в
   `lib/utils/text_utils.py`. Оставлен back-compat re-export.
+- **`lib/utils/text_utils.py`** — добавлены `sanitize_value`,
+  `truncate_middle`; дублирование `_sanitize_value`/`_truncate` в skill
+  и tool устранено.
 - **`benchmarks/items/{simple,medium,hard}.yaml`** — вызовы
   `audit_analyze.bat` заменены на `python scripts/cli.py`.
+- **`project.json`** — секции `gateway.audit_predefined.*`,
+  `gateway.audit_vector.*`, `gateway.audit_sql.*` заменены на
+  `gateway.duckdb_query.*` и `gateway.vector_search.*`.
+- **`lib/services/audit_memory_store.py`** — `schema` default
+  `"oarb"` → `"main"`; docstring переписан как generic
+  infrastructure (имя класса сохранено для back-compat).
+- **`lib/services/audit_sync_service.py`** — `schema` default
+  `"oarb"` → `"main"`; docstring переписан.
+- **`lib/services/audit_settings.py`** — функция `audit_vector_settings`
+  принимает optional kwarg `section: Tuple[str, ...]` (по умолчанию
+  `("skills", "audit_analyzer")`). Позволяет будущим skills читать
+  настройки из произвольной секции.
 
 ### Removed
 
+- **`workspace/tools/audit_analyzer_tool.py`** — три tool'а
+  (`audit_run_predefined_script`, `audit_search_vector`,
+  `audit_generate_sql`) удалены. Они нарушали §3, §22.1, §22.2
+  TARGET_ARCHITECTURE.md (импортировали skill через `importlib`).
+  Функциональность перенесена в skill workflow + generic tools.
+- **`tests/test_tools_audit_analyzer.py`** — 1326 строк тестов
+  удалённого file. Заменён на targeted-тесты (`test_duckdb_query_tool.py`,
+  `test_vector_search_tool.py`) + architectural tests.
 - **`workspace/skills/audit_analyzer/audit_analyze.bat`** и
   **`audit_analyze.sh`** — обёртки вокруг `scripts/cli.py` удалены.
   CLI теперь запускается напрямую: `python scripts/cli.py --mode ...`.
@@ -85,144 +139,24 @@
   регистрировались. Регистрация через `ApplicationContext.start()`
   нарушила бы TARGET_ARCHITECTURE.md §4 (lib не должен зависеть от
   skill).
-
-- **Tool `duckdb_query`** (`workspace/tools/duckdb_query_tool.py`) —
-  generic read-only SQL- tool, выполняет SELECT-запросы в DuckDB-кэш.
-  Не знает конкретных таблиц / Skills. Использует
-  `lib.utils.sql_safety.validate_sql` как последнюю границу безопасности
-  (SELECT-only, multi-statement запрещён). Параметры: `sql`, `params`,
-  `max_rows`. Конфиг: `gateway.duckdb_query.*`.
-
-- **Tool `vector_search`** (`workspace/tools/vector_search_tool.py`) —
-  generic семантический поиск по указанному FAISS-индексу. Не знает
-  имён конкретных индексов; получает `index_name` от вызывающей стороны.
-  Использует `lib.services.cache_provider.CacheProvider.search_vector`.
-  Параметры: `query`, `index_name`, `top_k`, `threshold`. Конфиг:
-  `gateway.vector_search.*`.
-
-- **Утилиты `lib/utils/sql_safety.py` и `lib/utils/text_utils.py`** —
-  перенесены из skill'а `audit_analyzer` (бывших `scripts/database.py`,
-  `scripts/output.py`) для переиспользования обоими tool'ами и skill'ами.
-  Контракты сохранены 1:1.
-
-- **Skill `audit_analyzer/references/`** — progressive disclosure:
-  `schema.md`, `vector_indexes.md`, `sql_guidance.md`. Позволяют
-  агенту загружать детальные знания по необходимости, не раздувая
-  `SKILL.md` (см. TARGET_ARCHITECTURE.md §10).
-
-- **Архитектурные тесты:**
-  `tests/test_skill_tool_independence.py` (Skill↔Tool импорты),
-  `tests/test_architecture_tool_domain_free.py` (generic tools без
-  audit-домена), `tests/test_skill_tool_integration.py` (сценарии
-  из TARGET §8).
-
-- **Документация:**
-  `docs/skill-tool-architecture.md` (архитектурный контракт),
-  `docs/skill-tool-inventory.md` (инвентаризация до/после),
-  `docs/runtime_patches.md` (каталог monkey-patches по TARGET §20).
-
-### Changed
-
-- **`workspace/skills/audit_analyzer/SKILL.md`** переписан:
-  decision procedure для выбора tool'ов (TARGET §8), ссылки на
-  `references/`, явное отделение от Python-реализаций tool'ов.
-
-- **`workspace/skills/audit_analyzer/providers.py`** (новый) —
-  runtime-context providers (`predefined_scripts_provider`,
-  `db_schema_provider`) перенесены из удалённого
-  `audit_analyzer_tool.py`. Регистрация — через
-  `ApplicationContext.start()` если skill включён.
-
-- **`project.json`** — секции `gateway.audit_predefined.*`,
-  `gateway.audit_vector.*`, `gateway.audit_sql.*` заменены на
-  `gateway.duckdb_query.*` и `gateway.vector_search.*`.
-
-- **`lib/utils/text_utils.py`** — добавлены `sanitize_value`,
-  `truncate_middle`; дублирование `_sanitize_value`/`_truncate` в skill
-  и tool устранено.
-
-### Removed
-
-- **`workspace/tools/audit_analyzer_tool.py`** — три tool'а
-  (`audit_run_predefined_script`, `audit_search_vector`,
-  `audit_generate_sql`) удалены. Они нарушали §3, §22.1, §22.2
-  TARGET_ARCHITECTURE.md (импортировали skill через `importlib`).
-  Функциональность перенесена в skill workflow + generic tools.
-
-- **`tests/test_tools_audit_analyzer.py`** — 1326 строк тестов
-  удалённого file. Заменён на targeted-тесты (`test_duckdb_query_tool.py`,
-  `test_vector_search_tool.py`) + architectural tests.
-
-### Changed (legacy wip)
-
-- **`workspace/skills/audit_analyzer/SKILL.md`** — DEPRECATED-блок
-  для agent-flow снят.
-
-## [Unreleased] — `refactor/core-extract-duckdb-faiss`
-
-### Changed
-
-- **`lib/services/audit_memory_store.py`** — `schema` default
-  `"oarb"` → `"main"`; docstring переписан как generic
-  infrastructure (имя класса сохранено для back-compat).
-
-- **`lib/services/audit_sync_service.py`** — `schema` default
-  `"oarb"` → `"main"`; docstring переписан.
-
-- **`lib/services/audit_settings.py`** — функция `audit_vector_settings`
-  принимает optional kwarg `section: Tuple[str, ...]` (по умолчанию
-  `("skills", "audit_analyzer")`). Позволяет будущим skills читать
-  настройки из произвольной секции.
-
-### Removed
-
-- **`lib/services/preload_service.preload_audit_cache`** —
-  legacy CLI-путь к `audit_cache.duckdb` (не вызывается ни в одном
-  production-runtime). Единственный писатель — `AuditMemoryStore.publish()`
-  через gateway.
-
-- **`lib/services/preload_service.background_audit_cache_refresh`** —
-  legacy фоновая задача.
-
-- **`lib/services/preload_service.start_audit_cache_tasks`** /
-  **`stop_tasks`** — обёртки для удалённых методов.
-
-- **`lib/services/preload_service.get_audit_cache_config`** /
-  **`_audit_settings`** — настройки кеша навыка теперь читаются
-  только через `audit_vector_settings()` (см. ниже).
-
-- **`cli_agent.py::_run_patched_repl`** — убраны вызовы удалённых
-  preload-методов; CLI больше не пытается обновлять
-  `audit_cache.duckdb` локально (по дизайну).
+- **`lib/services/preload_service.preload_audit_cache`**,
+  **`background_audit_cache_refresh`**, **`start_audit_cache_tasks`** /
+  **`stop_tasks`**, **`get_audit_cache_config`** / **`_audit_settings`** —
+  legacy CLI-путь к `audit_cache.duckdb` и фоновые задачи удалены
+  (писатель — только `AuditMemoryStore.publish()` через gateway).
+  `cli_agent.py::_run_patched_repl` больше не обновляет `audit_cache.duckdb`
+  локально (по дизайну).
 
 ### Moved
 
 - **`sql/audit_analyzer/create_public_agent_vector_index_config.sql`** →
   **`sql/vectors/create_vector_index_config.sql`**.
-
 - **`sql/audit_analyzer/create_public_agent_vector_index_store.sql`** →
   **`sql/vectors/create_vector_index_store.sql`**.
 
-Эти таблицы — generic FAISS-метаданные, исторически лежали в
-`sql/audit_analyzer/`. После переноса `sql/README.md` обновлён:
-векторы — отдельный раздел, audit_analyzer — только доменные таблицы.
-
-### Added
-
-- **`tests/test_core_infrastructure_independence.py`** — архитектурные
-  тесты: core services не должны импортировать `workspace.skills/*`
-  (TARGET §4, §22.9), не должны иметь caller/skill/domain routing
-  (§22.9), не должны содержать audit-домен в коде (§22.3),
-  default-схема должна быть generic (`"main"`, не `"oarb"`).
-
-- **`docs/core-infrastructure.md`** (если будет создан в будущем
-  PR) — границы ответственности core vs skill.
-
-- **`workspace/skills/audit_analyzer/SKILL.md`** — добавлен баннер
-  DEPRECATED для agent-flow; ссылки на соответствующие tool'ы
-  (`audit_run_predefined_script`, `audit_search_vector`,
-  `audit_generate_sql`). Skill сохранён для CLI (`audit_analyze.bat/.sh`),
-  бенчмарка и e2e-тестов.
+  Эти таблицы — generic FAISS-метаданные, исторически лежали в
+  `sql/audit_analyzer/`. После переноса `sql/README.md` обновлён:
+  векторы — отдельный раздел, audit_analyzer — только доменные таблицы.
 
 ## [2.4.0] — 2026-08-20
 
@@ -567,7 +501,7 @@
   `utils.db._sanitize_param` — страховка на границе БД для всех параметров
   `execute`/`mogrify` (в т.ч. `execute_values`). Раньше `_sanitize_param`
   наоборот *превращал* escape `\u0000` в настоящий NUL, что и порождало ошибку.
-  Документация: раздел «Санитизация NUL-байта» в `DEVELOPMENT.md`.
+  Документация: раздел «Санитизация NUL-байта» в `docs/DATABASE.md`.
 
 - **Ответ «терялся» (статус `failed`), когда агент завершал оборот
   инструментом `message(...)` без последующего plain-text.** Тул публикует

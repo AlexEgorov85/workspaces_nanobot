@@ -137,7 +137,7 @@ Skill пишет инструкции **в терминах capability**, а н�
 | `enable` | true | — |
 | `max_rows` | 1000 | 1..10000 |
 | `max_result_chars` | 50000 | 1000..200000 |
-| `query_timeout` | 30 sec | 1..300 |
+| `query_timeout_sec` | 30 sec | 1..300 |
 
 ---
 
@@ -218,3 +218,94 @@ Skill не обязан превращать свои scripts в Tools (см. TA
 | Tool код без domain names | `tests/test_architecture_tool_domain_free.py::test_tool_code_has_no_audit_strings` |
 
 Любое падение этих тестов — архитектурная регрессия.
+
+---
+
+## Resource `label` — opaque marker для Skill-логики
+
+`TableResource.label` — опциональная opaque-метка на dataclass-ресурсе таблицы,
+позволяющая skill'у найти «свою» таблицу по семантической роли, не зная её
+реального имени в PostgreSQL. Поле объявлено в `lib/services/table_registry.py`,
+заполняется из `project.json::skills.<name>.tables[]` (объектная форма).
+
+Runtime-sync (`PgDuckDbSyncService`, `DuckDbCacheStore`) **игнорирует** `label` —
+это **не** routing marker и **не** влияет на cache/DuckDB. Значение label —
+domain knowledge конкретного skill'а; `lib/` не содержит конкретных констант
+label.
+
+### Контракт
+
+- `TableResource.label: str | None = None` — поле dataclass, **opaque для runtime**.
+- Задаётся через `tables[]` в `project.json` в объектной форме: `{"name": "...", "label": "..."}`
+  (см. `TableEntry` в `lib/core/project_settings.py`).
+- Runtime-sync (`PgDuckDbSyncService`, `DuckDbCacheStore`) **игнорирует** label —
+  это **не** routing marker.
+
+### Lookup
+
+```python
+from lib.services.table_registry import table_registry
+
+scripts_table = table_registry.resources_by_label("scripts_registry")[0]
+```
+
+Метод `TableRegistry.resources_by_label(label: str) -> tuple[TableResource, ...]`
+проходит по всем регистрациям, фильтрует `enabled` (как `table_resources()`),
+собирает ресурсы с совпадающим `label`, дедуплицирует по `name`. Неизвестный
+label возвращает `()`. Disabled-ресурсы пропускаются.
+
+### DoD
+
+Skill может объявить свою метку и находить соответствующую таблицу без знания
+её реального имени в PG. Это позволяет добавлять новые Skill-специфичные роли
+(например, `label="users_lookup"`, `label="events_stream"`) без правок `lib/`.
+
+### Пример: audit_analyzer + scripts_registry
+
+В `project.json`:
+
+```json
+"db": {
+  "schema": "oarb",
+  "tables": ["audits", "violations"],
+  "predefined_scripts_table": "public.agent_predefined_scripts"
+}
+```
+
+`ApplicationContext._auto_register_skills` создаёт:
+
+- `TableResource(name="oarb.audits")` (label=None)
+- `TableResource(name="oarb.violations")` (label=None)
+- `TableResource(name="public.agent_predefined_scripts", owner="additional", label="scripts_registry")`
+
+`audit_analyzer/scripts/db_loader.py` использует:
+
+```python
+from skill_config import get_predefined_scripts_table  # → "public.agent_predefined_scripts"
+```
+
+Внутри `get_predefined_scripts_table()` (см. `workspace/skills/audit_analyzer/scripts/skill_config.py`):
+
+```python
+rs = table_registry.resources_by_label("scripts_registry")
+if rs:
+    return rs[0].name
+```
+
+### Negative contract
+
+- Tool **не должен** читать `label` (см. TARGET §5/§6 — Tool не знает domain).
+- Runtime-sync **не должен** интерпретировать `label` как routing marker.
+- `lib/` **не должен** содержать конкретных значений label (например,
+  `"scripts_registry"` как константу в `lib/`). Это **domain knowledge skill'а**.
+
+### Тесты
+
+| Тест | Что проверяет |
+|---|---|
+| `tests/test_table_registry.py::TestLabelLookup` | unit-тесты метода `resources_by_label()` (default `None`, constructor, поиск, неизвестный label, disabled-пропуск, независимость от track-колонки) |
+| `tests/test_auto_register_skills.py::TestAutoRegisterPredefinedScriptsTable` | интеграционные тесты через `_auto_register_skills` (label ставится для `predefined_scripts_table`) |
+| `tests/test_skill_config_lookup.py::TestGetPredefinedScriptsTableRegistryPath` | end-to-end через `skill_config.get_predefined_scripts_table()` (lookup через registry) |
+
+Любое использование `label` в `lib/services/runtime`-слое (`audit_sync_service.py`,
+`audit_memory_store.py`, `cache_provider_impl.py`) — архитектурная регрессия.
