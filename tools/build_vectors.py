@@ -79,8 +79,10 @@ _CFG_RAW = SETTINGS.get("skills", {}).get("audit_analyzer", {})
 # build_vectors.py не дублировал логику ApplicationContext._auto_register_skills.
 # Источник истины — универсальная ``project.json::skills.audit_analyzer.*`` секция.
 from lib.core.skill_registration import register_skill_from_config
+from lib.core.infra_registration import register_vector_storage
 
 register_skill_from_config("audit_analyzer", _CFG_RAW)
+register_vector_storage()
 
 
 def fetchone(sql, *args):
@@ -624,8 +626,11 @@ def main():
         logger.error(f"vector_table должен быть в формате 'schema.table': {vector_table}")
         return 1
     db_schema, db_table = vector_table.split(".", 1)
-    if args.db_table:
-        db_table = args.db_table
+    if args.db_table and args.db_table != storage_table:
+        if "." in args.db_table:
+            db_schema, db_table = args.db_table.split(".", 1)
+        else:
+            db_table = args.db_table
 
     row = fetch(
         "SELECT 1 FROM information_schema.tables "

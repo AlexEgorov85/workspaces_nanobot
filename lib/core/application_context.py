@@ -525,29 +525,15 @@ _INFRA_KEY_VECTOR_STORAGE = "vector_index.storage"
 def _register_infra_resources(ctx: ApplicationContext) -> None:
     """Зарегистрировать инфраструктурные ресурсы runtime'а.
 
-    Сейчас: ``vector_index.storage`` — единая PG-таблица-хранилище сырых
-    эмбеддингов (``gateway.vector_index.storage_table``). Регистрируется
-    как ``VectorResource`` и попадает в DuckDB-кэш через sync, чтобы
-    ``vector_search`` мог читать вектора из локального снимка.
+    Делегирует ``lib.core.infra_registration`` — общую логику для runtime
+    и standalone-утилит (``tools/build_vectors.py``).
 
     Какие индексы строить и из каких source-таблиц — описывается в
     ``public.agent_vector_index_config`` (runtime-БД).
     """
-    from lib.services.table_registry import VectorResource, table_registry
+    from lib.core.infra_registration import register_vector_storage
 
-    gateway_cfg = ctx.config_service.settings_section("gateway") or {}
-    vi_cfg = gateway_cfg.get("vector_index") or {} if isinstance(gateway_cfg, dict) else {}
-    storage_table = vi_cfg.get("storage_table") if isinstance(vi_cfg, dict) else None
-
-    if (
-        isinstance(storage_table, str)
-        and "." in storage_table
-        and not table_registry.get_infra(_INFRA_KEY_VECTOR_STORAGE)
-    ):
-        table_registry.register_infra(
-            _INFRA_KEY_VECTOR_STORAGE,
-            (VectorResource(name=storage_table, tracking_column="id"),),
-        )
+    register_vector_storage()
 
 
 def _make_transcription(config: Any) -> Any:
