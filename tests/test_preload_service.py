@@ -4,7 +4,7 @@
 содержит только ``preload_vector_indexes`` (legacy CLI-методы
 ``preload_audit_cache`` / ``background_audit_cache_refresh`` удалены
 как неиспользуемые — единственный писатель ``audit_cache.duckdb``
-теперь ``AuditMemoryStore.publish()`` через gateway).
+теперь ``DuckDbCacheStore.publish()`` через gateway).
 """
 
 from __future__ import annotations

@@ -1,15 +1,36 @@
 """Pluggable table registry для синхронизации PostgreSQL → DuckDB.
 
-Skills регистрируют свои таблицы и векторы через ``table_registry.register(...)``.
-Core-инфраструктура (``ApplicationContext``, ``AuditSyncService``, ``CacheProvider``)
-собирает все зарегистрированные сущности и создаёт единый runtime-снапшот.
+Skills регистрируют свои ресурсы (таблицы и векторы) через
+``table_registry.register(...)``. Core-инфраструктура
+(``ApplicationContext``, ``PgDuckDbSyncService``, ``CacheProvider``)
+собирает все зарегистрированные ресурсы и создаёт единый runtime-снапшот.
 
-Преимущества перед хардкод-конфигурацией (``audit_vector_settings``):
+Преимущества:
 
 * новый skill добавляется без правок ``lib/`` — только ``register()`` в своём startup'е;
 * core не знает имён конкретных навыков (TARGET §4, §22.9);
 * один snapshot для всех навыков (``workspace/data_store/duckdb/cache.duckdb``)
   — все запросы через ``duckdb_query`` tool видят таблицы любого зарегистрированного skill'а.
+
+Архитектурный контракт ресурсов:
+
+* ``TableResource`` — описание одной PG-таблицы, которую skill хочет видеть
+  в DuckDB-кэше. Знает имя, опциональную tracking-колонку и опциональный
+  ``label`` (opaque-метка; если задана, таблица исключается из описания
+  схемы для LLM, см. ``skill_config.get_db_tables()``).
+* ``VectorResource`` — описание одной PG-таблицы сырых эмбеддингов,
+  поверх которой строится FAISS-индекс.
+* ``SkillRegistration.resources`` — единый набор ресурсов skill'а
+  (таблицы + векторы). Это единственный источник истины о ресурсах skill'а.
+
+Label — opaque marker для Skill-кода (например, ``"scripts_registry"`` для
+реестра предопределённых SQL-скриптов в ``audit_analyzer``). Skill читает
+таблицы с нужным label через ``TableRegistry.resources_by_label()``.
+Runtime-инфраструктура (``lib/``) не интерпретирует значение label.
+
+Никаких legacy-полей ``tables``/``additional_tables``/``vector_table``/
+``track_column``/``track_column_overrides`` нет — старый код был мигрирован
+на единый ``resources``.
 """
 
 from __future__ import annotations
@@ -20,44 +41,136 @@ from typing import Any
 
 
 @dataclass(frozen=True)
-class SkillRegistration:
-    """Описание таблиц и метаданных одного skill'а.
+class TableResource:
+    """Декларативное описание одной PostgreSQL-таблицы, нужной skill'у.
 
-    Поля:
-        name: уникальное имя skill'а.
-        tables: список таблиц для синхронизации (формат ``schema.table``).
-        additional_tables: доп. таблицы (например, реестры из других схем).
-        vector_table: таблица сырых эмбеддингов (если есть).
-        db_schema: основная схема навыка (default schema для голых имён).
-        track_column: колонка для инкрементального отслеживания изменений.
-            По умолчанию ``updated_at``. Для таблиц без этой колонки —
-            использовать ``track_column_overrides``.
-        track_column_overrides: per-table track-колонка. Например,
-            ``{"oarb.audit_vectors": "id"}``.
-        poll_interval_sec: per-skill интервал поллинга. По умолчанию
-            берётся из глобального settings (если None).
-        enabled: если False — таблицы этого skill'а пропускаются при sync.
+    Ресурс только объявляет, ЧТО требуется skill'у. Он:
+
+    * не открывает соединения;
+    * не выполняет SQL;
+    * не знает о DuckDB;
+    * не управляет кэшем.
+
+    Синхронизация ресурса выполняется инфраструктурным слоем
+    (``PgDuckDbSyncService`` + ``DuckDbCacheStore``). По сути это DTO —
+    единственный источник истины о том, какие таблицы skill хочет видеть.
+
+    Архитектурный смысл: tracking-колонка — свойство конкретной таблицы,
+    а не навыка в целом. Раньше tracking описывался через разрозненные
+    поля skill'а (``track_column`` + ``track_column_overrides``); теперь
+    это явный атрибут ресурса.
+
+    Attributes:
+        name: полное имя таблицы в формате ``schema.table``.
+        tracking_column: колонка для инкрементального отслеживания изменений
+            (обычно ``updated_at``). Если ``None``, sync-слой использует
+            дефолт ``updated_at``.
+        label: опциональная opaque-метка. Если задана, таблица исключается
+            из описания схемы для LLM (см. ``skill_config.get_db_tables()``)
+            и доступна только через
+            ``TableRegistry.resources_by_label()``. Runtime-sync игнорирует.
     """
 
     name: str
-    tables: tuple[str, ...] = ()
-    additional_tables: tuple[str, ...] = ()
-    vector_table: str = ""
-    db_schema: str = "main"
-    track_column: str = "updated_at"
-    track_column_overrides: dict[str, str] = field(default_factory=dict)
-    poll_interval_sec: float | None = None
+    tracking_column: str | None = None
+    label: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.name or "." not in self.name:
+            raise ValueError(
+                f"TableResource.name должен быть в формате 'schema.table', "
+                f"получено: {self.name!r}"
+            )
+
+
+@dataclass(frozen=True)
+class VectorResource:
+    """Декларативное описание одной PG-таблицы сырых эмбеддингов.
+
+    Архитектурно vector-таблица — это **отдельный вид ресурса**, потому что
+    она попадает в два независимых pipeline'а:
+
+    * обычный table-sync (PG → DuckDB), чтобы search_vector мог читать
+      эмбеддинги из снимка без обращения к PostgreSQL;
+    * vector-индексация (FAISS) поверх DuckDB-снимка.
+
+    Сейчас FAISS хранится в ``public.agent_vector_index_store`` и его
+    параметры (model/dimension) живут в embedding-конфиге — поэтому сам
+    ресурс знает только имя таблицы. Никаких ``embedding_model`` /
+    ``dimension`` в ресурс не выносим: это конфигурация инфраструктуры,
+    а не декларация ресурса.
+
+    Attributes:
+        name: полное имя таблицы в формате ``schema.table``.
+        tracking_column: по умолчанию ``id`` (строки не апдейтятся —
+            вставляются и остаются, монотонный PK). Явное значение
+            переопределяет дефолт.
+    """
+
+    name: str
+    tracking_column: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.name or "." not in self.name:
+            raise ValueError(
+                f"VectorResource.name должен быть в формате 'schema.table', "
+                f"получено: {self.name!r}"
+            )
+
+
+Resource = TableResource | VectorResource
+
+
+@dataclass(frozen=True)
+class SkillRegistration:
+    """Описание ресурсов одного skill'а.
+
+    Это единственный источник истины о том, что skill хочет видеть в
+    DuckDB-кэше и какие vector-таблицы нужны для FAISS-поиска.
+
+    Attributes:
+        name: уникальное имя skill'а (используется для идентификации
+            владельца ресурса в Registry).
+        resources: единый набор ресурсов skill'а (TableResource/VectorResource).
+        enabled: если False — ресурсы этого skill'а пропускаются при sync.
+            Полезно для отключения skill'а без удаления регистрации.
+    """
+
+    name: str
+    resources: tuple[Resource, ...] = ()
     enabled: bool = True
 
     def __post_init__(self) -> None:
         if not self.name:
             raise ValueError("SkillRegistration.name is required")
 
-    def track_column_for(self, table: str) -> str:
-        """Вернуть track-колонку для конкретной таблицы."""
-        if table in self.track_column_overrides:
-            return self.track_column_overrides[table]
-        return self.track_column
+    def table_resources(self) -> tuple[TableResource, ...]:
+        """Все ``TableResource`` этого skill'а (из единого ``resources``)."""
+        return tuple(r for r in self.resources if isinstance(r, TableResource))
+
+    def vector_resources(self) -> tuple[VectorResource, ...]:
+        """Все ``VectorResource`` этого skill'а (из единого ``resources``)."""
+        return tuple(r for r in self.resources if isinstance(r, VectorResource))
+
+    def tracking_column_for(self, table: str) -> str:
+        """Вернуть track-колонку для конкретной таблицы.
+
+        Логика:
+          * если таблица объявлена как ``VectorResource`` без явного
+            ``tracking_column`` — возвращаем ``id`` (строки не апдейтятся,
+            PK монотонный);
+          * если таблица объявлена как ``TableResource`` / ``VectorResource``
+            с явным ``tracking_column`` — возвращаем его;
+          * если таблица не зарегистрирована в этом skill'е — возвращаем
+            ``updated_at`` как generic-дефолт.
+        """
+        for r in self.resources:
+            if isinstance(r, (TableResource, VectorResource)) and r.name == table:
+                if r.tracking_column:
+                    return r.tracking_column
+                if isinstance(r, VectorResource):
+                    return "id"
+        return "updated_at"
 
 
 @dataclass
@@ -70,16 +183,18 @@ class TableRegistry:
 
         table_registry.register(SkillRegistration(
             name="audit_analyzer",
-            tables=("oarb.audits", "oarb.violations"),
-            additional_tables=("public.agent_predefined_scripts",),
-            vector_table="oarb.audit_vectors",
-            db_schema="oarb",
+            resources=(
+                TableResource(name="oarb.audits"),
+                TableResource(name="oarb.violations"),
+                TableResource(name="public.agent_predefined_scripts", label="scripts_registry"),
+                VectorResource(name="oarb.audit_vectors"),
+            ),
         ))
 
-    Запрос всех зарегистрированных таблиц::
+    Запрос всех зарегистрированных ресурсов::
 
-        all_tables = table_registry.all_tables()  # ("oarb.audits", "oarb.violations", ...)
-        vector_table = table_registry.vector_table()  # "oarb.audit_vectors"
+        tables = table_registry.table_names()
+        vectors = table_registry.vector_names()
 
     Snapshot path — общий для всех skill'ов::
 
@@ -118,57 +233,77 @@ class TableRegistry:
         )
 
     def skill_for_table(self, table: str) -> SkillRegistration | None:
-        """Найти регистрацию, владеющую данной таблицей."""
+        """Найти регистрацию, владеющую данной таблицей (включая vector-таблицы)."""
         for reg in self._registrations.values():
             if not reg.enabled:
                 continue
-            all_tables = list(reg.tables) + list(reg.additional_tables)
-            if reg.vector_table:
-                all_tables.append(reg.vector_table)
-            if table in all_tables:
+            all_names = [r.name for r in reg.table_resources()] + [
+                r.name for r in reg.vector_resources()
+            ]
+            if table in all_names:
                 return reg
         return None
 
-    def all_tables(self) -> tuple[str, ...]:
-        """Все таблицы для синхронизации PG → DuckDB (включая additional и vector)."""
-        out: list[str] = []
+    def resources_by_label(self, label: str) -> tuple[TableResource, ...]:
+        """Все ``TableResource`` с заданным ``label`` (enabled-registrations only).
+
+        Lookup-метод для skill-кода: позволяет skill'ам находить таблицы
+        с определённой ролью (например, реестр предопределённых SQL-скриптов)
+        без знания конкретных имён. Label — opaque marker; runtime-sync
+        (``PgDuckDbSyncService``, ``DuckDbCacheStore``) его игнорирует.
+
+        Disabled-регистрации пропускаются (соответствует семантике
+        ``table_resources()`` и ``vector_resources()``).
+        Дедупликация по ``name`` сохраняет порядок первой регистрации.
+        """
+        seen: dict[str, TableResource] = {}
         for reg in self._registrations.values():
-            out.extend(reg.tables)
-            out.extend(reg.additional_tables)
-            if reg.vector_table and reg.vector_table not in out:
-                out.append(reg.vector_table)
+            if not reg.enabled:
+                continue
+            for r in reg.table_resources():
+                if r.label == label and r.name not in seen:
+                    seen[r.name] = r
+        return tuple(seen.values())
+
+    def table_resources(self) -> tuple[TableResource, ...]:
+        """Все ``TableResource`` всех enabled-registrations (для sync и cache)."""
+        out: list[TableResource] = []
+        for reg in self._registrations.values():
+            if not reg.enabled:
+                continue
+            out.extend(reg.table_resources())
         return tuple(out)
 
-    def store_tables(self) -> tuple[str, ...]:
-        """Таблицы для in-memory store (без vector_table, чтобы publish не дублировал)."""
-        out: list[str] = []
+    def vector_resources(self) -> tuple[VectorResource, ...]:
+        """Все ``VectorResource`` всех enabled-registrations."""
+        out: list[VectorResource] = []
         for reg in self._registrations.values():
-            out.extend(reg.tables)
-            out.extend(reg.additional_tables)
+            if not reg.enabled:
+                continue
+            out.extend(reg.vector_resources())
         return tuple(out)
 
-    def sync_tables(self) -> tuple[str, ...]:
-        """Таблицы для синка (все, включая vector_table)."""
-        return self.all_tables()
+    def resources(self) -> tuple[Resource, ...]:
+        """Все ресурсы всех enabled-registrations (таблицы + векторы)."""
+        return (*self.table_resources(), *self.vector_resources())
 
-    def vector_table(self) -> str | None:
-        """Первая зарегистрированная vector_table (для FAISS)."""
+    def table_names(self) -> tuple[str, ...]:
+        """Имена всех таблиц (TableResource) в порядке регистрации."""
+        return tuple(dict.fromkeys(r.name for r in self.table_resources()))
+
+    def vector_names(self) -> tuple[str, ...]:
+        """Имена всех vector-таблиц (VectorResource) в порядке регистрации."""
+        return tuple(dict.fromkeys(r.name for r in self.vector_resources()))
+
+    def tracking_column_for(self, table: str) -> str:
+        """Глобальный lookup: track-колонка для таблицы по любой регистрации."""
         for reg in self._registrations.values():
-            if reg.vector_table:
-                return reg.vector_table
-        return None
-
-    def vector_db_tables(self) -> tuple[str, ...]:
-        """Все vector_tables по навыкам (для случая, когда у каждого свой)."""
-        out: list[str] = []
-        for reg in self._registrations.values():
-            if reg.vector_table:
-                out.append(reg.vector_table)
-        return tuple(out)
-
-    def all_db_schemas(self) -> tuple[str, ...]:
-        """Все схемы (для setup'а in-memory store)."""
-        return tuple(sorted({reg.db_schema for reg in self._registrations.values()}))
+            if not reg.enabled:
+                continue
+            tc = reg.tracking_column_for(table)
+            if table in self.table_names() or table in self.vector_names():
+                return tc
+        return "updated_at"
 
     def clear(self) -> None:
         """Очистить реестр (для тестов)."""
@@ -206,7 +341,10 @@ table_registry = TableRegistry()
 
 
 __all__ = [
+    "Resource",
     "SkillRegistration",
     "TableRegistry",
+    "TableResource",
+    "VectorResource",
     "table_registry",
 ]

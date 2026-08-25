@@ -17,12 +17,50 @@ Pipeline с ретраями:
 """
 
 
+import re
+
+
 from llm import chat
 from skill_config import get_db_schema, get_db_tables
 
 from lib.utils.sql_safety import format_schema, validate_sql
 
 MAX_RETRIES = 2
+
+
+def sanitize_sql_response(text: str) -> str:
+    """Извлечь SQL из ответа LLM (CoT + markdown-обёртки).
+
+    Для reasoning-моделей ответ часто выглядит так::
+
+        <think>...</think>
+
+        ```sql
+        SELECT 1
+        ```
+
+    Или просто `` ```sql ... `` без мыслей. Здесь мы вытаскиваем первый
+    SQL-запрос — либо из последнего `` ``` `` блока, либо по регулярному
+    выражению ``SELECT|WITH|EXPLAIN``.
+    """
+    cleaned = text.strip()
+
+    # Проверяем есть ли markdown-блок (```sql или просто ```)
+    if "```" in cleaned:
+        blocks = re.findall(r"```(?:sql)?\s*\n(.*?)```", cleaned, re.DOTALL)
+        if blocks:
+            return blocks[-1].strip().rstrip(";")
+
+    # Пробуем вырезать мысли (</think> / ```xml-think ... ``` / think:)
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"```xml-think\s*\n.*?```", "", cleaned, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"^[^\S\n]*think:[^\n]*\n", "", cleaned, flags=re.MULTILINE).strip()
+
+    # Если после очистки осталось только текст без SQL — вернём пустую строку
+    if not re.search(r"\b(SELECT|WITH|EXPLAIN)\b", cleaned, re.IGNORECASE):
+        return cleaned.strip().rstrip(";")
+
+    return cleaned.strip().rstrip(";")
 
 
 def run(query: str, db, context: list[dict] | None = None) -> dict:
@@ -83,7 +121,7 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
             last_error = {"error": f"LLM call failed: {e}", "sql": ""}
             continue
 
-        sql = sql.strip().rstrip(";")
+        sql = sanitize_sql_response(sql)
 
         # Шаг 1: безопасность (DDL/DML/multi-statement)
         safety_error = validate_sql(sql)

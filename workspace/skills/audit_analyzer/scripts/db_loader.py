@@ -147,7 +147,7 @@ def load_registry(force_reload: bool = False) -> dict[str, ScriptDefinition]:
     if not rows:
         raise RuntimeError(
             f"{table}: таблица пуста или отсутствует в DuckDB-кэше. "
-            "Перезалейте кэш: python gateway.py (AuditSyncService / cache init)."
+            "Перезалейте кэш: python gateway.py (PgDuckDbSyncService / cache init)."
         )
 
     registry: dict[str, ScriptDefinition] = {}

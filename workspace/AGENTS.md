@@ -15,7 +15,8 @@ Do NOT use shell redirects (`>`, `>>`) in `exec` to create files — use `write_
 - офисные форматы: `python-docx`, `openpyxl`, `xlrd`, `pypdf`,
   `pdfplumber`, `python-pptx`, `Pillow`, `chardet`;
 - инфраструктура: `psycopg2-binary`, `duckdb`, `faiss-cpu`, `numpy`,
-  `pyarrow`, `redis`, `httpx`, `loguru`, `PyYAML`, `streamlit`, `nanobot`.
+  `pyarrow`, `redis`, `httpx`, `loguru`, `PyYAML`, `streamlit`,
+  `sqlglot`, `nanobot`.
 
 **Запрещено вызывать `pip install ...` в `exec`.** Причины:
 

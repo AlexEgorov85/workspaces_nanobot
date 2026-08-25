@@ -589,7 +589,7 @@ async def _run_suite(
             original_config = None
 
     # Контекст приложения: поднимает Bus + SessionStorage + DbLogging +
-    # AuditSyncService + AuditMemoryStore + PreloadService + AgentLoop.
+    # PgDuckDbSyncService + DuckDbCacheStore + PreloadService + AgentLoop.
     # enable_audit=False при --no-audit (только локальные прогоны без DSN).
     enable_audit = not getattr(args, "no_audit", False)
     try:
@@ -614,14 +614,14 @@ async def _run_suite(
     # (см. комментарий в gateway.py:50-77).
     first_sync_event: "asyncio.Event | None" = None
     audit_ready = (
-        ctx.audit_sync_service is not None and ctx.audit_memory_store is not None
+        ctx.sync_service is not None and ctx.cache_store is not None
     )
     if audit_ready:
-        ctx.audit_memory_store.open()
-        ctx.audit_sync_service.set_on_new_records_callback(
-            ctx.audit_memory_store.upsert_records
+        ctx.cache_store.open()
+        ctx.sync_service.set_on_new_records_callback(
+            ctx.cache_store.upsert_records
         )
-        prev_cb = getattr(ctx.audit_sync_service, "_on_sync_callback", None)
+        prev_cb = getattr(ctx.sync_service, "_on_sync_callback", None)
         first_sync_event = asyncio.Event()
 
         def _on_first_sync() -> None:
@@ -636,7 +636,7 @@ async def _run_suite(
                 except Exception:
                     pass
 
-        ctx.audit_sync_service.set_on_sync_callback(_wrapped)
+        ctx.sync_service.set_on_sync_callback(_wrapped)
 
     ctx.start()
 
@@ -653,7 +653,7 @@ async def _run_suite(
                 print("[green]✓[/green] audit_analyzer initial load received")
 
             loaded = await ctx.preload_service.preload_vector_indexes(
-                ctx.audit_memory_store
+                ctx.cache_store
             )
             if not loaded:
                 print(

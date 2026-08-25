@@ -1,8 +1,8 @@
 """
-AuditSyncService — фоновая синхронизация audit-данных из PostgreSQL в кэш.
+PgDuckDbSyncService — фоновая синхронизация audit-данных из PostgreSQL в кэш.
 
 Отвечает за:
-  * инкрементальную синхронизацию данных из PG в in-memory кэш (AuditMemoryStore);
+  * инкрементальную синхронизацию данных из PG в in-memory кэш (DuckDbCacheStore);
   * корректное завершение (graceful shutdown) с гарантией сохранения очереди.
 
 Весь SQL-доступ идёт через общий пул ``utils.db`` (worker-поток не держит
@@ -12,7 +12,7 @@ AuditSyncService — фоновая синхронизация audit-данны�
 перезагрузить таблицы целиком. Публичный API безопасен для вызова
 из asyncio/любого потока:
 
-    sync_service = AuditSyncService(dsn=dsn, tables=[...])
+    sync_service = PgDuckDbSyncService(dsn=dsn, tables=[...])
     sync_service.set_on_new_records_callback(memory_store.upsert_records)
     sync_service.start(initial_load=True)
     ...
@@ -41,13 +41,13 @@ COMMAND_POLL = "POLL_CHANGES"
 COMMAND_SHUTDOWN = "SHUTDOWN"
 
 
-class AuditSyncService:
+class PgDuckDbSyncService:
     """Фоновая синхронизация произвольных таблиц из PostgreSQL в in-memory кэш.
 
     Worker-поток владеет единственным подключением к PG. Поллинг таблиц
     инкрементален (по track-колонке), новые/изменённые строки передаются
     в callback ``on_new_records(table, records)`` — обычно это
-    :class:`AuditMemoryStore.upsert_records`.
+    :class:`DuckDbCacheStore.upsert_records`.
 
     Имя класса сохранено для back-compat (см. TARGET_ARCHITECTURE.md §15).
     """
@@ -88,6 +88,10 @@ class AuditSyncService:
 
         # Инкрементальный поллинг: {table: последнее значение track-колонки}
         self._last_sync: dict[str, Any] = {}
+        # Batch-prefetch: {table: track-колонка}. Заполняется при первом опросе,
+        # далее читается за O(1). Устраняет повторный lookup через table_registry
+        # на каждом poll-цикле.
+        self._column_cache: dict[str, str] = {}
         self._on_new_records: Callable[[str, list[dict]], None] | None = None
         self._on_replace_records: Callable[[str, list[dict]], None] | None = None
         self._on_schema: Callable[[str, list[dict]], None] | None = None
@@ -119,7 +123,7 @@ class AuditSyncService:
         """Задать callback для полной пересинхронизации: ``callback(table, records)``.
 
         Вызывается при периодической полной перезагрузке таблицы (сверка
-        удалённых строк). Обычно это ``AuditMemoryStore.replace_records``.
+        удалённых строк). Обычно это ``DuckDbCacheStore.replace_records``.
         """
         self._on_replace_records = callback
 
@@ -131,7 +135,7 @@ class AuditSyncService:
         Вызывается перед загрузкой/полной пересинхронизацией таблицы:
         ``callback(table, columns)``, где ``columns`` — список описаний
         ``[{"name", "type", "not_null", "comment"}, ...]``. Обычно это
-        ``AuditMemoryStore.ensure_schema``.
+        ``DuckDbCacheStore.ensure_schema``.
         """
         self._on_schema = callback
 
@@ -264,20 +268,30 @@ class AuditSyncService:
         """Вернуть колонку для инкрементального отслеживания изменений.
 
         Источник истины — ``lib.services.table_registry`` (через
-        ``SkillRegistration.track_column_for(table)``). Это позволяет
-        skill'ам задавать per-table track-колонку без правок core.
-        Fallback — ``updated_at`` / ``id`` для совместимости.
+        ``SkillRegistration.tracking_column_for(table)``). Это позволяет
+        skill'ам задавать per-table track-колонку через
+        ``TableResource.tracking_column`` без правок core.
+        Fallback — ``updated_at`` для обычных таблиц, ``id`` для vector.
+
+        Оптимизация: результат кешируется в ``self._column_cache`` после
+        первого lookup'а — последующие вызовы за O(1).
         """
+        cached = self._column_cache.get(table)
+        if cached is not None:
+            return cached
+
         try:
             from lib.services.table_registry import table_registry
             reg = table_registry.skill_for_table(table)
             if reg is not None:
-                return reg.track_column_for(table)
+                col = reg.tracking_column_for(table)
+                self._column_cache[table] = col
+                return col
         except Exception:
             pass
-        if table == self._vector_table:
-            return "id"
-        return "updated_at"
+        col = "id" if table == self._vector_table else "updated_at"
+        self._column_cache[table] = col
+        return col
 
     def _do_initial_load(self) -> None:
         """Параллельная начальная загрузка всех таблиц через thread-pool.
@@ -308,9 +322,9 @@ class AuditSyncService:
                     return
                 except psycopg2.errors.UndefinedTable:
                     logger.error(
-                        "AuditSyncService: таблица-источник не найдена: %s "
-                        "— пропускаю. Проверьте настройки skills.audit_analyzer.db_tables/"
-                        "db_additional_tables и создайте таблицу в PG.",
+                        "PgDuckDbSyncService: таблица-источник не найдена: %s "
+                        "— пропускаю. Проверьте настройки db.tables/db.additional_tables "
+                        "в project.json::skills.<name> для соответствующего skill'а.",
                         table,
                     )
                 except Exception:
@@ -360,9 +374,9 @@ class AuditSyncService:
                     return
                 except psycopg2.errors.UndefinedTable:
                     logger.error(
-                        "AuditSyncService: таблица-источник не найдена при поллинге: %s "
-                        "— пропускаю. Проверьте настройки skills.audit_analyzer.db_tables/"
-                        "db_additional_tables.",
+                        "PgDuckDbSyncService: таблица-источник не найдена при поллинге: %s "
+                        "— пропускаю. Проверьте настройки db.tables/db.additional_tables "
+                        "в project.json::skills.<name> для соответствующего skill'а.",
                         table,
                     )
                 except Exception:
@@ -453,7 +467,7 @@ class AuditSyncService:
                     "ON pgd.objsubid = c.ordinal_position AND pgd.objoid = pc.oid "
                     "WHERE c.table_schema = %s AND c.table_name = %s "
                     "ORDER BY c.ordinal_position",
-                    [schema, name],
+                    [schema, schema, name],
                 )
                 col_rows = [dict(r) for r in cur.fetchall()]
             finally:

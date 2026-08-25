@@ -17,8 +17,8 @@ LIB_DIRS = ["lib/services", "lib/utils"]
 CORE_SERVICES = [
     "lib/services/cache_provider.py",
     "lib/services/cache_provider_impl.py",
-    "lib/services/audit_memory_store.py",
-    "lib/services/audit_sync_service.py",
+    "lib/services/duckdb_cache_store.py",
+    "lib/services/pg_duckdb_sync_service.py",
     "lib/services/preload_service.py",
     "lib/services/table_registry.py",
     "lib/services/vector_index_service.py",
@@ -124,8 +124,8 @@ class TestDefaultSchemaIsGeneric:
     @pytest.mark.parametrize(
         "path",
         [
-            "lib/services/audit_memory_store.py",
-            "lib/services/audit_sync_service.py",
+            "lib/services/duckdb_cache_store.py",
+            "lib/services/pg_duckdb_sync_service.py",
         ],
     )
     def test_no_oarb_default(self, path: str) -> None:

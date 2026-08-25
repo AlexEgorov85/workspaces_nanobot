@@ -113,19 +113,23 @@ def list_available() -> str:
 def resolve_params(script: ScriptDefinition, params: dict | None) -> tuple[dict, list[str]]:
     """
     Объединить переданные params с параметрами скрипта.
-    Фильтрует неизвестные (не указанные в script.parameters) ключи,
-    возвращает кортеж (merged, unknown).
+
+    Все непустые ключи из ``params`` передаются дальше как есть — даже если
+    их нет в ``script.parameters``. SQL может содержать ``:param_name`` без
+    явного определения параметра (например, в audit_dynamics параметр
+    ``period`` имеет default='month', но не все ``:year``/:audit_type покрыты
+    реестром). Жёсткая фильтрация "unknown" ломала такие скрипты.
+
+    Returns:
+        (merged, unknown) — ``merged`` со всеми непустыми ключами,
+        ``unknown`` всегда пуст (legacy-контракт сохранён).
     """
     merged: dict = {}
-    unknown: list[str] = []
     for k, v in (params or {}).items():
         if v is None or v == "":
             continue
-        if k in script.parameters:
-            merged[k] = v
-        else:
-            unknown.append(k)
-    return merged, unknown
+        merged[k] = v
+    return merged, []
 
 
 def resolve_params_with_vector(

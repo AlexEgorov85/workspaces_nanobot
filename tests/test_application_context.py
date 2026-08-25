@@ -185,7 +185,7 @@ class TestCreate:
         assert ctx.transcription_service is not None
         assert ctx.preload_service is not None
         assert ctx.db_logging_service is None
-        assert ctx.audit_sync_service is None
+        assert ctx.sync_service is None
 
     def test_storage_file_when_no_dsn(self, full_fake_modules):
         from lib.core.application_context import ApplicationContext

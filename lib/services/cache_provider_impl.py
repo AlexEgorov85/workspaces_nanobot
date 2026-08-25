@@ -36,7 +36,7 @@ for _p in (str(_ROOT), str(_WORKSPACE)):
 from lib.services.cache_provider import CacheProvider, SearchResult  # noqa: E402
 
 # Внутренняя таблица метаданных схемы (комментарии таблиц/колонок, PG-типы).
-# Та же структура, что в audit_memory_store, но в файле SQL-кэша навыка.
+# Та же структура, что в cache_store, но в файле SQL-кэша навыка.
 _META_SCHEMA = "__nanobot_meta"
 _META_TABLE = "__schema_meta"
 
@@ -100,23 +100,28 @@ def get_embedding(text: str) -> list[float] | None:
 
 
 def read_embedding_config(cfg: dict) -> dict[str, Any]:
-    """Параметры Ollama-эмбеддинга из конфиг-секции навыка (dict)."""
+    """Параметры Ollama-эмбеддинга из вложенной конфиг-секции навыка (dict).
+
+    Читает ``cfg["embedding"]``. Никаких legacy плоских ключей
+    ``embedding_*`` — они удалены в Фазе 5 Resource Model Refactoring.
+    """
+    emb = cfg.get("embedding") or {}
     return {
-        "base_url": cfg.get("embedding_base_url", ""),
-        "model": cfg.get("embedding_model", "mxbai-embed-large:latest"),
-        "dimension": cfg.get("embedding_dimension", 1024),
+        "base_url": emb.get("base_url", ""),
+        "model": emb.get("model", "mxbai-embed-large:latest"),
+        "dimension": emb.get("dimension", 1024),
     }
 
 
 def read_vector_index_config(cfg: dict) -> dict[str, Any]:
     """Конфиг векторных индексов: таблица agent_vector_index_config (источник — БД).
 
-    Имя таблицы берётся из ``cfg["mode_vector_index_config_table"]``.
-    При ошибке БД исключение пробрасывается.
+    Имя таблицы — ``public.agent_vector_index_config`` (дефолт; infrastructure-
+    уровень, не часть skill-конфига).  При ошибке БД исключение пробрасывается.
     """
     from utils.db import fetch
 
-    table = cfg.get("mode_vector_index_config_table", "public.agent_vector_index_config")
+    table = "public.agent_vector_index_config"
     rows = fetch(
         "SELECT index_name, source_table, src_table, pk_column, "
         "content_cols, embedding_cols, track_column, enabled "
@@ -145,48 +150,77 @@ def read_vector_index_config(cfg: dict) -> dict[str, Any]:
 def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvider:
     """Универсальная фабрика: собрать провайдера из конфиг-секции навыка.
 
-    cfg — секция skills.<name> (например, skills.audit_analyzer из project.json).
+    cfg — секция ``skills.<name>`` из project.json (Phase 7 модель:
+    ``tables: [...]``, ``vector_indexes: [...]``, ``cache.*``, ``embedding.*``).
+
     base_dir — каталог, относительно которого разрешаются относительные пути
     кэша/индексов (для навыка это корень навыка).
+
+    ``vector_db_table`` (таблица-хранилище сырых векторов) определяется
+    элементом ``tables[]`` с ``type="vector"``. ``vector_indexes[]``
+    используется только для индексов (имя + source-таблица), не для
+    storage-таблицы.
 
     Использует ``cfg`` напрямую + ``lib.services.table_registry`` для путей.
     Не зависит от ``lib.services.audit_settings`` (TARGET §4, §22.9).
     """
     base = Path(base_dir) if base_dir else Path.cwd()
 
+    cache = cfg.get("cache") or {}
+
+    storage_table = ""
+    schemas: list[str] = []
+
+    vi_cfg = (cfg.get("gateway") or {}).get("vector_index") or {}
+    storage_tables = vi_cfg.get("storage_tables") or []
+    if storage_tables:
+        storage_table = storage_tables[0]
+
+    for entry in cfg.get("tables") or []:
+        if isinstance(entry, dict):
+            name = entry.get("name") or ""
+            if name and "." in name:
+                sch = name.split(".", 1)[0]
+                if sch and sch not in schemas:
+                    schemas.append(sch)
+            if not storage_table and entry.get("type") == "vector" and name:
+                storage_table = name
+
+    vi_list = cfg.get("vector_indexes") or []
+    vi_first = vi_list[0] if vi_list and isinstance(vi_list[0], dict) else {}
+
     # Cache path — приоритет:
-    # 1. cfg["in_memory_cache_path"] (если задан явно — back-compat).
+    # 1. cfg["cache"]["cache_path"] (если задан явно).
     # 2. table_registry.snapshot_path(workspace_root) — единый runtime snapshot
     #    в workspace/data_store/duckdb/cache.duckdb.
-    # base_dir указывает на skill_root; workspace_root = base_dir.parent.parent
-    # для skill `workspace/skills/<name>/`.
-    cache_path_cfg = cfg.get("in_memory_cache_path") or ""
+    # base_dir указывает на skill_root (workspace/skills/<name>).
+    # workspace_root = base_dir.parent.parent = workspace/.
+    cache_path_cfg = cache.get("cache_path") or ""
     if cache_path_cfg:
         cache_path = cache_path_cfg if Path(cache_path_cfg).is_absolute() else str(base / cache_path_cfg)
     else:
-        try:
-            from lib.services.table_registry import table_registry
-            workspace_root = base.parent.parent if base.name == "scripts" else base.parent
-            cache_path = str(table_registry.snapshot_path(workspace_root))
-        except Exception:
-            cache_path = str(base / "cache" / "audit_cache.duckdb")
+        from lib.services.table_registry import table_registry
+        workspace_root = base.parent.parent
+        cache_path = str(table_registry.snapshot_path(workspace_root))
 
-    index_path = cfg.get("vector_index_default_path") or ""
-    if index_path and not Path(index_path).is_absolute():
-        index_path = str(base / index_path)
+    index_path = ""
+    vi_name = vi_first.get("name", "")
+    if vi_name:
+        vi_cfg = (cfg.get("gateway", {}) or {}).get("vector_index") or {}
+        root = vi_cfg.get("default_root") or "data_store/vectors"
+        idx = Path(root) / vi_name
+        index_path = str(idx) if idx.is_absolute() else str(base / idx)
 
     emb = read_embedding_config(cfg)
-    tables = cfg.get("db_tables") or []
-    additional = cfg.get("db_additional_tables") or []
     return PostgresDuckDbProvider(
-        schema=cfg.get("db_schema", "main"),
-        tables=list(tables) if isinstance(tables, (list, tuple)) else None,
-        additional_tables=_normalize_additional_tables(additional),
+        schema=schemas[0] if schemas else "main",
+        tables=None,
+        additional_tables=[],
         cache_path=cache_path,
-        vector_db_table=cfg.get("mode_vector_db_table", ""),
+        vector_db_table=storage_table,
         vector_index_path=index_path,
         vector_indexes=read_vector_index_config(cfg),
-        vector_store_table=cfg.get("mode_vector_store_table", ""),
+        vector_store_table="public.agent_vector_index_store",
         embedding_base_url=emb.get("base_url", ""),
         embedding_model=emb.get("model", "mxbai-embed-large:latest"),
     )

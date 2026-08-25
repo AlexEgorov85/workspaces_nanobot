@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from config import ConfigurationError
-from lib.core.project_settings import validate_project_settings
+from lib.core.project_settings import (
+    SkillSettings,
+    TableEntry,
+    validate_project_settings,
+)
 
 
 class TestValidateProjectSettings:
@@ -83,3 +87,88 @@ class TestValidateProjectSettings:
     def test_none_values_treated_as_absent(self) -> None:
         result = validate_project_settings({"gateway": {"compact": None}})
         assert result.gateway.compact is None
+
+
+class TestTableEntry:
+    """Pydantic-модель ``TableEntry`` и её использование в ``SkillSettings.tables``.
+
+    Расширение формата ``tables``: помимо строк допускаются
+    объекты ``{"name", "label?", "tracking_column?"}`` для задания
+    per-table атрибутов. Unknown keys запрещены (``extra="forbid"``).
+    """
+
+    def test_table_entry_minimal(self) -> None:
+        e = TableEntry.model_validate({"name": "oarb.audits"})
+        assert e.name == "oarb.audits"
+        assert e.label is None
+        assert e.tracking_column is None
+
+    def test_table_entry_full(self) -> None:
+        e = TableEntry.model_validate(
+            {"name": "public.scripts", "label": "scripts_registry", "tracking_column": "modified_at"}
+        )
+        assert e.name == "public.scripts"
+        assert e.label == "scripts_registry"
+        assert e.tracking_column == "modified_at"
+
+    def test_table_entry_extra_forbidden(self) -> None:
+        with pytest.raises(Exception) as excinfo:
+            TableEntry.model_validate({"name": "x", "bogus": 1})
+        assert "extra_forbidden" in str(excinfo.value) or "not permitted" in str(excinfo.value)
+
+    def test_table_entry_missing_name(self) -> None:
+        with pytest.raises(Exception):
+            TableEntry.model_validate({"label": "x"})
+
+    def test_skill_settings_tables_strings(self) -> None:
+        """Плоский список строк (min-контракт)."""
+        s = SkillSettings.model_validate({"tables": ["oarb.audits", "oarb.violations"]})
+        assert s.tables == ["oarb.audits", "oarb.violations"]
+
+    def test_skill_settings_tables_objects(self) -> None:
+        """Список объектов TableEntry."""
+        s = SkillSettings.model_validate({
+            "tables": [
+                {"name": "oarb.audits"},
+                {"name": "public.scripts", "label": "scripts_registry"},
+                {"name": "oarb.reports", "tracking_column": "modified_at"},
+            ],
+        })
+        assert len(s.tables) == 3
+        assert isinstance(s.tables[0], TableEntry)
+        assert s.tables[0].name == "oarb.audits"
+        assert s.tables[0].label is None
+        assert isinstance(s.tables[1], TableEntry)
+        assert s.tables[1].name == "public.scripts"
+        assert s.tables[1].label == "scripts_registry"
+        assert isinstance(s.tables[2], TableEntry)
+        assert s.tables[2].tracking_column == "modified_at"
+
+    def test_skill_settings_tables_mixed(self) -> None:
+        """Строки и объекты в одном списке."""
+        s = SkillSettings.model_validate({
+            "tables": ["oarb.audits", {"name": "public.scripts", "label": "scripts_registry"}],
+        })
+        assert s.tables[0] == "oarb.audits"
+        assert isinstance(s.tables[1], TableEntry)
+        assert s.tables[1].name == "public.scripts"
+        assert s.tables[1].label == "scripts_registry"
+
+    def test_skill_settings_tables_object_unknown_key_rejected(self) -> None:
+        """Опечатки в ключах объекта ловятся на старте (fail-fast)."""
+        with pytest.raises(Exception) as excinfo:
+            SkillSettings.model_validate(
+                {"tables": [{"name": "x", "bogus": 1}]}
+            )
+        msg = str(excinfo.value)
+        assert "not permitted" in msg or "extra_forbidden" in msg
+
+    def test_skill_settings_tables_none(self) -> None:
+        """Отсутствие ``tables`` остаётся None (не ошибка)."""
+        s = SkillSettings.model_validate({})
+        assert s.tables is None
+
+    def test_table_entry_in_exports(self) -> None:
+        """TableEntry экспортируется из lib.core.project_settings."""
+        from lib.core.project_settings import TableEntry as Exported
+        assert Exported is TableEntry

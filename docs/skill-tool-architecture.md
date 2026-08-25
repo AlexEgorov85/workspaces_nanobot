@@ -276,7 +276,7 @@ Skill может объявить свою метку и находить соо
 
 - `TableResource(name="oarb.audits")` (label=None)
 - `TableResource(name="oarb.violations")` (label=None)
-- `TableResource(name="public.agent_predefined_scripts", owner="additional", label="scripts_registry")`
+- `TableResource(name="public.agent_predefined_scripts", label="scripts_registry")`
 
 `audit_analyzer/scripts/db_loader.py` использует:
 

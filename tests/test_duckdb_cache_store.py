@@ -10,7 +10,8 @@ _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from lib.services.audit_memory_store import AuditMemoryStore
+from lib.services.duckdb_cache_store import DuckDbCacheStore
+from lib.services.table_registry import SkillRegistration, VectorResource, table_registry
 
 _DIM = 1024
 
@@ -50,9 +51,25 @@ _VECTOR_RECORDS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _reset_registry():
+    table_registry.clear()
+    table_registry._embedding.clear()
+    yield
+    table_registry.clear()
+    table_registry._embedding.clear()
+
+
 @pytest.fixture
 def store(tmp_path):
-    st = AuditMemoryStore(
+    # Регистрируем vector_db_table как VectorResource, потому что
+    # DuckDbCacheStore._mark_vector_sources_dirty теперь делает lookup
+    # через table_registry.vector_resources() вместо сравнения имён.
+    table_registry.register(SkillRegistration(
+        name="audit_analyzer",
+        resources=(VectorResource(name="oarb.audit_vectors", tracking_column="id"),),
+    ))
+    st = DuckDbCacheStore(
         cache_path=str(tmp_path / "audit.duckdb"),
         schema="oarb",
         tables=["audits", "violations"],
@@ -201,7 +218,7 @@ class TestVector:
 class TestSkillVectorFromCache:
     def test_publish_includes_vector_table(self, tmp_path):
         target = tmp_path / "out.duckdb"
-        store = AuditMemoryStore(
+        store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
             schema="oarb",
@@ -225,7 +242,7 @@ class TestSkillVectorFromCache:
         import lib.services.cache_provider_impl as cp
 
         target = tmp_path / "out.duckdb"
-        store = AuditMemoryStore(
+        store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
             schema="oarb",
@@ -259,7 +276,7 @@ class TestSkillVectorFromCache:
         import lib.services.cache_provider_impl as cp
 
         target = tmp_path / "out.duckdb"
-        store = AuditMemoryStore(
+        store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
             schema="oarb",
@@ -295,7 +312,7 @@ class TestSkillVectorFromCache:
 class TestPublish:
     def test_publish_creates_readable_snapshot(self, tmp_path):
         target = tmp_path / "out.duckdb"
-        store = AuditMemoryStore(
+        store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
             schema="oarb",
@@ -319,7 +336,7 @@ class TestPublish:
 
     def test_publish_replaces_file_on_update(self, tmp_path):
         target = tmp_path / "out.duckdb"
-        store = AuditMemoryStore(
+        store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
             schema="oarb",
@@ -341,7 +358,7 @@ class TestPublish:
 
     def test_publish_noop_when_not_dirty(self, tmp_path):
         target = tmp_path / "out.duckdb"
-        store = AuditMemoryStore(cache_path="", publish_path=str(target), schema="oarb")
+        store = DuckDbCacheStore(cache_path="", publish_path=str(target), schema="oarb")
         store.open()
         assert store.publish() is True
         assert not target.exists()
@@ -349,7 +366,7 @@ class TestPublish:
 
     def test_publish_force_recreates_when_not_dirty(self, tmp_path):
         target = tmp_path / "out.duckdb"
-        store = AuditMemoryStore(
+        store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
             schema="oarb",
@@ -365,14 +382,14 @@ class TestPublish:
         store.close()
 
     def test_publish_force_noop_without_publish_path(self):
-        store = AuditMemoryStore(cache_path="", schema="oarb")
+        store = DuckDbCacheStore(cache_path="", schema="oarb")
         store.open()
         assert store.publish(force=True) is True
         store.close()
 
     def test_publish_skips_missing_tables(self, tmp_path):
         target = tmp_path / "out.duckdb"
-        store = AuditMemoryStore(
+        store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
             schema="oarb",
@@ -391,7 +408,7 @@ class TestPublish:
         store.close()
 
     def test_publish_without_publish_path_is_noop(self):
-        store = AuditMemoryStore(cache_path="", schema="oarb")
+        store = DuckDbCacheStore(cache_path="", schema="oarb")
         store.open()
         store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
         assert store.publish() is True
@@ -498,7 +515,7 @@ class TestReplace:
 
     def test_publish_includes_schema_meta(self, tmp_path):
         target = tmp_path / "out.duckdb"
-        st = AuditMemoryStore(
+        st = DuckDbCacheStore(
             cache_path="", publish_path=str(target), schema="oarb", tables=["audits"],
         )
         st.open()
@@ -521,7 +538,7 @@ class TestReplace:
 
 
 def test_map_pg_type():
-    from lib.services.audit_memory_store import _map_pg_type
+    from lib.services.duckdb_cache_store import _map_pg_type
 
     assert _map_pg_type("integer") == "INTEGER"
     assert _map_pg_type("bigint") == "BIGINT"

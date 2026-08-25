@@ -4,8 +4,6 @@
   // ============================================================================
   //  Читается config.py и мержится в SETTINGS в порядке (поздний перекрывает):
   //      project.json → config.json → .secrets.env (секреты)
-  //  .env был удалён (миграция в project.json/config.json); код оставил лишь
-  //  защитный fallback: если файл .env когда-либо появится, он прочитается первым.
   //
   //  Формат: JSONC — обычный JSON + комментарии // и /* */.
   //  Значения вида ${VAR} подставляются из os.environ (секреты — из .secrets.env).
@@ -29,7 +27,7 @@
   // ============================================================================
 
   // ---------------------------------------------------------------------------
-  //  channels.* — каналы связи (заменяют секции [PostgreSQL]/[Redis] из .env)
+  //  channels.* — каналы связи
   // ---------------------------------------------------------------------------
   "project": {
     "version": "2.4.0"   // Версия проекта (актуальный релизный тег vX.Y.Z без префикса v)
@@ -59,15 +57,9 @@
       "lease_interval": 15.0,                 // Период heartbeat-продления аренды, сек
       "error_retry_delay": 60.0,              // Пауза перед повтором задачи со статусом error, сек
       "claim_strategy": "single",             // Режим аренды задач.
-                                             //   "single" (активен) — один инстанс gateway, захват задачи
+                                             //   "single" (дефолт) — один инстанс gateway, захват задачи
                                              //     через UPDATE ... RETURNING без таблицы agent_worker_claims.
                                              //     Подходит для типичного деплоя (как в v2.3.1).
-                                             //   "worker_pool" — мульти-машинный пул: захват через
-                                             //     INSERT INTO agent_worker_claims + lease/heartbeat.
-                                             //     Используется, если запущено несколько инстансов gateway
-                                             //     с общей таблицей agent_conversation_messages.
-                                             //   Параметры worker_id/claims_table/lease_interval/
-                                             //   error_retry_delay актуальны только в режиме "worker_pool".
                                              //   "worker_pool" — мульти-машинный пул: захват через
                                              //     INSERT INTO agent_worker_claims + lease/heartbeat.
                                              //     Используется, если запущено несколько инстансов gateway
@@ -100,81 +92,121 @@
   },
 
   // ---------------------------------------------------------------------------
-  //  skills.* — настройки пользовательских навыков
+  //  skills.* — настройки пользовательских навыков (универсальная схема)
+  // ---------------------------------------------------------------------------
+  //  Каждый skill объявляется одной JSON-секцией со стандартным набором полей
+  //  (см. lib/core/project_settings.py::SkillSettings). Никакого register.py
+  //  не требуется: ApplicationContext читает эту секцию при старте и
+  //  автоматически создаёт TableResource/VectorResource в table_registry.
+  //
+  //  Чтобы добавить новый skill:
+  //    1. Добавить секцию "skills.<name>" с массивом tables (TableResource).
+  //    2. Если нужны векторные индексы — добавить vector_indexes + embedding.
+  //    3. Если нужен свой интервал sync — настроить gateway.sync.*.
+  //    4. Готово: skill подхватится на старте gateway без правок кода.
+  //
+  //  Секции (все OPTIONAL):
+  //      enabled            — отключить skill без удаления секции (default: true)
+  //      tables             — единый список ресурсов skill'а (см. ниже "Структура tables")
+  //      vector_indexes     — массив {name, source}: декларация принадлежности
+  //                           индексов к навыку. backend и путь хранения — общая
+  //                           инфраструктура (см. gateway.vector_index.*).
+  //      embedding.*        — Ollama /api/embed (для vector-таблиц)
+  //      cache.*            — in-memory кэш (DuckDB): enabled, engine, max_age_sec, refresh_interval_sec
+  //      cli.*              — параметры CLI навыка (default_mode, default_format, max_retries, timeout_sec)
+  //      llm.*              — переопределение LLM для навыка (max_tokens, temperature)
+  //
+  //  Структура tables (lib/core/project_settings.py::TableEntry):
+  //      name              — ОБЯЗАТЕЛЬНО. Имя таблицы в формате "schema.table"
+  //                          (контракт TableResource.__post_init__).
+  //      type              — "table" (по умолчанию) | "vector". Определяет, какой
+  //                          Resource создаёт _auto_register_skills: обычный
+  //                          TableResource или VectorResource. Попадает ли
+  //                          таблица в DuckDB, определяется автоматически
+  //                          по VectorResource.
+  //      label             — OPTIONAL opaque-метка. Если label задан, таблица
+  //                          НЕ попадает в описание схемы для LLM
+  //                          (get_db_tables() возвращает только таблицы
+  //                          без label); доступ к ней — через
+  //                          TableRegistry.resources_by_label(label).
+  //                          Типичный кейс: реестры метаданных из других
+  //                          схем (например, public.agent_predefined_scripts
+  //                          с label="scripts_registry"). Runtime-sync
+  //                          игнорирует.
+  //      tracking_column   — OPTIONAL колонка для инкрементального поллинга.
+  //                          Дефолт "updated_at" для type="table", "id" для
+  //                          type="vector".
+  //      Элемент может быть строкой "schema.table" (равно {"name": "schema.table"})
+  //      или объектом с полями выше. Неизвестные ключи в объекте запрещены
+  //      (extra="forbid") — fail-fast на опечатках.
+  //
+  //  ВНИМАНИЕ: sync.* (poll_interval_sec, full_resync_every, max_queue_size,
+  //  reconnect_backoff_*) — это НЕ секция skill'а, а глобальная runtime-секция
+  //  на уровне gateway.sync.* (общая для всех skills). См. ниже.
   // ---------------------------------------------------------------------------
   "skills": {
     "audit_analyzer": {
-      // --- LLM: генерация SQL и обобщение результатов -----------------------
-      // Навык использует ТУ ЖЕ LLM, что и агент: провайдер/модель/api_base/ключ
-      // берутся из agents.defaults + providers.<provider> (config.json).
-      // Специфичные для навыка переопределения (llm_provider/llm_model/llm_api_base)
-      // задаются только при необходимости отклониться от агентской LLM.
-      "llm_max_tokens": 8192,
-      "llm_temperature": 0.1,
+      "enabled": true,
 
-      // --- База данных: источник данных для анализа ------------------------
-      "db_schema": "oarb",                    // Схема с таблицами аудита
-      "db_tables": [                          // Таблицы, доступные агенту
-        "audit_reports",
-        "audits",
-        "report_items",
-        "violations"
+      "tables": [                                    // Доменные таблицы навыка (без инфраструктурных
+                                                  // storage-таблиц — они в gateway.vector_index.*).
+                                                  // tracking_column — обычно updated_at;
+                                                  // label отмечает реестры метаданных
+                                                  // (не попадают в описание схемы для LLM).
+        {"name": "oarb.audit_reports",              "tracking_column": "updated_at"},
+        {"name": "oarb.audits",                     "tracking_column": "updated_at"},
+        {"name": "oarb.report_items",               "tracking_column": "updated_at"},
+        {"name": "oarb.violations",                 "tracking_column": "updated_at"},
+        {"name": "public.agent_predefined_scripts", "tracking_column": "updated_at", "label": "scripts_registry"}
       ],
-      "db_additional_tables": [               // Доп. таблицы (из других схем) для копирования в DuckDB-кэш
-        ["public", "agent_predefined_scripts"]     // реестр SQL-скриптов (см. predefined_scripts_table)
+
+      "vector_indexes": [                            // Какие индексы относятся к навыку.
+                                                  //   name   — логическое имя индекса (как его
+                                                  //            видит tool vector_search и
+                                                  //            <gateway.vector_index.default_root>/<name>
+                                                  //            даёт путь к FAISS-файлу).
+                                                  //   source — PG-таблица, из которой
+                                                  //            tools/build_vectors.py берёт строки
+                                                  //            для эмбеддингов (→ oarb.audit_vectors).
+        {
+          "name": "audits_index",
+          "source": "oarb.audits"
+        },
+        {
+          "name": "violations_index",
+          "source": "oarb.violations"
+        },
+        {
+          "name": "audit_reports_index",
+          "source": "oarb.audit_reports"
+        }
       ],
-      "predefined_scripts_table": "public.agent_predefined_scripts",  // Реестр SQL-скриптов (sql_template + parameters)
-      //   Источник истины для режима predefined. Заполняется через
-      //   sql/audit_analyzer/create_public_agent_predefined_scripts.sql и
-      //   tools/generate_predefined_scripts_sql.py.
-      "mode_vector_index_config_table": "public.agent_vector_index_config",  // Конфиг FAISS-индексов (читается cache_provider_impl)
 
-      // --- Фоновая синхронизация (gateway: AuditSyncService) ------------------
-      "poll_interval_sec": 14400,            // Поллинг новых/изменённых строк из PostgreSQL, сек.
-                                             // Минимум 4 часа (14400 сек) — AuditSyncService отвергает
-                                             // значения меньше минимума.
-      "full_resync_every": 10,                // Полная перезагрузка таблицы каждые N циклов (сверка удалений; 0 = выкл)
-      "sync_max_queue_size": 10000,           // Макс. размер очереди синхронизации (audit_sync_service.py)
-      "reconnect_backoff_sec": 1.0,           // Начальный backoff после разрыва соединения
-      "reconnect_backoff_max_sec": 60.0,      // Потолок reconnect-backoff (экспоненциально)
+      "embedding": {                                 // Ollama /api/embed
+        "base_url": "http://localhost:11434/api/embed",
+        "model": "mxbai-embed-large:latest",
+        "dimension": 1024,
+        "http_timeout_sec": 60
+      },
 
-      // --- In-memory кеш (DuckDB): локальная копия данных для скорости ------
-      "in_memory_enabled": true,              // Варианты: true | false
-      "in_memory_engine": "duckdb",           // Движок in-memory кеша. Варианты: duckdb (единственный реализованный)
-      "in_memory_cache_path": "cache/audit_cache.duckdb",
-      "cache_max_age_sec": 3600,              // Возраст кеша для initial-проверки (preload_service.py)
-      "cache_refresh_interval_sec": 3600,     // Фоновый интервал проверки кеша
+      "cache": {                                     // In-memory кэш (DuckDB)
+        "enabled": true,
+        "engine": "duckdb",
+        "max_age_sec": 3600,
+        "refresh_interval_sec": 3600
+      },
 
-      // --- Эмбеддинги для семантического (векторного) поиска ----------------
-      "embedding_base_url": "http://localhost:11434/api/embed",  // Ollama /api/embed
-      "embedding_model": "mxbai-embed-large:latest",
-      "embedding_dimension": 1024,            // Размерность векторов. Используется read_embedding_config() в cache_provider_impl.py
-      "embedding_http_timeout_sec": 60,       // HTTP-таймаут Ollama /api/embed
+      "cli": {                                       // audit_analyze --mode ...
+        "default_mode": "predefined",
+        "default_format": "json",
+        "max_retries": 3,
+        "timeout_sec": 60
+      },
 
-      // --- Векторный поиск: ИНДЕКСЫ В БАЗЕ ДАННЫХ ----------------------------
-      // Векторы и их конфигурация хранятся в PostgreSQL/Greenplum:
-      "mode_vector_db_table": "oarb.audit_vectors",  // Таблица сырых векторов (источник индекса)
-      "mode_vector_store_table": "public.agent_vector_index_store",  // Таблица FAISS-индексов (BYTEA)
-      "vector_index_default_path": "data_store/vectors/audits_index",  // Fallback-путь FAISS-индекса
-      // Параметры поиска top_k / threshold задаются аргументами CLI:
-      //   audit_analyze --mode vector --query '...' --index-name audits_index --top-k 5 --threshold 0.75 (0.0–1.0)
-      // (в конфиге не хранятся — код их не читает)
-
-      // --- Текст-сплиттер (build_vectors.py, text_splitter.py) --------------
-      "text_chunk_size": 500,                 // Размер чанка текста для эмбеддинга
-      "text_chunk_overlap": 80,               // Перекрытие между чанками
-      "build_batch_pause_sec": 0.5,           // Пауза между батчами в build_vectors.py
-
-      // --- Режимы работы навыка ---------------------------------------------
-      //   predefined — готовые SQL-шаблоны (--script), кеш в DuckDB
-      //   sql        — генерация SQL через LLM по текстовому запросу (--query)
-      //   vector     — семантический поиск по индексу из БД (--query + --index-name)
-      //   init       — загрузка DuckDB-кеша из PostgreSQL
-      "cli_default_mode": "predefined",       // Режим по умолчанию. Варианты: predefined | sql | vector | init (см. выше).
-      //   Используется cli.py как default для --mode (если флаг не передан).
-      "cli_default_format": "json",           // Формат вывода по умолчанию
-      "cli_max_retries": 3,                   // Ретраи LLM при генерации SQL
-      "cli_timeout_sec": 60                   // Таймаут запроса к LLM, сек
+      "llm": {                                       // Генерация SQL и обобщение
+        "max_tokens": 8192,
+        "temperature": 0.1
+      }
     }
   },
 
@@ -257,6 +289,17 @@
       "notify_in_history": true,       // Писать заметку о сжатии в agent_conversation_messages (видно в Streamlit)
       "print_to_terminal": false       // Дублировать заметку в терминал gateway (по образцу print_worker_activity)
     },
+    //  sync.* — параметры фоновой синхронизации PG → DuckDB (PgDuckDbSyncService).
+    //  Глобальные runtime-параметры, общие для всех skills. Минимум 4 часа
+    //  (см. lib/services/pg_duckdb_sync_service.py). Все ключи опциональны;
+    //  дефолты указаны в коде.
+    "sync": {
+      "poll_interval_sec": 14400,
+      "full_resync_every": 10,
+      "max_queue_size": 10000,
+      "reconnect_backoff_sec": 1.0,
+      "reconnect_backoff_max_sec": 60.0
+    },
     //  duckdb_query.* — tool workspace/tools/duckdb_query_tool.py.
     //  Read-only SELECT-запросы в локальный DuckDB-кэш.
     //  Все ключи опциональны; дефолты в DuckdbQueryToolConfig.
@@ -277,6 +320,34 @@
       "max_query_chars": 4000,
       "max_result_chars": 16000,
       "timeout_sec": 30
+    },
+    //  vector_index.* — общая инфраструктура FAISS и связанных storage-таблиц.
+    //  Раньше всё это жило в skill'е (vector_indexes[].default_path + tables[]
+    //  с type="vector"), что смешивало инфраструктуру и домен навыка. Теперь:
+    //    storage_tables — PG-таблицы-хранилища сырых эмбеддингов (по
+    //                     формату "schema.table"); регистрируются как
+    //                     VectorResource и попадают в DuckDB-кэш.
+    //    cache_tables   — PG-таблицы, реплицируемые в DuckDB-кэш
+    //                     (workspace/data_store/duckdb/cache.duckdb) — это
+    //                     storage_tables + доменные таблицы, нужные runtime'у.
+    //    default_root   — корневая папка FAISS-индексов; путь к индексу =
+    //                     <default_root>/<index_name>.
+    //    backend        — runtime-бэкенд построения индексов ("faiss" и т.п.).
+    //  Все ключи опциональны; дефолты в VectorIndexSettings.
+    "vector_index": {
+      "enable": true,
+      "storage_tables": [
+        "oarb.audit_vectors"
+      ],
+      "cache_tables": [
+        "oarb.audit_reports",
+        "oarb.audits",
+        "oarb.report_items",
+        "oarb.violations",
+        "oarb.audit_vectors"
+      ],
+      "default_root": "data_store/vectors",
+      "backend": "faiss"
     }
   },
 

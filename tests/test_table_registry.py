@@ -1,12 +1,20 @@
-"""Тесты для ``lib/services/table_registry.py``."""
+"""Тесты для ``lib/services/table_registry.py``.
+
+Эти тесты проверяют контракт единого API по ресурсам (``TableResource``,
+``VectorResource``, ``SkillRegistration.resources``). Legacy-полей и
+legacy-методов больше нет — все тесты работают через новый API.
+"""
 
 from __future__ import annotations
 
 import pytest
 
 from lib.services.table_registry import (
+    Resource,
     SkillRegistration,
     TableRegistry,
+    TableResource,
+    VectorResource,
     table_registry,
 )
 
@@ -19,6 +27,35 @@ def _reset_registry():
     table_registry.clear()
 
 
+class TestTableResource:
+    def test_requires_qualified_name(self) -> None:
+        """Контракт: ``name`` всегда в формате ``schema.table``."""
+        with pytest.raises(ValueError, match="schema.table"):
+            TableResource(name="audits")
+        with pytest.raises(ValueError, match="schema.table"):
+            TableResource(name="")
+
+    def test_qualified_name_ok(self) -> None:
+        r = TableResource(name="oarb.audits", tracking_column="updated_at")
+        assert r.name == "oarb.audits"
+        assert r.tracking_column == "updated_at"
+
+
+class TestVectorResource:
+    def test_requires_qualified_name(self) -> None:
+        with pytest.raises(ValueError, match="schema.table"):
+            VectorResource(name="vectors")
+        with pytest.raises(ValueError, match="schema.table"):
+            VectorResource(name="")
+
+    def test_default_tracking_is_id(self) -> None:
+        """Vector-таблица без явного tracking_column даёт ``id`` через ``tracking_column_for``."""
+        reg = SkillRegistration(
+            name="s", resources=(VectorResource(name="oarb.vectors"),)
+        )
+        assert reg.tracking_column_for("oarb.vectors") == "id"
+
+
 class TestSkillRegistration:
     def test_name_required(self) -> None:
         with pytest.raises(ValueError, match="name is required"):
@@ -27,28 +64,62 @@ class TestSkillRegistration:
     def test_defaults(self) -> None:
         reg = SkillRegistration(name="audit_analyzer")
         assert reg.name == "audit_analyzer"
-        assert reg.tables == ()
-        assert reg.additional_tables == ()
-        assert reg.vector_table == ""
-        assert reg.db_schema == "main"
+        assert reg.resources == ()
+        assert reg.enabled is True
+        assert reg.table_resources() == ()
+        assert reg.vector_resources() == ()
 
     def test_immutable(self) -> None:
-        reg = SkillRegistration(name="audit_analyzer", tables=("oarb.audits",))
+        reg = SkillRegistration(
+            name="audit_analyzer",
+            resources=(TableResource(name="oarb.audits"),),
+        )
         with pytest.raises(Exception):
-            reg.tables = ()  # type: ignore[misc]
+            reg.resources = ()  # type: ignore[misc]
+
+    def test_resource_methods_split_types(self) -> None:
+        reg = SkillRegistration(
+            name="s",
+            resources=(
+                TableResource(name="oarb.audits"),
+                VectorResource(name="oarb.vectors"),
+                TableResource(name="public.meta"),
+            ),
+        )
+        assert {r.name for r in reg.table_resources()} == {"oarb.audits", "public.meta"}
+        assert {r.name for r in reg.vector_resources()} == {"oarb.vectors"}
+
+    def test_tracking_column_per_resource(self) -> None:
+        reg = SkillRegistration(
+            name="s",
+            resources=(
+                TableResource(name="oarb.orders", tracking_column="updated_at"),
+                TableResource(name="oarb.archive", tracking_column="modified_at"),
+                TableResource(name="oarb.frozen"),  # дефолт
+            ),
+        )
+        assert reg.tracking_column_for("oarb.orders") == "updated_at"
+        assert reg.tracking_column_for("oarb.archive") == "modified_at"
+        assert reg.tracking_column_for("oarb.frozen") == "updated_at"
+
+    def test_tracking_column_default_updated_at(self) -> None:
+        """Для неизвестной таблицы — generic-дефолт ``updated_at``."""
+        reg = SkillRegistration(name="s")
+        assert reg.tracking_column_for("any.t") == "updated_at"
 
 
 class TestTableRegistryRegister:
     def test_register_one(self) -> None:
         reg = TableRegistry()
-        reg.register(SkillRegistration(name="a", tables=("oarb.x",)))
+        reg.register(SkillRegistration(name="a", resources=(TableResource(name="oarb.x"),)))
         assert reg.names() == ("a",)
 
     def test_register_replace(self) -> None:
         reg = TableRegistry()
-        reg.register(SkillRegistration(name="a", tables=("oarb.x",)))
-        reg.register(SkillRegistration(name="a", tables=("oarb.y",)))
-        assert reg.all_tables() == ("oarb.y",)
+        reg.register(SkillRegistration(name="a", resources=(TableResource(name="oarb.x"),)))
+        reg.register(SkillRegistration(name="a", resources=(TableResource(name="oarb.y"),)))
+        assert "oarb.y" in reg.table_names()
+        assert "oarb.x" not in reg.table_names()
 
     def test_register_type_error(self) -> None:
         reg = TableRegistry()
@@ -64,52 +135,52 @@ class TestTableRegistryRegister:
 
 
 class TestTableRegistryQueries:
-    def test_all_tables(self) -> None:
+    def test_table_and_vector_names(self) -> None:
         reg = TableRegistry()
         reg.register(SkillRegistration(
             name="audit_analyzer",
-            tables=("oarb.audits", "oarb.violations"),
-            additional_tables=("public.agent_predefined_scripts",),
-            vector_table="oarb.audit_vectors",
+            resources=(
+                TableResource(name="oarb.audits"),
+                TableResource(name="oarb.violations"),
+                TableResource(name="public.agent_predefined_scripts"),
+                VectorResource(name="oarb.audit_vectors"),
+            ),
         ))
         reg.register(SkillRegistration(
             name="finance",
-            tables=("finance.tx",),
+            resources=(TableResource(name="finance.tx"),),
         ))
-        all_tables = reg.all_tables()
-        assert "oarb.audits" in all_tables
-        assert "oarb.violations" in all_tables
-        assert "oarb.audit_vectors" in all_tables
-        assert "public.agent_predefined_scripts" in all_tables
-        assert "finance.tx" in all_tables
+        names = set(reg.table_names())
+        assert "oarb.audits" in names
+        assert "oarb.violations" in names
+        assert "public.agent_predefined_scripts" in names
+        assert "finance.tx" in names
+        # Vector — отдельно, не в tables
+        assert "oarb.audit_vectors" not in names
+        assert reg.vector_names() == ("oarb.audit_vectors",)
 
-    def test_store_tables_excludes_vector(self) -> None:
+    def test_resources_global(self) -> None:
         reg = TableRegistry()
         reg.register(SkillRegistration(
-            name="audit_analyzer",
-            tables=("oarb.audits",),
-            vector_table="oarb.audit_vectors",
+            name="a",
+            resources=(
+                TableResource(name="oarb.t1"),
+                VectorResource(name="oarb.v1"),
+            ),
         ))
-        assert "oarb.audit_vectors" not in reg.store_tables()
-        assert "oarb.audits" in reg.store_tables()
+        kinds = {type(r).__name__ for r in reg.resources()}
+        assert kinds == {"TableResource", "VectorResource"}
 
-    def test_vector_table_first(self) -> None:
+    def test_enabled_skipped_when_disabled(self) -> None:
         reg = TableRegistry()
-        reg.register(SkillRegistration(name="a", vector_table="first.vec"))
-        reg.register(SkillRegistration(name="b", vector_table="second.vec"))
-        assert reg.vector_table() == "first.vec"
-
-    def test_vector_table_none(self) -> None:
-        reg = TableRegistry()
-        reg.register(SkillRegistration(name="a"))
-        assert reg.vector_table() is None
-
-    def test_all_db_schemas_dedup(self) -> None:
-        reg = TableRegistry()
-        reg.register(SkillRegistration(name="a", db_schema="oarb"))
-        reg.register(SkillRegistration(name="b", db_schema="oarb"))
-        reg.register(SkillRegistration(name="c", db_schema="public"))
-        assert reg.all_db_schemas() == ("oarb", "public")
+        reg.register(SkillRegistration(
+            name="a",
+            enabled=False,
+            resources=(TableResource(name="oarb.t1"),),
+        ))
+        assert reg.table_names() == ()
+        assert reg.enabled_names() == ()
+        assert reg.names() == ("a",)
 
     def test_names_sorted(self) -> None:
         reg = TableRegistry()
@@ -117,6 +188,35 @@ class TestTableRegistryQueries:
         reg.register(SkillRegistration(name="a"))
         reg.register(SkillRegistration(name="m"))
         assert reg.names() == ("a", "m", "z")
+
+    def test_skill_for_table(self) -> None:
+        reg = TableRegistry()
+        reg.register(SkillRegistration(
+            name="sales",
+            resources=(
+                TableResource(name="sales.orders"),
+                VectorResource(name="sales.doc_vectors"),
+            ),
+        ))
+        assert reg.skill_for_table("sales.orders") is not None
+        assert reg.skill_for_table("sales.orders").name == "sales"
+        assert reg.skill_for_table("sales.doc_vectors") is not None
+        assert reg.skill_for_table("unknown.t") is None
+
+
+class TestTrackingColumn:
+    def test_global_lookup(self) -> None:
+        reg = TableRegistry()
+        reg.register(SkillRegistration(
+            name="s",
+            resources=(
+                TableResource(name="oarb.t1", tracking_column="modified_at"),
+                VectorResource(name="oarb.v1"),
+            ),
+        ))
+        assert reg.tracking_column_for("oarb.t1") == "modified_at"
+        assert reg.tracking_column_for("oarb.v1") == "id"
+        assert reg.tracking_column_for("unknown.t") == "updated_at"
 
 
 class TestSnapshotPath:
@@ -131,6 +231,123 @@ class TestSnapshotPath:
         assert path == tmp_path / "data_store" / "duckdb" / "other.duckdb"
 
 
+class TestLabelLookup:
+    """Lookup таблиц по ``TableResource.label`` для Skill-кода.
+
+    Label — opaque marker (например, ``"scripts_registry"`` для реестра
+    предопределённых SQL-скриптов в ``audit_analyzer``). Runtime-sync
+    игнорирует label, но skill может найти нужную таблицу через
+    ``TableRegistry.resources_by_label()``.
+    """
+
+    def test_label_default_none(self) -> None:
+        """Контракт: ``TableResource()`` без label имеет ``label is None``."""
+        r = TableResource(name="oarb.audits")
+        assert r.label is None
+
+    def test_label_optional_constructor(self) -> None:
+        r = TableResource(name="oarb.scripts", label="scripts_registry")
+        assert r.label == "scripts_registry"
+
+    def test_resources_by_label_finds_match(self) -> None:
+        reg = TableRegistry()
+        reg.register(SkillRegistration(
+            name="audit_analyzer",
+            resources=(
+                TableResource(name="oarb.audits"),
+                TableResource(name="public.agent_predefined_scripts", label="scripts_registry"),
+                TableResource(name="public.meta"),
+            ),
+        ))
+        reg.register(SkillRegistration(
+            name="finance",
+            resources=(TableResource(name="finance.tx", label="scripts_registry"),),
+        ))
+        found = reg.resources_by_label("scripts_registry")
+        names = {r.name for r in found}
+        assert names == {"public.agent_predefined_scripts", "finance.tx"}
+
+    def test_resources_by_label_unknown_returns_empty(self) -> None:
+        reg = TableRegistry()
+        reg.register(SkillRegistration(
+            name="a",
+            resources=(TableResource(name="oarb.audits"),),
+        ))
+        assert reg.resources_by_label("nonexistent_label") == ()
+
+    def test_resources_by_label_skips_disabled(self) -> None:
+        """Disabled skill пропускается (как ``table_resources()``)."""
+        reg = TableRegistry()
+        reg.register(SkillRegistration(
+            name="a",
+            enabled=False,
+            resources=(TableResource(name="oarb.t1", label="scripts_registry"),),
+        ))
+        assert reg.resources_by_label("scripts_registry") == ()
+
+    def test_resources_by_label_skips_unlabeled(self) -> None:
+        """Таблицы без label не попадают в результат."""
+        reg = TableRegistry()
+        reg.register(SkillRegistration(
+            name="a",
+            resources=(
+                TableResource(name="oarb.t1"),
+                TableResource(name="oarb.t2", label="scripts_registry"),
+            ),
+        ))
+        found = reg.resources_by_label("scripts_registry")
+        assert len(found) == 1
+        assert found[0].name == "oarb.t2"
+
+    def test_resources_by_label_ignores_vectors(self) -> None:
+        """``VectorResource`` не имеют label; lookup их не возвращает."""
+        reg = TableRegistry()
+        reg.register(SkillRegistration(
+            name="a",
+            resources=(
+                TableResource(name="oarb.t1", label="scripts_registry"),
+                VectorResource(name="oarb.v1"),
+            ),
+        ))
+        found = reg.resources_by_label("scripts_registry")
+        assert len(found) == 1
+        assert found[0].name == "oarb.t1"
+
+    def test_label_does_not_affect_tracking_column(self) -> None:
+        """Label не влияет на runtime-sync (track-колонка независима)."""
+        reg = SkillRegistration(
+            name="s",
+            resources=(
+                TableResource(name="oarb.t1", tracking_column="modified_at", label="x"),
+                TableResource(name="oarb.t2", label="y"),
+            ),
+        )
+        assert reg.tracking_column_for("oarb.t1") == "modified_at"
+        assert reg.tracking_column_for("oarb.t2") == "updated_at"
+
+    def test_label_does_not_affect_table_names(self) -> None:
+        """``table_names()`` не фильтрует по label."""
+        reg = TableRegistry()
+        reg.register(SkillRegistration(
+            name="a",
+            resources=(
+                TableResource(name="oarb.t1", label="x"),
+                TableResource(name="oarb.t2"),
+            ),
+        ))
+        assert set(reg.table_names()) == {"oarb.t1", "oarb.t2"}
+
+    def test_label_via_singleton(self) -> None:
+        """Singleton ``table_registry`` поддерживает lookup по label."""
+        table_registry.register(SkillRegistration(
+            name="audit_analyzer",
+            resources=(TableResource(name="public.x", label="scripts_registry"),),
+        ))
+        found = table_registry.resources_by_label("scripts_registry")
+        assert len(found) == 1
+        assert found[0].name == "public.x"
+
+
 class TestSingleton:
     def test_singleton_is_module_level(self) -> None:
         from lib.services.table_registry import table_registry as r1
@@ -138,6 +355,76 @@ class TestSingleton:
         assert r1 is r2
 
     def test_register_via_singleton(self) -> None:
-        table_registry.register(SkillRegistration(name="global", tables=("x.y",)))
+        table_registry.register(SkillRegistration(
+            name="global",
+            resources=(TableResource(name="x.y"),),
+        ))
         assert table_registry.get("global") is not None
-        assert "x.y" in table_registry.all_tables()
+        assert "x.y" in table_registry.table_names()
+
+
+class TestNoLegacyAPI:
+    """Реестр не должен предоставлять legacy-методов или legacy-полей."""
+
+    def test_no_legacy_methods_on_registry(self) -> None:
+        reg = TableRegistry()
+        legacy = {
+            "all_tables", "store_tables", "sync_tables",
+            "vector_table", "vector_db_tables", "all_db_schemas",
+        }
+        for name in legacy:
+            assert not hasattr(reg, name), (
+                f"legacy метод {name!r} должен быть удалён"
+            )
+
+    def test_no_legacy_fields_on_registration(self) -> None:
+        reg = SkillRegistration(name="s")
+        legacy = {
+            "tables", "additional_tables", "vector_table",
+            "db_schema", "track_column", "track_column_overrides",
+            "poll_interval_sec",
+        }
+        for name in legacy:
+            assert name not in reg.__dataclass_fields__, (
+                f"legacy поле {name!r} должно быть удалено"
+            )
+
+    def test_no_audit_specific_attrs(self) -> None:
+        """Реестр не должен содержать audit-специфических знаний."""
+        reg = TableRegistry()
+        for attr in dir(reg):
+            assert "audit" not in attr.lower(), f"audit-specific attr: {attr}"
+
+
+class TestNoLegacyFieldsOnTableResource:
+    """У ``TableResource`` нет legacy-полей (Phase 5 рефакторинга Resource Model)."""
+
+    def test_no_legacy_fields(self) -> None:
+        legacy = {
+            "db_schema", "db_tables", "db_additional_tables",
+            "predefined_scripts_table", "mode_vector_db_table",
+            "mode_vector_store_table", "mode_vector_index_config_table",
+            "in_memory_cache_path", "in_memory_enabled", "in_memory_engine",
+            "embedding_base_url", "embedding_model", "embedding_dimension",
+            "embedding_http_timeout_sec",
+            "cli_default_mode", "cli_default_format", "cli_max_retries", "cli_timeout_sec",
+            "llm_max_tokens", "llm_temperature",
+            "text_chunk_size", "text_chunk_overlap", "build_batch_pause_sec",
+            "cache_max_age_sec", "cache_refresh_interval_sec",
+            "vector_index_default_path", "sync_max_queue_size",
+            "poll_interval_sec", "full_resync_every",
+            "reconnect_backoff_sec", "reconnect_backoff_max_sec",
+            "track_column_overrides",
+        }
+        for name in legacy:
+            assert name not in TableResource.__dataclass_fields__, (
+                f"legacy поле {name!r} должно быть удалено из TableResource"
+            )
+
+    def test_only_documented_fields(self) -> None:
+        """Только name, tracking_column, label — никаких других атрибутов."""
+        expected = {"name", "tracking_column", "label"}
+        actual = set(TableResource.__dataclass_fields__.keys())
+        assert actual == expected, (
+            f"ожидались только {expected}, фактически {actual}"
+        )

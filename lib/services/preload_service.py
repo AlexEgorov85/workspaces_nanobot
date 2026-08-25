@@ -8,8 +8,8 @@ Legacy-методы ``preload_audit_cache`` / ``background_audit_cache_refresh``
 / ``start_audit_cache_tasks`` / ``stop_tasks`` / ``get_audit_cache_config``
 / ``_audit_settings`` удалены в рефакторинге
 ``refactor/core-extract-duckdb-faiss``: единственный писатель
-``audit_cache.duckdb`` теперь — ``AuditMemoryStore.publish()`` через
-gateway (AuditSyncService → in-memory mirror → snapshot file). CLI-агент
+``audit_cache.duckdb`` теперь — ``DuckDbCacheStore.publish()`` через
+gateway (PgDuckDbSyncService → in-memory mirror → snapshot file). CLI-агент
 остаётся чистым читателем.
 """
 
@@ -23,7 +23,7 @@ class PreloadService:
     """Runtime-сервис: прогрев FAISS-индексов в память.
 
     Этот сервис НЕ знает о цикле запуска — он предоставляет async-метод,
-    который точка входа (``gateway.py``) запускает после ``AuditSyncService``
+    который точка входа (``gateway.py``) запускает после ``PgDuckDbSyncService``
     initial_load. Имя и API сохранены для back-compat (см.
     TARGET_ARCHITECTURE.md §34 — KEEP).
     """
@@ -40,7 +40,7 @@ class PreloadService:
         не блокировать event loop.
 
         Вызывающий (обычно ``gateway.py``) ОБЯЗАН дождаться
-        ``AuditSyncService`` initial_load ПЕРЕД этим методом (иначе
+        ``PgDuckDbSyncService`` initial_load ПЕРЕД этим методом (иначе
         DuckDB пуст и preload вернёт ``[]``). В gateway это решается
         через ``asyncio.Event`` + таймаут 30с.
 

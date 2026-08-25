@@ -885,12 +885,6 @@
       "setattr_calls": []
     },
     {
-      "file": "workspace/skills/audit_analyzer/scripts/register.py",
-      "imports": [],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
       "file": "workspace/skills/audit_analyzer/scripts/scripts_registry.py",
       "imports": [],
       "getattr_private": [],

@@ -202,8 +202,7 @@ class DynamicQueryBuilder:
 
         def _repl(m: re.Match) -> str:
             name = m.group(1)
-            if name not in seen:
-                seen.append(name)
+            seen.append(name)
             return '%s'
 
         # Negative lookbehind: не заменять ::TEXT, ::INTEGER и т.д.

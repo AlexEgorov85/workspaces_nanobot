@@ -14,15 +14,20 @@ from config import SETTINGS  # noqa: E402
 _CFG = SETTINGS.get("skills", {}).get("audit_analyzer", {})
 
 
-def get_llm_config() -> dict[str, Any]:
-    # Навык по умолчанию использует ТУ ЖЕ LLM, что и агент (agents.defaults +
-    # providers.<provider> из config.json). Специфичные для навыка llm_* ключи
-    # (project.json → skills.audit_analyzer) приоритетнее и могут перекрывать.
-    # Таким образом смена провайдера/модели/ключа агента автоматически меняет
-    # и LLM навыка, без дублирования секретов. Логика вынесена в общий модуль
-    # lib/services/llm_config.py и переиспользуется бенчмарком.
-    from lib.services.llm_config import resolve_llm_config
+def _tables_list() -> list[dict]:
+    """``_CFG["tables"]`` as list of dicts (pydantic already validated)."""
+    raw = _CFG.get("tables") or []
+    return [t if isinstance(t, dict) else {"name": t} for t in raw]
 
+
+def _vector_indexes_list() -> list[dict]:
+    """``_CFG["vector_indexes"]`` as list of dicts."""
+    raw = _CFG.get("vector_indexes") or []
+    return [v for v in raw if isinstance(v, dict)]
+
+
+def get_llm_config() -> dict[str, Any]:
+    from lib.services.llm_config import resolve_llm_config
     return resolve_llm_config(overrides=_CFG)
 
 
@@ -31,137 +36,122 @@ def get_tool_config() -> dict[str, Any]:
 
 
 def load_db_config() -> dict[str, Any]:
-    db_schema = get_db_schema()
-    tables = get_db_tables()
-    return {"schema": db_schema, "tables": tables}
+    return {"schema": get_db_schema(), "tables": get_db_tables()}
 
 
 def get_db_tables() -> list[str]:
-    val = _CFG.get("db_tables", [])
-    return list(val) if isinstance(val, (list, tuple)) else []
+    """Доменные таблицы skill'а для LLM-описания схемы.
+
+    Возвращает имена таблиц из ``tables[]`` **без** ``label`` —
+    это доменные таблицы, которые попадают в описание схемы для LLM.
+    Таблицы с ``label`` (например, ``public.agent_predefined_scripts``
+    с ``label="scripts_registry"``) — реестры метаданных; они доступны
+    через ``TableRegistry.resources_by_label(label)`` и в описание схемы
+    не попадают, чтобы не путать LLM.
+    """
+    out: list[str] = []
+    for t in _tables_list():
+        name = t.get("name")
+        if name and not t.get("label"):
+            out.append(name)
+    return out
 
 
 def get_db_schema() -> str:
-    if not _CFG.get("db_schema"):
+    tables = _tables_list()
+    if not tables:
         raise ValueError(
-            "skill audit_analyzer: skills.audit_analyzer.db_schema обязателен "
-            "(нет авто-дефолта в коде)"
+            "skill audit_analyzer: skills.audit_analyzer.tables пуст "
+            "(нет ни одной таблицы)"
         )
-    return _CFG["db_schema"]
+    first = tables[0].get("name", "")
+    if "." in first:
+        return first.split(".", 1)[0]
+    raise ValueError(
+        f"skill audit_analyzer: первая таблица '{first}' не fully qualified "
+        "(ожидается 'schema.table')"
+    )
 
 
 def get_predefined_scripts_table() -> str:
-    """
-    Имя таблицы (схема.имя) с реестром предопределённых SQL-скриптов.
+    from lib.services.table_registry import table_registry
 
-    Источник истины: project.json → skills.audit_analyzer.predefined_scripts_table.
-    Используется:
-      - db_loader.load_registry()  — читает реестр из БД
-      - tools/generate_predefined_scripts_sql.py — генерирует INSERT в эту таблицу
-    """
-    table = _CFG.get("predefined_scripts_table", "")
-    if not table:
-        raise ValueError(
-            "skill audit_analyzer: skills.audit_analyzer.predefined_scripts_table "
-            "обязателен (нет авто-дефолта в коде)"
-        )
-    return table
+    rs = table_registry.resources_by_label("scripts_registry")
+    if rs:
+        return rs[0].name
+
+    raise ValueError(
+        "skill audit_analyzer: ни один skill не зарегистрировал ресурс "
+        "с label='scripts_registry' (ожидалось из "
+        "project.json::skills.<name>.tables[].label='scripts_registry'). "
+        "Запустите через gateway (ApplicationContext)."
+    )
 
 
 def get_in_memory_config() -> dict[str, Any]:
-    """Конфиг in-memory кеша для CLI.
-
-    Если навык зарегистрирован в ``table_registry``, путь берётся
-    оттуда (единый snapshot в workspace/data_store/duckdb/). Иначе —
-    legacy-путь ``cache/audit_cache.duckdb`` относительно навыка.
-    """
     from lib.services.table_registry import table_registry
 
-    registered = table_registry.get("audit_analyzer") is not None
-    if registered:
-        workspace_root = _SKILL_ROOT.parent.parent
-        path = str(table_registry.snapshot_path(workspace_root))
-    else:
-        path = _CFG.get("in_memory_cache_path", "cache/audit_cache.duckdb")
-        p = Path(path)
-        if not p.is_absolute():
-            path = str(_SKILL_ROOT / path)
+    workspace_root = _SKILL_ROOT.parent.parent
+    path = str(table_registry.snapshot_path(workspace_root))
+
+    cache_cfg = _CFG.get("cache") or {}
     return {
-        "enabled": bool(_CFG.get("in_memory_enabled", True)),
-        "engine": _CFG.get("in_memory_engine", "duckdb"),
+        "enabled": bool(cache_cfg.get("enabled", True)),
+        "engine": cache_cfg.get("engine", "duckdb"),
         "cache_path": path,
     }
 
 
 def is_in_memory_enabled() -> bool:
-    return bool(_CFG.get("in_memory_enabled", True))
+    cache_cfg = _CFG.get("cache") or {}
+    return bool(cache_cfg.get("enabled", True))
 
 
 def get_vector_index_path() -> str:
-    path = _CFG.get("mode_vector_index_path", "") or _CFG.get("vector_index_default_path", "")
-    if not path:
-        return ""  # необязательно: навык строит индекс из локального кэша
-    p = Path(path)
-    return str(p) if p.is_absolute() else str(_SKILL_ROOT / path)
+    vi_list = _vector_indexes_list()
+    vi_first = vi_list[0] if vi_list else {}
+    name = vi_first.get("name", "")
+    if not name:
+        return ""
+    vi_cfg = SETTINGS.get("gateway", {}).get("vector_index") or {}
+    root = vi_cfg.get("default_root") or "data_store/vectors"
+    p = Path(root) / name
+    return str(p) if p.is_absolute() else str(_SKILL_ROOT / p)
 
 
 def get_vector_db_table() -> str:
-    return _CFG.get("mode_vector_db_table", "")
+    """Имя таблицы-хранилища векторов (для ``PostgresDuckDbProvider.vector_db_table``).
+
+    Источник: ``gateway.vector_index.storage_tables[0]``. Storage-таблица —
+    общая инфраструктура, не относится к конкретному навыку.
+    """
+    vi_cfg = SETTINGS.get("gateway", {}).get("vector_index") or {}
+    storage_tables = vi_cfg.get("storage_tables") or []
+    if storage_tables:
+        return storage_tables[0]
+
+    for t in _tables_list():
+        if t.get("type") == "vector" and t.get("name"):
+            return t["name"]
+    return ""
 
 
 def get_vector_store_table() -> str:
-    table = _CFG.get("mode_vector_store_table", "")
-    if not table:
-        raise ValueError(
-            "skill audit_analyzer: skills.audit_analyzer.mode_vector_store_table "
-            "обязателен (нет авто-дефолта в коде)"
-        )
-    return table
+    return "public.agent_vector_index_store"
 
 
 def build_cache_provider() -> Any:
-    """Построить универсального провайдера данных (lib/services) для навыка.
-
-    Конфигурируется из skills.audit_analyzer: DuckDB-кэш (in_memory_*)
-    и векторные индексы (mode_vector_*). Используется CLI навыка напрямую —
-    без промежуточных обёрток.
-
-    Lazy-регистрирует навык через ``scripts/register.py`` —
-    тот же код, что вызывает ``ApplicationContext._auto_register_skills``.
-    """
     from lib.services.cache_provider_impl import build_cache_provider as _build
-    from lib.services.table_registry import table_registry
-
-    _register_skill(table_registry)
     return _build(_CFG, str(_SKILL_ROOT))
-
-
-def _register_skill(table_registry: Any) -> None:
-    """Зарегистрировать audit_analyzer в table_registry через register.py."""
-    import importlib.util
-    register_path = _SKILL_ROOT / "scripts" / "register.py"
-    spec = importlib.util.spec_from_file_location(
-        "_skill_register_audit_analyzer",
-        register_path,
-    )
-    if spec is None or spec.loader is None:
-        return
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    register_fn = getattr(mod, "register", None)
-    if callable(register_fn):
-        register_fn(table_registry)
 
 
 def get_vector_indexes() -> dict[str, Any]:
     from lib.services.cache_provider_impl import read_vector_index_config
-
     return read_vector_index_config(_CFG)
 
 
 def get_embedding_config() -> dict[str, Any]:
     from lib.services.cache_provider_impl import read_embedding_config
-
     return read_embedding_config(_CFG)
 
 
@@ -170,13 +160,15 @@ def get_embedding_model() -> str:
 
 
 def get_cli_config() -> dict[str, Any]:
+    cli_cfg = _CFG.get("cli") or {}
     return {
-        "default_mode": _CFG.get("cli_default_mode", "predefined"),
-        "default_format": _CFG.get("cli_default_format", "json"),
-        "max_retries": int(_CFG.get("cli_max_retries", 3)),
-        "timeout_sec": int(_CFG.get("cli_timeout_sec", 60)),
+        "default_mode": cli_cfg.get("default_mode", "predefined"),
+        "default_format": cli_cfg.get("default_format", "json"),
+        "max_retries": int(cli_cfg.get("max_retries", 3)),
+        "timeout_sec": int(cli_cfg.get("timeout_sec", 60)),
     }
 
 
 def get_max_retries() -> int:
-    return int(_CFG.get("cli_max_retries", 3))
+    cli_cfg = _CFG.get("cli") or {}
+    return int(cli_cfg.get("max_retries", 3))

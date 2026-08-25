@@ -16,7 +16,7 @@ _workspace = str(Path(__file__).resolve().parent.parent / "workspace")
 if _workspace not in sys.path:
     sys.path.insert(0, _workspace)
 
-from lib.services.audit_sync_service import AuditSyncService
+from lib.services.pg_duckdb_sync_service import PgDuckDbSyncService
 
 _T1 = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
 _T2 = datetime(2026, 1, 2, 0, 0, tzinfo=timezone.utc)
@@ -115,7 +115,7 @@ def _standard_rows_for(sql, params):
 class TestLifecycle:
     def test_start_stop_with_invalid_dsn_no_hang(self, mock_pool):
         mock_pool["connected"] = False
-        s = AuditSyncService(
+        s = PgDuckDbSyncService(
             dsn="postgresql://bad:bad@127.0.0.1:1/none",
             tables=["audits"],
             poll_interval_sec=0.2,
@@ -132,39 +132,51 @@ class TestLifecycle:
         assert st["connected"] is False
 
     def test_track_column_selection(self):
-        s = AuditSyncService(dsn="postgresql://u@h/db", vector_table="oarb.audit_vectors")
+        s = PgDuckDbSyncService(dsn="postgresql://u@h/db", vector_table="oarb.audit_vectors")
         assert s._track_column_for("audits") == "updated_at"
         assert s._track_column_for("oarb.audit_vectors") == "id"
 
-    def test_track_column_from_registry_overrides(self):
-        from lib.services.table_registry import SkillRegistration, table_registry
+    def test_track_column_from_registry_resources(self):
+        """Per-table tracking_column читается из ресурсов skill'а."""
+        from lib.services.table_registry import (
+            SkillRegistration,
+            TableResource,
+            VectorResource,
+            table_registry,
+        )
 
         table_registry.register(SkillRegistration(
             name="audit_analyzer",
-            tables=("oarb.audits", "oarb.report_items"),
-            vector_table="oarb.audit_vectors",
-            db_schema="oarb",
-            track_column_overrides={"oarb.report_items": "modified_at"},
+            resources=(
+                TableResource(name="oarb.audits"),
+                TableResource(name="oarb.report_items", tracking_column="modified_at"),
+                VectorResource(name="oarb.audit_vectors"),
+            ),
         ))
         try:
-            s = AuditSyncService(dsn="postgresql://u@h/db", vector_table="oarb.audit_vectors")
+            s = PgDuckDbSyncService(dsn="postgresql://u@h/db", vector_table="oarb.audit_vectors")
             assert s._track_column_for("oarb.report_items") == "modified_at"
             assert s._track_column_for("oarb.audits") == "updated_at"
+            assert s._track_column_for("oarb.audit_vectors") == "id"
             assert s._track_column_for("oarb.unknown") == "updated_at"
         finally:
             table_registry.unregister("audit_analyzer")
 
     def test_track_column_disabled_skill_falls_back(self):
-        from lib.services.table_registry import SkillRegistration, table_registry
+        """Disabled skill: ресурсы игнорируются → generic-дефолт ``updated_at``."""
+        from lib.services.table_registry import (
+            SkillRegistration,
+            TableResource,
+            table_registry,
+        )
 
         table_registry.register(SkillRegistration(
             name="audit_analyzer",
-            tables=("oarb.report_items",),
             enabled=False,
-            track_column_overrides={"oarb.report_items": "modified_at"},
+            resources=(TableResource(name="oarb.report_items", tracking_column="modified_at"),),
         ))
         try:
-            s = AuditSyncService(dsn="postgresql://u@h/db")
+            s = PgDuckDbSyncService(dsn="postgresql://u@h/db")
             assert s._track_column_for("oarb.report_items") == "updated_at"
         finally:
             table_registry.unregister("audit_analyzer")
@@ -180,7 +192,7 @@ class TestWorker:
         mock_pool["connected"] = True
         mock_pool["conn"] = ScriptedConn(_standard_rows_for)
         received = []
-        s = AuditSyncService(
+        s = PgDuckDbSyncService(
             dsn="postgresql://u@h/db",
             tables=["audits", "violations"],
             poll_interval_sec=0.05,
@@ -202,7 +214,7 @@ class TestWorker:
         mock_pool["connected"] = True
         mock_pool["conn"] = ScriptedConn(_standard_rows_for)
         received = []
-        s = AuditSyncService(
+        s = PgDuckDbSyncService(
             dsn="postgresql://u@h/db",
             tables=["audits"],
             poll_interval_sec=0.05,
@@ -221,7 +233,7 @@ class TestWorker:
     def test_incremental_query_uses_track_column_and_last(self, mock_pool):
         conn = ScriptedConn(_standard_rows_for)
         mock_pool["conn"] = conn
-        s = AuditSyncService(dsn="postgresql://u@h/db", tables=["audits"])
+        s = PgDuckDbSyncService(dsn="postgresql://u@h/db", tables=["audits"])
         s._conn = conn
         s._last_sync["audits"] = _T1
         s._poll_table("audits")
@@ -241,7 +253,7 @@ class TestSyncCallback:
         mock_pool["connected"] = True
         mock_pool["conn"] = ScriptedConn(_standard_rows_for)
         calls = []
-        s = AuditSyncService(
+        s = PgDuckDbSyncService(
             dsn="postgresql://u@h/db",
             tables=["audits"],
             poll_interval_sec=0.05,
@@ -261,7 +273,7 @@ class TestSyncCallback:
         def boom():
             raise RuntimeError("test")
 
-        s = AuditSyncService(
+        s = PgDuckDbSyncService(
             dsn="postgresql://u@h/db",
             tables=["audits"],
             poll_interval_sec=0.05,
@@ -297,10 +309,10 @@ _TABLE_COMMENTS = {"audits": "Аудиторские проверки"}
 def _schema_and_rows_for(sql, params):
     low = sql.lower()
     if "information_schema.columns" in low:
-        tbl = params[1] if params and len(params) > 1 else _table_from_sql(sql)
+        tbl = params[-1] if params else _table_from_sql(sql)
         return _SCHEMA_COLUMNS.get(tbl, [])
     if "obj_description" in low:
-        tbl = params[1] if params and len(params) > 1 else ""
+        tbl = params[-1] if params else ""
         comment = _TABLE_COMMENTS.get(tbl)
         return [(comment,)] if comment else []
     return _standard_rows_for(sql, params)
@@ -311,7 +323,7 @@ class TestSchemaAndResync:
         received = []
         mock_pool["connected"] = True
         mock_pool["conn"] = ScriptedConn(_schema_and_rows_for)
-        s = AuditSyncService(
+        s = PgDuckDbSyncService(
             dsn="postgresql://u@h/db", tables=["audits"],
             poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=0,
         )
@@ -334,7 +346,7 @@ class TestSchemaAndResync:
         received = []
         mock_pool["connected"] = True
         mock_pool["conn"] = ScriptedConn(_standard_rows_for)
-        s = AuditSyncService(
+        s = PgDuckDbSyncService(
             dsn="postgresql://u@h/db", tables=["audits"],
             poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=0,
         )
@@ -348,7 +360,7 @@ class TestSchemaAndResync:
         replaced = []
         mock_pool["connected"] = True
         mock_pool["conn"] = ScriptedConn(_schema_and_rows_for)
-        s = AuditSyncService(
+        s = PgDuckDbSyncService(
             dsn="postgresql://u@h/db", tables=["audits"],
             poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=1,
         )
@@ -366,7 +378,7 @@ class TestSchemaAndResync:
         replaced = []
         mock_pool["connected"] = True
         mock_pool["conn"] = ScriptedConn(_schema_and_rows_for)
-        s = AuditSyncService(
+        s = PgDuckDbSyncService(
             dsn="postgresql://u@h/db", tables=["audits"],
             poll_interval_sec=0.05, reconnect_backoff=0.01, full_resync_every=0,
         )
@@ -383,7 +395,7 @@ class TestSchemaAndResync:
 class TestReconnect:
     def test_reconnect_clears_last_sync(self, mock_pool):
         mock_pool["conn"] = ScriptedConn()
-        s = AuditSyncService(dsn="postgresql://u@h/db", reconnect_backoff=0.01)
+        s = PgDuckDbSyncService(dsn="postgresql://u@h/db", reconnect_backoff=0.01)
         s._last_sync["audits"] = _T1
         s._running = True
         s._reconnect()
@@ -391,7 +403,7 @@ class TestReconnect:
         assert s._conn is None
 
     def test_ensure_connected_configures_pool_dsn(self, mock_pool):
-        s = AuditSyncService(
+        s = PgDuckDbSyncService(
             dsn="postgresql://u@h/db", reconnect_backoff=0.01
         )
         s._running = True

@@ -87,6 +87,22 @@ from skill_config import (  # noqa: E402
 )
 
 
+def _ensure_registered() -> None:
+    """Зарегистрировать audit_analyzer в ``table_registry``.
+
+    Standalone CLI не имеет ``ApplicationContext`` (его поднимает gateway),
+    поэтому skill сам себя регистрирует из ``project.json::skills.audit_analyzer``
+    через ``lib.core.skill_registration.register_skill_from_config``. Идемпотентно:
+    если skill уже зарегистрирован (например, gateway-populated реестр),
+    повторная регистрация игнорируется.
+    """
+    from lib.core.skill_registration import register_skill_from_config
+    from config import SETTINGS
+
+    audit_cfg = SETTINGS.get("skills", {}).get("audit_analyzer", {})
+    register_skill_from_config("audit_analyzer", audit_cfg)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """
     Создать и настроить парсер аргументов командной строки.
@@ -223,10 +239,12 @@ def main() -> None:
     Точка входа скрипта (вызывается из audit_analyze.bat/.sh).
 
     Pipeline:
-        1. Парсинг аргументов (argparse)
-        2. Запуск _run() с маршрутизацией
-        3. Форматирование результата (prepare_output)
-        4. Вывод JSON в stdout
+        1. Саморегистрация в ``table_registry`` (для standalone-режима
+           без ``ApplicationContext``).
+        2. Парсинг аргументов (argparse)
+        3. Запуск _run() с маршрутизацией
+        4. Форматирование результата (prepare_output)
+        5. Вывод JSON в stdout
 
     Выходной JSON всегда содержит:
         - mode: режим работы
@@ -234,6 +252,7 @@ def main() -> None:
         - поля в зависимости от режима
     """
     try:
+        _ensure_registered()
         parser = _build_parser()
         args = parser.parse_args()
 

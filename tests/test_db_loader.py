@@ -22,15 +22,37 @@ sys.path.insert(0, str(_ROOT / "workspace" / "skills" / "audit_analyzer" / "scri
 
 @pytest.fixture
 def provider():
-    """DuckDB-кэш с заранее известным набором скриптов (используем существующий)."""
+    """DuckDB-кэш + table_registry с зарегистрированным audit_analyzer."""
     from skill_config import build_cache_provider
     from db_loader import set_provider, clear_cache
+    from lib.core.skill_registration import register_skill_from_config
+    from lib.services.table_registry import table_registry
+
+    register_skill_from_config("audit_analyzer", _CFG_FOR_REGISTRATION)
     p = build_cache_provider()
     if not p.open_cache():
         pytest.skip("DuckDB-кэш не найден — нужен реальный gateway refresh")
     set_provider(p)
     clear_cache()
     return p
+
+
+@pytest.fixture(autouse=True)
+def _reset_registry():
+    """Сбрасывать table_registry между тестами."""
+    from lib.services.table_registry import table_registry
+    table_registry.clear()
+    table_registry._embedding.clear()
+    yield
+    table_registry.clear()
+    table_registry._embedding.clear()
+
+
+_CFG_FOR_REGISTRATION = {
+    "tables": [
+        {"name": "public.agent_predefined_scripts", "label": "scripts_registry"},
+    ],
+}
 
 
 # ----- load_registry -----

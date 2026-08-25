@@ -53,32 +53,33 @@ def main() -> None:
     )
 
     # Назначаем callbacks и подменяем on_sync ДО ctx.start() — иначе
-    # AuditSyncService.worker-тред успеет сделать initial_load раньше,
+    # PgDuckDbSyncService.worker-тред успеет сделать initial_load раньше,
     # чем мы поставим callback (set_on_new_records_callback=None), и
     # данные не попадут в in-memory DuckDB.
     first_sync_event: "asyncio.Event | None" = None
-    if ctx.audit_sync_service is not None and ctx.audit_memory_store is not None:
-        ctx.audit_memory_store.open()
+    if ctx.sync_service is not None and ctx.cache_store is not None:
+        ctx.cache_store.open()
         # Пересоздаём снапшот при каждом старте: удаляем устаревший файл,
         # чтобы CLI/skill не читали данные с прошлого запуска, пока
         # initial_load не заполнит свежий снимок заново.
-        _old_snapshot = ctx.audit_memory_store.get_stats().get("publish_path")
+        _old_snapshot = ctx.cache_store.get_stats().get("publish_path")
         if _old_snapshot:
             try:
                 Path(_old_snapshot).unlink(missing_ok=True)
             except OSError:
                 pass
-        ctx.audit_sync_service.set_on_new_records_callback(
-            ctx.audit_memory_store.upsert_records
+        ctx.sync_service.set_on_new_records_callback(
+            ctx.cache_store.upsert_records
         )
         # Сохраняем оригинальный callback и подменяем на обёртку,
         # которая set-ит Event при первом вызове И публикует снимок
         # DuckDB в publish_path после каждого цикла синхронизации.
-        # Без publish() файл workspace/skills/audit_analyzer/cache/
-        # audit_cache.duckdb не создаётся — CLI/skill читают пусто/404.
-        prev_cb = getattr(ctx.audit_sync_service, "_on_sync_callback", None)
+        # Без publish() файл workspace/data_store/duckdb/cache.duckdb
+        # не создаётся — CLI/skill читают пусто/404. Путь вычисляется
+        # через table_registry.snapshot_path() в ApplicationContext.
+        prev_cb = getattr(ctx.sync_service, "_on_sync_callback", None)
         first_sync_event = asyncio.Event()
-        memory_store = ctx.audit_memory_store
+        memory_store = ctx.cache_store
         _first_sync_done = False
 
         def _on_first_sync() -> None:
@@ -102,7 +103,7 @@ def main() -> None:
                 except Exception:
                     pass
 
-        ctx.audit_sync_service.set_on_sync_callback(_wrapped)
+        ctx.sync_service.set_on_sync_callback(_wrapped)
 
     ctx.start()
 
@@ -116,9 +117,9 @@ def main() -> None:
         # Финальный снимок в publish_path — гарантируем, что CLI/skill
         # увидят свежие данные даже если цикл поллинга не успел
         # отработать после последнего апдейта.
-        if ctx.audit_memory_store is not None:
+        if ctx.cache_store is not None:
             try:
-                ctx.audit_memory_store.publish()
+                ctx.cache_store.publish()
             except Exception:
                 pass
         # Останавливаем фоновые сервисы, которые создал ApplicationContext,
@@ -146,20 +147,20 @@ async def _run(ctx: ApplicationContext, first_sync_event) -> None:
     if _streamlit_enabled() and subprocess_manager.spawn_streamlit(streamlit_script):
         console.print("[green]✓[/green] Streamlit UI started on :8501")
 
-    audit_memory_store = ctx.audit_memory_store
-    audit_sync_service = ctx.audit_sync_service
-    if audit_memory_store is not None and audit_sync_service is not None:
-        if audit_memory_store.get_stats().get("publish_path"):
+    cache_store = ctx.cache_store
+    sync_service = ctx.sync_service
+    if cache_store is not None and sync_service is not None:
+        if cache_store.get_stats().get("publish_path"):
             console.print(
                 f"[green]✓[/green] audit_analyzer sync started "
-                f"(publish -> {audit_memory_store.get_stats()['publish_path']})"
+                f"(publish -> {cache_store.get_stats()['publish_path']})"
             )
         else:
             console.print("[green]✓[/green] audit_analyzer sync started")
 
         # Фоновый прогрев FAISS-индексов в память; результат печатается
         # по мере готовности. Дожидаемся первого sync-callback от
-        # AuditSyncService (он вызывается после initial_load), иначе
+        # PgDuckDbSyncService (он вызывается после initial_load), иначе
         # preload стартует на пустом DuckDB-кеше и видит "нет данных".
         async def _preload_and_report() -> None:
             if first_sync_event is not None:
@@ -173,7 +174,7 @@ async def _run(ctx: ApplicationContext, first_sync_event) -> None:
                         "timeout (>30s), preload на текущем состоянии"
                     )
             loaded = await ctx.preload_service.preload_vector_indexes(
-                audit_memory_store
+                cache_store
             )
             if not loaded:
                 console.print(

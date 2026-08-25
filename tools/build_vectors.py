@@ -72,29 +72,15 @@ from lib.services.vector_index_service import (
 )
 from utils.db import configure, execute, fetch, resolve_dsn
 
-_CFG = SETTINGS.get("skills", {}).get("audit_analyzer", {})
+_CFG_RAW = SETTINGS.get("skills", {}).get("audit_analyzer", {})
 
-# Регистрируем таблицы в table_registry, чтобы vector_table() и
-# embedding_config() работали без зависимости от audit_settings.
-from lib.services.table_registry import (
-    SkillRegistration,
-    table_registry,
-)
-if not table_registry.get("audit_analyzer"):
-    from lib.utils.table_utils import normalize_table_names
-    table_registry.register(SkillRegistration(
-        name="audit_analyzer",
-        tables=tuple(_CFG.get("db_tables") or ()),
-        additional_tables=tuple(normalize_table_names(_CFG.get("db_additional_tables"))),
-        vector_table=_CFG.get("mode_vector_db_table", ""),
-        db_schema=_CFG.get("db_schema", "main"),
-    ))
-    table_registry.set_embedding_config(
-        base_url=_CFG.get("embedding_base_url", ""),
-        model=_CFG.get("embedding_model", "mxbai-embed-large:latest"),
-        dimension=_CFG.get("embedding_dimension", 1024),
-        timeout_sec=_CFG.get("embedding_http_timeout_sec", 60.0),
-    )
+
+# Регистрируем ресурсы skill'а через общую утилиту, чтобы standalone-запуск
+# build_vectors.py не дублировал логику ApplicationContext._auto_register_skills.
+# Источник истины — универсальная ``project.json::skills.audit_analyzer.*`` секция.
+from lib.core.skill_registration import register_skill_from_config
+
+register_skill_from_config("audit_analyzer", _CFG_RAW)
 
 
 def fetchone(sql, *args):
@@ -213,7 +199,7 @@ def _rebuild_faiss(index_name: str, db_table: str, rebuilt_only_deletion: bool =
     векторы уже в БД, поиск просто будет недоступен до установки зависимостей.
     """
     try:
-        svc = VectorIndexBuildService(_CFG, str(_SKILL_ROOT))
+        svc = VectorIndexBuildService(_CFG_RAW, str(_SKILL_ROOT))
         count = svc.rebuild_and_store(index_name, db_table)
     except (ImportError, ModuleNotFoundError) as exc:
         logger.warning(f"  ПРЕДУПРЕЖДЕНИЕ: FAISS-индекс для '{index_name}' не собран — "
@@ -571,16 +557,26 @@ def main():
                         help="Собрать только конкретный индекс")
     parser.add_argument("--batch-size", type=int, default=10,
                         help="Размер батча для эмбеддинга")
+    vi_list = _CFG_RAW.get("vector_indexes") or []
+    vi_first = vi_list[0] if vi_list and isinstance(vi_list[0], dict) else {}
+    vi_cfg = SETTINGS.get("gateway", {}).get("vector_index") or {}
+    storage_tables = vi_cfg.get("storage_tables") or []
+    storage_table = storage_tables[0] if storage_tables else ""
+    if not storage_table:
+        for entry in _CFG_RAW.get("tables") or []:
+            if isinstance(entry, dict) and entry.get("type") == "vector" and entry.get("name"):
+                storage_table = entry["name"]
+                break
     parser.add_argument("--chunk-size", type=int,
-                        default=int(_CFG.get("text_chunk_size", 500)),
-                        help="Размер чанка в символах (default из text_chunk_size)")
+                        default=int(vi_first.get("text_chunk_size", 500)),
+                        help="Размер чанка в символах (default из vector_indexes[0].text_chunk_size)")
     parser.add_argument("--chunk-overlap", type=int,
-                        default=int(_CFG.get("text_chunk_overlap", 80)),
-                        help="Перекрытие чанков в символах (default из text_chunk_overlap)")
+                        default=int(vi_first.get("text_chunk_overlap", 80)),
+                        help="Перекрытие чанков в символах (default из vector_indexes[0].text_chunk_overlap)")
     parser.add_argument("--pause-sec", type=float,
-                        default=float(_CFG.get("build_pause_sec", 5.0)),
+                        default=float(vi_first.get("build_batch_pause_sec", 5.0)),
                         help="Пауза между запросами эмбеддинга, сек "
-                             "(default 5.0 или build_pause_sec из config.json)")
+                             "(default 5.0 или vector_indexes[0].build_batch_pause_sec)")
     parser.add_argument("--embedding-retry-wait", type=float, default=5.0,
                         help="При ошибке получения эмбеддинга: подождать это время (сек) и повторить "
                              "один раз (default 5.0)")
@@ -592,8 +588,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="Режим проверки без вставки")
     parser.add_argument("--db-table",
-                        default=None,
-                        help="Таблица векторов в БД (default из конфига mode_vector_db_table)")
+                        default=storage_table,
+                        help="Таблица-хранилище векторов (default из gateway.vector_index.storage_tables[0] в project.json)")
     parser.add_argument("--verbose", action="store_true",
                         help="Подробное логирование (уровень DEBUG): конфиг, каждый чанк/строка")
 
@@ -617,10 +613,11 @@ def main():
     logger.info(f"Подключение к БД настроено (dsn={dsn.split('@')[-1] if '@' in dsn else ''})")
 
     from lib.services.table_registry import table_registry
-    vector_table = table_registry.vector_table() or ""
+    vec_names = table_registry.vector_names()
+    vector_table = vec_names[0] if vec_names else ""
     if not vector_table:
         logger.error(
-            "table_registry.vector_table() пуст — зарегистрируйте skill "
+            "table_registry.vector_names() пуст — зарегистрируйте skill "
             "через table_registry.register(...) или укажите --db-table."
         )
         return 1
@@ -637,11 +634,11 @@ def main():
         db_schema, db_table,
     )
     if not row:
-        logger.error(f"ОШИБКА: таблица {vec_cfg.mode_vector_db_table} не создана")
+        logger.error(f"ОШИБКА: таблица {db_schema}.{db_table} не создана")
         logger.error("Сначала выполните sql/audit_analyzer/create_oarb_audit_vectors.sql")
         sys.exit(1)
 
-    indexes = read_vector_index_config(_CFG)
+    indexes = read_vector_index_config(_CFG_RAW)
     if not indexes:
         logger.error("Нет конфигурации vector_indexes")
         sys.exit(1)

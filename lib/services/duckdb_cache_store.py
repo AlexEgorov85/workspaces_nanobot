@@ -1,8 +1,8 @@
 """
-AuditMemoryStore — локальное хранилище данных аудита (DuckDB + FAISS).
+DuckDbCacheStore — локальное хранилище данных аудита (DuckDB + FAISS).
 
 Отвечает за ДАННЫЕ, а не за их источник: данные приходят извне методом
-``upsert_records(table, records)`` (обычно — из AuditSyncService через
+``upsert_records(table, records)`` (обычно — из PgDuckDbSyncService через
 callback), и ни одна строка кода здесь не знает про PostgreSQL.
 
 Обязанности:
@@ -172,7 +172,7 @@ def _map_pg_type(pg_type: str) -> str:
     return _PG_TO_DUCKDB.get(t, "VARCHAR")
 
 
-class AuditMemoryStore:
+class DuckDbCacheStore:
     """Локальное in-memory mirror + FAISS: PostgreSQL → DuckDB + индексы.
 
     Generic infrastructure component: получает записи через
@@ -270,14 +270,14 @@ class AuditMemoryStore:
             self._dirty_sources.clear()
             self._is_ready = False
 
-    def __enter__(self) -> AuditMemoryStore:
+    def __enter__(self) -> DuckDbCacheStore:
         return self
 
     def __exit__(self, *args) -> None:
         self.close()
 
     # ------------------------------------------------------------------
-    # Приём данных (вызывается из AuditSyncService/worker-потока)
+    # Приём данных (вызывается из PgDuckDbSyncService/worker-потока)
     # ------------------------------------------------------------------
 
     def upsert_records(self, table: str, records: list[dict[str, Any]]) -> bool:
@@ -666,11 +666,16 @@ class AuditMemoryStore:
             self._conn.unregister("_upsert_arrow")
 
     def _mark_vector_sources_dirty(self, table: str, records: list[dict[str, Any]]) -> None:
-        if not self._vector_db_table:
-            return
-        _, vec_name = _split_table(self._vector_db_table)
-        _, tbl_name = _split_table(table)
-        if tbl_name != vec_name:
+        """Пометить vector-источники как dirty, чтобы FAISS пересобрался.
+
+        Lookup через ``table_registry.vector_resources()``: ``table`` считается
+        vector-таблицей, если она зарегистрирована как ``VectorResource``.
+        Раньше сравнивалось имя таблицы (``tbl_name == vec_name``) — stringly-typed.
+        """
+        from lib.services.table_registry import table_registry
+
+        vector_names = {r.name for r in table_registry.vector_resources()}
+        if table not in vector_names:
             return
         for r in records:
             src = r.get("source")
@@ -812,7 +817,7 @@ class AuditMemoryStore:
         tables = table_names if table_names is not None else self._tables
         with self._lock:
             if self._conn is None:
-                raise RuntimeError("AuditMemoryStore is not ready")
+                raise RuntimeError("DuckDbCacheStore is not ready")
 
             from lib.utils.duckdb_query import build_schema
 
@@ -822,7 +827,7 @@ class AuditMemoryStore:
         with self._lock:
             if self._conn is None:
                 return {"status": "error", "row_count": 0, "columns": [], "rows": [],
-                        "error": "AuditMemoryStore is not ready"}
+                        "error": "DuckDbCacheStore is not ready"}
 
             from lib.utils.duckdb_query import run_query
 
@@ -831,7 +836,7 @@ class AuditMemoryStore:
     def explain(self, sql: str) -> dict[str, Any]:
         with self._lock:
             if self._conn is None:
-                return {"valid": False, "error": "AuditMemoryStore is not ready"}
+                return {"valid": False, "error": "DuckDbCacheStore is not ready"}
 
             from lib.utils.duckdb_query import explain_query
 

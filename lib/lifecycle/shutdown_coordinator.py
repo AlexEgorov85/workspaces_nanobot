@@ -8,7 +8,7 @@
 Типичный порядок регистрации в ``ApplicationContext.start()``:
 
     1. db_logging_service      (записывает остаточные события)
-    2. audit_sync_service      (читает из БД — должен жить дольше writer'а)
+    2. sync_service      (читает из БД — должен жить дольше writer'а)
     3. ...
 
 Все stop-функции вызываются с ``try/except`` — ошибка одной НЕ
