@@ -96,6 +96,12 @@ def mock_db_and_psycopg(tmp_path):
 
         from utils.session_file_store import SessionFileStore  # noqa: F401
 
+        # Форсируем свежий импорт: если предыдущие тестовые файлы уже
+        # импортировали канал с НАСТОЯЩИМ utils.db, класс остался связан
+        # с реальным пулом — тесты ушли бы в живую БД (или зависли на
+        # переподключении). Ре-импорт под фейковым utils.db это исключает.
+        sys.modules.pop("lib.channels.postgres_channel", None)
+
         from lib.channels.postgres_channel import (
             PostgresChannel,
             _decode_jsonb,

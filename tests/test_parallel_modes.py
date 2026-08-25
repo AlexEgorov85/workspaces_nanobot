@@ -250,6 +250,25 @@ class TestWorkerPoolMode:
 class TestChannelFactoryClaimStrategy:
     """``ChannelFactory`` прокидывает ``claim_strategy`` из ``channels.postgres``."""
 
+    @pytest.fixture(autouse=True)
+    def _restore_fake_channel_modules(self):
+        """Убрать фейки из sys.modules после теста (иначе ломает
+        последующие тесты реального postgres_channel: ImportError
+        'unknown location')."""
+        keys = (
+            "nanobot.channels",
+            "nanobot.channels.manager",
+            "lib.channels.redis_channel",
+            "lib.channels.postgres_channel",
+        )
+        saved = {k: sys.modules.get(k) for k in keys}
+        yield
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
     def _setup(self):
         import sys
         import types
