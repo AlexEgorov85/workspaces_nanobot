@@ -102,7 +102,7 @@ class PostgresChannel(BaseChannel):
     Параллельность ограничена ``max_concurrent`` через asyncio.Semaphore.
     Мульти-машинная аренда задач: claim+lease/heartbeat, reclaim+heal,
     статусы ``error`` (повторяется) и ``failed`` (терминал). См. Документация
-    DEVELOPMENT.md » «Мульти-машинный пул воркеров».
+    docs/ARCHITECTURE.md » «Мульти-машинный пул воркеров».
     """
 
     def __init__(self, config: dict, bus: MessageBus) -> None:
@@ -156,7 +156,7 @@ class PostgresChannel(BaseChannel):
         # одиночного инстанса gateway.
         # ``worker_pool`` — захват через ``INSERT INTO agent_worker_claims``
         # + lease/heartbeat для координации нескольких инстансов gateway.
-        # Подробности: DEVELOPMENT.md § «Глобальный рубильник параллельности».
+        # Подробности: docs/ARCHITECTURE.md § «Глобальный рубильник параллельности».
         self._claim_strategy: str = _get("claim_strategy", "single")
 
         # ---- вывод активности пула воркеров в терминал ----

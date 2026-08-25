@@ -87,3 +87,62 @@
 
 Legacy-мигратор файлов `.faiss` удалён. Если у вас остались артефакты v1.x —
 обращайтесь к [CHANGELOG.md](../CHANGELOG.md) → соответствующая версия.
+
+---
+
+## Ручные действия миграции 1.5.0 → 2.0.0 (из DEVELOPMENT.md)
+
+Краткий таймлайн релизов — в [CHANGELOG.md](CHANGELOG.md). Этот раздел — только то, что **требует ручных действий при миграции**.
+
+### Миграция 1.5.0 → 2.0.0
+
+**Конфигурация:**
+
+| Изменение | Действие |
+|-----------|----------|
+| `.env` → `project.json` + `.secrets.env` | Скопировать секции `channels.*`, `skills.*`, `cli`, `benchmark`, `streamlit`, `gateway` в `project.json` (JSONC). Секреты — в `.secrets.env` с провайдер-скоупинг форматом |
+| Провайдерские ключи больше не через `export` | Секция `# providers: llm` с `api_key=...` в `.secrets.env`. `ConfigService._pre_resolve_env_refs` подставит в `os.environ` автоматически (env-переменная — каноническая `LLM_API_KEY`) |
+| `vector_indexes` / `mode_vector_index_path` в `config.json` | Удалить; теперь в `public.agent_vector_index_config` (см. [docs/VECTOR_INDEXES.md](VECTOR_INDEXES.md)) |
+| DuckDB-кеш audit_analyzer | CLI запускал загрузку | gateway-only — CLI читает готовый снимок |
+| `data-analyzer`, `html_presentation_generator` | Удалены. Убрать из импортов и `config.json` |
+| `pg_agent_worker.py` | Удалён. Использовать `streamlit_app.py` + `PostgresChannel` |
+
+**Код (если вы форкали):**
+
+| Что | Изменение |
+|-----|-----------|
+| `gateway.py` | Было 696 строк, стало 132. Вся инициализация — в `lib/core/ApplicationContext`. Свой код инициализации → переносить в `ApplicationContext.create()` или в новый сервис в `lib/services/` |
+| `cli_agent.py` | Было 865 строк, стало 165. То же самое |
+| `RuntimePatcher` | Оба monkey-patch'а (`ContextGovernor.normalize_tool_result`, `agent._assemble_outbound`) теперь в `lib/services/runtime_patcher.py` с fallback при изменении API nanobot |
+| `DbLoggingService` | Новый. Если раньше логировали вызовы иначе — мигрировать на `lib/services/db_logging_service.py` + `lib/hooks/database_logging_hook.py` |
+| Хуки | `lib/hooks/database_logging_hook.py` встроен в `AgentLoop` через `AgentFactory`: общий инстанс заменён на per-turn фабрику `hook_factories=` (см. `database_logging_hook.py:make_db_logging_hook_factory`) |
+
+**Данные:**
+
+- **Сессии** (`public.agent_session_meta`, `public.agent_session_messages`) —
+  схема та же. DDL: `sql/session/create_public_agent_session_meta.sql`,
+  `sql/session/create_public_agent_session_messages.sql`.
+- **Канал** (`public.agent_conversation_messages`) — без миграции (имя уже актуально).
+  DDL: `sql/channels/create_public_agent_conversation_messages.sql`.
+- **`workspace/data_store/duckdb/cache.duckdb`** — gateway пересоздаст автоматически (in-memory → новый snapshot; путь через `table_registry.snapshot_path()`).
+- **Векторные индексы** (`oarb.audit_vectors`, `public.agent_vector_index_store`,
+  `public.agent_vector_index_config`) — без миграции (1.5.0 уже хранил их в БД);
+  DDL в `sql/audit_analyzer/`.
+- **Бенчмарки** (`public.agent_benchmark_runs`, `public.agent_benchmark_results`) — без миграции;
+  DDL в `sql/benchmarks/`.
+- **`agent_gateway_logs` / `agent_question_runs`** — новые таблицы:
+  `sql/logs/create_public_agent_gateway_logs.sql`,
+  `sql/logs/create_public_agent_question_runs.sql`.
+
+**Что НЕ изменилось:**
+
+- API точек входа: `python gateway.py`, `python cli_agent.py -P`.
+- Имена таблиц БД.
+- `benchmarks/items/*.yaml` — формат совместим.
+- `audit_analyzer` режимы `predefined` / `sql` / `vector`.
+- Параметры CLI `audit_analyzer` (`--top-k`, `--threshold`, `--index-name`).
+
+Краткий таймлайн релизов — в [CHANGELOG.md](CHANGELOG.md).
+
+---
+

@@ -390,7 +390,7 @@ class ContextCompactionService:
 
         try:
             configure(dsn)
-            # ``utils.db.execute`` — sync-функция (DEVELOPMENT.md § ``ctx.config``
+            # ``utils.db.execute`` — sync-функция (docs/INTERNAL_API.md § ``ctx.config``
             # vs ``ctx._settings_ref``: используем ~тот же threading-обход,
             # что и для sync-IO в ``postgres_channel``). Без ``asyncio.to_thread``
             # ``await execute(...)`` падает на ``'str' object can't be awaited``

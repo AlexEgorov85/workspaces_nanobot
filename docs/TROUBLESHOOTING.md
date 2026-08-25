@@ -121,6 +121,6 @@ PowerShell интерпретирует `=` по-своему. Использу�
 | `AuditSyncService.get_stats()` | `polls`, `full_resyncs`, `reconnects`, `errors`, размер очереди |
 | `DbLoggingService.get_stats()` | `written`, `failed`, `queue_size`, `fallback_written`, `connected`, `last_error` |
 
-См. также: [DEVELOPMENT.md](DEVELOPMENT.md) — раздел «Диагностика» (если есть),
+См. также: [docs/ARCHITECTURE.md](ARCHITECTURE.md) — разделы по сервисам,
 [docs/architecture/runtime-patcher-inventory.md](architecture/runtime-patcher-inventory.md)
 — каталог monkey-patch'ей и upgrade-risk.

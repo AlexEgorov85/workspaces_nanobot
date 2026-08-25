@@ -44,7 +44,7 @@ python tools/check_worker_pool_integrity.py --fix                 # диагно
 python tools/migrate.py --apply                                   # миграции схемы
 ```
 
-Подробности по каждой команде — в [DEVELOPMENT.md](DEVELOPMENT.md) и
+Подробности по каждой команде — в [docs/INTERNAL_API.md](docs/INTERNAL_API.md) и
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## 🏗 Архитектура
@@ -73,7 +73,7 @@ flowchart TB
 
 **Поток:** 3 конфига → `config.py: SETTINGS` → `ApplicationContext.create()` →
 `MessageBus` → `AgentLoop` → `gateway.py`/`cli_agent.py` запускают каналы + lifecycle.
-Полная таблица связей — в [DEVELOPMENT.md](DEVELOPMENT.md).
+Полная таблица связей — в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## 📁 Структура проекта
 
@@ -88,7 +88,7 @@ nanobot/
 ├── tests/  benchmarks/  tools/  sql/  docs/  requirements.txt
 ```
 
-Подробное дерево — в [DEVELOPMENT.md → Структура проекта](DEVELOPMENT.md).
+Подробное дерево — в [docs/ARCHITECTURE.md → Структура проекта](docs/ARCHITECTURE.md#структура-проекта).
 Навигация по `docs/` — в [docs/README.md](docs/README.md).
 
 ## 🗃 База данных
@@ -138,7 +138,7 @@ pytest tests/ --cov=lib --cov-report=term-missing
 
 | Документ | Назначение |
 |---|---|
-| **[DEVELOPMENT.md](DEVELOPMENT.md)** | Тех. справочник: архитектура сервисного слоя, audit_analyzer, кеш, DDL, **где что править** |
+| **[DEVELOPMENT.md](DEVELOPMENT.md)** | Навигационный хаб разработчика (компактный); вся глубокая документация — в `docs/` |
 | **[CHANGELOG.md](CHANGELOG.md)** | История релизов (Keep a Changelog / SemVer) |
 | **[TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md)** | Целевая архитектура |
 | **[docs/README.md](docs/README.md)** | Навигационный индекс каталога `docs/` |
