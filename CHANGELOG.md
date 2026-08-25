@@ -40,6 +40,12 @@
   **`docs/skill-tool-inventory.md`**, **`docs/runtime_patches.md`** —
   документация (TARGET §20, §33).
 
+- **`docs/table-registry.md`** — как хранятся списки таблиц для
+  синхронизации PG → DuckDB (`project.json` → `scripts/register.py` →
+  `table_registry`), рецепты добавления таблиц, track-колонки,
+  параметры контроля синхронизации. Ссылка добавлена в Project Layout
+  `AGENTS.md`.
+
 ### Changed
 
 - **`workspace/skills/audit_analyzer/SKILL.md`** переписан: убраны
@@ -519,6 +525,38 @@
   в ~5 раз на пустом столе.
 
 ### Fixed
+
+- **`track_column_overrides` не работал в рантайме**: `AuditSyncService._track_column_for`
+  импортировал несуществующую функцию `skill_for_table` из `table_registry`
+  (это метод синглтона); ImportError глотался, и поллинг всегда падал в
+  fallback `updated_at`/`id`. Теперь lookup идёт через
+  `table_registry.skill_for_table(table)` — per-table track-колонки из
+  регистрации skill'а применяются. Регресс-тесты: registry-path и
+  disabled-skill fallback (`tests/test_audit_sync_service.py`).
+
+- **Дубликат таблицы при разных формах записи**: `register.py` skill'а
+  `audit_analyzer` не нормализовал `db_additional_tables`
+  (`[["public", "agent_predefined_scripts"]]`) перед проверкой
+  «уже есть в списке», поэтому таблица попадала в sync дважды
+  (вложенной формой и строкой). Теперь нормализация
+  `normalize_table_names` выполняется до дедупликации; плюс защитная
+  дедупликация списка таблиц в `_make_sync_services` (сохранение порядка)
+  и нормализация в `tools/build_vectors.py`.
+
+- **Изоляция тестов канала**: `TestChannelFactoryClaimStrategy._setup`
+  (`tests/test_parallel_modes.py`) оставлял фейковые модули в
+  `sys.modules["lib.channels.postgres_channel"]` → 55 ошибок ImportError
+  в `test_postgres_channel.py` при полном прогоне; после наивной очистки
+  тесты канала, наоборот, уходили связками в живой PostgreSQL.
+  Фикс двусторонний: autouse-фикстура восстановления sys.modules в
+  `test_parallel_modes.py` + форс-реимпорт канала под фейковым
+  `utils.db` в фикстуре `mock_db_and_psycopg`
+  (`tests/test_postgres_channel.py`). Полный прогон без integration:
+  1411 passed, 14 skipped.
+
+- **Устаревшие ожидания** `gateway.print_worker_activity` /
+  `gateway.print_db_activity` в `tests/test_config_keys.py`: ожидался
+  дефолт `True`, тогда как в `project.json` и по документации — `false`.
 
 - **Сохранение сессии падало с `A string literal cannot contain NUL (0x00)`**
   когда в контент сообщения (бинарь из `exec`/`read_file` или LLM-вывод)

@@ -48,8 +48,8 @@ def main() -> None:
     from lib.utils.project_version import project_version
 
     console.print(
-        f"{__logo__} Starting nanobot gateway v{__version__} "
-        f"(project v{project_version()})..."
+        f"{__logo__} Starting nanobot gateway · project v{project_version()} "
+        f"(nanobot {__version__})..."
     )
 
     # Назначаем callbacks и подменяем on_sync ДО ctx.start() — иначе

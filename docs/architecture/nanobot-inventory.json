@@ -3,7 +3,7 @@
     "description": "Инвентаризация зависимостей workspaces_nanobot от nanobot-ai",
     "nanobot_version_pinned": "0.3.0",
     "nanobot_version_installed": "0.3.0",
-    "scan_date": "2026-08-24",
+    "scan_date": "2026-08-25",
     "scanner": "tools/scan_nanobot_inventory.py",
     "legend": {
       "GREEN": "public/stable extension point",
@@ -13,7 +13,7 @@
     }
   },
   "summary": {
-    "files_scanned": 85,
+    "files_scanned": 86,
     "total_imports": 41,
     "by_classification": {
       "GREEN": 32,
@@ -21,7 +21,7 @@
       "ORANGE": 4
     },
     "getattr_private_total": 20,
-    "setattr_total": 2
+    "setattr_total": 0
   },
   "files": [
     {
@@ -86,17 +86,16 @@
       "file": "lib/channels/postgres_channel.py",
       "imports": [
         {
-          "line": 44,
-          "statement": "from nanobot.bus.events import InboundMessage, OutboundMessage",
+          "line": 37,
+          "statement": "from nanobot.bus.events import OutboundMessage",
           "module": "nanobot.bus.events",
           "names": [
-            "InboundMessage",
             "OutboundMessage"
           ],
           "classification": "GREEN"
         },
         {
-          "line": 45,
+          "line": 38,
           "statement": "from nanobot.bus.queue import MessageBus",
           "module": "nanobot.bus.queue",
           "names": [
@@ -105,7 +104,7 @@
           "classification": "GREEN"
         },
         {
-          "line": 46,
+          "line": 39,
           "statement": "from nanobot.channels.base import BaseChannel",
           "module": "nanobot.channels.base",
           "names": [
@@ -121,17 +120,16 @@
       "file": "lib/channels/redis_channel.py",
       "imports": [
         {
-          "line": 96,
-          "statement": "from nanobot.bus.events import InboundMessage, OutboundMessage",
+          "line": 92,
+          "statement": "from nanobot.bus.events import OutboundMessage",
           "module": "nanobot.bus.events",
           "names": [
-            "InboundMessage",
             "OutboundMessage"
           ],
           "classification": "GREEN"
         },
         {
-          "line": 97,
+          "line": 93,
           "statement": "from nanobot.bus.queue import MessageBus",
           "module": "nanobot.bus.queue",
           "names": [
@@ -140,7 +138,7 @@
           "classification": "GREEN"
         },
         {
-          "line": 98,
+          "line": 94,
           "statement": "from nanobot.channels.base import BaseChannel",
           "module": "nanobot.channels.base",
           "names": [
@@ -162,7 +160,7 @@
       "file": "lib/cli/console_loop.py",
       "imports": [
         {
-          "line": 176,
+          "line": 177,
           "statement": "from nanobot.bus.events import InboundMessage",
           "module": "nanobot.bus.events",
           "names": [
@@ -171,19 +169,19 @@
           "classification": "GREEN"
         },
         {
-          "line": 177,
+          "line": 178,
           "statement": "from nanobot.cli.commands import (",
           "module": "nanobot.cli.commands",
           "names": [
             "(",
+            "__logo__",
+            "__version__",
             "_init_prompt_session",
             "_is_exit_command",
             "_model_display",
             "_read_interactive_input_async",
             "_restore_terminal",
-            "_sanitize_surrogates",
-            "__logo__",
-            "__version__"
+            "_sanitize_surrogates"
           ],
           "classification": "RED"
         }
@@ -255,7 +253,7 @@
       "file": "lib/core/application_context.py",
       "imports": [
         {
-          "line": 617,
+          "line": 622,
           "statement": "from nanobot.cron.service import CronService",
           "module": "nanobot.cron.service",
           "names": [
@@ -280,6 +278,12 @@
           "classification": "GREEN"
         }
       ],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/core/project_settings.py",
+      "imports": [],
       "getattr_private": [],
       "setattr_calls": []
     },
@@ -309,7 +313,7 @@
       "file": "lib/hooks/database_logging_hook.py",
       "imports": [
         {
-          "line": 28,
+          "line": 29,
           "statement": "from nanobot.agent import AgentHookContext, AgentRunHookContext",
           "module": "nanobot.agent",
           "names": [
@@ -431,7 +435,7 @@
       "file": "lib/services/consolidator_locale.py",
       "imports": [
         {
-          "line": 47,
+          "line": 45,
           "statement": "from nanobot.utils import prompt_templates as _pt",
           "module": "nanobot.utils",
           "names": [
@@ -556,7 +560,7 @@
           "classification": "RED"
         },
         {
-          "line": 1095,
+          "line": 1096,
           "statement": "import nanobot.agent.subagent as _subagent_mod",
           "module": "nanobot.agent.subagent",
           "names": [],
@@ -643,16 +647,7 @@
           "attr": "_ttl"
         }
       ],
-      "setattr_calls": [
-        {
-          "line": 1248,
-          "expr": "setattr(ctx, \"_agent_ref\""
-        },
-        {
-          "line": 1250,
-          "expr": "setattr(ctx, \"_settings_ref\""
-        }
-      ]
+      "setattr_calls": []
     },
     {
       "file": "lib/services/session_storage.py",
@@ -710,7 +705,7 @@
       "file": "lib/session/pg_session_manager.py",
       "imports": [
         {
-          "line": 35,
+          "line": 34,
           "statement": "from nanobot.session.manager import Session, SessionManager, _message_preview_text",
           "module": "nanobot.session.manager",
           "names": [
@@ -800,7 +795,7 @@
       "file": "workspace/hooks/recent_files_hook.py",
       "imports": [
         {
-          "line": 35,
+          "line": 34,
           "statement": "from nanobot.agent import AgentHook",
           "module": "nanobot.agent",
           "names": [
@@ -839,7 +834,7 @@
       "imports": [],
       "getattr_private": [
         {
-          "line": 203,
+          "line": 204,
           "expr": "getattr(db, \"_search_error\"",
           "object": "db",
           "attr": "_search_error"
