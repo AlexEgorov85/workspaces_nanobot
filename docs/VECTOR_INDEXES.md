@@ -21,10 +21,10 @@
 
 ```mermaid
 flowchart LR
-    CFG["1. Конфиг векторных индексов"] --> SRC["2. Источники (таблицы из project.json)"]
-    SRC --> BL["3. build_vectors.py<br/>чанкование + эмбеддинг"]
-    BL --> ST["4. Эмбеддинги + FAISS-хранилище"]
-    ST --> SE["5. search_vector<br/>поиск в памяти"]
+    CFG["Конфиг векторных индексов"] --> SRC["Источники<br/>(таблицы из project.json)"]
+    SRC --> BL["build_vectors.py<br/>чанкование + эмбеддинг"]
+    BL --> ST["Эмбеддинги + FAISS-хранилище"]
+    ST --> SE["search_vector<br/>поиск в память"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class CFG,SRC,BL core
