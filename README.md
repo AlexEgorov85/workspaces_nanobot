@@ -51,37 +51,22 @@ python tools/migrate.py --apply                                   # миграц
 
 ```mermaid
 flowchart LR
-    subgraph UI["Точки входа"]
-        GW["gateway.py"]
-        CLI["cli_agent.py"]
-        ST["streamlit_app.py"]
-    end
-    subgraph ORCH["Оркестрация (lib/core)"]
-        CTX["ApplicationContext"]
-        BUS["MessageBus"]
-        AGENT["AgentLoop + Hooks"]
-    end
-    subgraph SVC["Сервисы (lib/services)"]
-        CFG["Config / Session"]
-        RT["RuntimePatcher"]
-        DBL["DbLogging"]
-        PRE["Preload"]
-    end
-    subgraph INFRA["Инфраструктура"]
-        PG[("PostgreSQL")]
-        RD[("Redis")]
-        DUCK[("DuckDB кеш")]
-    end
-    UI --> ORCH
-    ORCH --> SVC
-    ORCH --> INFRA
-    SVC --> INFRA
+    WEB["gateway (HTTP API)"] --> ORCH["Оркестрация<br/>ApplicationContext"]
+    TERM["cli_agent (терминал)"] --> ORCH
+    UI["streamlit (веб)"] --> ORCH
+    ORCH --> AGENT["Агент<br/>рассуждение + инструменты"]
+    ORCH --> BUS["Шина сообщений"]
+    AGENT --> CACHE[("Локальный кеш (DuckDB)")]
+    AGENT --> TOOLS["Инструменты<br/>SQL / векторный поиск"]
+    CACHE --> VEC["Векторы (FAISS)"]
+    TOOLS --> DB[("База данных (PostgreSQL)")]
+    VEC --> EMB["Эмбеддинги (Ollama)"]
     classDef entry fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
-    class GW,CLI,ST entry
-    class CTX,BUS,AGENT,CFG,RT,DBL,PRE core
-    class PG,RD,DUCK infra
+    class WEB,TERM,UI entry
+    class ORCH,AGENT,BUS,TOOLS core
+    class CACHE,VEC,DB,EMB infra
 ```
 
 **Поток:** 3 конфига → `config.py: SETTINGS` → `ApplicationContext.create()` →

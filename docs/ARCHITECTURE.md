@@ -28,32 +28,17 @@
 
 ```mermaid
 flowchart LR
-    subgraph PG["PostgreSQL"]
-        TBL["Доменные таблицы<br/>(имена в project.json)"]
-        VEC["Таблица эмбеддингов"]
-        VCFG["Конфиг / хранилище векторов"]
-    end
-    subgraph SVC["lib/services (универсальный слой)"]
-        SYNC["PgDuckDbSyncService - polling"]
-        STORE["DuckDbCacheStore + FAISS"]
-        PROV["PostgresDuckDbProvider"]
-        EMB["get_embedding (Ollama)"]
-    end
-    subgraph ART["Кеш навыка"]
-        DUCK["data_store/duckdb/cache.duckdb"]
-    end
-    TBL --> SYNC
-    VEC --> SYNC
-    VCFG --> SYNC
-    SYNC -->|upsert| STORE
-    STORE -->|publish| DUCK
-    PROV --> STORE
-    PROV --> EMB
-    PROV --> TBL
+    SRC["Данные аудита<br/>(в БД, имена в project.json)"] --> SYNC["Фоновая синхронизация<br/>изменения в кеш"]
+    VEC["Эмбеддинги строк"] --> SYNC
+    SYNC --> CACHE["Локальный кеш<br/>DuckDB + FAISS"]
+    CACHE -->|публикация| FILE[("Файл кеша<br/>cache.duckdb")]
+    AGENT["Агент / Навык"] --> CACHE
+    AGENT --> EMB["Эмбеддинг запроса<br/>(Ollama)"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
-    class SYNC,STORE,PROV,EMB core
-    class TBL,VEC,VCFG,DUCK infra
+    class SYNC,CACHE,AGENT,EMB core
+    class SRC,VEC,FILE infra
+
 ```
 
 **Потоки данных**
@@ -84,23 +69,21 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    GW["gateway.py"] --> APPCTX
-    CLI["cli_agent.py"] --> APPCTX
-    subgraph APPCTX["ApplicationContext.create / start / stop"]
-        CFG["ConfigService"]
-        SESS["SessionStorage"]
-        DBL["DbLoggingService"]
-        SYNC["PgDuckDbSync + CacheStore"]
-        BUS["MessageBus"]
-        AGENT["AgentFactory (AgentLoop)"]
-        PATCH["RuntimePatcher"]
-        PRE["PreloadService"]
-        TRANS["TranscriptionService"]
-    end
+    GW["gateway.py"] --> CTX["ApplicationContext<br/>create / start / stop"]
+    CLI["cli_agent.py"] --> CTX
+    CTX --> CFG["ConfigService"]
+    CTX --> SESS["SessionStorage"]
+    CTX --> DBL["DbLoggingService"]
+    CTX --> SYNC["PgDuckDbSync + CacheStore"]
+    CTX --> BUS["MessageBus"]
+    CTX --> AGENT["AgentFactory (AgentLoop)"]
+    CTX --> PATCH["RuntimePatcher"]
+    CTX --> PRE["PreloadService"]
+    CTX --> TRANS["TranscriptionService"]
     classDef entry fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     class GW,CLI entry
-    class CFG,SESS,DBL,SYNC,BUS,AGENT,PATCH,PRE,TRANS core
+    class CTX,CFG,SESS,DBL,SYNC,BUS,AGENT,PATCH,PRE,TRANS core
 ```
 
 ### `lib/core/` (ApplicationContext + фабрики)
@@ -332,17 +315,14 @@ TestDatabaseLoggingHookFactory.test_concurrent_sessions_do_not_mix_request_id`
 
 ```mermaid
 flowchart LR
-    subgraph IN["Входы"]
-        TOOL["compact_context (tool)"]
-        SLASH["/compact (slash + CLI)"]
-        AUTO["Авто: idle / token-budget"]
-    end
-    IN --> SVC["ContextCompactionService"]
-    SVC -->|notify| OUT["Заметка в истории + лог + UI"]
+    TOOL["compact_context (tool)"] --> SVC["Сжатие контекста"]
+    SLASH["/compact (slash + CLI)"] --> SVC
+    AUTO["Авто: idle / token-budget"] --> SVC
+    SVC["Сжатие контекста"] -->|notify| OUT["Заметка в истории<br/>+ лог + UI"]
     classDef entry fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     class TOOL,SLASH,AUTO entry
-    class SVC core
+    class SVC,OUT core
 ```
 
 **Точки входа:**
@@ -615,7 +595,7 @@ DDL: `metadata JSONB DEFAULT '{}'::jsonb` (см.
 
 ```mermaid
 flowchart TD
-    A["INSERT — status pending<br/>metadata = {}"] --> B["processing<br/>+ message_id, reasoning, context_window"]
+    A["INSERT — pending<br/>metadata = {}"] --> B["processing<br/>+ message_id, reasoning, context_window"]
     B --> C["completed<br/>+ _tool_audit"]
     C --> D["error / failed<br/>+ error, retry_count++"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
