@@ -153,10 +153,11 @@ class TestVectorStoreTable:
     def test_default_from_settings(self) -> None:
         """Без явного signature_table — дефолт runtime-инфраструктуры."""
         from lib.core import skill_config
+        from lib.services.cache_provider_impl import _DEFAULT_VECTOR_INDEX_STORE_TABLE
 
         assert (
             skill_config.get_vector_store_table()
-            == "public.agent_vector_index_store"
+            == _DEFAULT_VECTOR_INDEX_STORE_TABLE
         )
 
     def test_overridden_via_settings(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -171,6 +172,36 @@ class TestVectorStoreTable:
         )
         assert (
             skill_config.get_vector_store_table() == "public.custom_index_store"
+        )
+
+
+class TestVectorIndexConfigTable:
+    def test_default_from_settings(self) -> None:
+        """Без явного config_table — дефолт runtime-инфраструктуры."""
+        from lib.services.cache_provider_impl import (
+            _DEFAULT_VECTOR_INDEX_CONFIG_TABLE,
+            read_vector_index_config_table,
+        )
+
+        assert (
+            read_vector_index_config_table()
+            == _DEFAULT_VECTOR_INDEX_CONFIG_TABLE
+        )
+
+    def test_overridden_via_settings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Если в gateway.vector.index.config_table задано имя — оно побеждает."""
+        import config as _config
+        from lib.services.cache_provider_impl import read_vector_index_config_table
+
+        monkeypatch.setattr(
+            _config, "SETTINGS",
+            {"gateway": {"vector": {"index": {"config_table": "public.custom_index_cfg"}}}},
+            raising=False,
+        )
+        assert (
+            read_vector_index_config_table() == "public.custom_index_cfg"
         )
 
 

@@ -7,7 +7,8 @@
   имена fully qualified, без ``schema``;
 * ``vector_indexes: []`` — список имён индексов (только name);
   ``source`` больше не регистрируется как ресурс — это инфраструктурная
-  декларация в ``public.agent_vector_index_config``;
+  декларация в PG-реестре (``read_vector_index_config_table()``;
+  см. ``VectorIndexSettings.config_table``);
 * ``label`` / ``tracking_column`` пробрасываются в dataclass.
 
 Инфраструктурные ресурсы (vector-storage) живут в
@@ -156,7 +157,8 @@ class TestAutoRegisterTypeVector:
         """``type="vector"`` в ``tables[]`` даёт VectorResource.
 
         ``vector_indexes`` теперь не содержит ``source`` — это инфра
-        (runtime-БД ``public.agent_vector_index_config``).
+        (PG-реестр: ``read_vector_index_config_table()``;
+        см. ``VectorIndexSettings.config_table``).
         """
         ctx = _make_ctx({"x": {"tables": [
             {"name": "oarb.audit_vectors", "type": "vector", "tracking_column": "id"},
@@ -197,8 +199,8 @@ class TestAutoRegisterVectorIndexes:
     В новой архитектуре storage-таблица векторов — инфраструктурный ресурс
     (``gateway.vector.index.storage_table`` → ``TableRegistry.register_infra``).
     ``vector_indexes[].source`` (PG-таблица исходных строк) — тоже
-    инфраструктурный (хранится в ``public.agent_vector_index_config``),
-    skill его не знает.
+    инфраструктурный (PG-реестр: ``read_vector_index_config_table()``;
+    см. ``VectorIndexSettings.config_table``), skill его не знает.
     """
 
     def test_vector_index_names_preserved_in_config(self) -> None:

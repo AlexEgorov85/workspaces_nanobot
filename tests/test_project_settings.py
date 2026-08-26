@@ -322,7 +322,8 @@ class TestSkillSettingsExtraForbid:
 
 class TestVectorIndexEntryNoSource:
     """``VectorIndexEntry.source`` удалён: source — инфраструктурная
-    декларация в ``public.agent_vector_index_config``, не часть skill'а.
+    декларация в PG-реестре (``read_vector_index_config_table()``;
+    см. ``VectorIndexSettings.config_table``), не часть skill'а.
 
     После commit ``VectorIndexEntry.extra="forbid"`` legacy-поля
     (``source``, ``embedding``, любые другие) теперь не «тихо»
