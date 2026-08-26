@@ -45,10 +45,11 @@ from lib.utils.text_utils import sanitize_value, truncate_middle
 
 
 def _available_index_names() -> str:
-    """Список имён индексов из ``public.agent_vector_index_config`` (PG).
+    """Список имён индексов из PG-реестра.
 
     Для подсказок в error-сообщениях tool'а: вместо hardcoded-домен-имён
-    показывает реально зарегистрированные индексы из runtime-БД.
+    показывает реально зарегистрированные индексы из runtime-БД
+    (``read_vector_index_config_table()``; см. ``VectorIndexSettings.config_table``).
     При недоступной PG / пустой конфигурации — fallback без падения.
     """
     try:
@@ -58,12 +59,15 @@ def _available_index_names() -> str:
         if names:
             return ", ".join(names)
         return (
-            "(нет индексов в public.agent_vector_index_config — "
-            "настройте gateway.vector.index.storage_table и "
+            "(нет индексов в PG-реестре — настройте "
+            "gateway.vector.index.storage_table и запустите "
             "tools/build_vectors.py)"
         )
     except Exception as exc:
-        return f"(не удалось прочитать agent_vector_index_config: {exc})"
+        return (
+            f"(не удалось прочитать PG-реестр индексов "
+            f"(read_vector_index_config_table()): {exc})"
+        )
 
 
 class VectorSearchToolConfig(BaseModel):

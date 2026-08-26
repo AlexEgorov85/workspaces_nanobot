@@ -8,8 +8,9 @@ embedding_columns помечена "chunk": true, её текст разбива
 row_data (JSONB) всегда содержит ПОЛНУЮ строку исходной таблицы,
 независимо от количества чанков.
 
-Конфиг читается из public.agent_vector_index_config (БД) — единственный
-источник; конфигурация из project.json не подставляется.
+Конфиг читается из PG-реестра (``read_vector_index_config_table()``;
+см. ``VectorIndexSettings.config_table``) — единственный источник;
+конфигурация из project.json не подставляется.
 
 Запуск (из корня проекта):
     # Инкрементальное обновление (только новые строки)
@@ -59,8 +60,9 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 _ROOT = Path(__file__).resolve().parents[1]                    # корень проекта
 # tools/build_vectors.py — generic индексатор. НЕ знает про skill'ы:
-# источник истины — БД-таблица ``public.agent_vector_index_config``
-# (прочитана через ``read_vector_index_config({})``, см. Phase 7).
+# источник истины — PG-реестр (``read_vector_index_config_table()``;
+# см. ``VectorIndexSettings.config_table``), прочитанный через
+# ``read_vector_index_config({})`` (Phase 7).
 # Skill-секция в project.json исторически давала default storage_table и
 # chunk-параметры; сейчас default'ы берутся из ``gateway.vector.index.*``
 # (через ``infra_registration.register_vector_storage`` ниже) и из
@@ -176,7 +178,8 @@ def _content_hash(text: str) -> str:
 def _normalize_cols(embedding_cols: list) -> list[str]:
     """Привести embedding_cols к списку строк-имён колонок.
 
-    Конфигурация в public.agent_vector_index_config может содержать как
+    Конфигурация в PG-реестре (``read_vector_index_config_table()``;
+    см. ``VectorIndexSettings.config_table``) может содержать как
     простые имена колонок (["col1", "col2"]), так и объекты
     ([{"column": "col", "chunk": true, ...}, ...]). Функции
     `_build_search_text` и `build_chunks` ожидают только имена колонок,
@@ -197,9 +200,10 @@ def _rebuild_faiss(index_name: str, db_table: str, rebuilt_only_deletion: bool =
     """Пересобрать FAISS-индекс через единый сервисный слой (vector_index_service).
 
     Инвалидирует кэш провайдера, читает векторы ``index_name`` из
-    ``db_table``, строит индекс и сохраняет blob в
-    ``public.agent_vector_index_store``. faiss/numpy отсутствуют — не фатально:
-    векторы уже в БД, поиск просто будет недоступен до установки зависимостей.
+    ``db_table``, строит индекс и сохраняет blob в PG-таблицу-хранилище
+    (``read_vector_store_table()``; см. ``VectorIndexSettings.signature_table``).
+    faiss/numpy отсутствуют — не фатально: векторы уже в БД, поиск просто
+    будет недоступен до установки зависимостей.
     """
     try:
         # ``VectorIndexBuildService`` использует ``build_cache_provider(cfg, base_dir)``,
@@ -224,7 +228,8 @@ def _rebuild_faiss(index_name: str, db_table: str, rebuilt_only_deletion: bool =
         logger.info(f"  FAISS-индекс '{index_name}' пересобран (только удаление): {count} векторов")
     else:
         logger.success(f"  FAISS-индекс '{index_name}' собран в памяти и сохранён в "
-                       f"public.agent_vector_index_store ({count} векторов)")
+                       f"signature-store ({count} векторов; см. "
+                       f"gateway.vector.index.signature_table)")
 
 
 # =============================================================================
@@ -607,7 +612,8 @@ def main():
         import numpy  # noqa: F401
     except ImportError as exc:
         logger.warning(f"ПРЕДУПРЕЖДЕНИЕ: {exc.__class__.__name__}: {exc}")
-        logger.warning("  Вектора будут вставлены в oarb.audit_vectors, но FAISS-индекс не соберётся.")
+        logger.warning("  Вектора будут вставлены в storage_table "
+                   "(gateway.vector.index.storage_table), но FAISS-индекс не соберётся.")
         logger.warning("  Поставьте: pip install faiss-cpu numpy")
 
     dsn = resolve_dsn()
@@ -703,7 +709,9 @@ def main():
     logger.info(f"Режим: {mode_label}")
     logger.info(f"Батч: {args.batch_size}, чанк: {args.chunk_size} симв., перекрытие: {args.chunk_overlap}, "
                 f"пауза: {args.pause_sec}с, retry_wait: {args.embedding_retry_wait}с")
-    logger.info("Источник конфига: таблица public.agent_vector_index_config (БД)")
+    logger.info("Источник конфига: PG-реестр "
+                "(read_vector_index_config_table(); см. "
+                "gateway.vector.index.config_table)")
 
     results = []
     for name, cfg in enabled.items():
