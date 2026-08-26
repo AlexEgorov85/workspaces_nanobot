@@ -58,8 +58,15 @@ if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
 _ROOT = Path(__file__).resolve().parents[1]                    # корень проекта
-_SKILL_ROOT = _ROOT / "workspace" / "skills" / "audit_analyzer"  # корень навыка (кэш/индексы)
-for p in [str(_ROOT), str(_SKILL_ROOT)]:
+# tools/build_vectors.py — generic индексатор. НЕ знает про skill'ы:
+# источник истины — БД-таблица ``public.agent_vector_index_config``
+# (прочитана через ``read_vector_index_config({})``, см. Phase 7).
+# Skill-секция в project.json исторически давала default storage_table и
+# chunk-параметры; сейчас default'ы берутся из ``gateway.vector.index.*``
+# (через ``infra_registration.register_vector_storage`` ниже) и из
+# hardcoded CLI defaults. Если в вашем проекте используется skill-specific
+# storage_table — задайте ``gateway.vector.index.storage_table`` в project.json.
+for p in [str(_ROOT)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -72,16 +79,10 @@ from lib.services.vector_index_service import (
 )
 from utils.db import configure, execute, fetch, resolve_dsn
 
-_CFG_RAW = SETTINGS.get("skills", {}).get("audit_analyzer", {})
 
-
-# Регистрируем ресурсы skill'а через общую утилиту, чтобы standalone-запуск
-# build_vectors.py не дублировал логику ApplicationContext._auto_register_skills.
-# Источник истины — универсальная ``project.json::skills.audit_analyzer.*`` секция.
-from lib.core.skill_registration import register_skill_from_config
+# Standalone-регистрация runtime-storage (для случая когда build_vectors.py
+# запущен без ApplicationContext). Подменяет ApplicationContext._register_infra_resources.
 from lib.core.infra_registration import register_vector_storage
-
-register_skill_from_config("audit_analyzer", _CFG_RAW)
 register_vector_storage()
 
 
@@ -201,7 +202,11 @@ def _rebuild_faiss(index_name: str, db_table: str, rebuilt_only_deletion: bool =
     векторы уже в БД, поиск просто будет недоступен до установки зависимостей.
     """
     try:
-        svc = VectorIndexBuildService(_CFG_RAW, str(_SKILL_ROOT))
+        # ``VectorIndexBuildService`` использует ``build_cache_provider(cfg, base_dir)``,
+        # который читает storage_table из ``gateway.vector.index.*`` (через
+        # ``register_vector_storage``, вызванный при импорте). ``cfg={}`` —
+        # skill-independent; skill-name не должен попадать в CLI-утилиту.
+        svc = VectorIndexBuildService({}, str(_ROOT))
         count = svc.rebuild_and_store(index_name, db_table)
     except (ImportError, ModuleNotFoundError) as exc:
         logger.warning(f"  ПРЕДУПРЕЖДЕНИЕ: FAISS-индекс для '{index_name}' не собран — "
@@ -559,26 +564,24 @@ def main():
                         help="Собрать только конкретный индекс")
     parser.add_argument("--batch-size", type=int, default=10,
                         help="Размер батча для эмбеддинга")
-    vi_list = _CFG_RAW.get("vector_indexes") or []
-    vi_first = vi_list[0] if vi_list and isinstance(vi_list[0], dict) else {}
+    # Default-значения CLI — из глобальной runtime-секции ``gateway.vector.*``
+    # (НЕ из skills.audit_analyzer). Это generic — работает для любого skill'а.
     vector_cfg = SETTINGS.get("gateway", {}).get("vector") or {}
     index_cfg = vector_cfg.get("index") or {}
+    embed_cfg = vector_cfg.get("embedding") or {}
     storage_table = index_cfg.get("storage_table") or ""
-    if not storage_table:
-        for entry in _CFG_RAW.get("tables") or []:
-            if isinstance(entry, dict) and entry.get("type") == "vector" and entry.get("name"):
-                storage_table = entry["name"]
-                break
     parser.add_argument("--chunk-size", type=int,
-                        default=int(vi_first.get("text_chunk_size", 500)),
-                        help="Размер чанка в символах (default из vector_indexes[0].text_chunk_size)")
+                        default=int(embed_cfg.get("default_chunk_size", 500)),
+                        help="Размер чанка в символах (default 500 или "
+                             "gateway.vector.embedding.default_chunk_size)")
     parser.add_argument("--chunk-overlap", type=int,
-                        default=int(vi_first.get("text_chunk_overlap", 80)),
-                        help="Перекрытие чанков в символах (default из vector_indexes[0].text_chunk_overlap)")
+                        default=int(embed_cfg.get("default_chunk_overlap", 80)),
+                        help="Перекрытие чанков (default 80 или "
+                             "gateway.vector.embedding.default_chunk_overlap)")
     parser.add_argument("--pause-sec", type=float,
-                        default=float(vi_first.get("build_batch_pause_sec", 5.0)),
+                        default=float(embed_cfg.get("build_batch_pause_sec", 5.0)),
                         help="Пауза между запросами эмбеддинга, сек "
-                             "(default 5.0 или vector_indexes[0].build_batch_pause_sec)")
+                             "(default 5.0 или gateway.vector.embedding.build_batch_pause_sec)")
     parser.add_argument("--embedding-retry-wait", type=float, default=5.0,
                         help="При ошибке получения эмбеддинга: подождать это время (сек) и повторить "
                              "один раз (default 5.0)")
@@ -640,10 +643,14 @@ def main():
     )
     if not row:
         logger.error(f"ОШИБКА: таблица {db_schema}.{db_table} не создана")
-        logger.error("Сначала выполните sql/audit_analyzer/create_oarb_audit_vectors.sql")
+        logger.error(
+            "Сначала выполните DDL для vector-таблицы "
+            "(см. sql/audit_analyzer/create_oarb_audit_vectors.sql "
+            "или соответствующий DDL вашей vector-таблицы)"
+        )
         sys.exit(1)
 
-    indexes = read_vector_index_config(_CFG_RAW)
+    indexes = read_vector_index_config({})
     if not indexes:
         logger.error("Нет конфигурации vector_indexes")
         sys.exit(1)
