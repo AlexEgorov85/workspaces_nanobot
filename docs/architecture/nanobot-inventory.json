@@ -3,7 +3,7 @@
     "description": "Инвентаризация зависимостей workspaces_nanobot от nanobot-ai",
     "nanobot_version_pinned": "0.3.0",
     "nanobot_version_installed": "0.3.0",
-    "scan_date": "2026-08-25",
+    "scan_date": "2026-08-26",
     "scanner": "tools/scan_nanobot_inventory.py",
     "legend": {
       "GREEN": "public/stable extension point",
@@ -13,7 +13,7 @@
     }
   },
   "summary": {
-    "files_scanned": 86,
+    "files_scanned": 88,
     "total_imports": 41,
     "by_classification": {
       "GREEN": 32,
@@ -56,9 +56,9 @@
       ],
       "getattr_private": [
         {
-          "line": 79,
-          "expr": "getattr(ctx.audit_sync_service, \"_on_sync_callback\"",
-          "object": "ctx.audit_sync_service",
+          "line": 80,
+          "expr": "getattr(ctx.sync_service, \"_on_sync_callback\"",
+          "object": "ctx.sync_service",
           "attr": "_on_sync_callback"
         }
       ],
@@ -253,7 +253,7 @@
       "file": "lib/core/application_context.py",
       "imports": [
         {
-          "line": 622,
+          "line": 568,
           "statement": "from nanobot.cron.service import CronService",
           "module": "nanobot.cron.service",
           "names": [
@@ -282,7 +282,25 @@
       "setattr_calls": []
     },
     {
+      "file": "lib/core/infra_registration.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
       "file": "lib/core/project_settings.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/core/skill_config.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/core/skill_registration.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
@@ -362,18 +380,6 @@
     },
     {
       "file": "lib/services/__init__.py",
-      "imports": [],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
-      "file": "lib/services/audit_memory_store.py",
-      "imports": [],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
-      "file": "lib/services/audit_sync_service.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
@@ -485,6 +491,12 @@
       "setattr_calls": []
     },
     {
+      "file": "lib/services/duckdb_cache_store.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
       "file": "lib/services/llm_client.py",
       "imports": [],
       "getattr_private": [],
@@ -492,6 +504,12 @@
     },
     {
       "file": "lib/services/llm_config.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/services/pg_duckdb_sync_service.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
@@ -834,7 +852,7 @@
       "imports": [],
       "getattr_private": [
         {
-          "line": 204,
+          "line": 220,
           "expr": "getattr(db, \"_search_error\"",
           "object": "db",
           "attr": "_search_error"
