@@ -103,4 +103,4 @@ jobs:
         env:
           NANOBOT_LIVE_E2E: "0"
           NANOBOT_INTEGRATION: "0"
-        run: pytest tests/contract/ -v --tb=short || echo "Contract tests not yet present — skip"
+        run: pytest tests/contract/ -v --tb=short
