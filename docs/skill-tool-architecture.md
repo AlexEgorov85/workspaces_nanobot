@@ -307,5 +307,5 @@ if rs:
 | `tests/test_auto_register_skills.py::TestAutoRegisterPredefinedScriptsTable` | интеграционные тесты через `_auto_register_skills` (label ставится для `predefined_scripts_table`) |
 | `tests/test_skill_config_lookup.py::TestGetPredefinedScriptsTableRegistryPath` | end-to-end через `skill_config.get_predefined_scripts_table()` (lookup через registry) |
 
-Любое использование `label` в `lib/services/runtime`-слое (`audit_sync_service.py`,
-`audit_memory_store.py`, `cache_provider_impl.py`) — архитектурная регрессия.
+Любое использование `label` в `lib/services/runtime`-слое (`cache_provider_impl.py`,
+`duckdb_cache_store.py`, `pg_duckdb_sync_service.py`) — архитектурная регрессия.

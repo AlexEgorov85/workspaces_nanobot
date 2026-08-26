@@ -5,7 +5,7 @@
 навигационный хаб от деталей.
 
 > **TL;DR для диагноста:** логи — `logs/gateway.log` и `logs/cli.log`;
-> статистика пула — `AuditSyncService.get_stats()`;
+> статистика пула — `PgDuckDbSyncService.get_stats()`;
 > целостность пула воркеров — `python tools/check_worker_pool_integrity.py --fix`.
 
 ---
@@ -46,8 +46,8 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 ### `too many connections` (Greenplum)
 
 `pool_max_conn = 1` в `PGSessionManager`. Если не хватает — уменьшите
-`AuditSyncService.poll_interval_sec` (меньше опрос → меньше пиков).
-Мониторинг: `AuditSyncService.get_stats().reconnects`.
+`PgDuckDbSyncService.poll_interval_sec` (меньше опрос → меньше пиков).
+Мониторинг: `PgDuckDbSyncService.get_stats().reconnects`.
 
 ---
 
@@ -55,7 +55,7 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 
 ### `FileNotFoundError: workspace/data_store/duckdb/cache.duckdb`
 
-DuckDB-кеш публикуется **только gateway'ом** через `AuditMemoryStore.publish()`
+DuckDB-кеш публикуется **только gateway'ом** через `DuckDbCacheStore.publish()`
 (путь вычисляется `table_registry.snapshot_path()` →
 `workspace/data_store/duckdb/cache.duckdb`). Запустите `python gateway.py` и
 подождите первого цикла синхронизации. Старый путь
@@ -64,7 +64,7 @@ DuckDB-кеш публикуется **только gateway'ом** через `A
 
 ### `FAISS preload: no data in cache`
 
-Race condition: callbacks на `AuditSyncService` установлены **после** `ctx.start()`.
+Race condition: callbacks на `PgDuckDbSyncService` установлены **после** `ctx.start()`.
 Уже исправлено в `gateway.py:main()` (callbacks идут до `start()`). Если столкнулись —
 проверьте, что ваш код вызывает `set_on_*_callback` ДО `ctx.start()`.
 
@@ -118,7 +118,7 @@ PowerShell интерпретирует `=` по-своему. Использу�
 |---|---|
 | `python tools/check_worker_pool_integrity.py` | Проверка orphan-claims в `agent_worker_claims` |
 | `python tools/check_worker_pool_integrity.py --fix` | Возврат задач «мёртвых» воркеров в `pending` + снятие claim |
-| `AuditSyncService.get_stats()` | `polls`, `full_resyncs`, `reconnects`, `errors`, размер очереди |
+| `PgDuckDbSyncService.get_stats()` | `polls`, `full_resyncs`, `reconnects`, `errors`, размер очереди |
 | `DbLoggingService.get_stats()` | `written`, `failed`, `queue_size`, `fallback_written`, `connected`, `last_error` |
 
 См. также: [docs/ARCHITECTURE.md](ARCHITECTURE.md) — разделы по сервисам,
