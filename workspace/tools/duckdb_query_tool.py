@@ -91,6 +91,16 @@ class DuckdbQueryTool(Tool):
     def __init__(self, *, config: DuckdbQueryToolConfig) -> None:
         self.config = config
         self._connection_factory: Optional[Any] = None
+        self._cache_store: Optional[Any] = None
+
+    def set_provider(self, cache_store: Any) -> None:
+        """Подключить реальный ``DuckDbCacheStore`` (production DI).
+
+        Через него запрос исполняется в общем DuckDB-кеше
+        (``gateway.vector.index.storage_table``), а не в дефолтном
+        ``:memory:``-fallback'е.
+        """
+        self._cache_store = cache_store
 
     def set_connection_factory(self, factory: Any) -> None:
         """Установить фабрику DuckDB-коннектов (для DI в тестах)."""
@@ -190,18 +200,34 @@ class DuckdbQueryTool(Tool):
                 f"{self.config.max_rows}",
             )
 
-        conn = self._open_duckdb_connection()
-        try:
-            rows, columns = self._run_with_timeout(
-                conn, sql, params, effective_max_rows
-            )
-        except Exception as exc:
-            return self._error("sql_error", str(exc))
-        finally:
+        cache_store = getattr(self, "_cache_store", None)
+        if cache_store is not None:
+            result = cache_store.execute_readonly(sql, params, effective_max_rows)
+            error = result.get("error")
+            if error:
+                return self._error("sql_error", error)
+            rows = result.get("rows") or []
+            columns = result.get("columns") or []
+        elif getattr(self, "_connection_factory", None) is not None:
+            conn = self._open_duckdb_connection()
             try:
-                conn.close()
-            except Exception:
-                pass
+                rows, columns = self._run_with_timeout(
+                    conn, sql, params, effective_max_rows
+                )
+            except Exception as exc:
+                return self._error("sql_error", str(exc))
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        else:
+            return self._error(
+                "missing_infrastructure",
+                "duckdb_query tool is not wired to a DuckDB cache_store; "
+                "configure gateway.vector.index.storage_table and ensure the "
+                "DuckDB cache is available",
+            )
 
         sanitized_rows = [
             [sanitize_value(v) for v in row] for row in rows
