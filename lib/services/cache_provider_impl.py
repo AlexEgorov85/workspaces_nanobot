@@ -700,6 +700,7 @@ class PostgresDuckDbProvider(CacheProvider):
         self._conn = None          # DuckDB read-only connection
         self._is_ready = False     # кэш открыт (файл существует и прочитан)
         self._index_cache: dict[str, tuple[Any, dict | None]] = {}
+        self._last_loaded_meta: dict | None = None  # meta последнего загруженного индекса (для STALE-detection)
         self._search_error: str | None = None  # последняя ошибка search_vector
 
     # -- config --------------------------------------------------------
@@ -1019,16 +1020,86 @@ class PostgresDuckDbProvider(CacheProvider):
 
             idx, meta = self._load_index_from_store(index_name)
             if idx is not None:
+                meta = self._check_index_signature(index_name, meta)
                 self._index_cache[index_name] = (idx, meta)
+                # Сохраняем в provider для downstream (vector_search_tool)
+                # — может прочитать ``_last_loaded_meta`` и показать warning.
+                self._last_loaded_meta = meta
                 return idx, meta
 
             idx, meta = self._load_vectors_from_db(table, source=index_name)
             if idx is not None:
                 self._save_index_to_store(index_name, idx, meta)
+                meta = self._check_index_signature(index_name, meta)
                 self._index_cache[index_name] = (idx, meta)
                 return idx, meta
 
         return self._load_index_from_files(index_dir, index_name)
+
+    def _check_index_signature(
+        self, index_name: str, meta: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Проверить signature индекса против текущего cfg. Помечает meta.
+
+        Возвращает ``meta`` (возможно с добавленными ``_signature_status``
+        и ``_signature_reason``). Не блокирует загрузку — STALE/INVALID
+        индекс всё равно загружается, но оператор видит предупреждение
+        в результатах поиска через ``vector_search_tool.execute()``.
+
+        Если ``meta is None`` (нет данных для проверки) — возвращает
+        как есть, ``_check_index_signature`` не падает.
+        """
+        if meta is None:
+            return meta if meta is not None else {}
+        try:
+            current_cfg = self._read_current_index_config(index_name)
+        except Exception:
+            return meta
+        if current_cfg is None:
+            return meta
+        status = verify_index_signature(meta, current_cfg)
+        if status == "CURRENT":
+            return meta
+        meta = dict(meta)
+        meta["_signature_status"] = status
+        if status == "STALE":
+            meta["_signature_reason"] = (
+                "index config changed (embedding model / dimension / chunk / "
+                "source cols); rebuild via tools/build_vectors.py"
+            )
+        elif status == "INVALID":
+            meta["_signature_reason"] = (
+                "index metadata has no signature or it's corrupt; "
+                "index may be from a legacy build"
+            )
+        return meta
+
+    def _read_current_index_config(
+        self, index_name: str,
+    ) -> dict[str, Any] | None:
+        """Прочитать конфиг индекса + embedding config для verify_index_signature.
+
+        Returns ``None`` если ``agent_vector_index_config`` не задан или
+        индекс не найден — в этом случае STALE detection пропускается
+        (нечего проверять).
+        """
+        try:
+            configs = read_vector_index_config({})
+        except Exception:
+            return None
+        cfg = configs.get(index_name)
+        if not cfg:
+            return None
+        emb_cfg = read_embedding_config()
+        return {
+            "src_table": cfg.get("table"),
+            "pk_column": cfg.get("pk"),
+            "content_cols": cfg.get("content_columns") or [],
+            "embedding_cols": cfg.get("embedding_columns") or [],
+            "track_column": cfg.get("track_column"),
+            "embedding_model": emb_cfg.get("model"),
+            "embedding_dimension": emb_cfg.get("dimension"),
+        }
 
     def preload_indexes(self, db_table: str | None = None) -> list[dict[str, Any]]:
         """Прогреть кеш индексов в память."""

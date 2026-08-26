@@ -238,6 +238,23 @@ class VectorSearchTool(Tool):
             "count": len(results),
             "truncated": False,
         }
+        # STALE/INVALID detection — поставщик (provider) помечает meta через
+        # ``_signature_status`` при загрузке индекса из store. Если статус
+        # не CURRENT — поиск работает, но клиент видит warning с причиной
+        # и рекомендацией пересобрать индекс.
+        sig_status = (raw_results.__class__.__name__ and None) or None
+        meta = getattr(self._provider, "_last_loaded_meta", None)
+        if isinstance(meta, dict):
+            sig_status = meta.get("_signature_status")
+            sig_reason = meta.get("_signature_reason")
+            if sig_status and sig_status != "CURRENT":
+                payload["index_warning"] = {
+                    "status": sig_status,
+                    "reason": sig_reason,
+                    "recommendation": (
+                        "rebuild index via tools/build_vectors.py"
+                    ),
+                }
         text = json.dumps(payload, ensure_ascii=False, default=str)
         text = truncate_middle(text, self.config.max_result_chars)
         return text

@@ -226,3 +226,128 @@ class TestIndexSignature:
         from lib.services.cache_provider_impl import verify_index_signature
 
         assert verify_index_signature(None, {}) == "CURRENT"
+
+
+class TestCheckIndexSignatureInProvider:
+    """``PostgresDuckDbProvider._check_index_signature`` — STALE-detection
+    на загрузке индекса. Помечает meta через ``_signature_status``.
+    """
+
+    def test_check_marks_stale_when_signature_mismatch(self):
+        from unittest.mock import patch
+
+        from lib.services.cache_provider_impl import (
+            PostgresDuckDbProvider,
+            compute_index_signature,
+        )
+
+        provider = PostgresDuckDbProvider()
+        stored_cfg = {"embedding_model": "mxbai", "embedding_dimension": 1024}
+        stored_sig = compute_index_signature(stored_cfg)
+        stored_meta = {"signature": stored_sig, "pk_value": 1}
+
+        current_cfg = {
+            "src_table": "oarb.audits",
+            "pk_column": "id",
+            "content_cols": ["title"],
+            "embedding_cols": [],
+            "track_column": "updated_at",
+            "embedding_model": "nomic",  # changed
+            "embedding_dimension": 768,  # changed
+        }
+        with patch.object(
+            provider, "_read_current_index_config", return_value=current_cfg,
+        ):
+            result = provider._check_index_signature("audits_index", stored_meta)
+
+        assert result["_signature_status"] == "STALE"
+        assert "embedding model" in result["_signature_reason"].lower()
+
+    def test_check_marks_current_when_signature_matches(self):
+        from unittest.mock import patch
+
+        from lib.services.cache_provider_impl import (
+            PostgresDuckDbProvider,
+            compute_index_signature,
+        )
+
+        provider = PostgresDuckDbProvider()
+        cfg = {
+            "src_table": "oarb.audits",
+            "pk_column": "id",
+            "content_cols": ["title"],
+            "embedding_cols": [],
+            "track_column": "updated_at",
+            "embedding_model": "mxbai",
+            "embedding_dimension": 1024,
+        }
+        sig = compute_index_signature(cfg)
+        stored_meta = {"signature": sig, "pk_value": 1}
+        with patch.object(
+            provider, "_read_current_index_config", return_value=cfg,
+        ):
+            result = provider._check_index_signature("audits_index", stored_meta)
+
+        assert "_signature_status" not in result
+        assert result == stored_meta  # unchanged
+
+    def test_check_marks_invalid_when_no_signature_in_meta(self):
+        from unittest.mock import patch
+
+        from lib.services.cache_provider_impl import PostgresDuckDbProvider
+
+        provider = PostgresDuckDbProvider()
+        stored_meta = {"pk_value": 1}  # no signature field
+        current_cfg = {"embedding_model": "mxbai"}
+        with patch.object(
+            provider, "_read_current_index_config", return_value=current_cfg,
+        ):
+            result = provider._check_index_signature("audits_index", stored_meta)
+
+        assert result["_signature_status"] == "INVALID"
+        assert "legacy" in result["_signature_reason"].lower() or \
+            "missing" in result["_signature_reason"].lower()
+
+    def test_check_returns_meta_unchanged_when_no_config_in_db(self):
+        """Если в ``agent_vector_index_config`` нет такого индекса —
+        STALE detection пропускается (нечего проверять).
+        """
+        from unittest.mock import patch
+
+        from lib.services.cache_provider_impl import PostgresDuckDbProvider
+
+        provider = PostgresDuckDbProvider()
+        stored_meta = {"signature": "a" * 64, "pk_value": 1}
+        with patch.object(
+            provider, "_read_current_index_config", return_value=None,
+        ):
+            result = provider._check_index_signature("nonexistent", stored_meta)
+
+        assert result == stored_meta
+        assert "_signature_status" not in result
+
+    def test_check_does_not_mutate_input_meta(self):
+        """Функция не должна мутировать входной dict."""
+        from unittest.mock import patch
+
+        from lib.services.cache_provider_impl import (
+            PostgresDuckDbProvider,
+            compute_index_signature,
+        )
+
+        provider = PostgresDuckDbProvider()
+        stored_cfg = {"embedding_model": "mxbai", "embedding_dimension": 1024}
+        stored_sig = compute_index_signature(stored_cfg)
+        stored_meta = {"signature": stored_sig, "pk_value": 1}
+        original = dict(stored_meta)
+
+        current_cfg = {
+            "embedding_model": "nomic",
+            "embedding_dimension": 768,
+        }
+        with patch.object(
+            provider, "_read_current_index_config", return_value=current_cfg,
+        ):
+            provider._check_index_signature("audits_index", stored_meta)
+
+        assert stored_meta == original
