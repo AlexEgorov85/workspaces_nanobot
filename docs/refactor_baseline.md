@@ -6,14 +6,15 @@
 
 ## pytest (на момент фиксации baseline)
 
-- collected: **1153** (на текущий момент — 1502 collected, см. CHANGELOG [Unreleased])
-- skipped: **14** (на текущий момент — 22, добавлены архитектурные и contract-тесты)
-- errors: **55** (все в `tests/test_postgres_channel.py` — требовали PostgreSQL; устранены автоuse-фикстурой `test_parallel_modes.py` + форс-реимпортом канала под фейковым `utils.db` в `tests/test_postgres_channel.py`)
-- warnings: **1**
+- collected: **1153** (на текущий момент — **1816 collected / 1802 passed, 9 skipped**, прогон 2026-08-26)
+- skipped: **14** (на текущий момент — **9**, добавлены архитектурные и contract-тесты)
+- errors: **55** (на текущий момент — **0**; устранены автоuse-фикстурой `test_parallel_modes.py` + форс-реимпортом канала под фейковым `utils.db` в `tests/test_postgres_channel.py`)
+- warnings: **1** (без изменений)
 
 ## Примечания
 
 - baseline записан до старта изменений по плану `docs/skill-tool-architecture.md`.
 - После каждого коммита ветки `refactor/skills-tools-cleanup` фиксировались
   промежуточные baseline в `docs/refactor_baseline_after.md` (на момент слияния
-  в `master` итоговое состояние: **1480 passed, 22 skipped**).
+  в `master` (HEAD `bb844cf`) итоговое состояние: **1802 passed, 9 skipped**,
+  прогон 2026-08-26).

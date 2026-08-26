@@ -2,7 +2,7 @@
 
 Подробная схема таблиц `oarb.*` (см. `sql/audit_analyzer/create_*.sql`).
 Загружается по необходимости, когда агенту нужны конкретные колонки
-(progressive disclosure — TARGET_ARCHITECTURE.md §10).
+(progressive disclosure — docs/TARGET_ARCHITECTURE.md §10).
 
 ## `oarb.audits` — аудиторские проверки
 

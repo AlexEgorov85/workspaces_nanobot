@@ -1,7 +1,7 @@
 # Skill / Tool inventory
 
 Зафиксированное состояние после рефакторинга `refactor/skills-tools-cleanup`
-(коммиты `c593d509`..`7d8f6b0`, `master` @ `1cf49c2`).
+(коммиты `c593d509`..`7d8f6b0`; слито в `master` @ `bb844cf`).
 
 Baseline до старта рефакторинга — в [docs/refactor_baseline.md](refactor_baseline.md).
 
@@ -28,6 +28,23 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 | `tests/e2e_test.py` (skill) | `workspace/skills/audit_analyzer/tests/e2e_test.py` | standalone (не pytest) |
 | `scripts/generated/` | `workspace/skills/audit_analyzer/scripts/generated/` | одноразовый dump-скрипт |
 | `providers.py` (навыка, старая версия) | `workspace/skills/audit_analyzer/providers.py` (наброски без регистрации) | переписан в этом же цикле; регистрация через `ApplicationContext._auto_register_skills()` |
+
+## Последующие изменения (после слияния в `master`)
+
+После первоначального рефакторинга на ветке `master` (HEAD `bb844cf`) закреплены
+дополнительные границы конфигурации:
+
+- **Конфигурационная граница `skills.*`**: секции `embedding` и `cache` вынесены
+  из `skills.<name>` на уровень общей runtime-инфраструктуры `gateway.vector.*`.
+  `SkillSettings` теперь имеет `model_config = ConfigDict(extra="forbid")`
+  (fail-fast на опечатках и legacy-ключах). Регистрация embedding — через
+  `lib.core.skill_registration.register_embedding_config` (вызывается в
+  `lib.core.application_context`). Источник правды для эмбеддингов —
+  `gateway.vector.embedding` (см. `lib/core/project_settings.py::EmbeddingSettings`).
+- **`tools/build_vectors.py`** стал generic: убран hardcoded `audit_analyzer`,
+  источник индексов — `public.agent_vector_index_config` (runtime-БД). Коммит `bb844cf`.
+- **Embedding `auth_token`** (bearer) поддерживается в
+  `gateway.vector.embedding.auth_token` (см. `EmbeddingSettings`).
 
 ## Целевая зависимость (после рефакторинга)
 

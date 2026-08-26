@@ -44,7 +44,7 @@
 - **`Skill audit_analyzer/references/`** — progressive disclosure:
   `schema.md`, `vector_indexes.md`, `sql_guidance.md`. Позволяют
   агенту загружать детальные знания по необходимости, не раздувая
-  `SKILL.md` (см. TARGET_ARCHITECTURE.md §10).
+  `SKILL.md` (см. docs/TARGET_ARCHITECTURE.md §10).
 
 - **AST-политика SQL Security Guard (`lib/utils/sql_safety.py`)** —
   read-only SQL-валидация на sqlglot (вместо строковых эвристик):
@@ -115,7 +115,7 @@
 - **`workspace/tools/audit_analyzer_tool.py`** — три tool'а
   (`audit_run_predefined_script`, `audit_search_vector`,
   `audit_generate_sql`) удалены. Они нарушали §3, §22.1, §22.2
-  TARGET_ARCHITECTURE.md (импортировали skill через `importlib`).
+  docs/TARGET_ARCHITECTURE.md (импортировали skill через `importlib`).
   Функциональность перенесена в skill workflow + generic tools.
 - **`tests/test_tools_audit_analyzer.py`** — 1326 строк тестов
   удалённого file. Заменён на targeted-тесты (`test_duckdb_query_tool.py`,
@@ -138,7 +138,7 @@
 - **`workspace/skills/audit_analyzer/providers.py`** — runtime-context
   providers, которые были описаны в `SKILL.md`, но никем не
   регистрировались. Регистрация через `ApplicationContext.start()`
-  нарушила бы TARGET_ARCHITECTURE.md §4 (lib не должен зависеть от
+  нарушила бы docs/TARGET_ARCHITECTURE.md §4 (lib не должен зависеть от
   skill).
 - **`lib/services/preload_service.preload_audit_cache`**,
   **`background_audit_cache_refresh`**, **`start_audit_cache_tasks`** /
