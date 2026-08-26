@@ -150,10 +150,28 @@ class TestMultiSkill:
 
 
 class TestVectorStoreTable:
-    def test_infra_constant(self) -> None:
+    def test_default_from_settings(self) -> None:
+        """Без явного signature_table — дефолт runtime-инфраструктуры."""
         from lib.core import skill_config
 
-        assert skill_config.get_vector_store_table() == "public.agent_vector_index_store"
+        assert (
+            skill_config.get_vector_store_table()
+            == "public.agent_vector_index_store"
+        )
+
+    def test_overridden_via_settings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Если в gateway.vector.index.signature_table задано имя — оно побеждает."""
+        import config as _config
+        from lib.core import skill_config
+
+        monkeypatch.setattr(
+            _config, "SETTINGS",
+            {"gateway": {"vector": {"index": {"signature_table": "public.custom_index_store"}}}},
+            raising=False,
+        )
+        assert (
+            skill_config.get_vector_store_table() == "public.custom_index_store"
+        )
 
 
 class TestPredefinedScripts:

@@ -12,7 +12,7 @@ if _project_root not in sys.path:
 
 from lib.services.duckdb_cache_store import DuckDbCacheStore
 from lib.services.table_registry import SkillRegistration, VectorResource, table_registry
-from lib.services.cache_provider_impl import VECTOR_INDEX_STORE_TABLE
+from lib.services.cache_provider_impl import read_vector_store_table
 
 _DIM = 1024
 
@@ -653,7 +653,7 @@ class TestIndexIntegrity:
         # заведомо несовпадающая 64-символьная hex-сигнатура
         meta_rows = [{"metadata": {"signature": "0" * 64}}]
 
-        st = DuckDbCacheStore(cache_path="", vector_store_table=VECTOR_INDEX_STORE_TABLE)
+        st = DuckDbCacheStore(cache_path="", vector_store_table=read_vector_store_table())
         _fake_cfg_module(monkeypatch, cfg, emb, meta_rows)
         with pytest.raises(IndexIntegrityError) as exc:
             st._check_index_integrity("audits_index")
@@ -681,7 +681,7 @@ class TestIndexIntegrity:
         sig = compute_index_signature(current_cfg)
         meta_rows = [{"metadata": {"signature": sig}}]
 
-        st = DuckDbCacheStore(cache_path="", vector_store_table=VECTOR_INDEX_STORE_TABLE)
+        st = DuckDbCacheStore(cache_path="", vector_store_table=read_vector_store_table())
         _fake_cfg_module(monkeypatch, cfg, emb, meta_rows)
         # CURRENT → не бросает
         st._check_index_integrity("audits_index")
@@ -696,6 +696,6 @@ class TestIndexIntegrity:
         # legacy-индекс без signature в metadata → проверка пропускается
         meta_rows = [{"metadata": {}}]
 
-        st = DuckDbCacheStore(cache_path="", vector_store_table=VECTOR_INDEX_STORE_TABLE)
+        st = DuckDbCacheStore(cache_path="", vector_store_table=read_vector_store_table())
         _fake_cfg_module(monkeypatch, cfg, emb, meta_rows)
         st._check_index_integrity("audits_index")

@@ -641,11 +641,12 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     full_resync_every = int(sync_cfg.get("full_resync_every", 0) or 0)
 
     # Имя PG-таблицы с сериализованными FAISS-индексами + metadata.signature.
-    # Канонический константный путь (см. cache_provider_impl.VECTOR_INDEX_STORE_TABLE).
+    # Берётся из ``gateway.vector.index.signature_table`` (см.
+    # ``VectorIndexSettings`` и ``cache_provider_impl.read_vector_store_table``).
     # ``gateway.vector.index.storage_table`` — это сырые эмбеддинги
     # (``oarb.audit_vectors``), у которых нет колонки ``metadata``; использовать
     # её для проверки signature нельзя.
-    from lib.services.cache_provider_impl import VECTOR_INDEX_STORE_TABLE
+    from lib.services.cache_provider_impl import read_vector_store_table
 
     sync_tables = list(dict.fromkeys(all_table_names + vector_names))
 
@@ -655,7 +656,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         schema=schemas[0] if schemas else "main",
         tables=all_table_names or None,
         vector_db_table=vector_names[0] if vector_names else "",
-        vector_store_table=VECTOR_INDEX_STORE_TABLE,
+        vector_store_table=read_vector_store_table(),
         embedding_base_url=embedding_base_url,
         embedding_model=embedding_model,
         embedding_dimension=embedding_dimension,

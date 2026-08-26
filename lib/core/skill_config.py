@@ -190,8 +190,15 @@ def get_vector_db_table(skill_name: str) -> str:
 
 
 def get_vector_store_table() -> str:
-    """Имя таблицы serialized FAISS-индексов (инфраструктурная константа)."""
-    return "public.agent_vector_index_store"
+    """Имя таблицы serialized FAISS-индексов (из runtime-настроек).
+
+    Источник — ``gateway.vector.index.signature_table`` (см.
+    ``VectorIndexSettings``). Дефолт — ``public.agent_vector_index_store``
+    (DDL в ``sql/vectors/create_vector_index_store.sql``).
+    """
+    from lib.services.cache_provider_impl import read_vector_store_table
+
+    return read_vector_store_table()
 
 
 def build_cache_provider(skill_name: str, skill_root: Path | str) -> Any:
