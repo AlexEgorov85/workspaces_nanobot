@@ -14,7 +14,7 @@ FAISS-индексы, доступные навыку `audit_analyzer`. Загр
 | **embed-колонка** | `title` (заголовок проверки) |
 | **Когда использовать** | поиск проверок по смыслу заголовка: «проверки по пожарной безопасности», «бухгалтерские ревизии» |
 | **score-интерпретация** | `0.6+` — высокая схожесть, `0.4–0.6` — умеренная, `<0.4` — низкая |
-| **default для tool** | да (если `index_name` не указан в вызове) |
+| **default для tool** | да (используется по умолчанию в CLI при `--mode vector` без `--index-name`) |
 
 ## `violations_index`
 
@@ -38,8 +38,9 @@ FAISS-индексы, доступные навыку `audit_analyzer`. Загр
 
 ## Конвенции
 
-- `index_name` — строковый идентификатор. Не путать с PG-таблицей
-  `public.agent_vector_index_store` (метаданные индексов живут там).
+- `index_name` — строковый идентификатор. Метаданные индексов (источник,
+  embed-колонки, signature) живут в `public.agent_vector_index_config`.
+  Сериализованный FAISS BYTEA — в `public.agent_vector_index_store`.
 - Все три индекса зарегистрированы в `public.agent_vector_index_config` через
   `sql/audit_analyzer/seed_default_indexes.sql`.
 - Параметр `top_k` tool'а `vector_search` ограничен `max_top_k` из конфига

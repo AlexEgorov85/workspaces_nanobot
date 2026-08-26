@@ -13,7 +13,7 @@
 | `audit_type` | varchar(100) | тип проверки |
 | `planned_date` | date | плановая дата |
 | `actual_date` | date | фактическая дата |
-| `status` | varchar(50) | статус (`planned`/`in_progress`/`completed`) |
+| `status` | varchar(50) | статус проверки (человеко-читаемые ярлыки: «Запланирована», «В работе», «Завершена» и т.п.) |
 | `auditee_entity` | varchar(500) | проверяемая организация |
 | `created_at` | timestamptz | метка создания (sync) |
 | `updated_at` | timestamptz | метка обновления (sync) |
@@ -65,8 +65,8 @@
 | `violation_code` | varchar(100) | код нарушения |
 | `description` | text | описание нарушения |
 | `recommendation` | text | рекомендация по устранению |
-| `severity` | varchar(20) | критичность (`low`/`medium`/`high`/`critical`) |
-| `status` | varchar(50) | статус (`open`/`in_progress`/`closed`) |
+| `severity` | varchar(20) | критичность (человеко-читаемые ярлыки: низкая / средняя / высокая / критическая) |
+| `status` | varchar(50) | статус (человеко-читаемые ярлыки: открыто / в работе / закрыто) |
 | `responsible` | varchar(200) | ответственный |
 | `deadline` | date | срок устранения |
 | `created_at` | timestamptz | метка создания (sync) |
@@ -89,5 +89,7 @@ LEFT JOIN violations v ON v.audit_id = a.id
 ## Домен-соглашения
 
 - Все таблицы имеют `updated_at` — синхронизация идёт инкрементально по этой колонке.
-- Идентификаторы — `BIGSERIAL` (но в skill описаны как `integer` для краткости).
+- Идентификаторы — `BIGSERIAL` (в skill описаны как `integer` для краткости).
 - Текстовые поля могут содержать `NULL`.
+- Статусы и severity — свободный текст (`varchar`), а не PG-enum. Конкретный набор ярлыков определяется данными и может расширяться без миграции схемы.
+- Все таблицы живут в схеме `oarb` и доступны через DuckDB-кэш как `oarb.<table>` (полное имя обязательно в SELECT, см. `sql_guidance.md`).
