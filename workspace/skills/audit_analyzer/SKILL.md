@@ -10,6 +10,20 @@ metadata: {"nanobot":{"emoji":"📊","always":true}}
 
 Работает в **трёх режимах**. Выбирай режим под задачу, не комбинируй.
 
+## Decision procedure: задача → capability
+
+| Задача | Режим | Инструмент |
+|---|---|---|
+| Аггрегация / фильтр по полям (год, месяц, тип, статус) | Predefined / SQL | `scripts/cli.py --mode predefined`, `duckdb_query` |
+| Свободный вопрос про данные (SELECT) | SQL | `duckdb_query` tool |
+| Семантический поиск по смыслу (не точному слову) | Vector | `vector_search` tool |
+| Известный отчёт из реестра | Predefined | `scripts/cli.py --mode predefined` |
+
+**Правило выбора:**
+- Если задача ложится на готовый отчёт из реестра (`public.agent_predefined_scripts`) → `predefined`.
+- Если нужна группировка/фильтр по полям — это аггрегация: пробуй `predefined`, иначе `sql` через `duckdb_query`.
+- Если запрос про «смысл», а не точные слова (например, «пожарная безопасность», «финансовые нарушения») → `vector_search`.
+
 ## Режимы работы
 
 ### 1. Predefined — готовые отчёты из реестра
