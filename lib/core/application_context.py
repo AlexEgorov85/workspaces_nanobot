@@ -266,6 +266,7 @@ class ApplicationContext:
             recent_files_hook=recent_files_hook,
             db_logging_service=ctx.db_logging_service,
             session_manager=ctx.session_manager,
+            cache_store=ctx.cache_store,
         )
         ctx.runtime_patch_report = patch_report
         logger.info(

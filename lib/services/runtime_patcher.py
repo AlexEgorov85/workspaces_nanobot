@@ -385,6 +385,7 @@ class RuntimePatcher:
         db_logging_service: Any = None,
         session_manager: Any = None,
         recent_files_hook: Any = None,
+        cache_store: Any = None,
     ) -> PatchReport:
         """Применить все патчи и вернуть отчёт.
 
@@ -402,6 +403,9 @@ class RuntimePatcher:
                 ``None`` — патч пропускается).
             session_manager: ``SessionManager``/``PGSessionManager`` — для
                 персиста истории подагентов (может быть ``None``).
+            cache_store: ``CacheProvider`` (для DI в generic tools через
+                ``patch_project_tools``; ``None`` — патч пропускает DI,
+                tool'ы остаются со своими fallback'ами).
 
         Returns:
             ``PatchReport`` со списками ``applied`` / ``skipped`` (с причиной).
@@ -420,7 +424,7 @@ class RuntimePatcher:
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager))
         self._record(report, "project_tools", self.patch_project_tools(
-            agent, workspace_dir, settings=settings))
+            agent, workspace_dir, settings=settings, cache_store=cache_store))
         self._record(report, "compact_tracking", self.patch_compaction_tracking(
             agent, settings))
         self._record(report, "compact_command", self.patch_compact_command(
@@ -1383,6 +1387,7 @@ class RuntimePatcher:
     def patch_project_tools(
         self, agent: Any, workspace_dir: Any,
         *, settings: Any = None,
+        cache_store: Any = None,
     ) -> tuple[bool, str]:
         """Зарегистрировать кастомные tool'ы из ``workspace/tools/*.py``.
 
@@ -1524,6 +1529,8 @@ class RuntimePatcher:
             ctx._agent_ref = agent
             if settings is not None:
                 ctx._settings_ref = settings
+            if cache_store is not None:
+                ctx._cache_store_ref = cache_store
 
             registered: list[str] = []
             skipped_disabled: list[str] = []
@@ -1538,6 +1545,32 @@ class RuntimePatcher:
                     if agent.tools.get(tool.name) is not None:
                         skipped_duplicate.append(tool.name)
                         continue
+                    # DI: проброс инфраструктуры в tool'ы, которые её ожидают.
+                    # ``VectorSearchTool`` / ``DuckdbQueryTool`` — generic
+                    # tool'ы с явными ``set_provider``/``set_connection_factory``
+                    # точками внедрения; делаем это здесь, чтобы они работали
+                    # с реальной инфраструктурой (``cache_store``) в production,
+                    # а не с дефолтным fallback'ом (``duckdb.connect(":memory:")``
+                    # или ``no CacheProvider injected``).
+                    if cache_store is not None:
+                        if hasattr(tool, "set_provider"):
+                            try:
+                                tool.set_provider(cache_store)
+                            except Exception:
+                                logger.exception(
+                                    "set_provider failed for {}", cls.__name__,
+                                )
+                        elif hasattr(tool, "set_connection_factory"):
+                            try:
+                                tool.set_connection_factory(
+                                    getattr(cache_store, "get_duckdb_connection", None)
+                                    or getattr(cache_store, "connect", None)
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "set_connection_factory failed for {}",
+                                    cls.__name__,
+                                )
                     agent.tools.register(tool)
                     registered.append(tool.name)
                 except Exception:
