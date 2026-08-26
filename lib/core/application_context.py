@@ -50,6 +50,8 @@ class ApplicationContext:
     # Помощники
     config_service: Any = None
     runtime_patcher: Any = None
+    runtime_health: Any = None
+    runtime_readiness: Any = None
     transcription_service: Any = None
     session_storage_service: Any = None
     subprocess_manager: Any = None
@@ -246,6 +248,20 @@ class ApplicationContext:
         # нет (сканер успех молчит).
         _log_connected_hooks(ctx)
 
+        # 6b. RuntimeHealth / RuntimeReadiness — operational status.
+        # Health: пульс процесса (liveness). Readiness: PG/duckdb/vector.
+        # Регистрируется ПОСЛЕ хуков и bus_factory, потому что readiness
+        # проверяет состояние уже созданных сервисов.
+        from lib.services.runtime_health import (
+            RuntimeHealth,
+            RuntimeReadiness,
+            ComponentStatus,
+        )
+
+        ctx.runtime_health = RuntimeHealth()
+        ctx.runtime_readiness = RuntimeReadiness()
+        _register_readiness_checks(ctx)
+
         # 7. RuntimePatcher
         from lib.services.runtime_patcher import RuntimePatcher
 
@@ -284,6 +300,7 @@ class ApplicationContext:
         ctx.transcription_service = _make_transcription(ctx.config)
         ctx.preload_service = _make_preload(ctx.settings)
 
+        ctx.runtime_health.mark_started()
         return ctx
 
     # ------------------------------------------------------------------
@@ -297,6 +314,8 @@ class ApplicationContext:
         from lib.lifecycle.shutdown_coordinator import ShutdownCoordinator
 
         self._shutdown = ShutdownCoordinator()
+        if self.runtime_health is not None:
+            self.runtime_health.mark_started()
 
         # Переопределения системных шаблонов nanobot из workspace/overrides/
         # (например, русская инструкция Consolidator). Безопасно-идемпотентно;
@@ -326,6 +345,22 @@ class ApplicationContext:
 
         self._started = True
 
+        # Финальный readiness snapshot для startup-лога.
+        if self.runtime_readiness is not None:
+            report = self.runtime_readiness.check()
+            logger.info(
+                "Readiness: %s | components=%s",
+                report.status,
+                ", ".join(
+                    f"{c.name}={'UP' if c.status == 'UP' else 'DOWN'}"
+                    for c in report.components
+                ),
+            )
+            if report.status == "NOT_READY":
+                logger.warning(
+                    "Required dependencies are down; gateway starts in NOT_READY state"
+                )
+
     def stop(self) -> None:
         """Корректно остановить все фоновые сервисы."""
         if not self._started:
@@ -334,6 +369,8 @@ class ApplicationContext:
             self._shutdown.shutdown_all()
         # После остановки сервисов закрываем общий пул соединений.
         _stop_db_pool()
+        if self.runtime_health is not None:
+            self.runtime_health.mark_stopped()
         self._started = False
 
 
@@ -357,11 +394,87 @@ def _log_connected_hooks(ctx: ApplicationContext) -> None:
     try:
         from rich.console import Console
 
-        Console().print(f"[green]✓[/green] Hooks connected: {label}")
+        Console().print(f"[green]\u2713[/green] Hooks connected: {label}")
     except Exception:
         # Старые Windows-консоли (cp1251) не умеют ✓ (U+2713) — выводим
         # тот же список обычным print, чтобы информация не пропадала.
         print(f"Hooks connected: {label}")
+
+
+def _register_readiness_checks(ctx: ApplicationContext) -> None:
+    """Зарегистрировать проверки зависимостей для RuntimeReadiness.
+
+    Профили:
+      * ``postgres`` — required. Если БД доступна — UP. Если storage
+        fallback на file-mode — DOWN (НЕ NOT_READY, потому что система
+        работает, но в degraded mode).
+      * ``duckdb_cache`` — required. Если cache_store готов — UP.
+      * ``vector_search`` — optional. Если cache_store не имеет
+        FAISS-индексов — DOWN, но это не блокирует READY.
+
+    Все проверки идемпотентны и быстрые (< 1 сек каждая).
+    """
+    from lib.services.runtime_health import (
+        ComponentStatus,
+        compute_overall_status,
+    )
+
+    def check_postgres() -> ComponentStatus | None:
+        sm = getattr(ctx, "session_manager", None)
+        if sm is None:
+            return ComponentStatus(
+                name="postgres", required=True, status="DOWN",
+                detail="no session_manager",
+            )
+        # Проверяем тип storage. PGSessionManager — есть PG; file fallback — DOWN.
+        cls = type(sm).__name__
+        if "PG" in cls or "Postgres" in cls:
+            return None  # UP без detail
+        return ComponentStatus(
+            name="postgres", required=True, status="DOWN",
+            detail=f"storage degraded to {cls}",
+        )
+
+    def check_duckdb_cache() -> ComponentStatus | None:
+        cs = getattr(ctx, "cache_store", None)
+        if cs is None:
+            return ComponentStatus(
+                name="duckdb_cache", required=False, status="DOWN",
+                detail="no cache_store (sync disabled or no resources)",
+            )
+        is_ready = getattr(cs, "is_ready", None)
+        if callable(is_ready):
+            try:
+                if is_ready():
+                    return None
+                return ComponentStatus(
+                    name="duckdb_cache", required=False, status="DOWN",
+                    detail="cache_store.is_ready()=False",
+                )
+            except Exception as exc:
+                return ComponentStatus(
+                    name="duckdb_cache", required=False, status="DOWN",
+                    detail=f"is_ready failed: {type(exc).__name__}: {exc}",
+                )
+        return None  # нет is_ready — считаем UP
+
+    def check_vector_search() -> ComponentStatus | None:
+        cs = getattr(ctx, "cache_store", None)
+        if cs is None:
+            return ComponentStatus(
+                name="vector_search", required=False, status="DOWN",
+                detail="no cache_store; vector_search tool won't work",
+            )
+        if not hasattr(cs, "search_vector"):
+            return ComponentStatus(
+                name="vector_search", required=False, status="DOWN",
+                detail="cache_store has no search_vector method",
+            )
+        return None
+
+    ctx.runtime_readiness.register("postgres", check_postgres, required=True)
+    ctx.runtime_readiness.register("duckdb_cache", check_duckdb_cache, required=False)
+    ctx.runtime_readiness.register("vector_search", check_vector_search, required=False)
 
 
 def _make_config_service(script_dir: Path, workspace_dir: Path) -> Any:
