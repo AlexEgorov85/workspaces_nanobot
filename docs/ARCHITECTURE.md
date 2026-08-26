@@ -29,12 +29,12 @@
 ```mermaid
 flowchart LR
     subgraph PG["PostgreSQL"]
-        TBL["oarb.audits / violations / reports"]
-        VEC["oarb.audit_vectors"]
-        VCFG["agent_vector_index_config / store"]
+        TBL["Доменные таблицы<br/>(имена в project.json)"]
+        VEC["Таблица эмбеддингов"]
+        VCFG["Конфиг / хранилище векторов"]
     end
     subgraph SVC["lib/services (универсальный слой)"]
-        SYNC["PgDuckDbSyncService — поллинг"]
+        SYNC["PgDuckDbSyncService - polling"]
         STORE["DuckDbCacheStore + FAISS"]
         PROV["PostgresDuckDbProvider"]
         EMB["get_embedding (Ollama)"]
@@ -45,11 +45,11 @@ flowchart LR
     TBL --> SYNC
     VEC --> SYNC
     VCFG --> SYNC
-    SYNC -->|batch upsert| STORE
-    STORE -->|publish()| DUCK
+    SYNC -->|upsert| STORE
+    STORE -->|publish| DUCK
     PROV --> STORE
     PROV --> EMB
-    PROV --> PG
+    PROV --> TBL
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class SYNC,STORE,PROV,EMB core

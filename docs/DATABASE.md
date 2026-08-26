@@ -212,7 +212,7 @@ DSN подключается только через `channels.postgres.dsn` в 
 flowchart LR
     BUILD["_build_audit_services()"] --> SYNC["sync_service"]
     SYNC -->|upsert / replace / schema| STORE["DuckDbCacheStore"]
-    SYNC -->|publish()| DUCK["cache.duckdb"]
+    SYNC -->|publish| DUCK["cache.duckdb"]
     SYNC -->|preload| FAISS["FAISS в память"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px

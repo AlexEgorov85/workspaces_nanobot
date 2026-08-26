@@ -21,10 +21,10 @@
 
 ```mermaid
 flowchart LR
-    CFG["1. agent_vector_index_config"] --> SRC["2. Источники: oarb.audits / violations"]
+    CFG["1. Конфиг векторных индексов"] --> SRC["2. Источники (таблицы из project.json)"]
     SRC --> BL["3. build_vectors.py<br/>чанкование + эмбеддинг"]
-    BL --> ST["4. audit_vectors + FAISS store"]
-    ST --> SE["5. search_vector()<br/>поиск в памяти"]
+    BL --> ST["4. Эмбеддинги + FAISS-хранилище"]
+    ST --> SE["5. search_vector<br/>поиск в памяти"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class CFG,SRC,BL core
