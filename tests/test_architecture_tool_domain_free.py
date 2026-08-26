@@ -84,7 +84,7 @@ class TestToolCodeNoDomainIdentifiers:
         tree = ast.parse(source)
         offenders = _violates_forbidden(_collect_identifiers(tree))
         assert not offenders, (
-            f"{tool_path} contains forbidden domain identifiers: {offiders}. "
+            f"{tool_path} contains forbidden domain identifiers: {offenders}. "
             "Tool code must be domain-free (TARGET §22.3)."
         )
 
