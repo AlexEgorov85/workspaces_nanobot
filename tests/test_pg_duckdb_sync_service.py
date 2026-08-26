@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.conftest import TEST_TABLE, TEST_VECTOR_TABLE
 import re
 import sys
 import time
@@ -132,9 +133,9 @@ class TestLifecycle:
         assert st["connected"] is False
 
     def test_track_column_selection(self):
-        s = PgDuckDbSyncService(dsn="postgresql://u@h/db", vector_table="oarb.audit_vectors")
+        s = PgDuckDbSyncService(dsn="postgresql://u@h/db", vector_table=TEST_VECTOR_TABLE)
         assert s._track_column_for("audits") == "updated_at"
-        assert s._track_column_for("oarb.audit_vectors") == "id"
+        assert s._track_column_for(TEST_VECTOR_TABLE) == "id"
 
     def test_track_column_from_registry_resources(self):
         """Per-table tracking_column читается из ресурсов skill'а."""
@@ -148,16 +149,16 @@ class TestLifecycle:
         table_registry.register(SkillRegistration(
             name="audit_analyzer",
             resources=(
-                TableResource(name="oarb.audits"),
-                TableResource(name="oarb.report_items", tracking_column="modified_at"),
-                VectorResource(name="oarb.audit_vectors"),
+                TableResource(name=TEST_TABLE),
+                TableResource(name="test.report_items", tracking_column="modified_at"),
+                VectorResource(name=TEST_VECTOR_TABLE),
             ),
         ))
         try:
-            s = PgDuckDbSyncService(dsn="postgresql://u@h/db", vector_table="oarb.audit_vectors")
-            assert s._track_column_for("oarb.report_items") == "modified_at"
-            assert s._track_column_for("oarb.audits") == "updated_at"
-            assert s._track_column_for("oarb.audit_vectors") == "id"
+            s = PgDuckDbSyncService(dsn="postgresql://u@h/db", vector_table=TEST_VECTOR_TABLE)
+            assert s._track_column_for("test.report_items") == "modified_at"
+            assert s._track_column_for(TEST_TABLE) == "updated_at"
+            assert s._track_column_for(TEST_VECTOR_TABLE) == "id"
             assert s._track_column_for("oarb.unknown") == "updated_at"
         finally:
             table_registry.unregister("audit_analyzer")
@@ -173,11 +174,11 @@ class TestLifecycle:
         table_registry.register(SkillRegistration(
             name="audit_analyzer",
             enabled=False,
-            resources=(TableResource(name="oarb.report_items", tracking_column="modified_at"),),
+            resources=(TableResource(name="test.report_items", tracking_column="modified_at"),),
         ))
         try:
             s = PgDuckDbSyncService(dsn="postgresql://u@h/db")
-            assert s._track_column_for("oarb.report_items") == "updated_at"
+            assert s._track_column_for("test.report_items") == "updated_at"
         finally:
             table_registry.unregister("audit_analyzer")
 

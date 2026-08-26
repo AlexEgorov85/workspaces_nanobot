@@ -67,7 +67,7 @@ class TestGetPredefinedScriptsTableRegistryPath:
         table_registry.register(SkillRegistration(
             name="audit_analyzer",
             resources=(
-                TableResource(name="oarb.audits"),
+                TableResource(name="test.audits"),
                 TableResource(name="public.scripts_registry", label="scripts_registry"),
             ),
         ))
@@ -98,7 +98,7 @@ class TestGetPredefinedScriptsTableFallback:
     def test_empty_registry_no_flat_key_raises(self, skill_config) -> None:
         """Реестр пуст и плоского ключа ``predefined_scripts_table`` нет
         (удалён в Phase 7) → ValueError."""
-        skill_config._CFG = {"tables": [{"name": "oarb.audits"}]}
+        skill_config._CFG = {"tables": [{"name": "test.audits"}]}
         with pytest.raises(ValueError, match="scripts_registry"):
             skill_config.get_predefined_scripts_table()
 

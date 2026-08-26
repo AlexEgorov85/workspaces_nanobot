@@ -1,6 +1,7 @@
 """Тесты для ``lib/core/infra_registration.py``."""
 
 from __future__ import annotations
+from tests.conftest import TEST_VECTOR_TABLE
 
 from unittest.mock import patch
 
@@ -23,16 +24,16 @@ class TestRegisterVectorStorage:
     def test_registers_storage_table(self) -> None:
         from lib.core.infra_registration import register_vector_storage
 
-        settings = {"gateway": {"vector": {"index": {"storage_table": "oarb.audit_vectors"}}}}
+        settings = {"gateway": {"vector": {"index": {"storage_table": TEST_VECTOR_TABLE}}}}
         with patch("config.SETTINGS", settings):
             assert register_vector_storage() is True
-        assert "oarb.audit_vectors" in table_registry.vector_names()
+        assert TEST_VECTOR_TABLE in table_registry.vector_names()
         assert table_registry.get_infra("vector.storage") != ()
 
     def test_idempotent(self) -> None:
         from lib.core.infra_registration import register_vector_storage
 
-        settings = {"gateway": {"vector": {"index": {"storage_table": "oarb.audit_vectors"}}}}
+        settings = {"gateway": {"vector": {"index": {"storage_table": TEST_VECTOR_TABLE}}}}
         with patch("config.SETTINGS", settings):
             assert register_vector_storage() is True
             assert register_vector_storage() is False
@@ -62,7 +63,7 @@ class TestRegisterVectorStorage:
     def test_tracking_column_is_id(self) -> None:
         from lib.core.infra_registration import register_vector_storage
 
-        settings = {"gateway": {"vector": {"index": {"storage_table": "oarb.audit_vectors"}}}}
+        settings = {"gateway": {"vector": {"index": {"storage_table": TEST_VECTOR_TABLE}}}}
         with patch("config.SETTINGS", settings):
             register_vector_storage()
         resources = table_registry.get_infra("vector.storage")
@@ -78,7 +79,7 @@ class TestRegisterVectorStorage:
         """
         from lib.core.infra_registration import register_vector_storage
 
-        settings = {"gateway": {"vector_index": {"storage_table": "oarb.audit_vectors"}}}
+        settings = {"gateway": {"vector_index": {"storage_table": TEST_VECTOR_TABLE}}}
         with patch("config.SETTINGS", settings):
             assert register_vector_storage() is False
         assert table_registry.vector_names() == ()

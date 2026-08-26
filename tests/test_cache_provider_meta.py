@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import pytest
 
+from tests.conftest import TEST_TABLE as _TEST_TABLE
+
 from lib.services.cache_provider_impl import (
     _META_SCHEMA,
     _META_TABLE,
@@ -133,7 +135,7 @@ class TestIndexSignature:
         from lib.services.cache_provider_impl import compute_index_signature
 
         cfg = {
-            "src_table": "oarb.audits",
+            "src_table": _TEST_TABLE,
             "pk_column": "id",
             "content_cols": ["title", "description"],
             "embedding_cols": [{"col": "title", "text_chunk_size": 500}],
@@ -247,7 +249,7 @@ class TestCheckIndexSignatureInProvider:
         stored_meta = {"signature": stored_sig, "pk_value": 1}
 
         current_cfg = {
-            "src_table": "oarb.audits",
+            "src_table": _TEST_TABLE,
             "pk_column": "id",
             "content_cols": ["title"],
             "embedding_cols": [],
@@ -273,7 +275,7 @@ class TestCheckIndexSignatureInProvider:
 
         provider = PostgresDuckDbProvider()
         cfg = {
-            "src_table": "oarb.audits",
+            "src_table": _TEST_TABLE,
             "pk_column": "id",
             "content_cols": ["title"],
             "embedding_cols": [],

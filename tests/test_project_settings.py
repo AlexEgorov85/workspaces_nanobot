@@ -1,6 +1,7 @@
 """Unit-тесты ``lib/core/project_settings.py``."""
 
 from __future__ import annotations
+from tests.conftest import TEST_TABLE, TEST_TABLE_2, TEST_VECTOR_TABLE
 
 import pytest
 
@@ -115,8 +116,8 @@ class TestTableEntry:
     """
 
     def test_table_entry_minimal(self) -> None:
-        e = TableEntry.model_validate({"name": "oarb.audits"})
-        assert e.name == "oarb.audits"
+        e = TableEntry.model_validate({"name": TEST_TABLE})
+        assert e.name == TEST_TABLE
         assert e.label is None
         assert e.tracking_column is None
 
@@ -139,21 +140,21 @@ class TestTableEntry:
 
     def test_skill_settings_tables_strings(self) -> None:
         """Плоский список строк (min-контракт)."""
-        s = SkillSettings.model_validate({"tables": ["oarb.audits", "oarb.violations"]})
-        assert s.tables == ["oarb.audits", "oarb.violations"]
+        s = SkillSettings.model_validate({"tables": [TEST_TABLE, TEST_TABLE_2]})
+        assert s.tables == [TEST_TABLE, TEST_TABLE_2]
 
     def test_skill_settings_tables_objects(self) -> None:
         """Список объектов TableEntry."""
         s = SkillSettings.model_validate({
             "tables": [
-                {"name": "oarb.audits"},
+                {"name": TEST_TABLE},
                 {"name": "public.scripts", "label": "scripts_registry"},
-                {"name": "oarb.reports", "tracking_column": "modified_at"},
+                {"name": "test.reports", "tracking_column": "modified_at"},
             ],
         })
         assert len(s.tables) == 3
         assert isinstance(s.tables[0], TableEntry)
-        assert s.tables[0].name == "oarb.audits"
+        assert s.tables[0].name == TEST_TABLE
         assert s.tables[0].label is None
         assert isinstance(s.tables[1], TableEntry)
         assert s.tables[1].name == "public.scripts"
@@ -164,9 +165,9 @@ class TestTableEntry:
     def test_skill_settings_tables_mixed(self) -> None:
         """Строки и объекты в одном списке."""
         s = SkillSettings.model_validate({
-            "tables": ["oarb.audits", {"name": "public.scripts", "label": "scripts_registry"}],
+            "tables": [TEST_TABLE, {"name": "public.scripts", "label": "scripts_registry"}],
         })
-        assert s.tables[0] == "oarb.audits"
+        assert s.tables[0] == TEST_TABLE
         assert isinstance(s.tables[1], TableEntry)
         assert s.tables[1].name == "public.scripts"
         assert s.tables[1].label == "scripts_registry"
@@ -205,7 +206,7 @@ class TestSkillSettingsExtraForbid:
     def test_typo_in_tables_rejected_direct(self) -> None:
         """Прямая валидация SkillSettings ловит опечатку (``extra="forbid"``)."""
         with pytest.raises(Exception) as excinfo:
-            SkillSettings.model_validate({"tablse": [{"name": "oarb.audits"}]})
+            SkillSettings.model_validate({"tablse": [{"name": TEST_TABLE}]})
         msg = str(excinfo.value)
         assert "extra_forbidden" in msg or "not permitted" in msg
 
@@ -216,7 +217,7 @@ class TestSkillSettingsExtraForbid:
         """
         with pytest.raises(Exception) as excinfo:
             SkillSettings.model_validate({
-                "tables": [{"name": "oarb.audits"}],
+                "tables": [{"name": TEST_TABLE}],
                 "embedding": {"base_url": "http://x", "model": "m"},
             })
         msg = str(excinfo.value)
@@ -232,7 +233,7 @@ class TestSkillSettingsExtraForbid:
         """
         with pytest.raises(Exception) as excinfo:
             SkillSettings.model_validate({
-                "tables": [{"name": "oarb.audits"}],
+                "tables": [{"name": TEST_TABLE}],
                 "cache": {"enabled": True},
             })
         msg = str(excinfo.value)
@@ -242,7 +243,7 @@ class TestSkillSettingsExtraForbid:
         """Эталонный набор полей skill'а после рефакторинга."""
         s = SkillSettings.model_validate({
             "enabled": True,
-            "tables": [{"name": "oarb.audits"}],
+            "tables": [{"name": TEST_TABLE}],
             "vector_indexes": [{"name": "audits_index"}],
             "cli": {"default_mode": "predefined", "timeout_sec": 60},
             "llm": {"max_tokens": 8192, "temperature": 0.1},
@@ -269,8 +270,8 @@ class TestSkillSettingsExtraForbid:
                 "audit_analyzer": {
                     "enabled": True,
                     "tables": [
-                        {"name": "oarb.audit_reports", "tracking_column": "updated_at"},
-                        {"name": "oarb.audits", "tracking_column": "updated_at"},
+                        {"name": "test_audit_reports", "tracking_column": "updated_at"},
+                        {"name": TEST_TABLE, "tracking_column": "updated_at"},
                     ],
                     "vector_indexes": [
                         {"name": "audits_index"},
@@ -295,8 +296,8 @@ class TestSkillSettingsExtraForbid:
             validate_project_settings({
                 "skills": {
                     "audit_analyzer": {
-                        "tables": [{"name": "oarb.audits"}],
-                        "tablse": [{"name": "oarb.bogus"}],
+                        "tables": [{"name": TEST_TABLE}],
+                        "tablse": [{"name": "test.bogus"}],
                     },
                 },
             })
@@ -310,7 +311,7 @@ class TestSkillSettingsExtraForbid:
             validate_project_settings({
                 "skills": {
                     "audit_analyzer": {
-                        "tables": [{"name": "oarb.audits"}],
+                        "tables": [{"name": TEST_TABLE}],
                         "embedding": {"base_url": "http://x", "model": "m"},
                     },
                 },
@@ -367,7 +368,7 @@ class TestVectorIndexEntryNoSource:
                 "skills": {
                     "audit_analyzer": {
                         "vector_indexes": [
-                            {"name": "audits_index", "source": "oarb.audits"},
+                            {"name": "audits_index", "source": TEST_TABLE},
                         ],
                     },
                 },
@@ -460,14 +461,14 @@ class TestGatewayVectorEmbedding:
             "gateway": {
                 "vector": {
                     "index": {
-                        "storage_table": "oarb.audit_vectors",
+                        "storage_table": TEST_VECTOR_TABLE,
                         "default_root": "data_store/vectors",
                         "backend": "faiss",
                     }
                 },
             },
         })
-        assert result.gateway.vector.index.storage_table == "oarb.audit_vectors"
+        assert result.gateway.vector.index.storage_table == TEST_VECTOR_TABLE
 
     def test_legacy_vector_index_ignored_by_runtime(self) -> None:
         """Legacy ``gateway.vector_index.*`` runtime-mute (ни один consumer не читает).
@@ -484,7 +485,7 @@ class TestGatewayVectorEmbedding:
 
         legacy_only = {
             "gateway": {
-                "vector_index": {"storage_table": "oarb.audit_vectors"},
+                "vector_index": {"storage_table": TEST_VECTOR_TABLE},
             },
         }
         with patch("config.SETTINGS", legacy_only):
@@ -498,7 +499,7 @@ class TestGatewayVectorEmbedding:
 
         canonical = {
             "gateway": {
-                "vector": {"index": {"storage_table": "oarb.audit_vectors"}},
+                "vector": {"index": {"storage_table": TEST_VECTOR_TABLE}},
             },
         }
         with patch("config.SETTINGS", canonical):
@@ -541,22 +542,22 @@ class TestTableEntryTypeLiteral:
     """``TableEntry.type`` — Literal['table', 'vector'] (не произвольная str)."""
 
     def test_table_default(self) -> None:
-        e = TableEntry.model_validate({"name": "oarb.audits"})
+        e = TableEntry.model_validate({"name": TEST_TABLE})
         assert e.type == "table"
 
     def test_vector_explicit(self) -> None:
-        e = TableEntry.model_validate({"name": "oarb.audit_vectors", "type": "vector"})
+        e = TableEntry.model_validate({"name": TEST_VECTOR_TABLE, "type": "vector"})
         assert e.type == "vector"
 
     def test_banana_type_rejected(self) -> None:
         with pytest.raises(Exception) as excinfo:
-            TableEntry.model_validate({"name": "oarb.audits", "type": "banana"})
+            TableEntry.model_validate({"name": TEST_TABLE, "type": "banana"})
         msg = str(excinfo.value)
         assert "type" in msg.lower()
 
     def test_empty_string_type_rejected(self) -> None:
         with pytest.raises(Exception):
-            TableEntry.model_validate({"name": "oarb.audits", "type": ""})
+            TableEntry.model_validate({"name": TEST_TABLE, "type": ""})
 
 
 class TestGatewayLegacyFailFast:
@@ -569,7 +570,7 @@ class TestGatewayLegacyFailFast:
         with pytest.raises(ConfigurationError) as excinfo:
             validate_project_settings({
                 "gateway": {
-                    "vector_index": {"storage_table": "oarb.audit_vectors"},
+                    "vector_index": {"storage_table": TEST_VECTOR_TABLE},
                 },
             })
         msg = str(excinfo.value)

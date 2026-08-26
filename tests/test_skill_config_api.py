@@ -1,6 +1,7 @@
 """Тесты для ``lib/core/skill_config.py`` — единый API для всех skill'ов."""
 
 from __future__ import annotations
+from tests.conftest import TEST_TABLE, TEST_TABLE_2, TEST_VECTOR_TABLE
 
 from pathlib import Path
 from unittest.mock import patch
@@ -34,25 +35,25 @@ class TestDbTables:
 
         cfg = {
             "tables": [
-                {"name": "oarb.audits"},
+                {"name": TEST_TABLE},
                 {"name": "public.scripts", "label": "scripts_registry"},
-                {"name": "oarb.violations"},
+                {"name": TEST_TABLE_2},
             ]
         }
         with patch("config.SETTINGS", _settings_with({"audit_analyzer": cfg})):
             assert skill_config.get_db_tables("audit_analyzer") == [
-                "oarb.audits",
-                "oarb.violations",
+                TEST_TABLE,
+                TEST_TABLE_2,
             ]
 
     def test_string_table_entries_supported(self) -> None:
         from lib.core import skill_config
 
-        cfg = {"tables": ["oarb.audits", "oarb.violations"]}
+        cfg = {"tables": [TEST_TABLE, TEST_TABLE_2]}
         with patch("config.SETTINGS", _settings_with({"audit_analyzer": cfg})):
             assert skill_config.get_db_tables("audit_analyzer") == [
-                "oarb.audits",
-                "oarb.violations",
+                TEST_TABLE,
+                TEST_TABLE_2,
             ]
 
     def test_empty_tables_returns_empty(self) -> None:
@@ -66,9 +67,9 @@ class TestDbSchema:
     def test_schema_from_first_table(self) -> None:
         from lib.core import skill_config
 
-        cfg = {"tables": [{"name": "oarb.audits"}, {"name": "oarb.violations"}]}
+        cfg = {"tables": [{"name": TEST_TABLE}, {"name": TEST_TABLE_2}]}
         with patch("config.SETTINGS", _settings_with({"audit_analyzer": cfg})):
-            assert skill_config.get_db_schema("audit_analyzer") == "oarb"
+            assert skill_config.get_db_schema("audit_analyzer") == TEST_TABLE.split(".", 1)[0]
 
     def test_empty_tables_raises(self) -> None:
         from lib.core import skill_config
@@ -92,22 +93,22 @@ class TestVectorDbTable:
 
         settings = {
             "skills": {"audit_analyzer": {"tables": []}},
-            "gateway": {"vector": {"index": {"storage_table": "oarb.audit_vectors"}}},
+            "gateway": {"vector": {"index": {"storage_table": TEST_VECTOR_TABLE}}},
         }
         with patch("config.SETTINGS", settings):
-            assert skill_config.get_vector_db_table("audit_analyzer") == "oarb.audit_vectors"
+            assert skill_config.get_vector_db_table("audit_analyzer") == TEST_VECTOR_TABLE
 
     def test_fallback_to_tables_type_vector(self) -> None:
         from lib.core import skill_config
 
         settings = {
             "skills": {"audit_analyzer": {"tables": [
-                {"name": "oarb.audit_vectors", "type": "vector"},
+                {"name": TEST_VECTOR_TABLE, "type": "vector"},
             ]}},
             "gateway": {},
         }
         with patch("config.SETTINGS", settings):
-            assert skill_config.get_vector_db_table("audit_analyzer") == "oarb.audit_vectors"
+            assert skill_config.get_vector_db_table("audit_analyzer") == TEST_VECTOR_TABLE
 
     def test_returns_empty_when_no_storage(self) -> None:
         from lib.core import skill_config
@@ -124,14 +125,14 @@ class TestMultiSkill:
 
         settings = {
             "skills": {
-                "audit_analyzer": {"tables": [{"name": "oarb.audits"}]},
+                "audit_analyzer": {"tables": [{"name": TEST_TABLE}]},
                 "office_files": {"tables": [{"name": "ofx.docs"}]},
             }
         }
         with patch("config.SETTINGS", settings):
-            assert skill_config.get_db_tables("audit_analyzer") == ["oarb.audits"]
+            assert skill_config.get_db_tables("audit_analyzer") == [TEST_TABLE]
             assert skill_config.get_db_tables("office_files") == ["ofx.docs"]
-            assert skill_config.get_db_schema("audit_analyzer") == "oarb"
+            assert skill_config.get_db_schema("audit_analyzer") == TEST_TABLE.split(".", 1)[0]
             assert skill_config.get_db_schema("office_files") == "ofx"
 
     def test_cli_config_per_skill(self) -> None:

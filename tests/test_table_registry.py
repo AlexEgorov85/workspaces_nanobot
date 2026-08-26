@@ -6,6 +6,7 @@ legacy-методов больше нет — все тесты работают
 """
 
 from __future__ import annotations
+from tests.conftest import TEST_TABLE, TEST_TABLE_2, TEST_VECTOR_TABLE
 
 import pytest
 
@@ -36,8 +37,8 @@ class TestTableResource:
             TableResource(name="")
 
     def test_qualified_name_ok(self) -> None:
-        r = TableResource(name="oarb.audits", tracking_column="updated_at")
-        assert r.name == "oarb.audits"
+        r = TableResource(name=TEST_TABLE, tracking_column="updated_at")
+        assert r.name == TEST_TABLE
         assert r.tracking_column == "updated_at"
 
 
@@ -72,7 +73,7 @@ class TestSkillRegistration:
     def test_immutable(self) -> None:
         reg = SkillRegistration(
             name="audit_analyzer",
-            resources=(TableResource(name="oarb.audits"),),
+            resources=(TableResource(name=TEST_TABLE),),
         )
         with pytest.raises(Exception):
             reg.resources = ()  # type: ignore[misc]
@@ -81,12 +82,12 @@ class TestSkillRegistration:
         reg = SkillRegistration(
             name="s",
             resources=(
-                TableResource(name="oarb.audits"),
+                TableResource(name=TEST_TABLE),
                 VectorResource(name="oarb.vectors"),
                 TableResource(name="public.meta"),
             ),
         )
-        assert {r.name for r in reg.table_resources()} == {"oarb.audits", "public.meta"}
+        assert {r.name for r in reg.table_resources()} == {TEST_TABLE, "public.meta"}
         assert {r.name for r in reg.vector_resources()} == {"oarb.vectors"}
 
     def test_tracking_column_per_resource(self) -> None:
@@ -140,10 +141,10 @@ class TestTableRegistryQueries:
         reg.register(SkillRegistration(
             name="audit_analyzer",
             resources=(
-                TableResource(name="oarb.audits"),
-                TableResource(name="oarb.violations"),
+                TableResource(name=TEST_TABLE),
+                TableResource(name=TEST_TABLE_2),
                 TableResource(name="public.agent_predefined_scripts"),
-                VectorResource(name="oarb.audit_vectors"),
+                VectorResource(name=TEST_VECTOR_TABLE),
             ),
         ))
         reg.register(SkillRegistration(
@@ -151,13 +152,13 @@ class TestTableRegistryQueries:
             resources=(TableResource(name="finance.tx"),),
         ))
         names = set(reg.table_names())
-        assert "oarb.audits" in names
-        assert "oarb.violations" in names
+        assert TEST_TABLE in names
+        assert TEST_TABLE_2 in names
         assert "public.agent_predefined_scripts" in names
         assert "finance.tx" in names
         # Vector — отдельно, не в tables
-        assert "oarb.audit_vectors" not in names
-        assert reg.vector_names() == ("oarb.audit_vectors",)
+        assert TEST_VECTOR_TABLE not in names
+        assert reg.vector_names() == (TEST_VECTOR_TABLE,)
 
     def test_resources_global(self) -> None:
         reg = TableRegistry()
@@ -242,7 +243,7 @@ class TestLabelLookup:
 
     def test_label_default_none(self) -> None:
         """Контракт: ``TableResource()`` без label имеет ``label is None``."""
-        r = TableResource(name="oarb.audits")
+        r = TableResource(name=TEST_TABLE)
         assert r.label is None
 
     def test_label_optional_constructor(self) -> None:
@@ -254,7 +255,7 @@ class TestLabelLookup:
         reg.register(SkillRegistration(
             name="audit_analyzer",
             resources=(
-                TableResource(name="oarb.audits"),
+                TableResource(name=TEST_TABLE),
                 TableResource(name="public.agent_predefined_scripts", label="scripts_registry"),
                 TableResource(name="public.meta"),
             ),
@@ -271,7 +272,7 @@ class TestLabelLookup:
         reg = TableRegistry()
         reg.register(SkillRegistration(
             name="a",
-            resources=(TableResource(name="oarb.audits"),),
+            resources=(TableResource(name=TEST_TABLE),),
         ))
         assert reg.resources_by_label("nonexistent_label") == ()
 
@@ -376,9 +377,9 @@ class TestRegisterInfra:
     def test_register_infra_basic(self) -> None:
         table_registry.register_infra(
             "vector_index.storage",
-            (VectorResource(name="oarb.audit_vectors"),),
+            (VectorResource(name=TEST_VECTOR_TABLE),),
         )
-        assert "oarb.audit_vectors" in table_registry.vector_names()
+        assert TEST_VECTOR_TABLE in table_registry.vector_names()
         assert table_registry.get_infra("vector_index.storage") != ()
 
     def test_register_infra_replaces_same_key(self) -> None:

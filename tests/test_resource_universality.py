@@ -18,6 +18,7 @@
 """
 
 from __future__ import annotations
+from tests.conftest import TEST_TABLE, TEST_TABLE_2, TEST_VECTOR_TABLE
 
 import pytest
 
@@ -178,17 +179,17 @@ class TestAuditSkillUnchanged:
         reg.register(SkillRegistration(
             name="audit_analyzer",
             resources=(
-                TableResource(name="oarb.audits"),
-                TableResource(name="oarb.violations"),
-                TableResource(name="oarb.reports"),
+                TableResource(name=TEST_TABLE),
+                TableResource(name=TEST_TABLE_2),
+                TableResource(name="test.reports"),
                 TableResource(name="public.agent_predefined_scripts"),
-                VectorResource(name="oarb.audit_vectors"),
+                VectorResource(name=TEST_VECTOR_TABLE),
             ),
         ))
         names = set(reg.table_names())
-        assert {"oarb.audits", "oarb.violations", "oarb.reports",
+        assert {TEST_TABLE, TEST_TABLE_2, "test.reports",
                 "public.agent_predefined_scripts"} <= names
-        assert reg.vector_names() == ("oarb.audit_vectors",)
+        assert reg.vector_names() == (TEST_VECTOR_TABLE,)
 
 
 class TestNoAuditSpecificLogic:

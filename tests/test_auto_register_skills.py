@@ -17,6 +17,7 @@
 """
 
 from __future__ import annotations
+from tests.conftest import TEST_TABLE, TEST_TABLE_2, TEST_VECTOR_TABLE
 
 from types import SimpleNamespace
 
@@ -60,12 +61,12 @@ class TestAutoRegisterTables:
 
     def test_fully_qualified_names(self) -> None:
         ctx = _make_ctx({"audit_analyzer": {"tables": [
-            {"name": "oarb.audits"},
-            {"name": "oarb.violations"},
+            {"name": TEST_TABLE},
+            {"name": TEST_TABLE_2},
         ]}})
         _auto_register_skills(ctx)
         reg = table_registry.get("audit_analyzer")
-        assert {r.name for r in reg.table_resources()} == {"oarb.audits", "oarb.violations"}
+        assert {r.name for r in reg.table_resources()} == {TEST_TABLE, TEST_TABLE_2}
 
     def test_table_entry_with_label(self) -> None:
         ctx = _make_ctx({"x": {"tables": [
@@ -137,18 +138,18 @@ class TestAutoRegisterTypeVector:
 
     def test_type_vector_creates_vector_resource(self) -> None:
         ctx = _make_ctx({"x": {"tables": [
-            {"name": "oarb.audit_vectors", "type": "vector", "tracking_column": "id"},
+            {"name": TEST_VECTOR_TABLE, "type": "vector", "tracking_column": "id"},
         ]}})
         _auto_register_skills(ctx)
         reg = table_registry.get("x")
-        assert {r.name for r in reg.vector_resources()} == {"oarb.audit_vectors"}
+        assert {r.name for r in reg.vector_resources()} == {TEST_VECTOR_TABLE}
         assert reg.table_resources() == ()
         assert reg.vector_resources()[0].tracking_column == "id"
 
     def test_type_vector_default_tracking_column(self) -> None:
         """Если tracking_column не задан — дефолт ``id``."""
         ctx = _make_ctx({"x": {"tables": [
-            {"name": "oarb.audit_vectors", "type": "vector"},
+            {"name": TEST_VECTOR_TABLE, "type": "vector"},
         ]}})
         _auto_register_skills(ctx)
         assert table_registry.get("x").vector_resources()[0].tracking_column == "id"
@@ -161,13 +162,13 @@ class TestAutoRegisterTypeVector:
         см. ``VectorIndexSettings.config_table``).
         """
         ctx = _make_ctx({"x": {"tables": [
-            {"name": "oarb.audit_vectors", "type": "vector", "tracking_column": "id"},
+            {"name": TEST_VECTOR_TABLE, "type": "vector", "tracking_column": "id"},
         ], "vector_indexes": [
             {"name": "audits_index"},
         ]}})
         _auto_register_skills(ctx)
         reg = table_registry.get("x")
-        assert {r.name for r in reg.vector_resources()} == {"oarb.audit_vectors"}
+        assert {r.name for r in reg.vector_resources()} == {TEST_VECTOR_TABLE}
         assert len(reg.resources) == 1
 
     def test_legacy_source_in_vector_indexes_rejected(self) -> None:
@@ -183,9 +184,9 @@ class TestAutoRegisterTypeVector:
         with pytest.raises(ConfigurationError) as excinfo:
             validate_project_settings({
                 "skills": {"x": {
-                    "tables": [{"name": "oarb.audit_vectors", "type": "vector"}],
+                    "tables": [{"name": TEST_VECTOR_TABLE, "type": "vector"}],
                     "vector_indexes": [
-                        {"name": "audits_index", "source": "oarb.audit_vectors"},
+                        {"name": "audits_index", "source": TEST_VECTOR_TABLE},
                     ],
                 }},
             })
@@ -224,7 +225,7 @@ class TestAutoRegisterScriptsRegistry:
     def test_label_lookup_end_to_end(self) -> None:
         ctx = _make_ctx({"audit_analyzer": {"tables": [
             {"name": "public.scripts_registry", "label": "scripts_registry"},
-            {"name": "oarb.audits"},
+            {"name": TEST_TABLE},
         ]}})
         _auto_register_skills(ctx)
         found = table_registry.resources_by_label("scripts_registry")
