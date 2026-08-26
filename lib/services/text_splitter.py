@@ -80,55 +80,75 @@ def _split_by_separator(text: str, pattern: str, chunk_size: int, chunk_overlap:
     return _merge_into_chunks(result, chunk_size, chunk_overlap)
 
 
+_MAX_MERGE_CHUNKS = 1_000_000
+
+
 def _merge_into_chunks(parts: list[str], chunk_size: int, chunk_overlap: int) -> list[str]:
-    """Склеить сегменты в чанки нужного размера с перекрытием."""
+    """Склеить сегменты в чанки нужного размера с перекрытием (жадно, вперёд).
+
+    В отличие от старой реализации никогда не возвращается к уже
+    обработанным частям (устраняет бесконечный цикл, Баг Б). Если
+    отдельная часть сама по себе длиннее ``chunk_size`` — она
+    принудительно режется посимвольно через ``_split_by_chars``.
+
+    Перекрытие реализовано как хвост предыдущего чанка, добавляемый
+    в начало следующего (символьный overlap) — детерминированно и
+    не зависит от структуры ``parts``.
+    """
     if not parts:
         return []
 
-    chunks = []
+    chunks: list[str] = []
     current = ""
-    i = 0
-    while i < len(parts):
-        if not current:
-            current = parts[i]
-            i += 1
+    for part in parts:
+        # Непомещаемая часть — сразу режем, чтобы не зациклиться.
+        if len(part) > chunk_size:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(_split_by_chars(part, chunk_size, chunk_overlap))
+            if len(chunks) > _MAX_MERGE_CHUNKS:
+                raise RuntimeError("text_splitter: превышен лимит чанков")
             continue
 
-        candidate = current + "\n\n" + parts[i]
+        candidate = (current + "\n\n" + part) if current else part
         if len(candidate) <= chunk_size:
             current = candidate
-            i += 1
         else:
             chunks.append(current)
-            overlap = _compute_overlap_start(parts, i, chunk_overlap)
-            current = parts[overlap] if overlap < i else ""
-            i = overlap if overlap < i else i
+            if len(chunks) > _MAX_MERGE_CHUNKS:
+                raise RuntimeError("text_splitter: превышен лимит чанков")
+            # Хвост перекрытия: не больше chunk_overlap и не больше того,
+            # что влезает вместе с part (гарантия len(current) <= chunk_size).
+            max_tail = chunk_size - 2 - len(part)
+            overlap_chars = min(chunk_overlap, max_tail)
+            tail = current[-overlap_chars:] if overlap_chars > 0 else ""
+            current = (tail + "\n\n" + part) if tail else part
 
     if current:
         chunks.append(current)
-
     return chunks
 
 
-def _compute_overlap_start(parts: list[str], current_index: int, overlap_chars: int) -> int:
-    """Найти индекс части, с которой начать следующий чанк для перекрытия."""
-    chars = 0
-    idx = current_index
-    while idx > 0 and chars < overlap_chars:
-        idx -= 1
-        chars += len(parts[idx])
-    return idx
-
-
 def _split_by_chars(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
-    """Посимвольное разбиение — последняя надежда."""
-    chunks = []
+    """Посимвольное разбиение — последняя надежда.
+
+    Гарантирует завершение: как только достигнут конец текста, остаток
+    добавляется и цикл прерывается. Раньше на финальном остатке
+    ``start`` мог не продвигаться вперёд (Баг А) — бесконечный цикл.
+    """
+    if not text:
+        return []
+    chunks: list[str] = []
     start = 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
+    n = len(text)
+    while start < n:
+        end = min(start + chunk_size, n)
         chunks.append(text[start:end])
+        if end >= n:
+            break
         start = end - chunk_overlap
-        if start >= len(text) or start >= end:
+        if start >= end:
             break
     return chunks
 
