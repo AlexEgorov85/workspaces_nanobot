@@ -14,7 +14,7 @@ nanobot-ai==0.3.0
 python-docx==1.2.0
 openpyxl==3.1.5
 xlrd==2.0.2
-pypdf==6.16.1
+ pypdf==5.9.0
 pdfplumber==0.11.10
 python-pptx==1.0.2
  Pillow==12.3.0
