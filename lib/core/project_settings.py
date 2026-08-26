@@ -179,6 +179,37 @@ class GatewaySettings(_StrictOptional):
     heartbeat: HeartbeatSettings | None = None
     sync: SyncSettings | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_renamed_sections(cls, data: Any) -> Any:
+        """Fail-fast на legacy-переименованных секциях ``gateway.*``.
+
+        ``GatewaySettings`` унаследован от ``_StrictOptional(extra="allow")``
+        для forward-compat по **новым** flat-ключам (``print_*``, ``storage``
+        и т.п.). Но это означает, что **известные legacy-переименования**
+        (``vector_index``) тоже прошли бы как extra-поля, и тогда:
+          * комментарий «обратной совместимости нет (fail-fast)» врёт;
+          * consumer (``register_vector_storage``) молча игнорирует секцию;
+          * пользователь получает «всё стартануло, но DuckDB-кеш пустой».
+
+        Этот ``mode="before"`` валидатор делает явный fail-fast:
+        legacy-секции сразу падают. Ошибка ловится в
+        ``validate_project_settings`` (см. ``_LEGACY_GATEWAY_KEYS``)
+        и unwrap'ается в чистую ``ConfigurationError``.
+        """
+        if not isinstance(data, dict):
+            return data
+        problems: list[str] = []
+        for legacy_key, hint in _LEGACY_GATEWAY_KEYS.items():
+            if legacy_key in data:
+                problems.append(f"  gateway.{legacy_key}: {hint}")
+        if problems:
+            raise _LegacyGatewaySectionsError(
+                "Некорректная конфигурация project.json (legacy-секции gateway.*):\n"
+                + "\n".join(problems)
+            )
+        return data
+
 
 class SyncSettings(_StrictOptional):
     """Параметры фоновой синхронизации PG → DuckDB (PgDuckDbSyncService).
@@ -257,7 +288,7 @@ class TableEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    type: str = "table"
+    type: Literal["table", "vector"] = "table"
     label: str | None = None
     tracking_column: str | None = None
 
@@ -275,6 +306,12 @@ class VectorIndexEntry(BaseModel):
     Attributes:
         name: логическое имя индекса (``"audits_index"``, ``"products_v"``).
 
+    Unknown keys запрещены (``extra="forbid"``). Это сознательно:
+    ``source``, ``embedding`` или другие legacy-поля НЕ должны «тихо»
+    проходить через pydantic-валидацию. Если кто-то добавит
+    legacy-поле — старт gateway упадёт с ``ConfigurationError``,
+    а не пройдёт валидацию и обнаружится только в runtime.
+
     Раньше в этой модели было обязательное поле ``source`` (имя PG-таблицы
     исходных строк). После того как source-таблицу перенесли в общий
     runtime-реестр (``public.agent_vector_index_config``), ``source``
@@ -283,7 +320,7 @@ class VectorIndexEntry(BaseModel):
     а не возврат к старой.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     name: str
 
@@ -412,18 +449,60 @@ class SkillsSettings(_StrictOptional):
         return normalized
 
 
+class ProjectMetadataSettings(_StrictOptional):
+    """Метаданные проекта (``project.json::project.*``).
+
+    Канонический источник project metadata: ``project.json`` секция
+    ``project``. Содержит релизные данные, читаемые runtime'ом через
+    ``lib.utils.project_version.project_version()`` (для баннера
+    ``gateway.py``) и как fallback-источник версии.
+
+    Сейчас включает только ``version`` (SemVer-строка, без префикса
+    ``v``; см. Release Process в ``AGENTS.md``). Дополнительные
+    project-level metadata (``name``, ``description`` и т.п.)
+    добавляются сюда по мере надобности.
+
+    **Не** путать с ``ProjectSettings.version`` (которого больше нет)
+    или с ``__version__`` библиотеки nanobot.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str | None = None
+
+
 class ProjectSettings(BaseModel):
     """Корневая модель проектных настроек (проекция секций SETTINGS)."""
 
     model_config = ConfigDict(extra="allow")
 
-    version: str | None = None
+    project: ProjectMetadataSettings | None = None
     channels: ChannelsSettings | None = None
     gateway: GatewaySettings | None = None
     cli: CliSettings | None = None
     streamlit: StreamlitSettings | None = None
     logging: LoggingSettings | None = None
     skills: SkillsSettings | None = None
+
+
+class _LegacyGatewaySectionsError(Exception):
+    """Маркер: внутри pydantic обнаружена legacy gateway-секция.
+
+    Pydantic оборачивает любое исключение из ``model_validator(mode="before")``
+    в свой ``ValidationError``, что размывает сообщение. ``validate_project_settings``
+    ловит этот маркер, unwrap'ает, и поднимает чистую ``ConfigurationError``.
+    """
+
+
+# Известные legacy-переименования секций ``gateway.*``. Добавлять сюда при
+# следующих rename'ах. Сообщение должно указывать на новый путь и на
+# соответствующий блок CHANGELOG.md.
+_LEGACY_GATEWAY_KEYS: dict[str, str] = {
+    "vector_index": (
+        "gateway.vector_index.* → gateway.vector.index.* "
+        "(см. Migration notes в CHANGELOG.md :: skill-configuration-boundary)"
+    ),
+}
 
 
 def validate_project_settings(settings: Any) -> ProjectSettings:
@@ -441,7 +520,20 @@ def validate_project_settings(settings: Any) -> ProjectSettings:
     """
     try:
         return ProjectSettings.model_validate(dict(settings or {}))
+    except _LegacyGatewaySectionsError as exc:
+        # pydantic не оборачивает произвольные Exception из mode="before"
+        # (он оборачивает только ValueError/AssertionError). Маркер
+        # _LegacyGatewaySectionsError пробрасывается как есть; поднимаем
+        # чистую ConfigurationError.
+        raise ConfigurationError(str(exc)) from exc
     except ValidationError as exc:
+        # Unwrap _LegacyGatewaySectionsError, если pydantic всё-таки
+        # обернул его (например, при изменении версии pydantic).
+        for err in exc.errors():
+            ctx = err.get("ctx") or {}
+            inner = ctx.get("error")
+            if isinstance(inner, _LegacyGatewaySectionsError):
+                raise ConfigurationError(str(inner)) from exc
         problems: list[str] = []
         for err in exc.errors():
             path = ".".join(str(p) for p in err.get("loc", ()))

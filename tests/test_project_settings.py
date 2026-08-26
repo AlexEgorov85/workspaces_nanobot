@@ -323,6 +323,11 @@ class TestSkillSettingsExtraForbid:
 class TestVectorIndexEntryNoSource:
     """``VectorIndexEntry.source`` удалён: source — инфраструктурная
     декларация в ``public.agent_vector_index_config``, не часть skill'а.
+
+    После commit ``VectorIndexEntry.extra="forbid"`` legacy-поля
+    (``source``, ``embedding``, любые другие) теперь не «тихо»
+    проходят через pydantic — старт gateway падает с
+    ``ConfigurationError``. Это regression-guard.
     """
 
     def test_minimal_index(self) -> None:
@@ -330,15 +335,45 @@ class TestVectorIndexEntryNoSource:
         e = VectorIndexEntry.model_validate({"name": "audits_index"})
         assert e.name == "audits_index"
 
-    def test_source_field_absent(self) -> None:
-        """Source больше не поле модели. Передача его в JSON игнорируется
-        (``extra="allow"``) или, если хочется строго, можно проверить,
-        что он не появляется в attributes.
+    def test_source_field_rejected(self) -> None:
+        """Legacy ``source`` теперь reject'ится pydantic'ом (fail-fast).
+
+        Раньше ``extra="allow"`` пропускал source — это подрывало
+        рефакторинг «source перенесён в runtime-БД». Теперь старый
+        ``source`` в ``vector_indexes[]`` падает на старте gateway.
         """
         from lib.core.project_settings import VectorIndexEntry
-        e = VectorIndexEntry.model_validate({"name": "x", "source": "y"})
-        assert e.name == "x"
-        assert not hasattr(e, "source") or e.model_dump().get("source") in (None, "y")
+        with pytest.raises(Exception) as excinfo:
+            VectorIndexEntry.model_validate({"name": "x", "source": "y"})
+        msg = str(excinfo.value)
+        assert "extra_forbidden" in msg or "not permitted" in msg
+
+    def test_any_unknown_key_rejected(self) -> None:
+        """Любой неожиданный ключ отвергается (extra="forbid")."""
+        from lib.core.project_settings import VectorIndexEntry
+        with pytest.raises(Exception) as excinfo:
+            VectorIndexEntry.model_validate({"name": "x", "whatever": 123})
+        msg = str(excinfo.value)
+        assert "extra_forbidden" in msg or "not permitted" in msg
+
+    def test_project_settings_skills_legacy_source_rejected(self) -> None:
+        """Legacy ``skills.<name>.vector_indexes[].source`` падает через
+        SkillsSettings._validate_skill_sections.
+        """
+        from lib.core.project_settings import validate_project_settings
+        with pytest.raises(ConfigurationError) as excinfo:
+            validate_project_settings({
+                "skills": {
+                    "audit_analyzer": {
+                        "vector_indexes": [
+                            {"name": "audits_index", "source": "oarb.audits"},
+                        ],
+                    },
+                },
+            })
+        msg = str(excinfo.value)
+        assert "audit_analyzer" in msg
+        assert "extra_forbidden" in msg or "not permitted" in msg
 
 
 class TestGatewayVectorEmbedding:
@@ -468,3 +503,107 @@ class TestGatewayVectorEmbedding:
         with patch("config.SETTINGS", canonical):
             registered = register_vector_storage()
         assert registered is True
+
+
+class TestProjectMetadataSettings:
+    """``project.json::project.*`` — канонический namespace для project metadata.
+
+    Раньше ``ProjectSettings.version`` (top-level) был мёртвым кодом —
+    никто не читал, а реальный источник ``project.json::project.version``
+    читался напрямую через ``lib.utils.project_version``. Этот коммит
+    вводит ``ProjectMetadataSettings`` и связывает его с реальным
+    каноническим namespace.
+    """
+
+    def test_project_version_parsed(self) -> None:
+        result = validate_project_settings({
+            "project": {"version": "2.5.0"},
+        })
+        assert result.project is not None
+        assert result.project.version == "2.5.0"
+
+    def test_project_section_optional(self) -> None:
+        result = validate_project_settings({})
+        assert result.project is None
+
+    def test_project_extra_forbidden(self) -> None:
+        """``ProjectMetadataSettings`` — strict: неизвестные ключи падают."""
+        with pytest.raises(ConfigurationError) as excinfo:
+            validate_project_settings({
+                "project": {"version": "2.5.0", "name": "workspaces"},
+            })
+        msg = str(excinfo.value)
+        assert "name" in msg or "project.name" in msg
+
+
+class TestTableEntryTypeLiteral:
+    """``TableEntry.type`` — Literal['table', 'vector'] (не произвольная str)."""
+
+    def test_table_default(self) -> None:
+        e = TableEntry.model_validate({"name": "oarb.audits"})
+        assert e.type == "table"
+
+    def test_vector_explicit(self) -> None:
+        e = TableEntry.model_validate({"name": "oarb.audit_vectors", "type": "vector"})
+        assert e.type == "vector"
+
+    def test_banana_type_rejected(self) -> None:
+        with pytest.raises(Exception) as excinfo:
+            TableEntry.model_validate({"name": "oarb.audits", "type": "banana"})
+        msg = str(excinfo.value)
+        assert "type" in msg.lower()
+
+    def test_empty_string_type_rejected(self) -> None:
+        with pytest.raises(Exception):
+            TableEntry.model_validate({"name": "oarb.audits", "type": ""})
+
+
+class TestGatewayLegacyFailFast:
+    """Legacy-секции ``gateway.*`` падают на validation, а не «тихо»
+    проходят как extra-поля (через ``_StrictOptional(extra="allow")``)."""
+
+    def test_legacy_vector_index_top_level_rejected(self) -> None:
+        """``gateway.vector_index.*`` (legacy) → fail-fast через
+        ``_LegacyGatewaySectionsError`` → ``ConfigurationError``."""
+        with pytest.raises(ConfigurationError) as excinfo:
+            validate_project_settings({
+                "gateway": {
+                    "vector_index": {"storage_table": "oarb.audit_vectors"},
+                },
+            })
+        msg = str(excinfo.value)
+        assert "vector_index" in msg
+        # Должен быть hint на новый путь
+        assert "gateway.vector.index" in msg
+
+    def test_legacy_vector_index_under_canonical_ignored(self) -> None:
+        """``gateway.vector.index.vector_index`` НЕ срабатывает (не тот путь)."""
+        # Нет legacy-секции → проходит.
+        result = validate_project_settings({
+            "gateway": {
+                "vector": {"index": {"storage_table": "x"}},
+            },
+        })
+        assert result.gateway.vector.index.storage_table == "x"
+
+    def test_no_legacy_section_works(self) -> None:
+        """Без legacy-секции — нормальный путь."""
+        result = validate_project_settings({
+            "gateway": {
+                "vector": {"embedding": {"base_url": "http://x"}},
+            },
+        })
+        assert result.gateway.vector.embedding.base_url == "http://x"
+
+    def test_unknown_gateway_top_level_still_allowed(self) -> None:
+        """Случайные flat-ключи в ``gateway.*`` (forward-compat) всё ещё
+        разрешены — ``extra="allow"``. Legacy-проверка срабатывает только
+        на известных переименованиях.
+        """
+        result = validate_project_settings({
+            "gateway": {
+                "some_future_flat_key": {"foo": "bar"},
+            },
+        })
+        # Не падает; ключ становится extra-полем.
+        assert result.gateway is not None

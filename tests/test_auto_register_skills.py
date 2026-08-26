@@ -150,18 +150,42 @@ class TestAutoRegisterTypeVector:
         assert table_registry.get("x").vector_resources()[0].tracking_column == "id"
 
     def test_type_vector_dedup_with_vector_indexes(self) -> None:
-        """``type="vector"`` в ``tables[]`` даёт VectorResource; ``vector_indexes[].source``
-        не регистрируется (инфра). Итог: один ресурс от tables[], source игнорируется.
+        """``type="vector"`` в ``tables[]`` даёт VectorResource.
+
+        ``vector_indexes`` теперь не содержит ``source`` — это инфра
+        (runtime-БД ``public.agent_vector_index_config``).
         """
         ctx = _make_ctx({"x": {"tables": [
             {"name": "oarb.audit_vectors", "type": "vector", "tracking_column": "id"},
         ], "vector_indexes": [
-            {"name": "audits_index", "source": "oarb.audit_vectors"},
+            {"name": "audits_index"},
         ]}})
         _auto_register_skills(ctx)
         reg = table_registry.get("x")
         assert {r.name for r in reg.vector_resources()} == {"oarb.audit_vectors"}
         assert len(reg.resources) == 1
+
+    def test_legacy_source_in_vector_indexes_rejected(self) -> None:
+        """Legacy ``vector_indexes[].source`` отвергается на validation.
+
+        После commit ``VectorIndexEntry.extra="forbid"`` pydantic не
+        пропускает неизвестные поля. Это regression-guard: нельзя
+        «тихо» вернуть ``source`` обратно в декларацию skill'а.
+        """
+        from config import ConfigurationError
+        from lib.core.project_settings import validate_project_settings
+
+        with pytest.raises(ConfigurationError) as excinfo:
+            validate_project_settings({
+                "skills": {"x": {
+                    "tables": [{"name": "oarb.audit_vectors", "type": "vector"}],
+                    "vector_indexes": [
+                        {"name": "audits_index", "source": "oarb.audit_vectors"},
+                    ],
+                }},
+            })
+        msg = str(excinfo.value)
+        assert "extra_forbidden" in msg or "not permitted" in msg
 
 
 class TestAutoRegisterVectorIndexes:
@@ -173,15 +197,6 @@ class TestAutoRegisterVectorIndexes:
     инфраструктурный (хранится в ``public.agent_vector_index_config``),
     skill его не знает.
     """
-
-    def test_vector_index_source_not_registered_as_resource(self) -> None:
-        ctx = _make_ctx({"x": {"tables": [{"name": "public.t1"}], "vector_indexes": [
-            {"name": "audits_index", "source": "oarb.audit_vectors"},
-        ]}})
-        _auto_register_skills(ctx)
-        reg = table_registry.get("x")
-        assert reg.vector_resources() == ()
-        assert {r.name for r in reg.table_resources()} == {"public.t1"}
 
     def test_vector_index_names_preserved_in_config(self) -> None:
         """Имена индексов остаются в конфиге skill'а — build-tools их читают."""

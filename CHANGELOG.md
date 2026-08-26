@@ -326,6 +326,36 @@
 - `lib.core.infra_registration.INFRA_KEY_VECTOR_STORAGE` —
   `"vector_index.storage"` → `"vector.storage"`.
 
+#### Fixed (configuration contract hardening)
+
+По следам review-анализа текущего состояния `project.json` /
+`lib/core/project_settings.py`. Ужесточение конфигурационного контракта —
+без расширения поверхности API.
+
+- **`VectorIndexEntry` теперь `extra="forbid"`.** Раньше старый
+  `source` (и любые другие legacy-поля) проходили через pydantic как
+  extra-ключи, что подрывало рефакторинг «source перенесён в
+  runtime-БД». Теперь legacy `vector_indexes[].source` падает на
+  старте gateway с `ConfigurationError`, а не проходит молча.
+- **`TableEntry.type` теперь `Literal["table", "vector"]`.** Раньше
+  принимался любой `str` (включая `"banana"`), что противоречило
+  документации. Теперь `type="banana"` падает с `ValidationError`.
+- **Legacy `gateway.vector_index.*` теперь fail-fast на validation.**
+  Раньше `_StrictOptional(extra="allow")` пропускал legacy-секцию
+  как extra-поле, и `register_vector_storage` молча её игнорировал
+  (юзер получал «всё стартануло, но DuckDB-кеш пустой»). Теперь
+  `GatewaySettings._reject_legacy_renamed_sections` поднимает
+  `ConfigurationError` с явным hint на новый путь
+  `gateway.vector.index.*`. Реестр legacy-ключей — `_LEGACY_GATEWAY_KEYS`
+  в `lib/core/project_settings.py`; добавлять при следующих rename'ах.
+- **Удалён мёртвый `ProjectSettings.version` (top-level).** Раньше
+  модель принимала `version` на верхнем уровне, но никто не читал
+  (реальный источник — `project.json::project.version` через
+  `lib.utils.project_version`). Введён `ProjectMetadataSettings`:
+  `project.json::project.*` теперь канонический namespace для
+  project metadata. `ProjectMetadataSettings(extra="forbid")` —
+  неизвестные ключи в `project.*` тоже падают.
+
 #### Added (follow-up: auth_token by default)
 
 - **`project.json::gateway.vector.embedding.auth_token`** теперь задан
