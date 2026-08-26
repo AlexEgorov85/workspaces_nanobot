@@ -95,6 +95,14 @@ class ApplicationContext:
         ctx.script_dir = Path(script_dir)
         ctx.workspace_dir = Path(workspace_dir)
 
+        # Сбросить ``TableRegistry`` — это singleton, и при повторном
+        # ``create()`` в одном процессе (тесты, streamlit-reload, gateway
+        # перезапуск конфига) старые регистрации остались бы и смешались
+        # с новыми. ``_make_sync_services`` и ``_auto_register_skills``
+        # ниже заполнят реестр заново.
+        from lib.services.table_registry import table_registry
+        table_registry.clear()
+
         # 1. ConfigService + загрузка конфига
         # ConfigService.load() сам подставляет ${VAR} плейсхолдеры из
         # SETTINGS.providers.*.api_key (если ${VAR} — это *_API_KEY и
@@ -252,13 +260,24 @@ class ApplicationContext:
                 break
 
         ctx.runtime_patcher = RuntimePatcher()
-        ctx.runtime_patcher.apply_all(
+        patch_report = ctx.runtime_patcher.apply_all(
             ctx.config, ctx.settings, ctx.workspace_dir,
             ctx.agent, ctx.tool_audit_hook,
             recent_files_hook=recent_files_hook,
             db_logging_service=ctx.db_logging_service,
             session_manager=ctx.session_manager,
         )
+        ctx.runtime_patch_report = patch_report
+        logger.info(
+            "Runtime patches:\n%s",
+            patch_report.render(specs=RuntimePatcher.patch_specs()),
+        )
+        if patch_report.failed:
+            logger.warning(
+                "%d runtime patch(es) failed: %s",
+                len(patch_report.failed),
+                [name for name, _ in patch_report.failed],
+            )
 
         # 8. Помощники
         ctx.transcription_service = _make_transcription(ctx.config)
