@@ -790,3 +790,209 @@ class TestPatchContextBridgeSeed:
         result = await agent._state_build(ctx)
         assert called["n"] == 1
         assert result == {"fresh": True}
+
+
+class TestPatchReportClassification:
+    """PatchReport должен различать skipped (конфигуративный) и failed
+    (реальный сбой) — TARGET §26.
+    """
+
+    def test_skippable_reason_goes_to_skipped(self):
+        from lib.services.runtime_patcher import PatchReport
+
+        report = PatchReport()
+        RuntimePatcher._record(report, "save_turn", (False, "persist_threshold <= 0"))
+        assert report.skipped == [("save_turn", "persist_threshold <= 0")]
+        assert report.failed == []
+
+    def test_real_failure_goes_to_failed(self):
+        from lib.services.runtime_patcher import PatchReport
+
+        report = PatchReport()
+        RuntimePatcher._record(
+            report, "compact_tracking", (False, "import failed: cannot import name X"),
+        )
+        assert report.failed == [("compact_tracking", "import failed: cannot import name X")]
+        assert report.skipped == []
+
+    def test_agent_none_is_skipped(self):
+        from lib.services.runtime_patcher import PatchReport
+
+        report = PatchReport()
+        RuntimePatcher._record(report, "async_save", (False, "agent is None"))
+        assert report.skipped == [("async_save", "agent is None")]
+        assert report.failed == []
+
+    def test_idle_compact_enabled_is_skipped(self):
+        from lib.services.runtime_patcher import PatchReport
+
+        report = PatchReport()
+        RuntimePatcher._record(
+            report, "idle_guard", (False, "idle compact enabled (ttl=180)"),
+        )
+        assert report.skipped == [("idle_guard", "idle compact enabled (ttl=180)")]
+        assert report.failed == []
+
+    def test_missing_attr_is_failed(self):
+        from lib.services.runtime_patcher import PatchReport
+
+        report = PatchReport()
+        RuntimePatcher._record(
+            report, "assemble_outbound", (False, "agent._assemble_outbound is missing"),
+        )
+        assert report.failed == [("assemble_outbound", "agent._assemble_outbound is missing")]
+        assert report.skipped == []
+
+    def test_module_not_loaded_is_skipped(self):
+        """``module not loaded`` — конфигуративный skip: nanobot не подключил
+        эти модули в runtime (например, в unit-тесте без AgentLoop).
+        """
+        from lib.services.runtime_patcher import PatchReport
+
+        report = PatchReport()
+        RuntimePatcher._record(
+            report, "exec_limits", (False, "exec_session/shell module not loaded"),
+        )
+        assert report.skipped == [("exec_limits", "exec_session/shell module not loaded")]
+        assert report.failed == []
+
+    def test_internal_failed_marker_reclassifies(self):
+        """``[INTERNAL_FAILED]`` от ``patch_project_tools`` → failed."""
+        from lib.services.runtime_patcher import PatchReport
+
+        report = PatchReport()
+        RuntimePatcher._record(
+            report,
+            "project_tools",
+            (True, "[INTERNAL_FAILED] 3 project tools registered: foo; 1 failed: Bar"),
+        )
+        assert report.failed == [
+            (
+                "project_tools",
+                "[INTERNAL_FAILED] 3 project tools registered: foo; 1 failed: Bar",
+            ),
+        ]
+        assert report.skipped == []
+        assert "project_tools" not in report.applied
+
+    def test_details_recorded_for_every_state(self):
+        from lib.services.runtime_patcher import PatchReport
+
+        report = PatchReport()
+        RuntimePatcher._record(report, "compact_command", (True, "/compact registered"))
+        RuntimePatcher._record(report, "save_turn", (False, "persist_threshold <= 0"))
+        RuntimePatcher._record(report, "compact_tracking", (False, "import failed: boom"))
+        assert report.details["compact_command"] == "/compact registered"
+        assert report.details["save_turn"] == "persist_threshold <= 0"
+        assert report.details["compact_tracking"] == "import failed: boom"
+
+
+class TestPatchReportRender:
+    """``PatchReport.render`` — формат для startup-логов."""
+
+    def test_render_marks_applied_skipped_failed(self):
+        from lib.services.runtime_patcher import PatchReport
+
+        report = PatchReport()
+        report.applied.append("compact_command")
+        report.skipped.append(("save_turn", "persist_threshold <= 0"))
+        report.failed.append(("compact_tracking", "import failed: boom"))
+        rendered = report.render()
+        assert "✓ compact_command" in rendered
+        assert "⚠ save_turn skipped: persist_threshold <= 0" in rendered
+        assert "✗ compact_tracking failed: import failed: boom" in rendered
+
+    def test_render_includes_spec_purpose_for_failed(self):
+        from lib.services.runtime_patcher import PatchReport, RuntimePatcher
+
+        specs = RuntimePatcher.patch_specs()
+        report = PatchReport()
+        report.failed.append(("compact_tracking", "import failed: boom"))
+        rendered = report.render(specs=specs)
+        assert "✗ compact_tracking failed: import failed: boom" in rendered
+        assert "auto-compact" in rendered  # purpose из PatchSpec содержит это слово
+
+
+class TestPatchSpecs:
+    """Каждый патч из ``apply_all`` должен иметь ``PatchSpec``."""
+
+    def test_all_patches_have_specs(self):
+        from lib.services.runtime_patcher import RuntimePatcher
+
+        specs = RuntimePatcher.patch_specs()
+        expected = {
+            "context_governor", "save_turn", "exec_limits", "tool_limits",
+            "assemble_outbound", "context_bridge_seed", "async_save",
+            "subagent_logging", "project_tools", "compact_tracking",
+            "compact_command", "idle_guard", "session_content_cleanup",
+        }
+        assert set(specs) == expected
+
+    def test_specs_have_required_fields(self):
+        from lib.services.runtime_patcher import RuntimePatcher
+
+        specs = RuntimePatcher.patch_specs()
+        for name, spec in specs.items():
+            assert spec.name == name
+            assert spec.purpose, f"{name}: purpose is empty"
+            assert spec.nanobot_target, f"{name}: nanobot_target is empty"
+            assert spec.reason, f"{name}: reason is empty"
+            assert spec.risk in ("low", "medium", "high"), f"{name}: bad risk '{spec.risk}'"
+            assert spec.nanobot_version, f"{name}: nanobot_version is empty"
+
+    def test_high_risk_patches_are_private_methods(self):
+        """``risk='high'`` только для патчей, трогающих приватные методы."""
+        from lib.services.runtime_patcher import RuntimePatcher
+
+        specs = RuntimePatcher.patch_specs()
+        for name, spec in specs.items():
+            if spec.risk == "high":
+                target = spec.nanobot_target
+                assert any(
+                    token in target
+                    for token in ("_save_turn", "_assemble_outbound", "_SubagentHook")
+                ), (
+                    f"{name}: marked high risk but target '{target}' is not "
+                    "a known private method"
+                )
+
+
+class TestApplyAllFailed:
+    """``TestApplyAll`` — расширения для нового состояния ``failed``."""
+
+    def test_report_contents_has_details(self):
+        agent = MagicMock()
+        original_return = MagicMock()
+        original_return.metadata = {}
+        agent._assemble_outbound.return_value = original_return
+        hook = MagicMock()
+        hook.drain.return_value = []
+
+        patcher = RuntimePatcher()
+        report = patcher.apply_all(
+            MagicMock(), _settings(persist_threshold=0), Path("ws"), agent, hook,
+            db_logging_service=None,
+        )
+        d = report.to_dict()
+        assert "details" in d
+        assert "compact_command" in d["details"]
+        assert "save_turn" in d["details"]
+        assert "subagent_logging" in d["details"]
+
+    def test_normal_scenario_no_failures(self):
+        """В нормальном сценарии (MagicMock-agent, persist=0, db_logging=None)
+        НЕ должно быть failed — все skipped/applied.
+        """
+        agent = MagicMock()
+        original_return = MagicMock()
+        original_return.metadata = {}
+        agent._assemble_outbound.return_value = original_return
+        hook = MagicMock()
+        hook.drain.return_value = []
+
+        patcher = RuntimePatcher()
+        report = patcher.apply_all(
+            MagicMock(), _settings(persist_threshold=0), Path("ws"), agent, hook,
+            db_logging_service=None,
+        )
+        assert report.failed == [], f"unexpected failures: {report.failed}"

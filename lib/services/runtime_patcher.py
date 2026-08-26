@@ -21,6 +21,7 @@ import asyncio
 import json
 import sys as _sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -98,20 +99,276 @@ def _attach_context_window(agent: Any, session_key: str, result: Any) -> None:
     _store_context_window(session_key, block)
 
 
+@dataclass(frozen=True)
+class PatchSpec:
+    """Метаданные одного monkey-patch.
+
+    Описывает ЗАЧЕМ патч существует, какой nanobot-API трогает, есть ли
+    публичная альтернатива и какой риск при апгрейде nanobot. Нужен для
+    audit-trail в ``PatchReport.details`` и для быстрой диагностики при
+    обновлении nanobot-ai (см. TARGET §26).
+
+    Attributes:
+        name: короткое имя патча (ключ в ``apply_all``).
+        purpose: человекочитаемое описание цели (1 строка).
+        nanobot_target: какой API/модуль nanobot трогается
+            (например, ``nanobot.agent.loop.AgentLoop._save_turn``).
+        reason: почему это monkey-patch, а не использование публичного API.
+        alternatives_checked: что проверяли перед тем, как делать patch
+            (публичный API / hook / callback / config-ключ).
+        risk: уровень риска при апгрейде (``low``/``medium``/``high``).
+            ``high`` — патч трогает приватный метод, ломается при rename.
+        nanobot_version: версия nanobot, на которой патч валидирован.
+    """
+
+    name: str
+    purpose: str
+    nanobot_target: str
+    reason: str
+    alternatives_checked: str
+    risk: str
+    nanobot_version: str = "0.3.0"
+
+
+_PATCH_SPECS: dict[str, PatchSpec] = {
+    "context_governor": PatchSpec(
+        name="context_governor",
+        purpose="выгружать большие результаты инструментов в data_store/ "
+                "вместо заглушки обрезки",
+        nanobot_target="nanobot.agent.context_governance.ContextGovernor"
+                       ".normalize_tool_result",
+        reason="nanobot режет вывод инструментов по умолчанию и теряет данные",
+        alternatives_checked="config-ключи не покрывают кастомный persist-каталог",
+        risk="medium",
+    ),
+    "save_turn": PatchSpec(
+        name="save_turn",
+        purpose="архивировать полные tool-результаты в data_store/ при "
+                "сохранении истории оборота (вместо truncate в _save_turn)",
+        nanobot_target="nanobot.agent.loop.AgentLoop._save_turn",
+        reason="_save_turn — приватный метод; nanobot не имеет публичного "
+               "extension point для кастомного persist",
+        alternatives_checked="public hook 'before/after_save_turn' отсутствует",
+        risk="high",
+    ),
+    "exec_limits": PatchSpec(
+        name="exec_limits",
+        purpose="сделать лимиты вывода exec-инструмента конфигурируемыми",
+        nanobot_target="nanobot.agent.tools.exec_session.MAX_OUTPUT_CHARS, "
+                       "shell.ExecTool._MAX_OUTPUT",
+        reason="конфигурируемых лимитов вывода exec в nanobot нет; дефолт "
+               "50K символов теряет данные",
+        alternatives_checked="ToolConfig-схема параметров — обходится через "
+                             "schema bump",
+        risk="medium",
+    ),
+    "tool_limits": PatchSpec(
+        name="tool_limits",
+        purpose="сделать лимиты read_file/grep/list_dir конфигурируемыми",
+        nanobot_target="nanobot.agent.tools.filesystem.ReadFileTool._MAX_CHARS, "
+                       "ListDirTool._DEFAULT_MAX; "
+                       "nanobot.agent.tools.search._DEFAULT_HEAD_LIMIT, "
+                       "GrepTool._MAX_FILE_BYTES",
+        reason="конфигурируемых лимитов read_file/grep/list_dir в nanobot нет",
+        alternatives_checked="ToolConfig параметров не покрывает модульные константы",
+        risk="medium",
+    ),
+    "assemble_outbound": PatchSpec(
+        name="assemble_outbound",
+        purpose="внедрить tool_audit, recent_files и context_window в финальный "
+                "outbound (UI-метаданные для канала и CLI)",
+        nanobot_target="nanobot.agent.loop.AgentLoop._assemble_outbound",
+        reason="nanobot не имеет post-processor hook для OutboundMessage; "
+               "_assemble_outbound — единственная точка финала",
+        alternatives_checked="AgentHook.finalize_content не получает "
+                             "OutboundMessage",
+        risk="high",
+    ),
+    "context_bridge_seed": PatchSpec(
+        name="context_bridge_seed",
+        purpose="засеять лимит окна/модель в мост контекста на старте оборота "
+                "(для живого обновления context_window в UI)",
+        nanobot_target="nanobot.agent.loop.AgentLoop._state_build",
+        reason="_state_build — единственная гарантированная точка входа в "
+               "оборот до итераций",
+        alternatives_checked="AgentHook.before_run не получает runtime-context",
+        risk="medium",
+    ),
+    "async_save": PatchSpec(
+        name="async_save",
+        purpose="вынести sessions.save из event-loop в executor, чтобы "
+                "синхронный save не блокировал async-канал",
+        nanobot_target="nanobot.agent.loop.AgentLoop.sessions.save",
+        reason="nanobot вызывает sessions.save синхронно из async-методов; "
+               "публичного async-API нет",
+        alternatives_checked="AgentHook.after_run — слишком поздно",
+        risk="medium",
+    ),
+    "subagent_logging": PatchSpec(
+        name="subagent_logging",
+        purpose="проксировать tool-события подагентов в DbLoggingService + "
+                "персистить их историю",
+        nanobot_target="nanobot.agent.subagent._SubagentHook",
+        reason="_SubagentHook пишет только debug в loguru; БД-логирование "
+               "подагентов отсутствует",
+        alternatives_checked="AgentHook — не передаётся в AgentRunner.run() "
+                             "subagent'а",
+        risk="high",
+    ),
+    "project_tools": PatchSpec(
+        name="project_tools",
+        purpose="auto-discover + регистрация пользовательских tool'ов из "
+                "workspace/tools/*.py в AgentLoop.tools",
+        nanobot_target="nanobot.agent.tools.base.Tool, ToolRegistry, "
+                       "ToolContext",
+        reason="nanobot не имеет механизма подключения пользовательских "
+                       "tool-каталогов",
+        alternatives_checked="ToolLoader.discover — ищет только во встроенных "
+                             "пакетах",
+        risk="low",
+    ),
+    "compact_tracking": PatchSpec(
+        name="compact_tracking",
+        purpose="обернуть auto-compact так, чтобы он шёл через общий "
+                "ContextCompactionService (та же история, что и ручной /compact)",
+        nanobot_target="nanobot.agent.autocompact.AutoCompact._archive, "
+                       "nanobot.agent.memory.Consolidator"
+                       ".maybe_consolidate_by_tokens",
+        reason="AutoCompact/Consolidator не вызывают наш "
+               "ContextCompactionService; ручной /compact и auto-compact "
+               "расходятся в записях",
+        alternatives_checked="AgentHook.on_compact — не существует в nanobot "
+                             "0.3.0",
+        risk="medium",
+    ),
+    "compact_command": PatchSpec(
+        name="compact_command",
+        purpose="зарегистрировать /compact как настоящую slash-команду "
+                "(детерминированно до LLM)",
+        nanobot_target="nanobot.command.router.CommandRouter",
+        reason="без регистрации /compact уходит в LLM как user-сообщение и "
+               "модель часто отвечает текстом, не сжимая",
+        alternatives_checked="Tool 'compact' — LLM решает вызывать или нет",
+        risk="low",
+    ),
+    "idle_guard": PatchSpec(
+        name="idle_guard",
+        purpose="заглушить бесполезное list_sessions в check_expired при "
+                "выключенном idle-компакте (N+1 запросов вхолостую)",
+        nanobot_target="nanobot.agent.autocompact.AutoCompact.check_expired",
+        reason="AutoCompact всегда перечисляет сессии, даже когда idle-TTL=0; "
+               "публичного способа отключить нет",
+        alternatives_checked="config 'idleCompactAfterMinutes: 0' — не "
+                             "предотвращает сам list_sessions",
+        risk="low",
+    ),
+    "session_content_cleanup": PatchSpec(
+        name="session_content_cleanup",
+        purpose="чистить невалидные символы (NUL, control-chars) из контента "
+                "при Session.add_message",
+        nanobot_target="nanobot.session.manager.Session.add_message",
+        reason="add_message — единая точка, через которую в сессию попадают "
+               "user/assistant/tool; NUL-байты валят запись в PostgreSQL",
+        alternatives_checked="public sanitizer — отсутствует",
+        risk="low",
+    ),
+}
+
+
+_SKIPPABLE_REASONS: frozenset[str] = frozenset({
+    "agent is None",
+    "persist_threshold <= 0",
+    "exec_max_output_chars <= 0",
+    "read_file_max_chars <= 0",
+    "db_logging_service is None",
+    "gateway.compact.enabled=false",
+    "gateway.compact.notify_in_history=false",
+    "workspace/tools not found — skip",
+    "no project tools found",
+    "agent.auto_compact is missing",
+    "agent.commands is missing",
+    "auto_compact is missing",
+    "auto_compact.check_expired is missing",
+    "agent.sessions is missing",
+    "exec_session/shell module not loaded",
+    "filesystem/search module not loaded",
+})
+
+
+def _classify_skip(detail: str) -> bool:
+    """True, если причина — конфигуративный skip (а не реальный сбой).
+
+    ``_record`` использует это, чтобы решить: деталь попадает в
+    ``report.skipped`` или ``report.failed``. ``True`` = skip,
+    ``False`` = failed.
+    """
+    if detail in _SKIPPABLE_REASONS:
+        return True
+    if detail.startswith("idle compact enabled"):
+        return True
+    if detail.startswith("no project tools found"):
+        return True
+    if detail.startswith("[INTERNAL_FAILED]"):
+        return False
+    return False
+
+
 class PatchReport:
-    """Отчёт о применении патчей: что применено / пропущено / упало."""
+    """Отчёт о применении патчей: что применено / пропущено / упало.
+
+    Состояния:
+      * ``applied`` — патч успешно применён;
+      * ``skipped`` — патч не применён **по конфигурации** (порог = 0,
+        фича выключена и т.п.); это не дефект;
+      * ``failed`` — патч пытался примениться, но не смог (изменился API
+        nanobot, import error и т.п.); требует внимания.
+
+    Все состояния (включая applied) сохраняют деталь в ``details`` —
+    для дампа в startup-логе и для диагностики при апгрейде nanobot.
+    """
 
     def __init__(self) -> None:
         self.applied: list[str] = []
         self.skipped: list[tuple[str, str]] = []
         self.failed: list[tuple[str, str]] = []
+        self.details: dict[str, str] = {}
 
     def to_dict(self) -> dict:
         return {
             "applied": list(self.applied),
             "skipped": [list(t) for t in self.skipped],
             "failed": [list(t) for t in self.failed],
+            "details": dict(self.details),
         }
+
+    def render(self, *, specs: dict[str, PatchSpec] | None = None) -> str:
+        """Человекочитаемая сводка для startup-диагностики.
+
+        Формат:
+            Runtime patches
+            ----------------
+            ✓ context_governor
+            ✓ save_turn
+            ⚠ idle_guard skipped: idle compact enabled (ttl=180)
+            ✗ compact_tracking failed: import failed: ...
+
+        При наличии ``specs`` добавляется строка ``(purpose: ...)`` под
+        каждым failed, чтобы оператор сразу видел, зачем патч был нужен.
+        """
+        lines = ["Runtime patches", "-" * 16]
+        for name in self.applied:
+            lines.append(f"✓ {name}")
+            if specs and name in specs:
+                lines.append(f"    ({specs[name].purpose})")
+        for name, detail in self.skipped:
+            lines.append(f"⚠ {name} skipped: {detail}")
+            if specs and name in specs:
+                lines.append(f"    ({specs[name].purpose})")
+        for name, detail in self.failed:
+            lines.append(f"✗ {name} failed: {detail}")
+            if specs and name in specs:
+                lines.append(f"    ({specs[name].purpose})")
+        return "\n".join(lines)
 
 
 class RuntimePatcher:
@@ -173,16 +430,35 @@ class RuntimePatcher:
         return report
 
     @staticmethod
+    def patch_specs() -> dict[str, PatchSpec]:
+        """Метаданные всех зарегистрированных патчей.
+
+        Используется в startup-логах (через ``PatchReport.render(specs=...)``)
+        и при ручном аудите зависимости от nanobot. Ключи совпадают с
+        ``name`` в ``PatchReport``.
+        """
+        return dict(_PATCH_SPECS)
+
+    @staticmethod
     def _record(report: PatchReport, name: str, result: tuple[bool, str]) -> None:
         """Записать результат одного патча в ``PatchReport``.
 
-        True → ``applied``, False → ``skipped`` (с деталью-причиной).
+        ``True`` → ``applied`` (если в detail нет маркера
+        ``[INTERNAL_FAILED]``); ``False`` → ``skipped`` или ``failed``
+        в зависимости от причины (``_classify_skip``).
+        Маркер ``[INTERNAL_FAILED]`` в detail переклассифицирует
+        успешный патч (например, ``patch_project_tools`` с частичным
+        успехом) в ``failed``.
         """
         ok, detail = result
-        if ok:
+        report.details[name] = detail
+        if ok and not detail.startswith("[INTERNAL_FAILED]"):
             report.applied.append(name)
-        else:
+            return
+        if _classify_skip(detail):
             report.skipped.append((name, detail))
+        else:
+            report.failed.append((name, detail))
 
     @staticmethod
     def _format_workspace_hint(workspace_dir: Any) -> str:
@@ -1283,6 +1559,13 @@ class RuntimePatcher:
                 )
             if failed:
                 detail += f"; {len(failed)} failed: {', '.join(failed)}"
+            # Помечаем detail маркером ``[INTERNAL_FAILED]`` если внутри
+            # ``for cls in candidates`` хоть один tool упал на
+            # ``cls.enabled``/``cls.create``/``register``. Тогда
+            # ``_record`` классифицирует этот патч как failed, а не
+            # skipped (по умолчанию ``True`` → ``applied``).
+            if failed:
+                detail = "[INTERNAL_FAILED] " + detail
             # Логируем итог через INFO — иначе пользователь не видит,
             # что проектные tool'ы реально подхватились (в nanobot
             # ``Registered N tools`` логируется только для builtin
