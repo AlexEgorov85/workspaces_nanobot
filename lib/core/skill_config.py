@@ -129,6 +129,26 @@ def get_max_retries(skill_name: str) -> int:
     return int(cli_cfg.get("max_retries", 3))
 
 
+def get_chunking_config(skill_name: str) -> dict[str, Any]:
+    """Параметры map-reduce чанкинга из ``skills.<name>.chunking.*``.
+
+    Дефолты согласованы с прежней реализацией навыка ``legal_summarizer``
+    (chunk 12 000 симв., overlap 1 000, single-call threshold 20 000) и
+    с дефолтами ``lib.services.text_splitter.split_text`` для коротких
+    текстов (там ``chunk_size=500`` — но для LLM-prompt обычно
+    крупнее).
+    """
+    cfg = _skill_cfg(skill_name)
+    chunking_cfg = cfg.get("chunking") or {}
+    return {
+        "chunk_size": int(chunking_cfg.get("chunk_size", 12000)),
+        "chunk_overlap": int(chunking_cfg.get("chunk_overlap", 1000)),
+        "single_call_threshold": int(
+            chunking_cfg.get("single_call_threshold", 20000)
+        ),
+    }
+
+
 def get_in_memory_cache_path(skill_root: Path | str) -> str:
     """Путь к единому DuckDB-снапшоту runtime-кэша.
 

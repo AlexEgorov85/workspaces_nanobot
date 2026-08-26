@@ -206,6 +206,35 @@
         "max_tokens": 8192,
         "temperature": 0.1
       }
+    },
+
+    // -------------------------------------------------------------------------
+    //  legal_summarizer — суммаризация юридических документов (PDF/DOCX/TXT).
+    //  Извлечение текста — workspace.utils.office_files.extract_text;
+    //  чанкинг — lib.services.text_splitter.split_text;
+    //  LLM-клиент — lib.services.llm_client.call_llm.
+    //  У skill'а нет PG-таблиц, поэтому tables[] пуст и регистрация в
+    //  TableRegistry пропускается автоматически.
+    // -------------------------------------------------------------------------
+    "legal_summarizer": {
+      "enabled": true,
+
+      "cli": {                                       // legal_summarize --length ...
+        "default_length": "medium",                  // brief | medium | detailed
+        "timeout_sec": 120,
+        "max_retries": 3
+      },
+
+      "llm": {                                       // Execution policy для саммари.
+        "max_tokens": 8192,
+        "temperature": 0.1
+      },
+
+      "chunking": {                                  // Map-reduce пороги для длинных документов.
+        "chunk_size": 12000,                         // Размер чанка в символах для одного LLM-вызова
+        "chunk_overlap": 1000,                       // Перекрытие соседних чанков
+        "single_call_threshold": 20000               // Ниже этого — single-call, выше — map-reduce
+      }
     }
   },
 

@@ -368,6 +368,21 @@ class SkillLlmSettings(_StrictOptional):
     temperature: float | None = Field(default=None, ge=0, le=2)
 
 
+class SkillChunkingSettings(_StrictOptional):
+    """Секция ``chunking`` — параметры map-reduce чанкинга для длинных текстов (необязательно).
+
+    Управляет поведением ``lib.services.text_splitter.split_text``
+    внутри skill'а: для текстов короче ``single_call_threshold`` —
+    один вызов LLM; для длиннее — разбиение с перекрытием.
+    Используется навыком ``legal_summarizer`` (map-reduce LLM).
+    ``text_splitter`` для эмбеддингов живёт отдельно в ``vector.*``.
+    """
+
+    chunk_size: int | None = Field(default=None, gt=0)
+    chunk_overlap: int | None = Field(default=None, ge=0)
+    single_call_threshold: int | None = Field(default=None, gt=0)
+
+
 class SkillSettings(BaseModel):
     """Универсальная декларация навыка в ``project.json::skills.<name>``.
 
@@ -406,6 +421,7 @@ class SkillSettings(BaseModel):
     vector_indexes: list[VectorIndexEntry] | None = None
     cli: SkillCliSettings | None = None
     llm: SkillLlmSettings | None = None
+    chunking: SkillChunkingSettings | None = None
 
 
 class SkillsSettings(_StrictOptional):
