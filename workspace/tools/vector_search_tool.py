@@ -37,10 +37,11 @@ from __future__ import annotations
 import json
 from typing import Any, ClassVar, Optional
 
+from nanobot.agent.tools.base import Tool, tool_parameters
 from pydantic import BaseModel, Field
 
+from lib.services.cache_provider import IndexIntegrityError
 from lib.utils.text_utils import sanitize_value, truncate_middle
-from nanobot.agent.tools.base import Tool, tool_parameters
 
 
 class VectorSearchToolConfig(BaseModel):
@@ -225,6 +226,13 @@ class VectorSearchTool(Tool):
             return self._error(
                 "missing_index",
                 f"index '{index_name}' is not registered or unreachable",
+            )
+        except IndexIntegrityError as exc:
+            # Устаревший/повреждённый векторный индекс блокируется провайдером;
+            # клиент видит конкретный error_type и reason для пересборки.
+            return self._error(
+                f"{exc.status.lower()}_index",
+                f"vector index '{exc.index_name}' is {exc.status}: {exc.reason}",
             )
         except Exception as exc:
             return self._error("search_failure", str(exc))

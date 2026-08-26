@@ -12,6 +12,8 @@ from typing import Any
 
 import pytest
 
+from lib.services.cache_provider import IndexIntegrityError
+
 from workspace.tools.vector_search_tool import (
     VectorSearchTool,
     VectorSearchToolConfig,
@@ -241,6 +243,23 @@ class TestExecuteFailures:
         payload = json.loads(_exec(tool, query="q", index_name="idx", threshold=1.5))
         assert payload["status"] == "error"
         assert payload["error_type"] == "invalid_input"
+
+    def test_index_integrity_error_mapped_to_specific_type(self):
+        """IndexIntegrityError → контролируемая ошибка (stale_index/invalid_index)."""
+        class _StaleProvider(_FakeProvider):
+            def search_vector(self, **kwargs):
+                raise IndexIntegrityError(
+                    "audits_index", "STALE",
+                    "embedding model changed; rebuild via tools/build_vectors.py",
+                )
+
+        tool = _make_tool()
+        tool.set_provider(_StaleProvider())
+        payload = json.loads(_exec(tool, query="q", index_name="audits_index"))
+        assert payload["status"] == "error"
+        assert payload["error_type"] == "stale_index"
+        assert "audits_index" in payload["message"]
+        assert "rebuild" in payload["message"]
 
     def test_result_truncated_marker(self):
         tool = _make_tool(max_result_chars=200)
