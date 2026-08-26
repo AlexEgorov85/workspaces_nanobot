@@ -44,6 +44,28 @@ from lib.services.cache_provider import IndexIntegrityError
 from lib.utils.text_utils import sanitize_value, truncate_middle
 
 
+def _available_index_names() -> str:
+    """Список имён индексов из ``public.agent_vector_index_config`` (PG).
+
+    Для подсказок в error-сообщениях tool'а: вместо hardcoded-домен-имён
+    показывает реально зарегистрированные индексы из runtime-БД.
+    При недоступной PG / пустой конфигурации — fallback без падения.
+    """
+    try:
+        from lib.services.cache_provider_impl import read_vector_index_config
+
+        names = sorted(read_vector_index_config({}).keys())
+        if names:
+            return ", ".join(names)
+        return (
+            "(нет индексов в public.agent_vector_index_config — "
+            "настройте gateway.vector.index.storage_table и "
+            "tools/build_vectors.py)"
+        )
+    except Exception as exc:
+        return f"(не удалось прочитать agent_vector_index_config: {exc})"
+
+
 class VectorSearchToolConfig(BaseModel):
     """Конфиг секции ``gateway.vector_search`` в ``project.json``."""
 
@@ -212,7 +234,10 @@ class VectorSearchTool(Tool):
         if provider is None:
             return self._error(
                 "missing_provider",
-                "no CacheProvider injected; call set_provider(...) first",
+                "vector_search tool не подключён к CacheProvider "
+                "(см. RuntimePatcher.patch_project_tools и "
+                "gateway.vector.index.storage_table в project.json). "
+                f"Available indexes from settings: {_available_index_names()}",
             )
 
         try:
@@ -225,14 +250,16 @@ class VectorSearchTool(Tool):
         except AttributeError:
             return self._error(
                 "missing_index",
-                f"index '{index_name}' is not registered or unreachable",
+                f"index '{index_name}' is not registered or unreachable. "
+                f"Available indexes from settings: {_available_index_names()}",
             )
         except IndexIntegrityError as exc:
             # Устаревший/повреждённый векторный индекс блокируется провайдером;
             # клиент видит конкретный error_type и reason для пересборки.
             return self._error(
                 f"{exc.status.lower()}_index",
-                f"vector index '{exc.index_name}' is {exc.status}: {exc.reason}",
+                f"vector index '{exc.index_name}' is {exc.status}: {exc.reason}. "
+                f"Available indexes from settings: {_available_index_names()}",
             )
         except Exception as exc:
             return self._error("search_failure", str(exc))

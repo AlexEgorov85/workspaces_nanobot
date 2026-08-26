@@ -222,11 +222,32 @@ class DuckdbQueryTool(Tool):
                 except Exception:
                     pass
         else:
+            # В подсказке показываем таблицы, зарегистрированные в
+            # TableRegistry из project.json::skills.* и
+            # gateway.vector.index.storage_table — это универсальный
+            # список из настроек, не hardcoded домен-имена.
+            try:
+                from lib.services.table_registry import table_registry
+
+                names = (
+                    list(table_registry.table_names())
+                    + list(table_registry.vector_names())
+                )
+                if names:
+                    available = ", ".join(names)
+                else:
+                    available = (
+                        "(нет таблиц в TableRegistry — проверьте skills.* "
+                        "и gateway.vector.index.storage_table в project.json)"
+                    )
+            except Exception:
+                available = "(не удалось прочитать TableRegistry)"
             return self._error(
                 "missing_infrastructure",
-                "duckdb_query tool is not wired to a DuckDB cache_store; "
-                "configure gateway.vector.index.storage_table and ensure the "
-                "DuckDB cache is available",
+                "duckdb_query tool не подключён к DuckDB-кешу. "
+                "Настройте gateway.vector.index.storage_table в project.json "
+                "и убедитесь, что TableRegistry заполнен. "
+                f"Доступные таблицы из настроек: {available}",
             )
 
         sanitized_rows = [
