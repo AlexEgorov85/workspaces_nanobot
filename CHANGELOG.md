@@ -326,6 +326,22 @@
 - `lib.core.infra_registration.INFRA_KEY_VECTOR_STORAGE` —
   `"vector_index.storage"` → `"vector.storage"`.
 
+#### Added (follow-up: auth_token by default)
+
+- **`project.json::gateway.vector.embedding.auth_token`** теперь задан
+  как `"${EMBED_TOKEN}"` по умолчанию. Если в `.secrets.env` есть
+  `EMBED_TOKEN` — подставится в `Authorization: Bearer <token>`.
+- **`cache_provider_impl.get_embedding()`** — guard от неразрешённого
+  `${VAR}`-плейсхолдера: если `auth_token` после `.strip()` начинается
+  с `${`, трактуется как «без авторизации». Без этого локальный Ollama
+  без reverse proxy получал бы `Authorization: Bearer ${EMBED_TOKEN}`
+  и падал с 401.
+- **`.secrets.env.example`** — `EMBED_TOKEN=YOUR_EMBED_TOKEN`
+  раскомментирован как шаблон. Пустое значение безопасно для локального
+  Ollama (см. выше guard).
+- **`tests/test_get_embedding_auth.py`** — 6 тестов на ветки
+  `base_url`/`auth_token`/`${placeholder}`/empty/whitespace.
+
 ## [2.4.0] — 2026-08-20
 
 > **MINOR-релиз:** метрика занятости контекстного окна (`metadata.context_window`),

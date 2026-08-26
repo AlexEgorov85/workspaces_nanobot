@@ -72,7 +72,13 @@ def get_embedding(text: str) -> list[float] | None:
     model = cfg.get("model") or "mxbai-embed-large:latest"
     timeout_sec = float(cfg.get("timeout_sec") or 60.0)
     retries = int(cfg.get("max_retries") or 3)
-    auth_token = (cfg.get("auth_token") or "").strip()
+    auth_token_raw = (cfg.get("auth_token") or "").strip()
+    # Неразрешённый ${VAR}-плейсхолдер (env-переменная не задана) трактуем
+    # как «без авторизации» — иначе локальный Ollama без токена получит
+    # ``Authorization: Bearer ${EMBED_TOKEN}`` и сломается.
+    auth_token = auth_token_raw if (
+        auth_token_raw and not auth_token_raw.startswith("${")
+    ) else ""
 
     def _embed() -> list[float] | None:
         import httpx

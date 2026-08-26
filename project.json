@@ -357,10 +357,8 @@
         "base_url": "http://localhost:11434/api/embed",
         "model": "mxbai-embed-large:latest",
         "dimension": 1024,
-        "http_timeout_sec": 60
-        // auth_token не задан: локальный Ollama без авторизации.
-        // Для reverse-proxy: добавить "auth_token": "${EMBED_TOKEN}"
-        // и EMBED_TOKEN в .secrets.env.
+        "http_timeout_sec": 60,
+        "auth_token": "${EMBED_TOKEN}"
       },
       "index": {
         "enable": true,
