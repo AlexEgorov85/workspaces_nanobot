@@ -30,24 +30,24 @@ Coding-agent обязан сверять любое существенное и�
 
 Целевая модель:
 
-```text
-                         nanobot-ai
-                             |
-          +------------------+------------------+
-          |                  |                  |
-       AgentLoop          Tool Registry     Skill System
-          |                  |                  |
-          +------------------+------------------+
-                             |
-                   workspaces_nanobot
-                             |
-          +------------------+------------------+
-          |                  |                  |
-       Channels          Infrastructure       Domain Skills
-          |                  |                  |
-      PostgreSQL         DuckDB/FAISS       audit_analyzer
-      Redis              DB/Vector          other skills
-      etc.               services
+```mermaid
+flowchart TB
+    NB["nanobot-ai - generic agent runtime"]
+    NB --> AL["AgentLoop"]
+    NB --> TR["Tool Registry"]
+    NB --> SK["Skill System"]
+    AL --> WN["workspaces_nanobot - integration layer (lib/core)"]
+    TR --> WN
+    SK --> WN
+    WN --> CH["Channels: PostgresChannel, RedisChannel"]
+    WN --> INF["Infrastructure: DuckDB, FAISS (lib/services)"]
+    WN --> DS["Domain Skills: audit_analyzer, ..."]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef ext fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class NB,AL,TR,SK core
+    class WN ext
+    class CH,INF,DS infra
 ```
 
 Проект должен использовать возможности `nanobot-ai`, а не копировать их.
@@ -240,17 +240,13 @@ from workspace.tools import ...
 
 Связь Skill и Tool происходит через agent runtime:
 
-```text
-SKILL instructions
-        |
-        v
-      Agent
-        |
-        v
-   selects Tool
-        |
-        v
-Tool executes capability
+```mermaid
+flowchart TD
+    SK["SKILL.md (audit_analyzer)"] --> AG["Agent (nanobot AgentLoop)"]
+    AG -->|выбирает| TL["Tool: duckdb_query / vector_search"]
+    TL -->|выполняет| EX["Tool executes capability"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    class SK,AG,TL,EX core
 ```
 
 Skill не вызывает Tool программно.
@@ -263,12 +259,15 @@ Skill не вызывает Tool программно.
 
 Принцип:
 
-```text
-Skill A ----+
-            |
-Skill B ----+----> shared service/repository
-            |
-Tool   -----+
+```mermaid
+flowchart LR
+    SA["Skill: audit_analyzer"] --> SVC["Shared service (lib/services)"]
+    SB["Skill: other"] --> SVC
+    TL["Tool: duckdb_query"] --> SVC
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class SA,SB,TL core
+    class SVC infra
 ```
 
 Общий код должен быть нейтральным к конкретному Skill.
@@ -422,16 +421,17 @@ Skill должен знать domain context:
 
 Для `audit_analyzer` целевая логика:
 
-```text
-User request
-    |
-    +-- structured aggregation/filter/grouping --> duckdb_query
-    |
-    +-- semantic retrieval/search                --> vector_search
-    |
-    +-- retrieval + analysis                    --> vector_search -> duckdb_query
-    |
-    +-- complex analytical request              --> duckdb_query
+```mermaid
+flowchart TD
+    U["Запрос пользователя"] --> D{выбор capability}
+    D -->|агрегация / фильтр / группировка| Q["duckdb_query"]
+    D -->|семантический поиск| V["vector_search"]
+    D -->|поиск и анализ| VQ["vector_search + duckdb_query"]
+    D -->|сложный аналитический запрос| Q2["duckdb_query"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class U,D core
+    class Q,V,VQ,Q2 infra
 ```
 
 Если конкретный сценарий лучше решается predefined workflow внутри Skill, Skill может использовать собственный script.
@@ -470,12 +470,13 @@ Script не должен регистрировать Tool и не должен 
 
 Использовать progressive disclosure:
 
-```text
-SKILL.md
-    |
-    +--> references/schema.md
-    +--> references/vector_indexes.md
-    +--> references/reports.md
+```mermaid
+flowchart TD
+    SK["SKILL.md (audit_analyzer)"] --> R1["references/schema.md"]
+    SK --> R2["references/vector_indexes.md"]
+    SK --> R3["references/reports.md"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    class SK,R1,R2,R3 core
 ```
 
 `SKILL.md` должен содержать правила принятия решений и основную процедуру.
@@ -494,10 +495,14 @@ CLI не должен зависеть от nanobot runtime только рад�
 
 Целевая модель:
 
-```text
-CLI -----> Skill/scripts/shared service
-
-Agent ---> Tools/shared service
+```mermaid
+flowchart LR
+    CLI["cli_agent.py"] --> SK["Skill / scripts / shared service"]
+    AG["gateway.py (Agent)"] --> TL["Tools: duckdb_query / vector_search"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class CLI,AG core
+    class SK,TL infra
 ```
 
 Оба пути могут использовать общий infrastructure/domain code, но не должны вызывать друг друга.
@@ -558,18 +563,14 @@ PG Session Manager
 
 Целевая модель:
 
-```text
-PostgreSQL
-    = canonical durable source of truth
-
-DuckDB
-    = local analytical/read cache or snapshot
-
-FAISS
-    = derived vector index
-
-Filesystem
-    = artifacts and session files where applicable
+```mermaid
+flowchart TB
+    PG[("PostgreSQL")] --- L1["canonical source of truth (данные аудита)"]
+    DUCK[("DuckDB")] --- L2["локальный кеш / снимок cache.duckdb"]
+    FAISS[("FAISS")] --- L3["производный векторный индекс"]
+    FS[("Filesystem")] --- L4["артефакты и сессии (data_store)"]
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class PG,DUCK,FAISS,FS infra
 ```
 
 Производные данные должны быть восстановимыми из canonical source.
@@ -587,15 +588,15 @@ domain/infrastructure integration component.
 
 Целевая цепочка:
 
-```text
-PostgreSQL
-    |
-    v
-PgDuckDbSyncService
-    |
-    +--> DuckDB snapshot/cache
-    |
-    +--> vector index update/build
+```mermaid
+flowchart LR
+    PG[("PostgreSQL")] --> SYNC["PgDuckDbSyncService - синхронизация"]
+    SYNC --> SNAP["DuckDB snapshot / cache.duckdb"]
+    SYNC --> VIDX["FAISS индекс (build_vectors.py)"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class SYNC core
+    class PG,SNAP,VIDX infra
 ```
 
 Он не должен зависеть от AgentLoop.
@@ -633,15 +634,13 @@ Policy должна находиться ниже Skill, чтобы ошибка
 
 Конфигурация разделяется на три смысловых уровня.
 
-```text
-nanobot configuration
-    = настройки generic runtime
-
-project configuration
-    = настройки workspaces integration
-
-secrets
-    = credentials only
+```mermaid
+flowchart TB
+    NB["nanobot config (config.json) - generic runtime"]
+    PR["project config (project.json) - workspaces integration"]
+    SE["secrets (.secrets.env) - только credentials"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    class NB,PR,SE core
 ```
 
 Не смешивать их без необходимости.
@@ -719,35 +718,37 @@ test
 
 Целевая зависимость:
 
-```text
-                    nanobot runtime
-                           ^
-                           |
-                    integration layer
-                           ^
-                           |
-                shared infrastructure
-                    ^              ^
-                    |              |
-                 Skills          Tools
+```mermaid
+flowchart TB
+    NB["nanobot-ai (runtime)"] --> IL["workspaces_nanobot (lib/core)"]
+    IL --> SI["shared infrastructure (lib/services)"]
+    SI --> SK["Skills: audit_analyzer"]
+    SI --> TL["Tools: duckdb_query, vector_search"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef ext fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class NB,IL core
+    class SI infra
+    class SK,TL infra
 ```
 
 Но domain-specific Skills и generic Tools не должны зависеть друг от друга.
 
 Более точная practical model:
 
-```text
-                    +------------------+
-                    |   nanobot-ai     |
-                    +---------+--------+
-                              |
-                 +------------+-------------+
-                 |                          |
-              Skills                      Tools
-                 |                          |
-                 +------------+-------------+
-                              |
-                     Shared infrastructure
+```mermaid
+flowchart TB
+    NB["nanobot-ai"] --> IL["integration layer (lib/core)"]
+    IL --> SI["shared infrastructure (lib/services)"]
+    SI --> SK["Skills: audit_analyzer"]
+    SI --> TL["Tools: duckdb_query, vector_search"]
+    SK -.не зависят.-> TL
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef ext fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class NB,IL core
+    class SI infra
+    class SK,TL infra
 ```
 
 `Shared infrastructure` не должен быть скрытым business layer.
@@ -856,11 +857,13 @@ Skill должен быть полезен как самостоятельный
 
 Правило:
 
-```text
-metadata
-   -> SKILL.md
-      -> references
-         -> specific resource
+```mermaid
+flowchart TD
+    M["metadata"] --> SK["SKILL.md"]
+    SK --> REF["references"]
+    REF --> RES["specific resource"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    class M,SK,REF,RES core
 ```
 
 Большие schema, длинные examples и технические справочники должны быть вынесены из основного Skill instructions.
@@ -950,23 +953,15 @@ Tool -> Skill
 
 Поэтому upgrade должен проходить так:
 
-```text
-new nanobot version
-      |
-      v
-contract tests
-      |
-      v
-integration tests
-      |
-      v
-full test suite
-      |
-      v
-manual smoke test
-      |
-      v
-adopt version
+```mermaid
+flowchart TD
+    V["new nanobot version"] --> C["contract tests"]
+    C --> I["integration tests"]
+    I --> F["full test suite (pytest)"]
+    F --> M["manual smoke test"]
+    M --> A["adopt version"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    class V,C,I,F,M,A core
 ```
 
 Не обновлять nanobot и одновременно переписывать половину проекта без необходимости.
