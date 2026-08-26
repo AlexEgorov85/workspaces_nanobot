@@ -428,18 +428,34 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
             )
         # Проверяем тип storage. PGSessionManager — есть PG; file fallback — DOWN.
         cls = type(sm).__name__
-        if "PG" in cls or "Postgres" in cls:
+        if not ("PG" in cls or "Postgres" in cls):
+            return ComponentStatus(
+                name="postgres", required=True, status="DOWN",
+                detail=f"storage degraded to {cls}",
+            )
+        # Реальный ping через пул соединений, а не только тип storage-класса.
+        try:
+            import sys
+            from pathlib import Path
+
+            _ws = Path(__file__).resolve().parents[2] / "workspace"
+            if str(_ws) not in sys.path:
+                sys.path.insert(0, str(_ws))
+            from utils.db import fetch
+
+            fetch("SELECT 1")
             return None  # UP без detail
-        return ComponentStatus(
-            name="postgres", required=True, status="DOWN",
-            detail=f"storage degraded to {cls}",
-        )
+        except Exception as exc:
+            return ComponentStatus(
+                name="postgres", required=True, status="DOWN",
+                detail=f"pg ping failed: {type(exc).__name__}: {exc}",
+            )
 
     def check_duckdb_cache() -> ComponentStatus | None:
         cs = getattr(ctx, "cache_store", None)
         if cs is None:
             return ComponentStatus(
-                name="duckdb_cache", required=False, status="DOWN",
+                name="duckdb_cache", required=True, status="DOWN",
                 detail="no cache_store (sync disabled or no resources)",
             )
         is_ready = getattr(cs, "is_ready", None)
@@ -448,12 +464,12 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
                 if is_ready():
                     return None
                 return ComponentStatus(
-                    name="duckdb_cache", required=False, status="DOWN",
+                    name="duckdb_cache", required=True, status="DOWN",
                     detail="cache_store.is_ready()=False",
                 )
             except Exception as exc:
                 return ComponentStatus(
-                    name="duckdb_cache", required=False, status="DOWN",
+                    name="duckdb_cache", required=True, status="DOWN",
                     detail=f"is_ready failed: {type(exc).__name__}: {exc}",
                 )
         return None  # нет is_ready — считаем UP
@@ -473,7 +489,7 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
         return None
 
     ctx.runtime_readiness.register("postgres", check_postgres, required=True)
-    ctx.runtime_readiness.register("duckdb_cache", check_duckdb_cache, required=False)
+    ctx.runtime_readiness.register("duckdb_cache", check_duckdb_cache, required=True)
     ctx.runtime_readiness.register("vector_search", check_vector_search, required=False)
 
 
@@ -609,6 +625,10 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     reconnect_backoff_max = float(sync_cfg.get("reconnect_backoff_max_sec", 0) or 0)
     full_resync_every = int(sync_cfg.get("full_resync_every", 0) or 0)
 
+    vector_cfg = (ctx.config_service.settings_section("gateway") or {}).get("vector") or {}
+    index_cfg = vector_cfg.get("index") or {}
+    storage_table = (index_cfg.get("storage_table") or "").strip()
+
     sync_tables = list(dict.fromkeys(all_table_names + vector_names))
 
     store = DuckDbCacheStore(
@@ -617,6 +637,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         schema=schemas[0] if schemas else "main",
         tables=all_table_names or None,
         vector_db_table=vector_names[0] if vector_names else "",
+        vector_store_table=storage_table,
         embedding_base_url=embedding_base_url,
         embedding_model=embedding_model,
         embedding_dimension=embedding_dimension,
