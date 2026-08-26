@@ -1,6 +1,7 @@
 # 🗃 База данных, пул соединений и SQL-скрипты
 
-> Перенесено из `DEVELOPMENT.md`. Навигационный хаб — в корне `DEVELOPMENT.md`.
+> Навигационный индекс каталога `docs/` — в [`README.md`](README.md). Этот документ —
+> самодостаточное описание подсистемы.
 
 ## 🔌 Универсальный слой данных lib/services
 
@@ -330,7 +331,7 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 
 ## 🗃 SQL-скрипты: создание таблиц
 
-Все DDL собраны в корневом каталоге [`sql/`](sql/). Каталог, порядок применения, совместимость — в [`sql/README.md`](sql/README.md). Здесь только краткая сводка по новой структуре v2.
+Все DDL собраны в корневом каталоге [`../sql/`](../sql/). Каталог, порядок применения, совместимость — в [`../sql/README.md`](../sql/README.md). Здесь только краткая сводка по новой структуре v2.
 
 ### Совместимость с Greenplum 6.5+
 
@@ -447,5 +448,5 @@ Pydantic-модель `ProjectSettings` поверх merged SETTINGS; вызыв
 Runner: `python tools/migrate.py --status|--dry-run|--apply|--verify|--baseline`
 (DSN: `DATABASE_URL` или `channels.postgres.dsn`). Drift применённого
 файла блокирует apply без `--force`. Существующая БД штампуется через
-`--baseline` (V001 не содержит DDL). Подробности: [sql/README.md](sql/README.md).
+`--baseline` (V001 не содержит DDL). Подробности: [../sql/README.md](../sql/README.md).
 Тесты: `tests/test_migrations.py`.

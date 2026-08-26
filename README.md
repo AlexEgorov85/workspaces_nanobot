@@ -79,7 +79,7 @@ flowchart TB
 
 ```
 nanobot/
-├── README.md  DEVELOPMENT.md  CHANGELOG.md  AGENTS.md
+├── README.md  CHANGELOG.md  AGENTS.md
 ├── config.json  project.json  config.py        # 3 конфига
 ├── gateway.py  cli_agent.py  streamlit_app.py  # точки входа
 ├── lib/                          # сервисный слой: core, services, cli, hooks,
@@ -138,10 +138,9 @@ pytest tests/ --cov=lib --cov-report=term-missing
 
 | Документ | Назначение |
 |---|---|
-| **[DEVELOPMENT.md](DEVELOPMENT.md)** | Навигационный хаб разработчика (компактный); вся глубокая документация — в `docs/` |
+| **[docs/README.md](docs/README.md)** | Навигационный индекс каталога документации (разделы, нормативная архитектура, конвенции) |
+| **[docs/TARGET_ARCHITECTURE.md](docs/TARGET_ARCHITECTURE.md)** | Нормативный архитектурный контракт (принципы, invariant'ы, anti-patterns, decision-чеклист) |
 | **[CHANGELOG.md](CHANGELOG.md)** | История релизов (Keep a Changelog / SemVer) |
-| **[TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md)** | Целевая архитектура |
-| **[docs/README.md](docs/README.md)** | Навигационный индекс каталога `docs/` |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Диагностический runbook |
 | **[docs/MIGRATION.md](docs/MIGRATION.md)** | Сводка изменений между релизами + breaking changes |
 | **[docs/table-registry.md](docs/table-registry.md)** | Реестр таблиц PG → DuckDB |

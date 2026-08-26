@@ -58,7 +58,7 @@ _MEDIA_TOOLS: frozenset[str] = frozenset({"message"})
 _ALLOWED_FILES: ClassVar[set[str]] = {
     "AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md",
     "HEARTBEAT.md", "MEMORY.md", "README.md", "CHANGELOG.md",
-    "DEVELOPMENT.md", "project.json", "config.json", "pyproject.toml",
+    "project.json", "config.json", "pyproject.toml",
 }
 
 _ALLOWED_PREFIXES: ClassVar[tuple[str, ...]] = (

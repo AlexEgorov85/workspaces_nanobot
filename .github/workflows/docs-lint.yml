@@ -26,15 +26,6 @@ jobs:
             exit 1
           fi
 
-      - name: Check DEVELOPMENT.md size (≤ 150 строк, хаб)
-        run: |
-          lines=$(wc -l < DEVELOPMENT.md)
-          echo "DEVELOPMENT.md: ${lines} lines"
-          if [ "$lines" -gt 150 ]; then
-            echo "::error::DEVELOPMENT.md is too large (${lines} > 150 lines). It is a navigation hub — move content to docs/"
-            exit 1
-          fi
-
       - name: Check no Pandoc anchors
         run: |
           if grep -nE '\(#[^)]+\)\{#' README.md docs/*.md docs/**/*.md 2>/dev/null; then

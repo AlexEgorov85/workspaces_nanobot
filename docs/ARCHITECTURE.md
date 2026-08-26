@@ -1,10 +1,11 @@
-# 🏗 Архитектура и сервисный слой
+﻿# 🏗 Архитектура и сервисный слой
 
-> Перенесено из `DEVELOPMENT.md`. Навигационный хаб — в корне `DEVELOPMENT.md`.
+> Навигационный индекс каталога `docs/` — в [`README.md`](README.md). Этот документ —
+> самодостаточное описание подсистемы.
 >
 > **Это описание текущей реализации («as-is»).** Нормативная целевая архитектура
 > (принципы, invariant'ы, anti-patterns, decision-чеклист) — отдельный контракт
-> [TARGET_ARCHITECTURE.md](../TARGET_ARCHITECTURE.md). Правила и «как должно быть»
+> [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md). Правила и «как должно быть»
 > ищите там; здесь — только то, как оно работает сейчас.
 
 ## 🏗 Архитектура
@@ -972,7 +973,7 @@ read→persist→read петли).
 
 При добавлении нового канала: наследовать `nanobot.channels.base.BaseChannel`
 и делегировать `start/stop/send/send_delta/poll_once` в `MessageExchange`.
-Подробнее — [`lib/channels/README.md`](lib/channels/README.md).
+Подробнее — [`../lib/channels/README.md`](../lib/channels/README.md).
 
 ### Мульти-машинный пул воркеров (аренда задач через `agent_worker_claims`)
 
@@ -1233,7 +1234,7 @@ file_size}` (payload → `data_store/cache/sessions/_shared/attachments/`,
 
 ```
 nanobot/
-├── DEVELOPMENT.md                        # этот документ
+├── docs/                                  # каталог технической документации (навигация — docs/README.md)
 ├── tools/                                # инфраструктурные CLI-утилиты
 │   └── build_vectors.py                  #   сборка векторных индексов (вне навыка)
 ├── sql/                                  # DDL сгруппированы по доменам
