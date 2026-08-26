@@ -434,6 +434,10 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
                 detail=f"storage degraded to {cls}",
             )
         # Реальный ping через пул соединений, а не только тип storage-класса.
+        # Используем прямой submit с таймаутом, чтобы при недоступном PG
+        # readiness-чек не зависал на внутренних backoff-ретраях воркера
+        # (psycopg2.connect + connect_max_retries могут занять десятки секунд,
+        # а ``fetch().get()`` блокирует навсегда).
         try:
             import sys
             from pathlib import Path
@@ -441,9 +445,20 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
             _ws = Path(__file__).resolve().parents[2] / "workspace"
             if str(_ws) not in sys.path:
                 sys.path.insert(0, str(_ws))
-            from utils.db import fetch
+            from utils.db import _get_manager, _Job
 
-            fetch("SELECT 1")
+            def _ping(conn: Any) -> Any:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    return cur.fetchone()
+
+            job = _get_manager()._submit(_Job(_ping, tag="readiness.postgres"))
+            result = job.result.get(timeout=2.0)
+            if result is None:
+                return ComponentStatus(
+                    name="postgres", required=True, status="DOWN",
+                    detail="pg ping timeout (2s)",
+                )
             return None  # UP без detail
         except Exception as exc:
             return ComponentStatus(
