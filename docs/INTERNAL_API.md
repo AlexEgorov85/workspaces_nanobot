@@ -341,10 +341,11 @@ audit_analyze --mode vector --query 'пожарная безопасность' 
 audit_analyze --mode vector --query 'статусы аудитов' --index-name audits_index --threshold 0.7
 ```
 
-**Как выбирается бэкенд запросов:** если `in_memory_enabled: true` — CLI строит
-провайдера (`build_cache_provider()`), открывает DuckDB-кеш на чтение и работает
-по нему; иначе — `Database` (прямой PostgreSQL). Кеш создаёт и обновляет
-**gateway** (см. раздел «Жизненный цикл кеша»); CLI про это не знает. Если файла
+**Как выбирается бэкенд запросов:** CLI строит провайдера
+(`build_cache_provider()`), открывает опубликованный gateway DuckDB-снапшот
+(путь через `table_registry.snapshot_path()`) на чтение и работает по нему;
+иначе — `Database` (прямой PostgreSQL). Кеш создаёт и обновляет
+**gateway** (см. [DATABASE.md](DATABASE.md#-жизненный-цикл-кеша)); CLI про это не знает. Если файла
 кеша нет — CLI завершается с `FileNotFoundError`: «Кеш создаёт и обновляет
 gateway автоматически — запустите его (python gateway.py)».
 

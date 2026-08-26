@@ -262,13 +262,17 @@ Skill может объявить свою метку и находить соо
 
 ### Пример: audit_analyzer + scripts_registry
 
-В `project.json`:
+В `project.json` (секция `skills.audit_analyzer`, имена таблиц — настраиваемые):
 
 ```json
-"db": {
-  "schema": "oarb",
-  "tables": ["audits", "violations"],
-  "predefined_scripts_table": "public.agent_predefined_scripts"
+"skills": {
+  "audit_analyzer": {
+    "tables": [
+      {"name": "oarb.audits"},
+      {"name": "oarb.violations"},
+      {"name": "public.agent_predefined_scripts", "label": "scripts_registry"}
+    ]
+  }
 }
 ```
 
@@ -278,15 +282,11 @@ Skill может объявить свою метку и находить соо
 - `TableResource(name="oarb.violations")` (label=None)
 - `TableResource(name="public.agent_predefined_scripts", label="scripts_registry")`
 
-`audit_analyzer/scripts/db_loader.py` использует:
+`audit_analyzer/scripts/db_loader.py` использует единый API реестра:
 
 ```python
-from skill_config import get_predefined_scripts_table  # → "public.agent_predefined_scripts"
-```
-
-Внутри `get_predefined_scripts_table()` (см. `workspace/skills/audit_analyzer/scripts/skill_config.py`):
-
-```python
+from lib.core.skill_config import get_db_tables  # таблицы skill'а
+# либо точечно для реестра скриптов:
 rs = table_registry.resources_by_label("scripts_registry")
 if rs:
     return rs[0].name

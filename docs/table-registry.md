@@ -64,7 +64,8 @@ Resource Model решает это так: skill — это **деклараци
 ```
 
 Какие индексы строить и из каких source-таблиц — описывается в
-`public.agent_vector_index_config` (runtime-БД), это **инфраструктурная
+`public.agent_vector_index_config` (runtime-БД, имя настраивается через
+`gateway.vector.index.config_table`), это **инфраструктурная
 декларация**, не часть skill'а.
 
 ## Resource: декларативная модель

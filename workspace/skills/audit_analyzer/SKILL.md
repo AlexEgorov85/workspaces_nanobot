@@ -78,9 +78,14 @@ python scripts/cli.py --mode vector --query "финансовые нарушен
 
 ## Доменные таблицы и индексы
 
+> Имена таблиц и индексов ниже — значения текущей инсталляции, настраиваемые в
+> `project.json` (`skills.audit_analyzer.tables[*].name`,
+> `skills.audit_analyzer.vector_indexes[*].name`). В других развёртываниях они
+> могут отличаться; не зашивайте их в код/промпты как константы.
+
 - `oarb.audits`, `oarb.violations`, `oarb.audit_reports`, `oarb.report_items` — что в них, см. `references/schema.md`.
 - Vector-индексы — `references/vector_indexes.md`.
-- Predefined-скрипты — реестр `public.agent_predefined_scripts`.
+- Predefined-скрипты — реестр `public.agent_predefined_scripts` (конфигурируется через `label: "scripts_registry"` в `skills.audit_analyzer.tables`).
 
 ## Что не делать
 

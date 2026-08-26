@@ -144,26 +144,19 @@
 
 | Ключ | Назначение | Значение / по умолчанию |
 |------|-----------|-------------|
-| `llm.provider` / `llm.model` / `llm.api_base` | LLM для генерации SQL | `minimax` / `MiniMax-M3` / `https://api.minimax.io/v1` (единая с агентом; любой OpenAI-compatible: Mistral, OpenAI, MiniMax, Ollama, vLLM) |
-| `llm.max_tokens` / `llm.temperature` | Параметры генерации | `8192` / `0.1` |
-| `db.schema` | Схема по умолчанию для голых имён таблиц | `oarb` |
-| `db.tables` | Таблицы, доступные агенту (`str` ИЛИ `{name, label?, tracking_column?}`) | `audit_reports, audits, report_items, violations` (значение project.json; код по умолч. — пустой список) |
-| `db.additional_tables` | Таблицы других схем (`[schema, table]` ИЛИ `"schema.table"` ИЛИ `{schema, table}`) | `[["public", "agent_predefined_scripts"]]` |
-| `db.predefined_scripts_table` | Таблица реестра SQL-скриптов (audit_analyzer-специфика) → label `"scripts_registry"` | `public.agent_predefined_scripts` |
-| `gateway.vector.index.storage_table` | Vector-таблица сырых эмбеддингов (`oarb.audit_vectors`); регистрируется через `lib.core.infra_registration.register_vector_storage` → `TableRegistry.register_infra("vector.storage", ...)` | `oarb.audit_vectors` |
-| `sync.poll_interval_sec` | Интервал инкрементального полла PG | `14400` |
-| `sync.full_resync_every` | Каждые N поллов — полная пересинхронизация | `10` |
-| `embedding.base_url` | URL Ollama `/api/embed` | `http://localhost:11434/api/embed` |
-| `embedding.model` | Модель эмбеддингов | `mxbai-embed-large:latest` |
-| `embedding.dimension` | Размерность векторов | `1024` |
-| `vector_index.config_table` | PG-таблица реестра индексов | `public.agent_vector_index_config` |
-| `vector_index.store_table` | PG-таблица сериализованных FAISS-блобов | `public.agent_vector_index_store` |
-| `vector_index.default_path` | Путь к FAISS-индексу | `data_store/vectors/audits_index` |
-| `cache.enabled` | Включить DuckDB-кэш | `true` |
-| `cache.cache_path` | Путь к кэшу (теперь общий для всех skills) | `cache/audit_cache.duckdb` |
-| `cli.default_mode` | Режим CLI навыка (резерв; CLI требует `--mode`) | `predefined` |
-| `cli.max_retries` | Ретраи HTTP-запросов LLM-клиента (`llm.py`) | `3` |
-| `cli.timeout_sec` | Таймаут запроса к LLM (`llm.py`) | `60` |
+| `skills.audit_analyzer.enabled` | Вкл/выкл навыка | `true` |
+| `skills.audit_analyzer.tables[*].name` | Таблицы домена, доступные агенту (`{name, tracking_column?, label?}`) | `oarb.audit_reports`, `oarb.audits`, `oarb.report_items`, `oarb.violations` — **примеры текущей инсталляции; имена настраиваются здесь** |
+| `skills.audit_analyzer.tables[*].label` | Opaque-метка для `resources_by_label` (напр. реестр скриптов) | `public.agent_predefined_scripts` → `label: "scripts_registry"` |
+| `skills.audit_analyzer.vector_indexes[*].name` | Имена FAISS-индексов (путь = `<gateway.vector.index.default_root>/<name>`) | `audits_index`, `violations_index`, `audit_reports_index` — **примеры текущей инсталляции** |
+| `skills.audit_analyzer.llm.max_tokens` / `temperature` | Параметры генерации SQL | `8192` / `0.1` |
+| `skills.audit_analyzer.cli.default_mode` / `max_retries` / `timeout_sec` | CLI-режим навыка | `predefined` / `3` / `60` |
+| `gateway.vector.embedding.base_url` | URL Ollama `/api/embed` | `http://localhost:11434/api/embed` |
+| `gateway.vector.embedding.model` / `dimension` | Модель / размерность эмбеддингов | `mxbai-embed-large:latest` / `1024` |
+| `gateway.vector.index.storage_table` | Таблица сырых эмбеддингов; регистрируется через `lib.core.infra_registration.register_vector_storage` → `TableRegistry.register_infra("vector.storage", ...)` | `oarb.audit_vectors` |
+| `gateway.vector.index.default_root` | Корень FAISS-индексов (путь индекса = `<default_root>/<index_name>`) | `data_store/vectors` |
+| `gateway.vector.index.config_table` / `signature_table` | PG-реестр индексов / сериализованные FAISS-блобы | `public.agent_vector_index_config` / `public.agent_vector_index_store` |
+| `gateway.sync.poll_interval_sec` / `full_resync_every` | Интервал инкрементального полла / полная пересинхронизация | `14400` / `10` |
+| `gateway.duckdb_query.*` / `gateway.vector_search.*` | Generic tool'ы (read-only SQL / FAISS search) | см. [INTERNAL_API.md](INTERNAL_API.md) |
 
 Декларация — единый источник истины. `ApplicationContext._auto_register_skills` (см. `lib/core/application_context.py`) читает эту секцию при старте и автоматически создаёт `TableResource`/`VectorResource` в `table_registry`. Никакого `register.py` не требуется. Для добавления нового skill достаточно добавить секцию `skills.<name>` в `project.json`. DoD-проверка — `tests/test_resource_universality.py`.
 
@@ -186,11 +179,12 @@ DSN подключается только через `channels.postgres.dsn` в 
 обновление кеша больше не знает: `--force` удалён.
 
 Пара сервисов строится в `gateway.py::_build_audit_services()` (возвращает
-`(None, None)`, если `in_memory_enabled` выключен, нет DSN или таблиц):
+`(None, None)`, если нет DSN, таблиц или `gateway.vector.index`/`gateway.sync`
+не сконфигурированы):
 
 - **`PgDuckDbSyncService`** — единственный владелец подключения к PostgreSQL
   (worker-поток). При старте выполняет полную загрузку таблиц, далее каждые
-  `poll_interval_sec` (по умолч. 60 с) инкрементально опрашивает таблицы по
+  `gateway.sync.poll_interval_sec` (по умолч. 14400 с) инкрементально опрашивает таблицы по
   track-колонке (`updated_at`; для `audit_vectors` — `id`). Новые/изменённые
   строки передаёт в callback `on_new_records` → `DuckDbCacheStore.upsert_records`.
   Структуру таблиц собирает из PG `information_schema` (+ `pg_description`):
@@ -207,8 +201,8 @@ DSN подключается только через `channels.postgres.dsn` в 
   `publish()` атомарно записывает снимок таблиц (ATTACH во временный файл →
   `os.replace`) в `publish_path`, который вычисляется
   `table_registry.snapshot_path(workspace_path)` →
-  `workspace/data_store/duckdb/cache.duckdb`. Поле `in_memory_cache_path`
-  в `project.json` оставлено для истории, но игнорируется. Без изменений
+  `workspace/data_store/duckdb/cache.duckdb`. Путь снимка вычисляется
+  через `table_registry.snapshot_path()` и не задаётся напрямую в настройках. Без изменений
   (`_dirty` = False) файл не перезаписывается; если снимок занят читателем
   (CLI) — публикация откладывается до следующего цикла, ошибка не теряет данные.
 
@@ -240,17 +234,18 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 #### Полный цикл обновления данных (что происходит по шагам)
 
 1. **Старт gateway** (`gateway.py::run()`): `_build_audit_services()` читает
-   секцию `skills.audit_analyzer` из `project.json`. Сервисы создаются, только
-   если `in_memory_enabled: true`, задан DSN и есть таблицы; иначе — `(None, None)`
+   секции `skills.audit_analyzer` и `gateway.vector`/`gateway.sync` из `project.json`.
+   Сервисы создаются, только если задан DSN, есть таблицы (`skills.audit_analyzer.tables`)
+   и сконфигурирован `gateway.vector.index`; иначе — `(None, None)`
    и синхронизация не запускается.
 2. **Initial load**: `PgDuckDbSyncService._do_initial_load()` для каждой таблицы из
-   `db_tables` (+ таблица векторов) делает:
+   `skills.audit_analyzer.tables` (+ таблица векторов `gateway.vector.index.storage_table`) делает:
    - `_fetch_schema()` — запрос структуры из PG `information_schema.columns`
      + `pg_description` (колонки, типы, NOT NULL, комментарии таблиц/колонок);
    - `_ensure_table_schema()` → колбека `on_schema` → `store.ensure_schema()` —
      создаёт таблицу в in-memory DuckDB **с типами из PG** (включая пустые);
    - `_fetch_all()` → `SELECT *` → колбека `on_new_records` → `store.upsert_records()`.
-3. **Поллинг**: worker-поток каждые `poll_interval_sec` вызывает
+3. **Поллинг**: worker-поток каждые `gateway.sync.poll_interval_sec` вызывает
    `_poll_table()`: `SELECT * WHERE "<track>" > <последняя_метка>`. Track-колонка:
    `updated_at` (доменные таблицы) или `id` (`audit_vectors`). Новые/изменённые
    строки → `upsert_records()` (upsert по `id`: DELETE + INSERT).
@@ -282,16 +277,20 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 Чтобы изменить поведение (например, публиковать снимок реже или дополнительно
 инвалидировать индексы) — правишь именно эту секцию `gateway.py`.
 
-#### Управляющие ключи (`skills.audit_analyzer` в `project.json`)
+#### Управляющие ключи (`gateway.sync` / `gateway.vector.index` в `project.json`)
 
-| Ключ | Где читается | По умолч. | Эффект |
-|------|-------------|-----------|--------|
-| `in_memory_enabled` | `gateway.py:511` | `false` | Выключает весь кеш и синхронизацию: CLI ходит напрямую в PG. `true` — включает |
-| `in_memory_cache_path` | `application_context.py:491` | `workspace/data_store/duckdb/cache.duckdb` | Куда публикуется снимок (через `table_registry.snapshot_path()`). Поле `in_memory_cache_path` в `project.json` оставлено для обратной совместимости, но игнорируется новым путём |
-| `db_schema` / `db_tables` | `gateway.py:516-518` | `oarb` / 4 таблицы | Какие таблицы синхронизировать. Список — массив строк; добавил таблицу → она появится в кеше после следующего цикла |
-| `poll_interval_sec` | `gateway.py:549` | `60` | Частота инкрементального поллинга, сек. Меньше → свежее кеш, больше запросов к PG |
-| `full_resync_every` | `gateway.py:552` | `10` | Полная перезагрузка таблиц каждые N циклов поллинга. `0` — отключить (удалённые строки останутся в кеше) |
-| `mode_vector_db_table` | `gateway.py:517` | `oarb.audit_vectors` | Таблица векторов, включается в синхронизацию и прогревается в FAISS |
+> Имена таблиц/индексов не зашиты: они берутся из `skills.audit_analyzer.tables[*].name`,
+> `skills.audit_analyzer.vector_indexes[*].name` и `gateway.vector.index.*`. Ниже — только
+> параметры режима синхронизации и кеша.
+
+| Ключ | По умолч. | Эффект |
+|------|-----------|--------|
+| `gateway.sync.poll_interval_sec` | `14400` | Частота инкрементального поллинга PG, сек. Меньше → свежее кеш, больше запросов к PG |
+| `gateway.sync.full_resync_every` | `10` | Полная перезагрузка таблиц каждые N циклов поллинга. `0` — отключить (удалённые строки останутся в кеше) |
+| `gateway.sync.max_queue_size` | `10000` | Максимальный размер очереди синхронизации |
+| `gateway.sync.reconnect_backoff_sec` / `_max_sec` | `1.0` / `60.0` | Backoff реконнекта воркера к PG |
+| `gateway.vector.index.storage_table` | `oarb.audit_vectors` | Таблица векторов, включается в синхронизацию и прогревается в FAISS (имя настраивается) |
+| `gateway.vector.index.config_table` / `signature_table` | `public.agent_vector_index_config` / `public.agent_vector_index_store` | PG-реестр индексов / сериализованные FAISS-блобы (имена настраиваются) |
 
 `config.py` мержит `project.json` в `SETTINGS`; после правки `project.json`
 перезапуск gateway обязателен.
@@ -307,12 +306,11 @@ _preload_vector_indexes(store)                       # прогрев FAISS в �
 
 #### Практические сценарии
 
-- **Свежее кеш, чаще опрос**: `poll_interval_sec: 15`.
-- **Меньше нагрузки на PG**: `poll_interval_sec: 300`, `full_resync_every: 5`
+- **Свежее кеш, чаще опрос**: `gateway.sync.poll_interval_sec: 15`.
+- **Меньше нагрузки на PG**: `gateway.sync.poll_interval_sec: 300`, `gateway.sync.full_resync_every: 5`
   (реже опрос, но регулярная сверка удалений).
-- **Не нужна сверка удалений / большие таблицы**: `full_resync_every: 0`.
-- **Выключить кеш совсем**: `in_memory_enabled: false` (CLI → прямой PG).
-- **Добавить таблицу в анализ**: вставить её имя в `db_tables` и перезапустить
+- **Не нужна сверка удалений / большие таблицы**: `gateway.sync.full_resync_every: 0`.
+- **Добавить таблицу в анализ**: добавить её в `skills.audit_analyzer.tables` и перезапустить
   gateway.
 
 #### Мониторинг

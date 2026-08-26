@@ -30,7 +30,7 @@
 | `gateway.print_db_activity` | `false` | Активность db-job'ов в терминал |
 | `gateway.vector.index.storage_table` | `oarb.audit_vectors` | Единая PG-таблица-хранилище сырых эмбеддингов. Регистрируется через `TableRegistry.register_infra("vector.storage", ...)` |
 | `cli.show_context_window` | `true` | Метка занятости контекстного окна в CLI |
-| `streamlit.enabled` | `true` | Гейт запуска Streamlit-UI на :8501 |
+| `streamlit.enabled` | не задано (`None`) — отключено по умолчанию | Гейт запуска Streamlit-UI на :8501 (явное `true` включает) |
 
 **Удалённые ключи**:
 
@@ -88,7 +88,7 @@
 
 - Конфигурация векторных индексов переехала из файлов `.faiss` и `project.json`
   в таблицу `public.agent_vector_index_config` (управление через SQL).
-- DSN разделён на `host`/`port`/`user`/`dbname` + `DB_PASSWORD` (env).
+- DSN задаётся единым `channels.postgres.dsn` (обычно `"${DATABASE_URL}"` из `.secrets.env`, резолвится через `utils.db.resolve_dsn()`). Частичные ключи `host`/`port`/`user`/`dbname` не поддерживаются.
 - Все таблицы логов и сессий получили префикс `agent_` (`agent_gateway_logs`,
   `agent_conversation_messages`, `agent_worker_claims`).
 - Имя LLM-провайдера — каноническое `LLM_API_KEY` (вместо `MISTRAL_API_KEY`).
@@ -130,6 +130,12 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
 | Хуки | `lib/hooks/database_logging_hook.py` встроен в `AgentLoop` через `AgentFactory`: общий инстанс заменён на per-turn фабрику `hook_factories=` (см. `database_logging_hook.py:make_db_logging_hook_factory`) |
 
 **Данные:**
+
+> Имена таблиц ниже — значения текущей инсталляции, настраиваемые в `project.json`
+> (`channels.postgres.table_name`/`messages_table`/`meta_table`/`claims_table`,
+> `logging.db.table_name`/`question_runs_table`, `benchmark.runs_table`/`results_table`,
+> `gateway.vector.index.storage_table`/`config_table`/`signature_table`). В других
+> развёртываниях они могут отличаться.
 
 - **Сессии** (`public.agent_session_meta`, `public.agent_session_messages`) —
   схема та же. DDL: `sql/session/create_public_agent_session_meta.sql`,

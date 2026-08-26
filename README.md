@@ -105,6 +105,9 @@ DDL в `sql/<domain>/create_<schema>_<table>.sql` (один файл = одна 
 - **Воркер-пул:** `public.agent_worker_claims` (UNIQUE PK, lease)
 - **Бенчмарки:** `public.agent_benchmark_runs/results`
 
+> Имена таблиц/индексов выше — значения текущей инсталляции (REFERENCE). Они
+> настраиваются в `project.json` (`channels.postgres.*`, `skills.audit_analyzer.tables[]`/`vector_indexes[]`, `gateway.vector.index.*`, `logging.db.*`, `benchmark.*`) и в других развёртываниях могут отличаться.
+
 Реестр таблиц PG → DuckDB — в [docs/table-registry.md](docs/table-registry.md).
 
 ## 🧪 Тестирование

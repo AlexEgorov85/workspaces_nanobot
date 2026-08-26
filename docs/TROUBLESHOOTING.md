@@ -116,7 +116,7 @@ PowerShell интерпретирует `=` по-своему. Использу�
 
 | Утилита | Назначение |
 |---|---|
-| `python tools/check_worker_pool_integrity.py` | Проверка orphan-claims в `agent_worker_claims` |
+| `python tools/check_worker_pool_integrity.py` | Проверка orphan-claims в `agent_worker_claims` (имя настраивается через `channels.postgres.claims_table`) |
 | `python tools/check_worker_pool_integrity.py --fix` | Возврат задач «мёртвых» воркеров в `pending` + снятие claim |
 | `PgDuckDbSyncService.get_stats()` | `polls`, `full_resyncs`, `reconnects`, `errors`, размер очереди |
 | `DbLoggingService.get_stats()` | `written`, `failed`, `queue_size`, `fallback_written`, `connected`, `last_error` |

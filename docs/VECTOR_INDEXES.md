@@ -3,6 +3,15 @@
 > Навигационный индекс каталога `docs/` — в [`README.md`](README.md). Этот документ —
 > самодостаточное описание подсистемы.
 
+> **Об именах таблиц и индексов.** Имена `public.agent_vector_index_config`,
+> `public.agent_vector_index_store`, `oarb.audit_vectors`, а также имена самих
+> индексов (`audits_index`, `violations_index`, …) и исходных таблиц (`oarb.audits`,
+> …) — **не зашитые константы**, а значения текущей инсталляции. Они настраиваются
+> в `project.json`: `gateway.vector.index.config_table` / `signature_table` /
+> `storage_table`, `skills.audit_analyzer.tables[*].name`,
+> `skills.audit_analyzer.vector_indexes[*].name`. В других развёртываниях имена
+> могут отличаться.
+
 ## 🔍 Векторная индексация
 
 > **Исчерпывающий гайд:** как устроены индексы, как их создавать, обновлять,
@@ -186,8 +195,8 @@ python tools/build_vectors.py --index audits_index --full-rebuild
 
 ```json
 {
-  "embedding_model": "nomic-embed-text:latest",
-  "embedding_dimension": 768
+  "model": "nomic-embed-text:latest",
+  "dimension": 768
 }
 ```
 
@@ -624,9 +633,9 @@ GROUP BY v.source;
 **Если меняете модель:**
 
 ```jsonc
-// project.json
-"embedding_model":     "nomic-embed-text:latest",  // было mxbai-embed-large:latest
-"embedding_dimension": 768,                          // было 1024
+// project.json → gateway.vector.embedding
+"model":     "nomic-embed-text:latest",  // было mxbai-embed-large:latest
+"dimension": 768,                          // было 1024
 ```
 
 После смены **обязательно**:

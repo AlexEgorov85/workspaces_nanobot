@@ -16,6 +16,16 @@
 тонким CLI: он конфигурирует провайдера из своих настроек и работает с ним
 напрямую (без промежуточных обёрток-шимов).
 
+> **Об именах таблиц и индексов.** Все имена таблиц/индексов, упомянутые ниже, —
+> **не зашитые константы**, а значения текущей инсталляции, настраиваемые в
+> `project.json`. Они могут отличаться в других развёртываниях. Ключи конфигурации:
+> `channels.postgres.table_name` / `messages_table` / `meta_table` / `claims_table`,
+> `skills.audit_analyzer.tables[*].name` / `vector_indexes[*].name`,
+> `gateway.vector.index.storage_table` / `config_table` / `signature_table`,
+> `logging.db.table_name` / `question_runs_table`,
+> `benchmark.runs_table` / `results_table`. Точный список и дефолты — в
+> [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md) и [AGENTS.md](../AGENTS.md).
+
 ```mermaid
 flowchart LR
     subgraph PG["PostgreSQL (канон)"]
@@ -158,7 +168,7 @@ flowchart TB
 | `transcription_service.py` | openai/groq key/URL/language (вынесено из gateway). |
 | `subprocess_manager.py` | Streamlit spawn + terminate/kill. |
 | `preload_service.py` | Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель `workspace/data_store/duckdb/cache.duckdb` — `DuckDbCacheStore.publish()` через gateway (путь вычисляется через `table_registry.snapshot_path`). |
-| `db_logging_service.py` | **Новый** — структурированный журнал агента в `gateway_logs`. |
+| `db_logging_service.py` | **Новый** — структурированный журнал агента в `agent_gateway_logs` (имя настраивается через `logging.db.table_name`). |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
 
 ### Pre-resolve `${VAR}` от `.secrets.env`
@@ -1051,7 +1061,9 @@ outbound). Все остальные сообщения `send()` merge'ит в a
 снималась с heartbeat, пока claim ещё жив, и другой воркер мог её reclaim-нуть.
 
 **Конфиг (`channels.postgres`):** `worker_id` (пусто → авто
-`{hostname}:{pid}:{rand8}`, идентификация воркера в claims), `claims_table`,
+`{hostname}:{pid}:{rand8}`, идентификация воркера в claims), `claims_table`
+(таблица аренды задач), `table_name` (таблица канала, дефолт
+`agent_conversation_messages`), `messages_table` / `meta_table` (таблицы сессий),
 `lease_interval`, `error_retry_delay`. **`streamlit.error_window_sec`** — окно
 ожидания повтора `error`-задач (быв. `failed_window_sec`).
 
@@ -1241,7 +1253,7 @@ nanobot/
 │   ├── README.md                          #   порядок применения, каталог
 │   ├── session/                           #   session_meta + session_messages
 │   ├── channels/                          #   seed_messages.sql (тестовые данные)
-│   ├── logs/                              #   gateway_logs (DbLoggingService)
+│   ├── logs/                              #   agent_gateway_logs (DbLoggingService, имя через logging.db.table_name)
 │   ├── audit_analyzer/                    #   домен oarb.* + векторы (GP)
 │   ├── benchmarks/                        #   agent_benchmark_runs + agent_benchmark_results
 │   └── migrations/                        #   инкрементальные миграции (например, logs)
@@ -1267,7 +1279,7 @@ nanobot/
 │   │   ├── cache_provider.py             #     интерфейс CacheProvider + SearchResult
 │   │   ├── cache_provider_impl.py        #     PostgresDuckDbProvider + фабрика и модульные функции
 │   │   ├── text_splitter.py              #     чанкование текстов для индексаторов
-│   │   # DDL для DbLoggingService (gateway_logs) — в sql/logs/
+│   │   # DDL для DbLoggingService (agent_gateway_logs, имя через logging.db.table_name) — в sql/logs/
 │   ├── cli/                              #  вынесено из cli_agent.py
 │   │   ├── console_loop.py               #   REPL + typewriter + consume_outbound
 │   │   ├── display_config.py             #   DisplayConfig
