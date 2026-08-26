@@ -41,6 +41,23 @@ class SearchResult:
     row: dict[str, Any] = field(default_factory=dict)
 
 
+class IndexIntegrityError(Exception):
+    """Векторный индекс не прошёл проверку signature (STALE/INVALID).
+
+    Поднимается провайдером (``search_vector``), когда сохранённая сигнатура
+    индекса не совпадает с текущей конфигурацией (модель эмбеддингов,
+    размерность, колонки, chunk-параметры). Tool преобразует это в
+    контролируемую ошибку (``stale_index`` / ``invalid_index``), блокируя
+    «тихую» семантическую деградацию.
+    """
+
+    def __init__(self, index_name: str, status: str, reason: str = "") -> None:
+        self.index_name = index_name
+        self.status = status  # "STALE" | "INVALID"
+        self.reason = reason
+        super().__init__(f"vector index {index_name!r} is {status}: {reason}")
+
+
 class CacheProvider(ABC):
     """Абстрактный провайдер кэша данных (SQL-кеш + векторные индексы)."""
 

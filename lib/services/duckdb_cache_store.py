@@ -3,7 +3,10 @@ DuckDbCacheStore — локальное хранилище данных ауди
 
 Отвечает за ДАННЫЕ, а не за их источник: данные приходят извне методом
 ``upsert_records(table, records)`` (обычно — из PgDuckDbSyncService через
-callback), и ни одна строка кода здесь не знает про PostgreSQL.
+callback), а запись не обращается к PostgreSQL напрямую. Единственное
+исключение — ``_check_index_integrity``: read-only проверка signature
+векторного индекса, читающая ``metadata`` из PG-таблицы-хранилища
+(``vector_store_table``) для блокировки устаревших индексов.
 
 Обязанности:
   * ведение локального SQL-кэша (DuckDB-файл) для query_sql / get_schema / explain
@@ -192,6 +195,7 @@ class DuckDbCacheStore:
         schema: str = "main",
         tables: list[str] | None = None,
         vector_db_table: str = "",
+        vector_store_table: str = "",
         embedding_base_url: str = "",
         embedding_model: str = "mxbai-embed-large:latest",
         embedding_dimension: int = 1024,
@@ -202,6 +206,7 @@ class DuckDbCacheStore:
         self._schema = schema or "main"
         self._tables = list(tables) if tables else None
         self._vector_db_table = vector_db_table or ""
+        self._vector_store_table = vector_store_table or ""
         self._embedding_base_url = embedding_base_url
         self._embedding_model = embedding_model or "mxbai-embed-large:latest"
         self._embedding_dimension = int(embedding_dimension or 1024)
@@ -842,6 +847,43 @@ class DuckDbCacheStore:
 
             return explain_query(self._conn, sql)
 
+    def execute_readonly(
+        self,
+        sql: str,
+        params: dict[str, Any] | list[Any] | None = None,
+        max_rows: int = 1000,
+    ) -> dict[str, Any]:
+        """Выполнить read-only SQL к настроенному DuckDB-кэшу.
+
+        Точка интеграции для ``DuckdbQueryTool``: tool делегирует сюда запрос,
+        не зная пути к файлу DuckDB, жизненного цикла соединения и локов.
+        Возвращает ``{"rows": [...], "columns": [...]}`` при успехе или
+        ``{"error": <msg>}`` если кэш не готов / запрос упал. SQL-safety
+        (SELECT-only) контролируется самим tool'ом (``validate_sql``).
+        """
+        with self._lock:
+            if self._conn is None:
+                return {"error": "DuckDbCacheStore is not ready"}
+            try:
+                cur = self._conn.cursor()
+                try:
+                    if params:
+                        if isinstance(params, dict):
+                            cur.execute(sql, list(params.values()))
+                        else:
+                            cur.execute(sql, list(params))
+                    else:
+                        cur.execute(sql)
+                    if cur.description is None:
+                        return {"rows": [], "columns": []}
+                    columns = [c[0] for c in cur.description]
+                    rows = [row for row in cur.fetchmany(max_rows)]
+                    return {"rows": rows, "columns": columns}
+                finally:
+                    cur.close()
+            except Exception as exc:
+                return {"error": str(exc)}
+
     # ------------------------------------------------------------------
     # Векторные индексы (FAISS)
     # ------------------------------------------------------------------
@@ -914,6 +956,83 @@ class DuckDbCacheStore:
 
         return build_faiss_index(records)
 
+    def _check_index_integrity(self, index_name: str) -> None:
+        """Проверить signature индекса против текущей конфигурации.
+
+        Читает сохранённую signature из ``metadata`` PG-таблицы-хранилища
+        (``self._vector_store_table``) и сравнивает с вычисленной по
+        ``agent_vector_index_config`` + ``gateway.vector.embedding``. При
+        несовпадении бросает ``IndexIntegrityError`` (STALE) — это блокирует
+        «тихую» семантическую деградацию (поиск старыми векторами по новым
+        запросам).
+
+        Если ``_vector_store_table`` не задан или signature недоступна —
+        проверка пропускается (нет источника истины), чтобы не ломать
+        автономный режим из DuckDB-снимка.
+        """
+        store = self._vector_store_table
+        if not store:
+            return
+        # ``utils.db`` живёт в workspace, который не всегда на sys.path.
+        # Зеркалим логику cache_provider_impl: подкладываем workspace в путь.
+        try:
+            import sys
+            from pathlib import Path
+
+            _ws = Path(__file__).resolve().parents[2] / "workspace"
+            if str(_ws) not in sys.path:
+                sys.path.insert(0, str(_ws))
+            from utils.db import fetch
+
+            from lib.services.cache_provider import IndexIntegrityError
+            from lib.services.cache_provider_impl import (
+                read_embedding_config,
+                read_vector_index_config,
+                verify_index_signature,
+            )
+        except Exception:
+            return
+        try:
+            rows = fetch(
+                f"SELECT metadata FROM {store} WHERE source = %s",
+                index_name,
+            )
+        except Exception:
+            return
+        if not rows:
+            return
+        meta = rows[0].get("metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        if not meta:
+            return
+        cfg = read_vector_index_config({}).get(index_name)
+        if not cfg:
+            return
+        emb = read_embedding_config()
+        current_cfg = {
+            "src_table": cfg.get("table"),
+            "pk_column": cfg.get("pk"),
+            "content_cols": cfg.get("content_columns") or [],
+            "embedding_cols": cfg.get("embedding_columns") or [],
+            "track_column": cfg.get("track_column"),
+            "embedding_model": emb.get("model"),
+            "embedding_dimension": emb.get("dimension"),
+        }
+        status = verify_index_signature(meta, current_cfg)
+        if status == "STALE":
+            raise IndexIntegrityError(
+                index_name,
+                "STALE",
+                "vector index config changed (embedding model / dimension / "
+                "chunk / source columns); rebuild via tools/build_vectors.py",
+            )
+        # CURRENT — ок. INVALID (legacy индекс без signature) — пропускаем,
+        # чтобы не ломать автономный режим старых сборок.
+
     def search_vector(
         self,
         query: str,
@@ -942,6 +1061,7 @@ class DuckDbCacheStore:
                     self._dirty_sources.discard(index_name)
                     return []
                 self._index_cache[index_name] = (idx, meta)
+                self._check_index_integrity(index_name)
             self._dirty_sources.discard(index_name)
 
             idx, meta = self._index_cache.get(index_name, (None, None))
