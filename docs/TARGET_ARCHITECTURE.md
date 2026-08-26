@@ -11,12 +11,12 @@ Coding-agent обязан сверять любое существенное и�
 > **Отношение к остальной документации (чтобы не дублировать):**
 > - Этот файл — **норма/контракт** («как должно быть»), а не описание текущей реализации.
 > - Описание того, **как система устроена сейчас**, — в `docs/`:
->   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (сервисный слой, `ApplicationContext`,
->   каналы), [docs/DATABASE.md](docs/DATABASE.md) (БД, пул соединений, границы SQL),
->   [docs/INTERNAL_API.md](docs/INTERNAL_API.md) (tool'ы, конфигурация),
->   [docs/VECTOR_INDEXES.md](docs/VECTOR_INDEXES.md) (FAISS/Ollama).
+>   [ARCHITECTURE.md](ARCHITECTURE.md) (сервисный слой, `ApplicationContext`,
+>   каналы), [DATABASE.md](DATABASE.md) (БД, пул соединений, границы SQL),
+>   [INTERNAL_API.md](INTERNAL_API.md) (tool'ы, конфигурация),
+>   [VECTOR_INDEXES.md](VECTOR_INDEXES.md) (FAISS/Ollama).
 > - Где темы пересекаются: правила и invariant'ы — только здесь; детали реализации — только в `docs/*`.
-> - Навигационный хаб разработчика — [DEVELOPMENT.md](DEVELOPMENT.md).
+> - Навигационный индекс документации — [README.md](README.md).
 
 ---
 
@@ -533,7 +533,8 @@ DuckDB не должен становиться authoritative database.
 
 # 15. AuditSync
 
-`AuditSyncService` является domain/infrastructure integration component.
+`PgDuckDbSyncService` (ранее `AuditSyncService`, переименован в Фазе 6) является
+domain/infrastructure integration component.
 
 Целевая цепочка:
 
@@ -541,7 +542,7 @@ DuckDB не должен становиться authoritative database.
 PostgreSQL
     |
     v
-AuditSyncService
+PgDuckDbSyncService
     |
     +--> DuckDB snapshot/cache
     |
