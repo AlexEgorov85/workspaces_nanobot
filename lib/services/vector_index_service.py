@@ -4,7 +4,8 @@
   * создание эмбеддинга (Ollama /api/embed)         — ``get_embedding``
     (re-export из ``lib/services/cache_provider_impl`` — единая функция)
   * пересборка индекса из сырых векторов и персист
-    в store (public.agent_vector_index_store)        — ``VectorIndexBuildService``
+    в store (``read_vector_store_table()`` / ``VectorIndexSettings.signature_table``)
+                                                — ``VectorIndexBuildService``
 
 Навык (``workspace/skills/audit_analyzer``) и инструменты
 (``tools/build_vectors.py``) переиспользуют этот слой вместо собственных
@@ -47,7 +48,9 @@ class VectorIndexBuildService:
 
     Пример:
         >>> svc = VectorIndexBuildService()
-        >>> n = svc.rebuild_and_store("audits_index", "oarb.audit_vectors")
+        >>> n = svc.rebuild_and_store(
+        ...     "audits_index", "<schema.table из gateway.vector.index.storage_table>",
+        ... )
     """
 
     def __init__(self, cfg: dict[str, Any] | None = None, base_dir: str = "") -> None:

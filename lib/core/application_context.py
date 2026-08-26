@@ -642,10 +642,11 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
 
     # Имя PG-таблицы с сериализованными FAISS-индексами + metadata.signature.
     # Берётся из ``gateway.vector.index.signature_table`` (см.
-    # ``VectorIndexSettings`` и ``cache_provider_impl.read_vector_store_table``).
+    # ``VectorIndexSettings.signature_table`` и
+    # ``cache_provider_impl.read_vector_store_table``).
     # ``gateway.vector.index.storage_table`` — это сырые эмбеддинги
-    # (``oarb.audit_vectors``), у которых нет колонки ``metadata``; использовать
-    # её для проверки signature нельзя.
+    # (таблица из ``vector_db_table`` провайдера; см. ``DuckDbCacheStore._vector_db_table``),
+    # у которых нет колонки ``metadata``; использовать её для проверки signature нельзя.
     from lib.services.cache_provider_impl import read_vector_store_table
 
     sync_tables = list(dict.fromkeys(all_table_names + vector_names))
@@ -702,7 +703,8 @@ def _register_infra_resources(ctx: ApplicationContext) -> None:
     и standalone-утилит (``tools/build_vectors.py``).
 
     Какие индексы строить и из каких source-таблиц — описывается в
-    ``public.agent_vector_index_config`` (runtime-БД).
+    PG-реестре (``read_vector_index_config_table()``;
+    см. ``VectorIndexSettings.config_table``).
 
     Embedding-конфиг (``gateway.vector.embedding``) кладётся в
     ``TableRegistry.set_embedding_config(...)`` отдельно — это

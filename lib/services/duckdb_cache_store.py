@@ -41,7 +41,7 @@ from typing import Any
 
 
 def _split_table(table: str) -> tuple[str, str]:
-    """Разбить 'oarb.audit_vectors' на (schema, table)."""
+    """Разбить ``schema.table`` (значение ``vector_db_table`` / ``storage_table``) на (schema, table)."""
     if "." in table:
         schema, name = table.split(".", 1)
         return schema, name
@@ -721,7 +721,8 @@ class DuckDbCacheStore:
                 return True
             out = [t for t in (tables or self._tables or []) if t]
             # Навык работает только со своим снимком — ему нужны и векторные
-            # данные (oarb.audit_vectors), чтобы строить FAISS-индекс локально.
+            # данные (``vector_db_table``; см. ``gateway.vector.index.storage_table``),
+            # чтобы строить FAISS-индекс локально.
             if self._vector_db_table and self._vector_db_table not in out:
                 out.append(self._vector_db_table)
             if not out:
@@ -960,9 +961,10 @@ class DuckDbCacheStore:
         """Проверить signature индекса против текущей конфигурации.
 
         Читает сохранённую signature из ``metadata`` PG-таблицы-хранилища
-        (``self._vector_store_table``) и сравнивает с вычисленной по
-        ``agent_vector_index_config`` + ``gateway.vector.embedding``. При
-        несовпадении бросает ``IndexIntegrityError`` (STALE) — это блокирует
+        (``self._vector_store_table``; см. ``VectorIndexSettings.signature_table``)
+        и сравнивает с вычисленной по ``read_vector_index_config_table()``
+        (``VectorIndexSettings.config_table``) + ``gateway.vector.embedding``.
+        При несовпадении бросает ``IndexIntegrityError`` (STALE) — это блокирует
         «тихую» семантическую деградацию (поиск старыми векторами по новым
         запросам).
 

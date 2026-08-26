@@ -46,25 +46,31 @@ _INDEX_SIGNATURE_FIELDS = (
 )
 
 
-# Имя PG-таблицы-хранилища сериализованных FAISS-индексов по умолчанию
-# (BYTEA + metadata JSONB со signature). Используется как default, когда в
+# Дефолтное имя PG-таблицы-хранилища сериализованных FAISS-индексов
+# (BYTEA + metadata JSONB со signature). Используется когда в
 # ``project.json::gateway.vector.index.signature_table`` ничего не задано.
 # Чтобы переименовать таблицу через DDL — указать новое имя в settings.
 _DEFAULT_VECTOR_INDEX_STORE_TABLE = "public.agent_vector_index_store"
 
+# Дефолтное имя PG-таблицы-реестра векторных индексов (какие индексы
+# строить, из каких source-таблиц, content_cols, embedding_cols).
+# Используется когда в ``project.json::gateway.vector.index.config_table``
+# ничего не задано. Чтобы переименовать через DDL — указать в settings.
+_DEFAULT_VECTOR_INDEX_CONFIG_TABLE = "public.agent_vector_index_config"
+
 
 def read_vector_store_table() -> str:
-    """Имя PG-таблицы с сериализованными FAISS-индексами.
+    """Имя PG-таблицы-хранилища сериализованных FAISS-индексов.
 
     Источник — ``project.json::gateway.vector.index.signature_table``
-    (см. ``VectorIndexSettings``). Дефолт —
-    ``public.agent_vector_index_store`` (DDL в
-    ``sql/vectors/create_vector_index_store.sql``).
+    (см. ``VectorIndexSettings.signature_table``). Дефолт —
+    значение ``_DEFAULT_VECTOR_INDEX_STORE_TABLE``.
 
-    Используется и ``build_cache_provider`` (как ``vector_store_table``
-    провайдера), и ``DuckDbCacheStore._check_index_integrity`` — оба должны
+    Используется ``build_cache_provider`` (как ``vector_store_table``
+    провайдера) и ``DuckDbCacheStore._check_index_integrity``: оба должны
     смотреть в одну и ту же таблицу, иначе проверка signature бесшумно
-    выключается (``oarb.audit_vectors`` не имеет колонки ``metadata``).
+    выключается (``storage_table``-источник сырых эмбеддингов не имеет
+    колонки ``metadata``).
     """
     from config import SETTINGS
 
@@ -72,6 +78,25 @@ def read_vector_store_table() -> str:
     return (
         idx.get("signature_table")
         or _DEFAULT_VECTOR_INDEX_STORE_TABLE
+    )
+
+
+def read_vector_index_config_table() -> str:
+    """Имя PG-таблицы-реестра векторных индексов.
+
+    Источник — ``project.json::gateway.vector.index.config_table``
+    (см. ``VectorIndexSettings.config_table``). Дефолт —
+    значение ``_DEFAULT_VECTOR_INDEX_CONFIG_TABLE``.
+
+    Используется ``cache_provider_impl.read_vector_index_config`` и
+    ``tools/build_vectors.py`` для чтения декларации индексов.
+    """
+    from config import SETTINGS
+
+    idx = ((SETTINGS.get("gateway") or {}).get("vector") or {}).get("index") or {}
+    return (
+        idx.get("config_table")
+        or _DEFAULT_VECTOR_INDEX_CONFIG_TABLE
     )
 
 
@@ -227,14 +252,18 @@ def read_embedding_config() -> dict[str, Any]:
 
 
 def read_vector_index_config(cfg: dict) -> dict[str, Any]:
-    """Конфиг векторных индексов: таблица agent_vector_index_config (источник — БД).
+    """Конфиг векторных индексов: читается из PG-таблицы-реестра.
 
-    Имя таблицы — ``public.agent_vector_index_config`` (дефолт; infrastructure-
-    уровень, не часть skill-конфига).  При ошибке БД исключение пробрасывается.
+    Имя таблицы — результат ``read_vector_index_config_table()``
+    (см. ``VectorIndexSettings.config_table``: ключ
+    ``project.json::gateway.vector.index.config_table``; дефолт — значение
+    ``_DEFAULT_VECTOR_INDEX_CONFIG_TABLE``, DDL в
+    ``sql/vectors/create_vector_index_config.sql``). При ошибке БД
+    исключение пробрасывается.
     """
     from utils.db import fetch
 
-    table = "public.agent_vector_index_config"
+    table = read_vector_index_config_table()
     rows = fetch(
         "SELECT index_name, source_table, src_table, pk_column, "
         "content_cols, embedding_cols, track_column, enabled "
@@ -283,8 +312,8 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
     ``data_store/vectors``).
 
     ``vector_indexes[]`` используется только для индексов (имя);
-    source-таблица — runtime-реестр (``public.agent_vector_index_config``),
-    не часть декларации skill'а.
+    source-таблица — runtime-реестр (``read_vector_index_config_table()``;
+    см. ``VectorIndexSettings.config_table``), не часть декларации skill'а.
 
     ``cache.*`` и ``embedding.*`` из ``cfg`` НЕ читаются:
     ``embedding`` — общий runtime (``gateway.vector.embedding``);
@@ -984,7 +1013,8 @@ class PostgresDuckDbProvider(CacheProvider):
         """Построить FAISS-индекс из локального DuckDB-кэша навыка.
 
         Навык работает только со своим снимком (``audit_cache.duckdb``) — без
-        PostgreSQL. Индекс строится из ``oarb.audit_vectors`` файла кэша и
+        PostgreSQL. Индекс строится из таблицы-источника (``vector_db_table``
+        провайдера; см. ``gateway.vector.index.storage_table``) файла кэша и
         кешируется в ``_index_cache``.
         """
         if not self._vector_db_table:
@@ -1108,8 +1138,8 @@ class PostgresDuckDbProvider(CacheProvider):
     ) -> dict[str, Any] | None:
         """Прочитать конфиг индекса + embedding config для verify_index_signature.
 
-        Returns ``None`` если ``agent_vector_index_config`` не задан или
-        индекс не найден — в этом случае STALE detection пропускается
+        Returns ``None`` если ``read_vector_index_config_table()`` не задан
+        или индекс не найден — в этом случае STALE detection пропускается
         (нечего проверять).
         """
         try:
@@ -1236,7 +1266,8 @@ class PostgresDuckDbProvider(CacheProvider):
     def rebuild_and_store_index(self, source: str, db_table: str) -> int | None:
         """Перестроить индекс для source и сохранить в store (для индексаторов).
 
-        Перед сохранением читает конфиг индекса из ``agent_vector_index_config``
+        Перед сохранением читает конфиг индекса из
+        ``read_vector_index_config_table()`` (``VectorIndexSettings.config_table``)
         и текущий embedding-конфиг из ``gateway.vector.embedding``; вычисляет
         signature (``compute_index_signature``) и кладёт в ``metadata.signature``
         в store. Это позволяет последующему ``verify_index_signature``
@@ -1272,7 +1303,7 @@ class PostgresDuckDbProvider(CacheProvider):
         try:
             rows = fetch(
                 "SELECT src_table, pk_column, content_cols, embedding_cols, "
-                "track_column FROM public.agent_vector_index_config "
+                f"track_column FROM {read_vector_index_config_table()} "
                 "WHERE index_name = %s",
                 source,
             )

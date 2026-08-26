@@ -87,8 +87,9 @@ class VectorIndexSettings(_StrictOptional):
     Хранилище эмбеддингов и сами индексы — общий runtime, не привязанный
     к домену skill'а. Доменные таблицы, нужные в DuckDB-кэше, декларируются
     в ``skills.<name>.tables[]``. Какие индексы строить и из каких
-    source-таблиц — описывается в ``public.agent_vector_index_config``
-    (runtime-БД).
+    source-таблиц — описывается в PG-реестре (``config_table`` ниже;
+    дефолт — ``_DEFAULT_VECTOR_INDEX_CONFIG_TABLE`` в
+    ``cache_provider_impl``).
 
     Путь в ``project.json``: ``gateway.vector.index.*`` (см.
     ``VectorInfrastructureSettings``). Раньше жил в ``gateway.vector_index.*`` —
@@ -103,13 +104,20 @@ class VectorIndexSettings(_StrictOptional):
             Регистрируется в ``TableRegistry`` через ``register_infra``
             и попадает в DuckDB-кэш через ``PgDuckDbSyncService``.
         signature_table: PG-таблица-хранилище сериализованных FAISS-индексов
-            (BYTEA + ``metadata`` JSONB со signature). Дефолт
-            ``"public.agent_vector_index_store"`` (runtime-константа,
-            таблица создаётся ``sql/vectors/create_vector_index_store.sql``).
+            (BYTEA + ``metadata`` JSONB со signature). Дефолт —
+            ``_DEFAULT_VECTOR_INDEX_STORE_TABLE`` в ``cache_provider_impl``
+            (DDL в ``sql/vectors/create_vector_index_store.sql``).
             Используется ``DuckDbCacheStore._check_index_integrity`` и
             ``build_cache_provider`` для проверки/записи signature; если
             переименована через DDL — указать здесь, чтобы код не зависел
             от хардкода.
+        config_table: PG-таблица-реестр векторных индексов (какие
+            индексы строить, из каких source-таблиц, content_cols,
+            embedding_cols). Дефолт —
+            ``_DEFAULT_VECTOR_INDEX_CONFIG_TABLE`` в ``cache_provider_impl``
+            (DDL в ``sql/vectors/create_vector_index_config.sql``).
+            Используется ``cache_provider_impl.read_vector_index_config``
+            и ``tools/build_vectors.py``; если переименована — указать здесь.
     """
 
     enable: bool | None = None
@@ -117,6 +125,7 @@ class VectorIndexSettings(_StrictOptional):
     backend: str | None = None
     storage_table: str | None = None
     signature_table: str | None = None
+    config_table: str | None = None
 
 
 class EmbeddingSettings(_StrictOptional):
@@ -323,10 +332,10 @@ class VectorIndexEntry(BaseModel):
 
     Раньше в этой модели было обязательное поле ``source`` (имя PG-таблицы
     исходных строк). После того как source-таблицу перенесли в общий
-    runtime-реестр (``public.agent_vector_index_config``), ``source``
-    удалён из декларации skill'а. Если будет добавлен новый backend,
-    где source декларируется прямо в skill'е — это будет новая схема,
-    а не возврат к старой.
+    runtime-реестр (``config_table``; см. ``VectorIndexSettings.config_table``),
+    ``source`` удалён из декларации skill'а. Если будет добавлен новый
+    backend, где source декларируется прямо в skill'е — это будет новая
+    схема, а не возврат к старой.
     """
 
     model_config = ConfigDict(extra="forbid")

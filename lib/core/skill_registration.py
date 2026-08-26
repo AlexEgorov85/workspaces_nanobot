@@ -11,8 +11,9 @@ gateway) и в standalone-утилитах (``tools/build_vectors.py``).
   (для ``get_vector_index_path()`` и build-tool'ов). НЕ регистрирует
   ресурс: storage-таблица векторов — инфраструктурный ресурс
   (``gateway.vector.index.storage_table`` → ``TableRegistry.register_infra``),
-  source-таблица — инфраструктурный (хранится в
-  ``public.agent_vector_index_config``).
+  source-таблица — инфраструктурный (хранится в PG-реестре
+  ``read_vector_index_config_table()``; см.
+  ``VectorIndexSettings.config_table``).
 """
 
 from __future__ import annotations

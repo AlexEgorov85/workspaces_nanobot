@@ -193,8 +193,9 @@ def get_vector_store_table() -> str:
     """Имя таблицы serialized FAISS-индексов (из runtime-настроек).
 
     Источник — ``gateway.vector.index.signature_table`` (см.
-    ``VectorIndexSettings``). Дефолт — ``public.agent_vector_index_store``
-    (DDL в ``sql/vectors/create_vector_index_store.sql``).
+    ``VectorIndexSettings.signature_table``; дефолт —
+    ``_DEFAULT_VECTOR_INDEX_STORE_TABLE`` в ``cache_provider_impl``,
+    DDL в ``sql/vectors/create_vector_index_store.sql``).
     """
     from lib.services.cache_provider_impl import read_vector_store_table
 
@@ -208,7 +209,8 @@ def build_cache_provider(skill_name: str, skill_root: Path | str) -> Any:
 
 
 def get_vector_indexes(skill_name: str) -> dict[str, Any]:
-    """Метаданные индексов из ``public.agent_vector_index_config``."""
+    """Метаданные индексов из PG-реестра (``read_vector_index_config_table()``,
+    см. ``VectorIndexSettings.config_table``)."""
     from lib.services.cache_provider_impl import read_vector_index_config
 
     return read_vector_index_config(_skill_cfg(skill_name))

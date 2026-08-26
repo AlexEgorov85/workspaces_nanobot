@@ -19,9 +19,10 @@ runtime-снапшот ``workspace/data_store/duckdb/cache.duckdb``.
   и делает её доступной только через ``TableRegistry.resources_by_label()``.
   Runtime-sync ``label`` игнорирует.
 * ``VectorResource`` — описание одной PG-таблицы сырых эмбеддингов. FAISS
-  строится поверх неё (через ``public.agent_vector_index_config`` +
-  ``agent_vector_index_store``), параметры model/dimension — в
-  embedding-конфиге, не в ресурсе.
+  строится поверх неё (через ``read_vector_index_config_table()`` +
+  ``read_vector_store_table()`` — см. ``VectorIndexSettings.config_table`` /
+  ``.signature_table``), параметры model/dimension — в embedding-конфиге,
+  не в ресурсе.
 * ``SkillRegistration.resources`` — единый набор ресурсов skill'а.
 """
 
@@ -142,9 +143,9 @@ class TableRegistry:
       ключ — ``SkillRegistration.name``. Регистрируются через
       ``register(SkillRegistration(...))``.
     * ``_infra`` — общие runtime-ресурсы (например, единый storage сырых
-      эмбеддингов ``oarb.audit_vectors``). Ключ — логический
-      идентификатор (``"vector_index.storage"``). Регистрируются через
-      ``register_infra(key, resources)``.
+      эмбеддингов из ``gateway.vector.index.storage_table``). Ключ —
+      логический идентификатор (``"vector_index.storage"``).
+      Регистрируются через ``register_infra(key, resources)``.
 
     Методы-агрегаторы (``table_names``, ``vector_names``, ``resources``,
     ``tracking_column_for``) объединяют оба namespace'а — сборка
