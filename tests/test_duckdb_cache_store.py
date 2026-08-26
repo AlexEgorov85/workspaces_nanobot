@@ -577,3 +577,124 @@ class TestStats:
         assert store.is_ready() is False
         st = store.get_stats()
         assert st["is_ready"] is False
+
+
+# ---------------------------------------------------------------------------
+# execute_readonly — точка интеграции DuckdbQueryTool
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteReadonly:
+    def test_readonly_returns_rows(self, store):
+        store.upsert_records("oarb.audits", [
+            {"id": 1, "title": "А", "status": "open"},
+            {"id": 2, "title": "Б", "status": "closed"},
+        ])
+        res = store.execute_readonly("SELECT id, title FROM oarb.audits ORDER BY id")
+        assert "error" not in res
+        assert res["columns"] == ["id", "title"]
+        assert [r[0] for r in res["rows"]] == [1, 2]
+
+    def test_readonly_propagates_error(self, store):
+        res = store.execute_readonly("SELECT * FROM oarb.missing_table")
+        assert "error" in res
+        assert res["error"]
+
+    def test_readonly_not_ready(self):
+        st = DuckDbCacheStore(cache_path="")
+        res = st.execute_readonly("SELECT 1")
+        assert res == {"error": "DuckDbCacheStore is not ready"}
+
+
+# ---------------------------------------------------------------------------
+# _check_index_integrity — signature enforcement (P0)
+# ---------------------------------------------------------------------------
+
+
+def _fake_cfg_module(monkeypatch, cfg, emb, meta_rows):
+    """Подменить чтение PG-signature и конфигов индекса для DuckDbCacheStore."""
+    import lib.services.cache_provider_impl as impl
+
+    _ws = str(Path(__file__).resolve().parent.parent / "workspace")
+    if _ws not in sys.path:
+        sys.path.insert(0, _ws)
+    import utils.db as dbmod
+
+    def _read_vector_index_config(_cfg):
+        return cfg
+
+    def _read_embedding_config():
+        return emb
+
+    def _fetch(sql, *args):
+        return meta_rows
+
+    monkeypatch.setattr(impl, "read_vector_index_config", _read_vector_index_config)
+    monkeypatch.setattr(impl, "read_embedding_config", _read_embedding_config)
+    monkeypatch.setattr(dbmod, "fetch", _fetch)
+
+
+class TestIndexIntegrity:
+    def test_skips_without_vector_store_table(self):
+        st = DuckDbCacheStore(cache_path="", vector_store_table="")
+        # не падает и не стучится в БД
+        st._check_index_integrity("audits_index")
+
+    def test_stale_raises(self, monkeypatch):
+        from lib.services.cache_provider import IndexIntegrityError
+
+        cfg = {"audits_index": {
+            "table": "audits", "pk": "id",
+            "content_columns": ["content"], "embedding_columns": {"c": "col"},
+            "track_column": "updated_at",
+        }}
+        emb = {"model": "mxbai-embed-large:latest", "dimension": 1024}
+        # заведомо несовпадающая 64-символьная hex-сигнатура
+        meta_rows = [{"metadata": {"signature": "0" * 64}}]
+
+        st = DuckDbCacheStore(cache_path="", vector_store_table="oarb.audit_vectors")
+        _fake_cfg_module(monkeypatch, cfg, emb, meta_rows)
+        with pytest.raises(IndexIntegrityError) as exc:
+            st._check_index_integrity("audits_index")
+        assert exc.value.status == "STALE"
+
+    def test_current_signature_ok(self, monkeypatch):
+        from lib.services.cache_provider_impl import compute_index_signature
+
+        cfg_data = {
+            "table": "audits", "pk": "id",
+            "content_columns": ["content"], "embedding_columns": {"c": "col"},
+            "track_column": "updated_at",
+        }
+        cfg = {"audits_index": cfg_data}
+        emb = {"model": "mxbai-embed-large:latest", "dimension": 1024}
+        current_cfg = {
+            "src_table": cfg_data["table"],
+            "pk_column": cfg_data["pk"],
+            "content_cols": cfg_data["content_columns"],
+            "embedding_cols": cfg_data["embedding_columns"],
+            "track_column": cfg_data["track_column"],
+            "embedding_model": emb["model"],
+            "embedding_dimension": emb["dimension"],
+        }
+        sig = compute_index_signature(current_cfg)
+        meta_rows = [{"metadata": {"signature": sig}}]
+
+        st = DuckDbCacheStore(cache_path="", vector_store_table="oarb.audit_vectors")
+        _fake_cfg_module(monkeypatch, cfg, emb, meta_rows)
+        # CURRENT → не бросает
+        st._check_index_integrity("audits_index")
+
+    def test_invalid_legacy_no_signature_skips(self, monkeypatch):
+        cfg = {"audits_index": {
+            "table": "audits", "pk": "id",
+            "content_columns": ["content"], "embedding_columns": {"c": "col"},
+            "track_column": "updated_at",
+        }}
+        emb = {"model": "mxbai-embed-large:latest", "dimension": 1024}
+        # legacy-индекс без signature в metadata → проверка пропускается
+        meta_rows = [{"metadata": {}}]
+
+        st = DuckDbCacheStore(cache_path="", vector_store_table="oarb.audit_vectors")
+        _fake_cfg_module(monkeypatch, cfg, emb, meta_rows)
+        st._check_index_integrity("audits_index")

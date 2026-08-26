@@ -289,3 +289,48 @@ class TestArchitectureIndependence:
                     raise AssertionError(
                         f"forbidden attribute {node.attr!r} at line {node.lineno}"
                     )
+
+
+class TestProviderWiring:
+    def test_missing_infrastructure_without_provider(self) -> None:
+        """Без cache_store и без connection_factory — зелёный fallback в :memory:
+        запрещён: tool должен вернуть missing_infrastructure."""
+        tool = _make_tool()
+        # сбрасываем DI, установленный _make_tool
+        tool.set_connection_factory(None)
+        tool.set_provider(None)
+        payload = json.loads(_exec(tool, sql="SELECT 1"))
+        assert payload["status"] == "error"
+        assert payload["error_type"] == "missing_infrastructure"
+
+    def test_routes_through_cache_store(self) -> None:
+        """set_provider(core_cache_store) перенаправляет запрос в
+        DuckDbCacheStore.execute_readonly, а не в :memory:-фабрику."""
+        tool = _make_tool()
+        calls: dict[str, Any] = {}
+
+        class _FakeStore:
+            def execute_readonly(self, sql, params=None, max_rows=1000):
+                calls["sql"] = sql
+                return {
+                    "columns": ["n"],
+                    "rows": [[42]],
+                }
+
+        tool.set_provider(_FakeStore())
+        payload = json.loads(_exec(tool, sql="SELECT n FROM t"))
+        assert payload["status"] == "success"
+        assert payload["rows"] == [[42]]
+        assert calls["sql"] == "SELECT n FROM t"
+
+    def test_provider_error_surfaced(self) -> None:
+        tool = _make_tool()
+
+        class _FakeStore:
+            def execute_readonly(self, sql, params=None, max_rows=1000):
+                return {"error": "boom"}
+
+        tool.set_provider(_FakeStore())
+        payload = json.loads(_exec(tool, sql="SELECT 1"))
+        assert payload["status"] == "error"
+        assert payload["message"] == "boom"
