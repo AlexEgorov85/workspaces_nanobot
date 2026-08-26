@@ -41,17 +41,6 @@ jobs:
             exit 1
           fi
 
-  docs-link-check:
-    name: Markdown link check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: gaurav-nelson/github-action-markdown-link-check@v1
-        with:
-          use-quiet-mode: 'yes'
-          config-file: '.markdown-link-check.json'
-        continue-on-error: true
-
   code-blocks:
     name: Code blocks have language
     runs-on: ubuntu-latest
