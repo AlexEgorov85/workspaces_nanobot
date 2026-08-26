@@ -208,16 +208,16 @@ DSN подключается только через `channels.postgres.dsn` в 
 
 Схема в `gateway.py::run()`:
 
-```
-_build_audit_services() ──► (store, sync_service)
-sync_service.set_on_new_records_callback(store.upsert_records)
-sync_service.set_on_replace_records_callback(store.replace_records)
-sync_service.set_on_schema_callback(store.ensure_schema)
-sync_service.set_on_sync_callback(store.publish)     # снимок после каждого цикла
-sync_service.start(initial_load=True)                # полная загрузка + поллинг
-_preload_vector_indexes(store)                       # прогрев FAISS в память
-...
-(finally) store.publish() → store.close()            # финальный снимок при выходе
+```mermaid
+flowchart LR
+    BUILD["_build_audit_services()"] --> SYNC["sync_service"]
+    SYNC -->|upsert / replace / schema| STORE["DuckDbCacheStore"]
+    SYNC -->|publish()| DUCK["cache.duckdb"]
+    SYNC -->|preload| FAISS["FAISS в память"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class BUILD,SYNC,STORE core
+    class DUCK,FAISS infra
 ```
 
 **Правило одного писателя.** DuckDB допускает только один процесс-писатель на

@@ -48,15 +48,17 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 
 ## Целевая зависимость (после рефакторинга)
 
-```
-Skill (audit_analyzer) ─┐
-                        ├──► shared infrastructure (lib/utils, lib/services) ◄──┐
-Tool (duckdb_query)  ───┤                                                      │
-Tool (vector_search)  ──┘                                                      │
-                                                                              │
-Skill (audit_analyzer) не импортирует Tool,                                   │
-Tool не импортирует Skill,                                                   │
-связь — только через LLM-agent runtime.                                      │
+```mermaid
+flowchart TB
+    SKILL["Skill: audit_analyzer"] --> INFRA["shared infra<br/>lib/services, lib/utils"]
+    T1["Tool: duckdb_query"] --> INFRA
+    T2["Tool: vector_search"] --> INFRA
+    SKILL -.не импортирует.-> T1
+    SKILL -.не импортирует.-> T2
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class SKILL,T1,T2 core
+    class INFRA infra
 ```
 
 Контракт и инварианты — в [docs/skill-tool-architecture.md](skill-tool-architecture.md)

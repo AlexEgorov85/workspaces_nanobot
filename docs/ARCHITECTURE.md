@@ -27,49 +27,33 @@
 > [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md) и [AGENTS.md](../AGENTS.md).
 
 ```mermaid
-flowchart LR
-    subgraph PG["PostgreSQL (канон)"]
-        AUDITS["oarb.audits<br/>oarb.violations<br/>oarb.audit_reports<br/>oarb.report_items"]
-        VECTORS["oarb.audit_vectors"]
-        STORE["public.agent_vector_index_store<br/>(FAISS в BYTEA)"]
-        CONFIG["public.agent_vector_index_config"]
+flowchart TB
+    subgraph PG["PostgreSQL"]
+        TBL["oarb.audits / violations / reports"]
+        VEC["oarb.audit_vectors"]
+        VCFG["agent_vector_index_config / store"]
     end
-
-    subgraph SERVICES["lib/services (универсальный слой данных)"]
-        SYNC["PgDuckDbSyncService<br/>(worker-поток,<br/>SQL через общий пул)"]
-        STORE_SVC["DuckDbCacheStore<br/>(in-memory DuckDB+FAISS)"]
-        PROV["PostgresDuckDbProvider<br/>(CacheProvider)"]
-        EMBED["get_embedding<br/>(Ollama /api/embed)"]
+    subgraph SVC["lib/services (универсальный слой)"]
+        SYNC["PgDuckDbSyncService — поллинг"]
+        STORE["DuckDbCacheStore + FAISS"]
+        PROV["PostgresDuckDbProvider"]
+        EMB["get_embedding (Ollama)"]
     end
-
-    subgraph ARTIFACT["Файл кеша навыка"]
-        DUCK["workspace/data_store/duckdb/cache.duckdb<br/>(снимок таблиц,<br/>table_registry.snapshot_path)"]
+    subgraph ART["Кеш навыка"]
+        DUCK["data_store/duckdb/cache.duckdb"]
     end
-
-    AUDITS -->|"поллинг<br/>(incremental)"| SYNC
-    VECTORS --> SYNC
-    SYNC -->|"upsert_records<br/>(batch)"| STORE_SVC
-    SYNC -->|"after sync"| STORE_SVC
-    STORE_SVC -->|"publish()<br/>temp+os.replace"| DUCK
-    VECTORS -->|"при промахе индекса"| STORE
-    PROV -->|"query_sql/explain"| AUDITS
-    PROV -->|"search_vector"| STORE
-    PROV -->|"get_embedding"| EMBED
-
-    GATEWAY["gateway.py<br/>(владелец кеша)<br/>PgDuckDbSyncService →<br/>DuckDbCacheStore →<br/>publish()"]
-    CLI["навык CLI<br/>(только чтение)"]
-
-    GATEWAY --> SYNC
-    GATEWAY --> STORE_SVC
-    CLI --> DUCK
-    CLI --> PROV
-
-    classDef service fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
-    classDef owner fill:#fff3cd,stroke:#d39e00,stroke-width:2px
-    classDef consumer fill:#f8d7da,stroke:#c82333
-    class SYNC,STORE_SVC service
-    class GATEWAY owner
-    class CLI consumer
+    TBL --> SYNC
+    VEC --> SYNC
+    VCFG --> SYNC
+    SYNC -->|batch upsert| STORE
+    STORE -->|publish()| DUCK
+    PROV --> STORE
+    PROV --> EMB
+    PROV --> PG
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class SYNC,STORE,PROV,EMB core
+    class TBL,VEC,VCFG,DUCK infra
 ```
 
 **Потоки данных**
@@ -100,27 +84,23 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    GW["gateway.py<br/>232 строки<br/>(тонкий оркестратор)"]
-    CLI["cli_agent.py<br/>165 строк<br/>(тонкий оркестратор)"]
-    CTX["lib/core/ApplicationContext<br/>(create/start/stop)"]
-
-    GW -->|"create(...)"| CTX
-    CLI -->|"create(...)"| CTX
-
-    CTX --> CFG_SVC["ConfigService<br/>(config.json, SETTINGS, pre-resolve env)"]
-    CTX --> SESS["SessionStorageService<br/>(PGSessionManager / SessionManager)"]
-    CTX --> DB_LOG["DbLoggingService<br/>(worker, batch INSERT, без JSONL-fallback)"]
-    CTX --> AUDIT["PgDuckDbSyncService + DuckDbCacheStore<br/>(audit_analyzer)"]
-    CTX --> BUS["MessageBus<br/>(через BusFactory, с обёрткой под логгеры)"]
-    CTX --> AGENT["AgentLoop<br/>(через AgentFactory,<br/>hooks=[ToolAudit],<br/>hook_factories=[DbLogging per-turn])"]
-    CTX --> PATCHER["RuntimePatcher<br/>(ContextGovernor + _assemble_outbound)"]
-    CTX --> PRELOAD["PreloadService<br/>(FAISS / audit_cache)"]
-    CTX --> TRANS["TranscriptionService"]
-
-    classDef bootstrap fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    GW["gateway.py"] --> APPCTX
+    CLI["cli_agent.py"] --> APPCTX
+    subgraph APPCTX["ApplicationContext.create / start / stop"]
+        CFG["ConfigService"]
+        SESS["SessionStorage"]
+        DBL["DbLoggingService"]
+        SYNC["PgDuckDbSync + CacheStore"]
+        BUS["MessageBus"]
+        AGENT["AgentFactory (AgentLoop)"]
+        PATCH["RuntimePatcher"]
+        PRE["PreloadService"]
+        TRANS["TranscriptionService"]
+    end
     classDef entry fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
-    class CTX bootstrap
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     class GW,CLI entry
+    class CFG,SESS,DBL,SYNC,BUS,AGENT,PATCH,PRE,TRANS core
 ```
 
 ### `lib/core/` (ApplicationContext + фабрики)
@@ -352,30 +332,17 @@ TestDatabaseLoggingHookFactory.test_concurrent_sessions_do_not_mix_request_id`
 
 ```mermaid
 flowchart LR
-    subgraph manual["Ручной запуск"]
-        TOOL["compact_context<br/>(AgentTool)"]
-        SLASH["/compact<br/>(slash-command)"]
-        CLI["/compact<br/>(console_loop REPL)"]
+    subgraph IN["Входы"]
+        TOOL["compact_context (tool)"]
+        SLASH["/compact (slash + CLI)"]
+        AUTO["Авто: idle / token-budget"]
     end
-    subgraph auto["Авто-сжатие nanobot"]
-        AC["AutoCompact._archive<br/>(idle)"]
-        MC["Consolidator.maybe_<br/>consolidate_by_tokens<br/>(token)"]
-    end
-
-    TOOL --> SVC
-    SLASH --> SVC
-    CLI --> SVC
-    AC --> W1["runtime_patcher.<br/>_wrap_auto_compact_archive"]
-    MC --> W2["runtime_patcher.<br/>_wrap_maybe_consolidate_by_tokens"]
-    W1 --> SVC
-    W2 --> SVC
-
-    SVC["ContextCompactionService<br/>(lib/services/context_compaction.py)"]
-    SVC -->|_notify| FMT["format_report(report)"]
-    FMT --> LOG["loguru INFO"]
-    FMT --> RICH["Rich-вывод в терминал<br/>(print_to_terminal)"]
-    FMT --> DB["INSERT в agent_conversation_<br/>messages (metadata.kind='context_compact')"]
-    DB --> ST["Streamlit UI<br/>.compact-notice"]
+    IN --> SVC["ContextCompactionService"]
+    SVC -->|notify| OUT["Заметка в истории + лог + UI"]
+    classDef entry fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    class TOOL,SLASH,AUTO entry
+    class SVC core
 ```
 
 **Точки входа:**
@@ -646,22 +613,13 @@ DDL: `metadata JSONB DEFAULT '{}'::jsonb` (см.
 Одна строка проходит несколько фаз, в каждой из которых
 `metadata` дополняется:
 
-```
-INSERT (user/assistant placeholder, status='pending'/'processing')
-   │   metadata = {}   (или raw_meta от UI — см. §3)
-   ▼
-status='processing' (работает канал PostgresChannel)
-   │   metadata += {message_id, answer_id, session_key, retry_count}
-   │   metadata += {reasoning}            (live, в процессе оборота)
-   │   metadata += {context_window}       (live, каждые flush_interval)
-   ▼
-status='completed'   (финал оборота)
-   │   metadata += {_tool_audit}          (в патче _assemble_outbound)
-   │   metadata уже содержит reasoning, context_window, message_id, answer_id
-   ▼
-статус меняется: error/failed (см. §4)
-   │   metadata += {error: <reason>}      (только error/failed)
-   │   metadata.retry_count инкрементируется
+```mermaid
+flowchart TD
+    A["INSERT — status pending<br/>metadata = {}"] --> B["processing<br/>+ message_id, reasoning, context_window"]
+    B --> C["completed<br/>+ _tool_audit"]
+    C --> D["error / failed<br/>+ error, retry_count++"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    class A,B,C,D core
 ```
 
 То есть в `metadata` **накапливаются** ключи от разных подсистем;

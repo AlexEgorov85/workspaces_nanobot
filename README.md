@@ -51,24 +51,37 @@ python tools/migrate.py --apply                                   # миграц
 
 ```mermaid
 flowchart TB
-    subgraph CFG["3 конфига (порядок мержа: поздний перекрывает ранний)"]
-        CONFIG["config.json"] --> PROJECT["project.json"] --> SECRETS[".secrets.env"]
+    subgraph UI["Точки входа"]
+        GW["gateway.py"]
+        CLI["cli_agent.py"]
+        ST["streamlit_app.py"]
     end
-    CFG -->|"SETTINGS"| CTX["ApplicationContext<br>(lib/core/)"]
-    CTX --> SVC["lib/services/<br>config, session, channel_factory,<br>runtime_patcher, db_logging,<br>transcription, subprocess, preload"]
-    CTX --> CORE["lib/core/<br>agent_factory, bus_factory"]
-    CTX --> LIFE["lib/lifecycle/<br>gateway_runner, shutdown_coordinator"]
-    CTX --> BUS["MessageBus"] --> AGENT["AgentLoop<br>+ ToolAuditHook<br>+ DatabaseLoggingHook"]
-    GATEWAY["gateway.py"] --> CTX
-    CLI["cli_agent.py"] --> CTX
-    STREAMLIT["streamlit_app.py (отдельно)"] --> PG["PostgreSQL"]
-    BUS --> PG
-    BUS --> REDIS["Redis (опционально)"]
-    PG --> STREAMLIT
-    classDef v2 fill:#fff3cd,stroke:#d39e00,stroke-width:2px
-    classDef legacy fill:#f8d7da,stroke:#c82333
-    class CTX,CORE,LIFE,SVC v2
-    class STREAMLIT legacy
+    subgraph ORCH["Оркестрация (lib/core)"]
+        CTX["ApplicationContext"]
+        BUS["MessageBus"]
+        AGENT["AgentLoop + Hooks"]
+    end
+    subgraph SVC["Сервисы (lib/services)"]
+        CFG["Config / Session"]
+        RT["RuntimePatcher"]
+        DBL["DbLogging"]
+        PRE["Preload"]
+    end
+    subgraph INFRA["Инфраструктура"]
+        PG[("PostgreSQL")]
+        RD[("Redis")]
+        DUCK[("DuckDB кеш")]
+    end
+    UI --> ORCH
+    ORCH --> SVC
+    ORCH --> INFRA
+    SVC --> INFRA
+    classDef entry fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class GW,CLI,ST entry
+    class CTX,BUS,AGENT,CFG,RT,DBL,PRE core
+    class PG,RD,DUCK infra
 ```
 
 **Поток:** 3 конфига → `config.py: SETTINGS` → `ApplicationContext.create()` →

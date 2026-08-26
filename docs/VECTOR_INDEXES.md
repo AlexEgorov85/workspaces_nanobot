@@ -19,39 +19,16 @@
 
 ### Архитектура
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│ 1. Конфиг (public.agent_vector_index_config)                                  │
-│    - задаёт какие таблицы индексировать, какие колонки эмбеддить,    │
-│      параметры чанкования, track-колонку                             │
-└──────────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────────┐
-│ 2. Источники (oarb.audits, oarb.violations, oarb.audit_reports, …)   │
-│    - читаются через SELECT * + track_column для инкрементального     │
-│      сравнения с уже собранными векторами                            │
-└──────────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────────┐
-│ 3. tools/build_vectors.py (сборщик)                                   │
-│    - NEW/CHANGED/DELETED классификация по (source, pk_value)         │
-│    - чанкование длинных текстов (lib/services/text_splitter.py)      │
-│    - батчевый эмбеддинг через Ollama /api/embed                       │
-│    - INSERT в oarb.audit_vectors + rebuild FAISS в public.agent_vector_index_store
-└──────────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────────┐
-│ 4. Хранилище                                                         │
-│    - oarb.audit_vectors:  эмбеддинги REAL[] + метаданные             │
-│    - public.agent_vector_index_store: сериализованный FAISS BYTEA (для поиска)│
-└──────────────────────────────────────────────────────────────────────┘
-                              ↓
-┌──────────────────────────────────────────────────────────────────────┐
-│ 5. Поиск (audit_analyzer --mode vector)                              │
-│    - PostgresDuckDbProvider.search_vector()                          │
-│    - десериализует FAISS из public.agent_vector_index_store, ищет в памяти,  │
-│      при промахе пересобирает из oarb.audit_vectors                  │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    CFG["1. agent_vector_index_config"] --> SRC["2. Источники: oarb.audits / violations"]
+    SRC --> BL["3. build_vectors.py<br/>чанкование + эмбеддинг"]
+    BL --> ST["4. audit_vectors + FAISS store"]
+    ST --> SE["5. search_vector()<br/>поиск в памяти"]
+    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class CFG,SRC,BL core
+    class ST,SE infra
 ```
 
 ### Таблицы
