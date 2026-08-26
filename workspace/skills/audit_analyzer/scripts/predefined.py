@@ -138,10 +138,14 @@ def resolve_params_with_vector(
     index_dir: str = "",
 ) -> tuple[dict, list[str]]:
     """
-    Асинхронно разрешить параметры с использованием FAISS-векторного поиска.
+    Разрешить параметры с использованием FAISS-векторного поиска.
     Для каждого строкового параметра с validation.vector_source выполняет
     embedding-поиск через провайдера данных (lib/services) и подставляет
     лучшее совпадение. Возвращает кортеж (merged, unknown).
+
+    ``index_dir`` — deprecated, сохранён в сигнатуре для back-compat:
+    индексы живут в DuckDB-кэше runtime, файловый путь провайдером
+    игнорируется (см. lib/services/cache_provider_impl.search_vector).
     """
     merged, unknown = resolve_params(script, params)
 
@@ -161,14 +165,11 @@ def resolve_params_with_vector(
         top_k = validation.get("vector_top_k", 3)
         index_name = f"{v_source}_index"
 
-        if not index_dir:
-            continue
-
         try:
             from skill_config import build_cache_provider
             provider = build_cache_provider()
             results = provider.search_vector(
-                val, index_name=index_name, index_path=index_dir,
+                val, index_name=index_name,
                 top_k=top_k, threshold=min_score,
             )
         except (ImportError, AttributeError) as e:

@@ -19,10 +19,6 @@
     # Векторный поиск: всё выше порога 0.5
     audit_analyze --mode vector --query 'статусы аудитов' --index-name audits_index --threshold 0.5
 
-    # Векторный поиск с кастомной директорией индексов
-    audit_analyze --mode vector --query 'финансы' --index-name fin_index \\
-        --vector-index 'C:/custom/path'
-
     # С контекстом чата (история для LLM в sql-режиме)
     audit_analyze --mode sql --query 'покажи детали' \\
         --context '[{"role":"user","content":"привет"}]'
@@ -88,19 +84,30 @@ from skill_config import (  # noqa: E402
 
 
 def _ensure_registered() -> None:
-    """Зарегистрировать audit_analyzer в ``table_registry``.
+    """Зарегистрировать audit_analyzer и runtime-инфраструктуру в ``table_registry``.
 
     Standalone CLI не имеет ``ApplicationContext`` (его поднимает gateway),
     поэтому skill сам себя регистрирует из ``project.json::skills.audit_analyzer``
     через ``lib.core.skill_registration.register_skill_from_config``. Идемпотентно:
     если skill уже зарегистрирован (например, gateway-populated реестр),
     повторная регистрация игнорируется.
+
+    Дополнительно поднимаем общую runtime-инфраструктуру (``vector.storage``
+    + ``embedding_config``), без которой ``search_vector`` падает на
+    «Не удалось получить эмбеддинг запроса»: эти ресурсы в обычном
+    режиме кладёт ``ApplicationContext._register_infra_resources``.
     """
-    from lib.core.skill_registration import register_skill_from_config
+    from lib.core.infra_registration import register_vector_storage
+    from lib.core.skill_registration import (
+        register_embedding_config,
+        register_skill_from_config,
+    )
     from config import SETTINGS
 
     audit_cfg = SETTINGS.get("skills", {}).get("audit_analyzer", {})
     register_skill_from_config("audit_analyzer", audit_cfg)
+    register_vector_storage()
+    register_embedding_config()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -143,16 +150,12 @@ def _build_parser() -> argparse.ArgumentParser:
              'Форматы: \'{"year": 2024}\' (JSON) или year=2024 (key=value, запятые).',
     )
     parser.add_argument(
-        "--vector-index",
-        default=None,
-        help="Директория с FAISS-индексами (только для vector mode). "
-             "По умолчанию из skills.audit_analyzer.mode_vector_index_path",
-    )
-    parser.add_argument(
         "--index-name",
         default=None,
-        help="Имя индекса (без .faiss) для mode=vector. "
-             "По умолчанию: 'audits_index'",
+        help="Имя индекса для mode=vector. "
+             "По умолчанию: 'audits_index'. "
+             "Индекс живёт в DuckDB-кэше (workspace/data_store/duckdb/cache.duckdb), "
+             "путь к .faiss-файлам не нужен.",
     )
     parser.add_argument(
         "--top-k",
@@ -212,7 +215,6 @@ def _run(args: argparse.Namespace) -> dict:
             results = db.search_vector(
                 args.query,
                 index_name=args.index_name or "audits_index",
-                index_path=args.vector_index or get_vector_index_path(),
                 top_k=args.top_k or 5,
                 threshold=args.threshold,
             )
