@@ -226,6 +226,106 @@
   `SETTINGS["gateway"]["vector_index"]` (приоритет), fallback —
   `cfg["tables"][type="vector"]` для standalone-режима.
 
+### Block: skill-configuration-boundary
+
+> Жёсткое разделение между **domain binding** (`skills.<name>.*`) и
+> **shared runtime infrastructure** (`gateway.*`). Удалена обратная
+> совместимость для legacy-путей — fail-fast на уровне runtime.
+> Skill `audit_analyzer` сохранён для CLI/бенчмарка/e2e.
+>
+> Правило (TARGET_ARCHITECTURE §skills.* boundary):
+>
+>   * Меняется при смене домена skill'а → `skills.<name>.*`.
+>   * Меняется при смене инфраструктуры, но не домена → `gateway.*`.
+>   * Меняется при смене deployment'а → `channels.*` или env.
+
+#### Added
+
+- **`EmbeddingSettings` (`pydantic`)** в `lib/core/project_settings.py` —
+  новая модель в `GatewaySettings.vector.embedding`. Поля: `base_url`,
+  `model`, `dimension`, `http_timeout_sec`, **`auth_token`** (bearer-токен
+  для `Authorization: Bearer <token>`, для эмбеддеров за reverse proxy).
+  Рекомендуемый способ задания `auth_token` — через переменную окружения:
+  `"auth_token": "${EMBED_TOKEN}"` + `EMBED_TOKEN=...` в `.secrets.env`.
+- **`VectorInfrastructureSettings`** — новая модель для объединённой
+  секции `gateway.vector.{embedding,index}`. Канонический путь для
+  всей vector-инфраструктуры.
+- **`register_embedding_config()`** (`lib/core/skill_registration.py`) —
+  читает `gateway.vector.embedding` и кладёт в
+  `TableRegistry.set_embedding_config(...)`. Вызывается один раз
+  из `ApplicationContext._register_infra_resources()`.
+- **`SkillsSettings._validate_skill_sections`** (`@model_validator(mode="before")`)
+  — реально валидирует каждую `skills.<name>` через `SkillSettings` с
+  `extra="forbid"`. Без этого pydantic не спускался бы в типизированные
+  секции (`SkillsSettings` имеет `extra="allow"` для forward-compat
+  по именам skill'ов).
+
+#### Changed
+
+- **`SkillSettings`** (`lib/core/project_settings.py`) — `extra="forbid"`,
+  удалены секции `embedding` и `cache`. Остались `enabled`, `tables`,
+  `vector_indexes`, `cli`, `llm`. Это явная граница: skill описывает
+  только domain binding, не shared infrastructure.
+- **`cache_provider_impl.get_embedding()`** — добавлен `Authorization:
+  Bearer <auth_token>` если `auth_token` задан в
+  `gateway.vector.embedding`. Поддержка Ollama / open-webui / LiteLLM /
+  клаудных провайдеров, выставленных за reverse proxy с авторизацией.
+- **`cache_provider_impl.read_embedding_config()`** — без аргумента;
+  источник — `SETTINGS['gateway']['vector']['embedding']`. Параметр
+  `cfg` удалён.
+- **`cache_provider_impl.build_cache_provider()`** — больше не читает
+  `cfg["cache"]`; `cache_path` всегда из `table_registry.snapshot_path()`.
+- **`skill_config.get_embedding_config()` / `get_embedding_model()`** —
+  теперь skill-независимые, читают из `table_registry.embedding_config()`
+  (общий runtime-конфиг).
+- **`lib/core/skill_config.py`** — добавлена `get_in_memory_cache_path()`,
+  удалены `get_in_memory_config(skill_name, skill_root)` и
+  `is_in_memory_enabled()` (были мёртвыми: `enabled` нигде не
+  проверялся, `engine` нигде не использовался, `max_age_sec` /
+  `refresh_interval_sec` не пробрасывались в `PostgresDuckDbProvider`).
+- **`project.json`** — `skills.audit_analyzer.embedding` и
+  `skills.audit_analyzer.cache` удалены. Добавлен `gateway.vector.embedding`
+  (с подсказкой про `${EMBED_TOKEN}` в комментарии).
+- **`lib/core/infra_registration.py`** — `INFRA_KEY_VECTOR_STORAGE`
+  переименован с `"vector_index.storage"` на `"vector.storage"`.
+  Источник: `gateway.vector.index.storage_table`.
+
+#### Removed
+
+- **`skills.<name>.embedding`** (секция в `project.json`) — embedding —
+  общая runtime-инфраструктура, не свойство домена skill'а.
+- **`skills.<name>.cache`** (секция в `project.json`) — все поля были
+  мёртвыми; DuckDB snapshot — общий `table_registry.snapshot_path()`.
+- **`skills.<name>.vector_indexes[].source`** — поле `source` удалено
+  из `VectorIndexEntry`. Source-таблица (PG-таблица исходных строк)
+  хранится в `public.agent_vector_index_config` (runtime-БД).
+- **`gateway.vector_index.*`** — устаревший путь удалён из
+  `GatewaySettings` (поле `vector_index`) и из `project.json`.
+  Единственный канонический путь — `gateway.vector.index.*`.
+  Обратной совместимости нет (fail-fast через runtime).
+- **`skill_config.get_in_memory_config(skill_name, skill_root)`** и
+  **`is_in_memory_enabled(skill_name)`** — заменены на
+  `get_in_memory_cache_path(skill_root)`.
+
+#### Migration notes
+
+- `project.json::gateway.vector_index.*` → `gateway.vector.index.*`
+  (переименование секции). Если у вас внешние скрипты/документация,
+  ссылающиеся на `gateway.vector_index`, обновите их.
+- `project.json::skills.<name>.embedding` → `gateway.vector.embedding`.
+- `project.json::skills.<name>.cache` — удалено. Если вы полагались
+  на `enabled`/`engine`, замените на `table_registry.snapshot_path()`
+  (путь — runtime-константа).
+- `skills.<name>.vector_indexes[].source` — поле больше не нужно.
+  Source-таблица хранится в `public.agent_vector_index_config`.
+- `skill_config.get_in_memory_config(name, root)` →
+  `skill_config.get_in_memory_cache_path(root)`.
+- `skill_config.get_embedding_config(name)` / `get_embedding_model(name)`
+  — убран параметр `skill_name` (embedding — общий runtime).
+- `skill_config.is_in_memory_enabled(name)` — удалено.
+- `lib.core.infra_registration.INFRA_KEY_VECTOR_STORAGE` —
+  `"vector_index.storage"` → `"vector.storage"`.
+
 ## [2.4.0] — 2026-08-20
 
 > **MINOR-релиз:** метрика занятости контекстного окна (`metadata.context_window`),

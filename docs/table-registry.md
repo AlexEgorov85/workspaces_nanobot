@@ -31,16 +31,18 @@ Resource Model решает это так: skill — это **деклараци
 - **Имена индексов**, которые использует skill — в
   `skills.<name>.vector_indexes[]` (только `name`).
 - **Storage сырых эмбеддингов** (общий runtime, не привязан к skill'у) —
-  в `gateway.vector_index.storage_table`. Регистрируется через
+  в `gateway.vector.index.storage_table`. Регистрируется через
   `TableRegistry.register_infra`.
 
 ```jsonc
 // project.json
 "gateway": {
-  "vector_index": {
-    "storage_table": "oarb.audit_vectors",
-    "default_root": "data_store/vectors",
-    "backend": "faiss"
+  "vector": {
+    "index": {
+      "storage_table": "oarb.audit_vectors",
+      "default_root": "data_store/vectors",
+      "backend": "faiss"
+    }
   }
 },
 "skills": {
@@ -112,7 +114,7 @@ table-sync (PG → DuckDB) и vector-индексация (FAISS / pgvector / Qd
 
 - `name` — логическое имя индекса (`"audits_index"`).
 
-Storage сырых эмбеддингов — **не** здесь (см. `gateway.vector_index.storage_table`
+Storage сырых эмбеддингов — **не** здесь (см. `gateway.vector.index.storage_table`
 и `register_infra`). Source-таблица (PG-таблица, из которой `tools/build_vectors.py`
 читает строки для эмбеддингов) — тоже **не** здесь; это инфраструктурная
 декларация в `public.agent_vector_index_config`.
@@ -206,10 +208,12 @@ optional и backend-specific (read-only через `extra="allow"`):
 
 ```jsonc
 "gateway": {
-  "vector_index": {
-    "storage_table": "oarb.audit_vectors",
-    "default_root": "data_store/vectors",
-    "backend": "faiss"
+  "vector": {
+    "index": {
+      "storage_table": "oarb.audit_vectors",
+      "default_root": "data_store/vectors",
+      "backend": "faiss"
+    }
   }
 },
 "skills": {
@@ -243,8 +247,8 @@ optional и backend-specific (read-only через `extra="allow"`):
   `oarb.violations` — из `tables[]`;
 - `TableResource(name="public.agent_predefined_scripts", label="scripts_registry")` —
   из `tables[]` с явным label;
-- `VectorResource(name="oarb.audit_vectors")` — из `gateway.vector_index.storage_table`
-  через `register_infra("vector_index.storage", ...)`.
+- `VectorResource(name="oarb.audit_vectors")` — из `gateway.vector.index.storage_table`
+  через `register_infra("vector.storage", ...)`.
 
 ## Примеры для новых skill'ов
 
@@ -269,10 +273,12 @@ optional и backend-specific (read-only через `extra="allow"`):
 
 ```jsonc
 "gateway": {
-  "vector_index": {
-    "storage_table": "kb.kb_embeddings",
-    "default_root": "data_store/vectors",
-    "backend": "faiss"
+  "vector": {
+    "index": {
+      "storage_table": "kb.kb_embeddings",
+      "default_root": "data_store/vectors",
+      "backend": "faiss"
+    }
   }
 },
 "skills": {
@@ -302,7 +308,7 @@ optional и backend-specific (read-only через `extra="allow"`):
 - `kb.kb_search_index` помечен `label="scripts_registry"`;
 - `public.kb_user_collections` — внешняя таблица;
 - `kb.kb_embeddings` (vector-storage) — общий runtime, объявлен в
-  `gateway.vector_index.storage_table`, регистрируется через `register_infra`.
+  `gateway.vector.index.storage_table`, регистрируется через `register_infra`.
 
 ## label как opaque marker
 
@@ -349,9 +355,9 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 **`_register_infra_resources`** делегирует
 `lib/core/infra_registration.register_vector_storage()`, который:
 
-1. Читает `gateway.vector_index.storage_table`.
+1. Читает `gateway.vector.index.storage_table`.
 2. Регистрирует `VectorResource(name=storage_table, tracking_column="id")`
-   через `table_registry.register_infra("vector_index.storage", ...)`.
+   через `table_registry.register_infra("vector.storage", ...)`.
 
 Та же логика используется в standalone-режиме (`tools/build_vectors.py`)
 — `register_vector_storage()` вызывается там явно, чтобы реестр был
@@ -449,7 +455,7 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 - `tests/test_auto_register_skills.py` — поведение `_auto_register_skills`:
   парсинг `tables[]`; `vector_indexes[].source` не регистрируется как ресурс.
 - `tests/test_infra_registration.py` — `register_vector_storage` через
-  `gateway.vector_index.storage_table`.
+  `gateway.vector.index.storage_table`.
 - `tests/test_project_settings.py` — pydantic-валидация `TableEntry`/
   `VectorIndexEntry`, fail-fast на опечатках.
 - `tests/test_skill_config_lookup.py` — `resources_by_label("scripts_registry")`

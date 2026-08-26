@@ -28,7 +28,7 @@
 | `gateway.print_llm_calls` | `false` | Токены LLM в терминал gateway (CLI — всегда вкл.) |
 | `gateway.print_worker_activity` | `false` | Активность воркеров в терминал |
 | `gateway.print_db_activity` | `false` | Активность db-job'ов в терминал |
-| `gateway.vector_index.storage_table` | `oarb.audit_vectors` | Единая PG-таблица-хранилище сырых эмбеддингов. Регистрируется через `TableRegistry.register_infra` |
+| `gateway.vector.index.storage_table` | `oarb.audit_vectors` | Единая PG-таблица-хранилище сырых эмбеддингов. Регистрируется через `TableRegistry.register_infra("vector.storage", ...)` |
 | `cli.show_context_window` | `true` | Метка занятости контекстного окна в CLI |
 | `streamlit.enabled` | `true` | Гейт запуска Streamlit-UI на :8501 |
 
@@ -37,9 +37,12 @@
 - `streamlit.failed_window_sec` → `streamlit.error_window_sec`
   (теперь окно повтора `error`-задач, а не `failed`).
 - `gateway.vector_index.cache_tables` — удалён (был мёртв: никем не читался).
-- `gateway.vector_index.storage_tables` (list) → `gateway.vector_index.storage_table` (str)
+- `gateway.vector_index.storage_tables` (list) → `gateway.vector.index.storage_table` (str)
   — единая общая storage-таблица для runtime'а. Если у вас был список с одной
   таблицей (`["oarb.audit_vectors"]`), замените на строку (`"oarb.audit_vectors"`).
+- `gateway.vector_index.*` (legacy) → `gateway.vector.index.*`
+  — секция переименована. Обратной совместимости нет (fail-fast через
+  runtime-проверку в `register_vector_storage`).
 - `skills.<name>.vector_indexes[].source` — поле `source` больше не нужно.
   PG-таблица исходных строк для каждого индекса — в
   `public.agent_vector_index_config` (runtime-БД). Имена индексов (`name`)

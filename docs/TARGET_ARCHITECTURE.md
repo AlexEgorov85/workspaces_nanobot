@@ -131,6 +131,55 @@ Skill не должен импортировать `workspace/tools`.
 
 Skill не должен зависеть от конкретного Python-класса Tool.
 
+### Граница `skills.<name>.*` vs shared infrastructure
+
+`project.json::skills.<name>` содержит ТОЛЬКО **domain binding** skill'а —
+то, что меняется при смене домена. Shared runtime-инфраструктура лежит
+вне `skills.*` (см. `gateway.*`). Это сознательное правило: оно
+фиксируется в `SkillSettings(extra="forbid")` (см.
+`lib/core/project_settings.py::SkillSettings`) и автоматически
+валидируется на старте через `SkillsSettings._validate_skill_sections`.
+
+**Чек-лист «куда положить новый ключ»:**
+
+| Меняется при смене... | Положить в... |
+|---|---|
+| Домена skill'а | `skills.<name>.<key>` |
+| Инфраструктуры, но не домена | `gateway.<section>.<key>` |
+| Deployment'а | `channels.*` или env (`.secrets.env`) |
+
+**Примеры:**
+
+| Настройка | Где живёт | Почему |
+|---|---|---|
+| `temperature`, `max_tokens` для SQL-генерации | `skills.<name>.llm` (или `skills.<name>.generation`) | Execution policy skill'а (доменное решение) |
+| Модель / провайдер LLM | `config.json` (`agents.defaults.*`) | Выбор провайдера — это свойство инфраструктуры, не домена skill'а |
+| Ollama URL / `auth_token` для эмбеддера | `gateway.vector.embedding` | Embedding service — общий runtime, не домен skill'а |
+| DuckDB snapshot path | `table_registry.snapshot_path()` | Cache path — общий runtime |
+| FAISS root / backend / storage_table | `gateway.vector.index.*` | FAISS-инфраструктура — общий runtime |
+| PG → DuckDB sync интервал | `gateway.sync.*` | Sync — общий runtime |
+| Список таблиц skill'а | `skills.<name>.tables[]` | Какие PG-ресурсы — часть домена skill'а |
+| Список vector-индексов skill'а | `skills.<name>.vector_indexes[]` | Какие индексы использует skill (только имена) |
+| Параметры CLI навыка (`default_mode`, `timeout_sec`) | `skills.<name>.cli` | Специфика CLI-интерфейса skill'а |
+| Pool size / worker count | `channels.postgres.pool.*` | Deployment-настройка транспорта |
+| CLI-флаги отображения (`show_reasoning`) | `cli.*` (верхний уровень) | Настройки CLI-агента, не skill |
+
+**Что НЕ должно быть в `skills.<name>`** (по правилу): embedding service,
+cache/refresh policy, FAISS-бэкенд, sync-параметры, model/provider LLM.
+Всё это — shared infrastructure.
+
+**Legacy-пути, удалённые при commit «skill configuration boundary»:**
+
+* `skills.<name>.embedding` → перенесён в `gateway.vector.embedding`.
+* `skills.<name>.cache` → удалён (поля были мёртвыми).
+* `skills.<name>.vector_indexes[].source` → удалён (source —
+  runtime-реестр в `public.agent_vector_index_config`).
+* `gateway.vector_index.*` → переименован в `gateway.vector.index.*`.
+
+Обратной совместимости нет (fail-fast через runtime-проверку, не
+через Pydantic): старый `project.json` с этими секциями стартует, но
+runtime их **не читает**.
+
 ---
 
 ## 2.4. Tools

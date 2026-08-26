@@ -182,7 +182,7 @@ python tools/build_vectors.py --index audits_index --full-rebuild
 
 #### Сценарий C: изменилась модель эмбеддинга или размерность
 
-`project.json → skills.audit_analyzer.embedding_*`:
+`project.json → gateway.vector.embedding`:
 
 ```json
 {
@@ -783,7 +783,7 @@ python tools/build_vectors.py --index audits_index --full-rebuild
 
 #### Эмбеддинг для разных моделей
 
-Каждый индекс эмбеддится **одной моделью** (из `project.json → skills.audit_analyzer.embedding_*`). Разные модели для разных индексов **не поддерживаются** через конфиг — только глобально.
+Каждый индекс эмбеддится **одной моделью** (из `project.json → gateway.vector.embedding`). Разные модели для разных индексов **не поддерживаются** через конфиг — только глобально.
 
 Если нужна разная размерность для разных индексов — нужен рефакторинг `cache_provider_impl.py:PostgresDuckDbProvider` (per-index `embedding_base_url/model`).
 
