@@ -32,12 +32,15 @@ from lib.services.table_registry import (
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
-    """Сбрасывать singleton между тестами."""
+    """Сбрасывать singleton между тестами.
+
+    ``table_registry.clear()`` уже сбрасывает и ``_embedding`` (см.
+    ``TableRegistry.clear``); отдельный вызов ``_embedding.clear()``
+    больше не нужен.
+    """
     table_registry.clear()
-    table_registry._embedding.clear()
     yield
     table_registry.clear()
-    table_registry._embedding.clear()
 
 
 def _make_ctx(skills_cfg: dict) -> SimpleNamespace:

@@ -312,9 +312,16 @@ class TableRegistry:
         return "updated_at"
 
     def clear(self) -> None:
-        """Очистить реестр."""
+        """Очистить реестр (skill + infra + embedding).
+
+        Полная очистка состояния singleton'а. Безопасна для повторного
+        вызова (idempotent). Должна вызываться ``ApplicationContext`` при
+        повторном ``create()`` в одном процессе, чтобы избежать утечки
+        ресурсов между contexts.
+        """
         self._registrations.clear()
         self._infra.clear()
+        self._embedding.clear()
 
     def snapshot_path(self, workspace_path: Path, filename: str = "cache.duckdb") -> Path:
         """Путь к runtime-снапшоту DuckDB.

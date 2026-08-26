@@ -39,13 +39,14 @@ def provider():
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
-    """Сбрасывать table_registry между тестами."""
+    """Сбрасывать table_registry между тестами.
+
+    ``TableRegistry.clear()`` уже сбрасывает и ``_embedding``.
+    """
     from lib.services.table_registry import table_registry
     table_registry.clear()
-    table_registry._embedding.clear()
     yield
     table_registry.clear()
-    table_registry._embedding.clear()
 
 
 _CFG_FOR_REGISTRATION = {

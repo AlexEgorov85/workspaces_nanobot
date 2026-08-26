@@ -29,14 +29,15 @@ for _p in (str(_PROJECT_ROOT), str(_SKILL_SCRIPTS)):
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
-    """Сбрасывать singleton registry между тестами."""
+    """Сбрасывать singleton registry между тестами.
+
+    ``TableRegistry.clear()`` уже сбрасывает и ``_embedding``.
+    """
     from lib.services.table_registry import table_registry
 
     table_registry.clear()
-    table_registry._embedding.clear()
     yield
     table_registry.clear()
-    table_registry._embedding.clear()
 
 
 @pytest.fixture

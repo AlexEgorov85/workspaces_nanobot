@@ -325,3 +325,49 @@ class TestCreate:
             "SessionFileRedirectHook должен идти раньше ToolAuditHook, "
             f"но порядок: {names}"
         )
+
+
+class TestTableRegistryReset:
+    """``ApplicationContext.create()`` сбрасывает singleton
+    ``table_registry`` в начале, чтобы при повторном создании context
+    в одном процессе (тесты, streamlit-reload) не утекали ресурсы
+    от предыдущего context.
+
+    Без фикса: после первой ``create()`` с skill "A" вторая ``create()``
+    с skill "B" видела ресурсы обоих.
+    """
+
+    def test_create_resets_table_registry(self, full_fake_modules):
+        from lib.core.application_context import ApplicationContext
+        from lib.services.table_registry import (
+            SkillRegistration,
+            TableResource,
+            table_registry,
+        )
+
+        table_registry.register(
+            SkillRegistration(
+                name="leftover_skill",
+                resources=(TableResource(name="public.leftover"),),
+            )
+        )
+        table_registry.set_embedding_config(base_url="http://stale", model="old")
+        assert "leftover_skill" in table_registry.names()
+        assert table_registry.embedding_config() != {}
+
+        script = Path(__file__).resolve().parent.parent
+        ApplicationContext.create(
+            script_dir=script,
+            workspace_dir=script / "workspace",
+            enable_db_logging=False,
+            enable_audit=False,
+        )
+
+        assert "leftover_skill" not in table_registry.names(), (
+            "ApplicationContext.create() должен сбрасывать TableRegistry "
+            "в начале; остались ресурсы от предыдущего context"
+        )
+        assert table_registry.embedding_config() == {}, (
+            "Embedding-конфиг тоже должен сбрасываться; "
+            f"остался: {table_registry.embedding_config()}"
+        )

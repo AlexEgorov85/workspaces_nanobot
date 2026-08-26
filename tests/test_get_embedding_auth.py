@@ -23,8 +23,6 @@ def _setup_registry(base_url: str = "http://localhost:11434/api/embed",
     from lib.services.table_registry import table_registry
 
     table_registry.clear()
-    # clear() не сбрасывает _embedding — обнуляем явно.
-    table_registry._embedding.clear()
     kwargs: dict = {
         "base_url": base_url,
         "model": model,

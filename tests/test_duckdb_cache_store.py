@@ -54,10 +54,8 @@ _VECTOR_RECORDS = [
 @pytest.fixture(autouse=True)
 def _reset_registry():
     table_registry.clear()
-    table_registry._embedding.clear()
     yield
     table_registry.clear()
-    table_registry._embedding.clear()
 
 
 @pytest.fixture
