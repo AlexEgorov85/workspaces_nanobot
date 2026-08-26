@@ -49,7 +49,7 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 ## Целевая зависимость (после рефакторинга)
 
 ```mermaid
-flowchart TB
+flowchart LR
     SKILL["Skill: audit_analyzer"] --> INFRA["shared infra<br/>lib/services, lib/utils"]
     T1["Tool: duckdb_query"] --> INFRA
     T2["Tool: vector_search"] --> INFRA

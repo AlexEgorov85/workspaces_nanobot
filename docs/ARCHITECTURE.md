@@ -27,7 +27,7 @@
 > [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md) и [AGENTS.md](../AGENTS.md).
 
 ```mermaid
-flowchart TB
+flowchart LR
     subgraph PG["PostgreSQL"]
         TBL["oarb.audits / violations / reports"]
         VEC["oarb.audit_vectors"]
@@ -83,7 +83,7 @@ flowchart TB
 ### Точки входа → общий bootstrap
 
 ```mermaid
-flowchart TB
+flowchart LR
     GW["gateway.py"] --> APPCTX
     CLI["cli_agent.py"] --> APPCTX
     subgraph APPCTX["ApplicationContext.create / start / stop"]

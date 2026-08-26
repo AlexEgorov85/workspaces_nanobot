@@ -50,7 +50,7 @@ python tools/migrate.py --apply                                   # миграц
 ## 🏗 Архитектура
 
 ```mermaid
-flowchart TB
+flowchart LR
     subgraph UI["Точки входа"]
         GW["gateway.py"]
         CLI["cli_agent.py"]

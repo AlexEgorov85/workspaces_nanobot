@@ -20,7 +20,7 @@
 ### Архитектура
 
 ```mermaid
-flowchart TB
+flowchart LR
     CFG["1. agent_vector_index_config"] --> SRC["2. Источники: oarb.audits / violations"]
     SRC --> BL["3. build_vectors.py<br/>чанкование + эмбеддинг"]
     BL --> ST["4. audit_vectors + FAISS store"]
