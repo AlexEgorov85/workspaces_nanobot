@@ -61,12 +61,8 @@ def get_max_retries() -> int:
     return _lib.get_max_retries(_SKILL_NAME)
 
 
-def get_in_memory_config() -> dict[str, Any]:
-    return _lib.get_in_memory_config(_SKILL_NAME, _root())
-
-
-def is_in_memory_enabled() -> bool:
-    return _lib.is_in_memory_enabled(_SKILL_NAME)
+def get_in_memory_cache_path() -> str:
+    return _lib.get_in_memory_cache_path(_root())
 
 
 def get_vector_index_path() -> str:
@@ -90,8 +86,8 @@ def get_vector_indexes() -> dict[str, Any]:
 
 
 def get_embedding_config() -> dict[str, Any]:
-    return _lib.get_embedding_config(_SKILL_NAME)
+    return _lib.get_embedding_config()
 
 
 def get_embedding_model() -> str:
-    return _lib.get_embedding_model(_SKILL_NAME)
+    return _lib.get_embedding_model()

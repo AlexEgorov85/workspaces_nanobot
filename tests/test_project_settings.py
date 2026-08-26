@@ -45,10 +45,27 @@ class TestValidateProjectSettings:
         assert result.cli.max_iterations == 200
 
     def test_unknown_keys_allowed(self) -> None:
+        """Неизвестные ключи на верхнем уровне (например, ``benchmark.x``)
+        разрешены (``extra="allow"`` — forward-совместимость).
+        Внутри ``skills.<name>`` неизвестные ключи теперь запрещены
+        (``SkillsSettings._validate_skill_sections`` + ``SkillSettings(extra="forbid")``).
+        """
         result = validate_project_settings(
-            {"skills": {"audit_analyzer": {"db_tables": ["t1"]}}, "benchmark": {"x": 1}}
+            {"benchmark": {"x": 1}, "logging": {"unknown_subkey": 42}}
         )
         assert result.channels is None
+
+    def test_unknown_key_in_skill_raises(self) -> None:
+        """После commit «skill configuration boundary» неизвестные ключи
+        внутри ``skills.<name>`` поднимают ``ConfigurationError`` (regression-guard).
+        """
+        with pytest.raises(ConfigurationError) as excinfo:
+            validate_project_settings(
+                {"skills": {"audit_analyzer": {"db_tables": ["t1"]}}}
+            )
+        msg = str(excinfo.value)
+        assert "audit_analyzer" in msg
+        assert "extra_forbidden" in msg or "not permitted" in msg
 
     def test_wrong_type_bool_key(self) -> None:
         with pytest.raises(ConfigurationError) as excinfo:
@@ -172,3 +189,282 @@ class TestTableEntry:
         """TableEntry экспортируется из lib.core.project_settings."""
         from lib.core.project_settings import TableEntry as Exported
         assert Exported is TableEntry
+
+
+class TestSkillSettingsExtraForbid:
+    """``SkillSettings`` имеет ``extra="forbid"``: неизвестные ключи в skill-секции
+    ловятся на старте (fail-fast).
+
+    Это граница контракта: ``skills.<name>`` описывает ТОЛЬКО то, что
+    меняется при смене домена skill'а (см. TARGET_ARCHITECTURE §skills.*
+    boundary). Любая попытка положить туда инфраструктурную настройку
+    (``embedding``, ``cache``, что-то ещё) сразу падает с понятной ошибкой
+    валидации. Это сильно сокращает класс «тихих» багов конфигурации.
+    """
+
+    def test_typo_in_tables_rejected_direct(self) -> None:
+        """Прямая валидация SkillSettings ловит опечатку (``extra="forbid"``)."""
+        with pytest.raises(Exception) as excinfo:
+            SkillSettings.model_validate({"tablse": [{"name": "oarb.audits"}]})
+        msg = str(excinfo.value)
+        assert "extra_forbidden" in msg or "not permitted" in msg
+
+    def test_legacy_embedding_section_rejected_direct(self) -> None:
+        """Прямая валидация SkillSettings запрещает legacy-секцию ``embedding``.
+
+        После рефакторинга ``embedding`` должна жить в ``gateway.vector.embedding``.
+        """
+        with pytest.raises(Exception) as excinfo:
+            SkillSettings.model_validate({
+                "tables": [{"name": "oarb.audits"}],
+                "embedding": {"base_url": "http://x", "model": "m"},
+            })
+        msg = str(excinfo.value)
+        assert "extra_forbidden" in msg or "not permitted" in msg
+
+    def test_legacy_cache_section_rejected_direct(self) -> None:
+        """Прямая валидация SkillSettings запрещает legacy-секцию ``cache``.
+
+        ``cache.*`` удалена полностью (была мёртвой: ``max_age_sec`` /
+        ``refresh_interval_sec`` / ``engine`` не пробрасывались в runtime).
+        DuckDB-кеш живёт в ``table_registry.snapshot_path()`` как часть
+        общей инфраструктуры.
+        """
+        with pytest.raises(Exception) as excinfo:
+            SkillSettings.model_validate({
+                "tables": [{"name": "oarb.audits"}],
+                "cache": {"enabled": True},
+            })
+        msg = str(excinfo.value)
+        assert "extra_forbidden" in msg or "not permitted" in msg
+
+    def test_full_valid_skill_settings(self) -> None:
+        """Эталонный набор полей skill'а после рефакторинга."""
+        s = SkillSettings.model_validate({
+            "enabled": True,
+            "tables": [{"name": "oarb.audits"}],
+            "vector_indexes": [{"name": "audits_index"}],
+            "cli": {"default_mode": "predefined", "timeout_sec": 60},
+            "llm": {"max_tokens": 8192, "temperature": 0.1},
+        })
+        assert s.enabled is True
+        assert len(s.tables) == 1
+        assert len(s.vector_indexes) == 1
+        assert s.cli.timeout_sec == 60
+        assert s.llm.temperature == 0.1
+
+    def test_minimal_skill_settings(self) -> None:
+        """Skill без единой секции (только ``enabled`` опционально) — допустимо."""
+        s = SkillSettings.model_validate({})
+        assert s.enabled is None
+        assert s.tables is None
+        assert s.vector_indexes is None
+        assert s.cli is None
+        assert s.llm is None
+
+    def test_project_settings_skills_audit_analyzer_parsed(self) -> None:
+        """Полная валидация project.json::skills.audit_analyzer проходит."""
+        result = validate_project_settings({
+            "skills": {
+                "audit_analyzer": {
+                    "enabled": True,
+                    "tables": [
+                        {"name": "oarb.audit_reports", "tracking_column": "updated_at"},
+                        {"name": "oarb.audits", "tracking_column": "updated_at"},
+                    ],
+                    "vector_indexes": [
+                        {"name": "audits_index"},
+                        {"name": "violations_index"},
+                    ],
+                    "cli": {"default_mode": "predefined"},
+                    "llm": {"max_tokens": 8192, "temperature": 0.1},
+                },
+            },
+        })
+        assert result.skills is not None
+
+    def test_project_settings_typo_in_skill_rejected(self) -> None:
+        """Опечатка в skill-секции ловится ``SkillsSettings._validate_skill_sections``.
+
+        Без ``model_validator`` pydantic не спустился бы в типизированный
+        ``SkillSettings``, потому что ``SkillsSettings`` имеет
+        ``extra="allow"`` для forward-compat по именам skill'ов. Этот
+        тест — regression-guard на то, что валидатор реально работает.
+        """
+        with pytest.raises(ConfigurationError) as excinfo:
+            validate_project_settings({
+                "skills": {
+                    "audit_analyzer": {
+                        "tables": [{"name": "oarb.audits"}],
+                        "tablse": [{"name": "oarb.bogus"}],
+                    },
+                },
+            })
+        msg = str(excinfo.value)
+        assert "audit_analyzer" in msg
+        assert "extra_forbidden" in msg or "not permitted" in msg
+
+    def test_project_settings_legacy_embedding_in_skill_rejected(self) -> None:
+        """Legacy-секция ``skills.<name>.embedding`` падает на validation."""
+        with pytest.raises(ConfigurationError) as excinfo:
+            validate_project_settings({
+                "skills": {
+                    "audit_analyzer": {
+                        "tables": [{"name": "oarb.audits"}],
+                        "embedding": {"base_url": "http://x", "model": "m"},
+                    },
+                },
+            })
+        msg = str(excinfo.value)
+        assert "audit_analyzer" in msg
+        assert "extra_forbidden" in msg or "not permitted" in msg
+
+
+class TestVectorIndexEntryNoSource:
+    """``VectorIndexEntry.source`` удалён: source — инфраструктурная
+    декларация в ``public.agent_vector_index_config``, не часть skill'а.
+    """
+
+    def test_minimal_index(self) -> None:
+        from lib.core.project_settings import VectorIndexEntry
+        e = VectorIndexEntry.model_validate({"name": "audits_index"})
+        assert e.name == "audits_index"
+
+    def test_source_field_absent(self) -> None:
+        """Source больше не поле модели. Передача его в JSON игнорируется
+        (``extra="allow"``) или, если хочется строго, можно проверить,
+        что он не появляется в attributes.
+        """
+        from lib.core.project_settings import VectorIndexEntry
+        e = VectorIndexEntry.model_validate({"name": "x", "source": "y"})
+        assert e.name == "x"
+        assert not hasattr(e, "source") or e.model_dump().get("source") in (None, "y")
+
+
+class TestGatewayVectorEmbedding:
+    """``gateway.vector.embedding`` — общая инфраструктура эмбеддингов."""
+
+    def test_valid_embedding(self) -> None:
+        result = validate_project_settings({
+            "gateway": {
+                "vector": {
+                    "embedding": {
+                        "base_url": "http://localhost:11434/api/embed",
+                        "model": "mxbai-embed-large:latest",
+                        "dimension": 1024,
+                        "http_timeout_sec": 60,
+                    },
+                },
+            },
+        })
+        emb = result.gateway.vector.embedding
+        assert emb.base_url == "http://localhost:11434/api/embed"
+        assert emb.model == "mxbai-embed-large:latest"
+        assert emb.dimension == 1024
+        assert emb.http_timeout_sec == 60
+
+    def test_embedding_with_auth_token(self) -> None:
+        """Bearer-токен для ``Authorization: Bearer <token>`` пробрасывается как есть.
+
+        Подстановка ``${EMBED_TOKEN}`` происходит на этапе мержа config.py;
+        здесь мы проверяем только, что поле валидно.
+        """
+        result = validate_project_settings({
+            "gateway": {
+                "vector": {
+                    "embedding": {
+                        "base_url": "http://localhost:11434/api/embed",
+                        "model": "mxbai-embed-large:latest",
+                        "dimension": 1024,
+                        "auth_token": "${EMBED_TOKEN}",
+                    },
+                },
+            },
+        })
+        emb = result.gateway.vector.embedding
+        assert emb.auth_token == "${EMBED_TOKEN}"
+
+    def test_auth_token_optional(self) -> None:
+        """Если auth_token не задан — эмбеддер без авторизации (например, локальный Ollama)."""
+        result = validate_project_settings({
+            "gateway": {
+                "vector": {
+                    "embedding": {
+                        "base_url": "http://localhost:11434/api/embed",
+                        "model": "mxbai-embed-large:latest",
+                    },
+                },
+            },
+        })
+        emb = result.gateway.vector.embedding
+        assert emb.auth_token is None
+
+    def test_embedding_dimension_must_be_positive(self) -> None:
+        with pytest.raises(ConfigurationError):
+            validate_project_settings({
+                "gateway": {
+                    "vector": {"embedding": {"base_url": "x", "dimension": 0}}
+                }
+            })
+
+    def test_embedding_http_timeout_must_be_positive(self) -> None:
+        with pytest.raises(ConfigurationError):
+            validate_project_settings({
+                "gateway": {
+                    "vector": {"embedding": {"base_url": "x", "http_timeout_sec": -1}}
+                }
+            })
+
+    def test_vector_index_path_unique(self) -> None:
+        """``gateway.vector.index.*`` — единственный канонический путь.
+
+        Legacy ``gateway.vector_index.*`` НЕ читается (fail-fast).
+        """
+        result = validate_project_settings({
+            "gateway": {
+                "vector": {
+                    "index": {
+                        "storage_table": "oarb.audit_vectors",
+                        "default_root": "data_store/vectors",
+                        "backend": "faiss",
+                    }
+                },
+            },
+        })
+        assert result.gateway.vector.index.storage_table == "oarb.audit_vectors"
+
+    def test_legacy_vector_index_ignored_by_runtime(self) -> None:
+        """Legacy ``gateway.vector_index.*`` runtime-mute (ни один consumer не читает).
+
+        Pydantic не падает (через ``_StrictOptional.extra="allow"`` для
+        forward-compat), но ``register_vector_storage`` в
+        ``lib/core/infra_registration.py`` НЕ смотрит на этот путь.
+        Это явный fail-fast через runtime-проверку: оставивший legacy
+        ``vector_index`` увидит, что ``vector_names()`` пустой, и
+        синхронизация PG → DuckDB не работает.
+        """
+        from unittest.mock import patch
+        from lib.core.infra_registration import register_vector_storage
+
+        legacy_only = {
+            "gateway": {
+                "vector_index": {"storage_table": "oarb.audit_vectors"},
+            },
+        }
+        with patch("config.SETTINGS", legacy_only):
+            registered = register_vector_storage()
+        assert registered is False
+
+    def test_runtime_prefers_canonical_vector_index_path(self) -> None:
+        """Канонический путь ``gateway.vector.index.*`` регистрирует storage."""
+        from unittest.mock import patch
+        from lib.core.infra_registration import register_vector_storage
+
+        canonical = {
+            "gateway": {
+                "vector": {"index": {"storage_table": "oarb.audit_vectors"}},
+            },
+        }
+        with patch("config.SETTINGS", canonical):
+            registered = register_vector_storage()
+        assert registered is True

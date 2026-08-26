@@ -101,9 +101,8 @@
   //
   //  Чтобы добавить новый skill:
   //    1. Добавить секцию "skills.<name>" с массивом tables (TableResource).
-  //    2. Если нужны векторные индексы — добавить vector_indexes + embedding.
-  //    3. Если нужен свой интервал sync — настроить gateway.sync.*.
-  //    4. Готово: skill подхватится на старте gateway без правок кода.
+  //    2. Если нужны векторные индексы — добавить vector_indexes.
+  //    3. Готово: skill подхватится на старте gateway без правок кода.
   //
   //  Секции (все OPTIONAL):
   //      enabled            — отключить skill без удаления секции (default: true)
@@ -112,12 +111,20 @@
   //                           Source-таблица (PG-таблица исходных строк для
   //                           эмбеддингов) — инфраструктурная декларация в
   //                           public.agent_vector_index_config. backend и путь
-  //                           хранения — общая
-  //                           инфраструктура (см. gateway.vector_index.*).
-  //      embedding.*        — Ollama /api/embed (для vector-таблиц)
-  //      cache.*            — in-memory кэш (DuckDB): enabled, engine, max_age_sec, refresh_interval_sec
+  //                           хранения — общая инфраструктура
+  //                           (см. gateway.vector.index.*).
   //      cli.*              — параметры CLI навыка (default_mode, default_format, max_retries, timeout_sec)
-  //      llm.*              — переопределение LLM для навыка (max_tokens, temperature)
+  //      llm.*              — execution policy для skill'а: max_tokens/temperature
+  //                           для LLM-вызовов (генерация SQL, обобщение).
+  //                           Выбор модели/провайдера — в config.json (nanobot).
+  //
+  //  ГРАНИЦА skills.*: только то, что меняется при смене ДОМЕНА skill'а.
+  //  Общая runtime-инфраструктура — снаружи:
+  //    * embedding service (Ollama /api/embed, включая auth_token) → gateway.vector.embedding
+  //    * DuckDB snapshot path                                  → table_registry.snapshot_path()
+  //    * FAISS backend / storage / root                        → gateway.vector.index.*
+  //    * PG → DuckDB sync                                      → gateway.sync.*
+  //  Правило описано в TARGET_ARCHITECTURE §skills.* boundary.
   //
   //  Структура tables (lib/core/project_settings.py::TableEntry):
   //      name              — ОБЯЗАТЕЛЬНО. Имя таблицы в формате "schema.table"
@@ -143,6 +150,11 @@
   //      или объектом с полями выше. Неизвестные ключи в объекте запрещены
   //      (extra="forbid") — fail-fast на опечатках.
   //
+  //  ВНИМАНИЕ: skills.<name> имеет model_config = extra="forbid". Любой
+  //  неизвестный ключ в skill-секции вызовет ConfigurationError на старте
+  //  gateway (например, опечатка "tablse" или оставшийся от старой версии
+  //  ключ "embedding"/"cache"). Это сознательное ужесточение контракта.
+  //
   //  ВНИМАНИЕ: sync.* (poll_interval_sec, full_resync_every, max_queue_size,
   //  reconnect_backoff_*) — это НЕ секция skill'а, а глобальная runtime-секция
   //  на уровне gateway.sync.* (общая для всех skills). См. ниже.
@@ -152,10 +164,10 @@
       "enabled": true,
 
       "tables": [                                    // Доменные таблицы навыка (без инфраструктурных
-                                                  // storage-таблиц — они в gateway.vector_index.*).
-                                                  // tracking_column — обычно updated_at;
-                                                  // label отмечает реестры метаданных
-                                                  // (не попадают в описание схемы для LLM).
+                                                   // storage-таблиц — они в gateway.vector.index.*).
+                                                   // tracking_column — обычно updated_at;
+                                                   // label отмечает реестры метаданных
+                                                   // (не попадают в описание схемы для LLM).
         {"name": "oarb.audit_reports",              "tracking_column": "updated_at"},
         {"name": "oarb.audits",                     "tracking_column": "updated_at"},
         {"name": "oarb.report_items",               "tracking_column": "updated_at"},
@@ -181,20 +193,6 @@
         }
       ],
 
-      "embedding": {                                 // Ollama /api/embed
-        "base_url": "http://localhost:11434/api/embed",
-        "model": "mxbai-embed-large:latest",
-        "dimension": 1024,
-        "http_timeout_sec": 60
-      },
-
-      "cache": {                                     // In-memory кэш (DuckDB)
-        "enabled": true,
-        "engine": "duckdb",
-        "max_age_sec": 3600,
-        "refresh_interval_sec": 3600
-      },
-
       "cli": {                                       // audit_analyze --mode ...
         "default_mode": "predefined",
         "default_format": "json",
@@ -202,7 +200,9 @@
         "timeout_sec": 60
       },
 
-      "llm": {                                       // Генерация SQL и обобщение
+      "llm": {                                       // Execution policy для skill'а: max_tokens/temperature
+                                                   // для LLM-вызовов (генерация SQL, обобщение).
+                                                   // Выбор модели/провайдера — в config.json.
         "max_tokens": 8192,
         "temperature": 0.1
       }
@@ -320,21 +320,54 @@
       "max_result_chars": 16000,
       "timeout_sec": 30
     },
-    //  vector_index.* — общая инфраструктура FAISS.
-    //    storage_table  — единая PG-таблица-хранилище сырых эмбеддингов
-    //                     (формат "schema.table"); регистрируется в
-    //                     TableRegistry через register_infra.
-    //    default_root   — корневая папка FAISS-индексов; путь к индексу =
-    //                     <default_root>/<index_name>.
-    //    backend        — runtime-бэкенд построения индексов ("faiss" и т.п.).
+    //  vector.* — общая runtime-инфраструктура эмбеддингов и индексов.
+    //    embedding.* — параметры Ollama /api/embed (общие для всех skill'ов);
+    //                  раньше жили в skills.<name>.embedding, вынесены т.к.
+    //                  embedding service — это инфраструктура, не свойство
+    //                  конкретного домена skill'а. Регистрируется в
+    //                  TableRegistry при старте gateway через
+    //                  register_embedding_config.
+    //      base_url         — URL эмбеддер-сервиса.
+    //      model            — имя модели эмбеддингов.
+    //      dimension        — размерность вектора (используется при сборке FAISS).
+    //      http_timeout_sec — таймаут HTTP-запроса к эмбеддеру.
+    //      auth_token       — bearer-токен для Authorization: Bearer <token>.
+    //                         Используется, если эмбеддер за reverse proxy
+    //                         с авторизацией (open-webui, LiteLLM, клауд).
+    //                         Задавать через переменную окружения OS:
+    //                             "auth_token": "${EMBED_TOKEN}"
+    //                         и положить EMBED_TOKEN=... в .secrets.env.
+    //                         Прямое значение в project.json — только для
+    //                         локальной отладки, в коммиты не сохранять.
+    //    index.*    — FAISS-инфраструктура:
+    //      storage_table  — единая PG-таблица-хранилище сырых эмбеддингов
+    //                       (формат "schema.table"); регистрируется в
+    //                       TableRegistry через register_infra.
+    //      default_root   — корневая папка FAISS-индексов; путь к индексу =
+    //                       <default_root>/<index_name>.
+    //      backend        — runtime-бэкенд построения индексов ("faiss" и т.п.).
     //  Какие именно индексы строить и из каких source-таблиц — описывается
     //  в public.agent_vector_index_config (runtime-БД).
-    //  Все ключи опциональны; дефолты в VectorIndexSettings.
-    "vector_index": {
-      "enable": true,
-      "storage_table": "oarb.audit_vectors",
-      "default_root": "data_store/vectors",
-      "backend": "faiss"
+    //  Все ключи опциональны; дефолты в EmbeddingSettings и VectorIndexSettings.
+    //
+    //  УСТАРЕВШИЙ ПУТЬ: gateway.vector_index.*  → УДАЛЁН. Используйте
+    //  gateway.vector.index.* (это ЕДИНСТВЕННЫЙ канонический путь).
+    "vector": {
+      "embedding": {
+        "base_url": "http://localhost:11434/api/embed",
+        "model": "mxbai-embed-large:latest",
+        "dimension": 1024,
+        "http_timeout_sec": 60
+        // auth_token не задан: локальный Ollama без авторизации.
+        // Для reverse-proxy: добавить "auth_token": "${EMBED_TOKEN}"
+        // и EMBED_TOKEN в .secrets.env.
+      },
+      "index": {
+        "enable": true,
+        "storage_table": "oarb.audit_vectors",
+        "default_root": "data_store/vectors",
+        "backend": "faiss"
+      }
     }
   },
 

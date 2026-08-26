@@ -168,7 +168,7 @@ class TestAutoRegisterVectorIndexes:
     """``vector_indexes: []`` — список имён индексов, не регистрирует ресурс.
 
     В новой архитектуре storage-таблица векторов — инфраструктурный ресурс
-    (``gateway.vector_index.storage_table`` → ``TableRegistry.register_infra``).
+    (``gateway.vector.index.storage_table`` → ``TableRegistry.register_infra``).
     ``vector_indexes[].source`` (PG-таблица исходных строк) — тоже
     инфраструктурный (хранится в ``public.agent_vector_index_config``),
     skill его не знает.
@@ -241,25 +241,96 @@ class TestAutoRegisterSkillSkipping:
         assert table_registry.get("y") is not None
 
 
-class TestAutoRegisterEmbeddingConfig:
-    def test_embedding_set_from_cfg(self) -> None:
-        ctx = _make_ctx({"x": {"tables": [{"name": "s.t1"}], "embedding": {
-            "base_url": "http://localhost:11434/api/embed",
+class TestRegisterEmbeddingConfig:
+    """``register_embedding_config`` читает ``gateway.vector.embedding``.
+
+    Embedding-конфиг больше НЕ живёт в ``skills.<name>.embedding``
+    (после commit «skill configuration boundary»). Источник — общий
+    runtime-блок ``gateway.vector.embedding``. ``register_embedding_config``
+    вызывается один раз на старте gateway через
+    ``ApplicationContext._register_infra_resources``.
+    """
+
+    def test_embedding_set_from_gateway(self) -> None:
+        from config import SETTINGS
+        from lib.core.skill_registration import register_embedding_config
+
+        SETTINGS["gateway"] = {
+            "vector": {
+                "embedding": {
+                    "base_url": "http://localhost:11434/api/embed",
+                    "model": "mxbai-embed-large:latest",
+                    "dimension": 1024,
+                    "http_timeout_sec": 60,
+                },
+            },
+        }
+        try:
+            register_embedding_config()
+            emb = table_registry.embedding_config()
+            assert emb["base_url"] == "http://localhost:11434/api/embed"
+            assert emb["model"] == "mxbai-embed-large:latest"
+            assert emb["dimension"] == 1024
+            assert emb["timeout_sec"] == 60.0
+        finally:
+            SETTINGS.pop("gateway", None)
+
+    def test_embedding_with_auth_token(self) -> None:
+        from config import SETTINGS
+        from lib.core.skill_registration import register_embedding_config
+
+        SETTINGS["gateway"] = {"vector": {"embedding": {
+            "base_url": "http://proxy/api/embed",
             "model": "mxbai-embed-large:latest",
             "dimension": 1024,
-            "http_timeout_sec": 60,
-        }}})
-        _auto_register_skills(ctx)
-        emb = table_registry.embedding_config()
-        assert emb["base_url"] == "http://localhost:11434/api/embed"
-        assert emb["model"] == "mxbai-embed-large:latest"
-        assert emb["dimension"] == 1024
-        assert emb["timeout_sec"] == 60.0
+            "auth_token": "${EMBED_TOKEN}",
+        }}}
+        try:
+            register_embedding_config()
+            emb = table_registry.embedding_config()
+            assert emb["auth_token"] == "${EMBED_TOKEN}"
+        finally:
+            SETTINGS.pop("gateway", None)
 
-    def test_no_embedding_no_config_set(self) -> None:
-        ctx = _make_ctx({"x": {"tables": [{"name": "s.t1"}]}})
-        _auto_register_skills(ctx)
+    def test_no_embedding_section_no_op(self) -> None:
+        from lib.core.skill_registration import register_embedding_config
+
+        register_embedding_config()
         assert table_registry.embedding_config() == {}
+
+    def test_embedding_without_base_url_no_op(self) -> None:
+        """``base_url`` — обязательный признак «конфиг задан». Без него — no-op."""
+        from config import SETTINGS
+        from lib.core.skill_registration import register_embedding_config
+
+        SETTINGS["gateway"] = {"vector": {"embedding": {"model": "x"}}}
+        try:
+            register_embedding_config()
+            assert table_registry.embedding_config() == {}
+        finally:
+            SETTINGS.pop("gateway", None)
+
+    def test_skills_embedding_section_ignored(self) -> None:
+        """Legacy-секция ``skills.<name>.embedding`` больше не пробрасывается.
+
+        Это часть контракта: ``SkillSettings`` имеет ``extra="forbid"``,
+        и даже если бы allow — embedding в skill-секции не идёт в
+        ``table_registry``. Источник только один — ``gateway.vector.*``.
+        """
+        from config import SETTINGS
+        from lib.core.skill_registration import register_embedding_config
+
+        SETTINGS["gateway"] = {"vector": {"embedding": {
+            "base_url": "http://correct/api/embed",
+            "model": "good-model",
+        }}}
+        try:
+            register_embedding_config()
+            emb = table_registry.embedding_config()
+            assert emb["base_url"] == "http://correct/api/embed"
+            assert emb["model"] == "good-model"
+        finally:
+            SETTINGS.pop("gateway", None)
 
 
 class TestRegisterSkillFromConfigStandalone:

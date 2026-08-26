@@ -1,4 +1,4 @@
-"""Runtime API для skill'ов: конфигурация, таблицы, embedding, FAISS.
+"""Runtime API для skill'ов: конфигурация, таблицы, FAISS.
 
 Параметризован по ``skill_name``. Каждый skill вызывает функции со своим
 именем (например, ``get_db_tables("audit_analyzer")``). Это единая точка
@@ -6,6 +6,13 @@
 
 Реализация читает секцию ``project.json::skills.<name>`` через
 ``config.SETTINGS`` и табличный реестр через ``lib.services.table_registry``.
+
+Embedding-конфиг (``get_embedding_config``, ``get_embedding_model``)
+больше НЕ параметризован по ``skill_name``: после commit «skill
+configuration boundary» embedding — общая runtime-инфраструктура
+(``gateway.vector.embedding``), а не свойство skill-домена. Эти функции
+читают напрямую из ``table_registry.embedding_config()`` (положен туда
+на старте gateway через ``register_embedding_config``).
 """
 
 from __future__ import annotations
@@ -122,24 +129,24 @@ def get_max_retries(skill_name: str) -> int:
     return int(cli_cfg.get("max_retries", 3))
 
 
-def get_in_memory_config(skill_name: str, skill_root: Path | str) -> dict[str, Any]:
-    """Конфиг in-memory кэша (путь к DuckDB-снапшоту + engine/enabled)."""
+def get_in_memory_cache_path(skill_root: Path | str) -> str:
+    """Путь к единому DuckDB-снапшоту runtime-кэша.
+
+    Снимок общий для всех skill'ов (``workspace/data_store/duckdb/cache.duckdb``,
+    см. ``TableRegistry.snapshot_path()``) — это свойство runtime-инфраструктуры,
+    а не skill-домена. Поэтому функция НЕ параметризована ``skill_name``.
+
+    Заменила ранее существовавшую ``get_in_memory_config(skill_name,
+    skill_root)``, которая возвращала ещё ``enabled`` / ``engine`` из
+    ``skills.<name>.cache.*``. Эти поля были мёртвыми (``enabled``
+    нигде не проверялся, ``engine`` нигде не использовался,
+    ``max_age_sec`` / ``refresh_interval_sec`` не пробрасывались в
+    ``PostgresDuckDbProvider``). См. commit «skill configuration boundary».
+    """
     from lib.services.table_registry import table_registry
 
-    cfg = _skill_cfg(skill_name)
-    cache_cfg = cfg.get("cache") or {}
     workspace_root = Path(skill_root).parent.parent
-    return {
-        "enabled": bool(cache_cfg.get("enabled", True)),
-        "engine": cache_cfg.get("engine", "duckdb"),
-        "cache_path": str(table_registry.snapshot_path(workspace_root)),
-    }
-
-
-def is_in_memory_enabled(skill_name: str) -> bool:
-    cfg = _skill_cfg(skill_name)
-    cache_cfg = cfg.get("cache") or {}
-    return bool(cache_cfg.get("enabled", True))
+    return str(table_registry.snapshot_path(workspace_root))
 
 
 def get_vector_index_path(skill_name: str, skill_root: Path | str) -> str:
@@ -155,8 +162,9 @@ def get_vector_index_path(skill_name: str, skill_root: Path | str) -> str:
     name = vi_first.get("name", "")
     if not name:
         return ""
-    vi_cfg = SETTINGS.get("gateway", {}).get("vector_index") or {}
-    root = vi_cfg.get("default_root") or "data_store/vectors"
+    vector_cfg = SETTINGS.get("gateway", {}).get("vector") or {}
+    index_cfg = vector_cfg.get("index") or {}
+    root = index_cfg.get("default_root") or "data_store/vectors"
     p = Path(root) / name
     return str(p) if p.is_absolute() else str(Path(skill_root) / p)
 
@@ -164,13 +172,14 @@ def get_vector_index_path(skill_name: str, skill_root: Path | str) -> str:
 def get_vector_db_table(skill_name: str) -> str:
     """Имя таблицы-хранилища векторов.
 
-    Источник — ``gateway.vector_index.storage_table``. Fallback —
+    Источник — ``gateway.vector.index.storage_table``. Fallback —
     ``tables[type="vector"]`` (для standalone-утилит без ``gateway.*``).
     """
     from config import SETTINGS
 
-    vi_cfg = SETTINGS.get("gateway", {}).get("vector_index") or {}
-    storage_table = vi_cfg.get("storage_table") or ""
+    vector_cfg = SETTINGS.get("gateway", {}).get("vector") or {}
+    index_cfg = vector_cfg.get("index") or {}
+    storage_table = index_cfg.get("storage_table") or ""
     if storage_table:
         return storage_table
 
@@ -198,11 +207,17 @@ def get_vector_indexes(skill_name: str) -> dict[str, Any]:
     return read_vector_index_config(_skill_cfg(skill_name))
 
 
-def get_embedding_config(skill_name: str) -> dict[str, Any]:
-    from lib.services.cache_provider_impl import read_embedding_config
+def get_embedding_config() -> dict[str, Any]:
+    """Embedding-конфиг из общего runtime-реестра.
 
-    return read_embedding_config(_skill_cfg(skill_name))
+    Источник — ``gateway.vector.embedding`` (положен в ``TableRegistry``
+    на старте gateway через ``register_embedding_config``). Не
+    параметризовано ``skill_name``: embedding — общая инфраструктура.
+    """
+    from lib.services.table_registry import table_registry
+
+    return table_registry.embedding_config()
 
 
-def get_embedding_model(skill_name: str) -> str:
-    return get_embedding_config(skill_name).get("model", "mxbai-embed-large:latest")
+def get_embedding_model() -> str:
+    return get_embedding_config().get("model", "mxbai-embed-large:latest")

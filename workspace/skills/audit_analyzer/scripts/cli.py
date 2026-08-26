@@ -82,7 +82,7 @@ import sql_mode  # noqa: E402
 from output import _sanitize_value, prepare_output  # noqa: E402
 from skill_config import (  # noqa: E402
     build_cache_provider,
-    get_in_memory_config,
+    get_in_memory_cache_path,
     get_vector_index_path,
 )
 
@@ -179,16 +179,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _open_db():
-    im_cfg = get_in_memory_config()
     provider = build_cache_provider()
+    cache_path = get_in_memory_cache_path()
     if not provider.open_cache():
-        cache_path = im_cfg.get("cache_path", "?")
         raise FileNotFoundError(
             f"DuckDB-кеш не найден: {cache_path}. "
             "Кеш создаёт и обновляет gateway автоматически — "
             "запустите его (python gateway.py)."
         )
-    print(f"[DB] DuckDB in-memory cache ({im_cfg.get('cache_path', '?')})", file=sys.stderr)
+    print(f"[DB] DuckDB in-memory cache ({cache_path})", file=sys.stderr)
     return provider
 
 

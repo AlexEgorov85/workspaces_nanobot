@@ -561,8 +561,9 @@ def main():
                         help="Размер батча для эмбеддинга")
     vi_list = _CFG_RAW.get("vector_indexes") or []
     vi_first = vi_list[0] if vi_list and isinstance(vi_list[0], dict) else {}
-    vi_cfg = SETTINGS.get("gateway", {}).get("vector_index") or {}
-    storage_table = vi_cfg.get("storage_table") or ""
+    vector_cfg = SETTINGS.get("gateway", {}).get("vector") or {}
+    index_cfg = vector_cfg.get("index") or {}
+    storage_table = index_cfg.get("storage_table") or ""
     if not storage_table:
         for entry in _CFG_RAW.get("tables") or []:
             if isinstance(entry, dict) and entry.get("type") == "vector" and entry.get("name"):
@@ -590,7 +591,7 @@ def main():
                         help="Режим проверки без вставки")
     parser.add_argument("--db-table",
                         default=storage_table,
-                        help="Таблица-хранилище векторов (default: gateway.vector_index.storage_table)")
+                        help="Таблица-хранилище векторов (default: gateway.vector.index.storage_table)")
     parser.add_argument("--verbose", action="store_true",
                         help="Подробное логирование (уровень DEBUG): конфиг, каждый чанк/строка")
 

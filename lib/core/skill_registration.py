@@ -10,7 +10,7 @@ gateway) и в standalone-утилитах (``tools/build_vectors.py``).
 * ``vector_indexes`` — список имён индексов, которые использует skill
   (для ``get_vector_index_path()`` и build-tool'ов). НЕ регистрирует
   ресурс: storage-таблица векторов — инфраструктурный ресурс
-  (``gateway.vector_index.storage_table`` → ``TableRegistry.register_infra``),
+  (``gateway.vector.index.storage_table`` → ``TableRegistry.register_infra``),
   source-таблица — инфраструктурный (хранится в
   ``public.agent_vector_index_config``).
 """
@@ -64,8 +64,6 @@ def register_skill_from_config(skill_name: str, cfg: dict, registry=None) -> Ski
 
     ``enabled=False`` → skill пропускается (``None``).
     Skill уже зарегистрирован → возвращается существующая запись.
-    Embedding-конфиг (``base_url``, ``model``, ``dimension``, ``timeout_sec``)
-    ставится в ``registry.set_embedding_config(...)``, если задан.
 
     Args:
         skill_name: имя skill'а.
@@ -74,6 +72,15 @@ def register_skill_from_config(skill_name: str, cfg: dict, registry=None) -> Ski
 
     Returns:
         ``SkillRegistration`` или ``None``, если skill пропущен.
+
+    Note:
+        Embedding-конфиг (``base_url``, ``model``, ``dimension``,
+        ``timeout_sec``, ``auth_token``) больше НЕ берётся из
+        ``cfg["embedding"]``: после commit «skill configuration
+        boundary» он живёт в общей runtime-инфраструктуре
+        ``gateway.vector.embedding`` (см. ``register_embedding_config``).
+        Регистрируется в реестре один раз на старте gateway,
+        а не при регистрации каждого skill'а.
     """
     if not isinstance(cfg, dict):
         return None
@@ -88,13 +95,31 @@ def register_skill_from_config(skill_name: str, cfg: dict, registry=None) -> Ski
     registration = SkillRegistration(name=skill_name, resources=tuple(resources))
     reg.register(registration)
 
-    emb_cfg = cfg.get("embedding") or {}
-    if isinstance(emb_cfg, dict) and emb_cfg.get("base_url"):
-        reg.set_embedding_config(
-            base_url=emb_cfg.get("base_url", ""),
-            model=emb_cfg.get("model", "mxbai-embed-large:latest"),
-            dimension=int(emb_cfg.get("dimension", 1024) or 1024),
-            timeout_sec=float(emb_cfg.get("http_timeout_sec", 60.0) or 60.0),
-        )
-
     return registration
+
+
+def register_embedding_config(registry=None) -> None:
+    """Положить embedding-конфиг из ``gateway.vector.embedding`` в ``table_registry``.
+
+    Вызывается один раз при старте gateway (после ``register_vector_storage``).
+    Не падает, если секция отсутствует — embedding-функционал опционален.
+
+    Source: ``project.json::gateway.vector.embedding``. Все ключи
+    опциональны; если ``base_url`` пуст — no-op. ``auth_token``
+    пробрасывается без расшифровки (значение уже резолвится из
+    ``${EMBED_TOKEN}`` на этапе мержа ``config.py``).
+    """
+    from config import SETTINGS
+
+    emb_cfg = ((SETTINGS.get("gateway") or {}).get("vector") or {}).get("embedding") or {}
+    if not emb_cfg or not emb_cfg.get("base_url"):
+        return
+
+    reg = registry if registry is not None else table_registry
+    reg.set_embedding_config(
+        base_url=emb_cfg.get("base_url", ""),
+        model=emb_cfg.get("model", "mxbai-embed-large:latest"),
+        dimension=int(emb_cfg.get("dimension", 1024) or 1024),
+        timeout_sec=float(emb_cfg.get("http_timeout_sec", 60.0) or 60.0),
+        auth_token=emb_cfg.get("auth_token") or None,
+    )

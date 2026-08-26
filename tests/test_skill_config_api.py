@@ -92,7 +92,7 @@ class TestVectorDbTable:
 
         settings = {
             "skills": {"audit_analyzer": {"tables": []}},
-            "gateway": {"vector_index": {"storage_table": "oarb.audit_vectors"}},
+            "gateway": {"vector": {"index": {"storage_table": "oarb.audit_vectors"}}},
         }
         with patch("config.SETTINGS", settings):
             assert skill_config.get_vector_db_table("audit_analyzer") == "oarb.audit_vectors"

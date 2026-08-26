@@ -1,7 +1,7 @@
 """Регистрация инфраструктурных ресурсов в ``TableRegistry``.
 
 Единая точка для runtime (``ApplicationContext``) и standalone-утилит
-(``tools/build_vectors.py``). Читает конфиг из ``gateway.vector_index.*``
+(``tools/build_vectors.py``). Читает конфиг из ``gateway.vector.index.*``
 и регистрирует инфра-ресурсы через ``TableRegistry.register_infra``.
 """
 
@@ -15,7 +15,7 @@ from lib.services.table_registry import (
 )
 
 
-INFRA_KEY_VECTOR_STORAGE = "vector_index.storage"
+INFRA_KEY_VECTOR_STORAGE = "vector.storage"
 
 
 def _settings() -> dict[str, Any]:
@@ -25,19 +25,20 @@ def _settings() -> dict[str, Any]:
 
 
 def register_vector_storage() -> bool:
-    """Зарегистрировать ``vector_index.storage`` (PG-таблица-хранилище эмбеддингов).
+    """Зарегистрировать ``vector.storage`` (PG-таблица-хранилище эмбеддингов).
 
-    Источник — ``gateway.vector_index.storage_table``. Регистрируется как
-    ``VectorResource`` под ключом ``"vector_index.storage"``. Если уже
-    зарегистрировано — не перезатирает.
+    Источник — ``project.json::gateway.vector.index.storage_table``.
+    Регистрируется как ``VectorResource`` под ключом ``"vector.storage"``.
+    Если уже зарегистрировано — не перезатирает.
 
     Returns:
         ``True`` если зарегистрировано в этом вызове.
     """
     settings = _settings()
     gateway_cfg = settings.get("gateway") or {}
-    vi_cfg = gateway_cfg.get("vector_index") or {} if isinstance(gateway_cfg, dict) else {}
-    storage_table = vi_cfg.get("storage_table") if isinstance(vi_cfg, dict) else None
+    vector_cfg = gateway_cfg.get("vector") or {} if isinstance(gateway_cfg, dict) else {}
+    index_cfg = vector_cfg.get("index") or {} if isinstance(vector_cfg, dict) else {}
+    storage_table = index_cfg.get("storage_table") if isinstance(index_cfg, dict) else None
 
     if not (
         isinstance(storage_table, str)

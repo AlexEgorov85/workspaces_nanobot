@@ -530,10 +530,16 @@ def _register_infra_resources(ctx: ApplicationContext) -> None:
 
     Какие индексы строить и из каких source-таблиц — описывается в
     ``public.agent_vector_index_config`` (runtime-БД).
+
+    Embedding-конфиг (``gateway.vector.embedding``) кладётся в
+    ``TableRegistry.set_embedding_config(...)`` отдельно — это
+    runtime-конфиг без PG-ресурсов.
     """
     from lib.core.infra_registration import register_vector_storage
+    from lib.core.skill_registration import register_embedding_config
 
     register_vector_storage()
+    register_embedding_config()
 
 
 def _make_transcription(config: Any) -> Any:

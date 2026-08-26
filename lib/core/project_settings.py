@@ -9,7 +9,10 @@ create``), а не в рантайме канала/сервиса.
     (дефолты живут в потребителях через ``get_setting``);
   - неверный ТИП или значение — ошибка: ``ConfigurationError`` со списком
     всех проблем сразу;
-  - неизвестные ключи разрешены (extra="allow") — forward-совместимость;
+  - неизвестные ключи на верхнем уровне разрешены (extra="allow") —
+    forward-совместимость для новых подсекций;
+  - внутри ``skills.<name>`` неизвестные ключи ЗАПРЕЩЕНЫ (extra="forbid")
+    — fail-fast на опечатках (например, ``tablse`` вместо ``tables``);
   - единственный источник правды — SETTINGS после мержа
     project.json → config.json → .secrets.env.
 """
@@ -18,15 +21,14 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from config import ConfigurationError
 
 __all__ = [
+    "EmbeddingSettings",
     "ProjectSettings",
-    "SkillCacheSettings",
     "SkillCliSettings",
-    "SkillEmbeddingSettings",
     "SkillLlmSettings",
     "SkillSettings",
     "SkillsSettings",
@@ -34,6 +36,7 @@ __all__ = [
     "TableEntry",
     "VectorIndexEntry",
     "GatewaySettings",
+    "VectorInfrastructureSettings",
     "validate_project_settings",
 ]
 
@@ -87,6 +90,10 @@ class VectorIndexSettings(_StrictOptional):
     source-таблиц — описывается в ``public.agent_vector_index_config``
     (runtime-БД).
 
+    Путь в ``project.json``: ``gateway.vector.index.*`` (см.
+    ``VectorInfrastructureSettings``). Раньше жил в ``gateway.vector_index.*`` —
+    устаревший путь удалён, обратной совместимости нет (fail-fast).
+
     Attributes:
         enable: включён ли vector-indexing слой. ``None`` → дефолт ``True``.
         default_root: корневая папка FAISS-индексов. Дефолт
@@ -103,6 +110,57 @@ class VectorIndexSettings(_StrictOptional):
     storage_table: str | None = None
 
 
+class EmbeddingSettings(_StrictOptional):
+    """Параметры эмбеддингов (Ollama /api/embed и совместимые сервисы).
+
+    Общая runtime-инфраструктура, не привязанная к домену конкретного
+    skill'а (``embedding`` больше НЕ живёт в ``skills.<name>``). Источник
+    — ``project.json::gateway.vector.embedding``. Читается
+    ``skill_registration.register_embedding_config`` при старте gateway
+    и кладётся в ``TableRegistry.set_embedding_config(...)``.
+
+    Attributes:
+        base_url: URL эмбеддер-сервиса (например, Ollama ``/api/embed``).
+        model: имя модели эмбеддингов (например, ``mxbai-embed-large:latest``).
+        dimension: размерность вектора. Используется при сборке FAISS-индекса
+            и валидации совместимости с уже построенными индексами.
+        http_timeout_sec: таймаут HTTP-запроса к эмбеддер-сервису, сек.
+        auth_token: bearer-токен для ``Authorization: Bearer <token>``
+            при запросах к эмбеддер-сервису. Используется, если Ollama
+            (или совместимый сервис: open-webui, LiteLLM, клаудные
+            провайдеры с ``/api/embed``-совместимым API) выставлена за
+            reverse proxy с авторизацией. **Рекомендуемый способ задания** —
+            через переменную окружения OS: ``"auth_token": "${EMBED_TOKEN}"``
+            (подстановка делается на этапе мержа ``config.py`` из
+            ``.secrets.env``). Прямое значение в ``project.json`` — только
+            для локальной отладки, в коммиты не сохранять.
+    """
+
+    base_url: str | None = None
+    model: str | None = None
+    dimension: int | None = Field(default=None, gt=0)
+    http_timeout_sec: float | None = Field(default=None, gt=0)
+    auth_token: str | None = None
+
+
+class VectorInfrastructureSettings(_StrictOptional):
+    """Векторная инфраструктура (``gateway.vector.*``): эмбеддинги + индексы.
+
+    Содержит:
+      * ``embedding`` — ``EmbeddingSettings`` (см. выше);
+      * ``index`` — ``VectorIndexSettings`` (FAISS-индексы, storage-таблица).
+
+    Каноническое место для **общей** vector-инфраструктуры. Раньше
+    ``embedding`` жил в ``skills.<name>.embedding`` (per-skill), что
+    противоречит его runtime-семантике: ``embedding_config`` — singleton
+    в ``TableRegistry``, общий для всех skill'ов. Поэтому ``embedding``
+    перенесён в ``gateway.vector.embedding``.
+    """
+
+    embedding: EmbeddingSettings | None = None
+    index: VectorIndexSettings | None = None
+
+
 class HeartbeatSettings(_StrictOptional):
     enabled: bool | None = None
     intervalS: int | None = Field(default=None, gt=0)
@@ -117,7 +175,7 @@ class GatewaySettings(_StrictOptional):
     compact: CompactSettings | None = None
     duckdb_query: DuckDbQuerySettings | None = None
     vector_search: VectorSearchSettings | None = None
-    vector_index: VectorIndexSettings | None = None
+    vector: VectorInfrastructureSettings | None = None
     heartbeat: HeartbeatSettings | None = None
     sync: SyncSettings | None = None
 
@@ -207,53 +265,27 @@ class TableEntry(BaseModel):
 class VectorIndexEntry(BaseModel):
     """Один vector-storage индекс в ``vector_indexes: [...]``.
 
-    Минимальный generic-контракт: имя индекса + источник данных.
-    Алгоритм построения (FAISS / pgvector / Qdrant / иной бэкенд),
-    параметры чанкинга и формат хранения — это runtime-параметры конкретного
-    бэкенда, **общая инфраструктура** (см. ``gateway.vector_index.*``),
-    а не часть декларации ресурса.
+    Минимальный generic-контракт: **только имя** индекса.
+    Источник эмбеддингов (PG-таблица исходных строк), алгоритм построения
+    (FAISS / pgvector / Qdrant / иной бэкенд), параметры чанкинга и формат
+    хранения — это runtime-параметры конкретного бэкенда, **общая
+    инфраструктура** (см. ``gateway.vector.index.*``, ``agent_vector_index_config``
+    в runtime-БД), а не часть декларации ресурса в ``skills.<name>``.
 
     Attributes:
         name: логическое имя индекса (``"audits_index"``, ``"products_v"``).
-        source: имя PG-таблицы-источника сырых эмбеддингов.
 
-    Backend-specific параметры (для FAISS: ``text_chunk_size``,
-    ``text_chunk_overlap``, ``build_batch_pause_sec``; для Qdrant:
-    ``collection_name``; для pgvector: ``vector_column``) — это OPTIONAL
-    ключи с ``extra="allow"``. Они читаются конкретным runtime-бэкендом,
-    не валидируются здесь.
+    Раньше в этой модели было обязательное поле ``source`` (имя PG-таблицы
+    исходных строк). После того как source-таблицу перенесли в общий
+    runtime-реестр (``public.agent_vector_index_config``), ``source``
+    удалён из декларации skill'а. Если будет добавлен новый backend,
+    где source декларируется прямо в skill'е — это будет новая схема,
+    а не возврат к старой.
     """
 
     model_config = ConfigDict(extra="allow")
 
     name: str
-    source: str
-
-
-class SkillEmbeddingSettings(_StrictOptional):
-    """Секция ``embedding`` — параметры эмбеддингов (Ollama /api/embed).
-
-    Пишется в ``table_registry.set_embedding_config(...)`` при регистрации
-    skill'а и далее читается ``lib/services/cache_provider_impl.get_embedding``.
-    """
-
-    base_url: str | None = None
-    model: str | None = None
-    dimension: int | None = Field(default=None, gt=0)
-    http_timeout_sec: float | None = Field(default=None, gt=0)
-
-
-class SkillCacheSettings(_StrictOptional):
-    """Секция ``cache`` — параметры in-memory кэша (DuckDB).
-
-    Снимок общий для всех skill'ов (``workspace/data_store/duckdb/cache.duckdb``,
-    см. ``TableRegistry.snapshot_path()``); путь НЕ per-skill.
-    """
-
-    enabled: bool | None = None
-    engine: str | None = None
-    max_age_sec: float | None = Field(default=None, gt=0)
-    refresh_interval_sec: float | None = Field(default=None, gt=0)
 
 
 class SkillCliSettings(_StrictOptional):
@@ -270,13 +302,18 @@ class SkillCliSettings(_StrictOptional):
 
 
 class SkillLlmSettings(_StrictOptional):
-    """Секция ``llm`` — переопределение LLM для навыка (необязательно)."""
+    """Секция ``llm`` — execution policy генерации для навыка (необязательно).
+
+    Это НЕ выбор модели/провайдера — это runtime-параметры вызова
+    (``temperature``, ``max_tokens``). Выбор модели — в ``config.json``
+    (``agents.defaults.*``). См. ``llm_config.resolve_llm_config()``.
+    """
 
     max_tokens: int | None = Field(default=None, gt=0)
     temperature: float | None = Field(default=None, ge=0, le=2)
 
 
-class SkillSettings(_StrictOptional):
+class SkillSettings(BaseModel):
     """Универсальная декларация навыка в ``project.json::skills.<name>``.
 
     Это **единственный источник истины** для регистрации skill'а:
@@ -285,25 +322,33 @@ class SkillSettings(_StrictOptional):
 
     Секции:
 
+      * ``enabled`` — флаг включения skill'а (default ``True``);
       * ``tables`` — единый список ресурсов (PG-таблицы + vector-источники);
       * ``vector_indexes`` — какие vector-индексы нужны skill'у
         (min-контракт: имя + источник; runtime определяет бэкенд);
-      * ``embedding`` — параметры эмбеддингов (если есть vector);
-      * ``cache`` — параметры in-memory кэша;
       * ``cli`` — параметры CLI навыка;
-      * ``llm`` — переопределение LLM для навыка (опционально).
+      * ``llm`` — execution policy для навыка (опционально).
 
-    Глобальные параметры синхронизации PG → DuckDB теперь лежат в
-    ``gateway.sync.*`` (не per-skill), см. ``GatewaySettings.sync``.
+    Это **только domain binding** skill'а. Shared infrastructure
+    (embedding service, DuckDB-кеш, FAISS root, sync) лежит вне
+    ``skills.*`` — см. ``gateway.vector.embedding``, ``gateway.duckdb``,
+    ``gateway.vector.index.*``, ``gateway.sync``.
+
+    Граница: ``model_config = ConfigDict(extra="forbid")`` — fail-fast
+    на опечатках в ``project.json`` (например, ``tablse`` вместо
+    ``tables`` сразу поднимет ``ConfigurationError`` на старте gateway,
+    а не тихо пройдёт валидацию). Имя skill'а остаётся динамическим —
+    добавляется простым добавлением секции в ``project.json``; форма
+    самой секции строго типизирована.
 
     Корневой ``enabled`` отключает skill без удаления секции.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool | None = None
     tables: list[str | TableEntry] | None = None
     vector_indexes: list[VectorIndexEntry] | None = None
-    embedding: SkillEmbeddingSettings | None = None
-    cache: SkillCacheSettings | None = None
     cli: SkillCliSettings | None = None
     llm: SkillLlmSettings | None = None
 
@@ -311,14 +356,60 @@ class SkillSettings(_StrictOptional):
 class SkillsSettings(_StrictOptional):
     """Контейнер для всех навыков: ``skills.<name>``.
 
-    Универсальная схема: каждый skill — это ``SkillSettings``. Любой новый
-    skill добавляется простым добавлением секции в ``project.json``.
+    Имя skill'а — произвольное (forward-compat), но **форма** секции
+    строго типизирована через ``SkillSettings`` (``extra="forbid"``).
+    Любой новый skill добавляется простым добавлением секции в
+    ``project.json``; опечатки внутри секции (``tablse``, ``embedding``,
+    ``cache`` и т.п.) ловятся на старте через ``_validate_skill_sections``.
+
+    Универсальное правило (TARGET_ARCHITECTURE §skills.* boundary):
+
+      * Меняется при смене домена skill'а → в ``skills.<name>``.
+      * Меняется при смене инфраструктуры, но не домена → в ``gateway.*``.
+      * Меняется при смене deployment'а → в ``channels.*`` или env.
     """
 
-    # Skill-секции не типизируем жёстко по имени (forward-compat): используем
-    # ``dict[str, Any]``. ИЗВЕСТНЫЕ ключи (например, ``audit_analyzer``) можно
-    # добавить сюда как alias, если потребуется; сейчас — единая модель для всех.
     model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_skill_sections(cls, data: Any) -> Any:
+        """Прогнать каждую вложенную ``skills.<name>`` через ``SkillSettings``.
+
+        Без этого валидатора pydantic не спускается в типизированные
+        секции: ``SkillsSettings`` имеет ``extra="allow"`` (forward-compat
+        для новых skill'ов по имени) и не описывает вложенные секции
+        как типизированный ``dict[str, SkillSettings]``. В результате
+        ``SkillSettings(extra="forbid")`` не срабатывал бы, и опечатки
+        вроде ``tablse`` / забытый legacy ``embedding`` / ``cache``
+        проходили бы валидацию.
+
+        Этот ``@model_validator(mode="before")`` нормализует каждую
+        вложенную секцию: если это dict — пропускает через
+        ``SkillSettings.model_validate`` (что поднимет
+        ``ConfigurationError`` при ``extra="forbid"`` нарушении).
+        """
+        if not isinstance(data, dict):
+            return data
+
+        normalized: dict[str, Any] = {}
+        for name, cfg in data.items():
+            if not isinstance(cfg, dict):
+                normalized[name] = cfg
+                continue
+            try:
+                validated = SkillSettings.model_validate(cfg)
+            except ValidationError as exc:
+                problems: list[str] = []
+                for err in exc.errors():
+                    p = ".".join(str(x) for x in err.get("loc", ()))
+                    problems.append(f"  skills.{name}.{p}: {err.get('msg', 'invalid')}")
+                raise ConfigurationError(
+                    "Некорректная конфигурация project.json (skills."
+                    f"{name}):\n" + "\n".join(problems)
+                ) from exc
+            normalized[name] = validated.model_dump(exclude_none=True)
+        return normalized
 
 
 class ProjectSettings(BaseModel):

@@ -49,12 +49,16 @@ _META_TABLE = "__schema_meta"
 def get_embedding(text: str) -> list[float] | None:
     """Единая точка получения эмбеддинга текста через Ollama /api/embed.
 
-    Конфиг (``base_url`` / ``model`` / ``timeout_sec``) читается из
-    ``lib.services.table_registry``. Это generic инфраструктурный слой —
+    Конфиг (``base_url`` / ``model`` / ``timeout_sec`` / ``auth_token``)
+    читается из ``lib.services.table_registry.embedding_config()``
+    (положен туда на старте gateway через ``register_embedding_config``
+    из ``gateway.vector.embedding``). Это generic инфраструктурный слой —
     ``lib/`` не зависит от конкретного навыка (TARGET §4, §22.9).
 
-    Если ни один skill не зарегистрирован через ``table_registry``
-    с заполненным embedding-конфигом — функция возвращает ``None``.
+    Если ``base_url`` пуст — функция возвращает ``None``.
+    ``auth_token`` (если задан) передаётся как ``Authorization: Bearer``.
+    Используется для Ollama / open-webui / LiteLLM / клаудных провайдеров,
+    выставленных за reverse proxy с авторизацией.
     """
     try:
         from lib.services.table_registry import table_registry
@@ -68,13 +72,17 @@ def get_embedding(text: str) -> list[float] | None:
     model = cfg.get("model") or "mxbai-embed-large:latest"
     timeout_sec = float(cfg.get("timeout_sec") or 60.0)
     retries = int(cfg.get("max_retries") or 3)
+    auth_token = (cfg.get("auth_token") or "").strip()
 
     def _embed() -> list[float] | None:
         import httpx
 
         payload = {"model": model, "input": text}
+        headers = {}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
         with httpx.Client(timeout=timeout_sec) as client:
-            resp = client.post(base_url, json=payload)
+            resp = client.post(base_url, json=payload, headers=headers or None)
             resp.raise_for_status()
             data = resp.json()
         embeddings = data.get("embeddings")
@@ -99,17 +107,26 @@ def get_embedding(text: str) -> list[float] | None:
         return None
 
 
-def read_embedding_config(cfg: dict) -> dict[str, Any]:
-    """Параметры Ollama-эмбеддинга из вложенной конфиг-секции навыка (dict).
+def read_embedding_config() -> dict[str, Any]:
+    """Параметры эмбеддера из ``project.json::gateway.vector.embedding``.
 
-    Читает ``cfg["embedding"]``. Никаких legacy плоских ключей
-    ``embedding_*`` — они удалены в Фазе 5 Resource Model Refactoring.
+    Источник — ``SETTINGS['gateway']['vector']['embedding']``
+    (см. ``EmbeddingSettings``).
+
+    Раньше секция жила в ``skills.<name>.embedding``. После commit
+    «skill configuration boundary» она вынесена на уровень gateway,
+    потому что embedding-service общий для всех skill'ов, а не специфичен
+    для домена одного навыка.
     """
-    emb = cfg.get("embedding") or {}
+    from config import SETTINGS
+
+    emb = ((SETTINGS.get("gateway") or {}).get("vector") or {}).get("embedding") or {}
     return {
         "base_url": emb.get("base_url", ""),
         "model": emb.get("model", "mxbai-embed-large:latest"),
         "dimension": emb.get("dimension", 1024),
+        "http_timeout_sec": emb.get("http_timeout_sec", 60.0),
+        "auth_token": emb.get("auth_token"),
     }
 
 
@@ -154,22 +171,29 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
     ``tables: [...]``, ``vector_indexes: [...]``, ``cache.*``, ``embedding.*``).
 
     base_dir — каталог, относительно которого разрешаются относительные пути
-    кэша/индексов (для навыка это корень навыка).
+    индексов (для навыка это корень навыка; cache_path — единый runtime
+    snapshot, всегда из ``TableRegistry.snapshot_path``).
 
     ``vector_db_table`` (таблица-хранилище сырых векторов) определяется:
-      1. ``gateway.vector_index.storage_table`` (глобальная runtime-БД
-         декларация в ``SETTINGS['gateway']['vector_index']`` — основной
+      1. ``gateway.vector.index.storage_table`` (глобальная runtime-БД
+         декларация в ``SETTINGS['gateway']['vector']['index']`` — основной
          источник; заполняется через
          ``lib.core.infra_registration.register_vector_storage``).
       2. Fallback: ``cfg["tables"][type="vector"]`` — для standalone-утилит
          и обратной совместимости, когда ``gateway.*`` ещё не прочитан.
 
     Аналогично ``default_root`` для FAISS-индексов читается из глобального
-    ``gateway.vector_index.default_root`` (fallback — относительный путь
+    ``gateway.vector.index.default_root`` (fallback — относительный путь
     ``data_store/vectors``).
 
-    ``vector_indexes[]`` используется только для индексов (имя + source-
-    таблица), не для storage-таблицы.
+    ``vector_indexes[]`` используется только для индексов (имя);
+    source-таблица — runtime-реестр (``public.agent_vector_index_config``),
+    не часть декларации skill'а.
+
+    ``cache.*`` и ``embedding.*`` из ``cfg`` НЕ читаются:
+    ``embedding`` — общий runtime (``gateway.vector.embedding``);
+    cache path — единый ``table_registry.snapshot_path``. Источник —
+    ``read_embedding_config()`` без аргумента.
 
     Использует ``cfg`` напрямую + ``lib.services.table_registry`` для путей.
     Не зависит от ``lib.services.audit_settings`` (TARGET §4, §22.9).
@@ -178,13 +202,11 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
 
     base = Path(base_dir) if base_dir else Path.cwd()
 
-    cache = cfg.get("cache") or {}
-
     storage_table = ""
     schemas: list[str] = []
-
-    vi_cfg = (_SETTINGS.get("gateway") or {}).get("vector_index") or {}
-    storage_table = vi_cfg.get("storage_table") or ""
+    vector_cfg = ((_SETTINGS.get("gateway") or {}).get("vector") or {})
+    index_cfg = vector_cfg.get("index") or {}
+    storage_table = index_cfg.get("storage_table") or ""
 
     for entry in cfg.get("tables") or []:
         if isinstance(entry, dict):
@@ -199,29 +221,18 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
     vi_list = cfg.get("vector_indexes") or []
     vi_first = vi_list[0] if vi_list and isinstance(vi_list[0], dict) else {}
 
-    # Cache path — приоритет:
-    # 1. cfg["cache"]["cache_path"] (если задан явно).
-    # 2. table_registry.snapshot_path(workspace_root) — единый runtime snapshot
-    #    в workspace/data_store/duckdb/cache.duckdb.
-    # base_dir указывает на skill_root (workspace/skills/<name>).
-    # workspace_root = base_dir.parent.parent = workspace/.
-    cache_path_cfg = cache.get("cache_path") or ""
-    if cache_path_cfg:
-        cache_path = cache_path_cfg if Path(cache_path_cfg).is_absolute() else str(base / cache_path_cfg)
-    else:
-        from lib.services.table_registry import table_registry
-        workspace_root = base.parent.parent
-        cache_path = str(table_registry.snapshot_path(workspace_root))
+    from lib.services.table_registry import table_registry
+    workspace_root = base.parent.parent
+    cache_path = str(table_registry.snapshot_path(workspace_root))
 
     index_path = ""
     vi_name = vi_first.get("name", "")
     if vi_name:
-        vi_cfg = (_SETTINGS.get("gateway") or {}).get("vector_index") or {}
-        root = vi_cfg.get("default_root") or "data_store/vectors"
+        root = index_cfg.get("default_root") or "data_store/vectors"
         idx = Path(root) / vi_name
         index_path = str(idx) if idx.is_absolute() else str(base / idx)
 
-    emb = read_embedding_config(cfg)
+    emb = read_embedding_config()
     return PostgresDuckDbProvider(
         schema=schemas[0] if schemas else "main",
         tables=None,

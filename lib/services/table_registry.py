@@ -5,7 +5,7 @@
 * skill-ресурсы (``SkillRegistration``): доменные таблицы и вектора,
   декларируются навыком в ``project.json::skills.<name>.tables[]``.
 * инфраструктурные ресурсы (``register_infra``): общий runtime-storage,
-  декларируется в ``gateway.*`` (``gateway.vector_index.storage_table``).
+  декларируется в ``gateway.vector.index.storage_table``.
 
 Core-инфраструктура (``ApplicationContext``, ``PgDuckDbSyncService``,
 ``DuckDbCacheStore``) собирает ресурсы обоих видов через единые методы
