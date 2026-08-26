@@ -20,14 +20,75 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 # Пути к проекту и workspace — чтобы `from utils.db import ...` работал
 # независимо от рабочего каталога.
 _ROOT = Path(__file__).resolve().parents[2]        # корень проекта
+
+
+# Канонический список полей, по которым вычисляется signature индекса.
+# Любое изменение этих параметров между сборками → индекс устарел.
+_INDEX_SIGNATURE_FIELDS = (
+    "src_table",
+    "pk_column",
+    "content_cols",
+    "embedding_cols",
+    "track_column",
+    "embedding_model",
+    "embedding_dimension",
+    "chunk_size",
+    "chunk_overlap",
+)
+
+
+def compute_index_signature(cfg: dict[str, Any]) -> str:
+    """SHA256-хеш канонической конфигурации индекса.
+
+    Вход: dict, где ключи — поля из ``_INDEX_SIGNATURE_FIELDS`` (неполный
+    допустим; отсутствующие трактуются как ``""``). Выход: 64-char hex.
+
+    Детерминирована: одинаковый вход → одинаковый выход на любой платформе.
+    Используется для записи в ``agent_vector_index_store.metadata.signature``
+    и для последующей проверки ``verify_index_signature``.
+    """
+    parts: list[str] = []
+    for key in _INDEX_SIGNATURE_FIELDS:
+        val = cfg.get(key)
+        if isinstance(val, (list, tuple)):
+            val = ",".join(str(v) for v in val)
+        parts.append(f"{key}={val if val is not None else ''}")
+    raw = "|".join(parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def verify_index_signature(
+    stored_meta: dict[str, Any] | None,
+    current_cfg: dict[str, Any],
+) -> Literal["CURRENT", "STALE", "INVALID"]:
+    """Сравнить signature в сохранённом metadata с текущим конфигом.
+
+    Returns:
+        ``CURRENT`` — конфиги совпадают (или signature отсутствует, но
+            ``stored_meta is None`` — индекс ещё не загружался).
+        ``STALE``  — signature присутствует и не совпадает с текущим
+            (изменилась модель эмбеддингов, chunk параметры, columns).
+        ``INVALID`` — stored_meta есть, но в нём нет signature ИЛИ
+            signature повреждена (не hex).
+    """
+    if stored_meta is None:
+        return "CURRENT"
+    stored_sig = stored_meta.get("signature")
+    if not stored_sig:
+        return "INVALID"
+    if not isinstance(stored_sig, str) or len(stored_sig) != 64:
+        return "INVALID"
+    current_sig = compute_index_signature(current_cfg)
+    return "CURRENT" if stored_sig == current_sig else "STALE"
 _WORKSPACE = _ROOT / "workspace"
 for _p in (str(_ROOT), str(_WORKSPACE)):
     if _p not in sys.path:
@@ -787,7 +848,9 @@ class PostgresDuckDbProvider(CacheProvider):
         except Exception:
             return None, None
 
-    def _save_index_to_store(self, source: str, index, metadata: dict) -> None:
+    def _save_index_to_store(
+        self, source: str, index, metadata: dict, signature: str | None = None,
+    ) -> None:
         if not self._vector_store_table:
             return
         import faiss
@@ -795,7 +858,13 @@ class PostgresDuckDbProvider(CacheProvider):
 
         store = self._vector_store_table
         blob = bytes(faiss.serialize_index(index))
-        meta_json = json.dumps(metadata, ensure_ascii=False, default=str)
+        # Если вызывающий передал signature — кладём её в metadata.
+        # Это позволяет downstream-проверке ``verify_index_signature``
+        # отличать CURRENT от STALE/INVALID без отдельной колонки.
+        meta_to_save = dict(metadata or {})
+        if signature is not None:
+            meta_to_save["signature"] = signature
+        meta_json = json.dumps(meta_to_save, ensure_ascii=False, default=str)
         dim = index.d
         ntotal = index.ntotal
 
@@ -1067,18 +1136,62 @@ class PostgresDuckDbProvider(CacheProvider):
     def rebuild_and_store_index(self, source: str, db_table: str) -> int | None:
         """Перестроить индекс для source и сохранить в store (для индексаторов).
 
+        Перед сохранением читает конфиг индекса из ``agent_vector_index_config``
+        и текущий embedding-конфиг из ``gateway.vector.embedding``; вычисляет
+        signature (``compute_index_signature``) и кладёт в ``metadata.signature``
+        в store. Это позволяет последующему ``verify_index_signature``
+        отличать CURRENT от STALE/INVALID без отдельной миграции схемы.
+
         Returns:
             Количество векторов построенного индекса, или ``None`` если данных
             нет / индекс не собран.
         """
         idx, meta = self._load_vectors_from_db(db_table, source=source)
         if idx is not None:
-            self._save_index_to_store(source, idx, meta)
+            signature = self._compute_index_signature_from_config(source)
+            self._save_index_to_store(source, idx, meta, signature=signature)
             self._index_cache.pop(source, None)
             print(f"[vector] Индекс '{source}' перестроен и сохранён в store "
                   f"({idx.ntotal} векторов)", file=sys.stderr)
             return idx.ntotal
         return None
+
+    def _compute_index_signature_from_config(self, source: str) -> str | None:
+        """Прочитать конфиг индекса из БД + embedding-конфиг и вычислить signature.
+
+        Возвращает ``None`` если конфиг в БД не найден или таблица не задана —
+        в этом случае signature не пишется, и downstream-вызовы получат
+        ``INVALID`` через ``verify_index_signature`` (принудительная пересборка).
+        """
+        if not self._vector_store_table:
+            return None
+        try:
+            from utils.db import fetch
+        except Exception:
+            return None
+        try:
+            rows = fetch(
+                "SELECT src_table, pk_column, content_cols, embedding_cols, "
+                "track_column FROM public.agent_vector_index_config "
+                "WHERE index_name = %s",
+                source,
+            )
+        except Exception:
+            return None
+        if not rows:
+            return None
+        row = rows[0]
+        emb_cfg = read_embedding_config()
+        cfg = {
+            "src_table": row.get("src_table"),
+            "pk_column": row.get("pk_column"),
+            "content_cols": row.get("content_cols") or [],
+            "embedding_cols": row.get("embedding_cols") or [],
+            "track_column": row.get("track_column"),
+            "embedding_model": emb_cfg.get("model"),
+            "embedding_dimension": emb_cfg.get("dimension"),
+        }
+        return compute_index_signature(cfg)
 
     # -- resource --------------------------------------------------------
 
