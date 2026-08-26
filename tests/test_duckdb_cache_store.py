@@ -6,6 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import TEST_TABLE, TEST_TABLE_2, TEST_VECTOR_TABLE
+
+# Single source of truth for the test schema name: derived from
+# TEST_VECTOR_TABLE so renaming fixtures propagates automatically.
+_test_schema = TEST_VECTOR_TABLE.split(".", 1)[0]
+_test_table_q = TEST_TABLE
+_test_vector_table_q = TEST_VECTOR_TABLE
+
 _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
@@ -64,15 +72,16 @@ def store(tmp_path):
     # Регистрируем vector_db_table как VectorResource, потому что
     # DuckDbCacheStore._mark_vector_sources_dirty теперь делает lookup
     # через table_registry.vector_resources() вместо сравнения имён.
+    # Схема test.* соответствует TEST_TABLE/TEST_VECTOR_TABLE из conftest.
     table_registry.register(SkillRegistration(
         name="audit_analyzer",
-        resources=(VectorResource(name="oarb.audit_vectors", tracking_column="id"),),
+        resources=(VectorResource(name=TEST_VECTOR_TABLE, tracking_column="id"),),
     ))
     st = DuckDbCacheStore(
         cache_path=str(tmp_path / "audit.duckdb"),
-        schema="oarb",
-        tables=["audits", "violations"],
-        vector_db_table="oarb.audit_vectors",
+        schema=_test_schema,
+        tables=[TEST_TABLE.split(".", 1)[1], TEST_TABLE_2.split(".", 1)[1]],
+        vector_db_table=TEST_VECTOR_TABLE,
         embedding_base_url="",
     )
     assert st.open()
@@ -87,11 +96,11 @@ def store(tmp_path):
 
 class TestUpsert:
     def test_creates_table_and_inserts(self, store):
-        assert store.upsert_records("oarb.audits", [
+        assert store.upsert_records(TEST_TABLE, [
             {"id": 1, "title": "Проверка А", "status": "open"},
             {"id": 2, "title": "Проверка Б", "status": "closed"},
         ])
-        r = store.query_sql("SELECT * FROM oarb.audits ORDER BY id")
+        r = store.query_sql(f"SELECT * FROM {TEST_TABLE} ORDER BY id")
         assert r["status"] == "success"
         assert [row["id"] for row in r["rows"]] == [1, 2]
 
@@ -104,22 +113,22 @@ class TestUpsert:
             {"id": 1, "title": "Новый", "status": "open"},
             {"id": 3, "title": "В", "status": "pending"},
         ])
-        r = store.query_sql("SELECT id, title FROM oarb.audits ORDER BY id")
+        r = store.query_sql(f"SELECT id, title FROM {TEST_TABLE} ORDER BY id")
         assert [row["id"] for row in r["rows"]] == [1, 2, 3]
         assert r["rows"][0]["title"] == "Новый"
 
     def test_new_column_added_with_inferred_type(self, store):
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
-        store.upsert_records("oarb.audits", [
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
+        store.upsert_records(TEST_TABLE, [
             {"id": 2, "title": "Б", "status": "closed", "amount": 100},
         ])
-        r = store.query_sql("SELECT id, amount FROM oarb.audits WHERE id = 2")
+        r = store.query_sql(f"SELECT id, amount FROM {TEST_TABLE} WHERE id = 2")
         assert r["rows"][0]["amount"] == 100
 
     def test_empty_batch_is_noop(self, store):
-        assert store.upsert_records("oarb.audits", []) is True
+        assert store.upsert_records(TEST_TABLE, []) is True
         # таблица не создана — запрос падает с ошибкой, не с исключением
-        r = store.query_sql("SELECT COUNT(*) AS c FROM oarb.audits")
+        r = store.query_sql(f"SELECT COUNT(*) AS c FROM {TEST_TABLE}")
         assert r["status"] == "error"
 
 
@@ -130,20 +139,20 @@ class TestUpsert:
 
 class TestQuery:
     def test_query_sql_error_returns_status(self, store):
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
-        r = store.query_sql("SELECT * FROM oarb.missing_table")
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
+        r = store.query_sql("SELECT * FROM test.missing_table")
         assert r["status"] == "error"
         assert r["error"]
 
     def test_get_schema(self, store):
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         s = store.get_schema()
         assert "audits" in s["tables"]
         assert "id" in s["tables"]["audits"]["columns"]
 
     def test_explain(self, store):
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
-        e = store.explain("SELECT * FROM oarb.audits LIMIT 1")
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
+        e = store.explain(f"SELECT * FROM {TEST_TABLE} LIMIT 1")
         assert e["valid"] is True
         assert e["plan"]
 
@@ -155,7 +164,7 @@ class TestQuery:
 
 class TestVector:
     def test_index_built_from_upserts(self, store):
-        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         idx, meta = store._load_source_index("audits_index")
         assert idx is not None
         assert idx.ntotal == 2
@@ -166,14 +175,14 @@ class TestVector:
         import lib.services.cache_provider_impl as cp
 
         monkeypatch.setattr(cp, "get_embedding", lambda *a, **k: None)
-        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         assert store.search_vector("тест", index_name="audits_index") == []
 
     def test_search_vector_faiss_returns_top_hit(self, store, monkeypatch):
         import lib.services.cache_provider_impl as cp
 
         monkeypatch.setattr(cp, "get_embedding", lambda *a, **k: _vec(0))
-        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         res = store.search_vector("тест", index_name="audits_index", top_k=1)
         assert len(res) == 1
         assert res[0].pk_value == 1
@@ -184,27 +193,27 @@ class TestVector:
         import lib.services.cache_provider_impl as cp
 
         monkeypatch.setattr(cp, "get_embedding", lambda *a, **k: _vec(1))
-        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         # запись 2 (единичный на позиции 1) совпадает полностью; запись 0 — ортогональна
         res = store.search_vector("тест", index_name="audits_index", threshold=0.5)
         assert len(res) == 1
         assert res[0].pk_value == 2
 
     def test_dirty_marking_invalidates_cache(self, store):
-        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         assert store.preload_indexes()  # warm cache
-        store.upsert_records("oarb.audit_vectors", [dict(_VECTOR_RECORDS[0], embedding=[0.9, 0.9, 0.9])])
+        store.upsert_records(TEST_VECTOR_TABLE, [dict(_VECTOR_RECORDS[0], embedding=[0.9, 0.9, 0.9])])
         assert "audits_index" in store._dirty_sources
         assert "audits_index" not in store._index_cache
 
     def test_preload_indexes(self, store):
-        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         loaded = store.preload_indexes()
         assert [x["index_name"] for x in loaded] == ["audits_index"]
         assert loaded[0]["vectors"] == 2
 
     def test_non_vector_table_ignored(self, store):
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         assert store._dirty_sources == set()
         assert store.preload_indexes() == []
 
@@ -220,19 +229,19 @@ class TestSkillVectorFromCache:
         store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
-            schema="oarb",
+            schema=_test_schema,
             tables=["audits"],
-            vector_db_table="oarb.audit_vectors",
+            vector_db_table=TEST_VECTOR_TABLE,
         )
         store.open()
-        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         assert store.publish() is True
         store.close()
 
         import duckdb
         ro = duckdb.connect(str(target), read_only=True)
         rows = ro.execute(
-            "SELECT COUNT(*) AS c FROM oarb.audit_vectors"
+            f"SELECT COUNT(*) AS c FROM {TEST_VECTOR_TABLE}"
         ).fetchall()
         ro.close()
         assert rows == [(2,)]
@@ -244,19 +253,19 @@ class TestSkillVectorFromCache:
         store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
-            schema="oarb",
+            schema=_test_schema,
             tables=["audits"],
-            vector_db_table="oarb.audit_vectors",
+            vector_db_table=TEST_VECTOR_TABLE,
         )
         store.open()
-        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         assert store.publish() is True
         store.close()
 
         provider = cp.PostgresDuckDbProvider(
-            schema="oarb",
+            schema=_test_schema,
             cache_path=str(target),
-            vector_db_table="oarb.audit_vectors",
+            vector_db_table=TEST_VECTOR_TABLE,
             vector_store_table="",  # у навыка нет PG store
             embedding_base_url="",
         )
@@ -278,19 +287,19 @@ class TestSkillVectorFromCache:
         store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
-            schema="oarb",
+            schema=_test_schema,
             tables=["audits"],
-            vector_db_table="oarb.audit_vectors",
+            vector_db_table=TEST_VECTOR_TABLE,
         )
         store.open()
-        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         assert store.publish() is True
         store.close()
 
         provider = cp.PostgresDuckDbProvider(
-            schema="oarb",
+            schema=_test_schema,
             cache_path=str(target),
-            vector_db_table="oarb.audit_vectors",
+            vector_db_table=TEST_VECTOR_TABLE,
             vector_store_table="",
             embedding_base_url="",
         )
@@ -314,18 +323,18 @@ class TestPublish:
         store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
-            schema="oarb",
+            schema=_test_schema,
             tables=["audits", "violations"],
         )
         store.open()
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "П1", "status": "open"}])
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "П1", "status": "open"}])
         assert store.get_stats()["dirty"] is True
         assert store.publish() is True
         assert target.exists()
 
         import duckdb
         ro = duckdb.connect(str(target), read_only=True)
-        rows = ro.execute("SELECT id, title FROM oarb.audits").fetchall()
+        rows = ro.execute(f"SELECT id, title FROM {TEST_TABLE}").fetchall()
         ro.close()
         assert rows == [(1, "П1")]
         st = store.get_stats()
@@ -338,18 +347,18 @@ class TestPublish:
         store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
-            schema="oarb",
+            schema=_test_schema,
             tables=["audits"],
         )
         store.open()
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         store.publish()
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "Б", "status": "open"}])
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "Б", "status": "open"}])
         store.publish()
 
         import duckdb
         ro = duckdb.connect(str(target), read_only=True)
-        title = ro.execute("SELECT title FROM oarb.audits WHERE id = 1").fetchall()[0][0]
+        title = ro.execute(f"SELECT title FROM {TEST_TABLE} WHERE id = 1").fetchall()[0][0]
         ro.close()
         assert title == "Б"
         assert store.get_stats()["publishes"] == 2
@@ -357,7 +366,7 @@ class TestPublish:
 
     def test_publish_noop_when_not_dirty(self, tmp_path):
         target = tmp_path / "out.duckdb"
-        store = DuckDbCacheStore(cache_path="", publish_path=str(target), schema="oarb")
+        store = DuckDbCacheStore(cache_path="", publish_path=str(target), schema=_test_schema)
         store.open()
         assert store.publish() is True
         assert not target.exists()
@@ -368,7 +377,7 @@ class TestPublish:
         store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
-            schema="oarb",
+            schema=_test_schema,
             tables=["audits"],
         )
         store.open()
@@ -381,7 +390,7 @@ class TestPublish:
         store.close()
 
     def test_publish_force_noop_without_publish_path(self):
-        store = DuckDbCacheStore(cache_path="", schema="oarb")
+        store = DuckDbCacheStore(cache_path="", schema=_test_schema)
         store.open()
         assert store.publish(force=True) is True
         store.close()
@@ -391,25 +400,25 @@ class TestPublish:
         store = DuckDbCacheStore(
             cache_path="",
             publish_path=str(target),
-            schema="oarb",
+            schema=_test_schema,
             tables=["audits", "violations"],  # violations не заполнена
         )
         store.open()
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         assert store.publish() is True
         import duckdb
         ro = duckdb.connect(str(target), read_only=True)
         tables = [r[0] for r in ro.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_schema='oarb'"
+            f"SELECT table_name FROM information_schema.tables WHERE table_schema='{_test_schema}'"
         ).fetchall()]
         ro.close()
         assert tables == ["audits"]
         store.close()
 
     def test_publish_without_publish_path_is_noop(self):
-        store = DuckDbCacheStore(cache_path="", schema="oarb")
+        store = DuckDbCacheStore(cache_path="", schema=_test_schema)
         store.open()
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         assert store.publish() is True
         store.close()
 
@@ -429,7 +438,7 @@ _COLS = [
 
 class TestSchema:
     def test_ensure_schema_creates_table_with_pg_types(self, store):
-        assert store.ensure_schema("oarb.audits", _COLS)
+        assert store.ensure_schema(TEST_TABLE, _COLS)
         sch = store.get_schema()
         cols = sch["tables"]["audits"]["columns"]
         # исходные PG-типы сохранены в __schema_meta и возвращаются в get_schema
@@ -441,7 +450,7 @@ class TestSchema:
         assert "__table__" not in cols
 
     def test_ensure_schema_returns_comments(self, store):
-        store.ensure_schema("oarb.audits", _COLS)
+        store.ensure_schema(TEST_TABLE, _COLS)
         t = store.get_schema()["tables"]["audits"]
         assert t["comment"] == "Аудиторские проверки"
         assert t["columns"]["id"]["comment"] == "Идентификатор"
@@ -449,14 +458,14 @@ class TestSchema:
         assert t["columns"]["amount"]["comment"] is None
 
     def test_empty_table_created_via_schema(self, store):
-        store.ensure_schema("oarb.audits", _COLS)
-        r = store.query_sql("SELECT COUNT(*) AS n FROM oarb.audits")
+        store.ensure_schema(TEST_TABLE, _COLS)
+        r = store.query_sql(f"SELECT COUNT(*) AS n FROM {TEST_TABLE}")
         assert r["status"] == "success"
         assert r["rows"][0]["n"] == 0
 
     def test_ensure_schema_adds_new_columns(self, store):
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
-        store.ensure_schema("oarb.audits", [
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
+        store.ensure_schema(TEST_TABLE, [
             {"name": "id", "type": "integer", "not_null": False, "comment": None},
             {"name": "title", "type": "character varying(500)", "not_null": False, "comment": None},
             {"name": "status", "type": "character varying(50)", "not_null": False, "comment": None},
@@ -466,67 +475,67 @@ class TestSchema:
         assert cols["new_col"]["type"] == "bigint"
         assert cols["new_col"]["comment"] == "Новая колонка"
         # старые данные на месте
-        r = store.query_sql("SELECT title FROM oarb.audits WHERE id = 1")
+        r = store.query_sql(f"SELECT title FROM {TEST_TABLE} WHERE id = 1")
         assert r["rows"][0]["title"] == "А"
 
     def test_upsert_after_ensure_schema_preserves_types(self, store):
-        store.ensure_schema("oarb.audits", _COLS)
-        assert store.upsert_records("oarb.audits", [
+        store.ensure_schema(TEST_TABLE, _COLS)
+        assert store.upsert_records(TEST_TABLE, [
             {"id": 1, "title": "П1", "amount": 123.45, "checked_on": "2024-05-21"},
         ])
-        r = store.query_sql("SELECT id, amount FROM oarb.audits")
+        r = store.query_sql(f"SELECT id, amount FROM {TEST_TABLE}")
         assert str(r["rows"][0]["amount"]) == "123.45"
         assert store.get_schema()["tables"]["audits"]["columns"]["amount"]["type"] == "numeric(10,2)"
 
 
 class TestReplace:
     def test_replace_reconciles_deletions(self, store):
-        store.upsert_records("oarb.audits", [
+        store.upsert_records(TEST_TABLE, [
             {"id": 1, "title": "А", "status": "open"},
             {"id": 2, "title": "Б", "status": "closed"},
         ])
-        assert store.replace_records("oarb.audits", [
+        assert store.replace_records(TEST_TABLE, [
             {"id": 1, "title": "А", "status": "open"},
         ])
-        r = store.query_sql("SELECT id FROM oarb.audits ORDER BY id")
+        r = store.query_sql(f"SELECT id FROM {TEST_TABLE} ORDER BY id")
         assert [row["id"] for row in r["rows"]] == [1]
 
     def test_replace_empty_keeps_schema(self, store):
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
-        assert store.replace_records("oarb.audits", [])
-        r = store.query_sql("SELECT COUNT(*) AS n FROM oarb.audits")
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
+        assert store.replace_records(TEST_TABLE, [])
+        r = store.query_sql(f"SELECT COUNT(*) AS n FROM {TEST_TABLE}")
         assert r["rows"][0]["n"] == 0
         assert "audits" in store.get_schema()["tables"]
 
     def test_replace_preserves_typed_schema(self, store):
-        store.ensure_schema("oarb.audits", _COLS)
-        store.upsert_records("oarb.audits", [
+        store.ensure_schema(TEST_TABLE, _COLS)
+        store.upsert_records(TEST_TABLE, [
             {"id": 1, "title": "П1", "amount": 1.5, "checked_on": "2024-05-21"},
             {"id": 2, "title": "П2", "amount": 2.5, "checked_on": "2024-06-24"},
         ])
-        store.replace_records("oarb.audits", [
+        store.replace_records(TEST_TABLE, [
             {"id": 2, "title": "П2", "amount": 2.5, "checked_on": "2024-06-24"},
         ])
         cols = store.get_schema()["tables"]["audits"]["columns"]
         assert cols["amount"]["type"] == "numeric(10,2)"
-        r = store.query_sql("SELECT id FROM oarb.audits")
+        r = store.query_sql(f"SELECT id FROM {TEST_TABLE}")
         assert [row["id"] for row in r["rows"]] == [2]
 
     def test_publish_includes_schema_meta(self, tmp_path):
         target = tmp_path / "out.duckdb"
         st = DuckDbCacheStore(
-            cache_path="", publish_path=str(target), schema="oarb", tables=["audits"],
+            cache_path="", publish_path=str(target), schema=_test_schema, tables=["audits"],
         )
         st.open()
-        st.ensure_schema("oarb.audits", _COLS)
-        st.upsert_records("oarb.audits", [{"id": 1, "title": "П1", "amount": 1.5, "checked_on": "2024-05-21"}])
+        st.ensure_schema(TEST_TABLE, _COLS)
+        st.upsert_records(TEST_TABLE, [{"id": 1, "title": "П1", "amount": 1.5, "checked_on": "2024-05-21"}])
         assert st.publish() is True
 
         import duckdb
         ro = duckdb.connect(str(target), read_only=True)
         meta = ro.execute(
             "SELECT column_name, comment FROM __nanobot_meta.__schema_meta "
-            "WHERE schema_name = 'oarb' AND table_name = 'audits'"
+            f"WHERE schema_name = '{_test_schema}' AND table_name = '{TEST_TABLE.split('.', 1)[1]}'"
         ).fetchall()
         ro.close()
         comments = {row[0]: row[1] for row in meta}
@@ -562,8 +571,8 @@ def test_map_pg_type():
 
 class TestStats:
     def test_stats(self, store):
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
-        store.upsert_records("oarb.audit_vectors", _VECTOR_RECORDS)
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
+        store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         st = store.get_stats()
         assert st["is_ready"] is True
         assert st["tables"]["audits"]["rows"] == 1
@@ -573,7 +582,7 @@ class TestStats:
         assert st["last_upsert_at"]
 
     def test_close_clears_state(self, store):
-        store.upsert_records("oarb.audits", [{"id": 1, "title": "А", "status": "open"}])
+        store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         store.close()
         assert store.is_ready() is False
         st = store.get_stats()
@@ -587,17 +596,17 @@ class TestStats:
 
 class TestExecuteReadonly:
     def test_readonly_returns_rows(self, store):
-        store.upsert_records("oarb.audits", [
+        store.upsert_records(TEST_TABLE, [
             {"id": 1, "title": "А", "status": "open"},
             {"id": 2, "title": "Б", "status": "closed"},
         ])
-        res = store.execute_readonly("SELECT id, title FROM oarb.audits ORDER BY id")
+        res = store.execute_readonly(f"SELECT id, title FROM {TEST_TABLE} ORDER BY id")
         assert "error" not in res
         assert res["columns"] == ["id", "title"]
         assert [r[0] for r in res["rows"]] == [1, 2]
 
     def test_readonly_propagates_error(self, store):
-        res = store.execute_readonly("SELECT * FROM oarb.missing_table")
+        res = store.execute_readonly("SELECT * FROM test.missing_table")
         assert "error" in res
         assert res["error"]
 

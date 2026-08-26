@@ -26,6 +26,29 @@ from benchmarks.models import (
 )
 
 
+# =============================================================================
+# Generic table-name fixtures (placeholder values for hermetic tests).
+#
+# Тесты инфраструктуры (cache_store, registry, sync, skill_config) не должны
+# зависеть от доменных имён (`oarb.audits`, `oarb.audit_vectors`). Это
+# обеспечивает portability проекта: при переносе на другой домен
+# (другие таблицы) generic-тесты продолжают работать без правок.
+#
+# Audit-specific тесты (если появятся в будущем) могут ссылаться на
+# реальные доменные имена через свои собственные фикстуры.
+#
+# Конвенция: префикс ``TEST_`` чётко маркирует «это тестовая заглушка».
+# Формат ``schema.table`` обязателен для VectorResource (см.
+# ``table_registry.VectorResource.__post_init__``) — используем
+# схему ``test``.
+# =============================================================================
+
+TEST_TABLE = "test.audits"
+TEST_TABLE_2 = "test.violations"
+TEST_VECTOR_TABLE = "test.audit_vectors"
+TEST_VECTOR_INDEX_NAME = "test_index"
+
+
 @pytest.fixture
 def sample_expect() -> BenchExpect:
     return BenchExpect(
