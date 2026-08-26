@@ -2,16 +2,16 @@
 Точка входа: CLI с разбором аргументов и маршрутизацией по режимам.
 
 Режимы:
-    predefined  — выполнение готовых SQL-шаблонов (--script + --params)
-    sql         — генерация SQL через LLM по текстовому запросу (--query)
-    vector      — семантический поиск по FAISS-индексу (--query + --index-name, --top-k/--threshold)
+    predefined     — выполнение готовых SQL-шаблонов (--script + --params)
+    generated_sql  — генерация SQL через LLM по текстовому запросу (--query)
+    vector         — семантический поиск по FAISS-индексу (--query + --index-name, --top-k/--threshold)
 
 Примеры запуска:
     # Предопределённый скрипт
     audit_analyze --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
 
-    # SQL-генерация
-    audit_analyze --mode sql --query 'сколько аудитов было в 2024 по месяцам'
+    # Генерация SQL через LLM
+    audit_analyze --mode generated_sql --query 'сколько аудитов было в 2024 по месяцам'
 
     # Векторный поиск: топ-3
     audit_analyze --mode vector --query 'пожарная безопасность' --index-name audits_index --top-k 3
@@ -19,8 +19,8 @@
     # Векторный поиск: всё выше порога 0.5
     audit_analyze --mode vector --query 'статусы аудитов' --index-name audits_index --threshold 0.5
 
-    # С контекстом чата (история для LLM в sql-режиме)
-    audit_analyze --mode sql --query 'покажи детали' \\
+    # С контекстом чата (история для LLM в generated_sql-режиме)
+    audit_analyze --mode generated_sql --query 'покажи детали' \\
         --context '[{"role":"user","content":"привет"}]'
 """
 
@@ -74,7 +74,7 @@ def _parse_params(raw: str) -> dict[str, Any]:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import predefined_mode  # noqa: E402
-import sql_mode  # noqa: E402
+import generated_sql_mode  # noqa: E402
 from output import _sanitize_value, prepare_output  # noqa: E402
 from skill_config import (  # noqa: E402
     build_cache_provider,
@@ -127,8 +127,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         default=default_mode,
-        choices=["predefined", "sql", "vector"],
-        help=f"Режим работы: predefined, sql или vector (default: {default_mode})",
+        choices=["predefined", "generated_sql", "vector"],
+        help=f"Режим работы: predefined, generated_sql или vector (default: {default_mode})",
     )
     parser.add_argument(
         "--script",
@@ -139,7 +139,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--query",
         default=None,
-        help="Запрос на естественном языке (для mode=sql/vector). "
+        help="Запрос на естественном языке (для mode=generated_sql/vector). "
              "Например: 'сколько аудитов было в 2024'",
     )
     parser.add_argument(
@@ -195,7 +195,7 @@ def _open_db():
 
 
 def _run(args: argparse.Namespace) -> dict:
-    """Маршрутизация выполнения по режиму (predefined/sql/vector)."""
+    """Маршрутизация выполнения по режиму (predefined/generated_sql/vector)."""
     db = _open_db()
     try:
         if args.mode == "predefined":
@@ -207,8 +207,8 @@ def _run(args: argparse.Namespace) -> dict:
         if not args.query:
             return {"status": "error", "data": {"message": f"Для mode={args.mode} требуется --query"}}
 
-        if args.mode == "sql":
-            return sql_mode.run(args.query, db, context=args.context)
+        if args.mode == "generated_sql":
+            return generated_sql_mode.run(args.query, db, context=args.context)
 
         if args.mode == "vector":
             from dataclasses import asdict

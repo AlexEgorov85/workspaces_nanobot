@@ -5,10 +5,10 @@
 единообразному формату для сериализации в JSON.
 
 Выходной JSON всегда содержит:
-    - mode: режим работы ("predefined", "sql", "vector")
+    - mode: режим работы ("predefined", "generated_sql", "vector")
     - status: "success" | "error"
 И дополнительные поля в зависимости от режима:
-    - predefined/sql: row_count, columns, rows, sql [, script_name]
+    - predefined/generated_sql: row_count, columns, rows, sql [, script_name]
     - vector: vector_results, count
 
 JSON-сериализация значений (datetime/Decimal/NaN/bytes) — через
@@ -25,7 +25,7 @@ def prepare_output(result: dict, mode: str) -> dict:
     """
     Привести вложенный результат режима к плоскому формату для вывода.
 
-    Для predefined и sql:
+    Для predefined и generated_sql:
         {"mode", "status", "row_count", "columns", "rows", "sql"}
         + "script_name" для predefined.
 
@@ -34,7 +34,7 @@ def prepare_output(result: dict, mode: str) -> dict:
 
     Args:
         result: dict от run() одного из режимов.
-        mode: "predefined" | "sql" | "vector"
+        mode: "predefined" | "generated_sql" | "vector"
 
     Returns:
         Плоский dict для json.dumps().

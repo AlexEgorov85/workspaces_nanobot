@@ -1,5 +1,5 @@
 """
-Режим: sql — LLM генерирует SELECT по описанию на естественном языке.
+Режим: generated_sql — LLM генерирует SELECT по описанию на естественном языке.
 
 Pipeline с ретраями:
   1. Получить схему БД (information_schema)
@@ -17,9 +17,9 @@ Pipeline с ретраями:
     ``public.agent_predefined_scripts`` (по keyword-overlap с запросом).
 
 Пример запуска через CLI:
-    audit_analyze --mode sql --query 'сколько аудитов было в 2024 по месяцам'
-    audit_analyze --mode sql --query 'топ-10 объектов по количеству нарушений'
-    audit_analyze --mode sql --query 'среднее количество нарушений на проверку'
+    audit_analyze --mode generated_sql --query 'сколько аудитов было в 2024 по месяцам'
+    audit_analyze --mode generated_sql --query 'топ-10 объектов по количеству нарушений'
+    audit_analyze --mode generated_sql --query 'среднее количество нарушений на проверку'
 """
 
 
@@ -155,7 +155,7 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
 
     Returns:
         dict с полями:
-            mode: "sql"
+            mode: "generated_sql"
             status: "success" | "error"
             data:
                 sql: сгенерированный SQL
@@ -239,7 +239,7 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
             break
 
         return {
-            "mode": "sql",
+            "mode": "generated_sql",
             "status": result["status"],
             "data": {"sql": sql, "result": result},
         }
@@ -247,7 +247,7 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
     # Все попытки исчерпаны
     detail = last_error or {"error": "неизвестная ошибка", "sql": ""}
     return {
-        "mode": "sql",
+        "mode": "generated_sql",
         "status": "error",
         "data": {
             "message": (

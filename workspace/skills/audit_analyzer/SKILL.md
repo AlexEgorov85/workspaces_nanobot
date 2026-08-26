@@ -14,14 +14,14 @@ metadata: {"nanobot":{"emoji":"📊","always":true}}
 
 | Задача | Режим | Инструмент |
 |---|---|---|
-| Аггрегация / фильтр по полям (год, месяц, тип, статус) | Predefined / SQL | `scripts/cli.py --mode predefined`, `duckdb_query` |
-| Свободный вопрос про данные (SELECT) | SQL | `duckdb_query` tool |
+| Аггрегация / фильтр по полям (год, месяц, тип, статус) | Predefined / Generated SQL | `scripts/cli.py --mode predefined`, `duckdb_query` |
+| Свободный вопрос про данные (SELECT) | Generated SQL | `duckdb_query` tool |
 | Семантический поиск по смыслу (не точному слову) | Vector | `vector_search` tool |
 | Известный отчёт из реестра | Predefined | `scripts/cli.py --mode predefined` |
 
 **Правило выбора:**
 - Если задача ложится на готовый отчёт из реестра (`public.agent_predefined_scripts`) → `predefined`.
-- Если нужна группировка/фильтр по полям — это аггрегация: пробуй `predefined`, иначе `sql` через `duckdb_query`.
+- Если нужна группировка/фильтр по полям — это аггрегация: пробуй `predefined`, иначе `generated_sql` через `duckdb_query`.
 - Если запрос про «смысл», а не точные слова (например, «пожарная безопасность», «финансовые нарушения») → `vector_search`.
 
 ## Режимы работы
@@ -47,13 +47,15 @@ python scripts/cli.py --mode predefined --script analytics_by_year_month --param
 
 Полный список скриптов и параметров — `references/schema.md`.
 
-### 2. SQL — свободный вопрос на естественном языке
+### 2. Generated SQL — свободный вопрос на естественном языке
 
 Используй, когда ни один predefined-скрипт не подходит, но вопрос
-можно выразить через SELECT по доменным таблицам.
+можно выразить через SELECT по доменным таблицам. LLM генерирует
+SQL по схеме БД и текстовому запросу; результат проходит
+SQL-policy (только SELECT, один statement) и выполняется.
 
 ```bash
-python scripts/cli.py --mode sql --query "топ-10 объектов по нарушениям"
+python scripts/cli.py --mode generated_sql --query "топ-10 объектов по нарушениям"
 ```
 
 Возвращает JSON с `rows`, `columns`, `sql`. Не подходит, если

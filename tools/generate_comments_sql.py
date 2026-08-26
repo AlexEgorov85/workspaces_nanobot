@@ -51,7 +51,7 @@ predefined_scripts = {
             "description, validation (опц., для vector-резолва).",
             "max_rows_default": "Лимит строк по умолчанию (добавляется в LIMIT). "
             "Если передан --params с полем type=limit, перекрывает default.",
-            "returns": "Что возвращает скрипт (для документации и LLM-промпта в --mode sql).",
+            "returns": "Что возвращает скрипт (для документации и LLM-промпта в --mode generated_sql).",
             "long_description": "Подробное описание для LLM-промпта: что делает, когда использовать, edge cases.",
             "created_at": "Время создания записи (при первой INSERT).",
             "updated_at": "Время последнего изменения (выставляется кодом при INSERT/UPDATE).",
