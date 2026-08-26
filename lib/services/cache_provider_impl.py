@@ -46,6 +46,14 @@ _INDEX_SIGNATURE_FIELDS = (
 )
 
 
+# Каноническое имя PG-таблицы, в которой хранятся сериализованные FAISS-индексы
+# (BYTEA + metadata JSONB со signature). Используется и ``build_cache_provider``
+# (как ``vector_store_table`` провайдера), и ``DuckDbCacheStore._check_index_integrity``
+# — оба должны смотреть в одну и ту же таблицу, иначе проверка signature
+# бесшумно выключается (``oarb.audit_vectors`` не имеет колонки ``metadata``).
+VECTOR_INDEX_STORE_TABLE = "public.agent_vector_index_store"
+
+
 def compute_index_signature(cfg: dict[str, Any]) -> str:
     """SHA256-хеш канонической конфигурации индекса.
 
@@ -308,7 +316,7 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
         vector_db_table=storage_table,
         vector_index_path=index_path,
         vector_indexes=read_vector_index_config(cfg),
-        vector_store_table="public.agent_vector_index_store",
+        vector_store_table=VECTOR_INDEX_STORE_TABLE,
         embedding_base_url=emb.get("base_url", ""),
         embedding_model=emb.get("model", "mxbai-embed-large:latest"),
     )
