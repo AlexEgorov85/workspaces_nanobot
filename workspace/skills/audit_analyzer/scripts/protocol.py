@@ -1,14 +1,9 @@
 """
-Единый протокол для бэкенда запросов (DuckDB-кэш / PostgreSQL).
+Единый протокол для бэкенда запросов (DuckDB-кэш через CacheProvider).
 
-Заменяет устаревший ``from database import Database, QueryBackend``.
-Теперь ни один модуль не делает импорт ``database``, который на module-level
-пускал connect-backoff к PostgreSQL (resolve_dsn → configure).
-
-Обратная совместимость:
-    ``database.py`` переписан так, чтобы при прямом импорте не подключаться
-    к PG и не писать DeprecationWarning — просто экспортирует Protocol +
-    тонкую обёртку над CacheProvider (lib.services).
+Заменяет устаревший прямой psycopg2-доступ (``workspace.utils.db.fetch``)
+в пользу единого ``build_cache_provider()`` — все skill-модули работают
+через этот контракт, никаких обращений к PG на module-level.
 """
 
 from __future__ import annotations
