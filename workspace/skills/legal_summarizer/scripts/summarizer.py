@@ -219,11 +219,10 @@ def summarize(
                 }
             partials = []
             for i, chunk in enumerate(chunks):
-                if i % 5 == 0:
-                    _progress(
-                        f"chunk {i + 1}/{chunks_count} "
-                        f"({(i + 1) * 100 // chunks_count}%)"
-                    )
+                _progress(
+                    f"chunk {i + 1}/{chunks_count} "
+                    f"({(i + 1) * 100 // chunks_count}%)"
+                )
                 partial = _llm_summarize(
                     chunk,
                     "brief",
