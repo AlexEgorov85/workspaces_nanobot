@@ -50,7 +50,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         type=json.loads,
         help='Контекст чата в формате JSON. Например: '
-             '\'[{"role":"user","content":"сфокусируйся на рисках"}]\'',
+             '\'[{"role":"user","content":"сфокусируйся на рисках"}\']',
+    )
+    parser.add_argument(
+        "--max-chunks",
+        default=5,
+        type=int,
+        help="Жёсткий лимит чанков для map-reduce. По умолчанию 5 - "
+             "защита от подвисания на больших документах. Если документ "
+             "больше, skill вернёт структурированную ошибку с понятным "
+             "сообщением вместо многочасовой обработки. "
+             "Для очень больших документов (>1 МБ текста после извлечения) "
+             "используйте office_files.summarize() вместо map-reduce.",
     )
     return parser
 
@@ -108,7 +119,12 @@ def main() -> None:
 
         length = args.length or get_default_length()
         text = load_text(Path(args.file))
-        result = summarize(text, length=length, context=args.context)
+        result = summarize(
+            text,
+            length=length,
+            context=args.context,
+            max_chunks=args.max_chunks,
+        )
         out = prepare_output(result)
         _emit(_sanitize_value(out))
     except argparse.ArgumentTypeError as e:

@@ -88,7 +88,10 @@ def test_long_document_map_reduce_strategy(monkeypatch):
         return f"Это договор аренды.\n\nЧасть {state['n']}: суть аренды."
 
     monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
-    result = summarizer.summarize(text, length="medium")
+    # max_chunks=None в тесте — глобальный лимит не должен срабатывать
+    # на маленьком синтетическом документе (10 чанков < дефолт 5,
+    # но в тесте важна общая логика map_reduce, а не лимит).
+    result = summarizer.summarize(text, length="medium", max_chunks=None)
 
     assert result["status"] == "success"
     data = result["data"]
@@ -267,6 +270,34 @@ def test_skill_config_cli_matches_project_json():
     assert cli["max_retries"] == 3
     assert cli["timeout_sec"] == 120
     assert skill_config.get_default_length() == "medium"
+
+
+def test_max_chunks_default_is_five():
+    """Защита от подвисания на огромных документах: max_chunks=None даёт
+    дефолт 5, при превышении skill возвращает structured error не вызывая LLM."""
+    long_text = "x" * 200_000
+    called_llm = {"n": 0}
+
+    def fake_chat(*args, **kwargs):
+        called_llm["n"] += 1
+        return "summary"
+
+    import summarizer
+    summarizer.llm.chat = fake_chat
+    result = summarizer.summarize(long_text, length="brief", max_chunks=3)
+    assert result["status"] == "error"
+    assert "max_chunks" in result["data"]["message"] or \
+        "слишком" in result["data"]["message"].lower()
+    assert called_llm["n"] == 0, "LLM не должен вызываться при превышении max_chunks"
+
+
+def test_max_chunks_allow_small_doc():
+    """Для маленького документа max_chunks не блокирует."""
+    small_text = "Договор аренды.\n\nСрок 11 месяцев, оплата помесячно."
+    import summarizer
+    summarizer.llm.chat = lambda *a, **kw: "Это договор.\n\nСуть."
+    result = summarizer.summarize(small_text, length="brief", max_chunks=5)
+    assert result["status"] == "success"
 
 
 if __name__ == "__main__":
