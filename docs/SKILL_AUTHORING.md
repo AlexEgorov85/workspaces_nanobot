@@ -90,7 +90,28 @@ workspace/skills/<skill_name>/
     └── schema.json            # дамп схемы для reference
 ```
 
-### 2.3 Чего НЕ должно быть
+### 2.3 Три паттерна структуры skill'а
+
+| Паттерн | Когда | Что есть | Пример |
+|---|---|---|---|
+| **Полный skill** | Своя логика, таблицы/индексы, LLM-режимы | SKILL.md + scripts/ (10+ модулей) + project.json::skills | `audit_analyzer` |
+| **Минимальный skill** | Своя логика, но без своих таблиц | SKILL.md + scripts/ + project.json::skills (без `tables[]`) | `legal_summarizer` |
+| **Documentation-only skill** | Только описывает готовый модуль из `workspace/utils/*` | **Только** SKILL.md; без `__init__.py`, без `scripts/`, **без** записи в `project.json::skills` | `office_files` |
+
+**Documentation-only skill** допустим **только** когда выполняются **все** условия:
+
+1. Реализация уже живёт в `workspace/utils/<module>.py` и покрыта собственными unit-тестами.
+2. У skill'а нет собственной PG/vector-инфраструктуры — нечего регистрировать через `project.json::skills`.
+3. SKILL.md нужен исключительно для **discovery** агентом при маршрутизации по описанию.
+
+Если хотя бы одно условие не выполнено — это не documentation-only skill, а полноценный skill без кода. Нужно либо `scripts/`, либо регистрация в `project.json::skills` (либо удалить skill).
+
+**Когда выбирать documentation-only**, а когда полный:
+
+- ✅ Documentation-only: skill — это `extract_text`/`extract_tables`/`summarize` офисного файла поверх общей утилиты.
+- ❌ Не documentation-only: skill делает что-то доменное (выбор скрипта по реестру, LLM-генерация SQL, map-reduce) — это полный skill.
+
+### 2.4 Чего НЕ должно быть
 
 - **Никаких `register.py`** — мёртвый паттерн, проверяется
   `tests/test_skill_config_lookup.py::TestNoRegisterPy`. Регистрация —
@@ -251,14 +272,21 @@ LLM-генерация SELECT», а не «работа с аудитами».
 
 ### 4.4 Опциональные runtime-секции
 
-| Секция | Поля |
-|---|---|
-| `cli` | `default_mode`, `default_format`, `max_retries`, `timeout_sec` (`project_settings.py:346-356`) |
-| `llm` | `max_tokens`, `temperature` (не выбор модели!) (`project_settings.py:359-368`) |
-| `chunking` | `chunk_size`, `chunk_overlap`, `single_call_threshold` (`project_settings.py:371-383`) |
+| Секция | Обязательные поля | Расширения |
+|---|---|---|
+| `cli` | `default_mode`, `default_format`, `max_retries`, `timeout_sec` (`project_settings.py:346-356`) | Skill-специфичные флаги допустимы через `SkillCliSettings(extra='allow')`. Пример: `legal_summarizer.cli.default_length = "medium"` (literal среди `brief`/`medium`/`detailed`). |
+| `llm` | `max_tokens`, `temperature` (не выбор модели!) (`project_settings.py:359-368`) | — |
+| `chunking` | `chunk_size`, `chunk_overlap`, `single_call_threshold` (`project_settings.py:371-383`) | — |
 
 **Выбор модели/провайдера — в `config.json`** (`agents.defaults.*`).
 `skills.<name>.llm` — только execution policy.
+
+> **Контракт `extra="allow"`:** вложенные секции (`SkillCliSettings`, `SkillLlmSettings`,
+> `SkillChunkingSettings`) наследуют `_StrictOptional(extra='allow')`, поэтому skill-специфичные
+> поля (например, `default_length`, `default_kind`) проходят валидацию. Однако **собственные**
+> поля `SkillSettings` (включая `tables`, `vector_indexes`, имя самой секции) — `extra="forbid"`,
+> опечатки ловятся на старте gateway. Это намеренная асимметрия: жёсткий контракт на уровне
+> декларации skill'а, мягкое расширение внутри каждой подсекции.
 
 ### 4.5 Что НЕ должно быть в `skills.<name>`
 
@@ -345,6 +373,12 @@ def _ensure_registered() -> None:
 `register_skill_from_config` (`lib/core/skill_registration.py:63-99`)
 идемпотентен — повторный вызов безопасен.
 
+**Skill без vector/tables** (как `legal_summarizer`): вызовы `register_skill_from_config`,
+`register_vector_storage`, `register_embedding_config` будут no-op (нечего регистрировать,
+`gateway.vector.index.storage_table` пуст → `register_vector_storage` пропускает).
+Тем не менее **рекомендуется всегда вызывать `_ensure_registered()`** для единообразия
+(контракт в §5.3 соблюдается безусловно; код одинаков во всех skill'ах).
+
 ---
 
 ## 6. TableRegistry и модель ресурсов
@@ -420,6 +454,29 @@ Skill **не вызывает** Tool программно (TARGET §22.2,
 `tests/test_skill_tool_independence.py:53-67`).
 Tool **не импортирует** Skill (TARGET §22.1,
 `tests/test_skill_tool_independence.py:70-84`).
+
+### 7.1.1 Два пути к одной инфраструктуре
+
+Кэш и векторный поиск живут в **общем runtime** (`lib/services/cache_provider_impl.py`):
+DuckDB-снапшот `workspace/data_store/duckdb/cache.duckdb` синхронизируется с PG
+(`PgDuckDbSyncService`), FAISS-индексы строятся на его основе.
+
+К этому runtime подключаются **две независимые поверхности**:
+
+| Поверхность | Кто использует | Когда |
+|---|---|---|
+| **`CacheProvider` напрямую** | Standalone CLI skill'ов (`audit_analyzer/scripts/cli.py`), утилиты (`tools/build_vectors.py`), тесты | Детерминированные сценарии: retry-цикл LLM, predefined-скрипты, map-reduce, ручной smoke |
+| **Generic tools** (`workspace/tools/duckdb_query_tool.py`, `vector_search_tool.py`) | Agent runtime (CLI/gateway/streamlit) при свободном NL-вопросе или ad-hoc семантическом поиске | Агент выбирает tool по `SKILL.md` description; tool — generic capability без домен-routing |
+
+Обе поверхности **сводятся к одному runtime-синглтону** — данные в кэше и индексах
+общие. Это **не дублирование**, а намеренное разделение:
+- Skill'у нужен прямой доступ для retry-циклов, подготовки входных данных,
+  валидации параметров — то, что generic tool не делает;
+- Tool даёт агенту единый «ровный» entrypoint без знания skill-рееестра.
+
+Связь между ними — **только через agent runtime**: skill в `SKILL.md` описывает
+capability в терминах tool'а («use `vector_search` with `index_name='audits_index'`»),
+агент вызывает tool. Сам skill tool **программно не вызывает**.
 
 ### 7.2 Что РАЗРЕШЕНО в Skill
 
@@ -641,26 +698,43 @@ pytest tests/test_auto_register_skills.py             -v
 
 Перед коммитом нового skill'а:
 
-1. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/}` создан.
+### Обязательная часть (все паттерны)
+
+1. ☐ Структура соответствует одному из трёх паттернов §2.3 (полный / минимальный / documentation-only).
 2. ☐ `SKILL.md` написан по §3: правильный frontmatter, decision procedure, «Что не делать».
-3. ☐ `__init__.py` пустые.
-4. ☐ В `project.json` добавлена секция `skills.<name>` с fully qualified таблицами (если есть).
-5. ☐ Если используется `label="scripts_registry"` (или другое) — явно отмечено.
-6. ☐ Если у таблицы нестандартная track-колонка — задана per-resource.
-7. ☐ Если vector — `gateway.vector.index.storage_table` настроен в общем инфра-слое + `vector_indexes[]` в skill-секции.
-8. ☐ CLI skill'а (если есть) использует `lib.core.skill_config` + сам регистрируется через `_ensure_registered()` для standalone.
-9. ☐ Skill **НЕ импортирует** `workspace.tools`.
-10. ☐ Skill использует generic Tool'ы без домен-routing.
-11. ☐ Unit-тест минимум на один сценарий skill'а.
-12. ☐ `pytest tests/test_skill_tool_independence.py tests/test_architecture_tool_domain_free.py tests/test_resource_universality.py tests/test_auto_register_skills.py -v` — без падений.
-13. ☐ `pytest tests/ -q` — без регрессий.
-14. ☐ `python cli_agent.py` стартует без ошибок (smoke).
-15. ☐ Если новая обязательная настройка — запись в `REQUIRED_KEYS` (`tests/test_config_keys.py:31-171`).
-16. ☐ Документация обновлена:
+3. ☐ Skill **НЕ импортирует** `workspace.tools`.
+4. ☐ Skill использует generic Tool'ы без домен-routing.
+5. ☐ Архитектурные тесты `tests/test_skill_tool_independence.py tests/test_architecture_tool_domain_free.py tests/test_resource_universality.py tests/test_auto_register_skills.py` — без падений.
+6. ☐ `pytest tests/ -q` — без регрессий.
+7. ☐ `python cli_agent.py` стартует без ошибок (smoke).
+8. ☐ Документация обновлена:
     - `docs/skill-tool-inventory.md` (строка в сводной таблице);
     - `docs/README.md` (если добавился новый файл);
     - корневой `AGENTS.md` (если новый ключ config);
     - `CHANGELOG.md` (секция `[Unreleased]`).
+
+### Полный skill (audit_analyzer)
+
+9. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/__init__.py, scripts/cli.py, scripts/skill_config.py}` создан.
+10. ☐ В `project.json` добавлена секция `skills.<name>` с fully qualified таблицами.
+11. ☐ Если используется `label="scripts_registry"` (или другое) — явно отмечено.
+12. ☐ Если у таблицы нестандартная track-колонка — задана per-resource (по умолчанию `updated_at`).
+13. ☐ Если vector — `gateway.vector.index.storage_table` настроен в общем инфра-слое + `vector_indexes[]` в skill-секции.
+14. ☐ CLI skill'а использует `lib.core.skill_config` + сам регистрируется через `_ensure_registered()` для standalone.
+15. ☐ Unit-тест минимум на один сценарий skill'а.
+
+### Минимальный skill (legal_summarizer)
+
+9'. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/__init__.py, scripts/cli.py, scripts/skill_config.py}` создан (без `tables[]`/`vector_indexes[]`, если их нет).
+10'. ☐ В `project.json` есть `skills.<name>` с `cli`/`llm`/`chunking` (по необходимости).
+11'. ☐ CLI регистрирует skill через `_ensure_registered()` (для skill'ов с LLM обязательно; для чистых LLM-pipeline вызовы могут быть no-op).
+12'. ☐ Unit-тест минимум на один сценарий.
+
+### Documentation-only skill (office_files)
+
+9''. ☐ Реализация уже живёт в `workspace/utils/<module>.py`.
+10''. ☐ У skill'а нет PG/vector-инфраструктуры — `project.json::skills` НЕ трогаем.
+11''. ☐ SKILL.md секции: «Когда использовать», «Когда не вызывать», «Что не делать» (может называться «Ограничения»), «Что внутри» со ссылкой на utility-модуль.
 
 ---
 

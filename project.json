@@ -165,14 +165,15 @@
 
       "tables": [                                    // Доменные таблицы навыка (без инфраструктурных
                                                    // storage-таблиц — они в gateway.vector.index.*).
-                                                   // tracking_column — обычно updated_at;
+                                                   // tracking_column по умолчанию updated_at для type=table,
+                                                   // задаётся явно только когда отличается.
                                                    // label отмечает реестры метаданных
                                                    // (не попадают в описание схемы для LLM).
-        {"name": "oarb.audit_reports",              "tracking_column": "updated_at"},
-        {"name": "oarb.audits",                     "tracking_column": "updated_at"},
-        {"name": "oarb.report_items",               "tracking_column": "updated_at"},
-        {"name": "oarb.violations",                 "tracking_column": "updated_at"},
-        {"name": "public.agent_predefined_scripts", "tracking_column": "updated_at", "label": "scripts_registry"}
+        {"name": "oarb.audit_reports"},
+        {"name": "oarb.audits"},
+        {"name": "oarb.report_items"},
+        {"name": "oarb.violations"},
+        {"name": "public.agent_predefined_scripts", "label": "scripts_registry"}
       ],
 
       "vector_indexes": [                            // Имена индексов, используемых навыком.
