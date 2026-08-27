@@ -249,6 +249,154 @@ def summarize(
     }
 
 
+def summarize_batch(
+    text: str,
+    *,
+    length: str = "medium",
+    context: list[dict] | None = None,
+    batch_size: int = 3,
+    batch_index: int = 0,
+) -> dict:
+    """Обработать текст порциями по ``batch_size`` чанков за вызов.
+
+    Streaming-режим для очень больших документов. На каждом вызове
+    обрабатывает только чанки
+    ``[batch_index * batch_size, (batch_index + 1) * batch_size)``
+    относительно ``split_text``. Возвращает partial_summary по этой
+    порции + метаданные для следующего вызова.
+
+    Финальный ``status='complete'`` возвращается, когда последний батч
+    обработан и сделан combine поверх всех partial.
+
+    Args:
+        text: Полный текст документа (передаётся в каждом вызове).
+        length: ``brief`` | ``medium`` | ``detailed``.
+        context: История чата. На последующих вызовах сюда надо
+            передать partial_summary предыдущего батча для continuity.
+        batch_size: Сколько чанков обработать за один вызов.
+        batch_index: Номер батча (0-based).
+
+    Returns:
+        dict со ``status`` (``partial`` | ``complete`` | ``error``) и
+        ``stream``-метаданными (chunks_total, chunks_done,
+        next_batch_index).
+    """
+    text = (text or "").strip()
+    if not text:
+        return {
+            "status": "error",
+            "data": {"message": "Документ не содержит текста"},
+        }
+
+    length = length if length in _LENGTH_INSTRUCTIONS else "medium"
+    cfg = get_chunking_config()
+    threshold = int(cfg["single_call_threshold"])
+
+    if len(text) <= threshold:
+        return summarize(
+            text,
+            length=length,
+            context=context,
+            max_chunks=None,
+        )
+
+    chunk_size = _compute_chunk_size(cfg)
+    chunks = split_text(
+        text,
+        chunk_size=chunk_size,
+        chunk_overlap=int(cfg["chunk_overlap"]),
+    )
+    chunks_total = len(chunks) if chunks else 1
+    _progress(
+        f"batch: {chunks_total} chunks total, batch_size={batch_size}, "
+        f"batch_index={batch_index}"
+    )
+
+    start = batch_index * batch_size
+    end = start + batch_size
+    batch_chunks = chunks[start:end]
+    if not batch_chunks:
+        return {
+            "status": "error",
+            "data": {
+                "message": (
+                    f"batch_index={batch_index} выходит за пределы "
+                    f"(всего чанков {chunks_total}, размер батча {batch_size})"
+                ),
+            },
+        }
+
+    partials = []
+    for j, chunk in enumerate(batch_chunks):
+        global_i = start + j
+        _progress(
+            f"chunk {global_i + 1}/{chunks_total} "
+            f"({(global_i + 1) * 100 // chunks_total}%)"
+        )
+        partial = _llm_summarize(
+            chunk,
+            "brief",
+            context,
+            part_label=f"[Часть {global_i + 1}/{chunks_total}]",
+        )
+        partials.append(partial)
+
+    partial_summary = "\n\n".join(
+        f"[Часть {start + j + 1}]\n{p}" for j, p in enumerate(partials)
+    )
+
+    is_last = end >= chunks_total
+    chunks_done = min(end, chunks_total)
+    next_batch_index = batch_index + 1
+
+    if not is_last:
+        _progress(
+            f"BATCH [{batch_index}] DONE: {chunks_done}/{chunks_total}. "
+            f"Чтобы продолжить, передайте --batch-index {next_batch_index}."
+        )
+        return {
+            "status": "partial",
+            "data": {
+                "partial_summary": partial_summary,
+                "chunks_in_batch": len(batch_chunks),
+                "chars_in": len(text),
+                "length": length,
+            },
+            "stream": {
+                "chunks_total": chunks_total,
+                "chunks_done": chunks_done,
+                "next_batch_index": next_batch_index,
+                "next_resume_hint": (
+                    f"передайте --batch-index {next_batch_index} для продолжения"
+                ),
+            },
+        }
+
+    # Последний батч: комбинируем partials этого батча как финальный
+    # ответ (агенту для продолжения лучше делать отдельный
+    # финальный reduce, но батч-режим для очень больших документов уже
+    # сам по себе достоин внимания).
+    _progress(f"combining {len(partials)} partials of final batch")
+    summary = _llm_combine(partials, length, context)
+    subject = _extract_subject(summary)
+    return {
+        "status": "complete",
+        "data": {
+            "subject": subject,
+            "summary": summary,
+            "length": length,
+            "chars_in": len(text),
+            "chunks": chunks_total,
+            "strategy": "map_reduce_batch",
+        },
+        "stream": {
+            "chunks_total": chunks_total,
+            "chunks_done": chunks_done,
+            "next_batch_index": None,
+        },
+    }
+
+
 def _llm_summarize(
     text: str,
     length: str,

@@ -61,7 +61,24 @@ def _build_parser() -> argparse.ArgumentParser:
              "больше, skill вернёт структурированную ошибку с понятным "
              "сообщением вместо многочасовой обработки. "
              "Для очень больших документов (>1 МБ текста после извлечения) "
-             "используйте office_files.summarize() вместо map-reduce.",
+             "используйте office_files.summarize() или batch-режим.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        default=None,
+        type=int,
+        help="Размер батча для streaming-режима: обработать за один "
+             "вызов только указанное число чанков, вернуть partial-саммари "
+             "со ссылкой на следующий batch_index. По умолчанию (None) "
+             "- обычный режим без streaming.",
+    )
+    parser.add_argument(
+        "--batch-index",
+        default=0,
+        type=int,
+        help="С какого батча начать (0 = сначала). Используется вместе "
+             "с --batch-size для resume: каждый следующий запуск skill "
+             "получает partial_summary предыдущего батча в --context.",
     )
     return parser
 
@@ -115,10 +132,22 @@ def main() -> None:
 
         from output import prepare_output
         from skill_config import get_default_length
-        from summarizer import load_text, summarize
+        from summarizer import load_text, summarize, summarize_batch
 
         length = args.length or get_default_length()
         text = load_text(Path(args.file))
+
+        if args.batch_size is not None:
+            result = summarize_batch(
+                text,
+                length=length,
+                context=args.context,
+                batch_size=args.batch_size,
+                batch_index=args.batch_index,
+            )
+            _emit(_sanitize_value(result))
+            return
+
         result = summarize(
             text,
             length=length,

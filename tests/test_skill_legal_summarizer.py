@@ -305,5 +305,48 @@ def test_max_chunks_allow_small_doc():
     assert result["status"] == "success"
 
 
+def test_summarize_batch_partial_then_complete(monkeypatch):
+    """Streaming batch-режим: первый вызов partial, второй complete."""
+    import summarizer
+    from summarizer import summarize_batch
+
+    # Длинный текст чтобы получить >= 4 чанков (нужно > 3 чанка для partial).
+    # chunk_size по умолчанию = 100000; используем текст > 400000 симв,
+    # чтобы получилось >= 4 чанка.
+    paragraph = "Абзац про договор подряда, права, обязанности, сроки и порядок расчётов между сторонами. " * 50
+    text = "\n\n".join([paragraph] * 30)  # ~80000 chars - мало,
+    # добавим еще:
+    text = text + "\n\n" + (paragraph * 200)  # + ~50000
+    assert len(text) > 100000
+
+    state = {"n": 0}
+
+    def fake_chat(messages, *, context=None, **kwargs):
+        state["n"] += 1
+        return f"Саммари #{state['n']}"
+
+    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+
+    # Батч 0 (3 чанка)
+    result = summarize_batch(text, length="brief", batch_size=3, batch_index=0)
+    assert result["status"] == "partial"
+    assert "stream" in result
+    assert result["stream"]["chunks_done"] == 3
+    assert result["stream"]["next_batch_index"] == 1
+    assert "partial_summary" in result["data"]
+    assert "Часть 1" in result["data"]["partial_summary"]
+
+
+def test_summarize_batch_single_call_path(monkeypatch):
+    """Короткий текст в batch-режиме идёт через single_call, без streaming."""
+    from summarizer import summarize_batch
+    import summarizer
+
+    summarizer.llm.chat = lambda *a, **kw: "Это короткое саммари."
+    text = "Договор аренды на 11 месяцев."
+    result = summarize_batch(text, length="brief", batch_size=3, batch_index=0)
+    assert result["status"] == "success"  # не partial, не streaming
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
