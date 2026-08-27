@@ -212,9 +212,15 @@ def _run(args: argparse.Namespace) -> dict:
 
         if args.mode == "vector":
             from dataclasses import asdict
+            if not args.index_name:
+                return {
+                    "status": "error",
+                    "data": {"message": "Для mode=vector укажите --index-name "
+                                       "(audits_index / violations_index / audit_reports_index из skills.audit_analyzer.vector_indexes[])"}
+                }
             results = db.search_vector(
                 args.query,
-                index_name=args.index_name or "audits_index",
+                index_name=args.index_name,
                 top_k=args.top_k or 5,
                 threshold=args.threshold,
             )

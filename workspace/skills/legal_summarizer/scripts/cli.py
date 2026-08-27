@@ -65,8 +65,35 @@ def _error(status_message: str, exc: Exception | None = None) -> dict:
     return out
 
 
+def _ensure_registered() -> None:
+    """Зарегистрировать legal_summarizer и runtime-инфраструктуру в ``table_registry``.
+
+    Standalone CLI не имеет ``ApplicationContext`` (его поднимает gateway),
+    поэтому skill сам себя регистрирует из ``project.json::skills.legal_summarizer``
+    через ``lib.core.skill_registration.register_skill_from_config``. Идемпотентно:
+    если skill уже зарегистрирован (например, gateway-populated реестр),
+    повторная регистрация игнорируется.
+
+    Для skill'а без vector-инфраструктуры и без PG-таблиц вызовы
+    ``register_vector_storage`` и ``register_embedding_config`` будут no-op,
+    но вызываются для единообразия с полными skill'ами (audit_analyzer).
+    """
+    from lib.core.infra_registration import register_vector_storage
+    from lib.core.skill_registration import (
+        register_embedding_config,
+        register_skill_from_config,
+    )
+    from config import SETTINGS
+
+    legal_cfg = SETTINGS.get("skills", {}).get("legal_summarizer", {})
+    register_skill_from_config("legal_summarizer", legal_cfg)
+    register_vector_storage()
+    register_embedding_config()
+
+
 def main() -> None:
     try:
+        _ensure_registered()
         parser = _build_parser()
         args = parser.parse_args()
 
