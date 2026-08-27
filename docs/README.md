@@ -13,6 +13,7 @@ reference** по своей подсистеме; README в корне — эт�
 | [architecture/runtime-patcher-inventory.md](architecture/runtime-patcher-inventory.md) | Каталог monkey-patch'ей с target/risk/тестами |
 | [skill-tool-architecture.md](skill-tool-architecture.md) | Контракт Skill ↔ Tool: что разрешено, что запрещено |
 | [skill-tool-inventory.md](skill-tool-inventory.md) | Текущее состояние всех skill/tool и история удалённых |
+| [SKILL_AUTHORING.md](SKILL_AUTHORING.md) | **Пошаговый гайд**: как создать свой skill (структура, SKILL.md, регистрация в project.json, runtime API, best practices, anti-patterns, DoD) |
 | [refactor_baseline.md](refactor_baseline.md) | pytest baseline ветки `refactor/skills-tools-cleanup` |
 | [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md) | **Нормативный контракт**: принципы, invariant'ы, anti-patterns, decision-чеклист (цель, не «as-is») |
 
@@ -77,6 +78,10 @@ invariant'ы, anti-patterns, decision-чеклист и правила зави�
 2. Запустите тесты без БД: `pytest tests/ -q`
 3. Запустите gateway / CLI и проверьте прогон: `python gateway.py` или `python cli_agent.py -P`
 4. Перед коммитом убедитесь, что проверки документации (CI `docs-lint`) проходят.
+
+Хотите написать **свой навык** (skill)? Начните с
+[`SKILL_AUTHORING.md`](SKILL_AUTHORING.md) — там пошаговый гайд, best practices,
+anti-patterns и Definition of Done.
 
 ## 📐 Конвенции правки документации
 
