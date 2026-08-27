@@ -273,14 +273,13 @@ def test_skill_config_cli_matches_project_json():
     assert skill_config.get_default_length() == "medium"
 
 
-def test_max_chunks_default_is_five():
-    """Защита от подвисания на огромных документах: max_chunks=None даёт
-    дефолт 5, при превышении skill возвращает structured error не вызывая LLM.
+def test_max_chunks_default_is_fifty():
+    """Защита от подвисания на огромных документах: max_chunks=50 по умолчанию,
+    при превышении skill возвращает structured error не вызывая LLM.
 
-    Используем реальный chunk_size по умолчанию (100000 симв.) + длинный
-    текст, чтобы гарантированно получить более 3 чанков даже при больших
-    значениях chunk_size в project.json."""
-    long_text = "x" * 500_000
+    Используем реальный chunk_size по умолчанию + достаточно длинный текст,
+    чтобы получить чёткое превышение через малый max_chunks."""
+    long_text = "x" * 2_000_000  # 2М симв → ~20+ чанков через default chunk_size
     called_llm = {"n": 0}
 
     def fake_chat(*args, **kwargs):
@@ -346,6 +345,80 @@ def test_summarize_batch_single_call_path(monkeypatch):
     text = "Договор аренды на 11 месяцев."
     result = summarize_batch(text, length="brief", batch_size=3, batch_index=0)
     assert result["status"] == "success"  # не partial, не streaming
+
+
+# ---------------------------------------------------------------------------
+# SKILL.md: контракт инструкций для LLM
+# ---------------------------------------------------------------------------
+
+
+class TestSkillMarkdownContract:
+    """Регрессия: LLM иногда выбирает ``office_files.summarize()`` вместо
+    ``cli.py --file`` (см. инцидент 2026-08-27). Чтобы это не повторялось,
+    SKILL.md обязан содержать явные инварианты:
+
+      1. упоминание ``cli.py --file`` в первых 30 строках (агент видит
+         инструкцию, даже если читает SKILL.md бегло);
+      2. явный запрет вызывать ``office_files.summarize()`` напрямую —
+         ``summarize()`` возвращает только метаданные и НЕ делает
+         LLM-анализ, поэтому пользователь получит пустой ответ;
+      3. в frontmatter ``description`` упоминается ``cli.py --file`` —
+         это первое, что видит LLM при выборе skill'а;
+      4. инструкция «не вызывай office_files.summarize() напрямую»
+         встречается явно в тексте (в том числе в разделе «Что не делать»).
+    """
+
+    @pytest.fixture(scope="class")
+    def skill_text(self) -> str:
+        path = _SKILL_ROOT / "SKILL.md"
+        return path.read_text(encoding="utf-8")
+
+    def test_cli_invocation_in_first_lines(self, skill_text: str):
+        head = "\n".join(skill_text.splitlines()[:30])
+        assert "cli.py" in head, (
+            "Инструкция 'cli.py --file' должна быть в первых 30 строках "
+            "SKILL.md, иначе LLM может её пропустить."
+        )
+        assert "--file" in head, (
+            "Параметр --file должен быть упомянут в первых 30 строках."
+        )
+
+    def test_summarize_is_not_a_summary(self, skill_text: str):
+        """Явное предупреждение, что ``summarize()`` — это НЕ саммари."""
+        lower = skill_text.lower()
+        assert "summarize" in lower
+        assert "не саммари" in lower or "не делает саммари" in lower or \
+               "не делает llm" in lower, (
+            "SKILL.md должен явно предупреждать, что summarize() не делает "
+            "LLM-саммари (иначе LLM будет выбирать его вместо cli.py)."
+        )
+
+    def test_forbidden_summarize_direct_call(self, skill_text: str):
+        """Раздел «Что не делать» содержит запрет на summarize()."""
+        assert "office_files.summarize" in skill_text
+        assert "❌" in skill_text and "summarize" in skill_text
+
+    def test_description_mentions_cli(self, skill_text: str):
+        """В frontmatter description упомянут cli.py --file."""
+        assert skill_text.startswith("---")
+        end = skill_text.find("\n---\n", 4)
+        assert end > 0
+        front = skill_text[4:end]
+        assert "cli.py" in front, (
+            "description во frontmatter должен упоминать cli.py --file — "
+            "это первое, что LLM видит при выборе skill'а."
+        )
+        assert "--file" in front
+
+    def test_workspace_path_section_present(self, skill_text: str):
+        """Инструкция по абсолютному/относительному пути для --file."""
+        assert "Абсолютный путь" in skill_text or "абсолютный путь" in skill_text
+        assert "data_store/cache/sessions" in skill_text
+
+    def test_websocket_media_dir_mentioned(self, skill_text: str):
+        """Подсказка про websocket-канал: media/websocket/ вместо data_store."""
+        assert "websocket" in skill_text.lower()
+        assert "media/websocket" in skill_text or "media\\websocket" in skill_text
 
 
 if __name__ == "__main__":

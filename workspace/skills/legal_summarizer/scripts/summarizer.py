@@ -146,7 +146,7 @@ def summarize(
     *,
     length: str = "medium",
     context=None,
-    max_chunks: int | None = 5,
+    max_chunks: int | None = 50,
 ) -> dict:
     """Суммаризовать текст документа.
 
@@ -201,20 +201,31 @@ def summarize(
             if max_chunks is not None and chunks_count > max_chunks:
                 _progress(
                     f"ABORT: {chunks_count} chunks > max_chunks={max_chunks}. "
-                    "Документ слишком большой - увеличьте --max-chunks или "
-                    "разделите файл."
+                    "Рекомендуем streaming через --batch-size."
                 )
                 return {
                     "status": "error",
                     "data": {
                         "message": (
-                            f"Документ слишком большой для map-reduce: "
-                            f"{chunks_count} чанков (chars={chars}), "
-                            f"--max-chunks={max_chunks}. "
-                            "Увеличьте лимит или обработайте файл по частям."
+                            f"Документ слишком большой для map-reduce "
+                            f"за один вызов: {chunks_count} чанков "
+                            f"(chars={chars}), --max-chunks={max_chunks}. "
+                            "Используйте streaming: "
+                            f"--batch-size {chunks_count // 4 + 1} "
+                            "--batch-index 0 для первой порции."
                         ),
                         "chars_in": chars,
                         "chunks_estimated": chunks_count,
+                    },
+                    "stream": {
+                        "chunks_total": chunks_count,
+                        "chunks_done": 0,
+                        "next_batch_index": 0,
+                        "recommended_batch_size": chunks_count // 4 + 1,
+                        "next_resume_hint": (
+                            "передайте --batch-size N --batch-index 0 "
+                            f"для streaming (рекомендую N={chunks_count // 4 + 1})"
+                        ),
                     },
                 }
             partials = []
