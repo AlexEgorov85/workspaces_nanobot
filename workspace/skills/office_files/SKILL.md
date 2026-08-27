@@ -90,17 +90,24 @@ info = summarize(path)           # dict: pages/sheets/slides/author/...
 
 ## Чтение файлов из чата (Telegram)
 
-Файлы от пользователя сохраняются в `data_store/cache/sessions/<session_key>/`. Перед обработкой:
+Файлы от пользователя сохраняются в `data_store/cache/sessions/<session_key>/`. Утилита `office_files.py` **не делает redirect сама** — нужен абсолютный путь или относительный от корня проекта.
+
+**Допустимые пути:**
+
+- ✅ **Абсолютный:** `C:\Users\<user>\.nanobot\workspace\data_store\cache\sessions\<session_key>\<file>.pdf`
+- ✅ **Относительный от корня:** `data_store/cache/sessions/<session_key>/<file>.pdf`
+- ❌ Только имя файла без префикса — `extract_text` не найдёт файл и вернёт ошибку.
 
 ```python
 from pathlib import Path
 from workspace.utils.office_files import extract_text
 
+# cwd = workspace-корень (типичный случай для gateway/agent runtime)
 path = Path("data_store/cache/sessions/<session_key>/<file>")
 text = extract_text(path)
 ```
 
-Если `path` не существует — ошибку пробросить пользователю с указанием пути.
+Если `path` не существует — ошибка пробрасывается пользователю с указанием пути. Если нужно автоматически находить файл по basename в `data_store/cache/sessions/` — это ответственность вызывающего (агента).
 
 ## Примеры использования
 

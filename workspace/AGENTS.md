@@ -59,6 +59,30 @@ keeping path` → в БД уходит AW-dict с пустым `mime_type`/`file
   Для файлов, которых реально не существует (`Path(p).is_file()` ложно)
   даже после перенаправления — не прикладывай.
 
+## Пути к media-attach при вызове CLI skill'ов через `exec`
+
+**Это особый случай**: `SessionFileRedirectHook` перенаправляет только
+`write_file`/`edit`, но НЕ произвольные `exec`-команды (включая вызовы
+skill CLI через `python skills/<name>/scripts/cli.py --file <path>`).
+
+Skill CLI сам не делает redirect и не знает session_key агента.
+
+При вызове `python skills/<skill>/scripts/cli.py --file <path>`:
+
+- ✅ Передавай **абсолютный** путь к media-attach в канале:
+  `C:\Users\<user>\.nanobot\workspace\data_store\cache\sessions\<session_key>\<file>.pdf`
+- ✅ Или **относительный от корня репо** (cwd должен быть `.nanobot/`):
+  `data_store/cache/sessions/<session_key>/<file>.pdf`
+- ❌ Только basename (`<file>.pdf` без префикса) — skill вернёт
+  `Файл не найден`, потому что в cwd такого файла нет.
+
+Если не знаешь session_key — найди файл через `glob` по
+`data_store/cache/sessions/*/<file>`, или возьми абсолютный путь из
+context канала (он лежит в `media` payload сообщения).
+
+Конкретные правила для каждого skill'а — в его `SKILL.md` (секция
+«Чтение файлов из чата»).
+
 ## Scheduled Reminders
 
 Before scheduling reminders, check available skills and follow skill guidance first.

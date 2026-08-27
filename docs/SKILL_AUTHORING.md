@@ -546,16 +546,42 @@ Skill пишет инструкции в терминах capability, не Pytho
   пишите в корень проекта.
 - Используйте **относительные пути** в `write_file`/`write`/`edit` —
   `SessionFileRedirectHook` (`workspace/hooks/session_file_redirect_hook.py`)
-  сам перенаправит их.
+  сам перенаправит их. Хук работает **только** для `write_file`/`edit` —
+  не для произвольных `exec`-команд.
 - **Запрещены** абсолютные пути вида `/home/<user>/<project>/...` —
   на сервере таких путей нет.
 
-Для CLI skill'а с файловым входом (`legal_summarizer --file`):
+### 8.1 CLI skill'ы с файловым входом (`--file`)
+
+`SessionFileRedirectHook` НЕ перенаправляет пути в произвольных командах
+(`exec`-tunnels skill CLI, `nanobot exec`, и т.п.) — он рассчитан только
+на `write_file`/`edit`. Skill CLI **сам не делает redirect** и не имеет
+доступа к session_key агента. Поэтому **агент обязан передавать корректный
+путь явно**.
+
+Допустимые пути для `--file <path>`:
+
+- ✅ **Абсолютный** путь: `C:\Users\<user>\.nanobot\workspace\data_store\cache\sessions\<session_key>\<file>.pdf`
+- ✅ **Относительный от корня репо** (cwd = `.nanobot/`): `data_store/cache/sessions/<session_key>/<file>.pdf`
+- ❌ Только basename файла (`<file>.pdf` без префикса) — skill вернёт
+  `Файл не найден`, потому что в cwd такого файла нет.
+
+Если агент не знает session_key и видит только basename из media-attach —
+он должен найти файл через `glob` по `data_store/cache/sessions/*/<file>`,
+или через `SessionFileRedirectHook` (если бы они использовался для `exec`,
+но это не так), или просто передать абсолютный путь, который он знает
+из контекста канала.
+
+Skill со своей стороны **не делает redirect-логику** — это контрактная
+ответственность агента: «передавай то, что есть; мы валидируем и либо
+читаем, либо отдаём структурированную ошибку с понятным сообщением».
+
+Пример из `legal_summarizer/cli.py::load_text(...)`:
 
 ```python
-path = Path("data_store/cache/sessions/<session_key>/<file>")
-# SessionFileRedirectHook сам найдёт файл и подставит реальный путь.
-text = extract_text(path)
+text = load_text(Path(args.file))
+# если args.file не существует — FileNotFoundError с указанием пути;
+# ошибка пробрасывается в JSON-ответ агенту.
 ```
 
 ---

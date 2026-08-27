@@ -41,11 +41,19 @@ python skills/legal_summarizer/scripts/cli.py --file <path>
 
 | Параметр | Обязательный | Описание |
 |:---|:---:|:---|
-| `--file` | да | Путь к документу (`.pdf`, `.docx`, `.txt` и др. форматы `office_files`) |
+| `--file` | да | Путь к документу: `.pdf`, `.docx`, `.txt` и др. форматы `office_files`. **Абсолютный** путь ИЛИ относительный от корня проекта с полным префиксом (см. ниже). |
 | `--length` | нет | `brief` (150–250 слов), `medium` (400–600, по умолч.), `detailed` (800–1200) |
 | `--context` | нет | История чата в JSON (для учёта фокуса пользователя) |
 
-Сохранённые файлы Telegram лежат в `data_store/cache/sessions/<session_key>/<file>`. Передавай относительный путь через `SessionFileRedirectHook` (см. `workspace/hooks/`).
+Сохранённые файлы Telegram лежат в `data_store/cache/sessions/<session_key>/<file>`. 
+
+**Как передавать `--file`** (важно — `cli.py` не делает redirect сам):
+
+- ✅ **Абсолютный путь:** `C:\Users\<user>\.nanobot\workspace\data_store\cache\sessions\<session_key>\<file>.pdf`
+- ✅ **Относительный от корня проекта** (cwd=workspace-корень): `data_store/cache/sessions/<session_key>/<file>.pdf`
+- ❌ Только имя файла `<file>.pdf` без префикса — будет `Файл не найден`, потому что в cwd такого файла нет. `SessionFileRedirectHook` работает только для `write_file`/`edit`, не для произвольных `exec`-команд.
+
+Если не знаешь session_key — найди файл по basename в `data_store/cache/sessions/` и подставь полный относительный путь.
 
 ## Длинные документы
 
