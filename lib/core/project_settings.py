@@ -376,11 +376,17 @@ class SkillChunkingSettings(_StrictOptional):
     один вызов LLM; для длиннее — разбиение с перекрытием.
     Используется навыком ``legal_summarizer`` (map-reduce LLM).
     ``text_splitter`` для эмбеддингов живёт отдельно в ``vector.*``.
+
+    Размер чанка управляется через ``chunk_size_input_ratio``
+    (доля от ``agents.defaults.contextWindowTokens``) — это основной
+    источник. ``chunk_size`` — fallback (если ratio не задано или
+    контекстное окно неизвестно).
     """
 
     chunk_size: int | None = Field(default=None, gt=0)
     chunk_overlap: int | None = Field(default=None, ge=0)
     single_call_threshold: int | None = Field(default=None, gt=0)
+    chunk_size_input_ratio: float | None = Field(default=None, gt=0, le=1)
 
 
 class SkillSettings(BaseModel):

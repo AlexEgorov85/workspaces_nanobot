@@ -254,9 +254,10 @@ def test_skill_config_chunking_defaults_match_project_json():
     import skill_config
 
     cfg = skill_config.get_chunking_config()
-    assert cfg["chunk_size"] == 12000
-    assert cfg["chunk_overlap"] == 1000
+    assert cfg["chunk_size"] == 100000
+    assert cfg["chunk_overlap"] == 2000
     assert cfg["single_call_threshold"] == 20000
+    assert cfg["chunk_size_input_ratio"] == 0.5
 
 
 def test_skill_config_cli_matches_project_json():
@@ -274,8 +275,12 @@ def test_skill_config_cli_matches_project_json():
 
 def test_max_chunks_default_is_five():
     """Защита от подвисания на огромных документах: max_chunks=None даёт
-    дефолт 5, при превышении skill возвращает structured error не вызывая LLM."""
-    long_text = "x" * 200_000
+    дефолт 5, при превышении skill возвращает structured error не вызывая LLM.
+
+    Используем реальный chunk_size по умолчанию (100000 симв.) + длинный
+    текст, чтобы гарантированно получить более 3 чанков даже при больших
+    значениях chunk_size в project.json."""
+    long_text = "x" * 500_000
     called_llm = {"n": 0}
 
     def fake_chat(*args, **kwargs):

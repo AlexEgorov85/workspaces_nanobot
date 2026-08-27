@@ -105,6 +105,42 @@ def _progress(msg: str) -> None:
     print(f"[legal_summarizer] {msg}", file=sys.stderr, flush=True)
 
 
+def _compute_chunk_size(cfg: dict) -> int:
+    """Вычислить размер чанка в символах из конфигурации.
+
+    Источники (по убыванию приоритета):
+      1. ``cfg["chunk_size_input_ratio"]`` + контекстное окно из
+         ``config.json::agents.defaults.contextWindowTokens`` —
+         основной источник. chunk_size = ctx_tokens * ratio.
+      2. ``cfg["chunk_size"]`` — fallback, если ratio не задан
+         или контекстное окно неизвестно.
+
+    Args:
+        cfg: ``skill_config.get_chunking_config()``.
+
+    Returns:
+        Размер чанка в символах (>= 1000).
+    """
+    fallback = int(cfg.get("chunk_size") or 100000)
+    ratio = cfg.get("chunk_size_input_ratio")
+    if ratio is None or not (0 < float(ratio) <= 1):
+        return fallback
+    try:
+        from config import SETTINGS as _SET
+        ctx_tokens = int(
+            _SET.get("agents", {}).get("defaults", {}).get("contextWindowTokens")
+            or 0
+        )
+    except Exception:
+        return fallback
+    if ctx_tokens <= 0:
+        return fallback
+    # Эмпирическая оценка: для русского юридического текста ~3.5 chars/token.
+    chars = int(ctx_tokens * 3.5 * float(ratio))
+    # Округляем вниз до тысячи для читаемости и стабильности.
+    return max(1000, (chars // 1000) * 1000)
+
+
 def summarize(
     text: str,
     *,
@@ -145,9 +181,15 @@ def summarize(
         chunks_count = 1
         summary = _llm_summarize(text, length, context)
     else:
+        chunk_size = _compute_chunk_size(cfg)
+        _progress(
+            f"map-reduce: chunk_size={chunk_size} chars "
+            f"(ratio={cfg.get('chunk_size_input_ratio')}, "
+            f"fallback={cfg.get('chunk_size')})"
+        )
         chunks = split_text(
             text,
-            chunk_size=int(cfg["chunk_size"]),
+            chunk_size=chunk_size,
             chunk_overlap=int(cfg["chunk_overlap"]),
         )
         chunks_count = len(chunks) if chunks else 1
