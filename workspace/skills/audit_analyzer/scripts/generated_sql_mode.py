@@ -30,6 +30,7 @@ import re
 from llm import chat
 from skill_config import get_db_schema, get_db_tables, get_predefined_scripts_table
 
+from column_hints import format_hints_block
 from lib.utils.sql_safety import format_schema, validate_sql
 
 MAX_RETRIES = 3
@@ -180,10 +181,8 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
         "  2. If the user's question cannot be answered from these tables, "
         "return the SQL that best approximates it (e.g. aggregate over the "
         "closest column). Never invent new tables.\n"
-        "  3. «объекты проверок» / «audited objects» / «проверяемые» = "
-        "`oarb.audits.auditee_entity` (NOT a separate objects table).\n"
-        "  4. «нарушения» / «violations» = `oarb.violations`.\n"
-        "  5. Always schema-qualify table names."
+        "  3. Always schema-qualify table names."
+        f"{format_hints_block()}"
         f"{few_shot_section}"
     )
 
