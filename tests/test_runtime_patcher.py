@@ -13,18 +13,68 @@ import pytest
 from lib.services.runtime_patcher import RuntimePatcher
 
 
-def _settings(**overrides):
+def _settings(gateway_overrides=None, channels=None, **overrides):
     gw = {
         "persist_threshold": 0,
         "persist_max_files": 100,
         "persist_max_age_hours": 24,
     }
-    gw.update(overrides)
+    if gateway_overrides is not None:
+        gw.update(gateway_overrides)
+    else:
+        gw.update(overrides)
+
+    channels_ns = types.SimpleNamespace(**(channels or {}))
 
     class _Settings:
         gateway = gw
 
+        def __init__(self) -> None:
+            self.channels = channels_ns
+
     return _Settings()
+
+
+def _make_fake_document_module(body_factory=None):
+    """Собрать fake ``nanobot.utils.document`` для подмены в ``sys.modules``.
+
+    ``from nanobot.utils import document`` резолвится через атрибут
+    ``document`` родительского модуля ``nanobot.utils``. Чтобы патч
+    ``patch_document_text_threshold`` подхватил наш fake (а не
+    настоящий submodule), подменяем **оба** ключа в ``sys.modules``.
+    """
+    document_mod = types.ModuleType("nanobot.utils.document")
+
+    def _fake_extract(text, media_paths, **kwargs):
+        new = text
+        if media_paths:
+            blocks = []
+            for p in media_paths:
+                body = (
+                    body_factory(media_paths)
+                    if body_factory is not None
+                    else "a" * 5000
+                )
+                blocks.append(f"[File: {Path(p).name}]\n{body}")
+            new = (text + "\n\n" + "\n\n".join(blocks)) if text else "\n\n".join(blocks)
+        return new, []
+
+    document_mod.extract_documents = _fake_extract
+    return document_mod
+
+
+def _patched_document_module(document_mod):
+    """Контекст-менеджер: подменить ``nanobot.utils`` и
+    ``nanobot.utils.document`` так, чтобы ``from nanobot.utils import
+    document`` взял наш fake.
+    """
+    return patch.dict(
+        "sys.modules",
+        {
+            "nanobot.utils.document": document_mod,
+            "nanobot.utils": types.SimpleNamespace(document=document_mod),
+        },
+    )
 
 
 class TestPatchAssembleOutbound:
@@ -174,6 +224,156 @@ class TestPatchContextGovernor:
             )
             assert not ok
             assert "import failed" in detail
+
+
+class TestPatchDocumentTextThreshold:
+    def test_threshold_zero_skipped(self):
+        patcher = RuntimePatcher()
+        ok, detail = patcher.patch_document_text_threshold(
+            _settings(channels={"document_text_threshold": 0})
+        )
+        assert not ok
+        assert "document_text_threshold <= 0" in detail
+
+    def test_threshold_negative_skipped(self):
+        patcher = RuntimePatcher()
+        ok, detail = patcher.patch_document_text_threshold(
+            _settings(channels={"document_text_threshold": -5})
+        )
+        assert not ok
+        assert "document_text_threshold <= 0" in detail
+
+    def test_threshold_default_applied(self):
+        patcher = RuntimePatcher()
+        ok, detail = patcher.patch_document_text_threshold(
+            _settings(channels={"document_text_threshold": 20000})
+        )
+        assert ok
+        assert "patched" in detail
+
+    def test_small_text_passes_through(self):
+        document_mod = _make_fake_document_module()
+        with _patched_document_module(document_mod):
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_document_text_threshold(
+                _settings(channels={"document_text_threshold": 20000})
+            )
+            assert ok
+            new_text, _ = document_mod.extract_documents(
+                "user prompt", ["x/cache/file.pdf"]
+            )
+            assert "[File: file.pdf]" in new_text
+            assert "text omitted" not in new_text
+
+    def test_large_text_replaced_with_marker_and_path(self):
+        document_mod = _make_fake_document_module(
+            body_factory=lambda media: "a" * 30000
+        )
+        with _patched_document_module(document_mod):
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_document_text_threshold(
+                _settings(channels={"document_text_threshold": 1000})
+            )
+            assert ok
+            new_text, _ = document_mod.extract_documents(
+                "user prompt", ["cache/sessions/k/big.pdf"]
+            )
+            assert "[File: big.pdf" in new_text
+            assert "text omitted" in new_text
+            assert "len=30000" in new_text
+            assert "threshold=1000" in new_text
+            assert "read at cache/sessions/k/big.pdf" in new_text
+            assert ("a" * 30000) not in new_text
+
+    def test_marker_omits_path_when_basename_not_in_media(self):
+        # В реальной выдаче extract_documents basename берётся из media_paths.
+        # Здесь мы симулируем ситуацию, когда заголовок блока и список путей
+        # рассогласованы: блок от другого источника, и его basename нет в media.
+        def _factory(media):
+            return "a" * 5000
+
+        document_mod = _make_fake_document_module(body_factory=_factory)
+
+        def _custom_extract(text, media_paths, **kwargs):
+            # Перебиваем — формируем блок с basename, которого нет в media_paths
+            big_body = "a" * 5000
+            return text + "\n\n" + f"[File: ghost.pdf]\n{big_body}", []
+
+        document_mod.extract_documents = _custom_extract
+        with _patched_document_module(document_mod):
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_document_text_threshold(
+                _settings(channels={"document_text_threshold": 100})
+            )
+            assert ok
+            new_text, _ = document_mod.extract_documents(
+                "user prompt", ["cache/sessions/k/real.pdf"]
+            )
+            assert "text omitted" in new_text
+            assert "read at" not in new_text
+
+    def test_missing_extract_documents_skipped(self):
+        hidden = {"nanobot.utils.document": None, "nanobot.utils": None}
+        with patch.dict("sys.modules", hidden):
+            patcher = RuntimePatcher()
+            ok, detail = patcher.patch_document_text_threshold(
+                _settings(channels={"document_text_threshold": 100})
+            )
+            assert not ok
+            assert "missing" in detail or "import failed" in detail
+
+    def test_multipage_pdf_grouped_by_file(self):
+        # nanobot разбивает PDF на ``--- Page N ---`` блоки, разделённые
+        # ``\n\n``. Каждая страница по отдельности меньше порога, но документ
+        # целиком — больше. Старый подход (сплит по ``\n\n``) пропускал бы
+        # каждую страницу и не сработал; патч должен группировать по файлу.
+
+        def _factory(media):
+            return (
+                "--- Page 1 ---\n" + "x" * 100 + "\n\n"
+                "--- Page 2 ---\n" + "x" * 100
+            )
+
+        document_mod = _make_fake_document_module(body_factory=_factory)
+        with _patched_document_module(document_mod):
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_document_text_threshold(
+                _settings(channels={"document_text_threshold": 150})
+            )
+            assert ok
+            new_text, _ = document_mod.extract_documents(
+                "user prompt", ["cache/sessions/k/mp.pdf"]
+            )
+            assert "text omitted" in new_text
+            assert "--- Page" not in new_text
+            assert ("x" * 100) not in new_text
+
+    def test_loop_namespace_also_patched(self):
+        # Реальная точка вызова — ``nanobot.agent.loop`` (импорт через
+        # ``from nanobot.utils.document import extract_documents``), а не
+        # ``document.extract_documents``. Патч обязан подменить и эту ссылку.
+        document_mod = _make_fake_document_module(
+            body_factory=lambda media: "a" * 5000
+        )
+        import nanobot.agent.loop as _loop_mod
+
+        saved = _loop_mod.extract_documents
+        try:
+            with _patched_document_module(document_mod):
+                patcher = RuntimePatcher()
+                ok, detail = patcher.patch_document_text_threshold(
+                    _settings(channels={"document_text_threshold": 100})
+                )
+                assert ok
+                assert "nanobot.agent.loop.extract_documents" in detail
+                assert _loop_mod.extract_documents is not saved
+                new_text, _ = _loop_mod.extract_documents(
+                    "p", ["cache/sessions/k/big.pdf"]
+                )
+                assert "text omitted" in new_text
+                assert "read at cache/sessions/k/big.pdf" in new_text
+        finally:
+            _loop_mod.extract_documents = saved
 
 
 class TestPatchExecLimits:
@@ -652,6 +852,27 @@ class TestPatchCompactCommand:
         )
         assert "compact_command" in report.to_dict()["applied"]
 
+    def test_apply_all_records_document_text_threshold(self):
+        agent = MagicMock()
+        original_return = MagicMock()
+        original_return.metadata = {}
+        agent._assemble_outbound.return_value = original_return
+        hook = MagicMock()
+        hook.drain.return_value = []
+
+        patcher = RuntimePatcher()
+        report = patcher.apply_all(
+            MagicMock(),
+            _settings(channels={"document_text_threshold": 20000}),
+            Path("ws"),
+            agent,
+            hook,
+            db_logging_service=None,
+        )
+        details = report.to_dict()["details"]
+        assert "document_text_threshold" in details
+        assert "patched" in details["document_text_threshold"]
+
 
 class TestAutoCompactIdleGuard:
     """``patch_auto_compact_idle_guard`` — глушит list_sessions при ttl=0."""
@@ -925,6 +1146,7 @@ class TestPatchSpecs:
             "assemble_outbound", "context_bridge_seed", "async_save",
             "subagent_logging", "project_tools", "compact_tracking",
             "compact_command", "idle_guard", "session_content_cleanup",
+            "document_text_threshold",
         }
         assert set(specs) == expected
 

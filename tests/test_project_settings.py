@@ -106,6 +106,27 @@ class TestValidateProjectSettings:
         result = validate_project_settings({"gateway": {"compact": None}})
         assert result.gateway.compact is None
 
+    def test_document_text_threshold_positive_accepted(self) -> None:
+        result = validate_project_settings(
+            {"channels": {"document_text_threshold": 5000}}
+        )
+        assert result.channels.document_text_threshold == 5000
+
+    def test_document_text_threshold_zero_accepted_as_disable(self) -> None:
+        """``0`` — явный NO-OP-сигнал для патча; pydantic должен
+        разрешать его (``ge=0``), без ошибок валидации."""
+        result = validate_project_settings(
+            {"channels": {"document_text_threshold": 0}}
+        )
+        assert result.channels.document_text_threshold == 0
+
+    def test_document_text_threshold_negative_rejected(self) -> None:
+        with pytest.raises(ConfigurationError) as excinfo:
+            validate_project_settings(
+                {"channels": {"document_text_threshold": -1}}
+            )
+        assert "document_text_threshold" in str(excinfo.value)
+
 
 class TestTableEntry:
     """Pydantic-модель ``TableEntry`` и её использование в ``SkillSettings.tables``.

@@ -256,6 +256,7 @@ class StreamlitSettings(_StrictOptional):
 
 class ChannelsSettings(_StrictOptional):
     postgres: PostgresChannelSettings | None = None
+    document_text_threshold: int | None = Field(default=None, ge=0)
 
 
 class LoggingDbSettings(_StrictOptional):

@@ -53,6 +53,30 @@ def _session_key_of(msg: Any) -> str:
     key = getattr(msg, "session_key", None)
     return key if isinstance(key, str) else ""
 
+
+def _resolve_media_path(media_paths: list[str], basename: str) -> str:
+    """Найти путь в ``media_paths`` по совпадению с ``basename``.
+
+    Используется патчем ``patch_document_text_threshold`` для маркера
+    ``read at <path>``: когда текст документа обрезан, агент должен
+    иметь возможность прочитать файл сам. Возвращает первый путь,
+    чей ``Path(p).name`` совпадает с ``basename`` (точное совпадение,
+    без нормализации — имена файлов в проекте уникальны в пределах
+    одного сообщения). Если совпадения нет — возвращает ``""``.
+    """
+    if not basename:
+        return ""
+    for p in media_paths or []:
+        if not isinstance(p, str) or not p:
+            continue
+        try:
+            if Path(p).name == basename:
+                return p
+        except (OSError, ValueError):
+            continue
+    return ""
+
+
 def _attach_context_window(agent: Any, session_key: str, result: Any) -> None:
     """Внедрить ``metadata["context_window"]`` в финальный outbound.
 
@@ -272,6 +296,22 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
         alternatives_checked="public sanitizer — отсутствует",
         risk="low",
     ),
+    "document_text_threshold": PatchSpec(
+        name="document_text_threshold",
+        purpose="ограничить размер извлекаемого текста документа, который "
+                "попадает прямо в user-сообщение LLM; при превышении "
+                "порога в промпт кладётся маркер-пометка с путём к файлу, "
+                "агенту остаётся возможность прочитать файл самому",
+        nanobot_target="nanobot.utils.document.extract_documents + "
+                       "nanobot.agent.loop.extract_documents (прямой import)",
+        reason="nanobot извлекает текст документа целиком в промпт; для "
+               "длинных PDF/DOCX это раздувает контекст и мешает агенту "
+               "найти файл на диске; per-channel настройки нет",
+        alternatives_checked="config 'channels.extractDocumentText=false' — "
+                             "только полностью выключает извлечение, без "
+                             "промежуточного режима «текст ≤ N»",
+        risk="medium",
+    ),
 }
 
 
@@ -292,6 +332,7 @@ _SKIPPABLE_REASONS: frozenset[str] = frozenset({
     "agent.sessions is missing",
     "exec_session/shell module not loaded",
     "filesystem/search module not loaded",
+    "document_text_threshold <= 0",
 })
 
 
@@ -430,6 +471,7 @@ class RuntimePatcher:
         self._record(report, "compact_command", self.patch_compact_command(
             agent, settings))
         self._record(report, "idle_guard", self.patch_auto_compact_idle_guard(agent))
+        self._record(report, "document_text_threshold", self.patch_document_text_threshold(settings))
         self._record(report, "session_content_cleanup", self.patch_session_content_cleanup())
         return report
 
@@ -727,6 +769,121 @@ class RuntimePatcher:
     # ------------------------------------------------------------------
     # Патч 1b: санитизация контента на источнике (Session.add_message)
     # ------------------------------------------------------------------
+
+    def patch_document_text_threshold(
+        self, settings: Any
+    ) -> tuple[bool, str]:
+        """Ограничить размер текста документа, встраиваемого в user-сообщение.
+
+        ``nanobot.utils.document.extract_documents`` извлекает текст из
+        PDF/DOCX/TXT/etc. и кладёт его целиком в ``content`` user-сообщения
+        LLM. Для длинных документов (60+ страниц ГК РФ ≈ 30–50к символов)
+        это раздувает контекст и сбивает агента: он видит огромный дамп
+        текста, но не видит путь к файлу и пытается найти его на диске.
+
+        Патч оборачивает ``extract_documents`` так, чтобы блоки документа,
+        чей извлечённый текст длиннее порога, заменялись на короткий
+        маркер ``[File: <basename> — text omitted (len=… > threshold=…);
+        read at <path>]``. Путь к файлу сохраняется в маркере, чтобы
+        агент мог прочитать файл сам через ``read_file`` (или передать
+        путь в skill ``legal_summarizer``).
+
+        Настройка читается из ``channels.document_text_threshold``
+        (общая для всех каналов — Postgres/Redis). Дефолт 20000 символов:
+        средний договор/акт/раздел закона укладывается, длинные книги —
+        обрезаются. ``<=0`` — патч пропускается (NO-OP).
+
+        Returns:
+            ``(True, "extract_documents patched")`` при успехе;
+            ``(False, <причина>)`` при отказе (нет атрибута, импорт упал,
+            и т.п.).
+        """
+        raw = _get(settings, "channels", "document_text_threshold", default=20000)
+        try:
+            threshold = int(raw)
+        except (TypeError, ValueError):
+            return False, "document_text_threshold is not an int"
+        if threshold <= 0:
+            return False, "document_text_threshold <= 0"
+
+        try:
+            from nanobot.utils import document as _document_mod
+        except Exception as exc:
+            return False, f"import failed: {exc}"
+
+        original = getattr(_document_mod, "extract_documents", None)
+        if original is None:
+            return False, "extract_documents is missing"
+
+        try:
+            _marker_prefix = "[File: "
+
+            def _extract_with_threshold(
+                text: str,
+                media_paths: list[str],
+                **kwargs: Any,
+            ) -> tuple[str, list[str]]:
+                new_text, image_paths = original(text, media_paths, **kwargs)
+                if not new_text or threshold <= 0:
+                    return new_text, image_paths
+                # Документ-блоки разделены ``\n\n[File: ``. Сплит по этому
+                # разделителю и возврат ``[File: `` обратно второму куску
+                # восстанавливает целые блоки (включая ``--- Page N ---``
+                # под-блоки внутри PDF, которые тоже разделены ``\n\n``).
+                parts = new_text.split("\n\n[File: ")
+                segments: list[str] = []
+                for i, part in enumerate(parts):
+                    segments.append(part if i == 0 else _marker_prefix + part)
+                rebuilt: list[str] = []
+                for segment in segments:
+                    if not segment.startswith(_marker_prefix):
+                        rebuilt.append(segment)
+                        continue
+                    newline_idx = segment.find("\n")
+                    if newline_idx < 0:
+                        rebuilt.append(segment)
+                        continue
+                    header = segment[:newline_idx]
+                    body = segment[newline_idx + 1:]
+                    basename = header[len(_marker_prefix):-1]
+                    body_len = len(body)
+                    if body_len <= threshold:
+                        rebuilt.append(segment)
+                        continue
+                    path = _resolve_media_path(media_paths, basename)
+                    suffix = f"; read at {path}" if path else ""
+                    rebuilt.append(
+                        f"[File: {basename} — text omitted "
+                        f"(len={body_len} > threshold={threshold}){suffix}]"
+                    )
+                return "\n\n".join(rebuilt), image_paths
+
+            _document_mod.extract_documents = _extract_with_threshold
+
+            # ``nanobot.agent.loop`` импортирует ``extract_documents`` напрямую
+            # через ``from nanobot.utils.document import extract_documents``
+            # (loop.py:88) и вызывает свою привязку имени (loop.py:1472), а не
+            # ``document.extract_documents``. Поэтому переопределение атрибута
+            # модуля выше НЕ влияет на реальную точку вызова — нужно подменить
+            # и ссылку в namespace модуля ``loop``.
+            patched_targets = ["nanobot.utils.document.extract_documents"]
+            try:
+                import nanobot.agent.loop as _loop_mod  # type: ignore
+
+                if getattr(_loop_mod, "extract_documents", None) is not None:
+                    _loop_mod.extract_documents = _extract_with_threshold
+                    patched_targets.append("nanobot.agent.loop.extract_documents")
+            except Exception:
+                pass
+
+            return (
+                True,
+                "extract_documents patched for document_text_threshold ("
+                + ", ".join(patched_targets)
+                + ")",
+            )
+        except Exception as exc:
+            return False, f"patch failed: {exc}"
 
     def patch_session_content_cleanup(self) -> tuple[bool, str]:
         """Вычищать невалидные символы из контента при добавлении сообщения.

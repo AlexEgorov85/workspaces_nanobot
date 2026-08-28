@@ -280,6 +280,37 @@ risk: LOW (graceful: getattr с fallback).
 tests: tests/test_runtime_patcher.py::test_idle_guard*
 ```
 
+### 14. `patch_document_text_threshold(settings)` — runtime_patcher.py:747
+
+```yaml
+PATCH: document_text_threshold
+target: >
+  nanobot.utils.document.extract_documents (обёртка) + nanobot.agent.loop.extract_documents.
+  ВАЖНО: loop.py делает `from nanobot.utils.document import extract_documents`
+  (прямой import в namespace модуля, loop.py:88) и вызывает свою привязку
+  (loop.py:1472), поэтому переопределения атрибута модуля document
+  недостаточно — патч подменяет и ссылку в namespace loop.
+nanobot_version: 0.3.0
+purpose: >
+  Ограничить размер текста документа, встраиваемого в user-сообщение. При
+  превышении channels.document_text_threshold блок `[File: <basename>]\n<body>`
+  заменяется на короткий маркер `[File: <basename> — text omitted (len=…
+  > threshold=…); read at <path>]`; путь сохраняется, чтобы агент мог
+  прочитать файл сам через read_file / передать в skill.
+  Группировка — по файловым блокам (`\n\n[File: `), НЕ по `\n\n`, т.к.
+  PDF разбивается на `--- Page N ---`-подблоки, разделённые `\n\n`; порог
+  считается по длине всего извлечённого текста файла, а не по странице.
+why_not_config: >
+  nanobot 0.3.0 не имеет промежуточного режима «извлекать только если
+  ≤ N»; только бинарный channels.extractDocumentText (true/false).
+  Per-channel настройки тоже нет — патч применяется единообразно ко всем
+  каналам (Postgres, Redis, subagent-сообщения через _prepare_message_media).
+public_alternative: ПРОВЕРИТЬ при апгрейде (если upstream добавит per-call
+  параметр в extract_documents — патч можно схлопнуть).
+risk: MEDIUM (оборачиваем публичную функцию, сигнатура стабильна).
+tests: tests/test_runtime_patcher.py::TestPatchDocumentTextThreshold
+```
+
 ---
 
 ## Политика ведения

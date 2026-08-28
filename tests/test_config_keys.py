@@ -54,6 +54,8 @@ def _required_keys():
         ("channels.postgres.error_retry_delay", 60.0),
         ("channels.postgres.claim_strategy", "single"),
         ("channels.postgres.media_cache_dir", "data_store/cache/sessions"),
+        # общее поведение для всех каналов (Postgres, Redis, будущие)
+        ("channels.document_text_threshold", 20000),
         # channels.postgres.pool
         ("channels.postgres.pool.min_conn", 1),
         ("channels.postgres.pool.max_conn", 4),

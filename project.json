@@ -34,6 +34,11 @@
   },
 
   "channels": {
+    // Общее поведение для всех каналов (Postgres, Redis, будущие).
+    // При превышении document_text_threshold в user-промпт кладётся маркер
+    // [File: <basename> — text omitted (len=… > threshold=…); read at <path>]
+    // вместо полного текста документа (защита от раздува контекста).
+    "document_text_threshold": 20000,
     "postgres": {
       "enabled": true,                        // Канал включён. Варианты: true | false
       "dsn": "${DATABASE_URL}",               // Полный DSN. Единственный источник подключения — резолвится из .secrets.env (${DATABASE_URL}). Без fallback на части.
@@ -297,7 +302,7 @@
   //  streamlit.* — веб-чат (streamlit_app.py)
   // ---------------------------------------------------------------------------
   "streamlit": {
-    "enabled": false,                 // Поднимать веб-чат на :8501 при старте gateway. false — UI не запускается
+    "enabled": true,                 // Поднимать веб-чат на :8501 при старте gateway. false — UI не запускается
     "max_wait": 600,                  // Макс. ожидание ответа агента, сек
     "poll_interval": 10.0,             // Интервал поллинга статуса, сек
     "files_dir": "data_store/streamlit_files",  // Папка загруженных файлов
