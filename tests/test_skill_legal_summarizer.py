@@ -725,5 +725,235 @@ class TestSkillMarkdownContract:
         assert "data_store/cache/sessions" in skill_text
 
 
+# ---------------------------------------------------------------------------
+# Retry + continue-with-skip + think-strip (Phase 2B hardening)
+# ---------------------------------------------------------------------------
+
+
+def test_strip_think_blocks_removes_cot():
+    """``<think>...</think>`` от моделей с CoT вырезаются из текста."""
+    text = "<think>\nЭто рассуждение, которое не нужно.\n</think>\nЭто саммари."
+    cleaned = summarizer._strip_think_blocks(text)
+    assert "<think>" not in cleaned
+    assert "рассуждение" not in cleaned
+    assert cleaned == "Это саммари."
+
+
+def test_strip_think_blocks_no_think_returns_unchanged():
+    text = "Обычное саммари без CoT."
+    assert summarizer._strip_think_blocks(text) == text
+
+def test_strip_think_blocks_multiple():
+    text = "<think>A</think>Полезно.<think>B</think>Конец."
+    assert summarizer._strip_think_blocks(text) == "Полезно.Конец."
+
+
+def test_strip_think_blocks_unclosed_drops_to_blank_line():
+    """Незакрытый ``<think>`` (DeepSeek/Qwen забывают ``</think>``):
+    отрезается до первого абзацного разрыва, реальный ответ сохраняется.
+    """
+    text = "<think>\nвнутреннее рассуждение модели\n\nЭто итоговый ответ."
+    cleaned = summarizer._strip_think_blocks(text)
+    assert "<think>" not in cleaned
+    assert "рассуждение" not in cleaned
+    assert cleaned == "Это итоговый ответ."
+
+
+def test_strip_think_blocks_unclosed_no_blank_drops_all():
+    """Незакрытый ``<think>`` без пустой строки (весь текст — рассуждение):
+    отрезается до конца (пусто лучше, чем сырой ``<think>`` в result.json)."""
+    text = "<think>\nтолько рассуждение без ответа"
+    cleaned = summarizer._strip_think_blocks(text)
+    assert cleaned == ""
+
+
+def test_strip_think_blocks_mixed_closed_and_unclosed():
+    """Смешанный случай: закрытый + незакрытый блоки в одном тексте."""
+    text = "<think>закрытое рассуждение</think>вступление<think>открытое\n\nответ"
+    cleaned = summarizer._strip_think_blocks(text)
+    assert "рассуждение" not in cleaned
+    assert "<think>" not in cleaned
+    assert cleaned == "вступлениеответ"
+
+
+def test_prepare_output_partial_exposes_failed_batches():
+    """``status=partial`` пробрасывает ``partial``/``failed_batches``/``hint``."""
+    result = {
+        "status": "partial",
+        "operation_id": "op_x",
+        "result": {
+            "subject": "Субъект",
+            "summary": "Текст.",
+            "length": "medium",
+            "chars_in": 1000,
+            "chunks": 5,
+            "context_batches": 3,
+            "sections": 0,
+            "strategy": "map_reduce_flat",
+            "partial": True,
+        },
+        "stats": {
+            "chars_in": 1000,
+            "chunks_total": 5,
+            "context_batches_total": 3,
+            "map_calls": 2,
+            "failed_batches": ["cb_000"],
+            "partial": True,
+        },
+    }
+    out = prepare_output(result)
+    assert out["status"] == "partial"
+    assert out["partial"] is True
+    assert out["failed_batches"] == ["cb_000"]
+    assert "hint" in out
+    assert "cb_000" in out["hint"]
+    assert "Перезапустите" in out["hint"]
+
+
+def _one_chunk_per_batch_pack(chunks, budget):
+    """Тестовый ``pack_chunks``: каждый чанк → отдельный батч (cb_NNN).
+
+    В тест-окружении ``context_window_tokens`` дефолт 65536, и реальный
+    ``pack_chunks`` кладёт ВСЕ чанки в один батч. Для тестов retry /
+    continue-with-skip нужны ≥2 батча — мок даёт по батчу на чанк.
+    """
+    from workspace.skills.legal_summarizer.scripts.packing import (
+        ContextBatch,
+        _BATCH_OVERHEAD_TOKENS,
+    )
+    return [
+        ContextBatch(
+            batch_id=f"cb_{i:03d}",
+            chunks=(c,),
+            total_tokens_estimate=c.token_estimate + _BATCH_OVERHEAD_TOKENS,
+            section_paths=(c.section_path,),
+            page_range=(c.page_start, c.page_end),
+        )
+        for i, c in enumerate(chunks)
+    ]
+
+
+def test_run_reduce_output_with_think_blocks_is_cleaned(monkeypatch, tmp_path):
+    """Reduce LLM вернул ``<think>...`` — subject/summary чистятся до записи."""
+    def fake_chat(messages, *, context=None, **kwargs):
+        return "<think>\nПлан: написать summary.\n</think>\nЭто договор аренды.\n\nСуть: аренда."
+
+    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+    text = "Договор аренды на 11 месяцев. Арендодатель сдаёт помещение."
+    result = summarizer.run(text, length="brief", workspace_root=tmp_path)
+    assert result["status"] == "completed"
+    assert "<think>" not in result["result"]["subject"]
+    assert "<think>" not in result["result"]["summary"]
+    assert "План" not in result["result"]["summary"]
+    assert "Это договор" in result["result"]["summary"]
+
+
+def test_batch_parse_error_retries_then_succeeds(monkeypatch, tmp_path):
+    """LLM-JSON флакает на первых попытках → retry → батч доезжает → completed.
+
+    Без retry-цикла первый же невалидный ответ привёл бы к
+    ``LLM_PARSE_ERROR`` и ``status=failed``. Здесь chat возвращает мусор
+    для первых двух map-вызовов (3-я попытка успешна) — run() всё равно
+    завершается ``completed``.
+    """
+    import re as _re
+    state = {"n": 0}
+
+    def fake_chat(messages, *, context=None, **kwargs):
+        state["n"] += 1
+        user_content = messages[1]["content"]
+        chunk_ids = _re.findall(r"DOCUMENT CHUNK (\d+)", user_content)
+        if chunk_ids:
+            if state["n"] <= 2:
+                return "not a valid json {"
+            return json.dumps({
+                "chunks": [
+                    {"chunk_id": cid, "summary": f"s{cid}", "section": "1"}
+                    for cid in chunk_ids
+                ]
+            })
+        return "Это договор.\n\nСуть: подряд."
+
+    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+    # 1 чанк на батч — чтобы retry-тест видел ≥2 батча (иначе в тест-окружении
+    # pack_chunks кладёт всё в один cb_000).
+    monkeypatch.setattr(summarizer, "pack_chunks", _one_chunk_per_batch_pack)
+    monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
+        "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
+        "chunk_size_input_ratio": None,
+    })
+    monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
+        "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
+        "max_chunks_for_execution": 100,
+        "context_batching": {
+            "system_prompt_tokens": 100, "instruction_tokens_per_map": 50,
+            "chars_per_token": 3.5, "safety_margin": 0.85,
+        },
+        "llm_max_tokens": 100,
+    })
+
+    paragraph = "Длинный абзац про договор подряда, права и обязанности. "
+    text = "\n\n".join([paragraph] * 200)
+    result = summarizer.run(
+        text, length="brief", confirmed=True, workspace_root=tmp_path,
+    )
+    assert result["status"] == "completed"
+    assert result["stats"]["map_calls"] >= 2
+
+
+def test_batch_parse_error_exhausts_returns_partial(monkeypatch, tmp_path):
+    """Первый батч исчерпывает retry (3 parse-error) → помечается failed,
+    остальные батчи успевают → ``status=partial`` с ``failed_batches``."""
+    import re as _re
+    state = {"n": 0}
+
+    def fake_chat(messages, *, context=None, **kwargs):
+        state["n"] += 1
+        user_content = messages[1]["content"]
+        chunk_ids = _re.findall(r"DOCUMENT CHUNK (\d+)", user_content)
+        if chunk_ids:
+            # Первые 3 map-вызова (3 retry первого батча) — невалидный JSON.
+            # С 4-го вызова — валидный (второй и последующие батчи).
+            if state["n"] <= 3:
+                return "not json at all"
+            return json.dumps({
+                "chunks": [
+                    {"chunk_id": cid, "summary": f"s{cid}", "section": "1"}
+                    for cid in chunk_ids
+                ]
+            })
+        return "Это договор.\n\nСуть: подряд."
+
+    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+    # 1 чанк на батч — чтобы partial-тест видел ≥2 батча (иначе в тест-окружении
+    # pack_chunks кладёт всё в один cb_000).
+    monkeypatch.setattr(summarizer, "pack_chunks", _one_chunk_per_batch_pack)
+    monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
+        "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
+        "chunk_size_input_ratio": None,
+    })
+    monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
+        "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
+        "max_chunks_for_execution": 100,
+        "context_batching": {
+            "system_prompt_tokens": 100, "instruction_tokens_per_map": 50,
+            "chars_per_token": 3.5, "safety_margin": 0.85,
+        },
+        "llm_max_tokens": 100,
+    })
+
+    paragraph = "Длинный абзац про договор подряда, права и обязанности. "
+    text = "\n\n".join([paragraph] * 200)
+    result = summarizer.run(
+        text, length="brief", confirmed=True, workspace_root=tmp_path,
+    )
+    assert result["status"] == "partial"
+    assert result["result"]["partial"] is True
+    failed = result["stats"]["failed_batches"]
+    assert len(failed) == 1
+    assert failed[0].startswith("cb_")
+    assert result["stats"]["partial"] is True
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

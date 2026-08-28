@@ -103,21 +103,45 @@ _PROMPT_FILES = {
 # При исчерпании — батч помечается failed, обработка документа продолжается.
 MAX_BATCH_PARSE_RETRIES = 3
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINK_OPEN = "<think>"
+_THOUGHT_CLOSE = "</think>"
 
 
 def _strip_think_blocks(text: str) -> str:
-    """Убрать ``<think>...</think>`` блоки из текста.
+    """Убрать ``<think>...</think>`` блоки из текста (CoT от моделей).
 
-    Некоторые модели (DeepSeek/Qwen) выдают chain-of-thought внутри
-    ``<think>...</think>`` прямо в финальном ответе. Для document-reduce
-    это мусор: ``_extract_subject`` подберёт ``<think>`` как subject, а
-    summary будет содержать рассуждения вместо саммари. Чистим ДО
-    извлечения subject и записи ``result.json``, чтобы result был
-    пригоден агенту и пользователю.
+    Некоторые модели (DeepSeek/Qwen) выдают chain-of-thought прямо в
+    финальном ответе — иначе ``_extract_subject`` подберёт ``<think>``
+    как subject, а summary будет рассуждением вместо саммари. Чистим
+    ДО извлечения subject и записи ``result.json``.
+
+    Два варианта мусора:
+    1. Закрытый блок ``<think>reasoning</think>answer`` — целиком
+       вырезается regex'ом (lazy + DOTALL).
+    2. **Незакрытый** ``<think>reasoning\n\nanswer`` — модель забыла
+       ``</think>``. Без этого фикса regex не матчит → рассуждение
+       утекает в result.json (наблюдалось в проде 2026-08-28 на ГК РФ).
+       Решение: отрезать от ``<think>`` до первого абзацного разрыва
+       (``\n\n``), сохраняя реальный ответ после. Если разрыва нет
+       (весь текст — рассуждение) — отрезать до конца: пустой
+       subject/summary лучше сырого ``<think>``.
     """
     if not text:
         return text
     cleaned = _THINK_BLOCK_RE.sub("", text)
+    # Дорезаем незакрытые<think>... (модель забыла закрывающий тег).
+    while _THINK_OPEN in cleaned:
+        idx = cleaned.find(_THINK_OPEN)
+        close_idx = cleaned.find(_THOUGHT_CLOSE, idx)
+        if close_idx != -1:
+            # Повторный/вложенный — отрезаем до ближайшего ``</think>``.
+            cleaned = cleaned[:idx] + cleaned[close_idx + len(_THOUGHT_CLOSE):]
+            continue
+        blank = cleaned.find("\n\n", idx)
+        if blank == -1:
+            cleaned = cleaned[:idx]
+        else:
+            cleaned = cleaned[:idx] + cleaned[blank + 2:]
     return cleaned.strip()
 
 
