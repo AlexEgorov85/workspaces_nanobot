@@ -32,6 +32,7 @@ from workspace.utils.office_files import (
     detect_format,
     extract_tables,
 )
+from workspace.skills.legal_summarizer.scripts.manifest import manifest_root
 
 
 SUPPORTED_FORMATS: frozenset[str] = frozenset({"pdf", "docx", "txt"})
@@ -121,9 +122,8 @@ class PhysicalDocument:
 
 
 def _physical_cache_root(workspace_root: Path | str | None) -> Path:
-    if workspace_root is None:
-        return Path("workspace/data_store/cache/skills/legal_summarizer/physical")
-    return Path(workspace_root) / "workspace" / "data_store" / "cache" / "skills" / "legal_summarizer" / "physical"
+    # Единый якорь — :func:`manifest_root` (см. описание дубля workspace/workspace).
+    return manifest_root(workspace_root) / "physical"
 
 
 def _physical_cache_key(path: Path) -> str:

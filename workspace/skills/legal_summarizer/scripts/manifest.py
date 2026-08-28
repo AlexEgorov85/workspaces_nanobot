@@ -104,10 +104,28 @@ class NormalizedManifest:
         }
 
 
+def skill_repo_root() -> Path:
+    """Корень репозитория, выведенный из расположения этого скрипта.
+
+    Скрипт лежит по пути ``<repo>/workspace/skills/legal_summarizer/scripts/manifest.py``.
+    ``parents[4]`` от его абсолютного пути — корень репо. Это СТАБИЛЬНЫЙ
+    якорь, не зависящий от cwd процесса и от того, как агент запустил cli.py
+    (раньше при ``workspace_root=None`` возвращался относительный путь
+    ``workspace/data_store/...``, и при cwd=<workspace> получался дубль
+    ``workspace/workspace/data_store/...`` — см. тест-инцидент 2026-08-28).
+    """
+    return Path(__file__).resolve().parents[4]
+
+
 def manifest_root(workspace_root: Path | str | None) -> Path:
-    """Корень для manifest'ов skill'а."""
+    """Корень для manifest'ов/chunks/result skill'а.
+
+    ``workspace_root`` — корень РЕПО (не workspace dir!). Если не передан
+    — выводится через :func:`skill_repo_root` (стабильный абсолютный путь).
+    Возвращает ``<repo>/workspace/data_store/cache/skills/legal_summarizer``.
+    """
     if workspace_root is None:
-        return Path("workspace/data_store/cache/skills/legal_summarizer")
+        workspace_root = skill_repo_root()
     return Path(workspace_root) / "workspace" / "data_store" / "cache" / "skills" / "legal_summarizer"
 
 

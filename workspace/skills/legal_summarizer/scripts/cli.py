@@ -180,6 +180,11 @@ def main() -> None:
             "focus": args.focus,
             "operation_id": args.operation_id,
             "document_path": str(args.file),
+            # Корень РЕПО (не workspace dir) — стабильный абсолютный путь,
+            # выведенный из __file__. Раньше передавали None → скилл брал
+            # относительный путь и при cwd=<workspace> создавал дубль
+            # workspace/workspace/data_store/... (см. инцидент 2026-08-28).
+            "workspace_root": Path(__file__).resolve().parents[4],
         }
 
         if not args.confirm:
