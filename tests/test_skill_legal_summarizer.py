@@ -866,6 +866,85 @@ def test_quick_estimate_txt_estimates_without_full_load(monkeypatch, tmp_path):
     assert not hasattr(est, "estimated_llm_calls") or est.estimated_llm_calls >= 1
 
 
+def test_running_marker_emitted_before_long_run(monkeypatch, tmp_path, capsys):
+    """cli.py при старте длинного прогона печатает в stdout маркер
+    ``status=running`` с ``poll_interval_hint_sec`` — чтобы агент не
+    опрашивал каждые 30 сек вслепую (~14 LLM-вызовов) а ждал по
+    подсказанному интервалу (~3-4 вызова). Проверяем что маркер
+    появляется в stdout ДО запуска run()."""
+    import io as _io
+    import cli as _cli
+
+    import summarizer as _summ
+
+    monkeypatch.setattr(_summ, "get_chunking_config", lambda: {
+        "chunk_size": 100000, "chunk_overlap": 0, "single_call_threshold": 100,
+        "chunk_size_input_ratio": None,
+    })
+    monkeypatch.setattr(_summ, "get_execution_config", lambda: {
+        "confirmation_threshold_sec": 0.001,
+        "estimated_chunk_duration_sec": 20,
+        "max_chunks_for_execution": 100,
+        "context_batching": {"system_prompt_tokens": 0, "instruction_tokens_per_map": 0,
+                              "chars_per_token": 3.5, "safety_margin": 0.85},
+        "llm_max_tokens": 100,
+    })
+
+    # Большой текст → оценка > threshold → пройдём confirmation gate
+    text = "Длинный договор. " * 15000  # ~1.4M chars
+
+    # Перехватываем запуск run() чтобы маркер точно вышел ДО него
+    run_called = {"n": 0}
+    real_run = _summ.run
+    def fake_run(t, **kwargs):
+        run_called["n"] += 1
+        # Проверяем что маркер УЖЕ напечатан (capsysbuf содержит его)
+        captured = capsys.readouterr()
+        assert '"status": "running"' in captured.out, (
+            f"running marker not in stdout before run(); got: {captured.out[:300]}"
+        )
+        # Парсим маркер и проверяем поля
+        import json as _json
+        start = captured.out.find("{")
+        end = captured.out.find("\n}", start) + 2
+        if end < 2:
+            depth = 0
+            end = start
+            for i, ch in enumerate(captured.out[start:], start):
+                if ch == "{": depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+        marker = _json.loads(captured.out[start:end])
+        assert marker["status"] == "running"
+        assert marker["mode"] == "summarize"
+        assert marker["estimated_total_sec"] > 0
+        assert 60 <= marker["poll_interval_hint_sec"] <= 180
+        assert "write_stdin" in marker["hint"]
+        return real_run(t, **kwargs)
+
+    monkeypatch.setattr(_summ, "run", fake_run)
+
+    # Подменяем chat чтобы run() не делал реальных LLM-вызовов
+    monkeypatch.setattr(_summ.llm, "chat",
+                        lambda messages, **kw: "ok")
+    monkeypatch.setattr(_summ, "inspect", lambda text, **kw: type("I", (), {
+        "chunks": [], "context_batches": [], "tree": None,
+        "strategy": "single", "estimated_llm_calls": 1,
+        "chars_in": len(text),
+    })())
+
+    # Запуск через argv
+    monkeypatch.setattr("sys.argv", ["cli.py", "--file", str(tmp_path/"x.txt"),
+                                     "--confirm"])
+    (tmp_path/"x.txt").write_text(text, encoding="utf-8")
+    _cli.main()
+
+    assert run_called["n"] == 1
+
+
 def test_confirmation_required_payload_hides_llm_call_count():
     """``confirmation_required`` НЕ должен содержать ``estimated_llm_calls``
     и НЕ должен упоминать «вызовов LLM» в hint — пользователю важно время

@@ -100,6 +100,40 @@ def _emit(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
+def _emit_running_marker(text: str) -> None:
+    """Маркер старта длинного прогона — печатается ПЕРВЫМ в stdout.
+
+    Агент при ``exec`` (или первом ``write_stdin``) видит этот JSON и
+    понимает: (1) скилл реально работает, не висит; (2) сколько примерно
+    ждать; (3) с каким интервалом опрашивать. Без этого маркера агент
+    вслепую вызывал write_stdin каждые 30 сек — ~14 LLM-вызовов на
+    прогон 7 мин (инцидент 2026-08-28).
+
+    Оценки грубые (без структурного парсинга): только по длине текста.
+    ``poll_interval_hint_sec`` — рекомендация для yield_time_ms
+    write_stdin (clamp 60–180 сек).
+    """
+    from summarizer import get_chunking_config, get_execution_config
+    chunk_size = int(get_chunking_config().get("chunk_size", 100000))
+    chunk_dur = float(get_execution_config().get("estimated_chunk_duration_sec", 20))
+    rough_chunks = max(1, -(-len(text) // max(1, chunk_size)))
+    estimated_total_sec = max(1.0, rough_chunks * chunk_dur)
+    poll_interval_hint_sec = max(60, min(180, int(estimated_total_sec / 5)))
+    marker = {
+        "mode": "summarize",
+        "status": "running",
+        "estimated_total_sec": int(estimated_total_sec),
+        "poll_interval_hint_sec": poll_interval_hint_sec,
+        "hint": (
+            f"Обработка займёт примерно {int(estimated_total_sec)} сек. "
+            f"Опрашивайте через write_stdin с yield_time_ms="
+            f"{poll_interval_hint_sec * 1000} не чаще раза в "
+            f"{poll_interval_hint_sec} сек."
+        ),
+    }
+    _emit(marker)
+
+
 def _error(status_message: str, exc: Exception | None = None) -> dict:
     out: dict = {
         "mode": "summarize",
@@ -251,6 +285,14 @@ def main() -> None:
                     ),
                 })
                 return
+
+        # Маркер старта длинного прогона: печатаем в stdout ДО вызова run(),
+        # чтобы агент увидел его в первом exec/write_stdin результате и
+        # перестал опрашивать каждые 30 сек вслепую. Содержит
+        # estimated_total_sec (грубая оценка) и poll_interval_hint_sec
+        # (рекомендация для write_stdin yield_time_ms). Это решает
+        # «инцидент 2026-08-28»: ~14 LLM-вызовов на polling вместо ~3-4.
+        _emit_running_marker(text)
 
         result = run(text, confirmed=args.confirm, **kwargs)
         out = prepare_output(result)
