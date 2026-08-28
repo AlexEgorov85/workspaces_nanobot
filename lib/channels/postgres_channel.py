@@ -946,12 +946,11 @@ class PostgresChannel(BaseChannel):
         # Декодируем data URL из БД обратно в локальные файлы сессии
         session_key = raw_meta.get("session_key") or f"postgres:{chat_id}"
         media = await self._decode_media_from_db(media, session_key)
-        # Агенту передаём только пути; в текст добавляем подсказку, что
-        # пользователь приложил файл и где он лежит в кэше сессии.
-        media_paths, hints = self._resolve_media_paths_and_hints(media)
-        if hints:
-            suffix = "\n".join(hints)
-            content = f"{content}\n\n{suffix}" if content else suffix
+        # Агенту передаём только пути к файлам. Текстовое описание вложений
+        # (с путём) — единая ответственность ``extract_documents`` (см.
+        # ``RuntimePatcher.patch_document_text_threshold``); сюда НЕ
+        # дописываем хинты, чтобы не было дублирования «файл там-то».
+        media_paths, _ = self._resolve_media_paths_and_hints(media)
         media = media_paths
 
         # Создаём assistant-placeholder, чтобы Streamlit мог начать опрос

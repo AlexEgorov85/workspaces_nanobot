@@ -262,7 +262,9 @@ class TestPatchDocumentTextThreshold:
             new_text, _ = document_mod.extract_documents(
                 "user prompt", ["x/cache/file.pdf"]
             )
-            assert "[File: file.pdf]" in new_text
+            # Унифицированный формат: путь ВСЕГДА в заголовке, даже для
+            # маленьких документов (агент должен мочь передать путь в skill).
+            assert "[File: file.pdf (saved at x/cache/file.pdf)]" in new_text
             assert "text omitted" not in new_text
 
     def test_large_text_replaced_with_marker_and_path(self):
@@ -278,11 +280,12 @@ class TestPatchDocumentTextThreshold:
             new_text, _ = document_mod.extract_documents(
                 "user prompt", ["cache/sessions/k/big.pdf"]
             )
-            assert "[File: big.pdf" in new_text
-            assert "text omitted" in new_text
-            assert "len=30000" in new_text
-            assert "threshold=1000" in new_text
-            assert "read at cache/sessions/k/big.pdf" in new_text
+            # Унифицированный формат: путь в заголовке (один раз),
+            # маркер обрезки — отдельной строкой без дублирования пути.
+            assert "[File: big.pdf (saved at cache/sessions/k/big.pdf)]" in new_text
+            assert "[text omitted (len=30000 > threshold=1000)]" in new_text
+            # Дублирования «read at <path>» быть не должно — путь уже в заголовке.
+            assert "read at" not in new_text
             assert ("a" * 30000) not in new_text
 
     def test_marker_omits_path_when_basename_not_in_media(self):
@@ -309,8 +312,12 @@ class TestPatchDocumentTextThreshold:
             new_text, _ = document_mod.extract_documents(
                 "user prompt", ["cache/sessions/k/real.pdf"]
             )
+            # Путь не нашёлся → заголовок БЕЗ «(saved at …)», маркер обрезки
+            # БЕЗ «read at <path>». Никакого выдуманного пути.
             assert "text omitted" in new_text
+            assert "(saved at" not in new_text
             assert "read at" not in new_text
+            assert "[File: ghost.pdf]\n[text omitted" in new_text
 
     def test_missing_extract_documents_skipped(self):
         hidden = {"nanobot.utils.document": None, "nanobot.utils": None}
@@ -371,7 +378,8 @@ class TestPatchDocumentTextThreshold:
                     "p", ["cache/sessions/k/big.pdf"]
                 )
                 assert "text omitted" in new_text
-                assert "read at cache/sessions/k/big.pdf" in new_text
+                # Путь — в заголовке (единый механизм), не в маркере обрезки.
+                assert "[File: big.pdf (saved at cache/sessions/k/big.pdf)]" in new_text
         finally:
             _loop_mod.extract_documents = saved
 

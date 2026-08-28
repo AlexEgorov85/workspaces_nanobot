@@ -298,15 +298,17 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
     ),
     "document_text_threshold": PatchSpec(
         name="document_text_threshold",
-        purpose="ограничить размер извлекаемого текста документа, который "
-                "попадает прямо в user-сообщение LLM; при превышении "
-                "порога в промпт кладётся маркер-пометка с путём к файлу, "
-                "агенту остаётся возможность прочитать файл самому",
+        purpose="единый универсальный механизм встраивания документов в "
+                "user-промпт (все каналы и навыки): заголовок каждого блока "
+                "всегда содержит путь к файлу; при превышении порога тело "
+                "заменяется на короткий маркер text omitted",
         nanobot_target="nanobot.utils.document.extract_documents + "
                        "nanobot.agent.loop.extract_documents (прямой import)",
-        reason="nanobot извлекает текст документа целиком в промпт; для "
-               "длинных PDF/DOCX это раздувает контекст и мешает агенту "
-               "найти файл на диске; per-channel настройки нет",
+        reason="каналы дублировали информацию о файле собственными хинтами "
+               "[Attachment: … (saved at …)] рядом с extract_documents — "
+               "два параллельных указания пути расходились между каналами; "
+               "вынесено в единую точку; порог защищает от раздувания "
+               "контекста на длинных PDF/DOCX",
         alternatives_checked="config 'channels.extractDocumentText=false' — "
                              "только полностью выключает извлечение, без "
                              "промежуточного режима «текст ≤ N»",
@@ -773,30 +775,41 @@ class RuntimePatcher:
     def patch_document_text_threshold(
         self, settings: Any
     ) -> tuple[bool, str]:
-        """Ограничить размер текста документа, встраиваемого в user-сообщение.
+        """Единый универсальный механизм встраивания документов в user-промпт.
 
-        ``nanobot.utils.document.extract_documents`` извлекает текст из
-        PDF/DOCX/TXT/etc. и кладёт его целиком в ``content`` user-сообщения
-        LLM. Для длинных документов (60+ страниц ГК РФ ≈ 30–50к символов)
-        это раздувает контекст и сбивает агента: он видит огромный дамп
-        текста, но не видит путь к файлу и пытается найти его на диске.
+        ``nanobot.utils.document.extract_documents`` — ЕДИНСТВЕННОЕ место,
+        через которое текст документа попадает в ``content`` user-сообщения
+        LLM (для всех каналов — Postgres/Redis/websocket/streamlit).
+        Каналы НЕ должны дублировать эту информацию собственными хинтами
+        вида ``[Attachment: … (saved at …)]``: иначе агент видит два
+        параллельных указания «файл там-то» и поведение расходится между
+        каналами.
 
-        Патч оборачивает ``extract_documents`` так, чтобы блоки документа,
-        чей извлечённый текст длиннее порога, заменялись на короткий
-        маркер ``[File: <basename> — text omitted (len=… > threshold=…);
-        read at <path>]``. Путь к файлу сохраняется в маркере, чтобы
-        агент мог прочитать файл сам через ``read_file`` (или передать
-        путь в skill ``legal_summarizer``).
+        Патч переписывает формат каждого файлового блока в унифицированный:
+
+        - маленький документ (извлечённый текст ≤ порога):
+          ``[File: <name> (saved at <path>)]\n<text>``
+        - большой документ (> порога):
+          ``[File: <name> (saved at <path>)]\n[text omitted (len=… > threshold=…)]``
+
+        Путь к файлу присутствует ВСЕГДА (и при полном тексте, и при
+        обрезке) — агент в любом случае знает, куда передать файл
+        (skill, ``read_file``, ``exec``), независимо от навыка. Тело
+        заменяется на короткий маркер ``text omitted`` при превышении
+        порога, чтобы не раздувать контекст.
+
+        Группировка — по файловым блокам (``\n\n[File: ``), а не по ``\n\n``:
+        внутри PDF страницы разделены ``\n\n`` (``--- Page N ---``), и
+        сплит по ``\n\n`` ломал бы документ на отдельные страницы.
 
         Настройка читается из ``channels.document_text_threshold``
-        (общая для всех каналов — Postgres/Redis). Дефолт 20000 символов:
-        средний договор/акт/раздел закона укладывается, длинные книги —
+        (общая для всех каналов). Дефолт 20000 символов: средний
+        договор/акт/раздел закона укладывается, длинные книги —
         обрезаются. ``<=0`` — патч пропускается (NO-OP).
 
         Returns:
             ``(True, "extract_documents patched")`` при успехе;
-            ``(False, <причина>)`` при отказе (нет атрибута, импорт упал,
-            и т.п.).
+            ``(False, <причина>)`` при отказе.
         """
         raw = _get(settings, "channels", "document_text_threshold", default=20000)
         try:
@@ -846,16 +859,20 @@ class RuntimePatcher:
                     header = segment[:newline_idx]
                     body = segment[newline_idx + 1:]
                     basename = header[len(_marker_prefix):-1]
+                    path = _resolve_media_path(media_paths, basename)
+                    new_header = (
+                        f"[File: {basename} (saved at {path})]"
+                        if path
+                        else f"[File: {basename}]"
+                    )
                     body_len = len(body)
                     if body_len <= threshold:
-                        rebuilt.append(segment)
-                        continue
-                    path = _resolve_media_path(media_paths, basename)
-                    suffix = f"; read at {path}" if path else ""
-                    rebuilt.append(
-                        f"[File: {basename} — text omitted "
-                        f"(len={body_len} > threshold={threshold}){suffix}]"
-                    )
+                        rebuilt.append(f"{new_header}\n{body}")
+                    else:
+                        rebuilt.append(
+                            f"{new_header}\n"
+                            f"[text omitted (len={body_len} > threshold={threshold})]"
+                        )
                 return "\n\n".join(rebuilt), image_paths
 
             _document_mod.extract_documents = _extract_with_threshold

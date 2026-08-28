@@ -62,14 +62,26 @@ python skills/legal_summarizer/scripts/cli.py --file <path> [--flags...]
 - ✅ **Относительный от корня проекта** (cwd=workspace-корень): `data_store/cache/sessions/<session_key>/<file>.pdf`
 - ❌ Только имя файла `<file>.pdf` без префикса — будет `Файл не найден`.
 
-**Подсказка:** при прикладывании файла через канал агент видит маркер
-`[Attachment: <basename> (saved at <path>)]` рядом с пользовательским
-сообщением. Если извлечённый текст документа превышает порог
-`channels.document_text_threshold` (по умолчанию 20000 символов), в промпт
-кладётся маркер `[File: <basename> — text omitted (len=… > threshold=…);
-read at <path>]` — путь к файлу сохранён, чтобы можно было прочитать
-самому. Бери путь прямо из этих маркеров — не перебирай каталоги через
-`find_files`/`Get-ChildItem`.
+**Подсказка:** при прикладывании документа канал передаёт агенту только
+пути к файлам; текстовое описание вложения формирует единый механизм
+`extract_documents` (см. `RuntimePatcher.patch_document_text_threshold`).
+В промпте каждый документ выглядит так:
+
+- маленький (≤ `channels.document_text_threshold`, по умолчанию 20000 символов):
+  ```
+  [File: <basename> (saved at <path>)]
+  <извлечённый текст>
+  ```
+- большой (> порога):
+  ```
+  [File: <basename> (saved at <path>)]
+  [text omitted (len=… > threshold=…)]
+  ```
+
+Путь к файлу присутствует **всегда** (и при полном тексте, и при обрезке) —
+бери его прямо из заголовка `[File: … (saved at …)]` и передавай в
+`cli.py --file <path>`. Не перебирай каталоги через `find_files`/
+`Get-ChildItem`.
 
 ## Протокол (Phase 2B — Structure-Aware Context Batching)
 

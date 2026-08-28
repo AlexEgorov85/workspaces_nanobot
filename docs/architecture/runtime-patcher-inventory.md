@@ -280,7 +280,7 @@ risk: LOW (graceful: getattr с fallback).
 tests: tests/test_runtime_patcher.py::test_idle_guard*
 ```
 
-### 14. `patch_document_text_threshold(settings)` — runtime_patcher.py:747
+### 14. `patch_document_text_threshold(settings)` — runtime_patcher.py:773
 
 ```yaml
 PATCH: document_text_threshold
@@ -292,22 +292,33 @@ target: >
   недостаточно — патч подменяет и ссылку в namespace loop.
 nanobot_version: 0.3.0
 purpose: >
-  Ограничить размер текста документа, встраиваемого в user-сообщение. При
-  превышении channels.document_text_threshold блок `[File: <basename>]\n<body>`
-  заменяется на короткий маркер `[File: <basename> — text omitted (len=…
-  > threshold=…); read at <path>]`; путь сохраняется, чтобы агент мог
-  прочитать файл сам через read_file / передать в skill.
-  Группировка — по файловым блокам (`\n\n[File: `), НЕ по `\n\n`, т.к.
-  PDF разбивается на `--- Page N ---`-подблоки, разделённые `\n\n`; порог
-  считается по длине всего извлечённого текста файла, а не по странице.
+  ЕДИНЫЙ универсальный механизм встраивания документов в user-промпт
+  (все каналы и навыки). Каждый файловый блок переписывается в
+  унифицированный формат:
+    маленький (≤ channels.document_text_threshold):
+      [File: <name> (saved at <path>)]
+      <text>
+    большой (> порога):
+      [File: <name> (saved at <path>)]
+      [text omitted (len=… > threshold=…)]
+  Путь присутствует ВСЕГДА (агент знает, куда передать файл в skill /
+  read_file / exec). Группировка — по файловым блокам (`\n\n[File: `),
+  НЕ по `\n\n` (PDF разбит на под-страницы через `\n\n`, и сплит по
+  `\n\n` сломал бы документ на отдельные страницы; порог считается
+  по длине всего извлечённого текста файла).
+  Каналы НЕ дописывают собственных хинтов `[Attachment: … (saved at …)]` —
+  это была параллельная дублирующая ответственность, теперь вся
+  информация о файле идёт через единый механизм.
 why_not_config: >
   nanobot 0.3.0 не имеет промежуточного режима «извлекать только если
   ≤ N»; только бинарный channels.extractDocumentText (true/false).
   Per-channel настройки тоже нет — патч применяется единообразно ко всем
-  каналам (Postgres, Redis, subagent-сообщения через _prepare_message_media).
+  каналам (Postgres, Redis, websocket, streamlit, subagent-сообщения
+  через _prepare_message_media).
 public_alternative: ПРОВЕРИТЬ при апгрейде (если upstream добавит per-call
   параметр в extract_documents — патч можно схлопнуть).
-risk: MEDIUM (оборачиваем публичную функцию, сигнатура стабильна).
+risk: MEDIUM (оборачиваем публичную функцию, сигнатура стабильна;
+  формат вывода меняется — добавляется `(saved at <path>)` в заголовке).
 tests: tests/test_runtime_patcher.py::TestPatchDocumentTextThreshold
 ```
 
