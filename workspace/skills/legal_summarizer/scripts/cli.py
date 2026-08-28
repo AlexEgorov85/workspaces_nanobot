@@ -149,12 +149,50 @@ def main() -> None:
             inspect as _inspect,
             load_text,
             needs_confirmation,
+            quick_estimate,
             run,
         )
+        from summarizer import _progress
         from skill_config import get_default_length
 
         length = args.length or get_default_length()
-        text = load_text(Path(args.file))
+        file_path = Path(args.file)
+
+        # Fast pre-confirm gate: БЕЗ полной экстракции текста. Для PDF
+        # (ГК РФ, 663 стр.) полная экстракция через pdfplumber занимает
+        # 3–5 минут — пользователь ждал только чтобы узнать «документ
+        # большой» (инцидент 2026-08-28). quick_estimate (pypdf page_count
+        # + сэмпл 10 стр.) → секунды.
+        # Не отдаём estimated_llm_calls — пользователю важно только время.
+        if not args.confirm and not args.estimate_only:
+            try:
+                qe = quick_estimate(file_path)
+                qest = qe["estimate"]
+                if needs_confirmation(qest):
+                    _emit({
+                        "mode": "summarize",
+                        "status": "confirmation_required",
+                        "estimate": {
+                            "chars_in": qe["chars_in"],
+                            "chunks_total": qest.chunks_count,
+                            "context_batches_total": qest.context_batches,
+                            "estimated_duration_min_sec": qest.estimated_duration_min_sec,
+                            "estimated_duration_max_sec": qest.estimated_duration_max_sec,
+                            "confirmation_threshold_sec": qest.confirmation_threshold_sec,
+                        },
+                        "hint": (
+                            f"Документ требует примерно {qest.estimated_duration_min_sec:g}–"
+                            f"{qest.estimated_duration_max_sec:g} сек. "
+                            "Перезапустите с --confirm для выполнения."
+                        ),
+                    })
+                    return
+            except Exception as exc:
+                # quick_estimate упал (битый PDF и т.п.) → fallback к полному
+                # пути: полная экстракция + inspect + safety-net confirm.
+                _progress(f"quick_estimate failed ({exc}); falling back to full inspect")
+
+        text = load_text(file_path)
 
         if args.estimate_only:
             insp = _inspect(text, document_path=str(args.file))
@@ -166,7 +204,8 @@ def main() -> None:
                 "chunks_total": len(insp.chunks),
                 "context_batches_total": len(insp.context_batches),
                 "sections_total": len(insp.tree.sections) if insp.tree else 0,
-                "estimated_llm_calls": insp.estimated_llm_calls,
+                # estimated_llm_calls намеренно не отдаём — пользователю
+                # важно только время; агенты склонны зеркалить числа.
                 "strategy": insp.strategy,
                 "estimated_duration_min_sec": est.estimated_duration_min_sec,
                 "estimated_duration_max_sec": est.estimated_duration_max_sec,
@@ -187,6 +226,9 @@ def main() -> None:
             "workspace_root": Path(__file__).resolve().parents[4],
         }
 
+        # Safety-net: если quick_estimate сказал «не нужно confirm» (или
+        # упал и упал на fallback), полный inspect может пересмотреть.
+        # Не отдаём estimated_llm_calls — только время.
         if not args.confirm:
             insp = _inspect(text, document_path=str(args.file))
             est = _estimate(insp)
@@ -198,15 +240,13 @@ def main() -> None:
                         "chars_in": len(text),
                         "chunks_total": len(insp.chunks),
                         "context_batches_total": len(insp.context_batches),
-                        "estimated_llm_calls": insp.estimated_llm_calls,
                         "estimated_duration_min_sec": est.estimated_duration_min_sec,
                         "estimated_duration_max_sec": est.estimated_duration_max_sec,
                         "confirmation_threshold_sec": est.confirmation_threshold_sec,
                     },
                     "hint": (
                         f"Документ требует примерно {est.estimated_duration_min_sec:g}–"
-                        f"{est.estimated_duration_max_sec:g} сек и "
-                        f"{insp.estimated_llm_calls} вызовов LLM. "
+                        f"{est.estimated_duration_max_sec:g} сек. "
                         "Перезапустите с --confirm для выполнения."
                     ),
                 })

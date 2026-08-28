@@ -245,7 +245,19 @@ def _doc_context(structure: dict | None, *, with_begin_end: bool = False) -> str
 
 
 def _progress(msg: str) -> None:
-    print(f"[legal_summarizer] {msg}", file=sys.stderr, flush=True)
+    """Прогресс в stderr (человеческий лог) и stdout (агент при polling).
+
+    При длинных прогонах nanobot запускает cli.py в фоне и опрашивает
+    через ``write_stdin`` — он читает ТОЛЬКО stdout. Без зеркала в stdout
+    агент видит пустоту и не понимает, что скилл реально молотит батчи
+    (инцидент 2026-08-28: ~30 LLM-вызовов на polling «подожди ещё»
+    вместо осмысленных действий). Зеркалим в оба потока — LLM
+    спокойно читает progress-строки рядом с финальным JSON
+    (``_emit`` всё равно печатает JSON последним).
+    """
+    line = f"[legal_summarizer] {msg}"
+    print(line, file=sys.stderr, flush=True)
+    print(line, file=sys.stdout, flush=True)
 
 
 def _compute_chunk_size_chars(cfg: dict) -> int:
@@ -489,6 +501,93 @@ def estimate(insp: Inspection) -> Estimate:
 
 def needs_confirmation(est: Estimate) -> bool:
     return est.estimated_duration_max_sec > est.confirmation_threshold_sec
+
+
+# Сэмпл страниц для оценки плотности chars/page в quick_estimate.
+# 10 страниц достаточно для грубой оценки (< сек на pypdf для 600+ стр.).
+_QUICK_SAMPLE_PAGES = 10
+# Консервативные множители (лучше переспросить confirm, чем стартовать
+# длинный ран без предупреждения — пользователь не любит, когда «обещали
+# 5 минут, а вышло 12»).
+_CHARS_OVERESTIMATE = 1.3
+_BATCH_OVERESTIMATE_RATIO = 1.0  # batches ~= chunks (worst case 1 chunk/batch)
+
+
+def quick_estimate(path: Path | str) -> dict[str, Any]:
+    """Быстрая оценка размера документа БЕЗ полного извлечения текста.
+
+    Используется как pre-confirm gate в ``cli.py``: для PDF (ГК РФ на 663
+    стр.) полная экстракция через pdfplumber занимает ~3–5 минут —
+    пользователь 3.5 минуты ждал только чтобы узнать «документ большой»
+    (см. инцидент 2026-08-28). Здесь — pypdf page_count + сэмпл 10
+    страниц (~секунды), для txt/docx — дешёвое чтение длины.
+
+    Возвращает ``{"chars_in": int, "estimate": Estimate}``. Оценки
+    завышены (×1.3 chars, batches ~= chunks) чтобы fast-path скорее
+    требовал confirm, чем рисковал стартовать длинный ран.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(str(p))
+    ext = p.suffix.lower()
+    cfg = globals()["get_execution_config"]()
+    chunk_dur = float(cfg["estimated_chunk_duration_sec"])
+    threshold = float(cfg["confirmation_threshold_sec"])
+    chunk_size = int(globals()["get_chunking_config"]().get("chunk_size", 100000))
+
+    chars_in_est = 0
+    if ext == ".pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(str(p), strict=False)
+        page_count = len(reader.pages)
+        sample_n = min(_QUICK_SAMPLE_PAGES, page_count)
+        sample_chars = 0
+        for i in range(sample_n):
+            try:
+                sample_chars += len(reader.pages[i].extract_text() or "")
+            except Exception:
+                pass
+        if sample_n > 0 and sample_chars > 0:
+            avg_per_page = sample_chars / sample_n
+            chars_in_est = int(avg_per_page * page_count * _CHARS_OVERESTIMATE)
+        else:
+            # пустой/битый PDF — грубый fallback по размеру файла
+            chars_in_est = int(p.stat().st_size * 0.5)
+    elif ext == ".txt":
+        chars_in_est = int(p.stat().st_size * 0.95)
+    elif ext == ".docx":
+        from docx import Document as _Docx
+        doc = _Docx(str(p))
+        n_par = len(doc.paragraphs)
+        sample_n = min(50, n_par)
+        sample_chars = sum(len(par.text) for par in doc.paragraphs[:sample_n])
+        if sample_n > 0:
+            avg = sample_chars / sample_n
+            chars_in_est = int(avg * n_par * _CHARS_OVERESTIMATE)
+        else:
+            chars_in_est = int(p.stat().st_size * 0.3)
+    else:
+        # для неподдерживаемых расширений — fallback на размер; пусть
+        # load_text() ниже сам бросит ValueError с понятным сообщением
+        chars_in_est = int(p.stat().st_size)
+
+    chunks_count_est = max(1, -(-chars_in_est // max(1, chunk_size)))  # ceil
+    # batches ~= chunks (worst case 1 chunk/batch) → консервативная оценка
+    context_batches_est = max(1, int(chunks_count_est * _BATCH_OVERESTIMATE_RATIO))
+    estimated_llm_calls_est = context_batches_est + 1  # +1 doc reduce
+    avg_sec = context_batches_est * chunk_dur
+
+    return {
+        "chars_in": chars_in_est,
+        "estimate": Estimate(
+            chunks_count=chunks_count_est,
+            context_batches=context_batches_est,
+            estimated_llm_calls=estimated_llm_calls_est,
+            estimated_duration_min_sec=round(avg_sec * 0.8, 1),
+            estimated_duration_max_sec=round(avg_sec * 1.2, 1),
+            confirmation_threshold_sec=threshold,
+        ),
+    }
 
 
 def _llm_batch(

@@ -833,6 +833,98 @@ def _one_chunk_per_batch_pack(chunks, budget):
     ]
 
 
+def test_quick_estimate_txt_estimates_without_full_load(monkeypatch, tmp_path):
+    """``quick_estimate`` для txt даёт оценку за секунды без полной
+    экстракции (полная экстракция больших PDF = минуты; инцидент 2026-08-28)."""
+    import summarizer as _summ
+
+    # Низкий порог чтобы триггернуть needs_confirmation на умеренном txt
+    monkeypatch.setattr(_summ, "get_execution_config", lambda: {
+        "confirmation_threshold_sec": 1.0,
+        "estimated_chunk_duration_sec": 5.0,
+        "max_chunks_for_execution": 100,
+        "context_batching": {
+            "system_prompt_tokens": 0, "instruction_tokens_per_map": 0,
+            "chars_per_token": 3.5, "safety_margin": 0.85,
+        },
+        "llm_max_tokens": 100,
+    })
+    monkeypatch.setattr(_summ, "get_chunking_config", lambda: {
+        "chunk_size": 1000, "chunk_overlap": 0, "single_call_threshold": 100,
+        "chunk_size_input_ratio": None,
+    })
+
+    # txt ~30k символов → с низким порогом нужен confirm
+    p = tmp_path / "big.txt"
+    p.write_text("Длинный договор. " * 3000, encoding="utf-8")
+    qe = _summ.quick_estimate(p)
+    assert qe["chars_in"] > 10000
+    est = qe["estimate"]
+    assert est.chunks_count > 1
+    assert est.estimated_duration_max_sec > est.confirmation_threshold_sec
+    # Не утечка LLM-call counts в оценку
+    assert not hasattr(est, "estimated_llm_calls") or est.estimated_llm_calls >= 1
+
+
+def test_confirmation_required_payload_hides_llm_call_count():
+    """``confirmation_required`` НЕ должен содержать ``estimated_llm_calls``
+    и НЕ должен упоминать «вызовов LLM» в hint — пользователю важно время
+    (инцидент 2026-08-28: агент зеркалил «20 вызовов LLM» в ответ)."""
+    result = {
+        "status": "confirmation_required",
+        "operation_id": "op_x",
+        "summary": {"chars_in": 1000, "chunks_total": 20, "context_batches_total": 10},
+        "estimate": {
+            "chars_in": 1000,
+            "chunks_total": 20,
+            "context_batches_total": 10,
+            "estimated_duration_min_sec": 300.0,
+            "estimated_duration_max_sec": 480.0,
+            "confirmation_threshold_sec": 120,
+        },
+        "hint": "Документ требует примерно 300–480 сек. Перезапустите с --confirm.",
+    }
+    out = prepare_output(result)
+    assert out["status"] == "confirmation_required"
+    assert "estimated_llm_calls" not in out["summary"]
+    assert "estimated_llm_calls" not in out["estimate"]
+    assert "вызовов" not in out["hint"]
+
+
+def test_prepare_output_strips_llm_call_counts_from_stats():
+    """``completed``/``partial`` НЕ отдают агенту счётчики LLM-вызовов
+    (map_calls/total_llm_calls/...) — только время/размер/стратегию."""
+    result = {
+        "status": "completed",
+        "operation_id": "op_x",
+        "result": {
+            "subject": "S", "summary": "T", "length": "medium",
+            "chars_in": 1000, "chunks": 5, "context_batches": 2,
+            "sections": 0, "strategy": "map_reduce_flat",
+        },
+        "stats": {
+            "chars_in": 1000, "chunks_total": 5, "context_batches_total": 2,
+            "duration_sec": 120.5, "strategy": "map_reduce_flat",
+            "map_calls": 10, "reduce_calls": 3, "total_llm_calls": 13,
+            "retries": 1, "sections_total": 0, "meaningful_sections": 0,
+        },
+    }
+    out = prepare_output(result)
+    stats = out["stats"]
+    assert "duration_sec" in stats
+    assert "strategy" in stats
+    assert "chars_in" in stats
+    # LLM-call counts скрыты
+    assert "map_calls" not in stats
+    assert "reduce_calls" not in stats
+    assert "total_llm_calls" not in stats
+    assert "section_reduce_calls" not in stats
+    assert "section_trim_calls" not in stats
+    assert "document_reduce_calls" not in stats
+    # retries оставлен (ретраи — надёжность, не «объём работы»)
+    assert "retries" in stats
+
+
 def test_run_reduce_output_with_think_blocks_is_cleaned(monkeypatch, tmp_path):
     """Reduce LLM вернул ``<think>...`` — subject/summary чистятся до записи."""
     def fake_chat(messages, *, context=None, **kwargs):

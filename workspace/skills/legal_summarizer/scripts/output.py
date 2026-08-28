@@ -15,6 +15,21 @@ from typing import Any
 from lib.utils.text_utils import sanitize_value as _sanitize_value  # noqa: F401
 
 
+# Поля со счётчиками LLM-вызовов, которые НЕ отдаём агенту: пользователю
+# важно только время (длительность/ETA), а агенты склонны зеркалить числа
+# вроде «20 вызовов LLM» в ответ — это раздражает (инцидент 2026-08-28).
+# Оставляем duration_sec / retries / chars / chunks / strategy / partial /
+# failed_batches — это либо время, либо структурное, либо операционное.
+_HIDDEN_LLM_CALL_COUNTERS: frozenset[str] = frozenset({
+    "map_calls",
+    "section_reduce_calls",
+    "section_trim_calls",
+    "document_reduce_calls",
+    "reduce_calls",
+    "total_llm_calls",
+})
+
+
 def prepare_output(result: dict) -> dict:
     """Привести результат ``summarizer.run()`` к плоскому формату.
 
@@ -50,7 +65,9 @@ def prepare_output(result: dict) -> dict:
             out["title"] = title
         stats = result.get("stats") or {}
         if stats:
-            out["stats"] = stats
+            out["stats"] = {
+                k: v for k, v in stats.items() if k not in _HIDDEN_LLM_CALL_COUNTERS
+            }
         # partial: саммари есть, но часть батчей не распарсилась после retry.
         # Агент должен сообщить пользователю и предложить resume.
         if status == "partial":
@@ -65,8 +82,18 @@ def prepare_output(result: dict) -> dict:
             )
 
     elif status == "confirmation_required":
-        out["summary"] = result.get("summary") or {}
-        out["estimate"] = result.get("estimate") or {}
+        # summary может содержать estimated_llm_calls (устаревший путь) —
+        # пробрасываем, но вычищаем счётчик: пользователю важно только время.
+        out["summary"] = {
+            k: v
+            for k, v in (result.get("summary") or {}).items()
+            if k != "estimated_llm_calls"
+        }
+        out["estimate"] = {
+            k: v
+            for k, v in (result.get("estimate") or {}).items()
+            if k != "estimated_llm_calls"
+        }
         hint = result.get("hint")
         if hint:
             out["hint"] = hint
