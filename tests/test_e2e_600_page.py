@@ -30,6 +30,12 @@ if str(_PROJ) not in sys.path:
 import summarizer  # noqa: E402
 
 
+def _build_text_response(user_content: str) -> str:
+    """Мок-ответ LLM в текстовом формате с маркерами ``DOC CHUNK N:``."""
+    n = len(re.findall(r"DOCUMENT CHUNK \d+", user_content))
+    return "\n\n".join(f"DOC CHUNK {i + 1}: саммари чанка {i + 1}" for i in range(n)) + ("\n" if n else "")
+
+
 def _generate_long_legal_text(
     *,
     pages: int = 600,
@@ -148,15 +154,9 @@ def test_600_page_executes_via_context_batching(long_legal_text, monkeypatch, tm
 
     def fake_chat(messages, *, context=None, **kwargs):
         user_content = messages[1]["content"]
-        chunk_ids = re.findall(r"DOCUMENT CHUNK (\d+)", user_content)
-        if chunk_ids:
+        if re.findall(r"DOCUMENT CHUNK \d+", user_content):
             state["map_calls"] += 1
-            return json.dumps({
-                "chunks": [
-                    {"chunk_id": cid, "summary": f"s{cid}", "section": "1"}
-                    for cid in chunk_ids
-                ]
-            })
+            return _build_text_response(user_content)
         state["reduce_calls"] += 1
         return "Это договор аренды.\n\nСуть: аренда помещения."
 
@@ -209,14 +209,8 @@ def test_600_page_stats_separate_map_reduce_retries(long_legal_text, monkeypatch
 
     def fake_chat(messages, *, context=None, **kwargs):
         user_content = messages[1]["content"]
-        chunk_ids = re.findall(r"DOCUMENT CHUNK (\d+)", user_content)
-        if chunk_ids:
-            return json.dumps({
-                "chunks": [
-                    {"chunk_id": cid, "summary": f"s{cid}", "section": "1"}
-                    for cid in chunk_ids
-                ]
-            })
+        if re.findall(r"DOCUMENT CHUNK \d+", user_content):
+            return _build_text_response(user_content)
         return "Это договор.\n\nСуть: аренда."
 
     monkeypatch.setattr(summarizer.llm, "chat", fake_chat)

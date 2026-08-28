@@ -1,16 +1,17 @@
 """LLM-prompt и parser для batch'ей (Phase 2B).
 
 Каждый ContextBatch (multi-chunk) → один LLM call.
-LLM получает явную секционную разметку + page ranges для каждого chunk'а.
 
-Output: строго JSON ``{"chunks":[{"chunk_id":"...","summary":"...","section":"..."}]}``.
-
-См. ``workspace/skills/legal_summarizer/ARCHITECTURE.md`` invariants #7, #9.
+Output: свободный текст с маркерами ``DOC CHUNK N: <саммари>`` — никакого
+JSON. LLM не тратит токены на обвязку/идентификаторы (chunk_id, section) —
+они и так известны на нашей стороне. Парсер regex'ом вытаскивает блоки
+по порядку и сопоставляет с chunk_id батча по позиции (чанк #N → chunk_id
+с индексом N-1 в батче). Это убирает ChunkResultParseError полностью —
+LLM не может «забыть закрыть скобку» или «не экранировать кавычку».
 """
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -29,23 +30,25 @@ _BATCH_USER_TEMPLATE = """Документ для анализа.
 
 {chunks_block}
 
-ФОРМАТ ОТВЕТА (строго JSON без markdown-обёрток):
-{{
-  "chunks": [
-    {{"chunk_id": "001", "summary": "...", "section": "..."}},
-    {{"chunk_id": "002", "summary": "...", "section": "..."}}
-  ]
-}}
+ЗАДАНИЕ:
+Для КАЖДОГО чанка выше напиши краткое саммари (2–4 предложения). Формат
+ответа — строго по одному блоку на чанк, В ТОМ ЖЕ ПОРЯДКЕ, что и чанки выше:
+
+DOC CHUNK 1: <саммари чанка 1>
+
+DOC CHUNK 2: <саммари чанка 2>
+
+...
 
 ВАЖНО:
-- Каждый chunk_id из списка выше должен встретиться в ответе ровно один раз.
-- Не смешивай факты между chunks.
-- Каждый chunk — самостоятельная единица анализа.
+- Один блок на каждый чанк, без пропусков.
+- Не смешивай факты между чанками.
 - summary — связный текст на русском, юридические термины переписаны на бытовой язык.
+- Никакого JSON, никаких markdown-обёрток, никаких номеров чанков в самом тексте саммари.
 """
 
 
-_CHUNK_BLOCK_TEMPLATE = """DOCUMENT CHUNK {chunk_id}
+_CHUNK_BLOCK_TEMPLATE = """DOCUMENT CHUNK {n}
 Раздел: {section_path}
 Заголовок: {section_heading}
 Страницы: {page_start}–{page_end}
@@ -56,8 +59,23 @@ _CHUNK_BLOCK_TEMPLATE = """DOCUMENT CHUNK {chunk_id}
 """
 
 
+# Маркер для LLM: "DOC CHUNK N: ...". N — порядковый номер чанка в батче (1..K).
+# Парсер регексом достаёт все вхождения и маппит на chunk_id по позиции.
+# Lookahead ``^DOC CHUNK`` (с MULTILINE) ловит только маркер в начале
+# строки — болтовня между блоками (через пустые строки) не попадает в body.
+_CHUNK_MARKER_RE = re.compile(
+    r"(?m)^\s*DOC CHUNK\s+(\d+)\s*:\s*(.*?)(?=\n\n|^\s*DOC CHUNK\s+\d+\s*:|\Z)",
+    re.DOTALL,
+)
+
+
 class ChunkResultParseError(Exception):
-    """Ответ LLM не содержит валидный JSON или отсутствуют chunk_id."""
+    """Ответ LLM не содержит маркеров DOC CHUNK N для всех чанков батча.
+
+    Оставлено для обратной совместимости (retry-логика в map-фазе).
+    На текстовом формате практически недостижим — модель печатает блоки
+    свободно. Но сеть/timeout/streaming-truncation всё ещё возможны.
+    """
 
 
 def build_batch_user_message(
@@ -66,6 +84,9 @@ def build_batch_user_message(
     chunks_total: int,
 ) -> str:
     """Построить user_body для LLM-вызова одного ContextBatch.
+
+    Чанки нумеруются 1..K (порядок в батче). LLM вернёт саммари в том же
+    порядке с маркерами ``DOC CHUNK N: ...``.
 
     Args:
         batch: контекст-батч с chunks.
@@ -81,12 +102,12 @@ def build_batch_user_message(
     page_end = batch.page_range[1] if batch.page_range[1] is not None else "?"
 
     chunks_block_parts: list[str] = []
-    for c in batch.chunks:
+    for idx, c in enumerate(batch.chunks, start=1):
         cs = c.page_start if c.page_start is not None else "?"
         ce = c.page_end if c.page_end is not None else "?"
         chunks_block_parts.append(
             _CHUNK_BLOCK_TEMPLATE.format(
-                chunk_id=c.chunk_id,
+                n=idx,
                 section_path=c.section_path or "(root)",
                 section_heading=c.section_heading or "",
                 page_start=cs,
@@ -106,86 +127,64 @@ def build_batch_user_message(
     )
 
 
-_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-
-def _extract_json_object(text: str) -> str | None:
-    s = text.strip()
-    try:
-        json.loads(s)
-        return s
-    except Exception:
-        pass
-    m = _CODE_FENCE_RE.search(text)
-    if m:
-        try:
-            json.loads(m.group(1))
-            return m.group(1)
-        except Exception:
-            pass
-    m = _JSON_OBJECT_RE.search(text)
-    if m:
-        try:
-            json.loads(m.group(0))
-            return m.group(0)
-        except Exception:
-            pass
-    return None
-
-
 def parse_batch_response(
     batch: ContextBatch,
     llm_text: str,
 ) -> dict[str, str]:
-    """Распарсить ответ LLM, валидируя наличие всех chunk_id.
+    """Распарсить ответ LLM, сопоставляя саммари с chunk_id по позиции.
+
+    LLM пишет блоки вида::
+
+        DOC CHUNK 1: <саммари>
+        DOC CHUNK 2: <саммари>
+        ...
+
+    Парсер regex'ом достаёт пары (n, summary), где n — порядковый номер
+    чанка в батче (1..len(batch.chunks)). chunk_id определяется ПОЗИЦИЕЙ:
+    чанк #N → batch.chunks[N-1].].chunk_id. Если каких-то номеров нет или
+    они дублируются — ChunkResultParseError.
 
     Args:
-        batch: контекст-батч (ожидаемые chunk_id).
+        batch: контекст-батч (ожидаемые chunk_id, в порядке).
         llm_text: текст ответа LLM.
 
     Returns:
         dict[chunk_id, summary].
 
     Raises:
-        ChunkResultParseError: ответ невалиден или отсутствует какой-то chunk_id.
+        ChunkResultParseError: отсутствуют или дублируются номера чанков.
     """
-    expected_ids = {c.chunk_id for c in batch.chunks}
-    raw = _extract_json_object(llm_text)
-    if raw is None:
+    expected_count = len(batch.chunks)
+    raw = llm_text or ""
+
+    # Достаём пары (n, text). Регекс ловит: до следующего маркера или до конца.
+    found: dict[int, str] = {}
+    duplicates: list[int] = []
+    for m in _CHUNK_MARKER_RE.finditer(raw):
+        n_str, body = m.group(1), m.group(2).strip()
+        if not body:
+            continue
+        try:
+            n = int(n_str)
+        except ValueError:
+            continue
+        if n in found:
+            # Дубликат номера — raise (модель перепутала нумерацию).
+            if n not in duplicates:
+                duplicates.append(n)
+            continue
+        found[n] = body
+
+    missing = [n for n in range(1, expected_count + 1) if n not in found]
+    if missing or duplicates:
         raise ChunkResultParseError(
-            f"Не удалось извлечь JSON из ответа LLM. text[:200]={llm_text[:200]!r}"
+            f"Номера чанков в ответе LLM неполные/дубликаты: "
+            f"missing={missing}, duplicates={duplicates}, "
+            f"got_nums={sorted(found.keys())}, expected=1..{expected_count}"
         )
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ChunkResultParseError(f"Невалидный JSON: {e}") from e
-    if not isinstance(data, dict):
-        raise ChunkResultParseError(
-            f"Ожидался dict, получен {type(data).__name__}"
-        )
-    chunks = data.get("chunks")
-    if not isinstance(chunks, list):
-        raise ChunkResultParseError("Ключ 'chunks' должен быть list")
-    out: dict[str, str] = {}
-    for entry in chunks:
-        if not isinstance(entry, dict):
-            continue
-        cid = entry.get("chunk_id")
-        if not isinstance(cid, str):
-            continue
-        if cid not in expected_ids:
-            continue
-        summary = entry.get("summary")
-        if not isinstance(summary, str) or not summary.strip():
-            continue
-        out[cid] = summary.strip()
-    missing = expected_ids - set(out.keys())
-    if missing:
-        raise ChunkResultParseError(
-            f"В ответе LLM отсутствуют chunk_id: {sorted(missing)}"
-        )
-    return out
+
+    # Сопоставляем позицию N → batch.chunks[N-1].chunk_id.
+    return {batch.chunks[n - 1].chunk_id: found[n] for n in range(1, expected_count + 1)}
 
 
 __all__ = [

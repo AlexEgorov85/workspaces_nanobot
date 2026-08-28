@@ -190,14 +190,8 @@ def test_run_long_doc_with_confirm_executes_full_pipeline(monkeypatch, tmp_path)
     def fake_chat(messages, *, context=None, **kwargs):
         state["n"] += 1
         user_content = messages[1]["content"]
-        chunk_ids = _re.findall(r"DOCUMENT CHUNK (\d+)", user_content)
-        if chunk_ids:
-            return json.dumps({
-                "chunks": [
-                    {"chunk_id": cid, "summary": f"s{cid}", "section": "1"}
-                    for cid in chunk_ids
-                ]
-            })
+        if _re.findall(r"DOCUMENT CHUNK \d+", user_content):
+            return _build_text_response(user_content)
         return "Это договор.\n\nСуть."
 
     monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
@@ -258,14 +252,8 @@ def test_run_isolates_llm_from_agent_history(monkeypatch, tmp_path):
     def fake_chat(messages, *, context=None, **kwargs):
         captured.append({"messages": messages, "context": context})
         user_content = messages[1]["content"]
-        chunk_ids = _re.findall(r"DOCUMENT CHUNK (\d+)", user_content)
-        if chunk_ids:
-            return json.dumps({
-                "chunks": [
-                    {"chunk_id": cid, "summary": f"s{cid}", "section": "1"}
-                    for cid in chunk_ids
-                ]
-            })
+        if _re.findall(r"DOCUMENT CHUNK \d+", user_content):
+            return _build_text_response(user_content)
         return "Это договор.\n\nСуть."
 
     monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
@@ -833,6 +821,19 @@ def _one_chunk_per_batch_pack(chunks, budget):
     ]
 
 
+import re as _re_map
+
+def _build_text_response(user_content: str) -> str:
+    """Мок-ответ LLM в текстовом формате с маркерами ``DOC CHUNK N:``.
+
+    Считает DOCUMENT CHUNK N в промпте, генерит ``DOC CHUNK 1: саммари 1``,
+    ``DOC CHUNK 2: саммари 2`` и т.д. Парсер regex'ом достаёт пары по
+    позиции → chunk_id (см. ``prompts.parse_batch_response``).
+    """
+    n = len(_re_map.findall(r"DOCUMENT CHUNK \d+", user_content))
+    return "\n\n".join(f"DOC CHUNK {i + 1}: саммари чанка {i + 1}" for i in range(n)) + ("\n" if n else "")
+
+
 def test_quick_estimate_txt_estimates_without_full_load(monkeypatch, tmp_path):
     """``quick_estimate`` для txt даёт оценку за секунды без полной
     экстракции (полная экстракция больших PDF = минуты; инцидент 2026-08-28)."""
@@ -1033,16 +1034,10 @@ def test_batch_parse_error_retries_then_succeeds(monkeypatch, tmp_path):
     def fake_chat(messages, *, context=None, **kwargs):
         state["n"] += 1
         user_content = messages[1]["content"]
-        chunk_ids = _re.findall(r"DOCUMENT CHUNK (\d+)", user_content)
-        if chunk_ids:
+        if _re.findall(r"DOCUMENT CHUNK \d+", user_content):
             if state["n"] <= 2:
-                return "not a valid json {"
-            return json.dumps({
-                "chunks": [
-                    {"chunk_id": cid, "summary": f"s{cid}", "section": "1"}
-                    for cid in chunk_ids
-                ]
-            })
+                return "DOC CHUNK 1: invalid attempt"
+            return _build_text_response(user_content)
         return "Это договор.\n\nСуть: подряд."
 
     monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
@@ -1093,14 +1088,8 @@ def test_map_phase_runs_batches_concurrently(monkeypatch, tmp_path):
             # завершается мгновенно и Semaphore не успевает разойтись).
             _time.sleep(0.05)
             user_content = messages[1]["content"]
-            chunk_ids = _re.findall(r"DOCUMENT CHUNK (\d+)", user_content)
-            if chunk_ids:
-                return json.dumps({
-                    "chunks": [
-                        {"chunk_id": cid, "summary": f"s{cid}", "section": "1"}
-                        for cid in chunk_ids
-                    ]
-                })
+            if _re.findall(r"DOCUMENT CHUNK \d+", user_content):
+                return _build_text_response(user_content)
             return "Это договор.\n\nСуть: подряд."
         finally:
             with state["lock"]:
@@ -1147,18 +1136,13 @@ def test_batch_parse_error_exhausts_returns_partial(monkeypatch, tmp_path):
     def fake_chat(messages, *, context=None, **kwargs):
         state["n"] += 1
         user_content = messages[1]["content"]
-        chunk_ids = _re.findall(r"DOCUMENT CHUNK (\d+)", user_content)
-        if chunk_ids:
-            # Первые 3 map-вызова (3 retry первого батча) — невалидный JSON.
-            # С 4-го вызова — валидный (второй и последующие батчи).
+        if _re.findall(r"DOCUMENT CHUNK \d+", user_content):
+            # Первые 3 map-вызова (3 retry первого батча) — невалидный
+            # текст (нет маркеров DOC CHUNK N:). С 4-го вызова — валидный
+            # (второй и последующие батчи).
             if state["n"] <= 3:
-                return "not json at all"
-            return json.dumps({
-                "chunks": [
-                    {"chunk_id": cid, "summary": f"s{cid}", "section": "1"}
-                    for cid in chunk_ids
-                ]
-            })
+                return "Это просто текст без маркеров"
+            return _build_text_response(user_content)
         return "Это договор.\n\nСуть: подряд."
 
     monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
