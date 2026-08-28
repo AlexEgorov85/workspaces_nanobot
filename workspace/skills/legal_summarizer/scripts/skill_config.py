@@ -43,6 +43,17 @@ def get_chunking_config() -> dict[str, Any]:
     return _lib.get_chunking_config(_SKILL_NAME)
 
 
+def get_execution_config() -> dict[str, Any]:
+    """Прямой доступ к ``SETTINGS['skills']['legal_summarizer']['execution']``.
+
+    Обёртка через ``_lib.get_execution_config`` отсутствует в
+    ``lib.core.skill_config``, поэтому читаем напрямую из SETTINGS.
+    """
+    from config import SETTINGS
+    cfg = SETTINGS.get("skills", {}).get(_SKILL_NAME, {}).get("execution", {})
+    return dict(cfg)
+
+
 def get_default_length() -> str:
     return str(get_cli_config().get("default_length", "medium"))
 

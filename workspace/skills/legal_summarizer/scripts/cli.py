@@ -1,18 +1,26 @@
 """Точка входа: CLI с разбором аргументов и запуском суммаризации.
 
-Примеры запуска:
-    # Краткое саммари
-    legal_summarize --file contract.pdf --length brief
+Phase 2B API: ``summarizer.run(text, ...)`` возвращает dict со статусом
+``completed`` / ``confirmation_required`` / ``requires_continuation`` /
+``failed``. CLI делает estimate первым проходом (без LLM-вызовов),
+показывает его пользователю и либо сразу выполняет (если короткая
+операция), либо запрашивает `--confirm` (как в ARCHITECTURE.md
+invariant #16).
 
-    # Среднее (по умолчанию)
-    legal_summarize --file contract.docx
+Примеры запуска::
 
-    # Развёрнутое
-    legal_summarize --file contract.txt --length detailed
+    # Оценка + исполнение короткого документа
+    legal_summarize --file contract.pdf --length medium
+
+    # Длинный документ: estimate + явное подтверждение
+    legal_summarize --file gkodeksrf.pdf --length medium --confirm
+
+    # С фокусом
+    legal_summarize --file contract.pdf --focus "сроки и штрафы"
 
     # С контекстом чата (история для LLM)
     legal_summarize --file contract.pdf --length medium \\
-        --context '[{"role":"user","content":"сфокусируйся на сроках"}]'
+        --context '[{"role":"user","content":"сфокусируйся на рисках"}]'
 """
 
 from __future__ import annotations
@@ -31,7 +39,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="legal_summarizer — суммаризация юридических документов",
+        description="legal_summarizer — суммаризация юридических документов (Phase 2B)",
     )
     parser.add_argument(
         "--file",
@@ -46,39 +54,44 @@ def _build_parser() -> argparse.ArgumentParser:
              "по умолч.), detailed (800–1200). По умолчанию — из project.json.",
     )
     parser.add_argument(
+        "--focus",
+        default=None,
+        help="Тема, на которой фокусироваться при суммаризации (например, "
+             "\"сроки и штрафы\"). Передаётся в LLM как instruction.",
+    )
+    parser.add_argument(
         "--context",
         default=None,
         type=json.loads,
         help='Контекст чата в формате JSON. Например: '
-             '\'[{"role":"user","content":"сфокусируйся на рисках"}\']',
+             '\'[{"role":"user","content":"сфокусируйся на рисках"}]\'',
+    )
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Подтвердить выполнение длинной операции (по умолчанию для "
+             "коротких — авто). Без флага при confirmation_required CLI "
+             "выводит estimate и завершает работу.",
     )
     parser.add_argument(
         "--max-chunks",
-        default=50,
-        type=int,
-        help="Жёсткий лимит чанков для map-reduce. По умолчанию 50 - "
-             "покрывает большинство документов (ГК РФ = ~20 чанков, "
-             "обычные договоры = 1-3 чанка). Если документ больше, "
-             "skill вернёт структурированную ошибку с понятным сообщением. "
-             "Для очень больших (>50 чанков) используйте --batch-size N "
-             "для streaming-обработки.",
-    )
-    parser.add_argument(
-        "--batch-size",
         default=None,
         type=int,
-        help="Размер батча для streaming-режима: обработать за один "
-             "вызов только указанное число чанков, вернуть partial-саммари "
-             "со ссылкой на следующий batch_index. По умолчанию (None) "
-             "- обычный режим без streaming.",
+        help="Override ``max_chunks_for_execution`` из конфига. По "
+             "умолчанию берётся из project.json::skills.legal_summarizer."
+             "execution.max_chunks_for_execution.",
     )
     parser.add_argument(
-        "--batch-index",
-        default=0,
-        type=int,
-        help="С какого батча начать (0 = сначала). Используется вместе "
-             "с --batch-size для resume: каждый следующий запуск skill "
-             "получает partial_summary предыдущего батча в --context.",
+        "--estimate-only",
+        action="store_true",
+        help="Только оценить документ (без LLM-вызовов). Печатает "
+             "Inspection (chunks, batches, sections) + Estimate "
+             "(duration, llm_calls). Полезно для предварительной проверки.",
+    )
+    parser.add_argument(
+        "--operation-id",
+        default=None,
+        help="Передать явный operation_id (иначе — автогенерация из текста).",
     )
     return parser
 
@@ -131,31 +144,72 @@ def main() -> None:
         args = parser.parse_args()
 
         from output import prepare_output
+        from summarizer import (
+            estimate as _estimate,
+            inspect as _inspect,
+            load_text,
+            needs_confirmation,
+            run,
+        )
         from skill_config import get_default_length
-        from summarizer import load_text, summarize, summarize_batch
 
         length = args.length or get_default_length()
         text = load_text(Path(args.file))
 
-        if args.batch_size is not None:
-            result = summarize_batch(
-                text,
-                length=length,
-                context=args.context,
-                batch_size=args.batch_size,
-                batch_index=args.batch_index,
-            )
-            _emit(_sanitize_value(result))
+        if args.estimate_only:
+            insp = _inspect(text, document_path=str(args.file))
+            est = _estimate(insp)
+            _emit({
+                "mode": "estimate_only",
+                "status": "ok",
+                "chars_in": len(text),
+                "chunks_total": len(insp.chunks),
+                "context_batches_total": len(insp.context_batches),
+                "sections_total": len(insp.tree.sections) if insp.tree else 0,
+                "estimated_llm_calls": insp.estimated_llm_calls,
+                "strategy": insp.strategy,
+                "estimated_duration_min_sec": est.estimated_duration_min_sec,
+                "estimated_duration_max_sec": est.estimated_duration_max_sec,
+                "confirmation_threshold_sec": est.confirmation_threshold_sec,
+                "needs_confirmation": needs_confirmation(est),
+            })
             return
 
-        result = summarize(
-            text,
-            length=length,
-            context=args.context,
-            max_chunks=args.max_chunks,
-        )
+        kwargs: dict = {
+            "length": length,
+            "focus": args.focus,
+            "operation_id": args.operation_id,
+            "document_path": str(args.file),
+        }
+
+        if not args.confirm:
+            insp = _inspect(text, document_path=str(args.file))
+            est = _estimate(insp)
+            if needs_confirmation(est):
+                _emit({
+                    "mode": "summarize",
+                    "status": "confirmation_required",
+                    "estimate": {
+                        "chars_in": len(text),
+                        "chunks_total": len(insp.chunks),
+                        "context_batches_total": len(insp.context_batches),
+                        "estimated_llm_calls": insp.estimated_llm_calls,
+                        "estimated_duration_min_sec": est.estimated_duration_min_sec,
+                        "estimated_duration_max_sec": est.estimated_duration_max_sec,
+                        "confirmation_threshold_sec": est.confirmation_threshold_sec,
+                    },
+                    "hint": (
+                        f"Документ требует примерно {est.estimated_duration_min_sec:g}–"
+                        f"{est.estimated_duration_max_sec:g} сек и "
+                        f"{insp.estimated_llm_calls} вызовов LLM. "
+                        "Перезапустите с --confirm для выполнения."
+                    ),
+                })
+                return
+
+        result = run(text, confirmed=args.confirm, **kwargs)
         out = prepare_output(result)
-        _emit(_sanitize_value(out))
+        _emit(out)
     except argparse.ArgumentTypeError as e:
         _emit(_error(str(e)))
         sys.exit(1)
@@ -168,13 +222,6 @@ def main() -> None:
     except Exception as e:
         _emit(_error(f"Внутренняя ошибка: {e}", e))
         sys.exit(1)
-
-
-def _sanitize_value(obj):
-    """Lazy import — избегаем подтягивания pydantic-валидации до старта CLI."""
-    from output import _sanitize_value as _sv  # noqa: WPS433
-
-    return _sv(obj)
 
 
 if __name__ == "__main__":
