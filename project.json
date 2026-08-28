@@ -245,6 +245,23 @@
         "chunk_size": 100000,                        // Fallback если ratio не задан/не применим.
         "chunk_overlap": 2000,                       // Перекрытие соседних чанков (символов).
         "single_call_threshold": 20000               // Ниже этого — single-call, выше — map-reduce.
+      },
+
+      "execution": {                                 // Phase 2B: пользовательский контроль
+                                                   // над долгими операциями + safety net + context batching.
+        "confirmation_threshold_sec": 120,           // Если estimated_duration_max_sec > этого
+                                                   // значения, skill возвращает confirmation_required
+                                                   // и ждёт --confirm. Дефолт: 2 минуты.
+        "estimated_chunk_duration_sec": 20,          // Оценка времени обработки одного ContextBatch
+                                                   // (Phase 2B: считается per-batch, а не per-chunk).
+        "max_chunks_for_execution": 50,              // Safety net: chunks_total > этого значения → requires_continuation.
+        "context_batching": {                        // Phase 2B: параметры TokenBudget.
+          "chars_per_token": 3.5,                    // Оценка токенов для русского текста.
+          "system_prompt_tokens": 1200,              // Резерв под system prompt + format(length_instruction).
+          "instruction_tokens_per_map": 200,         // Резерв под инструкции в user_body.
+          "safety_margin": 0.85,                     // 15% запас поверх budget.
+          "llm_max_tokens": 8192                    // Резерв под output.
+        }
       }
     }
   },
@@ -291,7 +308,7 @@
   //  gateway.* — настройки gateway-сервера (gateway.py)
   // ---------------------------------------------------------------------------
   "gateway": {
-    "storage": "auto",                // Хранилище сессий. Варианты: auto | postgres | file
+    "storage": "file",                // Хранилище сессий. Варианты: auto | postgres | file
     //   auto     — PGSessionManager при наличии dsn, иначе JSONL-файлы
     //   postgres — только PGSessionManager (без dsn — ошибка)
     //   file     — только JSONL-файлы (SessionManager), dsn игнорируется

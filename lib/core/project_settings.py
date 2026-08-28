@@ -389,6 +389,38 @@ class SkillChunkingSettings(_StrictOptional):
     chunk_size_input_ratio: float | None = Field(default=None, gt=0, le=1)
 
 
+class SkillExecutionContextBatchingSettings(_StrictOptional):
+    """Параметры context batching для skill'а (опционально).
+
+    ``chars_per_token`` — оценка токенов для русского текста.
+    ``system_prompt_tokens`` / ``instruction_tokens_per_map`` — резерв
+    под system prompt и user_body.
+    ``safety_margin`` — запас поверх budget (нелинейность оценки).
+    ``llm_max_tokens`` — резерв под output LLM.
+    """
+
+    chars_per_token: float | None = Field(default=None, gt=0)
+    system_prompt_tokens: int | None = Field(default=None, gt=0)
+    instruction_tokens_per_map: int | None = Field(default=None, gt=0)
+    safety_margin: float | None = Field(default=None, gt=0, le=1)
+    llm_max_tokens: int | None = Field(default=None, gt=0)
+
+
+class SkillExecutionSettings(_StrictOptional):
+    """Секция ``execution`` — параметры запуска skill'а (необязательно).
+
+    Управляет подтверждением длинных операций (``confirmation_required``),
+    оценкой длительности (``estimated_chunk_duration_sec``),
+    safety net (``max_chunks_for_execution``) и параметрами
+    context batching (Phase 2B для ``legal_summarizer``).
+    """
+
+    confirmation_threshold_sec: float | None = Field(default=None, gt=0)
+    estimated_chunk_duration_sec: float | None = Field(default=None, gt=0)
+    max_chunks_for_execution: int | None = Field(default=None, gt=0)
+    context_batching: SkillExecutionContextBatchingSettings | None = None
+
+
 class SkillSettings(BaseModel):
     """Универсальная декларация навыка в ``project.json::skills.<name>``.
 
@@ -403,7 +435,10 @@ class SkillSettings(BaseModel):
       * ``vector_indexes`` — какие vector-индексы нужны skill'у
         (min-контракт: имя + источник; runtime определяет бэкенд);
       * ``cli`` — параметры CLI навыка;
-      * ``llm`` — execution policy для навыка (опционально).
+      * ``llm`` — execution policy для навыка (опционально);
+      * ``chunking`` — параметры map-reduce чанкинга;
+      * ``execution`` — параметры запуска (confirmation, safety net,
+        context batching).
 
     Это **только domain binding** skill'а. Shared infrastructure
     (embedding service, DuckDB-кеш, FAISS root, sync) лежит вне
@@ -428,6 +463,7 @@ class SkillSettings(BaseModel):
     cli: SkillCliSettings | None = None
     llm: SkillLlmSettings | None = None
     chunking: SkillChunkingSettings | None = None
+    execution: SkillExecutionSettings | None = None
 
 
 class SkillsSettings(_StrictOptional):
