@@ -110,8 +110,13 @@ def _emit_running_marker(text: str) -> None:
     прогон 7 мин (инцидент 2026-08-28).
 
     Оценки грубые (без структурного парсинга): только по длине текста.
-    ``poll_interval_hint_sec`` — рекомендация для yield_time_ms
-    write_stdin (clamp 60–180 сек).
+    ``poll_interval_hint_sec`` — КАК ЧАСТО опрашивать агенту (через какое
+    время вызывать следующий write_stdin), НЕ параметр exec. Дефолт
+    yield_time_ms остаётся 30000 (30 сек) — агенту НЕ надо передавать
+    poll_interval_hint_sec * 1000 в yield_time_ms; нужно просто
+    выдержать паузу ~poll_interval_hint_sec сек между вызовами
+    write_stdin. Clamp 250–300 сек (требование пользователя). Для прогона
+    7 мин это 2 polls вместо 14 (вслепые 30-сек).
     """
     from summarizer import get_chunking_config, get_execution_config
     chunk_size = int(get_chunking_config().get("chunk_size", 100000))
@@ -129,9 +134,9 @@ def _emit_running_marker(text: str) -> None:
         "poll_interval_hint_sec": poll_interval_hint_sec,
         "hint": (
             f"Обработка займёт примерно {int(estimated_total_sec)} сек. "
-            f"Опрашивайте через write_stdin с yield_time_ms="
-            f"{poll_interval_hint_sec * 1000} не чаще раза в "
-            f"{poll_interval_hint_sec} сек."
+            f"Опрашивайте через write_stdin не чаще раза в "
+            f"{poll_interval_hint_sec} сек (yield_time_ms оставьте "
+            f"дефолтным 30000 — выдерживайте паузу между вызовами)."
         ),
     }
     _emit(marker)
