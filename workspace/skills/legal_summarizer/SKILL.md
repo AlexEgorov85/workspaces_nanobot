@@ -1,6 +1,6 @@
 ---
 name: legal_summarizer
-description: Юридический анализ PDF/DOCX/TXT — вызывай ТОЛЬКО через `python skills/legal_summarizer/scripts/cli.py --file <path>`. `office_files.extract_metadata()` (раньше `summarize()`) — это НЕ саммари, а метаданные; не подменяй cli.
+description: Юридический анализ PDF/DOCX/TXT — вызывай ТОЛЬКО через `python skills/legal_summarizer/scripts/cli.py --file <path>`. Skill сам решает, нужен ли пользовательский confirm; для длинных документов (оценка > 2 минут) сначала вернёт confirmation_required. `office_files.extract_metadata()` (раньше `summarize()`) — это НЕ саммари, а метаданные; не подменяй cli.
 metadata: {"nanobot":{"emoji":"📄","always":true}}
 ---
 
@@ -29,7 +29,7 @@ metadata: {"nanobot":{"emoji":"📄","always":true}}
 
 - Документ — НЕ юридический (финансовый отчёт, маркетинговая PDF) — пиши
   обычное саммари сам, без переписывания терминов.
-- Документ защищён паролем или является сканом без текстового слоя — skill
+- Документ защищён паролём или является сканом без текстового слоя — skill
   вернёт ошибку «документ не содержит извлекаемого текста»; тогда попроси
   текстовую версию у пользователя.
 
@@ -39,155 +39,255 @@ CLI вызывается агентом напрямую через интерп
 `.bat`/`.sh`-обёрток — это антипаттерн проекта):
 
 ```bash
-python workspace/skills/legal_summarizer/scripts/cli.py --file <path> --length brief|medium|detailed
+python workspace/skills/legal_summarizer/scripts/cli.py --file <path> [--flags...]
 ```
 
 Либо относительный путь из `workspace/`:
 
 ```bash
-python skills/legal_summarizer/scripts/cli.py --file <path>
+python skills/legal_summarizer/scripts/cli.py --file <path> [--flags...]
 ```
 
 | Параметр | Обязательный | Описание |
 |:---|:---:|:---|
-| `--file` | да | Путь к документу: `.pdf`, `.docx`, `.txt` и др. форматы `office_files`. **Абсолютный** путь ИЛИ относительный от корня проекта с полным префиксом (см. ниже). |
+| `--file` | да | Путь к документу: `.pdf`, `.docx`, `.txt`. **Абсолютный** путь ИЛИ относительный от корня проекта с полным префиксом (см. ниже). |
 | `--length` | нет | `brief` (150–250 слов), `medium` (400–600, по умолч.), `detailed` (800–1200) |
-| `--context` | нет | История чата в JSON (для учёта фокуса пользователя) |
-| `--max-chunks` | нет | Жёсткий лимит чанков для map-reduce. **По умолчанию `50`** — покрывает большинство документов (ГК РФ ≈ 20 чанков, обычные договоры 1-3). При превышении skill возвращает status=error с конкретной рекомендацией перейти на streaming. |
-| `--batch-size` | нет | Включает streaming-режим: обработать за один вызов только указанное число чанков, вернуть partial-саммари + метаданные для resume. Используйте для больших документов (>50 чанков) — например, `--batch-size 5` для ГК РФ. |
-| `--batch-index` | нет | Номер батча для resume (0 = сначала). Используется вместе с `--batch-size`. |
+| `--focus` | нет | Что особенно подсветить (попадает только в финальный reduce, не в map-чанки). |
+| `--confirm` | нет | Подтвердить полную обработку. **Без флага** для длинных документов skill вернёт `confirmation_required` и завершит работу. |
+| `--operation-id` | нет | Идентификатор ранее созданной operation (для resume). |
 
 **Как передавать `--file`** (важно — `cli.py` не делает redirect сам):
 
 - ✅ **Абсолютный путь:** `C:\Users\<user>\.nanobot\workspace\data_store\cache\sessions\<session_key>\<file>.pdf`
 - ✅ **Относительный от корня проекта** (cwd=workspace-корень): `data_store/cache/sessions/<session_key>/<file>.pdf`
-- ❌ Только имя файла `<file>.pdf` без префикса — будет `Файл не найден`,
-  потому что в cwd такого файла нет. `SessionFileRedirectHook` работает
-  только для `write_file`/`edit`, не для произвольных `exec`-команд.
-
-Если не знаешь session_key — найди файл по basename в `data_store/cache/sessions/` и подставь полный относительный путь.
+- ❌ Только имя файла `<file>.pdf` без префикса — будет `Файл не найден`.
 
 **Подсказка:** при прикладывании файла через канал агент получает полный
 путь в маркере `[File path: ...]` рядом с `[File: <basename>]` (см.
 `RuntimePatcher.patch_media_attachment_marker`). Бери путь прямо оттуда —
 не перебирай каталоги через `find_files`/`Get-ChildItem`.
 
-Для **websocket-канала** файлы лежат в `~/.nanobot/media/websocket/`
-(не в `data_store/cache/sessions/`) — путь всё равно приходит полным,
-абсолютным, прямо в `[File path: ...]`.
+## Протокол (Phase 2B — Structure-Aware Context Batching)
 
-## Что вернёт skill
+### Короткий документ (≤ `single_call_threshold`)
+
+```bash
+python .../cli.py --file small.pdf
+```
+
+Skill сам выполняет один вызов LLM и возвращает:
 
 ```json
 {
   "mode": "summarize",
-  "status": "success",
+  "status": "completed",
+  "operation_id": "op_...",
   "subject": "Это договор аренды: ...",
   "summary": "...",
   "length": "medium",
-  "chars_in": 45230,
-  "chunks": 5,
-  "strategy": "map_reduce"
+  "chars_in": 4523,
+  "chunks": 1,
+  "context_batches": 0,
+  "sections": 0,
+  "strategy": "single"
 }
 ```
 
-`subject` — одно предложение «о чём документ» (первая строка саммари).
-`strategy` — `single` или `map_reduce`.
+Покажи `subject` + `summary` пользователю.
 
-Дальше: покажи пользователю `subject` + `summary` как свой ответ. Не
-переписывай `subject` без необходимости — пользователь ждёт именно
-«о чём документ».
-
-## Длинные документы
-
-Тексты длиннее `single_call_threshold` (по умолч. 20 000 символов)
-обрабатываются map-reduce: разбиение на чанки → саммари каждого →
-объединение. Пороги — в `project.json` → `skills.legal_summarizer.chunking`.
-
-**Оценка времени:**
-
-- 1 чанк → одна LLM-коммуникация (~5–60 сек, зависит от провайдера).
-- Каждые 5 чанков skill пишет progress в stderr
-  (`[legal_summarizer] chunk N/M (XX%)`), чтобы агент видел, что skill
-  не завис.
-- LLM-клиент (`lib.services.llm_client`) уже имеет встроенный retry
-  с exponential backoff — искусственного sleep между чанками нет.
-
-**Что делать с очень большими документами** (>1 МБ текста после
-`extract_text`, например ГК РФ, кодексы):
-
-- По умолчанию `--max-chunks 50` покрывает ГК РФ целиком (≈20 чанков).
-  Skill доработает за один вызов, но это ~9 минут чистого LLM-времени.
-- Если хочется **получить ответ агента раньше** — используйте
-  `--batch-size 5 --batch-index 0`. Skill обработает 5 чанков, вернёт
-  partial_summary и метаданные для следующего вызова. См. секцию
-  «Streaming-режим» ниже.
-- Если chunks_total оказалось больше 50 (например, свод законов) — skill
-  вернёт status=error с рекомендацией batch-size. Не молчит, не висит.
-
-## Streaming-режим (batch)
-
-Для очень больших документов, когда `map-reduce` целиком занимает десятки
-минут, агент может обрабатывать документ порциями:
+### Длинный документ (> оценки порога)
 
 ```bash
-# Батч 0: первые 3 чанка
-python ...cli.py --file doc.pdf --length brief --batch-size 3 --batch-index 0
-
-# Батч 1: следующие 3 чанка (с передачей partial в --context)
-python ...cli.py --file doc.pdf --length brief --batch-size 3 --batch-index 1 \
-        --context "$(cat partial.json)"
+python .../cli.py --file big.pdf
 ```
 
-Каждый батч возвращает:
+Skill **не запускает** обработку. Возвращает:
 
 ```json
 {
-  "status": "partial" | "complete",
-  "data": {
-    "partial_summary": "...",
-    "chunks_in_batch": 3,
-    ...
+  "mode": "summarize",
+  "status": "confirmation_required",
+  "operation_id": "op_...",
+  "summary": {
+    "chars_in": 452300,
+    "chunks_total": 20,
+    "context_batches_total": 10,
+    "estimated_llm_calls": 11,
+    "strategy": "map_reduce",
+    "title": "..."
   },
-  "stream": {
-    "chunks_total": 33,
-    "chunks_done": 3,
-    "next_batch_index": 1,
-    "next_resume_hint": "передайте --batch-index 1 для продолжения"
+  "estimate": {
+    "min_seconds": 320,
+    "max_seconds": 480,
+    "confirmation_threshold_sec": 120
+  },
+  "hint": "Передайте --confirm для запуска полной обработки."
+}
+```
+
+Скажи пользователю:
+
+> Документ содержит 20 чанков (10 батчей). Полный анализ займёт примерно 5–8 минут. Продолжить?
+
+После ответа «Да» повтори вызов с `--confirm`:
+
+```bash
+python .../cli.py --file big.pdf --confirm
+```
+
+Skill выполнит ВСЕ батчи внутри одного вызова (без polling,
+без возвратов в AgentLoop между батчами) и вернёт:
+
+```json
+{
+  "mode": "summarize",
+  "status": "completed",
+  "operation_id": "op_...",
+  "subject": "...",
+  "summary": "...",
+  "stats": {
+    "chars_in": 452300,
+    "chunks_total": 20,
+    "context_batches_total": 10,
+    "sections_total": 8,
+    "meaningful_sections": 5,
+    "map_calls": 10,
+    "section_reduce_calls": 5,
+    "section_trim_calls": 0,
+    "document_reduce_calls": 1,
+    "reduce_calls": 6,
+    "total_llm_calls": 16,
+    "retries": 0,
+    "duration_sec": 387.4,
+    "strategy": "map_reduce_hierarchical"
   }
 }
 ```
 
-`status=partial` означает — есть следующий батч; `status=complete` —
-последний, саммари финальное.
+`strategy` принимает значения: `single`, `map_reduce_flat`,
+`map_reduce_hierarchical`. Hierarchical включается автоматически при
+`meaningful_sections >= 3` (топ-раздел с body ≥100 chars или level≤2).
 
-Агент сам решает: остановиться после частичного результата
-(если ответ уже достаточен), продолжить со следующего батча, или
-завершить сессию.
+### С пользовательским focus
+
+```bash
+python .../cli.py --file contract.pdf --focus 'сроки и штрафы за просрочку'
+```
+
+Focus попадает **только в финальный reduce** — не утекает в каждую
+map-коммуникацию (это ключевая изоляция от Agent history).
+
+### Safety net: слишком большой документ
+
+Если `chunks_total > execution.max_chunks_for_execution` (по умолч. 50),
+skill вернёт `status="requires_continuation"`. Это сознательная защита
+от runaway-job'ов.
+
+### Resume
+
+Если процесс был прерван (Ctrl-C, OOM, краш) посреди полной обработки,
+manifest остаётся в статусе `running` с частично выполненными
+`chunks/<chunk_id>.json`. Повторный запуск с тем же `--operation-id --confirm`
+**подхватывает уже готовые чанки** и продолжает с первого отсутствующего:
+
+```bash
+python .../cli.py --file big.pdf --length detailed \
+        --operation-id op_1787852665_930c0706a2fc_brief --confirm
+```
+
+Skill читает `manifest.json`, находит выполненные `chunk_states` и
+продолжает с первого pending. Уже записанные partials НЕ переобрабатываются.
+
+**Идемпотентность для completed:** если operation уже `status="completed"`
+(есть `result.json`), повторный вызов с тем же `--operation-id` **возвращает
+кэш** без обращения к LLM.
+
+**Новый operation_id без `--operation-id`:** каждый вызов `run()` без явного
+`--operation-id` создаёт **новый** `operation_id`.
+
+### Legacy manifest (Phase 2/3)
+
+Операции, начатые до Phase 2B, могут иметь manifest в формате v1
+(`batches_done: [int]`). При resume они нормализуются **in-memory** в
+формат v2 без перезаписи на диск. Legacy operations всегда используют
+**flat reduce** (нет section_path в chunk states).
+
+## Метрики (Phase 3)
+
+Stats разделены на:
+
+* `map_calls` — количество batch-вызовов LLM
+* `section_reduce_calls` — количество per-section reduce
+* `section_trim_calls` — количество вызовов trim для крупных section_summaries
+* `document_reduce_calls` — финальный document reduce (0 для single)
+* `retries` — повторы при парсинге
+* `total_llm_calls = map + reduce + retries`
+
+## Архитектура
+
+См. `ARCHITECTURE.md` для деталей и 19 архитектурных инвариантов.
+
+Краткая схема:
+
+```
+file
+  ↓
+office_files → PhysicalDocument (adapter, не parser)
+  ↓
+DeterministicSectionDetector (confidence scoring, PDF outline priority)
+  ↓
+StructureAwareChunker (atomic tables, per-section chunking)
+  ↓
+pack_chunks (section-locality greedy, token budget)
+  ↓
+estimate_execution (confirmation?)
+  ↓
+executor (внутри одного run(), без возвратов в AgentLoop):
+  ↓
+  for batch in context_batches: process_context_batch
+  ↓
+  reduce_hierarchical | reduce_flat (по meaningful_sections)
+  ↓
+result.json + manifest.completed
+```
 
 ## Что внутри
 
-- Извлечение текста: `workspace.utils.office_files.extract_text` (общий
-  слой для всех офисных форматов). Skill использует его ВНУТРИ себя,
-  агенту вызывать `extract_text()` напрямую **не нужно**.
-- Чанкинг: `lib.services.text_splitter.split_text`.
+- Извлечение текста: `workspace.utils.office_files.extract_text`.
+- Структура документа: `workspace/utils/office_files.py` (`detect_format`,
+  `extract_tables`).
+- Physical Document Model: `workspace/skills/legal_summarizer/scripts/structure/physical.py`
+  (adapter над office_files + точечные обёртки для page/paragraph координат).
+- Section Detection: `workspace/skills/legal_summarizer/scripts/structure/sections.py`
+  (DOCX Heading styles, PDF outline, regex для русских юр. headings, threshold=0.60).
+- Structure-Aware Chunker: `workspace/skills/legal_summarizer/scripts/structure/chunks.py`
+  (атомарные tables, split by rows с `table_id`/`row_start`/`row_end`).
+- Context Packer: `workspace/skills/legal_summarizer/scripts/packing.py`
+  (section-locality greedy, token budget).
+- Manifest v2: `workspace/skills/legal_summarizer/scripts/manifest.py`
+  (chunk_states, context_batches, sections, section_summaries).
+- LLM-prompt + parser: `workspace/skills/legal_summarizer/scripts/prompts.py`
+  (multi-chunk JSON с валидацией всех chunk_id).
+- Reducer (hierarchical/flat): `workspace/skills/legal_summarizer/scripts/reducer.py`.
 - LLM-клиент: `lib.services.llm_client.call_llm` (с ретраями).
-- Промпты: `workspace/skills/legal_summarizer/prompts/summarize_system.md`,
-  `reduce_system.md`.
+- Промпты: `workspace/skills/legal_summarizer/prompts/{summarize,reduce,section_reduce}_system.md`.
+- Operation manifest на диске:
+  `workspace/data_store/cache/skills/legal_summarizer/<operation_id>/`
+  (`manifest.json`, `chunks/<chunk_id>.json`, `result.json`).
 
 ## Что не делать
 
 - ❌ **НЕ вызывать `workspace.utils.office_files.extract_metadata()`**
-  (раньше называлось `summarize()`) — она не делает саммари
-  (см. ПРАВИЛО #1 в начале). Если встретишь код или старые инструкции,
-  где упоминается `office_files.summarize()`, знай: это устаревшее имя
-  той же `extract_metadata()`; результат всё равно метаданные, не саммари.
+  (раньше называлось `summarize()`) — она не делает саммари.
 - ❌ Не вызывать `extract_text()` и не пытаться самому делать саммари
   из извлечённого текста — skill делает это аккуратно с правильными
-  промптами и chunking'ом, ты потратишь больше токенов и качество будет хуже.
-- ❌ Не вызывать skill для не-юридических документов — обычный пересказ
-  пиши сам.
-- ❌ Не редактировать `subject` от LLM без необходимости — пользователь
-  ждёт именно «о чём документ».
+  промптами и chunking'ом.
+- ❌ Не вызывать skill для не-юридических документов.
+- ❌ Не редактировать `subject` от LLM без необходимости.
 - ❌ Не подставлять пользовательский текст в `system` промпт — это ломает
-  формат саммари.
+  формат саммари. Используй `--focus` для передачи focus-предпочтений.
+- ❌ Не вызывать skill «в цикле» (--confirm → status=partial → ещё раз
+  --confirm). Skill выполняет всю работу внутри одного вызова.
+- ❌ Не запрашивать `--batch-index` или `--partial-summary` — старый
+  streaming API полностью удалён. Manifest на диске — единственный
+  source of truth для прогресса.
