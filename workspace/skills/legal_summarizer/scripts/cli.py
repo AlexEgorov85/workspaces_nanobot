@@ -118,7 +118,10 @@ def _emit_running_marker(text: str) -> None:
     chunk_dur = float(get_execution_config().get("estimated_chunk_duration_sec", 20))
     rough_chunks = max(1, -(-len(text) // max(1, chunk_size)))
     estimated_total_sec = max(1.0, rough_chunks * chunk_dur)
-    poll_interval_hint_sec = max(60, min(180, int(estimated_total_sec / 5)))
+    # Интервал polling жёстко задан: 250-300 сек (требование пользователя).
+    # Прикидка: estimated_total_sec/6, кламп в [250, 300]. Для прогона 7 мин
+    # это 2 polls вместо 14 (раньше агенты опрашивали каждые 30 сек).
+    poll_interval_hint_sec = max(250, min(300, int(estimated_total_sec / 6)))
     marker = {
         "mode": "summarize",
         "status": "running",

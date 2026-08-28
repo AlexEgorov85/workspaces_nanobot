@@ -921,7 +921,7 @@ def test_running_marker_emitted_before_long_run(monkeypatch, tmp_path, capsys):
         assert marker["status"] == "running"
         assert marker["mode"] == "summarize"
         assert marker["estimated_total_sec"] > 0
-        assert 60 <= marker["poll_interval_hint_sec"] <= 180
+        assert 250 <= marker["poll_interval_hint_sec"] <= 300
         assert "write_stdin" in marker["hint"]
         return real_run(t, **kwargs)
 
