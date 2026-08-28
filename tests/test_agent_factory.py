@@ -58,7 +58,11 @@ class TestAgentFactory:
         kwargs = fake_modules["from_config"].call_args.kwargs
         assert "session_manager" in kwargs
         assert "hooks" in kwargs
-        assert len(kwargs["hooks"]) == 1
+        # Без плагинов: ToolAuditHook + TerminalToolPrintHook.
+        assert len(kwargs["hooks"]) == 2
+        names = [type(h).__name__ for h in kwargs["hooks"]]
+        assert "ToolAuditHook" in names
+        assert "TerminalToolPrintHook" in names
 
     def test_passes_session_manager(self, fake_modules):
         from lib.core.agent_factory import AgentFactory
@@ -81,9 +85,12 @@ class TestAgentFactory:
             project_hooks=project_hooks,
         )
         # Плагины идут ПЕРЕД ToolAuditHook (правки params видны в аудите).
-        assert len(hooks) == 2
+        # С TerminalToolPrintHook итоговый порядок:
+        #   [PluginA, ToolAuditHook, TerminalToolPrintHook]
+        assert len(hooks) == 3
         assert hooks[0] is plugin_a
         assert type(hooks[1]).__name__ == "ToolAuditHook"
+        assert type(hooks[2]).__name__ == "TerminalToolPrintHook"
         kwargs = fake_modules["from_config"].call_args.kwargs
         assert kwargs["hooks"] == hooks
 
@@ -104,11 +111,12 @@ class TestAgentFactory:
         from lib.core.agent_factory import AgentFactory
 
         factory = AgentFactory()
-        # Без db_logging_service — один hook (ToolAuditHook), без фабрик.
+        # Без db_logging_service — ToolAuditHook + TerminalToolPrintHook,
+        # без фабрик оборота.
         _, hooks, hook_factories = factory.create(
             config=MagicMock(), bus=MagicMock(),
         )
-        assert len(hooks) == 1
+        assert len(hooks) == 2
         assert hook_factories == []
         kwargs = fake_modules["from_config"].call_args.kwargs
         assert kwargs["hook_factories"] == []
@@ -120,7 +128,7 @@ class TestAgentFactory:
             db_logging_service=MagicMock(),
         )
         kwargs = fake_modules["from_config"].call_args.kwargs
-        assert len(kwargs["hooks"]) == 1
+        assert len(kwargs["hooks"]) == 2
         assert len(kwargs["hook_factories"]) == 1
 
     def test_db_logging_factory_creates_per_turn_hook(self, fake_modules):
@@ -140,8 +148,8 @@ class TestAgentFactory:
             config=MagicMock(), bus=MagicMock(),
             db_logging_service=service, agent_id="agent-7",
         )
-        # hooks содержит только ToolAuditHook
-        assert len(hooks) == 1
+        # hooks содержит ToolAuditHook + TerminalToolPrintHook
+        assert len(hooks) == 2
         assert len(hook_factories) == 1
 
         kwargs = fake_modules["from_config"].call_args.kwargs

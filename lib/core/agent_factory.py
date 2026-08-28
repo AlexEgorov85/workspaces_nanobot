@@ -7,6 +7,13 @@
     в ``OutboundMessage.metadata["_tool_audit"]`` (см. ``RuntimePatcher.
     patch_assemble_outbound``). Каналы и CLI рендерят их в UI.
 
+  * ``TerminalToolPrintHook`` (если модуль импортируется) — живой
+    терминальный вывод результатов ``tool_call`` (успех/ошибка +
+    длительность). Регистрируется как обычный инстанс, потому что
+    не хранит состояние, критичное к изоляции между сессиями
+    (метрики по session_key используются только как bucket для
+    ``_starts``). Отключается через ``gateway.print_tools=false``.
+
   * ``DatabaseLoggingHook`` (если передан ``db_logging_service``) —
     НЕ регистрируется как общий инстанс. Вместо этого в ``hook_factories``
     передаётся ``make_db_logging_hook_factory``: фреймворк создаёт СВЕЖИЙ
@@ -111,6 +118,17 @@ class AgentFactory:
         tool_audit_hook = self._import_tool_audit_hook()()
         hooks.append(tool_audit_hook)
 
+        # TerminalToolPrintHook — опционален: живой вывод результатов
+        # tool-вызовов в терминал (отдельный канал ``tools`` в loguru).
+        # Подключается ПОСЛЕ ToolAuditHook, потому что использует
+        # те же ``tool_events``/``tool_results``/``tool_calls``,
+        # которые ToolAuditHook заполняет в ``before_execute_tools`` /
+        # ``after_iteration``. Импорт через try/except — модуль
+        # может отсутствовать в форке nanobot.
+        terminal_print_hook = self._import_terminal_tool_print_hook()
+        if terminal_print_hook is not None:
+            hooks.append(terminal_print_hook())
+
         # Плагины workspace/hooks/ идут ПЕРЕД ToolAuditHook, чтобы их
         # правки ``params["path"]`` уже были видны в аудите.
         if project_hooks:
@@ -152,6 +170,25 @@ class AgentFactory:
         from lib.hooks.tool_audit_hook import ToolAuditHook
 
         return ToolAuditHook
+
+    @staticmethod
+    def _import_terminal_tool_print_hook():
+        """Ленивый импорт ``TerminalToolPrintHook`` из ``lib/hooks/``.
+
+        Возвращает класс хука или ``None``, если модуль отсутствует
+        или не импортируется (например, в минимальном окружении
+        тестов, где ``loguru.bind`` ещё не настроен, или если хук
+        не зарегистрирован в ``lib/hooks/``).
+
+        В отличие от ``_import_tool_audit_hook``, этот хук **опционален** —
+        если он не подключён, терминал просто не печатает tool-результаты,
+        но всё остальное работает.
+        """
+        try:
+            from lib.hooks.terminal_tool_print_hook import TerminalToolPrintHook
+        except Exception:
+            return None
+        return TerminalToolPrintHook
 
     @staticmethod
     def _build_database_logging_factory(
