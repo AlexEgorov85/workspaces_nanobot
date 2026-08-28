@@ -84,6 +84,7 @@ from workspace.skills.legal_summarizer.scripts.structure.sections import (
     SectionTree,
     count_meaningful_sections,
     detect_sections,
+    extract_local_structure_label,
     merge_short_sections,
 )
 from workspace.utils.office_files import extract_text
@@ -97,6 +98,28 @@ _PROMPT_FILES = {
     "reduce_system": _PROMPTS_DIR / "reduce_system.md",
     "section_reduce_system": _PROMPTS_DIR / "section_reduce_system.md",
 }
+
+
+def _chunk_structure_label(chunk: "Chunk") -> str:
+    """Структурная метка чанка: global heading, иначе локальная из текста.
+
+    Когда detect_sections не нашёл разделов (например, заголовки
+    «утоплены» внутри постраничных блоков PDF), чанк несёт пустой
+    section_heading. Тогда извлекаем метку (Раздел/Глава/Часть/Статья)
+    прямо из текста чанка, чтобы подписать его при сборке общего ответа.
+    """
+    heading = getattr(chunk, "section_heading", "") or ""
+    if heading:
+        return heading
+    return extract_local_structure_label(getattr(chunk, "text", "") or "")
+
+
+def _format_chunk_block(chunk: "Chunk", summary: str) -> str:
+    """Подписать блок чанка его структурной меткой при сборке ответа."""
+    label = _chunk_structure_label(chunk)
+    if label:
+        return f"[Chunk {chunk.chunk_id} | {label}]\n{summary}"
+    return f"[Chunk {chunk.chunk_id}]\n{summary}"
 
 
 # Сколько раз перезапускать LLM-вызов батча при ChunkResultParseError
@@ -695,6 +718,8 @@ def _extract_subject(summary: str) -> str:
         if ln:
             subject = ln
             break
+    # Убираем markdown-заголовок, если модель вернула "# Тема" как первую строку.
+    subject = re.sub(r"^#{1,6}\s+", "", subject).strip()
     if len(subject) > 400:
         m = re.match(r"(.+?[.!?])\s", subject)
         if m:
@@ -1167,7 +1192,8 @@ def run(
             if not section_chunk_ids:
                 continue
             joined = "\n\n".join(
-                f"[Chunk {cid}]\n{all_partials[cid]}" for cid in section_chunk_ids
+                _format_chunk_block(c, all_partials[c.chunk_id])
+                for c in chunks if c.chunk_id in section_chunk_ids
             )
             try:
                 section_summary = _llm_section_reduce(
@@ -1215,7 +1241,7 @@ def run(
     else:
         ordered_chunks = [c for c in chunks if c.chunk_id in all_partials]
         joined = "\n\n".join(
-            f"[Chunk {c.chunk_id}]\n{all_partials[c.chunk_id]}" for c in ordered_chunks
+            _format_chunk_block(c, all_partials[c.chunk_id]) for c in ordered_chunks
         )
         try:
             final_summary = _llm_document_reduce(

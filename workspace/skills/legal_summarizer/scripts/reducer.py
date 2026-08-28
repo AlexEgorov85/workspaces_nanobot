@@ -24,6 +24,7 @@ from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
 from workspace.skills.legal_summarizer.scripts.structure.sections import (
     SectionTree,
     count_meaningful_sections,
+    extract_local_structure_label,
 )
 
 
@@ -125,11 +126,21 @@ def _build_fake_blocks(chars_by_ord: dict[int, int]) -> tuple:
     )
 
 
-def _section_text(items: list[tuple[str, str]]) -> str:
-    """Склеить (chunk_id, summary) пары в читаемый текст для LLM."""
+def _section_text(items: list[tuple[str, str]], labels: dict[str, str] | None = None) -> str:
+    """Склеить (chunk_id, summary) пары в читаемый текст для LLM.
+
+    Если для chunk_id задана структурная метка (``labels``), она
+    добавляется в подпись блока: ``[Chunk 012 | Раздел III. Наследственное
+    право]`` — чтобы модель сохранила принадлежность фактов к разделам при
+    объединении в общий ответ.
+    """
     parts: list[str] = []
     for cid, summary in items:
-        parts.append(f"[Chunk {cid}]\n{summary}")
+        label = (labels or {}).get(cid)
+        if label:
+            parts.append(f"[Chunk {cid} | {label}]\n{summary}")
+        else:
+            parts.append(f"[Chunk {cid}]\n{summary}")
     return "\n\n".join(parts)
 
 
@@ -236,7 +247,12 @@ def _reduce_flat(
             strategy="flat_empty",
         )
 
-    joined = _section_text(items)
+    labels = {
+        c.chunk_id: (c.section_heading or extract_local_structure_label(c.text))
+        for c in chunks
+        if c.chunk_id in chunk_summaries
+    }
+    joined = _section_text(items, labels)
 
     if llm_runner is None:
         joined_summary = joined
@@ -284,7 +300,11 @@ def _reduce_hierarchical(
 
     for sid, section, chunk_ids in sections_in_order:
         items = [(cid, chunk_summaries[cid]) for cid in chunk_ids]
-        joined = _section_text(items)
+        labels = {
+            cid: (section.heading or extract_local_structure_label(chunk_by_id[cid].text))
+            for cid in chunk_ids
+        }
+        joined = _section_text(items, labels)
         if llm_runner is None:
             section_summary = joined
         else:

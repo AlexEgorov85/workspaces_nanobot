@@ -86,11 +86,11 @@ def test_prompt_contains_total_chunks():
 
 
 def test_prompt_contains_doc_chunk_marker_format_instruction():
-    """Промпт просит модель писать ``DOC CHUNK N: ...`` (не JSON)."""
+    """Промпт просит модель писать ``DOCUMENT CHUNK N: ...`` (не JSON)."""
     chunks = [_chunk("000", "A")]
     batches = pack_chunks(chunks, _budget())
     msg = build_batch_user_message(batches[0], chunks_total=1)
-    assert "DOC CHUNK 1:" in msg
+    assert "DOCUMENT CHUNK 1:" in msg
     assert "Никакого JSON" in msg
 
 
@@ -177,9 +177,23 @@ def test_parse_strips_whitespace():
     assert result["000"] == "саммари с пробелами"
 
 
-def test_parse_duplicate_number_raises():
+def test_parse_duplicate_number_uses_first_when_all_present():
+    """Дубликат маркера без пропусков не фатален — берётся первое вхождение.
+
+    Особенно важно для одночанковых батчей, где модель может повторить
+    маркер «DOC CHUNK 1» внутри тела или при перечислении.
+    """
     chunks = [_chunk("000", "A"), _chunk("001", "B")]
     batches = pack_chunks(chunks, _budget())
     llm_text = "DOC CHUNK 1: first\n\nDOC CHUNK 1: duplicate\n\nDOC CHUNK 2: B\n"
-    with pytest.raises(ChunkResultParseError):
+    result = parse_batch_response(batches[0], llm_text)
+    assert result == {"000": "first", "001": "B"}
+
+
+def test_parse_duplicate_with_missing_raises():
+    """Дубликат + реально пропущенный номер — всё ещё ChunkResultParseError."""
+    chunks = [_chunk("000", "A"), _chunk("001", "B"), _chunk("002", "C")]
+    batches = pack_chunks(chunks, _budget())
+    llm_text = "DOC CHUNK 1: a\n\nDOC CHUNK 1: dup\n\nDOC CHUNK 3: c"
+    with pytest.raises(ChunkResultParseError, match="missing"):
         parse_batch_response(batches[0], llm_text)

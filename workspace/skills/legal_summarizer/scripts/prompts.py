@@ -2,7 +2,7 @@
 
 Каждый ContextBatch (multi-chunk) → один LLM call.
 
-Output: свободный текст с маркерами ``DOC CHUNK N: <саммари>`` — никакого
+Output: свободный текст с маркерами ``DOCUMENT CHUNK N: <саммари>`` — никакого
 JSON. LLM не тратит токены на обвязку/идентификаторы (chunk_id, section) —
 они и так известны на нашей стороне. Парсер regex'ом вытаскивает блоки
 по порядку и сопоставляет с chunk_id батча по позиции (чанк #N → chunk_id
@@ -34,9 +34,9 @@ _BATCH_USER_TEMPLATE = """Документ для анализа.
 Для КАЖДОГО чанка выше напиши краткое саммари (2–4 предложения). Формат
 ответа — строго по одному блоку на чанк, В ТОМ ЖЕ ПОРЯДКЕ, что и чанки выше:
 
-DOC CHUNK 1: <саммари чанка 1>
+DOCUMENT CHUNK 1: <саммари чанка 1>
 
-DOC CHUNK 2: <саммари чанка 2>
+DOCUMENT CHUNK 2: <саммари чанка 2>
 
 ...
 
@@ -59,18 +59,19 @@ _CHUNK_BLOCK_TEMPLATE = """DOCUMENT CHUNK {n}
 """
 
 
-# Маркер для LLM: "DOC CHUNK N: ...". N — порядковый номер чанка в батче (1..K).
-# Парсер регексом достаёт все вхождения и маппит на chunk_id по позиции.
-# Lookahead ``^DOC CHUNK`` (с MULTILINE) ловит только маркер в начале
+# Маркер для LLM: "DOCUMENT CHUNK N: ..." (допускается и краткое "DOC CHUNK").
+# N — порядковый номер чанка в батче (1..K). Парсер регексом достаёт все
+# вхождения и маппит на chunk_id по позиции. Lookahead ``^DOC(?:UMENT)? CHUNK``
+# (с MULTILINE) ловит только маркер в начале
 # строки — болтовня между блоками (через пустые строки) не попадает в body.
 _CHUNK_MARKER_RE = re.compile(
-    r"(?m)^\s*DOC CHUNK\s+(\d+)\s*:\s*(.*?)(?=\n\n|^\s*DOC CHUNK\s+\d+\s*:|\Z)",
+    r"(?m)^\s*DOC(?:UMENT)? CHUNK\s+(\d+)\s*:\s*(.*?)(?=\n\n|^\s*DOC(?:UMENT)? CHUNK\s+\d+\s*:|\Z)",
     re.DOTALL,
 )
 
 
 class ChunkResultParseError(Exception):
-    """Ответ LLM не содержит маркеров DOC CHUNK N для всех чанков батча.
+    """Ответ LLM не содержит маркеров DOCUMENT CHUNK N для всех чанков батча.
 
     Оставлено для обратной совместимости (retry-логика в map-фазе).
     На текстовом формате практически недостижим — модель печатает блоки
@@ -135,8 +136,8 @@ def parse_batch_response(
 
     LLM пишет блоки вида::
 
-        DOC CHUNK 1: <саммари>
-        DOC CHUNK 2: <саммари>
+        DOCUMENT CHUNK 1: <саммари>
+        DOCUMENT CHUNK 2: <саммари>
         ...
 
     Парсер regex'ом достаёт пары (n, summary), где n — порядковый номер
@@ -158,7 +159,11 @@ def parse_batch_response(
     raw = llm_text or ""
 
     # Достаём пары (n, text). Регекс ловит: до следующего маркера или до конца.
-    found: dict[int, str] = {}
+    # Берём ПЕРВОЕ непустое вхождение каждого номера; дубликаты маркеров
+    # (без пропусков) не фатальны — модель может повторить маркер внутри
+    # тела или при перечислении, особенно в одночанковых батчах. Важно
+    # наличие саммари всех ожидаемых чанков, а не уникальность маркеров.
+    found_first: dict[int, str] = {}
     duplicates: list[int] = []
     for m in _CHUNK_MARKER_RE.finditer(raw):
         n_str, body = m.group(1), m.group(2).strip()
@@ -168,23 +173,35 @@ def parse_batch_response(
             n = int(n_str)
         except ValueError:
             continue
-        if n in found:
-            # Дубликат номера — raise (модель перепутала нумерацию).
+        if n in found_first:
             if n not in duplicates:
                 duplicates.append(n)
             continue
-        found[n] = body
+        found_first[n] = body
 
-    missing = [n for n in range(1, expected_count + 1) if n not in found]
-    if missing or duplicates:
+    missing = [n for n in range(1, expected_count + 1) if n not in found_first]
+    if missing:
         raise ChunkResultParseError(
-            f"Номера чанков в ответе LLM неполные/дубликаты: "
+            f"Номера чанков в ответе LLM неполные: "
             f"missing={missing}, duplicates={duplicates}, "
-            f"got_nums={sorted(found.keys())}, expected=1..{expected_count}"
+            f"got_nums={sorted(found_first.keys())}, expected=1..{expected_count}"
         )
 
+    if duplicates:
+        try:
+            from loguru import logger
+
+            logger.warning(
+                "parse_batch_response: дубликаты маркеров %s для batch %s — "
+                "взято первое вхождение каждого номера",
+                duplicates,
+                batch.batch_id,
+            )
+        except Exception:
+            pass
+
     # Сопоставляем позицию N → batch.chunks[N-1].chunk_id.
-    return {batch.chunks[n - 1].chunk_id: found[n] for n in range(1, expected_count + 1)}
+    return {batch.chunks[n - 1].chunk_id: found_first[n] for n in range(1, expected_count + 1)}
 
 
 __all__ = [

@@ -47,6 +47,34 @@ _ANY_HEADING_RE = re.compile(
     r"^\s*(?:\d+\.(?:\d+\.?)?(?:\d+\.?)?|Статья\s+\d+|Глава\s+\d+|Раздел\s+\d+|§\s*\d+)\s*[.:]?\s*\S"
 )
 
+# Локальная структурная метка внутри текста чанка (работает построчно, в
+# отличие от detect_sections, который требует standalone-блок). Находит
+# "Раздел I", "Глава 1", "Статья 12", "Подраздел 3", "Часть 4", "§ 5"
+# даже когда детектор разделов не смог выделить заголовки как отдельные
+# блоки (постраничная нарезка PDF с колонками).
+_LOCAL_HEADING_RE = re.compile(
+    r"^\s*(?:Раздел|Подраздел|Глава|Статья|Часть|§)\b[^\n]{0,120}",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def extract_local_structure_label(text: str) -> str:
+    """Извлечь первую структурную метку из текста чанка.
+
+    Возвращает первую строку, начинающуюся с юр. заголовка
+    (Раздел/Подраздел/Глава/Статья/Часть/§), обрезанную до 120 символов.
+    Если не найдено — пустая строка.
+
+    Используется как fallback для подписи чанка при формировании общего
+    ответа, когда глобальный detect_sections не нашёл разделов.
+    """
+    if not text:
+        return ""
+    m = _LOCAL_HEADING_RE.search(text)
+    if not m:
+        return ""
+    return m.group(0).strip()[:120]
+
 
 @dataclass(frozen=True)
 class HeadingCandidate:
@@ -616,6 +644,7 @@ __all__ = [
     "detect_sections",
     "merge_short_sections",
     "count_meaningful_sections",
+    "extract_local_structure_label",
     "ROOT_SECTION_ID",
     "CONFIDENCE_THRESHOLD",
 ]

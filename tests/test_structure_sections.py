@@ -34,6 +34,7 @@ from workspace.skills.legal_summarizer.scripts.structure.sections import (  # no
     SectionTree,
     count_meaningful_sections,
     detect_sections,
+    extract_local_structure_label,
     merge_short_sections,
 )
 
@@ -253,6 +254,28 @@ def test_meaningful_sections_includes_top_level_even_short():
     tree = detect_sections(doc)
     meaningful = count_meaningful_sections(tree, doc.blocks)
     assert meaningful >= 2
+
+
+def test_extract_local_structure_label_finds_embedded_heading():
+    """Локальная метка находится внутри текста чанка (без global sections)."""
+    text = (
+        "Какой-то вводный абзац про договор.\n"
+        "Раздел I. Общие положения\n"
+        "1. Гражданское законодательство состоит из настоящего Кодекса.\n"
+        "Статья 1. Отношения, регулируемые гражданским законодательством."
+    )
+    assert extract_local_structure_label(text) == "Раздел I. Общие положения"
+
+
+def test_extract_local_structure_label_handles_glava_chastya_statya():
+    assert extract_local_structure_label("Глава 62. Общие положения о наследовании").startswith("Глава 62")
+    assert extract_local_structure_label("ЧАСТЬ ЧЕТВЁРТАЯ").startswith("ЧАСТЬ")
+    assert extract_local_structure_label("Статья 12. Правоспособность граждан").startswith("Статья 12")
+
+
+def test_extract_local_structure_label_empty_when_no_heading():
+    assert extract_local_structure_label("") == ""
+    assert extract_local_structure_label("Обычный текст без заголовков и структуры документа.") == ""
 
 
 def test_section_path_format():

@@ -161,19 +161,21 @@ python .../cli.py --file big.pdf --confirm
 {
   "mode": "summarize",
   "status": "running",
-  "estimated_total_sec": 420,
-  "poll_interval_hint_sec": 275,
-  "hint": "Обработка займёт примерно 420 сек. Опрашивайте через write_stdin не чаще раза в 275 сек (yield_time_ms оставьте дефолтным 30000 — выдерживайте паузу между вызовами)."
+  "estimated_total_sec": 440,
+  "poll_interval_hint_sec": 75,
+  "hint": "Обработка займёт примерно 440 сек. Опрашивайте через write_stdin с wait_for=\"batch cb_\" и wait_timeout_ms=75000 (лимит nanobot 120000) не чаще раза в 75 сек. yield_time_ms оставьте дефолтным 30000."
 }
 ```
 
 **Обязательно:** когда `exec`/`write_stdin` возвращает этот маркер —
 
-1. Возьми `poll_interval_hint_sec` (жёстко 250–300 сек; требование пользователя, чтобы сократить число бессмысленных LLM-вызовов polling).
-2. **Не передавай** его в `yield_time_ms`. Параметр `yield_time_ms` оставь дефолтным `30000` (30 сек) — это максимум ожидания внутри одного вызова write_stdin. `poll_interval_hint_sec` — это **пауза МЕЖДУ** вызовами write_stdin, а не их внутренний таймаут.
-3. Выдержи паузу ≈`poll_interval_hint_sec` сек перед следующим вызовом `write_stdin`. Для прогона 7 мин с interval=275 это 2 вызова write_stdin вместо 14 (раньше агенты вслепую опрашивали каждые 30 сек).
-4. При каждом `write_stdin` в stdout приходят строки `[legal_summarizer] batch cb_NNN: 1/1 chunks (X% remaining)` — это значит скилл **реально молотит батчи**, не висит. Просто жди следующего интервала.
+1. Возьми `poll_interval_hint_sec` (жёстко 60–90 сек; clamp обусловлен лимитом `wait_timeout_ms ≤ 120000` в nanobot — больше 90 агенты не могут ждать одним write_stdin и вынуждены опрашивать чаще = больше LLM-вызовов).
+2. Передавай его как `wait_timeout_ms = poll_interval_hint_sec * 1000` в `write_stdin` (НЕ как `yield_time_ms`). Параметр `yield_time_ms` остаётся дефолтным `30000` — это максимум ожидания stdout внутри одного вызова.
+3. Передавай `wait_for="batch cb_"` (или `"DOC CHUNK"` / `"text omitted"` — любой progress-маркер из stdout) — `write_stdin` вернётся **раньше** `wait_timeout_ms`, как только подстрока появится. Это даёт агенту видимый прогресс без лишних polls.
+4. При каждом `write_stdin` в stdout приходят строки `[legal_summarizer] batch cb_NNN: 1/1 chunks queued ...` — это значит скилл реально молотит, не висит. Просто жди следующего интервала.
 5. Финальный результат (`status: "completed"` или `"partial"`) приходит последней строкой stdout, когда процесс завершится.
+
+Почему не больше 90 сек: инцидент 2026-08-28 — агент пытался `wait_timeout_ms=240000`, получил `Invalid parameters: wait_timeout_ms must be <= 120000`, и опрашивал по дефолту каждые 30 сек → 14 LLM-вызовов за 7 мин. С clamp 60-90 и `wait_for` агент укладывается в лимит и видит прогресс.
 
 Skill выполнит ВСЕ батчи внутри одного вызова (без polling между
 батчами внутри run()) и в конце вернёт:

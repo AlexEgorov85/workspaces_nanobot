@@ -110,23 +110,31 @@ def _emit_running_marker(text: str) -> None:
     прогон 7 мин (инцидент 2026-08-28).
 
     Оценки грубые (без структурного парсинга): только по длине текста.
-    ``poll_interval_hint_sec`` — КАК ЧАСТО опрашивать агенту (через какое
-    время вызывать следующий write_stdin), НЕ параметр exec. Дефолт
-    yield_time_ms остаётся 30000 (30 сек) — агенту НЕ надо передавать
-    poll_interval_hint_sec * 1000 в yield_time_ms; нужно просто
-    выдержать паузу ~poll_interval_hint_sec сек между вызовами
-    write_stdin. Clamp 250–300 сек (требование пользователя). Для прогона
-    7 мин это 2 polls вместо 14 (вслепые 30-сек).
+    ``poll_interval_hint_sec`` — КАК ЧАСТО опрашивать агенту. Агент должен
+    передавать это значение как ``wait_timeout_ms`` в ``write_stdin``
+    (НЕ ``yield_time_ms``, который остаётся дефолтным 30000). Также
+    передавать ``wait_for="batch cb_"`` — write_stdin вернётся раньше,
+    как только в stdout появится следующий progress-маркер (вслепые
+    30-сек уходят).
+
+    Clamp 60–90 сек обусловлен ЛИМИТОМ nanobot ``wait_timeout_ms ≤ 120000``
+    (инцидент 2026-08-28: агенты пытались ``wait_timeout_ms=240000`` и
+    падали с ошибкой; clamp 250–300 делал polling дороже, чем без него).
+    Для прогона 7 мин это 5-7 polls вместо 14 (вслепые 30-сек).
     """
     from summarizer import get_chunking_config, get_execution_config
     chunk_size = int(get_chunking_config().get("chunk_size", 100000))
     chunk_dur = float(get_execution_config().get("estimated_chunk_duration_sec", 20))
     rough_chunks = max(1, -(-len(text) // max(1, chunk_size)))
     estimated_total_sec = max(1.0, rough_chunks * chunk_dur)
-    # Интервал polling жёстко задан: 250-300 сек (требование пользователя).
-    # Прикидка: estimated_total_sec/6, кламп в [250, 300]. Для прогона 7 мин
-    # это 2 polls вместо 14 (раньше агенты опрашивали каждые 30 сек).
-    poll_interval_hint_sec = max(250, min(300, int(estimated_total_sec / 6)))
+    # Интервал polling жёстко задан: 60-90 сек. Меньше нельзя (хуже
+    # пользовательского опыта — слишком частые polls), больше нельзя
+    # потому что nanobot лимит wait_timeout_ms = 120000 (120 сек) —
+    # агент не сможет ждать дольше одним write_stdin и вынужден будет
+    # опрашивать несколько раз (= больше LLM-вызовов). Прикидка:
+    # estimated_total_sec/5, кламп в [60, 90]. Для прогона 7 мин это
+    # 5-7 polls вместо 14 (вслепые 30-сек).
+    poll_interval_hint_sec = max(60, min(90, int(estimated_total_sec / 5)))
     marker = {
         "mode": "summarize",
         "status": "running",
@@ -135,8 +143,11 @@ def _emit_running_marker(text: str) -> None:
         "hint": (
             f"Обработка займёт примерно {int(estimated_total_sec)} сек. "
             f"Опрашивайте через write_stdin не чаще раза в "
-            f"{poll_interval_hint_sec} сек (yield_time_ms оставьте "
-            f"дефолтным 30000 — выдерживайте паузу между вызовами)."
+            f"{poll_interval_hint_sec} сек. Используйте wait_for=\"batch cb_\" "
+            f"и wait_timeout_ms={poll_interval_hint_sec * 1000} "
+            f"(лимит nanobot 120000 = 120 сек) — write_stdin вернётся раньше, "
+            f"как только появится следующий progress. yield_time_ms "
+            f"оставьте дефолтным 30000."
         ),
     }
     _emit(marker)
