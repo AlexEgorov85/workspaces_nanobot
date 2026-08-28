@@ -34,3 +34,38 @@ This file documents non-obvious constraints and usage patterns.
 ## cron — Scheduled Reminders
 
 - Please refer to cron skill for usage.
+
+## history_search — поиск по долговечному журналу агента
+
+`history_search` — кастомный инструмент (см. `workspace/tools/history_search_tool.py`).
+Ищет по `agent_gateway_logs` — журналу, который переживает context compaction
+(в отличие от `agent_conversation_messages`). Полезно, когда пользователь
+ссылается на старое сообщение или результат, который выпал из контекста.
+
+**Параметры:**
+
+- `query` (опц.) — подстрока для ILIKE-поиска по `summary` и `payload::text`.
+- `event_type` (опц.) — один из `context_compacted`, `tool_call`,
+  `tool_result`, `llm_call`, `run_finished`, `subagent_run_finished`, `inbound`.
+- `tool_name` (опц.) — имя инструмента для фильтрации `tool_call` /
+  `tool_result`. Удобно для поиска истории конкретного инструмента.
+- `since` / `until` (опц.) — ISO-8601 таймстамп.
+- `session_scope` (опц., дефолт `current`) — `current` (только текущая
+  сессия) или `all` (по всем сессиям).
+- `limit` (опц.) — максимум событий (по конфигу `max_rows`).
+
+**Примеры:**
+
+- «Какие файлы я прикладывал?» →
+  `history_search(event_type="tool_call", tool_name="read_file")`
+- «Когда последний раз сжимался контекст?» →
+  `history_search(event_type="context_compacted", session_scope="current")`
+- «Что я писал про договор аренды?» →
+  `history_search(query="договор аренды", event_type="llm_call")`
+
+**Замечания:**
+
+- Для поиска файлов используй `tool_call` / `tool_result` (там аргументы
+  и пути), а НЕ выдуманные типы (`file_attached`, `file_created`,
+  `document_summarized` — таких нет в журнале).
+- Если результат пустой — отвечай «не найдено в истории», не выдумывай.
