@@ -1,6 +1,6 @@
 ---
 name: legal_summarizer
-description: Юридический анализ PDF/DOCX/TXT. КОМАНДА: `python skills/legal_summarizer/scripts/cli.py --file <path>`. Для длинных — сначала вернёт confirmation_required (тогда --confirm). НЕ читай файл через read_file/exec — он огромный, забьёт контекст. НЕ вызывай office_files.extract_metadata/summarize — это метаданные, не саммари. После вызова cli верни пользователю subject + summary из JSON-ответа.
+description: Юридический анализ PDF/DOCX/TXT — вызывай ТОЛЬКО через `python skills/legal_summarizer/scripts/cli.py --file <path>`. Skill сам решает, нужен ли пользовательский confirm; для длинных документов (оценка > 2 минут) сначала вернёт confirmation_required. `office_files.extract_metadata()` (раньше `summarize()`) — это НЕ саммари, а метаданные; не подменяй cli.
 metadata: {"nanobot":{"emoji":"📄","always":true}}
 ---
 
