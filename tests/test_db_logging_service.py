@@ -200,6 +200,23 @@ class TestNonBlocking:
             "cli:1", "read", "content", latency_ms=15.0
         ) is True
 
+    def test_tool_result_error_summary_carrier(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x")
+        svc.log_tool_result(
+            "cli:1", "exec", None, latency_ms=10.0,
+            status="error", error="Command timed out after 60 seconds",
+            tool_call_id="t1",
+        )
+        event = svc._queue.queue[0]
+        # summary несёт текст ошибки — видно сразу, без раскрытия payload
+        assert event.summary == "Command timed out after 60 seconds"
+        assert event.level == "ERROR"
+        assert event.payload["error"] == "Command timed out after 60 seconds"
+        assert event.payload["status"] == "error"
+        # успешный результат — summary = имя инструмента (как раньше)
+        svc.log_tool_result("cli:1", "exec", "ok", latency_ms=1.0, tool_call_id="t2")
+        assert svc._queue.queue[1].summary == "exec"
+
     def test_log_error(self, fake_psycopg2):
         svc = _svc(dsn="postgresql://x")
         assert svc.log_error("boom", session_id="k", context={"k": "v"}) is True
@@ -408,3 +425,81 @@ class TestSchemaCheck:
         assert "question = %s" in calls[0]
         assert "media = %s" in calls[0]
         assert "media" in calls[1]
+
+
+class TestPurge:
+    def test_purge_empty_outbound_deletes(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x")
+        fake_psycopg2["cursor"].rowcount = 7
+        removed = svc.purge_empty_outbound()
+        assert removed == 7
+        sqls = [str(c.args[0]) for c in fake_psycopg2["cursor"].execute.call_args_list]
+        delete = [s for s in sqls if s.lstrip().upper().startswith("DELETE")]
+        assert delete
+        assert "outbound_final" in delete[0] and "outbound_delta" in delete[0]
+        assert "btrim(payload->>'content')" in delete[0]
+
+    def test_purge_empty_outbound_no_dsn(self, fake_psycopg2):
+        svc = _svc(dsn="")
+        assert svc.purge_empty_outbound() == 0
+
+    def test_purge_old_respects_retention(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x", retention_days=10)
+        fake_psycopg2["cursor"].rowcount = 4
+        ev, runs = svc.purge_old(10)
+        assert ev == 4 and runs == 4
+        sqls = [str(c.args[0]) for c in fake_psycopg2["cursor"].execute.call_args_list]
+        delete = [s for s in sqls if s.lstrip().upper().startswith("DELETE")]
+        assert len(delete) == 2  # события + question_runs
+        assert "days" in delete[0]
+
+    def test_purge_old_disabled_when_zero(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x", retention_days=0)
+        assert svc.purge_old(0) == (0, 0)
+
+    def test_stats_expose_purge_counters(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x")
+        stats = svc.get_stats()
+        for k in ("last_purged_events", "last_purged_runs", "last_purge_at"):
+            assert k in stats
+
+
+class TestNamePopulation:
+    """Поле name несёт сущность события (не NULL для нетool-событий)."""
+
+    def test_inbound_name_is_sender(self):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.log_inbound("cli:1", "cli", "hi", sender_id="u42")
+        assert svc._queue.queue[0].name == "u42"
+
+    def test_inbound_name_defaults_to_user(self):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.log_inbound("cli:1", "cli", "hi")
+        assert svc._queue.queue[0].name == "user"
+
+    def test_outbound_name_is_assistant(self):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.log_outbound("cli:1", "cli", "ok")
+        assert svc._queue.queue[0].name == "assistant"
+        svc.log_outbound("cli:1", "cli", "ok", kind="outbound_intermediate")
+        assert svc._queue.queue[1].name == "assistant"
+
+    def test_llm_call_name_is_model(self):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.log_llm_call("cli:1", "p", "r", model="mini")
+        assert svc._queue.queue[0].name == "mini"
+        svc.log_llm_call("cli:1", "p", "r", model=None)
+        assert svc._queue.queue[1].name == "llm"
+
+    def test_error_name_is_error(self):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.log_error("boom")
+        assert svc._queue.queue[0].name == "error"
+
+    def test_tool_events_name_is_tool(self):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.log_tool_call("cli:1", "read", {})
+        svc.log_tool_result("cli:1", "read", "r", 1.0)
+        call, result = list(svc._queue.queue)
+        assert call.name == "read"
+        assert result.name == "read"

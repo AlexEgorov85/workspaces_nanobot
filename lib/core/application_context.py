@@ -588,6 +588,8 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
         connect_backoff_sec=float(db_cfg.get("connect_backoff_sec", 1.0)),
         connect_backoff_max_sec=float(db_cfg.get("connect_backoff_max_sec", 60.0)),
         summary_max_chars=int(db_cfg.get("summary_max_chars", 200)),
+        retention_days=int(db_cfg.get("retention_days", 90)),
+        purge_interval_sec=float(db_cfg.get("purge_interval_sec", 3600.0)),
     )
 
 

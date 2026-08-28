@@ -180,7 +180,7 @@ COMMENT ON COLUMN public.agent_gateway_logs."request_id" IS 'FK-логическ
 COMMENT ON COLUMN public.agent_gateway_logs."session_id" IS 'Денормализованный channel:chat_id для удобства.';
 COMMENT ON COLUMN public.agent_gateway_logs."channel" IS 'Канал (telegram/cli/etc).';
 COMMENT ON COLUMN public.agent_gateway_logs."actor" IS 'Кто инициировал событие (user/agent/system).';
-COMMENT ON COLUMN public.agent_gateway_logs."name" IS 'Имя инструмента / задачи / сущности события.';
+COMMENT ON COLUMN public.agent_gateway_logs."name" IS 'Сущность события (категориальный ключ для фильтрации, никогда не NULL): tool_call/tool_result — имя tool; llm_call — модель; inbound — sender/user; outbound_final/outbound_intermediate — "assistant"; run_finished — "run"; subagent_run_finished — task_id; error — "error"; context_compacted и др. (через event_log.record_event) — переданное имя.';
 COMMENT ON COLUMN public.agent_gateway_logs."summary" IS 'Краткое текстовое описание события.';
 COMMENT ON COLUMN public.agent_gateway_logs."payload" IS 'JSONB: детальные данные события.';
 COMMENT ON COLUMN public.agent_gateway_logs."metadata" IS 'JSONB: дополнительные метаданные.';

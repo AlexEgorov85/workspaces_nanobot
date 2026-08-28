@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -177,8 +178,19 @@ def make_db_logging_hook_factory(
     def _factory(turn_context: Any) -> DatabaseLoggingHook:
         session_key = getattr(turn_context, "session_key", None) or None
         request_id = None
-        if session_key:
+        if session_key and db_logging_service is not None:
             request_id = db_logging_service.get_request_id(session_key)
+            # Если inbound не зарегистрировал вопрос (websocket без message_id
+            # или inbound не прошёл через шину) — создаём request_id сами,
+            # чтобы ВСЕ события оборота несли его и джойнились к question_runs.
+            if request_id is None:
+                request_id = str(uuid.uuid4())
+                try:
+                    db_logging_service.register_request(
+                        session_key, request_id, agent_id=agent_id,
+                    )
+                except Exception:
+                    pass
         return DatabaseLoggingHook(
             db_logging_service,
             agent_id=agent_id,
@@ -429,6 +441,7 @@ def _make_run_event(
         event_type="run_finished",
         level="ERROR" if context.error else "INFO",
         actor="agent",
+        name="run",
         session_id=session_key,
         request_id=request_id,
         summary=final[:200],

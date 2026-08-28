@@ -15,15 +15,17 @@ async-callable-логгеры в ``BusFactory`` — и они оборачива
           → service.log_inbound(session_key, channel, content, message_id)
         → original publish_inbound(msg)
 
-  Outbound (ответ агента пользователю)
-    nanobot bus.publish_outbound(msg)
-      → wrapper (BusFactory)
-        → make_outbound_logger(service)(msg)
-          → ``is_dropped(meta)`` (reasoning/tool_hint/progress/...) — drop;
-          → ``is_stream_delta(meta)`` — логируем как ``outbound_delta``;
-          → иначе — ``outbound_final``;
-          → service.log_outbound(...)
-        → original publish_outbound(msg)
+   Outbound (ответ агента пользователю)
+     nanobot bus.publish_outbound(msg)
+       → wrapper (BusFactory)
+         → make_outbound_logger(service)(msg)
+           → ``is_outbound_noise(msg)`` (stream-delta/stream-end/progress/
+             reasoning/retry-wait) — drop (бесполезный шум, раздувает таблицу);
+           → ``is_outbound_final(msg)`` (``_final_turn`` в meta / StreamedResponseEvent)
+             — ``outbound_final``;
+           → иначе (промежуточный ``message(...)`` агента) — ``outbound_intermediate``;
+           → service.log_outbound(...)
+         → original publish_outbound(msg)
 
 Фильтрация служебных сигналов runner'а выполняется через единый
 ``lib.utils.outbound_meta`` — добавление новых флагов правится в одном
@@ -35,12 +37,13 @@ runner туда положил) — иначе None.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from utils.media import serialize as media_serialize
 
-from lib.utils.outbound_meta import is_dropped, is_stream_delta, msg_session_key
+from lib.utils.outbound_meta import is_outbound_final, is_outbound_noise, msg_session_key
 
 
 def make_inbound_logger(
@@ -75,9 +78,15 @@ def make_inbound_logger(
             content = getattr(msg, "content", "") or ""
             media = [p for p in (getattr(msg, "media", None) or []) if isinstance(p, str) and p]
             media = media_serialize(media) if media else None
-            if session_key and message_id:
+            # request_id: берём message_id, если канал его передаёт, иначе
+            # генерируем стабильный UUID. БЕЗ этого websocket-канал
+            # (message_id=None) никогда не регистрировал question_runs, и
+            # ~97% событий оставались без request_id (не джойнились к
+            # agent_question_runs). См. fix request_id-linkage.
+            request_id = message_id or str(uuid.uuid4())
+            if session_key:
                 service.register_request(
-                    session_key, message_id,
+                    session_key, request_id,
                     user_id=sender_id, chat_id=chat_id, channel=channel,
                     agent_id=agent_id,
                     question=content,
@@ -90,7 +99,7 @@ def make_inbound_logger(
                 message_id=message_id,
                 sender_id=sender_id,
                 chat_id=chat_id,
-                request_id=message_id,
+                request_id=request_id,
                 media=media or None,
             )
         except Exception:
@@ -104,14 +113,16 @@ def make_outbound_logger(
     """Создать async-логгер для ``MessageBus.publish_outbound``.
 
     Получает ``OutboundMessage`` (см. ``nanobot.bus.events``) и решает,
-    писать ли его в БД:
+    писать ли его в БД (единый контракт — ``lib.utils.outbound_meta``):
 
-      1. Если ``is_dropped(msg.metadata)`` — drop
-         (reasoning/tool_hint/progress/turn_end/stream_end);
-      2. Если ``is_stream_delta(msg.metadata)`` — это очередной чанк
-         стриминг-ответа, логируем с ``kind="outbound_delta"``;
-      3. Иначе — это финальный ответ оборота, логируем с
-         ``kind="outbound_final"``.
+      1. ``is_outbound_noise(msg)`` — stream-delta (каждый токен стрима) /
+         stream-end / progress / reasoning / retry-wait → drop (шум, не
+         несёт аналитической ценности, только раздувает таблицу);
+      2. ``is_outbound_final(msg)`` (``_final_turn`` в meta ИЛИ
+         ``StreamedResponseEvent``) — финальный ответ оборота,
+         ``kind="outbound_final"``;
+      3. иначе — промежуточный ``message(...)`` агента в течение оборота,
+         ``kind="outbound_intermediate"`` (ценен для анализа поведения).
 
     Контекст вопроса (user_id/agent_id/...) подхватывается из индекса
     сервиса по session_id (зарегистрирован при inbound).
@@ -124,10 +135,10 @@ def make_outbound_logger(
     """
     async def _log(msg: Any) -> None:
         try:
-            meta = getattr(msg, "metadata", {}) or {}
-            if is_dropped(meta):
+            if is_outbound_noise(msg):
                 return
-            kind = "outbound_delta" if is_stream_delta(meta) else "outbound_final"
+            meta = getattr(msg, "metadata", {}) or {}
+            kind = "outbound_final" if is_outbound_final(msg) else "outbound_intermediate"
             latency = None
             tokens = None
             turn_meta = meta.get("_turn") or {}

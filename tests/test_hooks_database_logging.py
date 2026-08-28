@@ -395,7 +395,7 @@ class TestBusLoggers:
         msg.channel = "cli"
         msg.chat_id = "42"
         msg.content = "final answer"
-        msg.metadata = {"message_id": "m1"}
+        msg.metadata = {"message_id": "m1", "_final_turn": True}
         msg.media = []
         asyncio.run(logger(msg))
         service.log_outbound.assert_called_once()
@@ -405,6 +405,37 @@ class TestBusLoggers:
         assert kwargs["session_id"] == "cli:42"
         assert kwargs["request_id"] == "m1"
         assert kwargs["media"] is None
+
+    def test_outbound_logger_stream_delta_dropped(self):
+        from lib.services.db_logging_bus import make_outbound_logger
+
+        service = MagicMock()
+        logger = make_outbound_logger(service)
+        from nanobot.bus.outbound_events import StreamDeltaEvent
+        msg = MagicMock()
+        msg.channel = "cli"
+        msg.chat_id = "42"
+        msg.content = "токен"
+        msg.metadata = {}
+        msg.event = StreamDeltaEvent(content="токен", stream_id="s1")
+        asyncio.run(logger(msg))
+        service.log_outbound.assert_not_called()
+
+    def test_outbound_logger_intermediate_logged(self):
+        from lib.services.db_logging_bus import make_outbound_logger
+
+        service = MagicMock()
+        service.get_request_id.return_value = "m1"
+        logger = make_outbound_logger(service)
+        msg = MagicMock()
+        msg.channel = "cli"
+        msg.chat_id = "42"
+        msg.content = "промежуточное сообщение агента"
+        msg.metadata = {"message_id": "m1"}
+        msg.media = []
+        asyncio.run(logger(msg))
+        service.log_outbound.assert_called_once()
+        assert service.log_outbound.call_args.kwargs["kind"] == "outbound_intermediate"
 
     def test_outbound_logger_with_media(self):
         from lib.services.db_logging_bus import make_outbound_logger
@@ -416,7 +447,7 @@ class TestBusLoggers:
         msg.channel = "cli"
         msg.chat_id = "42"
         msg.content = "final answer"
-        msg.metadata = {"message_id": "m1"}
+        msg.metadata = {"message_id": "m1", "_final_turn": True}
         msg.media = ["https://example.com/out.png"]
         asyncio.run(logger(msg))
         kwargs = service.log_outbound.call_args.kwargs
@@ -426,3 +457,37 @@ class TestBusLoggers:
             "mime_type": "",
             "file_size": 0,
         }]
+
+    def test_inbound_logger_generates_request_id_without_message_id(self):
+        from lib.services.db_logging_bus import make_inbound_logger
+
+        service = MagicMock()
+        logger = make_inbound_logger(service)
+        msg = MagicMock()
+        msg.channel = "websocket"
+        msg.chat_id = "c1"
+        msg.session_key = "websocket:c1"
+        msg.content = "привет"
+        msg.metadata = {}  # websocket не кладёт message_id
+        msg.sender_id = "u9"
+        msg.media = []
+        asyncio.run(logger(msg))
+        reg = service.register_request.call_args
+        assert reg is not None
+        rid = reg.args[1]  # request_id — второй позиционный аргумент
+        assert rid  # сгенерированный UUID, не пустой
+        # inbound-событие несёт тот же request_id → джойн к question_runs
+        assert service.log_inbound.call_args.kwargs["request_id"] == rid
+
+    def test_factory_generates_request_id_when_missing(self):
+        from lib.hooks.database_logging_hook import make_db_logging_hook_factory
+
+        svc = MagicMock()
+        svc.get_request_id.return_value = None
+        factory = make_db_logging_hook_factory(svc, agent_id="main")
+        turn = MagicMock()
+        turn.session_key = "websocket:c1"
+        hook = factory(turn)
+        assert hook._request_id  # сгенерированный UUID
+        svc.register_request.assert_called_once()
+        assert svc.register_request.call_args.args[1] == hook._request_id

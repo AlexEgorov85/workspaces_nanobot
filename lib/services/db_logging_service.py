@@ -121,6 +121,8 @@ class DbLoggingService:
         connect_backoff_sec: float = 1.0,
         connect_backoff_max_sec: float = 60.0,
         summary_max_chars: int = 200,
+        retention_days: int = 0,
+        purge_interval_sec: float = 3600.0,
     ) -> None:
         self._dsn = dsn or ""
         self._table_name = table_name
@@ -133,6 +135,9 @@ class DbLoggingService:
         self._connect_backoff_sec = float(connect_backoff_sec)
         self._connect_backoff_max_sec = float(connect_backoff_max_sec)
         self._summary_max_chars = int(summary_max_chars)
+        self._retention_days = int(retention_days)
+        self._purge_interval_sec = float(purge_interval_sec)
+        self._last_purge = 0.0
 
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=queue_maxsize)
         self._stop_event = threading.Event()
@@ -150,6 +155,9 @@ class DbLoggingService:
             "connected": False,
             "last_error": None,
             "question_runs": 0,
+            "last_purge_at": None,
+            "last_purged_events": 0,
+            "last_purged_runs": 0,
         }
 
         # Индекс «текущий вопрос»: session_key -> контекст вопроса.
@@ -322,6 +330,7 @@ class DbLoggingService:
             session_id=session_id,
             channel=channel,
             actor=actor_val,
+            name=actor_val,
             summary=content[: self._summary_max_chars] if content else "",
             payload=payload,
             request_id=request_id or message_id,
@@ -349,6 +358,7 @@ class DbLoggingService:
             session_id=session_id,
             channel=channel,
             actor="agent",
+            name="assistant",
             summary=content[: self._summary_max_chars] if content else "",
             payload=payload,
             metadata={"latency_ms": latency_ms, "tokens_used": tokens_used},
@@ -389,12 +399,20 @@ class DbLoggingService:
         request_id: str | None = None,
         level: str = "INFO",
     ) -> bool:
+        # Для ошибочных результатов: уровень ERROR (для фильтрации) и текст
+        # ошибки в summary — причина («что не так») видна сразу, без
+        # раскрытия payload.
+        if status == "error":
+            level = "ERROR"
+        summary = tool_name
+        if status == "error" and error:
+            summary = str(error)[: self._summary_max_chars]
         return self.log_event(LogEvent(
             event_type="tool_result",
             level=level,
             session_id=session_id,
             actor="agent",
-            summary=tool_name,
+            summary=summary,
             payload={"tool": tool_name, "status": status, "result": result, "error": error},
             metadata={"latency_ms": latency_ms, "tool_call_id": tool_call_id},
             request_id=request_id,
@@ -426,6 +444,7 @@ class DbLoggingService:
             level=level,
             session_id=session_id,
             actor="agent",
+            name=model or "llm",
             summary=finish_reason or "llm_call",
             payload={
                 "prompt": _json_safe(prompt),
@@ -453,6 +472,7 @@ class DbLoggingService:
             event_type="error",
             level=level,
             session_id=session_id,
+            name="error",
             summary=error[:200],
             payload={"error": error, "context": context or {}},
             request_id=request_id,
@@ -556,6 +576,15 @@ class DbLoggingService:
                         self._flush_batch(buffer)
                         buffer.clear()
                     deadline = time.time() + self._flush_interval
+
+                # Периодическая очистка: пустой outbound-мусор (stream-чанки)
+                # чистим всегда; старые события/question_runs — только при
+                # retention_days > 0. Защита от неограниченного роста таблицы.
+                if self._purge_interval_sec > 0 and (
+                    time.time() - self._last_purge >= self._purge_interval_sec
+                ):
+                    self._last_purge = time.time()
+                    self._purge_old()
         finally:
             # Финальный флаш
             if buffer:
@@ -791,3 +820,98 @@ class DbLoggingService:
         with self._state_lock:
             self._stats["failed"] += len(batch)
             self._stats["last_error"] = "flush: БД недоступна, батч выброшен"
+
+    # ------------------------------------------------------------------
+    # Очистка (retention + удаление пустого мусора)
+    # ------------------------------------------------------------------
+
+    def purge_empty_outbound(self) -> int:
+        """Удалить пустые outbound-события (stream-чанки / синтетические финалы).
+
+        Удаляются ``outbound_final``/``outbound_delta`` с пустым/whitespace
+        ``content`` И без ``media`` (реальные доставки файлов с пустым
+        текстом сохраняются — у них есть media). Возвращает число удалённых
+        строк. Работает через общий пул ``utils.db`` (своего соединения нет).
+        """
+        if not self._dsn:
+            return 0
+        try:
+            def _work(conn: Any) -> int:
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        f'DELETE FROM "{self._schema}"."{self._table_name}" '
+                        "WHERE event_type IN ('outbound_final', 'outbound_delta') "
+                        "AND coalesce(btrim(payload->>'content'), '') = '' "
+                        "AND (payload->'media') IS NULL"
+                    )
+                    return int(cur.rowcount)
+                finally:
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
+
+            removed = self._db_run(_work) or 0
+            with self._state_lock:
+                self._stats["last_purged_events"] += removed
+                self._stats["last_purge_at"] = time.time()
+            return removed
+        except Exception as exc:
+            with self._state_lock:
+                self._stats["last_error"] = f"purge_empty: {exc}"
+            return 0
+
+    def purge_old(self, retention_days: int | None = None) -> tuple[int, int]:
+        """Удалить события и question_runs старее ``retention_days``.
+
+        Возвращает ``(удалено_событий, удалено_question_runs)``. Если
+        ``retention_days <= 0`` или нет DSN — ничего не делает. Интервал
+        считается через ``NOW() - (%s || ' days')::interval`` (совместимо
+        с Greenplum 6.5, без ``make_interval``).
+        """
+        days = int(retention_days if retention_days is not None else self._retention_days)
+        if days <= 0 or not self._dsn:
+            return (0, 0)
+        try:
+            def _work(conn: Any) -> tuple[int, int]:
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        f'DELETE FROM "{self._schema}"."{self._table_name}" '
+                        "WHERE \"timestamp\" < NOW() - (%s || ' days')::interval",
+                        (str(days),),
+                    )
+                    ev = int(cur.rowcount)
+                    cur.execute(
+                        f'DELETE FROM "{self._schema}"."{self._question_runs_table}" '
+                        "WHERE updated_at < NOW() - (%s || ' days')::interval",
+                        (str(days),),
+                    )
+                    return (ev, int(cur.rowcount))
+                finally:
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
+
+            res = self._db_run(_work) or (0, 0)
+            with self._state_lock:
+                self._stats["last_purged_events"] += res[0]
+                self._stats["last_purged_runs"] += res[1]
+                self._stats["last_purge_at"] = time.time()
+            return res
+        except Exception as exc:
+            with self._state_lock:
+                self._stats["last_error"] = f"purge_old: {exc}"
+            return (0, 0)
+
+    def _purge_old(self) -> None:
+        """Один шаг периодической очистки из worker-цикла.
+
+        Пустой outbound-мусор чистим всегда (независимо от retention);
+        старые данные — только если задан ``retention_days > 0``.
+        """
+        self.purge_empty_outbound()
+        if self._retention_days > 0:
+            self.purge_old(self._retention_days)
