@@ -35,7 +35,7 @@ def prepare_output(result: dict) -> dict:
     if op_id:
         out["operation_id"] = op_id
 
-    if status == "completed":
+    if status == "completed" or status == "partial":
         inner = result.get("result") or {}
         out["subject"] = inner.get("subject", "")
         out["summary"] = inner.get("summary", "")
@@ -51,6 +51,18 @@ def prepare_output(result: dict) -> dict:
         stats = result.get("stats") or {}
         if stats:
             out["stats"] = stats
+        # partial: саммари есть, но часть батчей не распарсилась после retry.
+        # Агент должен сообщить пользователю и предложить resume.
+        if status == "partial":
+            failed = stats.get("failed_batches") or []
+            total_batches = stats.get("context_batches_total") or 0
+            out["partial"] = True
+            out["failed_batches"] = list(failed)
+            out["hint"] = (
+                f"Саммари собрано из {total_batches - len(failed)}/{total_batches} батчей; "
+                f"не удалось: {', '.join(failed) if failed else '—'}. "
+                "Перезапустите с тем же --operation-id --confirm для retry упавших батчей."
+            )
 
     elif status == "confirmation_required":
         out["summary"] = result.get("summary") or {}

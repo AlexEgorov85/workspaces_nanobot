@@ -98,6 +98,29 @@ _PROMPT_FILES = {
 }
 
 
+# Сколько раз перезапускать LLM-вызов батча при ChunkResultParseError
+# (валидный JSON + все chunk_id). LLM-JSON флакает, ретрай обычно помогает.
+# При исчерпании — батч помечается failed, обработка документа продолжается.
+MAX_BATCH_PARSE_RETRIES = 3
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_think_blocks(text: str) -> str:
+    """Убрать ``<think>...</think>`` блоки из текста.
+
+    Некоторые модели (DeepSeek/Qwen) выдают chain-of-thought внутри
+    ``<think>...</think>`` прямо в финальном ответе. Для document-reduce
+    это мусор: ``_extract_subject`` подберёт ``<think>`` как subject, а
+    summary будет содержать рассуждения вместо саммари. Чистим ДО
+    извлечения subject и записи ``result.json``, чтобы result был
+    пригоден агенту и пользователю.
+    """
+    if not text:
+        return text
+    cleaned = _THINK_BLOCK_RE.sub("", text)
+    return cleaned.strip()
+
+
 def _load_prompt(name: str) -> str:
     """Прочитать системный промпт из ``prompts/<name>.md``."""
     p = _PROMPT_FILES.get(name)
@@ -732,6 +755,9 @@ def run(
             {"role": "user", "content": user_body},
         ]
         summary = llm.chat(messages, context=None)
+        # Убираем<think>... от моделей с CoT, чтобы subject/summary
+        # в result.json были чистыми (single-strategy path).
+        summary = _strip_think_blocks(summary)
         subject = _extract_subject(summary)
         result = {
             "subject": subject,
@@ -826,6 +852,8 @@ def run(
     total_start = _time.monotonic()
     map_calls = 0
     retries = 0
+    failed_batch_ids: list[str] = []
+    first_batch_error: dict[str, Any] | None = None
 
     for batch in batches:
         pending = [c for c in batch.chunks if c.chunk_id not in chunk_states or chunk_states[c.chunk_id].get("status") != "completed"]
@@ -842,15 +870,35 @@ def run(
             section_paths=tuple({c.section_path for c in pending}),
             page_range=batch.page_range,
         )
-        try:
-            batch_meta = _process_context_batch(
-                batch_to_process,
-                chunks_total=len(chunks),
-                structure=structure,
-                length="brief",
-                operation_id=operation_id,
-                workspace_root=workspace_root,
-            )
+        batch_meta: dict[str, Any] | None = None
+        last_error: tuple[str, Exception] | None = None
+        for attempt in range(1, MAX_BATCH_PARSE_RETRIES + 1):
+            try:
+                batch_meta = _process_context_batch(
+                    batch_to_process,
+                    chunks_total=len(chunks),
+                    structure=structure,
+                    length="brief",
+                    operation_id=operation_id,
+                    workspace_root=workspace_root,
+                )
+                last_error = None
+                break
+            except ChunkResultParseError as exc:
+                # LLM-JSON флакает — ретраим с тем же промптом.
+                last_error = ("LLM_PARSE_ERROR", exc)
+                _progress(
+                    f"batch {batch.batch_id}: parse error "
+                    f"attempt {attempt}/{MAX_BATCH_PARSE_RETRIES}, retrying"
+                )
+                continue
+            except Exception as exc:
+                # Не-parse ошибка (сеть, OOM, структурно): не ретраим —
+                # помечаем батч failed и идём дальше.
+                last_error = ("LLM_ERROR", exc)
+                break
+
+        if batch_meta is not None:
             map_calls += 1
             ctx_batches[batch.batch_id] = {
                 "chunk_ids": batch_meta["chunk_ids"],
@@ -871,28 +919,34 @@ def run(
                     "result_path": f"chunks/{c.chunk_id}.json",
                     "duration_sec": batch_meta["duration_sec"],
                 }
-        except ChunkResultParseError as exc:
+        else:
+            # Все retry исчерпаны (parse) или не-parse ошибка:
+            # батч помечен failed, обработка документа продолжается.
+            assert last_error is not None
+            error_code, error_exc = last_error
             retries += 1
-            return {
-                "status": "failed",
-                "operation_id": operation_id,
-                "error": {
-                    "code": "LLM_PARSE_ERROR",
-                    "message": f"Batch {batch.batch_id} failed: {exc}",
+            failed_batch_ids.append(batch.batch_id)
+            if first_batch_error is None:
+                first_batch_error = {
+                    "code": error_code,
                     "batch_id": batch.batch_id,
-                },
-            }
-        except Exception as exc:
-            retries += 1
-            return {
+                    "message": str(error_exc),
+                }
+            ctx_batches[batch.batch_id] = {
+                "chunk_ids": [c.chunk_id for c in batch_to_process.chunks],
                 "status": "failed",
-                "operation_id": operation_id,
-                "error": {
-                    "code": "LLM_ERROR",
-                    "message": f"Batch {batch.batch_id} failed: {exc}",
-                    "batch_id": batch.batch_id,
-                },
+                "error": {"code": error_code, "message": str(error_exc)},
             }
+            for c in batch_to_process.chunks:
+                chunk_states[c.chunk_id] = {
+                    "status": "failed",
+                    "context_batch_id": batch.batch_id,
+                    "section_id": c.section_id,
+                    "section_path": c.section_path,
+                    "page_start": c.page_start,
+                    "page_end": c.page_end,
+                    "error_code": error_code,
+                }
 
     all_partials = _load_cached_partials(operation_id, expected_chunk_ids, workspace_root)
     if not all_partials:
@@ -990,8 +1044,14 @@ def run(
             final_summary = joined
         strategy_label = "map_reduce_flat"
 
+    # Убираем <think>...</think> от моделей с CoT, чтобы subject/summary
+    # в result.json были чистыми для агента.
+    final_summary = _strip_think_blocks(final_summary)
+
     total_duration = round(_time.monotonic() - total_start, 1)
     subject = _extract_subject(final_summary)
+
+    is_partial = bool(failed_batch_ids)
 
     result = {
         "subject": subject,
@@ -1003,6 +1063,7 @@ def run(
         "sections": sum(1 for sid in tree.sections if sid != ROOT_SECTION_ID) if tree else 0,
         "strategy": strategy_label,
         "title": (structure or {}).get("title"),
+        "partial": is_partial,
     }
     write_result(operation_id, result, workspace_root=workspace_root)
 
@@ -1030,7 +1091,7 @@ def run(
 
     final_manifest = NormalizedManifest(
         operation_id=operation_id,
-        status="completed",
+        status="partial" if is_partial else "completed",
         version=2,
         document_path=document_path,
         structure_title=(structure or {}).get("title"),
@@ -1045,8 +1106,8 @@ def run(
         context_batches=ctx_batches,
         section_summaries=section_summaries_out,
         batches_done=[f"cb_{i:03d}" for i in range(len(batches))],
-        batches_failed=[],
-        last_error=None,
+        batches_failed=list(failed_batch_ids),
+        last_error=first_batch_error,
         started_at=existing_manifest.started_at if existing_manifest else _now_iso(),
         completed_at=_now_iso(),
         duration_sec=total_duration,
@@ -1056,7 +1117,7 @@ def run(
     save_manifest(final_manifest, workspace_root=workspace_root)
 
     return {
-        "status": "completed",
+        "status": "partial" if is_partial else "completed",
         "operation_id": operation_id,
         "result": result,
         "stats": {
@@ -1072,6 +1133,8 @@ def run(
             "reduce_calls": section_reduce_calls + section_trim_calls + document_reduce_calls,
             "total_llm_calls": total_llm_calls,
             "retries": retries,
+            "failed_batches": list(failed_batch_ids),
+            "partial": is_partial,
             "duration_sec": total_duration,
             "strategy": strategy_label,
         },
