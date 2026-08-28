@@ -1072,6 +1072,72 @@ def test_batch_parse_error_retries_then_succeeds(monkeypatch, tmp_path):
     assert result["stats"]["map_calls"] >= 2
 
 
+def test_map_phase_runs_batches_concurrently(monkeypatch, tmp_path):
+    """Параллельная map-фаза: при concurrency=3 и 10 батчах peak in-flight
+    должен быть ≤3, а не 1 (как было при sequential). Это проверяет что
+    asyncio.gather + Semaphore реально работают."""
+    import re as _re
+    import threading
+    import time as _time
+
+    state = {"in_flight": 0, "peak": 0, "lock": threading.Lock()}
+
+    def fake_chat(messages, *, context=None, **kwargs):
+        with state["lock"]:
+            state["in_flight"] += 1
+            if state["in_flight"] > state["peak"]:
+                state["peak"] = state["in_flight"]
+        try:
+            # Имитируем I/O latency чтобы event loop успевал запустить
+            # следующие task'и до завершения текущего (без sleep to_thread
+            # завершается мгновенно и Semaphore не успевает разойтись).
+            _time.sleep(0.05)
+            user_content = messages[1]["content"]
+            chunk_ids = _re.findall(r"DOCUMENT CHUNK (\d+)", user_content)
+            if chunk_ids:
+                return json.dumps({
+                    "chunks": [
+                        {"chunk_id": cid, "summary": f"s{cid}", "section": "1"}
+                        for cid in chunk_ids
+                    ]
+                })
+            return "Это договор.\n\nСуть: подряд."
+        finally:
+            with state["lock"]:
+                state["in_flight"] -= 1
+
+    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+    monkeypatch.setattr(summarizer, "pack_chunks", _one_chunk_per_batch_pack)
+    monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
+        "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
+        "chunk_size_input_ratio": None,
+    })
+    monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
+        "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
+        "max_chunks_for_execution": 100,
+        "max_concurrent_batches": 3,  # лимит
+        "context_batching": {
+            "system_prompt_tokens": 100, "instruction_tokens_per_map": 50,
+            "chars_per_token": 3.5, "safety_margin": 0.85,
+        },
+        "llm_max_tokens": 100,
+    })
+
+    paragraph = "Длинный абзац про договор подряда, права и обязанности. "
+    text = "\n\n".join([paragraph] * 60)  # ~30 батчей
+    result = summarizer.run(
+        text, length="brief", confirmed=True, workspace_root=tmp_path,
+    )
+    assert result["status"] == "completed"
+    assert state["peak"] >= 2, (
+        f"peak in-flight должен быть ≥2 при concurrency=3 и "
+        f"{result['stats']['map_calls']} батчах; получили {state['peak']}"
+    )
+    assert state["peak"] <= 3, (
+        f"peak in-flight превысил max_concurrent_batches=3: {state['peak']}"
+    )
+
+
 def test_batch_parse_error_exhausts_returns_partial(monkeypatch, tmp_path):
     """Первый батч исчерпывает retry (3 parse-error) → помечается failed,
     остальные батчи успевают → ``status=partial`` с ``failed_batches``."""
@@ -1106,6 +1172,9 @@ def test_batch_parse_error_exhausts_returns_partial(monkeypatch, tmp_path):
     monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
         "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
         "max_chunks_for_execution": 100,
+        # concurrency=1 → sequential map (иначе при concurrency=4 первые 4
+        # батча стартуют одновременно и 3 из них получают invalid JSON).
+        "max_concurrent_batches": 1,
         "context_batching": {
             "system_prompt_tokens": 100, "instruction_tokens_per_map": 50,
             "chars_per_token": 3.5, "safety_margin": 0.85,

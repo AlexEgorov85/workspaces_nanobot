@@ -27,6 +27,7 @@ Structure-Aware Context Batching:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -745,6 +746,55 @@ def _process_context_batch(
     }
 
 
+async def _run_one_batch_async(
+    batch_to_process: ContextBatch,
+    *,
+    chunks_total: int,
+    structure: dict | None,
+    operation_id: str,
+    workspace_root: Path | str | None,
+    sem: asyncio.Semaphore,
+) -> tuple[str, dict | None, tuple[str, Exception] | None]:
+    """Один батч с retry-циклом (parse-error), под семафором concurrency.
+
+    Sync-функция ``_process_context_batch`` (внутри LLM HTTP + JSON parse +
+    запись chunks/*.json) обёрнута в ``asyncio.to_thread`` — пока один батч
+    висит на HTTP, event loop крутит остальные. Семафор ограничивает
+    число одновременных HTTP-запросов к LLM-провайдеру (rate-limit).
+
+    Возвращает:
+      ("ok", batch_meta, None) — успех (с метаданными батча)
+      ("failed", None, (code, exc)) — все retry исчерпаны или не-parse ошибка
+    """
+    async with sem:
+        last_error: tuple[str, Exception] | None = None
+        for attempt in range(1, MAX_BATCH_PARSE_RETRIES + 1):
+            try:
+                batch_meta = await asyncio.to_thread(
+                    _process_context_batch,
+                    batch_to_process,
+                    chunks_total=chunks_total,
+                    structure=structure,
+                    length="brief",
+                    operation_id=operation_id,
+                    workspace_root=workspace_root,
+                )
+                return ("ok", batch_meta, None)
+            except ChunkResultParseError as exc:
+                # LLM-JSON флакает — ретраим с тем же промптом.
+                last_error = ("LLM_PARSE_ERROR", exc)
+                _progress(
+                    f"batch {batch_to_process.batch_id}: parse error "
+                    f"attempt {attempt}/{MAX_BATCH_PARSE_RETRIES}, retrying"
+                )
+                continue
+            except Exception as exc:
+                # Не-parse ошибка (сеть, OOM, структурно): не ретраим.
+                last_error = ("LLM_ERROR", exc)
+                break
+        return ("failed", None, last_error)
+
+
 def _load_cached_partials(
     operation_id: str,
     expected_chunk_ids: list[str],
@@ -978,14 +1028,25 @@ def run(
     failed_batch_ids: list[str] = []
     first_batch_error: dict[str, Any] | None = None
 
+    # Параллельное выполнение батчей: семафор ограничивает одновременные
+    # HTTP-запросы к LLM-провайдеру (rate-limit), event loop крутит остальные
+    # пока один батч висит на llm.chat. Раньше был строго sequential
+    # for-loop — для ГК РФ (19 батчей × ~26 сек) это ~8.5 мин стены;
+    # с concurrency=4 это ~2.5 мин (×3-4 ускорение).
+    exec_cfg_for_map = globals()["get_execution_config"]()
+    concurrency = max(1, int(exec_cfg_for_map.get("max_concurrent_batches", 4)))
+
+    # Соберём все батчи с pending чанками и предварительно посчитаем прогресс.
+    queued: list[tuple[ContextBatch, int]] = []  # (batch_to_process, pending_count)
+    total_batches = len(batches)
     for batch in batches:
-        pending = [c for c in batch.chunks if c.chunk_id not in chunk_states or chunk_states[c.chunk_id].get("status") != "completed"]
+        pending = [
+            c for c in batch.chunks
+            if c.chunk_id not in chunk_states
+            or chunk_states[c.chunk_id].get("status") != "completed"
+        ]
         if not pending:
             continue
-        _progress(
-            f"batch {batch.batch_id}: {len(pending)}/{len(batch.chunks)} chunks "
-            f"({(len(batches) - batches.index(batch)) * 100 // len(batches)}% remaining)"
-        )
         batch_to_process = ContextBatch(
             batch_id=batch.batch_id,
             chunks=tuple(pending),
@@ -993,83 +1054,85 @@ def run(
             section_paths=tuple({c.section_path for c in pending}),
             page_range=batch.page_range,
         )
-        batch_meta: dict[str, Any] | None = None
-        last_error: tuple[str, Exception] | None = None
-        for attempt in range(1, MAX_BATCH_PARSE_RETRIES + 1):
-            try:
-                batch_meta = _process_context_batch(
-                    batch_to_process,
+        queued.append((batch_to_process, len(pending)))
+        _progress(
+            f"batch {batch_to_process.batch_id}: {len(pending)}/{len(batch.chunks)} chunks "
+            f"queued ({total_batches} batches total, concurrency={concurrency})"
+        )
+
+    # Запускаем все батчи параллельно с retry; потом применяем результаты.
+    if queued:
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _gather_all():
+            return await asyncio.gather(*[
+                _run_one_batch_async(
+                    btp,
                     chunks_total=len(chunks),
                     structure=structure,
-                    length="brief",
                     operation_id=operation_id,
                     workspace_root=workspace_root,
+                    sem=sem,
                 )
-                last_error = None
-                break
-            except ChunkResultParseError as exc:
-                # LLM-JSON флакает — ретраим с тем же промптом.
-                last_error = ("LLM_PARSE_ERROR", exc)
-                _progress(
-                    f"batch {batch.batch_id}: parse error "
-                    f"attempt {attempt}/{MAX_BATCH_PARSE_RETRIES}, retrying"
-                )
-                continue
-            except Exception as exc:
-                # Не-parse ошибка (сеть, OOM, структурно): не ретраим —
-                # помечаем батч failed и идём дальше.
-                last_error = ("LLM_ERROR", exc)
-                break
+                for btp, _ in queued
+            ])
 
-        if batch_meta is not None:
-            map_calls += 1
-            ctx_batches[batch.batch_id] = {
-                "chunk_ids": batch_meta["chunk_ids"],
-                "status": "completed",
-                "started_at": batch_meta["started_at"],
-                "completed_at": batch_meta["completed_at"],
-                "duration_sec": batch_meta["duration_sec"],
-                "section_paths": list(batch_to_process.section_paths),
-            }
-            for c in batch_to_process.chunks:
-                chunk_states[c.chunk_id] = {
+        gather_results = asyncio.run(_gather_all())
+
+        # Применяем результаты: ctx_batches + chunk_states + failed_batch_ids.
+        for (batch_to_process, pending_count), (status, batch_meta, last_error) in zip(
+            queued, gather_results
+        ):
+            if status == "ok":
+                assert batch_meta is not None
+                map_calls += 1
+                ctx_batches[batch_to_process.batch_id] = {
+                    "chunk_ids": batch_meta["chunk_ids"],
                     "status": "completed",
-                    "context_batch_id": batch.batch_id,
-                    "section_id": c.section_id,
-                    "section_path": c.section_path,
-                    "page_start": c.page_start,
-                    "page_end": c.page_end,
-                    "result_path": f"chunks/{c.chunk_id}.json",
+                    "started_at": batch_meta["started_at"],
+                    "completed_at": batch_meta["completed_at"],
                     "duration_sec": batch_meta["duration_sec"],
+                    "section_paths": list(batch_to_process.section_paths),
                 }
-        else:
-            # Все retry исчерпаны (parse) или не-parse ошибка:
-            # батч помечен failed, обработка документа продолжается.
-            assert last_error is not None
-            error_code, error_exc = last_error
-            retries += 1
-            failed_batch_ids.append(batch.batch_id)
-            if first_batch_error is None:
-                first_batch_error = {
-                    "code": error_code,
-                    "batch_id": batch.batch_id,
-                    "message": str(error_exc),
-                }
-            ctx_batches[batch.batch_id] = {
-                "chunk_ids": [c.chunk_id for c in batch_to_process.chunks],
-                "status": "failed",
-                "error": {"code": error_code, "message": str(error_exc)},
-            }
-            for c in batch_to_process.chunks:
-                chunk_states[c.chunk_id] = {
+                for c in batch_to_process.chunks:
+                    chunk_states[c.chunk_id] = {
+                        "status": "completed",
+                        "context_batch_id": batch_to_process.batch_id,
+                        "section_id": c.section_id,
+                        "section_path": c.section_path,
+                        "page_start": c.page_start,
+                        "page_end": c.page_end,
+                        "result_path": f"chunks/{c.chunk_id}.json",
+                        "duration_sec": batch_meta["duration_sec"],
+                    }
+            else:
+                # Все retry исчерпаны (parse) или не-parse ошибка:
+                # батч помечен failed, обработка документа продолжается.
+                assert last_error is not None
+                error_code, error_exc = last_error
+                retries += 1
+                failed_batch_ids.append(batch_to_process.batch_id)
+                if first_batch_error is None:
+                    first_batch_error = {
+                        "code": error_code,
+                        "batch_id": batch_to_process.batch_id,
+                        "message": str(error_exc),
+                    }
+                ctx_batches[batch_to_process.batch_id] = {
+                    "chunk_ids": [c.chunk_id for c in batch_to_process.chunks],
                     "status": "failed",
-                    "context_batch_id": batch.batch_id,
-                    "section_id": c.section_id,
-                    "section_path": c.section_path,
-                    "page_start": c.page_start,
-                    "page_end": c.page_end,
-                    "error_code": error_code,
+                    "error": {"code": error_code, "message": str(error_exc)},
                 }
+                for c in batch_to_process.chunks:
+                    chunk_states[c.chunk_id] = {
+                        "status": "failed",
+                        "context_batch_id": batch_to_process.batch_id,
+                        "section_id": c.section_id,
+                        "section_path": c.section_path,
+                        "page_start": c.page_start,
+                        "page_end": c.page_end,
+                        "error_code": error_code,
+                    }
 
     all_partials = _load_cached_partials(operation_id, expected_chunk_ids, workspace_root)
     if not all_partials:
