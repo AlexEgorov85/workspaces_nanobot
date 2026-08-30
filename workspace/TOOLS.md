@@ -69,3 +69,38 @@ This file documents non-obvious constraints and usage patterns.
   и пути), а НЕ выдуманные типы (`file_attached`, `file_created`,
   `document_summarized` — таких нет в журнале).
 - Если результат пустой — отвечай «не найдено в истории», не выдумывай.
+
+## legal_summarizer_query — follow-up по уже проанализированному документу
+
+Кастомный tool (`workspace/tools/legal_summarizer_query.py`). Возвращает
+структурные данные по сохранённой `operation_id` **без перепарсинга PDF** —
+читает manifest/result/chunks навыка `legal_summarizer` из
+`data_store/cache/skills/legal_summarizer/<operation_id>/`.
+
+**Зачем:** иначе на follow-up-вопрос («сколько статей?», «какие разделы?»,
+«что в чанке N?») агент вынужден через `exec`+pdfplumber повторно
+извлекать текст документа (200+ сек, часто падает на кириллице в Windows-cp1251).
+
+**Параметры:**
+
+- `operation_id` (обяз.) — поле `result.operation_id` из предыдущего ответа `legal_summarizer`.
+- `field` (дефолт `stats`) — `stats | articles | chunks | sections | tree | all`.
+- `max_chunk_summary_chars` (опц., дефолт 1500) — обрезка summary чанка для `field=chunks`.
+
+**Когда звать:**
+
+- Сразу после `--confirm` саммари вернуло `operation_id` → запомни его для follow-up'ов.
+- Любой вопрос про уже проанализированный документ: «сколько статей?», «какие
+  разделы?», «что в чанке 5?», «назови все части» и т.п.
+
+**Примеры:**
+
+- «Сколько статей в документе?» → `legal_summarizer_query(operation_id="<op_id>", field="articles")` → `{article_count: N}`
+- «Какие разделы?» → `legal_summarizer_query(operation_id="<op_id>", field="sections")`
+- «О чём чанк 12?» → `legal_summarizer_query(operation_id="<op_id>", field="chunks")` → массив с `chunk_id`, `summary`, `section_path`.
+
+**Не делать:**
+
+- Не вызывай `pdfplumber`/`pdftotext` через `exec` для подсчёта статей —
+  есть `legal_summarizer_query`. Это и быстрее, и кириллица не сломается.
+- Не передавай в `field` значения вне списка — будет отказ с понятной ошибкой.

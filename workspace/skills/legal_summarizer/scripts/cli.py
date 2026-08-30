@@ -100,6 +100,21 @@ def _emit(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
+# Sentinel, который навык печатает в stdout СТРОГО в самом конце любого
+# завершённого прогона (успех / partial / confirmation / error). Агент ловит
+# его через write_stdin(wait_for=...) и дожидается ОДНИМ блокирующим вызовом
+# реального конца вместо опроса каждые 30 сек (каждый опрос = лишний
+# LLM-вызов агента). Progress-строки уходят в stderr и этот sentinel не
+# содержат, поэтому ложных срабатываний нет.
+_DONE_SENTINEL = "__LEGAL_SUMMARIZER_DONE__"
+
+
+def _emit_done(payload: dict) -> None:
+    """Напечатать финальный результат, затем sentinel завершения в stdout."""
+    _emit(payload)
+    print(_DONE_SENTINEL)
+
+
 def _emit_running_marker(text: str) -> None:
     """Маркер старта длинного прогона — печатается ПЕРВЫМ в stdout.
 
@@ -110,17 +125,17 @@ def _emit_running_marker(text: str) -> None:
     прогон 7 мин (инцидент 2026-08-28).
 
     Оценки грубые (без структурного парсинга): только по длине текста.
-    ``poll_interval_hint_sec`` — КАК ЧАСТО опрашивать агенту. Агент должен
-    передавать это значение как ``wait_timeout_ms`` в ``write_stdin``
-    (НЕ ``yield_time_ms``, который остаётся дефолтным 30000). Также
-    передавать ``wait_for="batch cb_"`` — write_stdin вернётся раньше,
-    как только в stdout появится следующий progress-маркер (вслепые
-    30-сек уходят).
+    ``done_marker`` — sentinel, который навык печатает в stdout в самом
+    конце прогона. Агент должен ждать ЕГО одним блокирующим вызовом
+    ``write_stdin`` (``wait_for=done_marker``, ``wait_timeout_ms=120000``),
+    а НЕ опрашивать по таймеру. Каждый опрос = лишний LLM-вызов агента,
+    поэтому блокирующее ожидание радикально их сокращает.
 
-    Clamp 60–90 сек обусловлен ЛИМИТОМ nanobot ``wait_timeout_ms ≤ 120000``
-    (инцидент 2026-08-28: агенты пытались ``wait_timeout_ms=240000`` и
-    падали с ошибкой; clamp 250–300 делал polling дороже, чем без него).
-    Для прогона 7 мин это 5-7 polls вместо 14 (вслепые 30-сек).
+    ``poll_interval_hint_sec`` оставлен для обратной совместимости (и тестов)
+    как грубая оценка ожидания; семантики «частота опроса» больше не несёт.
+    Лимит nanobot ``wait_timeout_ms ≤ 120000`` (инцидент 2026-08-28) — поэтому
+    один блокирующий вызов покрывает прогон ≤120 сек; для более длинных
+    агент делает повторный write_stdin с тем же ``wait_for`` (минимум вызовов).
     """
     from summarizer import get_chunking_config, get_execution_config
     chunk_size = int(get_chunking_config().get("chunk_size", 100000))
@@ -142,12 +157,13 @@ def _emit_running_marker(text: str) -> None:
         "poll_interval_hint_sec": poll_interval_hint_sec,
         "hint": (
             f"Обработка займёт примерно {int(estimated_total_sec)} сек. "
-            f"Опрашивайте через write_stdin не чаще раза в "
-            f"{poll_interval_hint_sec} сек. Используйте wait_for=\"batch cb_\" "
-            f"и wait_timeout_ms={poll_interval_hint_sec * 1000} "
-            f"(лимит nanobot 120000 = 120 сек) — write_stdin вернётся раньше, "
-            f"как только появится следующий progress. yield_time_ms "
-            f"оставьте дефолтным 30000."
+            f"НЕ опрашивайте по таймеру — это лишние LLM-вызовы. Дождитесь "
+            f"конца ОДНИМ блокирующим write_stdin: wait_for=<финальный маркер "
+            f"завершения, см. SKILL.md>, wait_timeout_ms=120000 (максимум "
+            f"nanobot). Навык напечатает этот маркер в stdout строго в самом "
+            f"конце (успех/ошибка/confirmation). Если вернулось «Wait target "
+            f"not observed» (прогон >120 сек), вызовите write_stdin ещё раз с "
+            f"тем же wait_for — вызовов будет минимум."
         ),
     }
     _emit(marker)
@@ -222,7 +238,7 @@ def main() -> None:
                 qe = quick_estimate(file_path)
                 qest = qe["estimate"]
                 if needs_confirmation(qest):
-                    _emit({
+                    _emit_done({
                         "mode": "summarize",
                         "status": "confirmation_required",
                         "estimate": {
@@ -250,7 +266,7 @@ def main() -> None:
         if args.estimate_only:
             insp = _inspect(text, document_path=str(args.file))
             est = _estimate(insp)
-            _emit({
+            _emit_done({
                 "mode": "estimate_only",
                 "status": "ok",
                 "chars_in": len(text),
@@ -286,7 +302,7 @@ def main() -> None:
             insp = _inspect(text, document_path=str(args.file))
             est = _estimate(insp)
             if needs_confirmation(est):
-                _emit({
+                _emit_done({
                     "mode": "summarize",
                     "status": "confirmation_required",
                     "estimate": {
@@ -315,18 +331,18 @@ def main() -> None:
 
         result = run(text, confirmed=args.confirm, **kwargs)
         out = prepare_output(result)
-        _emit(out)
+        _emit_done(out)
     except argparse.ArgumentTypeError as e:
-        _emit(_error(str(e)))
+        _emit_done(_error(str(e)))
         sys.exit(1)
     except FileNotFoundError as e:
-        _emit(_error(str(e)))
+        _emit_done(_error(str(e)))
         sys.exit(1)
     except ValueError as e:
-        _emit(_error(str(e)))
+        _emit_done(_error(str(e)))
         sys.exit(1)
     except Exception as e:
-        _emit(_error(f"Внутренняя ошибка: {e}", e))
+        _emit_done(_error(f"Внутренняя ошибка: {e}", e))
         sys.exit(1)
 
 

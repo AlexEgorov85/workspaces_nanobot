@@ -715,6 +715,11 @@
       "enable": false,
       "maxChars": 8000
     },
+    "legal_summarizer_query": {
+      "enable": true,
+      "timeout_sec": 60,
+      "workspace_root": null
+    },
     "restrictToWorkspace": false,
     "webuiAllowLocalServiceAccess": true,
     "webuiAllowRemotePackageInstall": false,

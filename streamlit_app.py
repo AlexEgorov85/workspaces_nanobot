@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+# Кросс-платформенная UTF-8 кодировка для ВСЕХ exec-подпроцессов (см. gateway.py).
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 import streamlit as st
 

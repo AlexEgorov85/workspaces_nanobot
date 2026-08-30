@@ -1150,11 +1150,11 @@ class TestPatchSpecs:
 
         specs = RuntimePatcher.patch_specs()
         expected = {
-            "context_governor", "save_turn", "exec_limits", "tool_limits",
-            "assemble_outbound", "context_bridge_seed", "async_save",
-            "subagent_logging", "project_tools", "compact_tracking",
-            "compact_command", "idle_guard", "session_content_cleanup",
-            "document_text_threshold",
+            "context_governor", "save_turn", "exec_limits", "exec_timeout_cap",
+            "tool_limits", "assemble_outbound", "context_bridge_seed",
+            "async_save", "subagent_logging", "project_tools",
+            "compact_tracking", "compact_command", "idle_guard",
+            "session_content_cleanup", "document_text_threshold",
         }
         assert set(specs) == expected
 

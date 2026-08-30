@@ -133,7 +133,7 @@ def _required_keys():
         ("gateway.persist_max_files", 100),
         ("gateway.persist_max_age_hours", 0),
         ("gateway.llm_timeout", 300),
-        ("gateway.exec_timeout", 60),
+        ("gateway.exec_timeout", 0),
         ("gateway.log_level", "INFO"),
         ("gateway.print_llm_calls", True),
         ("gateway.print_worker_activity", False),

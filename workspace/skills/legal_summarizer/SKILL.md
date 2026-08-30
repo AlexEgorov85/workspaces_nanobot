@@ -155,6 +155,15 @@ python .../cli.py --file big.pdf --confirm
 ```
 
 **Протокол polling (важно — иначе ~14 лишних LLM-вызовов).**
+
+**Запуск через `exec` — обязательно БЕЗ таймаута.** НЕ передавайте параметр
+`timeout` в вызов `exec` (или передавайте `timeout=0`). Дефолтный таймаут
+exec — 60 сек, и сессия будет убита ровно на 60-й секунде, ДО завершения
+прогона и печати финального маркера. nanobot жёстко ограничивает per-call
+таймаут значением `_MAX_TIMEOUT=600` сек, поэтому явный `timeout > 0`
+тоже опасен для документов длиннее ~10 минут — просто не указывайте его,
+чтобы сессия жила, пока процесс не завершится сам.
+
 Сразу при старте cli.py печатает в stdout **первой строкой** маркер:
 
 ```json
@@ -163,19 +172,20 @@ python .../cli.py --file big.pdf --confirm
   "status": "running",
   "estimated_total_sec": 440,
   "poll_interval_hint_sec": 75,
-  "hint": "Обработка займёт примерно 440 сек. Опрашивайте через write_stdin с wait_for=\"batch cb_\" и wait_timeout_ms=75000 (лимит nanobot 120000) не чаще раза в 75 сек. yield_time_ms оставьте дефолтным 30000."
+  "done_marker": "__LEGAL_SUMMARIZER_DONE__",
+  "hint": "Обработка займёт примерно 440 сек. НЕ опрашивайте по таймеру — это лишние LLM-вызовы. Дождитесь конца ОДНИМ блокирующим write_stdin: wait_for=\"__LEGAL_SUMMARIZER_DONE__\", wait_timeout_ms=120000 (максимум nanobot). Навык напечатает «__LEGAL_SUMMARIZER_DONE__» в stdout в самом конце (успех/ошибка/confirmation). Если вернулось «Wait target not observed» (прогон >120 сек), вызовите write_stdin ещё раз с тем же wait_for — вызовов будет минимум."
 }
 ```
 
 **Обязательно:** когда `exec`/`write_stdin` возвращает этот маркер —
 
-1. Возьми `poll_interval_hint_sec` (жёстко 60–90 сек; clamp обусловлен лимитом `wait_timeout_ms ≤ 120000` в nanobot — больше 90 агенты не могут ждать одним write_stdin и вынуждены опрашивать чаще = больше LLM-вызовов).
-2. Передавай его как `wait_timeout_ms = poll_interval_hint_sec * 1000` в `write_stdin` (НЕ как `yield_time_ms`). Параметр `yield_time_ms` остаётся дефолтным `30000` — это максимум ожидания stdout внутри одного вызова.
-3. Передавай `wait_for="batch cb_"` (или `"DOC CHUNK"` / `"text omitted"` — любой progress-маркер из stdout) — `write_stdin` вернётся **раньше** `wait_timeout_ms`, как только подстрока появится. Это даёт агенту видимый прогресс без лишних polls.
-4. При каждом `write_stdin` в stdout приходят строки `[legal_summarizer] batch cb_NNN: 1/1 chunks queued ...` — это значит скилл реально молотит, не висит. Просто жди следующего интервала.
-5. Финальный результат (`status: "completed"` или `"partial"`) приходит последней строкой stdout, когда процесс завершится.
+1. НЕ опрашивайте по таймеру (каждый опрос = лишний LLM-вызов агента). Дождитесь завершения ОДНИМ блокирующим вызовом `write_stdin`.
+2. Передайте `wait_for = done_marker` (строка `"__LEGAL_SUMMARIZER_DONE__"`) и `wait_timeout_ms = 120000` (жёсткий максимум nanobot). `yield_time_ms` оставьте дефолтным.
+3. `write_stdin` вернётся, как только навык напечатает sentinel в stdout — это значит прогон завершён (успех/`partial`/`confirmation`/`error`). Финальный JSON-результат придёт в том же выводе сразу перед sentinel.
+4. Если прогон дольше 120 сек, `write_stdin` вернётся с `Wait target not observed` (процесс ещё жив). Тогда вызовите `write_stdin` повторно с тем же `wait_for`/`wait_timeout_ms` — это даст минимум LLM-вызовов (по одному на каждые ~120 сек работы), а не по одному каждые 30 сек.
+5. Progress-строки (`[legal_summarizer] batch cb_NNN ...`) идут в **stderr** и sentinel не содержат — `wait_for` на sentinel не сработает ложно.
 
-Почему не больше 90 сек: инцидент 2026-08-28 — агент пытался `wait_timeout_ms=240000`, получил `Invalid parameters: wait_timeout_ms must be <= 120000`, и опрашивал по дефолту каждые 30 сек → 14 LLM-вызовов за 7 мин. С clamp 60-90 и `wait_for` агент укладывается в лимит и видит прогресс.
+Почему блокирующее ожидание, а не опрос: инцидент 2026-08-28 — агент опрашивал `write_stdin` каждые 30 сек (лимит `yield_time_ms ≤ 30000` в nanobot), что дало ~14 LLM-вызовов за 7 мин. `wait_for` на финальный sentinel + `wait_timeout_ms=120000` сокращает их до минимума (1 вызов на прогон ≤120 сек, +1 на каждые следующие 120 сек).
 
 Skill выполнит ВСЕ батчи внутри одного вызова (без polling между
 батчами внутри run()) и в конце вернёт:
@@ -253,6 +263,49 @@ Skill читает `manifest.json`, находит выполненные `chunk
 (`batches_done: [int]`). При resume они нормализуются **in-memory** в
 формат v2 без перезаписи на диск. Legacy operations всегда используют
 **flat reduce** (нет section_path в chunk states).
+
+## Follow-up запросы по сохранённой operation_id
+
+После прогона результат (`status: completed`/`partial`) содержит
+`operation_id` (`result.operation_id`) — это ключ к сохранённым данным
+навыка (`data_store/cache/skills/legal_summarizer/<operation_id>/`):
+manifest.json, result.json, chunks/*.json.
+
+Для follow-up вопросов («сколько статей?», «какие разделы?», «что в чанке N?»)
+**не перепарсивай PDF** через `exec`+pdfplumber — это долго (200+ сек) и
+часто падает на кириллице в Windows-cp1251. Используй кастомный tool
+`legal_summarizer_query`:
+
+```python
+legal_summarizer_query(operation_id="<op_id>", field="stats")           # базовые метрики
+legal_summarizer_query(operation_id="<op_id>", field="articles")        # только article_count
+legal_summarizer_query(operation_id="<op_id>", field="sections")        # список section_path
+legal_summarizer_query(operation_id="<op_id>", field="chunks")          # чанки с summary
+legal_summarizer_query(operation_id="<op_id>", field="tree")            # иерархия sections
+legal_summarizer_query(operation_id="<op_id>", field="all")             # весь manifest
+```
+
+Поля `field`:
+
+- `stats` — `chars_in`, `chunks_total`, `context_batches_total`, `article_count`,
+  `duration_sec`, `started_at`, `completed_at`, `batches_done/failed`.
+- `articles` — только `article_count` (число статей в документе, считается
+  один раз по полному тексту при прогоне через regex `Статья\s+\d+(?:\.\d+)?`).
+- `chunks` — массив с `chunk_id`, `section_id`, `section_path`, `page_start/end`,
+  `summary` (обрезанное до `max_chunk_summary_chars`).
+- `sections` — плоский список секций: `section_id`, `section_path`, `heading`.
+- `tree` — то же, но отсортировано по `section_path` (псевдо-иерархия).
+- `all` — полный manifest.json (для отладки).
+
+Подробнее — `workspace/TOOLS.md` раздел «legal_summarizer_query».
+Tool работает кросс-платформенно (Windows + Linux): `subprocess.run([...],
+shell=False, encoding="utf-8")` + абсолютные пути. Кириллица в путях
+работает, потому что на entry-points выставлены `PYTHONUTF8=1` и
+`PYTHONIOENCODING=utf-8`.
+
+**Что делать, если tool вернул `manifest_not_found`:** операция ещё не
+завершилась (статус `running`) или прогон был удалён. Попроси пользователя
+подождать или повторить `--confirm`.
 
 ## Метрики (Phase 3)
 

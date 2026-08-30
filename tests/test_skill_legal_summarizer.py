@@ -16,7 +16,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1176,6 +1179,351 @@ def test_batch_parse_error_exhausts_returns_partial(monkeypatch, tmp_path):
     assert len(failed) == 1
     assert failed[0].startswith("cb_")
     assert result["stats"]["partial"] is True
+
+
+# ---------------------------------------------------------------------------
+# article_count в run() — для follow-up "сколько статей?"
+# ---------------------------------------------------------------------------
+
+
+def test_run_includes_article_count_in_stats(monkeypatch, tmp_path):
+    """article_count считается один раз по полному тексту и попадает в stats."""
+    monkeypatch.setattr(
+        summarizer.llm,
+        "chat",
+        lambda messages, *, context=None, **kwargs: "Краткое саммари документа.",
+    )
+    text = (
+        "Статья 1. Первая статья.\n"
+        "Статья 2. Вторая статья.\n"
+        "Статья 3. Третья статья.\n"
+        "Ещё текст без слова Статья.\n"
+        "Статья 3. Повтор (тот же номер, но это отдельное вхождение).\n"
+    )
+    result = summarizer.run(text, length="brief", workspace_root=tmp_path)
+    assert result["status"] == "completed"
+    # 4 вхождения "Статья N" в тексте (повторы номеров считаются как
+    # отдельные совпадения regex; "Статья 3" дважды = 2 вхождения).
+    assert result["stats"]["article_count"] == 4
+
+
+def test_run_no_article_pattern_returns_zero(monkeypatch, tmp_path):
+    """Документ без 'Статья N' → article_count = 0 (не None)."""
+    monkeypatch.setattr(
+        summarizer.llm,
+        "chat",
+        lambda messages, *, context=None, **kwargs: "Саммари без статей.",
+    )
+    result = summarizer.run(
+        "Просто произвольный текст без слова Статья и номеров.",
+        length="brief",
+        workspace_root=tmp_path,
+    )
+    assert result["status"] == "completed"
+    assert result["stats"]["article_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# cli_query.py — follow-up по operation_id без перепарсинга PDF
+# ---------------------------------------------------------------------------
+
+
+def _seed_operation(tmp_path: Path, *, article_count: int | None = 7) -> str:
+    """Положить минимальный manifest + result в tmp_path как будто был прогон."""
+    from manifest import (  # noqa: E402  (sys.path настроен выше)
+        manifest_path,
+        result_path,
+        write_chunk_result,
+        write_result,
+    )
+
+    op_id = "op_test_query_001_medium"
+    text = "Статья 1.\nСтатья 2.\n"
+    from summarizer import run as _summarizer_run  # noqa: E402
+    # Реальный прогон не нужен — пишем manifest/result вручную.
+    from manifest import _atomic_write_json  # noqa: E402
+    _atomic_write_json(
+        manifest_path(op_id, tmp_path),
+        {
+            "version": 2,
+            "operation_id": op_id,
+            "status": "completed",
+            "document_path": str(tmp_path / "doc.pdf"),
+            "structure_title": "Test",
+            "chars_in": len(text),
+            "length": "medium",
+            "chunks_total": 1,
+            "context_batches_total": 1,
+            "estimated_llm_calls": 2,
+            "actual_llm_calls": 2,
+            "sections": {},
+            "chunk_states": {"000": {"status": "completed"}},
+            "context_batches": {"cb_000": {"status": "completed"}},
+            "section_summaries": {},
+            "batches_done": ["cb_000"],
+            "batches_failed": [],
+            "last_error": None,
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "completed_at": "2026-01-01T00:01:00+00:00",
+            "duration_sec": 60.0,
+            "article_count": article_count,
+        },
+    )
+    write_result(
+        op_id,
+        {"subject": "Test", "summary": "OK", "length": "medium"},
+        workspace_root=tmp_path,
+    )
+    write_chunk_result(
+        op_id,
+        "000",
+        "Саммари чанка 0.",
+        context_batch_id="cb_000",
+        section_id=None,
+        section_path=None,
+        page_start=1,
+        page_end=1,
+        duration_sec=10.0,
+        workspace_root=tmp_path,
+    )
+    return op_id
+
+
+def _run_cli_query(op_id: str, tmp_path: Path, *extra: str) -> tuple[int, str]:
+    """Запустить cli_query.py в subprocess и вернуть (rc, stdout).
+
+    Изоляция: subprocess (не импорт в pytest-процесс), чтобы sys.path.insert
+    cli_query.py не влиял на другие тесты в общем pytest-запуске.
+    """
+    cli_path = _SKILL_ROOT / "scripts" / "cli_query.py"
+    argv = [
+        sys.executable,
+        str(cli_path),
+        "--operation-id",
+        op_id,
+        "--workspace-root",
+        str(tmp_path),
+        *extra,
+    ]
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    completed = subprocess.run(
+        argv,
+        cwd=str(_PROJECT_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        shell=False,
+        check=False,
+    )
+    return completed.returncode, completed.stdout
+
+
+def test_cli_query_stats_field(tmp_path):
+    op_id = _seed_operation(tmp_path)
+    rc, out = _run_cli_query(op_id, tmp_path, "--field", "stats")
+    assert rc == 0, f"cli_query failed: {out!r}"
+    payload = json.loads(out)
+    assert payload["status"] == "ok"
+    assert payload["field"] == "stats"
+    assert payload["operation_id"] == op_id
+    assert payload["operation_status"] == "completed"
+    assert payload["article_count"] == 7
+    assert payload["chunks_total"] == 1
+    assert payload["duration_sec"] == 60.0
+
+
+def test_cli_query_articles_field(tmp_path):
+    op_id = _seed_operation(tmp_path)
+    rc, out = _run_cli_query(op_id, tmp_path, "--field", "articles")
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["field"] == "articles"
+    assert payload["article_count"] == 7
+
+
+def test_cli_query_sections_field(tmp_path):
+    op_id = _seed_operation(tmp_path)
+    rc, out = _run_cli_query(op_id, tmp_path, "--field", "sections")
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["field"] == "sections"
+    assert payload["sections"] == []  # legacy manifest без sections
+
+
+def test_cli_query_chunks_field(tmp_path):
+    op_id = _seed_operation(tmp_path)
+    rc, out = _run_cli_query(op_id, tmp_path, "--field", "chunks")
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["field"] == "chunks"
+    assert payload["chunk_count"] == 1
+    assert payload["chunks"][0]["chunk_id"] == "000"
+    assert "Саммари чанка 0." in payload["chunks"][0]["summary"]
+
+
+def test_cli_query_all_field(tmp_path):
+    op_id = _seed_operation(tmp_path)
+    rc, out = _run_cli_query(op_id, tmp_path, "--field", "all")
+    assert rc == 0
+    payload = json.loads(out)
+    assert payload["field"] == "all"
+    assert payload["manifest"]["article_count"] == 7
+    assert payload["manifest"]["chunks_total"] == 1
+
+
+def test_cli_query_manifest_not_found(tmp_path):
+    rc, out = _run_cli_query("op_does_not_exist", tmp_path, "--field", "stats")
+    assert rc == 1
+    payload = json.loads(out)
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "manifest_not_found"
+    assert "op_does_not_exist" in payload["message"]
+
+
+def test_cli_query_chunks_truncates_summary(tmp_path):
+    """--field chunks корректно обрезает summary до max_chunk_summary_chars."""
+    from manifest import write_chunk_result  # noqa: E402
+    op_id = _seed_operation(tmp_path)
+    write_chunk_result(
+        op_id,
+        "000",
+        "X" * 5000,
+        context_batch_id="cb_000",
+        section_id=None,
+        section_path=None,
+        page_start=1,
+        page_end=1,
+        duration_sec=10.0,
+        workspace_root=tmp_path,
+    )
+    rc, out = _run_cli_query(
+        op_id, tmp_path, "--field", "chunks",
+        "--max-chunk-summary-chars", "200",
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    summary = payload["chunks"][0]["summary"]
+    assert len(summary) <= 200 + 1  # +1 для "…"
+    assert summary.endswith("…")
+
+
+# ---------------------------------------------------------------------------
+# legal_summarizer_query tool — мок subprocess.run, проверка маршрутизации
+# ---------------------------------------------------------------------------
+
+
+def test_legal_summarizer_query_tool_invokes_cli_query(monkeypatch, tmp_path):
+    """Tool вызывает cli_query.py через subprocess.run и возвращает JSON."""
+    from nanobot.agent.tools.base import ToolResult  # noqa: E402
+
+    # Подгружаем tool-модуль из workspace/tools/.
+    import importlib.util  # noqa: E402
+    _REPO_ROOT = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "workspace.tools.legal_summarizer_query",
+        _REPO_ROOT / "workspace" / "tools" / "legal_summarizer_query.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        # Возвращаем CompletedProcess с фиктивным JSON в stdout.
+        from subprocess import CompletedProcess  # noqa: E402
+        return CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=json.dumps({
+                "status": "ok",
+                "field": "stats",
+                "operation_id": "op_xyz",
+                "article_count": 42,
+            }),
+            stderr="",
+        )
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    tool = mod.LegalSummarizerQueryTool(
+        config=mod.LegalSummarizerQueryToolConfig(workspace_root=None),
+    )
+    result = asyncio.run(tool.execute(operation_id="op_xyz", field="stats"))
+
+    # Аргументы subprocess — список (нет shell), абсолютный путь к cli_query.py.
+    assert captured["argv"][0] == sys.executable
+    assert captured["argv"][1].endswith("cli_query.py")
+    assert "--operation-id" in captured["argv"]
+    assert "op_xyz" in captured["argv"]
+    assert captured["kwargs"]["encoding"] == "utf-8"
+    assert captured["kwargs"]["shell"] is False
+    assert captured["kwargs"]["check"] is False
+
+    # Возврат tool'а — JSON с article_count.
+    payload = json.loads(result)
+    assert payload["status"] == "ok"
+    assert payload["article_count"] == 42
+
+
+def test_legal_summarizer_query_tool_handles_cli_failure(monkeypatch, tmp_path):
+    """Tool корректно обрабатывает subprocess.returncode != 0."""
+    import importlib.util  # noqa: E402
+    from subprocess import CompletedProcess  # noqa: E402
+
+    _REPO_ROOT = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "workspace.tools.legal_summarizer_query",
+        _REPO_ROOT / "workspace" / "tools" / "legal_summarizer_query.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    def fake_run(argv, **kwargs):
+        return CompletedProcess(
+            args=argv, returncode=2, stdout="", stderr="something broke",
+        )
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    tool = mod.LegalSummarizerQueryTool(
+        config=mod.LegalSummarizerQueryToolConfig(workspace_root=None),
+    )
+    result = asyncio.run(tool.execute(operation_id="op_bad", field="stats"))
+    payload = json.loads(result)
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "cli_failed"
+    assert "exit=2" in payload["message"]
+
+
+def test_legal_summarizer_query_tool_handles_timeout(monkeypatch, tmp_path):
+    """Tool корректно обрабатывает TimeoutExpired."""
+    import importlib.util  # noqa: E402
+    import subprocess as _sp  # noqa: E402
+
+    _REPO_ROOT = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "workspace.tools.legal_summarizer_query",
+        _REPO_ROOT / "workspace" / "tools" / "legal_summarizer_query.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    def fake_run(argv, **kwargs):
+        raise _sp.TimeoutExpired(cmd=argv, timeout=60)
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    tool = mod.LegalSummarizerQueryTool(
+        config=mod.LegalSummarizerQueryToolConfig(workspace_root=None),
+    )
+    result = asyncio.run(tool.execute(operation_id="op_slow", field="stats"))
+    payload = json.loads(result)
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "timeout"
 
 
 if __name__ == "__main__":

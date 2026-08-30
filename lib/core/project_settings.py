@@ -189,7 +189,7 @@ class GatewaySettings(_StrictOptional):
     print_worker_activity: bool | None = None
     print_db_activity: bool | None = None
     llm_timeout: int | None = Field(default=None, gt=0)
-    exec_timeout: int | None = Field(default=None, gt=0)
+    exec_timeout: int | None = Field(default=None, ge=0)
     compact: CompactSettings | None = None
     duckdb_query: DuckDbQuerySettings | None = None
     vector_search: VectorSearchSettings | None = None

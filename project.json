@@ -332,11 +332,13 @@
       "list_dir_max_entries": 500           // ListDirTool._DEFAULT_MAX (marker truncated)
     },
     "llm_timeout": 300,               // Таймаут LLM, сек
-    "exec_timeout": 60,               // Таймаут exec, сек
+    "exec_timeout": 0,                // Таймаут exec, сек. 0 = без лимита (сессия живёт, пока процесс не завершится). Важно для долгих навыков вроде legal_summarizer: дефолт 60 убивал прогон ровно на 60-й секунде, до печати финального sentinel. Per-call таймаут агента всё равно ограничен _MAX_TIMEOUT=600s в nanobot — поэтому агент должен НЕ передавать timeout (или передавать 0), иначе прогон >600с будет убит.
+    "exec_timeout_cap_sec": 3600,      // Потолок явного per-call timeout exec (поднимается RuntimePatcher.patch_exec_timeout_cap). Ниже 600 nanobot не даст; 3600 покрывает прогоны до 1 часа даже если агент передаст явный timeout.
     "log_level": "INFO",              // Уровень логирования. Варианты: DEBUG | INFO | WARNING | ERROR
     "print_llm_calls": true,          // Выводить в терминал токены LLM-итераций (→ промпт / ← ответ). Варианты: true | false
     "print_worker_activity": false,    // Выводить в терминал активность пула воркеров [task-worker]/[очередь-задач]: взял/закончил задачу, размер очереди. Варианты: true | false
     "print_db_activity": false,        // Выводить в терминал активность воркеров соединений БД [db-worker]/[очередь-БД]: взял/закончил job. Варианты: true | false
+    "print_tools": false,              // Выводить в терминал результат каждого tool-call (TerminalToolPrintHook). false — гасит шум от долгих write_stdin/exec; ошибки тулов всё равно уходят в agent_gateway_logs.
     "restart_initial_delay_sec": 1.0, // Начальная пауза backoff при перезапуске (gateway_runner.py)
     "restart_max_delay_sec": 30.0,    // Потолок backoff при перезапуске
     "streamlit_port": 8501,           // Порт Streamlit subprocess (subprocess_manager.py)

@@ -9,9 +9,20 @@ FAISS-индексов, вывод Rich-баннера.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import traceback
 from pathlib import Path
+
+# Кросс-платформенная кодировка для ВСЕХ exec-подпроцессов (Windows + Linux).
+# На Windows PowerShell по умолчанию cp1251/OEM, и Python-подпроцессы
+# получают эту кодировку в stdout/stderr — кириллица в путях/выводе
+# ломается (C:\Users\Алексей\… → C:\Users\�������\…). PYTHONUTF8=1 (PEP 540,
+# Python 3.7+) переключает дочерний Python в UTF-8; PYTHONIOENCODING=utf-8
+# фиксит stdout/stderr encoding. На Linux обе переменные обычно уже
+# соответствуют (no-op), но задаём их явно — детерминированно.
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from loguru import logger
 from rich.console import Console

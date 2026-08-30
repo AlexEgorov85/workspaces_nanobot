@@ -937,6 +937,11 @@ def run(
     batches = insp.context_batches
     tree = insp.tree
 
+    # Число статей в документе (для legal-домена). Считаем один раз по полному
+    # тексту (Python stdlib re, кросс-платформенно) — нужно для follow-up
+    # вопросов вроде "сколько статей?" без перепарсинга PDF.
+    article_count = len(re.findall(r"Статья\s+\d+(?:\.\d+)?", text))
+
     if insp.strategy == "single":
         _progress(f"single-call: chars={insp.chars_in}")
         system = _load_prompt("summarize_system").replace(
@@ -979,6 +984,7 @@ def run(
                 "context_batches_total": 0,
                 "sections_total": 0,
                 "meaningful_sections": 0,
+                "article_count": article_count,
                 "map_calls": 1,
                 "section_reduce_calls": 0,
                 "section_trim_calls": 0,
@@ -1020,6 +1026,7 @@ def run(
         started_at=_now_iso(),
         completed_at=None,
         duration_sec=None,
+        article_count=article_count,
         is_legacy=False,
         raw={},
     )
@@ -1301,6 +1308,9 @@ def run(
 
     total_llm_calls = map_calls + section_reduce_calls + section_trim_calls + document_reduce_calls
 
+    # article_count уже посчитан выше (см. начало map-фазы) — повторно
+    # пересчитывать по `text` не нужно.
+
     final_manifest = NormalizedManifest(
         operation_id=operation_id,
         status="partial" if is_partial else "completed",
@@ -1323,6 +1333,7 @@ def run(
         started_at=existing_manifest.started_at if existing_manifest else _now_iso(),
         completed_at=_now_iso(),
         duration_sec=total_duration,
+        article_count=article_count,
         is_legacy=False,
         raw={},
     )
@@ -1338,6 +1349,7 @@ def run(
             "context_batches_total": len(batches),
             "sections_total": result["sections"],
             "meaningful_sections": meaningful,
+            "article_count": article_count,
             "map_calls": map_calls,
             "section_reduce_calls": section_reduce_calls,
             "section_trim_calls": section_trim_calls,

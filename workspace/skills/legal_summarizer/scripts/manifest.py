@@ -75,6 +75,7 @@ class NormalizedManifest:
     started_at: str | None
     completed_at: str | None
     duration_sec: float | None
+    article_count: int | None
     is_legacy: bool
     raw: dict[str, Any]
 
@@ -101,6 +102,7 @@ class NormalizedManifest:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "duration_sec": self.duration_sec,
+            "article_count": self.article_count,
         }
 
 
@@ -203,6 +205,7 @@ def _normalize_v1(raw: dict[str, Any]) -> NormalizedManifest:
         started_at=raw.get("started_at"),
         completed_at=raw.get("completed_at"),
         duration_sec=raw.get("duration_sec"),
+        article_count=raw.get("article_count"),
         is_legacy=True,
         raw=raw,
     )
@@ -231,6 +234,7 @@ def _normalize_v2(raw: dict[str, Any]) -> NormalizedManifest:
         started_at=raw.get("started_at"),
         completed_at=raw.get("completed_at"),
         duration_sec=raw.get("duration_sec"),
+        article_count=raw.get("article_count"),
         is_legacy=False,
         raw=raw,
     )

@@ -71,6 +71,7 @@ def test_manifest_v2_roundtrip(tmp_path):
         started_at="2026-01-01T00:00:00",
         completed_at=None,
         duration_sec=None,
+        article_count=42,
         is_legacy=False,
         raw={},
     )
@@ -81,6 +82,7 @@ def test_manifest_v2_roundtrip(tmp_path):
     assert loaded.chunks_total == 5
     assert loaded.chunk_states["000"]["status"] == "completed"
     assert loaded.sections["s_0001"]["heading"] == "1. Р"
+    assert loaded.article_count == 42
 
 
 def test_legacy_manifest_normalizes_to_v2(tmp_path):

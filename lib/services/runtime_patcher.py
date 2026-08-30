@@ -186,6 +186,20 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
                              "schema bump",
         risk="medium",
     ),
+    "exec_timeout_cap": PatchSpec(
+        name="exec_timeout_cap",
+        purpose="поднять потолок таймаута exec (константа _MAX_TIMEOUT и "
+                "схема параметра timeout) для долгих навыков вроде "
+                "legal_summarizer",
+        nanobot_target="nanobot.agent.tools.shell.ExecTool._MAX_TIMEOUT, "
+                       "shell.ExecTool.parameters.timeout.maximum",
+        reason="хардкод 600с убивал много-минутные прогоны, даже при "
+               "exec_timeout=0, если агент передавал явный timeout",
+        alternatives_checked="exec_timeout=0 в project.json снимает лимит, "
+                             "но только когда агент НЕ передаёт timeout; "
+                             "патч страхует случай явного timeout",
+        risk="medium",
+    ),
     "tool_limits": PatchSpec(
         name="tool_limits",
         purpose="сделать лимиты read_file/grep/list_dir конфигурируемыми",
@@ -459,6 +473,7 @@ class RuntimePatcher:
         self._record(report, "save_turn", self.patch_save_turn(
             settings, workspace_dir, agent))
         self._record(report, "exec_limits", self.patch_exec_limits(settings))
+        self._record(report, "exec_timeout_cap", self.patch_exec_timeout_cap(settings))
         self._record(report, "tool_limits", self.patch_tool_limits(settings))
         self._record(report, "assemble_outbound", self.patch_assemble_outbound(
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
@@ -1097,6 +1112,47 @@ class RuntimePatcher:
         except Exception as exc:
             return False, f"patch failed: {exc}"
         return True, "exec output limits patched"
+
+    # ------------------------------------------------------------------
+    # Патч 1c-2: потолок таймаута exec (константа + схема параметра)
+    # ------------------------------------------------------------------
+
+    def patch_exec_timeout_cap(self, settings: Any) -> tuple[bool, str]:
+        """Поднять хардкод-потолок таймаута exec выше 600 сек.
+
+        nanobot жёстко ограничивает per-call таймаут ``_MAX_TIMEOUT = 600``
+        (``shell.py:247``) и схемой параметра ``timeout`` (``maximum=600``).
+        Для долгих навыков (legal_summarizer: 7–10 мин на ГК РФ) это убивало
+        прогон, даже при ``exec_timeout=0`` в project.json, если агент передавал
+        явный ``timeout`` (TOOLS.md учит передавать таймаут). Патч поднимает
+        оба потолка до ``gateway.exec_timeout_cap_sec`` (дефолт 3600).
+
+        Полностью безлимитной сессия становится при ``exec_timeout=0`` И когда
+        агент НЕ передаёт ``timeout`` (см. SKILL.md legal_summarizer) — тогда
+        ``_resolve_timeout`` возвращает ``None`` и deadline = inf. Патч лишь
+        расширяет коридор для явного ``timeout``.
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+        """
+        cap = int(_get(settings, "gateway", "exec_timeout_cap_sec", default=3600) or 3600)
+        if cap <= 0:
+            return False, "exec_timeout_cap_sec <= 0"
+
+        try:
+            shell = _getloaded("nanobot.agent.tools.shell")
+            if shell is None:
+                return False, "shell module not loaded"
+            if not hasattr(shell.ExecTool, "_MAX_TIMEOUT"):
+                return False, "ExecTool._MAX_TIMEOUT not found"
+
+            shell.ExecTool._MAX_TIMEOUT = cap
+            # Схема параметра timeout: снять потолок 600, иначе агент не сможет
+            # запросить больше и явный timeout всё равно упрётся в 600.
+            self._bump_schema_max(shell.ExecTool, ("timeout",), cap)
+        except Exception as exc:
+            return False, f"patch failed: {exc}"
+        return True, f"exec timeout cap raised to {cap}s"
 
     # ------------------------------------------------------------------
     # Патч 1d: лимиты read_file / grep / list_dir (конфигурируемые)
