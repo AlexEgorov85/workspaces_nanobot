@@ -15,6 +15,7 @@ Dead code ``_register_skill`` (lazy-register через ``scripts/register.py``,
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -22,9 +23,24 @@ import pytest
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SKILL_SCRIPTS = _PROJECT_ROOT / "workspace" / "skills" / "audit_analyzer" / "scripts"
-for _p in (str(_PROJECT_ROOT), str(_SKILL_SCRIPTS)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+_SKILL_CONFIG_PATH = _SKILL_SCRIPTS / "skill_config.py"
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+# Изоляция: грузим ``audit_analyzer.scripts.skill_config`` напрямую через
+# ``importlib.util.spec_from_file_location``, НЕ загрязняя ``sys.path``.
+# Иначе ``summarizer.py`` из legal_summarizer будет импортировать
+# ``skill_config`` от audit_analyzer (где нет ``get_chunking_config``)
+# и тесты сломаются (см. инцидент 2026-08-30).
+
+
+def _load_audit_skill_config():
+    spec = importlib.util.spec_from_file_location(
+        "_test_audit_skill_config", str(_SKILL_CONFIG_PATH)
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture(autouse=True)
@@ -45,7 +61,8 @@ def skill_config():
     """Перезагрузить модуль skill_config (его _CFG вычисляется при импорте)."""
     if "skill_config" in sys.modules:
         del sys.modules["skill_config"]
-    return importlib.import_module("skill_config")
+    # Загружаем через ``_load_audit_skill_config`` (не через sys.path).
+    return _load_audit_skill_config()
 
 
 class TestGetPredefinedScriptsTableRegistryPath:

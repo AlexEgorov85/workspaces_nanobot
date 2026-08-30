@@ -503,29 +503,48 @@ class TestGatewayVectorEmbedding:
         """
         from unittest.mock import patch
         from lib.core.infra_registration import register_vector_storage
+        from lib.services.table_registry import table_registry
 
-        legacy_only = {
-            "gateway": {
-                "vector_index": {"storage_table": TEST_VECTOR_TABLE},
-            },
-        }
-        with patch("config.SETTINGS", legacy_only):
-            registered = register_vector_storage()
-        assert registered is False
+        # Изоляция: явно снимаем vector.storage, чтобы verify именно
+        # поведение legacy-пути (``registered = False``), а не возврат
+        # из-за ранее зарегистрированного storage.
+        table_registry.unregister_infra("vector.storage")
+        try:
+            legacy_only = {
+                "gateway": {
+                    "vector_index": {"storage_table": TEST_VECTOR_TABLE},
+                },
+            }
+            with patch("config.SETTINGS", legacy_only):
+                registered = register_vector_storage()
+            assert registered is False
+        finally:
+            table_registry.unregister_infra("vector.storage")
 
     def test_runtime_prefers_canonical_vector_index_path(self) -> None:
         """Канонический путь ``gateway.vector.index.*`` регистрирует storage."""
         from unittest.mock import patch
         from lib.core.infra_registration import register_vector_storage
+        from lib.services.table_registry import table_registry
 
-        canonical = {
-            "gateway": {
-                "vector": {"index": {"storage_table": TEST_VECTOR_TABLE}},
-            },
-        }
-        with patch("config.SETTINGS", canonical):
-            registered = register_vector_storage()
-        assert registered is True
+        # Изоляция: ``table_registry`` — глобальный singleton; снимаем
+        # vector.storage перед тестом (другие тесты в сессии могли его
+        # зарегистрировать), и очищаем после, чтобы не загрязнять дальше.
+        # ``register_vector_storage`` сам по себе идемпотентен (не
+        # перезатирает уже зарегистрированное), поэтому без очистки
+        # возврат был бы ``False`` и ассерт провалился.
+        table_registry.unregister_infra("vector.storage")
+        try:
+            canonical = {
+                "gateway": {
+                    "vector": {"index": {"storage_table": TEST_VECTOR_TABLE}},
+                },
+            }
+            with patch("config.SETTINGS", canonical):
+                registered = register_vector_storage()
+            assert registered is True
+        finally:
+            table_registry.unregister_infra("vector.storage")
 
 
 class TestProjectMetadataSettings:
