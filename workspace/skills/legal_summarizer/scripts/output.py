@@ -38,9 +38,13 @@ def build_confirmation_options(
 ) -> dict[str, Any]:
     """Сформировать компактный payload ``confirmation_required``.
 
-    Payload компактный (~300 chars) чтобы агент не генерировал длинный
-    ответ (в UI длинные тексты обрезаются спереди). Технические числа
-    (chunks, batches, llm_calls) НЕ включаются.
+    Payload компактный (~400 chars) чтобы агент не генерировал длинный
+    ответ (UI режет спереди). Технические числа (chunks, batches,
+    llm_calls) НЕ включаются.
+
+    Поля ``words`` (250 vs 1000) и ``hint`` нужны агенту чтобы он мог
+    отличить brief от detailed — иначе выводит подробный текст даже для
+    brief mode (инцидент 2026-08-31).
     """
     detailed_min = max(60, int(min_seconds))
     detailed_max = max(detailed_min + 30, int(max_seconds))
@@ -54,11 +58,15 @@ def build_confirmation_options(
                 "min_sec": brief_min,
                 "max_sec": brief_max,
                 "words": 250,
+                "label": "кратко",
+                "style": "краткое саммари (~250 слов)",
             },
             "detailed": {
                 "min_sec": detailed_min,
                 "max_sec": detailed_max,
                 "words": 1000,
+                "label": "подробно",
+                "style": "подробное саммари (~1000 слов)",
             },
         },
         "supports_question": True,
