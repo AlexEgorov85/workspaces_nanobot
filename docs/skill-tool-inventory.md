@@ -14,7 +14,8 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 | `duckdb_query` tool | `workspace/tools/duckdb_query_tool.py` | Tool (generic infrastructure) | — | — | `lib/utils/sql_safety.py` (последняя граница безопасности) + `lib/services/cache_provider_impl.py` | active |
 | `vector_search` tool | `workspace/tools/vector_search_tool.py` | Tool (generic infrastructure) | — | — | `lib/services/cache_provider_impl.py` (FAISS через `CacheProvider.search_vector`) | active |
 | `nl_sql_generate` tool | `workspace/tools/nl_sql_generate.py` | Tool (generic infrastructure) | — | — (через `column_descriptions.lookup`) | `lib/services/nl_sql_runner.py` (общий NL→SELECT pipeline) + `lib/services/schema_formatter.py` (internal service) + `lib/services/cache_provider_impl.py` + `lib/utils/sql_safety.py` + `lib/utils/text_utils.py` | active |
-| `column_descriptions` tool | `workspace/tools/column_descriptions.py` | Tool (generic infrastructure) | — | — | `data_store/column_descriptions.json` (data_file) + `ctx._settings_ref.tools.column_descriptions.entries` (inline fallback) | active |
+| `column_descriptions` tool | `workspace/tools/column_descriptions.py` | Tool (generic infrastructure, тонкий adapter) | — | — | `lib/services/column_descriptions.py::ColumnDescriptionsResolver` (механизм lookup) + `data_store/column_descriptions.json` (data_file) + `ctx._settings_ref.tools.column_descriptions.entries` (inline fallback) | active |
+| `ColumnDescriptionsResolver` | `lib/services/column_descriptions.py` | Internal service (generic mechanism) | — | — | — | active |
 | `example_tool` | `workspace/tools/example.py` | Tool (template) | — | — | — | reference |
 
 ## Удалённые компоненты

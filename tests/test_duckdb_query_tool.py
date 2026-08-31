@@ -88,7 +88,9 @@ class TestConfigAndDiscovery:
         assert c.max_rows == 1000
         assert c.max_result_chars == 50_000
         assert c.query_timeout_sec == 30
-        assert c.schema_name == "oarb"
+        # ``schema_name`` был удалён: tool не привязан к конкретной схеме,
+        # SQL-запросы должны быть fully-qualified (см. TARGET §22.3).
+        assert "schema_name" not in DuckdbQueryToolConfig.model_fields
 
     def test_enabled_default_true(self) -> None:
         assert DuckdbQueryTool.enabled(_make_ctx()) is True

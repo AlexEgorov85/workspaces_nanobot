@@ -1,22 +1,25 @@
-"""Тесты для tool ``column_descriptions``.
+"""Тесты для tool ``column_descriptions`` и сервиса
+``lib.services.column_descriptions.ColumnDescriptionsResolver``.
 
 Покрывает:
-  * lookup по термину (русский/английский);
+  * lookup по термину (русский/английский) через tool.execute();
   * match_all возвращает все entries;
   * fallback на inline entries из settings;
   * fallback на data_file;
   * disabled-режим;
-  * метод lookup() для in-process вызовов.
+  * in-process ``tool.lookup()`` (тонкая обёртка над resolver);
+  * unit-тесты механизма resolver (tokenize/synonyms/normalize) — теперь
+    живут в ``lib/services/column_descriptions.py``.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
+from lib.services.column_descriptions import ColumnDescriptionsResolver
 from workspace.tools.column_descriptions import (
     ColumnDescriptionsTool,
     ColumnDescriptionsToolConfig,
@@ -177,30 +180,30 @@ class TestLookupMethod:
         assert tool.lookup("") == []
 
 
-class TestNormalizeEntries:
+class TestResolverNormalizeEntries:
     def test_list_values_kept(self) -> None:
         raw = {"a|b": ["x.y", "z.w"]}
-        out = ColumnDescriptionsTool._normalize_entries(raw)
+        out = ColumnDescriptionsResolver._normalize(raw)
         assert out == {"a|b": ["x.y", "z.w"]}
 
     def test_string_value_wrapped_in_list(self) -> None:
         raw = {"a": "x.y"}
-        out = ColumnDescriptionsTool._normalize_entries(raw)
+        out = ColumnDescriptionsResolver._normalize(raw)
         assert out == {"a": ["x.y"]}
 
     def test_empty_columns_dropped(self) -> None:
         raw = {"a": [], "b": ["x"]}
-        out = ColumnDescriptionsTool._normalize_entries(raw)
+        out = ColumnDescriptionsResolver._normalize(raw)
         assert out == {"b": ["x"]}
 
     def test_empty_string_keys_dropped(self) -> None:
         raw = {"": ["x"], "a": ["y"]}
-        out = ColumnDescriptionsTool._normalize_entries(raw)
+        out = ColumnDescriptionsResolver._normalize(raw)
         assert out == {"a": ["y"]}
 
     def test_non_dict_returns_empty(self) -> None:
-        assert ColumnDescriptionsTool._normalize_entries("not a dict") == {}
-        assert ColumnDescriptionsTool._normalize_entries(None) == {}
+        assert ColumnDescriptionsResolver._normalize("not a dict") == {}
+        assert ColumnDescriptionsResolver._normalize(None) == {}
 
 
 class TestEnableDisable:
@@ -238,9 +241,9 @@ class TestCreate:
         assert instance.config.data_file is None
 
 
-class TestTokenize:
+class TestResolverTokenize:
     def test_lowercase_and_filter_short(self) -> None:
-        toks = ColumnDescriptionsTool._tokenize("Hello World! a bb ccc")
+        toks = ColumnDescriptionsResolver._tokenize("Hello World! a bb ccc")
         assert "hello" in toks
         assert "world" in toks
         assert "ccc" in toks
@@ -248,15 +251,15 @@ class TestTokenize:
         assert "bb" not in toks
 
 
-class TestSynonymsSplit:
+class TestResolverSynonymsSplit:
     def test_split_on_pipe(self) -> None:
-        assert ColumnDescriptionsTool._split_synonyms("a|b|c") == ["a", "b", "c"]
+        assert ColumnDescriptionsResolver._split_synonyms("a|b|c") == ["a", "b", "c"]
 
     def test_strip_whitespace(self) -> None:
-        assert ColumnDescriptionsTool._split_synonyms(" a | b ") == ["a", "b"]
+        assert ColumnDescriptionsResolver._split_synonyms(" a | b ") == ["a", "b"]
 
     def test_drop_empty(self) -> None:
-        assert ColumnDescriptionsTool._split_synonyms("|a||b|") == ["a", "b"]
+        assert ColumnDescriptionsResolver._split_synonyms("|a||b|") == ["a", "b"]
 
 
 class _FakeCtx:

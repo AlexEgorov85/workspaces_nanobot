@@ -139,6 +139,10 @@ Skill пишет инструкции **в терминах capability**, а н�
 | `max_result_chars` | 50000 | 1000..200000 |
 | `query_timeout_sec` | 30 sec | 1..300 |
 
+Tool **не привязан к конкретной схеме**: SQL-запросы должны быть
+fully-qualified (`schema.table`), `schema_name` в конфиге отсутствует.
+Доступные таблицы определяются `TableRegistry` (см. `docs/table-registry.md`).
+
 ---
 
 ## 7. Контракт `vector_search`
@@ -264,34 +268,43 @@ Tool генерирует SELECT по NL-запросу, валидирует ч
 
 ```text
 ┌────────────────────────────────────────────────────────────────────┐
-│ NlSqlGenerateTool.execute(query, ...) │
-│ │
-│ 1. hints = ColumnDescriptionsTool.lookup(query, max_matches=...) │
-│ 2. runner = NlSqlRunner(provider=CacheProvider, │
-│ schema_formatter=SchemaFormatter(), │
-│ config=NlSqlRunnerConfig(...)) │
-│ 3. result = runner.run(query, hints_block=hints_block) │
-│ 4. → {sql, columns, rows, row_count} (tool contract) │
+│ NlSqlGenerateTool.execute(query, ...)                              │
+│                                                                     │
+│  1. hints = ColumnDescriptionsResolver.lookup(query, max_matches=…)│
+│  2. runner = NlSqlRunner(provider=CacheProvider,                   │
+│                           schema_formatter=SchemaFormatter(),      │
+│                           config=NlSqlRunnerConfig(...))           │
+│  3. result = runner.run(query, hints_block=hints_block)            │
+│  4. → {sql, columns, rows, row_count} (tool contract)              │
 └────────────────────────────────────────────────────────────────────┘
- ▲ │
- │ ▼
- ┌─────────────────────────┐ ┌────────────────────────────────┐
- │ ColumnDescriptionsTool │ │ NlSqlRunner │
- │ (workspace/tools/) │ │ (lib/services/) │
- │ + data_file fallback │ │ + whitelist TableRegistry │
- │ + inline entries │ │ + schema SchemaFormatter │
- └─────────────────────────┘ │ + few-shot registry │
- │ + LLM retry (max_retries+1) │
- │ + validate_sql + EXPLAIN │
- │ + provider.query_sql │
- └────────────────────────────────┘
+                              ▲                                          │
+                              │                                          ▼
+                ┌─────────────────────────┐      ┌────────────────────────────────┐
+                │ ColumnDescriptions       │      │ NlSqlRunner                    │
+                │ Resolver                │      │ (lib/services/)                │
+                │ (lib/services/)         │      │ + whitelist TableRegistry      │
+                │ + tokenize + match      │      │ + schema SchemaFormatter       │
+                │ + inline/data_file dict │      │ + few-shot registry             │
+                └─────────────────────────┘      │ + LLM retry (max_retries+1)   │
+                ▲                                  │ + validate_sql + EXPLAIN      │
+                │                                  │ + provider.query_sql          │
+                │                                  └────────────────────────────────┘
+                │
+   ┌────────────────────────────┐
+   │ workspace/tools/            │
+   │ column_descriptions.py      │
+   │ (тонкий adapter: ctx →      │
+   │ resolver → JSON-контракт)   │
+   └────────────────────────────┘
 ```
 
-`SchemaFormatter` — **internal service** в `lib/services/schema_formatter.py`,
-не tool. Он формирует текстовое описание схемы для system prompt и кешируется
-на уровне процесса (TTL). Tool'ы обращаются к нему через DI / in-process
-call, не через function calling — это дешевле по токенам и не плодит
-лишний шаг в pipeline агента.
+`SchemaFormatter` и `ColumnDescriptionsResolver` — **internal services**
+в `lib/services/`. `SchemaFormatter` формирует текстовое описание схемы
+для system prompt и кешируется на уровне процесса (TTL). Resolver —
+чистый механизм tokenize+match без доменных знаний (словарь
+термин→колонка живёт во внешней конфигурации). Tool'ы обращаются к
+ним через DI / in-process call, не через function calling — это
+дешевле по токенам и не плодит лишний шаг в pipeline агента.
 
 Общий pipeline (`NlSqlRunner`) переиспользуется tool'ом `nl_sql_generate`;
 skill `audit_analyzer` после перевода на tool-only не имеет собственного
@@ -341,23 +354,36 @@ Tool возвращает структурированный словарь по
 
 ```json
 {
-  "audited objects|objects of audit|проверяемые|объекты проверок": [
-    "oarb.audits.auditee_entity"
-  ],
-  "violations|нарушения": ["oarb.violations"]
+  "synonym 1|synonym 2|синоним": [
+    "schema.table.column"
+  ]
 }
 ```
 
 Ключ может содержать `|` — список синонимов; совпадение с любым из
 них считается положительным. Поиск case-insensitive, токены ≥ 3
-символов.
+символов. Словарь — **домен-данные конкретного skill'а**; resolver
+(generic механизм) не знает, какие именно ключи там лежат.
 
 ### In-process API
 
-`ColumnDescriptionsTool.lookup(term, max_matches=5)` — синхронный
-вызов из `NlSqlGenerateTool.execute()` (не через function calling).
-Возвращает список `{"terms": [...], "columns": [...]}` для подмешивания
-в hints_block.
+Resolver живёт в `lib/services/column_descriptions.py` как
+`ColumnDescriptionsResolver`. Это generic механизм — без знания о
+конкретных таблицах/индексах. Используется двумя путями:
+
+- `ColumnDescriptionsResolver.lookup(term, max_matches=5)` —
+  синхронный in-process вызов из `NlSqlGenerateTool.execute()`
+  (не через function calling). Возвращает список
+  `{"terms": [...], "columns": [...]}` для подмешивания в hints_block.
+- `ColumnDescriptionsTool` (`workspace/tools/column_descriptions.py`)
+  — тонкий adapter над resolver: читает конфиг через
+  `ctx._settings_ref.tools.column_descriptions.{entries,data_file}`
+  и публикует matches через function calling для отладки или
+  ручного использования агентом.
+
+Source-словарь resolver получает из inline-`entries` (конфиг) или
+`data_file` (JSON). Если оба не заданы — resolver возвращает
+пустые matches.
 
 ---
 

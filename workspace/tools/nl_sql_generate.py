@@ -3,13 +3,13 @@
 Регистрируется автоматически через ``RuntimePatcher.patch_project_tools``
 (см. ``lib/services/runtime_patcher.py``).
 
-Назначение: заменяет режим ``generated_sql`` навыка ``audit_analyzer``
-(и других skill'ов с NL→SELECT) в виде generic tool. Использует:
+Назначение: generic NL→SELECT pipeline, переиспользуемый любым skill'ом
+с NL-запросами. Использует:
   * ``lib/services/nl_sql_runner.py::NlSqlRunner`` — общий pipeline
     (whitelist + LLM retry + execute);
   * ``lib/services/schema_formatter.py::SchemaFormatter`` — internal
     service для описания схемы (НЕ tool);
-  * ``workspace/tools/column_descriptions.py::ColumnDescriptionsTool.lookup``
+  * ``lib/services/column_descriptions.py::ColumnDescriptionsResolver.lookup``
     — синхронный in-process lookup подсказок по термину запроса;
   * ``lib/services/cache_provider_impl.CacheProvider`` — выполнение SQL.
 
@@ -31,9 +31,11 @@
 
 Контракт и поведение описаны в ``docs/skill-tool-architecture.md`` §8.1.
 
-Domain-free: tool не знает про конкретные таблицы (``oarb.*``) и индексы.
-Whitelist приходит из ``TableRegistry``, few-shot — из ресурсов с
-``label='scripts_registry'``.
+Domain-free: tool не знает про конкретные таблицы и индексы. Whitelist
+таблиц приходит из ``TableRegistry`` (skills.* + infra-ресурсы),
+few-shot — из ресурсов, зарегистрированных с маркером
+``label='scripts_registry'``. Словарь колонок для hints — во внешней
+конфигурации (см. ``lib/services/column_descriptions.py``).
 
 Observability покрывается штатным ``lib/hooks/tool_audit_hook.py``
 (см. TARGET_ARCHITECTURE.md §26) — этот tool не дублирует логирование.
@@ -47,11 +49,11 @@ from typing import Any, ClassVar, Optional
 
 from pydantic import BaseModel, Field
 
+from lib.services.column_descriptions import ColumnDescriptionsResolver
 from lib.services.nl_sql_runner import NlSqlRunner, NlSqlRunnerConfig
 from lib.services.schema_formatter import SchemaFormatter
 from lib.utils.text_utils import sanitize_value, truncate_middle
 from nanobot.agent.tools.base import Tool, tool_parameters
-from workspace.tools.column_descriptions import ColumnDescriptionsTool
 
 
 __all__ = ["NlSqlGenerateTool", "NlSqlGenerateToolConfig"]
@@ -130,7 +132,7 @@ class NlSqlGenerateTool(Tool):
         self.config = config
         self._provider: Optional[Any] = None
         self._schema_formatter: SchemaFormatter | None = None
-        self._column_descriptions: ColumnDescriptionsTool | None = None
+        self._column_descriptions: ColumnDescriptionsResolver | None = None
 
     def set_provider(self, provider: Any) -> None:
         """DI для CacheProvider (production / integration tests)."""
@@ -140,14 +142,14 @@ class NlSqlGenerateTool(Tool):
         """DI для SchemaFormatter (unit-тесты)."""
         self._schema_formatter = formatter
 
-    def set_column_descriptions(self, tool: ColumnDescriptionsTool) -> None:
-        """DI для ColumnDescriptionsTool (unit-тесты).
+    def set_column_descriptions(self, resolver: ColumnDescriptionsResolver) -> None:
+        """DI для ColumnDescriptionsResolver (unit-тесты).
 
-        Без DI tool создаёт свой экземпляр с дефолтным конфигом —
+        Без DI tool создаёт свой resolver с пустым source —
         этого достаточно, если column_descriptions настроен в
         ``tools.column_descriptions`` (``data_file`` или inline entries).
         """
-        self._column_descriptions = tool
+        self._column_descriptions = resolver
 
     @classmethod
     def config_cls(cls):
@@ -319,10 +321,12 @@ class NlSqlGenerateTool(Tool):
         block = "\n".join(lines).rstrip()
         return block if block.count("\n") >= 2 else ""
 
-    def _default_column_descriptions(self) -> ColumnDescriptionsTool | None:
+    def _default_column_descriptions(self) -> ColumnDescriptionsResolver | None:
         try:
-            cd = ColumnDescriptionsTool.create(object())
-            return cd
+            from workspace.tools.column_descriptions import ColumnDescriptionsTool
+
+            cd_tool = ColumnDescriptionsTool.create(object())
+            return cd_tool._get_resolver()
         except Exception:
             return None
 

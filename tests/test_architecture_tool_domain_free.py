@@ -16,6 +16,21 @@ FORBIDDEN_IDENTIFIERS = {
     "audit", "violations", "audits_index", "audit_analyzer",
 }
 
+# Строковые токены, запрещённые в docstring'ах generic tools.
+# Проверяются как подстроки в литералах ``ast.Constant`` внутри docstring.
+# ``audit`` как самостоятельное слово здесь НЕ включено намеренно — имя
+# ``tool_audit_hook`` (инфра) легитимно; проверка идёт по уникальным
+# домен-маркерам (``oarb``, именам таблиц/индексов конкретного домена).
+FORBIDDEN_STRING_TOKENS = (
+    "oarb",
+    "audit_analyzer",
+    "audits_index",
+    "violations_index",
+    "audit_reports_index",
+    "audit_reports",
+    "auditee_entity",
+)
+
 
 def _tool_files() -> list[Path]:
     tools_dir = REPO_ROOT / "workspace" / "tools"
@@ -110,3 +125,57 @@ class TestToolNoDomainRouting:
                 f"{tool_path} contains forbidden routing pattern '{pattern}'. "
                 "Generic tool must not contain caller/skill/domain routing (TARGET §22.9)."
             )
+
+
+def _iter_tool_docstring_constants(tree: ast.AST) -> list[tuple[str, int]]:
+    """Собрать все строковые литералы, привязанные к docstring'ам tool'ов.
+
+    Docstring в Python представлен как первый стейтмент функции/класса с
+    ``ast.Constant`` ``str``-значением. Возвращает пары (значение, line_no).
+    """
+    out: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+            continue
+        if not node.body:
+            continue
+        first = node.body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            out.append((first.value.value, first.value.lineno))
+    return out
+
+
+class TestToolDocstringsNoDomainLiterals:
+    """String literals в docstring'ах generic tools не должны содержать
+    domain-маркеры (TARGET §22.3).
+
+    AST-проверка ``FORBIDDEN_IDENTIFIERS`` ловит только имена
+    (FunctionDef/Name/arg/Attribute) — этого недостаточно: docstring
+    ``"не знает про oarb.*"`` спокойно проходит. Этот тест покрывает
+    именно строковые литералы внутри docstring'ов, где leak и наблюдался.
+    """
+
+    @pytest.mark.parametrize(
+        "tool_path",
+        [str(p.relative_to(REPO_ROOT)) for p in _tool_files()],
+    )
+    def test_no_domain_tokens_in_docstrings(self, tool_path: str) -> None:
+        source = (REPO_ROOT / tool_path).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        offenders: list[tuple[str, int, str]] = []
+        for doc_value, doc_line in _iter_tool_docstring_constants(tree):
+            lower = doc_value.lower()
+            for token in FORBIDDEN_STRING_TOKENS:
+                if token.lower() in lower:
+                    offenders.append((token, doc_line, doc_value[:200]))
+        assert not offenders, (
+            f"{tool_path} docstrings contain forbidden domain tokens: "
+            f"{[(t, l) for t, l, _ in offenders]}. "
+            "Tool docstrings must be domain-free (TARGET §22.3). "
+            "Generic infrastructure layer should not reference concrete "
+            "tables/indexes from any skill."
+        )

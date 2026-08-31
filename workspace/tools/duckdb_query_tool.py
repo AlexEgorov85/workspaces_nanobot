@@ -13,11 +13,15 @@
           "enable": true,
           "max_rows": 1000,
           "max_result_chars": 50000,
-          "query_timeout_sec": 30,
-          "schema_name": "oarb"
+          "query_timeout_sec": 30
         }
       }
     }
+
+SQL-запросы должны быть fully-qualified (``schema.table``); tool не
+привязан к конкретной схеме и не подставляет её неявно. Доступные
+таблицы определяются ``TableRegistry`` (skills.* + infra-ресурсы,
+см. ``docs/table-registry.md``).
 
 Инфраструктура выполнения запросов:
   * ``lib/utils/sql_safety.py::validate_sql`` — последняя граница
@@ -50,7 +54,6 @@ class DuckdbQueryToolConfig(BaseModel):
     max_rows: int = Field(default=1000, ge=1, le=10000)
     max_result_chars: int = Field(default=50_000, ge=100, le=200_000)
     query_timeout_sec: int = Field(default=30, ge=1, le=300)
-    schema_name: str = "oarb"
 
 
 @tool_parameters({
@@ -133,7 +136,7 @@ class DuckdbQueryTool(Tool):
         # pydantic-модель или SimpleNamespace: читаем по атрибутам
         out: dict[str, Any] = {}
         for field in ("enable", "max_rows", "max_result_chars",
-                      "query_timeout_sec", "schema_name"):
+                      "query_timeout_sec"):
             if hasattr(section, field):
                 out[field] = getattr(section, field)
         if not out:

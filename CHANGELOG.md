@@ -20,6 +20,45 @@
 > `audit_vectors` теперь попадает в DuckDB-кэш через инфра-регистрацию
 > (`gateway.vector_index.storage_table`).
 
+### Changed (generic tools → domain-free cleanup)
+
+- **`workspace/tools/duckdb_query_tool.py`** — удалён неиспользуемый
+  `DuckdbQueryToolConfig.schema_name` (дефолт `"oarb"`). Tool не
+  привязан к конкретной схеме: SQL-запросы должны быть fully-qualified,
+  доступные таблицы определяются `TableRegistry`. Тест
+  `tests/test_duckdb_query_tool.py::test_default_config` обновлён.
+- **`workspace/tools/nl_sql_generate.py`** — убраны упоминания
+  `oarb.*` и `audit_analyzer` из docstring. Указатель на
+  `workspace.tools.column_descriptions.ColumnDescriptionsTool.lookup`
+  заменён на `lib.services.column_descriptions.ColumnDescriptionsResolver`.
+- **`workspace/tools/column_descriptions.py`** — убраны audit-примеры
+  (`oarb.audits.auditee_entity`, `oarb.violations`) из docstring.
+  Tool переработан в **тонкий adapter** поверх нового
+  `lib/services/column_descriptions.py::ColumnDescriptionsResolver`.
+- **`lib/services/column_descriptions.py`** — новый internal service:
+  generic механизм `tokenize`/`match`/`score` без доменных знаний.
+  Словарь термин→колонка полностью во внешней конфигурации
+  (`config.json::tools.column_descriptions.entries` или `data_file`).
+  Resolver ничего не знает про конкретные таблицы/индексы.
+- **`tests/test_architecture_tool_domain_free.py`** — добавлен новый
+  класс `TestToolDocstringsNoDomainLiterals` (8 параметризованных
+  тестов): проверяет, что строковые литералы в docstring'ах generic
+  tools не содержат домен-маркеров (`oarb`, `audit_analyzer`,
+  `audits_index`, `violations_index`, `audit_reports_index`,
+  `auditee_entity`). AST-проверка только по идентификаторам
+  (FunctionDef/Name/arg/Attribute) пропускала такие литералы —
+  теперь это закрыто.
+- **`docs/skill-tool-architecture.md`** — обновлены §6 (удалён
+  `schema_name` из конфига `duckdb_query`), §8.1 (pipeline diagram
+  показывает `ColumnDescriptionsResolver` в `lib/services/`),
+  §8.2 (формат `data_file` без audit-примеров, разделение
+  resolver ↔ tool-adapter).
+- **`docs/skill-tool-inventory.md`** — добавлена строка
+  `ColumnDescriptionsResolver` (internal service, generic mechanism),
+  обновлена строка `column_descriptions` tool (теперь «тонкий adapter»).
+- **`workspace/TOOLS.md`** — секция `column_descriptions` обновлена:
+  убраны `oarb.*` примеры, добавлено упоминание `ColumnDescriptionsResolver`.
+
 ### Added
 
 - **Tool `nl_sql_generate`** (`workspace/tools/nl_sql_generate.py`) —

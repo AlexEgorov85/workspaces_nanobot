@@ -167,14 +167,14 @@ NL-запрос в SELECT по whitelist'у зарегистрированных
 }
 ```
 
-Формат `data_file`:
+Формат `data_file` (словарь generic, конкретные таблицы — на стороне
+skill'а):
 
 ```json
 {
-  "audited objects|objects of audit|проверяемые|объекты проверок": [
-    "oarb.audits.auditee_entity"
-  ],
-  "violations|нарушения": ["oarb.violations"]
+  "synonym 1|synonym 2|синоним": [
+    "schema.table.column"
+  ]
 }
 ```
 
@@ -182,13 +182,14 @@ NL-запрос в SELECT по whitelist'у зарегистрированных
 считается положительным.
 
 **Когда звать:** в большинстве случаев звать напрямую не нужно —
-`nl_sql_generate` сам подтянет hints через in-process lookup. Прямой
-вызов имеет смысл, если хочешь заранее посмотреть подсказки перед
-генерацией SQL или при отладке словаря.
+`nl_sql_generate` сам подтянет hints через in-process lookup
+(`lib.services.column_descriptions.ColumnDescriptionsResolver`).
+Прямой вызов имеет смысл, если хочешь заранее посмотреть подсказки
+перед генерацией SQL или при отладке словаря.
 
 **Пример:**
 
-- «Какие колонки подходят для “проверяемые объекты”?» →
-  `column_descriptions(term="проверяемые объекты")` →
-  `{matches: [{terms: [...], columns: ["oarb.audits.auditee_entity"]}]}`
+- «Какие колонки подходят для синонима?» →
+  `column_descriptions(term="...")` →
+  `{matches: [{terms: [...], columns: ["schema.table.column"]}]}`
 
