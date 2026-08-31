@@ -49,9 +49,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--length",
         default=None,
-        choices=["brief", "medium", "detailed"],
-        help="Объём саммари: brief (150–250 слов), medium (400–600, "
-             "по умолч.), detailed (800–1200). По умолчанию — из project.json.",
+        choices=["brief", "detailed"],
+        help="Объём саммари: brief (150–250 слов) — первые 8 chunks; "
+             "detailed (800–1200) — весь документ. По умолчанию — из project.json.",
+    )
+    parser.add_argument(
+        "--question",
+        default=None,
+        help="Конкретный вопрос по документу (взаимоисключающе с --length). "
+             "Skill найдёт релевантные chunks (≤8) и ответит кратко. "
+             "Если ничего не найдено — fallback на чтение всего документа.",
     )
     parser.add_argument(
         "--focus",
@@ -225,6 +232,12 @@ def main() -> None:
         from skill_config import get_default_length
 
         length = args.length or get_default_length()
+        if args.question and args.length:
+            _emit_done(_error(
+                "--question и --length взаимно исключают друг друга. "
+                "Укажите либо --question, либо --length."
+            ))
+            sys.exit(2)
         file_path = Path(args.file)
 
         # Fast pre-confirm gate: БЕЗ полной экстракции текста. Для PDF
@@ -286,6 +299,7 @@ def main() -> None:
         kwargs: dict = {
             "length": length,
             "focus": args.focus,
+            "question": args.question,
             "operation_id": args.operation_id,
             "document_path": str(args.file),
             # Корень РЕПО (не workspace dir) — стабильный абсолютный путь,

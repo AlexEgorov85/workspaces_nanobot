@@ -47,6 +47,8 @@ from typing import Any, ClassVar
 
 from nanobot.agent import AgentHook
 
+from workspace.utils.session_key import safe_session_key
+
 logger = logging.getLogger(__name__)
 
 _PATH_KEYS: tuple[str, ...] = ("path", "filePath", "file_path", "filepath")
@@ -191,7 +193,7 @@ class SessionFileRedirectHook(AgentHook):
             return
 
         session_key = self._session_key(context)
-        safe_key = self._sanitize_session_key(session_key)
+        safe_key = safe_session_key(session_key)
         session_sub = self._sessions_root / safe_key
         # session_sub может не существовать — это нормально, идём к fallback'ам.
 
@@ -369,7 +371,7 @@ class SessionFileRedirectHook(AgentHook):
             logger.warning("SessionFileRedirectHook: cannot create %s: %s", self._sessions_root, exc)
             return None
 
-        safe_key = self._sanitize_session_key(session_key)
+        safe_key = safe_session_key(session_key)
         sub = self._sessions_root / safe_key
         try:
             sub.mkdir(parents=True, exist_ok=True)
@@ -392,16 +394,6 @@ class SessionFileRedirectHook(AgentHook):
                     candidate = alt
                     break
         return str(candidate)
-
-    @staticmethod
-    def _sanitize_session_key(key: str) -> str:
-        """Сделать из session_key имя директории, валидное на Windows и Linux.
-
-        ``cli:1`` → ``cli_1``, ``telegram:8281248569`` → ``telegram_8281248569``,
-        пустая строка → ``__nosession__``.
-        """
-        cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", key).strip("._-")
-        return cleaned or "__nosession__"
 
     @classmethod
     def _safe_leaf(cls, target: str) -> str:

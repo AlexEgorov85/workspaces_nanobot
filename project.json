@@ -219,7 +219,7 @@
       "enabled": true,
 
       "cli": {                                       // legal_summarize --length ...
-        "default_length": "medium",                  // brief | medium | detailed
+        "default_length": "brief",                   // brief | detailed (medium удалён в Phase 2B+)
         "timeout_sec": 120,
         "max_retries": 3
       },
@@ -253,6 +253,8 @@
         "estimated_chunk_duration_sec": 20,          // Оценка времени обработки одного ContextBatch
                                                    // (Phase 2B: считается per-batch, а не per-chunk).
         "max_chunks_for_execution": 50,              // Safety net: chunks_total > этого значения → requires_continuation.
+        "max_chunks_per_question": 8,                // Лимит выборки для brief и --question режимов.
+                                                     // brief: первые N chunks; question: ≤N релевантных.
         "context_batching": {                        // Phase 2B: параметры TokenBudget.
           "chars_per_token": 3.5,                    // Оценка токенов для русского текста.
           "system_prompt_tokens": 1200,              // Резерв под system prompt + format(length_instruction).

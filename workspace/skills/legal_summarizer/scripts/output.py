@@ -68,6 +68,9 @@ def prepare_output(result: dict) -> dict:
             out["stats"] = {
                 k: v for k, v in stats.items() if k not in _HIDDEN_LLM_CALL_COUNTERS
             }
+        cache_stats = result.get("cache_stats")
+        if cache_stats:
+            out["cache_stats"] = cache_stats
         # partial: саммари есть, но часть батчей не распарсилась после retry.
         # Агент должен сообщить пользователю и предложить resume.
         if status == "partial":

@@ -89,13 +89,13 @@ def test_run_uses_same_operation_id_when_provided(monkeypatch, tmp_path):
     assert result["operation_id"] == "op_test_resume_001"
 
 
-def test_invalid_length_falls_back_to_medium(monkeypatch, tmp_path):
+def test_invalid_length_falls_back_to_brief(monkeypatch, tmp_path):
     def fake_chat(messages, *, context=None, **kwargs):
         return "Это договор.\n\nСуть."
 
     monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
     result = summarizer.run("Договор.", length="nonexistent", workspace_root=tmp_path)
-    assert result["result"]["length"] == "medium"
+    assert result["result"]["length"] == "brief"
 
 
 def test_subject_extracted_from_first_line(monkeypatch, tmp_path):
@@ -1528,3 +1528,393 @@ def test_legal_summarizer_query_tool_handles_timeout(monkeypatch, tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# brief_strategy: выбор chunks для brief / question
+# ---------------------------------------------------------------------------
+
+from brief_strategy import select_brief_chunks, select_relevant_chunks  # noqa: E402
+
+
+class _FakeChunk:
+    """Минимальный chunk для тестов выборки: только .text нужен."""
+    def __init__(self, chunk_id: str, text: str) -> None:
+        self.chunk_id = chunk_id
+        self.text = text
+
+
+def test_brief_strategy_selects_first_n_chunks():
+    chunks = [_FakeChunk(str(i), f"chunk-{i}") for i in range(20)]
+    chosen = select_brief_chunks(chunks, max_chunks=8)
+    assert len(chosen) == 8
+    assert [c.chunk_id for c in chosen] == ["0", "1", "2", "3", "4", "5", "6", "7"]
+
+
+def test_brief_strategy_returns_all_when_below_max():
+    chunks = [_FakeChunk(str(i), f"chunk-{i}") for i in range(3)]
+    chosen = select_brief_chunks(chunks, max_chunks=8)
+    assert len(chosen) == 3
+
+
+def test_brief_strategy_preserves_canonical_order():
+    chunks = [_FakeChunk(str(i), f"chunk-{i}") for i in range(20)]
+    chosen = select_brief_chunks(chunks, max_chunks=5)
+    ids = [int(c.chunk_id) for c in chosen]
+    assert ids == sorted(ids)
+
+
+def test_question_strategy_finds_keyword_in_chunks():
+    chunks = [
+        _FakeChunk("0", "Общие положения договора."),
+        _FakeChunk("1", "Стороны: ООО Ромашка и Иванов."),
+        _FakeChunk("2", "Штраф за просрочку — 0.1% в день."),
+        _FakeChunk("3", "Срок оплаты — 30 дней с момента подписания."),
+        _FakeChunk("4", "Расторжение договора по соглашению сторон."),
+    ]
+    chosen = select_relevant_chunks("что про штраф", chunks, max_chunks=8)
+    assert chosen is not None
+    assert len(chosen) == 1
+    assert chosen[0].chunk_id == "2"
+
+
+def test_question_strategy_returns_none_when_no_match():
+    chunks = [
+        _FakeChunk("0", "Общие положения договора."),
+        _FakeChunk("1", "Стороны: ООО Ромашка и Иванов."),
+    ]
+    chosen = select_relevant_chunks("xyz123абв", chunks, max_chunks=8)
+    assert chosen is None
+
+
+def test_question_strategy_returns_none_when_question_too_short():
+    chunks = [_FakeChunk("0", "любой текст.")]
+    chosen = select_relevant_chunks("а б в", chunks, max_chunks=8)
+    assert chosen is None
+
+
+def test_question_strategy_respects_max_chunks():
+    chunks = [
+        _FakeChunk(str(i), f"штраф номер {i}") for i in range(20)
+    ]
+    chosen = select_relevant_chunks("штраф", chunks, max_chunks=5)
+    assert chosen is not None
+    assert len(chosen) == 5
+
+
+def test_question_strategy_preserves_canonical_order():
+    chunks = [
+        _FakeChunk("0", "без ключевого слова"),
+        _FakeChunk("1", "первый штраф"),
+        _FakeChunk("2", "без ключевого слова"),
+        _FakeChunk("3", "второй штраф"),
+    ]
+    chosen = select_relevant_chunks("штраф", chunks, max_chunks=8)
+    assert chosen is not None
+    ids = [c.chunk_id for c in chosen]
+    assert ids == ["1", "3"]
+
+
+# ---------------------------------------------------------------------------
+# summarizer.run() — выборка chunks по режиму + cache_stats
+# ---------------------------------------------------------------------------
+
+
+def test_run_question_passes_question_to_llm(monkeypatch, tmp_path):
+    """Question mode пробрасывает вопрос в system prompt LLM-вызова."""
+    captured = {}
+
+    def fake_chat(messages, *, context=None, **kwargs):
+        captured["system"] = messages[0]["content"]
+        # Map-режим требует формат "DOCUMENT CHUNK N: ...". Имитируем его.
+        body = messages[1]["content"]
+        # Достаём "DOCUMENT CHUNK N" из body.
+        import re as _re
+        chunks = _re.findall(r"DOCUMENT CHUNK\s+(\d+)", body)
+        if chunks:
+            return "\n\n".join(
+                f"DOCUMENT CHUNK {n}: штраф {n}" for n in chunks
+            )
+        return "Это договор.\n\nШтрафы описаны."
+
+    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+
+    text = "Договор аренды на 11 месяцев. Штраф за просрочку. " * 1500
+    result = summarizer.run(
+        text,
+        question="что про штрафы?",
+        workspace_root=tmp_path,
+    )
+    assert result["status"] == "completed"
+    assert "штрафы" in captured["system"].lower() or "штраф" in captured["system"].lower()
+
+
+def test_run_question_mode_falls_back_to_all_chunks_when_no_match(
+    monkeypatch, tmp_path,
+):
+    """Если keyword match пустой — chosen = все chunks (detailed fallback)."""
+    import re as _re
+
+    def fake_chat(messages, *, context=None, **kwargs):
+        # Имитируем map-reduce формат.
+        body = messages[1]["content"]
+        chunks = _re.findall(r"DOCUMENT CHUNK\s+(\d+)", body)
+        if chunks:
+            return "\n\n".join(
+                f"DOCUMENT CHUNK {n}: fallback {n}" for n in chunks
+            )
+        return "Документ не содержит данных по вопросу."
+
+    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+
+    cfg = summarizer.get_chunking_config()
+    threshold = int(cfg["single_call_threshold"])
+    text = "Общие положения без ключевых слов. " * (threshold // 30 + 100)
+    result = summarizer.run(
+        text,
+        question="xyzабв123",  # нет таких слов в тексте
+        workspace_root=tmp_path,
+    )
+    # Не failed — fallback отработал
+    assert result["status"] == "completed"
+
+
+def test_run_returns_cache_stats(monkeypatch, tmp_path):
+    """Завершённый прогон содержит cache_stats."""
+    def fake_chat(messages, *, context=None, **kwargs):
+        return "Это договор.\n\nСуть."
+
+    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+
+    text = "Договор аренды."
+    result = summarizer.run(text, length="brief", workspace_root=tmp_path)
+    assert "cache_stats" in result
+    cs = result["cache_stats"]
+    assert "document_id" in cs
+    assert "chunks_from_cache" in cs
+    assert "chunks_processed" in cs
+    assert "cache_enabled" in cs
+    assert cs["cache_enabled"] is False   # tmp_path не содержит sessions/<key>/
+
+
+def test_run_doc_cache_enabled_when_path_has_session_key(monkeypatch, tmp_path):
+    """Если --file содержит data_store/cache/sessions/<key>/ → cache_enabled=True."""
+    def fake_chat(messages, *, context=None, **kwargs):
+        return "Это договор.\n\nСуть."
+
+    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+
+    session_dir = tmp_path / "data_store" / "cache" / "sessions" / "cli_1"
+    session_dir.mkdir(parents=True)
+    doc_path = session_dir / "doc.pdf"
+    doc_path.write_bytes(b"%PDF-1.4 dummy")
+
+    # Подменяем load_text чтобы не парсить PDF.
+    monkeypatch.setattr(summarizer, "load_text", lambda p: "Договор аренды.")
+
+    text = summarizer.load_text(doc_path)
+    result = summarizer.run(
+        text, length="brief", document_path=str(doc_path), workspace_root=tmp_path,
+    )
+    assert "cache_stats" in result
+    assert result["cache_stats"]["cache_enabled"] is True
+    # Короткий документ → 1 chunk, 0 from cache
+    assert result["cache_stats"]["chunks_from_cache"] == 0
+
+
+def test_run_repeated_question_uses_doc_cache(monkeypatch, tmp_path):
+    """Первый вопрос обрабатывает chunks, второй — подхватывает из document-cache."""
+    import re as _re
+
+    # Подменяем llm.chat так, чтобы map-режим отдавал DOCUMENT CHUNK N: ...
+    def fake_chat(messages, *, context=None, **kwargs):
+        body = messages[1]["content"]
+        chunks = _re.findall(r"DOCUMENT CHUNK\s+(\d+)", body)
+        if chunks:
+            return "\n\n".join(
+                f"DOCUMENT CHUNK {n}: summary {n}" for n in chunks
+            )
+        return "summary"
+
+    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+
+    session_dir = tmp_path / "data_store" / "cache" / "sessions" / "cli_42"
+    session_dir.mkdir(parents=True)
+    doc_path = session_dir / "doc.pdf"
+    doc_path.write_bytes(b"%PDF-1.4 dummy")
+
+    monkeypatch.setattr(summarizer, "load_text", lambda p: "Договор аренды.")
+
+    cfg = summarizer.get_chunking_config()
+    threshold = int(cfg["single_call_threshold"])
+    text = "Договор аренды. Штраф за просрочку 0.1%. " * (threshold // 50 + 100)
+    assert len(text) >= threshold, "тест требует map-reduce стратегию"
+
+    # Первый запуск — все chunks обрабатываются
+    r1 = summarizer.run(
+        text, length="detailed", document_path=str(doc_path), workspace_root=tmp_path,
+    )
+    assert r1["status"] == "completed"
+    assert r1["cache_stats"]["chunks_processed"] > 0
+    assert r1["cache_stats"]["chunks_from_cache"] == 0
+    assert r1["cache_stats"]["cache_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# CLI: --question + отказ от medium
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# CLI: --question + отказ от medium
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture
+def cli_subprocess():
+    """Запустить cli.py как subprocess и вернуть JSON-payload из stdout."""
+    import io
+    import contextlib
+
+    _CLI = _SKILL_ROOT / "scripts" / "cli.py"
+
+    def _run(*args, check=True):
+        # Подменяем sys.argv для argparse
+        import sys as _sys
+        old_argv = _sys.argv
+        _sys.argv = ["cli.py", *args]
+        old_stdout = _sys.stdout
+        _sys.stdout = io.StringIO()
+        try:
+            from cli import main as _cli_main  # noqa: PLC0415
+            try:
+                _cli_main()
+            except SystemExit as e:
+                rc = e.code
+            else:
+                rc = 0
+            output = _sys.stdout.getvalue()
+        finally:
+            _sys.stdout = old_stdout
+            _sys.argv = old_argv
+
+        # Парсим JSON после sentinel __LEGAL_SUMMARIZER_DONE__
+        sentinel = "__LEGAL_SUMMARIZER_DONE__"
+        if sentinel in output:
+            output = output.split(sentinel, 1)[0]
+        # Если был ещё один JSON до sentinel — берём последний полный
+        decoder = json.JSONDecoder()
+        idx = 0
+        last_obj = None
+        text = output.strip()
+        while idx < len(text):
+            while idx < len(text) and text[idx] in " \r\n\t":
+                idx += 1
+            if idx >= len(text):
+                break
+            try:
+                obj, end = decoder.raw_decode(text[idx:])
+                last_obj = obj
+                idx += end
+            except json.JSONDecodeError:
+                break
+        if last_obj is not None:
+            last_obj["exit_code"] = rc
+            return last_obj
+        return {"exit_code": rc, "raw": output}
+
+    return _run
+
+
+def test_cli_rejects_medium_length(cli_subprocess):
+    """--length medium → argparse ругается на invalid choice (SystemExit 2)."""
+    out = cli_subprocess(
+        "--file", "fake.pdf",
+        "--length", "medium",
+        "--confirm",
+    )
+    # argparse бросает SystemExit(2). Наш fixture должен зафиксировать exit_code.
+    assert out.get("exit_code") == 2
+    # В stdout ничего полезного (argparse пишет в stderr).
+    assert out.get("raw", "") == ""
+
+
+def test_cli_rejects_question_and_length_together(cli_subprocess):
+    """--question и --length одновременно → ошибка."""
+    payload = cli_subprocess(
+        "--file", "fake.pdf",
+        "--question", "что про штрафы?",
+        "--length", "brief",
+        "--confirm",
+    )
+    assert payload.get("status") == "error"
+    msg = (payload.get("message") or "").lower()
+    assert "взаимно" in msg or "исключа" in msg
+
+
+def test_cli_help_does_not_list_medium(cli_subprocess):
+    """--help показывает только brief|detailed."""
+    out = cli_subprocess("--help", check=False)
+    text = json.dumps(out) if isinstance(out, dict) else str(out)
+    assert "brief" in text
+    assert "detailed" in text
+    # medium НЕ должен быть в списке choices
+    assert "{brief,detailed}" in text or "brief, detailed" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# output.prepare_output — проброс cache_stats
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_output_includes_cache_stats_for_completed():
+    from output import prepare_output
+
+    result = {
+        "status": "completed",
+        "operation_id": "op_test",
+        "result": {
+            "subject": "S",
+            "summary": "sum",
+            "length": "brief",
+            "chars_in": 100,
+            "chunks": 1,
+            "context_batches": 0,
+            "sections": 0,
+            "strategy": "single",
+        },
+        "stats": {},
+        "cache_stats": {
+            "document_id": "abc123",
+            "chunks_from_cache": 0,
+            "chunks_processed": 1,
+            "cache_enabled": False,
+        },
+    }
+    out = prepare_output(result)
+    assert "cache_stats" in out
+    assert out["cache_stats"]["document_id"] == "abc123"
+
+
+def test_prepare_output_omits_cache_stats_when_absent():
+    from output import prepare_output
+
+    result = {
+        "status": "completed",
+        "operation_id": "op_test",
+        "result": {
+            "subject": "S",
+            "summary": "sum",
+            "length": "brief",
+            "chars_in": 100,
+            "chunks": 1,
+            "context_batches": 0,
+            "sections": 0,
+            "strategy": "single",
+        },
+        "stats": {},
+    }
+    out = prepare_output(result)
+    assert "cache_stats" not in out

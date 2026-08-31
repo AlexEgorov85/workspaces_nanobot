@@ -42,6 +42,11 @@ import llm
 import skill_config
 from skill_config import get_chunking_config, get_execution_config
 
+from workspace.utils.session_key import (
+    extract_session_key_from_path,
+    safe_session_key,
+)
+
 from workspace.skills.legal_summarizer.scripts.manifest import (
     NormalizedManifest,
     load_manifest,
@@ -182,9 +187,114 @@ def _load_prompt(name: str) -> str:
 
 _LENGTH_INSTRUCTIONS = {
     "brief": "1 абзац, 150-250 слов: что это за документ и ключевые условия в двух-трёх фразах.",
-    "medium": "3-5 абзацев, 400-600 слов: стороны + предмет + условия + сроки + риски.",
     "detailed": "по разделам документа, 800-1200 слов: каждый раздел простым языком.",
 }
+
+
+_QUESTION_INSTRUCTION_TEMPLATE = (
+    "Пользователь задал конкретный вопрос: «{question}»\n"
+    "Ищи в chunk'е / саммари ТОЛЬКО факты по этому вопросу.\n"
+    "Если ничего не относится — пропусти (для map) "
+    "или напиши «В документе не нашёл ответа» (для reduce).\n"
+    "НЕ описывай документ целиком, отвечай только на вопрос."
+)
+
+
+def _resolve_max_chunks() -> int:
+    """Максимум chunks для brief/question режимов из конфига."""
+    cfg = globals()["get_execution_config"]()
+    try:
+        n = int(cfg.get("max_chunks_per_question", 8))
+        return n if n > 0 else 8
+    except (TypeError, ValueError):
+        return 8
+
+
+def _resolve_session_key(document_path: str | None) -> str | None:
+    """Извлечь safe_session_key из пути документа.
+
+    Идентично SessionFileRedirectHook: raw → safe_session_key() → str.
+    ``None`` если путь не содержит ``data_store/cache/sessions/<key>/``.
+    """
+    if not document_path:
+        return None
+    raw = extract_session_key_from_path(document_path)
+    if not raw:
+        return None
+    return safe_session_key(raw)
+
+
+def _document_id_for(text: str) -> str:
+    """Стабильный document_id = sha256 от первых 64KB текста."""
+    sample = text[: 64 * 1024].encode("utf-8", errors="replace")
+    return hashlib.sha256(sample).hexdigest()[:16]
+
+
+def _doc_cache_dir(document_id: str, session_key: str, workspace_root: Path) -> Path:
+    return (
+        workspace_root
+        / "data_store" / "cache" / "sessions" / session_key
+        / "skills" / "legal_summarizer" / "documents" / document_id
+    )
+
+
+def _load_doc_cache(
+    document_id: str,
+    session_key: str,
+    workspace_root: Path,
+) -> dict[str, dict]:
+    """Загрузить chunks из document-cache. ``{chunk_id: chunk_data}``."""
+    cache = _doc_cache_dir(document_id, session_key, workspace_root)
+    chunks_dir = cache / "chunks"
+    if not chunks_dir.is_dir():
+        return {}
+    out: dict[str, dict] = {}
+    for f in chunks_dir.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        cid = data.get("chunk_id") or f.stem
+        out[cid] = data
+    return out
+
+
+def _save_doc_cache(
+    document_id: str,
+    session_key: str,
+    workspace_root: Path,
+    new_chunks: dict[str, dict],
+) -> None:
+    """Сохранить новые chunks в document-cache (атомарно по файлу)."""
+    if not new_chunks:
+        return
+    cache = _doc_cache_dir(document_id, session_key, workspace_root)
+    chunks_dir = cache / "chunks"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = cache / "meta.json"
+    if not meta_path.exists():
+        try:
+            meta_path.write_text(
+                json.dumps(
+                    {
+                        "document_id": document_id,
+                        "first_seen_at": _now_iso(),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    for cid, data in new_chunks.items():
+        path = chunks_dir / f"{cid}.json"
+        try:
+            path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            _progress(f"warn: не удалось сохранить chunk {cid} в document-cache")
 
 
 _SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
@@ -614,16 +724,29 @@ def quick_estimate(path: Path | str) -> dict[str, Any]:
     }
 
 
+def _system_instruction(length: str, question: str | None) -> str:
+    """Подготовить инструкцию для {length_instruction} в системном промпте.
+
+    Если передан ``question`` — инструкция фокусирует LLM на ответе на
+    конкретный вопрос (длину игнорируем — ответ всегда краткий).
+    Иначе — стандартная инструкция по объёму.
+    """
+    if question:
+        return _QUESTION_INSTRUCTION_TEMPLATE.format(question=question)
+    return _LENGTH_INSTRUCTIONS.get(length, _LENGTH_INSTRUCTIONS["brief"])
+
+
 def _llm_batch(
     batch: ContextBatch,
     *,
     chunks_total: int,
     structure: dict | None,
     length: str,
+    question: str | None = None,
 ) -> dict[str, str]:
     """Вызвать LLM для одного ContextBatch. Возвращает dict[chunk_id, summary]."""
     system = _load_prompt("summarize_system").replace(
-        "{length_instruction}", _LENGTH_INSTRUCTIONS.get(length, _LENGTH_INSTRUCTIONS["medium"])
+        "{length_instruction}", _system_instruction(length, question)
     )
     user_body = build_batch_user_message(batch, chunks_total=chunks_total)
     doc_ctx = _doc_context(structure, with_begin_end=False)
@@ -643,9 +766,10 @@ def _llm_section_reduce(
     joined_text: str,
     *,
     length: str,
+    question: str | None = None,
 ) -> str:
     system = _load_prompt("section_reduce_system").replace(
-        "{length_instruction}", _LENGTH_INSTRUCTIONS.get(length, _LENGTH_INSTRUCTIONS["medium"])
+        "{length_instruction}", _system_instruction(length, question)
     )
     user_body = (
         f"Раздел: {section_path}\n"
@@ -690,9 +814,10 @@ def _llm_document_reduce(
     length: str,
     focus: str | None,
     structure: dict | None,
+    question: str | None = None,
 ) -> str:
     system = _load_prompt("reduce_system").replace(
-        "{length_instruction}", _LENGTH_INSTRUCTIONS.get(length, _LENGTH_INSTRUCTIONS["medium"])
+        "{length_instruction}", _system_instruction(length, question)
     )
     doc_ctx = _doc_context(structure, with_begin_end=True)
     user_body = "Саммари разделов документа:\n\n" + section_summaries_text
@@ -735,6 +860,7 @@ def _process_context_batch(
     length: str,
     operation_id: str,
     workspace_root: Path | str | None,
+    question: str | None = None,
 ) -> dict[str, str]:
     """Один LLM call → parse → write per-chunk files."""
     started_at = _now_iso()
@@ -744,6 +870,7 @@ def _process_context_batch(
         chunks_total=chunks_total,
         structure=structure,
         length=length,
+        question=question,
     )
     duration = round(_time.monotonic() - start, 3)
     completed_at = _now_iso()
@@ -779,6 +906,8 @@ async def _run_one_batch_async(
     operation_id: str,
     workspace_root: Path | str | None,
     sem: asyncio.Semaphore,
+    length: str = "brief",
+    question: str | None = None,
 ) -> tuple[str, dict | None, tuple[str, Exception] | None]:
     """Один батч с retry-циклом (parse-error), под семафором concurrency.
 
@@ -800,9 +929,10 @@ async def _run_one_batch_async(
                     batch_to_process,
                     chunks_total=chunks_total,
                     structure=structure,
-                    length="brief",
+                    length=length,
                     operation_id=operation_id,
                     workspace_root=workspace_root,
+                    question=question,
                 )
                 return ("ok", batch_meta, None)
             except ChunkResultParseError as exc:
@@ -836,15 +966,16 @@ def _load_cached_partials(
 def run(
     text: str,
     *,
-    length: str = "medium",
+    length: str = "brief",
     focus: str | None = None,
+    question: str | None = None,
     confirmed: bool = False,
     operation_id: str | None = None,
     structure: dict | None = None,
     document_path: str | None = None,
     workspace_root: Path | str | None = None,
 ) -> dict:
-    """Главная execution path для legal_summarizer (Phase 2B)."""
+    """Главная execution path для legal_summarizer (Phase 2B + brief/detailed/question)."""
     text = (text or "").strip()
     if not text:
         return {
@@ -853,7 +984,7 @@ def run(
             "operation_id": operation_id,
         }
 
-    length = length if length in _LENGTH_INSTRUCTIONS else "medium"
+    length = length if length in _LENGTH_INSTRUCTIONS else "brief"
 
     insp = inspect(text, document_path=document_path)
     if insp.strategy == "empty":
@@ -862,6 +993,32 @@ def run(
             "error": {"code": "EMPTY_DOCUMENT", "message": "Документ не содержит текста"},
             "operation_id": operation_id,
         }
+
+    # === Выбор chunks по режиму ===
+    # brief / detailed / question используют разные стратегии:
+    #   brief    — первые max_chunks
+    #   detailed — все chunks
+    #   question — chunks, содержащие слова вопроса (≤max_chunks);
+    #              если ничего не нашли — fallback на detailed (все)
+    document_id = _document_id_for(text)
+    session_key = _resolve_session_key(document_path)
+    max_chunks = _resolve_max_chunks()
+
+    if insp.strategy == "map_reduce":
+        if question:
+            from brief_strategy import select_relevant_chunks as _sel_relevant
+            chosen_chunks = _sel_relevant(question, insp.chunks, max_chunks=max_chunks)
+            if chosen_chunks is None:
+                _progress("question: keyword match пустой → fallback на detailed")
+                chosen_chunks = insp.chunks
+        elif length == "brief":
+            from brief_strategy import select_brief_chunks as _sel_brief
+            chosen_chunks = _sel_brief(insp.chunks, max_chunks=max_chunks)
+        else:
+            chosen_chunks = insp.chunks
+    else:
+        # single-call: chunks — это dummy Chunk, не трогаем.
+        chosen_chunks = insp.chunks
 
     est = estimate(insp)
     exec_cfg = globals()["get_execution_config"]()
@@ -933,9 +1090,28 @@ def run(
             ),
         }
 
-    chunks = insp.chunks
-    batches = insp.context_batches
+    chunks = chosen_chunks
     tree = insp.tree
+
+    # Re-pack в ContextBatch под выбранную выборку. Для brief/question
+    # выбранные chunks могут быть меньше полного набора → перепаковываем.
+    if chunks is insp.chunks:
+        batches = insp.context_batches
+    else:
+        exec_cfg_pack = globals()["get_chunking_config"]()
+        threshold = int(exec_cfg_pack["single_call_threshold"])
+        if insp.chars_in <= threshold:
+            # single-стратегия — batches пустой, ничего не перепаковываем
+            batches = insp.context_batches
+        else:
+            budget_pack = _build_token_budget(exec_cfg_pack)
+            batches = pack_chunks(chunks, budget_pack)
+
+    # Загрузить document-cache (если есть session_key)
+    doc_cache_chunks: dict[str, dict] = (
+        _load_doc_cache(document_id, session_key, workspace_root)
+        if session_key else {}
+    )
 
     # Число статей в документе (для legal-домена). Считаем один раз по полному
     # тексту (Python stdlib re, кросс-платформенно) — нужно для follow-up
@@ -945,7 +1121,7 @@ def run(
     if insp.strategy == "single":
         _progress(f"single-call: chars={insp.chars_in}")
         system = _load_prompt("summarize_system").replace(
-            "{length_instruction}", _LENGTH_INSTRUCTIONS.get(length, _LENGTH_INSTRUCTIONS["medium"])
+            "{length_instruction}", _system_instruction(length, question)
         )
         user_body = (
             "Документ для саммари:\n\n" + text
@@ -978,6 +1154,12 @@ def run(
             "status": "completed",
             "operation_id": operation_id,
             "result": result,
+            "cache_stats": {
+                "document_id": document_id,
+                "chunks_from_cache": 0,
+                "chunks_processed": 1,
+                "cache_enabled": bool(session_key),
+            },
             "stats": {
                 "chars_in": insp.chars_in,
                 "chunks": 1,
@@ -1037,6 +1219,24 @@ def run(
     expected_chunk_ids = [c.chunk_id for c in chunks]
     cached_partials = _load_cached_partials(operation_id, expected_chunk_ids, workspace_root)
     chunk_states: dict[str, dict[str, Any]] = dict(existing_manifest.chunk_states) if existing_manifest else {}
+
+    # Подмешать document-cache: chunks, обработанные в прошлых вопросах
+    # к этому же документу в этой же сессии. Map-фаза пропустит их (status
+    # уже completed) и сразу пойдёт в reduce.
+    if doc_cache_chunks:
+        for cid, cdata in doc_cache_chunks.items():
+            if cid not in chunk_states and cid in expected_chunk_ids:
+                chunk_states[cid] = {
+                    "status": "completed",
+                    "context_batch_id": None,
+                    "section_id": cdata.get("section_id"),
+                    "section_path": cdata.get("section_path"),
+                    "page_start": cdata.get("page_start"),
+                    "page_end": cdata.get("page_end"),
+                    "result_path": f"chunks/{cid}.json",
+                    "duration_sec": cdata.get("duration_sec"),
+                    "from_doc_cache": True,
+                }
 
     for cid in cached_partials:
         chunk_states[cid] = {
@@ -1105,6 +1305,8 @@ def run(
                     operation_id=operation_id,
                     workspace_root=workspace_root,
                     sem=sem,
+                    length=length,
+                    question=question,
                 )
                 for btp, _ in queued
             ])
@@ -1167,12 +1369,39 @@ def run(
                     }
 
     all_partials = _load_cached_partials(operation_id, expected_chunk_ids, workspace_root)
+
+    # Подмешать document-cache chunks в partials, если их нет в operation-папке.
+    if doc_cache_chunks:
+        for cid, cdata in doc_cache_chunks.items():
+            if cid in expected_chunk_ids and cid not in all_partials:
+                all_partials[cid] = cdata.get("summary", "")
+
     if not all_partials:
         return {
             "status": "failed",
             "operation_id": operation_id,
             "error": {"code": "NO_PARTIALS", "message": "Нет per-chunk partials"},
         }
+
+    # Сохранить свежие chunks в document-cache для будущих вопросов.
+    if session_key and all_partials:
+        to_save: dict[str, dict] = {}
+        for cid, summary in all_partials.items():
+            if cid in doc_cache_chunks:
+                continue
+            cs = chunk_states.get(cid, {})
+            to_save[cid] = {
+                "chunk_id": cid,
+                "summary": summary,
+                "section_id": cs.get("section_id"),
+                "section_path": cs.get("section_path"),
+                "page_start": cs.get("page_start"),
+                "page_end": cs.get("page_end"),
+                "duration_sec": cs.get("duration_sec"),
+                "saved_at": _now_iso(),
+            }
+        if to_save:
+            _save_doc_cache(document_id, session_key, workspace_root, to_save)
 
     reduce_cfg = ReduceConfig(
         instruction_tokens_per_section_reduce=200,
@@ -1208,6 +1437,7 @@ def run(
                     section.heading,
                     joined,
                     length=length,
+                    question=question,
                 )
             except Exception:
                 section_summary = joined
@@ -1239,6 +1469,7 @@ def run(
                 length=length,
                 focus=focus,
                 structure=structure,
+                question=question,
             )
             document_reduce_calls += 1
         except Exception:
@@ -1256,6 +1487,7 @@ def run(
                 length=length,
                 focus=focus,
                 structure=structure,
+                question=question,
             )
             document_reduce_calls += 1
         except Exception:
@@ -1343,6 +1575,12 @@ def run(
         "status": "partial" if is_partial else "completed",
         "operation_id": operation_id,
         "result": result,
+        "cache_stats": {
+            "document_id": document_id,
+            "chunks_from_cache": sum(1 for s in chunk_states.values() if s.get("from_doc_cache")),
+            "chunks_processed": map_calls,
+            "cache_enabled": bool(session_key),
+        },
         "stats": {
             "chars_in": insp.chars_in,
             "chunks_total": len(chunks),
