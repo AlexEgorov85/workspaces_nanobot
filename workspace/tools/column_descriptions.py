@@ -13,12 +13,22 @@
       "tools": {
         "column_descriptions": {
           "enable": true,
-          "data_file": "data_store/column_descriptions.json"
+          "entries": {
+            "audited objects|objects of audit|проверяемые|объекты проверок": [
+              "oarb.audits.auditee_entity"
+            ],
+            "violations|нарушения": ["oarb.violations"]
+          }
         }
       }
     }
 
-Формат ``data_file``::
+Опционально entries могут быть вынесены в отдельный JSON-файл через
+``data_file`` (например, ``data_file: "workspace/data/column_descriptions.json"``);
+это полезно для больших словарей. Если указан ``data_file`` — он
+перекрывает inline ``entries``.
+
+Формат ``data_file`` / ``entries``::
 
     {
       "audited objects|objects of audit|проверяемые|объекты проверок": [
@@ -30,9 +40,8 @@
 Ключ может содержать ``|`` — это список синонимов; совпадение
 с любым из них считается положительным.
 
-Если ``data_file`` не указан — entries читаются из
-``ctx._settings_ref.tools.column_descriptions.entries`` (inline-словарь
-в конфиге). Если и там пусто — tool возвращает пустой список matches.
+Если ни ``data_file``, ни ``entries`` не заданы — tool возвращает
+пустой список matches.
 
 Контракт и поведение описаны в ``docs/skill-tool-architecture.md`` §8.2.
 """

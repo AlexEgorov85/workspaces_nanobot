@@ -384,6 +384,26 @@
       "max_result_chars": 16000,
       "timeout_sec": 30
     },
+    //  nl_sql_generate.* — tool workspace/tools/nl_sql_generate.py.
+    //  NL→SELECT pipeline: генерирует SELECT по whitelist'у таблиц из
+    //  TableRegistry, валидирует через EXPLAIN и выполняет в локальном
+    //  DuckDB-кеше. Использует shared infra:
+    //    * lib/services/nl_sql_runner.py::NlSqlRunner — общий pipeline
+    //      (whitelist + LLM retry + execute);
+    //    * lib/services/schema_formatter.py::SchemaFormatter — internal
+    //      service для описания схемы (не tool, не виден агенту);
+    //    * workspace/tools/column_descriptions.py — подсказки
+    //      термин→колонка, подмешиваются в system prompt.
+    //  Все ключи опциональны; дефолты в NlSqlGenerateToolConfig.
+    "nl_sql_generate": {
+      "enable": true,
+      "max_retries": 3,
+      "schema_max_chars": 12000,
+      "few_shot_top_n": 2,
+      "max_result_chars": 50000,
+      "max_rows": 1000,
+      "hints_max_matches": 5
+    },
     //  vector.* — общая runtime-инфраструктура эмбеддингов и индексов.
     //    embedding.* — параметры Ollama /api/embed (общие для всех skill'ов);
     //                  раньше жили в skills.<name>.embedding, вынесены т.к.
