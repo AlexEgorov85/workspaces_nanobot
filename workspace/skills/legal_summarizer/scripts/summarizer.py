@@ -306,16 +306,16 @@ _SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
 def load_text(path, *, mode: str = "full") -> str:
     """Извлечь plain text из файла через office_files.
 
-    Всегда полная экстракция. Для ускорения brief mode не режем входной
-    текст (это искажало саммари — LLM видел только начало документа).
-    Ускорение brief достигается через:
-      - параллельные map-вызовы (concurrency=4 в cli.py);
-      - выборку только первых 8 chunks в summarizer.run().
+    ``mode='brief'`` для PDF: первые 100 стр. + до 300К символов через pypdf
+    (быстрая экстракция ~5 сек для ГК РФ вместо 70+ сек pdfplumber).
+    Для ГК РФ 663 стр. это первые 100 стр. = общая часть + оглавление,
+    чего достаточно для краткого саммари.
+
+    ``mode='full'`` (по умолчанию): полная экстракция через pdfplumber/extract_text.
 
     Args:
         path: путь к .pdf / .docx / .txt.
-        mode: сохранён для обратной совместимости, но не используется —
-            полная экстракция всегда.
+        mode: ``"full"`` для detailed/question, ``"brief"`` для --length brief.
     """
     p = Path(path)
     if p.suffix.lower() not in _SUPPORTED_EXTENSIONS:
@@ -323,7 +323,10 @@ def load_text(path, *, mode: str = "full") -> str:
             f"Неподдерживаемый формат: '{p.suffix}'. "
             "legal_summarizer принимает только .pdf, .docx, .txt"
         )
-    text = extract_text(p)
+    if mode == "brief" and p.suffix.lower() == ".pdf":
+        text = _extract_pdf_head(p, max_pages=100, max_chars=300_000)
+    else:
+        text = extract_text(p)
     if not text or not text.strip():
         raise ValueError(
             f"Документ не содержит извлекаемого текста: {p}."
@@ -334,9 +337,8 @@ def load_text(path, *, mode: str = "full") -> str:
 def _extract_pdf_head(path: Path, *, max_pages: int, max_chars: int) -> str:
     """Извлечь первые ``max_pages`` страниц PDF через pypdf.
 
-    DEPRECATED: использовался для ускорения brief, но давал неполное
-    саммари (только начало документа). Сейчас load_text() всегда делает
-    полную экстракцию. Оставлен для возможных экспериментов.
+    Быстрая экстракция (5-10× быстрее pdfplumber). Используется в brief mode
+    для чтения только начала документа — титульник, общая часть, оглавление.
     """
     from pypdf import PdfReader
 

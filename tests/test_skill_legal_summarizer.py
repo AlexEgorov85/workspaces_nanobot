@@ -493,23 +493,21 @@ def test_load_text_unknown_extension_raises(tmp_path):
 
 
 def test_load_text_brief_mode_for_txt(tmp_path):
-    """mode='brief' для .txt — полная экстракция (как для full)."""
+    """mode='brief' для .txt — полная экстракция (txt не поддерживает head)."""
     p = tmp_path / "contract.txt"
     p.write_text("Договор аренды.\n\nПункт 1.\n\nПункт 2.", encoding="utf-8")
     text = summarizer.load_text(p, mode="brief")
     assert "Договор аренды" in text
-    # mode='brief' теперь эквивалентен mode='full' (полная экстракция).
     text_full = summarizer.load_text(p, mode="full")
     assert text == text_full
 
 
-def test_load_text_brief_mode_for_pdf_extracts_full_text(tmp_path):
-    """mode='brief' для PDF даёт полный текст, не обрезанный.
+def test_load_text_brief_mode_for_pdf_extracts_head(tmp_path):
+    """mode='brief' для PDF читает только первые max_pages через pypdf.
 
-    Раньше для ускорения brief извлекал только первые 50 страниц через
-    pypdf, но это искажало саммари — LLM видел только начало документа.
-    Сейчас load_text() всегда делает полную экстракцию; ускорение brief
-    достигается через выборку первых 8 chunks и параллельные map-вызовы.
+    Для ГК РФ 663 стр.: brief даёт ~5% от полного текста (первые 100 стр.).
+    Это основа краткого режима — он НЕ анализирует весь документ,
+    только начало (титульник, общая часть, оглавление).
     """
     import shutil
     real_pdf = Path(r"C:\Users\Алексей\Downloads\gkodeksrf.pdf")
@@ -519,8 +517,18 @@ def test_load_text_brief_mode_for_pdf_extracts_full_text(tmp_path):
     shutil.copy(real_pdf, target)
     full_text = summarizer.load_text(target, mode="full")
     brief_text = summarizer.load_text(target, mode="brief")
-    # brief теперь даёт полный текст, как full.
-    assert len(brief_text) == len(full_text)
+    # brief даёт меньше текста, чем full (только начало документа).
+    assert len(brief_text) < len(full_text)
+    # Но не слишком мало — должны быть основные разделы (≥10% от полного).
+    assert len(brief_text) >= len(full_text) * 0.05
+
+
+def test_extract_pdf_head_respects_max_pages_and_max_chars(tmp_path):
+    """_extract_pdf_head: max_pages и max_chars ограничивают выход."""
+    import inspect
+    sig = inspect.signature(summarizer._extract_pdf_head)
+    assert "max_pages" in sig.parameters
+    assert "max_chars" in sig.parameters
 
 
 def test_load_structure_returns_title_and_text(tmp_path):

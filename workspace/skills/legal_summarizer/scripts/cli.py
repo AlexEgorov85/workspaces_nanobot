@@ -267,10 +267,10 @@ def main() -> None:
                 # пути: полная экстракция + inspect + safety-net confirm.
                 _progress(f"quick_estimate failed ({exc}); falling back to full inspect")
 
-        # Всегда полная экстракция. Для brief mode ускорение — через
-        # выборку первых 8 chunks (summarizer.select_brief_chunks) +
-        # параллельные map-вызовы (concurrency=4).
-        text = load_text(file_path)
+        # brief mode: читаем только первые 100 стр. PDF (быстрая экстракция
+        # через pypdf). detailed/question: полная экстракция через pdfplumber.
+        load_mode = "brief" if length == "brief" else "full"
+        text = load_text(file_path, mode=load_mode)
 
         if args.estimate_only:
             insp = _inspect(text, document_path=str(args.file))
