@@ -1586,6 +1586,7 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 
 from brief_strategy import select_brief_chunks, select_relevant_chunks  # noqa: E402
+from brief_strategy import select_brief_chunks_structured  # noqa: E402
 
 
 class _FakeChunk:
@@ -1593,6 +1594,27 @@ class _FakeChunk:
     def __init__(self, chunk_id: str, text: str) -> None:
         self.chunk_id = chunk_id
         self.text = text
+
+
+class _FakeChunkWithSection:
+    """Chunk с section_id и .index для тестов select_brief_chunks_structured."""
+    def __init__(self, index: int, section_id: str, text: str = "") -> None:
+        self.chunk_id = f"{index:03d}"
+        self.index = index
+        self.section_id = section_id
+        self.text = text
+
+
+class _FakeSection:
+    def __init__(self, section_id: str, heading: str = "") -> None:
+        self.section_id = section_id
+        self.heading = heading
+
+
+class _FakeSectionTree:
+    def __init__(self, sections: list, root_id: str = "s_root") -> None:
+        self.sections = {s.section_id: s for s in sections}
+        self.root_id = root_id
 
 
 def test_brief_strategy_selects_first_n_chunks():
@@ -1613,6 +1635,89 @@ def test_brief_strategy_preserves_canonical_order():
     chosen = select_brief_chunks(chunks, max_chunks=5)
     ids = [int(c.chunk_id) for c in chosen]
     assert ids == sorted(ids)
+
+
+def test_structured_brief_respects_50_percent_limit():
+    """6 chunks → берём 3 (50%), даже если max_chunks=10."""
+    chunks = [
+        _FakeChunkWithSection(i, "s_1") for i in range(6)
+    ]
+    tree = _FakeSectionTree([_FakeSection("s_1"), _FakeSection("s_root")])
+    chosen = select_brief_chunks_structured(chunks, tree, max_chunks=10)
+    assert len(chosen) == 3
+    assert [c.index for c in chosen] == [0, 1, 2]
+
+
+def test_structured_brief_respects_max_chunks_10():
+    """50 chunks → берём 10 (max_chunks), даже если 50% = 25."""
+    chunks = [
+        _FakeChunkWithSection(i, "s_1") for i in range(50)
+    ]
+    tree = _FakeSectionTree([_FakeSection("s_1"), _FakeSection("s_root")])
+    chosen = select_brief_chunks_structured(chunks, tree, max_chunks=10)
+    assert len(chosen) == 10
+
+
+def test_structured_brief_round_robin_covers_all_sections():
+    """4 секции × 5 chunks → 10 chunks (≤max_chunks, 50% от 20), все секции покрыты."""
+    chunks: list = []
+    sections_ids = ["s_intro", "s_subject", "s_terms", "s_liability"]
+    for sec_idx, sec_id in enumerate(sections_ids):
+        for k in range(5):
+            idx = sec_idx * 5 + k
+            chunks.append(_FakeChunkWithSection(idx, sec_id))
+    sections = [_FakeSection(s) for s in sections_ids + ["s_root"]]
+    tree = _FakeSectionTree(sections)
+    chosen = select_brief_chunks_structured(chunks, tree, max_chunks=10)
+    # 20 chunks: effective = min(10, 10) = 10. Round-robin по 4 секциям = 3,3,2,2.
+    assert len(chosen) == 10
+    covered_sections = {c.section_id for c in chosen}
+    assert covered_sections == set(sections_ids)
+    # Все секции должны быть покрыты хотя бы одним chunk.
+    by_sec: dict[str, list] = {}
+    for c in chosen:
+        by_sec.setdefault(c.section_id, []).append(c)
+    for sid in sections_ids:
+        assert len(by_sec[sid]) >= 1, f"{sid} не покрыта"
+    # Document order соблюдён.
+    assert [c.index for c in chosen] == sorted(c.index for c in chosen)
+
+
+def test_structured_brief_fallback_no_tree():
+    """tree=None → fallback на первые N chunks (≤max_chunks и ≤50%)."""
+    chunks = [_FakeChunkWithSection(i, "s_1") for i in range(20)]
+    chosen = select_brief_chunks_structured(chunks, None, max_chunks=10)
+    # 20 chunks: effective = min(10, ceil(20*0.5)=10) = 10.
+    assert len(chosen) == 10
+    assert [c.index for c in chosen] == list(range(10))
+
+
+def test_structured_brief_fallback_root_only_tree():
+    """Tree только с root → fallback на первые N chunks (нечего round-robin'ить)."""
+    chunks = [_FakeChunkWithSection(i, "s_root") for i in range(20)]
+    tree = _FakeSectionTree([_FakeSection("s_root")], root_id="s_root")
+    chosen = select_brief_chunks_structured(chunks, tree, max_chunks=10)
+    # 20 chunks: effective = 10.
+    assert len(chosen) == 10
+    assert [c.index for c in chosen] == list(range(10))
+
+
+def test_structured_brief_preserves_document_order():
+    """Результат round-robin сортируется по .index перед возвратом."""
+    chunks: list = []
+    # Перемешанный ввод: chunks приходят НЕ в document order.
+    raw = [
+        (5, "s_b"), (1, "s_a"), (8, "s_c"), (0, "s_a"),
+        (6, "s_b"), (3, "s_a"), (9, "s_c"), (2, "s_a"),
+        (7, "s_b"), (4, "s_b"),
+    ]
+    for idx, sid in raw:
+        chunks.append(_FakeChunkWithSection(idx, sid))
+    sections = [_FakeSection(s) for s in ["s_a", "s_b", "s_c", "s_root"]]
+    tree = _FakeSectionTree(sections)
+    chosen = select_brief_chunks_structured(chunks, tree, max_chunks=10)
+    indices = [c.index for c in chosen]
+    assert indices == sorted(indices)
 
 
 def test_question_strategy_finds_keyword_in_chunks():

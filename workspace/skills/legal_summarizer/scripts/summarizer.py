@@ -1052,8 +1052,10 @@ def run(
                 _progress("question: keyword match пустой → fallback на detailed")
                 chosen_chunks = insp.chunks
         elif length == "brief":
-            from brief_strategy import select_brief_chunks as _sel_brief
-            chosen_chunks = _sel_brief(insp.chunks, max_chunks=max_chunks)
+            from brief_strategy import select_brief_chunks_structured as _sel_brief
+            chosen_chunks = _sel_brief(
+                insp.chunks, insp.tree, max_chunks=max_chunks,
+            )
         else:
             chosen_chunks = insp.chunks
     else:
