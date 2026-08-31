@@ -720,6 +720,24 @@
       "timeout_sec": 60,
       "workspace_root": null
     },
+    "column_descriptions": {
+      "enable": true,
+      "entries": {
+        "audited objects|objects of audit|проверяемые|объекты проверок": [
+          "oarb.audits.auditee_entity"
+        ],
+        "violations|нарушения": [
+          "oarb.violations"
+        ],
+        "audits|аудиты|проверки": [
+          "oarb.audits"
+        ],
+        "audit reports|отчёты|reports": [
+          "oarb.audit_reports"
+        ]
+      },
+      "max_result_chars": 16000
+    },
     "restrictToWorkspace": false,
     "webuiAllowLocalServiceAccess": true,
     "webuiAllowRemotePackageInstall": false,

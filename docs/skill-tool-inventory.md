@@ -9,10 +9,12 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 
 | component | path | type | depends_on_skill | depends_on_tool | depends_on_shared_infra | status |
 |---|---|---|---|---|---|---|
-| `audit_analyzer` Skill | `workspace/skills/audit_analyzer/SKILL.md` + `scripts/` + `tests/` | Skill (domain) | — | — (через LLM) | `lib/services/cache_provider_impl.py` (через `scripts/skill_config.build_cache_provider`) + `lib/utils/{sql_safety,text_utils,table_utils}.py` (через back-compat re-export) | active |
+| `audit_analyzer` Skill | `workspace/skills/audit_analyzer/SKILL.md` + `references/` | Skill (domain, **tool-only**) | — | `nl_sql_generate`, `duckdb_query`, `vector_search`, `column_descriptions` (через SKILL.md) | — | active |
 | `compact_context` tool | `workspace/tools/compact_context.py` | Tool | — | — | `lib/services/context_compaction.py` | active |
 | `duckdb_query` tool | `workspace/tools/duckdb_query_tool.py` | Tool (generic infrastructure) | — | — | `lib/utils/sql_safety.py` (последняя граница безопасности) + `lib/services/cache_provider_impl.py` | active |
 | `vector_search` tool | `workspace/tools/vector_search_tool.py` | Tool (generic infrastructure) | — | — | `lib/services/cache_provider_impl.py` (FAISS через `CacheProvider.search_vector`) | active |
+| `nl_sql_generate` tool | `workspace/tools/nl_sql_generate.py` | Tool (generic infrastructure) | — | — (через `column_descriptions.lookup`) | `lib/services/nl_sql_runner.py` (общий NL→SELECT pipeline) + `lib/services/schema_formatter.py` (internal service) + `lib/services/cache_provider_impl.py` + `lib/utils/sql_safety.py` + `lib/utils/text_utils.py` | active |
+| `column_descriptions` tool | `workspace/tools/column_descriptions.py` | Tool (generic infrastructure) | — | — | `data_store/column_descriptions.json` (data_file) + `ctx._settings_ref.tools.column_descriptions.entries` (inline fallback) | active |
 | `example_tool` | `workspace/tools/example.py` | Tool (template) | — | — | — | reference |
 
 ## Удалённые компоненты

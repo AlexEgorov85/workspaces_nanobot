@@ -22,6 +22,97 @@
 
 ### Added
 
+- **Tool `nl_sql_generate`** (`workspace/tools/nl_sql_generate.py`) —
+  generic NL→SELECT pipeline: генерирует SELECT по whitelist'у таблиц
+  из `TableRegistry`, валидирует через `EXPLAIN` и выполняет в общем
+  DuckDB-кеше. Заменил режим `generated_sql` навыка `audit_analyzer`
+  в виде generic tool (skill CLI-режим сохранён для бенчмарков).
+  Использует shared infra: `lib.services.nl_sql_runner.NlSqlRunner`
+  (общий pipeline), `lib.services.schema_formatter.SchemaFormatter`
+  (internal service для описания схемы), `workspace.tools.column_descriptions`
+  (in-process lookup hints). Параметры: `query`, `max_rows`,
+  `no_few_shot`, `skip_hints`, `hints_max_matches`, `context`.
+  Конфиг: `gateway.nl_sql_generate.*`.
+
+- **Tool `column_descriptions`** (`workspace/tools/column_descriptions.py`) —
+  структурированный словарь подсказок (термин → колонка) для подмешивания
+  в system prompt `nl_sql_generate`. Заменил бывший
+  `workspace/skills/audit_analyzer/scripts/column_hints.py`. Словарь
+  перенесён в `data_store/column_descriptions.json`. Параметры: `term`,
+  `match_all`, `max_matches`. Конфиг: `tools.column_descriptions.*`
+  (хранение в `config.json`, рядом с `tools.legal_summarizer_query`).
+
+- **Internal service `SchemaFormatter`** (`lib/services/schema_formatter.py`) —
+  формирует описание схемы БД для LLM system prompt. Использует
+  `TableRegistry` (whitelist) + `CacheProvider.get_schema` +
+  `lib.utils.sql_safety.format_schema`. Кешируется на уровне процесса
+  (TTL). **Не является tool'ом** — это internal helper, вызываемый из
+  `NlSqlRunner` через DI / in-process call, дешевле по токенам, чем
+  отдельный `schema_describe` tool.
+
+- **`NlSqlRunner`** (`lib/services/nl_sql_runner.py`) — общий NL→SELECT
+  pipeline (whitelist + LLM retry + EXPLAIN + execute). Переиспользуется
+  tool'ом `nl_sql_generate`.
+
+### Changed
+
+- **Skill `audit_analyzer` полностью переведён на tool-only**. Больше
+  нет `scripts/cli.py` с режимами `--mode`, нет `scripts/predefined.py`
+  / `predefined_mode.py` / `db_loader.py` / `scripts_registry.py`
+  / `column_hints.py` / `protocol.py` / `output.py` / `llm.py`
+  / `skill_config.py`. Skill теперь содержит только `SKILL.md` +
+  `references/` (`schema.md`, `vector_indexes.md`, `sql_guidance.md`).
+  Все запросы идут через generic tools: `nl_sql_generate` (NL→SELECT),
+  `duckdb_query` (точный SELECT), `vector_search` (семантика),
+  `column_descriptions` (подсказки). Бенчмарки `benchmarks/items/{simple,medium,hard}.yaml`
+  переписаны с `audit_analyzer/scripts/cli.py --mode ...` на вызовы
+  `nl_sql_generate` / `duckdb_query`.
+
+- **`docs/skill-tool-architecture.md`** — добавлены §8.1 «Контракт
+  `nl_sql_generate`» и §8.2 «Контракт `column_descriptions`». Раздел §8
+  (decision procedure для `audit_analyzer`) обновлён: убраны ссылки
+  на `scripts.cli` и `predefined_mode`.
+
+- **`docs/skill-tool-inventory.md`** — добавлены строки `nl_sql_generate`
+  и `column_descriptions` в сводную таблицу. Строка `audit_analyzer` Skill
+  обновлена: type `Skill (domain, tool-only)`, depends_on_tool
+  `nl_sql_generate`, `duckdb_query`, `vector_search`, `column_descriptions`.
+
+- **`workspace/TOOLS.md`** — добавлены секции `nl_sql_generate` и
+  `column_descriptions` с примерами использования.
+
+- **`tools/generate_predefined_scripts_sql.py`** — переведён на прямой
+  импорт `lib.core.skill_config.get_predefined_scripts_table("audit_analyzer")`
+  вместо удалённого `workspace/skills/audit_analyzer/scripts/skill_config.py`.
+
+- **`tests/test_config_keys.py`** — добавлены обязательные ключи
+  `gateway.nl_sql_generate.*` в `REQUIRED_KEYS`. Удалены ключи
+  `skills.audit_analyzer.cli.*` и `skills.audit_analyzer.llm.*` (skill
+  больше не имеет собственного CLI / LLM-политики — это generic tools).
+
+- **`project.json::skills.audit_analyzer`** — удалены секции `cli` и `llm`
+  (после перевода skill'а на tool-only обе секции не нужны).
+
+### Removed
+
+- **`workspace/skills/audit_analyzer/scripts/`** (целиком): `cli.py`,
+  `predefined.py`, `predefined_mode.py`, `db_loader.py`, `scripts_registry.py`,
+  `column_hints.py`, `protocol.py`, `output.py`, `llm.py`, `skill_config.py`,
+  `generated_sql_mode.py`, `__init__.py`. Логика полностью перенесена
+  в `lib/services/nl_sql_runner.py`, `lib/services/schema_formatter.py`,
+  `workspace/tools/nl_sql_generate.py`, `workspace/tools/column_descriptions.py`,
+  `data_store/column_descriptions.json`.
+
+- **`workspace/skills/audit_analyzer/cache/schema.json`** — снимок схемы
+  не используется skill'ом после перехода на tool-only; актуальная схема
+  читается через `duckdb_query` (information_schema) или `nl_sql_generate`.
+
+- **`workspace/skills/audit_analyzer/scripts/column_hints.py`** —
+  логика перенесена в tool `column_descriptions` и
+  `data_store/column_descriptions.json` (см. Added выше).
+
+### Added (legacy tools, см. ниже)
+
 - **Tool `duckdb_query`** (`workspace/tools/duckdb_query_tool.py`) —
   generic read-only SQL-tool, выполняет SELECT-запросы в DuckDB-кэш.
   Не знает конкретных таблиц / Skills. Использует

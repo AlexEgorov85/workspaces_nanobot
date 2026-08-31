@@ -104,3 +104,91 @@ This file documents non-obvious constraints and usage patterns.
 - Не вызывай `pdfplumber`/`pdftotext` через `exec` для подсчёта статей —
   есть `legal_summarizer_query`. Это и быстрее, и кириллица не сломается.
 - Не передавай в `field` значения вне списка — будет отказ с понятной ошибкой.
+
+## nl_sql_generate — генерация SELECT по запросу на естественном языке
+
+Кастомный tool (`workspace/tools/nl_sql_generate.py`). Преобразует
+NL-запрос в SELECT по whitelist'у зарегистрированных таблиц, валидирует
+через EXPLAIN и выполняет в общем DuckDB-кеше. Заменил режим
+`generated_sql` навыка `audit_analyzer` в виде generic tool.
+
+**Архитектура (pipeline):**
+
+1. `ColumnDescriptionsTool.lookup(query)` — подсказки термин→колонка.
+2. `SchemaFormatter` (internal service) — описание схемы из DuckDB-снимка.
+3. `NlSqlRunner.run(query, hints_block=hints)` — LLM retry-цикл +
+   validate_sql + EXPLAIN + execute в общем кэше.
+4. JSON-ответ с `sql`, `columns`, `rows`, `row_count`.
+
+**Параметры:**
+
+- `query` (обяз.) — запрос на естественном языке.
+- `max_rows` (опц., дефолт 1000) — лимит возвращаемых строк.
+- `no_few_shot` (опц., дефолт false) — пропустить few-shot из реестра.
+- `skip_hints` (опц., дефолт false) — не вызывать `column_descriptions`.
+- `hints_max_matches` (опц., дефолт 5) — сколько hints подмешать в system prompt.
+- `context` (опц.) — история чата для LLM.
+
+**Когда звать:**
+
+- Любой NL→SELECT: «сколько X по Y?», «топ-N объектов по …», «динамика по …».
+- Когда `duckdb_query` написан руками, но не уверен в правильных именах колонок.
+
+**Примеры:**
+
+- «Сколько аудитов в 2024?» → `nl_sql_generate(query="сколько аудитов в 2024")` → `{status, sql, columns: [...], rows: [...]}`
+- «Топ-5 организаций по нарушениям» → `nl_sql_generate(query="топ-5 организаций по нарушениям", max_rows=5)`
+
+**Не делать:**
+
+- Не вызывай `duckdb_query` с самописным SELECT, если не уверен в схеме —
+  `nl_sql_generate` сам подтянет hints и описание таблиц.
+- Не пытайся использовать DDL/DML — tool зарубит через `validate_sql`.
+
+## column_descriptions — структурированные подсказки термин→колонка
+
+Кастомный tool (`workspace/tools/column_descriptions.py`). Возвращает
+словарь подсказок для подмешивания в system prompt `nl_sql_generate`.
+Заменяет бывший `workspace/skills/audit_analyzer/scripts/column_hints.py`.
+
+**Аргументы:**
+
+- `term` (опц.) — термин/фраза для поиска (case-insensitive).
+- `match_all` (опц., дефолт false) — вернуть все entries.
+- `max_matches` (опц., дефолт 20) — лимит matches.
+
+**Конфиг** (`config.json::tools.column_descriptions`):
+
+```json
+{
+  "enable": true,
+  "data_file": "data_store/column_descriptions.json",
+  "max_result_chars": 16000
+}
+```
+
+Формат `data_file`:
+
+```json
+{
+  "audited objects|objects of audit|проверяемые|объекты проверок": [
+    "oarb.audits.auditee_entity"
+  ],
+  "violations|нарушения": ["oarb.violations"]
+}
+```
+
+Ключ может содержать `|` — список синонимов; совпадение с любым из них
+считается положительным.
+
+**Когда звать:** в большинстве случаев звать напрямую не нужно —
+`nl_sql_generate` сам подтянет hints через in-process lookup. Прямой
+вызов имеет смысл, если хочешь заранее посмотреть подсказки перед
+генерацией SQL или при отладке словаря.
+
+**Пример:**
+
+- «Какие колонки подходят для “проверяемые объекты”?» →
+  `column_descriptions(term="проверяемые объекты")` →
+  `{matches: [{terms: [...], columns: ["oarb.audits.auditee_entity"]}]}`
+
