@@ -245,29 +245,22 @@ def main() -> None:
         # 3–5 минут — пользователь ждал только чтобы узнать «документ
         # большой» (инцидент 2026-08-28). quick_estimate (pypdf page_count
         # + сэмпл 10 стр.) → секунды.
-        # Не отдаём estimated_llm_calls — пользователю важно только время.
+        # Payload для агента: меню из двух вариантов (brief / detailed) +
+        # подсказка про --question. Технические числа (chunks, batches,
+        # llm_calls) НЕ отдаём — агент их зеркалит в ответ, что раздражает
+        # (инцидент 2026-08-28).
         if not args.confirm and not args.estimate_only:
             try:
                 qe = quick_estimate(file_path)
                 qest = qe["estimate"]
                 if needs_confirmation(qest):
-                    _emit_done({
-                        "mode": "summarize",
-                        "status": "confirmation_required",
-                        "estimate": {
-                            "chars_in": qe["chars_in"],
-                            "chunks_total": qest.chunks_count,
-                            "context_batches_total": qest.context_batches,
-                            "estimated_duration_min_sec": qest.estimated_duration_min_sec,
-                            "estimated_duration_max_sec": qest.estimated_duration_max_sec,
-                            "confirmation_threshold_sec": qest.confirmation_threshold_sec,
-                        },
-                        "hint": (
-                            f"Документ требует примерно {qest.estimated_duration_min_sec:g}–"
-                            f"{qest.estimated_duration_max_sec:g} сек. "
-                            "Перезапустите с --confirm для выполнения."
-                        ),
-                    })
+                    from output import build_confirmation_options
+                    payload = build_confirmation_options(
+                        chars_in=qe["chars_in"],
+                        min_seconds=qest.estimated_duration_min_sec,
+                        max_seconds=qest.estimated_duration_max_sec,
+                    )
+                    _emit_done(payload)
                     return
             except Exception as exc:
                 # quick_estimate упал (битый PDF и т.п.) → fallback к полному
@@ -311,28 +304,17 @@ def main() -> None:
 
         # Safety-net: если quick_estimate сказал «не нужно confirm» (или
         # упал и упал на fallback), полный inspect может пересмотреть.
-        # Не отдаём estimated_llm_calls — только время.
         if not args.confirm:
             insp = _inspect(text, document_path=str(args.file))
             est = _estimate(insp)
             if needs_confirmation(est):
-                _emit_done({
-                    "mode": "summarize",
-                    "status": "confirmation_required",
-                    "estimate": {
-                        "chars_in": len(text),
-                        "chunks_total": len(insp.chunks),
-                        "context_batches_total": len(insp.context_batches),
-                        "estimated_duration_min_sec": est.estimated_duration_min_sec,
-                        "estimated_duration_max_sec": est.estimated_duration_max_sec,
-                        "confirmation_threshold_sec": est.confirmation_threshold_sec,
-                    },
-                    "hint": (
-                        f"Документ требует примерно {est.estimated_duration_min_sec:g}–"
-                        f"{est.estimated_duration_max_sec:g} сек. "
-                        "Перезапустите с --confirm для выполнения."
-                    ),
-                })
+                from output import build_confirmation_options
+                payload = build_confirmation_options(
+                    chars_in=len(text),
+                    min_seconds=est.estimated_duration_min_sec,
+                    max_seconds=est.estimated_duration_max_sec,
+                )
+                _emit_done(payload)
                 return
 
         # Маркер старта длинного прогона: печатаем в stdout ДО вызова run(),

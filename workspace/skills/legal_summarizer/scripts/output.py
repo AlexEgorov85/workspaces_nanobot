@@ -30,6 +30,60 @@ _HIDDEN_LLM_CALL_COUNTERS: frozenset[str] = frozenset({
 })
 
 
+def build_confirmation_options(
+    *,
+    chars_in: int,
+    min_seconds: float,
+    max_seconds: float,
+) -> dict[str, Any]:
+    """Сформировать payload ``confirmation_required`` для агента.
+
+    Возвращает dict с двумя вариантами (brief / detailed) и подсказкой
+    про ``--question``. Технические числа (chunks, batches, llm_calls)
+    НЕ включаются — агент их зеркалит в ответ, что раздражает
+    (инцидент 2026-08-28).
+
+    brief: ~40-55% от detailed (sample vs full). Защита от деления на ноль.
+    """
+    detailed_min = max(60, int(min_seconds))
+    detailed_max = max(detailed_min + 30, int(max_seconds))
+    brief_min = max(60, int(detailed_min * 0.45))
+    brief_max = max(brief_min + 30, int(detailed_max * 0.55))
+    return {
+        "mode": "summarize",
+        "status": "confirmation_required",
+        "summary": {"chars_in": chars_in},
+        "options": [
+            {
+                "id": "brief",
+                "label": "краткая выжимка",
+                "min_seconds": brief_min,
+                "max_seconds": brief_max,
+                "words_estimate": 250,
+                "description": (
+                    "Прочитаю только ключевые разделы (введение, подписи, "
+                    "заголовки всех частей). Детали могу пропустить."
+                ),
+            },
+            {
+                "id": "detailed",
+                "label": "подробный анализ",
+                "min_seconds": detailed_min,
+                "max_seconds": detailed_max,
+                "words_estimate": 1000,
+                "description": (
+                    "Прочитаю весь документ, опишу каждый раздел простым языком."
+                ),
+            },
+        ],
+        "supports_question": True,
+        "hint": (
+            "Покажите пользователю меню из двух вариантов (brief / detailed) "
+            "и упомяните, что можно задать конкретный вопрос через --question."
+        ),
+    }
+
+
 def prepare_output(result: dict) -> dict:
     """Привести результат ``summarizer.run()`` к плоскому формату.
 
@@ -85,21 +139,22 @@ def prepare_output(result: dict) -> dict:
             )
 
     elif status == "confirmation_required":
-        # summary может содержать estimated_llm_calls (устаревший путь) —
-        # пробрасываем, но вычищаем счётчик: пользователю важно только время.
-        out["summary"] = {
-            k: v
-            for k, v in (result.get("summary") or {}).items()
-            if k != "estimated_llm_calls"
-        }
-        out["estimate"] = {
-            k: v
-            for k, v in (result.get("estimate") or {}).items()
-            if k != "estimated_llm_calls"
-        }
-        hint = result.get("hint")
-        if hint:
-            out["hint"] = hint
+        summary = result.get("summary") or {}
+        est = result.get("estimate") or {}
+        min_sec = est.get("min_seconds") or est.get("estimated_duration_min_sec")
+        max_sec = est.get("max_seconds") or est.get("estimated_duration_max_sec")
+        if min_sec is not None and max_sec is not None:
+            payload = build_confirmation_options(
+                chars_in=summary.get("chars_in") or 0,
+                min_seconds=min_sec,
+                max_seconds=max_sec,
+            )
+            out.update(payload)
+            return out
+        # Если время неизвестно — fallback на старый минимальный payload.
+        title = summary.get("title")
+        if title:
+            out["summary"] = {"title": title}
 
     elif status == "requires_continuation":
         out["summary"] = result.get("summary") or {}

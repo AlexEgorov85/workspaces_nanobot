@@ -611,27 +611,38 @@ def test_prepare_output_failed():
 
 
 def test_prepare_output_confirmation_required():
+    """confirmation_required: payload содержит options (brief/detailed) и
+    НЕ содержит технических чисел (chunks, batches, llm_calls)."""
     result = {
         "status": "confirmation_required",
         "operation_id": "op_test_003",
         "summary": {
-            "chars_in": 1000,
-            "chunks_total": 20,
-            "context_batches_total": 10,
-            "estimated_llm_calls": 11,
+            "title": "Договор аренды",
         },
         "estimate": {
             "min_seconds": 320,
             "max_seconds": 480,
-            "confirmation_threshold_sec": 120,
         },
-        "hint": "Передайте --confirm.",
+        "hint": "Покажите меню.",
     }
     out = prepare_output(result)
     assert out["status"] == "confirmation_required"
-    assert out["summary"]["chunks_total"] == 20
-    assert out["summary"]["context_batches_total"] == 10
-    assert out["estimate"]["max_seconds"] == 480
+    # Два варианта: brief и detailed.
+    assert "options" in out
+    ids = [opt["id"] for opt in out["options"]]
+    assert ids == ["brief", "detailed"]
+    # У каждого варианта есть время и оценка объёма.
+    brief = next(o for o in out["options"] if o["id"] == "brief")
+    detailed = next(o for o in out["options"] if o["id"] == "detailed")
+    assert brief["min_seconds"] < detailed["min_seconds"]
+    assert brief["words_estimate"] < detailed["words_estimate"]
+    # Поддерживается --question.
+    assert out["supports_question"] is True
+    # Технических чисел быть не должно.
+    out_str = str(out)
+    assert "chunks_total" not in out_str
+    assert "context_batches_total" not in out_str
+    assert "estimated_llm_calls" not in out_str
 
 
 def test_sanitize_handles_datetime():
@@ -950,27 +961,26 @@ def test_running_marker_emitted_before_long_run(monkeypatch, tmp_path, capsys):
 
 def test_confirmation_required_payload_hides_llm_call_count():
     """``confirmation_required`` НЕ должен содержать ``estimated_llm_calls``
-    и НЕ должен упоминать «вызовов LLM» в hint — пользователю важно время
+    и НЕ должен упоминать «вызовов LLM» в payload — пользователю важно время
     (инцидент 2026-08-28: агент зеркалил «20 вызовов LLM» в ответ)."""
     result = {
         "status": "confirmation_required",
         "operation_id": "op_x",
-        "summary": {"chars_in": 1000, "chunks_total": 20, "context_batches_total": 10},
+        "summary": {"title": "Документ"},
         "estimate": {
-            "chars_in": 1000,
-            "chunks_total": 20,
-            "context_batches_total": 10,
-            "estimated_duration_min_sec": 300.0,
-            "estimated_duration_max_sec": 480.0,
-            "confirmation_threshold_sec": 120,
+            "min_seconds": 300.0,
+            "max_seconds": 480.0,
         },
-        "hint": "Документ требует примерно 300–480 сек. Перезапустите с --confirm.",
     }
     out = prepare_output(result)
     assert out["status"] == "confirmation_required"
-    assert "estimated_llm_calls" not in out["summary"]
-    assert "estimated_llm_calls" not in out["estimate"]
-    assert "вызовов" not in out["hint"]
+    # Payload содержит options для меню выбора.
+    assert "options" in out
+    # И НЕ содержит технических чисел.
+    out_str = str(out)
+    assert "estimated_llm_calls" not in out_str
+    assert "chunks_total" not in out_str
+    assert "context_batches_total" not in out_str
 
 
 def test_prepare_output_strips_llm_call_counts_from_stats():
