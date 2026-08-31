@@ -650,30 +650,29 @@ def test_prepare_output_failed():
 
 def test_prepare_output_confirmation_required():
     """confirmation_required: payload содержит options (brief/detailed) и
-    НЕ содержит технических чисел (chunks, batches, llm_calls)."""
+    НЕ содержит технических чисел (chunks, batches, llm_calls).
+
+    Payload должен быть компактным (~300 chars), чтобы агент не генерировал
+    длинный ответ (UI режет спереди длинные тексты).
+    """
     result = {
         "status": "confirmation_required",
         "operation_id": "op_test_003",
-        "summary": {
-            "title": "Договор аренды",
-        },
+        "summary": {"title": "Договор аренды"},
         "estimate": {
             "min_seconds": 320,
             "max_seconds": 480,
         },
-        "hint": "Покажите меню.",
     }
     out = prepare_output(result)
     assert out["status"] == "confirmation_required"
-    # Два варианта: brief и detailed.
+    # Два варианта: brief и detailed (в виде dict).
     assert "options" in out
-    ids = [opt["id"] for opt in out["options"]]
-    assert ids == ["brief", "detailed"]
-    # У каждого варианта есть время и оценка объёма.
-    brief = next(o for o in out["options"] if o["id"] == "brief")
-    detailed = next(o for o in out["options"] if o["id"] == "detailed")
-    assert brief["min_seconds"] < detailed["min_seconds"]
-    assert brief["words_estimate"] < detailed["words_estimate"]
+    assert set(out["options"].keys()) == {"brief", "detailed"}
+    brief = out["options"]["brief"]
+    detailed = out["options"]["detailed"]
+    assert brief["min_sec"] < detailed["min_sec"]
+    assert brief["words"] < detailed["words"]
     # Поддерживается --question.
     assert out["supports_question"] is True
     # Технических чисел быть не должно.
@@ -681,6 +680,9 @@ def test_prepare_output_confirmation_required():
     assert "chunks_total" not in out_str
     assert "context_batches_total" not in out_str
     assert "estimated_llm_calls" not in out_str
+    # Payload должен быть компактным — не больше 400 chars после сериализации.
+    serialized_len = len(json.dumps(out, ensure_ascii=False))
+    assert serialized_len < 400, f"payload слишком длинный: {serialized_len} chars"
 
 
 def test_sanitize_handles_datetime():

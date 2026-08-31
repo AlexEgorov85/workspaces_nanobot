@@ -36,56 +36,32 @@ def build_confirmation_options(
     min_seconds: float,
     max_seconds: float,
 ) -> dict[str, Any]:
-    """Сформировать payload ``confirmation_required`` для агента.
+    """Сформировать компактный payload ``confirmation_required``.
 
-    Возвращает dict с двумя вариантами (brief / detailed) и подсказкой
-    про ``--question``. Технические числа (chunks, batches, llm_calls)
-    НЕ включаются — агент их зеркалит в ответ, что раздражает
-    (инцидент 2026-08-28).
-
-    brief: ~10-15% от detailed. Для ГК РФ (663 стр.):
-      detailed ~ 7-10 мин (полная экстракция pdfplumber + ~20 map-вызовов).
-      brief ~ 1-2 мин (быстрая экстракция первых 50 стр. через pypdf за ~2 сек +
-                        ~1-3 map-вызова).
+    Payload компактный (~300 chars) чтобы агент не генерировал длинный
+    ответ (в UI длинные тексты обрезаются спереди). Технические числа
+    (chunks, batches, llm_calls) НЕ включаются.
     """
     detailed_min = max(60, int(min_seconds))
     detailed_max = max(detailed_min + 30, int(max_seconds))
-    # brief: минимум 30 сек (1 LLM-вызов + экстракция), максимум 25% от detailed,
-    # но не меньше 30 сек и не больше 180 сек (3 мин — потолок для brief).
     brief_min = max(30, int(detailed_min * 0.10))
     brief_max = max(brief_min + 20, min(int(detailed_max * 0.25), 180))
     return {
-        "mode": "summarize",
         "status": "confirmation_required",
-        "summary": {"chars_in": chars_in},
-        "options": [
-            {
-                "id": "brief",
-                "label": "краткая выжимка",
-                "min_seconds": brief_min,
-                "max_seconds": brief_max,
-                "words_estimate": 250,
-                "description": (
-                    "Прочитаю только ключевые разделы (введение, подписи, "
-                    "заголовки всех частей). Детали могу пропустить."
-                ),
+        "chars_in": chars_in,
+        "options": {
+            "brief": {
+                "min_sec": brief_min,
+                "max_sec": brief_max,
+                "words": 250,
             },
-            {
-                "id": "detailed",
-                "label": "подробный анализ",
-                "min_seconds": detailed_min,
-                "max_seconds": detailed_max,
-                "words_estimate": 1000,
-                "description": (
-                    "Прочитаю весь документ, опишу каждый раздел простым языком."
-                ),
+            "detailed": {
+                "min_sec": detailed_min,
+                "max_sec": detailed_max,
+                "words": 1000,
             },
-        ],
+        },
         "supports_question": True,
-        "hint": (
-            "Покажите пользователю меню из двух вариантов (brief / detailed) "
-            "и упомяните, что можно задать конкретный вопрос через --question."
-        ),
     }
 
 
