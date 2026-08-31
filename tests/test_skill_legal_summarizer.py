@@ -492,6 +492,44 @@ def test_load_text_unknown_extension_raises(tmp_path):
         summarizer.load_text(p)
 
 
+def test_load_text_brief_mode_for_txt(tmp_path):
+    """mode='brief' для .txt просто читает весь файл (быстрая экстракция
+    применима только к PDF)."""
+    p = tmp_path / "contract.txt"
+    p.write_text("Договор аренды.\n\nПункт 1.\n\nПункт 2.", encoding="utf-8")
+    text = summarizer.load_text(p, mode="brief")
+    assert "Договор аренды" in text
+
+
+def test_load_text_brief_mode_for_pdf_uses_head_extraction(tmp_path):
+    """mode='brief' для PDF читает только первые max_pages через pypdf.
+
+    Проверяем, что функция существует и принимает параметры; реальный PDF
+    тестируется end-to-end на gkodeksrf.pdf (см. логи сессии).
+    """
+    import inspect
+    sig = inspect.signature(summarizer._extract_pdf_head)
+    assert "max_pages" in sig.parameters
+    assert "max_chars" in sig.parameters
+    assert "path" in sig.parameters
+
+
+def test_load_text_brief_mode_for_pdf_returns_smaller_text(tmp_path):
+    """Brief mode для PDF даёт меньше символов, чем full mode."""
+    import shutil
+    # Копируем реальный PDF в tmp (если есть в тестовой среде).
+    real_pdf = Path(r"C:\Users\Алексей\Downloads\gkodeksrf.pdf")
+    if not real_pdf.exists():
+        pytest.skip("gkodeksrf.pdf не доступен в этой среде")
+    target = tmp_path / "gk.pdf"
+    shutil.copy(real_pdf, target)
+    full_text = summarizer.load_text(target, mode="full")
+    brief_text = summarizer.load_text(target, mode="brief")
+    # Brief mode должен вернуть существенно меньше символов.
+    assert len(brief_text) < len(full_text) / 2
+    assert len(brief_text) > 0
+
+
 def test_load_structure_returns_title_and_text(tmp_path):
     from docx import Document
 

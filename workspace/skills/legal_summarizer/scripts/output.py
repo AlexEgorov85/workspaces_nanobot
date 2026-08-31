@@ -43,12 +43,17 @@ def build_confirmation_options(
     НЕ включаются — агент их зеркалит в ответ, что раздражает
     (инцидент 2026-08-28).
 
-    brief: ~40-55% от detailed (sample vs full). Защита от деления на ноль.
+    brief: ~10-15% от detailed. Для ГК РФ (663 стр.):
+      detailed ~ 7-10 мин (полная экстракция pdfplumber + ~20 map-вызовов).
+      brief ~ 1-2 мин (быстрая экстракция первых 50 стр. через pypdf за ~2 сек +
+                        ~1-3 map-вызова).
     """
     detailed_min = max(60, int(min_seconds))
     detailed_max = max(detailed_min + 30, int(max_seconds))
-    brief_min = max(60, int(detailed_min * 0.45))
-    brief_max = max(brief_min + 30, int(detailed_max * 0.55))
+    # brief: минимум 30 сек (1 LLM-вызов + экстракция), максимум 25% от detailed,
+    # но не меньше 30 сек и не больше 180 сек (3 мин — потолок для brief).
+    brief_min = max(30, int(detailed_min * 0.10))
+    brief_max = max(brief_min + 20, min(int(detailed_max * 0.25), 180))
     return {
         "mode": "summarize",
         "status": "confirmation_required",

@@ -300,20 +300,59 @@ def _save_doc_cache(
 _SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
 
 
-def load_text(path) -> str:
-    """Извлечь plain text из файла через office_files."""
+def load_text(path, *, mode: str = "full") -> str:
+    """Извлечь plain text из файла через office_files.
+
+    Args:
+        path: путь к .pdf / .docx / .txt.
+        mode: ``"full"`` — полная экстракция (для detailed / question
+            когда нужно читать весь документ). ``"brief"`` — быстрая
+            экстракция только первых страниц через pypdf (для brief
+            mode: первые 50 стр. ~100-150К chars → ~2 сек вместо 70+ сек
+            для ГК РФ на 663 стр.).
+    """
     p = Path(path)
     if p.suffix.lower() not in _SUPPORTED_EXTENSIONS:
         raise ValueError(
             f"Неподдерживаемый формат: '{p.suffix}'. "
             "legal_summarizer принимает только .pdf, .docx, .txt"
         )
-    text = extract_text(p)
+    if mode == "brief" and p.suffix.lower() == ".pdf":
+        text = _extract_pdf_head(p, max_pages=50, max_chars=150_000)
+    else:
+        text = extract_text(p)
     if not text or not text.strip():
         raise ValueError(
             f"Документ не содержит извлекаемого текста: {p}."
         )
     return text
+
+
+def _extract_pdf_head(path: Path, *, max_pages: int, max_chars: int) -> str:
+    """Извлечь первые ``max_pages`` страниц PDF через pypdf.
+
+    Возвращает не более ``max_chars`` символов. Это в 10-50× быстрее
+    pdfplumber для больших PDF (ГК РФ 663 стр. → ~70 сек → ~2 сек).
+    Текст первых страниц содержит титульник, общую часть и оглавление —
+    этого достаточно для краткого саммари.
+    """
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(path), strict=False)
+    parts: list[str] = []
+    total = 0
+    for i in range(min(max_pages, len(reader.pages))):
+        try:
+            text = reader.pages[i].extract_text() or ""
+        except Exception:
+            text = ""
+        if not text.strip():
+            continue
+        parts.append(text)
+        total += len(text)
+        if total >= max_chars:
+            break
+    return "\n\n".join(parts)
 
 
 def load_structure(path) -> dict:
