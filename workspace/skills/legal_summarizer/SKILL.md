@@ -251,7 +251,7 @@ exec — 60 сек, и сессия будет убита ровно на 60-й 
 **Обязательно:** когда `exec`/`write_stdin` возвращает этот маркер —
 
 1. НЕ опрашивайте по таймеру (каждый опрос = лишний LLM-вызов агента). Дождитесь завершения ОДНИМ блокирующим вызовом `write_stdin`.
-2. Передайте `wait_for = done_marker` (строка `"__LEGAL_SUMMARIZER_DONE__"`) и `wait_timeout_ms = 120000` (жёсткий максимум nanobot). `yield_time_ms` оставьте дефолтным.
+2. Передайте `wait_for = done_marker` (строка `"__LEGAL_SUMMARIZER_DONE__"`) и `wait_timeout_ms = 120000` (жёсткий максимум nanobot). `yield_time_ms` **НЕ передавайте** — дефолт nanobot 30000. ⚠️ **НИКОГДА не передавайте `yield_time_ms > 30000`** — будет ошибка `Invalid parameters: yield_time_ms must be <= 30000`.
 3. `write_stdin` вернётся, как только навык напечатает sentinel в stdout — это значит прогон завершён (успех/`partial`/`confirmation`/`error`). Финальный JSON-результат придёт в том же выводе сразу перед sentinel.
 4. Если прогон дольше 120 сек, `write_stdin` вернётся с `Wait target not observed` (процесс ещё жив). Тогда вызовите `write_stdin` повторно с тем же `wait_for`/`wait_timeout_ms` — это даст минимум LLM-вызовов (по одному на каждые ~120 сек работы), а не по одному каждые 30 сек.
 5. Progress-строки (`[legal_summarizer] batch cb_NNN ...`) идут в **stderr** и sentinel не содержат — `wait_for` на sentinel не сработает ложно.
