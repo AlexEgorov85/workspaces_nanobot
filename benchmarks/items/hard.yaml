@@ -1,5 +1,6 @@
 ﻿# Сложные задания (сложность 8-10)
-# Многошаговый анализ реальных данных oarb с итоговым отчётом
+# Многошаговый анализ реальных данных oarb с итоговым отчётом.
+# После перевода skill'а на tool-only все шаги — через nl_sql_generate.
 
 - id: "hard-effectiveness-report"
   name: "Отчёт по эффективности проверок"
@@ -13,21 +14,19 @@
     - step: 1
       weight: 0.3
       question: >-
-        Запусти предопределённый скрипт analytics_by_year_month с параметром
-        year=2024 через skills/audit_analyzer/scripts/cli.py и покажи,
-        сколько проверок прошло по месяцам.
+        Через tool nl_sql_generate покажи, сколько аудиторских проверок
+        прошло в 2024 году по месяцам.
       expect:
-        tools: ["exec"]
+        tools: ["nl_sql_generate"]
         keywords_include: ["2024", "проверок"]
     - step: 2
       weight: 0.3
       question: >-
-        Запусти скрипт audit_effectiveness и определи, какая проверка имеет
+        Через tool nl_sql_generate определи, какая проверка имеет
         наибольшее число нарушений и какой у неё уровень серьёзности.
       expect:
-        tools: ["exec"]
-        
-        keywords_include: ["severity_level", "критическ"]
+        tools: ["nl_sql_generate"]
+        keywords_include: ["severity", "критическ"]
     - step: 3
       weight: 0.4
       question: >-
@@ -52,19 +51,18 @@
     - step: 1
       weight: 0.3
       question: >-
-        Запусти предопределённый скрипт analytics_by_year_month с параметром
-        year=2024 через skills/audit_analyzer/scripts/cli.py и покажи,
-        в каких месяцах 2024 года проходили проверки и сколько их было.
+        Через tool nl_sql_generate покажи, в каких месяцах 2024 года
+        проходили проверки и сколько их было.
       expect:
-        tools: ["exec"]
+        tools: ["nl_sql_generate"]
         keywords_include: ["2024", "проверок"]
     - step: 2
       weight: 0.3
       question: >-
-        Запусти скрипт top_audited_objects и покажи, какие объекты
-        проверялись чаще всего в 2024 году.
+        Через tool nl_sql_generate покажи, какие объекты проверялись
+        чаще всего в 2024 году.
       expect:
-        tools: ["exec"]
+        tools: ["nl_sql_generate"]
         keywords_include: ["объект", "проверок"]
     - step: 3
       weight: 0.4
@@ -90,19 +88,18 @@
     - step: 1
       weight: 0.3
       question: >-
-        Запусти предопределённый скрипт violations_by_type через
-        skills/audit_analyzer/scripts/cli.py и покажи распределение
-        нарушений по кодам.
+        Через tool nl_sql_generate покажи распределение нарушений
+        по кодам.
       expect:
-        tools: ["exec"]
+        tools: ["nl_sql_generate"]
         keywords_include: ["VIOL", "нарушений"]
     - step: 2
       weight: 0.3
       question: >-
-        Запусти скрипт top_audited_objects и покажи, какие объекты
-        проверялись чаще всего.
+        Через tool nl_sql_generate покажи, какие объекты проверялись
+        чаще всего.
       expect:
-        tools: ["exec"]
+        tools: ["nl_sql_generate"]
         keywords_include: ["объект", "проверок"]
     - step: 3
       weight: 0.4

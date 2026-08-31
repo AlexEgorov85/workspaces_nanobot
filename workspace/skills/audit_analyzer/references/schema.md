@@ -93,3 +93,17 @@ LEFT JOIN violations v ON v.audit_id = a.id
 - Текстовые поля могут содержать `NULL`.
 - Статусы и severity — свободный текст (`varchar`), а не PG-enum. Конкретный набор ярлыков определяется данными и может расширяться без миграции схемы.
 - Все таблицы живут в схеме `oarb` и доступны через DuckDB-кэш как `oarb.<table>` (полное имя обязательно в SELECT, см. `sql_guidance.md`).
+
+## Как использовать схему
+
+Skill **не выполняет SQL сам** — только даёт инструкции агенту, какие tool'ы
+вызвать. Все запросы идут через `workspace/tools/`:
+
+- Для NL→SELECT: `nl_sql_generate(query="...")` (этот tool знает whitelist
+  таблиц из `TableRegistry` и подтягивает hints через `column_descriptions`).
+- Для точного SELECT: `duckdb_query(sql="SELECT * FROM oarb.audits WHERE ...")`.
+- Для семантического поиска: `vector_search(query="...", index_name="...")`.
+
+Tool'ы сами следят за безопасностью (`validate_sql`) и лимитами
+(`max_rows` / `max_result_chars`). Skill не должен в промптах или
+инструкциях просить агента писать DDL/DML.

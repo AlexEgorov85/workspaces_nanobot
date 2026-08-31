@@ -197,21 +197,14 @@
         {
           "name": "audit_reports_index"
         }
-      ],
-
-      "cli": {                                       // audit_analyze --mode ...
-        "default_mode": "predefined",
-        "default_format": "json",
-        "max_retries": 3,
-        "timeout_sec": 60
-      },
-
-      "llm": {                                       // Execution policy для skill'а: max_tokens/temperature
-                                                   // для LLM-вызовов (генерация SQL, обобщение).
-                                                   // Выбор модели/провайдера — в config.json.
-        "max_tokens": 8192,
-        "temperature": 0.1
-      }
+      ]
+      // После перевода навыка на tool-only (skill использует только
+      // nl_sql_generate / duckdb_query / vector_search, никакого CLI)
+      // секции cli.* и llm.* больше не нужны:
+      //   * cli.* — был для scripts/cli.py (удалён);
+      //   * llm.* — общий LLM-параметр теперь на gateway.nl_sql_generate.*
+      //     (max_tokens/temperature пробрасываются через lib.services.llm_config
+      //     и resolve_llm_config, см. gateway.nl_sql_generate.*).
     },
 
     // -------------------------------------------------------------------------

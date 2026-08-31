@@ -7,74 +7,29 @@ metadata: {"nanobot":{"emoji":"📊","always":true}}
 # Audit Analyzer
 
 Анализ аудиторских проверок: нарушения, отчёты, плановые/фактические даты.
+Skill **использует только tool'ы** (никаких внутренних CLI/скриптов — всё
+выполнение идёт через generic infrastructure tools).
 
-Работает в **трёх режимах**. Выбирай режим под задачу, не комбинируй.
+## Decision procedure: задача → tool
 
-## Decision procedure: задача → capability
-
-| Задача | Режим | Инструмент |
-|---|---|---|
-| Аггрегация / фильтр по полям (год, месяц, тип, статус) | Predefined / Generated SQL | `scripts/cli.py --mode predefined`, `duckdb_query` |
-| Свободный вопрос про данные (SELECT) | Generated SQL | `duckdb_query` tool |
-| Семантический поиск по смыслу (не точному слову) | Vector | `vector_search` tool |
-| Известный отчёт из реестра | Predefined | `scripts/cli.py --mode predefined` |
+| Задача | Tool |
+|---|---|
+| NL-запрос на естественном языке → SELECT → результат | `nl_sql_generate` |
+| Точный SQL уже известен → выполнить SELECT | `duckdb_query` |
+| Семантический поиск по смыслу (не точному слову) | `vector_search` (с `index_name` из `references/vector_indexes.md`) |
+| Подсказки по колонкам для текущего термина | `column_descriptions` (опц., вызывается `nl_sql_generate` автоматически) |
 
 **Правило выбора:**
-- Если задача ложится на готовый отчёт из реестра (`public.agent_predefined_scripts`) → `predefined`.
-- Если нужна группировка/фильтр по полям — это аггрегация: пробуй `predefined`, иначе `generated_sql` через `duckdb_query`.
-- Если запрос про «смысл», а не точные слова (например, «пожарная безопасность», «финансовые нарушения») → `vector_search`.
 
-## Режимы работы
-
-### 1. Predefined — готовые отчёты из реестра
-
-Используй, когда вопрос пользователя совпадает с одним из готовых отчётов:
-
-| Скрипт | Когда подходит |
-|---|---|
-| `analytics_by_year_month` | аналитика проверок по годам/месяцам |
-| `violations_by_type` | статистика нарушений по кодам |
-| `top_audited_objects` | топ проверяемых объектов |
-| `audit_effectiveness` | оценка эффективности проверок |
-| `audit_dynamics` | динамика проверок по периодам |
-| `audit_types_stats` | статистика по типам проверок |
-
-Запуск через CLI:
-
-```bash
-python scripts/cli.py --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
-```
-
-Полный список скриптов и параметров — `references/schema.md`.
-
-### 2. Generated SQL — свободный вопрос на естественном языке
-
-Используй, когда ни один predefined-скрипт не подходит, но вопрос
-можно выразить через SELECT по доменным таблицам. LLM генерирует
-SQL по схеме БД и текстовому запросу; результат проходит
-SQL-policy (только SELECT, один statement) и выполняется.
-
-```bash
-python scripts/cli.py --mode generated_sql --query "топ-10 объектов по нарушениям"
-```
-
-Возвращает JSON с `rows`, `columns`, `sql`. Не подходит, если
-нужен семантический поиск — для этого режим `vector`.
-
-### 3. Vector — семантический поиск
-
-Используй, когда нужно найти документы **по смыслу**, а не точному слову
-(«пожарная безопасность», «финансовые нарушения», «дебиторка»).
-
-| Индекс | Что ищет |
-|---|---|
-| `audits_index` | по заголовкам проверок |
-| `violations_index` | по описаниям нарушений |
-| `audit_reports_index` | по полным текстам отчётов |
-
-```bash
-python scripts/cli.py --mode vector --query "финансовые нарушения" --index-name violations_index --top-k 5
-```
+1. **NL → SELECT**: `nl_sql_generate(query="...")`. Сам подтянет hints через
+   `column_descriptions` (термин → колонка) и выполнит запрос в общем
+   DuckDB-кеше.
+2. **Точный SELECT**: `duckdb_query(sql="SELECT ... FROM oarb.audits ...")`,
+   когда SQL уже знаешь (например, скопировал из `references/sql_guidance.md`).
+3. **Семантический поиск**: `vector_search(query="...", index_name="...")`,
+   когда запрос про «смысл», а не точные слова.
+4. **Подсказки отдельно**: `column_descriptions(term="...")` —
+   обычно не нужно напрямую, `nl_sql_generate` подтянет сам.
 
 ## Доменные таблицы и индексы
 
@@ -83,15 +38,54 @@ python scripts/cli.py --mode vector --query "финансовые нарушен
 > `skills.audit_analyzer.vector_indexes[*].name`). В других развёртываниях они
 > могут отличаться; не зашивайте их в код/промпты как константы.
 
-- `oarb.audits`, `oarb.violations`, `oarb.audit_reports`, `oarb.report_items` — что в них, см. `references/schema.md`.
-- Vector-индексы — `references/vector_indexes.md`.
-- Predefined-скрипты — реестр `public.agent_predefined_scripts` (конфигурируется через `label: "scripts_registry"` в `skills.audit_analyzer.tables`).
+- `oarb.audits`, `oarb.violations`, `oarb.audit_reports`, `oarb.report_items` —
+  колонки и связи см. `references/schema.md`.
+- Vector-индексы (`audits_index`, `violations_index`, `audit_reports_index`)
+  — назначение и embed-колонки см. `references/vector_indexes.md`.
+- Реестр предопределённых скриптов — `public.agent_predefined_scripts`
+  (конфигурируется через `label: "scripts_registry"`).
 
 ## Что не делать
 
 - Не использовать неизвестные таблицы или индексы.
-- Не использовать DDL/DML.
-- Не подставлять пользовательские значения в SQL строкой — параметры через `:name` (для CLI) или `params` в `duckdb_query`.
+- Не использовать DDL/DML (запрещено в `duckdb_query` и `nl_sql_generate`
+  через `lib/utils/sql_safety.py::validate_sql`).
+- Не подставлять пользовательские значения в SQL строкой — параметры через
+  `:name` (для `duckdb_query.params`) или args в `nl_sql_generate`.
+- Не вызывать `scripts/cli.py` (в skill'е больше нет CLI — он удалён,
+  всё через tool'ы).
+
+## Как работает NL → SELECT
+
+`nl_sql_generate` использует общий pipeline в `lib/services/nl_sql_runner.py`:
+
+1. Whitelist таблиц из `TableRegistry` (не знает про домен).
+2. `SchemaFormatter` (internal service) формирует описание схемы для LLM.
+3. `column_descriptions.lookup()` подмешивает подсказки термин→колонка
+   в system prompt (если `skip_hints=False`).
+4. LLM генерирует SELECT.
+5. `validate_sql` — последняя граница безопасности (SELECT-only, single-statement).
+6. `provider.explain()` — синтаксическая проверка.
+7. `provider.query_sql()` — выполнение в общем DuckDB-кеше.
+8. JSON-ответ с `sql`, `columns`, `rows`, `row_count`.
+
+Retry-цикл: до `gateway.nl_sql_generate.max_retries` (default 3) при
+ошибках валидации / EXPLAIN / execute.
+
+## Семантический поиск: пример
+
+```
+vector_search(
+  query="пожарная безопасность",
+  index_name="violations_index",
+  top_k=5,
+  threshold=0.5,
+)
+```
+
+Метаданные индексов (`audits_index`, `violations_index`, `audit_reports_index`)
+живут в `public.agent_vector_index_config`. Выбор `index_name` — на стороне
+skill'а (см. `references/vector_indexes.md`).
 
 ## References
 

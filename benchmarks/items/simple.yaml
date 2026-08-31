@@ -1,5 +1,8 @@
 ﻿# Простые задания (сложность 1-3)
-# Естественные вопросы пользователя о данных в схеме oarb БД аудита
+# Естественные вопросы пользователя о данных в схеме oarb БД аудита.
+#
+# После перевода skill'а на tool-only агент больше НЕ запускает
+# ``skills/audit_analyzer/scripts/cli.py`` — всё через generic tools.
 
 - id: "simple-greeting"
   name: "Приветствие"
@@ -20,11 +23,11 @@
   type: "single"
   new_session: true
   question: >-
-    Посмотри на структуру базы в файле skills/audit_analyzer/cache/schema.json.
     Какие таблицы относятся к схеме oarb и сколько их всего?
+    Используй tool duckdb_query с SELECT к information_schema.tables.
   max_iterations: 10
   expect:
-    tools: ["read_file"]
+    tools: ["duckdb_query"]
     keywords_include: ["oarb", "violations"]
 
 - id: "simple-schema-violations"
@@ -35,10 +38,11 @@
   new_session: true
   question: >-
     В базе аудита есть таблица violations. Расскажи, из каких колонок она
-    состоит и что означает каждая из них.
+    состоит и что означает каждая из них. Используй tool duckdb_query
+    с information_schema.columns для oarb.violations.
   max_iterations: 10
   expect:
-    tools: ["read_file"]
+    tools: ["duckdb_query"]
     keywords_include: ["severity", "violation_code"]
 
 - id: "simple-audits-2024"
@@ -49,13 +53,10 @@
   new_session: true
   question: >-
     Покажи, сколько аудиторских проверок прошло в 2024 году по месяцам.
-    Воспользуйся навыком audit_analyzer: запусти скрипт analytics_by_year_month
-    с параметром year=2024 через skills/audit_analyzer/scripts/cli.py
-    (режим predefined).
+    Используй tool nl_sql_generate.
   max_iterations: 15
   expect:
-    tools: ["exec"]
-    
+    tools: ["nl_sql_generate"]
     keywords_include: ["2024", "проверк"]
 
 - id: "simple-violations-table"
@@ -65,9 +66,10 @@
   type: "single"
   new_session: true
   question: >-
-    Посмотри на схему таблицы violations в schema.json. Какие значения может
-    принимать колонка severity и какого она типа?
+    Какие значения может принимать колонка severity в таблице violations
+    и какого она типа? Используй tool duckdb_query:
+    SELECT severity, count(*) FROM oarb.violations GROUP BY severity.
   max_iterations: 10
   expect:
-    tools: ["read_file"]
-    keywords_include: ["severity", "Низкая"]
+    tools: ["duckdb_query"]
+    keywords_include: ["severity"]

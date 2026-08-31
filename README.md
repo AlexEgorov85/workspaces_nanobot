@@ -35,14 +35,17 @@ psql -d nanobot -f sql/channels/create_public_agent_conversation_messages.sql
 python gateway.py                                                 # долгоживущий сервер
 python cli_agent.py                          # REPL vanilla (JSONL)
 python cli_agent.py -P -s my-session         # REPL patched (PGSessionManager + хуки)
-python workspace/skills/audit_analyzer/scripts/cli.py \
-    --mode vector --query "..." --index-name violations_index    # навык audit_analyzer
 python benchmarks/runner.py --tags simple                         # оценка качества
 python tools/build_vectors.py --full-rebuild                      # перестроение FAISS-индексов
 python tools/build_vectors.py --status                            # текущее состояние
 python tools/check_worker_pool_integrity.py --fix                 # диагностика пула воркеров
 python tools/migrate.py --apply                                   # миграции схемы
 ```
+
+> **Навык `audit_analyzer` работает через tool'ы агента:** `nl_sql_generate`
+> (NL→SELECT), `duckdb_query` (точный SELECT), `vector_search` (семантика),
+> `column_descriptions` (подсказки). Skill больше не имеет собственного CLI —
+> агенту достаточно следовать `SKILL.md`.
 
 Подробности по каждой команде — в [docs/INTERNAL_API.md](docs/INTERNAL_API.md) и
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).

@@ -79,8 +79,6 @@ def _required_keys():
         ("skills.legal_summarizer.chunking.chunk_overlap", 2000),
         ("skills.legal_summarizer.chunking.single_call_threshold", 20000),
         ("skills.legal_summarizer.chunking.chunk_size_input_ratio", 0.5),
-        ("skills.audit_analyzer.llm.max_tokens", 8192),
-        ("skills.audit_analyzer.llm.temperature", 0.1),
         ("skills.audit_analyzer.tables", [
             {"name": "oarb.audit_reports"},
             {"name": "oarb.audits"},
@@ -105,10 +103,6 @@ def _required_keys():
         ("gateway.vector.embedding.model", "mxbai-embed-large:latest"),
         ("gateway.vector.embedding.dimension", 1024),
         ("gateway.vector.embedding.http_timeout_sec", 60),
-        ("skills.audit_analyzer.cli.default_mode", "predefined"),
-        ("skills.audit_analyzer.cli.default_format", "json"),
-        ("skills.audit_analyzer.cli.max_retries", 3),
-        ("skills.audit_analyzer.cli.timeout_sec", 60),
         # cli
         ("cli.show_reasoning", True),
         ("cli.llm_timeout", 300),

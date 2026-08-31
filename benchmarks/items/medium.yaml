@@ -1,5 +1,5 @@
 ﻿# Средние задания (сложность 4-7)
-# Анализ реальных данных oarb через audit_analyzer (predefined-скрипты)
+# Анализ реальных данных oarb через tool nl_sql_generate / duckdb_query.
 
 - id: "medium-schema-relations"
   name: "Связи таблиц"
@@ -8,12 +8,13 @@
   type: "single"
   new_session: true
   question: >-
-    Посмотри на схему базы в schema.json и объясни, как таблицы audits,
-    audit_reports, report_items и violations связаны между собой. Какие колонки
-    соединяют их друг с другом?
+    Объясни, как таблицы audits, audit_reports, report_items и violations
+    связаны между собой. Какие колонки соединяют их друг с другом?
+    Используй tool nl_sql_generate или duckdb_query для просмотра
+    information_schema и references/schema.md навыка.
   max_iterations: 15
   expect:
-    tools: ["read_file"]
+    tools: ["nl_sql_generate", "duckdb_query"]
     keywords_include: ["audit_id", "report_id"]
 
 - id: "medium-audit-types"
@@ -24,12 +25,11 @@
   new_session: true
   question: >-
     Какие типы аудиторских проверок встречаются в базе и как часто?
-    Запусти предопределённый скрипт audit_types_stats через
-    skills/audit_analyzer/scripts/cli.py (режим predefined) и
-    перечисли типы с их количеством.
+    Используй tool nl_sql_generate для генерации SELECT по oarb.audits
+    с группировкой по audit_type.
   max_iterations: 40
   expect:
-    tools: ["exec"]
+    tools: ["nl_sql_generate"]
     keywords_include: ["audit_type", "Внеплановая"]
 
 - id: "medium-violations-by-type"
@@ -39,13 +39,12 @@
   type: "single"
   new_session: true
   question: >-
-    Сгруппируй нарушения по кодам и покажи, какие коды встречаются чаще всего
-    и в скольких разных проверках. Запусти script violations_by_type через
-    skills/audit_analyzer/scripts/cli.py (режим predefined).
+    Сгруппируй нарушения по кодам и покажи, какие коды встречаются чаще
+    всего и в скольких разных проверках. Используй tool nl_sql_generate
+    или duckdb_query с GROUP BY violation_code по oarb.violations.
   max_iterations: 20
   expect:
-    tools: ["exec"]
-    
+    tools: ["nl_sql_generate", "duckdb_query"]
     keywords_include: ["VIOL", "нарушений"]
 
 - id: "medium-effectiveness"
@@ -56,13 +55,14 @@
   new_session: true
   question: >-
     Проанализируй эффективность аудиторских проверок: для каждой проверки
-    посчитай число нарушений и уровень серьёзности (severity_level). Какие
-    проверки попали в категории «Критические» и «Без нарушений»? Запусти
-    предопределённый скрипт audit_effectiveness.
+    посчитай число нарушений и уровень серьёзности (severity). Какие
+    проверки попали в категории «Критические» и «Без нарушений»?
+    Используй tool nl_sql_generate для генерации SELECT с JOIN
+    audits × violations.
   max_iterations: 40
   expect:
-    tools: ["exec"]
-    keywords_include: ["severity_level", "Критические"]
+    tools: ["nl_sql_generate"]
+    keywords_include: ["severity", "Критическ"]
 
 - id: "medium-dynamics"
   name: "Динамика проверок"
@@ -71,12 +71,12 @@
   type: "single"
   new_session: true
   question: >-
-    Покажи динамику проведения проверок по месяцам 2024 года: в каких месяцах
-    прошли проверки и сколько их было. Запусти предопределённый скрипт
-    analytics_by_year_month с параметром year=2024.
+    Покажи динамику проведения проверок по месяцам 2024 года: в каких
+    месяцах прошли проверки и сколько их было. Используй tool
+    nl_sql_generate.
   max_iterations: 30
   expect:
-    tools: ["exec"]
+    tools: ["nl_sql_generate"]
     keywords_include: ["проверок", "2024"]
 
 - id: "medium-top-objects"
@@ -86,11 +86,10 @@
   type: "single"
   new_session: true
   question: >-
-    Какие объекты чаще всего проверялись аудиторами? Запусти предопределённый
-    скрипт top_audited_objects и перечисли объекты с количеством проверок
-    по убыванию.
+    Какие объекты чаще всего проверялись аудиторами? Используй tool
+    nl_sql_generate для генерации SELECT с GROUP BY auditee_entity
+    по oarb.audits и ORDER BY count DESC.
   max_iterations: 20
   expect:
-    tools: ["exec"]
-    
+    tools: ["nl_sql_generate"]
     keywords_include: ["объект", "проверок"]

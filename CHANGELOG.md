@@ -38,7 +38,8 @@
   структурированный словарь подсказок (термин → колонка) для подмешивания
   в system prompt `nl_sql_generate`. Заменил бывший
   `workspace/skills/audit_analyzer/scripts/column_hints.py`. Словарь
-  перенесён в `data_store/column_descriptions.json`. Параметры: `term`,
+  читается из inline `entries` в `config.json` или опционально из
+  внешнего JSON-файла через `data_file`. Параметры: `term`,
   `match_all`, `max_matches`. Конфиг: `tools.column_descriptions.*`
   (хранение в `config.json`, рядом с `tools.legal_summarizer_query`).
 
@@ -56,27 +57,11 @@
 
 ### Changed
 
-- **Skill `audit_analyzer` полностью переведён на tool-only**. Больше
-  нет `scripts/cli.py` с режимами `--mode`, нет `scripts/predefined.py`
-  / `predefined_mode.py` / `db_loader.py` / `scripts_registry.py`
-  / `column_hints.py` / `protocol.py` / `output.py` / `llm.py`
-  / `skill_config.py`. Skill теперь содержит только `SKILL.md` +
-  `references/` (`schema.md`, `vector_indexes.md`, `sql_guidance.md`).
-  Все запросы идут через generic tools: `nl_sql_generate` (NL→SELECT),
-  `duckdb_query` (точный SELECT), `vector_search` (семантика),
-  `column_descriptions` (подсказки). Бенчмарки `benchmarks/items/{simple,medium,hard}.yaml`
-  переписаны с `audit_analyzer/scripts/cli.py --mode ...` на вызовы
-  `nl_sql_generate` / `duckdb_query`.
-
 - **`docs/skill-tool-architecture.md`** — добавлены §8.1 «Контракт
-  `nl_sql_generate`» и §8.2 «Контракт `column_descriptions`». Раздел §8
-  (decision procedure для `audit_analyzer`) обновлён: убраны ссылки
-  на `scripts.cli` и `predefined_mode`.
+  `nl_sql_generate`» и §8.2 «Контракт `column_descriptions`».
 
 - **`docs/skill-tool-inventory.md`** — добавлены строки `nl_sql_generate`
-  и `column_descriptions` в сводную таблицу. Строка `audit_analyzer` Skill
-  обновлена: type `Skill (domain, tool-only)`, depends_on_tool
-  `nl_sql_generate`, `duckdb_query`, `vector_search`, `column_descriptions`.
+  и `column_descriptions` в сводную таблицу.
 
 - **`workspace/TOOLS.md`** — добавлены секции `nl_sql_generate` и
   `column_descriptions` с примерами использования.
@@ -85,31 +70,62 @@
   импорт `lib.core.skill_config.get_predefined_scripts_table("audit_analyzer")`
   вместо удалённого `workspace/skills/audit_analyzer/scripts/skill_config.py`.
 
-- **`tests/test_config_keys.py`** — добавлены обязательные ключи
-  `gateway.nl_sql_generate.*` в `REQUIRED_KEYS`. Удалены ключи
-  `skills.audit_analyzer.cli.*` и `skills.audit_analyzer.llm.*` (skill
-  больше не имеет собственного CLI / LLM-политики — это generic tools).
+- **`config.json::tools.column_descriptions`** — добавлена секция с
+  inline `entries` (термин→колонка) для `nl_sql_generate`-hints.
+
+### Changed (skill audit_analyzer → tool-only)
+
+- **Skill `audit_analyzer` полностью переведён на tool-only**. Удалён
+  каталог `scripts/` целиком (`cli.py`, `predefined.py`, `predefined_mode.py`,
+  `db_loader.py`, `scripts_registry.py`, `column_hints.py`, `protocol.py`,
+  `output.py`, `llm.py`, `skill_config.py`, `generated_sql_mode.py`,
+  `__init__.py`). Удалён также `cache/schema.json` (снимок схемы —
+  legacy-артефакт). Skill теперь содержит только `SKILL.md` +
+  `references/` (`schema.md`, `vector_indexes.md`, `sql_guidance.md`).
+
+  Все запросы идут через generic tools: `nl_sql_generate` (NL→SELECT),
+  `duckdb_query` (точный SELECT), `vector_search` (семантика),
+  `column_descriptions` (подсказки). Документация skill'а обновлена:
+  `SKILL.md` (decision procedure → tool-only), `references/sql_guidance.md`
+  (рекомендуемый путь — `nl_sql_generate`), `references/schema.md` (как
+  читать схему через tools), `references/vector_indexes.md` (NL→SELECT
+  → `nl_sql_generate`).
 
 - **`project.json::skills.audit_analyzer`** — удалены секции `cli` и `llm`
   (после перевода skill'а на tool-only обе секции не нужны).
 
+- **`tests/test_config_keys.py::REQUIRED_KEYS`** — удалены ключи
+  `skills.audit_analyzer.cli.*` и `skills.audit_analyzer.llm.*` (skill
+  больше не имеет собственного CLI / LLM-политики — это generic tools).
+  `gateway.nl_sql_generate.*` сохранены в `REQUIRED_KEYS`.
+
+- **`benchmarks/items/{simple,medium,hard}.yaml`** — переписаны с
+  `audit_analyzer/scripts/cli.py --mode ...` на вызовы `nl_sql_generate`
+  / `duckdb_query`. Заголовки yaml дополнены комментарием о tool-only.
+
+- **`README.md`** — убрана команда `python workspace/skills/audit_analyzer/scripts/cli.py`,
+  добавлена сноска о работе skill'а через tool'ы агента.
+
 ### Removed
 
-- **`workspace/skills/audit_analyzer/scripts/`** (целиком): `cli.py`,
-  `predefined.py`, `predefined_mode.py`, `db_loader.py`, `scripts_registry.py`,
-  `column_hints.py`, `protocol.py`, `output.py`, `llm.py`, `skill_config.py`,
-  `generated_sql_mode.py`, `__init__.py`. Логика полностью перенесена
-  в `lib/services/nl_sql_runner.py`, `lib/services/schema_formatter.py`,
-  `workspace/tools/nl_sql_generate.py`, `workspace/tools/column_descriptions.py`,
-  `data_store/column_descriptions.json`.
+- **`workspace/skills/audit_analyzer/scripts/`** (целиком): все 12 файлов
+  удалены. Логика полностью перенесена в `lib/services/nl_sql_runner.py`,
+  `lib/services/schema_formatter.py`, `workspace/tools/nl_sql_generate.py`,
+  `workspace/tools/column_descriptions.py`.
 
 - **`workspace/skills/audit_analyzer/cache/schema.json`** — снимок схемы
   не используется skill'ом после перехода на tool-only; актуальная схема
   читается через `duckdb_query` (information_schema) или `nl_sql_generate`.
 
-- **`workspace/skills/audit_analyzer/scripts/column_hints.py`** —
-  логика перенесена в tool `column_descriptions` и
-  `data_store/column_descriptions.json` (см. Added выше).
+- **`tests/test_db_loader.py`** — тестировал удалённый `db_loader.py`.
+
+- **`tests/test_skill_config_lookup.py`** — тестировал удалённый
+  `workspace/skills/audit_analyzer/scripts/skill_config.py` (lookup через
+  TableRegistry теперь покрывается `test_table_registry.py`).
+
+- **`workspace/skills/audit_analyzer/__init__.py`** — пустой файл, не
+  нужен (Python не требует `__init__.py` для распознавания пакета через
+  `tools.project_loader`).
 
 ### Added (legacy tools, см. ниже)
 
