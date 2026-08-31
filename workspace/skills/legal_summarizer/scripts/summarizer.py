@@ -186,8 +186,8 @@ def _load_prompt(name: str) -> str:
 
 
 _LENGTH_INSTRUCTIONS = {
-    "brief": "1 абзац, 150-250 слов: что это за документ и ключевые условия в двух-трёх фразах.",
-    "detailed": "по разделам документа, 800-1200 слов: каждый раздел простым языком.",
+    "brief": "1 абзац, 150-250 слов: что это за документ и ключевые условия в двух-трёх фразах. НЕ превышай 250 слов.",
+    "detailed": "по разделам документа, 800-1200 слов: каждый раздел простым языком. НЕ превышай 1200 слов.",
 }
 
 
@@ -196,7 +196,10 @@ _QUESTION_INSTRUCTION_TEMPLATE = (
     "Ищи в chunk'е / саммари ТОЛЬКО факты по этому вопросу.\n"
     "Если ничего не относится — пропусти (для map) "
     "или напиши «В документе не нашёл ответа» (для reduce).\n"
-    "НЕ описывай документ целиком, отвечай только на вопрос."
+    "НЕ описывай документ целиком, отвечай только на вопрос.\n"
+    "ОБЪЁМ: максимум 200-300 слов, прямой ответ по существу вопроса. "
+    "Без вводных фраз, без перечисления статей закона (только релевантные), "
+    "без подробного изложения каждого аспекта."
 )
 
 
@@ -303,13 +306,16 @@ _SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
 def load_text(path, *, mode: str = "full") -> str:
     """Извлечь plain text из файла через office_files.
 
+    Всегда полная экстракция. Для ускорения brief mode не режем входной
+    текст (это искажало саммари — LLM видел только начало документа).
+    Ускорение brief достигается через:
+      - параллельные map-вызовы (concurrency=4 в cli.py);
+      - выборку только первых 8 chunks в summarizer.run().
+
     Args:
         path: путь к .pdf / .docx / .txt.
-        mode: ``"full"`` — полная экстракция (для detailed / question
-            когда нужно читать весь документ). ``"brief"`` — быстрая
-            экстракция только первых страниц через pypdf (для brief
-            mode: первые 50 стр. ~100-150К chars → ~2 сек вместо 70+ сек
-            для ГК РФ на 663 стр.).
+        mode: сохранён для обратной совместимости, но не используется —
+            полная экстракция всегда.
     """
     p = Path(path)
     if p.suffix.lower() not in _SUPPORTED_EXTENSIONS:
@@ -317,10 +323,7 @@ def load_text(path, *, mode: str = "full") -> str:
             f"Неподдерживаемый формат: '{p.suffix}'. "
             "legal_summarizer принимает только .pdf, .docx, .txt"
         )
-    if mode == "brief" and p.suffix.lower() == ".pdf":
-        text = _extract_pdf_head(p, max_pages=50, max_chars=150_000)
-    else:
-        text = extract_text(p)
+    text = extract_text(p)
     if not text or not text.strip():
         raise ValueError(
             f"Документ не содержит извлекаемого текста: {p}."
@@ -331,10 +334,9 @@ def load_text(path, *, mode: str = "full") -> str:
 def _extract_pdf_head(path: Path, *, max_pages: int, max_chars: int) -> str:
     """Извлечь первые ``max_pages`` страниц PDF через pypdf.
 
-    Возвращает не более ``max_chars`` символов. Это в 10-50× быстрее
-    pdfplumber для больших PDF (ГК РФ 663 стр. → ~70 сек → ~2 сек).
-    Текст первых страниц содержит титульник, общую часть и оглавление —
-    этого достаточно для краткого саммари.
+    DEPRECATED: использовался для ускорения brief, но давал неполное
+    саммари (только начало документа). Сейчас load_text() всегда делает
+    полную экстракцию. Оставлен для возможных экспериментов.
     """
     from pypdf import PdfReader
 
@@ -418,19 +420,16 @@ def _doc_context(structure: dict | None, *, with_begin_end: bool = False) -> str
 
 
 def _progress(msg: str) -> None:
-    """Прогресс в stderr (человеческий лог) и stdout (агент при polling).
+    """Прогресс ТОЛЬКО в stderr.
 
-    При длинных прогонах nanobot запускает cli.py в фоне и опрашивает
-    через ``write_stdin`` — он читает ТОЛЬКО stdout. Без зеркала в stdout
-    агент видит пустоту и не понимает, что скилл реально молотит батчи
-    (инцидент 2026-08-28: ~30 LLM-вызовов на polling «подожди ещё»
-    вместо осмысленных действий). Зеркалим в оба потока — LLM
-    спокойно читает progress-строки рядом с финальным JSON
-    (``_emit`` всё равно печатает JSON последним).
+    ВАЖНО: НЕ зеркалим в stdout — иначе progress-строки попадают в финальный
+    вывод exec-вызова и LLM видит их как 'шум' / 'побитую кириллицу'
+    (инцидент 2026-08-31: агент интерпретировал progress как legacy cp1251).
+    Для polling через ``write_stdin`` sentinel ``__LEGAL_SUMMARIZER_DONE__``
+    достаточно, agent его ловит и не путается в потоке.
     """
     line = f"[legal_summarizer] {msg}"
     print(line, file=sys.stderr, flush=True)
-    print(line, file=sys.stdout, flush=True)
 
 
 def _compute_chunk_size_chars(cfg: dict) -> int:
