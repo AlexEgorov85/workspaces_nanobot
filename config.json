@@ -184,20 +184,6 @@
         "allowFrom": []
       }
     },
-    "telegram": {
-      "enabled": false,
-      "token": "",
-      "allowFrom": [],
-      "proxy": null,
-      "replyToMessage": false,
-      "reactEmoji": "👀",
-      "groupPolicy": "mention",
-      "connectionPoolSize": 32,
-      "poolTimeout": 5.0,
-      "streaming": true,
-      "inlineKeyboards": false,
-      "streamEditInterval": 0.6
-    },
     "wecom": {
       "enabled": false,
       "botId": "",
