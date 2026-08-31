@@ -18,6 +18,17 @@ metadata: {"nanobot":{"emoji":"📄","always":true}}
 > вместо анализа. Это самая частая ошибка при работе с этим skill'ом
 > (см. инцидент 2026-08-27).
 
+> ⚠️ **ПРАВИЛО #2 (обязательно для длинных документов):** если skill
+> вернул `status="confirmation_required"`, **НИКОГДА не вызывай его
+> сразу с `--confirm`** и **НИКОГДА не выбирай режим за пользователя**.
+> Сначала покажи пользователю **меню из двух вариантов** из
+> `options[]` (с `id`, `label`, `min/max_seconds`, `description`) и
+> подскажи, что можно задать конкретный вопрос через `--question`.
+> Только **после явного выбора** пользователя вызывай `cli.py` повторно
+> с нужным `--length` или `--question` и `--confirm`.
+> Если пользователь ответил «давай» без уточнений — по умолчанию
+> `--length brief`.
+
 ## Когда вызывать
 
 - Пользователь прислал файл `.pdf` / `.docx` / `.txt` и просит «расскажи,
@@ -134,7 +145,7 @@ Skill сам выполняет один вызов LLM и возвращает:
   "operation_id": "op_...",
   "subject": "Это договор аренды: ...",
   "summary": "...",
-  "length": "medium",
+  "length": "brief",
   "chars_in": 4523,
   "chunks": 1,
   "context_batches": 0,
@@ -151,26 +162,34 @@ Skill сам выполняет один вызов LLM и возвращает:
 python .../cli.py --file big.pdf
 ```
 
-Skill **не запускает** обработку. Возвращает:
+Skill **не запускает** обработку. Возвращает `confirmation_required` с
+готовым меню из двух вариантов для показа пользователю:
 
 ```json
 {
   "mode": "summarize",
   "status": "confirmation_required",
-  "operation_id": "op_...",
-  "summary": {
-    "chars_in": 452300,
-    "chunks_total": 20,
-    "context_batches_total": 10,
-    "strategy": "map_reduce",
-    "title": "..."
-  },
-  "estimate": {
-    "min_seconds": 320,
-    "max_seconds": 480,
-    "confirmation_threshold_sec": 120
-  },
-  "hint": "Передайте --confirm для запуска полной обработки."
+  "summary": {"chars_in": 2531314},
+  "options": [
+    {
+      "id": "brief",
+      "label": "краткая выжимка",
+      "min_seconds": 187,
+      "max_seconds": 343,
+      "words_estimate": 250,
+      "description": "Прочитаю только ключевые разделы (введение, подписи, заголовки всех частей). Детали могу пропустить."
+    },
+    {
+      "id": "detailed",
+      "label": "подробный анализ",
+      "min_seconds": 416,
+      "max_seconds": 624,
+      "words_estimate": 1000,
+      "description": "Прочитаю весь документ, опишу каждый раздел простым языком."
+    }
+  ],
+  "supports_question": true,
+  "hint": "Покажите пользователю меню из двух вариантов (brief / detailed) и упомяните, что можно задать конкретный вопрос через --question."
 }
 ```
 
