@@ -49,6 +49,15 @@ metadata: {"nanobot":{"emoji":"📄","always":true}}
 CLI вызывается агентом напрямую через интерпретатор (без отдельных
 `.bat`/`.sh`-обёрток — это антипаттерн проекта):
 
+> ⚠️ **Windows PowerShell:** НЕ используйте `cd X && python ...` —
+> PowerShell НЕ поддерживает `&&` как разделитель команд (только `;` или
+> пайплайн `|`). Используйте **абсолютный путь к cli.py** одним аргументом
+> в `exec` без `cd`:
+>
+> ```bash
+> python "C:\Users\<user>\.nanobot\workspace\skills\legal_summarizer\scripts\cli.py" --file "<path>" [--flags...]
+> ```
+
 ```bash
 python workspace/skills/legal_summarizer/scripts/cli.py --file <path> [--flags...]
 ```
