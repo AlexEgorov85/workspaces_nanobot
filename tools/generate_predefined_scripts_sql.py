@@ -5,13 +5,16 @@
 
 Источник данных (выбирается флагом):
   --from-db    — читает SELECT из БД (через utils.db.fetch)
-  --from-file  — импортирует SCRIPTS_REGISTRY из Python-файла
+  --from-file  — импортирует SCRIPTS_REGISTRY из произвольного Python-файла
+                 (файл должен определить ``SCRIPTS_REGISTRY: dict`` с
+                 типизированными ``ScriptDefinition``; зависимости —
+                 ``scripts_registry`` / ``lib.core.skill_config``)
   --from-stdin — принимает JSON через stdin
 
 Примеры:
   python tools/generate_predefined_scripts_sql.py --from-db
   python tools/generate_predefined_scripts_sql.py --from-file \\
-      --source workspace/skills/audit_analyzer/scripts/predefined_scripts.py
+      --source path/to/my_scripts.py
   python tools/generate_predefined_scripts_sql.py --from-db --out migration.sql
   python tools/generate_predefined_scripts_sql.py --from-db --truncate
 
@@ -50,14 +53,16 @@ for p in (str(_WORKSPACE), str(_ROOT)):
 #   --table <schema.table> в CLI  (перекрывает конфиг)
 #   project.json → skills.audit_analyzer.predefined_scripts_table
 # Хардкод-подстановки таблицы нет: если конфиг не читается — ошибка.
+#
+# Используем общий runtime API (``lib.core.skill_config``) — раньше
+# был wrapper в ``workspace/skills/audit_analyzer/scripts/skill_config.py``,
+# но skill полностью перешёл на tool-only и scripts/ удалён.
 
 
 def get_target_table() -> str:
-    """Прочитать имя таблицы из skill_config (читает project.json)."""
-    from workspace.skills.audit_analyzer.scripts.skill_config import (
-        get_predefined_scripts_table,
-    )
-    return get_predefined_scripts_table()
+    """Прочитать имя таблицы из lib.core.skill_config (читает project.json)."""
+    from lib.core.skill_config import get_predefined_scripts_table
+    return get_predefined_scripts_table("audit_analyzer")
 
 
 # =============================================================================
