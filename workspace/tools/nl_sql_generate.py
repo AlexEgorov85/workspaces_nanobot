@@ -44,7 +44,6 @@ Observability покрывается штатным ``lib/hooks/tool_audit_hook.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, ClassVar, Optional
 
 from pydantic import BaseModel, Field
@@ -57,9 +56,6 @@ from nanobot.agent.tools.base import Tool, tool_parameters
 
 
 __all__ = ["NlSqlGenerateTool", "NlSqlGenerateToolConfig"]
-
-
-_TOKEN_SPLIT_RE = re.compile(r"[^a-zа-яё0-9]+")
 
 
 class NlSqlGenerateToolConfig(BaseModel):
@@ -364,18 +360,22 @@ class NlSqlGenerateTool(Tool):
         result: dict[str, Any],
         effective_max_rows: int,
     ) -> str:
-        """Привести результат runner'а к контракту tool'а + truncate."""
+        """Привести результат runner'а к контракту tool'а + truncate.
+
+        Runner возвращает ``mode: "generated_sql"`` с ``data.result`` —
+        структура ``{columns, rows, row_count}`` от ``CacheProvider``.
+        """
         status = result.get("status", "error")
-        data = result.get("data") or {}
+        payload_data = result.get("data") or {}
 
         if status != "success":
-            err_msg = data.get("message", "Unknown error")
-            sql = data.get("sql", "")
+            err_msg = payload_data.get("message", "Unknown error")
+            sql = payload_data.get("sql", "")
             error_type = self._classify_error(err_msg)
             return self._error(error_type, err_msg, sql=sql)
 
-        sql = data.get("sql", "")
-        inner = data.get("result") or {}
+        sql = payload_data.get("sql", "")
+        inner = payload_data.get("result") or {}
         columns = inner.get("columns") or []
         raw_rows = inner.get("rows") or []
         row_count = inner.get("row_count", len(raw_rows))
@@ -391,7 +391,7 @@ class NlSqlGenerateTool(Tool):
             [sanitize_value(v) for v in row] for row in rows
         ]
 
-        payload = {
+        payload: dict[str, Any] = {
             "status": "success",
             "sql": sql,
             "columns": list(columns),

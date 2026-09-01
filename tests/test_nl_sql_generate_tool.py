@@ -506,3 +506,4 @@ class TestGetProviderFallback:
         sentinel = object()
         tool.set_provider(sentinel)
         assert tool._get_provider() is sentinel
+

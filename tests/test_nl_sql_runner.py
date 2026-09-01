@@ -443,3 +443,5 @@ class TestLoadPredefinedScripts:
         }])
         runner = NlSqlRunner(provider=provider)
         assert runner._load_predefined_scripts() == []
+
+

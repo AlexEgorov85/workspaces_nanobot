@@ -76,7 +76,7 @@ def _required_keys():
         ("skills.legal_summarizer.llm.max_tokens", 8192),
         ("skills.legal_summarizer.llm.temperature", 0.1),
         ("skills.legal_summarizer.chunking.chunk_size", 100000),
-        ("skills.legal_summarizer.chunking.chunk_overlap", 2000),
+        ("skills.legal_summarizer.chunking.chunk_overlap", 0),
         ("skills.legal_summarizer.chunking.single_call_threshold", 20000),
         ("skills.legal_summarizer.chunking.chunk_size_input_ratio", 0.5),
         ("skills.audit_analyzer.tables", [
@@ -157,6 +157,11 @@ def _required_keys():
         ("gateway.nl_sql_generate.max_result_chars", 50000),
         ("gateway.nl_sql_generate.max_rows", 1000),
         ("gateway.nl_sql_generate.hints_max_matches", 5),
+        # gateway.run_predefined_script — инфраструктурный tool (выполнение SQL
+        # из public.agent_predefined_scripts).
+        ("gateway.run_predefined_script.enable", True),
+        ("gateway.run_predefined_script.max_rows", 1000),
+        ("gateway.run_predefined_script.max_result_chars", 50000),
         ("gateway.vector.index.enable", True),
         ("gateway.vector.index.default_root", "data_store/vectors"),
         ("gateway.vector.index.backend", "faiss"),

@@ -1,0 +1,435 @@
+# Режим выбора — бенчмарк для audit_analyzer.
+#
+# Цель: проверить, что агент правильно выбирает один из трёх режимов:
+# 1. Predefined scripts (run_predefined_script)
+# 2. Vector search (vector_search)
+# 3. NL → SQL (nl_sql_generate) — fallback
+#
+# Метрика — правильность ВЫБОРА РЕЖИМА, а не качество SQL.
+#
+# Поля:
+#   * expected_mode: predefined | vector | nl_sql
+#   * expected_tool: имя tool'а из глобального expect.tools
+#   * expected_script: имя скрипта (для predefined)
+#   * expected_index: имя FAISS-индекса (для vector)
+#
+# Запускается как обычный benchmark-item:
+#   python benchmarks/runner.py --items benchmarks/items/audit_mode_selection.yaml --dry-run
+
+# === Predefined (10 заданий) ===
+
+- id: "audit-mode-predefined-1"
+  name: "Сводка по статусам аудитов"
+  difficulty: 2
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Покажи сводку по статусам аудиторских проверок."
+  max_iterations: 10
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["audit_status_summary"]
+
+- id: "audit-mode-predefined-2"
+  name: "Топ нарушений по кодам"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Покажи топ типов нарушений (по кодам)."
+  max_iterations: 10
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["top_violations_by_type"]
+
+- id: "audit-mode-predefined-3"
+  name: "Нарушения за 2024"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сколько нарушений было за 2024 год?"
+  max_iterations: 10
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["violations_by_period", "2024"]
+
+- id: "audit-mode-predefined-4"
+  name: "Проверки за квартал"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Покажи проверки за Q1 2024 года."
+  max_iterations: 10
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["audits_by_period"]
+
+- id: "audit-mode-predefined-5"
+  name: "Сводка по эффективности"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Дай сводку по эффективности аудиторских проверок."
+  max_iterations: 10
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["audit_effectiveness_summary"]
+
+- id: "audit-mode-predefined-6"
+  name: "Сводка по статусам (альтернативная формулировка)"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сколько проверок в каком статусе?"
+  max_iterations: 10
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["audit_status_summary"]
+
+- id: "audit-mode-predefined-7"
+  name: "Нарушения за полугодие"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Нарушения за период с 2024-01-01 по 2024-06-30."
+  max_iterations: 10
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["violations_by_period", "2024"]
+
+- id: "audit-mode-predefined-8"
+  name: "Самые частые коды нарушений"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Какие коды нарушений встречаются чаще?"
+  max_iterations: 10
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["top_violations_by_type"]
+
+- id: "audit-mode-predefined-9"
+  name: "Проверки за 2023"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Что проверяли в 2023 году?"
+  max_iterations: 10
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["audits_by_period", "2023"]
+
+- id: "audit-mode-predefined-10"
+  name: "Эффективность (синоним)"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Какие проверки самые проблемные?"
+  max_iterations: 10
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["audit_effectiveness_summary"]
+
+# === Vector (10 заданий) ===
+
+- id: "audit-mode-vector-1"
+  name: "Похожие нарушения — пожарная безопасность"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди нарушения, связанные с пожарной безопасностью."
+  max_iterations: 10
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["violations_index"]
+
+- id: "audit-mode-vector-2"
+  name: "Похожие проверки — бухгалтерия"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди проверки по бухгалтерскому учёту."
+  max_iterations: 10
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["audits_index"]
+
+- id: "audit-mode-vector-3"
+  name: "Похожие отчёты — неэффективность"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди отчёты с выводами о неэффективности."
+  max_iterations: 10
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["audit_reports_index"]
+
+- id: "audit-mode-vector-4"
+  name: "Похожие нарушения — охрана труда"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди нарушения про охрану труда."
+  max_iterations: 10
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["violations_index"]
+
+- id: "audit-mode-vector-5"
+  name: "Похожие проверки — школы"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди проверки в школах."
+  max_iterations: 10
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["audits_index"]
+
+- id: "audit-mode-vector-6"
+  name: "Похожие нарушения — финансы"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди финансовые нарушения."
+  max_iterations: 10
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["violations_index"]
+
+- id: "audit-mode-vector-7"
+  name: "Похожие отчёты — коррупция"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди отчёты, связанные с коррупцией."
+  max_iterations: 10
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["audit_reports_index"]
+
+- id: "audit-mode-vector-8"
+  name: "Похожие нарушения — эвакуация"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди нарушения правил эвакуации."
+  max_iterations: 10
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["violations_index"]
+
+- id: "audit-mode-vector-9"
+  name: "Похожие проверки — экология"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди экологические проверки."
+  max_iterations: 10
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["audits_index"]
+
+- id: "audit-mode-vector-10"
+  name: "Похожие отчёты — санкции"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди отчёты про применение санкций."
+  max_iterations: 10
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["audit_reports_index"]
+
+# === NL → SQL (10 заданий) — fallback-путь ===
+
+- id: "audit-mode-nlsql-1"
+  name: "Сколько проверок в 2025"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сколько аудиторских проверок было в 2025 году?"
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+
+- id: "audit-mode-nlsql-2"
+  name: "Топ организаций по нарушениям"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Топ-5 организаций по числу нарушений."
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+
+- id: "audit-mode-nlsql-3"
+  name: "Динамика по месяцам 2024"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Покажи динамику проверок по месяцам 2024 года."
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+
+- id: "audit-mode-nlsql-4"
+  name: "Средний срок устранения"
+  difficulty: 5
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Какой средний срок устранения нарушений?"
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+
+- id: "audit-mode-nlsql-5"
+  name: "JOIN audits × violations"
+  difficulty: 5
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Покажи JOIN audits и violations: сколько нарушений у каждой проверки."
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+
+- id: "audit-mode-nlsql-6"
+  name: "Сколько критических"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сколько нарушений с severity = критическая?"
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+
+- id: "audit-mode-nlsql-7"
+  name: "Открытые нарушения по responsible"
+  difficulty: 5
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сколько открытых нарушений у каждого ответственного?"
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+
+- id: "audit-mode-nlsql-8"
+  name: "Проверки без нарушений"
+  difficulty: 5
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Какие проверки прошли без нарушений?"
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+
+- id: "audit-mode-nlsql-9"
+  name: "Просроченные нарушения"
+  difficulty: 5
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сколько нарушений с истёкшим deadline?"
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+
+- id: "audit-mode-nlsql-10"
+  name: "Динамика по типам"
+  difficulty: 5
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Покажи динамику проверок по типам за 2024."
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+
+# === Ambiguous / negative cases ===
+
+- id: "audit-mode-ambiguous-1"
+  name: "Неоднозначный — между predefined и vector"
+  difficulty: 5
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сводка по статусам похожих проверок."
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+    keywords_include: ["ошибка"]
+
+- id: "audit-mode-ambiguous-2"
+  name: "Числовой вопрос — должен быть SQL, не vector"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сколько проверок пожарной безопасности было в 2024?"
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+    keywords_exclude: ["vector_search"]
+
+- id: "audit-mode-ambiguous-3"
+  name: "Predefined не подходит — нужны параметры"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди нарушения про пожарную безопасность за 2024."
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+    keywords_exclude: ["run_predefined_script"]
+
+- id: "audit-mode-ambiguous-4"
+  name: "Vector не подходит — нужны числа"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сколько раз упоминается пожарная безопасность в violations?"
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+    keywords_exclude: ["vector_search"]
+
+- id: "audit-mode-negative-1"
+  name: "Запрос с COUNT — не vector"
+  difficulty: 3
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сколько проверок было по пожарной безопасности?"
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+    keywords_exclude: ["vector_search"]
