@@ -300,6 +300,13 @@ Skill выполнит ВСЕ батчи внутри одного вызова 
 `map_reduce_hierarchical`. Hierarchical включается автоматически при
 `meaningful_sections >= 3` (топ-раздел с body ≥100 chars или level≤2).
 
+> ℹ️ **Все opt-in флаги — default OFF (бэкомпат).** `direct_strategy_min_chars > 0`
+> переключает medium-sized документы на single path (1 LLM call вместо map+reduce).
+> `brief_coverage_ratio < 0.5` уменьшает выборку для brief mode.
+> `allow_adjacent_sections=True` для locality-aware packing.
+> Включение — через `project.json -> skills.legal_summarizer.chunking`.
+> Подробнее — `docs/ARCHITECTURE.md` (раздел «legal_summarizer — внутренняя структура»).
+
 ### С пользовательским focus
 
 ```bash
@@ -400,7 +407,8 @@ Stats разделены на:
 
 ## Архитектура
 
-См. `ARCHITECTURE.md` для деталей и 19 архитектурных инвариантов.
+См. `ARCHITECTURE.md` (раздел «legal_summarizer — внутренняя структура») для деталей,
+новых модулей и инвариантов.
 
 Краткая схема:
 
@@ -409,19 +417,25 @@ file
   ↓
 office_files → PhysicalDocument (adapter, не parser)
   ↓
-DeterministicSectionDetector (confidence scoring, PDF outline priority)
+DeterministicSectionDetector (evidence scoring, PDF outline priority, list detection)
   ↓
-StructureAwareChunker (atomic tables, per-section chunking)
+StructureAwareChunker (atomic tables, per-section chunking, block-aware)
   ↓
-pack_chunks (section-locality greedy, token budget)
+document_cleanup (header/footer/duplicate classification)
+  ↓
+compute_document_stats → TokenBudget → pack_chunks (section-locality greedy)
   ↓
 estimate_execution (confirmation?)
+  ↓
+select_reduce_strategy (token-budget first, sections second) →
   ↓
 executor (внутри одного run(), без возвратов в AgentLoop):
   ↓
   for batch in context_batches: process_context_batch
   ↓
   reduce_hierarchical | reduce_flat (по meaningful_sections)
+  ↓
+  truncate section_summaries (НЕ LLM-trim)
   ↓
 result.json + manifest.completed
 ```
@@ -466,3 +480,38 @@ result.json + manifest.completed
 - ❌ Не запрашивать `--batch-index` или `--partial-summary` — старый
   streaming API полностью удалён. Manifest на диске — единственный
   source of truth для прогресса.
+
+## Performance baseline
+
+Representative документ: **ГК РФ (~5.7 MB, 663 страницы)**.
+Замер на синтетическом pipeline (без LLM-вызовов):
+
+| Этап pipeline | Время |
+|---|---|
+| `load_physical_document` | <30s |
+| `detect_sections` | <60s |
+| `StructureAwareChunker.chunk` | <30s |
+| `pack_chunks` | <10s |
+| `compute_document_stats` | <5s |
+
+**ГК РФ метрики:** 2.1M chars, 663 blocks → 659 chunks, 535k estimated tokens.
+**Heading detection**: 0 sections (ГК РФ — плоская структура без явных heading'ов).
+
+**Acceptance matrix (mock LLM, deterministic):**
+
+| Сценарий | LLM-вызовы | Acceptance |
+|---|---|---|
+| Small doc (≤12000 chars, single) | 1 | ≤ 1 ✅ |
+| Medium doc (default, no opt-in) | 2 | ≥ 1 ✅ |
+| Large doc (default) | 17 | ≥ 2 ✅ |
+| Medium doc (opt-in DIRECT) | **1** | ≤ baseline (2) ✅ |
+| Quality (small, honest mock) | 100% facts | ≥ 80% ✅ |
+
+**Opt-in для экономии вызовов:** `chunking_config.direct_strategy_min_chars=10000`
+переключает документы ~10-50k chars на single path → **−50% LLM-вызовов** для medium docs.
+
+**Тестовое покрытие:** 9 characterization tests, 7 resume scenarios, 9 tables tests,
+10 info-preservation tests, 7 perf-benchmarks, 12 quality-benchmarks, 9 acceptance
+tests. Файлы: `tests/test_skill_legal_summarizer_characterization.py`,
+`tests/test_resume_scenarios.py`, `tests/test_tables.py`,
+`tests/test_information_preservation.py`, `tests/benchmarks/*.py`.

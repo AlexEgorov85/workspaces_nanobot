@@ -1260,12 +1260,150 @@ nanobot/
 │       ├── SKILL.md                      #   пользовательская документация
 │       └── (utils: workspace/utils/office_files.py)
 │
+│       # legal_summarizer — структура scripts:
+│       # см. секцию «legal_summarizer — внутренняя структура» ниже.
+│
 ├── gateway.py                            #  тонкий оркестратор
 ├── cli_agent.py                          #  тонкий оркестратор
 ├── streamlit_app.py                      # [web-клиент, не через ApplicationContext]
 ├── config.py                             # SETTINGS (project.json + config.json + .secrets.env)
 └── project.json                          # конфигурация (channels.*, skills.*, gateway, cli, logging.db)
 ```
+
+---
+
+## legal_summarizer — внутренняя структура
+
+Структура `workspace/skills/legal_summarizer/scripts/`:
+
+```
+scripts/
+├── summarizer.py          # facade (~1300 строк): public entry points (run, inspect,
+│                          #   estimate, quick_estimate, load_text, load_structure,
+│                          #   make_operation_id). Не содержит деталей — делегирует.
+│
+├── sanitize.py            # post-processing LLM-ответов:
+│                          #   strip_think_blocks (CoT cleanup), extract_subject.
+│
+├── fingerprint.py         # детерминированные ID документов:
+│                          #   fingerprint_file (sha256 streaming 1MB),
+│                          #   resolve_document_id (smart-fallback),
+│                          #   resolve_session_key.
+│
+├── document_cache.py      # per-session кеш chunk-results для follow-up вопросов.
+│                          #   Включается только если путь содержит session-папку.
+│
+├── prompts_runtime.py     # runtime-загрузка prompts и длина/question instructions.
+│                          #   load_prompt, LENGTH_INSTRUCTIONS,
+│                          #   QUESTION_INSTRUCTION_TEMPLATE, system_instruction.
+│
+├── llm_calls.py           # все LLM-вызовы: doc_context, llm_batch,
+│                          #   llm_section_reduce, llm_document_reduce.
+│                          #   llm_section_trim помечен как dead code.
+│
+├── pipeline.py            # map-фаза pipeline:
+│                          #   process_context_batch, run_one_batch_async,
+│                          #   load_cached_partials, MAX_BATCH_PARSE_RETRIES.
+│
+├── token_budget.py        # расчёт бюджета токенов + optional tiktoken.
+│                          #   TokenBudget(context_window_tokens, ...),
+│                          #   direct_call_tokens,
+│                          #   count_tokens, text_to_tokens_estimate.
+│
+├── document_stats.py      # дешёвая статистика документов:
+│                          #   DocumentStats(chars, estimated_tokens, pages,
+│                          #   blocks, sections, tables, chunks, repeated_blocks).
+│
+├── document_cleanup.py    # детерминированная очистка blocks:
+│                          #   cleanup_blocks, _classify_role
+│                          #   (header/footer/duplicate по repetition_threshold).
+│
+├── execution_strategy.py  # адаптивный selector strategy:
+│                          #   ExecutionStrategy enum (DIRECT / MAP_FLAT /
+│                          #   MAP_HIERARCHICAL), StrategyConfig, select_execution_strategy.
+│                          #   Детерминированный, без LLM-вызовов.
+│
+├── reducer.py             # facade reducer:
+├── reducer_models.py      #   ReduceStrategy enum, ReduceStats, ReduceConfig,
+│                          #   ReduceResult, LLMRunner.
+├── reducer_strategy.py    #   should_use_hierarchical_reduce, select_reduce_strategy,
+│                          #   _build_fake_blocks.
+└── reducer_impl.py        #   reduce_results, _reduce_flat, _reduce_hierarchical,
+                           #   _section_text, _chunk_id_by_section, _section_order_key.
+
+├── packing.py             # facade packing:
+├── packing_models.py      #   ContextBatch, PackingConfig.
+└── packing_impl.py        #   _BATCH_OVERHEAD_TOKENS, _build_batches_strict,
+                           #   pack_chunks.
+
+├── manifest.py            # нормализованный v2 manifest + resume API.
+│                          #   Keyed по operation_id (mutable state).
+│
+├── output.py              # legacy output keys (back-compat).
+│
+├── llm.py                 # LLM-клиент (chat() через lib.services.llm_client).
+│                          #   Зарезервированное имя → не конфликтует с
+│                          #   пакетом llm/ (планируется после переименования
+│                          #   llm.py → llm_client.py).
+│
+├── prompts.py             # build_batch_user_message, parse_batch_response,
+│                          #   ChunkResultParseError (НЕ путать с prompts_runtime.py).
+│
+├── cli.py                 # CLI entry point (legacy back-compat interface).
+│
+├── brief_strategy.py      # round-robin selector для brief mode:
+│                          #   select_brief_chunks, select_brief_chunks_structured,
+│                          #   select_relevant_chunks. coverage_ratio вынесен в
+│                          #   параметр (default 0.5 = старое поведение).
+│
+└── structure/             # пакет для detection структуры документа:
+    ├── physical.py        #   load_physical_document: PDF/DOCX/TXT → PhysicalDocument
+    │                      #   (DOCX interleaved через body.iterchildren).
+    ├── heading.py         #   HeadingCandidate, HeadingEvidence,
+    │                      #   detect_heading_candidates, apply_evidence_scoring,
+    │                      #   compute_evidence.
+    ├── tree.py            #   DocumentSection, SectionTree, ROOT_SECTION_ID,
+    │                      #   build_section_tree, section_total_chars.
+    ├── sections.py        #   facade (221 строк): detect_sections, merge_short_sections,
+    │                      #   count_meaningful_sections, extract_local_structure_label.
+    ├── chunks.py          #   block-aware chunker: StructureAwareChunker,
+    │                      #   _split_table_into_chunks (preserve header).
+    └── list_detection.py  #   ListDetectionConfig, detect_list_runs,
+                           #   list_penalty_for_candidate.
+```
+
+### Ключевые invariants (legal_summarizer)
+
+- **#4.** Single-call strategy (`strategy="single"`) → ровно 1 LLM call для
+  документов, помещающихся в `single_call_threshold` chars или
+  `TokenBudget.direct_call_tokens` (opt-in через `direct_strategy_min_chars`).
+- **#5.** Map-reduce без opt-in → `len(batches)` map-вызовов + ≥1 reduce-вызов.
+  Opt-in DIRECT переключает на single path для подходящих документов.
+- **#8.** Cache separation: document cache keyed по `(session_key, document_id)` —
+  immutable chunks для follow-up вопросов. Manifest keyed по `operation_id` —
+  mutable state. Разные namespace, не конфликтуют.
+- **#15.** Section reduce вызывается **только** при `should_use_hierarchical_reduce`
+  ИЛИ `select_reduce_strategy == ReduceStrategy.HIERARCHICAL`.
+  Legacy criterion: `count_meaningful_sections >= 3`. Новый criterion:
+  token-budget first, sections second.
+- **#20.** LLM-trim секций заменён на truncation `[:max_chars]`.
+  `section_trim_calls` всегда 0 в stats.
+
+### Opt-in флаги (default OFF для back-compat)
+
+- `chunking_config.direct_strategy_min_chars > 0` → DIRECT strategy для
+  средних документов. Default 0 = старое поведение.
+- `chunking_config.brief_coverage_ratio < 0.5` → уменьшение выборки для
+  brief mode. Default 0.5 = старое поведение.
+- `PackingConfig.allow_adjacent_sections=True` → locality-aware packing.
+  Default False = strict section-locality.
+
+### Тесты
+
+`tests/test_resume_scenarios.py` (10 tests), `tests/test_tables.py` (9 tests),
+`tests/test_information_preservation.py` (10 tests), `tests/benchmarks/test_benchmark_summarizer.py`
+(7 tests), `tests/benchmarks/test_quality_benchmark.py` (12 tests),
+`tests/benchmarks/test_acceptance_matrix.py` (9 tests).
 
 ---
 
