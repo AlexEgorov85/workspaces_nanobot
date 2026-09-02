@@ -702,7 +702,7 @@ def test_skill_config_chunking_defaults_match_project_json():
 
     cfg = skill_config.get_chunking_config()
     assert cfg["chunk_size"] == 100000
-    assert cfg["chunk_overlap"] == 2000
+    assert cfg["chunk_overlap"] == 0
     assert cfg["single_call_threshold"] == 20000
     assert cfg["chunk_size_input_ratio"] == 0.5
 
