@@ -297,13 +297,10 @@ def _iter_docx_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
     blocks: list[DocumentBlock] = []
     ordinal = 0
 
-    para_to_page: dict[int, int] = {}
-    page_no = 1
+    para_to_page: dict[int, int | None] = {}
     n_paras = len(doc.paragraphs)
     for p_idx in range(n_paras):
-        if p_idx > 0 and p_idx % 25 == 0:
-            page_no += 1
-        para_to_page[p_idx] = page_no
+        para_to_page[p_idx] = None
 
     # Индексы исходных paragraphs/tables по их XML-объектам (для meta).
     para_by_xml: dict[int, object] = {id(p._p): (i, p) for i, p in enumerate(doc.paragraphs)}
@@ -375,6 +372,13 @@ def _iter_docx_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
 
     page_count = max((b.page_index or 0) for b in blocks) if blocks else 1
     return blocks, page_count
+
+
+# NOTE: fake pagination (каждые N параграфов = новая page) УДАЛЁН в этапе
+# Integration & Simplification. ``para_to_page[p_idx] = None`` теперь
+# возвращает None для всех параграфов — лучше отсутствие pagination, чем
+# ложная точность (использовалось только для DOCX без как page-extracting
+# встроенной — см. разбор архитектуры, фикс #13).
 
 
 def _iter_txt_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
