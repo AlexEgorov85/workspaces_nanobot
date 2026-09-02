@@ -180,6 +180,22 @@ class StructureAwareChunker:
         config: ChunkConfig,
         start_counter: int,
     ) -> list[Chunk]:
+        """Block-aware chunking.
+
+        Алгоритм:
+            1. Разделить блоки секции на body и tables (как раньше).
+            2. Для body: greedy накопление целых блоков в chunk пока
+               ``current_chars + block_chars <= max_chunk_chars``.
+               Если следующий блок не влезает → flush current chunk, начать новый.
+               Если ОДИН блок больше ``max_chunk_chars`` → fallback на
+               ``split_text`` для этого блока (как было).
+            3. Tables обрабатываются отдельно и атомарны (как было).
+
+        Преимущества над старым «join → split_text»:
+            - chunk boundaries = block boundaries (где возможно);
+            - меньше overlap-артефактов;
+            - ``block_indices`` точно отражают содержимое каждого chunk.
+        """
         body_blocks: list[DocumentBlock] = []
         table_blocks: list[DocumentBlock] = []
         for idx in section.block_indices:
@@ -195,31 +211,68 @@ class StructureAwareChunker:
         counter = start_counter
 
         if body_blocks:
-            body_texts = [b.content for b in body_blocks]
-            joined = "\n\n".join(body_texts)
-            if len(joined) <= config.max_chunk_chars:
-                parts = [joined]
-            else:
-                parts = split_text(
-                    joined,
-                    chunk_size=config.max_chunk_chars,
-                    chunk_overlap=config.chunk_overlap_chars,
-                )
-                if not parts:
-                    parts = [joined]
+            chunks_data: list[tuple[str, tuple[int, ...], tuple[str, ...]]] = []
+            current_texts: list[str] = []
+            current_indices: list[int] = []
+            current_types: list[str] = []
+            current_chars = 0
 
-            page_start = next(
-                (b.page_index for b in body_blocks if b.page_index is not None), None
-            )
-            page_end = next(
-                (b.page_index for b in reversed(body_blocks) if b.page_index is not None),
-                None,
-            )
+            def _flush_body() -> None:
+                nonlocal current_texts, current_indices, current_types, current_chars
+                if current_texts:
+                    chunks_data.append((
+                        "\n\n".join(current_texts),
+                        tuple(current_indices),
+                        tuple(current_types),
+                    ))
+                    current_texts = []
+                    current_indices = []
+                    current_types = []
+                    current_chars = 0
 
-            body_indices = tuple(b.ordinal for b in body_blocks)
-            body_types = tuple(b.block_type for b in body_blocks)
+            for b in body_blocks:
+                b_chars = len(b.content)
+                # Если блок сам по себе больше budget — fallback на split_text.
+                if b_chars > config.max_chunk_chars:
+                    _flush_body()
+                    parts = split_text(
+                        b.content,
+                        chunk_size=config.max_chunk_chars,
+                        chunk_overlap=config.chunk_overlap_chars,
+                    )
+                    if not parts:
+                        parts = [b.content]
+                    # Для split-частей одного блока — block_indices пустые
+                    # (не можем точно атрибутировать ordinals).
+                    for part in parts:
+                        chunks_data.append((part, (), (b.block_type,)))
+                    continue
 
-            for i, part in enumerate(parts):
+                # Пытаемся добавить целый блок.
+                if current_chars + b_chars > config.max_chunk_chars and current_texts:
+                    _flush_body()
+                current_texts.append(b.content)
+                current_indices.append(b.ordinal)
+                current_types.append(b.block_type)
+                current_chars += b_chars
+
+            _flush_body()
+
+            for part, block_indices, block_types in chunks_data:
+                # page_start/page_end = min/max page_index по block_indices;
+                # если block_indices пустой (split fallback) — None/None.
+                if block_indices:
+                    page_starts = [
+                        blocks_by_ord[o].page_index
+                        for o in block_indices
+                        if blocks_by_ord[o].page_index is not None
+                    ]
+                    page_start = min(page_starts) if page_starts else None
+                    page_end = max(page_starts) if page_starts else None
+                else:
+                    page_start = None
+                    page_end = None
+
                 chunk_id = f"{counter:03d}"
                 out.append(
                     Chunk(
@@ -233,8 +286,8 @@ class StructureAwareChunker:
                         section_id=section.section_id,
                         section_path=section.section_path,
                         section_heading=section.heading,
-                        block_indices=body_indices if i == 0 else (),
-                        block_types=body_types if i == 0 else (),
+                        block_indices=block_indices,
+                        block_types=block_types,
                     )
                 )
                 counter += 1
