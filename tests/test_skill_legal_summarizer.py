@@ -131,7 +131,13 @@ def test_prompts_load_from_markdown(monkeypatch, tmp_path):
 
 
 def test_run_long_doc_returns_confirmation_required(monkeypatch, tmp_path):
-    """Длинный документ → confirmation_required БЕЗ LLM-вызовов."""
+    """Длинный документ → confirmation_required БЕЗ LLM-вызовов.
+
+    После Integration: ``ExecutionStrategy`` решает DIRECT vs MAP_* через
+    ``TokenBudget.direct_call_tokens``. Чтобы заставить документ пойти
+    по MAP_* пути, выставляем ``llm_max_tokens=65000`` — direct budget
+    сжимается до ~500 tokens (≪ размера документа).
+    """
     call_count = {"n": 0}
 
     def fake_chat(messages, *, context=None, **kwargs):
@@ -147,6 +153,7 @@ def test_run_long_doc_returns_confirmation_required(monkeypatch, tmp_path):
             "chunk_overlap": 0,
             "single_call_threshold": 50,
             "chunk_size_input_ratio": None,
+            "context_window_tokens": 200,
         },
     )
     monkeypatch.setattr(
@@ -162,7 +169,7 @@ def test_run_long_doc_returns_confirmation_required(monkeypatch, tmp_path):
                 "chars_per_token": 3.5,
                 "safety_margin": 0.85,
             },
-            "llm_max_tokens": 100,
+            "llm_max_tokens": 65000,
         },
     )
 
@@ -206,6 +213,7 @@ def test_run_long_doc_with_confirm_executes_full_pipeline(monkeypatch, tmp_path)
             "chunk_overlap": 0,
             "single_call_threshold": 100,
             "chunk_size_input_ratio": None,
+            "context_window_tokens": 200,
         },
     )
     monkeypatch.setattr(
@@ -268,6 +276,7 @@ def test_run_isolates_llm_from_agent_history(monkeypatch, tmp_path):
             "chunk_overlap": 0,
             "single_call_threshold": 100,
             "chunk_size_input_ratio": None,
+            "context_window_tokens": 200,
         },
     )
     monkeypatch.setattr(
@@ -322,6 +331,7 @@ def test_run_rejects_max_chunks_for_execution(monkeypatch, tmp_path):
             "chunk_overlap": 0,
             "single_call_threshold": 10,
             "chunk_size_input_ratio": None,
+            "context_window_tokens": 200,
         },
     )
     monkeypatch.setattr(
@@ -908,6 +918,7 @@ def test_quick_estimate_txt_estimates_without_full_load(monkeypatch, tmp_path):
     monkeypatch.setattr(_summ, "get_chunking_config", lambda: {
         "chunk_size": 1000, "chunk_overlap": 0, "single_call_threshold": 100,
         "chunk_size_input_ratio": None,
+            "context_window_tokens": 200,
     })
 
     # txt ~30k символов → с низким порогом нужен confirm
@@ -935,6 +946,7 @@ def test_running_marker_emitted_before_long_run(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(_summ, "get_chunking_config", lambda: {
         "chunk_size": 100000, "chunk_overlap": 0, "single_call_threshold": 100,
         "chunk_size_input_ratio": None,
+            "context_window_tokens": 200,
     })
     monkeypatch.setattr(_summ, "get_execution_config", lambda: {
         "confirmation_threshold_sec": 0.001,
@@ -1100,6 +1112,7 @@ def test_batch_parse_error_retries_then_succeeds(monkeypatch, tmp_path):
     monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
         "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
         "chunk_size_input_ratio": None,
+            "context_window_tokens": 200,
     })
     monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
         "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
@@ -1153,6 +1166,7 @@ def test_map_phase_runs_batches_concurrently(monkeypatch, tmp_path):
     monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
         "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
         "chunk_size_input_ratio": None,
+            "context_window_tokens": 200,
     })
     monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
         "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
@@ -1166,7 +1180,7 @@ def test_map_phase_runs_batches_concurrently(monkeypatch, tmp_path):
     })
 
     paragraph = "Длинный абзац про договор подряда, права и обязанности. "
-    text = "\n\n".join([paragraph] * 60)  # ~30 батчей
+    text = "\n\n".join([paragraph] * 120)  # ~30 батчей, > direct budget floor 1000
     result = summarizer.run(
         text, length="brief", confirmed=True, workspace_root=tmp_path,
     )
@@ -1205,6 +1219,7 @@ def test_batch_parse_error_exhausts_returns_partial(monkeypatch, tmp_path):
     monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
         "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
         "chunk_size_input_ratio": None,
+            "context_window_tokens": 200,
     })
     monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
         "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,

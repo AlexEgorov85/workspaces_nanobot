@@ -139,13 +139,25 @@ MEDIUM_DOC = _make_text(
     + "Содержание раздела с деталями. " * 100
 )
 
+# Doc для тестов ≥2 LLM calls: после Integration ``ExecutionStrategy.DIRECT``
+# ловит короткие документы (≤direct_budget_tokens), поэтому для тестов
+# call-count нужен достаточно большой документ, который выберет MAP_*.
+MAP_REDUCE_DOC = _make_text(
+    "Раздел 1. Вступление.\n\n"
+    + "FACT_001: Первый важный факт о договоре.\n"
+    + "FACT_002: Второй факт о сроках.\n"
+    + "FACT_003: Третий факт о сумме.\n\n"
+    + "Раздел 2. Описание.\n\n"
+    + "Содержание раздела с деталями. " * 8000
+)
+
 LARGE_DOC = _make_text(
     "\n\n".join(
         (
             f"Раздел {n}. Заголовок раздела {n}.\n\n"
             f"FACT_{n}_001: Факт один из раздела {n}.\n"
             f"FACT_{n}_002: Факт два из раздела {n}.\n"
-            + "Содержание раздела с подробностями. " * 50
+            + "Содержание раздела с подробностями. " * 2000
         )
         for n in range(1, 11)
     )
@@ -179,10 +191,12 @@ def test_acceptance_matrix_small_doc_single_call(tmp_path, monkeypatch):
 
 
 def test_acceptance_matrix_medium_doc_two_calls_min(tmp_path, monkeypatch):
-    """Medium doc (>12000 chars, но ≤reduce budget) → ≥2 LLM calls.
+    """Medium doc (после Integration) → MAP_* strategy → ≥2 LLM calls.
 
-    Было: map_reduce → N map + 1 reduce = ≥2.
-    Стало (default): ≥2 (без opt-in direct).
+    Используется ``MAP_REDUCE_DOC`` (большой документ, который НЕ влезает в
+    ``direct_call_tokens``). После Integration ``ExecutionStrategy.DIRECT``
+    срабатывает для маленьких текстов; для тестов call-count нужен
+    достаточно большой документ.
     """
     _build_honest_mock(monkeypatch)
     _setup_execution_mocks(monkeypatch, single_threshold=100)  # не single
@@ -191,7 +205,7 @@ def test_acceptance_matrix_medium_doc_two_calls_min(tmp_path, monkeypatch):
     from workspace.skills.legal_summarizer.scripts import summarizer
 
     result = summarizer.run(
-        MEDIUM_DOC, length="brief", confirmed=True, workspace_root=tmp_path,
+        MAP_REDUCE_DOC, length="brief", confirmed=True, workspace_root=tmp_path,
     )
     assert result["status"] == "completed"
     assert counter["n"] >= 2, (
@@ -216,41 +230,29 @@ def test_acceptance_matrix_large_doc_two_or_more_calls(tmp_path, monkeypatch):
     )
 
 
-def test_acceptance_matrix_opt_in_direct_reduces_calls(tmp_path, monkeypatch):
-    """Opt-in DIRECT → 1 LLM call для medium doc.
+def test_acceptance_matrix_direct_strategy_for_short_doc(tmp_path, monkeypatch):
+    """Short doc → ExecutionStrategy.DIRECT → 1 LLM call.
 
-    Было: medium doc → map + reduce = 2+ calls.
-    Стало (с opt-in): 1 call.
-    Acceptance: opt-in строго меньше baseline.
+    После Integration & Simplification: ``direct_strategy_min_chars`` УДАЛЁН.
+    Acceptance: для документа, который влезает в ``TokenBudget.direct_call_tokens``,
+    селектор выбирает DIRECT без дополнительной конфигурации.
+
+    Раньше это требовало opt-in (``direct_strategy_min_chars``). Теперь
+    решение принимается через ``DocumentStats`` + ``StrategyConfig``.
     """
     from workspace.skills.legal_summarizer.scripts import summarizer
 
-    # Baseline (no opt-in).
     _build_honest_mock(monkeypatch)
-    _setup_execution_mocks(monkeypatch, single_threshold=100)
-    counter_baseline = _count_llm_calls(monkeypatch)
-    summarizer.run(
-        MEDIUM_DOC, length="brief", confirmed=True, workspace_root=tmp_path,
-    )
-    baseline_calls = counter_baseline["n"]
+    _setup_execution_mocks(monkeypatch, single_threshold=12000)
+    counter = _count_llm_calls(monkeypatch)
 
-    # Opt-in DIRECT.
-    _build_honest_mock(monkeypatch)
-    monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
-        "chunk_size": 1000, "chunk_overlap": 0, "single_call_threshold": 100,
-        "chunk_size_input_ratio": None, "direct_strategy_min_chars": 100,
-    })
-    counter_optin = _count_llm_calls(monkeypatch)
     summarizer.run(
-        MEDIUM_DOC, length="brief", confirmed=True, workspace_root=tmp_path,
+        SMALL_DOC, length="brief", confirmed=True, workspace_root=tmp_path,
     )
-    optin_calls = counter_optin["n"]
 
-    assert optin_calls == 1, (
-        f"opt-in DIRECT: ожидался 1 LLM call, получено {optin_calls}"
-    )
-    assert optin_calls < baseline_calls, (
-        f"opt-in ({optin_calls}) не меньше baseline ({baseline_calls})"
+    assert counter["n"] == 1, (
+        f"short doc + ExecutionStrategy.DIRECT: ожидался 1 LLM call, "
+        f"получено {counter['n']}"
     )
 
 

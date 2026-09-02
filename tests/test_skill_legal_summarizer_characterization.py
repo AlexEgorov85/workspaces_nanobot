@@ -1398,12 +1398,14 @@ def test_block_aware_chunking_oversized_block_falls_back_to_split(tmp_path, monk
     chunker = StructureAwareChunker()
     chunks = chunker.chunk(doc, tree, _chunk_config(max_chunk_chars=2000))
     # Первый chunk — heading (block_indices = (0,)).
-    # Остальные — split-части большого body (block_indices = () — split fallback).
+    # Остальные — split-части большого body (block_indices = (b.ordinal,) —
+    # split fallback сохраняет provenance до оригинального DocumentBlock,
+    # см. фикс #7 в changelog).
     assert len(chunks) >= 2
     assert chunks[0].block_indices == (0,)
     for c in chunks[1:]:
-        # split-части: нельзя атрибутировать ordinals.
-        assert c.block_indices == ()
+        # split-части: атрибутируем к ordinal исходного большого блока.
+        assert c.block_indices == (1,)
 
 def test_block_aware_chunking_preserves_section_metadata(tmp_path, monkeypatch):
     """section metadata сохраняется в каждом chunk."""
@@ -2703,11 +2705,22 @@ def test_select_execution_strategy_boundary_one_above_direct():
 # ---------------------------------------------------------------------------
 
 def test_direct_strategy_min_chars_default_zero_keeps_old_behavior():
-    """``direct_strategy_min_chars=0`` → старое поведение."""
-    import skill_config
+    """``direct_strategy_min_chars`` УДАЛЁН из production pipeline (этап Integration).
 
-    cfg = skill_config.get_chunking_config()
-    assert int(cfg.get("direct_strategy_min_chars", 0)) == 0
+    После интеграции ``ExecutionStrategy.DIRECT`` параметр больше не читается —
+    ``inspect()`` принимает решение через ``StrategyConfig.direct_budget_tokens``
+    (из ``TokenBudget.direct_call_tokens``). Этот тест оставлен как REGRESSION:
+    если кто-то случайно вернёт чтение ``direct_strategy_min_chars`` в
+    теле ``inspect()``, тест напомнит, что у нас единый путь через селектор.
+    """
+    import summarizer
+    import inspect as _inspect
+
+    src = _inspect.getsource(summarizer.inspect)
+    assert "direct_strategy_min_chars" not in src, (
+        "direct_strategy_min_chars не должно использоваться в теле inspect() "
+        "(этап Integration & Simplification — единый ExecutionStrategy селектор)."
+    )
 
 def test_token_budget_direct_call_tokens_positive():
     """``TokenBudget.direct_call_tokens`` положительное."""
@@ -2772,106 +2785,69 @@ def test_token_budget_direct_call_tokens_differs_from_available_chunk_tokens():
     # DIRECT больше available (нет per-chunk instruction и margin).
     assert budget.direct_call_tokens > budget.available_chunk_tokens
 
-def test_run_with_direct_strategy_opt_in_single_call(tmp_path, monkeypatch):
-    """opt-in DIRECT → ``map_calls=0``, ``total_llm_calls=1``.
+def test_inspect_direct_strategy_for_short_text():
+    """Короткий текст, влезающий в direct budget → ``strategy='single'``.
 
-    Opt-in через ``direct_strategy_min_chars=10000`` в chunking_config.
-    Текст 11597 chars, single_call_threshold=100, помещается в direct budget.
+    Этап Integration: ``ExecutionStrategy.DIRECT`` срабатывает по
+    ``DocumentStats.estimated_tokens ≤ TokenBudget.direct_call_tokens``.
+    Без LLM-вызовов: проверка чисто детерминированная.
     """
     import summarizer
 
-    monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
-        "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
-        "chunk_size_input_ratio": None, "direct_strategy_min_chars": 10000,
-    })
-    monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
+    summarizer.get_chunking_config = lambda: {
+        "chunk_size": 100, "chunk_overlap": 0,
+        "single_call_threshold": 100, "chunk_size_input_ratio": None,
+    }
+    summarizer.get_execution_config = lambda: {
         "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
-        "max_chunks_for_execution": 100,
+        "max_chunks_for_execution": 1000,
         "context_batching": {
             "system_prompt_tokens": 100, "instruction_tokens_per_map": 50,
             "chars_per_token": 3.5, "safety_margin": 0.85,
         },
         "llm_max_tokens": 100,
-    })
+    }
 
     paragraph = "Юридический тестовый абзац для проверки директ-вызова. "
     text = "\n\n".join([paragraph] * 200)
     assert 10000 < len(text) < 20000
+    insp = summarizer.inspect(text)
+    assert insp.strategy == "single"
+    assert insp.estimated_llm_calls == 1
+    assert len(insp.chunks) == 1
+    assert insp.context_batches == []
 
-    call_count = {"n": 0}
 
-    def fake_chat(messages, *, context=None, **kwargs):
-        call_count["n"] += 1
-        return "Заголовок. Краткое содержание документа для теста."
+def test_inspect_map_reduce_for_long_text():
+    """Длинный текст, НЕ влезающий в direct budget → ``strategy='map_reduce'``.
 
-    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
-
-    result = summarizer.run(
-        text, length="brief", confirmed=True, workspace_root=tmp_path,
-    )
-    assert result["status"] == "completed"
-    # Acceptance этапа 19: ровно 1 LLM call для всего документа.
-    # ``map_calls`` в single-path считается как 1 (был 1 запрос, без map-фазы).
-    assert result["stats"]["map_calls"] == 1
-    assert result["stats"]["section_reduce_calls"] == 0
-    assert result["stats"]["document_reduce_calls"] == 0
-    assert result["stats"]["total_llm_calls"] == 1
-    assert call_count["n"] == 1
-    assert result["stats"]["strategy"] == "single"
-
-def _direct_test_build_text_response(user_content: str) -> str:
-    """ helper — мок-ответ LLM в текстовом формате с DOC CHUNK N."""
-    import re as _re
-    n = len(_re.findall(r"DOCUMENT CHUNK \d+", user_content))
-    return "\n\n".join(f"DOC CHUNK {i + 1}: саммари чанка {i + 1}" for i in range(n)) + ("\n" if n else "")
-
-def test_run_with_direct_strategy_opt_in_disabled_uses_map(tmp_path, monkeypatch):
-    """opt-in DISABLED → старое поведение (map_reduce).
-
-    Проверяем только что стратегия — ``map_reduce_*``, не ``single``.
-    Проверять ``map_calls >= 2`` нельзя (синтетика может дать 1 batch).
+    Чтобы заставить ``ExecutionStrategy`` выбрать MAP_*, искусственно
+    увеличиваем ``llm_max_tokens`` — это уменьшает ``direct_budget_tokens``
+    через ``TokenBudget.direct_call_tokens = context - system - output``.
     """
     import summarizer
 
-    monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
-        "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
-        "chunk_size_input_ratio": None, "direct_strategy_min_chars": 0,
-    })
-    monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
+    summarizer.get_chunking_config = lambda: {
+        "chunk_size": 100, "chunk_overlap": 0,
+        "single_call_threshold": 100, "chunk_size_input_ratio": None,
+    }
+    summarizer.get_execution_config = lambda: {
         "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
-        "max_chunks_for_execution": 100,
+        "max_chunks_for_execution": 1000,
         "context_batching": {
             "system_prompt_tokens": 100, "instruction_tokens_per_map": 50,
             "chars_per_token": 3.5, "safety_margin": 0.85,
         },
-        "llm_max_tokens": 100,
-    })
+        "llm_max_tokens": 65000,
+    }
 
     paragraph = "Юридический тестовый абзац для проверки мап-вызова. "
     text = "\n\n".join([paragraph] * 200)
-
-    def fake_chat(messages, *, context=None, **kwargs):
-        # Map-вызовы (с DOCUMENT CHUNK N в user prompt) → текстовый формат.
-        # Reduce-вызов (без DOCUMENT CHUNK) → plain summary.
-        user_content = messages[1]["content"]
-        import re as _re
-        if _re.findall(r"DOCUMENT CHUNK \d+", user_content):
-            return _direct_test_build_text_response(user_content)
-        return (
-            "Тестовое саммари\n\n"
-            "Это содержание саммари для теста отключённой direct strategy."
-        )
-
-    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
-
-    result = summarizer.run(
-        text, length="brief", confirmed=True, workspace_root=tmp_path,
-    )
-    assert result["status"] == "completed"
-    # Opt-in disabled → старое поведение: strategy не single.
-    assert result["stats"]["strategy"] != "single"
-    # map фаза должна быть выполнена (map_calls >= 1).
-    assert result["stats"]["map_calls"] >= 1
+    assert 10000 < len(text) < 20000
+    insp = summarizer.inspect(text)
+    assert insp.strategy == "map_reduce"
+    assert len(insp.chunks) >= 1
+    assert len(insp.context_batches) >= 1
 
 # ---------------------------------------------------------------------------
 
