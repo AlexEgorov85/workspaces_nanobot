@@ -433,3 +433,104 @@
   expect:
     tools: ["nl_sql_generate"]
     keywords_exclude: ["vector_search"]
+
+# === Конкурирующие случаи ===
+# Запрос одновременно похож на predefined и vector — нужно выбрать
+# правильный по дополнительным признакам (числа/фильтры vs семантика).
+
+- id: "audit-mode-competing-1"
+  name: "Predefined vs vector — нужен фильтр severity"
+  difficulty: 5
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Покажи нарушения по severity за 2024 год."
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+    keywords_exclude: ["run_predefined_script", "vector_search"]
+
+- id: "audit-mode-competing-2"
+  name: "Predefined vs vector — нужен фильтр по responsible"
+  difficulty: 5
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сколько нарушений пожарной безопасности в 2024?"
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+    keywords_exclude: ["vector_search"]
+
+- id: "audit-mode-competing-3"
+  name: "Vector vs SQL — нужны похожие, не числа"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди похожие проверки по теме экологии."
+  max_iterations: 15
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["audits_index"]
+    keywords_exclude: ["nl_sql_generate"]
+
+- id: "audit-mode-competing-4"
+  name: "Vector vs SQL — нужны отчёты про X"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Найди отчёты про применение санкций."
+  max_iterations: 15
+  expect:
+    tools: ["vector_search"]
+    keywords_include: ["audit_reports_index"]
+
+- id: "audit-mode-competing-5"
+  name: "Predefined vs SQL — есть готовый script"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Нарушения за 2024 год."
+  max_iterations: 15
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["violations_by_period", "2024"]
+
+- id: "audit-mode-competing-6"
+  name: "Predefined vs SQL — есть готовый script для проверок"
+  difficulty: 4
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Что проверяли в 2024?"
+  max_iterations: 15
+  expect:
+    tools: ["run_predefined_script"]
+    keywords_include: ["audits_by_period", "2024"]
+
+- id: "audit-mode-competing-7"
+  name: "Неоднозначный COUNT — vector vs SQL"
+  difficulty: 5
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сколько раз проверяли школы?"
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+    keywords_exclude: ["vector_search"]
+
+- id: "audit-mode-competing-8"
+  name: "Неоднозначный фильтр — predefined vs vector"
+  difficulty: 5
+  category: "audit_analyzer"
+  type: "single"
+  new_session: true
+  question: "Сводка по статусам проверок пожарной безопасности."
+  max_iterations: 15
+  expect:
+    tools: ["nl_sql_generate"]
+    keywords_exclude: ["run_predefined_script", "vector_search"]

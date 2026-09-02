@@ -175,21 +175,33 @@ class TestScenario5SkillReferencesExist:
         """SKILL.md должен содержать decision logic для выбора capability.
 
         Проверяем наличие одного из вариантов:
-        - явный раздел "Decision procedure",
-        - таблица "задача → capability",
+        - явный раздел "Decision procedure" / "Decision tree";
+        - таблица "задача → capability";
         - список правил выбора tool'а.
+
+        После рефакторинга архитектура — ровно 3 capability:
+        ``run_predefined_script``, ``vector_search``, ``nl_sql_generate``.
+        Прямой SQL через ``duckdb_query`` **не** рекомендуется в
+        SKILL.md (см. Этап 14 коррекционного pass'а).
         """
         skill = Path("workspace/skills/audit_analyzer/SKILL.md").read_text(encoding="utf-8")
         markers = [
             "Decision procedure",
+            "Decision tree",
             "| Задача |",
-            "Аггрегация / фильтр",
-            "Семантический поиск",
+            "задача → capability",
         ]
         assert any(m in skill for m in markers), (
-            "SKILL.md не содержит decision logic — добавьте таблицу "
-            "'задача → capability' или раздел 'Decision procedure'."
+            "SKILL.md не содержит decision logic — добавьте раздел "
+            "'Decision tree' / 'Decision procedure' или таблицу "
+            "'задача → capability'."
         )
-        assert "duckdb_query" in skill
+        assert "run_predefined_script" in skill
         assert "vector_search" in skill
-        assert "vector_search" in skill
+        assert "nl_sql_generate" in skill
+        # Прямой SQL через duckdb_query НЕ должен быть в SKILL.md —
+        # архитектура трёх capability запрещает его как data flow.
+        assert "duckdb_query" not in skill, (
+            "SKILL.md не должен рекомендовать duckdb_query как путь "
+            "получения audit data — только 3 capability."
+        )

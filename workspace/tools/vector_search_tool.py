@@ -70,6 +70,25 @@ def _available_index_names() -> str:
         )
 
 
+def _is_known_index(index_name: str) -> bool:
+    """Проверить, что ``index_name`` зарегистрирован в runtime-реестре.
+
+    Используется для детерминированного контракта: неизвестный индекс →
+    сразу ``missing_index`` (ошибка конфигурации/вызова), а не молчаливый
+    пустой результат от provider'а.
+
+    При недоступной PG / пустом реестре возвращает ``None`` — это значит,
+    что runtime-БД не готова и tool должен fall back к provider-проверке.
+    """
+    try:
+        from lib.services.cache_provider_impl import read_vector_index_config
+
+        names = read_vector_index_config({}).keys()
+        return index_name in names
+    except Exception:
+        return None
+
+
 class VectorSearchToolConfig(BaseModel):
     """Конфиг секции ``gateway.vector_search`` в ``project.json``."""
 
@@ -232,6 +251,17 @@ class VectorSearchTool(Tool):
             return self._error(
                 "invalid_input",
                 f"threshold={effective_threshold} not in [0, 1]",
+            )
+
+        # Контракт: неизвестный index_name → missing_index сразу,
+        # без обращения к provider (неизвестный индекс — ошибка вызова,
+        # а не «корректный пустой результат»).
+        known = _is_known_index(index_name)
+        if known is False:
+            return self._error(
+                "missing_index",
+                f"index '{index_name}' is not registered. "
+                f"Available indexes from settings: {_available_index_names()}",
             )
 
         provider = getattr(self, "_provider", None)

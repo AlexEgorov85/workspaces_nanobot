@@ -240,17 +240,30 @@ class TestBVectorPathNoSql:
         assert provider.search_calls[0]["index_name"] == "violations_index"
 
     def test_unknown_index_reports_error(self) -> None:
-        """Tool не подбирает индекс автоматически — Agent обязан знать имя."""
+        """Tool не подбирает индекс автоматически — Agent обязан знать имя.
+
+        Контракт: неизвестный ``index_name`` (не в runtime-реестре) →
+        ``status=error`` / ``error_type=missing_index``. Неизвестный
+        индекс — это ошибка вызова, а не «корректный пустой результат».
+        """
+        from unittest.mock import patch
+
         provider = _VectorFakeProvider(hits=[])
         tool = VectorSearchTool(config=VectorSearchToolConfig())
         tool.set_provider(provider)
 
-        result = json.loads(asyncio.run(tool.execute(
-            query="x", index_name="unknown_index",
-        )))
+        with patch(
+            "workspace.tools.vector_search_tool._is_known_index",
+            return_value=False,
+        ):
+            result = json.loads(asyncio.run(tool.execute(
+                query="x", index_name="unknown_index",
+            )))
 
-        assert result["status"] == "success"
-        assert result["count"] == 0
+        assert result["status"] == "error"
+        assert result["error_type"] == "missing_index"
+        # Provider не вызывался — pre-check сработал до обращения к FAISS.
+        assert provider.search_calls == []
 
 
 # ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -69,6 +70,22 @@ def _make_ctx(settings=None):
     )
     settings_obj = SimpleNamespace(gateway=gateway)
     return SimpleNamespace(_settings_ref=settings_obj)
+
+
+@pytest.fixture(autouse=True)
+def _mock_known_index():
+    """Mock ``_is_known_index`` чтобы unit-тесты не зависели от runtime-БД.
+
+    По умолчанию — все ``index_name`` считаются известными
+    (тесты tool'а изолированы от registry). Конкретные сценарии
+    «неизвестный индекс» переопределяют mock через
+    ``patch(..., return_value=False)``.
+    """
+    with patch(
+        "workspace.tools.vector_search_tool._is_known_index",
+        return_value=True,
+    ):
+        yield
 
 
 class TestConfigAndDiscovery:

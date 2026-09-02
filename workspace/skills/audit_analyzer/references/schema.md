@@ -101,7 +101,6 @@ Skill **не выполняет SQL сам** — только даёт инст�
 
 - Для NL→SELECT: `nl_sql_generate(query="...")` (этот tool знает whitelist
   таблиц из `TableRegistry` и подтягивает hints через `column_descriptions`).
-- Для точного SELECT: `duckdb_query(sql="SELECT * FROM oarb.audits WHERE ...")`.
 - Для семантического поиска: `vector_search(query="...", index_name="...")`.
 
 Tool'ы сами следят за безопасностью (`validate_sql`) и лимитами

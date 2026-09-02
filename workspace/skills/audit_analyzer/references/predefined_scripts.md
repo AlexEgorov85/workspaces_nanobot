@@ -1,4 +1,10 @@
-# Predefined SQL scripts
+# Predefined SQL scripts — технические детали
+
+Это **техническая справка** о реестре `public.agent_predefined_scripts`,
+схеме JSONB `parameters` и правилах валидации. Каталог для выбора
+скриптов и decision tree — в `SKILL.md` (раздел «Predefined scripts»).
+
+## Источник истины
 
 Реестр готовых SQL-рецептов живёт в PG-таблице
 `public.agent_predefined_scripts`
@@ -7,9 +13,9 @@
 DuckDB (`workspace/data_store/duckdb/cache.duckdb`), откуда их читает
 tool `run_predefined_script`.
 
-> Этот файл — **навигация**. Источник истины — таблица в БД. Перед тем
-> как звать `run_predefined_script(name="<редкое имя>")`, проверь реальный
-> реестр через `duckdb_query(sql="SELECT name, description, parameters FROM public.agent_predefined_scripts ORDER BY name")`.
+> **Синхронизация каталога и реестра — задача администратора.** Если
+> скрипта из `SKILL.md` нет в реестре, он не работает; если в реестре
+> есть скрипт, которого нет в `SKILL.md`, Agent о нём не знает.
 
 ## Колонки реестра
 
@@ -45,29 +51,33 @@ tool `run_predefined_script`.
 `date`, `datetime`. Поддерживаемые `validation`: `min`, `max`,
 `min_length`, `max_length`, `pattern`, `choices`.
 
-## Когда звать `run_predefined_script`
+Параметры передаются как позиционные `?`-placeholder'ы в `sql_template`
+в порядке объявления (см. `ParameterValidator` в
+`lib/services/predefined_script_validator.py`).
 
-Если запрос пользователя точно соответствует одному из скриптов реестра —
-зови `run_predefined_script` (детерминированно, без LLM). Подробный каталог
-и decision tree — в `SKILL.md` (раздел «Predefined scripts»).
+## Контракт вызова
 
-## Как добавить новый скрипт
+```
+run_predefined_script(name="<из SKILL.md>", params={...})
+```
 
-1. **Не** редактируй этот файл как «истину» — он just-навигация.
-2. Реальный источник — таблица. INSERT/UPDATE делается через PG
-   напрямую (или через `INSERT INTO public.agent_predefined_scripts ...`
-   в SQL-миграции).
-3. После добавления — дождись `PgDuckDbSyncService` (инкрементальный sync
-   по `updated_at`) и проверь, что запись появилась в DuckDB:
-   `duckdb_query(sql="SELECT name FROM public.agent_predefined_scripts")`.
+- **name** — PK в `public.agent_predefined_scripts` (из каталога в `SKILL.md`).
+- **params** — словарь значений, валидируется по JSONB-схеме
+  (`type`/`required`/`default`/`validation`). Лишние ключи → `invalid_script`.
+- Если скрипт не найден → `script_not_found`.
+- SQL из шаблона проходит `validate_sql` (SELECT-only gate).
 
-## Чего не делать
+## Как добавить новый скрипт (для администратора)
+
+1. INSERT/UPDATE через PG напрямую или через SQL-миграцию:
+   `INSERT INTO public.agent_predefined_scripts ...`.
+2. Дождаться `PgDuckDbSyncService` (инкрементальный sync по `updated_at`).
+3. Синхронизировать каталог в `SKILL.md` — добавить имя и описание.
+
+## Чего не делать (для Agent'а)
 
 - Не вызывай `nl_sql_generate`, если запрос 1-в-1 ложится на известный
   скрипт — это лишний LLM-вызов.
-- Не выдумывай `name` скрипта, если его нет в реестре — будет
-  `script_not_found`.
-- Не передавай лишних параметров в `params` — будет
-  `invalid_script` с указанием неизвестного ключа.
-- Не передавай `sql` руками — tool берёт SQL из реестра и валидирует
-  через `validate_sql`.
+- Не выдумывай `name` скрипта — бери только из каталога в `SKILL.md`.
+- Не передавай лишних параметров в `params` — будет `invalid_script`.
+- Не передавай `sql` руками — tool берёт SQL из реестра.
