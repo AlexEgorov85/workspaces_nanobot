@@ -58,32 +58,39 @@ def select_brief_chunks_structured(
     tree,
     *,
     max_chunks: int = _MAX_CHUNKS_DEFAULT,
+    coverage_ratio: float = 0.5,
 ) -> list:
-    """Brief: round-robin по секциям для равномерного покрытия документа.
+    """Brief: round-robin по секциям для максимального покрытия документа.
 
-    Вместо «первые N chunks подряд» берёт по chunks из разных секций,
-    чтобы краткое саммари покрывало ключевые разделы, а не только начало.
+    Берём первые N chunks по кругу из chunks каждой секции,
+    чтобы краткое саммари покрывало все секции, а не начало одной.
 
-    Правила:
-      - Эффективный лимит = ``min(max_chunks, ceil(total * 0.5))``.
-        Brief не анализирует больше половины документа.
-      - Если ``tree`` is None или содержит только root — fallback на
+    Лимиты:
+      - эффективный лимит = ``min(max_chunks, ceil(total * coverage_ratio))``.
+        Brief не обрабатывает больше половины секций (default).
+      - если ``tree`` is None или секций только root → fallback на
         ``select_brief_chunks`` (первые N chunks).
-      - Иначе round-robin по секциям в порядке их первой встречи в документе,
-        внутри секции — document order.
+      - иначе round-robin по секциям в порядке первой секции в документе,
+        потом вторично в document order.
 
     Args:
-        chunks: список chunks (с полями ``.index`` и ``.section_id``).
-        tree: ``SectionTree`` или None (если нет структуры).
-        max_chunks: верхняя граница (например, 10).
+        chunks: список chunks (с атрибутом ``.index`` и ``.section_id``).
+        tree: ``SectionTree`` или None (если без секций).
+        max_chunks: жёсткий лимит (например, 10).
+        coverage_ratio: доля chunks для brief (0 < ratio ≤ 1).
+            Default 0.5 = ~50% (round-robin).
+            Для этапа 20 «structural sampling» можно задать 0.33.
 
     Returns:
-        Список chunks в document order, не более effective_limit.
+        список chunks в document order, не более effective_limit.
     """
     if not chunks:
         return []
     total = len(chunks)
-    effective_limit = _effective_brief_limit(total, max_chunks)
+    # coverage_ratio вынесен в параметр (default 0.5 = старое поведение).
+    if not (0.0 < coverage_ratio <= 1.0):
+        coverage_ratio = 0.5
+    effective_limit = min(max_chunks, math.ceil(total * coverage_ratio))
     if effective_limit == 0:
         return []
 
