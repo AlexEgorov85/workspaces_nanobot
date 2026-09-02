@@ -242,10 +242,12 @@ class StructureAwareChunker:
                     )
                     if not parts:
                         parts = [b.content]
-                    # Для split-частей одного блока — block_indices пустые
-                    # (не можем точно атрибутировать ordinals).
+                    # Для split-частей одного блока — сохраняем source_block_id
+                    # в block_indices (не пустой, чтобы downstream мог
+                    # атрибутировать split-части к оригинальному DocumentBlock
+                    # для provenance / citation / page mapping).
                     for part in parts:
-                        chunks_data.append((part, (), (b.block_type,)))
+                        chunks_data.append((part, (b.ordinal,), (b.block_type,)))
                     continue
 
                 # Пытаемся добавить целый блок.
