@@ -20,6 +20,50 @@
 > `audit_vectors` теперь попадает в DuckDB-кэш через инфра-регистрацию
 > (`gateway.vector_index.storage_table`).
 
+### Changed (Integration & Simplification — `legal_summarizer`)
+
+- **`workspace/skills/legal_summarizer/scripts/summarizer.py`** —
+  production pipeline переведён на **единый `ExecutionStrategy` селектор**
+  (DIRECT / MAP_FLAT / MAP_HIERARCHICAL) и `DocumentStats`.
+  Параллельные механизмы выбора single-call path удалены:
+  - `chunking.single_call_threshold` (legacy REQUIRED_KEYS) больше не
+    читается как критерий — поведение «< threshold → single»
+    воспроизводится естественно через `TokenBudget.direct_call_tokens`.
+  - `chunking.direct_strategy_min_chars` (opt-in для средних текстов)
+    полностью удалён: DIRECT/MAP_FLAT/MAP_HIERARCHICAL покрывают
+    весь спектр без дополнительной конфигурации.
+  - `should_use_hierarchical_reduce()` (legacy criterion) заменён на
+    `select_reduce_strategy()` из `reducer_strategy.py` (token-budget
+    first, sections second).
+  - `cleanup_blocks` (document_cleanup) интегрирован в pipeline перед
+    chunking (ранее создавался, но не использовался).
+  - single-call path теперь пишет `manifest.json` (consistency с
+    map_reduce и поддержка resume/cache через `cli_query.py`).
+- **`workspace/skills/legal_summarizer/scripts/summarizer.py` (run)** —
+  две правки в порядке принятия решения:
+  - `max_chunks_for_execution` проверяется **после** выбора
+    `chunks = chosen_chunks`. Раньше проверка шла по
+    `len(insp.chunks)` до выбора — для `question` режима при больших
+    документах она блокировала обработку даже если фактически нужно
+    обработать ≤10 chunks. Применяется **и** к `brief`, **и** к
+    `question`, **и** к `detailed`.
+  - `question → keyword miss` получает **controlled fallback** через
+    `_relaxed_lexical_fallback` (prefix-match по 4 символам каждого
+    слова для устойчивости к русским словоформам) и затем
+    **bounded** top-of-document fallback через
+    `execution.question_fallback_max_chunks` (default 16).
+- **`workspace/skills/legal_summarizer/scripts/structure/chunks.py`** —
+  provenance split-chunks: при fallback `split_text` для oversize
+  блоков `block_indices` теперь содержит исходный `b.ordinal`
+  (раньше был `()` — split-части теряли атрибуцию к
+  `DocumentBlock`, что критично для future citation / page mapping /
+  поиска / диагностики потери информации).
+- **`workspace/skills/legal_summarizer/scripts/structure/physical.py`**
+  (DOCX) — **fake pagination удалена**. Раньше каждые 25 параграфов
+  получали инкремент `page_index`; теперь `page_index=None` для всех
+  параграфов DOCX. Лучше отсутствие metadata, чем ложная точность
+  (для citation / provenance / audit / debugging).
+
 ### Changed (generic tools → domain-free cleanup)
 
 - **`workspace/tools/duckdb_query_tool.py`** — удалён неиспользуемый
