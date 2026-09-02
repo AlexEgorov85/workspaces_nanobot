@@ -69,7 +69,18 @@ from workspace.skills.legal_summarizer.scripts.prompts import (
 from workspace.skills.legal_summarizer.scripts.reducer import (
     ReduceConfig,
     reduce_results,
-    should_use_hierarchical_reduce,
+)
+from workspace.skills.legal_summarizer.scripts.reducer_strategy import (
+    select_reduce_strategy,
+)
+from workspace.skills.legal_summarizer.scripts.document_stats import (
+    DocumentStats,
+    compute_document_stats,
+)
+from workspace.skills.legal_summarizer.scripts.execution_strategy import (
+    ExecutionStrategy,
+    StrategyConfig,
+    select_execution_strategy,
 )
 from workspace.skills.legal_summarizer.scripts.structure.chunks import (
     Chunk,
@@ -80,6 +91,10 @@ from workspace.skills.legal_summarizer.scripts.structure.physical import (
     DocumentBlock,
     PhysicalDocument,
     load_physical_document,
+)
+from workspace.skills.legal_summarizer.scripts.document_cleanup import (
+    CleanupConfig,
+    cleanup_blocks,
 )
 from workspace.skills.legal_summarizer.scripts.structure.sections import (
     ROOT_SECTION_ID,
@@ -304,7 +319,7 @@ def _compute_chunk_size_chars(cfg: dict) -> int:
     return max(1000, (chars // 1000) * 1000)
 
 
-def _build_token_budget(cfg: dict) -> TokenBudget:
+def _build_token_budget(cfg: dict | None = None) -> TokenBudget:
     try:
         from config import SETTINGS as _SET
         ctx_tokens = int(
@@ -316,6 +331,14 @@ def _build_token_budget(cfg: dict) -> TokenBudget:
 
     exec_cfg = globals()["get_execution_config"]()
     context_batching_cfg = exec_cfg.get("context_batching") or {}
+    # Test override: context_window_tokens из chunking_config (для unit-тестов,
+    # которые хотят принудительно направить ExecutionStrategy в MAP_* —
+    # уменьшают window через mock).
+    if cfg is None:
+        cfg = globals()["get_chunking_config"]()
+    override_ctx = cfg.get("context_window_tokens") if isinstance(cfg, dict) else None
+    if isinstance(override_ctx, (int, float)) and override_ctx > 0:
+        ctx_tokens = int(override_ctx)
     return TokenBudget(
         context_window_tokens=ctx_tokens,
         system_prompt_tokens=int(context_batching_cfg.get("system_prompt_tokens", 1200)),
@@ -347,6 +370,38 @@ def _make_text_block(content: str, *, ordinal: int) -> DocumentBlock:
     )
 
 
+def _relaxed_lexical_fallback(
+    question: str,
+    chunks: list,
+    *,
+    max_chunks: int,
+) -> list | None:
+    """Управляемый fallback для question: расслабленный lexical match.
+
+    Когда строгий keyword match (``select_relevant_chunks``) ничего не нашёл,
+    делаем вторую попытку с prefix-match по первым 4 символам каждого слова
+    вопроса. Это устойчиво к словоформам русского языка
+    («договор» ↔ «договора» ↔ «договору»).
+
+    Возвращает ``None``, если даже расслабленный match не нашёл ничего —
+    caller эскалирует на bounded top-of-document fallback.
+    """
+    if not question or not chunks or max_chunks <= 0:
+        return None
+    raw_words = re.findall(r"\w{4,}", question.lower())
+    if not raw_words:
+        return None
+    prefixes = [w[:4] for w in raw_words]
+    matched: list = []
+    for c in chunks:
+        text_lower = getattr(c, "text", "").lower()
+        if any(p in text_lower for p in prefixes):
+            matched.append(c)
+            if len(matched) >= max_chunks:
+                break
+    return matched if matched else None
+
+
 @dataclass(frozen=True)
 class Inspection:
     chars_in: int
@@ -372,7 +427,25 @@ def inspect(
     text: str,
     document_path: str | None = None,
 ) -> Inspection:
-    """Осмотреть документ: структура, секции, chunks, context_batches."""
+    """Осмотреть документ: structure + DocumentStats + ExecutionStrategy.
+
+    Калиброванный пайплайн (этап Integration & Simplification):
+
+        text
+          ↓ PhysicalDocument (load или inline split на blocks)
+          ↓ cleanup_blocks (header/footer/duplicate marking)
+          ↓ detect_sections + merge_short_sections
+          ↓ DocumentStats (дешёвые метрики)
+          ↓ ExecutionStrategy (DIRECT / MAP_FLAT / MAP_HIERARCHICAL)
+          ↓ chunker + pack_chunks (только для MAP_*)
+
+    DIRECT — единственная точка выбора single-call path.
+    ``single_call_threshold`` (legacy REQUIRED_KEYS) читается, но НЕ
+    используется как критерий: он нерелевантен после введения
+    ``ExecutionStrategy``. Поведение «< threshold → single» воспроизводится
+    естественно через ``direct_call_tokens`` budget: короткие документы
+    всегда влезают в DIRECT.
+    """
     text = (text or "").strip()
     if not text:
         return Inspection(
@@ -385,69 +458,6 @@ def inspect(
         )
 
     cfg = globals()["get_chunking_config"]()
-    threshold = int(cfg["single_call_threshold"])
-    # Расширенный single-path: если chars > threshold, но текст целиком
-    # помещается в DIRECT LLM budget, всё равно single path (1 call).
-    # Opt-in: ``direct_strategy_min_chars`` в chunking_config. 0/отсутствует
-    # → выключено, старое поведение (back-compat).
-    _direct_strategy_min_chars = int(cfg.get("direct_strategy_min_chars", 0))
-    _fits_direct = False
-    if _direct_strategy_min_chars > 0:
-        _budget_for_direct = _build_token_budget(cfg)
-        _direct_tokens = _count_tokens(text)
-        _fits_direct = (
-            _direct_tokens <= _budget_for_direct.direct_call_tokens
-            and len(text) > threshold
-        )
-    if len(text) <= threshold or _fits_direct:
-        sb = _make_text_block(text, ordinal=0)
-        dummy_doc = PhysicalDocument(
-            path="<inline>",
-            format="txt",
-            title=None,
-            size_bytes=len(text.encode("utf-8")),
-            blocks=(sb,),
-            page_count=1,
-        )
-        tree = SectionTree(
-            sections={ROOT_SECTION_ID: DocumentSection(
-                section_id=ROOT_SECTION_ID,
-                level=0,
-                heading="",
-                section_path="",
-                block_indices=(0,),
-                children=(),
-                parent_id=None,
-            )},
-            root_id=ROOT_SECTION_ID,
-            block_to_section={0: ROOT_SECTION_ID},
-        )
-        from workspace.skills.legal_summarizer.scripts.structure.chunks import (
-            Chunk as _Chunk,
-        )
-        chunk = _Chunk(
-            chunk_id="000",
-            index=0,
-            text=text,
-            char_count=len(text),
-            token_estimate=max(1, len(text) // 4),
-            page_start=None,
-            page_end=None,
-            section_id=ROOT_SECTION_ID,
-            section_path="",
-            section_heading="",
-            block_indices=(0,),
-            block_types=("text",),
-        )
-        return Inspection(
-            chars_in=len(text),
-            chunks=[chunk],
-            context_batches=[],
-            tree=tree,
-            strategy="single",
-            estimated_llm_calls=1,
-        )
-
     budget = _build_token_budget(cfg)
     chunk_cfg = _make_chunk_config(cfg, budget)
 
@@ -481,6 +491,16 @@ def inspect(
             page_count=1,
         )
 
+    cleaned_blocks, cleanup_stats = cleanup_blocks(doc.blocks, CleanupConfig())
+    doc = PhysicalDocument(
+        path=doc.path,
+        format=doc.format,
+        title=doc.title,
+        size_bytes=doc.size_bytes,
+        blocks=tuple(cleaned_blocks),
+        page_count=doc.page_count,
+    )
+
     tree = detect_sections(
         doc,
         pdf_path=document_path if (document_path and Path(document_path).suffix.lower() == ".pdf") else None,
@@ -492,14 +512,58 @@ def inspect(
         min_section_chars=chunk_cfg.min_section_chars,
     )
 
+    stats = compute_document_stats(
+        doc,
+        tree=tree,
+        chars_per_token=budget.chars_per_token,
+        repeated_blocks=cleanup_stats.repeated_blocks,
+    )
+
+    strategy_cfg = StrategyConfig(
+        direct_budget_tokens=budget.direct_call_tokens,
+        reduce_budget_tokens=budget.available_chunk_tokens,
+    )
+    strategy = select_execution_strategy(stats, strategy_cfg)
+
+    if strategy is ExecutionStrategy.DIRECT:
+        chunk = Chunk(
+            chunk_id="000",
+            index=0,
+            text=text,
+            char_count=len(text),
+            token_estimate=max(1, int(stats.estimated_tokens)),
+            page_start=None,
+            page_end=None,
+            section_id=ROOT_SECTION_ID,
+            section_path="",
+            section_heading="",
+            block_indices=(0,) if doc.blocks else (),
+            block_types=("text",),
+        )
+        return Inspection(
+            chars_in=len(text),
+            chunks=[chunk],
+            context_batches=[],
+            tree=tree,
+            strategy="single",
+            estimated_llm_calls=1,
+        )
+
     chunker = StructureAwareChunker()
     chunks = chunker.chunk(doc, tree, chunk_cfg)
 
     batches = pack_chunks(chunks, budget)
 
     map_calls = len(batches)
-    meaningful = count_meaningful_sections(tree, doc.blocks)
-    estimated_reduce_calls = 1 + max(0, meaningful - 1)
+    reduce_strategy = select_reduce_strategy(
+        stats,
+        reduce_budget_tokens=budget.available_chunk_tokens,
+    )
+    if reduce_strategy.value == "hierarchical":
+        meaningful = count_meaningful_sections(tree, doc.blocks)
+        estimated_reduce_calls = 1 + max(0, meaningful - 1)
+    else:
+        estimated_reduce_calls = 1
     estimated_total = map_calls + estimated_reduce_calls
 
     return Inspection(
@@ -674,8 +738,19 @@ def run(
             from brief_strategy import select_relevant_chunks as _sel_relevant
             chosen_chunks = _sel_relevant(question, insp.chunks, max_chunks=max_chunks)
             if chosen_chunks is None:
-                _progress("question: keyword match пустой → fallback на detailed")
-                chosen_chunks = insp.chunks
+                _progress("question: keyword match пустой → controlled fallback")
+                _exec_cfg = globals()["get_execution_config"]()
+                _question_fallback_max = int(
+                    _exec_cfg.get("question_fallback_max_chunks", 16)
+                )
+                chosen_chunks = _relaxed_lexical_fallback(
+                    question, insp.chunks, max_chunks=_question_fallback_max,
+                )
+                if chosen_chunks is None:
+                    _progress(
+                        "question: keyword miss → bounded top-of-document fallback"
+                    )
+                    chosen_chunks = insp.chunks[:_question_fallback_max]
         elif length == "brief":
             from brief_strategy import select_brief_chunks_structured as _sel_brief
             # Opt-in «structural sampling» — coverage_ratio через
@@ -750,36 +825,44 @@ def run(
             "hint": "Передайте --confirm для запуска полной обработки.",
         }
 
-    if len(insp.chunks) > max_chunks_for_execution:
+    chunks = chosen_chunks
+    tree = insp.tree
+
+    # Safety net: проверяем max_chunks_for_execution **после** выбора
+    # ``chunks`` (фикс #18). Раньше проверка шла по ``len(insp.chunks)``
+    # до выбора — для question она блокировала обработку при больших
+    # документах даже если фактически нужно обработать только 5 chunks.
+    if len(chunks) > max_chunks_for_execution:
         return {
             "status": "requires_continuation",
             "operation_id": operation_id,
             "summary": {
                 "chars_in": insp.chars_in,
                 "chunks_total": len(insp.chunks),
+                "chunks_selected": len(chunks),
                 "estimated_llm_calls": insp.estimated_llm_calls,
                 "title": (structure or {}).get("title"),
             },
             "hint": (
-                f"Документ превышает max_chunks_for_execution={max_chunks_for_execution}."
+                f"Выбранная выборка ({len(chunks)} chunks) превышает "
+                f"max_chunks_for_execution={max_chunks_for_execution}. "
+                f"Уменьшите max_chunks_per_question / question_fallback_max_chunks "
+                f"или передайте --confirm для принудительного продолжения."
             ),
         }
-
-    chunks = chosen_chunks
-    tree = insp.tree
 
     # Re-pack в ContextBatch под выбранную выборку. Для brief/question
     # выбранные chunks могут быть меньше полного набора → перепаковываем.
     if chunks is insp.chunks:
         batches = insp.context_batches
     else:
-        exec_cfg_pack = globals()["get_chunking_config"]()
-        threshold = int(exec_cfg_pack["single_call_threshold"])
-        if insp.chars_in <= threshold:
-            # single-стратегия — batches пустой, ничего не перепаковываем
+        # Для DIRECT strategy batches пустой (single-call path не требует
+        # context batching). Не пытаемся re-pack — re-pack только для
+        # MAP_* путей, где ``insp.context_batches`` уже нет нужного размера.
+        if insp.strategy == "single":
             batches = insp.context_batches
         else:
-            budget_pack = _build_token_budget(exec_cfg_pack)
+            budget_pack = _build_token_budget(globals()["get_chunking_config"]())
             batches = pack_chunks(chunks, budget_pack)
 
     # Загрузить document-cache (если есть session_key)
@@ -795,6 +878,7 @@ def run(
 
     if insp.strategy == "single":
         _progress(f"single-call: chars={insp.chars_in}")
+        total_start_single = _time.monotonic()
         system = _load_prompt("summarize_system").replace(
             "{length_instruction}", _system_instruction(length, question)
         )
@@ -825,6 +909,38 @@ def run(
             "title": (structure or {}).get("title"),
         }
         write_result(operation_id, result, workspace_root=workspace_root)
+
+        # Минимальный manifest для single-call path (consistency с map_reduce
+        # и поддержка resume/cache). Не было до Integration — был pre-existing
+        # gap, вылез из тестов при переходе на ExecutionStrategy.DIRECT.
+        single_duration = round(_time.monotonic() - total_start_single, 1)
+        single_manifest = NormalizedManifest(
+            operation_id=operation_id,
+            status="completed",
+            version=2,
+            document_path=document_path,
+            structure_title=(structure or {}).get("title"),
+            chars_in=insp.chars_in,
+            length=length,
+            chunks_total=1,
+            context_batches_total=0,
+            estimated_llm_calls=1,
+            actual_llm_calls=1,
+            sections={},
+            chunk_states={},
+            context_batches={},
+            section_summaries={},
+            batches_done=[],
+            batches_failed=[],
+            last_error=None,
+            started_at=_now_iso(),
+            completed_at=_now_iso(),
+            duration_sec=single_duration,
+            article_count=article_count,
+            is_legacy=False,
+            raw={},
+        )
+        save_manifest(single_manifest, workspace_root=workspace_root)
         return {
             "status": "completed",
             "operation_id": operation_id,
@@ -849,7 +965,7 @@ def run(
                 "reduce_calls": 0,
                 "total_llm_calls": 1,
                 "retries": 0,
-                "duration_sec": 0.0,
+                "duration_sec": single_duration,
                 "strategy": "single",
             },
         }
@@ -1087,7 +1203,27 @@ def run(
         section_summary_max_chars=12000,
     )
 
-    hierarchical = should_use_hierarchical_reduce(tree, chunks, threshold=3)
+    _chars_in_reduce = sum(c.char_count for c in chunks)
+    _sections_in_reduce = (
+        sum(1 for sid in tree.sections if sid != ROOT_SECTION_ID)
+        if tree is not None else 0
+    )
+    _stats_for_reduce = DocumentStats(
+        chars=_chars_in_reduce,
+        estimated_tokens=max(1, int(_chars_in_reduce / reduce_cfg.chars_per_token + 0.999)),
+        pages=0,
+        blocks=len(chunks),
+        sections=_sections_in_reduce,
+        tables=0,
+        chunks=len(chunks),
+    )
+    _budget_for_reduce = _build_token_budget(globals()["get_chunking_config"]())
+    _reduce_strategy = select_reduce_strategy(
+        _stats_for_reduce,
+        reduce_budget_tokens=_budget_for_reduce.available_chunk_tokens,
+        min_sections_for_hierarchical=reduce_cfg.reduce_strategy_min_sections,
+    )
+    hierarchical = _reduce_strategy.value == "hierarchical"
     section_summaries_out: dict[str, str] = {}
     section_reduce_calls = 0
     section_trim_calls = 0
