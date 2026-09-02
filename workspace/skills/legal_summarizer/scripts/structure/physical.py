@@ -276,7 +276,21 @@ def _iter_pdf_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
 
 
 def _iter_docx_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
-    """DOCX → blocks (paragraphs + tables) в document order."""
+    """    DOCX → blocks (paragraphs + tables) в document order.
+
+    Обход ``body.iterchildren()`` даёт честный document order (interleaved
+    paragraphs и tables), а не «сначала все paragraphs, потом все tables».
+
+    python-docx ``doc.paragraphs`` и ``doc.tables`` хранят элементы
+    раздельно (не сохраняя относительный порядок). Чтобы получить
+    реальный документный порядок — идём напрямую по XML-body и
+    диспатчим по тегу ``w:p`` / ``w:tbl``.
+
+    ``sectPr`` (секционные свойства) пропускаем — это не контент.
+
+    ``paragraph_index`` и ``table_index`` — позиции в ``doc.paragraphs``
+    / ``doc.tables`` соответственно (нужны для page-mapping и meta).
+    """
     from docx import Document
 
     doc = Document(str(path))
@@ -285,56 +299,79 @@ def _iter_docx_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
 
     para_to_page: dict[int, int] = {}
     page_no = 1
-    for p_idx in range(len(doc.paragraphs)):
+    n_paras = len(doc.paragraphs)
+    for p_idx in range(n_paras):
         if p_idx > 0 and p_idx % 25 == 0:
             page_no += 1
         para_to_page[p_idx] = page_no
 
-    for p_idx, para in enumerate(doc.paragraphs):
-        text = (para.text or "").strip()
-        if not text:
-            continue
-        page_idx = para_to_page.get(p_idx)
-        blocks.append(
-            DocumentBlock(
-                block_id=f"b_{ordinal:04d}",
-                block_type="paragraph",
-                content=text,
-                char_count=len(text),
-                page_index=page_idx,
-                page_start=page_idx,
-                page_end=page_idx,
-                paragraph_index=p_idx,
-                table_index=None,
-                ordinal=ordinal,
-                block_metadata={"style": para.style.name if para.style else ""},
-            )
-        )
-        ordinal += 1
+    # Индексы исходных paragraphs/tables по их XML-объектам (для meta).
+    para_by_xml: dict[int, object] = {id(p._p): (i, p) for i, p in enumerate(doc.paragraphs)}
+    table_by_xml: dict[int, object] = {id(t._tbl): (i, t) for i, t in enumerate(doc.tables)}
 
-    for t_idx, table in enumerate(doc.tables):
-        rows: list[list[str]] = []
-        for row in table.rows:
-            rows.append([cell.text.strip() for cell in row.cells])
-        table_text = _table_to_text(rows)
-        if not table_text.strip():
-            continue
-        blocks.append(
-            DocumentBlock(
-                block_id=f"b_{ordinal:04d}",
-                block_type="table",
-                content=table_text,
-                char_count=len(table_text),
-                page_index=None,
-                page_start=None,
-                page_end=None,
-                paragraph_index=None,
-                table_index=t_idx,
-                ordinal=ordinal,
-                block_metadata={"row_count": len(rows)},
+    p_idx_seen = 0
+    t_idx_seen = 0
+
+    for child in doc.element.body.iterchildren():
+        local_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+
+        if local_tag == "p":
+            para_obj = para_by_xml.get(id(child))
+            if para_obj is None:
+                continue
+            p_idx, para = para_obj
+            p_idx_seen += 1
+            text = (para.text or "").strip()
+            if not text:
+                continue
+            page_idx = para_to_page.get(p_idx)
+            blocks.append(
+                DocumentBlock(
+                    block_id=f"b_{ordinal:04d}",
+                    block_type="paragraph",
+                    content=text,
+                    char_count=len(text),
+                    page_index=page_idx,
+                    page_start=page_idx,
+                    page_end=page_idx,
+                    paragraph_index=p_idx,
+                    table_index=None,
+                    ordinal=ordinal,
+                    block_metadata={"style": para.style.name if para.style else ""},
+                )
             )
-        )
-        ordinal += 1
+            ordinal += 1
+
+        elif local_tag == "tbl":
+            table_obj = table_by_xml.get(id(child))
+            if table_obj is None:
+                continue
+            t_idx, table = table_obj
+            t_idx_seen += 1
+            rows: list[list[str]] = []
+            for row in table.rows:
+                rows.append([cell.text.strip() for cell in row.cells])
+            table_text = _table_to_text(rows)
+            if not table_text.strip():
+                continue
+            blocks.append(
+                DocumentBlock(
+                    block_id=f"b_{ordinal:04d}",
+                    block_type="table",
+                    content=table_text,
+                    char_count=len(table_text),
+                    page_index=None,
+                    page_start=None,
+                    page_end=None,
+                    paragraph_index=None,
+                    table_index=t_idx,
+                    ordinal=ordinal,
+                    block_metadata={"row_count": len(rows)},
+                )
+            )
+            ordinal += 1
+
+        # sectPr / другие — пропускаем.
 
     page_count = max((b.page_index or 0) for b in blocks) if blocks else 1
     return blocks, page_count
