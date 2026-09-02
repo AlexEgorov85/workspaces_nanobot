@@ -19,15 +19,52 @@ tool `run_predefined_script`.
 
 ## Колонки реестра
 
-| column | type | что хранится |
-|---|---|---|
-| `name` | TEXT PK | Имя скрипта (используется в tool) |
-| `description` | TEXT | Краткое описание (1–2 строки) |
-| `sql_template` | TEXT | SQL с `?`-placeholder'ами (DuckDB-стиль) |
-| `parameters` | JSONB | `{name: {type, required, default?, validation?}}` |
-| `max_rows_default` | INTEGER | Дефолтный LIMIT |
-| `returns` | TEXT | Что возвращает (для LLM-промпта) |
-| `long_description` | TEXT | Подробное описание |
+| column | type | что хранится | используется кодом |
+|---|---|---|---|
+| `name` | TEXT PK | Имя скрипта (^[a-z][a-z0-9_]*$) | да — lookup |
+| `description` | TEXT NOT NULL | Краткое описание (1–2 строки) | да — для LLM-промпта/few-shot |
+| `sql_template` | TEXT NOT NULL | SQL с позиционными `?`-placeholder'ами (DuckDB-стиль) | да — выполняется |
+| `parameters` | JSONB NOT NULL DEFAULT `'{}'` | `{name: ParamDefinition}` | да — валидация |
+| `max_rows_default` | INTEGER NOT NULL | Лимит строк по умолчанию (добавляется в `LIMIT`) | да — добавляется автоматически |
+| `returns` | TEXT NOT NULL DEFAULT '' | Что возвращает скрипт (для документации и LLM-промпта) | зарезервировано |
+| `long_description` | TEXT NOT NULL DEFAULT '' | Подробное описание для LLM-промпта: что делает, когда использовать, edge cases | зарезервировано |
+| `created_at` | TIMESTAMPTZ NOT NULL DEFAULT NOW() | Время создания записи | sync-метаданные |
+| `updated_at` | TIMESTAMPTZ NOT NULL DEFAULT NOW() | Время последнего изменения | sync-метаданные (`PgDuckDbSyncService` синхронизирует инкрементально по этой колонке) |
+
+## Контракт `sql_template` и placeholder'ов
+
+**Только позиционные `?`-placeholder'ы (DuckDB-стиль).**
+
+Каждый `?` соответствует параметру из JSONB `parameters` в порядке
+объявления (`script.parameter_names()`).
+
+```sql
+-- Пример:
+SELECT COUNT(*)
+FROM oarb.audits
+WHERE actual_date BETWEEN ? AND ?
+  AND audit_type = ?
+```
+
+Соответствующий JSONB:
+
+```json
+{
+  "date_from":  {"type": "date", "required": true},
+  "date_to":    {"type": "date", "required": true},
+  "audit_type": {"type": "string", "required": true, "validation": {"choices": ["Внеплановая", "Плановая"]}}
+}
+```
+
+Реализация: `lib/services/predefined_script_request.py`
+(`PredefinedScriptRequestBuilder`).
+
+**Если в SQL нет явного `LIMIT` и `max_rows_default > 0`** — tool
+автоматически добавляет `LIMIT ?` с дополнительным аргументом. Если
+`LIMIT` уже есть (литерал или `?`) — tool не вмешивается.
+
+**Если в SQL `?` больше или меньше, чем параметров в JSONB** —
+`invalid_script` (валидация в `PredefinedScriptRequestBuilder.build`).
 
 ## Схема `parameters` (JSONB)
 
@@ -70,7 +107,7 @@ run_predefined_script(name="<из SKILL.md>", params={...})
 ## Как добавить новый скрипт (для администратора)
 
 1. INSERT/UPDATE через PG напрямую или через SQL-миграцию:
-   `INSERT INTO public.agent_predefined_scripts ...`.
+   `INSERT INTO public.agent_predefined_scripts (name, description, sql_template, parameters, max_rows_default) VALUES (...)`.
 2. Дождаться `PgDuckDbSyncService` (инкрементальный sync по `updated_at`).
 3. Синхронизировать каталог в `SKILL.md` — добавить имя и описание.
 

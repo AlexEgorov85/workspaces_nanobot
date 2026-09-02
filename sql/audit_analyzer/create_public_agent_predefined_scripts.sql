@@ -25,7 +25,7 @@ DISTRIBUTED RANDOMLY;
 COMMENT ON TABLE  public.agent_predefined_scripts IS 'Реестр предопределённых SQL-скриптов навыка audit_analyzer. Источник истины для режима --mode predefined.';
 COMMENT ON COLUMN public.agent_predefined_scripts.name             IS 'PK — уникальное имя скрипта. Используется в CLI: --script <name>. Должно быть валидным идентификатором (^[a-z][a-z0-9_]*$).';
 COMMENT ON COLUMN public.agent_predefined_scripts.description      IS 'Краткое описание для меню/подсказок (1-2 строки).';
-COMMENT ON COLUMN public.agent_predefined_scripts.sql_template     IS 'SQL-шаблон с Jinja2-подобными блоками {% if param %} и :param_name плейсхолдерами.';
+COMMENT ON COLUMN public.agent_predefined_scripts.sql_template     IS 'SQL-шаблон с позиционными ?-плейсхолдерами (DuckDB-стиль). Каждый ? соответствует параметру из JSONB parameters в порядке объявления. Реализация: PredefinedScriptRequestBuilder в lib/services/predefined_script_request.py.';
 COMMENT ON COLUMN public.agent_predefined_scripts.parameters       IS 'JSONB: {param_name: ParamDefinition} — type/required/default/description/validation.';
 COMMENT ON COLUMN public.agent_predefined_scripts.max_rows_default IS 'Лимит строк по умолчанию (добавляется в LIMIT).';
 COMMENT ON COLUMN public.agent_predefined_scripts.returns          IS 'Что возвращает скрипт (для документации и LLM-промпта).';
