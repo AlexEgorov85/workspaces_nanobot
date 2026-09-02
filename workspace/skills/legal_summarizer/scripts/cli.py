@@ -26,6 +26,7 @@ invariant #16).
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
 import traceback
@@ -33,6 +34,30 @@ from pathlib import Path
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _setup_stdout_encoding() -> None:
+    """Переключить stdout на UTF-8 для кросс-платформенного вывода.
+
+    В Windows по умолчанию stdout использует ``cp1251`` (или другую
+    системную кодировку), и любой Unicode-символ в выводе (включая
+    стрелки ``→``, em-dash ``—``, кириллицу, эмодзи) вызывает
+    ``UnicodeEncodeError: 'charmap' codec can't encode character``.
+
+    Решение: ``sys.stdout.reconfigure(encoding='utf-8', errors='replace')``
+    для Python 3.7+. В Linux/Mac stdout уже UTF-8, reconfigure no-op.
+    ``errors='replace'`` — defensive (на случай не-UTF-8-capable stdout).
+
+    Это **одноразовый** setup при старте cli.py — вызывается из ``main()``
+    ДО любых print() в stdout. stderr тоже переключаем (на случай если
+    кто-то решит писать Unicode в stderr).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, io.UnsupportedOperation):
+            # Python < 3.7 или stream закрыт.
+            pass
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -104,7 +129,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _emit(payload: dict) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    try:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    except UnicodeEncodeError:
+        # Запасной путь: stdout не перешёл на UTF-8 (reconfigure недоступен
+        # или вернул closed stream). Пишем байты напрямую с заменой
+        # не-кодируемых символов.
+        encoded = json.dumps(
+            payload, ensure_ascii=False, indent=2, default=str,
+        ).encode("utf-8", errors="replace")
+        sys.stdout.buffer.write(encoded)
+        sys.stdout.buffer.write(b"\n")
+        sys.stdout.buffer.flush()
 
 
 # Sentinel, который навык печатает в stdout СТРОГО в самом конце любого
@@ -215,6 +251,7 @@ def _ensure_registered() -> None:
 
 def main() -> None:
     try:
+        _setup_stdout_encoding()
         _ensure_registered()
         parser = _build_parser()
         args = parser.parse_args()
