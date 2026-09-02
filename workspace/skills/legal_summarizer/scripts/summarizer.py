@@ -51,11 +51,9 @@ from workspace.skills.legal_summarizer.scripts.manifest import (
     NormalizedManifest,
     load_manifest,
     manifest_path,
-    read_chunk_result,
     read_result,
     result_path,
     save_manifest,
-    write_chunk_result,
     write_result,
 )
 from workspace.skills.legal_summarizer.scripts.packing import (
@@ -96,13 +94,6 @@ from workspace.utils.office_files import extract_text
 
 
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
-_PROMPTS_DIR = _SKILL_ROOT / "prompts"
-
-_PROMPT_FILES = {
-    "summarize_system": _PROMPTS_DIR / "summarize_system.md",
-    "reduce_system": _PROMPTS_DIR / "reduce_system.md",
-    "section_reduce_system": _PROMPTS_DIR / "section_reduce_system.md",
-}
 
 
 def _chunk_structure_label(chunk: "Chunk") -> str:
@@ -127,79 +118,25 @@ def _format_chunk_block(chunk: "Chunk", summary: str) -> str:
     return f"[Chunk {chunk.chunk_id}]\n{summary}"
 
 
-# Сколько раз перезапускать LLM-вызов батча при ChunkResultParseError
-# (валидный JSON + все chunk_id). LLM-JSON флакает, ретрай обычно помогает.
-# При исчерпании — батч помечается failed, обработка документа продолжается.
-MAX_BATCH_PARSE_RETRIES = 3
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_THINK_OPEN = "<think>"
-_THOUGHT_CLOSE = "</think>"
-
-
-def _strip_think_blocks(text: str) -> str:
-    """Убрать ``<think>...</think>`` блоки из текста (CoT от моделей).
-
-    Некоторые модели (DeepSeek/Qwen) выдают chain-of-thought прямо в
-    финальном ответе — иначе ``_extract_subject`` подберёт ``<think>``
-    как subject, а summary будет рассуждением вместо саммари. Чистим
-    ДО извлечения subject и записи ``result.json``.
-
-    Два варианта мусора:
-    1. Закрытый блок ``<think>reasoning</think>answer`` — целиком
-       вырезается regex'ом (lazy + DOTALL).
-    2. **Незакрытый** ``<think>reasoning\n\nanswer`` — модель забыла
-       ``</think>``. Без этого фикса regex не матчит → рассуждение
-       утекает в result.json (наблюдалось в проде 2026-08-28 на ГК РФ).
-       Решение: отрезать от ``<think>`` до первого абзацного разрыва
-       (``\n\n``), сохраняя реальный ответ после. Если разрыва нет
-       (весь текст — рассуждение) — отрезать до конца: пустой
-       subject/summary лучше сырого ``<think>``.
-    """
-    if not text:
-        return text
-    cleaned = _THINK_BLOCK_RE.sub("", text)
-    # Дорезаем незакрытые<think>... (модель забыла закрывающий тег).
-    while _THINK_OPEN in cleaned:
-        idx = cleaned.find(_THINK_OPEN)
-        close_idx = cleaned.find(_THOUGHT_CLOSE, idx)
-        if close_idx != -1:
-            # Повторный/вложенный — отрезаем до ближайшего ``</think>``.
-            cleaned = cleaned[:idx] + cleaned[close_idx + len(_THOUGHT_CLOSE):]
-            continue
-        blank = cleaned.find("\n\n", idx)
-        if blank == -1:
-            cleaned = cleaned[:idx]
-        else:
-            cleaned = cleaned[:idx] + cleaned[blank + 2:]
-    return cleaned.strip()
-
-
-def _load_prompt(name: str) -> str:
-    """Прочитать системный промпт из ``prompts/<name>.md``."""
-    p = _PROMPT_FILES.get(name)
-    if p is None or not p.is_file():
-        raise FileNotFoundError(
-            f"Не найден файл промпта: {p}. Промпты лежат в "
-            "workspace/skills/legal_summarizer/prompts/."
-        )
-    return p.read_text(encoding="utf-8")
-
-
-_LENGTH_INSTRUCTIONS = {
-    "brief": "1 абзац, 150-250 слов: что это за документ и ключевые условия в двух-трёх фразах. НЕ превышай 250 слов.",
-    "detailed": "по разделам документа, 800-1200 слов: каждый раздел простым языком. НЕ превышай 1200 слов.",
-}
-
-
-_QUESTION_INSTRUCTION_TEMPLATE = (
-    "Пользователь задал конкретный вопрос: «{question}»\n"
-    "Ищи в chunk'е / саммари ТОЛЬКО факты по этому вопросу.\n"
-    "Если ничего не относится — пропусти (для map) "
-    "или напиши «В документе не нашёл ответа» (для reduce).\n"
-    "НЕ описывай документ целиком, отвечай только на вопрос.\n"
-    "ОБЪЁМ: максимум 200-300 слов, прямой ответ по существу вопроса. "
-    "Без вводных фраз, без перечисления статей закона (только релевантные), "
-    "без подробного изложения каждого аспекта."
+from workspace.skills.legal_summarizer.scripts.pipeline import (  # noqa: E402
+    MAX_BATCH_PARSE_RETRIES,
+    now_iso as _now_iso,
+    process_context_batch as _process_context_batch,
+    run_one_batch_async as _run_one_batch_async,
+    load_cached_partials as _load_cached_partials,
+)
+from workspace.skills.legal_summarizer.scripts.sanitize import (  # noqa: E402
+    extract_subject as _extract_subject,
+    _THINK_BLOCK_RE,
+    _THINK_OPEN,
+    _THOUGHT_CLOSE,
+    strip_think_blocks as _strip_think_blocks,
+)
+from workspace.skills.legal_summarizer.scripts.prompts_runtime import (  # noqa: E402
+    load_prompt as _load_prompt,
+    LENGTH_INSTRUCTIONS as _LENGTH_INSTRUCTIONS,
+    QUESTION_INSTRUCTION_TEMPLATE as _QUESTION_INSTRUCTION_TEMPLATE,
+    system_instruction as _system_instruction,
 )
 
 
@@ -213,91 +150,19 @@ def _resolve_max_chunks() -> int:
         return 8
 
 
-def _resolve_session_key(document_path: str | None) -> str | None:
-    """Извлечь safe_session_key из пути документа.
-
-    Идентично SessionFileRedirectHook: raw → safe_session_key() → str.
-    ``None`` если путь не содержит ``data_store/cache/sessions/<key>/``.
-    """
-    if not document_path:
-        return None
-    raw = extract_session_key_from_path(document_path)
-    if not raw:
-        return None
-    return safe_session_key(raw)
-
-
-def _document_id_for(text: str) -> str:
-    """Стабильный document_id = sha256 от первых 64KB текста."""
-    sample = text[: 64 * 1024].encode("utf-8", errors="replace")
-    return hashlib.sha256(sample).hexdigest()[:16]
-
-
-def _doc_cache_dir(document_id: str, session_key: str, workspace_root: Path) -> Path:
-    return (
-        workspace_root
-        / "data_store" / "cache" / "sessions" / session_key
-        / "skills" / "legal_summarizer" / "documents" / document_id
-    )
-
-
-def _load_doc_cache(
-    document_id: str,
-    session_key: str,
-    workspace_root: Path,
-) -> dict[str, dict]:
-    """Загрузить chunks из document-cache. ``{chunk_id: chunk_data}``."""
-    cache = _doc_cache_dir(document_id, session_key, workspace_root)
-    chunks_dir = cache / "chunks"
-    if not chunks_dir.is_dir():
-        return {}
-    out: dict[str, dict] = {}
-    for f in chunks_dir.glob("*.json"):
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        cid = data.get("chunk_id") or f.stem
-        out[cid] = data
-    return out
-
-
-def _save_doc_cache(
-    document_id: str,
-    session_key: str,
-    workspace_root: Path,
-    new_chunks: dict[str, dict],
-) -> None:
-    """Сохранить новые chunks в document-cache (атомарно по файлу)."""
-    if not new_chunks:
-        return
-    cache = _doc_cache_dir(document_id, session_key, workspace_root)
-    chunks_dir = cache / "chunks"
-    chunks_dir.mkdir(parents=True, exist_ok=True)
-    meta_path = cache / "meta.json"
-    if not meta_path.exists():
-        try:
-            meta_path.write_text(
-                json.dumps(
-                    {
-                        "document_id": document_id,
-                        "first_seen_at": _now_iso(),
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
-    for cid, data in new_chunks.items():
-        path = chunks_dir / f"{cid}.json"
-        try:
-            path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
-            _progress(f"warn: не удалось сохранить chunk {cid} в document-cache")
+from workspace.skills.legal_summarizer.scripts.fingerprint import (  # noqa: E402
+    document_id_for as _document_id_for,
+    resolve_document_id as _resolve_document_id,
+    resolve_session_key as _resolve_session_key,
+)
+from workspace.skills.legal_summarizer.scripts.document_cache import (  # noqa: E402
+    doc_cache_dir as _doc_cache_dir,
+    load_doc_cache as _load_doc_cache,
+    save_doc_cache as _save_doc_cache,
+)
+from workspace.skills.legal_summarizer.scripts.token_budget import (  # noqa: E402
+    count_tokens as _count_tokens,
+)
 
 
 _SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
@@ -399,26 +264,12 @@ def make_operation_id(text: str, length: str) -> str:
     return f"op_{ts}_{h}_{length}"
 
 
-def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _doc_context(structure: dict | None, *, with_begin_end: bool = False) -> str:
-    if not structure:
-        return ""
-    parts: list[str] = []
-    title = (structure.get("title") or "").strip()
-    if title:
-        parts.append(f"НАЗВАНИЕ ДОКУМЕНТА: {title}")
-    if with_begin_end:
-        begin = (structure.get("begin") or "").strip()
-        end = (structure.get("end") or "").strip()
-        if begin:
-            parts.append("НАЧАЛО ДОКУМЕНТА:\n" + begin)
-        if end:
-            parts.append("КОНЕЦ ДОКУМЕНТА:\n" + end)
-    return "\n\n".join(parts)
+from workspace.skills.legal_summarizer.scripts.llm_calls import (  # noqa: E402
+    doc_context as _doc_context,
+    llm_batch as _llm_batch,
+    llm_section_reduce as _llm_section_reduce,
+    llm_document_reduce as _llm_document_reduce,
+)
 
 
 def _progress(msg: str) -> None:
@@ -535,7 +386,20 @@ def inspect(
 
     cfg = globals()["get_chunking_config"]()
     threshold = int(cfg["single_call_threshold"])
-    if len(text) <= threshold:
+    # Расширенный single-path: если chars > threshold, но текст целиком
+    # помещается в DIRECT LLM budget, всё равно single path (1 call).
+    # Opt-in: ``direct_strategy_min_chars`` в chunking_config. 0/отсутствует
+    # → выключено, старое поведение (back-compat).
+    _direct_strategy_min_chars = int(cfg.get("direct_strategy_min_chars", 0))
+    _fits_direct = False
+    if _direct_strategy_min_chars > 0:
+        _budget_for_direct = _build_token_budget(cfg)
+        _direct_tokens = _count_tokens(text)
+        _fits_direct = (
+            _direct_tokens <= _budget_for_direct.direct_call_tokens
+            and len(text) > threshold
+        )
+    if len(text) <= threshold or _fits_direct:
         sb = _make_text_block(text, ordinal=0)
         dummy_doc = PhysicalDocument(
             path="<inline>",
@@ -764,245 +628,6 @@ def quick_estimate(path: Path | str) -> dict[str, Any]:
     }
 
 
-def _system_instruction(length: str, question: str | None) -> str:
-    """Подготовить инструкцию для {length_instruction} в системном промпте.
-
-    Если передан ``question`` — инструкция фокусирует LLM на ответе на
-    конкретный вопрос (длину игнорируем — ответ всегда краткий).
-    Иначе — стандартная инструкция по объёму.
-    """
-    if question:
-        return _QUESTION_INSTRUCTION_TEMPLATE.format(question=question)
-    return _LENGTH_INSTRUCTIONS.get(length, _LENGTH_INSTRUCTIONS["brief"])
-
-
-def _llm_batch(
-    batch: ContextBatch,
-    *,
-    chunks_total: int,
-    structure: dict | None,
-    length: str,
-    question: str | None = None,
-) -> dict[str, str]:
-    """Вызвать LLM для одного ContextBatch. Возвращает dict[chunk_id, summary]."""
-    system = _load_prompt("summarize_system").replace(
-        "{length_instruction}", _system_instruction(length, question)
-    )
-    user_body = build_batch_user_message(batch, chunks_total=chunks_total)
-    doc_ctx = _doc_context(structure, with_begin_end=False)
-    if doc_ctx:
-        user_body = doc_ctx + "\n\n" + user_body
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_body},
-    ]
-    response = llm.chat(messages, context=None)
-    return parse_batch_response(batch, response)
-
-
-def _llm_section_reduce(
-    section_path: str,
-    section_heading: str,
-    joined_text: str,
-    *,
-    length: str,
-    question: str | None = None,
-) -> str:
-    system = _load_prompt("section_reduce_system").replace(
-        "{length_instruction}", _system_instruction(length, question)
-    )
-    user_body = (
-        f"Раздел: {section_path}\n"
-        f"Заголовок: {section_heading}\n\n"
-        f"Частичные саммари чанков этого раздела:\n\n{joined_text}\n\n"
-        "Объедини в одно связное саммари этого раздела."
-    )
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_body},
-    ]
-    return llm.chat(messages, context=None)
-
-
-def _llm_section_trim(
-    section_path: str,
-    summary: str,
-    *,
-    max_chars: int,
-) -> str:
-    """Сократить section summary до max_chars."""
-    system = (
-        "Ты — редактор. Сократи саммари юридического раздела до краткой формы, "
-        "сохранив ключевые факты."
-    )
-    user_body = (
-        f"Раздел: {section_path}\n"
-        f"Саммари раздела (превышает допустимый размер):\n\n{summary}\n\n"
-        f"Сократи до ≤{max_chars} символов. Сохрани: стороны, предмет, "
-        "обязательства, сроки, штрафы."
-    )
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_body},
-    ]
-    return llm.chat(messages, context=None)
-
-
-def _llm_document_reduce(
-    section_summaries_text: str,
-    *,
-    length: str,
-    focus: str | None,
-    structure: dict | None,
-    question: str | None = None,
-) -> str:
-    system = _load_prompt("reduce_system").replace(
-        "{length_instruction}", _system_instruction(length, question)
-    )
-    doc_ctx = _doc_context(structure, with_begin_end=True)
-    user_body = "Саммари разделов документа:\n\n" + section_summaries_text
-    if doc_ctx:
-        user_body = doc_ctx + "\n\n" + user_body
-    if focus:
-        user_body = (
-            user_body
-            + "\n\nФокус пользователя (что особенно важно подсветить): "
-            + focus
-        )
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_body},
-    ]
-    return llm.chat(messages, context=None)
-
-
-def _extract_subject(summary: str) -> str:
-    lines = [ln.strip() for ln in (summary or "").splitlines()]
-    subject = ""
-    for ln in lines:
-        if ln:
-            subject = ln
-            break
-    # Убираем markdown-заголовок, если модель вернула "# Тема" как первую строку.
-    subject = re.sub(r"^#{1,6}\s+", "", subject).strip()
-    if len(subject) > 400:
-        m = re.match(r"(.+?[.!?])\s", subject)
-        if m:
-            subject = m.group(1)
-    return subject
-
-
-def _process_context_batch(
-    batch: ContextBatch,
-    *,
-    chunks_total: int,
-    structure: dict | None,
-    length: str,
-    operation_id: str,
-    workspace_root: Path | str | None,
-    question: str | None = None,
-) -> dict[str, str]:
-    """Один LLM call → parse → write per-chunk files."""
-    started_at = _now_iso()
-    start = _time.monotonic()
-    result = _llm_batch(
-        batch,
-        chunks_total=chunks_total,
-        structure=structure,
-        length=length,
-        question=question,
-    )
-    duration = round(_time.monotonic() - start, 3)
-    completed_at = _now_iso()
-
-    for c in batch.chunks:
-        if c.chunk_id in result:
-            write_chunk_result(
-                operation_id,
-                c.chunk_id,
-                result[c.chunk_id],
-                context_batch_id=batch.batch_id,
-                section_id=c.section_id,
-                section_path=c.section_path,
-                page_start=c.page_start,
-                page_end=c.page_end,
-                duration_sec=duration,
-                workspace_root=workspace_root,
-            )
-    return {
-        "batch_id": batch.batch_id,
-        "chunk_ids": [c.chunk_id for c in batch.chunks],
-        "started_at": started_at,
-        "completed_at": completed_at,
-        "duration_sec": duration,
-    }
-
-
-async def _run_one_batch_async(
-    batch_to_process: ContextBatch,
-    *,
-    chunks_total: int,
-    structure: dict | None,
-    operation_id: str,
-    workspace_root: Path | str | None,
-    sem: asyncio.Semaphore,
-    length: str = "brief",
-    question: str | None = None,
-) -> tuple[str, dict | None, tuple[str, Exception] | None]:
-    """Один батч с retry-циклом (parse-error), под семафором concurrency.
-
-    Sync-функция ``_process_context_batch`` (внутри LLM HTTP + JSON parse +
-    запись chunks/*.json) обёрнута в ``asyncio.to_thread`` — пока один батч
-    висит на HTTP, event loop крутит остальные. Семафор ограничивает
-    число одновременных HTTP-запросов к LLM-провайдеру (rate-limit).
-
-    Возвращает:
-      ("ok", batch_meta, None) — успех (с метаданными батча)
-      ("failed", None, (code, exc)) — все retry исчерпаны или не-parse ошибка
-    """
-    async with sem:
-        last_error: tuple[str, Exception] | None = None
-        for attempt in range(1, MAX_BATCH_PARSE_RETRIES + 1):
-            try:
-                batch_meta = await asyncio.to_thread(
-                    _process_context_batch,
-                    batch_to_process,
-                    chunks_total=chunks_total,
-                    structure=structure,
-                    length=length,
-                    operation_id=operation_id,
-                    workspace_root=workspace_root,
-                    question=question,
-                )
-                return ("ok", batch_meta, None)
-            except ChunkResultParseError as exc:
-                # LLM-JSON флакает — ретраим с тем же промптом.
-                last_error = ("LLM_PARSE_ERROR", exc)
-                _progress(
-                    f"batch {batch_to_process.batch_id}: parse error "
-                    f"attempt {attempt}/{MAX_BATCH_PARSE_RETRIES}, retrying"
-                )
-                continue
-            except Exception as exc:
-                # Не-parse ошибка (сеть, OOM, структурно): не ретраим.
-                last_error = ("LLM_ERROR", exc)
-                break
-        return ("failed", None, last_error)
-
-
-def _load_cached_partials(
-    operation_id: str,
-    expected_chunk_ids: list[str],
-    workspace_root: Path | str | None,
-) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for cid in expected_chunk_ids:
-        rec = read_chunk_result(operation_id, cid, workspace_root)
-        if rec and isinstance(rec.get("summary"), str):
-            out[cid] = rec["summary"]
-    return out
-
-
 def run(
     text: str,
     *,
@@ -1040,7 +665,7 @@ def run(
     #   detailed — все chunks
     #   question — chunks, содержащие слова вопроса (≤max_chunks);
     #              если ничего не нашли — fallback на detailed (все)
-    document_id = _document_id_for(text)
+    document_id = _resolve_document_id(document_path, text)
     session_key = _resolve_session_key(document_path)
     max_chunks = _resolve_max_chunks()
 
@@ -1053,8 +678,16 @@ def run(
                 chosen_chunks = insp.chunks
         elif length == "brief":
             from brief_strategy import select_brief_chunks_structured as _sel_brief
+            # Opt-in «structural sampling» — coverage_ratio через
+            # chunking_config.brief_coverage_ratio. 0.5 (default) = старое
+            # поведение; 0.33 = треть чанков (экономия LLM calls).
+            chunk_cfg_brief = globals()["get_chunking_config"]()
+            brief_coverage = float(
+                chunk_cfg_brief.get("brief_coverage_ratio", 0.5)
+            )
             chosen_chunks = _sel_brief(
                 insp.chunks, insp.tree, max_chunks=max_chunks,
+                coverage_ratio=brief_coverage,
             )
         else:
             chosen_chunks = insp.chunks
@@ -1443,7 +1076,9 @@ def run(
                 "saved_at": _now_iso(),
             }
         if to_save:
-            _save_doc_cache(document_id, session_key, workspace_root, to_save)
+            _save_doc_cache(
+                document_id, session_key, workspace_root, to_save, progress=_progress,
+            )
 
     reduce_cfg = ReduceConfig(
         instruction_tokens_per_section_reduce=200,
@@ -1485,15 +1120,12 @@ def run(
                 section_summary = joined
                 retries += 1
             if len(section_summary) > reduce_cfg.section_summary_max_chars:
-                try:
-                    section_summary = _llm_section_trim(
-                        section.section_path,
-                        section_summary,
-                        max_chars=reduce_cfg.section_summary_max_chars,
-                    )
-                    section_trim_calls += 1
-                except Exception:
-                    section_summary = section_summary[: reduce_cfg.section_summary_max_chars]
+                # Truncation вместо LLM-trim: LLM-trim добавлял ещё один
+                # вызов на каждую oversized section_summary (потенциально
+                # дорого). Truncation по max_chars детерминированна и
+                # сохраняет начало section_summary (наиболее важное —
+                # heading + первые факты).
+                section_summary = section_summary[: reduce_cfg.section_summary_max_chars]
             section_summaries_out[sid] = section_summary
             section_reduce_calls += 1
 
