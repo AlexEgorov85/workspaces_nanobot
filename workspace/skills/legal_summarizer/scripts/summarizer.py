@@ -1344,6 +1344,34 @@ def run(
             section_summaries_out[sid] = section_summary
             section_reduce_calls += 1
 
+        # REDUCE_INPUT_EMPTY: если ни один раздел не дал section_summary
+        # (например, все chunks упали на map-фазе), document reduce не
+        # должен вызываться — это transient LLM-ошибка, не retry-able.
+        if not section_summaries_out:
+            return {
+                "status": "failed",
+                "operation_id": operation_id,
+                "error": {
+                    "code": "REDUCE_INPUT_EMPTY",
+                    "message": "Нет валидных section_summaries для финального reduce",
+                },
+                "stats": {
+                    "chars_in": insp.chars_in,
+                    "chunks_total": len(chunks),
+                    "context_batches_total": len(batches),
+                    "map_calls": map_calls,
+                    "section_reduce_calls": section_reduce_calls,
+                    "section_trim_calls": section_trim_calls,
+                    "document_reduce_calls": 0,
+                    "reduce_calls": section_reduce_calls + section_trim_calls,
+                    "total_llm_calls": map_calls + section_reduce_calls + section_trim_calls,
+                    "retries": retries,
+                    "failed_batches": list(failed_batch_ids),
+                    "duration_sec": round(_time.monotonic() - total_start, 1),
+                    "strategy": "map_reduce_hierarchical",
+                },
+            }
+
         ordered = sorted(
             section_summaries_out.items(),
             key=lambda kv: tuple(int(p) if p.isdigit() else 999 for p in tree.sections[kv[0]].section_path.split(" > ")),
@@ -1352,6 +1380,33 @@ def run(
             f"[Раздел {tree.sections[sid].section_path}: {tree.sections[sid].heading}]\n{summary}"
             for sid, summary in ordered
         )
+        # Дополнительная проверка непосредственно перед LLM: в joined_sections
+        # могло не оказаться ни одного непустого блока (например, все
+        # section_summary состояли только из whitespace после strip).
+        if not joined_sections.strip():
+            return {
+                "status": "failed",
+                "operation_id": operation_id,
+                "error": {
+                    "code": "REDUCE_INPUT_EMPTY",
+                    "message": "Joined section summaries пусты для финального reduce",
+                },
+                "stats": {
+                    "chars_in": insp.chars_in,
+                    "chunks_total": len(chunks),
+                    "context_batches_total": len(batches),
+                    "map_calls": map_calls,
+                    "section_reduce_calls": section_reduce_calls,
+                    "section_trim_calls": section_trim_calls,
+                    "document_reduce_calls": 0,
+                    "reduce_calls": section_reduce_calls + section_trim_calls,
+                    "total_llm_calls": map_calls + section_reduce_calls + section_trim_calls,
+                    "retries": retries,
+                    "failed_batches": list(failed_batch_ids),
+                    "duration_sec": round(_time.monotonic() - total_start, 1),
+                    "strategy": "map_reduce_hierarchical",
+                },
+            }
         try:
             final_summary = _llm_document_reduce(
                 joined_sections,
@@ -1363,13 +1418,41 @@ def run(
             document_reduce_calls += 1
         except Exception:
             retries += 1
-            final_summary = joined_sections
+            # Fallback на joined_sections — допустимо только если он
+            # непустой (REDUCE_INPUT_EMPTY уже отфильтрован выше).
+            final_summary = joined_sections if joined_sections.strip() else ""
         strategy_label = "map_reduce_hierarchical"
     else:
         ordered_chunks = [c for c in chunks if c.chunk_id in all_partials]
         joined = "\n\n".join(
             _format_chunk_block(c, all_partials[c.chunk_id]) for c in ordered_chunks
         )
+        # REDUCE_INPUT_EMPTY для flat-path: joined пуст когда ни один
+        # chunk не дал partial (например, все map-батчи провалились).
+        if not joined.strip():
+            return {
+                "status": "failed",
+                "operation_id": operation_id,
+                "error": {
+                    "code": "REDUCE_INPUT_EMPTY",
+                    "message": "Нет валидных partial summaries для финального reduce",
+                },
+                "stats": {
+                    "chars_in": insp.chars_in,
+                    "chunks_total": len(chunks),
+                    "context_batches_total": len(batches),
+                    "map_calls": map_calls,
+                    "section_reduce_calls": 0,
+                    "section_trim_calls": 0,
+                    "document_reduce_calls": 0,
+                    "reduce_calls": 0,
+                    "total_llm_calls": map_calls,
+                    "retries": retries,
+                    "failed_batches": list(failed_batch_ids),
+                    "duration_sec": round(_time.monotonic() - total_start, 1),
+                    "strategy": "map_reduce_flat",
+                },
+            }
         try:
             final_summary = _llm_document_reduce(
                 joined,
@@ -1381,12 +1464,44 @@ def run(
             document_reduce_calls += 1
         except Exception:
             retries += 1
-            final_summary = joined
+            # Fallback на joined — допустимо только если он непустой
+            # (REDUCE_INPUT_EMPTY уже отфильтрован выше).
+            final_summary = joined if joined.strip() else ""
         strategy_label = "map_reduce_flat"
 
     # Убираем <think>...</think> от моделей с CoT, чтобы subject/summary
     # в result.json были чистыми для агента.
     final_summary = _strip_think_blocks(final_summary)
+
+    # Защита от пустого summary после reduce: completed/partial с пустым
+    # summary — misleading success-like output. Если LLM вернул пустую
+    # строку (или CoT-блок только), считаем прогон failed.
+    if not final_summary or not final_summary.strip():
+        return {
+            "status": "failed",
+            "operation_id": operation_id,
+            "error": {
+                "code": "REDUCE_INPUT_EMPTY",
+                "message": "Document reduce вернул пустой summary",
+            },
+            "stats": {
+                "chars_in": insp.chars_in,
+                "chunks_total": len(chunks),
+                "context_batches_total": len(batches),
+                "map_calls": map_calls,
+                "section_reduce_calls": section_reduce_calls,
+                "section_trim_calls": section_trim_calls,
+                "document_reduce_calls": document_reduce_calls,
+                "reduce_calls": section_reduce_calls + section_trim_calls + document_reduce_calls,
+                "total_llm_calls": (
+                    map_calls + section_reduce_calls + section_trim_calls + document_reduce_calls
+                ),
+                "retries": retries,
+                "failed_batches": list(failed_batch_ids),
+                "duration_sec": round(_time.monotonic() - total_start, 1),
+                "strategy": strategy_label,
+            },
+        }
 
     total_duration = round(_time.monotonic() - total_start, 1)
     subject = _extract_subject(final_summary)
