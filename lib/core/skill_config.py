@@ -140,14 +140,20 @@ def get_chunking_config(skill_name: str) -> dict[str, Any]:
     LLM (``agents.defaults.contextWindowTokens``); если задана, skill
     пересчитывает ``chunk_size`` динамически от контекста.
 
-    ``brief_truncate_chars_per_block``: ограничение по символам для
-    представления каждого chunk'а в brief-режиме (null = без обрезки).
+    ``brief_max_chars_per_chunk``: ограничение по символам для
+    представления каждого chunk'а (целиком, а не per-block внутри chunk'а)
+    в brief-режиме (null = без обрезки). Название честнее, чем старое
+    ``brief_truncate_chars_per_block``: budget действует на уровне
+    всего chunk'а в LLM-prompt, не на каждый DocumentBlock.
     """
 
     cfg = _skill_cfg(skill_name)
     chunking_cfg = cfg.get("chunking") or {}
     ratio = chunking_cfg.get("chunk_size_input_ratio")
-    brief_truncate = chunking_cfg.get("brief_truncate_chars_per_block")
+    brief_max = chunking_cfg.get("brief_max_chars_per_chunk")
+    legacy_brief = chunking_cfg.get("brief_truncate_chars_per_block")
+    if brief_max is None and legacy_brief is not None:
+        brief_max = legacy_brief
     return {
         "chunk_size": int(chunking_cfg.get("chunk_size", 100000)),
         "chunk_overlap": int(chunking_cfg.get("chunk_overlap", 2000)),
@@ -155,8 +161,8 @@ def get_chunking_config(skill_name: str) -> dict[str, Any]:
             chunking_cfg.get("single_call_threshold", 20000)
         ),
         "chunk_size_input_ratio": float(ratio) if ratio is not None else None,
-        "brief_truncate_chars_per_block": (
-            int(brief_truncate) if brief_truncate is not None else None
+        "brief_max_chars_per_chunk": (
+            int(brief_max) if brief_max is not None else None
         ),
     }
 

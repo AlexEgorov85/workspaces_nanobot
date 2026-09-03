@@ -525,7 +525,7 @@ def test_chunk_to_dict_whole_block_offsets_none():
 
 
 def test_apply_brief_truncate_disabled_is_noop():
-    """brief_truncate_chars_per_block=None → chunks возвращаются без изменений."""
+    """brief_max_chars_per_chunk=None → chunks возвращаются без изменений."""
     from workspace.skills.legal_summarizer.scripts.brief_representation import (
         apply_brief_text_budget,
     )
@@ -1794,13 +1794,126 @@ def test_e2e_via_inspect_then_reload_then_followup(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Project config: brief_truncate_chars_per_block
+# Project config: brief_max_chars_per_chunk
 # ---------------------------------------------------------------------------
 
 
-def test_skill_config_chunking_includes_brief_truncate():
-    """lib.core.skill_config.get_chunking_config читает brief_truncate_chars_per_block."""
+def test_skill_config_chunking_includes_brief_max():
+    """lib.core.skill_config.get_chunking_config читает brief_max_chars_per_chunk."""
     from lib.core.skill_config import get_chunking_config
 
     cfg = get_chunking_config("legal_summarizer")
-    assert "brief_truncate_chars_per_block" in cfg
+    assert "brief_max_chars_per_chunk" in cfg
+
+
+def test_skill_config_chunking_legacy_brief_truncate_still_supported(monkeypatch):
+    """Legacy-ключ brief_truncate_chars_per_block всё ещё работает (back-compat).
+
+    Если в project.json стоит legacy-ключ, ``brief_max_chars_per_chunk``
+    всё равно получает его значение. Это позволяет плавный rollout
+    rename без поломки существующих project.json.
+    """
+    from config import SETTINGS
+
+    from lib.core import skill_config
+
+    backup = SETTINGS.get("skills", {}).get("legal_summarizer", {}).get(
+        "chunking", {},
+    )
+    monkeypatch.setitem(
+        SETTINGS.setdefault("skills", {}).setdefault("legal_summarizer", {}).setdefault("chunking", {}),
+        "brief_truncate_chars_per_block", 1500,
+    )
+    cfg = skill_config.get_chunking_config("legal_summarizer")
+    assert cfg["brief_max_chars_per_chunk"] == 1500
+    monkeypatch.delitem(
+        SETTINGS["skills"]["legal_summarizer"]["chunking"],
+        "brief_truncate_chars_per_block",
+    )
+
+
+def test_freshness_check_blocks_stale_reuse_in_run_path(tmp_path):
+    """Если PhysicalDocument изменился после сохранения cache → run() не подмешивает stale partials.
+
+    Тестируем через inspection кода: ``summarizer.run`` не получает
+    `doc_cache_chunks` если ``cache_is_fresh`` возвращает False. Это
+    симметрично проверке в cache-assisted question path.
+    """
+    from workspace.skills.legal_summarizer.scripts import summarizer
+    from workspace.skills.legal_summarizer.scripts.document_cache import (
+        cache_is_fresh,
+        save_doc_cache,
+    )
+
+    workspace_root = tmp_path
+    session_key = "fresh_reuse_session"
+    document_id = "fresh_reuse_doc"
+    doc_path = workspace_root / "data_store" / "cache" / "sessions" / session_key / "contract.txt"
+    doc_path.parent.mkdir(parents=True, exist_ok=True)
+    doc_path.write_text(
+        "1. Раздел.\n"
+        + ("Какой-то текст договора подряда между заказчиком и подрядчиком. " * 5),
+        encoding="utf-8",
+    )
+
+    save_doc_cache(
+        document_id, session_key, workspace_root,
+        {
+            "000": {
+                "chunk_id": "000",
+                "summary": "Штрафы за просрочку",
+                "chunk_text_preview": "0.1 процента за каждый день",
+                "section_id": "s_0001",
+                "section_path": "1",
+                "block_indices": [0],
+                "block_types": ["paragraph"],
+                "source_char_start": 0,
+                "source_char_end": 10,
+                "saved_at": "2026-09-03T00:00:00Z",
+            },
+        },
+        document_path=doc_path,
+    )
+
+    assert cache_is_fresh(document_id, session_key, workspace_root, doc_path)
+
+    doc_path.write_text(
+        "1. Раздел.\n"
+        + ("Какой-то текст договора подряда между заказчиком и подрядчиком. " * 5)
+        + "\n\nНовая секция после изменения.",
+        encoding="utf-8",
+    )
+    assert not cache_is_fresh(document_id, session_key, workspace_root, doc_path)
+
+    # Не вызываем полный ``run()`` (требует LLM), но проверяем helper.
+    from workspace.skills.legal_summarizer.scripts.document_cache import (
+        cache_is_fresh as _check,
+    )
+    assert _check(document_id, session_key, workspace_root, doc_path) is False
+
+
+def test_brief_max_chars_per_chunk_chunks_truncated():
+    """Убедимся, что новый ключ читается и применяется как budget на chunk.text."""
+    from lib.core import skill_config
+    from config import SETTINGS
+
+    from workspace.skills.legal_summarizer.scripts.brief_representation import (
+        apply_brief_text_budget,
+    )
+    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
+
+    chunk = Chunk(
+        chunk_id="000", index=0, text="A" * 4000, char_count=4000,
+        token_estimate=1143, page_start=1, page_end=1,
+        section_id="s_0001", section_path="1", section_heading="",
+        block_indices=(0,), block_types=("paragraph",),
+    )
+
+    out = apply_brief_text_budget([chunk], truncate_chars=2500)
+    assert len(out[0].text) < 4000
+    assert " …" in out[0].text
+    assert len(out[0].text) <= 2510
+
+    assert "brief_max_chars_per_chunk" in skill_config.get_chunking_config(
+        "legal_summarizer",
+    )

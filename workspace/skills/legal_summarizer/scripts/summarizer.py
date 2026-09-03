@@ -801,9 +801,9 @@ def run(
                 insp.chunks, insp.tree, max_chunks=max_chunks,
                 coverage_ratio=brief_coverage,
             )
-            # Если задан brief_truncate_chars_per_block > 0 — обрезаем только
+            # Если задан brief_max_chars_per_chunk > 0 — обрезаем только
             # представление для LLM, не мутируя PhysicalDocument.
-            truncate_chars = chunk_cfg_brief.get("brief_truncate_chars_per_block")
+            truncate_chars = chunk_cfg_brief.get("brief_max_chars_per_chunk")
             if truncate_chars:
                 from brief_representation import apply_brief_text_budget
                 chosen_chunks = apply_brief_text_budget(
@@ -915,6 +915,20 @@ def run(
         _load_doc_cache(document_id, session_key, workspace_root)
         if session_key else {}
     )
+
+    # Freshness: если PhysicalDocument изменился с момента сохранения
+    # document-cache, не подмешиваем его записи в partials (summary может
+    # не соответствовать актуальному содержимому). Без этой проверки
+    # существует риск подмешать stale cache → reduce получит partials,
+    # противоречащие текущему тексту. Это симметрично проверке в
+    # ``retrieve_followup_context_via_cache``: freshness обязателен для
+    # **любого** reuse document-cache как partials, не только для
+    # cache-assisted question retrieval.
+    if doc_cache_chunks and document_path:
+        from document_cache import cache_is_fresh as _cache_is_fresh
+        if not _cache_is_fresh(document_id, session_key, workspace_root, document_path):
+            _progress("document-cache stale → пропускаем reuse как partials")
+            doc_cache_chunks = {}
 
     # Число статей в документе (для legal-домена). Считаем один раз по полному
     # тексту (Python stdlib re, кросс-платформенно) — нужно для follow-up

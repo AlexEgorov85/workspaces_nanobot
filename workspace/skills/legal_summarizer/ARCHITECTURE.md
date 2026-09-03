@@ -204,15 +204,26 @@ cache).
 Для `--length brief` используется `select_brief_chunks_structured` с
 round-robin по секциям: `effective_limit = min(max_chunks, ceil(total *
 coverage_ratio))`. `coverage_ratio` берётся из
-`chunking_config.brief_coverage_ratio` (default 0.5). round-robin
-гарантирует покрытие всех секций, а не только начала документа.
+`chunking_config.brief_coverage_ratio` (default 0.5). Round-robin
+**максимизирует покрытие секций в пределах sample budget**, но не
+гарантирует покрытие всех секций: при `effective_limit < N_sections`
+часть секций остаётся без representation (это математически невозможно
+при меньшем budget). Round-robin выбран, чтобы при прочих равных
+каждая секция получила хотя бы один chunk, а не всё budget ушёл в
+первую секцию.
 
-Опциональный параметр `brief_truncate_chars_per_block` в
-`chunking_config` включает bounded LLM-input: каждый выбранный chunk
-обрезается до N символов через `apply_brief_text_budget`. Физический
-документ **не обрезается** — `apply_brief_text_budget` создаёт новые
-`Chunk` объекты через `dataclasses.replace`, оставляя `source_char_*`
-и `block_indices` нетронутыми. Tables не обрезаются этим параметром.
+Опциональный параметр `brief_max_chars_per_chunk` в `chunking_config`
+включает bounded LLM-input: каждый выбранный chunk (целиком, не
+per-block) обрезается до N символов через `apply_brief_text_budget`.
+Физический документ **не обрезается** — `apply_brief_text_budget`
+создаёт новые `Chunk` объекты через `dataclasses.replace`, оставляя
+`source_char_*` и `block_indices` нетронутыми. Tables не обрезаются
+этим параметром.
+
+> **Naming:** ранее ключ назывался `brief_truncate_chars_per_block`,
+> но фактически budget действует на уровне chunk'а (агрегата блоков),
+> а не на каждый DocumentBlock внутри chunk'а. `skill_config`
+> читает legacy-ключ как fallback для back-compat.
 
 ## Document cache: provenance и freshness
 
@@ -239,6 +250,16 @@ coverage_ratio))`. `coverage_ratio` берётся из
 через `fingerprint_file`). Перед использованием provenance
 `cache_is_fresh` проверяет совпадение ключей — если файл изменился,
 cache stale и provenance не используется.
+
+**Freshness policy:** `cache_is_fresh` вызывается в **двух** точках
+runtime, симметрично:
+
+1. `retrieve_followup_context_via_cache` (вопрос-путь) — при cache-assisted
+   retrieval; stale → `None` → existing fallback.
+2. Перед **любым** reuse document-cache как partials в основном
+   `run()` (map-reduce path) — если stale, `doc_cache_chunks` не
+   подмешивается в `chunk_states` (иначе reduce получил бы partials,
+   противоречащие актуальному содержимому файла).
 
 Legacy cache без provenance-полей загружается (поля = `None`); для
 retrieval такие записи получают score только за `summary`.

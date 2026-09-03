@@ -13,7 +13,7 @@
    по ``doc.blocks[block_indices[0]].content[start:end]``.
 4. Tables не обрезаются этим helper'ом. Таблица атомарна
    (см. invariant §6 в ARCHITECTURE.md).
-5. Если ``brief_truncate_chars_per_block is None``/0 → legacy-поведение
+5. Если ``brief_max_chars_per_chunk is None``/0 → legacy-поведение
    (возвращаем список как есть).
 """
 
