@@ -1110,13 +1110,14 @@ def run(
     failed_batch_ids: list[str] = []
     first_batch_error: dict[str, Any] | None = None
 
-    # Параллельное выполнение батчей: семафор ограничивает одновременные
-    # HTTP-запросы к LLM-провайдеру (rate-limit), event loop крутит остальные
-    # пока один батч висит на llm.chat. Раньше был строго sequential
-    # for-loop — для ГК РФ (19 батчей × ~26 сек) это ~8.5 мин стены;
-    # с concurrency=4 это ~2.5 мин (×3-4 ускорение).
+    # Sequential выполнение батчей: один LLM-вызов одновременно.
+    # Текущий runtime не рассчитан на параллельные запросы к LLM
+    # (тесты на single-flight, нет общего rate-limit policy, retry
+    # parse-error должен идти от первого failed батча без перемешивания
+    # с параллельно стартовавшими). Default строго 1; runtime-конфиг
+    # ``max_concurrent_batches`` оставлен как override (не ниже 1).
     exec_cfg_for_map = globals()["get_execution_config"]()
-    concurrency = max(1, int(exec_cfg_for_map.get("max_concurrent_batches", 4)))
+    concurrency = max(1, int(exec_cfg_for_map.get("max_concurrent_batches", 1)))
 
     # Соберём все батчи с pending чанками и предварительно посчитаем прогресс.
     queued: list[tuple[ContextBatch, int]] = []  # (batch_to_process, pending_count)
