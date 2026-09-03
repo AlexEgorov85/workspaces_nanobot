@@ -20,7 +20,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from lib.services.text_splitter import split_text
 from workspace.skills.legal_summarizer.scripts.structure.physical import (
     DocumentBlock,
     PhysicalDocument,
@@ -30,6 +29,66 @@ from workspace.skills.legal_summarizer.scripts.structure.sections import (
     DocumentSection,
     SectionTree,
 )
+
+
+_SPLIT_SEPARATORS = ("\n\n", "\n", ". ", "? ", "! ", "; ", ", ", " ", "")
+
+
+def _split_block_with_offsets(
+    text: str,
+    *,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> list[tuple[str, int, int]]:
+    """Разбить текст block'а на подчасти и сохранить абсолютные offsets.
+
+    Возвращает список ``(part_text, char_start, char_end)``, где
+    ``text[char_start:char_end] == part_text``. Offsets отсчитываются от
+    начала ``text`` (block.content).
+
+    Используется как fallback, когда block больше ``max_chunk_chars``.
+    Реализует split детерминированно по separators и сохраняет offsets.
+
+    Гарантии:
+        * ``chunk_overlap`` для skill'а = 0 (см. invariant #21 +
+          ``test_chunk_overlap_project_json_default_is_zero``).
+        * ``text[char_start:char_end] == part_text`` **посимвольно** —
+          invariant #7 (exact reconstruction).
+    """
+    if not text:
+        return [("", 0, 0)]
+    if len(text) <= chunk_size:
+        return [(text, 0, len(text))]
+
+    parts: list[tuple[str, int, int]] = []
+    cursor = 0
+    n = len(text)
+    while cursor < n:
+        end = min(cursor + chunk_size, n)
+        if end >= n:
+            parts.append((text[cursor:end], cursor, end))
+            break
+        window_start = cursor + (chunk_size // 2)
+        cut = -1
+        for sep in _SPLIT_SEPARATORS:
+            if not sep:
+                cut = end
+                break
+            search_in = text[window_start:end]
+            idx_in_window = search_in.rfind(sep)
+            if idx_in_window >= 0:
+                cut = window_start + idx_in_window + len(sep)
+                break
+        if cut <= cursor:
+            cut = end
+        parts.append((text[cursor:cut], cursor, cut))
+        if chunk_overlap <= 0:
+            cursor = cut
+        else:
+            cursor = max(cut - chunk_overlap, cursor + 1)
+    if not parts:
+        return [(text, 0, len(text))]
+    return parts
 
 
 @dataclass(frozen=True)
@@ -68,6 +127,8 @@ class Chunk:
     table_id: str | None = None
     table_row_start: int | None = None
     table_row_end: int | None = None
+    source_char_start: int | None = None
+    source_char_end: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -86,6 +147,8 @@ class Chunk:
             "table_id": self.table_id,
             "table_row_start": self.table_row_start,
             "table_row_end": self.table_row_end,
+            "source_char_start": self.source_char_start,
+            "source_char_end": self.source_char_end,
         }
 
 
@@ -211,7 +274,9 @@ class StructureAwareChunker:
         counter = start_counter
 
         if body_blocks:
-            chunks_data: list[tuple[str, tuple[int, ...], tuple[str, ...]]] = []
+            chunks_data: list[
+                tuple[str, tuple[int, ...], tuple[str, ...], int | None, int | None]
+            ] = []
             current_texts: list[str] = []
             current_indices: list[int] = []
             current_types: list[str] = []
@@ -224,6 +289,8 @@ class StructureAwareChunker:
                         "\n\n".join(current_texts),
                         tuple(current_indices),
                         tuple(current_types),
+                        None,
+                        None,
                     ))
                     current_texts = []
                     current_indices = []
@@ -232,22 +299,18 @@ class StructureAwareChunker:
 
             for b in body_blocks:
                 b_chars = len(b.content)
-                # Если блок сам по себе больше budget — fallback на split_text.
+                # Если блок сам по себе больше budget — fallback на split.
                 if b_chars > config.max_chunk_chars:
                     _flush_body()
-                    parts = split_text(
+                    parts_with_offsets = _split_block_with_offsets(
                         b.content,
                         chunk_size=config.max_chunk_chars,
                         chunk_overlap=config.chunk_overlap_chars,
                     )
-                    if not parts:
-                        parts = [b.content]
-                    # Для split-частей одного блока — сохраняем source_block_id
-                    # в block_indices (не пустой, чтобы downstream мог
-                    # атрибутировать split-части к оригинальному DocumentBlock
-                    # для provenance / citation / page mapping).
-                    for part in parts:
-                        chunks_data.append((part, (b.ordinal,), (b.block_type,)))
+                    for part, char_start, char_end in parts_with_offsets:
+                        chunks_data.append(
+                            (part, (b.ordinal,), (b.block_type,), char_start, char_end)
+                        )
                     continue
 
                 # Пытаемся добавить целый блок.
@@ -260,9 +323,7 @@ class StructureAwareChunker:
 
             _flush_body()
 
-            for part, block_indices, block_types in chunks_data:
-                # page_start/page_end = min/max page_index по block_indices;
-                # если block_indices пустой (split fallback) — None/None.
+            for part, block_indices, block_types, char_start, char_end in chunks_data:
                 if block_indices:
                     page_starts = [
                         blocks_by_ord[o].page_index
@@ -290,6 +351,8 @@ class StructureAwareChunker:
                         section_heading=section.heading,
                         block_indices=block_indices,
                         block_types=block_types,
+                        source_char_start=char_start,
+                        source_char_end=char_end,
                     )
                 )
                 counter += 1
@@ -372,13 +435,84 @@ class StructureAwareChunker:
                     table_id=c.table_id,
                     table_row_start=c.table_row_start,
                     table_row_end=c.table_row_end,
+                    source_char_start=c.source_char_start,
+                    source_char_end=c.source_char_end,
                 )
             )
         return normalized
+
+
+def reconstruct_source_fragment(
+    chunk: Chunk,
+    *,
+    doc: PhysicalDocument | None = None,
+    blocks: tuple[DocumentBlock, ...] | None = None,
+) -> str:
+    """Восстановить точный исходный текст чанка из PhysicalDocument.
+
+    Контракт:
+        * ``block_indices`` — отсортированные ordinal'ы ``DocumentBlock``;
+          для обычного chunk (целый block или greedy-соединение 2+ блоков
+          одной секции) — этого достаточно.
+        * ``source_char_start`` / ``source_char_end`` — обязательны для
+          split chunks. ``None`` означает «целый block» (back-compat).
+
+    Поддерживаемые случаи:
+        1. Целый block (``source_char_start is None``) → ``block.content``.
+        2. Split block → ``block.content[source_char_start:source_char_end]``.
+        3. Multi-block chunk → конкатенация ``block.content`` через ``"\\n\\n"``.
+        4. Table chunk → ``block.content`` (таблица атомарна).
+    """
+    blocks_by_ord: dict[int, DocumentBlock] = {}
+    if doc is not None:
+        blocks_by_ord = {b.ordinal: b for b in doc.blocks}
+    elif blocks is not None:
+        blocks_by_ord = {b.ordinal: b for b in blocks}
+    else:
+        raise ValueError("reconstruct_source_fragment: нужен doc или blocks")
+
+    if not chunk.block_indices:
+        raise ValueError(
+            f"chunk {chunk.chunk_id}: пустые block_indices — нельзя реконструировать"
+        )
+
+    if len(chunk.block_indices) == 1:
+        ordinal = chunk.block_indices[0]
+        block = blocks_by_ord.get(ordinal)
+        if block is None:
+            raise ValueError(
+                f"chunk {chunk.chunk_id}: block ordinal={ordinal} не найден"
+            )
+        if chunk.source_char_start is None and chunk.source_char_end is None:
+            return block.content
+        start = chunk.source_char_start
+        end = chunk.source_char_end
+        if start is None or end is None:
+            raise ValueError(
+                f"chunk {chunk.chunk_id}: split chunk требует оба offsets "
+                f"(start={start}, end={end})"
+            )
+        if start < 0 or end > len(block.content) or start > end:
+            raise ValueError(
+                f"chunk {chunk.chunk_id}: offsets вне диапазона "
+                f"[0, {len(block.content)}] (start={start}, end={end})"
+            )
+        return block.content[start:end]
+
+    parts: list[str] = []
+    for ordinal in chunk.block_indices:
+        block = blocks_by_ord.get(ordinal)
+        if block is None:
+            raise ValueError(
+                f"chunk {chunk.chunk_id}: block ordinal={ordinal} не найден"
+            )
+        parts.append(block.content)
+    return "\n\n".join(parts)
 
 
 __all__ = [
     "Chunk",
     "ChunkConfig",
     "StructureAwareChunker",
+    "reconstruct_source_fragment",
 ]
