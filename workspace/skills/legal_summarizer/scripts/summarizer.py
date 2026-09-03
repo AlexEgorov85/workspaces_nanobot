@@ -735,22 +735,59 @@ def run(
 
     if insp.strategy == "map_reduce":
         if question:
-            from brief_strategy import select_relevant_chunks as _sel_relevant
-            chosen_chunks = _sel_relevant(question, insp.chunks, max_chunks=max_chunks)
-            if chosen_chunks is None:
-                _progress("question: keyword match пустой → controlled fallback")
-                _exec_cfg = globals()["get_execution_config"]()
-                _question_fallback_max = int(
-                    _exec_cfg.get("question_fallback_max_chunks", 16)
-                )
-                chosen_chunks = _relaxed_lexical_fallback(
-                    question, insp.chunks, max_chunks=_question_fallback_max,
-                )
-                if chosen_chunks is None:
-                    _progress(
-                        "question: keyword miss → bounded top-of-document fallback"
+            # Cache-assisted follow-up retrieval: если для документа есть
+            # свежий doc_cache, пытаемся вытащить точные source fragments
+            # через PhysicalDocument. При stale/no match/weak — existing
+            # keyword match + relaxed fallback.
+            cache_chunks = None
+            if session_key:
+                try:
+                    from cache_followup import (
+                        retrieve_followup_context_via_cache,
                     )
-                    chosen_chunks = insp.chunks[:_question_fallback_max]
+                    phys_doc = None
+                    if document_path:
+                        try:
+                            phys_doc = load_physical_document(
+                                document_path, workspace_root=workspace_root,
+                            )
+                        except Exception:
+                            phys_doc = None
+                    if phys_doc is not None:
+                        cache_chunks = retrieve_followup_context_via_cache(
+                            question=question,
+                            document_id=document_id,
+                            session_key=session_key,
+                            document_path=document_path,
+                            workspace_root=workspace_root,
+                            doc=phys_doc,
+                            max_candidates=max_chunks,
+                            min_top_score=3,
+                        )
+                except Exception:
+                    cache_chunks = None
+            if cache_chunks:
+                _progress(
+                    f"question: cache-assisted retrieval → {len(cache_chunks)} chunks"
+                )
+                chosen_chunks = cache_chunks
+            else:
+                from brief_strategy import select_relevant_chunks as _sel_relevant
+                chosen_chunks = _sel_relevant(question, insp.chunks, max_chunks=max_chunks)
+                if chosen_chunks is None:
+                    _progress("question: keyword match пустой → controlled fallback")
+                    _exec_cfg = globals()["get_execution_config"]()
+                    _question_fallback_max = int(
+                        _exec_cfg.get("question_fallback_max_chunks", 16)
+                    )
+                    chosen_chunks = _relaxed_lexical_fallback(
+                        question, insp.chunks, max_chunks=_question_fallback_max,
+                    )
+                    if chosen_chunks is None:
+                        _progress(
+                            "question: keyword miss → bounded top-of-document fallback"
+                        )
+                        chosen_chunks = insp.chunks[:_question_fallback_max]
         elif length == "brief":
             from brief_strategy import select_brief_chunks_structured as _sel_brief
             # Opt-in «structural sampling» — coverage_ratio через
@@ -764,6 +801,14 @@ def run(
                 insp.chunks, insp.tree, max_chunks=max_chunks,
                 coverage_ratio=brief_coverage,
             )
+            # Если задан brief_truncate_chars_per_block > 0 — обрезаем только
+            # представление для LLM, не мутируя PhysicalDocument.
+            truncate_chars = chunk_cfg_brief.get("brief_truncate_chars_per_block")
+            if truncate_chars:
+                from brief_representation import apply_brief_text_budget
+                chosen_chunks = apply_brief_text_budget(
+                    chosen_chunks, truncate_chars=int(truncate_chars),
+                )
         else:
             chosen_chunks = insp.chunks
     else:
@@ -1175,13 +1220,16 @@ def run(
         }
 
     # Сохранить свежие chunks в document-cache для будущих вопросов.
+    # Каждая запись содержит полный provenance + chunk_text_preview.
     if session_key and all_partials:
+        chunks_by_id: dict[str, Any] = {c.chunk_id: c for c in chunks}
         to_save: dict[str, dict] = {}
         for cid, summary in all_partials.items():
             if cid in doc_cache_chunks:
                 continue
             cs = chunk_states.get(cid, {})
-            to_save[cid] = {
+            chunk = chunks_by_id.get(cid)
+            payload: dict[str, Any] = {
                 "chunk_id": cid,
                 "summary": summary,
                 "section_id": cs.get("section_id"),
@@ -1191,9 +1239,25 @@ def run(
                 "duration_sec": cs.get("duration_sec"),
                 "saved_at": _now_iso(),
             }
+            if chunk is not None:
+                payload["block_indices"] = list(chunk.block_indices)
+                payload["block_types"] = list(chunk.block_types)
+                payload["source_char_start"] = chunk.source_char_start
+                payload["source_char_end"] = chunk.source_char_end
+                payload["table_id"] = chunk.table_id
+                payload["table_row_start"] = chunk.table_row_start
+                payload["table_row_end"] = chunk.table_row_end
+                _preview_src = chunk.text
+                _PREVIEW_MAX = 500
+                if len(_preview_src) > _PREVIEW_MAX:
+                    payload["chunk_text_preview"] = _preview_src[:_PREVIEW_MAX]
+                else:
+                    payload["chunk_text_preview"] = _preview_src
+            to_save[cid] = payload
         if to_save:
             _save_doc_cache(
-                document_id, session_key, workspace_root, to_save, progress=_progress,
+                document_id, session_key, workspace_root, to_save,
+                progress=_progress, document_path=document_path,
             )
 
     reduce_cfg = ReduceConfig(
