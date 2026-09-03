@@ -247,7 +247,14 @@
                                                     // только раздувает LLM-вход без пользы.
                                                     // Oversized blocks (этап 10) получают минимальный
                                                     // overlap внутри split_text fallback для continuity.
-        "single_call_threshold": 20000               // Ниже этого — single-call, выше — map-reduce.
+        "single_call_threshold": 20000,              // Ниже этого — single-call, выше — map-reduce.
+
+        "brief_truncate_chars_per_block": null       // Бюджет для brief-представления.
+                                                     // null = выборка без per-chunk обрезки.
+                                                     // >0 = для каждого выбранного brief chunk'а в LLM уходит
+                                                     // только первые N символов от block.content.
+                                                     // PhysicalDocument не обрезается (canonical source).
+                                                     // Tables не обрезаются этим параметром.
       },
 
       "execution": {                                 // Phase 2B: пользовательский контроль
