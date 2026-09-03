@@ -164,6 +164,11 @@ def get_chunking_config(skill_name: str) -> dict[str, Any]:
         "brief_max_chars_per_chunk": (
             int(brief_max) if brief_max is not None else None
         ),
+        "brief_coverage_ratio": (
+            float(chunking_cfg["brief_coverage_ratio"])
+            if chunking_cfg.get("brief_coverage_ratio") is not None
+            else None
+        ),
     }
 
 

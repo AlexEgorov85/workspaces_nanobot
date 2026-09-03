@@ -794,9 +794,9 @@ def run(
             # chunking_config.brief_coverage_ratio. 0.5 (default) = старое
             # поведение; 0.33 = треть чанков (экономия LLM calls).
             chunk_cfg_brief = globals()["get_chunking_config"]()
-            brief_coverage = float(
-                chunk_cfg_brief.get("brief_coverage_ratio", 0.5)
-            )
+            brief_coverage = chunk_cfg_brief.get("brief_coverage_ratio")
+            if brief_coverage is None:
+                brief_coverage = 0.5
             chosen_chunks = _sel_brief(
                 insp.chunks, insp.tree, max_chunks=max_chunks,
                 coverage_ratio=brief_coverage,
