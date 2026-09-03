@@ -155,6 +155,97 @@ from workspace.skills.legal_summarizer.scripts.prompts_runtime import (  # noqa:
 )
 
 
+# Бюджет входа для document_reduce (до LLM), chars. ~17K токенов для
+# большинства моделей с контекстом 32K+ — компактно для провайдера,
+# стабильно для ответа. НЕ путать с ReduceConfig.section_summary_max_chars:
+# это бюджет ВЫХОДА section_reduce (обрезает одну section_summary после LLM).
+DOCUMENT_REDUCE_INPUT_BUDGET_CHARS = 60_000
+
+# Бюджет входа для section_reduce. Большие разделы (например раздел ГК РФ
+# «Общие положения» — сотни статей) могут дать joined >> 60K chars из
+# склеенных partials; обрезка до входа в LLM спасает от того же перегруза.
+SECTION_REDUCE_INPUT_BUDGET_CHARS = 60_000
+
+# Сколько section_summary группировать в один промежуточный reduce-вызов
+# при рекурсивной иерархии. 3 — баланс: группы достаточно малы, чтобы
+# вход умещался в budget, при этом цепочка не взрывается по числу вызовов.
+MID_REDUCE_GROUP_SIZE = 3
+
+# Safety net: оборвать рекурсивный reduce после этого числа раундов даже
+# если секций > group_size**max_rounds. Защита от взрывного роста
+# LLM-вызовов на очень больших документах (~100+ секций).
+MAX_REDUCE_ROUNDS = 4
+
+
+def _fit_input(text: str, budget: int) -> str:
+    """Урезать text до budget символов стратегией head + tail.
+
+    Сохраняет начало (заголовки, контекст, ключевые определения) и конец
+    (выводы, заключительные формулировки). Средняя часть заменяется явным
+    маркером с числом пропущенных символов — без него модель может
+    «додумать» пропущенное и сгенерировать галлюцинации на стыке.
+    """
+    if len(text) <= budget:
+        return text
+    head = budget * 2 // 3
+    tail = budget - head - 200
+    if tail < 0:
+        tail = 0
+    skipped = len(text) - head - tail
+    if tail:
+        return (
+            text[:head]
+            + f"\n\n[...пропущено {skipped} символов...]\n\n"
+            + text[-tail:]
+        )
+    return text[:head] + f"\n\n[...пропущено {skipped} символов...]"
+
+
+def _hierarchical_reduce_rounds(
+    section_summaries: list[tuple[str, str]],
+    *,
+    group_size: int = MID_REDUCE_GROUP_SIZE,
+    max_rounds: int = MAX_REDUCE_ROUNDS,
+    input_budget: int = DOCUMENT_REDUCE_INPUT_BUDGET_CHARS,
+    length: str,
+    focus: str | None,
+    structure: dict | None,
+    question: str | None,
+) -> tuple[str, int]:
+    """Рекурсивный reduce для hierarchical-ветки: map → section → mid* → document.
+
+    На каждом раунде группирует section_summaries по group_size, объединяет
+    в одну строку и вызывает _llm_document_reduce. Результат каждой группы
+    становится новым «section_summary» для следующего раунда. Повторяет,
+    пока не останется 1 финальное саммари или не исчерпан max_rounds.
+
+    Возвращает (final_summary, rounds_done). rounds_done добавляется
+    к document_reduce_calls в caller'е.
+    """
+    rounds = 0
+    current = list(section_summaries)
+    while len(current) > 1 and rounds < max_rounds:
+        rounds += 1
+        next_level: list[tuple[str, str]] = []
+        for i in range(0, len(current), group_size):
+            group = current[i:i + group_size]
+            joined_group = "\n\n".join(
+                f"[{sid}]\n{summary}" for sid, summary in group
+            )
+            joined_group = _fit_input(joined_group, input_budget)
+            text = _llm_document_reduce(
+                joined_group,
+                length=length,
+                focus=focus,
+                structure=structure,
+                question=question,
+            )
+            text = _strip_think_blocks(text)
+            next_level.append((f"r{rounds}_g{i // group_size}", text))
+        current = next_level
+    return current[0][1], rounds
+
+
 def _resolve_max_chunks() -> int:
     """Максимум chunks для brief/question режимов из конфига."""
     cfg = globals()["get_execution_config"]()
@@ -1357,6 +1448,7 @@ def run(
                 _format_chunk_block(c, all_partials[c.chunk_id])
                 for c in chunks if c.chunk_id in section_chunk_ids
             )
+            joined = _fit_input(joined, SECTION_REDUCE_INPUT_BUDGET_CHARS)
             try:
                 section_summary = _llm_section_reduce(
                     section.section_path,
@@ -1414,6 +1506,7 @@ def run(
             f"[Раздел {tree.sections[sid].section_path}: {tree.sections[sid].heading}]\n{summary}"
             for sid, summary in ordered
         )
+        joined_sections = _fit_input(joined_sections, DOCUMENT_REDUCE_INPUT_BUDGET_CHARS)
         # Дополнительная проверка непосредственно перед LLM: в joined_sections
         # могло не оказаться ни одного непустого блока (например, все
         # section_summary состояли только из whitespace после strip).
@@ -1442,14 +1535,15 @@ def run(
                 },
             }
         try:
-            final_summary = _llm_document_reduce(
-                joined_sections,
+            ordered_pairs = [(sid, summary) for sid, summary in ordered]
+            final_summary, extra_rounds = _hierarchical_reduce_rounds(
+                ordered_pairs,
                 length=length,
                 focus=focus,
                 structure=structure,
                 question=question,
             )
-            document_reduce_calls += 1
+            document_reduce_calls += 1 + extra_rounds
         except Exception:
             retries += 1
             # Fallback на joined_sections — допустимо только если он
