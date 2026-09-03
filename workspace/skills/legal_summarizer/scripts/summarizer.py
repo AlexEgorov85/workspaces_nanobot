@@ -801,14 +801,31 @@ def run(
                 insp.chunks, insp.tree, max_chunks=max_chunks,
                 coverage_ratio=brief_coverage,
             )
-            # Если задан brief_max_chars_per_chunk > 0 — обрезаем только
-            # представление для LLM, не мутируя PhysicalDocument.
-            truncate_chars = chunk_cfg_brief.get("brief_max_chars_per_chunk")
-            if truncate_chars:
-                from brief_representation import apply_brief_text_budget
-                chosen_chunks = apply_brief_text_budget(
-                    chosen_chunks, truncate_chars=int(truncate_chars),
+            # Двухуровневая модель (coverage + budget):
+            #
+            #   1. Coverage: select_brief_chunks_structured уже выбрал
+            #      N chunks (round-robin по sections, max N=10).
+            #   2. Budget: общий лимит chars для LLM-input через
+            #      brief_max_input_chars (предпочтительно, новый путь).
+            #      Распределяется пропорционально между chunks
+            #      через brief_representation.allocate_brief_budget.
+            #
+            # Если brief_max_input_chars не задан (None/0) — fallback
+            # на legacy per-chunk budget (brief_max_chars_per_chunk),
+            # чтобы старые конфиги продолжали работать.
+            brief_total_budget = chunk_cfg_brief.get("brief_max_input_chars")
+            if brief_total_budget:
+                from brief_representation import allocate_brief_budget
+                chosen_chunks = allocate_brief_budget(
+                    chosen_chunks, total_budget_chars=int(brief_total_budget),
                 )
+            else:
+                truncate_chars = chunk_cfg_brief.get("brief_max_chars_per_chunk")
+                if truncate_chars:
+                    from brief_representation import apply_brief_text_budget
+                    chosen_chunks = apply_brief_text_budget(
+                        chosen_chunks, truncate_chars=int(truncate_chars),
+                    )
         else:
             chosen_chunks = insp.chunks
     else:
