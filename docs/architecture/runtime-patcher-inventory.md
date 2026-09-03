@@ -322,6 +322,42 @@ risk: MEDIUM (оборачиваем публичную функцию, сигн
 tests: tests/test_runtime_patcher.py::TestPatchDocumentTextThreshold
 ```
 
+### 15. `patch_skill_catalogs()` - runtime_patcher.py (Skill Catalog)
+
+**Цель**: подменить чтение `SKILL.md` на expanded-версию через
+`SkillCatalog.render_expanded_skill`. Маркеры `{{SCRIPTS_CATALOG}}`,
+`{{VECTORS_CATALOG}}`, `{{TABLES_CATALOG}}` заменяются runtime-каталогом
+из auto-populated env-vars `SKILL_<NAME>_*`.
+
+**Target**: `nanobot.agent.skills.SkillsLoader.load_skill`
+
+**Почему не публичный API**: nanobot читает `SKILL.md` как статический
+текст без шаблонизации. Чтобы runtime подмешивал каталог — нужно
+перехватить чтение. Альтернативы:
+- `workspace/overrides/` (Jinja2 ChoiceLoader) — не подходит, не
+  используется nanobot для SKILL.md;
+- auto-scan skills каждый раз при чтении — слишком дорого при hot-reload;
+- отдельный «meta-skill» в каталоге — создаёт рекурсию.
+
+**Defensive check**: если `SkillsLoader.load_skill` отсутствует (nanobot
+API изменился) — `RuntimeError` при старте gateway. Превращает молчаливую
+регрессию с `{{MARKER}}` в rendered SKILL.md в явную ошибку.
+
+**Идемпотентность**: повторный вызов `patch_skill_catalogs()` пропускается
+через флаг `SkillsLoader._skill_catalog_patched`.
+
+**Контракт**:
+- патчится **класс** `SkillsLoader`, не инстанс;
+- оригинальный метод сохраняется в `SkillsLoader._load_skill_original`
+  для отладки/тестов;
+- отсутствующий skill (`load_skill → None`) → патч возвращает `None`
+  без падения.
+
+risk: MEDIUM (публичный метод, но сигнатура может измениться в
+  следующих версиях nanobot).
+tests: tests/test_runtime_patcher_skill_catalogs.py
+```
+
 ---
 
 ## Политика ведения

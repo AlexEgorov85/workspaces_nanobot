@@ -1182,6 +1182,83 @@ file_size}` (payload → `data_store/cache/sessions/_shared/attachments/`,
 
 ---
 
+### Skill catalog rendering — runtime-расширение `SKILL.md` из auto-populated env-vars
+
+`SKILL.md` навыка — это **шаблон** с маркерами `{{SCRIPTS_CATALOG}}`,
+`{{VECTORS_CATALOG}}`, `{{TABLES_CATALOG}}`, которые заменяются на
+актуальный runtime-каталог при загрузке. Источник — auto-populated
+env-vars `SKILL_<NAME>_*`, которые выставляются
+`ApplicationContext._populate_skill_catalog_env` при старте gateway.
+
+**Цель**: skill **не знает** физических имён ресурсов datasource. Это
+архитектурный инвариант — см. `TARGET_ARCHITECTURE.md` §22.10.
+
+**Контракт**:
+
+```
+SKILL_<NAME>_TABLES              = "schema.table1,schema.table2,..."
+SKILL_<NAME>_VECTORS             = "index_name1,index_name2,..."
+SKILL_<NAME>_SCRIPTS             = "script_name1,..."
+SKILL_<NAME>_SCRIPT_DESCRIPTIONS = "name1=desc1;name2=desc2;..."
+SKILL_<NAME>_VECTOR_DESCRIPTIONS = "name1=desc1;name2=desc2;..."
+```
+
+**Источники env-vars** (см. `lib/core/application_context.py::_populate_skill_catalog_env`):
+
+| Env-var | Источник |
+|---|---|
+| `SKILL_<NAME>_TABLES` | `TableRegistry.table_resources()` (без `label`) |
+| `SKILL_<NAME>_VECTORS` | `agent_vector_index_config` (PG-реестр) с fallback на `TableRegistry.vector_resources()` |
+| `SKILL_<NAME>_SCRIPTS` | `agent_predefined_scripts` через `TableRegistry.resources_by_label("scripts_registry")` → DuckDB-кеш |
+| `SKILL_<NAME>_SCRIPT_DESCRIPTIONS` | колонка `description` из `agent_predefined_scripts` |
+| `SKILL_<NAME>_VECTOR_DESCRIPTIONS` | колонка `description` из `agent_vector_index_config` (после миграции `migrate_add_index_description.sql`) |
+
+**Pipeline рендеринга**:
+
+1. `ApplicationContext.start()` после `sync_service.start(initial_load=True)`
+   вызывает `_populate_skill_catalog_env()`.
+2. Env-vars записываются в `os.environ`.
+3. `RuntimePatcher.patch_skill_catalogs()` подменяет
+   `nanobot.agent.skills.SkillsLoader.load_skill` на функцию,
+   прогоняющую результат через `SkillCatalog.render_expanded_skill`.
+4. При следующем чтении `SKILL.md` маркеры `{{...}}` заменяются на
+   markdown-таблицы с актуальным каталогом.
+
+**Жизненный цикл env-vars**:
+
+- `start()` → `_populate_skill_catalog_env()` пишет в `os.environ`;
+- `stop()` → `SkillCatalog.clear_skill_env()` удаляет все `SKILL_*`;
+- между этим — env-vars стабильны, Agent видит каталог при чтении SKILL.md.
+
+**Defensive check** в `patch_skill_catalogs()`:
+
+```python
+if not hasattr(SkillsLoader, "load_skill"):
+    raise RuntimeError("nanobot API изменился: SkillsLoader.load_skill не найден")
+```
+
+При апгрейде nanobot, если метод переименуется, ошибка ловится при старте
+gateway, а не молчаливой регрессией с `{{MARKER}}` в rendered SKILL.md.
+
+**TODO** (отложено):
+
+> Если процесс будет обслуживать несколько контекстов (multi-tenant /
+> per-request skill loading), `os.environ` не подходит — перейти на
+> передачу snapshot-словаря через `ctx/skill_context`, а
+> `{{MARKER}}`-substitution делать в `SkillCatalog.render_expanded_skill`
+> с параметром `snapshot=...`. Сейчас допустимо, т.к. `ApplicationContext`
+> singleton-per-process.
+
+**CLI для CI**:
+
+```bash
+python tools/render_skill_catalog.py audit_analyzer --check
+```
+
+Exit 0 — каталог актуален; exit 1 — drift (запустить `--stdout`, посмотреть diff).
+
+---
+
 ## 📁 Структура проекта
 
 ```
