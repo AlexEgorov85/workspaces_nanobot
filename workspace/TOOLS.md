@@ -215,9 +215,8 @@ JSONB-схеме и выполняет SELECT в общем DuckDB-кеше. Н�
 
 - Запрос свободной формы → `nl_sql_generate`.
 - Уже есть точный SELECT → `duckdb_query`.
-- Не знаешь имя скрипта или не уверен, что он существует — посмотри
-  runtime-каталог в `SKILL.md` (рендерится из
-  `agent_predefined_scripts` через `SkillCatalog`) или таблицу напрямую.
+- Не знаешь имя скрипта или не уверен, что он существует — сначала
+  посмотри `references/predefined_scripts.md` (или БД напрямую).
 
 **Параметры:**
 
@@ -341,14 +340,10 @@ JSONB-схеме и выполняет SELECT в общем DuckDB-кеше. Н�
 
 | Tool | Назначение | Когда |
 |---|---|---|
-| `run_predefined_script` | Выполнить готовый SQL из `public.agent_predefined_scripts` | Запрос точно соответствует скрипту из runtime-каталога (см. ниже) |
-| `vector_search` | Семантический поиск по FAISS | Запрос про **смысл**, индекс есть в runtime-каталоге |
+| `run_predefined_script` | Выполнить готовый SQL из `public.agent_predefined_scripts` | Запрос точно соответствует скрипту из `SKILL.md` |
+| `vector_search` | Семантический поиск по FAISS | Запрос про **смысл**, индекс есть в `SKILL.md` |
 | `nl_sql_generate` | LLM-генерация SELECT | Fallback: всё остальное |
 
 Agent сам читает `SKILL.md` и делает выбор. Ни один tool не делает
 auto-routing или классификацию запроса.
-
-Runtime-каталог скриптов/индексов в SKILL.md подмешивается через
-`{{SCRIPTS_CATALOG}}` / `{{VECTORS_CATALOG}}` (см. архитектурный
-инвариант в `docs/TARGET_ARCHITECTURE.md` §22.10).
 

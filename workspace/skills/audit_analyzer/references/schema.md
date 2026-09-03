@@ -1,0 +1,108 @@
+# Audit DB schema
+
+Подробная схема таблиц `oarb.*` (см. `sql/audit_analyzer/create_*.sql`).
+Загружается по необходимости, когда агенту нужны конкретные колонки
+(progressive disclosure — docs/TARGET_ARCHITECTURE.md §10).
+
+## `oarb.audits` — аудиторские проверки
+
+| column | type | description |
+|---|---|---|
+| `id` | integer | первичный ключ |
+| `title` | varchar(500) | название проверки |
+| `audit_type` | varchar(100) | тип проверки |
+| `planned_date` | date | плановая дата |
+| `actual_date` | date | фактическая дата |
+| `status` | varchar(50) | статус проверки (человеко-читаемые ярлыки: «Запланирована», «В работе», «Завершена» и т.п.) |
+| `auditee_entity` | varchar(500) | проверяемая организация |
+| `created_at` | timestamptz | метка создания (sync) |
+| `updated_at` | timestamptz | метка обновления (sync) |
+
+Связи:
+
+- `oarb.audit_reports.audit_id → oarb.audits.id` (1-N).
+- `oarb.violations.audit_id → oarb.audits.id` (1-N).
+
+## `oarb.audit_reports` — отчёты о проверках
+
+| column | type | description |
+|---|---|---|
+| `id` | integer | первичный ключ |
+| `audit_id` | integer | FK → `oarb.audits.id` |
+| `report_number` | varchar(100) | номер отчёта |
+| `report_date` | date | дата отчёта |
+| `title` | varchar(500) | заголовок отчёта |
+| `full_text` | text | полный текст отчёта |
+| `created_at` | timestamptz | метка создания (sync) |
+| `updated_at` | timestamptz | метка обновления (sync) |
+
+Связи:
+
+- `oarb.report_items.report_id → oarb.audit_reports.id` (1-N).
+- `oarb.violations.report_id → oarb.audit_reports.id` (1-N, опционально).
+
+## `oarb.report_items` — пункты отчётов
+
+| column | type | description |
+|---|---|---|
+| `id` | integer | первичный ключ |
+| `report_id` | integer | FK → `oarb.audit_reports.id` |
+| `item_number` | varchar(20) | номер пункта |
+| `item_title` | varchar(500) | заголовок пункта |
+| `item_content` | text | содержимое |
+| `order_index` | integer | порядок отображения |
+| `created_at` | timestamptz | метка создания (sync) |
+| `updated_at` | timestamptz | метка обновления (sync) |
+
+## `oarb.violations` — нарушения
+
+| column | type | description |
+|---|---|---|
+| `id` | integer | первичный ключ |
+| `audit_id` | integer | FK → `oarb.audits.id` |
+| `report_id` | integer | FK → `oarb.audit_reports.id` (опционально) |
+| `item_id` | integer | FK → `oarb.report_items.id` (опционально) |
+| `violation_code` | varchar(100) | код нарушения |
+| `description` | text | описание нарушения |
+| `recommendation` | text | рекомендация по устранению |
+| `severity` | varchar(20) | критичность (человеко-читаемые ярлыки: низкая / средняя / высокая / критическая) |
+| `status` | varchar(50) | статус (человеко-читаемые ярлыки: открыто / в работе / закрыто) |
+| `responsible` | varchar(200) | ответственный |
+| `deadline` | date | срок устранения |
+| `created_at` | timestamptz | метка создания (sync) |
+| `updated_at` | timestamptz | метка обновления (sync) |
+
+## Сводные JOIN-связи
+
+```sql
+-- Проверка → отчёт → пункты → нарушения
+audits a
+JOIN audit_reports r ON r.audit_id = a.id
+JOIN report_items ri ON ri.report_id = r.id
+LEFT JOIN violations v ON v.item_id = ri.id
+
+-- Проверка → нарушения напрямую
+audits a
+LEFT JOIN violations v ON v.audit_id = a.id
+```
+
+## Домен-соглашения
+
+- Все таблицы имеют `updated_at` — синхронизация идёт инкрементально по этой колонке.
+- Идентификаторы — `BIGSERIAL` (в skill описаны как `integer` для краткости).
+- Текстовые поля могут содержать `NULL`.
+- Статусы и severity — свободный текст (`varchar`), а не PG-enum. Конкретный набор ярлыков определяется данными и может расширяться без миграции схемы.
+- Все таблицы живут в схеме `oarb` и доступны через DuckDB-кэш как `oarb.<table>` (полное имя обязательно в SELECT, см. `sql_guidance.md`).
+
+## Как использовать схему
+
+Skill **не выполняет SQL сам** — только даёт инструкции агенту, какие tool'ы
+вызвать. Все запросы идут через `workspace/tools/`:
+
+- Для NL→SELECT: `nl_sql_generate(query="...")` (этот tool знает whitelist
+  таблиц из `TableRegistry` и подтягивает hints через `column_descriptions`).
+- Для семантического поиска: `vector_search(query="...", index_name="...")`.
+
+Tool'ы сами следят за безопасностью (`validate_sql`) и лимитами
+(`max_rows` / `max_result_chars`). Skill не должен в промптах или
+инструкциях просить агента писать DDL/DML.

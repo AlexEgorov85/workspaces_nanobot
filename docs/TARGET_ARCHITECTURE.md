@@ -811,39 +811,6 @@ if caller == "audit_analyzer":
 
 Не использовать.
 
-## 22.10. Hardcoded каталог ресурсов в `SKILL.md`
-
-`SKILL.md` навыка не должен содержать **физических имён** таблиц, колонок,
-векторных индексов или predefined-скриптов текущего datasource. Каталог
-ресурсов рендерится runtime из auto-populated env-vars
-`SKILL_<NAME>_*` (см. `lib/utils/skill_catalog.py` и
-`RuntimePatcher.patch_skill_catalogs`).
-
-Инвариант:
-
-> **Adding, removing, renaming or extending datasource resources must be
-> a configuration operation, not a skill modification.**
-
-Конкретно запрещено в `SKILL.md`:
-
-- имена таблиц (`oarb.audits`, `sales.orders`, и т.п.);
-- имена колонок (`auditee_entity`, `severity`, `actual_date`, и т.п.);
-- имена vector-индексов (`audits_index`, `violations_index`, и т.п.);
-- имена predefined-скриптов (`audit_status_summary`, ..., и т.п.);
-- ссылки на `references/*.md` с физической схемой.
-
-Разрешено:
-
-- маркеры `{{SCRIPTS_CATALOG}}`, `{{VECTORS_CATALOG}}`, `{{TABLES_CATALOG}}`
-  для runtime-рендера каталога;
-- capability-названия как категории выбора
-  (`PREDEFINED SCRIPT`, `VECTOR SEARCH`, `NL → SQL`);
-- бизнес-термины (`аудит`, `нарушение`, `организация`) — без привязки
-  к конкретным колонкам;
-- правила выбора capability, safety, quality.
-
-Проверки: `tests/test_skill_tool_integration.py::test_skill_md_no_hardcoded_resource_names`.
-
 ---
 
 # 23. Tool design rules
