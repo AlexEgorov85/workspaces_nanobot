@@ -1239,7 +1239,10 @@ class PostgresDuckDbProvider(CacheProvider):
             return []
 
         query_vec = np.array([embedding], dtype=np.float32)
-        n = idx.ntotal if threshold is not None else min(top_k, idx.ntotal)
+        if idx.ntotal == 0:
+            return []
+        threshold_active = threshold is not None and threshold > 0
+        n = idx.ntotal if threshold_active else min(top_k, idx.ntotal)
         scores, ids = idx.search(query_vec, n)
 
         meta_items = (meta or {}).get("metadata", {})

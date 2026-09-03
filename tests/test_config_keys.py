@@ -123,7 +123,7 @@ def _required_keys():
         ("streamlit.error_window_sec", 300),
         # gateway
         ("gateway.storage", "file"),
-        ("gateway.persist_threshold", 5000),
+        ("gateway.persist_threshold", 50000),
         ("gateway.persist_max_files", 100),
         ("gateway.persist_max_age_hours", 0),
         ("gateway.llm_timeout", 300),

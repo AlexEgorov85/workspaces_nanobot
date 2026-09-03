@@ -623,6 +623,38 @@
 - **`tests/test_get_embedding_auth.py`** — 6 тестов на ветки
   `base_url`/`auth_token`/`${placeholder}`/empty/whitespace.
 
+### Fixed (vector_search: top_k не пробрасывался через FAISS + пустой индекс падал)
+
+`PostgresDuckDbProvider.search_vector` и `group_vector_hits`
+использовали `threshold is not None` для различения «порог задан»
+и «без фильтра». Это ломалось при `threshold=0.0` (default в
+`gateway.vector_search.default_threshold`): `is not None` всегда True →
+`top_k` игнорировался, FAISS всегда возвращал все хиты индекса.
+Дополнительно пустой индекс (`ntotal=0`) приводил к `faiss.search(q, 0)`
+→ `AssertionError` (особенность C++ биндинга FAISS).
+
+- **`lib/services/cache_provider_impl.py:1242`** — `if idx.ntotal == 0:
+  return []` (guard для пустого индекса); `threshold_active = threshold is
+  not None and threshold > 0` (truthy check, `0.0` ≠ «порог задан»).
+- **`lib/utils/duckdb_query.py:182`** — `group_vector_hits`: тот же
+  truthy check; `[:top_k]` теперь применяется при `threshold=0.0`.
+- **`tests/integration/test_vector_search_real_faiss.py`** — новый
+  integration-тест с реальным FAISS-индексом (`IndexFlatIP`), 11 кейсов:
+  top-k, метаданные, сортировка, пустой индекс, threshold-фильтр,
+  chunked grouping, dimension mismatch, размер payload под
+  persist_threshold.
+
+### Changed (gateway.persist_threshold: 5000 → 50000)
+
+Поднятие порога выноса tool-результатов в файл: с 5000 до 50000 байт.
+Типичный ответ `vector_search` (5–30 KB JSON) перестаёт вытесняться
+в `[Result saved to data_store/...]`, агент видит результат прямо в
+tool-output. `duckdb_query`/`nl_sql_generate` с `max_result_chars=50000`
+также перестают вытесняться (ранее — почти всегда).
+
+- **`project.json::gateway.persist_threshold`** — 5000 → 50000.
+- **`tests/test_config_keys.py`** — синхронизация.
+
 ## [2.4.0] — 2026-08-20
 
 > **MINOR-релиз:** метрика занятости контекстного окна (`metadata.context_window`),

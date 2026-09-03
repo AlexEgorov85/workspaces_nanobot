@@ -179,7 +179,8 @@ def group_vector_hits(
             doc_groups[key]["matched_chunks"] += 1
 
     results = sorted(doc_groups.values(), key=lambda r: r["score"], reverse=True)
-    if top_k and threshold is None:
+    threshold_active = threshold is not None and threshold > 0
+    if top_k and not threshold_active:
         results = results[:top_k]
 
     for r in results:

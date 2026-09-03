@@ -343,7 +343,7 @@
     //   auto     — PGSessionManager при наличии dsn, иначе JSONL-файлы
     //   postgres — только PGSessionManager (без dsn — ошибка)
     //   file     — только JSONL-файлы (SessionManager), dsn игнорируется
-    "persist_threshold": 5000,        // Порог байт для выноса результата в файл
+    "persist_threshold": 50000,       // Порог байт для выноса результата в файл
     "persist_max_files": 100,         // Макс. файлов в data_store/cache/sessions/
     "persist_max_age_hours": 0,       // 0 = хранить бессрочно
     //  tool_result_limits.* — потолки вывода инструментов (runtime_patcher.py).
