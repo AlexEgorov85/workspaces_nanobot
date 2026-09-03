@@ -14,10 +14,17 @@ Phase 9: E2E second-run test (cache → reload PhysicalDocument → detailed ans
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+
+_REPO = Path(__file__).resolve().parents[1]
+_SCRIPTS = _REPO / "workspace" / "skills" / "legal_summarizer" / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
 
 
 # ---------------------------------------------------------------------------
@@ -1182,13 +1189,13 @@ def test_expand_context_adds_one_prev_and_one_next():
     doc = _make_provenance_doc((b0, b1, b2))
 
     out = expand_followup_context(
-        target_block_index=1,
+        target_ordinal=1,
         doc=doc,
         neighbor_count=1,
         max_total_chars=10000,
     )
-    assert out["bounded"] is False
-    indices = [idx for idx, _ in out["blocks"]]
+    assert out.bounded is False
+    indices = [idx for idx, _ in out.blocks]
     assert indices == [0, 1, 2]
 
 
@@ -1202,8 +1209,8 @@ def test_expand_context_no_prev_at_document_start():
     b1 = _make_provenance_block(1, "Следующий block.")
     doc = _make_provenance_doc((b0, b1))
 
-    out = expand_followup_context(target_block_index=0, doc=doc)
-    indices = [idx for idx, _ in out["blocks"]]
+    out = expand_followup_context(target_ordinal=0, doc=doc)
+    indices = [idx for idx, _ in out.blocks]
     assert indices == [0, 1]
 
 
@@ -1217,8 +1224,8 @@ def test_expand_context_no_next_at_document_end():
     b1 = _make_provenance_block(1, "Последний — целевой.")
     doc = _make_provenance_doc((b0, b1))
 
-    out = expand_followup_context(target_block_index=1, doc=doc)
-    indices = [idx for idx, _ in out["blocks"]]
+    out = expand_followup_context(target_ordinal=1, doc=doc)
+    indices = [idx for idx, _ in out.blocks]
     assert 0 in indices
     assert 1 in indices
 
@@ -1238,9 +1245,9 @@ def test_expand_context_skips_table_as_neighbor():
     doc = _make_provenance_doc((body, table, body2))
 
     out = expand_followup_context(
-        target_block_index=0, doc=doc, neighbor_count=2,
+        target_ordinal=0, doc=doc, neighbor_count=2,
     )
-    indices = [idx for idx, _ in out["blocks"]]
+    indices = [idx for idx, _ in out.blocks]
     assert indices == [0, 2]
 
 
@@ -1256,12 +1263,12 @@ def test_expand_context_bounded_by_max_chars():
     doc = _make_provenance_doc((big_prev, target, big_next))
 
     out = expand_followup_context(
-        target_block_index=1,
+        target_ordinal=1,
         doc=doc,
         max_total_chars=1000,
     )
-    assert out["bounded"] is True
-    assert out["total_chars"] <= 1000
+    assert out.bounded is True
+    assert out.total_chars <= 1000
 
 
 def test_expand_context_table_rule_includes_before_and_after():
@@ -1278,8 +1285,8 @@ def test_expand_context_table_rule_includes_before_and_after():
     after = _make_provenance_block(2, "Подробнее об условиях.")
     doc = _make_provenance_doc((heading, table, after))
 
-    out = expand_followup_context(target_block_index=1, doc=doc)
-    indices = [idx for idx, _ in out["blocks"]]
+    out = expand_followup_context(target_ordinal=1, doc=doc)
+    indices = [idx for idx, _ in out.blocks]
     assert indices == [0, 1, 2]
 
 
@@ -1307,8 +1314,8 @@ def test_expand_context_heading_rule_no_prev_for_heading():
         (_make_provenance_block(0, "Просто предыдущий."), heading, body, body2)
     )
 
-    out = expand_followup_context(target_block_index=1, doc=doc)
-    indices = [idx for idx, _ in out["blocks"]]
+    out = expand_followup_context(target_ordinal=1, doc=doc)
+    indices = [idx for idx, _ in out.blocks]
     assert 0 not in indices
     assert 1 in indices
     assert 2 in indices
@@ -1316,7 +1323,7 @@ def test_expand_context_heading_rule_no_prev_for_heading():
 
 
 def test_expand_context_raises_on_out_of_range_target():
-    """target_block_index вне диапазона → ValueError."""
+    """target_ordinal не найден в doc.blocks → ValueError."""
     from workspace.skills.legal_summarizer.scripts.context_expansion import (
         expand_followup_context,
     )
@@ -1325,9 +1332,9 @@ def test_expand_context_raises_on_out_of_range_target():
     doc = _make_provenance_doc((block,))
 
     with pytest.raises(ValueError, match="вне диапазона"):
-        expand_followup_context(target_block_index=999, doc=doc)
+        expand_followup_context(target_ordinal=999, doc=doc)
     with pytest.raises(ValueError, match="вне диапазона"):
-        expand_followup_context(target_block_index=-1, doc=doc)
+        expand_followup_context(target_ordinal=-1, doc=doc)
 
 
 # ---------------------------------------------------------------------------
@@ -1538,7 +1545,12 @@ def test_retrieve_followup_context_uses_full_source_text():
 def test_e2e_second_run_followup_question_uses_cache_then_reloads_physical_document(
     tmp_path,
 ):
-    """E2E: cache → reload PhysicalDocument → exact source → LLM-input."""
+    """E2E: cache → reload PhysicalDocument → exact source → LLM-input.
+
+    Lightweight integration: подтверждает, что cache (с provenance)
+    корректно восстанавливается через PhysicalDocument после reload и
+    возвращает text, содержащий exact source fragment. Без LLM.
+    """
     from workspace.skills.legal_summarizer.scripts.cache_followup import (
         retrieve_followup_context_via_cache,
     )
@@ -1610,15 +1622,11 @@ def test_e2e_second_run_followup_question_uses_cache_then_reloads_physical_docum
         document_path=doc_path,
     )
 
-    # «RESTART»: перечитываем cache + заново парсим PhysicalDocument.
     doc_run2 = load_physical_document(
         str(doc_path), workspace_root=workspace_root,
     )
     assert doc_run2.path == doc_run1.path
     assert len(doc_run2.blocks) == len(doc_run1.blocks)
-    # doc_run2.blocks[0].content может отличаться от doc_run1 (raw текст
-    # без \n\n разделителей, потому что парсер TXT создаёт один block).
-    # Главное — содержит те же слова в правильном порядке.
     assert "0.1 процента" in doc_run2.blocks[0].content
     assert doc_run2.blocks[0].ordinal == 0
 
@@ -1626,7 +1634,6 @@ def test_e2e_second_run_followup_question_uses_cache_then_reloads_physical_docum
     assert "002" in cache_run2
     assert cache_run2["002"]["block_indices"] == [0]
 
-    # Follow-up question
     chunks = retrieve_followup_context_via_cache(
         question="Какие штрафы предусмотрены за просрочку?",
         document_id=document_id,
@@ -1642,6 +1649,148 @@ def test_e2e_second_run_followup_question_uses_cache_then_reloads_physical_docum
     assert "0.1 процента" in chunk.text
     assert len(chunk.text) > len(cache_run2["002"]["chunk_text_preview"])
     assert 0 in chunk.block_indices
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 (refined): true E2E через inspect() — без fake LLM, через
+# save_doc_cache точно так же, как это делает summarizer.run(). Подтверждает
+# полный runtime contract: inspect → save provenance → reload → retrieve.
+# ---------------------------------------------------------------------------
+
+
+def test_e2e_via_inspect_then_reload_then_followup(tmp_path):
+    """E2E через ``summarizer.inspect``: первый проход использует inspect для
+    генерации chunks с provenance, имитирует summarizer.run() сохраняя
+    cache (как делает run), затем второй проход загружает PhysicalDocument
+    с диска и обращается через ``retrieve_followup_context_via_cache``.
+    """
+    from workspace.skills.legal_summarizer.scripts import summarizer
+    from workspace.skills.legal_summarizer.scripts.cache_followup import (
+        retrieve_followup_context_via_cache,
+    )
+    from workspace.skills.legal_summarizer.scripts.document_cache import (
+        cache_is_fresh,
+        load_doc_cache,
+        save_doc_cache,
+    )
+    from workspace.skills.legal_summarizer.scripts.fingerprint import (
+        fingerprint_file,
+    )
+    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+        load_physical_document,
+    )
+
+    workspace_root = tmp_path
+    session_key = "e2e_via_inspect"
+    document_id = "e2e_via_inspect_doc"
+    doc_path = workspace_root / "data_store" / "cache" / "sessions" / session_key / "contract.txt"
+    doc_path.parent.mkdir(parents=True, exist_ok=True)
+
+    section_3_marker = (
+        "3. Ответственность сторон.\n"
+        "При нарушении сроков подрядчик уплачивает заказчику штраф в "
+        "размере 0.1 процента от суммы договора за каждый день просрочки."
+    )
+    full_doc = (
+        "1. Общие положения.\n"
+        + ("Стороны договора определяют заказчик и подрядчик. " * 5) + "\n\n"
+        + "2. Права и обязанности.\n"
+        + ("Заказчик вправе требовать от подрядчика надлежащего исполнения. " * 5) + "\n\n"
+        + section_3_marker + "\n\n"
+        + "4. Заключительные положения.\n"
+        + ("Споры разрешаются по соглашению сторон. " * 5)
+    )
+    doc_path.write_text(full_doc, encoding="utf-8")
+
+    # === RUN #1 ===
+    insp = summarizer.inspect(full_doc, document_path=str(doc_path))
+    assert insp.strategy in {"map_reduce", "single"}
+    assert len(insp.chunks) >= 1
+
+    selected = insp.chunks[0]
+
+    _PREVIEW_MAX = 500
+    preview_src = selected.text
+    if len(preview_src) > _PREVIEW_MAX:
+        preview = preview_src[:_PREVIEW_MAX]
+    else:
+        preview = preview_src
+    payload: dict = {
+        "chunk_id": selected.chunk_id,
+        "summary": (
+            "Штрафные санкции предусмотрены за просрочку договора подряда"
+        ),
+        "chunk_text_preview": preview,
+        "section_id": selected.section_id,
+        "section_path": selected.section_path,
+        "page_start": selected.page_start,
+        "page_end": selected.page_end,
+        "block_indices": list(selected.block_indices),
+        "block_types": list(selected.block_types),
+        "source_char_start": selected.source_char_start,
+        "source_char_end": selected.source_char_end,
+        "table_id": selected.table_id,
+        "table_row_start": selected.table_row_start,
+        "table_row_end": selected.table_row_end,
+        "saved_at": "2026-09-03T00:00:00Z",
+    }
+    save_doc_cache(
+        document_id, session_key, workspace_root,
+        {selected.chunk_id: payload},
+        document_path=doc_path,
+    )
+
+    assert cache_is_fresh(document_id, session_key, workspace_root, doc_path)
+
+    # === RESTART (новый runtime, новые объекты) ===
+    doc_run2 = load_physical_document(
+        str(doc_path), workspace_root=workspace_root,
+    )
+    assert fingerprint_file(doc_path)
+
+    cache_run2 = load_doc_cache(document_id, session_key, workspace_root)
+    assert selected.chunk_id in cache_run2
+
+    chunks = retrieve_followup_context_via_cache(
+        question="Какие штрафы предусмотрены за просрочку договора подряда?",
+        document_id=document_id,
+        session_key=session_key,
+        document_path=str(doc_path),
+        workspace_root=workspace_root,
+        doc=doc_run2,
+    )
+    assert chunks is not None
+    assert len(chunks) >= 1
+
+    chunk = chunks[0]
+    # Provenance target сохранён после context expansion
+    assert chunk.target_block_indices is not None
+    assert chunk.target_source_char_start == selected.source_char_start
+    assert chunk.target_source_char_end == selected.source_char_end
+    # Source spans присутствуют и помечают primary target
+    assert any(
+        span[3] == 1 for span in chunk.source_spans
+    ), "expected at least one source span marked as target"
+
+    # === STALE FALLBACK: при изменении файла cache становится stale ===
+    doc_path.write_text(
+        full_doc + "\n\nНовая секция после модификации файла.",
+        encoding="utf-8",
+    )
+    assert not cache_is_fresh(document_id, session_key, workspace_root, doc_path)
+
+    doc_run3 = load_physical_document(
+        str(doc_path), workspace_root=workspace_root,
+    )
+    chunks_stale = retrieve_followup_context_via_cache(
+        question="Какие штрафы предусмотрены за просрочку договора подряда?",
+        document_id=document_id,
+        session_key=session_key,
+        document_path=str(doc_path),
+        workspace_root=workspace_root,
+        doc=doc_run3,
+    )
+    assert chunks_stale is None, "stale cache must return None → existing fallback"
 
 
 # ---------------------------------------------------------------------------

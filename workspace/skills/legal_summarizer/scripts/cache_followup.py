@@ -22,18 +22,29 @@
        │   reconstruct_candidate_source
        │       │
        │       ▼
-       │   expand_followup_context
+       │   expand_followup_context  (target provenance сохраняется!)
        │       │
        │       ▼
-       │   list[Chunk] с точным source text
+       │   list[Chunk] с точным source text + target_* поля
        │
        └── нет / слабо / stale
                │
                ▼
            None → caller existing fallback
 
-Важно: не создаём новый LLM/reducer/execution pipeline.
-Возвращаемые ``Chunk``-и подставляются в существующий pipeline.
+Invariants:
+    * Возвращаемые ``Chunk``-и **сохраняют provenance target** в полях
+      ``target_block_indices``, ``target_source_char_start/end``,
+      ``source_spans``. Это критично для claim-level citations — без
+      этого нельзя отличить exact target от соседей, добавленных для
+      LLM-контекста.
+    * Не создаём новый LLM/reducer/execution pipeline. Возвращаемые
+      ``Chunk``-и подставляются в существующий pipeline.
+
+P0 corrections:
+    * ``target_block_index`` → ``target_ordinal`` (ordinal = identity,
+      индекс массива = position; их не смешиваем).
+    * Target provenance сохраняется при expansion.
 """
 
 from __future__ import annotations
@@ -45,6 +56,7 @@ from workspace.skills.legal_summarizer.scripts.cached_retrieval import (
     select_cached_candidates,
 )
 from workspace.skills.legal_summarizer.scripts.context_expansion import (
+    ExpandedContext,
     expand_followup_context,
 )
 from workspace.skills.legal_summarizer.scripts.document_cache import (
@@ -64,27 +76,43 @@ def _build_chunk_from_reconstructed(
     *,
     chunk_id: str,
     source_text: str,
-    candidate_source_text: str,
-    candidate_block_index: int,
+    target_block_ordinal: int,
+    target_source_char_start: int | None,
+    target_source_char_end: int | None,
+    target_block_type: str,
     doc: PhysicalDocument,
-    expanded_blocks: list[tuple[int, str]],
+    expanded: ExpandedContext,
 ) -> Chunk | None:
-    """Собрать Chunk для downstream pipeline (с provenance + expanded context)."""
-    if not expanded_blocks:
+    """Собрать Chunk для downstream pipeline.
+
+    Сохраняет:
+        * expanded ``text`` (target + соседи) для LLM-input;
+        * ``block_indices`` / ``source_char_*`` для expanded text
+          (как и раньше, для back-compat с downstream);
+        * ``target_block_indices`` / ``target_source_char_start/end`` —
+          provenance **primary target**;
+        * ``source_spans`` — список spans с ``is_target`` маркером.
+    """
+    if not expanded.blocks:
         return None
+
     text_parts: list[str] = []
     block_indices: list[int] = []
-    block_types: list[str] = []
     page_indices: list[int] = []
-    for idx, txt in expanded_blocks:
+    for idx, txt in expanded.blocks:
         text_parts.append(txt)
         block_indices.append(idx)
-        block_types.append("paragraph")
-        b = doc.blocks[idx] if 0 <= idx < len(doc.blocks) else None
+        b = doc.blocks_by_ord.get(idx)
         if b is not None and b.page_index is not None:
             page_indices.append(b.page_index)
 
     joined = "\n\n".join(text_parts)
+
+    source_spans: list[tuple[int, int, int | None, int | None]] = [
+        (ord_, cs, ce, marker)
+        for (ord_, cs, ce, _scs, _sce, marker) in expanded.source_spans
+    ]
+
     return Chunk(
         chunk_id=chunk_id,
         index=-1,
@@ -97,7 +125,13 @@ def _build_chunk_from_reconstructed(
         section_path="",
         section_heading="",
         block_indices=tuple(block_indices),
-        block_types=tuple(block_types),
+        block_types=tuple(["paragraph"] * len(block_indices)) if target_block_type != "table" else tuple(["table"] * len(block_indices)),
+        source_char_start=target_source_char_start,
+        source_char_end=target_source_char_end,
+        target_block_indices=(target_block_ordinal,),
+        target_source_char_start=target_source_char_start,
+        target_source_char_end=target_source_char_end,
+        source_spans=tuple(source_spans),
     )
 
 
@@ -119,18 +153,9 @@ def retrieve_followup_context_via_cache(
     Возвращает ``list[Chunk]`` для подстановки в существующий question-path
     pipeline или ``None`` при weak/no match / stale / ошибке.
 
-    Args:
-        question: пользовательский follow-up вопрос.
-        document_id, session_key, document_path, workspace_root: для
-            :func:`load_doc_cache` и :func:`cache_is_fresh`.
-        doc: ``PhysicalDocument`` (canonical source).
-        max_candidates: сколько cache-записей обрабатывать.
-        min_top_score: min_top_score для ``select_cached_candidates``.
-        neighbor_count: для ``expand_followup_context``.
-        max_total_chars: для ``expand_followup_context``.
-
     Returns:
-        ``list[Chunk]`` (готовых для LLM) или ``None``.
+        ``list[Chunk]`` (готовых для LLM, **с сохранённой target provenance**)
+        или ``None``.
     """
     if not session_key:
         return None
@@ -151,10 +176,14 @@ def retrieve_followup_context_via_cache(
         return None
 
     chunks: list[Chunk] = []
+    blocks_by_ord = {b.ordinal: b for b in doc.blocks}
     for cand in candidates:
         if not cand.block_indices:
             continue
-        target_block_idx = cand.block_indices[0]
+        target_ordinal = cand.block_indices[0]
+        if target_ordinal not in blocks_by_ord:
+            continue
+
         source_text, is_stale = reconstruct_candidate_source(
             cand, doc=doc, is_fresh=True,
         )
@@ -162,19 +191,23 @@ def retrieve_followup_context_via_cache(
             continue
 
         expanded = expand_followup_context(
-            target_block_index=target_block_idx,
+            target_ordinal=target_ordinal,
             doc=doc,
             target_source_text=source_text,
+            target_source_char_start=cand.source_char_start,
+            target_source_char_end=cand.source_char_end,
             neighbor_count=neighbor_count,
             max_total_chars=max_total_chars,
         )
         chunk = _build_chunk_from_reconstructed(
             chunk_id=cand.chunk_id,
             source_text=source_text,
-            candidate_source_text=source_text,
-            candidate_block_index=target_block_idx,
+            target_block_ordinal=target_ordinal,
+            target_source_char_start=cand.source_char_start,
+            target_source_char_end=cand.source_char_end,
+            target_block_type=blocks_by_ord[target_ordinal].block_type,
             doc=doc,
-            expanded_blocks=expanded["blocks"],
+            expanded=expanded,
         )
         if chunk is not None:
             chunks.append(chunk)

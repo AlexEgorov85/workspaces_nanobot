@@ -97,6 +97,27 @@ class PhysicalDocument:
     size_bytes: int
     blocks: tuple[DocumentBlock, ...]
     page_count: int
+    _blocks_by_ord_cache: dict[int, "DocumentBlock"] | None = field(
+        default=None, repr=False, compare=False,
+    )
+
+    @property
+    def blocks_by_ord(self) -> dict[int, "DocumentBlock"]:
+        """Lookup ``DocumentBlock`` по ``ordinal`` (identity, не position).
+
+        Invariant в текущей реализации: ``blocks[i].ordinal == i``. Этот
+        property всё равно работает через ``{b.ordinal: b}`` — это защищает
+        callers (cache-assisted follow-up, context expansion) от поломки,
+        если upstream когда-нибудь начнёт фильтровать/нормализовать
+        blocks, оставляя ``ordinal`` как identity, но разрывая связь
+        ``position == ordinal``.
+        """
+        cached = object.__getattribute__(self, "_blocks_by_ord_cache")
+        if cached is not None:
+            return cached
+        mapping = {b.ordinal: b for b in self.blocks}
+        object.__setattr__(self, "_blocks_by_ord_cache", mapping)
+        return mapping
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -105,11 +105,25 @@ class Chunk:
         section_id: ``"s_0001"`` или ``"s_root"``.
         section_path: ``"1"`` / ``"1 > 1.2"`` / ``""``.
         section_heading: текст heading'а (``""`` для root).
-        block_indices: tuple[int, ...] — ordinal'ы DocumentBlock'ов.
+        block_indices: tuple[int, ...] — ordinal'ы DocumentBlock'ов
+            (для ``text``, не для provenance target).
         block_types: tuple[str, ...] — параллельный массив.
         table_id: ``"t_001"`` если chunk — это таблица.
         table_row_start / table_row_end: для split-table (1-based rows).
-        tokens_per_chunk_estimate: token_estimate (alias для удобства).
+        source_char_start / source_char_end: offsets для split block'а
+            **внутри ``block_indices[0]``**.
+        target_block_indices: tuple[int, ...] — ordinal'ы DocumentBlock'ов
+            **для original provenance target** (только для follow-up
+            reconstructed chunks). ``None`` → не установлено (legacy /
+            обычные map-reduce chunks).
+        target_source_char_start / target_source_char_end: offsets target'а
+            внутри ``target_block_indices[0]`` (split chunk case). ``None``
+            для whole-block target.
+        source_spans: tuple[tuple[int, int, int | None, int | None], ...] —
+            список ``(block_ordinal, block_char_start, block_char_end,
+            target_marker)`` где ``target_marker=1`` помечает span, который
+            был primary target при cache-assisted retrieval.
+            ``()`` для обычных chunks.
     """
 
     chunk_id: str
@@ -129,6 +143,10 @@ class Chunk:
     table_row_end: int | None = None
     source_char_start: int | None = None
     source_char_end: int | None = None
+    target_block_indices: tuple[int, ...] | None = None
+    target_source_char_start: int | None = None
+    target_source_char_end: int | None = None
+    source_spans: tuple[tuple[int, int, int | None, int | None], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -149,6 +167,21 @@ class Chunk:
             "table_row_end": self.table_row_end,
             "source_char_start": self.source_char_start,
             "source_char_end": self.source_char_end,
+            "target_block_indices": (
+                list(self.target_block_indices)
+                if self.target_block_indices is not None else None
+            ),
+            "target_source_char_start": self.target_source_char_start,
+            "target_source_char_end": self.target_source_char_end,
+            "source_spans": [
+                {
+                    "block_ordinal": b,
+                    "char_start": cs,
+                    "char_end": ce,
+                    "is_target": bool(marker),
+                }
+                for (b, cs, ce, marker) in self.source_spans
+            ],
         }
 
 
@@ -437,6 +470,10 @@ class StructureAwareChunker:
                     table_row_end=c.table_row_end,
                     source_char_start=c.source_char_start,
                     source_char_end=c.source_char_end,
+                    target_block_indices=c.target_block_indices,
+                    target_source_char_start=c.target_source_char_start,
+                    target_source_char_end=c.target_source_char_end,
+                    source_spans=c.source_spans,
                 )
             )
         return normalized
