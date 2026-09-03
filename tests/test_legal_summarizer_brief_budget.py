@@ -22,9 +22,8 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 _SKILL_ROOT = Path(__file__).resolve().parents[1] / "workspace" / "skills" / "legal_summarizer"
 _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
@@ -76,7 +75,6 @@ from workspace.skills.legal_summarizer.scripts.brief_representation import (  # 
     apply_brief_text_budget,
     total_input_chars,
 )
-
 
 # ---------------------------------------------------------------------------
 # Test A — несколько больших chunks: суммарный ввод ≤ budget.

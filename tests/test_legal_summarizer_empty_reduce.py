@@ -19,9 +19,6 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Any
-
-import pytest
 
 _SKILL_ROOT = Path(__file__).resolve().parents[1] / "workspace" / "skills" / "legal_summarizer"
 _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
@@ -204,12 +201,8 @@ def test_document_reduce_exception_does_not_emit_empty_completed(
     monkeypatch, tmp_path,
 ):
     """Если document reduce бросает исключение и fallback joined пуст,
-    прогон → failed с REDUCE_INPUT_EMPTY. Completed с пустым summary
+прогон → failed с REDUCE_INPUT_EMPTY. Completed с пустым summary
     НЕ допускается."""
-    from workspace.skills.legal_summarizer.scripts.summarizer import (
-        _llm_document_reduce,
-    )
-
     def fake_doc_reduce_explode(*_args, **_kw):
         raise RuntimeError("simulated LLM error")
 

@@ -152,3 +152,4 @@ def test_runtime_single_flight_through_run_one_batch_async(monkeypatch):
         f"single-flight нарушен в run_one_batch_async: "
         f"peak in-flight == {state['peak']}"
     )
+

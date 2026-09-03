@@ -166,42 +166,6 @@ def allocate_brief_budget(
             replace(c, text=truncated, char_count=len(truncated))
         )
     return out
-    budget_remaining = max(
-        0, total_budget_chars - sum_unchanged - suffix_len * n_truncated,
-    )
-
-    out: list[Chunk] = list(table_chunks) + list(text_chunks_without_truncation)
-    total_truncated_chars = sum(
-        len(c.text) for c in text_chunks_with_truncation
-    )
-
-    # Пропорциональное распределение с min_per_chunk.
-    # min_per_chunk включается в available_for_truncation,
-    # поэтому при дефиците budget режем равномерно (degenerate).
-    n = n_truncated
-    eff_min = (
-        min_per_chunk if budget_remaining >= min_per_chunk * n
-        else max(50, budget_remaining // max(1, n))
-    )
-
-    for c in text_chunks_with_truncation:
-        # Доля chunk'а в общей сумме (среди обрезаемых).
-        share = max(
-            eff_min,
-            int(round(len(c.text) * budget_remaining / max(1, total_truncated_chars))),
-        )
-        # Cap по budget_remaining для одного chunk'а.
-        share = min(share, budget_remaining)
-        if len(c.text) <= share:
-            out.append(c)
-            continue
-        truncated = c.text[:share].rstrip()
-        if len(truncated) < len(c.text):
-            truncated = truncated + " …"
-        out.append(
-            replace(c, text=truncated, char_count=len(truncated))
-        )
-    return out
 
 
 def total_input_chars(chunks: list[Chunk]) -> int:

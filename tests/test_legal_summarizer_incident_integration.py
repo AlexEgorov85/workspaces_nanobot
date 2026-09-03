@@ -228,7 +228,7 @@ def test_incident_scenario_doc_reduce_exception(monkeypatch, tmp_path):
     (если он непустой) → completed с осмысленным summary. Или failed,
     если fallback пуст. Главное: не completed с пустым summary.
     """
-    state = _install_mocks(
+    _install_mocks(
         monkeypatch, doc_reduce_side_effect=RuntimeError("LLM timeout"),
     )
 
@@ -269,6 +269,7 @@ def test_incident_scenario_single_flight_under_load(monkeypatch, tmp_path):
     из-за monkeypatch.pack_chunks особенностей (см. PR #4).
     """
     import asyncio
+
     from workspace.skills.legal_summarizer.scripts.packing import ContextBatch
     from workspace.skills.legal_summarizer.scripts.pipeline import (
         run_one_batch_async,
@@ -334,7 +335,7 @@ def test_incident_no_empty_success_under_any_path(monkeypatch, tmp_path):
     summary. Проверяется на success-path и на doc_reduce_exception."""
     for side_effect in [None, RuntimeError("transient")]:
         monkeypatch.undo()
-        state = _install_mocks(monkeypatch, doc_reduce_side_effect=side_effect)
+        _install_mocks(monkeypatch, doc_reduce_side_effect=side_effect)
         text = _make_long_document(paragraphs=200)
         result = _summarizer_run(
             text, length="brief", confirmed=True, workspace_root=tmp_path,

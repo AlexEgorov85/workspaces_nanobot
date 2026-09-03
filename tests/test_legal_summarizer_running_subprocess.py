@@ -21,7 +21,6 @@ import textwrap
 import time
 from pathlib import Path
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CLI = _REPO_ROOT / "workspace" / "skills" / "legal_summarizer" / "scripts" / "cli.py"
 
