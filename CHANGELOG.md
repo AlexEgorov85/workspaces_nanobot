@@ -103,6 +103,67 @@
 - **`workspace/TOOLS.md`** — секция `column_descriptions` обновлена:
   убраны `oarb.*` примеры, добавлено упоминание `ColumnDescriptionsResolver`.
 
+### Deprecated (legal_summarizer runtime hardening)
+
+- **`skills.legal_summarizer.execution.max_concurrent_batches`** —
+  DEPRECATED. Ранее допускал override > 1, что позволяло обойти
+  runtime invariant `max_active_llm_calls == 1`. Сейчас runtime
+  читает ключ, **clamp'ит до 1** и эмитит `DeprecationWarning`,
+  если значение > 1. Backward-compat сохранён, но нельзя поднять
+  concurrency выше 1. Удаление ключа — в v3.0 (MAJOR). Подробности
+  и обоснование: `workspace/skills/legal_summarizer/ARCHITECTURE.md`
+  §21 + § Deprecation.
+
+### Fixed (legal_summarizer: 4 бага — follow-up invariants)
+
+Продолжение регрессионного hardening после merge-коммита
+`06dc6cc` (`Merge branch 'fix/legal-summarizer-four-bugs'`).
+Закрывает архитектурные замечания, выявленные при ревизии
+(3.5/4 → 4/4 по invariant'ам плана):
+
+- **`workspace/skills/legal_summarizer/scripts/summarizer.py`** —
+  production concurrency зафиксирована на 1. Старая формула
+  `max(1, int(exec_cfg_for_map.get("max_concurrent_batches", 1)))`
+  заменена на `concurrency = 1` + DEPRECATE-warning. Раньше
+  ключ `max_concurrent_batches=4` создавал `Semaphore(4)` —
+  нарушение single-flight invariant. Теперь любые значения
+  > 1 игнорируются (clamp до 1) с явным `DeprecationWarning`.
+- **`tests/test_legal_summarizer_single_flight.py`** — добавлен
+  регрессионный тест `test_summarizer_run_single_flight_under_max_concurrent_4`:
+  прогоняет полный `summarizer.run()` под
+  `max_concurrent_batches=4` и проверяет, что peak in-flight LLM
+  остаётся == 1, плюс эмитится ровно один `DeprecationWarning`.
+  Старые тесты на default-значение переформулированы:
+  `test_default_value_in_summarizer_is_one` теперь проверяет
+  литерал `concurrency = 1`, `test_max_concurrent_batches_clamped_to_one_with_warning`
+  — реальный runtime-clamp через `warnings.catch_warnings`.
+- **`tests/test_legal_summarizer_empty_reduce.py`** —
+  `test_reduce_input_empty_is_non_retryable` усилен: вместо
+  подсчёта строкового литерала `REDUCE_INPUT_EMPTY` в исходнике
+  тест реально запускает `summarizer.run()` с пустым
+  `section_summaries`, мокает `_llm_document_reduce` (должен
+  бросить исключение если вызван) и проверяет: status=failed
+  СРАЗУ, code=REDUCE_INPUT_EMPTY, document_reduce вызван 0 раз.
+- **`tests/test_legal_summarizer_running_subprocess.py`** —
+  `test_running_marker_arrives_before_run_completes` переведён
+  на построчное чтение stdout (`proc.stdout.readline()` в
+  бинарном unbuffered режиме) вместо хрупкого `read(1024)`.
+  Стабильнее на разных платформах/размерах pipe-пакетов.
+- **`workspace/skills/legal_summarizer/ARCHITECTURE.md`** —
+  уточнён контракт `brief_max_input_chars`: budget ограничивает
+  **только text chunks**, tables атомарны (invariant §6) и идут
+  **сверх** budget'а. Документирован осознанный выбор text-only
+  budget (а не total LLM-input budget) с обоснованием:
+  настоящий total budget требует либо резать таблицы
+  (нарушит atomicity), либо выбрасывать их (потеря данных).
+  Добавлен новый invariant §21 (`max_active_llm_calls == 1` —
+  жёсткий runtime invariant в map-фазе) + секция
+  `## Deprecation` с планом v3.0.
+- **`project.json`** — `max_concurrent_batches: 1` явно задан
+  с DEPRECATE-комментарием для видимости оператора; комментарий
+  `brief_max_input_chars` дополнен CONTRACT-нотой про text-only
+  budget и сверх-надбавку tables.
+
 ### Added
 
 - **Tool `nl_sql_generate`** (`workspace/tools/nl_sql_generate.py`) —

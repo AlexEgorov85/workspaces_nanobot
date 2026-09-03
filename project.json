@@ -257,15 +257,18 @@
                                                      // Tables не обрезаются этим параметром.
                                                      // DEPRECATED: предпочтительно brief_max_input_chars (общий budget).
 
-        "brief_max_input_chars": 30000          // Общий LLM-text budget для brief (этап 4 фиксов):
-                                                     // выбранные chunks пропорционально обрезаются так,
-                                                     // чтобы их суммарный объём не превышал N символов.
-                                                     // Заменяет per-chunk логику brief_max_chars_per_chunk:
-                                                     // coverage остаётся (round-robin по sections),
-                                                     // но общий лимит chars в LLM-prompt ограничен.
-                                                     // Tables пропускаются целиком (atomicity invariant §6).
-                                                     // Применяется ПОСЛЕ select_brief_chunks_structured,
-                                                     // не ломает coverage-логику.
+"brief_max_input_chars": 30000          // Общий LLM-text budget для brief (этап 4 фиксов):
+                                                      // выбранные chunks пропорционально обрезаются так,
+                                                      // чтобы их суммарный объём не превышал N символов.
+                                                      // Заменяет per-chunk логику brief_max_chars_per_chunk:
+                                                      // coverage остаётся (round-robin по sections),
+                                                      // но общий лимит chars в LLM-prompt ограничен.
+                                                      // CONTRACT: budget ограничивает ТОЛЬКО text chunks.
+                                                      // Tables атомарны (invariant §6) и идут СВЕРХ budget'а —
+                                                      // реальный LLM-input = text-budget + sum(table sizes).
+                                                      // Подробности и обоснование: ARCHITECTURE.md § «Общий LLM-text budget».
+                                                      // Применяется ПОСЛЕ select_brief_chunks_structured,
+                                                      // не ломает coverage-логику.
       },
 
       "execution": {                                 // Phase 2B: пользовательский контроль
@@ -276,6 +279,10 @@
         "estimated_chunk_duration_sec": 20,          // Оценка времени обработки одного ContextBatch
                                                    // (Phase 2B: считается per-batch, а не per-chunk).
         "max_chunks_for_execution": 50,              // Safety net: chunks_total > этого значения → requires_continuation.
+        "max_concurrent_batches": 1,                 // DEPRECATED: runtime invariant single-flight (см. ARCHITECTURE.md §21).
+                                                      // Ключ оставлен для backward-compat, runtime всегда clamp'ит до 1.
+                                                      // Значения > 1 эмитят DeprecationWarning и игнорируются.
+                                                      // Удаление ключа планируется в v3.0 (MAJOR).
 "max_chunks_per_question": 10,               // Лимит выборки для brief и --question режимов.
                                                       // brief: ≤10 И ≤50% от chunks_total, round-robin по секциям.
                                                       // question: ≤N релевантных chunks.

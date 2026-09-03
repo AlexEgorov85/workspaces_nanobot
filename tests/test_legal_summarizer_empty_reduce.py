@@ -261,22 +261,70 @@ def test_no_empty_summary_in_completed_or_partial():
     )
 
 
-def test_reduce_input_empty_is_non_retryable():
-    """REDUCE_INPUT_EMPTY должен встречаться как минимум в 3 точках
-    summarizer.run():
-      1. hierarchical section_summaries пуст
-      2. hierarchical joined_sections пуст (дополнительная проверка)
-      3. flat joined пуст
-      4. пост-reduce защита final_summary пуст
+def test_reduce_input_empty_is_non_retryable(monkeypatch, tmp_path):
+    """REDUCE_INPUT_EMPTY → status=failed СРАЗУ, без вызова reduce-LLM
+    и без retry.
 
-    Все они возвращают ``status=failed`` с error.code=REDUCE_INPUT_EMPTY
-    — без raise, без retry (это не transient LLM-ошибка).
+    Этот тест проверяет не наличие строкового литерала, а runtime-инвариант:
+    когда section_summaries пуст, summarizer.run() должен вернуть
+    ``{status: failed, error.code: REDUCE_INPUT_EMPTY}``, не вызывая
+    ``_llm_document_reduce`` и не делая retry.
     """
-    import inspect
+    import summarizer as _summarizer
 
-    src = inspect.getsource(summarizer.run)
-    n = src.count("REDUCE_INPUT_EMPTY")
-    assert n >= 3, (
-        f"Ожидалось >= 3 упоминания REDUCE_INPUT_EMPTY, найдено {n}. "
-        "Защита недостаточна."
+    document_reduce_calls = {"count": 0}
+
+    def fake_doc_reduce_raises(*_args, **_kw):
+        document_reduce_calls["count"] += 1
+        raise RuntimeError("should not be called on empty input")
+
+    # section_reduce возвращает "" → section_summaries_out пуст →
+    # REDUCE_INPUT_EMPTY ДО вызова document reduce.
+    def fake_section_reduce_empty(*_args, **_kw):
+        return ""
+
+    monkeypatch.setattr(
+        "workspace.skills.legal_summarizer.scripts.summarizer._llm_document_reduce",
+        fake_doc_reduce_raises,
+    )
+    monkeypatch.setattr(
+        "workspace.skills.legal_summarizer.scripts.summarizer._llm_section_reduce",
+        fake_section_reduce_empty,
+    )
+
+    # map: каждый chunk даёт валидный partials (иначе test провалится раньше).
+    def fake_chat(messages, *, context=None, **kwargs):
+        user_content = messages[1]["content"]
+        if re.findall(r"DOCUMENT CHUNK \d+", user_content):
+            return _build_text_response(user_content)
+        return "fallback"
+
+    monkeypatch.setattr(_summarizer.llm, "chat", fake_chat)
+    monkeypatch.setattr(_summarizer, "pack_chunks", _one_chunk_per_batch_pack)
+    monkeypatch.setattr(_summarizer, "get_chunking_config", lambda: _base_cfg())
+    monkeypatch.setattr(_summarizer, "get_execution_config", lambda: _base_exec_cfg())
+
+    paragraph = "Длинный абзац про договор подряда, права и обязанности. "
+    text = "\n\n".join([paragraph] * 200)
+    result = _summarizer.run(
+        text, length="brief", confirmed=True, workspace_root=tmp_path,
+    )
+
+    # Runtime-инвариант: status=failed СРАЗУ.
+    assert result["status"] == "failed", (
+        f"REDUCE_INPUT_EMPTY не должен быть completed/partial. "
+        f"Получили status={result['status']!r}, full result={result}"
+    )
+
+    err = result.get("error") or {}
+    assert err.get("code") in {"REDUCE_INPUT_EMPTY", "NO_PARTIALS"}, (
+        f"Ожидался REDUCE_INPUT_EMPTY/NO_PARTIALS для пустого reduce "
+        f"input, получили code={err.get('code')!r}, error={err}"
+    )
+
+    # Главный инвариант: document_reduce НЕ вызывается.
+    assert document_reduce_calls["count"] == 0, (
+        f"document_reduce вызван {document_reduce_calls['count']} раз "
+        "при пустом reduce input — это ЗАПРЕЩЕНО (REDUCE_INPUT_EMPTY "
+        "non-retryable, LLM не должен получать пустой input)."
     )

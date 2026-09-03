@@ -154,6 +154,11 @@ def test_running_marker_arrives_before_run_completes(tmp_path):
     Без flush=True на ``print(...)`` stdout subprocess буферизуется —
     агент (или другой наблюдатель) не увидит RUNNING, пока процесс не
     завершится и Python не сбросит буфер при exit.
+
+    Чтение stdout — построчное (через ``readline`` после перевода stdout
+    subprocess в бинарный line-buffered режим). Блок ``read(1024)``
+    хрупок к packetization/buffering на разных платформах; line-by-line
+    стабильнее.
     """
     doc = _make_doc(tmp_path)
     stubs = _write_stub_dir(tmp_path)
@@ -193,38 +198,40 @@ def test_running_marker_arrives_before_run_completes(tmp_path):
 
     started = time.monotonic()
     first_marker_at: float | None = None
-    completion_marker_at: float | None = None
     proc_alive_when_running: bool | None = None
     deadline = started + 15.0
-    buffer = ""
+    decoder = json.JSONDecoder()
 
+    # ``json.dumps(..., indent=2)`` в cli._emit() делает multi-line JSON,
+    # поэтому построчный readline() не годится: первая строка это только
+    # ``"{"``. Накапливаем в buffer, пробуем raw_decode начиная с
+    # любой non-whitespace позиции; на каждой итерации крутим readline().
+    buffer = ""
     while time.monotonic() < deadline:
-        chunk = proc.stdout.read(1024)
-        if not chunk:
+        line = proc.stdout.readline()
+        if not line:
             if proc.poll() is not None:
                 break
             continue
-        buffer += chunk
-        while buffer:
-            stripped = buffer.lstrip()
-            if not stripped:
-                buffer = ""
-                break
-            decoder = json.JSONDecoder()
-            try:
-                obj, end = decoder.raw_decode(stripped)
-            except json.JSONDecodeError:
-                break
-            buffer = stripped[end:]
-            now = time.monotonic() - started
-            if obj.get("status") == "running" and first_marker_at is None:
-                first_marker_at = now
-                # Запоминаем, жив ли ещё процесс в момент чтения RUNNING.
-                proc_alive_when_running = proc.poll() is None
-                break
-            elif obj.get("status") == "completed" and completion_marker_at is None:
-                completion_marker_at = now
-        if first_marker_at is not None:
+        buffer += line
+        # Пытаемся распарсить JSON начиная с любой non-whitespace позиции.
+        # Если нашли — обрезаем buffer.
+        stripped = buffer.lstrip()
+        if not stripped:
+            buffer = ""
+            continue
+        try:
+            obj, end = decoder.raw_decode(stripped)
+        except json.JSONDecodeError:
+            continue
+        buffer = stripped[end:]
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("status") == "running" and first_marker_at is None:
+            first_marker_at = time.monotonic() - started
+            proc_alive_when_running = proc.poll() is None
+            break
+        if obj.get("status") == "completed":
             break
 
     proc.poll()

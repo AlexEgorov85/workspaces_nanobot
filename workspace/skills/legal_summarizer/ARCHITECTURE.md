@@ -102,6 +102,14 @@
     - каждый `block_to_section[ord]` указывает на существующий `sid`;
     - `SectionTree.root_id` остаётся прежним.
 
+21. **`max_active_llm_calls == 1` — жёсткий runtime invariant в map-фазе.**
+    В map-фазе выполняется строго один LLM-вызов одновременно
+    (`Semaphore(1)`). Config `execution.max_concurrent_batches` DEPRECATED
+    и runtime-clamp'ится до 1 с `DeprecationWarning` (см. Deprecation).
+    Параллельные LLM-вызовы запрещены: текущая реализация не имеет
+    общего rate-limit policy, retry parse-error должен идти от первого
+    failed батча без перемешивания с параллельно стартовавшими.
+
 ## Файловая структура Phase 2B
 
 ```
@@ -225,6 +233,33 @@ per-block) обрезается до N символов через `apply_brief_
 > а не на каждый DocumentBlock внутри chunk'а. `skill_config`
 > читает legacy-ключ как fallback для back-compat.
 
+### Общий LLM-text budget: `brief_max_input_chars`
+
+Предпочтительный параметр для ограничения LLM-input в brief-режиме —
+`chunking_config.brief_max_input_chars` (default 30000). Работает
+через `brief_representation.allocate_brief_budget`: распределяет
+общий budget между уже выбранными chunks (после coverage-фазы)
+пропорционально их исходной длине.
+
+**Контракт budget'а (v1):**
+
+* Budget ограничивает **суммарный объём text chunks** для LLM-input.
+  То есть: `sum(len(c.text) for c in text_chunks) <= brief_max_input_chars`.
+* **Tables идут сверх budget.** Они атомарны (invariant §6) и не
+  режутся. Реальный LLM-input = text-budget + sum(table sizes).
+  Для текстовых документов tables обычно малы и этой разницей можно
+  пренебречь. Для документов с большими таблицами оператор должен
+  учитывать сверх-надбавку при выборе `brief_max_input_chars`.
+* Применяется ПОСЛЕ `select_brief_chunks_structured`, не ломает
+  coverage-логику (round-robin по секциям сохраняется).
+* `brief_max_chars_per_chunk` остаётся как legacy fallback для
+  back-compat, deprecated.
+
+Это сознательный выбор: **настоящий total-LLM-input budget потребует
+либо резать таблицы (нарушит atomicity), либо выбрасывать их из
+brief (потеря данных)**. Текущая семантика — text-only budget с
+явно зафиксированной сверх-надбавкой для tables.
+
 ## Document cache: provenance и freshness
 
 Каждая запись в document-cache содержит:
@@ -283,6 +318,20 @@ retrieval такие записи получают score только за `summ
 При stale cache, weak match, no match или ошибке реконструкции —
 fallback на существующий `_relaxed_lexical_fallback` → bounded
 top-of-document → keyword match. Existing fallbacks не отключаются.
+
+## Deprecation
+
+| Ключ                                  | Статус                                              | План удаления |
+| ------------------------------------- | --------------------------------------------------- | ------------- |
+| `chunking_config.brief_max_chars_per_chunk` | DEPRECATED, заменён на `brief_max_input_chars` (общий budget). legacy-path сохранён для back-compat. | v3.0 (MAJOR)  |
+| `execution.max_concurrent_batches`    | DEPRECATED, runtime-clamp до 1 + DeprecationWarning. Текущий runtime строго single-flight (invariant §21). Ключ игнорируется при значении > 1. | v3.0 (MAJOR)  |
+
+При upgrade до v3.0:
+
+* `brief_max_chars_per_chunk` → мигрировать на `brief_max_input_chars`.
+  Семантика различается: legacy — per-chunk, новый — общий text budget.
+* `max_concurrent_batches` → удалить из `project.json`. Значения > 1
+  запрещены runtime invariant'ом.
 
 ## Файловая структура (обновлено)
 

@@ -10,7 +10,6 @@ LLM-вызова (в map-фазе). Тест мокает ``llm.chat`` и тре
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -26,61 +25,85 @@ import summarizer  # noqa: E402
 
 
 def test_default_value_in_summarizer_is_one():
-    """Sanity-check: значение default в самом summarizer.py — 1.
+    """Sanity-check: production concurrency в summarizer.py строго 1.
 
-    Если кто-то поменяет default обратно на 4, этот тест поймает.
+    Если кто-то поменяет runtime invariant обратно на семафор(>1),
+    этот тест поймает.
     """
     import inspect
 
     src = inspect.getsource(summarizer)
-    m = re.search(
-        r'max_concurrent_batches["\']?\s*,\s*(\d+)\s*\)',
-        src,
-    )
-    assert m is not None, (
-        "Не удалось найти default для max_concurrent_batches в summarizer.py"
-    )
-    assert int(m.group(1)) == 1, (
-        f"Default max_concurrent_batches == {m.group(1)}, ожидалось 1. "
-        "Параллельные LLM-вызовы запрещены текущим runtime'ом."
+    assert "concurrency = 1" in src, (
+        "Ожидалась жёсткая строка 'concurrency = 1' в summarizer.run(). "
+        "Runtime invariant single-flight нарушен — параллельные LLM-вызовы "
+        "должны быть запрещены."
     )
 
 
-def test_concurrency_overrides_apply_via_max_call():
-    """Проверка, что значение max_concurrent_batches из config читается
-    и применяется через ``max(1, ...)`` clamp.
+def test_max_concurrent_batches_clamped_to_one_with_warning():
+    """DEPRECATED ключ ``max_concurrent_batches > 1`` clamp'ится до 1
+    с ``DeprecationWarning``.
     """
-    cfg_default: dict = {}
-    concurrency_default = max(1, int(cfg_default.get("max_concurrent_batches", 1)))
-    assert concurrency_default == 1
+    import warnings
 
-    cfg_one = {"max_concurrent_batches": 1}
-    concurrency_one = max(1, int(cfg_one.get("max_concurrent_batches", 1)))
-    assert concurrency_one == 1
+    # Имитируем то, что summarizer.run() делает inline:
+    # читаем ключ, clamp'им до 1, эмитим warning на > 1.
+    for cfg_value, expected_concurrency, should_warn in [
+        (None, 1, False),                  # ключ отсутствует
+        (1, 1, False),                      # ключ == 1 (валидный default)
+        (0, 1, False),                      # 0 → 1 без warning
+        (-5, 1, False),                     # отрицательное → 1 без warning
+        (2, 1, True),                       # > 1 → warning + clamp до 1
+        (4, 1, True),                       # 4 → warning + clamp до 1
+    ]:
+        cfg: dict = {} if cfg_value is None else {"max_concurrent_batches": cfg_value}
+        configured = int(cfg.get("max_concurrent_batches", 1) or 1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            if configured > 1:
+                warnings.warn(
+                    "skills.legal_summarizer.execution.max_concurrent_batches > 1 "
+                    f"({configured}) DEPRECATED",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+            concurrency = 1
+        warnings_emitted = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert concurrency == expected_concurrency, (
+            f"cfg={cfg_value}: concurrency={concurrency}, "
+            f"expected {expected_concurrency}"
+        )
+        if should_warn:
+            assert len(warnings_emitted) == 1, (
+                f"cfg={cfg_value}: ожидался ровно 1 DeprecationWarning, "
+                f"получили {len(warnings_emitted)}"
+            )
+        else:
+            assert len(warnings_emitted) == 0, (
+                f"cfg={cfg_value}: warning не должен эмититься, "
+                f"получили {len(warnings_emitted)}"
+            )
 
-    cfg_zero = {"max_concurrent_batches": 0}
-    concurrency_zero = max(1, int(cfg_zero.get("max_concurrent_batches", 1)))
-    assert concurrency_zero == 1
 
-    cfg_neg = {"max_concurrent_batches": -5}
-    concurrency_neg = max(1, int(cfg_neg.get("max_concurrent_batches", 1)))
-    assert concurrency_neg == 1
-
-
-def test_summarizer_uses_max_concurrent_batches_from_config(monkeypatch):
-    """summarizer.run() читает ``max_concurrent_batches`` из
-    ``get_execution_config()``. Проверяем интроспекцией исходника,
-    что значение действительно берётся из конфига, а не хардкодится.
+def test_summarizer_emits_warning_on_max_concurrent_batches_above_one(
+    monkeypatch,
+):
+    """summarizer.run() эмитит DeprecationWarning, если в config
+    ``max_concurrent_batches > 1`` — backward-compat path.
     """
+    # Проверяем, что в исходнике summarizer.run() есть DeprecationWarning
+    # на configured_concurrency > 1.
     import inspect
 
-    src = inspect.getsource(summarizer.run)
-    assert "max_concurrent_batches" in src, (
-        "summarizer.run должен читать max_concurrent_batches из config"
+    import summarizer as _summarizer
+
+    src = inspect.getsource(_summarizer.run)
+    assert "DeprecationWarning" in src, (
+        "summarizer.run должен эмитить DeprecationWarning при "
+        "max_concurrent_batches > 1"
     )
-    assert "get_execution_config" in src, (
-        "summarizer.run должен звать get_execution_config для "
-        "получения max_concurrent_batches"
+    assert "DEPRECATED" in src, (
+        "summarizer.run должен явно указывать DEPRECATED в warning"
     )
 
 
@@ -151,5 +174,126 @@ def test_runtime_single_flight_through_run_one_batch_async(monkeypatch):
     assert state["peak"] == 1, (
         f"single-flight нарушен в run_one_batch_async: "
         f"peak in-flight == {state['peak']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Production-path invariant: summarizer.run с max_concurrent_batches=4
+# ВСЁ РАВНО должен оставаться single-flight (peak == 1).
+# Без runtime-clamp'а это была бы регрессия: config=4 → Semaphore(4).
+# ---------------------------------------------------------------------------
+
+
+def test_summarizer_run_single_flight_under_max_concurrent_4(
+    monkeypatch, tmp_path,
+):
+    """summarizer.run под config ``max_concurrent_batches=4`` всё равно
+    держит peak in-flight LLM == 1.
+
+    До runtime-clamp'а (DEPRECATE+warn) этот тест был красным:
+    config=4 → Semaphore(4) → peak in-flight до 4.
+
+    Мок на уровне ``pipeline.process_context_batch`` — обходит парсер
+    и реальный LLM-вызов (latency через time.sleep), но counting peak
+    in-flight идёт в нашей обёртке.
+    """
+    import threading
+    import time as _time
+
+    import summarizer as _summarizer
+
+    state = {
+        "in_flight": 0, "peak": 0, "lock": threading.Lock(),
+        "calls": 0,
+    }
+
+    from workspace.skills.legal_summarizer.scripts.packing import ContextBatch
+
+    def fake_process_context_batch(
+        batch, *, length="", question=None, **kwargs,
+    ):
+        with state["lock"]:
+            state["in_flight"] += 1
+            if state["in_flight"] > state["peak"]:
+                state["peak"] = state["in_flight"]
+            state["calls"] += 1
+        try:
+            _time.sleep(0.03)
+            return {
+                "batch_id": batch.batch_id,
+                "chunk_ids": [c.chunk_id for c in batch.chunks],
+                "started_at": "1970-01-01T00:00:00Z",
+                "completed_at": "1970-01-01T00:00:00Z",
+                "duration_sec": 0.03,
+            }
+        finally:
+            with state["lock"]:
+                state["in_flight"] -= 1
+
+    def one_chunk_per_batch(chunks, budget):
+        return tuple(
+            ContextBatch(
+                batch_id=f"cb_{i:03d}",
+                chunks=(c,),
+                total_tokens_estimate=c.token_estimate,
+                section_paths=(c.section_path,),
+                page_range=None,
+            )
+            for i, c in enumerate(chunks)
+        )
+
+    monkeypatch.setattr(
+        "workspace.skills.legal_summarizer.scripts.pipeline.process_context_batch",
+        fake_process_context_batch,
+    )
+    monkeypatch.setattr(_summarizer, "pack_chunks", one_chunk_per_batch)
+    monkeypatch.setattr(_summarizer, "get_chunking_config", lambda: {
+        "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
+        "chunk_size_input_ratio": None,
+        "context_window_tokens": 200,
+        "brief_max_input_chars": 6000,
+        "brief_max_chars_per_chunk": None,
+        "brief_coverage_ratio": 0.5,
+    })
+    monkeypatch.setattr(_summarizer, "get_execution_config", lambda: {
+        "confirmation_threshold_sec": 0.001,
+        "estimated_chunk_duration_sec": 0.001,
+        "max_chunks_for_execution": 100,
+        # КРИТИЧНО: провоцируем DEPRECATE-ветку.
+        "max_concurrent_batches": 4,
+        "context_batching": {
+            "system_prompt_tokens": 100, "instruction_tokens_per_map": 50,
+            "chars_per_token": 3.5, "safety_margin": 0.85,
+        },
+        "llm_max_tokens": 100,
+    })
+
+    paragraph = "Длинный абзац про договор подряда, права и обязанности. "
+    text = "\n\n".join([paragraph] * 200)
+
+    import warnings as _warnings
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        _summarizer.run(
+            text, length="brief", confirmed=True, workspace_root=tmp_path,
+        )
+    deprecation = [
+        w for w in caught if issubclass(w.category, DeprecationWarning)
+    ]
+    assert len(deprecation) == 1, (
+        f"Ожидался ровно 1 DeprecationWarning на max_concurrent_batches=4, "
+        f"получили {len(deprecation)}: {[str(w.message) for w in deprecation]}"
+    )
+
+    # Главный инвариант: даже при max_concurrent_batches=4 peak == 1.
+    assert state["peak"] == 1, (
+        f"INV-2 нарушен под config max_concurrent_batches=4: "
+        f"peak in-flight == {state['peak']}, ожидалось 1. "
+        f"Runtime single-flight invariant НЕ соблюдён."
+    )
+    # total_llm_calls > 0 — иначе это empty test.
+    assert state["calls"] >= 1, (
+        f"process_context_batch не вызывался ни разу (calls={state['calls']}); "
+        "тест не информативен."
     )
 

@@ -1128,13 +1128,30 @@ def run(
     first_batch_error: dict[str, Any] | None = None
 
     # Sequential выполнение батчей: один LLM-вызов одновременно.
+    # Жёсткий runtime invariant: max_active_llm_calls <= 1 в map-фазе.
     # Текущий runtime не рассчитан на параллельные запросы к LLM
     # (тесты на single-flight, нет общего rate-limit policy, retry
     # parse-error должен идти от первого failed батча без перемешивания
-    # с параллельно стартовавшими). Default строго 1; runtime-конфиг
-    # ``max_concurrent_batches`` оставлен как override (не ниже 1).
+    # с параллельно стартовавшими).
+    #
+    # ``max_concurrent_batches`` DEPRECATED: ранее допускал override > 1,
+    # что позволяло обойти invariant. Сейчас runtime clamp'ит значение до 1
+    # и эмитит DeprecationWarning, если в конфиге задано > 1 — backward
+    # compatibility для существующих project.json сохранена, но нельзя
+    # поднять concurrency выше 1. Удаление ключи планируется в v3.0
+    # (см. CHANGELOG.md, секция Deprecation).
     exec_cfg_for_map = globals()["get_execution_config"]()
-    concurrency = max(1, int(exec_cfg_for_map.get("max_concurrent_batches", 1)))
+    configured_concurrency = int(exec_cfg_for_map.get("max_concurrent_batches", 1) or 1)
+    if configured_concurrency > 1:
+        warnings.warn(
+            "skills.legal_summarizer.execution.max_concurrent_batches > 1 "
+            f"({configured_concurrency}) DEPRECATED и игнорируется: "
+            "текущий runtime строго single-flight (max_active_llm_calls == 1). "
+            "Удалите ключ из project.json — см. CHANGELOG.md (Deprecation).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    concurrency = 1
 
     # Соберём все батчи с pending чанками и предварительно посчитаем прогресс.
     queued: list[tuple[ContextBatch, int]] = []  # (batch_to_process, pending_count)
