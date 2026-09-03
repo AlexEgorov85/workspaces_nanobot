@@ -129,8 +129,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _emit(payload: dict) -> None:
+    """Напечатать JSON-payload в stdout и физически отправить его наружу.
+
+    ``flush=True`` обязателен: внешний ``exec``/``write_stdin`` считывает
+    stdout построчно и без flush видит ``RUNNING``-маркер только после
+    завершения долгой операции (несколько минут молчания). Исторически
+    CLI полагался на авто-flush при exit — для short-lived процессов это
+    работало, но для multi-minute прогонов ``legal_summarizer`` это
+    нарушало контракт долгой операции (инцидент 2026-08-31:
+    «получил status=running только после завершения»).
+    """
     try:
-        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        print(
+            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+            flush=True,
+        )
     except UnicodeEncodeError:
         # Запасной путь: stdout не перешёл на UTF-8 (reconfigure недоступен
         # или вернул closed stream). Пишем байты напрямую с заменой
@@ -153,9 +166,15 @@ _DONE_SENTINEL = "__LEGAL_SUMMARIZER_DONE__"
 
 
 def _emit_done(payload: dict) -> None:
-    """Напечатать финальный результат, затем sentinel завершения в stdout."""
+    """Напечатать финальный результат, затем sentinel завершения в stdout.
+
+    Оба вызова физически отправляются наружу (``flush=True``) — иначе
+    внешний ``exec``/``write_stdin(wait_for=...)`` рискует не увидеть
+    sentinel до завершения процесса (autoflush при exit для multi-minute
+    прогонов не помогает). См. ``_emit()`` docstring.
+    """
     _emit(payload)
-    print(_DONE_SENTINEL)
+    print(_DONE_SENTINEL, flush=True)
 
 
 def _emit_running_marker(text: str) -> None:

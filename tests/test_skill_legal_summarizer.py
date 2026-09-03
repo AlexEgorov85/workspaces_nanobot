@@ -1133,10 +1133,17 @@ def test_batch_parse_error_retries_then_succeeds(monkeypatch, tmp_path):
     assert result["stats"]["map_calls"] >= 2
 
 
-def test_map_phase_runs_batches_concurrently(monkeypatch, tmp_path):
-    """Параллельная map-фаза: при concurrency=3 и 10 батчах peak in-flight
-    должен быть ≤3, а не 1 (как было при sequential). Это проверяет что
-    asyncio.gather + Semaphore реально работают."""
+def test_map_phase_single_flight(monkeypatch, tmp_path):
+    """Single-flight map-фаза: при concurrency=1 (default) peak in-flight
+    должен быть ≤1 даже при множестве батчей.
+
+    Текущий runtime рассчитан на один LLM-вызов одновременно
+    (parse-error retry должен идти от первого failed батча без
+    перемешивания с параллельно стартовавшими). Старая политика
+    ``max_concurrent_batches=4`` создавала race conditions при
+    parse-error (тест ``test_batch_parse_error_exhausts_returns_partial``
+    явно выставлял concurrency=1 чтобы тест был детерминированным).
+    """
     import re as _re
     import threading
     import time as _time
@@ -1149,9 +1156,6 @@ def test_map_phase_runs_batches_concurrently(monkeypatch, tmp_path):
             if state["in_flight"] > state["peak"]:
                 state["peak"] = state["in_flight"]
         try:
-            # Имитируем I/O latency чтобы event loop успевал запустить
-            # следующие task'и до завершения текущего (без sleep to_thread
-            # завершается мгновенно и Semaphore не успевает разойтись).
             _time.sleep(0.05)
             user_content = messages[1]["content"]
             if _re.findall(r"DOCUMENT CHUNK \d+", user_content):
@@ -1171,7 +1175,7 @@ def test_map_phase_runs_batches_concurrently(monkeypatch, tmp_path):
     monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
         "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
         "max_chunks_for_execution": 100,
-        "max_concurrent_batches": 3,  # лимит
+        "max_concurrent_batches": 1,  # default
         "context_batching": {
             "system_prompt_tokens": 100, "instruction_tokens_per_map": 50,
             "chars_per_token": 3.5, "safety_margin": 0.85,
@@ -1185,12 +1189,9 @@ def test_map_phase_runs_batches_concurrently(monkeypatch, tmp_path):
         text, length="brief", confirmed=True, workspace_root=tmp_path,
     )
     assert result["status"] == "completed"
-    assert state["peak"] >= 2, (
-        f"peak in-flight должен быть ≥2 при concurrency=3 и "
-        f"{result['stats']['map_calls']} батчах; получили {state['peak']}"
-    )
-    assert state["peak"] <= 3, (
-        f"peak in-flight превысил max_concurrent_batches=3: {state['peak']}"
+    assert state["peak"] == 1, (
+        f"peak in-flight должен быть ==1 при single-flight; "
+        f"получили {state['peak']}"
     )
 
 
