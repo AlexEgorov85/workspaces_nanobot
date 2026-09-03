@@ -328,6 +328,24 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
                              "промежуточного режима «текст ≤ N»",
         risk="medium",
     ),
+    "skill_catalogs": PatchSpec(
+        name="skill_catalogs",
+        purpose="подмена чтения SKILL.md на expanded-версию через "
+                "SkillCatalog.render_expanded_skill; маркеры "
+                "{{SCRIPTS_CATALOG}} / {{VECTORS_CATALOG}} / {{TABLES_CATALOG}} "
+                "заменяются runtime-каталогом из auto-populated env-vars",
+        nanobot_target="nanobot.agent.skills.SkillsLoader.load_skill",
+        reason="каталог ресурсов навыка (скрипты, векторные индексы, "
+               "таблицы) динамический и живёт в runtime-БД + project.json; "
+               "hardcoded-список в SKILL.md нарушает инвариант «добавление "
+               "ресурса = config/DB operation»",
+        alternatives_checked="workspace/overrides (Jinja2 ChoiceLoader) — не "
+                             "подходит, т.к. nanobot читает SKILL.md как "
+                             "статический текст без шаблонизации; auto-scan "
+                             "skills каждый раз при чтении — слишком "
+                             "дорого при hot-reload",
+        risk="medium",
+    ),
 }
 
 
@@ -490,6 +508,7 @@ class RuntimePatcher:
         self._record(report, "idle_guard", self.patch_auto_compact_idle_guard(agent))
         self._record(report, "document_text_threshold", self.patch_document_text_threshold(settings))
         self._record(report, "session_content_cleanup", self.patch_session_content_cleanup())
+        self._record(report, "skill_catalogs", self.patch_skill_catalogs())
         return report
 
     @staticmethod
@@ -2030,3 +2049,65 @@ class RuntimePatcher:
 
         auto.check_expired = lambda *a, **k: None
         return True, "idle auto-compact enumeration disabled (ttl=0)"
+
+    # ------------------------------------------------------------------
+    # Патч N: рендеринг каталожных секций SKILL.md runtime-каталогом
+    # ------------------------------------------------------------------
+
+    def patch_skill_catalogs(self) -> tuple[bool, str]:
+        """Подменить ``SkillsLoader.load_skill`` на expanded-версию.
+
+        Маркеры ``{{SCRIPTS_CATALOG}}``, ``{{VECTORS_CATALOG}}``,
+        ``{{TABLES_CATALOG}}`` в SKILL.md заменяются на runtime-каталог,
+        вычисленный в ``ApplicationContext._populate_skill_catalog_env``
+        (env-vars ``SKILL_<NAME>_*``).
+
+        Без этого патча SKILL.md содержит ``{{...}}`` буквально — Agent
+        видит маркеры, не каталог.
+
+        Risk: ``high`` — зависит от ``SkillsLoader.load_skill`` (публичный
+        метод, но может измениться в будущих версиях nanobot).
+        Defensive check: если метод отсутствует — ``RuntimeError`` при
+        старте вместо тихой регрессии.
+
+        Контракт:
+            * patch идемпотентен (повторный вызов пропускается);
+            * патчится **класс**, а не инстанс (SkillsLoader создаётся
+              динамически SkillsManager'ом);
+            * оригинальный метод сохраняется в ``SkillsLoader._load_skill_original``
+              для отладки/тестов.
+        """
+        try:
+            from nanobot.agent.skills import SkillsLoader
+        except Exception as exc:
+            return False, f"nanobot.agent.skills.SkillsLoader import failed: {exc}"
+
+        if not hasattr(SkillsLoader, "load_skill"):
+            raise RuntimeError(
+                "nanobot API изменился: SkillsLoader.load_skill не найден. "
+                "SkillCatalog не может быть подключён. Проверьте версию nanobot "
+                "и docs/architecture/runtime-patcher-inventory.md::patch_skill_catalogs."
+            )
+
+        if getattr(SkillsLoader, "_skill_catalog_patched", False):
+            return True, "skill_catalogs patch already applied"
+
+        from lib.utils.skill_catalog import SkillCatalog
+
+        original = SkillsLoader.load_skill
+
+        def patched(self, name: str) -> str | None:
+            raw = original(self, name)
+            if raw is None:
+                return None
+            return SkillCatalog.render_expanded_skill(name, raw)
+
+        SkillsLoader.load_skill = patched
+        SkillsLoader._load_skill_original = original
+        SkillsLoader._skill_catalog_patched = True
+        logger.info(
+            "SkillCatalog: SkillsLoader.load_skill подменён — маркеры "
+            "{{SCRIPTS_CATALOG}}/{{VECTORS_CATALOG}}/{{TABLES_CATALOG}} будут "
+            "заменены на runtime-каталог."
+        )
+        return True, "SkillsLoader.load_skill expanded via SkillCatalog"

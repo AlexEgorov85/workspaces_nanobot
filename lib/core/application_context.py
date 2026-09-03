@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -343,6 +343,28 @@ class ApplicationContext:
             except Exception as exc:
                 logger.warning("PgDuckDbSyncService not started: %s", exc)
 
+        # Auto-populate SKILL_<NAME>_* env-vars из runtime-состояния.
+        #
+        # Cold-start: snapshot ещё не опубликован, populate пишет INFO
+        # «snapshot not available yet» и пустые env-vars. После успешного
+        # initial_load once-callback на on_sync (см. _wrap_initial_sync_callback)
+        # повторно вызывает _populate_skill_catalog_env — теперь snapshot
+        # доступен и {{SCRIPTS_CATALOG}} получит актуальные данные.
+        #
+        # Warm-restart: snapshot уже есть на диске — populate сразу видит
+        # его, once-callback подтверждает то же состояние (идемпотентно).
+        #
+        # Никакого polling/sleep — это lifecycle-event от sync-сервиса,
+        # а не ожидание на стороне startup'а (Этап 11 плана).
+        if self.sync_service is not None:
+            _wrap_initial_sync_callback(
+                self.sync_service,
+                lambda: _populate_skill_catalog_env(
+                    workspace_path=self.workspace_dir,
+                ),
+            )
+        _populate_skill_catalog_env(workspace_path=self.workspace_dir)
+
         self._started = True
 
         # Финальный readiness snapshot для startup-лога.
@@ -367,6 +389,15 @@ class ApplicationContext:
             return
         if self._shutdown is not None:
             self._shutdown.shutdown_all()
+        # Очистить auto-populated env-vars SKILL_<NAME>_*, чтобы при
+        # повторном create() в одном процессе не было утечки состояния
+        # между contexts (особенно важно для pytest reuse).
+        try:
+            from lib.utils.skill_catalog import SkillCatalog
+
+            SkillCatalog.clear_skill_env()
+        except Exception as exc:
+            logger.warning("clear_skill_catalog_env failed: %s", exc)
         # После остановки сервисов закрываем общий пул соединений.
         _stop_db_pool()
         if self.runtime_health is not None:
@@ -717,6 +748,332 @@ def _register_infra_resources(ctx: ApplicationContext) -> None:
 
     register_vector_storage()
     register_embedding_config()
+
+
+# ----------------------------------------------------------------------
+# Auto-population SKILL_<NAME>_* env-vars (см. docs/ARCHITECTURE.md
+# «Skill catalog rendering»).
+# ----------------------------------------------------------------------
+
+
+def _populate_skill_catalog_env(workspace_path: Path | None = None) -> None:
+    """Заполнить ``os.environ[SKILL_<NAME>_*]`` из runtime-состояния.
+
+    Источники:
+      * tables — ``TableRegistry.table_resources()`` (без label);
+      * vectors — ``agent_vector_index_config`` (PG-реестр) или fallback
+        на ``TableRegistry.vector_resources()``;
+      * scripts — ``agent_predefined_scripts`` через
+        ``TableRegistry.resources_by_label('scripts_registry')`` → DuckDB.
+
+    Args:
+        workspace_path: путь к корню workspace для поиска DuckDB-снапшота.
+            Если ``None`` — пытаемся найти автоматически (cwd или env-vars).
+
+    Вызывается:
+      * один раз при старте (см. ``ApplicationContext.start``) —
+        warm-restart: snapshot уже есть, populate сразу видит его;
+      * повторно через ``SkillCatalog.refresh_runtime_catalog`` после
+        успешного ``PgDuckDbSyncService`` initial load (cold-start).
+
+    Очистка — ``ApplicationContext.stop`` через
+    ``SkillCatalog.clear_skill_env``.
+
+    TODO(future): если процесс будет обслуживать несколько контекстов
+    (multi-tenant / per-request skill loading), ``os.environ`` не подходит —
+    перейти на передачу snapshot-словаря через ctx/skill_context, а
+    ``{{MARKER}}``-substitution делать в ``SkillCatalog.render_expanded_skill``
+    с параметром ``snapshot=...``. Сейчас это допустимо, т.к.
+    ``ApplicationContext`` singleton-per-process.
+
+    При ошибке чтения из DuckDB/PG — ставит пустые значения и логирует
+    INFO (отсутствие snapshot до initial sync — допустимое состояние).
+    """
+    from lib.services.table_registry import table_registry
+    from lib.utils.skill_catalog import SkillCatalog
+
+    skill_names = list(table_registry.names())
+    if not skill_names:
+        return
+
+    # Скрипты общие для всех skill'ов (один реестр agent_predefined_scripts).
+    # Читаем их один раз и подставляем во все skill'ы.
+    scripts_cache = _load_predefined_scripts_cache(workspace_path=workspace_path)
+
+    for skill_name in skill_names:
+        reg = table_registry.get(skill_name)
+        if reg is None or not reg.enabled:
+            continue
+        upper = skill_name.upper().replace("-", "_")
+
+        _populate_tables_env(skill_name, upper)
+        _populate_vectors_env(skill_name, upper)
+        _populate_scripts_env(skill_name, upper, scripts_cache=scripts_cache)
+
+
+def _wrap_initial_sync_callback(
+    sync_service: Any,
+    on_initial_done: Callable[[], None],
+) -> None:
+    """Установить once-callback на первый успешный ``on_sync``.
+
+    ``PgDuckDbSyncService._fire_sync_callback`` вызывается после
+    initial_load и после каждого poll-цикла. Refresh SkillCatalog нужен
+    **ровно один раз** — после того, как worker опубликовал снимок.
+
+    Args:
+        sync_service: ``PgDuckDbSyncService``.
+        on_initial_done: callable, вызывается ровно один раз при первом
+            sync-callback. Ошибка внутри логируется и не пробрасывается —
+            readiness-флаг должен остаться консистентным.
+
+    Поведение:
+        * оборачивает существующий ``prev_cb = _on_sync_callback``
+          (если его уже поставил ``gateway.py``) — после срабатывания
+          once-callback вернёт его обратно;
+        * не делает polling/sleep;
+        * не трогает ``PgDuckDbSyncService`` API;
+        * идемпотентен относительно вызывающей стороны: можно поставить
+          один раз, дальше он сам себя снимает.
+    """
+    if sync_service is None:
+        return
+    prev_cb = getattr(sync_service, "_on_sync_callback", None)
+    state = {"done": False}
+
+    def _wrapped() -> None:
+        if not state["done"]:
+            state["done"] = True
+            try:
+                on_initial_done()
+            except Exception as exc:
+                logger.warning(
+                    "SkillCatalog: initial refresh callback failed: %s", exc
+                )
+            try:
+                sync_service.set_on_sync_callback(prev_cb)
+            except Exception:
+                pass
+        if prev_cb is not None:
+            try:
+                prev_cb()
+            except Exception:
+                pass
+
+    try:
+        sync_service.set_on_sync_callback(_wrapped)
+    except Exception as exc:
+        logger.warning(
+            "SkillCatalog: set_on_sync_callback failed (%s); "
+            "initial refresh will not run automatically.",
+            exc,
+        )
+
+
+def _load_predefined_scripts_cache(
+    workspace_path: Path | None = None,
+) -> dict[str, str]:
+    """Прочитать {name: description} из DuckDB-кеша один раз.
+
+    Возвращает пустой dict, если:
+      * ``scripts_registry`` не зарегистрирован в TableRegistry;
+      * DuckDB-снапшот не найден;
+      * ``query_sql`` вернул ошибку;
+      * PostgresDuckDbProvider не удалось открыть.
+
+    WARNING логируется ровно один раз.
+    """
+    import os
+    from loguru import logger
+    from lib.services.table_registry import table_registry
+
+    if workspace_path is None:
+        workspace_path = Path.cwd()
+
+    resources = table_registry.resources_by_label("scripts_registry")
+    if not resources:
+        logger.warning(
+            "SkillCatalog: scripts_registry не зарегистрирован в TableRegistry; "
+            "SKILL_<NAME>_SCRIPTS будет пустым для всех skill'ов."
+        )
+        return {}
+
+    table = resources[0].name
+    if "." in table:
+        schema, tbl = table.split(".", 1)
+    else:
+        schema, tbl = "main", table
+
+    cache_path = table_registry.snapshot_path(workspace_path)
+    if not cache_path.is_file():
+        logger.info(
+            "SkillCatalog: DuckDB snapshot is not available yet: "
+            "{snapshot_path}; descriptions of predefined scripts will be "
+            "picked up after PgDuckDbSyncService initial load completes.",
+            snapshot_path=cache_path,
+        )
+        return {}
+
+    try:
+        from lib.services.cache_provider_impl import PostgresDuckDbProvider
+
+        provider = PostgresDuckDbProvider(
+            schema=None, tables=None, additional_tables=[],
+            cache_path=str(cache_path), vector_db_table="",
+            vector_index_path="", vector_indexes={},
+            vector_store_table="",
+        )
+        # Provider создаётся в состоянии ``_is_ready=False``. Без явного
+        # ``open_cache()`` первый ``query_sql`` вернёт "Cache is not ready".
+        # Здесь — read-only snapshot уже создан sync'ом, так что refresh не
+        # нужен: достаточно открыть существующий файл.
+        if not provider.open_cache():
+            logger.warning(
+                "SkillCatalog: open_cache() не удался для {path}; "
+                "SKILL_<NAME>_SCRIPTS будет пустым.",
+                path=cache_path,
+            )
+            return {}
+    except Exception as exc:
+        logger.warning(
+            "SkillCatalog: не удалось открыть DuckDB provider ({err}); "
+            "SKILL_<NAME>_SCRIPTS будет пустым.",
+            err=exc,
+        )
+        return {}
+
+    sql = f'SELECT name, description FROM "{schema}"."{tbl}" ORDER BY name'
+    try:
+        try:
+            result = provider.query_sql(sql)
+        finally:
+            try:
+                provider.close()
+            except Exception:
+                pass
+        if result.get("status") != "success":
+            logger.warning(
+                "SkillCatalog: query_sql вернул {status} для scripts_registry; "
+                "SKILL_<NAME>_SCRIPTS пуст.",
+                status=result.get("status"),
+            )
+            return {}
+        out: dict[str, str] = {}
+        for row in result.get("rows", []) or []:
+            if isinstance(row, dict):
+                name = row.get("name") or ""
+                desc = row.get("description") or ""
+            elif isinstance(row, (list, tuple)) and len(row) >= 2:
+                name = row[0] or ""
+                desc = row[1] or ""
+            else:
+                continue
+            if name:
+                out[str(name)] = str(desc) if desc else ""
+        return out
+    except Exception as exc:
+        logger.warning(
+            "SkillCatalog: ошибка чтения scripts_registry ({err}); "
+            "SKILL_<NAME>_SCRIPTS пуст.",
+            err=exc,
+        )
+        return {}
+
+
+def _populate_tables_env(skill_name: str, upper: str) -> None:
+    """Tables из TableRegistry (без label)."""
+    from lib.services.table_registry import table_registry
+
+    reg = table_registry.get(skill_name)
+    if reg is None:
+        return
+    names = [
+        r.name for r in reg.table_resources() if r.name and not r.label
+    ]
+    import os
+
+    os.environ[f"SKILL_{upper}_TABLES"] = ",".join(names)
+
+
+def _populate_vectors_env(skill_name: str, upper: str) -> None:
+    """Vectors из agent_vector_index_config (PG-реестр) с fallback на TableRegistry.
+
+    Вместе с именами подмешивает ``SKILL_<NAME>_VECTOR_DESCRIPTIONS`` —
+    описание из колонки ``description`` (если есть) для каждого индекса.
+    """
+    import os
+    from lib.services.table_registry import table_registry
+
+    cfg: dict = {}
+    try:
+        from lib.services.cache_provider_impl import read_vector_index_config
+
+        cfg = read_vector_index_config({}) or {}
+    except Exception as exc:
+        from loguru import logger
+
+        logger.warning(
+            "SkillCatalog: не удалось прочитать agent_vector_index_config "
+            "для %s (%s); SKILL_%s_VECTORS заполняется из TableRegistry.",
+            skill_name, exc, upper,
+        )
+
+    if cfg:
+        names = sorted(cfg.keys())
+        descriptions: list[str] = []
+        for name in names:
+            entry = cfg.get(name) or {}
+            desc = ""
+            if isinstance(entry, dict):
+                desc = (
+                    entry.get("description")
+                    or entry.get("long_description")
+                    or ""
+                )
+            if isinstance(desc, str) and desc:
+                d_escaped = desc.replace(";", ",").replace("\n", " ")
+                descriptions.append(f"{name}={d_escaped}")
+        os.environ[f"SKILL_{upper}_VECTORS"] = ",".join(names)
+        os.environ[f"SKILL_{upper}_VECTOR_DESCRIPTIONS"] = ";".join(descriptions)
+        return
+
+    reg = table_registry.get(skill_name)
+    if reg is None:
+        os.environ[f"SKILL_{upper}_VECTORS"] = ""
+        os.environ[f"SKILL_{upper}_VECTOR_DESCRIPTIONS"] = ""
+        return
+    vec_names = [r.name for r in reg.vector_resources()]
+    os.environ[f"SKILL_{upper}_VECTORS"] = ",".join(vec_names)
+    os.environ[f"SKILL_{upper}_VECTOR_DESCRIPTIONS"] = ""
+
+
+def _populate_scripts_env(
+    skill_name: str,
+    upper: str,
+    *,
+    scripts_cache: dict[str, str] | None = None,
+) -> None:
+    """Записать ``SKILL_<NAME>_SCRIPTS`` / ``_SCRIPT_DESCRIPTIONS`` из кеша.
+
+    Кеш заполняется один раз в ``_populate_skill_catalog_env`` через
+    ``_load_predefined_scripts_cache`` — это исключает двойной WARNING
+    при наличии нескольких skill'ов в реестре.
+    """
+    import os
+
+    if not scripts_cache:
+        os.environ[f"SKILL_{upper}_SCRIPTS"] = ""
+        os.environ[f"SKILL_{upper}_SCRIPT_DESCRIPTIONS"] = ""
+        return
+
+    names = list(scripts_cache.keys())
+    descriptions: list[str] = []
+    for name, desc in scripts_cache.items():
+        if desc:
+            d_escaped = desc.replace(";", ",").replace("\n", " ")
+            descriptions.append(f"{name}={d_escaped}")
+    os.environ[f"SKILL_{upper}_SCRIPTS"] = ",".join(names)
+    os.environ[f"SKILL_{upper}_SCRIPT_DESCRIPTIONS"] = ";".join(descriptions)
 
 
 def _make_transcription(config: Any) -> Any:

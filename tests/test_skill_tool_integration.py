@@ -156,33 +156,26 @@ class TestScenario4UnknownTableRejected:
 
 
 class TestScenario5SkillReferencesExist:
-    """SKILL.md ссылается на references/, которые существуют."""
+    """SKILL.md больше НЕ содержит references/ — каталог рендерится runtime."""
 
-    @pytest.mark.parametrize(
-        "ref_path",
-        [
-            "workspace/skills/audit_analyzer/references/schema.md",
-            "workspace/skills/audit_analyzer/references/vector_indexes.md",
-            "workspace/skills/audit_analyzer/references/sql_guidance.md",
-        ],
-    )
-    def test_reference_file_exists(self, ref_path: str) -> None:
-        path = Path(ref_path)
-        assert path.exists(), f"{ref_path} must exist for progressive disclosure"
-        assert path.stat().st_size > 200, f"{ref_path} too small"
+    def test_references_dir_removed(self) -> None:
+        """Папка references/ удалена; runtime-каталог живёт в SKILL_<NAME>_*."""
+        from pathlib import Path
+
+        path = Path("workspace/skills/audit_analyzer/references")
+        assert not path.exists(), (
+            f"{path} должен быть удалён — каталог рендерится runtime "
+            "из SKILL_<NAME>_* env-vars (SkillCatalog.render_expanded_skill)"
+        )
 
     def test_skill_md_uses_decision_procedure(self) -> None:
         """SKILL.md должен содержать decision logic для выбора capability.
 
-        Проверяем наличие одного из вариантов:
-        - явный раздел "Decision procedure" / "Decision tree";
-        - таблица "задача → capability";
-        - список правил выбора tool'а.
-
-        После рефакторинга архитектура — ровно 3 capability:
-        ``run_predefined_script``, ``vector_search``, ``nl_sql_generate``.
-        Прямой SQL через ``duckdb_query`` **не** рекомендуется в
-        SKILL.md (см. Этап 14 коррекционного pass'а).
+        После рефакторинга архитектура — ровно 3 capability (predefined,
+        vector, NL→SQL). SKILL.md может упоминать tool по имени
+        (``run_predefined_script``) как иллюстрацию вызова — это не
+        нарушает инвариант «skill не знает физических имён ресурсов».
+        Главное — нет ``duckdb_query`` как data-flow.
         """
         skill = Path("workspace/skills/audit_analyzer/SKILL.md").read_text(encoding="utf-8")
         markers = [
@@ -196,12 +189,51 @@ class TestScenario5SkillReferencesExist:
             "'Decision tree' / 'Decision procedure' или таблицу "
             "'задача → capability'."
         )
-        assert "run_predefined_script" in skill
-        assert "vector_search" in skill
-        assert "nl_sql_generate" in skill
+        # 3 capability как capability-названия (вместо точных tool-имён).
+        for cap in ("PREDEFINED SCRIPT", "VECTOR SEARCH", "NL → SQL"):
+            assert cap in skill, (
+                f"SKILL.md не содержит capability '{cap}' — добавьте "
+                "как имена режимов в Decision tree."
+            )
         # Прямой SQL через duckdb_query НЕ должен быть в SKILL.md —
         # архитектура трёх capability запрещает его как data flow.
         assert "duckdb_query" not in skill, (
             "SKILL.md не должен рекомендовать duckdb_query как путь "
             "получения audit data — только 3 capability."
         )
+
+    def test_skill_md_has_runtime_catalog_markers(self) -> None:
+        """SKILL.md содержит маркеры ``{{...}}`` для runtime-рендера каталога."""
+        skill = Path("workspace/skills/audit_analyzer/SKILL.md").read_text(encoding="utf-8")
+        assert "{{SCRIPTS_CATALOG}}" in skill, (
+            "SKILL.md должен содержать {{SCRIPTS_CATALOG}} для "
+            "runtime-рендера каталога predefined scripts"
+        )
+        assert "{{VECTORS_CATALOG}}" in skill, (
+            "SKILL.md должен содержать {{VECTORS_CATALOG}} для "
+            "runtime-рендера каталога vector indexes"
+        )
+
+    def test_skill_md_no_hardcoded_resource_names(self) -> None:
+        """SKILL.md не содержит физические имена ресурсов (инвариант)."""
+        skill = Path("workspace/skills/audit_analyzer/SKILL.md").read_text(encoding="utf-8")
+        forbidden = [
+            "audits_index",
+            "violations_index",
+            "audit_reports_index",
+            "audit_status_summary",
+            "top_violations_by_type",
+            "violations_by_period",
+            "audits_by_period",
+            "audit_effectiveness_summary",
+            "oarb.audits",
+            "oarb.violations",
+            "oarb.audit_reports",
+            "oarb.report_items",
+        ]
+        for name in forbidden:
+            assert name not in skill, (
+                f"SKILL.md содержит hardcoded имя {name!r} — должно "
+                "рендериться runtime через {{SCRIPTS_CATALOG}} / "
+                "{{VECTORS_CATALOG}} (архитектурный инвариант)."
+            )

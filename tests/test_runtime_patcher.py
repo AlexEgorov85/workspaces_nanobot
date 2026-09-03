@@ -1155,6 +1155,7 @@ class TestPatchSpecs:
             "async_save", "subagent_logging", "project_tools",
             "compact_tracking", "compact_command", "idle_guard",
             "session_content_cleanup", "document_text_threshold",
+            "skill_catalogs",
         }
         assert set(specs) == expected
 
