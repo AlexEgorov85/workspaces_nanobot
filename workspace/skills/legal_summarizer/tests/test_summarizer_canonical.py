@@ -133,3 +133,35 @@ def test_estimate_chunks_canonical_empty():
     )
 
     assert estimate_chunks_canonical([]) == 0
+
+
+def test_pack_batches_canonical_returns_batches():
+    """pack_batches_canonical возвращает список tuple chunk_ids."""
+    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        pack_batches_canonical,
+    )
+
+    chunks = [
+        Chunk(
+            chunk_id="001", index=0, text="Section one content. " * 50,
+            char_count=1100, token_estimate=10,
+            page_start=None, page_end=None,
+            section_id="s1", section_path="", section_heading="Section 1",
+            block_indices=(0,), block_types=("paragraph",),
+        ),
+        Chunk(
+            chunk_id="002", index=1, text="Section two content. " * 50,
+            char_count=1100, token_estimate=10,
+            page_start=None, page_end=None,
+            section_id="s2", section_path="", section_heading="Section 2",
+            block_indices=(1,), block_types=("paragraph",),
+        ),
+    ]
+    batches = pack_batches_canonical(chunks)
+    assert isinstance(batches, list)
+    assert len(batches) >= 1
+    for batch in batches:
+        assert isinstance(batch, tuple)
+        for cid in batch:
+            assert isinstance(cid, str)

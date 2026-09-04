@@ -213,6 +213,24 @@ def estimate_chunks_canonical(chunks: list) -> int:
     return estimator.estimate_many([c.text for c in chunks])
 
 
+def pack_batches_canonical(
+    chunks: list,
+    *,
+    max_sections_per_batch: int = 2,
+    per_batch_token_budget: int = 6000,
+) -> list[tuple[str, ...]]:
+    """Canonical batch packing через adjacent-section policy.
+
+    Использует ``pack_chunks_with_adjacent`` (Этап 13 подготовка).
+    Возвращает список tuple chunk_ids — порядок execution.
+    """
+    cfg = AdjacentPackingConfig(
+        max_sections_per_batch=max_sections_per_batch,
+        per_batch_token_budget=per_batch_token_budget,
+    )
+    return pack_chunks_with_adjacent(tuple(chunks), config=cfg)
+
+
 __all__ = [
     "build_pipeline_result",
     "strategy_from_pipeline",
@@ -221,4 +239,5 @@ __all__ = [
     "inspect_canonical",
     "estimate_canonical",
     "estimate_chunks_canonical",
+    "pack_batches_canonical",
 ]
