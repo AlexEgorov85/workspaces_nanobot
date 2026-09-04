@@ -77,11 +77,6 @@ from workspace.skills.legal_summarizer.scripts.document_stats import (
     DocumentStats,
     compute_document_stats,
 )
-from workspace.skills.legal_summarizer.scripts.execution_strategy import (
-    ExecutionStrategy,
-    StrategyConfig,
-    select_execution_strategy,
-)
 from workspace.skills.legal_summarizer.scripts.structure.chunks import (
     Chunk,
     ChunkConfig,
@@ -565,13 +560,15 @@ def inspect(
         repeated_blocks=cleanup_stats.repeated_blocks,
     )
 
-    strategy_cfg = StrategyConfig(
-        direct_budget_tokens=budget.direct_call_tokens,
-        reduce_budget_tokens=budget.available_chunk_tokens,
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        execution_strategy_for_legacy,
     )
-    strategy = select_execution_strategy(stats, strategy_cfg)
-
-    strategy_label = strategy.value
+    strategy_label = execution_strategy_for_legacy(
+        estimated_tokens=int(stats.estimated_tokens),
+        sections=int(stats.sections),
+        direct_budget_tokens=int(budget.direct_call_tokens),
+        reduce_budget_tokens=int(budget.available_chunk_tokens),
+    )
 
     if strategy_label == "direct":
         chunk = Chunk(

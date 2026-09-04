@@ -252,6 +252,32 @@ def reduce_strategy_for_legacy(
     return "hierarchical" if sections >= min_sections_for_hierarchical else "flat"
 
 
+def execution_strategy_for_legacy(
+    *,
+    estimated_tokens: int,
+    sections: int,
+    direct_budget_tokens: int,
+    reduce_budget_tokens: int,
+    min_sections_for_hierarchical: int = 3,
+) -> str:
+    """Определить execution strategy для legacy DocumentStats.
+
+    Canonical ``select_strategy`` принимает DocumentStructure + chunks.
+    Этот адаптер работает с legacy DocumentStats: возвращает
+    ``"direct"`` / ``"map_flat"`` / ``"map_hierarchical"``.
+
+    Логика (PLAN §23):
+    - estimated_tokens ≤ direct_budget_tokens → ``"direct"``
+    - sections ≥ min_sections_for_hierarchical → ``"map_hierarchical"``
+    - иначе → ``"map_flat"``
+    """
+    if estimated_tokens <= direct_budget_tokens:
+        return "direct"
+    if sections >= min_sections_for_hierarchical:
+        return "map_hierarchical"
+    return "map_flat"
+
+
 __all__ = [
     "build_pipeline_result",
     "strategy_from_pipeline",
@@ -262,4 +288,5 @@ __all__ = [
     "estimate_chunks_canonical",
     "pack_batches_canonical",
     "reduce_strategy_for_legacy",
+    "execution_strategy_for_legacy",
 ]
