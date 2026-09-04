@@ -8,7 +8,9 @@
 
 ## [Unreleased]
 
-> Состояние тестов на момент правки: **1590 passed, 14 skipped** (`pytest`).
+> Состояние тестов на момент правки: **2672 passed, 5 failed, 14 skipped** (`pytest -q --tb=no`).
+> Baseline зафиксирован в `docs/legal_summarizer_baseline.md` (Этап 0 из `PLAN.md`).
+> Все 5 failed — **pre-existing**, не регрессия правок этого этапа (см. `docs/legal_summarizer_baseline.md` §1.1).
 > Содержит три больших блока: `refactor/skills-tools-cleanup`
 > (generic tools + audit_analyzer cleanup, +архитектурные тесты),
 > `refactor/core-extract-duckdb-faiss` (lib → generic, table_registry,
@@ -19,6 +21,169 @@
 > `table_registry.snapshot_path()` → `workspace/data_store/duckdb/cache.duckdb`.
 > `audit_vectors` теперь попадает в DuckDB-кэш через инфра-регистрацию
 > (`gateway.vector_index.storage_table`).
+
+### Added (legal_summarizer refactor — Stage 0: baseline)
+
+- **`docs/legal_summarizer_baseline.md`** — фиксация текущего состояния перед
+  началом поэтапного рефакторинга `workspace/skills/legal_summarizer` по
+  `PLAN.md` (97 этапов). Содержит: 2691 тестов (2672 passed / 5 failed /
+  14 skipped), 5 pre-existing failures с описанием природы (чтобы новые
+  failures отличать от старых), CLI контракт, карту модулей (LOC),
+  существующие режимы (`single` / `map_reduce_flat` / `map_reduce_hierarchical`),
+  acceptance matrix и список pre-existing архитектурных проблем
+  (8 пунктов: `summarizer.py` 1773 строк, PDF outline mapping bug,
+  sibling-numbering глобальный, два reducer-а, разный token estimation,
+  linear `index()` lookup, brief coverage_ratio mismatch,
+  `map_calls == chunks_total` для 600-страничного документа). Следующий
+  этап — Этап 1 (аудит кода).
+
+### Added (legal_summarizer refactor — Stages 1–10: structure foundation)
+
+- **`docs/legal_summarizer_audit_stage1.md`** — карта модулей по §7 PLAN:
+  parsing / structure / chunking / packing / reduce / retrieval. Список
+  дублирований (9 пунктов: fingerprint, hierarchical reduce, numbering
+  regex'ы, token estimation, hierarchical criterion, head+tail fit,
+  cleanup без downstream use, substring retrieval, linear `index()`
+  lookup) с указанием модулей-дублёров. Для каждого этапа 2–10
+  определены точки модификации.
+
+- **`workspace/skills/legal_summarizer/scripts/structure/models.py`** —
+  контракт `DocumentStructure` (Этап 2): `DocumentStructure`,
+  `StructureNode`, `StructureEvidence`, `NumberingInfo`, `DocumentTitle`.
+  `StructureNode` ссылается на `DocumentBlock` через `start_block` /
+  `end_block`, **не копирует текст**. `semantic_type` отделён от
+  `node_type`. 8 новых characterization-тестов в
+  `tests/test_structure_models.py`.
+
+- **`workspace/skills/legal_summarizer/scripts/structure/document_loader.py`**
+  (Этап 4) — canonical `DocumentLoader` API. `load_physical_document`
+  сохранён как back-compat.
+
+- **`workspace/skills/.../scripts/structure/identity.py`** (Этап 5) —
+  единый `DocumentIdentity` (fingerprint + cache_key + freshness check).
+  Заменяет два параллельных расчёта (`scripts/fingerprint.py` и
+  `_physical_cache_key` в `physical.py`). 7 новых тестов.
+
+- **`workspace/skills/.../scripts/structure/numbering.py`** (Этап 6) —
+  единый `parse_numbering()` для 8 схем (decimal / legal_article /
+  legal_chapter / legal_section_roman / legal_clause / paragraph_mark /
+  cyrillic_alpha / appendix) + `assign_sibling_ordinals()`,
+  решающий проблему PLAN §13 (глобальный counter давал неправильную
+  нумерацию для nested структур). 18 новых тестов.
+
+- **`workspace/skills/.../scripts/structure/heading.py`** (Этапы 7, 8) —
+  `detect_heading_candidates` теперь сверяется с `parse_numbering`
+  (Этап 7); `HeadingEvidence` расширен полями `legal_marker_bonus` и
+  `docx_title_bonus` для PLAN §8; `_is_docx_title_style` для Title /
+  Subtitle стилей (PLAN §14).
+
+- **`workspace/skills/.../scripts/structure/candidate_aggregator.py`**
+  (Этап 9) — `aggregate_by_block` объединяет кандидатов одного блока
+  из разных источников (DOCX style + numbering + regex + PDF outline)
+  в один `AggregatedCandidate` с `confidence = max` и комбинированным
+  `sources`. 6 новых тестов.
+
+- **`workspace/skills/.../scripts/structure/list_detection.py`**
+  (Этап 10) — `classify_ambiguous_run` для спорных run; penalty для
+  коротких list-run (3..4 элемента) снижен с 0.10 до 0.08, чтобы
+  heading-детектор не отбрасывал их слишком агрессивно (явное
+  изменение поведения; отражено в
+  `tests/test_skill_legal_summarizer_characterization.py`).
+
+- **`workspace/skills/.../scripts/structure/physical.py`** (Этап 3) —
+  docstring обновлён, явно фиксирует границу Physical vs Semantic:
+  `PhysicalDocument` описывает только физическое содержимое, семантика —
+  ответственность `DocumentStructure`.
+
+### Test changes
+
+- **`tests/test_skill_legal_summarizer_characterization.py`** — обновлён
+  `test_list_detection_penalty_value` под новый штраф 0.08 (Этап 10).
+
+### Test results
+
+- Полный набор по затронутым подсистемам (structure / sections /
+  chunks / packing / reducer / resume / tables / info-preservation /
+  legal_summarizer* / skill_tool*): **577 passed**, 2 pre-existing
+  failures (`test_brief_strategy_default_coverage_ratio`,
+  `test_e2e_600_page_executes_via_context_batching` — зафиксированы в
+  baseline как F3/F5).
+
+### Added (legal_summarizer refactor — Stages 11–20: structure pipeline)
+
+- **`workspace/skills/legal_summarizer/scripts/structure/pdf_outline.py`**
+  (Этап 11) — критический bugfix: PDF outline mapping. Раньше
+  `_extract_pdf_outline` ставил `block_index = -1`, и
+  `build_section_tree` отбрасывал этих кандидатов — outline фактически
+  не участвовал в дереве. Новый `map_pdf_outline` выполняет **явный
+  pipeline** `PDF outline entry → destination → page → block` с
+  валидациями (`missing_destination`, `page_out_of_range`,
+  `out_of_document_order`, `duplicate_destination`, `no_blocks_on_page`)
+  и возвращает `MappedOutlineCandidate` с `block_index >= 0` для
+  успешно mapped. `mapped_to_heading_candidates` отбрасывает провалившие.
+  `detect_heading_candidates` обновлён: при наличии `physical_doc`
+  используется новый mapping (back-compat: без `physical_doc` —
+  legacy `_extract_pdf_outline`). 5 новых тестов.
+
+- **`workspace/skills/.../scripts/structure/hierarchy.py`** (Этапы 12, 13)
+  — `StructureTreeBuilder` для построения нового `DocumentStructure`
+  из `HeadingCandidate`. Приоритеты: legal numbering > outline/style >
+  style level > numbering level > visual. **Этап 13**: `numbering.assign_sibling_ordinals`
+  интегрирован в builder для nested numbering (`1.1, 1.2` под
+  parent'ом 2 → ordinals `[1,1,2,1,1,2]`, не `[1,1,2,2,3,4]`).
+  11 новых тестов.
+
+- **`workspace/skills/.../scripts/structure/title.py`** (Этап 14) —
+  `resolve_title(doc)` извлекает `DocumentTitle` с приоритетом:
+  metadata (DOCX/PDF/PPTX core_properties) → DOCX Title/Subtitle
+  style → first Heading 1 → fallback по первой непустой строке.
+  7 новых тестов.
+
+- **`workspace/skills/.../scripts/structure/repair.py`** (Этап 15) —
+  `repair_structure(struct)` чинит: orphan parent_id, invalid
+  ranges, empty nodes, impossible parents (parent.level >= node.level).
+  Возвращает `RepairReport` (orphans_fixed, empty_nodes_collapsed,
+  invalid_ranges_dropped, impossible_parents_fixed, numbering_glued).
+  6 новых тестов.
+
+- **`workspace/skills/.../scripts/structure/validation.py`** (Этап 16) —
+  `validate_structure(struct, doc)` проверяет: invalid ranges, orphan
+  parents, section overlap, low coverage (< 50% blocks покрыто
+  section-level nodes), total_blocks mismatch. Возвращает
+  `ValidationReport` с `is_valid` и `coverage_ratio`. 6 новых тестов.
+
+- **`workspace/skills/.../scripts/structure/safety_merge.py`** (Этап 17) —
+  `safety_merge(struct, blocks)` схлопывает микро-секции в соседнюю
+  секцию того же level, помечая merged `confidence = 0.0`. Это
+  **safety net** после хорошего heading detection + repair, не
+  основной механизм (как сейчас `merge_short_sections`). 5 новых тестов.
+
+- **`workspace/skills/.../scripts/structure/document_chunker.py`**
+  (Этапы 18, 19) — `chunk_from_structure(doc, struct)` и класс
+  `ChunkPlanner`. ChunkPlanner использует `DocumentStructure` как SoT
+  (не переопределяет structure), следует section boundaries, держит
+  tables атомарными. 6 новых тестов.
+
+- **`workspace/skills/.../scripts/structure/token_estimator.py`** (Этап 20) —
+  единый `TokenEstimator` (API: `estimate`, `estimate_many`,
+  `available`) с `chars_per_token=3.5` fallback. PLAN §20 разрешает
+  fallback при отсутствии tiktoken. 8 новых тестов.
+
+### Files modified
+
+- `workspace/skills/.../scripts/structure/heading.py` —
+  интегрирован новый pdf_outline mapping (Этап 11).
+- `workspace/skills/.../scripts/structure/sections.py` —
+  `detect_sections` теперь прокидывает `physical_doc` (Этап 11).
+
+### Test results
+
+- Структурные тесты (14 новых модулей + существующие): **154 passed**
+  за 3.71 сек.
+- Scoped-набор (structure / sections / chunks / packing / reducer /
+  resume / tables / info-preservation / legal_summarizer* /
+  skill_tool*): **537 passed**, 2 pre-existing failures (F3/F5).
+- 0 новых regressions.
 
 ### Changed (Integration & Simplification — `legal_summarizer`)
 
