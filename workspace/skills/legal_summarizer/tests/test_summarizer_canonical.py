@@ -106,3 +106,30 @@ def test_estimate_canonical_returns_dict(tmp_path: Path):
     assert "estimated_llm_calls" in est
     assert "strategy" in est
     assert est["strategy"] in ("direct", "map_flat", "map_hierarchical")
+
+
+def test_estimate_chunks_canonical_returns_positive():
+    """estimate_chunks_canonical для непустого списка даёт >0."""
+    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        estimate_chunks_canonical,
+    )
+
+    chunk = Chunk(
+        chunk_id="001", index=0, text="Hello world. " * 100,
+        char_count=1300, token_estimate=10,
+        page_start=None, page_end=None,
+        section_id="root", section_path="", section_heading="",
+        block_indices=(0,), block_types=("paragraph",),
+    )
+    total = estimate_chunks_canonical([chunk])
+    assert total >= 1
+
+
+def test_estimate_chunks_canonical_empty():
+    """estimate_chunks_canonical для пустого списка = 0."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        estimate_chunks_canonical,
+    )
+
+    assert estimate_chunks_canonical([]) == 0

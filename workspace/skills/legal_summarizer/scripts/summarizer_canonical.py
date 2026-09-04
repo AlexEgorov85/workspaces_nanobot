@@ -201,6 +201,18 @@ def estimate_canonical(document_path: str | Path) -> dict[str, Any]:
     }
 
 
+def estimate_chunks_canonical(chunks: list) -> int:
+    """Canonical оценка суммарных токенов для списка Chunk.
+
+    Использует ``TokenEstimator`` (Этап 12 подготовка). Возвращает
+    общее число токенов для всех chunks.
+    """
+    estimator = TokenEstimator(
+        TokenEstimatorConfig(chars_per_token=3.5),
+    )
+    return estimator.estimate_many([c.text for c in chunks])
+
+
 __all__ = [
     "build_pipeline_result",
     "strategy_from_pipeline",
@@ -208,4 +220,5 @@ __all__ = [
     "CanonicalInspection",
     "inspect_canonical",
     "estimate_canonical",
+    "estimate_chunks_canonical",
 ]
