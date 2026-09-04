@@ -427,18 +427,12 @@ def test_sanitize_module_is_extracted_and_re_exported(tmp_path):
 
 def test_fingerprint_module_is_extracted_and_re_exported():
     """``document_id_for`` и ``resolve_session_key`` живут в
-    ``fingerprint.py``, ``summarizer._document_id_for`` /
-    ``_resolve_session_key`` — это те же объекты.
+    ``fingerprint.py`` (Этап 14 — пока legacy, миграция в процессе).
     """
     from workspace.skills.legal_summarizer.scripts import fingerprint
-    from workspace.skills.legal_summarizer.scripts import summarizer as summ_mod
-
-    assert summ_mod._document_id_for is fingerprint.document_id_for
-    assert summ_mod._resolve_session_key is fingerprint.resolve_session_key
 
     # Поведение document_id_for: стабильный sha256 от первых 64KB,
-    # обрезанный до 16 hex символов (legacy поведение, будет меняться
-    # в этапе 4).
+    # обрезанный до 16 hex символов (legacy поведение).
     # Одинаковый первый 64KB → одинаковый id.
     text_a = "hello world"
     text_b = text_a  # короткий — целиком влезает в 64KB.

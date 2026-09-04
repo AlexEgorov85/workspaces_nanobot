@@ -199,15 +199,14 @@ def _resolve_max_chunks() -> int:
         return 8
 
 
-from workspace.skills.legal_summarizer.scripts.fingerprint import (  # noqa: E402
-    document_id_for as _document_id_for,
-    resolve_document_id as _resolve_document_id,
-    resolve_session_key as _resolve_session_key,
-)
 from workspace.skills.legal_summarizer.scripts.document_cache import (  # noqa: E402
     doc_cache_dir as _doc_cache_dir,
     load_doc_cache as _load_doc_cache,
     save_doc_cache as _save_doc_cache,
+)
+from workspace.skills.legal_summarizer.scripts.fingerprint import (  # noqa: E402
+    resolve_document_id as _resolve_document_id,
+    resolve_session_key as _resolve_session_key,
 )
 from workspace.skills.legal_summarizer.scripts.token_budget import (  # noqa: E402
     count_tokens as _count_tokens,
