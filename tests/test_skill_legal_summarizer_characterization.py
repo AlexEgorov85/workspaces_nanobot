@@ -451,15 +451,16 @@ def test_fingerprint_module_is_extracted_and_re_exported():
 
 def test_document_cache_module_is_extracted_and_re_exported(tmp_path):
     """``doc_cache_dir/load_doc_cache/save_doc_cache`` живут в
-    ``document_cache.py``, ``summarizer._doc_cache_*`` — те же объекты.
+    ``document_cache.py``. ``summarizer`` НЕ ре-экспортирует их —
+    resume выполняется через manifest partials (canonical path §13c).
     Поведение save/load round-trip идентично baseline.
     """
     from workspace.skills.legal_summarizer.scripts import document_cache
     from workspace.skills.legal_summarizer.scripts import summarizer as summ_mod
 
-    assert summ_mod._doc_cache_dir is document_cache.doc_cache_dir
-    assert summ_mod._load_doc_cache is document_cache.load_doc_cache
-    assert summ_mod._save_doc_cache is document_cache.save_doc_cache
+    assert not hasattr(summ_mod, "_doc_cache_dir")
+    assert not hasattr(summ_mod, "_load_doc_cache")
+    assert not hasattr(summ_mod, "_save_doc_cache")
 
     ws = tmp_path
     doc_id = "abcd1234"

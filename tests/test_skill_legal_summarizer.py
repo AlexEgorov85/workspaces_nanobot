@@ -35,6 +35,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import summarizer  # noqa: E402
 from output import _sanitize_value, prepare_output  # noqa: E402
+from structure.document_loader import DocumentLoader  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -551,9 +552,10 @@ def test_load_structure_returns_title_and_text(tmp_path):
     d.add_paragraph("2. Покупатель оплачивает товар в течение 5 дней.")
     d.save(str(p))
 
-    struct = summarizer.load_structure(p)
-    assert "Договор поставки №7" == struct["title"]
-    assert "Поставщик" in struct["text"]
+    doc = DocumentLoader().load(p)
+    assert "Договор поставки №7" == doc.title
+    blocks_text = "\n\n".join(b.content for b in doc.blocks)
+    assert "Поставщик" in blocks_text
 
 
 def test_summarize_injects_title_into_prompt(monkeypatch, tmp_path):

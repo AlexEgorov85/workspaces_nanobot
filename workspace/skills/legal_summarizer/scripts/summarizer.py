@@ -1,4 +1,4 @@
-"""Canonical orchestration layer для legal_summarizer (PLAN §13).
+"""Canonical orchestration layer для legal_summarizer (PLAN §13, §13c, §32).
 
 Производственный pipeline:
 
@@ -19,8 +19,8 @@
   manifest + result.json
 
 Все legacy модули (StructureAwareChunker, SectionTree, document_cleanup,
-fingerprint, token_budget, packing, document_cache, document_stats)
-**не** импортируются в этой версии. Canonical pipeline — единственный
+fingerprint, token_budget, packing, document_cache, document_stats,
+_legacy_run_map_reduce) удалены. Canonical pipeline — единственный
 production path.
 
 Архитектурные инварианты — см. ``workspace/skills/legal_summarizer/ARCHITECTURE.md``.
@@ -78,25 +78,38 @@ from workspace.skills.legal_summarizer.scripts.structure.models import (
 )
 from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
     build_execution_plan,
+    select_strategy,
 )
 from workspace.utils.office_files import extract_text
 
 
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
 
+_LOCAL_HEADING_RE = re.compile(
+    r"^\s*(?:Раздел|Подраздел|Глава|Статья|Часть|§)\b[^\n]{0,120}",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _local_structure_label(text: str) -> str:
+    """Extract first structural heading from text chunk (inline replacement).
+
+    Finds the first line starting with a legal section prefix
+    (Раздел/Подраздел/Глава/Статья/Часть/§), truncated to 120 chars.
+    Returns ``""`` if not found.
+    """
+    if not text:
+        return ""
+    m = _LOCAL_HEADING_RE.search(text)
+    return m.group(0).strip()[:120] if m else ""
+
 
 def _chunk_structure_label(chunk: "Chunk") -> str:
-    """Структурная метка чанка: global heading, иначе локальная из текста.
-
-    Когда detect_sections не нашёл разделов (например, заголовки
-    «утоплены» внутри постраничных блоков PDF), чанк несёт пустой
-    section_heading. Тогда извлекаем метку (Раздел/Глава/Часть/Статья)
-    прямо из текста чанка, чтобы подписать его при сборке общего ответа.
-    """
+    """Структурная метка чанка: global heading, иначе локальная из текста."""
     heading = getattr(chunk, "section_heading", "") or ""
     if heading:
         return heading
-    return extract_local_structure_label(getattr(chunk, "text", "") or "")
+    return _local_structure_label(getattr(chunk, "text", "") or "")
 
 
 def _format_chunk_block(chunk: "Chunk", summary: str) -> str:
@@ -129,36 +142,14 @@ from workspace.skills.legal_summarizer.scripts.prompts_runtime import (  # noqa:
 )
 
 
-# Бюджет входа для document_reduce (до LLM), chars. ~17K токенов для
-# большинства моделей с контекстом 32K+ — компактно для провайдера,
-# стабильно для ответа. НЕ путать с ReduceConfig.section_summary_max_chars:
-# это бюджет ВЫХОДА section_reduce (обрезает одну section_summary после LLM).
 DOCUMENT_REDUCE_INPUT_BUDGET_CHARS = 60_000
-
-# Бюджет входа для section_reduce. Большие разделы (например раздел ГК РФ
-# «Общие положения» — сотни статей) могут дать joined >> 60K chars из
-# склеенных partials; обрезка до входа в LLM спасает от того же перегруза.
 SECTION_REDUCE_INPUT_BUDGET_CHARS = 60_000
-
-# Сколько section_summary группировать в один промежуточный reduce-вызов
-# при рекурсивной иерархии. 3 — баланс: группы достаточно малы, чтобы
-# вход умещался в budget, при этом цепочка не взрывается по числу вызовов.
 MID_REDUCE_GROUP_SIZE = 3
-
-# Safety net: оборвать рекурсивный reduce после этого числа раундов даже
-# если секций > group_size**max_rounds. Защита от взрывного роста
-# LLM-вызовов на очень больших документах (~100+ секций).
 MAX_REDUCE_ROUNDS = 4
 
 
 def _fit_input(text: str, budget: int) -> str:
-    """Урезать text до budget символов стратегией head + tail.
-
-    Сохраняет начало (заголовки, контекст, ключевые определения) и конец
-    (выводы, заключительные формулировки). Средняя часть заменяется явным
-    маркером с числом пропущенных символов — без него модель может
-    «додумать» пропущенное и сгенерировать галлюцинации на стыке.
-    """
+    """Урезать text до budget символов стратегией head + tail."""
     if len(text) <= budget:
         return text
     head = budget * 2 // 3
@@ -185,18 +176,14 @@ def _resolve_max_chunks() -> int:
         return 8
 
 
-from workspace.skills.legal_summarizer.scripts.document_cache import (  # noqa: E402
-    doc_cache_dir as _doc_cache_dir,
-    load_doc_cache as _load_doc_cache,
-    save_doc_cache as _save_doc_cache,
-)
-from workspace.skills.legal_summarizer.scripts.fingerprint import (  # noqa: E402
-    resolve_document_id as _resolve_document_id,
-    resolve_session_key as _resolve_session_key,
-)
-from workspace.skills.legal_summarizer.scripts.token_budget import (  # noqa: E402
-    count_tokens as _count_tokens,
-)
+def _session_key_for(document_path: str | None) -> str | None:
+    """Извлечь safe_session_key из пути документа (canonical, без fingerprint)."""
+    if not document_path:
+        return None
+    raw = extract_session_key_from_path(document_path)
+    if not raw:
+        return None
+    return safe_session_key(raw)
 
 
 _SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
@@ -205,16 +192,8 @@ _SUPPORTED_EXTENSIONS = frozenset({".pdf", ".docx", ".txt"})
 def load_text(path, *, mode: str = "full") -> str:
     """Извлечь plain text из файла через office_files.
 
-    ``mode='brief'`` для PDF: первые 100 стр. + до 300К символов через pypdf
-    (быстрая экстракция ~5 сек для ГК РФ вместо 70+ сек pdfplumber).
-    Для ГК РФ 663 стр. это первые 100 стр. = общая часть + оглавление,
-    чего достаточно для краткого саммари.
-
+    ``mode='brief'`` для PDF: первые 100 стр. + до 300К символов через pypdf.
     ``mode='full'`` (по умолчанию): полная экстракция через pdfplumber/extract_text.
-
-    Args:
-        path: путь к .pdf / .docx / .txt.
-        mode: ``"full"`` для detailed/question, ``"brief"`` для --length brief.
     """
     p = Path(path)
     if p.suffix.lower() not in _SUPPORTED_EXTENSIONS:
@@ -234,11 +213,7 @@ def load_text(path, *, mode: str = "full") -> str:
 
 
 def _extract_pdf_head(path: Path, *, max_pages: int, max_chars: int) -> str:
-    """Извлечь первые ``max_pages`` страниц PDF через pypdf.
-
-    Быстрая экстракция (5-10× быстрее pdfplumber). Используется в brief mode
-    для чтения только начала документа — титульник, общая часть, оглавление.
-    """
+    """Извлечь первые ``max_pages`` страниц PDF через pypdf."""
     from pypdf import PdfReader
 
     reader = PdfReader(str(path), strict=False)
@@ -258,38 +233,6 @@ def _extract_pdf_head(path: Path, *, max_pages: int, max_chars: int) -> str:
     return "\n\n".join(parts)
 
 
-def load_structure(path) -> dict:
-    """Legacy: title/begin/end/text (Phase 2 совместимость)."""
-    p = Path(path)
-    if p.suffix.lower() not in _SUPPORTED_EXTENSIONS:
-        raise ValueError(
-            f"Неподдерживаемый формат: '{p.suffix}'."
-        )
-    fmt = p.suffix.lower().lstrip(".")
-    text = extract_text(p)
-    if not text or not text.strip():
-        raise ValueError(f"Документ не содержит извлекаемого текста: {p}.")
-
-    title: str | None = None
-    if fmt == "docx":
-        try:
-            from docx import Document
-            d = Document(str(p))
-            if d.core_properties.title:
-                title = d.core_properties.title.strip()
-        except Exception:
-            pass
-
-    return {
-        "title": title,
-        "begin": text[:800],
-        "end": text[-800:],
-        "text": text,
-        "format": fmt,
-        "size_bytes": p.stat().st_size,
-    }
-
-
 def make_operation_id(text: str, length: str) -> str:
     """Стабильный operation_id."""
     sample = text[: 64 * 1024].encode("utf-8", errors="replace")
@@ -307,112 +250,9 @@ from workspace.skills.legal_summarizer.scripts.llm_calls import (  # noqa: E402
 
 
 def _progress(msg: str) -> None:
-    """Прогресс ТОЛЬКО в stderr.
-
-    ВАЖНО: НЕ зеркалим в stdout — иначе progress-строки попадают в финальный
-    вывод exec-вызова и LLM видит их как 'шум' / 'побитую кириллицу'
-    (инцидент 2026-08-31: агент интерпретировал progress как legacy cp1251).
-    Для polling через ``write_stdin`` sentinel ``__LEGAL_SUMMARIZER_DONE__``
-    достаточно, agent его ловит и не путается в потоке.
-    """
+    """Прогресс ТОЛЬКО в stderr."""
     line = f"[legal_summarizer] {msg}"
     print(line, file=sys.stderr, flush=True)
-
-
-def _compute_chunk_size_chars(cfg: dict) -> int:
-    fallback = int(cfg.get("chunk_size") or 100000)
-    ratio = cfg.get("chunk_size_input_ratio")
-    if ratio is None or not (0 < float(ratio) <= 1):
-        return fallback
-    try:
-        from config import SETTINGS as _SET
-        ctx_tokens = int(
-            _SET.get("agents", {}).get("defaults", {}).get("contextWindowTokens")
-            or 0
-        )
-    except Exception:
-        return fallback
-    if ctx_tokens <= 0:
-        return fallback
-    chars = int(ctx_tokens * 3.5 * float(ratio))
-    return max(1000, (chars // 1000) * 1000)
-
-
-def _build_token_budget(cfg: dict | None = None) -> TokenBudget:
-    try:
-        from config import SETTINGS as _SET
-        ctx_tokens = int(
-            _SET.get("agents", {}).get("defaults", {}).get("contextWindowTokens")
-            or 65536
-        )
-    except Exception:
-        ctx_tokens = 65536
-
-    exec_cfg = globals()["get_execution_config"]()
-    context_batching_cfg = exec_cfg.get("context_batching") or {}
-    # Test override: context_window_tokens из chunking_config (для unit-тестов,
-    # которые хотят принудительно направить ExecutionStrategy в MAP_* —
-    # уменьшают window через mock).
-    if cfg is None:
-        cfg = globals()["get_chunking_config"]()
-    override_ctx = cfg.get("context_window_tokens") if isinstance(cfg, dict) else None
-    if isinstance(override_ctx, (int, float)) and override_ctx > 0:
-        ctx_tokens = int(override_ctx)
-    return TokenBudget(
-        context_window_tokens=ctx_tokens,
-        system_prompt_tokens=int(context_batching_cfg.get("system_prompt_tokens", 1200)),
-        instruction_tokens=int(context_batching_cfg.get("instruction_tokens_per_map", 200)),
-        output_reserve_tokens=int(exec_cfg.get("llm_max_tokens", 8192)),
-        safety_margin=float(context_batching_cfg.get("safety_margin", 0.85)),
-        chars_per_token=float(context_batching_cfg.get("chars_per_token", 3.5)),
-    )
-
-
-def _iter_text_blocks(text: str) -> list[str]:
-    parts = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    return parts or [text]
-
-
-def _inline_stats(doc, tree, chars_per_token: float) -> dict[str, int]:
-    """Inline замена compute_document_stats (PLAN §15).
-
-    Возвращает dict с метриками: chars, estimated_tokens, blocks,
-    sections, tables. Раньше это был ``DocumentStats`` dataclass, но
-    теперь вычисляется inline без отдельного класса.
-    """
-    chars = sum(len(b.content) for b in doc.blocks)
-    estimated_tokens = max(1, int(chars / chars_per_token + 0.999))
-    blocks = len(doc.blocks)
-    tables = sum(1 for b in doc.blocks if b.block_type == "table")
-    sections = 0
-    if tree is not None:
-        sections = sum(
-            1 for sid in tree.sections
-            if sid != tree.root_id
-        )
-    return {
-        "chars": chars,
-        "estimated_tokens": estimated_tokens,
-        "blocks": blocks,
-        "sections": sections,
-        "tables": tables,
-    }
-
-
-def _make_text_block(content: str, *, ordinal: int) -> DocumentBlock:
-    return DocumentBlock(
-        block_id=f"b_{ordinal:04d}",
-        block_type="text",
-        content=content,
-        char_count=len(content),
-        page_index=None,
-        page_start=None,
-        page_end=None,
-        paragraph_index=None,
-        table_index=None,
-        ordinal=ordinal,
-        block_metadata={},
-    )
 
 
 def _relaxed_lexical_fallback(
@@ -421,16 +261,7 @@ def _relaxed_lexical_fallback(
     *,
     max_chunks: int,
 ) -> list | None:
-    """Управляемый fallback для question: расслабленный lexical match.
-
-    Когда строгий keyword match (``select_relevant_chunks``) ничего не нашёл,
-    делаем вторую попытку с prefix-match по первым 4 символам каждого слова
-    вопроса. Это устойчиво к словоформам русского языка
-    («договор» ↔ «договора» ↔ «договору»).
-
-    Возвращает ``None``, если даже расслабленный match не нашёл ничего —
-    caller эскалирует на bounded top-of-document fallback.
-    """
+    """Управляемый fallback для question: расслабленный lexical match."""
     if not question or not chunks or max_chunks <= 0:
         return None
     raw_words = re.findall(r"\w{4,}", question.lower())
@@ -447,22 +278,113 @@ def _relaxed_lexical_fallback(
     return matched if matched else None
 
 
+# ---------------------------------------------------------------------------
+# Canonical chunk selection by mode
+# ---------------------------------------------------------------------------
+
+
+def _select_chunks_for_mode(
+    insp: "Inspection",
+    *,
+    question: str | None,
+    length: str,
+) -> list:
+    """Select chunks for the given run mode (brief/detailed/question)."""
+    max_chunks = _resolve_max_chunks()
+    if question:
+        from workspace.skills.legal_summarizer.scripts.structure.retrieval import (
+            RetrievalConfig,
+        )
+        hits = insp.analysis.retrieve(
+            question, config=RetrievalConfig(max_results=max_chunks),
+        ) if insp.analysis is not None else []
+        if hits:
+            by_id = {c.chunk_id: c for c in insp.chunks}
+            chosen = [by_id[h.chunk_id] for h in hits if h.chunk_id in by_id]
+            if chosen:
+                _progress(f"question: retrieval → {len(chosen)} chunks")
+                return chosen
+        _progress("question: retrieval пустой → relaxed lexical fallback")
+        _exec_cfg = globals()["get_execution_config"]()
+        _fallback_max = int(_exec_cfg.get("question_fallback_max_chunks", 16))
+        chosen = _relaxed_lexical_fallback(
+            question, insp.chunks, max_chunks=_fallback_max,
+        )
+        if chosen is not None:
+            return chosen
+        _progress("question: keyword miss → bounded top-of-document fallback")
+        return insp.chunks[:_fallback_max]
+    if length == "brief":
+        from workspace.skills.legal_summarizer.scripts.structure.brief_from_analysis import (
+            select_brief_chunks_from_analysis,
+        )
+        chunk_cfg = globals()["get_chunking_config"]()
+        chosen = list(select_brief_chunks_from_analysis(insp.analysis, config=None))
+        brief_coverage = chunk_cfg.get("brief_coverage_ratio")
+        if brief_coverage is None:
+            brief_coverage = 0.5
+        if brief_coverage < 1.0 and chosen:
+            target = max(1, int(len(chosen) * brief_coverage))
+            chosen = chosen[:target]
+        brief_total_budget = chunk_cfg.get("brief_max_input_chars")
+        if brief_total_budget:
+            from workspace.skills.legal_summarizer.scripts.structure.brief_budget import (
+                allocate_brief_budget,
+            )
+            chosen = list(allocate_brief_budget(
+                chosen, total_budget_chars=int(brief_total_budget),
+            ))
+        return chosen
+    return list(insp.chunks)
+
+
+# ---------------------------------------------------------------------------
+# Canonical section helpers
+# ---------------------------------------------------------------------------
+
+
+def _section_index(
+    struct: DocumentStructure,
+) -> tuple[list[str], dict[str, str], dict[str, str]]:
+    """Build canonical section index: (ids, headings, paths) from DocumentStructure."""
+    section_ids: list[str] = []
+    section_headings: dict[str, str] = {}
+    section_paths: dict[str, str] = {}
+    for node in struct.iter_sections():
+        section_ids.append(node.node_id)
+        section_headings[node.node_id] = node.title
+        parts: list[str] = []
+        cur = node
+        while cur is not None and cur.node_id != struct.root_id:
+            if cur.number is not None and cur.number.ordinal is not None:
+                parts.append(str(cur.number.ordinal))
+            else:
+                parts.append(str(cur.level))
+            if cur.parent_id is None:
+                break
+            cur = struct.nodes.get(cur.parent_id)
+        section_paths[node.node_id] = " > ".join(reversed(parts))
+    return section_ids, section_headings, section_paths
+
+
+def _count_meaningful_sections_canonical(struct: DocumentStructure) -> int:
+    """Meaningful sections: section nodes with non-empty title or spanning >1 block."""
+    return sum(
+        1 for n in struct.iter_sections()
+        if n.title.strip() or n.end_block > n.start_block
+    )
+
+
+# ---------------------------------------------------------------------------
+# Inspection + estimate (unchanged canonical path)
+# ---------------------------------------------------------------------------
+
+
 @dataclass(frozen=True)
 class Inspection:
     """Результат inspection документа (PLAN §13).
 
-    Canonical variant: вместо legacy ``tree: SectionTree`` теперь
-    ``structure: DocumentStructure`` + ``analysis: DocumentAnalysis``.
-
-    Attributes:
-        chars_in: длина входного текста.
-        chunks: список ``Chunk`` из canonical ChunkPlanner.
-        context_batches: список batch'ей из canonical ExecutionPlan.
-        structure: ``DocumentStructure`` (canonical semantic structure).
-        analysis: ``DocumentAnalysis`` (immutable snapshot, для follow-up).
-        strategy: ``"direct"`` / ``"map_flat"`` / ``"map_hierarchical"`` /
-            ``"empty"`` (пустой документ).
-        estimated_llm_calls: оценка числа LLM-вызовов.
+    Canonical variant: ``structure: DocumentStructure`` + ``analysis: DocumentAnalysis``.
     """
 
     chars_in: int
@@ -474,44 +396,17 @@ class Inspection:
     estimated_llm_calls: int
 
 
-def _make_chunk_config(cfg: dict, budget: TokenBudget) -> ChunkConfig:
-    chunk_size_chars = _compute_chunk_size_chars(cfg)
-    return ChunkConfig(
-        max_chunk_chars=min(chunk_size_chars, int(budget.available_chunk_tokens * budget.chars_per_token)),
-        chunk_overlap_chars=int(cfg["chunk_overlap"]),
-        chars_per_token=budget.chars_per_token,
-        table_chunk_threshold_chars=6000,
-        min_section_chars=int(cfg.get("min_section_chars", 200)),
-    )
-
-
 def inspect(
     text: str,
     document_path: str | None = None,
 ) -> Inspection:
-    """Canonical inspection (PLAN §13).
-
-    Pipeline:
-        text / document_path
-          ↓ DocumentLoader (single-pass loading)
-          ↓ run_canonical_pipeline (DocumentStructure + repair + validate)
-          ↓ ChunkPlanner → DocumentAnalysis
-          ↓ build_execution_plan → ExecutionPlan.batches
-
-    Canonical single source of truth — ``DocumentAnalysis``.
-    """
+    """Canonical inspection (PLAN §13)."""
     text = (text or "").strip()
     if not text:
         return Inspection(
-            chars_in=0,
-            chunks=[],
-            context_batches=[],
-            structure=None,
-            analysis=None,
-            strategy="empty",
-            estimated_llm_calls=0,
+            chars_in=0, chunks=[], context_batches=[], structure=None,
+            analysis=None, strategy="empty", estimated_llm_calls=0,
         )
-
     if document_path is None:
         raise ValueError(
             "inspect() требует document_path для canonical pipeline; "
@@ -528,10 +423,6 @@ def inspect(
     analysis = pipeline_result.analysis
     chunks = list(pipeline_result.chunks)
     structure = analysis.structure
-
-    from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
-        select_strategy,
-    )
     strategy = select_strategy(structure, tuple(chunks))
 
     if strategy == "direct":
@@ -539,8 +430,7 @@ def inspect(
         batches: list[tuple[str, ...]] = []
     else:
         plan = build_execution_plan(
-            structure,
-            tuple(chunks),
+            structure, tuple(chunks),
             document_id=analysis.identity.document_id,
         )
         batches = [tuple(b.chunk_ids) for b in plan.batches]
@@ -586,29 +476,13 @@ def needs_confirmation(est: Estimate) -> bool:
     return est.estimated_duration_max_sec > est.confirmation_threshold_sec
 
 
-# Сэмпл страниц для оценки плотности chars/page в quick_estimate.
-# 10 страниц достаточно для грубой оценки (< сек на pypdf для 600+ стр.).
 _QUICK_SAMPLE_PAGES = 10
-# Консервативные множители (лучше переспросить confirm, чем стартовать
-# длинный ран без предупреждения — пользователь не любит, когда «обещали
-# 5 минут, а вышло 12»).
 _CHARS_OVERESTIMATE = 1.3
-_BATCH_OVERESTIMATE_RATIO = 1.0  # batches ~= chunks (worst case 1 chunk/batch)
+_BATCH_OVERESTIMATE_RATIO = 1.0
 
 
 def quick_estimate(path: Path | str) -> dict[str, Any]:
-    """Быстрая оценка размера документа БЕЗ полного извлечения текста.
-
-    Используется как pre-confirm gate в ``cli.py``: для PDF (ГК РФ на 663
-    стр.) полная экстракция через pdfplumber занимает ~3–5 минут —
-    пользователь 3.5 минуты ждал только чтобы узнать «документ большой»
-    (см. инцидент 2026-08-28). Здесь — pypdf page_count + сэмпл 10
-    страниц (~секунды), для txt/docx — дешёвое чтение длины.
-
-    Возвращает ``{"chars_in": int, "estimate": Estimate}``. Оценки
-    завышены (×1.3 chars, batches ~= chunks) чтобы fast-path скорее
-    требовал confirm, чем рисковал стартовать длинный ран.
-    """
+    """Быстрая оценка размера документа БЕЗ полного извлечения текста."""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(str(p))
@@ -634,7 +508,6 @@ def quick_estimate(path: Path | str) -> dict[str, Any]:
             avg_per_page = sample_chars / sample_n
             chars_in_est = int(avg_per_page * page_count * _CHARS_OVERESTIMATE)
         else:
-            # пустой/битый PDF — грубый fallback по размеру файла
             chars_in_est = int(p.stat().st_size * 0.5)
     elif ext == ".txt":
         chars_in_est = int(p.stat().st_size * 0.95)
@@ -650,14 +523,11 @@ def quick_estimate(path: Path | str) -> dict[str, Any]:
         else:
             chars_in_est = int(p.stat().st_size * 0.3)
     else:
-        # для неподдерживаемых расширений — fallback на размер; пусть
-        # load_text() ниже сам бросит ValueError с понятным сообщением
         chars_in_est = int(p.stat().st_size)
 
-    chunks_count_est = max(1, -(-chars_in_est // max(1, chunk_size)))  # ceil
-    # batches ~= chunks (worst case 1 chunk/batch) → консервативная оценка
+    chunks_count_est = max(1, -(-chars_in_est // max(1, chunk_size)))
     context_batches_est = max(1, int(chunks_count_est * _BATCH_OVERESTIMATE_RATIO))
-    estimated_llm_calls_est = context_batches_est + 1  # +1 doc reduce
+    estimated_llm_calls_est = context_batches_est + 1
     avg_sec = context_batches_est * chunk_dur
 
     return {
@@ -673,6 +543,536 @@ def quick_estimate(path: Path | str) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Canonical execution: _run_direct / _run_map_reduce
+# ---------------------------------------------------------------------------
+
+
+def _count_sections(struct: DocumentStructure | None) -> int:
+    if struct is None:
+        return 0
+    return len(struct.iter_sections())
+
+
+def _build_manifest(
+    *,
+    operation_id: str,
+    document_path: str | None,
+    structure: dict | None,
+    chars_in: int,
+    length: str,
+    chunks_total: int,
+    context_batches_total: int,
+    estimated_llm_calls: int,
+    sections_payload: dict[str, dict[str, Any]],
+    started_at: str | None = None,
+    article_count: int,
+) -> NormalizedManifest:
+    return NormalizedManifest(
+        operation_id=operation_id,
+        status="running",
+        version=2,
+        document_path=document_path,
+        structure_title=(structure or {}).get("title"),
+        chars_in=chars_in,
+        length=length,
+        chunks_total=chunks_total,
+        context_batches_total=context_batches_total,
+        estimated_llm_calls=estimated_llm_calls,
+        actual_llm_calls=None,
+        sections=sections_payload,
+        chunk_states={},
+        context_batches={},
+        section_summaries={},
+        batches_done=[],
+        batches_failed=[],
+        last_error=None,
+        started_at=started_at or _now_iso(),
+        completed_at=None,
+        duration_sec=None,
+        article_count=article_count,
+        is_legacy=False,
+        raw={},
+    )
+
+
+def _run_direct(
+    chunks: list,
+    *,
+    length: str,
+    focus: str | None,
+    question: str | None,
+    structure: dict | None,
+    operation_id: str,
+    document_path: str | None,
+    workspace_root: Path | str | None,
+    chars_in: int,
+    insp_estimated_llm_calls: int,
+    article_count: int,
+    existing_manifest: NormalizedManifest | None,
+) -> dict:
+    """Canonical direct execution: single llm_document_reduce call."""
+    total_start = _time.monotonic()
+    retries = 0
+    ordered = list(chunks)
+
+    joined = "\n\n".join(f"[Chunk {c.chunk_id}]\n{c.text}" for c in ordered)
+    joined = _fit_input(joined, DOCUMENT_REDUCE_INPUT_BUDGET_CHARS)
+
+    try:
+        final_summary = _llm_document_reduce(
+            joined, length=length, focus=focus, structure=structure, question=question,
+        )
+        reduce_calls = 1
+    except Exception:
+        retries += 1
+        reduce_calls = 0
+        final_summary = joined if joined.strip() else ""
+
+    final_summary = _strip_think_blocks(final_summary)
+
+    if not final_summary or not final_summary.strip():
+        return {
+            "status": "failed",
+            "operation_id": operation_id,
+            "error": {"code": "REDUCE_INPUT_EMPTY", "message": "Document reduce вернул пустой summary"},
+        }
+
+    duration = round(_time.monotonic() - total_start, 1)
+    subject = _extract_subject(final_summary)
+
+    result = {
+        "subject": subject,
+        "summary": final_summary,
+        "length": length,
+        "chars_in": chars_in,
+        "chunks": len(ordered),
+        "context_batches": 1,
+        "sections": _count_sections(None),
+        "strategy": "direct",
+        "title": (structure or {}).get("title"),
+        "partial": False,
+    }
+    write_result(operation_id, result, workspace_root=workspace_root)
+
+    manifest = _build_manifest(
+        operation_id=operation_id,
+        document_path=document_path,
+        structure=structure,
+        chars_in=chars_in,
+        length=length,
+        chunks_total=len(ordered),
+        context_batches_total=1,
+        estimated_llm_calls=insp_estimated_llm_calls,
+        sections_payload={},
+        started_at=existing_manifest.started_at if existing_manifest else _now_iso(),
+        article_count=article_count,
+    )
+    manifest.status = "completed"
+    manifest.actual_llm_calls = reduce_calls
+    manifest.completed_at = _now_iso()
+    manifest.duration_sec = duration
+    manifest.context_batches = {
+        "cb_000": {"chunk_ids": [c.chunk_id for c in ordered], "status": "completed"},
+    }
+    manifest.batches_done = ["cb_000"]
+    save_manifest(manifest, workspace_root=workspace_root)
+
+    return {
+        "status": "completed",
+        "operation_id": operation_id,
+        "result": result,
+        "stats": {
+            "chars_in": chars_in,
+            "chunks_total": len(ordered),
+            "context_batches_total": 1,
+            "sections_total": 0,
+            "meaningful_sections": 0,
+            "article_count": article_count,
+            "map_calls": 0,
+            "section_reduce_calls": 0,
+            "section_trim_calls": 0,
+            "document_reduce_calls": reduce_calls,
+            "reduce_calls": reduce_calls,
+            "total_llm_calls": reduce_calls,
+            "retries": retries,
+            "failed_batches": [],
+            "partial": False,
+            "duration_sec": duration,
+            "strategy": "direct",
+        },
+    }
+
+
+def _run_map_reduce(
+    chunks: list,
+    *,
+    strategy: str,
+    length: str,
+    focus: str | None,
+    question: str | None,
+    structure: dict | None,
+    document_path: str | None,
+    operation_id: str,
+    workspace_root: Path | str | None,
+    chars_in: int,
+    insp_estimated_llm_calls: int,
+    article_count: int,
+    existing_manifest: NormalizedManifest | None,
+) -> dict:
+    """Canonical map_reduce: batch execution → hierarchical/flat reduce."""
+    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
+        HierarchicalReducerConfig,
+        reduce_chunks_hierarchical,
+        reduce_sections_to_document,
+    )
+
+    struct = None
+    analysis = None
+    # Re-run inspect to get structure for section iteration (lightweight, cached on disk)
+    if document_path:
+        try:
+            _insp_result = run_canonical_pipeline(
+                document_path,
+                apply_repair=True,
+                include_retrieval_index=True,
+            )
+            analysis = _insp_result.analysis
+            struct = analysis.structure
+        except Exception:
+            struct = None
+
+    plan = build_execution_plan(
+        struct,
+        tuple(chunks),
+        document_id=analysis.identity.document_id if analysis else "",
+    )
+    batch_chunks_list = [list(c.chunk_id for c in chunks) for _ in plan.batches]
+    # Build actual chunk lists per batch
+    chunk_by_id = {c.chunk_id: c for c in chunks}
+    final_batches = [
+        [chunk_by_id[cid] for cid in bcids if cid in chunk_by_id]
+        for bcids in batch_chunks_list
+    ]
+
+    # Section metadata for manifest + hierarchical reduce
+    section_ids: list[str] = []
+    section_headings: dict[str, str] = {}
+    section_paths: dict[str, str] = {}
+    sections_payload: dict[str, dict[str, Any]] = {}
+    if struct is not None:
+        section_ids, section_headings, section_paths = _section_index(struct)
+        for node in struct.iter_sections():
+            sections_payload[node.node_id] = node.to_dict()
+
+    # Manifest initialization
+    article_count_for_manifest = article_count
+    initial_manifest = _build_manifest(
+        operation_id=operation_id,
+        document_path=document_path,
+        structure=structure,
+        chars_in=chars_in,
+        length=length,
+        chunks_total=len(chunks),
+        context_batches_total=len(final_batches),
+        estimated_llm_calls=insp_estimated_llm_calls,
+        sections_payload=sections_payload,
+        started_at=existing_manifest.started_at if existing_manifest else _now_iso(),
+        article_count=article_count_for_manifest,
+    )
+    if existing_manifest is None:
+        save_manifest(initial_manifest, workspace_root=workspace_root)
+
+    expected_chunk_ids = [c.chunk_id for c in chunks]
+    cached_partials = _load_cached_partials(operation_id, expected_chunk_ids, workspace_root)
+    chunk_states: dict[str, dict[str, Any]] = (
+        dict(existing_manifest.chunk_states) if existing_manifest else {}
+    )
+
+    for cid in cached_partials:
+        chunk_states[cid] = {
+            "status": "completed",
+            "context_batch_id": chunk_states.get(cid, {}).get("context_batch_id"),
+            "section_id": chunk_states.get(cid, {}).get("section_id"),
+            "section_path": chunk_states.get(cid, {}).get("section_path"),
+            "page_start": chunk_states.get(cid, {}).get("page_start"),
+            "page_end": chunk_states.get(cid, {}).get("page_end"),
+            "result_path": f"chunks/{cid}.json",
+            "duration_sec": chunk_states.get(cid, {}).get("duration_sec"),
+        }
+
+    ctx_batches: dict[str, dict[str, Any]] = (
+        dict(existing_manifest.context_batches) if existing_manifest else {}
+    )
+
+    total_start = _time.monotonic()
+    map_calls = 0
+    retries = 0
+    failed_batch_ids: list[str] = []
+    first_batch_error: dict[str, Any] | None = None
+    concurrency = 1
+
+    queued: list[tuple[str, list[Chunk], int]] = []
+    total_batches = len(final_batches)
+    for batch_idx, batch_chunks in enumerate(final_batches):
+        pending = [
+            c for c in batch_chunks
+            if c.chunk_id not in chunk_states
+            or chunk_states[c.chunk_id].get("status") != "completed"
+        ]
+        if not pending:
+            continue
+        batch_id = f"cb_{batch_idx:03d}"
+        queued.append((batch_id, pending, len(batch_chunks)))
+        _progress(
+            f"batch {batch_id}: {len(pending)}/{len(batch_chunks)} chunks "
+            f"queued ({total_batches} batches total, concurrency={concurrency})"
+        )
+
+    if queued:
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _gather_all():
+            return await asyncio.gather(*[
+                _run_one_batch_async(
+                    pending_chunks,
+                    chunks_total=len(chunks),
+                    structure=structure,
+                    operation_id=operation_id,
+                    workspace_root=workspace_root,
+                    sem=sem,
+                    batch_id=batch_id,
+                    length=length,
+                    question=question,
+                )
+                for batch_id, pending_chunks, _ in queued
+            ])
+
+        gather_results = asyncio.run(_gather_all())
+
+        for (batch_id, batch_chunks, _pending_count), (status, batch_meta, last_error) in zip(
+            queued, gather_results
+        ):
+            if status == "ok":
+                assert batch_meta is not None
+                map_calls += 1
+                ctx_batches[batch_id] = {
+                    "chunk_ids": batch_meta["chunk_ids"],
+                    "status": "completed",
+                    "started_at": batch_meta["started_at"],
+                    "completed_at": batch_meta["completed_at"],
+                    "duration_sec": batch_meta["duration_sec"],
+                    "section_paths": list({c.section_path for c in batch_chunks}),
+                }
+                for c in batch_chunks:
+                    chunk_states[c.chunk_id] = {
+                        "status": "completed",
+                        "context_batch_id": batch_id,
+                        "section_id": c.section_id,
+                        "section_path": c.section_path,
+                        "page_start": c.page_start,
+                        "page_end": c.page_end,
+                        "result_path": f"chunks/{c.chunk_id}.json",
+                        "duration_sec": batch_meta["duration_sec"],
+                    }
+            else:
+                assert last_error is not None
+                error_code, error_exc = last_error
+                retries += 1
+                failed_batch_ids.append(batch_id)
+                if first_batch_error is None:
+                    first_batch_error = {
+                        "code": error_code,
+                        "batch_id": batch_id,
+                        "message": str(error_exc),
+                    }
+                ctx_batches[batch_id] = {
+                    "chunk_ids": [c.chunk_id for c in batch_chunks],
+                    "status": "failed",
+                    "error": {"code": error_code, "message": str(error_exc)},
+                }
+                for c in batch_chunks:
+                    chunk_states[c.chunk_id] = {
+                        "status": "failed",
+                        "context_batch_id": batch_id,
+                        "section_id": c.section_id,
+                        "section_path": c.section_path,
+                        "page_start": c.page_start,
+                        "page_end": c.page_end,
+                        "error_code": error_code,
+                    }
+
+    all_partials = _load_cached_partials(operation_id, expected_chunk_ids, workspace_root)
+
+    if not all_partials:
+        return {
+            "status": "failed",
+            "operation_id": operation_id,
+            "error": {"code": "NO_PARTIALS", "message": "Нет per-chunk partials"},
+        }
+
+    _section_summary_max_chars = 12000
+    section_reduce_calls = 0
+    document_reduce_calls = 0
+
+    # Hierarchical reduce via canonical reducer
+    if strategy == "map_hierarchical" and struct is not None and section_ids:
+        reducer_config = HierarchicalReducerConfig(
+            group_size=MID_REDUCE_GROUP_SIZE,
+            max_rounds=MAX_REDUCE_ROUNDS,
+            input_budget_chars=DOCUMENT_REDUCE_INPUT_BUDGET_CHARS,
+            section_summary_max_chars=_section_summary_max_chars,
+        )
+
+        def _llm_section_runner(joined, *, section_path="", section_heading="", **_kw):
+            result = _llm_section_reduce(
+                section_path, section_heading, joined,
+                length=length, question=question,
+            )
+            result = _strip_think_blocks(result)
+            if len(result) > _section_summary_max_chars:
+                result = _fit_input(result, _section_summary_max_chars)
+            return result
+
+        def _llm_doc_runner(joined, *, length=length, focus=focus, structure=structure, question=question, **_kw):
+            return _strip_think_blocks(
+                _llm_document_reduce(
+                    joined, length=length, focus=focus, structure=structure, question=question,
+                )
+            )
+
+        def _llm_hybrid_runner(joined, *, section_path=None, section_heading=None, **kw):
+            if section_path is not None or section_heading is not None:
+                nonlocal section_reduce_calls
+                section_reduce_calls += 1
+                return _llm_section_runner(
+                    joined, section_path=section_path or "", section_heading=section_heading or "",
+                )
+            nonlocal document_reduce_calls
+            document_reduce_calls += 1
+            return _llm_doc_runner(joined, **kw)
+
+        reducer_result = reduce_chunks_hierarchical(
+            list(chunks),
+            all_partials,
+            section_ids=section_ids,
+            section_headings=section_headings,
+            section_paths=section_paths,
+            config=reducer_config,
+            llm_runner=_llm_hybrid_runner,
+            length=length,
+            focus=focus,
+        )
+        final_summary = reducer_result.final_summary
+        strategy_label = "map_reduce_hierarchical"
+    else:
+        # Flat reduce: join all chunk partials
+        ordered_chunks = [c for c in chunks if c.chunk_id in all_partials]
+        joined = "\n\n".join(
+            _format_chunk_block(c, all_partials[c.chunk_id]) for c in ordered_chunks
+        )
+        if not joined.strip():
+            return {
+                "status": "failed",
+                "operation_id": operation_id,
+                "error": {"code": "REDUCE_INPUT_EMPTY", "message": "Нет валидных partial summaries для финального reduce"},
+            }
+        joined = _fit_input(joined, DOCUMENT_REDUCE_INPUT_BUDGET_CHARS)
+        try:
+            final_summary = _llm_document_reduce(
+                joined, length=length, focus=focus, structure=structure, question=question,
+            )
+            document_reduce_calls += 1
+        except Exception:
+            retries += 1
+            final_summary = joined if joined.strip() else ""
+        strategy_label = "map_reduce_flat"
+
+    final_summary = _strip_think_blocks(final_summary)
+
+    if not final_summary or not final_summary.strip():
+        return {
+            "status": "failed",
+            "operation_id": operation_id,
+            "error": {"code": "REDUCE_INPUT_EMPTY", "message": "Document reduce вернул пустой summary"},
+        }
+
+    total_duration = round(_time.monotonic() - total_start, 1)
+    subject = _extract_subject(final_summary)
+    is_partial = bool(failed_batch_ids)
+    total_llm_calls = map_calls + section_reduce_calls + document_reduce_calls
+    meaningful = _count_meaningful_sections_canonical(struct) if struct else 0
+
+    result = {
+        "subject": subject,
+        "summary": final_summary,
+        "length": length,
+        "chars_in": chars_in,
+        "chunks": len(chunks),
+        "context_batches": len(final_batches),
+        "sections": _count_sections(struct),
+        "strategy": strategy_label,
+        "title": (structure or {}).get("title"),
+        "partial": is_partial,
+    }
+    write_result(operation_id, result, workspace_root=workspace_root)
+
+    final_manifest = _build_manifest(
+        operation_id=operation_id,
+        document_path=document_path,
+        structure=structure,
+        chars_in=chars_in,
+        length=length,
+        chunks_total=len(chunks),
+        context_batches_total=len(final_batches),
+        estimated_llm_calls=insp_estimated_llm_calls,
+        sections_payload=sections_payload,
+        started_at=existing_manifest.started_at if existing_manifest else _now_iso(),
+        article_count=article_count_for_manifest,
+    )
+    final_manifest.status = "partial" if is_partial else "completed"
+    final_manifest.actual_llm_calls = total_llm_calls
+    final_manifest.chunk_states = chunk_states
+    final_manifest.context_batches = ctx_batches
+    final_manifest.section_summaries = {}
+    final_manifest.batches_done = [f"cb_{i:03d}" for i in range(len(final_batches))]
+    final_manifest.batches_failed = list(failed_batch_ids)
+    final_manifest.last_error = first_batch_error
+    final_manifest.completed_at = _now_iso()
+    final_manifest.duration_sec = total_duration
+    save_manifest(final_manifest, workspace_root=workspace_root)
+
+    return {
+        "status": "partial" if is_partial else "completed",
+        "operation_id": operation_id,
+        "result": result,
+        "stats": {
+            "chars_in": chars_in,
+            "chunks_total": len(chunks),
+            "context_batches_total": len(final_batches),
+            "sections_total": _count_sections(struct),
+            "meaningful_sections": meaningful,
+            "article_count": article_count_for_manifest,
+            "map_calls": map_calls,
+            "section_reduce_calls": section_reduce_calls,
+            "section_trim_calls": 0,
+            "document_reduce_calls": document_reduce_calls,
+            "reduce_calls": section_reduce_calls + document_reduce_calls,
+            "total_llm_calls": total_llm_calls,
+            "retries": retries,
+            "failed_batches": list(failed_batch_ids),
+            "partial": is_partial,
+            "duration_sec": total_duration,
+            "strategy": strategy_label,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public API: run()
+# ---------------------------------------------------------------------------
+
+
 def run(
     text: str,
     *,
@@ -685,7 +1085,7 @@ def run(
     document_path: str | None = None,
     workspace_root: Path | str | None = None,
 ) -> dict:
-    """Главная execution path для legal_summarizer (Phase 2B + brief/detailed/question)."""
+    """Canonical execution path: inspect → select chunks → map/direct reduce."""
     text = (text or "").strip()
     if not text:
         return {
@@ -704,114 +1104,7 @@ def run(
             "operation_id": operation_id,
         }
 
-    # === Выбор chunks по режиму ===
-    # brief / detailed / question используют разные стратегии:
-    #   brief    — первые max_chunks
-    #   detailed — все chunks
-    #   question — chunks, содержащие слова вопроса (≤max_chunks);
-    #              если ничего не нашли — fallback на detailed (все)
-    document_id = _resolve_document_id(document_path, text)
-    session_key = _resolve_session_key(document_path)
-    max_chunks = _resolve_max_chunks()
-
-    if insp.strategy == "map_reduce":
-        if question:
-            # Cache-assisted follow-up retrieval: если для документа есть
-            # свежий doc_cache, пытаемся вытащить точные source fragments
-            # через PhysicalDocument. При stale/no match/weak — existing
-            # keyword match + relaxed fallback.
-            cache_chunks = None
-            if session_key:
-                try:
-                    from cache_followup import (
-                        retrieve_followup_context_via_cache,
-                    )
-                    phys_doc = None
-                    if document_path:
-                        try:
-                            phys_doc = load_physical_document(
-                                document_path, workspace_root=workspace_root,
-                            )
-                        except Exception:
-                            phys_doc = None
-                    if phys_doc is not None:
-                        cache_chunks = retrieve_followup_context_via_cache(
-                            question=question,
-                            document_id=document_id,
-                            session_key=session_key,
-                            document_path=document_path,
-                            workspace_root=workspace_root,
-                            doc=phys_doc,
-                            max_candidates=max_chunks,
-                            min_top_score=3,
-                        )
-                except Exception:
-                    cache_chunks = None
-            if cache_chunks:
-                _progress(
-                    f"question: cache-assisted retrieval → {len(cache_chunks)} chunks"
-                )
-                chosen_chunks = cache_chunks
-            else:
-                from brief_strategy import select_relevant_chunks as _sel_relevant
-                chosen_chunks = _sel_relevant(question, insp.chunks, max_chunks=max_chunks)
-                if chosen_chunks is None:
-                    _progress("question: keyword match пустой → controlled fallback")
-                    _exec_cfg = globals()["get_execution_config"]()
-                    _question_fallback_max = int(
-                        _exec_cfg.get("question_fallback_max_chunks", 16)
-                    )
-                    chosen_chunks = _relaxed_lexical_fallback(
-                        question, insp.chunks, max_chunks=_question_fallback_max,
-                    )
-                    if chosen_chunks is None:
-                        _progress(
-                            "question: keyword miss → bounded top-of-document fallback"
-                        )
-                        chosen_chunks = insp.chunks[:_question_fallback_max]
-        elif length == "brief":
-            from workspace.skills.legal_summarizer.scripts.structure.brief_from_analysis import (
-                select_brief_chunks_from_analysis,
-            )
-            chunk_cfg_brief = globals()["get_chunking_config"]()
-            brief_coverage = chunk_cfg_brief.get("brief_coverage_ratio")
-            if brief_coverage is None:
-                brief_coverage = 0.5
-            chosen_chunks = select_brief_chunks_from_analysis(
-                insp.analysis,
-                config=None,
-            )
-            if brief_coverage < 1.0 and chosen_chunks:
-                target_count = max(1, int(len(chosen_chunks) * brief_coverage))
-                chosen_chunks = chosen_chunks[:target_count]
-            # Двухуровневая модель (coverage + budget):
-            #
-            #   1. Coverage: select_brief_chunks_structured уже выбрал
-            #      N chunks (round-robin по sections, max N=10).
-            #   2. Budget: общий лимит chars для LLM-input через
-            #      brief_max_input_chars (предпочтительно, новый путь).
-            #      Распределяется пропорционально между chunks
-            #      через brief_representation.allocate_brief_budget.
-            #
-            # Если brief_max_input_chars не задан (None/0) — fallback
-            # на legacy per-chunk budget (brief_max_chars_per_chunk),
-            # чтобы старые конфиги продолжали работать.
-            brief_total_budget = chunk_cfg_brief.get("brief_max_input_chars")
-            if brief_total_budget:
-                from workspace.skills.legal_summarizer.scripts.structure.brief_budget import (
-                    allocate_brief_budget,
-                )
-                chosen_chunks = allocate_brief_budget(
-                    chosen_chunks, total_budget_chars=int(brief_total_budget),
-                )
-            else:
-                # No-op: без brief_max_input_chars возвращаем как есть.
-                pass
-        else:
-            chosen_chunks = insp.chunks
-    else:
-        # single-call: chunks — это dummy Chunk, не трогаем.
-        chosen_chunks = insp.chunks
+    chosen_chunks = _select_chunks_for_mode(insp, question=question, length=length)
 
     est = estimate(insp)
     exec_cfg = globals()["get_execution_config"]()
@@ -868,39 +1161,46 @@ def run(
             "hint": "Передайте --confirm для запуска полной обработки.",
         }
 
-    # === Map-reduce СЃС‚СЂР°С‚РµРіРёСЏ: РґРµР»РµРіР°С†РёСЏ РІ legacy transitional layer ===
-    # (СЃРј. _legacy_run_map_reduce.py вЂ” Р±СѓРґРµС‚ СѓРґР°Р»С‘РЅ РІ В§32 РїРѕСЃР»Рµ РїРѕР»РЅРѕРіРѕ
-    # РїРµСЂРµРІРѕРґР° map-reduce РЅР° canonical ExecutionPlan + HierarchicalReducer)
-    if insp.strategy != "single":
-        from workspace.skills.legal_summarizer.scripts._legacy_run_map_reduce import (
-            legacy_run_map_reduce,
-        )
-        session_key = _resolve_session_key(document_path)
-        return legacy_run_map_reduce(
-            text=text,
-            length=length,
-            focus=focus,
-            question=question,
-            confirmed=confirmed,
-            operation_id=operation_id,
-            structure=structure,
-            document_path=document_path,
-            workspace_root=workspace_root,
-            chunks=chunks,
-            tree=insp.structure,
-            batches=batches,
-            insp_chars_in=insp.chars_in,
-            insp_strategy=insp.strategy,
-            insp_estimated_llm_calls=insp.estimated_llm_calls,
-            insp_context_batches=insp.context_batches,
-            make_operation_id_fn=make_operation_id,
-            get_chunking_config_fn=globals()["get_chunking_config"],
-            get_execution_config_fn=globals()["get_execution_config"],
-            build_token_budget_fn=_build_token_budget,
-            session_key=session_key,
-            existing_manifest=existing_manifest,
-        )
+    if len(chosen_chunks) > max_chunks_for_execution:
+        return {
+            "status": "requires_continuation",
+            "operation_id": operation_id,
+            "summary": {
+                "chars_in": insp.chars_in,
+                "chunks_total": len(insp.chunks),
+                "chunks_selected": len(chosen_chunks),
+                "estimated_llm_calls": insp.estimated_llm_calls,
+                "title": (structure or {}).get("title"),
+            },
+            "hint": (
+                f"Выбранная выборка ({len(chosen_chunks)} chunks) превышает "
+                f"max_chunks_for_execution={max_chunks_for_execution}. "
+                f"Уменьшите max_chunks_per_question / question_fallback_max_chunks "
+                f"или передайте --confirm для принудительного продолжения."
+            ),
+        }
 
+    article_count = len(re.findall(r"Статья\s+\d+(?:\.\d+)?", text))
+    strategy = select_strategy(insp.structure, tuple(chosen_chunks))
+
+    _common = dict(
+        length=length,
+        focus=focus,
+        question=question,
+        structure=structure,
+        document_path=document_path,
+        operation_id=operation_id,
+        workspace_root=workspace_root,
+        chars_in=insp.chars_in,
+        insp_estimated_llm_calls=insp.estimated_llm_calls,
+        article_count=article_count,
+        existing_manifest=existing_manifest,
+    )
+
+    if strategy == "direct":
+        return _run_direct(chosen_chunks, **_common)
+
+    return _run_map_reduce(chosen_chunks, strategy=strategy, **_common)
 
 
 # ---------------------------------------------------------------------------
