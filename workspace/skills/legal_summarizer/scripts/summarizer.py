@@ -201,51 +201,6 @@ def _fit_input(text: str, budget: int) -> str:
     return text[:head] + f"\n\n[...пропущено {skipped} символов...]"
 
 
-def _hierarchical_reduce_rounds(
-    section_summaries: list[tuple[str, str]],
-    *,
-    group_size: int = MID_REDUCE_GROUP_SIZE,
-    max_rounds: int = MAX_REDUCE_ROUNDS,
-    input_budget: int = DOCUMENT_REDUCE_INPUT_BUDGET_CHARS,
-    length: str,
-    focus: str | None,
-    structure: dict | None,
-    question: str | None,
-) -> tuple[str, int]:
-    """Рекурсивный reduce для hierarchical-ветки: map → section → mid* → document.
-
-    На каждом раунде группирует section_summaries по group_size, объединяет
-    в одну строку и вызывает _llm_document_reduce. Результат каждой группы
-    становится новым «section_summary» для следующего раунда. Повторяет,
-    пока не останется 1 финальное саммари или не исчерпан max_rounds.
-
-    Возвращает (final_summary, rounds_done). rounds_done добавляется
-    к document_reduce_calls в caller'е.
-    """
-    rounds = 0
-    current = list(section_summaries)
-    while len(current) > 1 and rounds < max_rounds:
-        rounds += 1
-        next_level: list[tuple[str, str]] = []
-        for i in range(0, len(current), group_size):
-            group = current[i:i + group_size]
-            joined_group = "\n\n".join(
-                f"[{sid}]\n{summary}" for sid, summary in group
-            )
-            joined_group = _fit_input(joined_group, input_budget)
-            text = _llm_document_reduce(
-                joined_group,
-                length=length,
-                focus=focus,
-                structure=structure,
-                question=question,
-            )
-            text = _strip_think_blocks(text)
-            next_level.append((f"r{rounds}_g{i // group_size}", text))
-        current = next_level
-    return current[0][1], rounds
-
-
 def _resolve_max_chunks() -> int:
     """Максимум chunks для brief/question режимов из конфига."""
     cfg = globals()["get_execution_config"]()
@@ -1536,13 +1491,36 @@ def run(
             }
         try:
             ordered_pairs = [(sid, summary) for sid, summary in ordered]
-            final_summary, extra_rounds = _hierarchical_reduce_rounds(
+            from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
+                HierarchicalReducerConfig,
+                reduce_sections_to_document,
+            )
+            reducer_config = HierarchicalReducerConfig(
+                group_size=MID_REDUCE_GROUP_SIZE,
+                max_rounds=MAX_REDUCE_ROUNDS,
+                input_budget_chars=DOCUMENT_REDUCE_INPUT_BUDGET_CHARS,
+            )
+            reducer_result = reduce_sections_to_document(
                 ordered_pairs,
+                config=reducer_config,
+                llm_runner=lambda joined, **_kw: (
+                    _strip_think_blocks(
+                        _llm_document_reduce(
+                            joined,
+                            length=length,
+                            focus=focus,
+                            structure=structure,
+                            question=question,
+                        ),
+                    )
+                ),
                 length=length,
                 focus=focus,
                 structure=structure,
                 question=question,
             )
+            final_summary = reducer_result.final_summary
+            extra_rounds = reducer_result.rounds_done
             document_reduce_calls += 1 + extra_rounds
         except Exception:
             retries += 1
