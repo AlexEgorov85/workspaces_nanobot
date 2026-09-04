@@ -186,11 +186,49 @@ def list_penalty_for_candidate(
     Дополнительно: если кандидат — единственный представитель номера
     в длинном run (≥ 5), он получает повышенный штраф (0.15),
     потому что это явный list.
+
+    Для граничных случаев (короткий run ≤ 4) возвращается меньший
+    штраф 0.08 — возможно, это section, не list.
     """
     for run in list_runs:
         if run.is_list and candidate_ordinal in run.block_ordinals:
-            return 0.15 if len(run.block_ordinals) >= 5 else 0.10
+            if len(run.block_ordinals) >= 5:
+                return 0.15
+            return 0.08
     return 0.0
+
+
+def classify_ambiguous_run(
+    ordinals: tuple[int, ...],
+    blocks: tuple[DocumentBlock, ...],
+    *,
+    max_item_chars: int = 200,
+) -> str:
+    """Определить категорию для спорного numbered-run.
+
+    PLAN §10 — различать heading vs list item в спорных случаях.
+
+    Возвращает одно из:
+
+    * ``"list"`` — явный list (короткие однотипные блоки).
+    * ``"section"`` — heading'и (есть substantial body после).
+    * ``"ambiguous"`` — нельзя определить детерминированно.
+    """
+    if len(ordinals) < 2:
+        return "ambiguous"
+    by_ord = {b.ordinal: b for b in blocks}
+    short_count = 0
+    for o in ordinals:
+        b = by_ord.get(o)
+        if b is None:
+            continue
+        if len(b.content.strip()) <= max_item_chars:
+            short_count += 1
+    if short_count == len(ordinals):
+        return "list"
+    if short_count == 0:
+        return "section"
+    return "ambiguous"
 
 
 __all__ = [
@@ -198,4 +236,5 @@ __all__ = [
     "ListRun",
     "detect_list_runs",
     "list_penalty_for_candidate",
+    "classify_ambiguous_run",
 ]

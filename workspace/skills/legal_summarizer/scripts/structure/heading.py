@@ -18,10 +18,17 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
+from workspace.skills.legal_summarizer.scripts.structure.models import NumberingInfo
+from workspace.skills.legal_summarizer.scripts.structure.numbering import parse_numbering
+from workspace.skills.legal_summarizer.scripts.structure.pdf_outline import (
+    map_pdf_outline,
+    mapped_to_heading_candidates,
+)
 from workspace.skills.legal_summarizer.scripts.structure.physical import (
     DocumentBlock,
+    PhysicalDocument,
 )
 from workspace.skills.legal_summarizer.scripts.structure.list_detection import (
     detect_list_runs,
@@ -32,6 +39,7 @@ from workspace.skills.legal_summarizer.scripts.structure.list_detection import (
 CONFIDENCE_THRESHOLD = 0.60
 
 _HEADING_KEYWORDS = ("heading ", "heading_", "заголовок")
+_TITLE_KEYWORDS = ("title", "титул", "название", "subtitle", "подзаголовок")
 
 _RE_NUMBERED_LEVEL_1 = re.compile(r"^\s*(\d+)\.\s+(.{2,200})$")
 _RE_NUMBERED_LEVEL_2 = re.compile(r"^\s*(\d+)\.(\d+)\.?\s+(.{2,200})$")
@@ -64,6 +72,19 @@ def _is_docx_heading_style(style_name: str) -> bool:
         return False
     name = style_name.lower()
     return any(name.startswith(prefix) for prefix in _HEADING_KEYWORDS)
+
+
+def _is_docx_title_style(style_name: str) -> bool:
+    """True если DOCX style — это Title / Subtitle (PLAN §14).
+
+    Title-стили дают очень высокую уверенность, что параграф — это
+    document title (а не heading). Используется при формировании
+    ``DocumentTitle`` в ``DocumentStructure``.
+    """
+    if not style_name:
+        return False
+    name = style_name.lower()
+    return any(name.startswith(prefix) for prefix in _TITLE_KEYWORDS)
 
 
 def _looks_like_heading(text: str) -> bool:
@@ -157,11 +178,28 @@ def _extract_pdf_outline(path: str) -> list[HeadingCandidate]:
 def detect_heading_candidates(
     blocks: tuple[DocumentBlock, ...],
     pdf_path: str | None,
+    *,
+    physical_doc: Optional[PhysicalDocument] = None,
 ) -> list[HeadingCandidate]:
     """Найти всех кандидатов в heading'и (DOCX style + regex + PDF outline).
 
     Public API этапа 7: было приватной ``_detect_candidates`` в ``sections.py``,
     теперь экспортируется из ``heading.py``.
+
+    Этап 7 (PLAN): numbering detection делегирован в
+    ``scripts/structure/numbering.py`` (``parse_numbering``). Старый
+    ``_classify_regex`` оставлен для back-compat, но теперь результат
+    сверяется с новым parser'ом — и если новый parser даёт иную
+    информацию (например, level на основе nested components),
+    используется он.
+
+    Этап 11 (PLAN §11): PDF outline mapping теперь делается через
+    ``scripts/structure/pdf_outline.py::map_pdf_outline``, который
+    возвращает ``HeadingCandidate`` с реальным ``block_index >= 0``
+    (раньше outline кандидаты имели ``block_index = -1`` и отбрасывались
+    в ``build_section_tree``). Для этого требуется ``physical_doc`` —
+    если он передан, mapping делается; если нет — fallback на legacy
+    ``_extract_pdf_outline`` (без mapping, ``block_index = -1``).
     """
     candidates: list[HeadingCandidate] = []
 
@@ -176,7 +214,7 @@ def detect_heading_candidates(
             m = re.search(r"(\d+)", style_name)
             if m:
                 try:
-                    level = max(1, min(6, int(m.group(1))))
+                        level = max(1, min(6, int(m.group(1))))
                 except ValueError:
                     pass
             candidates.append(
@@ -197,6 +235,11 @@ def detect_heading_candidates(
         level, score, source, raw_number = classified
         if level == 1 and len(text) > 80:
             score = min(score, 0.55)
+
+        ni = parse_numbering(text)
+        if ni is not None:
+            level = max(level, ni.level)
+
         candidates.append(
             HeadingCandidate(
                 block_index=block.ordinal,
@@ -209,7 +252,11 @@ def detect_heading_candidates(
         )
 
     if pdf_path:
-        outline_candidates = _extract_pdf_outline(pdf_path)
+        if physical_doc is not None:
+            mapped = map_pdf_outline(pdf_path, physical_doc)
+            outline_candidates = mapped_to_heading_candidates(mapped)
+        else:
+            outline_candidates = _extract_pdf_outline(pdf_path)
         for c in outline_candidates:
             candidates.append(c)
 
@@ -265,15 +312,27 @@ class HeadingEvidence:
     Это намеренно **детерминированная** эвристика (без LLM): LLM-классификация
     заголовков была бы дороже и нестабильнее, чем набор локальных правил.
 
+    Уровни уверенности (PLAN §8):
+
+    * Very high: DOCX Heading style, mapped PDF outline, explicit legal markers.
+    * High: numbering + typography + body_after + neighbor_consistency.
+    * Medium: bold + short + uppercase + centered.
+    * Low: только короткая строка или только номер.
+
     Attributes:
         source_score: копия ``HeadingCandidate.score`` для удобства сводки.
         short_text_bonus: +0.05 если heading короткий (< 80 chars).
         body_after_bonus: +0.05 если после heading идёт substantial body
             (≥ 100 chars в следующем блоке).
         numbering_consistency_bonus: +0.05 если соседние headings одного
-            уровня образуют монотонную последовательность.
+            уровня образуют монотонную последовательность (см. ``numbering.assign_sibling_ordinals``).
         typography_bonus: +0.05 если heading имеет «heading-стиль»
             (короткий + title-case ИЛИ весь uppercase).
+        legal_marker_bonus: +0.10 если heading содержит явный legal marker
+            (Статья / Глава / Раздел / § / Пункт / Приложение).
+        docx_title_bonus: +0.15 если DOCX style — это Title/Subtitle
+            (PLAN §14: title не heading — но он помогает выбрать «главный»
+            heading для первой секции).
         list_penalty: −0.10 если heading окружён list-like соседями
             (≥ 3 коротких нумерованных блока подряд).
         duplicate_penalty: −0.20 если текст совпадает с предыдущим heading'ом.
@@ -284,6 +343,8 @@ class HeadingEvidence:
     body_after_bonus: float = 0.0
     numbering_consistency_bonus: float = 0.0
     typography_bonus: float = 0.0
+    legal_marker_bonus: float = 0.0
+    docx_title_bonus: float = 0.0
     list_penalty: float = 0.0
     duplicate_penalty: float = 0.0
 
@@ -295,6 +356,8 @@ class HeadingEvidence:
             + self.body_after_bonus
             + self.numbering_consistency_bonus
             + self.typography_bonus
+            + self.legal_marker_bonus
+            + self.docx_title_bonus
             - self.list_penalty
             - self.duplicate_penalty
         )
@@ -396,10 +459,8 @@ def compute_evidence(
     """
     text = candidate.text.strip()
 
-    # short_text_bonus
     short_bonus = 0.05 if _is_short(text) else 0.0
 
-    # body_after_bonus
     body_bonus = 0.0
     next_idx = candidate.block_index + 1
     if 0 <= candidate.block_index and next_idx < len(blocks):
@@ -407,23 +468,24 @@ def compute_evidence(
         if _is_substantial_body(next_block.content):
             body_bonus = 0.05
 
-    # numbering_consistency_bonus
     num_bonus = (
         0.05
         if _numbering_consistency_with_neighbors(candidate, all_candidates)
         else 0.0
     )
 
-    # typography_bonus
     typo_bonus = 0.05 if _looks_like_heading_typography(text) else 0.0
 
-    # list_penalty: list-detection вынесен в ``apply_evidence_scoring`` —
-    # он вычисляет list-runs один раз и обновляет penalty здесь для каждого
-    # кандидата. Внутри ``compute_evidence`` оставляем 0.0 (дефолт);
-    # outer код может перезаписать.
+    legal_bonus = 0.10 if _looks_like_explicit_legal_marker(text) else 0.0
+
+    docx_title_bonus = 0.0
+    if 0 <= candidate.block_index < len(blocks):
+        style_name = blocks[candidate.block_index].block_metadata.get("style", "")
+        if _is_docx_title_style(style_name):
+            docx_title_bonus = 0.15
+
     list_pen = 0.0
 
-    # duplicate_penalty: текст совпадает с предыдущим heading'ом.
     dup_pen = 0.0
     prev_text = _collect_previous_heading_text(candidate, all_candidates)
     if prev_text is not None and prev_text.strip() == text:
@@ -435,9 +497,29 @@ def compute_evidence(
         body_after_bonus=body_bonus,
         numbering_consistency_bonus=num_bonus,
         typography_bonus=typo_bonus,
+        legal_marker_bonus=legal_bonus,
+        docx_title_bonus=docx_title_bonus,
         list_penalty=list_pen,
         duplicate_penalty=dup_pen,
     )
+
+
+_LEGAL_MARKERS = (
+    "Статья", "Глава", "Раздел", "Пункт", "Часть",
+    "§", "Приложение",
+)
+
+
+def _looks_like_explicit_legal_marker(text: str) -> bool:
+    """``True`` если текст содержит явный юридический маркер (PLAN §8)."""
+    s = text.strip()
+    if not s:
+        return False
+    head = s.split(None, 1)[0] if s else ""
+    for marker in _LEGAL_MARKERS:
+        if head.startswith(marker):
+            return True
+    return False
 
 
 def apply_evidence_scoring(
@@ -468,8 +550,6 @@ def apply_evidence_scoring(
             continue
 
         ev = compute_evidence(c, blocks, candidates)
-        # Заменяет старую ``list_penalty`` на новую, точную,
-        # основанную на полноценном list-detection (а не на радиусе 3 блока).
         extra_list_penalty = list_penalty_for_candidate(c.block_index, list_runs)
         if extra_list_penalty > ev.list_penalty:
             ev = HeadingEvidence(
@@ -478,6 +558,8 @@ def apply_evidence_scoring(
                 body_after_bonus=ev.body_after_bonus,
                 numbering_consistency_bonus=ev.numbering_consistency_bonus,
                 typography_bonus=ev.typography_bonus,
+                legal_marker_bonus=ev.legal_marker_bonus,
+                docx_title_bonus=ev.docx_title_bonus,
                 list_penalty=extra_list_penalty,
                 duplicate_penalty=ev.duplicate_penalty,
             )
