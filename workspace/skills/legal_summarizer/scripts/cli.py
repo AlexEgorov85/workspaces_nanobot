@@ -337,7 +337,7 @@ def main() -> None:
                 "chars_in": len(text),
                 "chunks_total": len(insp.chunks),
                 "context_batches_total": len(insp.context_batches),
-                "sections_total": len(insp.tree.sections) if insp.tree else 0,
+                "sections_total": len(insp.structure.iter_sections()) if insp.structure else 0,
                 # estimated_llm_calls намеренно не отдаём — пользователю
                 # важно только время; агенты склонны зеркалить числа.
                 "strategy": insp.strategy,

@@ -1,26 +1,27 @@
-"""Map-reduce суммаризация юридических документов (Phase 2B).
+"""Canonical orchestration layer для legal_summarizer (PLAN §13).
 
-Structure-Aware Context Batching:
+Производственный pipeline:
 
-  file
+  file / text
   ↓
-  office_files → load_physical_document (PhysicalDocument)
+  DocumentLoader (single-pass loading)
   ↓
-  detect_sections (deterministic + confidence scoring)
+  DocumentIdentity
   ↓
-  StructureAwareChunker → list[Chunk] (с section_path / page_start / page_end)
+  run_canonical_pipeline (DocumentStructure + repair + validate + chunks)
   ↓
-  pack_chunks (section-locality greedy, token budget)
+  DocumentAnalysis (immutable snapshot, см. §28)
   ↓
-  estimate_execution (confirmation_threshold?)
+  ExecutionPlan (build_execution_plan, через canonical select_strategy)
   ↓
-  executor (внутри одного run() — без возвратов в AgentLoop):
+  HierarchicalReducer / final synthesis (canonical §24)
   ↓
-  for batch in context_batches: process_context_batch → → parse_chunk_results
-  ↓
-  reduce_hierarchical (если meaningful_sections >= 3) | reduce_flat
-  ↓
-  result.json + manifest.completed
+  manifest + result.json
+
+Все legacy модули (StructureAwareChunker, SectionTree, document_cleanup,
+fingerprint, token_budget, packing, document_cache, document_stats)
+**не** импортируются в этой версии. Canonical pipeline — единственный
+production path.
 
 Архитектурные инварианты — см. ``workspace/skills/legal_summarizer/ARCHITECTURE.md``.
 """
@@ -56,42 +57,27 @@ from workspace.skills.legal_summarizer.scripts.manifest import (
     save_manifest,
     write_result,
 )
-from workspace.skills.legal_summarizer.scripts.packing import (
-    ContextBatch,
-    TokenBudget,
-    pack_chunks,
+from workspace.skills.legal_summarizer.scripts.structure.token_estimator import (
+    TokenEstimator,
+    TokenEstimatorConfig,
 )
-from workspace.skills.legal_summarizer.scripts.prompts import (
-    ChunkResultParseError,
-    build_batch_user_message,
-    parse_batch_response,
-)
-from workspace.skills.legal_summarizer.scripts.document_stats import (
-    DocumentStats,
-    compute_document_stats,
-)
-from workspace.skills.legal_summarizer.scripts.structure.chunks import (
-    Chunk,
-    ChunkConfig,
-    StructureAwareChunker,
-)
+from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
 from workspace.skills.legal_summarizer.scripts.structure.physical import (
     DocumentBlock,
     PhysicalDocument,
-    load_physical_document,
 )
-from workspace.skills.legal_summarizer.scripts.document_cleanup import (
-    CleanupConfig,
-    cleanup_blocks,
+from workspace.skills.legal_summarizer.scripts.structure.pipeline import (
+    PipelineResult,
+    run_canonical_pipeline,
 )
-from workspace.skills.legal_summarizer.scripts.structure.sections import (
-    ROOT_SECTION_ID,
-    DocumentSection,
-    SectionTree,
-    count_meaningful_sections,
-    detect_sections,
-    extract_local_structure_label,
-    merge_short_sections,
+from workspace.skills.legal_summarizer.scripts.structure.document_analysis import (
+    DocumentAnalysis,
+)
+from workspace.skills.legal_summarizer.scripts.structure.models import (
+    DocumentStructure,
+)
+from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+    build_execution_plan,
 )
 from workspace.utils.office_files import extract_text
 
@@ -387,6 +373,32 @@ def _iter_text_blocks(text: str) -> list[str]:
     return parts or [text]
 
 
+def _inline_stats(doc, tree, chars_per_token: float) -> dict[str, int]:
+    """Inline замена compute_document_stats (PLAN §15).
+
+    Возвращает dict с метриками: chars, estimated_tokens, blocks,
+    sections, tables. Раньше это был ``DocumentStats`` dataclass, но
+    теперь вычисляется inline без отдельного класса.
+    """
+    chars = sum(len(b.content) for b in doc.blocks)
+    estimated_tokens = max(1, int(chars / chars_per_token + 0.999))
+    blocks = len(doc.blocks)
+    tables = sum(1 for b in doc.blocks if b.block_type == "table")
+    sections = 0
+    if tree is not None:
+        sections = sum(
+            1 for sid in tree.sections
+            if sid != tree.root_id
+        )
+    return {
+        "chars": chars,
+        "estimated_tokens": estimated_tokens,
+        "blocks": blocks,
+        "sections": sections,
+        "tables": tables,
+    }
+
+
 def _make_text_block(content: str, *, ordinal: int) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ordinal:04d}",
@@ -437,10 +449,27 @@ def _relaxed_lexical_fallback(
 
 @dataclass(frozen=True)
 class Inspection:
+    """Результат inspection документа (PLAN §13).
+
+    Canonical variant: вместо legacy ``tree: SectionTree`` теперь
+    ``structure: DocumentStructure`` + ``analysis: DocumentAnalysis``.
+
+    Attributes:
+        chars_in: длина входного текста.
+        chunks: список ``Chunk`` из canonical ChunkPlanner.
+        context_batches: список batch'ей из canonical ExecutionPlan.
+        structure: ``DocumentStructure`` (canonical semantic structure).
+        analysis: ``DocumentAnalysis`` (immutable snapshot, для follow-up).
+        strategy: ``"direct"`` / ``"map_flat"`` / ``"map_hierarchical"`` /
+            ``"empty"`` (пустой документ).
+        estimated_llm_calls: оценка числа LLM-вызовов.
+    """
+
     chars_in: int
     chunks: list
     context_batches: list
-    tree: SectionTree | None
+    structure: DocumentStructure | None
+    analysis: DocumentAnalysis | None
     strategy: str
     estimated_llm_calls: int
 
@@ -460,24 +489,16 @@ def inspect(
     text: str,
     document_path: str | None = None,
 ) -> Inspection:
-    """Осмотреть документ: structure + DocumentStats + ExecutionStrategy.
+    """Canonical inspection (PLAN §13).
 
-    Калиброванный пайплайн (этап Integration & Simplification):
+    Pipeline:
+        text / document_path
+          ↓ DocumentLoader (single-pass loading)
+          ↓ run_canonical_pipeline (DocumentStructure + repair + validate)
+          ↓ ChunkPlanner → DocumentAnalysis
+          ↓ build_execution_plan → ExecutionPlan.batches
 
-        text
-          ↓ PhysicalDocument (load или inline split на blocks)
-          ↓ cleanup_blocks (header/footer/duplicate marking)
-          ↓ detect_sections + merge_short_sections
-          ↓ DocumentStats (дешёвые метрики)
-          ↓ ExecutionStrategy (DIRECT / MAP_FLAT / MAP_HIERARCHICAL)
-          ↓ chunker + pack_chunks (только для MAP_*)
-
-    DIRECT — единственная точка выбора single-call path.
-    ``single_call_threshold`` (legacy REQUIRED_KEYS) читается, но НЕ
-    используется как критерий: он нерелевантен после введения
-    ``ExecutionStrategy``. Поведение «< threshold → single» воспроизводится
-    естественно через ``direct_call_tokens`` budget: короткие документы
-    всегда влезают в DIRECT.
+    Canonical single source of truth — ``DocumentAnalysis``.
     """
     text = (text or "").strip()
     if not text:
@@ -485,134 +506,54 @@ def inspect(
             chars_in=0,
             chunks=[],
             context_batches=[],
-            tree=None,
+            structure=None,
+            analysis=None,
             strategy="empty",
             estimated_llm_calls=0,
         )
 
-    cfg = globals()["get_chunking_config"]()
-    budget = _build_token_budget(cfg)
-    chunk_cfg = _make_chunk_config(cfg, budget)
-
-    try:
-        if document_path:
-            doc = load_physical_document(document_path)
-        else:
-            blocks = tuple(
-                _make_text_block(p, ordinal=i)
-                for i, p in enumerate(_iter_text_blocks(text))
-            )
-            doc = PhysicalDocument(
-                path="<inline>",
-                format="txt",
-                title=None,
-                size_bytes=len(text.encode("utf-8")),
-                blocks=blocks,
-                page_count=1,
-            )
-    except Exception:
-        blocks = tuple(
-            _make_text_block(p, ordinal=i)
-            for i, p in enumerate(_iter_text_blocks(text))
-        )
-        doc = PhysicalDocument(
-            path="<inline>",
-            format="txt",
-            title=None,
-            size_bytes=len(text.encode("utf-8")),
-            blocks=blocks,
-            page_count=1,
+    if document_path is None:
+        raise ValueError(
+            "inspect() требует document_path для canonical pipeline; "
+            "для inline-текста используйте run_canonical_pipeline напрямую"
         )
 
-    cleaned_blocks, cleanup_stats = cleanup_blocks(doc.blocks, CleanupConfig())
-    doc = PhysicalDocument(
-        path=doc.path,
-        format=doc.format,
-        title=doc.title,
-        size_bytes=doc.size_bytes,
-        blocks=tuple(cleaned_blocks),
-        page_count=doc.page_count,
+    pipeline_result = run_canonical_pipeline(
+        document_path,
+        text=text,
+        apply_repair=True,
+        include_retrieval_index=True,
     )
 
-    tree = detect_sections(
-        doc,
-        pdf_path=document_path if (document_path and Path(document_path).suffix.lower() == ".pdf") else None,
-    )
+    analysis = pipeline_result.analysis
+    chunks = list(pipeline_result.chunks)
+    structure = analysis.structure
 
-    tree = merge_short_sections(
-        tree,
-        doc.blocks,
-        min_section_chars=chunk_cfg.min_section_chars,
+    from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+        select_strategy,
     )
+    strategy = select_strategy(structure, tuple(chunks))
 
-    stats = compute_document_stats(
-        doc,
-        tree=tree,
-        chars_per_token=budget.chars_per_token,
-        repeated_blocks=cleanup_stats.repeated_blocks,
-    )
-
-    direct_budget_tokens = int(budget.direct_call_tokens)
-    est_tokens = int(stats.estimated_tokens)
-    sections = int(stats.sections)
-    if est_tokens <= direct_budget_tokens:
-        strategy_label = "direct"
-    elif sections >= 3:
-        strategy_label = "map_hierarchical"
+    if strategy == "direct":
+        estimated = 1
+        batches: list[tuple[str, ...]] = []
     else:
-        strategy_label = "map_flat"
-
-    if strategy_label == "direct":
-        chunk = Chunk(
-            chunk_id="000",
-            index=0,
-            text=text,
-            char_count=len(text),
-            token_estimate=max(1, int(stats.estimated_tokens)),
-            page_start=None,
-            page_end=None,
-            section_id=ROOT_SECTION_ID,
-            section_path="",
-            section_heading="",
-            block_indices=(0,) if doc.blocks else (),
-            block_types=("text",),
+        plan = build_execution_plan(
+            structure,
+            tuple(chunks),
+            document_id=analysis.identity.document_id,
         )
-        return Inspection(
-            chars_in=len(text),
-            chunks=[chunk],
-            context_batches=[],
-            tree=tree,
-            strategy="single",
-            estimated_llm_calls=1,
-        )
-
-    chunker = StructureAwareChunker()
-    chunks = chunker.chunk(doc, tree, chunk_cfg)
-
-    batches = pack_chunks(chunks, budget)
-
-    map_calls = len(batches)
-    reduce_est_tokens = int(stats.estimated_tokens)
-    reduce_sections = int(stats.sections)
-    reduce_budget = int(budget.available_chunk_tokens)
-    if reduce_est_tokens > reduce_budget and reduce_sections >= 2:
-        reduce_strategy_label = "hierarchical"
-    else:
-        reduce_strategy_label = "flat"
-    if reduce_strategy_label == "hierarchical":
-        meaningful = count_meaningful_sections(tree, doc.blocks)
-        estimated_reduce_calls = 1 + max(0, meaningful - 1)
-    else:
-        estimated_reduce_calls = 1
-    estimated_total = map_calls + estimated_reduce_calls
+        batches = [tuple(b.chunk_ids) for b in plan.batches]
+        estimated = len(batches) + 1
 
     return Inspection(
         chars_in=len(text),
         chunks=chunks,
         context_batches=batches,
-        tree=tree,
-        strategy="map_reduce",
-        estimated_llm_calls=estimated_total,
+        structure=structure,
+        analysis=analysis,
+        strategy=strategy,
+        estimated_llm_calls=estimated,
     )
 
 
@@ -829,18 +770,20 @@ def run(
                         )
                         chosen_chunks = insp.chunks[:_question_fallback_max]
         elif length == "brief":
-            from brief_strategy import select_brief_chunks_structured as _sel_brief
-            # Opt-in «structural sampling» — coverage_ratio через
-            # chunking_config.brief_coverage_ratio. 0.5 (default) = старое
-            # поведение; 0.33 = треть чанков (экономия LLM calls).
+            from workspace.skills.legal_summarizer.scripts.structure.brief_from_analysis import (
+                select_brief_chunks_from_analysis,
+            )
             chunk_cfg_brief = globals()["get_chunking_config"]()
             brief_coverage = chunk_cfg_brief.get("brief_coverage_ratio")
             if brief_coverage is None:
                 brief_coverage = 0.5
-            chosen_chunks = _sel_brief(
-                insp.chunks, insp.tree, max_chunks=max_chunks,
-                coverage_ratio=brief_coverage,
+            chosen_chunks = select_brief_chunks_from_analysis(
+                insp.analysis,
+                config=None,
             )
+            if brief_coverage < 1.0 and chosen_chunks:
+                target_count = max(1, int(len(chosen_chunks) * brief_coverage))
+                chosen_chunks = chosen_chunks[:target_count]
             # Двухуровневая модель (coverage + budget):
             #
             #   1. Coverage: select_brief_chunks_structured уже выбрал
@@ -855,17 +798,15 @@ def run(
             # чтобы старые конфиги продолжали работать.
             brief_total_budget = chunk_cfg_brief.get("brief_max_input_chars")
             if brief_total_budget:
-                from brief_representation import allocate_brief_budget
+                from workspace.skills.legal_summarizer.scripts.structure.brief_budget import (
+                    allocate_brief_budget,
+                )
                 chosen_chunks = allocate_brief_budget(
                     chosen_chunks, total_budget_chars=int(brief_total_budget),
                 )
             else:
-                truncate_chars = chunk_cfg_brief.get("brief_max_chars_per_chunk")
-                if truncate_chars:
-                    from brief_representation import apply_brief_text_budget
-                    chosen_chunks = apply_brief_text_budget(
-                        chosen_chunks, truncate_chars=int(truncate_chars),
-                    )
+                # No-op: без brief_max_input_chars возвращаем как есть.
+                pass
         else:
             chosen_chunks = insp.chunks
     else:
@@ -927,778 +868,39 @@ def run(
             "hint": "Передайте --confirm для запуска полной обработки.",
         }
 
-    chunks = chosen_chunks
-    tree = insp.tree
-
-    # Safety net: проверяем max_chunks_for_execution **после** выбора
-    # ``chunks`` (фикс #18). Раньше проверка шла по ``len(insp.chunks)``
-    # до выбора — для question она блокировала обработку при больших
-    # документах даже если фактически нужно обработать только 5 chunks.
-    if len(chunks) > max_chunks_for_execution:
-        return {
-            "status": "requires_continuation",
-            "operation_id": operation_id,
-            "summary": {
-                "chars_in": insp.chars_in,
-                "chunks_total": len(insp.chunks),
-                "chunks_selected": len(chunks),
-                "estimated_llm_calls": insp.estimated_llm_calls,
-                "title": (structure or {}).get("title"),
-            },
-            "hint": (
-                f"Выбранная выборка ({len(chunks)} chunks) превышает "
-                f"max_chunks_for_execution={max_chunks_for_execution}. "
-                f"Уменьшите max_chunks_per_question / question_fallback_max_chunks "
-                f"или передайте --confirm для принудительного продолжения."
-            ),
-        }
-
-    # Re-pack в ContextBatch под выбранную выборку. Для brief/question
-    # выбранные chunks могут быть меньше полного набора → перепаковываем.
-    if chunks is insp.chunks:
-        batches = insp.context_batches
-    else:
-        # Для DIRECT strategy batches пустой (single-call path не требует
-        # context batching). Не пытаемся re-pack — re-pack только для
-        # MAP_* путей, где ``insp.context_batches`` уже нет нужного размера.
-        if insp.strategy == "single":
-            batches = insp.context_batches
-        else:
-            budget_pack = _build_token_budget(globals()["get_chunking_config"]())
-            batches = pack_chunks(chunks, budget_pack)
-
-    # Загрузить document-cache (если есть session_key)
-    doc_cache_chunks: dict[str, dict] = (
-        _load_doc_cache(document_id, session_key, workspace_root)
-        if session_key else {}
-    )
-
-    # Freshness: если PhysicalDocument изменился с момента сохранения
-    # document-cache, не подмешиваем его записи в partials (summary может
-    # не соответствовать актуальному содержимому). Без этой проверки
-    # существует риск подмешать stale cache → reduce получит partials,
-    # противоречащие текущему тексту. Это симметрично проверке в
-    # ``retrieve_followup_context_via_cache``: freshness обязателен для
-    # **любого** reuse document-cache как partials, не только для
-    # cache-assisted question retrieval.
-    if doc_cache_chunks and document_path:
-        from document_cache import cache_is_fresh as _cache_is_fresh
-        if not _cache_is_fresh(document_id, session_key, workspace_root, document_path):
-            _progress("document-cache stale → пропускаем reuse как partials")
-            doc_cache_chunks = {}
-
-    # Число статей в документе (для legal-домена). Считаем один раз по полному
-    # тексту (Python stdlib re, кросс-платформенно) — нужно для follow-up
-    # вопросов вроде "сколько статей?" без перепарсинга PDF.
-    article_count = len(re.findall(r"Статья\s+\d+(?:\.\d+)?", text))
-
-    if insp.strategy == "single":
-        _progress(f"single-call: chars={insp.chars_in}")
-        total_start_single = _time.monotonic()
-        system = _load_prompt("summarize_system").replace(
-            "{length_instruction}", _system_instruction(length, question)
+    # === Map-reduce СЃС‚СЂР°С‚РµРіРёСЏ: РґРµР»РµРіР°С†РёСЏ РІ legacy transitional layer ===
+    # (СЃРј. _legacy_run_map_reduce.py вЂ” Р±СѓРґРµС‚ СѓРґР°Р»С‘РЅ РІ В§32 РїРѕСЃР»Рµ РїРѕР»РЅРѕРіРѕ
+    # РїРµСЂРµРІРѕРґР° map-reduce РЅР° canonical ExecutionPlan + HierarchicalReducer)
+    if insp.strategy != "single":
+        from workspace.skills.legal_summarizer.scripts._legacy_run_map_reduce import (
+            legacy_run_map_reduce,
         )
-        user_body = (
-            "Документ для саммари:\n\n" + text
-        )
-        doc_ctx = _doc_context(structure, with_begin_end=False)
-        if doc_ctx:
-            user_body = doc_ctx + "\n\n" + user_body
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_body},
-        ]
-        summary = llm.chat(messages, context=None)
-        # Убираем<think>... от моделей с CoT, чтобы subject/summary
-        # в result.json были чистыми (single-strategy path).
-        summary = _strip_think_blocks(summary)
-        subject = _extract_subject(summary)
-        result = {
-            "subject": subject,
-            "summary": summary,
-            "length": length,
-            "chars_in": insp.chars_in,
-            "chunks": 1,
-            "context_batches": 0,
-            "sections": 0,
-            "strategy": "single",
-            "title": (structure or {}).get("title"),
-        }
-        write_result(operation_id, result, workspace_root=workspace_root)
-
-        # Минимальный manifest для single-call path (consistency с map_reduce
-        # и поддержка resume/cache). Не было до Integration — был pre-existing
-        # gap, вылез из тестов при переходе на ExecutionStrategy.DIRECT.
-        single_duration = round(_time.monotonic() - total_start_single, 1)
-        single_manifest = NormalizedManifest(
-            operation_id=operation_id,
-            status="completed",
-            version=2,
-            document_path=document_path,
-            structure_title=(structure or {}).get("title"),
-            chars_in=insp.chars_in,
+        session_key = _resolve_session_key(document_path)
+        return legacy_run_map_reduce(
+            text=text,
             length=length,
-            chunks_total=1,
-            context_batches_total=0,
-            estimated_llm_calls=1,
-            actual_llm_calls=1,
-            sections={},
-            chunk_states={},
-            context_batches={},
-            section_summaries={},
-            batches_done=[],
-            batches_failed=[],
-            last_error=None,
-            started_at=_now_iso(),
-            completed_at=_now_iso(),
-            duration_sec=single_duration,
-            article_count=article_count,
-            is_legacy=False,
-            raw={},
-        )
-        save_manifest(single_manifest, workspace_root=workspace_root)
-        return {
-            "status": "completed",
-            "operation_id": operation_id,
-            "result": result,
-            "cache_stats": {
-                "document_id": document_id,
-                "chunks_from_cache": 0,
-                "chunks_processed": 1,
-                "cache_enabled": bool(session_key),
-            },
-            "stats": {
-                "chars_in": insp.chars_in,
-                "chunks": 1,
-                "context_batches_total": 0,
-                "sections_total": 0,
-                "meaningful_sections": 0,
-                "article_count": article_count,
-                "map_calls": 1,
-                "section_reduce_calls": 0,
-                "section_trim_calls": 0,
-                "document_reduce_calls": 0,
-                "reduce_calls": 0,
-                "total_llm_calls": 1,
-                "retries": 0,
-                "duration_sec": single_duration,
-                "strategy": "single",
-            },
-        }
-
-    sections_dict = {sid: s for sid, s in tree.sections.items()} if tree else {}
-    section_payload: dict[str, dict[str, Any]] = {}
-    for sid, s in sections_dict.items():
-        if sid == ROOT_SECTION_ID:
-            continue
-        section_payload[sid] = s.to_dict()
-
-    initial_manifest = NormalizedManifest(
-        operation_id=operation_id,
-        status="running",
-        version=2,
-        document_path=document_path,
-        structure_title=(structure or {}).get("title"),
-        chars_in=insp.chars_in,
-        length=length,
-        chunks_total=len(chunks),
-        context_batches_total=len(batches),
-        estimated_llm_calls=insp.estimated_llm_calls,
-        actual_llm_calls=None,
-        sections=section_payload,
-        chunk_states={},
-        context_batches={},
-        section_summaries={},
-        batches_done=[],
-        batches_failed=[],
-        last_error=None,
-        started_at=_now_iso(),
-        completed_at=None,
-        duration_sec=None,
-        article_count=article_count,
-        is_legacy=False,
-        raw={},
-    )
-
-    if existing_manifest is None:
-        save_manifest(initial_manifest, workspace_root=workspace_root)
-
-    expected_chunk_ids = [c.chunk_id for c in chunks]
-    cached_partials = _load_cached_partials(operation_id, expected_chunk_ids, workspace_root)
-    chunk_states: dict[str, dict[str, Any]] = dict(existing_manifest.chunk_states) if existing_manifest else {}
-
-    # Подмешать document-cache: chunks, обработанные в прошлых вопросах
-    # к этому же документу в этой же сессии. Map-фаза пропустит их (status
-    # уже completed) и сразу пойдёт в reduce.
-    if doc_cache_chunks:
-        for cid, cdata in doc_cache_chunks.items():
-            if cid not in chunk_states and cid in expected_chunk_ids:
-                chunk_states[cid] = {
-                    "status": "completed",
-                    "context_batch_id": None,
-                    "section_id": cdata.get("section_id"),
-                    "section_path": cdata.get("section_path"),
-                    "page_start": cdata.get("page_start"),
-                    "page_end": cdata.get("page_end"),
-                    "result_path": f"chunks/{cid}.json",
-                    "duration_sec": cdata.get("duration_sec"),
-                    "from_doc_cache": True,
-                }
-
-    for cid in cached_partials:
-        chunk_states[cid] = {
-            "status": "completed",
-            "context_batch_id": chunk_states.get(cid, {}).get("context_batch_id"),
-            "section_id": chunk_states.get(cid, {}).get("section_id"),
-            "section_path": chunk_states.get(cid, {}).get("section_path"),
-            "page_start": chunk_states.get(cid, {}).get("page_start"),
-            "page_end": chunk_states.get(cid, {}).get("page_end"),
-            "result_path": f"chunks/{cid}.json",
-            "duration_sec": chunk_states.get(cid, {}).get("duration_sec"),
-        }
-
-    ctx_batches: dict[str, dict[str, Any]] = (
-        dict(existing_manifest.context_batches) if existing_manifest else {}
-    )
-
-    total_start = _time.monotonic()
-    map_calls = 0
-    retries = 0
-    failed_batch_ids: list[str] = []
-    first_batch_error: dict[str, Any] | None = None
-
-    # Sequential выполнение батчей: один LLM-вызов одновременно.
-    # Жёсткий runtime invariant: max_active_llm_calls <= 1 в map-фазе.
-    # Текущий runtime не рассчитан на параллельные запросы к LLM
-    # (тесты на single-flight, нет общего rate-limit policy, retry
-    # parse-error должен идти от первого failed батча без перемешивания
-    # с параллельно стартовавшими).
-    #
-    # ``max_concurrent_batches`` DEPRECATED: ранее допускал override > 1,
-    # что позволяло обойти invariant. Сейчас runtime clamp'ит значение до 1
-    # и эмитит DeprecationWarning, если в конфиге задано > 1 — backward
-    # compatibility для существующих project.json сохранена, но нельзя
-    # поднять concurrency выше 1. Удаление ключи планируется в v3.0
-    # (см. CHANGELOG.md, секция Deprecation).
-    exec_cfg_for_map = globals()["get_execution_config"]()
-    configured_concurrency = int(exec_cfg_for_map.get("max_concurrent_batches", 1) or 1)
-    if configured_concurrency > 1:
-        warnings.warn(
-            "skills.legal_summarizer.execution.max_concurrent_batches > 1 "
-            f"({configured_concurrency}) DEPRECATED и игнорируется: "
-            "текущий runtime строго single-flight (max_active_llm_calls == 1). "
-            "Удалите ключ из project.json — см. CHANGELOG.md (Deprecation).",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-    concurrency = 1
-
-    # Соберём все батчи с pending чанками и предварительно посчитаем прогресс.
-    queued: list[tuple[ContextBatch, int]] = []  # (batch_to_process, pending_count)
-    total_batches = len(batches)
-    for batch in batches:
-        pending = [
-            c for c in batch.chunks
-            if c.chunk_id not in chunk_states
-            or chunk_states[c.chunk_id].get("status") != "completed"
-        ]
-        if not pending:
-            continue
-        batch_to_process = ContextBatch(
-            batch_id=batch.batch_id,
-            chunks=tuple(pending),
-            total_tokens_estimate=sum(c.token_estimate for c in pending),
-            section_paths=tuple({c.section_path for c in pending}),
-            page_range=batch.page_range,
-        )
-        queued.append((batch_to_process, len(pending)))
-        _progress(
-            f"batch {batch_to_process.batch_id}: {len(pending)}/{len(batch.chunks)} chunks "
-            f"queued ({total_batches} batches total, concurrency={concurrency})"
+            focus=focus,
+            question=question,
+            confirmed=confirmed,
+            operation_id=operation_id,
+            structure=structure,
+            document_path=document_path,
+            workspace_root=workspace_root,
+            chunks=chunks,
+            tree=insp.structure,
+            batches=batches,
+            insp_chars_in=insp.chars_in,
+            insp_strategy=insp.strategy,
+            insp_estimated_llm_calls=insp.estimated_llm_calls,
+            insp_context_batches=insp.context_batches,
+            make_operation_id_fn=make_operation_id,
+            get_chunking_config_fn=globals()["get_chunking_config"],
+            get_execution_config_fn=globals()["get_execution_config"],
+            build_token_budget_fn=_build_token_budget,
+            session_key=session_key,
+            existing_manifest=existing_manifest,
         )
 
-    # Запускаем все батчи параллельно с retry; потом применяем результаты.
-    if queued:
-        sem = asyncio.Semaphore(concurrency)
-
-        async def _gather_all():
-            return await asyncio.gather(*[
-                _run_one_batch_async(
-                    btp,
-                    chunks_total=len(chunks),
-                    structure=structure,
-                    operation_id=operation_id,
-                    workspace_root=workspace_root,
-                    sem=sem,
-                    length=length,
-                    question=question,
-                )
-                for btp, _ in queued
-            ])
-
-        gather_results = asyncio.run(_gather_all())
-
-        # Применяем результаты: ctx_batches + chunk_states + failed_batch_ids.
-        for (batch_to_process, pending_count), (status, batch_meta, last_error) in zip(
-            queued, gather_results
-        ):
-            if status == "ok":
-                assert batch_meta is not None
-                map_calls += 1
-                ctx_batches[batch_to_process.batch_id] = {
-                    "chunk_ids": batch_meta["chunk_ids"],
-                    "status": "completed",
-                    "started_at": batch_meta["started_at"],
-                    "completed_at": batch_meta["completed_at"],
-                    "duration_sec": batch_meta["duration_sec"],
-                    "section_paths": list(batch_to_process.section_paths),
-                }
-                for c in batch_to_process.chunks:
-                    chunk_states[c.chunk_id] = {
-                        "status": "completed",
-                        "context_batch_id": batch_to_process.batch_id,
-                        "section_id": c.section_id,
-                        "section_path": c.section_path,
-                        "page_start": c.page_start,
-                        "page_end": c.page_end,
-                        "result_path": f"chunks/{c.chunk_id}.json",
-                        "duration_sec": batch_meta["duration_sec"],
-                    }
-            else:
-                # Все retry исчерпаны (parse) или не-parse ошибка:
-                # батч помечен failed, обработка документа продолжается.
-                assert last_error is not None
-                error_code, error_exc = last_error
-                retries += 1
-                failed_batch_ids.append(batch_to_process.batch_id)
-                if first_batch_error is None:
-                    first_batch_error = {
-                        "code": error_code,
-                        "batch_id": batch_to_process.batch_id,
-                        "message": str(error_exc),
-                    }
-                ctx_batches[batch_to_process.batch_id] = {
-                    "chunk_ids": [c.chunk_id for c in batch_to_process.chunks],
-                    "status": "failed",
-                    "error": {"code": error_code, "message": str(error_exc)},
-                }
-                for c in batch_to_process.chunks:
-                    chunk_states[c.chunk_id] = {
-                        "status": "failed",
-                        "context_batch_id": batch_to_process.batch_id,
-                        "section_id": c.section_id,
-                        "section_path": c.section_path,
-                        "page_start": c.page_start,
-                        "page_end": c.page_end,
-                        "error_code": error_code,
-                    }
-
-    all_partials = _load_cached_partials(operation_id, expected_chunk_ids, workspace_root)
-
-    # Подмешать document-cache chunks в partials, если их нет в operation-папке.
-    if doc_cache_chunks:
-        for cid, cdata in doc_cache_chunks.items():
-            if cid in expected_chunk_ids and cid not in all_partials:
-                all_partials[cid] = cdata.get("summary", "")
-
-    if not all_partials:
-        return {
-            "status": "failed",
-            "operation_id": operation_id,
-            "error": {"code": "NO_PARTIALS", "message": "Нет per-chunk partials"},
-        }
-
-    # Сохранить свежие chunks в document-cache для будущих вопросов.
-    # Каждая запись содержит полный provenance + chunk_text_preview.
-    if session_key and all_partials:
-        chunks_by_id: dict[str, Any] = {c.chunk_id: c for c in chunks}
-        to_save: dict[str, dict] = {}
-        for cid, summary in all_partials.items():
-            if cid in doc_cache_chunks:
-                continue
-            cs = chunk_states.get(cid, {})
-            chunk = chunks_by_id.get(cid)
-            payload: dict[str, Any] = {
-                "chunk_id": cid,
-                "summary": summary,
-                "section_id": cs.get("section_id"),
-                "section_path": cs.get("section_path"),
-                "page_start": cs.get("page_start"),
-                "page_end": cs.get("page_end"),
-                "duration_sec": cs.get("duration_sec"),
-                "saved_at": _now_iso(),
-            }
-            if chunk is not None:
-                payload["block_indices"] = list(chunk.block_indices)
-                payload["block_types"] = list(chunk.block_types)
-                payload["source_char_start"] = chunk.source_char_start
-                payload["source_char_end"] = chunk.source_char_end
-                payload["table_id"] = chunk.table_id
-                payload["table_row_start"] = chunk.table_row_start
-                payload["table_row_end"] = chunk.table_row_end
-                _preview_src = chunk.text
-                _PREVIEW_MAX = 500
-                if len(_preview_src) > _PREVIEW_MAX:
-                    payload["chunk_text_preview"] = _preview_src[:_PREVIEW_MAX]
-                else:
-                    payload["chunk_text_preview"] = _preview_src
-            to_save[cid] = payload
-        if to_save:
-            _save_doc_cache(
-                document_id, session_key, workspace_root, to_save,
-                progress=_progress, document_path=document_path,
-            )
-
-    _section_summary_max_chars = 12000
-    _chars_per_token = 3.5
-
-    _chars_in_reduce = sum(c.char_count for c in chunks)
-    _sections_in_reduce = (
-        sum(1 for sid in tree.sections if sid != ROOT_SECTION_ID)
-        if tree is not None else 0
-    )
-    _stats_for_reduce = DocumentStats(
-        chars=_chars_in_reduce,
-        estimated_tokens=max(1, int(_chars_in_reduce / _chars_per_token + 0.999)),
-        pages=0,
-        blocks=len(chunks),
-        sections=_sections_in_reduce,
-        tables=0,
-        chunks=len(chunks),
-    )
-    _budget_for_reduce = _build_token_budget(globals()["get_chunking_config"]())
-    _r_est = int(_stats_for_reduce.estimated_tokens)
-    _r_sections = int(_stats_for_reduce.sections)
-    _r_budget = int(_budget_for_reduce.available_chunk_tokens)
-    hierarchical = _r_est > _r_budget and _r_sections >= 2
-    section_summaries_out: dict[str, str] = {}
-    section_reduce_calls = 0
-    section_trim_calls = 0
-    document_reduce_calls = 0
-
-    if hierarchical and tree is not None:
-        for sid, section in tree.sections.items():
-            if sid == ROOT_SECTION_ID:
-                continue
-            if not section.heading:
-                continue
-            section_chunk_ids = [
-                c.chunk_id for c in chunks if c.section_id == sid and c.chunk_id in all_partials
-            ]
-            if not section_chunk_ids:
-                continue
-            joined = "\n\n".join(
-                _format_chunk_block(c, all_partials[c.chunk_id])
-                for c in chunks if c.chunk_id in section_chunk_ids
-            )
-            joined = _fit_input(joined, SECTION_REDUCE_INPUT_BUDGET_CHARS)
-            try:
-                section_summary = _llm_section_reduce(
-                    section.section_path,
-                    section.heading,
-                    joined,
-                    length=length,
-                    question=question,
-                )
-            except Exception:
-                section_summary = joined
-                retries += 1
-            if len(section_summary) > _section_summary_max_chars:
-                # Truncation вместо LLM-trim: LLM-trim добавлял ещё один
-                # вызов на каждую oversized section_summary (потенциально
-                # дорого). Truncation по max_chars детерминированна и
-                # сохраняет начало section_summary (наиболее важное —
-                # heading + первые факты).
-                section_summary = section_summary[: _section_summary_max_chars]
-            section_summaries_out[sid] = section_summary
-            section_reduce_calls += 1
-
-        # REDUCE_INPUT_EMPTY: если ни один раздел не дал section_summary
-        # (например, все chunks упали на map-фазе), document reduce не
-        # должен вызываться — это transient LLM-ошибка, не retry-able.
-        if not section_summaries_out:
-            return {
-                "status": "failed",
-                "operation_id": operation_id,
-                "error": {
-                    "code": "REDUCE_INPUT_EMPTY",
-                    "message": "Нет валидных section_summaries для финального reduce",
-                },
-                "stats": {
-                    "chars_in": insp.chars_in,
-                    "chunks_total": len(chunks),
-                    "context_batches_total": len(batches),
-                    "map_calls": map_calls,
-                    "section_reduce_calls": section_reduce_calls,
-                    "section_trim_calls": section_trim_calls,
-                    "document_reduce_calls": 0,
-                    "reduce_calls": section_reduce_calls + section_trim_calls,
-                    "total_llm_calls": map_calls + section_reduce_calls + section_trim_calls,
-                    "retries": retries,
-                    "failed_batches": list(failed_batch_ids),
-                    "duration_sec": round(_time.monotonic() - total_start, 1),
-                    "strategy": "map_reduce_hierarchical",
-                },
-            }
-
-        ordered = sorted(
-            section_summaries_out.items(),
-            key=lambda kv: tuple(int(p) if p.isdigit() else 999 for p in tree.sections[kv[0]].section_path.split(" > ")),
-        )
-        joined_sections = "\n\n".join(
-            f"[Раздел {tree.sections[sid].section_path}: {tree.sections[sid].heading}]\n{summary}"
-            for sid, summary in ordered
-        )
-        joined_sections = _fit_input(joined_sections, DOCUMENT_REDUCE_INPUT_BUDGET_CHARS)
-        # Дополнительная проверка непосредственно перед LLM: в joined_sections
-        # могло не оказаться ни одного непустого блока (например, все
-        # section_summary состояли только из whitespace после strip).
-        if not joined_sections.strip():
-            return {
-                "status": "failed",
-                "operation_id": operation_id,
-                "error": {
-                    "code": "REDUCE_INPUT_EMPTY",
-                    "message": "Joined section summaries пусты для финального reduce",
-                },
-                "stats": {
-                    "chars_in": insp.chars_in,
-                    "chunks_total": len(chunks),
-                    "context_batches_total": len(batches),
-                    "map_calls": map_calls,
-                    "section_reduce_calls": section_reduce_calls,
-                    "section_trim_calls": section_trim_calls,
-                    "document_reduce_calls": 0,
-                    "reduce_calls": section_reduce_calls + section_trim_calls,
-                    "total_llm_calls": map_calls + section_reduce_calls + section_trim_calls,
-                    "retries": retries,
-                    "failed_batches": list(failed_batch_ids),
-                    "duration_sec": round(_time.monotonic() - total_start, 1),
-                    "strategy": "map_reduce_hierarchical",
-                },
-            }
-        try:
-            ordered_pairs = [(sid, summary) for sid, summary in ordered]
-            from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-                HierarchicalReducerConfig,
-                reduce_sections_to_document,
-            )
-            reducer_config = HierarchicalReducerConfig(
-                group_size=MID_REDUCE_GROUP_SIZE,
-                max_rounds=MAX_REDUCE_ROUNDS,
-                input_budget_chars=DOCUMENT_REDUCE_INPUT_BUDGET_CHARS,
-            )
-            reducer_result = reduce_sections_to_document(
-                ordered_pairs,
-                config=reducer_config,
-                llm_runner=lambda joined, **_kw: (
-                    _strip_think_blocks(
-                        _llm_document_reduce(
-                            joined,
-                            length=length,
-                            focus=focus,
-                            structure=structure,
-                            question=question,
-                        ),
-                    )
-                ),
-                length=length,
-                focus=focus,
-                structure=structure,
-                question=question,
-            )
-            final_summary = reducer_result.final_summary
-            extra_rounds = reducer_result.rounds_done
-            document_reduce_calls += 1 + extra_rounds
-        except Exception:
-            retries += 1
-            # Fallback на joined_sections — допустимо только если он
-            # непустой (REDUCE_INPUT_EMPTY уже отфильтрован выше).
-            final_summary = joined_sections if joined_sections.strip() else ""
-        strategy_label = "map_reduce_hierarchical"
-    else:
-        ordered_chunks = [c for c in chunks if c.chunk_id in all_partials]
-        joined = "\n\n".join(
-            _format_chunk_block(c, all_partials[c.chunk_id]) for c in ordered_chunks
-        )
-        # REDUCE_INPUT_EMPTY для flat-path: joined пуст когда ни один
-        # chunk не дал partial (например, все map-батчи провалились).
-        if not joined.strip():
-            return {
-                "status": "failed",
-                "operation_id": operation_id,
-                "error": {
-                    "code": "REDUCE_INPUT_EMPTY",
-                    "message": "Нет валидных partial summaries для финального reduce",
-                },
-                "stats": {
-                    "chars_in": insp.chars_in,
-                    "chunks_total": len(chunks),
-                    "context_batches_total": len(batches),
-                    "map_calls": map_calls,
-                    "section_reduce_calls": 0,
-                    "section_trim_calls": 0,
-                    "document_reduce_calls": 0,
-                    "reduce_calls": 0,
-                    "total_llm_calls": map_calls,
-                    "retries": retries,
-                    "failed_batches": list(failed_batch_ids),
-                    "duration_sec": round(_time.monotonic() - total_start, 1),
-                    "strategy": "map_reduce_flat",
-                },
-            }
-        try:
-            final_summary = _llm_document_reduce(
-                joined,
-                length=length,
-                focus=focus,
-                structure=structure,
-                question=question,
-            )
-            document_reduce_calls += 1
-        except Exception:
-            retries += 1
-            # Fallback на joined — допустимо только если он непустой
-            # (REDUCE_INPUT_EMPTY уже отфильтрован выше).
-            final_summary = joined if joined.strip() else ""
-        strategy_label = "map_reduce_flat"
-
-    # Убираем <think>...</think> от моделей с CoT, чтобы subject/summary
-    # в result.json были чистыми для агента.
-    final_summary = _strip_think_blocks(final_summary)
-
-    # Защита от пустого summary после reduce: completed/partial с пустым
-    # summary — misleading success-like output. Если LLM вернул пустую
-    # строку (или CoT-блок только), считаем прогон failed.
-    if not final_summary or not final_summary.strip():
-        return {
-            "status": "failed",
-            "operation_id": operation_id,
-            "error": {
-                "code": "REDUCE_INPUT_EMPTY",
-                "message": "Document reduce вернул пустой summary",
-            },
-            "stats": {
-                "chars_in": insp.chars_in,
-                "chunks_total": len(chunks),
-                "context_batches_total": len(batches),
-                "map_calls": map_calls,
-                "section_reduce_calls": section_reduce_calls,
-                "section_trim_calls": section_trim_calls,
-                "document_reduce_calls": document_reduce_calls,
-                "reduce_calls": section_reduce_calls + section_trim_calls + document_reduce_calls,
-                "total_llm_calls": (
-                    map_calls + section_reduce_calls + section_trim_calls + document_reduce_calls
-                ),
-                "retries": retries,
-                "failed_batches": list(failed_batch_ids),
-                "duration_sec": round(_time.monotonic() - total_start, 1),
-                "strategy": strategy_label,
-            },
-        }
-
-    total_duration = round(_time.monotonic() - total_start, 1)
-    subject = _extract_subject(final_summary)
-
-    is_partial = bool(failed_batch_ids)
-
-    result = {
-        "subject": subject,
-        "summary": final_summary,
-        "length": length,
-        "chars_in": insp.chars_in,
-        "chunks": len(chunks),
-        "context_batches": len(batches),
-        "sections": sum(1 for sid in tree.sections if sid != ROOT_SECTION_ID) if tree else 0,
-        "strategy": strategy_label,
-        "title": (structure or {}).get("title"),
-        "partial": is_partial,
-    }
-    write_result(operation_id, result, workspace_root=workspace_root)
-
-    meaningful = 0
-    if tree:
-        fake_blocks = tuple(
-            DocumentBlock(
-                block_id=f"b_{i:04d}",
-                block_type="paragraph",
-                content="x" * c.char_count,
-                char_count=c.char_count,
-                page_index=c.page_start,
-                page_start=c.page_start,
-                page_end=c.page_end,
-                paragraph_index=None,
-                table_index=None,
-                ordinal=c.index,
-                block_metadata={},
-            )
-            for i, c in enumerate(chunks)
-        )
-        meaningful = count_meaningful_sections(tree, fake_blocks)
-
-    total_llm_calls = map_calls + section_reduce_calls + section_trim_calls + document_reduce_calls
-
-    # article_count уже посчитан выше (см. начало map-фазы) — повторно
-    # пересчитывать по `text` не нужно.
-
-    final_manifest = NormalizedManifest(
-        operation_id=operation_id,
-        status="partial" if is_partial else "completed",
-        version=2,
-        document_path=document_path,
-        structure_title=(structure or {}).get("title"),
-        chars_in=insp.chars_in,
-        length=length,
-        chunks_total=len(chunks),
-        context_batches_total=len(batches),
-        estimated_llm_calls=insp.estimated_llm_calls,
-        actual_llm_calls=total_llm_calls,
-        sections=section_payload,
-        chunk_states=chunk_states,
-        context_batches=ctx_batches,
-        section_summaries=section_summaries_out,
-        batches_done=[f"cb_{i:03d}" for i in range(len(batches))],
-        batches_failed=list(failed_batch_ids),
-        last_error=first_batch_error,
-        started_at=existing_manifest.started_at if existing_manifest else _now_iso(),
-        completed_at=_now_iso(),
-        duration_sec=total_duration,
-        article_count=article_count,
-        is_legacy=False,
-        raw={},
-    )
-    save_manifest(final_manifest, workspace_root=workspace_root)
-
-    return {
-        "status": "partial" if is_partial else "completed",
-        "operation_id": operation_id,
-        "result": result,
-        "cache_stats": {
-            "document_id": document_id,
-            "chunks_from_cache": sum(1 for s in chunk_states.values() if s.get("from_doc_cache")),
-            "chunks_processed": map_calls,
-            "cache_enabled": bool(session_key),
-        },
-        "stats": {
-            "chars_in": insp.chars_in,
-            "chunks_total": len(chunks),
-            "context_batches_total": len(batches),
-            "sections_total": result["sections"],
-            "meaningful_sections": meaningful,
-            "article_count": article_count,
-            "map_calls": map_calls,
-            "section_reduce_calls": section_reduce_calls,
-            "section_trim_calls": section_trim_calls,
-            "document_reduce_calls": document_reduce_calls,
-            "reduce_calls": section_reduce_calls + section_trim_calls + document_reduce_calls,
-            "total_llm_calls": total_llm_calls,
-            "retries": retries,
-            "failed_batches": list(failed_batch_ids),
-            "partial": is_partial,
-            "duration_sec": total_duration,
-            "strategy": strategy_label,
-        },
-    }
 
 
 # ---------------------------------------------------------------------------
