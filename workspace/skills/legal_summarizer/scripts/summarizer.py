@@ -571,7 +571,9 @@ def inspect(
     )
     strategy = select_execution_strategy(stats, strategy_cfg)
 
-    if strategy is ExecutionStrategy.DIRECT:
+    strategy_label = strategy.value
+
+    if strategy_label == "direct":
         chunk = Chunk(
             chunk_id="000",
             index=0,
