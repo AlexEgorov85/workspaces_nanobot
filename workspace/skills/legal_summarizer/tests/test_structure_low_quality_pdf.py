@@ -79,7 +79,7 @@ def test_low_quality_no_repair_fabricates_structure():
     )
     fixed, report = repair_structure(struct)
     assert "n_0000" in fixed.nodes
-    assert report.empty_nodes_collapsed == 0
+    assert report.invalid_ranges_dropped == 0
 
 
 def test_compute_evidence_for_ocr_garbage():
