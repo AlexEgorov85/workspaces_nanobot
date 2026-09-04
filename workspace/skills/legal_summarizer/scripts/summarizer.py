@@ -66,10 +66,6 @@ from workspace.skills.legal_summarizer.scripts.prompts import (
     build_batch_user_message,
     parse_batch_response,
 )
-from workspace.skills.legal_summarizer.scripts.reducer import (
-    ReduceConfig,
-    reduce_results,
-)
 from workspace.skills.legal_summarizer.scripts.document_stats import (
     DocumentStats,
     compute_document_stats,
@@ -1355,12 +1351,8 @@ def run(
                 progress=_progress, document_path=document_path,
             )
 
-    reduce_cfg = ReduceConfig(
-        instruction_tokens_per_section_reduce=200,
-        instruction_tokens_per_document_reduce=200,
-        chars_per_token=3.5,
-        section_summary_max_chars=12000,
-    )
+    _section_summary_max_chars = 12000
+    _chars_per_token = 3.5
 
     _chars_in_reduce = sum(c.char_count for c in chunks)
     _sections_in_reduce = (
@@ -1369,7 +1361,7 @@ def run(
     )
     _stats_for_reduce = DocumentStats(
         chars=_chars_in_reduce,
-        estimated_tokens=max(1, int(_chars_in_reduce / reduce_cfg.chars_per_token + 0.999)),
+        estimated_tokens=max(1, int(_chars_in_reduce / _chars_per_token + 0.999)),
         pages=0,
         blocks=len(chunks),
         sections=_sections_in_reduce,
@@ -1384,7 +1376,7 @@ def run(
         estimated_tokens=int(_stats_for_reduce.estimated_tokens),
         sections=int(_stats_for_reduce.sections),
         reduce_budget_tokens=int(_budget_for_reduce.available_chunk_tokens),
-        min_sections_for_hierarchical=int(reduce_cfg.reduce_strategy_min_sections),
+        min_sections_for_hierarchical=2,
     )
     hierarchical = _reduce_strategy_value == "hierarchical"
     section_summaries_out: dict[str, str] = {}
@@ -1419,13 +1411,13 @@ def run(
             except Exception:
                 section_summary = joined
                 retries += 1
-            if len(section_summary) > reduce_cfg.section_summary_max_chars:
+            if len(section_summary) > _section_summary_max_chars:
                 # Truncation вместо LLM-trim: LLM-trim добавлял ещё один
                 # вызов на каждую oversized section_summary (потенциально
                 # дорого). Truncation по max_chars детерминированна и
                 # сохраняет начало section_summary (наиболее важное —
                 # heading + первые факты).
-                section_summary = section_summary[: reduce_cfg.section_summary_max_chars]
+                section_summary = section_summary[: _section_summary_max_chars]
             section_summaries_out[sid] = section_summary
             section_reduce_calls += 1
 
