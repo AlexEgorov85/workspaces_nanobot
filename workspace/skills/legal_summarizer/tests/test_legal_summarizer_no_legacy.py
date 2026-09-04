@@ -138,16 +138,14 @@ def test_compatibility_adapter_removed():
 
 
 def test_legacy_reducer_modules_still_present():
-    """Legacy reducer/ модули ещё существуют (миграция в процессе).
+    """Legacy reducer_impl/reducer_strategy ещё существуют (миграция в процессе).
 
     Этот тест — **negative** assertion: показывает текущее состояние.
-    Удалить/переписать после миграции summarizer.py на canonical reducer
-    (Этап 9).
+    ``reducer.py`` уже удалён.
     """
-    from workspace.skills.legal_summarizer.scripts import reducer
     from workspace.skills.legal_summarizer.scripts import reducer_impl
     from workspace.skills.legal_summarizer.scripts import reducer_strategy
 
-    assert reducer is not None
     assert reducer_impl is not None
+    assert reducer_strategy is not None
     assert reducer_strategy is not None

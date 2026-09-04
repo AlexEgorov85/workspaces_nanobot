@@ -2433,32 +2433,50 @@ def test_select_reduce_strategy_min_sections_configurable():
 
 def test_legacy_should_use_hierarchical_removed():
     """``should_use_hierarchical_reduce`` deprecated (мигрирован на canonical)."""
-    from workspace.skills.legal_summarizer.scripts.reducer import (
-        should_use_hierarchical_reduce,
-    )
     try:
+        from workspace.skills.legal_summarizer.scripts.reducer import (
+            should_use_hierarchical_reduce,
+        )
         should_use_hierarchical_reduce(None, [])
-    except NotImplementedError:
-        return
-    except Exception:
+    except (NotImplementedError, ImportError):
         return
     raise AssertionError(
-        "should_use_hierarchical_reduce должен быть deprecated",
+        "should_use_hierarchical_reduce должен быть deprecated или удалён",
     )
 
 def test_reduce_strategy_enum_values():
-    """``ReduceStrategy.FLAT`` / ``ReduceStrategy.HIERARCHICAL`` — enum values."""
-    from workspace.skills.legal_summarizer.scripts.reducer import ReduceStrategy
+    """``flat`` / ``hierarchical`` — canonical reduce_strategy labels."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        reduce_strategy_for_legacy,
+    )
 
-    assert ReduceStrategy.FLAT.value == "flat"
-    assert ReduceStrategy.HIERARCHICAL.value == "hierarchical"
+    assert reduce_strategy_for_legacy(
+        estimated_tokens=100, sections=10,
+        reduce_budget_tokens=10000,
+    ) == "flat"
+    assert reduce_strategy_for_legacy(
+        estimated_tokens=10000, sections=10,
+        reduce_budget_tokens=5000,
+    ) == "hierarchical"
 
 def test_reduce_config_has_min_sections_for_hierarchical():
-    """``ReduceConfig.reduce_strategy_min_sections`` — настройка этапа 16."""
-    from workspace.skills.legal_summarizer.scripts.reducer import ReduceConfig
+    """``reduce_strategy_for_legacy`` принимает ``min_sections_for_hierarchical``."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        reduce_strategy_for_legacy,
+    )
 
-    cfg = ReduceConfig()
-    assert cfg.reduce_strategy_min_sections == 2
+    # С min_sections=2: hierarchical если tokens > budget.
+    result_h = reduce_strategy_for_legacy(
+        estimated_tokens=10000, sections=2,
+        reduce_budget_tokens=5000, min_sections_for_hierarchical=2,
+    )
+    assert result_h == "hierarchical"
+    # С min_sections=3: flat (2 < 3).
+    result_f = reduce_strategy_for_legacy(
+        estimated_tokens=10000, sections=2,
+        reduce_budget_tokens=5000, min_sections_for_hierarchical=3,
+    )
+    assert result_f == "flat"
 
 # ---------------------------------------------------------------------------
 
