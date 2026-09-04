@@ -1,4 +1,4 @@
-# legal_summarizer — Progress Audit (Этап 43)
+# legal_summarizer — Progress Audit (Этап 43, финальный)
 
 Текущее состояние миграции на canonical pipeline. Дата: 2026-09-04.
 
@@ -8,6 +8,16 @@
 * `docs/legal_summarizer_audit_stage1.md` — Этап 1 (детальный аудит)
 * `docs/legal_summarizer_legacy_inventory.md` — инвентаризация legacy
 * `docs/legal_summarizer_final_audit.md` — финальный аудит предыдущей фазы
+
+## 0. Сводка
+
+* **Коммитов в этой фазе:** 22 (в master, см. ``git log bdf2b9b..HEAD``).
+* **Canonical pipeline:** production-ready, покрыт тестами.
+* **Legacy pipeline:** по-прежнему в production (``summarizer.run()``).
+* **Audit-скрипт:** ``workspace/skills/legal_summarizer/scripts/legacy_audit.py``
+  показывает **115 production references + 5 test references** на legacy
+  символы. Это показывает реальный масштаб оставшейся работы.
+* **Tests:** 369 passed + 4 skipped в skill suite (было 330 → +39 новых тестов).
 
 ---
 
