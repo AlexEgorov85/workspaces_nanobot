@@ -268,3 +268,76 @@ def test_chunks_deterministic_across_runs():
         assert c1.chunk_id == c2.chunk_id
         assert c1.index == c2.index
         assert c1.block_indices == c2.block_indices
+
+
+def test_table_ids_unique_across_sections():
+    """PLAN §8 acceptance: 10 sections, 20 tables → unique table_ids.
+
+    Document-level counter даёт уникальные table_id для всех таблиц.
+    """
+    blocks: list[DocumentBlock] = []
+    for sec_idx in range(10):
+        blocks.append(_b(sec_idx * 3, f"sec {sec_idx} heading"))
+        blocks.append(
+            _b(sec_idx * 3 + 1, f"row | cell", block_type="table"),
+        )
+        blocks.append(
+            _b(sec_idx * 3 + 2, f"row | cell", block_type="table"),
+        )
+    doc = _make_doc(tuple(blocks))
+    sec_nodes: dict[str, StructureNode] = {}
+    sec_nodes["n_0000"] = StructureNode(
+        node_id="n_0000", node_type="document", semantic_type=None,
+        level=0, title="", number=None, parent_id=None,
+        children=tuple(f"n_{i + 1:04d}" for i in range(10)),
+        start_block=0, end_block=29, confidence=1.0,
+    )
+    children_ids: list[str] = []
+    for sec_idx in range(10):
+        nid = f"n_{sec_idx + 1:04d}"
+        sec_nodes[nid] = StructureNode(
+            node_id=nid, node_type="section", semantic_type=None,
+            level=1, title=f"Sec {sec_idx}", number=None,
+            parent_id="n_0000", children=(),
+            start_block=sec_idx * 3, end_block=sec_idx * 3 + 2,
+            confidence=0.7,
+        )
+        children_ids.append(nid)
+    s = DocumentStructure(
+        document_id="d", title=None, nodes=sec_nodes,
+        root_id="n_0000", preamble_node_id="n_0000",
+        numbering=(), total_blocks=30,
+    )
+    chunks = chunk_from_structure(doc, s)
+    table_ids = [c.table_id for c in chunks if c.table_id]
+    assert len(table_ids) == 20, f"expected 20 tables, got {len(table_ids)}"
+    assert len(table_ids) == len(set(table_ids)), (
+        f"table_ids must be unique, duplicates: "
+        f"{[t for t in table_ids if table_ids.count(t) > 1]}"
+    )
+
+
+def test_table_ids_deterministic():
+    """Два прогона → identical table_ids."""
+    blocks = (
+        _b(0, "h1"),
+        _b(1, "row", block_type="table"),
+        _b(2, "h2"),
+        _b(3, "row", block_type="table"),
+    )
+    doc = _make_doc(blocks)
+    s = DocumentStructure(
+        document_id="d", title=None,
+        nodes={
+            "n_0000": _root(("n_0001", "n_0002")),
+            "n_0001": _sec("n_0001", start=0, end=1),
+            "n_0002": _sec("n_0002", start=2, end=3),
+        },
+        root_id="n_0000", preamble_node_id="n_0000",
+        numbering=(), total_blocks=4,
+    )
+    chunks1 = chunk_from_structure(doc, s)
+    chunks2 = chunk_from_structure(doc, s)
+    tids1 = [c.table_id for c in chunks1 if c.table_id]
+    tids2 = [c.table_id for c in chunks2 if c.table_id]
+    assert tids1 == tids2
