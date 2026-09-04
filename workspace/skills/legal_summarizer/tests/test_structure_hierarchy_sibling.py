@@ -1,4 +1,4 @@
-"""Тест для sibling numbering в hierarchy builder (Этап 13)."""
+"""Тест для sibling numbering в hierarchy builder."""
 
 from __future__ import annotations
 
@@ -30,7 +30,12 @@ def test_sibling_ordinals_in_hierarchy_flat():
 
 
 def test_sibling_ordinals_in_hierarchy_resets_per_parent():
-    """Решает PLAN §13: под родителем 2 ordinals сбрасываются, не глобально."""
+    """Под каждым родителем ordinals начинаются заново, не глобально.
+
+    ``s.root_id.children`` содержит только top-level nodes (1, 2).
+    Чтобы проверить ordinals для nested children — итерируем все
+    секции в document order через ``s.iter_sections()``.
+    """
     cs = [
         _hc(0, "1. Первая"),
         _hc(2, "1.1. Под первая"),
@@ -40,6 +45,6 @@ def test_sibling_ordinals_in_hierarchy_resets_per_parent():
         _hc(10, "2.2. Под второй второй"),
     ]
     s = build_document_structure(cs, total_blocks=15)
-    section_ids = s.nodes[s.root_id].children
-    ordinals = [s.nodes[nid].number.ordinal for nid in section_ids]
+    sections = s.iter_sections()
+    ordinals = [sec.number.ordinal for sec in sections]
     assert ordinals == [1, 1, 2, 1, 1, 2]
