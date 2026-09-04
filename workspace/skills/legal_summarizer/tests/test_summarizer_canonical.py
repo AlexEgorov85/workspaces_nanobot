@@ -61,3 +61,34 @@ def test_build_plan_from_pipeline_returns_plan(tmp_path: Path):
         result, document_id=result.analysis.identity.document_id,
     )
     assert plan is not None
+
+
+def test_inspect_canonical_text(tmp_path: Path):
+    """inspect_canonical даёт CanonicalInspection со всеми полями."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        inspect_canonical,
+    )
+
+    p = _write_doc(
+        tmp_path, "doc.txt",
+        "1. First\n\nContent.\n\n2. Second\n\nMore text.",
+    )
+    text = p.read_text(encoding="utf-8")
+    insp = inspect_canonical(text, document_path=p)
+    assert insp.strategy in ("direct", "map_flat", "map_hierarchical")
+    assert insp.pipeline_result is not None
+    assert insp.structure is not None
+    assert insp.estimated_llm_calls >= 1
+
+
+def test_inspect_canonical_requires_document_path(tmp_path: Path):
+    """inspect_canonical без пути — ValueError."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        inspect_canonical,
+    )
+
+    try:
+        inspect_canonical("some text", document_path=None)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError")

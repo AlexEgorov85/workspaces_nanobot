@@ -1,4 +1,4 @@
-"""Canonical run pipeline (Этап 4А).
+"""Canonical run pipeline (Этапы 4А, 6А).
 
 Этот модуль — **новый** production-flow, использующий только canonical
 pipeline (``run_canonical_pipeline`` → ``DocumentAnalysis`` →
@@ -8,22 +8,38 @@ pipeline (``run_canonical_pipeline`` → ``DocumentAnalysis`` →
 для обратной совместимости с существующими тестами, пока equivalence
 не доказана на fixtures. Переключение делается поэтапно.
 
-Здесь только:
+Здесь:
 
 * ``build_pipeline_result`` — обёртка над ``run_canonical_pipeline``,
   возвращающая ``PipelineResult`` с логированием прогресса;
 * ``strategy_from_pipeline`` — определить стратегию выполнения по
   ``PipelineResult`` ("direct" / "map_flat" / "map_hierarchical").
+* ``inspect_canonical`` — канонический аналог ``summarizer.inspect()``,
+  использующий только canonical-путь (DocumentStructure + ChunkPlanner
+  + TokenEstimator + ExecutionPlan).
 """
 
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from workspace.skills.legal_summarizer.scripts.structure.adjacent_packing import (
+    AdjacentPackingConfig,
+    pack_chunks_with_adjacent,
+)
+from workspace.skills.legal_summarizer.scripts.structure.execution_plan import (
+    ExecutionPlan,
+)
 from workspace.skills.legal_summarizer.scripts.structure.pipeline import (
     PipelineResult,
     run_canonical_pipeline,
+)
+from workspace.skills.legal_summarizer.scripts.structure.token_estimator import (
+    TokenEstimator,
+    TokenEstimatorConfig,
 )
 from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
     ExecutionPolicy,
@@ -77,7 +93,7 @@ def build_plan_from_pipeline(
     *,
     document_id: str,
     policy: ExecutionPolicy | None = None,
-):
+) -> ExecutionPlan:
     """Построить ``ExecutionPlan`` из ``PipelineResult``."""
     return build_execution_plan(
         result.analysis.structure,
@@ -87,8 +103,90 @@ def build_plan_from_pipeline(
     )
 
 
+@dataclass(frozen=True)
+class CanonicalInspection:
+    """Результат canonical inspection (аналог summarizer.Inspection).
+
+    Attributes:
+    chars_in: длина входного текста.
+    chunks: список ``Chunk`` из ``ChunkPlanner``.
+    structure: ``DocumentStructure`` (canonical semantic structure).
+    strategy: ``"direct"`` / ``"map_flat"`` / ``"map_hierarchical"``.
+    estimated_llm_calls: оценка числа LLM-вызовов.
+    pipeline_result: полный ``PipelineResult`` (для downstream).
+    """
+
+    chars_in: int
+    chunks: list
+    structure: Any
+    strategy: str
+    estimated_llm_calls: int
+    pipeline_result: PipelineResult
+
+
+def inspect_canonical(
+    text: str,
+    document_path: str | Path | None = None,
+    *,
+    workspace_root: Path | str | None = None,
+) -> CanonicalInspection:
+    """Canonical осмотр документа.
+
+    Использует только canonical pipeline (без legacy ``StructureAwareChunker``,
+    ``SectionTree``, ``detect_sections``, ``merge_short_sections``,
+    ``select_execution_strategy``, ``select_reduce_strategy``).
+
+    Args:
+    text: входной текст (для fallback title resolution).
+    document_path: путь к файлу (или ``None`` для inline txt).
+    workspace_root: корень workspace.
+
+    Returns:
+    ``CanonicalInspection`` со всеми canonical-объектами.
+    """
+    if document_path is None:
+        raise ValueError(
+            "inspect_canonical требует document_path; "
+            "для inline-текста используйте run_canonical_pipeline напрямую",
+        )
+
+    pipeline_result = build_pipeline_result(
+        document_path=document_path,
+        text=text,
+        workspace_root=workspace_root,
+    )
+    strategy = strategy_from_pipeline(pipeline_result)
+
+    estimator = TokenEstimator(
+        TokenEstimatorConfig(chars_per_token=3.5),
+    )
+    total_tokens = estimator.estimate_many(
+        [c.text for c in pipeline_result.chunks],
+    )
+
+    if strategy == "direct":
+        estimated = 1
+    else:
+        plan = build_plan_from_pipeline(
+            pipeline_result,
+            document_id=pipeline_result.analysis.identity.document_id,
+        )
+        estimated = len(plan.batches) + 1
+
+    return CanonicalInspection(
+        chars_in=len(text or ""),
+        chunks=list(pipeline_result.chunks),
+        structure=pipeline_result.analysis.structure,
+        strategy=strategy,
+        estimated_llm_calls=estimated,
+        pipeline_result=pipeline_result,
+    )
+
+
 __all__ = [
     "build_pipeline_result",
     "strategy_from_pipeline",
     "build_plan_from_pipeline",
+    "CanonicalInspection",
+    "inspect_canonical",
 ]
