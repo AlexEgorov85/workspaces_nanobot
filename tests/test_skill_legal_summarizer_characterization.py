@@ -1216,27 +1216,30 @@ def test_list_detection_short_run_below_min_is_not_list():
     assert runs[0].is_list is False
 
 def test_list_detection_penalty_value():
-    """``list_penalty_for_candidate`` возвращает правильный штраф в зависимости от длины run."""
+    """``list_penalty_for_candidate`` возвращает правильный штраф в зависимости от длины run.
+
+    Этап 10 (PLAN §10): для спорных коротких run (3..4 элементов) штраф
+    снижен с 0.10 до 0.08 — это даёт heading-детектору больше шансов
+    принять их за headings (а не отбрасывать как list). Изменение
+    поведения явно зафиксировано в ``docs/CHANGELOG.md`` Этапа 10.
+    """
     from workspace.skills.legal_summarizer.scripts.structure.list_detection import (
         detect_list_runs,
         list_penalty_for_candidate,
     )
 
-    # Run из 5 элементов (≥ 5) → penalty = 0.15
     blocks5 = tuple(
         _make_heading_block(i, f"{i+1}. короткий") for i in range(5)
     )
     runs5 = detect_list_runs(blocks5)
     assert list_penalty_for_candidate(2, runs5) == 0.15
 
-    # Run из 3 элементов (< 5) → penalty = 0.10
     blocks3 = tuple(
         _make_heading_block(i, f"{i+1}. короткий") for i in range(3)
     )
     runs3 = detect_list_runs(blocks3)
-    assert list_penalty_for_candidate(1, runs3) == 0.10
+    assert list_penalty_for_candidate(1, runs3) == 0.08
 
-    # Кандидат не в list → 0.0
     assert list_penalty_for_candidate(99, runs3) == 0.0
 
 def test_heading_evidence_uses_precise_list_penalty():

@@ -75,8 +75,13 @@ def detect_sections(doc: PhysicalDocument, *, pdf_path: str | None = None) -> Se
 
     Returns:
         SectionTree.
+
+    Этап 11 (PLAN): ``physical_doc`` прокидывается в
+    ``detect_heading_candidates``, чтобы PDF outline mapping
+    (``map_pdf_outline``) получил доступ к ``page_count`` и ``blocks``
+    и вернул ``block_index >= 0`` (раньше outline отбрасывался).
     """
-    candidates = _detect_candidates(doc.blocks, pdf_path)
+    candidates = _detect_candidates(doc.blocks, pdf_path, physical_doc=doc)
     candidates = _apply_confidence_penalties(candidates, doc.blocks)
     candidates = _apply_evidence_scoring(candidates, doc.blocks)
     candidates = _filter_above_threshold(candidates)

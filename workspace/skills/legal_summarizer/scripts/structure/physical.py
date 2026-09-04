@@ -18,6 +18,18 @@
 Эти обёртки минимальны (буквально 1-2 строки на блок) и **не** пытаются
 перепарсить документ — только сохраняют координаты, потерянные в
 ``extract_text``.
+
+Граница между Physical и Semantic (PLAN §3, §10):
+
+* ``PhysicalDocument`` описывает **только то, что физически есть в файле**
+  — pages, paragraphs, tables. ``DocumentBlock`` — это physical unit.
+* Семантическая структура (``heading``, ``list_item``, ``section`` и
+  т.п.) — ответственность ``DocumentStructure`` из ``structure/models.py``,
+  который **ссылается** на блоки через ordinals, а не копирует текст.
+* ``PhysicalDocument`` намеренно **не знает** ни о каких ``semantic_type``,
+  ``heading``, ``section``. Это строго отделено в ``structure/models.py``.
+* ``DocumentBlock.block_type`` (``"page"`` / ``"paragraph"`` / ``"table"``
+  / ``"text"``) — это **physical** тип, не семантический.
 """
 
 from __future__ import annotations
