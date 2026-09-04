@@ -121,7 +121,7 @@ def build_direct_plan(
         batch_id=_make_batch_id(0),
         chunk_ids=tuple(c.chunk_id for c in chunks),
         token_estimate=total_tokens,
-        section_ids=tuple({c.section_id for c in chunks}),
+        section_ids=tuple(dict.fromkeys(c.section_id for c in chunks)),
     )
     return ExecutionPlan(
         document_id=document_id,
@@ -165,7 +165,7 @@ def build_map_plan(
                 batch_id=_make_batch_id(i),
                 chunk_ids=tuple(batch_chunk_ids),
                 token_estimate=total_tokens,
-                section_ids=tuple({c.section_id for c in batch_chunks}),
+                section_ids=tuple(dict.fromkeys(c.section_id for c in batch_chunks)),
             )
         )
 

@@ -98,3 +98,67 @@ def test_execution_plan_includes_hierarchical_strategy():
         token_estimator=TokenEstimator(),
     )
     assert plan.strategy == "map_hierarchical"
+
+def test_section_ids_preserve_order_across_runs():
+    """PLAN §26: section_ids в PlannedBatch сохраняют order (dict.fromkeys)."""
+    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
+    from workspace.skills.legal_summarizer.scripts.structure.execution_plan import (
+        build_direct_plan,
+    )
+    from workspace.skills.legal_summarizer.scripts.structure.token_estimator import (
+        TokenEstimator, TokenEstimatorConfig,
+    )
+
+    chunks = tuple(
+        Chunk(
+            chunk_id=f"00{i}",
+            index=i, text=f"t{i}", char_count=2, token_estimate=1,
+            page_start=1, page_end=1,
+            section_id=f"s{i % 3}",
+            section_path=f"{i % 3}",
+            section_heading=f"S{i % 3}",
+            block_indices=(i,), block_types=("text",),
+        )
+        for i in range(10)
+    )
+    est = TokenEstimator(TokenEstimatorConfig())
+    p1 = build_direct_plan(chunks, document_id="d", token_estimator=est)
+    p2 = build_direct_plan(chunks, document_id="d", token_estimator=est)
+    assert p1.batches[0].section_ids == p2.batches[0].section_ids
+    assert p1.batches[0].section_ids == ("s0", "s1", "s2")
+
+
+def test_map_plan_section_ids_preserve_order():
+    """PLAN §26: map-plan section_ids С‚РѕР¶Рµ СЃРѕС…СЂР°РЅСЏСЋС‚ order."""
+    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
+    from workspace.skills.legal_summarizer.scripts.structure.execution_plan import (
+        build_map_plan,
+    )
+    from workspace.skills.legal_summarizer.scripts.structure.token_estimator import (
+        TokenEstimator, TokenEstimatorConfig,
+    )
+
+    chunks = tuple(
+        Chunk(
+            chunk_id=f"00{i}",
+            index=i, text=f"t{i}", char_count=2, token_estimate=1,
+            page_start=1, page_end=1,
+            section_id=f"s{i % 3}",
+            section_path=f"{i % 3}",
+            section_heading=f"S{i % 3}",
+            block_indices=(i,), block_types=("text",),
+        )
+        for i in range(10)
+    )
+    est = TokenEstimator(TokenEstimatorConfig())
+    batches_in = [tuple(chunks[i:i + 4]) for i in range(0, 10, 4)]
+    p1 = build_map_plan(
+        chunks, document_id="d", strategy="map_flat",
+        batches_input=batches_in, token_estimator=est,
+    )
+    p2 = build_map_plan(
+        chunks, document_id="d", strategy="map_flat",
+        batches_input=batches_in, token_estimator=est,
+    )
+    for b1, b2 in zip(p1.batches, p2.batches):
+        assert b1.section_ids == b2.section_ids
