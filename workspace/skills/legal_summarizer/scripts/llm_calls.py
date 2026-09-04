@@ -1,13 +1,16 @@
-"""LLM-call wrappers: один вызов на одну задачу (map batch / section reduce /
-section trim / document reduce), плюс формирование ``doc_context``.
+"""LLM-call wrappers: низкоуровневые обёртки для LLM (map batch / section reduce /
+document reduce), плюс утилитарная ``doc_context``.
 
-NOTE: модуль НЕ называется ``llm.py``, чтобы не конфликтовать с
-существующим ``scripts/llm.py`` (LLM-клиент).
+NOTE: legacy импорт ``ContextBatch`` удалён в PLAN §20. ``llm_batch``
+теперь принимает ``list[Chunk]`` (canonical-compatible signature).
 """
 from __future__ import annotations
 
+from typing import Iterable
+
 import llm
 
+from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
 from workspace.skills.legal_summarizer.scripts.prompts import (
     build_batch_user_message,
     parse_batch_response,
@@ -16,7 +19,6 @@ from workspace.skills.legal_summarizer.scripts.prompts_runtime import (
     load_prompt,
     system_instruction,
 )
-from workspace.skills.legal_summarizer.scripts.packing import ContextBatch
 
 
 def doc_context(structure: dict | None, *, with_begin_end: bool = False) -> str:
@@ -31,25 +33,35 @@ def doc_context(structure: dict | None, *, with_begin_end: bool = False) -> str:
         begin = (structure.get("begin") or "").strip()
         end = (structure.get("end") or "").strip()
         if begin:
-            parts.append("НАЧАЛО ДОКУМЕНТА:\n" + begin)
+            parts.append("Начало документа:\n" + begin)
         if end:
-            parts.append("КОНЕЦ ДОКУМЕНТА:\n" + end)
+            parts.append("Конец документа:\n" + end)
     return "\n\n".join(parts)
 
 
 def llm_batch(
-    batch: ContextBatch,
+    chunks: Iterable[Chunk],
     *,
     chunks_total: int,
     structure: dict | None,
     length: str,
     question: str | None = None,
 ) -> dict[str, str]:
-    """Вызвать LLM для одного ContextBatch. Возвращает dict[chunk_id, summary]."""
+    """Сгруппировать LLM вызов для батча Chunk'ов.
+
+    Возвращает dict[chunk_id, summary].
+
+    Args:
+        chunks: список Chunk для одного батча.
+        chunks_total: общее число chunks в документе.
+    """
+    chunks_list = list(chunks)
     system = load_prompt("summarize_system").replace(
         "{length_instruction}", system_instruction(length, question)
     )
-    user_body = build_batch_user_message(batch, chunks_total=chunks_total)
+    user_body = build_batch_user_message(
+        chunks_list, chunks_total=chunks_total,
+    )
     dctx = doc_context(structure, with_begin_end=False)
     if dctx:
         user_body = dctx + "\n\n" + user_body
@@ -58,7 +70,7 @@ def llm_batch(
         {"role": "user", "content": user_body},
     ]
     response = llm.chat(messages, context=None)
-    return parse_batch_response(batch, response)
+    return parse_batch_response(chunks_list, response)
 
 
 def llm_section_reduce(
@@ -69,15 +81,15 @@ def llm_section_reduce(
     length: str,
     question: str | None = None,
 ) -> str:
-    """Per-section reduce: объединить partials чанков раздела."""
+    """Per-section reduce: объединить partials в финальную section_summary."""
     system = load_prompt("section_reduce_system").replace(
         "{length_instruction}", system_instruction(length, question)
     )
     user_body = (
         f"Раздел: {section_path}\n"
-        f"Заголовок: {section_heading}\n\n"
-        f"Частичные саммари чанков этого раздела:\n\n{joined_text}\n\n"
-        "Объедини в одно связное саммари этого раздела."
+        f"Заголовок раздела: {section_heading}\n\n"
+        f"Объединённые краткие описания частей раздела:\n\n{joined_text}\n\n"
+        "Объедини их в одно итоговое описание раздела."
     )
     messages = [
         {"role": "system", "content": system},
@@ -94,18 +106,18 @@ def llm_document_reduce(
     structure: dict | None,
     question: str | None = None,
 ) -> str:
-    """Document-level reduce: объединить section_summaries в финальное саммари."""
+    """Document-level reduce: объединить section_summaries в финальный документ."""
     system = load_prompt("reduce_system").replace(
         "{length_instruction}", system_instruction(length, question)
     )
     dctx = doc_context(structure, with_begin_end=True)
-    user_body = "Саммари разделов документа:\n\n" + section_summaries_text
+    user_body = "Краткие описания разделов документа:\n\n" + section_summaries_text
     if dctx:
         user_body = dctx + "\n\n" + user_body
     if focus:
         user_body = (
             user_body
-            + "\n\nФокус пользователя (что особенно важно подсветить): "
+            + "\n\nАкцент (если задан фокус внимания читателя): "
             + focus
         )
     messages = [

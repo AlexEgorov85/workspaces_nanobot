@@ -1,22 +1,27 @@
-"""LLM-prompt и parser для batch'ей (Phase 2B).
+"""LLM-prompt и parser для batch'ей.
 
-Каждый ContextBatch (multi-chunk) → один LLM call.
+Каждый ``list[Chunk]`` → один LLM call.
 
-Output: свободный текст с маркерами ``DOCUMENT CHUNK N: <саммари>`` — никакого
-JSON. LLM не тратит токены на обвязку/идентификаторы (chunk_id, section) —
-они и так известны на нашей стороне. Парсер regex'ом вытаскивает блоки
-по порядку и сопоставляет с chunk_id батча по позиции (чанк #N → chunk_id
-с индексом N-1 в батче). Это убирает ChunkResultParseError полностью —
-LLM не может «забыть закрыть скобку» или «не экранировать кавычку».
+Output: свободный текст с маркерами ``DOCUMENT CHUNK N: <саммари>``. LLM
+не тратит токены на обвязку/идентификаторы (chunk_id, section) — они
+известны на нашей стороне. Парсер regex'ом достаёт блоки по порядку и
+сопоставляет с chunk_id по позиции (чанк #N → chunk_id с индексом N-1
+в списке). Это убирает ChunkResultParseError полностью — LLM не может
+«забыть закрыть скобку» или «не экранировать кавычку».
+
+NOTE: legacy импорт ``ContextBatch`` удалён в PLAN §20. Сигнатура
+``build_batch_user_message(chunks, chunks_total=...)`` и
+``parse_batch_response(chunks, llm_text)`` принимают ``list[Chunk]``
+напрямую — canonical-compatible.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
-from workspace.skills.legal_summarizer.scripts.packing import ContextBatch
+from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
 
 
 _BATCH_USER_TEMPLATE = """Документ для анализа.
@@ -59,11 +64,6 @@ _CHUNK_BLOCK_TEMPLATE = """DOCUMENT CHUNK {n}
 """
 
 
-# Маркер для LLM: "DOCUMENT CHUNK N: ..." (допускается и краткое "DOC CHUNK").
-# N — порядковый номер чанка в батче (1..K). Парсер регексом достаёт все
-# вхождения и маппит на chunk_id по позиции. Lookahead ``^DOC(?:UMENT)? CHUNK``
-# (с MULTILINE) ловит только маркер в начале
-# строки — болтовня между блоками (через пустые строки) не попадает в body.
 _CHUNK_MARKER_RE = re.compile(
     r"(?m)^\s*DOC(?:UMENT)? CHUNK\s+(\d+)\s*:\s*(.*?)(?=\n\n|^\s*DOC(?:UMENT)? CHUNK\s+\d+\s*:|\Z)",
     re.DOTALL,
@@ -71,39 +71,26 @@ _CHUNK_MARKER_RE = re.compile(
 
 
 class ChunkResultParseError(Exception):
-    """Ответ LLM не содержит маркеров DOCUMENT CHUNK N для всех чанков батча.
-
-    Оставлено для обратной совместимости (retry-логика в map-фазе).
-    На текстовом формате практически недостижим — модель печатает блоки
-    свободно. Но сеть/timeout/streaming-truncation всё ещё возможны.
-    """
+    """Ответ LLM не содержит маркеров DOCUMENT CHUNK N для всех чанков."""
 
 
 def build_batch_user_message(
-    batch: ContextBatch,
+    chunks: Sequence[Chunk],
     *,
     chunks_total: int,
 ) -> str:
-    """Построить user_body для LLM-вызова одного ContextBatch.
-
-    Чанки нумеруются 1..K (порядок в батче). LLM вернёт саммари в том же
-    порядке с маркерами ``DOC CHUNK N: ...``.
-
-    Args:
-        batch: контекст-батч с chunks.
-        chunks_total: общее число chunks в документе (для контекста LLM).
-
-    Returns:
-        Готовая строка user_body.
-    """
-    sections = sorted({c.section_path for c in batch.chunks if c.section_path})
+    """Построить user_body для LLM-вызова одного батча."""
+    chunks_list = list(chunks)
+    sections = sorted({c.section_path for c in chunks_list if c.section_path})
     section_paths_str = " ; ".join(sections) if sections else "(root)"
 
-    page_start = batch.page_range[0] if batch.page_range[0] is not None else "?"
-    page_end = batch.page_range[1] if batch.page_range[1] is not None else "?"
+    page_starts = [c.page_start for c in chunks_list if c.page_start is not None]
+    page_ends = [c.page_end for c in chunks_list if c.page_end is not None]
+    page_start = min(page_starts) if page_starts else None
+    page_end = max(page_ends) if page_ends else None
 
     chunks_block_parts: list[str] = []
-    for idx, c in enumerate(batch.chunks, start=1):
+    for idx, c in enumerate(chunks_list, start=1):
         cs = c.page_start if c.page_start is not None else "?"
         ce = c.page_end if c.page_end is not None else "?"
         chunks_block_parts.append(
@@ -121,48 +108,31 @@ def build_batch_user_message(
 
     return _BATCH_USER_TEMPLATE.format(
         chunks_total=chunks_total,
-        page_start=page_start,
-        page_end=page_end,
+        page_start=page_start if page_start is not None else "?",
+        page_end=page_end if page_end is not None else "?",
         section_paths=section_paths_str,
         chunks_block=chunks_block,
     )
 
 
 def parse_batch_response(
-    batch: ContextBatch,
+    chunks: Sequence[Chunk],
     llm_text: str,
 ) -> dict[str, str]:
     """Распарсить ответ LLM, сопоставляя саммари с chunk_id по позиции.
 
     LLM пишет блоки вида::
 
-        DOCUMENT CHUNK 1: <саммари>
-        DOCUMENT CHUNK 2: <саммари>
-        ...
+            DOCUMENT CHUNK 1: <саммари>
+            DOCUMENT CHUNK 2: <саммари>
+            ...
 
-    Парсер regex'ом достаёт пары (n, summary), где n — порядковый номер
-    чанка в батче (1..len(batch.chunks)). chunk_id определяется ПОЗИЦИЕЙ:
-    чанк #N → batch.chunks[N-1].].chunk_id. Если каких-то номеров нет или
-    они дублируются — ChunkResultParseError.
-
-    Args:
-        batch: контекст-батч (ожидаемые chunk_id, в порядке).
-        llm_text: текст ответа LLM.
-
-    Returns:
-        dict[chunk_id, summary].
-
-    Raises:
-        ChunkResultParseError: отсутствуют или дублируются номера чанков.
+    Чанк #N → chunks[N-1].chunk_id.
     """
-    expected_count = len(batch.chunks)
+    chunks_list = list(chunks)
+    expected_count = len(chunks_list)
     raw = llm_text or ""
 
-    # Достаём пары (n, text). Регекс ловит: до следующего маркера или до конца.
-    # Берём ПЕРВОЕ непустое вхождение каждого номера; дубликаты маркеров
-    # (без пропусков) не фатальны — модель может повторить маркер внутри
-    # тела или при перечислении, особенно в одночанковых батчах. Важно
-    # наличие саммари всех ожидаемых чанков, а не уникальность маркеров.
     found_first: dict[int, str] = {}
     duplicates: list[int] = []
     for m in _CHUNK_MARKER_RE.finditer(raw):
@@ -187,21 +157,7 @@ def parse_batch_response(
             f"got_nums={sorted(found_first.keys())}, expected=1..{expected_count}"
         )
 
-    if duplicates:
-        try:
-            from loguru import logger
-
-            logger.warning(
-                "parse_batch_response: дубликаты маркеров %s для batch %s — "
-                "взято первое вхождение каждого номера",
-                duplicates,
-                batch.batch_id,
-            )
-        except Exception:
-            pass
-
-    # Сопоставляем позицию N → batch.chunks[N-1].chunk_id.
-    return {batch.chunks[n - 1].chunk_id: found_first[n] for n in range(1, expected_count + 1)}
+    return {chunks_list[n - 1].chunk_id: found_first[n] for n in range(1, expected_count + 1)}
 
 
 __all__ = [

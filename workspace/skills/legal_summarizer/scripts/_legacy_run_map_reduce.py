@@ -29,10 +29,6 @@ from workspace.skills.legal_summarizer.scripts.manifest import (
     save_manifest,
     write_result,
 )
-from workspace.skills.legal_summarizer.scripts.packing import (
-    ContextBatch,
-    pack_chunks,
-)
 from workspace.skills.legal_summarizer.scripts.prompts import (
     ChunkResultParseError,
     build_batch_user_message,
@@ -74,6 +70,18 @@ from workspace.skills.legal_summarizer.scripts.token_budget import (
 )
 from workspace.skills.legal_summarizer.scripts.prompts_runtime import (
     load_prompt as _load_prompt,
+)
+from workspace.skills.legal_summarizer.scripts.structure.brief_budget import (
+    allocate_brief_budget,
+)
+from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
+from workspace.skills.legal_summarizer.scripts.structure.adjacent_packing import (
+    AdjacentPackingConfig,
+    pack_chunks_with_adjacent,
+)
+from workspace.skills.legal_summarizer.scripts.structure.token_estimator import (
+    TokenEstimator,
+    TokenEstimatorConfig,
 )
 
 
@@ -205,7 +213,16 @@ def legacy_run_map_reduce(
             final_batches = insp_context_batches
         else:
             budget_pack = build_token_budget_fn(get_chunking_config_fn())
-            final_batches = pack_chunks(chunks, budget_pack)
+            cfg = AdjacentPackingConfig(
+                per_batch_token_budget=int(
+                    budget_pack.available_chunk_tokens
+                ),
+            )
+            final_batches = [
+                list(b) for b in pack_chunks_with_adjacent(
+                    tuple(chunks), config=cfg,
+                )
+            ]
     batches = final_batches
 
     doc_cache_chunks: dict[str, dict] = (
@@ -311,26 +328,20 @@ def legacy_run_map_reduce(
         )
     concurrency = 1
 
-    queued: list[tuple[ContextBatch, int]] = []
+    queued: list[tuple[str, list[Chunk], int]] = []
     total_batches = len(batches)
-    for batch in batches:
+    for batch_idx, batch_chunks in enumerate(batches):
         pending = [
-            c for c in batch.chunks
+            c for c in batch_chunks
             if c.chunk_id not in chunk_states
             or chunk_states[c.chunk_id].get("status") != "completed"
         ]
         if not pending:
             continue
-        batch_to_process = ContextBatch(
-            batch_id=batch.batch_id,
-            chunks=tuple(pending),
-            total_tokens_estimate=sum(c.token_estimate for c in pending),
-            section_paths=tuple({c.section_path for c in pending}),
-            page_range=batch.page_range,
-        )
-        queued.append((batch_to_process, len(pending)))
+        batch_id = f"cb_{batch_idx:03d}"
+        queued.append((batch_id, pending, len(batch_chunks)))
         _progress(
-            f"batch {batch_to_process.batch_id}: {len(pending)}/{len(batch.chunks)} chunks "
+            f"batch {batch_id}: {len(pending)}/{len(batch_chunks)} chunks "
             f"queued ({total_batches} batches total, concurrency={concurrency})"
         )
 
@@ -340,38 +351,39 @@ def legacy_run_map_reduce(
         async def _gather_all():
             return await asyncio.gather(*[
                 _run_one_batch_async(
-                    btp,
+                    pending_chunks,
                     chunks_total=len(chunks),
                     structure=structure,
                     operation_id=operation_id,
                     workspace_root=workspace_root,
                     sem=sem,
+                    batch_id=batch_id,
                     length=length,
                     question=question,
                 )
-                for btp, _ in queued
+                for batch_id, pending_chunks, _ in queued
             ])
 
         gather_results = asyncio.run(_gather_all())
 
-        for (batch_to_process, pending_count), (status, batch_meta, last_error) in zip(
+        for (batch_id, batch_chunks, _pending_count), (status, batch_meta, last_error) in zip(
             queued, gather_results
         ):
             if status == "ok":
                 assert batch_meta is not None
                 map_calls += 1
-                ctx_batches[batch_to_process.batch_id] = {
+                ctx_batches[batch_id] = {
                     "chunk_ids": batch_meta["chunk_ids"],
                     "status": "completed",
                     "started_at": batch_meta["started_at"],
                     "completed_at": batch_meta["completed_at"],
                     "duration_sec": batch_meta["duration_sec"],
-                    "section_paths": list(batch_to_process.section_paths),
+                    "section_paths": list({c.section_path for c in batch_chunks}),
                 }
-                for c in batch_to_process.chunks:
+                for c in batch_chunks:
                     chunk_states[c.chunk_id] = {
                         "status": "completed",
-                        "context_batch_id": batch_to_process.batch_id,
+                        "context_batch_id": batch_id,
                         "section_id": c.section_id,
                         "section_path": c.section_path,
                         "page_start": c.page_start,
@@ -383,22 +395,22 @@ def legacy_run_map_reduce(
                 assert last_error is not None
                 error_code, error_exc = last_error
                 retries += 1
-                failed_batch_ids.append(batch_to_process.batch_id)
+                failed_batch_ids.append(batch_id)
                 if first_batch_error is None:
                     first_batch_error = {
                         "code": error_code,
-                        "batch_id": batch_to_process.batch_id,
+                        "batch_id": batch_id,
                         "message": str(error_exc),
                     }
-                ctx_batches[batch_to_process.batch_id] = {
-                    "chunk_ids": [c.chunk_id for c in batch_to_process.chunks],
+                ctx_batches[batch_id] = {
+                    "chunk_ids": [c.chunk_id for c in batch_chunks],
                     "status": "failed",
                     "error": {"code": error_code, "message": str(error_exc)},
                 }
-                for c in batch_to_process.chunks:
+                for c in batch_chunks:
                     chunk_states[c.chunk_id] = {
                         "status": "failed",
-                        "context_batch_id": batch_to_process.batch_id,
+                        "context_batch_id": batch_id,
                         "section_id": c.section_id,
                         "section_path": c.section_path,
                         "page_start": c.page_start,

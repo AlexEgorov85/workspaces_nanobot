@@ -6,10 +6,9 @@
     * ``load_cached_partials`` — загрузить per-chunk summary из disk-манифеста
     * ``now_iso`` — текущее время в ISO 8601 (UTC)
 
-NOTE: модуль назван ``pipeline.py``, не ``pipeline/...`` — оставлено
-top-level для минимизации структурных изменений на этом этапе.
-Целевая структура (``pipeline/execute.py``) будет достигнута после
-переименования конфликтующего ``llm.py`` → ``llm_client.py``.
+NOTE: legacy импорт ``ContextBatch`` удалён в PLAN §20. Сигнатуры
+``process_context_batch(chunks, ...)`` и ``run_one_batch_async(chunks, ...)``
+принимают ``list[Chunk]`` (canonical-compatible).
 """
 from __future__ import annotations
 
@@ -17,20 +16,17 @@ import asyncio
 import time as _time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from workspace.skills.legal_summarizer.scripts.llm_calls import llm_batch as _llm_batch
 from workspace.skills.legal_summarizer.scripts.manifest import (
     read_chunk_result,
     write_chunk_result,
 )
-from workspace.skills.legal_summarizer.scripts.packing import ContextBatch
 from workspace.skills.legal_summarizer.scripts.prompts import ChunkResultParseError
+from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
 
 
-# Сколько раз перезапускать LLM-вызов батча при ChunkResultParseError
-# (валидный JSON + все chunk_id). LLM-JSON флакает, ретрай обычно помогает.
-# При исчерпании — батч помечается failed, обработка документа продолжается.
 MAX_BATCH_PARSE_RETRIES = 3
 
 
@@ -40,7 +36,7 @@ def now_iso() -> str:
 
 
 def process_context_batch(
-    batch: ContextBatch,
+    chunks: Sequence[Chunk],
     *,
     chunks_total: int,
     structure: dict | None,
@@ -49,17 +45,14 @@ def process_context_batch(
     workspace_root: Path | str | None,
     question: str | None = None,
     progress: Any = None,
+    batch_id: str = "",
 ) -> dict[str, Any]:
-    """Один LLM call → parse → write per-chunk files.
-
-    Args:
-        progress: callable(str) для вывода прогресса (например, о parse-retry).
-            Если ``None`` — пропускается (тестам обычно не нужен).
-    """
+    """Один LLM call → parse → write per-chunk files."""
+    chunks_list = list(chunks)
     started_at = now_iso()
     start = _time.monotonic()
     result = _llm_batch(
-        batch,
+        chunks_list,
         chunks_total=chunks_total,
         structure=structure,
         length=length,
@@ -68,13 +61,13 @@ def process_context_batch(
     duration = round(_time.monotonic() - start, 3)
     completed_at = now_iso()
 
-    for c in batch.chunks:
+    for c in chunks_list:
         if c.chunk_id in result:
             write_chunk_result(
                 operation_id,
                 c.chunk_id,
                 result[c.chunk_id],
-                context_batch_id=batch.batch_id,
+                context_batch_id=batch_id,
                 section_id=c.section_id,
                 section_path=c.section_path,
                 page_start=c.page_start,
@@ -83,8 +76,8 @@ def process_context_batch(
                 workspace_root=workspace_root,
             )
     return {
-        "batch_id": batch.batch_id,
-        "chunk_ids": [c.chunk_id for c in batch.chunks],
+        "batch_id": batch_id,
+        "chunk_ids": [c.chunk_id for c in chunks_list],
         "started_at": started_at,
         "completed_at": completed_at,
         "duration_sec": duration,
@@ -92,35 +85,26 @@ def process_context_batch(
 
 
 async def run_one_batch_async(
-    batch_to_process: ContextBatch,
+    chunks: Sequence[Chunk],
     *,
     chunks_total: int,
     structure: dict | None,
     operation_id: str,
     workspace_root: Path | str | None,
     sem: asyncio.Semaphore,
+    batch_id: str = "",
     length: str = "brief",
     question: str | None = None,
     progress: Any = None,
 ) -> tuple[str, dict | None, tuple[str, Exception] | None]:
-    """Один батч с retry-циклом (parse-error), под семафором concurrency.
-
-    Sync-функция ``process_context_batch`` (внутри LLM HTTP + JSON parse +
-    запись chunks/*.json) обёрнута в ``asyncio.to_thread`` — пока один батч
-    висит на HTTP, event loop крутит остальные. Семафор ограничивает
-    число одновременных HTTP-запросов к LLM-провайдеру (rate-limit).
-
-    Возвращает:
-      ("ok", batch_meta, None) — успех (с метаданными батча)
-      ("failed", None, (code, exc)) — все retry исчерпаны или не-parse ошибка
-    """
+    """Один батч с retry-циклом (parse-error), под семафором concurrency."""
     async with sem:
         last_error: tuple[str, Exception] | None = None
         for attempt in range(1, MAX_BATCH_PARSE_RETRIES + 1):
             try:
                 batch_meta = await asyncio.to_thread(
                     process_context_batch,
-                    batch_to_process,
+                    chunks,
                     chunks_total=chunks_total,
                     structure=structure,
                     length=length,
@@ -128,19 +112,18 @@ async def run_one_batch_async(
                     workspace_root=workspace_root,
                     question=question,
                     progress=progress,
+                    batch_id=batch_id,
                 )
                 return ("ok", batch_meta, None)
             except ChunkResultParseError as exc:
-                # LLM-JSON флакает — ретраим с тем же промптом.
                 last_error = ("LLM_PARSE_ERROR", exc)
                 if progress is not None:
                     progress(
-                        f"batch {batch_to_process.batch_id}: parse error "
+                        f"batch {batch_id}: parse error "
                         f"attempt {attempt}/{MAX_BATCH_PARSE_RETRIES}, retrying"
                     )
                 continue
             except Exception as exc:
-                # Не-parse ошибка (сеть, OOM, структурно): не ретраим.
                 last_error = ("LLM_ERROR", exc)
                 break
         return ("failed", None, last_error)
