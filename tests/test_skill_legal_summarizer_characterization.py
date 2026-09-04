@@ -2560,73 +2560,65 @@ def test_summarizer_truncate_section_summary_helper():
 
 # ---------------------------------------------------------------------------
 
-def test_execution_strategy_enum_values():
-    """``ExecutionStrategy`` имеет 3 значения."""
-    from workspace.skills.legal_summarizer.scripts.execution_strategy import (
-        ExecutionStrategy,
+def test_execution_strategy_values():
+    """Canonical execution strategy имеет 3 значения."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        execution_strategy_for_legacy,
     )
 
-    assert ExecutionStrategy.DIRECT.value == "direct"
-    assert ExecutionStrategy.MAP_FLAT.value == "map_flat"
-    assert ExecutionStrategy.MAP_HIERARCHICAL.value == "map_hierarchical"
+    assert execution_strategy_for_legacy(
+        estimated_tokens=1000, sections=0,
+        direct_budget_tokens=10000, reduce_budget_tokens=10000,
+    ) == "direct"
+    assert execution_strategy_for_legacy(
+        estimated_tokens=15000, sections=2,
+        direct_budget_tokens=10000, reduce_budget_tokens=20000,
+        min_sections_for_hierarchical=3,
+    ) == "map_flat"
+    assert execution_strategy_for_legacy(
+        estimated_tokens=30000, sections=5,
+        direct_budget_tokens=10000, reduce_budget_tokens=20000,
+    ) == "map_hierarchical"
 
 def test_select_execution_strategy_direct():
-    """estimated_tokens ≤ direct_budget → DIRECT."""
-    from workspace.skills.legal_summarizer.scripts.document_stats import (
-        DocumentStats,
-    )
-    from workspace.skills.legal_summarizer.scripts.execution_strategy import (
-        ExecutionStrategy,
-        StrategyConfig,
-        select_execution_strategy,
+    """estimated_tokens ≤ direct_budget → direct."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        execution_strategy_for_legacy,
     )
 
-    stats = DocumentStats(
-        chars=8000, estimated_tokens=2000, pages=2, blocks=10,
-        sections=3, tables=0, chunks=1,
+    result = execution_strategy_for_legacy(
+        estimated_tokens=2000, sections=3,
+        direct_budget_tokens=30000, reduce_budget_tokens=20000,
     )
-    cfg = StrategyConfig(direct_budget_tokens=30000, reduce_budget_tokens=20000)
-    assert select_execution_strategy(stats, cfg) == ExecutionStrategy.DIRECT
+    assert result == "direct"
 
 def test_select_execution_strategy_map_flat():
-    """estimated_tokens > direct_budget, но ≤ reduce_budget → MAP_FLAT."""
-    from workspace.skills.legal_summarizer.scripts.document_stats import (
-        DocumentStats,
-    )
-    from workspace.skills.legal_summarizer.scripts.execution_strategy import (
-        ExecutionStrategy,
-        StrategyConfig,
-        select_execution_strategy,
+    """estimated_tokens > direct_budget, sections < threshold → map_flat."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        execution_strategy_for_legacy,
     )
 
-    # 50000 chars → 12500 tokens. direct_budget=10000, reduce_budget=20000.
-    stats = DocumentStats(
-        chars=50000, estimated_tokens=12500, pages=20, blocks=50,
-        sections=5, tables=2, chunks=10,
+    result = execution_strategy_for_legacy(
+        estimated_tokens=12500, sections=2,
+        direct_budget_tokens=10000, reduce_budget_tokens=20000,
+        min_sections_for_hierarchical=3,
     )
-    cfg = StrategyConfig(direct_budget_tokens=10000, reduce_budget_tokens=20000)
-    assert select_execution_strategy(stats, cfg) == ExecutionStrategy.MAP_FLAT
+    assert result == "map_flat"
 
 def test_select_execution_strategy_map_hierarchical():
-    """estimated_tokens > reduce_budget → MAP_HIERARCHICAL."""
-    from workspace.skills.legal_summarizer.scripts.document_stats import (
-        DocumentStats,
-    )
-    from workspace.skills.legal_summarizer.scripts.execution_strategy import (
-        ExecutionStrategy,
-        StrategyConfig,
-        select_execution_strategy,
+    """estimated_tokens > direct_budget, sections ≥ threshold → map_hierarchical."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        execution_strategy_for_legacy,
     )
 
-    stats = DocumentStats(
-        chars=200000, estimated_tokens=50000, pages=100, blocks=500,
-        sections=20, tables=10, chunks=50,
+    result = execution_strategy_for_legacy(
+        estimated_tokens=50000, sections=20,
+        direct_budget_tokens=10000, reduce_budget_tokens=20000,
     )
-    cfg = StrategyConfig(direct_budget_tokens=10000, reduce_budget_tokens=20000)
-    assert select_execution_strategy(stats, cfg) == ExecutionStrategy.MAP_HIERARCHICAL
+    assert result == "map_hierarchical"
 
 def test_select_execution_strategy_no_llm_calls():
-    """``select_execution_strategy`` НЕ вызывает LLM.
+    """execution strategy selector НЕ вызывает LLM.
 
     Детерминированный selector — нет side-effects, нет I/O.
     """
@@ -2640,68 +2632,59 @@ def test_select_execution_strategy_no_llm_calls():
 
     summarizer.llm.chat = fake_chat  # type: ignore[assignment]
 
-    from workspace.skills.legal_summarizer.scripts.document_stats import (
-        DocumentStats,
-    )
-    from workspace.skills.legal_summarizer.scripts.execution_strategy import (
-        StrategyConfig,
-        select_execution_strategy,
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        execution_strategy_for_legacy,
     )
 
-    stats = DocumentStats(
-        chars=10000, estimated_tokens=2500, pages=5, blocks=20,
-        sections=3, tables=0, chunks=4,
+    execution_strategy_for_legacy(
+        estimated_tokens=2500, sections=3,
+        direct_budget_tokens=30000, reduce_budget_tokens=20000,
     )
-    cfg = StrategyConfig(direct_budget_tokens=30000, reduce_budget_tokens=20000)
-    select_execution_strategy(stats, cfg)
     assert call_count["n"] == 0
 
-def test_strategy_config_holds_budgets():
-    """``StrategyConfig`` хранит direct и reduce бюджеты."""
-    from workspace.skills.legal_summarizer.scripts.execution_strategy import (
-        StrategyConfig,
+def test_execution_strategy_config_holds_budgets():
+    """Canonical strategy selector использует параметры напрямую."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        execution_strategy_for_legacy,
     )
 
-    cfg = StrategyConfig(direct_budget_tokens=50000, reduce_budget_tokens=30000)
-    assert cfg.direct_budget_tokens == 50000
-    assert cfg.reduce_budget_tokens == 30000
+    result_direct = execution_strategy_for_legacy(
+        estimated_tokens=100, sections=1,
+        direct_budget_tokens=50000, reduce_budget_tokens=30000,
+    )
+    assert result_direct == "direct"
+
+    result_flat = execution_strategy_for_legacy(
+        estimated_tokens=60000, sections=1,
+        direct_budget_tokens=50000, reduce_budget_tokens=30000,
+        min_sections_for_hierarchical=3,
+    )
+    assert result_flat == "map_flat"
 
 def test_select_execution_strategy_boundary_exactly_at_direct_budget():
-    """Boundary: estimated_tokens == direct_budget → DIRECT (≤)."""
-    from workspace.skills.legal_summarizer.scripts.document_stats import (
-        DocumentStats,
-    )
-    from workspace.skills.legal_summarizer.scripts.execution_strategy import (
-        ExecutionStrategy,
-        StrategyConfig,
-        select_execution_strategy,
+    """Boundary: estimated_tokens == direct_budget → direct (≤)."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        execution_strategy_for_legacy,
     )
 
-    stats = DocumentStats(
-        chars=40000, estimated_tokens=10000, pages=10, blocks=40,
-        sections=5, tables=0, chunks=8,
+    result = execution_strategy_for_legacy(
+        estimated_tokens=10000, sections=5,
+        direct_budget_tokens=10000, reduce_budget_tokens=5000,
     )
-    cfg = StrategyConfig(direct_budget_tokens=10000, reduce_budget_tokens=5000)
-    # Tokens == direct_budget → DIRECT.
-    assert select_execution_strategy(stats, cfg) == ExecutionStrategy.DIRECT
+    assert result == "direct"
 
 def test_select_execution_strategy_boundary_one_above_direct():
-    """Boundary: estimated_tokens = direct + 1 → MAP_FLAT (или HIERARCHICAL)."""
-    from workspace.skills.legal_summarizer.scripts.document_stats import (
-        DocumentStats,
-    )
-    from workspace.skills.legal_summarizer.scripts.execution_strategy import (
-        ExecutionStrategy,
-        StrategyConfig,
-        select_execution_strategy,
+    """Boundary: estimated_tokens = direct + 1 → map_flat или map_hierarchical."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        execution_strategy_for_legacy,
     )
 
-    stats = DocumentStats(
-        chars=40004, estimated_tokens=10001, pages=10, blocks=40,
-        sections=5, tables=0, chunks=8,
+    result = execution_strategy_for_legacy(
+        estimated_tokens=10001, sections=5,
+        direct_budget_tokens=10000, reduce_budget_tokens=20000,
+        min_sections_for_hierarchical=3,
     )
-    cfg = StrategyConfig(direct_budget_tokens=10000, reduce_budget_tokens=20000)
-    assert select_execution_strategy(stats, cfg) == ExecutionStrategy.MAP_FLAT
+    assert result in ("map_flat", "map_hierarchical")
 
 # ---------------------------------------------------------------------------
 
