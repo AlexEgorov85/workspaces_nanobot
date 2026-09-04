@@ -63,6 +63,11 @@ def test_chunk_from_structure_empty():
 
 
 def test_chunk_from_structure_single_section():
+    """PLAN §7: последовательные blocks с одним owner группируются в chunk.
+
+    blocks (0, "first body"), (1, "second body") оба принадлежат n_0001
+    и оба < max_chunk_chars → один chunk с block_indices=(0, 1).
+    """
     blocks = (
         _b(0, "first body"),
         _b(1, "second body"),
@@ -78,10 +83,12 @@ def test_chunk_from_structure_single_section():
         numbering=(), total_blocks=2,
     )
     chunks = chunk_from_structure(doc, s)
-    assert len(chunks) == 2
+    assert len(chunks) == 1
     assert chunks[0].section_id == "n_0001"
     assert chunks[0].section_heading == "Sec"
-    assert chunks[1].text == "second body"
+    assert chunks[0].block_indices == (0, 1)
+    assert "first body" in chunks[0].text
+    assert "second body" in chunks[0].text
 
 
 def test_chunk_from_structure_table_atomic():
@@ -132,6 +139,11 @@ def test_chunk_from_structure_split_oversize_block():
 
 
 def test_chunk_from_structure_section_order():
+    """PLAN §7: chunks в physical document order, последовательные blocks
+    с одним owner группируются в один chunk.
+
+    blocks 0,1 (A) → один chunk; blocks 2,3 (B) → один chunk.
+    """
     blocks = (
         _b(0, "A1"), _b(1, "A2"),
         _b(2, "B1"), _b(3, "B2"),
@@ -149,7 +161,8 @@ def test_chunk_from_structure_section_order():
     )
     chunks = chunk_from_structure(doc, s)
     section_titles = [c.section_heading for c in chunks]
-    assert section_titles == ["A", "A", "B", "B"]
+    assert section_titles == ["A", "B"]
+    assert [c.block_indices for c in chunks] == [(0, 1), (2, 3)]
 
 
 def test_chunk_planner_class():
@@ -168,3 +181,90 @@ def test_chunk_planner_class():
     chunks = planner.plan(doc, s)
     assert len(chunks) == 1
     assert chunks[0].text == "hello"
+
+
+def test_chunks_in_physical_document_order():
+    """PLAN §7: chunks строго в document order по block.ordinal.
+
+    blocks:
+      0 → Chapter
+      1 → Article 1
+      2 → Article 1
+      3 → Chapter
+      4 → Chapter
+
+    Owner: blocks 1,2 принадлежат Article (deepest), 0,3,4 — Chapter.
+
+    Chunks должны выходить в порядке block ordinals, не section-list:
+      Chunk(chapter=0,3,4)? Нет — blocks 1,2 между 0 и 3, значит
+      chunk с blocks 1,2 появится ПОСЛЕ chunk с block 0.
+    """
+    blocks = (
+        _b(0, "Chapter heading"),
+        _b(1, "Article 1 body 1"),
+        _b(2, "Article 1 body 2"),
+        _b(3, "Chapter body 1"),
+        _b(4, "Chapter body 2"),
+    )
+    doc = _make_doc(blocks)
+    chapter = StructureNode(
+        node_id="n_0001", node_type="section", semantic_type=None,
+        level=1, title="Chapter", number=None, parent_id="n_0000",
+        children=("n_0002",), start_block=0, end_block=4,
+        confidence=0.7,
+    )
+    article = StructureNode(
+        node_id="n_0002", node_type="section", semantic_type=None,
+        level=2, title="Article 1", number=None, parent_id="n_0001",
+        children=(), start_block=1, end_block=2,
+        confidence=0.7,
+    )
+    s = DocumentStructure(
+        document_id="d", title=None,
+        nodes={"n_0000": _root(("n_0001",)), "n_0001": chapter, "n_0002": article},
+        root_id="n_0000", preamble_node_id="n_0000",
+        numbering=(), total_blocks=5,
+    )
+    chunks = chunk_from_structure(doc, s)
+    indices = [c.block_indices for c in chunks]
+    flat = [b for ci in indices for b in ci]
+    assert flat == [0, 1, 2, 3, 4], f"expected physical order, got {flat}"
+    assert all(chunks[i].index < chunks[i + 1].index for i in range(len(chunks) - 1))
+
+
+def test_chunks_have_strictly_increasing_index():
+    """chunks[i].index < chunks[i+1].index для всех i."""
+    blocks = tuple(_b(i, f"block {i}") for i in range(5))
+    doc = _make_doc(blocks)
+    s = DocumentStructure(
+        document_id="d", title=None,
+        nodes={"n_0000": _root()},
+        root_id="n_0000", preamble_node_id="n_0000",
+        numbering=(), total_blocks=5,
+    )
+    chunks = chunk_from_structure(doc, s)
+    for i in range(len(chunks) - 1):
+        assert chunks[i].index < chunks[i + 1].index
+
+
+def test_chunks_deterministic_across_runs():
+    """Два прогона → identical chunks."""
+    blocks = tuple(_b(i, f"block {i}") for i in range(10))
+    doc = _make_doc(blocks)
+    s = DocumentStructure(
+        document_id="d", title=None,
+        nodes={
+            "n_0000": _root(("n_0001", "n_0002")),
+            "n_0001": _sec("n_0001", start=0, end=4, title="A"),
+            "n_0002": _sec("n_0002", start=5, end=9, title="B"),
+        },
+        root_id="n_0000", preamble_node_id="n_0000",
+        numbering=(), total_blocks=10,
+    )
+    chunks1 = chunk_from_structure(doc, s)
+    chunks2 = chunk_from_structure(doc, s)
+    assert len(chunks1) == len(chunks2)
+    for c1, c2 in zip(chunks1, chunks2):
+        assert c1.chunk_id == c2.chunk_id
+        assert c1.index == c2.index
+        assert c1.block_indices == c2.block_indices

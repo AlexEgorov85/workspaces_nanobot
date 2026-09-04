@@ -121,17 +121,19 @@ def chunk_from_structure(
 ) -> list[Chunk]:
     """Создать ``Chunk``-и из ``PhysicalDocument`` + ``DocumentStructure``.
 
-    Алгоритм:
+    Алгоритм (PLAN §7 — chunks в **physical document order**):
 
-    1. Строим ``block_ownership``: каждый block → ровно один section;
-    2. Для каждого section — итерируем только **его** blocks;
-    3. Каждый block становится частью chunk'а (или своим chunk'ом, если
-       достаточно большой);
-    4. tables атомарны (не разбиваются между chunks);
+    1. Строим ``block_ownership``: каждый block → ровно один section
+       (deepest, см. ``owner_for_block``);
+    2. Итерируем **physical blocks** в ``ordinal`` order (НЕ sections);
+    3. Группируем последовательные blocks с одним owner в один chunk
+       (если влезает в ``max_chunk_chars``);
+    4. tables атомарны (каждый table block — свой chunk);
     5. chunk_id = zero-padded index (1-based).
 
     Returns:
-        ``list[Chunk]`` в document order.
+        ``list[Chunk]`` в physical document order. ``chunks[i].index``
+        строго возрастает.
     """
     cfg = config or DocumentStructureChunkerConfig()
 
@@ -200,85 +202,121 @@ def chunk_from_structure(
             cur = struct.nodes.get(cur.parent_id)
         return " > ".join(reversed(path_parts))
 
-    def _process_range(
-        start_ord: int,
-        end_ord: int,
+    def _split_oversized_block(
+        block: DocumentBlock,
         section_id: str,
         section_path: str,
         section_heading: str,
     ) -> None:
-        table_counter = 0
-        i = start_ord
-        while i <= end_ord:
-            block = by_ord.get(i)
-            if block is None:
-                i += 1
-                continue
-            if ownership.get(i) != section_id:
-                i += 1
-                continue
-
-            if block.block_type == "table":
-                table_counter += 1
-                tid = f"t_{table_counter:03d}"
-                _emit(
-                    text=block.content,
-                    block_indices=(block.ordinal,),
-                    block_types=(block.block_type,),
-                    section_id=section_id,
-                    section_path=section_path,
-                    section_heading=section_heading,
-                    page_start=block.page_index,
-                    page_end=block.page_end,
-                    table_id=tid,
-                )
-                i += 1
-                continue
-
-            if block.char_count <= max_chunk_chars:
-                _emit(
-                    text=block.content,
-                    block_indices=(block.ordinal,),
-                    block_types=(block.block_type,),
-                    section_id=section_id,
-                    section_path=section_path,
-                    section_heading=section_heading,
-                    page_start=block.page_index,
-                    page_end=block.page_end,
-                )
-                i += 1
-                continue
-
-            parts = _split_block_with_offsets(
-                block.content, chunk_size=max_chunk_chars, chunk_overlap=chunk_overlap,
-            )
-            for part_text, cs, ce in parts:
-                _emit(
-                    text=part_text,
-                    block_indices=(block.ordinal,),
-                    block_types=(block.block_type,),
-                    section_id=section_id,
-                    section_path=section_path,
-                    section_heading=section_heading,
-                    page_start=block.page_index,
-                    page_end=block.page_end,
-                    source_char_start=cs,
-                    source_char_end=ce,
-                )
-            i += 1
-
-    for nid in struct.nodes:
-        node = struct.nodes[nid]
-        if node.node_type != "section":
-            continue
-        section_path = _section_path_for(nid, struct)
-        _process_range(
-            node.start_block,
-            node.end_block,
-            section_id=nid,
-            section_path=section_path,
-            section_heading=node.title,
+        parts = _split_block_with_offsets(
+            block.content, chunk_size=max_chunk_chars, chunk_overlap=chunk_overlap,
         )
+        for part_text, cs, ce in parts:
+            _emit(
+                text=part_text,
+                block_indices=(block.ordinal,),
+                block_types=(block.block_type,),
+                section_id=section_id,
+                section_path=section_path,
+                section_heading=section_heading,
+                page_start=block.page_index,
+                page_end=block.page_end,
+                source_char_start=cs,
+                source_char_end=ce,
+            )
+
+    section_meta_cache: dict[str, tuple[str, str]] = {}
+
+    def _meta(section_id: str) -> tuple[str, str]:
+        if section_id not in section_meta_cache:
+            node = struct.nodes.get(section_id)
+            heading = node.title if node is not None else ""
+            section_meta_cache[section_id] = (
+                _section_path_for(section_id, struct), heading,
+            )
+        return section_meta_cache[section_id]
+
+    ordered_ords = sorted(by_ord.keys())
+    i = 0
+    document_table_counter = 0
+
+    while i < len(ordered_ords):
+        ord_i = ordered_ords[i]
+        block = by_ord.get(ord_i)
+        if block is None:
+            i += 1
+            continue
+        owner = ownership.get(ord_i, struct.root_id)
+        section_path, section_heading = _meta(owner)
+
+        if block.block_type == "table":
+            document_table_counter += 1
+            tid = f"t_{document_table_counter:03d}"
+            _emit(
+                text=block.content,
+                block_indices=(block.ordinal,),
+                block_types=(block.block_type,),
+                section_id=owner,
+                section_path=section_path,
+                section_heading=section_heading,
+                page_start=block.page_index,
+                page_end=block.page_end,
+                table_id=tid,
+            )
+            i += 1
+            continue
+
+        if block.char_count > max_chunk_chars:
+            _split_oversized_block(block, owner, section_path, section_heading)
+            i += 1
+            continue
+
+        collected_indices: list[int] = [block.ordinal]
+        collected_types: list[str] = [block.block_type]
+        collected_text_parts: list[str] = [block.content]
+        collected_page_start = block.page_index
+        collected_page_end = block.page_end
+        j = i + 1
+        current_chars = block.char_count
+        while j < len(ordered_ords):
+            ord_j = ordered_ords[j]
+            next_block = by_ord.get(ord_j)
+            if next_block is None:
+                j += 1
+                continue
+            next_owner = ownership.get(ord_j, struct.root_id)
+            if next_owner != owner:
+                break
+            if next_block.block_type == "table":
+                break
+            if next_block.char_count > max_chunk_chars:
+                break
+            new_chars = current_chars + next_block.char_count
+            if new_chars > max_chunk_chars:
+                break
+            collected_indices.append(next_block.ordinal)
+            collected_types.append(next_block.block_type)
+            collected_text_parts.append(next_block.content)
+            if next_block.page_index is not None:
+                if collected_page_start is None or next_block.page_index < collected_page_start:
+                    collected_page_start = next_block.page_index
+            if next_block.page_end is not None:
+                if collected_page_end is None or next_block.page_end > collected_page_end:
+                    collected_page_end = next_block.page_end
+            current_chars = new_chars
+            j += 1
+
+        _emit(
+            text="\n\n".join(collected_text_parts),
+            block_indices=tuple(collected_indices),
+            block_types=tuple(collected_types),
+            section_id=owner,
+            section_path=section_path,
+            section_heading=section_heading,
+            page_start=collected_page_start,
+            page_end=collected_page_end,
+        )
+        i = j
 
     return chunks
 
