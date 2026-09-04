@@ -1,10 +1,25 @@
-"""Zero-reference audit: найти все legacy references в коде.
+"""Zero-reference audit: regression guard для legacy symbols (PLAN §34).
 
-Скрипт (не pytest-тест) — обходит всю кодовую базу и печатает
-production references на legacy-символы. Полезен для отслеживания
-оставшихся legacy-зависимостей в canonical-пути.
+Это **regression guard**, не просто print. Два режима:
 
-Запуск: ``python workspace/skills/legal_summarizer/scripts/legacy_audit.py``
+* ``audit()`` — возвращает structured result (dict с hits).
+* ``assert_no_legacy()`` — поднимает ``AssertionError`` при production hit.
+
+Разделение:
+
+* ``_FORBIDDEN_MODULES`` — модули, запрещённые в production:
+  ``document_cleanup``, ``fingerprint``, ``document_cache``,
+  ``token_budget``, ``packing``, ``structure.sections``, ``structure.tree``.
+
+* ``_FORBIDDEN_SYMBOLS`` — символы, запрещённые в production:
+  ``SectionTree``, ``DocumentSection``, ``StructureAwareChunker``,
+  ``build_section_tree``, ``merge_short_sections``,
+  ``extract_local_structure_label``, ``count_meaningful_sections``,
+  ``should_use_hierarchical_reduce``, ``select_reduce_strategy``,
+  ``section_tree_from_structure``, ``structure_from_section_tree``.
+
+NOTE: ``load_physical_document`` НЕ legacy symbol — это canonical
+DocumentLoader API (см. PLAN §11, §12).
 """
 
 from __future__ import annotations
@@ -13,23 +28,24 @@ import ast
 import pathlib
 from collections import defaultdict
 
-_LEGACY_MODULES = frozenset({
-    "workspace.skills.legal_summarizer.scripts.fingerprint",
+_FORBIDDEN_MODULES = frozenset({
+    "workspace.skills.legal_summarizer.scripts.document_cleanup",
     "workspace.skills.legal_summarizer.scripts.reducer_strategy",
     "workspace.skills.legal_summarizer.scripts.document_cache",
-    "workspace.skills.legal_summarizer.scripts.document_cleanup",
+    "workspace.skills.legal_summarizer.scripts.packing",
+    "workspace.skills.legal_summarizer.scripts.packing_impl",
+    "workspace.skills.legal_summarizer.scripts.packing_models",
+    "workspace.skills.legal_summarizer.scripts.token_budget",
     "workspace.skills.legal_summarizer.scripts.structure.sections",
     "workspace.skills.legal_summarizer.scripts.structure.tree",
     "workspace.skills.legal_summarizer.scripts.structure.compatibility",
     "workspace.skills.legal_summarizer.scripts.brief_strategy",
     "workspace.skills.legal_summarizer.scripts.brief_representation",
-    "workspace.skills.legal_summarizer.scripts.packing",
-    "workspace.skills.legal_summarizer.scripts.packing_impl",
-    "workspace.skills.legal_summarizer.scripts.packing_models",
-    "workspace.skills.legal_summarizer.scripts.token_budget",
+    "workspace.skills.legal_summarizer.scripts.document_stats",
+    "workspace.skills.legal_summarizer.scripts.fingerprint",
 })
 
-_LEGACY_SYMBOLS = frozenset({
+_FORBIDDEN_SYMBOLS = frozenset({
     "SectionTree",
     "DocumentSection",
     "StructureAwareChunker",
@@ -39,9 +55,10 @@ _LEGACY_SYMBOLS = frozenset({
     "count_meaningful_sections",
     "should_use_hierarchical_reduce",
     "select_reduce_strategy",
-    "load_physical_document",
     "section_tree_from_structure",
     "structure_from_section_tree",
+    "reduce_strategy_for_legacy",
+    "execution_strategy_for_legacy",
 })
 
 _CANONICAL_PRODUCTION = frozenset({
@@ -59,26 +76,11 @@ def _iter_python_files(root: pathlib.Path) -> list[pathlib.Path]:
     ]
 
 
-def _module_to_path(mod_name: str, root: pathlib.Path) -> pathlib.Path | None:
-    parts = mod_name.split(".")
-    path = root.joinpath(*parts).with_suffix(".py")
-    if path.is_file():
-        return path
-    init = root.joinpath(*parts, "__init__.py")
-    if init.is_file():
-        return init
-    return None
-
-
 def audit_legacy_in_module(
     py_file: pathlib.Path,
     project_root: pathlib.Path,
 ) -> dict[str, list[str]]:
-    """Найти legacy references в одном .py файле (через AST).
-
-    Returns:
-        dict: ``{module_or_symbol: [hit_description, ...]}``.
-    """
+    """Найти legacy references в одном .py файле (через AST)."""
     try:
         source = py_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -93,24 +95,24 @@ def audit_legacy_in_module(
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            if node.module in _LEGACY_MODULES:
+            if node.module in _FORBIDDEN_MODULES:
                 for n in node.names:
                     hits[node.module].append(
                         f"{rel}:{node.lineno} from {node.module} import {n.name}",
                     )
         elif isinstance(node, ast.Import):
             for n in node.names:
-                if n.name in _LEGACY_MODULES:
+                if n.name in _FORBIDDEN_MODULES:
                     hits[n.name].append(
                         f"{rel}:{node.lineno} import {n.name}",
                     )
         elif isinstance(node, ast.Name):
-            if node.id in _LEGACY_SYMBOLS:
+            if node.id in _FORBIDDEN_SYMBOLS:
                 hits[node.id].append(
                     f"{rel}:{node.lineno} name: {node.id}",
                 )
         elif isinstance(node, ast.Attribute):
-            if node.attr in _LEGACY_SYMBOLS:
+            if node.attr in _FORBIDDEN_SYMBOLS:
                 hits[node.attr].append(
                     f"{rel}:{node.lineno} attr: .{node.attr}",
                 )
@@ -137,6 +139,34 @@ def audit() -> dict[str, list[str]]:
 
 def _is_production_file(rel: str) -> bool:
     return "/tests/" not in f"/{rel}" and "/test_" not in rel
+
+
+def assert_no_legacy() -> None:
+    """Поднять AssertionError если production содержит legacy hits.
+
+    Returns:
+        None если всё чисто.
+
+    Raises:
+        AssertionError: список production hits.
+    """
+    hits = audit()
+    production_hits: dict[str, list[str]] = {}
+    for k, locations in hits.items():
+        for loc in locations:
+            rel = loc.split(":", 1)[0]
+            if _is_production_file(rel):
+                production_hits.setdefault(k, []).append(loc)
+
+    if production_hits:
+        details = "\n".join(
+            f"  {k}: {len(v)} refs\n    " + "\n    ".join(v[:3])
+            for k, v in sorted(production_hits.items())
+        )
+        raise AssertionError(
+            f"Found {sum(len(v) for v in production_hits.values())} "
+            f"production legacy references:\n{details}"
+        )
 
 
 def main() -> None:
@@ -179,5 +209,8 @@ def main() -> None:
             print(f"\n{k}: {len(test_hits[k])} references")
 
 
-if __name__ == "__main__":
-    main()
+__all__ = [
+    "audit",
+    "audit_legacy_in_module",
+    "assert_no_legacy",
+]
