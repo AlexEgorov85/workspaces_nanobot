@@ -1,15 +1,27 @@
-"""Semantic context expansion (PLAN §37, Этап 37).
+"""Semantic context expansion (PLAN §10).
 
-Для выбранного chunk'а вернуть расширенный контекст:
+Для выбранного chunk'а вернуть расширенный контекст через поиск
+**neighbours по target index** (PLAN §10):
 
-* target chunk;
-* same subsection (если есть);
-* parent heading;
-* neighbour blocks (не более ``max_neighbour_blocks``);
-* same section metadata.
+    target
+    ↓
+    immediate previous chunk
+    immediate next chunk
+    ↓
+    same subsection restriction
+    ↓
+    parent heading
+    ↓
+    token budget
 
-Не расширять безлимитно. Ввести ``max_context_tokens`` через
-единый ``TokenEstimator``.
+**Не** выбирать «все chunks той же section → первые N».
+Семантика — **target_idx ± k** (adjacent neighbours), а не
+section-prefix.
+
+Token accounting:
+
+* ``used_tokens`` обновляется **после каждого** добавленного neighbour;
+* ``total_tokens == tokens(target) + sum(tokens(neighbours))``.
 
 Использует ``DocumentStructure`` (не ``SectionTree``) — это новый
 canonical путь (PLAN §18, §45).
@@ -30,7 +42,18 @@ from workspace.skills.legal_summarizer.scripts.structure.token_estimator import 
 
 @dataclass(frozen=True)
 class ContextExpansionConfig:
-    """Параметры context expansion."""
+    """Параметры context expansion.
+
+    Attributes:
+        max_neighbour_blocks: максимум neighbours (default 2 — один
+            слева, один справа).
+        max_context_tokens: token budget для neighbours (не считая
+            target).
+        include_same_subsection: если ``True``, neighbours только из
+            того же section_id, что и target (для skip через sections).
+        include_parent_heading: если ``True``, добавить parent heading
+            в ``parent_heading`` поля ``ExpandedContext``.
+    """
 
     max_neighbour_blocks: int = 2
     max_context_tokens: int = 4000
@@ -50,16 +73,22 @@ class ExpandedContext:
     truncated: bool = False
 
 
-def _section_for_chunk(chunk: Chunk, struct: DocumentStructure) -> str:
+def _section_for_chunk(chunk: Chunk) -> str:
     return chunk.section_id or ""
 
 
-def _is_within_subsection(
-    chunk_a: Chunk,
-    chunk_b: Chunk,
-    struct: DocumentStructure,
+def _can_use_neighbour(
+    candidate: Chunk,
+    target: Chunk,
+    cfg: ContextExpansionConfig,
 ) -> bool:
-    return chunk_a.section_id == chunk_b.section_id and bool(chunk_a.section_id)
+    """Можно ли использовать ``candidate`` как neighbour для ``target``.
+
+    Если ``include_same_subsection`` — только из той же секции.
+    """
+    if not cfg.include_same_subsection:
+        return True
+    return _section_for_chunk(candidate) == _section_for_chunk(target)
 
 
 def expand_context(
@@ -72,13 +101,25 @@ def expand_context(
 ) -> ExpandedContext:
     """Расширить контекст для ``target``.
 
-    Использует ``DocumentStructure`` как SoT (PLAN §45) — не делает
-    linear lookup через blocks.
+    Алгоритм (PLAN §10):
+
+    1. ``target_idx = index of target in sorted(chunks)``;
+    2. Поочерёдно проверяем ``target_idx - 1``, ``target_idx + 1``,
+       ``target_idx - 2``, ``target_idx + 2``, ... ;
+    3. Если neighbour проходит subsection check и budget check —
+       добавляем; иначе skip и пробуем следующий;
+    4. После каждого добавления пересчитываем ``used_tokens``;
+    5. Останавливаемся при ``max_neighbour_blocks`` или
+       ``max_context_tokens``.
+
+    Returns:
+        ``ExpandedContext`` с ``total_tokens ==
+        tokens(target) + sum(tokens(neighbours))``.
     """
     cfg = config or ContextExpansionConfig()
     est = estimator or TokenEstimator(TokenEstimatorConfig())
 
-    section_id = _section_for_chunk(target, struct)
+    section_id = _section_for_chunk(target)
     section = struct.nodes.get(section_id) if section_id else None
     section_title = section.title if section else ""
 
@@ -94,34 +135,49 @@ def expand_context(
     if target_idx < 0:
         return ExpandedContext(
             target_chunk=target, neighbour_chunks=(),
-            parent_heading=parent_heading, section_title=section_title,
+            parent_heading=parent_heading if cfg.include_parent_heading else "",
+            section_title=section_title,
             total_tokens=est.estimate(target.text),
         )
-
-    neighbours: list[Chunk] = []
-    if cfg.include_same_subsection and section_id:
-        for c in sorted_chunks:
-            if c.chunk_id == target.chunk_id:
-                continue
-            if _is_within_subsection(target, c, struct):
-                neighbours.append(c)
-
-    target_tokens = est.estimate(target.text)
-    remaining = max(0, cfg.max_context_tokens - target_tokens)
 
     chosen_neighbours: list[Chunk] = []
     used_tokens = 0
     truncated = False
-    for n in neighbours:
-        n_tokens = est.estimate(n.text)
-        if used_tokens + n_tokens > remaining:
-            truncated = True
-            break
-        chosen_neighbours.append(n)
-        used_tokens += n_tokens
 
-    if len(chosen_neighbours) > cfg.max_neighbour_blocks:
-        chosen_neighbours = chosen_neighbours[: cfg.max_neighbour_blocks]
+    target_tokens = est.estimate(target.text)
+
+    left = target_idx - 1
+    right = target_idx + 1
+    take_left = True
+    while (
+        len(chosen_neighbours) < cfg.max_neighbour_blocks
+        and (left >= 0 or right < len(sorted_chunks))
+    ):
+        candidate: Chunk | None = None
+        if take_left and left >= 0:
+            candidate = sorted_chunks[left]
+            left -= 1
+        elif not take_left and right < len(sorted_chunks):
+            candidate = sorted_chunks[right]
+            right += 1
+        elif left >= 0:
+            candidate = sorted_chunks[left]
+            left -= 1
+        elif right < len(sorted_chunks):
+            candidate = sorted_chunks[right]
+            right += 1
+        else:
+            break
+        take_left = not take_left
+
+        if _can_use_neighbour(candidate, target, cfg):
+            cand_tokens = est.estimate(candidate.text)
+            if used_tokens + cand_tokens <= cfg.max_context_tokens:
+                chosen_neighbours.append(candidate)
+                used_tokens += cand_tokens
+            else:
+                truncated = True
+                break
 
     return ExpandedContext(
         target_chunk=target,

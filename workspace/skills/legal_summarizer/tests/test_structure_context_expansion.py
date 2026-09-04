@@ -1,4 +1,4 @@
-"""Тесты для context expansion (Этап 37 из PLAN.md)."""
+"""Тесты для context expansion (PLAN §10)."""
 
 from __future__ import annotations
 
@@ -123,3 +123,90 @@ def test_expand_context_target_not_found():
     result = expand_context(fake_target, chunks, struct)
     assert result.target_chunk == fake_target
     assert result.neighbour_chunks == ()
+
+
+def test_expand_context_neighbours_by_target_index_not_section_prefix():
+    """PLAN §10 acceptance: для A B C D E, target=C → neighbours = B, D.
+
+    НЕ A, B (первые N из секции), а строго ±k от target.
+    """
+    chunks = tuple(
+        _c(f"{i}", "n_0001", text=f"chunk {i}", idx=i) for i in range(5)
+    )
+    struct = _struct()
+    target = chunks[2]
+    result = expand_context(target, chunks, struct)
+    nids = [c.chunk_id for c in result.neighbour_chunks]
+    assert nids == ["1", "3"], f"expected ['1', '3'], got {nids}"
+
+
+def test_expand_context_target_at_left_edge():
+    """target = первый chunk → только правые neighbours (max_neighbour_blocks=1)."""
+    chunks = tuple(
+        _c(f"{i}", "n_0001", text=f"chunk {i}", idx=i) for i in range(5)
+    )
+    struct = _struct()
+    target = chunks[0]
+    cfg = ContextExpansionConfig(max_neighbour_blocks=1)
+    result = expand_context(target, chunks, struct, config=cfg)
+    nids = [c.chunk_id for c in result.neighbour_chunks]
+    assert nids == ["1"]
+
+
+def test_expand_context_target_at_right_edge():
+    """target = последний chunk → только левые neighbours (max_neighbour_blocks=1)."""
+    chunks = tuple(
+        _c(f"{i}", "n_0001", text=f"chunk {i}", idx=i) for i in range(5)
+    )
+    struct = _struct()
+    target = chunks[4]
+    cfg = ContextExpansionConfig(max_neighbour_blocks=1)
+    result = expand_context(target, chunks, struct, config=cfg)
+    nids = [c.chunk_id for c in result.neighbour_chunks]
+    assert nids == ["3"]
+
+
+def test_expand_context_skip_other_section():
+    """PLAN §10: subsection restriction — neighbours из другой секции
+    не используются.
+    """
+    chunks = (
+        _c("0", "n_0001", text="A", idx=0),
+        _c("1", "n_0001", text="B", idx=1),
+        _c("2", "n_0002", text="C", idx=2),
+        _c("3", "n_0001", text="D", idx=3),
+    )
+    struct = _struct()
+    target = chunks[1]
+    result = expand_context(target, chunks, struct)
+    nids = [c.chunk_id for c in result.neighbour_chunks]
+    assert "0" in nids
+    assert "2" not in nids
+    assert "3" in nids or len(nids) < 2
+
+
+def test_expand_context_total_tokens_equals_sum():
+    """PLAN §10: total_tokens = tokens(target) + sum(tokens(neighbours))."""
+    chunks = tuple(
+        _c(f"{i}", "n_0001", text=f"x" * 100, idx=i) for i in range(5)
+    )
+    struct = _struct()
+    target = chunks[2]
+    estimator = TokenEstimator(TokenEstimatorConfig(chars_per_token=3.5))
+    result = expand_context(target, chunks, struct, estimator=estimator)
+    expected = estimator.estimate(target.text)
+    for n in result.neighbour_chunks:
+        expected += estimator.estimate(n.text)
+    assert result.total_tokens == expected
+
+
+def test_expand_context_max_neighbour_blocks_respected():
+    """PLAN §10: max_neighbour_blocks ограничивает количество."""
+    chunks = tuple(
+        _c(f"{i}", "n_0001", text="x", idx=i) for i in range(10)
+    )
+    struct = _struct()
+    target = chunks[5]
+    cfg = ContextExpansionConfig(max_neighbour_blocks=3)
+    result = expand_context(target, chunks, struct, config=cfg)
+    assert len(result.neighbour_chunks) <= 3
