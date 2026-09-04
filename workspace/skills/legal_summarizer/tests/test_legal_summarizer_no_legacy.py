@@ -42,7 +42,6 @@ _LEGACY_SYMBOLS = frozenset({
     "count_meaningful_sections",
     "should_use_hierarchical_reduce",
     "select_reduce_strategy",
-    "_hierarchical_reduce_rounds",
     "load_physical_document",
     "section_tree_from_structure",
     "structure_from_section_tree",
