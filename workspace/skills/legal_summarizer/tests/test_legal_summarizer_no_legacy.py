@@ -121,6 +121,15 @@ def test_canonical_pipeline_has_no_legacy_imports():
         )
 
 
+def test_legacy_audit_assert_no_legacy():
+    """Regression guard §35: production не должен содержать legacy hits."""
+    from workspace.skills.legal_summarizer.scripts.legacy_audit import (
+        assert_no_legacy,
+    )
+
+    assert_no_legacy()
+
+
 def test_compatibility_adapter_removed():
     """compatibility.py полностью удалён (Этап 20)."""
     try:
@@ -132,13 +141,72 @@ def test_compatibility_adapter_removed():
     raise AssertionError("compatibility.py should be removed (Этап 20)")
 
 
-def test_legacy_reducer_strategy_still_present():
-    """Legacy ``reducer_strategy`` — deprecated shim (Этап 8).
+def test_legacy_reducer_strategy_removed():
+    """Legacy ``reducer_strategy`` удалён (Этап 49 — финальный cleanup)."""
+    try:
+        from workspace.skills.legal_summarizer.scripts import (
+            reducer_strategy,
+        )
+    except ImportError:
+        return
+    raise AssertionError(
+        "reducer_strategy should be removed (Этап 49 — финальный cleanup)"
+    )
 
-    ``reducer.py``, ``reducer_impl.py``, ``reducer_models.py`` уже
-    удалены (Этап 9).
-    """
-    from workspace.skills.legal_summarizer.scripts import reducer_strategy
 
-    assert reducer_strategy is not None
-    assert reducer_strategy is not None
+def test_legacy_token_budget_removed():
+    """Legacy ``token_budget`` удалён."""
+    try:
+        from workspace.skills.legal_summarizer.scripts import token_budget
+    except ImportError:
+        return
+    raise AssertionError("token_budget should be removed")
+
+
+def test_legacy_brief_strategy_removed():
+    """Legacy ``brief_strategy`` удалён (canonical replacement — importance_brief)."""
+    try:
+        from workspace.skills.legal_summarizer.scripts import brief_strategy
+    except ImportError:
+        return
+    raise AssertionError("brief_strategy should be removed")
+
+
+def test_legacy_document_cache_removed():
+    """Legacy ``document_cache`` удалён (canonical replacement — DocumentIdentity)."""
+    try:
+        from workspace.skills.legal_summarizer.scripts import document_cache
+    except ImportError:
+        return
+    raise AssertionError("document_cache should be removed")
+
+
+def test_legacy_fingerprint_removed():
+    """Legacy ``fingerprint`` удалён (canonical replacement — DocumentIdentity.fingerprint)."""
+    try:
+        from workspace.skills.legal_summarizer.scripts import fingerprint
+    except ImportError:
+        return
+    raise AssertionError("fingerprint should be removed")
+
+
+def test_legacy_structure_sections_removed():
+    """Legacy ``structure.sections`` удалён (canonical replacement — DocumentStructure)."""
+    try:
+        from workspace.skills.legal_summarizer.scripts.structure import (
+            sections,
+        )
+    except ImportError:
+        return
+    raise AssertionError("structure.sections should be removed")
+
+
+def test_legacy_structure_tree_removed():
+    """Legacy ``structure.tree`` удалён (canonical replacement — DocumentStructure)."""
+    try:
+        from workspace.skills.legal_summarizer.scripts.structure import (
+            tree,
+        )
+    except ImportError:
+        return
+    raise AssertionError("structure.tree should be removed")

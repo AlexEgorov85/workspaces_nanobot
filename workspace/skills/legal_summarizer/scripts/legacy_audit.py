@@ -30,19 +30,12 @@ from collections import defaultdict
 
 _FORBIDDEN_MODULES = frozenset({
     "workspace.skills.legal_summarizer.scripts.document_cleanup",
-    "workspace.skills.legal_summarizer.scripts.reducer_strategy",
-    "workspace.skills.legal_summarizer.scripts.document_cache",
     "workspace.skills.legal_summarizer.scripts.packing",
     "workspace.skills.legal_summarizer.scripts.packing_impl",
     "workspace.skills.legal_summarizer.scripts.packing_models",
-    "workspace.skills.legal_summarizer.scripts.token_budget",
-    "workspace.skills.legal_summarizer.scripts.structure.sections",
-    "workspace.skills.legal_summarizer.scripts.structure.tree",
     "workspace.skills.legal_summarizer.scripts.structure.compatibility",
-    "workspace.skills.legal_summarizer.scripts.brief_strategy",
     "workspace.skills.legal_summarizer.scripts.brief_representation",
     "workspace.skills.legal_summarizer.scripts.document_stats",
-    "workspace.skills.legal_summarizer.scripts.fingerprint",
 })
 
 _FORBIDDEN_SYMBOLS = frozenset({
