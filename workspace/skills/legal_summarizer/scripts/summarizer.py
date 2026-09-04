@@ -1377,12 +1377,16 @@ def run(
         chunks=len(chunks),
     )
     _budget_for_reduce = _build_token_budget(globals()["get_chunking_config"]())
-    _reduce_strategy = select_reduce_strategy(
-        _stats_for_reduce,
-        reduce_budget_tokens=_budget_for_reduce.available_chunk_tokens,
-        min_sections_for_hierarchical=reduce_cfg.reduce_strategy_min_sections,
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        reduce_strategy_for_legacy,
     )
-    hierarchical = _reduce_strategy.value == "hierarchical"
+    _reduce_strategy_value = reduce_strategy_for_legacy(
+        estimated_tokens=int(_stats_for_reduce.estimated_tokens),
+        sections=int(_stats_for_reduce.sections),
+        reduce_budget_tokens=int(_budget_for_reduce.available_chunk_tokens),
+        min_sections_for_hierarchical=int(reduce_cfg.reduce_strategy_min_sections),
+    )
+    hierarchical = _reduce_strategy_value == "hierarchical"
     section_summaries_out: dict[str, str] = {}
     section_reduce_calls = 0
     section_trim_calls = 0

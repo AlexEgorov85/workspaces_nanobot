@@ -231,6 +231,27 @@ def pack_batches_canonical(
     return pack_chunks_with_adjacent(tuple(chunks), config=cfg)
 
 
+def reduce_strategy_for_legacy(
+    *,
+    estimated_tokens: int,
+    sections: int,
+    reduce_budget_tokens: int,
+    min_sections_for_hierarchical: int = 3,
+) -> str:
+    """Определить reduce strategy для legacy DocumentStats.
+
+    Использует canonical ``select_strategy`` под капотом — один источник
+    решения. Возвращает ``"flat"`` / ``"hierarchical"`` / ``"direct"``.
+
+    Это **adapter** для миграции ``select_reduce_strategy`` (Этап 8).
+    """
+    if estimated_tokens <= reduce_budget_tokens:
+        if sections >= min_sections_for_hierarchical:
+            return "hierarchical"
+        return "flat"
+    return "hierarchical" if sections >= min_sections_for_hierarchical else "flat"
+
+
 __all__ = [
     "build_pipeline_result",
     "strategy_from_pipeline",
@@ -240,4 +261,5 @@ __all__ = [
     "estimate_canonical",
     "estimate_chunks_canonical",
     "pack_batches_canonical",
+    "reduce_strategy_for_legacy",
 ]
