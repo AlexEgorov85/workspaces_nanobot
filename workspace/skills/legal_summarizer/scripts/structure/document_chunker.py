@@ -71,6 +71,11 @@ def build_block_ownership(
     **самому глубокому** section, чей диапазон его содержит. Это даёт
     ровно одного owner на block (или ноль, если block не покрыт ни одним
     section — такие blocks принадлежат root preamble).
+
+    Returns:
+        ``dict[block_ordinal, owning_section_node_id]``.
+        Blocks вне section ranges отсутствуют в dict (см.
+        ``owner_for_block`` для fallback на root).
     """
     candidates = [n for n in struct.nodes.values() if n.node_type == "section"]
     candidates.sort(key=lambda n: _depth_of(n.node_id, struct), reverse=True)
@@ -80,6 +85,32 @@ def build_block_ownership(
         for b in range(node.start_block, node.end_block + 1):
             owner.setdefault(b, node.node_id)
     return owner
+
+
+def owner_for_block(
+    struct: DocumentStructure,
+    ordinal: int,
+    ownership: dict[int, str] | None = None,
+) -> str | None:
+    """Получить owner для block ``ordinal``.
+
+    Returns:
+        - ``owning_section_node_id`` если block принадлежит section;
+        - ``struct.root_id`` если block не принадлежит ни одной section
+          (preamble / orphan block);
+        - ``None`` если ``ordinal`` вне диапазона документа.
+
+    Args:
+        struct: ``DocumentStructure``.
+        ordinal: ``DocumentBlock.ordinal``.
+        ownership: предвычисленная ``build_block_ownership(struct)``.
+            Если ``None`` — будет построена на лету (детерминированно).
+    """
+    if ordinal < 0 or ordinal >= struct.total_blocks:
+        return None
+    if ownership is None:
+        ownership = build_block_ownership(struct)
+    return ownership.get(ordinal, struct.root_id)
 
 
 def chunk_from_structure(
@@ -257,6 +288,7 @@ __all__ = [
     "ChunkPlanner",
     "chunk_from_structure",
     "build_block_ownership",
+    "owner_for_block",
 ]
 
 

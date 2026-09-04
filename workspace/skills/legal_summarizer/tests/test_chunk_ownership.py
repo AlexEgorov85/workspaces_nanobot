@@ -104,3 +104,93 @@ def test_block_ownership_for_root_only():
     struct = build_document_structure([], total_blocks=5)
     ownership = build_block_ownership(struct)
     assert len(ownership) == 0
+
+
+def test_owner_for_block_returns_deepest_section():
+    """owner_for_block возвращает deepest section для nested case."""
+    from workspace.skills.legal_summarizer.scripts.structure.document_chunker import (
+        owner_for_block,
+    )
+
+    cs = [
+        _hc(0, "Глава 1", source="regex_glзава"),
+        _hc(2, "Статья 1", source="regex_statiya"),
+    ]
+    struct = build_document_structure(cs, total_blocks=5)
+    ownership = build_block_ownership(struct)
+    sections = struct.iter_sections()
+    chapter = next(s for s in sections if "Глава" in s.title)
+    article = next(s for s in sections if "Статья" in s.title)
+    assert owner_for_block(struct, 0, ownership) == chapter.node_id
+    assert owner_for_block(struct, 2, ownership) == article.node_id
+
+
+def test_owner_for_block_returns_root_for_uncovered_block():
+    """Block вне section ranges → root_id (PLAN §6 acceptance)."""
+    from workspace.skills.legal_summarizer.scripts.structure.document_chunker import (
+        owner_for_block,
+    )
+    from workspace.skills.legal_summarizer.scripts.structure.models import (
+        DocumentStructure, StructureNode,
+    )
+
+    root = StructureNode(
+        node_id="n_0000", node_type="document", semantic_type=None,
+        level=0, title="", number=None, parent_id=None,
+        children=("n_0001",), start_block=0, end_block=9,
+        confidence=1.0,
+    )
+    sec = StructureNode(
+        node_id="n_0001", node_type="section", semantic_type=None,
+        level=1, title="S", number=None, parent_id="n_0000",
+        children=(), start_block=0, end_block=4,
+        confidence=0.7,
+    )
+    struct = DocumentStructure(
+        document_id="d", title=None,
+        nodes={"n_0000": root, "n_0001": sec},
+        root_id="n_0000", preamble_node_id="n_0000",
+        numbering=(), total_blocks=10,
+    )
+    ownership = build_block_ownership(struct)
+    assert owner_for_block(struct, 7, ownership) == "n_0000"
+    assert owner_for_block(struct, 0, ownership) == "n_0001"
+    assert owner_for_block(struct, 4, ownership) == "n_0001"
+
+
+def test_owner_for_block_returns_none_for_out_of_range():
+    """Block вне total_blocks → None."""
+    from workspace.skills.legal_summarizer.scripts.structure.document_chunker import (
+        owner_for_block,
+    )
+
+    struct = build_document_structure([], total_blocks=5)
+    assert owner_for_block(struct, 5) is None
+    assert owner_for_block(struct, -1) is None
+
+
+def test_owner_for_block_lazy_builds_ownership():
+    """owner_for_block без переданного ownership строит его на лету."""
+    from workspace.skills.legal_summarizer.scripts.structure.document_chunker import (
+        owner_for_block,
+    )
+
+    cs = [_hc(0, "1."), _hc(5, "2.")]
+    struct = build_document_structure(cs, total_blocks=10)
+    assert owner_for_block(struct, 0) is not None
+    assert owner_for_block(struct, 5) is not None
+
+
+def test_block_ownership_zero_or_one_owner_per_block():
+    """PLAN §6 acceptance: каждый block имеет 0 или 1 owner."""
+    cs = [
+        _hc(0, "Глава 1", source="regex_glзава"),
+        _hc(1, "Статья 1", source="regex_statiya"),
+        _hc(2, "Статья 2", source="regex_statiya"),
+        _hc(4, "Глава 2", source="regex_glзава"),
+    ]
+    struct = build_document_structure(cs, total_blocks=6)
+    ownership = build_block_ownership(struct)
+    for b in range(struct.total_blocks):
+        assert b in ownership or b not in ownership
+        assert isinstance(ownership.get(b), (str, type(None)))
