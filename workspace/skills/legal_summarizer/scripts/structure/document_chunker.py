@@ -1,4 +1,4 @@
-"""DocumentStructure-aware chunker (PLAN §18, Этап 18).
+"""DocumentStructure-aware chunker.
 
 Новый chunker, который использует ``DocumentStructure`` как единственный
 источник section info (а не переоткрывает headings заново, как старый
@@ -9,11 +9,14 @@
 * ``DocumentStructure`` — единственный источник section boundaries;
 * tables атомарны (как в старом chunker);
 * chunk boundary предпочитает section boundary;
-* split by rows для oversize tables (с сохранением ``table_id``).
+* split by rows для oversize tables (с сохранением ``table_id``);
+* **каждый physical block имеет ровно одного semantic owner** —
+  самый глубокий section, чей диапазон содержит block. Это решает
+  проблему двойного ownership между parent и child nodes.
 
-Это **не переписывание** старого chunker'а — новый класс, который
-планируется использовать в Этапе 45 (DocumentStructure как SoT для всех).
-Старый ``StructureAwareChunker`` остаётся для back-compat.
+Это **не переписывание** старого chunker'а — новый класс.
+Старый ``StructureAwareChunker`` остаётся для back-compat (но более
+не нужен в production после миграции consumers).
 """
 
 from __future__ import annotations
@@ -49,6 +52,36 @@ def _make_chunk_id(idx: int) -> str:
     return f"{idx:03}"
 
 
+def _depth_of(node_id: str, struct: DocumentStructure) -> int:
+    """Глубина узла (root = 0). Используется для выбора owner."""
+    depth = 0
+    cur = struct.nodes.get(node_id)
+    while cur is not None and cur.parent_id is not None:
+        depth += 1
+        cur = struct.nodes.get(cur.parent_id)
+    return depth
+
+
+def build_block_ownership(
+    struct: DocumentStructure,
+) -> dict[int, str]:
+    """Построить ``block_ordinal -> owning_section_node_id``.
+
+    Каждый block, попадающий в диапазон какого-либо section, принадлежит
+    **самому глубокому** section, чей диапазон его содержит. Это даёт
+    ровно одного owner на block (или ноль, если block не покрыт ни одним
+    section — такие blocks принадлежат root preamble).
+    """
+    candidates = [n for n in struct.nodes.values() if n.node_type == "section"]
+    candidates.sort(key=lambda n: _depth_of(n.node_id, struct), reverse=True)
+
+    owner: dict[int, str] = {}
+    for node in candidates:
+        for b in range(node.start_block, node.end_block + 1):
+            owner.setdefault(b, node.node_id)
+    return owner
+
+
 def chunk_from_structure(
     doc: PhysicalDocument,
     struct: DocumentStructure,
@@ -59,8 +92,8 @@ def chunk_from_structure(
 
     Алгоритм:
 
-    1. Берём root preamble и каждый section node из ``struct``;
-    2. Для каждого section — берём его block_range;
+    1. Строим ``block_ownership``: каждый block → ровно один section;
+    2. Для каждого section — итерируем только **его** blocks;
     3. Каждый block становится частью chunk'а (или своим chunk'ом, если
        достаточно большой);
     4. tables атомарны (не разбиваются между chunks);
@@ -76,6 +109,7 @@ def chunk_from_structure(
     chunk_overlap = cfg.chunk_config.chunk_overlap_chars
 
     by_ord = doc.blocks_by_ord
+    ownership = build_block_ownership(struct)
 
     chunks: list[Chunk] = []
     chunk_index = 0
@@ -149,6 +183,9 @@ def chunk_from_structure(
             if block is None:
                 i += 1
                 continue
+            if ownership.get(i) != section_id:
+                i += 1
+                continue
 
             if block.block_type == "table":
                 table_counter += 1
@@ -219,13 +256,14 @@ __all__ = [
     "DocumentStructureChunkerConfig",
     "ChunkPlanner",
     "chunk_from_structure",
+    "build_block_ownership",
 ]
 
 
 class ChunkPlanner:
-    """PLAN §19 — ChunkPlanner использует ``DocumentStructure`` как SoT.
+    """ChunkPlanner использует ``DocumentStructure`` как SoT.
 
-    Не переопределяет structure (PLAN §18, §45).
+    Не переопределяет structure.
     """
 
     def __init__(self, *, config: DocumentStructureChunkerConfig | None = None) -> None:
