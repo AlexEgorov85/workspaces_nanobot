@@ -183,10 +183,29 @@ def inspect_canonical(
     )
 
 
+def estimate_canonical(document_path: str | Path) -> dict[str, Any]:
+    """Canonical оценка документа без полного parsing.
+
+    Возвращает dict с chars_in, estimated_llm_calls, strategy. Не
+    вызывает LLM, не делает map/reduce — только inspection.
+    """
+    insp = inspect_canonical(
+        text="",
+        document_path=document_path,
+    )
+    return {
+        "chars_in": insp.chars_in,
+        "estimated_llm_calls": insp.estimated_llm_calls,
+        "strategy": insp.strategy,
+        "chunks_count": len(insp.chunks),
+    }
+
+
 __all__ = [
     "build_pipeline_result",
     "strategy_from_pipeline",
     "build_plan_from_pipeline",
     "CanonicalInspection",
     "inspect_canonical",
+    "estimate_canonical",
 ]

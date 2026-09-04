@@ -92,3 +92,17 @@ def test_inspect_canonical_requires_document_path(tmp_path: Path):
     except ValueError:
         return
     raise AssertionError("expected ValueError")
+
+
+def test_estimate_canonical_returns_dict(tmp_path: Path):
+    """estimate_canonical даёт dict без LLM-вызовов."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        estimate_canonical,
+    )
+
+    p = _write_doc(tmp_path, "doc.txt", "Some text.\n\nMore text.")
+    est = estimate_canonical(p)
+    assert "chars_in" in est
+    assert "estimated_llm_calls" in est
+    assert "strategy" in est
+    assert est["strategy"] in ("direct", "map_flat", "map_hierarchical")
