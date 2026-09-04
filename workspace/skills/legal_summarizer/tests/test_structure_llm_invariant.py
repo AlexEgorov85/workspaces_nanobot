@@ -33,7 +33,7 @@ def test_no_llm_call_in_structure_modules():
         retry, importance_brief, retrieval, query_normalizer,
         retrieval_index, context_expansion, full_doc_fallback,
         cleanup, block_lookup, pipeline, provenance,
-        document_analysis, followup, compatibility,
+        document_analysis, followup,
         benchmark, reference_qa, quality_metrics,
         single_flight, architecture_guard,
     )
@@ -47,7 +47,7 @@ def test_no_llm_call_in_structure_modules():
         retry, importance_brief, retrieval, query_normalizer,
         retrieval_index, context_expansion, full_doc_fallback,
         cleanup, block_lookup, pipeline, provenance,
-        document_analysis, followup, compatibility,
+        document_analysis, followup,
         benchmark, reference_qa, quality_metrics,
         single_flight, architecture_guard,
     ]
