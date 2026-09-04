@@ -12,15 +12,14 @@ pipeline (``run_canonical_pipeline`` → ``DocumentAnalysis`` →
 
 * ``build_pipeline_result`` — обёртка над ``run_canonical_pipeline``,
   возвращающая ``PipelineResult`` с логированием прогресса;
-* ``strategy_from_pipeline`` — определить ExecutionPolicy по
-  ``PipelineResult`` (DIRECT / MAP_FLAT / MAP_HIERARCHICAL).
+* ``strategy_from_pipeline`` — определить стратегию выполнения по
+  ``PipelineResult`` ("direct" / "map_flat" / "map_hierarchical").
 """
 
 from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
 
 from workspace.skills.legal_summarizer.scripts.structure.pipeline import (
     PipelineResult,
@@ -56,26 +55,35 @@ def build_pipeline_result(
     return result
 
 
-def strategy_from_pipeline(result: PipelineResult) -> ExecutionPolicy:
+def strategy_from_pipeline(
+    result: PipelineResult,
+    *,
+    policy: ExecutionPolicy | None = None,
+) -> str:
     """Определить стратегию выполнения по ``PipelineResult``.
 
     Использует canonical ``select_strategy`` (один источник решения).
+    Возвращает ``"direct"`` / ``"map_flat"`` / ``"map_hierarchical"``.
     """
-    return select_strategy(result.analysis.structure)
+    return select_strategy(
+        result.analysis.structure,
+        result.chunks,
+        policy=policy,
+    )
 
 
 def build_plan_from_pipeline(
     result: PipelineResult,
     *,
-    estimator=None,
-) -> Any:
-    """Построить ``ExecutionPlan`` из ``PipelineResult``.
-
-    Возвращает план, готовый к выполнению через ``unified_execution``.
-    """
+    document_id: str,
+    policy: ExecutionPolicy | None = None,
+):
+    """Построить ``ExecutionPlan`` из ``PipelineResult``."""
     return build_execution_plan(
         result.analysis.structure,
-        estimator=estimator,
+        result.chunks,
+        document_id=document_id,
+        policy=policy,
     )
 
 
