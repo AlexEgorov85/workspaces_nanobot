@@ -1,6 +1,6 @@
 """DocumentLoader — single-pass canonical loader для legal_summarizer.
 
-Создаёт ``PhysicalDocument`` за **один проход** по файлу (PLAN §4, §10).
+Создаёт ``PhysicalDocument`` за **один проход** по файлу (PLAN §12).
 
 Сравнение с ``load_physical_document`` из ``physical.py``:
 
@@ -11,6 +11,10 @@
 * ``DocumentLoader`` собирает всё **за один проход** через ``PdfReader``
   (текст и outline через ``reader.outline``) и таблицы читаются
   **лениво** из ``PdfReader`` pages, когда они нужны downstream.
+
+**PLAN §12:** single canonical loading path. DocumentLoader.load()
+делает **один** проход для blocks, и оттуда же извлекает text для
+title resolution. Никакого двойного парсинга PDF/DOCX.
 
 Низкоуровневые дополнительные доступы (например, ``docx.Document`` для
 title) допустимы **только** когда они дают информацию, недоступную
@@ -25,10 +29,8 @@ Back-compat: ``load_physical_document`` оставлен и продолжает
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from workspace.skills.legal_summarizer.scripts.structure.physical import (
-    DocumentBlock,
     PhysicalDocument,
     SUPPORTED_FORMATS,
     _iter_docx_blocks,
@@ -40,7 +42,12 @@ from workspace.utils.office_files import detect_format
 
 
 class DocumentLoader:
-    """Canonical loader для ``PhysicalDocument`` (PLAN §4, §10).
+    """Canonical loader для ``PhysicalDocument`` (PLAN §4, §10, §12).
+
+    Single-pass loading: ``_iter_*_blocks`` парсит файл один раз,
+    и тот же blocks-iteration даёт текст для title resolution
+    (через ``_pick_title_from_text``). Никакого второго вызова
+    ``extract_text`` или повторного открытия файла.
 
     Usage::
 
@@ -64,10 +71,6 @@ class DocumentLoader:
                 f"Поддерживаются: {sorted(SUPPORTED_FORMATS)}"
             )
 
-        text = self._extract_full_text(p, fmt)
-        title = _pick_title_from_text(fmt, text, p)
-        size_bytes = p.stat().st_size
-
         if fmt == "pdf":
             blocks, page_count = _iter_pdf_blocks(p)
         elif fmt == "docx":
@@ -77,6 +80,10 @@ class DocumentLoader:
         else:
             raise ValueError(f"Unsupported format: {fmt}")
 
+        text = "\n\n".join(b.content for b in blocks)
+        title = _pick_title_from_text(fmt, text, p)
+        size_bytes = p.stat().st_size
+
         return PhysicalDocument(
             path=str(p.resolve()),
             format=fmt,
@@ -85,21 +92,6 @@ class DocumentLoader:
             blocks=tuple(blocks),
             page_count=page_count,
         )
-
-    @staticmethod
-    def _extract_full_text(path: Path, fmt: str) -> str:
-        """Единый вход в ``extract_text``.
-
-        Сейчас для всех форматов делегируем в ``office_files.extract_text``
-        (PLAN §4 — single source of text). Это позволяет будущим вызовам
-        (PDF outline mapping, DOCX title hint) видеть **один и тот же**
-        текст, что и downstream chunker.
-        """
-        from workspace.utils.office_files import extract_text
-        try:
-            return extract_text(path)
-        except Exception:
-            return ""
 
 
 __all__ = ["DocumentLoader"]
