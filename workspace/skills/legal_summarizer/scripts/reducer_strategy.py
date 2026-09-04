@@ -10,11 +10,20 @@
 Этот модуль оставлен только для обратной совместимости и удалится в
 Этапе 9, когда ``reducer.py`` и ``reducer_impl.py`` будут
 переведены на canonical ``HierarchicalReducer``.
+
+``ReduceStrategy`` enum deprecated; canonical использует строки
+``"flat"`` / ``"hierarchical"``.
 """
 
-from workspace.skills.legal_summarizer.scripts.reducer_models import (
-    ReduceStrategy,
-)
+from enum import Enum
+
+
+class ReduceStrategy(Enum):
+    """Deprecated enum (Этап 8). Canonical использует строки."""
+
+    FLAT = "flat"
+    HIERARCHICAL = "hierarchical"
+
 
 __all__ = [
     "ReduceStrategy",

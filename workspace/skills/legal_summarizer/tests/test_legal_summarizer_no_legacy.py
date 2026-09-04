@@ -14,10 +14,7 @@ import ast
 
 _LEGACY_MODULES = frozenset({
     "workspace.skills.legal_summarizer.scripts.fingerprint",
-    "workspace.skills.legal_summarizer.scripts.reducer",
-    "workspace.skills.legal_summarizer.scripts.reducer_impl",
     "workspace.skills.legal_summarizer.scripts.reducer_strategy",
-    "workspace.skills.legal_summarizer.scripts.reducer_models",
     "workspace.skills.legal_summarizer.scripts.context_expansion",
     "workspace.skills.legal_summarizer.scripts.cached_retrieval",
     "workspace.skills.legal_summarizer.scripts.document_cache",
@@ -137,15 +134,13 @@ def test_compatibility_adapter_removed():
     raise AssertionError("compatibility.py should be removed (Этап 20)")
 
 
-def test_legacy_reducer_modules_still_present():
-    """Legacy reducer_impl/reducer_strategy ещё существуют (миграция в процессе).
+def test_legacy_reducer_strategy_still_present():
+    """Legacy ``reducer_strategy`` — deprecated shim (Этап 8).
 
-    Этот тест — **negative** assertion: показывает текущее состояние.
-    ``reducer.py`` уже удалён.
+    ``reducer.py``, ``reducer_impl.py``, ``reducer_models.py`` уже
+    удалены (Этап 9).
     """
-    from workspace.skills.legal_summarizer.scripts import reducer_impl
     from workspace.skills.legal_summarizer.scripts import reducer_strategy
 
-    assert reducer_impl is not None
     assert reducer_strategy is not None
     assert reducer_strategy is not None

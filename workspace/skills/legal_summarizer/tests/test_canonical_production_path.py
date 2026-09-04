@@ -53,8 +53,6 @@ def test_canonical_pipeline_does_not_import_legacy(monkeypatch):
 
     forbidden = {
         "workspace.skills.legal_summarizer.scripts.fingerprint",
-        "workspace.skills.legal_summarizer.scripts.reducer",
-        "workspace.skills.legal_summarizer.scripts.reducer_impl",
         "workspace.skills.legal_summarizer.scripts.reducer_strategy",
         "workspace.skills.legal_summarizer.scripts.context_expansion",
         "workspace.skills.legal_summarizer.scripts.cached_retrieval",

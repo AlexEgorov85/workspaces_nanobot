@@ -236,20 +236,28 @@ def reduce_strategy_for_legacy(
     estimated_tokens: int,
     sections: int,
     reduce_budget_tokens: int,
-    min_sections_for_hierarchical: int = 3,
+    min_sections_for_hierarchical: int = 2,
 ) -> str:
     """Определить reduce strategy для legacy DocumentStats.
 
     Использует canonical ``select_strategy`` под капотом — один источник
-    решения. Возвращает ``"flat"`` / ``"hierarchical"`` / ``"direct"``.
+    решения. Возвращает ``"flat"`` / ``"hierarchical"``.
+
+    Логика (PLAN §25, mirror legacy select_reduce_strategy):
+
+    * ``estimated_tokens ≤ reduce_budget_tokens`` → ``flat``
+      (помещается в один reduce call).
+    * ``estimated_tokens > reduce_budget_tokens`` AND
+      ``sections ≥ min_sections_for_hierarchical`` → ``hierarchical``.
+    * Иначе → ``flat`` (section_reduce не окупается для малых секций).
 
     Это **adapter** для миграции ``select_reduce_strategy`` (Этап 8).
     """
     if estimated_tokens <= reduce_budget_tokens:
-        if sections >= min_sections_for_hierarchical:
-            return "hierarchical"
         return "flat"
-    return "hierarchical" if sections >= min_sections_for_hierarchical else "flat"
+    if sections < min_sections_for_hierarchical:
+        return "flat"
+    return "hierarchical"
 
 
 def execution_strategy_for_legacy(
