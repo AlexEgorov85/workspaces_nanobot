@@ -904,38 +904,17 @@ def run(
 
 
 # ---------------------------------------------------------------------------
-# Legacy shims (Phase 2 backward compat)
+# Public API (PLAN §13)
 # ---------------------------------------------------------------------------
 
-
-def summarize(
-    text: str,
-    *,
-    length: str = "medium",
-    structure: dict | None = None,
-) -> dict:
-    """Legacy entry point (Phase 2). Используйте ``run()`` напрямую."""
-    warnings.warn(
-        "summarizer.summarize is deprecated; use summarizer.run() instead",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    rd = run(text, length=length, structure=structure)
-    status = rd.get("status")
-    if status == "completed":
-        return {"status": "success", "data": rd.get("result") or {}}
-    if status == "failed":
-        err = rd.get("error") or {}
-        return {
-            "status": "error",
-            "data": {"message": err.get("message", "Unknown"), "code": err.get("code")},
-        }
-    if status == "confirmation_required":
-        return {
-            "status": "partial",
-            "data": {
-                "partial_summary": "confirmation_required",
-                "chunks_in_batch": 0,
-            },
-        }
-    return {"status": "error", "data": {"message": f"Unknown status: {status}"}}
+__all__ = [
+    "run",
+    "inspect",
+    "Inspection",
+    "Estimate",
+    "estimate",
+    "needs_confirmation",
+    "quick_estimate",
+    "make_operation_id",
+    "load_text",
+]
