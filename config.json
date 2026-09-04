@@ -684,7 +684,19 @@
       "pathAppend": "",
       "sandbox": "",
       "allowedEnvKeys": [
-        "DATABASE_URL"
+        "DATABASE_URL",
+        // Кодировка subprocess’ов: без этих переменных Windows вернёт
+        // мусор вместо кириллицы в stdout/stderr Python-подпроцессов
+        // (см. shell.py:706 — минимальный env собирается с нуля).
+        // — PYTHONIOENCODING — UTF-8 для python -c (Python 3.0+)
+        // — PYTHONUTF8 — UTF-8 для sys.stdin/stdout/stderr (Python 3.7+)
+        // — LANG/LC_ALL — locale для подпроцессов (C.UTF-8 спасает Linux)
+        // — TZ — часовой пояс, datetime-операции в подпроцессах
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "LANG",
+        "LC_ALL",
+        "TZ"
       ],
       "allowPatterns": [],
       "denyPatterns": []
