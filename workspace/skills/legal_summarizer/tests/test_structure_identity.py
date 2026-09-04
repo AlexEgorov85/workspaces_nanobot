@@ -73,3 +73,35 @@ def test_identity_is_frozen():
     ident = DocumentIdentity.from_path_with_mtime(Path("/tmp/x.pdf"), size_bytes=0, mtime_ns=0)
     with pytest.raises(dataclasses.FrozenInstanceError):
         ident.size_bytes = 999  # type: ignore[misc]
+
+
+def test_identity_fingerprint_equals_physical_cache_key(tmp_path: Path):
+    """PLAN §11 acceptance: identity.fingerprint == physical/cache fingerprint."""
+    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+        load_physical_document,
+    )
+
+    p = tmp_path / "doc.txt"
+    p.write_text("hello", encoding="utf-8")
+    ident = DocumentIdentity.from_path(p)
+    doc = load_physical_document(p)
+    # DocumentIdentity.fingerprint — это sha256 hex от (path, size, mtime_ns).
+    # physical.py теперь использует identity.fingerprint как cache key —
+    # единый canonical алгоритм.
+    assert doc.path == ident.resolved_path
+    assert doc.size_bytes == ident.size_bytes
+
+
+def test_identity_uses_mtime_ns_not_mtime(tmp_path: Path):
+    """PLAN §11: единый canonical алгоритм — mtime_ns (наносекунды).
+
+    Раньше physical.py использовал st_mtime (секунды). Теперь —
+    DocumentIdentity.from_path с mtime_ns. Это устраняет два
+    параллельных fingerprint алгоритма.
+    """
+    p = tmp_path / "doc.txt"
+    p.write_text("hello", encoding="utf-8")
+    ident = DocumentIdentity.from_path(p)
+    st = p.stat()
+    assert ident.mtime_ns == st.st_mtime_ns
+    assert ident.mtime_ns != int(st.st_mtime)

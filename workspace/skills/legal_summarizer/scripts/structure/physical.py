@@ -30,11 +30,14 @@
   ``heading``, ``section``. Это строго отделено в ``structure/models.py``.
 * ``DocumentBlock.block_type`` (``"page"`` / ``"paragraph"`` / ``"table"``
   / ``"text"``) — это **physical** тип, не семантический.
+
+**PLAN §11:** ``DocumentIdentity`` — единственный owner identity/fingerprint.
+``PhysicalDocument`` **не** придумывает собственный cache key —
+использует ``DocumentIdentity.from_path``.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -45,6 +48,9 @@ from workspace.utils.office_files import (
     extract_tables,
 )
 from workspace.skills.legal_summarizer.scripts.manifest import manifest_root
+from workspace.skills.legal_summarizer.scripts.structure.identity import (
+    DocumentIdentity,
+)
 
 
 SUPPORTED_FORMATS: frozenset[str] = frozenset({"pdf", "docx", "txt"})
@@ -159,10 +165,9 @@ def _physical_cache_root(workspace_root: Path | str | None) -> Path:
     return manifest_root(workspace_root) / "physical"
 
 
-def _physical_cache_key(path: Path) -> str:
-    st = path.stat()
-    raw = f"{path.resolve()}|{st.st_size}|{st.st_mtime}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+def _identity_for(path: Path) -> DocumentIdentity:
+    """``DocumentIdentity`` для ``path`` (PLAN §11 — единственный owner)."""
+    return DocumentIdentity.from_path(path)
 
 
 def _pick_title_from_text(fmt: str, text: str, path: Path) -> str | None:
@@ -469,7 +474,8 @@ def load_physical_document(
         )
 
     cache_dir = _physical_cache_root(workspace_root)
-    cache_file = cache_dir / f"{_physical_cache_key(p)}.json"
+    identity = _identity_for(p)
+    cache_file = cache_dir / f"{identity.fingerprint}.json"
 
     if cache_file.is_file():
         try:
