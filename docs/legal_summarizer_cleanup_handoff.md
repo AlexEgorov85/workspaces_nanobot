@@ -1,7 +1,87 @@
-# Legal Summarizer Cleanup — Handoff
+# Legal Summarizer Cleanup — Handoff (обновлено)
 
-Эта сессия завершила **16/50 этапов PLAN.md**. Документ — handoff для
-следующей сессии.
+## Текущее состояние (после §13 partial + §17)
+
+- **HEAD:** `b70338a refactor(summarizer): §17 — удалить document_cleanup.py`
+- **Branch:** `master` (clean working tree)
+- **Тесты:** **431 passed, 4 skipped, 0 failed**
+- **Legacy файлы удалены:** `document_stats.py`, `brief_representation.py`,
+  `document_cleanup.py`
+- **Legacy adapters удалены:** `reduce_strategy_for_legacy`,
+  `execution_strategy_for_legacy`
+
+### Прогресс: 17/50 этапов плана
+
+| Этап | Статус |
+|---|---|
+| §1-§3 | ✅ |
+| §4. Validation parent-child/sibling | ✅ |
+| §5. Repair one-block survives | ✅ |
+| §6. owner_for_block helper | ✅ |
+| §7. chunk_from_structure по physical order | ✅ |
+| §8. Уникальность table_id | ✅ |
+| §9. adjacent_packing правила | ✅ |
+| §10. context expansion по target_idx | ✅ |
+| §11. DocumentIdentity fingerprint | ✅ |
+| §12. DocumentLoader single-pass | ✅ |
+| **§13. summarizer.py на canonical** | **⚠️ partial** |
+| §14. Удалить legacy adapters | ✅ |
+| §15. Удалить document_stats.py | ✅ |
+| §16. Brief budget в canonical | ✅ |
+| **§17. Удалить document_cleanup.py** | **✅** |
+| §18-§49 | ❌ |
+
+### §13 partial: что сделано
+
+- `inspect()` → `run_canonical_pipeline` (DocumentStructure + ChunkPlanner +
+  ExecutionPlan)
+- `Inspection` dataclass: `tree: SectionTree | None` →
+  `structure: DocumentStructure | None` + `analysis: DocumentAnalysis | None`
+- `cli.py`: обновлён под `insp.structure`
+- `run()` direct strategy → канонический
+- `run()` map_reduce → делегация в `_legacy_run_map_reduce.legacy_run_map_reduce()`
+- `_legacy_run_map_reduce.py` создан (763 строки legacy map_reduce фазы)
+- `summarizer.py` сократился с 1671 → 941 строк
+
+### §13 осталось (для следующей сессии)
+
+1. **Перевести `map_reduce` фазу на canonical**:
+   - `ExecutionPlan.batches` (через `build_execution_plan`) →
+     `DocumentStructure.iter_sections()` → `HierarchicalReducer.reduce_chunks_hierarchical`
+   - Это ~500 строк кода
+2. **Удалить `_legacy_run_map_reduce.py`** (после полного перевода)
+3. **Удалить legacy imports из `summarizer.py`**: `_load_doc_cache`,
+   `_save_doc_cache`, `_resolve_document_id`, `_resolve_session_key`,
+   `_count_tokens`
+
+### Файлы, готовые к удалению (после §13 complete)
+
+```
+scripts/packing.py             # нужен _legacy_run_map_reduce
+scripts/packing_impl.py        # нужен packing.py
+scripts/packing_models.py      # нужен packing.py
+scripts/token_budget.py        # нужен packing.py, _legacy_run_map_reduce
+scripts/document_cache.py      # нужен _legacy_run_map_reduce
+scripts/fingerprint.py         # нужен _legacy_run_map_reduce
+scripts/execution_strategy.py  # уже удалён?
+scripts/reducer_strategy.py    # legacy shim, может удалить сразу
+scripts/brief_strategy.py      # не нужен (заменён в §16)
+structure/sections.py          # нужен _legacy_run_map_reduce
+structure/tree.py              # нужен structure/sections.py
+structure/compatibility.py     # уже удалён?
+```
+
+### Дальнейшие этапы
+
+§18 — cleanup algorithm (canonical `structure/cleanup.py` остаётся,
+доработка при необходимости)
+§20 — packing modules (см. выше)
+§21 — StructureAwareChunker (в `structure/chunks.py`)
+§22 — `structure/sections.py` и `structure/tree.py`
+§23 — compatibility layer
+§24-§27 — canonical reducer + execution_plan fixes
+§28-§31 — DocumentAnalysis cache + follow-up + retrieval + CLI
+§32-§49 — тесты, guards, audit, docs
 
 ## Текущее состояние
 
