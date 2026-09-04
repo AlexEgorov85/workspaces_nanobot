@@ -24,11 +24,11 @@ def _b(ordinal: int) -> DocumentBlock:
     )
 
 
-def _root(children: tuple[str, ...] = ()) -> StructureNode:
+def _root(children: tuple[str, ...] = (), end_block: int = 10) -> StructureNode:
     return StructureNode(
         node_id="n_0000", node_type="document", semantic_type=None,
         level=0, title="", number=None, parent_id=None,
-        children=children, start_block=0, end_block=10,
+        children=children, start_block=0, end_block=end_block,
         confidence=1.0,
     )
 
@@ -52,7 +52,7 @@ def test_validate_healthy():
     s = DocumentStructure(
         document_id="d", title=None,
         nodes={
-            "n_0000": _root(("n_0001",)),
+            "n_0000": _root(("n_0001",), end_block=4),
             "n_0001": _sec("n_0001", start=0, end=4),
         },
         root_id="n_0000", preamble_node_id="n_0000",
@@ -71,7 +71,7 @@ def test_validate_invalid_range():
     s = DocumentStructure(
         document_id="d", title=None,
         nodes={
-            "n_0000": _root(("n_0001",)),
+            "n_0000": _root(("n_0001",), end_block=4),
             "n_0001": _sec("n_0001", start=5, end=2),
         },
         root_id="n_0000", preamble_node_id="n_0000",
@@ -91,7 +91,7 @@ def test_validate_orphan_parent():
     s = DocumentStructure(
         document_id="d", title=None,
         nodes={
-            "n_0000": _root(("n_0001",)),
+            "n_0000": _root(("n_0001",), end_block=4),
             "n_0001": _sec("n_0001", start=0, end=4, parent_id="n_missing"),
         },
         root_id="n_0000", preamble_node_id="n_0000",
@@ -110,7 +110,7 @@ def test_validate_section_overlap():
     s = DocumentStructure(
         document_id="d", title=None,
         nodes={
-            "n_0000": _root(("n_0001", "n_0002")),
+            "n_0000": _root(("n_0001", "n_0002"), end_block=4),
             "n_0001": _sec("n_0001", start=0, end=4),
             "n_0002": _sec("n_0002", start=2, end=4),
         },
@@ -119,7 +119,7 @@ def test_validate_section_overlap():
     )
     r = validate_structure(s, doc)
     kinds = {i.kind for i in r.issues}
-    assert "section_overlap" in kinds
+    assert "sibling_overlap" in kinds
 
 
 def test_validate_low_coverage():
