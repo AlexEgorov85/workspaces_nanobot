@@ -70,9 +70,6 @@ from workspace.skills.legal_summarizer.scripts.reducer import (
     ReduceConfig,
     reduce_results,
 )
-from workspace.skills.legal_summarizer.scripts.reducer_strategy import (
-    select_reduce_strategy,
-)
 from workspace.skills.legal_summarizer.scripts.document_stats import (
     DocumentStats,
     compute_document_stats,
@@ -600,11 +597,15 @@ def inspect(
     batches = pack_chunks(chunks, budget)
 
     map_calls = len(batches)
-    reduce_strategy = select_reduce_strategy(
-        stats,
-        reduce_budget_tokens=budget.available_chunk_tokens,
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        reduce_strategy_for_legacy,
     )
-    if reduce_strategy.value == "hierarchical":
+    reduce_strategy_label = reduce_strategy_for_legacy(
+        estimated_tokens=int(stats.estimated_tokens),
+        sections=int(stats.sections),
+        reduce_budget_tokens=int(budget.available_chunk_tokens),
+    )
+    if reduce_strategy_label == "hierarchical":
         meaningful = count_meaningful_sections(tree, doc.blocks)
         estimated_reduce_calls = 1 + max(0, meaningful - 1)
     else:

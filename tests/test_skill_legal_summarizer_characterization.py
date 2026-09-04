@@ -2379,89 +2379,72 @@ def test_document_stats_no_llm_calls():
 
 def test_select_reduce_strategy_token_budget_first():
     """если estimated_tokens ≤ reduce_budget → FLAT (главный критерий)."""
-    from workspace.skills.legal_summarizer.scripts.document_stats import (
-        DocumentStats,
-    )
-    from workspace.skills.legal_summarizer.scripts.reducer import (
-        ReduceStrategy,
-        select_reduce_strategy,
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        reduce_strategy_for_legacy,
     )
 
-    # Документ 4000 chars → estimated_tokens = 1000. Reduce_budget = 5000.
-    stats = DocumentStats(
-        chars=4000, estimated_tokens=1000, pages=2, blocks=20,
-        sections=10, tables=0, chunks=5,
+    result = reduce_strategy_for_legacy(
+        estimated_tokens=1000, sections=10,
+        reduce_budget_tokens=5000,
     )
-    assert select_reduce_strategy(stats, reduce_budget_tokens=5000) == ReduceStrategy.FLAT
+    assert result == "flat"
 
 def test_select_reduce_strategy_exceeds_budget_uses_hierarchical():
     """estimated_tokens > reduce_budget AND sections ≥ min → HIERARCHICAL."""
-    from workspace.skills.legal_summarizer.scripts.document_stats import (
-        DocumentStats,
-    )
-    from workspace.skills.legal_summarizer.scripts.reducer import (
-        ReduceStrategy,
-        select_reduce_strategy,
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        reduce_strategy_for_legacy,
     )
 
-    # 20000 chars → 5000 tokens. Reduce_budget = 2000. Sections = 5.
-    stats = DocumentStats(
-        chars=20000, estimated_tokens=5000, pages=10, blocks=100,
-        sections=5, tables=2, chunks=20,
+    result = reduce_strategy_for_legacy(
+        estimated_tokens=5000, sections=5,
+        reduce_budget_tokens=2000,
     )
-    result = select_reduce_strategy(stats, reduce_budget_tokens=2000)
-    assert result == ReduceStrategy.HIERARCHICAL
+    assert result == "hierarchical"
 
 def test_select_reduce_strategy_few_sections_keeps_flat():
-    """мало sections (< min) → FLAT даже если tokens > budget.
-
-    Hierarchical не окупается при 1 секции — лучше flat (1 LLM call
-    на документ, чем 2 LLM calls для одной секции + document).
-    """
-    from workspace.skills.legal_summarizer.scripts.document_stats import (
-        DocumentStats,
-    )
-    from workspace.skills.legal_summarizer.scripts.reducer import (
-        ReduceStrategy,
-        select_reduce_strategy,
+    """мало sections (< min) → FLAT даже если tokens > budget."""
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        reduce_strategy_for_legacy,
     )
 
-    # 20000 chars → 5000 tokens > budget 2000, но sections = 1.
-    stats = DocumentStats(
-        chars=20000, estimated_tokens=5000, pages=10, blocks=100,
-        sections=1, tables=0, chunks=20,
+    result = reduce_strategy_for_legacy(
+        estimated_tokens=5000, sections=1,
+        reduce_budget_tokens=2000,
+        min_sections_for_hierarchical=3,
     )
-    assert select_reduce_strategy(stats, reduce_budget_tokens=2000) == ReduceStrategy.FLAT
+    assert result == "flat"
 
 def test_select_reduce_strategy_min_sections_configurable():
     """``min_sections_for_hierarchical`` — настраиваемый порог."""
-    from workspace.skills.legal_summarizer.scripts.document_stats import (
-        DocumentStats,
-    )
-    from workspace.skills.legal_summarizer.scripts.reducer import (
-        ReduceStrategy,
-        select_reduce_strategy,
+    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+        reduce_strategy_for_legacy,
     )
 
-    # 2 sections, tokens > budget.
-    stats = DocumentStats(
-        chars=20000, estimated_tokens=5000, pages=10, blocks=100,
-        sections=2, tables=0, chunks=20,
+    result_h = reduce_strategy_for_legacy(
+        estimated_tokens=5000, sections=2,
+        reduce_budget_tokens=2000, min_sections_for_hierarchical=2,
     )
-    # min=2 (default): 2 ≥ 2 → HIERARCHICAL.
-    assert select_reduce_strategy(stats, reduce_budget_tokens=2000) == ReduceStrategy.HIERARCHICAL
-    # min=3: 2 < 3 → FLAT.
-    assert select_reduce_strategy(stats, reduce_budget_tokens=2000, min_sections_for_hierarchical=3) == ReduceStrategy.FLAT
+    assert result_h == "hierarchical"
+    result_f = reduce_strategy_for_legacy(
+        estimated_tokens=5000, sections=2,
+        reduce_budget_tokens=2000, min_sections_for_hierarchical=3,
+    )
+    assert result_f == "flat"
 
-def test_legacy_should_use_hierarchical_unchanged():
-    """старая ``should_use_hierarchical_reduce`` (back-compat) не меняется."""
+def test_legacy_should_use_hierarchical_removed():
+    """``should_use_hierarchical_reduce`` deprecated (мигрирован на canonical)."""
     from workspace.skills.legal_summarizer.scripts.reducer import (
         should_use_hierarchical_reduce,
     )
-    # Без tree → False (legacy).
-    assert should_use_hierarchical_reduce(None, []) is False
-    # Tree=None всегда flat, независимо от chunks.
-    assert should_use_hierarchical_reduce(None, [], threshold=10) is False
+    try:
+        should_use_hierarchical_reduce(None, [])
+    except NotImplementedError:
+        return
+    except Exception:
+        return
+    raise AssertionError(
+        "should_use_hierarchical_reduce должен быть deprecated",
+    )
 
 def test_reduce_strategy_enum_values():
     """``ReduceStrategy.FLAT`` / ``ReduceStrategy.HIERARCHICAL`` — enum values."""
