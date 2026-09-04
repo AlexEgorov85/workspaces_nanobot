@@ -86,30 +86,6 @@ def llm_section_reduce(
     return llm.chat(messages, context=None)
 
 
-def llm_section_trim(
-    section_path: str,
-    summary: str,
-    *,
-    max_chars: int,
-) -> str:
-    """Сократить section summary до max_chars."""
-    system = (
-        "Ты — редактор. Сократи саммари юридического раздела до краткой формы, "
-        "сохранив ключевые факты."
-    )
-    user_body = (
-        f"Раздел: {section_path}\n"
-        f"Саммари раздела (превышает допустимый размер):\n\n{summary}\n\n"
-        f"Сократи до ≤{max_chars} символов. Сохрани: стороны, предмет, "
-        "обязательства, сроки, штрафы."
-    )
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_body},
-    ]
-    return llm.chat(messages, context=None)
-
-
 def llm_document_reduce(
     section_summaries_text: str,
     *,
@@ -143,6 +119,5 @@ __all__ = [
     "doc_context",
     "llm_batch",
     "llm_section_reduce",
-    "llm_section_trim",
     "llm_document_reduce",
 ]
