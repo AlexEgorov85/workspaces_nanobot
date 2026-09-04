@@ -24,11 +24,6 @@ from workspace.skills.legal_summarizer.scripts.structure.physical import (
     DocumentBlock,
     PhysicalDocument,
 )
-from workspace.skills.legal_summarizer.scripts.structure.sections import (
-    ROOT_SECTION_ID,
-    DocumentSection,
-    SectionTree,
-)
 
 
 _SPLIT_SEPARATORS = ("\n\n", "\n", ". ", "? ", "! ", "; ", ", ", " ", "")
