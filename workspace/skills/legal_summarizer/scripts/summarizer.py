@@ -552,15 +552,15 @@ def inspect(
         repeated_blocks=cleanup_stats.repeated_blocks,
     )
 
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
-        execution_strategy_for_legacy,
-    )
-    strategy_label = execution_strategy_for_legacy(
-        estimated_tokens=int(stats.estimated_tokens),
-        sections=int(stats.sections),
-        direct_budget_tokens=int(budget.direct_call_tokens),
-        reduce_budget_tokens=int(budget.available_chunk_tokens),
-    )
+    direct_budget_tokens = int(budget.direct_call_tokens)
+    est_tokens = int(stats.estimated_tokens)
+    sections = int(stats.sections)
+    if est_tokens <= direct_budget_tokens:
+        strategy_label = "direct"
+    elif sections >= 3:
+        strategy_label = "map_hierarchical"
+    else:
+        strategy_label = "map_flat"
 
     if strategy_label == "direct":
         chunk = Chunk(
@@ -592,14 +592,13 @@ def inspect(
     batches = pack_chunks(chunks, budget)
 
     map_calls = len(batches)
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
-        reduce_strategy_for_legacy,
-    )
-    reduce_strategy_label = reduce_strategy_for_legacy(
-        estimated_tokens=int(stats.estimated_tokens),
-        sections=int(stats.sections),
-        reduce_budget_tokens=int(budget.available_chunk_tokens),
-    )
+    reduce_est_tokens = int(stats.estimated_tokens)
+    reduce_sections = int(stats.sections)
+    reduce_budget = int(budget.available_chunk_tokens)
+    if reduce_est_tokens > reduce_budget and reduce_sections >= 2:
+        reduce_strategy_label = "hierarchical"
+    else:
+        reduce_strategy_label = "flat"
     if reduce_strategy_label == "hierarchical":
         meaningful = count_meaningful_sections(tree, doc.blocks)
         estimated_reduce_calls = 1 + max(0, meaningful - 1)
@@ -1368,16 +1367,10 @@ def run(
         chunks=len(chunks),
     )
     _budget_for_reduce = _build_token_budget(globals()["get_chunking_config"]())
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
-        reduce_strategy_for_legacy,
-    )
-    _reduce_strategy_value = reduce_strategy_for_legacy(
-        estimated_tokens=int(_stats_for_reduce.estimated_tokens),
-        sections=int(_stats_for_reduce.sections),
-        reduce_budget_tokens=int(_budget_for_reduce.available_chunk_tokens),
-        min_sections_for_hierarchical=2,
-    )
-    hierarchical = _reduce_strategy_value == "hierarchical"
+    _r_est = int(_stats_for_reduce.estimated_tokens)
+    _r_sections = int(_stats_for_reduce.sections)
+    _r_budget = int(_budget_for_reduce.available_chunk_tokens)
+    hierarchical = _r_est > _r_budget and _r_sections >= 2
     section_summaries_out: dict[str, str] = {}
     section_reduce_calls = 0
     section_trim_calls = 0

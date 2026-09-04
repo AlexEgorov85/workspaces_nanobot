@@ -1,19 +1,20 @@
-"""Canonical run pipeline (Этапы 4А, 6А).
+"""Canonical run pipeline (Этапы 4А, 6А, PLAN §14).
 
-Этот модуль — **новый** production-flow, использующий только canonical
+Этот модуль — **production-flow**, использующий только canonical
 pipeline (``run_canonical_pipeline`` → ``DocumentAnalysis`` →
 ``HierarchicalReducer``).
 
-Это **не замена** ``summarizer.run()`` сразу: legacy-путь остаётся
-для обратной совместимости с существующими тестами, пока equivalence
-не доказана на fixtures. Переключение делается поэтапно.
+**Не содержит legacy adapters** (PLAN §14). ``execution_strategy_for_legacy``
+и ``reduce_strategy_for_legacy`` удалены в §14: canonical
+``select_strategy`` (в ``unified_execution.py``) — единственный owner
+для strategy selection.
 
 Здесь:
 
-* ``build_pipeline_result`` — обёртка над ``run_canonical_pipeline``,
-  возвращающая ``PipelineResult`` с логированием прогресса;
+* ``build_pipeline_result`` — обёртка над ``run_canonical_pipeline``;
 * ``strategy_from_pipeline`` — определить стратегию выполнения по
-  ``PipelineResult`` ("direct" / "map_flat" / "map_hierarchical").
+  ``PipelineResult`` ("direct" / "map_flat" / "map_hierarchical")
+  через canonical ``select_strategy``;
 * ``inspect_canonical`` — канонический аналог ``summarizer.inspect()``,
   использующий только canonical-путь (DocumentStructure + ChunkPlanner
   + TokenEstimator + ExecutionPlan).
@@ -231,61 +232,6 @@ def pack_batches_canonical(
     return pack_chunks_with_adjacent(tuple(chunks), config=cfg)
 
 
-def reduce_strategy_for_legacy(
-    *,
-    estimated_tokens: int,
-    sections: int,
-    reduce_budget_tokens: int,
-    min_sections_for_hierarchical: int = 2,
-) -> str:
-    """Определить reduce strategy для legacy DocumentStats.
-
-    Использует canonical ``select_strategy`` под капотом — один источник
-    решения. Возвращает ``"flat"`` / ``"hierarchical"``.
-
-    Логика (PLAN §25, mirror legacy select_reduce_strategy):
-
-    * ``estimated_tokens ≤ reduce_budget_tokens`` → ``flat``
-      (помещается в один reduce call).
-    * ``estimated_tokens > reduce_budget_tokens`` AND
-      ``sections ≥ min_sections_for_hierarchical`` → ``hierarchical``.
-    * Иначе → ``flat`` (section_reduce не окупается для малых секций).
-
-    Это **adapter** для миграции ``select_reduce_strategy`` (Этап 8).
-    """
-    if estimated_tokens <= reduce_budget_tokens:
-        return "flat"
-    if sections < min_sections_for_hierarchical:
-        return "flat"
-    return "hierarchical"
-
-
-def execution_strategy_for_legacy(
-    *,
-    estimated_tokens: int,
-    sections: int,
-    direct_budget_tokens: int,
-    reduce_budget_tokens: int,
-    min_sections_for_hierarchical: int = 3,
-) -> str:
-    """Определить execution strategy для legacy DocumentStats.
-
-    Canonical ``select_strategy`` принимает DocumentStructure + chunks.
-    Этот адаптер работает с legacy DocumentStats: возвращает
-    ``"direct"`` / ``"map_flat"`` / ``"map_hierarchical"``.
-
-    Логика (PLAN §23):
-    - estimated_tokens ≤ direct_budget_tokens → ``"direct"``
-    - sections ≥ min_sections_for_hierarchical → ``"map_hierarchical"``
-    - иначе → ``"map_flat"``
-    """
-    if estimated_tokens <= direct_budget_tokens:
-        return "direct"
-    if sections >= min_sections_for_hierarchical:
-        return "map_hierarchical"
-    return "map_flat"
-
-
 __all__ = [
     "build_pipeline_result",
     "strategy_from_pipeline",
@@ -295,6 +241,4 @@ __all__ = [
     "estimate_canonical",
     "estimate_chunks_canonical",
     "pack_batches_canonical",
-    "reduce_strategy_for_legacy",
-    "execution_strategy_for_legacy",
 ]
