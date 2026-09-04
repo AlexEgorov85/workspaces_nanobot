@@ -1,16 +1,18 @@
 """Scenario tests на resume / manifest state recovery.
 
-Покрывает 4 сценария:
+Покрывает 3 сценария:
 
     * **A. completed**: manifest с ``status=completed`` → reload → status preserved.
     * **B. failed → retry**: manifest с ``status=failed`` → retry → status=completed.
     * **C. partial**: manifest с ``status=partial`` (есть failed_batch_ids) → reload →
       status preserved + failed batches видны.
-    * **D. cache reuse**: тот же ``document_id`` в той же ``session_key`` →
-      пропуск map-фазы (chunks загружены из document-cache).
 
-Эти тесты используют уже существующие ``manifest.py``/``document_cache.py``
-и ``summarizer.run()`` для проверки фактического поведения.
+Scenario D (document-cache reuse) удалён вместе с ``document_cache.py`` (Этап 49)
+— canonical resume path использует manifest partials (§13c), а не отдельный
+doc-cache.
+
+Тесты используют ``manifest.py`` и ``summarizer.run()`` для проверки
+фактического поведения.
 """
 from __future__ import annotations
 
@@ -313,70 +315,6 @@ def test_resume_scenario_c_partial_chunk_results_persist(tmp_path):
     # 001 — нет файла.
     path_1 = chunk_result_path(op_id, "001", ws)
     assert not path_1.exists()
-
-
-# ---------------------------------------------------------------------------
-# Scenario D: cache reuse — пропуск map-фазы
-# ---------------------------------------------------------------------------
-
-
-def test_resume_scenario_d_cache_reuse_loads_chunks(tmp_path):
-    """Scenario D: document-cache → load_doc_cache → chunks восстановлены."""
-    from workspace.skills.legal_summarizer.scripts.document_cache import (
-        load_doc_cache,
-        save_doc_cache,
-    )
-
-    ws = _workspace(tmp_path)
-    session_key = "test_session_d"
-    document_id = "doc_abc123"
-
-    # Simulate cache write.
-    chunks = {
-        "000": {"chunk_id": "000", "summary": "Саммари 1"},
-        "001": {"chunk_id": "001", "summary": "Саммари 2"},
-    }
-    save_doc_cache(document_id, session_key, ws, chunks)
-
-    # Reload.
-    loaded = load_doc_cache(document_id, session_key, ws)
-    assert len(loaded) == 2
-    assert loaded["000"]["summary"] == "Саммари 1"
-    assert loaded["001"]["summary"] == "Саммари 2"
-
-
-def test_resume_scenario_d_empty_cache_returns_empty_dict(tmp_path):
-    """Scenario D: cache не существует → empty dict (не raise)."""
-    from workspace.skills.legal_summarizer.scripts.document_cache import (
-        load_doc_cache,
-    )
-
-    ws = _workspace(tmp_path)
-    loaded = load_doc_cache("nonexistent_doc", "nonexistent_session", ws)
-    assert loaded == {}
-
-
-def test_resume_scenario_d_cache_isolated_by_session(tmp_path):
-    """Scenario D: разные session_key — разные cache."""
-    from workspace.skills.legal_summarizer.scripts.document_cache import (
-        load_doc_cache,
-        save_doc_cache,
-    )
-
-    ws = _workspace(tmp_path)
-    document_id = "doc_iso"
-
-    save_doc_cache(
-        document_id, "session_1", ws,
-        {"000": {"chunk_id": "000", "summary": "S1"}},
-    )
-    save_doc_cache(
-        document_id, "session_2", ws,
-        {"000": {"chunk_id": "000", "summary": "S2"}},
-    )
-
-    assert load_doc_cache(document_id, "session_1", ws)["000"]["summary"] == "S1"
-    assert load_doc_cache(document_id, "session_2", ws)["000"]["summary"] == "S2"
 
 
 # ---------------------------------------------------------------------------
