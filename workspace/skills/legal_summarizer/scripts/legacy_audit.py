@@ -13,7 +13,6 @@ import ast
 import pathlib
 from collections import defaultdict
 
-
 _LEGACY_MODULES = frozenset({
     "workspace.skills.legal_summarizer.scripts.fingerprint",
     "workspace.skills.legal_summarizer.scripts.execution_strategy",

@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from workspace.skills.legal_summarizer.scripts.structure.document_analysis import (
     DocumentAnalysis,
 )
