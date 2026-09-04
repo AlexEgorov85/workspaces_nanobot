@@ -15,7 +15,6 @@ from collections import defaultdict
 
 _LEGACY_MODULES = frozenset({
     "workspace.skills.legal_summarizer.scripts.fingerprint",
-    "workspace.skills.legal_summarizer.scripts.execution_strategy",
     "workspace.skills.legal_summarizer.scripts.reducer",
     "workspace.skills.legal_summarizer.scripts.reducer_impl",
     "workspace.skills.legal_summarizer.scripts.reducer_strategy",
