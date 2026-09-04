@@ -17,12 +17,19 @@ from pathlib import Path
 # Кросс-платформенная кодировка для ВСЕХ exec-подпроцессов (Windows + Linux).
 # На Windows PowerShell по умолчанию cp1251/OEM, и Python-подпроцессы
 # получают эту кодировку в stdout/stderr — кириллица в путях/выводе
-# ломается (C:\Users\Алексей\… → C:\Users\�������\…). PYTHONUTF8=1 (PEP 540,
+# ломается (C:\Users\Алексей\… → C:\Users\\…). PYTHONUTF8=1 (PEP 540,
 # Python 3.7+) переключает дочерний Python в UTF-8; PYTHONIOENCODING=utf-8
 # фиксит stdout/stderr encoding. На Linux обе переменные обычно уже
 # соответствуют (no-op), но задаём их явно — детерминированно.
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+# На Linux задаём C.UTF-8 locale для подпроцессов, чтобы Python читал
+# кириллицу из argv/env в кодировке UTF-8, а не C/POSIX (ASCII-only).
+# На Windows не трогаем LANG/LC_ALL — там переменная игнорируется Python'ом
+# и оставление её не выставленной безопаснее.
+if sys.platform != "win32":
+    os.environ.setdefault("LC_ALL", "C.UTF-8")
+    os.environ.setdefault("LANG", "C.UTF-8")
 
 from loguru import logger
 from rich.console import Console
