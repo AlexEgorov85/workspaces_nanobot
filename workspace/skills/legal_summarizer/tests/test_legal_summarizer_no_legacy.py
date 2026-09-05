@@ -21,6 +21,7 @@ _LEGACY_MODULES = frozenset({
     "workspace.skills.legal_summarizer.scripts.structure.sections",
     "workspace.skills.legal_summarizer.scripts.structure.tree",
     "workspace.skills.legal_summarizer.scripts.structure.compatibility",
+    "workspace.skills.legal_summarizer.scripts.structure.cleanup",
     "workspace.skills.legal_summarizer.scripts.brief_strategy",
     "workspace.skills.legal_summarizer.scripts.brief_representation",
     "workspace.skills.legal_summarizer.scripts.provenance_reconstruction",
@@ -39,6 +40,12 @@ _LEGACY_SYMBOLS = frozenset({
     "load_physical_document",
     "section_tree_from_structure",
     "structure_from_section_tree",
+})
+
+# Файлы, которые были удалены (Этап 8/18).
+_LEGACY_FILES = frozenset({
+    "workspace/skills/legal_summarizer/scripts/structure/cleanup.py",
+    "workspace/skills/legal_summarizer/scripts/_legacy_run_map_reduce.py",
 })
 
 
@@ -152,6 +159,18 @@ def test_legacy_reducer_strategy_removed():
     raise AssertionError(
         "reducer_strategy should be removed (Этап 49 — финальный cleanup)"
     )
+
+
+def test_forbidden_files_not_present():
+    """Этап 8/18: ``_FORBIDDEN_FILES`` не должны существовать на диске."""
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[3]
+    for rel_path in _LEGACY_FILES:
+        target = project_root / rel_path
+        assert not target.is_file(), (
+            f"forbidden file present: {target}"
+        )
 
 
 def test_legacy_token_budget_removed():

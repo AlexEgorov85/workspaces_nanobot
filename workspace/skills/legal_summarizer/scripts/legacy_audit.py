@@ -3,7 +3,8 @@
 Это **regression guard**, не просто print. Два режима:
 
 * ``audit()`` — возвращает structured result (dict с hits).
-* ``assert_no_legacy()`` — поднимает ``AssertionError`` при production hit.
+* ``assert_no_legacy()`` — поднимает ``AssertionError`` при production hit
+  или при наличии запрещённых файлов (Этап 18).
 
 Разделение:
 
@@ -16,10 +17,11 @@
   ``build_section_tree``, ``merge_short_sections``,
   ``extract_local_structure_label``, ``count_meaningful_sections``,
   ``should_use_hierarchical_reduce``, ``select_reduce_strategy``,
-  ``section_tree_from_structure``, ``structure_from_section_tree``.
+  ``section_tree_from_structure``, ``structure_from_section_tree``,
+  ``load_physical_document`` (Этап 12 — canonical: ``DocumentLoader.load()``).
 
-NOTE: ``load_physical_document`` НЕ legacy symbol — это canonical
-DocumentLoader API (см. PLAN §11, §12).
+* ``_FORBIDDEN_FILES`` — файлы, которые были удалены и не должны быть
+  воссозданы (Этап 8, Этап 18).
 """
 
 from __future__ import annotations
@@ -52,6 +54,15 @@ _FORBIDDEN_SYMBOLS = frozenset({
     "structure_from_section_tree",
     "reduce_strategy_for_legacy",
     "execution_strategy_for_legacy",
+    # Этап 12: load_physical_document — legacy loader; canonical —
+    # DocumentLoader.load().
+    "load_physical_document",
+})
+
+# Файлы, которые были удалены и не должны появиться снова (Этап 8).
+_FORBIDDEN_FILES = frozenset({
+    "workspace/skills/legal_summarizer/scripts/structure/cleanup.py",
+    "workspace/skills/legal_summarizer/scripts/_legacy_run_map_reduce.py",
 })
 
 _CANONICAL_PRODUCTION = frozenset({
@@ -141,7 +152,8 @@ def assert_no_legacy() -> None:
         None если всё чисто.
 
     Raises:
-        AssertionError: список production hits.
+        AssertionError: список production hits или наличие
+        запрещённых файлов.
     """
     hits = audit()
     production_hits: dict[str, list[str]] = {}
@@ -151,6 +163,14 @@ def assert_no_legacy() -> None:
             if _is_production_file(rel):
                 production_hits.setdefault(k, []).append(loc)
 
+    # Проверка _FORBIDDEN_FILES (Этап 8 / Этап 18): файл не должен
+    # существовать на диске.
+    project_root = pathlib.Path.cwd()
+    forbidden_present: list[str] = []
+    for rel_path in _FORBIDDEN_FILES:
+        if (project_root / rel_path).is_file():
+            forbidden_present.append(rel_path)
+
     if production_hits:
         details = "\n".join(
             f"  {k}: {len(v)} refs\n    " + "\n    ".join(v[:3])
@@ -159,6 +179,11 @@ def assert_no_legacy() -> None:
         raise AssertionError(
             f"Found {sum(len(v) for v in production_hits.values())} "
             f"production legacy references:\n{details}"
+        )
+    if forbidden_present:
+        raise AssertionError(
+            f"Forbidden files present:\n  "
+            + "\n  ".join(sorted(forbidden_present))
         )
 
 
