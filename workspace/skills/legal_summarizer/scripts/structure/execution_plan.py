@@ -8,9 +8,8 @@ batches и token estimation. Используется всеми downstream'ам
 * **manifest** — сохранить план на диск (для resume).
 * **recovery** — восстановить из manifest без повторного packing.
 
-Back-compat: legacy ``pack_chunks`` продолжает работать (используется
-тестами). ``ExecutionPlan`` — новый канонический API, который
-планируется использовать в Этапе 45 (DocumentStructure как SoT для всех).
+``ExecutionPlan`` — единственный канонический API планирования.
+Legacy ``pack_chunks`` удалён.
 
 Детерминированный (PLAN §61, §75): один документ + одна стратегия →
 один план (включаяя chunk IDs и batch composition).

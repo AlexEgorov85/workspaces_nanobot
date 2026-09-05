@@ -122,5 +122,10 @@ def test_build_execution_plan_map():
         numbering=(), total_blocks=5,
     )
     chunks = tuple(_chunk(f"{i:03d}", "x" * 1000) for i in range(50))
+    # Этап 16: controlled policy → детерминированная ожидаемая стратегия.
+    # 1 meaningful section < hierarchical_section_threshold (3), total
+    # tokens > direct_threshold → map_flat.
     plan = build_execution_plan(s, chunks, document_id="d")
-    assert plan.strategy in ("map_flat", "map_hierarchical")
+    assert plan.strategy == "map_flat", (
+        f"1 section should yield map_flat, got {plan.strategy}"
+    )
