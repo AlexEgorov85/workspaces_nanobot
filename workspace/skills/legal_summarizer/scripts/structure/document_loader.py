@@ -1,29 +1,13 @@
-"""DocumentLoader — single-pass canonical loader для legal_summarizer.
+"""DocumentLoader — единственный canonical loader для legal_summarizer.
 
 Создаёт ``PhysicalDocument`` за **один проход** по файлу (PLAN §12).
 
-Сравнение с ``load_physical_document`` из ``physical.py``:
+**PLAN §12 + Этап 12:** ``DocumentLoader.load()`` — единая production
+загрузочная цепочка. Делает один проход для blocks, и оттуда же
+извлекает text для title resolution. Никакого двойного парсинга PDF/DOCX.
 
-* Старый ``physical.py`` использует **несколько независимых проходов**:
-  - PDF: ``PdfReader`` для текста + ``pdfplumber.open`` для таблиц.
-  - DOCX: ``extract_text`` из ``office_files`` + ``docx.Document`` для
-    title (внутри ``_pick_title_from_text``).
-* ``DocumentLoader`` собирает всё **за один проход** через ``PdfReader``
-  (текст и outline через ``reader.outline``) и таблицы читаются
-  **лениво** из ``PdfReader`` pages, когда они нужны downstream.
-
-**PLAN §12:** single canonical loading path. DocumentLoader.load()
-делает **один** проход для blocks, и оттуда же извлекает text для
-title resolution. Никакого двойного парсинга PDF/DOCX.
-
-Низкоуровневые дополнительные доступы (например, ``docx.Document`` для
-title) допустимы **только** когда они дают информацию, недоступную
-через основной проход (PLAN §10). Для DOCX title это так —
-``extract_text`` его не возвращает.
-
-Back-compat: ``load_physical_document`` оставлен и продолжает работать
-(используется тестами). ``DocumentLoader`` — **новый canonical** API,
-которым пользуются новые компоненты (Этап 5 — ``DocumentIdentity``).
+Legacy ``load_physical_document`` удалён (Этап 12). Все consumers
+используют ``DocumentLoader().load(path)``.
 """
 
 from __future__ import annotations

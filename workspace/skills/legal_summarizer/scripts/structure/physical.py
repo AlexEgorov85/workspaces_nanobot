@@ -444,84 +444,13 @@ def _iter_txt_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
     return blocks, 1
 
 
-def load_physical_document(
-    path: str | Path,
-    *,
-    workspace_root: Path | str | None = None,
-) -> PhysicalDocument:
-    """Загрузить PhysicalDocument для файла с кэшированием на диске.
-
-    Args:
-        path: путь к PDF/DOCX/TXT.
-        workspace_root: корень workspace (для тестов).
-
-    Returns:
-        PhysicalDocument с нормализованным списком DocumentBlock.
-
-    Raises:
-        FileNotFoundError: файл не существует.
-        ValueError: формат не поддерживается.
-    """
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"Файл не найден: {p}")
-
-    fmt = detect_format(p)
-    if fmt not in SUPPORTED_FORMATS:
-        raise ValueError(
-            f"Неподдерживаемый формат для PhysicalDocument: '{fmt}'. "
-            f"Поддерживаются: {sorted(SUPPORTED_FORMATS)}"
-        )
-
-    cache_dir = _physical_cache_root(workspace_root)
-    identity = _identity_for(p)
-    cache_file = cache_dir / f"{identity.fingerprint}.json"
-
-    if cache_file.is_file():
-        try:
-            cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            if cached.get("path") == str(p.resolve()) and cached.get("format") == fmt:
-                return PhysicalDocument.from_dict(cached)
-        except (OSError, json.JSONDecodeError, KeyError, TypeError):
-            pass
-
-    struct = _build_structure_dict(p, fmt)
-    title = struct.get("title")
-    size_bytes = struct.get("size_bytes", p.stat().st_size)
-
-    if fmt == "pdf":
-        blocks, page_count = _iter_pdf_blocks(p)
-    elif fmt == "docx":
-        blocks, page_count = _iter_docx_blocks(p)
-    elif fmt == "txt":
-        blocks, page_count = _iter_txt_blocks(p)
-    else:
-        raise ValueError(f"Unsupported format: {fmt}")
-
-    doc = PhysicalDocument(
-        path=str(p.resolve()),
-        format=fmt,
-        title=title,
-        size_bytes=size_bytes,
-        blocks=tuple(blocks),
-        page_count=page_count,
-    )
-
-    try:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(
-            json.dumps(doc.to_dict(), ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except OSError:
-        pass
-
-    return doc
+# NOTE: ``load_physical_document`` удалён в Этапе 12.
+# Единственная production загрузка — ``DocumentLoader().load(path)``
+# (см. ``document_loader.py``).
 
 
 __all__ = [
     "DocumentBlock",
     "PhysicalDocument",
-    "load_physical_document",
     "SUPPORTED_FORMATS",
 ]

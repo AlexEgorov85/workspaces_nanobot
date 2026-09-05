@@ -77,14 +77,14 @@ def test_identity_is_frozen():
 
 def test_identity_fingerprint_equals_physical_cache_key(tmp_path: Path):
     """PLAN §11 acceptance: identity.fingerprint == physical/cache fingerprint."""
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
-        load_physical_document,
+    from workspace.skills.legal_summarizer.scripts.structure.document_loader import (
+        DocumentLoader,
     )
 
     p = tmp_path / "doc.txt"
     p.write_text("hello", encoding="utf-8")
     ident = DocumentIdentity.from_path(p)
-    doc = load_physical_document(p)
+    doc = DocumentLoader().load(p)
     # DocumentIdentity.fingerprint — это sha256 hex от (path, size, mtime_ns).
     # physical.py теперь использует identity.fingerprint как cache key —
     # единый canonical алгоритм.
