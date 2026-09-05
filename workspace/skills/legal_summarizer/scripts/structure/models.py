@@ -15,9 +15,9 @@
 * Структура **детерминированная** (PLAN §61): LLM не участвует
   в её построении.
 
-Существующие callers (DocumentSection / SectionTree / HeadingCandidate)
-продолжают работать через back-compat re-export в ``sections.py``.
-Их удаление — Этап 78.
+``DocumentStructure`` — единственный production тип структуры.
+Legacy ``SectionTree`` / ``DocumentSection`` / ``HeadingCandidate``
+удалены в предыдущих рефакторингах.
 """
 
 from __future__ import annotations
@@ -110,9 +110,9 @@ class DocumentTitle:
 
 @dataclass(frozen=True)
 class StructureNode:
-    """Узел семантической структуры документа (PLAN §3.2).
+    """Узел семантической структуры документа (PLAN §3.2, Этап 4).
 
-    Поля:
+    Семантика полей:
 
     * ``node_id``: стабильный идентификатор вида ``"n_0001"``.
     * ``node_type``: ``"section"`` | ``"body"`` | ``"table"`` | ``"list"`` |
@@ -125,15 +125,25 @@ class StructureNode:
     * ``title``: heading / caption text. ``""`` для root и body.
     * ``number``: ``NumberingInfo`` или ``None``.
     * ``parent_id``: node_id родителя или ``None``.
+      **Semantic hierarchy** — указывает на parent node в логическом
+      дереве (статья → глава → раздел → root). Не зависит от range.
     * ``children``: tuple of child node_id.
     * ``start_block`` / ``end_block``: ordinals ``DocumentBlock`` в
-        canonical document order.
+      canonical document order. **Direct physical block ownership** —
+      диапазон блоков, непосредственно принадлежащих узлу
+      (``start_block == c.block_index``, ``end_block == next-1`` или
+      ``total_blocks - 1``). Не вычисляется как subtree range.
     * ``confidence``: 0..1.
     * ``evidence``: tuple of ``StructureEvidence``.
     * ``source_refs``: tuple of provenance markers (например,
         ``("pdf_outline",)`` для outline-derived nodes).
 
     Все поля frozen: ``StructureNode`` — immutable.
+
+    Invariant (Этап 4): ``start_block == end_block`` допустим — это
+    валидная одно-блочная секция. ``parent_id`` НЕ обязан покрывать
+    range ребёнка (subtree ≠ parent range).
+
     """
 
     node_id: str
@@ -227,16 +237,17 @@ class DocumentStructure:
         return [self.nodes[cid] for cid in parent.children if cid in self.nodes]
 
     def block_to_node(self) -> dict[int, str]:
-        """Mapping ``ordinal DocumentBlock`` → ``node_id`` (PLAN §3, §45).
+        """Mapping ``ordinal DocumentBlock`` → ``node_id`` (PLAN §3, §45, Этап 5).
 
-        Возвращает словарь только для блоков, покрытых структурой.
-        Непокрытые блоки (например, root preamble) → ``root_id``.
+        Делегирует ``block_ownership.block_to_node`` — единственному
+        каноническому механизму определения ownership. Возвращает
+        словарь для **всех** блоков ``[0, total_blocks)``, где
+        непокрытые блоки (например, root preamble) → ``root_id``.
         """
-        out: dict[int, str] = {}
-        for node in self.nodes.values():
-            for b in range(node.start_block, node.end_block + 1):
-                out[b] = node.node_id
-        return out
+        from workspace.skills.legal_summarizer.scripts.structure.block_ownership import (
+            block_to_node as _canonical_block_to_node,
+        )
+        return _canonical_block_to_node(self)
 
     def to_dict(self) -> dict[str, Any]:
         return {

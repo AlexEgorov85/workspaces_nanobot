@@ -32,10 +32,11 @@ def test_no_llm_call_in_structure_modules():
         unified_execution, hierarchical_reducer, semantic_record,
         retry, importance_brief, retrieval, query_normalizer,
         retrieval_index, context_expansion, full_doc_fallback,
-        cleanup, block_lookup, pipeline, provenance,
+        block_lookup, pipeline, provenance,
         document_analysis, followup,
         benchmark, reference_qa, quality_metrics,
         single_flight, architecture_guard,
+        block_ownership,
     )
     modules = [
         models, physical, numbering, heading, hierarchy,
@@ -46,10 +47,11 @@ def test_no_llm_call_in_structure_modules():
         unified_execution, hierarchical_reducer, semantic_record,
         retry, importance_brief, retrieval, query_normalizer,
         retrieval_index, context_expansion, full_doc_fallback,
-        cleanup, block_lookup, pipeline, provenance,
+        block_lookup, pipeline, provenance,
         document_analysis, followup,
         benchmark, reference_qa, quality_metrics,
         single_flight, architecture_guard,
+        block_ownership,
     ]
     for module in modules:
         assert _module_has_llm_call(module) is False, (

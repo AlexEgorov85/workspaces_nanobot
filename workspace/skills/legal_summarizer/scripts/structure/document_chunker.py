@@ -1,22 +1,17 @@
 """DocumentStructure-aware chunker.
 
-Новый chunker, который использует ``DocumentStructure`` как единственный
-источник section info (а не переоткрывает headings заново, как старый
-``StructureAwareChunker``).
+Chunker, который использует ``DocumentStructure`` как единственный
+источник section info.
 
 Ключевые правила:
 
 * ``DocumentStructure`` — единственный источник section boundaries;
-* tables атомарны (как в старом chunker);
+* tables атомарны;
 * chunk boundary предпочитает section boundary;
 * split by rows для oversize tables (с сохранением ``table_id``);
 * **каждый physical block имеет ровно одного semantic owner** —
-  самый глубокий section, чей диапазон содержит block. Это решает
-  проблему двойного ownership между parent и child nodes.
-
-Это **не переписывание** старого chunker'а — новый класс.
-Старый ``StructureAwareChunker`` остаётся для back-compat (но более
-не нужен в production после миграции consumers).
+  самый глубокий section, чей диапазон содержит block (см.
+  ``block_ownership.py``).
 """
 
 from __future__ import annotations
@@ -28,6 +23,10 @@ from workspace.skills.legal_summarizer.scripts.structure.chunks import (
     Chunk,
     ChunkConfig,
     _split_block_with_offsets,
+)
+from workspace.skills.legal_summarizer.scripts.structure.block_ownership import (
+    build_block_ownership,
+    owner_for_block,
 )
 from workspace.skills.legal_summarizer.scripts.structure.models import (
     DocumentStructure,
@@ -50,67 +49,6 @@ class DocumentStructureChunkerConfig:
 
 def _make_chunk_id(idx: int) -> str:
     return f"{idx:03}"
-
-
-def _depth_of(node_id: str, struct: DocumentStructure) -> int:
-    """Глубина узла (root = 0). Используется для выбора owner."""
-    depth = 0
-    cur = struct.nodes.get(node_id)
-    while cur is not None and cur.parent_id is not None:
-        depth += 1
-        cur = struct.nodes.get(cur.parent_id)
-    return depth
-
-
-def build_block_ownership(
-    struct: DocumentStructure,
-) -> dict[int, str]:
-    """Построить ``block_ordinal -> owning_section_node_id``.
-
-    Каждый block, попадающий в диапазон какого-либо section, принадлежит
-    **самому глубокому** section, чей диапазон его содержит. Это даёт
-    ровно одного owner на block (или ноль, если block не покрыт ни одним
-    section — такие blocks принадлежат root preamble).
-
-    Returns:
-        ``dict[block_ordinal, owning_section_node_id]``.
-        Blocks вне section ranges отсутствуют в dict (см.
-        ``owner_for_block`` для fallback на root).
-    """
-    candidates = [n for n in struct.nodes.values() if n.node_type == "section"]
-    candidates.sort(key=lambda n: _depth_of(n.node_id, struct), reverse=True)
-
-    owner: dict[int, str] = {}
-    for node in candidates:
-        for b in range(node.start_block, node.end_block + 1):
-            owner.setdefault(b, node.node_id)
-    return owner
-
-
-def owner_for_block(
-    struct: DocumentStructure,
-    ordinal: int,
-    ownership: dict[int, str] | None = None,
-) -> str | None:
-    """Получить owner для block ``ordinal``.
-
-    Returns:
-        - ``owning_section_node_id`` если block принадлежит section;
-        - ``struct.root_id`` если block не принадлежит ни одной section
-          (preamble / orphan block);
-        - ``None`` если ``ordinal`` вне диапазона документа.
-
-    Args:
-        struct: ``DocumentStructure``.
-        ordinal: ``DocumentBlock.ordinal``.
-        ownership: предвычисленная ``build_block_ownership(struct)``.
-            Если ``None`` — будет построена на лету (детерминированно).
-    """
-    if ordinal < 0 or ordinal >= struct.total_blocks:
-        return None
-    if ownership is None:
-        ownership = build_block_ownership(struct)
-    return ownership.get(ordinal, struct.root_id)
 
 
 def chunk_from_structure(
