@@ -1,15 +1,12 @@
-"""Единый HierarchicalReducer (PLAN §24, Этап 24).
+"""Единый HierarchicalReducer (PLAN §24, Этапы 9, 19).
 
-Заменяет **две** реализации:
+Единственная реализация hierarchical reduce для canonical pipeline.
 
-* ``reducer_impl._reduce_hierarchical`` — секция→документ (per-section + final).
-* ``summarizer._hierarchical_reduce_rounds`` — rounds of groups.
+Два режима:
 
-Один ``HierarchicalReducer.reduce`` работает в обоих режимах:
-
-* Если ``chunks`` даны с ``tree`` — section-level + document-level.
-* Если даны ``section_summaries`` (для уже просуммированных секций) —
-  rounds of groups (rounds=1..max_rounds).
+* ``reduce_chunks_hierarchical`` — section-level + document-level.
+* ``reduce_sections_to_document`` — rounds of groups + финальный reduce
+  (Этап 9: данные не теряются).
 
 LLM-trim (PLAN §26) убран как нормальный этап pipeline. Остаётся
 **deterministic truncation** как emergency fallback (PLAN §27).
@@ -85,6 +82,12 @@ def reduce_sections_to_document(
 
     Используется, когда section_summaries уже есть (Этап 40 follow-up
     или pre-computed section summaries).
+
+    Этап 9 invariant: данные не теряются. Если после ``max_rounds``
+    остаётся более одной группы, делается **финальный reduce** (один
+    дополнительный round, объединяющий всё, что осталось). Если
+    ``llm_runner is None`` — финальный reduce пропускается и берётся
+    детерминированный join.
     """
     cfg = config or HierarchicalReducerConfig()
     rounds = 0
@@ -112,6 +115,27 @@ def reduce_sections_to_document(
                 )
                 next_level.append((f"r{rounds}_g{i // cfg.group_size}", text))
         current = next_level
+
+    # Финальный reduce (Этап 9): если после max_rounds осталось >1
+    # группы — делаем один дополнительный round, чтобы не потерять
+    # данные.
+    if len(current) > 1:
+        rounds += 1
+        joined = "\n\n".join(f"[{sid}]\n{summary}" for sid, summary in current)
+        if len(joined) > cfg.input_budget_chars:
+            joined = _fit_input(joined, cfg.input_budget_chars)
+            truncated = True
+        if llm_runner is None:
+            final = joined
+        else:
+            final = llm_runner(
+                joined,
+                length=length,
+                focus=focus,
+                structure=structure,
+                question=question,
+            )
+        current = [("final", final)]
 
     final_summary = current[0][1] if current else ""
     return HierarchicalReducerResult(

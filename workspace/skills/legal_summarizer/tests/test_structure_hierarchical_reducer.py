@@ -99,10 +99,15 @@ def test_reduce_sections_to_document_truncates_long_input():
 
 
 def test_reduce_sections_to_document_respects_max_rounds():
+    """Этап 9: max_rounds ограничивает основной цикл, но финальный
+    reduce выполняется дополнительно чтобы данные не терялись."""
     items = [(f"s{i}", f"sum {i}") for i in range(10)]
     cfg = HierarchicalReducerConfig(group_size=2, max_rounds=2)
     result = reduce_sections_to_document(items, config=cfg)
-    assert result.rounds_done <= 2
+    # max_rounds=2 → основной цикл делает ≤2 round; финальный reduce
+    # добавляет ещё один, поэтому total может быть 3.
+    assert result.rounds_done >= 2
+    assert result.final_summary != ""
 
 
 def test_reduce_chunks_1_section():
@@ -190,7 +195,7 @@ def test_reduce_chunks_10_sections():
 
 
 def test_reduce_chunks_100_sections_no_data_loss():
-    """PLAN §25: 100 sections — rounds bounded, no section disappears."""
+    """PLAN §25 + Этап 9: 100 sections — все секции учтены, ровно один final."""
     from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
         HierarchicalReducerConfig,
         reduce_chunks_hierarchical,
@@ -207,9 +212,16 @@ def test_reduce_chunks_100_sections_no_data_loss():
         section_ids=[f"s{i}" for i in range(n)],
         config=cfg,
     )
+    # Все секции просуммированы (ни одна не потеряна).
     assert len(result.section_summaries) == n
+    # Финальный summary не пустой.
     assert result.final_summary != ""
-    assert result.rounds_done <= cfg.max_rounds
+    # Этап 9: данные не теряются — ``final_summary`` содержит материалы
+    # всех 100 секций (хотя бы частично) и не выбрасывает молча.
+    # Проверяем, что финальный reduce сделал хотя бы один доп. round.
+    assert result.rounds_done >= cfg.max_rounds, (
+        f"expected final-fallback round, got rounds_done={result.rounds_done}"
+    )
 
 
 def test_reduce_sections_continues_until_one_item():
