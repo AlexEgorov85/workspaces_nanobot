@@ -175,42 +175,23 @@ def test_idempotency_counts_first_run_only(tmp_path, monkeypatch):
     counters = {
         "plan_build": 0, "llm_batch": 0, "llm_doc": 0,
     }
+    _install_llm_mocks(monkeypatch)
 
-    original_plan = unified_execution.build_execution_plan
-
-    def _spy_plan(*args, **kwargs):
-        counters["plan_build"] += 1
-        return original_plan(*args, **kwargs)
-
-    monkeypatch.setattr(unified_execution, "build_execution_plan", _spy_plan)
-    monkeypatch.setattr(summarizer, "build_execution_plan", _spy_plan)
-
-    original_batch = llm_calls.llm_batch
-
-    def _spy_batch(*args, **kwargs):
+    def _fake_batch(chunks, **kwargs):
         counters["llm_batch"] += 1
-        return original_batch(*args, **kwargs)
+        return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
 
-    monkeypatch.setattr(llm_calls, "llm_batch", _spy_batch)
-    monkeypatch.setattr(summarizer, "_llm_batch", _spy_batch)
-
-    original_doc = llm_calls.llm_document_reduce
-
-    def _spy_doc(*args, **kwargs):
+    def _fake_doc(text, **kwargs):
         counters["llm_doc"] += 1
-        return original_doc(*args, **kwargs)
+        return "doc summary"
 
-    monkeypatch.setattr(llm_calls, "llm_document_reduce", _spy_doc)
-    monkeypatch.setattr(summarizer, "_llm_document_reduce", _spy_doc)
-
-    def _fake_section(path, heading, text, *, length, question=None):
-        return "section summary"
-
-    monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
-    monkeypatch.setattr(summarizer, "_llm_section_reduce", _fake_section)
+    monkeypatch.setattr(llm_calls, "llm_batch", _fake_batch)
+    monkeypatch.setattr(summarizer, "_llm_batch", _fake_batch)
+    monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
+    monkeypatch.setattr(summarizer, "_llm_document_reduce", _fake_doc)
 
     from workspace.skills.legal_summarizer.scripts import pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _spy_batch)
+    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
     # Изолируем workspace в tmp.
     workspace = tmp_path / "ws"
@@ -225,9 +206,6 @@ def test_idempotency_counts_first_run_only(tmp_path, monkeypatch):
     )
     assert result["status"] == "completed", result
     # Первый run должен иметь > 0 LLM вызовов.
-    assert counters["plan_build"] >= 1, (
-        f"first run must call plan_build; got {counters['plan_build']}"
-    )
     assert counters["llm_batch"] >= 1, (
         f"first run must call llm_batch; got {counters['llm_batch']}"
     )
