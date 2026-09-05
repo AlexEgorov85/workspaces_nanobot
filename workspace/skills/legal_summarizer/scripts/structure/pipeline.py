@@ -1,4 +1,4 @@
-"""DocumentStructure как SoT для всех downstream'ов (PLAN §45).
+"""DocumentStructure как SoT для всех downstream'ов (PLAN §45, Этап 19).
 
 Этот модуль — **точка сборки** canonical pipeline:
 
@@ -9,9 +9,8 @@
 Все компоненты принимают ``DocumentStructure`` как вход; не делают
 повторных определений heading/numbering/etc.
 
-Legacy API (``SectionTree``, ``DocumentSection``, ``build_section_tree``)
-остаётся для back-compat (Этап 58) — но новые consumers должны
-использовать только ``DocumentStructure``.
+Canonical pipeline — единственный production path. Legacy API
+(``SectionTree``, ``DocumentSection``, ``build_section_tree``) удалены.
 """
 
 from __future__ import annotations
@@ -34,6 +33,7 @@ from workspace.skills.legal_summarizer.scripts.structure.heading import (
     detect_heading_candidates,
 )
 from workspace.skills.legal_summarizer.scripts.structure.hierarchy import (
+    StructureTreeBuilderConfig,
     build_document_structure,
 )
 from workspace.skills.legal_summarizer.scripts.structure.identity import (
@@ -94,7 +94,11 @@ def run_canonical_pipeline(
         physical.blocks, pdf_path=str(path) if str(path).endswith(".pdf") else None,
         physical_doc=physical,
     )
-    struct = build_document_structure(candidates, total_blocks=len(physical.blocks))
+    struct = build_document_structure(
+        candidates,
+        total_blocks=len(physical.blocks),
+        config=StructureTreeBuilderConfig(document_id=identity.document_id),
+    )
     title = resolve_title(physical, text=text)
     if title is not None:
         struct = DocumentStructure(

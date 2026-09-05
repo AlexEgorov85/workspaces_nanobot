@@ -100,13 +100,31 @@ class DocumentAnalysis:
     ) -> "DocumentAnalysis":
         """Построить DocumentAnalysis из ингредиентов.
 
-        Это **новая** canonical сборка (PLAN §39). Старые caches
-        (physical_cache_key, document_cache) продолжают работать
-        (back-compat). DocumentAnalysis — это слой **выше** них,
-        объединяющий их результаты.
+        Это **canonical** сборка (PLAN §39). ``DocumentAnalysis`` —
+        единый слой immutable snapshot, объединяющий
+        ``PhysicalDocument``, ``DocumentStructure``, ``chunks`` и
+        ``RetrievalIndex``.
         """
         if identity is None:
             identity = DocumentIdentity.from_path(physical.path)
+        # Этап 3 invariant: DocumentStructure.document_id ==
+        # DocumentIdentity.document_id. Production pipeline (structure.pipeline)
+        # передаёт ``document_id=identity.document_id`` явно. Если
+        # ``DocumentAnalysis.build`` получает ``structure`` с расходящимся
+        # ``document_id`` (например, из unit-теста builder'а) — выравниваем
+        # структуру по identity, чтобы downstream видел консистентный
+        # canonical state.
+        if structure.document_id != identity.document_id:
+            structure = DocumentStructure(
+                document_id=identity.document_id,
+                title=structure.title,
+                nodes=structure.nodes,
+                root_id=structure.root_id,
+                preamble_node_id=structure.preamble_node_id,
+                numbering=structure.numbering,
+                total_blocks=structure.total_blocks,
+                coverage_ratio=structure.coverage_ratio,
+            )
         if include_retrieval_index:
             retrieval = RetrievalIndex.build(
                 chunks=chunks,
