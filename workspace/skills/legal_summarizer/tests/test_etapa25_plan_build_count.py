@@ -1,18 +1,16 @@
 """Этап 25: ``build_execution_plan`` вызывается правильное число раз за ``run()``.
 
 Архитектурная картина:
-- ``Inspection.execution_plan`` — legacy/default (document-level) поле,
-  строится в ``inspect()``.
 - ``ExecutionContext.plan`` — canonical (run-level) snapshot, строится
-  в ``_build_execution_context()``.
+  в ``_build_execution_context()`` и используется execution.
+
+Legacy ``Inspection.execution_plan`` удалён — план строится один раз
+(только в ``_build_execution_context``).
 
 Инварианты:
-- direct-run (1 chunk или нет structure): ``build_execution_plan == 0``
-  (legacy пуст в inspect(), ctx тоже direct).
-- map-run: ``build_execution_plan == 2`` — один в inspect() (для
-  Inspection.execution_plan, legacy compat), один в
-  _build_execution_context() (для ExecutionContext.plan, canonical).
-  Execution использует ``ctx.plan`` (canonical), не ``insp.execution_plan``.
+- direct-run (1 chunk или нет structure): ``build_execution_plan == 0``.
+- map-run: ``build_execution_plan == 1`` (только в
+  _build_execution_context() для ExecutionContext.plan).
 """
 
 from __future__ import annotations
@@ -69,10 +67,11 @@ def _build_doc(sections: int = 6) -> str:
 
 
 def test_plan_built_for_map_run(tmp_path, monkeypatch):
-    """Для map-run: build_execution_plan вызывается для ctx.plan + insp.execution_plan.
+    """Для map-run: build_execution_plan вызывается один раз (для ctx.plan).
 
-    Документируем число 2 (1 в inspect() для legacy, 1 в _build_execution_context()
-    для canonical). Главное — execution использует canonical ctx.plan.
+    Legacy ``Inspection.execution_plan`` удалён, поэтому план строится
+    только в ``_build_execution_context()`` — execution использует
+    canonical ``ctx.plan``.
     """
     import summarizer
     from workspace.skills.legal_summarizer.scripts.structure import unified_execution
@@ -97,15 +96,15 @@ def test_plan_built_for_map_run(tmp_path, monkeypatch):
         confirmed=True,
     )
     assert result["status"] == "completed", result
-    # 1 для Inspection.execution_plan (legacy), 1 для ExecutionContext.plan (canonical).
-    assert calls["n"] == 2, (
-        f"expected 2 build_execution_plan calls (inspect + ctx) for map, "
+    # 1 для ExecutionContext.plan (canonical) в _build_execution_context().
+    assert calls["n"] == 1, (
+        f"expected 1 build_execution_plan call (ctx only) for map, "
         f"got {calls['n']}"
     )
 
 
 def test_plan_not_built_for_direct_run(tmp_path, monkeypatch):
-    """Для direct-run: build_execution_plan == 0 (direct path в inspect и в ctx)."""
+    """Для direct-run: build_execution_plan == 0 (direct path в ctx)."""
     import summarizer
     from workspace.skills.legal_summarizer.scripts.structure import unified_execution
 

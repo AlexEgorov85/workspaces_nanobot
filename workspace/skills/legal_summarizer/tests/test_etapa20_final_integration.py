@@ -94,7 +94,8 @@ def test_scenario_map_flat(tmp_path: Path, monkeypatch):
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    assert insp.strategy in ("map_flat", "map_hierarchical")
+    ctx = summarizer._build_execution_context(insp, length="detailed")
+    assert ctx.strategy in ("map_flat", "map_hierarchical")
 
     result = summarizer.run(
         text, length="detailed",
@@ -109,8 +110,8 @@ def test_scenario_map_flat(tmp_path: Path, monkeypatch):
     assert len(seen) == len(set(seen)), "duplicate chunks"
     # No omissions: union covers plan.
     planned: set[str] = set()
-    for b in insp.context_batches:
-        planned.update(b)
+    for b in ctx.plan.batches:
+        planned.update(b.chunk_ids)
     actual: set[str] = set()
     for b in batches:
         actual.update(b)

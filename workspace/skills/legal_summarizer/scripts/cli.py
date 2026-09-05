@@ -277,7 +277,8 @@ def main() -> None:
 
         from output import prepare_output
         from summarizer import (
-            estimate as _estimate,
+            _build_execution_context,
+            _estimate_for_run,
             inspect as _inspect,
             load_text,
             needs_confirmation,
@@ -330,17 +331,23 @@ def main() -> None:
 
         if args.estimate_only:
             insp = _inspect(text, document_path=str(args.file))
-            est = _estimate(insp)
+            ctx = _build_execution_context(
+                insp,
+                length=length,
+                question=args.question,
+            )
+            est = _estimate_for_run(insp, ctx)
             _emit_done({
                 "mode": "estimate_only",
                 "status": "ok",
                 "chars_in": len(text),
                 "chunks_total": len(insp.chunks),
-                "context_batches_total": len(insp.context_batches),
+                "chunks_selected": len(ctx.chunks),
+                "context_batches_total": est.context_batches,
                 "sections_total": len(insp.structure.iter_sections()) if insp.structure else 0,
                 # estimated_llm_calls намеренно не отдаём — пользователю
                 # важно только время; агенты склонны зеркалить числа.
-                "strategy": insp.strategy,
+                "strategy": ctx.strategy,
                 "estimated_duration_min_sec": est.estimated_duration_min_sec,
                 "estimated_duration_max_sec": est.estimated_duration_max_sec,
                 "confirmation_threshold_sec": est.confirmation_threshold_sec,
@@ -365,7 +372,8 @@ def main() -> None:
         # упал и упал на fallback), полный inspect может пересмотреть.
         if not args.confirm:
             insp = _inspect(text, document_path=str(args.file))
-            est = _estimate(insp)
+            ctx = _build_execution_context(insp, length=length, question=args.question)
+            est = _estimate_for_run(insp, ctx)
             if needs_confirmation(est):
                 from output import build_confirmation_options
                 payload = build_confirmation_options(

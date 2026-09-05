@@ -536,29 +536,23 @@ def _count_meaningful_sections_canonical(struct: DocumentStructure) -> int:
 
 @dataclass(frozen=True)
 class Inspection:
-    """Снимок анализа документа (PLAN §13).
+    """Снимок анализа документа (document-level, PLAN §13).
 
-    ``Inspection`` описывает **документ** (document-level): structure +
-    analysis + chunks. Это НЕ план конкретного запуска. Выбор chunks,
-    ``strategy`` и ``ExecutionPlan`` для конкретного запуска живёт в
-    ``ExecutionContext`` (строится через ``_build_execution_context``).
+    ``Inspection`` описывает **документ**: structure + analysis + chunks.
+    Это НЕ план конкретного запуска. Для конкретного запуска строить
+    ``ExecutionContext`` через ``_build_execution_context`` — там живут
+    strategy, список batch'ей и ``ExecutionPlan``.
 
-    Поля ``strategy`` / ``estimated_llm_calls`` / ``context_batches`` /
-    ``execution_plan`` оставлены для обратной совместимости (CLI
-    ``--estimate-only``, старые тесты) и представляют собой
-    **default/full-document оценку**, а не гарантированный план
-    execution. Реальный план конкретного запуска формируется только
-    в ``_build_execution_context``.
+    Legacy-поля ``strategy`` / ``context_batches`` /
+    ``estimated_llm_calls`` / ``execution_plan`` удалены (hardening:
+    полная чистка legacy). Оценка для запуска — через
+    ``_estimate_for_run(insp, ctx)``.
     """
 
     chars_in: int
     chunks: list
-    context_batches: list
     structure: DocumentStructure | None
     analysis: DocumentAnalysis | None
-    strategy: str
-    estimated_llm_calls: int
-    execution_plan: ExecutionPlan | None = None
 
 
 @dataclass(frozen=True)
@@ -579,13 +573,15 @@ def inspect(
     text: str,
     document_path: str | None = None,
 ) -> Inspection:
-    """Canonical inspection (PLAN §13)."""
+    """Canonical inspection (document-level, PLAN §13).
+
+    Возвращает ``Inspection`` со structure + analysis + chunks. Выбор
+    strategy / batch'ей / plan строится на уровне запуска через
+    ``_build_execution_context``.
+    """
     text = (text or "").strip()
     if not text:
-        return Inspection(
-            chars_in=0, chunks=[], context_batches=[], structure=None,
-            analysis=None, strategy="empty", estimated_llm_calls=0,
-        )
+        return Inspection(chars_in=0, chunks=[], structure=None, analysis=None)
     if document_path is None:
         raise ValueError(
             "inspect() требует document_path для canonical pipeline; "
@@ -598,34 +594,12 @@ def inspect(
         apply_repair=True,
         include_retrieval_index=True,
     )
-
     analysis = pipeline_result.analysis
-    chunks = list(pipeline_result.chunks)
-    structure = analysis.structure
-    strategy = select_strategy(structure, tuple(chunks))
-
-    execution_plan: ExecutionPlan | None = None
-    if strategy == "direct":
-        estimated = 1
-        batches: list[tuple[str, ...]] = []
-    else:
-        plan = build_execution_plan(
-            structure, tuple(chunks),
-            document_id=analysis.identity.document_id,
-        )
-        execution_plan = plan
-        batches = [tuple(b.chunk_ids) for b in plan.batches]
-        estimated = len(batches) + 1
-
     return Inspection(
         chars_in=len(text),
-        chunks=chunks,
-        context_batches=batches,
-        structure=structure,
+        chunks=list(pipeline_result.chunks),
+        structure=analysis.structure,
         analysis=analysis,
-        strategy=strategy,
-        estimated_llm_calls=estimated,
-        execution_plan=execution_plan,
     )
 
 
@@ -637,21 +611,6 @@ class Estimate:
     estimated_duration_min_sec: float
     estimated_duration_max_sec: float
     confirmation_threshold_sec: float
-
-
-def estimate(insp: Inspection) -> Estimate:
-    cfg = globals()["get_execution_config"]()
-    chunk_dur = float(cfg["estimated_chunk_duration_sec"])
-    threshold = float(cfg["confirmation_threshold_sec"])
-    avg = insp.context_batches.__len__() * chunk_dur
-    return Estimate(
-        chunks_count=len(insp.chunks),
-        context_batches=len(insp.context_batches),
-        estimated_llm_calls=insp.estimated_llm_calls,
-        estimated_duration_min_sec=round(avg * 0.8, 1),
-        estimated_duration_max_sec=round(avg * 1.2, 1),
-        confirmation_threshold_sec=threshold,
-    )
 
 
 def needs_confirmation(est: Estimate) -> bool:
@@ -1394,7 +1353,7 @@ def run(
 
     # --- 3. Canonical pipeline (один раз, document-level) ---
     insp = inspect(text, document_path=document_path)
-    if insp.strategy == "empty":
+    if not insp.chunks:
         return {
             "status": "failed",
             "error": {"code": "EMPTY_DOCUMENT", "message": "Документ не содержит текста"},

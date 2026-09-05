@@ -118,22 +118,6 @@ def test_direct_run_no_plan_no_map(tmp_path, monkeypatch):
     )
 
 
-def test_direct_run_through_inspect_no_plan(tmp_path):
-    """Inspection direct run: insp.execution_plan is None."""
-    import summarizer
-
-    text = _build_tiny_doc()
-    p = _write_doc(tmp_path, text)
-
-    insp = summarizer.inspect(text, document_path=str(p))
-    assert insp.strategy == "direct", f"expected direct, got {insp.strategy}"
-    # insp.execution_plan может быть None или not None — для direct это None.
-    assert insp.execution_plan is None, (
-        f"direct Inspection must have execution_plan=None; "
-        f"got {insp.execution_plan!r}"
-    )
-
-
 def test_direct_strategy_via_ctx_plan_none(tmp_path):
     """ctx.plan is None для direct."""
     import summarizer

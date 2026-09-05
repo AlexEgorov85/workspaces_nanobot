@@ -51,8 +51,10 @@ def test_direct_estimated_equals_actual(tmp_path: Path, monkeypatch):
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    assert insp.strategy == "direct"
-    assert insp.estimated_llm_calls == 1
+    ctx = summarizer._build_execution_context(insp, length="detailed")
+    est = summarizer._estimate_for_run(insp, ctx)
+    assert ctx.strategy == "direct"
+    assert est.estimated_llm_calls == 1
 
     result = summarizer.run(
         text, length="detailed",
@@ -60,13 +62,18 @@ def test_direct_estimated_equals_actual(tmp_path: Path, monkeypatch):
     )
     assert result["status"] == "completed", result
     actual = result["stats"]["total_llm_calls"]
-    assert actual == insp.estimated_llm_calls, (
-        f"estimated={insp.estimated_llm_calls}, actual={actual}"
+    assert actual == est.estimated_llm_calls, (
+        f"estimated={est.estimated_llm_calls}, actual={actual}"
     )
 
 
-def test_map_flat_estimated_equals_actual(tmp_path: Path, monkeypatch):
-    """Map-flat: estimated=len(batches)+1, actual=map+doc."""
+def test_map_flat_estimated_bounds_actual(tmp_path: Path, monkeypatch):
+    """Map-flat: estimate — верхняя граница (бatches + reduce + buffer);
+    actual = map + doc.
+
+    Semantic estimate (Этап 11): estimate != guarantee; для flat-map
+    actual часто равен estimate - 1 (нет section-level reduce).
+    """
     _install_llm_mocks(monkeypatch)
     import summarizer
 
@@ -79,8 +86,11 @@ def test_map_flat_estimated_equals_actual(tmp_path: Path, monkeypatch):
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    assert insp.strategy in ("map_flat", "map_hierarchical"), insp.strategy
-    estimated = insp.estimated_llm_calls
+    ctx = summarizer._build_execution_context(insp, length="detailed")
+    est = summarizer._estimate_for_run(insp, ctx)
+    assert ctx.strategy in ("map_flat", "map_hierarchical"), ctx.strategy
+    estimated = est.estimated_llm_calls
+    n_batches = len(ctx.plan.batches)
 
     result = summarizer.run(
         text, length="detailed",
@@ -89,7 +99,14 @@ def test_map_flat_estimated_equals_actual(tmp_path: Path, monkeypatch):
     )
     assert result["status"] == "completed", result
     actual = result["stats"]["total_llm_calls"]
-    assert actual == estimated, (
+    # Estimate — верхняя граница: actual <= estimated.
+    assert actual <= estimated, (
         f"strategy={result['stats']['strategy']}, "
-        f"estimated={estimated}, actual={actual}"
+        f"estimated={estimated}, actual={actual} (actual > estimate)"
+    )
+    # Для flat-map actual = batches + 1 (map + doc reduce).
+    # Для hierarchical actual может быть больше (section reduce).
+    expected_min = n_batches + 1
+    assert actual >= expected_min, (
+        f"map reduce: expected actual >= {expected_min}, got {actual}"
     )

@@ -95,14 +95,17 @@ def test_actual_batches_match_planned(tmp_path: Path, monkeypatch):
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    assert insp.strategy != "direct", (
+    ctx = summarizer._build_execution_context(insp, length="detailed")
+    assert ctx.strategy != "direct", (
         "Test expects map path; adjust doc size if it now goes direct"
     )
-    assert len(insp.context_batches) >= 2, (
+    assert ctx.plan is not None and len(ctx.plan.batches) >= 2, (
         "Test expects ≥2 planned batches; document must exceed one batch"
     )
 
-    planned_chunk_ids: list[tuple[str, ...]] = list(insp.context_batches)
+    planned_chunk_ids: list[tuple[str, ...]] = [
+        tuple(b.chunk_ids) for b in ctx.plan.batches
+    ]
 
     result = summarizer.run(
         text,
@@ -171,7 +174,8 @@ def test_each_chunk_processed_at_least_once(tmp_path: Path, monkeypatch):
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    planned = [set(batch) for batch in insp.context_batches]
+    ctx = summarizer._build_execution_context(insp, length="detailed")
+    planned = [set(b.chunk_ids) for b in ctx.plan.batches] if ctx.plan else []
     expected = set()
     for s in planned:
         expected.update(s)

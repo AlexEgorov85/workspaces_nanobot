@@ -179,10 +179,6 @@ def test_missing_chunks_raises_in_run_map_reduce(tmp_path, monkeypatch):
     )
     bad_plan = replace(plan, batches=bad_batches)
 
-    insp2 = replace(
-        insp, execution_plan=bad_plan,
-    )
-
     with pytest.raises(RuntimeError, match="missing"):
         summarizer._run_map_reduce(
             selected,
