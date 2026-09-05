@@ -3,9 +3,15 @@ document reduce), плюс утилитарная ``doc_context``.
 
 NOTE: legacy импорт ``ContextBatch`` удалён в PLAN §20. ``llm_batch``
 теперь принимает ``list[Chunk]`` (canonical-compatible signature).
+
+Single LLM boundary: ``chat_locked`` — единая обёртка для всех
+``llm.chat(...)`` вызовов в этом модуле, сериализующая их через
+``threading.Lock``. Это покрывает single-flight invariant для
+map / section reduce / document reduce внутри одной ``run()``.
 """
 from __future__ import annotations
 
+import threading
 from typing import Iterable
 
 import llm
@@ -19,6 +25,23 @@ from workspace.skills.legal_summarizer.scripts.prompts_runtime import (
     load_prompt,
     system_instruction,
 )
+
+
+# ---------------------------------------------------------------------------
+# Single-flight LLM boundary (intra-process)
+# ---------------------------------------------------------------------------
+#
+# Все вызовы ``llm.chat`` сериализуются через этот lock. В комбинации
+# с ``pipeline._LLM_FLIGHT_LOCK`` (cross-thread guard в pipeline.py)
+# это даёт гарантию ``max_active_llm_calls == 1`` для всех LLM-вызовов
+# во всех точках входа.
+_CHAT_LOCK = threading.Lock()
+
+
+def chat_locked(messages, *, context=None) -> str:
+    """Сериализованный ``llm.chat`` через единый lock."""
+    with _CHAT_LOCK:
+        return llm.chat(messages, context=context)
 
 
 def doc_context(structure: dict | None, *, with_begin_end: bool = False) -> str:
@@ -69,7 +92,7 @@ def llm_batch(
         {"role": "system", "content": system},
         {"role": "user", "content": user_body},
     ]
-    response = llm.chat(messages, context=None)
+    response = chat_locked(messages, context=None)
     return parse_batch_response(chunks_list, response)
 
 
@@ -95,7 +118,7 @@ def llm_section_reduce(
         {"role": "system", "content": system},
         {"role": "user", "content": user_body},
     ]
-    return llm.chat(messages, context=None)
+    return chat_locked(messages, context=None)
 
 
 def llm_document_reduce(
@@ -124,7 +147,7 @@ def llm_document_reduce(
         {"role": "system", "content": system},
         {"role": "user", "content": user_body},
     ]
-    return llm.chat(messages, context=None)
+    return chat_locked(messages, context=None)
 
 
 __all__ = [
@@ -132,4 +155,5 @@ __all__ = [
     "llm_batch",
     "llm_section_reduce",
     "llm_document_reduce",
+    "chat_locked",
 ]

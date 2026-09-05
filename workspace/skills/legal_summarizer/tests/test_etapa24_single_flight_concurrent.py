@@ -27,11 +27,6 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
     return p
 
 
-@pytest.mark.xfail(
-    reason="SingleFlightTracker monitors but doesn't block across threads; "
-           "asyncio.Semaphore is per-run, not global.",
-    strict=False,
-)
 def test_concurrent_runs_peak_is_one(tmp_path, monkeypatch):
     """Две параллельные run() → max concurrent LLM calls == 1."""
     from workspace.skills.legal_summarizer.scripts import llm_calls

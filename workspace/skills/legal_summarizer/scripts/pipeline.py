@@ -9,10 +9,17 @@
 NOTE: legacy импорт ``ContextBatch`` удалён в PLAN §20. Сигнатуры
 ``process_context_batch(chunks, ...)`` и ``run_one_batch_async(chunks, ...)``
 принимают ``list[Chunk]`` (canonical-compatible).
+
+Cross-thread single-flight: ``_llm_batch`` обёрнут в
+``_LLM_FLIGHT_LOCK`` (threading.Lock). Все LLM-вызовы внутри
+``process_context_batch`` сериализуются через этот lock, что
+гарантирует ``max_active_llm_calls == 1`` даже при нескольких
+параллельных ``summarizer.run()`` в разных потоках.
 """
 from __future__ import annotations
 
 import asyncio
+import threading
 import time as _time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +35,17 @@ from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
 
 
 MAX_BATCH_PARSE_RETRIES = 3
+
+
+# ---------------------------------------------------------------------------
+# Cross-thread LLM single-flight boundary
+# ---------------------------------------------------------------------------
+#
+# Все ``process_context_batch`` вызовы сериализуются через этот lock.
+# Это покрывает cross-thread случай (несколько ``summarizer.run()``
+# одновременно), потому что внутри одного run'а параллелизм
+# контролируется ``asyncio.Semaphore(1)``.
+_LLM_FLIGHT_LOCK = threading.Lock()
 
 
 def now_iso() -> str:
@@ -47,17 +65,21 @@ def process_context_batch(
     progress: Any = None,
     batch_id: str = "",
 ) -> dict[str, Any]:
-    """Один LLM call → parse → write per-chunk files."""
+    """Один LLM call → parse → write per-chunk files.
+
+    Обёрнут в ``_LLM_FLIGHT_LOCK`` для cross-thread single-flight.
+    """
     chunks_list = list(chunks)
     started_at = now_iso()
     start = _time.monotonic()
-    result = _llm_batch(
-        chunks_list,
-        chunks_total=chunks_total,
-        structure=structure,
-        length=length,
-        question=question,
-    )
+    with _LLM_FLIGHT_LOCK:
+        result = _llm_batch(
+            chunks_list,
+            chunks_total=chunks_total,
+            structure=structure,
+            length=length,
+            question=question,
+        )
     duration = round(_time.monotonic() - start, 3)
     completed_at = now_iso()
 
