@@ -76,6 +76,9 @@ from workspace.skills.legal_summarizer.scripts.structure.document_analysis impor
 from workspace.skills.legal_summarizer.scripts.structure.models import (
     DocumentStructure,
 )
+from workspace.skills.legal_summarizer.scripts.structure.execution_plan import (
+    ExecutionPlan,
+)
 from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
     build_execution_plan,
     select_strategy,
@@ -233,12 +236,35 @@ def _extract_pdf_head(path: Path, *, max_pages: int, max_chars: int) -> str:
     return "\n\n".join(parts)
 
 
-def make_operation_id(text: str, length: str) -> str:
-    """Стабильный operation_id."""
+def make_operation_id(
+    text: str,
+    length: str,
+    *,
+    document_path: str | None = None,
+    question: str | None = None,
+) -> str:
+    """Стабильный operation_id (Этап 13).
+
+    Детерминированно зависит от:
+
+    * первых 64 КБ текста (sha256 hex);
+    * ``length`` (brief / detailed);
+    * ``document_path`` (если передан);
+    * ``question`` (если передан).
+
+    Не использует wall-clock или ``monotonic_ns`` — два прогона с
+    одинаковыми аргументами дают одинаковый ``operation_id``, что
+    необходимо для idempotency manifest.
+    """
     sample = text[: 64 * 1024].encode("utf-8", errors="replace")
     h = hashlib.sha256(sample).hexdigest()[:12]
-    ts = _time.monotonic_ns()
-    return f"op_{ts}_{h}_{length}"
+    extras = (
+        f"\npath:{document_path or ''}"
+        f"\nlen:{length}"
+        f"\nq:{question or ''}"
+    )
+    extras_hash = hashlib.sha256(extras.encode("utf-8")).hexdigest()[:8]
+    return f"op_{h}_{extras_hash}_{length}"
 
 
 from workspace.skills.legal_summarizer.scripts.llm_calls import (  # noqa: E402
@@ -385,6 +411,8 @@ class Inspection:
     """Результат inspection документа (PLAN §13).
 
     Canonical variant: ``structure: DocumentStructure`` + ``analysis: DocumentAnalysis``.
+    ``execution_plan`` — единый план map/direct (для инварианта Этапа 2:
+    один canonical pipeline на запуск).
     """
 
     chars_in: int
@@ -394,6 +422,7 @@ class Inspection:
     analysis: DocumentAnalysis | None
     strategy: str
     estimated_llm_calls: int
+    execution_plan: ExecutionPlan | None = None
 
 
 def inspect(
@@ -425,6 +454,7 @@ def inspect(
     structure = analysis.structure
     strategy = select_strategy(structure, tuple(chunks))
 
+    execution_plan: ExecutionPlan | None = None
     if strategy == "direct":
         estimated = 1
         batches: list[tuple[str, ...]] = []
@@ -433,6 +463,7 @@ def inspect(
             structure, tuple(chunks),
             document_id=analysis.identity.document_id,
         )
+        execution_plan = plan
         batches = [tuple(b.chunk_ids) for b in plan.batches]
         estimated = len(batches) + 1
 
@@ -444,6 +475,7 @@ def inspect(
         analysis=analysis,
         strategy=strategy,
         estimated_llm_calls=estimated,
+        execution_plan=execution_plan,
     )
 
 
@@ -559,6 +591,7 @@ def _build_manifest(
     operation_id: str,
     document_path: str | None,
     structure: dict | None,
+    analysis: DocumentAnalysis | None,
     chars_in: int,
     length: str,
     chunks_total: int,
@@ -568,12 +601,17 @@ def _build_manifest(
     started_at: str | None = None,
     article_count: int,
 ) -> NormalizedManifest:
+    title = None
+    if analysis is not None and analysis.structure.title is not None:
+        title = analysis.structure.title.value
+    elif structure:
+        title = structure.get("title")
     return NormalizedManifest(
         operation_id=operation_id,
         status="running",
         version=2,
         document_path=document_path,
-        structure_title=(structure or {}).get("title"),
+        structure_title=title,
         chars_in=chars_in,
         length=length,
         chunks_total=chunks_total,
@@ -603,6 +641,8 @@ def _run_direct(
     focus: str | None,
     question: str | None,
     structure: dict | None,
+    analysis: DocumentAnalysis | None,
+    execution_plan: ExecutionPlan | None,
     operation_id: str,
     document_path: str | None,
     workspace_root: Path | str | None,
@@ -611,7 +651,11 @@ def _run_direct(
     article_count: int,
     existing_manifest: NormalizedManifest | None,
 ) -> dict:
-    """Canonical direct execution: single llm_document_reduce call."""
+    """Canonical direct execution: single llm_document_reduce call.
+
+    Использует ``analysis`` из ``Inspection`` (один canonical pipeline
+    на запуск; см. Этап 2).
+    """
     total_start = _time.monotonic()
     retries = 0
     ordered = list(chunks)
@@ -641,6 +685,12 @@ def _run_direct(
     duration = round(_time.monotonic() - total_start, 1)
     subject = _extract_subject(final_summary)
 
+    title = None
+    if analysis is not None and analysis.structure.title is not None:
+        title = analysis.structure.title.value
+    elif structure:
+        title = structure.get("title")
+
     result = {
         "subject": subject,
         "summary": final_summary,
@@ -648,9 +698,9 @@ def _run_direct(
         "chars_in": chars_in,
         "chunks": len(ordered),
         "context_batches": 1,
-        "sections": _count_sections(None),
+        "sections": _count_sections(analysis.structure if analysis else None),
         "strategy": "direct",
-        "title": (structure or {}).get("title"),
+        "title": title,
         "partial": False,
     }
     write_result(operation_id, result, workspace_root=workspace_root)
@@ -659,6 +709,7 @@ def _run_direct(
         operation_id=operation_id,
         document_path=document_path,
         structure=structure,
+        analysis=analysis,
         chars_in=chars_in,
         length=length,
         chunks_total=len(ordered),
@@ -678,6 +729,12 @@ def _run_direct(
     manifest.batches_done = ["cb_000"]
     save_manifest(manifest, workspace_root=workspace_root)
 
+    sections_total = _count_sections(analysis.structure if analysis else None)
+    meaningful_sections = (
+        _count_meaningful_sections_canonical(analysis.structure)
+        if analysis is not None else 0
+    )
+
     return {
         "status": "completed",
         "operation_id": operation_id,
@@ -686,8 +743,8 @@ def _run_direct(
             "chars_in": chars_in,
             "chunks_total": len(ordered),
             "context_batches_total": 1,
-            "sections_total": 0,
-            "meaningful_sections": 0,
+            "sections_total": sections_total,
+            "meaningful_sections": meaningful_sections,
             "article_count": article_count,
             "map_calls": 0,
             "section_reduce_calls": 0,
@@ -712,6 +769,8 @@ def _run_map_reduce(
     focus: str | None,
     question: str | None,
     structure: dict | None,
+    analysis: DocumentAnalysis | None,
+    execution_plan: ExecutionPlan | None,
     document_path: str | None,
     operation_id: str,
     workspace_root: Path | str | None,
@@ -720,40 +779,50 @@ def _run_map_reduce(
     article_count: int,
     existing_manifest: NormalizedManifest | None,
 ) -> dict:
-    """Canonical map_reduce: batch execution → hierarchical/flat reduce."""
+    """Canonical map_reduce: batch execution → hierarchical/flat reduce.
+
+    Invariant Этапа 2: ``run_canonical_pipeline`` вызывается ровно один раз
+    в ``inspect()``. Эта функция использует уже готовые ``analysis`` и
+    ``execution_plan`` из ``Inspection``.
+    """
     from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
         HierarchicalReducerConfig,
         reduce_chunks_hierarchical,
         reduce_sections_to_document,
     )
 
-    struct = None
-    analysis = None
-    # Re-run inspect to get structure for section iteration (lightweight, cached on disk)
-    if document_path:
-        try:
-            _insp_result = run_canonical_pipeline(
-                document_path,
-                apply_repair=True,
-                include_retrieval_index=True,
-            )
-            analysis = _insp_result.analysis
-            struct = analysis.structure
-        except Exception:
-            struct = None
-
-    plan = build_execution_plan(
-        struct,
-        tuple(chunks),
-        document_id=analysis.identity.document_id if analysis else "",
-    )
-    batch_chunks_list = [list(c.chunk_id for c in chunks) for _ in plan.batches]
-    # Build actual chunk lists per batch
+    struct = analysis.structure if analysis is not None else None
+    plan = execution_plan
+    if plan is None and struct is not None:
+        plan = build_execution_plan(
+            struct,
+            tuple(chunks),
+            document_id=analysis.identity.document_id if analysis else "",
+        )
+    # Map actual batches strictly to plan.batches[i].chunk_ids (one-to-one,
+    # no duplication, no omission). See Этап 1 acceptance: each chunk is
+    # processed exactly once.
     chunk_by_id = {c.chunk_id: c for c in chunks}
     final_batches = [
-        [chunk_by_id[cid] for cid in bcids if cid in chunk_by_id]
-        for bcids in batch_chunks_list
+        [chunk_by_id[cid] for cid in batch.chunk_ids if cid in chunk_by_id]
+        for batch in plan.batches
     ]
+    # Invariant: union of final_batches chunk_ids == expected chunk_ids.
+    actual_chunk_ids: list[str] = []
+    for fb in final_batches:
+        actual_chunk_ids.extend(c.chunk_id for c in fb)
+    expected_chunk_ids = [c.chunk_id for c in chunks]
+    if sorted(actual_chunk_ids) != sorted(expected_chunk_ids):
+        raise RuntimeError(
+            "Этап 1 invariant violated: "
+            f"plan batches do not cover expected chunks. "
+            f"missing={sorted(set(expected_chunk_ids) - set(actual_chunk_ids))}, "
+            f"extra={sorted(set(actual_chunk_ids) - set(expected_chunk_ids))}",
+        )
+    if len(set(actual_chunk_ids)) != len(actual_chunk_ids):
+        raise RuntimeError(
+            "Этап 1 invariant violated: duplicate chunk_id in map batches",
+        )
 
     # Section metadata for manifest + hierarchical reduce
     section_ids: list[str] = []
@@ -771,6 +840,7 @@ def _run_map_reduce(
         operation_id=operation_id,
         document_path=document_path,
         structure=structure,
+        analysis=analysis,
         chars_in=chars_in,
         length=length,
         chunks_total=len(chunks),
@@ -1003,6 +1073,12 @@ def _run_map_reduce(
     total_llm_calls = map_calls + section_reduce_calls + document_reduce_calls
     meaningful = _count_meaningful_sections_canonical(struct) if struct else 0
 
+    title = None
+    if analysis is not None and analysis.structure.title is not None:
+        title = analysis.structure.title.value
+    elif structure:
+        title = structure.get("title")
+
     result = {
         "subject": subject,
         "summary": final_summary,
@@ -1012,7 +1088,7 @@ def _run_map_reduce(
         "context_batches": len(final_batches),
         "sections": _count_sections(struct),
         "strategy": strategy_label,
-        "title": (structure or {}).get("title"),
+        "title": title,
         "partial": is_partial,
     }
     write_result(operation_id, result, workspace_root=workspace_root)
@@ -1021,6 +1097,7 @@ def _run_map_reduce(
         operation_id=operation_id,
         document_path=document_path,
         structure=structure,
+        analysis=analysis,
         chars_in=chars_in,
         length=length,
         chunks_total=len(chunks),
@@ -1085,7 +1162,15 @@ def run(
     document_path: str | None = None,
     workspace_root: Path | str | None = None,
 ) -> dict:
-    """Canonical execution path: inspect → select chunks → map/direct reduce."""
+    """Canonical execution path (Этап 14: idempotency до analysis).
+
+    Порядок:
+
+    1. ``resolve operation_id`` (детерминированно из text+length+path+question);
+    2. ``check completed manifest`` — если completed и не legacy → return cached;
+    3. ``inspect()`` — только если нужен;
+    4. select chunks, estimate, execute.
+    """
     text = (text or "").strip()
     if not text:
         return {
@@ -1096,22 +1181,12 @@ def run(
 
     length = length if length in _LENGTH_INSTRUCTIONS else "brief"
 
-    insp = inspect(text, document_path=document_path)
-    if insp.strategy == "empty":
-        return {
-            "status": "failed",
-            "error": {"code": "EMPTY_DOCUMENT", "message": "Документ не содержит текста"},
-            "operation_id": operation_id,
-        }
+    # Этап 14: resolve operation_id ДО analysis.
+    operation_id = operation_id or make_operation_id(
+        text, length, document_path=document_path, question=question,
+    )
 
-    chosen_chunks = _select_chunks_for_mode(insp, question=question, length=length)
-
-    est = estimate(insp)
-    exec_cfg = globals()["get_execution_config"]()
-    max_chunks_for_execution = int(exec_cfg["max_chunks_for_execution"])
-
-    operation_id = operation_id or make_operation_id(text, length)
-
+    # Этап 14: idempotency check до inspect/analysis.
     existing_manifest = load_manifest(operation_id, workspace_root)
     if (
         existing_manifest is not None
@@ -1135,12 +1210,36 @@ def run(
                 },
             }
 
+    insp = inspect(text, document_path=document_path)
+    if insp.strategy == "empty":
+        return {
+            "status": "failed",
+            "error": {"code": "EMPTY_DOCUMENT", "message": "Документ не содержит текста"},
+            "operation_id": operation_id,
+        }
+
+    chosen_chunks = _select_chunks_for_mode(insp, question=question, length=length)
+
+    est = estimate(insp)
+    exec_cfg = globals()["get_execution_config"]()
+    max_chunks_for_execution = int(exec_cfg["max_chunks_for_execution"])
+
+    # Этап 14: idempotency уже обработан выше (до inspect).
+    # existing_manifest нужен для resume/sections_payload в execution,
+    # поэтому он загружается здесь повторно (cache hit на filesystem).
+    existing_manifest = load_manifest(operation_id, workspace_root)
+
     if needs_confirmation(est) and not confirmed:
         _progress(
             f"confirmation_required: chunks={len(insp.chunks)}, "
             f"batches={len(insp.context_batches)}, "
             f"est_duration={est.estimated_duration_min_sec:.0f}-"
             f"{est.estimated_duration_max_sec:.0f}s"
+        )
+        title = (
+            insp.analysis.structure.title.value
+            if insp.analysis is not None and insp.analysis.structure.title is not None
+            else (structure or {}).get("title")
         )
         return {
             "status": "confirmation_required",
@@ -1151,7 +1250,7 @@ def run(
                 "context_batches_total": len(insp.context_batches),
                 "estimated_llm_calls": insp.estimated_llm_calls,
                 "strategy": insp.strategy,
-                "title": (structure or {}).get("title"),
+                "title": title,
             },
             "estimate": {
                 "min_seconds": est.estimated_duration_min_sec,
@@ -1162,6 +1261,11 @@ def run(
         }
 
     if len(chosen_chunks) > max_chunks_for_execution:
+        title = (
+            insp.analysis.structure.title.value
+            if insp.analysis is not None and insp.analysis.structure.title is not None
+            else (structure or {}).get("title")
+        )
         return {
             "status": "requires_continuation",
             "operation_id": operation_id,
@@ -1170,7 +1274,7 @@ def run(
                 "chunks_total": len(insp.chunks),
                 "chunks_selected": len(chosen_chunks),
                 "estimated_llm_calls": insp.estimated_llm_calls,
-                "title": (structure or {}).get("title"),
+                "title": title,
             },
             "hint": (
                 f"Выбранная выборка ({len(chosen_chunks)} chunks) превышает "
@@ -1188,6 +1292,8 @@ def run(
         focus=focus,
         question=question,
         structure=structure,
+        analysis=insp.analysis,
+        execution_plan=insp.execution_plan,
         document_path=document_path,
         operation_id=operation_id,
         workspace_root=workspace_root,
