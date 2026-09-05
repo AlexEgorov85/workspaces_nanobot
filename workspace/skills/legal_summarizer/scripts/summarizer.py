@@ -365,6 +365,134 @@ def _select_chunks_for_mode(
 
 
 # ---------------------------------------------------------------------------
+# Execution context (run-level): selected chunks + strategy + plan
+# ---------------------------------------------------------------------------
+
+
+def _build_execution_context(
+    insp: Inspection,
+    length: str | None = None,
+    question: str | None = None,
+    selected_chunks: list | None = None,
+) -> ExecutionContext:
+    """Собрать контекст конкретного запуска из Inspection (document-level).
+
+    Единая точка, которая выбирает chunks, вычисляет ``strategy`` и
+    строит ``ExecutionPlan``. Вынесена отдельно для тестирования
+    (этап 21) и для разделения document-level / run-level.
+
+    Parameters
+    ----------
+    insp:
+        Результат ``inspect()`` (document-level снимок).
+    length:
+        Режим суммаризации ('brief' / 'detailed' / None = full).
+    question:
+        Вопрос пользователя (для ``question``-режима).
+    selected_chunks:
+        Предвыбранная выборка (если передана — используется напрямую,
+        без выбора через ``_select_chunks_for_mode``).
+    """
+    if selected_chunks is not None:
+        chunks = tuple(selected_chunks)
+    else:
+        chunks = tuple(_select_chunks_for_mode(insp, length=length, question=question))
+
+    if len(chunks) <= 1:
+        plan = None
+        strategy = "direct"
+    elif insp.structure is not None:
+        strategy = select_strategy(insp.structure, list(chunks))
+        plan = build_execution_plan(
+            insp.structure,
+            tuple(chunks),
+            document_id=insp.analysis.identity.document_id if insp.analysis else "",
+        )
+    else:
+        plan = None
+        strategy = "direct"
+
+    return ExecutionContext(chunks=chunks, strategy=strategy, plan=plan)
+
+
+# ---------------------------------------------------------------------------
+# Execution estimation helpers
+# ---------------------------------------------------------------------------
+
+
+def _count_execution_calls(
+    plan: ExecutionPlan | None,
+    chunks: tuple[Chunk, ...],
+) -> int:
+    """Подсчитать количество LLM-вызовов для execution-плана.
+
+    - ``None`` (direct) → 1 (один прямой вызов для всего документа).
+    - С ``plan`` → 1 + ``len(plan.batches)`` + 1 (summarize + reduce).
+    """
+    if plan is None:
+        return 1
+    return 1 + len(plan.batches) + 1
+
+
+def _simulate_section_doc_reduce_calls(
+    plan: ExecutionPlan | None,
+) -> int:
+    """Приблизительное количество LLM-вызовов для reduce-фазы.
+
+    В реальности ``hierarchical_reducer`` может разбить 输出 на несколько
+    маркерных групп, но для ``estimate`` используется
+    ``1 + len(plan.batches)`` как upper bound.
+    """
+    if plan is None:
+        return 0
+    return 1 + len(plan.batches)
+
+
+def _estimate_execution(
+    insp: Inspection,
+    length: str | None = None,
+    question: str | None = None,
+) -> tuple[int, int]:
+    """(min_calls, max_calls) для выбранного режима execution.
+
+    Используется ``_build_execution_context`` для выбора chunks,
+    чтобы оценка строилась на той же выборке, что и реальный run.
+    """
+    ctx = _build_execution_context(insp, length=length, question=question)
+    min_calls = _count_execution_calls(ctx.plan, ctx.chunks)
+    max_calls = min_calls + _simulate_section_doc_reduce_calls(ctx.plan)
+    return min_calls, max_calls
+
+
+def _estimate_for_run(
+    insp: Inspection,
+    ctx: ExecutionContext,
+) -> Estimate:
+    """Estimate для конкретного run-context (run-level).
+
+    Строится на selected chunks и реальном plan, unlike ``estimate()``
+    (которая использует default/full-document оценку).
+    """
+    cfg = globals()["get_execution_config"]()
+    chunk_dur = float(cfg["estimated_chunk_duration_sec"])
+    threshold = float(cfg["confirmation_threshold_sec"])
+    if ctx.plan is None:
+        batches = 1
+    else:
+        batches = len(ctx.plan.batches)
+    llm_calls = _count_execution_calls(ctx.plan, ctx.chunks)
+    avg = batches * chunk_dur
+    return Estimate(
+        chunks_count=len(ctx.chunks),
+        context_batches=batches,
+        estimated_llm_calls=llm_calls,
+        estimated_duration_min_sec=round(avg * 0.8, 1),
+        estimated_duration_max_sec=round(avg * 1.2, 1),
+        confirmation_threshold_sec=threshold,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Canonical section helpers
 # ---------------------------------------------------------------------------
 
@@ -408,11 +536,19 @@ def _count_meaningful_sections_canonical(struct: DocumentStructure) -> int:
 
 @dataclass(frozen=True)
 class Inspection:
-    """Результат inspection документа (PLAN §13).
+    """Снимок анализа документа (PLAN §13).
 
-    Canonical variant: ``structure: DocumentStructure`` + ``analysis: DocumentAnalysis``.
-    ``execution_plan`` — единый план map/direct (для инварианта Этапа 2:
-    один canonical pipeline на запуск).
+    ``Inspection`` описывает **документ** (document-level): structure +
+    analysis + chunks. Это НЕ план конкретного запуска. Выбор chunks,
+    ``strategy`` и ``ExecutionPlan`` для конкретного запуска живёт в
+    ``ExecutionContext`` (строится через ``_build_execution_context``).
+
+    Поля ``strategy`` / ``estimated_llm_calls`` / ``context_batches`` /
+    ``execution_plan`` оставлены для обратной совместимости (CLI
+    ``--estimate-only``, старые тесты) и представляют собой
+    **default/full-document оценку**, а не гарантированный план
+    execution. Реальный план конкретного запуска формируется только
+    в ``_build_execution_context``.
     """
 
     chars_in: int
@@ -423,6 +559,20 @@ class Inspection:
     strategy: str
     estimated_llm_calls: int
     execution_plan: ExecutionPlan | None = None
+
+
+@dataclass(frozen=True)
+class ExecutionContext:
+    """Контекст конкретного запуска (run-level).
+
+    Собирается через ``_build_execution_context`` из ``Inspection``
+    (document-level). ``chunks`` — выбранная для запуска выборка;
+    ``strategy`` и ``plan`` построены именно для неё.
+    """
+
+    chunks: tuple[Chunk, ...]
+    strategy: str
+    plan: ExecutionPlan | None
 
 
 def inspect(
@@ -634,6 +784,37 @@ def _build_manifest(
     )
 
 
+def _map_plan_to_chunk_batches(
+    plan: ExecutionPlan,
+    chunks: list,
+) -> list[list[Chunk]]:
+    """Преобразовать ``ExecutionPlan`` в список батчей chunks.
+
+    Единая точка маппинга plan→chunks для ``_run_map_reduce``.
+    Неизвестные ``cid`` → ``RuntimeError``. Дубликаты → ``RuntimeError``.
+    Порядок батчей == порядок ``plan.batches``.
+    """
+    chunk_by_id = {c.chunk_id: c for c in chunks}
+    seen_ids: set[str] = set()
+    result: list[list[Chunk]] = []
+    for batch in plan.batches:
+        batch_chunks: list[Chunk] = []
+        for cid in batch.chunk_ids:
+            if cid not in chunk_by_id:
+                raise RuntimeError(
+                    f"plan references unknown chunk_id={cid!r}; "
+                    f"available={[c.chunk_id for c in chunks]}"
+                )
+            if cid in seen_ids:
+                raise RuntimeError(
+                    f"duplicate chunk_id={cid!r} across batches"
+                )
+            seen_ids.add(cid)
+            batch_chunks.append(chunk_by_id[cid])
+        result.append(batch_chunks)
+    return result
+
+
 def _run_direct(
     chunks: list,
     *,
@@ -642,12 +823,11 @@ def _run_direct(
     question: str | None,
     structure: dict | None,
     analysis: DocumentAnalysis | None,
-    execution_plan: ExecutionPlan | None,
     operation_id: str,
     document_path: str | None,
     workspace_root: Path | str | None,
     chars_in: int,
-    insp_estimated_llm_calls: int,
+    estimated_llm_calls: int,
     article_count: int,
     existing_manifest: NormalizedManifest | None,
 ) -> dict:
@@ -714,7 +894,7 @@ def _run_direct(
         length=length,
         chunks_total=len(ordered),
         context_batches_total=1,
-        estimated_llm_calls=insp_estimated_llm_calls,
+        estimated_llm_calls=estimated_llm_calls,
         sections_payload={},
         started_at=existing_manifest.started_at if existing_manifest else _now_iso(),
         article_count=article_count,
@@ -764,26 +944,26 @@ def _run_direct(
 def _run_map_reduce(
     chunks: list,
     *,
+    plan: ExecutionPlan | None,
     strategy: str,
     length: str,
     focus: str | None,
     question: str | None,
     structure: dict | None,
     analysis: DocumentAnalysis | None,
-    execution_plan: ExecutionPlan | None,
     document_path: str | None,
     operation_id: str,
     workspace_root: Path | str | None,
     chars_in: int,
-    insp_estimated_llm_calls: int,
+    estimated_llm_calls: int,
     article_count: int,
     existing_manifest: NormalizedManifest | None,
 ) -> dict:
     """Canonical map_reduce: batch execution → hierarchical/flat reduce.
 
     Invariant Этапа 2: ``run_canonical_pipeline`` вызывается ровно один раз
-    в ``inspect()``. Эта функция использует уже готовые ``analysis`` и
-    ``execution_plan`` из ``Inspection``.
+    в ``inspect()``. Эта функция использует уже готовые ``analysis`` из
+    ``Inspection`` и ``plan`` из ``ExecutionContext``.
     """
     from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
         HierarchicalReducerConfig,
@@ -791,22 +971,17 @@ def _run_map_reduce(
         reduce_sections_to_document,
     )
 
-    struct = analysis.structure if analysis is not None else None
-    plan = execution_plan
-    if plan is None and struct is not None:
-        plan = build_execution_plan(
-            struct,
-            tuple(chunks),
-            document_id=analysis.identity.document_id if analysis else "",
+    if plan is None:
+        raise RuntimeError(
+            "_run_map_reduce requires a non-None ExecutionPlan; "
+            "direct mode should use _run_direct instead"
         )
-    # Map actual batches strictly to plan.batches[i].chunk_ids (one-to-one,
-    # no duplication, no omission). See Этап 1 acceptance: each chunk is
-    # processed exactly once.
-    chunk_by_id = {c.chunk_id: c for c in chunks}
-    final_batches = [
-        [chunk_by_id[cid] for cid in batch.chunk_ids if cid in chunk_by_id]
-        for batch in plan.batches
-    ]
+
+    struct = analysis.structure if analysis is not None else None
+
+    # Единая точка маппинга plan→chunks (Этап 21:未知cid → RuntimeError).
+    final_batches = _map_plan_to_chunk_batches(plan, chunks)
+
     # Invariant: union of final_batches chunk_ids == expected chunk_ids.
     actual_chunk_ids: list[str] = []
     for fb in final_batches:
@@ -845,7 +1020,7 @@ def _run_map_reduce(
         length=length,
         chunks_total=len(chunks),
         context_batches_total=len(final_batches),
-        estimated_llm_calls=insp_estimated_llm_calls,
+        estimated_llm_calls=estimated_llm_calls,
         sections_payload=sections_payload,
         started_at=existing_manifest.started_at if existing_manifest else _now_iso(),
         article_count=article_count_for_manifest,
@@ -897,6 +1072,14 @@ def _run_map_reduce(
         _progress(
             f"batch {batch_id}: {len(pending)}/{len(batch_chunks)} chunks "
             f"queued ({total_batches} batches total, concurrency={concurrency})"
+        )
+
+    # Этап 21: order invariant — queued batch_ids == plan batch order.
+    expected_ids = [f"cb_{i:03d}" for i in range(len(final_batches))]
+    actual_ids = [bid for bid, _, _ in queued]
+    if actual_ids != [eid for eid in expected_ids if eid in set(actual_ids)]:
+        raise RuntimeError(
+            f"batch order mismatch: queued={actual_ids} != expected={expected_ids}"
         )
 
     if queued:
@@ -1102,7 +1285,7 @@ def _run_map_reduce(
         length=length,
         chunks_total=len(chunks),
         context_batches_total=len(final_batches),
-        estimated_llm_calls=insp_estimated_llm_calls,
+        estimated_llm_calls=estimated_llm_calls,
         sections_payload=sections_payload,
         started_at=existing_manifest.started_at if existing_manifest else _now_iso(),
         article_count=article_count_for_manifest,
@@ -1168,8 +1351,9 @@ def run(
 
     1. ``resolve operation_id`` (детерминированно из text+length+path+question);
     2. ``check completed manifest`` — если completed и не legacy → return cached;
-    3. ``inspect()`` — только если нужен;
-    4. select chunks, estimate, execute.
+    3. ``inspect()`` — один canonical pipeline (document-level);
+    4. ``_build_execution_context()`` — selected chunks + strategy + plan (run-level);
+    5. confirmation / requires_continuation / execute.
     """
     text = (text or "").strip()
     if not text:
@@ -1210,6 +1394,7 @@ def run(
                 },
             }
 
+    # --- 3. Canonical pipeline (один раз, document-level) ---
     insp = inspect(text, document_path=document_path)
     if insp.strategy == "empty":
         return {
@@ -1218,9 +1403,12 @@ def run(
             "operation_id": operation_id,
         }
 
-    chosen_chunks = _select_chunks_for_mode(insp, question=question, length=length)
+    # --- 4. Run-level: selected chunks + strategy + plan ---
+    ctx = _build_execution_context(insp, length=length, question=question)
 
-    est = estimate(insp)
+    # Run-level estimate (на selected chunks, не на полном документе).
+    run_estimate = _estimate_for_run(insp, ctx)
+
     exec_cfg = globals()["get_execution_config"]()
     max_chunks_for_execution = int(exec_cfg["max_chunks_for_execution"])
 
@@ -1229,12 +1417,13 @@ def run(
     # поэтому он загружается здесь повторно (cache hit на filesystem).
     existing_manifest = load_manifest(operation_id, workspace_root)
 
-    if needs_confirmation(est) and not confirmed:
+    # --- Confirmation (на selected chunks) ---
+    if needs_confirmation(run_estimate) and not confirmed:
         _progress(
-            f"confirmation_required: chunks={len(insp.chunks)}, "
-            f"batches={len(insp.context_batches)}, "
-            f"est_duration={est.estimated_duration_min_sec:.0f}-"
-            f"{est.estimated_duration_max_sec:.0f}s"
+            f"confirmation_required: chunks={len(ctx.chunks)}, "
+            f"batches={run_estimate.context_batches}, "
+            f"est_duration={run_estimate.estimated_duration_min_sec:.0f}-"
+            f"{run_estimate.estimated_duration_max_sec:.0f}s"
         )
         title = (
             insp.analysis.structure.title.value
@@ -1247,20 +1436,21 @@ def run(
             "summary": {
                 "chars_in": insp.chars_in,
                 "chunks_total": len(insp.chunks),
-                "context_batches_total": len(insp.context_batches),
-                "estimated_llm_calls": insp.estimated_llm_calls,
-                "strategy": insp.strategy,
+                "chunks_selected": len(ctx.chunks),
+                "context_batches_total": run_estimate.context_batches,
+                "estimated_llm_calls": run_estimate.estimated_llm_calls,
+                "strategy": ctx.strategy,
                 "title": title,
             },
             "estimate": {
-                "min_seconds": est.estimated_duration_min_sec,
-                "max_seconds": est.estimated_duration_max_sec,
-                "confirmation_threshold_sec": est.confirmation_threshold_sec,
+                "min_seconds": run_estimate.estimated_duration_min_sec,
+                "max_seconds": run_estimate.estimated_duration_max_sec,
+                "confirmation_threshold_sec": run_estimate.confirmation_threshold_sec,
             },
             "hint": "Передайте --confirm для запуска полной обработки.",
         }
 
-    if len(chosen_chunks) > max_chunks_for_execution:
+    if len(ctx.chunks) > max_chunks_for_execution:
         title = (
             insp.analysis.structure.title.value
             if insp.analysis is not None and insp.analysis.structure.title is not None
@@ -1272,12 +1462,12 @@ def run(
             "summary": {
                 "chars_in": insp.chars_in,
                 "chunks_total": len(insp.chunks),
-                "chunks_selected": len(chosen_chunks),
-                "estimated_llm_calls": insp.estimated_llm_calls,
+                "chunks_selected": len(ctx.chunks),
+                "estimated_llm_calls": run_estimate.estimated_llm_calls,
                 "title": title,
             },
             "hint": (
-                f"Выбранная выборка ({len(chosen_chunks)} chunks) превышает "
+                f"Выбранная выборка ({len(ctx.chunks)} chunks) превышает "
                 f"max_chunks_for_execution={max_chunks_for_execution}. "
                 f"Уменьшите max_chunks_per_question / question_fallback_max_chunks "
                 f"или передайте --confirm для принудительного продолжения."
@@ -1285,28 +1475,29 @@ def run(
         }
 
     article_count = len(re.findall(r"Статья\s+\d+(?:\.\d+)?", text))
-    strategy = select_strategy(insp.structure, tuple(chosen_chunks))
 
+    # --- 5. Execute ---
     _common = dict(
         length=length,
         focus=focus,
         question=question,
         structure=structure,
         analysis=insp.analysis,
-        execution_plan=insp.execution_plan,
         document_path=document_path,
         operation_id=operation_id,
         workspace_root=workspace_root,
         chars_in=insp.chars_in,
-        insp_estimated_llm_calls=insp.estimated_llm_calls,
+        estimated_llm_calls=run_estimate.estimated_llm_calls,
         article_count=article_count,
         existing_manifest=existing_manifest,
     )
 
-    if strategy == "direct":
-        return _run_direct(chosen_chunks, **_common)
+    if ctx.strategy == "direct":
+        return _run_direct(list(ctx.chunks), **_common)
 
-    return _run_map_reduce(chosen_chunks, strategy=strategy, **_common)
+    return _run_map_reduce(
+        list(ctx.chunks), plan=ctx.plan, strategy=ctx.strategy, **_common,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1317,6 +1508,7 @@ __all__ = [
     "run",
     "inspect",
     "Inspection",
+    "ExecutionContext",
     "Estimate",
     "estimate",
     "needs_confirmation",

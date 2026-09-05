@@ -55,7 +55,7 @@ def test_block_ownership_no_duplicates():
         _hc(0, "Глава 1", source="regex_glзава"),
         _hc(2, "Глава 2", source="regex_glзава"),
     ]
-    struct = build_document_structure(cs, total_blocks=10)
+    struct = build_document_structure(cs, total_blocks=10, document_id="test")
     ownership = build_block_ownership(struct)
 
     counts = Counter(ownership.values())
@@ -70,7 +70,7 @@ def test_block_ownership_covers_section_blocks():
         _hc(0, "1."),
         _hc(5, "2."),
     ]
-    struct = build_document_structure(cs, total_blocks=10)
+    struct = build_document_structure(cs, total_blocks=10, document_id="test")
     ownership = build_block_ownership(struct)
     for b in range(10):
         owner = ownership.get(b)
@@ -85,7 +85,7 @@ def test_block_ownership_respects_nesting():
         _hc(0, "1."),
         _hc(3, "1.1."),
     ]
-    struct = build_document_structure(cs, total_blocks=10)
+    struct = build_document_structure(cs, total_blocks=10, document_id="test")
     ownership = build_block_ownership(struct)
 
     sections = struct.iter_sections()
@@ -101,7 +101,7 @@ def test_block_ownership_respects_nesting():
 
 def test_block_ownership_for_root_only():
     """Структура без sections — все blocks принадлежат root."""
-    struct = build_document_structure([], total_blocks=5)
+    struct = build_document_structure([], total_blocks=5, document_id="test")
     ownership = build_block_ownership(struct)
     assert len(ownership) == 0
 
@@ -116,7 +116,7 @@ def test_owner_for_block_returns_deepest_section():
         _hc(0, "Глава 1", source="regex_glзава"),
         _hc(2, "Статья 1", source="regex_statiya"),
     ]
-    struct = build_document_structure(cs, total_blocks=5)
+    struct = build_document_structure(cs, total_blocks=5, document_id="test")
     ownership = build_block_ownership(struct)
     sections = struct.iter_sections()
     chapter = next(s for s in sections if "Глава" in s.title)
@@ -164,7 +164,7 @@ def test_owner_for_block_returns_none_for_out_of_range():
         owner_for_block,
     )
 
-    struct = build_document_structure([], total_blocks=5)
+    struct = build_document_structure([], total_blocks=5, document_id="test")
     assert owner_for_block(struct, 5) is None
     assert owner_for_block(struct, -1) is None
 
@@ -176,7 +176,7 @@ def test_owner_for_block_lazy_builds_ownership():
     )
 
     cs = [_hc(0, "1."), _hc(5, "2.")]
-    struct = build_document_structure(cs, total_blocks=10)
+    struct = build_document_structure(cs, total_blocks=10, document_id="test")
     assert owner_for_block(struct, 0) is not None
     assert owner_for_block(struct, 5) is not None
 
@@ -189,7 +189,7 @@ def test_block_ownership_zero_or_one_owner_per_block():
         _hc(2, "Статья 2", source="regex_statiya"),
         _hc(4, "Глава 2", source="regex_glзава"),
     ]
-    struct = build_document_structure(cs, total_blocks=6)
+    struct = build_document_structure(cs, total_blocks=6, document_id="test")
     ownership = build_block_ownership(struct)
     for b in range(struct.total_blocks):
         assert b in ownership or b not in ownership

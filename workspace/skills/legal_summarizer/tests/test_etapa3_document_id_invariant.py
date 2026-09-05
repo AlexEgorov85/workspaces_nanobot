@@ -107,9 +107,10 @@ def test_identity_is_source_of_truth(tmp_path):
     struct = build_document_structure(
         [],
         total_blocks=0,
-        config=StructureTreeBuilderConfig(),
+        document_id="test",
+        config=StructureTreeBuilderConfig(document_id="test"),
     )
-    assert struct.document_id == "doc"
+    assert struct.document_id == "test"
 
     identity = DocumentIdentity.from_path(str(p))
     physical = PhysicalDocument(

@@ -63,7 +63,7 @@ def _nested_three_level_structure() -> DocumentStructure:
         _hc(2, "A.2", source="regex_statiya", level=2, score=0.85, raw_number="A.2"),
         _hc(3, "B", source="regex_glзава", level=1, score=0.85, raw_number="B"),
     ]
-    return build_document_structure(cs, total_blocks=4)
+    return build_document_structure(cs, total_blocks=4, document_id="test")
 
 
 def test_invariant_root_has_no_parent():
@@ -161,7 +161,7 @@ def test_invariant_end_block_equals_next_candidate_minus_one():
         _hc(2, "A.2", source="regex_statiya", level=2, score=0.85, raw_number="A.2"),
         _hc(3, "B", source="regex_glзава", level=1, score=0.85, raw_number="B"),
     ]
-    s = build_document_structure(cs, total_blocks=4)
+    s = build_document_structure(cs, total_blocks=4, document_id="test")
     section_nodes = s.iter_sections()
     expected_ends = {
         "A": 0,
@@ -183,7 +183,7 @@ def test_invariant_last_candidate_end_is_total_blocks_minus_one():
         _hc(0, "1.", score=0.7, raw_number="1"),
         _hc(5, "2.", score=0.7, raw_number="2"),
     ]
-    s = build_document_structure(cs, total_blocks=8)
+    s = build_document_structure(cs, total_blocks=8, document_id="test")
     section_nodes = s.iter_sections()
     last = section_nodes[-1]
     assert last.title == "2."
@@ -208,8 +208,8 @@ def test_invariant_determinism_byte_for_byte():
         _hc(3, "B", source="regex_glзава", level=1, score=0.85, raw_number="B"),
         _hc(4, "B.1", source="regex_statiya", level=2, score=0.85, raw_number="B.1"),
     ]
-    s1 = build_document_structure(cs, total_blocks=8)
-    s2 = build_document_structure(cs, total_blocks=8)
+    s1 = build_document_structure(cs, total_blocks=8, document_id="test")
+    s2 = build_document_structure(cs, total_blocks=8, document_id="test")
     d1 = s1.to_dict()
     d2 = s2.to_dict()
     j1 = json.dumps(d1, sort_keys=True, ensure_ascii=False)
@@ -256,7 +256,7 @@ def test_invariant_three_level_expected_shape():
 
 
 def test_invariant_empty_structure_has_only_root():
-    s = build_document_structure([], total_blocks=5)
+    s = build_document_structure([], total_blocks=5, document_id="test")
     assert len(s.nodes) == 1
     assert s.root_id in s.nodes
     root = s.nodes[s.root_id]

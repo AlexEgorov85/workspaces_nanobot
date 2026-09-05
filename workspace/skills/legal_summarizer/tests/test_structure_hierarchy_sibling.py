@@ -23,7 +23,7 @@ def test_sibling_ordinals_in_hierarchy_flat():
         _hc(5, "2. Вторая"),
         _hc(10, "3. Третья"),
     ]
-    s = build_document_structure(cs, total_blocks=15)
+    s = build_document_structure(cs, total_blocks=15, document_id="test")
     section_ids = s.nodes[s.root_id].children
     ordinals = [s.nodes[nid].number.ordinal for nid in section_ids]
     assert ordinals == [1, 2, 3]
@@ -44,7 +44,7 @@ def test_sibling_ordinals_in_hierarchy_resets_per_parent():
         _hc(8, "2.1. Под первой второй"),
         _hc(10, "2.2. Под второй второй"),
     ]
-    s = build_document_structure(cs, total_blocks=15)
+    s = build_document_structure(cs, total_blocks=15, document_id="test")
     sections = s.iter_sections()
     ordinals = [sec.number.ordinal for sec in sections]
     assert ordinals == [1, 1, 2, 1, 1, 2]

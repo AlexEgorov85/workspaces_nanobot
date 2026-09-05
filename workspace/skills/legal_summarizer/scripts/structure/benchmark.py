@@ -105,7 +105,7 @@ def _build_chunks_and_struct(
     loader = DocumentLoader()
     physical = loader.load(path)
     candidates = detect_heading_candidates(physical.blocks, pdf_path=None)
-    struct = build_document_structure(candidates, total_blocks=len(physical.blocks))
+    struct = build_document_structure(candidates, total_blocks=len(physical.blocks), document_id="benchmark")
     struct, _ = repair_structure(struct)
     chunks = tuple(ChunkPlanner().plan(physical, struct))
     return struct, chunks, physical

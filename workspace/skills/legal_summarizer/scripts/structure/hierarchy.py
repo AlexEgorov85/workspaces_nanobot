@@ -117,8 +117,8 @@ def _effective_level(c: HeadingCandidate, ni: NumberingInfo | None) -> int:
 class StructureTreeBuilderConfig:
     """Параметры builder'а (минимальный набор)."""
 
+    document_id: str
     default_section_level: int = 1
-    document_id: str = "doc"
     include_body_nodes: bool = True
 
 
@@ -178,6 +178,7 @@ def build_document_structure(
     candidates: Iterable[HeadingCandidate],
     *,
     total_blocks: int,
+    document_id: str | None = None,
     config: StructureTreeBuilderConfig | None = None,
     title: DocumentTitle | None = None,
 ) -> DocumentStructure:
@@ -188,6 +189,8 @@ def build_document_structure(
             ``detect_heading_candidates``).
         total_blocks: ``len(PhysicalDocument.blocks)`` — для
             ``coverage_ratio`` и root диапазона.
+        document_id: идентификатор документа (обязателен если ``config`` не
+            передан; берётся из ``config.document_id`` если ``config`` задан).
         config: параметры builder'а.
         title: ``DocumentTitle`` или ``None``.
 
@@ -201,7 +204,14 @@ def build_document_structure(
     Если таких нет, parent = root. Это даёт реальное nested дерево,
     а не плоский список.
     """
-    cfg = config or StructureTreeBuilderConfig()
+    if config is not None:
+        cfg = config
+    elif document_id is not None:
+        cfg = StructureTreeBuilderConfig(document_id=document_id)
+    else:
+        raise TypeError(
+            "build_document_structure() requires either 'config' or 'document_id'"
+        )
 
     accepted = [c for c in candidates if c.block_index >= 0]
     accepted.sort(key=lambda c: (c.block_index, c.level))

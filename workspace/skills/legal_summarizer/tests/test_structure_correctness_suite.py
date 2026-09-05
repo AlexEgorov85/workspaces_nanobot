@@ -36,7 +36,7 @@ def test_nested_decimal():
         _hc(5, "1.1. Под первая"),
         _hc(10, "1.1.1. Под под первая"),
     ]
-    s = build_document_structure(cs, total_blocks=15)
+    s = build_document_structure(cs, total_blocks=15, document_id="test")
     assert s.root_id in s.nodes
 
     sections = s.iter_sections()
@@ -55,7 +55,7 @@ def test_chapter_article():
         _hc(5, "Статья 1", source="regex_statiya"),
         _hc(10, "Статья 2", source="regex_statiya"),
     ]
-    s = build_document_structure(cs, total_blocks=15)
+    s = build_document_structure(cs, total_blocks=15, document_id="test")
     sections = s.iter_sections()
     assert len(sections) == 3
     chapter = sections[0]
@@ -108,7 +108,7 @@ def test_missing_intermediate_parent_handled():
         _hc(0, "Random heading without numbering"),
         _hc(5, "1.1."),
     ]
-    s = build_document_structure(cs, total_blocks=10)
+    s = build_document_structure(cs, total_blocks=10, document_id="test")
     sections = s.iter_sections()
     assert sections[0].parent_id == s.root_id
 
@@ -124,7 +124,7 @@ def test_mixed_numbering_schemes():
         _hc(0, "Глава 1", source="regex_glзава"),
         _hc(5, "Статья 5", source="regex_statiya"),
     ]
-    s = build_document_structure(cs, total_blocks=15)
+    s = build_document_structure(cs, total_blocks=15, document_id="test")
     sections = s.iter_sections()
     assert len(sections) == 2
     assert sections[0].semantic_type == "chapter"

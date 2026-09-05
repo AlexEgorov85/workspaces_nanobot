@@ -87,9 +87,9 @@ def test_scenario_map_flat(tmp_path: Path, monkeypatch):
 
     text = (
         "1. Общие положения\n\n"
-        + ("Текст. " * 50) * 100
+        + ("Текст. " * 50) * 300
         + "\n\n2. Предмет\n\n"
-        + ("Текст. " * 50) * 100
+        + ("Текст. " * 50) * 300
     )
     p = _write_doc(tmp_path, text)
 
