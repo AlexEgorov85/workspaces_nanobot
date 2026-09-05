@@ -779,7 +779,6 @@ def _build_manifest(
         completed_at=None,
         duration_sec=None,
         article_count=article_count,
-        is_legacy=False,
         raw={},
     )
 
@@ -1375,7 +1374,6 @@ def run(
     if (
         existing_manifest is not None
         and existing_manifest.status == "completed"
-        and not existing_manifest.is_legacy
     ):
         cached_result = read_result(operation_id, workspace_root)
         if cached_result is not None:

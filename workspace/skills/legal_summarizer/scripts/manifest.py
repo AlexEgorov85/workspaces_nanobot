@@ -1,4 +1,4 @@
-"""Manifest v2 + legacy normalizer для legal_summarizer Phase 2B.
+"""Manifest v2 для legal_summarizer Phase 2B.
 
 Manifest хранит source of truth для resume (invariant #12, #13, #14):
   * ``chunk_states`` — per-chunk state (status, section_id, page range, ...)
@@ -6,26 +6,19 @@ Manifest хранит source of truth для resume (invariant #12, #13, #14):
   * ``sections`` — sections tree (derived, пересчитывается при необходимости)
   * ``section_summaries`` — per-section summary (для hierarchical reduce)
 
-Legacy v1 manifest (Phase 2/3) содержит:
-  * ``batches_done: [int]`` — индексы выполненных чанков
-  * ``chunks_total: int``
-  * ``status: str``
-  * ``last_error: dict | None``
-
-Legacy → v2 нормализация **in-memory**, без перезаписи на диск (invariant #8).
-Legacy operations всегда используют flat reduce (нет section_path).
+Поддерживается только формат v2. ``load_manifest`` возвращает ``None``
+для несовместимых манифестов (legacy v1 normalizer удалён).
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
 MANIFEST_VERSION_V2 = 2
-MANIFEST_VERSION_V1 = 1
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -49,10 +42,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 @dataclass
 class NormalizedManifest:
-    """Унифицированное представление manifest'а в формате v2.
-
-    Поля legacy заполняются как None, если manifest v1.
-    """
+    """Унифицированное представление manifest'а в формате v2."""
 
     operation_id: str
     status: str
@@ -76,7 +66,6 @@ class NormalizedManifest:
     completed_at: str | None
     duration_sec: float | None
     article_count: int | None
-    is_legacy: bool
     raw: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
@@ -151,64 +140,19 @@ def result_path(operation_id: str, workspace_root: Path | str | None = None) -> 
     return manifest_root(workspace_root) / operation_id / "result.json"
 
 
-def _detect_version(raw: dict[str, Any]) -> int:
+def _detect_version(raw: dict[str, Any]) -> int | None:
+    """Вернуть ``MANIFEST_VERSION_V2`` только для v2 manifest, иначе ``None``.
+
+    Legacy v1 manifest не поддерживается (normalizer удалён).
+    """
     if "version" in raw:
         try:
-            v = int(raw["version"])
-            return v if v == MANIFEST_VERSION_V2 else MANIFEST_VERSION_V1
+            return MANIFEST_VERSION_V2 if int(raw["version"]) == MANIFEST_VERSION_V2 else None
         except (TypeError, ValueError):
-            pass
+            return None
     if "chunk_states" in raw or "context_batches" in raw:
         return MANIFEST_VERSION_V2
-    if "batches_done" in raw and "chunks_total" in raw:
-        return MANIFEST_VERSION_V1
-    return MANIFEST_VERSION_V1
-
-
-def _normalize_v1(raw: dict[str, Any]) -> NormalizedManifest:
-    batches_done_idx = raw.get("batches_done") or []
-    chunks_total = int(raw.get("chunks_total") or len(batches_done_idx))
-    chunk_states: dict[str, dict[str, Any]] = {}
-    for i in batches_done_idx:
-        chunk_id = f"{int(i):03d}"
-        chunk_states[chunk_id] = {
-            "status": "completed",
-            "context_batch_id": f"legacy_b_{int(i):03d}",
-            "section_id": None,
-            "section_path": None,
-            "page_start": None,
-            "page_end": None,
-            "result_path": f"batches/{int(i):04d}.json",
-            "duration_sec": None,
-            "is_legacy": True,
-        }
-
-    return NormalizedManifest(
-        operation_id=str(raw.get("operation_id", "")),
-        status=str(raw.get("status", "running")),
-        version=MANIFEST_VERSION_V1,
-        document_path=raw.get("document_path"),
-        structure_title=raw.get("structure_title"),
-        chars_in=int(raw.get("chars_in") or 0),
-        length=str(raw.get("length", "medium")),
-        chunks_total=chunks_total,
-        context_batches_total=len(batches_done_idx),
-        estimated_llm_calls=raw.get("estimated_llm_calls"),
-        actual_llm_calls=raw.get("actual_llm_calls"),
-        sections={},
-        chunk_states=chunk_states,
-        context_batches={},
-        section_summaries={},
-        batches_done=[f"{int(i):03d}" for i in batches_done_idx],
-        batches_failed=[str(i) for i in (raw.get("batches_failed") or [])],
-        last_error=raw.get("last_error"),
-        started_at=raw.get("started_at"),
-        completed_at=raw.get("completed_at"),
-        duration_sec=raw.get("duration_sec"),
-        article_count=raw.get("article_count"),
-        is_legacy=True,
-        raw=raw,
-    )
+    return None
 
 
 def _normalize_v2(raw: dict[str, Any]) -> NormalizedManifest:
@@ -235,7 +179,6 @@ def _normalize_v2(raw: dict[str, Any]) -> NormalizedManifest:
         completed_at=raw.get("completed_at"),
         duration_sec=raw.get("duration_sec"),
         article_count=raw.get("article_count"),
-        is_legacy=False,
         raw=raw,
     )
 
@@ -244,27 +187,25 @@ def load_manifest(
     operation_id: str,
     workspace_root: Path | str | None = None,
 ) -> NormalizedManifest | None:
-    """Прочитать manifest.json и нормализовать к формату v2 in-memory."""
+    """Прочитать manifest.json и нормализовать к формату v2 in-memory.
+
+    Возвращает ``None`` если файла нет или это не v2 manifest
+    (legacy v1 normalizer удалён — несовместимые манифесты игнорируются).
+    """
     raw = _read_json(manifest_path(operation_id, workspace_root))
     if raw is None:
         return None
     version = _detect_version(raw)
-    if version == MANIFEST_VERSION_V2:
-        return _normalize_v2(raw)
-    return _normalize_v1(raw)
+    if version != MANIFEST_VERSION_V2:
+        return None
+    return _normalize_v2(raw)
 
 
 def save_manifest(
     normalized: NormalizedManifest,
     workspace_root: Path | str | None = None,
 ) -> None:
-    """Записать manifest в формате v2 на диск.
-
-    Если операция legacy — НЕ пишем (in-memory only, чтобы не повредить
-    существующий v1 manifest).
-    """
-    if normalized.is_legacy:
-        return
+    """Записать manifest в формате v2 на диск."""
     payload = normalized.to_dict()
     payload["version"] = MANIFEST_VERSION_V2
     _atomic_write_json(manifest_path(normalized.operation_id, workspace_root), payload)
@@ -323,7 +264,6 @@ def read_result(
 
 
 __all__ = [
-    "MANIFEST_VERSION_V1",
     "MANIFEST_VERSION_V2",
     "NormalizedManifest",
     "load_manifest",
