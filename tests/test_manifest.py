@@ -2,9 +2,11 @@
 
 Покрывает:
     * v2 manifest read/write
-    * legacy v1 → v2 normalization (in-memory, без перезаписи на диск)
     * chunk_result read/write
     * result.json read/write
+
+Поддерживается только формат v2: ``load_manifest`` возвращает ``None``
+для несовместимых (legacy v1) манифестов — v1 normalizer удалён.
 """
 
 from __future__ import annotations
@@ -24,7 +26,6 @@ if str(_PROJ) not in sys.path:
     sys.path.insert(0, str(_PROJ))
 
 from workspace.skills.legal_summarizer.scripts.manifest import (  # noqa: E402
-    MANIFEST_VERSION_V1,
     MANIFEST_VERSION_V2,
     NormalizedManifest,
     chunk_result_path,
@@ -72,7 +73,6 @@ def test_manifest_v2_roundtrip(tmp_path):
         completed_at=None,
         duration_sec=None,
         article_count=42,
-        is_legacy=False,
         raw={},
     )
     save_manifest(m, workspace_root=ws)
@@ -85,7 +85,8 @@ def test_manifest_v2_roundtrip(tmp_path):
     assert loaded.article_count == 42
 
 
-def test_legacy_manifest_normalizes_to_v2(tmp_path):
+def test_legacy_v1_manifest_returns_none(tmp_path):
+    """Legacy v1 manifest (без version/chunk_states) игнорируется."""
     ws = _workspace(tmp_path)
     op_id = "op_legacy_001"
     legacy = {
@@ -104,18 +105,11 @@ def test_legacy_manifest_normalizes_to_v2(tmp_path):
     manifest_path(op_id, ws).parent.mkdir(parents=True, exist_ok=True)
     manifest_path(op_id, ws).write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
 
-    loaded = load_manifest(op_id, workspace_root=ws)
-    assert loaded is not None
-    assert loaded.version == MANIFEST_VERSION_V1
-    assert loaded.is_legacy
-    assert loaded.chunks_total == 5
-    assert loaded.chunk_states["000"]["status"] == "completed"
-    assert loaded.chunk_states["000"]["is_legacy"] is True
-    assert loaded.chunk_states["000"]["section_path"] is None
-    assert loaded.actual_llm_calls == 6
+    assert load_manifest(op_id, workspace_root=ws) is None
 
 
 def test_legacy_manifest_not_overwritten_on_disk(tmp_path):
+    """Legacy v1 manifest не читается и не перезаписывается."""
     ws = _workspace(tmp_path)
     op_id = "op_legacy_no_overwrite"
     legacy = {
@@ -129,11 +123,7 @@ def test_legacy_manifest_not_overwritten_on_disk(tmp_path):
     path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
 
     loaded = load_manifest(op_id, workspace_root=ws)
-    save_manifest(loaded, workspace_root=ws)
-
-    on_disk = json.loads(path.read_text(encoding="utf-8"))
-    assert "version" not in on_disk
-    assert on_disk == legacy
+    assert loaded is None
 
 
 def test_chunk_result_roundtrip(tmp_path):
@@ -197,6 +187,7 @@ def test_load_corrupted_json_returns_none(tmp_path):
 
 
 def test_legacy_chunk_states_have_none_section_metadata(tmp_path):
+    """Legacy v1 manifest (без chunk_states) → load_manifest вернёт None."""
     ws = _workspace(tmp_path)
     op_id = "op_legacy_none"
     legacy = {
@@ -208,29 +199,7 @@ def test_legacy_chunk_states_have_none_section_metadata(tmp_path):
     path = manifest_path(op_id, ws)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
-    loaded = load_manifest(op_id, workspace_root=ws)
-    assert loaded.is_legacy
-    for sid, state in loaded.chunk_states.items():
-        assert state["section_id"] is None
-        assert state["section_path"] is None
-
-
-def test_legacy_resume_continues_with_flat_reduce():
-    """Legacy operations не имеют section_path → flat reduce."""
-    legacy = {
-        "operation_id": "op_legacy",
-        "status": "running",
-        "chunks_total": 5,
-        "batches_done": [0, 1],
-    }
-    loaded = _normalize_legacy_dict(legacy)
-    assert loaded.is_legacy
-    assert all(s is None for s in [state.get("section_path") for state in loaded.chunk_states.values()])
-
-
-def _normalize_legacy_dict(legacy: dict):
-    from workspace.skills.legal_summarizer.scripts.manifest import _normalize_v1
-    return _normalize_v1(legacy)
+    assert load_manifest(op_id, workspace_root=ws) is None
 
 
 def test_v2_manifest_detected_via_version_field(tmp_path):
@@ -248,7 +217,6 @@ def test_v2_manifest_detected_via_version_field(tmp_path):
     path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
     loaded = load_manifest(op_id, workspace_root=ws)
     assert loaded.version == MANIFEST_VERSION_V2
-    assert not loaded.is_legacy
 
 
 def test_v2_manifest_detected_via_field_absence(tmp_path):

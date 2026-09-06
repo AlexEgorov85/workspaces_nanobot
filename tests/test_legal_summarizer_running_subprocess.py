@@ -102,6 +102,16 @@ _STUB_SUMMARIZER = textwrap.dedent(
             confirmation_threshold_sec: float = 120.0
         return _Est()
 
+    class _Ctx:
+        chunks = []
+        strategy = "single"
+
+    def _build_execution_context(insp, *, length=None, question=None):
+        return _Ctx()
+
+    def _estimate_for_run(insp, ctx):
+        return estimate(insp)
+
     def needs_confirmation(est):
         return False
 

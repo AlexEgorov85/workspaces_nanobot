@@ -5,13 +5,14 @@
     * DOCX → blocks (paragraphs + tables) в document order
     * TXT → один block
     * ordinal монотонный (invariant #3)
-    * кэш на диске
     * ошибки (missing file, unsupported format)
+
+Загрузка идёт через canonical :class:`DocumentLoader` (Этап 12):
+``load_physical_document`` и его disk-cache удалены.
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -25,11 +26,19 @@ _PROJ = _REPO
 if str(_PROJ) not in sys.path:
     sys.path.insert(0, str(_PROJ))
 
+from workspace.skills.legal_summarizer.scripts.structure.document_loader import (  # noqa: E402
+    DocumentLoader,
+)
 from workspace.skills.legal_summarizer.scripts.structure.physical import (  # noqa: E402
     DocumentBlock,
     PhysicalDocument,
-    load_physical_document,
 )
+
+_LOADER = DocumentLoader()
+
+
+def _load(path: Path) -> PhysicalDocument:
+    return _LOADER.load(path)
 
 
 def _write_txt(path: Path, content: str) -> None:
@@ -97,7 +106,7 @@ def _write_pdf(path: Path, pages_text: list[str]) -> None:
 def test_load_txt_returns_single_block(tmp_path):
     p = tmp_path / "doc.txt"
     _write_txt(p, "Договор аренды.\n\nСтороны и предмет.")
-    doc = load_physical_document(p)
+    doc = _load(p)
     assert isinstance(doc, PhysicalDocument)
     assert doc.format == "txt"
     assert len(doc.blocks) == 1
@@ -109,7 +118,7 @@ def test_load_txt_returns_single_block(tmp_path):
 def test_txt_block_page_metadata_is_none(tmp_path):
     p = tmp_path / "doc.txt"
     _write_txt(p, "abc")
-    doc = load_physical_document(p)
+    doc = _load(p)
     block = doc.blocks[0]
     assert block.page_index is None
     assert block.paragraph_index is None
@@ -124,7 +133,7 @@ def test_txt_block_page_metadata_is_none(tmp_path):
 def test_load_docx_returns_paragraphs(tmp_path):
     p = tmp_path / "doc.docx"
     _write_docx(p, ["Первый параграф.", "Второй параграф.", "Третий."])
-    doc = load_physical_document(p)
+    doc = _load(p)
     assert doc.format == "docx"
     para_blocks = [b for b in doc.blocks if b.block_type == "paragraph"]
     assert len(para_blocks) == 3
@@ -143,7 +152,7 @@ def test_load_docx_returns_tables_in_document_order(tmp_path):
         paragraphs=["До таблицы."],
         table_rows=[["a", "b"], ["c", "d"]],
     )
-    doc = load_physical_document(p)
+    doc = _load(p)
     assert len(doc.blocks) == 2
     assert doc.blocks[0].block_type == "paragraph"
     assert doc.blocks[0].content == "До таблицы."
@@ -161,7 +170,7 @@ def test_load_docx_ordinal_is_monotonic(tmp_path):
         paragraphs=["p1", "p2", "p3"],
         table_rows=[["x", "y"], ["z", "w"]],
     )
-    doc = load_physical_document(p)
+    doc = _load(p)
     ordinals = [b.ordinal for b in doc.blocks]
     assert ordinals == list(range(len(doc.blocks)))
 
@@ -169,7 +178,7 @@ def test_load_docx_ordinal_is_monotonic(tmp_path):
 def test_load_docx_skips_empty_paragraphs(tmp_path):
     p = tmp_path / "doc.docx"
     _write_docx(p, ["Видимый.", "", "   ", "Тоже видимый."])
-    doc = load_physical_document(p)
+    doc = _load(p)
     assert [b.content for b in doc.blocks if b.block_type == "paragraph"] == [
         "Видимый.",
         "Тоже видимый.",
@@ -184,7 +193,7 @@ def test_load_docx_skips_empty_paragraphs(tmp_path):
 def test_load_pdf_returns_pages(tmp_path):
     p = tmp_path / "doc.pdf"
     _write_pdf(p, ["Первая страница.", "Вторая страница."])
-    doc = load_physical_document(p)
+    doc = _load(p)
     assert doc.format == "pdf"
     assert doc.page_count == 2
     page_blocks = [b for b in doc.blocks if b.block_type == "page"]
@@ -196,7 +205,7 @@ def test_load_pdf_returns_pages(tmp_path):
 def test_load_pdf_ordinal_is_monotonic(tmp_path):
     p = tmp_path / "doc.pdf"
     _write_pdf(p, ["page1", "page2", "page3"])
-    doc = load_physical_document(p)
+    doc = _load(p)
     ordinals = [b.ordinal for b in doc.blocks]
     assert ordinals == list(range(len(doc.blocks)))
 
@@ -208,7 +217,7 @@ def test_load_pdf_extracts_tables_per_page(tmp_path):
         pytest.skip("pdfplumber not available")
     p = tmp_path / "doc.pdf"
     _write_pdf(p, ["page with table"])
-    doc = load_physical_document(p)
+    doc = _load(p)
     assert doc.page_count == 1
 
 
@@ -219,56 +228,14 @@ def test_load_pdf_extracts_tables_per_page(tmp_path):
 
 def test_load_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
-        load_physical_document(tmp_path / "missing.pdf")
+        _load(tmp_path / "missing.pdf")
 
 
 def test_load_unsupported_format_raises(tmp_path):
     p = tmp_path / "data.bin"
     p.write_bytes(b"\x00" * 10)
     with pytest.raises(ValueError, match="Неподдерживаемый формат"):
-        load_physical_document(p)
-
-
-# ---------------------------------------------------------------------------
-# Cache
-# ---------------------------------------------------------------------------
-
-
-def test_physical_document_cached_on_disk(tmp_path):
-    """Повторный вызов не парсит файл, читает из кэша."""
-    p = tmp_path / "doc.txt"
-    _write_txt(p, "cached content")
-
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-
-    doc1 = load_physical_document(p, workspace_root=workspace)
-    cache_dir = workspace / "workspace" / "data_store" / "cache" / "skills" / "legal_summarizer" / "physical"
-    assert cache_dir.exists()
-    files = list(cache_dir.glob("*.json"))
-    assert files, "Кэш должен быть записан"
-
-    cached_raw = json.loads(files[0].read_text(encoding="utf-8"))
-    cached_raw["blocks"][0]["content"] = "tampered"
-    files[0].write_text(json.dumps(cached_raw, ensure_ascii=False), encoding="utf-8")
-
-    doc2 = load_physical_document(p, workspace_root=workspace)
-    assert doc2.blocks[0].content == "tampered", (
-        "Кэш должен перечитаться без обращения к файлу"
-    )
-    assert doc1.blocks[0].content == "cached content"
-
-
-def test_physical_document_cache_stale_size_invalidates(tmp_path):
-    """Кэш с устаревшим размером файла инвалидируется."""
-    p = tmp_path / "doc.txt"
-    _write_txt(p, "first")
-    doc1 = load_physical_document(p, workspace_root=tmp_path)
-    assert doc1.blocks[0].content == "first"
-
-    _write_txt(p, "second and longer content")
-    doc2 = load_physical_document(p, workspace_root=tmp_path)
-    assert doc2.blocks[0].content == "second and longer content"
+        _load(p)
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +283,7 @@ def test_to_dict_roundtrip():
 def test_physical_document_to_dict_roundtrip(tmp_path):
     p = tmp_path / "doc.txt"
     _write_txt(p, "abc")
-    doc = load_physical_document(p)
+    doc = _load(p)
     d = doc.to_dict()
     restored = PhysicalDocument.from_dict(d)
     assert restored == doc
