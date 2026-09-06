@@ -247,7 +247,7 @@ def make_operation_id(
 
     Детерминированно зависит от:
 
-    * первых 64 КБ текста (sha256 hex);
+    * полного текста (sha256 hex);
     * ``length`` (brief / detailed);
     * ``document_path`` (если передан);
     * ``question`` (если передан).
@@ -255,9 +255,14 @@ def make_operation_id(
     Не использует wall-clock или ``monotonic_ns`` — два прогона с
     одинаковыми аргументами дают одинаковый ``operation_id``, что
     необходимо для idempotency manifest.
+
+    Полный текст хешируется (не префикс): изменение **хвоста**
+    документа (например, правка последней статьи) меняет
+    ``operation_id`` — иначе idempotency-кэш мог бы вернуть
+    устаревший результат для изменённого документа.
     """
-    sample = text[: 64 * 1024].encode("utf-8", errors="replace")
-    h = hashlib.sha256(sample).hexdigest()[:12]
+    text_blob = text.encode("utf-8", errors="replace")
+    h = hashlib.sha256(text_blob).hexdigest()[:12]
     extras = (
         f"\npath:{document_path or ''}"
         f"\nlen:{length}"
@@ -423,45 +428,67 @@ def _build_execution_context(
 def _count_execution_calls(
     plan: ExecutionPlan | None,
     chunks: tuple[Chunk, ...],
+    *,
+    strategy: str,
+    structure: DocumentStructure | None,
 ) -> int:
-    """Подсчитать количество LLM-вызовов для execution-плана.
+    """Верхняя граница (upper bound) числа LLM-вызовов для запуска.
 
-    - ``None`` (direct) → 1 (один прямой вызов для всего документа).
-    - С ``plan`` → 1 + ``len(plan.batches)`` + 1 (summarize + reduce).
+    * ``direct`` / ``plan is None`` → 1 (один прямой вызов).
+    * ``map_flat`` → ``len(batches)`` (map) + 1 (document reduce).
+    * ``map_hierarchical`` → ``len(batches)`` (map) + ``S`` (section reduce,
+      по числу всех sections) + ``D`` (document-level reduce-вызовов, включая
+      финальный). ``S + D`` — детерминированная симуляция
+      ``reduce_chunks_hierarchical`` (см. ``_hierarchical_reduce_calls``);
+      это настоящий upper bound, а не эвристика.
     """
-    if plan is None:
+    if plan is None or strategy == "direct":
         return 1
-    return 1 + len(plan.batches) + 1
+    batches = len(plan.batches)
+    if strategy == "map_hierarchical" and structure is not None:
+        s = len(list(structure.iter_sections()))
+        return batches + s + _hierarchical_reduce_calls(s)
+    return batches + 1
 
 
-def _simulate_section_doc_reduce_calls(
-    plan: ExecutionPlan | None,
-) -> int:
-    """Приблизительное количество LLM-вызовов для reduce-фазы.
+def _hierarchical_reduce_calls(sections: int) -> int:
+    """Верхняя граница числа document-level LLM-вызовов в
+    ``reduce_chunks_hierarchical`` (reduce-фаза после section reduce).
 
-    В реальности ``hierarchical_reducer`` может разбить 输出 на несколько
-    маркерных групп, но для ``estimate`` используется
-    ``1 + len(plan.batches)`` как upper bound.
+    Симулирует ``reduce_sections_to_document`` (PLAN §24):
+
+    * ``sections`` section-summaries на входе (в реальности это
+      ``len(section_summaries) <= sections`` — только non-empty, поэтому
+      оценка по ``sections`` — консервативный upper bound);
+    * каждый ``round`` разбивает ``current`` на группы по
+      ``MID_REDUCE_GROUP_SIZE`` и вызывает LLM **по разу на каждую группу**
+      (не по разу на round!);
+    * не более ``MAX_REDUCE_ROUNDS`` таких раундов;
+    * если после ``MAX_REDUCE_ROUNDS`` осталось больше одной группы — один
+      финальный LLM-вызов объединяет всё оставшееся.
+
+    Возвращает **суммарное** число вызовов по всем раундам + финал.
     """
-    if plan is None:
+    if sections <= 1:
+        # Zero / one section on the way in → reduce_sections_to_document
+        # is not even called (see ``reduce_chunks_hierarchical``:
+        # ``if len(section_items) > 1``). If it were called, a single item
+        # needs no LLM call.
         return 0
-    return 1 + len(plan.batches)
-
-
-def _estimate_execution(
-    insp: Inspection,
-    length: str | None = None,
-    question: str | None = None,
-) -> tuple[int, int]:
-    """(min_calls, max_calls) для выбранного режима execution.
-
-    Используется ``_build_execution_context`` для выбора chunks,
-    чтобы оценка строилась на той же выборке, что и реальный run.
-    """
-    ctx = _build_execution_context(insp, length=length, question=question)
-    min_calls = _count_execution_calls(ctx.plan, ctx.chunks)
-    max_calls = min_calls + _simulate_section_doc_reduce_calls(ctx.plan)
-    return min_calls, max_calls
+    current = sections
+    calls = 0
+    gs = MID_REDUCE_GROUP_SIZE
+    rounds = 0
+    while current > 1 and rounds < MAX_REDUCE_ROUNDS:
+        rounds += 1
+        # ``for i in range(0, len(current), gs)`` → ceil(current/gs) groups,
+        # each triggers one LLM call.
+        calls += -(-current // gs)
+        current = -(-current // gs)
+    if current > 1:
+        # Final reduce: one call joining everything that remains.
+        calls += 1
+    return calls
 
 
 def _estimate_for_run(
@@ -470,8 +497,9 @@ def _estimate_for_run(
 ) -> Estimate:
     """Estimate для конкретного run-context (run-level).
 
-    Строится на selected chunks и реальном plan, unlike ``estimate()``
-    (которая использует default/full-document оценку).
+    ``estimated_llm_calls`` — верхняя граница (upper bound) фактического
+    числа LLM-вызовов: гарантированно ``actual <= estimate`` для любой
+    стратегии (direct / map_flat / map_hierarchical).
     """
     cfg = globals()["get_execution_config"]()
     chunk_dur = float(cfg["estimated_chunk_duration_sec"])
@@ -480,7 +508,10 @@ def _estimate_for_run(
         batches = 1
     else:
         batches = len(ctx.plan.batches)
-    llm_calls = _count_execution_calls(ctx.plan, ctx.chunks)
+    llm_calls = _count_execution_calls(
+        ctx.plan, ctx.chunks,
+        strategy=ctx.strategy, structure=insp.structure,
+    )
     avg = batches * chunk_dur
     return Estimate(
         chunks_count=len(ctx.chunks),
@@ -1467,7 +1498,6 @@ __all__ = [
     "Inspection",
     "ExecutionContext",
     "Estimate",
-    "estimate",
     "needs_confirmation",
     "quick_estimate",
     "make_operation_id",

@@ -61,3 +61,18 @@ def test_no_monotonic_in_id():
         assert len(part) < 30, (
             f"unexpected long timestamp component: {a}"
         )
+
+
+def test_same_prefix_different_tail_different_operation_id():
+    """Изменение хвоста (>64 КБ префиксов) меняет operation_id.
+
+    Раньше хешировался префикс ``text[:64 * 1024]`` — правка последней
+    статьи не меняла id, и idempotency-кэш мог вернуть устаревший
+    результат. Теперь хешируется полный текст.
+    """
+    from summarizer import make_operation_id
+
+    base = ("Текст договора. " * 200) * 70  # ~490 КБ — далеко за 64 КБ
+    a = make_operation_id(base + "Итог: вариант А.", "detailed")
+    b = make_operation_id(base + "Итог: вариант Б.", "detailed")
+    assert a != b
