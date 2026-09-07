@@ -1271,106 +1271,103 @@ nanobot/
 ```
 
 ---
-
 ## legal_summarizer — внутренняя структура
 
-Структура `workspace/skills/legal_summarizer/scripts/`:
+Структура `workspace/skills/legal_summarizer/src/legal_summarizer/`
+(одноимённый скилл инсталлируется как пакет `legal_summarizer.*` через
+`pyproject.toml::pythonpath + workspace/skills/legal_summarizer/src`).
+Legacy `scripts/` остался только тонкими shim-файлами ради CLI-flat
+импортов (`summarizer.py`, `output.py`, `skill_config.py`, `manifest.py`)
+и самих CLI-обёрток (`cli.py`, `cli_query.py`). Всё живое — в `src/`:
 
 ```
-scripts/
-├── summarizer.py          # facade (~1300 строк): public entry points (run, inspect,
-│                          #   estimate, quick_estimate, load_text, load_structure,
-│                          #   make_operation_id). Не содержит деталей — делегирует.
+src/legal_summarizer/
+├── domain/               # pure data classes / config (лист графа):
+│   ├── identity.py       #   DocumentIdentity (fingerprint = sha256)
+│   ├── models.py         #   DocumentStructure, Block, Chunk, BlockRole
+│   ├── numbering.py      #   ArticleNumberingDetector
+│   ├── tokens.py         #   token_estimator, TokenBudget, MID_REDUCE_GROUP_SIZE
+│   └── config.py         #   HierarchicalReducerConfig
 │
-├── sanitize.py            # post-processing LLM-ответов:
-│                          #   strip_think_blocks (CoT cleanup), extract_subject.
+├── document/             # работа с PhysicalDocument (может импортировать domain):
+│   ├── loader.py         #   DocumentLoader (PDF/DOCX/TXT)
+│   ├── physical.py       #   PhysicalDocument, block extraction
+│   ├── heading.py, hierarchy.py, list_detection.py,
+│   │   pdf_outline.py, title.py, block_lookup.py,
+│   │   repair.py, validation.py
+│   ├── analysis.py       #   DocumentAnalysis (lazy import retrieval)
+│   └── safety_merge.py   #   safety_merge — pure structure operation
 │
-├── fingerprint.py         # детерминированные ID документов:
-│                          #   fingerprint_file (sha256 streaming 1MB),
-│                          #   resolve_document_id (smart-fallback),
-│                          #   resolve_session_key.
+├── chunking/             # чанкинг поверх document-блоков:
+│   ├── chunker.py, chunks.py, block_ownership.py,
+│   │   importance_score.py, importance_brief.py,
+│   │   brief_budget.py, packing.py, order.py
 │
-├── document_cache.py      # per-session кеш chunk-results для follow-up вопросов.
-│                          #   Включается только если путь содержит session-папку.
+├── retrieval/            # retrieval-индексы и QA (выше chunking/document):
+│   ├── query.py, normalizer.py, index.py, fallback.py,
+│   │   context_expansion.py, followup.py, qa.py, question.py,
+│   │   records.py, provenance.py, quality.py,
+│   │   canonical.py, candidate_aggregator.py
 │
-├── prompts_runtime.py     # runtime-загрузка prompts и длина/question instructions.
-│                          #   load_prompt, LENGTH_INSTRUCTIONS,
-│                          #   QUESTION_INSTRUCTION_TEMPLATE, system_instruction.
+├── planning/             # выбор стратегии + plan (выше document/retrieval):
+│   ├── strategy.py       #   select_strategy (direct / map_flat / map_hierarchical)
+│   ├── plan.py           #   ExecutionPlan, PlannedBatch
+│   └── benchmark.py
 │
-├── llm_calls.py           # все LLM-вызовы: doc_context, llm_batch,
-│                          #   llm_section_reduce, llm_document_reduce.
-│                          #   llm_section_trim помечен как dead code.
+├── execution/            # чистое исполнение batch-плана (выше document):
+│   ├── pipeline.py       #   process_context_batch, run_one_batch_async
+│   └── hierarchical.py  #   reduce_chunks_hierarchical, reduce_sections_to_document,
+│                          #   deterministic_truncate, HierarchicalReducerResult
 │
-├── pipeline.py            # map-фаза pipeline:
-│                          #   process_context_batch, run_one_batch_async,
-│                          #   load_cached_partials, MAX_BATCH_PARSE_RETRIES.
+├── llm/                  # LLM-клиент + sanitization (лист):
+│   ├── client.py         #   chat(), LLMRunner
+│   ├── calls.py          #   _run_all_calls (single-flight + retry)
+│   ├── prompts.py, prompts_runtime.py
+│   ├── retry.py          #   build_repair_prompt (LLM-driven)
+│   ├── sanitize.py       #   strip_think_blocks, extract_subject
+│   ├── single_flight.py  #   asyncio.Semaphore-based gate
+│   └── config.py         #   get_chunking_config / get_execution_config / …
+│                          #   (бывший ``skill_config.py``)
 │
-├── token_budget.py        # расчёт бюджета токенов + optional tiktoken.
-│                          #   TokenBudget(context_window_tokens, ...),
-│                          #   direct_call_tokens,
-│                          #   count_tokens, text_to_tokens_estimate.
+├── application/          # оркестратор — единственная точка над всем графом:
+│   ├── service.py        #   run / inspect / estimate / quick_estimate / load_text /
+│   │                     #   load_structure / make_operation_id (бывший ``summarizer.py``)
+│   ├── canonical.py      #   inspect_canonical / run_canonical_pipeline /
+│   │                     #   build_pipeline_result (бывший ``summarizer_canonical.py``)
+│   ├── pipeline_structure.py
+│   │                     #   run_canonical_pipeline impl (бывший structure/pipeline.py)
+│   └── brief_from_analysis.py
+│                          #   select_brief_chunks_from_analysis
 │
-├── document_stats.py      # дешёвая статистика документов:
-│                          #   DocumentStats(chars, estimated_tokens, pages,
-│                          #   blocks, sections, tables, chunks, repeated_blocks).
+├── cache/                # долговечные per-operation-state:
+│   └── manifest.py       #   NormalizedManifest, resume API
+│                          #   (бывший ``scripts/manifest.py``)
 │
-├── document_cleanup.py    # детерминированная очистка blocks:
-│                          #   cleanup_blocks, _classify_role
-│                          #   (header/footer/duplicate по repetition_threshold).
+├── output/               # вывод пользователю:
+│   └── presenter.py      #   prepare_output, build_confirmation_options
+│                          #   (бывший ``scripts/output.py``)
 │
-├── execution_strategy.py  # адаптивный selector strategy:
-│                          #   ExecutionStrategy enum (DIRECT / MAP_FLAT /
-│                          #   MAP_HIERARCHICAL), StrategyConfig, select_execution_strategy.
-│                          #   Детерминированный, без LLM-вызовов.
-│
-├── reducer.py             # facade reducer:
-├── reducer_models.py      #   ReduceStrategy enum, ReduceStats, ReduceConfig,
-│                          #   ReduceResult, LLMRunner.
-├── reducer_strategy.py    #   should_use_hierarchical_reduce, select_reduce_strategy,
-│                          #   _build_fake_blocks.
-└── reducer_impl.py        #   reduce_results, _reduce_flat, _reduce_hierarchical,
-                           #   _section_text, _chunk_id_by_section, _section_order_key.
-
-├── packing.py             # facade packing:
-├── packing_models.py      #   ContextBatch, PackingConfig.
-└── packing_impl.py        #   _BATCH_OVERHEAD_TOKENS, _build_batches_strict,
-                           #   pack_chunks.
-
-├── manifest.py            # нормализованный v2 manifest + resume API.
-│                          #   Keyed по operation_id (mutable state).
-│
-├── output.py              # legacy output keys (back-compat).
-│
-├── llm.py                 # LLM-клиент (chat() через lib.services.llm_client).
-│                          #   Зарезервированное имя → не конфликтует с
-│                          #   пакетом llm/ (планируется после переименования
-│                          #   llm.py → llm_client.py).
-│
-├── prompts.py             # build_batch_user_message, parse_batch_response,
-│                          #   ChunkResultParseError (НЕ путать с prompts_runtime.py).
-│
-├── cli.py                 # CLI entry point (legacy back-compat interface).
-│
-├── brief_strategy.py      # round-robin selector для brief mode:
-│                          #   select_brief_chunks, select_brief_chunks_structured,
-│                          #   select_relevant_chunks. coverage_ratio вынесен в
-│                          #   параметр (default 0.5 = старое поведение).
-│
-└── structure/             # пакет для detection структуры документа:
-    ├── physical.py        #   load_physical_document: PDF/DOCX/TXT → PhysicalDocument
-    │                      #   (DOCX interleaved через body.iterchildren).
-    ├── heading.py         #   HeadingCandidate, HeadingEvidence,
-    │                      #   detect_heading_candidates, apply_evidence_scoring,
-    │                      #   compute_evidence.
-    ├── tree.py            #   DocumentSection, SectionTree, ROOT_SECTION_ID,
-    │                      #   build_section_tree, section_total_chars.
-    ├── sections.py        #   facade (221 строк): detect_sections, merge_short_sections,
-    │                      #   count_meaningful_sections, extract_local_structure_label.
-    ├── chunks.py          #   block-aware chunker: StructureAwareChunker,
-    │                      #   _split_table_into_chunks (preserve header).
-    └── list_detection.py  #   ListDetectionConfig, detect_list_runs,
-                           #   list_penalty_for_candidate.
+└── infrastructure/       # сквозные utilities:
+    ├── legacy_audit.py   #   assert_no_legacy()
+    └── architecture_guard.py
+                          #   is_factory_pattern / count_abstract_classes /
+                          #   has_oversized_class
 ```
+
+Старая вложенная раскладка:
+
+* `workspace/skills/legal_summarizer/scripts/` — теперь только CLI-обёртки
+  и four `sys.modules`-shim'а (`summarizer.py`, `output.py`,
+  `skill_config.py`, `manifest.py`), которые нужны `cli.py`/`cli_query.py`
+  для плоских (`from summarizer import ...`) импортов.
+* `workspace/skills/legal_summarizer/scripts/structure/` — удалён целиком
+  (42 bridge-файла). Тесты repoint'нуты на `legal_summarizer.<layer>.<mod>`.
+
+Граница слоёв (§65, `docs/TARGET_ARCHITECTURE.md`) автоматически
+проверяется в `tests/architecture/test_layer_boundaries.py`: домен
+не может импортировать ничего, документ — retrieval/execution/llm/
+planning, retrieval — execution/llm, planning — llm, execution —
+document/retrieval/llm.
 
 ### Ключевые invariants (legal_summarizer)
 
