@@ -128,7 +128,7 @@ def test_canonical_pipeline_has_no_legacy_imports():
 
 def test_legacy_audit_assert_no_legacy():
     """Regression guard §35: production не должен содержать legacy hits."""
-    from legal_summarizer.infrastructure.legacy_audit import (
+    from tools.legacy_audit import (
         assert_no_legacy,
     )
 

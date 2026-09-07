@@ -237,17 +237,19 @@ class DocumentStructure:
         return [self.nodes[cid] for cid in parent.children if cid in self.nodes]
 
     def block_to_node(self) -> dict[int, str]:
-        """Mapping ``ordinal DocumentBlock`` → ``node_id`` (PLAN §3, §45, Этап 5).
+        """Mapping ``ordinal DocumentBlock`` → ``node_id``.
 
-        Делегирует ``block_ownership.block_to_node`` — единственному
-        каноническому механизму определения ownership. Возвращает
-        словарь для **всех** блоков ``[0, total_blocks)``, где
-        непокрытые блоки (например, root preamble) → ``root_id``.
+        Делегирует ``domain.structure.block_to_node`` — единственному
+        каноническому механизму определения ownership. Реализация —
+        чистая функция на ``DocumentStructure`` (см.
+        ``legal_summarizer.domain.structure``), не зависит ни от
+        каких downstream subsystems.
+
+        Возвращает словарь для **всех** блоков ``[0, total_blocks)``,
+        где непокрытые блоки (например, root preamble) → ``root_id``.
         """
-        from legal_summarizer.chunking.block_ownership import (
-            block_to_node as _canonical_block_to_node,
-        )
-        return _canonical_block_to_node(self)
+        from legal_summarizer.domain.structure import block_to_node
+        return block_to_node(self)
 
     def to_dict(self) -> dict[str, Any]:
         return {

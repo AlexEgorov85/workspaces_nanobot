@@ -1,11 +1,11 @@
-"""All reduce functions (SPECIAL 1 canonical copy in execution layer)."""
+"""All reduce functions (canonical copy in execution layer)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from legal_summarizer.domain.config import HierarchicalReducerConfig
+from legal_summarizer.execution.config import HierarchicalReducerConfig
 
 def deterministic_truncate(text: str, max_chars: int) -> str:
     """PLAN §27: deterministic head + tail truncate с omission marker.

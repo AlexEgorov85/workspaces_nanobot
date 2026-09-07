@@ -56,11 +56,11 @@ def test_no_llm_call_in_structure_modules():
     import legal_summarizer.retrieval.provenance as provenance
     import legal_summarizer.document.analysis as document_analysis
     import legal_summarizer.retrieval.followup as followup
-    import legal_summarizer.planning.benchmark as benchmark
+    import tools.legal_benchmark as benchmark
     import legal_summarizer.retrieval.qa as reference_qa
     import legal_summarizer.retrieval.quality as quality_metrics
     import legal_summarizer.llm.single_flight as single_flight
-    import legal_summarizer.infrastructure.architecture_guard as architecture_guard
+    import tools.architecture_guard as architecture_guard
     import legal_summarizer.chunking.block_ownership as block_ownership
     modules = [
         models, physical, numbering, heading, hierarchy,

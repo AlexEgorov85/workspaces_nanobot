@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from legal_summarizer.infrastructure.architecture_guard import (
+from tools.architecture_guard import (
     count_abstract_classes, has_oversized_class, is_factory_pattern,
 )
 
