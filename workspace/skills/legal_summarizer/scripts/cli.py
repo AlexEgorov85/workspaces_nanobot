@@ -61,10 +61,12 @@ def _setup_stdout_encoding() -> None:
             pass
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-if str(_SKILL_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(_SKILL_ROOT / "src"))
-if str(_SKILL_ROOT / "scripts") not in sys.path:
-    sys.path.insert(0, str(_SKILL_ROOT / "scripts"))
+if str(_SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SKILL_ROOT))
+# ``legal_summarizer/`` (runtime package) теперь лежит в корне Skill —
+# для запуска ``python scripts/cli.py`` его нужно явно добавить в sys.path.
+if str(_SKILL_ROOT / "legal_summarizer") not in sys.path:
+    sys.path.insert(0, str(_SKILL_ROOT / "legal_summarizer"))
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -204,7 +206,7 @@ def _emit_running_marker(text: str) -> None:
     один блокирующий вызов покрывает прогон ≤120 сек; для более длинных
     агент делает повторный write_stdin с тем же ``wait_for`` (минимум вызовов).
     """
-    from summarizer import get_chunking_config, get_execution_config
+    from legal_summarizer.llm.config import get_chunking_config, get_execution_config
     chunk_size = int(get_chunking_config().get("chunk_size", 100000))
     chunk_dur = float(get_execution_config().get("estimated_chunk_duration_sec", 20))
     rough_chunks = max(1, -(-len(text) // max(1, chunk_size)))
@@ -280,8 +282,7 @@ def main() -> None:
         parser = _build_parser()
         args = parser.parse_args()
 
-        from output import prepare_output
-        from summarizer import (
+        from legal_summarizer.application.service import (
             _build_execution_context,
             _estimate_for_run,
             inspect as _inspect,
@@ -289,9 +290,13 @@ def main() -> None:
             needs_confirmation,
             quick_estimate,
             run,
+            _progress,
         )
-        from summarizer import _progress
-        from skill_config import get_default_length
+        from legal_summarizer.llm.config import get_default_length
+        from legal_summarizer.output.presenter import (
+            build_confirmation_options,
+            prepare_output,
+        )
 
         length = args.length or get_default_length()
         if args.question and args.length:
@@ -316,7 +321,6 @@ def main() -> None:
                 qe = quick_estimate(file_path)
                 qest = qe["estimate"]
                 if needs_confirmation(qest):
-                    from output import build_confirmation_options
                     payload = build_confirmation_options(
                         chars_in=qe["chars_in"],
                         min_seconds=qest.estimated_duration_min_sec,
@@ -380,7 +384,6 @@ def main() -> None:
             ctx = _build_execution_context(insp, length=length, question=args.question)
             est = _estimate_for_run(insp, ctx)
             if needs_confirmation(est):
-                from output import build_confirmation_options
                 payload = build_confirmation_options(
                     chars_in=len(text),
                     min_seconds=est.estimated_duration_min_sec,

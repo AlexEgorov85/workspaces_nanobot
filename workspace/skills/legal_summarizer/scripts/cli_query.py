@@ -30,10 +30,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _SKILL_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-if str(_SKILL_ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(_SKILL_ROOT / "src"))
-if str(_SKILL_ROOT / "scripts") not in sys.path:
-    sys.path.insert(0, str(_SKILL_ROOT / "scripts"))
+if str(_SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SKILL_ROOT))
+# ``legal_summarizer/`` (runtime package) теперь лежит в корне Skill —
+# для запуска ``python scripts/cli_query.py`` его нужно явно добавить в sys.path.
+if str(_SKILL_ROOT / "legal_summarizer") not in sys.path:
+    sys.path.insert(0, str(_SKILL_ROOT / "legal_summarizer"))
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -91,7 +93,7 @@ def _resolve_workspace_root(arg: str | None) -> Path:
 
 def _load_manifest_or_none(operation_id: str, workspace_root: Path) -> dict[str, Any] | None:
     """Прочитать manifest.json. None если файла нет."""
-    from manifest import _read_json, manifest_path  # type: ignore
+    from legal_summarizer.cache.manifest import _read_json, manifest_path  # type: ignore
 
     return _read_json(manifest_path(operation_id, workspace_root))
 
@@ -103,7 +105,7 @@ def _load_chunk_summaries(
     max_summary_chars: int,
 ) -> list[dict[str, Any]]:
     """Прочитать per-chunk файлы; обрезать summary до ``max_summary_chars``."""
-    from manifest import chunks_dir  # type: ignore
+    from legal_summarizer.cache.manifest import chunks_dir  # type: ignore
 
     out: list[dict[str, Any]] = []
     cd = chunks_dir(operation_id, workspace_root)
