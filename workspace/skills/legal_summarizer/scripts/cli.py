@@ -35,6 +35,7 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _SKILL_ROOT = Path(__file__).resolve().parents[1]
+_SCRIPTS_ROOT = Path(__file__).resolve().parent
 
 
 def _setup_stdout_encoding() -> None:
@@ -63,10 +64,10 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 if str(_SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(_SKILL_ROOT))
-# ``legal_summarizer/`` (runtime package) теперь лежит в корне Skill —
-# для запуска ``python scripts/cli.py`` его нужно явно добавить в sys.path.
-if str(_SKILL_ROOT / "legal_summarizer") not in sys.path:
-    sys.path.insert(0, str(_SKILL_ROOT / "legal_summarizer"))
+# ``scripts/`` — корень executable runtime Skill. ``cli.py`` живёт
+# непосредственно в нём, поэтому достаточно добавить сам scripts/.
+if str(_SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_ROOT))
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -206,7 +207,7 @@ def _emit_running_marker(text: str) -> None:
     один блокирующий вызов покрывает прогон ≤120 сек; для более длинных
     агент делает повторный write_stdin с тем же ``wait_for`` (минимум вызовов).
     """
-    from legal_summarizer.llm.config import get_chunking_config, get_execution_config
+    from llm.config import get_chunking_config, get_execution_config
     chunk_size = int(get_chunking_config().get("chunk_size", 100000))
     chunk_dur = float(get_execution_config().get("estimated_chunk_duration_sec", 20))
     rough_chunks = max(1, -(-len(text) // max(1, chunk_size)))
@@ -282,7 +283,7 @@ def main() -> None:
         parser = _build_parser()
         args = parser.parse_args()
 
-        from legal_summarizer.application.service import (
+        from application.service import (
             _build_execution_context,
             _estimate_for_run,
             inspect as _inspect,
@@ -292,8 +293,8 @@ def main() -> None:
             run,
             _progress,
         )
-        from legal_summarizer.llm.config import get_default_length
-        from legal_summarizer.output.presenter import (
+        from llm.config import get_default_length
+        from output.presenter import (
             build_confirmation_options,
             prepare_output,
         )
