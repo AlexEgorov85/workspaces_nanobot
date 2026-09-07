@@ -11,9 +11,15 @@ Pure execution boundary: этот модуль **не** импортирует
 
 Single-flight: ``LLM_FLIGHT_LOCK`` из ``llm.single_flight`` сериализует
 все LLM-вызовы между разными ``summarizer.run()`` в разных потоках.
-Тот же lock используется в ``llm/calls.py`` для section/document reduce —
-единая single-flight boundary. Тесты:
-``test_etapa{17,24,29}_single_flight*.py``.
+Тот же lock используется в ``llm/calls.py`` через ``guarded_chat`` —
+единая single-flight boundary.
+
+Архитектурный контракт: ``execution → llm.single_flight`` — это
+**единственное** исключение из общего правила ``execution не знает о llm``.
+Single-flight — cross-cutting технический gate (как ``threading.Lock``),
+а не domain-зависимость. ``llm.calls`` / ``llm.prompts`` / ``llm.client``
+по-прежнему запрещены для ``execution``. См.
+``tests/architecture/test_layer_boundaries.py``.
 """
 from __future__ import annotations
 
@@ -30,12 +36,6 @@ from legal_summarizer.llm.single_flight import LLM_FLIGHT_LOCK
 
 
 MAX_BATCH_PARSE_RETRIES = 3
-
-
-# Back-compat: тесты, которые ссылаются на ``execution.pipeline._LLM_FLIGHT_LOCK``
-# (``test_etapa17_single_flight.py::test_lock_finally_releases``-style)
-# продолжают работать.
-_LLM_FLIGHT_LOCK = LLM_FLIGHT_LOCK
 
 
 def now_iso() -> str:
@@ -59,8 +59,13 @@ def process_context_batch(
     без side-effects на cache. Application-уровень (``execution_orchestration``)
     сам решает — сохранять ли partials в disk-манифест для resume.
 
-    Single-flight: ``_LLM_FLIGHT_LOCK`` сериализует cross-thread
-    ``_llm_batch`` вызовы.
+    Single-flight: lock берётся здесь (а не внутри ``llm_batch``) —
+    это позволяет mock-тестам подменять ``llm_batch`` напрямую
+    (минуя внутреннюю обёртку ``guarded_chat``) и всё равно
+    соблюдать ``max_active_llm_calls == 1``. Реальный путь к LLM
+    (``guarded_chat``) внутри ``llm_batch`` берёт **тот же** lock —
+    блокировка реентрантна семантически (``LLM_FLIGHT_LOCK`` один),
+    deadlock'а нет, потому что между вызовами lock отпускается.
     """
     chunks_list = list(chunks)
     started_at = now_iso()

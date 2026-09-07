@@ -4,10 +4,11 @@ document reduce), плюс утилитарная ``doc_context``.
 NOTE: legacy импорт ``ContextBatch`` удалён. ``llm_batch``
 теперь принимает ``list[Chunk]`` (canonical-compatible signature).
 
-Single LLM boundary: ``chat_locked`` — единая обёртка для всех
-``llm.chat(...)`` вызовов в этом модуле, сериализующая их через
-``LLM_FLIGHT_LOCK`` из ``llm.single_flight``. Это покрывает
-single-flight invariant для map / section reduce / document reduce.
+Single LLM boundary: каждый вызов ``llm.chat`` в этом модуле
+проходит через ``guarded_chat`` из ``llm.single_flight``. Это **единственный
+путь к LLM** в runtime — ``execution.pipeline`` НЕ импортирует
+``threading.Lock`` / ``LLM_FLIGHT_LOCK`` напрямую (см. архитектурный
+контракт ``execution не знает о llm``).
 """
 from __future__ import annotations
 
@@ -24,18 +25,19 @@ from legal_summarizer.llm.prompts_runtime import (
     load_prompt,
     system_instruction,
 )
-from legal_summarizer.llm.single_flight import LLM_FLIGHT_LOCK
-
-
-# Back-compat: старые импорты ``from legal_summarizer.llm.calls import _CHAT_LOCK``
-# продолжают работать (используется в ``test_lock_finally_releases``).
-_CHAT_LOCK = LLM_FLIGHT_LOCK
+from legal_summarizer.llm.single_flight import (
+    LLM_FLIGHT_LOCK,
+    guarded_chat,
+)
 
 
 def chat_locked(messages, *, context=None) -> str:
-    """Сериализованный ``llm.chat`` через единый lock."""
-    with LLM_FLIGHT_LOCK:
-        return llm.chat(messages, context=context)
+    """Сериализованный ``llm.chat`` через единый ``guarded_chat`` API.
+
+    Back-compat public API: старый код вызывает ``chat_locked(...)``
+    для manual LLM-вызовов. Реализация делегирует в ``guarded_chat``.
+    """
+    return guarded_chat(llm.chat, messages, context=context)
 
 
 def doc_context(
@@ -75,11 +77,10 @@ def llm_batch(
 
     Возвращает dict[chunk_id, summary].
 
-    Note on single-flight: lock берётся **на уровне выше** —
-    ``execution.pipeline.process_context_batch`` для map-phase
-    (внутри ``asyncio.to_thread``) или через ``chat_locked()`` для
-    прямого вызова. Этот модуль не берёт lock повторно — иначе
-    был бы deadlock при вызове из-под lock'а.
+    Single-flight: lock берётся **внешним** кодом —
+    ``execution.pipeline.process_context_batch`` (map phase) или
+    ``chat_locked()`` для прямого вызова. Этот модуль НЕ берёт lock —
+    иначе был бы deadlock при вызове из-под lock'а.
     """
     chunks_list = list(chunks)
     system = load_prompt("summarize_system").replace(
@@ -109,8 +110,7 @@ def llm_section_reduce(
 ) -> str:
     """Per-section reduce: объединить partials в финальную section_summary.
 
-    Single-flight: lock берётся в ``application.execution_orchestration``
-    или в ``execution.direct`` — не здесь.
+    Single-flight: см. ``llm_batch``.
     """
     system = load_prompt("section_reduce_system").replace(
         "{length_instruction}", system_instruction(length, question)
@@ -138,8 +138,7 @@ def llm_document_reduce(
 ) -> str:
     """Document-level reduce: объединить section_summaries в финальный документ.
 
-    Single-flight: lock берётся в ``application.execution_orchestration``
-    или в ``execution.direct`` — не здесь.
+    Single-flight: см. ``llm_batch``.
     """
     system = load_prompt("reduce_system").replace(
         "{length_instruction}", system_instruction(length, question)
@@ -159,6 +158,13 @@ def llm_document_reduce(
         {"role": "user", "content": user_body},
     ]
     return llm.chat(messages, context=None)
+
+
+# Back-compat alias — старые тесты ссылались на ``_CHAT_LOCK``
+# (см. ``test_etapa29_single_flight_concurrent.py::test_lock_finally_releases``).
+# Новый код использует ``guarded_chat``, но ``_CHAT_LOCK`` остаётся
+# ссылкой на тот же объект для проверки инварианта в тестах.
+_CHAT_LOCK = LLM_FLIGHT_LOCK
 
 
 __all__ = [

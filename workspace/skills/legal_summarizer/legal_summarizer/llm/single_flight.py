@@ -101,6 +101,28 @@ def assert_single_flight(
 LLM_FLIGHT_LOCK = threading.Lock()
 
 
+def guarded_chat(callable_, *args, **kwargs):
+    """Сериализованный LLM-вызов через единый single-flight boundary.
+
+    Это **public API** для всех потребителей LLM boundary:
+    ``llm.calls``, ``execution.pipeline`` и любые будущие подсистемы.
+    Вместо прямого импорта ``threading.Lock`` / ``LLM_FLIGHT_LOCK``
+    подсистемы вызывают ``guarded_chat(llm.chat, ...)``.
+
+    Single-flight invariant (``PLAN §54``: ``max_active_llm_calls == 1``)
+    обеспечивается через единый ``LLM_FLIGHT_LOCK`` и сохраняется
+    между любыми двумя одновременными ``guarded_chat`` вызовами в
+    разных потоках / event loops.
+
+    Раньше ``execution.pipeline`` напрямую использовал
+    ``with LLM_FLIGHT_LOCK:``, что нарушало архитектурную границу
+    ``execution не знает о llm``. ``guarded_chat`` переносит эту
+    ответственность в ``llm.single_flight``.
+    """
+    with LLM_FLIGHT_LOCK:
+        return callable_(*args, **kwargs)
+
+
 # Back-compat alias — модули и тесты, которые импортировали старый
 # ``_CHAT_LOCK`` из ``llm.calls``, продолжают работать.
 # То же для ``execution.pipeline._LLM_FLIGHT_LOCK``.
@@ -109,4 +131,5 @@ __all__ = [
     "SingleFlightViolation",
     "assert_single_flight",
     "LLM_FLIGHT_LOCK",
+    "guarded_chat",
 ]
