@@ -6,15 +6,12 @@
     * ``load_cached_partials`` — загрузить per-chunk summary из disk-манифеста
     * ``now_iso`` — текущее время в ISO 8601 (UTC)
 
-NOTE: legacy импорт ``ContextBatch`` удалён в PLAN §20. Сигнатуры
-``process_context_batch(chunks, ...)`` и ``run_one_batch_async(chunks, ...)``
-принимают ``list[Chunk]`` (canonical-compatible).
-
-Cross-thread single-flight: ``_llm_batch`` обёрнут в
-``_LLM_FLIGHT_LOCK`` (threading.Lock). Все LLM-вызовы внутри
-``process_context_batch`` сериализуются через этот lock, что
-гарантирует ``max_active_llm_calls == 1`` даже при нескольких
-параллельных ``summarizer.run()`` в разных потоках.
+Single-flight LLM invariant: ``_LLM_FLIGHT_LOCK`` сериализует все
+``_llm_batch`` вызовы между разными ``summarizer.run()`` в разных
+потоках. Это **единственный** cross-thread gate к LLM для map-фазы
+(внутри одного run'а concurrency=1, поэтому дополнительный lock не
+нужен). Для section/document reduce — single-flight живёт в
+``llm/calls.py::_CHAT_LOCK``.
 """
 from __future__ import annotations
 
@@ -38,13 +35,14 @@ MAX_BATCH_PARSE_RETRIES = 3
 
 
 # ---------------------------------------------------------------------------
-# Cross-thread LLM single-flight boundary
+# Cross-thread LLM single-flight boundary (map phase)
 # ---------------------------------------------------------------------------
 #
-# Все ``process_context_batch`` вызовы сериализуются через этот lock.
-# Это покрывает cross-thread случай (несколько ``summarizer.run()``
-# одновременно), потому что внутри одного run'а параллелизм
-# контролируется ``asyncio.Semaphore(1)``.
+# Сериализует ``_llm_batch`` между разными ``summarizer.run()`` в
+# разных потоках. Без этого lock'а два параллельных run() могли бы
+# одновременно войти в ``_llm_batch``, что нарушает single-flight
+# invariant ``max_active_llm_calls == 1`` (тесты
+# ``test_etapa{24,29}_single_flight_concurrent.py``).
 _LLM_FLIGHT_LOCK = threading.Lock()
 
 
@@ -65,10 +63,7 @@ def process_context_batch(
     progress: Any = None,
     batch_id: str = "",
 ) -> dict[str, Any]:
-    """Один LLM call → parse → write per-chunk files.
-
-    Обёрнут в ``_LLM_FLIGHT_LOCK`` для cross-thread single-flight.
-    """
+    """Один LLM call → parse → write per-chunk files."""
     chunks_list = list(chunks)
     started_at = now_iso()
     start = _time.monotonic()

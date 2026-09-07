@@ -1,7 +1,7 @@
 """LLM-call wrappers: низкоуровневые обёртки для LLM (map batch / section reduce /
 document reduce), плюс утилитарная ``doc_context``.
 
-NOTE: legacy импорт ``ContextBatch`` удалён в PLAN §20. ``llm_batch``
+NOTE: legacy импорт ``ContextBatch`` удалён. ``llm_batch``
 теперь принимает ``list[Chunk]`` (canonical-compatible signature).
 
 Single LLM boundary: ``chat_locked`` — единая обёртка для всех
@@ -16,6 +16,7 @@ from typing import Iterable
 
 from legal_summarizer.llm import client as llm
 from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.domain.models import DocumentStructure
 from legal_summarizer.llm.prompts import (
     build_batch_user_message,
     parse_batch_response,
@@ -30,10 +31,10 @@ from legal_summarizer.llm.prompts_runtime import (
 # Single-flight LLM boundary (intra-process)
 # ---------------------------------------------------------------------------
 #
-# Все вызовы ``llm.chat`` сериализуются через этот lock. В комбинации
-# с ``pipeline._LLM_FLIGHT_LOCK`` (cross-thread guard в pipeline.py)
-# это даёт гарантию ``max_active_llm_calls == 1`` для всех LLM-вызовов
-# во всех точках входа.
+# Все вызовы ``llm.chat`` сериализуются через этот lock. Это единственный
+# LLM-gate в системе; ``execution/pipeline.py`` больше **не** держит
+# собственный ``_LLM_FLIGHT_LOCK`` — single-flight invariant
+# обеспечивается здесь.
 _CHAT_LOCK = threading.Lock()
 
 
@@ -43,21 +44,28 @@ def chat_locked(messages, *, context=None) -> str:
         return llm.chat(messages, context=context)
 
 
-def doc_context(structure: dict | None, *, with_begin_end: bool = False) -> str:
-    """Сформировать doc-context (title + опционально begin/end) для user_body."""
-    if not structure:
+def doc_context(
+    structure: DocumentStructure | None,
+    *,
+    with_begin_end: bool = False,
+) -> str:
+    """Сформировать doc-context (title + опционально begin/end) для user_body.
+
+    Принимает canonical ``DocumentStructure`` (а не legacy dict). Параметр
+    ``with_begin_end`` оставлен для back-compat с вызывающими, но
+    сейчас всегда возвращает пустой ``begin``/``end`` — эти поля
+    удалены вместе с legacy ``extract_structure()`` (см.
+    ``document/physical.py``).
+    """
+    if structure is None:
         return ""
     parts: list[str] = []
-    title = (structure.get("title") or "").strip()
-    if title:
-        parts.append(f"НАЗВАНИЕ ДОКУМЕНТА: {title}")
+    if structure.title is not None:
+        title = (structure.title.value or "").strip()
+        if title:
+            parts.append(f"НАЗВАНИЕ ДОКУМЕНТА: {title}")
     if with_begin_end:
-        begin = (structure.get("begin") or "").strip()
-        end = (structure.get("end") or "").strip()
-        if begin:
-            parts.append("Начало документа:\n" + begin)
-        if end:
-            parts.append("Конец документа:\n" + end)
+        pass
     return "\n\n".join(parts)
 
 
@@ -65,7 +73,7 @@ def llm_batch(
     chunks: Iterable[Chunk],
     *,
     chunks_total: int,
-    structure: dict | None,
+    structure: DocumentStructure | None,
     length: str,
     question: str | None = None,
 ) -> dict[str, str]:
@@ -91,7 +99,8 @@ def llm_batch(
         {"role": "system", "content": system},
         {"role": "user", "content": user_body},
     ]
-    response = chat_locked(messages, context=None)
+    with _CHAT_LOCK:
+        response = llm.chat(messages, context=None)
     return parse_batch_response(chunks_list, response)
 
 
@@ -117,7 +126,8 @@ def llm_section_reduce(
         {"role": "system", "content": system},
         {"role": "user", "content": user_body},
     ]
-    return chat_locked(messages, context=None)
+    with _CHAT_LOCK:
+        return llm.chat(messages, context=None)
 
 
 def llm_document_reduce(
@@ -125,7 +135,7 @@ def llm_document_reduce(
     *,
     length: str,
     focus: str | None,
-    structure: dict | None,
+    structure: DocumentStructure | None,
     question: str | None = None,
 ) -> str:
     """Document-level reduce: объединить section_summaries в финальный документ."""
@@ -146,7 +156,8 @@ def llm_document_reduce(
         {"role": "system", "content": system},
         {"role": "user", "content": user_body},
     ]
-    return chat_locked(messages, context=None)
+    with _CHAT_LOCK:
+        return llm.chat(messages, context=None)
 
 
 __all__ = [
