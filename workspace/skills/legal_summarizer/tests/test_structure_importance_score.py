@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.chunking.importance_score import (
+from chunking.chunks import Chunk
+from chunking.importance_score import (
     ImportanceScore, compute_importance, select_top_chunks_by_importance,
 )
 

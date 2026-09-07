@@ -34,7 +34,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 def _install_llm_mocks(monkeypatch, *, batch_recorder=None):
     """Подменяем llm_* во всех namespace."""
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         if batch_recorder is not None:
@@ -51,19 +51,19 @@ def _install_llm_mocks(monkeypatch, *, batch_recorder=None):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
 def test_scenario_direct(tmp_path: Path, monkeypatch):
     """Small document → direct → exactly 1 LLM call → correct metadata."""
     _install_llm_mocks(monkeypatch)
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = "1. Пункт\n\nКороткий текст договора для прямого пути."
     p = _write_doc(tmp_path, text)
     result = summarizer.run(
@@ -82,7 +82,7 @@ def test_scenario_map_flat(tmp_path: Path, monkeypatch):
     """Document → exact ExecutionPlan → no duplicates, no omissions."""
     batches: list[tuple[str, ...]] = []
     _install_llm_mocks(monkeypatch, batch_recorder=batches)
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = (
         "1. Общие положения\n\n"
         + ("Текст. " * 50) * 300
@@ -119,7 +119,7 @@ def test_scenario_map_flat(tmp_path: Path, monkeypatch):
 def test_scenario_map_hierarchical(tmp_path: Path, monkeypatch):
     """Many sections → map_hierarchical → exactly one final result."""
     _install_llm_mocks(monkeypatch)
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     sections = []
     for i in range(5):
         sections.append(f"{i+1}. Раздел {i+1}\n\n" + ("Текст. " * 60) * 100 + "\n\n")
@@ -142,7 +142,7 @@ def test_scenario_map_hierarchical(tmp_path: Path, monkeypatch):
 def test_scenario_idempotency(tmp_path: Path, monkeypatch):
     """Same operation twice → second call is cached."""
     _install_llm_mocks(monkeypatch)
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = "1. Пункт\n\nКороткий текст для проверки идемпотентности."
     p = _write_doc(tmp_path, text)
 
@@ -164,7 +164,7 @@ def test_scenario_idempotency(tmp_path: Path, monkeypatch):
 def test_scenario_brief(tmp_path: Path, monkeypatch):
     """Brief mode → execution с budget."""
     _install_llm_mocks(monkeypatch)
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = (
         "1. Раздел А\n\n" + ("Текст. " * 60) * 50
         + "\n\n2. Раздел Б\n\n" + ("Текст. " * 60) * 50
@@ -184,7 +184,7 @@ def test_scenario_brief(tmp_path: Path, monkeypatch):
 
 def test_scenario_single_flight(tmp_path: Path, monkeypatch):
     """Two execution path invocations have peak==1 concurrent LLM call."""
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     active = {"now": 0, "peak": 0}
     lock = threading.Lock()
@@ -209,15 +209,15 @@ def test_scenario_single_flight(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = (
         "1. Общие положения\n\n"
         + ("Текст длинный. " * 50) * 80

@@ -31,7 +31,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 
 def _install_llm_mocks(monkeypatch):
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -46,12 +46,12 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
@@ -73,8 +73,8 @@ def test_plan_built_for_map_run(tmp_path, monkeypatch):
     только в ``_build_execution_context()`` — execution использует
     canonical ``ctx.plan``.
     """
-    import legal_summarizer.application.service as summarizer
-    import legal_summarizer.planning.strategy as unified_execution
+    import application.service as summarizer
+    import planning.strategy as unified_execution
 
     calls = {"n": 0}
     original = unified_execution.build_execution_plan
@@ -105,8 +105,8 @@ def test_plan_built_for_map_run(tmp_path, monkeypatch):
 
 def test_plan_not_built_for_direct_run(tmp_path, monkeypatch):
     """Для direct-run: build_execution_plan == 0 (direct path в ctx)."""
-    import legal_summarizer.application.service as summarizer
-    import legal_summarizer.planning.strategy as unified_execution
+    import application.service as summarizer
+    import planning.strategy as unified_execution
 
     calls = {"n": 0}
     original = unified_execution.build_execution_plan
@@ -138,7 +138,7 @@ def test_execution_uses_ctx_plan_not_insp_plan(tmp_path, monkeypatch):
 
     Spy на _run_map_reduce — он должен получать ctx.plan как plan=...
     """
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     captured = {}
 
     def _wrap_map_reduce(chunks, *, plan, strategy, **_kwargs):

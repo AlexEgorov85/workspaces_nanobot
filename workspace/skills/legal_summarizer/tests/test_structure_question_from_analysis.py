@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.document.analysis import (
+from chunking.chunks import Chunk
+from document.analysis import (
     DocumentAnalysis,
 )
-from legal_summarizer.document.structure import (
+from document.structure import (
     DocumentStructure, StructureNode,
 )
-from legal_summarizer.document.physical import (
+from document.physical import (
     DocumentBlock, PhysicalDocument,
 )
-from legal_summarizer.retrieval.question import (
+from retrieval.question import (
     answer_question_from_analysis,
 )
 

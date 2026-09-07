@@ -42,7 +42,7 @@ def _build_doc(sections: int = 6) -> str:
 
 
 def _install_llm_mocks(monkeypatch):
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -57,12 +57,12 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
@@ -78,14 +78,14 @@ def test_question_selected_planned_processed_exact_order(tmp_path, monkeypatch):
     actual   == c2,c4
     no c1, c3, c5 in LLM input.
     """
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     seen = {"ids": []}
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         seen["ids"].extend([c.chunk_id for c in chunks])
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
 
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_section(path, heading, text, *, length, question=None):
         return "section summary"
@@ -97,12 +97,12 @@ def test_question_selected_planned_processed_exact_order(tmp_path, monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _sm
+    import application.service as _sm
     monkeypatch.setattr(_sm, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_sm, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_sm, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
     text = _build_doc(sections=6)
@@ -150,7 +150,7 @@ def test_question_selected_planned_processed_exact_order(tmp_path, monkeypatch):
 def test_brief_subset_all_fields_consistent(tmp_path, monkeypatch):
     """20 chunks, brief → subset. Selection, plan, estimate, manifest
     все относятся к subset."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
     # Большой документ → много chunks.
     text = _build_doc(sections=12)
@@ -191,7 +191,7 @@ def test_brief_subset_all_fields_consistent(tmp_path, monkeypatch):
 def test_map_flat_exact_batches_each_chunk_once(tmp_path, monkeypatch):
     """strategy == map_flat. Planned batches == actual batches.
     Each chunk exactly once."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, "doc.txt", text)
@@ -220,9 +220,9 @@ def test_map_flat_exact_batches_each_chunk_once(tmp_path, monkeypatch):
 def test_map_hierarchical_reduce_calls_positive(tmp_path, monkeypatch):
     """strategy == map_hierarchical: map_calls > 0, section_reduce > 0,
     document_reduce == expected."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     counters = {"map": 0, "section": 0, "doc": 0}
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         counters["map"] += 1
@@ -240,12 +240,12 @@ def test_map_hierarchical_reduce_calls_positive(tmp_path, monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _sm
+    import application.service as _sm
     monkeypatch.setattr(_sm, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_sm, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_sm, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
     text = _build_doc(sections=8)
@@ -270,7 +270,7 @@ def test_map_hierarchical_reduce_calls_positive(tmp_path, monkeypatch):
 
 def test_manifest_has_required_fields(tmp_path, monkeypatch):
     """Для каждой strategy manifest содержит нужные поля."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, "doc.txt", text)
@@ -302,7 +302,7 @@ def test_manifest_has_required_fields(tmp_path, monkeypatch):
 def test_plan_deterministic_same_input(tmp_path):
     """Один DocumentAnalysis + одинаковые selected chunks + одинаковая
     policy → одинаковый ExecutionPlan."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, "doc.txt", text)
     insp = summarizer.inspect(text, document_path=str(p))
@@ -329,8 +329,8 @@ def test_plan_deterministic_same_input(tmp_path):
 
 def test_different_policies_different_plans(tmp_path):
     """Разные ExecutionPolicy → разные планы."""
-    import legal_summarizer.application.service as summarizer
-    from legal_summarizer.planning.strategy import (
+    import application.service as summarizer
+    from planning.strategy import (
         ExecutionPolicy,
         build_execution_plan,
     )
@@ -365,8 +365,8 @@ def test_different_policies_different_plans(tmp_path):
 
 def test_policy_disallow_table_table_batch(tmp_path):
     """allow_table_table_batch=False запрещает объединение table chunks."""
-    import legal_summarizer.application.service as summarizer
-    from legal_summarizer.planning.strategy import (
+    import application.service as summarizer
+    from planning.strategy import (
         ExecutionPolicy,
         build_execution_plan,
     )

@@ -27,14 +27,14 @@ from __future__ import annotations
 
 import json
 
-from legal_summarizer.document.heading import (
+from document.heading import (
     HeadingCandidate,
 )
-from legal_summarizer.document.hierarchy import (
+from document.hierarchy import (
     StructureTreeBuilderConfig,
     build_document_structure,
 )
-from legal_summarizer.document.structure import (
+from document.structure import (
     DocumentStructure,
     StructureNode,
 )

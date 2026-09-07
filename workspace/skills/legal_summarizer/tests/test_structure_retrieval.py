@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.retrieval.query import (
+from chunking.chunks import Chunk
+from retrieval.query import (
     RetrievalConfig, retrieve_chunks, score_chunk, tokenize,
 )
 

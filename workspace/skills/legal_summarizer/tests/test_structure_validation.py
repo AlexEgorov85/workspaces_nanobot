@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from legal_summarizer.document.structure import (
+from document.structure import (
     DocumentStructure,
     StructureNode,
 )
-from legal_summarizer.document.physical import (
+from document.physical import (
     DocumentBlock,
     PhysicalDocument,
 )
-from legal_summarizer.document.validation import (
+from document.validation import (
     validate_structure,
 )
 

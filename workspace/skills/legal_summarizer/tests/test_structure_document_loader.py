@@ -18,13 +18,13 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from legal_summarizer.document.loader import (
+from document.loader import (
     DocumentLoader,
 )
-from legal_summarizer.document.identity import (
+from document.identity import (
     DocumentIdentity,
 )
-from legal_summarizer.document.physical import (
+from document.physical import (
     PhysicalDocument,
 )
 

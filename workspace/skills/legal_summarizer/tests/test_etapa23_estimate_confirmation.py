@@ -28,7 +28,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 
 def _install_llm_mocks(monkeypatch):
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -43,12 +43,12 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
@@ -66,7 +66,7 @@ def _build_large_doc(tmp_path: Path, sections: int = 8) -> str:
 
 def test_confirmation_contains_chunks_selected(tmp_path, monkeypatch):
     """confirmation_required содержит chunks_selected (run-level)."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     monkeypatch.setattr(
         summarizer, "get_execution_config",
         lambda: {
@@ -97,7 +97,7 @@ def test_confirmation_contains_chunks_selected(tmp_path, monkeypatch):
 
 def test_estimate_uses_selected_chunks(tmp_path, monkeypatch):
     """estimate min/max основан на selected chunks."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     monkeypatch.setattr(
         summarizer, "get_execution_config",
         lambda: {
@@ -132,7 +132,7 @@ def test_estimate_uses_selected_chunks(tmp_path, monkeypatch):
 
 def test_requires_continuation_uses_selected_count(tmp_path, monkeypatch):
     """requires_continuation проверяет len(selected_chunks), не len(all_chunks)."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     monkeypatch.setattr(
         summarizer, "get_execution_config",
         lambda: {
@@ -162,7 +162,7 @@ def test_requires_continuation_uses_selected_count(tmp_path, monkeypatch):
 
 def test_brief_no_confirmation_when_small_selection(tmp_path, monkeypatch):
     """Brief mode с малым числом selected chunks → НЕ confirmation."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     # Порог очень высокий → confirmation только если max > threshold.
     # Brief selection: 1-2 chunks × 0.001s = tiny → no confirmation.
     monkeypatch.setattr(

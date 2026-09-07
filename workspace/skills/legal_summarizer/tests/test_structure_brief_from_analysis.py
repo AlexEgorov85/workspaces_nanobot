@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from legal_summarizer.application.brief_from_analysis import (
+from application.brief_from_analysis import (
     select_brief_chunks_from_analysis,
 )
-from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.document.analysis import (
+from chunking.chunks import Chunk
+from document.analysis import (
     DocumentAnalysis,
 )
-from legal_summarizer.chunking.importance_brief import (
+from chunking.importance_brief import (
     BriefSelectionConfig,
 )
-from legal_summarizer.document.structure import (
+from document.structure import (
     DocumentStructure, StructureNode,
 )
-from legal_summarizer.document.physical import (
+from document.physical import (
     DocumentBlock, PhysicalDocument,
 )
 

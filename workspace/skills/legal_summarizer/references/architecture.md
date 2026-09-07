@@ -6,8 +6,9 @@
 
 `legal_summarizer` — самодостаточный Agent Skill (Anthropic Skills
 модель). Skill упакован как набор инструкций (`SKILL.md`), скриптов
-(`scripts/`), runtime-реализации (`legal_summarizer/`), prompts
-(`prompts/`) и developer-only тестов (`tests/`).
+(`scripts/`), runtime-реализации (непосредственно в `scripts/`,
+9 runtime-слоёв), prompts (`prompts/`) и developer-only тестов
+(`tests/`).
 
 ## Skill layout
 
@@ -16,7 +17,9 @@ legal_summarizer/
 ├── SKILL.md                # инструкция агенту
 ├── README.md               # developer overview
 │
-├── legal_summarizer/       # runtime Python-пакет
+├── scripts/                # executable runtime Skill
+│   ├── cli.py              # entry point
+│   ├── cli_query.py        # follow-up по operation_id
 │   ├── application/
 │   ├── cache/
 │   ├── chunking/
@@ -26,10 +29,6 @@ legal_summarizer/
 │   ├── output/
 │   ├── planning/
 │   └── retrieval/
-│
-├── scripts/                # точки запуска
-│   ├── cli.py
-│   └── cli_query.py
 │
 ├── prompts/                # LLM-инструкции
 │
@@ -44,8 +43,12 @@ legal_summarizer/
 ## `src/` отсутствует намеренно
 
 Skill — **self-contained Agent Skill**, а не отдельный Python distribution
-package. `legal_summarizer/` лежит в корне Skill и импортируется по
-`sys.path` из `scripts/cli.py` (см. там `_SKILL_ROOT / "legal_summarizer"`).
+package.
+
+Runtime расположен непосредственно в `scripts/`, который является
+Python import root для standalone CLI: при запуске
+`python workspace/skills/legal_summarizer/scripts/cli.py` каталог
+`scripts/` явно добавляется в `sys.path` (см. `_SCRIPTS_ROOT` в `cli.py`).
 
 ## Главный поток
 
@@ -139,7 +142,7 @@ leaves (не импортируют внутренние слои).
 
 Импорты **вниз** (например, `document → execution`) запрещены — это
 архитектурное нарушение. Тест `tests/architecture/test_layer_boundaries.py`
-проверяет это правило через AST-обход всех `.py` под `legal_summarizer/`.
+проверяет это правило через AST-обход всех `.py` под `scripts/`.
 
 ### Single-flight — единственное исключение
 

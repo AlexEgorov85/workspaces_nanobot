@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.planning.plan import (
+from chunking.chunks import Chunk
+from planning.plan import (
     ExecutionPlan, PlannedBatch, build_direct_plan, build_map_plan,
 )
-from legal_summarizer.llm.tokens import (
+from llm.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
 
@@ -101,11 +101,11 @@ def test_execution_plan_includes_hierarchical_strategy():
 
 def test_section_ids_preserve_order_across_runs():
     """PLAN §26: section_ids в PlannedBatch сохраняют order (dict.fromkeys)."""
-    from legal_summarizer.chunking.chunks import Chunk
-    from legal_summarizer.planning.plan import (
+    from chunking.chunks import Chunk
+    from planning.plan import (
         build_direct_plan,
     )
-    from legal_summarizer.llm.tokens import (
+    from llm.tokens import (
         TokenEstimator, TokenEstimatorConfig,
     )
 
@@ -130,11 +130,11 @@ def test_section_ids_preserve_order_across_runs():
 
 def test_map_plan_section_ids_preserve_order():
     """PLAN §26: map-plan section_ids С‚РѕР¶Рµ СЃРѕС…СЂР°РЅСЏСЋС‚ order."""
-    from legal_summarizer.chunking.chunks import Chunk
-    from legal_summarizer.planning.plan import (
+    from chunking.chunks import Chunk
+    from planning.plan import (
         build_map_plan,
     )
-    from legal_summarizer.llm.tokens import (
+    from llm.tokens import (
         TokenEstimator, TokenEstimatorConfig,
     )
 

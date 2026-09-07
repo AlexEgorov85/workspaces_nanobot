@@ -164,8 +164,9 @@ Skill состоит из:
 
 * `scripts/cli.py` — CLI entry point.
 * `scripts/cli_query.py` — follow-up по `operation_id`.
-* `legal_summarizer/` — runtime Python-пакет (9 слоёв: application,
-  cache, chunking, document, execution, llm, output, planning, retrieval).
+* `scripts/` — executable runtime Skill (9 runtime-слоёв:
+  `application/`, `cache/`, `chunking/`, `document/`, `execution/`,
+  `llm/`, `output/`, `planning/`, `retrieval/`).
 * `prompts/` — LLM-инструкции (summarize / section_reduce / reduce).
 * `references/` — подробные документы: `architecture.md`, `contracts.md`,
   `testing.md`.

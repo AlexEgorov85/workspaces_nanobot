@@ -39,9 +39,9 @@ Forbidden direction is what matters: ``llm.calls`` may NOT import
 ``document``, ``application``. Same for other leaves.
 
 The test walks every ``.py`` under
-``workspace/skills/legal_summarizer/legal_summarizer`` and asserts
-that no module reaches a forbidden target via ``legal_summarizer.<layer>...``
-or ``legal_summarizer.llm.<sublayer>...``.
+``workspace/skills/legal_summarizer/scripts`` and asserts
+that no module reaches a forbidden target via ``<layer>...``
+or ``llm.<sublayer>...``.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ from pathlib import Path
 
 
 _SKILL_ROOT = Path(__file__).resolve().parents[2]
-_RUNTIME_PKG = _SKILL_ROOT / "legal_summarizer"
+_RUNTIME_PKG = _SKILL_ROOT / "scripts"
 
 
 # Layer name -> set of layer names it MUST NOT import.
@@ -142,30 +142,33 @@ def _layer_of(path: Path) -> str | None:
 
 
 def _imported_target(module: str | None) -> str | None:
-    """Target layer/sub-layer name if ``module`` is an internal ``legal_summarizer.*`` import.
+    """Target layer/sub-layer name if ``module`` is an internal layer import.
 
     Returns:
         ``document`` / ``chunking`` / ``cache`` / ``output`` для
         не-llm imports.
 
-        Для ``legal_summarizer.llm`` → ``llm`` (целый пакет).
-        Для ``legal_summarizer.llm.tokens`` → ``llm.tokens``.
-        Для ``legal_summarizer.llm.calls`` → ``llm.calls``.
+        Для ``llm`` → ``llm`` (целый пакет).
+        Для ``llm.tokens`` → ``llm.tokens``.
+        Для ``llm.calls`` → ``llm.calls``.
         Это позволяет различать технические импорты
         (``llm.tokens`` = ``TokenEstimator``, безопасен) от
         LLM-API импортов (``llm.calls`` / ``llm.client``,
         запрещены для data-слоёв).
     """
-    if not module or not module.startswith("legal_summarizer."):
+    if not module:
         return None
     parts = module.split(".")
-    if len(parts) < 2:
+    if parts[0] not in {
+        "application", "cache", "chunking", "document", "execution",
+        "llm", "output", "planning", "retrieval",
+    }:
         return None
-    if parts[1] == "llm":
-        if len(parts) < 3:
+    if parts[0] == "llm":
+        if len(parts) < 2:
             return "llm"
-        return f"llm.{parts[2]}"
-    return parts[1]
+        return f"llm.{parts[1]}"
+    return parts[0]
 
 
 def _walk_module(path: Path) -> list[tuple[str, str]]:

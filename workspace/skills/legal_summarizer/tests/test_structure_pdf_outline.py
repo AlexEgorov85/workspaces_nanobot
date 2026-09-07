@@ -9,12 +9,12 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
-from legal_summarizer.document.pdf_outline import (
+from document.pdf_outline import (
     StructureAnchor,
     map_pdf_outline,
     mapped_to_heading_candidates,
 )
-from legal_summarizer.document.physical import (
+from document.physical import (
     DocumentBlock,
     PhysicalDocument,
 )
@@ -77,7 +77,7 @@ def _make_reader(outline_items: list, n_pages: int):
 
 def test_mapped_to_heading_candidates_skips_unmapped(monkeypatch):
     """Кандидаты с anchor=None отбрасываются."""
-    from legal_summarizer.document.pdf_outline import (
+    from document.pdf_outline import (
         MappedOutlineCandidate,
     )
 

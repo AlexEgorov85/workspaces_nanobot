@@ -45,7 +45,7 @@ def _build_doc(sections: int = 6) -> str:
 
 def _make_plan_with_batches(insp, chunks, batch_chunk_ids_list):
     """Строит ExecutionPlan с заданными batch chunk_ids."""
-    from legal_summarizer.planning.strategy import (
+    from planning.strategy import (
         build_execution_plan,
         select_strategy,
     )
@@ -62,7 +62,7 @@ def _make_plan_with_batches(insp, chunks, batch_chunk_ids_list):
 
 def test_unknown_chunk_raises(tmp_path):
     """8.1: unknown chunk_id → RuntimeError."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
@@ -70,7 +70,7 @@ def test_unknown_chunk_raises(tmp_path):
     plan, _ = _make_plan_with_batches(insp, selected, [])
 
     # Строим «отравленный» план: в первом батче — левый chunk_id.
-    from legal_summarizer.planning.plan import (
+    from planning.plan import (
         PlannedBatch,
     )
     poisoned_batches = (
@@ -88,14 +88,14 @@ def test_unknown_chunk_raises(tmp_path):
 
 def test_duplicate_chunk_raises(tmp_path):
     """8.2: один chunk_id в двух батчах → RuntimeError."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
     selected = list(insp.chunks[:3])
     plan, _ = _make_plan_with_batches(insp, selected, [])
 
-    from legal_summarizer.planning.plan import (
+    from planning.plan import (
         PlannedBatch,
     )
     # B1 = c0,c1; B2 = c1,c2 → c1 дублируется.
@@ -119,14 +119,14 @@ def test_duplicate_chunk_raises(tmp_path):
 
 def test_exact_batch_order_preserved(tmp_path):
     """8.3: actual_batches имеет точно ту же форму, что и plan.batches."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
     selected = list(insp.chunks[:5])
     plan, _ = _make_plan_with_batches(insp, selected, [])
 
-    from legal_summarizer.planning.plan import (
+    from planning.plan import (
         PlannedBatch,
     )
     ids = tuple(c.chunk_id for c in selected)
@@ -157,8 +157,8 @@ def test_missing_chunks_raises_in_run_map_reduce(tmp_path, monkeypatch):
     это invariant уровня ``_run_map_reduce``. Проверяем через прямой вызов
     ``_run_map_reduce`` с отравленным планом.
     """
-    import legal_summarizer.application.service as summarizer
-    from legal_summarizer.planning.plan import (
+    import application.service as summarizer
+    from planning.plan import (
         PlannedBatch,
     )
 

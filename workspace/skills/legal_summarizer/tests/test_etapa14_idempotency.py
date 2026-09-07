@@ -19,8 +19,8 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 def _patch_run_canonical_pipeline(monkeypatch):
     """Подменяем ``run_canonical_pipeline`` счётчиком вызовов."""
-    import legal_summarizer.application.pipeline_structure as _pipeline_mod
-    import legal_summarizer.application.service as _summarizer
+    import application.pipeline_structure as _pipeline_mod
+    import application.service as _summarizer
     calls = {"n": 0}
     original = _pipeline_mod.run_canonical_pipeline
 
@@ -37,7 +37,7 @@ def test_idempotent_run_does_not_call_pipeline(tmp_path: Path, monkeypatch):
     """Запуск с уже-completed manifest → pipeline НЕ вызывается."""
     calls = _patch_run_canonical_pipeline(monkeypatch)
 
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = "1. Пункт\n\nТекст документа для саммари."
     p = _write_doc(tmp_path, text)
 
@@ -63,7 +63,7 @@ def test_different_inputs_create_different_operation_id(tmp_path: Path, monkeypa
     """Разные text/length/path → разные operation_id → нет cache hit."""
     calls = _patch_run_canonical_pipeline(monkeypatch)
 
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text1 = "1. Пункт 1\n\nТекст первый."
     text2 = "1. Пункт 2\n\nТекст второй, длиннее и содержательнее."
     p = _write_doc(tmp_path, text1)

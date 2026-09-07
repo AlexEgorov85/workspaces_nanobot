@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from legal_summarizer.document.structure import (
+from document.structure import (
     DocumentStructure,
     StructureNode,
 )
-from legal_summarizer.document.physical import (
+from document.physical import (
     DocumentBlock,
 )
-from legal_summarizer.document.safety_merge import (
+from document.safety_merge import (
     SafetyMergeConfig, safety_merge,
 )
 

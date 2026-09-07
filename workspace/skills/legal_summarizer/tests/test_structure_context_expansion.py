@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.retrieval.context_expansion import (
+from chunking.chunks import Chunk
+from retrieval.context_expansion import (
     ContextExpansionConfig, expand_context,
 )
-from legal_summarizer.document.structure import (
+from document.structure import (
     DocumentStructure, StructureNode,
 )
-from legal_summarizer.llm.tokens import (
+from llm.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
 

@@ -49,7 +49,7 @@ def _build_doc(sections: int = 6) -> str:
 
 def test_flat_invariant_selected_planned_processed(tmp_path):
     """Flat case: selected_ids == planned_ids == (actual batches union)."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
@@ -78,7 +78,7 @@ def test_flat_invariant_selected_planned_processed(tmp_path):
 
 def test_question_invariant_selected_planned_processed(tmp_path):
     """Question case: selected_ids == planned_ids == processed_ids."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
@@ -104,7 +104,7 @@ def test_question_invariant_selected_planned_processed(tmp_path):
 
 def test_ordered_batches_match(tmp_path):
     """planned_batches == actual_batches (exact list-of-lists)."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
@@ -126,7 +126,7 @@ def test_ordered_batches_match(tmp_path):
 
 def test_each_chunk_appears_exactly_once(tmp_path):
     """Каждый chunk из selected появляется в plan ровно один раз."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))

@@ -26,7 +26,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 
 def _install_llm_mocks(monkeypatch):
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -41,12 +41,12 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
@@ -63,7 +63,7 @@ def _build_doc(sections: int = 6) -> str:
 
 def test_build_execution_context_called_once_for_map_run(tmp_path, monkeypatch):
     """За один ``run()`` _build_execution_context вызывается ровно 1 раз."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     calls = {"n": 0}
     original = summarizer._build_execution_context
 
@@ -90,7 +90,7 @@ def test_build_execution_context_called_once_for_map_run(tmp_path, monkeypatch):
 
 def test_build_execution_context_called_once_for_direct_run(tmp_path, monkeypatch):
     """Даже для direct-run (1 chunk) context строится 1 раз."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     # Малый документ → 1 chunk → direct strategy.
     small_text = "Только один абзац текста, без секций."
 
@@ -119,7 +119,7 @@ def test_build_execution_context_called_once_for_direct_run(tmp_path, monkeypatc
 
 def test_build_execution_context_called_once_for_confirmation_path(tmp_path, monkeypatch):
     """Confirmation path тоже должен построить context один раз."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     monkeypatch.setattr(
         summarizer, "get_execution_config",
         lambda: {

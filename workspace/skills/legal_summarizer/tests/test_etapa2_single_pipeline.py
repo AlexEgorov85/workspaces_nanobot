@@ -36,7 +36,7 @@ def _long_text() -> str:
 def _install_pipeline_counter(monkeypatch):
     """Подменяем ``run_canonical_pipeline`` счётчиком вызовов."""
     from workspace.skills.legal_summarizer.tests import _etapa2_recorder
-    import legal_summarizer.application.pipeline_structure as _pipeline_mod
+    import application.pipeline_structure as _pipeline_mod
 
     original = _pipeline_mod.run_canonical_pipeline
 
@@ -45,12 +45,12 @@ def _install_pipeline_counter(monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(_pipeline_mod, "run_canonical_pipeline", _counting_run)
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "run_canonical_pipeline", _counting_run)
 
 
 def _install_llm_mocks(monkeypatch):
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -65,13 +65,13 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     # Map path: pipeline._llm_batch.
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
@@ -86,7 +86,7 @@ def test_run_calls_pipeline_exactly_once_map(tmp_path: Path, monkeypatch):
     _install_pipeline_counter(monkeypatch)
     _install_llm_mocks(monkeypatch)
 
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _long_text()
     p = _write_doc(tmp_path, text)
 
@@ -111,7 +111,7 @@ def test_run_calls_pipeline_exactly_once_direct(tmp_path: Path, monkeypatch):
     _install_pipeline_counter(monkeypatch)
     _install_llm_mocks(monkeypatch)
 
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = "Короткий текст. Без секций. Просто содержание."
     p = _write_doc(tmp_path, text)
 
@@ -135,7 +135,7 @@ def test_run_map_reduce_does_not_re_run_pipeline(tmp_path: Path, monkeypatch):
     _install_pipeline_counter(monkeypatch)
     _install_llm_mocks(monkeypatch)
 
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _long_text()
     p = _write_doc(tmp_path, text)
 

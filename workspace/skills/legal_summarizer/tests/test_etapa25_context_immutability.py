@@ -25,7 +25,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 
 def _install_llm_mocks(monkeypatch):
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -40,12 +40,12 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
@@ -62,7 +62,7 @@ def _build_doc(sections: int = 6) -> str:
 
 def test_ctx_chunks_immutable_after_estimate_and_execution(tmp_path, monkeypatch):
     """ctx.chunks == (selected) во всех фазах run'а."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=6)
@@ -102,7 +102,7 @@ def test_ctx_chunks_immutable_after_estimate_and_execution(tmp_path, monkeypatch
 
 def test_ctx_chunks_cannot_be_swapped_by_estimate(tmp_path, monkeypatch):
     """Estimate не подменяет ctx.chunks на полный набор."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=6)
@@ -123,7 +123,7 @@ def test_ctx_chunks_cannot_be_swapped_by_estimate(tmp_path, monkeypatch):
 
 def test_ctx_chunks_preserved_in_manifest(tmp_path, monkeypatch):
     """manifest.chunks_selected == len(ctx.chunks)."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=6)

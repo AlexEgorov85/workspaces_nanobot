@@ -24,7 +24,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 def test_document_id_invariant_for_txt(tmp_path: Path):
     """TXT: ``structure.document_id == identity.document_id``."""
-    from legal_summarizer.application.pipeline_structure import (
+    from application.pipeline_structure import (
         run_canonical_pipeline,
     )
 
@@ -39,7 +39,7 @@ def test_document_id_invariant_for_txt(tmp_path: Path):
 
 def test_document_id_invariant_for_pdf(tmp_path: Path):
     """PDF: ``structure.document_id == identity.document_id``."""
-    from legal_summarizer.application.pipeline_structure import (
+    from application.pipeline_structure import (
         run_canonical_pipeline,
     )
 
@@ -67,10 +67,10 @@ def test_document_id_invariant_for_pdf(tmp_path: Path):
 
 def test_production_builder_uses_identity_document_id():
     """``run_canonical_pipeline`` передаёт identity.document_id в builder."""
-    from legal_summarizer.application.pipeline_structure import (
+    from application.pipeline_structure import (
         run_canonical_pipeline,
     )
-    from legal_summarizer.document.identity import (
+    from document.identity import (
         DocumentIdentity,
     )
 
@@ -87,17 +87,17 @@ def test_production_builder_uses_identity_document_id():
 def test_identity_is_source_of_truth(tmp_path):
     """Если в builder передан ``document_id`` отличный от identity —
     ``DocumentAnalysis.build`` выравнивает по identity."""
-    from legal_summarizer.document.analysis import (
+    from document.analysis import (
         DocumentAnalysis,
     )
-    from legal_summarizer.document.hierarchy import (
+    from document.hierarchy import (
         StructureTreeBuilderConfig,
         build_document_structure,
     )
-    from legal_summarizer.document.identity import (
+    from document.identity import (
         DocumentIdentity,
     )
-    from legal_summarizer.document.physical import (
+    from document.physical import (
         PhysicalDocument,
     )
 

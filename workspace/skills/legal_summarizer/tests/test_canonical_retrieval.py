@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from legal_summarizer.retrieval.canonical import (
+from retrieval.canonical import (
     answer_followup,
     select_brief_from_analysis,
 )
-from legal_summarizer.application.canonical import (
+from application.canonical import (
     build_pipeline_result,
 )
 

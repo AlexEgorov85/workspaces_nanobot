@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from legal_summarizer.document.physical import (
+from document.physical import (
     DocumentBlock,
     PhysicalDocument,
 )
-from legal_summarizer.document.title import (
+from document.title import (
     resolve_title,
 )
 

@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from collections import Counter
 
-from legal_summarizer.chunking.chunker import (
+from chunking.chunker import (
     build_block_ownership,
 )
-from legal_summarizer.document.heading import (
+from document.heading import (
     HeadingCandidate,
 )
-from legal_summarizer.document.hierarchy import (
+from document.hierarchy import (
     build_document_structure,
 )
 
@@ -28,7 +28,7 @@ def _hc(i, t, source="regex_numbered_1"):
 
 
 def _physical(total: int):
-    from legal_summarizer.document.physical import (
+    from document.physical import (
         DocumentBlock, PhysicalDocument,
     )
     blocks = tuple(
@@ -108,7 +108,7 @@ def test_block_ownership_for_root_only():
 
 def test_owner_for_block_returns_deepest_section():
     """owner_for_block возвращает deepest section для nested case."""
-    from legal_summarizer.chunking.chunker import (
+    from chunking.chunker import (
         owner_for_block,
     )
 
@@ -127,10 +127,10 @@ def test_owner_for_block_returns_deepest_section():
 
 def test_owner_for_block_returns_root_for_uncovered_block():
     """Block вне section ranges → root_id (PLAN §6 acceptance)."""
-    from legal_summarizer.chunking.chunker import (
+    from chunking.chunker import (
         owner_for_block,
     )
-    from legal_summarizer.document.structure import (
+    from document.structure import (
         DocumentStructure, StructureNode,
     )
 
@@ -160,7 +160,7 @@ def test_owner_for_block_returns_root_for_uncovered_block():
 
 def test_owner_for_block_returns_none_for_out_of_range():
     """Block вне total_blocks → None."""
-    from legal_summarizer.chunking.chunker import (
+    from chunking.chunker import (
         owner_for_block,
     )
 
@@ -171,7 +171,7 @@ def test_owner_for_block_returns_none_for_out_of_range():
 
 def test_owner_for_block_lazy_builds_ownership():
     """owner_for_block без переданного ownership строит его на лету."""
-    from legal_summarizer.chunking.chunker import (
+    from chunking.chunker import (
         owner_for_block,
     )
 

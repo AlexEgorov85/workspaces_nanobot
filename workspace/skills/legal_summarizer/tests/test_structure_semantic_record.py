@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from legal_summarizer.retrieval.records import (
+from retrieval.records import (
     Provenance,
     SemanticRecord,
 )

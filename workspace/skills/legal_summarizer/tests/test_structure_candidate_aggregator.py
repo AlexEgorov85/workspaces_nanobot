@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from legal_summarizer.retrieval.candidate_aggregator import (
+from retrieval.candidate_aggregator import (
     AggregatedCandidate,
     aggregate_by_block,
 )
-from legal_summarizer.document.heading import (
+from document.heading import (
     HeadingCandidate,
 )
 

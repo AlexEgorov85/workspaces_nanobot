@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from legal_summarizer.chunking.packing import (
+from chunking.packing import (
     AdjacentPackingConfig,
     pack_chunks_with_adjacent,
 )
-from legal_summarizer.chunking.chunks import Chunk
+from chunking.chunks import Chunk
 
 
 def _c(cid: str, section: str, text: str = "x" * 100) -> Chunk:

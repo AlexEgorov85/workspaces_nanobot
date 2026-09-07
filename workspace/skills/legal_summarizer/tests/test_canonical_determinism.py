@@ -24,7 +24,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 def test_pipeline_deterministic_for_same_input(tmp_path: Path):
     """Два запуска дают идентичный DocumentStructure."""
-    from legal_summarizer.application.pipeline_structure import (
+    from application.pipeline_structure import (
         run_canonical_pipeline,
     )
 
@@ -46,7 +46,7 @@ def test_pipeline_deterministic_for_same_input(tmp_path: Path):
 
 def test_chunk_ids_deterministic(tmp_path: Path):
     """Chunk IDs идентичны между запусками."""
-    from legal_summarizer.application.pipeline_structure import (
+    from application.pipeline_structure import (
         run_canonical_pipeline,
     )
 
@@ -64,10 +64,10 @@ def test_chunk_ids_deterministic(tmp_path: Path):
 
 def test_execution_plan_deterministic(tmp_path: Path):
     """ExecutionPlan identical между запусками."""
-    from legal_summarizer.application.pipeline_structure import (
+    from application.pipeline_structure import (
         run_canonical_pipeline,
     )
-    from legal_summarizer.planning.strategy import (
+    from planning.strategy import (
         build_execution_plan,
     )
 
@@ -91,7 +91,7 @@ def test_execution_plan_deterministic(tmp_path: Path):
 
 def test_retrieval_ranking_deterministic(tmp_path: Path):
     """Retrieval ranking identical."""
-    from legal_summarizer.application.pipeline_structure import (
+    from application.pipeline_structure import (
         run_canonical_pipeline,
     )
 
@@ -118,7 +118,7 @@ def test_no_time_based_ids_in_pipeline(tmp_path: Path):
     """В pipeline нет time-based IDs."""
     import re
 
-    from legal_summarizer.application.pipeline_structure import (
+    from application.pipeline_structure import (
         run_canonical_pipeline,
     )
 

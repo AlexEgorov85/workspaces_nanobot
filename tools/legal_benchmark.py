@@ -30,32 +30,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.chunking.chunker import (
+from chunking.chunks import Chunk
+from chunking.chunker import (
     ChunkPlanner,
 )
-from legal_summarizer.document.loader import (
+from document.loader import (
     DocumentLoader,
 )
-from legal_summarizer.document.heading import (
+from document.heading import (
     detect_heading_candidates,
 )
-from legal_summarizer.document.hierarchy import (
+from document.hierarchy import (
     build_document_structure,
 )
-from legal_summarizer.document.structure import (
+from document.structure import (
     DocumentStructure,
 )
-from legal_summarizer.document.physical import (
+from document.physical import (
     PhysicalDocument,
 )
-from legal_summarizer.document.repair import (
+from document.repair import (
     repair_structure,
 )
-from legal_summarizer.llm.tokens import (
+from llm.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
-from legal_summarizer.planning.strategy import (
+from planning.strategy import (
     ExecutionPolicy, build_execution_plan,
 )
 

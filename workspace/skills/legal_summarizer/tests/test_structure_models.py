@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from legal_summarizer.document.structure import (
+from document.structure import (
     DocumentStructure,
     DocumentTitle,
     NumberingInfo,

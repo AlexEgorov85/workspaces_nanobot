@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from legal_summarizer.document.block_lookup import (
+from document.block_lookup import (
     build_block_lookup,
 )
-from legal_summarizer.document.physical import (
+from document.physical import (
     DocumentBlock, PhysicalDocument,
 )
 

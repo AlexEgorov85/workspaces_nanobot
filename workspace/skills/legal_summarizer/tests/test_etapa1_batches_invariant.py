@@ -29,7 +29,7 @@ def _install_llm_mocks(monkeypatch):
     * ``llm_calls`` (оригинальный module);
     * ``summarizer`` namespace (``_llm_*`` для direct path);
     * ``pipeline`` namespace (``_llm_batch`` для map path — импортируется
-      через ``from legal_summarizer.llm.calls import llm_batch as _llm_batch``).
+      через ``from llm.calls import llm_batch as _llm_batch``).
     """
     batches: list[tuple[str, ...]] = []
     section_reduces = {"n": 0}
@@ -49,14 +49,14 @@ def _install_llm_mocks(monkeypatch):
         section_reduces["n"] += 1
         return "Итоговое описание раздела."
 
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
     monkeypatch.setattr(llm_calls, "llm_batch", _patched_llm_batch)
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _patched_llm_section_reduce)
     monkeypatch.setattr(
         llm_calls, "llm_document_reduce", _patched_llm_document_reduce,
     )
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _patched_llm_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _patched_llm_section_reduce)
     monkeypatch.setattr(
@@ -66,7 +66,7 @@ def _install_llm_mocks(monkeypatch):
     # Этап 1 acceptance: ``summarizer._run_one_batch_async`` →
     # ``pipeline.process_context_batch`` → ``pipeline._llm_batch``.
     # Подменяем также в ``pipeline`` namespace, чтобы перехватить map path.
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _patched_llm_batch)
 
     return batches, section_reduces, document_reduces
@@ -89,7 +89,7 @@ def test_actual_batches_match_planned(tmp_path: Path, monkeypatch):
     """Test A+B+C: plan.batches[i].chunk_ids == actual batches, no duplication."""
     batches, _, _ = _install_llm_mocks(monkeypatch)
 
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_long_text()
     p = _write_doc(tmp_path, text)
 
@@ -141,7 +141,7 @@ def test_no_chunk_processed_more_than_once(tmp_path: Path, monkeypatch):
     """Test C: каждый chunk_id попадает ровно один раз."""
     batches, _, _ = _install_llm_mocks(monkeypatch)
 
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_long_text()
     p = _write_doc(tmp_path, text)
 
@@ -166,7 +166,7 @@ def test_each_chunk_processed_at_least_once(tmp_path: Path, monkeypatch):
     """Test B: каждый chunk_id попадает хотя бы один раз."""
     batches, _, _ = _install_llm_mocks(monkeypatch)
 
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_long_text()
     p = _write_doc(tmp_path, text)
 

@@ -25,7 +25,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 
 def _install_llm_mocks(monkeypatch):
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -40,18 +40,18 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
 def test_detailed_plan_covers_all_chunks(tmp_path, monkeypatch):
     """detailed → plan содержит ВСЕ chunks документа."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     sections = []
     for i in range(1, 7):
         sections.append(
@@ -80,7 +80,7 @@ def test_detailed_plan_covers_all_chunks(tmp_path, monkeypatch):
 def test_direct_plan_is_none(tmp_path, monkeypatch):
     """Direct (1 chunk) → plan=None, strategy='direct', map_calls=0."""
     _install_llm_mocks(monkeypatch)
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = "1. Пункт\n\nКороткий текст для direct."
     p = _write_doc(tmp_path, text)
 
@@ -95,7 +95,7 @@ def test_direct_plan_is_none(tmp_path, monkeypatch):
 def test_direct_execution_stats(tmp_path, monkeypatch):
     """Direct → map_calls=0, document_reduce_calls=1."""
     _install_llm_mocks(monkeypatch)
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = "1. Пункт\n\nКороткий текст для direct."
     p = _write_doc(tmp_path, text)
 
@@ -113,7 +113,7 @@ def test_direct_execution_stats(tmp_path, monkeypatch):
 def test_detailed_execution_uses_plan(tmp_path, monkeypatch):
     """detailed (multi-chunk) → plan не None, map_calls > 0."""
     _install_llm_mocks(monkeypatch)
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     sections = []
     for i in range(1, 6):
         sections.append(

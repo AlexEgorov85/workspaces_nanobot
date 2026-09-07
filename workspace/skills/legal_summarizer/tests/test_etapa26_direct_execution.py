@@ -32,14 +32,14 @@ def _build_tiny_doc() -> str:
 
 def test_direct_run_no_plan_no_map(tmp_path, monkeypatch):
     """Direct run: strategy=='direct', plan is None, нет map calls."""
-    import legal_summarizer.application.service as summarizer
-    import legal_summarizer.planning.strategy as unified_execution
+    import application.service as summarizer
+    import planning.strategy as unified_execution
 
     calls = {"plan_build": 0, "map": 0, "doc": 0}
 
     def _fake_plan(*args, **kwargs):
         calls["plan_build"] += 1
-        from legal_summarizer.planning.plan import (
+        from planning.plan import (
             ExecutionPlan,
             PlannedBatch,
         )
@@ -58,7 +58,7 @@ def test_direct_run_no_plan_no_map(tmp_path, monkeypatch):
     monkeypatch.setattr(unified_execution, "build_execution_plan", _fake_plan)
     monkeypatch.setattr(summarizer, "build_execution_plan", _fake_plan)
 
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         calls["map"] += 1
@@ -79,7 +79,7 @@ def test_direct_run_no_plan_no_map(tmp_path, monkeypatch):
     monkeypatch.setattr(summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
     text = _build_tiny_doc()
@@ -120,7 +120,7 @@ def test_direct_run_no_plan_no_map(tmp_path, monkeypatch):
 
 def test_direct_strategy_via_ctx_plan_none(tmp_path):
     """ctx.plan is None для direct."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_tiny_doc()
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))

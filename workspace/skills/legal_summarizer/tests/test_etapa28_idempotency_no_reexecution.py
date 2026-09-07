@@ -28,7 +28,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 
 def _install_llm_mocks(monkeypatch):
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -43,12 +43,12 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
@@ -65,7 +65,7 @@ def _build_doc(sections: int = 4) -> str:
 
 def test_second_run_uses_cached_result(tmp_path, monkeypatch):
     """Повторный run() не вызывает pipeline, plan и LLM."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=4)
@@ -83,8 +83,8 @@ def test_second_run_uses_cached_result(tmp_path, monkeypatch):
     # Поле cached может отсутствовать у первого run.
 
     # Теперь устанавливаем spies.
-    import legal_summarizer.application.service as _sm
-    import legal_summarizer.planning.strategy as unified_execution
+    import application.service as _sm
+    import planning.strategy as unified_execution
 
     counters = {
         "inspect": 0, "build_ctx": 0, "plan_build": 0,
@@ -115,7 +115,7 @@ def test_second_run_uses_cached_result(tmp_path, monkeypatch):
     monkeypatch.setattr(unified_execution, "build_execution_plan", _spy_plan)
     monkeypatch.setattr(_sm, "build_execution_plan", _spy_plan)
 
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     original_batch = llm_calls.llm_batch
 
@@ -167,9 +167,9 @@ def test_second_run_uses_cached_result(tmp_path, monkeypatch):
 
 def test_idempotency_counts_first_run_only(tmp_path, monkeypatch):
     """Подсчёт вызовов на первом run — все ненулевые."""
-    import legal_summarizer.application.service as summarizer
-    import legal_summarizer.planning.strategy as unified_execution
-    import legal_summarizer.llm.calls as llm_calls
+    import application.service as summarizer
+    import planning.strategy as unified_execution
+    import llm.calls as llm_calls
 
     counters = {
         "plan_build": 0, "llm_batch": 0, "llm_doc": 0,
@@ -189,7 +189,7 @@ def test_idempotency_counts_first_run_only(tmp_path, monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
     monkeypatch.setattr(summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
     # Изолируем workspace в tmp.

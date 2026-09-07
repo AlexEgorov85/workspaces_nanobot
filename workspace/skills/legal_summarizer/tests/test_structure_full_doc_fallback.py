@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.retrieval.fallback import (
+from chunking.chunks import Chunk
+from retrieval.fallback import (
     FullDocFallbackConfig, decide_retrieval, full_document_fallback,
 )
 

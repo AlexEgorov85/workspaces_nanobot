@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from legal_summarizer.retrieval.qa import (
+from retrieval.qa import (
     ReferenceQuestion, ReferenceQASet,
     evaluate_retrieval, standard_qa_set,
 )

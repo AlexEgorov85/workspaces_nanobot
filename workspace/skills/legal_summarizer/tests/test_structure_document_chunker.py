@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from legal_summarizer.chunking.chunker import (
+from chunking.chunker import (
     ChunkPlanner,
     DocumentStructureChunkerConfig,
     chunk_from_structure,
 )
-from legal_summarizer.document.structure import (
+from document.structure import (
     DocumentStructure,
     StructureNode,
 )
-from legal_summarizer.document.physical import (
+from document.physical import (
     DocumentBlock,
     PhysicalDocument,
 )
@@ -114,7 +114,7 @@ def test_chunk_from_structure_table_atomic():
 
 
 def test_chunk_from_structure_split_oversize_block():
-    from legal_summarizer.chunking.chunks import (
+    from chunking.chunks import (
         ChunkConfig,
     )
 

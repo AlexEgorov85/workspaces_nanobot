@@ -6,11 +6,11 @@ PLAN §73: если extraction плохой — ``structure confidence`` дол�
 
 from __future__ import annotations
 
-from legal_summarizer.document.heading import (
+from document.heading import (
     HeadingCandidate, apply_evidence_scoring, compute_evidence,
     detect_heading_candidates,
 )
-from legal_summarizer.document.physical import (
+from document.physical import (
     DocumentBlock,
 )
 
@@ -61,10 +61,10 @@ def test_low_quality_pdf_with_partial_ocr():
 
 def test_low_quality_no_repair_fabricates_structure():
     """Repair не должен придумывать секции, если их нет."""
-    from legal_summarizer.document.structure import (
+    from document.structure import (
         DocumentStructure, StructureNode,
     )
-    from legal_summarizer.document.repair import (
+    from document.repair import (
         repair_structure,
     )
     struct = DocumentStructure(

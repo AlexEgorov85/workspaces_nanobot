@@ -33,7 +33,7 @@ def _build_section_summaries(n: int) -> list[tuple[str, str]]:
 
 def test_single_section_no_reduce():
     """1 section → 0 reduce calls."""
-    from legal_summarizer.execution.hierarchical import (
+    from execution.hierarchical import (
     reduce_sections_to_document,
     )
 
@@ -73,10 +73,10 @@ def _compute_max_calls(n: int, group_size: int, max_rounds: int) -> int:
 
 def test_n_sections_rounds_bounded():
     """N sections: actual calls ≤ max_rounds * ceil(N/group_size) + 1."""
-    from legal_summarizer.execution.config import (
+    from execution.config import (
     HierarchicalReducerConfig,
     )
-    from legal_summarizer.execution.hierarchical import (
+    from execution.hierarchical import (
     reduce_sections_to_document,
     )
 
@@ -100,10 +100,10 @@ def test_n_sections_rounds_bounded():
 
 def test_estimate_bounds_for_1_2_10_100_sections():
     """Bounds: actual_calls ≤ max_rounds * ceil(N/group_size) + 1."""
-    from legal_summarizer.execution.config import (
+    from execution.config import (
     HierarchicalReducerConfig,
     )
-    from legal_summarizer.execution.hierarchical import (
+    from execution.hierarchical import (
     reduce_sections_to_document,
     )
 
@@ -130,10 +130,10 @@ def test_estimate_bounds_for_1_2_10_100_sections():
 
 def test_reducer_no_data_loss_for_marker_groups():
     """Все маркерные группы сохраняются при reduce."""
-    from legal_summarizer.execution.config import (
+    from execution.config import (
     HierarchicalReducerConfig,
     )
-    from legal_summarizer.execution.hierarchical import (
+    from execution.hierarchical import (
     reduce_sections_to_document,
     )
 

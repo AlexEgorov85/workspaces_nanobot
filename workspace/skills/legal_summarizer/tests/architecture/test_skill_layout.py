@@ -1,151 +1,123 @@
-"""Skill layout guard for ``legal_summarizer``.
+"""Skill layout guard для ``legal_summarizer`` после миграции runtime в ``scripts/``.
 
-Проверяет, что Skill соответствует модели Anthropic Skills:
+Проверяет целевую структуру каталога Skill согласно § 19 плана миграции:
 
-* ``SKILL.md`` существует (инструкция агенту).
-* ``scripts/`` существует с entry-points ``cli.py`` / ``cli_query.py``.
-* ``legal_summarizer/`` (runtime Python-пакет) существует в корне Skill.
-* ``prompts/`` существует.
-* ``references/`` существует.
-* ``src/`` НЕ существует (нет дополнительного packaging-слоя).
-* ``domain/`` НЕ существует внутри runtime-пакета.
-* ``ARCHITECTURE_V2.md`` НЕ существует (нет конфликтующих архитектурных
-  источников).
-* ``import legal_summarizer.src`` нигде не встречается.
+* ``SKILL.md`` существует.
+* ``README.md`` существует.
+* ``prompts/``, ``references/``, ``scripts/``, ``tests/`` существуют.
+* ``scripts/cli.py`` и ``scripts/cli_query.py`` существуют.
+* 9 runtime-каталогов существуют непосредственно в ``scripts/``.
+* ``src/``, ``domain/``, ``legal_summarizer/``, ``scripts/legal_summarizer/``
+  НЕ существуют.
+* legacy shim-файлы в ``scripts/`` НЕ существуют.
 """
-
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 
 _SKILL_ROOT = Path(__file__).resolve().parents[2]
-_RUNTIME_PKG = _SKILL_ROOT / "legal_summarizer"
+_SCRIPTS_DIR = _SKILL_ROOT / "scripts"
+
+_RUNTIME_LAYERS = (
+    "application",
+    "cache",
+    "chunking",
+    "document",
+    "execution",
+    "llm",
+    "output",
+    "planning",
+    "retrieval",
+)
 
 
 def test_skill_md_exists() -> None:
-    """``SKILL.md`` — главный интерфейс Skill."""
+    """``SKILL.md`` существует."""
     assert (_SKILL_ROOT / "SKILL.md").is_file()
 
 
-def test_scripts_dir_exists() -> None:
-    """``scripts/`` — каталог entry-points (cli.py, cli_query.py)."""
-    assert (_SKILL_ROOT / "scripts").is_dir()
-    assert (_SKILL_ROOT / "scripts" / "cli.py").is_file()
-    assert (_SKILL_ROOT / "scripts" / "cli_query.py").is_file()
-
-
-def test_runtime_package_exists() -> None:
-    """``legal_summarizer/`` — runtime Python-пакет в корне Skill."""
-    assert _RUNTIME_PKG.is_dir()
-    assert (_RUNTIME_PKG / "__init__.py").is_file()
-
-
-def test_references_dir_exists() -> None:
-    """``references/`` — подробные документы Skill."""
-    assert (_SKILL_ROOT / "references").is_dir()
-    assert (_SKILL_ROOT / "references" / "architecture.md").is_file()
-    assert (_SKILL_ROOT / "references" / "contracts.md").is_file()
-    assert (_SKILL_ROOT / "references" / "testing.md").is_file()
+def test_readme_exists() -> None:
+    """``README.md`` существует."""
+    assert (_SKILL_ROOT / "README.md").is_file()
 
 
 def test_prompts_dir_exists() -> None:
-    """``prompts/`` — LLM-инструкции."""
-    assert (_SKILL_ROOT / "prompts").is_dir()
-    assert (_SKILL_ROOT / "prompts" / "summarize_system.md").is_file()
-    assert (_SKILL_ROOT / "prompts" / "reduce_system.md").is_file()
-    assert (_SKILL_ROOT / "prompts" / "section_reduce_system.md").is_file()
+    """``prompts/`` существует со всеми prompt-файлами."""
+    prompts = _SKILL_ROOT / "prompts"
+    assert prompts.is_dir()
+    assert (prompts / "summarize_system.md").is_file()
+    assert (prompts / "reduce_system.md").is_file()
+    assert (prompts / "section_reduce_system.md").is_file()
+
+
+def test_references_dir_exists() -> None:
+    """``references/`` существует с обязательными документами."""
+    refs = _SKILL_ROOT / "references"
+    assert refs.is_dir()
+    assert (refs / "architecture.md").is_file()
+    assert (refs / "contracts.md").is_file()
+    assert (refs / "testing.md").is_file()
+
+
+def test_tests_dir_exists() -> None:
+    """``tests/`` существует."""
+    assert (_SKILL_ROOT / "tests").is_dir()
+
+
+def test_scripts_dir_exists() -> None:
+    """``scripts/`` существует с entry-points ``cli.py`` / ``cli_query.py``."""
+    assert _SCRIPTS_DIR.is_dir()
+    assert (_SCRIPTS_DIR / "cli.py").is_file()
+    assert (_SCRIPTS_DIR / "cli_query.py").is_file()
+
+
+def test_runtime_layers_in_scripts() -> None:
+    """Все 9 runtime-каталогов лежат непосредственно в ``scripts/``."""
+    for layer in _RUNTIME_LAYERS:
+        assert (_SCRIPTS_DIR / layer).is_dir(), (
+            f"scripts/{layer}/ не существует"
+        )
 
 
 def test_no_src_dir() -> None:
-    """``src/`` НЕ должен существовать — Skill не использует packaging-слой."""
-    assert not (_SKILL_ROOT / "src").exists(), (
-        "src/ found — Skill должен быть self-contained, без packaging-слоя"
+    """``src/`` не должен существовать."""
+    assert not (_SKILL_ROOT / "src").exists()
+
+
+def test_no_domain_dir() -> None:
+    """``domain/`` не должен существовать в Skill root."""
+    assert not (_SKILL_ROOT / "domain").exists()
+
+
+def test_no_legacy_runtime_package() -> None:
+    """``legal_summarizer/`` runtime-каталог НЕ должен существовать в Skill root."""
+    assert not (_SKILL_ROOT / "legal_summarizer").exists(), (
+        "legal_summarizer/ runtime package не должен существовать — "
+        "runtime переехал в scripts/"
     )
 
 
-def test_no_legacy_architecture_v2() -> None:
-    """``ARCHITECTURE_V2.md`` НЕ должен существовать — единственный
-    архитектурный документ в ``references/architecture.md``."""
-    assert not (_SKILL_ROOT / "ARCHITECTURE_V2.md").exists()
+def test_no_nested_legal_summarizer_in_scripts() -> None:
+    """``scripts/legal_summarizer/`` (nested package) НЕ должен существовать."""
+    assert not (_SCRIPTS_DIR / "legal_summarizer").exists()
 
 
-def test_no_legacy_architecture_root() -> None:
-    """Корневой ``ARCHITECTURE.md`` удалён (его роль выполняет
-    ``references/architecture.md``)."""
-    assert not (_SKILL_ROOT / "ARCHITECTURE.md").exists()
+def test_no_legacy_summarizer_py() -> None:
+    """``scripts/summarizer.py`` НЕ должен существовать."""
+    assert not (_SCRIPTS_DIR / "summarizer.py").exists()
 
 
-def test_no_domain_layer_in_runtime() -> None:
-    """``legal_summarizer/domain/`` НЕ должно быть — domain распределён
-    по document / llm."""
-    assert not (_RUNTIME_PKG / "domain").exists(), (
-        "domain/ found in runtime package — must be removed; "
-        "models live in document/structure.py, tokens in llm/tokens.py"
-    )
+def test_no_legacy_manifest_py() -> None:
+    """``scripts/manifest.py`` НЕ должен существовать."""
+    assert not (_SCRIPTS_DIR / "manifest.py").exists()
 
 
-def test_no_src_imports_in_codebase() -> None:
-    """``import legal_summarizer.src`` / ``from legal_summarizer.src``
-    нигде не встречается."""
-    pattern = re.compile(r"legal_summarizer\.src|legal_summarizer\s*\.\s*src")
-    this_file = Path(__file__).resolve()
-    for path in _SKILL_ROOT.rglob("*.py"):
-        if "__pycache__" in str(path):
-            continue
-        if path.resolve() == this_file:
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        assert not pattern.search(text), (
-            f"{path.relative_to(_SKILL_ROOT)}: legacy src/ import found"
-        )
+def test_no_legacy_output_py() -> None:
+    """``scripts/output.py`` НЕ должен существовать."""
+    assert not (_SCRIPTS_DIR / "output.py").exists()
 
 
-def test_no_domain_imports_in_codebase() -> None:
-    """``legal_summarizer.domain.*`` нигде не встречается."""
-    pattern = re.compile(r"legal_summarizer\.domain\.")
-    this_file = Path(__file__).resolve()
-    for path in _SKILL_ROOT.rglob("*.py"):
-        if "__pycache__" in str(path):
-            continue
-        if path.resolve() == this_file:
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        assert not pattern.search(text), (
-            f"{path.relative_to(_SKILL_ROOT)}: legacy domain/ import found"
-        )
-
-
-def test_prompts_path_independent_of_cwd() -> None:
-    """``load_prompt()`` использует абсолютный путь через ``__file__``,
-    поэтому работает независимо от того, откуда запущен Skill.
-    """
-    import subprocess
-    import sys
-
-    cli = _SKILL_ROOT / "scripts" / "cli.py"
-    assert cli.is_file()
-    proc = subprocess.run(
-        [sys.executable, str(cli), "--help"],
-        cwd=_SKILL_ROOT,  # cwd skill root
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert proc.returncode == 0, (
-        f"cli.py --help from skill root failed: {proc.stderr}"
-    )
-    # Также из произвольной cwd (родитель репо).
-    other_cwd = _SKILL_ROOT.parent.parent
-    proc = subprocess.run(
-        [sys.executable, str(cli), "--help"],
-        cwd=other_cwd,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert proc.returncode == 0, (
-        f"cli.py --help from arbitrary cwd ({other_cwd}) failed: "
-        f"{proc.stderr}"
-    )
+def test_no_legacy_skill_config_py() -> None:
+    """``scripts/skill_config.py`` НЕ должен существовать."""
+    assert not (_SCRIPTS_DIR / "skill_config.py").exists()

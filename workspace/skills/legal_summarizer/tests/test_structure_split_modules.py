@@ -14,19 +14,19 @@ PLAN §59: ``summarizer.py`` (1773 строк) и ``chunks.py`` (555) — сли
 
 from __future__ import annotations
 
-from legal_summarizer.chunking.chunker import (
+from chunking.chunker import (
     ChunkPlanner,
 )
-from legal_summarizer.execution.hierarchical import (
+from execution.hierarchical import (
     reduce_chunks_hierarchical,
 )
-from legal_summarizer.application.pipeline_structure import (
+from application.pipeline_structure import (
     run_canonical_pipeline,
 )
-from legal_summarizer.retrieval.index import (
+from retrieval.index import (
     RetrievalIndex,
 )
-from legal_summarizer.planning.strategy import (
+from planning.strategy import (
     build_execution_plan,
 )
 
@@ -54,11 +54,11 @@ def test_build_execution_plan_exists():
 def test_new_modules_have_narrow_responsibility():
     """Каждый новый модуль отвечает за одну вещь (PLAN §60)."""
     import inspect
-    import legal_summarizer.application.pipeline_structure as pipeline
-    import legal_summarizer.chunking.chunker as document_chunker
-    import legal_summarizer.execution.hierarchical as hierarchical_reducer
-    import legal_summarizer.retrieval.index as retrieval_index
-    import legal_summarizer.planning.strategy as unified_execution
+    import application.pipeline_structure as pipeline
+    import chunking.chunker as document_chunker
+    import execution.hierarchical as hierarchical_reducer
+    import retrieval.index as retrieval_index
+    import planning.strategy as unified_execution
     for module in (
         pipeline, document_chunker, hierarchical_reducer,
         retrieval_index, unified_execution,

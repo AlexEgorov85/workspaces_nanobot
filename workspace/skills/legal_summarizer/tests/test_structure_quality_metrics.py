@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.document.structure import (
+from chunking.chunks import Chunk
+from document.structure import (
     DocumentStructure, StructureNode,
 )
-from legal_summarizer.document.physical import (
+from document.physical import (
     DocumentBlock, PhysicalDocument,
 )
-from legal_summarizer.retrieval.provenance import (
+from retrieval.provenance import (
     ProvenanceChain, build_provenance_chain,
 )
-from legal_summarizer.retrieval.quality import (
+from retrieval.quality import (
     QualityMetrics, compute_quality_metrics,
 )
-from legal_summarizer.retrieval.qa import (
+from retrieval.qa import (
     ReferenceQuestion, ReferenceQASet, standard_qa_set,
 )
-from legal_summarizer.retrieval.index import (
+from retrieval.index import (
     RetrievalIndex,
 )
 

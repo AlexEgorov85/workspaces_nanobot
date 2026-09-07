@@ -22,15 +22,15 @@ planner'а:
 
 from __future__ import annotations
 
-from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.document.structure import (
+from chunking.chunks import Chunk
+from document.structure import (
     DocumentStructure,
     StructureNode,
 )
-from legal_summarizer.llm.tokens import (
+from llm.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
-from legal_summarizer.planning.strategy import (
+from planning.strategy import (
     ExecutionPolicy,
     build_execution_plan,
     select_strategy,
@@ -171,7 +171,7 @@ def test_direct_threshold_lower_reduces_call_count():
 
 def test_adjacent_packing_reduces_batches_vs_legacy():
     """Adjacent packing уменьшает число batches vs naive section-locality."""
-    from legal_summarizer.chunking.packing import (
+    from chunking.packing import (
         AdjacentPackingConfig, pack_chunks_with_adjacent,
     )
 

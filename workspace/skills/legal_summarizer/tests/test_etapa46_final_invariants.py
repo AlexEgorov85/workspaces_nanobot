@@ -33,7 +33,7 @@ def _build_doc(sections: int = 6) -> str:
 
 
 def _install_llm_mocks(monkeypatch):
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -48,18 +48,18 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.application.service as _summarizer
+    import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
 def test_invariant_a_one_run_one_pipeline(tmp_path, monkeypatch):
     """A: One run → one canonical pipeline."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=4)
@@ -77,7 +77,7 @@ def test_invariant_a_one_run_one_pipeline(tmp_path, monkeypatch):
 
 def test_invariant_b_one_run_one_context(tmp_path, monkeypatch):
     """B: One run → one ExecutionContext."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=4)
@@ -91,7 +91,7 @@ def test_invariant_b_one_run_one_context(tmp_path, monkeypatch):
 
 def test_invariant_c_one_context_one_plan(tmp_path, monkeypatch):
     """C: One ExecutionContext → one ExecutionPlan."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=4)
@@ -104,7 +104,7 @@ def test_invariant_c_one_context_one_plan(tmp_path, monkeypatch):
 
 def test_invariant_d_selected_equals_planned(tmp_path, monkeypatch):
     """D: selected chunks == planned chunks."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=4)
@@ -125,7 +125,7 @@ def test_invariant_d_selected_equals_planned(tmp_path, monkeypatch):
 
 def test_invariant_e_planned_equals_actual(tmp_path, monkeypatch):
     """E: planned batches == actual batches."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=4)
@@ -144,7 +144,7 @@ def test_invariant_e_planned_equals_actual(tmp_path, monkeypatch):
 
 def test_invariant_f_each_chunk_processed_exactly_once(tmp_path, monkeypatch):
     """F: each selected chunk → processed exactly once."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=4)
@@ -162,7 +162,7 @@ def test_invariant_f_each_chunk_processed_exactly_once(tmp_path, monkeypatch):
 
 def test_invariant_g_idempotent_no_reexecution(tmp_path, monkeypatch):
     """G: completed idempotent run → no pipeline, no plan, no LLM."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=4)
@@ -177,7 +177,7 @@ def test_invariant_g_idempotent_no_reexecution(tmp_path, monkeypatch):
 
     # Второй run — cached.
     seen = {"n": 0}
-    import legal_summarizer.llm.calls as llm_calls
+    import llm.calls as llm_calls
 
     original_batch = llm_calls.llm_batch
 
@@ -209,9 +209,9 @@ def test_invariant_h_two_concurrent_max_one_llm(tmp_path, monkeypatch):
 
 def test_invariant_i_exception_releases_lock():
     """I: LLM exception → lock released."""
-    from legal_summarizer.llm.calls import chat_locked
-    import legal_summarizer.llm.calls as lc
-    import legal_summarizer.llm.client as llm
+    from llm.calls import chat_locked
+    import llm.calls as lc
+    import llm.client as llm
     original = lc.llm.chat
 
     def _explode(*args, **kwargs):
@@ -232,7 +232,7 @@ def test_invariant_i_exception_releases_lock():
 
 def test_invariant_j_same_input_same_plan(tmp_path):
     """J: same analysis + same selection + same policy → same plan."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_doc(sections=4)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
@@ -249,7 +249,7 @@ def test_invariant_j_same_input_same_plan(tmp_path):
 
 def test_invariant_k_identity_matches_structure(tmp_path):
     """K: identity.document_id == structure.document_id."""
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     text = _build_doc(sections=4)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import tempfile
 
-from legal_summarizer.application.pipeline_structure import (
+from application.pipeline_structure import (
     run_canonical_pipeline,
 )
 

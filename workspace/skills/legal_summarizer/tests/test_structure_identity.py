@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from legal_summarizer.document.identity import (
+from document.identity import (
     DocumentIdentity,
 )
 
@@ -77,7 +77,7 @@ def test_identity_is_frozen():
 
 def test_identity_fingerprint_equals_physical_cache_key(tmp_path: Path):
     """PLAN §11 acceptance: identity.fingerprint == physical/cache fingerprint."""
-    from legal_summarizer.document.loader import (
+    from document.loader import (
         DocumentLoader,
     )
 

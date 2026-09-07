@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from legal_summarizer.llm.tokens import (
+from llm.tokens import (
     TokenEstimator,
     TokenEstimatorConfig,
 )
