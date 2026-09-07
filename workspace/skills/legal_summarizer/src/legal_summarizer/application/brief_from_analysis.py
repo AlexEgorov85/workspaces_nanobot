@@ -1,21 +1,21 @@
-"""Brief reuse analysis (PLAN §63).
+"""Brief reuse analysis для ``application`` layer.
 
-PLAN §63: ``brief`` mode не должен заново парсить документ,
-detect_sections, chunk, и т.п. Должен работать через ``DocumentAnalysis``
-+ importance-aware selection.
+``brief`` mode не должен заново парсить документ, detect_sections, chunk,
+и т.п. Должен работать через ``DocumentAnalysis`` + importance-aware
+selection.
 
-Этот модуль — convenience helper: ``select_brief_chunks_from_analysis``.
+Этот модуль — convenience helper для ``application.chunk_selection``:
+``select_brief_chunks_from_analysis``.
 """
 
 from __future__ import annotations
 
 from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.document.analysis import (
-    DocumentAnalysis,
-)
 from legal_summarizer.chunking.importance_brief import (
-    BriefSelectionConfig, select_brief_chunks,
+    BriefSelectionConfig,
+    select_brief_chunks,
 )
+from legal_summarizer.document.analysis import DocumentAnalysis
 
 
 def select_brief_chunks_from_analysis(
@@ -23,7 +23,7 @@ def select_brief_chunks_from_analysis(
     *,
     config: BriefSelectionConfig | None = None,
 ) -> tuple[Chunk, ...]:
-    """Выбрать chunks для brief из cached analysis (PLAN §63).
+    """Выбрать chunks для brief из cached analysis.
 
     Использует ``DocumentAnalysis.chunks`` и
     ``DocumentAnalysis.structure`` — **без** повторного parsing.
