@@ -1,13 +1,14 @@
-"""Execution orchestration: ``_run_direct`` / ``_run_map_reduce``.
+"""Execution orchestration: координатор ``_run_direct`` / ``_run_map_reduce``.
 
-Два варианта canonical execution path:
+Тонкая прослойка application layer:
+* выбирает стратегию (``direct`` vs ``map_reduce``);
+* делегирует фактическую работу в ``execution/direct`` и ``execution/map_reduce``;
+* отвечает за cache lifecycle (initial/final manifest, write_result).
 
-* ``run_direct`` — один ``llm_document_reduce`` вызов для коротких
-  документов (strategy='direct').
-* ``run_map_reduce`` — batched execution → hierarchical/flat reduce
-  для длинных документов.
-
-Оба варианта возвращают dict в shape, ожидаемом ``application.service.run()``.
+Алгоритмы execution (batching, LLM-вызовы, reduce) живут в
+``execution.map_reduce`` и ``execution.hierarchical``.
+Cache persistence — application-level responsibility (см.
+``references/architecture.md``).
 
 Note on monkeypatch:
     Тесты делают ``monkeypatch.setattr(service, "_llm_batch", mock)``
@@ -15,45 +16,36 @@ Note on monkeypatch:
     вызовут именно mock. Чтобы patch работал, мы читаем все
     ``_llm_*`` / ``_strip_*`` / ``_run_one_batch_async`` / etc.
     функции **через module attribute ``legal_summarizer.application.service``**
-    (lazy lookup), а не прямой импорт. Это back-compat shim для
-    этапа-тестов; основной код может импортировать напрямую из
-    subsystem-модулей.
+    (lazy lookup). Это back-compat shim для этапа-тестов.
 """
 
 from __future__ import annotations
 
-import asyncio
 import time as _time
 from pathlib import Path
 from typing import Any
 
-from legal_summarizer.application._text_helpers import (
+from legal_summarizer.application.manifest_builder import build_manifest
+from legal_summarizer.cache.manifest import (
+    NormalizedManifest,
+    save_manifest,
+    write_result,
+)
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.chunking._text_helpers import (
     fit_input,
-    format_chunk_block,
     progress,
 )
-from legal_summarizer.application.manifest_builder import build_manifest
-from legal_summarizer.application.section_index import (
+from legal_summarizer.document.analysis import DocumentAnalysis
+from legal_summarizer.document.section_helpers import (
     count_meaningful_sections_canonical,
     count_sections,
     section_index,
 )
-from legal_summarizer.cache.manifest import (
-    NormalizedManifest,
-    save_manifest,
-    write_chunk_result,
-    write_result,
-)
-from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.document.analysis import DocumentAnalysis
 from legal_summarizer.document.structure import DocumentStructure
-from legal_summarizer.execution.config import (
-    MAX_REDUCE_ROUNDS,
-    MID_REDUCE_GROUP_SIZE,
-)
-from legal_summarizer.execution.hierarchical import (
-    HierarchicalReducerConfig,
-    reduce_chunks_hierarchical,
+from legal_summarizer.execution.map_reduce import (
+    DOCUMENT_REDUCE_INPUT_BUDGET_CHARS,
+    run_map_reduce_execution,
 )
 from legal_summarizer.planning.plan import ExecutionPlan
 
@@ -70,16 +62,13 @@ def _service_mod():
     return _svc
 
 
-DOCUMENT_REDUCE_INPUT_BUDGET_CHARS = 60_000
-
-
 def map_plan_to_chunk_batches(
     plan: ExecutionPlan,
     chunks: list,
 ) -> list[list[Chunk]]:
     """Преобразовать ``ExecutionPlan`` в список батчей chunks.
 
-    Единая точка маппинга plan→chunks для ``run_map_reduce``.
+    Единая точка маппинта plan→chunks для ``run_map_reduce``.
     Неизвестные ``cid`` → ``RuntimeError``. Дубликаты → ``RuntimeError``.
     Порядок батчей == порядок ``plan.batches``.
     """
@@ -248,11 +237,15 @@ def run_map_reduce(
     article_count: int,
     existing_manifest: NormalizedManifest | None,
 ) -> dict:
-    """Canonical map_reduce: batch execution → hierarchical/flat reduce.
+    """Canonical map_reduce: coordinator.
 
-    Invariant: ``run_canonical_pipeline`` вызывается ровно один раз
-    в ``inspect()``. Эта функция использует уже готовые ``analysis`` из
-    ``Inspection`` и ``plan`` из ``ExecutionContext``.
+    Вычисляет ``section_index`` / ``sections_payload`` (document-level
+    helpers), делегирует execution в ``execution.map_reduce``,
+    затем отвечает за cache persistence (``save_manifest`` /
+    ``write_result``) и финальный manifest.
+
+    Cache boundary: ``execution.map_reduce`` НЕ пишет в cache —
+    ``write_chunk_result`` инжектируется callback'ом сюда.
     """
     if plan is None:
         raise RuntimeError(
@@ -264,22 +257,6 @@ def run_map_reduce(
 
     final_batches = map_plan_to_chunk_batches(plan, chunks)
 
-    actual_chunk_ids: list[str] = []
-    for fb in final_batches:
-        actual_chunk_ids.extend(c.chunk_id for c in fb)
-    expected_chunk_ids = [c.chunk_id for c in chunks]
-    if sorted(actual_chunk_ids) != sorted(expected_chunk_ids):
-        raise RuntimeError(
-            "Этап 1 invariant violated: "
-            f"plan batches do not cover expected chunks. "
-            f"missing={sorted(set(expected_chunk_ids) - set(actual_chunk_ids))}, "
-            f"extra={sorted(set(actual_chunk_ids) - set(expected_chunk_ids))}",
-        )
-    if len(set(actual_chunk_ids)) != len(actual_chunk_ids):
-        raise RuntimeError(
-            "Этап 1 invariant violated: duplicate chunk_id in map batches"
-        )
-
     section_ids: list[str] = []
     section_headings: dict[str, str] = {}
     section_paths: dict[str, str] = {}
@@ -289,7 +266,6 @@ def run_map_reduce(
         for node in struct.iter_sections():
             sections_payload[node.node_id] = node.to_dict()
 
-    article_count_for_manifest = article_count
     _svc = _service_mod()
     initial_manifest = build_manifest(
         operation_id=operation_id,
@@ -303,259 +279,97 @@ def run_map_reduce(
         estimated_llm_calls=estimated_llm_calls,
         sections_payload=sections_payload,
         started_at=existing_manifest.started_at if existing_manifest else _svc._now_iso(),
-        article_count=article_count_for_manifest,
+        article_count=article_count,
         now_iso=_svc._now_iso,
     )
     if existing_manifest is None:
         save_manifest(initial_manifest, workspace_root=workspace_root)
 
-    expected_chunk_ids = [c.chunk_id for c in chunks]
-    cached_partials = _svc._load_cached_partials(
-        operation_id, expected_chunk_ids, workspace_root,
-    )
-    chunk_states: dict[str, dict[str, Any]] = (
-        dict(existing_manifest.chunk_states) if existing_manifest else {}
-    )
+    from legal_summarizer.cache.manifest import write_chunk_result as _write_chunk_result
 
-    for cid in cached_partials:
-        chunk_states[cid] = {
-            "status": "completed",
-            "context_batch_id": chunk_states.get(cid, {}).get("context_batch_id"),
-            "section_id": chunk_states.get(cid, {}).get("section_id"),
-            "section_path": chunk_states.get(cid, {}).get("section_path"),
-            "page_start": chunk_states.get(cid, {}).get("page_start"),
-            "page_end": chunk_states.get(cid, {}).get("page_end"),
-            "result_path": f"chunks/{cid}.json",
-            "duration_sec": chunk_states.get(cid, {}).get("duration_sec"),
-        }
-
-    ctx_batches: dict[str, dict[str, Any]] = (
-        dict(existing_manifest.context_batches) if existing_manifest else {}
-    )
-
-    total_start = _time.monotonic()
-    map_calls = 0
-    retries = 0
-    failed_batch_ids: list[str] = []
-    first_batch_error: dict[str, Any] | None = None
-    concurrency = 1
-
-    queued: list[tuple[str, list[Chunk], int]] = []
-    total_batches = len(final_batches)
-    for batch_idx, batch_chunks in enumerate(final_batches):
-        pending = [
-            c for c in batch_chunks
-            if c.chunk_id not in chunk_states
-            or chunk_states[c.chunk_id].get("status") != "completed"
-        ]
-        if not pending:
-            continue
-        batch_id = f"cb_{batch_idx:03d}"
-        queued.append((batch_id, pending, len(batch_chunks)))
-        progress(
-            f"batch {batch_id}: {len(pending)}/{len(batch_chunks)} chunks "
-            f"queued ({total_batches} batches total, concurrency={concurrency})"
-        )
-
-    expected_ids = [f"cb_{i:03d}" for i in range(len(final_batches))]
-    actual_ids = [bid for bid, _, _ in queued]
-    if actual_ids != [eid for eid in expected_ids if eid in set(actual_ids)]:
-        raise RuntimeError(
-            f"batch order mismatch: queued={actual_ids} != expected={expected_ids}"
-        )
-
-    if queued:
-        sem = asyncio.Semaphore(concurrency)
-
-        async def _gather_all():
-            return await asyncio.gather(*[
-                _svc._run_one_batch_async(
-                    pending_chunks,
-                    chunks_total=len(chunks),
-                    structure=struct,
-                    operation_id=operation_id,
-                    workspace_root=workspace_root,
-                    sem=sem,
-                    batch_id=batch_id,
-                    length=length,
-                    question=question,
-                )
-                for batch_id, pending_chunks, _ in queued
-            ])
-
-        gather_results = asyncio.run(_gather_all())
-
-        for (batch_id, batch_chunks, _pending_count), (
-            status, batch_meta, chunk_results, last_error,
-        ) in zip(queued, gather_results):
-            if status == "ok":
-                assert batch_meta is not None
-                assert chunk_results is not None
-                map_calls += 1
-                ctx_batches[batch_id] = {
-                    "chunk_ids": batch_meta["chunk_ids"],
-                    "status": "completed",
-                    "started_at": batch_meta["started_at"],
-                    "completed_at": batch_meta["completed_at"],
-                    "duration_sec": batch_meta["duration_sec"],
-                    "section_paths": list({c.section_path for c in batch_chunks}),
-                }
-                # Cache persistence — application-level responsibility:
-                # ``execution.pipeline`` возвращает ``chunk_results``, но
-                # решение о записи в disk-манифест принимает application.
-                duration = batch_meta["duration_sec"]
-                for c in batch_chunks:
-                    if c.chunk_id in chunk_results:
-                        write_chunk_result(
-                            operation_id,
-                            c.chunk_id,
-                            chunk_results[c.chunk_id],
-                            context_batch_id=batch_id,
-                            section_id=c.section_id,
-                            section_path=c.section_path,
-                            page_start=c.page_start,
-                            page_end=c.page_end,
-                            duration_sec=duration,
-                            workspace_root=workspace_root,
-                        )
-                    chunk_states[c.chunk_id] = {
-                        "status": "completed",
-                        "context_batch_id": batch_id,
-                        "section_id": c.section_id,
-                        "section_path": c.section_path,
-                        "page_start": c.page_start,
-                        "page_end": c.page_end,
-                        "result_path": f"chunks/{c.chunk_id}.json",
-                        "duration_sec": batch_meta["duration_sec"],
-                    }
-            else:
-                assert last_error is not None
-                error_code, error_exc = last_error
-                retries += 1
-                failed_batch_ids.append(batch_id)
-                if first_batch_error is None:
-                    first_batch_error = {
-                        "code": error_code,
-                        "batch_id": batch_id,
-                        "message": str(error_exc),
-                    }
-                ctx_batches[batch_id] = {
-                    "chunk_ids": [c.chunk_id for c in batch_chunks],
-                    "status": "failed",
-                    "error": {"code": error_code, "message": str(error_exc)},
-                }
-                for c in batch_chunks:
-                    chunk_states[c.chunk_id] = {
-                        "status": "failed",
-                        "context_batch_id": batch_id,
-                        "section_id": c.section_id,
-                        "section_path": c.section_path,
-                        "page_start": c.page_start,
-                        "page_end": c.page_end,
-                        "error_code": error_code,
-                    }
-
-    all_partials = _svc._load_cached_partials(
-        operation_id, expected_chunk_ids, workspace_root,
+    payload = run_map_reduce_execution(
+        chunks=chunks,
+        plan=plan,
+        strategy=strategy,
+        length=length,
+        focus=focus,
+        question=question,
+        structure=structure,
+        analysis=analysis,
+        operation_id=operation_id,
+        workspace_root=workspace_root,
+        chars_in=chars_in,
+        article_count=article_count,
+        existing_manifest=existing_manifest,
+        final_batches=final_batches,
+        section_ids=section_ids,
+        section_headings=section_headings,
+        section_paths=section_paths,
+        write_chunk_result=_write_chunk_result,
     )
 
-    if not all_partials:
-        return {
-            "status": "failed",
-            "operation_id": operation_id,
-            "error": {"code": "NO_PARTIALS", "message": "Нет per-chunk partials"},
-        }
-
-    _section_summary_max_chars = 12000
-    section_reduce_calls = 0
-    document_reduce_calls = 0
-
-    if strategy == "map_hierarchical" and struct is not None and section_ids:
-        reducer_config = HierarchicalReducerConfig(
-            group_size=MID_REDUCE_GROUP_SIZE,
-            max_rounds=MAX_REDUCE_ROUNDS,
-            input_budget_chars=DOCUMENT_REDUCE_INPUT_BUDGET_CHARS,
-            section_summary_max_chars=_section_summary_max_chars,
-        )
-
-        def _llm_section_runner(joined, *, section_path="", section_heading="", **_kw):
-            result = _svc._llm_section_reduce(
-                section_path, section_heading, joined,
-                length=length, question=question,
-            )
-            result = _svc._strip_think_blocks(result)
-            if len(result) > _section_summary_max_chars:
-                result = fit_input(result, _section_summary_max_chars)
-            return result
-
-        def _llm_doc_runner(joined, *, length=length, focus=focus, structure=struct, question=question, **_kw):
-            return _svc._strip_think_blocks(
-                _svc._llm_document_reduce(
-                    joined, length=length, focus=focus, structure=structure, question=question,
-                )
-            )
-
-        def _llm_hybrid_runner(joined, *, section_path=None, section_heading=None, **kw):
-            if section_path is not None or section_heading is not None:
-                nonlocal section_reduce_calls
-                section_reduce_calls += 1
-                return _llm_section_runner(
-                    joined, section_path=section_path or "", section_heading=section_heading or "",
-                )
-            nonlocal document_reduce_calls
-            document_reduce_calls += 1
-            return _llm_doc_runner(joined, **kw)
-
-        reducer_result = reduce_chunks_hierarchical(
-            list(chunks),
-            all_partials,
-            section_ids=section_ids,
-            section_headings=section_headings,
-            section_paths=section_paths,
-            config=reducer_config,
-            llm_runner=_llm_hybrid_runner,
+    # Cache persistence — application-level responsibility.
+    # ``execution.map_reduce`` returns ``_internal`` artifacts for us to
+    # persist (chunk_states, ctx_batches, batch failure tracking).
+    if payload.get("status") in ("completed", "partial") and "_internal" in payload.get("stats", {}):
+        _persist_final_manifest(
+            payload=payload,
+            document_path=document_path,
+            structure=structure,
+            analysis=analysis,
+            chars_in=chars_in,
             length=length,
-            focus=focus,
+            chunks=chunks,
+            estimated_llm_calls=estimated_llm_calls,
+            sections_payload=sections_payload,
+            existing_manifest=existing_manifest,
+            article_count=article_count,
+            workspace_root=workspace_root,
+            now_iso=_svc._now_iso,
         )
-        final_summary = reducer_result.final_summary
-        strategy_label = "map_reduce_hierarchical"
-    else:
-        ordered_chunks = [c for c in chunks if c.chunk_id in all_partials]
-        joined = "\n\n".join(
-            format_chunk_block(c, all_partials[c.chunk_id]) for c in ordered_chunks
-        )
-        if not joined.strip():
-            return {
-                "status": "failed",
-                "operation_id": operation_id,
-                "error": {"code": "REDUCE_INPUT_EMPTY", "message": "Нет валидных partial summaries для финального reduce"},
-            }
-        joined = fit_input(joined, DOCUMENT_REDUCE_INPUT_BUDGET_CHARS)
-        try:
-            final_summary = _svc._llm_document_reduce(
-                joined, length=length, focus=focus,
-                structure=struct, question=question,
-            )
-            document_reduce_calls += 1
-        except Exception:
-            retries += 1
-            final_summary = joined if joined.strip() else ""
-        strategy_label = "map_reduce_flat"
 
-    final_summary = _svc._strip_think_blocks(final_summary)
+    # Удалить ``_internal`` из payload перед возвратом.
+    if payload.get("stats", {}).get("_internal") is not None:
+        del payload["stats"]["_internal"]
 
-    if not final_summary or not final_summary.strip():
-        return {
-            "status": "failed",
-            "operation_id": operation_id,
-            "error": {"code": "REDUCE_INPUT_EMPTY", "message": "Document reduce вернул пустой summary"},
-        }
+    return payload
 
-    total_duration = round(_time.monotonic() - total_start, 1)
-    subject = _svc._extract_subject(final_summary)
-    is_partial = bool(failed_batch_ids)
-    total_llm_calls = map_calls + section_reduce_calls + document_reduce_calls
-    meaningful = count_meaningful_sections_canonical(struct) if struct else 0
+
+def _persist_final_manifest(
+    *,
+    payload: dict,
+    document_path: str | None,
+    structure: DocumentStructure | None,
+    analysis: DocumentAnalysis | None,
+    chars_in: int,
+    length: str,
+    chunks: list,
+    estimated_llm_calls: int,
+    sections_payload: dict[str, dict[str, Any]],
+    existing_manifest: NormalizedManifest | None,
+    article_count: int,
+    workspace_root: Path | str | None,
+    now_iso,
+) -> None:
+    """Сохранить финальный manifest на диск.
+
+    Извлекает ``_internal`` из ``payload.stats`` и сохраняет
+    ``NormalizedManifest`` через ``cache.manifest.save_manifest``.
+    """
+    from legal_summarizer.cache.manifest import (
+        NormalizedManifest,
+        save_manifest,
+        write_result,
+    )
+
+    internal = payload["stats"]["_internal"]
+    chunk_states = internal["chunk_states"]
+    ctx_batches = internal["ctx_batches"]
+    failed_batch_ids = internal["failed_batch_ids"]
+    first_batch_error = internal["first_batch_error"]
+    total_llm_calls = internal["total_llm_calls"]
+    total_duration = internal["total_duration"]
+    strategy_label = internal["strategy_label"]
 
     title = None
     if analysis is not None and analysis.structure.title is not None:
@@ -563,71 +377,34 @@ def run_map_reduce(
     elif structure is not None and structure.title is not None:
         title = structure.title.value
 
-    result = {
-        "subject": subject,
-        "summary": final_summary,
-        "length": length,
-        "chars_in": chars_in,
-        "chunks": len(chunks),
-        "context_batches": len(final_batches),
-        "sections": count_sections(struct),
-        "strategy": strategy_label,
-        "title": title,
-        "partial": is_partial,
-    }
-    write_result(operation_id, result, workspace_root=workspace_root)
+    write_result(payload["operation_id"], payload["result"], workspace_root=workspace_root)
 
-    final_manifest = build_manifest(
-        operation_id=operation_id,
+    final_manifest = NormalizedManifest(
+        operation_id=payload["operation_id"],
+        status=payload["status"],
+        version=2,
         document_path=document_path,
-        structure=structure,
-        analysis=analysis,
+        structure_title=title,
         chars_in=chars_in,
         length=length,
         chunks_total=len(chunks),
-        context_batches_total=len(final_batches),
+        context_batches_total=len(ctx_batches),
         estimated_llm_calls=estimated_llm_calls,
-        sections_payload=sections_payload,
-        started_at=existing_manifest.started_at if existing_manifest else _svc._now_iso(),
-        article_count=article_count_for_manifest,
-        now_iso=_svc._now_iso,
+        actual_llm_calls=total_llm_calls,
+        sections=sections_payload,
+        chunk_states=chunk_states,
+        context_batches=ctx_batches,
+        section_summaries={},
+        batches_done=[f"cb_{i:03d}" for i in range(len(ctx_batches))],
+        batches_failed=failed_batch_ids,
+        last_error=first_batch_error,
+        started_at=existing_manifest.started_at if existing_manifest else now_iso(),
+        completed_at=now_iso(),
+        duration_sec=total_duration,
+        article_count=article_count,
+        raw={"strategy": strategy_label},
     )
-    final_manifest.status = "partial" if is_partial else "completed"
-    final_manifest.actual_llm_calls = total_llm_calls
-    final_manifest.chunk_states = chunk_states
-    final_manifest.context_batches = ctx_batches
-    final_manifest.section_summaries = {}
-    final_manifest.batches_done = [f"cb_{i:03d}" for i in range(len(final_batches))]
-    final_manifest.batches_failed = list(failed_batch_ids)
-    final_manifest.last_error = first_batch_error
-    final_manifest.completed_at = _svc._now_iso()
-    final_manifest.duration_sec = total_duration
     save_manifest(final_manifest, workspace_root=workspace_root)
-
-    return {
-        "status": "partial" if is_partial else "completed",
-        "operation_id": operation_id,
-        "result": result,
-        "stats": {
-            "chars_in": chars_in,
-            "chunks_total": len(chunks),
-            "context_batches_total": len(final_batches),
-            "sections_total": count_sections(struct),
-            "meaningful_sections": meaningful,
-            "article_count": article_count_for_manifest,
-            "map_calls": map_calls,
-            "section_reduce_calls": section_reduce_calls,
-            "section_trim_calls": 0,
-            "document_reduce_calls": document_reduce_calls,
-            "reduce_calls": section_reduce_calls + document_reduce_calls,
-            "total_llm_calls": total_llm_calls,
-            "retries": retries,
-            "failed_batches": list(failed_batch_ids),
-            "partial": is_partial,
-            "duration_sec": total_duration,
-            "strategy": strategy_label,
-        },
-    }
 
 
 __all__ = [
