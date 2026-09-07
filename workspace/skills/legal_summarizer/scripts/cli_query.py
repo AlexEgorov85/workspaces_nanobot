@@ -27,8 +27,13 @@ from typing import Any
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
+_SKILL_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+if str(_SKILL_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_SKILL_ROOT / "src"))
+if str(_SKILL_ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(_SKILL_ROOT / "scripts"))
 
 
 def _build_parser() -> argparse.ArgumentParser:
