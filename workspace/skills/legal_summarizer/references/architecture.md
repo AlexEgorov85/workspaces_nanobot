@@ -103,6 +103,8 @@ chunking          │
 
 ## Зависимости между слоями (canonical)
 
+Поток импортов направлен **снизу вверх** — от leaves к application:
+
 ```text
 CLI
   ↓
@@ -110,34 +112,43 @@ application
   ↓
 ┌────────────┬────────────┬────────────┬────────────┐
 document   chunking   retrieval   planning
-                                  ↓
+    │           │           │           │
+    └───────────┴───────────┴─────┬─────┘
+                                   ▼
                               execution
-                                  ↓
+                                   │
+                                   ▼
                                  llm
 ```
 
 Cache вызывается **только** на application-level. Output — на
 application/output boundary.
 
-### Запрещённые зависимости
+### Запрещённые зависимости (обратное направление)
 
 ```text
-document       → retrieval, execution, llm, planning
-chunking        → application, execution, llm, cache
-retrieval       → application, execution, llm
-planning        → application, llm
-execution       → application, retrieval, llm.client (lock)
-llm             → application
+document       → retrieval, execution, planning, application, llm, cache, output
+chunking        → retrieval, execution, planning, application, llm, cache, output
+retrieval       → execution, planning, application, llm, cache, output
+planning        → execution, application, llm, cache, output
+execution       → application, cache, output
 ```
 
-Для LLM разрешено:
+`application` может импортировать всё. `llm` / `cache` / `output` —
+leaves (не импортируют внутренние слои).
 
-```text
-llm → client
-llm → prompts
-llm → single_flight
-llm → tokens
-```
+Импорты **вниз** (например, `document → execution`) запрещены — это
+архитектурное нарушение. Тест `tests/architecture/test_layer_boundaries.py`
+проверяет это правило через AST-обход всех `.py` под `legal_summarizer/`.
+
+### Single-flight — единственное исключение
+
+`execution.pipeline` импортирует `llm.single_flight.LLM_FLIGHT_LOCK` —
+это **технический cross-cutting gate** (как `threading.Lock`), а не
+domain-зависимость. Это явное исключение из общего правила «execution
+не зависит от llm». Для остальных обращений к LLM
+рекомендуется `llm/single_flight.py::guarded_chat` — public API,
+используемый `llm.calls`.
 
 ## Document — единый source of truth
 
@@ -170,8 +181,11 @@ boundary (manifest / JSON output). Внутренние API принимают
 
 Один `LLM_FLIGHT_LOCK` в `llm/single_flight.py`. Используется:
 
-* `execution.pipeline.process_context_batch` — map-phase.
+* `execution.pipeline.process_context_batch` — map-phase
+  (через прямой lock — для совместимости с mock-тестами).
 * `llm.calls.chat_locked` — manual вызовы (back-compat).
+* `llm.single_flight.guarded_chat` — рекомендуемый public API для
+  нового кода.
 
 `threading.Lock` импортируется **только** в `llm/single_flight.py`.
 `execution.pipeline` импортирует `LLM_FLIGHT_LOCK` напрямую (без

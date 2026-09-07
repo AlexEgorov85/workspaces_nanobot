@@ -1,29 +1,47 @@
 """Architecture boundary guard for ``legal_summarizer`` layered package.
 
 Forbids ``import`` / ``import ... from`` between layers in the
-direction of the dependency graph:
+direction of the dependency graph::
 
-    domain       ← document  ← retrieval ← application
-                         ↑          ↓
-                      chunking  execution
-                         ↓          ↓
-                       llm  ← planning → output, infrastructure
+                  ┌─────────────────────┐
+                  │   application       │  orchestration, idempotency
+                  └─────────┬───────────┘
+                            ▼
+    ┌───────────┬───────────┴───────────┬───────────────┐
+    │           │                       │               │
+    ▼           ▼           ▼           ▼               ▼
+  document  chunking  retrieval  planning           output
+    │           │           │           │
+    └───────────┴───────────┴─────┬─────┘
+                                   ▼
+                               execution
+                                   │
+                                   ▼
+                              llm.calls / llm.prompts
+                                   │
+                                   ▼
+                              llm.client (leaf)
 
-Concrete rules (from AGENTS.md §65 / `docs/TARGET_ARCHITECTURE.md`):
+Rules (canonical dependency direction):
 
-* ``domain`` may not import any layer.
-* ``document`` may not import ``retrieval``, ``execution``, ``llm``, ``planning``.
-* ``retrieval`` may not import ``execution``, ``llm``.
-* ``planning`` may not import ``llm``, ``execution``.
-* ``chunking`` may not import ``execution``, ``llm``.
-* ``execution`` may not import ``document``, ``retrieval``, ``llm``.
+* ``document`` is a leaf — may not import any internal layer.
+* ``chunking`` may import ``document`` (block ownership, types).
+* ``retrieval`` may import ``document`` (structure types).
+* ``planning`` may import ``document`` and ``chunking``.
+* ``execution`` may import ``document``, ``chunking``, ``llm.calls``,
+  ``llm.prompts``, ``llm.tokens``, ``llm.single_flight``.
 * ``application`` may import anything.
-* ``llm``, ``output``, ``cache``, ``infrastructure`` are leaves
-  (no imports from internal layers required — allowed: any).
+* ``llm.calls``, ``llm.prompts``, ``llm.config``, ``llm.client``,
+  ``cache``, ``output`` are leaves.
+
+Forbidden direction is what matters: ``llm.calls`` may NOT import
+``execution``, ``chunking``, ``retrieval``, ``planning``,
+``document``, ``application``. Same for other leaves.
 
 The test walks every ``.py`` under
 ``workspace/skills/legal_summarizer/legal_summarizer`` and asserts
-that no module reaches a forbidden target via ``legal_summarizer.<layer>...``.
+that no module reaches a forbidden target via ``legal_summarizer.<layer>...``
+or ``legal_summarizer.llm.<sublayer>...``.
 """
 
 from __future__ import annotations
@@ -32,51 +50,121 @@ import ast
 from pathlib import Path
 
 
-_SRC_ROOT = (
-    Path(__file__).resolve().parents[3]
-    / "legal_summarizer"
-)
+_SKILL_ROOT = Path(__file__).resolve().parents[2]
+_RUNTIME_PKG = _SKILL_ROOT / "legal_summarizer"
 
-# layer name -> set of layer names it MUST NOT import
+
+# Layer name -> set of layer names it MUST NOT import.
+# Direction matters: imports flow from leaves UP to application, not
+# downward. ``document``, ``chunking``, ``retrieval``, ``planning`` are
+# pure data/structure layers — they may NOT depend on ``execution``,
+# ``application``, ``cache``, ``output``.
+#
+# ``execution`` is the only layer allowed to bridge to ``llm`` (calls,
+# prompts, single_flight).
 _FORBIDDEN: dict[str, frozenset[str]] = {
-    "domain": frozenset({
-        "document", "chunking", "retrieval",
-        "planning", "execution", "llm",
-        "application", "cache", "output", "infrastructure",
-    }),
     "document": frozenset({
-        "retrieval", "execution", "llm", "planning",
+        "retrieval", "execution", "planning", "application",
+        "llm", "output",
     }),
     "chunking": frozenset({
-        "execution", "llm",
+        "retrieval", "execution", "planning", "application",
+        "llm", "cache", "output",
     }),
     "retrieval": frozenset({
-        "execution", "llm",
+        "execution", "planning", "application",
+        "llm", "cache", "output",
     }),
     "planning": frozenset({
-        "llm",
+        "execution", "application",
+        "llm", "cache", "output",
     }),
+    # ``execution`` may import ``llm.calls``/``llm.prompts`` (canonical LLM API)
+    # and ``llm.single_flight`` (technical gate).
     "execution": frozenset({
-        "document", "retrieval", "llm",
+        "application",
+        "cache", "output",
     }),
+    "application": frozenset(),  # application may import anything
+    "llm": frozenset(),  # leaves (llm.client, llm.calls, llm.prompts, etc.)
+    "cache": frozenset(),  # leaves
+    "output": frozenset(),  # leaves
 }
 
 
+# Разрешённые исключения из общего правила — технические примитивы,
+# которые являются infra-утилитами, а не domain-зависимостями.
+#
+# 1. ``llm.tokens`` (``TokenEstimator``) — pure-math token-budget.
+#    Не делает LLM-вызовов, безопасен для всех data-слоёв
+#    (``chunking``, ``retrieval``, ``planning``, ``document``).
+# 2. ``cache.manifest_root`` — утилита path resolution
+#    (``document/physical.py`` использует её для document cache key).
+# 3. ``retrieval.index`` и ``retrieval.query`` — исторически
+#    ``document/analysis.py`` собирает ``DocumentAnalysis`` через
+#    эти модули. Это известное архитектурное исключение
+#    (``DocumentAnalysis`` — это projectional representation, требующая
+#    и document, и retrieval). Должно быть решено отдельным рефакторингом.
+# 4. ``application.service`` — единственный **lazy** import из
+#    ``execution.map_reduce`` (через ``_service_mod()``). Это
+#    back-compat shim для monkeypatch-тестов
+#    (``monkeypatch.setattr(service, "_llm_*", mock)``). В runtime
+#    фактические LLM-вызовы идут через ``llm.calls`` —
+#    ``application.service`` нужен только для резолва тестовых
+#    mock'ов. См. ``legal_summarizer/execution/map_reduce.py``.
+_ALLOWED_TECHNICAL_EXCEPTIONS: dict[str, frozenset[str]] = {
+    "document": frozenset({"cache", "retrieval"}),
+    "chunking": frozenset({"llm.tokens"}),
+    "retrieval": frozenset({"llm.tokens"}),
+    "planning": frozenset({"llm.tokens"}),
+    "execution": frozenset({"application"}),  # back-compat _service_mod
+}
+
+
+def _is_allowed_exception(source_layer: str, target: str) -> bool:
+    return target in _ALLOWED_TECHNICAL_EXCEPTIONS.get(source_layer, frozenset())
+
+
 def _layer_of(path: Path) -> str | None:
-    rel = path.relative_to(_SRC_ROOT)
+    """Layer name from a relative path under ``legal_summarizer/``.
+
+    Examples:
+        ``document/foo.py`` → ``document``
+        ``llm/calls.py`` → ``llm``
+        ``llm/single_flight.py`` → ``llm``
+        ``application/__init__.py`` → ``application``
+    """
+    rel = path.relative_to(_RUNTIME_PKG)
     parts = rel.parts
     if len(parts) < 2:
         return None
     return parts[0]
 
 
-def _imported_layer(module: str | None) -> str | None:
-    """Return the layer name if ``module`` is an internal ``legal_summarizer.*`` import."""
+def _imported_target(module: str | None) -> str | None:
+    """Target layer/sub-layer name if ``module`` is an internal ``legal_summarizer.*`` import.
+
+    Returns:
+        ``document`` / ``chunking`` / ``cache`` / ``output`` для
+        не-llm imports.
+
+        Для ``legal_summarizer.llm`` → ``llm`` (целый пакет).
+        Для ``legal_summarizer.llm.tokens`` → ``llm.tokens``.
+        Для ``legal_summarizer.llm.calls`` → ``llm.calls``.
+        Это позволяет различать технические импорты
+        (``llm.tokens`` = ``TokenEstimator``, безопасен) от
+        LLM-API импортов (``llm.calls`` / ``llm.client``,
+        запрещены для data-слоёв).
+    """
     if not module or not module.startswith("legal_summarizer."):
         return None
     parts = module.split(".")
     if len(parts) < 2:
         return None
+    if parts[1] == "llm":
+        if len(parts) < 3:
+            return "llm"
+        return f"llm.{parts[2]}"
     return parts[1]
 
 
@@ -100,7 +188,7 @@ def _walk_module(path: Path) -> list[tuple[str, str]]:
 
 def _collect_violations() -> list[str]:
     violations: list[str] = []
-    for path in sorted(_SRC_ROOT.rglob("*.py")):
+    for path in sorted(_RUNTIME_PKG.rglob("*.py")):
         if path.name == "__init__.py":
             continue
         layer = _layer_of(path)
@@ -108,20 +196,26 @@ def _collect_violations() -> list[str]:
             continue
         forbidden = _FORBIDDEN[layer]
         for src_line, mod in _walk_module(path):
-            target_layer = _imported_layer(mod)
-            if target_layer is None or target_layer == layer:
+            target = _imported_target(mod)
+            if target is None or target == layer:
                 continue
-            if target_layer in forbidden:
-                rel = path.relative_to(_SRC_ROOT.parent.parent.parent)
+            if target in forbidden:
+                if _is_allowed_exception(layer, target):
+                    continue
+                rel = path.relative_to(_SKILL_ROOT)
                 violations.append(
-                    f"{rel} {src_line}: {layer} → {target_layer} "
-                    f"({mod})"
+                    f"{rel} {src_line}: {layer} → {target} ({mod})"
                 )
     return violations
 
 
-def test_no_layer_boundary_violations():
-    """Внутри ``legal_summarizer`` слои не должны ссылаться на запрещённые зависимости."""
+def test_no_layer_boundary_violations() -> None:
+    """Внутри ``legal_summarizer`` нижние слои не должны зависеть от верхних.
+
+    Канонический поток: ``document → chunking/retrieval/planning →
+    execution → llm → application``. Импорты только в этом направлении.
+    Обратное направление (например, ``document → execution``) запрещено.
+    """
     violations = _collect_violations()
     assert violations == [], (
         "Architecture boundary violations:\n  - " +

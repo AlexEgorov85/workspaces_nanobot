@@ -115,3 +115,37 @@ def test_no_domain_imports_in_codebase() -> None:
         assert not pattern.search(text), (
             f"{path.relative_to(_SKILL_ROOT)}: legacy domain/ import found"
         )
+
+
+def test_prompts_path_independent_of_cwd() -> None:
+    """``load_prompt()`` использует абсолютный путь через ``__file__``,
+    поэтому работает независимо от того, откуда запущен Skill.
+    """
+    import subprocess
+    import sys
+
+    cli = _SKILL_ROOT / "scripts" / "cli.py"
+    assert cli.is_file()
+    proc = subprocess.run(
+        [sys.executable, str(cli), "--help"],
+        cwd=_SKILL_ROOT,  # cwd skill root
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"cli.py --help from skill root failed: {proc.stderr}"
+    )
+    # Также из произвольной cwd (родитель репо).
+    other_cwd = _SKILL_ROOT.parent.parent
+    proc = subprocess.run(
+        [sys.executable, str(cli), "--help"],
+        cwd=other_cwd,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"cli.py --help from arbitrary cwd ({other_cwd}) failed: "
+        f"{proc.stderr}"
+    )
