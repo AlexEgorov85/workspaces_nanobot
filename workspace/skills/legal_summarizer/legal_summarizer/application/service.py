@@ -27,7 +27,7 @@ import re
 from pathlib import Path
 
 from legal_summarizer.document.structure import DocumentStructure
-from legal_summarizer.application._text_helpers import progress
+from legal_summarizer.chunking._text_helpers import progress
 from legal_summarizer.application.chunk_selection import (
     relaxed_lexical_fallback as _relaxed_lexical_fallback,
     select_chunks_for_mode as _select_chunks_for_mode,
@@ -120,7 +120,7 @@ from legal_summarizer.execution.pipeline import (  # noqa: E402
 from legal_summarizer.cache.manifest import (  # noqa: E402
     load_cached_partials as _load_cached_partials,
 )
-from legal_summarizer.application._text_helpers import (  # noqa: E402
+from legal_summarizer.chunking._text_helpers import (  # noqa: E402
     format_chunk_block as _format_chunk_block,
     fit_input as _fit_input,
     local_structure_label as _local_structure_label,
@@ -144,7 +144,7 @@ from legal_summarizer.application.chunk_selection import (  # noqa: E402
 from legal_summarizer.application.manifest_builder import (  # noqa: E402
     build_manifest as _build_manifest,
 )
-from legal_summarizer.application.section_index import (  # noqa: E402
+from legal_summarizer.document.section_helpers import (  # noqa: E402
     section_index as _section_index,
     count_meaningful_sections_canonical as _count_meaningful_sections_canonical,
     count_sections as _count_sections,

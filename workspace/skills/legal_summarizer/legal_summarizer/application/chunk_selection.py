@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-from legal_summarizer.application._text_helpers import progress
+from legal_summarizer.chunking._text_helpers import progress
 from legal_summarizer.llm.config import get_chunking_config, get_execution_config
 
 

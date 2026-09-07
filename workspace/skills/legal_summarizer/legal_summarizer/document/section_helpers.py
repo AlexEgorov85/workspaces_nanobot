@@ -1,7 +1,11 @@
 """Canonical section helpers для DocumentStructure.
 
 Чистые функции на ``DocumentStructure``: индекс секций (ids, headings,
-hierarchical paths) и подсчёт meaningful sections.
+hierarchical paths), подсчёт meaningful sections, подсчёт sections.
+
+Раньше жили в ``application/section_index.py`` — переехали сюда
+(в ``document/``), потому что это чистые утилиты над DocumentStructure,
+а не orchestration-логика. ``application`` импортирует их отсюда.
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ def count_meaningful_sections_canonical(struct: DocumentStructure) -> int:
 
 
 def count_sections(struct: DocumentStructure | None) -> int:
-    """Число section-узлов в структуре (0 если None)."""
+    """Число section-узлов в DocumentStructure (0 если None)."""
     if struct is None:
         return 0
     return len(struct.iter_sections())

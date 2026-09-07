@@ -1,7 +1,9 @@
-"""Text-helper утилиты для application layer.
+"""Text-helper утилиты для chunk layer.
 
-Маленькие чистые функции для разметки chunk-блоков и truncate. Без
-зависимостей от downstream subsystems (domain/chunking/retrieval).
+Маленькие чистые функции для разметки chunk-блоков и truncate.
+Без зависимостей от downstream subsystems. Раньше жили
+в ``application/_text_helpers.py`` — переехали сюда, потому что
+работают над ``Chunk`` (логически принадлежит chunking).
 """
 
 from __future__ import annotations
