@@ -22,7 +22,7 @@ Concrete rules (from AGENTS.md §65 / `docs/TARGET_ARCHITECTURE.md`):
   (no imports from internal layers required — allowed: any).
 
 The test walks every ``.py`` under
-``workspace/skills/legal_summarizer/src/legal_summarizer`` and asserts
+``workspace/skills/legal_summarizer/legal_summarizer`` and asserts
 that no module reaches a forbidden target via ``legal_summarizer.<layer>...``.
 """
 
@@ -34,7 +34,6 @@ from pathlib import Path
 
 _SRC_ROOT = (
     Path(__file__).resolve().parents[3]
-    / "src"
     / "legal_summarizer"
 )
 

@@ -21,7 +21,7 @@ from unittest.mock import patch
 from legal_summarizer.document.loader import (
     DocumentLoader,
 )
-from legal_summarizer.domain.identity import (
+from legal_summarizer.document.identity import (
     DocumentIdentity,
 )
 from legal_summarizer.document.physical import (

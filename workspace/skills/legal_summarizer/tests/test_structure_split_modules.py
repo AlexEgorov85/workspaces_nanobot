@@ -71,17 +71,17 @@ def test_new_modules_have_narrow_responsibility():
 def test_summary_of_split_modules():
     """Краткая карта: где сейчас находится что."""
     parts = {
-        "loader": "src/legal_summarizer/document/loader.py",
-        "identity": "src/legal_summarizer/domain/identity.py",
-        "numbering": "src/legal_summarizer/domain/numbering.py",
-        "heading": "src/legal_summarizer/document/heading.py",
-        "hierarchy": "src/legal_summarizer/document/hierarchy.py",
-        "structure": "src/legal_summarizer/domain/models.py",
-        "chunker": "src/legal_summarizer/chunking/chunker.py",
-        "execution": "src/legal_summarizer/planning/plan.py",
-        "reducer": "src/legal_summarizer/execution/hierarchical.py",
-        "retrieval": "src/legal_summarizer/retrieval/query.py",
-        "pipeline": "src/legal_summarizer/application/pipeline_structure.py",
+        "loader": "legal_summarizer/document/loader.py",
+        "identity": "legal_summarizer/document/identity.py",
+        "numbering": "legal_summarizer/document/numbering.py",
+        "heading": "legal_summarizer/document/heading.py",
+        "hierarchy": "legal_summarizer/document/hierarchy.py",
+        "structure": "legal_summarizer/document/structure.py",
+        "chunker": "legal_summarizer/chunking/chunker.py",
+        "execution": "legal_summarizer/planning/plan.py",
+        "reducer": "legal_summarizer/execution/hierarchical.py",
+        "retrieval": "legal_summarizer/retrieval/query.py",
+        "pipeline": "legal_summarizer/application/pipeline_structure.py",
     }
     for key, path in parts.items():
         assert path.endswith(".py")

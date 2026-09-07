@@ -29,7 +29,7 @@ def test_identity_matches_structure(tmp_path):
     from legal_summarizer.document.analysis import (
         DocumentAnalysis,
     )
-    from legal_summarizer.domain.identity import (
+    from legal_summarizer.document.identity import (
         DocumentIdentity,
     )
     from legal_summarizer.document.physical import (

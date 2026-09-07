@@ -43,7 +43,7 @@ from legal_summarizer.document.heading import (
 from legal_summarizer.document.hierarchy import (
     build_document_structure,
 )
-from legal_summarizer.domain.models import (
+from legal_summarizer.document.structure import (
     DocumentStructure,
 )
 from legal_summarizer.document.physical import (
@@ -52,7 +52,7 @@ from legal_summarizer.document.physical import (
 from legal_summarizer.document.repair import (
     repair_structure,
 )
-from legal_summarizer.domain.tokens import (
+from legal_summarizer.llm.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
 from legal_summarizer.planning.strategy import (

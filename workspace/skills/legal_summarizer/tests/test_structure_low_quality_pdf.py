@@ -61,7 +61,7 @@ def test_low_quality_pdf_with_partial_ocr():
 
 def test_low_quality_no_repair_fabricates_structure():
     """Repair не должен придумывать секции, если их нет."""
-    from legal_summarizer.domain.models import (
+    from legal_summarizer.document.structure import (
         DocumentStructure, StructureNode,
     )
     from legal_summarizer.document.repair import (

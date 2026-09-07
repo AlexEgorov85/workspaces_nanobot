@@ -73,7 +73,7 @@ def _compute_max_calls(n: int, group_size: int, max_rounds: int) -> int:
 
 def test_n_sections_rounds_bounded():
     """N sections: actual calls ≤ max_rounds * ceil(N/group_size) + 1."""
-    from legal_summarizer.domain.config import (
+    from legal_summarizer.execution.config import (
     HierarchicalReducerConfig,
     )
     from legal_summarizer.execution.hierarchical import (
@@ -100,7 +100,7 @@ def test_n_sections_rounds_bounded():
 
 def test_estimate_bounds_for_1_2_10_100_sections():
     """Bounds: actual_calls ≤ max_rounds * ceil(N/group_size) + 1."""
-    from legal_summarizer.domain.config import (
+    from legal_summarizer.execution.config import (
     HierarchicalReducerConfig,
     )
     from legal_summarizer.execution.hierarchical import (
@@ -130,7 +130,7 @@ def test_estimate_bounds_for_1_2_10_100_sections():
 
 def test_reducer_no_data_loss_for_marker_groups():
     """Все маркерные группы сохраняются при reduce."""
-    from legal_summarizer.domain.config import (
+    from legal_summarizer.execution.config import (
     HierarchicalReducerConfig,
     )
     from legal_summarizer.execution.hierarchical import (

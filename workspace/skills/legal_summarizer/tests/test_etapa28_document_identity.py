@@ -21,7 +21,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 def test_document_identity_is_deterministic(tmp_path):
     """Один и тот же файл → один и тот же document_id."""
-    from legal_summarizer.domain.identity import (
+    from legal_summarizer.document.identity import (
         DocumentIdentity,
     )
 
@@ -40,7 +40,7 @@ def test_file_change_creates_new_identity(tmp_path):
     """Изменение файла → новый document_id."""
     import time as _time
 
-    from legal_summarizer.domain.identity import (
+    from legal_summarizer.document.identity import (
         DocumentIdentity,
     )
 
@@ -61,7 +61,7 @@ def test_file_change_creates_new_identity(tmp_path):
 
 def test_different_files_have_different_identities(tmp_path):
     """Два разных файла → разные document_id."""
-    from legal_summarizer.domain.identity import (
+    from legal_summarizer.document.identity import (
         DocumentIdentity,
     )
 
@@ -79,7 +79,7 @@ def test_different_files_have_different_identities(tmp_path):
 def test_documents_with_same_prefix_have_different_ids(tmp_path):
     """Документы с одинаковым префиксом (collision risk на 12 hex chars) — разные."""
     import hashlib
-    from legal_summarizer.domain.identity import (
+    from legal_summarizer.document.identity import (
         DocumentIdentity,
     )
 
@@ -100,7 +100,7 @@ def test_is_fresh_detects_modification(tmp_path):
     """is_fresh возвращает False после модификации."""
     import time as _time
 
-    from legal_summarizer.domain.identity import (
+    from legal_summarizer.document.identity import (
         DocumentIdentity,
     )
 
@@ -119,7 +119,7 @@ def test_is_fresh_detects_modification(tmp_path):
 
 def test_document_id_first_12_hex_chars(tmp_path):
     """document_id — это первые 12 hex chars от fingerprint."""
-    from legal_summarizer.domain.identity import (
+    from legal_summarizer.document.identity import (
         DocumentIdentity,
     )
 

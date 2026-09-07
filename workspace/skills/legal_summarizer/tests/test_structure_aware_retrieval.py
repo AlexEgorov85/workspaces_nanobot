@@ -20,7 +20,7 @@ PLAN §65: при ranking учитывать:
 from __future__ import annotations
 
 from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.domain.models import (
+from legal_summarizer.document.structure import (
     DocumentStructure, StructureNode,
 )
 from legal_summarizer.document.physical import (

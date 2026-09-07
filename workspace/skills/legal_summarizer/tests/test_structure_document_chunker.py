@@ -7,7 +7,7 @@ from legal_summarizer.chunking.chunker import (
     DocumentStructureChunkerConfig,
     chunk_from_structure,
 )
-from legal_summarizer.domain.models import (
+from legal_summarizer.document.structure import (
     DocumentStructure,
     StructureNode,
 )

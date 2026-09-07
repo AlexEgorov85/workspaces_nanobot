@@ -6,7 +6,7 @@ from legal_summarizer.chunking.chunks import Chunk
 from legal_summarizer.planning.plan import (
     ExecutionPlan, PlannedBatch, build_direct_plan, build_map_plan,
 )
-from legal_summarizer.domain.tokens import (
+from legal_summarizer.llm.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
 
@@ -105,7 +105,7 @@ def test_section_ids_preserve_order_across_runs():
     from legal_summarizer.planning.plan import (
         build_direct_plan,
     )
-    from legal_summarizer.domain.tokens import (
+    from legal_summarizer.llm.tokens import (
         TokenEstimator, TokenEstimatorConfig,
     )
 
@@ -134,7 +134,7 @@ def test_map_plan_section_ids_preserve_order():
     from legal_summarizer.planning.plan import (
         build_map_plan,
     )
-    from legal_summarizer.domain.tokens import (
+    from legal_summarizer.llm.tokens import (
         TokenEstimator, TokenEstimatorConfig,
     )
 

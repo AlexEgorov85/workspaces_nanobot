@@ -6,10 +6,10 @@ from legal_summarizer.chunking.chunks import Chunk
 from legal_summarizer.document.analysis import (
     DocumentAnalysis,
 )
-from legal_summarizer.domain.identity import (
+from legal_summarizer.document.identity import (
     DocumentIdentity,
 )
-from legal_summarizer.domain.models import (
+from legal_summarizer.document.structure import (
     DocumentStructure, StructureNode,
 )
 from legal_summarizer.document.physical import (

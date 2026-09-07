@@ -6,10 +6,10 @@ from legal_summarizer.chunking.chunks import Chunk
 from legal_summarizer.retrieval.context_expansion import (
     ContextExpansionConfig, expand_context,
 )
-from legal_summarizer.domain.models import (
+from legal_summarizer.document.structure import (
     DocumentStructure, StructureNode,
 )
-from legal_summarizer.domain.tokens import (
+from legal_summarizer.llm.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
 

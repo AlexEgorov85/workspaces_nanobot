@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.domain.config import (
+from legal_summarizer.execution.config import (
     HierarchicalReducerConfig,
 )
 from legal_summarizer.execution.hierarchical import (
@@ -114,7 +114,7 @@ def test_reduce_sections_to_document_respects_max_rounds():
 
 def test_reduce_chunks_1_section():
     """PLAN §25: 1 section — single round."""
-    from legal_summarizer.domain.config import (
+    from legal_summarizer.execution.config import (
     HierarchicalReducerConfig,
     )
     from legal_summarizer.execution.hierarchical import (
@@ -138,7 +138,7 @@ def test_reduce_chunks_1_section():
 
 def test_reduce_chunks_2_sections():
     """PLAN §25: 2 sections — single round."""
-    from legal_summarizer.domain.config import (
+    from legal_summarizer.execution.config import (
     HierarchicalReducerConfig,
     )
     from legal_summarizer.execution.hierarchical import (
@@ -160,7 +160,7 @@ def test_reduce_chunks_2_sections():
 
 def test_reduce_chunks_3_sections():
     """PLAN §25: 3 sections — single round (group_size=3)."""
-    from legal_summarizer.domain.config import (
+    from legal_summarizer.execution.config import (
     HierarchicalReducerConfig,
     )
     from legal_summarizer.execution.hierarchical import (
@@ -183,7 +183,7 @@ def test_reduce_chunks_3_sections():
 
 def test_reduce_chunks_10_sections():
     """PLAN §25: 10 sections — multiple rounds."""
-    from legal_summarizer.domain.config import (
+    from legal_summarizer.execution.config import (
     HierarchicalReducerConfig,
     )
     from legal_summarizer.execution.hierarchical import (
@@ -206,7 +206,7 @@ def test_reduce_chunks_10_sections():
 
 def test_reduce_chunks_100_sections_no_data_loss():
     """PLAN §25 + Этап 9: 100 sections — все секции учтены, ровно один final."""
-    from legal_summarizer.domain.config import (
+    from legal_summarizer.execution.config import (
     HierarchicalReducerConfig,
     )
     from legal_summarizer.execution.hierarchical import (

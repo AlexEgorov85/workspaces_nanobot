@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from legal_summarizer.domain.numbering import (
+from legal_summarizer.document.numbering import (
     assign_sibling_ordinals,
     parse_numbering,
 )
-from legal_summarizer.domain.models import NumberingInfo
+from legal_summarizer.document.structure import NumberingInfo
 
 
 def _ni(**kw):

@@ -70,7 +70,7 @@ def test_production_builder_uses_identity_document_id():
     from legal_summarizer.application.pipeline_structure import (
         run_canonical_pipeline,
     )
-    from legal_summarizer.domain.identity import (
+    from legal_summarizer.document.identity import (
         DocumentIdentity,
     )
 
@@ -94,7 +94,7 @@ def test_identity_is_source_of_truth(tmp_path):
         StructureTreeBuilderConfig,
         build_document_structure,
     )
-    from legal_summarizer.domain.identity import (
+    from legal_summarizer.document.identity import (
         DocumentIdentity,
     )
     from legal_summarizer.document.physical import (

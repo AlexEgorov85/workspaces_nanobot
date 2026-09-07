@@ -23,9 +23,9 @@ def _module_has_llm_call(module) -> bool:
 
 def test_no_llm_call_in_structure_modules():
     """Структурные модули не должны вызывать LLM."""
-    import legal_summarizer.domain.models as models
+    import legal_summarizer.document.structure as models
     import legal_summarizer.document.physical as physical
-    import legal_summarizer.domain.numbering as numbering
+    import legal_summarizer.document.numbering as numbering
     import legal_summarizer.document.heading as heading
     import legal_summarizer.document.hierarchy as hierarchy
     import legal_summarizer.document.repair as repair
@@ -34,11 +34,11 @@ def test_no_llm_call_in_structure_modules():
     import legal_summarizer.document.list_detection as list_detection
     import legal_summarizer.retrieval.candidate_aggregator as candidate_aggregator
     import legal_summarizer.document.pdf_outline as pdf_outline
-    import legal_summarizer.domain.identity as identity
+    import legal_summarizer.document.identity as identity
     import legal_summarizer.document.safety_merge as safety_merge
     import legal_summarizer.document.loader as document_loader
     import legal_summarizer.chunking.chunker as document_chunker
-    import legal_summarizer.domain.tokens as token_estimator
+    import legal_summarizer.llm.tokens as token_estimator
     import legal_summarizer.planning.plan as execution_plan
     import legal_summarizer.chunking.packing as adjacent_packing
     import legal_summarizer.planning.strategy as unified_execution
@@ -85,7 +85,7 @@ def test_no_llm_call_in_structure_modules():
 
 def test_hierarchical_reducer_accepts_llm_runner():
     """HierarchicalReducer **принимает** LLMRunner, но не вызывает его сам."""
-    from legal_summarizer.domain.config import (
+    from legal_summarizer.execution.config import (
     HierarchicalReducerConfig,
     )
     import dataclasses

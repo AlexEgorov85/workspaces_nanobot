@@ -17,7 +17,7 @@ def test_factory_pattern_detection():
 
 
 def test_count_abstract_classes():
-    import legal_summarizer.domain.models as models
+    import legal_summarizer.document.structure as models
     import legal_summarizer.document.repair as repair
     import legal_summarizer.document.validation as validation
     for module in (models, repair, validation):
@@ -28,7 +28,7 @@ def test_count_abstract_classes():
 def test_no_oversized_classes_in_new_modules():
     import legal_summarizer.document.hierarchy as hierarchy
     import legal_summarizer.retrieval.query as retrieval
-    import legal_summarizer.domain.numbering as numbering
+    import legal_summarizer.document.numbering as numbering
     for module in (hierarchy, retrieval, numbering):
         assert has_oversized_class(module, max_lines=500) is False
 
@@ -45,5 +45,5 @@ def test_factory_check_specific_names():
 
 
 def test_clean_module_under_threshold():
-    import legal_summarizer.domain.numbering as numbering
+    import legal_summarizer.document.numbering as numbering
     assert has_oversized_class(numbering, max_lines=300) is False

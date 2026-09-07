@@ -34,7 +34,7 @@ from legal_summarizer.document.hierarchy import (
     StructureTreeBuilderConfig,
     build_document_structure,
 )
-from legal_summarizer.domain.models import (
+from legal_summarizer.document.structure import (
     DocumentStructure,
     StructureNode,
 )

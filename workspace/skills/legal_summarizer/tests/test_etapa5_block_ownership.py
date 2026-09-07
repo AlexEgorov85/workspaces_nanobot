@@ -13,7 +13,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 def _make_structure_with_nested():
     """Структура: root, chapter 0..4, два articles (0..1, 2..2), article2 (3..3)."""
-    from legal_summarizer.domain.models import (
+    from legal_summarizer.document.structure import (
         DocumentStructure,
         NumberingInfo,
         StructureNode,

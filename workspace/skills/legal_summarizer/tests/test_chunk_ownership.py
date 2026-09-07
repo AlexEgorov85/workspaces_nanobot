@@ -130,7 +130,7 @@ def test_owner_for_block_returns_root_for_uncovered_block():
     from legal_summarizer.chunking.chunker import (
         owner_for_block,
     )
-    from legal_summarizer.domain.models import (
+    from legal_summarizer.document.structure import (
         DocumentStructure, StructureNode,
     )
 

@@ -23,11 +23,11 @@ planner'а:
 from __future__ import annotations
 
 from legal_summarizer.chunking.chunks import Chunk
-from legal_summarizer.domain.models import (
+from legal_summarizer.document.structure import (
     DocumentStructure,
     StructureNode,
 )
-from legal_summarizer.domain.tokens import (
+from legal_summarizer.llm.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
 from legal_summarizer.planning.strategy import (

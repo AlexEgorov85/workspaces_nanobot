@@ -12,7 +12,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 
 def _make_node(*, node_id, title="", start_block=0, end_block=0, parent_id="n_0000"):
-    from legal_summarizer.domain.models import StructureNode
+    from legal_summarizer.document.structure import StructureNode
     return StructureNode(
         node_id=node_id,
         node_type="section",
@@ -29,7 +29,7 @@ def _make_node(*, node_id, title="", start_block=0, end_block=0, parent_id="n_00
 
 
 def _wrap(nodes):
-    from legal_summarizer.domain.models import (
+    from legal_summarizer.document.structure import (
         DocumentStructure,
     )
     root = _make_node(node_id="n_0000", title="", start_block=0, end_block=9, parent_id=None)
