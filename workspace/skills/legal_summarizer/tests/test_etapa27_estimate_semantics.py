@@ -25,7 +25,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 
 def _install_llm_mocks(monkeypatch):
-    from workspace.skills.legal_summarizer.scripts import llm_calls
+    import legal_summarizer.llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -40,12 +40,12 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import summarizer as _summarizer
+    import legal_summarizer.application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    from workspace.skills.legal_summarizer.scripts import pipeline as _pipeline_mod
+    import legal_summarizer.execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
@@ -62,8 +62,7 @@ def _build_doc(sections: int = 6) -> str:
 
 def test_estimate_and_actual_are_separate_fields(tmp_path, monkeypatch):
     """Manifest хранит estimated и actual как разные поля."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     _install_llm_mocks(monkeypatch)
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
@@ -87,8 +86,7 @@ def test_estimate_and_actual_are_separate_fields(tmp_path, monkeypatch):
 
 def test_estimate_is_a_forecast_not_a_guarantee(tmp_path, monkeypatch):
     """Estimate остаётся forecast'ом, не превращается в факт."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     _install_llm_mocks(monkeypatch)
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
@@ -108,8 +106,7 @@ def test_estimate_is_a_forecast_not_a_guarantee(tmp_path, monkeypatch):
 
 def test_estimate_for_run_is_upper_bound_for_direct(tmp_path):
     """_estimate_for_run: direct → upper bound = 1."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = _build_doc(sections=3)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
@@ -121,8 +118,7 @@ def test_estimate_for_run_is_upper_bound_for_direct(tmp_path):
 
 def test_estimate_for_run_hierarchical_upper_bound(tmp_path):
     """_estimate_for_run: map_hierarchical → batches + S + R (upper bound)."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
@@ -144,8 +140,7 @@ def test_hierarchical_reduce_calls_upper_bound_simulation():
     (каждый group в раунде → 1 LLM-вызов) + финальный call,
     если после max_rounds осталось >1 группы.
     """
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     gs = summarizer.MID_REDUCE_GROUP_SIZE
     max_rounds = summarizer.MAX_REDUCE_ROUNDS
 
@@ -191,8 +186,7 @@ def test_actual_llm_calls_bounded_by_estimate(tmp_path, monkeypatch):
     нетривиальном пути: ``batches + S + reduce_calls(S)``.
     """
     import docx
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     doc = docx.Document()
@@ -239,8 +233,7 @@ def test_actual_llm_calls_bounded_by_estimate_map_flat(tmp_path, monkeypatch):
     TXT загружается одним physical block → structure без meaningful
     sections → strategy ``map_flat``. Upper bound = batches + 1.
     """
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     _install_llm_mocks(monkeypatch)
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
@@ -267,8 +260,7 @@ def test_actual_llm_calls_bounded_by_estimate_map_flat(tmp_path, monkeypatch):
 
 def test_actual_llm_calls_bounded_by_estimate_direct(tmp_path, monkeypatch):
     """direct: estimate == actual == 1."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     _install_llm_mocks(monkeypatch)
     p = _write_doc(tmp_path, "Только один абзац текста, без секций.")
     text = p.read_text(encoding="utf-8")
@@ -290,8 +282,7 @@ def test_actual_llm_calls_bounded_by_estimate_direct(tmp_path, monkeypatch):
 
 def test_estimate_for_run_returns_estimate_dataclass(tmp_path):
     """_estimate_for_run возвращает dataclass Estimate с min/max."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))

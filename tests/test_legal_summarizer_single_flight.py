@@ -95,8 +95,7 @@ def test_summarizer_emits_warning_on_max_concurrent_batches_above_one(
     # на configured_concurrency > 1.
     import inspect
 
-    import summarizer as _summarizer
-
+    import legal_summarizer.application.service as _summarizer
     src = inspect.getsource(_summarizer.run)
     assert "DeprecationWarning" in src, (
         "summarizer.run должен эмитить DeprecationWarning при "
@@ -120,7 +119,7 @@ def test_runtime_single_flight_through_run_one_batch_async(monkeypatch):
     import time as _time
 
     from workspace.skills.legal_summarizer.scripts.packing import ContextBatch
-    from workspace.skills.legal_summarizer.scripts.pipeline import (
+    from legal_summarizer.execution.pipeline import (
         run_one_batch_async,
     )
 
@@ -144,7 +143,7 @@ def test_runtime_single_flight_through_run_one_batch_async(monkeypatch):
                 state["in_flight"] -= 1
 
     monkeypatch.setattr(
-        "workspace.skills.legal_summarizer.scripts.pipeline.process_context_batch",
+        "legal_summarizer.execution.pipeline.process_context_batch",
         fake_batch_meta,
     )
 
@@ -200,8 +199,7 @@ def test_summarizer_run_single_flight_under_max_concurrent_4(
     import threading
     import time as _time
 
-    import summarizer as _summarizer
-
+    import legal_summarizer.application.service as _summarizer
     state = {
         "in_flight": 0, "peak": 0, "lock": threading.Lock(),
         "calls": 0,
@@ -243,7 +241,7 @@ def test_summarizer_run_single_flight_under_max_concurrent_4(
         )
 
     monkeypatch.setattr(
-        "workspace.skills.legal_summarizer.scripts.pipeline.process_context_batch",
+        "legal_summarizer.execution.pipeline.process_context_batch",
         fake_process_context_batch,
     )
     monkeypatch.setattr(_summarizer, "pack_chunks", one_chunk_per_batch)

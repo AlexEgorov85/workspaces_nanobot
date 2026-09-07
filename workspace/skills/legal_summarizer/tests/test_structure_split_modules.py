@@ -14,19 +14,19 @@ PLAN §59: ``summarizer.py`` (1773 строк) и ``chunks.py`` (555) — сли
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.document_chunker import (
+from legal_summarizer.chunking.chunker import (
     ChunkPlanner,
 )
-from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
+from legal_summarizer.execution.hierarchical import (
     reduce_chunks_hierarchical,
 )
-from workspace.skills.legal_summarizer.scripts.structure.pipeline import (
+from legal_summarizer.application.pipeline_structure import (
     run_canonical_pipeline,
 )
-from workspace.skills.legal_summarizer.scripts.structure.retrieval_index import (
+from legal_summarizer.retrieval.index import (
     RetrievalIndex,
 )
-from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+from legal_summarizer.planning.strategy import (
     build_execution_plan,
 )
 
@@ -54,10 +54,11 @@ def test_build_execution_plan_exists():
 def test_new_modules_have_narrow_responsibility():
     """Каждый новый модуль отвечает за одну вещь (PLAN §60)."""
     import inspect
-    from workspace.skills.legal_summarizer.scripts.structure import (
-        pipeline, document_chunker, hierarchical_reducer,
-        retrieval_index, unified_execution,
-    )
+    import legal_summarizer.application.pipeline_structure as pipeline
+    import legal_summarizer.chunking.chunker as document_chunker
+    import legal_summarizer.execution.hierarchical as hierarchical_reducer
+    import legal_summarizer.retrieval.index as retrieval_index
+    import legal_summarizer.planning.strategy as unified_execution
     for module in (
         pipeline, document_chunker, hierarchical_reducer,
         retrieval_index, unified_execution,
@@ -70,17 +71,17 @@ def test_new_modules_have_narrow_responsibility():
 def test_summary_of_split_modules():
     """Краткая карта: где сейчас находится что."""
     parts = {
-        "loader": "scripts/structure/document_loader.py",
-        "identity": "scripts/structure/identity.py",
-        "numbering": "scripts/structure/numbering.py",
-        "heading": "scripts/structure/heading.py",
-        "hierarchy": "scripts/structure/hierarchy.py",
-        "structure": "scripts/structure/models.py",
-        "chunker": "scripts/structure/document_chunker.py",
-        "execution": "scripts/structure/execution_plan.py",
-        "reducer": "scripts/structure/hierarchical_reducer.py",
-        "retrieval": "scripts/structure/retrieval.py",
-        "pipeline": "scripts/structure/pipeline.py",
+        "loader": "src/legal_summarizer/document/loader.py",
+        "identity": "src/legal_summarizer/domain/identity.py",
+        "numbering": "src/legal_summarizer/domain/numbering.py",
+        "heading": "src/legal_summarizer/document/heading.py",
+        "hierarchy": "src/legal_summarizer/document/hierarchy.py",
+        "structure": "src/legal_summarizer/domain/models.py",
+        "chunker": "src/legal_summarizer/chunking/chunker.py",
+        "execution": "src/legal_summarizer/planning/plan.py",
+        "reducer": "src/legal_summarizer/execution/hierarchical.py",
+        "retrieval": "src/legal_summarizer/retrieval/query.py",
+        "pipeline": "src/legal_summarizer/application/pipeline_structure.py",
     }
     for key, path in parts.items():
         assert path.endswith(".py")

@@ -53,7 +53,7 @@ def _build_honest_mock(monkeypatch):
     В map-вызовах (DOCUMENT CHUNK) — каждый chunk содержит свои FACTs.
     В reduce-вызове — все FACTs из user prompt.
     """
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     def fake_chat(messages, *, context=None, **kwargs):
         user_content = messages[1]["content"]
@@ -86,7 +86,7 @@ def _build_honest_mock(monkeypatch):
 
 def _setup_execution_mocks(monkeypatch, *, single_threshold: int = 12000):
     """Mock chunking_config и execution_config."""
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
         "chunk_size": 1000, "chunk_overlap": 0, "single_call_threshold": single_threshold,
@@ -105,7 +105,7 @@ def _setup_execution_mocks(monkeypatch, *, single_threshold: int = 12000):
 
 def _count_llm_calls(monkeypatch):
     """Счётчик LLM-вызовов."""
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     counter = {"n": 0}
     original = summarizer.llm.chat
@@ -179,7 +179,7 @@ def test_acceptance_matrix_small_doc_single_call(tmp_path, monkeypatch):
     _setup_execution_mocks(monkeypatch, single_threshold=12000)
     counter = _count_llm_calls(monkeypatch)
 
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     result = summarizer.run(
         SMALL_DOC, length="brief", confirmed=True, workspace_root=tmp_path,
@@ -202,7 +202,7 @@ def test_acceptance_matrix_medium_doc_two_calls_min(tmp_path, monkeypatch):
     _setup_execution_mocks(monkeypatch, single_threshold=100)  # не single
     counter = _count_llm_calls(monkeypatch)
 
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     result = summarizer.run(
         MAP_REDUCE_DOC, length="brief", confirmed=True, workspace_root=tmp_path,
@@ -219,7 +219,7 @@ def test_acceptance_matrix_large_doc_two_or_more_calls(tmp_path, monkeypatch):
     _setup_execution_mocks(monkeypatch, single_threshold=100)
     counter = _count_llm_calls(monkeypatch)
 
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     result = summarizer.run(
         LARGE_DOC, length="brief", confirmed=True, workspace_root=tmp_path,
@@ -240,7 +240,7 @@ def test_acceptance_matrix_direct_strategy_for_short_doc(tmp_path, monkeypatch):
     Раньше это требовало opt-in (``direct_strategy_min_chars``). Теперь
     решение принимается через ``DocumentStats`` + ``StrategyConfig``.
     """
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     _build_honest_mock(monkeypatch)
     _setup_execution_mocks(monkeypatch, single_threshold=12000)
@@ -272,7 +272,7 @@ def test_acceptance_matrix_quality_small_doc_100_percent(tmp_path, monkeypatch):
     _build_honest_mock(monkeypatch)
     _setup_execution_mocks(monkeypatch)
 
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     # Вставка фактов в small doc.
     text_with_facts = (
@@ -301,7 +301,7 @@ def test_acceptance_matrix_quality_medium_doc_80_percent(tmp_path, monkeypatch):
     _build_honest_mock(monkeypatch)
     _setup_execution_mocks(monkeypatch, single_threshold=100000)
 
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     result = summarizer.run(
         MEDIUM_DOC, length="brief", confirmed=True, workspace_root=tmp_path,
@@ -321,12 +321,12 @@ def test_acceptance_matrix_quality_medium_doc_80_percent(tmp_path, monkeypatch):
 
 
 REQUIRED_MODULES = [
-    "workspace.skills.legal_summarizer.scripts.sanitize",
+    "legal_summarizer.llm.sanitize",
     "workspace.skills.legal_summarizer.scripts.fingerprint",
     "workspace.skills.legal_summarizer.scripts.document_cache",
-    "workspace.skills.legal_summarizer.scripts.prompts_runtime",
-    "workspace.skills.legal_summarizer.scripts.llm_calls",
-    "workspace.skills.legal_summarizer.scripts.pipeline",
+    "legal_summarizer.llm.prompts_runtime",
+    "legal_summarizer.llm.calls",
+    "legal_summarizer.execution.pipeline",
     "workspace.skills.legal_summarizer.scripts.token_budget",
     "workspace.skills.legal_summarizer.scripts.document_stats",
     "workspace.skills.legal_summarizer.scripts.document_cleanup",
@@ -389,7 +389,7 @@ def test_acceptance_matrix_summary_report(tmp_path, monkeypatch, capsys):
     print("=" * 60)
 
     # LLM calls.
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     _build_honest_mock(monkeypatch)
     _setup_execution_mocks(monkeypatch, single_threshold=12000)

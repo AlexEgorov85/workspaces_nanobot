@@ -24,7 +24,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 def test_document_id_invariant_for_txt(tmp_path: Path):
     """TXT: ``structure.document_id == identity.document_id``."""
-    from workspace.skills.legal_summarizer.scripts.structure.pipeline import (
+    from legal_summarizer.application.pipeline_structure import (
         run_canonical_pipeline,
     )
 
@@ -39,7 +39,7 @@ def test_document_id_invariant_for_txt(tmp_path: Path):
 
 def test_document_id_invariant_for_pdf(tmp_path: Path):
     """PDF: ``structure.document_id == identity.document_id``."""
-    from workspace.skills.legal_summarizer.scripts.structure.pipeline import (
+    from legal_summarizer.application.pipeline_structure import (
         run_canonical_pipeline,
     )
 
@@ -67,10 +67,10 @@ def test_document_id_invariant_for_pdf(tmp_path: Path):
 
 def test_production_builder_uses_identity_document_id():
     """``run_canonical_pipeline`` передаёт identity.document_id в builder."""
-    from workspace.skills.legal_summarizer.scripts.structure.pipeline import (
+    from legal_summarizer.application.pipeline_structure import (
         run_canonical_pipeline,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.identity import (
+    from legal_summarizer.domain.identity import (
         DocumentIdentity,
     )
 
@@ -87,17 +87,17 @@ def test_production_builder_uses_identity_document_id():
 def test_identity_is_source_of_truth(tmp_path):
     """Если в builder передан ``document_id`` отличный от identity —
     ``DocumentAnalysis.build`` выравнивает по identity."""
-    from workspace.skills.legal_summarizer.scripts.structure.document_analysis import (
+    from legal_summarizer.document.analysis import (
         DocumentAnalysis,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchy import (
+    from legal_summarizer.document.hierarchy import (
         StructureTreeBuilderConfig,
         build_document_structure,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.identity import (
+    from legal_summarizer.domain.identity import (
         DocumentIdentity,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         PhysicalDocument,
     )
 

@@ -29,7 +29,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 def test_concurrent_runs_peak_is_one(tmp_path, monkeypatch):
     """Две параллельные run() → max concurrent LLM calls == 1."""
-    from workspace.skills.legal_summarizer.scripts import llm_calls
+    import legal_summarizer.llm.calls as llm_calls
 
     active = {"now": 0, "peak": 0}
     lock = threading.Lock()
@@ -54,16 +54,15 @@ def test_concurrent_runs_peak_is_one(tmp_path, monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import summarizer as _summarizer
+    import legal_summarizer.application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    from workspace.skills.legal_summarizer.scripts import pipeline as _pipeline_mod
+    import legal_summarizer.execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text_a = (
         "1. Раздел прочее\n\n"
         + ("Текст. " * 50) * 300

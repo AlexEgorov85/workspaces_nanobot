@@ -27,8 +27,8 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 def test_direct_run_returns_real_sections_metadata(tmp_path: Path, monkeypatch):
     """Direct run с известной структурой → ``result['sections']`` отражает
     реальное число секций."""
-    import summarizer
-    from workspace.skills.legal_summarizer.scripts import llm_calls
+    import legal_summarizer.application.service as summarizer
+    import legal_summarizer.llm.calls as llm_calls
 
     def _fake_doc(text, *, length, focus, structure, question=None):
         return "Итоговое саммари."

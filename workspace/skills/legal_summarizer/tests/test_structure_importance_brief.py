@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-from workspace.skills.legal_summarizer.scripts.structure.importance_brief import (
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.chunking.importance_brief import (
     BriefSelectionConfig, select_brief_chunks,
 )
-from workspace.skills.legal_summarizer.scripts.structure.models import (
+from legal_summarizer.domain.models import (
     DocumentStructure, StructureNode,
 )
 

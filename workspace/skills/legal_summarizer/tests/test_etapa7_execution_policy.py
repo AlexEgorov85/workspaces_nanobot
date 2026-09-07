@@ -13,7 +13,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 def _simple_struct_with_sections(n_sections: int):
     """Структура с N секциями."""
-    from workspace.skills.legal_summarizer.scripts.structure.models import (
+    from legal_summarizer.domain.models import (
         DocumentStructure, StructureNode,
     )
 
@@ -86,7 +86,7 @@ def _chunks_for(struct):
 
 def test_policy_max_sections_per_batch_changes_plan():
     """Изменение ``max_sections_per_batch`` меняет реальный план."""
-    from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+    from legal_summarizer.planning.strategy import (
         ExecutionPolicy,
         build_execution_plan,
     )
@@ -125,7 +125,7 @@ def test_policy_max_sections_per_batch_changes_plan():
 
 def test_policy_per_batch_token_budget_changes_plan():
     """Изменение ``per_batch_token_budget`` меняет реальный план."""
-    from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+    from legal_summarizer.planning.strategy import (
         ExecutionPolicy,
         build_execution_plan,
     )
@@ -160,7 +160,7 @@ def test_policy_per_batch_token_budget_changes_plan():
 
 def test_policy_direct_threshold_changes_strategy():
     """Изменение ``direct_threshold_tokens`` меняет стратегию."""
-    from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+    from legal_summarizer.planning.strategy import (
         ExecutionPolicy,
         select_strategy,
     )

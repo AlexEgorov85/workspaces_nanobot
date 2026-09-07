@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.reference_qa import (
+from legal_summarizer.retrieval.qa import (
     ReferenceQuestion, ReferenceQASet,
     evaluate_retrieval, standard_qa_set,
 )

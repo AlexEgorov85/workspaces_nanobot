@@ -25,7 +25,7 @@ _PROJ = _REPO
 if str(_PROJ) not in sys.path:
     sys.path.insert(0, str(_PROJ))
 
-from workspace.skills.legal_summarizer.scripts.manifest import (  # noqa: E402
+from legal_summarizer.cache.manifest import (  # noqa: E402
     MANIFEST_VERSION_V2,
     NormalizedManifest,
     chunk_result_path,

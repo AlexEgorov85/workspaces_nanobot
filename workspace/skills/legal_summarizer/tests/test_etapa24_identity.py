@@ -26,16 +26,16 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 def test_identity_matches_structure(tmp_path):
     """identity.document_id == structure.document_id после DocumentAnalysis.build."""
-    from workspace.skills.legal_summarizer.scripts.structure.document_analysis import (
+    from legal_summarizer.document.analysis import (
         DocumentAnalysis,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.identity import (
+    from legal_summarizer.domain.identity import (
         DocumentIdentity,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         PhysicalDocument,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchy import (
+    from legal_summarizer.document.hierarchy import (
         build_document_structure,
     )
 
@@ -58,8 +58,7 @@ def test_identity_matches_structure(tmp_path):
 
 def test_make_operation_id_deterministic(tmp_path):
     """make_operation_id детерминирован для одного входа."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = "Тестовый документ."
     op1 = summarizer.make_operation_id(text, "brief")
     op2 = summarizer.make_operation_id(text, "brief")
@@ -68,8 +67,7 @@ def test_make_operation_id_deterministic(tmp_path):
 
 def test_make_operation_id_stable(tmp_path):
     """make_operation_id стабилен при повторных вызовах."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = "Договор аренды помещения."
     ops = [summarizer.make_operation_id(text, "detailed") for _ in range(10)]
     assert len(set(ops)) == 1
@@ -77,8 +75,7 @@ def test_make_operation_id_stable(tmp_path):
 
 def test_make_operation_id_differs_by_length(tmp_path):
     """make_operation_id различается для разных length."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = "Договор аренды."
     op_brief = summarizer.make_operation_id(text, "brief")
     op_detailed = summarizer.make_operation_id(text, "detailed")

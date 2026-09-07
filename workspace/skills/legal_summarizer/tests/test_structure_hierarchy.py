@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.heading import (
+from legal_summarizer.document.heading import (
     HeadingCandidate,
 )
-from workspace.skills.legal_summarizer.scripts.structure.hierarchy import (
+from legal_summarizer.document.hierarchy import (
     StructureTreeBuilderConfig,
     build_document_structure,
 )
-from workspace.skills.legal_summarizer.scripts.structure.models import (
+from legal_summarizer.domain.models import (
     DocumentTitle,
 )
 

@@ -34,8 +34,8 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import summarizer  # noqa: E402
-from output import _sanitize_value, prepare_output  # noqa: E402
-from structure.document_loader import DocumentLoader  # noqa: E402
+from legal_summarizer.output.presenter import _sanitize_value, prepare_output  # noqa: E402
+from legal_summarizer.document.loader import DocumentLoader  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +385,7 @@ def test_inspect_does_not_call_llm(monkeypatch, tmp_path):
 
 
 def test_estimate_returns_min_max_seconds(tmp_path):
-    from summarizer import Estimate, estimate, Inspection
+    from legal_summarizer.application.service import Estimate, estimate, Inspection
 
     insp = Inspection(
         chars_in=1000,
@@ -400,7 +400,7 @@ def test_estimate_returns_min_max_seconds(tmp_path):
 
 
 def test_needs_confirmation_threshold(monkeypatch, tmp_path):
-    from summarizer import Inspection, estimate, needs_confirmation
+    from legal_summarizer.application.service import Inspection, estimate, needs_confirmation
 
     monkeypatch.setattr(
         summarizer,
@@ -419,7 +419,7 @@ def test_needs_confirmation_threshold(monkeypatch, tmp_path):
         },
     )
 
-    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
+    from legal_summarizer.chunking.chunks import Chunk
     from workspace.skills.legal_summarizer.scripts.packing import ContextBatch
 
     cb_small = ContextBatch(
@@ -710,8 +710,7 @@ def test_sanitize_handles_datetime():
 
 
 def test_skill_config_chunking_defaults_match_project_json():
-    import skill_config
-
+    import legal_summarizer.llm.config as skill_config
     cfg = skill_config.get_chunking_config()
     assert cfg["chunk_size"] == 100000
     assert cfg["chunk_overlap"] == 0
@@ -720,8 +719,7 @@ def test_skill_config_chunking_defaults_match_project_json():
 
 
 def test_skill_config_cli_matches_project_json():
-    import skill_config
-
+    import legal_summarizer.llm.config as skill_config
     cli = skill_config.get_cli_config()
     assert cli["max_retries"] == 3
     assert cli["timeout_sec"] == 120
@@ -904,8 +902,7 @@ def _build_text_response(user_content: str) -> str:
 def test_quick_estimate_txt_estimates_without_full_load(monkeypatch, tmp_path):
     """``quick_estimate`` для txt даёт оценку за секунды без полной
     экстракции (полная экстракция больших PDF = минуты; инцидент 2026-08-28)."""
-    import summarizer as _summ
-
+    import legal_summarizer.application.service as _summ
     # Низкий порог чтобы триггернуть needs_confirmation на умеренном txt
     monkeypatch.setattr(_summ, "get_execution_config", lambda: {
         "confirmation_threshold_sec": 1.0,
@@ -943,8 +940,7 @@ def test_running_marker_emitted_before_long_run(monkeypatch, tmp_path, capsys):
     появляется в stdout ДО запуска run()."""
     import cli as _cli
 
-    import summarizer as _summ
-
+    import legal_summarizer.application.service as _summ
     monkeypatch.setattr(_summ, "get_chunking_config", lambda: {
         "chunk_size": 100000, "chunk_overlap": 0, "single_call_threshold": 100,
         "chunk_size_input_ratio": None,
@@ -1299,7 +1295,7 @@ def test_run_no_article_pattern_returns_zero(monkeypatch, tmp_path):
 
 def _seed_operation(tmp_path: Path, *, article_count: int | None = 7) -> str:
     """Положить минимальный manifest + result в tmp_path как будто был прогон."""
-    from manifest import (  # noqa: E402  (sys.path настроен выше)
+    from legal_summarizer.cache.manifest import (  # noqa: E402  (sys.path настроен выше)
         manifest_path,
         result_path,
         write_chunk_result,
@@ -1308,9 +1304,9 @@ def _seed_operation(tmp_path: Path, *, article_count: int | None = 7) -> str:
 
     op_id = "op_test_query_001_medium"
     text = "Статья 1.\nСтатья 2.\n"
-    from summarizer import run as _summarizer_run  # noqa: E402
+    from legal_summarizer.application.service import run as _summarizer_run  # noqa: E402
     # Реальный прогон не нужен — пишем manifest/result вручную.
-    from manifest import _atomic_write_json  # noqa: E402
+    from legal_summarizer.cache.manifest import _atomic_write_json  # noqa: E402
     _atomic_write_json(
         manifest_path(op_id, tmp_path),
         {
@@ -1456,7 +1452,7 @@ def test_cli_query_manifest_not_found(tmp_path):
 
 def test_cli_query_chunks_truncates_summary(tmp_path):
     """--field chunks корректно обрезает summary до max_chunk_summary_chars."""
-    from manifest import write_chunk_result  # noqa: E402
+    from legal_summarizer.cache.manifest import write_chunk_result  # noqa: E402
     op_id = _seed_operation(tmp_path)
     write_chunk_result(
         op_id,
@@ -1854,7 +1850,7 @@ def test_cli_help_does_not_list_medium(cli_subprocess):
 
 
 def test_prepare_output_includes_cache_stats_for_completed():
-    from output import prepare_output
+    from legal_summarizer.output.presenter import prepare_output
 
     result = {
         "status": "completed",
@@ -1883,7 +1879,7 @@ def test_prepare_output_includes_cache_stats_for_completed():
 
 
 def test_prepare_output_omits_cache_stats_when_absent():
-    from output import prepare_output
+    from legal_summarizer.output.presenter import prepare_output
 
     result = {
         "status": "completed",

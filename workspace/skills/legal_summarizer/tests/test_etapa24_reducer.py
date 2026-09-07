@@ -18,7 +18,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 
 def _make_chunks_and_summaries(n: int):
-    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
+    from legal_summarizer.chunking.chunks import Chunk
     chunks = [
         Chunk(
             chunk_id=f"{i:03d}", index=i,
@@ -48,9 +48,9 @@ def _fake_llm(messages, *, context=None, **kwargs):
 
 def test_reducer_single_chunk():
     """1 chunk → reducer возвращает HierarchicalReducerResult."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerResult,
-        reduce_chunks_hierarchical,
+    from legal_summarizer.execution.hierarchical import (
+    HierarchicalReducerResult,
+    reduce_chunks_hierarchical,
     )
     chunks, summaries, section_ids = _make_chunks_and_summaries(1)
     result = reduce_chunks_hierarchical(
@@ -65,9 +65,9 @@ def test_reducer_single_chunk():
 
 def test_reducer_two_chunks():
     """2 chunks → reducer возвращает HierarchicalReducerResult."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerResult,
-        reduce_chunks_hierarchical,
+    from legal_summarizer.execution.hierarchical import (
+    HierarchicalReducerResult,
+    reduce_chunks_hierarchical,
     )
     chunks, summaries, section_ids = _make_chunks_and_summaries(2)
     result = reduce_chunks_hierarchical(
@@ -82,9 +82,9 @@ def test_reducer_two_chunks():
 
 def test_reducer_three_chunks():
     """3 chunks → reducer возвращает HierarchicalReducerResult."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerResult,
-        reduce_chunks_hierarchical,
+    from legal_summarizer.execution.hierarchical import (
+    HierarchicalReducerResult,
+    reduce_chunks_hierarchical,
     )
     chunks, summaries, section_ids = _make_chunks_and_summaries(3)
     result = reduce_chunks_hierarchical(
@@ -99,9 +99,9 @@ def test_reducer_three_chunks():
 
 def test_reducer_10_chunks():
     """10 chunks → reducer возвращает HierarchicalReducerResult."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerResult,
-        reduce_chunks_hierarchical,
+    from legal_summarizer.execution.hierarchical import (
+    HierarchicalReducerResult,
+    reduce_chunks_hierarchical,
     )
     chunks, summaries, section_ids = _make_chunks_and_summaries(10)
     result = reduce_chunks_hierarchical(
@@ -116,8 +116,8 @@ def test_reducer_10_chunks():
 
 def test_reducer_empty_input():
     """0 chunks → reducer возвращает пустой результат."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        reduce_chunks_hierarchical,
+    from legal_summarizer.execution.hierarchical import (
+    reduce_chunks_hierarchical,
     )
     result = reduce_chunks_hierarchical(
         [], {},
@@ -130,10 +130,10 @@ def test_reducer_empty_input():
 
 def test_reducer_preserves_content():
     """Reducer output непустой и содержит информацию из summaries."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        reduce_chunks_hierarchical,
+    from legal_summarizer.execution.hierarchical import (
+    reduce_chunks_hierarchical,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
+    from legal_summarizer.chunking.chunks import Chunk
     chunks = [
         Chunk(chunk_id="c01", index=0, text="text1", char_count=5, token_estimate=2,
               page_start=None, page_end=None, section_id="s1", section_path="",

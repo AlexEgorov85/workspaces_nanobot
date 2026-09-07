@@ -22,15 +22,15 @@ planner'а:
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-from workspace.skills.legal_summarizer.scripts.structure.models import (
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.domain.models import (
     DocumentStructure,
     StructureNode,
 )
-from workspace.skills.legal_summarizer.scripts.structure.token_estimator import (
+from legal_summarizer.domain.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
-from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+from legal_summarizer.planning.strategy import (
     ExecutionPolicy,
     build_execution_plan,
     select_strategy,
@@ -171,7 +171,7 @@ def test_direct_threshold_lower_reduces_call_count():
 
 def test_adjacent_packing_reduces_batches_vs_legacy():
     """Adjacent packing уменьшает число batches vs naive section-locality."""
-    from workspace.skills.legal_summarizer.scripts.structure.adjacent_packing import (
+    from legal_summarizer.chunking.packing import (
         AdjacentPackingConfig, pack_chunks_with_adjacent,
     )
 

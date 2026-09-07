@@ -27,7 +27,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 
 def _install_llm_mocks(monkeypatch):
-    from workspace.skills.legal_summarizer.scripts import llm_calls
+    import legal_summarizer.llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -42,22 +42,21 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import summarizer as _summarizer
+    import legal_summarizer.application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    from workspace.skills.legal_summarizer.scripts import pipeline as _pipeline_mod
+    import legal_summarizer.execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
 def test_unknown_cid_raises(tmp_path, monkeypatch):
     """plan ссылается на неизвестный chunk_id → RuntimeError."""
-    from workspace.skills.legal_summarizer.scripts.structure.execution_plan import (
+    from legal_summarizer.planning.plan import (
         ExecutionPlan, PlannedBatch,
     )
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = ("1. Раздел\n\n" + ("Текст. " * 50) * 300 + "\n\n") * 3
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
@@ -85,8 +84,7 @@ def test_unknown_cid_raises(tmp_path, monkeypatch):
 def test_order_invariant(tmp_path, monkeypatch):
     """queued batch_ids совпадают с порядком plan.batches."""
     _install_llm_mocks(monkeypatch)
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = ("1. Раздел\n\n" + ("Текст. " * 50) * 300 + "\n\n") * 3
     p = _write_doc(tmp_path, text)
 
@@ -104,11 +102,10 @@ def test_order_invariant(tmp_path, monkeypatch):
 
 def test_duplicate_chunks_raises(tmp_path, monkeypatch):
     """Дублирующиеся chunk_id в разных batches → RuntimeError."""
-    from workspace.skills.legal_summarizer.scripts.structure.execution_plan import (
+    from legal_summarizer.planning.plan import (
         ExecutionPlan, PlannedBatch,
     )
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = ("1. Раздел\n\n" + ("Текст. " * 50) * 300 + "\n\n") * 3
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))
@@ -137,8 +134,7 @@ def test_duplicate_chunks_raises(tmp_path, monkeypatch):
 def test_plan_none_raises_in_map_reduce(tmp_path, monkeypatch):
     """_run_map_reduce с plan=None → RuntimeError."""
     _install_llm_mocks(monkeypatch)
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = ("1. Раздел\n\n" + ("Текст. " * 50) * 300 + "\n\n") * 3
     p = _write_doc(tmp_path, text)
     insp = summarizer.inspect(text, document_path=str(p))

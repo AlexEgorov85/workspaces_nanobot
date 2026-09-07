@@ -22,7 +22,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 
 def _install_llm_mocks(monkeypatch):
-    from workspace.skills.legal_summarizer.scripts import llm_calls
+    import legal_summarizer.llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -37,12 +37,12 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import summarizer as _summarizer
+    import legal_summarizer.application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    from workspace.skills.legal_summarizer.scripts import pipeline as _pipeline_mod
+    import legal_summarizer.execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
@@ -64,8 +64,7 @@ def _canonical_batches(plan):
 
 def test_plan_batches_immutable_during_run(tmp_path, monkeypatch):
     """Snapshot плана до и после run() одинаков."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=6)
@@ -94,8 +93,7 @@ def test_plan_batches_immutable_during_run(tmp_path, monkeypatch):
 
 def test_plan_preserves_exact_chunk_order(tmp_path, monkeypatch):
     """План сохраняет порядок chunks внутри batch'ей (exact, не set)."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=6)
@@ -119,8 +117,7 @@ def test_plan_preserves_exact_chunk_order(tmp_path, monkeypatch):
 
 def test_plan_chunks_are_subset_of_selection(tmp_path, monkeypatch):
     """Все chunk_ids в плане — из selected chunks."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=6)

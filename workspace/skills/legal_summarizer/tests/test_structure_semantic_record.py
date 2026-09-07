@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.semantic_record import (
+from legal_summarizer.retrieval.records import (
     Provenance,
     SemanticRecord,
 )

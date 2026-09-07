@@ -12,7 +12,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 
 def _make_node(*, node_id, title="", start_block=0, end_block=0, parent_id="n_0000"):
-    from workspace.skills.legal_summarizer.scripts.structure.models import StructureNode
+    from legal_summarizer.domain.models import StructureNode
     return StructureNode(
         node_id=node_id,
         node_type="section",
@@ -29,7 +29,7 @@ def _make_node(*, node_id, title="", start_block=0, end_block=0, parent_id="n_00
 
 
 def _wrap(nodes):
-    from workspace.skills.legal_summarizer.scripts.structure.models import (
+    from legal_summarizer.domain.models import (
         DocumentStructure,
     )
     root = _make_node(node_id="n_0000", title="", start_block=0, end_block=9, parent_id=None)
@@ -61,7 +61,7 @@ def _wrap(nodes):
 
 def test_one_block_section_with_title_counts():
     """Одна секция ``start_block == end_block`` с title → meaningful."""
-    from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+    from legal_summarizer.planning.strategy import (
         _count_meaningful_sections,
     )
 
@@ -73,7 +73,7 @@ def test_one_block_section_with_title_counts():
 
 def test_three_one_block_sections_above_threshold():
     """3 one-block sections → ``map_hierarchical``."""
-    from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+    from legal_summarizer.planning.strategy import (
         ExecutionPolicy,
         _count_meaningful_sections,
         select_strategy,
@@ -102,7 +102,7 @@ def test_three_one_block_sections_above_threshold():
 
 def test_title_less_section_excluded():
     """Section без title → не считается meaningful."""
-    from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+    from legal_summarizer.planning.strategy import (
         _count_meaningful_sections,
     )
 
@@ -114,7 +114,7 @@ def test_title_less_section_excluded():
 
 def test_invalid_range_excluded():
     """Section с ``start_block > end_block`` → не считается."""
-    from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+    from legal_summarizer.planning.strategy import (
         _count_meaningful_sections,
     )
 

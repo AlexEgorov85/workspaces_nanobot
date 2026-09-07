@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.architecture_guard import (
+from legal_summarizer.infrastructure.architecture_guard import (
     count_abstract_classes, has_oversized_class, is_factory_pattern,
 )
 
@@ -17,18 +17,18 @@ def test_factory_pattern_detection():
 
 
 def test_count_abstract_classes():
-    from workspace.skills.legal_summarizer.scripts.structure import (
-        models, repair, validation,
-    )
+    import legal_summarizer.domain.models as models
+    import legal_summarizer.document.repair as repair
+    import legal_summarizer.document.validation as validation
     for module in (models, repair, validation):
         count = count_abstract_classes(module)
         assert count == 0, f"{module.__name__} has {count} abstract classes"
 
 
 def test_no_oversized_classes_in_new_modules():
-    from workspace.skills.legal_summarizer.scripts.structure import (
-        hierarchy, retrieval, numbering,
-    )
+    import legal_summarizer.document.hierarchy as hierarchy
+    import legal_summarizer.retrieval.query as retrieval
+    import legal_summarizer.domain.numbering as numbering
     for module in (hierarchy, retrieval, numbering):
         assert has_oversized_class(module, max_lines=500) is False
 
@@ -45,5 +45,5 @@ def test_factory_check_specific_names():
 
 
 def test_clean_module_under_threshold():
-    from workspace.skills.legal_summarizer.scripts.structure import numbering
+    import legal_summarizer.domain.numbering as numbering
     assert has_oversized_class(numbering, max_lines=300) is False

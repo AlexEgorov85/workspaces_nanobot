@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from workspace.skills.legal_summarizer.scripts.structure.retry import (
+from legal_summarizer.llm.retry import (
     ChunkResultParseError,
     build_repair_prompt,
     parse_batch_response_local,

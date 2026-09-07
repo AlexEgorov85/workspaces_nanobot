@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.brief_from_analysis import (
+from legal_summarizer.application.brief_from_analysis import (
     select_brief_chunks_from_analysis,
 )
-from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-from workspace.skills.legal_summarizer.scripts.structure.document_analysis import (
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.document.analysis import (
     DocumentAnalysis,
 )
-from workspace.skills.legal_summarizer.scripts.structure.importance_brief import (
+from legal_summarizer.chunking.importance_brief import (
     BriefSelectionConfig,
 )
-from workspace.skills.legal_summarizer.scripts.structure.models import (
+from legal_summarizer.domain.models import (
     DocumentStructure, StructureNode,
 )
-from workspace.skills.legal_summarizer.scripts.structure.physical import (
+from legal_summarizer.document.physical import (
     DocumentBlock, PhysicalDocument,
 )
 

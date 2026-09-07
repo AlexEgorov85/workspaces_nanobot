@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.list_detection import (
+from legal_summarizer.document.list_detection import (
     classify_ambiguous_run,
     detect_list_runs,
     list_penalty_for_candidate,
 )
-from workspace.skills.legal_summarizer.scripts.structure.physical import (
+from legal_summarizer.document.physical import (
     DocumentBlock,
 )
 

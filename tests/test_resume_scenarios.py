@@ -99,7 +99,7 @@ def test_resume_scenario_a_completed_manifest_roundtrip(tmp_path):
     Проверяет, что после reload manifest содержит корректные chunk_states
     и status='completed'.
     """
-    from workspace.skills.legal_summarizer.scripts.manifest import (
+    from legal_summarizer.cache.manifest import (
         load_manifest,
         manifest_path,
     )
@@ -136,7 +136,7 @@ def test_resume_scenario_a_completed_manifest_roundtrip(tmp_path):
 
 def test_resume_scenario_a_completed_manifest_path_exists(tmp_path):
     """Scenario A: manifest_path существует на диске после save."""
-    from workspace.skills.legal_summarizer.scripts.manifest import (
+    from legal_summarizer.cache.manifest import (
         manifest_path,
     )
 
@@ -161,7 +161,7 @@ def test_resume_scenario_b_failed_manifest_reload_preserves_failure(tmp_path):
     Retry должен сохранить старый manifest до тех пор, пока новый run
     не создаст новый manifest (или обновит тот же).
     """
-    from workspace.skills.legal_summarizer.scripts.manifest import (
+    from legal_summarizer.cache.manifest import (
         load_manifest,
         manifest_path,
     )
@@ -202,7 +202,7 @@ def test_resume_scenario_b_retry_updates_status_to_completed(tmp_path):
 
     Симулируем retry: overwrite manifest с новым status=completed.
     """
-    from workspace.skills.legal_summarizer.scripts.manifest import (
+    from legal_summarizer.cache.manifest import (
         load_manifest,
         manifest_path,
     )
@@ -245,7 +245,7 @@ def test_resume_scenario_c_partial_manifest_roundtrip(tmp_path):
 
     Partial = есть успешные batches + batches_failed.
     """
-    from workspace.skills.legal_summarizer.scripts.manifest import (
+    from legal_summarizer.cache.manifest import (
         load_manifest,
         manifest_path,
     )
@@ -288,7 +288,7 @@ def test_resume_scenario_c_partial_manifest_roundtrip(tmp_path):
 
 def test_resume_scenario_c_partial_chunk_results_persist(tmp_path):
     """Scenario C: chunk_results для completed chunks записаны, для failed — нет."""
-    from workspace.skills.legal_summarizer.scripts.manifest import (
+    from legal_summarizer.cache.manifest import (
         chunk_result_path,
         read_chunk_result,
         write_chunk_result,
@@ -328,8 +328,7 @@ def test_resume_integration_run_writes_manifest(tmp_path, monkeypatch):
     Single-path НЕ пишет manifest (только result.json). Используем
     map_reduce: chunk_size=200 → много chunks → manifest пишется.
     """
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
         "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
         "chunk_size_input_ratio": None,
@@ -367,7 +366,7 @@ def test_resume_integration_run_writes_manifest(tmp_path, monkeypatch):
     op_id = result["operation_id"]
 
     # Manifest должен быть на диске (manifest_root = tmp_path/workspace/...).
-    from workspace.skills.legal_summarizer.scripts.manifest import (
+    from legal_summarizer.cache.manifest import (
         load_manifest,
         manifest_path,
     )

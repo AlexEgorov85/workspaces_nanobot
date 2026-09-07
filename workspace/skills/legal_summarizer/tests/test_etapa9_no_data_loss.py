@@ -13,9 +13,11 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 def _run(n_sections: int, max_rounds: int = 4, group_size: int = 3):
     """Прогоняет reduce_sections_to_document с N секциями."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerConfig,
-        reduce_sections_to_document,
+    from legal_summarizer.domain.config import (
+    HierarchicalReducerConfig,
+    )
+    from legal_summarizer.execution.hierarchical import (
+    reduce_sections_to_document,
     )
     items = [(f"s{i}", f"section {i} summary") for i in range(n_sections)]
     cfg = HierarchicalReducerConfig(
@@ -53,9 +55,11 @@ def test_no_data_loss_1000_sections():
 def test_final_summary_contains_all_input_markers():
     """Final summary содержит текст всех секций (нет потерь)."""
     items = [(f"s{i}", f"unique-marker-{i}") for i in range(20)]
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerConfig,
-        reduce_sections_to_document,
+    from legal_summarizer.domain.config import (
+    HierarchicalReducerConfig,
+    )
+    from legal_summarizer.execution.hierarchical import (
+    reduce_sections_to_document,
     )
     cfg = HierarchicalReducerConfig(group_size=2, max_rounds=1)
     result = reduce_sections_to_document(items, config=cfg, llm_runner=None)

@@ -17,7 +17,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 def test_first_run_builds_analysis(tmp_path: Path):
     """Первый запуск строит DocumentAnalysis с semantic_records=[]."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         build_pipeline_result,
     )
 
@@ -33,7 +33,7 @@ def test_first_run_builds_analysis(tmp_path: Path):
 
 def test_second_run_returns_same_identity(tmp_path: Path):
     """Два запуска на одном файле → один и тот же DocumentIdentity."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         build_pipeline_result,
     )
 
@@ -54,7 +54,7 @@ def test_second_run_returns_same_identity(tmp_path: Path):
 
 def test_modified_file_creates_new_identity(tmp_path: Path):
     """Изменённый файл → новый DocumentIdentity."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         build_pipeline_result,
     )
 
@@ -73,8 +73,8 @@ def test_modified_file_creates_new_identity(tmp_path: Path):
 
 def test_followup_uses_cached_analysis(tmp_path: Path, monkeypatch):
     """Follow-up запрос использует cached DocumentAnalysis, без повторного parsing."""
-    from workspace.skills.legal_summarizer.scripts import summarizer_canonical
-    from workspace.skills.legal_summarizer.scripts import canonical_retrieval
+    import legal_summarizer.application.canonical as summarizer_canonical
+    import legal_summarizer.retrieval.canonical as canonical_retrieval
 
     pipeline_calls = {"n": 0}
     original_pipeline = summarizer_canonical.run_canonical_pipeline
@@ -110,7 +110,7 @@ def test_followup_uses_cached_analysis(tmp_path: Path, monkeypatch):
 
 def test_document_analysis_immutable(tmp_path: Path):
     """DocumentAnalysis — frozen dataclass."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         build_pipeline_result,
     )
 

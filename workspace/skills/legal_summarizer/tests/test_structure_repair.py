@@ -13,11 +13,11 @@ Acceptance criteria из PLAN §5:
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.models import (
+from legal_summarizer.domain.models import (
     DocumentStructure,
     StructureNode,
 )
-from workspace.skills.legal_summarizer.scripts.structure.repair import (
+from legal_summarizer.document.repair import (
     RepairReport,
     repair_structure,
 )

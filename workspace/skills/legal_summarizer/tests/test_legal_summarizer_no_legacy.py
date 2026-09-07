@@ -87,7 +87,7 @@ def _read_source(module) -> str:
 
 def test_summarizer_canonical_does_not_reference_legacy():
     """summarizer_canonical — единственная production-точка входа без legacy."""
-    from workspace.skills.legal_summarizer.scripts import summarizer_canonical
+    import legal_summarizer.application.canonical as summarizer_canonical
 
     hits = _module_legacy_refs(summarizer_canonical)
     assert hits == [], (
@@ -97,18 +97,16 @@ def test_summarizer_canonical_does_not_reference_legacy():
 
 def test_canonical_pipeline_has_no_legacy_imports():
     """Все canonical-структурные модули не должны ссылаться на legacy."""
-    from workspace.skills.legal_summarizer.scripts.structure import (
-        document_loader,
-        document_chunker,
-        document_analysis,
-        execution_plan,
-        followup,
-        hierarchical_reducer,
-        pipeline,
-        retrieval,
-        retrieval_index,
-        unified_execution,
-    )
+    import legal_summarizer.document.loader as document_loader
+    import legal_summarizer.chunking.chunker as document_chunker
+    import legal_summarizer.document.analysis as document_analysis
+    import legal_summarizer.planning.plan as execution_plan
+    import legal_summarizer.retrieval.followup as followup
+    import legal_summarizer.execution.hierarchical as hierarchical_reducer
+    import legal_summarizer.application.pipeline_structure as pipeline
+    import legal_summarizer.retrieval.query as retrieval
+    import legal_summarizer.retrieval.index as retrieval_index
+    import legal_summarizer.planning.strategy as unified_execution
 
     for module in (
         document_loader,
@@ -130,7 +128,7 @@ def test_canonical_pipeline_has_no_legacy_imports():
 
 def test_legacy_audit_assert_no_legacy():
     """Regression guard §35: production не должен содержать legacy hits."""
-    from workspace.skills.legal_summarizer.scripts.legacy_audit import (
+    from legal_summarizer.infrastructure.legacy_audit import (
         assert_no_legacy,
     )
 

@@ -19,14 +19,14 @@ PLAN §65: при ranking учитывать:
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-from workspace.skills.legal_summarizer.scripts.structure.models import (
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.domain.models import (
     DocumentStructure, StructureNode,
 )
-from workspace.skills.legal_summarizer.scripts.structure.physical import (
+from legal_summarizer.document.physical import (
     DocumentBlock, PhysicalDocument,
 )
-from workspace.skills.legal_summarizer.scripts.structure.retrieval import (
+from legal_summarizer.retrieval.query import (
     RetrievalConfig, retrieve_chunks,
 )
 

@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from collections import Counter
 
-from workspace.skills.legal_summarizer.scripts.structure.document_chunker import (
+from legal_summarizer.chunking.chunker import (
     build_block_ownership,
 )
-from workspace.skills.legal_summarizer.scripts.structure.heading import (
+from legal_summarizer.document.heading import (
     HeadingCandidate,
 )
-from workspace.skills.legal_summarizer.scripts.structure.hierarchy import (
+from legal_summarizer.document.hierarchy import (
     build_document_structure,
 )
 
@@ -28,7 +28,7 @@ def _hc(i, t, source="regex_numbered_1"):
 
 
 def _physical(total: int):
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         DocumentBlock, PhysicalDocument,
     )
     blocks = tuple(
@@ -108,7 +108,7 @@ def test_block_ownership_for_root_only():
 
 def test_owner_for_block_returns_deepest_section():
     """owner_for_block возвращает deepest section для nested case."""
-    from workspace.skills.legal_summarizer.scripts.structure.document_chunker import (
+    from legal_summarizer.chunking.chunker import (
         owner_for_block,
     )
 
@@ -127,10 +127,10 @@ def test_owner_for_block_returns_deepest_section():
 
 def test_owner_for_block_returns_root_for_uncovered_block():
     """Block вне section ranges → root_id (PLAN §6 acceptance)."""
-    from workspace.skills.legal_summarizer.scripts.structure.document_chunker import (
+    from legal_summarizer.chunking.chunker import (
         owner_for_block,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.models import (
+    from legal_summarizer.domain.models import (
         DocumentStructure, StructureNode,
     )
 
@@ -160,7 +160,7 @@ def test_owner_for_block_returns_root_for_uncovered_block():
 
 def test_owner_for_block_returns_none_for_out_of_range():
     """Block вне total_blocks → None."""
-    from workspace.skills.legal_summarizer.scripts.structure.document_chunker import (
+    from legal_summarizer.chunking.chunker import (
         owner_for_block,
     )
 
@@ -171,7 +171,7 @@ def test_owner_for_block_returns_none_for_out_of_range():
 
 def test_owner_for_block_lazy_builds_ownership():
     """owner_for_block без переданного ownership строит его на лету."""
-    from workspace.skills.legal_summarizer.scripts.structure.document_chunker import (
+    from legal_summarizer.chunking.chunker import (
         owner_for_block,
     )
 

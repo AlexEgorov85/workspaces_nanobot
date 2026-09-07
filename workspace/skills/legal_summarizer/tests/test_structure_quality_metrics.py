@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-from workspace.skills.legal_summarizer.scripts.structure.models import (
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.domain.models import (
     DocumentStructure, StructureNode,
 )
-from workspace.skills.legal_summarizer.scripts.structure.physical import (
+from legal_summarizer.document.physical import (
     DocumentBlock, PhysicalDocument,
 )
-from workspace.skills.legal_summarizer.scripts.structure.provenance import (
+from legal_summarizer.retrieval.provenance import (
     ProvenanceChain, build_provenance_chain,
 )
-from workspace.skills.legal_summarizer.scripts.structure.quality_metrics import (
+from legal_summarizer.retrieval.quality import (
     QualityMetrics, compute_quality_metrics,
 )
-from workspace.skills.legal_summarizer.scripts.structure.reference_qa import (
+from legal_summarizer.retrieval.qa import (
     ReferenceQuestion, ReferenceQASet, standard_qa_set,
 )
-from workspace.skills.legal_summarizer.scripts.structure.retrieval_index import (
+from legal_summarizer.retrieval.index import (
     RetrievalIndex,
 )
 

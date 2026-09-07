@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.benchmark import (
+from legal_summarizer.planning.benchmark import (
     BenchmarkMetrics, BenchmarkScenario,
     large_scenario, medium_scenario, run_benchmark,
     small_scenario, very_large_scenario,

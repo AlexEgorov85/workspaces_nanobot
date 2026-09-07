@@ -36,8 +36,8 @@ def _build_doc(sections: int = 6) -> str:
 def test_partial_run_resume_processes_only_pending(tmp_path, monkeypatch):
     """Первый run падает на первом batch'е → second run обрабатывает
     только pending chunks (исключая уже записанные partials)."""
-    import summarizer
-    from workspace.skills.legal_summarizer.scripts import llm_calls
+    import legal_summarizer.application.service as summarizer
+    import legal_summarizer.llm.calls as llm_calls
 
     calls = {"batches": [], "calls": 0}
 
@@ -58,12 +58,12 @@ def test_partial_run_resume_processes_only_pending(tmp_path, monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import summarizer as _sm
+    import legal_summarizer.application.service as _sm
     monkeypatch.setattr(_sm, "_llm_batch", _flaky_batch)
     monkeypatch.setattr(_sm, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_sm, "_llm_document_reduce", _fake_doc)
 
-    from workspace.skills.legal_summarizer.scripts import pipeline as _pipeline_mod
+    import legal_summarizer.execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _flaky_batch)
 
     text = _build_doc(sections=6)
@@ -108,8 +108,7 @@ def test_partial_run_resume_processes_only_pending(tmp_path, monkeypatch):
 
 def test_resume_plan_remains_stable(tmp_path, monkeypatch):
     """План детерминирован при повторном build_execution_context."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
 
@@ -119,17 +118,17 @@ def test_resume_plan_remains_stable(tmp_path, monkeypatch):
     def _fake_doc(text, *, length, focus, structure, question=None):
         return "doc summary"
 
-    from workspace.skills.legal_summarizer.scripts import llm_calls
+    import legal_summarizer.llm.calls as llm_calls
     monkeypatch.setattr(llm_calls, "llm_batch", _fake_batch)
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import summarizer as _sm
+    import legal_summarizer.application.service as _sm
     monkeypatch.setattr(_sm, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_sm, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_sm, "_llm_document_reduce", _fake_doc)
 
-    from workspace.skills.legal_summarizer.scripts import pipeline as _pipeline_mod
+    import legal_summarizer.execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
     text = _build_doc(sections=6)

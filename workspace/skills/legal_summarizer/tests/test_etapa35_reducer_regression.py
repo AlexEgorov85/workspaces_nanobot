@@ -10,8 +10,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
+from legal_summarizer.domain.config import (
     HierarchicalReducerConfig,
+)
+from legal_summarizer.execution.hierarchical import (
     reduce_sections_to_document,
 )
 

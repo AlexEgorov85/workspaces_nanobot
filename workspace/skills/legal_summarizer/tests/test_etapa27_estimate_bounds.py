@@ -33,8 +33,8 @@ def _build_section_summaries(n: int) -> list[tuple[str, str]]:
 
 def test_single_section_no_reduce():
     """1 section → 0 reduce calls."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        reduce_sections_to_document,
+    from legal_summarizer.execution.hierarchical import (
+    reduce_sections_to_document,
     )
 
     calls = {"n": 0}
@@ -73,9 +73,11 @@ def _compute_max_calls(n: int, group_size: int, max_rounds: int) -> int:
 
 def test_n_sections_rounds_bounded():
     """N sections: actual calls ≤ max_rounds * ceil(N/group_size) + 1."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerConfig,
-        reduce_sections_to_document,
+    from legal_summarizer.domain.config import (
+    HierarchicalReducerConfig,
+    )
+    from legal_summarizer.execution.hierarchical import (
+    reduce_sections_to_document,
     )
 
     cfg = HierarchicalReducerConfig(group_size=3, max_rounds=4)
@@ -98,9 +100,11 @@ def test_n_sections_rounds_bounded():
 
 def test_estimate_bounds_for_1_2_10_100_sections():
     """Bounds: actual_calls ≤ max_rounds * ceil(N/group_size) + 1."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerConfig,
-        reduce_sections_to_document,
+    from legal_summarizer.domain.config import (
+    HierarchicalReducerConfig,
+    )
+    from legal_summarizer.execution.hierarchical import (
+    reduce_sections_to_document,
     )
 
     cfg = HierarchicalReducerConfig(group_size=3, max_rounds=4)
@@ -126,9 +130,11 @@ def test_estimate_bounds_for_1_2_10_100_sections():
 
 def test_reducer_no_data_loss_for_marker_groups():
     """Все маркерные группы сохраняются при reduce."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerConfig,
-        reduce_sections_to_document,
+    from legal_summarizer.domain.config import (
+    HierarchicalReducerConfig,
+    )
+    from legal_summarizer.execution.hierarchical import (
+    reduce_sections_to_document,
     )
 
     cfg = HierarchicalReducerConfig(group_size=3, max_rounds=10)

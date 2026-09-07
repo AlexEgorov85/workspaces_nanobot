@@ -25,7 +25,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 
 def _install_llm_mocks(monkeypatch):
-    from workspace.skills.legal_summarizer.scripts import llm_calls
+    import legal_summarizer.llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -40,12 +40,12 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import summarizer as _summarizer
+    import legal_summarizer.application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    from workspace.skills.legal_summarizer.scripts import pipeline as _pipeline_mod
+    import legal_summarizer.execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
@@ -62,8 +62,7 @@ def _build_doc(sections: int = 8) -> str:
 
 def test_confirmation_uses_run_estimate_not_document(tmp_path, monkeypatch):
     """confirmation_required показывает run-level metrics."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     monkeypatch.setattr(
         summarizer, "get_execution_config",
         lambda: {
@@ -99,8 +98,7 @@ def test_confirmation_uses_run_estimate_not_document(tmp_path, monkeypatch):
 
 def test_continuation_uses_selected_chunks_not_document(tmp_path, monkeypatch):
     """requires_continuation проверяет selected, а не document chunks."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     monkeypatch.setattr(
         summarizer, "get_execution_config",
         lambda: {
@@ -135,8 +133,7 @@ def test_continuation_uses_selected_chunks_not_document(tmp_path, monkeypatch):
 
 def test_brief_does_not_require_continuation_for_large_doc(tmp_path, monkeypatch):
     """Brief mode с малым selected — НЕ requires_continuation, даже если doc большой."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     monkeypatch.setattr(
         summarizer, "get_execution_config",
         lambda: {
@@ -167,8 +164,7 @@ def test_brief_does_not_require_continuation_for_large_doc(tmp_path, monkeypatch
 
 def test_confirmation_does_not_trigger_for_small_doc(tmp_path, monkeypatch):
     """Маленький документ (selected ≤ 1 batch) → без confirmation при высоком threshold."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     monkeypatch.setattr(
         summarizer, "get_execution_config",
         lambda: {

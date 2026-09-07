@@ -31,7 +31,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import summarizer  # noqa: E402
-from summarizer import run as _summarizer_run  # noqa: E402
+from legal_summarizer.application.service import run as _summarizer_run  # noqa: E402
 
 
 def _one_chunk_per_batch_pack(chunks, budget):
@@ -271,7 +271,7 @@ def test_incident_scenario_single_flight_under_load(monkeypatch, tmp_path):
     import asyncio
 
     from workspace.skills.legal_summarizer.scripts.packing import ContextBatch
-    from workspace.skills.legal_summarizer.scripts.pipeline import (
+    from legal_summarizer.execution.pipeline import (
         run_one_batch_async,
     )
 
@@ -293,7 +293,7 @@ def test_incident_scenario_single_flight_under_load(monkeypatch, tmp_path):
                 state["in_flight"] -= 1
 
     monkeypatch.setattr(
-        "workspace.skills.legal_summarizer.scripts.pipeline.process_context_batch",
+        "legal_summarizer.execution.pipeline.process_context_batch",
         fake_batch_meta,
     )
 

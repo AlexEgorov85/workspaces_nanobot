@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+from legal_summarizer.application.canonical import (
     build_pipeline_result,
     build_plan_from_pipeline,
     strategy_from_pipeline,
@@ -65,7 +65,7 @@ def test_build_plan_from_pipeline_returns_plan(tmp_path: Path):
 
 def test_inspect_canonical_text(tmp_path: Path):
     """inspect_canonical даёт CanonicalInspection со всеми полями."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         inspect_canonical,
     )
 
@@ -83,7 +83,7 @@ def test_inspect_canonical_text(tmp_path: Path):
 
 def test_inspect_canonical_requires_document_path(tmp_path: Path):
     """inspect_canonical без пути — ValueError."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         inspect_canonical,
     )
 
@@ -96,7 +96,7 @@ def test_inspect_canonical_requires_document_path(tmp_path: Path):
 
 def test_estimate_canonical_returns_dict(tmp_path: Path):
     """estimate_canonical даёт dict без LLM-вызовов."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         estimate_canonical,
     )
 
@@ -110,8 +110,8 @@ def test_estimate_canonical_returns_dict(tmp_path: Path):
 
 def test_estimate_chunks_canonical_returns_positive():
     """estimate_chunks_canonical для непустого списка даёт >0."""
-    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.chunking.chunks import Chunk
+    from legal_summarizer.application.canonical import (
         estimate_chunks_canonical,
     )
 
@@ -128,7 +128,7 @@ def test_estimate_chunks_canonical_returns_positive():
 
 def test_estimate_chunks_canonical_empty():
     """estimate_chunks_canonical для пустого списка = 0."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         estimate_chunks_canonical,
     )
 
@@ -137,8 +137,8 @@ def test_estimate_chunks_canonical_empty():
 
 def test_pack_batches_canonical_returns_batches():
     """pack_batches_canonical возвращает список tuple chunk_ids."""
-    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.chunking.chunks import Chunk
+    from legal_summarizer.application.canonical import (
         pack_batches_canonical,
     )
 

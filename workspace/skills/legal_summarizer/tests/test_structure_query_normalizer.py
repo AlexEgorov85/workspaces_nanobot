@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.query_normalizer import (
+from legal_summarizer.retrieval.normalizer import (
     expand_with_aliases, normalize_query, tokenize_normalized,
 )
 from workspace.skills.legal_summarizer.tests import cyrillic_literals as L

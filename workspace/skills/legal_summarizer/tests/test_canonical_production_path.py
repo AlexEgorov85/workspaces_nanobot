@@ -24,7 +24,7 @@ def _write_named_doc(tmp_path: Path, name: str, text: str) -> Path:
 
 def test_canonical_pipeline_used_in_canonical_wrapper(tmp_path: Path, monkeypatch):
     """summarizer_canonical вызывает run_canonical_pipeline."""
-    from workspace.skills.legal_summarizer.scripts import summarizer_canonical
+    import legal_summarizer.application.canonical as summarizer_canonical
 
     call_count = {"n": 0}
     original = summarizer_canonical.run_canonical_pipeline
@@ -46,9 +46,8 @@ def test_canonical_pipeline_used_in_canonical_wrapper(tmp_path: Path, monkeypatc
 
 def test_canonical_pipeline_does_not_import_legacy(monkeypatch):
     """canonical модули не импортируют legacy."""
-    from workspace.skills.legal_summarizer.scripts import (
-        summarizer_canonical, canonical_retrieval,
-    )
+    import legal_summarizer.application.canonical as summarizer_canonical
+    import legal_summarizer.retrieval.canonical as canonical_retrieval
     import importlib
 
     forbidden = {
@@ -94,7 +93,7 @@ def test_canonical_pipeline_does_not_import_legacy(monkeypatch):
 
 def test_canonical_inspection_returns_pipeline_result(tmp_path: Path):
     """inspect_canonical возвращает объект с pipeline_result."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         inspect_canonical,
     )
 
@@ -109,7 +108,7 @@ def test_canonical_inspection_returns_pipeline_result(tmp_path: Path):
 
 def test_canonical_followup_uses_document_analysis(tmp_path: Path, monkeypatch):
     """answer_followup использует DocumentAnalysis, не legacy."""
-    from workspace.skills.legal_summarizer.scripts import canonical_retrieval
+    import legal_summarizer.retrieval.canonical as canonical_retrieval
 
     call_count = {"n": 0}
     original = canonical_retrieval.build_followup_response
@@ -128,7 +127,7 @@ def test_canonical_followup_uses_document_analysis(tmp_path: Path, monkeypatch):
         "Текст о договорных обязательствах.\n\n",
     )
 
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         build_pipeline_result,
     )
     result = build_pipeline_result(document_path=p)

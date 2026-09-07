@@ -40,7 +40,7 @@ def _build_doc(sections: int = 4) -> str:
 
 def _install_counting_llm_mocks(monkeypatch, *, llm_runner):
     """Установить мок-функции для LLM, которые считают active calls."""
-    from workspace.skills.legal_summarizer.scripts import llm_calls
+    import legal_summarizer.llm.calls as llm_calls
 
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         return llm_runner(chunks, kind="batch")
@@ -55,12 +55,12 @@ def _install_counting_llm_mocks(monkeypatch, *, llm_runner):
     monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
-    import summarizer as _summarizer
+    import legal_summarizer.application.service as _summarizer
     monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
     monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
-    from workspace.skills.legal_summarizer.scripts import pipeline as _pipeline_mod
+    import legal_summarizer.execution.pipeline as _pipeline_mod
     monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
 
@@ -89,8 +89,7 @@ def test_concurrent_runs_peak_is_one(tmp_path, monkeypatch):
 
     _install_counting_llm_mocks(monkeypatch, llm_runner=_llm_runner)
 
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = _build_doc(sections=4)
     dir_a = tmp_path / "a"
     dir_b = tmp_path / "b"
@@ -143,8 +142,7 @@ def test_retry_after_exception_peak_is_one(tmp_path, monkeypatch):
 
     _install_counting_llm_mocks(monkeypatch, llm_runner=_llm_runner)
 
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     text = _build_doc(sections=4)
     p = _write_doc(tmp_path, text)
 
@@ -185,8 +183,7 @@ def test_exception_releases_lock(tmp_path, monkeypatch):
 
     _install_counting_llm_mocks(monkeypatch, llm_runner=_llm_runner)
 
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     # Два последовательных run — оба должны иметь возможность вызвать LLM.
     text = _build_doc(sections=4)
     first_ws = tmp_path / "first"
@@ -220,8 +217,8 @@ def test_lock_finally_releases():
 
     Прямой тест над chat_locked — внутри lock бросаем исключение.
     """
-    from workspace.skills.legal_summarizer.scripts.llm_calls import chat_locked
-    import workspace.skills.legal_summarizer.scripts.llm_calls as lc
+    from legal_summarizer.llm.calls import chat_locked
+    import legal_summarizer.llm.calls as lc
 
     # Если lock удерживается — второй вызов ждёт; проверим это.
     acquired = []
@@ -233,8 +230,7 @@ def test_lock_finally_releases():
             lc._CHAT_LOCK.release()
 
     # Бросаем исключение внутри chat_locked.
-    import llm
-
+    import legal_summarizer.llm.client as llm
     def _explode(messages, *, context=None):
         raise RuntimeError("test exception")
 

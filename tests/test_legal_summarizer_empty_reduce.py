@@ -104,7 +104,7 @@ def test_all_map_batches_failed_returns_reduce_input_empty(
     monkeypatch.setattr(summarizer, "get_chunking_config", lambda: _base_cfg())
     monkeypatch.setattr(summarizer, "get_execution_config", lambda: _base_exec_cfg())
     monkeypatch.setattr(
-        "workspace.skills.legal_summarizer.scripts.summarizer._llm_document_reduce",
+        "legal_summarizer.application.service._llm_document_reduce",
         fake_doc_reduce_check,
     )
 
@@ -149,7 +149,7 @@ def test_section_summaries_empty_returns_reduce_input_empty(
         return "should not be called"
 
     monkeypatch.setattr(
-        "workspace.skills.legal_summarizer.scripts.summarizer._llm_document_reduce",
+        "legal_summarizer.application.service._llm_document_reduce",
         fake_doc_reduce,
     )
 
@@ -159,7 +159,7 @@ def test_section_summaries_empty_returns_reduce_input_empty(
         return ""
 
     monkeypatch.setattr(
-        "workspace.skills.legal_summarizer.scripts.summarizer._llm_section_reduce",
+        "legal_summarizer.application.service._llm_section_reduce",
         fake_section_reduce,
     )
 
@@ -207,7 +207,7 @@ def test_document_reduce_exception_does_not_emit_empty_completed(
         raise RuntimeError("simulated LLM error")
 
     monkeypatch.setattr(
-        "workspace.skills.legal_summarizer.scripts.summarizer._llm_document_reduce",
+        "legal_summarizer.application.service._llm_document_reduce",
         fake_doc_reduce_explode,
     )
 
@@ -270,8 +270,7 @@ def test_reduce_input_empty_is_non_retryable(monkeypatch, tmp_path):
     ``{status: failed, error.code: REDUCE_INPUT_EMPTY}``, не вызывая
     ``_llm_document_reduce`` и не делая retry.
     """
-    import summarizer as _summarizer
-
+    import legal_summarizer.application.service as _summarizer
     document_reduce_calls = {"count": 0}
 
     def fake_doc_reduce_raises(*_args, **_kw):
@@ -284,11 +283,11 @@ def test_reduce_input_empty_is_non_retryable(monkeypatch, tmp_path):
         return ""
 
     monkeypatch.setattr(
-        "workspace.skills.legal_summarizer.scripts.summarizer._llm_document_reduce",
+        "legal_summarizer.application.service._llm_document_reduce",
         fake_doc_reduce_raises,
     )
     monkeypatch.setattr(
-        "workspace.skills.legal_summarizer.scripts.summarizer._llm_section_reduce",
+        "legal_summarizer.application.service._llm_section_reduce",
         fake_section_reduce_empty,
     )
 

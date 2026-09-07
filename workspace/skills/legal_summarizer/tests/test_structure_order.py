@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-from workspace.skills.legal_summarizer.scripts.structure.order import (
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.chunking.order import (
     ensure_order_preserved, restore_document_order,
 )
 

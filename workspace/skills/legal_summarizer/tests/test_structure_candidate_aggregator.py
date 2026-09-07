@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.candidate_aggregator import (
+from legal_summarizer.retrieval.candidate_aggregator import (
     AggregatedCandidate,
     aggregate_by_block,
 )
-from workspace.skills.legal_summarizer.scripts.structure.heading import (
+from legal_summarizer.document.heading import (
     HeadingCandidate,
 )
 

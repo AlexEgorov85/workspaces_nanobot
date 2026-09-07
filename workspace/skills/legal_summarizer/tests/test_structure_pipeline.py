@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from workspace.skills.legal_summarizer.scripts.structure.pipeline import (
+from legal_summarizer.application.pipeline_structure import (
     run_canonical_pipeline,
 )
 

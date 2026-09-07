@@ -46,9 +46,10 @@ def _fake_llm(messages, *, context=None, **kwargs):
 
 def test_run_direct_short_doc(tmp_path: Path, monkeypatch):
     """Короткий документ → strategy 'direct', один document_reduce call."""
-    import summarizer
-
-    monkeypatch.setattr("llm.chat", _fake_llm)
+    import legal_summarizer.application.service as summarizer
+    monkeypatch.setattr(
+        "legal_summarizer.llm.client.chat", _fake_llm,
+    )
 
     text = "1. Общие положения\n\nКороткий текст договора для прямого пути."
     p = _write_doc(tmp_path, text)
@@ -68,9 +69,10 @@ def test_run_direct_short_doc(tmp_path: Path, monkeypatch):
 
 def test_run_map_flat_long_doc(tmp_path: Path, monkeypatch):
     """Длинный документ без секций → strategy 'map_reduce_flat'."""
-    import summarizer
-
-    monkeypatch.setattr("llm.chat", _fake_llm)
+    import legal_summarizer.application.service as summarizer
+    monkeypatch.setattr(
+        "legal_summarizer.llm.client.chat", _fake_llm,
+    )
 
     long_block = ("Текст договора. " * 120) * 60
     text = "1. Пункт\n\n" + long_block
@@ -92,8 +94,7 @@ def test_run_map_flat_long_doc(tmp_path: Path, monkeypatch):
 
 def test_run_no_legacy_re_exports():
     """run() не зависит от удалённых legacy re-export'ов summarizer."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     assert not hasattr(summarizer, "_legacy_run_map_reduce")
     assert not hasattr(summarizer, "_doc_cache_dir")
     assert not hasattr(summarizer, "load_structure")

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-from workspace.skills.legal_summarizer.scripts.structure.full_doc_fallback import (
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.retrieval.fallback import (
     FullDocFallbackConfig, decide_retrieval, full_document_fallback,
 )
 

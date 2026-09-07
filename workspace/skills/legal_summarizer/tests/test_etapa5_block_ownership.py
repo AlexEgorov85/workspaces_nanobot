@@ -13,7 +13,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 def _make_structure_with_nested():
     """Структура: root, chapter 0..4, два articles (0..1, 2..2), article2 (3..3)."""
-    from workspace.skills.legal_summarizer.scripts.structure.models import (
+    from legal_summarizer.domain.models import (
         DocumentStructure,
         NumberingInfo,
         StructureNode,
@@ -100,7 +100,7 @@ def test_block_to_node_delegates_to_canonical():
     что ``block_ownership.block_to_node``."""
     struct = _make_structure_with_nested()
 
-    from workspace.skills.legal_summarizer.scripts.structure.block_ownership import (
+    from legal_summarizer.chunking.block_ownership import (
         block_to_node as canonical_b2n,
     )
 
@@ -113,7 +113,7 @@ def test_block_to_node_returns_root_for_uncovered():
     """Blocks вне section ranges → root_id."""
     struct = _make_structure_with_nested()
 
-    from workspace.skills.legal_summarizer.scripts.structure.block_ownership import (
+    from legal_summarizer.chunking.block_ownership import (
         block_to_node,
     )
 
@@ -127,7 +127,7 @@ def test_block_to_node_assigns_deepest_section():
     """Block в диапазоне article → article (deepest)."""
     struct = _make_structure_with_nested()
 
-    from workspace.skills.legal_summarizer.scripts.structure.block_ownership import (
+    from legal_summarizer.chunking.block_ownership import (
         block_to_node,
     )
 
@@ -141,7 +141,7 @@ def test_only_one_owner_per_block():
     """``build_block_ownership`` даёт ровно одного owner на block."""
     struct = _make_structure_with_nested()
 
-    from workspace.skills.legal_summarizer.scripts.structure.block_ownership import (
+    from legal_summarizer.chunking.block_ownership import (
         build_block_ownership,
     )
 

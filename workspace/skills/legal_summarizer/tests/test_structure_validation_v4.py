@@ -16,15 +16,15 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.models import (
+from legal_summarizer.domain.models import (
     DocumentStructure,
     StructureNode,
 )
-from workspace.skills.legal_summarizer.scripts.structure.physical import (
+from legal_summarizer.document.physical import (
     DocumentBlock,
     PhysicalDocument,
 )
-from workspace.skills.legal_summarizer.scripts.structure.validation import (
+from legal_summarizer.document.validation import (
     validate_structure,
 )
 

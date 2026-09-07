@@ -41,17 +41,16 @@ def _build_docx(
         doc.add_paragraph(body * 20)
     p = tmp_path / name
     doc.save(str(p))
-    import summarizer
+    import legal_summarizer.application.service as summarizer
     text = summarizer.load_text(p)
     return p, text
 
 
 def _install_recording_llm(monkeypatch, recorded: dict) -> None:
     """Mock LLM-вызовов, собирающие chunk-IDs, реально ушедшие в LLM."""
-    from workspace.skills.legal_summarizer.scripts import llm_calls
-    from workspace.skills.legal_summarizer.scripts import pipeline as _pipeline_mod
-    import summarizer
-
+    import legal_summarizer.llm.calls as llm_calls
+    import legal_summarizer.execution.pipeline as _pipeline_mod
+    import legal_summarizer.application.service as summarizer
     def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
         recorded["ids"].update(c.chunk_id for c in chunks)
         return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
@@ -75,8 +74,7 @@ def _install_recording_llm(monkeypatch, recorded: dict) -> None:
 
 def test_question_llm_input_only_retrieved_chunks(tmp_path, monkeypatch):
     """Маркер в 2 из 8 секций: LLM видит только эти 2 чанка."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     recorded = {"ids": set()}
     _install_recording_llm(monkeypatch, recorded)
 
@@ -102,8 +100,7 @@ def test_question_llm_input_only_retrieved_chunks(tmp_path, monkeypatch):
 
 def test_question_respects_max_chunks_per_question(tmp_path, monkeypatch):
     """max_chunks_per_question=1 → ровно один (top) чанк уходит в LLM."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     monkeypatch.setattr(summarizer, "_resolve_max_chunks", lambda: 1)
     recorded = {"ids": set()}
     _install_recording_llm(monkeypatch, recorded)
@@ -128,8 +125,7 @@ def test_question_respects_max_chunks_per_question(tmp_path, monkeypatch):
 def test_question_lexical_fallback_when_retrieval_empty(tmp_path, monkeypatch):
     """Inverted index пуст → relaxed lexical (4-буквенный префикс)
     выбирает чанки по подстроке."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     recorded = {"ids": set()}
     _install_recording_llm(monkeypatch, recorded)
 
@@ -162,8 +158,7 @@ def test_question_lexical_fallback_when_retrieval_empty(tmp_path, monkeypatch):
 def test_question_full_miss_falls_back_to_document_head(tmp_path, monkeypatch):
     """Ни retrieval, ни lexical не нашли ничего → bounded doc-head fallback
     (первые question_fallback_max_chunks чанков по умолчанию)."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     recorded = {"ids": set()}
     _install_recording_llm(monkeypatch, recorded)
 
@@ -181,8 +176,7 @@ def test_question_full_miss_falls_back_to_document_head(tmp_path, monkeypatch):
 
 def test_relaxed_lexical_fallback_unit():
     """_relaxed_lexical_fallback: prefix-match, лимит, empty-случаи."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     class _Chunk:
         def __init__(self, text: str) -> None:
             self.text = text

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from workspace.skills.legal_summarizer.scripts.structure.token_estimator import (
+from legal_summarizer.domain.tokens import (
     TokenEstimator,
     TokenEstimatorConfig,
 )

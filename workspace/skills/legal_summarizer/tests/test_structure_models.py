@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.models import (
+from legal_summarizer.domain.models import (
     DocumentStructure,
     DocumentTitle,
     NumberingInfo,

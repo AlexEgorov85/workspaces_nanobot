@@ -17,7 +17,7 @@ def _write_doc(tmp_path: Path, text: str) -> Path:
 
 def test_short_doc_selects_direct(tmp_path: Path):
     """Короткий документ → strategy = 'direct'."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         inspect_canonical,
     )
 
@@ -28,7 +28,7 @@ def test_short_doc_selects_direct(tmp_path: Path):
 
 def test_long_doc_selects_map_strategy(tmp_path: Path):
     """Длинный документ → strategy = 'map_flat' или 'map_hierarchical'."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         inspect_canonical,
     )
 
@@ -44,10 +44,8 @@ def test_long_doc_selects_map_strategy(tmp_path: Path):
 
 def test_strategy_decision_single_source(tmp_path: Path):
     """strategy определяется только через canonical select_strategy."""
-    from workspace.skills.legal_summarizer.scripts import summarizer_canonical
-    from workspace.skills.legal_summarizer.scripts.structure import (
-        unified_execution,
-    )
+    import legal_summarizer.application.canonical as summarizer_canonical
+    import legal_summarizer.planning.strategy as unified_execution
 
     call_count = {"n": 0}
     original = unified_execution.select_strategy
@@ -75,9 +73,7 @@ def test_reducer_decision_single_source():
     Это проверка архитектурная — reducer получает стратегию
     извне (от ExecutionPlan), не вычисляет заново.
     """
-    from workspace.skills.legal_summarizer.scripts.structure import (
-        hierarchical_reducer,
-    )
+    import legal_summarizer.execution.hierarchical as hierarchical_reducer
 
     assert hasattr(hierarchical_reducer, "reduce_chunks_hierarchical")
     assert hasattr(hierarchical_reducer, "reduce_sections_to_document")
@@ -87,7 +83,7 @@ def test_reducer_decision_single_source():
 
 def test_strategy_re_evaluation_deterministic(tmp_path: Path):
     """strategy детерминирован — два вызова дают одинаковый результат."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         inspect_canonical,
     )
 

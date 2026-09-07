@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-from workspace.skills.legal_summarizer.scripts.structure.execution_plan import (
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.planning.plan import (
     ExecutionPlan, PlannedBatch, build_direct_plan, build_map_plan,
 )
-from workspace.skills.legal_summarizer.scripts.structure.token_estimator import (
+from legal_summarizer.domain.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
 
@@ -101,11 +101,11 @@ def test_execution_plan_includes_hierarchical_strategy():
 
 def test_section_ids_preserve_order_across_runs():
     """PLAN §26: section_ids в PlannedBatch сохраняют order (dict.fromkeys)."""
-    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-    from workspace.skills.legal_summarizer.scripts.structure.execution_plan import (
+    from legal_summarizer.chunking.chunks import Chunk
+    from legal_summarizer.planning.plan import (
         build_direct_plan,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.token_estimator import (
+    from legal_summarizer.domain.tokens import (
         TokenEstimator, TokenEstimatorConfig,
     )
 
@@ -130,11 +130,11 @@ def test_section_ids_preserve_order_across_runs():
 
 def test_map_plan_section_ids_preserve_order():
     """PLAN §26: map-plan section_ids С‚РѕР¶Рµ СЃРѕС…СЂР°РЅСЏСЋС‚ order."""
-    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-    from workspace.skills.legal_summarizer.scripts.structure.execution_plan import (
+    from legal_summarizer.chunking.chunks import Chunk
+    from legal_summarizer.planning.plan import (
         build_map_plan,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.token_estimator import (
+    from legal_summarizer.domain.tokens import (
         TokenEstimator, TokenEstimatorConfig,
     )
 

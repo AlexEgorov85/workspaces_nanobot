@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from workspace.skills.legal_summarizer.scripts.structure.single_flight import (
+from legal_summarizer.llm.single_flight import (
     SingleFlightTracker, SingleFlightViolation, assert_single_flight,
 )
 

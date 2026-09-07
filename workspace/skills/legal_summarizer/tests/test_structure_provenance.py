@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import tempfile
 
-from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-from workspace.skills.legal_summarizer.scripts.structure.models import (
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.domain.models import (
     DocumentStructure, StructureNode,
 )
-from workspace.skills.legal_summarizer.scripts.structure.physical import (
+from legal_summarizer.document.physical import (
     DocumentBlock, PhysicalDocument,
 )
-from workspace.skills.legal_summarizer.scripts.structure.provenance import (
+from legal_summarizer.retrieval.provenance import (
     build_provenance_chain,
 )
 

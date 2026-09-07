@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-from workspace.skills.legal_summarizer.scripts.structure.models import (
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.domain.models import (
     DocumentStructure,
     StructureNode,
 )
-from workspace.skills.legal_summarizer.scripts.structure.unified_execution import (
+from legal_summarizer.planning.strategy import (
     ExecutionPolicy, build_execution_plan, select_strategy,
 )
 

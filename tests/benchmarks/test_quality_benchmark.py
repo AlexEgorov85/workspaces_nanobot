@@ -149,7 +149,7 @@ def test_golden_dataset_extracted_facts_match():
 @pytest.fixture
 def mock_honest_llm(monkeypatch):
     """Mock LLM, который возвращает summary с фактами документа."""
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     def fake_chat(messages, *, context=None, **kwargs):
         # Найти FACT_NNN в user message и вернуть в summary.
@@ -167,7 +167,7 @@ def mock_honest_llm(monkeypatch):
 @pytest.fixture
 def mock_bad_llm(monkeypatch):
     """Mock LLM, который возвращает пустой summary (без фактов)."""
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     def fake_chat(messages, *, context=None, **kwargs):
         return "Саммари без каких-либо конкретных фактов из документа."
@@ -178,7 +178,7 @@ def mock_bad_llm(monkeypatch):
 @pytest.fixture
 def execution_mocks(monkeypatch):
     """Mock chunking_config и execution_config для детерминизма."""
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
         "chunk_size": 100000, "chunk_overlap": 0, "single_call_threshold": 100000,
@@ -205,7 +205,7 @@ def test_quality_benchmark_honest_mock_passes_acceptance(
     doc, tmp_path, mock_honest_llm, execution_mocks,
 ):
     """Acceptance: honest mock → ≥80% required_facts в summary."""
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     result = summarizer.run(
         doc["text"], length="brief", confirmed=True, workspace_root=tmp_path,
@@ -231,7 +231,7 @@ def test_quality_benchmark_bad_mock_detects_degradation(
     doc, tmp_path, mock_bad_llm, execution_mocks,
 ):
     """Bad mock → ratio=0 (фиксирует detection baseline)."""
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     result = summarizer.run(
         doc["text"], length="brief", confirmed=True, workspace_root=tmp_path,
@@ -256,7 +256,7 @@ def test_quality_benchmark_summary_report(tmp_path, mock_honest_llm, execution_m
 
     pytest покажет отчёт при ``-v -s``.
     """
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     print("\n[quality benchmark] Сводный отчёт по golden dataset:")
     print(f"  Документов: {len(GOLDEN_DOCUMENTS)}")
@@ -290,7 +290,7 @@ def test_quality_benchmark_summary_report(tmp_path, mock_honest_llm, execution_m
 
 def test_quality_benchmark_empty_required_facts_passes(tmp_path, mock_honest_llm, execution_mocks):
     """Пустой required_facts → ratio=0 (без деления на 0)."""
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     text = "Любой документ без маркеров FACT_NNN."
     result = summarizer.run(

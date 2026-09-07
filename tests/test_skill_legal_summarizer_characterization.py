@@ -104,11 +104,10 @@ def _small_execution_config() -> dict:
 
 def test_pdf_blocks_ordinals_are_dense(tmp_path, monkeypatch):
     """PDF → blocks: ordinal == [0, 1, …, N-1] без дыр (invariant #3)."""
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         load_physical_document,
     )
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     monkeypatch.setattr(summarizer, "get_chunking_config", _small_chunking_config)
 
     p = tmp_path / "doc.pdf"
@@ -119,7 +118,7 @@ def test_pdf_blocks_ordinals_are_dense(tmp_path, monkeypatch):
 
 def test_pdf_pages_have_ascending_page_index(tmp_path):
     """PDF page blocks идут с page_index 1..N в document order."""
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         load_physical_document,
     )
 
@@ -142,7 +141,7 @@ def test_docx_blocks_ordinals_are_dense_and_interleaved(tmp_path):
         → ordinals [0..4], порядок сохранён.
     """
     from docx import Document as _Docx
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         load_physical_document,
     )
 
@@ -183,7 +182,7 @@ def test_docx_blocks_ordinals_are_dense_and_interleaved(tmp_path):
 
 def test_docx_table_blocks_never_mixed_with_paragraph(tmp_path):
     """Tables — отдельные DocumentBlock; никогда не склеиваются с paragraph."""
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         load_physical_document,
     )
 
@@ -209,8 +208,7 @@ def test_docx_table_blocks_never_mixed_with_paragraph(tmp_path):
 def test_multi_chunk_batch_stats_separated(tmp_path, monkeypatch):
     """run() на multi-chunk документе: stats разделены на map_calls/section_reduce/
     document_reduce/retries."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     monkeypatch.setattr(summarizer, "get_execution_config", _small_execution_config)
     monkeypatch.setattr(summarizer, "get_chunking_config", _small_chunking_config)
 
@@ -277,12 +275,12 @@ def test_multi_chunk_batch_stats_separated(tmp_path, monkeypatch):
 
 def test_sanitize_module_is_extracted_and_re_exported(tmp_path):
     """``strip_think_blocks`` живёт в отдельном модуле
-    ``workspace.skills.legal_summarizer.scripts.sanitize``, и
+    ``legal_summarizer.llm.sanitize``, и
     ``summarizer._strip_think_blocks`` — это тот же объект (back-compat
     для тестов, которые делают ``monkeypatch.setattr(summarizer, '_strip_think_blocks', ...)``).
     """
-    from workspace.skills.legal_summarizer.scripts import sanitize as sanitize_mod
-    from workspace.skills.legal_summarizer.scripts import summarizer as summ_mod
+    import legal_summarizer.llm.sanitize as sanitize_mod
+    import legal_summarizer.application.service as summ_mod
 
     assert hasattr(sanitize_mod, "strip_think_blocks")
     assert summ_mod._strip_think_blocks is sanitize_mod.strip_think_blocks
@@ -297,8 +295,8 @@ def test_prompts_runtime_module_is_extracted_and_re_exported():
     живут в ``prompts_runtime.py``, ``summarizer._load_prompt`` /
     ``_LENGTH_INSTRUCTIONS`` / ``_system_instruction`` — те же объекты.
     """
-    from workspace.skills.legal_summarizer.scripts import prompts_runtime
-    from workspace.skills.legal_summarizer.scripts import summarizer as summ_mod
+    import legal_summarizer.llm.prompts_runtime as prompts_runtime
+    import legal_summarizer.application.service as summ_mod
 
     assert summ_mod._load_prompt is prompts_runtime.load_prompt
     assert summ_mod._LENGTH_INSTRUCTIONS is prompts_runtime.LENGTH_INSTRUCTIONS
@@ -332,8 +330,8 @@ def test_llm_calls_module_is_extracted_and_re_exported():
     и ``_doc_context`` живут в ``llm_calls.py``. ``_llm_section_trim``
     убран в этапе 17 — section_trim больше не используется summarizer'ом.
     """
-    from workspace.skills.legal_summarizer.scripts import llm_calls
-    from workspace.skills.legal_summarizer.scripts import summarizer as summ_mod
+    import legal_summarizer.llm.calls as llm_calls
+    import legal_summarizer.application.service as summ_mod
 
     assert summ_mod._llm_batch is llm_calls.llm_batch
     assert summ_mod._llm_section_reduce is llm_calls.llm_section_reduce
@@ -360,8 +358,8 @@ def test_pipeline_module_is_extracted_and_re_exported(tmp_path):
     load_cached_partials/now_iso`` и ``MAX_BATCH_PARSE_RETRIES`` живут
     в ``pipeline.py``, ``summarizer._*`` — те же объекты.
     """
-    from workspace.skills.legal_summarizer.scripts import pipeline
-    from workspace.skills.legal_summarizer.scripts import summarizer as summ_mod
+    import legal_summarizer.execution.pipeline as pipeline
+    import legal_summarizer.application.service as summ_mod
 
     assert summ_mod._process_context_batch is pipeline.process_context_batch
     assert summ_mod._run_one_batch_async is pipeline.run_one_batch_async
@@ -383,7 +381,7 @@ def test_pipeline_module_is_extracted_and_re_exported(tmp_path):
 
 def _make_block(ordinal: int, content: str, *, block_type: str = "paragraph") -> "DocumentBlock":
     """Хелпер для создания DocumentBlock в тестах cleanup."""
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         DocumentBlock,
     )
 
@@ -587,7 +585,7 @@ def test_normalize_whitespace_helper():
 
 def test_heading_module_extracted():
     """heading detection логика живёт в ``structure/heading.py``."""
-    from workspace.skills.legal_summarizer.scripts.structure import heading
+    import legal_summarizer.document.heading as heading
     from workspace.skills.legal_summarizer.scripts.structure import sections
 
     # Public symbols переехали.
@@ -649,7 +647,7 @@ def test_sections_module_is_facade():
 
 def _make_heading_block(ordinal: int, content: str, *, block_type: str = "paragraph") -> "DocumentBlock":
     """Хелпер для heading-evidence тестов."""
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         DocumentBlock,
     )
 
@@ -668,7 +666,7 @@ def _make_heading_block(ordinal: int, content: str, *, block_type: str = "paragr
     )
 
 def _make_candidate(ordinal: int, text: str, *, raw_number: str | None = None) -> "HeadingCandidate":
-    from workspace.skills.legal_summarizer.scripts.structure.heading import (
+    from legal_summarizer.document.heading import (
         HeadingCandidate,
     )
     return HeadingCandidate(
@@ -682,7 +680,7 @@ def _make_candidate(ordinal: int, text: str, *, raw_number: str | None = None) -
 
 def test_heading_evidence_total_delta_defaults_to_zero():
     """Без признаков total_delta == 0; final_score == source_score."""
-    from workspace.skills.legal_summarizer.scripts.structure.heading import (
+    from legal_summarizer.document.heading import (
         HeadingEvidence,
     )
 
@@ -692,7 +690,7 @@ def test_heading_evidence_total_delta_defaults_to_zero():
 
 def test_heading_evidence_clamped_to_unit_interval():
     """total_delta может вытолкнуть за [0, 1] — final_score зажимается."""
-    from workspace.skills.legal_summarizer.scripts.structure.heading import (
+    from legal_summarizer.document.heading import (
         HeadingEvidence,
     )
 
@@ -708,12 +706,12 @@ def test_heading_evidence_clamped_to_unit_interval():
 
 def test_heading_evidence_apply_to_candidate_no_context_no_change():
     """Кандидат без контекста (например, PDF outline) — score не меняется."""
-    from workspace.skills.legal_summarizer.scripts.structure.heading import (
+    from legal_summarizer.document.heading import (
         apply_evidence_scoring,
     )
 
     # PDF outline кандидат имеет block_index == -1.
-    from workspace.skills.legal_summarizer.scripts.structure.heading import (
+    from legal_summarizer.document.heading import (
         HeadingCandidate,
     )
 
@@ -729,7 +727,7 @@ def test_heading_evidence_apply_to_candidate_no_context_no_change():
 
 def test_heading_evidence_short_text_bonus():
     """Короткий текст → +0.05 к score."""
-    from workspace.skills.legal_summarizer.scripts.structure.heading import (
+    from legal_summarizer.document.heading import (
         apply_evidence_scoring,
     )
 
@@ -747,7 +745,7 @@ def test_heading_evidence_short_text_bonus():
 
 def test_heading_evidence_list_penalty():
     """Кандидат в list-like neighborhood → −0.10."""
-    from workspace.skills.legal_summarizer.scripts.structure.heading import (
+    from legal_summarizer.document.heading import (
         apply_evidence_scoring,
     )
 
@@ -763,7 +761,7 @@ def test_heading_evidence_list_penalty():
 
 def test_heading_evidence_duplicate_penalty():
     """Текст совпадает с предыдущим heading'ом → −0.20."""
-    from workspace.skills.legal_summarizer.scripts.structure.heading import (
+    from legal_summarizer.document.heading import (
         apply_evidence_scoring,
     )
 
@@ -781,7 +779,7 @@ def test_heading_evidence_duplicate_penalty():
 
 def test_heading_evidence_numbering_consistency():
     """Heading с монотонным raw_number получает bonus."""
-    from workspace.skills.legal_summarizer.scripts.structure.heading import (
+    from legal_summarizer.document.heading import (
         apply_evidence_scoring,
     )
 
@@ -805,7 +803,7 @@ def test_list_detection_numbered_list_run_is_list():
     """``1. сделать X / 2. сделать Y / 3. сделать Z``
     (contiguous, короткие) → ``is_list=True``.
     """
-    from workspace.skills.legal_summarizer.scripts.structure.list_detection import (
+    from legal_summarizer.document.list_detection import (
         detect_list_runs,
     )
 
@@ -827,7 +825,7 @@ def test_list_detection_section_sequence_with_body_is_not_list():
     не list. Наш детектор ловит это через contiguous-ordinal: между разделами
     есть body-блоки → ordinals не contiguous → нет list-run.
     """
-    from workspace.skills.legal_summarizer.scripts.structure.list_detection import (
+    from legal_summarizer.document.list_detection import (
         detect_list_runs,
     )
 
@@ -848,7 +846,7 @@ def test_list_detection_section_sequence_with_body_is_not_list():
 
 def test_list_detection_long_items_not_classified_as_list():
     """Длинные numbered блоки (каждый > max_item_chars) → не list."""
-    from workspace.skills.legal_summarizer.scripts.structure.list_detection import (
+    from legal_summarizer.document.list_detection import (
         detect_list_runs,
         ListDetectionConfig,
     )
@@ -862,7 +860,7 @@ def test_list_detection_long_items_not_classified_as_list():
 
 def test_list_detection_short_run_below_min_is_not_list():
     """Только 2 numbered элемента < min_run_length=3 → не list (section из 2 элементов)."""
-    from workspace.skills.legal_summarizer.scripts.structure.list_detection import (
+    from legal_summarizer.document.list_detection import (
         detect_list_runs,
     )
 
@@ -883,7 +881,7 @@ def test_list_detection_penalty_value():
     принять их за headings (а не отбрасывать как list). Изменение
     поведения явно зафиксировано в ``docs/CHANGELOG.md`` Этапа 10.
     """
-    from workspace.skills.legal_summarizer.scripts.structure.list_detection import (
+    from legal_summarizer.document.list_detection import (
         detect_list_runs,
         list_penalty_for_candidate,
     )
@@ -909,7 +907,7 @@ def test_heading_evidence_uses_precise_list_penalty():
     НО это часть большего list-run. Score должен получить list_penalty 0.15
     (≥ 5 элементов), а не 0.10.
     """
-    from workspace.skills.legal_summarizer.scripts.structure.heading import (
+    from legal_summarizer.document.heading import (
         apply_evidence_scoring,
     )
 
@@ -926,7 +924,7 @@ def test_heading_evidence_uses_precise_list_penalty():
 
 def test_list_detection_non_monotonic_breaks_run():
     """Немонотонная последовательность (1, 2, 4) разрывает run."""
-    from workspace.skills.legal_summarizer.scripts.structure.list_detection import (
+    from legal_summarizer.document.list_detection import (
         detect_list_runs,
     )
 
@@ -946,7 +944,7 @@ def test_list_detection_non_monotonic_breaks_run():
 # ---------------------------------------------------------------------------
 
 def _chunk_config(max_chunk_chars: int = 4000, chunk_overlap_chars: int = 200):
-    from workspace.skills.legal_summarizer.scripts.structure.chunks import ChunkConfig
+    from legal_summarizer.chunking.chunks import ChunkConfig
     return ChunkConfig(
         max_chunk_chars=max_chunk_chars,
         chunk_overlap_chars=chunk_overlap_chars,
@@ -962,8 +960,7 @@ def test_chunk_overlap_project_json_default_is_zero():
     в ``test_config_keys.py::test_required_key_present_with_default`` —
     этот тест только smoke-проверяет, что get_chunking_config возвращает 0.
     """
-    import skill_config
-
+    import legal_summarizer.llm.config as skill_config
     cfg = skill_config.get_chunking_config()
     assert cfg["chunk_overlap"] == 0
 
@@ -973,8 +970,7 @@ def test_summarizer_passes_zero_overlap_to_chunk_config(monkeypatch, tmp_path):
     Проверяем через ``inspect()`` (который вызывает chunker), а не run()
     (single-call path не использует chunker).
     """
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     captured = {}
 
     real_make_chunk_config = summarizer._make_chunk_config
@@ -1019,7 +1015,7 @@ def _make_test_chunk(
             Для тестов с разными section_path нужно передавать разные section_id,
             чтобы locality-aware packing корректно их различал.
     """
-    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
+    from legal_summarizer.chunking.chunks import Chunk
 
     if section_id is None:
         section_id = "s_0001"
@@ -1364,7 +1360,7 @@ def test_document_stats_basic_metrics():
     from workspace.skills.legal_summarizer.scripts.document_stats import (
         compute_document_stats,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         PhysicalDocument,
     )
 
@@ -1391,7 +1387,7 @@ def test_document_stats_counts_tables():
     from workspace.skills.legal_summarizer.scripts.document_stats import (
         compute_document_stats,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         DocumentBlock,
         PhysicalDocument,
     )
@@ -1427,7 +1423,7 @@ def test_document_stats_counts_chunks():
     from workspace.skills.legal_summarizer.scripts.document_stats import (
         compute_document_stats,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         PhysicalDocument,
     )
 
@@ -1447,7 +1443,7 @@ def test_document_stats_blocks_per_section_ratio():
     from workspace.skills.legal_summarizer.scripts.document_stats import (
         compute_document_stats,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         PhysicalDocument,
     )
 
@@ -1465,7 +1461,7 @@ def test_document_stats_chars_per_block_ratio():
     from workspace.skills.legal_summarizer.scripts.document_stats import (
         compute_document_stats,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         PhysicalDocument,
     )
 
@@ -1487,7 +1483,7 @@ def test_document_stats_repeated_blocks_default():
     from workspace.skills.legal_summarizer.scripts.document_stats import (
         compute_document_stats,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         PhysicalDocument,
     )
 
@@ -1503,7 +1499,7 @@ def test_document_stats_repeated_blocks_passed_through():
     from workspace.skills.legal_summarizer.scripts.document_stats import (
         compute_document_stats,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         PhysicalDocument,
     )
 
@@ -1520,8 +1516,7 @@ def test_document_stats_no_llm_calls():
     Smoke-проверка: вызов с monkey-patched llm.chat → если бы stats
     дёргал LLM, monkey-patch счётчик бы увеличился.
     """
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     call_count = {"n": 0}
 
     def fake_chat(messages, *, context=None, **kwargs):
@@ -1533,7 +1528,7 @@ def test_document_stats_no_llm_calls():
     from workspace.skills.legal_summarizer.scripts.document_stats import (
         compute_document_stats,
     )
-    from workspace.skills.legal_summarizer.scripts.structure.physical import (
+    from legal_summarizer.document.physical import (
         PhysicalDocument,
     )
 
@@ -1550,7 +1545,7 @@ def test_document_stats_no_llm_calls():
 
 def test_select_reduce_strategy_token_budget_first():
     """если estimated_tokens ≤ reduce_budget → FLAT (главный критерий)."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         reduce_strategy_for_legacy,
     )
 
@@ -1562,7 +1557,7 @@ def test_select_reduce_strategy_token_budget_first():
 
 def test_select_reduce_strategy_exceeds_budget_uses_hierarchical():
     """estimated_tokens > reduce_budget AND sections ≥ min → HIERARCHICAL."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         reduce_strategy_for_legacy,
     )
 
@@ -1574,7 +1569,7 @@ def test_select_reduce_strategy_exceeds_budget_uses_hierarchical():
 
 def test_select_reduce_strategy_few_sections_keeps_flat():
     """мало sections (< min) → FLAT даже если tokens > budget."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         reduce_strategy_for_legacy,
     )
 
@@ -1587,7 +1582,7 @@ def test_select_reduce_strategy_few_sections_keeps_flat():
 
 def test_select_reduce_strategy_min_sections_configurable():
     """``min_sections_for_hierarchical`` — настраиваемый порог."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         reduce_strategy_for_legacy,
     )
 
@@ -1614,7 +1609,7 @@ def test_legacy_should_use_hierarchical_removed():
 
 def test_reduce_strategy_enum_values():
     """``flat`` / ``hierarchical`` — canonical reduce_strategy labels."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         reduce_strategy_for_legacy,
     )
 
@@ -1629,7 +1624,7 @@ def test_reduce_strategy_enum_values():
 
 def test_reduce_config_has_min_sections_for_hierarchical():
     """``reduce_strategy_for_legacy`` принимает ``min_sections_for_hierarchical``."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         reduce_strategy_for_legacy,
     )
 
@@ -1652,7 +1647,7 @@ def test_reduce_config_has_min_sections_for_hierarchical():
 
 def test_section_trim_truncation_replaces_llm_call():
     """oversized section_summary → truncation, а не LLM-вызов."""
-    from workspace.skills.legal_summarizer.scripts import summarizer
+    import legal_summarizer.application.service as summarizer
 
     # Длинный section_summary, превышающий лимит.
     oversized = "X" * 20000
@@ -1669,8 +1664,7 @@ def test_section_trim_truncation_replaces_llm_call():
 
 def test_summarizer_run_no_trim_calls_for_oversized_sections(monkeypatch, tmp_path):
     """End-to-end: при section_summary > max_chars → trim_calls=0 (truncation)."""
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
         "chunk_size": 4000,
         "chunk_overlap": 0,
@@ -1731,7 +1725,7 @@ def test_summarizer_truncate_section_summary_helper():
 
 def test_execution_strategy_values():
     """Canonical execution strategy имеет 3 значения."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         execution_strategy_for_legacy,
     )
 
@@ -1751,7 +1745,7 @@ def test_execution_strategy_values():
 
 def test_select_execution_strategy_direct():
     """estimated_tokens ≤ direct_budget → direct."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         execution_strategy_for_legacy,
     )
 
@@ -1763,7 +1757,7 @@ def test_select_execution_strategy_direct():
 
 def test_select_execution_strategy_map_flat():
     """estimated_tokens > direct_budget, sections < threshold → map_flat."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         execution_strategy_for_legacy,
     )
 
@@ -1776,7 +1770,7 @@ def test_select_execution_strategy_map_flat():
 
 def test_select_execution_strategy_map_hierarchical():
     """estimated_tokens > direct_budget, sections ≥ threshold → map_hierarchical."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         execution_strategy_for_legacy,
     )
 
@@ -1791,8 +1785,7 @@ def test_select_execution_strategy_no_llm_calls():
 
     Детерминированный selector — нет side-effects, нет I/O.
     """
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     call_count = {"n": 0}
 
     def fake_chat(messages, *, context=None, **kwargs):
@@ -1801,7 +1794,7 @@ def test_select_execution_strategy_no_llm_calls():
 
     summarizer.llm.chat = fake_chat  # type: ignore[assignment]
 
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         execution_strategy_for_legacy,
     )
 
@@ -1813,7 +1806,7 @@ def test_select_execution_strategy_no_llm_calls():
 
 def test_execution_strategy_config_holds_budgets():
     """Canonical strategy selector использует параметры напрямую."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         execution_strategy_for_legacy,
     )
 
@@ -1832,7 +1825,7 @@ def test_execution_strategy_config_holds_budgets():
 
 def test_select_execution_strategy_boundary_exactly_at_direct_budget():
     """Boundary: estimated_tokens == direct_budget → direct (≤)."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         execution_strategy_for_legacy,
     )
 
@@ -1844,7 +1837,7 @@ def test_select_execution_strategy_boundary_exactly_at_direct_budget():
 
 def test_select_execution_strategy_boundary_one_above_direct():
     """Boundary: estimated_tokens = direct + 1 → map_flat или map_hierarchical."""
-    from workspace.skills.legal_summarizer.scripts.summarizer_canonical import (
+    from legal_summarizer.application.canonical import (
         execution_strategy_for_legacy,
     )
 
@@ -1868,7 +1861,7 @@ def test_direct_strategy_min_chars_default_zero_keeps_old_behavior():
     если кто-то случайно вернёт чтение ``direct_strategy_min_chars`` в
     теле ``inspect()``, тест напомнит, что у нас единый путь через селектор.
     """
-    import summarizer
+    import legal_summarizer.application.service as summarizer
     import inspect as _inspect
 
     src = _inspect.getsource(summarizer.inspect)
@@ -1884,8 +1877,7 @@ def test_inspect_direct_strategy_for_short_text():
     ``DocumentStats.estimated_tokens ≤ TokenBudget.direct_call_tokens``.
     Без LLM-вызовов: проверка чисто детерминированная.
     """
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     summarizer.get_chunking_config = lambda: {
         "chunk_size": 100, "chunk_overlap": 0,
         "single_call_threshold": 100, "chunk_size_input_ratio": None,
@@ -1917,8 +1909,7 @@ def test_inspect_map_reduce_for_long_text():
     увеличиваем ``llm_max_tokens`` — это уменьшает ``direct_budget_tokens``
     через ``TokenBudget.direct_call_tokens = context - system - output``.
     """
-    import summarizer
-
+    import legal_summarizer.application.service as summarizer
     summarizer.get_chunking_config = lambda: {
         "chunk_size": 100, "chunk_overlap": 0,
         "single_call_threshold": 100, "chunk_size_input_ratio": None,

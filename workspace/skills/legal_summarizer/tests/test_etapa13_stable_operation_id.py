@@ -13,7 +13,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 def test_same_inputs_same_operation_id():
     """Два вызова с одинаковыми аргументами → одинаковый operation_id."""
-    from summarizer import make_operation_id
+    from legal_summarizer.application.service import make_operation_id
 
     a = make_operation_id("hello world", "detailed")
     b = make_operation_id("hello world", "detailed")
@@ -22,7 +22,7 @@ def test_same_inputs_same_operation_id():
 
 def test_different_inputs_different_operation_id():
     """Разный length → разный operation_id."""
-    from summarizer import make_operation_id
+    from legal_summarizer.application.service import make_operation_id
 
     a = make_operation_id("hello world", "detailed")
     b = make_operation_id("hello world", "brief")
@@ -31,7 +31,7 @@ def test_different_inputs_different_operation_id():
 
 def test_different_question_different_operation_id():
     """Разный question → разный operation_id."""
-    from summarizer import make_operation_id
+    from legal_summarizer.application.service import make_operation_id
 
     a = make_operation_id("hello world", "detailed", question=None)
     b = make_operation_id("hello world", "detailed", question="Что?")
@@ -40,7 +40,7 @@ def test_different_question_different_operation_id():
 
 def test_different_document_path_different_operation_id():
     """Разный document_path → разный operation_id."""
-    from summarizer import make_operation_id
+    from legal_summarizer.application.service import make_operation_id
 
     a = make_operation_id("hello world", "detailed", document_path="a.txt")
     b = make_operation_id("hello world", "detailed", document_path="b.txt")
@@ -49,7 +49,7 @@ def test_different_document_path_different_operation_id():
 
 def test_no_monotonic_in_id():
     """operation_id не содержит временной компонент."""
-    from summarizer import make_operation_id
+    from legal_summarizer.application.service import make_operation_id
 
     a = make_operation_id("hello world", "detailed")
     # Старый формат был ``op_<ts_ns>_<hash>_<length>`` → содержал длинный
@@ -70,7 +70,7 @@ def test_same_prefix_different_tail_different_operation_id():
     статьи не меняла id, и idempotency-кэш мог вернуть устаревший
     результат. Теперь хешируется полный текст.
     """
-    from summarizer import make_operation_id
+    from legal_summarizer.application.service import make_operation_id
 
     base = ("Текст договора. " * 200) * 70  # ~490 КБ — далеко за 64 КБ
     a = make_operation_id(base + "Итог: вариант А.", "detailed")

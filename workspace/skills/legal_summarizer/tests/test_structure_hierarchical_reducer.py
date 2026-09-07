@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
-from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
+from legal_summarizer.chunking.chunks import Chunk
+from legal_summarizer.domain.config import (
     HierarchicalReducerConfig,
+)
+from legal_summarizer.execution.hierarchical import (
     deterministic_truncate,
     reduce_chunks_hierarchical,
     reduce_sections_to_document,
@@ -112,9 +114,11 @@ def test_reduce_sections_to_document_respects_max_rounds():
 
 def test_reduce_chunks_1_section():
     """PLAN §25: 1 section — single round."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerConfig,
-        reduce_chunks_hierarchical,
+    from legal_summarizer.domain.config import (
+    HierarchicalReducerConfig,
+    )
+    from legal_summarizer.execution.hierarchical import (
+    reduce_chunks_hierarchical,
     )
     chunks = [
         _make_chunk("c0", section_id="s1", text="body 1"),
@@ -134,9 +138,11 @@ def test_reduce_chunks_1_section():
 
 def test_reduce_chunks_2_sections():
     """PLAN §25: 2 sections — single round."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerConfig,
-        reduce_chunks_hierarchical,
+    from legal_summarizer.domain.config import (
+    HierarchicalReducerConfig,
+    )
+    from legal_summarizer.execution.hierarchical import (
+    reduce_chunks_hierarchical,
     )
     chunks = [
         _make_chunk("c0", section_id="s1", text="body 1"),
@@ -154,9 +160,11 @@ def test_reduce_chunks_2_sections():
 
 def test_reduce_chunks_3_sections():
     """PLAN §25: 3 sections — single round (group_size=3)."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerConfig,
-        reduce_chunks_hierarchical,
+    from legal_summarizer.domain.config import (
+    HierarchicalReducerConfig,
+    )
+    from legal_summarizer.execution.hierarchical import (
+    reduce_chunks_hierarchical,
     )
     chunks = [
         _make_chunk("c0", section_id=f"s{i}", text=f"body {i}")
@@ -175,9 +183,11 @@ def test_reduce_chunks_3_sections():
 
 def test_reduce_chunks_10_sections():
     """PLAN §25: 10 sections — multiple rounds."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerConfig,
-        reduce_chunks_hierarchical,
+    from legal_summarizer.domain.config import (
+    HierarchicalReducerConfig,
+    )
+    from legal_summarizer.execution.hierarchical import (
+    reduce_chunks_hierarchical,
     )
     chunks = [
         _make_chunk(f"c{i}", section_id=f"s{i}", text=f"body {i}")
@@ -196,9 +206,11 @@ def test_reduce_chunks_10_sections():
 
 def test_reduce_chunks_100_sections_no_data_loss():
     """PLAN §25 + Этап 9: 100 sections — все секции учтены, ровно один final."""
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        HierarchicalReducerConfig,
-        reduce_chunks_hierarchical,
+    from legal_summarizer.domain.config import (
+    HierarchicalReducerConfig,
+    )
+    from legal_summarizer.execution.hierarchical import (
+    reduce_chunks_hierarchical,
     )
     n = 100
     chunks = [
@@ -230,8 +242,8 @@ def test_reduce_sections_continues_until_one_item():
     Если после max_rounds остались > 1 элементов,
     reducer должает итерации до одного элемента.
     """
-    from workspace.skills.legal_summarizer.scripts.structure.hierarchical_reducer import (
-        reduce_sections_to_document,
+    from legal_summarizer.execution.hierarchical import (
+    reduce_sections_to_document,
     )
     pairs = [(f"s{i}", f"section {i} text") for i in range(20)]
     result = reduce_sections_to_document(
@@ -245,7 +257,7 @@ def test_reduce_sections_continues_until_one_item():
 
 def _make_chunk(chunk_id: str, *, section_id: str, text: str = "x"):
     """Helper РґР»СЏ СЃРѕР·РґР°РЅРёСЏ Chunk СЃ section_id."""
-    from workspace.skills.legal_summarizer.scripts.structure.chunks import Chunk
+    from legal_summarizer.chunking.chunks import Chunk
     return Chunk(
         chunk_id=chunk_id, index=int(chunk_id.lstrip("c")) if chunk_id.startswith("c") else 0,
         text=text, char_count=len(text), token_estimate=1,

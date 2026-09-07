@@ -26,10 +26,10 @@ _PROJ = _REPO
 if str(_PROJ) not in sys.path:
     sys.path.insert(0, str(_PROJ))
 
-from workspace.skills.legal_summarizer.scripts.structure.document_loader import (  # noqa: E402
+from legal_summarizer.document.loader import (  # noqa: E402
     DocumentLoader,
 )
-from workspace.skills.legal_summarizer.scripts.structure.physical import (  # noqa: E402
+from legal_summarizer.document.physical import (  # noqa: E402
     DocumentBlock,
     PhysicalDocument,
 )
