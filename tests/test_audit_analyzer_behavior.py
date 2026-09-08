@@ -466,14 +466,24 @@ class TestAuditAnalyerSkillToolSet:
             assert path.is_file(), f"{path} должен существовать"
             assert path.stat().st_size > 200, f"{path} слишком мал"
 
-    def test_skill_helper_exists(self) -> None:
-        """Skill-side helper ``scripts/sql_generator.py`` существует."""
-        helper = SKILL_DIR / "scripts" / "sql_generator.py"
-        assert helper.is_file()
-        text = helper.read_text(encoding="utf-8")
-        assert "generate_sql" in text
-        assert "validate_sql" in text
-        assert "call_llm" in text
+    def test_skill_predefined_module_exists(self) -> None:
+        """``workspace/skills/audit_analyzer/predefined/`` — режим predefined.
+
+        Заменил удалённый ``scripts/sql_generator.py`` (deprecated skill-side
+        helper для LLM-генерации SQL): Agent теперь формирует SQL сам по
+        ``references/sql_guidance.md`` или использует ``predefined.run()``.
+        """
+        assert (SKILL_DIR / "predefined" / "mode.py").is_file()
+        assert (SKILL_DIR / "predefined" / "builder.py").is_file()
+        assert (SKILL_DIR / "predefined" / "validator.py").is_file()
+        assert (SKILL_DIR / "predefined" / "models.py").is_file()
+        assert (SKILL_DIR / "predefined" / "scripts.py").is_file()
+
+    def test_no_sql_generator_helper_exists(self) -> None:
+        """Удалённый ``scripts/sql_generator.py`` не должен существовать."""
+        assert not (SKILL_DIR / "scripts").exists() or not (
+            SKILL_DIR / "scripts" / "sql_generator.py"
+        ).exists()
 
 
 # ---------------------------------------------------------------------------

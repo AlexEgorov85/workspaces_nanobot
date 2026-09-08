@@ -1,82 +1,149 @@
 # Audit Analyzer Architecture
 
-## Core tools
+## Граница ответственности
 
-Skill использует только два инструмента получения данных:
+Skill `audit_analyzer` владеет **только** domain-знаниями:
+- структура таблиц `oarb.*` (`references/schema.md`);
+- каталог из 5 predefined SQL-скриптов (`predefined/scripts.py` +
+  `references/predefined_scripts.md`);
+- каталог из 3 FAISS-индексов (`references/vector_indexes.md`);
+- правила выбора одного из трёх режимов (decision tree).
 
-- `duckdb_query`
-- `vector_search`
+Skill НЕ владеет логикой выполнения SQL, поиска FAISS или LLM-вызова —
+всё это generic core services.
 
-Оба инструмента являются generic capabilities.
+## Архитектура
 
-Они не знают ничего про audit_analyzer.
+```
+Agent / user
+  ↓
+scripts/cli.py --mode <predefined | generated_sql | vector>
+  ↓ маршрутизация
++---+---+---+
+|   |   |   |
+PREDEFINED       GENERATED_SQL     VECTOR
+|   |   |
+↓   ↓   ↓
+predefined_mode   generated_sql_mode   cli (search_vector)
+↓   ↓   ↓
+predefined.run    chat() + validate_sql + execute
+↓                 ↓
+DynamicQueryBuilder + DuckDBService
+↓
+DuckDB / FAISS (generic core)
+```
 
-## Agent responsibility
+Тонкие tool'ы (`workspace/tools/duckdb_query_tool.py`,
+`workspace/tools/vector_search_tool.py`) — для Agent, не для CLI.
 
-Agent:
+## Что такое `scripts/cli.py`
 
-1. читает SKILL.md;
-2. определяет способ получения данных;
-3. формирует параметры tool;
-4. вызывает tool;
-5. анализирует результат;
-6. при необходимости повторяет вызов;
-7. формирует ответ пользователю.
+CLI — единственная **целевая** точка вызова навыка из shell/runtime.
+Поддерживает 3 режима, валидирует параметры, возвращает плоский JSON.
 
-## Skill responsibility
+Внутри CLI:
+- `predefined_mode.py` — pipeline для predefined (lookup +
+  ParameterValidator + DynamicQueryBuilder + ``CacheProvider.query_sql``);
+- `generated_sql_mode.py` — LLM → SQL с retry-циклом (``MAX_RETRIES = 2``);
+- `output.py` — плоский формат JSON;
+- `llm.py` — тонкая обёртка над `lib.services.llm_client`;
+- `skill_config.py` — обёртка над `lib.core.skill_config` для удобства
+  импорта из `scripts/`.
 
-Skill содержит:
+Никаких audit-specific знаний в core: `CacheProvider.query_sql`,
+`CacheProvider.search_vector`, `lib.services.llm_client.call_llm` —
+всё generic.
 
-- предметные знания;
-- описание данных;
-- правила выбора способа получения данных;
-- каталог predefined SQL (имена, параметры, назначение);
-- описания vector indexes;
-- SQL guidance для генерации свободных запросов;
-- ограничения;
-- примеры;
-- skill-side helper `scripts/sql_generator.py` для генерации SQL по
-  NL-запросу через прямой LLM API-вызов (если Agent предпочитает
-  не генерировать SQL сам).
+## Core Services
 
-## Script responsibility
+Skill использует **только generic** core services:
 
-Python scripts разрешены для:
+| Сервис | Назначение | Skill-конкретика |
+|---|---|---|
+| `lib.services.DuckDbCacheStore` | generic SELECT-only SQL | не знает про audit_analyzer |
+| `lib.services.CacheProvider` | generic FAISS-поиск | не знает про audits_index/violations_index |
+| `lib.utils.sql_safety.validate_sql` | SELECT-only gate | не знает про oarb.* |
 
-- самостоятельной детерминированной обработки;
-- skill-side LLM-генерации SQL (через прямой API-вызов).
+Имена индексов/скриптов/таблиц — **домен skill'а**, не core.
 
-Python script не должен существовать только ради вызова другого tool.
+## Workflow по режимам
 
-## Dependency direction
+### PREDEFINED
 
-Core не импортирует audit_analyzer.
+```
+ScriptDefinition         ─┐  predefined/scripts.py
+   ↓ name + params
+ParameterValidator       ─┤  predefined/validator.py
+   ↓ merged + err|none
+DynamicQueryBuilder      ─┤  predefined/builder.py  (Jinja2-подобный {% if %})
+   ↓ SQL + positional params   (:param → ?)
+CacheProvider.query_sql(sql, params)
+   ↓
+result {row_count, columns, rows (dict по именам колонок)}
+```
 
-audit_analyzer использует generic capabilities core:
+Все компоненты — внутри skill'a. Не делает HTTP/LLM-вызовов.
 
-- `duckdb_query` (workspace/tools/duckdb_query_tool.py);
-- `vector_search` (workspace/tools/vector_search_tool.py);
-- `lib.services.llm_client.call_llm` (если нужен LLM-вызов);
-- `lib.utils.sql_safety.validate_sql`;
-- `lib.utils.text_utils.{sanitize_value, truncate_middle}`;
-- `lib.core.skill_config.get_predefined_scripts_table`.
+### VECTOR
+
+```
+vector_search(query, index_name, top_k, threshold)
+  ↓
+CacheProvider.search_vector(...)      ← из runtime-БД public.agent_vector_index_config
+  ↓
+FAISS score + content + metadata
+```
+
+Skill только передаёт `index_name` из своего каталога
+(`references/vector_indexes.md`); tool ничего не знает про эти имена.
+
+### SQL
+
+```
+Agent reasoning (по references/schema.md, sql_guidance.md)
+  ↓
+SQL SELECT
+  ↓
+duckdb_query(sql, params)
+  ↓
+validate_sql(sql)             ← SELECT-only gate в workspace/tools/duckdb_query_tool.py
+DuckDBService.execute_readonly(sql, params, max_rows)
+  ↓
+result
+```
+
+Retry (при `sql_error`) — задача **Agent**, не отдельный сервис.
+
+## Зависимости
+
+`audit_analyzer` импортирует:
+
+- `lib.services.DuckDbCacheStore` (через `lib.core.skill_config` /
+  `workspace/tools/duckdb_query_tool.py` / `CacheProvider`)
+- `lib.utils.sql_safety.validate_sql` (через `workspace/tools/duckdb_query_tool.py`)
+- `workspace.utils.*` (при необходимости)
+
+`audit_analyzer` НЕ импортирует:
+
+- `lib.services.llm_client` — нет LLM-вызовов;
+- `lib.core.skill_config.get_predefined_scripts_table` — реестр не в БД.
 
 ## Forbidden
 
 Запрещены:
 
-- audit-specific tools в core;
-- `run_predefined_script` как отдельный tool;
-- `nl_sql_generate` как отдельный tool;
-- Python wrappers вокруг `duckdb_query`;
-- Python wrappers вокруг `vector_search`;
-- audit-specific SQL routing в core;
-- audit-specific prompts в core.
+- audit-specific tools в core (`vector_search`, `duckdb_query` — generic);
+- `run_predefined_script` как отдельный tool (это режим skill);
+- `nl_sql_generate` как отдельный tool (Agent формирует SQL сам);
+- LLM-helper `scripts/sql_generator.py` (удалён);
+- Python wrappers вокруг `duckdb_query` или `vector_search`;
+- `public.agent_predefined_scripts` lookup из runtime skill'a (реестр
+  хранится в `predefined/scripts.py`);
+- `audit_specific` SQL routing / prompts в core.
 
 Допустимы:
 
-- `public.agent_predefined_scripts` как PG-источник SQL для Agent;
-  Agent читает SQL inline через `duckdb_query` (см.
-  `references/predefined_scripts.md`);
-- skill-side `scripts/sql_generator.py` для автономной генерации SQL
-  через прямой LLM API-вызов (используется по желанию Agent'а).
+- `predefined.run(name, db, params)` — режим skill, generic DB-сервис;
+- `vector_search(query, index_name=<из vector_indexes>)` — generic tool;
+- `duckdb_query(sql, params)` — generic tool;
+- ссылки на `lib.utils.sql_safety.validate_sql` — generic SELECT-only gate.

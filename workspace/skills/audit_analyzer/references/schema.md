@@ -108,7 +108,5 @@ Tool'ы сами следят за безопасностью (`validate_sql`) �
 (`max_rows` / `max_result_chars`). Skill не должен в промптах или
 инструкциях просить агента писать DDL/DML.
 
-Агент может по своему усмотрению вызвать skill-side helper
-`scripts/sql_generator.py` для автономной генерации SQL через прямой
-LLM API-вызов — это опционально, основной путь — `duckdb_query`
-с SQL, который агент формирует сам на основании этой схемы.
+Agent формирует SQL сам на основании этой схемы и
+`references/sql_guidance.md`, выполняет через generic `duckdb_query`.

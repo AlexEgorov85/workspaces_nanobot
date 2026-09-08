@@ -1,87 +1,133 @@
 ---
 name: audit_analyzer
-description: Анализ аудиторских проверок — два способа получения данных (predefined SQL через PG-таблицу + duckdb_query, и vector_search), плюс свободный SQL через duckdb_query.
+description: Анализ аудиторских проверок — три режима получения данных: predefined SQL-скрипты, семантический поиск по FAISS, свободный SQL через duckdb_query.
 metadata: {"nanobot":{"emoji":"📊","always":true}}
 ---
 
 # Audit Analyzer
 
-Ты работаешь с данными аудиторских проверок.
+Ты работаешь с данными аудиторских проверок (нарушения, отчёты,
+плановые/фактические даты).
 
-Для получения данных доступны **только два generic tool'а**:
+Доступны **ровно три способа** получения данных. Agent выбирает режим сам
+по каталогам ниже (decision tree в `references/predefined_scripts.md`,
+`references/vector_indexes.md`, `references/sql_guidance.md`).
 
-- `duckdb_query`
-- `vector_search`
+## Три режима получения данных
 
-Других способов получения audit data не используй. Любой SQL идёт
-через `duckdb_query`.
+### 1. PREDEFINED — приоритет 1
 
-## 1. Predefined SQL
+Используй, если запрос **точно** соответствует одному из 5 скриптов
+в каталоге (см. `references/predefined_scripts.md`).
 
-Сначала проверь каталог ниже. Подробности — в
-`references/predefined_scripts.md`.
+Преимущества:
+
+- SQL заранее проверен и валидирован;
+- результат детерминирован;
+- LLM не вызывается;
+- параметры валидируются по типизированной схеме.
+
+### Запуск через CLI
+
+Навык поставляет CLI с тремя режимами (`scripts/cli.py --mode ...`).
+
+Целевое использование из runtime / shell / тестов:
+
+```bash
+# Predefined script
+python workspace/skills/audit_analyzer/scripts/cli.py \
+    --mode predefined \
+    --script violations_by_period \
+    --params '{"date_from": "2024-01-01", "date_to": "2024-12-31"}'
+
+# NL → SQL (требует LLM-ключ в окружении)
+    python workspace/skills/audit_analyzer/scripts/cli.py \
+        --mode generated_sql \
+        --query 'сколько аудитов в 2024 по месяцам'
+
+# Vector search
+python workspace/skills/audit_analyzer/scripts/cli.py \
+    --mode vector \
+    --query 'пожарная безопасность' \
+    --index-name audits_index --top-k 5
+```
+
+JSON-результат (плоский, для парсинга в агенте) — в stdout.
+
+### 2. VECTOR SEARCH — приоритет 2
+
+Используй для **семантического поиска**: «найди похожие …», «… про X».
+Выбери `index_name` **только** из каталога
+`references/vector_indexes.md` — никаких других имён.
+
+```
+vector_search(query="...", index_name="<из каталога>", top_k=5)
+```
+
+### 3. SQL — fallback
+
+Используй **только** если первые два режима не подходят. Это путь для
+свободных аналитических запросов и агрегаций: COUNT, GROUP BY, JOIN, фильтры по колонкам.
+
+```
+duckdb_query(sql="SELECT ... FROM oarb.<table> WHERE ...", params={...})
+```
+
+Agent формирует SQL **сам** по `references/schema.md` и
+`references/sql_guidance.md` (никаких SQL-generator-helper'ов).
+Если `duckdb_query` вернул `sql_error` — исправь SQL и повтори
+(retry выполняет Agent, не отдельный сервис).
+
+## Decision tree
+
+```
+Q: Запрос точно соответствует одному из 5 predefined scripts?
+  YES → python scripts/cli.py --mode predefined --script NAME --params '{...}'
+  NO ↓
+
+Q: Запрос про смысл/похожие (не точные числа)?
+  YES → vector_search(index_name=<из vector_indexes.md>)
+  NO ↓
+
+  duckdb_query(sql=<формирует Agent сам>)
+```
+
+## Каталог predefined scripts
 
 | Script | Параметры | Назначение |
 |---|---|---|
 | `audit_status_summary` | — | Сводка по статусам аудитов |
 | `top_violations_by_type` | — | Топ кодов нарушений |
-| `violations_by_period` | `date_from`, `date_to` (YYYY-MM-DD, обязательны) | Нарушения за период |
-| `audits_by_period` | `date_from`, `date_to` (YYYY-MM-DD, обязательны) | Проверки за период |
-| `audit_effectiveness_summary` | — | Сводка эффективности (проверки × нарушения × severity) |
+| `violations_by_period` | `date_from`, `date_to` (ISO-date, обязательны) | Нарушения за период |
+| `audits_by_period` | `date_from`, `date_to` (ISO-date, обязательны) | Проверки за период |
+| `audit_effectiveness_summary` | `min_violations` (опц.) | Сводка эффективности (проверки × нарушения × severity) |
 
-Если запрос **точно соответствует** одному из predefined script'ов:
+Подробности и длинные описания — в `references/predefined_scripts.md`.
 
-1. прочитай его `sql_template` и `parameters` через
-   `duckdb_query(sql="SELECT name, sql_template, parameters FROM "
-   "public.agent_predefined_scripts WHERE name = ?", params=["<name>"])`;
-2. определи значения параметров из пользовательского запроса;
-3. вызови `duckdb_query(sql="<sql_template>", params={...})`.
+## Каталог vector indexes
 
-**Predefined всегда приоритетнее**, потому что результат детерминирован
-и SQL заранее проверен. Не используй predefined, если обязательных
-параметров нет.
+| Index | Источник | Когда использовать |
+|---|---|---|
+| `audits_index` | `oarb.audits` (embed: `title`) | поиск проверок по смыслу заголовка |
+| `violations_index` | `oarb.violations` (embed: `description`) | поиск нарушений по смыслу описания |
+| `audit_reports_index` | `oarb.audit_reports` (embed: `title`, `full_text`) | поиск по отчётам целиком |
 
-## 2. Vector search
+Подробности — в `references/vector_indexes.md`.
 
-Используй `vector_search`, если пользователь ищет информацию
-по **смыслу** («найди похожие …», «что-нибудь про X»).
+## Жёсткие правила
 
-Каталог индексов (подробности и score-интерпретация — в
-`references/vector_indexes.md`):
-
-| Index | Источник | Embed-колонка | Когда использовать |
-|---|---|---|---|
-| `audits_index` | `oarb.audits` | `title` | поиск проверок по смыслу заголовка |
-| `violations_index` | `oarb.violations` | `description` | поиск нарушений по смыслу описания |
-| `audit_reports_index` | `oarb.audit_reports` | `title`, `full_text` | поиск по отчётам целиком |
-
-Не используй `vector_search` для числовых агрегаций.
-
-## 3. Свободный SQL
-
-Если predefined и vector search не подходят:
-
-1. прочитай `references/schema.md` для понимания данных;
-2. прочитай `references/sql_guidance.md` для правил формирования SQL;
-3. сформируй `SELECT` сам (или вызови skill-side helper
-   `scripts/sql_generator.py` через `exec`, если предпочитаешь);
-4. выполни его через `duckdb_query`;
-5. если tool вернул `sql_error` — прочитай `message`, исправь SQL,
-   повтори `duckdb_query`.
-
-Retry — задача Agent, не отдельного сервиса.
-
-## Правила
-
-- SQL выполняй **только** через `duckdb_query`.
-- Не выполняй SQL через `exec` / `python`.
-- Не придумывай таблицы и колонки — читай `references/schema.md`.
-- Не придумывай `index_name` — бери только из `references/vector_indexes.md`.
-- Не используй `vector_search` для COUNT / GROUP BY / точных фильтров.
-- Не используй SQL (`LIKE '%...%'`) для семантического поиска.
-- Не создавай Python wrapper только ради вызова tool.
+- SQL выполняй **только** через `duckdb_query` (не через `exec` / `python`).
+- Не выбирай `index_name` сам — только из `references/vector_indexes.md`.
+- Не выдумывай скрипт predefined — только из каталога выше.
 - Не вызывай удалённые инструменты `run_predefined_script` /
-  `nl_sql_generate` — их больше нет.
+  `nl_sql_generate` / `column_descriptions` — их больше нет.
+- `predefined.run()` валидирует параметры сам; `vector_search` валидирует
+  `index_name` через runtime-реестр; `duckdb_query` валидирует SQL через
+  `validate_sql` (SELECT-only).
+- Не используй `vector_search` для COUNT / GROUP BY / точных фильтров.
+- Не используй `LIKE '%...%'` через `duckdb_query` для семантического поиска.
+- Не выбирай `predefined`, если **обязательных параметров** нет — переходи
+  к `duckdb_query` (см. `references/sql_guidance.md`).
 
 ## References
 
@@ -91,18 +137,13 @@ Retry — задача Agent, не отдельного сервиса.
 - `references/predefined_scripts.md` — каталог predefined scripts.
 - `references/architecture.md` — архитектурный контракт skill'а.
 
-## Skill-side helper (опционально)
+## Что нельзя делать
 
-`scripts/sql_generator.py` — автономный генератор SQL по NL-запросу
-через прямой LLM API-вызов. Используй его, если предпочитаешь не
-генерировать SQL сам. Helper возвращает только SQL, выполнение — через
-`duckdb_query`.
-
-Пример:
-
-```bash
-python scripts/sql_generator.py \
-    --query "Сколько проверок за 2024 год?" \
-    --schema-file references/schema.md \
-    --tables oarb.audits
-```
+- Не использовать `public.agent_predefined_scripts` через `duckdb_query` —
+  реестр SQL хранится в `predefined/scripts.py` (внутри skill'а).
+- Не использовать `/python scripts/sql_generator.py` или любой другой
+  LLM-helper для генерации SQL — Agent формирует SQL сам.
+- Не передавать сгенерированный SQL в `predefined.run()` — это для
+  использования `duckdb_query`.
+- Не выдумывать SQL для задачи, которую решает `predefined` script — определи
+  params и вызови `predefined.run()`.
