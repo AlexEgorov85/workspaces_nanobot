@@ -56,19 +56,27 @@ class DocumentStructureChunkerConfig:
     ))
 
 
-def build_chunk_config_from_runtime() -> ChunkConfig:
+def build_chunk_config_from_runtime(
+    context_window_tokens: int | None = None,
+) -> ChunkConfig:
     """Построить ``ChunkConfig`` из runtime-конфига.
 
-    Источник истины — ``context_window_tokens`` (берётся из
-    ``skills.legal_summarizer.chunking`` или LLM config). Размер чанка
-    вычисляется как:
+    Приоритет источников для ``max_chunk_chars``:
 
-        max_chunk_chars = context_window_tokens * chunk_size_input_ratio
-                         / chars_per_token
+    1. Если передан ``context_window_tokens`` (например, из
+       ``agents.defaults.contextWindowTokens`` в ``config.json``):
+       ``max_chunk_chars = context_window_tokens * chunk_size_input_ratio
+       * chars_per_token``.
+       Это основной путь: размер chunk'а привязан к реальному
+       контекстному окну модели.
 
-    Fallback: если ``context_window_tokens`` не задан — используем
-    ``chunk_size`` (literal fallback). НЕ использовать
-    захардкоженное 100000.
+    2. Если в ``llm.config.get_chunking_config()`` есть ключ
+       ``context_window_tokens`` (legacy override для тестов):
+       используем его по той же формуле.
+
+    3. Fallback: ``chunk_size`` из llm config (default 100000).
+       Сохранён для обратной совместимости, если context window
+       недоступен.
 
     Дополнительные поля:
         target_chunk_chars (default 20000) — мягкий ориентир;
@@ -76,18 +84,25 @@ def build_chunk_config_from_runtime() -> ChunkConfig:
         решения о закрытии chunk'а на strong boundary.
 
     Args:
-        chunk_size_config_override: для тестов
-            (см. ``tests/architecture/test_layer_boundaries.py``).
+        context_window_tokens: контекстное окно модели в токенах
+            (типичный источник: ``config.json::agents.defaults.contextWindowTokens``).
+            Если None — используется legacy fallback.
+
+    Returns:
+        ChunkConfig с вычисленным max_chunk_chars.
     """
     import llm.config as _llm_config_mod
 
     chunk_cfg = _llm_config_mod.get_chunking_config() or {}
     chars_per_token = float(chunk_cfg.get("chars_per_token", 3.5))
-
-    ctx_tokens = chunk_cfg.get("context_window_tokens")
     ratio = chunk_cfg.get("chunk_size_input_ratio")
-    if ctx_tokens and ratio:
-        max_chunk_chars = int(ctx_tokens * float(ratio) * chars_per_token)
+
+    cwt = context_window_tokens
+    if cwt is None:
+        cwt = chunk_cfg.get("context_window_tokens")
+
+    if cwt and ratio:
+        max_chunk_chars = int(cwt * float(ratio) * chars_per_token)
     else:
         max_chunk_chars = int(chunk_cfg.get("chunk_size", 100000))
 
@@ -133,20 +148,8 @@ def _is_strong_boundary(
     nxt_owner_id: str,
     struct: DocumentStructure,
 ) -> bool:
-    """True, если prev→next — major→major переход между разными узлами.
-
-    Strong boundary = два соседних structural unit'а с major semantic_type
-    (chapter / section / appendix / razdel), при условии что prev_owner !=
-    nxt_owner (т.е. это разные structural узлы).
-
-    Returns False если:
-    - prev_owner == nxt_owner;
-    - один из owners = root_id (root — generic, не имеет strong boundary);
-    - один из owners = None или отсутствует в struct.nodes;
-    - оба не являются major.
-
-    Caller проверяет условие "current >= preferred_min * target" отдельно.
-    """
+    """DEPRECATED: оставлен для back-compat, используйте
+    ``structural_packing._is_strong_boundary_units``."""
     if prev_owner_id == nxt_owner_id:
         return False
     if prev_owner_id == struct.root_id or nxt_owner_id == struct.root_id:
@@ -155,13 +158,9 @@ def _is_strong_boundary(
     nxt = struct.nodes.get(nxt_owner_id)
     if prev is None or nxt is None:
         return False
-
     prev_is_major = prev.semantic_type in _MAJOR_SEMANTIC_TYPES
     nxt_is_major = nxt.semantic_type in _MAJOR_SEMANTIC_TYPES
-    if not (prev_is_major and nxt_is_major):
-        return False
-
-    return True
+    return prev_is_major and nxt_is_major
 
 
 def chunk_from_structure(
@@ -172,24 +171,31 @@ def chunk_from_structure(
 ) -> list[Chunk]:
     """Создать ``Chunk``-и из ``PhysicalDocument`` + ``DocumentStructure``.
 
-    Алгоритм (STRUCTURAL_PACKING_PLAN v3 §2):
+    Алгоритм (hierarchical structural packing):
 
-    1. Строим ``block_ownership`` (deepest owner для каждого block).
-    2. Итерируем **physical blocks** в ordinal order (НЕ sections).
-    3. Tables — atomic chunks.
-    4. Oversized blocks — split через ``_split_block_with_offsets``,
+    1. Tables → atomic chunks (каждый table block — свой chunk).
+    2. Oversized blocks → split через ``_split_block_with_offsets``,
        каждый split-part — свой chunk.
-    5. Normal blocks — greedy packing:
-       - same owner и помещается в max → merge;
-       - max overflow → close current, start new;
-       - strong boundary + current ≥ preferred_min*target → close;
-       - иначе (слабая граница) → merge.
-    6. chunk_id = zero-padded index (1-based).
+    3. Structural units: recursive descent по DocumentStructure.
+       Если subtree помещается в ``target_chunk_chars`` AND не содержит
+       specials → один ``PackableUnit`` на всё subtree.
+       Иначе → раскрываем на children + direct gaps родителя.
+    4. Все unit'ы (structural + table + oversized) собираются в
+       physical document order.
+    5. Greedy packing: structural unit'ы могут объединяться, пока не
+       встретится table/oversized_part или max overflow или strong boundary.
+    6. Emit ``Chunk[]`` с правильными section_id, section_ids, section_path.
 
     Returns:
         ``list[Chunk]`` в physical document order. ``chunks[i].index``
         строго возрастает.
     """
+    from chunking.structural_packing import (
+        PackableUnit,
+        build_packable_units,
+        greedy_pack_units,
+    )
+
     cfg = config or DocumentStructureChunkerConfig()
     chunk_cfg = cfg.chunk_config
 
@@ -198,6 +204,11 @@ def chunk_from_structure(
     chunk_overlap = chunk_cfg.chunk_overlap_chars
     target_chunk_chars = chunk_cfg.target_chunk_chars
     preferred_min = chunk_cfg.preferred_min_before_strong_boundary
+
+    if target_chunk_chars < max_chunk_chars * 0.3:
+        target_chunk_chars = int(max_chunk_chars * 0.6)
+    if target_chunk_chars > max_chunk_chars:
+        target_chunk_chars = int(max_chunk_chars * 0.6)
 
     by_ord = doc.blocks_by_ord
     if not by_ord:
@@ -227,26 +238,16 @@ def chunk_from_structure(
         section_id: str,
         section_path: str,
         section_heading: str,
-        owners: tuple[str, ...],
+        section_ids: tuple[str, ...],
         page_start: int | None,
         page_end: int | None,
         table_id: str | None = None,
-        table_row_start: int | None = None,
-        table_row_end: int | None = None,
         source_char_start: int | None = None,
         source_char_end: int | None = None,
     ) -> Chunk:
         nonlocal chunk_index
         chunk_index += 1
         token_est = max(1, len(text) // max(1, int(chars_per_token)))
-
-        seen: list[str] = []
-        for o in owners:
-            if o == struct.root_id:
-                continue
-            if o not in seen:
-                seen.append(o)
-        section_ids = tuple(seen)
 
         chunk = Chunk(
             chunk_id=_make_chunk_id(chunk_index),
@@ -262,8 +263,8 @@ def chunk_from_structure(
             block_indices=block_indices,
             block_types=block_types,
             table_id=table_id,
-            table_row_start=table_row_start,
-            table_row_end=table_row_end,
+            table_row_start=None,
+            table_row_end=None,
             source_char_start=source_char_start,
             source_char_end=source_char_end,
             section_ids=section_ids,
@@ -271,155 +272,194 @@ def chunk_from_structure(
         chunks.append(chunk)
         return chunk
 
-    def _flush_current(
-        current_blocks: list[int],
-        current_owners: list[str],
-    ) -> None:
-        if not current_blocks:
+    def _emit_unit(unit: PackableUnit) -> None:
+        nonlocal document_table_counter
+        if not unit.block_indices:
             return
-        section_id = current_owners[0]
-        section_path, section_heading = _meta(section_id)
+
+        blocks_in_unit = [by_ord[o] for o in unit.block_indices if o in by_ord]
+        if not blocks_in_unit:
+            return
 
         text_parts: list[str] = []
         page_start: int | None = None
         page_end: int | None = None
         block_types_list: list[str] = []
-        for ord_idx, owner in zip(current_blocks, current_owners):
-            block = by_ord.get(ord_idx)
-            if block is None:
-                continue
-            text_parts.append(block.content)
-            block_types_list.append(block.block_type)
-            if block.page_index is not None:
-                if page_start is None or block.page_index < page_start:
-                    page_start = block.page_index
-            if block.page_end is not None:
-                if page_end is None or block.page_end > page_end:
-                    page_end = block.page_end
+        for b in blocks_in_unit:
+            text_parts.append(b.content)
+            block_types_list.append(b.block_type)
+            if b.page_index is not None:
+                if page_start is None or b.page_index < page_start:
+                    page_start = b.page_index
+            if b.page_end is not None:
+                if page_end is None or b.page_end > page_end:
+                    page_end = b.page_end
+
+        text = "\n\n".join(text_parts)
+        section_path, section_heading = _meta(unit.primary_section_id)
+
+        if unit.kind == "table":
+            document_table_counter += 1
+            table_id = unit.table_id or f"t_{document_table_counter:03d}"
+            _emit_chunk(
+                text=text,
+                block_indices=unit.block_indices,
+                block_types=tuple(block_types_list),
+                section_id=unit.primary_section_id,
+                section_path=section_path,
+                section_heading=section_heading,
+                section_ids=unit.section_ids,
+                page_start=page_start,
+                page_end=page_end,
+                table_id=table_id,
+            )
+            return
+
+        if unit.kind == "oversized_part":
+            _emit_chunk(
+                text=text,
+                block_indices=unit.block_indices,
+                block_types=tuple(block_types_list),
+                section_id=unit.primary_section_id,
+                section_path=section_path,
+                section_heading=section_heading,
+                section_ids=unit.section_ids,
+                page_start=page_start,
+                page_end=page_end,
+                source_char_start=unit.source_char_start,
+                source_char_end=unit.source_char_end,
+            )
+            return
 
         _emit_chunk(
-            text="\n\n".join(text_parts),
-            block_indices=tuple(current_blocks),
+            text=text,
+            block_indices=unit.block_indices,
             block_types=tuple(block_types_list),
-            section_id=section_id,
+            section_id=unit.primary_section_id,
             section_path=section_path,
             section_heading=section_heading,
-            owners=tuple(current_owners),
+            section_ids=unit.section_ids,
             page_start=page_start,
             page_end=page_end,
         )
 
-    current_blocks: list[int] = []
-    current_owners: list[str] = []
-    current_chars = 0
-    current_anchor_owner: str | None = None
+    def _unit_for_block(ord_i: int, owner: str) -> PackableUnit:
+        """Создать unit для одного normal block."""
+        block = by_ord[ord_i]
+        section_ids = _collect_owner_section_ids(
+            (ord_i,), ownership, struct.root_id,
+        )
+        return PackableUnit(
+            kind="structural",
+            block_indices=(ord_i,),
+            section_ids=section_ids,
+            primary_section_id=owner,
+            char_count=block.char_count,
+        )
 
-    ordered_ords = sorted(by_ord.keys())
+    structural_units = build_packable_units(
+        doc, struct, ownership,
+        target_chunk_chars=target_chunk_chars,
+        max_chunk_chars=max_chunk_chars,
+    )
 
-    def _start_new_at(ord_i: int, owner: str, block: DocumentBlock) -> None:
-        nonlocal current_blocks, current_owners, current_chars, current_anchor_owner
-        current_blocks = [ord_i]
-        current_owners = [owner]
-        current_chars = block.char_count
-        current_anchor_owner = owner
+    all_units: list[PackableUnit] = []
+    structural_idx = 0
+    doc_tables: dict[int, str] = {}
+    doc_oversized_parts: dict[int, list[tuple[int, int]]] = {}
 
-    for ord_i in ordered_ords:
-        block = by_ord.get(ord_i)
-        if block is None:
-            continue
-        owner = ownership.get(ord_i, struct.root_id)
-
+    for ord_i in sorted(by_ord.keys()):
+        block = by_ord[ord_i]
         if block.block_type == "table":
-            _flush_current(current_blocks, current_owners)
-            current_blocks = []
-            current_owners = []
-            current_chars = 0
-            current_anchor_owner = None
-
             document_table_counter += 1
-            section_path, section_heading = _meta(owner)
-            _emit_chunk(
-                text=block.content,
-                block_indices=(ord_i,),
-                block_types=(block.block_type,),
-                section_id=owner,
-                section_path=section_path,
-                section_heading=section_heading,
-                owners=(owner,),
-                page_start=block.page_index,
-                page_end=block.page_end,
-                table_id=f"t_{document_table_counter:03d}",
+            tid = f"t_{document_table_counter:03d}"
+            doc_tables[ord_i] = tid
+
+            owner = ownership.get(ord_i, struct.root_id)
+            section_ids = _collect_owner_section_ids(
+                (ord_i,), ownership, struct.root_id,
             )
-            continue
-
-        if block.char_count > max_chunk_chars:
-            _flush_current(current_blocks, current_owners)
-            current_blocks = []
-            current_owners = []
-            current_chars = 0
-            current_anchor_owner = None
-
-            section_path, section_heading = _meta(owner)
+            all_units.append(
+                PackableUnit(
+                    kind="table",
+                    block_indices=(ord_i,),
+                    section_ids=section_ids,
+                    primary_section_id=owner,
+                    char_count=block.char_count,
+                    table_id=tid,
+                ),
+            )
+        elif block.char_count > max_chunk_chars:
+            owner = ownership.get(ord_i, struct.root_id)
             parts = _split_block_with_offsets(
                 block.content,
                 chunk_size=max_chunk_chars,
                 chunk_overlap=chunk_overlap,
             )
+            doc_oversized_parts[ord_i] = []
             for part_text, cs, ce in parts:
-                _emit_chunk(
-                    text=part_text,
-                    block_indices=(ord_i,),
-                    block_types=(block.block_type,),
-                    section_id=owner,
-                    section_path=section_path,
-                    section_heading=section_heading,
-                    owners=(owner,),
-                    page_start=block.page_index,
-                    page_end=block.page_end,
-                    source_char_start=cs,
-                    source_char_end=ce,
+                section_ids = _collect_owner_section_ids(
+                    (ord_i,), ownership, struct.root_id,
                 )
+                all_units.append(
+                    PackableUnit(
+                        kind="oversized_part",
+                        block_indices=(ord_i,),
+                        section_ids=section_ids,
+                        primary_section_id=owner,
+                        char_count=len(part_text),
+                        source_block=ord_i,
+                        source_char_start=cs,
+                        source_char_end=ce,
+                    ),
+                )
+
+    structural_remaining = list(structural_units)
+    structural_block_set: set[int] = set()
+    for u in structural_remaining:
+        structural_block_set.update(u.block_indices)
+
+    for ord_i in sorted(by_ord.keys()):
+        block = by_ord[ord_i]
+        if block.block_type == "table" or block.char_count > max_chunk_chars:
             continue
+        if ord_i not in structural_block_set:
+            owner = ownership.get(ord_i, struct.root_id)
+            all_units.append(_unit_for_block(ord_i, owner))
 
-        if not current_blocks:
-            _start_new_at(ord_i, owner, block)
-            continue
+    for u in structural_remaining:
+        all_units.append(u)
 
-        assert current_anchor_owner is not None
+    all_units.sort(key=lambda u: (u.block_indices[0] if u.block_indices else 0))
 
-        if owner == current_anchor_owner and current_chars + block.char_count <= max_chunk_chars:
-            current_blocks.append(ord_i)
-            current_owners.append(owner)
-            current_chars += block.char_count
-            continue
+    packed_units = greedy_pack_units(
+        all_units,
+        target_chunk_chars=target_chunk_chars,
+        max_chunk_chars=max_chunk_chars,
+        preferred_min_before_strong_boundary=preferred_min,
+        struct=struct,
+    )
 
-        if current_chars + block.char_count > max_chunk_chars:
-            _flush_current(current_blocks, current_owners)
-            current_blocks = []
-            current_owners = []
-            current_chars = 0
-            current_anchor_owner = None
-            _start_new_at(ord_i, owner, block)
-            continue
-
-        if _is_strong_boundary(current_anchor_owner, owner, struct) and (
-            current_chars >= target_chunk_chars * preferred_min
-        ):
-            _flush_current(current_blocks, current_owners)
-            current_blocks = []
-            current_owners = []
-            current_chars = 0
-            current_anchor_owner = None
-            _start_new_at(ord_i, owner, block)
-            continue
-
-        current_blocks.append(ord_i)
-        current_owners.append(owner)
-        current_chars += block.char_count
-
-    _flush_current(current_blocks, current_owners)
+    for unit in packed_units:
+        _emit_unit(unit)
 
     return chunks
+
+
+def _collect_owner_section_ids(
+    block_indices: tuple[int, ...],
+    ownership: dict[int, str],
+    root_id: str,
+) -> tuple[str, ...]:
+    """Уникальные owner'ы blocks в document order, исключая root_id."""
+    seen: list[str] = []
+    for b in block_indices:
+        o = ownership.get(b, root_id)
+        if o == root_id:
+            continue
+        if o not in seen:
+            seen.append(o)
+    return tuple(seen)
 
 
 def chunk_from_structure_with_diagnostics(

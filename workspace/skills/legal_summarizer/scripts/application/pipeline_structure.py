@@ -56,6 +56,36 @@ from document.validation import (
 )
 
 
+def _read_context_window_tokens() -> int | None:
+    """Прочитать ``contextWindowTokens`` из SETTINGS.
+
+    Источник: ``config.json::agents.defaults.contextWindowTokens`` (или
+    override в project.json через ``agents.defaults.contextWindowTokens``).
+
+    Returns:
+        int или None если ключ отсутствует / не парсится.
+    """
+    try:
+        from config import SETTINGS
+    except Exception:
+        return None
+    try:
+        raw = (
+            SETTINGS.get("agents", {})
+            .get("defaults", {})
+            .get("contextWindowTokens")
+        )
+    except Exception:
+        return None
+    if raw is None or raw == "":
+        return None
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
 @dataclass(frozen=True)
 class PipelineResult:
     """Полный результат canonical pipeline."""
@@ -122,8 +152,11 @@ def run_canonical_pipeline(
         DocumentStructureChunkerConfig,
         build_chunk_config_from_runtime,
     )
+    context_window_tokens = _read_context_window_tokens()
     chunker_config = DocumentStructureChunkerConfig(
-        chunk_config=build_chunk_config_from_runtime(),
+        chunk_config=build_chunk_config_from_runtime(
+            context_window_tokens=context_window_tokens,
+        ),
     )
     planner = ChunkPlanner(config=chunker_config)
     chunks = tuple(planner.plan(physical, struct))
