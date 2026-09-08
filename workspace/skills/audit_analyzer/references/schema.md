@@ -96,13 +96,19 @@ LEFT JOIN violations v ON v.audit_id = a.id
 
 ## Как использовать схему
 
-Skill **не выполняет SQL сам** — только даёт инструкции агенту, какие tool'ы
-вызвать. Все запросы идут через `workspace/tools/`:
+Skill **не выполняет SQL сам** — только даёт инструкции агенту. Все
+запросы идут через два generic tool'а:
 
-- Для NL→SELECT: `nl_sql_generate(query="...")` (этот tool знает whitelist
-  таблиц из `TableRegistry` и подтягивает hints через `column_descriptions`).
-- Для семантического поиска: `vector_search(query="...", index_name="...")`.
+- Для SQL: `duckdb_query(sql="...", params={"...": ...})`
+  (см. `references/sql_guidance.md`).
+- Для семантического поиска: `vector_search(query="...", index_name="...")`
+  (см. `references/vector_indexes.md`).
 
 Tool'ы сами следят за безопасностью (`validate_sql`) и лимитами
 (`max_rows` / `max_result_chars`). Skill не должен в промптах или
 инструкциях просить агента писать DDL/DML.
+
+Агент может по своему усмотрению вызвать skill-side helper
+`scripts/sql_generator.py` для автономной генерации SQL через прямой
+LLM API-вызов — это опционально, основной путь — `duckdb_query`
+с SQL, который агент формирует сам на основании этой схемы.

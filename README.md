@@ -42,10 +42,11 @@ python tools/check_worker_pool_integrity.py --fix                 # диагно
 python tools/migrate.py --apply                                   # миграции схемы
 ```
 
-> **Навык `audit_analyzer` работает через tool'ы агента:** `nl_sql_generate`
-> (NL→SELECT), `duckdb_query` (точный SELECT), `vector_search` (семантика),
-> `column_descriptions` (подсказки). Skill больше не имеет собственного CLI —
-> агенту достаточно следовать `SKILL.md`.
+> **Навык `audit_analyzer` работает через tool'ы агента:** `duckdb_query`
+> (точный SELECT, в т.ч. чтение predefined SQL из PG inline) и
+> `vector_search` (семантика). Skill больше не имеет собственного CLI —
+> агенту достаточно следовать `SKILL.md`. Опционально доступен skill-side
+> helper `scripts/sql_generator.py` для автономной LLM-генерации SQL.
 
 Подробности по каждой команде — в [docs/INTERNAL_API.md](docs/INTERNAL_API.md) и
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).

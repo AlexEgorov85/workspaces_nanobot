@@ -1,156 +1,53 @@
 ---
 name: audit_analyzer
-description: Анализ аудиторских проверок — ровно три режима получения данных: predefined SQL-скрипты, семантический поиск по FAISS, LLM-генерация SELECT как fallback.
+description: Анализ аудиторских проверок — два способа получения данных (predefined SQL через PG-таблицу + duckdb_query, и vector_search), плюс свободный SQL через duckdb_query.
 metadata: {"nanobot":{"emoji":"📊","always":true}}
 ---
 
 # Audit Analyzer
 
-Анализ аудиторских проверок: нарушения, отчёты, плановые/фактические даты.
+Ты работаешь с данными аудиторских проверок.
 
-## Три способа получения данных
+Для получения данных доступны **только два generic tool'а**:
 
-Получить audit data можно **только** одним из трёх способов. Agent выбирает
-способ сам по каталогам ниже. Никаких других путей нет.
+- `duckdb_query`
+- `vector_search`
 
-### 1. PREDEFINED SCRIPT — приоритет 1
+Других способов получения audit data не используй. Любой SQL идёт
+через `duckdb_query`.
 
-Используй, если запрос пользователя **соответствует** одному из скриптов
-в каталоге **Predefined scripts**.
+## 1. Predefined SQL
 
-Преимущества: SQL заранее проверен, результат детерминирован, LLM не вызывается.
+Сначала проверь каталог ниже. Подробности — в
+`references/predefined_scripts.md`.
 
-```
-run_predefined_script(name="<из каталога>", params={...})
-```
-
-### 2. VECTOR SEARCH — приоритет 2
-
-Используй для **семантического поиска**: «найди похожие …», «… про X».
-Выбери `index_name` **только** из каталога **Vector indexes**.
-
-```
-vector_search(query="...", index_name="<из каталога>")
-```
-
-### 3. NL → SQL — fallback
-
-Используй, **только если** первые два способа не подходят. Это единственный
-путь для свободных SQL-запросов: COUNT, GROUP BY, JOIN'ы, фильтры по колонкам.
-
-```
-nl_sql_generate(query="...")
-```
-
-## Decision tree
-
-```
-Q: Запрос соответствует одному из predefined scripts из каталога?
-  YES → run_predefined_script
-  NO ↓
-
-Q: Запрос — про смысл/похожие?
-  YES → vector_search с index из каталога
-  NO ↓
-
-  nl_sql_generate
-```
-
-## Жёсткие правила
-
-- **Никогда** не выполняй SELECT напрямую. Любой SQL идёт через один из
- трёх tools выше.
-- **Никогда** не выбирай `index_name` автоматически — только из каталога.
-- **Никогда** не ищи predefined scripts через другой tool. Если скрипта
- нет в каталоге — значит его нет.
-- **Никогда** не используй SQL для задачи, которую решает predefined script.
-- **Никогда** не используй vector search для агрегаций и числовых расчётов.
-- **Никогда** не используй NL→SQL, если задача решается vector search
- (семантический поиск → `vector_search`, а не LIKE через SQL).
-
-### Что значит «соответствует predefined»
-
-Выбирай predefined script **только если выполняются оба условия**:
-
-1. **Весь смысл** запроса соответствует назначению скрипта (см. подробное
-   описание каждого script ниже).
-2. **Параметры** запроса позволяют выполнить скрипт (например, для
-   `violations_by_period` обе даты должны быть заданы).
-
-Похожее слово в запросе ≠ подходящий predefined. Например:
-
-- «покажи нарушения» без периода — **не** `violations_by_period`
- (период не указан).
-- «топ нарушений за 2024» — **не** `top_violations_by_type`
- (скрипт не принимает период).
-- «сводка по статусам похожих проверок» — **не** `audit_status_summary`
- (нужен дополнительный фильтр; не реализован в скрипте).
-
-В таких случаях — переходи к режиму 2 (vector) или 3 (NL→SQL).
-
-## Examples
-
-| Запрос | Tool |
-|---|---|
-| «Сводка по статусам аудитов» | `run_predefined_script(name="audit_status_summary")` |
-| «Нарушения за 2024 год» | `run_predefined_script(name="violations_by_period", params={"date_from": "2024-01-01", "date_to": "2024-12-31"})` |
-| «Найди похожие нарушения про пожарную безопасность» | `vector_search(query="пожарная безопасность", index_name="violations_index")` |
-| «Сколько проверок было в 2025 году?» | `nl_sql_generate(query="сколько проверок в 2025")` |
-| «Топ-5 организаций по числу нарушений» | `nl_sql_generate(query="топ-5 организаций по числу нарушений")` |
-| «Покажи динамику проверок по месяцам 2024» | `nl_sql_generate(query="проверки по месяцам 2024")` |
-| «Найди отчёты про неэффективность» | `vector_search(query="неэффективность", index_name="audit_reports_index")` |
-
-## Predefined scripts
-
-**Каталог ниже — это источник истины для выбора.** Если запрос соответствует
-скрипту из каталога — зови `run_predefined_script(name=...)`. Если скрипта
-нет в каталоге, его нет в реестре (синхронизация каталога и реестра — это
-задача администратора, не Agent).
-
-| Script | Когда использовать | Параметры |
+| Script | Параметры | Назначение |
 |---|---|---|
-| `audit_status_summary` | Сводка по статусам аудитов (Завершена / В работе / Запланирована) | нет |
-| `top_violations_by_type` | Топ типов/кодов нарушений | нет |
-| `violations_by_period` | Нарушения за период | `date_from` (date, required), `date_to` (date, required) |
-| `audits_by_period` | Аудиторские проверки за период | `date_from` (date, required), `date_to` (date, required) |
-| `audit_effectiveness_summary` | Сводка эффективности: проверки × нарушения × severity | нет |
+| `audit_status_summary` | — | Сводка по статусам аудитов |
+| `top_violations_by_type` | — | Топ кодов нарушений |
+| `violations_by_period` | `date_from`, `date_to` (YYYY-MM-DD, обязательны) | Нарушения за период |
+| `audits_by_period` | `date_from`, `date_to` (YYYY-MM-DD, обязательны) | Проверки за период |
+| `audit_effectiveness_summary` | — | Сводка эффективности (проверки × нарушения × severity) |
 
-### Подробное описание
+Если запрос **точно соответствует** одному из predefined script'ов:
 
-#### `audit_status_summary`
-- **Назначение**: агрегация `oarb.audits` по `status`.
-- **Когда использовать**: «сколько аудитов по статусам», «распределение проверок».
-- **Когда НЕ использовать**: нужны подробности по конкретным проверкам.
-- **Параметры**: нет.
+1. прочитай его `sql_template` и `parameters` через
+   `duckdb_query(sql="SELECT name, sql_template, parameters FROM "
+   "public.agent_predefined_scripts WHERE name = ?", params=["<name>"])`;
+2. определи значения параметров из пользовательского запроса;
+3. вызови `duckdb_query(sql="<sql_template>", params={...})`.
 
-#### `top_violations_by_type`
-- **Назначение**: топ кодов нарушений (`oarb.violations.violation_code`).
-- **Когда использовать**: «самые частые нарушения», «топ кодов».
-- **Когда НЕ использовать**: нужны нарушения по конкретному коду → `nl_sql_generate`.
-- **Параметры**: нет.
+**Predefined всегда приоритетнее**, потому что результат детерминирован
+и SQL заранее проверен. Не используй predefined, если обязательных
+параметров нет.
 
-#### `violations_by_period`
-- **Назначение**: нарушения в заданный период.
-- **Когда использовать**: «нарушения за 2024», «что выявлено в Q1».
-- **Когда НЕ использовать**: период не указан и неочевиден, нужны фильтры по severity/status → `nl_sql_generate`.
-- **Параметры**: `date_from`, `date_to` — обязательные ISO-даты (`YYYY-MM-DD`).
+## 2. Vector search
 
-#### `audits_by_period`
-- **Назначение**: проверки в заданный период (по `actual_date`).
-- **Когда использовать**: «проверки за 2024», «что проверяли в Q2».
-- **Когда НЕ использовать**: период не указан, нужны фильтры по status/audit_type → `nl_sql_generate`.
-- **Параметры**: `date_from`, `date_to`.
+Используй `vector_search`, если пользователь ищет информацию
+по **смыслу** («найди похожие …», «что-нибудь про X»).
 
-#### `audit_effectiveness_summary`
-- **Назначение**: сводка эффективности — проверки × нарушения × severity.
-- **Когда использовать**: «какие проверки самые проблемные», «уровень серьёзности».
-- **Когда НЕ использовать**: JOIN'ы с другими таблицами → `nl_sql_generate`.
-- **Параметры**: нет.
-
-## Vector indexes
-
-**Каталог ниже — это источник истины для выбора индекса.** Если подходящего
-индекса нет — переходи к режиму 3 (NL → SQL).
+Каталог индексов (подробности и score-интерпретация — в
+`references/vector_indexes.md`):
 
 | Index | Источник | Embed-колонка | Когда использовать |
 |---|---|---|---|
@@ -158,39 +55,54 @@ Q: Запрос — про смысл/похожие?
 | `violations_index` | `oarb.violations` | `description` | поиск нарушений по смыслу описания |
 | `audit_reports_index` | `oarb.audit_reports` | `title`, `full_text` | поиск по отчётам целиком |
 
-### Подробное описание
+Не используй `vector_search` для числовых агрегаций.
 
-#### `audits_index`
-- **Что индексируется**: `oarb.audits.title` — заголовок проверки.
-- **Что можно найти**: проверки по теме («проверки по пожарной безопасности», «бухгалтерские ревизии», «проверки в школах»).
-- **Когда использовать**: пользователь ищет проверки по **смыслу заголовка**.
-- **Когда НЕ использовать**:
-  - точные числа (COUNT/GROUP BY) → `nl_sql_generate`;
-  - фильтры по `actual_date`/`status`/`audit_type` → `nl_sql_generate`;
-  - поиск по содержимому отчётов → `audit_reports_index`.
+## 3. Свободный SQL
 
-#### `violations_index`
-- **Что индексируется**: `oarb.violations.description` — описание нарушения.
-- **Что можно найти**: «нарушения, похожие на …», «нарушения про X».
-- **Когда использовать**: пользователь ищет **похожие** нарушения по смыслу.
-- **Когда НЕ использовать**:
-  - числовые агрегации;
-  - фильтры по `severity`/`status`/`deadline` → `nl_sql_generate`;
-  - точные коды (`WHERE violation_code = ...`) → `nl_sql_generate`.
+Если predefined и vector search не подходят:
 
-#### `audit_reports_index`
-- **Что индексируется**: `oarb.audit_reports.title` + `full_text`.
-- **Что можно найти**: «отчёты с выводами о неэффективности», «отчёты про X».
-- **Когда использовать**: пользователь ищет **отчёты** по смыслу содержания.
-- **Когда НЕ использовать**:
-  - точные данные (числа, статусы) → `nl_sql_generate`;
-  - JOIN'ы с другими таблицами → `nl_sql_generate`.
+1. прочитай `references/schema.md` для понимания данных;
+2. прочитай `references/sql_guidance.md` для правил формирования SQL;
+3. сформируй `SELECT` сам (или вызови skill-side helper
+   `scripts/sql_generator.py` через `exec`, если предпочитаешь);
+4. выполни его через `duckdb_query`;
+5. если tool вернул `sql_error` — прочитай `message`, исправь SQL,
+   повтори `duckdb_query`.
+
+Retry — задача Agent, не отдельного сервиса.
+
+## Правила
+
+- SQL выполняй **только** через `duckdb_query`.
+- Не выполняй SQL через `exec` / `python`.
+- Не придумывай таблицы и колонки — читай `references/schema.md`.
+- Не придумывай `index_name` — бери только из `references/vector_indexes.md`.
+- Не используй `vector_search` для COUNT / GROUP BY / точных фильтров.
+- Не используй SQL (`LIKE '%...%'`) для семантического поиска.
+- Не создавай Python wrapper только ради вызова tool.
+- Не вызывай удалённые инструменты `run_predefined_script` /
+  `nl_sql_generate` — их больше нет.
 
 ## References
 
-Технические детали реализации:
-
 - `references/schema.md` — структура таблиц `oarb.*`.
-- `references/vector_indexes.md` — метаданные FAISS-индексов, score thresholds, источник истины по embedding-параметрам.
-- `references/sql_guidance.md` — правила формулировки SELECT.
-- `references/predefined_scripts.md` — схема `parameters` JSONB и правила валидации.
+- `references/vector_indexes.md` — каталог FAISS-индексов.
+- `references/sql_guidance.md` — правила формирования SQL.
+- `references/predefined_scripts.md` — каталог predefined scripts.
+- `references/architecture.md` — архитектурный контракт skill'а.
+
+## Skill-side helper (опционально)
+
+`scripts/sql_generator.py` — автономный генератор SQL по NL-запросу
+через прямой LLM API-вызов. Используй его, если предпочитаешь не
+генерировать SQL сам. Helper возвращает только SQL, выполнение — через
+`duckdb_query`.
+
+Пример:
+
+```bash
+python scripts/sql_generator.py \
+    --query "Сколько проверок за 2024 год?" \
+    --schema-file references/schema.md \
+    --tables oarb.audits
+```

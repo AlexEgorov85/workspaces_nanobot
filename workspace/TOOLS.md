@@ -105,160 +105,62 @@ This file documents non-obvious constraints and usage patterns.
   есть `legal_summarizer_query`. Это и быстрее, и кириллица не сломается.
 - Не передавай в `field` значения вне списка — будет отказ с понятной ошибкой.
 
-## nl_sql_generate — генерация SELECT по запросу на естественном языке
+## duckdb_query — read-only SQL по whitelist таблиц
 
-Кастомный tool (`workspace/tools/nl_sql_generate.py`). Преобразует
-NL-запрос в SELECT по whitelist'у зарегистрированных таблиц, валидирует
-через EXPLAIN и выполняет в общем DuckDB-кеше. Заменил режим
-`generated_sql` навыка `audit_analyzer` в виде generic tool.
+Generic tool (`workspace/tools/duckdb_query_tool.py`). Выполняет
+SELECT/WITH/EXPLAIN в общем DuckDB-кеше и возвращает структурированный
+результат.
 
-**Архитектура (pipeline):**
+**Архитектура:**
 
-1. `ColumnDescriptionsTool.lookup(query)` — подсказки термин→колонка.
-2. `SchemaFormatter` (internal service) — описание схемы из DuckDB-снимка.
-3. `NlSqlRunner.run(query, hints_block=hints)` — LLM retry-цикл +
-   validate_sql + EXPLAIN + execute в общем кэше.
-4. JSON-ответ с `sql`, `columns`, `rows`, `row_count`.
+1. `validate_sql` — SELECT-only gate (см. `lib/utils/sql_safety.py`).
+2. `DuckDbCacheStore.execute_readonly(sql, params, max_rows)` —
+   выполнение в общем кэше через `CacheProvider.query_sql`.
+3. JSON-ответ с `{status, columns, rows, row_count, returned_rows, truncated}`.
 
 **Параметры:**
 
-- `query` (обяз.) — запрос на естественном языке.
-- `max_rows` (опц., дефолт 1000) — лимит возвращаемых строк.
-- `no_few_shot` (опц., дефолт false) — пропустить few-shot из реестра.
-- `skip_hints` (опц., дефолт false) — не вызывать `column_descriptions`.
-- `hints_max_matches` (опц., дефолт 5) — сколько hints подмешать в system prompt.
-- `context` (опц.) — история чата для LLM.
+- `sql` (обяз.) — SQL-запрос. SELECT/WITH/EXPLAIN. Параметры через `?`
+  (позиционно) или `:name` (именованно).
+- `params` (опц.) — словарь `{name: value}` для параметров запроса.
+- `max_rows` (опц., дефолт `gateway.duckdb_query.max_rows=1000`) —
+  локальный лимит строк.
 
 **Когда звать:**
 
-- Любой NL→SELECT: «сколько X по Y?», «топ-N объектов по …», «динамика по …».
-- Когда `duckdb_query` написан руками, но не уверен в правильных именах колонок.
+- Точный SELECT по таблице из `references/schema.md` навыка.
+- Чтение SQL из `public.agent_predefined_scripts` для выполнения
+  predefined (см. `audit_analyzer/SKILL.md`, секция «Predefined SQL»).
+- Агрегации, GROUP BY, JOIN, фильтры по колонкам.
 
 **Примеры:**
 
-- «Сколько аудитов в 2024?» → `nl_sql_generate(query="сколько аудитов в 2024")` → `{status, sql, columns: [...], rows: [...]}`
-- «Топ-5 организаций по нарушениям» → `nl_sql_generate(query="топ-5 организаций по нарушениям", max_rows=5)`
+- «Сводка по статусам аудитов» → Agent читает `sql_template` из
+  `public.agent_predefined_scripts WHERE name='audit_status_summary'`,
+  затем `duckdb_query(sql=<template>)`.
+- «Сколько проверок в 2024?» →
+  `duckdb_query(sql="SELECT COUNT(*) FROM oarb.audits WHERE actual_date >= ? AND actual_date < ?", params={...})`.
 
 **Не делать:**
 
-- Не вызывай `duckdb_query` с самописным SELECT, если не уверен в схеме —
-  ` `nl_sql_generate` сам подтянет hints и описание таблиц.
-- Не пытайся использовать DDL/DML — tool зарубит через `validate_sql`.
+- Не пытайся выполнять DDL/DML — tool зарубит через `validate_sql`.
+- Не формируй `LIKE '%...%'` для семантического поиска — для этого
+  есть `vector_search`.
 
-## column_descriptions — структурированные подсказки термин→колонка
-
-Кастомный tool (`workspace/tools/column_descriptions.py`). Возвращает
-словарь подсказок для подмешивания в system prompt `nl_sql_generate`.
-Заменяет бывший `workspace/skills/audit_analyzer/scripts/column_hints.py`.
-
-**Аргументы:**
-
-- `term` (опц.) — термин/фраза для поиска (case-insensitive).
-- `match_all` (опц., дефолт false) — вернуть все entries.
-- `max_matches` (опц., дефолт 20) — лимит matches.
-
-**Конфиг** (`config.json::tools.column_descriptions`):
-
-```json
-{
-  "enable": true,
-  "data_file": "data_store/column_descriptions.json",
-  "max_result_chars": 16000
-}
-```
-
-Формат `data_file` (словарь generic, конкретные таблицы — на стороне
-skill'а):
-
-```json
-{
-  "synonym 1|synonym 2|синоним": [
-    "schema.table.column"
-  ]
-}
-```
-
-Ключ может содержать `|` — список синонимов; совпадение с любым из них
-считается положительным.
-
-**Когда звать:** в большинстве случаев звать напрямую не нужно —
-`nl_sql_generate` сам подтянет hints через in-process lookup
-(`lib.services.column_descriptions.ColumnDescriptionsResolver`).
-Прямой вызов имеет смысл, если хочешь заранее посмотреть подсказки
-перед генерацией SQL или при отладке словаря.
-
-**Пример:**
-
-- «Какие колонки подходят для синонима?» →
-  `column_descriptions(term="...")` →
-  `{matches: [{terms: [...], columns: ["schema.table.column"]}]}`
-
-## run_predefined_script — выполнение готового SQL из реестра
-
-Кастомный tool (`workspace/tools/run_predefined_script.py`). Достаёт
-SQL-шаблон из таблицы `public.agent_predefined_scripts` (зарегистрирована
-как `TableResource(label="scripts_registry")`), проверяет параметры по
-JSONB-схеме и выполняет SELECT в общем DuckDB-кеше. Не ходит в БД
-напрямую и не делает собственный SQL execution: использует
-`CacheProvider.query_sql` и `validate_sql` (тот же SELECT-only gate,
-что `nl_sql_generate` / `duckdb_query`).
-
-**Когда звать:**
-
-- Есть готовый SQL-рецепт в реестре, и пользователь явно назвал скрипт
-  (или имя легко восстановимо из запроса). Скрипт уже имеет
-  параметризованный SQL и JSONB-схему параметров.
-- Запрос стабильный, повторяемый и хочется детерминированного ответа
-  без LLM-генерации.
-
-**Когда НЕ звать:**
-
-- Запрос свободной формы → `nl_sql_generate`.
-- Уже есть точный SELECT → `duckdb_query`.
-- Не знаешь имя скрипта или не уверен, что он существует — сначала
-  посмотри `references/predefined_scripts.md` (или БД напрямую).
-
-**Параметры:**
-
-- `name` (обяз.) — PK скрипта в `public.agent_predefined_scripts`.
-- `params` (опц.) — словарь `{param_name: value}` для JSONB-схемы
-  `parameters`. Валидируется (required/default/type/choices/pattern/
-  min/max/min_length/max_length). Лишние ключи → ошибка.
-- `max_rows` (опц.) — переопределить `max_rows_default` из реестра
-  (но не больше `gateway.run_predefined_script.max_rows`).
-
-**Конфиг (`project.json::gateway.run_predefined_script`):**
+**Конфиг (`project.json::gateway.duckdb_query`):**
 
 ```json
 {
   "gateway": {
-    "run_predefined_script": {
+    "duckdb_query": {
       "enable": true,
       "max_rows": 1000,
-      "max_result_chars": 50000
+      "max_result_chars": 50000,
+      "query_timeout_sec": 30
     }
   }
 }
 ```
-
-**Примеры:**
-
-- Сводка по статусам аудитов (скрипт без параметров):
-  `run_predefined_script(name="audit_status_summary")` →
-  `{status, name, sql, params: [], columns: [...], rows: [...], row_count, returned_rows, truncated}`
-- Нарушения за период:
-  `run_predefined_script(name="violations_by_period", params={"date_from": "2024-01-01", "date_to": "2024-12-31"})`
-
-**Замечания:**
-
-- SQL-шаблон хранится в БД, но **всё равно проходит `validate_sql`** —
-  никаких исключений для predefined. Если шаблон содержит DDL/DML —
-  tool откажет с `error_type: invalid_script`.
-- Параметры передаются через `?`-placeholder'ы (DuckDB-стиль), а не
-  строковой интерполяцией — SQL injection исключён на уровне движка.
-- Если имя скрипта не указано в запросе пользователя — лучше сначала
-  уточнить, чем угадывать. Agent сам выбирает predefined script по описанию
-  в `SKILL.md` («Predefined scripts»); никакого auto-resolution в tool'е нет.
 
 ## vector_search — семантический поиск по FAISS-индексу
 
@@ -296,11 +198,11 @@ JSONB-схеме и выполняет SELECT в общем DuckDB-кеше. Н�
 
 **Когда НЕ звать:**
 
-- COUNT / GROUP BY / ORDER BY → `nl_sql_generate`.
+- COUNT / GROUP BY / ORDER BY → `duckdb_query` (свободный SQL).
 - Точный `id` → `duckdb_query WHERE id = ?`.
 - Фильтры по конкретным колонкам (`severity`, `status`, `date`) →
-  `nl_sql_generate`.
-- Сложные JOIN'ы → `nl_sql_generate`.
+  `duckdb_query`.
+- Сложные JOIN'ы → `duckdb_query`.
 
 **Конфиг (`project.json::gateway.vector_search.*`):**
 
@@ -336,14 +238,15 @@ JSONB-схеме и выполняет SELECT в общем DuckDB-кеше. Н�
 
 ## Capability layer для audit_analyzer
 
-В режиме на `audit_analyzer` Agent выбирает один из трёх инструментов:
+В режиме на `audit_analyzer` Agent выбирает один из двух generic tools:
 
 | Tool | Назначение | Когда |
 |---|---|---|
-| `run_predefined_script` | Выполнить готовый SQL из `public.agent_predefined_scripts` | Запрос точно соответствует скрипту из `SKILL.md` |
-| `vector_search` | Семантический поиск по FAISS | Запрос про **смысл**, индекс есть в `SKILL.md` |
-| `nl_sql_generate` | LLM-генерация SELECT | Fallback: всё остальное |
+| `duckdb_query` | Точный SELECT (включая чтение `sql_template` из `public.agent_predefined_scripts` inline) | Числовые/структурные запросы; predefined-скрипты; свободный SQL |
+| `vector_search` | Семантический поиск по FAISS | Запрос про **смысл**, индекс есть в `references/vector_indexes.md` |
 
-Agent сам читает `SKILL.md` и делает выбор. Ни один tool не делает
-auto-routing или классификацию запроса.
+Агент сам читает `SKILL.md` и делает выбор. Ни один tool не делает
+auto-routing или классификацию запроса. Опционально доступен skill-side
+helper `scripts/sql_generator.py` для автономной LLM-генерации SQL —
+используется по желанию Agent'а.
 

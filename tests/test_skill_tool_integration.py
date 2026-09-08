@@ -179,10 +179,9 @@ class TestScenario5SkillReferencesExist:
         - таблица "задача → capability";
         - список правил выбора tool'а.
 
-        После рефакторинга архитектура — ровно 3 capability:
-        ``run_predefined_script``, ``vector_search``, ``nl_sql_generate``.
-        Прямой SQL через ``duckdb_query`` **не** рекомендуется в
-        SKILL.md (см. Этап 14 коррекционного pass'а).
+        После рефакторинга архитектура — ровно 2 capability:
+        ``duckdb_query`` и ``vector_search``. Старые tools
+        (``run_predefined_script``, ``nl_sql_generate``) запрещены.
         """
         skill = Path("workspace/skills/audit_analyzer/SKILL.md").read_text(encoding="utf-8")
         markers = [
@@ -190,18 +189,27 @@ class TestScenario5SkillReferencesExist:
             "Decision tree",
             "| Задача |",
             "задача → capability",
+            "## 1. Predefined",
+            "## 2. Vector",
+            "## 3. Свободный",
         ]
         assert any(m in skill for m in markers), (
             "SKILL.md не содержит decision logic — добавьте раздел "
             "'Decision tree' / 'Decision procedure' или таблицу "
             "'задача → capability'."
         )
-        assert "run_predefined_script" in skill
-        assert "vector_search" in skill
-        assert "nl_sql_generate" in skill
-        # Прямой SQL через duckdb_query НЕ должен быть в SKILL.md —
-        # архитектура трёх capability запрещает его как data flow.
-        assert "duckdb_query" not in skill, (
-            "SKILL.md не должен рекомендовать duckdb_query как путь "
-            "получения audit data — только 3 capability."
+        assert "duckdb_query" in skill, (
+            "SKILL.md должен ссылаться на duckdb_query как основной "
+            "tool получения audit data."
         )
+        assert "vector_search" in skill, (
+            "SKILL.md должен ссылаться на vector_search для "
+            "семантического поиска."
+        )
+        # Старые tools запрещены в SKILL.md как data flow.
+        # Допустимо упоминание в forbidden-list (`Не вызывай ...`).
+        for forbidden in ("run_predefined_script", "nl_sql_generate"):
+            assert skill.count(forbidden) <= 1, (
+                f"SKILL.md не должен использовать {forbidden} как data flow; "
+                f"допустимо только упоминание в forbidden-list."
+            )

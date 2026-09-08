@@ -1,47 +1,90 @@
-# SQL guidance (NL → SELECT fallback)
+# SQL guidance
 
-Это **технические детали** для fallback-пути `nl_sql_generate`. Не
-инструкция выбирать другой tool — основной контракт выбора режима
-в `SKILL.md` (только три способа).
+Как Agent формирует SQL для `duckdb_query`.
 
-## Pipeline `nl_sql_generate`
+## Общие правила
 
-1. **Whitelist таблиц** из `TableRegistry` (только зарегистрированные
-   `schema.table`, никаких посторонних).
-2. **SchemaFormatter** формирует описание схемы для LLM (system prompt).
-3. **column_descriptions.lookup()** подмешивает подсказки термин→колонка.
-4. **Few-shot** примеры из `public.agent_predefined_scripts` подмешиваются
-   как контекст для LLM (но **не выполняются** автоматически).
-5. **LLM** генерирует SELECT.
-6. **validate_sql** — SELECT-only gate (см. `lib/utils/sql_safety.py`).
-7. **provider.explain** — синтаксическая проверка.
-8. **provider.query_sql** — выполнение в общем DuckDB-кеше.
-9. JSON-ответ с `sql`, `columns`, `rows`, `row_count`.
+- Только `SELECT` / `WITH` / `EXPLAIN`. Никаких DDL/DML — `duckdb_query`
+  отвергнет через `validate_sql` (`lib/utils/sql_safety.py`).
+- Один statement. Без `; DROP ...`.
+- Полностью квалифицированные имена таблиц: `schema.table` (например,
+  `oarb.audits`).
+- Параметры — позиционные `?` или именованные `:name` (см. контракт
+  `duckdb_query.params`).
+- `LIMIT` добавляется автоматически (`max_rows` из конфига).
 
-Retry-цикл: до `gateway.nl_sql_generate.max_retries` (default 3).
+## Процесс
 
-## Правила для LLM-промта (когда генерирует SELECT)
+1. Определи нужную таблицу (см. `references/schema.md`).
+2. Определи нужные колонки.
+3. Сформируй минимальный `SELECT`.
+4. Используй явные `JOIN` для связей.
+5. Для агрегатов — `COUNT` / `SUM` / `AVG` + `GROUP BY`.
+6. Для дат используй фактические `date`-колонки
+   (`actual_date`, `report_date`, `deadline` — см. `schema.md`).
+7. Выполни SQL через `duckdb_query`.
+8. Используй результат для формирования ответа.
 
-1. **Только SELECT/WITH/EXPLAIN.** Никаких DDL/DML.
-2. **Один statement.** Без `; DROP ...`.
-3. **Только таблицы** из `references/schema.md` (полные имена
-   `schema.table`).
-4. **LIMIT** добавляется автоматически (потолок из конфига).
-5. **Prepared parameters** (`?` или `:name`) — не строковая интерполяция.
+## Что делать при ошибке
 
-## Когда fallback-путь **не нужен**
+`duckdb_query` вернёт структурированную ошибку:
 
-- Запрос соответствует predefined скрипту из `SKILL.md` → `run_predefined_script`.
-- Семантический поиск (похожие, смысл) → `vector_search` с индексом из `SKILL.md`.
+```json
+{
+  "status": "error",
+  "error_type": "sql_error",
+  "message": "..."
+}
+```
 
-## Ограничения
+При ошибке:
 
-`nl_sql_generate` гарантирует:
+1. Прочитай `message`.
+2. Исправь SQL (синтаксис / имя таблицы / колонки).
+3. Повтори `duckdb_query`.
 
-- SELECT-only (см. `lib/utils/sql_safety.py::validate_sql`).
-- `max_rows` — из конфига `gateway.nl_sql_generate.max_rows` (default 1000).
-- `max_result_chars` — обрезка JSON-ответа через `truncate_middle`.
+Retry — задача Agent, не отдельного сервиса.
 
-Если результат пустой или ошибка — **не пытайся** генерировать DDL для
-«исправления». Tool остаётся в read-only режиме. Сообщи пользователю
-о причине.
+## Не придумывай
+
+Не придумывай:
+
+- таблицы;
+- колонки;
+- индексы;
+- значения enum.
+
+Используй `references/schema.md`. Если данных нет в skill — это
+признак того, что запрос нужно переформулировать или использовать
+другой способ получения данных.
+
+## Empty result ≠ ошибка
+
+Если SQL корректный, но `rows == []`:
+
+```json
+{
+  "status": "success",
+  "columns": ["id", "title"],
+  "rows": [],
+  "row_count": 0
+}
+```
+
+Это нормальный ответ. Сообщи пользователю «нет данных за указанный
+период», не интерпретируй пустой результат как сбой.
+
+## Предопределённые SQL-скрипты
+
+Если запрос точно соответствует predefined из
+`references/predefined_scripts.md` — используй predefined
+(через inline SQL из PG-таблицы + `duckdb_query`), а не свободный SQL.
+Predefined всегда приоритетнее.
+
+## Что НЕ делать
+
+- Не вызывай `exec` / `python` для выполнения SQL.
+- Не формируй DDL (`CREATE` / `DROP` / `ALTER`) — будет отвергнуто.
+- Не используй `LIKE '%...%'` для семантического поиска — для этого
+  есть `vector_search`.
+- Не строй сложные подзапросы, если можно обойтись `JOIN`.

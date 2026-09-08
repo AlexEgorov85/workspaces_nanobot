@@ -1,120 +1,143 @@
-# Predefined SQL scripts — технические детали
+# Predefined SQL scripts — каталог для Agent
 
-Это **техническая справка** о реестре `public.agent_predefined_scripts`,
-схеме JSONB `parameters` и правилах валидации. Каталог для выбора
-скриптов и decision tree — в `SKILL.md` (раздел «Predefined scripts»).
+Каталог предопределённых SQL-скриптов для `audit_analyzer`.
 
-## Источник истины
-
-Реестр готовых SQL-рецептов живёт в PG-таблице
-`public.agent_predefined_scripts`
+Источник истины — таблица `public.agent_predefined_scripts` в PostgreSQL
 (DDL: `sql/audit_analyzer/create_public_agent_predefined_scripts.sql`).
-Через `PgDuckDbSyncService` записи попадают в общий runtime-снапшот
-DuckDB (`workspace/data_store/duckdb/cache.duckdb`), откуда их читает
-tool `run_predefined_script`.
+Через `PgDuckDbSyncService` записи попадают в общий runtime-снапшот DuckDB
+(`workspace/data_store/duckdb/cache.duckdb`) и читаются агентом через
+`duckdb_query`.
 
-> **Синхронизация каталога и реестра — задача администратора.** Если
-> скрипта из `SKILL.md` нет в реестре, он не работает; если в реестре
-> есть скрипт, которого нет в `SKILL.md`, Agent о нём не знает.
+> **Эта таблица — единственный runtime-источник predefined SQL.** Если
+> скрипта из этого каталога нет в таблице, он не работает. Синхронизация
+> каталога и таблицы — задача администратора, не Agent.
 
-## Колонки реестра
+## Как Agent использует predefined
 
-| column | type | что хранится | используется кодом |
-|---|---|---|---|
-| `name` | TEXT PK | Имя скрипта (^[a-z][a-z0-9_]*$) | да — lookup |
-| `description` | TEXT NOT NULL | Краткое описание (1–2 строки) | да — для LLM-промпта/few-shot |
-| `sql_template` | TEXT NOT NULL | SQL с позиционными `?`-placeholder'ами (DuckDB-стиль) | да — выполняется |
-| `parameters` | JSONB NOT NULL DEFAULT `'{}'` | `{name: ParamDefinition}` | да — валидация |
-| `max_rows_default` | INTEGER NOT NULL | Лимит строк по умолчанию (добавляется в `LIMIT`) | да — добавляется автоматически |
-| `returns` | TEXT NOT NULL DEFAULT '' | Что возвращает скрипт (для документации и LLM-промпта) | зарезервировано |
-| `long_description` | TEXT NOT NULL DEFAULT '' | Подробное описание для LLM-промпта: что делает, когда использовать, edge cases | зарезервировано |
-| `created_at` | TIMESTAMPTZ NOT NULL DEFAULT NOW() | Время создания записи | sync-метаданные |
-| `updated_at` | TIMESTAMPTZ NOT NULL DEFAULT NOW() | Время последнего изменения | sync-метаданные (`PgDuckDbSyncService` синхронизирует инкрементально по этой колонке) |
+Чтобы выполнить скрипт `X` с параметрами `params`:
 
-## Контракт `sql_template` и placeholder'ов
+1. **Узнать имя таблицы** predefined-скриптов. Это ресурс с
+   `label="scripts_registry"` в `TableRegistry`. Имя можно получить
+   через `lib.core.skill_config.get_predefined_scripts_table("audit_analyzer")`
+   (если доступен через Python), либо прочитав настройки `project.json`:
+   секция `skills.audit_analyzer.tables[]` с `label="scripts_registry"`.
 
-**Только позиционные `?`-placeholder'ы (DuckDB-стиль).**
+   В этом проекте таблица — `public.agent_predefined_scripts`.
 
-Каждый `?` соответствует параметру из JSONB `parameters` в порядке
-объявления (`script.parameter_names()`).
+2. **Прочитать `sql_template` и `parameters`** скрипта через `duckdb_query`:
 
-```sql
--- Пример:
-SELECT COUNT(*)
-FROM oarb.audits
-WHERE actual_date BETWEEN ? AND ?
-  AND audit_type = ?
-```
+   ```sql
+   SELECT name, sql_template, parameters, max_rows_default
+   FROM public.agent_predefined_scripts
+   WHERE name = ?
+   -- params: ["<имя_скрипта>"]
+   ```
 
-Соответствующий JSONB:
+3. **Подставить параметры**. SQL использует позиционные `?`-placeholder'ы
+   в порядке объявления ключей в `parameters`. Передать через
+   `duckdb_query(... params={"p1": v1, "p2": v2, ...})`.
 
-```json
-{
-  "date_from":  {"type": "date", "required": true},
-  "date_to":    {"type": "date", "required": true},
-  "audit_type": {"type": "string", "required": true, "validation": {"choices": ["Внеплановая", "Плановая"]}}
-}
-```
+4. **Выполнить SQL** через `duckdb_query`.
 
-Реализация: `lib/services/predefined_script_request.py`
-(`PredefinedScriptRequestBuilder`).
+`duckdb_query` сам прогоняет SQL через `validate_sql` (SELECT-only gate).
 
-**Если в SQL нет явного `LIMIT` и `max_rows_default > 0`** — tool
-автоматически добавляет `LIMIT ?` с дополнительным аргументом. Если
-`LIMIT` уже есть (литерал или `?`) — tool не вмешивается.
+## Каталог скриптов
 
-**Если в SQL `?` больше или меньше, чем параметров в JSONB** —
-`invalid_script` (валидация в `PredefinedScriptRequestBuilder.build`).
+| Script | Параметры | Назначение |
+|---|---|---|
+| `audit_status_summary` | нет | Сводка по статусам аудитов |
+| `top_violations_by_type` | нет | Топ кодов нарушений |
+| `violations_by_period` | `date_from` (date, required), `date_to` (date, required) | Нарушения за период |
+| `audits_by_period` | `date_from` (date, required), `date_to` (date, required) | Аудиторские проверки за период |
+| `audit_effectiveness_summary` | нет | Сводка эффективности (проверки × нарушения × severity) |
 
-## Схема `parameters` (JSONB)
+### Подробное описание
 
-```json
-{
-  "date_from": {
-    "type": "date",
-    "required": true,
-    "description": "Начало периода",
-    "validation": { "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
-  },
-  "year": {
-    "type": "integer",
-    "default": 2024,
-    "validation": { "min": 2000, "max": 2100 }
-  }
-}
-```
+#### `audit_status_summary`
 
-Поддерживаемые `type`: `string`, `integer`, `number`, `boolean`,
-`date`, `datetime`. Поддерживаемые `validation`: `min`, `max`,
-`min_length`, `max_length`, `pattern`, `choices`.
+- **Источник**: `oarb.audits`.
+- **Назначение**: агрегация по `status`.
+- **Когда использовать**: «сколько аудитов по статусам», «распределение проверок».
+- **Когда НЕ использовать**: нужны подробности по конкретным проверкам → свободный SQL.
+- **Параметры**: нет.
 
-Параметры передаются как позиционные `?`-placeholder'ы в `sql_template`
-в порядке объявления (см. `ParameterValidator` в
-`lib/services/predefined_script_validator.py`).
+#### `top_violations_by_type`
 
-## Контракт вызова
+- **Источник**: `oarb.violations`.
+- **Назначение**: топ кодов нарушений (`violation_code`).
+- **Когда использовать**: «самые частые нарушения», «топ кодов».
+- **Когда НЕ использовать**: нужны нарушения по конкретному коду → свободный SQL с `WHERE violation_code = ?`.
+- **Параметры**: нет.
 
-```
-run_predefined_script(name="<из SKILL.md>", params={...})
-```
+#### `violations_by_period`
 
-- **name** — PK в `public.agent_predefined_scripts` (из каталога в `SKILL.md`).
-- **params** — словарь значений, валидируется по JSONB-схеме
-  (`type`/`required`/`default`/`validation`). Лишние ключи → `invalid_script`.
-- Если скрипт не найден → `script_not_found`.
-- SQL из шаблона проходит `validate_sql` (SELECT-only gate).
+- **Источник**: `oarb.violations`.
+- **Назначение**: нарушения в заданный период.
+- **Когда использовать**: «нарушения за 2024», «что выявлено в Q1».
+- **Когда НЕ использовать**:
+  - период не указан и неочевиден из контекста;
+  - нужны дополнительные фильтры по `severity` / `status` → свободный SQL.
+- **Параметры**: `date_from`, `date_to` — обязательные ISO-даты (`YYYY-MM-DD`).
 
-## Как добавить новый скрипт (для администратора)
+#### `audits_by_period`
 
-1. INSERT/UPDATE через PG напрямую или через SQL-миграцию:
-   `INSERT INTO public.agent_predefined_scripts (name, description, sql_template, parameters, max_rows_default) VALUES (...)`.
-2. Дождаться `PgDuckDbSyncService` (инкрементальный sync по `updated_at`).
-3. Синхронизировать каталог в `SKILL.md` — добавить имя и описание.
+- **Источник**: `oarb.audits`.
+- **Назначение**: проверки в заданный период (по `actual_date`).
+- **Когда использовать**: «проверки за 2024», «что проверяли в Q2».
+- **Когда НЕ использовать**:
+  - период не указан;
+  - нужны фильтры по `status` / `audit_type` → свободный SQL.
+- **Параметры**: `date_from`, `date_to` — обязательные ISO-даты.
+
+#### `audit_effectiveness_summary`
+
+- **Источник**: `oarb.audits` × `oarb.violations` × `oarb.violations.severity`.
+- **Назначение**: сводка эффективности — проверки × нарушения × severity.
+- **Когда использовать**: «какие проверки самые проблемные», «уровень серьёзности».
+- **Когда НЕ использовать**: нужны JOIN'ы с другими таблицами → свободный SQL.
+- **Параметры**: нет.
+
+## Что значит «соответствует predefined»
+
+Выбирай predefined script **только если выполняются оба условия**:
+
+1. **Весь смысл** запроса соответствует назначению скрипта.
+2. **Параметры** запроса позволяют выполнить скрипт (например, для
+   `violations_by_period` обе даты должны быть заданы).
+
+Похожее слово в запросе ≠ подходящий predefined:
+
+- «покажи нарушения» без периода — **не** `violations_by_period`.
+- «топ нарушений за 2024» — **не** `top_violations_by_type`
+  (скрипт не принимает период).
+- «сводка по статусам похожих проверок» — **не** `audit_status_summary`
+  (нужен дополнительный фильтр; не реализован в скрипте).
+
+В таких случаях — переходи к свободному SQL через `duckdb_query`
+(см. `references/sql_guidance.md` и `references/schema.md`).
 
 ## Чего не делать (для Agent'а)
 
-- Не вызывай `nl_sql_generate`, если запрос 1-в-1 ложится на известный
-  скрипт — это лишний LLM-вызов.
-- Не выдумывай `name` скрипта — бери только из каталога в `SKILL.md`.
-- Не передавай лишних параметров в `params` — будет `invalid_script`.
-- Не передавай `sql` руками — tool берёт SQL из реестра.
+- Не выполняй SQL напрямую через `exec`/`python` — только `duckdb_query`.
+- Не вызывай `vector_search` для задачи, которую решает predefined script
+  (predefined всегда приоритетнее).
+- Не выдумывай имя скрипта — бери только из каталога выше.
+- Не передавай лишние параметры — `duckdb_query` их проигнорирует, но
+  скрипт может упасть на неожиданных `?`-placeholder'ах.
+- Не генерируй SQL «по мотивам» predefined — это уже свободный SQL,
+  используй его явно.
+
+## Как добавить новый скрипт (для администратора)
+
+```sql
+INSERT INTO public.agent_predefined_scripts
+  (name, description, sql_template, parameters, max_rows_default)
+VALUES
+  ('my_new_script', 'Краткое описание',
+   'SELECT ... FROM oarb.<table> WHERE <col> = ?',
+   '{"p1": {"type": "string", "required": true}}'::jsonb,
+   1000);
+```
+
+После INSERT дождаться `PgDuckDbSyncService` и синхронизировать каталог
+в этом файле (добавить имя и описание).

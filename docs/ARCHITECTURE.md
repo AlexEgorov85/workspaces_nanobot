@@ -133,8 +133,8 @@ flowchart LR
 | `preload_service.py` | Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель `workspace/data_store/duckdb/cache.duckdb` — `DuckDbCacheStore.publish()` через gateway (путь вычисляется через `table_registry.snapshot_path`). |
 | `db_logging_service.py` | **Новый** — структурированный журнал агента в `agent_gateway_logs` (имя настраивается через `logging.db.table_name`). |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
-| `schema_formatter.py` | **Новый** — internal service для формирования описания схемы БД для LLM system prompt. Использует `TableRegistry` (whitelist) + `CacheProvider.get_schema` + `lib.utils.sql_safety.format_schema`. Кешируется на уровне процесса (TTL). Не является tool'ом — вызывается из `NlSqlRunner` через DI / in-process call, дешевле по токенам, чем отдельный `schema_describe` tool. |
-| `nl_sql_runner.py` | **Новый** — общая логика NL→SELECT pipeline (whitelist + LLM retry + EXPLAIN + execute). Переиспользуется tool'ом `nl_sql_generate` (см. `workspace/tools/nl_sql_generate.py`) и skill CLI `audit_analyzer/scripts/generated_sql_mode.py` (для бенчмарков). |
+| `schema_formatter.py` | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Замена: skill `audit_analyzer` сам читает `references/schema.md` (см. `workspace/skills/audit_analyzer/references/schema.md`). |
+| `nl_sql_runner.py` | **Удалён** — общая логика NL→SELECT pipeline. Заменена: skill `audit_analyzer` использует skill-side helper `scripts/sql_generator.py` для автономной LLM-генерации SQL либо формирует SQL сам (см. `workspace/skills/audit_analyzer/SKILL.md` и `references/sql_guidance.md`). |
 
 ### Pre-resolve `${VAR}` от `.secrets.env`
 

@@ -1,4 +1,4 @@
-# Skill / Tool architecture
+﻿# Skill / Tool architecture
 
 **Документ-контракт** для рефакторинга `refactor/skills-tools-cleanup`.
 Цель — зафиксировать архитектурные правила и служить reference при code review.
@@ -188,204 +188,39 @@ fully-qualified (`schema.table`), `schema_name` в конфиге отсутст
 ## 8. Decision procedure в `SKILL.md` (audit_analyzer)
 
 ```text
-Step 1: NL→SELECT → use nl_sql_generate tool (LLM with retry + EXPLAIN).
-Step 2: exact SELECT is known → use duckdb_query.
-Step 3: semantic similarity → use vector_search.
-Step 4: find similar docs, then aggregate → vector_search first, then nl_sql_generate.
+Step 1: запрос соответствует predefined из references/predefined_scripts.md
+        → прочитать sql_template из public.agent_predefined_scripts
+        → duckdb_query(sql=<template>, params=<...>).
+Step 2: запрос про смысл/похожие → vector_search с index_name из
+        references/vector_indexes.md.
+Step 3: свободный SQL → Agent читает references/schema.md +
+        references/sql_guidance.md, формирует SELECT сам,
+        duckdb_query(sql=<...>, params=<...>).
+Step 4: при ошибке SQL → Agent читает message, исправляет,
+        повторяет duckdb_query (retry — задача Agent, не tool'а).
 Step 5: do not use unknown tables or indexes.
 Step 6: do not use DDL/DML.
+Step 7: do not use vector_search для COUNT/GROUP BY.
+Step 8: do not use LIKE для семантического поиска.
 ```
 
 Skill `audit_analyzer` полностью tool-only: у него больше нет `scripts/cli.py`
 или иной back-compat обвязки. Все запросы идут через generic tools
-`workspace/tools/` (см. `docs/skill-tool-inventory.md`). Раньше skill
-содержал `scripts/cli.py` с режимами `--mode predefined`, `--mode generated_sql`,
-`--mode vector` — эти режимы мигрированы в tool'ы (см. §8.1 для
-`nl_sql_generate` — replacement режима `generated_sql`, и §7 для `vector_search`).
-Режим `predefined` (готовые SQL-скрипты из реестра `public.agent_predefined_scripts`)
-теперь вызывается через `duckdb_query` напрямую (агент читает `sql_template` из
-реестра через `nl_sql_generate` или `duckdb_query`, либо формирует SELECT сам
-по образцу из `references/sql_guidance.md`).
+`workspace/tools/duckdb_query_tool.py` и `workspace/tools/vector_search_tool.py`
+(см. `docs/skill-tool-inventory.md`).
 
----
+Раньше skill содержал `scripts/cli.py` с режимами `--mode predefined`,
+`--mode generated_sql`, `--mode vector` — эти режимы удалены вместе
+с tool'ами `run_predefined_script` и `nl_sql_generate`. Режим
+`predefined` (готовые SQL-скрипты из реестра `public.agent_predefined_scripts`)
+теперь вызывается через `duckdb_query` напрямую (агент читает
+`sql_template` из реестра через `duckdb_query`, подставляет параметры,
+выполняет).
 
-## 8.1. Контракт `nl_sql_generate`
-
-Tool генерирует SELECT по NL-запросу, валидирует через EXPLAIN и выполняет
-в общем DuckDB-кеше. Заменяет режим `generated_sql` навыка `audit_analyzer`
-(и любой другой skill с NL→SELECT; skill после перевода на tool-only
-больше не имеет CLI-обёртки для этого режима). Domain-free: whitelist
-таблиц приходит из `TableRegistry`, не зашит в код.
-
-```json
-{
-  "query": "сколько проверок в 2024 по месяцам",
-  "max_rows": 100,
-  "no_few_shot": false,
-  "skip_hints": false,
-  "hints_max_matches": 5
-}
-```
-
-Ответ (success):
-
-```json
-{
-  "status": "success",
-  "sql": "SELECT ...",
-  "columns": ["month", "count"],
-  "rows": [[1, 12], [2, 8]],
-  "row_count": 12,
-  "returned_rows": 12,
-  "truncated": false
-}
-```
-
-Ответ (error):
-
-```json
-{
-  "status": "error",
-  "error_type": "generation_failed" | "sql_error" | "explain_failed" | "missing_infrastructure",
-  "message": "...",
-  "sql": "последний сгенерированный SQL"
-}
-```
-
-### Конфиг (`gateway.nl_sql_generate.*` в `project.json`)
-
-| ключ | default | диапазон | описание |
-|---|---|---|---|
-| `enable` | true | — | выключить tool |
-| `max_retries` | 3 | 0..10 | retry-цикл LLM при ошибке |
-| `schema_max_chars` | 12000 | 1000..100000 | обрезка описания схемы |
-| `few_shot_top_n` | 2 | 0..10 | сколько примеров из реестра подмешивать |
-| `max_result_chars` | 50000 | 1000..200000 | truncate_middle по JSON-ответу |
-| `max_rows` | 1000 | 1..10000 | потолок возвращаемых строк; используется также как лимит для auto-predefined |
-| `hints_max_matches` | 5 | 0..50 | сколько hints подмешать в system prompt |
-
-### Архитектура pipeline
-
-### Архитектура pipeline
-
-```text
-┌────────────────────────────────────────────────────────────────────┐
-│ NlSqlGenerateTool.execute(query, ...)                              │
-│                                                                     │
-│  1. hints = ColumnDescriptionsResolver.lookup(query, max_matches=…)│
-│  2. runner = NlSqlRunner(provider=CacheProvider,                   │
-│                           schema_formatter=SchemaFormatter(),      │
-│                           config=NlSqlRunnerConfig(...))           │
-│  3. result = runner.run(query, hints_block=hints_block)            │
-│  4. → {sql, columns, rows, row_count} (tool contract)              │
-└────────────────────────────────────────────────────────────────────┘
-                              ▲                                          │
-                              │                                          ▼
-                ┌─────────────────────────┐      ┌────────────────────────────────┐
-                │ ColumnDescriptions       │      │ NlSqlRunner                    │
-                │ Resolver                │      │ (lib/services/)                │
-                │ (lib/services/)         │      │ + whitelist TableRegistry      │
-                │ + tokenize + match      │      │ + schema SchemaFormatter       │
-                │ + inline/data_file dict │      │ + few-shot registry             │
-                └─────────────────────────┘      │ + LLM retry (max_retries+1)   │
-                ▲                                  │ + validate_sql + EXPLAIN      │
-                │                                  │ + provider.query_sql          │
-                │                                  └────────────────────────────────┘
-                │
-   ┌────────────────────────────┐
-   │ workspace/tools/            │
-   │ column_descriptions.py      │
-   │ (тонкий adapter: ctx →      │
-   │ resolver → JSON-контракт)   │
-   └────────────────────────────┘
-```
-
-`SchemaFormatter` и `ColumnDescriptionsResolver` — **internal services**
-в `lib/services/`. `SchemaFormatter` формирует текстовое описание схемы
-для system prompt и кешируется на уровне процесса (TTL). Resolver —
-чистый механизм tokenize+match без доменных знаний (словарь
-термин→колонка живёт во внешней конфигурации). Tool'ы обращаются к
-ним через DI / in-process call, не через function calling — это
-дешевле по токенам и не плодит лишний шаг в pipeline агента.
-
-Общий pipeline (`NlSqlRunner`) переиспользуется tool'ом `nl_sql_generate`;
-skill `audit_analyzer` после перевода на tool-only не имеет собственного
-CLI-обёртки — все вызовы идут через `nl_sql_generate` напрямую.
-
----
-
-## 8.2. Контракт `column_descriptions`
-
-Tool возвращает структурированный словарь подсказок (термин → колонка)
-для подмешивания в system prompt `nl_sql_generate`. Заменил бывший
-`workspace/skills/audit_analyzer/scripts/column_hints.py`
-(удалён вместе со всем `scripts/` skill'а после перехода на tool-only).
-
-```json
-{ "term": "объекты проверок", "max_matches": 5 }
-```
-или
-```json
-{ "match_all": true }
-```
-
-Ответ:
-
-```json
-{
-  "status": "success",
-  "term": "объекты проверок",
-  "matches": [
-    {"terms": ["audited objects", "объекты проверок"],
-     "columns": ["oarb.audits.auditee_entity"]}
-  ],
-  "count": 1
-}
-```
-
-### Конфиг (`tools.column_descriptions.*` в `config.json`)
-
-| ключ | default | диапазон | описание |
-|---|---|---|---|
-| `enable` | true | — | выключить tool |
-| `data_file` | — | — | путь к JSON-файлу со словарём (относительно cwd) |
-| `max_result_chars` | 16000 | 1000..200000 | truncate_middle по JSON-ответу |
-| `entries` | — | — | inline-словарь (fallback если `data_file` не задан) |
-
-### Формат `data_file`
-
-```json
-{
-  "synonym 1|synonym 2|синоним": [
-    "schema.table.column"
-  ]
-}
-```
-
-Ключ может содержать `|` — список синонимов; совпадение с любым из
-них считается положительным. Поиск case-insensitive, токены ≥ 3
-символов. Словарь — **домен-данные конкретного skill'а**; resolver
-(generic механизм) не знает, какие именно ключи там лежат.
-
-### In-process API
-
-Resolver живёт в `lib/services/column_descriptions.py` как
-`ColumnDescriptionsResolver`. Это generic механизм — без знания о
-конкретных таблицах/индексах. Используется двумя путями:
-
-- `ColumnDescriptionsResolver.lookup(term, max_matches=5)` —
-  синхронный in-process вызов из `NlSqlGenerateTool.execute()`
-  (не через function calling). Возвращает список
-  `{"terms": [...], "columns": [...]}` для подмешивания в hints_block.
-- `ColumnDescriptionsTool` (`workspace/tools/column_descriptions.py`)
-  — тонкий adapter над resolver: читает конфиг через
-  `ctx._settings_ref.tools.column_descriptions.{entries,data_file}`
-  и публикует matches через function calling для отладки или
-  ручного использования агентом.
-
-Source-словарь resolver получает из inline-`entries` (конфиг) или
-`data_file` (JSON). Если оба не заданы — resolver возвращает
-пустые matches.
+Опционально доступен skill-side helper `scripts/sql_generator.py`
+для автономной LLM-генерации SQL (прямой HTTP-вызов к LLM API через
+`lib.services.llm_client.call_llm`). Helper возвращает только SQL,
+выполнение — всегда через `duckdb_query`.
 
 ---
 

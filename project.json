@@ -199,12 +199,12 @@
         }
       ]
       // После перевода навыка на tool-only (skill использует только
-      // nl_sql_generate / duckdb_query / vector_search, никакого CLI)
-      // секции cli.* и llm.* больше не нужны:
+      // duckdb_query / vector_search, никакого CLI) секции cli.* и
+      // llm.* не нужны:
       //   * cli.* — был для scripts/cli.py (удалён);
-      //   * llm.* — общий LLM-параметр теперь на gateway.nl_sql_generate.*
-      //     (max_tokens/temperature пробрасываются через lib.services.llm_config
-      //     и resolve_llm_config, см. gateway.nl_sql_generate.*).
+      //   * llm.* — LLM-параметры берутся из общего резолва
+      //     lib.services.llm_config.resolve_llm_config (модель/провайдер
+      //     из agents.defaults, ключи из providers.*).
     },
 
     // -------------------------------------------------------------------------
@@ -414,42 +414,14 @@
       "max_result_chars": 16000,
       "timeout_sec": 30
     },
-    //  nl_sql_generate.* — tool workspace/tools/nl_sql_generate.py.
-    //  NL→SELECT pipeline: генерирует SELECT по whitelist'у таблиц из
-    //  TableRegistry, валидирует через EXPLAIN и выполняет в локальном
-    //  DuckDB-кеше. Использует shared infra:
-    //    * lib/services/nl_sql_runner.py::NlSqlRunner — общий pipeline
-    //      (whitelist + LLM retry + execute);
-    //    * lib/services/schema_formatter.py::SchemaFormatter — internal
-    //      service для описания схемы (не tool, не виден агенту);
-    //    * workspace/tools/column_descriptions.py — подсказки
-    //      термин→колонка, подмешиваются в system prompt.
-    //  Все ключи опциональны; дефолты в NlSqlGenerateToolConfig.
-    "nl_sql_generate": {
+    //  duckdb_query.* — generic read-only SQL tool
+    //    (workspace/tools/duckdb_query_tool.py).
+    //  Все ключи опциональны; дефолты в DuckdbQueryToolConfig.
+    "duckdb_query": {
       "enable": true,
-      "max_retries": 3,
-      "schema_max_chars": 12000,
-      "few_shot_top_n": 2,
+      "max_rows": 1000,
       "max_result_chars": 50000,
-      "max_rows": 1000,
-      "hints_max_matches": 5
-    },
-    //  run_predefined_script.* — tool workspace/tools/run_predefined_script.py.
-    //  Выполняет SQL-шаблон из public.agent_predefined_scripts (label
-    //  "scripts_registry"). Использует shared infra:
-    //    * lib/services/predefined_script_registry.PredefinedScriptRegistry — lookup;
-    //    * lib/services/predefined_script_request.PredefinedScriptRequestBuilder —
-    //      валидация параметров и подготовка args (?-placeholder'ы для DuckDB);
-    //    * lib/utils/sql_safety.validate_sql — SELECT-only gate (тот же, что
-    //      для LLM-генерированного SQL);
-    //    * CacheProvider.query_sql — выполнение в общем DuckDB-кеше.
-    //  Никакого собственного DB-пула или async — синхронный execution через
-    //  существующий pipeline.
-    //  Все ключи опциональны; дефолты в RunPredefinedScriptToolConfig.
-    "run_predefined_script": {
-      "enable": true,
-      "max_rows": 1000,
-      "max_result_chars": 50000
+      "query_timeout_sec": 30
     },
     //  vector.* — общая runtime-инфраструктура эмбеддингов и индексов.
     //    embedding.* — параметры Ollama /api/embed (общие для всех skill'ов);

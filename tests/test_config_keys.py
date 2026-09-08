@@ -149,19 +149,9 @@ def _required_keys():
         ("gateway.vector_search.max_query_chars", 4000),
         ("gateway.vector_search.max_result_chars", 16000),
         ("gateway.vector_search.timeout_sec", 30),
-        # gateway.nl_sql_generate — инфраструктурный tool (NL→SELECT).
-        ("gateway.nl_sql_generate.enable", True),
-        ("gateway.nl_sql_generate.max_retries", 3),
-        ("gateway.nl_sql_generate.schema_max_chars", 12000),
-        ("gateway.nl_sql_generate.few_shot_top_n", 2),
-        ("gateway.nl_sql_generate.max_result_chars", 50000),
-        ("gateway.nl_sql_generate.max_rows", 1000),
-        ("gateway.nl_sql_generate.hints_max_matches", 5),
-        # gateway.run_predefined_script — инфраструктурный tool (выполнение SQL
-        # из public.agent_predefined_scripts).
-        ("gateway.run_predefined_script.enable", True),
-        ("gateway.run_predefined_script.max_rows", 1000),
-        ("gateway.run_predefined_script.max_result_chars", 50000),
+        # NOTE: gateway.nl_sql_generate и gateway.run_predefined_script
+        # удалены в рефакторинге audit_analyzer — Agent использует
+        # duckdb_query напрямую (см. workspace/skills/audit_analyzer/SKILL.md).
         ("gateway.vector.index.enable", True),
         ("gateway.vector.index.default_root", "data_store/vectors"),
         ("gateway.vector.index.backend", "faiss"),
