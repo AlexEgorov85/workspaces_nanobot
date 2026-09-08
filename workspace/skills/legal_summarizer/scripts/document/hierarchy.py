@@ -40,6 +40,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from loguru import logger
+
 from document.heading import (
     HeadingCandidate,
 )
@@ -158,20 +160,80 @@ def _resolve_semantic_type(c: HeadingCandidate) -> str | None:
     Правила:
 
     * ``regex_statiya`` → ``"article"``.
-    * ``regex_glзава`` → ``"chapter"``.
+    * ``regex_glava`` → ``"chapter"``.
     * ``regex_razdel`` → ``"section"`` (в смысле «раздел»).
     * ``regex_paragraph`` → ``"paragraph_mark"``.
     * иначе → ``None``.
     """
     if c.source == "regex_statiya":
         return "article"
-    if c.source == "regex_glзава":
+    if c.source == "regex_glava":
         return "chapter"
     if c.source == "regex_razdel":
         return "section"
     if c.source == "regex_paragraph":
         return "paragraph_mark"
     return None
+
+
+# Порог «подозрительной плотности» sections в документе (Этап 6 плана).
+# Если sections / total_blocks > этого значения — логируем WARNING.
+# Значение 0.50: больше половины blocks стали section — явный признак
+# over-fragmentation (напр. 199 chunks на НК РФ). Не используется как
+# жёсткое правило (план запрещает) — только как диагностика.
+_SECTION_DENSITY_WARN_THRESHOLD = 0.50
+
+# Минимальное количество blocks, ниже которого sanity check не работает
+# (короткие документы с 1-2 sections норм даже при density=100%).
+_SECTION_DENSITY_MIN_BLOCKS = 20
+
+
+def _log_structure_diagnostics(
+    accepted: list[HeadingCandidate],
+    total_blocks: int,
+    *,
+    document_id: str,
+) -> None:
+    """Записать diagnostic counters и sanity check (Этап 5+6 плана).
+
+    Diagnostic counters (по source):
+
+    * ``total_blocks`` — размер документа в blocks.
+    * ``heading_candidates`` — сколько кандидатов пришло из heading.py
+      после фильтра ``block_index >= 0`` (не все они станут sections).
+    * ``sections_by_source`` — dict source → count, для отслеживания,
+      откуда пришли headings (docx_style / pdf_outline / regex_*).
+    * ``section_density`` — sections / total_blocks.
+
+    Sanity check: если ``section_density > 0.50`` и
+    ``total_blocks > 20`` — WARNING в логе (без прерывания работы).
+    Эта защита не должна ломать валидные случаи; она только
+    подсвечивает подозрительную структуру для последующего анализа.
+    """
+    sections = len(accepted)
+    by_source: dict[str, int] = {}
+    for c in accepted:
+        by_source[c.source] = by_source.get(c.source, 0) + 1
+
+    density = sections / max(1, total_blocks)
+    logger.info(
+        "Structure diagnostics: doc={} total_blocks={} heading_candidates={} "
+        "section_density={:.2%} sections_by_source={}",
+        document_id, total_blocks, sections, density, by_source,
+    )
+
+    if (
+        total_blocks >= _SECTION_DENSITY_MIN_BLOCKS
+        and density > _SECTION_DENSITY_WARN_THRESHOLD
+    ):
+        logger.warning(
+            "Suspicious section density: doc={} sections={} total_blocks={} "
+            "density={:.2%} (threshold={:.0%}). "
+            "Possible over-fragmentation — investigate heading classifier "
+            "and list_detection evidence. This is a WARNING, not an error.",
+            document_id, sections, total_blocks, density,
+            _SECTION_DENSITY_WARN_THRESHOLD,
+        )
 
 
 def build_document_structure(
@@ -215,6 +277,8 @@ def build_document_structure(
 
     accepted = [c for c in candidates if c.block_index >= 0]
     accepted.sort(key=lambda c: (c.block_index, c.level))
+
+    _log_structure_diagnostics(accepted, total_blocks, document_id=cfg.document_id)
 
     nodes: dict[str, StructureNode] = {}
 

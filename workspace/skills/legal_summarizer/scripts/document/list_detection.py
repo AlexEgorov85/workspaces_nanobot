@@ -47,9 +47,18 @@ _RE_NUMBERED_LEVEL_2 = re.compile(r"^\s*(\d+)\.(\d+)\.?\s+(.{2,200})$")
 
 @dataclass(frozen=True)
 class ListDetectionConfig:
-    """Параметры list-detection."""
+    """Параметры list-detection.
 
-    max_item_chars: int = 200
+    ``max_item_chars`` увеличен со старого 200 до 600: для юридических
+    документов (НК РФ, ГК РФ) средняя длина нумерованного пункта
+    статьи 1.5К–7К символов. Старый порог 200 → ``is_list=False``
+    для всех таких пунктов → list-penalty не применялся → каждый пункт
+    ошибочно проходил как heading. 600 — компромисс: длинные legal-статьи
+    не считаются list, но одиночный ambiguous run получает штраф через
+    ``list_penalty_for_candidate``.
+    """
+
+    max_item_chars: int = 600
     min_run_length: int = 3
     body_threshold_chars: int = 200  # блок body ≥ этого размера «разрывает» list
 
@@ -176,25 +185,109 @@ def _classify_run(
     return True
 
 
+_NEIGHBOR_WINDOW = 10
+
+
+def _neighbor_numbered_count(
+    candidate_ordinal: int,
+    list_runs: list[ListRun],
+    *,
+    window: int = _NEIGHBOR_WINDOW,
+) -> int:
+    """Сколько нумерованных блоков в окрестности ±window от кандидата.
+
+    Используется для различения:
+
+    * standalone heading (``1. Общие положения``) — в окрестности
+      нет других нумерованных блоков → 0 соседей;
+    * list item в нумерованной серии (``1. Содержание пункта 1``
+      среди ``1./2./3.``) — есть несколько соседей → ≥ 1.
+    """
+    lo = candidate_ordinal - window
+    hi = candidate_ordinal + window
+    count = 0
+    for run in list_runs:
+        for o in run.block_ordinals:
+            if o == candidate_ordinal:
+                continue
+            if lo <= o <= hi:
+                count += 1
+    return count
+
+
 def list_penalty_for_candidate(
     candidate_ordinal: int,
     list_runs: list[ListRun],
 ) -> float:
     """Штраф к heading-score за попадание кандидата в list-run.
 
-    Возвращает 0.10 если кандидат находится внутри list-run, иначе 0.0.
-    Дополнительно: если кандидат — единственный представитель номера
-    в длинном run (≥ 5), он получает повышенный штраф (0.15),
-    потому что это явный list.
+    Возвращает:
 
-    Для граничных случаев (короткий run ≤ 4) возвращается меньший
-    штраф 0.08 — возможно, это section, не list.
+    * ``0.0`` если run длины 1 (standalone heading-кандидат, не list);
+    * ``0.15`` если кандидат в **подтверждённом** list-run (≥ 5 элементов);
+    * ``0.10`` если кандидат в **подтверждённом** коротком list (3–4);
+    * ``0.08`` если кандидат в **ambiguous** run (run найден, но
+      ``is_list=False``) длины ≥ 2 — это защита от ложных заголовков
+      в длинных документах (НК РФ: 199 blocks, run обнаружен,
+      ``is_list=False`` по ``max_item_chars``, но кандидат всё равно
+      "голый" ``1. text``, и без legal marker это **почти наверняка
+      не heading**).
+
+    Этап 3 (план): одиночный run (длины 1) — это **не** list,
+    а standalone heading-кандидат (``1. Общие положения`` в начале
+    раздела). Штрафовать его за list-семантику — ломать реальные headings.
+
+    Returns 0.0 если кандидат не входит ни в один run.
     """
     for run in list_runs:
-        if run.is_list and candidate_ordinal in run.block_ordinals:
+        if candidate_ordinal not in run.block_ordinals:
+            continue
+        if len(run.block_ordinals) < 2:
+            # Одиночный run. Если рядом есть другие нумерованные блоки —
+            # часть серии, штрафуем (0.08). Если рядом никого — standalone
+            # heading, не штрафуем.
+            if _neighbor_numbered_count(candidate_ordinal, list_runs) == 0:
+                return 0.0
+            return 0.08
+        if run.is_list:
             if len(run.block_ordinals) >= 5:
                 return 0.15
-            return 0.08
+            return 0.10
+        # Ambiguous run (найден, но не классифицирован как list) —
+        # наказываем голую десятичную нумерацию.
+        return 0.08
+    return 0.0
+
+
+def ambiguous_decimal_penalty(candidate_ordinal: int, list_runs: list[ListRun]) -> float:
+    """Доп. штраф для кандидатов с голой десятичной нумерацией в ambiguous run.
+
+    Это **ещё одна** ступень защиты: даже если ``list_penalty_for_candidate``
+    уже вернул 0.08, голая нумерация без legal marker / body должна
+    быть почти запрещена.
+
+    Условие применения (Этап 3 плана):
+
+    * кандидат входит в run;
+    * run **не** квалифицирован как ``is_list`` (т.е. ``_classify_run``
+      вернул False — между блоками есть body или они длиннее
+      ``max_item_chars``);
+    * run содержит **минимум 2** нумерованных блока.
+
+    Последнее условие важно: одиночный нумерованный блок (run длины 1)
+    не является "ambiguous" — это просто standalone heading-кандидат,
+    и штрафовать его за list-семантику неправильно (это бы сломало
+    реальные heading'и вида ``1. Общие положения`` в начале раздела).
+
+    Returns: 0.05 если кандидат в ambiguous run длины ≥ 2, иначе 0.0.
+    """
+    for run in list_runs:
+        if (
+            candidate_ordinal in run.block_ordinals
+            and not run.is_list
+            and len(run.block_ordinals) >= 2
+        ):
+            return 0.05
     return 0.0
 
 
@@ -236,6 +329,7 @@ __all__ = [
     "ListRun",
     "detect_list_runs",
     "list_penalty_for_candidate",
+    "ambiguous_decimal_penalty",
     "classify_ambiguous_run",
 ]
 

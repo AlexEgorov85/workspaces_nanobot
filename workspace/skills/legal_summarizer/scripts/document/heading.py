@@ -31,6 +31,7 @@ from document.physical import (
     PhysicalDocument,
 )
 from document.list_detection import (
+    ambiguous_decimal_penalty,
     detect_list_runs,
     list_penalty_for_candidate,
 )
@@ -93,19 +94,37 @@ def _looks_like_heading(text: str) -> bool:
 
 
 def _classify_regex(text: str) -> tuple[int, float, str, str | None] | None:
-    """Классифицировать текст по regex'ам. Вернуть (level, score, source, number)."""
+    """Классифицировать текст по regex'ам. Вернуть (level, score, source, number).
+
+    Шкала base scores (Этап 2 плана):
+
+    * **Явные legal markers** (Статья / Глава / Раздел / §): 0.80–0.85.
+      Эти regex'ы достаточно специфичны — кандидат почти всегда
+      настоящий heading.
+    * **Голая десятичная нумерация** (``1.``, ``1.1``, ``1.1.1``):
+      **0.55** (ниже ``CONFIDENCE_THRESHOLD=0.60``). Чтобы пройти
+      threshold, такой кандидат **обязан** набрать evidence bonuses
+      (short_text_bonus + body_after_bonus + numbering_consistency_bonus +
+      legal_marker_bonus). Это разделение ``numbering`` (формат) и
+      ``heading`` (семантика) — наличие номера **не** является
+      достаточным доказательством heading'а.
+
+      Раньше base score был 0.65–0.70, что выше порога: голые
+      ``1. текст`` проходили без каких-либо дополнительных
+      evidence и превращали пункты НК РФ в sections (199 chunks).
+    """
     s = text.strip()
     if not s:
         return None
     m = _RE_NUMBERED_LEVEL_3.match(s)
     if m:
-        return (3, 0.70, "regex_numbered_3", f"{m.group(1)}.{m.group(2)}.{m.group(3)}")
+        return (3, 0.55, "regex_numbered_3", f"{m.group(1)}.{m.group(2)}.{m.group(3)}")
     m = _RE_NUMBERED_LEVEL_2.match(s)
     if m:
-        return (2, 0.70, "regex_numbered_2", f"{m.group(1)}.{m.group(2)}")
+        return (2, 0.55, "regex_numbered_2", f"{m.group(1)}.{m.group(2)}")
     m = _RE_NUMBERED_LEVEL_1.match(s)
     if m:
-        return (1, 0.65, "regex_numbered_1", m.group(1))
+        return (1, 0.55, "regex_numbered_1", m.group(1))
     m = _RE_STATIYA.match(s)
     if m:
         return (1, 0.85, "regex_statiya", f"статья_{m.group(1)}")
@@ -233,7 +252,14 @@ def detect_heading_candidates(
         if classified is None:
             continue
         level, score, source, raw_number = classified
-        if level == 1 and len(text) > 80:
+
+        # Этап 2 плана: длинный текст на level ≥ 2 — слабый кандидат.
+        # Защита от "1.1. Длинный пункт под-раздела" как heading.
+        # (Level 1 cap 0.55 для len > 80 оставлен без изменений.)
+        text_len = len(text)
+        if level >= 2 and text_len > 200:
+            score = min(score, 0.45)
+        elif level == 1 and text_len > 80:
             score = min(score, 0.55)
 
         ni = parse_numbering(text)
@@ -456,6 +482,13 @@ def compute_evidence(
 
     Не зависит от того, прошёл ли кандидат threshold — это чистый скоринг,
     используемый после confidence penalties.
+
+    Этап 3 (план): для голой десятичной нумерации (``regex_numbered_*``)
+    ``numbering_consistency_bonus`` **не применяется**. Монотонная
+    последовательность ``1./2./3.`` — это характеристика **list'а**, а не
+    heading'а. Если дать +0.05 за "согласованную нумерацию", то 30 нумерованных
+    пунктов НК РФ пройдут через threshold как headings (см. regression
+    в ``test_heading_nk_long_paragraphs.py``).
     """
     text = candidate.text.strip()
 
@@ -468,11 +501,15 @@ def compute_evidence(
         if _is_substantial_body(next_block.content):
             body_bonus = 0.05
 
-    num_bonus = (
-        0.05
-        if _numbering_consistency_with_neighbors(candidate, all_candidates)
-        else 0.0
-    )
+    # Этап 3: голая десятичная нумерация не получает numbering_consistency_bonus.
+    if candidate.source in ("regex_numbered_1", "regex_numbered_2", "regex_numbered_3"):
+        num_bonus = 0.0
+    else:
+        num_bonus = (
+            0.05
+            if _numbering_consistency_with_neighbors(candidate, all_candidates)
+            else 0.0
+        )
 
     typo_bonus = 0.05 if _looks_like_heading_typography(text) else 0.0
 
@@ -537,6 +574,14 @@ def apply_evidence_scoring(
     Дополнительный list-penalty через ``list_detection``. List-runs
     обнаруживаются один раз для всего набора кандидатов (а не per-candidate),
     чтобы не делать дорогой regex-проход повторно.
+
+    **Этап 3 плана:** для голой десятичной нумерации (``regex_numbered_*``
+    без explicit legal marker) подключается ``ambiguous_decimal_penalty``
+    из ``list_detection`` — дополнительный штраф к кандидатам в
+    ambiguous run (run найден, но ``is_list=False``, например, на НК РФ
+    где между нумерованными пунктами есть substantial body). Это
+    окончательно разделяет ``numbering`` (формат) и ``heading`` (семантика):
+    голое ``1. текст`` в ambiguous run не получает heading-статус.
     """
     if not candidates:
         return candidates
@@ -563,6 +608,25 @@ def apply_evidence_scoring(
                 list_penalty=extra_list_penalty,
                 duplicate_penalty=ev.duplicate_penalty,
             )
+
+        # Этап 3: дополнительный штраф для голой десятичной нумерации
+        # в ambiguous run. Не применяется к explicit legal markers
+        # (regex_statiya, regex_glava, regex_razdel, regex_paragraph,
+        # docx_style, pdf_outline) — у них собственный высокий score.
+        if c.source in ("regex_numbered_1", "regex_numbered_2", "regex_numbered_3"):
+            amb = ambiguous_decimal_penalty(c.block_index, list_runs)
+            if amb > 0:
+                ev = HeadingEvidence(
+                    source_score=ev.source_score,
+                    short_text_bonus=ev.short_text_bonus,
+                    body_after_bonus=ev.body_after_bonus,
+                    numbering_consistency_bonus=ev.numbering_consistency_bonus,
+                    typography_bonus=ev.typography_bonus,
+                    legal_marker_bonus=ev.legal_marker_bonus,
+                    docx_title_bonus=ev.docx_title_bonus,
+                    list_penalty=ev.list_penalty + amb,
+                    duplicate_penalty=ev.duplicate_penalty,
+                )
 
         delta = ev.total_delta
         if delta == 0.0:

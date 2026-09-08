@@ -165,6 +165,18 @@ def _find_nearest_block_on_page(
     return None
 
 
+# Максимальная глубина outline (Этап 7 плана): PDF outline на больших
+# юридических документах (НК РФ) содержит сотни entries на глубоких
+# уровнях (Раздел → Глава → Статья → Пункт). Без ограничения каждая
+# outline entry становится section → 271 sections только на одном
+# уровне 2 для НК РФ. Ограничиваем до уровня 2 (Раздел/Глава/Статья),
+# отбрасывая уровни 3+ (пункты/подпункты), которые не должны быть
+# headings. См. также Этап 3 (negative evidence в heading.py для
+# regex_numbered_*, который не применяется к pdf_outline — поэтому
+# ограничение глубины outline критично).
+_MAX_OUTLINE_DEPTH = 2
+
+
 def _walk_outline(
     reader: Any,
     items: list[Any],
@@ -174,8 +186,14 @@ def _walk_outline(
 
     Page_ref — это destination target, который потом резолвится в
     1-based page index через ``_resolve_destination_page``.
+
+    Этап 7 плана: ограничиваем глубину outline до ``_MAX_OUTLINE_DEPTH``
+    (= 2). Уровни выше игнорируются — это предотвращает превращение
+    каждой Статьи/Пункта из оглавления в section.
     """
     out: list[tuple[int, str, Any]] = []
+    if level > _MAX_OUTLINE_DEPTH:
+        return out
     for item in items:
         if isinstance(item, list):
             out.extend(_walk_outline(reader, item, level + 1))
