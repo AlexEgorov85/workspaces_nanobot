@@ -14,22 +14,18 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
 
-
 def _install_llm_mocks(monkeypatch):
     """Подменяем llm_batch / llm_section_reduce / llm_document_reduce.
 
-    Мокируем в **всех** местах, где они импортируются:
-
-    * ``llm_calls`` (оригинальный module);
-    * ``summarizer`` namespace (``_llm_*`` для direct path);
-    * ``pipeline`` namespace (``_llm_batch`` для map path — импортируется
-      через ``from llm.calls import llm_batch as _llm_batch``).
+    После удаления back-compat aliases в ``application.service``
+    patch выполняется только через ``llm.calls`` namespace
+    (бывшие ``_llm_*`` алиасы на ``service`` и ``pipeline``-side
+    private ``as _llm_batch`` больше не используются).
     """
     batches: list[tuple[str, ...]] = []
     section_reduces = {"n": 0}
@@ -56,21 +52,7 @@ def _install_llm_mocks(monkeypatch):
         llm_calls, "llm_document_reduce", _patched_llm_document_reduce,
     )
 
-    import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _patched_llm_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _patched_llm_section_reduce)
-    monkeypatch.setattr(
-        _summarizer, "_llm_document_reduce", _patched_llm_document_reduce,
-    )
-
-    # Этап 1 acceptance: ``summarizer._run_one_batch_async`` →
-    # ``pipeline.process_context_batch`` → ``pipeline._llm_batch``.
-    # Подменяем также в ``pipeline`` namespace, чтобы перехватить map path.
-    import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _patched_llm_batch)
-
     return batches, section_reduces, document_reduces
-
 
 def _build_long_text() -> str:
     return (
@@ -84,7 +66,6 @@ def _build_long_text() -> str:
         + ("Ответственность текст. " * 60) * 120
     )
 
-
 def test_actual_batches_match_planned(tmp_path: Path, monkeypatch):
     """Test A+B+C: plan.batches[i].chunk_ids == actual batches, no duplication."""
     batches, _, _ = _install_llm_mocks(monkeypatch)
@@ -94,7 +75,7 @@ def test_actual_batches_match_planned(tmp_path: Path, monkeypatch):
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    ctx = summarizer._build_execution_context(insp, length="detailed")
+    ctx = summarizer.build_execution_context(insp, length="detailed")
     assert ctx.strategy != "direct", (
         "Test expects map path; adjust doc size if it now goes direct"
     )
@@ -136,7 +117,6 @@ def test_actual_batches_match_planned(tmp_path: Path, monkeypatch):
         f"{ {c: seen.count(c) for c in set(seen) if seen.count(c) > 1} }"
     )
 
-
 def test_no_chunk_processed_more_than_once(tmp_path: Path, monkeypatch):
     """Test C: каждый chunk_id попадает ровно один раз."""
     batches, _, _ = _install_llm_mocks(monkeypatch)
@@ -161,7 +141,6 @@ def test_no_chunk_processed_more_than_once(tmp_path: Path, monkeypatch):
         f"{ {c: seen.count(c) for c in set(seen) if seen.count(c) > 1} }"
     )
 
-
 def test_each_chunk_processed_at_least_once(tmp_path: Path, monkeypatch):
     """Test B: каждый chunk_id попадает хотя бы один раз."""
     batches, _, _ = _install_llm_mocks(monkeypatch)
@@ -171,7 +150,7 @@ def test_each_chunk_processed_at_least_once(tmp_path: Path, monkeypatch):
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    ctx = summarizer._build_execution_context(insp, length="detailed")
+    ctx = summarizer.build_execution_context(insp, length="detailed")
     planned = [set(b.chunk_ids) for b in ctx.plan.batches] if ctx.plan else []
     expected = set()
     for s in planned:

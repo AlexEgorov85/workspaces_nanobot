@@ -20,12 +20,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _install_llm_mocks(monkeypatch):
     import llm.calls as llm_calls
@@ -44,13 +42,8 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
-
 
 def _build_doc(sections: int = 4) -> str:
     parts = []
@@ -61,6 +54,8 @@ def _build_doc(sections: int = 4) -> str:
             + "\n\n"
         )
     return "".join(parts)
+
+import application.context_builder  # noqa: E402
 
 
 def test_second_run_uses_cached_result(tmp_path, monkeypatch):
@@ -98,13 +93,13 @@ def test_second_run_uses_cached_result(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_sm, "inspect", _spy_inspect)
 
-    original_ctx = _sm._build_execution_context
+    original_ctx = _sm.build_execution_context
 
     def _spy_ctx(insp, **kwargs):
         counters["build_ctx"] += 1
         return original_ctx(insp, **kwargs)
 
-    monkeypatch.setattr(_sm, "_build_execution_context", _spy_ctx)
+    monkeypatch.setattr(application.context_builder, "build_execution_context", _spy_ctx)
 
     original_plan = unified_execution.build_execution_plan
 
@@ -164,7 +159,6 @@ def test_second_run_uses_cached_result(tmp_path, monkeypatch):
         f"second run must not call llm_document_reduce; got {counters['llm_doc']}"
     )
 
-
 def test_idempotency_counts_first_run_only(tmp_path, monkeypatch):
     """Подсчёт вызовов на первом run — все ненулевые."""
     import application.service as summarizer
@@ -185,12 +179,9 @@ def test_idempotency_counts_first_run_only(tmp_path, monkeypatch):
         return "doc summary"
 
     monkeypatch.setattr(llm_calls, "llm_batch", _fake_batch)
-    monkeypatch.setattr(summarizer, "_llm_batch", _fake_batch)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
-    monkeypatch.setattr(summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
     # Изолируем workspace в tmp.
     workspace = tmp_path / "ws"

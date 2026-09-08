@@ -14,7 +14,6 @@ from document.validation import (
     validate_structure,
 )
 
-
 def _b(ordinal: int) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ordinal:04d}", block_type="page", content="x",
@@ -22,7 +21,6 @@ def _b(ordinal: int) -> DocumentBlock:
         page_end=ordinal + 1, paragraph_index=None, table_index=None,
         ordinal=ordinal, block_metadata={},
     )
-
 
 def _root(children: tuple[str, ...] = (), end_block: int = 10) -> StructureNode:
     return StructureNode(
@@ -32,7 +30,6 @@ def _root(children: tuple[str, ...] = (), end_block: int = 10) -> StructureNode:
         confidence=1.0,
     )
 
-
 def _sec(nid: str, *, start: int, end: int,
          parent_id: str = "n_0000") -> StructureNode:
     return StructureNode(
@@ -41,7 +38,6 @@ def _sec(nid: str, *, start: int, end: int,
         children=(), start_block=start, end_block=end,
         confidence=0.7,
     )
-
 
 def test_validate_healthy():
     doc = PhysicalDocument(
@@ -62,7 +58,6 @@ def test_validate_healthy():
     assert r.is_valid
     assert r.coverage_ratio == 1.0
 
-
 def test_validate_invalid_range():
     doc = PhysicalDocument(
         path="/tmp/x", format="pdf", title=None, size_bytes=0,
@@ -82,7 +77,6 @@ def test_validate_invalid_range():
     kinds = {i.kind for i in r.issues}
     assert "invalid_range" in kinds
 
-
 def test_validate_orphan_parent():
     doc = PhysicalDocument(
         path="/tmp/x", format="pdf", title=None, size_bytes=0,
@@ -100,7 +94,6 @@ def test_validate_orphan_parent():
     r = validate_structure(s, doc)
     kinds = {i.kind for i in r.issues}
     assert "orphan" in kinds
-
 
 def test_validate_section_overlap():
     doc = PhysicalDocument(
@@ -121,7 +114,6 @@ def test_validate_section_overlap():
     kinds = {i.kind for i in r.issues}
     assert "sibling_overlap" in kinds
 
-
 def test_validate_low_coverage():
     doc = PhysicalDocument(
         path="/tmp/x", format="pdf", title=None, size_bytes=0,
@@ -140,7 +132,6 @@ def test_validate_low_coverage():
     kinds = {i.kind for i in r.issues}
     assert "low_coverage" in kinds
     assert r.coverage_ratio < 0.5
-
 
 def test_validate_total_blocks_mismatch():
     doc = PhysicalDocument(

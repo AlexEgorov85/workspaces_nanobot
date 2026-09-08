@@ -16,7 +16,6 @@ from retrieval.question import (
     answer_question_from_analysis,
 )
 
-
 def _b(ord: int) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ord:04d}", block_type="paragraph", content="x",
@@ -24,7 +23,6 @@ def _b(ord: int) -> DocumentBlock:
         paragraph_index=None, table_index=None, ordinal=ord,
         block_metadata={},
     )
-
 
 def _doc() -> PhysicalDocument:
     import tempfile
@@ -37,7 +35,6 @@ def _doc() -> PhysicalDocument:
         blocks=tuple(_b(i) for i in range(3)), page_count=1,
     )
 
-
 def _c(cid: str, text: str, idx: int = 0) -> Chunk:
     return Chunk(
         chunk_id=cid, index=idx, text=text, char_count=len(text),
@@ -45,7 +42,6 @@ def _c(cid: str, text: str, idx: int = 0) -> Chunk:
         section_id="s1", section_path="1", section_heading="x",
         block_indices=(0,), block_types=("paragraph",),
     )
-
 
 def _struct() -> DocumentStructure:
     return DocumentStructure(
@@ -59,7 +55,6 @@ def _struct() -> DocumentStructure:
         numbering=(), total_blocks=3,
     )
 
-
 def test_answer_question_with_hits():
     chunks = (
         _c("001", "оплата по договору"),
@@ -72,7 +67,6 @@ def test_answer_question_with_hits():
     response = answer_question_from_analysis(analysis, "оплата")
     assert response.confidence in ("high", "medium", "low")
 
-
 def test_answer_question_no_match_uses_fallback():
     chunks = (_c("001", "текст"),)
     analysis = DocumentAnalysis.build(
@@ -80,7 +74,6 @@ def test_answer_question_no_match_uses_fallback():
     )
     response = answer_question_from_analysis(analysis, "xyzabc")
     assert response.used_full_doc_fallback is True
-
 
 def test_answer_question_does_not_reparse():
     chunks = (_c("001", "оплата"),)

@@ -9,7 +9,6 @@ from document.physical import (
     DocumentBlock, PhysicalDocument,
 )
 
-
 def _b(ord: int) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ord:04d}", block_type="paragraph", content="x",
@@ -17,7 +16,6 @@ def _b(ord: int) -> DocumentBlock:
         paragraph_index=None, table_index=None, ordinal=ord,
         block_metadata={},
     )
-
 
 def _doc() -> PhysicalDocument:
     import tempfile
@@ -30,20 +28,17 @@ def _doc() -> PhysicalDocument:
         blocks=tuple(_b(i) for i in range(5)), page_count=1,
     )
 
-
 def test_build_block_lookup_by_ord():
     doc = _doc()
     lookup = build_block_lookup(doc)
     assert lookup.get_by_ord(3).ordinal == 3
     assert lookup.get_by_ord(999) is None
 
-
 def test_build_block_lookup_by_id():
     doc = _doc()
     lookup = build_block_lookup(doc)
     assert lookup.get_by_id("b_0002").ordinal == 2
     assert lookup.get_by_id("b_9999") is None
-
 
 def test_build_block_lookup_empty():
     import tempfile
@@ -57,7 +52,6 @@ def test_build_block_lookup_empty():
     )
     lookup = build_block_lookup(doc)
     assert lookup.get_by_ord(0) is None
-
 
 def test_block_lookup_o1_speed():
     import time

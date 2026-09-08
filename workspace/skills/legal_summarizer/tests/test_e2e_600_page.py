@@ -33,23 +33,19 @@ import llm.config as llm_config  # noqa: E402
 import application.context_builder as ctx_builder  # noqa: E402
 from cache.manifest import manifest_path  # noqa: E402
 
-
 def _patch_exec_cfg(monkeypatch, cfg):
     """Установить get_execution_config в обоих местах (llm_config и service)."""
     monkeypatch.setattr(llm_config, "get_execution_config", lambda: cfg)
-    monkeypatch.setattr(summarizer, "get_execution_config", lambda: cfg)
-
+    monkeypatch.setattr(llm.config, "get_execution_config", lambda: cfg)
 
 def _patch_chunk_cfg(monkeypatch, cfg):
     """Установить get_chunking_config. Runtime читает через llm_config."""
     monkeypatch.setattr(llm_config, "get_chunking_config", lambda: cfg)
 
-
 def _build_text_response(user_content: str) -> str:
     """Мок-ответ LLM в текстовом формате с маркерами ``DOC CHUNK N:``."""
     n = len(re.findall(r"DOCUMENT CHUNK \d+", user_content))
     return "\n\n".join(f"DOC CHUNK {i + 1}: саммари чанка {i + 1}" for i in range(n)) + ("\n" if n else "")
-
 
 def _generate_long_legal_text(
     *,
@@ -78,17 +74,17 @@ def _generate_long_legal_text(
     text = "\n\n".join(paragraphs)
     return text
 
-
 @pytest.fixture
 def long_legal_text() -> str:
     return _generate_long_legal_text(pages=600, chars_per_page=3000, sections_per_doc=25)
-
 
 @pytest.fixture
 def long_legal_doc(tmp_path, long_legal_text) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(long_legal_text, encoding="utf-8")
     return p
+
+import llm.config  # noqa: E402
 
 
 def test_600_page_inspect_without_llm(long_legal_doc, long_legal_text, monkeypatch):
@@ -109,7 +105,6 @@ def test_600_page_inspect_without_llm(long_legal_doc, long_legal_text, monkeypat
     if ctx.strategy.startswith("map_reduce") and ctx.plan is not None:
         assert len(ctx.plan.batches) > 0
         assert len(ctx.plan.batches) <= len(ctx.chunks)
-
 
 def test_600_page_confirmation_required_without_llm(
     long_legal_doc, long_legal_text, monkeypatch, tmp_path,
@@ -142,7 +137,6 @@ def test_600_page_confirmation_required_without_llm(
     assert result["status"] == "confirmation_required"
     assert call_count["n"] == 0
     assert result["summary"]["chunks_total"] > 5
-
 
 def test_600_page_executes_via_context_batching(
     long_legal_doc, long_legal_text, monkeypatch, tmp_path,
@@ -198,7 +192,6 @@ def test_600_page_executes_via_context_batching(
     manifest_p = manifest_path(op_id, tmp_path)
     assert manifest_p.is_file()
 
-
 def test_600_page_stats_separate_map_reduce_retries(
     long_legal_doc, long_legal_text, monkeypatch, tmp_path,
 ):
@@ -244,7 +237,6 @@ def test_600_page_stats_separate_map_reduce_retries(
     assert "retries" in stats
     assert stats["reduce_calls"] >= stats["document_reduce_calls"]
     assert stats["total_llm_calls"] == stats["map_calls"] + stats["reduce_calls"] + stats["retries"]
-
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

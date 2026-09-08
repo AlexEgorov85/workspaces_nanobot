@@ -20,12 +20,12 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+import llm.config  # noqa: E402
 
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _install_llm_mocks(monkeypatch):
     import llm.calls as llm_calls
@@ -44,13 +44,8 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
-
 
 def _build_large_doc(tmp_path: Path, sections: int = 8) -> str:
     """Large doc → multiple chunks."""
@@ -63,12 +58,14 @@ def _build_large_doc(tmp_path: Path, sections: int = 8) -> str:
         )
     return "".join(parts)
 
+import llm.config  # noqa: E402
+
 
 def test_confirmation_contains_chunks_selected(tmp_path, monkeypatch):
     """confirmation_required содержит chunks_selected (run-level)."""
     import application.service as summarizer
     monkeypatch.setattr(
-        summarizer, "get_execution_config",
+        llm.config, "get_execution_config",
         lambda: {
             "confirmation_threshold_sec": 0.001,
             "estimated_chunk_duration_sec": 100.0,
@@ -94,12 +91,11 @@ def test_confirmation_contains_chunks_selected(tmp_path, monkeypatch):
     assert "chunks_selected" in summary
     assert summary["chunks_selected"] <= summary["chunks_total"]
 
-
 def test_estimate_uses_selected_chunks(tmp_path, monkeypatch):
     """estimate min/max основан на selected chunks."""
     import application.service as summarizer
     monkeypatch.setattr(
-        summarizer, "get_execution_config",
+        llm.config, "get_execution_config",
         lambda: {
             "confirmation_threshold_sec": 0.001,
             "estimated_chunk_duration_sec": 100.0,
@@ -118,23 +114,22 @@ def test_estimate_uses_selected_chunks(tmp_path, monkeypatch):
     insp = summarizer.inspect(text, document_path=str(p))
 
     # Полный документ: 8+ chunks → estimate > threshold.
-    full_ctx = summarizer._build_execution_context(insp)
-    full_est = summarizer._estimate_for_run(insp, full_ctx)
+    full_ctx = summarizer.build_execution_context(insp)
+    full_est = summarizer.estimate_for_run(insp, full_ctx)
     assert full_est.estimated_duration_max_sec > 0
 
     # Selected 2 chunks → estimate меньше.
     selected = list(insp.chunks[:2])
-    sel_ctx = summarizer._build_execution_context(insp, selected_chunks=selected)
-    sel_est = summarizer._estimate_for_run(insp, sel_ctx)
+    sel_ctx = summarizer.build_execution_context(insp, selected_chunks=selected)
+    sel_est = summarizer.estimate_for_run(insp, sel_ctx)
     assert sel_est.estimated_duration_max_sec <= full_est.estimated_duration_max_sec
     assert sel_est.context_batches <= full_est.context_batches
-
 
 def test_requires_continuation_uses_selected_count(tmp_path, monkeypatch):
     """requires_continuation проверяет len(selected_chunks), не len(all_chunks)."""
     import application.service as summarizer
     monkeypatch.setattr(
-        summarizer, "get_execution_config",
+        llm.config, "get_execution_config",
         lambda: {
             "confirmation_threshold_sec": 999999,
             "estimated_chunk_duration_sec": 0.001,
@@ -159,14 +154,13 @@ def test_requires_continuation_uses_selected_count(tmp_path, monkeypatch):
     # brief selection строже, чем max_chunks_for_execution=2.
     assert result["status"] in ("confirmation_required", "completed")
 
-
 def test_brief_no_confirmation_when_small_selection(tmp_path, monkeypatch):
     """Brief mode с малым числом selected chunks → НЕ confirmation."""
     import application.service as summarizer
     # Порог очень высокий → confirmation только если max > threshold.
     # Brief selection: 1-2 chunks × 0.001s = tiny → no confirmation.
     monkeypatch.setattr(
-        summarizer, "get_execution_config",
+        llm.config, "get_execution_config",
         lambda: {
             "confirmation_threshold_sec": 999999,
             "estimated_chunk_duration_sec": 0.001,

@@ -8,6 +8,44 @@
 
 ## [Unreleased]
 
+### Changed (legal_summarizer: structural packing)
+
+- **`legal_summarizer` chunker**: заменён owner-boundary алгоритм на
+  hierarchical structural packing (см. `workspace/skills/legal_summarizer/STRUCTURAL_PACKING_PLAN.md`).
+  Соседние sections с одним parent теперь объединяются в один chunk,
+  пока суммарный размер ≤ `max_chunk_chars`. Strong structural boundary
+  (chapter→chapter, part→part, appendix→main_document) при `current ≥
+  preferred_min_before_strong_boundary × target_chunk_chars` закрывает
+  chunk. На синтетическом документе (30 sections × ~4K chars): было бы
+  30 chunks, теперь 6 chunks (~17K avg). `max_chunk_chars` runtime
+  default НЕ изменён (по-прежнему 100000); добавлены новые поля
+  `target_chunk_chars` (default 20000) и
+  `preferred_min_before_strong_boundary` (default 0.7) в `ChunkConfig`.
+- **`Chunk.section_ids`**: добавлено поле — tuple уникальных deepest
+  owner'ов всех blocks в chunk'е (в document order, без root_id).
+  `section_id` остаётся primary section (back-compat). Все downstream
+  потребители работают без изменений.
+- **`chunk_from_structure_with_diagnostics`**: новый API возвращает
+  `ChunkingDiagnostics` (physical_blocks, sections, chunks, structural_units,
+  avg/median/min/max chars, small_chunks_count, multi_section_chunks,
+  table_chunks, oversized_chunks). Полезно для smoke-тестов и CLI-отчётов.
+
+### Tests added
+
+- `tests/test_structure_chunker_invariants.py` — 10 инвариант-тестов
+  (I1-I10): каждый block встречается ровно один раз, tables atomic,
+  oversized через splitter, physical order, owner consistency,
+  max hard limit, no phantom ordinals, section_id = anchor,
+  section_ids через deepest owners, target soft/max hard.
+- `tests/test_structure_chunker_packing.py` — 11 algorithm-тестов
+  для нового packing (три маленьких sections → 1 chunk, target soft,
+  max split, chapter→chapter boundary, oversized split, table atomic,
+  multi-section reconstruction, physical order).
+- `tests/test_structure_chunker_regression.py` — regression test на
+  «3 articles × 3K → должно быть 1 chunk (а не 3)».
+- `tests/smoke_chunking_diagnostics.py` — synthetic document smoke
+  test для проверки diagnostics.
+
 > Состояние тестов на момент правки: **2672 passed, 5 failed, 14 skipped** (`pytest -q --tb=no`).
 > Baseline зафиксирован в `docs/legal_summarizer_baseline.md` (Этап 0 из `PLAN.md`).
 > Все 5 failed — **pre-existing**, не регрессия правок этого этапа (см. `docs/legal_summarizer_baseline.md` §1.1).
@@ -819,6 +857,77 @@ tool-output. `duckdb_query`/`nl_sql_generate` с `max_result_chars=50000`
 
 - **`project.json::gateway.persist_threshold`** — 5000 → 50000.
 - **`tests/test_config_keys.py`** — синхронизация.
+
+### Changed (legal_summarizer: удалить compatibility-layer и `execution → application` связь)
+
+Финальная очистка архитектуры `legal_summarizer` после переезда runtime
+в `scripts/`. Без изменения публичного поведения, без loss тестового
+покрытия. Подготовка к разделению `application/execution_orchestration.py`
+на независимые execution-модули (следующий рефакторинг).
+
+- **`scripts/execution/map_reduce.py`** — удалена `_service_mod()`.
+  Зависимости на cache и pipeline инжектируются через callback'и:
+  `WriteChunkResultFn`, `RunOneBatchFn`, `LoadCachedPartialsFn`.
+  LLM boundary читается через `import llm.calls as _llm_calls_mod`
+  (module-attr lookup), чтобы `monkeypatch.setattr(llm_calls, "llm_*")`
+  работал. Прямой импорт `from llm.calls import …` с захватом ссылки
+  заменён на module-level lookup для обеспечения патчинга.
+- **`scripts/execution/pipeline.py`** — то же: `_llm_calls_mod.llm_batch`
+  вместо `from llm.calls import llm_batch as _llm_batch`.
+- **`scripts/application/execution_orchestration.py`** — удалена
+  `_service_mod()`, прямые импорты `import llm.calls / llm.sanitize as …`.
+- **`scripts/application/service.py`** — удалены все back-compat aliases
+  приватных функций (`_llm_batch`, `_strip_think_blocks`,
+  `_extract_subject`, `_run_one_batch_async`, `_load_cached_partials`,
+  и т.д.). Сервис стал оркестратором: прямые импорты subsystem-модулей
+  и module-attr lookup (`_inspection_mod`, `_ctx_builder_mod`,
+  `_estimation_mod`, `_exec_orchestration_mod`, `_llm_config_mod`)
+  для тестового патчинга.
+- **`scripts/application/{chunk_selection,estimation,context_builder,inspection}.py`** —
+  удалены внутренние `_service_mod()` lazy-lookups, заменены на прямые
+  импорты между sub-modules.
+- **`scripts/cli.py`** и **`scripts/cli_query.py`** — убран избыточный
+  `_SKILL_ROOT` path insertion (только `_PROJECT_ROOT` и `_SCRIPTS_ROOT`
+  реально нужны). Skill обновлён на актуальные публичные API.
+- **`tests/architecture/test_layer_boundaries.py`** — удалено исключение
+  `execution → application` из allowed (`_ALLOWED_TECHNICAL_EXCEPTIONS`);
+  добавлен новый регрессионный тест
+  `test_execution_does_not_import_application`, проверяющий AST
+  на статические импорты `application` в `execution/*.py`.
+- **`tests/test_reduce_input_empty.py`** — переписан на **точный**
+  контракт (`status="failed"`, `error.code` ∈ `{NO_PARTIALS, REDUCE_INPUT_EMPTY}`,
+  ровно один attempt LLM). Удалены permissive assertions `assert … in {…}`.
+- **`scripts/execution/map_reduce.py::_reduce_phase`** — fallback
+  на `joined` при exception заменён на возврат пустой строки.
+  Runtime теперь корректно классифицирует LLM exception
+  как `REDUCE_INPUT_EMPTY` → `status="failed"`, без подмены
+  результата сырым текстом чанков.
+- **`tests/test_etapa7_recovered_invariants.py`** — новый файл,
+  8 регрессионных тестов, восстанавливающих critical behaviors
+  из удалённого `tests/test_skill_legal_summarizer.py`:
+  `inspect_does_not_call_llm`, `quick_estimate_txt_estimates_without_full_load`,
+  `presenter_strips_llm_call_counts_from_stats`,
+  `run_reduce_output_with_think_blocks_is_cleaned`,
+  `batch_parse_error_eventual_success_returns_completed`,
+  `run_question_passes_question_to_llm`,
+  `confirmation_required_payload_includes_estimate_block`,
+  `run_returns_cache_stats_for_repeat`.
+- Аудит удалённых 51 функций (включая fixtures) из
+  `tests/test_skill_legal_summarizer.py` — см. workspace/data_store/cache/_etapa7_report.md.
+
+### Tests
+
+- **Skill tests** (`workspace/skills/legal_summarizer/tests/`):
+  **658 passed, 4 skipped, 0 failed, 0 xfailed**. Из них 17 architecture tests
+  (`tests/architecture/`) проходят без нарушений.
+- **Full tests/** (baseline зафиксирован): **12 failed, 2381 passed, 14 skipped, 8 errors**.
+  Все failures/errors pre-existing, не относятся к Skill:
+  `tests/benchmarks/test_acceptance_matrix.py` (9 failures),
+  `tests/benchmarks/test_quality_benchmark.py` (8 errors),
+  `tests/test_config_keys.py::test_required_key_present_with_default[skills.legal_summarizer.cli.default_length-medium]`,
+  `tests/test_architecture_tool_domain_free.py`,
+  `tests/test_history_search_tool.py`. Все эти тесты используют
+  устаревший API и будут устранены в отдельном следующем проходе.
 
 ## [2.4.0] — 2026-08-20
 

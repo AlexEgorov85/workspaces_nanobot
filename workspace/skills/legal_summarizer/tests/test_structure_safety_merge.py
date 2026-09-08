@@ -13,7 +13,6 @@ from document.safety_merge import (
     SafetyMergeConfig, safety_merge,
 )
 
-
 def _b(ordinal: int, content: str = "x") -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ordinal:04d}", block_type="paragraph", content=content,
@@ -21,7 +20,6 @@ def _b(ordinal: int, content: str = "x") -> DocumentBlock:
         page_end=None, paragraph_index=None, table_index=None,
         ordinal=ordinal, block_metadata={},
     )
-
 
 def _root(children: tuple[str, ...] = ()) -> StructureNode:
     return StructureNode(
@@ -31,7 +29,6 @@ def _root(children: tuple[str, ...] = ()) -> StructureNode:
         confidence=1.0,
     )
 
-
 def _sec(nid: str, *, level: int, start: int, end: int) -> StructureNode:
     return StructureNode(
         node_id=nid, node_type="section", semantic_type=None,
@@ -39,7 +36,6 @@ def _sec(nid: str, *, level: int, start: int, end: int) -> StructureNode:
         children=(), start_block=start, end_block=end,
         confidence=0.7,
     )
-
 
 def test_safety_merge_collapses_micro():
     blocks = (
@@ -60,7 +56,6 @@ def test_safety_merge_collapses_micro():
     assert out.nodes["n_0001"].confidence == 0.0
     assert out.nodes["n_0002"].end_block == 1
 
-
 def test_safety_merge_no_action_when_healthy():
     blocks = (
         _b(0, "long " * 200),
@@ -79,7 +74,6 @@ def test_safety_merge_no_action_when_healthy():
     out = safety_merge(s, blocks)
     assert out.nodes["n_0001"].confidence == 0.7
 
-
 def test_safety_merge_does_not_change_total_blocks():
     blocks = (_b(0, "tiny"), _b(1, "x"))
     s = DocumentStructure(
@@ -93,7 +87,6 @@ def test_safety_merge_does_not_change_total_blocks():
     )
     out = safety_merge(s, blocks)
     assert out.total_blocks == 2
-
 
 def test_safety_merge_level_3_skipped():
     """Safety merge не трогает level > max_level (по умолчанию 2)."""
@@ -111,7 +104,6 @@ def test_safety_merge_level_3_skipped():
     out = safety_merge(s, blocks)
     assert out.nodes["n_0001"].confidence == 0.7
     assert out.nodes["n_0002"].confidence == 0.7
-
 
 def test_safety_merge_custom_threshold():
     cfg = SafetyMergeConfig(min_section_chars=10)

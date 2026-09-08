@@ -16,7 +16,6 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _make_chunks_and_summaries(n: int):
     from chunking.chunks import Chunk
     chunks = [
@@ -34,7 +33,6 @@ def _make_chunks_and_summaries(n: int):
     section_ids = [f"sec_{i}" for i in range(n)]
     return chunks, summaries, section_ids
 
-
 def _fake_llm(messages, *, context=None, **kwargs):
     """Mock LLM: возвращает склейку всех сообщений."""
     parts = []
@@ -44,7 +42,6 @@ def _fake_llm(messages, *, context=None, **kwargs):
         else:
             parts.append(str(m))
     return "\n".join(parts)
-
 
 def test_reducer_single_chunk():
     """1 chunk → reducer возвращает HierarchicalReducerResult."""
@@ -62,7 +59,6 @@ def test_reducer_single_chunk():
     assert isinstance(result, HierarchicalReducerResult)
     assert isinstance(result.final_summary, str)
 
-
 def test_reducer_two_chunks():
     """2 chunks → reducer возвращает HierarchicalReducerResult."""
     from execution.hierarchical import (
@@ -78,7 +74,6 @@ def test_reducer_two_chunks():
     )
     assert isinstance(result, HierarchicalReducerResult)
     assert isinstance(result.final_summary, str)
-
 
 def test_reducer_three_chunks():
     """3 chunks → reducer возвращает HierarchicalReducerResult."""
@@ -96,7 +91,6 @@ def test_reducer_three_chunks():
     assert isinstance(result, HierarchicalReducerResult)
     assert isinstance(result.final_summary, str)
 
-
 def test_reducer_10_chunks():
     """10 chunks → reducer возвращает HierarchicalReducerResult."""
     from execution.hierarchical import (
@@ -113,7 +107,6 @@ def test_reducer_10_chunks():
     assert isinstance(result, HierarchicalReducerResult)
     assert isinstance(result.final_summary, str)
 
-
 def test_reducer_empty_input():
     """0 chunks → reducer возвращает пустой результат."""
     from execution.hierarchical import (
@@ -126,7 +119,6 @@ def test_reducer_empty_input():
         length="brief",
     )
     assert result.final_summary == ""
-
 
 def test_reducer_preserves_content():
     """Reducer output непустой и содержит информацию из summaries."""

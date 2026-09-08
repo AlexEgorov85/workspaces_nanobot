@@ -17,12 +17,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def test_identity_matches_structure(tmp_path):
     """identity.document_id == structure.document_id после DocumentAnalysis.build."""
@@ -55,7 +53,6 @@ def test_identity_matches_structure(tmp_path):
     )
     assert analysis.identity.document_id == analysis.structure.document_id
 
-
 def test_make_operation_id_deterministic(tmp_path):
     """make_operation_id детерминирован для одного входа."""
     import application.service as summarizer
@@ -64,14 +61,12 @@ def test_make_operation_id_deterministic(tmp_path):
     op2 = summarizer.make_operation_id(text, "brief")
     assert op1 == op2
 
-
 def test_make_operation_id_stable(tmp_path):
     """make_operation_id стабилен при повторных вызовах."""
     import application.service as summarizer
     text = "Договор аренды помещения."
     ops = [summarizer.make_operation_id(text, "detailed") for _ in range(10)]
     assert len(set(ops)) == 1
-
 
 def test_make_operation_id_differs_by_length(tmp_path):
     """make_operation_id различается для разных length."""

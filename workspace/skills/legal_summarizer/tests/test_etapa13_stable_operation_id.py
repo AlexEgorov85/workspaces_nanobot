@@ -10,7 +10,6 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def test_same_inputs_same_operation_id():
     """Два вызова с одинаковыми аргументами → одинаковый operation_id."""
     from application.service import make_operation_id
@@ -18,7 +17,6 @@ def test_same_inputs_same_operation_id():
     a = make_operation_id("hello world", "detailed")
     b = make_operation_id("hello world", "detailed")
     assert a == b
-
 
 def test_different_inputs_different_operation_id():
     """Разный length → разный operation_id."""
@@ -28,7 +26,6 @@ def test_different_inputs_different_operation_id():
     b = make_operation_id("hello world", "brief")
     assert a != b
 
-
 def test_different_question_different_operation_id():
     """Разный question → разный operation_id."""
     from application.service import make_operation_id
@@ -37,7 +34,6 @@ def test_different_question_different_operation_id():
     b = make_operation_id("hello world", "detailed", question="Что?")
     assert a != b
 
-
 def test_different_document_path_different_operation_id():
     """Разный document_path → разный operation_id."""
     from application.service import make_operation_id
@@ -45,7 +41,6 @@ def test_different_document_path_different_operation_id():
     a = make_operation_id("hello world", "detailed", document_path="a.txt")
     b = make_operation_id("hello world", "detailed", document_path="b.txt")
     assert a != b
-
 
 def test_no_monotonic_in_id():
     """operation_id не содержит временной компонент."""
@@ -61,7 +56,6 @@ def test_no_monotonic_in_id():
         assert len(part) < 30, (
             f"unexpected long timestamp component: {a}"
         )
-
 
 def test_same_prefix_different_tail_different_operation_id():
     """Изменение хвоста (>64 КБ префиксов) меняет operation_id.

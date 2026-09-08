@@ -13,7 +13,6 @@ from retrieval.index import (
     RetrievalIndex,
 )
 
-
 def _b(ord: int) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ord:04d}", block_type="paragraph", content="x",
@@ -22,13 +21,11 @@ def _b(ord: int) -> DocumentBlock:
         block_metadata={},
     )
 
-
 def _doc() -> PhysicalDocument:
     return PhysicalDocument(
         path="/tmp/x", format="txt", title=None, size_bytes=0,
         blocks=tuple(_b(i) for i in range(3)), page_count=1,
     )
-
 
 def _c(cid: str, text: str, section_heading: str = "") -> Chunk:
     return Chunk(
@@ -37,7 +34,6 @@ def _c(cid: str, text: str, section_heading: str = "") -> Chunk:
         section_id="s1", section_path="1", section_heading=section_heading,
         block_indices=(0,), block_types=("paragraph",),
     )
-
 
 def _struct() -> DocumentStructure:
     return DocumentStructure(
@@ -51,7 +47,6 @@ def _struct() -> DocumentStructure:
         numbering=(), total_blocks=3,
     )
 
-
 def test_build_index_creates_inverted():
     chunks = (
         _c("001", "срок оплаты"),
@@ -64,7 +59,6 @@ def test_build_index_creates_inverted():
     assert "срок" in index.term_to_chunks
     assert set(index.term_to_chunks["срок"]) == {"001", "002"}
 
-
 def test_retrieve_uses_inverted_index():
     chunks = (
         _c("001", "оплата — 30 дней"),
@@ -76,12 +70,10 @@ def test_retrieve_uses_inverted_index():
     assert len(hits) >= 1
     assert hits[0].chunk_id == "001"
 
-
 def test_retrieve_no_match():
     chunks = (_c("001", "оплата"),)
     index = RetrievalIndex.build(chunks=chunks, structure=_struct())
     assert index.retrieve("xyz123") == []
-
 
 def test_to_dict():
     index = RetrievalIndex.build(
@@ -92,7 +84,6 @@ def test_to_dict():
     d = index.to_dict()
     assert d["document_id"] == "my-doc"
     assert d["chunk_count"] == 1
-
 
 def test_retrieve_section_title_boost_via_score():
     """Section title boost покрывается в retrieval tests; для inverted

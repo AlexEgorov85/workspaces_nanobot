@@ -10,7 +10,6 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _run(n_sections: int, max_rounds: int = 4, group_size: int = 3):
     """Прогоняет reduce_sections_to_document с N секциями."""
     from execution.config import (
@@ -25,12 +24,10 @@ def _run(n_sections: int, max_rounds: int = 4, group_size: int = 3):
     )
     return reduce_sections_to_document(items, config=cfg, llm_runner=None)
 
-
 def test_no_data_loss_3_sections():
     """3 sections → ровно один final_summary."""
     result = _run(3)
     assert result.final_summary != ""
-
 
 def test_no_data_loss_10_sections():
     """10 sections → ровно один final_summary, после max_rounds делается final."""
@@ -39,18 +36,15 @@ def test_no_data_loss_10_sections():
     # 10 sections, group_size=3: round1 → [3, 3, 3, 1]; round2 → [1, 1] → final.
     assert result.rounds_done >= 2
 
-
 def test_no_data_loss_100_sections():
     """100 sections → ровно один final_summary."""
     result = _run(100, max_rounds=3)
     assert result.final_summary != ""
 
-
 def test_no_data_loss_1000_sections():
     """1000 sections → ровно один final_summary, без потерь."""
     result = _run(1000, max_rounds=3)
     assert result.final_summary != ""
-
 
 def test_final_summary_contains_all_input_markers():
     """Final summary содержит текст всех секций (нет потерь)."""

@@ -12,7 +12,6 @@ from application.canonical import (
     build_pipeline_result,
 )
 
-
 def _make_analysis(tmp_path: Path):
     p = tmp_path / "doc.txt"
     p.write_text(
@@ -24,7 +23,6 @@ def _make_analysis(tmp_path: Path):
     result = build_pipeline_result(document_path=p)
     return result.analysis
 
-
 def test_answer_followup_returns_followup_result(tmp_path: Path):
     """answer_followup возвращает FollowupResult с непустым target_chunks."""
     analysis = _make_analysis(tmp_path)
@@ -35,14 +33,12 @@ def test_answer_followup_returns_followup_result(tmp_path: Path):
     assert len(result.target_chunks) >= 0
     assert result.confidence in ("high", "medium", "low", "very_low")
 
-
 def test_select_brief_from_analysis_returns_result(tmp_path: Path):
     """select_brief возвращает FollowupResult с target_chunks."""
     analysis = _make_analysis(tmp_path)
     result = select_brief_from_analysis(analysis)
     assert result.target_chunks is not None
     assert result.confidence == "medium"
-
 
 def test_answer_followup_with_no_match_triggers_fallback(tmp_path: Path):
     """Запрос без match → full-document fallback (very_low)."""

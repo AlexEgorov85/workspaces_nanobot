@@ -10,7 +10,6 @@ from document.identity import (
     DocumentIdentity,
 )
 
-
 def test_from_path_creates_identity(tmp_path: Path):
     p = tmp_path / "doc.txt"
     p.write_text("hello", encoding="utf-8")
@@ -21,7 +20,6 @@ def test_from_path_creates_identity(tmp_path: Path):
     assert ident.size_bytes == 5
     assert Path(ident.resolved_path) == p.resolve()
 
-
 def test_same_path_same_identity(tmp_path: Path):
     p = tmp_path / "doc.txt"
     p.write_text("hello", encoding="utf-8")
@@ -29,7 +27,6 @@ def test_same_path_same_identity(tmp_path: Path):
     b = DocumentIdentity.from_path(p)
     assert a.fingerprint == b.fingerprint
     assert a.document_id == b.document_id
-
 
 def test_modified_content_changes_identity(tmp_path: Path):
     p = tmp_path / "doc.txt"
@@ -39,7 +36,6 @@ def test_modified_content_changes_identity(tmp_path: Path):
     b = DocumentIdentity.from_path(p)
     assert a.fingerprint != b.fingerprint
 
-
 def test_is_fresh(tmp_path: Path):
     p = tmp_path / "doc.txt"
     p.write_text("hello", encoding="utf-8")
@@ -48,14 +44,12 @@ def test_is_fresh(tmp_path: Path):
     p.write_text("hello world", encoding="utf-8")
     assert ident.is_fresh(p) is False
 
-
 def test_is_fresh_missing_file(tmp_path: Path):
     p = tmp_path / "doc.txt"
     p.write_text("hello", encoding="utf-8")
     ident = DocumentIdentity.from_path(p)
     p.unlink()
     assert ident.is_fresh(p) is False
-
 
 def test_to_dict_roundtrip():
     ident = DocumentIdentity.from_path_with_mtime(
@@ -66,14 +60,12 @@ def test_to_dict_roundtrip():
     assert d["mtime_ns"] == 12345
     assert d["physical_cache_key"] == d["fingerprint"]
 
-
 def test_identity_is_frozen():
     import dataclasses
 
     ident = DocumentIdentity.from_path_with_mtime(Path("/tmp/x.pdf"), size_bytes=0, mtime_ns=0)
     with pytest.raises(dataclasses.FrozenInstanceError):
         ident.size_bytes = 999  # type: ignore[misc]
-
 
 def test_identity_fingerprint_equals_physical_cache_key(tmp_path: Path):
     """PLAN §11 acceptance: identity.fingerprint == physical/cache fingerprint."""
@@ -90,7 +82,6 @@ def test_identity_fingerprint_equals_physical_cache_key(tmp_path: Path):
     # единый canonical алгоритм.
     assert doc.path == ident.resolved_path
     assert doc.size_bytes == ident.size_bytes
-
 
 def test_identity_uses_mtime_ns_not_mtime(tmp_path: Path):
     """PLAN §11: единый canonical алгоритм — mtime_ns (наносекунды).

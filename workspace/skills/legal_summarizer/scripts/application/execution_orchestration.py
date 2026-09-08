@@ -1,8 +1,8 @@
-"""Execution orchestration: координатор ``_run_direct`` / ``_run_map_reduce``.
+"""Execution orchestration: координатор ``run_direct`` / ``run_map_reduce``.
 
 Тонкая прослойка application layer:
 * выбирает стратегию (``direct`` vs ``map_reduce``);
-* делегирует фактическую работу в ``execution/direct`` и ``execution/map_reduce``;
+* делегирует фактическую работу в ``execution/map_reduce``;
 * отвечает за cache lifecycle (initial/final manifest, write_result).
 
 Алгоритмы execution (batching, LLM-вызовы, reduce) живут в
@@ -10,13 +10,11 @@
 Cache persistence — application-level responsibility (см.
 ``references/architecture.md``).
 
-Note on monkeypatch:
-    Тесты делают ``monkeypatch.setattr(service, "_llm_batch", mock)``
-    и ожидают, что ``service._run_direct`` / ``service._run_map_reduce``
-    вызовут именно mock. Чтобы patch работал, мы читаем все
-    ``_llm_*`` / ``_strip_*`` / ``_run_one_batch_async`` / etc.
-    функции **через module attribute ``application.service``**
-    (lazy lookup). Это back-compat shim для этапа-тестов.
+LLM boundary: ``llm.calls``/``llm.sanitize`` импортируются напрямую.
+Тестовый monkeypatch выполняется через ``llm.calls.llm_*``
+(``monkeypatch.setattr(llm_calls, "llm_document_reduce", mock)``)
+и ``llm.sanitize.strip_think_blocks`` — без back-compat aliases
+на ``application.service``.
 """
 
 from __future__ import annotations
@@ -25,6 +23,8 @@ import time as _time
 from pathlib import Path
 from typing import Any
 
+import llm.calls as _llm_calls_mod
+import llm.sanitize as _llm_sanitize_mod
 from application.manifest_builder import build_manifest
 from cache.manifest import (
     NormalizedManifest,
@@ -47,19 +47,8 @@ from execution.map_reduce import (
     DOCUMENT_REDUCE_INPUT_BUDGET_CHARS,
     run_map_reduce_execution,
 )
+from execution.pipeline import now_iso
 from planning.plan import ExecutionPlan
-
-
-def _service_mod():
-    """Lazy lookup модуля ``application.service``.
-
-    Все ссылки на ``_llm_*``, ``_strip_*``, ``_extract_subject``,
-    ``_now_iso``, ``_load_cached_partials``, ``_run_one_batch_async``
-    идут через этот lookup, чтобы ``monkeypatch.setattr(service, name, mock)``
-    в тестах перехватывал реальный вызов.
-    """
-    import application.service as _svc
-    return _svc
 
 
 def map_plan_to_chunk_batches(
@@ -118,19 +107,23 @@ def run_direct(
     joined = fit_input(joined, DOCUMENT_REDUCE_INPUT_BUDGET_CHARS)
 
     canonical_structure = analysis.structure if analysis is not None else None
-    _svc = _service_mod()
     try:
-        final_summary = _svc._llm_document_reduce(
+        final_summary = _llm_calls_mod.llm_document_reduce(
             joined, length=length, focus=focus,
             structure=canonical_structure, question=question,
         )
         reduce_calls = 1
     except Exception:
+        # REDUCE_INPUT_EMPTY на non-retryable input error. Не используем
+        # ``joined`` как fallback — это невалидный summary (сырой текст
+        # чанков), и он нарушит контракт ``completed only with non-empty
+        # summary``. Runtime классифицирует это как REDUCE_INPUT_EMPTY
+        # → ``status='failed'``.
         retries += 1
         reduce_calls = 0
-        final_summary = joined if joined.strip() else ""
+        final_summary = ""
 
-    final_summary = _svc._strip_think_blocks(final_summary)
+    final_summary = _llm_sanitize_mod.strip_think_blocks(final_summary)
 
     if not final_summary or not final_summary.strip():
         return {
@@ -140,7 +133,7 @@ def run_direct(
         }
 
     duration = round(_time.monotonic() - total_start, 1)
-    subject = _svc._extract_subject(final_summary)
+    subject = _llm_sanitize_mod.extract_subject(final_summary)
 
     title = None
     if analysis is not None and analysis.structure.title is not None:
@@ -173,13 +166,13 @@ def run_direct(
         context_batches_total=1,
         estimated_llm_calls=estimated_llm_calls,
         sections_payload={},
-        started_at=existing_manifest.started_at if existing_manifest else _svc._now_iso(),
+        started_at=existing_manifest.started_at if existing_manifest else now_iso(),
         article_count=article_count,
-        now_iso=_svc._now_iso,
+        now_iso=now_iso,
     )
     manifest.status = "completed"
     manifest.actual_llm_calls = reduce_calls
-    manifest.completed_at = _svc._now_iso()
+    manifest.completed_at = now_iso()
     manifest.duration_sec = duration
     manifest.context_batches = {
         "cb_000": {"chunk_ids": [c.chunk_id for c in ordered], "status": "completed"},
@@ -245,7 +238,8 @@ def run_map_reduce(
     ``write_result``) и финальный manifest.
 
     Cache boundary: ``execution.map_reduce`` НЕ пишет в cache —
-    ``write_chunk_result`` инжектируется callback'ом сюда.
+    ``write_chunk_result`` и ``load_cached_partials`` инжектируются
+    callback'ами сюда.
     """
     if plan is None:
         raise RuntimeError(
@@ -266,7 +260,6 @@ def run_map_reduce(
         for node in struct.iter_sections():
             sections_payload[node.node_id] = node.to_dict()
 
-    _svc = _service_mod()
     initial_manifest = build_manifest(
         operation_id=operation_id,
         document_path=document_path,
@@ -278,14 +271,18 @@ def run_map_reduce(
         context_batches_total=len(final_batches),
         estimated_llm_calls=estimated_llm_calls,
         sections_payload=sections_payload,
-        started_at=existing_manifest.started_at if existing_manifest else _svc._now_iso(),
+        started_at=existing_manifest.started_at if existing_manifest else now_iso(),
         article_count=article_count,
-        now_iso=_svc._now_iso,
+        now_iso=now_iso,
     )
     if existing_manifest is None:
         save_manifest(initial_manifest, workspace_root=workspace_root)
 
-    from cache.manifest import write_chunk_result as _write_chunk_result
+    from cache.manifest import (
+        load_cached_partials as _load_cached_partials,
+        write_chunk_result as _write_chunk_result,
+    )
+    from execution.pipeline import run_one_batch_async as _run_one_batch_async
 
     payload = run_map_reduce_execution(
         chunks=chunks,
@@ -306,6 +303,8 @@ def run_map_reduce(
         section_headings=section_headings,
         section_paths=section_paths,
         write_chunk_result=_write_chunk_result,
+        run_one_batch_async=_run_one_batch_async,
+        load_cached_partials=_load_cached_partials,
     )
 
     # Cache persistence — application-level responsibility.
@@ -325,7 +324,7 @@ def run_map_reduce(
             existing_manifest=existing_manifest,
             article_count=article_count,
             workspace_root=workspace_root,
-            now_iso=_svc._now_iso,
+            now_iso=now_iso,
         )
 
     # Удалить ``_internal`` из payload перед возвратом.

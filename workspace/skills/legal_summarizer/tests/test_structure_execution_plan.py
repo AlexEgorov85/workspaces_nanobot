@@ -10,7 +10,6 @@ from llm.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
 
-
 def _chunk(cid: str, text: str, section_id: str = "s1") -> Chunk:
     return Chunk(
         chunk_id=cid, index=int(cid), text=text, char_count=len(text),
@@ -18,7 +17,6 @@ def _chunk(cid: str, text: str, section_id: str = "s1") -> Chunk:
         section_id=section_id, section_path="1", section_heading="x",
         block_indices=(0,), block_types=("paragraph",),
     )
-
 
 def test_build_direct_plan_single_batch():
     chunks = (_chunk("001", "hello world"), _chunk("002", "another text"))
@@ -32,7 +30,6 @@ def test_build_direct_plan_single_batch():
     assert plan.estimated_llm_calls == 1
     assert plan.batches[0].chunk_ids == ("001", "002")
     assert plan.batches[0].token_estimate > 0
-
 
 def test_build_map_plan_multiple_batches():
     chunks = tuple(_chunk(f"{i:03d}", f"text-{i}") for i in range(6))
@@ -48,7 +45,6 @@ def test_build_map_plan_multiple_batches():
     assert plan.batches[1].chunk_ids == ("004", "005", "006")
     assert plan.estimated_llm_calls == 2
 
-
 def test_build_map_plan_skips_missing_chunk_ids():
     chunks = (_chunk("001", "a"), _chunk("002", "b"))
     batches_input = [("001", "999", "002")]
@@ -60,13 +56,11 @@ def test_build_map_plan_skips_missing_chunk_ids():
     assert plan.batches[0].chunk_ids == ("001", "999", "002")
     assert plan.batches[0].token_estimate > 0
 
-
 def test_plan_get_batch():
     chunks = (_chunk("001", "a"),)
     plan = build_direct_plan(chunks, document_id="d", token_estimator=TokenEstimator())
     assert plan.get_batch("cb_000") is not None
     assert plan.get_batch("cb_999") is None
-
 
 def test_plan_to_dict():
     chunks = (_chunk("001", "a"),)
@@ -81,14 +75,12 @@ def test_plan_to_dict():
     assert d["metadata"] == {"mode": "brief"}
     assert len(d["batches"]) == 1
 
-
 def test_plan_immutable():
     chunks = (_chunk("001", "a"),)
     plan = build_direct_plan(chunks, document_id="d", token_estimator=TokenEstimator())
     import dataclasses
     with __import__("pytest").raises(dataclasses.FrozenInstanceError):
         plan.strategy = "map_flat"
-
 
 def test_execution_plan_includes_hierarchical_strategy():
     chunks = (_chunk("001", "x"),)
@@ -126,7 +118,6 @@ def test_section_ids_preserve_order_across_runs():
     p2 = build_direct_plan(chunks, document_id="d", token_estimator=est)
     assert p1.batches[0].section_ids == p2.batches[0].section_ids
     assert p1.batches[0].section_ids == ("s0", "s1", "s2")
-
 
 def test_map_plan_section_ids_preserve_order():
     """PLAN §26: map-plan section_ids С‚РѕР¶Рµ СЃРѕС…СЂР°РЅСЏСЋС‚ order."""

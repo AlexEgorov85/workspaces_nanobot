@@ -8,7 +8,6 @@ from chunking.packing import (
 )
 from chunking.chunks import Chunk
 
-
 def _c(cid: str, section: str, text: str = "x" * 100) -> Chunk:
     return Chunk(
         chunk_id=cid, index=int(cid), text=text, char_count=len(text),
@@ -17,13 +16,11 @@ def _c(cid: str, section: str, text: str = "x" * 100) -> Chunk:
         block_indices=(0,), block_types=("paragraph",),
     )
 
-
 def test_packs_same_section():
     chunks = tuple(_c(f"{i:03d}", "s1") for i in range(3))
     batches = pack_chunks_with_adjacent(chunks)
     assert len(batches) == 1
     assert batches[0] == ("000", "001", "002")
-
 
 def test_separates_by_max_sections():
     chunks = (
@@ -36,7 +33,6 @@ def test_separates_by_max_sections():
     batches = pack_chunks_with_adjacent(chunks, config=cfg)
     assert len(batches) >= 2
 
-
 def test_keeps_section_provenance_in_batch():
     chunks = (
         _c("000", "s1"),
@@ -47,13 +43,11 @@ def test_keeps_section_provenance_in_batch():
     assert len(batches) == 1
     assert batches[0] == ("000", "001")
 
-
 def test_respects_token_budget():
     chunks = tuple(_c(f"{i:03d}", "s1", text="x" * 1000) for i in range(10))
     cfg = AdjacentPackingConfig(per_batch_token_budget=1000)
     batches = pack_chunks_with_adjacent(chunks, config=cfg)
     assert len(batches) > 1
-
 
 def test_root_section_starts_new_batch():
     chunks = (
@@ -64,10 +58,8 @@ def test_root_section_starts_new_batch():
     batches = pack_chunks_with_adjacent(chunks)
     assert batches == [("000",), ("001",), ("002",)]
 
-
 def test_empty():
     assert pack_chunks_with_adjacent(()) == []
-
 
 def _table_c(cid: str, section: str) -> Chunk:
     return Chunk(
@@ -77,7 +69,6 @@ def _table_c(cid: str, section: str) -> Chunk:
         block_indices=(0,), block_types=("table",),
         table_id=f"t_{cid}",
     )
-
 
 def test_table_not_mixed_with_non_table():
     """PLAN §9 Rule 1: table + non-table → отдельные batches."""
@@ -90,7 +81,6 @@ def test_table_not_mixed_with_non_table():
     batches = pack_chunks_with_adjacent(chunks, config=cfg)
     assert batches == [("000",), ("001",), ("002",)]
 
-
 def test_table_table_separate_by_default():
     """PLAN §9 Rule 2: table + table → отдельные (allow_table_table_batch=False)."""
     chunks = (
@@ -100,7 +90,6 @@ def test_table_table_separate_by_default():
     cfg = AdjacentPackingConfig(allow_table_table_batch=False)
     batches = pack_chunks_with_adjacent(chunks, config=cfg)
     assert batches == [("000",), ("001",)]
-
 
 def test_table_table_combined_when_allowed():
     """PLAN §9 Rule 2: table + table → один batch если allow_table_table_batch=True."""
@@ -112,7 +101,6 @@ def test_table_table_combined_when_allowed():
     batches = pack_chunks_with_adjacent(chunks, config=cfg)
     assert batches == [("000", "001")]
 
-
 def test_two_sections_in_batch():
     """PLAN §9 Rule 3: 2 sections allowed (max=2)."""
     chunks = (
@@ -122,7 +110,6 @@ def test_two_sections_in_batch():
     cfg = AdjacentPackingConfig(max_sections_per_batch=2, per_batch_token_budget=10000)
     batches = pack_chunks_with_adjacent(chunks, config=cfg)
     assert batches == [("000", "001")]
-
 
 def test_three_sections_split():
     """PLAN §9 Rule 3: 3 sections → split (max=2)."""
@@ -135,7 +122,6 @@ def test_three_sections_split():
     batches = pack_chunks_with_adjacent(chunks, config=cfg)
     assert batches == [("000", "001"), ("002",)]
 
-
 def test_document_order_preserved():
     """PLAN §9 Rule 4: document order сохраняется."""
     chunks = tuple(_c(f"{i:03d}", "s1" if i < 5 else "s2") for i in range(10))
@@ -143,7 +129,6 @@ def test_document_order_preserved():
     batches = pack_chunks_with_adjacent(chunks, config=cfg)
     flat = [cid for batch in batches for cid in batch]
     assert flat == [f"{i:03d}" for i in range(10)]
-
 
 def test_budget_exceeded_splits():
     """PLAN §9 Rule 6: budget exceeded → split."""
@@ -153,7 +138,6 @@ def test_budget_exceeded_splits():
     assert len(batches) > 1
     flat = [cid for batch in batches for cid in batch]
     assert flat == [f"{i:03d}" for i in range(5)]
-
 
 def test_deterministic_order_with_set_iteration():
     """PLAN §9: section_ids order не зависит от dict insertion order."""

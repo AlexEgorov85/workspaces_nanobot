@@ -7,7 +7,6 @@ from retrieval.qa import (
     evaluate_retrieval, standard_qa_set,
 )
 
-
 def test_reference_question_dataclass():
     q = ReferenceQuestion(
         query="test", expected_section_keywords=("a", "b"),
@@ -15,14 +14,12 @@ def test_reference_question_dataclass():
     assert q.query == "test"
     assert len(q.expected_section_keywords) == 2
 
-
 def test_reference_qa_set_dataclass():
     qa = ReferenceQASet(
         document_name="doc",
         questions=(ReferenceQuestion(query="q", expected_section_keywords=()),),
     )
     assert qa.document_name == "doc"
-
 
 def test_standard_qa_set_has_six_questions():
     qa = standard_qa_set()
@@ -32,7 +29,6 @@ def test_standard_qa_set_has_six_questions():
     assert any("срок" in q for q in queries)
     assert any("штраф" in q for q in queries)
 
-
 def test_evaluate_retrieval_hit():
     q = ReferenceQuestion(
         query="цена", expected_section_keywords=("цена", "стоимость"),
@@ -40,7 +36,6 @@ def test_evaluate_retrieval_hit():
     result = evaluate_retrieval(("Цена договора 1000 руб.",), q)
     assert result["hit"] is True
     assert result["score"] >= 0.5
-
 
 def test_evaluate_retrieval_miss():
     q = ReferenceQuestion(
@@ -50,7 +45,6 @@ def test_evaluate_retrieval_miss():
     assert result["hit"] is False
     assert result["score"] == 0.0
 
-
 def test_evaluate_retrieval_empty():
     q = ReferenceQuestion(
         query="q", expected_section_keywords=("a",),
@@ -58,7 +52,6 @@ def test_evaluate_retrieval_empty():
     result = evaluate_retrieval((), q)
     assert result["hit"] is False
     assert result["score"] == 0.0
-
 
 def test_evaluate_retrieval_partial_hit():
     q = ReferenceQuestion(

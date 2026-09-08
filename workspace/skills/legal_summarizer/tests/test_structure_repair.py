@@ -22,7 +22,6 @@ from document.repair import (
     repair_structure,
 )
 
-
 def _node(nid: str, *, parent_id: str | None = "n_0000",
           level: int = 1, start_block: int = 0, end_block: int = 5,
           node_type: str = "section",
@@ -34,7 +33,6 @@ def _node(nid: str, *, parent_id: str | None = "n_0000",
         confidence=0.7,
     )
 
-
 def _root(children: tuple[str, ...] = ()) -> StructureNode:
     return StructureNode(
         node_id="n_0000", node_type="document", semantic_type=None,
@@ -43,7 +41,6 @@ def _root(children: tuple[str, ...] = ()) -> StructureNode:
         confidence=1.0,
     )
 
-
 def _struct(nodes: dict[str, StructureNode]) -> DocumentStructure:
     root = nodes["n_0000"]
     return DocumentStructure(
@@ -51,7 +48,6 @@ def _struct(nodes: dict[str, StructureNode]) -> DocumentStructure:
         root_id="n_0000", preamble_node_id="n_0000",
         numbering=(), total_blocks=100,
     )
-
 
 def test_repair_orphans_fixed():
     root = _root(children=("n_0001", "n_0002"))
@@ -62,7 +58,6 @@ def test_repair_orphans_fixed():
     assert report.orphans_fixed == 1
     assert fixed.nodes["n_0001"].parent_id == "n_0000"
 
-
 def test_repair_invalid_range_dropped():
     root = _root(children=("n_0001",))
     bad = _node("n_0001", start_block=10, end_block=5)
@@ -70,7 +65,6 @@ def test_repair_invalid_range_dropped():
     fixed, report = repair_structure(struct)
     assert report.invalid_ranges_dropped == 1
     assert "n_0001" not in fixed.nodes
-
 
 def test_repair_one_block_section_survives():
     """PLAN §5.1: one-block section (start == end) НЕ удаляется."""
@@ -80,7 +74,6 @@ def test_repair_one_block_section_survives():
     fixed, report = repair_structure(struct)
     assert report.invalid_ranges_dropped == 0
     assert "n_0001" in fixed.nodes
-
 
 def test_repair_impossible_parent_fixed():
     """Parent.level >= node.level → parent_id склеивается на root_id."""
@@ -112,7 +105,6 @@ def test_repair_impossible_parent_fixed():
     assert report.impossible_parents_fixed == 1
     assert fixed.nodes["n_0001"].parent_id == "n_0000"
 
-
 def test_repair_no_changes_when_healthy():
     root = _root(children=("n_0001",))
     good = _node("n_0001", start_block=0, end_block=10)
@@ -125,14 +117,12 @@ def test_repair_no_changes_when_healthy():
     fixed, report = repair_structure(struct)
     assert report == RepairReport()
 
-
 def test_repair_keeps_root():
     root = _root()
     struct = _struct({"n_0000": root})
     fixed, _ = repair_structure(struct)
     assert "n_0000" in fixed.nodes
     assert fixed.nodes["n_0000"].node_id == "n_0000"
-
 
 def test_repair_removed_node_absent_from_children():
     """PLAN §5.3: при drop node он удаляется из parent's children."""
@@ -144,7 +134,6 @@ def test_repair_removed_node_absent_from_children():
     assert "n_0002" not in fixed.nodes
     assert "n_0002" not in fixed.nodes["n_0001"].children
     assert "n_0002" not in fixed.nodes["n_0000"].children
-
 
 def test_repair_child_of_repaired_parent_becomes_valid():
     """PLAN §5.3: child of repaired parent (parent reparented) сохраняется.
@@ -159,7 +148,6 @@ def test_repair_child_of_repaired_parent_becomes_valid():
     assert fixed.nodes["n_0001"].parent_id == "n_0000"
     assert fixed.nodes["n_0002"].parent_id == "n_0001"
     assert "n_0002" in fixed.nodes["n_0001"].children
-
 
 def test_repair_idempotent():
     """PLAN §5: repair(repair(struct)) == repair(struct)."""
@@ -186,7 +174,6 @@ def test_repair_idempotent():
         assert once.end_block == twice.end_block
         assert once.children == twice.children
 
-
 def test_repair_drops_invalid_child_of_dropped_node():
     """PLAN §5.3: child of dropped invalid-range node → repaired parent."""
     parent = _node("n_0001", children=("n_0002",), start_block=0, end_block=20)
@@ -195,7 +182,6 @@ def test_repair_drops_invalid_child_of_dropped_node():
     struct = _struct({"n_0000": root, "n_0001": parent, "n_0002": invalid})
     fixed, _ = repair_structure(struct)
     assert "n_0002" not in fixed.nodes
-
 
 def test_repair_dropped_node_removed_from_sibling_children():
     """PLAN §5.3: dropped node не появляется в children других parent'ов."""
@@ -211,7 +197,6 @@ def test_repair_dropped_node_removed_from_sibling_children():
     assert "n_0003" not in fixed.nodes
     assert "n_0003" not in fixed.nodes["n_0001"].children
     assert "n_0003" not in fixed.nodes["n_0002"].children
-
 
 def test_repair_parent_changed_synchronously_rebuilds_children():
     """PLAN §5.2: при изменении parent_id children parent пересобирается."""

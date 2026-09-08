@@ -27,13 +27,9 @@ from typing import Any
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
-_SKILL_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPTS_ROOT = Path(__file__).resolve().parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-if str(_SKILL_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SKILL_ROOT))
-# ``scripts/`` — корень executable runtime Skill.
 if str(_SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_ROOT))
 

@@ -15,12 +15,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _long_text() -> str:
     return (
@@ -31,7 +29,6 @@ def _long_text() -> str:
         + "\n\n3. Раздел В\n\n"
         + ("Текст В. " * 60) * 80
     )
-
 
 def _install_pipeline_counter(monkeypatch):
     """Подменяем ``run_canonical_pipeline`` счётчиком вызовов."""
@@ -47,7 +44,6 @@ def _install_pipeline_counter(monkeypatch):
     monkeypatch.setattr(_pipeline_mod, "run_canonical_pipeline", _counting_run)
     import application.service as _summarizer
     monkeypatch.setattr(_summarizer, "run_canonical_pipeline", _counting_run)
-
 
 def _install_llm_mocks(monkeypatch):
     import llm.calls as llm_calls
@@ -66,19 +62,13 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     # Map path: pipeline._llm_batch.
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
-
 
 def _reset_pipeline_counter():
     from workspace.skills.legal_summarizer.tests import _etapa2_recorder
     _etapa2_recorder.reset()
-
 
 def test_run_calls_pipeline_exactly_once_map(tmp_path: Path, monkeypatch):
     """Map-reduce: ``run_canonical_pipeline`` вызывается один раз."""
@@ -104,7 +94,6 @@ def test_run_calls_pipeline_exactly_once_map(tmp_path: Path, monkeypatch):
         f"expected exactly 1 pipeline call, got {_etapa2_recorder.PIPELINE_CALLS}"
     )
 
-
 def test_run_calls_pipeline_exactly_once_direct(tmp_path: Path, monkeypatch):
     """Direct: ``run_canonical_pipeline`` вызывается один раз."""
     _reset_pipeline_counter()
@@ -127,7 +116,6 @@ def test_run_calls_pipeline_exactly_once_direct(tmp_path: Path, monkeypatch):
     assert _etapa2_recorder.PIPELINE_CALLS == 1, (
         f"expected exactly 1 pipeline call, got {_etapa2_recorder.PIPELINE_CALLS}"
     )
-
 
 def test_run_map_reduce_does_not_re_run_pipeline(tmp_path: Path, monkeypatch):
     """Внутри ``run()`` — ровно один pipeline call (Этап 2 invariant)."""

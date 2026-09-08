@@ -18,12 +18,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _install_llm_mocks(monkeypatch):
     import llm.calls as llm_calls
@@ -42,13 +40,8 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
-
 
 def _build_doc(sections: int = 6) -> str:
     parts = []
@@ -60,18 +53,23 @@ def _build_doc(sections: int = 6) -> str:
         )
     return "".join(parts)
 
+import application.context_builder  # noqa: E402
+
+
+import llm.config  # noqa: E402
+
 
 def test_build_execution_context_called_once_for_map_run(tmp_path, monkeypatch):
     """За один ``run()`` _build_execution_context вызывается ровно 1 раз."""
     import application.service as summarizer
     calls = {"n": 0}
-    original = summarizer._build_execution_context
+    original = summarizer.build_execution_context
 
     def _spy(insp, **kwargs):
         calls["n"] += 1
         return original(insp, **kwargs)
 
-    monkeypatch.setattr(summarizer, "_build_execution_context", _spy)
+    monkeypatch.setattr(application.context_builder, "build_execution_context", _spy)
 
     _install_llm_mocks(monkeypatch)
     text = _build_doc(sections=6)
@@ -87,7 +85,6 @@ def test_build_execution_context_called_once_for_map_run(tmp_path, monkeypatch):
         f"expected exactly 1 _build_execution_context call, got {calls['n']}"
     )
 
-
 def test_build_execution_context_called_once_for_direct_run(tmp_path, monkeypatch):
     """Даже для direct-run (1 chunk) context строится 1 раз."""
     import application.service as summarizer
@@ -95,13 +92,13 @@ def test_build_execution_context_called_once_for_direct_run(tmp_path, monkeypatc
     small_text = "Только один абзац текста, без секций."
 
     calls = {"n": 0}
-    original = summarizer._build_execution_context
+    original = summarizer.build_execution_context
 
     def _spy(insp, **kwargs):
         calls["n"] += 1
         return original(insp, **kwargs)
 
-    monkeypatch.setattr(summarizer, "_build_execution_context", _spy)
+    monkeypatch.setattr(application.context_builder, "build_execution_context", _spy)
     _install_llm_mocks(monkeypatch)
 
     p = _write_doc(tmp_path, small_text)
@@ -116,12 +113,11 @@ def test_build_execution_context_called_once_for_direct_run(tmp_path, monkeypatc
         f"expected exactly 1 _build_execution_context call, got {calls['n']}"
     )
 
-
 def test_build_execution_context_called_once_for_confirmation_path(tmp_path, monkeypatch):
     """Confirmation path тоже должен построить context один раз."""
     import application.service as summarizer
     monkeypatch.setattr(
-        summarizer, "get_execution_config",
+        llm.config, "get_execution_config",
         lambda: {
             "confirmation_threshold_sec": 0.001,
             "estimated_chunk_duration_sec": 100.0,
@@ -136,13 +132,13 @@ def test_build_execution_context_called_once_for_confirmation_path(tmp_path, mon
     )
 
     calls = {"n": 0}
-    original = summarizer._build_execution_context
+    original = summarizer.build_execution_context
 
     def _spy(insp, **kwargs):
         calls["n"] += 1
         return original(insp, **kwargs)
 
-    monkeypatch.setattr(summarizer, "_build_execution_context", _spy)
+    monkeypatch.setattr(application.context_builder, "build_execution_context", _spy)
 
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)

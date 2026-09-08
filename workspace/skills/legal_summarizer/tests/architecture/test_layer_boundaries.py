@@ -17,10 +17,10 @@ direction of the dependency graph::
                                execution
                                    │
                                    ▼
-                              llm.calls / llm.prompts
+                               llm.calls / llm.prompts
                                    │
                                    ▼
-                              llm.client (leaf)
+                               llm.client (leaf)
 
 Rules (canonical dependency direction):
 
@@ -42,6 +42,9 @@ The test walks every ``.py`` under
 ``workspace/skills/legal_summarizer/scripts`` and asserts
 that no module reaches a forbidden target via ``<layer>...``
 or ``llm.<sublayer>...``.
+
+В частности, ``execution → application`` всегда запрещено: application —
+верхний слой, dependency direction только ``application → execution``.
 """
 
 from __future__ import annotations
@@ -49,10 +52,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-
 _SKILL_ROOT = Path(__file__).resolve().parents[2]
 _RUNTIME_PKG = _SKILL_ROOT / "scripts"
-
 
 # Layer name -> set of layer names it MUST NOT import.
 # Direction matters: imports flow from leaves UP to application, not
@@ -60,8 +61,9 @@ _RUNTIME_PKG = _SKILL_ROOT / "scripts"
 # pure data/structure layers — they may NOT depend on ``execution``,
 # ``application``, ``cache``, ``output``.
 #
-# ``execution`` is the only layer allowed to bridge to ``llm`` (calls,
-# prompts, single_flight).
+# ``execution`` — единственная точка bridge'а к ``llm`` (calls,
+# prompts, single_flight). ``execution → application`` всегда запрещено:
+# application — верхний слой.
 _FORBIDDEN: dict[str, frozenset[str]] = {
     "document": frozenset({
         "retrieval", "execution", "planning", "application",
@@ -79,10 +81,9 @@ _FORBIDDEN: dict[str, frozenset[str]] = {
         "execution", "application",
         "llm", "cache", "output",
     }),
-    # ``execution`` may import ``llm.calls``/``llm.prompts`` (canonical LLM API)
-    # and ``llm.single_flight`` (technical gate).
+# ``execution`` may import ``llm.calls``/``llm.prompts`` (canonical LLM API)
+    # и ``llm.single_flight`` (technical gate).
     "execution": frozenset({
-        "application",
         "cache", "output",
     }),
     "application": frozenset(),  # application may import anything
@@ -90,7 +91,6 @@ _FORBIDDEN: dict[str, frozenset[str]] = {
     "cache": frozenset(),  # leaves
     "output": frozenset(),  # leaves
 }
-
 
 # Разрешённые исключения из общего правила — технические примитивы,
 # которые являются infra-утилитами, а не domain-зависимостями.
@@ -105,25 +105,20 @@ _FORBIDDEN: dict[str, frozenset[str]] = {
 #    эти модули. Это известное архитектурное исключение
 #    (``DocumentAnalysis`` — это projectional representation, требующая
 #    и document, и retrieval). Должно быть решено отдельным рефакторингом.
-# 4. ``application.service`` — единственный **lazy** import из
-#    ``execution.map_reduce`` (через ``_service_mod()``). Это
-#    back-compat shim для monkeypatch-тестов
-#    (``monkeypatch.setattr(service, "_llm_*", mock)``). В runtime
-#    фактические LLM-вызовы идут через ``llm.calls`` —
-#    ``application.service`` нужен только для резолва тестовых
-#    mock'ов. См. ``legal_summarizer/execution/map_reduce.py``.
+# 4. ~~``application.service`` — единственный **lazy** import из~~
+#    ~~``execution.map_reduce``.~~ Удалено: ``application → execution`` —
+#    единственное каноническое направление зависимости. Execution
+#    получает всё необходимое через DI-callbacks и прямые импорты
+#    из ``llm.*``, ``cache.*``, ``chunking.*``, ``document.*``.
 _ALLOWED_TECHNICAL_EXCEPTIONS: dict[str, frozenset[str]] = {
     "document": frozenset({"cache", "retrieval"}),
     "chunking": frozenset({"llm.tokens"}),
     "retrieval": frozenset({"llm.tokens"}),
     "planning": frozenset({"llm.tokens"}),
-    "execution": frozenset({"application"}),  # back-compat _service_mod
 }
-
 
 def _is_allowed_exception(source_layer: str, target: str) -> bool:
     return target in _ALLOWED_TECHNICAL_EXCEPTIONS.get(source_layer, frozenset())
-
 
 def _layer_of(path: Path) -> str | None:
     """Layer name from a relative path under ``legal_summarizer/``.
@@ -139,7 +134,6 @@ def _layer_of(path: Path) -> str | None:
     if len(parts) < 2:
         return None
     return parts[0]
-
 
 def _imported_target(module: str | None) -> str | None:
     """Target layer/sub-layer name if ``module`` is an internal layer import.
@@ -170,7 +164,6 @@ def _imported_target(module: str | None) -> str | None:
         return f"llm.{parts[1]}"
     return parts[0]
 
-
 def _walk_module(path: Path) -> list[tuple[str, str]]:
     """Return list of (source_line, fully-qualified-module) imports in ``path``."""
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -187,7 +180,6 @@ def _walk_module(path: Path) -> list[tuple[str, str]]:
             for alias in node.names:
                 hits.append((f"L{alias.lineno}", alias.name))
     return hits
-
 
 def _collect_violations() -> list[str]:
     violations: list[str] = []
@@ -211,7 +203,6 @@ def _collect_violations() -> list[str]:
                 )
     return violations
 
-
 def test_no_layer_boundary_violations() -> None:
     """Внутри ``legal_summarizer`` нижние слои не должны зависеть от верхних.
 
@@ -223,4 +214,49 @@ def test_no_layer_boundary_violations() -> None:
     assert violations == [], (
         "Architecture boundary violations:\n  - " +
         "\n  - ".join(violations)
+    )
+
+def test_execution_does_not_import_application() -> None:
+    """Regression: ``execution → application`` запрещено.
+
+    ``application`` — верхний orchestrator-слой. ``execution``
+    получает всё необходимое через DI-callbacks (``WriteChunkResultFn``,
+    ``RunOneBatchFn``, ``LoadCachedPartialsFn``) и прямые импорты
+    из ``llm.*`` / ``cache.*`` / ``chunking.*`` / ``document.*``.
+    Запрет абсолютный: ни статического, ни lazy, ни ``__init__``
+    импорта. Раньше ``execution.map_reduce`` использовал lazy
+    ``_service_mod()`` для monkeypatch-совместимости; после миграции
+    этот shortcut удалён.
+    """
+    execution_root = _RUNTIME_PKG / "execution"
+    assert execution_root.is_dir(), (
+        f"ожидался каталог {execution_root}, его нет — Skill не "
+        "инициализирован правильно"
+    )
+    offenders: list[str] = []
+    for path in sorted(execution_root.rglob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        rel = path.relative_to(_SKILL_ROOT)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            tree = ast.parse(text, filename=str(path))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                if mod == "application" or mod.startswith("application."):
+                    offenders.append(f"{rel} L{node.lineno}: from {mod} ...")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "application" or alias.name.startswith("application."):
+                        offenders.append(
+                            f"{rel} L{alias.lineno}: import {alias.name}"
+                        )
+    assert offenders == [], (
+        "execution → application запрещено (dependency direction). "
+        "Найдены нарушители:\n  - " + "\n  - ".join(offenders) +
+        "\nИспользуйте DI-callbacks или прямые импорты из "
+        "нижних слоёв (llm.*, cache.*, chunking.*, document.*)."
     )

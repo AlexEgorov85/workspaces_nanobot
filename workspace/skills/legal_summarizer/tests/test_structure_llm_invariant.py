@@ -13,13 +13,11 @@ from __future__ import annotations
 
 import inspect
 
-
 def _module_has_llm_call(module) -> bool:
     """True если в модуле есть вызовы LLM / OpenAI / Anthropic."""
     source = inspect.getsource(module)
     keywords = ("openai.", "anthropic.", "call_llm(", "client.chat")
     return any(kw in source for kw in keywords)
-
 
 def test_no_llm_call_in_structure_modules():
     """Структурные модули не должны вызывать LLM."""
@@ -82,7 +80,6 @@ def test_no_llm_call_in_structure_modules():
             f"{module.__name__} should not call LLM directly"
         )
 
-
 def test_hierarchical_reducer_accepts_llm_runner():
     """HierarchicalReducer **принимает** LLMRunner, но не вызывает его сам."""
     from execution.config import (
@@ -91,7 +88,6 @@ def test_hierarchical_reducer_accepts_llm_runner():
     import dataclasses
     fields = dataclasses.fields(HierarchicalReducerConfig)
     assert any("group_size" in str(f) for f in fields)
-
 
 def test_retry_module_uses_llm_for_repair():
     """retry.build_repair_prompt формирует prompt для **точечного** LLM-call."""

@@ -4,18 +4,16 @@
 из ``application.execution_orchestration``.
 
 Архитектурный контракт:
-* ``execution`` НЕ импортирует ``cache`` и ``application`` напрямую.
-* ``cache.manifest.write_chunk_result`` / ``save_manifest`` /
-  ``write_result`` инжектируются через callback-параметры.
-* LLM boundary (``_llm_*``, ``_strip_*``, ``_extract_subject``,
-  ``_now_iso``) — разрешённая зависимость ``execution → llm.calls`` /
-  ``llm.prompts`` (canonical API).
-* ``_load_cached_partials`` / ``_run_one_batch_async`` — резолвятся
-  через ``application.service`` (lazy import),
-  единственный кросс-слойный lookup для monkeypatch-совместимости
-  с ``test_etapa{...}`` тестами. Это **исключение** из
-  ``execution → application`` правила — аналогично ``llm.single_flight``
-  (см. ``tests/architecture/test_layer_boundaries.py``).
+
+* ``execution`` НЕ импортирует ``cache`` и ``application``.
+* ``cache.manifest.write_chunk_result`` и
+  ``cache.manifest.load_cached_partials`` инжектируются
+  через callback-параметры (``WriteChunkResultFn``/``LoadCachedPartialsFn``).
+* ``execution.pipeline.run_one_batch_async`` инжектируется
+  через callback-параметр (``RunOneBatchFn``) — caller
+  (``application.execution_orchestration``) резолвит mock-совместимость.
+* LLM-вызовы идут **напрямую** через ``llm.calls``
+  (``llm_batch``/``llm_section_reduce``/``llm_document_reduce``).
 """
 
 from __future__ import annotations
@@ -45,6 +43,11 @@ from execution.hierarchical import (
     HierarchicalReducerConfig,
     reduce_chunks_hierarchical,
 )
+import llm.calls as _llm_calls_mod
+from llm.sanitize import (
+    extract_subject,
+    strip_think_blocks,
+)
 from planning.plan import ExecutionPlan
 
 
@@ -52,30 +55,13 @@ DOCUMENT_REDUCE_INPUT_BUDGET_CHARS = 60_000
 _SECTION_SUMMARY_MAX_CHARS = 12_000
 
 
-# Back-compat: старые тесты ссылались на ``execution.pipeline._LLM_FLIGHT_LOCK``
-# и ``llm.calls._CHAT_LOCK`` через ``from application.service``.
-# Чтобы НЕ вводить новый кросс-слойный import в тесты, ниже сохраняем
-# lazy ``_service_mod()``. Это единственный back-compat exception —
-# в новом коде dependency injection через ``run_map_reduce_execution``
-# ниже не использует ``_service_mod``.
-
-def _service_mod():
-    """Lazy lookup модуля ``application.service``.
-
-    Используется ТОЛЬКО для monkeypatch-совместимости тестов с
-    ``setattr(service, "_llm_*", mock)``. В runtime этот lookup
-    возвращает ``service`` модуль, но фактические вызовы LLM
-    делегируются через callback-параметры ``run_map_reduce_execution``.
-    """
-    import application.service as _svc
-    return _svc
-
-
-# Типы callback'ов (для dependency injection из application layer).
-# ``cache.manifest.write_chunk_result(operation_id, chunk_id, summary, ...)``
-# и ``cache.manifest.save_manifest(manifest, workspace_root=...)``
-# — application инжектирует конкретные функции.
+# Callback-типы для dependency injection из application layer.
 WriteChunkResultFn = Callable[..., None]
+# ``run_one_batch_async(pending_chunks, *, chunks_total, structure,
+#   operation_id, workspace_root, sem, batch_id, length, question)``
+RunOneBatchFn = Callable[..., Any]
+# ``load_cached_partials(operation_id, expected_chunk_ids, workspace_root)``
+LoadCachedPartialsFn = Callable[..., dict[str, str]]
 
 
 def _assert_invariants(
@@ -134,14 +120,14 @@ async def _run_all_batches(
     workspace_root: Path | str | None,
     length: str,
     question: str | None,
+    run_one_batch_async: RunOneBatchFn,
 ) -> list[tuple[str, dict | None, dict | None, tuple[str, Exception] | None]]:
-    """Запустить все queued батчи через ``_run_one_batch_async`` (concurrency=1)."""
-    _svc = _service_mod()
+    """Запустить все queued батчи через ``run_one_batch_async`` (concurrency=1)."""
     sem = asyncio.Semaphore(1)
 
     async def _gather_all():
         return await asyncio.gather(*[
-            _svc._run_one_batch_async(
+            run_one_batch_async(
                 pending_chunks,
                 chunks_total=chunks_total,
                 structure=struct,
@@ -269,7 +255,6 @@ def _reduce_phase(
     Возвращает ``(final_summary, section_reduce_calls,
     document_reduce_calls, retries_incremented, strategy_label)``.
     """
-    _svc = _service_mod()
     section_reduce_calls = 0
     document_reduce_calls = 0
 
@@ -282,18 +267,18 @@ def _reduce_phase(
         )
 
         def _llm_section_runner(joined, *, section_path="", section_heading="", **_kw):
-            result = _svc._llm_section_reduce(
+            result = _llm_calls_mod.llm_section_reduce(
                 section_path, section_heading, joined,
                 length=length, question=question,
             )
-            result = _svc._strip_think_blocks(result)
+            result = strip_think_blocks(result)
             if len(result) > _SECTION_SUMMARY_MAX_CHARS:
                 result = fit_input(result, _SECTION_SUMMARY_MAX_CHARS)
             return result
 
         def _llm_doc_runner(joined, *, length=length, focus=focus, structure=struct, question=question, **_kw):
-            return _svc._strip_think_blocks(
-                _svc._llm_document_reduce(
+            return strip_think_blocks(
+                _llm_calls_mod.llm_document_reduce(
                     joined, length=length, focus=focus, structure=structure, question=question,
                 )
             )
@@ -335,21 +320,25 @@ def _reduce_phase(
     if not joined.strip():
         return "", section_reduce_calls, document_reduce_calls, False, "map_reduce_flat"
     joined = fit_input(joined, DOCUMENT_REDUCE_INPUT_BUDGET_CHARS)
-    retries_incremented = False
     try:
-        final_summary = _svc._llm_document_reduce(
+        final_summary = _llm_calls_mod.llm_document_reduce(
             joined, length=length, focus=focus,
             structure=struct, question=question,
         )
         document_reduce_calls += 1
     except Exception:
-        retries_incremented = True
-        final_summary = joined if joined.strip() else ""
+        # REDUCE_INPUT_EMPTY на non-retryable input error: возвращаем
+        # пустую строку, чтобы runtime классифицировал это как
+        # ``REDUCE_INPUT_EMPTY`` → ``status='failed'``.
+        # Никакого fallback на ``joined`` (это невалидное поведение —
+        # сырой текст не является summary). И никакого retry — input
+        # сам по себе non-retryable.
+        return "", section_reduce_calls, document_reduce_calls, True, "map_reduce_flat"
     return (
         final_summary,
         section_reduce_calls,
         document_reduce_calls,
-        retries_incremented,
+        False,
         "map_reduce_flat",
     )
 
@@ -394,12 +383,15 @@ def run_map_reduce_execution(
     section_headings: dict[str, str],
     section_paths: dict[str, str],
     write_chunk_result: WriteChunkResultFn,
+    run_one_batch_async: RunOneBatchFn,
+    load_cached_partials: LoadCachedPartialsFn,
 ) -> dict:
     """Фактическая реализация map-reduce execution.
 
     Pure execution: возвращает dict в shape ``application.service.run()``.
     НЕ делает cache writes напрямую — ``write_chunk_result`` инжектируется
-    из application.
+    из application. ``run_one_batch_async`` инжектируется из application
+    (mock-совместимость с этапа-тестами).
 
     Фазы:
     1. ``_assert_invariants`` — plan vs chunks.
@@ -411,7 +403,6 @@ def run_map_reduce_execution(
 
     Финальный manifest + write_result делает ``application.execution_orchestration``.
     """
-    _svc = _service_mod()
     struct = analysis.structure if analysis is not None else None
 
     _assert_invariants(plan, chunks, final_batches)
@@ -421,7 +412,7 @@ def run_map_reduce_execution(
         dict(existing_manifest.chunk_states) if existing_manifest else {}
     )
 
-    cached_partials = _svc._load_cached_partials(
+    cached_partials = load_cached_partials(
         operation_id, expected_chunk_ids, workspace_root,
     )
     chunk_states.update(_build_initial_partials_from_cache(
@@ -449,6 +440,7 @@ def run_map_reduce_execution(
             workspace_root=workspace_root,
             length=length,
             question=question,
+            run_one_batch_async=run_one_batch_async,
         ))
         map_calls, failed_batch_ids, batch_chunk_states, ctx_batches, first_batch_error = (
             _persist_batch_results(
@@ -460,7 +452,7 @@ def run_map_reduce_execution(
         )
         chunk_states.update(batch_chunk_states)
 
-    all_partials = _svc._load_cached_partials(
+    all_partials = load_cached_partials(
         operation_id, expected_chunk_ids, workspace_root,
     )
 
@@ -488,7 +480,7 @@ def run_map_reduce_execution(
     if retries_incremented:
         retries += 1
 
-    final_summary = _svc._strip_think_blocks(final_summary)
+    final_summary = strip_think_blocks(final_summary)
 
     if not final_summary or not final_summary.strip():
         return {
@@ -498,7 +490,7 @@ def run_map_reduce_execution(
         }
 
     total_duration = round(_time.monotonic() - total_start, 1)
-    subject = _svc._extract_subject(final_summary)
+    subject = extract_subject(final_summary)
     is_partial = bool(failed_batch_ids)
     total_llm_calls = map_calls + section_reduce_calls + document_reduce_calls
     meaningful = count_meaningful_sections_canonical(struct) if struct else 0
@@ -544,7 +536,6 @@ def run_map_reduce_execution(
             "partial": is_partial,
             "duration_sec": total_duration,
             "strategy": strategy_label,
-            # Прокинутые caller'у артефакты для cache persistence.
             "_internal": {
                 "chunk_states": chunk_states,
                 "ctx_batches": ctx_batches,

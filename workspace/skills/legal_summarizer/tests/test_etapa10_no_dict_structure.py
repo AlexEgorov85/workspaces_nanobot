@@ -17,12 +17,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def test_direct_run_returns_real_sections_metadata(tmp_path: Path, monkeypatch):
     """Direct run с известной структурой → ``result['sections']`` отражает
@@ -34,7 +32,6 @@ def test_direct_run_returns_real_sections_metadata(tmp_path: Path, monkeypatch):
         return "Итоговое саммари."
 
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
-    monkeypatch.setattr(summarizer, "_llm_document_reduce", _fake_doc)
 
     text = (
         "1. Раздел А\n\n" + ("Текст. " * 30) * 10

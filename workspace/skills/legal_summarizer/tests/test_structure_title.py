@@ -12,7 +12,6 @@ from document.title import (
     resolve_title,
 )
 
-
 def _b(ordinal: int, content: str, block_type: str = "paragraph",
        style: str = "") -> DocumentBlock:
     return DocumentBlock(
@@ -22,14 +21,12 @@ def _b(ordinal: int, content: str, block_type: str = "paragraph",
         block_metadata={"style": style} if style else {},
     )
 
-
 def _make_doc(path: str = "/tmp/no.docx", blocks: tuple[DocumentBlock, ...] = (),
               title: str | None = None) -> PhysicalDocument:
     return PhysicalDocument(
         path=path, format="docx", title=title,
         size_bytes=0, blocks=blocks, page_count=1,
     )
-
 
 def test_resolve_title_docx_metadata(monkeypatch):
     """DOCX core_properties.title → source='metadata'."""
@@ -49,7 +46,6 @@ def test_resolve_title_docx_metadata(monkeypatch):
     assert t.source == "metadata"
     assert t.confidence == 1.0
 
-
 def test_resolve_title_docx_title_style():
     """DOCX Title style → source='visual'."""
     blocks = (
@@ -64,7 +60,6 @@ def test_resolve_title_docx_title_style():
     assert t.source == "visual"
     assert t.block_ordinal == 1
 
-
 def test_resolve_title_docx_subtitle_style():
     """DOCX Subtitle style → source='visual'."""
     blocks = (_b(0, "My Subtitle", style="Subtitle"),)
@@ -72,7 +67,6 @@ def test_resolve_title_docx_subtitle_style():
     t = resolve_title(doc)
     assert t is not None
     assert t.source == "visual"
-
 
 def test_resolve_title_first_heading():
     """DOCX Heading 1 → source='inferred'."""
@@ -86,7 +80,6 @@ def test_resolve_title_first_heading():
     assert t.value == "First Heading"
     assert t.source == "inferred"
 
-
 def test_resolve_title_fallback():
     """Ничего не нашли → fallback по первой непустой строке текста."""
     blocks = ()
@@ -96,14 +89,12 @@ def test_resolve_title_fallback():
     assert t.value == "Some line"
     assert t.source == "inferred"
 
-
 def test_resolve_title_no_fallback():
     """Если fallback не дан → None."""
     blocks = ()
     doc = _make_doc(blocks=blocks)
     assert resolve_title(doc) is None
     assert resolve_title(doc, text="") is None
-
 
 def test_resolve_title_priority_metadata_over_style(monkeypatch):
     """Metadata важнее visual."""

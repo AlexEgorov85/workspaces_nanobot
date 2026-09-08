@@ -19,7 +19,6 @@ from retrieval.records import (
     SemanticRecord,
 )
 
-
 def _b(ord: int) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ord:04d}", block_type="paragraph", content="x",
@@ -27,7 +26,6 @@ def _b(ord: int) -> DocumentBlock:
         paragraph_index=None, table_index=None, ordinal=ord,
         block_metadata={},
     )
-
 
 def _doc(tmp_path_factory=None) -> PhysicalDocument:
     import tempfile
@@ -41,7 +39,6 @@ def _doc(tmp_path_factory=None) -> PhysicalDocument:
         blocks=tuple(_b(i) for i in range(3)), page_count=1,
     )
 
-
 def _c(cid: str, text: str, idx: int = 0) -> Chunk:
     return Chunk(
         chunk_id=cid, index=idx, text=text, char_count=len(text),
@@ -49,7 +46,6 @@ def _c(cid: str, text: str, idx: int = 0) -> Chunk:
         section_id="s1", section_path="1", section_heading="x",
         block_indices=(0,), block_types=("paragraph",),
     )
-
 
 def _struct() -> DocumentStructure:
     return DocumentStructure(
@@ -63,20 +59,17 @@ def _struct() -> DocumentStructure:
         numbering=(), total_blocks=3,
     )
 
-
 def test_build_creates_identity():
     analysis = DocumentAnalysis.build(
         physical=_doc(), structure=_struct(), chunks=(_c("001", "x"),),
     )
     assert analysis.identity.document_id != ""
 
-
 def test_build_includes_retrieval_index_by_default():
     analysis = DocumentAnalysis.build(
         physical=_doc(), structure=_struct(), chunks=(_c("001", "оплата"),),
     )
     assert analysis.retrieval_index is not None
-
 
 def test_build_skips_retrieval_index_when_disabled():
     analysis = DocumentAnalysis.build(
@@ -85,7 +78,6 @@ def test_build_skips_retrieval_index_when_disabled():
     )
     assert analysis.retrieval_index is None
 
-
 def test_get_chunk_by_id():
     chunks = (_c("001", "x"), _c("002", "y"))
     analysis = DocumentAnalysis.build(
@@ -93,7 +85,6 @@ def test_get_chunk_by_id():
     )
     assert analysis.get_chunk("001").text == "x"
     assert analysis.get_chunk("999") is None
-
 
 def test_get_record_by_id():
     chunks = (_c("001", "x"),)
@@ -105,7 +96,6 @@ def test_get_record_by_id():
     assert analysis.get_record("001").summary == "summary"
     assert analysis.get_record("999") is None
 
-
 def test_to_dict_roundtrip():
     analysis = DocumentAnalysis.build(
         physical=_doc(), structure=_struct(), chunks=(_c("001", "x"),),
@@ -116,7 +106,6 @@ def test_to_dict_roundtrip():
     assert d["version"] == 1
     assert d["has_retrieval_index"] is True
 
-
 def test_retrieve_uses_index():
     chunks = (_c("001", "оплата по договору"), _c("002", "другой текст"))
     analysis = DocumentAnalysis.build(
@@ -126,7 +115,6 @@ def test_retrieve_uses_index():
     assert len(hits) >= 1
     assert hits[0].chunk_id == "001"
 
-
 def test_retrieve_falls_back_when_no_index():
     chunks = (_c("001", "оплата"),)
     analysis = DocumentAnalysis.build(
@@ -135,7 +123,6 @@ def test_retrieve_falls_back_when_no_index():
     )
     hits = analysis.retrieve("оплата")
     assert len(hits) >= 1
-
 
 def test_custom_identity_used():
     chunks = (_c("001", "x"),)

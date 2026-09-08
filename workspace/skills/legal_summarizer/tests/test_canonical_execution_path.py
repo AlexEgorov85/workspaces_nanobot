@@ -8,12 +8,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def test_short_doc_selects_direct(tmp_path: Path):
     """Короткий документ → strategy = 'direct'."""
@@ -24,7 +22,6 @@ def test_short_doc_selects_direct(tmp_path: Path):
     p = _write_doc(tmp_path, "Просто короткий текст для теста.")
     insp = inspect_canonical(text="", document_path=p)
     assert insp.strategy in ("direct", "map_flat")
-
 
 def test_long_doc_selects_map_strategy(tmp_path: Path):
     """Длинный документ → strategy = 'map_flat' или 'map_hierarchical'."""
@@ -40,7 +37,6 @@ def test_long_doc_selects_map_strategy(tmp_path: Path):
     p = _write_doc(tmp_path, text)
     insp = inspect_canonical(text="", document_path=p)
     assert insp.strategy in ("direct", "map_flat", "map_hierarchical")
-
 
 def test_strategy_decision_single_source(tmp_path: Path):
     """strategy определяется только через canonical select_strategy."""
@@ -66,7 +62,6 @@ def test_strategy_decision_single_source(tmp_path: Path):
     assert call_count["n"] >= 1
     assert insp.strategy in ("direct", "map_flat", "map_hierarchical")
 
-
 def test_reducer_decision_single_source():
     """reducer не делает собственного решения flat/hierarchical.
 
@@ -79,7 +74,6 @@ def test_reducer_decision_single_source():
     assert hasattr(hierarchical_reducer, "reduce_sections_to_document")
     assert not hasattr(hierarchical_reducer, "select_strategy")
     assert not hasattr(hierarchical_reducer, "should_use_hierarchical_reduce")
-
 
 def test_strategy_re_evaluation_deterministic(tmp_path: Path):
     """strategy детерминирован — два вызова дают одинаковый результат."""

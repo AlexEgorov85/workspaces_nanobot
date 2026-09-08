@@ -19,7 +19,6 @@ from document.physical import (
     PhysicalDocument,
 )
 
-
 def _b(ordinal: int, page_index: int, content: str = "x") -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ordinal:04d}", block_type="page", content=content,
@@ -28,14 +27,12 @@ def _b(ordinal: int, page_index: int, content: str = "x") -> DocumentBlock:
         paragraph_index=None, table_index=None, ordinal=ordinal, block_metadata={},
     )
 
-
 def _make_doc(n_pages: int) -> PhysicalDocument:
     blocks = tuple(_b(i, i + 1) for i in range(n_pages))
     return PhysicalDocument(
         path="/tmp/fake.pdf", format="pdf", title="x",
         size_bytes=100, blocks=blocks, page_count=n_pages,
     )
-
 
 def _outline_item(title: str, page_index_1based: int):
     """Создать mock outline item с ``page=IndirectObject(page_index)``."""
@@ -48,7 +45,6 @@ def _outline_item(title: str, page_index_1based: int):
         IndexError
     )
     return item, page_ref
-
 
 def _make_reader(outline_items: list, n_pages: int):
     """Создать mock PdfReader с outline и pages."""
@@ -74,7 +70,6 @@ def _make_reader(outline_items: list, n_pages: int):
     reader.outline = outline_items
     return reader
 
-
 def test_mapped_to_heading_candidates_skips_unmapped(monkeypatch):
     """Кандидаты с anchor=None отбрасываются."""
     from document.pdf_outline import (
@@ -96,7 +91,6 @@ def test_mapped_to_heading_candidates_skips_unmapped(monkeypatch):
     assert out[0].block_index == 5
     assert out[0].source == "pdf_outline"
 
-
 def test_map_pdf_outline_no_pypdf(monkeypatch):
     """Если pypdf недоступен — возвращает пустой список."""
     import builtins
@@ -111,7 +105,6 @@ def test_map_pdf_outline_no_pypdf(monkeypatch):
     doc = _make_doc(3)
     result = map_pdf_outline("/tmp/x.pdf", doc)
     assert result == []
-
 
 def test_map_pdf_outline_no_outline(monkeypatch):
     """Outline пуст → возвращает пустой список."""
@@ -132,7 +125,6 @@ def test_map_pdf_outline_no_outline(monkeypatch):
     doc = _make_doc(3)
     result = map_pdf_outline("/tmp/x.pdf", doc)
     assert result == []
-
 
 def test_map_pdf_outline_missing_destination(monkeypatch):
     """Item без destination → diagnostics=missing_destination, anchor=None."""
@@ -162,7 +154,6 @@ def test_map_pdf_outline_missing_destination(monkeypatch):
     assert len(result) == 1
     assert result[0].anchor is None
     assert "missing_destination" in result[0].diagnostics
-
 
 def test_structure_anchor_roundtrip():
     a = StructureAnchor(block_ordinal=5, page_index=3, char_offset=42)

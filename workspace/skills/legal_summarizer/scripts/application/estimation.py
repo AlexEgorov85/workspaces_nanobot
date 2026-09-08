@@ -17,19 +17,9 @@ from execution.config import (
     MAX_REDUCE_ROUNDS,
     MID_REDUCE_GROUP_SIZE,
 )
-from llm.config import get_chunking_config, get_execution_config
+from llm.config import get_chunking_config
+import llm.config as _llm_config_mod
 from planning.plan import ExecutionPlan
-
-
-def _service_mod():
-    """Lazy lookup ``service.get_execution_config`` (для monkeypatch).
-
-    Тесты делают ``monkeypatch.setattr(service, "get_execution_config", mock)``
-    и ожидают, что ``estimate_for_run`` прочитает mock. Чтобы patch
-    работал, читаем через module attribute, а не через локальный импорт.
-    """
-    import application.service as _svc
-    return _svc
 
 
 _QUICK_SAMPLE_PAGES = 10
@@ -117,7 +107,7 @@ def estimate_for_run(insp, ctx) -> Estimate:
     числа LLM-вызовов: гарантированно ``actual <= estimate`` для любой
     стратегии (direct / map_flat / map_hierarchical).
     """
-    cfg = _service_mod().get_execution_config()
+    cfg = _llm_config_mod.get_execution_config()
     chunk_dur = float(cfg["estimated_chunk_duration_sec"])
     threshold = float(cfg["confirmation_threshold_sec"])
     if ctx.plan is None:
@@ -145,7 +135,7 @@ def quick_estimate(path: Path | str) -> dict[str, Any]:
     if not p.exists():
         raise FileNotFoundError(str(p))
     ext = p.suffix.lower()
-    cfg = _service_mod().get_execution_config()
+    cfg = _llm_config_mod.get_execution_config()
     chunk_dur = float(cfg["estimated_chunk_duration_sec"])
     threshold = float(cfg["confirmation_threshold_sec"])
     chunk_size = int(get_chunking_config().get("chunk_size", 100000))

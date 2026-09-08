@@ -10,7 +10,6 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _simple_struct_with_sections(n_sections: int):
     """Структура с N секциями."""
     from document.structure import (
@@ -58,7 +57,6 @@ def _simple_struct_with_sections(n_sections: int):
         coverage_ratio=1.0,
     )
 
-
 class _FakeChunk:
     def __init__(self, chunk_id: str, section_id: str, text: str):
         self.chunk_id = chunk_id
@@ -71,7 +69,6 @@ class _FakeChunk:
         self.table_id = None
         self.text = text
 
-
 def _chunks_for(struct):
     """Один chunk на каждую секцию."""
     chunks = []
@@ -82,7 +79,6 @@ def _chunks_for(struct):
             text="x" * 3_500,
         ))
     return tuple(chunks)
-
 
 def test_policy_max_sections_per_batch_changes_plan():
     """Изменение ``max_sections_per_batch`` меняет реальный план."""
@@ -122,7 +118,6 @@ def test_policy_max_sections_per_batch_changes_plan():
         f"{len(plan_small.batches)} vs {len(plan_large.batches)}"
     )
 
-
 def test_policy_per_batch_token_budget_changes_plan():
     """Изменение ``per_batch_token_budget`` меняет реальный план."""
     from planning.strategy import (
@@ -156,7 +151,6 @@ def test_policy_per_batch_token_budget_changes_plan():
     )
 
     assert len(plan_tight.batches) >= len(plan_loose.batches)
-
 
 def test_policy_direct_threshold_changes_strategy():
     """Изменение ``direct_threshold_tokens`` меняет стратегию."""

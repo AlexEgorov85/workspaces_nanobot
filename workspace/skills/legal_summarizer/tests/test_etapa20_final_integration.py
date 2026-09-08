@@ -25,12 +25,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _install_llm_mocks(monkeypatch, *, batch_recorder=None):
     """Подменяем llm_* во всех namespace."""
@@ -52,13 +50,8 @@ def _install_llm_mocks(monkeypatch, *, batch_recorder=None):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
-
 
 def test_scenario_direct(tmp_path: Path, monkeypatch):
     """Small document → direct → exactly 1 LLM call → correct metadata."""
@@ -77,7 +70,6 @@ def test_scenario_direct(tmp_path: Path, monkeypatch):
     assert result["stats"]["map_calls"] == 0
     assert result["stats"]["sections_total"] >= 0
 
-
 def test_scenario_map_flat(tmp_path: Path, monkeypatch):
     """Document → exact ExecutionPlan → no duplicates, no omissions."""
     batches: list[tuple[str, ...]] = []
@@ -92,7 +84,7 @@ def test_scenario_map_flat(tmp_path: Path, monkeypatch):
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    ctx = summarizer._build_execution_context(insp, length="detailed")
+    ctx = summarizer.build_execution_context(insp, length="detailed")
     assert ctx.strategy in ("map_flat", "map_hierarchical")
 
     result = summarizer.run(
@@ -114,7 +106,6 @@ def test_scenario_map_flat(tmp_path: Path, monkeypatch):
     for b in batches:
         actual.update(b)
     assert actual == planned
-
 
 def test_scenario_map_hierarchical(tmp_path: Path, monkeypatch):
     """Many sections → map_hierarchical → exactly one final result."""
@@ -138,7 +129,6 @@ def test_scenario_map_hierarchical(tmp_path: Path, monkeypatch):
     # total_llm_calls >= 1 (map calls + section reductions + document reduce).
     assert result["stats"]["total_llm_calls"] >= 1
 
-
 def test_scenario_idempotency(tmp_path: Path, monkeypatch):
     """Same operation twice → second call is cached."""
     _install_llm_mocks(monkeypatch)
@@ -160,7 +150,6 @@ def test_scenario_idempotency(tmp_path: Path, monkeypatch):
     assert r2["status"] == "completed"
     assert r2["stats"].get("cached") is True
 
-
 def test_scenario_brief(tmp_path: Path, monkeypatch):
     """Brief mode → execution с budget."""
     _install_llm_mocks(monkeypatch)
@@ -180,7 +169,6 @@ def test_scenario_brief(tmp_path: Path, monkeypatch):
     assert result["status"] == "completed", result
     assert result["result"]["length"] == "brief"
     assert result["result"]["summary"]
-
 
 def test_scenario_single_flight(tmp_path: Path, monkeypatch):
     """Two execution path invocations have peak==1 concurrent LLM call."""
@@ -210,12 +198,8 @@ def test_scenario_single_flight(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
     import application.service as summarizer
     text = (

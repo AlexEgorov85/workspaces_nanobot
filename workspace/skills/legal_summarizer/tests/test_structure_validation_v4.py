@@ -28,7 +28,6 @@ from document.validation import (
     validate_structure,
 )
 
-
 def _b(ordinal: int) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ordinal:04d}", block_type="page", content="x",
@@ -37,7 +36,6 @@ def _b(ordinal: int) -> DocumentBlock:
         ordinal=ordinal, block_metadata={},
     )
 
-
 def _root(children: tuple[str, ...] = (), end_block: int = 9) -> StructureNode:
     return StructureNode(
         node_id="n_0000", node_type="document", semantic_type=None,
@@ -45,7 +43,6 @@ def _root(children: tuple[str, ...] = (), end_block: int = 9) -> StructureNode:
         children=children, start_block=0, end_block=end_block,
         confidence=1.0,
     )
-
 
 def _sec(nid: str, *, start: int, end: int,
           parent_id: str = "n_0000", level: int = 1,
@@ -57,14 +54,12 @@ def _sec(nid: str, *, start: int, end: int,
         confidence=0.7,
     )
 
-
 def _doc(total_blocks: int = 10) -> PhysicalDocument:
     return PhysicalDocument(
         path="/tmp/x", format="pdf", title=None, size_bytes=0,
         blocks=tuple(_b(i) for i in range(total_blocks)),
         page_count=total_blocks,
     )
-
 
 def test_parent_child_overlap_is_valid():
     """Parent range покрывает child range — валидно (§4)."""
@@ -84,7 +79,6 @@ def test_parent_child_overlap_is_valid():
     assert "cross_branch_overlap" not in kinds
     assert r.is_valid, f"unexpected issues: {r.issues}"
 
-
 def test_sibling_overlap_is_invalid():
     """Siblings под одним parent с перекрывающимися ranges — невалидно."""
     s = DocumentStructure(
@@ -100,7 +94,6 @@ def test_sibling_overlap_is_invalid():
     r = validate_structure(s, _doc(10))
     kinds = {i.kind for i in r.issues}
     assert "sibling_overlap" in kinds
-
 
 def test_cross_branch_overlap_is_invalid():
     """Sections из разных ветвей с перекрывающимися ranges — невалидно."""
@@ -119,7 +112,6 @@ def test_cross_branch_overlap_is_invalid():
     kinds = {i.kind for i in r.issues}
     assert "cross_branch_overlap" in kinds
 
-
 def test_no_cycle_detected():
     """A.parent_id=B, B.parent_id=A → cycle issue."""
     s = DocumentStructure(
@@ -135,7 +127,6 @@ def test_no_cycle_detected():
     r = validate_structure(s, _doc(10))
     kinds = {i.kind for i in r.issues}
     assert "cycle" in kinds
-
 
 def test_duplicate_child_detected():
     """Один node в children двух parents → duplicate_child issue."""
@@ -154,7 +145,6 @@ def test_duplicate_child_detected():
     kinds = {i.kind for i in r.issues}
     assert "duplicate_child" in kinds
 
-
 def test_root_must_cover_full_document():
     """Root.end_block != total_blocks-1 → issue."""
     s = DocumentStructure(
@@ -168,7 +158,6 @@ def test_root_must_cover_full_document():
     r = validate_structure(s, _doc(10))
     kinds = {i.kind for i in r.issues}
     assert "root_does_not_cover_document" in kinds
-
 
 def test_root_must_start_at_zero():
     """Root.start_block != 0 → issue."""
@@ -188,7 +177,6 @@ def test_root_must_start_at_zero():
     kinds = {i.kind for i in r.issues}
     assert "root_not_at_start" in kinds
 
-
 def test_range_out_of_bounds_detected():
     """end_block >= total_blocks → range_out_of_bounds issue."""
     s = DocumentStructure(
@@ -203,7 +191,6 @@ def test_range_out_of_bounds_detected():
     r = validate_structure(s, _doc(10))
     kinds = {i.kind for i in r.issues}
     assert "range_out_of_bounds" in kinds
-
 
 def test_nested_hierarchy_no_false_positive_overlap():
     """Полная nested иерархия (root → A → A.1, A.2 → B → B.1) валидна."""

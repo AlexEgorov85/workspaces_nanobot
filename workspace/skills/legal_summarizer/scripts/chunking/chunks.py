@@ -142,6 +142,7 @@ class Chunk:
     target_source_char_start: int | None = None
     target_source_char_end: int | None = None
     source_spans: tuple[tuple[int, int, int | None, int | None], ...] = ()
+    section_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -177,6 +178,7 @@ class Chunk:
                 }
                 for (b, cs, ce, marker) in self.source_spans
             ],
+            "section_ids": list(self.section_ids),
         }
 
 
@@ -190,6 +192,8 @@ class ChunkConfig:
     table_chunk_threshold_chars: int = 6000
     min_chunk_chars: int = 200
     min_section_chars: int = 200
+    target_chunk_chars: int = 20000
+    preferred_min_before_strong_boundary: float = 0.7
 
 
 def _make_table_chunk_text(rows: list[str], row_start: int, row_end: int) -> str:

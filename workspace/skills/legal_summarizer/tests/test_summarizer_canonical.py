@@ -10,12 +10,10 @@ from application.canonical import (
     strategy_from_pipeline,
 )
 
-
 def _write_doc(tmp_path: Path, name: str, text: str) -> Path:
     p = tmp_path / name
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def test_build_pipeline_result_text(tmp_path: Path):
     """Pipeline на TXT даёт PipelineResult со всеми компонентами."""
@@ -27,14 +25,12 @@ def test_build_pipeline_result_text(tmp_path: Path):
     assert result.chunks is not None
     assert result.validation is not None
 
-
 def test_strategy_from_pipeline_short_doc(tmp_path: Path):
     """Короткий документ → DIRECT стратегия."""
     p = _write_doc(tmp_path, "short.txt", "Hello world. Это короткий текст.")
     result = build_pipeline_result(document_path=p)
     policy = strategy_from_pipeline(result)
     assert policy in ("direct", "map_flat")
-
 
 def test_strategy_from_pipeline_long_doc(tmp_path: Path):
     """Длинный документ: strategy selector возвращает валидное значение."""
@@ -49,7 +45,6 @@ def test_strategy_from_pipeline_long_doc(tmp_path: Path):
     policy = strategy_from_pipeline(result)
     assert policy in ("direct", "map_flat", "map_hierarchical")
 
-
 def test_build_plan_from_pipeline_returns_plan(tmp_path: Path):
     """План строится из PipelineResult."""
     p = _write_doc(
@@ -61,7 +56,6 @@ def test_build_plan_from_pipeline_returns_plan(tmp_path: Path):
         result, document_id=result.analysis.identity.document_id,
     )
     assert plan is not None
-
 
 def test_inspect_canonical_text(tmp_path: Path):
     """inspect_canonical даёт CanonicalInspection со всеми полями."""
@@ -80,7 +74,6 @@ def test_inspect_canonical_text(tmp_path: Path):
     assert insp.structure is not None
     assert insp.estimated_llm_calls >= 1
 
-
 def test_inspect_canonical_requires_document_path(tmp_path: Path):
     """inspect_canonical без пути — ValueError."""
     from application.canonical import (
@@ -92,7 +85,6 @@ def test_inspect_canonical_requires_document_path(tmp_path: Path):
     except ValueError:
         return
     raise AssertionError("expected ValueError")
-
 
 def test_estimate_canonical_returns_dict(tmp_path: Path):
     """estimate_canonical даёт dict без LLM-вызовов."""
@@ -106,7 +98,6 @@ def test_estimate_canonical_returns_dict(tmp_path: Path):
     assert "estimated_llm_calls" in est
     assert "strategy" in est
     assert est["strategy"] in ("direct", "map_flat", "map_hierarchical")
-
 
 def test_estimate_chunks_canonical_returns_positive():
     """estimate_chunks_canonical для непустого списка даёт >0."""
@@ -125,7 +116,6 @@ def test_estimate_chunks_canonical_returns_positive():
     total = estimate_chunks_canonical([chunk])
     assert total >= 1
 
-
 def test_estimate_chunks_canonical_empty():
     """estimate_chunks_canonical для пустого списка = 0."""
     from application.canonical import (
@@ -133,7 +123,6 @@ def test_estimate_chunks_canonical_empty():
     )
 
     assert estimate_chunks_canonical([]) == 0
-
 
 def test_pack_batches_canonical_returns_batches():
     """pack_batches_canonical возвращает список tuple chunk_ids."""

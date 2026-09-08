@@ -10,7 +10,6 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _make_structure_with_nested():
     """Структура: root, chapter 0..4, два articles (0..1, 2..2), article2 (3..3)."""
     from document.structure import (
@@ -94,7 +93,6 @@ def _make_structure_with_nested():
         coverage_ratio=1.0,
     )
 
-
 def test_block_to_node_delegates_to_canonical():
     """``DocumentStructure.block_to_node`` даёт тот же результат,
     что ``block_ownership.block_to_node``."""
@@ -107,7 +105,6 @@ def test_block_to_node_delegates_to_canonical():
     via_struct = struct.block_to_node()
     via_canonical = canonical_b2n(struct)
     assert via_struct == via_canonical
-
 
 def test_block_to_node_returns_root_for_uncovered():
     """Blocks вне section ranges → root_id."""
@@ -122,7 +119,6 @@ def test_block_to_node_returns_root_for_uncovered():
     for b in (5, 6, 7, 8, 9):
         assert mapping[b] == struct.root_id
 
-
 def test_block_to_node_assigns_deepest_section():
     """Block в диапазоне article → article (deepest)."""
     struct = _make_structure_with_nested()
@@ -135,7 +131,6 @@ def test_block_to_node_assigns_deepest_section():
     assert mapping[0] == "n_0002"  # article 1
     assert mapping[1] == "n_0002"  # article 1
     assert mapping[2] == "n_0003"  # article 2
-
 
 def test_only_one_owner_per_block():
     """``build_block_ownership`` даёт ровно одного owner на block."""

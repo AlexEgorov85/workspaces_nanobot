@@ -13,7 +13,6 @@ from application.pipeline_structure import (
     run_canonical_pipeline,
 )
 
-
 def test_pipeline_tables_only():
     import tempfile
     from docx import Document
@@ -32,7 +31,6 @@ def test_pipeline_tables_only():
 
     result = run_canonical_pipeline(path)
     assert result is not None
-
 
 def test_pipeline_table_heavy_does_not_crash():
     import tempfile

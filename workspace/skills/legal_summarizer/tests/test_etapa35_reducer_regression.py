@@ -17,7 +17,6 @@ from execution.hierarchical import (
     reduce_sections_to_document,
 )
 
-
 def test_reducer_deterministic():
     """Одинаковый ввод → одинаковый вывод и одинаковые rounds."""
     items = [(f"s{i}", f"МАРКЕР_{i:03d} summary " + "x" * 50) for i in range(1, 7)]
@@ -42,7 +41,6 @@ def test_reducer_deterministic():
     assert r1.final_summary == r2.final_summary, "reducer not deterministic"
     assert r1.rounds_done == r2.rounds_done
 
-
 def test_reducer_no_data_loss():
     """Все входные маркеры присутствуют после каждого round'а."""
     cfg = HierarchicalReducerConfig(group_size=3, max_rounds=2)
@@ -56,7 +54,6 @@ def test_reducer_no_data_loss():
     for i in range(1, 7):
         marker = f"МАРКЕР_{i:03d}"
         assert marker in r.final_summary, f"marker {marker} lost"
-
 
 def test_reducer_rounds_bounded():
     """rounds_done <= max_rounds + 1 (финальный reduce)."""

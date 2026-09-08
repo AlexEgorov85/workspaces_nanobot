@@ -34,7 +34,6 @@ from pathlib import Path
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
-_SKILL_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPTS_ROOT = Path(__file__).resolve().parent
 
 
@@ -62,10 +61,6 @@ def _setup_stdout_encoding() -> None:
             pass
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-if str(_SKILL_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SKILL_ROOT))
-# ``scripts/`` — корень executable runtime Skill. ``cli.py`` живёт
-# непосредственно в нём, поэтому достаточно добавить сам scripts/.
 if str(_SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_ROOT))
 
@@ -283,16 +278,16 @@ def main() -> None:
         parser = _build_parser()
         args = parser.parse_args()
 
+        from application.context_builder import build_execution_context
+        from application.estimation import estimate_for_run
         from application.service import (
-            _build_execution_context,
-            _estimate_for_run,
             inspect as _inspect,
             load_text,
             needs_confirmation,
             quick_estimate,
             run,
-            _progress,
         )
+        from chunking._text_helpers import progress as _progress
         from llm.config import get_default_length
         from output.presenter import (
             build_confirmation_options,
@@ -341,12 +336,12 @@ def main() -> None:
 
         if args.estimate_only:
             insp = _inspect(text, document_path=str(args.file))
-            ctx = _build_execution_context(
+            ctx = build_execution_context(
                 insp,
                 length=length,
                 question=args.question,
             )
-            est = _estimate_for_run(insp, ctx)
+            est = estimate_for_run(insp, ctx)
             _emit_done({
                 "mode": "estimate_only",
                 "status": "ok",
@@ -382,8 +377,8 @@ def main() -> None:
         # упал и упал на fallback), полный inspect может пересмотреть.
         if not args.confirm:
             insp = _inspect(text, document_path=str(args.file))
-            ctx = _build_execution_context(insp, length=length, question=args.question)
-            est = _estimate_for_run(insp, ctx)
+            ctx = build_execution_context(insp, length=length, question=args.question)
+            est = estimate_for_run(insp, ctx)
             if needs_confirmation(est):
                 payload = build_confirmation_options(
                     chars_in=len(text),

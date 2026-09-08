@@ -7,7 +7,6 @@ from chunking.importance_score import (
     ImportanceScore, compute_importance, select_top_chunks_by_importance,
 )
 
-
 def _c(cid: str, text: str, idx: int = 0, section: str = "s1") -> Chunk:
     return Chunk(
         chunk_id=cid, index=idx, text=text, char_count=len(text),
@@ -17,41 +16,33 @@ def _c(cid: str, text: str, idx: int = 0, section: str = "s1") -> Chunk:
         block_types=("paragraph",),
     )
 
-
 def test_short_chunk_high_score():
     s = compute_importance(_c("001", "short"), section_level=1)
     assert s.is_heading >= 1.0
-
 
 def test_legal_keywords():
     s = compute_importance(_c("001", "Статья 12. Штраф за нарушение"))
     assert s.legal_importance > 0
 
-
 def test_definition_bonus():
     s = compute_importance(_c("001", "Договор определяется как соглашение сторон"))
     assert s.is_definition > 0
-
 
 def test_first_chunk_bonus():
     s = compute_importance(_c("001", "x"), section_index=0, section_chunk_count=5)
     assert s.is_first_in_section == 1.0
 
-
 def test_last_chunk_bonus():
     s = compute_importance(_c("001", "x"), section_index=4, section_chunk_count=5)
     assert s.is_last_in_section == 1.0
-
 
 def test_total_score():
     s = compute_importance(_c("001", "Статья 12"), section_level=1)
     assert s.total > 0
 
-
 def test_importance_score_dataclass():
     s = ImportanceScore(is_title=1.0)
     assert s.total >= 1.0
-
 
 def test_select_top_chunks_by_importance():
     chunks = (
@@ -61,7 +52,6 @@ def test_select_top_chunks_by_importance():
     )
     selected = select_top_chunks_by_importance(chunks, top_k=2)
     assert len(selected) == 2
-
 
 def test_select_top_chunks_empty():
     assert select_top_chunks_by_importance(()) == []

@@ -6,7 +6,6 @@ from tools.architecture_guard import (
     count_abstract_classes, has_oversized_class, is_factory_pattern,
 )
 
-
 def test_factory_pattern_detection():
     assert is_factory_pattern("MyFactory") is True
     assert is_factory_pattern("SectionBuilder") is True
@@ -14,7 +13,6 @@ def test_factory_pattern_detection():
     assert is_factory_pattern("DocumentStructure") is False
     assert is_factory_pattern("ChunkPlanner") is False
     assert is_factory_pattern("") is False
-
 
 def test_count_abstract_classes():
     import document.structure as models
@@ -24,14 +22,12 @@ def test_count_abstract_classes():
         count = count_abstract_classes(module)
         assert count == 0, f"{module.__name__} has {count} abstract classes"
 
-
 def test_no_oversized_classes_in_new_modules():
     import document.hierarchy as hierarchy
     import retrieval.query as retrieval
     import document.numbering as numbering
     for module in (hierarchy, retrieval, numbering):
         assert has_oversized_class(module, max_lines=500) is False
-
 
 def test_factory_check_specific_names():
     """Проверяем имена из PLAN §60."""
@@ -42,7 +38,6 @@ def test_factory_check_specific_names():
     ]
     for name in forbidden:
         assert is_factory_pattern(name) is True
-
 
 def test_clean_module_under_threshold():
     import document.numbering as numbering

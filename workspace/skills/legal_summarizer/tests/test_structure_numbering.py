@@ -8,12 +8,10 @@ from document.numbering import (
 )
 from document.structure import NumberingInfo
 
-
 def _ni(**kw):
     base = dict(raw="1", scheme="decimal", components=(1,), level=1, ordinal=None)
     base.update(kw)
     return NumberingInfo(**base)
-
 
 def test_decimal_simple():
     n = parse_numbering("1. Общие положения")
@@ -22,14 +20,12 @@ def test_decimal_simple():
     assert n.components == (1,)
     assert n.level == 1
 
-
 def test_decimal_nested():
     n = parse_numbering("1.2.3 Пункт подпункта")
     assert n is not None
     assert n.scheme == "decimal"
     assert n.components == (1, 2, 3)
     assert n.level == 3
-
 
 def test_legal_article():
     n = parse_numbering("Статья 12. Права сторон")
@@ -38,7 +34,6 @@ def test_legal_article():
     assert n.components == (12,)
     assert n.level == 1
 
-
 def test_legal_article_sub():
     n = parse_numbering("Статья 12.1")
     assert n is not None
@@ -46,13 +41,11 @@ def test_legal_article_sub():
     assert n.components == (12, 1)
     assert n.level == 2
 
-
 def test_legal_chapter():
     n = parse_numbering("Глава 3. Ответственность")
     assert n is not None
     assert n.scheme == "legal_chapter"
     assert n.components == (3,)
-
 
 def test_legal_section_roman():
     n = parse_numbering("Раздел IV. Заключительные положения")
@@ -60,13 +53,11 @@ def test_legal_section_roman():
     assert n.scheme == "legal_section_roman"
     assert n.components == (4,)
 
-
 def test_paragraph_mark():
     n = parse_numbering("§ 5. Конфиденциальность")
     assert n is not None
     assert n.scheme == "paragraph_mark"
     assert n.components == (5,)
-
 
 def test_legal_clause():
     n = parse_numbering("Пункт 1. Обязанности заказчика")
@@ -74,13 +65,11 @@ def test_legal_clause():
     assert n.scheme == "legal_clause"
     assert n.components == (1,)
 
-
 def test_cyrillic_alpha():
     n = parse_numbering("а) первое условие")
     assert n is not None
     assert n.scheme == "cyrillic_alpha"
     assert n.components == ("а",)
-
 
 def test_appendix_digit():
     n = parse_numbering("Приложение 1")
@@ -88,13 +77,11 @@ def test_appendix_digit():
     assert n.scheme == "appendix"
     assert n.components == (1,)
 
-
 def test_appendix_letter():
     n = parse_numbering("Приложение А")
     assert n is not None
     assert n.scheme == "appendix"
     assert n.components == ("А",)
-
 
 def test_appendix_letter_subnumber():
     n = parse_numbering("Приложение А.1")
@@ -103,12 +90,10 @@ def test_appendix_letter_subnumber():
     assert n.components == ("А", 1)
     assert n.level == 2
 
-
 def test_no_numbering():
     assert parse_numbering("Просто текст без номера") is None
     assert parse_numbering("") is None
     assert parse_numbering("   ") is None
-
 
 def test_sibling_ordinals_decimal_flat():
     items = [
@@ -118,7 +103,6 @@ def test_sibling_ordinals_decimal_flat():
     ]
     ordinals = assign_sibling_ordinals(items)
     assert ordinals == [1, 2, 3]
-
 
 def test_sibling_ordinals_decimal_nested():
     items = [
@@ -130,7 +114,6 @@ def test_sibling_ordinals_decimal_nested():
     ]
     ordinals = assign_sibling_ordinals(items)
     assert ordinals == [1, 1, 2, 1, 1]
-
 
 def test_sibling_ordinals_resets_per_parent():
     items = [
@@ -144,7 +127,6 @@ def test_sibling_ordinals_resets_per_parent():
     ordinals = assign_sibling_ordinals(items)
     assert ordinals == [1, 1, 2, 1, 1, 2]
 
-
 def test_sibling_ordinals_with_none():
     items = [
         _ni(raw="1", components=(1,)),
@@ -153,7 +135,6 @@ def test_sibling_ordinals_with_none():
     ]
     ordinals = assign_sibling_ordinals(items)
     assert ordinals == [1, None, 1]
-
 
 def test_sibling_ordinals_empty():
     assert assign_sibling_ordinals([]) == []

@@ -15,12 +15,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _install_llm_mocks(monkeypatch):
     """Подменяем llm_* во всех namespace."""
@@ -40,13 +38,8 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
-
 
 def _build_six_section_doc(tmp_path: Path) -> str:
     """6 sections, each ~105000 chars → 7+ chunks."""
@@ -58,7 +51,6 @@ def _build_six_section_doc(tmp_path: Path) -> str:
             + "\n\n"
         )
     return "".join(sections)
-
 
 def test_plan_covers_only_selected_chunks(tmp_path, monkeypatch):
     """selected_chunks=[c2, c4] → plan содержит ТОЛЬКО c2, c4."""
@@ -72,7 +64,7 @@ def test_plan_covers_only_selected_chunks(tmp_path, monkeypatch):
     selected = [insp.chunks[1], insp.chunks[3]]
     selected_ids = {c.chunk_id for c in selected}
 
-    ctx = summarizer._build_execution_context(insp, selected_chunks=selected)
+    ctx = summarizer.build_execution_context(insp, selected_chunks=selected)
     assert len(ctx.chunks) == 2
     assert {c.chunk_id for c in ctx.chunks} == selected_ids
 
@@ -87,7 +79,6 @@ def test_plan_covers_only_selected_chunks(tmp_path, monkeypatch):
         f"extra={plan_ids - selected_ids}, missing={selected_ids - plan_ids}"
     )
 
-
 def test_plan_no_duplicates(tmp_path, monkeypatch):
     """plan не содержит дублирующихся chunk_id."""
     import application.service as summarizer
@@ -96,14 +87,13 @@ def test_plan_no_duplicates(tmp_path, monkeypatch):
     insp = summarizer.inspect(text, document_path=str(p))
 
     selected = [insp.chunks[0], insp.chunks[2], insp.chunks[4]]
-    ctx = summarizer._build_execution_context(insp, selected_chunks=selected)
+    ctx = summarizer.build_execution_context(insp, selected_chunks=selected)
 
     all_ids: list[str] = []
     for batch in ctx.plan.batches:
         all_ids.extend(batch.chunk_ids)
 
     assert len(all_ids) == len(set(all_ids)), f"duplicate chunk_ids: {all_ids}"
-
 
 def test_plan_no_omissions(tmp_path, monkeypatch):
     """plan покрывает ВСЕ выбранные chunks без пропусков."""
@@ -114,7 +104,7 @@ def test_plan_no_omissions(tmp_path, monkeypatch):
 
     selected = list(insp.chunks[:5])
     selected_ids = {c.chunk_id for c in selected}
-    ctx = summarizer._build_execution_context(insp, selected_chunks=selected)
+    ctx = summarizer.build_execution_context(insp, selected_chunks=selected)
 
     plan_ids: set[str] = set()
     for batch in ctx.plan.batches:

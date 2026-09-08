@@ -15,7 +15,6 @@ from retrieval.provenance import (
     build_provenance_chain,
 )
 
-
 def _b(ord: int, page: int = 1) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ord:04d}", block_type="page", content="x",
@@ -23,7 +22,6 @@ def _b(ord: int, page: int = 1) -> DocumentBlock:
         paragraph_index=None, table_index=None, ordinal=ord,
         block_metadata={},
     )
-
 
 def _doc() -> PhysicalDocument:
     with tempfile.NamedTemporaryFile(
@@ -34,7 +32,6 @@ def _doc() -> PhysicalDocument:
         path=path, format="txt", title=None, size_bytes=0,
         blocks=tuple(_b(i, page=i + 1) for i in range(3)), page_count=3,
     )
-
 
 def _struct() -> DocumentStructure:
     return DocumentStructure(
@@ -57,7 +54,6 @@ def _struct() -> DocumentStructure:
         numbering=(), total_blocks=3,
     )
 
-
 def _c(cid: str, idx: int = 0, ordinals: tuple[int, ...] = (0, 1)) -> Chunk:
     return Chunk(
         chunk_id=cid, index=idx, text="x", char_count=1, token_estimate=1,
@@ -65,7 +61,6 @@ def _c(cid: str, idx: int = 0, ordinals: tuple[int, ...] = (0, 1)) -> Chunk:
         section_path="1", section_heading="Section A",
         block_indices=ordinals, block_types=("page",),
     )
-
 
 def test_build_provenance_chain_basic():
     doc = _doc()
@@ -81,7 +76,6 @@ def test_build_provenance_chain_basic():
     assert chain.page_start == 1
     assert chain.page_end == 2
 
-
 def test_provenance_chain_is_complete():
     doc = _doc()
     struct = _struct()
@@ -90,7 +84,6 @@ def test_provenance_chain_is_complete():
         chunk, doc=doc, struct=struct, document_id="doc-1",
     )
     assert chain.is_complete() is True
-
 
 def test_provenance_chain_to_dict():
     doc = _doc()
@@ -102,7 +95,6 @@ def test_provenance_chain_to_dict():
     d = chain.to_dict()
     assert d["chunk_id"] == "001"
     assert d["section_title"] == "Section A"
-
 
 def test_provenance_chain_with_invalid_block_indices():
     doc = _doc()

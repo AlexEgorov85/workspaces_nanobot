@@ -28,7 +28,7 @@ import time as _time
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
-from llm.calls import llm_batch as _llm_batch
+import llm.calls as _llm_calls_mod
 from llm.prompts import ChunkResultParseError
 from chunking.chunks import Chunk
 from document.structure import DocumentStructure
@@ -71,7 +71,7 @@ def process_context_batch(
     started_at = now_iso()
     start = _time.monotonic()
     with LLM_FLIGHT_LOCK:
-        chunk_results = _llm_batch(
+        chunk_results = _llm_calls_mod.llm_batch(
             chunks_list,
             chunks_total=chunks_total,
             structure=structure,
@@ -105,10 +105,12 @@ async def run_one_batch_async(
 ) -> tuple[str, dict[str, Any] | None, dict[str, str] | None, tuple[str, Exception] | None]:
     """Один батч с retry-циклом (parse-error), под семафором concurrency.
 
-    ``operation_id``/``workspace_root`` приняты для back-compat с
-    monkeypatch-тестами (``monkeypatch.setattr(service, "_run_one_batch_async", mock)``);
-    в самой реализации они не используются (cache writes — на стороне
-    application).
+    ``operation_id``/``workspace_root`` — обязательные параметры
+    единой сигнатуры ``run_one_batch_async`` (callback для
+    ``execution.map_reduce``). В самой реализации они не используются:
+    cache writes — на стороне application
+    (``application.execution_orchestration`` пробрасывает сюда
+    callbacks через ``run_map_reduce_execution``).
 
     Returns:
         ``(status, batch_meta, chunk_results, last_error)``.

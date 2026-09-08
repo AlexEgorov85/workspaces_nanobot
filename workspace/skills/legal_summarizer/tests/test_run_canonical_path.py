@@ -19,12 +19,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _fake_llm(messages, *, context=None, **kwargs):
     """Универсальный mock ``llm.chat``: batch / section / document reduce."""
@@ -42,7 +40,6 @@ def _fake_llm(messages, *, context=None, **kwargs):
         return "Итоговое описание раздела."
 
     return "Итоговое саммари документа."
-
 
 def test_run_direct_short_doc(tmp_path: Path, monkeypatch):
     """Короткий документ → strategy 'direct', один document_reduce call."""
@@ -65,7 +62,6 @@ def test_run_direct_short_doc(tmp_path: Path, monkeypatch):
     assert result["stats"]["document_reduce_calls"] == 1
     assert result["stats"]["map_calls"] == 0
     assert result["result"]["summary"]
-
 
 def test_run_map_flat_long_doc(tmp_path: Path, monkeypatch):
     """Длинный документ без секций → strategy 'map_reduce_flat'."""
@@ -90,7 +86,6 @@ def test_run_map_flat_long_doc(tmp_path: Path, monkeypatch):
     assert result["stats"]["map_calls"] >= 1
     assert result["stats"]["document_reduce_calls"] == 1
     assert result["result"]["summary"]
-
 
 def test_run_no_legacy_re_exports():
     """run() не зависит от удалённых legacy re-export'ов summarizer."""

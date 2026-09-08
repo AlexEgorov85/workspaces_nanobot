@@ -9,13 +9,11 @@ from document.hierarchy import (
     build_document_structure,
 )
 
-
 def _hc(block_index: int, text: str, source: str = "regex_numbered_1"):
     return HeadingCandidate(
         block_index=block_index, text=text, score=0.7, source=source,
         level=1, raw_number=None,
     )
-
 
 def test_sibling_ordinals_in_hierarchy_flat():
     cs = [
@@ -27,7 +25,6 @@ def test_sibling_ordinals_in_hierarchy_flat():
     section_ids = s.nodes[s.root_id].children
     ordinals = [s.nodes[nid].number.ordinal for nid in section_ids]
     assert ordinals == [1, 2, 3]
-
 
 def test_sibling_ordinals_in_hierarchy_resets_per_parent():
     """Под каждым родителем ordinals начинаются заново, не глобально.

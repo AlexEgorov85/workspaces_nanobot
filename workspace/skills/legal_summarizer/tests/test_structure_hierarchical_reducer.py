@@ -12,7 +12,6 @@ from execution.hierarchical import (
     reduce_sections_to_document,
 )
 
-
 def _c(cid: str, section: str) -> Chunk:
     return Chunk(
         chunk_id=cid, index=int(cid), text=f"text-{cid}", char_count=10,
@@ -21,17 +20,14 @@ def _c(cid: str, section: str) -> Chunk:
         block_indices=(0,), block_types=("paragraph",),
     )
 
-
 def test_deterministic_truncate_no_truncation_needed():
     assert deterministic_truncate("short", 100) == "short"
-
 
 def test_deterministic_truncate_marks_omission():
     long = "x" * 1000
     out = deterministic_truncate(long, 100)
     assert "пропущено" in out
     assert len(out) < len(long)
-
 
 def test_reduce_sections_to_document_no_runner():
     """Без llm_runner просто объединяет секции (без LLM вызова)."""
@@ -43,13 +39,11 @@ def test_reduce_sections_to_document_no_runner():
     assert "[s1]" in result.final_summary
     assert "[s2]" in result.final_summary
 
-
 def test_reduce_sections_to_document_single_section():
     items = [("s1", "summary only")]
     result = reduce_sections_to_document(items, config=HierarchicalReducerConfig())
     assert result.rounds_done == 0
     assert result.final_summary == "summary only"
-
 
 def test_reduce_sections_with_llm_runner():
     items = [("s1", "a"), ("s2", "b")]
@@ -62,7 +56,6 @@ def test_reduce_sections_with_llm_runner():
         llm_runner=runner, length="detailed",
     )
     assert "SUMMARIZED" in result.final_summary
-
 
 def test_reduce_chunks_hierarchical():
     chunks = [
@@ -81,7 +74,6 @@ def test_reduce_chunks_hierarchical():
     assert "s2" in result.section_summaries
     assert result.rounds_done >= 1
 
-
 def test_reduce_chunks_skips_empty_sections():
     chunks = [_c("001", "s1")]
     summaries = {"001": "sum 1"}
@@ -92,13 +84,11 @@ def test_reduce_chunks_skips_empty_sections():
     )
     assert "s2" not in result.section_summaries
 
-
 def test_reduce_sections_to_document_truncates_long_input():
     items = [("s1", "x" * 100_000), ("s2", "y" * 100_000)]
     cfg = HierarchicalReducerConfig(input_budget_chars=10_000, group_size=2)
     result = reduce_sections_to_document(items, config=cfg)
     assert result.truncated is True
-
 
 def test_reduce_sections_to_document_respects_max_rounds():
     """Этап 9: max_rounds ограничивает основной цикл, но финальный
@@ -110,7 +100,6 @@ def test_reduce_sections_to_document_respects_max_rounds():
     # добавляет ещё один, поэтому total может быть 3.
     assert result.rounds_done >= 2
     assert result.final_summary != ""
-
 
 def test_reduce_chunks_1_section():
     """PLAN §25: 1 section — single round."""
@@ -135,7 +124,6 @@ def test_reduce_chunks_1_section():
     assert result.final_summary != ""
     assert result.rounds_done == 0
 
-
 def test_reduce_chunks_2_sections():
     """PLAN §25: 2 sections — single round."""
     from execution.config import (
@@ -156,7 +144,6 @@ def test_reduce_chunks_2_sections():
         config=cfg,
     )
     assert len(result.section_summaries) == 2
-
 
 def test_reduce_chunks_3_sections():
     """PLAN §25: 3 sections — single round (group_size=3)."""
@@ -180,7 +167,6 @@ def test_reduce_chunks_3_sections():
     assert len(result.section_summaries) == 3
     assert result.rounds_done == 1
 
-
 def test_reduce_chunks_10_sections():
     """PLAN §25: 10 sections — multiple rounds."""
     from execution.config import (
@@ -202,7 +188,6 @@ def test_reduce_chunks_10_sections():
     )
     assert len(result.section_summaries) == 10
     assert result.rounds_done >= 2
-
 
 def test_reduce_chunks_100_sections_no_data_loss():
     """PLAN §25 + Этап 9: 100 sections — все секции учтены, ровно один final."""
@@ -235,7 +220,6 @@ def test_reduce_chunks_100_sections_no_data_loss():
         f"expected final-fallback round, got rounds_done={result.rounds_done}"
     )
 
-
 def test_reduce_sections_continues_until_one_item():
     """PLAN §25: max_rounds РѕРіСЂР°РЅРёС‡РёРІР°РµС‚, РЅРѕ РЅРµ С‚РµСЂСЏРµС‚ РґР°РЅРЅС‹Рµ.
 
@@ -253,7 +237,6 @@ def test_reduce_sections_continues_until_one_item():
     )
     assert len(result.final_summary) > 0
     assert result.rounds_done >= 3
-
 
 def _make_chunk(chunk_id: str, *, section_id: str, text: str = "x"):
     """Helper РґР»СЏ СЃРѕР·РґР°РЅРёСЏ Chunk СЃ section_id."""

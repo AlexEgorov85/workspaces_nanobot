@@ -19,13 +19,11 @@ from document.hierarchy import (
     build_document_structure,
 )
 
-
 def _hc(i, t, source="regex_numbered_1"):
     return HeadingCandidate(
         block_index=i, text=t, score=0.7,
         source=source, level=1, raw_number=None,
     )
-
 
 def _physical(total: int):
     from document.physical import (
@@ -48,7 +46,6 @@ def _physical(total: int):
         size_bytes=100, blocks=blocks, page_count=1,
     )
 
-
 def test_block_ownership_no_duplicates():
     """Каждый block имеет 0 или 1 owner (никогда 2+)."""
     cs = [
@@ -63,7 +60,6 @@ def test_block_ownership_no_duplicates():
         assert count >= 1
     assert len(ownership) == len(set(ownership.keys()))
 
-
 def test_block_ownership_covers_section_blocks():
     """owned_blocks покрывают все significant blocks."""
     cs = [
@@ -77,7 +73,6 @@ def test_block_ownership_covers_section_blocks():
         if owner is None:
             continue
         assert owner in struct.nodes
-
 
 def test_block_ownership_respects_nesting():
     """Child section имеет блоки, не принадлежащие parent."""
@@ -98,13 +93,11 @@ def test_block_ownership_respects_nesting():
         }
         assert len(child_blocks) >= 1
 
-
 def test_block_ownership_for_root_only():
     """Структура без sections — все blocks принадлежат root."""
     struct = build_document_structure([], total_blocks=5, document_id="test")
     ownership = build_block_ownership(struct)
     assert len(ownership) == 0
-
 
 def test_owner_for_block_returns_deepest_section():
     """owner_for_block возвращает deepest section для nested case."""
@@ -123,7 +116,6 @@ def test_owner_for_block_returns_deepest_section():
     article = next(s for s in sections if "Статья" in s.title)
     assert owner_for_block(struct, 0, ownership) == chapter.node_id
     assert owner_for_block(struct, 2, ownership) == article.node_id
-
 
 def test_owner_for_block_returns_root_for_uncovered_block():
     """Block вне section ranges → root_id (PLAN §6 acceptance)."""
@@ -157,7 +149,6 @@ def test_owner_for_block_returns_root_for_uncovered_block():
     assert owner_for_block(struct, 0, ownership) == "n_0001"
     assert owner_for_block(struct, 4, ownership) == "n_0001"
 
-
 def test_owner_for_block_returns_none_for_out_of_range():
     """Block вне total_blocks → None."""
     from chunking.chunker import (
@@ -167,7 +158,6 @@ def test_owner_for_block_returns_none_for_out_of_range():
     struct = build_document_structure([], total_blocks=5, document_id="test")
     assert owner_for_block(struct, 5) is None
     assert owner_for_block(struct, -1) is None
-
 
 def test_owner_for_block_lazy_builds_ownership():
     """owner_for_block без переданного ownership строит его на лету."""
@@ -179,7 +169,6 @@ def test_owner_for_block_lazy_builds_ownership():
     struct = build_document_structure(cs, total_blocks=10, document_id="test")
     assert owner_for_block(struct, 0) is not None
     assert owner_for_block(struct, 5) is not None
-
 
 def test_block_ownership_zero_or_one_owner_per_block():
     """PLAN §6 acceptance: каждый block имеет 0 или 1 owner."""

@@ -7,7 +7,6 @@ from retrieval.records import (
     SemanticRecord,
 )
 
-
 def test_semantic_record_minimal():
     r = SemanticRecord.from_minimal("c1", "s1", "short summary")
     assert r.chunk_id == "c1"
@@ -15,7 +14,6 @@ def test_semantic_record_minimal():
     assert r.summary == "short summary"
     assert r.facts == ()
     assert r.confidence == 0.5
-
 
 def test_semantic_record_full():
     prov = Provenance(start_block=10, end_block=20, page_start=2, page_end=3)
@@ -36,7 +34,6 @@ def test_semantic_record_full():
     assert r.facts == ("fact 1", "fact 2")
     assert r.provenance.page_start == 2
 
-
 def test_semantic_record_to_dict_roundtrip():
     r = SemanticRecord.from_minimal(
         "c1", "s1", "x",
@@ -46,18 +43,15 @@ def test_semantic_record_to_dict_roundtrip():
     assert d["chunk_id"] == "c1"
     assert d["provenance"]["end_block"] == 10
 
-
 def test_provenance_optional():
     r = SemanticRecord(chunk_id="c1", section_id="s1", summary="x")
     assert r.provenance is None
-
 
 def test_semantic_record_immutable():
     import dataclasses
     r = SemanticRecord.from_minimal("c1", "s1", "x")
     with __import__("pytest").raises(dataclasses.FrozenInstanceError):
         r.summary = "mutated"
-
 
 def test_semantic_record_empty_collections_default():
     r = SemanticRecord(chunk_id="c", section_id="s", summary="x")

@@ -10,7 +10,6 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _make_node(*, node_id, title="", start_block=0, end_block=0, parent_id="n_0000"):
     from document.structure import StructureNode
     return StructureNode(
@@ -26,7 +25,6 @@ def _make_node(*, node_id, title="", start_block=0, end_block=0, parent_id="n_00
         end_block=end_block,
         confidence=1.0,
     )
-
 
 def _wrap(nodes):
     from document.structure import (
@@ -58,7 +56,6 @@ def _wrap(nodes):
         coverage_ratio=1.0,
     )
 
-
 def test_one_block_section_with_title_counts():
     """Одна секция ``start_block == end_block`` с title → meaningful."""
     from planning.strategy import (
@@ -69,7 +66,6 @@ def test_one_block_section_with_title_counts():
         _make_node(node_id="n_0001", title="Глава", start_block=0, end_block=0),
     ])
     assert _count_meaningful_sections(s) == 1
-
 
 def test_three_one_block_sections_above_threshold():
     """3 one-block sections → ``map_hierarchical``."""
@@ -99,7 +95,6 @@ def test_three_one_block_sections_above_threshold():
         f"expected map_hierarchical, got {strategy}"
     )
 
-
 def test_title_less_section_excluded():
     """Section без title → не считается meaningful."""
     from planning.strategy import (
@@ -110,7 +105,6 @@ def test_title_less_section_excluded():
         _make_node(node_id="n_0001", title="", start_block=0, end_block=5),
     ])
     assert _count_meaningful_sections(s) == 0
-
 
 def test_invalid_range_excluded():
     """Section с ``start_block > end_block`` → не считается."""

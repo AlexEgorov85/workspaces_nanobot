@@ -15,12 +15,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def test_document_id_invariant_for_txt(tmp_path: Path):
     """TXT: ``structure.document_id == identity.document_id``."""
@@ -35,7 +33,6 @@ def test_document_id_invariant_for_txt(tmp_path: Path):
     p = _write_doc(tmp_path, text)
     result = run_canonical_pipeline(str(p), apply_repair=True)
     assert result.analysis.identity.document_id == result.analysis.structure.document_id
-
 
 def test_document_id_invariant_for_pdf(tmp_path: Path):
     """PDF: ``structure.document_id == identity.document_id``."""
@@ -64,7 +61,6 @@ def test_document_id_invariant_for_pdf(tmp_path: Path):
         pytest.skip(f"Minimal PDF not parseable: {e}")
     assert result.analysis.identity.document_id == result.analysis.structure.document_id
 
-
 def test_production_builder_uses_identity_document_id():
     """``run_canonical_pipeline`` передаёт identity.document_id в builder."""
     from application.pipeline_structure import (
@@ -82,7 +78,6 @@ def test_production_builder_uses_identity_document_id():
         result = run_canonical_pipeline(str(p), apply_repair=True)
         identity = DocumentIdentity.from_path(str(p))
         assert result.analysis.structure.document_id == identity.document_id
-
 
 def test_identity_is_source_of_truth(tmp_path):
     """Если в builder передан ``document_id`` отличный от identity —

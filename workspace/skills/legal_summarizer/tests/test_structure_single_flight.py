@@ -8,14 +8,12 @@ from llm.single_flight import (
     SingleFlightTracker, SingleFlightViolation, assert_single_flight,
 )
 
-
 def test_single_call_passes():
     tracker = SingleFlightTracker()
     with tracker.llm_call():
         pass
     assert tracker.is_safe() is True
     assert tracker.active == 0
-
 
 def test_sequential_calls_pass():
     tracker = SingleFlightTracker()
@@ -25,14 +23,12 @@ def test_sequential_calls_pass():
     assert tracker.is_safe() is True
     assert tracker.violation_count == 0
 
-
 def test_nested_call_violates():
     tracker = SingleFlightTracker()
     with pytest.raises(SingleFlightViolation):
         with tracker.llm_call():
             with tracker.llm_call():
                 pass
-
 
 def test_active_counter_increments():
     tracker = SingleFlightTracker()
@@ -44,12 +40,10 @@ def test_active_counter_increments():
     cm.__exit__(None, None, None)
     assert tracker.active == 0
 
-
 def test_assert_single_flight_helper():
     result, tracker = assert_single_flight(lambda x: x * 2, 21)
     assert result == 42
     assert tracker.is_safe()
-
 
 def test_thread_safety_serial():
     import threading
@@ -66,7 +60,6 @@ def test_thread_safety_serial():
         t.join()
     assert tracker.is_safe()
 
-
 def test_violation_count_increments():
     tracker = SingleFlightTracker()
     for _ in range(3):
@@ -77,7 +70,6 @@ def test_violation_count_increments():
         except SingleFlightViolation:
             pass
     assert tracker.violation_count == 3
-
 
 def test_is_safe_initial():
     tracker = SingleFlightTracker()

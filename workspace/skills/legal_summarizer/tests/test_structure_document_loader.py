@@ -28,18 +28,14 @@ from document.physical import (
     PhysicalDocument,
 )
 
-
 def _write_pdf(path: Path) -> None:
     path.write_bytes(b"%PDF-1.4\n%fake pdf content\n")
-
 
 def _write_docx(path: Path) -> None:
     path.write_bytes(b"PK\x03\x04fake docx")
 
-
 def _write_txt(path: Path) -> None:
     path.write_text("plain text content", encoding="utf-8")
-
 
 def test_loader_loads_txt(tmp_path: Path):
     p = tmp_path / "doc.txt"
@@ -51,7 +47,6 @@ def test_loader_loads_txt(tmp_path: Path):
     assert len(doc.blocks) == 1
     assert doc.blocks[0].content == "plain text content"
 
-
 def test_loader_uses_document_identity(tmp_path: Path):
     """PLAN §12 + §11: DocumentLoader использует DocumentIdentity."""
     p = tmp_path / "doc.txt"
@@ -61,7 +56,6 @@ def test_loader_uses_document_identity(tmp_path: Path):
     doc = loader.load(p)
     assert doc.path == identity.resolved_path
     assert doc.size_bytes == identity.size_bytes
-
 
 def test_loader_loads_pdf_calls_pypdf_at_most_twice(tmp_path: Path):
     """PLAN §12 acceptance: PdfReader создаётся минимизированно.
@@ -88,7 +82,6 @@ def test_loader_loads_pdf_calls_pypdf_at_most_twice(tmp_path: Path):
             f"got {mock_reader.call_count}"
         )
 
-
 def test_loader_loads_docx_calls_document_once(tmp_path: Path):
     """PLAN §12 acceptance: docx.Document создаётся один раз для blocks."""
     p = tmp_path / "doc.docx"
@@ -107,14 +100,12 @@ def test_loader_loads_docx_calls_document_once(tmp_path: Path):
             f"optionally one for title), got {mock_doc.call_count}"
         )
 
-
 def test_loader_missing_file_raises(tmp_path: Path):
     p = tmp_path / "missing.txt"
     loader = DocumentLoader()
     import pytest
     with pytest.raises(FileNotFoundError):
         loader.load(p)
-
 
 def test_loader_unsupported_format_raises(tmp_path: Path):
     p = tmp_path / "doc.xyz"

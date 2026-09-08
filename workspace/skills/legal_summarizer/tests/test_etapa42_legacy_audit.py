@@ -31,7 +31,6 @@ FORBIDDEN_DIRS = [
     "legal_summarizer",  # scripts/legal_summarizer/ (nested package)
 ]
 
-
 def test_forbidden_files_do_not_exist():
     """Legacy-файлы не должны существовать."""
     for fname in FORBIDDEN_FILES:
@@ -39,7 +38,6 @@ def test_forbidden_files_do_not_exist():
         assert not p.exists(), (
             f"forbidden legacy file exists: {p}"
         )
-
 
 def test_forbidden_runtime_dirs_do_not_exist():
     """Legacy runtime-каталоги не должны существовать в Skill root."""

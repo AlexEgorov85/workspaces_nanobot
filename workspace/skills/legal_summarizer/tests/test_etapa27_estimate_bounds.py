@@ -25,11 +25,9 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _build_section_summaries(n: int) -> list[tuple[str, str]]:
     """Создать N section_summaries."""
     return [(f"sec_{i:03d}", f"summary {i}") for i in range(n)]
-
 
 def test_single_section_no_reduce():
     """1 section → 0 reduce calls."""
@@ -53,7 +51,6 @@ def test_single_section_no_reduce():
     )
     assert result.rounds_done == 0
 
-
 def _compute_max_calls(n: int, group_size: int, max_rounds: int) -> int:
     """Upper bound на calls для reduce_sections_to_document.
 
@@ -69,7 +66,6 @@ def _compute_max_calls(n: int, group_size: int, max_rounds: int) -> int:
         return 0
     per_round = math.ceil(n / group_size)
     return max_rounds * per_round + 1
-
 
 def test_n_sections_rounds_bounded():
     """N sections: actual calls ≤ max_rounds * ceil(N/group_size) + 1."""
@@ -96,7 +92,6 @@ def test_n_sections_rounds_bounded():
     assert calls["n"] <= expected_max, (
         f"too many reduce calls: {calls['n']} > {expected_max}"
     )
-
 
 def test_estimate_bounds_for_1_2_10_100_sections():
     """Bounds: actual_calls ≤ max_rounds * ceil(N/group_size) + 1."""
@@ -126,7 +121,6 @@ def test_estimate_bounds_for_1_2_10_100_sections():
         assert 0 <= counter[0] <= max_calls, (
             f"n={n}: calls={counter[0]} not in [0, {max_calls}]"
         )
-
 
 def test_reducer_no_data_loss_for_marker_groups():
     """Все маркерные группы сохраняются при reduce."""

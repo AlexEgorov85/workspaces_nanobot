@@ -10,12 +10,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _install_llm_mocks(monkeypatch):
     import llm.calls as llm_calls
@@ -34,13 +32,8 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
-
 
 def test_direct_estimated_equals_actual(tmp_path: Path, monkeypatch):
     """Direct: estimated=1, actual=1."""
@@ -50,8 +43,8 @@ def test_direct_estimated_equals_actual(tmp_path: Path, monkeypatch):
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    ctx = summarizer._build_execution_context(insp, length="detailed")
-    est = summarizer._estimate_for_run(insp, ctx)
+    ctx = summarizer.build_execution_context(insp, length="detailed")
+    est = summarizer.estimate_for_run(insp, ctx)
     assert ctx.strategy == "direct"
     assert est.estimated_llm_calls == 1
 
@@ -64,7 +57,6 @@ def test_direct_estimated_equals_actual(tmp_path: Path, monkeypatch):
     assert actual == est.estimated_llm_calls, (
         f"estimated={est.estimated_llm_calls}, actual={actual}"
     )
-
 
 def test_map_flat_estimated_bounds_actual(tmp_path: Path, monkeypatch):
     """Map-flat: estimate — верхняя граница (бatches + reduce + buffer);
@@ -84,8 +76,8 @@ def test_map_flat_estimated_bounds_actual(tmp_path: Path, monkeypatch):
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    ctx = summarizer._build_execution_context(insp, length="detailed")
-    est = summarizer._estimate_for_run(insp, ctx)
+    ctx = summarizer.build_execution_context(insp, length="detailed")
+    est = summarizer.estimate_for_run(insp, ctx)
     assert ctx.strategy in ("map_flat", "map_hierarchical"), ctx.strategy
     estimated = est.estimated_llm_calls
     n_batches = len(ctx.plan.batches)

@@ -16,7 +16,6 @@ from document.physical import (
     DocumentBlock, PhysicalDocument,
 )
 
-
 def _b(ord: int) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ord:04d}", block_type="paragraph", content="x",
@@ -24,7 +23,6 @@ def _b(ord: int) -> DocumentBlock:
         paragraph_index=None, table_index=None, ordinal=ord,
         block_metadata={},
     )
-
 
 def _doc() -> PhysicalDocument:
     import tempfile
@@ -38,7 +36,6 @@ def _doc() -> PhysicalDocument:
         blocks=tuple(_b(i) for i in range(3)), page_count=1,
     )
 
-
 def _c(cid: str, text: str, idx: int = 0) -> Chunk:
     return Chunk(
         chunk_id=cid, index=idx, text=text, char_count=len(text),
@@ -46,7 +43,6 @@ def _c(cid: str, text: str, idx: int = 0) -> Chunk:
         section_id="s1", section_path="1", section_heading="x",
         block_indices=(0,), block_types=("paragraph",),
     )
-
 
 def _struct() -> DocumentStructure:
     return DocumentStructure(
@@ -60,7 +56,6 @@ def _struct() -> DocumentStructure:
         numbering=(), total_blocks=3,
     )
 
-
 def _build_analysis(chunks_text: list[str]) -> DocumentAnalysis:
     chunks = tuple(
         _c(f"{i:03d}", text, idx=i)
@@ -70,19 +65,16 @@ def _build_analysis(chunks_text: list[str]) -> DocumentAnalysis:
         physical=_doc(), structure=_struct(), chunks=chunks,
     )
 
-
 def test_first_run_returns_analysis():
     analysis = _build_analysis(["x" * 100])
     out = build_first_run_analysis(analysis=analysis)
     assert out is analysis
-
 
 def test_followup_brief_mode():
     analysis = _build_analysis(["x" * 100, "y" * 100, "z" * 100])
     result = build_followup_response(analysis, mode="brief")
     assert result.confidence == "medium"
     assert not result.used_full_doc_fallback
-
 
 def test_followup_question_with_hits():
     chunks_text = [
@@ -98,7 +90,6 @@ def test_followup_question_with_hits():
     assert result.confidence in ("high", "medium")
     assert not result.used_full_doc_fallback
 
-
 def test_followup_question_no_hits_uses_fallback():
     chunks_text = ["some random text"] * 5
     analysis = _build_analysis(chunks_text)
@@ -107,7 +98,6 @@ def test_followup_question_no_hits_uses_fallback():
     )
     assert result.used_full_doc_fallback is True
     assert result.confidence == "very_low"
-
 
 def test_followup_question_low_confidence_expands():
     chunks_text = [
@@ -123,14 +113,12 @@ def test_followup_question_low_confidence_expands():
     )
     assert result.confidence in ("low", "medium", "high")
 
-
 def test_followup_uses_cached_analysis_no_reparse():
     """PLAN §41: follow-up не должен перепарсивать документ."""
     analysis = _build_analysis(["x" * 100])
     analysis_id_before = analysis.identity.document_id
     _ = build_followup_response(analysis, query="x", mode="question")
     assert analysis.identity.document_id == analysis_id_before
-
 
 def test_followup_result_to_dict():
     analysis = _build_analysis(["x" * 100])

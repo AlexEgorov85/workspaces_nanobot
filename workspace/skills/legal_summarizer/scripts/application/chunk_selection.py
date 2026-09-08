@@ -28,12 +28,6 @@ def _resolve_max_chunks() -> int:
         return 8
 
 
-def _service_mod():
-    """Lazy lookup для ``_resolve_max_chunks`` (для monkeypatch в тестах)."""
-    import application.service as _svc
-    return _svc
-
-
 def relaxed_lexical_fallback(
     question: str,
     chunks: list,
@@ -64,7 +58,7 @@ def select_chunks_for_mode(
     length: str,
 ) -> list:
     """Select chunks for the given run mode (brief/detailed/question)."""
-    max_chunks = _service_mod()._resolve_max_chunks()
+    max_chunks = _resolve_max_chunks()
     if question:
         from retrieval.query import (
             RetrievalConfig,

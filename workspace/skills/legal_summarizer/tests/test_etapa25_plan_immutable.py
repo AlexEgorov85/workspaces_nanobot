@@ -14,12 +14,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _install_llm_mocks(monkeypatch):
     import llm.calls as llm_calls
@@ -38,13 +36,8 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
-
 
 def _build_doc(sections: int = 6) -> str:
     parts = []
@@ -56,11 +49,9 @@ def _build_doc(sections: int = 6) -> str:
         )
     return "".join(parts)
 
-
 def _canonical_batches(plan):
     """Каноническое представление плана для сравнения."""
     return tuple(tuple(batch.chunk_ids) for batch in plan.batches)
-
 
 def test_plan_batches_immutable_during_run(tmp_path, monkeypatch):
     """Snapshot плана до и после run() одинаков."""
@@ -71,7 +62,7 @@ def test_plan_batches_immutable_during_run(tmp_path, monkeypatch):
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    ctx = summarizer._build_execution_context(insp, length="detailed")
+    ctx = summarizer.build_execution_context(insp, length="detailed")
 
     assert ctx.plan is not None
     before = _canonical_batches(ctx.plan)
@@ -90,7 +81,6 @@ def test_plan_batches_immutable_during_run(tmp_path, monkeypatch):
         f"plan changed during run:\n  before={before}\n  after={after}"
     )
 
-
 def test_plan_preserves_exact_chunk_order(tmp_path, monkeypatch):
     """План сохраняет порядок chunks внутри batch'ей (exact, не set)."""
     import application.service as summarizer
@@ -102,7 +92,7 @@ def test_plan_preserves_exact_chunk_order(tmp_path, monkeypatch):
     insp = summarizer.inspect(text, document_path=str(p))
     # Берём selected в определённом порядке.
     selected = list(insp.chunks[:4])
-    ctx = summarizer._build_execution_context(
+    ctx = summarizer.build_execution_context(
         insp, selected_chunks=selected,
     )
 
@@ -114,7 +104,6 @@ def test_plan_preserves_exact_chunk_order(tmp_path, monkeypatch):
         for cid in batch.chunk_ids:
             assert isinstance(cid, str)
 
-
 def test_plan_chunks_are_subset_of_selection(tmp_path, monkeypatch):
     """Все chunk_ids в плане — из selected chunks."""
     import application.service as summarizer
@@ -125,7 +114,7 @@ def test_plan_chunks_are_subset_of_selection(tmp_path, monkeypatch):
 
     insp = summarizer.inspect(text, document_path=str(p))
     selected_ids = {c.chunk_id for c in insp.chunks[:4]}
-    ctx = summarizer._build_execution_context(
+    ctx = summarizer.build_execution_context(
         insp, selected_chunks=list(insp.chunks[:4]),
     )
 

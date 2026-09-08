@@ -30,26 +30,20 @@ from planning.strategy import (
     build_execution_plan,
 )
 
-
 def test_run_canonical_pipeline_exists():
     assert callable(run_canonical_pipeline)
-
 
 def test_chunk_planner_exists():
     assert callable(ChunkPlanner)
 
-
 def test_hierarchical_reducer_exists():
     assert callable(reduce_chunks_hierarchical)
-
 
 def test_retrieval_index_exists():
     assert callable(RetrievalIndex.build)
 
-
 def test_build_execution_plan_exists():
     assert callable(build_execution_plan)
-
 
 def test_new_modules_have_narrow_responsibility():
     """Каждый новый модуль отвечает за одну вещь (PLAN §60)."""
@@ -66,7 +60,6 @@ def test_new_modules_have_narrow_responsibility():
         source = inspect.getsource(module)
         assert "MAX_BATCH_PARSE_RETRIES" not in source
         assert "_llm_document_reduce" not in source
-
 
 def test_summary_of_split_modules():
     """Краткая карта: где сейчас находится что."""

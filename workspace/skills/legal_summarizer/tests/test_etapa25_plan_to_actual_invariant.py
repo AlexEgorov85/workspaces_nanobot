@@ -25,12 +25,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _build_doc(sections: int = 6) -> str:
     parts = []
@@ -41,7 +39,6 @@ def _build_doc(sections: int = 6) -> str:
             + "\n\n"
         )
     return "".join(parts)
-
 
 def _make_plan_with_batches(insp, chunks, batch_chunk_ids_list):
     """Строит ExecutionPlan с заданными batch chunk_ids."""
@@ -58,7 +55,6 @@ def _make_plan_with_batches(insp, chunks, batch_chunk_ids_list):
     return build_execution_plan(
         struct, tuple(chunks), document_id=document_id,
     ), strategy
-
 
 def test_unknown_chunk_raises(tmp_path):
     """8.1: unknown chunk_id → RuntimeError."""
@@ -83,8 +79,7 @@ def test_unknown_chunk_raises(tmp_path):
     poisoned_plan = replace(plan, batches=poisoned_batches)
 
     with pytest.raises(RuntimeError, match="unknown chunk_id"):
-        summarizer._map_plan_to_chunk_batches(poisoned_plan, selected)
-
+        summarizer.map_plan_to_chunk_batches(poisoned_plan, selected)
 
 def test_duplicate_chunk_raises(tmp_path):
     """8.2: один chunk_id в двух батчах → RuntimeError."""
@@ -114,8 +109,7 @@ def test_duplicate_chunk_raises(tmp_path):
     poisoned_plan = replace(plan, batches=poisoned_batches)
 
     with pytest.raises(RuntimeError, match="duplicate"):
-        summarizer._map_plan_to_chunk_batches(poisoned_plan, selected)
-
+        summarizer.map_plan_to_chunk_batches(poisoned_plan, selected)
 
 def test_exact_batch_order_preserved(tmp_path):
     """8.3: actual_batches имеет точно ту же форму, что и plan.batches."""
@@ -138,7 +132,7 @@ def test_exact_batch_order_preserved(tmp_path):
     )
     new_plan = replace(plan, batches=new_batches)
 
-    actual = summarizer._map_plan_to_chunk_batches(new_plan, selected)
+    actual = summarizer.map_plan_to_chunk_batches(new_plan, selected)
     actual_shape = [[c.chunk_id for c in batch] for batch in actual]
     expected_shape = [
         [ids[0], ids[1]],
@@ -148,7 +142,6 @@ def test_exact_batch_order_preserved(tmp_path):
     assert actual_shape == expected_shape, (
         f"shape mismatch:\n  actual={actual_shape}\n  expected={expected_shape}"
     )
-
 
 def test_missing_chunks_raises_in_run_map_reduce(tmp_path, monkeypatch):
     """Реальный путь: если plan покрывает не все chunks → RuntimeError.
@@ -177,7 +170,7 @@ def test_missing_chunks_raises_in_run_map_reduce(tmp_path, monkeypatch):
     bad_plan = replace(plan, batches=bad_batches)
 
     with pytest.raises(RuntimeError, match="missing"):
-        summarizer._run_map_reduce(
+        summarizer.run_map_reduce(
             selected,
             plan=bad_plan,
             strategy=plan.strategy,

@@ -117,7 +117,15 @@ def run_canonical_pipeline(
 
     validation = validate_structure(struct, physical)
 
-    planner = ChunkPlanner()
+    from chunking.chunker import (
+        ChunkPlanner,
+        DocumentStructureChunkerConfig,
+        build_chunk_config_from_runtime,
+    )
+    chunker_config = DocumentStructureChunkerConfig(
+        chunk_config=build_chunk_config_from_runtime(),
+    )
+    planner = ChunkPlanner(config=chunker_config)
     chunks = tuple(planner.plan(physical, struct))
 
     analysis = DocumentAnalysis.build(

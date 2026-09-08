@@ -10,19 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import application.pipeline_structure as _pipeline_struct_mod
 from document.analysis import DocumentAnalysis
 from document.structure import DocumentStructure
-
-
-def _service_mod():
-    """Lazy lookup модуля ``application.service``.
-
-    Используем для разрешения ``run_canonical_pipeline`` через module
-    attribute, чтобы ``monkeypatch.setattr(service, "run_canonical_pipeline", mock)``
-    перехватывал реальный вызов в тестах.
-    """
-    import application.service as _svc
-    return _svc
 
 
 @dataclass(frozen=True)
@@ -59,8 +49,7 @@ def inspect(
             "для inline-текста используйте run_canonical_pipeline напрямую"
         )
 
-    _svc = _service_mod()
-    pipeline_result = _svc.run_canonical_pipeline(
+    pipeline_result = _pipeline_struct_mod.run_canonical_pipeline(
         document_path,
         text=text,
         apply_repair=True,

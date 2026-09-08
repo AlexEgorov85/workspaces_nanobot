@@ -13,7 +13,6 @@ from llm.tokens import (
     TokenEstimator, TokenEstimatorConfig,
 )
 
-
 def _b() -> StructureNode:
     return StructureNode(
         node_id="n_0000", node_type="document", semantic_type=None,
@@ -21,7 +20,6 @@ def _b() -> StructureNode:
         children=("n_0001", "n_0002"), start_block=0, end_block=10,
         confidence=1.0,
     )
-
 
 def _sec(nid: str, title: str, parent: str = "n_0000") -> StructureNode:
     return StructureNode(
@@ -31,7 +29,6 @@ def _sec(nid: str, title: str, parent: str = "n_0000") -> StructureNode:
         confidence=0.7,
     )
 
-
 def _c(cid: str, section: str, text: str = "x", idx: int = 0) -> Chunk:
     return Chunk(
         chunk_id=cid, index=idx, text=text, char_count=len(text),
@@ -39,7 +36,6 @@ def _c(cid: str, section: str, text: str = "x", idx: int = 0) -> Chunk:
         section_id=section, section_path="1", section_heading=section,
         block_indices=(0,), block_types=("paragraph",),
     )
-
 
 def _struct() -> DocumentStructure:
     return DocumentStructure(
@@ -52,7 +48,6 @@ def _struct() -> DocumentStructure:
         root_id="n_0000", preamble_node_id="n_0000",
         numbering=(), total_blocks=10,
     )
-
 
 def test_expand_context_returns_target_and_metadata():
     chunks = (
@@ -67,7 +62,6 @@ def test_expand_context_returns_target_and_metadata():
     assert result.section_title == "Section 1"
     assert "002" in [c.chunk_id for c in result.neighbour_chunks]
 
-
 def test_expand_context_respects_token_limit():
     chunks = (
         _c("001", "n_0001", text="x"),
@@ -79,14 +73,12 @@ def test_expand_context_respects_token_limit():
     result = expand_context(chunks[0], chunks, struct, config=cfg)
     assert result.truncated is True
 
-
 def test_expand_context_respects_neighbour_limit():
     chunks = tuple(_c(f"{i:03d}", "n_0001", text="x") for i in range(10))
     struct = _struct()
     cfg = ContextExpansionConfig(max_neighbour_blocks=2)
     result = expand_context(chunks[0], chunks, struct, config=cfg)
     assert len(result.neighbour_chunks) <= 2
-
 
 def test_expand_context_includes_parent_heading():
     chunks = (
@@ -97,13 +89,11 @@ def test_expand_context_includes_parent_heading():
     result = expand_context(chunks[0], chunks, struct)
     assert result.parent_heading == ""
 
-
 def test_expand_context_no_chunks():
     chunks = (_c("001", "n_0001"),)
     struct = _struct()
     result = expand_context(chunks[0], chunks, struct)
     assert result.neighbour_chunks == ()
-
 
 def test_expand_context_uses_custom_estimator():
     chunks = (
@@ -115,7 +105,6 @@ def test_expand_context_uses_custom_estimator():
     result = expand_context(chunks[0], chunks, struct, estimator=estimator)
     assert result.total_tokens > 0
 
-
 def test_expand_context_target_not_found():
     chunks = (_c("001", "n_0001"),)
     struct = _struct()
@@ -123,7 +112,6 @@ def test_expand_context_target_not_found():
     result = expand_context(fake_target, chunks, struct)
     assert result.target_chunk == fake_target
     assert result.neighbour_chunks == ()
-
 
 def test_expand_context_neighbours_by_target_index_not_section_prefix():
     """PLAN §10 acceptance: для A B C D E, target=C → neighbours = B, D.
@@ -139,7 +127,6 @@ def test_expand_context_neighbours_by_target_index_not_section_prefix():
     nids = [c.chunk_id for c in result.neighbour_chunks]
     assert nids == ["1", "3"], f"expected ['1', '3'], got {nids}"
 
-
 def test_expand_context_target_at_left_edge():
     """target = первый chunk → только правые neighbours (max_neighbour_blocks=1)."""
     chunks = tuple(
@@ -152,7 +139,6 @@ def test_expand_context_target_at_left_edge():
     nids = [c.chunk_id for c in result.neighbour_chunks]
     assert nids == ["1"]
 
-
 def test_expand_context_target_at_right_edge():
     """target = последний chunk → только левые neighbours (max_neighbour_blocks=1)."""
     chunks = tuple(
@@ -164,7 +150,6 @@ def test_expand_context_target_at_right_edge():
     result = expand_context(target, chunks, struct, config=cfg)
     nids = [c.chunk_id for c in result.neighbour_chunks]
     assert nids == ["3"]
-
 
 def test_expand_context_skip_other_section():
     """PLAN §10: subsection restriction — neighbours из другой секции
@@ -184,7 +169,6 @@ def test_expand_context_skip_other_section():
     assert "2" not in nids
     assert "3" in nids or len(nids) < 2
 
-
 def test_expand_context_total_tokens_equals_sum():
     """PLAN §10: total_tokens = tokens(target) + sum(tokens(neighbours))."""
     chunks = tuple(
@@ -198,7 +182,6 @@ def test_expand_context_total_tokens_equals_sum():
     for n in result.neighbour_chunks:
         expected += estimator.estimate(n.text)
     assert result.total_tokens == expected
-
 
 def test_expand_context_max_neighbour_blocks_respected():
     """PLAN §10: max_neighbour_blocks ограничивает количество."""

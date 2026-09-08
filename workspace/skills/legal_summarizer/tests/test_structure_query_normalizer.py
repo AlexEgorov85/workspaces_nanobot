@@ -11,27 +11,21 @@ from retrieval.normalizer import (
 )
 from workspace.skills.legal_summarizer.tests import cyrillic_literals as L
 
-
 def test_normalize_basic():
     assert normalize_query("  Hello  WORLD!  ") == "hello world"
 
-
 def test_normalize_strips_punctuation():
     assert normalize_query("Что? Где? Когда?") == "что где когда"
-
 
 def test_normalize_empty():
     assert normalize_query("") == ""
     assert normalize_query("   ") == ""
 
-
 def test_normalize_unicode_nfkc():
     assert normalize_query("Café") == "café"
 
-
 def test_normalize_collapse_whitespace():
     assert normalize_query("a\n\n\tb") == "a b"
-
 
 def test_expand_with_aliases_legal_terms():
     expanded = expand_with_aliases(L.QUERY_LEGAL)
@@ -39,12 +33,10 @@ def test_expand_with_aliases_legal_terms():
     assert "неустойка" in expanded
     assert any("оплат" in t for t in expanded)
 
-
 def test_expand_with_aliases_no_legal_terms():
     expanded = expand_with_aliases(L.QUERY_PLAIN)
     assert "обычный" in expanded
     assert "вопрос" in expanded
-
 
 def test_tokenize_normalized_drops_stopwords():
     tokens = tokenize_normalized(L.QUERY_WITH_STOPWORDS)
@@ -53,10 +45,8 @@ def test_tokenize_normalized_drops_stopwords():
     assert "по" not in tokens
     assert "за" not in tokens
 
-
 def test_tokenize_normalized_empty():
     assert tokenize_normalized("") == []
-
 
 def test_tokenize_normalized_punctuation_handling():
     tokens = tokenize_normalized("оплата, штраф!")

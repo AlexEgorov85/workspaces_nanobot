@@ -16,13 +16,11 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def test_all_exports_exist():
     """Все имена из __all__ импортируемы без AttributeError."""
     import application.service as summarizer
     for name in summarizer.__all__:
         assert hasattr(summarizer, name), f"__all__ ссылается на несуществующий {name!r}"
-
 
 def test_dead_estimate_api_removed():
     """Удалённый legacy estimate API не доступен."""
@@ -31,7 +29,6 @@ def test_dead_estimate_api_removed():
     assert not hasattr(summarizer, "estimate")
     assert not hasattr(summarizer, "_estimate_execution")
     assert not hasattr(summarizer, "_simulate_section_doc_reduce_calls")
-
 
 def test_core_public_symbols_present():
     """Базовый публичный контракт остаётся на месте."""

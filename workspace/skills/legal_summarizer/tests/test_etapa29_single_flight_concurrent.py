@@ -20,12 +20,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _build_doc(sections: int = 4) -> str:
     parts = []
@@ -36,7 +34,6 @@ def _build_doc(sections: int = 4) -> str:
             + "\n\n"
         )
     return "".join(parts)
-
 
 def _install_counting_llm_mocks(monkeypatch, *, llm_runner):
     """Установить мок-функции для LLM, которые считают active calls."""
@@ -56,13 +53,8 @@ def _install_counting_llm_mocks(monkeypatch, *, llm_runner):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
-
 
 def test_concurrent_runs_peak_is_one(tmp_path, monkeypatch):
     """24: два параллельных run() → peak active == 1."""
@@ -116,7 +108,6 @@ def test_concurrent_runs_peak_is_one(tmp_path, monkeypatch):
         f"peak concurrent calls = {state['peak']}, expected <= 1"
     )
 
-
 def test_retry_after_exception_peak_is_one(tmp_path, monkeypatch):
     """25: первый вызов → exception, второй → success, peak == 1."""
     state = {"active": 0, "peak": 0, "calls": 0}
@@ -155,7 +146,6 @@ def test_retry_after_exception_peak_is_one(tmp_path, monkeypatch):
     # Не падает (либо completed, либо failed — это OK для нашего теста,
     # мы проверяем peak).
     assert state["peak"] <= 1, f"peak={state['peak']}, expected <= 1"
-
 
 def test_exception_releases_lock(tmp_path, monkeypatch):
     """26: LLM exception → lock released, второй run получает LLM."""
@@ -210,7 +200,6 @@ def test_exception_releases_lock(tmp_path, monkeypatch):
     )
     # Если бы lock не освободился, второй run завис бы.
     assert call_count["n"] >= 2, "second run must be able to call LLM"
-
 
 def test_lock_finally_releases():
     """27: ``finally`` clause release — lock освобождается даже при exception.

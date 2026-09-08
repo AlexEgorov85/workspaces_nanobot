@@ -10,12 +10,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _patch_run_canonical_pipeline(monkeypatch):
     """Подменяем ``run_canonical_pipeline`` счётчиком вызовов."""
@@ -31,7 +29,6 @@ def _patch_run_canonical_pipeline(monkeypatch):
     monkeypatch.setattr(_pipeline_mod, "run_canonical_pipeline", _counting_run)
     monkeypatch.setattr(_summarizer, "run_canonical_pipeline", _counting_run)
     return calls
-
 
 def test_idempotent_run_does_not_call_pipeline(tmp_path: Path, monkeypatch):
     """Запуск с уже-completed manifest → pipeline НЕ вызывается."""
@@ -57,7 +54,6 @@ def test_idempotent_run_does_not_call_pipeline(tmp_path: Path, monkeypatch):
     assert calls["n"] == pipeline_calls_after_first, (
         f"pipeline called again on idempotent run: {calls['n']}"
     )
-
 
 def test_different_inputs_create_different_operation_id(tmp_path: Path, monkeypatch):
     """Разные text/length/path → разные operation_id → нет cache hit."""

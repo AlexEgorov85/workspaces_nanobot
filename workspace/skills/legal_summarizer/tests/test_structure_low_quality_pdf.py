@@ -14,7 +14,6 @@ from document.physical import (
     DocumentBlock,
 )
 
-
 def _b(ord: int, content: str = "x") -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ord:04d}", block_type="page", content=content,
@@ -23,7 +22,6 @@ def _b(ord: int, content: str = "x") -> DocumentBlock:
         ordinal=ord, block_metadata={},
     )
 
-
 def test_unparseable_heading_has_low_confidence():
     """Если heading невозможно распарсить, ``confidence`` низкий."""
     text = "???@@@@@!!!abc"
@@ -31,7 +29,6 @@ def test_unparseable_heading_has_low_confidence():
     if candidates:
         for c in candidates:
             assert c.score < 0.7
-
 
 def test_no_headings_returns_low_confidence():
     """Только body без headings → очень низкая confidence."""
@@ -42,7 +39,6 @@ def test_no_headings_returns_low_confidence():
     candidates = detect_heading_candidates(blocks, pdf_path=None)
     high_conf = [c for c in candidates if c.score >= 0.6]
     assert len(high_conf) == 0
-
 
 def test_low_quality_pdf_with_partial_ocr():
     """Частичный OCR: heading detection должен дать **какие-то** candidates
@@ -57,7 +53,6 @@ def test_low_quality_pdf_with_partial_ocr():
     assert len(candidates) > 0
     for c in candidates:
         assert c.score < 0.85
-
 
 def test_low_quality_no_repair_fabricates_structure():
     """Repair не должен придумывать секции, если их нет."""
@@ -80,7 +75,6 @@ def test_low_quality_no_repair_fabricates_structure():
     fixed, report = repair_structure(struct)
     assert "n_0000" in fixed.nodes
     assert report.invalid_ranges_dropped == 0
-
 
 def test_compute_evidence_for_ocr_garbage():
     """OCR-мусор не должен получать body_after бонус."""

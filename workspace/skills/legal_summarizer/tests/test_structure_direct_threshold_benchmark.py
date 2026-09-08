@@ -36,7 +36,6 @@ from planning.strategy import (
     select_strategy,
 )
 
-
 def _root(children: tuple[str, ...] = ()) -> StructureNode:
     return StructureNode(
         node_id="n_0000", node_type="document", semantic_type=None,
@@ -44,7 +43,6 @@ def _root(children: tuple[str, ...] = ()) -> StructureNode:
         children=children, start_block=0, end_block=10,
         confidence=1.0,
     )
-
 
 def _sec(nid: str, title: str = "Section") -> StructureNode:
     return StructureNode(
@@ -54,7 +52,6 @@ def _sec(nid: str, title: str = "Section") -> StructureNode:
         confidence=0.7,
     )
 
-
 def _chunk(cid: str, text: str) -> Chunk:
     return Chunk(
         chunk_id=cid, index=int(cid), text=text, char_count=len(text),
@@ -62,7 +59,6 @@ def _chunk(cid: str, text: str) -> Chunk:
         section_id="s1", section_path="1", section_heading="x",
         block_indices=(0,), block_types=("paragraph",),
     )
-
 
 def _build_small_doc():
     """~3000 chars (≤12000 threshold) → direct."""
@@ -75,7 +71,6 @@ def _build_small_doc():
     chunks = (_chunk("001", "x" * 3000),)
     return s, chunks
 
-
 def _build_medium_doc():
     """~50k chars (> direct_threshold, 1 section) → map_flat."""
     s = DocumentStructure(
@@ -86,7 +81,6 @@ def _build_medium_doc():
     )
     chunks = tuple(_chunk(f"{i:03d}", "x" * 1000) for i in range(50))
     return s, chunks
-
 
 def _build_large_doc():
     """~200k chars, 6 sections → map_hierarchical."""
@@ -101,24 +95,20 @@ def _build_large_doc():
     chunks = tuple(_chunk(f"{i:03d}", "x" * 1000) for i in range(200))
     return s, chunks
 
-
 def test_small_doc_direct_strategy():
     s, chunks = _build_small_doc()
     strategy = select_strategy(s, chunks)
     assert strategy == "direct"
-
 
 def test_medium_doc_map_flat():
     s, chunks = _build_medium_doc()
     strategy = select_strategy(s, chunks)
     assert strategy == "map_flat"
 
-
 def test_large_doc_map_hierarchical():
     s, chunks = _build_large_doc()
     strategy = select_strategy(s, chunks)
     assert strategy == "map_hierarchical"
-
 
 def test_direct_call_count_one():
     """Small doc → exactly 1 LLM call."""
@@ -127,26 +117,22 @@ def test_direct_call_count_one():
     assert plan.estimated_llm_calls == 1
     assert plan.total_batches == 1
 
-
 def test_medium_doc_call_count():
     s, chunks = _build_medium_doc()
     plan = build_execution_plan(s, chunks, document_id="d")
     assert plan.estimated_llm_calls >= 2
     assert plan.strategy == "map_flat"
 
-
 def test_large_doc_hierarchical():
     s, chunks = _build_large_doc()
     plan = build_execution_plan(s, chunks, document_id="d")
     assert plan.strategy == "map_hierarchical"
-
 
 def test_token_estimator_consistent():
     """Estimator даёт одинаковые значения для одного текста."""
     estimator = TokenEstimator(TokenEstimatorConfig(chars_per_token=3.5))
     text = "x" * 1000
     assert estimator.estimate(text) == estimator.estimate(text)
-
 
 def test_execution_plan_budget_constant_for_repeated_plans():
     """Один и тот же документ → один план (PLAN §75 deterministic)."""
@@ -157,7 +143,6 @@ def test_execution_plan_budget_constant_for_repeated_plans():
     assert p1.total_chunks == p2.total_chunks
     assert p1.strategy == p2.strategy
 
-
 def test_direct_threshold_lower_reduces_call_count():
     """Снижение direct_threshold должно переводить medium в map."""
     s, chunks = _build_medium_doc()
@@ -167,7 +152,6 @@ def test_direct_threshold_lower_reduces_call_count():
     plan_low = build_execution_plan(s, chunks, document_id="d", policy=low_policy)
     assert plan_high.strategy == "direct"
     assert plan_low.strategy in ("map_flat", "map_hierarchical")
-
 
 def test_adjacent_packing_reduces_batches_vs_legacy():
     """Adjacent packing уменьшает число batches vs naive section-locality."""

@@ -9,16 +9,13 @@ from llm.tokens import (
     TokenEstimatorConfig,
 )
 
-
 def test_estimate_empty():
     e = TokenEstimator()
     assert e.estimate("") == 0
 
-
 def test_estimate_short_text():
     e = TokenEstimator(TokenEstimatorConfig(chars_per_token=3.5))
     assert e.estimate("hi") == 1
-
 
 def test_estimate_long_text():
     e = TokenEstimator(TokenEstimatorConfig(chars_per_token=3.5))
@@ -26,17 +23,14 @@ def test_estimate_long_text():
     est = e.estimate(text)
     assert est == 100
 
-
 def test_estimate_uses_config():
     e = TokenEstimator(TokenEstimatorConfig(chars_per_token=4.0))
     assert e.estimate("x" * 100) == 25
-
 
 def test_estimate_many():
     e = TokenEstimator()
     total = e.estimate_many(["x" * 100, "y" * 200, ""])
     assert total > 0
-
 
 def test_available_with_margin():
     e = TokenEstimator(TokenEstimatorConfig(safety_margin_ratio=0.1))
@@ -45,7 +39,6 @@ def test_available_with_margin():
     )
     assert avail == 600
 
-
 def test_available_overrides_margin():
     e = TokenEstimator()
     avail = e.available(
@@ -53,7 +46,6 @@ def test_available_overrides_margin():
         safety_margin_ratio=0.0,
     )
     assert avail == 800
-
 
 def test_available_floor_zero():
     e = TokenEstimator()

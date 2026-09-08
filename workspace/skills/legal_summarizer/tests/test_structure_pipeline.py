@@ -8,7 +8,6 @@ from application.pipeline_structure import (
     run_canonical_pipeline,
 )
 
-
 def test_pipeline_on_text_file(tmp_path: Path):
     text_file = tmp_path / "doc.txt"
     text_file.write_text(
@@ -20,7 +19,6 @@ def test_pipeline_on_text_file(tmp_path: Path):
     assert result.analysis is not None
     assert len(result.chunks) >= 1 or result.analysis.structure.coverage_ratio >= 0
 
-
 def test_pipeline_returns_validation_report(tmp_path: Path):
     text_file = tmp_path / "doc.txt"
     text_file.write_text("hello world", encoding="utf-8")
@@ -28,7 +26,6 @@ def test_pipeline_returns_validation_report(tmp_path: Path):
     result = run_canonical_pipeline(text_file)
     assert result.validation is not None
     assert result.validation.coverage_ratio >= 0.0
-
 
 def test_pipeline_skips_repair_when_disabled(tmp_path: Path):
     text_file = tmp_path / "doc.txt"
@@ -39,14 +36,12 @@ def test_pipeline_skips_repair_when_disabled(tmp_path: Path):
     assert result_no_repair is not None
     assert result_with_repair is not None
 
-
 def test_pipeline_skips_retrieval_when_disabled(tmp_path: Path):
     text_file = tmp_path / "doc.txt"
     text_file.write_text("1. Section\n\nContent.", encoding="utf-8")
 
     result = run_canonical_pipeline(text_file, include_retrieval_index=False)
     assert result.analysis.retrieval_index is None
-
 
 def test_pipeline_handles_plain_text_no_headings(tmp_path: Path):
     """Plain text без headings — valid structure."""

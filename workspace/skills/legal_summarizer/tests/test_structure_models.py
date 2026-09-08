@@ -11,7 +11,6 @@ from document.structure import (
     _make_node_id,
 )
 
-
 def _make_node(
     *,
     node_id: str = "n_0001",
@@ -42,12 +41,10 @@ def _make_node(
         evidence=evidence,
     )
 
-
 def test_node_id_generator_format():
     assert _make_node_id(0) == "n_0000"
     assert _make_node_id(123) == "n_0123"
     assert _make_node_id(9999) == "n_9999"
-
 
 def test_structure_node_is_frozen():
     import dataclasses
@@ -58,7 +55,6 @@ def test_structure_node_is_frozen():
     except dataclasses.FrozenInstanceError:
         return
     raise AssertionError("StructureNode must be frozen")
-
 
 def test_structure_node_to_dict_roundtrip():
     node = _make_node(
@@ -74,7 +70,6 @@ def test_structure_node_to_dict_roundtrip():
     assert d["number"]["scheme"] == "decimal"
     assert d["number"]["components"] == [1]
     assert d["evidence"][0]["source"] == "docx_style"
-
 
 def test_document_structure_get_node_and_iter():
     root = _make_node(node_id="root", level=0, title="", semantic_type=None, node_type="document")
@@ -109,7 +104,6 @@ def test_document_structure_get_node_and_iter():
     assert len(s.iter_nodes()) == 3
     assert s.iter_nodes()[0].node_id == "root"
 
-
 def test_document_structure_iter_sections():
     sec = _make_node(node_id="sec1", node_type="section", start_block=0, end_block=10)
     body = _make_node(node_id="b1", node_type="body", start_block=2, end_block=4)
@@ -125,7 +119,6 @@ def test_document_structure_iter_sections():
     sections = s.iter_sections()
     assert len(sections) == 1
     assert sections[0].node_id == "sec1"
-
 
 def test_document_structure_block_to_node():
     root = _make_node(node_id="root", node_type="document", semantic_type=None, level=0, start_block=0, end_block=9)
@@ -146,13 +139,11 @@ def test_document_structure_block_to_node():
     assert mapping[5] == "sec1"
     assert mapping[6] == "root"
 
-
 def test_numbering_info_decimal():
     ni = NumberingInfo(raw="1.2.3", scheme="decimal", components=(1, 2, 3), level=3, ordinal=3)
     assert ni.scheme == "decimal"
     assert ni.components == (1, 2, 3)
     assert ni.level == 3
-
 
 def test_document_title_sources():
     for source in ("metadata", "visual", "inferred"):

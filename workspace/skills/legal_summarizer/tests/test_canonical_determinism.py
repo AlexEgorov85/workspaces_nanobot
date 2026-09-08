@@ -15,12 +15,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def test_pipeline_deterministic_for_same_input(tmp_path: Path):
     """Два запуска дают идентичный DocumentStructure."""
@@ -43,7 +41,6 @@ def test_pipeline_deterministic_for_same_input(tmp_path: Path):
         assert n1.end_block == n2.end_block
         assert n1.title == n2.title
 
-
 def test_chunk_ids_deterministic(tmp_path: Path):
     """Chunk IDs идентичны между запусками."""
     from application.pipeline_structure import (
@@ -60,7 +57,6 @@ def test_chunk_ids_deterministic(tmp_path: Path):
     ids1 = [c.chunk_id for c in r1.chunks]
     ids2 = [c.chunk_id for c in r2.chunks]
     assert ids1 == ids2
-
 
 def test_execution_plan_deterministic(tmp_path: Path):
     """ExecutionPlan identical между запусками."""
@@ -88,7 +84,6 @@ def test_execution_plan_deterministic(tmp_path: Path):
         assert b1.batch_id == b2.batch_id
         assert b1.chunk_ids == b2.chunk_ids
 
-
 def test_retrieval_ranking_deterministic(tmp_path: Path):
     """Retrieval ranking identical."""
     from application.pipeline_structure import (
@@ -112,7 +107,6 @@ def test_retrieval_ranking_deterministic(tmp_path: Path):
     for a, b in zip(h1, h2):
         assert a.chunk_id == b.chunk_id
         assert a.score == b.score
-
 
 def test_no_time_based_ids_in_pipeline(tmp_path: Path):
     """В pipeline нет time-based IDs."""

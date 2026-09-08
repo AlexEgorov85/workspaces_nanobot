@@ -11,7 +11,6 @@ from planning.strategy import (
     ExecutionPolicy, build_execution_plan, select_strategy,
 )
 
-
 def _root(children: tuple[str, ...] = ()) -> StructureNode:
     return StructureNode(
         node_id="n_0000", node_type="document", semantic_type=None,
@@ -19,7 +18,6 @@ def _root(children: tuple[str, ...] = ()) -> StructureNode:
         children=children, start_block=0, end_block=10,
         confidence=1.0,
     )
-
 
 def _sec(nid: str, title: str, *, start: int = 0, end: int = 5) -> StructureNode:
     return StructureNode(
@@ -29,7 +27,6 @@ def _sec(nid: str, title: str, *, start: int = 0, end: int = 5) -> StructureNode
         confidence=0.7,
     )
 
-
 def _chunk(cid: str, text: str = "x" * 100) -> Chunk:
     return Chunk(
         chunk_id=cid, index=int(cid), text=text, char_count=len(text),
@@ -37,7 +34,6 @@ def _chunk(cid: str, text: str = "x" * 100) -> Chunk:
         section_id="s1", section_path="1", section_heading="x",
         block_indices=(0,), block_types=("paragraph",),
     )
-
 
 def test_select_strategy_direct_small_doc():
     s = DocumentStructure(
@@ -52,7 +48,6 @@ def test_select_strategy_direct_small_doc():
     chunks = (_chunk("001", "short"),)
     assert select_strategy(s, chunks) == "direct"
 
-
 def test_select_strategy_map_flat_medium():
     s = DocumentStructure(
         document_id="d", title=None,
@@ -66,7 +61,6 @@ def test_select_strategy_map_flat_medium():
     chunks = tuple(_chunk(f"{i:03d}", "x" * 1000) for i in range(50))
     assert select_strategy(s, chunks) == "map_flat"
 
-
 def test_select_strategy_hierarchical_many_sections():
     nodes = {"n_0000": _root(tuple(f"n_{i:04d}" for i in range(1, 6)))}
     for i in range(1, 6):
@@ -78,7 +72,6 @@ def test_select_strategy_hierarchical_many_sections():
     )
     chunks = tuple(_chunk(f"{i:03d}", "x" * 1000) for i in range(50))
     assert select_strategy(s, chunks) == "map_hierarchical"
-
 
 def test_select_strategy_custom_threshold():
     s = DocumentStructure(
@@ -94,7 +87,6 @@ def test_select_strategy_custom_threshold():
     policy = ExecutionPolicy(direct_threshold_tokens=100_000)
     assert select_strategy(s, chunks, policy=policy) == "direct"
 
-
 def test_build_execution_plan_direct():
     s = DocumentStructure(
         document_id="d", title=None,
@@ -109,7 +101,6 @@ def test_build_execution_plan_direct():
     plan = build_execution_plan(s, chunks, document_id="d")
     assert plan.strategy == "direct"
     assert plan.total_batches == 1
-
 
 def test_build_execution_plan_map():
     s = DocumentStructure(

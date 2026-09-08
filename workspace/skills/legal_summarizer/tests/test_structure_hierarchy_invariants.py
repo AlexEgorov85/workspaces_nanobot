@@ -39,14 +39,12 @@ from document.structure import (
     StructureNode,
 )
 
-
 def _hc(block_index: int, text: str, source: str = "regex_numbered_1",
         level: int = 1, score: float = 0.7, raw_number: str | None = None):
     return HeadingCandidate(
         block_index=block_index, text=text, score=score, source=source,
         level=level, raw_number=raw_number,
     )
-
 
 def _nested_three_level_structure() -> DocumentStructure:
     """root / A / A.1, A.2 / B — явный nested case из PLAN §3.
@@ -65,13 +63,11 @@ def _nested_three_level_structure() -> DocumentStructure:
     ]
     return build_document_structure(cs, total_blocks=4, document_id="test")
 
-
 def test_invariant_root_has_no_parent():
     s = _nested_three_level_structure()
     root = s.nodes[s.root_id]
     assert root.parent_id is None
     assert root.level == 0
-
 
 def test_invariant_every_non_root_has_existing_parent():
     s = _nested_three_level_structure()
@@ -80,7 +76,6 @@ def test_invariant_every_non_root_has_existing_parent():
             continue
         assert node.parent_id is not None, f"{nid} has no parent"
         assert node.parent_id in s.nodes, f"{nid} parent {node.parent_id} not in nodes"
-
 
 def test_invariant_parent_level_less_than_node_level():
     s = _nested_three_level_structure()
@@ -92,7 +87,6 @@ def test_invariant_parent_level_less_than_node_level():
             f"parent.level={parent.level} not < node.level={node.level} "
             f"for {nid}"
         )
-
 
 def test_invariant_node_reachable_from_root():
     """Каждый узел достижим из root по цепочке children."""
@@ -113,7 +107,6 @@ def test_invariant_node_reachable_from_root():
     for nid in s.nodes:
         assert _reachable(s.root_id, nid, set()), f"{nid} not reachable from root"
 
-
 def test_invariant_node_in_exactly_one_parents_children():
     s = _nested_three_level_structure()
     child_owners: dict[str, list[str]] = {}
@@ -123,7 +116,6 @@ def test_invariant_node_in_exactly_one_parents_children():
     for nid, parents in child_owners.items():
         assert len(parents) == 1, f"{nid} has {len(parents)} parents: {parents}"
 
-
 def test_invariant_siblings_ordered_by_start_block():
     s = _nested_three_level_structure()
     for node in s.nodes.values():
@@ -131,7 +123,6 @@ def test_invariant_siblings_ordered_by_start_block():
         assert child_starts == sorted(child_starts), (
             f"siblings of {node.node_id} not sorted: {child_starts}"
         )
-
 
 def test_invariant_ranges_inside_document():
     s = _nested_three_level_structure()
@@ -145,7 +136,6 @@ def test_invariant_ranges_inside_document():
         assert node.start_block <= node.end_block, (
             f"{nid} start={node.start_block} > end={node.end_block}"
         )
-
 
 def test_invariant_end_block_equals_next_candidate_minus_one():
     """end_block секции = block_index следующего кандидата - 1.
@@ -176,7 +166,6 @@ def test_invariant_end_block_equals_next_candidate_minus_one():
             f"{title}: end_block={sec.end_block}, expected={expected_ends[title]}"
         )
 
-
 def test_invariant_last_candidate_end_is_total_blocks_minus_one():
     """end_block последнего кандидата = total_blocks - 1."""
     cs = [
@@ -189,7 +178,6 @@ def test_invariant_last_candidate_end_is_total_blocks_minus_one():
     assert last.title == "2."
     assert last.end_block == 7
 
-
 def test_invariant_siblings_start_blocks_monotonic():
     """Стартовые блоки siblings строго возрастают."""
     s = _nested_three_level_structure()
@@ -197,7 +185,6 @@ def test_invariant_siblings_start_blocks_monotonic():
         child_starts = [s.nodes[cid].start_block for cid in node.children]
         for a, b in zip(child_starts, child_starts[1:]):
             assert a < b, f"siblings not monotonic: {child_starts}"
-
 
 def test_invariant_determinism_byte_for_byte():
     """Повторный build_document_structure → byte-for-byte тот же to_dict()."""
@@ -216,7 +203,6 @@ def test_invariant_determinism_byte_for_byte():
     j2 = json.dumps(d2, sort_keys=True, ensure_ascii=False)
     assert j1 == j2, "build_document_structure not deterministic"
 
-
 def test_invariant_determinism_repeated_runs_three():
     """3 прогона → идентичный JSON."""
     cs = [
@@ -233,7 +219,6 @@ def test_invariant_determinism_repeated_runs_three():
     j = json.dumps(runs[0], sort_keys=True, ensure_ascii=False)
     for r in runs[1:]:
         assert json.dumps(r, sort_keys=True, ensure_ascii=False) == j
-
 
 def test_invariant_three_level_expected_shape():
     """Проверить что nested hierarchy имеет правильный parent/children.
@@ -254,7 +239,6 @@ def test_invariant_three_level_expected_shape():
     )
     assert len(a.children) == 2, f"A has {len(a.children)} children"
 
-
 def test_invariant_empty_structure_has_only_root():
     s = build_document_structure([], total_blocks=5, document_id="test")
     assert len(s.nodes) == 1
@@ -263,7 +247,6 @@ def test_invariant_empty_structure_has_only_root():
     assert root.start_block == 0
     assert root.end_block == 4
     assert root.children == ()
-
 
 def test_invariant_root_covers_full_document():
     s = _nested_three_level_structure()

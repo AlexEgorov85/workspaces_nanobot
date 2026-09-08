@@ -89,8 +89,14 @@ def _run_pipeline(blocks):
     return accepted, struct, chunks
 
 
-def test_realistic_nk_three_articles_three_chunks():
-    """3 статьи → 3 chunks (по числу статей)."""
+def test_realistic_nk_three_articles_pack_into_few_chunks():
+    """3 коротких статьи → ≤ 3 chunks (новое structural packing).
+
+    До рефакторинга (owner-boundary): 3 chunks (по одной статье).
+    После рефакторинга (structural packing): статьи объединяются,
+    если суммарно не превышают max_chunk_chars. Для короткого НК
+    РФ fixture все 3 статьи влезают в 1 chunk.
+    """
     blocks = _nk_blocks()
     accepted, struct, chunks = _run_pipeline(blocks)
 
@@ -98,8 +104,11 @@ def test_realistic_nk_three_articles_three_chunks():
         f"Ожидалось 3 headings; получено {len(accepted)}: "
         f"{[(c.block_index, c.source) for c in accepted]}"
     )
-    assert len(chunks) == 3, (
-        f"Ожидалось 3 chunks (по 3 статьям); получено {len(chunks)}"
+    assert len(chunks) <= 3, (
+        f"Ожидалось ≤ 3 chunks (structural packing); получено {len(chunks)}"
+    )
+    assert len(chunks) >= 1, (
+        f"Ожидалось ≥ 1 chunk; получено {len(chunks)}"
     )
 
 

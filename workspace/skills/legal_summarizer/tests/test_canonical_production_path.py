@@ -9,18 +9,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
 
-
 def _write_named_doc(tmp_path: Path, name: str, text: str) -> Path:
     p = tmp_path / name
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def test_canonical_pipeline_used_in_canonical_wrapper(tmp_path: Path, monkeypatch):
     """summarizer_canonical вызывает run_canonical_pipeline."""
@@ -42,7 +39,6 @@ def test_canonical_pipeline_used_in_canonical_wrapper(tmp_path: Path, monkeypatc
         text="", document_path=p,
     )
     assert call_count["n"] == 1
-
 
 def test_canonical_pipeline_does_not_import_legacy(monkeypatch):
     """canonical модули не импортируют legacy."""
@@ -90,7 +86,6 @@ def test_canonical_pipeline_does_not_import_legacy(monkeypatch):
                 f"{module.__name__} импортирует {short}"
             )
 
-
 def test_canonical_inspection_returns_pipeline_result(tmp_path: Path):
     """inspect_canonical возвращает объект с pipeline_result."""
     from application.canonical import (
@@ -104,7 +99,6 @@ def test_canonical_inspection_returns_pipeline_result(tmp_path: Path):
     assert insp.pipeline_result.analysis.identity is not None
     assert insp.pipeline_result.chunks is not None
     assert insp.pipeline_result.validation is not None
-
 
 def test_canonical_followup_uses_document_analysis(tmp_path: Path, monkeypatch):
     """answer_followup использует DocumentAnalysis, не legacy."""

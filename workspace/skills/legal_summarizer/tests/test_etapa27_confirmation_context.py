@@ -17,12 +17,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _install_llm_mocks(monkeypatch):
     import llm.calls as llm_calls
@@ -41,13 +39,8 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
-
 
 def _build_doc(sections: int = 8) -> str:
     parts = []
@@ -59,12 +52,14 @@ def _build_doc(sections: int = 8) -> str:
         )
     return "".join(parts)
 
+import llm.config  # noqa: E402
+
 
 def test_confirmation_uses_run_estimate_not_document(tmp_path, monkeypatch):
     """confirmation_required показывает run-level metrics."""
     import application.service as summarizer
     monkeypatch.setattr(
-        summarizer, "get_execution_config",
+        llm.config, "get_execution_config",
         lambda: {
             "confirmation_threshold_sec": 0.001,
             "estimated_chunk_duration_sec": 100.0,
@@ -95,12 +90,11 @@ def test_confirmation_uses_run_estimate_not_document(tmp_path, monkeypatch):
     assert "estimated_llm_calls" in summary
     assert "strategy" in summary
 
-
 def test_continuation_uses_selected_chunks_not_document(tmp_path, monkeypatch):
     """requires_continuation проверяет selected, а не document chunks."""
     import application.service as summarizer
     monkeypatch.setattr(
-        summarizer, "get_execution_config",
+        llm.config, "get_execution_config",
         lambda: {
             "confirmation_threshold_sec": 999999,
             "estimated_chunk_duration_sec": 0.001,
@@ -130,12 +124,11 @@ def test_continuation_uses_selected_chunks_not_document(tmp_path, monkeypatch):
     # Ключевое: chunks_selected > max_chunks_for_execution.
     assert summary["chunks_selected"] > 1
 
-
 def test_brief_does_not_require_continuation_for_large_doc(tmp_path, monkeypatch):
     """Brief mode с малым selected — НЕ requires_continuation, даже если doc большой."""
     import application.service as summarizer
     monkeypatch.setattr(
-        summarizer, "get_execution_config",
+        llm.config, "get_execution_config",
         lambda: {
             "confirmation_threshold_sec": 999999,
             "estimated_chunk_duration_sec": 0.001,
@@ -161,12 +154,11 @@ def test_brief_does_not_require_continuation_for_large_doc(tmp_path, monkeypatch
     )
     assert result["status"] == "completed", result
 
-
 def test_confirmation_does_not_trigger_for_small_doc(tmp_path, monkeypatch):
     """Маленький документ (selected ≤ 1 batch) → без confirmation при высоком threshold."""
     import application.service as summarizer
     monkeypatch.setattr(
-        summarizer, "get_execution_config",
+        llm.config, "get_execution_config",
         lambda: {
             "confirmation_threshold_sec": 999999,  # высокий threshold
             "estimated_chunk_duration_sec": 0.001,  # очень быстрый estimate

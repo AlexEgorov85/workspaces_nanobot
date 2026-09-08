@@ -1,12 +1,34 @@
-"""Регрессия: REDUCE_INPUT_EMPTY + защита completed/partial от пустого summary.
+"""Регрессия: REDUCE_INPUT_EMPTY + NO_PARTIALS + защита completed/partial
+от пустого summary.
 
 Перенесено из tests/test_legal_summarizer_empty_reduce.py в рамках
 миграции Skill к целевой структуре (runtime в scripts/).
 
 Использует canonical execution path: документ со структурой (разделы
 1, 2, 3...) выбирает strategy=map_reduce_flat, ``llm_batch`` mock
-возвращает ``{}`` (все батчи failed), ``_load_cached_partials`` видит
-пустой cache → runtime возвращает ``NO_PARTIALS`` (REDUCE_INPUT_EMPTY).
+возвращает ``{}`` (все батчи failed), ``load_cached_partials`` видит
+пустой cache → runtime возвращает ``NO_PARTIALS``.
+
+Контракт (точный):
+
+* ``llm_batch={}`` + ``load_cached_partials возвращает {}`` →
+  ``status='failed'``, ``error.code='NO_PARTIALS'``,
+  ``llm_document_reduce`` НЕ вызывается.
+
+* ``llm_batch рабочий`` + ``llm_document_reduce возвращает пустую строку``
+  → ``status='failed'``, ``error.code='REDUCE_INPUT_EMPTY'``,
+  ``llm_document_reduce`` ВЫЗЫВАЕТСЯ (joined непуст).
+
+* ``llm_document_reduce бросает exception`` →
+  ``status='failed'``, NO retry, ``llm_document_reduce`` ВЫЗЫВАЕТСЯ
+  ровно один раз (один attempt).
+
+* ``llm_batch возвращает dict с одним chunk, ``llm_document_reduce``
+  возвращает whitespace-only строку → ``status='failed'``
+  with ``REDUCE_INPUT_EMPTY``.
+
+* Нормальный путь: непустой joined, непустой result → ``completed``
+  with non-whitespace ``result.summary``.
 """
 from __future__ import annotations
 
@@ -24,7 +46,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 import application.service as service  # noqa: E402
 import llm.calls as llm_calls  # noqa: E402
 import llm.config as llm_config  # noqa: E402
-import execution.pipeline as pipeline_mod  # noqa: E402
 
 
 def _make_doc(tmp_path, text: str) -> Path:
@@ -34,7 +55,7 @@ def _make_doc(tmp_path, text: str) -> Path:
 
 
 def _structured_text() -> str:
-    """Документ с распознаваемой структурой (разделы 1, 2, 3...),
+    """Документ с распознаваемой структурой (разделы 1, 2, 3, 4...),
     чтобы context_builder выбрал map_reduce strategy.
     """
     parts = []
@@ -47,19 +68,27 @@ def _structured_text() -> str:
     return "".join(parts)
 
 
-def _base_cfg(*, ctx_tokens: int = 200):
+def _base_cfg() -> dict:
+    """Chunker config с реалистичными параметрами (не mock 200).
+
+    Раньше был chunk_size=200 (mock), что приводило к 716 chunks на
+    синтетике 4 Раздел X — а test падал на ``requires_continuation``
+    ещё до достижения REDUCE_INPUT_EMPTY логики. Используем
+    реалистичные 100000 + короткий текст, чтобы тест проверял то,
+    для чего предназначен: REDUCE_INPUT_EMPTY behavior.
+    """
     return {
-        "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
+        "chunk_size": 100000, "chunk_overlap": 0, "single_call_threshold": 100,
         "chunk_size_input_ratio": None,
-        "context_window_tokens": ctx_tokens,
+        "context_window_tokens": 200,
     }
 
 
-def _base_exec_cfg(*, concurrency: int = 1, ctx_tokens: int = 200):
+def _base_exec_cfg() -> dict:
     return {
         "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
-        "max_chunks_for_execution": 100,
-        "max_concurrent_batches": concurrency,
+        "max_chunks_for_execution": 1000,
+        "max_concurrent_batches": 1,
         "context_batching": {
             "system_prompt_tokens": 100, "instruction_tokens_per_map": 50,
             "chars_per_token": 3.5, "safety_margin": 0.85,
@@ -68,8 +97,22 @@ def _base_exec_cfg(*, concurrency: int = 1, ctx_tokens: int = 200):
     }
 
 
-def _install_llm_mocks(monkeypatch, *, doc_fn=None, section_fn=None):
-    """Установить LLM-mocks на canonical surfaces."""
+def _patch_cfg(monkeypatch) -> None:
+    monkeypatch.setattr(
+        llm_config, "get_chunking_config", lambda: _base_cfg(),
+    )
+    monkeypatch.setattr(
+        llm_config, "get_execution_config", lambda: _base_exec_cfg(),
+    )
+
+
+def _install_empty_batch(
+    monkeypatch,
+    *,
+    doc_fn=None,
+    section_fn=None,
+) -> None:
+    """Установить ``llm_batch → {}`` + LLM mocks."""
     def fake_batch(chunks, **_kw):
         return {}
 
@@ -81,24 +124,45 @@ def _install_llm_mocks(monkeypatch, *, doc_fn=None, section_fn=None):
     monkeypatch.setattr(llm_calls, "llm_batch", fake_batch)
     monkeypatch.setattr(llm_calls, "llm_section_reduce", section_fn)
     monkeypatch.setattr(llm_calls, "llm_document_reduce", doc_fn)
-    monkeypatch.setattr(service, "_llm_batch", fake_batch)
-    monkeypatch.setattr(service, "_llm_section_reduce", section_fn)
-    monkeypatch.setattr(service, "_llm_document_reduce", doc_fn)
-    monkeypatch.setattr(pipeline_mod, "_llm_batch", fake_batch)
-    monkeypatch.setattr(
-        llm_config, "get_chunking_config", lambda: _base_cfg(),
-    )
-    monkeypatch.setattr(
-        llm_config, "get_execution_config", lambda: _base_exec_cfg(),
+    _patch_cfg(monkeypatch)
+
+
+def _install_working_batch(
+    monkeypatch,
+    *,
+    doc_fn=None,
+    section_fn=None,
+) -> None:
+    """Установить ``llm_batch`` → непустой partials."""
+    def fake_batch_ok(chunks, **_kw):
+        return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
+
+    if section_fn is None:
+        section_fn = lambda *_a, **_kw: "section summary"
+    if doc_fn is None:
+        doc_fn = lambda *_a, **_kw: "doc summary"
+
+    monkeypatch.setattr(llm_calls, "llm_batch", fake_batch_ok)
+    monkeypatch.setattr(llm_calls, "llm_section_reduce", section_fn)
+    monkeypatch.setattr(llm_calls, "llm_document_reduce", doc_fn)
+    _patch_cfg(monkeypatch)
+
+
+def _run(monkeypatch, tmp_path, *, length="detailed", confirmed=True):
+    """Run Skill на структурированном документе."""
+    text = _structured_text()
+    doc = _make_doc(tmp_path, text)
+    return service.run(
+        text, length=length, confirmed=confirmed,
+        workspace_root=tmp_path, document_path=str(doc),
     )
 
 
-def test_all_map_batches_failed_returns_reduce_input_empty(
-    monkeypatch, tmp_path,
-):
-    """Test 1: ``llm_batch`` возвращает пустой dict → все map-батчи
-    failed → ``_load_cached_partials`` пуст → runtime → ``NO_PARTIALS``
-    → status=failed. ``llm_document_reduce`` не должен вызываться.
+def test_all_map_batches_failed_returns_no_partials(monkeypatch, tmp_path):
+    """Сценарий 1: ``llm_batch`` возвращает пустой dict.
+
+    Контракт: ``status='failed'``, ``error.code='NO_PARTIALS'``,
+    ``llm_document_reduce`` НЕ вызывается.
     """
     document_reduce_called = {"v": False}
 
@@ -106,149 +170,136 @@ def test_all_map_batches_failed_returns_reduce_input_empty(
         document_reduce_called["v"] = True
         return "should not be called"
 
-    _install_llm_mocks(monkeypatch, doc_fn=fake_doc_reduce)
+    _install_empty_batch(monkeypatch, doc_fn=fake_doc_reduce)
+    result = _run(monkeypatch, tmp_path)
 
-    text = _structured_text()
-    doc = _make_doc(tmp_path, text)
-    result = service.run(
-        text, length="detailed", confirmed=True, workspace_root=tmp_path,
-        document_path=str(doc),
-    )
-
-    assert result["status"] == "failed"
+    # Точный контракт.
+    assert result["status"] == "failed", result
     err = result.get("error") or {}
-    assert err.get("code") in {"REDUCE_INPUT_EMPTY", "NO_PARTIALS"}, (
-        f"Ожидался REDUCE_INPUT_EMPTY или NO_PARTIALS, получили {err}"
+    assert err.get("code") == "NO_PARTIALS", (
+        f"Точно ожидался NO_PARTIALS (cache пуст); получили {err}"
     )
-    assert not document_reduce_called["v"], (
-        "document_reduce был вызван с пустым input — это запрещено"
+    assert document_reduce_called["v"] is False, (
+        "document_reduce НЕ должен вызываться, когда cache partials пуст"
     )
 
 
-def test_section_summaries_empty_returns_reduce_input_empty(
-    monkeypatch, tmp_path,
-):
-    """Test 2: ``llm_batch`` возвращает валидные partials, но
-    ``llm_document_reduce`` возвращает пустую строку →
-    final_summary.strip() == "" → REDUCE_INPUT_EMPTY.
+def test_empty_document_reduce_returns_reduce_input_empty(monkeypatch, tmp_path):
+    """Сценарий 2: ``llm_document_reduce`` возвращает пустую строку.
+
+    Контракт: ``status='failed'``, ``error.code='REDUCE_INPUT_EMPTY'``,
+    ``llm_document_reduce`` ВЫЗЫВАЕТСЯ (joined непуст).
     """
-    document_reduce_called = {"v": False}
+    document_reduce_calls = {"n": 0}
 
     def fake_doc_reduce_empty(*_args, **_kw):
-        document_reduce_called["v"] = True
+        document_reduce_calls["n"] += 1
         return ""
 
-    def fake_batch_ok(chunks, **_kw):
-        return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
+    _install_working_batch(monkeypatch, doc_fn=fake_doc_reduce_empty)
+    result = _run(monkeypatch, tmp_path)
 
-    def fake_section_ok(*_args, **_kw):
-        return "section summary"
-
-    monkeypatch.setattr(llm_calls, "llm_batch", fake_batch_ok)
-    monkeypatch.setattr(llm_calls, "llm_section_reduce", fake_section_ok)
-    monkeypatch.setattr(llm_calls, "llm_document_reduce", fake_doc_reduce_empty)
-    monkeypatch.setattr(service, "_llm_batch", fake_batch_ok)
-    monkeypatch.setattr(service, "_llm_section_reduce", fake_section_ok)
-    monkeypatch.setattr(service, "_llm_document_reduce", fake_doc_reduce_empty)
-    monkeypatch.setattr(pipeline_mod, "_llm_batch", fake_batch_ok)
-    monkeypatch.setattr(
-        llm_config, "get_chunking_config", lambda: _base_cfg(),
-    )
-    monkeypatch.setattr(
-        llm_config, "get_execution_config", lambda: _base_exec_cfg(),
-    )
-
-    text = _structured_text()
-    doc = _make_doc(tmp_path, text)
-    result = service.run(
-        text, length="detailed", confirmed=True, workspace_root=tmp_path,
-        document_path=str(doc),
-    )
-
-    assert result["status"] == "failed"
+    assert result["status"] == "failed", result
     err = result.get("error") or {}
-    assert err.get("code") in {"REDUCE_INPUT_EMPTY", "NO_PARTIALS"}, (
-        f"Ожидался REDUCE_INPUT_EMPTY или NO_PARTIALS, получили {err}"
+    assert err.get("code") == "REDUCE_INPUT_EMPTY", (
+        f"Точно ожидался REDUCE_INPUT_EMPTY (пустой результат reduce); "
+        f"получили {err}"
     )
-    assert document_reduce_called["v"], (
-        "document_reduce должен быть вызван (joined непуст); "
-        "REDUCE_INPUT_EMPTY возникает из-за пустого результата reduce."
+    assert document_reduce_calls["n"] == 1, (
+        f"document_reduce должен быть вызван ровно 1 раз "
+        f"(joined непуст, single attempt); "
+        f"получили n={document_reduce_calls['n']}"
     )
 
 
-def test_document_reduce_exception_does_not_emit_empty_completed(
+def test_whitespace_only_reduce_returns_reduce_input_empty(monkeypatch, tmp_path):
+    """Сценарий 3: ``llm_document_reduce`` возвращает только пробелы.
+
+    Контракт: ``status='failed'``, ``error.code='REDUCE_INPUT_EMPTY'`` —
+    whitespace-only summary не считается валидным.
+    """
+    def fake_doc_reduce_whitespace(*_args, **_kw):
+        return "   \n\n\t  \n"
+
+    _install_working_batch(monkeypatch, doc_fn=fake_doc_reduce_whitespace)
+    result = _run(monkeypatch, tmp_path)
+
+    assert result["status"] == "failed", result
+    err = result.get("error") or {}
+    assert err.get("code") == "REDUCE_INPUT_EMPTY", (
+        f"whitespace-only summary → REDUCE_INPUT_EMPTY; получили {err}"
+    )
+
+
+def test_document_reduce_exception_is_non_retryable_single_attempt(
     monkeypatch, tmp_path,
 ):
-    """Test 3: ``llm_document_reduce`` бросает исключение →
-    completed/partial НЕ допускается с пустым summary.
+    """Сценарий 4: ``llm_document_reduce`` бросает исключение.
+
+    Контракт: ``status='failed'``, ``llm_document_reduce`` вызывается
+    РОВНО ОДИН раз (NO retry на REDUCE_INPUT_EMPTY — non-retryable
+    error, обусловленный input).
     """
+    document_reduce_calls = {"n": 0}
+
     def fake_doc_reduce_explode(*_args, **_kw):
+        document_reduce_calls["n"] += 1
         raise RuntimeError("simulated LLM error")
 
-    def fake_batch_ok(chunks, **_kw):
-        return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
+    _install_working_batch(monkeypatch, doc_fn=fake_doc_reduce_explode)
+    result = _run(monkeypatch, tmp_path)
 
-    def fake_section_ok(*_args, **_kw):
-        return "section summary"
-
-    monkeypatch.setattr(llm_calls, "llm_batch", fake_batch_ok)
-    monkeypatch.setattr(llm_calls, "llm_section_reduce", fake_section_ok)
-    monkeypatch.setattr(llm_calls, "llm_document_reduce", fake_doc_reduce_explode)
-    monkeypatch.setattr(service, "_llm_batch", fake_batch_ok)
-    monkeypatch.setattr(service, "_llm_section_reduce", fake_section_ok)
-    monkeypatch.setattr(service, "_llm_document_reduce", fake_doc_reduce_explode)
-    monkeypatch.setattr(pipeline_mod, "_llm_batch", fake_batch_ok)
-    monkeypatch.setattr(
-        llm_config, "get_chunking_config", lambda: _base_cfg(),
-    )
-    monkeypatch.setattr(
-        llm_config, "get_execution_config", lambda: _base_exec_cfg(),
-    )
-
-    text = _structured_text()
-    doc = _make_doc(tmp_path, text)
-    result = service.run(
-        text, length="detailed", confirmed=True, workspace_root=tmp_path,
-        document_path=str(doc),
-    )
-
-    if result.get("status") in {"completed", "partial"}:
-        assert (result.get("result") or {}).get("summary", "").strip(), (
-            f"completed/partial с пустым summary — ЗАПРЕЩЕНО. result={result}"
-        )
-
-
-def test_reduce_input_empty_is_non_retryable(monkeypatch, tmp_path):
-    """Test 4: REDUCE_INPUT_EMPTY / NO_PARTIALS → status=failed сразу,
-    document_reduce НЕ вызывается, NO retry.
-    """
-    document_reduce_calls = {"count": 0}
-
-    def fake_doc_reduce_raises(*_args, **_kw):
-        document_reduce_calls["count"] += 1
-        raise RuntimeError("should not be called on empty input")
-
-    _install_llm_mocks(monkeypatch, doc_fn=fake_doc_reduce_raises)
-
-    text = _structured_text()
-    doc = _make_doc(tmp_path, text)
-    result = service.run(
-        text, length="detailed", confirmed=True, workspace_root=tmp_path,
-        document_path=str(doc),
-    )
-
+    # Точный контракт.
     assert result["status"] == "failed", (
-        f"REDUCE_INPUT_EMPTY не должен быть completed/partial. "
-        f"Получили status={result['status']!r}"
+        f"REDUCE_INPUT_EMPTY не должен выходить как completed/partial; "
+        f"получили status={result.get('status')!r}"
+    )
+    assert document_reduce_calls["n"] == 1, (
+        f"document_reduce вызван {document_reduce_calls['n']} раз "
+        f"при исключении — ожидался ровно один attempt"
+    )
+    # summary не должен быть пустым или whitespace-only в completed/partial.
+    assert "result" not in result or not (
+        result.get("result", {}).get("summary", "").strip()
+    ), f"completed/partial с непустым summary недопустим: {result}"
+
+
+def test_normal_run_returns_completed_with_nonempty_summary(monkeypatch, tmp_path):
+    """Сценарий 5: нормальный путь (positive control).
+
+    Контракт: ``status='completed'``, ``summary`` непустой.
+    Это baseline, против которого проверяются edge-case'ы сценариев 1-4.
+    Без этого теста edge-case-тесты могут проходить по неправильной
+    причине (например, всегда возвращать failed).
+    """
+    def fake_doc(*_args, **_kw):
+        return "Итоговое саммари документа с полезной информацией."
+
+    _install_working_batch(monkeypatch, doc_fn=fake_doc)
+    result = _run(monkeypatch, tmp_path)
+
+    assert result["status"] == "completed", result
+    assert result["result"]["summary"].strip(), (
+        f"completed требует непустой summary; result={result}"
     )
 
-    err = result.get("error") or {}
-    assert err.get("code") in {"REDUCE_INPUT_EMPTY", "NO_PARTIALS"}, (
-        f"Ожидался REDUCE_INPUT_EMPTY/NO_PARTIALS для пустого reduce input, "
-        f"получили code={err.get('code')!r}"
-    )
 
-    assert document_reduce_calls["count"] == 0, (
-        f"document_reduce вызван {document_reduce_calls['count']} раз "
-        "при пустом reduce input — ЗАПРЕЩЕНО"
+def test_reduce_input_empty_never_emits_completed_or_partial(monkeypatch, tmp_path):
+    """Защитный regression: REDUCE_INPUT_EMPTY / NO_PARTIALS НИКОГДА не должны
+    сопровождаться ``status in {completed, partial}`` даже если в кэше
+    есть ровно один chunk, joined непуст, но result — пустая строка.
+    """
+    document_reduce_calls = {"n": 0}
+
+    def fake_doc_reduce_empty(*_args, **_kw):
+        document_reduce_calls["n"] += 1
+        return ""
+
+    _install_working_batch(monkeypatch, doc_fn=fake_doc_reduce_empty)
+    result = _run(monkeypatch, tmp_path)
+
+    assert result.get("status") not in {"completed", "partial"}, (
+        f"REDUCE_INPUT_EMPTY с пустым summary → ЗАПРЕЩЕНО completed/partial; "
+        f"result={result}"
     )
+    assert document_reduce_calls["n"] == 1

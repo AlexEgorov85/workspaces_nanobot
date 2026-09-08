@@ -8,13 +8,7 @@ from application.chunk_selection import select_chunks_for_mode
 from application.inspection import Inspection
 from chunking.chunks import Chunk
 from planning.plan import ExecutionPlan
-from planning.strategy import select_strategy
-
-
-def _service_mod():
-    """Lazy lookup для ``build_execution_plan`` (для monkeypatch в тестах)."""
-    import application.service as _svc
-    return _svc
+import planning.strategy as _planning_strategy_mod
 
 
 @dataclass(frozen=True)
@@ -66,8 +60,8 @@ def build_execution_context(
         plan = None
         strategy = "direct"
     elif insp.structure is not None:
-        strategy = select_strategy(insp.structure, list(chunks))
-        plan = _service_mod().build_execution_plan(
+        strategy = _planning_strategy_mod.select_strategy(insp.structure, list(chunks))
+        plan = _planning_strategy_mod.build_execution_plan(
             insp.structure,
             tuple(chunks),
             document_id=insp.analysis.identity.document_id if insp.analysis else "",

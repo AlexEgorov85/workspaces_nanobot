@@ -19,7 +19,6 @@ from document.physical import (
     DocumentBlock, PhysicalDocument,
 )
 
-
 def _b(ord: int) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ord:04d}", block_type="paragraph", content="x",
@@ -27,7 +26,6 @@ def _b(ord: int) -> DocumentBlock:
         paragraph_index=None, table_index=None, ordinal=ord,
         block_metadata={},
     )
-
 
 def _doc() -> PhysicalDocument:
     import tempfile
@@ -40,7 +38,6 @@ def _doc() -> PhysicalDocument:
         blocks=tuple(_b(i) for i in range(3)), page_count=1,
     )
 
-
 def _c(cid: str, text: str, idx: int = 0) -> Chunk:
     return Chunk(
         chunk_id=cid, index=idx, text=text, char_count=len(text),
@@ -48,7 +45,6 @@ def _c(cid: str, text: str, idx: int = 0) -> Chunk:
         section_id="s1", section_path="1", section_heading="x",
         block_indices=(0,), block_types=("paragraph",),
     )
-
 
 def _struct() -> DocumentStructure:
     return DocumentStructure(
@@ -73,7 +69,6 @@ def _struct() -> DocumentStructure:
         numbering=(), total_blocks=3,
     )
 
-
 def test_select_brief_chunks_from_analysis():
     chunks = (
         _c("001", "Section 1", idx=0),
@@ -87,7 +82,6 @@ def test_select_brief_chunks_from_analysis():
     assert len(result) > 0
     assert len(result) <= len(chunks)
 
-
 def test_brief_does_not_reparse():
     chunks = (_c("001", "Section 1"),)
     analysis = DocumentAnalysis.build(
@@ -96,7 +90,6 @@ def test_brief_does_not_reparse():
     doc_id_before = analysis.identity.document_id
     _ = select_brief_chunks_from_analysis(analysis)
     assert analysis.identity.document_id == doc_id_before
-
 
 def test_brief_respects_config():
     chunks = (_c("001", "x"), _c("002", "y"), _c("003", "z"))

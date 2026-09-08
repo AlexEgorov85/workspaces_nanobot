@@ -8,12 +8,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def test_first_run_builds_analysis(tmp_path: Path):
     """Первый запуск строит DocumentAnalysis с semantic_records=[]."""
@@ -29,7 +27,6 @@ def test_first_run_builds_analysis(tmp_path: Path):
     assert result.analysis is not None
     assert result.analysis.semantic_records == {}
     assert result.analysis.retrieval_index is not None
-
 
 def test_second_run_returns_same_identity(tmp_path: Path):
     """Два запуска на одном файле → один и тот же DocumentIdentity."""
@@ -51,7 +48,6 @@ def test_second_run_returns_same_identity(tmp_path: Path):
         result2.analysis.identity.fingerprint
     )
 
-
 def test_modified_file_creates_new_identity(tmp_path: Path):
     """Изменённый файл → новый DocumentIdentity."""
     from application.canonical import (
@@ -69,7 +65,6 @@ def test_modified_file_creates_new_identity(tmp_path: Path):
         result1.analysis.identity.document_id
         != result2.analysis.identity.document_id
     )
-
 
 def test_followup_uses_cached_analysis(tmp_path: Path, monkeypatch):
     """Follow-up запрос использует cached DocumentAnalysis, без повторного parsing."""
@@ -106,7 +101,6 @@ def test_followup_uses_cached_analysis(tmp_path: Path, monkeypatch):
     )
 
     assert pipeline_calls["n"] == 0
-
 
 def test_document_analysis_immutable(tmp_path: Path):
     """DocumentAnalysis — frozen dataclass."""

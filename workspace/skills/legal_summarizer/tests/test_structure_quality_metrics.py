@@ -22,7 +22,6 @@ from retrieval.index import (
     RetrievalIndex,
 )
 
-
 def _b(ord: int) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ord:04d}", block_type="paragraph", content="x",
@@ -30,7 +29,6 @@ def _b(ord: int) -> DocumentBlock:
         paragraph_index=None, table_index=None, ordinal=ord,
         block_metadata={},
     )
-
 
 def _doc() -> PhysicalDocument:
     import tempfile
@@ -43,7 +41,6 @@ def _doc() -> PhysicalDocument:
         blocks=tuple(_b(i) for i in range(3)), page_count=1,
     )
 
-
 def _c(cid: str, text: str, idx: int = 0, ord: tuple[int, ...] = (0,)) -> Chunk:
     return Chunk(
         chunk_id=cid, index=idx, text=text, char_count=len(text),
@@ -51,7 +48,6 @@ def _c(cid: str, text: str, idx: int = 0, ord: tuple[int, ...] = (0,)) -> Chunk:
         section_id="s1", section_path="1", section_heading="x",
         block_indices=ord, block_types=("paragraph",),
     )
-
 
 def _struct() -> DocumentStructure:
     return DocumentStructure(
@@ -64,7 +60,6 @@ def _struct() -> DocumentStructure:
         root_id="n_0000", preamble_node_id="n_0000",
         numbering=(), total_blocks=3,
     )
-
 
 def test_quality_metrics_summary():
     m = QualityMetrics(
@@ -80,12 +75,10 @@ def test_quality_metrics_summary():
     assert d["retrieval_recall_at_k"] == 0.8
     assert d["tokens_per_call"] == 5000.0
 
-
 def test_compute_quality_metrics_empty():
     m = compute_quality_metrics()
     assert m.retrieval_recall_at_k == 0.0
     assert m.structure_correctness is True
-
 
 def test_compute_quality_metrics_with_recall():
     chunks = (
@@ -111,7 +104,6 @@ def test_compute_quality_metrics_with_recall():
     assert m.retrieval_recall_at_k == 1.0
     assert m.answer_completeness == 1.0
 
-
 def test_compute_quality_metrics_with_provenance():
     doc = _doc()
     struct = _struct()
@@ -123,16 +115,13 @@ def test_compute_quality_metrics_with_provenance():
     m = compute_quality_metrics(chains=[chain])
     assert m.provenance_correctness == 1.0
 
-
 def test_compute_quality_metrics_tokens_per_call():
     m = compute_quality_metrics(llm_calls=10, total_tokens=10000)
     assert m.tokens_per_call == 1000.0
 
-
 def test_compute_quality_metrics_zero_calls():
     m = compute_quality_metrics(llm_calls=0, total_tokens=1000)
     assert m.tokens_per_call == 0.0
-
 
 def test_standard_qa_set_with_recall():
     chunks = (

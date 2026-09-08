@@ -94,9 +94,12 @@ def test_synth_nk_chunk_count():
     )
     chunks = chunk_from_structure(doc, struct)
 
-    assert len(chunks) == 30, (
-        f"Ожидалось 30 chunks (по числу статей); получено {len(chunks)} "
-        f"— chunker не объединяет body под sections"
+    assert len(chunks) < 30, (
+        f"Ожидалось < 30 chunks (structural packing объединяет соседние "
+        f"sections); получено {len(chunks)}"
+    )
+    assert len(chunks) >= 1, (
+        f"Ожидалось ≥ 1 chunk; получено {len(chunks)}"
     )
 
 

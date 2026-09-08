@@ -8,11 +8,9 @@ from __future__ import annotations
 
 PIPELINE_CALLS: int = 0
 
-
 def reset() -> None:
     global PIPELINE_CALLS
     PIPELINE_CALLS = 0
-
 
 def record_pipeline_call() -> None:
     global PIPELINE_CALLS

@@ -19,12 +19,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _install_llm_mocks(monkeypatch):
     import llm.calls as llm_calls
@@ -43,13 +41,8 @@ def _install_llm_mocks(monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _summarizer
-    monkeypatch.setattr(_summarizer, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_summarizer, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_summarizer, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
-
 
 def test_unknown_cid_raises(tmp_path, monkeypatch):
     """plan ссылается на неизвестный chunk_id → RuntimeError."""
@@ -78,8 +71,7 @@ def test_unknown_cid_raises(tmp_path, monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="unknown chunk_id"):
-        summarizer._map_plan_to_chunk_batches(plan, real_chunks)
-
+        summarizer.map_plan_to_chunk_batches(plan, real_chunks)
 
 def test_order_invariant(tmp_path, monkeypatch):
     """queued batch_ids совпадают с порядком plan.batches."""
@@ -98,7 +90,6 @@ def test_order_invariant(tmp_path, monkeypatch):
     manifest = summarizer.load_manifest(result["operation_id"], tmp_path)
     if manifest.batches_done:
         assert manifest.batches_done == sorted(manifest.batches_done)
-
 
 def test_duplicate_chunks_raises(tmp_path, monkeypatch):
     """Дублирующиеся chunk_id в разных batches → RuntimeError."""
@@ -128,8 +119,7 @@ def test_duplicate_chunks_raises(tmp_path, monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="duplicate"):
-        summarizer._map_plan_to_chunk_batches(plan, real_chunks)
-
+        summarizer.map_plan_to_chunk_batches(plan, real_chunks)
 
 def test_plan_none_raises_in_map_reduce(tmp_path, monkeypatch):
     """_run_map_reduce с plan=None → RuntimeError."""
@@ -140,7 +130,7 @@ def test_plan_none_raises_in_map_reduce(tmp_path, monkeypatch):
     insp = summarizer.inspect(text, document_path=str(p))
 
     with pytest.raises(RuntimeError, match="non-None ExecutionPlan"):
-        summarizer._run_map_reduce(
+        summarizer.run_map_reduce(
             list(insp.chunks[:2]),
             plan=None,
             strategy="map_flat",

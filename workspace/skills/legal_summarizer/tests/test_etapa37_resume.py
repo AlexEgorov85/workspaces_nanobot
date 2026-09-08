@@ -15,12 +15,10 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-
 def _write_doc(tmp_path: Path, text: str) -> Path:
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
     return p
-
 
 def _build_doc(sections: int = 6) -> str:
     parts = []
@@ -31,7 +29,6 @@ def _build_doc(sections: int = 6) -> str:
             + "\n\n"
         )
     return "".join(parts)
-
 
 def test_partial_run_resume_processes_only_pending(tmp_path, monkeypatch):
     """Первый run падает на первом batch'е → second run обрабатывает
@@ -59,12 +56,8 @@ def test_partial_run_resume_processes_only_pending(tmp_path, monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _sm
-    monkeypatch.setattr(_sm, "_llm_batch", _flaky_batch)
-    monkeypatch.setattr(_sm, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_sm, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _flaky_batch)
 
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
@@ -105,7 +98,6 @@ def test_partial_run_resume_processes_only_pending(tmp_path, monkeypatch):
             f"re-execution of completed chunks: {second_seen & ok_chunk_ids}"
         )
 
-
 def test_resume_plan_remains_stable(tmp_path, monkeypatch):
     """План детерминирован при повторном build_execution_context."""
     import application.service as summarizer
@@ -124,18 +116,14 @@ def test_resume_plan_remains_stable(tmp_path, monkeypatch):
     monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
 
     import application.service as _sm
-    monkeypatch.setattr(_sm, "_llm_batch", _fake_batch)
-    monkeypatch.setattr(_sm, "_llm_section_reduce", _fake_section)
-    monkeypatch.setattr(_sm, "_llm_document_reduce", _fake_doc)
 
     import execution.pipeline as _pipeline_mod
-    monkeypatch.setattr(_pipeline_mod, "_llm_batch", _fake_batch)
 
     text = _build_doc(sections=6)
     p = _write_doc(tmp_path, text)
 
     insp = summarizer.inspect(text, document_path=str(p))
-    ctx_before = summarizer._build_execution_context(insp, length="detailed")
+    ctx_before = summarizer.build_execution_context(insp, length="detailed")
     assert ctx_before.plan is not None
     plan_before = [list(batch.chunk_ids) for batch in ctx_before.plan.batches]
 
@@ -145,7 +133,7 @@ def test_resume_plan_remains_stable(tmp_path, monkeypatch):
         confirmed=True,
     )
 
-    ctx_after = summarizer._build_execution_context(insp, length="detailed")
+    ctx_after = summarizer.build_execution_context(insp, length="detailed")
     plan_after = [list(batch.chunk_ids) for batch in ctx_after.plan.batches]
     assert plan_before == plan_after, (
         f"plan changed:\n  before={plan_before}\n  after={plan_after}"

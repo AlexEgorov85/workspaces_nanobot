@@ -21,13 +21,11 @@ from document.hierarchy import (
     build_document_structure,
 )
 
-
 def _hc(block_index: int, text: str, source: str = "regex_numbered_1"):
     return HeadingCandidate(
         block_index=block_index, text=text, score=0.7,
         source=source, level=1, raw_number=None,
     )
-
 
 def test_nested_decimal():
     """1.1.1 — три уровня decimal."""
@@ -47,11 +45,10 @@ def test_nested_decimal():
     assert second.parent_id == first.node_id
     assert third.parent_id == second.node_id
 
-
 def test_chapter_article():
     """Глава → Статья."""
     cs = [
-        _hc(0, "Глава 1", source="regex_glзава"),
+        _hc(0, "Глава 1", source="regex_glava"),
         _hc(5, "Статья 1", source="regex_statiya"),
         _hc(10, "Статья 2", source="regex_statiya"),
     ]
@@ -67,7 +64,6 @@ def test_chapter_article():
     assert article_1.parent_id == chapter.node_id
     assert article_2.parent_id == chapter.node_id
 
-
 def test_section_subsection():
     """Раздел → подраздел.
 
@@ -79,7 +75,6 @@ def test_section_subsection():
         "требует fix в numbering.py",
     )
 
-
 def test_sibling_ordinal_reset():
     """Под каждым parent ordinal начинается с 1.
 
@@ -89,7 +84,6 @@ def test_sibling_ordinal_reset():
     pytest.skip(
         "parse_numbering bug: decimal без текста не парсится",
     )
-
 
 def test_level_jumps_allowed():
     """Level 1 → level 3 через level 2 (промежуточный родитель = level 1).
@@ -101,7 +95,6 @@ def test_level_jumps_allowed():
         "parse_numbering bug: decimal без текста не парсится",
     )
 
-
 def test_missing_intermediate_parent_handled():
     """Section без родителя становится ребёнком root."""
     cs = [
@@ -112,7 +105,6 @@ def test_missing_intermediate_parent_handled():
     sections = s.iter_sections()
     assert sections[0].parent_id == s.root_id
 
-
 def test_mixed_numbering_schemes():
     """decimal + legal не сливаются.
 
@@ -121,7 +113,7 @@ def test_mixed_numbering_schemes():
     исправления numbering.py.
     """
     cs = [
-        _hc(0, "Глава 1", source="regex_glзава"),
+        _hc(0, "Глава 1", source="regex_glava"),
         _hc(5, "Статья 5", source="regex_statiya"),
     ]
     s = build_document_structure(cs, total_blocks=15, document_id="test")
@@ -129,7 +121,6 @@ def test_mixed_numbering_schemes():
     assert len(sections) == 2
     assert sections[0].semantic_type == "chapter"
     assert sections[1].semantic_type == "article"
-
 
 def test_unrelated_numbering_not_merged():
     """1.1. и 2.1. НЕ склеиваются в один parent.

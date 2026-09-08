@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import ast
 
-
 _LEGACY_MODULES = frozenset({
     "workspace.skills.legal_summarizer.scripts.fingerprint",
     "workspace.skills.legal_summarizer.scripts.reducer_strategy",
@@ -48,7 +47,6 @@ _LEGACY_FILES = frozenset({
     "workspace/skills/legal_summarizer/scripts/_legacy_run_map_reduce.py",
 })
 
-
 def _module_legacy_refs(module) -> list[str]:
     """Найти legacy-ссылки в AST модуля (не в комментариях/docstring)."""
     if module is None:
@@ -79,11 +77,9 @@ def _module_legacy_refs(module) -> list[str]:
                 hits.append(f"attr: .{node.attr}")
     return hits
 
-
 def _read_source(module) -> str:
     import inspect
     return inspect.getsource(module)
-
 
 def test_summarizer_canonical_does_not_reference_legacy():
     """summarizer_canonical — единственная production-точка входа без legacy."""
@@ -93,7 +89,6 @@ def test_summarizer_canonical_does_not_reference_legacy():
     assert hits == [], (
         f"summarizer_canonical has unexpected legacy refs: {hits}"
     )
-
 
 def test_canonical_pipeline_has_no_legacy_imports():
     """Все canonical-структурные модули не должны ссылаться на legacy."""
@@ -125,7 +120,6 @@ def test_canonical_pipeline_has_no_legacy_imports():
             f"{module.__name__} has unexpected legacy refs: {hits}"
         )
 
-
 def test_legacy_audit_assert_no_legacy():
     """Regression guard §35: production не должен содержать legacy hits."""
     from tools.legacy_audit import (
@@ -133,7 +127,6 @@ def test_legacy_audit_assert_no_legacy():
     )
 
     assert_no_legacy()
-
 
 def test_compatibility_adapter_removed():
     """compatibility.py полностью удалён (Этап 20)."""
@@ -144,7 +137,6 @@ def test_compatibility_adapter_removed():
     except ImportError:
         return
     raise AssertionError("compatibility.py should be removed (Этап 20)")
-
 
 def test_legacy_reducer_strategy_removed():
     """Legacy ``reducer_strategy`` удалён (Этап 49 — финальный cleanup)."""
@@ -158,7 +150,6 @@ def test_legacy_reducer_strategy_removed():
         "reducer_strategy should be removed (Этап 49 — финальный cleanup)"
     )
 
-
 def test_forbidden_files_not_present():
     """Этап 8/18: ``_FORBIDDEN_FILES`` не должны существовать на диске."""
     from pathlib import Path
@@ -170,7 +161,6 @@ def test_forbidden_files_not_present():
             f"forbidden file present: {target}"
         )
 
-
 def test_legacy_token_budget_removed():
     """Legacy ``token_budget`` удалён."""
     try:
@@ -178,7 +168,6 @@ def test_legacy_token_budget_removed():
     except ImportError:
         return
     raise AssertionError("token_budget should be removed")
-
 
 def test_legacy_brief_strategy_removed():
     """Legacy ``brief_strategy`` удалён (canonical replacement — importance_brief)."""
@@ -188,7 +177,6 @@ def test_legacy_brief_strategy_removed():
         return
     raise AssertionError("brief_strategy should be removed")
 
-
 def test_legacy_document_cache_removed():
     """Legacy ``document_cache`` удалён (canonical replacement — DocumentIdentity)."""
     try:
@@ -197,7 +185,6 @@ def test_legacy_document_cache_removed():
         return
     raise AssertionError("document_cache should be removed")
 
-
 def test_legacy_fingerprint_removed():
     """Legacy ``fingerprint`` удалён (canonical replacement — DocumentIdentity.fingerprint)."""
     try:
@@ -205,7 +192,6 @@ def test_legacy_fingerprint_removed():
     except ImportError:
         return
     raise AssertionError("fingerprint should be removed")
-
 
 def test_legacy_structure_sections_removed():
     """Legacy ``structure.sections`` удалён (canonical replacement — DocumentStructure)."""
@@ -216,7 +202,6 @@ def test_legacy_structure_sections_removed():
     except ImportError:
         return
     raise AssertionError("structure.sections should be removed")
-
 
 def test_legacy_structure_tree_removed():
     """Legacy ``structure.tree`` удалён (canonical replacement — DocumentStructure)."""

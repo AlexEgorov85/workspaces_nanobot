@@ -16,7 +16,6 @@ from document.physical import (
     PhysicalDocument,
 )
 
-
 def _b(ordinal: int, content: str, block_type: str = "paragraph") -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ordinal:04d}", block_type=block_type, content=content,
@@ -25,13 +24,11 @@ def _b(ordinal: int, content: str, block_type: str = "paragraph") -> DocumentBlo
         ordinal=ordinal, block_metadata={},
     )
 
-
 def _make_doc(blocks: tuple[DocumentBlock, ...]) -> PhysicalDocument:
     return PhysicalDocument(
         path="/tmp/x.pdf", format="pdf", title=None, size_bytes=0,
         blocks=blocks, page_count=len(blocks),
     )
-
 
 def _root(children: tuple[str, ...] = ()) -> StructureNode:
     return StructureNode(
@@ -41,7 +38,6 @@ def _root(children: tuple[str, ...] = ()) -> StructureNode:
         confidence=1.0,
     )
 
-
 def _sec(nid: str, *, start: int, end: int, title: str = "Section") -> StructureNode:
     return StructureNode(
         node_id=nid, node_type="section", semantic_type=None,
@@ -49,7 +45,6 @@ def _sec(nid: str, *, start: int, end: int, title: str = "Section") -> Structure
         children=(), start_block=start, end_block=end,
         confidence=0.7,
     )
-
 
 def test_chunk_from_structure_empty():
     doc = _make_doc(())
@@ -60,7 +55,6 @@ def test_chunk_from_structure_empty():
     )
     chunks = chunk_from_structure(doc, s)
     assert chunks == []
-
 
 def test_chunk_from_structure_single_section():
     """PLAN §7: последовательные blocks с одним owner группируются в chunk.
@@ -90,7 +84,6 @@ def test_chunk_from_structure_single_section():
     assert "first body" in chunks[0].text
     assert "second body" in chunks[0].text
 
-
 def test_chunk_from_structure_table_atomic():
     blocks = (
         _b(0, "before table"),
@@ -111,7 +104,6 @@ def test_chunk_from_structure_table_atomic():
     table_chunks = [c for c in chunks if c.table_id]
     assert len(table_chunks) == 1
     assert table_chunks[0].text == "row1 | row2"
-
 
 def test_chunk_from_structure_split_oversize_block():
     from chunking.chunks import (
@@ -137,12 +129,13 @@ def test_chunk_from_structure_split_oversize_block():
     assert len(chunks) > 1
     assert all(c.section_id == "n_0001" for c in chunks)
 
-
 def test_chunk_from_structure_section_order():
-    """PLAN §7: chunks в physical document order, последовательные blocks
-    с одним owner группируются в один chunk.
+    """PLAN §7: chunks в physical document order.
 
-    blocks 0,1 (A) → один chunk; blocks 2,3 (B) → один chunk.
+    После рефакторинга (STRUCTURAL_PACKING_PLAN) блоки с разными owners
+    могут объединяться в один chunk, если они влезают в max_chunk_chars.
+    Этот тест проверяет physical order: chunks[i].index возрастают,
+    и block_indices упорядочены по ordinal.
     """
     blocks = (
         _b(0, "A1"), _b(1, "A2"),
@@ -160,10 +153,12 @@ def test_chunk_from_structure_section_order():
         numbering=(), total_blocks=4,
     )
     chunks = chunk_from_structure(doc, s)
-    section_titles = [c.section_heading for c in chunks]
-    assert section_titles == ["A", "B"]
-    assert [c.block_indices for c in chunks] == [(0, 1), (2, 3)]
-
+    for c1, c2 in zip(chunks, chunks[1:]):
+        assert c1.block_indices[-1] < c2.block_indices[0]
+    flat = sorted(
+        b for c in chunks for b in c.block_indices
+    )
+    assert flat == [0, 1, 2, 3]
 
 def test_chunk_planner_class():
     blocks = (_b(0, "hello"),)
@@ -181,7 +176,6 @@ def test_chunk_planner_class():
     chunks = planner.plan(doc, s)
     assert len(chunks) == 1
     assert chunks[0].text == "hello"
-
 
 def test_chunks_in_physical_document_order():
     """PLAN §7: chunks строго в document order по block.ordinal.
@@ -231,7 +225,6 @@ def test_chunks_in_physical_document_order():
     assert flat == [0, 1, 2, 3, 4], f"expected physical order, got {flat}"
     assert all(chunks[i].index < chunks[i + 1].index for i in range(len(chunks) - 1))
 
-
 def test_chunks_have_strictly_increasing_index():
     """chunks[i].index < chunks[i+1].index для всех i."""
     blocks = tuple(_b(i, f"block {i}") for i in range(5))
@@ -245,7 +238,6 @@ def test_chunks_have_strictly_increasing_index():
     chunks = chunk_from_structure(doc, s)
     for i in range(len(chunks) - 1):
         assert chunks[i].index < chunks[i + 1].index
-
 
 def test_chunks_deterministic_across_runs():
     """Два прогона → identical chunks."""
@@ -268,7 +260,6 @@ def test_chunks_deterministic_across_runs():
         assert c1.chunk_id == c2.chunk_id
         assert c1.index == c2.index
         assert c1.block_indices == c2.block_indices
-
 
 def test_table_ids_unique_across_sections():
     """PLAN §8 acceptance: 10 sections, 20 tables → unique table_ids.
@@ -315,7 +306,6 @@ def test_table_ids_unique_across_sections():
         f"table_ids must be unique, duplicates: "
         f"{[t for t in table_ids if table_ids.count(t) > 1]}"
     )
-
 
 def test_table_ids_deterministic():
     """Два прогона → identical table_ids."""

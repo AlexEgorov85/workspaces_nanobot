@@ -10,14 +10,12 @@ from document.structure import (
     DocumentStructure, StructureNode,
 )
 
-
 def _b(ord: int) -> StructureNode:
     return StructureNode(
         node_id="n_0000", node_type="document", semantic_type=None,
         level=0, title="", number=None, parent_id=None,
         children=(), start_block=0, end_block=100, confidence=1.0,
     )
-
 
 def _sec(nid: str, *, start: int = 0, end: int = 5, level: int = 1,
          title: str = "Section") -> StructureNode:
@@ -27,7 +25,6 @@ def _sec(nid: str, *, start: int = 0, end: int = 5, level: int = 1,
         children=(), start_block=start, end_block=end,
         confidence=0.7,
     )
-
 
 def _struct_with_sections(num_sections: int) -> DocumentStructure:
     sec_ids = [f"n_{i:04d}" for i in range(1, num_sections + 1)]
@@ -48,7 +45,6 @@ def _struct_with_sections(num_sections: int) -> DocumentStructure:
         numbering=(), total_blocks=num_sections * 10,
     )
 
-
 def _chunk(cid: str, section: str, text: str = "x") -> Chunk:
     return Chunk(
         chunk_id=cid, index=int(cid), text=text, char_count=len(text),
@@ -56,7 +52,6 @@ def _chunk(cid: str, section: str, text: str = "x") -> Chunk:
         section_id=section, section_path="1", section_heading=section,
         block_indices=(0,), block_types=("paragraph",),
     )
-
 
 def test_select_first_per_top_level():
     s = _struct_with_sections(3)
@@ -71,7 +66,6 @@ def test_select_first_per_top_level():
     assert "003" in [c.chunk_id for c in selected]
     assert "004" in [c.chunk_id for c in selected]
 
-
 def test_select_legal_important():
     s = _struct_with_sections(3)
     chunks = (
@@ -84,7 +78,6 @@ def test_select_legal_important():
     selected_ids = [c.chunk_id for c in selected]
     assert "002" in selected_ids
 
-
 def test_select_respects_target():
     s = _struct_with_sections(2)
     chunks = tuple(_chunk(f"{i:03d}", f"n_{((i - 1) // 5 + 1):04d}") for i in range(1, 11))
@@ -93,7 +86,6 @@ def test_select_respects_target():
     ))
     assert len(selected) <= 3
 
-
 def test_select_preserves_document_order():
     s = _struct_with_sections(2)
     chunks = tuple(_chunk(f"{i:03d}", "n_0001" if i <= 5 else "n_0002") for i in range(1, 11))
@@ -101,11 +93,9 @@ def test_select_preserves_document_order():
     ids = [c.chunk_id for c in selected]
     assert ids == sorted(ids)
 
-
 def test_select_empty():
     s = _struct_with_sections(0)
     assert select_brief_chunks((), s) == []
-
 
 def test_select_conclusion_section():
     s = _struct_with_sections(3)
@@ -119,7 +109,6 @@ def test_select_conclusion_section():
     ))
     selected_ids = [c.chunk_id for c in selected]
     assert "003" in selected_ids
-
 
 def test_select_coverage_ratio_respected():
     s = _struct_with_sections(1)

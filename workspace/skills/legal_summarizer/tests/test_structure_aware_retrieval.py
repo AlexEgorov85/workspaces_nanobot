@@ -30,7 +30,6 @@ from retrieval.query import (
     RetrievalConfig, retrieve_chunks,
 )
 
-
 def _b(ord: int) -> DocumentBlock:
     return DocumentBlock(
         block_id=f"b_{ord:04d}", block_type="paragraph", content="x",
@@ -38,7 +37,6 @@ def _b(ord: int) -> DocumentBlock:
         paragraph_index=None, table_index=None, ordinal=ord,
         block_metadata={},
     )
-
 
 def _doc() -> PhysicalDocument:
     import tempfile
@@ -51,7 +49,6 @@ def _doc() -> PhysicalDocument:
         blocks=tuple(_b(i) for i in range(3)), page_count=1,
     )
 
-
 def _c(cid: str, text: str, section_heading: str = "") -> Chunk:
     return Chunk(
         chunk_id=cid, index=int(cid), text=text, char_count=len(text),
@@ -59,7 +56,6 @@ def _c(cid: str, text: str, section_heading: str = "") -> Chunk:
         section_id="s1", section_path="1", section_heading=section_heading,
         block_indices=(0,), block_types=("paragraph",),
     )
-
 
 def test_section_title_boost():
     chunks = (
@@ -70,7 +66,6 @@ def test_section_title_boost():
     assert hits[0].chunk_id == "002"
     assert hits[0].section_title_hit is True
 
-
 def test_heading_boost_short_text():
     chunks = (
         _c("001", "оплата"),
@@ -80,14 +75,12 @@ def test_heading_boost_short_text():
     titles = [h.title_hit for h in hits]
     assert True in titles
 
-
 def test_body_weight_baseline():
     """Body weight = 1.0 (baseline)."""
     cfg = RetrievalConfig()
     assert cfg.body_weight == 1.0
     assert cfg.section_title_weight == 2.0
     assert cfg.heading_weight == 1.5
-
 
 def test_combined_evidence_score():
     """Chunk в section title + body → max score."""
@@ -99,7 +92,6 @@ def test_combined_evidence_score():
     hits = retrieve_chunks(chunks, "оплата")
     assert hits[0].chunk_id == "001"
     assert hits[0].score >= 2.0
-
 
 def test_structure_node_lookup_for_retrieval():
     """DocumentStructure можно использовать для context ranking."""
