@@ -19,16 +19,14 @@ Agent / user
   ↓
 scripts/cli.py --mode <predefined | generated_sql | vector>
   ↓ маршрутизация
-+---+---+---+
-|   |   |   |
-PREDEFINED       GENERATED_SQL     VECTOR
-|   |   |
-↓   ↓   ↓
-predefined_mode   generated_sql_mode   cli (search_vector)
-↓   ↓   ↓
-predefined.run    chat() + validate_sql + execute
-↓                 ↓
-DynamicQueryBuilder + DuckDBService
++--------+--------+--------+
+|         |        |        |
+PREDEFINED         GENERATED_SQL    VECTOR
+|         |        |
+↓         ↓        ↓
+predefined.run   generated_sql_mode.run   vector_search (generic tool)
+↓         ↓        ↓
+CacheProvider.query_sql    LLM + validate_sql + CacheProvider.query_sql   CacheProvider.search_vector
 ↓
 DuckDB / FAISS (generic core)
 ```
@@ -39,14 +37,19 @@ DuckDB / FAISS (generic core)
 ## Что такое `scripts/cli.py`
 
 CLI — единственная **целевая** точка вызова навыка из shell/runtime.
-Поддерживает 3 режима, валидирует параметры, возвращает плоский JSON.
+Поддерживает 3 режима (`predefined`, `generated_sql`, `vector`),
+валидирует параметры, возвращает плоский JSON.
 
 Внутри CLI:
-- `predefined_mode.py` — pipeline для predefined (lookup +
+- `predefined.run()` — pipeline для predefined (lookup +
   ParameterValidator + DynamicQueryBuilder + ``CacheProvider.query_sql``);
-- `generated_sql_mode.py` — LLM → SQL с retry-циклом (``MAX_RETRIES = 2``);
-- `output.py` — плоский формат JSON;
+- `generated_sql_mode.run()` — LLM → SQL с retry-циклом (``MAX_RETRIES = 3``);
+- `_run_vector()` — вызов generic `vector_search` tool поверх
+  ``CacheProvider.search_vector``;
 - `llm.py` — тонкая обёртка над `lib.services.llm_client`;
+- `column_hints.py` — пронумерованные подсказки «термин → колонка» для
+  system prompt generated_sql_mode;
+- `output.py` — плоский формат JSON;
 - `skill_config.py` — обёртка над `lib.core.skill_config` для удобства
   импорта из `scripts/`.
 

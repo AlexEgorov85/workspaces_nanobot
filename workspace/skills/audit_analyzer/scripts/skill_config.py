@@ -1,13 +1,13 @@
-"""Конфигурация и провайдеры для CLI навыка ``audit_analyzer``.
+"""Обёртка над ``lib.core.skill_config`` для текущего skill'а (audit_analyzer).
 
-Это тонкая локальная обёртка над ``lib.core.skill_config`` —
-даёт CLI-режимам ``predefined_mode`` / ``generated_sql_mode`` / ``cli`` короткие
-имена без ``"audit_analyzer"`` (этот модуль импортируется из
-``scripts/``, namespace уже определён).
+Все функции параметризованы в ``lib.core.skill_config`` по ``skill_name``.
+Здесь — только реально используемые skill'ом обёртки, чтобы внутренний код
+мог продолжать вызывать ``from skill_config import get_db_tables`` и т.д.
 
-Также собирает ``CacheProvider`` из существующего core
-(``lib.services.cache_provider_impl.build_cache_provider``), который
-умеет читать DuckDB-кэш + FAISS-индексы, ничего не зная про audit.
+Имя skill'а фиксировано в ``_SKILL_NAME``. Обёртки для embedding/vector
+delivery (после commit «skill configuration boundary» — общий runtime)
+здесь не дублируются: используйте напрямую ``lib.core.skill_config``
+без ``skill_name``.
 """
 
 from __future__ import annotations
@@ -16,87 +16,64 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_SKILL_NAME = "audit_analyzer"
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _SKILL_ROOT.parents[1]
 
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from lib.core import skill_config as _core_cfg  # noqa: E402
+from lib.core import skill_config as _lib  # noqa: E402
+
+
+_SKILL_NAME = "audit_analyzer"
+
 
 __all__ = [
-    "get_llm_config",
-    "get_db_schema",
     "get_db_tables",
-    "get_in_memory_config",
-    "get_vector_index_path",
-    "build_cache_provider",
+    "get_db_schema",
+    "get_predefined_scripts_table",
+    "get_llm_config",
     "get_cli_config",
+    "get_max_retries",
+    "get_in_memory_cache_path",
+    "build_cache_provider",
 ]
 
 
-def get_llm_config() -> dict[str, Any]:
-    """LLM-конфиг skill'а (для NL → SQL режима)."""
-    return _core_cfg.get_llm_config(_SKILL_NAME)
+def get_db_tables() -> list[str]:
+    return _lib.get_db_tables(_SKILL_NAME)
 
 
 def get_db_schema() -> str:
-    """Схема skill'а (для LLM-схемы в ``generated_sql_mode``)."""
-    return _core_cfg.get_db_schema(_SKILL_NAME)
+    return _lib.get_db_schema(_SKILL_NAME)
 
 
-def get_db_tables() -> list[str]:
-    """Доменные таблицы skill'а (для LLM-схемы)."""
-    return _core_cfg.get_db_tables(_SKILL_NAME)
+def get_predefined_scripts_table() -> str:
+    return _lib.get_predefined_scripts_table(_SKILL_NAME)
 
 
-def get_in_memory_config() -> dict[str, Any]:
-    """Путь к DuckDB-кэшу skill'а.
-
-    Использует ``TableRegistry.snapshot_path(workspace_root)`` — единый
-    runtime-снимок ``workspace/data_store/duckdb/cache.duckdb``.
-    Этот файл публикует gateway (см. ``PgDuckDbSyncService``); standalone
-    CLI читает его без предварительной инициализации.
-    """
-    from lib.services.table_registry import table_registry
-
-    workspace_root = _SKILL_ROOT.parent
-    return {
-        "cache_path": str(table_registry.snapshot_path(workspace_root)),
-        "enabled": True,
-        "engine": "duckdb",
-    }
-
-
-def get_vector_index_path() -> str:
-    """Путь к FAISS-индексам skill'а (для vector mode CLI).
-
-    Пусто — если не настроено (vector_search имеет свой путь из project.json).
-    """
-    cfg = _core_cfg.get_tool_config(_SKILL_NAME)
-    raw = (
-        cfg.get("mode_vector_index_path")
-        or cfg.get("vector_index_default_path")
-        or ""
-    )
-    if not raw:
-        return ""
-    p = Path(raw)
-    return str(p if p.is_absolute() else _SKILL_ROOT / p)
-
-
-def build_cache_provider() -> Any:
-    """Построить ``CacheProvider`` для skill'а.
-
-    Делегирует в ``lib.core.skill_config.build_cache_provider``
-    (который собирает кэш-конфиг из ``project.json::skills.audit_analyzer``
-    и возвращает готовый ``CacheProvider``). Это generic (не знает
-    про audit_analyzer).
-    """
-    return _core_cfg.build_cache_provider(_SKILL_NAME, _SKILL_ROOT)
+def get_llm_config() -> dict[str, Any]:
+    return _lib.get_llm_config(_SKILL_NAME)
 
 
 def get_cli_config() -> dict[str, Any]:
-    """CLI-настройки: default_mode, max_retries, timeout."""
-    return _core_cfg.get_cli_config(_SKILL_NAME)
+    return _lib.get_cli_config(_SKILL_NAME)
+
+
+def get_max_retries() -> int:
+    return _lib.get_max_retries(_SKILL_NAME)
+
+
+def get_in_memory_cache_path() -> str:
+    """Путь к DuckDB-кэшу skill'а.
+
+    Использует ``TableRegistry.snapshot_path(workspace_root)`` — единый
+    runtime-снимок ``workspace/data_store/duckdb/cache.duckdb``. Этот
+    файл публикует gateway (см. ``PgDuckDbSyncService``); standalone
+    CLI читает его без предварительной инициализации.
+    """
+    return _lib.get_in_memory_cache_path(_SKILL_ROOT)
+
+
+def build_cache_provider() -> Any:
+    return _lib.build_cache_provider(_SKILL_NAME, _SKILL_ROOT)

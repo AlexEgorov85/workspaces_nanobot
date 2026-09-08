@@ -307,15 +307,15 @@ class VectorSearchTool(Tool):
             "count": len(results),
             "truncated": False,
         }
-        # STALE/INVALID detection — поставщик (provider) помечает meta через
-        # ``_signature_status`` при загрузке индекса из store. Если статус
+        # STALE/INVALID detection — провайдер (CacheProvider) помечает
+        # signature-статус на каждом SearchResult (см. lib.services.cache_provider
+        # ``SearchResult.signature_status``/``signature_reason``). Если статус
         # не CURRENT — поиск работает, но клиент видит warning с причиной
-        # и рекомендацией пересобрать индекс.
-        sig_status = (raw_results.__class__.__name__ and None) or None
-        meta = getattr(self._provider, "_last_loaded_meta", None)
-        if isinstance(meta, dict):
-            sig_status = meta.get("_signature_status")
-            sig_reason = meta.get("_signature_reason")
+        # и рекомендацией пересобрать индекс. Статус приходит официальным
+        # API (в составе результата), а не из приватного состояния provider'а.
+        if results:
+            sig_status = results[0].get("signature_status") or ""
+            sig_reason = results[0].get("signature_reason") or ""
             if sig_status and sig_status != "CURRENT":
                 payload["index_warning"] = {
                     "status": sig_status,
@@ -337,6 +337,8 @@ class VectorSearchTool(Tool):
                     "id": sanitize_value(getattr(item, "pk_value", None)),
                     "score": float(getattr(item, "score", 0.0) or 0.0),
                     "text": sanitize_value(getattr(item, "content", "")),
+                    "signature_status": getattr(item, "signature_status", "") or "",
+                    "signature_reason": getattr(item, "signature_reason", "") or "",
                     "metadata": {
                         "source": getattr(item, "source", ""),
                         "table": getattr(item, "table", ""),

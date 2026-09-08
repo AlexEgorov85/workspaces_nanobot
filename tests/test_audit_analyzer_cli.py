@@ -26,10 +26,7 @@ CLI_PATH = SKILL_DIR / "scripts" / "cli.py"
 REQUIRED_FILES = [
     "scripts/cli.py",
     "scripts/__init__.py",
-    "scripts/predefined_mode.py",
-    "scripts/generated_sql_mode.py",
     "scripts/output.py",
-    "scripts/llm.py",
     "scripts/skill_config.py",
 ]
 
@@ -92,7 +89,7 @@ class TestCLIParser:
         assert args.mode == "vector"
 
     def test_generated_sql_mode(self) -> None:
-        """``--mode generated_sql`` — LLM-генерация SQL (синоним для LLM)."""
+        """``--mode generated_sql`` — LLM-генерация SQL по NL-запросу."""
         from workspace.skills.audit_analyzer.scripts.cli import _build_parser
 
         parser = _build_parser()

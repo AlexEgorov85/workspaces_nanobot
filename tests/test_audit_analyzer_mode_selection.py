@@ -210,20 +210,28 @@ def db_service():
     )
 
     class _DBService:
-        def execute_readonly(self, sql, params, max_rows):
+        def query_sql(self, sql, params=None):
             try:
                 if params:
-                    rows = conn.execute(sql, list(params)).fetchmany(max_rows)
+                    result = conn.execute(sql, list(params))
                 else:
-                    rows = conn.execute(sql).fetchmany(max_rows)
-                cols = (
-                    [c[0] for c in conn.description]
-                    if conn.description
-                    else []
-                )
-                return {"rows": rows, "columns": cols, "row_count": len(rows)}
+                    result = conn.execute(sql)
+                columns = [c[0] for c in result.description] if result.description else []
+                rows = [dict(zip(columns, r, strict=False)) for r in result.fetchall()]
+                return {
+                    "status": "success",
+                    "row_count": len(rows),
+                    "columns": columns,
+                    "rows": rows,
+                }
             except Exception as exc:
-                return {"error": str(exc)}
+                return {
+                    "status": "error",
+                    "row_count": 0,
+                    "columns": [],
+                    "rows": [],
+                    "error": str(exc),
+                }
 
     return _DBService()
 

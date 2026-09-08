@@ -39,6 +39,8 @@ class SearchResult:
     chunk: str = ""
     matched_chunks: int = 1
     row: dict[str, Any] = field(default_factory=dict)
+    signature_status: str = ""
+    signature_reason: str = ""
 
 
 class IndexIntegrityError(Exception):

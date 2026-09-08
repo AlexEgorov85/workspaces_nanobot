@@ -41,9 +41,9 @@ python workspace/skills/audit_analyzer/scripts/cli.py \
     --params '{"date_from": "2024-01-01", "date_to": "2024-12-31"}'
 
 # NL → SQL (требует LLM-ключ в окружении)
-    python workspace/skills/audit_analyzer/scripts/cli.py \
-        --mode generated_sql \
-        --query 'сколько аудитов в 2024 по месяцам'
+python workspace/skills/audit_analyzer/scripts/cli.py \
+    --mode generated_sql \
+    --query 'сколько аудитов в 2024 по месяцам'
 
 # Vector search
 python workspace/skills/audit_analyzer/scripts/cli.py \

@@ -1252,6 +1252,9 @@ class PostgresDuckDbProvider(CacheProvider):
         raw = build_raw_items(meta_items, scores, ids, index_name, threshold)
         results = group_vector_hits(raw, top_k, threshold)
 
+        sig_status = (meta or {}).get("_signature_status", "")
+        sig_reason = (meta or {}).get("_signature_reason", "")
+
         return [
             SearchResult(
                 content=r["content"],
@@ -1262,6 +1265,8 @@ class PostgresDuckDbProvider(CacheProvider):
                 chunk=r.get("chunk", ""),
                 matched_chunks=r.get("matched_chunks", 1),
                 row=r.get("row", {}),
+                signature_status=sig_status,
+                signature_reason=sig_reason,
             )
             for r in results
         ]

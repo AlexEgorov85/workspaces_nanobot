@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import duckdb
 import pytest
 
@@ -63,30 +65,39 @@ class _DBService:
     """Адаптер in-memory DuckDB к ``DuckDBServiceProtocol``.
 
     Используется в тестах как подставной generic-сервис (без зависимости от
-    production ``DuckDbCacheStore``/``CacheProvider``).
+    production ``DuckDbCacheStore``/``CacheProvider``). Реализует единый
+    ``query_sql``-контракт generic Core: результат — ``{status, row_count,
+    columns, rows}``, где ``rows`` — список dict с ключами-именами колонок.
     """
 
     def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
         self._conn = conn
 
-    def execute_readonly(self, sql, params, max_rows):
+    def query_sql(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
         try:
             if params:
-                rows = self._conn.execute(sql, list(params)).fetchmany(max_rows)
+                result = self._conn.execute(sql, list(params))
             else:
-                rows = self._conn.execute(sql).fetchmany(max_rows)
-            cols = (
-                [c[0] for c in self._conn.description]
-                if self._conn.description
-                else []
-            )
+                result = self._conn.execute(sql)
+            columns = [c[0] for c in result.description] if result.description else []
+            rows = [
+                dict(zip(columns, r, strict=False))
+                for r in result.fetchall()
+            ]
             return {
-                "rows": rows,
-                "columns": cols,
+                "status": "success",
                 "row_count": len(rows),
+                "columns": columns,
+                "rows": rows,
             }
         except Exception as exc:
-            return {"error": str(exc)}
+            return {
+                "status": "error",
+                "row_count": 0,
+                "columns": [],
+                "rows": [],
+                "error": str(exc),
+            }
 
 
 @pytest.fixture
@@ -109,7 +120,7 @@ class TestPredefinedAuditStatusSummary:
         result = run("audit_status_summary", db_service)
         assert result["mode"] == "predefined"
         assert result["status"] == "success"
-        rows_by_status = {r[0]: r[1] for r in result["data"]["result"]["rows"]}
+        rows_by_status = {r["status"]: r["cnt"] for r in result["data"]["result"]["rows"]}
         assert rows_by_status == {
             "\u0412 \u0440\u0430\u0431\u043e\u0442\u0435": 1,
             "\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0430": 2,
@@ -138,7 +149,7 @@ class TestPredefinedTopViolationsByType:
         rows = result["data"]["result"]["rows"]
         assert len(rows) == 3
         # Первые строки отсортированы по cnt DESC.
-        counts = [r[1] for r in rows]
+        counts = [r["cnt"] for r in rows]
         assert counts == sorted(counts, reverse=True)
 
 
@@ -164,7 +175,7 @@ class TestPredefinedViolationsByPeriod:
         assert result["status"] == "success"
         result_rows = result["data"]["result"]["rows"]
         assert len(result_rows) == 3
-        codes = sorted(r[1] for r in result_rows)
+        codes = sorted(r["violation_code"] for r in result_rows)
         assert codes == ["D-1", "F-1", "F-2"]
 
     def test_missing_required_param(self, db_service) -> None:
@@ -199,7 +210,7 @@ class TestPredefinedViolationsByPeriod:
         )
         assert result["status"] == "success"
         assert result["data"]["result"]["row_count"] == 1
-        assert result["data"]["result"]["rows"][0][1] == "D-1"
+        assert result["data"]["result"]["rows"][0]["violation_code"] == "D-1"
 
     def test_unknown_param_caught(self, db_service) -> None:
         result = run(
@@ -231,7 +242,7 @@ class TestPredefinedAuditsByPeriod:
         assert result["status"] == "success"
         rows = result["data"]["result"]["rows"]
         # 2 аудита в 2024 (id=2, id=3); id=4 в 2025, id=1 NULL.
-        ids = sorted(r[0] for r in rows)
+        ids = sorted(r["id"] for r in rows)
         assert ids == [2, 3]
 
     def test_exclude_null_dates(self, db_service) -> None:
@@ -242,7 +253,7 @@ class TestPredefinedAuditsByPeriod:
             {"date_from": "1900-01-01", "date_to": "2100-01-01"},
         )
         assert result["status"] == "success"
-        ids = [r[0] for r in result["data"]["result"]["rows"]]
+        ids = [r["id"] for r in result["data"]["result"]["rows"]]
         assert 1 not in ids
 
 
@@ -264,7 +275,10 @@ class TestPredefinedAuditEffectivenessSummary:
         rows = result["data"]["result"]["rows"]
         # audits: id=1 (NULL date — excluded), id=2 (2 violations),
         # id=3 (1 violation), id=4 (0 violations).
-        severity_by_audit = {r[0]: (r[3], r[4]) for r in rows}
+        severity_by_audit = {
+            r["audit_id"]: (r["violations_count"], r["severity_level"])
+            for r in rows
+        }
         assert severity_by_audit[2] == (2, "\u0414\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u044b\u0435 \u043d\u0430\u0440\u0443\u0448\u0435\u043d\u0438\u044f")
         assert severity_by_audit[3] == (1, "\u0414\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u044b\u0435 \u043d\u0430\u0440\u0443\u0448\u0435\u043d\u0438\u044f")
         assert severity_by_audit[4] == (0, "\u0411\u0435\u0437 \u043d\u0430\u0440\u0443\u0448\u0435\u043d\u0438\u0439")

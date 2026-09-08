@@ -1,42 +1,37 @@
-"""LLM-клиент (OpenAI-compatible HTTP API) — тонкая обёртка над общим клиентом.
+"""
+LLM-клиент (OpenAI-compatible HTTP API) — тонкая обёртка над общим клиентом.
 
-Прежде здесь был собственный httpx-POST с ретраями; теперь единая
-реализация — ``lib.services.llm_client.call_llm`` (та же, что
-использует бенчмарк). Этот модуль сохраняет прежний публичный API
-``chat`` и источник конфигурации skill'а (``get_llm_config()``,
-``get_cli_config()``) из ``scripts/skill_config.py``.
+Раньше здесь жил собственный httpx-POST с ретраями; теперь единая
+реализация — ``lib/services/llm_client.py`` (та же, что использует
+бенчмарк). Этот модуль сохраняет прежний публичный API ``chat`` и
+источник конфигурации навыка (``get_llm_config()`` / ``get_cli_config()``).
 """
 
-from __future__ import annotations
-
-from typing import Any
-
-from lib.services.llm_client import call_llm
 
 from skill_config import get_cli_config, get_llm_config
 
+from lib.services.llm_client import call_llm
 
-__all__ = ["chat"]
 
+def chat(messages: list[dict], *, context: list[dict] | None = None, **kwargs) -> str:
+    """
+    Отправить сообщения в LLM и получить текстовый ответ.
 
-def chat(
-    messages: list[dict],
-    *,
-    context: list[dict] | None = None,
-    **kwargs: Any,
-) -> str:
-    """Отправить сообщения в LLM и получить текстовый ответ.
-
-    Поддерживает опциональный ``context`` — историю чата, которая
+    Поддерживает опциональный context — историю чата, которая
     добавляется в начало payload перед основными сообщениями.
 
     Args:
         messages: Список сообщений (system / user / assistant).
         context: История чата (опционально, добавляется перед messages).
-        **kwargs: Переопределение параметров (model, max_tokens, temperature).
+        **kwargs: Переопределение параметров из конфига (model, max_tokens,
+                  temperature).
 
     Returns:
-        Текстовый ответ LLM (только ``content``, без обёрток).
+        Текстовый ответ LLM (только content, без обёрток).
+
+    Raises:
+        httpx.HTTPStatusError: При ошибке HTTP.
+        RuntimeError: Если LLM вернул пустой ответ.
     """
     cfg = get_llm_config()
     cli = get_cli_config()

@@ -55,7 +55,7 @@ result = run(
 Внутри skill'а: ``predefined/mode.py::run`` выполняет SQL через
 ``CacheProvider.query_sql(sql, params)`` (generic core), ``rows`` — список
 dict по именам колонок. Это **единый** контракт результатов для всех
-режимов (predefined / generated_sql / vector-обвязки CLI).
+режимов CLI (predefined / generated_sql / vector).
 
 ## Каталог скриптов
 

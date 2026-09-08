@@ -86,41 +86,6 @@ def _make_audit_db() -> tuple[DuckdbQueryTool, None]:
                 (12, 3, "D-1", "Missing signature", "low"),
             ],
         )
-        conn.execute(
-            "CREATE TABLE public.agent_predefined_scripts ("
-            "name VARCHAR, description VARCHAR, sql_template VARCHAR, "
-            "parameters JSON)"
-        )
-        conn.executemany(
-            "INSERT INTO public.agent_predefined_scripts VALUES (?, ?, ?, ?)",
-            [
-                (
-                    "audit_status_summary",
-                    "Сводка по статусам аудитов",
-                    "SELECT status, COUNT(*) AS cnt FROM oarb.audits "
-                    "GROUP BY status ORDER BY status",
-                    "{}",
-                ),
-                (
-                    "violations_by_period",
-                    "Нарушения за период",
-                    "SELECT v.id, v.violation_code, v.description "
-                    "FROM oarb.violations v "
-                    "JOIN oarb.audits a ON a.id = v.audit_id "
-                    "WHERE a.actual_date >= ? AND a.actual_date <= ?",
-                    '{"date_from": {"type": "date", "required": true}, '
-                    '"date_to": {"type": "date", "required": true}}',
-                ),
-                (
-                    "top_violations_by_type",
-                    "Топ кодов нарушений",
-                    "SELECT violation_code, COUNT(*) AS cnt "
-                    "FROM oarb.violations GROUP BY violation_code "
-                    "ORDER BY cnt DESC LIMIT ?",
-                    '{"max_rows": {"type": "integer", "required": true}}',
-                ),
-            ],
-        )
         return conn
 
     tool.set_connection_factory(factory)
@@ -147,58 +112,122 @@ class _StubProvider:
         return list(self._hits.get(index_name, []))
 
 
+def _seed_duckdb() -> duckdb.DuckDBPyConnection:
+    """In-memory DuckDB со схемой ``oarb`` — generic provider-фикстура."""
+    conn = duckdb.connect(":memory:")
+    conn.execute("CREATE SCHEMA IF NOT EXISTS oarb")
+    conn.execute(
+        "CREATE TABLE oarb.audits ("
+        "id INTEGER, title VARCHAR, audit_type VARCHAR, "
+        "actual_date DATE, status VARCHAR)"
+    )
+    conn.executemany(
+        "INSERT INTO oarb.audits VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, "Fire safety", "planned", None, "Запланирована"),
+            (2, "Financial audit", "planned", "2024-05-01", "Завершена"),
+            (3, "Compliance review", "extra", "2024-08-15", "Завершена"),
+            (4, "School check", "extra", "2025-02-10", "В работе"),
+        ],
+    )
+    conn.execute(
+        "CREATE TABLE oarb.violations ("
+        "id INTEGER, audit_id INTEGER, violation_code VARCHAR, "
+        "description VARCHAR, severity VARCHAR)"
+    )
+    conn.executemany(
+        "INSERT INTO oarb.violations VALUES (?, ?, ?, ?, ?)",
+        [
+            (10, 2, "F-1", "Fire exit blocked", "high"),
+            (11, 2, "F-2", "No extinguisher", "medium"),
+            (12, 3, "D-1", "Missing signature", "low"),
+        ],
+    )
+    return conn
+
+
+class _DBService:
+    """Generic provider-адаптер к ``DuckDBServiceProtocol`` (query_sql/dict-rows)."""
+
+    def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
+        self._conn = conn
+
+    def query_sql(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
+        try:
+            if params:
+                result = self._conn.execute(sql, list(params))
+            else:
+                result = self._conn.execute(sql)
+            columns = [c[0] for c in result.description] if result.description else []
+            rows = [dict(zip(columns, r, strict=False)) for r in result.fetchall()]
+            return {
+                "status": "success",
+                "row_count": len(rows),
+                "columns": columns,
+                "rows": rows,
+            }
+        except Exception as exc:
+            return {
+                "status": "error",
+                "row_count": 0,
+                "columns": [],
+                "rows": [],
+                "error": str(exc),
+            }
+
+
 # ---------------------------------------------------------------------------
-# Predefined: Agent читает SQL из PG-таблицы через duckdb_query
+# Predefined: skill-owned registry доступен через predefined.run(), НЕ через PG
 # ---------------------------------------------------------------------------
 
 
 class TestAuditAnalyerPredefinedScripts:
-    """Шаг 24: Agent использует predefined через inline SQL + duckdb_query."""
+    """Шаг 24: predefined — skill-owned registry (predefined.run()), не PG-таблица.
 
-    def test_predefined_lookup_via_duckdb(self) -> None:
-        tool, _ = _make_audit_db()
-        sql = (
-            "SELECT sql_template FROM public.agent_predefined_scripts "
-            "WHERE name = ?"
+    Реестр SQL хранится в ``predefined/scripts.py`` (внутри skill'а), a не в
+    ``public.agent_predefined_scripts``. Agent не читает SQL из PG через
+    ``duckdb_query`` — он вызывает ``predefined.run()`` (см.
+    ``test_audit_analyzer_predefined.py`` для полного pipeline).
+    """
+
+    def test_predefined_registry_is_skill_owned(self) -> None:
+        """Реестр predefined — локальный REGISTRY, не PG-таблица."""
+        from workspace.skills.audit_analyzer.predefined import REGISTRY, run
+
+        assert "audit_status_summary" in REGISTRY
+        assert "violations_by_period" in REGISTRY
+        assert "top_violations_by_type" in REGISTRY
+
+        # Скрипт с обязательными date-параметрами валидируется через run().
+        result = run(
+            "violations_by_period",
+            _DBService(_seed_duckdb()),
+            {"date_from": "2024-01-01", "date_to": "2024-12-31"},
         )
-        payload = json.loads(_run(tool.execute(sql=sql, params={"name": "audit_status_summary"})))
-        assert payload["status"] == "success"
-        assert "GROUP BY status" in payload["rows"][0][0]
+        assert result["status"] == "success"
 
     def test_predefined_execute_after_lookup(self) -> None:
-        """Agent: 1) lookup → 2) execute SQL."""
-        tool, _ = _make_audit_db()
-        lookup = json.loads(_run(
-            tool.execute(
-                sql="SELECT sql_template FROM public.agent_predefined_scripts "
-                    "WHERE name = ?",
-                params={"name": "audit_status_summary"},
-            )
-        ))
-        assert lookup["status"] == "success"
-        predefined_sql = lookup["rows"][0][0]
+        """Agent: выбор predefined → run() выполняет SQL через generic provider."""
+        from workspace.skills.audit_analyzer.predefined import run
 
-        exec_payload = json.loads(_run(tool.execute(sql=predefined_sql)))
-        assert exec_payload["status"] == "success"
-        assert exec_payload["row_count"] == 3
-        statuses = {row[0] for row in exec_payload["rows"]}
+        result = run("audit_status_summary", _DBService(_seed_duckdb()))
+        assert result["status"] == "success"
+        assert result["data"]["script_name"] == "audit_status_summary"
+        statuses = {r["status"] for r in result["data"]["result"]["rows"]}
         assert statuses == {"Завершена", "В работе", "Запланирована"}
 
     def test_predefined_with_required_params(self) -> None:
         """Параметризованный predefined: date_from и date_to обязательны."""
-        tool, _ = _make_audit_db()
-        sql = (
-            "SELECT v.id, v.violation_code "
-            "FROM oarb.violations v "
-            "JOIN oarb.audits a ON a.id = v.audit_id "
-            "WHERE a.actual_date >= ? AND a.actual_date <= ?"
+        from workspace.skills.audit_analyzer.predefined import run
+
+        result = run(
+            "violations_by_period",
+            _DBService(_seed_duckdb()),
+            {"date_from": "2024-01-01", "date_to": "2024-12-31"},
         )
-        params = {"date_from": "2024-01-01", "date_to": "2024-12-31"}
-        payload = json.loads(_run(tool.execute(sql=sql, params=params)))
-        assert payload["status"] == "success"
-        assert payload["row_count"] == 3
-        codes = sorted(row[1] for row in payload["rows"])
-        assert codes == ["D-1", "F-1", "F-2"]
+        assert result["status"] == "success"
+        codes = {r["violation_code"] for r in result["data"]["result"]["rows"]}
+        assert codes == {"D-1", "F-1", "F-2"}
 
     def test_predefined_missing_required_param_excluded_from_skill(
         self,
