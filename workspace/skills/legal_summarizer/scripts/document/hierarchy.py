@@ -115,6 +115,70 @@ def _effective_level(c: HeadingCandidate, ni: NumberingInfo | None) -> int:
     return max(1, c.level)
 
 
+def _heading_rank(c: HeadingCandidate, ni: NumberingInfo | None) -> int:
+    """Монотонный ранг глубины для заголовка (больше = глубже).
+
+    Используется stack-алгоритмом построения дерева из плоского списка
+    (например, когда PDF-outline плоский — все ``c.level == 1`` и
+    иерархия выражена только в префиксах заголовков: ``Часть`` →
+    ``Раздел`` → ``Подраздел`` → ``Глава`` → ``§``/``Статья`` →
+    ``Пункт`` → числовой параграф).
+
+    Известные РФ-схемы получают фиксированную монотонную шкалу;
+    числовые (``decimal``) углубляются по ``len(components)``;
+    остальное (нет маркера) — fallback на явный ``c.level``.
+
+    Шкала (значения произвольны, важен относительный порядок):
+
+        Часть < Раздел < Подраздел < Глава < §/Статья < Пункт < N. < N.N.
+    """
+    if ni is not None:
+        scheme = ni.scheme
+        if scheme == "legal_section_roman":      # Раздел
+            return 200
+        if scheme == "legal_chapter":            # Глава
+            return 400
+        if scheme in ("paragraph_mark", "legal_article"):  # § / Статья
+            return 500
+        if scheme == "legal_clause":             # Пункт
+            return 600
+        if scheme == "decimal":                  # N. / N.N. / N.N.N.
+            return 700 + max(0, len(ni.components) - 1) * 100
+        if scheme == "cyrillic_alpha":           # а) б) в)
+            return 1000
+        if scheme == "appendix":                 # Приложение
+            return 600
+    low = c.text.strip().lower()
+    if low.startswith("часть"):                  # Часть
+        return 100
+    if low.startswith("подраздел"):              # Подраздел
+        return 300
+    return max(1, c.level)
+
+
+def _build_parents_by_stack(
+    order: list[tuple[str, int]],
+    root_id: str,
+) -> dict[str, str]:
+    """Построить ``parent_id`` для каждого section по stack-алгоритму.
+
+    Вход: ``order`` — список ``(node_id, rank)`` в document order.
+    Правило: для каждого блока поднимаемся по стеку, пока на вершине
+    ``rank >= rank(текущего)`` (тот же или больший ранг = сосед/закрыл
+    родительский диапазон); найденный предок с меньшим рангом — parent.
+
+    Возвращает ``{node_id: parent_id}``.
+    """
+    parents: dict[str, str] = {}
+    stack: list[tuple[str, int]] = [(root_id, -1)]
+    for nid, rank in order:
+        while len(stack) > 1 and stack[-1][1] >= rank:
+            stack.pop()
+        parents[nid] = stack[-1][0]
+        stack.append((nid, rank))
+    return parents
+
+
 @dataclass(frozen=True)
 class StructureTreeBuilderConfig:
     """Параметры builder'а (минимальный набор)."""
@@ -299,49 +363,31 @@ def build_document_structure(
 
     section_ids: list[str] = []
     numbering_list: list[NumberingInfo | None] = []
-    numbering_by_section: dict[str, NumberingInfo | None] = {}
-    eff_level_by_section: dict[str, int] = {}
+    rank_by_section: dict[str, int] = {}
     start_block_by_section: dict[str, int] = {}
+
+    stack_order: list[tuple[str, int]] = []
 
     for i, c in enumerate(accepted, start=1):
         nid = _make_node_id(i)
         ni = parse_numbering(c.text)
         numbering_list.append(ni)
-        eff_level = _effective_level(c, ni)
+        rank = _heading_rank(c, ni)
         semantic = _resolve_semantic_type(c)
         start = c.block_index
-        end = (
-            accepted[i].block_index - 1
-            if i < len(accepted)
-            else max(0, total_blocks - 1)
-        )
-
-        parent_id = root.node_id
-        for cand_id in reversed(section_ids):
-            cand_eff = eff_level_by_section[cand_id]
-            if cand_eff < eff_level:
-                parent_id = cand_id
-                break
-            if (
-                cand_eff == eff_level
-                and numbering_by_section[cand_id] is not None
-                and ni is not None
-                and numbering_by_section[cand_id].scheme == ni.scheme
-                and numbering_by_section[cand_id].components[:-1]
-                == ni.components[:-1]
-                and len(ni.components) > 1
-            ):
-                parent_id = cand_id
-                break
+        if i < len(accepted):
+            end = max(start, accepted[i].block_index - 1)
+        else:
+            end = max(start, max(0, total_blocks - 1))
 
         node = StructureNode(
             node_id=nid,
             node_type="section",
             semantic_type=semantic,
-            level=eff_level,
+            level=1,
             title=c.text,
             number=ni,
-            parent_id=parent_id,
+            parent_id=None,
             children=(),
             start_block=start,
             end_block=end,
@@ -351,9 +397,33 @@ def build_document_structure(
         )
         nodes[nid] = node
         section_ids.append(nid)
-        numbering_by_section[nid] = ni
-        eff_level_by_section[nid] = eff_level
+        rank_by_section[nid] = rank
         start_block_by_section[nid] = start
+        stack_order.append((nid, rank))
+
+    parents = _build_parents_by_stack(stack_order, root.node_id)
+
+    depth_by_id: dict[str, int] = {root.node_id: 0}
+    for nid in section_ids:
+        depth_by_id[nid] = depth_by_id.get(parents[nid], -1) + 1
+
+    for nid in section_ids:
+        node = nodes[nid]
+        nodes[nid] = StructureNode(
+            node_id=node.node_id,
+            node_type=node.node_type,
+            semantic_type=node.semantic_type,
+            level=depth_by_id[nid],
+            title=node.title,
+            number=node.number,
+            parent_id=parents[nid],
+            children=(),
+            start_block=node.start_block,
+            end_block=node.end_block,
+            confidence=node.confidence,
+            evidence=node.evidence,
+            source_refs=node.source_refs,
+        )
 
     siblings_children: dict[str, list[str]] = {sid: [] for sid in section_ids}
     siblings_children[root.node_id] = []

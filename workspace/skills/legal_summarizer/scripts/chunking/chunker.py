@@ -164,7 +164,7 @@ def _ancestor_chain_titles(
     cur = struct.nodes.get(node_id)
     ancestors: list[str] = []
     while cur is not None and cur.node_id != struct.root_id:
-        if cur.title:
+        if cur.title and cur.parent_id != struct.root_id:
             ancestors.append(cur.title)
         if cur.parent_id is None:
             break

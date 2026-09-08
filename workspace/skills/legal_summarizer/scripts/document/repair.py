@@ -171,7 +171,7 @@ def repair_structure(struct: DocumentStructure) -> tuple[DocumentStructure, Repa
             _drop(nid)
             for cid, child in sorted(current_nodes.items()):
                 if child.parent_id == nid:
-                    _reparent(cid, struct.root_id)
+                    _reparent(cid, old_parent_id or struct.root_id)
             if old_parent_id is not None:
                 _rebuild_children(old_parent_id)
             report = RepairReport(
