@@ -67,6 +67,45 @@ from lib.services.cache_provider import IndexIntegrityError  # noqa: E402
 MODES = ("predefined", "generated_sql", "vector")
 
 
+def _resolve_known_index(index_name: str) -> tuple[bool | None, str]:
+    """Проверить, что ``index_name`` зарегистрирован в runtime-реестре.
+
+    Использует публичный ``cache_provider_impl.read_vector_index_config({})``
+    (тот же источник, что и ``vector_search_tool._is_known_index``) — не
+    лезем в приватное состояние provider'а.
+
+    Returns:
+        ``(True, "")`` — индекс зарегистрирован.
+        ``(False, "message with available names")`` — индекс не найден.
+        ``(None, "registry-error message")`` — registry недоступен (PG
+        недоступна или реестр пустой); вызывающий решит, отказывать ли.
+
+    Для standalone-CLI реестр живёт в PostgreSQL — если gateway не
+    запущен или PG недоступна, registry вернёт ошибку. В этом случае
+    CLI **не должен** молча пропускать запрос (иначе silent fail на
+    неизвестном индексе), а отдаёт error с подсказкой.
+    """
+    try:
+        from lib.services.cache_provider_impl import read_vector_index_config
+        names = sorted(read_vector_index_config({}).keys())
+    except Exception as exc:
+        return (
+            None,
+            f"Не удалось прочитать runtime-реестр индексов "
+            f"(read_vector_index_config): {exc}. Запустите gateway "
+            f"(python gateway.py) — реестр индексов живёт в PostgreSQL.",
+        )
+    if index_name in names:
+        return (True, "")
+    available = ", ".join(names) if names else "(реестр пуст)"
+    return (
+        False,
+        f"vector index '{index_name}' is not registered. "
+        f"Available indexes: {available}. Зарегистрируйте индекс "
+        f"через tools/build_vectors.py.",
+    )
+
+
 def _parse_params(raw: str) -> dict[str, Any]:
     """Распарсить ``--params`` в dict. Поддерживает JSON и key=value."""
     if not raw:
@@ -243,10 +282,32 @@ def _run_vector(
                 "message": "Для --mode vector требуется --query",
             },
         }
+
+    # Валидация index_name ДО search_vector: иначе неизвестный индекс
+    # тихо вернёт [] через _search_error в provider'е, и пользователь
+    # увидит «Документы не найдены» как success (silent fail).
+    target_index = index_name or "audits_index"
+    known, registry_msg = _resolve_known_index(target_index)
+    if known is False:
+        return {
+            "status": "error",
+            "data": {"message": registry_msg, "error_type": "unknown_index"},
+        }
+    if known is None:
+        # Registry недоступен (PG offline и т.п.). Не пускаем дальше —
+        # иначе снова рискуем silent fail.
+        return {
+            "status": "error",
+            "data": {
+                "message": registry_msg,
+                "error_type": "registry_unavailable",
+            },
+        }
+
     try:
         results = db.search_vector(
             query,
-            index_name=index_name or "audits_index",
+            index_name=target_index,
             top_k=top_k or 5,
             threshold=threshold,
         )

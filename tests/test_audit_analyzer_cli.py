@@ -136,6 +136,172 @@ class TestParamsParser:
         assert _parse_params("") == {}
 
 
+class TestResolveKnownIndex:
+    """Публичный registry lookup для ``_run_vector``.
+
+    Skill валидирует ``index_name`` ДО вызова ``CacheProvider.search_vector``,
+    чтобы избежать silent fail (раньше неизвестный индекс → ``[]`` →
+    «Документы не найдены» как success). Тесты мокают публичный
+    ``lib.services.cache_provider_impl.read_vector_index_config``.
+    """
+
+    def test_known_index(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from workspace.skills.audit_analyzer.scripts import cli
+
+        monkeypatch.setattr(
+            "lib.services.cache_provider_impl.read_vector_index_config",
+            lambda cfg: {"audits_index": object(), "violations_index": object()},
+        )
+        known, msg = cli._resolve_known_index("audits_index")
+        assert known is True
+        assert msg == ""
+
+    def test_unknown_index(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from workspace.skills.audit_analyzer.scripts import cli
+
+        monkeypatch.setattr(
+            "lib.services.cache_provider_impl.read_vector_index_config",
+            lambda cfg: {"audits_index": object(), "violations_index": object()},
+        )
+        known, msg = cli._resolve_known_index("bogus_index")
+        assert known is False
+        assert "bogus_index" in msg
+        # Сообщение содержит список доступных имён.
+        assert "audits_index" in msg
+        assert "violations_index" in msg
+
+    def test_empty_registry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from workspace.skills.audit_analyzer.scripts import cli
+
+        monkeypatch.setattr(
+            "lib.services.cache_provider_impl.read_vector_index_config",
+            lambda cfg: {},
+        )
+        known, msg = cli._resolve_known_index("anything")
+        assert known is False
+        assert "пуст" in msg or "available" in msg.lower()
+
+    def test_registry_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """PG offline → registry lookup падает → (None, error_msg).
+
+        CLI в этом случае **отдаёт error**, не пропускает дальше
+        (иначе снова рискуем silent fail).
+        """
+        from workspace.skills.audit_analyzer.scripts import cli
+
+        def _explode(cfg):
+            raise RuntimeError("PG unavailable")
+
+        monkeypatch.setattr(
+            "lib.services.cache_provider_impl.read_vector_index_config",
+            _explode,
+        )
+        known, msg = cli._resolve_known_index("audits_index")
+        assert known is None
+        assert "PG unavailable" in msg
+        assert "gateway" in msg.lower()
+
+
+class TestRunVectorValidation:
+    """``_run_vector`` отвергает неизвестный индекс БЕЗ обращения к provider'у."""
+
+    def _stub_db(self) -> object:
+        class _Stub:
+            def __getattr__(self, name):
+                raise AssertionError(
+                    f"db.{name} не должен вызываться при unknown_index"
+                )
+
+        return _Stub()
+
+    def test_unknown_index_returns_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from workspace.skills.audit_analyzer.scripts import cli
+
+        monkeypatch.setattr(
+            "lib.services.cache_provider_impl.read_vector_index_config",
+            lambda cfg: {"audits_index": object()},
+        )
+        result = cli._run_vector(
+            query="пожарная безопасность",
+            db=self._stub_db(),
+            index_name="bogus_index",
+            top_k=3,
+            threshold=None,
+        )
+        assert result["status"] == "error"
+        assert result["data"]["error_type"] == "unknown_index"
+        assert "bogus_index" in result["data"]["message"]
+
+    def test_registry_unavailable_returns_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from workspace.skills.audit_analyzer.scripts import cli
+
+        def _explode(cfg):
+            raise RuntimeError("PG offline")
+
+        monkeypatch.setattr(
+            "lib.services.cache_provider_impl.read_vector_index_config",
+            _explode,
+        )
+        result = cli._run_vector(
+            query="q",
+            db=self._stub_db(),
+            index_name="audits_index",
+            top_k=5,
+            threshold=None,
+        )
+        assert result["status"] == "error"
+        assert result["data"]["error_type"] == "registry_unavailable"
+
+    def test_known_index_proceeds_to_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Happy path: индекс известен → db.search_vector вызывается."""
+        from dataclasses import dataclass
+
+        from workspace.skills.audit_analyzer.scripts import cli
+
+        monkeypatch.setattr(
+            "lib.services.cache_provider_impl.read_vector_index_config",
+            lambda cfg: {"audits_index": object()},
+        )
+
+        @dataclass
+        class _FakeResult:
+            content: str = "doc"
+            score: float = 0.9
+            source: str = "oarb.audits"
+            table: str = "audits"
+            pk_value: int = 1
+            chunk: str = ""
+            matched_chunks: int = 1
+            row: dict = None  # type: ignore[assignment]
+            signature_status: str = "CURRENT"
+            signature_reason: str = ""
+
+            def __post_init__(self):
+                if self.row is None:
+                    self.row = {}
+
+        class _FakeDB:
+            def search_vector(self, query, index_name, top_k, threshold):
+                assert index_name == "audits_index"
+                return [_FakeResult()]
+
+        out = cli._run_vector(
+            query="q",
+            db=_FakeDB(),
+            index_name="audits_index",
+            top_k=5,
+            threshold=None,
+        )
+        assert out["status"] == "success"
+        assert out["data"]["count"] == 1
+
+
 class TestOutputFormat:
     """``output.prepare_output`` — плоский JSON для всех 3 режимов."""
 

@@ -302,3 +302,99 @@ class TestGeneratedSqlRun:
         out = gsm.run("?", db=fake_db)
         assert out["status"] == "success"
         assert call_count["n"] == 2
+
+
+class TestIsNoMatch:
+    """``is_no_match`` распознаёт явный отказ LLM от генерации SQL.
+
+    Защита от silent data swap: LLM обучен возвращать ``<NO_MATCH>``
+    (system prompt rule #2), если запрос нельзя выполнить на доступных
+    таблицах. Любой реальный SQL здесь не пройдёт (validate_sql его
+    бы пропустил, is_no_match не сработает).
+    """
+
+    def test_exact_marker(self) -> None:
+        assert gsm.is_no_match("<NO_MATCH>")
+
+    def test_lowercase(self) -> None:
+        assert gsm.is_no_match("<no_match>")
+
+    def test_with_whitespace(self) -> None:
+        assert gsm.is_no_match("  <NO_MATCH>  ")
+
+    def test_with_trailing_dot(self) -> None:
+        # LLM иногда добавляет точку в конце.
+        assert gsm.is_no_match("<NO_MATCH>.")
+
+    def test_with_trailing_semicolon(self) -> None:
+        assert gsm.is_no_match("<NO_MATCH>;")
+
+    def test_real_sql_not_no_match(self) -> None:
+        assert not gsm.is_no_match("SELECT 1 FROM oarb.audits")
+
+    def test_empty_string_not_no_match(self) -> None:
+        assert not gsm.is_no_match("")
+
+    def test_partial_marker_not_no_match(self) -> None:
+        # Если LLM вернул «The result is <NO_MATCH> for this query» —
+        # это НЕ отказ, а SQL всё равно нет.
+        assert not gsm.is_no_match("The result is <NO_MATCH> for this query")
+
+
+class TestNoMatchShortCircuit:
+    """LLM возвращает ``<NO_MATCH>`` → run() отдаёт success без SQL."""
+
+    def test_llm_says_no_match(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stub_llm_chat,
+        stub_skill_config,
+        fake_db: _FakeDB,
+    ) -> None:
+        """LLM явно говорит «не могу» → status=success, no_match=true, rows=[].
+
+        Это защита от silent data swap (раньше LLM подставляла похожую
+        таблицу и возвращала чужие данные как success).
+        """
+        _chat, responses, _calls = stub_llm_chat
+        responses.append("<NO_MATCH>")
+        # NB: db.explain и db.query_sql НЕ должны вызываться — это
+        # short-circuit до safety/explain.
+        monkeypatch.setattr(gsm, "_load_predefined_scripts", lambda db: [])
+        out = gsm.run("?", db=fake_db)
+        assert out["status"] == "success"
+        assert out["mode"] == "generated_sql"
+        assert out["data"]["no_match"] is True
+        assert out["data"]["result"]["row_count"] == 0
+        assert out["data"]["result"]["rows"] == []
+        assert out["data"]["result"]["columns"] == []
+        assert out["data"]["sql"] == ""
+
+
+class TestNoMatchPrepareOutput:
+    """``output.prepare_output`` прокидывает ``no_match=true`` в плоский dict."""
+
+    def test_no_match_in_flat_output(self) -> None:
+        from workspace.skills.audit_analyzer.scripts.output import prepare_output
+
+        out = prepare_output(
+            {
+                "status": "success",
+                "data": {
+                    "no_match": True,
+                    "sql": "",
+                    "result": {
+                        "status": "success",
+                        "row_count": 0,
+                        "columns": [],
+                        "rows": [],
+                    },
+                },
+            },
+            "generated_sql",
+        )
+        assert out["status"] == "success"
+        assert out["no_match"] is True
+        assert out["row_count"] == 0
+        assert out["rows"] == []
+        assert "Запрос нельзя выполнить" in out["message"]

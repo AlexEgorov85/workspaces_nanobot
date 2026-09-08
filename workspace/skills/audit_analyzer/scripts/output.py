@@ -44,6 +44,23 @@ def prepare_output(result: dict, mode: str) -> dict:
     out: dict[str, Any] = {"mode": mode, "status": result.get("status", "error")}
     data = result.get("data", {})
 
+    # generated_sql: явный отказ LLM от генерации (``<NO_MATCH>`` —
+    # запрос нельзя выполнить на доступных таблицах). Это success,
+    # не error; row_count=0 и rows=[] говорят «данных нет», а
+    # no_match=true объясняет, почему.
+    if data.get("no_match"):
+        out["no_match"] = True
+        out["row_count"] = 0
+        out["columns"] = []
+        out["rows"] = []
+        out["sql"] = ""
+        out["message"] = (
+            "Запрос нельзя выполнить на доступных таблицах (LLM явно "
+            "отказался подставлять похожие). Уточните запрос или "
+            "используйте другой источник данных."
+        )
+        return out
+
     if "result" in data:
         r = data["result"]
         out["row_count"] = r.get("row_count", 0)

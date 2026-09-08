@@ -106,6 +106,25 @@ def _select_few_shot(query: str, scripts: list[dict], limit: int = 2) -> str:
     return "\n".join(lines).rstrip()
 
 
+_NO_MATCH_MARKER = "<NO_MATCH>"
+
+
+def is_no_match(sql: str) -> bool:
+    """Распознать явный отказ LLM от генерации SQL.
+
+    LLM обучен system prompt'ом возвращать ``<NO_MATCH>`` (без markdown-
+    обёрток и SQL), если запрос нельзя выполнить на доступных (whitelist)
+    таблицах. Маркер распознаётся после ``sanitize_sql_response``: точное
+    совпадение по токену после strip, плюс устойчивость к лишним
+    пробелам и завершающим точкам/запятым. Любой SQL, прошедший
+    ``validate_sql`` (т.е. не NoMatch), сюда не попадёт — см. ``run()``.
+    """
+    if not sql:
+        return False
+    cleaned = sql.strip().rstrip(".;,").strip()
+    return cleaned.upper() == _NO_MATCH_MARKER
+
+
 def sanitize_sql_response(text: str) -> str:
     """Извлечь SQL из ответа LLM (CoT + markdown-обёртки).
 
@@ -178,9 +197,12 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
         "STRICT RULES:\n"
         "  1. Use ONLY these tables (whitelist, fully qualified):\n"
         f"     {', '.join(qualified_tables) if qualified_tables else '(none)'}\n"
-        "  2. If the user's question cannot be answered from these tables, "
-        "return the SQL that best approximates it (e.g. aggregate over the "
-        "closest column). Never invent new tables.\n"
+        "  2. If the user's question CANNOT be answered from these tables "
+        "(the required data is not in the whitelist), return EXACTLY "
+        "``<NO_MATCH>`` and nothing else — no SQL, no markdown, no explanation. "
+        "NEVER invent tables, substitute a different table, or change the "
+        "schema-qualified names. Honesty over coverage: an explicit "
+        "``<NO_MATCH>`` is the correct response when the data is unavailable.\n"
         "  3. Always schema-qualify table names."
         f"{format_hints_block()}"
         f"{few_shot_section}"
@@ -216,6 +238,27 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
             continue
 
         sql = sanitize_sql_response(sql)
+
+        # Явный отказ LLM от генерации (<NO_MATCH>): запрос нельзя
+        # выполнить на доступных (whitelist) таблицах. Возвращаем
+        # status=success с пустым rows и message — это НЕ ошибка пайплайна,
+        # а честный ответ модели «данных нет». Никаких подстановок похожих
+        # таблиц (это была критическая регрессия: silent data swap).
+        if is_no_match(sql):
+            return {
+                "mode": "generated_sql",
+                "status": "success",
+                "data": {
+                    "sql": "",
+                    "no_match": True,
+                    "result": {
+                        "status": "success",
+                        "row_count": 0,
+                        "columns": [],
+                        "rows": [],
+                    },
+                },
+            }
 
         # Шаг 1: безопасность (DDL/DML/multi-statement)
         safety_error = validate_sql(sql)
