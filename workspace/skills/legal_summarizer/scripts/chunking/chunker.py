@@ -143,6 +143,71 @@ def _section_path_for(node_id: str, struct: DocumentStructure) -> str:
     return " > ".join(reversed(path_parts))
 
 
+def _ancestor_chain_titles(
+    node_id: str,
+    struct: DocumentStructure,
+) -> list[str]:
+    """Ancestor chain от root до node_id в формате ['Title1', 'Title2', ...].
+
+    Каждый элемент — это title родительского section node'а (или
+    DocumentStructure.title, если есть). Используется для построения
+    контекстной преамбулы chunk'а, чтобы LLM понимал, к какому разделу
+    документа относится chunk.
+
+    Пример для chunk с primary_section='§ 1':
+        ['Гражданский кодекс РФ (часть 1)', 'Раздел I. Общие положения',
+         'Глава 1. Гражданское законодательство']
+    """
+    chain: list[str] = []
+    if struct.title and struct.title.value:
+        chain.append(struct.title.value)
+    cur = struct.nodes.get(node_id)
+    ancestors: list[str] = []
+    while cur is not None and cur.node_id != struct.root_id:
+        if cur.title:
+            ancestors.append(cur.title)
+        if cur.parent_id is None:
+            break
+        cur = struct.nodes.get(cur.parent_id)
+    chain.extend(reversed(ancestors))
+    return chain
+
+
+def _build_context_preamble(
+    unit: "PackableUnit",
+    struct: DocumentStructure,
+    cache: dict[str, str],
+) -> str:
+    """Строит короткую преамбулу для chunk'а в формате:
+
+        [Контекст: Doc Title > Parent1 > Parent2]
+
+    Добавляется в начало text chunk'а. Не меняет block_indices
+    (preamble — overlay, не реальный block).
+
+    Кешируется для повторного использования.
+
+    Возвращает пустую строку если:
+    - primary_section == root (preamble нет);
+    - ancestor chain содержит только primary (нет полезных ancestors);
+    - у ancestors нет titles.
+    """
+    if unit.primary_section_id in (struct.root_id, ""):
+        return ""
+    key = unit.primary_section_id
+    if key in cache:
+        return cache[key]
+
+    chain = _ancestor_chain_titles(key, struct)
+    if len(chain) <= 1:
+        cache[key] = ""
+        return ""
+
+    preamble = "[Контекст: " + " > ".join(chain) + "]\n\n"
+    cache[key] = preamble
+    return preamble
+
+
 def _is_strong_boundary(
     prev_owner_id: str,
     nxt_owner_id: str,
@@ -216,6 +281,7 @@ def chunk_from_structure(
 
     ownership = build_block_ownership(struct)
     section_meta_cache: dict[str, tuple[str, str]] = {}
+    preamble_cache: dict[str, str] = {}
 
     def _meta(section_id: str) -> tuple[str, str]:
         if section_id not in section_meta_cache:
@@ -296,6 +362,9 @@ def chunk_from_structure(
                     page_end = b.page_end
 
         text = "\n\n".join(text_parts)
+        preamble = _build_context_preamble(unit, struct, preamble_cache)
+        if preamble:
+            text = preamble + text
         section_path, section_heading = _meta(unit.primary_section_id)
 
         if unit.kind == "table":
@@ -369,26 +438,13 @@ def chunk_from_structure(
     doc_oversized_parts: dict[int, list[tuple[int, int]]] = {}
 
     for ord_i in sorted(by_ord.keys()):
-        block = by_ord[ord_i]
+        block = by_ord.get(ord_i)
+        if block is None:
+            continue
         if block.block_type == "table":
             document_table_counter += 1
             tid = f"t_{document_table_counter:03d}"
             doc_tables[ord_i] = tid
-
-            owner = ownership.get(ord_i, struct.root_id)
-            section_ids = _collect_owner_section_ids(
-                (ord_i,), ownership, struct.root_id,
-            )
-            all_units.append(
-                PackableUnit(
-                    kind="table",
-                    block_indices=(ord_i,),
-                    section_ids=section_ids,
-                    primary_section_id=owner,
-                    char_count=block.char_count,
-                    table_id=tid,
-                ),
-            )
         elif block.char_count > max_chunk_chars:
             owner = ownership.get(ord_i, struct.root_id)
             parts = _split_block_with_offsets(
@@ -415,17 +471,6 @@ def chunk_from_structure(
                 )
 
     structural_remaining = list(structural_units)
-    structural_block_set: set[int] = set()
-    for u in structural_remaining:
-        structural_block_set.update(u.block_indices)
-
-    for ord_i in sorted(by_ord.keys()):
-        block = by_ord[ord_i]
-        if block.block_type == "table" or block.char_count > max_chunk_chars:
-            continue
-        if ord_i not in structural_block_set:
-            owner = ownership.get(ord_i, struct.root_id)
-            all_units.append(_unit_for_block(ord_i, owner))
 
     for u in structural_remaining:
         all_units.append(u)

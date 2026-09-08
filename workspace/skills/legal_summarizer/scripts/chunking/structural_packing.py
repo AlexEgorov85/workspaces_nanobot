@@ -162,7 +162,12 @@ def _build_units_for_node(
     target_chunk_chars: int,
     max_chunk_chars: int,
 ) -> list[PackableUnit]:
-    """Recursive descent: subtree целиком или раскрытие на children."""
+    """Recursive descent: subtree целиком или раскрытие на children.
+
+    Tables исключаются из structural units и обрабатываются отдельно
+    (atomic chunks по умолчанию). Это сохраняет back-compat семантику
+    legacy тестов и архитектуры "tables атомарны".
+    """
     node = struct.nodes[node_id]
 
     start, end = _node_subtree_range(node_id, struct)
@@ -205,19 +210,21 @@ def _build_units_for_node(
     if not node.children:
         if not structural_blocks:
             return []
-        if sub_chars <= target_chunk_chars:
+        if sub_chars <= max_chunk_chars:
             block_indices = tuple(b.ordinal for b in structural_blocks)
             section_ids = _collect_section_ids_for_range(
                 block_indices, ownership, struct.root_id,
+            )
+            primary = (
+                node_id if node_id != struct.root_id
+                else (section_ids[0] if section_ids else struct.root_id)
             )
             return [
                 PackableUnit(
                     kind="structural",
                     block_indices=block_indices,
                     section_ids=section_ids,
-                    primary_section_id=node_id if node_id != struct.root_id else (
-                        section_ids[0] if section_ids else struct.root_id
-                    ),
+                    primary_section_id=primary,
                     char_count=sub_chars,
                 ),
             ]
@@ -225,10 +232,13 @@ def _build_units_for_node(
         leaf_units: list[PackableUnit] = []
         current_blocks: list[DocumentBlock] = []
         current_chars = 0
-        primary = node_id if node_id != struct.root_id else struct.root_id
+        primary = (
+            node_id if node_id != struct.root_id
+            else struct.root_id
+        )
 
         for b in structural_blocks:
-            if current_chars + b.char_count > target_chunk_chars and current_blocks:
+            if current_chars + b.char_count > max_chunk_chars and current_blocks:
                 leaf_indices = tuple(x.ordinal for x in current_blocks)
                 leaf_section_ids = _collect_section_ids_for_range(
                     leaf_indices, ownership, struct.root_id,
@@ -340,6 +350,25 @@ def _merge_units(prev: PackableUnit, nxt: PackableUnit) -> PackableUnit:
     )
 
 
+def _is_consecutive(prev: PackableUnit, nxt: PackableUnit) -> bool:
+    """True, если nxt находится ВНУТРИ диапазона prev или сразу после.
+
+    Используется для small_table inline: таблица inline'нутая в current
+    должна физически находиться в том же непрерывном диапазоне блоков
+    (или сразу после, если prev — хвост subtree).
+
+    Возвращает True если:
+    - nxt.block_indices[0] находится внутри [prev.block_indices[0], prev.block_indices[-1]] (nxt внутри subtree prev)
+    - или nxt.block_indices[0] == prev.block_indices[-1] + 1 (сосед после subtree)
+    """
+    if not prev.block_indices or not nxt.block_indices:
+        return False
+    prev_start = prev.block_indices[0]
+    prev_end = prev.block_indices[-1]
+    nxt_start = nxt.block_indices[0]
+    return prev_start <= nxt_start <= prev_end + 1
+
+
 def _small_table_inline_threshold(max_chunk_chars: int) -> int:
     """Порог размера таблицы для inline-объединения.
 
@@ -358,31 +387,26 @@ def greedy_pack_units(
     preferred_min_before_strong_boundary: float,
     struct: DocumentStructure,
 ) -> list[PackableUnit]:
-    """Greedy packing unit'ов в плотные, заполненные chunks.
+    """Greedy packing unit'ов с плотным заполнением chunks.
 
-    Архитектурная цель: chunks должны лежать в диапазоне
-    [~0.4*max, max], без разброса от 91 chars до 100K+ chars.
+    Алгоритм:
 
-    Алгоритм (по приоритету):
+    1. **Oversized_part**: всегда atomic.
 
-    1. **Small table inline**: если nxt — table ≤ 5% от max,
-       объединяем с current (если влезает в max). Это поглощает
-       preamble tables, footnotes, tiny edits.
+    2. **Table inline в хвост**: если current — structural chunk с
+       section_id, который пересекается с section_id таблицы, и
+       current уже заполнен до ≥ 50% target (то есть structural
+       достаточно большой), и таблица физически в subtree current
+       (consecutive), и current + nxt ≤ max → объединяем.
 
-    2. **Max overflow**: если current + nxt > max → emit current,
-       start new.
+    3. **Разные kinds** (если inline не сработал): emit current, current = nxt.
 
-    3. **Min-target принудительный merge**: если current < min_target
-       (≈ 0.4 * max), объединяем всегда — даже через strong boundary.
-       Это не даёт оставлять крошечные хвосты.
-
-    4. **Strong boundary**: если current ≥ target и встретили strong
-       boundary → emit. Иначе merge.
-
-    5. **Default**: merge.
-
-    Oversized_part всегда atomic (никогда не объединяется с другими).
-    Большие таблицы (≥ 5% max) — atomic.
+    4. **Structural + structural**:
+       - max overflow → emit, start new
+       - оба < min_target → force merge
+       - primary_section_id = root → emit current
+       - strong boundary при current ≥ target * preferred_min → emit
+       - default: merge
     """
     if not units:
         return []
@@ -402,39 +426,18 @@ def greedy_pack_units(
         if (
             nxt.kind == "table"
             and nxt.char_count <= small_table_max
+            and current.char_count >= target_chunk_chars * 0.5
             and current.char_count + nxt.char_count <= max_chunk_chars
             and current.kind == "structural"
-        ):
-            current = _merge_units(current, nxt)
-            continue
-
-        if (
-            current.kind == "table"
-            and current.char_count <= small_table_max
-            and nxt.char_count + current.char_count <= max_chunk_chars
-            and nxt.kind == "structural"
-        ):
-            current = _merge_units(nxt, current)
-            continue
-
-        if (
-            current.kind == "table"
-            and nxt.kind == "table"
-            and current.char_count + nxt.char_count <= max_chunk_chars
-            and current.char_count + nxt.char_count <= small_table_max * 3
+            and _is_consecutive(current, nxt)
+            and bool(set(nxt.section_ids) & set(current.section_ids))
         ):
             current = _merge_units(current, nxt)
             continue
 
         if current.kind != "structural" or nxt.kind != "structural":
-            if current.kind == "structural" and current.char_count >= min_target:
-                packed.append(current)
-                current = nxt
-            elif nxt.kind == "structural":
-                current = _merge_units(current, nxt)
-            else:
-                packed.append(current)
-                current = nxt
+            packed.append(current)
+            current = nxt
             continue
 
         if current.char_count + nxt.char_count > max_chunk_chars:
