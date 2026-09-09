@@ -180,7 +180,7 @@ def _normalize_v2(raw: dict[str, Any]) -> NormalizedManifest:
         completed_at=raw.get("completed_at"),
         duration_sec=raw.get("duration_sec"),
         article_count=raw.get("article_count"),
-        raw=raw,
+        raw=dict(raw.get("raw") or {}),
     )
 
 
@@ -402,12 +402,22 @@ def write_document_section_summary(
     document_id: str,
     section_id: str,
     summary: str,
+    question: str | None = None,
 ) -> None:
     """Записать per-section LLM summary в document-level cache.
+
+    Commit #C1: document-level cache хранит ТОЛЬКО question-independent
+    (baseline) summaries. Если передан ``question is not None`` —
+    summary был построен с учётом конкретного вопроса и НЕ должен
+    попасть в cross-operation cache. Operation-level cache
+    (``operations/<op_id>/manifest.json:section_summaries``) хранит
+    question-specific результаты.
 
     Append-only и атомарный. Используется после успешного map/reduce —
     отдельная стадия жизненного цикла, не часть ``write_document_snapshot``.
     """
+    if question is not None:
+        return
     if not document_id or not section_id or not summary:
         return
     payload = {"section_id": section_id, "summary": summary}
@@ -427,12 +437,22 @@ def write_document_chunk_summary(
     section_path: str | None = None,
     page_start: int | None = None,
     page_end: int | None = None,
+    question: str | None = None,
 ) -> None:
     """Записать per-chunk LLM summary в document-level cache.
+
+    Commit #C1: document-level cache хранит ТОЛЬКО question-independent
+    (baseline) summaries. Если передан ``question is not None`` —
+    summary был построен с учётом конкретного вопроса и НЕ должен
+    попасть в cross-operation cache (semantic pollution guard).
+    В этом случае функция возвращает no-op.
 
     Append-only и атомарный. Используется после успешного batch'а map-фазы —
     параллельно с записью в ``operations/<op_id>/chunks/<cid>.json``.
     """
+    if question is not None:
+        # Question-specific summary → operation-level cache only.
+        return
     if not document_id or not chunk_id or not summary:
         return
     payload = {

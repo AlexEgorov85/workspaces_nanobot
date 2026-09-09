@@ -297,6 +297,12 @@ def run_map_reduce(
     # document-level cache (cross-operation identity). Если ``analysis``
     # или ``workspace_root`` отсутствуют — callback не инжектируется,
     # execution НЕ пишет в document-level cache.
+    #
+    # Commit #C1: document-level cache хранит только question-independent
+    # (baseline) summaries. При ``question is not None`` chunk summary
+    # пишется только в operation-level cache (``operations/<op_id>/chunks/``).
+    # Через callback пробрасываем ``question`` для guard внутри
+    # ``write_document_chunk_summary``.
     document_id = (
         analysis.identity.document_id
         if analysis is not None and getattr(analysis, "identity", None) is not None
@@ -317,6 +323,7 @@ def run_map_reduce(
                 section_path=section_path,
                 page_start=page_start,
                 page_end=page_end,
+                question=question,
             )
 
     payload = run_map_reduce_execution(
@@ -361,6 +368,7 @@ def run_map_reduce(
             article_count=article_count,
             workspace_root=workspace_root,
             now_iso=now_iso,
+            question=question,
         )
 
     # Удалить ``_internal`` из payload перед возвратом.
@@ -385,6 +393,7 @@ def _persist_final_manifest(
     article_count: int,
     workspace_root: Path | str | None,
     now_iso,
+    question: str | None = None,
 ) -> None:
     """Сохранить финальный manifest на диск.
 
@@ -467,6 +476,7 @@ def _persist_final_manifest(
                 document_id=document_id,
                 section_id=sid,
                 summary=summary,
+                question=question,
             )
 
 
