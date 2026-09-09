@@ -70,7 +70,7 @@ def _required_keys():
         # skills.audit_analyzer
         # Новая модель (Phase 7): tables[] + vector_indexes[] вместо db.* + vector_index.*
         ("skills.legal_summarizer.enabled", True),
-        ("skills.legal_summarizer.cli.default_length", "medium"),
+        ("skills.legal_summarizer.cli.default_length", "brief"),
         ("skills.legal_summarizer.cli.timeout_sec", 120),
         ("skills.legal_summarizer.cli.max_retries", 3),
         ("skills.legal_summarizer.llm.max_tokens", 8192),

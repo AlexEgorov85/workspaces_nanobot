@@ -28,6 +28,7 @@ from config import ConfigurationError
 __all__ = [
     "EmbeddingSettings",
     "ProjectSettings",
+    "SkillBriefContextSettings",
     "SkillCliSettings",
     "SkillLlmSettings",
     "SkillSettings",
@@ -390,6 +391,23 @@ class SkillChunkingSettings(_StrictOptional):
     chunk_size_input_ratio: float | None = Field(default=None, gt=0, le=1)
 
 
+class SkillBriefContextSettings(_StrictOptional):
+    """Секция ``brief_context`` — параметры ``BriefContextBuilder`` (необязательно).
+
+    Используется навыком ``legal_summarizer``: brief собирает ровно один
+    структурный ``Chunk`` из DocumentStructure + PhysicalDocument.
+    ``max_chars`` рассчитывается динамически из contextWindowTokens и
+    ``chunking.brief_input_ratio``; эти поля — резервные параметры.
+    Дефолты согласованы с ``BriefContextConfig``
+    в ``workspace/skills/legal_summarizer/scripts/application/brief_context.py``
+    (см. ``lib.core.skill_config.get_brief_context_config``).
+    """
+
+    max_chars_fallback: int | None = Field(default=None, gt=0)
+    chars_per_token: float | None = Field(default=None, gt=0)
+    structure_max_chars: int | None = Field(default=None, gt=0)
+
+
 class SkillExecutionContextBatchingSettings(_StrictOptional):
     """Параметры context batching для skill'а (опционально).
 
@@ -438,6 +456,7 @@ class SkillSettings(BaseModel):
       * ``cli`` — параметры CLI навыка;
       * ``llm`` — execution policy для навыка (опционально);
       * ``chunking`` — параметры map-reduce чанкинга;
+      * ``brief_context`` — параметры BriefContextBuilder (опционально);
       * ``execution`` — параметры запуска (confirmation, safety net,
         context batching).
 
@@ -464,6 +483,7 @@ class SkillSettings(BaseModel):
     cli: SkillCliSettings | None = None
     llm: SkillLlmSettings | None = None
     chunking: SkillChunkingSettings | None = None
+    brief_context: SkillBriefContextSettings | None = None
     execution: SkillExecutionSettings | None = None
 
 

@@ -342,6 +342,53 @@ class TestSkillSettingsExtraForbid:
         assert "extra_forbidden" in msg or "not permitted" in msg
 
 
+class TestSkillBriefContextSettings:
+    """Секция ``skills.<name>.brief_context`` — параметры BriefContextBuilder.
+
+    Введена коммитом brief-refactor (``project.json`` + runtime читает через
+    ``lib.core.skill_config.get_brief_context_config``), но долго отсутствовала
+    в pydantic-схеме — валидация с ``extra="forbid"`` валила старт gateway
+    на легитимном ключе. Это regression-guard на синхронизацию схемы.
+    """
+
+    def test_brief_context_parsed_direct(self) -> None:
+        s = SkillSettings.model_validate({
+            "brief_context": {
+                "max_chars_fallback": 30000,
+                "chars_per_token": 3.5,
+                "structure_max_chars": 12000,
+            },
+        })
+        assert s.brief_context is not None
+        assert s.brief_context.max_chars_fallback == 30000
+        assert s.brief_context.chars_per_token == 3.5
+        assert s.brief_context.structure_max_chars == 12000
+
+    def test_brief_context_defaults_roundtrip_via_project_settings(self) -> None:
+        """Полная валидация секции legal_summarizer-стиля проходит."""
+        result = validate_project_settings({
+            "skills": {
+                "legal_summarizer": {
+                    "enabled": True,
+                    "chunking": {"brief_input_ratio": 0.13},
+                    "brief_context": {
+                        "max_chars_fallback": 30000,
+                        "chars_per_token": 3.5,
+                        "structure_max_chars": 12000,
+                    },
+                    "execution": {"max_chunks_per_question": 10},
+                },
+            },
+        })
+        assert result.skills is not None
+        legal = result.skills.legal_summarizer
+        assert legal["brief_context"]["max_chars_fallback"] == 30000
+
+    def test_brief_context_optional_and_empty(self) -> None:
+        s = SkillSettings.model_validate({})
+        assert s.brief_context is None
+
+
 class TestVectorIndexEntryNoSource:
     """``VectorIndexEntry.source`` удалён: source — инфраструктурная
     декларация в PG-реестре (``read_vector_index_config_table()``;
