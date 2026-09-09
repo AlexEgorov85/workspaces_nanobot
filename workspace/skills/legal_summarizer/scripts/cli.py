@@ -78,8 +78,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--length",
         default=None,
         choices=["brief", "detailed"],
-        help="Объём саммари: brief (150–250 слов) — первые 8 chunks; "
-             "detailed (800–1200) — весь документ. По умолчанию — из project.json.",
+        help="Объём саммари: brief (150–250 слов) — ровно один "
+             "структурный Chunk всего документа; detailed (800–1200) — "
+             "весь документ. По умолчанию — из project.json.",
     )
     parser.add_argument(
         "--question",
