@@ -57,6 +57,9 @@ _SECTION_SUMMARY_MAX_CHARS = 12_000
 
 # Callback-типы для dependency injection из application layer.
 WriteChunkResultFn = Callable[..., None]
+# ``write_document_chunk_summary(workspace_root=, chunk_id=, summary=,
+#   section_id=, section_path=, page_start=, page_end=)`` — commit #4.
+WriteDocumentChunkSummaryFn = Callable[..., None] | None
 # ``run_one_batch_async(pending_chunks, *, chunks_total, structure,
 #   operation_id, workspace_root, sem, batch_id, length, question)``
 RunOneBatchFn = Callable[..., Any]
@@ -150,6 +153,7 @@ def _persist_batch_results(
     *,
     operation_id: str,
     write_chunk_result: WriteChunkResultFn,
+    write_document_chunk_summary: WriteDocumentChunkSummaryFn | None = None,
     workspace_root: Path | str | None = None,
 ) -> tuple[
     int, list[str], dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict | None,
@@ -158,6 +162,8 @@ def _persist_batch_results(
 
     ``write_chunk_result`` инжектируется из application — это
     соблюдение ``cache boundary``: execution НЕ импортирует cache.
+    ``write_document_chunk_summary`` (опциональный) — commit #4,
+    параллельная запись в document-level cache для cross-operation lookup.
 
     Возвращает ``(map_calls, failed_batch_ids, chunk_states, ctx_batches,
     first_batch_error)``.
@@ -198,6 +204,18 @@ def _persist_batch_results(
                         duration_sec=duration,
                         workspace_root=workspace_root,
                     )
+                    # Commit #4: дополнительная запись в document-level cache
+                    # (если был инжектирован callback от application).
+                    if write_document_chunk_summary is not None:
+                        write_document_chunk_summary(
+                            workspace_root=workspace_root,
+                            chunk_id=c.chunk_id,
+                            summary=chunk_results[c.chunk_id],
+                            section_id=c.section_id,
+                            section_path=c.section_path,
+                            page_start=c.page_start,
+                            page_end=c.page_end,
+                        )
                 chunk_states[c.chunk_id] = {
                     "status": "completed",
                     "context_batch_id": batch_id,
@@ -249,11 +267,20 @@ def _reduce_phase(
     length: str,
     focus: str | None,
     question: str | None,
-) -> tuple[str, int, int, bool, str]:
+) -> tuple[str, int, int, bool, str, dict[str, str]]:
     """Reduce phase: hierarchical или flat.
 
     Возвращает ``(final_summary, section_reduce_calls,
-    document_reduce_calls, retries_incremented, strategy_label)``.
+    document_reduce_calls, retries_incremented, strategy_label,
+    section_summaries)``.
+
+    ``section_summaries``:
+      * ``map_hierarchical`` — построенные в phase 1
+        ``reduce_chunks_hierarchical`` (LLM делал section-level reduce);
+      * ``map_reduce_flat`` — ``{}`` (LLM делал только document-level
+        reduce, section-level не было);
+      * direct-режим не вызывает ``_reduce_phase`` — manifest пишется
+        через ``build_manifest`` с ``section_summaries={}``.
     """
     import os
     import sys
@@ -350,6 +377,7 @@ def _reduce_phase(
             document_reduce_calls,
             False,
             "map_reduce_hierarchical",
+            dict(reducer_result.section_summaries),
         )
 
     ordered_chunks = [c for c in chunks if c.chunk_id in all_partials]
@@ -362,7 +390,7 @@ def _reduce_phase(
             ordered_chunks=len(ordered_chunks),
             total_partials=len(all_partials),
         )
-        return "", section_reduce_calls, document_reduce_calls, False, "map_reduce_flat"
+        return "", section_reduce_calls, document_reduce_calls, False, "map_reduce_flat", {}
     original_joined_chars = len(joined)
     joined = fit_input(joined, DOCUMENT_REDUCE_INPUT_BUDGET_CHARS)
     _mr_trace(
@@ -390,7 +418,7 @@ def _reduce_phase(
             err=type(exc).__name__,
             msg=str(exc)[:200],
         )
-        return "", section_reduce_calls, document_reduce_calls, True, "map_reduce_flat"
+        return "", section_reduce_calls, document_reduce_calls, True, "map_reduce_flat", {}
     _mr_trace(
         "flat_reduce_done",
         result_chars=len(final_summary),
@@ -401,6 +429,7 @@ def _reduce_phase(
         document_reduce_calls,
         False,
         "map_reduce_flat",
+        {},
     )
 
 
@@ -444,6 +473,7 @@ def run_map_reduce_execution(
     section_headings: dict[str, str],
     section_paths: dict[str, str],
     write_chunk_result: WriteChunkResultFn,
+    write_document_chunk_summary: WriteDocumentChunkSummaryFn = None,
     run_one_batch_async: RunOneBatchFn,
     load_cached_partials: LoadCachedPartialsFn,
 ) -> dict:
@@ -571,6 +601,7 @@ def run_map_reduce_execution(
                 queued, gather_results,
                 operation_id=operation_id,
                 write_chunk_result=write_chunk_result,
+                write_document_chunk_summary=write_document_chunk_summary,
                 workspace_root=workspace_root,
             )
         )
@@ -614,7 +645,7 @@ def run_map_reduce_execution(
         avg_chars=f"{avg_chars:.0f}",
     )
 
-    final_summary, section_reduce_calls, document_reduce_calls, retries_incremented, strategy_label = (
+    final_summary, section_reduce_calls, document_reduce_calls, retries_incremented, strategy_label, section_summaries = (
         _reduce_phase(
             strategy=strategy,
             struct=struct,
@@ -695,6 +726,7 @@ def run_map_reduce_execution(
                 "total_llm_calls": total_llm_calls,
                 "total_duration": total_duration,
                 "strategy_label": strategy_label,
+                "section_summaries": section_summaries,
             },
         },
     }
