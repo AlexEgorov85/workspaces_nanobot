@@ -95,6 +95,144 @@ class PipelineResult:
     chunks: tuple[Chunk, ...]
 
 
+def _try_load_cached_pipeline_result(
+    *,
+    path: str | Path,
+    workspace_root: Path | str | None,
+) -> PipelineResult | None:
+    """Попробовать загрузить cached ``PipelineResult`` из document-level cache.
+
+    Условия cache hit:
+      * ``workspace_root`` не None (для path resolution);
+      * файл существует и ``DocumentIdentity.is_fresh(path) == True``
+        (дешёвая проверка: stat + сравнение mtime_ns/size);
+      * snapshot complete (есть ``_complete.marker``).
+
+    При hit восстанавливает ``PhysicalDocument``, ``DocumentStructure``,
+    ``Chunk[]``, ``ValidationReport`` из их ``to_dict``. ``RetrievalIndex``
+    пересобирается заново (детерминированно из chunks+structure).
+
+    Returns:
+        ``PipelineResult`` или ``None`` при miss.
+    """
+    if workspace_root is None:
+        return None
+
+    try:
+        identity = DocumentIdentity.from_path(path)
+    except (FileNotFoundError, OSError):
+        return None
+
+    if not identity.is_fresh(path):
+        # mtime/size изменились — инвалидируем старый snapshot.
+        from cache.manifest import (
+            invalidate_document_cache,
+            is_document_cache_complete,
+            read_document_snapshot,
+        )
+        if is_document_cache_complete(identity.document_id, workspace_root):
+            invalidate_document_cache(identity.document_id, workspace_root)
+        return None
+
+    if not _is_complete(identity.document_id, workspace_root):
+        return None
+
+    snap = _read(identity.document_id, workspace_root)
+    if snap is None:
+        return None
+    physical_data, analysis_data, _meta = snap
+    if physical_data is None or analysis_data is None:
+        return None
+
+    try:
+        physical = PhysicalDocument.from_dict(physical_data)
+        structure = DocumentStructure.from_dict(analysis_data["structure"])
+        validation = ValidationReport.from_dict(
+            analysis_data.get("validation") or {},
+        )
+        chunks = tuple(Chunk.from_dict(c) for c in analysis_data["chunks"])
+    except (KeyError, TypeError, ValueError):
+        # Битый snapshot — инвалидируем и cache miss.
+        from cache.manifest import invalidate_document_cache
+        invalidate_document_cache(identity.document_id, workspace_root)
+        return None
+
+    analysis = DocumentAnalysis.build(
+        physical=physical,
+        structure=structure,
+        chunks=chunks,
+        identity=identity,
+        include_retrieval_index=True,
+        semantic_records={},
+    )
+
+    return PipelineResult(
+        analysis=analysis,
+        validation=validation,
+        chunks=chunks,
+    )
+
+
+def _write_document_snapshot_after_pipeline(
+    *,
+    path: str | Path,
+    workspace_root: Path | str | None,
+    physical: PhysicalDocument,
+    identity: DocumentIdentity,
+    structure: DocumentStructure,
+    validation: ValidationReport,
+    chunks: tuple[Chunk, ...],
+    analysis: DocumentAnalysis,
+) -> None:
+    """Сохранить document-level snapshot после успешного canonical pipeline.
+
+    Используется только при cache miss (commit #3). При cache hit snapshot
+    уже существует и write_document_snapshot выбросит ``RuntimeError`` —
+    мы это явно НЕ вызываем в hit-ветке.
+    """
+    if workspace_root is None:
+        return
+    from cache.manifest import write_document_snapshot
+
+    analysis_payload = {
+        "version": 1,
+        "document_id": identity.document_id,
+        "structure": structure.to_dict(),
+        "chunks": [c.to_dict() for c in chunks],
+        "validation": validation.to_dict(),
+    }
+    retrieval_meta: dict[str, Any] | None = None
+    if analysis.retrieval_index is not None:
+        retrieval_meta = {
+            "chunk_count": len(analysis.retrieval_index.chunks),
+            "term_count": len(analysis.retrieval_index.term_to_chunks),
+        }
+
+    try:
+        write_document_snapshot(
+            workspace_root=workspace_root,
+            document_id=identity.document_id,
+            physical_data=physical.to_dict(),
+            analysis_data=analysis_payload,
+            retrieval_index_meta=retrieval_meta,
+        )
+    except RuntimeError:
+        # Уже complete (конкурентная запись или race) — это OK, ничего не делаем.
+        pass
+
+
+# Ленивые импорты — ``cache.manifest`` уже импортируется транзитивно через
+# ``document.physical``, но мы хотим явный alias для ясности.
+def _is_complete(document_id: str, workspace_root: Path | str | None) -> bool:
+    from cache.manifest import is_document_cache_complete
+    return is_document_cache_complete(document_id, workspace_root)
+
+
+def _read(document_id: str, workspace_root: Path | str | None):
+    from cache.manifest import read_document_snapshot
+    return read_document_snapshot(document_id, workspace_root)
+
+
 def run_canonical_pipeline(
     path: str | Path,
     *,
@@ -104,6 +242,13 @@ def run_canonical_pipeline(
     workspace_root: Path | str | None = None,
 ) -> PipelineResult:
     """Запустить canonical pipeline.
+
+    При наличии document-level cache (commit #3) — попытка cache hit:
+    если файл не менялся (mtime/size) и snapshot complete — возвращаем
+    восстановленный ``PipelineResult`` без повторного парсинга PDF/DOCX,
+    heading detection, structure build, ChunkPlanner.
+
+    При cache miss — полный pipeline + запись snapshot в конце.
 
     Args:
         path: путь к документу.
@@ -116,6 +261,14 @@ def run_canonical_pipeline(
         ``PipelineResult`` с ``DocumentAnalysis``, ``ValidationReport``,
         и ``chunks``.
     """
+    # Commit #3: cache hit branch.
+    cached = _try_load_cached_pipeline_result(
+        path=path, workspace_root=workspace_root,
+    )
+    if cached is not None:
+        return cached
+
+    # Cache miss — existing pipeline.
     loader = DocumentLoader()
     physical = loader.load(path, workspace_root=workspace_root)
     identity = DocumentIdentity.from_path(physical.path)
@@ -167,6 +320,18 @@ def run_canonical_pipeline(
         chunks=chunks,
         identity=identity,
         include_retrieval_index=include_retrieval_index,
+    )
+
+    # Commit #3: write snapshot после успешного pipeline (cache miss).
+    _write_document_snapshot_after_pipeline(
+        path=path,
+        workspace_root=workspace_root,
+        physical=physical,
+        identity=identity,
+        structure=struct,
+        validation=validation,
+        chunks=chunks,
+        analysis=analysis,
     )
 
     return PipelineResult(

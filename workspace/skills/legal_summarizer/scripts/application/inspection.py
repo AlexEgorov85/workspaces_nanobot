@@ -9,6 +9,7 @@ strategy / batch'ей / plan строится на уровне запуска �
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import application.pipeline_structure as _pipeline_struct_mod
 from document.analysis import DocumentAnalysis
@@ -33,6 +34,8 @@ class Inspection:
 def inspect(
     text: str,
     document_path: str | None = None,
+    *,
+    workspace_root: Path | str | None = None,
 ) -> Inspection:
     """Canonical inspection (document-level).
 
@@ -54,6 +57,7 @@ def inspect(
         text=text,
         apply_repair=True,
         include_retrieval_index=True,
+        workspace_root=workspace_root,
     )
     analysis = pipeline_result.analysis
     return Inspection(
