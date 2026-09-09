@@ -1,4 +1,4 @@
-"""Тесты для numbering parser (Этап 6 из PLAN.md)."""
+"""Тесты для numbering parser."""
 
 from __future__ import annotations
 

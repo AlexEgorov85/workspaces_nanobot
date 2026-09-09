@@ -1,4 +1,4 @@
-"""Тесты для SemanticRecord (Этап 29 из PLAN.md)."""
+"""Тесты для SemanticRecord."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Structure correctness suite (Этап 31).
+"""Structure correctness suite.
 
 Расширенное покрытие DocumentStructure:
 * nested decimal (1.1.1)

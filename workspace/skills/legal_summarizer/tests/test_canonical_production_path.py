@@ -1,4 +1,4 @@
-"""Production-path integration test (Этап 28).
+"""Production-path integration test.
 
 Проверяет, что canonical pipeline действительно используется
 при вызове ``summarizer_canonical``. Использует monkeypatch для

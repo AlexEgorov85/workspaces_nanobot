@@ -1,7 +1,7 @@
-"""Тесты для split large files (Этап 59 из PLAN.md).
+"""Тесты для split large files.
 
-PLAN §59: ``summarizer.py`` (1773 строк) и ``chunks.py`` (555) — слишком
-большие. Цель — **не переписывать** (PLAN §1), а предоставить
+``summarizer.py`` (1773 строк) и ``chunks.py`` (555) — слишком
+большие. Цель — **не переписывать**, а предоставить
 **новые entry points** через выделенные модули.
 
 Проверяем, что новые entry points существуют и работают:
@@ -46,7 +46,7 @@ def test_build_execution_plan_exists():
     assert callable(build_execution_plan)
 
 def test_new_modules_have_narrow_responsibility():
-    """Каждый новый модуль отвечает за одну вещь (PLAN §60)."""
+    """Каждый новый модуль отвечает за одну вещь."""
     import inspect
     import application.pipeline_structure as pipeline
     import chunking.chunker as document_chunker

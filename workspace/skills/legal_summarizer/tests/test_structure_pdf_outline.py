@@ -1,4 +1,4 @@
-"""Тесты для PDF outline mapping (Этап 11 из PLAN.md).
+"""Тесты для PDF outline mapping.
 
 Тесты используют in-memory mock PdfReader / outline, чтобы не зависеть
 от реальных PDF-файлов и platform-specific pypdf behaviour.

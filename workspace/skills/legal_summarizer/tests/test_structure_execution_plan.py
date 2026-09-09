@@ -1,4 +1,4 @@
-"""Тесты для ExecutionPlan (Этап 21 из PLAN.md)."""
+"""Тесты для ExecutionPlan."""
 
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ def test_execution_plan_includes_hierarchical_strategy():
     assert plan.strategy == "map_hierarchical"
 
 def test_section_ids_preserve_order_across_runs():
-    """PLAN §26: section_ids в PlannedBatch сохраняют order (dict.fromkeys)."""
+    """section_ids в PlannedBatch сохраняют order (dict.fromkeys)."""
     from chunking.chunks import Chunk
     from planning.plan import (
         build_direct_plan,
@@ -120,7 +120,7 @@ def test_section_ids_preserve_order_across_runs():
     assert p1.batches[0].section_ids == ("s0", "s1", "s2")
 
 def test_map_plan_section_ids_preserve_order():
-    """PLAN §26: map-plan section_ids С‚РѕР¶Рµ СЃРѕС…СЂР°РЅСЏСЋС‚ order."""
+    """map-plan section_ids С‚РѕР¶Рµ СЃРѕС…СЂР°РЅСЏСЋС‚ order."""
     from chunking.chunks import Chunk
     from planning.plan import (
         build_map_plan,

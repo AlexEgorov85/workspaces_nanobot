@@ -1,6 +1,6 @@
-"""Integration test для Этапа 10: realistic НК РФ → pipeline.
+"""Integration test: realistic НК РФ → pipeline.
 
-Подробный план — Этап 10: regression на реальный сценарий.
+Подробный план:  regression на реальный сценарий.
 
 Контракт:
 

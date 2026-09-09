@@ -1,4 +1,4 @@
-"""Тесты для importance score (Этап 66 из PLAN.md)."""
+"""Тесты для importance score."""
 
 from __future__ import annotations
 

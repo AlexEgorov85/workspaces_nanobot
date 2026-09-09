@@ -1,4 +1,4 @@
-"""Тесты для retrieval cascade (Этапы 33–35 из PLAN.md)."""
+"""Тесты для retrieval cascade."""
 
 from __future__ import annotations
 

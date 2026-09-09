@@ -1,4 +1,4 @@
-"""Тесты для title resolution (Этап 14 из PLAN.md)."""
+"""Тесты для title resolution."""
 
 from __future__ import annotations
 

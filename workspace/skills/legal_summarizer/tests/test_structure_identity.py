@@ -1,4 +1,4 @@
-"""Тесты для DocumentIdentity (Этап 5 из PLAN.md)."""
+"""Тесты для DocumentIdentity."""
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ def test_identity_is_frozen():
         ident.size_bytes = 999  # type: ignore[misc]
 
 def test_identity_fingerprint_equals_physical_cache_key(tmp_path: Path):
-    """PLAN §11 acceptance: identity.fingerprint == physical/cache fingerprint."""
+    """acceptance: identity.fingerprint == physical/cache fingerprint."""
     from document.loader import (
         DocumentLoader,
     )
@@ -84,7 +84,7 @@ def test_identity_fingerprint_equals_physical_cache_key(tmp_path: Path):
     assert doc.size_bytes == ident.size_bytes
 
 def test_identity_uses_mtime_ns_not_mtime(tmp_path: Path):
-    """PLAN §11: единый canonical алгоритм — mtime_ns (наносекунды).
+    """единый canonical алгоритм — mtime_ns (наносекунды).
 
     Раньше physical.py использовал st_mtime (секунды). Теперь —
     DocumentIdentity.from_path с mtime_ns. Это устраняет два

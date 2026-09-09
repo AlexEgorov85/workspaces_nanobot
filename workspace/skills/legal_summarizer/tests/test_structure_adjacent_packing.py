@@ -1,4 +1,4 @@
-"""Тесты для adjacent-section packing (Этап 22 из PLAN.md)."""
+"""Тесты для adjacent-section packing."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def _table_c(cid: str, section: str) -> Chunk:
     )
 
 def test_table_not_mixed_with_non_table():
-    """PLAN §9 Rule 1: table + non-table → отдельные batches."""
+    """Rule 1: table + non-table → отдельные batches."""
     chunks = (
         _c("000", "s1"),
         _table_c("001", "s1"),
@@ -82,7 +82,7 @@ def test_table_not_mixed_with_non_table():
     assert batches == [("000",), ("001",), ("002",)]
 
 def test_table_table_separate_by_default():
-    """PLAN §9 Rule 2: table + table → отдельные (allow_table_table_batch=False)."""
+    """Rule 2: table + table → отдельные (allow_table_table_batch=False)."""
     chunks = (
         _table_c("000", "s1"),
         _table_c("001", "s1"),
@@ -92,7 +92,7 @@ def test_table_table_separate_by_default():
     assert batches == [("000",), ("001",)]
 
 def test_table_table_combined_when_allowed():
-    """PLAN §9 Rule 2: table + table → один batch если allow_table_table_batch=True."""
+    """Rule 2: table + table → один batch если allow_table_table_batch=True."""
     chunks = (
         _table_c("000", "s1"),
         _table_c("001", "s1"),
@@ -102,7 +102,7 @@ def test_table_table_combined_when_allowed():
     assert batches == [("000", "001")]
 
 def test_two_sections_in_batch():
-    """PLAN §9 Rule 3: 2 sections allowed (max=2)."""
+    """Rule 3: 2 sections allowed (max=2)."""
     chunks = (
         _c("000", "s1"),
         _c("001", "s2"),
@@ -112,7 +112,7 @@ def test_two_sections_in_batch():
     assert batches == [("000", "001")]
 
 def test_three_sections_split():
-    """PLAN §9 Rule 3: 3 sections → split (max=2)."""
+    """Rule 3: 3 sections → split (max=2)."""
     chunks = (
         _c("000", "s1"),
         _c("001", "s2"),
@@ -123,7 +123,7 @@ def test_three_sections_split():
     assert batches == [("000", "001"), ("002",)]
 
 def test_document_order_preserved():
-    """PLAN §9 Rule 4: document order сохраняется."""
+    """Rule 4: document order сохраняется."""
     chunks = tuple(_c(f"{i:03d}", "s1" if i < 5 else "s2") for i in range(10))
     cfg = AdjacentPackingConfig(max_sections_per_batch=3, per_batch_token_budget=10000)
     batches = pack_chunks_with_adjacent(chunks, config=cfg)
@@ -131,7 +131,7 @@ def test_document_order_preserved():
     assert flat == [f"{i:03d}" for i in range(10)]
 
 def test_budget_exceeded_splits():
-    """PLAN §9 Rule 6: budget exceeded → split."""
+    """Rule 6: budget exceeded → split."""
     chunks = tuple(_c(f"{i:03d}", "s1", text="x" * 3500) for i in range(5))
     cfg = AdjacentPackingConfig(per_batch_token_budget=1000)
     batches = pack_chunks_with_adjacent(chunks, config=cfg)
@@ -140,7 +140,7 @@ def test_budget_exceeded_splits():
     assert flat == [f"{i:03d}" for i in range(5)]
 
 def test_deterministic_order_with_set_iteration():
-    """PLAN §9: section_ids order не зависит от dict insertion order."""
+    """section_ids order не зависит от dict insertion order."""
     chunks = (
         _c("000", "s1"),
         _c("001", "s2"),

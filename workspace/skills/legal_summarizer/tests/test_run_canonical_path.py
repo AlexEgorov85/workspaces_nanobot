@@ -1,4 +1,4 @@
-"""Canonical run() path test (PLAN §13c, §32).
+"""Canonical run() path test.
 
 Проверяет, что ``summarizer.run`` использует единственный canonical
 путь: inspect → ``select_strategy`` → ``_run_direct`` / ``_run_map_reduce``

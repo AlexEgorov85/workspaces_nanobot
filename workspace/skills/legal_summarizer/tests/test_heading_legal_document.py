@@ -1,11 +1,11 @@
 """Regression для heading classifier: голые нумерованные пункты
 НЕ ДОЛЖНЫ становиться sections.
 
-Подробный план — Этап 1 bug-fix. Тест должен ПАДАТЬ на текущем коде,
+Подробный план — bug-fix. Тест должен ПАДАТЬ на текущем коде,
 в котором ``_RE_NUMBERED_LEVEL_1`` слишком щедро классифицирует
 любую строку вида ``1. Текст`` как heading.
 
-После фикса в heading.py (Этап 2) этот тест должен проходить:
+После фикса в heading.py этот тест должен проходить:
 раздел "1. Первый пункт" уже не считается section heading'ом.
 """
 
@@ -124,7 +124,7 @@ def test_legal_article_marker_accepted_as_heading():
 def test_bare_numbered_points_rejected_as_headings():
     """Голые ``1. ... 2. ... 3. ...`` НЕ должны становиться headings.
 
-    Это регрессия для Этапа 1: каждая статья-НК-РФ превращает
+    Это регрессия: каждая статья-НК-РФ превращает
     пункты в sections → 199 chunks на 1.5M chars.
     """
     blocks = _build_legal_style_doc()
@@ -166,7 +166,7 @@ def test_sections_much_less_than_body_blocks():
 
 
 def test_pdf_outline_at_default_path(tmp_path, monkeypatch):
-    """Этап 7.4 плана: убедиться, что PDF outline не превращает каждый
+    """убедиться, что PDF outline не превращает каждый
     outline entry автоматически в section.
 
     Сценарий: PDF содержит 100 outline entries (Структура PDF генерится
@@ -177,7 +177,7 @@ def test_pdf_outline_at_default_path(tmp_path, monkeypatch):
 
     Это document-level smoke test: подсчёт количества outline entries
     диагностически — если их слишком много (>200 на документ),
-    система должна рассматривать это как suspicious (см. Этап 6).
+    система должна рассматривать это как suspicious (см. PLAN.md).
     Тест проверяет, что сам pipeline count of sections не превышает
     разумного числа при ручном управлении outline.
     """
@@ -202,6 +202,6 @@ def test_pdf_outline_at_default_path(tmp_path, monkeypatch):
     assert len(accepted) == 50, (
         f"Все 50 outline entries проходят (score=0.95 > threshold=0.60). "
         f"Это документирует текущее поведение и должно быть исправлено "
-        f"через дополнительные проверки density (Этап 6). Тест НЕ падает "
+        f"через дополнительные проверки density. Тест НЕ падает "
         f"на текущем коде — это document-level smoke."
     )

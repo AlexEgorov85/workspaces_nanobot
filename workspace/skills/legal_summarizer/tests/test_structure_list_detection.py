@@ -1,4 +1,4 @@
-"""Тесты для list-detection (Этап 10 из PLAN.md)."""
+"""Тесты для list-detection."""
 
 from __future__ import annotations
 

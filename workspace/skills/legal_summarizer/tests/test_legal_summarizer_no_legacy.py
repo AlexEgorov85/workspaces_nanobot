@@ -41,7 +41,7 @@ _LEGACY_SYMBOLS = frozenset({
     "structure_from_section_tree",
 })
 
-# Файлы, которые были удалены (Этап 8/18).
+# Файлы, которые были удалены.
 _LEGACY_FILES = frozenset({
     "workspace/skills/legal_summarizer/scripts/structure/cleanup.py",
     "workspace/skills/legal_summarizer/scripts/_legacy_run_map_reduce.py",
@@ -129,17 +129,17 @@ def test_legacy_audit_assert_no_legacy():
     assert_no_legacy()
 
 def test_compatibility_adapter_removed():
-    """compatibility.py полностью удалён (Этап 20)."""
+    """compatibility.py полностью удалён."""
     try:
         from workspace.skills.legal_summarizer.scripts.structure import (
             compatibility,
         )
     except ImportError:
         return
-    raise AssertionError("compatibility.py should be removed (Этап 20)")
+    raise AssertionError("compatibility.py should be removed")
 
 def test_legacy_reducer_strategy_removed():
-    """Legacy ``reducer_strategy`` удалён (Этап 49 — финальный cleanup)."""
+    """Legacy ``reducer_strategy`` удалён (финальный cleanup)."""
     try:
         from workspace.skills.legal_summarizer.scripts import (
             reducer_strategy,
@@ -147,11 +147,11 @@ def test_legacy_reducer_strategy_removed():
     except ImportError:
         return
     raise AssertionError(
-        "reducer_strategy should be removed (Этап 49 — финальный cleanup)"
+        "reducer_strategy should be removed (финальный cleanup)"
     )
 
 def test_forbidden_files_not_present():
-    """Этап 8/18: ``_FORBIDDEN_FILES`` не должны существовать на диске."""
+    """``_FORBIDDEN_FILES`` не должны существовать на диске."""
     from pathlib import Path
 
     project_root = Path(__file__).resolve().parents[3]

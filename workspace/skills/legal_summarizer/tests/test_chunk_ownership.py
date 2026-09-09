@@ -1,4 +1,4 @@
-"""Chunk ownership regression (Этап 36).
+"""Chunk ownership regression.
 
 Проверяет, что build_block_ownership даёт:
 * 0 или 1 owner на block (никогда 2+);
@@ -118,7 +118,7 @@ def test_owner_for_block_returns_deepest_section():
     assert owner_for_block(struct, 2, ownership) == article.node_id
 
 def test_owner_for_block_returns_root_for_uncovered_block():
-    """Block вне section ranges → root_id (PLAN §6 acceptance)."""
+    """Block вне section ranges → root_id (acceptance)."""
     from chunking.chunker import (
         owner_for_block,
     )
@@ -171,7 +171,7 @@ def test_owner_for_block_lazy_builds_ownership():
     assert owner_for_block(struct, 5) is not None
 
 def test_block_ownership_zero_or_one_owner_per_block():
-    """PLAN §6 acceptance: каждый block имеет 0 или 1 owner."""
+    """acceptance: каждый block имеет 0 или 1 owner."""
     cs = [
         _hc(0, "Глава 1", source="regex_glзава"),
         _hc(1, "Статья 1", source="regex_statiya"),

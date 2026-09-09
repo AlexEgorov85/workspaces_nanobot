@@ -1,4 +1,4 @@
-"""Тесты для context expansion (PLAN §10)."""
+"""Тесты для context expansion."""
 
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ def test_expand_context_target_not_found():
     assert result.neighbour_chunks == ()
 
 def test_expand_context_neighbours_by_target_index_not_section_prefix():
-    """PLAN §10 acceptance: для A B C D E, target=C → neighbours = B, D.
+    """acceptance: для A B C D E, target=C → neighbours = B, D.
 
     НЕ A, B (первые N из секции), а строго ±k от target.
     """
@@ -152,7 +152,7 @@ def test_expand_context_target_at_right_edge():
     assert nids == ["3"]
 
 def test_expand_context_skip_other_section():
-    """PLAN §10: subsection restriction — neighbours из другой секции
+    """subsection restriction — neighbours из другой секции
     не используются.
     """
     chunks = (
@@ -170,7 +170,7 @@ def test_expand_context_skip_other_section():
     assert "3" in nids or len(nids) < 2
 
 def test_expand_context_total_tokens_equals_sum():
-    """PLAN §10: total_tokens = tokens(target) + sum(tokens(neighbours))."""
+    """total_tokens = tokens(target) + sum(tokens(neighbours))."""
     chunks = tuple(
         _c(f"{i}", "n_0001", text=f"x" * 100, idx=i) for i in range(5)
     )
@@ -184,7 +184,7 @@ def test_expand_context_total_tokens_equals_sum():
     assert result.total_tokens == expected
 
 def test_expand_context_max_neighbour_blocks_respected():
-    """PLAN §10: max_neighbour_blocks ограничивает количество."""
+    """max_neighbour_blocks ограничивает количество."""
     chunks = tuple(
         _c(f"{i}", "n_0001", text="x", idx=i) for i in range(10)
     )

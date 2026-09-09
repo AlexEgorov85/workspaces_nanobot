@@ -1,4 +1,4 @@
-"""Тесты для TokenEstimator (Этап 20 из PLAN.md)."""
+"""Тесты для TokenEstimator."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
-"""Тесты для LLM-as-semantic-only invariant (Этапы 61-62).
+"""Тесты для LLM-as-semantic-only invariant.
 
-PLAN §61-62:
+
 
 * LLM не используется для structure extraction (heading, numbering, list, page).
 * LLM используется для semantic summary, fact extraction, answer synthesis.

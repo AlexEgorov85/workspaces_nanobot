@@ -1,4 +1,4 @@
-"""Тесты для safety merge (Этап 17 из PLAN.md)."""
+"""Тесты для safety merge."""
 
 from __future__ import annotations
 

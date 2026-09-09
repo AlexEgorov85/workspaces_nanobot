@@ -1,0 +1,72 @@
+"""Acceptance tests: стабильный operation_id."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_SKILL_ROOT = Path(__file__).resolve().parents[1]
+_SCRIPTS_DIR = _SKILL_ROOT / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+def test_same_inputs_same_operation_id():
+    """Два вызова с одинаковыми аргументами → одинаковый operation_id."""
+    from application.service import make_operation_id
+
+    a = make_operation_id("hello world", "detailed")
+    b = make_operation_id("hello world", "detailed")
+    assert a == b
+
+def test_different_inputs_different_operation_id():
+    """Разный length → разный operation_id."""
+    from application.service import make_operation_id
+
+    a = make_operation_id("hello world", "detailed")
+    b = make_operation_id("hello world", "brief")
+    assert a != b
+
+def test_different_question_different_operation_id():
+    """Разный question → разный operation_id."""
+    from application.service import make_operation_id
+
+    a = make_operation_id("hello world", "detailed", question=None)
+    b = make_operation_id("hello world", "detailed", question="Что?")
+    assert a != b
+
+def test_different_document_path_different_operation_id():
+    """Разный document_path → разный operation_id."""
+    from application.service import make_operation_id
+
+    a = make_operation_id("hello world", "detailed", document_path="a.txt")
+    b = make_operation_id("hello world", "detailed", document_path="b.txt")
+    assert a != b
+
+def test_no_monotonic_in_id():
+    """operation_id не содержит временной компонент."""
+    from application.service import make_operation_id
+
+    a = make_operation_id("hello world", "detailed")
+    # Старый формат был ``op_<ts_ns>_<hash>_<length>`` → содержал длинный
+    # числовой ts. Новый формат — короткий стабильный hash.
+    parts = a.split("_")
+    assert len(parts) >= 3
+    # Ни одна часть не должна выглядеть как большое ns-timestamp.
+    for part in parts:
+        assert len(part) < 30, (
+            f"unexpected long timestamp component: {a}"
+        )
+
+def test_same_prefix_different_tail_different_operation_id():
+    """Изменение хвоста (>64 КБ префиксов) меняет operation_id.
+
+    Раньше хешировался префикс ``text[:64 * 1024]`` — правка последней
+    статьи не меняла id, и idempotency-кэш мог вернуть устаревший
+    результат. Теперь хешируется полный текст.
+    """
+    from application.service import make_operation_id
+
+    base = ("Текст договора. " * 200) * 70  # ~490 КБ — далеко за 64 КБ
+    a = make_operation_id(base + "Итог: вариант А.", "detailed")
+    b = make_operation_id(base + "Итог: вариант Б.", "detailed")
+    assert a != b

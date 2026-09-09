@@ -1,4 +1,4 @@
-"""Тесты для single-flight (Этап 54 из PLAN.md)."""
+"""Тесты для single-flight."""
 
 from __future__ import annotations
 

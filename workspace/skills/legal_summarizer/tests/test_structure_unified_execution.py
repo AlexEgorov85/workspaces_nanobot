@@ -1,4 +1,4 @@
-"""Тесты для unified execution strategy (Этап 23 из PLAN.md)."""
+"""Тесты для unified execution strategy."""
 
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ def test_build_execution_plan_map():
         numbering=(), total_blocks=5,
     )
     chunks = tuple(_chunk(f"{i:03d}", "x" * 1000) for i in range(50))
-    # Этап 16: controlled policy → детерминированная ожидаемая стратегия.
+    # controlled policy → детерминированная ожидаемая стратегия.
     # 1 meaningful section < hierarchical_section_threshold (3), total
     # tokens > direct_threshold → map_flat.
     plan = build_execution_plan(s, chunks, document_id="d")

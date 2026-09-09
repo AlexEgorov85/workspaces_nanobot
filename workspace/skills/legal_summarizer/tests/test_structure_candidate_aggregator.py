@@ -1,4 +1,4 @@
-"""Тесты для candidate aggregator (Этап 9 из PLAN.md)."""
+"""Тесты для candidate aggregator."""
 
 from __future__ import annotations
 

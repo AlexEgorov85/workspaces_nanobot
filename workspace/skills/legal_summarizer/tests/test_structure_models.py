@@ -1,4 +1,4 @@
-"""Тесты для DocumentStructure контракта (Этап 2 из PLAN.md)."""
+"""Тесты для DocumentStructure контракта."""
 
 from __future__ import annotations
 

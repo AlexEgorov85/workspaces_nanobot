@@ -1,4 +1,4 @@
-"""Execution-path test (Этап 30).
+"""Execution-path test.
 
 Проверяет, что ExecutionPlan выбирает стратегию на основе
 одного источника решения — ``select_strategy``.

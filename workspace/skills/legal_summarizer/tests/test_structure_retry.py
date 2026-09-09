@@ -1,4 +1,4 @@
-"""Тесты для smart retry (Этап 30 из PLAN.md)."""
+"""Тесты для smart retry."""
 
 from __future__ import annotations
 

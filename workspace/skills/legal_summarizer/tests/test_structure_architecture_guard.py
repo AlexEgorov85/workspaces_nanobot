@@ -1,4 +1,4 @@
-"""Тесты для premature abstraction guard (Этап 60 из PLAN.md)."""
+"""Тесты для premature abstraction guard."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def test_no_oversized_classes_in_new_modules():
         assert has_oversized_class(module, max_lines=500) is False
 
 def test_factory_check_specific_names():
-    """Проверяем имена из PLAN §60."""
+    """Проверяем имена."""
     forbidden = [
         "BaseStructureFactory",
         "AbstractHeadingStrategyFactory",

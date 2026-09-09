@@ -1,6 +1,6 @@
-"""Тесты для structure-aware retrieval (Этап 65 из PLAN.md).
+"""Тесты для structure-aware retrieval.
 
-PLAN §65: при ranking учитывать:
+при ranking учитывать:
 
 * heading text (section_title_weight);
 * section title;

@@ -1,6 +1,6 @@
-"""Тесты для документов только с tables (Этап 72 из PLAN.md).
+"""Тесты для документов только с tables.
 
-PLAN §72: документ только с таблицами — valid structure.
+документ только с таблицами — valid structure.
 ``DocumentStructure`` должен правильно обработать: корень + table nodes,
 без section nodes.
 """

@@ -1,4 +1,4 @@
-"""Тесты для HierarchicalReducer (Этап 24 из PLAN.md)."""
+"""Тесты для HierarchicalReducer."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ def test_reduce_sections_to_document_truncates_long_input():
     assert result.truncated is True
 
 def test_reduce_sections_to_document_respects_max_rounds():
-    """Этап 9: max_rounds ограничивает основной цикл, но финальный
+    """max_rounds ограничивает основной цикл, но финальный
     reduce выполняется дополнительно чтобы данные не терялись."""
     items = [(f"s{i}", f"sum {i}") for i in range(10)]
     cfg = HierarchicalReducerConfig(group_size=2, max_rounds=2)
@@ -102,7 +102,7 @@ def test_reduce_sections_to_document_respects_max_rounds():
     assert result.final_summary != ""
 
 def test_reduce_chunks_1_section():
-    """PLAN §25: 1 section — single round."""
+    """1 section — single round."""
     from execution.config import (
     HierarchicalReducerConfig,
     )
@@ -125,7 +125,7 @@ def test_reduce_chunks_1_section():
     assert result.rounds_done == 0
 
 def test_reduce_chunks_2_sections():
-    """PLAN §25: 2 sections — single round."""
+    """2 sections — single round."""
     from execution.config import (
     HierarchicalReducerConfig,
     )
@@ -146,7 +146,7 @@ def test_reduce_chunks_2_sections():
     assert len(result.section_summaries) == 2
 
 def test_reduce_chunks_3_sections():
-    """PLAN §25: 3 sections — single round (group_size=3)."""
+    """3 sections — single round (group_size=3)."""
     from execution.config import (
     HierarchicalReducerConfig,
     )
@@ -168,7 +168,7 @@ def test_reduce_chunks_3_sections():
     assert result.rounds_done == 1
 
 def test_reduce_chunks_10_sections():
-    """PLAN §25: 10 sections — multiple rounds."""
+    """10 sections — multiple rounds."""
     from execution.config import (
     HierarchicalReducerConfig,
     )
@@ -190,7 +190,7 @@ def test_reduce_chunks_10_sections():
     assert result.rounds_done >= 2
 
 def test_reduce_chunks_100_sections_no_data_loss():
-    """PLAN §25 + Этап 9: 100 sections — все секции учтены, ровно один final."""
+    """100 sections — все секции учтены, ровно один final."""
     from execution.config import (
     HierarchicalReducerConfig,
     )
@@ -213,7 +213,7 @@ def test_reduce_chunks_100_sections_no_data_loss():
     assert len(result.section_summaries) == n
     # Финальный summary не пустой.
     assert result.final_summary != ""
-    # Этап 9: данные не теряются — ``final_summary`` содержит материалы
+    # данные не теряются — ``final_summary`` содержит материалы
     # всех 100 секций (хотя бы частично) и не выбрасывает молча.
     # Проверяем, что финальный reduce сделал хотя бы один доп. round.
     assert result.rounds_done >= cfg.max_rounds, (
@@ -221,7 +221,7 @@ def test_reduce_chunks_100_sections_no_data_loss():
     )
 
 def test_reduce_sections_continues_until_one_item():
-    """PLAN §25: max_rounds РѕРіСЂР°РЅРёС‡РёРІР°РµС‚, РЅРѕ РЅРµ С‚РµСЂСЏРµС‚ РґР°РЅРЅС‹Рµ.
+    """max_rounds РѕРіСЂР°РЅРёС‡РёРІР°РµС‚, РЅРѕ РЅРµ С‚РµСЂСЏРµС‚ РґР°РЅРЅС‹Рµ.
 
     Если после max_rounds остались > 1 элементов,
     reducer должает итерации до одного элемента.

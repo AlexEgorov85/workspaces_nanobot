@@ -1,4 +1,4 @@
-"""Тесты для StructureTreeBuilder (Этап 12 из PLAN.md)."""
+"""Тесты для StructureTreeBuilder."""
 
 from __future__ import annotations
 

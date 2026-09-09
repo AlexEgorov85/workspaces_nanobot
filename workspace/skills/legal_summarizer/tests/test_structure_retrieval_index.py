@@ -1,4 +1,4 @@
-"""Тесты для RetrievalIndex (Этап 36 из PLAN.md)."""
+"""Тесты для RetrievalIndex."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Тесты для DocumentLoader (PLAN §12).
+"""Тесты для DocumentLoader.
 
 Acceptance: same physical source не парсится дважды.
 
@@ -48,7 +48,7 @@ def test_loader_loads_txt(tmp_path: Path):
     assert doc.blocks[0].content == "plain text content"
 
 def test_loader_uses_document_identity(tmp_path: Path):
-    """PLAN §12 + §11: DocumentLoader использует DocumentIdentity."""
+    """DocumentLoader использует DocumentIdentity."""
     p = tmp_path / "doc.txt"
     _write_txt(p)
     identity = DocumentIdentity.from_path(p)
@@ -58,7 +58,7 @@ def test_loader_uses_document_identity(tmp_path: Path):
     assert doc.size_bytes == identity.size_bytes
 
 def test_loader_loads_pdf_calls_pypdf_at_most_twice(tmp_path: Path):
-    """PLAN §12 acceptance: PdfReader создаётся минимизированно.
+    """acceptance: PdfReader создаётся минимизированно.
 
     ``_iter_pdf_blocks`` открывает PdfReader один раз. Title resolution
     через ``_pick_title_from_text`` для PDF открывает второй раз (для
@@ -83,7 +83,7 @@ def test_loader_loads_pdf_calls_pypdf_at_most_twice(tmp_path: Path):
         )
 
 def test_loader_loads_docx_calls_document_once(tmp_path: Path):
-    """PLAN §12 acceptance: docx.Document создаётся один раз для blocks."""
+    """acceptance: docx.Document создаётся один раз для blocks."""
     p = tmp_path / "doc.docx"
     _write_docx(p)
     loader = DocumentLoader()

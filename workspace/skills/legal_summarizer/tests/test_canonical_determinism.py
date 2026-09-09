@@ -1,4 +1,4 @@
-"""Determinism suite (Этап 33).
+"""Determinism suite.
 
 Проверяет, что canonical pipeline детерминирован:
 * DocumentStructure identical между запусками;

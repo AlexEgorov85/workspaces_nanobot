@@ -1,4 +1,4 @@
-"""Тесты для first-run/follow-up split (Этап 40 из PLAN.md)."""
+"""Тесты для first-run/follow-up split."""
 
 from __future__ import annotations
 
@@ -120,7 +120,7 @@ def test_followup_question_low_confidence_expands():
     assert result.confidence in ("low", "medium", "high")
 
 def test_followup_uses_cached_analysis_no_reparse():
-    """PLAN §41: follow-up не должен перепарсивать документ."""
+    """follow-up не должен перепарсивать документ."""
     analysis = _build_analysis(["x" * 100])
     analysis_id_before = analysis.identity.document_id
     _ = build_followup_response(analysis, query="x", mode="question")

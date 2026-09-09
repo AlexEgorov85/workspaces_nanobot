@@ -1,7 +1,7 @@
-"""Smoke-тест для Этапа 8: pipeline не даёт пустой reduce input.
+"""Smoke-тест: pipeline не даёт пустой reduce input.
 
-Подробный план — Этап 8: после исправления heading classification
-(Этапы 2-3) reduce input не должен быть пустым, потому что каждый
+Подробный план:  после исправления heading classification
+reduce input не должен быть пустым, потому что каждый
 chunk содержит реальный текст body под своей section-веткой.
 
 Контракт:

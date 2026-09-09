@@ -1,10 +1,10 @@
-"""Algorithm tests для STRUCTURAL_PACKING_PLAN §5.2.
+"""Algorithm tests.
 
 11 unit-тестов, которые проверяют поведение нового алгоритма packing.
 Большинство из них FAIL на текущем owner-boundary chunker'е — это
-ожидаемо до рефакторинга (Этап 5).
+ожидаемо до рефакторинга.
 
-После Этапа 5 все тесты должны проходить.
+После этого все тесты должны проходить.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Тесты для block lookup (Этап 44 из PLAN.md)."""
+"""Тесты для block lookup."""
 
 from __future__ import annotations
 

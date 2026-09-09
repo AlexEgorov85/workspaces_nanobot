@@ -1,4 +1,4 @@
-"""Тесты для structure validation (Этап 16 из PLAN.md)."""
+"""Тесты для structure validation."""
 
 from __future__ import annotations
 

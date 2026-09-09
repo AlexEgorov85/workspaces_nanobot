@@ -1,4 +1,4 @@
-"""Тесты для query normalizer (Этап 34 из PLAN.md).
+"""Тесты для query normalizer.
 
 Кириллические строки читаются из файла ``cyrillic_literals.py`` —
 для обхода проблем cp1251/cp866 в Windows PowerShell.

@@ -1,4 +1,4 @@
-"""Тесты для quality metrics (Этап 53 из PLAN.md)."""
+"""Тесты для quality metrics."""
 
 from __future__ import annotations
 

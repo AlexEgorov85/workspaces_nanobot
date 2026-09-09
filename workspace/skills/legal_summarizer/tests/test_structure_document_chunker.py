@@ -1,4 +1,4 @@
-"""Тесты для document_structure chunker (Этап 18 из PLAN.md)."""
+"""Тесты для document_structure chunker."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def test_chunk_from_structure_empty():
     assert chunks == []
 
 def test_chunk_from_structure_single_section():
-    """PLAN §7: последовательные blocks с одним owner группируются в chunk.
+    """последовательные blocks с одним owner группируются в chunk.
 
     blocks (0, "first body"), (1, "second body") оба принадлежат n_0001
     и оба < max_chunk_chars → один chunk с block_indices=(0, 1).
@@ -109,7 +109,7 @@ def test_chunk_from_structure_split_oversize_block():
     assert all(c.section_id == "n_0001" for c in chunks)
 
 def test_chunk_from_structure_section_order():
-    """PLAN §7: chunks в physical document order.
+    """chunks в physical document order.
 
     После рефакторинга (STRUCTURAL_PACKING_PLAN) блоки с разными owners
     могут объединяться в один chunk, если они влезают в max_chunk_chars.
@@ -157,7 +157,7 @@ def test_chunk_planner_class():
     assert chunks[0].text == "hello"
 
 def test_chunks_in_physical_document_order():
-    """PLAN §7: chunks строго в document order по block.ordinal.
+    """chunks строго в document order по block.ordinal.
 
     blocks:
       0 → Chapter

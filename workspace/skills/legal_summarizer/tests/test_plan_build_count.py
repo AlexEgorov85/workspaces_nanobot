@@ -1,0 +1,165 @@
+"""``build_execution_plan`` вызывается правильное число раз за ``run()``.
+
+Архитектурная картина:
+- ``ExecutionContext.plan`` — canonical (run-level) snapshot, строится
+  в ``_build_execution_context()`` и используется execution.
+
+Legacy ``Inspection.execution_plan`` удалён — план строится один раз
+(только в ``_build_execution_context``).
+
+Инварианты:
+- direct-run (1 chunk или нет structure): ``build_execution_plan == 0``.
+- map-run: ``build_execution_plan == 1`` (только в
+  _build_execution_context() для ExecutionContext.plan).
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_SKILL_ROOT = Path(__file__).resolve().parents[1]
+_SCRIPTS_DIR = _SKILL_ROOT / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+def _write_doc(tmp_path: Path, text: str) -> Path:
+    p = tmp_path / "doc.txt"
+    p.write_text(text, encoding="utf-8")
+    return p
+
+def _install_llm_mocks(monkeypatch):
+    import llm.calls as llm_calls
+
+    def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
+        return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
+
+    def _fake_section(path, heading, text, *, length, question=None):
+        return "section summary"
+
+    def _fake_doc(text, *, length, focus, structure, question=None):
+        return "doc summary"
+
+    monkeypatch.setattr(llm_calls, "llm_batch", _fake_batch)
+    monkeypatch.setattr(llm_calls, "llm_section_reduce", _fake_section)
+    monkeypatch.setattr(llm_calls, "llm_document_reduce", _fake_doc)
+
+    import application.service as _summarizer
+
+    import execution.pipeline as _pipeline_mod
+
+def _build_doc(sections: int = 6) -> str:
+    parts = []
+    for i in range(1, sections + 1):
+        parts.append(
+            f"{i}. Раздел {i}\n\n"
+            + ("Текст. " * 50) * 200
+            + "\n\n"
+        )
+    return "".join(parts)
+
+def test_plan_built_for_map_run(tmp_path, monkeypatch):
+    """Для map-run: build_execution_plan вызывается один раз (для ctx.plan).
+
+    Legacy ``Inspection.execution_plan`` удалён, поэтому план строится
+    только в ``_build_execution_context()`` — execution использует
+    canonical ``ctx.plan``.
+    """
+    import application.service as summarizer
+    import planning.strategy as unified_execution
+
+    calls = {"n": 0}
+    original = unified_execution.build_execution_plan
+
+    def _spy(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(unified_execution, "build_execution_plan", _spy)
+    monkeypatch.setattr(summarizer, "build_execution_plan", _spy)
+
+    _install_llm_mocks(monkeypatch)
+    text = _build_doc(sections=6)
+    p = _write_doc(tmp_path, text)
+
+    result = summarizer.run(
+        text, length="detailed",
+        document_path=str(p), workspace_root=tmp_path,
+        confirmed=True,
+    )
+    assert result["status"] == "completed", result
+    # 1 для ExecutionContext.plan (canonical) в _build_execution_context().
+    assert calls["n"] == 1, (
+        f"expected 1 build_execution_plan call (ctx only) for map, "
+        f"got {calls['n']}"
+    )
+
+def test_plan_not_built_for_direct_run(tmp_path, monkeypatch):
+    """Для direct-run: build_execution_plan == 0 (direct path в ctx)."""
+    import application.service as summarizer
+    import planning.strategy as unified_execution
+
+    calls = {"n": 0}
+    original = unified_execution.build_execution_plan
+
+    def _spy(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(unified_execution, "build_execution_plan", _spy)
+    monkeypatch.setattr(summarizer, "build_execution_plan", _spy)
+
+    _install_llm_mocks(monkeypatch)
+    small_text = "Только один абзац текста, без секций."
+    p = _write_doc(tmp_path, small_text)
+
+    result = summarizer.run(
+        small_text,
+        document_path=str(p), workspace_root=tmp_path,
+        confirmed=True,
+    )
+    assert result["status"] == "completed", result
+    assert calls["n"] == 0, (
+        f"expected 0 build_execution_plan calls for direct, got {calls['n']}"
+    )
+
+def test_execution_uses_ctx_plan_not_insp_plan(tmp_path, monkeypatch):
+    """Execution path получает ctx.plan, не insp.execution_plan.
+
+    Spy на _run_map_reduce — он должен получать ctx.plan как plan=...
+    """
+    import application.service as summarizer
+    captured = {}
+
+    def _wrap_map_reduce(chunks, *, plan, strategy, **_kwargs):
+        captured["plan"] = plan
+        captured["strategy"] = strategy
+        # Возвращаем фейковый результат без реального execution.
+        return {
+            "status": "completed",
+            "summary": "fake",
+            "manifest": {
+                "strategy": strategy,
+                "chunks_selected": len(chunks),
+                "actual_llm_calls": 1,
+                "context_batches_total": len(plan.batches) if plan else 1,
+            },
+        }
+
+    monkeypatch.setattr(summarizer, "run_map_reduce", _wrap_map_reduce)
+    _install_llm_mocks(monkeypatch)
+
+    text = _build_doc(sections=6)
+    p = _write_doc(tmp_path, text)
+
+    result = summarizer.run(
+        text, length="detailed",
+        document_path=str(p), workspace_root=tmp_path,
+        confirmed=True,
+    )
+    assert result["status"] == "completed"
+    assert captured["plan"] is not None
+    assert captured["strategy"] in ("map_flat", "map_hierarchical")
+    # plan, который получил _run_map_reduce, должен иметь
+    # тот же document_id, что и ctx.plan (canonical).
+    assert captured["plan"].document_id  # non-empty

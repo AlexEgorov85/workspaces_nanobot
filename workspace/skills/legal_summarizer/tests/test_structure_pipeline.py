@@ -1,4 +1,4 @@
-"""Тесты для canonical pipeline (Этап 45 из PLAN.md)."""
+"""Тесты для canonical pipeline."""
 
 from __future__ import annotations
 

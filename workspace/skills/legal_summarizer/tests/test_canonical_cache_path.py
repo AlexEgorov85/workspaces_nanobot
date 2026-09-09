@@ -1,4 +1,4 @@
-"""Cache-path test для canonical DocumentAnalysis (Этап 29).
+"""Cache-path test для canonical DocumentAnalysis.
 
 Проверяет, что DocumentAnalysis переиспользуется между запросами
 без повторного parsing/structure/chunking.

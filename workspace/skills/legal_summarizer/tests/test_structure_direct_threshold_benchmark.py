@@ -1,4 +1,4 @@
-"""Benchmark DIRECT threshold (PLAN §28, Этап 28).
+"""Benchmark DIRECT threshold.
 
 Сравнивает метрики разных размеров документов для unified execution
 planner'а:
@@ -135,7 +135,7 @@ def test_token_estimator_consistent():
     assert estimator.estimate(text) == estimator.estimate(text)
 
 def test_execution_plan_budget_constant_for_repeated_plans():
-    """Один и тот же документ → один план (PLAN §75 deterministic)."""
+    """Один и тот же документ → один план (deterministic)."""
     s, chunks = _build_medium_doc()
     p1 = build_execution_plan(s, chunks, document_id="d")
     p2 = build_execution_plan(s, chunks, document_id="d")

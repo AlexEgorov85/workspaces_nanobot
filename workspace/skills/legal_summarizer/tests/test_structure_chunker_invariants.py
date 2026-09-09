@@ -1,4 +1,4 @@
-"""Invariant tests для chunker'а (STRUCTURAL_PACKING_PLAN §1).
+"""Invariant tests для chunker'а (STRUCTURAL_PACKING_).
 
 Тесты для инвариантов I1-I10. Все тесты работают поверх публичного API:
 ``chunk_from_structure(doc, struct, config=...)``.

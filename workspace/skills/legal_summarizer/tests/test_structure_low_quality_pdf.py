@@ -1,6 +1,6 @@
-"""Тесты для PDF с плохим extraction (Этап 73 из PLAN.md).
+"""Тесты для PDF с плохим extraction.
 
-PLAN §73: если extraction плохой — ``structure confidence`` должен
+если extraction плохой — ``structure confidence`` должен
 снижаться. Не нужно придумывать отсутствующую структуру.
 """
 

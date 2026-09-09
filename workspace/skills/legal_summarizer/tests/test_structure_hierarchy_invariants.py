@@ -1,4 +1,4 @@
-"""Invariant-тесты для DocumentStructure hierarchy (PLAN §3).
+"""Invariant-тесты для DocumentStructure hierarchy.
 
 Формальные инварианты дерева:
 
@@ -47,7 +47,7 @@ def _hc(block_index: int, text: str, source: str = "regex_numbered_1",
     )
 
 def _nested_three_level_structure() -> DocumentStructure:
-    """root / A / A.1, A.2 / B — явный nested case из PLAN §3.
+    """root / A / A.1, A.2 / B — явный nested case.
 
     Blocks:
       0  → A        (level 1)

@@ -1,4 +1,4 @@
-"""Тесты для DocumentAnalysis (Этап 39 из PLAN.md)."""
+"""Тесты для DocumentAnalysis."""
 
 from __future__ import annotations
 

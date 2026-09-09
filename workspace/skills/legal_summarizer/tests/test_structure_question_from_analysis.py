@@ -1,4 +1,4 @@
-"""Тесты для question from analysis (Этап 64 из PLAN.md)."""
+"""Тесты для question from analysis."""
 
 from __future__ import annotations
 

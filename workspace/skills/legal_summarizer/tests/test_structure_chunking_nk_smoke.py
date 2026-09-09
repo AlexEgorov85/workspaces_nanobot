@@ -1,7 +1,7 @@
 """Smoke-тест для chunking на синтетическом НК РФ.
 
-Подробный план — Этап 7: после исправления heading classification
-(Этапы 2-3) chunking должен давать разумное количество chunks для
+Подробный план:  после исправления heading classification
+chunking должен давать разумное количество chunks для
 юридического документа.
 
 Контракт:
@@ -134,7 +134,7 @@ def test_synth_nk_no_over_fragmentation():
 
 
 def test_synth_nk_section_density_under_sanity_threshold():
-    """Section density < 50% (Этап 6: sanity warning threshold)."""
+    """Section density < 50% (sanity warning threshold)."""
     blocks = _build_synth_nk(num_articles=30)
 
     raw = detect_heading_candidates(blocks, pdf_path=None)

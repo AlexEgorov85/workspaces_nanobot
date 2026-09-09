@@ -1,4 +1,4 @@
-"""Тесты для full-document fallback (Этап 38 из PLAN.md)."""
+"""Тесты для full-document fallback."""
 
 from __future__ import annotations
 
