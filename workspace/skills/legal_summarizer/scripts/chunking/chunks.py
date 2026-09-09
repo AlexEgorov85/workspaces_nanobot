@@ -181,6 +181,94 @@ class Chunk:
             "section_ids": list(self.section_ids),
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Chunk":
+        """Обратная сериализация для ``to_dict``.
+
+        Используется при восстановлении ``DocumentAnalysis`` из
+        document-level cache (``cache.manifest.read_document_snapshot``).
+        Допускает отсутствие опциональных полей (legacy chunks, где
+        ``source_spans``/``section_ids`` ещё не существовали) — для них
+        берутся dataclass defaults.
+        """
+        spans_raw = data.get("source_spans") or []
+        spans: tuple[tuple[int, int, int | None, int | None], ...] = ()
+        if spans_raw and isinstance(spans_raw[0], dict):
+            # Новый формат: list of dicts.
+            spans = tuple(
+                (
+                    int(s["block_ordinal"]),
+                    int(s["char_start"]),
+                    int(s["char_end"]),
+                    1 if s.get("is_target") else 0,
+                )
+                for s in spans_raw
+            )
+        elif spans_raw and isinstance(spans_raw[0], (list, tuple)):
+            # Legacy формат: list of tuples (на случай если кто-то уже
+            # сериализовал старым способом).
+            spans = tuple(
+                (int(s[0]), int(s[1]), int(s[2]), int(s[3]) if len(s) > 3 else 0)
+                for s in spans_raw
+            )
+
+        target_block_indices = data.get("target_block_indices")
+        if target_block_indices is not None:
+            target_block_indices = tuple(int(b) for b in target_block_indices)
+
+        return cls(
+            chunk_id=str(data["chunk_id"]),
+            index=int(data["index"]),
+            text=str(data["text"]),
+            char_count=int(data["char_count"]),
+            token_estimate=int(data["token_estimate"]),
+            page_start=(
+                int(data["page_start"]) if data.get("page_start") is not None else None
+            ),
+            page_end=(
+                int(data["page_end"]) if data.get("page_end") is not None else None
+            ),
+            section_id=str(data.get("section_id", "")),
+            section_path=str(data.get("section_path", "")),
+            section_heading=str(data.get("section_heading", "")),
+            block_indices=tuple(int(b) for b in data.get("block_indices", ())),
+            block_types=tuple(str(t) for t in data.get("block_types", ())),
+            table_id=data.get("table_id"),
+            table_row_start=(
+                int(data["table_row_start"])
+                if data.get("table_row_start") is not None
+                else None
+            ),
+            table_row_end=(
+                int(data["table_row_end"])
+                if data.get("table_row_end") is not None
+                else None
+            ),
+            source_char_start=(
+                int(data["source_char_start"])
+                if data.get("source_char_start") is not None
+                else None
+            ),
+            source_char_end=(
+                int(data["source_char_end"])
+                if data.get("source_char_end") is not None
+                else None
+            ),
+            target_block_indices=target_block_indices,
+            target_source_char_start=(
+                int(data["target_source_char_start"])
+                if data.get("target_source_char_start") is not None
+                else None
+            ),
+            target_source_char_end=(
+                int(data["target_source_char_end"])
+                if data.get("target_source_char_end") is not None
+                else None
+            ),
+            source_spans=spans,
+            section_ids=tuple(str(s) for s in data.get("section_ids", ())),
+        )
+
 
 @dataclass(frozen=True)
 class ChunkConfig:

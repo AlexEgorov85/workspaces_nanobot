@@ -48,6 +48,19 @@ class ValidationIssue:
     def to_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "detail": self.detail, "node_id": self.node_id}
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ValidationIssue":
+        """Обратная сериализация для ``to_dict``."""
+        return cls(
+            kind=str(data.get("kind", "")),
+            detail=str(data.get("detail", "")),
+            node_id=(
+                str(data["node_id"])
+                if data.get("node_id") is not None
+                else None
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class ValidationReport:
@@ -63,6 +76,20 @@ class ValidationReport:
             "coverage_ratio": self.coverage_ratio,
             "is_valid": self.is_valid,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ValidationReport":
+        """Обратная сериализация для ``to_dict``.
+
+        Используется при восстановлении ``PipelineResult.validation``
+        из document-level cache.
+        """
+        issues_raw = data.get("issues") or []
+        return cls(
+            issues=tuple(ValidationIssue.from_dict(i) for i in issues_raw),
+            coverage_ratio=float(data.get("coverage_ratio", 0.0)),
+            is_valid=bool(data.get("is_valid", True)),
+        )
 
 
 def _is_ancestor(

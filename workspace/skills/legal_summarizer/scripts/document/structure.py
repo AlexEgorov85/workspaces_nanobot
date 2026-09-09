@@ -190,6 +190,64 @@ class StructureNode:
             "source_refs": list(self.source_refs),
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "StructureNode":
+        """Обратная сериализация для ``to_dict``.
+
+        Используется при восстановлении ``DocumentStructure`` из
+        document-level cache. Допускает отсутствие опциональных полей
+        (``evidence``, ``source_refs``) — для них берутся dataclass defaults.
+        """
+        number_raw = data.get("number")
+        number: NumberingInfo | None = None
+        if number_raw is not None:
+            components = tuple(number_raw.get("components", ()))
+            number = NumberingInfo(
+                raw=str(number_raw.get("raw", "")),
+                scheme=str(number_raw.get("scheme", "")),
+                components=components,
+                level=int(number_raw.get("level", 0)),
+                ordinal=(
+                    int(number_raw["ordinal"])
+                    if number_raw.get("ordinal") is not None
+                    else None
+                ),
+            )
+
+        evidence_raw = data.get("evidence") or []
+        evidence = tuple(
+            StructureEvidence(
+                source=str(e.get("source", "")),
+                weight=float(e.get("weight", 0.0)),
+                detail=str(e.get("detail", "")),
+            )
+            for e in evidence_raw
+        )
+
+        return cls(
+            node_id=str(data["node_id"]),
+            node_type=str(data["node_type"]),
+            semantic_type=(
+                str(data["semantic_type"])
+                if data.get("semantic_type") is not None
+                else None
+            ),
+            level=int(data["level"]),
+            title=str(data.get("title", "")),
+            number=number,
+            parent_id=(
+                str(data["parent_id"])
+                if data.get("parent_id") is not None
+                else None
+            ),
+            children=tuple(str(c) for c in data.get("children", ())),
+            start_block=int(data["start_block"]),
+            end_block=int(data["end_block"]),
+            confidence=float(data.get("confidence", 1.0)),
+            evidence=evidence,
+            source_refs=tuple(str(s) for s in data.get("source_refs", ())),
+        )
+
 
 @dataclass(frozen=True)
 class DocumentStructure:
@@ -281,6 +339,59 @@ class DocumentStructure:
             "total_blocks": self.total_blocks,
             "coverage_ratio": self.coverage_ratio,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DocumentStructure":
+        """Обратная сериализация для ``to_dict``.
+
+        Используется при восстановлении ``DocumentAnalysis`` из
+        document-level cache. Сохраняет равенство
+        ``nodes.keys() == data["nodes"].keys()`` и ``root_id`` /
+        ``preamble_node_id`` валидность.
+        """
+        title_raw = data.get("title")
+        title_obj: DocumentTitle | None = None
+        if title_raw is not None:
+            title_obj = DocumentTitle(
+                value=str(title_raw.get("value", "")),
+                source=str(title_raw.get("source", "")),
+                confidence=float(title_raw.get("confidence", 0.0)),
+                block_ordinal=(
+                    int(title_raw["block_ordinal"])
+                    if title_raw.get("block_ordinal") is not None
+                    else None
+                ),
+            )
+
+        nodes_raw = data.get("nodes") or {}
+        nodes = {nid: StructureNode.from_dict(n) for nid, n in nodes_raw.items()}
+
+        numbering_raw = data.get("numbering") or []
+        numbering = tuple(
+            NumberingInfo(
+                raw=str(ni.get("raw", "")),
+                scheme=str(ni.get("scheme", "")),
+                components=tuple(ni.get("components", ())),
+                level=int(ni.get("level", 0)),
+                ordinal=(
+                    int(ni["ordinal"])
+                    if ni.get("ordinal") is not None
+                    else None
+                ),
+            )
+            for ni in numbering_raw
+        )
+
+        return cls(
+            document_id=str(data["document_id"]),
+            title=title_obj,
+            nodes=nodes,
+            root_id=str(data["root_id"]),
+            preamble_node_id=str(data["preamble_node_id"]),
+            numbering=numbering,
+            total_blocks=int(data["total_blocks"]),
+            coverage_ratio=float(data.get("coverage_ratio", 0.0)),
+        )
 
 
 # ---------------------------------------------------------------------------
