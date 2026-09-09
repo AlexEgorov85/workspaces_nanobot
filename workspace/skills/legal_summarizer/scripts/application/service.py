@@ -210,9 +210,63 @@ def _try_question_via_document_cache(
         "partial": False,
     }
 
-    # Сохраняем result.json для idempotency.
-    from cache.manifest import write_result
+    # Commit #C2: записываем полноценный NormalizedManifest + result.json
+    # для idempotency. Раньше сохраняли только result.json — следующий
+    # вызов с тем же operation_id не находил manifest и снова делал
+    # LLM call. Теперь manifest со status=completed ловит idempotency-check
+    # в начале следующего вызова service.run().
+    from cache.manifest import NormalizedManifest, save_manifest, write_result
     write_result(operation_id, result, workspace_root=workspace_root)
+
+    manifest = NormalizedManifest(
+        operation_id=operation_id,
+        status="completed",
+        version=2,
+        document_path=str(document_path),
+        structure_title=title,
+        chars_in=len(text or ""),
+        length=length,
+        chunks_total=len(chunks),
+        context_batches_total=1,
+        estimated_llm_calls=None,
+        actual_llm_calls=1,  # один синтезирующий llm_document_reduce
+        sections=(
+            {sid: {"section_id": sid} for sid in (
+                {c.section_id for c in selected if c.section_id}
+            )}
+            if structure is not None else {}
+        ),
+        chunk_states={
+            c.chunk_id: {
+                "status": "completed",
+                "section_id": c.section_id,
+                "section_path": c.section_path,
+                "page_start": c.page_start,
+                "page_end": c.page_end,
+                "result_path": f"chunks/{c.chunk_id}.json",
+            }
+            for c in selected
+        },
+        context_batches={
+            "cb_000": {
+                "chunk_ids": [c.chunk_id for c in selected],
+                "status": "completed",
+            }
+        },
+        section_summaries={},  # question mode — пусто
+        batches_done=["cb_000"],
+        batches_failed=[],
+        last_error=None,
+        started_at=None,
+        completed_at=None,
+        duration_sec=0.0,
+        article_count=0,
+        raw={
+            "strategy": "document_cache_question",
+            "document_id": identity.document_id,
+        },
+    )
+    save_manifest(manifest, workspace_root=workspace_root)
 
     _progress(
         f"#6 ok: synthesized answer from {len(selected)} chunks "
