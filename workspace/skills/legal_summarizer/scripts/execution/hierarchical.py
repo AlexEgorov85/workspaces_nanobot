@@ -69,10 +69,36 @@ def reduce_sections_to_document(
     ``llm_runner is None`` — финальный reduce пропускается и берётся
     детерминированный join.
     """
+    import os
+    import sys
+    import time as _time
+
+    _MR_TRACE = (
+        "--mr-trace" in sys.argv
+        or os.environ.get("LEGAL_SUMMARIZER_MR_TRACE") == "1"
+    )
+
+    def _mr_trace(stage: str, **fields) -> None:
+        if not _MR_TRACE:
+            return
+        parts = [f"{k}={v}" for k, v in fields.items()]
+        sys.stderr.write(
+            f"[mr-trace {_time.monotonic():.2f}s] {stage} "
+            + " ".join(parts) + "\n"
+        )
+        sys.stderr.flush()
+
     cfg = config or HierarchicalReducerConfig()
     rounds = 0
     current = list(section_summaries)
     truncated = False
+
+    _mr_trace(
+        "sections_reduce_start",
+        input_count=len(current),
+        max_rounds=cfg.max_rounds,
+        group_size=cfg.group_size,
+    )
 
     while len(current) > 1 and rounds < cfg.max_rounds:
         rounds += 1
@@ -95,6 +121,13 @@ def reduce_sections_to_document(
                 )
                 next_level.append((f"r{rounds}_g{i // cfg.group_size}", text))
         current = next_level
+        _mr_trace(
+            f"section_round_{rounds}",
+            groups=len(current),
+            avg_chars=(
+                sum(len(s) for _, s in current) // max(1, len(current))
+            ),
+        )
 
     # Финальный reduce (Этап 9): если после max_rounds осталось >1
     # группы — делаем один дополнительный round, чтобы не потерять
@@ -116,6 +149,11 @@ def reduce_sections_to_document(
                 question=question,
             )
         current = [("final", final)]
+        _mr_trace(
+            "section_final_reduce",
+            joined_chars=len(joined),
+            result_chars=len(final),
+        )
 
     final_summary = current[0][1] if current else ""
     return HierarchicalReducerResult(
@@ -141,17 +179,45 @@ def reduce_chunks_hierarchical(
     """Hierarchical reduce: section-level + document-level.
 
     Используется когда chunks ещё не просуммированы.
+
+    Диагностика (``--mr-trace`` / ``LEGAL_SUMMARIZER_MR_TRACE=1``):
+    логирует в stderr сколько sections реально получили summaries
+    (vs сколько было в section_ids), и в каком раунде остановился
+    hierarchical reduce.
     """
+    import os
+    import sys
+
+    _MR_TRACE = (
+        "--mr-trace" in sys.argv
+        or os.environ.get("LEGAL_SUMMARIZER_MR_TRACE") == "1"
+    )
+
+    def _mr_trace(stage: str, **fields) -> None:
+        if not _MR_TRACE:
+            return
+        import time as _time
+        parts = [f"{k}={v}" for k, v in fields.items()]
+        sys.stderr.write(
+            f"[mr-trace {_time.monotonic():.2f}s] {stage} "
+            + " ".join(parts) + "\n"
+        )
+        sys.stderr.flush()
+
     cfg = config or HierarchicalReducerConfig()
     section_summaries: dict[str, str] = {}
 
+    sections_with_chunks = 0
+    sections_skipped = 0
     for sid in section_ids:
         chunk_ids = [
             c.chunk_id for c in chunks
             if c.section_id == sid and c.chunk_id in chunk_summaries
         ]
         if not chunk_ids:
+            sections_skipped += 1
             continue
+        sections_with_chunks += 1
         items = [(cid, chunk_summaries[cid]) for cid in chunk_ids]
         joined = "\n\n".join(f"[Chunk {cid}]\n{s}" for cid, s in items)
         if len(joined) > cfg.input_budget_chars:
@@ -171,6 +237,17 @@ def reduce_chunks_hierarchical(
             summary = _fit_input(summary, cfg.section_summary_max_chars)
         section_summaries[sid] = summary
 
+    _mr_trace(
+        "chunks_hierarchical_phase1",
+        n_section_ids=len(section_ids),
+        sections_with_chunks=sections_with_chunks,
+        sections_skipped=sections_skipped,
+        section_summaries_count=len(section_summaries),
+        empty_summaries=sum(
+            1 for s in section_summaries.values() if not s or not s.strip()
+        ),
+    )
+
     section_items = [
         (sid, section_summaries[sid])
         for sid in section_ids if sid in section_summaries
@@ -183,6 +260,13 @@ def reduce_chunks_hierarchical(
             length=length,
             focus=focus,
         )
+        _mr_trace(
+            "chunks_hierarchical_phase2",
+            section_items=len(section_items),
+            rounds=final_result.rounds_done,
+            truncated=final_result.truncated,
+            final_chars=len(final_result.final_summary),
+        )
         return HierarchicalReducerResult(
             final_summary=final_result.final_summary,
             section_summaries=section_summaries,
@@ -191,6 +275,11 @@ def reduce_chunks_hierarchical(
         )
 
     final = section_items[0][1] if section_items else ""
+    _mr_trace(
+        "chunks_hierarchical_phase2_shortcut",
+        section_items=len(section_items),
+        final_chars=len(final),
+    )
     return HierarchicalReducerResult(
         final_summary=final,
         section_summaries=section_summaries,

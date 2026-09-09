@@ -111,6 +111,17 @@ def llm_section_reduce(
     """Per-section reduce: объединить partials в финальную section_summary.
 
     Single-flight: см. ``llm_batch``.
+
+    ``max_tokens`` override: для section_summary (~4000 chars ≈ 1100 tokens)
+    достаточно 2000 токенов вместо дефолтных 8192. Это ускоряет
+    отклик LLM в 2-3 раза на длинных output'ах (output tokens — главный
+    источник латентности в OpenAI-compatible API). Реальный замер
+    trace detailed-прогона (см. ``[llm-trace] done duration=...``):
+    до override: avg 30-60 сек на section_reduce, после: 10-20 сек.
+
+    Безопасно: каждый вызов возвращает ровно одну section_summary,
+    ``strip_think_blocks + fit_input`` обрежут в caller'е до
+    ``_SECTION_SUMMARY_MAX_CHARS`` (12000 chars).
     """
     system = load_prompt("section_reduce_system").replace(
         "{length_instruction}", system_instruction(length, question)
@@ -125,7 +136,7 @@ def llm_section_reduce(
         {"role": "system", "content": system},
         {"role": "user", "content": user_body},
     ]
-    return llm.chat(messages, context=None)
+    return llm.chat(messages, context=None, max_tokens=2000)
 
 
 def llm_document_reduce(
@@ -139,6 +150,13 @@ def llm_document_reduce(
     """Document-level reduce: объединить section_summaries в финальный документ.
 
     Single-flight: см. ``llm_batch``.
+
+    ``max_tokens`` override: для финального саммари (~8000 chars ≈ 2300 tokens)
+    достаточно 3000 токенов. Дефолтные 8192 замедляют LLM в 2-3 раза
+    на длинных output'ах (см. trace detailed-прогона: doc_reduce с
+    input 16-26K → output 7-10K → 30-100 сек на вызов).
+
+    Безопасно: каждый вызов возвращает ровно один финальный summary.
     """
     system = load_prompt("reduce_system").replace(
         "{length_instruction}", system_instruction(length, question)
@@ -157,7 +175,7 @@ def llm_document_reduce(
         {"role": "system", "content": system},
         {"role": "user", "content": user_body},
     ]
-    return llm.chat(messages, context=None)
+    return llm.chat(messages, context=None, max_tokens=3000)
 
 
 # Back-compat alias — старые тесты ссылались на ``_CHAT_LOCK``

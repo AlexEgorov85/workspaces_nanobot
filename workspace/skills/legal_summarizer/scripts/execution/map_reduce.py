@@ -255,8 +255,33 @@ def _reduce_phase(
     Возвращает ``(final_summary, section_reduce_calls,
     document_reduce_calls, retries_incremented, strategy_label)``.
     """
+    import os
+    import sys
+
+    _MR_TRACE_ENABLED = (
+        "--mr-trace" in sys.argv
+        or os.environ.get("LEGAL_SUMMARIZER_MR_TRACE") == "1"
+    )
+
+    def _mr_trace(stage: str, **fields) -> None:
+        if not _MR_TRACE_ENABLED:
+            return
+        parts = [f"{k}={v}" for k, v in fields.items()]
+        sys.stderr.write(
+            f"[mr-trace {_time.monotonic():.2f}s] {stage} "
+            + " ".join(parts) + "\n"
+        )
+        sys.stderr.flush()
+
     section_reduce_calls = 0
     document_reduce_calls = 0
+
+    _mr_trace(
+        "reduce_dispatch",
+        strategy=strategy,
+        has_struct=struct is not None,
+        n_section_ids=len(section_ids),
+    )
 
     if strategy == "map_hierarchical" and struct is not None and section_ids:
         reducer_config = HierarchicalReducerConfig(
@@ -274,14 +299,28 @@ def _reduce_phase(
             result = strip_think_blocks(result)
             if len(result) > _SECTION_SUMMARY_MAX_CHARS:
                 result = fit_input(result, _SECTION_SUMMARY_MAX_CHARS)
+            _mr_trace(
+                "section_reduce",
+                path=section_path[:50],
+                heading=section_heading[:50],
+                joined_chars=len(joined),
+                result_chars=len(result),
+                truncated=len(result) >= _SECTION_SUMMARY_MAX_CHARS,
+            )
             return result
 
         def _llm_doc_runner(joined, *, length=length, focus=focus, structure=struct, question=question, **_kw):
-            return strip_think_blocks(
+            result = strip_think_blocks(
                 _llm_calls_mod.llm_document_reduce(
                     joined, length=length, focus=focus, structure=structure, question=question,
                 )
             )
+            _mr_trace(
+                "doc_reduce",
+                joined_chars=len(joined),
+                result_chars=len(result),
+            )
+            return result
 
         def _llm_hybrid_runner(joined, *, section_path=None, section_heading=None, **kw):
             if section_path is not None or section_heading is not None:
@@ -318,22 +357,44 @@ def _reduce_phase(
         format_chunk_block(c, all_partials[c.chunk_id]) for c in ordered_chunks
     )
     if not joined.strip():
+        _mr_trace(
+            "flat_reduce_empty",
+            ordered_chunks=len(ordered_chunks),
+            total_partials=len(all_partials),
+        )
         return "", section_reduce_calls, document_reduce_calls, False, "map_reduce_flat"
+    original_joined_chars = len(joined)
     joined = fit_input(joined, DOCUMENT_REDUCE_INPUT_BUDGET_CHARS)
+    _mr_trace(
+        "flat_reduce_input",
+        ordered_chunks=len(ordered_chunks),
+        original_chars=original_joined_chars,
+        after_fit_chars=len(joined),
+        truncated=len(joined) < original_joined_chars,
+    )
     try:
         final_summary = _llm_calls_mod.llm_document_reduce(
             joined, length=length, focus=focus,
             structure=struct, question=question,
         )
         document_reduce_calls += 1
-    except Exception:
+    except Exception as exc:
         # REDUCE_INPUT_EMPTY на non-retryable input error: возвращаем
         # пустую строку, чтобы runtime классифицировал это как
         # ``REDUCE_INPUT_EMPTY`` → ``status='failed'``.
         # Никакого fallback на ``joined`` (это невалидное поведение —
         # сырой текст не является summary). И никакого retry — input
         # сам по себе non-retryable.
+        _mr_trace(
+            "flat_reduce_error",
+            err=type(exc).__name__,
+            msg=str(exc)[:200],
+        )
         return "", section_reduce_calls, document_reduce_calls, True, "map_reduce_flat"
+    _mr_trace(
+        "flat_reduce_done",
+        result_chars=len(final_summary),
+    )
     return (
         final_summary,
         section_reduce_calls,
@@ -402,6 +463,54 @@ def run_map_reduce_execution(
     6. ``_reduce_phase`` — section/document reduce.
 
     Финальный manifest + write_result делает ``application.execution_orchestration``.
+
+    Диагностика (``LEGAL_SUMMARIZER_MR_TRACE=1`` или ``--mr-trace``):
+    печатает в stderr структурный trace каждой фазы (chunks, partials,
+    reduce inputs/outputs) — нужно для отладки "потерянных" данных
+    в map-reduce.
+    """
+    import os
+    import sys
+
+    _MR_TRACE_ENABLED = (
+        "--mr-trace" in sys.argv
+        or os.environ.get("LEGAL_SUMMARIZER_MR_TRACE") == "1"
+    )
+
+    def _mr_trace(stage: str, **fields) -> None:
+        if not _MR_TRACE_ENABLED:
+            return
+        parts = [f"{k}={v}" for k, v in fields.items()]
+        sys.stderr.write(
+            f"[mr-trace {_time.monotonic():.2f}s] {stage} "
+            + " ".join(parts) + "\n"
+        )
+        sys.stderr.flush()
+
+    _mr_trace(
+        "enter",
+        strategy=strategy,
+        chunks=len(chunks),
+        batches=len(final_batches),
+        section_ids=len(section_ids),
+        operation_id=operation_id,
+    )
+    """Фактическая реализация map-reduce execution.
+
+    Pure execution: возвращает dict в shape ``application.service.run()``.
+    НЕ делает cache writes напрямую — ``write_chunk_result`` инжектируется
+    из application. ``run_one_batch_async`` инжектируется из application
+    (mock-совместимость с этапа-тестами).
+
+    Фазы:
+    1. ``_assert_invariants`` — plan vs chunks.
+    2. Загрузить cached partials.
+    3. ``_queued_batches`` — pending chunks.
+    4. ``_run_all_batches`` — execute all queued batches.
+    5. ``_persist_batch_results`` — write per-chunk results (через callback).
+    6. ``_reduce_phase`` — section/document reduce.
+
+    Финальный manifest + write_result делает ``application.execution_orchestration``.
     """
     struct = analysis.structure if analysis is not None else None
 
@@ -418,6 +527,12 @@ def run_map_reduce_execution(
     chunk_states.update(_build_initial_partials_from_cache(
         chunk_states, cached_partials,
     ))
+    _mr_trace(
+        "cached_partials",
+        loaded=len(cached_partials),
+        expected=len(expected_chunk_ids),
+        coverage_pct=f"{100.0 * len(cached_partials) / max(1, len(expected_chunk_ids)):.1f}",
+    )
 
     ctx_batches: dict[str, dict[str, Any]] = (
         dict(existing_manifest.context_batches) if existing_manifest else {}
@@ -425,6 +540,15 @@ def run_map_reduce_execution(
 
     total_start = _time.monotonic()
     queued = _queued_batches(final_batches, chunk_states)
+
+    _mr_trace(
+        "map_queued",
+        batches=len(queued),
+        pending_chunks=sum(len(pending) for _, pending, _ in queued),
+        cached_already_done=(
+            len(expected_chunk_ids) - sum(len(pending) for _, pending, _ in queued)
+        ),
+    )
 
     map_calls = 0
     retries = 0
@@ -451,6 +575,13 @@ def run_map_reduce_execution(
             )
         )
         chunk_states.update(batch_chunk_states)
+        _mr_trace(
+            "map_done",
+            map_calls=map_calls,
+            failed_batches=len(failed_batch_ids),
+            failed_ids=failed_batch_ids[:5],
+            first_error=str(first_batch_error)[:200] if first_batch_error else None,
+        )
 
     all_partials = load_cached_partials(
         operation_id, expected_chunk_ids, workspace_root,
@@ -462,6 +593,26 @@ def run_map_reduce_execution(
             "operation_id": operation_id,
             "error": {"code": "NO_PARTIALS", "message": "Нет per-chunk partials"},
         }
+
+    # Диагностика partials: детектим пустые/короткие summaries
+    empty_partials = [cid for cid, p in all_partials.items() if not p or not p.strip()]
+    short_partials = [
+        cid for cid, p in all_partials.items()
+        if p and p.strip() and len(p.strip()) < 50
+    ]
+    avg_chars = (
+        sum(len(p) for p in all_partials.values()) / max(1, len(all_partials))
+    )
+    _mr_trace(
+        "reduce_input",
+        total_partials=len(all_partials),
+        expected=len(expected_chunk_ids),
+        empty=len(empty_partials),
+        empty_ids=empty_partials[:5],
+        short=len(short_partials),
+        short_ids=short_partials[:5],
+        avg_chars=f"{avg_chars:.0f}",
+    )
 
     final_summary, section_reduce_calls, document_reduce_calls, retries_incremented, strategy_label = (
         _reduce_phase(
