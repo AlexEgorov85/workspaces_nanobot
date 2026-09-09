@@ -60,11 +60,14 @@ python workspace/skills/legal_summarizer/scripts/cli.py --file <path> [--flags..
 | Параметр | Обязательный | Описание |
 |:---|:---:|:---|
 | `--file` | да | Путь к `.pdf` / `.docx` / `.txt`. |
-| `--length` | нет | `brief` (150–250 слов), `detailed` (800–1200). |
+| `--length` | нет | `brief` (150–250 слов) или `detailed` (800–1200). |
 | `--question` | нет | Конкретный вопрос (взаимоисключающе с `--length`). |
 | `--focus` | нет | Тема для финального reduce (не утекает в map). |
+| `--context` | нет | JSON с историей чата для LLM. Пример: `'[{"role":"user","content":"..."}]'`. |
 | `--confirm` | нет | Подтвердить длинную обработку. |
 | `--operation-id` | нет | Id для resume / idempotency. |
+| `--max-chunks` | нет | Override `max_chunks_for_execution` из project.json. |
+| `--estimate-only` | нет | Только оценить документ (без LLM-вызовов). |
 
 Полный список — `cli.py --help`. Подробности — `references/contracts.md`.
 
@@ -82,7 +85,7 @@ python .../cli.py --file small.pdf
   "operation_id": "op_...",
   "subject": "Это договор аренды: ...",
   "length": "brief",
-  "strategy": "single"
+  "strategy": "direct"
 }
 ```
 
@@ -141,22 +144,43 @@ cli.py печатает в самом начале:
 одним блокирующим `exec` (или `write_stdin(wait_for=..., wait_timeout_ms=120000)`).
 Не опрашивай по таймеру — это лишние LLM-вызовы.
 
-## Follow-up запросы
+## Follow-up вопросы
 
-После прогона результат содержит `result.operation_id` — это ключ к
-сохранённым данным (`data_store/cache/skills/legal_summarizer/<operation_id>/`).
+После успешного прогона результат содержит `result.operation_id`. Для
+follow-up вопросов по **тому же документу** используй `--question` через
+**document-level cache** (быстрый путь, без повторного map-LLM):
 
-Для follow-up вопросов используй кастомный tool `legal_summarizer_query`:
+```bash
+python .../cli.py --file contract.pdf --question "Какие штрафы за нарушение срока?" --confirm
+```
+
+Это работает через `strategy: "document_cache_question"` (1 LLM-вызов для
+synthesis). Document-level cache хранит только question-independent
+baseline summaries (chunk + section), которые используются как cheap
+context вместе с chunk.text. Подробности — `references/architecture.md`
+раздел «Document-level cache».
+
+Когда `--question` использовать **нельзя** (например, документ ещё не
+обработан / mtime изменился / нет workspace_root) — fallthrough на обычный
+pipeline (новый map-reduce с полным LLM-анализом выбранных chunks).
+
+Для read-only агрегации manifest (без LLM) используй кастомный tool
+`legal_summarizer_query`:
 
 ```python
-legal_summarizer_query(operation_id="<op_id>", field="stats")
-legal_summarizer_query(operation_id="<op_id>", field="chunks")
-legal_summarizer_query(operation_id="<op_id>", field="sections")
-legal_summarizer_query(operation_id="<op_id>", field="tree")
-legal_summarizer_query(operation_id="<op_id>", field="all")
+legal_summarizer_query(operation_id="<op_id>", field="stats")    # метрики + article_count
+legal_summarizer_query(operation_id="<op_id>", field="chunks")   # список chunks + summaries
+legal_summarizer_query(operation_id="<op_id>", field="sections")  # список sections
+legal_summarizer_query(operation_id="<op_id>", field="tree")      # иерархия sections
+legal_summarizer_query(operation_id="<op_id>", field="all")      # весь manifest.json
 ```
 
 Подробности — `workspace/TOOLS.md` раздел «legal_summarizer_query».
+
+**Resume прерванного прогона** (`status="partial"`): используй тот же `--operation-id --confirm`
+для **тот же операции** (`text + length + question`). Уже записанные
+`chunks/*.json` НЕ переобрабатываются. Это **не** для follow-up вопросов —
+`--question` создаёт новый `operation_id` (новый прогон).
 
 ## Что внутри
 
