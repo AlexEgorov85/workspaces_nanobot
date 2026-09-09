@@ -1,10 +1,17 @@
 """Zero-reference audit: regression guard для legacy symbols (PLAN §34).
 
-Это **regression guard**, не просто print. Два режима:
+Это **regression guard**, не просто print. Три режима:
 
-* ``audit()`` — возвращает structured result (dict с hits).
-* ``assert_no_legacy()`` — поднимает ``AssertionError`` при production hit
-  или при наличии запрещённых файлов (Этап 18).
+* ``audit()`` — возвращает structured result (dict с hits). Сканирует
+  **весь проект** (не только ``legal_summarizer``): ``lib/``, ``workspace/``,
+  ``tools/``, ``gateway.py``, ``streamlit_app.py``, ``cli_agent.py``,
+  ``tests/``, ``sql/``, ``benchmarks/``. Каталоги ``__pycache__``, ``.venv``,
+  ``data_store``, ``.pytest_cache``, ``.ruff_cache``, ``.benchmarks``,
+  ``node_modules`` исключены.
+* ``assert_no_legacy()`` — поднимает ``AssertionError`` при production hit,
+  при наличии запрещённых файлов или при наличии legacy секций в
+  ``project.json`` (Этап 11/18).
+* ``main()`` — печать отчёта (production vs test разделение).
 
 Разделение:
 
@@ -22,11 +29,19 @@
 
 * ``_FORBIDDEN_FILES`` — файлы, которые были удалены и не должны быть
   воссозданы (Этап 8, Этап 18).
+
+* ``_ALLOWED_LEGACY_FILES`` — characterization-тесты, которые НАМЕРЕННО
+  импортируют удалённые legacy-модули для проверки их удалённости.
+  Они не должны блокировать guard.
+
+* Config-level guard: ``project.json::gateway.vector_index`` (legacy →
+  ``gateway.vector.index``). Это Type E — fail-fast, без нормализации.
 """
 
 from __future__ import annotations
 
 import ast
+import json
 import pathlib
 from collections import defaultdict
 
@@ -70,6 +85,22 @@ _CANONICAL_PRODUCTION = frozenset({
     "legal_summarizer.application.canonical",
     "workspace.skills.legal_summarizer.scripts.cli",
     "workspace.skills.legal_summarizer.scripts.cli_query",
+})
+
+# Тестовые файлы, которые НАМЕРЕННО импортируют удалённые legacy-модули
+# для проверки их удалённости (characterization tests). Они не должны
+# блокировать guard — это позитивные проверки invariant'а удалённости.
+# Пример: ``test_skill_legal_summarizer_characterization.py`` содержит
+# секцию «legacy behavior regression», которая доказывает, что
+# document_cleanup / packing / document_stats / load_physical_document
+# удалены из production.
+_ALLOWED_LEGACY_FILES = frozenset({
+    "tests/test_skill_legal_summarizer_characterization.py",
+    "tests/benchmarks/test_acceptance_matrix.py",
+    "workspace/skills/legal_summarizer/tests/test_legal_summarizer_no_legacy.py",
+    "workspace/skills/legal_summarizer/tests/test_canonical_production_path.py",
+    "docs/architecture/COMPATIBILITY_INVENTORY.md",
+    "docs/legal_summarizer_legacy_inventory.md",
 })
 
 
@@ -123,17 +154,34 @@ def audit_legacy_in_module(
     return dict(hits)
 
 
-def audit() -> dict[str, list[str]]:
+def audit(skill_root: pathlib.Path | None = None) -> dict[str, list[str]]:
     """Запустить audit по всему проекту.
+
+    Сканирует ВСЕ .py файлы репозитория (не только legal_summarizer);
+    каталоги ``__pycache__``, ``.venv``, ``data_store`` исключены.
+    Это регрессионный guard для всех зарегистрированных forbidden
+    modules/symbols/files — независимо от того, в какой подсистеме
+    они встретились.
+
+    Args:
+        skill_root: legacy-параметр для обратной совместимости со
+            старыми вызывающими (см. ``tests/test_legal_summarizer_no_legacy``).
+            Игнорируется: audit покрывает весь проект.
 
     Returns:
         dict: ``{module_or_symbol: [hit_description, ...]}``.
     """
     project_root = pathlib.Path.cwd()
-    skill_root = project_root / "workspace" / "skills" / "legal_summarizer"
     all_hits: dict[str, list[str]] = defaultdict(list)
 
-    for py_file in _iter_python_files(skill_root):
+    for py_file in _iter_python_files(project_root):
+        # Пропускаем кеши и venv.
+        if any(part in py_file.parts for part in (
+            "__pycache__", ".venv", "data_store",
+            ".pytest_cache", ".ruff_cache", ".benchmarks",
+            "node_modules",
+        )):
+            continue
         hits = audit_legacy_in_module(py_file, project_root)
         for k, v in hits.items():
             all_hits[k].extend(v)
@@ -143,6 +191,15 @@ def audit() -> dict[str, list[str]]:
 
 def _is_production_file(rel: str) -> bool:
     return "/tests/" not in f"/{rel}" and "/test_" not in rel
+
+
+def _is_characterization_test(rel: str) -> bool:
+    """Является ли файл characterization-тестом, который НАМЕРЕННО
+    импортирует удалённые legacy-модули для проверки их удалённости.
+
+    См. ``_ALLOWED_LEGACY_FILES``.
+    """
+    return rel in _ALLOWED_LEGACY_FILES
 
 
 def assert_no_legacy() -> None:
@@ -160,7 +217,7 @@ def assert_no_legacy() -> None:
     for k, locations in hits.items():
         for loc in locations:
             rel = loc.split(":", 1)[0]
-            if _is_production_file(rel):
+            if _is_production_file(rel) and not _is_characterization_test(rel):
                 production_hits.setdefault(k, []).append(loc)
 
     # Проверка _FORBIDDEN_FILES (Этап 8 / Этап 18): файл не должен
@@ -170,6 +227,22 @@ def assert_no_legacy() -> None:
     for rel_path in _FORBIDDEN_FILES:
         if (project_root / rel_path).is_file():
             forbidden_present.append(rel_path)
+
+    # Config-level guard (Этап 11): project.json не должен содержать
+    # legacy ``gateway.vector_index.*`` секцию (Type E — fail-fast,
+    # нормализация не предусмотрена).
+    config_legacy: list[str] = []
+    cfg_path = project_root / "project.json"
+    if cfg_path.is_file():
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            gw = cfg.get("gateway") or {}
+            if isinstance(gw, dict) and "vector_index" in gw:
+                config_legacy.append(
+                    "project.json::gateway.vector_index (legacy → gateway.vector.index)"
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
 
     if production_hits:
         details = "\n".join(
@@ -185,6 +258,11 @@ def assert_no_legacy() -> None:
             f"Forbidden files present:\n  "
             + "\n  ".join(sorted(forbidden_present))
         )
+    if config_legacy:
+        raise AssertionError(
+            f"Legacy config keys present:\n  "
+            + "\n  ".join(sorted(config_legacy))
+        )
 
 
 def main() -> None:
@@ -198,13 +276,13 @@ def main() -> None:
     for k, locations in hits.items():
         for loc in locations:
             rel = loc.split(":", 1)[0]
-            if _is_production_file(rel):
+            if _is_production_file(rel) and not _is_characterization_test(rel):
                 production_hits.setdefault(k, []).append(loc)
             else:
                 test_hits.setdefault(k, []).append(loc)
 
     print("=" * 70)
-    print("LEGACY REFERENCE AUDIT")
+    print("LEGACY REFERENCE AUDIT (whole repo)")
     print("=" * 70)
     print()
     print(f"Production legacy references: {sum(len(v) for v in production_hits.values())}")
