@@ -58,16 +58,180 @@ from application.operation_id import (
 from application.pipeline_structure import (
     run_canonical_pipeline,
 )
+from application.question_context import build_question_context
 from cache.manifest import (
     load_manifest,
     read_result,
 )
 from document.structure import DocumentStructure
+from document.analysis import DocumentAnalysis
 import llm.config as _llm_config_mod
+import llm.calls as _llm_calls_mod
+import llm.sanitize as _llm_sanitize_mod
 from llm.prompts_runtime import LENGTH_INSTRUCTIONS
 from planning.strategy import (
     build_execution_plan,
 )
+
+
+def _try_question_via_document_cache(
+    *,
+    question: str,
+    text: str,
+    document_path: str,
+    workspace_root: Path | str,
+    operation_id: str,
+    length: str,
+    focus: str | None,
+) -> dict | None:
+    """Shortcut для ``--question`` через document-level cache (#6).
+
+    При успехе возвращает ``dict`` в shape ``service.run()`` result.
+    При любой ошибке (cache miss, broken snapshot, no selected chunks,
+    LLM failure) возвращает ``None`` — caller fallthrough на обычный
+    pipeline.
+    """
+    from cache.manifest import (
+        is_document_cache_complete,
+        read_document_snapshot,
+    )
+    from chunking._text_helpers import progress as _progress
+    from chunking.chunks import Chunk
+    from document.identity import DocumentIdentity
+
+    try:
+        identity = DocumentIdentity.from_path(document_path)
+    except (FileNotFoundError, OSError) as exc:
+        _progress(f"#6 skip: {exc!r}")
+        return None
+
+    if not is_document_cache_complete(identity.document_id, workspace_root):
+        _progress(
+            f"#6 skip: no document cache for document_id={identity.document_id!r}"
+        )
+        return None
+
+    snap = read_document_snapshot(identity.document_id, workspace_root)
+    if snap is None:
+        _progress("#6 skip: snapshot incomplete")
+        return None
+    physical_data, analysis_data, _meta = snap
+    if physical_data is None or analysis_data is None:
+        _progress("#6 skip: snapshot data missing")
+        return None
+
+    # Восстанавливаем DocumentAnalysis in-memory из snapshot.
+    try:
+        from document.physical import PhysicalDocument
+        physical = PhysicalDocument.from_dict(physical_data)
+        structure = DocumentStructure.from_dict(analysis_data["structure"])
+        chunks = tuple(
+            Chunk.from_dict(c) for c in analysis_data["chunks"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        _progress(f"#6 skip: broken snapshot: {exc!r}")
+        return None
+
+    analysis = DocumentAnalysis.build(
+        physical=physical,
+        structure=structure,
+        chunks=chunks,
+        identity=identity,
+        include_retrieval_index=True,
+        semantic_records={},
+    )
+
+    # Selection через lexical retrieval (используем DocumentAnalysis.retrieve).
+    from application.chunk_selection import (
+        select_chunks_for_mode as _select,
+    )
+    from application.inspection import Inspection
+
+    insp = Inspection(
+        chars_in=len(text or ""),
+        chunks=list(chunks),
+        structure=structure,
+        analysis=analysis,
+    )
+    selected = _select(insp, question=question, length=length)
+    if not selected:
+        _progress("#6 skip: no chunks selected by retrieval")
+        return None
+
+    # Синтез-вход из document-level cache (commit #7).
+    from execution.map_reduce import DOCUMENT_REDUCE_INPUT_BUDGET_CHARS
+    context_text = build_question_context(
+        selected,
+        document_id=identity.document_id,
+        workspace_root=workspace_root,
+        budget_chars=DOCUMENT_REDUCE_INPUT_BUDGET_CHARS,
+    )
+    if not context_text:
+        _progress("#6 skip: build_question_context returned empty")
+        return None
+
+    # Один финальный LLM call (synthesize).
+    try:
+        final_summary = _llm_calls_mod.llm_document_reduce(
+            context_text,
+            length=length,
+            focus=focus,
+            structure=structure,
+            question=question,
+        )
+    except Exception as exc:
+        _progress(f"#6 skip: llm_document_reduce failed: {exc!r}")
+        return None
+
+    final_summary = _llm_sanitize_mod.strip_think_blocks(final_summary)
+    if not final_summary or not final_summary.strip():
+        _progress("#6 skip: empty final_summary")
+        return None
+
+    subject = _llm_sanitize_mod.extract_subject(final_summary)
+    title = (
+        structure.title.value
+        if structure.title is not None else None
+    )
+
+    result = {
+        "subject": subject,
+        "summary": final_summary,
+        "length": length,
+        "chars_in": len(text or ""),
+        "chunks": len(selected),
+        "context_batches": 1,
+        "sections": (
+            len(structure.iter_sections())
+            if structure is not None else 0
+        ),
+        "strategy": "document_cache_question",
+        "title": title,
+        "partial": False,
+    }
+
+    # Сохраняем result.json для idempotency.
+    from cache.manifest import write_result
+    write_result(operation_id, result, workspace_root=workspace_root)
+
+    _progress(
+        f"#6 ok: synthesized answer from {len(selected)} chunks "
+        f"(document_id={identity.document_id})"
+    )
+
+    return {
+        "status": "completed",
+        "operation_id": operation_id,
+        "result": result,
+        "stats": {
+            "chars_in": len(text or ""),
+            "chunks_total": len(chunks),
+            "chunks_selected": len(selected),
+            "context_batches_total": 1,
+            "strategy": "document_cache_question",
+            "document_cache_hit": True,
+        },
+    }
 
 
 def run(
@@ -129,7 +293,35 @@ def run(
                 },
             }
 
-    insp = _inspection_mod.inspect(text, document_path=document_path)
+    # ── Commit #6: ``--question`` через document-level cache. ──
+    # Условия входа в shortcut-ветку (все 4 обязательны):
+    #   1. question is not None (режим question).
+    #   2. document_path is not None (для DocumentIdentity).
+    #   3. workspace_root is not None (для cache path resolution).
+    #   4. document-cache complete для данного document_id.
+    # Если хотя бы одно не выполнено — fallthrough на обычный pipeline.
+    if (
+        question is not None
+        and document_path is not None
+        and workspace_root is not None
+    ):
+        cached_question_result = _try_question_via_document_cache(
+            question=question,
+            text=text,
+            document_path=document_path,
+            workspace_root=workspace_root,
+            operation_id=operation_id,
+            length=length,
+            focus=focus,
+        )
+        if cached_question_result is not None:
+            return cached_question_result
+
+    insp = _inspection_mod.inspect(
+        text,
+        document_path=document_path,
+        workspace_root=workspace_root,
+    )
 
     if not insp.chunks:
         return {
