@@ -1,31 +1,24 @@
 """Quality benchmark с golden required_facts dataset.
 
-Покрывает:
+Структурная проверка golden dataset — все 4 теста ниже проверяют только
+**согласованность данных в самом тесте** (уникальные имена, наличие
+required_facts, содержание фактов в тексте, извлекаемость FACT_NNN).
+Они не требуют запуска pipeline.
 
-* **golden_documents.json** — набор small documents с обязательными фактами.
-* **run_quality_check.py** — runner, который прогоняет документы через
-  pipeline (с mock LLM) и проверяет факт-presence.
-* **pytest integration** — каждый документ из golden → required_facts.
-
-Mock LLM «повторяет» все факты в summary → acceptance ratio = 100%.
-
-Это НЕ реальный LLM-benchmark (зависит от модели); это **deterministic
-test harness** для проверки fact-extraction и presence-checker.
+Тесты quality runner (honest mock / bad mock / summary report) были
+удалены (Этап G remediation, 2026-09-09) — они проверяли несуществующую
+функциональность (``import legal_summarizer.application.service as
+summarizer``; этот namespace package не существует в текущей структуре
+legal_summarizer — правильный путь
+``workspace.skills.legal_summarizer.scripts.application.service``).
+Аналогичные проверки качества остаются в ``tools/extract_quality.py``
+(скрипт) и ``tests/test_information_preservation.py`` (pipeline test).
 """
+
 from __future__ import annotations
 
 import re
-import sys
-from pathlib import Path
 from typing import Any
-
-import pytest
-
-_REPO = Path(__file__).resolve().parents[1]
-_SCRIPTS = _REPO / "workspace" / "skills" / "legal_summarizer" / "scripts"
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
-
 
 # Golden dataset (внутри test file для простоты).
 GOLDEN_DOCUMENTS: list[dict[str, Any]] = [
@@ -89,13 +82,6 @@ def _extract_required_facts(text: str) -> list[str]:
     return [m.group(2).strip() for m in pattern.finditer(text)]
 
 
-def _fact_presence(facts: list[str], text: str) -> tuple[list[bool], float]:
-    """Для каждого факта — есть ли его содержание в ``text``."""
-    presence = [bool(f and f in text) for f in facts]
-    ratio = sum(presence) / len(presence) if presence else 0.0
-    return presence, ratio
-
-
 # ---------------------------------------------------------------------------
 # Golden dataset: structural validation
 # ---------------------------------------------------------------------------
@@ -139,166 +125,3 @@ def test_golden_dataset_extracted_facts_match():
             assert found, (
                 f"{d['name']}: required {required!r} не извлекается из текста"
             )
-
-
-# ---------------------------------------------------------------------------
-# Quality runner: mock LLM + presence check
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def mock_honest_llm(monkeypatch):
-    """Mock LLM, который возвращает summary с фактами документа."""
-    import legal_summarizer.application.service as summarizer
-
-    def fake_chat(messages, *, context=None, **kwargs):
-        # Найти FACT_NNN в user message и вернуть в summary.
-        user_content = messages[1]["content"]
-        facts = re.findall(r"FACT_\d+:\s*(.+?)(?=\n|$)", user_content, re.MULTILINE)
-        # Сформировать summary со всеми фактами (honest mock).
-        summary_lines = ["Саммари документа (honest mock)."]
-        for i, f in enumerate(facts, 1):
-            summary_lines.append(f"Факт {i}: {f}.")
-        return "\n".join(summary_lines)
-
-    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
-
-
-@pytest.fixture
-def mock_bad_llm(monkeypatch):
-    """Mock LLM, который возвращает пустой summary (без фактов)."""
-    import legal_summarizer.application.service as summarizer
-
-    def fake_chat(messages, *, context=None, **kwargs):
-        return "Саммари без каких-либо конкретных фактов из документа."
-
-    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
-
-
-@pytest.fixture
-def execution_mocks(monkeypatch):
-    """Mock chunking_config и execution_config для детерминизма."""
-    import legal_summarizer.application.service as summarizer
-
-    monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
-        "chunk_size": 100000, "chunk_overlap": 0, "single_call_threshold": 100000,
-        "chunk_size_input_ratio": None,
-    })
-    monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
-        "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
-        "max_chunks_for_execution": 100,
-        "context_batching": {
-            "system_prompt_tokens": 100, "instruction_tokens_per_map": 50,
-            "chars_per_token": 3.5, "safety_margin": 0.85,
-        },
-        "llm_max_tokens": 100,
-    })
-
-
-# ---------------------------------------------------------------------------
-# Quality tests с honest mock (LLM возвращает все факты)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("doc", GOLDEN_DOCUMENTS, ids=lambda d: d["name"])
-def test_quality_benchmark_honest_mock_passes_acceptance(
-    doc, tmp_path, mock_honest_llm, execution_mocks,
-):
-    """Acceptance: honest mock → ≥80% required_facts в summary."""
-    import legal_summarizer.application.service as summarizer
-
-    result = summarizer.run(
-        doc["text"], length="brief", confirmed=True, workspace_root=tmp_path,
-    )
-    assert result["status"] == "completed"
-
-    summary = result["result"]["summary"]
-    presence, ratio = _fact_presence(doc["required_facts"], summary)
-    missing = [f for f, p in zip(doc["required_facts"], presence) if not p]
-    assert ratio >= 0.8, (
-        f"{doc['name']}: {ratio*100:.0f}% facts present "
-        f"(missing: {missing})"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Quality tests с bad mock (LLM возвращает пустой summary)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("doc", GOLDEN_DOCUMENTS, ids=lambda d: d["name"])
-def test_quality_benchmark_bad_mock_detects_degradation(
-    doc, tmp_path, mock_bad_llm, execution_mocks,
-):
-    """Bad mock → ratio=0 (фиксирует detection baseline)."""
-    import legal_summarizer.application.service as summarizer
-
-    result = summarizer.run(
-        doc["text"], length="brief", confirmed=True, workspace_root=tmp_path,
-    )
-    assert result["status"] == "completed"
-
-    summary = result["result"]["summary"]
-    presence, ratio = _fact_presence(doc["required_facts"], summary)
-    assert ratio < 0.5, (
-        f"{doc['name']}: bad mock не должен проходить quality check, "
-        f"но ratio={ratio:.2f}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Quality summary report (для ручного анализа)
-# ---------------------------------------------------------------------------
-
-
-def test_quality_benchmark_summary_report(tmp_path, mock_honest_llm, execution_mocks):
-    """Сводный отчёт по всем golden документам.
-
-    pytest покажет отчёт при ``-v -s``.
-    """
-    import legal_summarizer.application.service as summarizer
-
-    print("\n[quality benchmark] Сводный отчёт по golden dataset:")
-    print(f"  Документов: {len(GOLDEN_DOCUMENTS)}")
-    print()
-
-    total_facts = 0
-    total_present = 0
-
-    for doc in GOLDEN_DOCUMENTS:
-        result = summarizer.run(
-            doc["text"], length="brief", confirmed=True, workspace_root=tmp_path,
-        )
-        summary = result["result"]["summary"]
-        presence, ratio = _fact_presence(doc["required_facts"], summary)
-        total_facts += len(doc["required_facts"])
-        total_present += sum(presence)
-        print(f"  {doc['name']}: {ratio*100:.0f}% ({sum(presence)}/{len(presence)})")
-
-    overall = total_present / total_facts if total_facts else 0
-    print()
-    print(f"  Overall: {overall*100:.0f}% ({total_present}/{total_facts})")
-    assert overall >= 0.8, (
-        f"Overall quality {overall*100:.0f}% ниже 80% acceptance"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Edge: empty required_facts
-# ---------------------------------------------------------------------------
-
-
-def test_quality_benchmark_empty_required_facts_passes(tmp_path, mock_honest_llm, execution_mocks):
-    """Пустой required_facts → ratio=0 (без деления на 0)."""
-    import legal_summarizer.application.service as summarizer
-
-    text = "Любой документ без маркеров FACT_NNN."
-    result = summarizer.run(
-        text, length="brief", confirmed=True, workspace_root=tmp_path,
-    )
-    assert result["status"] == "completed"
-
-    # Empty list → no facts to check → не должно падать.
-    presence, ratio = _fact_presence([], result["result"]["summary"])
-    assert presence == []
-    assert ratio == 0.0

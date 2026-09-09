@@ -328,7 +328,7 @@ def test_resume_integration_run_writes_manifest(tmp_path, monkeypatch):
     Single-path НЕ пишет manifest (только result.json). Используем
     map_reduce: chunk_size=200 → много chunks → manifest пишется.
     """
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
         "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
         "chunk_size_input_ratio": None,

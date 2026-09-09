@@ -144,7 +144,7 @@ def test_info_preservation_e2e_mock_passes_keywords(tmp_path, monkeypatch):
 
     Mock LLM «повторяет» факты в summary. Тест проверяет acceptance 80%.
     """
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
         "chunk_size": 100000, "chunk_overlap": 0, "single_call_threshold": 100000,
         "chunk_size_input_ratio": None,
@@ -203,7 +203,7 @@ def test_info_preservation_e2e_partial_summary_below_threshold(
     это ratio ниже acceptance. Тест не regression-detection, а документирует
     поведение ``_fact_presence``.
     """
-    import legal_summarizer.application.service as summarizer
+    import application.service as summarizer
     monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
         "chunk_size": 100000, "chunk_overlap": 0, "single_call_threshold": 100000,
         "chunk_size_input_ratio": None,
