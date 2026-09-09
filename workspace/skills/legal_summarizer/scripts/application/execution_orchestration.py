@@ -178,6 +178,14 @@ def run_direct(
         "cb_000": {"chunk_ids": [c.chunk_id for c in ordered], "status": "completed"},
     }
     manifest.batches_done = ["cb_000"]
+    # Commit #5: ``document_id`` в ``manifest.raw`` для reverse-lookup
+    # ``operation_id → document_id`` (commit #6 service.py --question).
+    document_id_direct = (
+        analysis.identity.document_id
+        if analysis is not None and getattr(analysis, "identity", None) is not None
+        else None
+    )
+    manifest.raw["document_id"] = document_id_direct
     save_manifest(manifest, workspace_root=workspace_root)
 
     sections_total = count_sections(analysis.structure if analysis else None)
@@ -281,8 +289,35 @@ def run_map_reduce(
     from cache.manifest import (
         load_cached_partials as _load_cached_partials,
         write_chunk_result as _write_chunk_result,
+        write_document_chunk_summary as _write_document_chunk_summary,
     )
     from execution.pipeline import run_one_batch_async as _run_one_batch_async
+
+    # Commit #4: опциональная параллельная запись chunk summaries в
+    # document-level cache (cross-operation identity). Если ``analysis``
+    # или ``workspace_root`` отсутствуют — callback не инжектируется,
+    # execution НЕ пишет в document-level cache.
+    document_id = (
+        analysis.identity.document_id
+        if analysis is not None and getattr(analysis, "identity", None) is not None
+        else None
+    )
+
+    def _write_doc_chunk_summary(
+        *, workspace_root, chunk_id, summary, section_id,
+        section_path, page_start, page_end,
+    ):
+        if document_id is not None and workspace_root is not None:
+            _write_document_chunk_summary(
+                workspace_root=workspace_root,
+                document_id=document_id,
+                chunk_id=chunk_id,
+                summary=summary,
+                section_id=section_id,
+                section_path=section_path,
+                page_start=page_start,
+                page_end=page_end,
+            )
 
     payload = run_map_reduce_execution(
         chunks=chunks,
@@ -303,6 +338,7 @@ def run_map_reduce(
         section_headings=section_headings,
         section_paths=section_paths,
         write_chunk_result=_write_chunk_result,
+        write_document_chunk_summary=_write_doc_chunk_summary,
         run_one_batch_async=_run_one_batch_async,
         load_cached_partials=_load_cached_partials,
     )
@@ -358,6 +394,7 @@ def _persist_final_manifest(
     from cache.manifest import (
         NormalizedManifest,
         save_manifest,
+        write_document_section_summary,
         write_result,
     )
 
@@ -369,6 +406,7 @@ def _persist_final_manifest(
     total_llm_calls = internal["total_llm_calls"]
     total_duration = internal["total_duration"]
     strategy_label = internal["strategy_label"]
+    section_summaries = internal.get("section_summaries", {})
 
     title = None
     if analysis is not None and analysis.structure.title is not None:
@@ -393,7 +431,7 @@ def _persist_final_manifest(
         sections=sections_payload,
         chunk_states=chunk_states,
         context_batches=ctx_batches,
-        section_summaries={},
+        section_summaries=section_summaries,
         batches_done=[f"cb_{i:03d}" for i in range(len(ctx_batches))],
         batches_failed=failed_batch_ids,
         last_error=first_batch_error,
@@ -401,9 +439,35 @@ def _persist_final_manifest(
         completed_at=now_iso(),
         duration_sec=total_duration,
         article_count=article_count,
-        raw={"strategy": strategy_label},
+        raw={
+            "strategy": strategy_label,
+            "document_id": (
+                analysis.identity.document_id
+                if analysis is not None and getattr(analysis, "identity", None) is not None
+                else None
+            ),
+        },
     )
     save_manifest(final_manifest, workspace_root=workspace_root)
+
+    # Commit #0c: persist section summaries в document-level cache.
+    # Только после save_manifest — отдельная стадия жизненного цикла.
+    # ``document_id`` берётся из ``analysis.identity`` (DocumentIdentity,
+    # построенный в run_canonical_pipeline от path+size+mtime).
+    if (
+        section_summaries
+        and workspace_root is not None
+        and analysis is not None
+        and getattr(analysis, "identity", None) is not None
+    ):
+        document_id = analysis.identity.document_id
+        for sid, summary in section_summaries.items():
+            write_document_section_summary(
+                workspace_root=workspace_root,
+                document_id=document_id,
+                section_id=sid,
+                summary=summary,
+            )
 
 
 __all__ = [
