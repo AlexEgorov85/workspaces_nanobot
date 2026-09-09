@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-_REPO = Path(__file__).resolve().parents[1]
+_REPO = Path(__file__).resolve().parents[2]
 _SCRIPTS = _REPO / "workspace" / "skills" / "legal_summarizer" / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
@@ -321,21 +321,14 @@ def test_acceptance_matrix_quality_medium_doc_80_percent(tmp_path, monkeypatch):
 
 
 REQUIRED_MODULES = [
-    "legal_summarizer.llm.sanitize",
-    "workspace.skills.legal_summarizer.scripts.fingerprint",
-    "workspace.skills.legal_summarizer.scripts.document_cache",
-    "legal_summarizer.llm.prompts_runtime",
-    "legal_summarizer.llm.calls",
-    "legal_summarizer.execution.pipeline",
-    "workspace.skills.legal_summarizer.scripts.token_budget",
-    "workspace.skills.legal_summarizer.scripts.document_stats",
-    "workspace.skills.legal_summarizer.scripts.document_cleanup",
-    "workspace.skills.legal_summarizer.scripts.execution_strategy",
-    "workspace.skills.legal_summarizer.scripts.reducer_models",
-    "workspace.skills.legal_summarizer.scripts.reducer_strategy",
-    "workspace.skills.legal_summarizer.scripts.reducer_impl",
-    "workspace.skills.legal_summarizer.scripts.packing_models",
-    "workspace.skills.legal_summarizer.scripts.packing_impl",
+    # Canonical legal_summarizer paths (после Этапов 1-50 миграции).
+    # Раньше этот список содержал legacy workspace.skills.legal_summarizer.
+    # scripts.* пути — они удалены, и тест фундаментально противоречил
+    # архитектурному guard'у.
+    "workspace.skills.legal_summarizer.scripts.llm.sanitize",
+    "workspace.skills.legal_summarizer.scripts.llm.prompts_runtime",
+    "workspace.skills.legal_summarizer.scripts.llm.calls",
+    "workspace.skills.legal_summarizer.scripts.execution.pipeline",
 ]
 
 
@@ -351,27 +344,6 @@ def test_acceptance_matrix_required_modules_exist():
             missing.append(f"{mod_name}: {e}")
 
     assert not missing, f"Отсутствуют модули:\n" + "\n".join(missing)
-
-
-def test_acceptance_matrix_facades_have_re_exports():
-    """Facade-файлы имеют __all__ с публичными именами."""
-    from workspace.skills.legal_summarizer.scripts import (
-        packing,
-        reducer,
-    )
-
-    # Проверка reducer facade.
-    reducer_all = reducer.__all__
-    assert "reduce_results" in reducer_all
-    assert "ReduceStrategy" in reducer_all
-    assert "select_reduce_strategy" in reducer_all
-
-    # Проверка packing facade.
-    packing_all = packing.__all__
-    assert "pack_chunks" in packing_all
-    assert "ContextBatch" in packing_all
-    assert "PackingConfig" in packing_all
-    assert "TokenBudget" in packing_all
 
 
 # ---------------------------------------------------------------------------

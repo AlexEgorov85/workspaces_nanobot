@@ -5,47 +5,30 @@
 (не grep), потому что grep не видит ленивые импорты внутри функций.
 
 Комментарии и docstring игнорируются — анализируется только код.
+
+**Единый source of truth** (Этап F remediation, 2026-09-09):
+реестры ``_FORBIDDEN_MODULES``, ``_FORBIDDEN_SYMBOLS``, ``_FORBIDDEN_FILES``
+импортируются из ``tools.legacy_audit``. Раньше в этом файле были
+свои ``_LEGACY_*``, которые расходились с основным реестром
+(13 vs 20 модулей), что давало два противоречивых сигнала guard'а.
+См. ``docs/architecture/COMPATIBILITY_INVENTORY.md`` §7.
 """
 
 from __future__ import annotations
 
 import ast
+from pathlib import Path
 
-_LEGACY_MODULES = frozenset({
-    "workspace.skills.legal_summarizer.scripts.fingerprint",
-    "workspace.skills.legal_summarizer.scripts.reducer_strategy",
-    "workspace.skills.legal_summarizer.scripts.cached_retrieval",
-    "workspace.skills.legal_summarizer.scripts.document_cache",
-    "workspace.skills.legal_summarizer.scripts.document_cleanup",
-    "workspace.skills.legal_summarizer.scripts.structure.sections",
-    "workspace.skills.legal_summarizer.scripts.structure.tree",
-    "workspace.skills.legal_summarizer.scripts.structure.compatibility",
-    "workspace.skills.legal_summarizer.scripts.structure.cleanup",
-    "workspace.skills.legal_summarizer.scripts.brief_strategy",
-    "workspace.skills.legal_summarizer.scripts.brief_representation",
-    "workspace.skills.legal_summarizer.scripts.provenance_reconstruction",
-})
+# Импортируем единый canonical registry (Этап F). Один source of truth.
+from tools.legacy_audit import (
+    _FORBIDDEN_MODULES,
+    _FORBIDDEN_SYMBOLS,
+)
 
-_LEGACY_SYMBOLS = frozenset({
-    "SectionTree",
-    "DocumentSection",
-    "StructureAwareChunker",
-    "build_section_tree",
-    "merge_short_sections",
-    "extract_local_structure_label",
-    "count_meaningful_sections",
-    "should_use_hierarchical_reduce",
-    "select_reduce_strategy",
-    "load_physical_document",
-    "section_tree_from_structure",
-    "structure_from_section_tree",
-})
-
-# Файлы, которые были удалены.
-_LEGACY_FILES = frozenset({
-    "workspace/skills/legal_summarizer/scripts/structure/cleanup.py",
-    "workspace/skills/legal_summarizer/scripts/_legacy_run_map_reduce.py",
-})
+# ``_FORBIDDEN_FILES`` импортируем отдельно, потому что содержит
+# POSIX-пути в формате ``workspace/skills/...``, а тест использует
+# Path API для проверки существования на диске.
+from tools.legacy_audit import _FORBIDDEN_FILES
 
 def _module_legacy_refs(module) -> list[str]:
     """Найти legacy-ссылки в AST модуля (не в комментариях/docstring)."""
@@ -63,17 +46,17 @@ def _module_legacy_refs(module) -> list[str]:
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            if node.module in _LEGACY_MODULES:
+            if node.module in _FORBIDDEN_MODULES:
                 hits.append(f"from {node.module} import ...")
         elif isinstance(node, ast.Import):
             for n in node.names:
-                if n.name in _LEGACY_MODULES:
+                if n.name in _FORBIDDEN_MODULES:
                     hits.append(f"import {n.name}")
         elif isinstance(node, ast.Name):
-            if node.id in _LEGACY_SYMBOLS:
+            if node.id in _FORBIDDEN_SYMBOLS:
                 hits.append(f"name: {node.id}")
         elif isinstance(node, ast.Attribute):
-            if node.attr in _LEGACY_SYMBOLS:
+            if node.attr in _FORBIDDEN_SYMBOLS:
                 hits.append(f"attr: .{node.attr}")
     return hits
 
@@ -152,10 +135,8 @@ def test_legacy_reducer_strategy_removed():
 
 def test_forbidden_files_not_present():
     """``_FORBIDDEN_FILES`` не должны существовать на диске."""
-    from pathlib import Path
-
     project_root = Path(__file__).resolve().parents[3]
-    for rel_path in _LEGACY_FILES:
+    for rel_path in _FORBIDDEN_FILES:
         target = project_root / rel_path
         assert not target.is_file(), (
             f"forbidden file present: {target}"

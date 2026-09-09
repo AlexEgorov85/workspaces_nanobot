@@ -18,10 +18,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.utils.text_utils import sanitize_value as _sanitize_value  # noqa: F401
+from lib.utils.text_utils import sanitize_value
 
 
-__all__ = ["prepare_output", "sanitize_output", "_sanitize_value"]
+__all__ = ["prepare_output", "sanitize_output"]
 
 
 def prepare_output(result: dict, mode: str) -> dict:
@@ -85,4 +85,4 @@ def prepare_output(result: dict, mode: str) -> dict:
 
 def sanitize_output(out: dict[str, Any]) -> dict[str, Any]:
     """Рекурсивно санировать значения в плоском dict для JSON."""
-    return _sanitize_value(out)  # type: ignore[return-value]
+    return sanitize_value(out)

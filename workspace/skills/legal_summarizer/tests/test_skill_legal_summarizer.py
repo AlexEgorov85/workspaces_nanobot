@@ -180,10 +180,10 @@ def test_prepare_output_confirmation_required():
     assert serialized_len < 400
 
 def test_sanitize_handles_datetime():
-    """_sanitize_value сериализует datetime в ISO format."""
+    """sanitize_value сериализует datetime в ISO format."""
     from datetime import datetime
-    from output.presenter import _sanitize_value
-    out = _sanitize_value({"d": datetime(2024, 1, 15, 10, 30)})
+    from lib.utils.text_utils import sanitize_value
+    out = sanitize_value({"d": datetime(2024, 1, 15, 10, 30)})
     assert out["d"] == "2024-01-15T10:30:00"
 
 # ---------------------------------------------------------------------------

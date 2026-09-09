@@ -208,15 +208,16 @@ def test_lock_finally_releases():
     """
     from llm.calls import chat_locked
     import llm.calls as lc
+    import llm.single_flight as lsf
 
     # Если lock удерживается — второй вызов ждёт; проверим это.
     acquired = []
 
     def _blocking_call():
         # Пытаемся взять lock — он должен быть свободен после exception.
-        acquired.append(lc._CHAT_LOCK.acquire(blocking=False))
+        acquired.append(lsf.LLM_FLIGHT_LOCK.acquire(blocking=False))
         if acquired[-1]:
-            lc._CHAT_LOCK.release()
+            lsf.LLM_FLIGHT_LOCK.release()
 
     # Бросаем исключение внутри chat_locked.
     import llm.client as llm

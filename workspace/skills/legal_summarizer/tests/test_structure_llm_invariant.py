@@ -60,7 +60,7 @@ def test_no_llm_call_in_structure_modules():
     import retrieval.quality as quality_metrics
     import llm.single_flight as single_flight
     import tools.architecture_guard as architecture_guard
-    import chunking.block_ownership as block_ownership
+    import document.structure as document_structure_module
     modules = [
         models, physical, numbering, heading, hierarchy,
         repair, validation, title, list_detection,
@@ -74,7 +74,7 @@ def test_no_llm_call_in_structure_modules():
         document_analysis, followup,
         benchmark, reference_qa, quality_metrics,
         single_flight, architecture_guard,
-        block_ownership,
+        document_structure_module,
     ]
     for module in modules:
         assert _module_has_llm_call(module) is False, (

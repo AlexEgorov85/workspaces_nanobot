@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from lib.utils.text_utils import sanitize_value as _sanitize_value  # noqa: F401
-
 
 # Поля со счётчиками LLM-вызовов, которые НЕ отдаём агенту: пользователю
 # важно только время (длительность/ETA), а агенты склонны зеркалить числа

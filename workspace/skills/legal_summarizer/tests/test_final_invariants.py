@@ -196,6 +196,7 @@ def test_invariant_i_exception_releases_lock():
     from llm.calls import chat_locked
     import llm.calls as lc
     import llm.client as llm
+    import llm.single_flight as lsf
     original = lc.llm.chat
 
     def _explode(*args, **kwargs):
@@ -208,8 +209,8 @@ def test_invariant_i_exception_releases_lock():
         except RuntimeError:
             pass
         # Lock must be free.
-        assert lc._CHAT_LOCK.acquire(blocking=False)
-        lc._CHAT_LOCK.release()
+        assert lsf.LLM_FLIGHT_LOCK.acquire(blocking=False)
+        lsf.LLM_FLIGHT_LOCK.release()
     finally:
         lc.llm.chat = original
 

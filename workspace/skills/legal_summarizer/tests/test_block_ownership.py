@@ -95,10 +95,10 @@ def _make_structure_with_nested():
 
 def test_block_to_node_delegates_to_canonical():
     """``DocumentStructure.block_to_node`` даёт тот же результат,
-    что ``block_ownership.block_to_node``."""
+    что ``document.structure.block_to_node``."""
     struct = _make_structure_with_nested()
 
-    from chunking.block_ownership import (
+    from document.structure import (
         block_to_node as canonical_b2n,
     )
 
@@ -110,7 +110,7 @@ def test_block_to_node_returns_root_for_uncovered():
     """Blocks вне section ranges → root_id."""
     struct = _make_structure_with_nested()
 
-    from chunking.block_ownership import (
+    from document.structure import (
         block_to_node,
     )
 
@@ -123,7 +123,7 @@ def test_block_to_node_assigns_deepest_section():
     """Block в диапазоне article → article (deepest)."""
     struct = _make_structure_with_nested()
 
-    from chunking.block_ownership import (
+    from document.structure import (
         block_to_node,
     )
 
@@ -136,7 +136,7 @@ def test_only_one_owner_per_block():
     """``build_block_ownership`` даёт ровно одного owner на block."""
     struct = _make_structure_with_nested()
 
-    from chunking.block_ownership import (
+    from document.structure import (
         build_block_ownership,
     )
 

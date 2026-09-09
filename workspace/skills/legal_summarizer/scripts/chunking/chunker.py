@@ -30,12 +30,10 @@ from chunking.chunks import (
     ChunkConfig,
     _split_block_with_offsets,
 )
-from chunking.block_ownership import (
-    build_block_ownership,
-    owner_for_block,
-)
 from document.structure import (
     DocumentStructure,
+    build_block_ownership,
+    owner_for_block,
 )
 from document.physical import (
     DocumentBlock,
