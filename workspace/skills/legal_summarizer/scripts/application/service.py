@@ -84,7 +84,7 @@ def _try_question_via_document_cache(
     length: str,
     focus: str | None,
 ) -> dict | None:
-    """Shortcut для ``--question`` через document-level cache (#6).
+    """Shortcut для ``--question`` через document-level cache.
 
     При успехе возвращает ``dict`` в shape ``service.run()`` result.
     При любой ошибке (cache miss, broken snapshot, no selected chunks,
@@ -158,7 +158,7 @@ def _try_question_via_document_cache(
         _progress("#6 skip: no chunks selected by retrieval")
         return None
 
-    # Синтез-вход из document-level cache (commit #7).
+    # Синтез-вход из document-level cache.
     from execution.map_reduce import DOCUMENT_REDUCE_INPUT_BUDGET_CHARS
     context_text = build_question_context(
         selected,
@@ -210,7 +210,7 @@ def _try_question_via_document_cache(
         "partial": False,
     }
 
-    # Commit #C2: записываем полноценный NormalizedManifest + result.json
+    # записываем полноценный NormalizedManifest + result.json
     # для idempotency. Раньше сохраняли только result.json — следующий
     # вызов с тем же operation_id не находил manifest и снова делал
     # LLM call. Теперь manifest со status=completed ловит idempotency-check
@@ -347,7 +347,8 @@ def run(
                 },
             }
 
-    # ── Commit #6: ``--question`` через document-level cache. ──
+    # ──────────────────────────────────────────────────────────────────
+    # ``--question`` через document-level cache.
     # Условия входа в shortcut-ветку (все 4 обязательны):
     #   1. question is not None (режим question).
     #   2. document_path is not None (для DocumentIdentity).

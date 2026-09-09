@@ -1,6 +1,6 @@
-"""Order-preserving utilities (PLAN §67).
+"""Order-preserving utilities.
 
-PLAN §67: даже при ranking/retrieval порядок документа не должен
+Даже при ranking/retrieval порядок документа не должен
 уничтожаться. После ranking `restore_document_order`.
 
 Этот модуль — minimal helpers.

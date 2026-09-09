@@ -76,7 +76,7 @@ def _is_docx_heading_style(style_name: str) -> bool:
 
 
 def _is_docx_title_style(style_name: str) -> bool:
-    """True если DOCX style — это Title / Subtitle (PLAN §14).
+    """True если DOCX style — это Title / Subtitle.
 
     Title-стили дают очень высокую уверенность, что параграф — это
     document title (а не heading). Используется при формировании
@@ -96,7 +96,7 @@ def _looks_like_heading(text: str) -> bool:
 def _classify_regex(text: str) -> tuple[int, float, str, str | None] | None:
     """Классифицировать текст по regex'ам. Вернуть (level, score, source, number).
 
-    Шкала base scores (Этап 2 плана):
+    Шкала base scores:
 
     * **Явные legal markers** (Статья / Глава / Раздел / §): 0.80–0.85.
       Эти regex'ы достаточно специфичны — кандидат почти всегда
@@ -202,17 +202,17 @@ def detect_heading_candidates(
 ) -> list[HeadingCandidate]:
     """Найти всех кандидатов в heading'и (DOCX style + regex + PDF outline).
 
-    Public API этапа 7: было приватной ``_detect_candidates`` в ``sections.py``,
+    Public API: было приватной ``_detect_candidates`` в ``sections.py``,
     теперь экспортируется из ``heading.py``.
 
-    Этап 7 (PLAN): numbering detection делегирован в
+    Numbering detection делегирован в
     ``scripts/structure/numbering.py`` (``parse_numbering``). Старый
     ``_classify_regex`` оставлен для back-compat, но теперь результат
     сверяется с новым parser'ом — и если новый parser даёт иную
     информацию (например, level на основе nested components),
     используется он.
 
-    Этап 11 (PLAN §11): PDF outline mapping теперь делается через
+    PDF outline mapping теперь делается через
     ``scripts/structure/pdf_outline.py::map_pdf_outline``, который
     возвращает ``HeadingCandidate`` с реальным ``block_index >= 0``
     (раньше outline кандидаты имели ``block_index = -1`` и отбрасывались
@@ -253,7 +253,7 @@ def detect_heading_candidates(
             continue
         level, score, source, raw_number = classified
 
-        # Этап 2 плана: длинный текст на level ≥ 2 — слабый кандидат.
+        # длинный текст на level ≥ 2 — слабый кандидат.
         # Защита от "1.1. Длинный пункт под-раздела" как heading.
         # (Level 1 cap 0.55 для len > 80 оставлен без изменений.)
         text_len = len(text)
@@ -338,7 +338,7 @@ class HeadingEvidence:
     Это намеренно **детерминированная** эвристика (без LLM): LLM-классификация
     заголовков была бы дороже и нестабильнее, чем набор локальных правил.
 
-    Уровни уверенности (PLAN §8):
+    Уровни уверенности:
 
     * Very high: DOCX Heading style, mapped PDF outline, explicit legal markers.
     * High: numbering + typography + body_after + neighbor_consistency.
@@ -357,7 +357,7 @@ class HeadingEvidence:
         legal_marker_bonus: +0.10 если heading содержит явный legal marker
             (Статья / Глава / Раздел / § / Пункт / Приложение).
         docx_title_bonus: +0.15 если DOCX style — это Title/Subtitle
-            (PLAN §14: title не heading — но он помогает выбрать «главный»
+            (title не heading — но он помогает выбрать «главный»
             heading для первой секции).
         list_penalty: −0.10 если heading окружён list-like соседями
             (≥ 3 коротких нумерованных блока подряд).
@@ -483,7 +483,7 @@ def compute_evidence(
     Не зависит от того, прошёл ли кандидат threshold — это чистый скоринг,
     используемый после confidence penalties.
 
-    Этап 3 (план): для голой десятичной нумерации (``regex_numbered_*``)
+    для голой десятичной нумерации (``regex_numbered_*``)
     ``numbering_consistency_bonus`` **не применяется**. Монотонная
     последовательность ``1./2./3.`` — это характеристика **list'а**, а не
     heading'а. Если дать +0.05 за "согласованную нумерацию", то 30 нумерованных
@@ -501,7 +501,7 @@ def compute_evidence(
         if _is_substantial_body(next_block.content):
             body_bonus = 0.05
 
-    # Этап 3: голая десятичная нумерация не получает numbering_consistency_bonus.
+    # голая десятичная нумерация не получает numbering_consistency_bonus.
     if candidate.source in ("regex_numbered_1", "regex_numbered_2", "regex_numbered_3"):
         num_bonus = 0.0
     else:
@@ -548,7 +548,7 @@ _LEGAL_MARKERS = (
 
 
 def _looks_like_explicit_legal_marker(text: str) -> bool:
-    """``True`` если текст содержит явный юридический маркер (PLAN §8)."""
+    """``True`` если текст содержит явный юридический маркер."""
     s = text.strip()
     if not s:
         return False
@@ -575,7 +575,7 @@ def apply_evidence_scoring(
     обнаруживаются один раз для всего набора кандидатов (а не per-candidate),
     чтобы не делать дорогой regex-проход повторно.
 
-    **Этап 3 плана:** для голой десятичной нумерации (``regex_numbered_*``
+    для голой десятичной нумерации (``regex_numbered_*``
     без explicit legal marker) подключается ``ambiguous_decimal_penalty``
     из ``list_detection`` — дополнительный штраф к кандидатам в
     ambiguous run (run найден, но ``is_list=False``, например, на НК РФ
@@ -609,7 +609,7 @@ def apply_evidence_scoring(
                 duplicate_penalty=ev.duplicate_penalty,
             )
 
-        # Этап 3: дополнительный штраф для голой десятичной нумерации
+        # дополнительный штраф для голой десятичной нумерации
         # в ambiguous run. Не применяется к explicit legal markers
         # (regex_statiya, regex_glava, regex_razdel, regex_paragraph,
         # docx_style, pdf_outline) — у них собственный высокий score.

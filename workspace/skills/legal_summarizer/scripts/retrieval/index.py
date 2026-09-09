@@ -1,4 +1,4 @@
-"""RetrievalIndex (PLAN §36, Этап 36).
+"""RetrievalIndex.
 
 Минимальная реализация многоуровневого индекса для retrieval:
 
@@ -89,7 +89,7 @@ class RetrievalIndex:
         ``L3`` строится один раз — повторные вызовы ``retrieve``
         не пересобирают index.
 
-        Включает section_heading термы (PLAN §65 — structure-aware):
+        Включает section_heading термы (structure-aware):
         chunk индексируется по ``chunk.text`` + ``chunk.section_heading``.
         """
         chunks_tuple = tuple(chunks)

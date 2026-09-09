@@ -240,7 +240,7 @@ def _resolve_semantic_type(c: HeadingCandidate) -> str | None:
     return None
 
 
-# Порог «подозрительной плотности» sections в документе (Этап 6 плана).
+# Порог «подозрительной плотности» sections в документе.
 # Если sections / total_blocks > этого значения — логируем WARNING.
 # Значение 0.50: больше половины blocks стали section — явный признак
 # over-fragmentation (напр. 199 chunks на НК РФ). Не используется как
@@ -258,7 +258,7 @@ def _log_structure_diagnostics(
     *,
     document_id: str,
 ) -> None:
-    """Записать diagnostic counters и sanity check (Этап 5+6 плана).
+    """Записать diagnostic counters и sanity check.
 
     Diagnostic counters (по source):
 

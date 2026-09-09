@@ -1,4 +1,4 @@
-"""DocumentStructure как SoT для всех downstream'ов (PLAN §45, Этап 19).
+"""DocumentStructure как SoT для всех downstream'ов.
 
 Этот модуль — **точка сборки** canonical pipeline:
 
@@ -186,7 +186,7 @@ def _write_document_snapshot_after_pipeline(
 ) -> None:
     """Сохранить document-level snapshot после успешного canonical pipeline.
 
-    Используется только при cache miss (commit #3). При cache hit snapshot
+    Используется только при cache miss. При cache hit snapshot
     уже существует и write_document_snapshot выбросит ``RuntimeError`` —
     мы это явно НЕ вызываем в hit-ветке.
     """
@@ -243,7 +243,7 @@ def run_canonical_pipeline(
 ) -> PipelineResult:
     """Запустить canonical pipeline.
 
-    При наличии document-level cache (commit #3) — попытка cache hit:
+    При наличии document-level cache — попытка cache hit:
     если файл не менялся (mtime/size) и snapshot complete — возвращаем
     восстановленный ``PipelineResult`` без повторного парсинга PDF/DOCX,
     heading detection, structure build, ChunkPlanner.
@@ -253,15 +253,15 @@ def run_canonical_pipeline(
     Args:
         path: путь к документу.
         text: полный текст (для fallback title resolution).
-        apply_repair: применить repair pass (PLAN §15).
-        include_retrieval_index: построить inverted index (PLAN §36).
+        apply_repair: применить repair pass.
+        include_retrieval_index: построить inverted index.
         workspace_root: корень workspace.
 
     Returns:
         ``PipelineResult`` с ``DocumentAnalysis``, ``ValidationReport``,
         и ``chunks``.
     """
-    # Commit #3: cache hit branch.
+    # cache hit branch.
     cached = _try_load_cached_pipeline_result(
         path=path, workspace_root=workspace_root,
     )
@@ -322,7 +322,7 @@ def run_canonical_pipeline(
         include_retrieval_index=include_retrieval_index,
     )
 
-    # Commit #3: write snapshot после успешного pipeline (cache miss).
+    # write snapshot после успешного pipeline (cache miss).
     _write_document_snapshot_after_pipeline(
         path=path,
         workspace_root=workspace_root,

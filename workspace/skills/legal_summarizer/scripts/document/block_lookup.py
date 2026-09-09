@@ -1,4 +1,4 @@
-"""Lookup helpers — замена linear ``index()`` (PLAN §44).
+"""Lookup helpers — замена linear ``index()``.
 
 В legacy коде (``context_expansion.py``, ``cached_retrieval.py``)
 использовался ``doc.blocks.index(target)`` — O(N) на каждый chunk.
@@ -6,7 +6,7 @@
 Этот модуль предоставляет ``build_block_lookup`` для O(1) lookup
 по ``block_id`` или ``ordinal``.
 
-``PhysicalDocument.blocks_by_ord`` уже есть (Этап 4) — он
+``PhysicalDocument.blocks_by_ord`` уже есть — он
 даёт lookup по ordinal. Этот модуль добавляет lookup по ``block_id``
 (``b_NNNN``) для удобства downstream'ов, которые ищут по id.
 """

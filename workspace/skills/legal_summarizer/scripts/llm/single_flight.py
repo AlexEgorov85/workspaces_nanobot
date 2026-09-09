@@ -1,6 +1,6 @@
-"""Single-flight invariant enforcement (PLAN §54).
+"""Single-flight invariant enforcement.
 
-PLAN §54: ``max_active_llm_calls == 1``. Нельзя иметь параллельных
+``max_active_llm_calls == 1``. Нельзя иметь параллельных
 LLM-вызовов, даже если pipeline содержит несколько батчей.
 
 Единая реализация cross-thread single-flight boundary:
@@ -26,7 +26,7 @@ from typing import Any
 
 @dataclass
 class SingleFlightTracker:
-    """Tracker для ``max_active_llm_calls == 1`` (PLAN §54).
+    """Tracker для ``max_active_llm_calls == 1``.
 
     Использование::
 
@@ -109,7 +109,7 @@ def guarded_chat(callable_, *args, **kwargs):
     Вместо прямого импорта ``threading.Lock`` / ``LLM_FLIGHT_LOCK``
     подсистемы вызывают ``guarded_chat(llm.chat, ...)``.
 
-    Single-flight invariant (``PLAN §54``: ``max_active_llm_calls == 1``)
+    Single-flight invariant (``max_active_llm_calls == 1``)
     обеспечивается через единый ``LLM_FLIGHT_LOCK`` и сохраняется
     между любыми двумя одновременными ``guarded_chat`` вызовами в
     разных потоках / event loops.

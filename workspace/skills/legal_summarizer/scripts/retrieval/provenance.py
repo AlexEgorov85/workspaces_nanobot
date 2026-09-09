@@ -1,4 +1,4 @@
-"""Provenance checks (PLAN §46, Этап 46).
+"""Provenance checks.
 
 Каждый результат должен уметь показать:
 
@@ -12,7 +12,7 @@
 Этот модуль предоставляет ``ProvenanceChain`` — связку document → section
 → chunk → page/block для **полной** traceability.
 
-PLAN §46: если final answer содержит утверждение "цена = X", система
+Если final answer содержит утверждение "цена = X", система
 должна иметь возможность определить источник.
 """
 
@@ -69,7 +69,7 @@ class ProvenanceChain:
         }
 
     def is_complete(self) -> bool:
-        """``True`` если все критичные поля заполнены (PLAN §58 acceptance)."""
+        """``True`` если все критичные поля заполнены (acceptance)."""
         return all([
             self.document_id,
             self.document_path,

@@ -1,16 +1,16 @@
-"""Question synthesis context builder (#7).
+"""Question synthesis context builder.
 
 Собирает LLM-вход для ``llm_document_reduce(question=...)`` из
-document-level cache (commit #6) без повторного map-вызова LLM.
+document-level cache без повторного map-вызова LLM.
 
 Три уровня (от cheap к deep):
   1. **section_summary** — per-section LLM summary из
-     ``documents/<doc_id>/sections/<sid>.json`` (#0c).
+     ``documents/<doc_id>/sections/<sid>.json``.
      Если секция, к которой относится chunk, уже просуммирована — это
      самое компактное представление, и для большинства юридических
      вопросов достаточно (раздел «Обязанности сторон» целиком).
   2. **chunk_summary** — per-chunk LLM summary из
-     ``documents/<doc_id>/chunks/<cid>.json`` (#4).
+     ``documents/<doc_id>/chunks/<cid>.json``.
      Если нет section summary, но есть chunk summary — это 2-4 предложения
      на chunk.
   3. **chunk.text** — оригинальный текст chunk'а (из

@@ -1,7 +1,7 @@
-"""Semantic context expansion (PLAN §10).
+"""Semantic context expansion.
 
 Для выбранного chunk'а вернуть расширенный контекст через поиск
-**neighbours по target index** (PLAN §10):
+**neighbours по target index**:
 
     target
     ↓
@@ -24,7 +24,7 @@ Token accounting:
 * ``total_tokens == tokens(target) + sum(tokens(neighbours))``.
 
 Использует ``DocumentStructure`` (не ``SectionTree``) — это новый
-canonical путь (PLAN §18, §45).
+canonical путь.
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ def expand_context(
 ) -> ExpandedContext:
     """Расширить контекст для ``target``.
 
-    Алгоритм (PLAN §10):
+    Алгоритм:
 
     1. ``target_idx = index of target in sorted(chunks)``;
     2. Поочерёдно проверяем ``target_idx - 1``, ``target_idx + 1``,

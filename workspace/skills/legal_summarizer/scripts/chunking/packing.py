@@ -1,10 +1,10 @@
-"""Controlled adjacent-section packing (PLAN §9, §22).
+"""Controlled adjacent-section packing.
 
 Сейчас ``packing_impl.pack_chunks`` строго section-locality greedy —
 что безопасно, но для 600-страничного документа даёт
 ``map_calls == chunks_total`` (см. baseline F3).
 
-Целевая политика (PLAN §9):
+Целевая политика:
 
 1. **Rule 1**: table + non-table → **не смешивать** (отдельные batch).
 2. **Rule 2**: table + table → только если это разрешено atomic policy
@@ -69,7 +69,7 @@ def pack_chunks_with_adjacent(
     *,
     config: AdjacentPackingConfig | None = None,
 ) -> list[tuple[str, ...]]:
-    """Сгруппировать ``Chunk`` в batches по правилам PLAN §9.
+    """Сгруппировать ``Chunk`` в batches по правилам.
 
     Возвращает список tuple chunk_ids — порядок execution.
 

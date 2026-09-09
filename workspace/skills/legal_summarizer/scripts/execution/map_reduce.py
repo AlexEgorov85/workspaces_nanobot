@@ -58,7 +58,7 @@ _SECTION_SUMMARY_MAX_CHARS = 12_000
 # Callback-типы для dependency injection из application layer.
 WriteChunkResultFn = Callable[..., None]
 # ``write_document_chunk_summary(workspace_root=, chunk_id=, summary=,
-#   section_id=, section_path=, page_start=, page_end=)`` — commit #4.
+#   section_id=, section_path=, page_start=, page_end=)``.
 WriteDocumentChunkSummaryFn = Callable[..., None] | None
 # ``run_one_batch_async(pending_chunks, *, chunks_total, structure,
 #   operation_id, workspace_root, sem, batch_id, length, question)``
@@ -162,7 +162,7 @@ def _persist_batch_results(
 
     ``write_chunk_result`` инжектируется из application — это
     соблюдение ``cache boundary``: execution НЕ импортирует cache.
-    ``write_document_chunk_summary`` (опциональный) — commit #4,
+    ``write_document_chunk_summary`` (опциональный) —
     параллельная запись в document-level cache для cross-operation lookup.
 
     Возвращает ``(map_calls, failed_batch_ids, chunk_states, ctx_batches,
@@ -204,7 +204,7 @@ def _persist_batch_results(
                         duration_sec=duration,
                         workspace_root=workspace_root,
                     )
-                    # Commit #4: дополнительная запись в document-level cache
+                    # дополнительная запись в document-level cache
                     # (если был инжектирован callback от application).
                     if write_document_chunk_summary is not None:
                         write_document_chunk_summary(

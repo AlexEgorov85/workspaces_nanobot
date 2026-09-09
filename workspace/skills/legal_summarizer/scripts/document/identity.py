@@ -1,4 +1,4 @@
-"""DocumentIdentity — единый идентификатор документа (PLAN §5, §77).
+"""DocumentIdentity — единый идентификатор документа.
 
 Заменяет **две параллельные** реализации fingerprint:
 
@@ -33,7 +33,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class DocumentIdentity:
-    """Единый идентификатор документа (PLAN §5).
+    """Единый идентификатор документа.
 
     Attributes:
         document_id: короткий ID (первые 12 hex fingerprint'а) для
@@ -57,7 +57,7 @@ class DocumentIdentity:
         """``True`` если ``(size, mtime)`` совпадают с закэшированными.
 
         Используется при cache lookup: если ``is_fresh`` == ``False``,
-        кэш нужно пересчитать (PLAN §77).
+        кэш нужно пересчитать.
         """
         p = Path(path)
         try:

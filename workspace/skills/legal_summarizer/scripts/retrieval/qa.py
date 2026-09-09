@@ -1,10 +1,10 @@
-"""Reference QA для benchmark'ов (PLAN §52).
+"""Reference QA для benchmark'ов.
 
 Для каждого benchmark-сценария набор reference questions с expected
-answer и expected_section_id. Используется в Этапе 53 для метрик
+answer и expected_section_id. Используется для метрик
 retrieval recall@K, section hit rate, provenance correctness.
 
-Reference questions (PLAN §52):
+Reference questions:
 
 * Какова цена?
 * Каковы сроки?
@@ -46,7 +46,7 @@ class ReferenceQASet:
 
 
 def standard_qa_set(document_name: str = "legal-doc") -> ReferenceQASet:
-    """Стандартный набор reference questions (PLAN §52)."""
+    """Стандартный набор reference questions."""
     return ReferenceQASet(
         document_name=document_name,
         questions=(

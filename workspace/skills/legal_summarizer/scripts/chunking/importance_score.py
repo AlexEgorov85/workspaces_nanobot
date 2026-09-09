@@ -1,6 +1,6 @@
-"""Importance score для chunk (PLAN §66).
+"""Importance score для chunk.
 
-Deterministic score (PLAN §61) на основе:
+Deterministic score на основе:
 
 * is_title (короткий chunk с section_heading).
 * is_heading (короткий, body < 200).

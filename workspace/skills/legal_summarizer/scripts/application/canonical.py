@@ -1,11 +1,11 @@
-"""Canonical run pipeline (Этапы 4А, 6А, PLAN §14).
+"""Canonical run pipeline.
 
 Этот модуль — **production-flow**, использующий только canonical
 pipeline (``run_canonical_pipeline`` → ``DocumentAnalysis`` →
 ``HierarchicalReducer``).
 
-**Не содержит legacy adapters** (PLAN §14). ``execution_strategy_for_legacy``
-и ``reduce_strategy_for_legacy`` удалены в §14: canonical
+**Не содержит legacy adapters**. ``execution_strategy_for_legacy``
+и ``reduce_strategy_for_legacy`` удалены: canonical
 ``select_strategy`` (в ``unified_execution.py``) — единственный owner
 для strategy selection.
 
@@ -205,7 +205,7 @@ def estimate_canonical(document_path: str | Path) -> dict[str, Any]:
 def estimate_chunks_canonical(chunks: list) -> int:
     """Canonical оценка суммарных токенов для списка Chunk.
 
-    Использует ``TokenEstimator`` (Этап 12 подготовка). Возвращает
+    Использует ``TokenEstimator``. Возвращает
     общее число токенов для всех chunks.
     """
     estimator = TokenEstimator(
@@ -222,7 +222,7 @@ def pack_batches_canonical(
 ) -> list[tuple[str, ...]]:
     """Canonical batch packing через adjacent-section policy.
 
-    Использует ``pack_chunks_with_adjacent`` (Этап 13 подготовка).
+    Использует ``pack_chunks_with_adjacent``.
     Возвращает список tuple chunk_ids — порядок execution.
     """
     cfg = AdjacentPackingConfig(

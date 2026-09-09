@@ -20,7 +20,7 @@ tests/
 │   └── retrieval/
 ├── integration/          # E2E прогон с mock LLM
 ├── architecture/         # boundary guards
-├── test_etapa*.py        # characterization tests (история фич)
+├── test_*.py              # characterization tests (история фич)
 └── test_structure_*.py   # структурные тесты
 ```
 
@@ -46,7 +46,8 @@ python -m pytest tests/architecture  # boundary guards
 
 ## Single-flight invariant
 
-Тесты `test_etapa{17,24,29}_single_flight*.py` проверяют, что
+Тесты `test_single_flight.py`, `test_single_flight_concurrent.py` и
+`test_single_flight_concurrent_safety.py` проверяют, что
 `max_active_llm_calls == 1`:
 
 * `test_concurrent_runs_peak_is_one` — два параллельных `run()` в разных
@@ -61,8 +62,8 @@ python -m pytest tests/architecture  # boundary guards
 
 ## Cache semantics
 
-Тесты `test_etapa28_idempotency_no_reexecution.py` и
-`test_etapa37_resume.py` проверяют:
+Тесты `test_idempotency_no_reexecution.py` и
+`test_resume.py` проверяют:
 
 * первый run создаёт cache;
 * второй run с тем же `operation_id` использует cache;
@@ -90,7 +91,7 @@ python -m pytest tests/architecture  # boundary guards
 
 ## Estimator consistency
 
-Тесты `test_etapa{15,27}_estimate_*.py` проверяют:
+Тесты `test_estimated_actual.py` и `test_estimate_*.py` проверяют:
 
 ```text
 actual_llm_calls <= estimated_llm_calls

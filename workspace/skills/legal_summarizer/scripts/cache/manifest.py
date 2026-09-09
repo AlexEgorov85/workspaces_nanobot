@@ -279,7 +279,7 @@ __all__ = [
     "chunk_result_path",
     "result_path",
     "load_cached_partials",
-    # Document-level cache (#2 — cross-operation identity).
+    # Document-level cache (cross-operation identity).
     "document_dir",
     "document_physical_path",
     "document_analysis_path",
@@ -333,7 +333,7 @@ def load_cached_partials(
 #     physical.json                          # PhysicalDocument.to_dict()
 #     analysis.json                          # {identity, structure, chunks, validation}
 #     chunks/<chunk_id>.json                 # {summary, section_id, section_path, page_start, page_end}
-#     sections/<section_id>.json             # section-level LLM summary (#0c)
+#     sections/<section_id>.json             # section-level LLM summary
 #
 # Snapshot пишется атомарно: staging dir + Path.rename. ``_complete.marker``
 # создаётся последним. Без marker snapshot считается неполным (cache miss).
@@ -406,7 +406,7 @@ def write_document_section_summary(
 ) -> None:
     """Записать per-section LLM summary в document-level cache.
 
-    Commit #C1: document-level cache хранит ТОЛЬКО question-independent
+    document-level cache хранит ТОЛЬКО question-independent
     (baseline) summaries. Если передан ``question is not None`` —
     summary был построен с учётом конкретного вопроса и НЕ должен
     попасть в cross-operation cache. Operation-level cache
@@ -441,7 +441,7 @@ def write_document_chunk_summary(
 ) -> None:
     """Записать per-chunk LLM summary в document-level cache.
 
-    Commit #C1: document-level cache хранит ТОЛЬКО question-independent
+    document-level cache хранит ТОЛЬКО question-independent
     (baseline) summaries. Если передан ``question is not None`` —
     summary был построен с учётом конкретного вопроса и НЕ должен
     попасть в cross-operation cache (semantic pollution guard).

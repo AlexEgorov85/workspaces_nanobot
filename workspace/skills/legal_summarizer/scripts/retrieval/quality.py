@@ -1,13 +1,12 @@
-"""Quality metrics (PLAN §53).
+"""Quality metrics.
 
-Метрики качества (PLAN §53):
+Метрики качества:
 
 * ``retrieval_recall_at_K``: доля reference questions, для которых
   retrieval вернул хотя бы один expected keyword в top-K chunks.
 * ``section_hit_rate``: доля questions, для которых retrieved chunk
   принадлежит correct section.
-* ``provenance_correctness``: доля results с complete ProvenanceChain
-  (PLAN §46).
+* ``provenance_correctness``: доля results с complete ProvenanceChain.
 * ``structure_correctness``: ValidationReport.is_valid == True.
 * ``hallucination_rate``: доля results, где answer содержит текст не
   из retrieved chunks (требует LLM — для unit-теста проверяем только

@@ -1,7 +1,7 @@
 """DocumentStructure — единый контракт семантической структуры документа.
 
 Это **canonical model** для семантической структуры, отдельная от
-``PhysicalDocument`` (см. PLAN §3, §10).
+``PhysicalDocument`` (semantic vs physical границы).
 
 Архитектурные инварианты:
 
@@ -11,8 +11,8 @@
   один и тот же ``block_type="paragraph"`` может иметь разный
   ``semantic_type`` — ``heading`` / ``body`` / ``list_item``).
 * ``DocumentStructure`` — единый source of truth для
-  ChunkPlanner / packer / retrieval / brief / reducer (PLAN §45).
-* Структура **детерминированная** (PLAN §61): LLM не участвует
+  ChunkPlanner / packer / retrieval / brief / reducer.
+* Структура **детерминированная**: LLM не участвует
   в её построении.
 
 ``DocumentStructure`` — единственный production тип структуры.
@@ -30,7 +30,7 @@ from typing import Any
 class StructureEvidence:
     """Один evidence для решения о structural node.
 
-    Используется в ``StructureNode.evidence`` (PLAN §8 — пять уровней
+    Используется в ``StructureNode.evidence`` (пять уровней
     уверенности: very-high / high / medium / low).
 
     Attributes:
@@ -52,7 +52,7 @@ class StructureEvidence:
 class NumberingInfo:
     """Парсер numbering для heading/list caption.
 
-    Поддерживает минимум (PLAN §6):
+    Поддерживает минимум:
 
     * ``1.``, ``1.1``, ``1.1.1`` — decimal scheme.
     * ``Статья 12``, ``Статья 12.1`` — legal_article scheme.
@@ -84,7 +84,7 @@ class NumberingInfo:
 
 @dataclass(frozen=True)
 class DocumentTitle:
-    """Title документа (PLAN §14).
+    """Title документа.
 
     Различает три источника:
 
@@ -110,7 +110,7 @@ class DocumentTitle:
 
 @dataclass(frozen=True)
 class StructureNode:
-    """Узел семантической структуры документа (PLAN §3.2, Этап 4).
+    """Узел семантической структуры документа.
 
     Семантика полей:
 
@@ -140,7 +140,7 @@ class StructureNode:
 
     Все поля frozen: ``StructureNode`` — immutable.
 
-    Invariant (Этап 4): ``start_block == end_block`` допустим — это
+    Invariant: ``start_block == end_block`` допустим — это
     валидная одно-блочная секция. ``parent_id`` НЕ обязан покрывать
     range ребёнка (subtree ≠ parent range).
 
@@ -251,7 +251,7 @@ class StructureNode:
 
 @dataclass(frozen=True)
 class DocumentStructure:
-    """Canonical DocumentStructure (PLAN §3.2, §8).
+    """Canonical DocumentStructure.
 
     Attributes:
         document_id: идентификатор документа (``DocumentIdentity.document_id``).

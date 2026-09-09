@@ -1,4 +1,4 @@
-"""Unified execution planner (PLAN §23, Этапы 7, 19).
+"""Unified execution planner.
 
 Единственный селектор для выбора стратегии:
 
@@ -6,13 +6,13 @@
 * ``"map_flat"`` — map → flat reduce.
 * ``"map_hierarchical"`` — map → hierarchical reduce (multi-round).
 
-Правила (PLAN §23):
+Правила:
 
 * total_tokens ≤ direct_threshold → ``"direct"``.
 * total_sections ≥ hierarchical_threshold → ``"map_hierarchical"``.
 * иначе → ``"map_flat"``.
 
-Все параметры — через ``ExecutionPolicy`` (Этап 7). Packing —
+Все параметры — через ``ExecutionPolicy``. Packing —
 ``pack_chunks_with_adjacent`` с ``AdjacentPackingConfig``,
 сконструированным из той же policy.
 """
@@ -34,7 +34,7 @@ from llm.tokens import (
 
 @dataclass(frozen=True)
 class ExecutionPolicy:
-    """Параметры unified execution strategy (PLAN §25, Этап 7).
+    """Параметры unified execution strategy.
 
     Все параметры, влияющие на построение ExecutionPlan:
 
@@ -57,9 +57,9 @@ class ExecutionPolicy:
 
 
 def _count_meaningful_sections(struct: DocumentStructure) -> int:
-    """Число meaningful sections (Этап 6).
+    """Число meaningful sections.
 
-    Критерий (Этап 4 + Этап 6):
+    Критерий:
 
     * ``node_type == "section"``;
     * ``title.strip() != ""``;
@@ -93,7 +93,7 @@ def select_strategy(
 ) -> str:
     """Выбрать стратегию (``"direct"``/``"map_flat"``/``"map_hierarchical"``).
 
-    PLAN §23: один ExecutionPlanner, одно решение.
+    Один ExecutionPlanner, одно решение.
     """
     cfg = policy or ExecutionPolicy()
     estimator = TokenEstimator(TokenEstimatorConfig(chars_per_token=cfg.chars_per_token))
@@ -120,10 +120,10 @@ def build_execution_plan(
     """Построить ``ExecutionPlan`` для выбранной стратегии.
 
     Это unified API — заменяет разрозненные legacy селекторы
-    для **новых** consumers (Этап 45). Старые consumers продолжают
+    для **новых** consumers. Старые consumers продолжают
     использовать свои пути.
 
-    Этап 7: ``ExecutionPolicy`` — единый источник параметров для
+    ``ExecutionPolicy`` — единый источник параметров для
     strategy selection и adjacent packing. ``AdjacentPackingConfig``
     формируется **из** ``ExecutionPolicy``; никаких скрытых defaults.
     """

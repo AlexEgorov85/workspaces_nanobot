@@ -1,4 +1,4 @@
-"""DocumentAnalysis cache architecture (PLAN §39, Этап 39).
+"""DocumentAnalysis cache architecture.
 
 Единый ``DocumentAnalysis`` — это immutable snapshot всех результатов
 анализа документа, который переиспользуется для follow-up запросов:
@@ -14,7 +14,7 @@
 * не хранит LLM summaries в свободном тексте — только structured records;
 * не дублирует text chunks — ссылается на PhysicalDocument.
 
-Plan §40 + §63: ``brief`` и ``question`` используют один и тот же
+``brief`` и ``question`` используют один и тот же
 DocumentAnalysis — не перепарсивают документ.
 """
 
@@ -37,7 +37,7 @@ from document.physical import (
 
 @dataclass(frozen=True)
 class DocumentAnalysis:
-    """Единый cache для анализа документа (PLAN §39).
+    """Единый cache для анализа документа.
 
     Attributes:
         identity: ``DocumentIdentity``.
@@ -94,14 +94,14 @@ class DocumentAnalysis:
     ) -> "DocumentAnalysis":
         """Построить DocumentAnalysis из ингредиентов.
 
-        Это **canonical** сборка (PLAN §39). ``DocumentAnalysis`` —
+        Это **canonical** сборка. ``DocumentAnalysis`` —
         единый слой immutable snapshot, объединяющий
         ``PhysicalDocument``, ``DocumentStructure``, ``chunks`` и
         ``RetrievalIndex``.
         """
         if identity is None:
             identity = DocumentIdentity.from_path(physical.path)
-        # Этап 3 invariant: DocumentStructure.document_id ==
+        # invariant: DocumentStructure.document_id ==
         # DocumentIdentity.document_id. Production pipeline (structure.pipeline)
         # передаёт ``document_id=identity.document_id`` явно. Если
         # ``DocumentAnalysis.build`` получает ``structure`` с расходящимся

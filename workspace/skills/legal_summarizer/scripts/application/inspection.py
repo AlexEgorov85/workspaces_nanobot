@@ -1,6 +1,6 @@
 """Inspection: document-level снимок анализа документа.
 
-Один canonical pipeline на запуск (см. PLAN §13): ``inspect()``
+Один canonical pipeline на запуск: ``inspect()``
 возвращает ``Inspection`` со structure + analysis + chunks. Выбор
 strategy / batch'ей / plan строится на уровне запуска через
 ``build_execution_context`` (см. ``application.context_builder``).

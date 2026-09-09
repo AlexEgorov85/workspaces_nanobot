@@ -1,10 +1,10 @@
-"""SemanticRecord — структурированный output LLM map (PLAN §29, Этап 29).
+"""SemanticRecord — структурированный output LLM map.
 
 LLM map возвращает не просто свободный текст, а структурированный
 record, который downstream может ранжировать, фильтровать и
 использовать для retrieval.
 
-Минимальная схема (PLAN §29):
+Минимальная схема:
 
 * ``chunk_id``: для какого chunk'а;
 * ``section_id``: из DocumentStructure;
@@ -31,7 +31,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Provenance:
-    """Provenance для SemanticRecord (PLAN §46)."""
+    """Provenance для SemanticRecord."""
 
     start_block: int
     end_block: int
@@ -49,7 +49,7 @@ class Provenance:
 
 @dataclass(frozen=True)
 class SemanticRecord:
-    """Структурированный output LLM map (PLAN §29).
+    """Структурированный output LLM map.
 
     Attributes:
         chunk_id: id chunk'а, для которого создан record.

@@ -19,7 +19,7 @@
 перепарсить документ — только сохраняют координаты, потерянные в
 ``extract_text``.
 
-Граница между Physical и Semantic (PLAN §3, §10):
+Граница между Physical и Semantic:
 
 * ``PhysicalDocument`` описывает **только то, что физически есть в файле**
   — pages, paragraphs, tables. ``DocumentBlock`` — это physical unit.
@@ -31,7 +31,7 @@
 * ``DocumentBlock.block_type`` (``"page"`` / ``"paragraph"`` / ``"table"``
   / ``"text"``) — это **physical** тип, не семантический.
 
-**PLAN §11:** ``DocumentIdentity`` — единственный owner identity/fingerprint.
+``DocumentIdentity`` — единственный owner identity/fingerprint.
 ``PhysicalDocument`` **не** придумывает собственный cache key —
 использует ``DocumentIdentity.from_path``.
 """
@@ -166,7 +166,7 @@ def _physical_cache_root(workspace_root: Path | str | None) -> Path:
 
 
 def _identity_for(path: Path) -> DocumentIdentity:
-    """``DocumentIdentity`` для ``path`` (PLAN §11 — единственный owner)."""
+    """``DocumentIdentity`` для ``path``."""
     return DocumentIdentity.from_path(path)
 
 
@@ -444,7 +444,7 @@ def _iter_txt_blocks(path: Path) -> tuple[list[DocumentBlock], int]:
     return blocks, 1
 
 
-# NOTE: ``load_physical_document`` удалён в Этапе 12.
+# NOTE: ``load_physical_document`` удалён.
 # Единственная production загрузка — ``DocumentLoader().load(path)``
 # (см. ``document_loader.py``).
 

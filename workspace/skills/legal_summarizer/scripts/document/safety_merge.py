@@ -1,6 +1,6 @@
-"""Safety net merge для микро-секций (PLAN §17, Этап 17).
+"""Safety net merge для микро-секций.
 
-После хорошего heading detection + repair (Этапы 11–16) остаются
+После хорошего heading detection + repair остаются
 **крайние случаи** — например, микро-секции из одной строки heading +
 одной строки body (false micro-section из-за агрессивного heading
 detector).
@@ -18,7 +18,7 @@ detector).
 * не меняет block_indices (только mark'ит как merged);
 * не убирает из дерева, а помечает ``confidence = 0.0`` и parent = merged.
 
-Реальная миграция consumers на ``DocumentStructure`` — Этап 45.
+Реальная миграция consumers на ``DocumentStructure`` впереди.
 Сейчас это **дополнительный** инструмент.
 """
 

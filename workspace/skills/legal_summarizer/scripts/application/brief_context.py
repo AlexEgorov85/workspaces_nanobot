@@ -7,7 +7,7 @@ Brief не является выборкой canonical chunks. Brief являе�
 ``DocumentStructure`` и ``PhysicalDocument`` напрямую (а не из
 ``analysis.chunks``).
 
-Архитектурные инварианты (см. план brief-refactor §0-§30):
+Архитектурные инварианты:
 
 * ровно один ``Chunk`` (тип возврата — ``Chunk``, не ``list[Chunk]``);
 * никакого повторного parsing PDF/DOCX/TXT;

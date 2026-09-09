@@ -9,7 +9,7 @@ Output: свободный текст с маркерами ``DOCUMENT CHUNK N: 
 в списке). Это убирает ChunkResultParseError полностью — LLM не может
 «забыть закрыть скобку» или «не экранировать кавычку».
 
-NOTE: legacy импорт ``ContextBatch`` удалён в PLAN §20. Сигнатура
+NOTE: legacy импорт ``ContextBatch`` удалён. Сигнатура
 ``build_batch_user_message(chunks, chunks_total=...)`` и
 ``parse_batch_response(chunks, llm_text)`` принимают ``list[Chunk]``
 напрямую — canonical-compatible.

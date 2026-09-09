@@ -1,11 +1,11 @@
-"""Numbering parser для headings / list items / captions (PLAN §6, §12).
+"""Numbering parser для headings / list items / captions.
 
 Цель: **один модуль** для всего numbering detection. Сейчас regex'ы
 разбросаны между ``heading.py`` (private ``_RE_NUMBERED_LEVEL_*``) и
-``list_detection.py`` (тоже private ``_RE_NUMBERED_LEVEL_*``). После
-Этапа 6 они будут импортироваться отсюда.
+``list_detection.py`` (тоже private ``_RE_NUMBERED_LEVEL_*``). Из нового
+единого модуля они импортируются отсюда.
 
-Поддерживаемые схемы (PLAN §6):
+Поддерживаемые схемы:
 
 * ``decimal``: ``1.``, ``1.1``, ``1.1.1`` — компоненты числовые.
 * ``legal_article``: ``Статья 12``, ``Статья 12.1``.
@@ -86,7 +86,7 @@ def parse_numbering(text: str) -> NumberingInfo | None:
     потом appendix, потом цирillic_alpha, потом decimal.
 
     ``ordinal`` пока ставим в ``None`` — он требует знания siblings
-    и будет вычислен в ``StructureTreeBuilder`` (PLAN §13).
+    и будет вычислен в ``StructureTreeBuilder``.
     """
     if not text:
         return None
@@ -186,7 +186,7 @@ def assign_sibling_ordinals(
 
     Правило: для каждой группы подряд идущих items с одним ``scheme``
     и одним ``parent`` (``components[:-1]``) — ordinal — позиция в группе
-    (1-based). Это решает проблему PLAN §13: глобальный counter даёт
+    (1-based). Это решает проблему: глобальный counter даёт
     неправильную нумерацию для nested структур.
     """
     if not items:

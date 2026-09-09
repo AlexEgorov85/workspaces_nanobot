@@ -1,6 +1,6 @@
-"""First-run vs Follow-up split (PLAN §40, Этап 40).
+"""First-run vs Follow-up split.
 
-Архитектурное разделение (PLAN §40):
+Архитектурное разделение:
 
 * **First-run**: file → parse → structure → chunk → semantic map → cache.
   Долго (LLM-вызовы). Результат — ``DocumentAnalysis``.
@@ -96,7 +96,7 @@ def build_followup_response(
     """Follow-up: retrieval → expansion → (low conf) full-doc fallback.
 
     Args:
-        analysis: ``DocumentAnalysis`` из cache (PLAN §40 — не перепарсиваем).
+        analysis: ``DocumentAnalysis`` из cache (не перепарсиваем).
         query: для question mode.
         mode: ``"question"`` (единственный поддерживаемый режим после
             brief-refactor — brief маршрутизируется через

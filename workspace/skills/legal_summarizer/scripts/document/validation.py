@@ -1,4 +1,4 @@
-"""StructureValidator (PLAN §4, §16).
+"""StructureValidator.
 
 Проверяет ``DocumentStructure`` на:
 
@@ -9,7 +9,7 @@
 * **No cross-branch overlap**: section nodes разных ветвей
   не должны перекрываться по диапазонам. **Parent-child overlap
   разрешён** (parent range содержит child range) — это часть
-  семантики nested hierarchy (PLAN §4);
+  семантики nested hierarchy;
 * **No sibling overlap**: section nodes одного parent не должны
   перекрываться по диапазонам;
 * **No cycles**: parent-chain не содержит циклов;
@@ -124,7 +124,7 @@ def validate_structure(
 ) -> ValidationReport:
     """Валидировать ``DocumentStructure`` против ``PhysicalDocument``.
 
-    Проверки (PLAN §4):
+    Проверки:
 
     1. ``total_blocks`` соответствует ``len(doc.blocks)``.
     2. ``start_block ≤ end_block`` для всех non-root nodes.

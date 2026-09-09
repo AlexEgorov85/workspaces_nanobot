@@ -233,7 +233,7 @@ def list_penalty_for_candidate(
       "голый" ``1. text``, и без legal marker это **почти наверняка
       не heading**).
 
-    Этап 3 (план): одиночный run (длины 1) — это **не** list,
+    одиночный run (длины 1) — это **не** list,
     а standalone heading-кандидат (``1. Общие положения`` в начале
     раздела). Штрафовать его за list-семантику — ломать реальные headings.
 
@@ -266,7 +266,7 @@ def ambiguous_decimal_penalty(candidate_ordinal: int, list_runs: list[ListRun]) 
     уже вернул 0.08, голая нумерация без legal marker / body должна
     быть почти запрещена.
 
-    Условие применения (Этап 3 плана):
+    Условие применения:
 
     * кандидат входит в run;
     * run **не** квалифицирован как ``is_list`` (т.е. ``_classify_run``
@@ -299,7 +299,7 @@ def classify_ambiguous_run(
 ) -> str:
     """Определить категорию для спорного numbered-run.
 
-    PLAN §10 — различать heading vs list item в спорных случаях.
+    Различать heading vs list item в спорных случаях.
 
     Возвращает одно из:
 

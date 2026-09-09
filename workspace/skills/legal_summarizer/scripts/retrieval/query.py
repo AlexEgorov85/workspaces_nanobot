@@ -1,26 +1,26 @@
-"""Question retrieval cascade (PLAN §33–35, Этапы 33–35).
+"""Question retrieval cascade.
 
 Целевой cascade:
 
     user query
         ↓
-    query normalization  (Этап 34: query_normalizer)
+    query normalization  (query_normalizer)
         ↓
     stopword removal    (минимальный, без LLM)
         ↓
     normalized lexical search (substring match)
         ↓
-    sparse ranking      (PLAN §35: score, BM25-lite)
+    sparse ranking      (score, BM25-lite)
         ↓
-    context expansion   (PLAN §37)
+    context expansion
         ↓
     final top-K
 
 Сейчас в проекте ``cached_retrieval.select_relevant_chunks`` — substring +
-first-match + full-document fallback. Это **слишком просто** (PLAN §33).
+first-match + full-document fallback. Это **слишком просто**.
 
 Этот модуль предоставляет новый каскад, который постепенно заменит
-старый (Этап 45).
+старый.
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ _WORD_RE = re.compile(r"\w+", re.UNICODE)  # noqa: W605 — \w is valid Python r
 
 
 def tokenize(text: str) -> list[str]:
-    """Нормализация + tokenization (PLAN §34).
+    """Нормализация + tokenization.
 
     Без LLM. Приводит к lowercase, выбрасывает стоп-слова, оставляет
     только word-tokens (regex \\w+).
@@ -83,7 +83,7 @@ def score_chunk(
     *,
     config: RetrievalConfig,
 ) -> RetrievalHit:
-    """Посчитать score для chunk'а по термам (PLAN §35).
+    """Посчитать score для chunk'а по термам.
 
     Score = sum(weight * term_frequency_in_section).
 
@@ -128,7 +128,7 @@ def retrieve_chunks(
 ) -> list[RetrievalHit]:
     """Cascade retrieval: normalize → score → top-K.
 
-    PLAN §33: retrieval ranking (не first-match).
+    Retrieval ranking (не first-match).
     """
     cfg = config or RetrievalConfig()
     terms = tokenize(query)

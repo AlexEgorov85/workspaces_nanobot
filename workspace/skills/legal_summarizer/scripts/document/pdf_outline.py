@@ -1,4 +1,4 @@
-"""PDF outline mapping (PLAN §11).
+"""PDF outline mapping.
 
 Критический bugfix: ``heading._extract_pdf_outline`` ставил ``block_index = -1``
 для outline-кандидатов, после чего ``tree.build_section_tree`` отбрасывал
@@ -27,7 +27,7 @@
             v
         HeadingCandidate (через агрегатор)
 
-Валидации (PLAN §11):
+Валидации:
 
 * destination существует (не ``None``);
 * page в документе (``1 <= page <= page_count``);
@@ -35,7 +35,7 @@
 * duplicate destinations → один outline entry;
 * отсут конные destinations → пропускаются с diagnostics;
 * конфликт с существующим heading (тот же ``block_index``) → outline
-  считается более приоритетным (PLAN §8, «very high»).
+  считается более приоритетным (категория «very high»).
 
 PDF outline нельзя слепо считать истиной — но **валидно mapped**
 outline даёт очень высокую confidence (0.95).
@@ -165,14 +165,14 @@ def _find_nearest_block_on_page(
     return None
 
 
-# Максимальная глубина outline (Этап 7 плана): PDF outline на больших
+# Максимальная глубина outline: PDF outline на больших
 # юридических документах (НК РФ) содержит сотни entries на глубоких
 # уровнях (Раздел → Глава → Статья → Пункт). Без ограничения каждая
 # outline entry становится section → 271 sections только на одном
 # уровне 2 для НК РФ. Ограничиваем до уровня 2 (Раздел/Глава/Статья),
 # отбрасывая уровни 3+ (пункты/подпункты), которые не должны быть
-# headings. См. также Этап 3 (negative evidence в heading.py для
-# regex_numbered_*, который не применяется к pdf_outline — поэтому
+# headings. negative evidence в heading.py для
+# regex_numbered_* не применяется к pdf_outline — поэтому
 # ограничение глубины outline критично).
 _MAX_OUTLINE_DEPTH = 2
 
@@ -187,7 +187,7 @@ def _walk_outline(
     Page_ref — это destination target, который потом резолвится в
     1-based page index через ``_resolve_destination_page``.
 
-    Этап 7 плана: ограничиваем глубину outline до ``_MAX_OUTLINE_DEPTH``
+    Ограничиваем глубину outline до ``_MAX_OUTLINE_DEPTH``
     (= 2). Уровни выше игнорируются — это предотвращает превращение
     каждой Статьи/Пункта из оглавления в section.
     """

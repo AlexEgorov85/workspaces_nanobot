@@ -179,7 +179,7 @@ def llm_document_reduce(
 
 
 # Back-compat alias — старые тесты ссылались на ``_CHAT_LOCK``
-# (см. ``test_etapa29_single_flight_concurrent.py::test_lock_finally_releases``).
+# (см. ``test_single_flight_concurrent_safety.py::test_lock_finally_releases``).
 # Новый код использует ``guarded_chat``, но ``_CHAT_LOCK`` остаётся
 # ссылкой на тот же объект для проверки инварианта в тестах.
 _CHAT_LOCK = LLM_FLIGHT_LOCK

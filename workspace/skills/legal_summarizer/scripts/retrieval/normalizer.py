@@ -1,6 +1,6 @@
-"""Query normalization (PLAN §34, Этап 34).
+"""Query normalization.
 
-Отдельный модуль для query normalization (PLAN §34):
+Отдельный модуль для query normalization:
 
 * case (lowercase);
 * punctuation;
@@ -8,7 +8,7 @@
 * stopwords;
 * legal aliases (если применимо).
 
-Не использует LLM — детерминированный (PLAN §61).
+Не использует LLM — детерминированный.
 
 Сейчас функция ``tokenize`` уже реализована в ``retrieval.py``. Этот
 модуль выносит её в собственный файл + добавляет ``normalize_query``
@@ -37,7 +37,7 @@ _LEGAL_ALIASES = {
 def normalize_query(query: str) -> str:
     """Нормализовать query: lowercase, strip punctuation, collapse whitespace.
 
-    PLAN §34. Не выбрасывает стоп-слова (это делает tokenize).
+    Не выбрасывает стоп-слова (это делает tokenize).
     """
     if not query:
         return ""
@@ -48,7 +48,7 @@ def normalize_query(query: str) -> str:
 
 
 def expand_with_aliases(text: str) -> list[str]:
-    """Вернуть оригинал + все legal aliases (PLAN §34).
+    """Вернуть оригинал + все legal aliases.
 
     Используется, если downstream хочет матчить как по query, так и
     по юридическим синонимам.

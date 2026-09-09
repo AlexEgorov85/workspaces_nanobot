@@ -1,4 +1,4 @@
-"""TokenEstimator — единая оценка токенов (PLAN §20, Этап 20).
+"""TokenEstimator — единая оценка токенов.
 
 Заменяет **разные** формулы оценки токенов, которые сейчас
 раскиданы по:
@@ -20,7 +20,7 @@ API:
 При наличии tokenizer (например, tiktoken) — использовать его. Сейчас
 зависимости tiktoken нет в ``requirements.txt`` — fallback
 ``chars / chars_per_token`` (calibrated 3.5 для русского/английского).
-PLAN §20 явно разрешает fallback.
+Fallback разрешён явно.
 
 Это **не LLM-вызов** и не сетевой — чистая deterministic функция.
 """
@@ -39,7 +39,7 @@ class TokenEstimatorConfig:
 
 
 class TokenEstimator:
-    """Единый TokenEstimator (PLAN §20).
+    """Единый TokenEstimator.
 
     Используется chunker'ом, packing'ом, execution strategy, reducer'ом,
     brief strategy, document_stats — все через единый API.

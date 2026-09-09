@@ -1,4 +1,4 @@
-"""ExecutionPlan (PLAN §21, Этап 21).
+"""ExecutionPlan.
 
 Immutable план выполнения, который объединяет результаты chunks,
 batches и token estimation. Используется всеми downstream'ами:
@@ -11,7 +11,7 @@ batches и token estimation. Используется всеми downstream'ам
 ``ExecutionPlan`` — единственный канонический API планирования.
 Legacy ``pack_chunks`` удалён.
 
-Детерминированный (PLAN §61, §75): один документ + одна стратегия →
+Детерминированный: один документ + одна стратегия →
 один план (включаяя chunk IDs и batch composition).
 """
 

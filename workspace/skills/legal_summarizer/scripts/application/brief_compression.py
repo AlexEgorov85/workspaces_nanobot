@@ -1,4 +1,4 @@
-"""Детерминированная компрессия brief-секций (PLAN brief-refactor §13-§16).
+"""Детерминированная компрессия brief-секций.
 
 BRIEF CONTRACT: один документ → ровно один Chunk.
 Brief не выбирает canonical chunks. Brief собирает одно структурное

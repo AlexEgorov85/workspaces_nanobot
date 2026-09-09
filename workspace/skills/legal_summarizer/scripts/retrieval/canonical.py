@@ -1,4 +1,4 @@
-"""Canonical retrieval wrapper (Этап 16А).
+"""Canonical retrieval wrapper.
 
 Использует только ``DocumentAnalysis.retrieve`` и canonical
 ``build_followup_response`` (через ``structure.followup``) для

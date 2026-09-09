@@ -1,13 +1,13 @@
-"""Full-document fallback (PLAN §38, Этап 38).
+"""Full-document fallback.
 
-По плану §38, full-document fallback должен быть **последним** шагом
+Full-document fallback должен быть **последним** шагом
 retrieval cascade — не default'ом. Этот модуль предоставляет явный
 helper для controlled fallback, когда confidence низкая.
 
-Confidence levels (PLAN §38):
+Confidence levels:
 
 * high → retrieval answer.
-* medium → expanded context (Этап 37).
+* medium → expanded context.
 * low → broader section search.
 * very low → controlled full-document fallback (этот модуль).
 """
@@ -78,7 +78,7 @@ def full_document_fallback(
 
 @dataclass(frozen=True)
 class RetrievalDecision:
-    """Решение retrieval cascade (PLAN §38)."""
+    """Решение retrieval cascade."""
 
     confidence: str
     hits: tuple[Chunk, ...] = ()

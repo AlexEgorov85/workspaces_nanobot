@@ -9,7 +9,7 @@ from document.structure import DocumentStructure
 from execution.config import HierarchicalReducerConfig
 
 def deterministic_truncate(text: str, max_chars: int) -> str:
-    """PLAN §27: deterministic head + tail truncate с omission marker.
+    """Deterministic head + tail truncate с omission marker.
 
     Используется как **emergency fallback** — нормальный путь — это
     hierarchical reduce с правильным budget.
@@ -60,10 +60,10 @@ def reduce_sections_to_document(
 ) -> HierarchicalReducerResult:
     """Hierarchical reduce: section-level → rounds → final.
 
-    Используется, когда section_summaries уже есть (Этап 40 follow-up
+    Используется, когда section_summaries уже есть (follow-up
     или pre-computed section summaries).
 
-    Этап 9 invariant: данные не теряются. Если после ``max_rounds``
+    Invariant: данные не теряются. Если после ``max_rounds``
     остаётся более одной группы, делается **финальный reduce** (один
     дополнительный round, объединяющий всё, что осталось). Если
     ``llm_runner is None`` — финальный reduce пропускается и берётся
@@ -129,7 +129,7 @@ def reduce_sections_to_document(
             ),
         )
 
-    # Финальный reduce (Этап 9): если после max_rounds осталось >1
+    # Финальный reduce: если после max_rounds осталось >1
     # группы — делаем один дополнительный round, чтобы не потерять
     # данные.
     if len(current) > 1:

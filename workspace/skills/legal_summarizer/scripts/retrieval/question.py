@@ -1,6 +1,6 @@
-"""Question via retrieval index (PLAN §64).
+"""Question via retrieval index.
 
-PLAN §64: follow-up ``question`` должен использовать
+Follow-up ``question`` должен использовать
 ``DocumentAnalysis.retrieve`` (через inverted index), не substring
 first-match.
 
@@ -36,7 +36,7 @@ def answer_question_from_analysis(
     *,
     config: FollowupConfig | None = None,
 ) -> QuestionResponse:
-    """Ответить на question через cached analysis (PLAN §64).
+    """Ответить на question через cached analysis.
 
     Использует ``DocumentAnalysis.retrieve`` (inverted index +
     sparse ranking) — не перепарсивает документ.

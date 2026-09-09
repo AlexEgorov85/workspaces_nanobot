@@ -1,7 +1,7 @@
-"""ChunkResultParseError + smart retry (PLAN §30, Этап 30).
+"""ChunkResultParseError + smart retry.
 
 Сейчас ошибка JSON в ответе LLM приводит к повторной отправке
-**всего batch'а** — это дорого (PLAN §30).
+**всего batch'а** — это дорого.
 
 Smart retry:
 
@@ -85,7 +85,7 @@ def parse_batch_response_local(
 
     Если JSON невалидный или отсутствуют chunk_ids — возвращает с
     ``failed_chunk_ids``, чтобы caller мог отправить repair prompt
-    только для них (PLAN §30).
+    только для них.
     """
     obj = _extract_first_json_object(response_text)
     if obj is None:
@@ -133,7 +133,7 @@ def build_repair_prompt(
 ) -> str:
     """Создать **точечный** repair prompt только для failed chunks.
 
-    Это решает проблему PLAN §30: вместо повторной отправки всего batch'а
+    Это решает проблему: вместо повторной отправки всего batch'а
     мы просим LLM дать только недостающие chunk summaries.
     """
     return (

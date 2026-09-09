@@ -1,4 +1,4 @@
-"""Structural repair pass (PLAN §5, §15).
+"""Structural repair pass.
 
 После построения иерархии запускается **repair** для исправления
 типичных проблем:
@@ -18,11 +18,11 @@ Repair **не придумывает** информацию, а только:
 * консервативно склеивает нарушения numbering (см. ``_repair_numbering``);
 * не меняет confidence, evidence, source_refs.
 
-**Important (PLAN §5.1):** one-block sections (``start_block == end_block``)
+**Important:** one-block sections (``start_block == end_block``)
 НЕ удаляются автоматически. Один блок может быть полностью валидной
 секцией (например, «Статья 1» одна занимает один semantic block).
 
-**Important (PLAN §5.2-§5.4):**
+**Important:**
 
 * При изменении ``parent_id`` синхронно пересобираем ``children``
   нового parent (drop из старого children + add в новый);
@@ -31,7 +31,7 @@ Repair **не придумывает** информацию, а только:
 * Никаких dangling children;
 * Repair детерминирован (никаких set-iterations на ordered data).
 
-Структура **детерминированная** (PLAN §61).
+Структура **детерминированная**.
 """
 
 from __future__ import annotations

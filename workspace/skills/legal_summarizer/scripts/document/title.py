@@ -1,4 +1,4 @@
-"""Document title resolution (PLAN §14, Этап 14).
+"""Document title resolution.
 
 Источники title (по приоритету):
 
@@ -124,7 +124,7 @@ def resolve_title(
 ) -> DocumentTitle | None:
     """Извлечь title из ``PhysicalDocument``.
 
-    Приоритет источников — по плану §14 (см. docstring модуля).
+    Приоритет источников — как описано в docstring модуля.
 
     Args:
         doc: ``PhysicalDocument`` (обязателен — нам нужны ``blocks``).

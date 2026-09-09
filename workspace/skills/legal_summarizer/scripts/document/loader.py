@@ -1,12 +1,12 @@
 """DocumentLoader — единственный canonical loader для legal_summarizer.
 
-Создаёт ``PhysicalDocument`` за **один проход** по файлу (PLAN §12).
+Создаёт ``PhysicalDocument`` за **один проход** по файлу.
 
-**PLAN §12 + Этап 12:** ``DocumentLoader.load()`` — единая production
+``DocumentLoader.load()`` — единая production
 загрузочная цепочка. Делает один проход для blocks, и оттуда же
 извлекает text для title resolution. Никакого двойного парсинга PDF/DOCX.
 
-Legacy ``load_physical_document`` удалён (Этап 12). Все consumers
+Legacy ``load_physical_document`` удалён. Все consumers
 используют ``DocumentLoader().load(path)``.
 """
 
@@ -26,7 +26,7 @@ from workspace.utils.office_files import detect_format
 
 
 class DocumentLoader:
-    """Canonical loader для ``PhysicalDocument`` (PLAN §4, §10, §12).
+    """Canonical loader для ``PhysicalDocument``.
 
     Single-pass loading: ``_iter_*_blocks`` парсит файл один раз,
     и тот же blocks-iteration даёт текст для title resolution

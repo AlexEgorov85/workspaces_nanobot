@@ -178,8 +178,8 @@ def run_direct(
         "cb_000": {"chunk_ids": [c.chunk_id for c in ordered], "status": "completed"},
     }
     manifest.batches_done = ["cb_000"]
-    # Commit #5: ``document_id`` в ``manifest.raw`` для reverse-lookup
-    # ``operation_id → document_id`` (commit #6 service.py --question).
+    # ``document_id`` в ``manifest.raw`` для reverse-lookup
+    # ``operation_id → document_id`` (вопрос через document cache).
     document_id_direct = (
         analysis.identity.document_id
         if analysis is not None and getattr(analysis, "identity", None) is not None
@@ -293,12 +293,12 @@ def run_map_reduce(
     )
     from execution.pipeline import run_one_batch_async as _run_one_batch_async
 
-    # Commit #4: опциональная параллельная запись chunk summaries в
+    # ─ опциональная параллельная запись chunk summaries в
     # document-level cache (cross-operation identity). Если ``analysis``
     # или ``workspace_root`` отсутствуют — callback не инжектируется,
     # execution НЕ пишет в document-level cache.
     #
-    # Commit #C1: document-level cache хранит только question-independent
+    # document-level cache хранит только question-independent
     # (baseline) summaries. При ``question is not None`` chunk summary
     # пишется только в operation-level cache (``operations/<op_id>/chunks/``).
     # Через callback пробрасываем ``question`` для guard внутри
@@ -459,7 +459,7 @@ def _persist_final_manifest(
     )
     save_manifest(final_manifest, workspace_root=workspace_root)
 
-    # Commit #0c: persist section summaries в document-level cache.
+    # persist section summaries в document-level cache.
     # Только после save_manifest — отдельная стадия жизненного цикла.
     # ``document_id`` берётся из ``analysis.identity`` (DocumentIdentity,
     # построенный в run_canonical_pipeline от path+size+mtime).

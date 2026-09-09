@@ -1,4 +1,4 @@
-"""Объединение heading-кандидатов (PLAN §9, Этап 9).
+"""Объединение heading-кандидатов.
 
 Если несколько источников (DOCX style + numbering + regex + PDF outline)
 говорят об одном и том же ``DocumentBlock``, нельзя создавать
@@ -14,7 +14,7 @@
 размазана и плохо отделима от тестов.
 
 Этот модуль — **явный** aggregator, который можно вызвать из будущих
-pipelines (Этап 12 — StructureTreeBuilder). Сейчас он
+pipelines (StructureTreeBuilder). Сейчас он
 **декларативный** — собирает кандидатов в ``AggregatedCandidate``
 с комбинированными evidence. Заменяет дубликаты в ``HeadingCandidate``
 (например, PDF outline + DOCX style указывают на одно и то же место).
@@ -32,12 +32,12 @@ from document.heading import (
 
 @dataclass(frozen=True)
 class AggregatedCandidate:
-    """Один объединённый heading-кандидат (PLAN §9).
+    """Один объединённый heading-кандидат.
 
     Attributes:
         block_index: ordinal ``DocumentBlock`` (для outline
             кандидатов ``block_index`` остаётся ``-1``, и
-            downstream mapping обязан решить эту ситуацию — Этап 11).
+            downstream mapping обязан решить эту ситуацию.
         text: текст кандидата (один из исходных текстов; для outline
             кандидатов — outline title, для остальных — block content).
         level: максимальный level среди объединённых источников.
@@ -61,7 +61,7 @@ def aggregate_by_block(
     """Объединить ``HeadingCandidate`` по ``block_index``.
 
     Outline-кандидаты (с ``block_index = -1``) не агрегируются с
-    обычными — они остаются отдельно (для mapping в Этапе 11).
+    обычными — они остаются отдельно (для mapping).
     """
     by_block: dict[int, list[HeadingCandidate]] = {}
     outline_only: list[HeadingCandidate] = []
