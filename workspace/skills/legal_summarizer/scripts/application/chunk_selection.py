@@ -5,8 +5,9 @@
 
 * ``question`` → retrieval (canonical), затем relaxed lexical fallback,
   затем bounded top-of-document fallback.
-* ``brief`` → ``select_brief_chunks_from_analysis`` (chunking policy) +
-  ``allocate_brief_budget`` (chunking policy) для cap по chars.
+* ``brief`` → ``BriefContextBuilder.build_brief_chunk``: ровно один
+  структурный ``Chunk`` из ``DocumentStructure`` + ``PhysicalDocument``
+  (см. ``application.brief_context``).
 * ``detailed``/default → все chunks из ``insp.chunks``.
 """
 
@@ -15,7 +16,7 @@ from __future__ import annotations
 import re
 
 from chunking._text_helpers import progress
-from llm.config import get_chunking_config, get_execution_config
+from llm.config import get_execution_config
 
 
 def _resolve_max_chunks() -> int:
@@ -83,26 +84,35 @@ def select_chunks_for_mode(
         progress("question: keyword miss → bounded top-of-document fallback")
         return insp.chunks[:_fallback_max]
     if length == "brief":
-        from application.brief_from_analysis import (
-            select_brief_chunks_from_analysis,
+        from application.brief_context import (
+            BriefContextConfig,
+            build_brief_chunk,
         )
-        chunk_cfg = get_chunking_config()
-        chosen = list(select_brief_chunks_from_analysis(insp.analysis, config=None))
-        brief_coverage = chunk_cfg.get("brief_coverage_ratio")
-        if brief_coverage is None:
-            brief_coverage = 0.5
-        if brief_coverage < 1.0 and chosen:
-            target = max(1, int(len(chosen) * brief_coverage))
-            chosen = chosen[:target]
-        brief_total_budget = chunk_cfg.get("brief_max_input_chars")
-        if brief_total_budget:
-            from chunking.brief_budget import (
-                allocate_brief_budget,
+        from llm.config import get_brief_context_config
+
+        if insp.analysis is None:
+            return []
+        cfg_dict = get_brief_context_config()
+        cfg = BriefContextConfig(
+            max_chars_fallback=int(cfg_dict.get("max_chars_fallback", 30000)),
+            input_ratio=(
+                float(cfg_dict["input_ratio"])
+                if cfg_dict.get("input_ratio") is not None
+                else None
+            ),
+            chars_per_token=float(cfg_dict.get("chars_per_token", 3.5)),
+            structure_max_chars=int(cfg_dict.get("structure_max_chars", 12000)),
+        )
+        chunk = build_brief_chunk(insp.analysis, config=cfg)
+        if chunk is None:
+            raise RuntimeError(
+                "BriefContextBuilder.build_brief_chunk returned no chunk"
             )
-            chosen = list(allocate_brief_budget(
-                chosen, total_budget_chars=int(brief_total_budget),
-            ))
-        return chosen
+        progress(
+            f"brief: 1 structural chunk "
+            f"(char_count={chunk.char_count}, blocks={len(chunk.block_indices)})"
+        )
+        return [chunk]
     return list(insp.chunks)
 
 

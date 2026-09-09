@@ -1300,8 +1300,7 @@ src/legal_summarizer/
 │
 ├── chunking/             # чанкинг поверх document-блоков:
 │   ├── chunker.py, chunks.py, block_ownership.py,
-│   │   importance_score.py, importance_brief.py,
-│   │   brief_budget.py, packing.py, order.py
+│   │   importance_score.py, packing.py, order.py
 │
 ├── retrieval/            # retrieval-индексы и QA (выше chunking/document):
 │   ├── query.py, normalizer.py, index.py, fallback.py,
@@ -1336,8 +1335,11 @@ src/legal_summarizer/
 │   │                     #   build_pipeline_result (бывший ``summarizer_canonical.py``)
 │   ├── pipeline_structure.py
 │   │                     #   run_canonical_pipeline impl (бывший structure/pipeline.py)
-│   └── brief_from_analysis.py
-│                          #   select_brief_chunks_from_analysis
+│   ├── brief_context.py
+│   │                     #   BriefContextBuilder.build_brief_chunk
+│   │                     #   (BRIEF CONTRACT: один документ → ровно один Chunk)
+│   └── brief_compression.py
+│                          #   детерминированная weighted компрессия секций
 │
 ├── cache/                # долговечные per-operation-state:
 │   └── manifest.py       #   NormalizedManifest, resume API
@@ -1386,12 +1388,70 @@ document/retrieval/llm.
 - **#20.** LLM-trim секций заменён на truncation `[:max_chars]`.
   `section_trim_calls` всегда 0 в stats.
 
+### Brief: всегда ровно один Chunk (BRIEF CONTRACT)
+
+`legal_summarizer --length brief` (default) собирает через
+`application.brief_context.build_brief_chunk` **ровно один**
+`Chunk` — компактное структурное представление всего документа.
+Это **архитектурный инвариант**, а не настройка:
+
+* `len(ctx.chunks) == 1` → `strategy="direct"`, `plan=None`
+  (см. `context_builder.build_execution_context`).
+* Никакого map-reduce, никакого fallback на несколько chunks.
+* Источники: `DocumentAnalysis.physical` и `DocumentAnalysis.structure`
+  напрямую — `analysis.chunks` (canonical) **не используется**.
+
+Структура итогового `chunk.text`:
+
+```text
+DOCUMENT STRUCTURE
+<outline всех значимых structural nodes в pre-order>
+
+DOCUMENT CONTENT
+[Preamble]
+<preamble blocks>
+[<Section heading>]
+<все physical blocks subtree в document order>
+```
+
+`max_chars` рассчитывается **динамически**:
+
+```text
+max_chars = agents.defaults.contextWindowTokens
+          * chunking.brief_input_ratio
+          * brief_context.chars_per_token
+```
+
+Fallback: `brief_context.max_chars_fallback` (если контекстное окно
+неизвестно). Текущие дефолты: 65536 tokens × 0.13 × 3.5 = ~29800 chars.
+
+При превышении `max_chars` сжатие идёт **по тексту секций**
+(`application.brief_compression`):
+
+1. Все headings секций сохраняются.
+2. Document structure (outline) сохраняется с собственным budget
+   (`brief_context.structure_max_chars`).
+3. Тексты сокращаются по безопасной границе
+   (paragraph → newline → sentence → word → hard char).
+4. Сокращённые секции получают явный маркер
+   `[BRIEF: section content truncated]` — LLM понимает, что
+   отсутствие дальнейшего текста не означает, что в документе этого
+   больше нет.
+5. Целые секции никогда не удаляются (даже при переполнении).
+6. Таблицы передаются атомарно (на уровне блока, не строки).
+
+Удалённые legacy-модули: `chunking/importance_brief.py`,
+`chunking/brief_budget.py`, `application/brief_from_analysis.py`.
+Удалённые config-ключи: `chunking.brief_coverage_ratio`,
+`chunking.brief_max_chars_per_chunk`, `chunking.brief_max_input_chars`.
+`retrieval.followup.build_followup_response(mode="brief")` теперь
+raises `NotImplementedError` (brief — chunk-selection concern,
+а не retrieval).
+
 ### Opt-in флаги (default OFF для back-compat)
 
 - `chunking_config.direct_strategy_min_chars > 0` → DIRECT strategy для
   средних документов. Default 0 = старое поведение.
-- `chunking_config.brief_coverage_ratio < 0.5` → уменьшение выборки для
-  brief mode. Default 0.5 = старое поведение.
 - `PackingConfig.allow_adjacent_sections=True` → locality-aware packing.
   Default False = strict section-locality.
 

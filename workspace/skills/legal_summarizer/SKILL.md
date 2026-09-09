@@ -171,6 +171,37 @@ Skill состоит из:
 * `references/` — подробные документы: `architecture.md`, `contracts.md`,
   `testing.md`.
 
+### Режим `--length brief`: всегда ровно один структурный Chunk
+
+`brief` режим — это **не** выборка N canonical chunks.
+Это **компактное структурное представление всего документа**,
+собранное в **ровно один** `Chunk` через
+`application.brief_context.BriefContextBuilder.build_brief_chunk`:
+
+* Источники: `DocumentAnalysis.physical` + `DocumentAnalysis.structure`
+  напрямую. `analysis.chunks` (canonical) **не используется**.
+* Структура `chunk.text`:
+  ```text
+  DOCUMENT STRUCTURE
+  <рекурсивный outline всех значимых structural nodes>
+
+  DOCUMENT CONTENT
+  [Preamble]
+  <preamble blocks>
+  [<Section heading>]
+  <все physical blocks subtree в document order>
+  ```
+* `len(ctx.chunks) == 1` → `strategy="direct"`, `plan=None`
+  (см. `application/context_builder.py`). Никакого map-reduce.
+* При превышении `max_chars` (рассчитывается динамически от
+  `agents.defaults.contextWindowTokens` ×
+  `chunking.brief_input_ratio` × `brief_context.chars_per_token`)
+  сжимается **текст** секций (через
+  `application.brief_compression`), но сами секции целиком
+  **не удаляются**. Сокращённые секции получают маркер
+  `[BRIEF: section content truncated]`.
+* Таблицы передаются атомарно (на уровне блока, не строки).
+
 ## Что НЕ делать
 
 - ❌ **НЕ вызывать `workspace.utils.office_files.extract_metadata()`**

@@ -1,7 +1,13 @@
 """Canonical retrieval wrapper (Этап 16А).
 
 Использует только ``DocumentAnalysis.retrieve`` и canonical
-``build_followup_response`` (через ``structure.followup``).
+``build_followup_response`` (через ``structure.followup``) для
+``mode="question"``.
+
+Архитектурное замечание (brief-refactor): ``select_brief_from_analysis``
+УДАЛЁН из этого модуля — он нарушал архитектурное правило
+``retrieval → application`` (запрещено). Для brief используйте
+``application.chunk_selection.select_chunks_for_mode`` напрямую.
 """
 
 from __future__ import annotations
@@ -35,22 +41,7 @@ def answer_followup(
     )
 
 
-def select_brief_from_analysis(
-    analysis: DocumentAnalysis,
-    *,
-    config: FollowupConfig | None = None,
-) -> FollowupResult:
-    """Выбрать chunks для brief через canonical analysis."""
-    return build_followup_response(
-        analysis,
-        None,
-        mode="brief",
-        config=config,
-    )
-
-
 __all__ = [
     "answer_followup",
-    "select_brief_from_analysis",
 ]
 

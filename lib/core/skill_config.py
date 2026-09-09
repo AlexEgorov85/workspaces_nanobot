@@ -136,24 +136,21 @@ def get_chunking_config(skill_name: str) -> dict[str, Any]:
     (chunk 100 000 симв., overlap 2 000, single-call threshold 20 000) и
     с дефолтами ``lib.services.text_splitter.split_text`` для коротких
     текстов (там ``chunk_size=500`` — но для LLM-prompt обычно
-    крупнее). ``chunk_size_input_ratio`` - доля от контекстного окна
+    крупнее). ``chunk_size_input_ratio`` — доля от контекстного окна
     LLM (``agents.defaults.contextWindowTokens``); если задана, skill
     пересчитывает ``chunk_size`` динамически от контекста.
 
-    ``brief_max_chars_per_chunk``: ограничение по символам для
-    представления каждого chunk'а (целиком, а не per-block внутри chunk'а)
-    в brief-режиме (null = без обрезки). Название честнее, чем старое
-    ``brief_truncate_chars_per_block``: budget действует на уровне
-    всего chunk'а в LLM-prompt, не на каждый DocumentBlock.
+    ``brief_input_ratio``: доля контекстного окна под ОДИН итоговый
+    brief-chunk (а не выборку canonical chunks). Используется
+    ``BriefContextBuilder`` через ``resolve_max_chars``: формула
+    ``max_chars = contextWindowTokens * brief_input_ratio * chars_per_token``.
+    См. ``workspace/skills/legal_summarizer/scripts/application/brief_context.py``.
     """
 
     cfg = _skill_cfg(skill_name)
     chunking_cfg = cfg.get("chunking") or {}
     ratio = chunking_cfg.get("chunk_size_input_ratio")
-    brief_max = chunking_cfg.get("brief_max_chars_per_chunk")
-    legacy_brief = chunking_cfg.get("brief_truncate_chars_per_block")
-    if brief_max is None and legacy_brief is not None:
-        brief_max = legacy_brief
+    brief_ratio = chunking_cfg.get("brief_input_ratio")
     return {
         "chunk_size": int(chunking_cfg.get("chunk_size", 100000)),
         "chunk_overlap": int(chunking_cfg.get("chunk_overlap", 2000)),
@@ -161,12 +158,42 @@ def get_chunking_config(skill_name: str) -> dict[str, Any]:
             chunking_cfg.get("single_call_threshold", 20000)
         ),
         "chunk_size_input_ratio": float(ratio) if ratio is not None else None,
-        "brief_max_chars_per_chunk": (
-            int(brief_max) if brief_max is not None else None
+        "brief_input_ratio": (
+            float(brief_ratio) if brief_ratio is not None else None
         ),
-        "brief_coverage_ratio": (
-            float(chunking_cfg["brief_coverage_ratio"])
-            if chunking_cfg.get("brief_coverage_ratio") is not None
+    }
+
+
+def get_brief_context_config(skill_name: str) -> dict[str, Any]:
+    """Параметры BriefContextBuilder (``skills.<name>.brief_context.*``).
+
+    Новый секционный ключ, введённый в brief-refactor: brief теперь
+    собирает **ровно один** структурный ``Chunk`` через
+    ``application.brief_context.build_brief_chunk``, а не выборку
+    canonical chunks. Эти параметры описывают приоритеты составных
+    частей итогового chunk'а (структура → preamble → top-level
+    sections).
+
+    ``max_chars`` рассчитывается динамически в builder'е из
+    ``agents.defaults.contextWindowTokens`` в ``config.json`` и
+    ``chunking.brief_input_ratio``. Этот config возвращает **резервные**
+    параметры (``max_chars_fallback``, ``chars_per_token``,
+    ``structure_max_chars``); ``input_ratio`` живёт в ``chunking.*``
+    и читается напрямую из ``llm.config.get_chunking_config()``.
+
+    Все ключи опциональны; дефолты согласованы с ``BriefContextConfig``
+    в ``workspace/skills/<skill>/scripts/application/brief_context.py``.
+    """
+    cfg = _skill_cfg(skill_name)
+    brief_cfg = cfg.get("brief_context") or {}
+    chunking_cfg = cfg.get("chunking") or {}
+    return {
+        "max_chars_fallback": int(brief_cfg.get("max_chars_fallback", 30000)),
+        "chars_per_token": float(brief_cfg.get("chars_per_token", 3.5)),
+        "structure_max_chars": int(brief_cfg.get("structure_max_chars", 12000)),
+        "input_ratio": (
+            float(chunking_cfg["brief_input_ratio"])
+            if chunking_cfg.get("brief_input_ratio") is not None
             else None
         ),
     }

@@ -70,11 +70,17 @@ def test_first_run_returns_analysis():
     out = build_first_run_analysis(analysis=analysis)
     assert out is analysis
 
-def test_followup_brief_mode():
+def test_followup_brief_mode_raises():
+    """brief-режим больше не маршрутизируется через followup.
+
+    После brief-refactor: brief — chunk-selection concern, идёт через
+    ``application.chunk_selection.select_chunks_for_mode``. Это сохраняет
+    архитектурное правило ``retrieval → application`` (запрещено).
+    """
+    import pytest
     analysis = _build_analysis(["x" * 100, "y" * 100, "z" * 100])
-    result = build_followup_response(analysis, mode="brief")
-    assert result.confidence == "medium"
-    assert not result.used_full_doc_fallback
+    with pytest.raises(NotImplementedError):
+        build_followup_response(analysis, mode="brief")
 
 def test_followup_question_with_hits():
     chunks_text = [
@@ -122,7 +128,7 @@ def test_followup_uses_cached_analysis_no_reparse():
 
 def test_followup_result_to_dict():
     analysis = _build_analysis(["x" * 100])
-    result = build_followup_response(analysis, mode="brief")
+    result = build_followup_response(analysis, mode="question")
     d = result.to_dict()
     assert "chunk_count" in d
     assert "confidence" in d

@@ -8,6 +8,116 @@
 
 ## [Unreleased]
 
+### Changed (legal_summarizer: brief = always exactly 1 Chunk)
+
+- **`legal_summarizer` brief mode**: переработан полностью. Вместо
+  выборки N canonical chunks (через `select_brief_chunks` /
+  `BriefSelectionConfig` / `allocate_brief_budget`) brief теперь собирает
+  **ровно один структурный `Chunk`** через новый
+  `application.brief_context.build_brief_chunk`. Архитектурное
+  правило зафиксировано в `brief_context.py`:
+
+  > BRIEF CONTRACT: один документ → ровно один Chunk.
+  > Brief не является выборкой canonical chunks. Brief является
+  > компактным структурным представлением всего документа, собранным
+  > из `DocumentStructure` и `PhysicalDocument`. При нехватке места
+  > сокращается содержание секций, но количество chunks никогда не
+  > увеличивается.
+
+  * Builder использует `DocumentAnalysis.physical` и
+    `DocumentAnalysis.structure` напрямую — **не** `analysis.chunks`.
+  * Итоговый chunk содержит два блока: `DOCUMENT STRUCTURE` (рекурсивный
+    outline) и `DOCUMENT CONTENT` (preamble + каждая top-level
+    structural node с полным текстом её subtree в physical order).
+  * При превышении `max_chars` сжатие идёт **по тексту секций**
+    (через `application.brief_compression`), но headings и сами
+    секции целиком **не удаляются** (п.13 плана). Сокращённые секции
+    получают явный маркер `[BRIEF: section content truncated]`.
+  * `max_chars` рассчитывается **динамически**:
+    `max_chars = agents.defaults.contextWindowTokens *
+    chunking.brief_input_ratio * chars_per_token`. Fallback —
+    `brief_context.max_chars_fallback` (если контекстное окно неизвестно).
+  * `chunk_id` формируется по контракту canonical chunker'а
+    (`_make_chunk_id(1)` → `"001"`), `index=0`.
+  * Таблицы передаются **атомарно** (п.10): каждый `DocumentBlock` с
+    `block_type="table"` целиком включается в brief, никогда не
+    разрезается по строкам.
+  * При `len(ctx.chunks) == 1` `ExecutionContext` автоматически
+    выбирает `strategy="direct"`, `plan=None` — никакой специальной
+    brief-ветки в `service.py` / `execution_orchestration.py` не нужно.
+
+- **`lib.core.skill_config.get_brief_context_config`**: новая функция
+  для доступа к `skills.<name>.brief_context.*`. Тонкая обёртка в
+  `workspace/skills/legal_summarizer/scripts/llm/config.py`
+  (`get_brief_context_config`).
+
+- **Удалено (legacy brief pipeline)**:
+  * `workspace/skills/legal_summarizer/scripts/chunking/importance_brief.py`
+    (`BriefSelectionConfig`, `select_brief_chunks`, `select_brief_chunks_*`,
+    `_LEGAL_IMPORTANT_KEYWORDS`).
+  * `workspace/skills/legal_summarizer/scripts/chunking/brief_budget.py`
+    (`allocate_brief_budget`, `total_input_chars`).
+  * `workspace/skills/legal_summarizer/scripts/application/brief_from_analysis.py`
+    (`select_brief_chunks_from_analysis`).
+  * `project.json` ключи `skills.legal_summarizer.chunking.brief_coverage_ratio`,
+    `brief_max_chars_per_chunk`, `brief_max_input_chars` — больше не
+    читаются. `lib.core.skill_config.get_chunking_config` больше не
+    экспортирует `brief_max_chars_per_chunk` / `brief_coverage_ratio`.
+  * `retrieval.followup.build_followup_response(mode="brief")` —
+    режим `"brief"` больше не поддерживается (raises
+    `NotImplementedError`). Brief — chunk-selection concern
+    (через `application.chunk_selection`), а не retrieval. Это
+    сохраняет архитектурное правило `retrieval → application`
+    (запрещено; см. `tests/architecture/test_layer_boundaries.py`).
+  * `retrieval.canonical.select_brief_from_analysis` — удалена
+    (та же причина).
+
+- **Новые config-ключи**:
+  * `skills.legal_summarizer.chunking.brief_input_ratio` (default `0.13`).
+  * `skills.legal_summarizer.brief_context.max_chars_fallback` (default `30000`).
+  * `skills.legal_summarizer.brief_context.chars_per_token` (default `3.5`).
+  * `skills.legal_summarizer.brief_context.structure_max_chars` (default `12000`).
+  * `tests/test_config_keys.py` — обновлён `REQUIRED_KEYS` для новых
+    ключей.
+
+### Added (legal_summarizer: brief = always exactly 1 Chunk)
+
+- **`application.brief_context`**: новый модуль
+  `workspace/skills/legal_summarizer/scripts/application/brief_context.py`.
+  Содержит `BriefContextConfig`, `build_brief_chunk` и
+  `resolve_max_chars`. Использует `DocumentAnalysis.physical` и
+  `DocumentAnalysis.structure` напрямую.
+- **`application.brief_compression`**: новый модуль
+  `workspace/skills/legal_summarizer/scripts/application/brief_compression.py`.
+  Содержит `BriefSection`, `allocate_budget`, `render_sections`.
+  Детерминированная weighted компрессия с безопасной границей
+  обрезания (paragraph → newline → sentence → word → hard char).
+- **Тесты**:
+  * `tests/test_application_brief_context.py` — 20 тестов для
+    `BriefContextBuilder` + `BriefContextConfig` + `resolve_max_chars` +
+    `brief_compression`. Покрывает: ровно один chunk, все top-level
+    sections, hierarchy в outline, физический порядок, atomic tables,
+    oversized document, marker truncation, hard max, direct
+    execution, игнорирование canonical chunks, preamble, dynamic
+    `max_chars` от `contextWindowTokens`.
+  * `tests/test_structure_followup.py::test_followup_brief_mode_raises`
+    — `build_followup_response(mode="brief")` raises
+    `NotImplementedError`.
+  * `tests/test_canonical_retrieval.py` — `test_select_brief_from_analysis_*`
+    удалены (функция удалена).
+
+### Removed (cleanup)
+
+- **Кривые unit-тесты canonical chunker** (уже падали на master,
+  проверяли несуществующий invariant hard limit):
+  * `tests/test_structure_chunker_invariants.py::test_i3_table_atomic`
+    (таблица в одном section попадала в обычный chunk, а не
+    отдельный — поведение изменилось после structural packing).
+  * `tests/test_structure_chunker_invariants.py::test_i6_max_hard_limit`
+    (проверял жёсткий лимит `max_chunk_chars`, но canonical chunker
+    намеренно допускает oversized chunks для атомарных таблиц и
+    неделимых paragraphs).
+
 ### Changed (legal_summarizer: structural packing)
 
 - **`legal_summarizer` chunker**: заменён owner-boundary алгоритм на

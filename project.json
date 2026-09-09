@@ -249,30 +249,33 @@
                                                     // overlap внутри split_text fallback для continuity.
         "single_call_threshold": 20000,              // Ниже этого — single-call, выше — map-reduce.
 
-        "brief_coverage_ratio": 0.2,                  // Доля чанков для brief mode (0 < r ≤ 0.5).
-                                                      // 0.5 = старое поведение (round-robin по sections);
-                                                      // меньше = меньше выборка, быстрее/дешевле.
+        //  brief_input_ratio — доля контекстного окна под ОДИН итоговый
+        //  brief-chunk (вместо выборки canonical chunks). Контракт:
+        //    max_chars = contextWindowTokens * brief_input_ratio * chars_per_token.
+        //  Источник contextWindowTokens — agents.defaults.contextWindowTokens
+        //  в config.json. Если ключ недоступен — fallback на max_chars ниже.
+        //  Подробности: workspace/skills/legal_summarizer/scripts/application/brief_context.py.
+        "brief_input_ratio": 0.13
+      },
 
-        "brief_max_chars_per_chunk": null,       // Legacy: per-chunk truncation для brief.
-                                                     // null = выборка без per-chunk обрезки.
-                                                     // >0 = для каждого выбранного brief chunk'а в LLM уходит
-                                                     // только первые N символов от всего chunk (text).
-                                                     // PhysicalDocument не обрезается (canonical source).
-                                                     // Tables не обрезаются этим параметром.
-                                                     // DEPRECATED: предпочтительно brief_max_input_chars (общий budget).
-
-"brief_max_input_chars": 30000          // Общий LLM-text budget для brief (этап 4 фиксов):
-                                                      // выбранные chunks пропорционально обрезаются так,
-                                                      // чтобы их суммарный объём не превышал N символов.
-                                                      // Заменяет per-chunk логику brief_max_chars_per_chunk:
-                                                      // coverage остаётся (round-robin по sections),
-                                                      // но общий лимит chars в LLM-prompt ограничен.
-                                                      // CONTRACT: budget ограничивает ТОЛЬКО text chunks.
-                                                      // Tables атомарны (invariant §6) и идут СВЕРХ budget'а —
-                                                      // реальный LLM-input = text-budget + sum(table sizes).
-                                                      // Подробности и обоснование: ARCHITECTURE.md § «Общий LLM-text budget».
-                                                      // Применяется ПОСЛЕ select_brief_chunks_structured,
-                                                      // не ломает coverage-логику.
+      //  brief_context.* — параметры BriefContextBuilder (этап brief-refactor):
+      //  brief теперь собирает ровно один Chunk из DocumentStructure +
+      //  PhysicalDocument (а не выборку canonical chunks). Эти параметры
+      //  описывают приоритеты составных частей итогового chunk'а
+      //  (структура → preamble → top-level sections).
+      //  Подробности: workspace/skills/legal_summarizer/scripts/application/brief_context.py.
+      "brief_context": {
+        "max_chars_fallback": 30000,        // Fallback если контекстное окно неизвестно
+                                            // (contextWindowTokens отсутствует в config.json).
+                                            // В норме max_chars расчитывается динамически:
+                                            //   max_chars = agents.defaults.contextWindowTokens
+                                            //             * chunking.brief_input_ratio
+                                            //             * brief_context.chars_per_token
+        "chars_per_token": 3.5,             // Оценка токенов для русского текста (используется
+                                            // для Chunk.token_estimate).
+        "structure_max_chars": 12000       // Лимит на блок DOCUMENT STRUCTURE. Если структура
+                                            // документа превышает этот порог, outline обрезается
+                                            // по newline-boundary, чтобы оставить budget контенту.
       },
 
       "execution": {                                 // Phase 2B: пользовательский контроль

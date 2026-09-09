@@ -43,6 +43,15 @@ def get_chunking_config() -> dict[str, Any]:
     return _lib.get_chunking_config(_SKILL_NAME)
 
 
+def get_brief_context_config() -> dict[str, Any]:
+    """Параметры BriefContextBuilder (``skills.legal_summarizer.brief_context.*``).
+
+    Тонкая обёртка над ``lib.core.skill_config.get_brief_context_config`` —
+    единый runtime-источник для всех skill'ов.
+    """
+    return _lib.get_brief_context_config(_SKILL_NAME)
+
+
 def get_execution_config() -> dict[str, Any]:
     """Прямой доступ к ``SETTINGS['skills']['legal_summarizer']['execution']``.
 

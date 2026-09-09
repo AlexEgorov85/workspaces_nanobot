@@ -43,7 +43,8 @@ def test_no_llm_call_in_structure_modules():
     import execution.hierarchical as hierarchical_reducer
     import retrieval.records as semantic_record
     import llm.retry as retry
-    import chunking.importance_brief as importance_brief
+    import application.brief_context as brief_context
+    import application.brief_compression as brief_compression
     import retrieval.query as retrieval
     import retrieval.normalizer as query_normalizer
     import retrieval.index as retrieval_index
@@ -67,7 +68,7 @@ def test_no_llm_call_in_structure_modules():
         safety_merge, document_loader, document_chunker,
         token_estimator, execution_plan, adjacent_packing,
         unified_execution, hierarchical_reducer, semantic_record,
-        retry, importance_brief, retrieval, query_normalizer,
+        retry, brief_context, brief_compression, retrieval, query_normalizer,
         retrieval_index, context_expansion, full_doc_fallback,
         block_lookup, pipeline, provenance,
         document_analysis, followup,

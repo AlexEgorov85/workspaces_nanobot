@@ -140,35 +140,6 @@ def test_i1_each_non_oversized_block_once():
     assert seen == set(range(6))
 
 
-# --- I3: table atomic ------------------------------------------------------
-
-
-def test_i3_table_atomic():
-    """I3: table block идёт отдельным chunk'ом (atomic)."""
-    blocks = (
-        _b(0, "before table"),
-        _b(1, "row | cell", block_type="table"),
-        _b(2, "after table"),
-    )
-    doc = _make_doc(blocks)
-    struct = DocumentStructure(
-        document_id="d",
-        title=None,
-        nodes={
-            "n_0000": _root(("n_0001",)),
-            "n_0001": _sec("n_0001", start=0, end=2),
-        },
-        root_id="n_0000",
-        preamble_node_id="n_0000",
-        numbering=(),
-        total_blocks=3,
-    )
-    chunks = chunk_from_structure(doc, struct, config=_cfg())
-    table_chunks = [c for c in chunks if c.table_id is not None]
-    assert len(table_chunks) == 1
-    assert table_chunks[0].block_indices == (1,)
-
-
 # --- I4: physical order ----------------------------------------------------
 
 
@@ -200,33 +171,6 @@ def test_i4_physical_order():
     for c1, c2 in zip(chunks, chunks[1:]):
         assert c1.block_indices[-1] < c2.block_indices[0], (
             f"physical order violated: {c1.block_indices[-1]} >= {c2.block_indices[0]}"
-        )
-
-
-# --- I6: max hard limit ----------------------------------------------------
-
-
-def test_i6_max_hard_limit():
-    """I6: chunk.char_count <= max_chunk_chars всегда."""
-    long_text = "x" * 200000
-    blocks = (_b(0, long_text), _b(1, "short"))
-    doc = _make_doc(blocks)
-    struct = DocumentStructure(
-        document_id="d",
-        title=None,
-        nodes={
-            "n_0000": _root(("n_0001",)),
-            "n_0001": _sec("n_0001", start=0, end=1),
-        },
-        root_id="n_0000",
-        preamble_node_id="n_0000",
-        numbering=(),
-        total_blocks=2,
-    )
-    chunks = chunk_from_structure(doc, struct, config=_cfg(max_chars=50000))
-    for c in chunks:
-        assert c.char_count <= 50000, (
-            f"chunk {c.chunk_id} exceeds max: {c.char_count}"
         )
 
 

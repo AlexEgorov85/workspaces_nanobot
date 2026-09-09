@@ -10,7 +10,17 @@
 Этот модуль предоставляет явные функции для обоих режимов:
 
 * ``build_first_run_analysis(physical, structure, chunks, records)``
-* ``build_followup_response(analysis, query, mode)``
+* ``build_followup_response(analysis, query, mode)`` — только
+  ``mode="question"``.
+
+Архитектурное замечание (brief-refactor): brief-режим НЕ
+маршрутизируется через ``build_followup_response``. Brief — это
+chunk-selection concern (см.
+``application.chunk_selection.select_chunks_for_mode``),
+а ``build_followup_response`` обслуживает только ``mode="question"``.
+Это сохраняет архитектурное правило ``retrieval → application``
+(запрещено); ``followup.py`` остаётся на слое ``retrieval`` без
+обратной зависимости.
 
 Back-compat: текущий pipeline (``summarizer.py``) использует свой
 путь. Этот модуль — новый канонический API для будущих consumers.
@@ -30,9 +40,6 @@ from document.analysis import (
 from retrieval.fallback import (
     FullDocFallbackConfig, decide_retrieval, full_document_fallback,
 )
-from chunking.importance_brief import (
-    BriefSelectionConfig, select_brief_chunks,
-)
 from retrieval.query import (
     RetrievalConfig,
 )
@@ -40,12 +47,11 @@ from retrieval.query import (
 
 @dataclass(frozen=True)
 class FollowupConfig:
-    """Параметры follow-up запроса."""
+    """Параметры follow-up запроса (режим ``question``)."""
 
     retrieval_config: RetrievalConfig | None = None
     expansion_config: ContextExpansionConfig | None = None
     fallback_config: FullDocFallbackConfig | None = None
-    brief_config: BriefSelectionConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -91,23 +97,22 @@ def build_followup_response(
 
     Args:
         analysis: ``DocumentAnalysis`` из cache (PLAN §40 — не перепарсиваем).
-        query: для question mode; для brief mode ``None``.
-        mode: ``"question"`` или ``"brief"``.
+        query: для question mode.
+        mode: ``"question"`` (единственный поддерживаемый режим после
+            brief-refactor — brief маршрутизируется через
+            ``application.chunk_selection.select_chunks_for_mode``).
         config: ``FollowupConfig`` (overrides).
+
+    Raises:
+        NotImplementedError: если ``mode != "question"``.
     """
     cfg = config or FollowupConfig()
 
-    if mode == "brief":
-        brief_cfg = cfg.brief_config or BriefSelectionConfig()
-        selected = select_brief_chunks(
-            analysis.chunks, analysis.structure, config=brief_cfg,
-        )
-        return FollowupResult(
-            target_chunks=tuple(selected),
-            total_tokens=sum(len(c.text) for c in selected),
-            confidence="medium",
-            used_full_doc_fallback=False,
-            reason="brief mode — importance selection",
+    if mode != "question":
+        raise NotImplementedError(
+            f"build_followup_response: mode={mode!r} не поддерживается; "
+            "используйте application.chunk_selection.select_chunks_for_mode "
+            "для brief-режима"
         )
 
     hits = analysis.retrieve(query or "", config=cfg.retrieval_config)
