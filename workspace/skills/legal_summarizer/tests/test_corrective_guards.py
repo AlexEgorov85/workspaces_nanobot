@@ -189,14 +189,15 @@ def test_run_map_reduce_no_question_writes_document_chunk_summaries(tmp_path, mo
     )
 
     from document.identity import DocumentIdentity
+    from workspace.utils.session_key import safe_session_key
     document_id = DocumentIdentity.from_path(p).document_id
     chunks_dir = (
         tmp_path
         / "workspace"
         / "data_store"
         / "cache"
-        / "skills"
-        / "legal_summarizer"
+        / "sessions"
+        / safe_session_key("default")
         / "documents"
         / document_id
         / "chunks"

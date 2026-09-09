@@ -36,6 +36,7 @@ def inspect(
     document_path: str | None = None,
     *,
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> Inspection:
     """Canonical inspection (document-level).
 
@@ -58,6 +59,7 @@ def inspect(
         apply_repair=True,
         include_retrieval_index=True,
         workspace_root=workspace_root,
+        session_key=session_key,
     )
     analysis = pipeline_result.analysis
     return Inspection(

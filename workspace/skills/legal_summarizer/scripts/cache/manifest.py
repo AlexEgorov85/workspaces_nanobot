@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from workspace.utils.session_key import safe_session_key
+
 
 MANIFEST_VERSION_V2 = 2
 
@@ -327,7 +329,7 @@ def load_cached_partials(
 # ключ для повторных запусков над тем же файлом **без** зависимости от
 # question/length/text hash (которые меняют ``operation_id``).
 #
-# Layout на диске (под ``document_dir(document_id, workspace_root)``):
+# Layout на диске (под ``document_dir(document_id, workspace_root, session_key)``):
 #
 #     _complete.marker                       # существует только при успешной записи
 #     physical.json                          # PhysicalDocument.to_dict()
@@ -335,65 +337,111 @@ def load_cached_partials(
 #     chunks/<chunk_id>.json                 # {summary, section_id, section_path, page_start, page_end}
 #     sections/<section_id>.json             # section-level LLM summary
 #
+# Корень: ``<repo>/workspace/data_store/cache/sessions/<safe_session_key>/documents/``.
+# Привязка к сессии: внутри одной сессии тот же ``document_id`` (SHA-256 от
+# resolved_path+size+mtime_ns) → cache hit. Между сессиями переиспользования
+# нет, каждая сессия живёт в своей подпапке.
+#
 # Snapshot пишется атомарно: staging dir + Path.rename. ``_complete.marker``
 # создаётся последним. Без marker snapshot считается неполным (cache miss).
 
 
-def document_dir(document_id: str, workspace_root: Path | str | None = None) -> Path:
+def _document_cache_root(
+    workspace_root: Path | str | None,
+    session_key: str,
+) -> Path:
+    """Корень document-level cache для конкретной сессии.
+
+    ``<repo>/workspace/data_store/cache/sessions/<safe_session_key>/documents/``.
+
+    Вынесен из ``document_dir``, чтобы не зависеть от ``manifest_root``
+    (тот по-прежнему обслуживает operation-level namespace
+    ``skills/legal_summarizer/operations/<op_id>/``).
+    """
+    root = Path(workspace_root) if workspace_root is not None else skill_repo_root()
+    safe = safe_session_key(session_key or "default")
+    return (
+        root
+        / "workspace" / "data_store" / "cache"
+        / "sessions" / safe / "documents"
+    )
+
+
+def document_dir(
+    document_id: str,
+    workspace_root: Path | str | None = None,
+    session_key: str = "default",
+) -> Path:
     """Корневая папка document-level cache.
 
-    ``<repo>/workspace/data_store/cache/skills/legal_summarizer/documents/<document_id>``.
-    Не пересекается с ``operations/<operation_id>/`` — другая ось identity.
+    ``<repo>/workspace/data_store/cache/sessions/<safe_session_key>/documents/<document_id>``.
+
+    Layout привязан к сессии (Phase 7 Resource Model Refactoring): тот же
+    файл, загруженный повторно в той же сессии → cache hit. Между сессиями
+    переиспользования нет: каждая сессия живёт в своей подпапке.
     """
-    return manifest_root(workspace_root) / "documents" / document_id
+    return _document_cache_root(workspace_root, session_key) / document_id
 
 
 def document_physical_path(
-    document_id: str, workspace_root: Path | str | None = None,
+    document_id: str,
+    workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> Path:
-    return document_dir(document_id, workspace_root) / "physical.json"
+    return document_dir(document_id, workspace_root, session_key) / "physical.json"
 
 
 def document_analysis_path(
-    document_id: str, workspace_root: Path | str | None = None,
+    document_id: str,
+    workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> Path:
-    return document_dir(document_id, workspace_root) / "analysis.json"
+    return document_dir(document_id, workspace_root, session_key) / "analysis.json"
 
 
 def document_chunks_dir(
-    document_id: str, workspace_root: Path | str | None = None,
+    document_id: str,
+    workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> Path:
-    return document_dir(document_id, workspace_root) / "chunks"
+    return document_dir(document_id, workspace_root, session_key) / "chunks"
 
 
 def document_chunk_result_path(
     document_id: str,
     chunk_id: str,
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> Path:
-    return document_chunks_dir(document_id, workspace_root) / f"{chunk_id}.json"
+    return document_chunks_dir(document_id, workspace_root, session_key) / f"{chunk_id}.json"
 
 
 def _document_complete_marker_path(
-    document_id: str, workspace_root: Path | str | None = None,
+    document_id: str,
+    workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> Path:
-    return document_dir(document_id, workspace_root) / "_complete.marker"
+    return document_dir(document_id, workspace_root, session_key) / "_complete.marker"
 
 
 def document_section_result_path(
     document_id: str,
     section_id: str,
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> Path:
-    return document_dir(document_id, workspace_root) / "sections" / f"{section_id}.json"
+    return document_dir(document_id, workspace_root, session_key) / "sections" / f"{section_id}.json"
 
 
 def is_document_cache_complete(
     document_id: str,
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> bool:
     """Быстрая проверка наличия snapshot'а (stat по marker'у)."""
-    return _document_complete_marker_path(document_id, workspace_root).is_file()
+    return _document_complete_marker_path(
+        document_id, workspace_root, session_key,
+    ).is_file()
 
 
 def write_document_section_summary(
@@ -403,6 +451,7 @@ def write_document_section_summary(
     section_id: str,
     summary: str,
     question: str | None = None,
+    session_key: str = "default",
 ) -> None:
     """Записать per-section LLM summary в document-level cache.
 
@@ -422,7 +471,9 @@ def write_document_section_summary(
         return
     payload = {"section_id": section_id, "summary": summary}
     _atomic_write_json(
-        document_section_result_path(document_id, section_id, workspace_root),
+        document_section_result_path(
+            document_id, section_id, workspace_root, session_key,
+        ),
         payload,
     )
 
@@ -438,6 +489,7 @@ def write_document_chunk_summary(
     page_start: int | None = None,
     page_end: int | None = None,
     question: str | None = None,
+    session_key: str = "default",
 ) -> None:
     """Записать per-chunk LLM summary в document-level cache.
 
@@ -464,7 +516,9 @@ def write_document_chunk_summary(
         "page_end": page_end,
     }
     _atomic_write_json(
-        document_chunk_result_path(document_id, chunk_id, workspace_root),
+        document_chunk_result_path(
+            document_id, chunk_id, workspace_root, session_key,
+        ),
         payload,
     )
 
@@ -473,15 +527,21 @@ def read_document_chunk_summary(
     document_id: str,
     chunk_id: str,
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> dict[str, Any] | None:
     """Прочитать per-chunk summary из document-level cache."""
-    return _read_json(document_chunk_result_path(document_id, chunk_id, workspace_root))
+    return _read_json(
+        document_chunk_result_path(
+            document_id, chunk_id, workspace_root, session_key,
+        ),
+    )
 
 
 def load_document_chunk_summaries(
     document_id: str,
     expected_chunk_ids: list[str],
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> dict[str, str]:
     """Загрузить per-chunk summaries из document-level cache.
 
@@ -491,7 +551,9 @@ def load_document_chunk_summaries(
     """
     out: dict[str, str] = {}
     for cid in expected_chunk_ids:
-        rec = read_document_chunk_summary(document_id, cid, workspace_root)
+        rec = read_document_chunk_summary(
+            document_id, cid, workspace_root, session_key,
+        )
         if rec and isinstance(rec.get("summary"), str):
             out[cid] = rec["summary"]
     return out
@@ -501,10 +563,13 @@ def read_document_section_summary(
     document_id: str,
     section_id: str,
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> dict[str, Any] | None:
     """Прочитать per-section summary из document-level cache."""
     return _read_json(
-        document_section_result_path(document_id, section_id, workspace_root),
+        document_section_result_path(
+            document_id, section_id, workspace_root, session_key,
+        ),
     )
 
 
@@ -512,11 +577,14 @@ def load_document_section_summaries(
     document_id: str,
     expected_section_ids: list[str],
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> dict[str, str]:
     """Загрузить per-section summaries для списка section_id."""
     out: dict[str, str] = {}
     for sid in expected_section_ids:
-        rec = read_document_section_summary(document_id, sid, workspace_root)
+        rec = read_document_section_summary(
+            document_id, sid, workspace_root, session_key,
+        )
         if rec and isinstance(rec.get("summary"), str):
             out[sid] = rec["summary"]
     return out
@@ -529,6 +597,7 @@ def write_document_snapshot(
     physical_data: dict[str, Any],
     analysis_data: dict[str, Any],
     retrieval_index_meta: dict[str, Any] | None = None,
+    session_key: str = "default",
 ) -> Path:
     """Атомарная запись document-level snapshot'а.
 
@@ -547,9 +616,10 @@ def write_document_snapshot(
             восстанавливается из L1/L2).
         retrieval_index_meta: метаданные для ``retrieval_index.meta.json``
             (``{"chunk_count": N, "term_count": M}``); None → skip.
+        session_key: ключ сессии для session-scoped пути.
 
     Returns:
-        Путь к финальному ``document_dir(document_id)``.
+        Путь к финальному ``document_dir(document_id, session_key)``.
 
     Raises:
         ``RuntimeError`` если snapshot уже существует (нельзя
@@ -559,9 +629,9 @@ def write_document_snapshot(
     if not document_id:
         raise ValueError("write_document_snapshot: document_id обязателен")
 
-    target_dir = document_dir(document_id, workspace_root)
+    target_dir = document_dir(document_id, workspace_root, session_key)
     if target_dir.exists() and is_document_cache_complete(
-        document_id, workspace_root,
+        document_id, workspace_root, session_key,
     ):
         raise RuntimeError(
             f"document-level cache для document_id={document_id!r} уже complete; "
@@ -573,7 +643,9 @@ def write_document_snapshot(
     import shutil
     import tempfile
 
-    staging_parent = manifest_root(workspace_root)
+    # staging_parent — это сессионная подпапка, чтобы tmp-каталог гарантированно
+    # лежал рядом с финальным snapshot'ом (требование os.rename для атомарности).
+    staging_parent = _document_cache_root(workspace_root, session_key)
     staging_parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".staging_doc_{document_id}_", dir=staging_parent))
 
@@ -623,6 +695,7 @@ def write_document_snapshot(
 def read_document_snapshot(
     document_id: str,
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> tuple[
     dict[str, Any] | None,    # physical
     dict[str, Any] | None,    # analysis
@@ -638,13 +711,18 @@ def read_document_snapshot(
         элемент это ``dict`` от ``_read_json`` или ``None`` если
         соответствующий файл не читается / отсутствует.
     """
-    if not is_document_cache_complete(document_id, workspace_root):
+    if not is_document_cache_complete(document_id, workspace_root, session_key):
         return None
 
-    physical = _read_json(document_physical_path(document_id, workspace_root))
-    analysis = _read_json(document_analysis_path(document_id, workspace_root))
+    physical = _read_json(
+        document_physical_path(document_id, workspace_root, session_key),
+    )
+    analysis = _read_json(
+        document_analysis_path(document_id, workspace_root, session_key),
+    )
     meta = _read_json(
-        document_dir(document_id, workspace_root) / "retrieval_index.meta.json",
+        document_dir(document_id, workspace_root, session_key)
+        / "retrieval_index.meta.json",
     )
     return physical, analysis, meta
 
@@ -652,6 +730,7 @@ def read_document_snapshot(
 def invalidate_document_cache(
     document_id: str,
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> None:
     """Удалить document-level snapshot целиком.
 
@@ -661,6 +740,6 @@ def invalidate_document_cache(
     """
     import shutil
 
-    target = document_dir(document_id, workspace_root)
+    target = document_dir(document_id, workspace_root, session_key)
     if target.exists():
         shutil.rmtree(target, ignore_errors=True)

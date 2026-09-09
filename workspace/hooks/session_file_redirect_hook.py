@@ -47,7 +47,7 @@ from typing import Any, ClassVar
 
 from nanobot.agent import AgentHook
 
-from workspace.utils.session_key import safe_session_key
+from workspace.utils.session_key import resolve_session_key, safe_session_key
 
 logger = logging.getLogger(__name__)
 
@@ -307,20 +307,11 @@ class SessionFileRedirectHook(AgentHook):
     def _session_key(context: Any) -> str:
         """Получить стабильный ключ сессии из контекста.
 
-        Источники (по убыванию приоритета):
-            1. ``context.session_key`` — обычно есть (см. database_logging_hook).
-            2. ``context.metadata.session_key`` — fallback.
-        Если ничего нет — каталог ``__nosession__`` (не ломаем запись).
+        Делегирует ``workspace.utils.session_key.resolve_session_key`` —
+        единый резолвер для in-process потребителей (хук, db_logging_hook и т.п.).
+        CLI-процессы используют sister-функцию ``resolve_session_key_for_subprocess``.
         """
-        key = getattr(context, "session_key", None)
-        if isinstance(key, str) and key:
-            return key
-        metadata = getattr(context, "metadata", None)
-        if metadata is not None:
-            key = getattr(metadata, "session_key", None)
-            if isinstance(key, str) and key:
-                return key
-        return "__nosession__"
+        return resolve_session_key(context)
 
     def _is_allowed(self, target: str) -> bool:
         """Белый список: не перенаправляем служебные файлы и уже легитимные пути."""

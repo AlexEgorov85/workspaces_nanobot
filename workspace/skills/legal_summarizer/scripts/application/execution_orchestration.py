@@ -97,6 +97,7 @@ def run_direct(
     estimated_llm_calls: int,
     article_count: int,
     existing_manifest: NormalizedManifest | None,
+    session_key: str = "default",
 ) -> dict:
     """Canonical direct execution: single llm_document_reduce call."""
     total_start = _time.monotonic()
@@ -237,6 +238,7 @@ def run_map_reduce(
     estimated_llm_calls: int,
     article_count: int,
     existing_manifest: NormalizedManifest | None,
+    session_key: str = "default",
 ) -> dict:
     """Canonical map_reduce: coordinator.
 
@@ -324,6 +326,7 @@ def run_map_reduce(
                 page_start=page_start,
                 page_end=page_end,
                 question=question,
+                session_key=session_key,
             )
 
     payload = run_map_reduce_execution(
@@ -369,6 +372,7 @@ def run_map_reduce(
             workspace_root=workspace_root,
             now_iso=now_iso,
             question=question,
+            session_key=session_key,
         )
 
     # Удалить ``_internal`` из payload перед возвратом.
@@ -394,6 +398,7 @@ def _persist_final_manifest(
     workspace_root: Path | str | None,
     now_iso,
     question: str | None = None,
+    session_key: str = "default",
 ) -> None:
     """Сохранить финальный manifest на диск.
 
@@ -477,6 +482,7 @@ def _persist_final_manifest(
                 section_id=sid,
                 summary=summary,
                 question=question,
+                session_key=session_key,
             )
 
 

@@ -99,6 +99,7 @@ def _try_load_cached_pipeline_result(
     *,
     path: str | Path,
     workspace_root: Path | str | None,
+    session_key: str = "default",
 ) -> PipelineResult | None:
     """Попробовать загрузить cached ``PipelineResult`` из document-level cache.
 
@@ -130,14 +131,23 @@ def _try_load_cached_pipeline_result(
             is_document_cache_complete,
             read_document_snapshot,
         )
-        if is_document_cache_complete(identity.document_id, workspace_root):
-            invalidate_document_cache(identity.document_id, workspace_root)
+        if is_document_cache_complete(
+            identity.document_id, workspace_root, session_key,
+        ):
+            invalidate_document_cache(
+                identity.document_id, workspace_root, session_key,
+            )
         return None
 
-    if not _is_complete(identity.document_id, workspace_root):
+    from cache.manifest import (
+        is_document_cache_complete,
+        read_document_snapshot,
+    )
+
+    if not is_document_cache_complete(identity.document_id, workspace_root, session_key):
         return None
 
-    snap = _read(identity.document_id, workspace_root)
+    snap = read_document_snapshot(identity.document_id, workspace_root, session_key)
     if snap is None:
         return None
     physical_data, analysis_data, _meta = snap
@@ -154,7 +164,9 @@ def _try_load_cached_pipeline_result(
     except (KeyError, TypeError, ValueError):
         # Битый snapshot — инвалидируем и cache miss.
         from cache.manifest import invalidate_document_cache
-        invalidate_document_cache(identity.document_id, workspace_root)
+        invalidate_document_cache(
+            identity.document_id, workspace_root, session_key,
+        )
         return None
 
     analysis = DocumentAnalysis.build(
@@ -183,6 +195,7 @@ def _write_document_snapshot_after_pipeline(
     validation: ValidationReport,
     chunks: tuple[Chunk, ...],
     analysis: DocumentAnalysis,
+    session_key: str = "default",
 ) -> None:
     """Сохранить document-level snapshot после успешного canonical pipeline.
 
@@ -215,22 +228,11 @@ def _write_document_snapshot_after_pipeline(
             physical_data=physical.to_dict(),
             analysis_data=analysis_payload,
             retrieval_index_meta=retrieval_meta,
+            session_key=session_key,
         )
     except RuntimeError:
         # Уже complete (конкурентная запись или race) — это OK, ничего не делаем.
         pass
-
-
-# Ленивые импорты — ``cache.manifest`` уже импортируется транзитивно через
-# ``document.physical``, но мы хотим явный alias для ясности.
-def _is_complete(document_id: str, workspace_root: Path | str | None) -> bool:
-    from cache.manifest import is_document_cache_complete
-    return is_document_cache_complete(document_id, workspace_root)
-
-
-def _read(document_id: str, workspace_root: Path | str | None):
-    from cache.manifest import read_document_snapshot
-    return read_document_snapshot(document_id, workspace_root)
 
 
 def run_canonical_pipeline(
@@ -240,6 +242,7 @@ def run_canonical_pipeline(
     apply_repair: bool = True,
     include_retrieval_index: bool = True,
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> PipelineResult:
     """Запустить canonical pipeline.
 
@@ -256,6 +259,7 @@ def run_canonical_pipeline(
         apply_repair: применить repair pass.
         include_retrieval_index: построить inverted index.
         workspace_root: корень workspace.
+        session_key: ключ сессии для session-scoped cache-пути.
 
     Returns:
         ``PipelineResult`` с ``DocumentAnalysis``, ``ValidationReport``,
@@ -263,7 +267,7 @@ def run_canonical_pipeline(
     """
     # cache hit branch.
     cached = _try_load_cached_pipeline_result(
-        path=path, workspace_root=workspace_root,
+        path=path, workspace_root=workspace_root, session_key=session_key,
     )
     if cached is not None:
         return cached
@@ -332,6 +336,7 @@ def run_canonical_pipeline(
         validation=validation,
         chunks=chunks,
         analysis=analysis,
+        session_key=session_key,
     )
 
     return PipelineResult(

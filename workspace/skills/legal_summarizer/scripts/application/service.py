@@ -83,6 +83,7 @@ def _try_question_via_document_cache(
     operation_id: str,
     length: str,
     focus: str | None,
+    session_key: str = "default",
 ) -> dict | None:
     """Shortcut для ``--question`` через document-level cache.
 
@@ -105,13 +106,17 @@ def _try_question_via_document_cache(
         _progress(f"#6 skip: {exc!r}")
         return None
 
-    if not is_document_cache_complete(identity.document_id, workspace_root):
+    if not is_document_cache_complete(
+        identity.document_id, workspace_root, session_key,
+    ):
         _progress(
             f"#6 skip: no document cache for document_id={identity.document_id!r}"
         )
         return None
 
-    snap = read_document_snapshot(identity.document_id, workspace_root)
+    snap = read_document_snapshot(
+        identity.document_id, workspace_root, session_key,
+    )
     if snap is None:
         _progress("#6 skip: snapshot incomplete")
         return None
@@ -165,6 +170,7 @@ def _try_question_via_document_cache(
         document_id=identity.document_id,
         workspace_root=workspace_root,
         budget_chars=DOCUMENT_REDUCE_INPUT_BUDGET_CHARS,
+        session_key=session_key,
     )
     if not context_text:
         _progress("#6 skip: build_question_context returned empty")
@@ -299,6 +305,7 @@ def run(
     structure: DocumentStructure | None = None,
     document_path: str | None = None,
     workspace_root: Path | str | None = None,
+    session_key: str = "default",
 ) -> dict:
     """Canonical execution path.
 
@@ -368,6 +375,7 @@ def run(
             operation_id=operation_id,
             length=length,
             focus=focus,
+            session_key=session_key,
         )
         if cached_question_result is not None:
             return cached_question_result
@@ -376,6 +384,7 @@ def run(
         text,
         document_path=document_path,
         workspace_root=workspace_root,
+        session_key=session_key,
     )
 
     if not insp.chunks:
@@ -474,6 +483,7 @@ def run(
         estimated_llm_calls=run_estimate.estimated_llm_calls,
         article_count=article_count,
         existing_manifest=existing_manifest,
+        session_key=session_key,
     )
 
     if ctx.strategy == "direct":

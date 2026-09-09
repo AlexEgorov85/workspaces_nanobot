@@ -88,8 +88,8 @@ def test_run_map_reduce_writes_document_chunk_summaries(tmp_path, monkeypatch):
         / "workspace"
         / "data_store"
         / "cache"
-        / "skills"
-        / "legal_summarizer"
+        / "sessions"
+        / "default"
         / "documents"
     )
     assert docs_root.is_dir(), (

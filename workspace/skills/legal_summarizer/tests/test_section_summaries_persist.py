@@ -3,7 +3,7 @@
 После commit #0a/#0b ``_internal["section_summaries"]`` содержит построенные
 phase-1 reducer'ом summaries. ``_persist_final_manifest`` должен дополнительно
 сохранять их в document-level cache ``<repo>/workspace/data_store/cache/
-skills/legal_summarizer/documents/<document_id>/sections/<sid>.json``.
+sessions/<safe_session_key>/documents/<document_id>/sections/<sid>.json``.
 """
 
 from __future__ import annotations

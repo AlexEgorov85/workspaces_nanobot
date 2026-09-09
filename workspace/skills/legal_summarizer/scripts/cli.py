@@ -32,6 +32,8 @@ import sys
 import traceback
 from pathlib import Path
 
+from workspace.utils.session_key import resolve_session_key_for_subprocess
+
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _SCRIPTS_ROOT = Path(__file__).resolve().parent
@@ -372,6 +374,11 @@ def main() -> None:
             # относительный путь и при cwd=<workspace> создавал дубль
             # workspace/workspace/data_store/... (см. инцидент 2026-08-28).
             "workspace_root": Path(__file__).resolve().parents[4],
+            # session_key: agent НЕ знает ключ сессии, резолвим автоматически
+            # через единый helper (см. workspace/utils/session_key.py).
+            # Приоритет: env SESSION_KEY (если nanobot-канал выставил) →
+            # safe_session_key(resolved_path) → '__nosession__'.
+            "session_key": resolve_session_key_for_subprocess(args.file),
         }
 
         # Safety-net: если quick_estimate сказал «не нужно confirm» (или

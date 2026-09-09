@@ -105,6 +105,7 @@ def build_question_context(
     document_id: str,
     workspace_root: str | None,
     budget_chars: int,
+    session_key: str = "default",
 ) -> str:
     """Собрать LLM-вход для question synthesis.
 
@@ -124,6 +125,7 @@ def build_question_context(
         budget_chars: максимальный размер выхода (chars). Должен быть
             согласован с ``DOCUMENT_REDUCE_INPUT_BUDGET_CHARS`` из
             ``execution.map_reduce``.
+        session_key: ключ сессии для session-scoped cache-пути.
 
     Returns:
         Готовая строка для передачи в ``llm_document_reduce``.
@@ -136,12 +138,13 @@ def build_question_context(
         document_id,
         [c.chunk_id for c in selected_chunks],
         workspace_root,
+        session_key=session_key,
     )
 
     # 2. Собрать уникальные section_id'ы и загрузить section summaries.
     section_ids = sorted({c.section_id for c in selected_chunks if c.section_id})
     section_summaries = load_document_section_summaries(
-        document_id, section_ids, workspace_root,
+        document_id, section_ids, workspace_root, session_key=session_key,
     )
 
     # 3. Собрать блоки (порядок = порядок selected_chunks).

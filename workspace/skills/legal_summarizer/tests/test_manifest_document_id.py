@@ -88,8 +88,8 @@ def test_manifest_raw_document_id_matches_document_cache(tmp_path, monkeypatch):
         / "workspace"
         / "data_store"
         / "cache"
-        / "skills"
-        / "legal_summarizer"
+        / "sessions"
+        / "default"
         / "documents"
     )
     doc_dirs = [d for d in docs_root.iterdir() if d.is_dir()]
