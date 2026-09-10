@@ -1,4 +1,4 @@
-﻿"""Демо end-to-end: --length detailed → --question."""
+"""Демо end-to-end: --length detailed → --question."""
 import sys
 from pathlib import Path
 

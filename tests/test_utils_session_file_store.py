@@ -93,61 +93,26 @@ class TestPrepareContent:
 
 
 class TestTryConvertToCsv:
-    def test_list_of_dicts(self):
+    @pytest.mark.parametrize("input_value,expected_substrings,expected_is_none", [
+        ([{"x": 10, "y": 20}], ["x,y", "10,20"], False),
+        ({"results": [{"k": "v"}]}, ["k", "v"], False),
+        ({"rows": [["a", 1]], "columns": ["name", "val"]}, ["name,val", "a,1"], False),
+        ({"data": {"rows": [["x"]], "columns": ["c"]}}, ["c", "x"], False),
+        ({"a": 1}, [], True),
+        ([], [], True),
+        ([1, 2], [], True),
+        (None, [], True),
+    ])
+    def test_try_convert_to_csv(self, input_value, expected_substrings, expected_is_none):
         from utils.session_file_store import _try_convert_to_csv
 
-        result = _try_convert_to_csv([{"x": 10, "y": 20}])
-        assert result is not None
-        assert "x,y" in result
-        assert "10,20" in result
-
-    def test_dict_with_results(self):
-        from utils.session_file_store import _try_convert_to_csv
-
-        result = _try_convert_to_csv({"results": [{"k": "v"}]})
-        assert result is not None
-        assert "k" in result
-        assert "v" in result
-
-    def test_dict_with_rows_columns(self):
-        from utils.session_file_store import _try_convert_to_csv
-
-        result = _try_convert_to_csv({"rows": [["a", 1]], "columns": ["name", "val"]})
-        assert result is not None
-        assert "name,val" in result
-        assert "a,1" in result
-
-    def test_dict_with_nested_data(self):
-        from utils.session_file_store import _try_convert_to_csv
-
-        result = _try_convert_to_csv({"data": {"rows": [["x"]], "columns": ["c"]}})
-        assert result is not None
-        assert "c" in result
-        assert "x" in result
-
-    def test_plain_dict_returns_none(self):
-        from utils.session_file_store import _try_convert_to_csv
-
-        result = _try_convert_to_csv({"a": 1})
-        assert result is None
-
-    def test_empty_list_returns_none(self):
-        from utils.session_file_store import _try_convert_to_csv
-
-        result = _try_convert_to_csv([])
-        assert result is None
-
-    def test_list_of_non_dicts_returns_none(self):
-        from utils.session_file_store import _try_convert_to_csv
-
-        result = _try_convert_to_csv([1, 2])
-        assert result is None
-
-    def test_none_returns_none(self):
-        from utils.session_file_store import _try_convert_to_csv
-
-        result = _try_convert_to_csv(None)
-        assert result is None
+        result = _try_convert_to_csv(input_value)
+        if expected_is_none:
+            assert result is None
+        else:
+            assert result is not None
+            for s in expected_substrings:
+                assert s in result, f"expected {s!r} in {result!r}"
 
 
 class TestSessionFileStoreInit:
