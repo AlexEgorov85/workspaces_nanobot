@@ -287,8 +287,12 @@ class DocumentCache:
         """Удалить document-level snapshot целиком.
 
         Безопасно вызывать на несуществующем каталоге (no-op).
-        Используется при ``DocumentIdentity.is_fresh() == False`` (mtime
-        изменился) или при явном сбросе.
+        Используется при битом snapshot (catch в ``from_dict``) или
+        при явном сбросе. Change detection при изменении файла
+        работает через ``document_id`` hash: новый файл → новый
+        fingerprint → cache miss → reparse → старый snapshot остаётся
+        как orphan. ``invalidate`` здесь — explicit cleanup, не part
+        нормального cache lifecycle.
         """
         target = self._document_dir(document_id)
         if target.exists():
