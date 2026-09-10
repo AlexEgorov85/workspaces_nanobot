@@ -11,6 +11,8 @@ CLI — целевая точка вызова навыка из shell/runtime. 
 
 from __future__ import annotations
 
+import argparse
+import inspect
 import json
 import os
 import subprocess
@@ -58,10 +60,19 @@ class TestCLIStructure:
             prepare_output,
         )
 
-        assert callable(main)
-        assert callable(_build_parser)
-        assert callable(_parse_params)
-        assert callable(prepare_output)
+        # Structural checks: each entry point is callable AND has a sensible signature,
+        # so a future rename or stub-replace will be caught.
+        for entry in (_build_parser, _parse_params, main, prepare_output):
+            assert callable(entry), f"{entry!r} must be callable"
+            sig = inspect.signature(entry)
+            assert sig.parameters or sig.return_annotation is not inspect.Signature.empty, (
+                f"{entry!r} must be a real function, not a stub"
+            )
+        # _build_parser() must actually return an argparse.ArgumentParser.
+        parser = _build_parser()
+        assert isinstance(parser, argparse.ArgumentParser), (
+            "_build_parser() must return argparse.ArgumentParser"
+        )
 
 
 class TestCLIParser:

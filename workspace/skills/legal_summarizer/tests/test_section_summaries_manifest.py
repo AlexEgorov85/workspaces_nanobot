@@ -79,7 +79,6 @@ def test_manifest_persists_section_summaries(tmp_path, monkeypatch):
     from cache.manifest import load_manifest
     manifest = load_manifest(result["operation_id"], tmp_path)
     assert manifest is not None
-    assert hasattr(manifest, "section_summaries")
     assert isinstance(manifest.section_summaries, dict), (
         f"section_summaries must be dict, got {type(manifest.section_summaries)}"
     )

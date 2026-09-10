@@ -112,13 +112,18 @@ class TestPGSessionManagerPure:
         """Фреймворк (WebUI /api/sessions, read_session_metadata) требует
         sessions_dir/legacy_sessions_dir от менеджера сессий — регрессия
         AttributeError: 'PGSessionManager' object has no attribute 'sessions_dir'."""
+        import inspect as _inspect
         ws = tmp_path / "ws"
         mgr = mock_db_and_psycopg(workspace=ws)
         assert mgr.sessions_dir == (ws / "sessions").resolve()
         assert mgr.sessions_dir.is_dir()
         assert mgr.legacy_sessions_dir is not None
-        assert hasattr(mgr, "read_session_metadata")
-        assert callable(mgr.read_session_metadata)
+        # read_session_metadata is a real method with a usable signature;
+        # structural check replaces the prior hasattr/callable pair.
+        sig = _inspect.signature(mgr.read_session_metadata)
+        assert sig.parameters, (
+            "PGSessionManager.read_session_metadata must accept at least one parameter"
+        )
 
 
 class TestPGSessionManagerGetOrCreate:

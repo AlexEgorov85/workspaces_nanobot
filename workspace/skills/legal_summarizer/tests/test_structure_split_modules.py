@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+import inspect
+from pathlib import Path
+
 from chunking.chunker import (
     ChunkPlanner,
 )
@@ -30,24 +33,58 @@ from planning.strategy import (
     build_execution_plan,
 )
 
+_SKILL_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _assert_callable_with_params(obj, *, min_params: int = 1, name: str) -> None:
+    sig = inspect.signature(obj)
+    params = [
+        p for p in sig.parameters.values()
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    assert callable(obj), f"{name} must be callable"
+    assert len(params) >= min_params, (
+        f"{name} must accept at least {min_params} positional parameter(s), got {len(params)}"
+    )
+
+
 def test_run_canonical_pipeline_exists():
-    assert callable(run_canonical_pipeline)
+    _assert_callable_with_params(run_canonical_pipeline, min_params=1, name="run_canonical_pipeline")
+    assert run_canonical_pipeline.__module__ == "application.pipeline_structure"
+
 
 def test_chunk_planner_exists():
-    assert callable(ChunkPlanner)
+    # ChunkPlanner is a class (instantiated with __init__ taking config kwargs);
+    # verify it is a class with an __init__ accepting at least one kwarg.
+    assert inspect.isclass(ChunkPlanner), "ChunkPlanner must be a class"
+    init_sig = inspect.signature(ChunkPlanner.__init__)
+    non_self_params = [
+        p for p in init_sig.parameters.values()
+        if p.name != "self"
+        and p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                       inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                       inspect.Parameter.KEYWORD_ONLY)
+    ]
+    assert non_self_params, "ChunkPlanner.__init__ must accept at least one configurable parameter"
+
 
 def test_hierarchical_reducer_exists():
-    assert callable(reduce_chunks_hierarchical)
+    _assert_callable_with_params(reduce_chunks_hierarchical, min_params=2, name="reduce_chunks_hierarchical")
+
 
 def test_retrieval_index_exists():
-    assert callable(RetrievalIndex.build)
+    assert callable(RetrievalIndex.build), "RetrievalIndex.build must be callable"
+    assert inspect.ismethod(RetrievalIndex.build) or inspect.isfunction(RetrievalIndex.build), (
+        "RetrievalIndex.build must be a method or function (not a generic callable)"
+    )
+
 
 def test_build_execution_plan_exists():
-    assert callable(build_execution_plan)
+    _assert_callable_with_params(build_execution_plan, min_params=2, name="build_execution_plan")
+
 
 def test_new_modules_have_narrow_responsibility():
     """Каждый новый модуль отвечает за одну вещь."""
-    import inspect
     import application.pipeline_structure as pipeline
     import chunking.chunker as document_chunker
     import execution.hierarchical as hierarchical_reducer
@@ -64,17 +101,19 @@ def test_new_modules_have_narrow_responsibility():
 def test_summary_of_split_modules():
     """Краткая карта: где сейчас находится что."""
     parts = {
-        "loader": "legal_summarizer/document/loader.py",
-        "identity": "legal_summarizer/document/identity.py",
-        "numbering": "legal_summarizer/document/numbering.py",
-        "heading": "legal_summarizer/document/heading.py",
-        "hierarchy": "legal_summarizer/document/hierarchy.py",
-        "structure": "legal_summarizer/document/structure.py",
-        "chunker": "legal_summarizer/chunking/chunker.py",
-        "execution": "legal_summarizer/planning/plan.py",
-        "reducer": "legal_summarizer/execution/hierarchical.py",
-        "retrieval": "legal_summarizer/retrieval/query.py",
-        "pipeline": "legal_summarizer/application/pipeline_structure.py",
+        "loader": "document/loader.py",
+        "identity": "document/identity.py",
+        "numbering": "document/numbering.py",
+        "heading": "document/heading.py",
+        "hierarchy": "document/hierarchy.py",
+        "structure": "document/structure.py",
+        "chunker": "chunking/chunker.py",
+        "execution": "planning/plan.py",
+        "reducer": "execution/hierarchical.py",
+        "retrieval": "retrieval/query.py",
+        "pipeline": "application/pipeline_structure.py",
     }
-    for key, path in parts.items():
-        assert path.endswith(".py")
+    scripts_root = _SKILL_ROOT / "scripts"
+    for key, rel_path in parts.items():
+        full = scripts_root / rel_path
+        assert full.is_file(), f"{key} module file missing at {full}"

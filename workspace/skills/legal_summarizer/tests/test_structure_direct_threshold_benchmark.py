@@ -129,10 +129,19 @@ def test_large_doc_hierarchical():
     assert plan.strategy == "map_hierarchical"
 
 def test_token_estimator_consistent():
-    """Estimator даёт одинаковые значения для одного текста."""
+    """Estimator даёт конкретное предсказуемое значение по контракту.
+
+    Контракт ``TokenEstimator.estimate(text)``:
+        * пустой text → 0;
+        * непустой text → max(1, ceil(len(text) / chars_per_token)).
+    """
+    import math
     estimator = TokenEstimator(TokenEstimatorConfig(chars_per_token=3.5))
+    assert estimator.estimate("") == 0
+    assert estimator.estimate("x") == 1, "minimum 1 для непустого text"
     text = "x" * 1000
-    assert estimator.estimate(text) == estimator.estimate(text)
+    expected = max(1, math.ceil(len(text) / 3.5))
+    assert estimator.estimate(text) == expected
 
 def test_execution_plan_budget_constant_for_repeated_plans():
     """Один и тот же документ → один план (deterministic)."""

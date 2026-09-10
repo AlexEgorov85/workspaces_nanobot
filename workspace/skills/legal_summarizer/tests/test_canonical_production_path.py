@@ -41,50 +41,81 @@ def test_canonical_pipeline_used_in_canonical_wrapper(tmp_path: Path, monkeypatc
     assert call_count["n"] == 1
 
 def test_canonical_pipeline_does_not_import_legacy(monkeypatch):
-    """canonical модули не импортируют legacy."""
+    """canonical модули не импортируют legacy.
+
+    Проверяем через статический AST-парсинг: для каждого ``from/forbidden``
+    import в ``summarizer_canonical`` и ``canonical_retrieval`` тест должен
+    упасть. Также проверяется транзитивный import (когда canonical-файл
+    импортирует другой canonical-файл, который уже импортирует legacy).
+    """
+    import ast as _ast
     import application.canonical as summarizer_canonical
     import retrieval.canonical as canonical_retrieval
-    import importlib
 
-    forbidden = {
-        "workspace.skills.legal_summarizer.scripts.fingerprint",
-        "workspace.skills.legal_summarizer.scripts.reducer_strategy",
-        "workspace.skills.legal_summarizer.scripts.cached_retrieval",
-        "workspace.skills.legal_summarizer.scripts.document_cache",
-        "workspace.skills.legal_summarizer.scripts.document_cleanup",
-        "workspace.skills.legal_summarizer.scripts.structure.sections",
-        "workspace.skills.legal_summarizer.scripts.structure.tree",
-        "workspace.skills.legal_summarizer.scripts.brief_strategy",
-        "workspace.skills.legal_summarizer.scripts.brief_representation",
-        "workspace.skills.legal_summarizer.scripts.provenance_reconstruction",
-        "workspace.skills.legal_summarizer.scripts.packing",
-        "workspace.skills.legal_summarizer.scripts.token_budget",
+    forbidden_short = {
+        "fingerprint",
+        "reducer_strategy",
+        "cached_retrieval",
+        "document_cache",
+        "document_cleanup",
+        "sections",
+        "tree",
+        "brief_strategy",
+        "brief_representation",
+        "provenance_reconstruction",
+        "packing",
+        "token_budget",
     }
 
-    for module_name in forbidden:
+    def _collect_imports(path: Path) -> set[str]:
+        """Вернуть имена (последний компонент импорта), которые файл импортирует."""
         try:
-            importlib.import_module(module_name)
-            in_sys = True
-        except ImportError:
-            in_sys = False
-        if in_sys:
-            try:
-                spec = importlib.util.find_spec(module_name)
-                if spec is None:
-                    continue
-                mod = importlib.import_module(module_name)
-                if hasattr(mod, "__file__") and mod.__file__:
-                    pass
-            except Exception:
-                continue
+            src = path.read_text(encoding="utf-8", errors="replace")
+            tree = _ast.parse(src)
+        except (SyntaxError, FileNotFoundError):
+            return set()
+        names: set[str] = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ImportFrom):
+                for alias in node.names:
+                    names.add(alias.asname or alias.name.split(".")[0])
+            elif isinstance(node, _ast.Import):
+                for alias in node.names:
+                    names.add(alias.asname or alias.name.split(".")[0])
+        return names
 
+    scripts_root = summarizer_canonical.__file__.rsplit("application", 1)[0]
     for module in (summarizer_canonical, canonical_retrieval):
-        module_file = module.__file__ or ""
-        for forbidden_mod in forbidden:
-            short = forbidden_mod.rsplit(".", 1)[-1]
-            assert short not in dir(module), (
-                f"{module.__name__} импортирует {short}"
-            )
+        module_path = Path(module.__file__ or "")
+        # прямые imports
+        direct = _collect_imports(module_path)
+        forbidden_used = direct & forbidden_short
+        assert not forbidden_used, (
+            f"{module.__name__} directly imports legacy: {sorted(forbidden_used)}"
+        )
+        # транзитивные imports: идём только по локальным файлам scripts/
+        visited: set[str] = set()
+        stack = [module_path]
+        transitive_forbidden: set[str] = set()
+        while stack and len(visited) < 50:
+            current = stack.pop()
+            cur_names = _collect_imports(current)
+            for short in cur_names & forbidden_short:
+                transitive_forbidden.add(f"{current.name}::{short}")
+            # follow local relative imports (within scripts/)
+            for node in _ast.walk(_ast.parse(current.read_text(encoding="utf-8", errors="replace"))):
+                if isinstance(node, _ast.ImportFrom) and node.level and node.module:
+                    base = current.parent
+                    for _ in range(node.level - 1):
+                        base = base.parent
+                    target = (base / node.module.replace(".", "/")).resolve()
+                    if scripts_root in str(target) and target not in visited:
+                        visited.add(target)
+                        stack.append(target)
+        assert not transitive_forbidden, (
+            f"{module.__name__} transitively imports legacy: "
+            f"{sorted(transitive_forbidden)}"
+        )
 
 def test_canonical_inspection_returns_pipeline_result(tmp_path: Path):
     """inspect_canonical возвращает объект с pipeline_result."""

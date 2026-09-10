@@ -112,8 +112,15 @@ def test_ctx_chunks_cannot_be_swapped_by_estimate(tmp_path, monkeypatch):
     assert before == after
 
 def test_ctx_chunks_preserved_in_manifest(tmp_path, monkeypatch):
-    """manifest.chunks_selected == len(ctx.chunks)."""
+    """После run() в manifest сохранены ровно те chunk_id, которые в ctx.chunks.
+
+    LLM мокаются, ``run_map_reduce`` отрабатывает настоящий код.
+    Проверяем что для каждого chunk_id из ``ctx.chunks`` в ``manifest.chunk_states``
+    есть запись со статусом completed (manifest хранит subset-или-equal от
+    ctx.chunks, потому что direct-стратегия сохраняет все chunks документа).
+    """
     import application.service as summarizer
+    from cache.manifest import load_manifest
     _install_llm_mocks(monkeypatch)
 
     text = _build_doc(sections=6)
@@ -124,30 +131,28 @@ def test_ctx_chunks_preserved_in_manifest(tmp_path, monkeypatch):
     ctx = summarizer.build_execution_context(
         insp, selected_chunks=list(selected),
     )
-
-    # Запускаем через run() с прямым mock'ом execution, чтобы проверить manifest.
-    fake_manifest = {
-        "strategy": "map_flat",
-        "chunks_selected": len(ctx.chunks),
-        "chunks_total": len(insp.chunks),
-        "actual_llm_calls": 1,
-        "context_batches_total": 1,
-    }
-
-    def _fake_run_map_reduce(chunks, *, plan, strategy, **_kwargs):
-        return {
-            "status": "completed",
-            "summary": "fake",
-            "manifest": fake_manifest,
-        }
-
-    monkeypatch.setattr(summarizer, "run_map_reduce", _fake_run_map_reduce)
+    ctx_chunk_ids = tuple(c.chunk_id for c in ctx.chunks)
+    assert len(ctx_chunk_ids) == 3
 
     result = summarizer.run(
         text, length="detailed",
         document_path=str(p), workspace_root=tmp_path,
         confirmed=True,
     )
-    assert result["status"] == "completed"
-    assert fake_manifest["chunks_selected"] == len(selected) == 3
-    # ctx.chunks == selected — это проверяется в предыдущем тесте.
+    assert result["status"] == "completed", result
+
+    # Загружаем реальный manifest из кэша (run() сохраняет его туда).
+    manifest = load_manifest(result["operation_id"], tmp_path)
+    assert manifest is not None, (
+        f"manifest for operation_id={result['operation_id']!r} not persisted"
+    )
+    chunk_states = manifest.chunk_states
+    # Каждый chunk из ctx.chunks должен иметь completed-запись в manifest.
+    for cid in ctx_chunk_ids:
+        assert cid in chunk_states, (
+            f"chunk {cid!r} from ctx.chunks missing in manifest.chunk_states"
+        )
+        assert chunk_states[cid].get("status") == "completed", (
+            f"chunk {cid!r} status is {chunk_states[cid].get('status')!r}, "
+            "expected 'completed'"
+        )
