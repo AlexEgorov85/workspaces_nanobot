@@ -44,7 +44,7 @@ def _build_text(sections: int = 3) -> str:
 def test_first_run_cache_miss_writes_snapshot(tmp_path):
     """Первый run — cache miss → snapshot пишется на диск."""
     from application.pipeline_structure import run_canonical_pipeline
-    from cache.manifest import is_document_cache_complete, read_document_snapshot
+    from cache.document_cache import DocumentCache
 
     text = _build_text(sections=3)
     p = _write_txt(tmp_path, text)
@@ -53,10 +53,10 @@ def test_first_run_cache_miss_writes_snapshot(tmp_path):
     assert result.analysis is not None
     assert len(result.chunks) >= 1
 
-    # Snapshot записан.
     document_id = result.analysis.identity.document_id
-    assert is_document_cache_complete(document_id, tmp_path)
-    snap = read_document_snapshot(document_id, tmp_path)
+    cache = DocumentCache(tmp_path)
+    assert cache.is_complete(document_id)
+    snap = cache.read_snapshot(document_id)
     assert snap is not None
     physical_data, analysis_data, meta = snap
     assert physical_data["path"] == str(p.resolve())
@@ -82,11 +82,9 @@ def test_second_run_cache_hit_returns_same_analysis(tmp_path):
     assert result1.analysis.identity.fingerprint == (
         result2.analysis.identity.fingerprint
     )
-    # Chunk IDs идентичны (cache hit восстанавливает из JSON, не ChunkPlanner).
     assert [c.chunk_id for c in result1.chunks] == [
         c.chunk_id for c in result2.chunks
     ]
-    # structure идентична.
     assert result1.analysis.structure.root_id == (
         result2.analysis.structure.root_id
     )
@@ -100,7 +98,6 @@ def test_cache_hit_skips_parsing(monkeypatch, tmp_path):
     text = _build_text(sections=3)
     p = _write_txt(tmp_path, text)
 
-    # Первый run: cache miss → DocumentLoader.load вызывается.
     run_canonical_pipeline(p, workspace_root=tmp_path)
 
     calls = {"n": 0}
@@ -112,7 +109,6 @@ def test_cache_hit_skips_parsing(monkeypatch, tmp_path):
 
     monkeypatch.setattr(loader_mod.DocumentLoader, "load", counting_load)
 
-    # Второй run: cache hit → DocumentLoader.load НЕ должен вызываться.
     run_canonical_pipeline(p, workspace_root=tmp_path)
     assert calls["n"] == 0, (
         f"cache hit must skip DocumentLoader.load, got {calls['n']} calls"
@@ -132,8 +128,6 @@ def test_cache_invalidation_on_file_change(tmp_path):
     result1 = run_canonical_pipeline(p, workspace_root=tmp_path)
     document_id_v1 = result1.analysis.identity.document_id
 
-    # Изменяем содержимое файла. Размер текста сильно меняется → другой
-    # SHA-256 fingerprint → другой document_id.
     text_v2 = _build_text(sections=6) + "\n" + ("Новое содержимое. " * 1000)
     time.sleep(1.1)
     p.write_text(text_v2, encoding="utf-8")
@@ -141,26 +135,16 @@ def test_cache_invalidation_on_file_change(tmp_path):
     result2 = run_canonical_pipeline(p, workspace_root=tmp_path)
     document_id_v2 = result2.analysis.identity.document_id
 
-    # Новый документ — другой document_id.
     assert document_id_v1 != document_id_v2
-    # Старый snapshot по document_id_v1 остаётся (он валиден для старого
-    # fingerprint'а — больше такого файла нет, snapshot осиротел, но это
-    # не bug: кто-то вручную может вызвать invalidate_document_cache).
-    # Главное — второй вызов был cache miss (новый файл).
 
 
 def test_cache_hit_invalidates_when_fingerprint_mtime_mismatch(tmp_path):
-    """Если кто-то подменил файл вручную (mtime изменился, но мы
-    искусственно подменили бы snapshot) → is_fresh() возвращает False,
-    _try_load_cached_pipeline_result инвалидирует snapshot.
+    """Если «осиротевший» snapshot от старого fingerprint — cache hit для
+    текущего файла всё равно работает (свой document_id), старый snapshot
+    остаётся (его никто не запрашивает).
     """
     from application.pipeline_structure import run_canonical_pipeline
-    from cache.manifest import (
-        document_dir,
-        invalidate_document_cache,
-        is_document_cache_complete,
-        write_document_snapshot,
-    )
+    from cache.document_cache import DocumentCache
     from document.identity import DocumentIdentity
 
     text = _build_text(sections=2)
@@ -168,56 +152,37 @@ def test_cache_hit_invalidates_when_fingerprint_mtime_mismatch(tmp_path):
 
     result = run_canonical_pipeline(p, workspace_root=tmp_path)
     document_id = result.analysis.identity.document_id
-    assert is_document_cache_complete(document_id, tmp_path)
+    cache = DocumentCache(tmp_path)
+    assert cache.is_complete(document_id)
 
-    # Симулируем «подмену» snapshot'а: создаём его с другим fingerprint
-    # (как если бы snapshot был от прошлого содержимого файла).
     fake_identity = DocumentIdentity.from_path_with_mtime(
         p, size_bytes=1, mtime_ns=999,
     )
     if fake_identity.document_id == document_id:
         pytest.skip("test setup: file mtime не дал разные identity")
 
-    # Записываем «осиротевший» snapshot.
-    write_document_snapshot(
-        workspace_root=tmp_path,
+    cache.write_snapshot(
         document_id=fake_identity.document_id,
         physical_data={"path": str(p.resolve())},
         analysis_data={"document_id": fake_identity.document_id},
     )
 
-    # Теперь делаем cache hit попытку с реальным path: наш snapshot не
-    # подходит (другой document_id), cache hit = False, новый snapshot
-    # пишется. Старый «осиротевший» остаётся (это нормально — его
-    # никто не запрашивает).
     result2 = run_canonical_pipeline(p, workspace_root=tmp_path)
-    # Новый run создал свой snapshot (документ всё равно валидный).
     new_document_id = result2.analysis.identity.document_id
-    assert is_document_cache_complete(new_document_id, tmp_path)
+    assert cache.is_complete(new_document_id)
 
 
 def test_cache_workspace_root_none_always_miss(tmp_path):
     """Без workspace_root cache не работает — каждый раз полный pipeline."""
     from application.pipeline_structure import run_canonical_pipeline
+    from cache.document_cache import DocumentCache
 
     text = _build_text(sections=2)
     p = _write_txt(tmp_path, text)
 
-    # Без workspace_root: cache hit невозможен, но и snapshot не пишется.
     result = run_canonical_pipeline(p)
     assert result.analysis is not None
-    # Никаких cache-файлов не должно появиться.
-    docs_root = (
-        tmp_path
-        / "workspace"
-        / "data_store"
-        / "cache"
-        / "skills"
-        / "legal_summarizer"
-        / "documents"
-    )
-    if docs_root.is_dir():
-        assert not any(docs_root.iterdir()), (
-            f"workspace_root=None must not write snapshot, found: "
-            f"{list(docs_root.iterdir())}"
-        )
+
+    cache = DocumentCache(tmp_path)
+    document_id = result.analysis.identity.document_id
+    assert not cache.is_complete(document_id)

@@ -50,20 +50,16 @@ def _make_chunk(
 def test_full_block_includes_all_three_levels(tmp_path):
     """Если section_summary + chunk_summary + text — все три присутствуют."""
     from application.question_context import build_question_context
-    from cache.manifest import (
-        write_document_chunk_summary,
-        write_document_section_summary,
-    )
+    from cache.document_cache import DocumentCache
 
     document_id = "d_full"
-    write_document_section_summary(
-        workspace_root=tmp_path,
+    cache = DocumentCache(tmp_path)
+    cache.write_section_summary(
         document_id=document_id,
         section_id="s_0001",
         summary="Раздел об обязанностях сторон",
     )
-    write_document_chunk_summary(
-        workspace_root=tmp_path,
+    cache.write_chunk_summary(
         document_id=document_id,
         chunk_id="001",
         summary="Chunk 1: пеня 0.1%",
@@ -102,11 +98,11 @@ def test_missing_chunk_summary_omits_block(tmp_path):
 def test_missing_section_summary_omits_block(tmp_path):
     """Нет section summary → блок CACHED SECTION SUMMARY пропускается."""
     from application.question_context import build_question_context
-    from cache.manifest import write_document_chunk_summary
+    from cache.document_cache import DocumentCache
 
     document_id = "d_no_sec"
-    write_document_chunk_summary(
-        workspace_root=tmp_path,
+    cache = DocumentCache(tmp_path)
+    cache.write_chunk_summary(
         document_id=document_id,
         chunk_id="001",
         summary="chunk summary",
@@ -143,20 +139,16 @@ def test_budget_truncation_preserves_summaries(tmp_path):
     """При budget < source text — source text обрезается, summaries сохраняются,
     общий размер <= budget_chars."""
     from application.question_context import build_question_context
-    from cache.manifest import (
-        write_document_chunk_summary,
-        write_document_section_summary,
-    )
+    from cache.document_cache import DocumentCache
 
     document_id = "d_budget"
-    write_document_section_summary(
-        workspace_root=tmp_path,
+    cache = DocumentCache(tmp_path)
+    cache.write_section_summary(
         document_id=document_id,
         section_id="s_0001",
         summary="Important section summary that must survive truncation",
     )
-    write_document_chunk_summary(
-        workspace_root=tmp_path,
+    cache.write_chunk_summary(
         document_id=document_id,
         chunk_id="001",
         summary="Critical chunk summary",
@@ -240,11 +232,11 @@ def test_empty_selection_returns_empty_string(tmp_path):
 def test_chunk_without_section_id(tmp_path):
     """Chunk без section_id (root) → section_summary пропускается, chunk_summary подгружается."""
     from application.question_context import build_question_context
-    from cache.manifest import write_document_chunk_summary
+    from cache.document_cache import DocumentCache
 
     document_id = "d_root"
-    write_document_chunk_summary(
-        workspace_root=tmp_path,
+    cache = DocumentCache(tmp_path)
+    cache.write_chunk_summary(
         document_id=document_id,
         chunk_id="001",
         summary="preamble chunk summary",

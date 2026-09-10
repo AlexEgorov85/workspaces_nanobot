@@ -11,7 +11,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 def test_demo_workflow_step_by_step(tmp_path, monkeypatch):
     """4-step демо полного workflow."""
     import application.service as summarizer
-    from cache.manifest import is_document_cache_complete
+    from cache.document_cache import DocumentCache
     from document.identity import DocumentIdentity
 
     text = """1. Раздел 1. Предмет
@@ -67,7 +67,8 @@ def test_demo_workflow_step_by_step(tmp_path, monkeypatch):
     )
     assert r1["status"] in ("completed", "partial")
     print(f"  batch={recorded['batch']}, section={recorded['section']}, doc={recorded['doc']}")
-    assert is_document_cache_complete(document_id, tmp_path)
+    cache = DocumentCache(tmp_path)
+    assert cache.is_complete(document_id)
     initial_batch, initial_section, initial_doc = (
         recorded["batch"], recorded["section"], recorded["doc"],
     )

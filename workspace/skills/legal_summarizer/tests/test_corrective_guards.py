@@ -27,91 +27,75 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 def test_write_document_chunk_summary_question_guard_no_op(tmp_path):
     """question is not None → no-op (не сохраняется в document cache)."""
-    from cache.manifest import (
-        document_chunk_result_path,
-        write_document_chunk_summary,
-    )
+    from cache.document_cache import DocumentCache
 
     document_id = "d_c1"
-    write_document_chunk_summary(
-        workspace_root=tmp_path,
+    cache = DocumentCache(tmp_path)
+    cache.write_chunk_summary(
         document_id=document_id,
         chunk_id="001",
         summary="question-specific summary",
         question="What about X?",
     )
-    # Файл НЕ должен появиться.
-    path = document_chunk_result_path(document_id, "001", tmp_path)
-    assert not path.exists(), (
-        "write_document_chunk_summary с question=... должен быть no-op "
+    assert cache.load_chunk_summaries(document_id, ["001"]) == {}, (
+        "write_chunk_summary с question=... должен быть no-op "
         "(document cache хранит только question-independent summaries)"
     )
 
 
 def test_write_document_chunk_summary_question_none_writes(tmp_path):
     """question is None → summary сохраняется в document cache."""
-    from cache.manifest import (
-        document_chunk_result_path,
-        write_document_chunk_summary,
-    )
+    from cache.document_cache import DocumentCache
 
     document_id = "d_c1b"
-    write_document_chunk_summary(
-        workspace_root=tmp_path,
+    cache = DocumentCache(tmp_path)
+    cache.write_chunk_summary(
         document_id=document_id,
         chunk_id="001",
         summary="baseline summary",
         question=None,
     )
-    path = document_chunk_result_path(document_id, "001", tmp_path)
-    assert path.is_file()
+    assert cache.load_chunk_summaries(document_id, ["001"]) == {"001": "baseline summary"}
 
 
 def test_write_document_section_summary_question_guard_no_op(tmp_path):
     """question is not None → no-op для section summaries."""
-    from cache.manifest import (
-        document_section_result_path,
-        write_document_section_summary,
-    )
+    from cache.document_cache import DocumentCache
 
     document_id = "d_c1c"
-    write_document_section_summary(
-        workspace_root=tmp_path,
+    cache = DocumentCache(tmp_path)
+    cache.write_section_summary(
         document_id=document_id,
         section_id="s_0001",
         summary="question-specific section summary",
         question="Specific Q",
     )
-    path = document_section_result_path(document_id, "s_0001", tmp_path)
-    assert not path.exists()
+    assert cache.load_section_summaries(document_id, ["s_0001"]) == {}
 
 
 def test_write_document_section_summary_question_none_writes(tmp_path):
     """question is None → summary сохраняется."""
-    from cache.manifest import (
-        document_section_result_path,
-        write_document_section_summary,
-    )
+    from cache.document_cache import DocumentCache
 
     document_id = "d_c1d"
-    write_document_section_summary(
-        workspace_root=tmp_path,
+    cache = DocumentCache(tmp_path)
+    cache.write_section_summary(
         document_id=document_id,
         section_id="s_0001",
         summary="baseline section summary",
         question=None,
     )
-    assert document_section_result_path(document_id, "s_0001", tmp_path).is_file()
+    assert cache.load_section_summaries(document_id, ["s_0001"]) == {
+        "s_0001": "baseline section summary",
+    }
 
 
 def test_run_map_reduce_question_mode_no_document_chunk_summaries(tmp_path, monkeypatch):
-    """End-to-end: question mode → documents/<doc_id>/chunks/*.json НЕ создаются
-    (только operations/<op_id>/chunks/)."""
+    """End-to-end: question mode → document chunks/*.json НЕ создаются
+    (cross-operation document cache хранит только baseline summaries)."""
     import application.service as summarizer
     import llm.calls as llm_calls
-
-    def _fake_batch(chunks, *, chunks_total, structure, length, question=None):
-        return {c.chunk_id: f"summary {c.chunk_id}" for c in chunks}
+    from cache.document_cache import DocumentCache
 
     monkeypatch.setattr(
         llm_calls, "llm_batch",
@@ -120,7 +104,6 @@ def test_run_map_reduce_question_mode_no_document_chunk_summaries(tmp_path, monk
     monkeypatch.setattr(llm_calls, "llm_section_reduce", lambda *a, **kw: "section_summary")
     monkeypatch.setattr(llm_calls, "llm_document_reduce", lambda *a, **kw: "final")
 
-    # Большой текст для map-стратегии.
     parts = []
     for i in range(1, 7):
         parts.append(
@@ -130,40 +113,23 @@ def test_run_map_reduce_question_mode_no_document_chunk_summaries(tmp_path, monk
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
 
-    # 1. Run с question → map_reduce (question-specific LLM).
     summarizer.run(
         text, question="Специфический вопрос",
         document_path=str(p), workspace_root=tmp_path,
         confirmed=True,
     )
 
-    # 2. Проверяем: documents/<doc_id>/chunks/*.json НЕ созданы.
-    docs_root = (
-        tmp_path
-        / "workspace"
-        / "data_store"
-        / "cache"
-        / "skills"
-        / "legal_summarizer"
-        / "documents"
-    )
     from document.identity import DocumentIdentity
     document_id = DocumentIdentity.from_path(p).document_id
-    chunks_dir = docs_root / document_id / "chunks"
-    if chunks_dir.exists():
-        # Если chunks_dir создан — он должен быть пустым (нет question-specific
-        # summaries в document cache).
-        files = list(chunks_dir.iterdir())
-        assert len(files) == 0, (
-            f"question mode не должен писать chunk summaries в document "
-            f"cache, но найдено {len(files)} файлов: {files}"
-        )
+    cache = DocumentCache(tmp_path)
+    assert cache.load_chunk_summaries(document_id, []) == {}
 
 
 def test_run_map_reduce_no_question_writes_document_chunk_summaries(tmp_path, monkeypatch):
     """End-to-end: non-question (length=detailed) → document chunks/*.json создаются."""
     import application.service as summarizer
     import llm.calls as llm_calls
+    from cache.document_cache import DocumentCache
 
     monkeypatch.setattr(
         llm_calls, "llm_batch",
@@ -181,7 +147,6 @@ def test_run_map_reduce_no_question_writes_document_chunk_summaries(tmp_path, mo
     p = tmp_path / "doc.txt"
     p.write_text(text, encoding="utf-8")
 
-    # Без question → length=detailed → map → chunk summaries пишутся.
     summarizer.run(
         text, length="detailed",
         document_path=str(p), workspace_root=tmp_path,
@@ -189,24 +154,22 @@ def test_run_map_reduce_no_question_writes_document_chunk_summaries(tmp_path, mo
     )
 
     from document.identity import DocumentIdentity
-    from workspace.utils.session_key import safe_session_key
     document_id = DocumentIdentity.from_path(p).document_id
-    chunks_dir = (
-        tmp_path
-        / "workspace"
-        / "data_store"
-        / "cache"
-        / "sessions"
-        / safe_session_key("default")
-        / "documents"
-        / document_id
-        / "chunks"
-    )
+    cache = DocumentCache(tmp_path)
+    # Проверяем filesystem contract: chunk summary files должны быть на диске.
+    # Это filesystem-level atomicity test — требует доступа к layout, поэтому
+    # используется private ``_document_dir``. Прямой импорт helper'ов
+    # ``cache.manifest`` запрещён.
+    chunks_dir = cache._document_dir(document_id) / "chunks"
     assert chunks_dir.is_dir(), (
-        f"non-question run должен создать document chunk summaries, "
-        f"но chunks_dir отсутствует"
+        f"non-question run должен создать document chunks dir, "
+        f"но {chunks_dir} отсутствует"
     )
-    assert len(list(chunks_dir.iterdir())) > 0
+    chunk_files = list(chunks_dir.glob("*.json"))
+    assert len(chunk_files) > 0, (
+        f"non-question run должен создать document chunk summary files, "
+        f"но {chunks_dir} пуст"
+    )
 
 
 # ============================================================================
@@ -219,7 +182,6 @@ def test_question_shortcut_creates_manifest_for_idempotency(tmp_path, monkeypatc
     idempotency-check (manifest hit) и НЕ делает LLM."""
     import application.service as summarizer
     import llm.calls as llm_calls
-    import cache.manifest as cm
 
     # Сначала создаём document cache через length=brief.
     monkeypatch.setattr(

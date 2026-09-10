@@ -81,11 +81,13 @@ def test_first_run_writes_document_cache(tmp_path, monkeypatch):
     )
     assert result["status"] in ("completed", "partial"), result
 
-    # document-cache должен быть заполнен (через _write_document_snapshot_after_pipeline).
-    from cache.manifest import is_document_cache_complete
+    # document-cache должен быть заполнен (через DocumentCache.write_snapshot
+    # внутри run_canonical_pipeline).
+    from cache.document_cache import DocumentCache
     from document.identity import DocumentIdentity
     document_id = DocumentIdentity.from_path(p).document_id
-    assert is_document_cache_complete(document_id, tmp_path)
+    cache = DocumentCache(tmp_path)
+    assert cache.is_complete(document_id)
 
 
 def test_question_after_cache_hit_uses_document_cache(tmp_path, monkeypatch):
@@ -220,7 +222,7 @@ def test_question_without_document_path_raises_inspect_error(
 def test_question_broken_snapshot_falls_through(tmp_path, monkeypatch):
     """Если snapshot повреждён → fallthrough без падения."""
     import application.service as summarizer
-    import cache.manifest as cm
+    from cache.document_cache import DocumentCache
     _install_recording_llm(monkeypatch)
 
     text = _build_doc_with_marker(sections=4)
@@ -236,7 +238,8 @@ def test_question_broken_snapshot_falls_through(tmp_path, monkeypatch):
     # Ломаем analysis.json.
     from document.identity import DocumentIdentity
     document_id = DocumentIdentity.from_path(p).document_id
-    analysis_path = cm.document_analysis_path(document_id, tmp_path)
+    cache = DocumentCache(tmp_path)
+    analysis_path = cache._document_dir(document_id) / "analysis.json"
     analysis_path.write_text("{not valid json", encoding="utf-8")
 
     # Второй run не должен упасть.
