@@ -59,6 +59,7 @@ from application.pipeline_structure import (
     run_canonical_pipeline,
 )
 from application.question_context import build_question_context
+from cache.document_cache import DocumentCache
 from cache.manifest import (
     load_manifest,
     read_result,
@@ -91,11 +92,10 @@ def _try_question_via_document_cache(
     При любой ошибке (cache miss, broken snapshot, no selected chunks,
     LLM failure) возвращает ``None`` — caller fallthrough на обычный
     pipeline.
+
+    Storage boundary (atomic read, completeness, layout) — ответственность
+    ``DocumentCache``. Service не знает про cache paths / marker / format.
     """
-    from cache.manifest import (
-        is_document_cache_complete,
-        read_document_snapshot,
-    )
     from chunking._text_helpers import progress as _progress
     from chunking.chunks import Chunk
     from document.identity import DocumentIdentity
@@ -106,17 +106,14 @@ def _try_question_via_document_cache(
         _progress(f"#6 skip: {exc!r}")
         return None
 
-    if not is_document_cache_complete(
-        identity.document_id, workspace_root, session_key,
-    ):
+    cache = DocumentCache(workspace_root, session_key)
+    if not cache.is_complete(identity.document_id):
         _progress(
             f"#6 skip: no document cache for document_id={identity.document_id!r}"
         )
         return None
 
-    snap = read_document_snapshot(
-        identity.document_id, workspace_root, session_key,
-    )
+    snap = cache.read_snapshot(identity.document_id)
     if snap is None:
         _progress("#6 skip: snapshot incomplete")
         return None

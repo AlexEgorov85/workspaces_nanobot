@@ -26,10 +26,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from cache.manifest import (
-    load_document_chunk_summaries,
-    load_document_section_summaries,
-)
+from cache.document_cache import DocumentCache
 from chunking.chunks import Chunk
 
 
@@ -134,17 +131,16 @@ def build_question_context(
         return ""
 
     # 1. Загрузить chunk summaries.
-    chunk_summaries = load_document_chunk_summaries(
+    cache = DocumentCache(workspace_root, session_key)
+    chunk_summaries = cache.load_chunk_summaries(
         document_id,
         [c.chunk_id for c in selected_chunks],
-        workspace_root,
-        session_key=session_key,
     )
 
     # 2. Собрать уникальные section_id'ы и загрузить section summaries.
     section_ids = sorted({c.section_id for c in selected_chunks if c.section_id})
-    section_summaries = load_document_section_summaries(
-        document_id, section_ids, workspace_root, session_key=session_key,
+    section_summaries = cache.load_section_summaries(
+        document_id, section_ids,
     )
 
     # 3. Собрать блоки (порядок = порядок selected_chunks).

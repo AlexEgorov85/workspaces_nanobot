@@ -26,6 +26,7 @@ from typing import Any
 import llm.calls as _llm_calls_mod
 import llm.sanitize as _llm_sanitize_mod
 from application.manifest_builder import build_manifest
+from cache.document_cache import DocumentCache
 from cache.manifest import (
     NormalizedManifest,
     save_manifest,
@@ -291,7 +292,6 @@ def run_map_reduce(
     from cache.manifest import (
         load_cached_partials as _load_cached_partials,
         write_chunk_result as _write_chunk_result,
-        write_document_chunk_summary as _write_document_chunk_summary,
     )
     from execution.pipeline import run_one_batch_async as _run_one_batch_async
 
@@ -304,20 +304,19 @@ def run_map_reduce(
     # (baseline) summaries. При ``question is not None`` chunk summary
     # пишется только в operation-level cache (``operations/<op_id>/chunks/``).
     # Через callback пробрасываем ``question`` для guard внутри
-    # ``write_document_chunk_summary``.
+    # ``DocumentCache.write_chunk_summary``.
     document_id = (
         analysis.identity.document_id
         if analysis is not None and getattr(analysis, "identity", None) is not None
         else None
     )
 
-    def _write_doc_chunk_summary(
+    def _persist_doc_chunk_summary(
         *, workspace_root, chunk_id, summary, section_id,
         section_path, page_start, page_end,
     ):
         if document_id is not None and workspace_root is not None:
-            _write_document_chunk_summary(
-                workspace_root=workspace_root,
+            DocumentCache(workspace_root, session_key).write_chunk_summary(
                 document_id=document_id,
                 chunk_id=chunk_id,
                 summary=summary,
@@ -326,7 +325,6 @@ def run_map_reduce(
                 page_start=page_start,
                 page_end=page_end,
                 question=question,
-                session_key=session_key,
             )
 
     payload = run_map_reduce_execution(
@@ -348,7 +346,7 @@ def run_map_reduce(
         section_headings=section_headings,
         section_paths=section_paths,
         write_chunk_result=_write_chunk_result,
-        write_document_chunk_summary=_write_doc_chunk_summary,
+        write_document_chunk_summary=_persist_doc_chunk_summary,
         run_one_batch_async=_run_one_batch_async,
         load_cached_partials=_load_cached_partials,
     )
@@ -408,7 +406,6 @@ def _persist_final_manifest(
     from cache.manifest import (
         NormalizedManifest,
         save_manifest,
-        write_document_section_summary,
         write_result,
     )
 
@@ -475,14 +472,13 @@ def _persist_final_manifest(
         and getattr(analysis, "identity", None) is not None
     ):
         document_id = analysis.identity.document_id
+        doc_cache = DocumentCache(workspace_root, session_key)
         for sid, summary in section_summaries.items():
-            write_document_section_summary(
-                workspace_root=workspace_root,
+            doc_cache.write_section_summary(
                 document_id=document_id,
                 section_id=sid,
                 summary=summary,
                 question=question,
-                session_key=session_key,
             )
 
 

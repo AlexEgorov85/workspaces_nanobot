@@ -11,6 +11,13 @@
 
 Canonical pipeline — единственный production path. Legacy API
 (``SectionTree``, ``DocumentSection``, ``build_section_tree``) удалены.
+
+Document-level cache: ``DocumentCache`` (см. ``cache/document_cache.py``).
+Pipeline **не** знает про cache paths / marker / snapshot filenames —
+это ответственность ``DocumentCache``. Pipeline только проверяет
+условия попадания в cache (``identity.is_fresh``) и зовёт
+``DocumentCache.is_complete`` / ``read_snapshot`` / ``write_snapshot``
+/ ``invalidate``.
 """
 
 from __future__ import annotations
@@ -19,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cache.document_cache import DocumentCache
 from chunking.chunks import Chunk
 from document.analysis import (
     DocumentAnalysis,
@@ -107,7 +115,7 @@ def _try_load_cached_pipeline_result(
       * ``workspace_root`` не None (для path resolution);
       * файл существует и ``DocumentIdentity.is_fresh(path) == True``
         (дешёвая проверка: stat + сравнение mtime_ns/size);
-      * snapshot complete (есть ``_complete.marker``).
+      * snapshot complete (по ``DocumentCache.is_complete``).
 
     При hit восстанавливает ``PhysicalDocument``, ``DocumentStructure``,
     ``Chunk[]``, ``ValidationReport`` из их ``to_dict``. ``RetrievalIndex``
@@ -124,30 +132,18 @@ def _try_load_cached_pipeline_result(
     except (FileNotFoundError, OSError):
         return None
 
+    cache = DocumentCache(workspace_root, session_key)
+
     if not identity.is_fresh(path):
         # mtime/size изменились — инвалидируем старый snapshot.
-        from cache.manifest import (
-            invalidate_document_cache,
-            is_document_cache_complete,
-            read_document_snapshot,
-        )
-        if is_document_cache_complete(
-            identity.document_id, workspace_root, session_key,
-        ):
-            invalidate_document_cache(
-                identity.document_id, workspace_root, session_key,
-            )
+        if cache.is_complete(identity.document_id):
+            cache.invalidate(identity.document_id)
         return None
 
-    from cache.manifest import (
-        is_document_cache_complete,
-        read_document_snapshot,
-    )
-
-    if not is_document_cache_complete(identity.document_id, workspace_root, session_key):
+    if not cache.is_complete(identity.document_id):
         return None
 
-    snap = read_document_snapshot(identity.document_id, workspace_root, session_key)
+    snap = cache.read_snapshot(identity.document_id)
     if snap is None:
         return None
     physical_data, analysis_data, _meta = snap
@@ -163,10 +159,7 @@ def _try_load_cached_pipeline_result(
         chunks = tuple(Chunk.from_dict(c) for c in analysis_data["chunks"])
     except (KeyError, TypeError, ValueError):
         # Битый snapshot — инвалидируем и cache miss.
-        from cache.manifest import invalidate_document_cache
-        invalidate_document_cache(
-            identity.document_id, workspace_root, session_key,
-        )
+        cache.invalidate(identity.document_id)
         return None
 
     analysis = DocumentAnalysis.build(
@@ -200,12 +193,11 @@ def _write_document_snapshot_after_pipeline(
     """Сохранить document-level snapshot после успешного canonical pipeline.
 
     Используется только при cache miss. При cache hit snapshot
-    уже существует и write_document_snapshot выбросит ``RuntimeError`` —
-    мы это явно НЕ вызываем в hit-ветке.
+    уже существует и ``DocumentCache.write_snapshot`` выбросит
+    ``RuntimeError`` — мы это явно НЕ вызываем в hit-ветке.
     """
     if workspace_root is None:
         return
-    from cache.manifest import write_document_snapshot
 
     analysis_payload = {
         "version": 1,
@@ -221,14 +213,13 @@ def _write_document_snapshot_after_pipeline(
             "term_count": len(analysis.retrieval_index.term_to_chunks),
         }
 
+    cache = DocumentCache(workspace_root, session_key)
     try:
-        write_document_snapshot(
-            workspace_root=workspace_root,
+        cache.write_snapshot(
             document_id=identity.document_id,
             physical_data=physical.to_dict(),
             analysis_data=analysis_payload,
             retrieval_index_meta=retrieval_meta,
-            session_key=session_key,
         )
     except RuntimeError:
         # Уже complete (конкурентная запись или race) — это OK, ничего не делаем.
