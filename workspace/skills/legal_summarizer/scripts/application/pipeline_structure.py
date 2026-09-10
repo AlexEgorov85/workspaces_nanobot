@@ -15,9 +15,11 @@ Canonical pipeline — единственный production path. Legacy API
 Document-level cache: ``DocumentCache`` (см. ``cache/document_cache.py``).
 Pipeline **не** знает про cache paths / marker / snapshot filenames —
 это ответственность ``DocumentCache``. Pipeline только проверяет
-условия попадания в cache (``identity.is_fresh``) и зовёт
-``DocumentCache.is_complete`` / ``read_snapshot`` / ``write_snapshot``
-/ ``invalidate``.
+наличие snapshot через ``DocumentCache.is_complete`` и зовёт
+``DocumentCache.read_snapshot`` / ``write_snapshot``. Change detection
+работает через ``document_id`` hash (SHA-256 от path+size+mtime);
+invalidate явно не требуется, потому что новый файл = новый
+``document_id`` = cache miss.
 """
 
 from __future__ import annotations
@@ -114,15 +116,25 @@ def _try_load_cached_pipeline_result(
 
     Условия cache hit:
       * ``workspace_root`` не None (для path resolution);
-      * файл существует и ``DocumentIdentity.is_fresh(path) == True``
-        (дешёвая проверка: stat + сравнение mtime_ns/size);
-      * snapshot complete (по ``DocumentCache.is_complete``).
+      * файл существует;
+      * snapshot complete для текущего ``document_id``
+        (SHA-256 от path+size+mtime — если файл изменился,
+        ``document_id`` другой → cache miss → reparse).
 
     При hit восстанавливает ``PhysicalDocument``, ``DocumentStructure``,
     ``Chunk[]``, ``ValidationReport`` из их ``to_dict``. ``RetrievalIndex``
     пересобирается заново (детерминированно из chunks+structure),
     если ``include_retrieval_index=True``; иначе ``analysis.retrieval_index``
     остаётся ``None`` (как и на cache miss с тем же параметром).
+
+    Note:
+        Change detection работает через ``document_id`` hash, не через
+        explicit ``DocumentIdentity.is_fresh`` check. Когда файл
+        изменяется, ``DocumentIdentity.from_path(path)`` создаёт
+        identity с новым fingerprint → новый ``document_id`` →
+        ``cache.is_complete`` возвращает ``False`` → cache miss.
+        Старый snapshot остаётся на диске как orphan (cache hygiene
+        responsibility вне scope этого метода).
 
     Returns:
         ``PipelineResult`` или ``None`` при miss.
@@ -136,12 +148,6 @@ def _try_load_cached_pipeline_result(
         return None
 
     cache = DocumentCache(workspace_root, session_key)
-
-    if not identity.is_fresh(path):
-        # mtime/size изменились — инвалидируем старый snapshot.
-        if cache.is_complete(identity.document_id):
-            cache.invalidate(identity.document_id)
-        return None
 
     if not cache.is_complete(identity.document_id):
         return None
