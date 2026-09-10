@@ -62,22 +62,13 @@ def test_no_data_loss_final_summary_has_all_markers(n_sections, max_rounds):
 def test_section_summaries_dict_is_indexed():
     """``result.section_summaries`` хранит каждую исходную section_id → summary.
 
-    Follow-up использует этот dict для O(1) lookups. Если dict пустой,
-    follow-up не сможет найти section.
-
-    NOTE: production-код ``reduce_sections_to_document`` сейчас НЕ заполняет
-    ``section_summaries`` (KNOWN ISSUE — см. audit-analyzer brief). Этот
-    тест зафиксирован как ``xfail`` до фикса reducer'а; после фикса
-    декоратор должен быть снят, и тест будет ловить регрессии.
+    Follow-up использует этот dict для O(1) lookups через
+    ``DocumentCache.write_section_summary``. Если dict пустой,
+    DocumentCache никогда не получает summaries, и follow-up не находит
+    section.
     """
-    import pytest
     result, items = _reduce_unique(20, group_size=2, max_rounds=1)
     expected_section_ids = {sid for sid, _ in items}
-    if not result.section_summaries:
-        pytest.xfail(
-            "KNOWN ISSUE: reduce_sections_to_document не заполняет "
-            "section_summaries; follow-up lookup будет падать"
-        )
     assert set(result.section_summaries.keys()) == expected_section_ids, (
         f"section_summaries missing: "
         f"{expected_section_ids - set(result.section_summaries.keys())}"

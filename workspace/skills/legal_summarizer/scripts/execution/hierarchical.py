@@ -156,9 +156,15 @@ def reduce_sections_to_document(
         )
 
     final_summary = current[0][1] if current else ""
+    # ``section_summaries`` возвращает dict с **исходными** section_id →
+    # summary, чтобы downstream (DocumentCache.write_section_summary,
+    # follow-up lookups) мог найти summary для каждой переданной секции.
+    # Раньше возвращался пустой dict — это ломало follow-up path:
+    # ``if section_summaries and ...`` всегда было False, поэтому
+    # DocumentCache никогда не получал summaries.
     return HierarchicalReducerResult(
         final_summary=final_summary,
-        section_summaries={},
+        section_summaries=dict(section_summaries),
         rounds_done=rounds,
         truncated=truncated,
     )
