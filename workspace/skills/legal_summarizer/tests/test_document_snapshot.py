@@ -269,6 +269,118 @@ def test_atomic_replace_no_staging_leftover_on_collision(tmp_path):
     assert physical == {"v": 2}
 
 
+def test_orphan_eviction_on_snapshot_write(tmp_path):
+    """При записи нового snapshot'а для пути X все предыдущие snapshot'ы
+    с тем же ``physical.path`` (но другим ``document_id``) удаляются
+    как orphans.
+
+    Симулирует полный сценарий: файл v1 → snapshot v1 (doc_id_A),
+    файл v2 (новый fingerprint) → snapshot v2 (doc_id_B) → orphan v1
+    удаляется.
+
+    Если ``physical.path`` отсутствует в payload — eviction skip
+    (defensive: snapshot всё равно записывается).
+    """
+    import cache.document_cache as dc
+    from cache.document_cache import DocumentCache
+
+    cache = DocumentCache(tmp_path)
+    source_path = "C:/fake/document.pdf"
+    doc_id_v1 = "v1_doc_id"
+    doc_id_v2 = "v2_doc_id"
+
+    cache.write_snapshot(
+        document_id=doc_id_v1,
+        physical_data={"path": source_path, "version": 1},
+        analysis_data={"document_id": doc_id_v1},
+    )
+    # v1 snapshot существует.
+    assert cache.is_complete(doc_id_v1)
+
+    # Симулируем новую версию файла (новый fingerprint → новый
+    # document_id) → запись snapshot v2.
+    cache.write_snapshot(
+        document_id=doc_id_v2,
+        physical_data={"path": source_path, "version": 2},
+        analysis_data={"document_id": doc_id_v2},
+    )
+
+    # v2 snapshot существует.
+    assert cache.is_complete(doc_id_v2)
+    snap_v2 = cache.read_snapshot(doc_id_v2)
+    assert snap_v2 is not None
+    assert snap_v2[0]["version"] == 2
+
+    # v1 orphan удалён post-write cleanup.
+    assert not cache.is_complete(doc_id_v1), (
+        "v1 snapshot должен быть удалён как orphan после записи v2"
+    )
+    v1_dir = cache._document_dir(doc_id_v1)
+    assert not v1_dir.exists(), (
+        f"orphan v1 каталог должен быть удалён: {v1_dir}"
+    )
+
+
+def test_orphan_eviction_keeps_siblings_for_different_paths(tmp_path):
+    """Cleanup удаляет **только** orphans с тем же ``physical.path``.
+    Snapshot'ы для других документов (другие path) не трогаются —
+    они не orphans, это валидные кэши других файлов.
+    """
+    from cache.document_cache import DocumentCache
+
+    cache = DocumentCache(tmp_path)
+    path_a = "C:/fake/document_a.pdf"
+    path_b = "C:/fake/document_b.pdf"
+
+    cache.write_snapshot(
+        document_id="a_v1",
+        physical_data={"path": path_a},
+        analysis_data={"document_id": "a_v1"},
+    )
+    cache.write_snapshot(
+        document_id="b_v1",
+        physical_data={"path": path_b},
+        analysis_data={"document_id": "b_v1"},
+    )
+    # Теперь пишем новую версию только для path_a → b_v1 не должен
+    # пострадать.
+    cache.write_snapshot(
+        document_id="a_v2",
+        physical_data={"path": path_a},
+        analysis_data={"document_id": "a_v2"},
+    )
+
+    assert cache.is_complete("a_v2")
+    assert not cache.is_complete("a_v1"), "a_v1 — orphan для path_a"
+    assert cache.is_complete("b_v1"), (
+        "b_v1 — валидный cache для path_b, не должен быть удалён"
+    )
+
+
+def test_orphan_eviction_skip_when_no_path(tmp_path):
+    """Если ``physical.path`` отсутствует в payload (или None),
+    eviction skip — snapshot всё равно записывается. Это defensive
+    fallback для случаев, когда caller не передал path.
+    """
+    from cache.document_cache import DocumentCache
+
+    cache = DocumentCache(tmp_path)
+    cache.write_snapshot(
+        document_id="d_no_path_v1",
+        physical_data={},  # no path
+        analysis_data={"document_id": "d_no_path_v1"},
+    )
+    # Write без path повторно — не должно падать, snapshot просто
+    # создаётся (cleanup skip).
+    cache.write_snapshot(
+        document_id="d_no_path_v2",
+        physical_data={},
+        analysis_data={"document_id": "d_no_path_v2"},
+    )
+    assert cache.is_complete("d_no_path_v1")
+    assert cache.is_complete("d_no_path_v2")
+
+
 def test_load_document_chunk_summaries(tmp_path):
     """``DocumentCache.load_chunk_summaries``: cross-operation lookup."""
     from cache.document_cache import DocumentCache

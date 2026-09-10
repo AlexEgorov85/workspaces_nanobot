@@ -243,20 +243,79 @@ class DocumentCache:
             target_dir.parent.mkdir(parents=True, exist_ok=True)
 
             # Атомарный install/replace через ``os.replace`` (POSIX + Windows).
-            # Устраняет TOCTOU window: если параллельный writer создал
-            # complete snapshot между нашим pre-check и этим вызовом —
-            # ``os.replace`` атомарно перезапишет его (новый writer
-            # «выигрывает», оба complete валидны).
-            # Если же target уже complete И его владелец — не мы, то
-            # мы перезапишем чужой complete; это не data loss, потому что
-            # оба snapshot'а семантически эквивалентны для одного
-            # document_id (SHA-256 от path+size+mtime детерминирован).
+            # Устраняет TOCTOU window, в котором параллельный writer мог
+            # уничтожить чужой complete snapshot через rmtree + rename.
+            # Параллельные writer'ы пишут семантически эквивалентные
+            # snapshot'ы (один document_id = один fingerprint), поэтому
+            # «выигрыш» любого writer'а допустим; data loss невозможен.
             os.replace(staging, target_dir)
+
+            # Post-write cleanup: удалить orphan siblings (старые версии
+            # того же файла с другим document_id). Scan documents_root
+            # по physical.json.path, сравниваем через os.path.realpath
+            # для устойчивости к разному spelling (relative vs absolute,
+            # POSIX vs Windows разделители). Идемпотентно: ``rmtree`` с
+            # ignore_errors=True не падает на несуществующих siblings
+            # (другой writer мог уже удалить их параллельно).
+            self._evict_orphan_siblings(target_dir, physical_data)
             return target_dir
         except Exception:
             if staging.exists() and staging.is_dir():
                 shutil.rmtree(staging, ignore_errors=True)
             raise
+
+    def _evict_orphan_siblings(
+        self,
+        target_dir: Path,
+        physical_data: dict[str, Any],
+    ) -> None:
+        """Удалить snapshot'ы, соответствующие старым версиям того же файла.
+
+        Orphan sibling = каталог в ``documents_root`` с другим
+        ``document_id``, но тем же ``physical.path``. Возникает при
+        изменении исходного файла (mtime/size → новый SHA-256 →
+        новый document_id → новый snapshot; старый остаётся мёртвым
+        грузом).
+
+        Без этой cleanup document-level cache растёт неограниченно
+        с каждой редакцией файла. Caller (pipeline) передаёт
+        ``physical_data`` явно — он знает абсолютный путь. Сравнение
+        через ``os.path.realpath`` нормализует разный spelling путей
+        на разных OS.
+
+        Идемпотентно: ``shutil.rmtree(..., ignore_errors=True)`` не
+        падает на несуществующих siblings (другой writer мог удалить
+        их параллельно).
+        """
+        source_path_raw = physical_data.get("path")
+        if not source_path_raw:
+            return
+        source_real = os.path.realpath(source_path_raw)
+
+        documents_root = target_dir.parent
+        target_name = target_dir.name
+        if not documents_root.is_dir():
+            return
+
+        for sibling in documents_root.iterdir():
+            if not sibling.is_dir():
+                continue
+            if sibling.name == target_name:
+                continue
+            if sibling.name.startswith(".staging_"):
+                continue
+            sibling_physical = _read_json(sibling / "physical.json")
+            if sibling_physical is None:
+                continue
+            sibling_path_raw = sibling_physical.get("path")
+            if not sibling_path_raw:
+                continue
+            try:
+                if os.path.realpath(sibling_path_raw) == source_real:
+                    shutil.rmtree(sibling, ignore_errors=True)
+            except OSError:
+                # Path resolution failed (битый symlink и т.п.) — skip.
+                continue
 
     def read_snapshot(
         self,
