@@ -18,6 +18,7 @@
 - **P1 — AST guard whitelist enforcement:** `test_operation_level_manifest_whitelist_enforced` реально запрещает import `cache.manifest` вне whitelist (старый тест только проверял whitelist на наличие). Поймал существующее нарушение в `cli_query.py` (использование private `_read_json`), которое исправлено через `load_manifest`.
 - **P2 — terminology fix:** `write_chunk_summary` / `write_section_summary` docstring обновлён: «idempotent atomic upsert» вместо misleading «append-only».
 - **P2 — `include_retrieval_index` propagation:** параметр теперь корректно пробрасывается через `_try_load_cached_pipeline_result`. Cache hit и cache miss ведут себя одинаково.
+- **Orphan eviction (data leak fix):** `DocumentCache.write_snapshot` после `os.replace` вызывает `_evict_orphan_siblings` — scan `documents_root` по `physical.json.path` (сравнение через `os.path.realpath`), удаление через `shutil.rmtree(ignore_errors=True)` (идемпотентно при concurrent eviction). Удаляет только snapshots с тем же path; snapshots других документов не трогает. Defensive skip если `physical.path` отсутствует в payload. Regression-тесты: `test_orphan_eviction_on_snapshot_write`, `test_orphan_eviction_keeps_siblings_for_different_paths`, `test_orphan_eviction_skip_when_no_path`.
 
 ### Phase 1 — исходная секция
 
@@ -89,25 +90,22 @@ Concurrency tests                                                        = 2/2 p
 
   В Phase 2 мёртвая ветка **удалена**. Текущая логика полагается на
   SHA-256 change detection через `document_id`: новый файл → новый
-  fingerprint → новый `document_id` → `cache.is_complete(new_id)` →
-  `False` → cache miss → полный reparse. Cache hit/miss correctness
-  не нарушен.
+  fingerprint → новый `document_id` →
+  `cache.is_complete(new_id)` → `False` → cache miss → полный reparse.
+  Cache hit/miss correctness не нарушен.
 
-  **Реальное следствие** (НЕ data corruption): старые snapshot'ы
-  остаются на диске как orphans при изменении файла. Это
-  **lifecycle/GC** проблема, а не cache correctness. Требует
-  отдельного решения о политике retention старых версий:
+  **Orphan eviction (data leak fix):** orphan snapshots при изменении
+  файла удаляются post-write в `DocumentCache._evict_orphan_siblings`.
+  Scan `documents_root` по `physical.json.path` (сравнение через
+  `os.path.realpath` для нормализации), удаление через `shutil.rmtree`
+  с `ignore_errors=True` (идемпотентно при concurrent eviction).
+  Idempotent: удаление уже удалённого sibling — no-op.
 
-  * **A. Не удалять автоматически** — текущее поведение; DocumentCache
-    становится версионированным хранилищем, cleanup делается отдельно.
-  * **B. Удалять orphans при cache miss для того же path** —
-    требует path → document_id index, дополнительная metadata.
-  * **C. TTL / background GC** — периодическая очистка старых версий
-    по LRU/возрасту.
-
-  Не реализовано в текущем refactoring (вне scope). Требует
-  отдельного обсуждения ожидаемой семантики DocumentCache как
-  storage backend.
+  Реализация **без** дополнительного index — scan `documents/*/physical.json`
+  при каждом write. При типичной нагрузке (десятки документов на
+  session) — десятки stat() вызовов, микросекунды. Без race conditions
+  между scan и delete (snapshot уже записан, sibling удаление
+  идемпотентно).
 
 - **`map_reduce.py`** — НЕ тронут (по явному правилу). Callback contract `WriteDocumentChunkSummaryFn` сохранён; реализация передаётся из `execution_orchestration.py` через `DocumentCache.write_chunk_summary`. Это dependency injection, не cache leak.
 
