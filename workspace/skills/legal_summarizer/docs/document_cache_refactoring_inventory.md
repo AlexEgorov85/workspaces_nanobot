@@ -2,11 +2,24 @@
 
 **Дата создания:** начало refactoring.
 **Назначение:** baseline для миграции document-level API в `DocumentCache`.
-**Статус:** ✅ **ЗАВЕРШЕНО** — все этапы 1-19 выполнены, полный test suite зелёный (777 passed, 1 xfailed).
+**Статус:** ✅ **Document-level cache migration completed.** Known follow-up refactors remain outside scope (см. секцию «Known follow-up refactors» ниже).
 
 ---
 
 ## Финальный статус
+
+### Phase 1 — что сделано при миграции
+
+(исходная миграция document-level API → DocumentCache)
+
+### Phase 2 — remediation pass (после code review)
+
+- **P0 — race condition fix:** `DocumentCache.write_snapshot` теперь использует `os.replace` вместо `shutil.rmtree + Path.rename`. Устраняет TOCTOU window. Concurrency contract документирован в docstring. Покрыто regression-тестами.
+- **P1 — AST guard whitelist enforcement:** `test_operation_level_manifest_whitelist_enforced` реально запрещает import `cache.manifest` вне whitelist (старый тест только проверял whitelist на наличие). Поймал существующее нарушение в `cli_query.py` (использование private `_read_json`), которое исправлено через `load_manifest`.
+- **P2 — terminology fix:** `write_chunk_summary` / `write_section_summary` docstring обновлён: «idempotent atomic upsert» вместо misleading «append-only».
+- **P2 — `include_retrieval_index` propagation:** параметр теперь корректно пробрасывается через `_try_load_cached_pipeline_result`. Cache hit и cache miss ведут себя одинаково.
+
+### Phase 1 — исходная секция
 
 ### Что сделано
 
@@ -51,13 +64,37 @@ document-level legacy symbols в cache/document_cache.py                  = N/A 
 document-level legacy symbols в cache/manifest.py                        = 0 (физически удалены)
 document-level legacy symbols в tests/ (кроме имён тестовых функций)     = 0
 document-level legacy symbols в references/                              = 0 (только в guard-документации)
-test suite (legal_summarizer)                                            = 777 passed, 1 xfailed
-AST guard                                                                = 10/10 passed
+test suite (legal_summarizer)                                            = 775 passed, 1 xfailed
+AST guard                                                                = 6/6 passed
+Concurrency tests                                                        = 2/2 passed
 ```
 
 ### НЕ выполнено (осознанные TODO)
 
 - **Helper'ы `_try_load_cached_pipeline_result` + `_write_document_snapshot_after_pipeline` в `pipeline_structure.py`** — сохранены как тонкие cache-coordination helpers (не wrappers над `DocumentCache`). Они владеют **recovery в PipelineResult** (десериализация snapshot → in-memory объекты). Это отдельная ответственность, не cache storage protocol. Решение (inline / `application/snapshot_loader.py` / baseline) — отдельный refactor после стабилизации архитектуры.
+
+- **`DocumentIdentity.is_fresh(path)` — pre-existing баг (НЕ связан с DocumentCache refactoring), обнаружен во время Phase 2 review.**
+
+  Текущая реализация в `document/identity.py:56-71`:
+  ```python
+  def is_fresh(self, path: str | Path) -> bool:
+      p = Path(path)
+      try:
+          st = p.stat()
+      except FileNotFoundError:
+          return False
+      return (
+          str(p.resolve()) == self.resolved_path
+          and st.st_size == self.size_bytes
+          and st.st_mtime_ns == self.mtime_ns
+      )
+  ```
+
+  Когда `self` — свежий `DocumentIdentity.from_path(path)`, проверка identity с самой собой **всегда возвращает True**. Соответственно, invalidate-ветка в `pipeline_structure._try_load_cached_pipeline_result` (lines 127-141) никогда не срабатывает на cache hit при изменении файла.
+
+  Правильный контракт требует сравнения с **identity из snapshot'а** (например, через `DocumentCache.read_snapshot(document_id).identity`). Behavioral test на полный lifecycle (file v1 → cache → modify → cache miss → new snapshot) требует исправления этого бага.
+
+  В Phase 2 я не стал исправлять `DocumentIdentity.is_fresh`, потому что это выходит за scope задачи (требует архитектурного решения о том, где хранить snapshot identity в `DocumentAnalysis`). Баг зафиксирован здесь.
 
 - **`map_reduce.py`** — НЕ тронут (по явному правилу). Callback contract `WriteDocumentChunkSummaryFn` сохранён; реализация передаётся из `execution_orchestration.py` через `DocumentCache.write_chunk_summary`. Это dependency injection, не cache leak.
 
