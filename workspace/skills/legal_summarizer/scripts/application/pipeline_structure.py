@@ -108,6 +108,7 @@ def _try_load_cached_pipeline_result(
     path: str | Path,
     workspace_root: Path | str | None,
     session_key: str = "default",
+    include_retrieval_index: bool = True,
 ) -> PipelineResult | None:
     """Попробовать загрузить cached ``PipelineResult`` из document-level cache.
 
@@ -119,7 +120,9 @@ def _try_load_cached_pipeline_result(
 
     При hit восстанавливает ``PhysicalDocument``, ``DocumentStructure``,
     ``Chunk[]``, ``ValidationReport`` из их ``to_dict``. ``RetrievalIndex``
-    пересобирается заново (детерминированно из chunks+structure).
+    пересобирается заново (детерминированно из chunks+structure),
+    если ``include_retrieval_index=True``; иначе ``analysis.retrieval_index``
+    остаётся ``None`` (как и на cache miss с тем же параметром).
 
     Returns:
         ``PipelineResult`` или ``None`` при miss.
@@ -167,7 +170,7 @@ def _try_load_cached_pipeline_result(
         structure=structure,
         chunks=chunks,
         identity=identity,
-        include_retrieval_index=True,
+        include_retrieval_index=include_retrieval_index,
         semantic_records={},
     )
 
@@ -258,7 +261,10 @@ def run_canonical_pipeline(
     """
     # cache hit branch.
     cached = _try_load_cached_pipeline_result(
-        path=path, workspace_root=workspace_root, session_key=session_key,
+        path=path,
+        workspace_root=workspace_root,
+        session_key=session_key,
+        include_retrieval_index=include_retrieval_index,
     )
     if cached is not None:
         return cached

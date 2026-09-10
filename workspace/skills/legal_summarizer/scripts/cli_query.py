@@ -88,10 +88,18 @@ def _resolve_workspace_root(arg: str | None) -> Path:
 
 
 def _load_manifest_or_none(operation_id: str, workspace_root: Path) -> dict[str, Any] | None:
-    """Прочитать manifest.json. None если файла нет."""
-    from cache.manifest import _read_json, manifest_path  # type: ignore
+    """Прочитать manifest.json через public ``load_manifest``.
 
-    return _read_json(manifest_path(operation_id, workspace_root))
+    Если manifest не v2 (legacy v1 или corrupted) — ``load_manifest``
+    возвращает ``None``; нам этого достаточно для CLI query (caller
+    обрабатывает None как «manifest not found»).
+    """
+    from cache.manifest import load_manifest
+
+    normalized = load_manifest(operation_id, workspace_root)
+    if normalized is None:
+        return None
+    return normalized.to_dict()
 
 
 def _load_chunk_summaries(
