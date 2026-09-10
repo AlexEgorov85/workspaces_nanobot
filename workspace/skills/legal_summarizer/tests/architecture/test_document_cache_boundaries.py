@@ -125,7 +125,13 @@ def _collect_production_files() -> list[Path]:
 
 
 def _rel(p: Path) -> str:
-    return str(p.relative_to(_SCRIPTS_DIR))
+    """Относительный путь от ``_SCRIPTS_DIR`` с forward slash separator.
+
+    Используем forward slash, чтобы match с whitelist строками
+    (которые заданы в POSIX-стиле) работал на Windows.
+    """
+    rel = p.relative_to(_SCRIPTS_DIR)
+    return str(rel).replace("\\", "/")
 
 
 def _scan_imports(tree: ast.AST) -> list[tuple[str, str, int]]:
@@ -343,26 +349,75 @@ def test_document_cache_is_singleton_owner_of_document_level_api():
     )
 
 
-@pytest.mark.parametrize(
-    "module_rel",
-    sorted(_LEGACY_MANIFEST_ALLOWED_MODULES),
-)
-def test_operation_level_manifest_allowed_in_module(module_rel: str):
-    """Модули из whitelist'а могут импортировать operation-level API."""
-    path = _SCRIPTS_DIR / module_rel
-    if not path.is_file():
-        pytest.skip(f"{module_rel} не существует (план допускает отсутствие)")
+def test_operation_level_manifest_whitelist_enforced():
+    """Production-модули вне whitelist не должны импортировать
+    operation-level API из ``cache.manifest``.
 
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    imports = _scan_imports(tree)
-    # Проверяем что *хотя бы один* operation-level symbol импортирован
-    # (это подтверждает, что whitelisting актуален, а не случайный).
-    op_level_found = [
-        (name, mod, ln) for name, mod, ln in imports
-        if name in _OPERATION_LEVEL_SYMBOLS
-    ]
-    if not op_level_found:
-        pytest.skip(
-            f"{module_rel} больше не использует operation-level API — "
-            f"кандидат на удаление из whitelist"
+    Whitelist:
+        * ``application/service.py``
+        * ``application/execution_orchestration.py``
+        * ``application/manifest_builder.py``
+        * ``document/physical.py``
+        * ``cli_query.py``
+
+    Любой другой production-модуль (включая сам ``cache/manifest.py`` —
+    ``cache/document_cache.py``, ``cache/__init__.py``, ``application/*``,
+    ``execution/*``, ``retrieval/*``, ``output/*``, ``planning/*``,
+    ``chunking/*``, ``document/*``, ``llm/*``, ``cli.py``) не должен
+    импортировать ничего из ``cache.manifest``.
+
+    Также: внутри whitelist-модулей разрешены **только** operation-level
+    symbols. Если whitelist-модуль импортирует document-level symbol
+    (которого уже нет в ``cache.manifest``, но guard это поймает на
+    стадии production import) — это regression.
+
+    Этот тест заменяет старый
+    ``test_operation_level_manifest_allowed_in_module``,
+    который только проверял whitelist на сам факт использования
+    operation-level API, но не проверял запрет импорта вне whitelist.
+    """
+    offenders: list[tuple[str, str, int, str]] = []
+
+    for path in _collect_production_files():
+        rel = _rel(path)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for name, module, lineno in _scan_imports(tree):
+            # ``import cache.manifest`` или ``import cache`` + ``manifest``
+            # — запрещены вне whitelist.
+            if name in ("*", "manifest") and rel not in _LEGACY_MANIFEST_ALLOWED_MODULES:
+                offenders.append((rel, f"import {module} ({name})", lineno, "no-whitelist"))
+                continue
+            # Если модуль НЕ в whitelist — любой cache.manifest import запрещён.
+            if rel not in _LEGACY_MANIFEST_ALLOWED_MODULES:
+                if module == "cache.manifest" or module.endswith(".cache.manifest"):
+                    offenders.append((rel, f"from {module} import {name}", lineno, "no-whitelist"))
+                continue
+            # Модуль в whitelist: разрешены только operation-level symbols.
+            if name == "*":
+                # ``from cache.manifest import *`` — никогда не whitelist'ится.
+                offenders.append((rel, f"from {module} import *", lineno, "wildcard"))
+                continue
+            if module != "cache.manifest" and not module.endswith(".cache.manifest"):
+                continue
+            if name not in _OPERATION_LEVEL_SYMBOLS:
+                offenders.append((
+                    rel,
+                    f"from {module} import {name}",
+                    lineno,
+                    f"non-operation-level symbol "
+                    f"(allowed: {sorted(_OPERATION_LEVEL_SYMBOLS)})",
+                ))
+
+    assert offenders == [], (
+        "Нарушения whitelist cache.manifest в production коде:\n"
+        + "\n".join(
+            f"  {p}: {what} (line {ln}, reason: {reason})"
+            for p, what, ln, reason in offenders
         )
+        + (
+            "\n\nЕсли этот модуль реально нуждается в operation-level "
+            "API, добавьте его в _LEGACY_MANIFEST_ALLOWED_MODULES в "
+            "tests/architecture/test_document_cache_boundaries.py "
+            "(явное решение, не implicit)."
+        )
+    )
