@@ -73,28 +73,41 @@ Concurrency tests                                                        = 2/2 p
 
 - **Helper'ы `_try_load_cached_pipeline_result` + `_write_document_snapshot_after_pipeline` в `pipeline_structure.py`** — сохранены как тонкие cache-coordination helpers (не wrappers над `DocumentCache`). Они владеют **recovery в PipelineResult** (десериализация snapshot → in-memory объекты). Это отдельная ответственность, не cache storage protocol. Решение (inline / `application/snapshot_loader.py` / baseline) — отдельный refactor после стабилизации архитектуры.
 
-- **`DocumentIdentity.is_fresh(path)` — pre-existing баг (НЕ связан с DocumentCache refactoring), обнаружен во время Phase 2 review.**
+- **`DocumentIdentity.is_fresh(path)` — использование в pipeline неправильное (НЕ баг метода). Обнаружено во время Phase 2 review.**
 
-  Текущая реализация в `document/identity.py:56-71`:
-  ```python
-  def is_fresh(self, path: str | Path) -> bool:
-      p = Path(path)
-      try:
-          st = p.stat()
-      except FileNotFoundError:
-          return False
-      return (
-          str(p.resolve()) == self.resolved_path
-          and st.st_size == self.size_bytes
-          and st.st_mtime_ns == self.mtime_ns
-      )
-  ```
+  Сам метод `DocumentIdentity.is_fresh()` корректен: он сравнивает
+  `self.size/mtime` (сохранённый identity) с текущим `stat(path)`.
+  Тесты `test_structure_identity.py:42-52` и
+  `test_operation_identity.py:107-112` подтверждают правильную
+  семантику для заранее сохранённого identity.
 
-  Когда `self` — свежий `DocumentIdentity.from_path(path)`, проверка identity с самой собой **всегда возвращает True**. Соответственно, invalidate-ветка в `pipeline_structure._try_load_cached_pipeline_result` (lines 127-141) никогда не срабатывает на cache hit при изменении файла.
+  **Проблема — в caller'е** (`pipeline_structure._try_load_cached_pipeline_result`):
+  identity там создаётся **заново** через
+  `DocumentIdentity.from_path(path)`, поэтому `is_fresh(path)`
+  сравнивает свежий identity с текущим `stat(path)` → **всегда True**.
+  Invalidate-ветка (старые lines 140-144) была недостижима (dead code).
 
-  Правильный контракт требует сравнения с **identity из snapshot'а** (например, через `DocumentCache.read_snapshot(document_id).identity`). Behavioral test на полный lifecycle (file v1 → cache → modify → cache miss → new snapshot) требует исправления этого бага.
+  В Phase 2 мёртвая ветка **удалена**. Текущая логика полагается на
+  SHA-256 change detection через `document_id`: новый файл → новый
+  fingerprint → новый `document_id` → `cache.is_complete(new_id)` →
+  `False` → cache miss → полный reparse. Cache hit/miss correctness
+  не нарушен.
 
-  В Phase 2 я не стал исправлять `DocumentIdentity.is_fresh`, потому что это выходит за scope задачи (требует архитектурного решения о том, где хранить snapshot identity в `DocumentAnalysis`). Баг зафиксирован здесь.
+  **Реальное следствие** (НЕ data corruption): старые snapshot'ы
+  остаются на диске как orphans при изменении файла. Это
+  **lifecycle/GC** проблема, а не cache correctness. Требует
+  отдельного решения о политике retention старых версий:
+
+  * **A. Не удалять автоматически** — текущее поведение; DocumentCache
+    становится версионированным хранилищем, cleanup делается отдельно.
+  * **B. Удалять orphans при cache miss для того же path** —
+    требует path → document_id index, дополнительная metadata.
+  * **C. TTL / background GC** — периодическая очистка старых версий
+    по LRU/возрасту.
+
+  Не реализовано в текущем refactoring (вне scope). Требует
+  отдельного обсуждения ожидаемой семантики DocumentCache как
+  storage backend.
 
 - **`map_reduce.py`** — НЕ тронут (по явному правилу). Callback contract `WriteDocumentChunkSummaryFn` сохранён; реализация передаётся из `execution_orchestration.py` через `DocumentCache.write_chunk_summary`. Это dependency injection, не cache leak.
 
