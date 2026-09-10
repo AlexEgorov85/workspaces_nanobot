@@ -225,6 +225,8 @@ registered: foo, bar, baz; skipped: qux (disabled by config)"`.
 | `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (project.json) |
 | `duckdb_query` | `workspace/tools/duckdb_query_tool.py` | read-only SELECT-запрос в DuckDB-кэш | `gateway.duckdb_query.*` (project.json) |
 | `vector_search` | `workspace/tools/vector_search_tool.py` | семантический поиск по FAISS-индексу | `gateway.vector_search.*` (project.json) |
+| `history_search` | `workspace/tools/history_search_tool.py` | generic-поиск по журналу `agent_gateway_logs` (переживает context compaction) | `tools.history_search.*` (project.json) |
+| `legal_summarizer_query` | `workspace/tools/legal_summarizer_query.py` | follow-up по saved `operation_id` для `legal_summarizer` | `tools.legal_summarizer_query.*` (config.json) |
 | `example_tool` | `workspace/tools/example.py` | шаблон (по умолчанию `enable=false`) | `tools.example.*` (config.json) |
 
 `duckdb_query` и `vector_search` — generic infrastructure tools, не знают

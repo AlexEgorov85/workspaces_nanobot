@@ -138,7 +138,8 @@ Retry (при `sql_error`) — задача **Agent**, не отдельный �
 - audit-specific tools в core (`vector_search`, `duckdb_query` — generic);
 - `run_predefined_script` как отдельный tool (это режим skill);
 - `nl_sql_generate` как отдельный tool (Agent формирует SQL сам);
-- LLM-helper `scripts/sql_generator.py` (удалён);
+- LLM-генерация SQL — только через CLI-режим `generated_sql`
+  (`scripts/generated_sql_mode.py`), не отдельным standalone-helper'ом;
 - Python wrappers вокруг `duckdb_query` или `vector_search`;
 - `public.agent_predefined_scripts` lookup из runtime skill'a (реестр
   хранится в `predefined/scripts.py`);

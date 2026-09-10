@@ -204,23 +204,22 @@ Step 7: do not use vector_search для COUNT/GROUP BY.
 Step 8: do not use LIKE для семантического поиска.
 ```
 
-Skill `audit_analyzer` полностью tool-only: у него больше нет `scripts/cli.py`
-или иной back-compat обвязки. Все запросы идут через generic tools
-`workspace/tools/duckdb_query_tool.py` и `workspace/tools/vector_search_tool.py`
-(см. `docs/skill-tool-inventory.md`).
+Skill `audit_analyzer` — **CLI + generic tools**: автономный skill-side CLI
+`scripts/cli.py --mode <predefined | generated_sql | vector>` (единый entry-point,
+вызывается агентом через `tools.exec` с абсолютным путём; также используется
+бенчмарками/CI). Дополнительно агент может выполнять те же операции напрямую
+через generic tools `workspace/tools/duckdb_query_tool.py` (точный SELECT,
+в т.ч. чтение predefined SQL из реестра `public.agent_predefined_scripts`)
+и `workspace/tools/vector_search_tool.py` (семантика).
+Подробности — в `docs/skill-tool-inventory.md` и `workspace/skills/audit_analyzer/SKILL.md`.
 
-Раньше skill содержал `scripts/cli.py` с режимами `--mode predefined`,
-`--mode generated_sql`, `--mode vector` — эти режимы удалены вместе
-с tool'ами `run_predefined_script` и `nl_sql_generate`. Режим
-`predefined` (готовые SQL-скрипты из реестра `public.agent_predefined_scripts`)
-теперь вызывается через `duckdb_query` напрямую (агент читает
-`sql_template` из реестра через `duckdb_query`, подставляет параметры,
-выполняет).
-
-Опционально доступен skill-side helper `scripts/sql_generator.py`
-для автономной LLM-генерации SQL (прямой HTTP-вызов к LLM API через
-`lib.services.llm_client.call_llm`). Helper возвращает только SQL,
-выполнение — всегда через `duckdb_query`.
+Раньше (рефакторинг `refactor/skills-tools-cleanup`) CLI был удалён в пользу
+tool-only, но позже восстановлен (коммиты `f4b646e`, `94fadf2`, `9e646ef`):
+режимы `--mode predefined`, `--mode generated_sql`, `--mode vector` — активны.
+Tool'ы `run_predefined_script` и `nl_sql_generate` при этом удалены: их логика
+живёт в CLI skill'а (`predefined.run`, `generated_sql_mode.run`) и skill-side
+helper `scripts/skill_config.py` / `scripts/llm.py` (прямой вызов
+`lib.services.llm_client.call_llm` для LLM-генерации SQL).
 
 ---
 
@@ -308,11 +307,12 @@ Skill может объявить свою метку и находить соо
 - `TableResource(name="oarb.violations")` (label=None)
 - `TableResource(name="public.agent_predefined_scripts", label="scripts_registry")`
 
-После перевода skill'а `audit_analyzer` на tool-only `scripts/db_loader.py`
-больше нет — реестр предопределённых скриптов читается напрямую
-через `lib.core.skill_config.get_predefined_scripts_table("audit_analyzer")`
+При восстановлении CLI (commit `f4b646e`) skill-обвязка вернулась:
+`scripts/db_loader.py` при этом не восстанавливался — реестр
+предопределённых скриптов читается через
+`lib.core.skill_config.get_predefined_scripts_table("audit_analyzer")`
 (используется утилитой `tools/generate_predefined_scripts_sql.py` и
-`NlSqlRunner` для few-shot retrieval):
+CLI skill'а `scripts/generated_sql_mode.py` для few-shot retrieval):
 
 ### Negative contract
 

@@ -14,8 +14,14 @@ reference** по своей подсистеме; README в корне — эт�
 | [skill-tool-architecture.md](skill-tool-architecture.md) | Контракт Skill ↔ Tool: что разрешено, что запрещено |
 | [skill-tool-inventory.md](skill-tool-inventory.md) | Текущее состояние всех skill/tool и история удалённых |
 | [SKILL_AUTHORING.md](SKILL_AUTHORING.md) | **Пошаговый гайд**: как создать свой skill (структура, SKILL.md, регистрация в project.json, runtime API, best practices, anti-patterns, DoD) |
-| [refactor_baseline.md](refactor_baseline.md) | pytest baseline ветки `refactor/skills-tools-cleanup` |
 | [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md) | **Нормативный контракт**: принципы, invariant'ы, anti-patterns, decision-чеклист (цель, не «as-is») |
+
+### Исторические / WIP (рефакторинги)
+
+| Документ | Статус |
+|---|---|
+| [refactor_baseline.md](refactor_baseline.md) | WIP-заметки ветки `refactor/skills-tools-cleanup` (исторический снимок; актуальное состояние — в `skill-tool-inventory.md`) |
+| [legal_summarizer_baseline.md](legal_summarizer_baseline.md), [legal_summarizer_audit_stage1.md](legal_summarizer_audit_stage1.md), [legal_summarizer_legacy_inventory.md](legal_summarizer_legacy_inventory.md), [legal_summarizer_final_audit.md](legal_summarizer_final_audit.md), [legal_summarizer_progress_audit.md](legal_summarizer_progress_audit.md), [legal_summarizer_cleanup_baseline.md](legal_summarizer_cleanup_baseline.md), [legal_summarizer_cleanup_inventory.md](legal_summarizer_cleanup_inventory.md), [legal_summarizer_cleanup_handoff.md](legal_summarizer_cleanup_handoff.md) | Рабочие заметки рефакторинга `legal_summarizer` (Этапы 0–50). Актуальное состояние — в [architecture/COMPATIBILITY_INVENTORY.md](architecture/COMPATIBILITY_INVENTORY.md) |
 
 ### Подсистемы
 
@@ -55,7 +61,7 @@ reference** по своей подсистеме; README в корне — эт�
 - `docs/architecture/` — каталоги инвентарей (генерируются из кода).
 - `docs/*-architecture.md` — архитектурные контракты (skill/tool).
 - `docs/*-inventory.md` — инвентаризация компонентов.
-- `docs/*-baseline.md` — wip-заметки рефакторингов.
+- `docs/*-baseline.md` и `docs/legal_summarizer_*.md` — исторические/WIP-заметки рефакторингов (см. секцию «Исторические / WIP» выше).
 
 Все ссылки между документами — относительные (`./SKILL.md`, `../README.md`).
 

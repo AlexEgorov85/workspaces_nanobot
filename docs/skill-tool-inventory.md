@@ -9,10 +9,13 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 
 | component | path | type | depends_on_skill | depends_on_tool | depends_on_shared_infra | status |
 |---|---|---|---|---|---|---|
-| `audit_analyzer` Skill | `workspace/skills/audit_analyzer/SKILL.md` + `references/` + `scripts/sql_generator.py` | Skill (domain, **tool-only**) | — | `duckdb_query`, `vector_search` (через SKILL.md); skill-side helper `scripts/sql_generator.py` для автономной LLM-генерации SQL | — | active |
+| `audit_analyzer` Skill | `workspace/skills/audit_analyzer/SKILL.md` + `references/` + `scripts/` | Skill (domain, **CLI + tool**) | — | следование SKILL.md через generic tools `duckdb_query`, `vector_search`; автономный CLI `scripts/cli.py --mode <predefined \| generated_sql \| vector>` для бенчмарков/CI/operator | — | active |
+| `legal_summarizer` Skill | `workspace/skills/legal_summarizer/SKILL.md` + `references/` + `scripts/` | Skill (domain) | — | через собственный skill-side CLI; follow-up через tool `legal_summarizer_query` | `lib/services/llm_client.py` | active |
 | `compact_context` tool | `workspace/tools/compact_context.py` | Tool | — | — | `lib/services/context_compaction.py` | active |
 | `duckdb_query` tool | `workspace/tools/duckdb_query_tool.py` | Tool (generic infrastructure) | — | — | `lib/utils/sql_safety.py` (последняя граница безопасности) + `lib/services/cache_provider_impl.py` | active |
 | `vector_search` tool | `workspace/tools/vector_search_tool.py` | Tool (generic infrastructure) | — | — | `lib/services/cache_provider_impl.py` (FAISS через `CacheProvider.search_vector`) | active |
+| `history_search` tool | `workspace/tools/history_search_tool.py` | Tool (generic infrastructure) | — | — | `agent_gateway_logs` (долговечный журнал) | active |
+| `legal_summarizer_query` tool | `workspace/tools/legal_summarizer_query.py` | Tool | `legal_summarizer` (follow-up по сохранённой `operation_id`) | — | skill CLI `cli_query.py` + `data_store/cache/skills/legal_summarizer/<op_id>/` | active |
 | `example_tool` | `workspace/tools/example.py` | Tool (template) | — | — | — | reference |
 
 ## Удалённые компоненты
@@ -20,7 +23,7 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 | component | бывший путь | замена |
 |---|---|---|
 | `run_predefined_script` tool | `workspace/tools/run_predefined_script.py` | inline SQL из `public.agent_predefined_scripts` через `duckdb_query` (см. `workspace/skills/audit_analyzer/references/predefined_scripts.md`) |
-| `nl_sql_generate` tool | `workspace/tools/nl_sql_generate.py` | Agent сам формирует SQL через `duckdb_query` (см. `references/sql_guidance.md`); опционально skill-side helper `scripts/sql_generator.py` |
+| `nl_sql_generate` tool | `workspace/tools/nl_sql_generate.py` | Agent сам формирует SQL через `duckdb_query` (см. `references/sql_guidance.md`); LLM-генерация SQL — CLI skill'а `scripts/cli.py --mode generated_sql` (`generated_sql_mode.py`) |
 | `column_descriptions` tool | `workspace/tools/column_descriptions.py` | `references/schema.md` + `references/sql_guidance.md` (Agent читает сам) |
 | `NlSqlRunner` core | `lib/services/nl_sql_runner.py` | не используется (NL→SELECT pipeline выпилен) |
 | `SchemaFormatter` core | `lib/services/schema_formatter.py` | не используется |
@@ -60,13 +63,16 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 ```mermaid
 flowchart LR
     SKILL["Skill: audit_analyzer"] --> INFRA["shared infra<br/>lib/services, lib/utils"]
+    CLI["Skill CLI<br/>scripts/cli.py (predefined / generated_sql / vector)"] --> INFRA
     T1["Tool: duckdb_query"] --> INFRA
     T2["Tool: vector_search"] --> INFRA
     SKILL -.не импортирует.-> T1
     SKILL -.не импортирует.-> T2
+    CLI -.не импортирует tools.-> T1
+    CLI -.не импортирует tools.-> T2
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
-    class SKILL,T1,T2 core
+    class SKILL,CLI,T1,T2 core
     class INFRA infra
 ```
 

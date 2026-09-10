@@ -134,7 +134,7 @@ flowchart LR
 | `db_logging_service.py` | **Новый** — структурированный журнал агента в `agent_gateway_logs` (имя настраивается через `logging.db.table_name`). |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
 | `schema_formatter.py` | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Замена: skill `audit_analyzer` сам читает `references/schema.md` (см. `workspace/skills/audit_analyzer/references/schema.md`). |
-| `nl_sql_runner.py` | **Удалён** — общая логика NL→SELECT pipeline. Заменена: skill `audit_analyzer` использует skill-side helper `scripts/sql_generator.py` для автономной LLM-генерации SQL либо формирует SQL сам (см. `workspace/skills/audit_analyzer/SKILL.md` и `references/sql_guidance.md`). |
+| `nl_sql_runner.py` | **Удалён** — общая логика NL→SELECT pipeline. Заменена: CLI skill'а `audit_analyzer` — режим `--mode generated_sql` (`workspace/skills/audit_analyzer/scripts/generated_sql_mode.py`, прямой вызов `lib.services.llm_client.call_llm`), либо Agent формирует SQL сам (см. `workspace/skills/audit_analyzer/SKILL.md` и `references/sql_guidance.md`). |
 
 ### Pre-resolve `${VAR}` от `.secrets.env`
 

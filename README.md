@@ -2,7 +2,7 @@
 
 Локальная инсталляция фреймворка **[nanobot-ai](https://github.com/HKUDS/nanobot)**
 (PyPI: `nanobot-ai`) с кастомными доработками: PostgreSQL-каналы, Redis, Streamlit UI,
-бенчмарки, навыки `audit_analyzer` и `office_files`.
+бенчмарки, навыки `audit_analyzer`, `legal_summarizer` и `office_files`.
 
 > **Агент:** Aura (🐈) · **Модель:** OpenAI-compatible · **ОС:** Windows · **Язык:** RU/EN
 
@@ -42,11 +42,10 @@ python tools/check_worker_pool_integrity.py --fix                 # диагно
 python tools/migrate.py --apply                                   # миграции схемы
 ```
 
-> **Навык `audit_analyzer` работает через tool'ы агента:** `duckdb_query`
-> (точный SELECT, в т.ч. чтение predefined SQL из PG inline) и
-> `vector_search` (семантика). Skill больше не имеет собственного CLI —
-> агенту достаточно следовать `SKILL.md`. Опционально доступен skill-side
-> helper `scripts/sql_generator.py` для автономной LLM-генерации SQL.
+> **Навык `audit_analyzer`** предоставляет CLI `scripts/cli.py --mode <predefined | generated_sql | vector>`
+> (для бенчмарков/CI) и workspace tools `duckdb_query` / `vector_search` (для runtime-агента).
+> LLM-генерация SQL — режим `generated_sql` (`scripts/generated_sql_mode.py`, прямой вызов `lib.services.llm_client`).
+> Внешний контракт — `SKILL.md`.
 
 Подробности по каждой команде — в [docs/INTERNAL_API.md](docs/INTERNAL_API.md) и
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).

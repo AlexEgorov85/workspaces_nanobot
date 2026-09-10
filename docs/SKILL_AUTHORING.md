@@ -69,25 +69,28 @@ workspace/skills/<skill_name>/
 workspace/skills/<skill_name>/
 ├── SKILL.md
 ├── __init__.py
+├── predefined/               # пакет режима "predefined" (если есть)
+│   ├── __init__.py           # public API (run, list_scripts, ScriptDefinition, ...)
+│   ├── builder.py            # сборка SQL из шаблона (DynamicQueryBuilder)
+│   ├── mode.py               # режим (run/list_*/DuckDBServiceProtocol)
+│   ├── models.py             # ScriptDefinition / ParamDefinition
+│   ├── scripts.py            # реестр SQL (Python-литералы)
+│   └── validator.py          # валидация параметров
 ├── scripts/
 │   ├── __init__.py
-│   ├── cli.py                 # точка входа CLI
-│   ├── skill_config.py        # тонкая обёртка над lib.core.skill_config
-│   ├── llm.py                 # LLM-клиент (если нужен)
-│   ├── db_loader.py           # работа с DuckDB-кэшем
-│   ├── predefined.py          # режим 1 (готовые отчёты)
-│   ├── predefined_mode.py
-│   ├── generated_sql_mode.py  # режим 2 (NL → SELECT)
-│   └── scripts_registry.py    # работа с label="scripts_registry"
+│   ├── cli.py                # точка входа CLI (--mode <predefined|generated_sql|vector>)
+│   ├── skill_config.py       # тонкая обёртка над lib.core.skill_config
+│   ├── llm.py                # LLM-клиент (если нужен)
+│   ├── generated_sql_mode.py # режим NL → SELECT (если нужен)
+│   ├── column_hints.py       # хинты по колонкам для generated_sql (если нужен)
+│   └── output.py             # форматирование/санитизация вывода
 ├── references/
 │   ├── schema.md
 │   ├── vector_indexes.md
-│   └── sql_guidance.md        # правила формулировки SELECT
-├── prompts/
-│   ├── summarize_system.md
-│   └── reduce_system.md
+│   ├── sql_guidance.md       # правила формулировки SELECT
+│   └── predefined_scripts.md # каталог predefined-скриптов
 └── cache/
-    └── schema.json            # дамп схемы для reference
+    └── schema.json           # дамп схемы для reference
 ```
 
 ### 2.3 Три паттерна структуры skill'а
@@ -593,14 +596,14 @@ text = load_text(Path(args.file))
 | Слой | Тесты |
 |---|---|
 | **Unit (skill)** | `tests/test_skill_legal_summarizer.py` — smoke через `monkeypatch` LLM-вызовов |
-| **Unit (db_loader)** | `tests/test_db_loader.py` — реальный DuckDB-кэш + `TableRegistry` |
+| **Unit (cache)** | `tests/test_duckdb_cache_store.py` — реальный DuckDB-кэш + `TableRegistry` |
 | **Integration** | `tests/test_skill_tool_integration.py` — Skill scenarios + Tool execution |
 | **Architecture** | `tests/test_skill_tool_independence.py`, `tests/test_architecture_tool_domain_free.py` |
 | **Resource universality** | `tests/test_resource_universality.py` — DoD «новый skill без правок lib/» |
 
 ### 9.2 Шаблон теста skill'а
 
-По `tests/test_db_loader.py:1-66`:
+По паттерну `tests/test_duckdb_cache_store.py` (DuckDB-кэш + `TableRegistry`, см. ниже):
 
 ```python
 import sys
@@ -688,7 +691,7 @@ pytest tests/test_auto_register_skills.py             -v
 
 ✅ Запускайте 4 архитектурных теста (см. §10).
 
-✅ Покрывайте минимум один сценарий unit-тестом по шаблону `tests/test_db_loader.py`.
+✅ Покрывайте минимум один сценарий unit-тестом по паттерну `tests/test_duckdb_cache_store.py` (DuckDB-кэш + `TableRegistry`).
 
 ### 11.2 DON'T (anti-patterns)
 
@@ -866,10 +869,9 @@ python cli_agent.py          # smoke
 - `tests/test_resource_universality.py`
 - `tests/test_auto_register_skills.py`
 - `tests/test_skill_config_api.py`
-- `tests/test_skill_config_lookup.py`
 - `tests/test_project_settings.py`
 - `tests/test_skill_tool_integration.py`
-- `tests/test_db_loader.py` — паттерн fixture для skill'ов с DuckDB.
+- `tests/test_duckdb_cache_store.py` — паттерн fixture для skill'ов с DuckDB.
 
 ### Hooks и runtime
 - `lib/hooks/tool_audit_hook.py` — автоматическая audit trail для всех tool'ов.

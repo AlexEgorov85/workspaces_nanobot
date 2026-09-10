@@ -85,7 +85,9 @@ Agent-цикл:
 
 - Не вызывай `run_predefined_script` / `nl_sql_generate` /
   `column_descriptions` — их больше нет.
-- Не вызывай `scripts/sql_generator.py` — этот helper удалён.
+- Не вызывай `scripts/sql_generator.py` — helper удалён; используй
+  `scripts/cli.py --mode generated_sql` (тот же pipeline через
+  `generated_sql_mode.run()`).
 - Не используй `LIKE '%...%'` для семантического поиска — для этого
   есть `vector_search`.
 

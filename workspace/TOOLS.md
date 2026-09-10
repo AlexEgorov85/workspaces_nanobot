@@ -246,7 +246,7 @@ SELECT/WITH/EXPLAIN в общем DuckDB-кеше и возвращает стр
 | `vector_search` | Семантический поиск по FAISS | Запрос про **смысл**, индекс есть в `references/vector_indexes.md` |
 
 Агент сам читает `SKILL.md` и делает выбор. Ни один tool не делает
-auto-routing или классификацию запроса. Опционально доступен skill-side
-helper `scripts/sql_generator.py` для автономной LLM-генерации SQL —
-используется по желанию Agent'а.
+auto-routing или классификацию запроса. Генерация SQL — через CLI
+`scripts/cli.py --mode generated_sql` (skill-side `scripts/generated_sql_mode.py`,
+прямой вызов `lib.services.llm_client.call_llm`), используется по желанию Agent'а.
 
