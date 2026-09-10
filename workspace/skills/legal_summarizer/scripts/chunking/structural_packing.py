@@ -91,14 +91,16 @@ def _node_has_specials(
     by_ord: dict[int, DocumentBlock],
     max_chunk_chars: int,
 ) -> bool:
-    """True, если subtree содержит table или oversized block."""
+    """True, если subtree содержит oversized block (>max_chunk_chars).
+
+    Tables — обычные блоки (atomic, но не special); обрабатываются
+    наравне с текстовыми в ``_build_units_for_node``.
+    """
     start, end = _node_subtree_range(node_id, struct)
     for ord_i in range(start, end + 1):
         b = by_ord.get(ord_i)
         if b is None:
             continue
-        if b.block_type == "table":
-            return True
         if b.char_count > max_chunk_chars:
             return True
     return False
@@ -129,8 +131,6 @@ def _direct_blocks_for_node(
             continue
         b_obj = by_ord.get(b)
         if b_obj is None:
-            continue
-        if b_obj.block_type == "table":
             continue
         if b_obj.char_count > max_chunk_chars:
             continue
@@ -164,9 +164,9 @@ def _build_units_for_node(
 ) -> list[PackableUnit]:
     """Recursive descent: subtree целиком или раскрытие на children.
 
-    Tables исключаются из structural units и обрабатываются отдельно
-    (atomic chunks по умолчанию). Это сохраняет back-compat семантику
-    legacy тестов и архитектуры "tables атомарны".
+    Tables — обычные блоки (atomic по построению: один table = один
+    block, не делится). Обрабатываются наравне с текстовыми блоками;
+    ``has_specials`` отражает только oversized (>max_chunk_chars).
     """
     node = struct.nodes[node_id]
 
@@ -178,7 +178,7 @@ def _build_units_for_node(
         b = by_ord.get(ord_i)
         if b is None:
             continue
-        if b.block_type == "table" or b.char_count > max_chunk_chars:
+        if b.char_count > max_chunk_chars:
             has_specials = True
             continue
         structural_blocks.append(b)
@@ -369,16 +369,6 @@ def _is_consecutive(prev: PackableUnit, nxt: PackableUnit) -> bool:
     return prev_start <= nxt_start <= prev_end + 1
 
 
-def _small_table_inline_threshold(max_chunk_chars: int) -> int:
-    """Порог размера таблицы для inline-объединения.
-
-    Маленькие таблицы (≤ 5% от max_chunk_chars) объединяются с соседним
-    structural unit'ом. Это убирает десятки мелких chunks (preamble tables,
-    tiny edits, footnotes) без потери atomicity для больших таблиц.
-    """
-    return max(500, max_chunk_chars // 20)
-
-
 def greedy_pack_units(
     units: list[PackableUnit],
     *,
@@ -393,15 +383,9 @@ def greedy_pack_units(
 
     1. **Oversized_part**: всегда atomic.
 
-    2. **Table inline в хвост**: если current — structural chunk с
-       section_id, который пересекается с section_id таблицы, и
-       current уже заполнен до ≥ 50% target (то есть structural
-       достаточно большой), и таблица физически в subtree current
-       (consecutive), и current + nxt ≤ max → объединяем.
+    2. **Разные kinds** (после oversized_part): emit current, current = nxt.
 
-    3. **Разные kinds** (если inline не сработал): emit current, current = nxt.
-
-    4. **Structural + structural**:
+    3. **Structural + structural**:
        - max overflow → emit, start new
        - оба < min_target → force merge
        - primary_section_id = root → emit current
@@ -411,7 +395,6 @@ def greedy_pack_units(
     if not units:
         return []
 
-    small_table_max = _small_table_inline_threshold(max_chunk_chars)
     min_target = int(max_chunk_chars * 0.4)
 
     packed: list[PackableUnit] = []
@@ -421,18 +404,6 @@ def greedy_pack_units(
         if nxt.kind == "oversized_part":
             packed.append(current)
             current = nxt
-            continue
-
-        if (
-            nxt.kind == "table"
-            and nxt.char_count <= small_table_max
-            and current.char_count >= target_chunk_chars * 0.5
-            and current.char_count + nxt.char_count <= max_chunk_chars
-            and current.kind == "structural"
-            and _is_consecutive(current, nxt)
-            and bool(set(nxt.section_ids) & set(current.section_ids))
-        ):
-            current = _merge_units(current, nxt)
             continue
 
         if current.kind != "structural" or nxt.kind != "structural":
@@ -484,8 +455,9 @@ def build_packable_units(
     """Public entry point: построить упорядоченные packable units.
 
     Использует hierarchical descent по DocumentStructure, начиная с root.
-    Tables и oversized обрабатываются отдельно — caller должен собрать
-    их в PackableUnit'ы с kind="table"/"oversized_part" и вставить в
+    Tables обрабатываются как обычные блоки (atomic по построению).
+    Oversized blocks (включая tables > max_chunk_chars) caller должен
+    собрать в PackableUnit'ы с kind="oversized_part" и вставить в
     список перед greedy_pack_units.
     """
     by_ord = doc.blocks_by_ord

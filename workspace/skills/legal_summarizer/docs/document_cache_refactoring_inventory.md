@@ -74,28 +74,30 @@ Concurrency tests                                                        = 2/2 p
 
 - **Helper'ы `_try_load_cached_pipeline_result` + `_write_document_snapshot_after_pipeline` в `pipeline_structure.py`** — сохранены как тонкие cache-coordination helpers (не wrappers над `DocumentCache`). Они владеют **recovery в PipelineResult** (десериализация snapshot → in-memory объекты). Это отдельная ответственность, не cache storage protocol. Решение (inline / `application/snapshot_loader.py` / baseline) — отдельный refactor после стабилизации архитектуры.
 
-- **Chunking regression от `00db0d2` (10 сентября 11:18) — обнаружено во время тестирования на реальном PDF Налогового кодекса, bisect через git.**
+- **Chunking regression от `00db0d2` (10 сентября 11:18) — исправлено (см. fix-chunker-table-atomic).**
 
   На Налоговом кодексе РФ (1.49M chars, 750 blocks, 49 sections через PDF outline):
-  - **До `00db0d2` (`ca53c5b`, 10 сентября 08:34):** 19 chunks ✅ (корректно)
-  - **После `00db0d2` (HEAD):** 263 chunks ❌ (аномально)
+  - **До `00db0d2` (`ca53c5b`, 10 сентября 08:34):** 19 chunks ✅
+  - **После `00db0d2` (HEAD до fix):** 263 chunks ❌ (аномально)
+  - **После fix (этот коммит):** 20 chunks ✅
 
-  Коммит `00db0d2 fix(legal_summarizer): cli sys.path, oversized_part split и table-atomic в chunker` пытался исправить проблему с oversized блоками, но в результате сломал chunking для документов с PDF outline. Проблема не в моём refactoring DocumentCache (DocumentCache не влияет на chunker), а в самом chunker'е после этого коммита.
+  **Корневая причина:** legacy-семантика "tables = special blocks" (`if b.block_type == "table": continue` в `_build_units_for_node`) вынуждала отдельный путь обработки таблиц через `PackableUnit(kind='table')` + специальный inline-merge в `greedy_pack_units`. Условие inline-merge `current.char_count >= target * 0.5` было слишком жёстким для маленьких structural chunks рядом с таблицами — 224/258 таблиц оставались atomic.
 
-  Регрессия проявляется на документах с **низкой density headings** (Налоговый: 6.53%) — chunker создаёт отдельные chunks для каждого блока вместо объединения. На документах с **высокой density** (Гражданский: 35.6%) chunker работает корректно (23 chunks на 2.14M chars).
+  **Фикс:** таблица — обычный блок (atomic по построению: один block = один `PackableUnit`, не делится). Никаких специальных paths:
+  - Убрано исключение tables из `_build_units_for_node` и `_direct_blocks_for_node`.
+  - Удалён специальный inline-merge `kind='table'` в `greedy_pack_units`.
+  - Удалён цикл создания `PackableUnit(kind='table')` в `chunker.py`.
+  - `table_id` проставляется только когда chunk — pure table (atomic chunk). Смешанные chunks с таблицами: `table_id=None`, наличие таблицы определяется через `block_types`.
 
-  **Reproduction:**
+  **Reproduction после fix:**
   ```bash
   python scripts/cli.py --file <pdf> --estimate-only
-  # chunks_total должно быть ~50 для типичного Налогового кодекса
+  # Налоговый: 20 chunks (было 263, до регрессии было 19)
   ```
 
-  **Вне scope** моего refactoring. Требует:
-  1. Анализ `_iter_pdf_blocks` и `_emit_unit` в `chunking/chunker.py` после `00db0d2`;
-  2. Понимание почему oversized_part split ломает packing для small blocks с headings;
-  3. Возможный revert `00db0d2` или новый fix.
+  Тест `test_09_table_inline` (бывший `test_09_table_atomic`) обновлён под новую семантику: таблица inline'нута в normal chunk, `block_types` содержит `'table'`.
 
-  **Моя** работа (DocumentCache refactoring) **не влияет** на эту проблему.
+  **Моя** работа (DocumentCache refactoring) **не влияет** на chunker (отдельная подсистема).
 
 - **`DocumentIdentity.is_fresh(path)` — использование в pipeline неправильное (НЕ баг метода). Обнаружено во время Phase 2 review.**
 

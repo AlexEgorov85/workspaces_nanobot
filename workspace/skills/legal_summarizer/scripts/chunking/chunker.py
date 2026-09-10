@@ -372,22 +372,10 @@ def chunk_from_structure(
             text = preamble + text
         section_path, section_heading = _meta(unit.primary_section_id)
 
-        if unit.kind == "table":
+        chunk_table_id: str | None = None
+        if block_types_list and all(bt == "table" for bt in block_types_list):
             document_table_counter += 1
-            table_id = unit.table_id or f"t_{document_table_counter:03d}"
-            _emit_chunk(
-                text=text,
-                block_indices=unit.block_indices,
-                block_types=tuple(block_types_list),
-                section_id=unit.primary_section_id,
-                section_path=section_path,
-                section_heading=section_heading,
-                section_ids=unit.section_ids,
-                page_start=page_start,
-                page_end=page_end,
-                table_id=table_id,
-            )
-            return
+            chunk_table_id = f"t_{document_table_counter:03d}"
 
         if unit.kind == "oversized_part":
             _emit_chunk(
@@ -402,6 +390,7 @@ def chunk_from_structure(
                 page_end=page_end,
                 source_char_start=unit.source_char_start,
                 source_char_end=unit.source_char_end,
+                table_id=chunk_table_id,
             )
             return
 
@@ -415,6 +404,7 @@ def chunk_from_structure(
             section_ids=unit.section_ids,
             page_start=page_start,
             page_end=page_end,
+            table_id=chunk_table_id,
         )
 
     def _unit_for_block(ord_i: int, owner: str) -> PackableUnit:
@@ -438,33 +428,13 @@ def chunk_from_structure(
     )
 
     all_units: list[PackableUnit] = []
-    structural_idx = 0
-    doc_tables: dict[int, str] = {}
     doc_oversized_parts: dict[int, list[tuple[int, int]]] = {}
 
     for ord_i in sorted(by_ord.keys()):
         block = by_ord.get(ord_i)
         if block is None:
             continue
-        if block.block_type == "table":
-            document_table_counter += 1
-            tid = f"t_{document_table_counter:03d}"
-            doc_tables[ord_i] = tid
-            owner = ownership.get(ord_i, struct.root_id)
-            table_section_ids = _collect_owner_section_ids(
-                (ord_i,), ownership, struct.root_id,
-            )
-            all_units.append(
-                PackableUnit(
-                    kind="table",
-                    block_indices=(ord_i,),
-                    section_ids=table_section_ids,
-                    primary_section_id=owner,
-                    char_count=block.char_count,
-                    table_id=tid,
-                ),
-            )
-        elif block.char_count > max_chunk_chars:
+        if block.char_count > max_chunk_chars:
             owner = ownership.get(ord_i, struct.root_id)
             parts = _split_block_with_offsets(
                 block.content,

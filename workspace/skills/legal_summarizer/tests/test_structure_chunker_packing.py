@@ -359,11 +359,19 @@ def test_08_oversized_block_splitter():
     assert len(set(offsets)) == len(offsets)
 
 
-# --- Test 9: table atomic ------------------------------------------------
+# --- Test 9: table inline в normal chunk ---------------------------------
 
 
-def test_09_table_atomic():
-    """Table block — отдельный chunk."""
+def test_09_table_inline():
+    """Table block — обычный atomic блок, inline'нутый в normal chunk.
+
+    С архитектурой "таблица = обычный блок" packing объединяет таблицу
+    с соседним текстом в один chunk, если секция целиком влезает в
+    target. ``table_id`` проставляется только когда chunk — pure table
+    (без текстовых блоков); здесь chunk смешанный, поэтому ``table_id
+    is None``. Наличие таблицы в chunk'е определяется через
+    ``block_types``.
+    """
     blocks = (
         _b(0, "before"),
         _b(1, "row | cell", block_type="table"),
@@ -387,9 +395,10 @@ def test_09_table_atomic():
         total_blocks=3,
     )
     chunks = chunk_from_structure(doc, struct, config=_cfg())
-    table_chunks = [c for c in chunks if c.table_id is not None]
-    assert len(table_chunks) == 1
-    assert table_chunks[0].block_indices == (1,)
+    assert len(chunks) == 1
+    assert chunks[0].block_indices == (0, 1, 2)
+    assert "table" in chunks[0].block_types
+    assert chunks[0].table_id is None
 
 
 # --- Test 10: multi-section reconstruction -------------------------------
