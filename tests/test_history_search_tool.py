@@ -177,3 +177,43 @@ async def test_search_includes_name_field_in_events() -> None:
         ev = parsed["events"][0]
         assert ev["name"] == "compact_context"
         assert ev["event_type"] == "tool_result"
+
+
+@pytest.mark.asyncio
+async def test_search_returns_event_id_in_each_event() -> None:
+    """Закрывает gap №3 (ANALYSIS.md): SELECT возвращает ``id``, и в JSON
+    каждое событие содержит ``event_id``. Колонка ``id`` в таблице уже была,
+    правка только в tool'е (расширение SELECT)."""
+    import json as _json
+
+    rows = [
+        {
+            "id": "11111111-2222-3333-4444-555555555555",
+            "timestamp": "2026-01-01T10:00:00+00:00",
+            "event_type": "tool_result",
+            "name": "compact_context",
+            "level": "INFO",
+            "summary": "compact ok",
+            "payload": {"status": "ok"},
+        },
+        {
+            "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "timestamp": "2026-01-01T09:00:00+00:00",
+            "event_type": "run_finished",
+            "name": "run",
+            "level": "INFO",
+            "summary": "ответ агента",
+            "payload": {"final_content": "..."},
+        },
+    ]
+    with patch(
+        "workspace.tools.history_search_tool._current_session_key",
+        return_value="s",
+    ), patch("utils.db.fetch", return_value=rows):
+        tool = _make_tool()
+        result = await tool.execute(query=None)
+        parsed = _json.loads(result)
+        assert parsed["count"] == 2
+        ids = [ev.get("event_id") for ev in parsed["events"]]
+        assert "11111111-2222-3333-4444-555555555555" in ids
+        assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in ids

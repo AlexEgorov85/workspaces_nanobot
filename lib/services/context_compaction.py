@@ -311,6 +311,53 @@ class ContextCompactionService:
                 pass
         if self.notify_in_history:
             await self._write_history_notice(session_key, report)
+            await self._record_event_log(session_key, report, text)
+
+    async def _record_event_log(
+        self, session_key: str, report: dict, text: str,
+    ) -> None:
+        """Записать событие ``context_compacted`` в долговечный журнал
+        ``agent_gateway_logs`` через ``workspace.utils.event_log.record_event``.
+
+        Закрывает gap №1 из ``docs/architecture/HISTORY_SEARCH_ANALYSIS.md``:
+        инструкция для агента в ``description`` tool'а ``history_search`` и в
+        ``workspace/TOOLS.md`` обещала событие, которого в журнале не было.
+        Теперь обещание согласовано с фактическим поведением.
+
+        Синхронный ``utils.db.execute`` (под капотом ``record_event``)
+        вызывается через ``asyncio.to_thread``, чтобы не блокировать
+        event loop. Ошибка записи не валит compaction — это observability,
+        а не критический путь.
+        """
+        try:
+            from workspace.utils.event_log import record_event
+            import asyncio as _asyncio
+
+            summary = text[:200] if text else "context compacted"
+            payload = {
+                "mode": report.get("mode"),
+                "archived_msgs": report.get("archived_msgs"),
+                "kept_msgs": report.get("kept_msgs"),
+                "tokens_before": report.get("tokens_before"),
+                "tokens_after": report.get("tokens_after"),
+                "summary": report.get("summary"),
+                "raw_dump": report.get("raw_dump", False),
+            }
+            await _asyncio.to_thread(
+                record_event,
+                "context_compacted",
+                "consolidator",
+                summary,
+                payload,
+                session_id=session_key,
+                channel="system",
+                actor="system",
+                level="INFO",
+            )
+        except Exception as exc:
+            logger.warning(
+                "agent_gateway_logs write for {} failed: {}", session_key, exc,
+            )
 
     async def record_external_compaction(
         self,

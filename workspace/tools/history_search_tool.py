@@ -217,8 +217,9 @@ class HistorySearchTool(Tool):
             "finds all calls/results of compact_context), time range "
             "(since/until ISO-8601), session_scope ('current' default | 'all'). "
             "Returns JSON {status, count, session_scope, truncated, "
-            "events:[{timestamp, event_type, name, level, summary, payload}]}; "
-            "payload is a JSON-string. After getting results: parse payload "
+            "events:[{event_id, timestamp, event_type, name, level, summary, "
+            "payload}]}; event_id — UUID строки agent_gateway_logs, "
+            "payload — JSON-string. After getting results: parse payload "
             "(fields path/doc_id/args/result usually survive truncation), "
             "reuse any found path/doc_id instead of redoing work; if empty, "
             "say 'not found in history' — do not fabricate."
@@ -280,7 +281,7 @@ class HistorySearchTool(Tool):
 
         schema, table = _log_table()
         sql = (
-            f'SELECT "timestamp", event_type, name, level, summary, payload '
+            f'SELECT id, "timestamp", event_type, name, level, summary, payload '
             f'FROM "{schema}"."{table}" '
             f"WHERE {' AND '.join(clauses)} "
             'ORDER BY "timestamp" DESC LIMIT %s'
@@ -308,6 +309,7 @@ class HistorySearchTool(Tool):
             else:
                 payload_text = str(payload) if payload is not None else ""
             events.append({
+                "event_id": row.get("id"),
                 "timestamp": str(row.get("timestamp")),
                 "event_type": row.get("event_type"),
                 "name": row.get("name"),

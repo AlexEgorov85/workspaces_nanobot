@@ -17,6 +17,7 @@ markers = [
     "integration: worker pool on real DB; needs NANOBOT_INTEGRATION=1 (+ DATABASE_URL)",
     "contract: nanobot-ai compatibility checks; runs in CI always (not gated)",
     "unit: fast unit tests; default",
+    "benchmark: offline baseline benchmark (synthetic fixtures); opt-in via -m benchmark",
 ]
 
 [tool.coverage.run]

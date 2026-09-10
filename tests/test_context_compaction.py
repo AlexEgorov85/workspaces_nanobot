@@ -792,9 +792,94 @@ class TestRecordExternalCompaction:
         await svc.record_external_compaction(
             session_key="postgres:1", mode="idle", summary="x",
             archived_msgs=10, kept_msgs=20,
-            tokens_before=100, tokens_after=50,
+            tokens_before=2000, tokens_after=800,
         )
         svc._write_history_notice.assert_not_called()
+
+
+class TestNotifyRecordsEventLog:
+    """_notify пишет и в agent_conversation_messages, и в agent_gateway_logs.
+
+    Закрывает gap №1 из ``docs/architecture/HISTORY_SEARCH_ANALYSIS.md``:
+    ``context_compacted`` должен быть виден через ``history_search``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_notify_calls_both_history_notice_and_event_log(self, monkeypatch):
+        agent = MagicMock()
+        agent.sessions = MagicMock()
+        svc = ContextCompactionService(agent, settings=_settings())
+
+        svc._write_history_notice = AsyncMock()
+        svc._record_event_log = AsyncMock()
+
+        report = {
+            "session_key": "postgres:1",
+            "mode": "idle",
+            "ok": True,
+            "archived_msgs": 10,
+            "kept_msgs": 20,
+            "tokens_before": 2000,
+            "tokens_after": 800,
+            "summary": "сводка",
+            "raw_dump": False,
+        }
+        await svc._notify("postgres:1", report)
+
+        svc._write_history_notice.assert_awaited_once_with("postgres:1", report)
+        svc._record_event_log.assert_awaited_once()
+        args = svc._record_event_log.await_args.args
+        assert args[0] == "postgres:1"
+        assert args[1] == report
+        assert "сводка" in args[2] or "10" in args[2]
+
+    @pytest.mark.asyncio
+    async def test_notify_skips_event_log_when_notify_disabled(self, monkeypatch):
+        agent = MagicMock()
+        agent.sessions = MagicMock()
+        svc = ContextCompactionService(agent, settings=_settings(
+            notify_in_history=False,
+        ))
+
+        svc._write_history_notice = AsyncMock()
+        svc._record_event_log = AsyncMock()
+
+        await svc._notify("postgres:1", {
+            "session_key": "postgres:1", "mode": "idle", "ok": True,
+            "archived_msgs": 5, "kept_msgs": 5, "tokens_before": 100,
+            "tokens_after": 50, "summary": None, "raw_dump": False,
+        })
+
+        svc._write_history_notice.assert_not_called()
+        svc._record_event_log.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_record_event_log_handles_import_error(self, monkeypatch):
+        """Если ``workspace.utils.event_log`` недоступен (например, нет
+        psycopg2) — compaction не должен падать."""
+        agent = MagicMock()
+        agent.sessions = MagicMock()
+        svc = ContextCompactionService(agent, settings=_settings())
+
+        def _raise(*_a, **_k):
+            raise ImportError("psycopg2 not available")
+
+        monkeypatch.setattr(
+            "workspace.utils.event_log.record_event", _raise,
+            raising=False,
+        )
+
+        await svc._record_event_log(
+            "postgres:1",
+            {
+                "mode": "idle", "archived_msgs": 5, "kept_msgs": 5,
+                "tokens_before": 100, "tokens_after": 50,
+                "summary": "x", "raw_dump": False,
+            },
+            "Итог: заархивировано 5 сообщений, 100 → 50 токенов.",
+        )
+
+
 
 
 class TestPatchCompactionTracking:

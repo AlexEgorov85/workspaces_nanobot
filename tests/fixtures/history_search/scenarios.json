@@ -1,0 +1,429 @@
+[
+  {
+    "id": "exact_phrase_1",
+    "category": "exact_phrase",
+    "query": "договор аренды",
+    "expected_event_ids": [
+      "fccc0fcc-e714-4201-957b-f12c88ba058f",
+      "de7378b6-be7a-49cb-8206-f3554ea3fb06",
+      "5af6cb2c-e58f-4468-8913-3258a269dcab",
+      "8479b558-fb9b-4851-9f94-c6cad61c2992",
+      "16114e48-da41-4708-8fd1-ca3dacfe8708"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "точная фраза, встречается в нескольких сессиях"
+  },
+  {
+    "id": "exact_phrase_2",
+    "category": "exact_phrase",
+    "query": "отчёт по продажам",
+    "expected_event_ids": [
+      "7d912a31-eb85-4262-8e8d-ad8a41bddf15",
+      "fdeb768f-186e-4e50-80f5-146d1a81a711",
+      "d36e1c06-216b-4168-9573-bb8ec5575101"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "точная фраза 'отчёт по продажам'"
+  },
+  {
+    "id": "exact_phrase_3",
+    "category": "exact_phrase",
+    "query": "риски",
+    "expected_event_ids": [
+      "2028c04b-3f25-4153-bb3e-067293f594a8",
+      "c6fc045c-32b6-48ac-aa54-2f18567cdb59",
+      "5fd12f24-623d-4cfd-94f0-a9986ca2c9df"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "однословный запрос"
+  },
+  {
+    "id": "exact_phrase_4",
+    "category": "exact_phrase",
+    "query": "пожарной безопасности",
+    "expected_event_ids": [
+      "308d0e50-99b0-4975-8cd3-2900ba90deeb",
+      "eae744ae-5e0f-4e0d-a4b6-dd6c5a377fb2",
+      "3ab0d45f-e8a5-46c3-ae6d-4f3028462381"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "составная фраза"
+  },
+  {
+    "id": "exact_phrase_5",
+    "category": "exact_phrase",
+    "query": "trigram",
+    "expected_event_ids": [
+      "ad5fed31-2a79-40a0-88b6-b42e3e517e16",
+      "b65482c0-ce75-4165-b40b-a07ac6588cfb",
+      "927a1692-fbe4-4b62-9c0c-40b0372a0fcb"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "английский технический термин в payload"
+  },
+  {
+    "id": "filename_1",
+    "category": "filename",
+    "query": "contract_2026_04.pdf",
+    "expected_event_ids": [
+      "2725a03c-1ad3-48fc-a3ac-cc8359367a76",
+      "f2b9cbd8-7cfd-4993-8166-92cf9b3f4267",
+      "155edf37-f66a-4a92-b39d-f872216dfa37",
+      "9641aa19-fdaf-4007-ae7e-d812d0557ba1",
+      "73198d5f-8019-4e93-bd84-72978e32e510"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "поиск по имени файла contract_2026_04.pdf"
+  },
+  {
+    "id": "filename_2",
+    "category": "filename",
+    "query": "contract_2025_12.pdf",
+    "expected_event_ids": [
+      "21a70e43-2fd3-4b09-beec-5f2e013eaf67",
+      "bf2f383f-4a75-4228-81e1-ce3bc90b3103",
+      "4e4dd1be-d469-4e22-8723-e66adef924ef",
+      "d36e1c06-216b-4168-9573-bb8ec5575101"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "поиск по имени файла contract_2025_12.pdf"
+  },
+  {
+    "id": "filename_3",
+    "category": "filename",
+    "query": "report_Q1_2026.xlsx",
+    "expected_event_ids": [
+      "d740df75-7bf9-493e-81bc-3054e6a6de41",
+      "b65482c0-ce75-4165-b40b-a07ac6588cfb",
+      "459565a0-9567-450a-bc00-da3fcd540d8c",
+      "10e65e92-0a7a-4eff-8a4f-a556db59b289",
+      "14968498-1957-4e6a-bb4c-c7b5796e2344"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "поиск по имени файла report_Q1_2026.xlsx"
+  },
+  {
+    "id": "filename_4",
+    "category": "filename",
+    "query": "audit_summary.csv",
+    "expected_event_ids": [
+      "de7378b6-be7a-49cb-8206-f3554ea3fb06",
+      "ed099a01-86d0-4029-83fa-b9fdd0649741",
+      "55acbb20-7236-4c4f-b319-72610d6aca68"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "поиск по имени файла audit_summary.csv"
+  },
+  {
+    "id": "filename_5",
+    "category": "filename",
+    "query": "fire_safety_report.pdf",
+    "expected_event_ids": [
+      "9a370996-73ca-4d18-aab7-4a9b718ae204",
+      "f01a5822-0512-4e98-bde7-a749f4fb1a59",
+      "2dec631a-7d75-4c99-b544-fd8c09bc254d"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "поиск по имени файла fire_safety_report.pdf"
+  },
+  {
+    "id": "filename_6",
+    "category": "filename",
+    "query": "ABC-12345.txt",
+    "expected_event_ids": [
+      "a17ddab9-7944-448f-be34-6c2307ec9d32",
+      "282d30f1-f690-4569-afd0-5f13866f0c04",
+      "5fd12f24-623d-4cfd-94f0-a9986ca2c9df",
+      "b983f583-764c-42fb-80e1-7bc5c4174468",
+      "5b71a4f3-06cd-4453-b7eb-d00fef4b1dc4"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "поиск по имени файла ABC-12345.txt"
+  },
+  {
+    "id": "filename_7",
+    "category": "filename",
+    "query": "my_report_2026_final_v3.pdf",
+    "expected_event_ids": [
+      "650a6480-4de7-4e09-be20-ffdd21313a35",
+      "16114e48-da41-4708-8fd1-ca3dacfe8708",
+      "b5a0b4fe-dfc4-47d3-8337-107249814080",
+      "c291cf98-1e10-4197-917c-94f75dbba6db",
+      "0c9494f5-079f-4aad-8ea2-9963de70865f"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "поиск по имени файла my_report_2026_final_v3.pdf"
+  },
+  {
+    "id": "doc_id_1",
+    "category": "doc_id",
+    "query": "doc_2026_04_15_abc",
+    "expected_event_ids": [
+      "9a370996-73ca-4d18-aab7-4a9b718ae204",
+      "fff05b46-d24e-4ab8-879f-9b65813dd748",
+      "282d30f1-f690-4569-afd0-5f13866f0c04"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "поиск по doc_id doc_2026_04_15_abc"
+  },
+  {
+    "id": "doc_id_2",
+    "category": "doc_id",
+    "query": "doc_2026_q1_summary",
+    "expected_event_ids": [
+      "a41d477c-f954-4d48-b75b-32f0c903db19",
+      "f2b9cbd8-7cfd-4993-8166-92cf9b3f4267",
+      "10e65e92-0a7a-4eff-8a4f-a556db59b289"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "поиск по doc_id doc_2026_q1_summary"
+  },
+  {
+    "id": "doc_id_3",
+    "category": "doc_id",
+    "query": "op_9876",
+    "expected_event_ids": [
+      "650a6480-4de7-4e09-be20-ffdd21313a35",
+      "a17ddab9-7944-448f-be34-6c2307ec9d32",
+      "14968498-1957-4e6a-bb4c-c7b5796e2344"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "поиск по doc_id op_9876"
+  },
+  {
+    "id": "tool_name_1",
+    "category": "tool_name",
+    "query": "compact_context",
+    "expected_event_ids": [
+      "650a6480-4de7-4e09-be20-ffdd21313a35",
+      "b65482c0-ce75-4165-b40b-a07ac6588cfb",
+      "35092798-eb7a-47ab-85a3-ce8d59875bb4",
+      "e7cc1242-66d2-4bd0-b28a-015619c53602",
+      "c291cf98-1e10-4197-917c-94f75dbba6db"
+    ],
+    "expected_event_type": "tool_call",
+    "session_scope": "all",
+    "limit": null,
+    "description": "история вызовов compact_context"
+  },
+  {
+    "id": "tool_name_2",
+    "category": "tool_name",
+    "query": "vector_search",
+    "expected_event_ids": [
+      "5fd12f24-623d-4cfd-94f0-a9986ca2c9df"
+    ],
+    "expected_event_type": "tool_call",
+    "session_scope": "all",
+    "limit": null,
+    "description": "история вызовов vector_search"
+  },
+  {
+    "id": "tool_name_3",
+    "category": "tool_name",
+    "query": "duckdb_query",
+    "expected_event_ids": [
+      "de7378b6-be7a-49cb-8206-f3554ea3fb06"
+    ],
+    "expected_event_type": "tool_call",
+    "session_scope": "all",
+    "limit": null,
+    "description": "история вызовов duckdb_query"
+  },
+  {
+    "id": "tool_name_4",
+    "category": "tool_name",
+    "query": "read_file",
+    "expected_event_ids": [
+      "21a70e43-2fd3-4b09-beec-5f2e013eaf67",
+      "bf2f383f-4a75-4228-81e1-ce3bc90b3103",
+      "dead6e22-0061-4c1c-a0ad-9e5a1cdb3372",
+      "d36e1c06-216b-4168-9573-bb8ec5575101"
+    ],
+    "expected_event_type": "tool_call",
+    "session_scope": "all",
+    "limit": null,
+    "description": "история вызовов read_file"
+  },
+  {
+    "id": "scope_current_1",
+    "category": "scope_current",
+    "query": "договор аренды",
+    "expected_event_ids": [
+      "fccc0fcc-e714-4201-957b-f12c88ba058f",
+      "de7378b6-be7a-49cb-8206-f3554ea3fb06",
+      "5af6cb2c-e58f-4468-8913-3258a269dcab"
+    ],
+    "expected_event_type": null,
+    "session_scope": "current",
+    "limit": null,
+    "description": "session_scope=current: только PRIMARY_SESSION"
+  },
+  {
+    "id": "scope_all_1",
+    "category": "scope_all",
+    "query": "договор аренды",
+    "expected_event_ids": [
+      "fccc0fcc-e714-4201-957b-f12c88ba058f",
+      "de7378b6-be7a-49cb-8206-f3554ea3fb06",
+      "5af6cb2c-e58f-4468-8913-3258a269dcab",
+      "8479b558-fb9b-4851-9f94-c6cad61c2992",
+      "16114e48-da41-4708-8fd1-ca3dacfe8708"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "session_scope=all: все сессии"
+  },
+  {
+    "id": "event_type_only_1",
+    "category": "event_type_only",
+    "query": "context_compacted",
+    "expected_event_ids": [
+      "6799e295-21e2-4dc8-b854-a0ca1be20a54",
+      "dc29865a-5e4f-41f2-bcc0-d0270828818b"
+    ],
+    "expected_event_type": "context_compacted",
+    "session_scope": "all",
+    "limit": null,
+    "description": "факт сжатия контекста (gap №1)"
+  },
+  {
+    "id": "event_type_only_2",
+    "category": "event_type_only",
+    "query": "run_finished",
+    "expected_event_ids": [
+      "2028c04b-3f25-4153-bb3e-067293f594a8",
+      "308d0e50-99b0-4975-8cd3-2900ba90deeb",
+      "c257062d-95d1-4108-a0b6-0d9a52918337"
+    ],
+    "expected_event_type": "run_finished",
+    "session_scope": "all",
+    "limit": null,
+    "description": "прошлые финальные ответы агента"
+  },
+  {
+    "id": "event_type_only_3",
+    "category": "event_type_only",
+    "query": "inbound",
+    "expected_event_ids": [
+      "5af6cb2c-e58f-4468-8913-3258a269dcab",
+      "83fa9476-1153-4ace-aab5-fac76669ceb8",
+      "c98f4d25-5931-4bca-b1e0-c996abfe8047"
+    ],
+    "expected_event_type": "inbound",
+    "session_scope": "all",
+    "limit": null,
+    "description": "история входящих сообщений пользователя"
+  },
+  {
+    "id": "limit_1",
+    "category": "limit",
+    "query": "договор аренды",
+    "expected_event_ids": [
+      "fccc0fcc-e714-4201-957b-f12c88ba058f",
+      "de7378b6-be7a-49cb-8206-f3554ea3fb06",
+      "5af6cb2c-e58f-4468-8913-3258a269dcab",
+      "8479b558-fb9b-4851-9f94-c6cad61c2992",
+      "16114e48-da41-4708-8fd1-ca3dacfe8708"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": 3,
+    "description": "limit=3: ожидаем не больше 3 результатов"
+  },
+  {
+    "id": "time_range_1",
+    "category": "time_range",
+    "query": "договор аренды",
+    "expected_event_ids": [
+      "fccc0fcc-e714-4201-957b-f12c88ba058f",
+      "de7378b6-be7a-49cb-8206-f3554ea3fb06",
+      "5af6cb2c-e58f-4468-8913-3258a269dcab",
+      "8479b558-fb9b-4851-9f94-c6cad61c2992",
+      "16114e48-da41-4708-8fd1-ca3dacfe8708"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "since/until (TBD — см. baseline)"
+  },
+  {
+    "id": "negative_1",
+    "category": "negative",
+    "query": "несуществующий_уникальный_маркер_zxqv",
+    "expected_event_ids": [],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "запрос, которого точно нет — ожидаем 0 результатов"
+  },
+  {
+    "id": "ambiguous_1",
+    "category": "ambiguous",
+    "query": "PDF",
+    "expected_event_ids": [],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "однословный неоднозначный запрос, проверка шума"
+  },
+  {
+    "id": "filename_complex_1",
+    "category": "filename_complex",
+    "query": "my_report_2026_final_v3.pdf",
+    "expected_event_ids": [
+      "650a6480-4de7-4e09-be20-ffdd21313a35",
+      "16114e48-da41-4708-8fd1-ca3dacfe8708",
+      "b5a0b4fe-dfc4-47d3-8337-107249814080"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "длинное имя с подчёркиваниями"
+  },
+  {
+    "id": "doc_id_only_1",
+    "category": "doc_id_only",
+    "query": "doc_2025_12_01_xyz",
+    "expected_event_ids": [
+      "d740df75-7bf9-493e-81bc-3054e6a6de41",
+      "de7378b6-be7a-49cb-8206-f3554ea3fb06",
+      "155edf37-f66a-4a92-b39d-f872216dfa37"
+    ],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "description": "поиск по doc_id без фильтра event_type"
+  }
+]

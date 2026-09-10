@@ -1,21 +1,20 @@
-"""Generic-эмиттер событий в долговечный журнал agent_gateway_logs.
+"""Эмиттер ``context_compacted`` в долговечный журнал ``agent_gateway_logs``.
 
-Единая точка записи для ВСЕХ доменных событий, которые должны пережить
-context compaction и быть найдены агентом через инструмент ``history_search``:
+Единственный реальный caller — ``ContextCompactionService._record_event_log``
+(см. ``lib/services/context_compaction.py``). Пишет одноимённое событие,
+которое агент находит через ``history_search(event_type="context_compacted",
+session_scope="current")`` — закрывает gap №1 из
+``docs/architecture/HISTORY_SEARCH_ANALYSIS.md``.
 
-  * ``document_summarized`` (legal_summarizer и др. skill-CLI через exec);
-  * ``context_compacted`` (ContextCompactionService);
-  * ``file_attached`` / ``file_created`` / ``file_delivered`` (хуки файлов);
-  * любые другие — навык/хук просто передаёт свой event_type.
+Таблица ``public.agent_gateway_logs`` уже существует (``sql/logs/...``),
+пишется ``DbLoggingService`` и НЕ чистится Consolidator'ом. Мы делаем прямой
+INSERT через ``utils.db`` (тот же DSN, что у всего остального), без привязки
+к ``ApplicationContext`` — чтобы эмиттер работал и из subprocess (exec),
+и из гейтвей-процесса.
 
-Таблица public.agent_gateway_logs уже существует (sql/logs/...), пишется
-DbLoggingService и НЕ чистится Consolidator'ом. Мы делаем прямой INSERT
-через utils.db (тот же DSN, что у всего остального), без привязки к
-ApplicationContext — чтобы эмиттер работал и из subprocess (exec), и из
-гейтвей-процесса.
-
-Gating: при отсутствии DSN (channels.postgres.dsn) или при выключенном
-logging.db.enabled событие тихо не пишется (skill/хук не падает).
+Gating: при отсутствии DSN (``channels.postgres.dsn``) или при выключенном
+``logging.db.enabled`` событие тихо не пишется (``history_search`` его
+тогда не найдёт — но и compaction не упадёт).
 """
 
 from __future__ import annotations
