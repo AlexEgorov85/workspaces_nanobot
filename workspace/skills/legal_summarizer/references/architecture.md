@@ -171,14 +171,67 @@ boundary (manifest / JSON output). Внутренние API принимают
 
 ## Cache — application boundary
 
-`cache.manifest` импортируется **только** в:
+Cache разделён на **два независимых уровня** с разными владельцами,
+разными layout'ами и разной ответственностью:
 
-* `application.execution_orchestration` — решает, сохранять ли partials.
-* `application.service` — idempotency + resume.
+```text
+DocumentCache
+    │
+    └── document-level cache
+        (sessions/<safe_session_key>/documents/<document_id>/...)
+        cross-operation identity, baseline summaries
+
+cache.manifest
+    │
+    └── operation-level resume state
+        (operations/<operation_id>/manifest.json + chunks/ + result.json)
+        per-operation idempotency, partials, final result
+```
+
+### `DocumentCache` — единственный владелец document-level storage
+
+`cache/document_cache.py::DocumentCache` (instance API:
+`DocumentCache(workspace_root, session_key)`).
+
+Импортируется в:
+
+* `application.pipeline_structure` — cache hit/miss вокруг canonical pipeline.
+* `application.service` — `_try_question_via_document_cache` cache boundary.
+* `application.question_context` — загрузка chunk/section summaries для
+  question synthesis.
+* `application.execution_orchestration` — callback factory для
+  `map_reduce` (per-chunk summaries в document cache).
+* `cache.document_cache` сам.
+* `tests/*` (contract tests) + `tests/architecture/test_document_cache_boundaries.py`.
+
+Производственные модули **не** знают про cache paths, marker, snapshot
+filenames или layout — это инкапсулировано в `DocumentCache`.
+
+### `cache.manifest` — единственный владелец operation-level storage
+
+`scripts/cache/manifest.py` содержит **только** operation-level API:
+`load_manifest`, `save_manifest`, `manifest_path`, `manifest_root`,
+`chunks_dir`, `chunk_result_path`, `write_chunk_result`, `read_chunk_result`,
+`result_path`, `write_result`, `read_result`, `load_cached_partials`,
+`NormalizedManifest`, `MANIFEST_VERSION_V2`.
+
+Импортируется в:
+
+* `application.execution_orchestration` — operation manifest lifecycle.
+* `application.service` — idempotency check + resume.
+* `application.manifest_builder` — построение `NormalizedManifest`.
+* `document.physical` — `manifest_root` для operation-level physical cache.
+* `cli_query.py` — read manifest/chunks по `operation_id`.
 * `cache.manifest` сам.
 
-`execution.pipeline` **не** импортирует `cache.manifest`: возвращает
-`(batch_meta, chunk_results)`, application решает — записывать ли.
+Document-level symbols (`is_document_cache_complete`,
+`read_document_snapshot`, `write_document_snapshot`, ...) **физически
+удалены** из `cache.manifest` и не должны появляться в production.
+Архитектурный guard: `tests/architecture/test_document_cache_boundaries.py`.
+
+`execution.pipeline` **не** импортирует ни `cache.manifest`, ни
+`cache.document_cache`: возвращает `(batch_meta, chunk_results)`,
+application решает — записывать ли и куда.
 
 ## Single-flight — единый boundary
 
