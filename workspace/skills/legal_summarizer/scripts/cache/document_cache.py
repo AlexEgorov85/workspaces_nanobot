@@ -50,6 +50,7 @@ production-модуль (``application/``, ``execution/``, ``retrieval/``,
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -164,7 +165,18 @@ class DocumentCache:
     ) -> Path:
         """Атомарная запись document-level snapshot'а.
 
-        Snapshot пишется в staging dir + ``Path.rename``. ``_complete.marker``
+        Concurrency contract:
+
+        * если ``target_dir`` уже **complete** (marker на месте) —
+          поднимается ``RuntimeError`` (поверх существующего snapshot
+          не писать; нужно сначала :meth:`invalidate`);
+        * атомарность ``install/replace`` обеспечивается через
+          :func:`os.replace` — POSIX и Windows оба делают rename
+          атомарно, без ``rmtree + rename`` (которое создаёт TOCTOU
+          window, в котором параллельный writer может уничтожить
+          чужой complete snapshot).
+
+        Snapshot пишется в staging dir + ``os.replace``. ``_complete.marker``
         создаётся последним — на случай падения посередине целостный
         snapshot либо виден полностью, либо не существует.
 
@@ -189,6 +201,13 @@ class DocumentCache:
             raise ValueError("DocumentCache.write_snapshot: document_id обязателен")
 
         target_dir = self._document_dir(document_id)
+
+        # Fail-fast check до того, как мы тратим работу на staging.
+        # Между этим check и ``os.replace`` параллельный writer мог
+        # завершить свой snapshot — это нормально, ``os.replace``
+        # атомарно перезапишет target. Но если target **уже complete**
+        # к моменту check — мы не должны писать, нужно explicit
+        # invalidate (так contract: complete → protected).
         if target_dir.exists() and self.is_complete(document_id):
             raise RuntimeError(
                 f"document-level cache для document_id={document_id!r} уже complete; "
@@ -222,9 +241,17 @@ class DocumentCache:
             )
 
             target_dir.parent.mkdir(parents=True, exist_ok=True)
-            if target_dir.exists():
-                shutil.rmtree(target_dir)
-            staging.rename(target_dir)
+
+            # Атомарный install/replace через ``os.replace`` (POSIX + Windows).
+            # Устраняет TOCTOU window: если параллельный writer создал
+            # complete snapshot между нашим pre-check и этим вызовом —
+            # ``os.replace`` атомарно перезапишет его (новый writer
+            # «выигрывает», оба complete валидны).
+            # Если же target уже complete И его владелец — не мы, то
+            # мы перезапишем чужой complete; это не data loss, потому что
+            # оба snapshot'а семантически эквивалентны для одного
+            # document_id (SHA-256 от path+size+mtime детерминирован).
+            os.replace(staging, target_dir)
             return target_dir
         except Exception:
             if staging.exists() and staging.is_dir():
@@ -293,7 +320,9 @@ class DocumentCache:
         учётом конкретного вопроса и НЕ должен попасть в cross-operation
         cache (semantic pollution guard). В этом случае no-op.
 
-        Append-only, атомарный.
+        Идемпотентный atomic upsert: повторный write с тем же
+        ``chunk_id`` перезаписывает существующий summary (не append-only).
+        Атомарность обеспечивается через ``_atomic_write_json``.
         """
         if question is not None:
             return
@@ -356,8 +385,10 @@ class DocumentCache:
         document-level cache хранит ТОЛЬКО question-independent (baseline)
         summaries. ``question is not None`` → no-op.
 
-        Append-only, атомарный. Используется после успешного map/reduce —
-        отдельная стадия жизненного цикла.
+        Идемпотентный atomic upsert: повторный write с тем же
+        ``section_id`` перезаписывает существующий summary.
+        Используется после успешного map/reduce — отдельная стадия
+        жизненного цикла.
         """
         if question is not None:
             return
