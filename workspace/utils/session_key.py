@@ -78,22 +78,18 @@ def resolve_session_key_for_subprocess(
     Источники (по убыванию приоритета):
         1. ``os.environ["SESSION_KEY"]`` — выставляется nanobot-каналом,
            если доступен (например, ``"telegram:8281248569"``).
-        2. ``safe_session_key(str(Path(file_path).resolve()))`` — стабильный
-           ключ из самого файла. Тот же файл → тот же ключ → cache hit;
-           разные файлы → разные ключи → изоляция.
+        2. ``safe_session_key(Path(file_path).name)`` — стабильный ключ из
+           basename файла. В рамках одной CLI-сессии имена файлов не
+           пересекаются, поэтому basename достаточен для cache isolation.
         3. ``__nosession__`` — last resort.
-
-    Семантика «cache hit для одного и того же файла в рамках сессии»
-    обеспечивается за счёт branch (2): путь стабилен в рамках одного запуска
-    и при повторной загрузке того же файла.
 
     Examples:
         >>> import os; os.environ["SESSION_KEY"] = "telegram:42"
         >>> resolve_session_key_for_subprocess(Path("/tmp/foo.pdf"))
         'telegram_42'
         >>> del os.environ["SESSION_KEY"]
-        >>> resolve_session_key_for_subprocess(Path("/tmp/foo.pdf")).startswith("__")
-        False
+        >>> resolve_session_key_for_subprocess(Path("/tmp/foo.pdf"))
+        'foo.pdf'
         >>> resolve_session_key_for_subprocess(None)
         '__nosession__'
     """
@@ -102,8 +98,9 @@ def resolve_session_key_for_subprocess(
         return safe_session_key(env_key)
     if file_path is not None:
         try:
-            resolved = Path(file_path).resolve()
-            return safe_session_key(str(resolved))
+            name = Path(file_path).name
+            if name:
+                return safe_session_key(name)
         except (OSError, ValueError):
             pass
     return __nosession__
