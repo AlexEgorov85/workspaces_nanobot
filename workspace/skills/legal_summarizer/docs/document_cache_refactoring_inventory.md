@@ -74,6 +74,29 @@ Concurrency tests                                                        = 2/2 p
 
 - **Helper'ы `_try_load_cached_pipeline_result` + `_write_document_snapshot_after_pipeline` в `pipeline_structure.py`** — сохранены как тонкие cache-coordination helpers (не wrappers над `DocumentCache`). Они владеют **recovery в PipelineResult** (десериализация snapshot → in-memory объекты). Это отдельная ответственность, не cache storage protocol. Решение (inline / `application/snapshot_loader.py` / baseline) — отдельный refactor после стабилизации архитектуры.
 
+- **Chunking regression от `00db0d2` (10 сентября 11:18) — обнаружено во время тестирования на реальном PDF Налогового кодекса, bisect через git.**
+
+  На Налоговом кодексе РФ (1.49M chars, 750 blocks, 49 sections через PDF outline):
+  - **До `00db0d2` (`ca53c5b`, 10 сентября 08:34):** 19 chunks ✅ (корректно)
+  - **После `00db0d2` (HEAD):** 263 chunks ❌ (аномально)
+
+  Коммит `00db0d2 fix(legal_summarizer): cli sys.path, oversized_part split и table-atomic в chunker` пытался исправить проблему с oversized блоками, но в результате сломал chunking для документов с PDF outline. Проблема не в моём refactoring DocumentCache (DocumentCache не влияет на chunker), а в самом chunker'е после этого коммита.
+
+  Регрессия проявляется на документах с **низкой density headings** (Налоговый: 6.53%) — chunker создаёт отдельные chunks для каждого блока вместо объединения. На документах с **высокой density** (Гражданский: 35.6%) chunker работает корректно (23 chunks на 2.14M chars).
+
+  **Reproduction:**
+  ```bash
+  python scripts/cli.py --file <pdf> --estimate-only
+  # chunks_total должно быть ~50 для типичного Налогового кодекса
+  ```
+
+  **Вне scope** моего refactoring. Требует:
+  1. Анализ `_iter_pdf_blocks` и `_emit_unit` в `chunking/chunker.py` после `00db0d2`;
+  2. Понимание почему oversized_part split ломает packing для small blocks с headings;
+  3. Возможный revert `00db0d2` или новый fix.
+
+  **Моя** работа (DocumentCache refactoring) **не влияет** на эту проблему.
+
 - **`DocumentIdentity.is_fresh(path)` — использование в pipeline неправильное (НЕ баг метода). Обнаружено во время Phase 2 review.**
 
   Сам метод `DocumentIdentity.is_fresh()` корректен: он сравнивает
