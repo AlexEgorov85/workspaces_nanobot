@@ -99,7 +99,7 @@ def test_resume_scenario_a_completed_manifest_roundtrip(tmp_path):
     Проверяет, что после reload manifest содержит корректные chunk_states
     и status='completed'.
     """
-    from legal_summarizer.cache.manifest import (
+    from cache.manifest import (
         load_manifest,
         manifest_path,
     )
@@ -136,7 +136,7 @@ def test_resume_scenario_a_completed_manifest_roundtrip(tmp_path):
 
 def test_resume_scenario_a_completed_manifest_path_exists(tmp_path):
     """Scenario A: manifest_path существует на диске после save."""
-    from legal_summarizer.cache.manifest import (
+    from cache.manifest import (
         manifest_path,
     )
 
@@ -161,7 +161,7 @@ def test_resume_scenario_b_failed_manifest_reload_preserves_failure(tmp_path):
     Retry должен сохранить старый manifest до тех пор, пока новый run
     не создаст новый manifest (или обновит тот же).
     """
-    from legal_summarizer.cache.manifest import (
+    from cache.manifest import (
         load_manifest,
         manifest_path,
     )
@@ -202,7 +202,7 @@ def test_resume_scenario_b_retry_updates_status_to_completed(tmp_path):
 
     Симулируем retry: overwrite manifest с новым status=completed.
     """
-    from legal_summarizer.cache.manifest import (
+    from cache.manifest import (
         load_manifest,
         manifest_path,
     )
@@ -245,7 +245,7 @@ def test_resume_scenario_c_partial_manifest_roundtrip(tmp_path):
 
     Partial = есть успешные batches + batches_failed.
     """
-    from legal_summarizer.cache.manifest import (
+    from cache.manifest import (
         load_manifest,
         manifest_path,
     )
@@ -288,7 +288,7 @@ def test_resume_scenario_c_partial_manifest_roundtrip(tmp_path):
 
 def test_resume_scenario_c_partial_chunk_results_persist(tmp_path):
     """Scenario C: chunk_results для completed chunks записаны, для failed — нет."""
-    from legal_summarizer.cache.manifest import (
+    from cache.manifest import (
         chunk_result_path,
         read_chunk_result,
         write_chunk_result,
@@ -329,11 +329,11 @@ def test_resume_integration_run_writes_manifest(tmp_path, monkeypatch):
     map_reduce: chunk_size=200 → много chunks → manifest пишется.
     """
     import application.service as summarizer
-    monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
+    monkeypatch.setattr(summarizer._llm_config_mod, "get_chunking_config", lambda: {
         "chunk_size": 200, "chunk_overlap": 0, "single_call_threshold": 100,
         "chunk_size_input_ratio": None,
     })
-    monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
+    monkeypatch.setattr(summarizer._llm_config_mod, "get_execution_config", lambda: {
         "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
         "max_chunks_for_execution": 100,
         "context_batching": {
@@ -343,30 +343,36 @@ def test_resume_integration_run_writes_manifest(tmp_path, monkeypatch):
         "llm_max_tokens": 100,
     })
 
-    def fake_chat(messages, *, context=None, **kwargs):
-        # Map-вызовы — текстовый формат с DOC CHUNK N.
-        user_content = messages[1]["content"]
-        import re as _re
-        if _re.findall(r"DOCUMENT CHUNK \d+", user_content):
-            n = len(_re.findall(r"DOCUMENT CHUNK \d+", user_content))
-            return "\n\n".join(
-                f"DOC CHUNK {i + 1}: саммари чанка {i + 1}" for i in range(n)
-            ) + "\n"
-        # Reduce-вызов.
+    import llm.calls as llm_calls_mod
+
+    def fake_llm_batch(chunks, *, chunks_total, structure, length, question=None):
+        """Map-вызов: возвращает саммари по каждому chunk."""
+        return {c.chunk_id: f"DOC CHUNK {i + 1}: саммари чанка {i + 1}"
+                for i, c in enumerate(chunks)}
+
+    def fake_llm_section_reduce(path, heading, text, *, length, question=None):
+        return "саммари секции"
+
+    def fake_llm_document_reduce(text, *, length, focus, structure, question=None):
         return "Тест. Саммари для integration теста."
 
-    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+    monkeypatch.setattr(llm_calls_mod, "llm_batch", fake_llm_batch)
+    monkeypatch.setattr(llm_calls_mod, "llm_section_reduce", fake_llm_section_reduce)
+    monkeypatch.setattr(llm_calls_mod, "llm_document_reduce", fake_llm_document_reduce)
 
     paragraph = "Тестовый абзац документа для проверки записи manifest. "
     text = "\n\n".join([paragraph] * 50)
+    doc_path = tmp_path / "doc.txt"
+    doc_path.write_text(text, encoding="utf-8")
     result = summarizer.run(
         text, length="brief", confirmed=True, workspace_root=tmp_path,
+        document_path=str(doc_path),
     )
     assert result["status"] == "completed"
     op_id = result["operation_id"]
 
     # Manifest должен быть на диске (manifest_root = tmp_path/workspace/...).
-    from legal_summarizer.cache.manifest import (
+    from cache.manifest import (
         load_manifest,
         manifest_path,
     )

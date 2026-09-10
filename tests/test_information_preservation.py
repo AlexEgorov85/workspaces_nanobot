@@ -145,11 +145,13 @@ def test_info_preservation_e2e_mock_passes_keywords(tmp_path, monkeypatch):
     Mock LLM «повторяет» факты в summary. Тест проверяет acceptance 80%.
     """
     import application.service as summarizer
-    monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
+    import llm.config as llm_config
+    import llm.calls as llm_calls_mod
+    monkeypatch.setattr(llm_config, "get_chunking_config", lambda: {
         "chunk_size": 100000, "chunk_overlap": 0, "single_call_threshold": 100000,
         "chunk_size_input_ratio": None,
     })
-    monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
+    monkeypatch.setattr(llm_config, "get_execution_config", lambda: {
         "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
         "max_chunks_for_execution": 100,
         "context_batching": {
@@ -171,17 +173,22 @@ def test_info_preservation_e2e_mock_passes_keywords(tmp_path, monkeypatch):
         text_parts.append(f"FACT_{i:03d}: {f}.")
     text_parts.append("Заключение.")
     text = "\n\n".join(text_parts)
+    doc_path = tmp_path / "doc.txt"
+    doc_path.write_text(text, encoding="utf-8")
 
     # Mock: возвращает summary с большинством фактов.
     honest_summary = "Саммари договора.\n" + "\n".join(facts[:4]) + "\n" + facts[4]
 
-    def fake_chat(messages, *, context=None, **kwargs):
+    def fake_llm_document_reduce(text, *, length, focus, structure, question=None):
         return honest_summary
 
-    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+    monkeypatch.setattr(
+        llm_calls_mod, "llm_document_reduce", fake_llm_document_reduce,
+    )
 
     result = summarizer.run(
         text, length="brief", confirmed=True, workspace_root=tmp_path,
+        document_path=str(doc_path),
     )
     assert result["status"] == "completed"
 
@@ -204,11 +211,13 @@ def test_info_preservation_e2e_partial_summary_below_threshold(
     поведение ``_fact_presence``.
     """
     import application.service as summarizer
-    monkeypatch.setattr(summarizer, "get_chunking_config", lambda: {
+    import llm.config as llm_config
+    import llm.calls as llm_calls_mod
+    monkeypatch.setattr(llm_config, "get_chunking_config", lambda: {
         "chunk_size": 100000, "chunk_overlap": 0, "single_call_threshold": 100000,
         "chunk_size_input_ratio": None,
     })
-    monkeypatch.setattr(summarizer, "get_execution_config", lambda: {
+    monkeypatch.setattr(llm_config, "get_execution_config", lambda: {
         "confirmation_threshold_sec": 0.001, "estimated_chunk_duration_sec": 0.001,
         "max_chunks_for_execution": 100,
         "context_batching": {
@@ -229,17 +238,20 @@ def test_info_preservation_e2e_partial_summary_below_threshold(
     for i, f in enumerate(facts, 1):
         text_parts.append(f"FACT_{i:03d}: {f}.")
     text = "\n\n".join(text_parts)
+    doc_path = tmp_path / "doc.txt"
+    doc_path.write_text(text, encoding="utf-8")
 
     # Mock: возвращает summary только с 2 фактами.
     bad_summary = "Краткое саммари: " + facts[0] + ". " + facts[1] + "."
 
-    def fake_chat(messages, *, context=None, **kwargs):
+    def fake_llm_document_reduce(text, *, length, focus, structure, question=None):
         return bad_summary
 
-    monkeypatch.setattr(summarizer.llm, "chat", fake_chat)
+    monkeypatch.setattr(llm_calls_mod, "llm_document_reduce", fake_llm_document_reduce)
 
     result = summarizer.run(
         text, length="brief", confirmed=True, workspace_root=tmp_path,
+        document_path=str(doc_path),
     )
     assert result["status"] == "completed"
 
