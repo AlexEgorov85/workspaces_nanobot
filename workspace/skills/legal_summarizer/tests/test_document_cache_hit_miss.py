@@ -186,3 +186,6 @@ def test_cache_workspace_root_none_always_miss(tmp_path):
     cache = DocumentCache(tmp_path)
     document_id = result.analysis.identity.document_id
     assert not cache.is_complete(document_id)
+
+
+

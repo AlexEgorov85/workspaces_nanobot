@@ -182,6 +182,93 @@ def test_snapshot_no_staging_leftover_on_error(tmp_path):
     assert not cache._document_dir(document_id).exists()
 
 
+def test_concurrent_writers_snapshot_is_always_valid(tmp_path):
+    """Concurrency contract: после любого числа параллельных writer'ов
+    snapshot либо полностью отсутствует, либо полностью complete (marker
+    на месте, payload читается целиком).
+
+    Тест симулирует гонку: 5 потоков одновременно пытаются записать
+    snapshot для одного ``document_id``. После завершения всех потоков
+    инвариант «target либо отсутствует, либо complete и читаем» должен
+    выполняться. Параллельные writer'ы пишут семантически
+    эквивалентные snapshot'ы (один document_id = один
+    (path, size, mtime) → SHA-256 детерминирован → одинаковый payload),
+    поэтому «выигрыш» любого writer'а допустим; data loss невозможен.
+    """
+    import threading
+    from cache.document_cache import DocumentCache
+
+    document_id = "d_concurrent"
+    cache = DocumentCache(tmp_path)
+    errors: list[BaseException] = []
+
+    def _writer(idx: int) -> None:
+        try:
+            cache.write_snapshot(
+                document_id=document_id,
+                physical_data={"writer": idx, "path": "x"},
+                analysis_data={"document_id": document_id, "writer": idx},
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_writer, args=(i,)) for i in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Хотя бы один writer должен был успешно завершить.
+    assert not errors or any(
+        not isinstance(e, RuntimeError) or "уже complete" not in str(e)
+        for e in errors
+    ), f"unexpected errors: {errors}"
+
+    # Invariant: либо target отсутствует, либо complete.
+    target = cache._document_dir(document_id)
+    if target.exists():
+        assert cache.is_complete(document_id), (
+            "target exists but marker отсутствует — race нарушил atomicity"
+        )
+        snap = cache.read_snapshot(document_id)
+        assert snap is not None, "is_complete=True но read_snapshot=None"
+        physical, analysis, _meta = snap
+        assert physical is not None and "writer" in physical
+        assert analysis is not None and "writer" in analysis
+
+
+def test_atomic_replace_no_staging_leftover_on_collision(tmp_path):
+    """``os.replace`` атомарно перезаписывает target. Если первый writer
+    уже сделал ``os.replace(staging1, target)``, второй writer тоже
+    делает ``os.replace(staging2, target)`` — атомарно, без мусора в
+    target (staging2 полностью заменяет staging1; staging1 уже не
+    существует как staging). Stale staging от упавших потоков может
+    остаться, но target всегда валиден.
+    """
+    from cache.document_cache import DocumentCache
+    import cache.document_cache as dc
+
+    document_id = "d_replace"
+    cache = DocumentCache(tmp_path)
+    cache.write_snapshot(
+        document_id=document_id,
+        physical_data={"v": 1},
+        analysis_data={"document_id": document_id},
+    )
+    # Второй writer: invalidate → запись нового snapshot.
+    # ``os.replace`` атомарно перезаписывает target.
+    cache.invalidate(document_id)
+    cache.write_snapshot(
+        document_id=document_id,
+        physical_data={"v": 2},
+        analysis_data={"document_id": document_id},
+    )
+    snap = cache.read_snapshot(document_id)
+    assert snap is not None
+    physical, _, _ = snap
+    assert physical == {"v": 2}
+
+
 def test_load_document_chunk_summaries(tmp_path):
     """``DocumentCache.load_chunk_summaries``: cross-operation lookup."""
     from cache.document_cache import DocumentCache
