@@ -350,7 +350,14 @@ def chunk_from_structure(
         page_end: int | None = None
         block_types_list: list[str] = []
         for b in blocks_in_unit:
-            text_parts.append(b.content)
+            if (
+                unit.kind == "oversized_part"
+                and unit.source_char_start is not None
+                and unit.source_char_end is not None
+            ):
+                text_parts.append(b.content[unit.source_char_start:unit.source_char_end])
+            else:
+                text_parts.append(b.content)
             block_types_list.append(b.block_type)
             if b.page_index is not None:
                 if page_start is None or b.page_index < page_start:
@@ -443,6 +450,20 @@ def chunk_from_structure(
             document_table_counter += 1
             tid = f"t_{document_table_counter:03d}"
             doc_tables[ord_i] = tid
+            owner = ownership.get(ord_i, struct.root_id)
+            table_section_ids = _collect_owner_section_ids(
+                (ord_i,), ownership, struct.root_id,
+            )
+            all_units.append(
+                PackableUnit(
+                    kind="table",
+                    block_indices=(ord_i,),
+                    section_ids=table_section_ids,
+                    primary_section_id=owner,
+                    char_count=block.char_count,
+                    table_id=tid,
+                ),
+            )
         elif block.char_count > max_chunk_chars:
             owner = ownership.get(ord_i, struct.root_id)
             parts = _split_block_with_offsets(

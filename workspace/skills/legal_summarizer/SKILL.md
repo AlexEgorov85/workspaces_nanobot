@@ -46,15 +46,40 @@ metadata: {"nanobot":{"emoji":"📄","always":true}}
 
 ## Запуск
 
-> ⚠️ **Windows PowerShell:** используйте **абсолютный путь к cli.py**
-> одним аргументом в `exec` (без `cd ... &&` — PowerShell не поддерживает `&&`):
->
-> ```bash
-> python "C:\Users\<user>\.nanobot\workspace\skills\legal_summarizer\scripts\cli.py" --file "<path>" [--flags...]
-> ```
+> ℹ️ PYTHONPATH выставлять **не нужно** — `cli.py` сам подкладывает
+> корень репо и `scripts/` в `sys.path`. Просто запускай `python` с
+> абсолютным путём к `cli.py` (см. команды ниже).
+
+> ⚠️ **ПРАВИЛО #4 (никакого retry-цикла):** если `cli.py` упал с
+> `ImportError`/`timeout`/просто не печатает sentinel
+> `__LEGAL_SUMMARIZER_DONE__` в течение `wait_timeout_ms=120000` —
+> **НЕ ПЫТАЙСЯ запустить его ещё раз с тем же `--file` без
+> `--operation-id`**. Повторный запуск создаст новую операцию
+> (дублирование работы, плюс занятый фоновый процесс остаётся
+> висеть). Если процесс перешёл в background (`session_id=...`),
+> дождись sentinel одним `write_stdin(wait_timeout_ms=120000)`
+> — **не более 2 попыток**. Если sentinel так и не пришёл — сообщи
+> пользователю `operation_id` (если напечатан в первом `running` JSON)
+> и остановись.
+
+### Каноническая команда (Windows PowerShell)
+
+```powershell
+python "C:\Users\<user>\.nanobot\workspace\skills\legal_summarizer\scripts\cli.py" --file "<абсолютный_путь_к_pdf>" [--estimate-only | --length brief|detailed --confirm | --question "..." --confirm]
+```
+
+- **Один** аргумент с абсолютным путём к `cli.py` — без `cd ... &&`
+  (PowerShell не поддерживает `&&`).
+- Путь к файлу — **абсолютный** (берётся из media payload сообщения,
+  либо из `data_store/cache/sessions/<session_key>/<file>`).
+- На первом запуске для длинного документа — **всегда** добавляй
+  `--estimate-only`, чтобы получить `confirmation_required` и показать
+  пользователю меню `brief/detailed/вопрос`.
+
+### Каноническая команда (bash / Linux)
 
 ```bash
-python workspace/skills/legal_summarizer/scripts/cli.py --file <path> [--flags...]
+python workspace/skills/legal_summarizer/scripts/cli.py --file "<path>" [--flags...]
 ```
 
 | Параметр | Обязательный | Описание |
@@ -74,6 +99,9 @@ python workspace/skills/legal_summarizer/scripts/cli.py --file <path> [--flags..
 ## Протокол
 
 ### Короткий документ (≤ `single_call_threshold`)
+
+> Перед запуском прочти [«Запуск»](#запуск) — там про `$env:PYTHONPATH`,
+> абсолютные пути и отсутствие `cd ... &&`.
 
 ```bash
 python .../cli.py --file small.pdf
@@ -143,6 +171,14 @@ cli.py печатает в самом начале:
 В самом конце — sentinel `__LEGAL_SUMMARIZER_DONE__`. Дожидайся его
 одним блокирующим `exec` (или `write_stdin(wait_for=..., wait_timeout_ms=120000)`).
 Не опрашивай по таймеру — это лишние LLM-вызовы.
+
+> ⚠️ **ПРАВИЛО #5 (потолок `write_stdin`):** `yield_time_ms <= 30000`,
+> `wait_timeout_ms <= 120000` — это потолок параметров tool `write_stdin`
+> (см. ошибки в логе инцидента 2026-09-10). Если процесс не допечатал
+> sentinel за один `write_stdin(wait_timeout_ms=120000)` — **максимум
+> одна повторная попытка** `write_stdin` с тем же `session_id`.
+> Дальше — сообщи пользователю, что обработка превысила ожидаемое время,
+> и прекрати вызовы. Не плоди 5+ итераций `write_stdin`.
 
 ## Follow-up вопросы
 

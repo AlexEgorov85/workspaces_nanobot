@@ -32,11 +32,25 @@ import sys
 import traceback
 from pathlib import Path
 
-from workspace.utils.session_key import resolve_session_key_for_subprocess
 
-
+# Подключаем корень репо и scripts/, чтобы sibling-модули
+# (``workspace.*``, ``application.*``, ``chunking.*``, ``llm.*``, ``output.*``)
+# импортировались и без выставленного PYTHONPATH. Это нужно потому, что
+# Python автоматически добавляет в sys.path только директорию самого скрипта,
+# но НЕ родительские директории — а у нас структура:
+#   <repo_root>/workspace/skills/legal_summarizer/scripts/cli.py
+#   <repo_root>/workspace/utils/session_key.py  ← импортируется ниже
+# Без этого блока импорт ``workspace.utils.session_key`` падал с
+# ``ImportError: cannot import name 'workspace'`` при запуске напрямую через
+# абсолютный путь к cli.py (см. инцидент 2026-09-10).
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _SCRIPTS_ROOT = Path(__file__).resolve().parent
+for _p in (str(_PROJECT_ROOT), str(_SCRIPTS_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+
+from workspace.utils.session_key import resolve_session_key_for_subprocess  # noqa: E402
 
 
 def _setup_stdout_encoding() -> None:
@@ -61,10 +75,6 @@ def _setup_stdout_encoding() -> None:
         except (AttributeError, io.UnsupportedOperation):
             # Python < 3.7 или stream закрыт.
             pass
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
 
 
 def _build_parser() -> argparse.ArgumentParser:
