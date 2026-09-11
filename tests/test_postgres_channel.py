@@ -1328,3 +1328,145 @@ class TestPostgresChannelLifecycleDiagnostics:
         assert "phase=final_received" in joined
         assert "phase=db_committed" in joined
         assert "phase=local_released" in joined
+
+
+class TestPostgresChannelUnstickProcessing:
+    """``_unstick_processing`` возвращает список восстановленных id,
+    а ``_unstick_loop`` чистит локал для каждого. Без этого воркер
+    мог бы остаться с заполненным ``exchange.inflight`` после того,
+    как БД вернула задачу в ``pending``.
+
+    Используем мок БД: ``conn.fetch`` отдаёт зависшие user-строки,
+    ``conn.fetchrow`` для чтения metadata. Тест проверяет:
+      - возвращённый список содержит id восстановленных задач;
+      - DB получает UPDATE status='pending' (retry < max) или 'failed';
+      - ``_unstick_loop`` чистит ``_msg_ctx``, ``_leases``, ``exchange.inflight``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_recovered_id_and_clears_local(self, mock_db_and_psycopg):
+        """Одна зависшая задача: recovered → local state очищен."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        # _unstick_processing делает fetch → SELECT зависших
+        conn.fetch.return_value = [{"id": "m-stuck", "metadata": "{}"}]
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        _claim_task(ch, user_msg_id="m-stuck", chat_id="chat-stuck",
+                    assistant_msg_id="a-stuck")
+
+        recovered = await ch._unstick_processing()
+
+        assert recovered == ["m-stuck"]
+        # Локал всё ещё не очищен — _unstick_processing только БД трогает.
+        # Очистку делает _unstick_loop.
+        assert "m-stuck" in ch.exchange.inflight
+        # Но SQL ушёл: UPDATE … status='pending'
+        sqls = [c.args[0] for c in conn.execute.call_args_list]
+        assert any("status = 'pending'" in s for s in sqls), sqls
+
+    @pytest.mark.asyncio
+    async def test_unstick_loop_clears_local_for_recovered(self, mock_db_and_psycopg):
+        """``_unstick_loop`` после ``_unstick_processing`` чистит локал."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetch.return_value = [{"id": "m-loop", "metadata": "{}"}]
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        _claim_task(ch, user_msg_id="m-loop", chat_id="chat-loop",
+                    assistant_msg_id="a-loop")
+
+        # Имитируем один тик loop'а вручную (без asyncio.sleep).
+        ch._unstick_interval = 0  # чтобы не ждать
+        recovered = await ch._unstick_processing()
+        for msg_id in recovered:
+            if msg_id in ch._msg_ctx or msg_id in ch.exchange.inflight:
+                ch._msg_ctx.pop(msg_id, None)
+                ch._leases.discard(msg_id)
+                ch._release_slot(msg_id)
+
+        _assert_local_clean(ch, "m-loop", "chat-loop")
+
+    @pytest.mark.asyncio
+    async def test_terminal_failed_after_max_retries(self, mock_db_and_psycopg):
+        """retry_count >= max_stuck_retries → status='failed' (терминал)."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        # retry_count в metadata = max_stuck_retries → после +1 уже failed
+        conn.fetch.return_value = [
+            {"id": "m-term", "metadata": {"retry_count": 2}},
+        ]
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db), max_stuck_retries=3,
+        )
+
+        recovered = await ch._unstick_processing()
+        assert recovered == ["m-term"]
+        sqls = [c.args[0] for c in conn.execute.call_args_list]
+        assert any("status = 'failed'" in s for s in sqls), sqls
+
+
+class TestPostgresChannelMarkFailed:
+    """``_mark_failed`` — второй terminal path (после ``_finalize_turn``).
+    После него локал должен быть полностью очищен, как и после нормального
+    финала — иначе polling зависнет.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dispatch_error_marks_error_and_clears_local(self, mock_db_and_psycopg):
+        """``_mark_failed(reason='dispatch_error')`` → DB error, локал чист."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {"metadata": "{}"}
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        _claim_task(ch, user_msg_id="m-d", chat_id="chat-d",
+                    assistant_msg_id="a-d")
+
+        await ch._mark_failed("m-d", "a-d", "dispatch_error")
+
+        _assert_local_clean(ch, "m-d", "chat-d")
+        sqls = [c.args[0] for c in conn.execute.call_args_list]
+        assert any("status = 'error'" in s for s in sqls), sqls
+
+    @pytest.mark.asyncio
+    async def test_mark_failed_after_max_retries_is_terminal(self, mock_db_and_psycopg):
+        """retry_count >= max → terminal failed, локал чист."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        # metadata уже содержит retry_count = max
+        conn.fetchrow.return_value = {
+            "metadata": {"retry_count": 3},
+        }
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db), max_stuck_retries=3,
+        )
+        _claim_task(ch, user_msg_id="m-t", chat_id="chat-t",
+                    assistant_msg_id="a-t")
+
+        await ch._mark_failed("m-t", "a-t", "write_error")
+
+        _assert_local_clean(ch, "m-t", "chat-t")
+        sqls = [c.args[0] for c in conn.execute.call_args_list]
+        assert any("status = 'failed'" in s for s in sqls), sqls
+
+    @pytest.mark.asyncio
+    async def test_mark_failed_unknown_user_does_not_crash(self, mock_db_and_psycopg):
+        """Вызов с неизвестным ``user_msg_id`` — локал уже пуст, не падает."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetchrow.return_value = None  # строка не найдена в БД
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        await ch._mark_failed("ghost", None, "write_error")
+        # никаких локальных хвостов
+        assert "ghost" not in ch._msg_ctx
+        assert "ghost" not in ch.exchange.inflight

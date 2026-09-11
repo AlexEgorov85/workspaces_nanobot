@@ -364,3 +364,136 @@ async def test_s5_polling_continues_after_finishes(test_schema):
     row = await ch._claim_one_single()
     assert row is not None
     assert str(row["id"]) == new_user
+
+
+# ---------------------------------------------------------------------------
+# S6 — полный poll-цикл через MessageExchange (главный acceptance criterion)
+# ---------------------------------------------------------------------------
+
+
+async def test_s6_full_poll_loop_with_max_concurrent_2(test_schema):
+    """Главный критерий приёмки фикса lifecycle deadlock.
+
+    Сценарий:
+      * ``max_concurrent=2`` — воркер обрабатывает 2 задачи параллельно;
+      * вставлены 5 ``pending`` задач (chat-1 .. chat-5, разные чаты);
+      * поднимаем ``MessageExchange`` с реальным ``_poll_once``;
+      * инжектим мок-обработчик ``_handle_message``, который для каждой
+        user-задачи немедленно отправляет финальный outbound через
+        ``ch.send(_final_turn=True)`` (имитация быстрого агента);
+      * ждём, пока все 5 дойдут до ``completed``.
+
+    Acceptance criterion (из плана):
+      > После любого количества завершённых/ошибочных задач агент
+      > продолжает принимать новые вопросы без перезапуска процесса.
+    """
+    from nanobot.bus.events import OutboundMessage
+
+    ds, schema = test_schema
+    ch = _make_channel(test_schema, max_concurrent=2)
+
+    # 1. Вставить 5 user-задач в разных чатах.
+    n_questions = 5
+    user_ids: list[str] = []
+    for i in range(n_questions):
+        u = _insert_user(ds, schema, f"chat-loop-{i}", f"Q{i}")
+        user_ids.append(u)
+
+    # 2. Подменить _handle_message: вместо реальной отправки в шину —
+    #    дождаться assistant-placeholder и сделать финал через ch.send.
+    seen: list[str] = []
+
+    async def fake_handle_message(
+        sender_id: str,
+        chat_id: str,
+        content: str,
+        media: list,
+        metadata: dict,
+    ) -> None:
+        # Здесь мы — «агент». Дождёмся assistant-placeholder (он создаётся
+        # в _poll_once до вызова _handle_message) и сразу финализируем.
+        user_msg_id = metadata.get("message_id") or metadata.get("answer_id")
+        # Подождём, пока _poll_once запишет ctx.
+        for _ in range(50):
+            if user_msg_id in ch._msg_ctx:
+                break
+            await asyncio.sleep(0.02)
+        assistant_id = (ch._msg_ctx.get(user_msg_id) or {}).get(
+            "assistant_msg_id"
+        )
+        assert assistant_id, (
+            f"assistant placeholder not found for {user_msg_id}"
+        )
+        seen.append(user_msg_id)
+        final = OutboundMessage(
+            channel="postgres",
+            chat_id=chat_id,
+            content=f"Answer to {content}",
+            media=[],
+            metadata={
+                "origin_message_id": user_msg_id,
+                "answer_id": assistant_id,
+                "_final_turn": True,
+            },
+            buttons=[],
+        )
+        await ch.send(final)
+
+    ch._handle_message = fake_handle_message
+
+    # 3. Запустить MessageExchange (полный цикл: poll + dispatch + finalize).
+    await ch.start()
+
+    # 4. Ждём, пока все 5 задач дойдут до completed.
+    deadline = asyncio.get_event_loop().time() + 15.0
+    while asyncio.get_event_loop().time() < deadline:
+        done = sum(
+            1
+            for uid in user_ids
+            if _row(ds, schema, "agent_conversation_messages", uid)["status"]
+            == "completed"
+        )
+        if done == n_questions:
+            break
+        await asyncio.sleep(0.1)
+    else:
+        statuses = [
+            _row(ds, schema, "agent_conversation_messages", uid)["status"]
+            for uid in user_ids
+        ]
+        raise AssertionError(
+            f"timeout: only {done}/{n_questions} completed, statuses={statuses}"
+        )
+
+    await ch.stop()
+
+    # 5. Acceptance criterion: всё локальное состояние пусто.
+    assert ch.exchange.inflight == set(), (
+        f"inflight не пуст: {ch.exchange.inflight}"
+    )
+    assert ch._msg_ctx == {}
+    assert ch._msg_chat == {}
+    assert ch._chat_inflight == set()
+    assert ch._leases == set()
+
+    # 6. Видим, что обработчик реально дёргался для всех 5.
+    assert sorted(seen) == sorted(user_ids)
+
+    # 7. Вставка новой задачи в pending: poll её поднимет немедленно
+    #    (доказывает, что воркер продолжает работать, а не висит).
+    new_user = _insert_user(ds, schema, "chat-after-loop", "Q-after-loop")
+    # Небольшая пауза, чтобы _poll_loop успел сделать тик
+    deadline = asyncio.get_event_loop().time() + 3.0
+    await ch.start()  # второй start для следующего цикла
+    while asyncio.get_event_loop().time() < deadline:
+        row = _row(
+            ds, schema, "agent_conversation_messages", new_user,
+        )
+        if row["status"] != "pending":
+            break
+        await asyncio.sleep(0.1)
+    await ch.stop()
+    final = _row(ds, schema, "agent_conversation_messages", new_user)
+    assert final["status"] == "completed", (
+        f"новая задача не была поднята поллом, status={final['status']}"
+    )
