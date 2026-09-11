@@ -175,9 +175,9 @@
 (Postgres / Redis / Streamlit) и для чтения истории. Инкапсулирует:
 
 - кодирование/декодирование `InboundMessage` / `OutboundMessage`;
-- JSONB-кодек медиа (`lib/utils/media_jsonb.py`);
+- JSONB-кодек медиа (`workspace/utils/media.py`);
 - поллинг и публикацию outbound;
-- фильтрацию служебных outbound (`lib/utils/outbound_filter.py`).
+- фильтрацию служебных outbound (`lib/utils/outbound_meta.py`).
 
 `PostgresChannel` и `RedisChannel` — тонкие обёртки над `MessageExchange`;
 публичный API не изменился. `streamlit_app.py` использует тот же движок для

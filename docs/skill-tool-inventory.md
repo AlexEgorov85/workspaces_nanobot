@@ -11,6 +11,7 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 |---|---|---|---|---|---|---|
 | `audit_analyzer` Skill | `workspace/skills/audit_analyzer/SKILL.md` + `references/` + `scripts/` | Skill (domain, **CLI + tool**) | — | следование SKILL.md через generic tools `duckdb_query`, `vector_search`; автономный CLI `scripts/cli.py --mode <predefined \| generated_sql \| vector>` для бенчмарков/CI/operator | — | active |
 | `legal_summarizer` Skill | `workspace/skills/legal_summarizer/SKILL.md` + `references/` + `scripts/` | Skill (domain) | — | через собственный skill-side CLI; follow-up через tool `legal_summarizer_query` | `lib/services/llm_client.py` | active |
+| `office_files` Skill | `workspace/skills/office_files/SKILL.md` + `references/` + `scripts/` | Skill (domain) | — | чтение docx/xlsx/xls/pdf/pptx/csv/txt через `workspace/utils/office_files.py` + `lib/services/text_splitter.py` | — | active |
 | `compact_context` tool | `workspace/tools/compact_context.py` | Tool | — | — | `lib/services/context_compaction.py` | active |
 | `duckdb_query` tool | `workspace/tools/duckdb_query_tool.py` | Tool (generic infrastructure) | — | — | `lib/utils/sql_safety.py` (последняя граница безопасности) + `lib/services/cache_provider_impl.py` | active |
 | `vector_search` tool | `workspace/tools/vector_search_tool.py` | Tool (generic infrastructure) | — | — | `lib/services/cache_provider_impl.py` (FAISS через `CacheProvider.search_vector`) | active |
@@ -22,16 +23,16 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 
 | component | бывший путь | замена |
 |---|---|---|
-| `run_predefined_script` tool | `workspace/tools/run_predefined_script.py` | inline SQL из `public.agent_predefined_scripts` через `duckdb_query` (см. `workspace/skills/audit_analyzer/references/predefined_scripts.md`) |
+| `run_predefined_script` tool | `workspace/tools/run_predefined_script.py` | CLI skill'а `scripts/cli.py --mode predefined --script <name>` / `predefined.run()` (реестр в `predefined/scripts.py`, см. `workspace/skills/audit_analyzer/references/predefined_scripts.md`) |
 | `nl_sql_generate` tool | `workspace/tools/nl_sql_generate.py` | Agent сам формирует SQL через `duckdb_query` (см. `references/sql_guidance.md`); LLM-генерация SQL — CLI skill'а `scripts/cli.py --mode generated_sql` (`generated_sql_mode.py`) |
 | `column_descriptions` tool | `workspace/tools/column_descriptions.py` | `references/schema.md` + `references/sql_guidance.md` (Agent читает сам) |
 | `NlSqlRunner` core | `lib/services/nl_sql_runner.py` | не используется (NL→SELECT pipeline выпилен) |
 | `SchemaFormatter` core | `lib/services/schema_formatter.py` | не используется |
 | `ColumnDescriptionsResolver` core | `lib/services/column_descriptions.py` | не используется |
-| `PredefinedScriptRegistry` core | `lib/services/predefined_script_registry.py` | lookup через `duckdb_query` к `public.agent_predefined_scripts` |
-| `PredefinedScriptRequestBuilder` core | `lib/services/predefined_script_request.py` | inline `?`-подстановка в SQL, который Agent читает из PG |
+| `PredefinedScriptRegistry` core | `lib/services/predefined_script_registry.py` | реестр `predefined/scripts.py` (`REGISTRY`/`get_script`) внутри skill'а |
+| `PredefinedScriptRequestBuilder` core | `lib/services/predefined_script_request.py` | `predefined/builder.py::DynamicQueryBuilder` (inline `?`-подстановка в SQL из реестра skill'а) |
 | `ParameterValidator` core | `lib/services/predefined_script_validator.py` | не используется |
-| `audit_run_predefined_script` tool | `workspace/tools/audit_analyzer_tool.py::AuditRunPredefinedScriptTool` | CLI skill'а (`scripts/cli.py --mode predefined`) + runtime-context provider в `workspace/skills/audit_analyzer/providers.py` |
+| `audit_run_predefined_script` tool | `workspace/tools/audit_analyzer_tool.py::AuditRunPredefinedScriptTool` | CLI skill'а (`scripts/cli.py --mode predefined --script <name>`) |
 | `audit_search_vector` tool | `workspace/tools/audit_analyzer_tool.py::AuditSearchVectorTool` | tool `vector_search` (с указанием `index_name`) |
 | `audit_generate_sql` tool | `workspace/tools/audit_analyzer_tool.py::AuditGenerateSqlTool` | skill workflow с tool `duckdb_query` (см. `workspace/skills/audit_analyzer/references/sql_guidance.md`) |
 | `audit_analyzer_tool.py` | `workspace/tools/audit_analyzer_tool.py` (файл целиком) | три tool'а выше + замены |
@@ -39,7 +40,7 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 | `scripts/__init__.py` (skill) | `workspace/skills/audit_analyzer/scripts/__init__.py` | legacy-фасад (никем не импортировался) |
 | `tests/e2e_test.py` (skill) | `workspace/skills/audit_analyzer/tests/e2e_test.py` | standalone (не pytest) |
 | `scripts/generated/` | `workspace/skills/audit_analyzer/scripts/generated/` | одноразовый dump-скрипт |
-| `providers.py` (навыка, старая версия) | `workspace/skills/audit_analyzer/providers.py` (наброски без регистрации) | переписан в этом же цикле; регистрация через `ApplicationContext._auto_register_skills()` |
+| `providers.py` (навыка) | `workspace/skills/audit_analyzer/providers.py` (наброски без регистрации) | удалён — регистрация через `ApplicationContext._auto_register_skills()` |
 
 ## Последующие изменения (после слияния в `master`)
 

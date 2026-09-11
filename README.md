@@ -10,7 +10,7 @@
 
 ```bash
 python -m venv .venv && .venv\Scripts\activate
-pip install nanobot && pip install -r requirements.txt
+pip install nanobot-ai && pip install -r requirements.txt
 copy .secrets.env.example .secrets.env   # cp на Linux
 # Отредактируйте .secrets.env: DB_PASSWORD=... и # providers: llm / api_key=...
 python tools/migrate.py --apply         # применить миграции схемы
@@ -84,7 +84,7 @@ nanobot/
 ├── config.json  project.json  config.py        # 3 конфига
 ├── gateway.py  cli_agent.py  streamlit_app.py  # точки входа
 ├── lib/                          # сервисный слой: core, services, cli, hooks,
-│                                 #   lifecycle, channels, session
+│                                 #   lifecycle, channels, session, utils, commands
 ├── workspace/                    # runtime, hooks-плагины, skills, memory
 ├── tests/  benchmarks/  tools/  sql/  docs/  requirements.txt
 ```
@@ -113,7 +113,7 @@ DDL в `sql/<domain>/create_<schema>_<table>.sql` (один файл = одна 
 
 ## 🧪 Тестирование
 
-**1480 unit-тестов** (22 интеграционных пропущены без живого PostgreSQL/LLM).
+**2365 unit-тестов** (интеграционные пропускаются без живого PostgreSQL/LLM).
 
 ```bash
 pytest tests/ -q

@@ -4,8 +4,9 @@
 (раздел «Troubleshooting»); сюда перенесён без изменений, чтобы освободить
 навигационный хаб от деталей.
 
-> **TL;DR для диагноста:** логи — `logs/gateway.log` и `logs/cli.log`;
-> статистика пула — `PgDuckDbSyncService.get_stats()`;
+> **TL;DR для диагноста:** логи — в stderr (loguru, `sys.stderr`); файловый
+> лог только у Streamlit — `logs/streamlit.log`; статистика пула —
+> `PgDuckDbSyncService.get_stats()`;
 > целостность пула воркеров — `python tools/check_worker_pool_integrity.py --fix`.
 
 ---
@@ -39,14 +40,17 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 
 1. PostgreSQL/Greenplum запущен? `pg_isready` или `pg_lsclusters`.
 2. DSN правильный? `psql "$DATABASE_URL"` работает?
-3. На Greenplum 6.25 — `gssencmode=disable` (`ConfigService` уже выставляет его
-   через kwargs `connect()`, но если проблема — проверьте).
+3. На Greenplum 6.25 — `gssencmode=disable` (пул соединений в
+   `workspace/utils/db.py:233` уже выставляет его через kwargs `connect()`,
+   но если проблема — проверьте).
 4. На PG 9.4 — минимум 3 retry, для GP — 50.
 
 ### `too many connections` (Greenplum)
 
-`pool_max_conn = 1` в `PGSessionManager`. Если не хватает — уменьшите
-`PgDuckDbSyncService.poll_interval_sec` (меньше опрос → меньше пиков).
+`channels.postgres.pool.max_conn` (дефолт `4` в `workspace/utils/db.py`,
+применяется к пулам воркеров и PG-сессий). Если не хватает — уменьшите
+`PgDuckDbSyncService.poll_interval_sec` (меньше опрос → меньше пиков),
+либо пул `channels.postgres.pool.min_conn/max_conn`.
 Мониторинг: `PgDuckDbSyncService.get_stats().reconnects`.
 
 ---
@@ -72,10 +76,13 @@ Race condition: callbacks на `PgDuckDbSyncService` установлены **п
 
 ## Бенчмарки и оценка
 
-### `match_type: llm_judge` всегда даёт 0.5
+### `match_type: llm_judge` не даёт 1.0 / «LLM judge returned no parseable JSON»
 
-LLM-судья — заглушка (`evaluator.py:_check_llm_judge()` возвращает 0.5).
-Используйте `match_type: "keyword"` или реализуйте судью.
+LLM-судья реализован (`benchmarks/evaluator.py:_check_llm_judge()`): запрашивает
+у LLM JSON `{"score": 0.0|0.5|1.0, "reason": ...}` и нормализует на дискретную
+шкалу. Проверка считается пройденной при `score >= 0.5`. При любом сбое
+(нет конфига провайдера, сеть, невалидный JSON) балл — `0.0`, нейтральный
+`0.5` не подставляется. Проверьте `config.json:providers.llm.api_key`.
 
 ### Файл `.yaml` в `benchmarks/items/` игнорируется
 
@@ -107,8 +114,8 @@ PowerShell интерпретирует `=` по-своему. Использу�
 
 ### Тесты падают на импорте `nanobot`
 
-`nanobot==0.3.0` нужен (закреплён в `requirements.txt`). Проверьте: `pip show nanobot`.
-Если ниже — `pip install --upgrade 'nanobot==0.3.0'`.
+`nanobot-ai==0.3.0` нужен (закреплён в `requirements.txt`). Проверьте: `pip show nanobot-ai`.
+Если ниже — `pip install --upgrade 'nanobot-ai==0.3.0'`.
 
 ---
 
@@ -119,7 +126,7 @@ PowerShell интерпретирует `=` по-своему. Использу�
 | `python tools/check_worker_pool_integrity.py` | Проверка orphan-claims в `agent_worker_claims` (имя настраивается через `channels.postgres.claims_table`) |
 | `python tools/check_worker_pool_integrity.py --fix` | Возврат задач «мёртвых» воркеров в `pending` + снятие claim |
 | `PgDuckDbSyncService.get_stats()` | `polls`, `full_resyncs`, `reconnects`, `errors`, размер очереди |
-| `DbLoggingService.get_stats()` | `written`, `failed`, `queue_size`, `fallback_written`, `connected`, `last_error` |
+| `DbLoggingService.get_stats()` | `written`, `failed`, `queued`, `queue_size`, `batch_count`, `queue_full`, `connected`, `last_error`, `question_runs`, `last_purge_*` |
 
 См. также: [docs/ARCHITECTURE.md](ARCHITECTURE.md) — разделы по сервисам,
 [docs/architecture/runtime-patcher-inventory.md](architecture/runtime-patcher-inventory.md)

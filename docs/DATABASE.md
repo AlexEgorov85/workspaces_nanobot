@@ -21,26 +21,28 @@
 - Модульные функции: `get_embedding()` (Ollama `/api/embed`),
   `load_cache_from_postgres(cache_path, db_config)`, `check_cache_stale(...)`,
   `read_vector_index_config(cfg)` (конфиг индексов — только из БД,
-  `agent_vector_index_config`), `read_embedding_config(cfg)` (через
-  `audit_vector_settings()`), `build_cache_provider(cfg, base_dir)` (фабрика
-  провайдера из конфиг-секции навыка).
+  `agent_vector_index_config`), `read_embedding_config()` (конфиг эмбеддинга
+  из `gateway.vector.embedding.*`), `build_cache_provider(cfg, base_dir)` (фабрика
+  провайдера из конфиг-секции).
 - Тяжёлые зависимости (`duckdb`, `psycopg2`, `faiss`, `numpy`, `pyarrow`, `httpx`)
   импортируются **лениво** внутри методов — импорт модуля остаётся лёгким,
   и gateway может управлять жизненным циклом без побочных эффектов.
 - Если передан `dsn` — провайдер сам вызывает `utils.db.configure(dsn)`
   (идемпотентно), поэтому пригоден для использования автономно.
 
-**Единый интерфейс бэкенда запросов.** `Database` (прямой PG) и
-`PostgresDuckDbProvider` (кеш) реализуют одинаковые методы
-`get_schema / query_sql / explain` (протокол `QueryBackend` в
-`scripts/database.py`), поэтому режимы `predefined`/`sql` работают с любым
-бэкендом без ветвлений.
+**Единый интерфейс запросов к кешу.** `CacheProvider` (ABC в
+`lib/services/cache_provider.py`) задаёт контракт
+`get_schema / query_sql / explain / search_vector / preload_indexes / refresh /
+check_stale / is_ready / close`; его реализуют `PostgresDuckDbProvider`
+(`cache_provider_impl.py`) и `DuckDbCacheStore` (`duckdb_cache_store.py`).
+Прямого PostgreSQL-бэкенда вида `Database`/`QueryBackend` больше нет: CLI-режимы
+`predefined`/`generated_sql` работают только по DuckDB-снимку, опубликованному
+gateway (`FileNotFoundError`, если файла кеша нет).
 
-**Фабрика провайдера** — универсальная `lib.services.cache_provider_impl.build_cache_provider(cfg, base_dir)`
-собирает провайдера из конфиг-секции навыка (DuckDB-кеш, индексы, эмбеддинг).
-Навык делегирует ей через `scripts/skill_config.build_cache_provider()`, тот же
-набор настроек читает `gateway.py::_build_audit_services()` и индексатор
-`tools/build_vectors.py`.
+**Фабрика провайдера** — `lib/services/cache_provider_impl.build_cache_provider(cfg, base_dir)`
+собирает провайдера из конфиг-секции (`gateway.vector.*`). Навык делегирует ей
+через `scripts/skill_config.build_cache_provider()`, тот же набор настроек
+использует индексатор `tools/build_vectors.py`.
 
 ## 🔌 Единый пул соединений PostgreSQL (`workspace/utils/db.py`)
 
@@ -160,8 +162,8 @@
 
 Декларация — единый источник истины. `ApplicationContext._auto_register_skills` (см. `lib/core/application_context.py`) читает эту секцию при старте и автоматически создаёт `TableResource`/`VectorResource` в `table_registry`. Никакого `register.py` не требуется. Для добавления нового skill достаточно добавить секцию `skills.<name>` в `project.json`. DoD-проверка — `tests/test_resource_universality.py`.
 
-> Примечание: ретраи *генерации* SQL в режиме `sql` захардкожены в
-> `sql_mode.py` (`MAX_RETRIES = 2` → до 3 попыток) и от `cli_max_retries`
+> Примечание: ретраи *генерации* SQL в режиме `generated_sql` захардкожены в
+> `generated_sql_mode.py` (`MAX_RETRIES = 3` → до 4 попыток) и от `cli_max_retries`
 > не зависят.
 
 DSN подключается только через `channels.postgres.dsn` в `project.json`
@@ -178,9 +180,10 @@ DSN подключается только через `channels.postgres.dsn` в 
 **Владелец файла кеша навыка — `gateway.py`.** Навык (CLI) про создание и
 обновление кеша больше не знает: `--force` удалён.
 
-Пара сервисов строится в `gateway.py::_build_audit_services()` (возвращает
-`(None, None)`, если нет DSN, таблиц или `gateway.vector.index`/`gateway.sync`
-не сконфигурированы):
+Пара сервисов строится в `ApplicationContext._make_sync_services`
+(см. `lib/core/application_context.py:596`) при старте gateway (возвращает
+`(None, None)`, если реестр таблиц пуст или нет DSN; сконфигурированные
+`gateway.sync.*` лишь управляют параметрами, а не фактом запуска):
 
 - **`PgDuckDbSyncService`** — единственный владелец подключения к PostgreSQL
   (worker-поток). При старте выполняет полную загрузку таблиц, далее каждые
@@ -206,7 +209,7 @@ DSN подключается только через `channels.postgres.dsn` в 
   (`_dirty` = False) файл не перезаписывается; если снимок занят читателем
   (CLI) — публикация откладывается до следующего цикла, ошибка не теряет данные.
 
-Схема в `gateway.py::run()`:
+Схема в `gateway.py::main()` (callbacks между сервисами — `main()` 77-124):
 
 ```mermaid
 flowchart LR
@@ -233,11 +236,12 @@ flowchart LR
 
 #### Полный цикл обновления данных (что происходит по шагам)
 
-1. **Старт gateway** (`gateway.py::run()`): `_build_audit_services()` читает
-   секции `skills.audit_analyzer` и `gateway.vector`/`gateway.sync` из `project.json`.
-   Сервисы создаются, только если задан DSN, есть таблицы (`skills.audit_analyzer.tables`)
-   и сконфигурирован `gateway.vector.index`; иначе — `(None, None)`
-   и синхронизация не запускается.
+1. **Старт gateway** (`gateway.py::main()`): `ApplicationContext.create()` читает
+   секции `skills.*` и `gateway.vector`/`gateway.sync` из `project.json`, затем
+   `_make_sync_services()` (application_context.py:596) строит сервисы.
+   Сервисы создаются, только если задан DSN и в `TableRegistry` зарегистрированы
+   таблицы (skills + infra, напр. `gateway.vector.index.storage_table`); иначе —
+   `(None, None)` и синхронизация не запускается.
 2. **Initial load**: `PgDuckDbSyncService._do_initial_load()` для каждой таблицы из
    `skills.audit_analyzer.tables` (+ таблица векторов `gateway.vector.index.storage_table`) делает:
    - `_fetch_schema()` — запрос структуры из PG `information_schema.columns`
@@ -264,7 +268,7 @@ flowchart LR
 
 #### Как связаны компоненты (callbacks)
 
-Колбеки подключаются в `gateway.py::run()` (строки ~608-613) — это единственная
+Колбеки подключаются в `gateway.py::main()` (строки ~77-124) — это единственная
 точка связывания `PgDuckDbSyncService` и `DuckDbCacheStore`:
 
 | Событие в PgDuckDbSyncService | Колбека | Метод store | Что делает |
@@ -333,16 +337,20 @@ flowchart LR
 
 ### Совместимость с Greenplum 6.5+
 
-Таблицы `oarb.audit_vectors` и `oarb.vector_index_*` разработаны для полной совместимости с **Greenplum 6.5** (PostgreSQL 9.4 ядро): `BIGINT GENERATED BY DEFAULT AS IDENTITY` для PK (нет переполнения), `TEXT` для `pk_value` (UUID/BIGINT), `DISTRIBUTED BY (source)` / `REPLICATED` для управляемой сегментации.
+Таблицы `oarb.audit_vectors`, `public.agent_vector_index_config` и
+`public.agent_vector_index_store` разработаны для полной совместимости
+с **Greenplum 6.5** (PostgreSQL 9.4 ядро): `BIGINT GENERATED BY DEFAULT AS IDENTITY`
+для PK (нет переполнения), `TEXT` для `pk_value` (UUID/BIGINT),
+`DISTRIBUTED BY (source)` / `REPLICATED` для управляемой сегментации.
 
 **Использование:**
 
 | СУБД | Файлы |
 |------|-------|
-| Все (PG/GP) | `sql/audit_analyzer/create_<schema>_<table>.sql` — один файл на таблицу, Greenplum 6.5 (`DISTRIBUTED BY`) |
+| Все (PG/GP) | `sql/audit_analyzer/create_oarb_*.sql` — доменные таблицы, один файл на таблицу; `sql/vectors/create_vector_index_{config,store}.sql` — векторный реестр/индексы, Greenplum 6.5 (`DISTRIBUTED BY`) |
 
 **Миграция со старой версии:** скрипты миграции векторов удалены (см. `CHANGELOG.md`).
-Примените актуальные DDL из `sql/audit_analyzer/` и пересоберите индексы:
+Примените актуальные DDL из `sql/audit_analyzer/` + `sql/vectors/` и пересоберите индексы:
 `python tools/build_vectors.py --full-rebuild`.
 
 ⚠️ Миграция удаляет данные в `audit_vectors` и `agent_vector_index_store`. После ОБЯЗАТЕЛЬНО:
@@ -368,11 +376,11 @@ public.agent_vector_index_store (
 );
 
 oarb.audit_vectors (
-    id             BIGINT IDENTITY PRIMARY KEY,
+    id             BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     pk_value       TEXT,                     -- было INTEGER
     embedding      REAL[] NOT NULL,
     source         TEXT NOT NULL,
-    ... + 3 индекса
+    ... (PK только по id; доп. индексов в DDL нет)
 );
 ```
 
@@ -419,7 +427,7 @@ AST-политика read-only SQL на `sqlglot` (dialect postgres). Контр
 - при недоступном sqlglot — graceful degradation на regex-проверки.
 
 Потребители: `workspace/tools/duckdb_query_tool.py`,
-skill `audit_analyzer` (`sql_mode`, `database`). Тесты: `tests/test_sql_safety.py`.
+skill `audit_analyzer` (`generated_sql_mode`, `predefined`). Тесты: `tests/test_sql_safety.py`.
 
 ### Contract tests nanobot API — `tests/contract/`
 

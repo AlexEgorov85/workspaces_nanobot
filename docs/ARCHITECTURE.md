@@ -59,9 +59,8 @@ flowchart LR
 
 ## Сервисный слой (ApplicationContext + lib/)
 
-После выделения сервисного слоя gateway и cli_agent сократились с 696/865 до 132/165 строк за счёт
-вынесения всей инициализации в `ApplicationContext` (см. подробности в
-Подробности в `CHANGELOG.md`. Этот раздел — про
+После выделения сервисного слоя gateway и cli_agent сократились и вся инициализация вынесена в `ApplicationContext`
+(см. подробности в `CHANGELOG.md`). Этот раздел — про
 **внутреннее устройство** нового слоя, нужно при добавлении новых
 сервисов или изменении lifecycle.
 
@@ -93,7 +92,9 @@ flowchart LR
   `bus`, `agent`, `tool_audit_hook`, `hooks`, `session_manager`,
   `storage_mode`, `db_logging_service`, `sync_service`,
   `cache_store`, `config_service`, `runtime_patcher`,
-  `transcription_service`, `subprocess_manager`, `preload_service`.
+  `transcription_service`, `subprocess_manager`, `preload_service`,
+  `runtime_health`, `runtime_readiness`, `session_storage_service`,
+  `hook_factories`, `project_settings`.
   Метод `start()` использует `ShutdownCoordinator` для регистрации
   сервисов; `stop()` — LIFO graceful shutdown.
   **Graceful degradation:** если БД недоступна, сервис остаётся `None`,
@@ -912,13 +913,13 @@ read→persist→read петли).
 `MessageExchange`.
 
 Зависимости модуля:
-- `lib/utils/media.py` — кодек media (AW-формат `{filename, file_id, mime_type,
+- `workspace/utils/media.py` — кодек media (AW-формат `{filename, file_id, mime_type,
   file_size}` + обратная совместимость со старым `{filename, data}` и
   data-URL).
-- `lib/utils/media_jsonb.py` — JSONB-декодер media для PG.
-- `lib/utils/outbound_filter.py` — единый фильтр служебных outbound
+- `workspace/utils/jsonb.py` — JSONB-декодер media для PG.
+- `lib/utils/outbound_meta.py` — единый фильтр служебных outbound
   (`system`, `audit`, `tool_audit`, `_assemble_outbound`-артефакты).
-- `SessionFileStore` (`lib/utils/session_file_store.py`) — общий стор
+- `SessionFileStore` (`workspace/utils/session_file_store.py`) — общий стор
   вложений под `data_store/cache/sessions/<key>/attachments/`.
 
 При добавлении нового канала: наследовать `nanobot.channels.base.BaseChannel`
@@ -1144,7 +1145,7 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
 Хелперы для безопасного обхода `SETTINGS` / `config.json` / `project.json`
 с поддержкой `require_setting` (строгий) и `get_setting` (с fallback).
 Удаляет ad-hoc `cfg.get("a", {}).get("b", default)` по кодовой базе. Потребители:
-`audit_settings.py`, `application_context.py`, `cache_provider_impl.py`.
+`config_service.py`, `channel_factory.py`, `runtime_patcher.py`.
 
 ### `lib/utils/logging_utils.py` — настройка `loguru`
 
@@ -1165,7 +1166,7 @@ Fallback при отсутствии ключа — `git describe --tags`, за�
 Используется в стартовом баннере `gateway.py`, чтобы показать версию проекта
 рядом с версией библиотеки nanobot (`__version__`).
 
-### `lib/utils/outbound_filter.py` — фильтрация outbound
+### `lib/utils/outbound_meta.py` — фильтрация outbound
 
 Скрывает internal-сообщения из пользовательского потока. Раньше фильтр
 был в каждом канале свой → поведение в Streamlit расходилось с
@@ -1179,6 +1180,24 @@ file_size}` (payload → `data_store/cache/sessions/_shared/attachments/`,
 в БД — только `file_id`). Идемпотентна: записи с уже проставленным
 `file_id` пропускаются, HTTP/HTTPS-ссылки не трогает. CLI:
 `python scripts/backfill_media_aw.py [--dry-run]`.
+
+### `lib/services/runtime_health.py` — Health / Readiness
+
+`RuntimeHealth` (liveness) и `RuntimeReadiness` (готовность с учётом
+зависимостей) дают операционную картину процесса. Это не HTTP-эндпойнт —
+используется в `ApplicationContext.start()` (логирует итоговый readiness),
+streamlit-UI, аварийными script'ами после deploy.
+
+- **Health (liveness):** `RuntimeHealth.is_alive()` / `status()` — процесс жив,
+  asyncio-loop работает, не в shutdown. Пульс отвечает всегда.
+- **Readiness:** `RuntimeReadiness.register(name, fn, required=True)` — каждый чек
+  это быстрый идемпотентный предикат (`ComponentStatus` или `None` = UP);
+  `check()` прогоняет все check'и в `try/except` и сводит в `ReadinessReport`.
+- **Статусы:** `READY` (required + optional UP), `DEGRADED` (required OK, optional
+  DOWN), `NOT_READY` (required DOWN). Сводное правило — `compute_overall_status`.
+  Required зависимости: PG, DuckDB cache; optional: vector search, Redis.
+- **Объекты** `ctx.runtime_health` / `ctx.runtime_readiness` создаются
+  в `ApplicationContext.create()`.
 
 ---
 
@@ -1214,11 +1233,17 @@ nanobot/
 │   │   ├── db_logging_service.py         #    worker, batch INSERT, без JSONL-fallback, get_stats()
 │   │   ├── db_logging_bus.py             #    обёртки publish_inbound/outbound
 │   │   ├── llm_config.py                 #    resolve_llm_config() — общий резолв LLM для навыка/бенчмарка
-│   │   ├── cache_store.py         #     in-memory DuckDB-зеркало + атомарный publish()
-│   │   ├── sync_service.py         #     фоновый поллинг PG (worker-поток)
+│   │   ├── duckdb_cache_store.py         #     in-memory DuckDB-зеркало + атомарный publish()
+│   │   ├── pg_duckdb_sync_service.py     #     фоновый поллинг PG (worker-поток)
 │   │   ├── cache_provider.py             #     интерфейс CacheProvider + SearchResult
 │   │   ├── cache_provider_impl.py        #     PostgresDuckDbProvider + фабрика и модульные функции
 │   │   ├── text_splitter.py              #     чанкование текстов для индексаторов
+│   │   ├── vector_index_service.py       #     VectorIndexBuildService — инкрементальная сборка FAISS
+│   │   ├── table_registry.py             #     pluggable-реестр ресурсов (skill + infra namespaces)
+│   │   ├── context_compaction.py         #     ContextCompactionService — единая точка сжатия контекста
+│   │   ├── consolidator_locale.py        #     monkeypatch Jinja2-шаблонов из workspace/overrides/
+│   │   ├── runtime_health.py             #     RuntimeHealth/RuntimeReadiness (liveness + readiness)
+│   │   └── llm_client.py                 #     call_llm / call_llm_async (OpenAI-compatible HTTP)
 │   │   # DDL для DbLoggingService (agent_gateway_logs, имя через logging.db.table_name) — в sql/logs/
 │   ├── cli/                              #  вынесено из cli_agent.py
 │   │   ├── console_loop.py               #   REPL + typewriter + consume_outbound
@@ -1227,35 +1252,48 @@ nanobot/
 │   ├── hooks/                            #  фреймворковые хуки (не плагины)
 │   │   ├── base_tool_tracking_hook.py    #     общий каркас для tool-хуков
 │   │   ├── tool_audit_hook.py            #     хук аудита вызовов инструментов
-│   │   └── database_logging_hook.py      #     AgentHook для tool-событий + run_finished в БД; per-turn инстанс через make_db_logging_hook_factory
+│   │   ├── database_logging_hook.py      #     AgentHook для tool-событий + run_finished в БД; per-turn инстанс через make_db_logging_hook_factory
+│   │   └── terminal_tool_print_hook.py   #     вывод результатов tool'ов в терминал (gateway.print_tools)
 │   ├── lifecycle/                        #  цикл запуска и graceful shutdown
 │   │   ├── gateway_runner.py             #   run_forever с exponential backoff (1с → 30с)
 │   │   └── shutdown_coordinator.py       #   LIFO graceful shutdown
 │   ├── channels/                         #   каналы
 │   │   ├── postgres_channel.py           #     канал через таблицу agent_conversation_messages
-│   │   └── redis_channel.py              #     канал через Redis-очереди (BRPOP/LPUSH)
+│   │   ├── redis_channel.py              #     канал через Redis-очереди (BRPOP/LPUSH)
+│   │   └── message_exchange.py           #     общий формат сообщений каналов (MessageExchange)
 │   ├── session/                          #   хранилище сессий
 │   │   └── pg_session_manager.py         #     хранение сессий в PostgreSQL (без JSONL)
-│   └── (см. lib/core/, lib/cli/, lib/lifecycle/ выше)
+│   └── utils/                            #   утилиты сервисного слоя
+│       ├── sql_safety.py                 #     SQL Security Guard (read-only AST-политика)
+│       ├── outbound_meta.py              #     фильтрация служебных outbound
+│       ├── text_utils.py, table_utils.py, project_version.py,
+│       │   duckdb_query.py, retry.py, node_access.py, logging_utils.py
 │
 ├── workspace/                            # runtime-данные и плагины-хуки
 │   ├── hooks/                            # плагины: самодостаточные AgentHook (cls(workspace_dir=...))
 │   │   ├── session_file_redirect_hook.py #     перенаправление write/edit + media тула message в data_store/cache/sessions/
-│   │   └── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
+│   │   ├── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
+│   │   └── active_files_hook.py          #     side-channel активных файлов через session.metadata
+│   ├── tools/                            # кастомные tool'ы (auto-discover через patch_project_tools)
+│   │   ├── compact_context.py, duckdb_query_tool.py, vector_search_tool.py,
+│   │   │   history_search_tool.py, legal_summarizer_query.py, example.py
+│   ├── utils/                            # утилиты workspace
+│   │   ├── db.py, media.py, jsonb.py, event_log.py, session_file_store.py,
+│   │   │   session_key.py, clean_text.py, office_files.py, structure_cache.py
 │   ├── skills/audit_analyzer/            # навык: тонкий CLI поверх провайдера
 │   │   ├── SKILL.md                      #   пользовательская документация
 │   │   ├── scripts/
 │   │   │   ├── cli.py                    #   точка входа (python scripts/cli.py ...)
 │   │   │   ├── skill_config.py           #   конфиг из SETTINGS + build_cache_provider()
-│   │   │   ├── database.py               #   Database (прямой PG, fallback) + QueryBackend
-│   │   │   ├── sql_mode.py               #   режим sql: LLM → SQL → EXPLAIN → выполнение
-│   │   │   ├── predefined_mode.py        #   режим predefined: готовые SQL-шаблоны
-│   │   │   ├── predefined.py             #   резолв параметров (+ векторный поиск по source)
-│   │   │   ├── scripts_registry.py       #   ScriptDefinition / ParamDefinition / реестр
+│   │   │   ├── generated_sql_mode.py     #   режим generated_sql: LLM → SQL → EXPLAIN → выполнение
+│   │   │   ├── column_hints.py           #   подсказки по колонкам для LLM-режима
 │   │   │   ├── llm.py                    #   LLM-клиент (OpenAI-compatible HTTP)
 │   │   │   └── output.py                 #   форматирование JSON-вывода
-│   │   └── tests/
-│   │       └── e2e_test.py               #   сквозной тест навыка (нужна живая БД)
+│   │   ├── predefined/                   #   реестр предопределённых SQL-скриптов (Python-литералы)
+│   │   │   ├── scripts.py                #     реестр скриптов (не PG-таблица!)
+│   │   │   ├── mode.py                   #     predefined.run() — выполнение через duckdb_query
+│   │   │   ├── builder.py, validator.py, models.py  #   ParamDefinition/ScriptDefinition
+│   │   └── references/                   #   schema.md, vector_indexes.md, architecture.md и др.
 │   └── skills/office_files/              # навык: чтение docx/xlsx/xls/pdf/pptx/csv/txt
 │       ├── SKILL.md                      #   пользовательская документация
 │       └── (utils: workspace/utils/office_files.py)
@@ -1273,97 +1311,89 @@ nanobot/
 ---
 ## legal_summarizer — внутренняя структура
 
-Структура `workspace/skills/legal_summarizer/src/legal_summarizer/`
-(одноимённый скилл инсталлируется как пакет `legal_summarizer.*` через
-`pyproject.toml::pythonpath + workspace/skills/legal_summarizer/src`).
-Legacy `scripts/` остался только тонкими shim-файлами ради CLI-flat
-импортов (`summarizer.py`, `output.py`, `skill_config.py`, `manifest.py`)
-и самих CLI-обёрток (`cli.py`, `cli_query.py`). Всё живое — в `src/`:
+Структура `workspace/skills/legal_summarizer/scripts/`: вся жилая логика — это
+Python-пакет внутри `scripts/` (корневой `pyproject.toml::pythonpath` включает
+`workspace/skills/legal_summarizer` и `workspace/skills/legal_summarizer/scripts`,
+импорты плоские: `from application.service import ...`, `from document.physical import ...`).
+CLI-обёртки — `cli.py` / `cli_query.py`:
 
 ```
-src/legal_summarizer/
-├── domain/               # pure data classes / config (лист графа):
-│   ├── identity.py       #   DocumentIdentity (fingerprint = sha256)
-│   ├── models.py         #   DocumentStructure, Block, Chunk, BlockRole
-│   ├── numbering.py      #   ArticleNumberingDetector
-│   ├── tokens.py         #   token_estimator, TokenBudget, MID_REDUCE_GROUP_SIZE
-│   └── config.py         #   HierarchicalReducerConfig
+scripts/
+├── cli.py                     # практики CLI (audit query) + разовые операции
+├── cli_query.py               # QA по пакетам документов (tool legal_summarizer_query)
 │
-├── document/             # работа с PhysicalDocument (может импортировать domain):
-│   ├── loader.py         #   DocumentLoader (PDF/DOCX/TXT)
-│   ├── physical.py       #   PhysicalDocument, block extraction
+├── application/               # оркестратор — единственная точка над всем графом:
+│   ├── service.py             #   run / inspect / estimate / quick_estimate / load_text /
+│   │                          #   load_structure / make_operation_id
+│   ├── canonical.py           #   inspect_canonical / run_canonical_pipeline /
+│   │                          #   build_pipeline_result
+│   ├── pipeline_structure.py  #   run_canonical_pipeline impl
+│   ├── brief_context.py       #   BriefContextBuilder.build_brief_chunk
+│   │                          #   (BRIEF CONTRACT: один документ → ровно один Chunk)
+│   ├── brief_compression.py   #   детерминированная weighted компрессия секций
+│   ├── execution_orchestration.py   #   координатор batch-исполнения
+│   ├── context_builder.py     #   построение контекста для reducers
+│   ├── chunk_selection.py     #   выбор Chunk'ов под вопрос
+│   ├── document_io.py         #   чтение/сохранение документов
+│   ├── estimation.py          #   оценочные проходы (без LLM)
+│   ├── inspection.py          #   inspect-режим
+│   ├── manifest_builder.py    #   сборка NormalizedManifest
+│   ├── operation_id.py        #   make_operation_id
+│   ├── question_context.py    #   контекст вопроса (single_context_block)
+│   └── section_index.py       #   индексирование секций
+│
+├── cache/                     # долговечные per-operation-state:
+│   ├── manifest.py            #   NormalizedManifest, resume API
+│   └── document_cache.py      #   document-level кеш хunk'ов (по session_key+document_id)
+│
+├── chunking/                  # чанкинг поверх document-блоков:
+│   ├── chunker.py, chunks.py, order.py, packing.py,
+│   │   importance_score.py, structural_packing.py, _text_helpers.py
+│
+├── document/                  # работа с PhysicalDocument (включая бывший domain/):
+│   ├── loader.py              #   DocumentLoader (PDF/DOCX/TXT)
+│   ├── physical.py            #   PhysicalDocument, block extraction
+│   ├── structure.py           #   DocumentStructure, Block, Chunk (бывший domain/models.py)
+│   ├── identity.py            #   DocumentIdentity (fingerprint = sha256)
+│   ├── numbering.py           #   ArticleNumberingDetector
 │   ├── heading.py, hierarchy.py, list_detection.py,
 │   │   pdf_outline.py, title.py, block_lookup.py,
-│   │   repair.py, validation.py
-│   ├── analysis.py       #   DocumentAnalysis (lazy import retrieval)
-│   └── safety_merge.py   #   safety_merge — pure structure operation
+│   │   repair.py, validation.py, section_helpers.py,
+│   │   analysis.py, safety_merge.py, block_ownership.py
 │
-├── chunking/             # чанкинг поверх document-блоков:
-│   ├── chunker.py, chunks.py, block_ownership.py,
-│   │   importance_score.py, packing.py, order.py
+├── execution/                 # чистое исполнение batch-плана (выше document):
+│   ├── pipeline.py            #   process_context_batch, run_one_batch_async
+│   ├── hierarchical.py        #   reduce_chunks_hierarchical, reduce_sections_to_document,
+│   │                          #   deterministic_truncate
+│   ├── map_reduce.py          #   flat map-reduce стратегия
+│   └── config.py              #   ExecutionConfig
 │
-├── retrieval/            # retrieval-индексы и QA (выше chunking/document):
-│   ├── query.py, normalizer.py, index.py, fallback.py,
-│   │   context_expansion.py, followup.py, qa.py, question.py,
-│   │   records.py, provenance.py, quality.py,
-│   │   canonical.py, candidate_aggregator.py
-│
-├── planning/             # выбор стратегии + plan (выше document/retrieval):
-│   ├── strategy.py       #   select_strategy (direct / map_flat / map_hierarchical)
-│   ├── plan.py           #   ExecutionPlan, PlannedBatch
-│   └── benchmark.py
-│
-├── execution/            # чистое исполнение batch-плана (выше document):
-│   ├── pipeline.py       #   process_context_batch, run_one_batch_async
-│   └── hierarchical.py  #   reduce_chunks_hierarchical, reduce_sections_to_document,
-│                          #   deterministic_truncate, HierarchicalReducerResult
-│
-├── llm/                  # LLM-клиент + sanitization (лист):
-│   ├── client.py         #   chat(), LLMRunner
-│   ├── calls.py          #   _run_all_calls (single-flight + retry)
+├── llm/                       # LLM-клиент + sanitization (лист):
+│   ├── client.py              #   chat(), LLMRunner
+│   ├── calls.py               #   _run_all_calls (single-flight + retry)
 │   ├── prompts.py, prompts_runtime.py
-│   ├── retry.py          #   build_repair_prompt (LLM-driven)
-│   ├── sanitize.py       #   strip_think_blocks, extract_subject
-│   ├── single_flight.py  #   asyncio.Semaphore-based gate
-│   └── config.py         #   get_chunking_config / get_execution_config / …
-│                          #   (бывший ``skill_config.py``)
+│   ├── retry.py               #   build_repair_prompt (LLM-driven)
+│   ├── sanitize.py            #   strip_think_blocks, extract_subject
+│   ├── single_flight.py       #   asyncio.Semaphore-based gate
+│   ├── tokens.py              #   token_estimator, TokenBudget, MID_REDUCE_GROUP_SIZE
+│   └── config.py              #   get_chunking_config / get_execution_config / …
+│                              #   (бывший ``skill_config.py``)
 │
-├── application/          # оркестратор — единственная точка над всем графом:
-│   ├── service.py        #   run / inspect / estimate / quick_estimate / load_text /
-│   │                     #   load_structure / make_operation_id (бывший ``summarizer.py``)
-│   ├── canonical.py      #   inspect_canonical / run_canonical_pipeline /
-│   │                     #   build_pipeline_result (бывший ``summarizer_canonical.py``)
-│   ├── pipeline_structure.py
-│   │                     #   run_canonical_pipeline impl (бывший structure/pipeline.py)
-│   ├── brief_context.py
-│   │                     #   BriefContextBuilder.build_brief_chunk
-│   │                     #   (BRIEF CONTRACT: один документ → ровно один Chunk)
-│   └── brief_compression.py
-│                          #   детерминированная weighted компрессия секций
+├── output/                    # вывод пользователю:
+│   └── presenter.py           #   prepare_output, build_confirmation_options
 │
-├── cache/                # долговечные per-operation-state:
-│   └── manifest.py       #   NormalizedManifest, resume API
-│                          #   (бывший ``scripts/manifest.py``)
-│
-├── output/               # вывод пользователю:
-│   └── presenter.py      #   prepare_output, build_confirmation_options
-│                          #   (бывший ``scripts/output.py``)
-│
-└── infrastructure/       # сквозные utilities:
-    ├── legacy_audit.py   #   assert_no_legacy()
-    └── architecture_guard.py
-                          #   is_factory_pattern / count_abstract_classes /
-                          #   has_oversized_class
+└── planning/                  # выбор стратегии + plan (выше document/retrieval):
+    ├── strategy.py            #   select_strategy (direct / map_flat / map_hierarchical)
+    └── plan.py                #   ExecutionPlan, PlannedBatch
 ```
 
-Старая вложенная раскладка:
-
-* `workspace/skills/legal_summarizer/scripts/` — теперь только CLI-обёртки
-  и four `sys.modules`-shim'а (`summarizer.py`, `output.py`,
-  `skill_config.py`, `manifest.py`), которые нужны `cli.py`/`cli_query.py`
-  для плоских (`from summarizer import ...`) импортов.
-* `workspace/skills/legal_summarizer/scripts/structure/` — удалён целиком
-  (42 bridge-файла). Тесты repoint'нуты на `legal_summarizer.<layer>.<mod>`.
+Бывшие слои `domain/` и `infrastructure/` упразднены: pure-данные (`identity`,
+`numbering`, `tokens`, конфиги) разложены по слоям-владельцам
+(`document/`, `llm/`, `execution/`), а dev-tooling (архитектурные проверки,
+`assert_no_legacy`) вынесено из production-пакета в корневой `tools/`
+(`tools/architecture_guard.py`, `tools/legacy_audit.py`).
+До этого пакет переезжал дважды: `src/legal_summarizer/` → корень Skill →
+`scripts/` (плоские импорты для CLI).
 
 Граница слоёв (§65, `docs/TARGET_ARCHITECTURE.md`) автоматически
 проверяется в `tests/architecture/test_layer_boundaries.py`: домен
@@ -1457,10 +1487,9 @@ raises `NotImplementedError` (brief — chunk-selection concern,
 
 ### Тесты
 
-`tests/test_resume_scenarios.py` (10 tests), `tests/test_tables.py` (9 tests),
-`tests/test_information_preservation.py` (10 tests), `tests/benchmarks/test_benchmark_summarizer.py`
-(7 tests), `tests/benchmarks/test_quality_benchmark.py` (12 tests),
-`tests/benchmarks/test_acceptance_matrix.py` (9 tests).
+`tests/test_resume_scenarios.py` (10 tests),
+`tests/test_information_preservation.py` (10 tests), `tests/benchmarks/test_quality_benchmark.py`
+(12 tests), `tests/benchmarks/test_acceptance_matrix.py` (9 tests).
 
 ---
 

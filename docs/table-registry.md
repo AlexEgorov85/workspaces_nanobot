@@ -383,10 +383,13 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 |---|---|
 | `register(SkillRegistration)` | Регистрация skill'а (доменные таблицы + вектора). |
 | `register_infra(key, resources)` | Регистрация runtime-ресурса общего назначения (storage сырых эмбеддингов). |
+| `unregister(name)` | Убрать skill-регистрацию по имени. |
 | `unregister_infra(key)` | Удалить инфра-регистрацию. |
+| `get(name)` | `SkillRegistration` по имени (или `None`). |
 | `get_infra(key)` / `infra_keys()` | Lookup инфра-ресурсов по ключу namespace'а. |
 | `table_names()` | Имена всех `TableResource` (skills + infra), в порядке регистрации. |
 | `vector_names()` | Имена всех `VectorResource` (skills + infra). |
+| `table_resources()` / `vector_resources()` | Flat-tuple `TableResource` / `VectorResource` (skills + infra). |
 | `resources()` | Все ресурсы (таблицы + векторы) одной плоской tuple. |
 | `resources_by_label(label)` | `TableResource` skill'ов с указанным `label` (инфру **не** смотрит — label доменная метка). |
 | `skill_for_table(table)` | `SkillRegistration`, владеющая таблицей (только skill-ресурсы). |
@@ -394,6 +397,7 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 | `names()` / `enabled_names()` | Имена зарегистрированных skill'ов (все/только enabled). |
 | `set_embedding_config(**kwargs)` / `embedding_config()` | Generic-конфиг эмбеддингов (не per-skill). |
 | `snapshot_path(workspace_path)` | Путь к общему DuckDB-снапшоту. |
+| `clear()` | Полный сброс реестра (тесты/пересборка). |
 
 ## track column
 
@@ -459,8 +463,8 @@ predefined_table = resources[0].name  # qualified 'schema.table'
   `gateway.vector.index.storage_table`.
 - `tests/test_project_settings.py` — pydantic-валидация `TableEntry`/
   `VectorIndexEntry`, fail-fast на опечатках.
-- `tests/test_skill_config_lookup.py` — `resources_by_label("scripts_registry")`
-  в skill-коде (audit_analyzer).
+- `tests/test_skill_config_api.py::TestPredefinedScripts` — 
+  `get_predefined_scripts_table()` → lookup через `resources_by_label("scripts_registry")`.
 - `tests/test_skill_config_api.py` — единый `lib.core.skill_config` API,
   multi-skill сценарии.
 - `tests/test_config_keys.py` — обязательные ключи конфига.

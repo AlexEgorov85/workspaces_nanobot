@@ -6,7 +6,7 @@
 
 ---
 
-## v2.4.0 → v2.4.x (текущая)
+## v2.3.1 → v2.4.0 (текущая)
 
 **Автоматические изменения** (ничего делать не нужно):
 
@@ -60,21 +60,17 @@
   в `data_store` (через `SessionFileStore`), а не режет до 16K символов в истории.
 - `patch_exec_limits` поднял дефолтные потолки `exec`/`shell`.
 - `patch_tool_limits` поднял потолки `read_file`/`grep`/`list_dir`.
-
-**Никаких ручных миграций БД** — DDL применяется через
-`python tools/migrate.py --apply`.
-
----
-
-## v2.3.1 → v2.4.0
-
-- Без поломок API. MINOR-релиз.
 - Новые кастомные tool'ы из `workspace/tools/*.py` (патч `patch_project_tools`):
   `compact_context`. Дополнительные `audit_run_predefined_script` и
   `audit_search_vector` появились и были удалены в этом же релизе
   (см. [docs/skill-tool-inventory.md](skill-tool-inventory.md)).
 - `ApplicationContext.create()` теперь автоматически подключает
   `SessionFileRedirectHook` и фреймворковые хуки из `lib/hooks/`.
+
+**Миграции** — `V002__vector_chunk_params.sql` добавляет в
+`public.agent_vector_index_config` колонки `chunk_size`/`chunk_overlap`/`metric`
+(дефолты `500`/`80`/`cosine`). DDL применяется через
+`python tools/migrate.py --apply`.
 
 ## v2.3.0 → v2.3.1
 
@@ -102,7 +98,7 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
 
 ---
 
-## Ручные действия миграции 1.5.0 → 2.0.0 (из DEVELOPMENT.md)
+## Ручные действия миграции 1.5.0 → 2.0.0
 
 Краткий таймлайн релизов — в [../CHANGELOG.md](../CHANGELOG.md). Этот раздел — только то, что **требует ручных действий при миграции**.
 

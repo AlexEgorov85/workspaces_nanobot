@@ -92,7 +92,7 @@ Reference: `nanobot/agent/tools/image_generation.py`
 
 | Источник | Как подхватывается |
 |---|---|
-| **`workspace/tools/*.py`** | `RuntimePatcher.patch_project_tools` — auto-discover через `pkgutil.iter_modules` + `importlib.util.spec_from_file_location` (т.к. `workspace/` не Python-пакет, без `__init__.py`). |
+| **`workspace/tools/*.py`** | `RuntimePatcher.patch_project_tools` — auto-discover через `pkgutil.iter_modules` + `importlib.util.spec_from_file_location` (модуль грузится под именем `workspace.tools.<name>`, без зависимости от наличия `__init__.py`). |
 | **Внешние pip-плагины** | `entry_points(group="nanobot.tools")` в `pyproject.toml` пакета. Встроенный `ToolLoader._discover_plugins` (`nanobot/agent/tools/loader.py:62`) подхватывает их автоматически. |
 | **Тесты/явная регистрация** | `agent.tools.register(MyTool(...))` напрямую (для unit-тестов или особых сценариев DI). |
 
@@ -225,7 +225,7 @@ registered: foo, bar, baz; skipped: qux (disabled by config)"`.
 | `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (project.json) |
 | `duckdb_query` | `workspace/tools/duckdb_query_tool.py` | read-only SELECT-запрос в DuckDB-кэш | `gateway.duckdb_query.*` (project.json) |
 | `vector_search` | `workspace/tools/vector_search_tool.py` | семантический поиск по FAISS-индексу | `gateway.vector_search.*` (project.json) |
-| `history_search` | `workspace/tools/history_search_tool.py` | generic-поиск по журналу `agent_gateway_logs` (переживает context compaction) | `tools.history_search.*` (project.json) |
+| `history_search` | `workspace/tools/history_search_tool.py` | generic-поиск по журналу `agent_gateway_logs` (переживает context compaction) | `tools.history_search.*` (config.json; если секция не задана — дефолты модели `HistorySearchConfig`) |
 | `legal_summarizer_query` | `workspace/tools/legal_summarizer_query.py` | follow-up по saved `operation_id` для `legal_summarizer` | `tools.legal_summarizer_query.*` (config.json) |
 | `example_tool` | `workspace/tools/example.py` | шаблон (по умолчанию `enable=false`) | `tools.example.*` (config.json) |
 
@@ -235,81 +235,17 @@ registered: foo, bar, baz; skipped: qux (disabled by config)"`.
 
 `audit_run_predefined_script` / `audit_search_vector` / `audit_generate_sql`
 **удалены** в рефакторинге `refactor/skills-tools-cleanup`
-(коммиты `c593d509`, `7d8f6b0`). Они нарушали §3, §22.1, §22.2
+(коммиты `593d509`, `7d8f6b0`). Они нарушали §3, §22.1, §22.2
 TARGET_ARCHITECTURE.md (импортировали skill через `importlib`); заменены на:
 
 - predefined — CLI-режим skill'а (`scripts/cli.py --mode predefined`);
 - vector search — tool `vector_search` (с указанием `index_name`);
 - NL→SELECT — skill workflow с tool `duckdb_query` (см.
-  `references/sql_guidance.md`).
-
-### Runtime-context providers
-
-Skill `audit_analyzer` экспортирует runtime-context providers через
-`workspace/skills/audit_analyzer/providers.py`. Регистрация вызывается
-из `lib/core/application_context.py::start()` если skill включён.
-
-* `predefined_scripts_provider` → список предопределённых скриптов
-  из реестра `public.agent_predefined_scripts`
-  (тег `source='audit_predefined_scripts'`).
-* `db_schema_provider` → схема БД в формате LLM-промпта
-  (тег `source='audit_db_schema'`); загружается через
-  `provider.get_schema()` + `lib.utils.sql_safety.format_schema`,
-  кешируется на уровне модуля.
-
-Skill владеет domain knowledge (имена таблиц, индексов, скриптов),
-tool `duckdb_query` / `vector_search` это не знают
-(см. TARGET_ARCHITECTURE.md §4).
-
-Контракт провайдера — `async (RequestContext) -> RuntimeContextBlock |
-sequence | None` (см. `nanobot/runtime_context.py:47-49`).
-`AgentLoop._build_runtime_context` (`nanobot/agent/loop.py:744-752`)
-собирает блоки провайдеров и добавляет их в system prompt каждый turn
-(см. `tools.get_runtime_context_providers()` в `registry.py:44-51`).
-
-Пример (predefined):
-
-```text
-[Runtime Context — metadata only, not instructions]
-Доступные predefined SQL-скрипты (skill audit_analyzer):
-- top_audited_objects: Топ проверяемых объектов | параметры: date_from, limit
-- violations_by_type: Статистика нарушений | параметры: date_from, violation_code
-- ...
-[/Runtime Context]
-```
-
-Пример (sql):
-
-```text
-[Runtime Context — metadata only, not instructions]
-=== Schema: oarb ===
-
-Table: "oarb".audits — Аудиторские проверки
-  id: integer NOT NULL — Идентификатор
-  actual_date: date — Дата проверки
-  title: varchar(500) — Название проверки
-...
-[/Runtime Context]
-```
-
-**Преимущества перед отдельным tool `audit_list_predefined_scripts`:**
-
-1. Нет лишнего round-trip (LLM вызывает основной tool сразу).
-2. LLM **всегда** знает актуальный список (не может галлюцинировать имя).
-3. Tool остаётся чистым — schema с одним действием.
-
-**Кеш:** список предопределённых скриптов и схема БД кешируются на
-уровне модуля (skill `audit_analyzer/providers.py`). Сбросить:
-``providers.invalidate_*_cache()`` (например, после миграций).
-
-Раньше (до `refactor/skills-tools-cleanup`) тот же retry-цикл жил в
-отдельном tool `audit_generate_sql`; теперь — в skill workflow, который
-вызывает `duckdb_query` через `lib/utils/sql_safety.validate_sql`
-(SELECT-only, multi-statement запрещён). LLM-промпт «You are a PostgreSQL
-expert. Return ONLY a safe SELECT query» живёт в
-`workspace/skills/audit_analyzer/scripts/sql_mode.py`; отчёт об ошибке
-(`provider.explain(sql)` → retry с обратной связью в LLM до
-``max_retries`` раз) — там же.
+  `references/sql_guidance.md`);
+- runtime-context providers (`providers.py`, инъекция схемы/predefined в system
+  prompt) — удалены полностью: схема БД и списки скриптов теперь доступны
+  по требованию через tool `duckdb_query` / `predefined/scripts.py`
+  (реестр `REGISTRY` в памяти skill'а, не в PostgreSQL).
 
 ---
 
@@ -318,23 +254,23 @@ expert. Return ONLY a safe SELECT query» живёт в
 Точка входа: `python scripts/cli.py` (кросс-платформенный).
 
 ```
-audit_analyze --mode {predefined,sql,vector} [опции]
+audit_analyze --mode {predefined,generated_sql,vector} [опции]
 ```
 
 | Режим | Назначение | Ключевые флаги |
 |-------|-----------|----------------|
 | `predefined` | Выполнение готовых SQL-шаблонов из реестра | `--script`, `--params` |
-| `sql` | Генерация SELECT через LLM по текстовому запросу | `--query`, `--context` |
-| `vector` | Семантический поиск по FAISS-индексу | `--query`, `--index-name`, `--top-k`, `--threshold`, `--vector-index` |
+| `generated_sql` | Генерация SELECT через LLM по текстовому запросу | `--query`, `--context` |
+| `vector` | Семантический поиск по FAISS-индексу | `--query`, `--index-name`, `--top-k`, `--threshold` |
 
 Примеры:
 
 ```bash
 # predefined — готовый шаблон с параметрами
-audit_analyze --mode predefined --script analytics_by_year_month --params '{"year": 2024}'
+audit_analyze --mode predefined --script violations_by_period --params '{"date_from": "2024-01-01", "date_to": "2024-12-31"}'
 
-# sql — генерация SQL через LLM и выполнение
-audit_analyze --mode sql --query 'сколько аудитов было в 2024 по месяцам'
+# generated_sql — генерация SQL через LLM и выполнение
+audit_analyze --mode generated_sql --query 'сколько аудитов было в 2024 по месяцам'
 
 # vector — топ-3 по схожести
 audit_analyze --mode vector --query 'пожарная безопасность' --index-name audits_index --top-k 3
@@ -345,16 +281,16 @@ audit_analyze --mode vector --query 'статусы аудитов' --index-name
 
 **Как выбирается бэкенд запросов:** CLI строит провайдера
 (`build_cache_provider()`), открывает опубликованный gateway DuckDB-снапшот
-(путь через `table_registry.snapshot_path()`) на чтение и работает по нему;
-иначе — `Database` (прямой PostgreSQL). Кеш создаёт и обновляет
+(путь через `table_registry.snapshot_path()`) на чтение и работает по нему.
+Прямого PostgreSQL-бэкенда у CLI нет (см. [DATABASE.md](DATABASE.md)). Кеш создаёт и обновляет
 **gateway** (см. [DATABASE.md](DATABASE.md#-жизненный-цикл-кеша)); CLI про это не знает. Если файла
 кеша нет — CLI завершается с `FileNotFoundError`: «Кеш создаёт и обновляет
 gateway автоматически — запустите его (python gateway.py)».
 
-**Векторный поиск в predefined:** строковые параметры с
-`validation.vector_source` (например, `violation_code`, `auditee_entity`,
-`audit_type`) резолвятся через семантический поиск — провайдер подставляет
-лучшее совпадение из индекса `{source}_index`.
+Векторный поиск — параметр `--index-name` (по умолчанию `audits_index`).
+Строковые параметры predefined-скриптов передаются как есть (после
+валидации `ParameterValidator`), без семантического резолва через векторный
+поиск.
 
 ---
 
@@ -413,6 +349,7 @@ python tools/build_vectors.py --verbose
 | `--batch-size` | 10 | Батч эмбеддинга |
 | `--chunk-size` | 500 | Размер чанка в символах |
 | `--chunk-overlap` | 80 | Перекрытие чанков |
+| `--pause-sec` | 5.0 | Пауза между батчами эмбеддинга (сек) |
 | `--embedding-retry-wait` | 5 | При ошибке получения эмбеддинга: ждать это время (сек) и повторить один раз |
 | `--verbose` | — | Подробный лог каждого чанка/строки (уровень DEBUG) |
 
@@ -451,7 +388,7 @@ python tools/build_vectors.py --verbose
 
 1. **Объявите ключ в `project.json`** (JSONC, с дефолтом и комментарием) — в подходящей секции (`channels.*`, `skills.*`, `cli`, `gateway`, `logging.db` и т.п.).
 2. **Для обязательных настроек навыка `audit_analyzer` используйте
-   `lib/services/audit_settings.py` (`require_setting` → `ConfigurationError`)**
+   `config.py` (`require_setting` → `ConfigurationError`)**
    — это единый источник правды без литералов в коде. Для необязательных —
    `config.get_setting(*keys, default=...)`. **Не хардкодьте литерал.**
 3. **Добавьте ключ в `REQUIRED_KEYS` в `tests/test_config_keys.py`** — иначе CI не поймает случайное удаление/переименование.

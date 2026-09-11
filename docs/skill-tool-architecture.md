@@ -189,8 +189,8 @@ fully-qualified (`schema.table`), `schema_name` в конфиге отсутст
 
 ```text
 Step 1: запрос соответствует predefined из references/predefined_scripts.md
-        → прочитать sql_template из public.agent_predefined_scripts
-        → duckdb_query(sql=<template>, params=<...>).
+        → CLI `--mode predefined --script <name>` (реестр в `predefined/scripts.py`,
+        выполнение через `predefined.run` → generic DuckDB).
 Step 2: запрос про смысл/похожие → vector_search с index_name из
         references/vector_indexes.md.
 Step 3: свободный SQL → Agent читает references/schema.md +
@@ -208,8 +208,7 @@ Skill `audit_analyzer` — **CLI + generic tools**: автономный skill-s
 `scripts/cli.py --mode <predefined | generated_sql | vector>` (единый entry-point,
 вызывается агентом через `tools.exec` с абсолютным путём; также используется
 бенчмарками/CI). Дополнительно агент может выполнять те же операции напрямую
-через generic tools `workspace/tools/duckdb_query_tool.py` (точный SELECT,
-в т.ч. чтение predefined SQL из реестра `public.agent_predefined_scripts`)
+через generic tools `workspace/tools/duckdb_query_tool.py` (точный SELECT)
 и `workspace/tools/vector_search_tool.py` (семантика).
 Подробности — в `docs/skill-tool-inventory.md` и `workspace/skills/audit_analyzer/SKILL.md`.
 
@@ -327,7 +326,7 @@ CLI skill'а `scripts/generated_sql_mode.py` для few-shot retrieval):
 |---|---|
 | `tests/test_table_registry.py::TestLabelLookup` | unit-тесты метода `resources_by_label()` (default `None`, constructor, поиск, неизвестный label, disabled-пропуск, независимость от track-колонки) |
 | `tests/test_auto_register_skills.py::TestAutoRegisterPredefinedScriptsTable` | интеграционные тесты через `_auto_register_skills` (label ставится для `predefined_scripts_table`) |
-| `tests/test_skill_config_lookup.py::TestGetPredefinedScriptsTableRegistryPath` | end-to-end через `skill_config.get_predefined_scripts_table()` (lookup через registry) |
+| `tests/test_skill_config_api.py::TestPredefinedScripts::test_lookup_from_table_registry` | end-to-end через `skill_config.get_predefined_scripts_table()` (lookup через registry) |
 
 Любое использование `label` в `lib/services/runtime`-слое (`cache_provider_impl.py`,
 `duckdb_cache_store.py`, `pg_duckdb_sync_service.py`) — архитектурная регрессия.
