@@ -58,8 +58,9 @@ from skill_config import (  # noqa: E402
     build_cache_provider,
     get_cli_config,
     get_in_memory_cache_path,
+    get_predefined_scripts_table,
 )
-from workspace.skills.audit_analyzer.predefined import run as predefined_run  # noqa: E402
+from workspace.skills.audit_analyzer.scripts.predefined import run as predefined_run  # noqa: E402
 
 # IndexIntegrityError — generic core exception для STALE/INVALID FAISS.
 from lib.services.cache_provider import IndexIntegrityError  # noqa: E402
@@ -173,8 +174,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--script",
         default=None,
-        help="Имя predefined-скрипта (для --mode predefined). "
-             "Например: audit_status_summary, violations_by_period",
+        help="Имя predefined-скрипта (для --mode predefined).",
+    )
+    parser.add_argument(
+        "--list-scripts",
+        action="store_true",
+        help="Для --mode predefined: вывести полный каталог "
+             "predefined-скриптов из БД (name, description, parameters) и выйти.",
+    )
+    parser.add_argument(
+        "--list-indexes",
+        action="store_true",
+        help="Для --mode vector: вывести каталог FAISS-индексов из БД "
+             "(name, source_table, embed-колонки) и выйти.",
     )
     parser.add_argument(
         "--query",
@@ -193,7 +205,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--index-name",
         default=None,
-        help="Имя индекса для --mode vector. По умолчанию: audits_index.",
+        help="Имя индекса для --mode vector.",
     )
     parser.add_argument(
         "--top-k",
@@ -211,8 +223,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--context",
         default=None,
         type=json.loads,
-        help="Контекст чата (JSON-список сообщений) для --mode generated_sql. "
-             "Пример: '[{\"role\":\"user\",\"content\":\"привет\"}]'",
+        help="Контекст чата (JSON-список сообщений) для --mode generated_sql.",
     )
     return parser
 
@@ -232,8 +243,106 @@ def _open_db():
     return provider
 
 
+def _list_scripts(db: Any) -> dict:
+    """Полный каталог predefined-скриптов из ``public.agent_predefined_scripts``.
+
+    Включает name, description, parameters (JSONB-структура
+    ParamDefinition: type/required/default/description), returns,
+    long_description, max_rows_default, sql_template. Используется
+    CLI-флагом ``--list-scripts`` для discovery без чтения ``SKILL.md``.
+    """
+    try:
+        predefined_table = get_predefined_scripts_table()
+    except Exception as exc:
+        return {
+            "status": "error",
+            "data": {
+                "message": f"Не удалось зарезолвить таблицу predefined-скриптов: {exc}",
+                "error_type": "registry_unavailable",
+            },
+        }
+    from workspace.skills.audit_analyzer.scripts.predefined import load_all
+
+    scripts = load_all(db, predefined_table)
+    items = []
+    for name in sorted(scripts.keys()):
+        s = scripts[name]
+        items.append(
+            {
+                "name": s.name,
+                "description": s.description,
+                "long_description": s.long_description,
+                "parameters": {
+                    pname: {
+                        "type": pdef.type,
+                        "required": pdef.required,
+                        "description": pdef.description,
+                    }
+                    for pname, pdef in s.parameters.items()
+                },
+                "max_rows_default": s.max_rows_default,
+            }
+        )
+    return {
+        "status": "success",
+        "data": {
+            "predefined_table": predefined_table,
+            "count": len(items),
+            "scripts": items,
+        },
+    }
+
+
+def _list_indexes() -> dict:
+    """Каталог FAISS-индексов из ``public.agent_vector_index_config``.
+
+    Возвращает полные метаданные каждого индекса: source_table,
+    embed-колонки, chunking, signature-status. Используется CLI-флагом
+    ``--list-indexes`` для discovery без чтения `` SKILL.md``.
+    """
+    try:
+        from lib.services.cache_provider_impl import read_vector_index_config
+
+        cfg = read_vector_index_config({})
+    except Exception as exc:
+        return {
+            "status": "error",
+            "data": {
+                "message": (
+                    f"Не удалось прочитать реестр индексов: {exc}. "
+                    "Запустите gateway (python gateway.py) — реестр живёт "
+                    "в PostgreSQL."
+                ),
+                "error_type": "registry_unavailable",
+            },
+        }
+    items = []
+    for name in sorted(cfg.keys()):
+        meta = cfg[name]
+        items.append(
+            {
+                "index_name": name,
+                "source_table": meta.get("source_table"),
+                "content_cols": meta.get("content_cols"),
+                "embedding_cols": meta.get("embedding_cols"),
+                "chunk_size": meta.get("chunk_size"),
+                "chunk_overlap": meta.get("chunk_overlap"),
+                "metric": meta.get("metric"),
+                "enabled": meta.get("enabled"),
+            }
+        )
+    return {"status": "success", "data": {"count": len(items), "indexes": items}}
+
+
 def _run_predefined(script: str, db: Any, params: dict[str, Any] | None) -> dict:
-    """Запустить predefined capability через ``predefined.run()``."""
+    """Запустить predefined capability через ``predefined.run()``.
+
+    Скрипты читаются из PG-снимка ``public.agent_predefined_scripts``
+    (см. ``sql/audit_analyzer/seed_predefined_scripts.sql``) — это
+    канонический source of truth. ``TableRegistry`` ищет таблицу по
+    label ``scripts_registry``; registration происходит в
+    ``_ensure_registered()`` при старте CLI.
+    """
     if not script:
         return {
             "status": "error",
@@ -241,7 +350,23 @@ def _run_predefined(script: str, db: Any, params: dict[str, Any] | None) -> dict
                 "message": "Для --mode predefined укажите --script",
             },
         }
-    return predefined_run(script, db, params=params)
+    try:
+        predefined_table = get_predefined_scripts_table()
+    except Exception as exc:
+        return {
+            "status": "error",
+            "data": {
+                "message": (
+                    f"Не удалось зарезолвить таблицу predefined-скриптов: {exc}. "
+                    "Проверьте, что skill audit_analyzer зарегистрирован "
+                    "(project.json::skills.audit_analyzer.tables содержит "
+                    "{\"name\": \"public.agent_predefined_scripts\", "
+                    "\"label\": \"scripts_registry\"})."
+                ),
+                "error_type": "registry_unavailable",
+            },
+        }
+    return predefined_run(script, db, params=params, predefined_table=predefined_table)
 
 
 def _run_generated_sql(query: str, db: Any, context: list[dict] | None) -> dict:
@@ -357,6 +482,10 @@ def _run(args: argparse.Namespace) -> dict:
     """Маршрутизация выполнения по ``args.mode``."""
     db = _open_db()
     try:
+        if getattr(args, "list_scripts", False):
+            return _list_scripts(db)
+        if getattr(args, "list_indexes", False):
+            return _list_indexes()
         if args.mode == "predefined":
             return _run_predefined(args.script, db, args.params)
         if args.mode == "generated_sql":
@@ -382,7 +511,13 @@ def main() -> None:
         args = parser.parse_args()
 
         result = _run(args)
-        out = sanitize_output(prepare_output(result, args.mode))
+        # ``--list-scripts`` / ``--list-indexes`` не проходят через
+        # ``prepare_output`` — там формат вывода другой
+        # (каталог скриптов/индексов из БД, без rows/columns).
+        if getattr(args, "list_scripts", False) or getattr(args, "list_indexes", False):
+            out = result
+        else:
+            out = sanitize_output(prepare_output(result, args.mode))
         print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
     except argparse.ArgumentTypeError as e:
         print(json.dumps(

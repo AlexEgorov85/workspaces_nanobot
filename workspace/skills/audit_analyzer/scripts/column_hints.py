@@ -1,32 +1,13 @@
-"""Обёртка над ``references/sql_guidance.md`` для generated_sql_mode.
+"""Тонкая обёртка для подсказок колонок в LLM system prompt (legacy).
 
-Нужен потому, что system prompt в LLM требует обучающих подсказок:
-русские термины → конкретные колонки (например, «объекты проверок» →
-``oarb.audits.auditee_entity``). Без этих подсказок LLM галлюцинирует
-имена колонок. Храним в отдельном модуле, чтобы:
+Использовалась только в ``generated_sql_mode.py`` (--mode generated_sql).
+Phase 8: ``references/`` удалены, SKILL.md self-contained. Этот модуль
+оставлен как transitional fallback для legacy CLI, но SKILL.md
+больше не описывает этот режим как активный.
 
-1. ``generated_sql_mode.py`` оставался фокусирован на pipeline-логике
-   (whitelist → few-shot → retry). Без «длинных строковых литералов»
-   в его исходнике.
-2. Подсказки легко менять без затрагивания pipeline.
-
-Источник истины — каталог ``references/`` skill'а (для редактирования
-человеком). Этот модуль — тонкая обёртка с предкомпилированным словарём.
-
-Пример использования::
-
-    from column_hints import format_hints_block
-    block = format_hints_block()  # '' если словарь пуст
+Хранит предкомпилированный словарь «русский термин → колонка»
+(например, «объекты проверок» → ``oarb.audits.auditee_entity``).
 """
-
-from __future__ import annotations
-
-from pathlib import Path
-
-
-# Каталог references/ skill'а: workspace/skills/audit_analyzer/references/.
-# Этот файл лежит в scripts/, поэтому parents[1] → корень skill'а.
-_REFERENCES_DIR = Path(__file__).resolve().parents[1] / "references"
 
 
 _HINTS: dict[str, list[str]] = {

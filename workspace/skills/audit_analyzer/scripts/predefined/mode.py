@@ -1,7 +1,11 @@
 """``predefined.run()`` — выполнение predefined SQL-скрипта через generic core.
 
-Pipeline (соответствует ``predefined_mode.run()`` эталона ``a606fe0``):
+Канонический pipeline:
 
+    public.agent_predefined_scripts         (PostgreSQL, source of truth)
+        ↓ seed_predefined_scripts.sql
+    DuckDB-PG snapshot (cache.duckdb)        (см. PgDuckDbSyncService)
+        ↓ db_loader.load_script / load_all
     ScriptDefinition
         ↓ resolve/merge
     ParameterValidator
@@ -13,8 +17,8 @@ Pipeline (соответствует ``predefined_mode.run()`` эталона ``
     result (rows — список dict с ключами-именами колонок)
 
 Critical rules:
-  * Skill НЕ обращается к PG-таблице ``public.agent_predefined_scripts``
-    (Step 10 плана миграции — реестр хранится внутри skill'а).
+  * Скрипты читаются только из ``public.agent_predefined_scripts`` (DB-source).
+    Python ``REGISTRY`` удалён; fallback отсутствует.
   * ``DuckDBService`` — generic ``lib.services.DuckDBService`` (или
     интерфейс ``CacheProvider``); никакого домен-знания здесь нет.
   * ``run()`` не делает HTTP/LLM вызовов.
@@ -22,12 +26,15 @@ Critical rules:
 
 from __future__ import annotations
 
-import json
 from typing import Any, Protocol
 
-from workspace.skills.audit_analyzer.predefined.builder import DynamicQueryBuilder
-from workspace.skills.audit_analyzer.predefined.scripts import REGISTRY, get_script
-from workspace.skills.audit_analyzer.predefined.validator import (
+from workspace.skills.audit_analyzer.scripts.predefined.builder import DynamicQueryBuilder
+from workspace.skills.audit_analyzer.scripts.predefined.db_loader import (
+    DBScriptProvider,
+    load_all,
+    load_script,
+)
+from workspace.skills.audit_analyzer.scripts.predefined.validator import (
     ParameterValidator,
 )
 
@@ -56,12 +63,14 @@ class DuckDBServiceProtocol(Protocol):
     ) -> dict[str, Any]: ...
 
 
-def list_available() -> str:
+def list_available(db: DBScriptProvider, predefined_table: str) -> str:
     """Список имён скриптов через запятую (для CLI/error messages)."""
-    return ", ".join(REGISTRY.keys())
+    return ", ".join(load_all(db, predefined_table).keys())
 
 
-def list_scripts() -> list[dict[str, str]]:
+def list_scripts(
+    db: DBScriptProvider, predefined_table: str
+) -> list[dict[str, str]]:
     """Метаданные всех скриптов для UI/CLI/документации."""
     return [
         {
@@ -69,22 +78,39 @@ def list_scripts() -> list[dict[str, str]]:
             "description": s.description,
             "parameters": ", ".join(s.parameters.keys()),
         }
-        for s in REGISTRY.values()
+        for s in load_all(db, predefined_table).values()
     ]
+
+
+def _resolve_script(
+    script_name: str,
+    db: DuckDBServiceProtocol | DBScriptProvider,
+    predefined_table: str,
+):
+    """DB-only lookup.
+
+    Скрипт читается только из ``public.agent_predefined_scripts``. Никакого
+    fallback на Python ``REGISTRY`` (удалён в Phase 7).
+    """
+    return load_script(db, predefined_table, script_name)
 
 
 def run(
     script_name: str,
     db: DuckDBServiceProtocol,
     params: dict[str, Any] | None = None,
+    *,
+    predefined_table: str | None = None,
 ) -> dict[str, Any]:
     """Выполнить predefined SQL-скрипт.
 
     Args:
-        script_name: имя скрипта из каталога (см. ``REGISTRY``).
+        script_name: имя скрипта (DB-only lookup, см. ``db_loader``).
         db: generic DuckDB-сервис (``DuckDbCacheStore`` или
             stub с тем же интерфейсом в тестах).
         params: пользовательские параметры запроса.
+        predefined_table: обязательный ``schema.table`` PG-реестра
+            (например, ``public.agent_predefined_scripts``).
 
     Returns:
         ``{"mode": "predefined", "status": "success" | "error", ...}``.
@@ -104,14 +130,27 @@ def run(
             },
         }
 
-    script = get_script(script_name)
+    if not predefined_table:
+        return {
+            "status": "error",
+            "data": {
+                "message": (
+                    "predefined_table обязателен: скрипты читаются только "
+                    "из PostgreSQL (public.agent_predefined_scripts). "
+                    "Передайте predefined_table= явно."
+                ),
+                "error_type": "missing_predefined_table",
+            },
+        }
+
+    script = _resolve_script(script_name, db, predefined_table)
     if script is None:
         return {
             "status": "error",
             "data": {
                 "message": (
                     f"Скрипт '{script_name}' не найден. "
-                    f"Доступны: {list_available()}"
+                    f"Доступны: {list_available(db, predefined_table)}"
                 ),
             },
         }
@@ -136,7 +175,6 @@ def run(
             "data": {"message": f"Ошибка выполнения SQL: {exc}"},
         }
 
-    # ``query_sql`` возвращает ``{status, row_count, columns, rows, error?}``.
     error_msg = result.get("error") if isinstance(result, dict) else None
     if error_msg or result.get("status") == "error":
         return {
