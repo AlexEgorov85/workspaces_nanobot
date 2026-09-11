@@ -8,7 +8,9 @@
 
 ## [Unreleased]
 
-> **MINOR-релиз v2.5.0:** крупный рефакторинг `legal_summarizer` (97-этапный
+## [2.5.0] — 2026-09-11
+
+> **MINOR-релиз:** крупный рефакторинг `legal_summarizer` (97-этапный
 > план: layered package, document-level cache, brief как ровно один Chunk,
 > structural packing, вопрос-режим через document cache, e2e 3-mode CLI),
 > переработка конфигурационного контракта skills ↔ runtime infrastructure
