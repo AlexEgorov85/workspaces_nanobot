@@ -546,6 +546,36 @@ class PostgresChannel(BaseChannel):
             safe = line.replace("←", "<-").replace("→", "->")
             console.print(safe, style="dim", markup=False)
 
+    def _lifecycle_log(
+        self,
+        phase: str,
+        user_msg_id: str | None,
+        *,
+        chat_id: str | None = None,
+        assistant_msg_id: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Одна строка lifecycle-лога на каждую фазу задачи.
+
+        Формат: ``TASK lifecycle task=<id> phase=<phase> chat=<id> assistant=<id> ...``.
+        По одной строке на фазу легко грепать и реконструировать сценарий
+        зависшего процесса. ``final_received`` дополнительно логирует
+        маркеры outbound (``_final_turn``/``_turn_end``/``_stream_end``/
+        ``streamed``/``event``), без них невозможно понять, какой именно
+        путь финализации сработал.
+        """
+        parts = [f"task={user_msg_id}", f"phase={phase}"]
+        if chat_id:
+            parts.append(f"chat={chat_id}")
+        if assistant_msg_id:
+            parts.append(f"assistant={assistant_msg_id}")
+        if extra:
+            for k, v in extra.items():
+                if isinstance(v, str) and len(v) > 80:
+                    v = v[:77] + "..."
+                parts.append(f"{k}={v}")
+        self.logger.debug("TASK lifecycle {}", " ".join(parts))
+
     @staticmethod
     def _preview(content: Any, limit: int = 60) -> str:
         """Короткий однострочный превью контента задачи для лога."""
@@ -695,7 +725,7 @@ class PostgresChannel(BaseChannel):
         had = await self._poll_once(exchange)
         return bool(had)
 
-    async def _unstick_processing(self) -> None:
+    async def _unstick_processing(self) -> list[str]:
         """Освободить сообщения, зависшие в ``processing`` дольше таймаута.
 
         Используется в single-режиме как замена reclaim/heal из worker_pool.
@@ -709,9 +739,18 @@ class PostgresChannel(BaseChannel):
           — ``retry_count >= max_stuck_retries`` → ``failed`` (терминал).
           — Старый assistant-placeholder удаляется, чтобы пользователь не
             видел ошибочный статус до повторной обработки.
+
+        Возвращает список ``user_msg_id``, которые были фактически
+        восстановлены (возвращены в ``pending`` или терминально ``failed``).
+        Это позволяет вызывающему коду очистить локальное состояние
+        (``_msg_ctx``, ``_leases``, ``_msg_chat``, ``_chat_inflight``,
+        ``exchange.inflight``) для задач, которые этот воркер уже
+        «забыл» — иначе после ``unstick`` локал остался бы занятым, и
+        polling не взял бы новые сообщения.
         """
         max_retries = self._max_stuck_retries
         timeout_s = self._processing_timeout
+        recovered: list[str] = []
 
         async with transaction() as conn:
             rows = await conn.fetch(
@@ -744,6 +783,7 @@ class PostgresChannel(BaseChannel):
                         "User msg {} exceeded max retries ({}/{})",
                         msg_id, retry_count, max_retries,
                     )
+                    recovered.append(msg_id)
                 else:
                     await conn.execute(
                         f"UPDATE {self._fq_table} SET status = 'pending', "
@@ -759,6 +799,7 @@ class PostgresChannel(BaseChannel):
                         "Released stuck user msg {} (retry {}/{})",
                         msg_id, retry_count, max_retries,
                     )
+                    recovered.append(msg_id)
 
             # orphaned assistant-сообщения без живой user-пары
             await conn.execute(
@@ -769,6 +810,8 @@ class PostgresChannel(BaseChannel):
                 timeout_s,
             )
 
+        return recovered
+
     async def _unstick_loop(self) -> None:
         """Фоновая задача: периодически откатывает зависшие ``processing``.
 
@@ -776,13 +819,27 @@ class PostgresChannel(BaseChannel):
         ``_lease_loop`` + ``agent_worker_claims``). Интервал — значительно
         больше ``poll_interval``, чтобы на пустом столе ``SELECT зависших``
         не выполнялся каждые ``poll_interval`` секунд.
+
+        Для каждого восстановленного ``user_msg_id`` снимает локальное
+        состояние воркера (``_msg_ctx``, ``_leases``, ``_msg_chat``,
+        ``_chat_inflight``, ``exchange.inflight``). Без этого воркер
+        остался бы с заполненным слотом, и polling не поднял бы новые
+        сообщения даже после восстановления БД.
         """
         while self._running:
             await asyncio.sleep(self._unstick_interval)
             if not self._running:
                 break
             try:
-                await self._unstick_processing()
+                recovered = await self._unstick_processing()
+                for msg_id in recovered:
+                    if msg_id in self._msg_ctx or msg_id in self.exchange.inflight:
+                        self._msg_ctx.pop(msg_id, None)
+                        self._leases.discard(msg_id)
+                        self._release_slot(msg_id)
+                        self.logger.info(
+                            "Cleared local state for unstuck msg {}", msg_id,
+                        )
             except Exception as e:
                 self.logger.error("Unstick loop error: {}", e)
 
@@ -918,6 +975,7 @@ class PostgresChannel(BaseChannel):
         self._leases.add(user_msg_id)
         chat_id = str(row["chat_id"]) if row["chat_id"] else str(row["user_id"])
         user_id = str(row["user_id"]) if row["user_id"] else chat_id
+        self._lifecycle_log("claimed", user_msg_id, chat_id=chat_id)
 
         # Не диспатчим, если из этого chat_id уже есть активное сообщение
         # в этом же процессе (в БД chat уже считается занятым, но защищаемся
@@ -956,6 +1014,10 @@ class PostgresChannel(BaseChannel):
         # Создаём assistant-placeholder, чтобы Streamlit мог начать опрос
         try:
             assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id)
+            self._lifecycle_log(
+                "assistant_created", user_msg_id, chat_id=chat_id,
+                assistant_msg_id=assistant_msg_id,
+            )
         except Exception:
             self.logger.exception(
                 "Failed to insert assistant placeholder for {}", user_msg_id,
@@ -1098,13 +1160,18 @@ class PostgresChannel(BaseChannel):
                     user_msg_id, retry_count, self._max_stuck_retries, reason,
                 )
             await self._delete_claim(conn, user_msg_id)
+        status = "error" if retry_count < self._max_stuck_retries else "failed"
+        self._lifecycle_log(
+            "failed", user_msg_id, chat_id=chat_id,
+            assistant_msg_id=assistant_msg_id,
+            extra={"reason": reason, "status": status},
+        )
         self._leases.discard(user_msg_id)
         self._msg_ctx.pop(user_msg_id, None)
         self._release_slot(user_msg_id)
         if assistant_msg_id:
             self._reasoning_buffers.pop(assistant_msg_id, None)
         self._drop_context_bridge(chat_id)
-        status = "error" if retry_count < self._max_stuck_retries else "failed"
         self._activity_print(
             f"← [task-worker] {self._worker_id} закончил задачу {user_msg_id} "
             f"(chat {chat_id or '?'}) [{status}]: {reason}"
@@ -1357,29 +1424,59 @@ class PostgresChannel(BaseChannel):
     ) -> None:
         """Зафинализировать оборот: записать ответ, закрыть claim и слот.
 
-        Вызывается один раз за оборот — на маркере ``_turn_end`` (или на
-        legacy-финале с ``latency_ms``). Единственное место, где:
-          — снимается ``_msg_ctx`` (``pop``);
-          — ``status='completed'`` и удаляется claim;
-          — освобождается слот параллельности.
+        Единственное место, где снимается ``_msg_ctx``, ставится
+        ``status='completed'``, удаляется claim и освобождается слот.
 
-        ``_release_slot`` вызывается ПОСЛЕ успешной записи (и на ошибке через
-        ``_mark_failed``). Раньше его вызывали до транзакции — задача снималась
-        с heartbeat (``_leases``), claim ещё жил, и ``_reclaim_and_heal`` на
-        другом воркере мог забрать задачу и довести до ``failed``.
+        Инвариант порядка (P0 — «DB-first»):
+          1. ``_resolve_turn_context`` — собрать user/assistant/chat
+          2. **DB transaction** (UPDATE assistant → UPDATE user → DELETE claim)
+          3. Только после успешного commit:
+             ``_msg_ctx.pop`` → ``_leases.discard`` → ``_release_slot``.
+          4. На исключении — ``_mark_failed`` (он сам управляет cleanup).
+
+        Это исключает ситуацию «локально отпустили, а БД всё ещё processing».
         """
-        ctx = self._msg_ctx.pop(msg_id, {}) if msg_id else {}
-        assistant_msg_id = ctx.get("assistant_msg_id") or meta.get("answer_id")
-        if not assistant_msg_id:
-            self._release_slot(msg_id)
-            self.logger.warning("send: no assistant_msg_id for msg_id={}", msg_id)
-            if msg.chat_id:
-                self._drop_context_bridge(msg.chat_id)
+        ctx_meta = await self._resolve_turn_context(
+            meta,
+            chat_id=msg.chat_id,
+            explicit_msg_id=msg_id,
+        )
+        user_msg_id = ctx_meta["user_msg_id"]
+        assistant_msg_id = ctx_meta["assistant_msg_id"]
+        chat_id = ctx_meta["chat_id"] or msg.chat_id
+
+        if not user_msg_id or not assistant_msg_id:
+            self.logger.warning(
+                "send: cannot resolve turn context (user={}, assistant={}, "
+                "meta_keys={}); forcing deterministic failure",
+                user_msg_id, assistant_msg_id, sorted(meta.keys()),
+            )
+            await self._cleanup_unresolvable_turn(chat_id, user_msg_id, assistant_msg_id)
             return
 
-        # Дописываем остатки рассуждений перед финальным ответом
+        ctx = self._msg_ctx.get(user_msg_id) or {}
+
+        self._lifecycle_log(
+            "final_received", user_msg_id, chat_id=chat_id,
+            assistant_msg_id=assistant_msg_id,
+            extra={
+                "origin_message_id": meta.get("origin_message_id"),
+                "message_id": meta.get("message_id"),
+                "answer_id": meta.get("answer_id"),
+                "_final_turn": meta.get("_final_turn"),
+                "_turn_end": meta.get("_turn_end"),
+                "_stream_end": meta.get("_stream_end"),
+                "streamed": meta.get("streamed"),
+                "has_content": bool(msg.content),
+                "resolver": ctx_meta.get("source"),
+            },
+        )
+
+        # Дописываем остатки рассуждений перед финальным ответом.
+        # Делаем это ВНЕ финальной транзакции (race с _flush_reasoning
+        # исключается через _reasoning_io_lock).
         reasoning_delta = ""
-        if assistant_msg_id and assistant_msg_id in self._reasoning_buffers:
+        if assistant_msg_id in self._reasoning_buffers:
             delta = self._reasoning_buffers.pop(assistant_msg_id, "")
             if delta:
                 reasoning_delta = delta
@@ -1387,8 +1484,6 @@ class PostgresChannel(BaseChannel):
             buf = " ".join(ctx["reasoning_buf"])
             reasoning_delta = buf + (" " if reasoning_delta else "") + reasoning_delta
         if reasoning_delta:
-            # atomic append через _reasoning_io_lock — исключает race
-            # с параллельным _flush_reasoning
             async with self._reasoning_io_lock:
                 row = await fetchone(
                     f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
@@ -1398,37 +1493,33 @@ class PostgresChannel(BaseChannel):
                     meta_row = _decode_jsonb(row["metadata"])
                     meta_row["reasoning"] = (meta_row.get("reasoning") or "") + reasoning_delta
                     await execute(
-                        f"UPDATE {self._fq_table} SET metadata = %s, updated_at = NOW() WHERE id = %s",
+                        f"UPDATE {self._fq_table} SET metadata = %s, "
+                        f"updated_at = NOW() WHERE id = %s",
                         meta_row, assistant_msg_id,
                     )
 
-        chat_id = msg.chat_id
-
-        # Кодируем локальные файлы в data URL для хранения в БД
         db_media = await self._embed_media_for_db(msg.media or [])
 
         try:
             async with transaction() as conn:
                 row = await conn.fetchrow(
-                    f"SELECT metadata, media, content FROM {self._fq_table} WHERE id = %s",
+                    f"SELECT metadata, media, content FROM {self._fq_table} "
+                    f"WHERE id = %s",
                     assistant_msg_id,
                 )
                 existing_meta = _decode_jsonb(row["metadata"]) if row else {}
                 existing_meta.update(meta)
-                # Не затираем вложения, прикреплённые тулом message в этом же
-                # обороте: если финальный ответ приходит без собственных media,
-                # сохраняем ранее записанные data URL.
                 existing_media = row["media"] if row else []
                 if isinstance(existing_media, str):
                     existing_media = json.loads(existing_media) if existing_media else []
                 if not isinstance(existing_media, list):
                     existing_media = []
                 final_media = db_media if db_media else existing_media
-                # Если финальный outbound пуст (синтетический ``_turn_end``
-                # после message(...)), сохраняем контент, накопленный merge'ем.
                 existing_content = row["content"] if row else ""
                 if not isinstance(existing_content, str):
                     existing_content = ""
+                # Пустой final_content (синтетический _final_turn после
+                # message(...)) → берём накопленный merge'ом.
                 final_content = msg.content if msg.content else existing_content
                 await conn.execute(
                     f"UPDATE {self._fq_table} "
@@ -1439,26 +1530,43 @@ class PostgresChannel(BaseChannel):
                     Json(msg.buttons or []), Json(final_media),
                     assistant_msg_id,
                 )
-                if msg_id:
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'completed', "
-                        f"updated_at = NOW() WHERE id = %s",
-                        msg_id,
-                    )
-                    await self._delete_claim(conn, msg_id)
-            # Слот освобождаем ПОСЛЕ успешной записи клейма/статуса.
-            self._release_slot(msg_id)
-            self._activity_print(
-                f"← [task-worker] {self._worker_id} закончил задачу {msg_id} "
-                f"(chat {chat_id}) [completed]"
+                await conn.execute(
+                    f"UPDATE {self._fq_table} SET status = 'completed', "
+                    f"updated_at = NOW() WHERE id = %s",
+                    user_msg_id,
+                )
+                await self._delete_claim(conn, user_msg_id)
+            self._lifecycle_log(
+                "db_committed", user_msg_id, chat_id=chat_id,
+                assistant_msg_id=assistant_msg_id,
             )
         except Exception:
-            self.logger.exception("Failed to write response for {}", chat_id)
-            if msg_id:
-                await self._mark_failed(msg_id, assistant_msg_id, "write_error")
-        finally:
-            if chat_id:
-                self._drop_context_bridge(chat_id)
+            self.logger.exception(
+                "Failed to write response for user={} chat={}",
+                user_msg_id, chat_id,
+            )
+            self._lifecycle_log(
+                "finalization_error", user_msg_id, chat_id=chat_id,
+                assistant_msg_id=assistant_msg_id, extra={"reason": "write_error"},
+            )
+            await self._mark_failed(
+                user_msg_id, assistant_msg_id, "write_error",
+            )
+            return
+
+        self._lifecycle_log(
+            "local_released", user_msg_id, chat_id=chat_id,
+            assistant_msg_id=assistant_msg_id,
+        )
+        self._msg_ctx.pop(user_msg_id, None)
+        self._leases.discard(user_msg_id)
+        self._release_slot(user_msg_id)
+        if chat_id:
+            self._drop_context_bridge(chat_id)
+        self._activity_print(
+            f"← [task-worker] {self._worker_id} закончил задачу {user_msg_id} "
+            f"(chat {chat_id}) [completed]"
+        )
 
     async def send_delta(
         self,
@@ -1475,57 +1583,52 @@ class PostgresChannel(BaseChannel):
         Когда агент использует стриминг (потоковую генерацию),
         каждый фрагмент текста приходит через ``send_delta``.
 
-        Совместимость с ``nanobot 0.3.0``: ``stream_id`` приходит как kwarg;
-        ``stream_end`` маркирует последний чанк; ``resuming`` — возобновление
-        потока (буфер не сбрасывается).
-
         Поведение:
-          — ``stream_end=True`` → финализируем: достаём накопленный текст,
-            пишем в БД как status='completed', освобождаем слот.
-          — Иначе → накапливаем текст в ``_stream_buffers[stream_id]``.
+          — **накопление**: текст дописывается в ``_stream_buffers[stream_id]``
+            (или по ``_stream_id`` из metadata, или по ``chat_id``);
+          — **stream_end=True** → формируется синтетический финальный
+            OutboundMessage с накопленным контентом и пробрасывается в
+            единый ``_finalize_turn`` (тот же путь, что ``_turn_end``).
+
+        ``stream_end`` всегда завершает оборот, даже если контент пустой:
+        в этом случае ``_finalize_turn`` возьмёт уже накопленный текст из
+        assistant-строки (через ``existing_content``), либо запишет пустую
+        строку как content (но lifecycle закроется в БД).
+
+        ``send_delta`` НЕ управляет lifecycle финализации напрямую — это
+        исключает двойную запись в БД и рассинхрон с ``_finalize_turn``.
         """
-        del resuming  # на текущей стороне буфер ключуется по stream_id
+        del resuming  # буфер ключуется по stream_id; resuming не нужен
         meta = dict(metadata or {})
         buf_key = stream_id or meta.get("_stream_id") or chat_id
 
-        if stream_end or meta.get("_stream_end"):
-            msg_id = meta.get("origin_message_id") or meta.get("message_id")
-            ctx = self._msg_ctx.pop(msg_id, {}) if msg_id else {}
-            stream_chat_id = self._msg_chat.get(msg_id) if msg_id else None
-            self._release_slot(msg_id)
-            assistant_msg_id = ctx.get("assistant_msg_id") or meta.get("answer_id")
-
-            if ctx.get("reasoning_buf"):
-                meta["reasoning"] = " ".join(ctx["reasoning_buf"])
-
-            content = self._stream_buffers.pop(buf_key, "")
-            if content and assistant_msg_id:
-                async with transaction() as conn:
-                    row = await conn.fetchrow(
-                        f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
-                        assistant_msg_id,
-                    )
-                    existing_meta = _decode_jsonb(row["metadata"]) if row else {}
-                    existing_meta.update(meta | {"streamed": True})
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET content = %s, "
-                        f"metadata = %s, status = 'completed', updated_at = NOW() WHERE id = %s",
-                        content, existing_meta, assistant_msg_id,
-                    )
-                    if msg_id:
-                        await conn.execute(
-                            f"UPDATE {self._fq_table} SET status = 'completed', "
-                            f"updated_at = NOW() WHERE id = %s",
-                            msg_id,
-                        )
-                        await self._delete_claim(conn, msg_id)
-                        self._activity_print(
-                            f"← [task-worker] {self._worker_id} закончил задачу {msg_id} "
-                            f"(chat {stream_chat_id or '?'}) [streamed/completed]"
-                        )
-        else:
+        if not (stream_end or meta.get("_stream_end")):
             buf = self._stream_buffers.get(buf_key, "")
             self._stream_buffers[buf_key] = buf + delta
+            return
+
+        content = self._stream_buffers.pop(buf_key, "")
+        # Прокидываем «streamed» в metadata, чтобы финализатор не потерял
+        # признак стриминга в журнале.
+        final_meta = dict(meta)
+        final_meta["streamed"] = True
+        final_meta["_final_turn"] = True
+        # msg_id достаём так же, как в resolve, чтобы пустой контент не
+        # приводил к потере контекста.
+        msg_id_hint = (
+            meta.get("origin_message_id") or meta.get("message_id")
+            or final_meta.get("origin_message_id")
+        )
+
+        synthetic = OutboundMessage(
+            channel=self.name,
+            chat_id=chat_id,
+            content=content,
+            media=[],
+            metadata=final_meta,
+            buttons=[],
+        )
+        await self._finalize_turn(synthetic, final_meta, msg_id_hint)
 
     # ------------------------------------------------------------------
     # Управление слотами параллельности
@@ -1561,6 +1664,52 @@ class PostgresChannel(BaseChannel):
         if chat_id:
             self._chat_inflight.discard(chat_id)
 
+    async def _cleanup_unresolvable_turn(
+        self,
+        chat_id: str | None,
+        user_msg_id: str | None,
+        assistant_msg_id: str | None,
+    ) -> None:
+        """Очистить локальное состояние при нерезолвенном контексте оборота.
+
+        Используется, когда ``_resolve_turn_context`` не смог однозначно
+        связать outbound с задачей (нет ``origin_message_id``/``answer_id``,
+        не найден ``_msg_ctx``). В этом случае мы не можем корректно
+        финализировать БД, но обязаны снять локальные хвосты, иначе
+        слот/лист_инфлайт останутся занятыми → polling зависнет.
+
+        Алгоритм:
+          1. Если есть хоть какой-то ``user_msg_id`` — ``_mark_failed``;
+             на ошибке БД всё равно чистим локал.
+          2. Иначе — ищем все user_msg_id в ``_msg_chat`` для ``chat_id``
+             и чистим их напрямую (для одного чата воркер держит
+             не более одной задачи).
+          3. ``_drop_context_bridge`` для chat_id.
+        """
+        candidates: list[str] = []
+        if user_msg_id:
+            candidates.append(user_msg_id)
+        elif chat_id:
+            for mid, cid in list(self._msg_chat.items()):
+                if cid == chat_id:
+                    candidates.append(mid)
+
+        for mid in candidates:
+            self._lifecycle_log(
+                "unresolvable_cleanup", mid, chat_id=chat_id,
+                assistant_msg_id=assistant_msg_id,
+            )
+            await self._mark_failed(
+                mid, assistant_msg_id, "unresolvable_context",
+            )
+            if mid in self._msg_ctx or mid in self.exchange.inflight:
+                self._msg_ctx.pop(mid, None)
+                self._leases.discard(mid)
+                self._release_slot(mid)
+        if chat_id:
+            self._chat_inflight.discard(chat_id)
+            self._drop_context_bridge(chat_id)
+
     # ------------------------------------------------------------------
     # Вспомогательные методы
     # ------------------------------------------------------------------
@@ -1584,6 +1733,95 @@ class PostgresChannel(BaseChannel):
             if ctx:
                 return ctx.get("assistant_msg_id")
         return None
+
+    async def _resolve_turn_context(
+        self,
+        meta: dict[str, Any] | None,
+        *,
+        chat_id: str | None = None,
+        explicit_msg_id: str | None = None,
+        explicit_assistant_msg_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Единый резолвер контекста оборота: ``user_msg_id`` +
+        ``assistant_msg_id`` + ``chat_id``.
+
+        Приоритет для ``user_msg_id`` (одно поле outbound):
+          1. ``meta.origin_message_id`` / ``meta.message_id``;
+          2. ``explicit_msg_id`` (если резолвер вызван из ``send_delta``);
+          3. ``_msg_ctx`` (по ``origin_message_id`` → ``message_id`` → ``answer_id``);
+          4. ``answer_id`` → SELECT assistant.reply_to (восстановление владельца).
+
+        Приоритет для ``assistant_msg_id``:
+          1. ``explicit_assistant_msg_id``;
+          2. ``meta.answer_id``;
+          3. ``_msg_ctx[user_msg_id]["assistant_msg_id"]``.
+
+        Возвращает dict::
+
+            {
+                "user_msg_id": str | None,
+                "assistant_msg_id": str | None,
+                "chat_id": str | None,
+                "source": "meta" | "ctx" | "reply_to" | None,
+            }
+
+        Гарантия: если оба ``user_msg_id`` и ``assistant_msg_id`` найдены,
+        оборот можно финализировать; иначе — детерминированный ``failed``
+        (см. ``_finalize_turn``).
+        """
+        m = dict(meta or {})
+        result: dict[str, Any] = {
+            "user_msg_id": None,
+            "assistant_msg_id": None,
+            "chat_id": chat_id,
+            "source": None,
+        }
+
+        result["user_msg_id"] = (
+            explicit_msg_id
+            or m.get("origin_message_id")
+            or m.get("message_id")
+        )
+
+        aid = explicit_assistant_msg_id or m.get("answer_id")
+        if aid:
+            result["assistant_msg_id"] = str(aid)
+
+        if result["user_msg_id"] and not result["assistant_msg_id"]:
+            ctx = self._msg_ctx.get(result["user_msg_id"]) or {}
+            if ctx.get("assistant_msg_id"):
+                result["assistant_msg_id"] = ctx["assistant_msg_id"]
+                result["source"] = "ctx"
+
+        if result["user_msg_id"] and not result["chat_id"]:
+            chat_from_ctx = (self._msg_chat.get(result["user_msg_id"]))
+            if chat_from_ctx:
+                result["chat_id"] = chat_from_ctx
+
+        if not result["user_msg_id"] and result["assistant_msg_id"]:
+            aid = result["assistant_msg_id"]
+            try:
+                row = await fetchone(
+                    f"SELECT reply_to FROM {self._fq_table} WHERE id = %s",
+                    aid,
+                )
+            except Exception:
+                row = None
+            if row and row.get("reply_to"):
+                result["user_msg_id"] = str(row["reply_to"])
+                result["source"] = "reply_to"
+
+        if result["user_msg_id"] and not result["assistant_msg_id"]:
+            ctx = self._msg_ctx.get(result["user_msg_id"]) or {}
+            if ctx.get("assistant_msg_id"):
+                result["assistant_msg_id"] = ctx["assistant_msg_id"]
+                if not result["source"]:
+                    result["source"] = "ctx"
+
+        if result["user_msg_id"] and not result["source"]:
+            result["source"] = "meta"
+
+        return result
 
     # ------------------------------------------------------------------
     # Конфиг по умолчанию (для ``nanobot onboard``)

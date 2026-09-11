@@ -536,6 +536,79 @@
   и обоснование: `workspace/skills/legal_summarizer/ARCHITECTURE.md`
   §21 + § Deprecation.
 
+### Fixed (postgres_channel: lifecycle deadlock при `stream_end` с пустым delta и потерянном `origin_message_id`)
+
+Главное замечание по каналу из production-логов: после ответа агента
+polling мог остановиться, потому что `exchange._inflight` оставался
+занятым. Жизненный цикл задачи был размазан между путями финализации
+(`send` / `send_delta` / `_finalize_turn` / `_mark_failed`), и каждый
+путь по-своему управлял локальным состоянием. Восстановление через
+`processing_timeout` / `unstick_interval` маскировало проблему, но
+не лечило её.
+
+Что исправлено:
+
+- **Единый резолвер контекста оборота (`_resolve_turn_context`)** —
+  один источник истины для `user_msg_id` / `assistant_msg_id` /
+  `chat_id`. Приоритет: `origin_message_id`/`message_id` →
+  `_msg_ctx` → `answer_id → SELECT assistant.reply_to` (восстановление
+  владельца по единственному доступному id). Заменяет десяток
+  fallback'ов, ранее разбросанных по `send`/`send_delta`/`_finalize_turn`.
+- **DB-first порядок в `_finalize_turn`** — теперь сначала выполняется
+  транзакция (UPDATE assistant → UPDATE user → DELETE claim), и только
+  после успешного commit снимаются `_msg_ctx`, `_leases`, слот,
+  `exchange.inflight`. Раньше `_msg_ctx.pop` и `_release_slot`
+  выполнялись до транзакции, и при ошибке БД локальное состояние
+  рассинхронизировалось с БД.
+- **Унификация `send_delta` через `_finalize_turn`** — `stream_end=True`
+  формирует синтетический `OutboundMessage` с накопленным буфером и
+  пробрасывается в общий финализатор. Убран собственный DB-write
+  в `send_delta` с опасным `if content and assistant_msg_id:`
+  (при пустом `delta`/`content` БД оставалась в `processing` — главный
+  источник зависаний). Теперь `stream_end` всегда завершает lifecycle,
+  даже с пустым содержимым.
+- **Детерминированный failed при нерезолвенном контексте
+  (`_cleanup_unresolvable_turn`)** — если outbound с `_final_turn` не
+  содержит ни `origin_message_id`, ни `answer_id` и `_msg_ctx` пуст,
+  канал больше не делает silent no-op, а маркирует задачу как failed
+  и снимает локальные хвосты по `chat_id`. Раньше такие аномалии
+  оставляли `_msg_ctx`/`_leases`/`exchange.inflight` занятыми → polling
+  зависал.
+- **`_unstick_processing` возвращает список восстановленных
+  `user_msg_id`** — `_unstick_loop` теперь чистит `_msg_ctx`,
+  `_leases`, `_msg_chat`, `_chat_inflight`, `exchange.inflight`
+  для каждой задачи, которую БД вернула в `pending`/`failed`.
+  Раньше восстановление БД не синхронизировалось с локальным
+  состоянием воркера, и слот оставался занятым.
+- **Lifecycle-логи (`_lifecycle_log`)** — каждая фаза (`claimed`,
+  `assistant_created`, `final_received`, `db_committed`,
+  `local_released`, `failed`, `unresolvable_cleanup`) пишет одну
+  строку `TASK lifecycle task=<id> phase=<phase> ...`. Фаза
+  `final_received` дополнительно содержит маркеры outbound
+  (`_final_turn`/`_turn_end`/`_stream_end`/`streamed`/resolver),
+  по которым можно реконструировать сценарий зависшего процесса.
+- **Новые тесты:**
+  - `tests/test_postgres_channel.py::TestPostgresChannelTurnLifecycle`
+    (7 тестов) — unit-тесты на lifecycle: обычный финал, `_turn_end`,
+    streaming с буфером, `stream_end` с пустым delta (был завис),
+    восстановление по `answer_id` через `reply_to`, финал без
+    id (детерминированный failed без утечек локала).
+  - `tests/test_postgres_channel.py::TestPostgresChannelLifecycleDiagnostics`
+    — проверяет, что `final_received`/`db_committed`/`local_released`
+    пишутся в DEBUG-логе ровно по одной строке на фазу.
+  - `tests/integration/test_postgres_channel_lifecycle_stress.py` —
+    opt-in integration-тест (под `NANOBOT_INTEGRATION=1`) против
+    реальной PostgreSQL: 5 сценариев финала + серия из 4 разных
+    финалов с проверкой, что polling поднимает следующую задачу
+    без перезапуска.
+
+Не входит в этот фикс (по плану):
+
+- Изменения `MessageExchange` — он и так работает корректно при условии,
+  что канал гарантирует освобождение `_inflight`. Теперь гарантия есть.
+- Watchdog, глобальный `exchange.reset()`, увеличение
+  `processing_timeout` — не нужны, так как исправлен корневой lifecycle.
+
 ### Fixed (legal_summarizer: 4 бага — follow-up invariants)
 
 Продолжение регрессионного hardening после merge-коммита
@@ -1263,7 +1336,7 @@ Skill `audit_analyzer` теперь — это `SKILL.md` + `references/`
 `duckdb_query`, `vector_search`, `column_descriptions`.
 
 - **End-to-end 3-mode CLI** в `workspace/skills/audit_analyzer/scripts/cli.py`:
-  `predefined` (Python-реестр `predefined/scripts.py` с `REGISTRY` /
+  `predefined` (Python-реестр `scripts/predefined/scripts.py` с `REGISTRY` /
   `get_script`), `generated_sql` (через `nl_sql_runner`), `vector`. Единый
   signature_status API; контракт `query_sql/dict-rows`.
 - **`audit_analyzer` predefined-пакет** (`workspace/skills/audit_analyzer/scripts/predefined/`):

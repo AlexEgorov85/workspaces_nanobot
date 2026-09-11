@@ -1062,3 +1062,269 @@ class TestPostgresChannelContextWindow:
         ch._drop_context_bridge(None)
 
         assert get_context_window("postgres:chat-1") is not None
+
+
+def _claim_task(ch, user_msg_id="m-1", chat_id="chat-1", assistant_msg_id="a-1"):
+    """Симулировать «воркер взял задачу»: поднять всё локальное состояние.
+
+    Возвращает объект ``OutboundMessage``-mock, готовый к финалу.
+    """
+    ch.exchange.add_inflight(user_msg_id)
+    ch._chat_inflight.add(chat_id)
+    ch._msg_chat[user_msg_id] = chat_id
+    ch._msg_ctx[user_msg_id] = {"assistant_msg_id": assistant_msg_id}
+    ch._leases.add(user_msg_id)
+
+
+def _outbound(content="Final answer", chat_id="chat-1", **meta):
+    """Собрать ``OutboundMessage``-mock с заданными полями."""
+    msg = MagicMock()
+    msg.event = None
+    msg.content = content
+    msg.chat_id = chat_id
+    msg.metadata = meta
+    msg.media = []
+    msg.buttons = []
+    return msg
+
+
+def _assert_local_clean(ch, user_msg_id, chat_id):
+    """После успешной финализации всё локальное состояние пусто."""
+    assert user_msg_id not in ch._msg_ctx
+    assert user_msg_id not in ch.exchange.inflight
+    assert user_msg_id not in ch._msg_chat
+    assert user_msg_id not in ch._leases
+    assert chat_id not in ch._chat_inflight
+
+
+class TestPostgresChannelTurnLifecycle:
+    """Lifecycle-инвариант: после финала (любого пути) локальное состояние
+    полностью очищено. Каждый тест поднимает «захваченную задачу» через
+    ``_claim_task`` и затем отправляет финальный outbound. Если канал
+    оставляет хвосты (ctx/inflight/lease/chat), соответствующий
+    ассерт упадёт — это и есть «репродукция бага».
+    """
+
+    @pytest.mark.asyncio
+    async def test_final_turn_full_lifecycle(self, mock_db_and_psycopg):
+        """Тест 1: обычный ``_final_turn`` финал. Все структуры очищены."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+        )
+        _claim_task(ch, user_msg_id="m-1", chat_id="chat-1", assistant_msg_id="a-1")
+
+        await ch.send(_outbound(
+            content="Final answer",
+            origin_message_id="m-1",
+            answer_id="a-1",
+            _final_turn=True,
+        ))
+
+        _assert_local_clean(ch, "m-1", "chat-1")
+        claim_sqls = [c.args[0] for c in conn.execute.call_args_list]
+        assert any("DELETE FROM" in s and "agent_worker_claims" in s for s in claim_sqls)
+        assert any("UPDATE" in s and "completed" in s for s in claim_sqls)
+
+    @pytest.mark.asyncio
+    async def test_turn_end_finalizes(self, mock_db_and_psycopg):
+        """Тест 3: legacy ``_turn_end`` маркер финализирует оборот."""
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+        )
+        _claim_task(ch, user_msg_id="m-2", chat_id="chat-2", assistant_msg_id="a-2")
+
+        await ch.send(_outbound(
+            content="done",
+            origin_message_id="m-2",
+            answer_id="a-2",
+            _turn_end=True,
+        ))
+
+        _assert_local_clean(ch, "m-2", "chat-2")
+
+    @pytest.mark.asyncio
+    async def test_streaming_final_with_buffer(self, mock_db_and_psycopg):
+        """Тест 4: стрим с накопленным буфером + ``stream_end=True``.
+        Контент непустой → всё завершается штатно.
+        """
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {
+            "metadata": "{}", "media": [], "content": "",
+        }
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+        )
+        _claim_task(ch, user_msg_id="m-3", chat_id="chat-3", assistant_msg_id="a-3")
+        ch._stream_buffers["s-3"] = "Hello streamed world"
+
+        await ch.send_delta("chat-3", "", {
+            "_stream_end": True,
+            "_stream_id": "s-3",
+            "origin_message_id": "m-3",
+            "answer_id": "a-3",
+        })
+
+        _assert_local_clean(ch, "m-3", "chat-3")
+        assert "s-3" not in ch._stream_buffers
+        claim_sqls = [c.args[0] for c in conn.execute.call_args_list]
+        assert any("UPDATE" in s and "completed" in s for s in claim_sqls)
+
+    @pytest.mark.asyncio
+    async def test_stream_end_empty_delta_still_finalizes(self, mock_db_and_psycopg):
+        """Тест 5: критический — ``stream_end=True`` с пустым delta.
+
+        Текущий код в ``send_delta`` ставит ``if content and assistant_msg_id:``
+        → при пустом буфере DB-финализация не выполняется, но локальное
+        состояние (``_msg_ctx``, ``_leases``, ``exchange.inflight``) уже
+        очищено через ``_msg_ctx.pop`` и ``_release_slot``. Задача остаётся
+        в ``processing`` в БД и слот в inflight.
+        """
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {
+            "metadata": "{}", "media": [], "content": "",
+        }
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+        )
+        _claim_task(ch, user_msg_id="m-4", chat_id="chat-4", assistant_msg_id="a-4")
+        ch._stream_buffers["s-4"] = ""
+
+        await ch.send_delta("chat-4", "", {
+            "_stream_end": True,
+            "_stream_id": "s-4",
+            "origin_message_id": "m-4",
+            "answer_id": "a-4",
+        })
+
+        _assert_local_clean(ch, "m-4", "chat-4")
+        claim_sqls = [c.args[0] for c in conn.execute.call_args_list]
+        assert any(
+            "UPDATE" in s and "completed" in s and "WHERE id = %s" in s
+            for s in claim_sqls
+        ), f"no UPDATE…completed in {claim_sqls}"
+
+    @pytest.mark.asyncio
+    async def test_final_with_only_answer_id_recovers_user(self, mock_db_and_psycopg):
+        """Тест 6: потерян ``origin_message_id``/``message_id``, есть только
+        ``answer_id``. Канал должен восстановить user_msg_id через
+        ``reply_to`` assistant-строки и завершить оборот.
+        """
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+        )
+        _claim_task(ch, user_msg_id="m-5", chat_id="chat-5", assistant_msg_id="a-5")
+
+        with patch(
+            "lib.channels.postgres_channel.fetchone",
+            AsyncMock(return_value={"reply_to": "m-5"}),
+        ) as patched:
+            await ch.send(_outbound(
+                content="Final answer",
+                chat_id="chat-5",
+                answer_id="a-5",
+                _final_turn=True,
+            ))
+            assert patched.called
+
+        _assert_local_clean(ch, "m-5", "chat-5")
+
+    @pytest.mark.asyncio
+    async def test_final_without_any_ids_does_not_leak_state(self, mock_db_and_psycopg):
+        """Тест 6б: ни ``origin_message_id``, ни ``answer_id``. Не молчаливый
+        no-op — задача должна быть терминально failed, локал очищен.
+        """
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {"metadata": "{}", "retry_count": 5}
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+        )
+        _claim_task(ch, user_msg_id="m-6", chat_id="chat-6", assistant_msg_id="a-6")
+
+        await ch.send(_outbound(
+            content="orphan",
+            chat_id="chat-6",
+            _final_turn=True,
+        ))
+
+        assert "m-6" not in ch._msg_ctx
+        assert "m-6" not in ch.exchange.inflight
+        assert "chat-6" not in ch._chat_inflight
+
+
+class TestPostgresChannelReleaseSlotDiagnostics:
+    """``_release_slot`` идемпотентен; повторный release неизвестного id —
+    не бесшумный (логирует debug/warning), но не падает."""
+
+    def test_release_unknown_id_does_not_raise(self, mock_db_and_psycopg):
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        ch = _make_channel((PostgresChannel, None, mock_db))
+        ch._release_slot("never-seen")
+        assert "never-seen" not in ch.exchange.inflight
+
+
+class TestPostgresChannelLifecycleDiagnostics:
+    """Каждая фаза оборота пишет ровно одну ``TASK lifecycle`` строку.
+
+    Без этих логов следующий зависший процесс будет невозможно
+    диагностировать: непонятно, дошёл ли клейм, дошла ли финализация,
+    был ли пустой content, был ли сбой транзакции.
+    """
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_phases_logged(self, mock_db_and_psycopg):
+        """Final outbound → логируются final_received, db_committed,
+        local_released (по одной строке на каждую фазу).
+        """
+        PostgresChannel, _, mock_db = mock_db_and_psycopg
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {"metadata": "{}", "media": [], "content": ""}
+        mock_db.async_transaction.return_value.__aenter__.return_value = conn
+
+        ch = _make_channel(
+            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+        )
+        _claim_task(ch, user_msg_id="m-L", chat_id="chat-L", assistant_msg_id="a-L")
+
+        import io
+        from loguru import logger as _loguru
+        sink = io.StringIO()
+        handler_id = _loguru.add(sink, level="DEBUG", format="{message}")
+
+        try:
+            await ch.send(_outbound(
+                content="done",
+                origin_message_id="m-L",
+                answer_id="a-L",
+                _final_turn=True,
+            ))
+        finally:
+            _loguru.remove(handler_id)
+
+        joined = sink.getvalue()
+        assert "phase=final_received" in joined
+        assert "phase=db_committed" in joined
+        assert "phase=local_released" in joined

@@ -1132,6 +1132,69 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
 чата блокируется. Пример корректного паттерна — `lib/commands/compact_command.py`
 (ставит `_final_turn` во все свои `OutboundMessage`).
 
+### Lifecycle-инвариант оборота (PostgresChannel)
+
+Жизненный цикл одной задачи в `PostgresChannel` от claim до terminal status
+описан инвариантом:
+
+> **Каждая захваченная задача имеет ровно один завершённый lifecycle:
+> `claim → processing → terminal status → release local state`.**
+
+После ответа агента должны быть закрыты:
+
+* user-сообщение: `processing → completed | error | failed`;
+* assistant-сообщение: `processing → completed` (или удалено в `error`/`failed`);
+* `agent_worker_claims.lease` удалён (только `worker_pool`);
+* `_msg_ctx`, `_msg_chat`, `_chat_inflight`, `_leases`, `exchange._inflight`
+  — все пусты для этого `user_msg_id`/`chat_id`.
+
+Ключевые инварианты реализации:
+
+1. **DB-first порядок в `_finalize_turn`** (`postgres_channel.py:_finalize_turn`).
+   Сначала выполняется транзакция (UPDATE assistant → UPDATE user →
+   DELETE claim), и только после успешного commit снимаются
+   `_msg_ctx`, `_leases`, `_release_slot`. Раньше `pop`/`release` шли
+   до транзакции, и при ошибке БД локальное состояние рассинхронизировалось
+   с БД.
+2. **Единый резолвер `_resolve_turn_context`** (Phase 2 плана фикса
+   lifecycle deadlock). Один источник истины для `user_msg_id` /
+   `assistant_msg_id` / `chat_id`:
+   `origin_message_id` → `message_id` → `_msg_ctx` →
+   `answer_id → SELECT assistant.reply_to`. Заменяет разбросанные fallback'ы.
+3. **`send_delta(stream_end=True)` делегирует в `_finalize_turn`**.
+   Синтетический `OutboundMessage` с накопленным буфером пробрасывается
+   в общий финализатор. `stream_end` всегда завершает lifecycle, даже
+   при пустом `delta` (раньше при пустом буфере DB-финализация
+   пропускалась из-за `if content and assistant_msg_id:`, и задача
+   оставалась в `processing` → polling зависал).
+4. **Детерминированный failed при нерезолвенном контексте
+   (`_cleanup_unresolvable_turn`)** — если outbound с `_final_turn`
+   не содержит ни одного id и `_msg_ctx` пуст, канал маркирует задачу
+   failed и снимает локальные хвосты. Раньше такие аномалии делали
+   silent no-op, оставляя `_inflight` занятым.
+5. **`_unstick_processing` возвращает список восстановленных `user_msg_id`** —
+   `_unstick_loop` чистит локальное состояние для каждого.
+   Раньше восстановление БД не синхронизировалось с `_inflight`,
+   и воркер продолжал считать слот занятым.
+6. **Lifecycle-логи `_lifecycle_log(phase, ...)`** — каждая фаза
+   (`claimed`, `assistant_created`, `final_received`, `db_committed`,
+   `local_released`, `failed`, `unresolvable_cleanup`) пишет одну
+   строку `TASK lifecycle task=<id> phase=<phase> ...`. По ним можно
+   реконструировать сценарий зависшего процесса.
+
+Тесты:
+
+* `tests/test_postgres_channel.py::TestPostgresChannelTurnLifecycle` —
+  7 unit-тестов на lifecycle (включая `stream_end` с пустым delta
+  и восстановление по `answer_id`).
+* `tests/test_postgres_channel.py::TestPostgresChannelLifecycleDiagnostics` —
+  проверяет наличие `final_received`/`db_committed`/`local_released` в DEBUG-логе.
+* `tests/integration/test_postgres_channel_lifecycle_stress.py` —
+  opt-in (под `NANOBOT_INTEGRATION=1`) integration-тест против
+  реальной PostgreSQL: серия из 4 разных финалов + проверка,
+  что `exchange.inflight` пуст и `_claim_one_single` поднимает
+  следующую задачу без перезапуска процесса.
+
 ### `lib/services/llm_client.py` — единая точка вызова LLM
 
 Единственное место, откуда делаются запросы к LLM-провайдеру: ретраи,
