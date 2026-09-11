@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS public.agent_vector_index_config (
     content_cols    TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
     embedding_cols  JSONB NOT NULL DEFAULT '[]'::JSONB,
     track_column    TEXT NOT NULL DEFAULT 'updated_at',
+    chunk_size      INTEGER NOT NULL DEFAULT 500,
+    chunk_overlap   INTEGER NOT NULL DEFAULT 80,
+    metric          TEXT NOT NULL DEFAULT 'cosine',
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -30,6 +33,9 @@ COMMENT ON COLUMN public.agent_vector_index_config.src_table      IS 'Исход
 COMMENT ON COLUMN public.agent_vector_index_config.pk_column      IS 'Колонка первичного ключа в исходной таблице.';
 COMMENT ON COLUMN public.agent_vector_index_config.content_cols   IS 'TEXT[] — колонки, попадающие в audit_vectors.content (для отображения).';
 COMMENT ON COLUMN public.agent_vector_index_config.embedding_cols IS 'JSONB — какие колонки эмбеддингить и чанковать ли.';
+COMMENT ON COLUMN public.agent_vector_index_config.chunk_size     IS 'Размер чанка в символах для этой сборки индекса (часть signature).';
+COMMENT ON COLUMN public.agent_vector_index_config.chunk_overlap  IS 'Перекрытие чанков в символах для этой сборки индекса (часть signature).';
+COMMENT ON COLUMN public.agent_vector_index_config.metric         IS 'Метрика FAISS: cosine (нормализация L2) | inner_product (без нормализации). Часть signature.';
 COMMENT ON COLUMN public.agent_vector_index_config.track_column   IS 'Колонка исходной таблицы для инкрементальных обновлений (обычно updated_at).';
 COMMENT ON COLUMN public.agent_vector_index_config.enabled        IS 'False — пропустить индекс при сборке.';
 COMMENT ON COLUMN public.agent_vector_index_config.created_at     IS 'Время создания записи конфига.';

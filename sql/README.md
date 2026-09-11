@@ -43,12 +43,13 @@ sql/
 │   └── create_public_agent_worker_claims.sql            #   public.agent_worker_claims (аренда задач)
 │
 ├── vectors/                                             # Generic FAISS infrastructure
-│   ├── create_vector_index_config.sql                   #   public.agent_vector_index_config
+│   ├── create_vector_index_config.sql                   #   public.agent_vector_index_config (+chunk_size/chunk_overlap/metric)
 │   └── create_vector_index_store.sql                    #   public.agent_vector_index_store (FAISS blob)
 │
 ├── migrations/                                          # версионные миграции схемы
 │   ├── schema_migrations.sql                            #   tracking-таблица public.schema_migrations
-│   └── V001__baseline.sql                               #   базовая линия (штамп, без DDL)
+│   ├── V001__baseline.sql                               #   базовая линия (штамп, без DDL)
+│   └── V002__vector_chunk_params.sql                    #   chunk_size/chunk_overlap/metric в agent_vector_index_config
 │
 └── audit_analyzer/                                      # навык audit_analyzer
     ├── create_oarb_audits.sql                           #   oarb.audits          (REFERENCE)

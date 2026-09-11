@@ -675,6 +675,7 @@ class TestIndexIntegrity:
             "table": "audits", "pk": "id",
             "content_columns": ["content"], "embedding_columns": {"c": "col"},
             "track_column": "updated_at",
+            "chunk_size": 300, "chunk_overlap": 40, "metric": "inner_product",
         }
         cfg = {"audits_index": cfg_data}
         emb = {"model": "mxbai-embed-large:latest", "dimension": 1024}
@@ -686,6 +687,9 @@ class TestIndexIntegrity:
             "track_column": cfg_data["track_column"],
             "embedding_model": emb["model"],
             "embedding_dimension": emb["dimension"],
+            "chunk_size": cfg_data["chunk_size"],
+            "chunk_overlap": cfg_data["chunk_overlap"],
+            "metric": cfg_data["metric"],
         }
         sig = compute_index_signature(current_cfg)
         meta_rows = [{"metadata": {"signature": sig}}]

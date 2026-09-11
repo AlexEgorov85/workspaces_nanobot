@@ -192,12 +192,23 @@ def group_vector_hits(
 
 def build_faiss_index(
     records: list[dict[str, Any]],
+    metric: str | None = None,
 ) -> tuple[Any, dict[str, Any] | None]:
     """Построить FAISS ``IndexFlatIP`` + metadata из списка записей.
 
     ``records`` — список словарей с ключами: ``source``, ``content``,
     ``search_text``, ``table``, ``pk_value``, ``chunk_index``, ``chunk_count``,
     ``row_data``, ``embedding``.
+
+    ``metric`` — ``"cosine"`` (нормализация L2 перед IP) или ``None``/``"inner_product"``
+    (без нормализации, raw IP — обратно совместимо с индексами до P0-2).
+
+    Если ``metric="cosine"`` — векторы нормализуются ``faiss.normalize_L2``
+    перед добавлением в индекс; ``query_vec`` в ``search_vector`` тоже
+    нормализуется, чтобы ``IP(normalized, normalized) = cosine``.
+
+    Метрика записывается в ``metadata["metric"]`` — downstream (``search_vector``)
+    читает её для определения способа нормализации запроса.
 
     Возвращает ``(index, metadata)`` или ``(None, None)`` (пусто/несоответствие
     размерности). Единая точка сборки FAISS для gateway-кэша и снимка навыка.
@@ -209,7 +220,7 @@ def build_faiss_index(
         return None, None
     dimension = len(records[0]["embedding"])
     vectors = np.zeros((len(records), dimension), dtype=np.float32)
-    metadata: dict[str, Any] = {"metadata": {}}
+    metadata: dict[str, Any] = {"metadata": {}, "metric": metric}
 
     for i, rec in enumerate(records):
         emb = rec["embedding"]
@@ -238,6 +249,8 @@ def build_faiss_index(
             "row": row_data or {},
         }
 
+    if metric == "cosine":
+        faiss.normalize_L2(vectors)
     index = faiss.IndexFlatIP(dimension)
     index.add(vectors)
     return index, metadata

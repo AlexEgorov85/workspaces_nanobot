@@ -35,11 +35,11 @@ flowchart LR
 
 | Таблица | Назначение | Кто пишет | Кто читает |
 |---------|-----------|-----------|-----------|
-| `public.agent_vector_index_config` | Конфиг индексов (имя, источник, колонки, чанки, track_column, enabled) | `seed_default_indexes.sql` (вручную) | `tools/build_vectors.py` |
+| `public.agent_vector_index_config` | Конфиг индексов (имя, источник, колонки, чанки, metric, track_column, enabled) | `seed_default_indexes.sql` (вручную) / `tools/build_vectors.py` (`_persist_index_build_params` — фактические параметры сборки) | `tools/build_vectors.py` |
 | `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (chunk_index/count, content_hash, row_data JSONB, synced_at) | `tools/build_vectors.py` | `lib/services/cache_provider_impl.py:PostgresDuckDbProvider` (агент читает только через DuckDB-снапшот `workspace/data_store/duckdb/cache.duckdb`; канон — PG) |
-| `public.agent_vector_index_store` | Сериализованный FAISS `BYTEA` + метаданные (dimension, vector_count, updated_at) | `provider.rebuild_and_store_index()` | `provider._INDEX_CACHE` (in-memory после preload) |
+| `public.agent_vector_index_store` | Сериализованный FAISS `BYTEA` + метаданные (dimension, vector_count, updated_at, signature, metric) | `provider.rebuild_and_store_index()` | `provider._load_index()` (in-memory + reload из store) |
 
-DDL: `sql/audit_analyzer/create_public_agent_vector_index_config.sql`, `sql/audit_analyzer/create_oarb_audit_vectors.sql`.
+DDL: `sql/vectors/create_vector_index_config.sql`, `sql/vectors/create_vector_index_store.sql`, `sql/audit_analyzer/create_oarb_audit_vectors.sql`.
 
 ### Дефолтные индексы
 
@@ -82,8 +82,8 @@ INSERT INTO public.agent_vector_index_config
     (index_name, source_table, src_table, pk_column,
      content_cols, embedding_cols, track_column, enabled)
 VALUES (
-    'objects_index',                        -- уникальное имя (используется в CLI --index-name)
-    'objects',                              -- короткое имя (идёт в column "source" таблицы audit_vectors)
+    'objects_index',                        -- уникальное имя (= column "source" в audit_vectors / agent_vector_index_store)
+    'objects',                              -- короткое имя (идёт в column "table" таблицы audit_vectors)
     'oarb.objects',                         -- полное имя исходной таблицы
     'id',                                   -- колонка первичного ключа
     ARRAY['name', 'description']::TEXT[],   -- колонки для content (отображение в результатах поиска)
@@ -118,10 +118,13 @@ python tools/build_vectors.py --full-rebuild
 
 ```bash
 python tools/build_vectors.py --status
-# objects_index: 100 векторов, размерность 1024
+#   objects_index
+#     векторов: 100
+#     размерность: 1024
+#     строк в источнике: 100
+#     последняя синхр.: 2026-08-12 ...
 
 psql -c "SELECT source, dimension, vector_count, updated_at FROM public.agent_vector_index_store ORDER BY source"
-# objects_index | 1024 | 100 | 2026-08-12 ...
 ```
 
 **5. Используйте в CLI:**
@@ -194,7 +197,7 @@ python tools/build_vectors.py --status
 # dim должен быть 768, не 1024
 ```
 
-**Альтернатива (быстрее, но менее надёжно):** оставить `audit_vectors` без изменений, но тогда `provider.search_vector()` может получить `RuntimeError: dimension mismatch` (Ollama вернёт 768, FAISS ожидает 1024). Чистая пересборка безопаснее.
+**Альтернатива (быстрее, но менее надёжно):** оставить `audit_vectors` без изменений, но тогда `provider.search_vector()` вернёт пустой результат с ошибкой `Размерность индекса не совпадает с размерностью эмбеддинга запроса`. Чистая пересборка безопаснее.
 
 #### Сценарий D: добавилась новая колонка в источнике (DDL)
 
@@ -314,7 +317,7 @@ TRUNCATE public.agent_vector_index_store;
 TRUNCATE public.agent_vector_index_config CASCADE;
 ```
 
-После этого `audit_analyze --mode vector` **вернёт ошибку** «нет конфигурации индексов». Восстановление:
+После этого `audit_analyze --mode vector` **вернёт ошибку** `unknown_index` (CLI валидирует имя индекса по реестру: `Available indexes: (реестр пуст)`). Восстановление:
 
 ```bash
 # 1. Применить seed заново
@@ -366,8 +369,8 @@ python tools/build_vectors.py --full-rebuild
 ```bash
 psql -f sql/audit_analyzer/create_oarb_audit_vectors.sql
 psql -f sql/audit_analyzer/create_public_agent_predefined_scripts.sql
-psql -f sql/audit_analyzer/create_public_agent_vector_index_config.sql
-psql -f sql/audit_analyzer/create_public_agent_vector_index_store.sql
+psql -f sql/vectors/create_vector_index_config.sql
+psql -f sql/vectors/create_vector_index_store.sql
 psql -f sql/audit_analyzer/seed_default_indexes.sql
 python tools/build_vectors.py --full-rebuild
 ```
@@ -376,18 +379,17 @@ python tools/build_vectors.py --full-rebuild
 
 ```bash
 python scripts/cli.py --mode vector --query "..." --index-name does_not_exist
-# "Индекс 'does_not_exist' не найден или отключён"
+# error_type: unknown_index
+# "vector index 'does_not_exist' is not registered. Available indexes: ..."
 ```
 
 Вектора в БД не затрагиваются. Ошибка показывается пользователю.
 
 #### Что будет если удалить индекс, а в `python scripts/cli.py` ссылка
 
-**Если индекс был в реестре предопределённых скриптов (`predefined.py`):** поиск перестанет находить `vector_source` параметры для этого индекса (ошибка `CacheProvider.search_vector` → `[]`).
+**Если индекс был в реестре предопределённых скриптов (`predefined/scripts.py` REGISTRY):** скрипты больше не ссылаются на `vector_source` — какой индекс использовать выбирается явно через `--index-name` в `--mode vector`. Удаление индекса из реестра на predefined не влияет.
 
-**Если индекс был в `predefined.py` через `validation.vector_source`:** скрипт вернёт ошибку `vector_source not configured` или пустой результат.
-
-**Чистый CLI:** `--mode vector --index-name X` — пустой результат без падения.
+**Чистый CLI:** `--mode vector --index-name X` с удалённым/несуществующим X — ошибка `unknown_index` (не тихий `[]`): CLI валидирует имя индекса по реестру до `search_vector` (`_resolve_known_index`).
 
 #### Удалить через `psql` cascade (осторожно)
 
@@ -423,7 +425,7 @@ python tools/build_vectors.py --full-rebuild  # пересоберёт оста�
 
 `tools/build_vectors.py:build_index(index_name, index_cfg, db_table, ...)`:
 
-1. **Загрузить текущее состояние** из `oarb.audit_vectors` по `(source, pk_value)`.
+1. **Загрузить текущее состояние** из `oarb.audit_vectors` по `(source, "table")` → `{pk_value: {synced_at, content_hash, chunk_count}}`.
 2. **Прочитать все строки** из исходной таблицы через `SELECT *`.
 3. **Посчитать `content_hash`** для каждой строки (MD5 от search_text).
 4. **Классифицировать:**
@@ -435,18 +437,64 @@ python tools/build_vectors.py --full-rebuild  # пересоберёт оста�
 7. **INSERT в `oarb.audit_vectors`** (один INSERT на чанк).
 8. **Пересобрать FAISS**: `provider.invalidate_cache(index)` + `provider.rebuild_and_store_index(index, db_table)`.
 
+### Сигнатура индекса и единый путь загрузки
+
+`compute_index_signature()` строит хэш от **канонической конфигурации сборки**
+(`src_table`, `pk_column`, `content_cols`, `embedding_cols`, `track_column`,
+`chunk_size`, `chunk_overlap`, `metric` + параметры модели эмбеддинга):
+
+- `lib/services/cache_provider_impl.py:compute_index_signature` — считается из реестра
+  `public.agent_vector_index_config` (fallback на legacy-чтение до миграции V002);
+- `tools/build_vectors.py:_persist_index_build_params` — перед каждой сборкой UPSERT'ит
+  **фактические** параметры (`--chunk-size`, `--chunk-overlap`, metric) в реестр, чтобы
+  signature всегда отражала реальную сборку;
+- `provider.rebuild_and_store_index` пишет `signature` в metadata store.
+
+**Проверка актуальности** (`_check_index_integrity` / `_signature_status`):
+сравнение signature сохранённого FAISS с текущей конфигурацией. При расхождении
+статус `STALE` (индекс помечается, но **загрузка не блокируется**). Статус изменяется,
+когда меняются: `embedding_cols`, `chunk_size`/`chunk_overlap`, `metric`, модель
+эмбеддинга, размерность.
+
+**Метрика и нормализация:**
+
+- `metric=cosine` (дефолт) — векторы **нормализуются через `faiss.normalize_L2`**
+  при сборке, query — перед поиском; score = косинусное сходство.
+- `metric=inner_product` — без нормализации (обратная совместимость со старыми индексами).
+- Метрика сохраняется в metadata store и учитывается при загрузке.
+
+**Единый путь `_load_index(index_name)`** (порядок источников):
+
+1. In-memory кэш провайдера (`_index_cache`) — если уже загружен;
+2. `public.agent_vector_index_store` (FAISS blob + metadata, проверка signature);
+3. Пересборка из сырых векторов `oarb.audit_vectors` → сохранение в store;
+4. DuckDB-снапшот `workspace/data_store/duckdb/cache.duckdb` (fallback);
+5. Файлы `.faiss` (legacy).
+
+`search_vector` всегда проходит через `_load_index` — единый путь для кэша, store,
+пересборки и fallback'ов (P0-3). Это гарантирует, что поиск и валидация signature
+видят один и тот же индекс.
+
 ### Параметры конфигурации (public.agent_vector_index_config)
 
 | Поле | Тип | Назначение |
 |------|-----|-----------|
 | `index_name` | TEXT PK | Уникальное имя индекса (audits_index, violations_index, …). Используется в CLI `--index-name`. |
-| `source_table` | TEXT | Короткое имя для `column "source"` в `audit_vectors` (например `audits`, `violations`). |
+| `source_table` | TEXT | Короткое имя исходной таблицы (например `audits`, `violations`). Идёт в `column "table"` таблицы `audit_vectors`. |
 | `src_table` | TEXT | Полное имя исходной таблицы (`schema.table`). |
 | `pk_column` | TEXT | Колонка первичного ключа (по умолч. `id`). |
 | `content_cols` | TEXT[] | Колонки для `content` (полный текст для отображения в результатах поиска). |
 | `embedding_cols` | JSONB | Колонки для эмбеддинга. Формат: `["col"]` или `[{"column":"col","chunk":true,"chunk_size":500,"chunk_overlap":80}]`. |
 | `track_column` | TEXT | Колонка для инкрементальной выборки. Должна быть сравнимой (`>`): `timestamp`, `bigint`. |
+| `chunk_size` | INTEGER (V002) | Размер чанка в символах для этой сборки. Часть signature индекса. Дефолт `500`. |
+| `chunk_overlap` | INTEGER (V002) | Перекрытие чанков в символах. Часть signature индекса. Дефолт `80`. |
+| `metric` | TEXT (V002) | Метрика FAISS: `cosine` (нормализация L2) или `inner_product` (без нормализации). Часть signature индекса. Дефолт `cosine`. |
 | `enabled` | BOOLEAN | Активен ли индекс при следующем запуске `build_vectors.py`. |
+
+> **Колонки `chunk_size`/`chunk_overlap`/`metric` добавлены миграцией
+> `sql/migrations/V002__vector_chunk_params.sql`** (для уже существующих БД —
+> `python tools/migrate.py --apply`). До применения миграции код читает
+> конфиг в legacy-режиме без этих полей (см. ниже «Сигнатура индекса»).
 
 ### Формат `embedding_cols`
 
@@ -577,12 +625,12 @@ GROUP BY v.source;
 | Симптом | Причина | Что делать |
 |---------|---------|-----------|
 | `RuntimeError: Error in faiss::IndexFlat::search: index has 0 vectors` | FAISS-индекс пуст | `python tools/build_vectors.py --status` — если `vector_count=0`, пересоберите `--full-rebuild` |
-| `RuntimeError: Error in faiss::IndexFlat::add: dimension mismatch` | Размерность FAISS ≠ размерности эмбеддинга запроса | Модель Ollama изменилась, а конфиг/project.json — нет. Обновите `embedding_dimension` и `--full-rebuild` |
+| `RuntimeError: Error in faiss::IndexFlat::add: dimension mismatch` | Размерность FAISS ≠ размерности эмбеддинга запроса | Модель Ollama изменилась, а конфиг/project.json — нет. Обновите `gateway.vector.embedding.{model, dimension}` и `--full-rebuild` |
 | Все результаты с `score=0.000` | FAISS устарел (новые вектора в `audit_vectors` не пересобраны в FAISS) | `python tools/build_vectors.py --full-rebuild` |
-| Все результаты возвращают `row_data=None` | Поле `row_data` не пишется в INSERT | Проверьте `INSERT` в `tools/build_vectors.py:392-405`; у вас должна быть колонка `row_data JSONB` |
+| Все результаты возвращают `row_data=None` | Поле `row_data` не пишется в INSERT | Проверьте `INSERT` в `tools/build_vectors.py:476-494`; у вас должна быть колонка `row_data JSONB` |
 | Поиск возвращает результаты из другой таблицы | `embedding_cols` конфликтуют между индексами (один и тот же текст в разных таблицах) | Используйте разные `index_name` и проверьте через `SELECT DISTINCT source FROM oarb.audit_vectors` |
 | Поиск по `violations_index` возвращает нарушения из всех проверок сразу | Индекс не фильтрует по `audit_id` | По умолчанию семантический поиск не фильтрует; для фильтрации нужен префикс в `--query` (например, `audit_id:5 ...`) — **это расширение, не реализовано** |
-| Поиск очень медленный (>1 сек на запрос) | FAISS не в памяти, пересобирается из БД каждый раз | `provider._INDEX_CACHE` пуст; gateway должен делать `preload_indexes()` при старте |
+| Поиск очень медленный (>1 сек на запрос) | FAISS не в памяти, пересобирается из БД каждый раз | `provider._index_cache` пуст; gateway должен делать `preload_indexes()` при старте |
 
 #### Проблемы с конфигурацией индексов
 
@@ -591,7 +639,7 @@ GROUP BY v.source;
 | `embedding_cols` содержит `[]` (пустой массив) | Все строки молча игнорируются (нет search_text) | Заполните конфиг: `UPDATE ... SET embedding_cols = '["title"]'::jsonb` |
 | `embedding_cols` содержит колонку с NULL для всех строк | `_build_search_text` возвращает `""` → строка пропускается | Проверьте `SELECT col, COUNT(*) FROM table GROUP BY col`; используйте только заполненные колонки |
 | `content_cols` пуст | INSERT упадёт или `content` будет NULL | Заполните `content_cols` хотя бы одной колонкой |
-| `pk_column` — UUID или TEXT | `pk_value INTEGER` в `oarb.audit_vectors` не вместит | Сейчас поддерживается только INTEGER; для UUID нужен ALTER: `ALTER TABLE oarb.audit_vectors ALTER COLUMN pk_value TYPE TEXT USING pk_value::TEXT` |
+| `pk_column` — UUID или TEXT | `pk_value TEXT` в `oarb.audit_vectors` вмещает только строки | Работает из коробки: `pk_value` — TEXT (`BIGINT`/`INTEGER` приводятся через `_norm_pk`); никакого ALTER не нужно |
 | `track_column = NULL` для всех строк | `_filter_unchanged` пропускает индекс | Используйте другую track_column или добавьте заполнение: `UPDATE table SET updated_at = NOW() WHERE updated_at IS NULL` |
 | В конфиге 2 индекса на одну таблицу с разными `embedding_cols` | Поддерживается, но FAISS общий | Создайте два индекса с разными `index_name`, проверьте через `provider.search_vector(index_name=...)` |
 | DROP COLUMN в источнике | `embedding_cols` ссылается на несущую колонку → ошибка чтения | Обновите конфиг: `UPDATE ... SET embedding_cols = '[...]'::jsonb WHERE index_name = '...'` |
@@ -711,7 +759,7 @@ INSERT INTO public.agent_vector_index_config (..., index_name, embedding_cols, e
 
 `build_vectors.py` использует `DELETE + INSERT` без блокировок. Параллельный запуск на одном индексе приведёт к:
 
-- `psycopg2.errors.UniqueViolation` на `id SERIAL`
+- `psycopg2.errors.UniqueViolation` на PK `id` (`BIGINT GENERATED BY DEFAULT AS IDENTITY`)
 - Потерянным изменениям (один из процессов перезатрёт другого)
 
 **Решения:**
@@ -736,8 +784,8 @@ rm /tmp/build_vectors.pid
 ```bash
 # 1. Применить новые DDL (если ещё не)
 psql -f sql/audit_analyzer/create_oarb_audit_vectors.sql
-psql -f sql/audit_analyzer/create_public_agent_vector_index_config.sql
-psql -f sql/audit_analyzer/create_public_agent_vector_index_store.sql
+psql -f sql/vectors/create_vector_index_config.sql
+psql -f sql/vectors/create_vector_index_store.sql
 
 # 2. Зарегистрировать индексы в public.agent_vector_index_config
 psql -f sql/audit_analyzer/seed_default_indexes.sql
@@ -790,15 +838,16 @@ provider.rebuild_and_store_index('audits_index', 'oarb.audit_vectors')
 
 #### Graceful degradation в навыке
 
-`audit_analyzer` (CLI `--mode vector`) при сбое эмбеддинга возвращает `[]` без падения:
+`audit_analyzer` (CLI `--mode vector`) при сбое эмбеддинга возвращает `[]` без падения (в `PostgresDuckDbProvider.search_vector`, `cache_provider_impl.py`):
 
 ```python
-embedding = get_embedding(query, url, model)
+embedding = get_embedding(query)
 if embedding is None:
+    self._search_error = "Не удалось получить эмбеддинг запроса."
     return []   # ← здесь
 ```
 
-Если в логах навыка видите `Ошибка эмбеддинга после 3 попыток` — ищите проблему в Ollama, а не в навыке.
+Если в логах видите `[vector] Ошибка эмбеддинга после N попыток` — ищите проблему в Ollama, а не в навыке.
 
 #### Большие источники и память Ollama
 
@@ -865,7 +914,7 @@ journalctl -u ollama -f
 
 `build_vectors.py` использует `DATABASE_URL` через `utils.db.resolve_dsn()` — никаких секретов в коде или логах.
 
-Логи `build_vectors.py` могут содержать **содержимое строк** (превью `content[:60]`) — если источник содержит PII (персональные данные), это утечка. Решение — закомментируйте превью в `_get_embeddings` или обфусцируйте.
+Логи `build_vectors.py` могут содержать **содержимое строк** (превью `content[:60]` в `tools/build_vectors.py:468`) — если источник содержит PII (персональные данные), это утечка. Решение — закомментируйте это превью или обфусцируйте.
 
 #### Когда все сломалось — пересоздание с нуля
 

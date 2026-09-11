@@ -94,6 +94,34 @@ def fetchone(sql, *args):
     return rows[0] if rows else None
 
 
+def _persist_index_build_params(
+    index_name: str, chunk_size: int, chunk_overlap: int, metric: str = "cosine",
+) -> None:
+    """Обновить chunk-параметры и metric в реестре индексов (idempotent).
+
+    Вызывается перед rebuild FAISS, чтобы ``compute_index_signature``
+    оперировал теми же параметрами, которые реально использовались при сборке.
+    Если реестр индексов не задан или таблица не существует — промолчит.
+
+    Это key для ``STALE``-detection по chunk-параметрам после миграции V002:
+    ``_read_current_index_config`` читает из реестра и сравнивает с сохранённой
+    signature; без UPSERT signature строится на default'ах, а в мигрированном
+    реестре может быть старое значение — будет бесконечный STALE.
+    """
+    try:
+        from lib.services.cache_provider_impl import read_vector_index_config_table
+        table = read_vector_index_config_table()
+        execute(
+            f"UPDATE {table} SET chunk_size = %s, chunk_overlap = %s, metric = %s, "
+            f"updated_at = NOW() WHERE index_name = %s",
+            chunk_size, chunk_overlap, metric, index_name,
+        )
+    except Exception as exc:
+        logger.debug(f"  Не удалось записать chunk-параметры в реестр индексов "
+                     f"({exc.__class__.__name__}): signature будет вычислена "
+                     f"по дефолтам из gateway.vector.embedding.*")
+
+
 def _setup_logging(verbose: bool) -> None:
     """Настроить логгер: без ANSI-цветов (удобно при redirect в файл), без stderr-дубликата.
 
@@ -716,6 +744,10 @@ def main():
     results = []
     for name, cfg in enabled.items():
         try:
+            # Записываем фактические chunk-параметры и metric в реестр индексов
+            # (idempotent), чтобы ``compute_index_signature`` при rebuild'е
+            # оперировал теми значениями, которые реально использовались при сборке.
+            _persist_index_build_params(name, args.chunk_size, args.chunk_overlap)
             result = build_index(
                 name, cfg,
                 db_table=args.db_table,

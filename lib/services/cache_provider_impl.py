@@ -43,6 +43,7 @@ _INDEX_SIGNATURE_FIELDS = (
     "embedding_dimension",
     "chunk_size",
     "chunk_overlap",
+    "metric",
 )
 
 
@@ -251,6 +252,24 @@ def read_embedding_config() -> dict[str, Any]:
     }
 
 
+def read_embedding_defaults() -> dict[str, Any]:
+    """Дефолтные chunk-параметры сборки из ``gateway.vector.embedding``.
+
+    Те самые значения, которые ``tools/build_vectors.py`` использует как
+    CLI-дефолты (``--chunk-size``/``--chunk-overlap``). Единая точка чтения —
+    чтобы signature-verification (``_read_current_index_config``) брала те же
+    значения, что и build, когда в реестре индексов нет per-index значений
+    (легаси-схема до миграции V002).
+    """
+    from config import SETTINGS
+
+    emb = ((SETTINGS.get("gateway") or {}).get("vector") or {}).get("embedding") or {}
+    return {
+        "chunk_size": int(emb.get("default_chunk_size", 500)),
+        "chunk_overlap": int(emb.get("default_chunk_overlap", 80)),
+    }
+
+
 def read_vector_index_config(cfg: dict) -> dict[str, Any]:
     """Конфиг векторных индексов: читается из PG-таблицы-реестра.
 
@@ -259,16 +278,29 @@ def read_vector_index_config(cfg: dict) -> dict[str, Any]:
     ``project.json::gateway.vector.index.config_table``; дефолт — значение
     ``_DEFAULT_VECTOR_INDEX_CONFIG_TABLE``, DDL в
     ``sql/vectors/create_vector_index_config.sql``). При ошибке БД
-    исключение пробрасывается.
+    исключение пробрасывается (кроме отсутствия колонок ``chunk_size``/
+    ``chunk_overlap``/``metric`` до миграции V002 — тогда читается
+    legacy-набор полей, чтобы signature-degradation была бесшумной).
     """
     from utils.db import fetch
 
     table = read_vector_index_config_table()
-    rows = fetch(
-        "SELECT index_name, source_table, src_table, pk_column, "
-        "content_cols, embedding_cols, track_column, enabled "
-        f"FROM {table} ORDER BY index_name"
+    base_cols = (
+        "index_name, source_table, src_table, pk_column, "
+        "content_cols, embedding_cols, track_column, enabled"
     )
+    try:
+        rows = fetch(
+            "SELECT " + base_cols + ", chunk_size, chunk_overlap, metric "
+            f"FROM {table} ORDER BY index_name"
+        )
+    except Exception:
+        # Миграция V002 не применена: колонок chunk-параметров нет.
+        # Читаем базовый набор — build/search не ломаются, просто signature
+        # не покрывает chunk-параметры (STALE-detection по ним отключён).
+        rows = fetch(
+            "SELECT " + base_cols + f" FROM {table} ORDER BY index_name"
+        )
     result = {}
     for r in rows:
         ec = r["embedding_cols"]
@@ -284,6 +316,9 @@ def read_vector_index_config(cfg: dict) -> dict[str, Any]:
             "content_columns": list(r["content_cols"]) if isinstance(r.get("content_cols"), (list, tuple)) else [],
             "embedding_columns": ec,
             "track_column": r["track_column"],
+            "chunk_size": r.get("chunk_size"),
+            "chunk_overlap": r.get("chunk_overlap"),
+            "metric": r.get("metric"),
             "enabled": r["enabled"],
         }
     return result
@@ -969,7 +1004,7 @@ class PostgresDuckDbProvider(CacheProvider):
             return None, None
 
     def _load_vectors_from_db(
-        self, table_name: str, source: str | None = None
+        self, table_name: str, source: str | None = None, metric: str | None = None,
     ) -> tuple[Any, dict | None]:
         from utils.db import fetch
 
@@ -1005,10 +1040,10 @@ class PostgresDuckDbProvider(CacheProvider):
         ]
         from lib.utils.duckdb_query import build_faiss_index
 
-        return build_faiss_index(records)
+        return build_faiss_index(records, metric=metric)
 
     def _load_index_from_cache(
-        self, source: str,
+        self, source: str, metric: str | None = None,
     ) -> tuple[Any, dict | None]:
         """Построить FAISS-индекс из локального DuckDB-кэша навыка.
 
@@ -1016,6 +1051,10 @@ class PostgresDuckDbProvider(CacheProvider):
         PostgreSQL. Индекс строится из таблицы-источника (``vector_db_table``
         провайдера; см. ``gateway.vector.index.storage_table``) файла кэша и
         кешируется в ``_index_cache``.
+
+        ``metric`` передаётся в ``build_faiss_index`` (нормализация L2 при
+        ``"cosine"``); ``None`` — fallback обратно совместим с индексами
+        до P0-2 (raw inner-product без нормализации).
         """
         if not self._vector_db_table:
             return None, None
@@ -1060,7 +1099,7 @@ class PostgresDuckDbProvider(CacheProvider):
         ]
         from lib.utils.duckdb_query import build_faiss_index
 
-        idx, meta = build_faiss_index(records)
+        idx, meta = build_faiss_index(records, metric=metric)
         if idx is not None:
             self._index_cache[source] = (idx, meta)
         return idx, meta
@@ -1077,21 +1116,41 @@ class PostgresDuckDbProvider(CacheProvider):
             if cached is not None:
                 return cached
 
-            idx, meta = self._load_index_from_store(index_name)
-            if idx is not None:
-                meta = self._check_index_signature(index_name, meta)
-                self._index_cache[index_name] = (idx, meta)
-                # Сохраняем в provider для downstream (vector_search_tool)
-                # — может прочитать ``_last_loaded_meta`` и показать warning.
-                self._last_loaded_meta = meta
-                return idx, meta
+            try:
+                idx, meta = self._load_index_from_store(index_name)
+                if idx is not None:
+                    meta = self._check_index_signature(index_name, meta)
+                    self._index_cache[index_name] = (idx, meta)
+                    # Сохраняем в provider для downstream (vector_search_tool)
+                    # — может прочитать ``_last_loaded_meta`` и показать warning.
+                    self._last_loaded_meta = meta
+                    return idx, meta
+            except Exception:
+                # PostgreSQL недоступен (offline/снимок навыка) —
+                # переходим к следующим fallback'ам.
+                pass
 
-            idx, meta = self._load_vectors_from_db(table, source=index_name)
-            if idx is not None:
-                self._save_index_to_store(index_name, idx, meta)
-                meta = self._check_index_signature(index_name, meta)
-                self._index_cache[index_name] = (idx, meta)
-                return idx, meta
+            try:
+                idx, meta = self._load_vectors_from_db(
+                    table, source=index_name, metric=self._get_index_metric(index_name),
+                )
+                if idx is not None:
+                    self._save_index_to_store(index_name, idx, meta)
+                    meta = self._check_index_signature(index_name, meta)
+                    self._index_cache[index_name] = (idx, meta)
+                    return idx, meta
+            except Exception:
+                pass
+
+        # DuckDB-снимок навыка (offline path; до P0-3 был единственным
+        # источником для ``search_vector``). Fallback для кейсов, когда
+        # PostgreSQL недоступен или store/векторы ещё не собраны.
+        idx, meta = self._load_index_from_cache(index_name, metric=self._get_index_metric(index_name))
+        if idx is not None:
+            meta = self._check_index_signature(index_name, meta)
+            self._index_cache[index_name] = (idx, meta)
+            self._last_loaded_meta = meta
+            return idx, meta
 
         return self._load_index_from_files(index_dir, index_name)
 
@@ -1141,6 +1200,12 @@ class PostgresDuckDbProvider(CacheProvider):
         Returns ``None`` если ``read_vector_index_config_table()`` не задан
         или индекс не найден — в этом случае STALE detection пропускается
         (нечего проверять).
+
+        ``chunk_size``/``chunk_overlap``/``metric`` берутся из реестра
+        (``agent_vector_index_config``); до миграции V002 (или NULL) —
+        fallback на глобальные дефолты ``gateway.vector.embedding.*``
+        (same defaults, что использует ``tools/build_vectors.py``), чтобы
+        signature при legacy-схеме оставался детерминированным.
         """
         try:
             configs = read_vector_index_config({})
@@ -1150,6 +1215,7 @@ class PostgresDuckDbProvider(CacheProvider):
         if not cfg:
             return None
         emb_cfg = read_embedding_config()
+        emb_default = read_embedding_defaults()
         return {
             "src_table": cfg.get("table"),
             "pk_column": cfg.get("pk"),
@@ -1158,6 +1224,9 @@ class PostgresDuckDbProvider(CacheProvider):
             "track_column": cfg.get("track_column"),
             "embedding_model": emb_cfg.get("model"),
             "embedding_dimension": emb_cfg.get("dimension"),
+            "chunk_size": cfg.get("chunk_size") or emb_default["chunk_size"],
+            "chunk_overlap": cfg.get("chunk_overlap") or emb_default["chunk_overlap"],
+            "metric": cfg.get("metric") or "cosine",
         }
 
     def preload_indexes(self, db_table: str | None = None) -> list[dict[str, Any]]:
@@ -1195,6 +1264,21 @@ class PostgresDuckDbProvider(CacheProvider):
         else:
             self._index_cache.clear()
 
+    def _get_index_metric(self, index_name: str) -> str | None:
+        """Метрика индекса из реестра (``agent_vector_index_config.metric``).
+
+        ``None`` — реестр недоступен/индекс не найден/легаси-схема до V002:
+        fallback на raw inner-product (без нормализации), обратно совместимо
+        с индексами до P0-2.
+        """
+        try:
+            cfg = self._read_current_index_config(index_name)
+        except Exception:
+            return None
+        if not cfg:
+            return None
+        return cfg.get("metric")
+
     def search_vector(
         self,
         query: str,
@@ -1216,12 +1300,15 @@ class PostgresDuckDbProvider(CacheProvider):
             self._search_error = "Не установлены зависимости: faiss и numpy. Установите: pip install faiss-cpu numpy"
             return []
 
-        # Индекс строится ТОЛЬКО из локального снимка кэша навыка (без PostgreSQL).
-        idx, meta = self._load_index_from_cache(index_name)
+        # Единый путь загрузки индекса (P0-3): persisted FAISS в PG-store →
+        # сырые векторы из PG → DuckDB-снимок навыка → .faiss файл на диске.
+        # Так STALE/INVALID-detection (``_check_index_signature``) работает
+        # на всех путях, а не только на store-пути preload.
+        idx, meta = self._load_index(index_path or "", index_name, self._vector_db_table)
         if idx is None:
             cache_txt = str(self._cache_path) if self._cache_path else "нет кэша"
             self._search_error = (
-                f"Индекс '{index_name}' не найден в кэше ({cache_txt})"
+                f"Индекс '{index_name}' не найден ни в store, ни в кэше ({cache_txt})"
             )
             return []
 
@@ -1239,6 +1326,11 @@ class PostgresDuckDbProvider(CacheProvider):
             return []
 
         query_vec = np.array([embedding], dtype=np.float32)
+        # Если индекс строился с cosine (нормализация L2 произведена
+        # в build_faiss_index) — нормализуем и запрос: тогда
+        # IP(normalized_q, normalized_b) == cosine(q, b).
+        if (meta or {}).get("metric") == "cosine":
+            faiss.normalize_L2(query_vec)
         if idx.ntotal == 0:
             return []
         threshold_active = threshold is not None and threshold > 0
@@ -1285,7 +1377,9 @@ class PostgresDuckDbProvider(CacheProvider):
             Количество векторов построенного индекса, или ``None`` если данных
             нет / индекс не собран.
         """
-        idx, meta = self._load_vectors_from_db(db_table, source=source)
+        idx, meta = self._load_vectors_from_db(
+            db_table, source=source, metric=self._get_index_metric(source),
+        )
         if idx is not None:
             signature = self._compute_index_signature_from_config(source)
             self._save_index_to_store(source, idx, meta, signature=signature)
@@ -1301,6 +1395,11 @@ class PostgresDuckDbProvider(CacheProvider):
         Возвращает ``None`` если конфиг в БД не найден или таблица не задана —
         в этом случае signature не пишется, и downstream-вызовы получат
         ``INVALID`` через ``verify_index_signature`` (принудительная пересборка).
+
+        ``chunk_size``/``chunk_overlap``/``metric`` — из реестра индексов
+        (пишет ``tools/build_vectors.py`` при сборке); до миграции V002 —
+        fallback на глобальные дефолты, чтобы build- и verify-стороны
+        оставались консистентными.
         """
         if not self._vector_store_table:
             return None
@@ -1309,18 +1408,28 @@ class PostgresDuckDbProvider(CacheProvider):
         except Exception:
             return None
         try:
+            table = read_vector_index_config_table()
             rows = fetch(
                 "SELECT src_table, pk_column, content_cols, embedding_cols, "
-                f"track_column FROM {read_vector_index_config_table()} "
-                "WHERE index_name = %s",
+                f"track_column, chunk_size, chunk_overlap, metric "
+                f"FROM {table} WHERE index_name = %s",
                 source,
             )
         except Exception:
-            return None
+            try:
+                rows = fetch(
+                    "SELECT src_table, pk_column, content_cols, embedding_cols, "
+                    f"track_column FROM {read_vector_index_config_table()} "
+                    "WHERE index_name = %s",
+                    source,
+                )
+            except Exception:
+                return None
         if not rows:
             return None
         row = rows[0]
         emb_cfg = read_embedding_config()
+        emb_default = read_embedding_defaults()
         cfg = {
             "src_table": row.get("src_table"),
             "pk_column": row.get("pk_column"),
@@ -1329,6 +1438,9 @@ class PostgresDuckDbProvider(CacheProvider):
             "track_column": row.get("track_column"),
             "embedding_model": emb_cfg.get("model"),
             "embedding_dimension": emb_cfg.get("dimension"),
+            "chunk_size": row.get("chunk_size") or emb_default["chunk_size"],
+            "chunk_overlap": row.get("chunk_overlap") or emb_default["chunk_overlap"],
+            "metric": row.get("metric") or "cosine",
         }
         return compute_index_signature(cfg)
 

@@ -922,8 +922,13 @@ class DuckDbCacheStore:
                 loaded.append({"index_name": src, "vectors": idx.ntotal})
         return loaded
 
-    def _load_source_index(self, source: str) -> tuple[Any, dict | None]:
-        """Прочитать векторы source из DuckDB и построить FAISS-индекс."""
+    def _load_source_index(self, source: str, metric: str | None = None) -> tuple[Any, dict | None]:
+        """Прочитать векторы source из DuckDB и построить FAISS-индекс.
+
+        ``metric`` передаётся в ``build_faiss_index`` (нормализация L2 при
+        ``"cosine"``); ``None`` — обратно совместимо с индексами до P0-2
+        (raw inner-product).
+        """
         if not self._vector_db_table:
             return None, None
         schema, name = _split_table(self._vector_db_table)
@@ -955,7 +960,7 @@ class DuckDbCacheStore:
         ]
         from lib.utils.duckdb_query import build_faiss_index
 
-        return build_faiss_index(records)
+        return build_faiss_index(records, metric=metric)
 
     def _check_index_integrity(self, index_name: str) -> None:
         """Проверить signature индекса против текущей конфигурации.
@@ -989,6 +994,7 @@ class DuckDbCacheStore:
             from lib.services.cache_provider import IndexIntegrityError
             from lib.services.cache_provider_impl import (
                 read_embedding_config,
+                read_embedding_defaults,
                 read_vector_index_config,
                 verify_index_signature,
             )
@@ -1015,6 +1021,7 @@ class DuckDbCacheStore:
         if not cfg:
             return
         emb = read_embedding_config()
+        emb_defaults = read_embedding_defaults()
         current_cfg = {
             "src_table": cfg.get("table"),
             "pk_column": cfg.get("pk"),
@@ -1023,6 +1030,9 @@ class DuckDbCacheStore:
             "track_column": cfg.get("track_column"),
             "embedding_model": emb.get("model"),
             "embedding_dimension": emb.get("dimension"),
+            "chunk_size": cfg.get("chunk_size") or emb_defaults["chunk_size"],
+            "chunk_overlap": cfg.get("chunk_overlap") or emb_defaults["chunk_overlap"],
+            "metric": cfg.get("metric") or "cosine",
         }
         status = verify_index_signature(meta, current_cfg)
         if status == "STALE":
@@ -1077,6 +1087,12 @@ class DuckDbCacheStore:
         import numpy as np
 
         query_vec = np.array([embedding], dtype=np.float32)
+        # Если индекс строился с cosine — нормализуем и запрос
+        # (IP(normalized_q, normalized_b) == cosine(q, b)).
+        if (meta or {}).get("metric") == "cosine":
+            import faiss
+
+            faiss.normalize_L2(query_vec)
         n = idx.ntotal if threshold is not None else min(top_k, idx.ntotal)
         scores, ids = idx.search(query_vec, n)
 
