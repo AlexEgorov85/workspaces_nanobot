@@ -156,17 +156,22 @@ pytest tests/ --cov=lib --cov-report=term-missing
 | **workspace/skills/*/SKILL.md** | Документация навыков |
 | **workspace/AGENTS.md** | Инструкции для агента |
 
-## 🆕 Что нового в v2.4.0
+## 🆕 Что нового в v2.5.0
 
-**MINOR поверх v2.3.1, 2026-08-20.** Метрика контекстного окна (`metadata.context_window`),
-ручное сжатие `/compact` (slash + CLI + tool, `ContextCompactionService`), мульти-машинный
-пул воркеров (`agent_worker_claims`, `claim_strategy: single | worker_pool`), кастомные
-tool'ы из `workspace/tools/` (`compact_context`), полное логирование промпта/ответа LLM,
-закрыта потеря данных при усечении больших результатов инструментов (`patch_save_turn` →
-полный файл в `data_store`), оптимизация БД-пула, кастомизация шаблонов через
-`workspace/overrides/`.
+**MINOR поверх v2.4.0, 2026-09-11.** Крупный рефакторинг `legal_summarizer` (97-этапный
+план: layered package, document-level cache, brief как ровно один Chunk, structural
+packing, вопрос-режим через document cache, e2e 3-mode CLI), переработка
+конфигурационного контракта skills ↔ runtime infrastructure (`TableRegistry.register_infra`,
+`gateway.vector.{embedding,index}.*`, `EmbeddingSettings`, hard validation legacy-ключей),
+generic infrastructure tools (`duckdb_query`, `vector_search`, `nl_sql_generate`,
+`column_descriptions`, `history_search`, `compact_context`), SQL AST-security-guard,
+миграции схемы, сервисы времени жизни (`ContextCompactionService`,
+`RuntimeHealth`/`RuntimeReadiness`, `ConsolidatorLocale`), перенос утилит
+`lib/utils/*` (media/jsonb/outbound) → `workspace/utils/*`, vector-storage как
+инфраструктурный ресурс, ремедиация compatibility-shim долга, history_search FTS-baseline.
+Подробный эпиграф с breaking changes — в начале блока v2.5.0.
 
-Полный changelog — в [CHANGELOG.md → 2.4.0](CHANGELOG.md#240--2026-08-20).
+Полный changelog — в [CHANGELOG.md → 2.5.0](CHANGELOG.md#250--2026-09-11).
 Сводка breaking changes — в [docs/MIGRATION.md](docs/MIGRATION.md).
 
 ## 🛡 Зависимости и лицензия
