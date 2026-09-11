@@ -8,6 +8,115 @@
 
 ## [Unreleased]
 
+> **MINOR-релиз v2.5.0:** крупный рефакторинг `legal_summarizer` (97-этапный
+> план: layered package, document-level cache, brief как ровно один Chunk,
+> structural packing, вопрос-режим через document cache, e2e 3-mode CLI),
+> переработка конфигурационного контракта skills ↔ runtime infrastructure
+> (`TableRegistry.register_infra`, `gateway.vector.*`, `EmbeddingSettings`,
+> hard validation legacy-ключей), generic infrastructure tools
+> (`duckdb_query`, `vector_search`, `nl_sql_generate`, `column_descriptions`,
+> `history_search`, `compact_context`), SQL AST-security-guard, миграции
+> схемы, сервисы времени жизни (`ContextCompactionService`,
+> `RuntimeHealth`/`RuntimeReadiness`, `consolidator_locale`),
+> перенос утилит `lib/utils/*` (media/jsonb/outbound) → `workspace/utils/*`,
+> vector-storage как инфраструктурный ресурс, ремедиация compatibility-shim
+> долга, history_search FTS-baseline. Ниже — детальный changelog по подсистемам.
+>
+> **Breaking changes (по сравнению с v2.4.0):**
+>
+> * `gateway.vector_index.*` → `gateway.vector.index.*` (legacy-секция теперь
+>   падает с `ConfigurationError`).
+> * `skills.<name>.embedding` / `skills.<name>.cache` — удалены из
+>   `SkillSettings` (embedding — общий runtime; DuckDB snapshot всегда
+>   из `table_registry.snapshot_path()`).
+> * `skills.<name>.vector_indexes[].source` — поле удалено (source живёт
+>   в `public.agent_vector_index_config`).
+> * `skill_config.get_in_memory_config(name, root)` /
+>   `is_in_memory_enabled(name)` / `get_embedding_config(name)` /
+>   `get_embedding_model(name)` — удалены или обезличены (параметр
+>   `skill_name` не нужен).
+> * Skill `audit_analyzer` полностью переведён на tool-only (каталог
+>   `scripts/` удалён, все запросы — через generic tools).
+> * `lib/services/cache_store.py` → `duckdb_cache_store.py`,
+>   `lib/services/sync_service.py` → `pg_duckdb_sync_service.py`,
+>   `lib/services/audit_memory_store.py` / `audit_sync_service.py` —
+>   переименованы и переписаны как generic infra.
+> * `lib/utils/media.py`, `lib/utils/outbound_filter.py`,
+>   `lib/utils/media_jsonb.py` — перенесены в `workspace/utils/`
+>   (`media.py`, `outbound_meta.py` остался в `lib/utils/`, `jsonb.py` в
+>   `workspace/utils/`).
+>
+> **Migration notes** — см. ниже секцию «Migration notes» и
+> `docs/MIGRATION.md` (обновлён под v2.4.0 → v2.5.0).
+
+### Added (legal_summarizer: document-level cache + вопрос-режим через кэш)
+
+- **Document-level cache (`workspace/skills/legal_summarizer/scripts/cache/document_cache.py`)** —
+  долговечный per-(session, document) снимок `physical` + `analysis`
+  (структура + chunks + validation) + `section_summaries` для каждой
+  секции. `run_canonical_pipeline` сохраняет результат через
+  `write_snapshot` (атомарно через `os.replace`, защита от TOCTOU race)
+  и читает через `read_snapshot` (`is_fresh` помечает только
+  question-independent summaries — `SectionSummary.is_question_independent`,
+  `ChunkSummary.is_question_independent`). `evict_orphan_siblings` чистит
+  артефакты после переименований блоков. `DocumentCache` — единственный
+  владелец document-level storage; старый API
+  `cache.manifest.{read,write,delete}_document_cache` физически удалён.
+  Конкурентные тесты: `tests/.../test_document_cache_*`,
+  `test_concurrency_regression`.
+- **3-уровневая сборка LLM-входа для `--question` синтеза**
+  (`application.question_context`): `question_full` →
+  `question_with_chunk_summaries` → `question_with_document_overview`,
+  лимит — `agents.defaults.contextWindowTokens` минус safety-margin.
+  `service.run(question=...)` сначала пробует document-cache hit, иначе
+  `single_context_block` (direct) / map-reduce. `--question` shortcut
+  пишет полноценный manifest для idempotency; `manifest.raw.document_id`
+  для reverse-lookup из snapshot. `write_document_chunk_summary` callback
+  пробрасывает `section_summaries` через `_internal` в map-reduce и
+  сохраняет их в operation manifest.
+- **`Chunk`, `StructureNode`, `DocumentStructure`, `ValidationReport`** —
+  добавлены `from_dict`/`to_dict` для round-trip сериализации в
+  document-cache snapshot.
+- **Тесты:** `tests/test_etapa7_recovered_invariants.py` (8 регрессионных
+  тестов, восстанавливающих critical behaviors из удалённого
+  `test_skill_legal_summarizer.py`); e2e demo `detailed -> question` с
+  idempotency; concurrency regression tests для DocumentCache; AST
+  guard для `document_cache` boundary; AST guard для operation-level
+  manifest whitelist.
+
+### Changed (legal_summarizer: package layout — layered structure)
+
+- **`src/legal_summarizer/` → `workspace/skills/legal_summarizer/scripts/`** —
+  runtime Python-пакет перенесён из `src/` (отдельный пакет через
+  `pyproject.toml::pythonpath`) в корень Skill с плоскими импортами
+  (`from application.service import ...`, `from document.physical import …`).
+  `pythonpath` в `pyproject.toml` включает оба каталога: корень Skill
+  и `scripts/`. Legacy shim-файлы (`manifest.py`, `output.py`,
+  `skill_config.py`, `summarizer.py` в `scripts/`) удалены.
+  `domain/` и `infrastructure/` упразднены: pure-данные (`identity`,
+  `numbering`, `tokens`, конфиги) разложены по слоям-владельцам
+  (`document/`, `llm/`, `execution/`); dev-tooling (архитектурные проверки,
+  `assert_no_legacy`) вынесен из production-пакета в корневой `tools/`
+  (`tools/architecture_guard.py`, `tools/legacy_audit.py`).
+- **Слои пакета** (канонический dependency graph):
+  `document` ← `chunking` ← `execution` ← `application` ← `planning` ← `llm`.
+  Граница проверяется `tests/architecture/test_layer_boundaries.py`:
+  `retrieval → application` явно запрещён; новый регрессионный тест
+  `test_execution_does_not_import_application` — AST-проверка на
+  статические импорты `application` в `execution/*.py`.
+- **`document.structure`** — `DocumentStructure`, `StructureNode`,
+  `StructureEvidence`, `NumberingInfo`, `DocumentTitle` (бывший
+  `domain/models.py`); `StructureNode` ссылается на `DocumentBlock` через
+  `start_block`/`end_block`, не копирует текст; `semantic_type` отделён
+  от `node_type`.
+- **`llm.tokens`** — `token_estimator`, `TokenBudget`,
+  `MID_REDUCE_GROUP_SIZE` (бывший `domain/tokens.py`).
+- **Compatibility-shim remediation** (`9df24e3`, `f1174fe`): реальные
+  правки (замена `from legal_summarizer.X` на canonical `from X` в
+  runtime, CLI, tests, tools) + расширение regression guard. Удалены
+  `block_ownership` legacy re-export и one-shot repoint tool (C-001,
+  C-015). Полный аудит — в `docs/architecture/COMPATIBILITY_INVENTORY.md`.
+
 ### Changed (legal_summarizer: brief = always exactly 1 Chunk)
 
 - **`legal_summarizer` brief mode**: переработан полностью. Вместо
@@ -1038,6 +1147,185 @@ tool-output. `duckdb_query`/`nl_sql_generate` с `max_result_chars=50000`
   `tests/test_architecture_tool_domain_free.py`,
   `tests/test_history_search_tool.py`. Все эти тесты используют
   устаревший API и будут устранены в отдельном следующем проходе.
+
+### Added (Vector P0: chunk/metric в signature, cosine normalization, единый `_load_index`)
+
+`lib/services/cache_provider_impl.py` — три класса багов P0,
+закрытых единым изменением:
+
+- **Chunk/metric в signature `_load_index`**: раньше `_load_index(index_name)`
+  загружал FAISS-индекс без знания о chunk_size/metric, что приводило к
+  некорректному `IndexFlatIP.search` для chunks с разным metric
+  (`cosine` vs `L2`). Теперь signature `_load_index(index_name, chunk_size, metric)`
+  и нормализованный cosine — хиты всегда нормируются к `[-1, 1]` независимо
+  от того, как был построен индекс. Это даёт стабильный score при
+  смешанных индексах и согласованный top_k по всему runtime.
+- **`d == d` guard** в `add()` / `search()` — assert на совпадение
+  dimension запроса и индекса; раньше FAISS сам кидал
+  `RuntimeError: (...) Error: dimension mismatch` без понятного контекста.
+- **Единый `_load_index`** (без дублирования логики в
+  `build_cache_provider`/`search_vector`/`add_vectors`) — инкапсулирует
+  locking и кеширование; три читателя упростились до одной строки.
+- **Тесты:** `tests/integration/test_vector_search_real_faiss.py` (11
+  кейсов: top-k, метаданные, сортировка, пустой индекс, threshold-фильтр,
+  chunked grouping, dimension mismatch, persist_threshold).
+
+### Fixed (history_search: gap №1 + №3 + baseline перед FTS)
+
+`workspace/tools/history_search_tool.py` — закрыты два gap'а из
+анализа (`docs/architecture/HISTORY_SEARCH_ANALYSIS.md`):
+
+- **Gap №1 (payload metadata corruption)** — при сериализации payload
+  с вложенными структурами (`agent_conversation_messages.metadata`)
+  некоторые ключи терялись из-за `_json_safe` clamp'а. Теперь payload
+  фильтруется по allow-list ключей и валидируется до записи.
+- **Gap №3 (ILIKE escape)** — `query` через `%s`-параметры с wildcard'ами
+  (`%`, `_`) ломал ILIKE pattern (escape не передавался). Теперь
+  параметры проходят через `LIKE`-escape, `%` и `_` литерально
+  интерпретируются.
+- **Baseline перед FTS** — зафиксировано поведение текущего
+  ILIKE-only режима в `docs/architecture/HISTORY_SEARCH_ANALYSIS.md` и
+  `HISTORY_SEARCH_SQL_PROPOSAL.md`. FTS-миграция — отдельный шаг.
+- **Тесты:** `tests/test_history_search_tool.py` дополнен регрессионными
+  кейсами для escape и payload.
+
+### Added (Runtime services: ContextCompaction / Health / Readiness / Locale)
+
+- **`ContextCompactionService`** (`lib/services/context_compaction.py`) —
+  единая точка записи факта сжатия контекста. Четыре входа: настоящая
+  slash-команда `/compact` (регистрация через
+  `RuntimePatcher.patch_compact_command` в `CommandRouter` —
+  детерминированно **до** LLM на любом канале: postgres, streamlit,
+  telegram), CLI-команда `/compact` (`lib/cli/console_loop.py`),
+  tool `compact_context` (`workspace/tools/compact_context.py`),
+  авто-сжатие nanobot (обёртки `RuntimePatcher.patch_compaction_tracking`).
+  Замеряет `tokens_before`/`tokens_after` (при падении нативного
+  `estimate_session_prompt_tokens` — `_estimate_fallback` по символам),
+  `archived_msgs`, возвращает отчёт. Ручные пути ставят `force=True`;
+  при `archived > 0` пишется заметка (`metadata.kind="context_compact"`,
+  `role='assistant'`, `status='completed'`) в
+  `agent_conversation_messages` (виден в Streamlit как `.compact-notice`,
+  НЕ попадает в контекст промпта). Управление — секция
+  `gateway.compact.*` в `project.json`.
+- **`RuntimeHealth` / `RuntimeReadiness`** (`lib/services/runtime_health.py`)
+  — operational view. `RuntimeHealth.is_alive()` (liveness, asyncio-loop,
+  не в shutdown); `RuntimeReadiness.register(name, fn, required=True)`
+  собирает чек-функции, `check()` прогоняет в `try/except` и сводит в
+  `ReadinessReport`. Статусы: `READY` / `DEGRADED` / `NOT_READY`.
+  Required: PG, DuckDB cache; optional: vector search, Redis.
+  Используется в `ApplicationContext.start()` (логирует итоговый
+  readiness), Streamlit UI, скриптах после deploy.
+- **`ConsolidatorLocale`** (`lib/services/consolidator_locale.py`) —
+  monkeypatch Jinja2-loader'а `prompt_templates._environment`:
+  `ChoiceLoader` с приоритетом `workspace/overrides/`. Применяется в
+  `ApplicationContext.start()` (идемпотентно; при отсутствии каталога —
+  no-op). Сейчас переопределён `agent/consolidator_archive.md` —
+  русскоязычная инструкция Consolidator для извлечения фактов
+  на языке диалога.
+- **`terminal_tool_print` hook** (`lib/hooks/terminal_tool_print_hook.py`)
+  — вывод результатов tool'ов в терминал при `gateway.print_tools=True`.
+- **`active_files` hook** (`workspace/hooks/active_files_hook.py`) —
+  side-channel активных файлов через `session.metadata` для UI.
+- **`llm_client`** (`lib/services/llm_client.py`) — `call_llm` /
+  `call_llm_async` (OpenAI-compatible HTTP), общий LLM-клиент для
+  skill'ов (заменил ad-hoc `audit_analyzer/scripts/llm.py`).
+
+### Changed (utils refactor: media/jsonb → workspace/utils)
+
+- **`lib/utils/media.py` → `workspace/utils/media.py`** — кодек
+  AW-формата `{filename, file_id, mime_type, file_size}` + обратная
+  совместимость со старым `{filename, data}` и data-URL. В `lib/utils/`
+  остался тонкий back-compat re-export.
+- **`lib/utils/media_jsonb.py` → `workspace/utils/jsonb.py`** — JSONB-декодер
+  media для PG. Back-compat re-export в `lib/utils/`.
+- **`lib/utils/outbound_filter.py` → `lib/utils/outbound_meta.py`** —
+  фильтр служебных outbound (`system`, `audit`, `tool_audit`,
+  `_assemble_outbound`-артефакты). Поднят до `lib.utils.outbound_meta`,
+  старая локация удалена.
+- **`workspace/utils/`** — новый каталог runtime-утилит workspace:
+  `db.py` (пул соединений, `resolve_dsn`, `get_stats`),
+  `session_file_store.py` (общий стор вложений под
+  `data_store/cache/sessions/<key>/attachments/`),
+  `session_key.py` (`safe_session_key`),
+  `clean_text.py`, `office_files.py` (извлечение текста из DOCX/XLSX/PDF/PPTX),
+  `structure_cache.py`, `event_log.py` (долговечный журнал в
+  `agent_gateway_logs`).
+- **`MessageExchange`** (`lib/channels/message_exchange.py`) — общий
+  формат сообщений каналов; `PostgresChannel` и `RedisChannel` стали
+  тонкими обёртками; `streamlit_app.py` использует тот же движок для
+  чтения истории.
+
+### Changed (audit_analyzer refactor → Skill↔Tool boundary)
+
+Замена domain-specific audit-tool'ов на generic infrastructure tools.
+Skill `audit_analyzer` теперь — это `SKILL.md` + `references/`
+(progressive disclosure); всё исполнение — через `nl_sql_generate`,
+`duckdb_query`, `vector_search`, `column_descriptions`.
+
+- **End-to-end 3-mode CLI** в `workspace/skills/audit_analyzer/scripts/cli.py`:
+  `predefined` (Python-реестр `predefined/scripts.py` с `REGISTRY` /
+  `get_script`), `generated_sql` (через `nl_sql_runner`), `vector`. Единый
+  signature_status API; контракт `query_sql/dict-rows`.
+- **`audit_analyzer` predefined-пакет** (`workspace/skills/audit_analyzer/scripts/predefined/`):
+  `scripts.py` (реестр — Python-литералы, не PG-таблица),
+  `mode.py` (`predefined.run()` → `duckdb_query`),
+  `builder.py` (DynamicQueryBuilder — inline `?`-подстановка),
+  `validator.py`, `models.py`. Заменил `agent_predefined_scripts` PG-таблицу
+  и `PredefinedScriptRegistry` core.
+- **Skill SKILL.md** сокращён до описания режимов и каталогов;
+  detail-контент — в `references/{schema.md, vector_indexes.md, sql_guidance.md}`.
+- **Skill-side helper** для NL→SQL вынесен из skill в `nl_sql_runner` core.
+
+### Added (legal_summarizer: runtime hardening — 50-этапный план)
+
+Завершение плана hardening'а `legal_summarizer` (50/50 этапов):
+
+- **Cross-thread single-flight LLM lock** (`scripts/llm/single_flight.py`) —
+  `asyncio.Semaphore`-based gate + `guarded_chat` API; жёсткий runtime
+  invariant `max_active_llm_calls == 1` в map-фазе (ARCHITECTURE.md §21).
+- **`ExecutionContext`** для планирования выбранных chunks и обязательный
+  `document_id` в `StructureTreeBuilderConfig`.
+- **Canonical runtime pipeline** — `run_canonical_pipeline` (бывший
+  `scripts.summarizer.canonical`), один pipeline, реальные метаданные
+  из analysis, стабильный `operation_id` и idempotency до analysis.
+- **Token estimator** (Этап 20) — единый `TokenEstimator` с
+  `chars_per_token=3.5` fallback (PLAN §20 разрешает fallback при
+  отсутствии tiktoken).
+- **Canonical блок-ownership и явная семантика range в StructureNode**
+  (`scripts/structure/block_ownership.py` + `StructureNode.start_block/end_block`).
+- **Полная ExecutionPolicy в packing** и meaningful sections без критерия
+  `end_block > start_block`.
+- **Финальный reduce после max_rounds** — чтобы данные не терялись при
+  сокращении rounds.
+- **Typed contracts в `llm/calls.py`** — `DocumentStructure` как типизированный
+  контракт.
+- **Canonical DocumentLoader** как единственный production loader
+  (`scripts/structure/document_loader.py`); `load_physical_document`
+  сохранён как back-compat alias.
+- **Тесты:** `tests/.../test_summarizer_integration.py` — 6 canonical-сценариев;
+  `test_summarizer_single_flight.py` — peak==1 одновременных LLM-вызовов;
+  48 invariant-тестов (этапы 25–29); AST guard для skill layout
+  (`src/domain` не существуют).
+
+### Removed
+
+- **`workspace/skills/legal_summarizer/scripts/document_cleanup.py`** —
+  cleanup интегрирован в pipeline перед chunking; standalone-модуль
+  удалён (legacy guards запрещают импорт).
+- **`workspace/skills/legal_summarizer/scripts/{manifest,output,skill_config,summarizer}.py`**
+  shim-файлы в `scripts/` — удалены; canonical imports
+  (`from application.service import …`).
+- **Legacy-поля `Inspection`** и документальный `estimate()` — удалены
+  в пользу `DocumentStats` и `TokenEstimator` (`38ccdae`, `6156fea`).
+- **Legacy v1 manifest normalizer** — удалён (`c388a4b`).
+- **`tests/test_skill_legal_summarizer.py`** (1326 строк) — заменён на
+  targeted scoped-тесты + `test_etapa7_recovered_invariants.py` для
+  критических behaviors.
+- **`workspace/skills/audit_analyzer/scripts/`** (целиком): все 12
+  legacy-файлов удалены.
+- **`lib/services/audit_memory_store.py` / `audit_sync_service.py`** —
+  переименованы в `duckdb_cache_store.py` / `pg_duckdb_sync_service.py`,
+  переписаны как generic infra.
 
 ## [2.4.0] — 2026-08-20
 
