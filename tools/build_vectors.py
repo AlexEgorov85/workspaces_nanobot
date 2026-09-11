@@ -85,7 +85,9 @@ from utils.db import configure, execute, fetch, resolve_dsn
 # Standalone-регистрация runtime-storage (для случая когда build_vectors.py
 # запущен без ApplicationContext). Подменяет ApplicationContext._register_infra_resources.
 from lib.core.infra_registration import register_vector_storage
+from lib.core.skill_registration import register_embedding_config
 register_vector_storage()
+register_embedding_config()
 
 
 def fetchone(sql, *args):
@@ -95,7 +97,7 @@ def fetchone(sql, *args):
 
 
 def _persist_index_build_params(
-    index_name: str, chunk_size: int, chunk_overlap: int, metric: str = "cosine",
+    index_name: str, chunk_size: int, chunk_overlap: int, metric: str,
 ) -> None:
     """Обновить chunk-параметры и metric в реестре индексов (idempotent).
 
@@ -107,6 +109,10 @@ def _persist_index_build_params(
     ``_read_current_index_config`` читает из реестра и сравнивает с сохранённой
     signature; без UPSERT signature строится на default'ах, а в мигрированном
     реестре может быть старое значение — будет бесконечный STALE.
+
+    ``metric`` обязателен (``"cosine"`` или ``"inner_product"``): signature
+    его включает, и расхождение между build- и verify-стороной ломает
+    STALE-detection.
     """
     try:
         from lib.services.cache_provider_impl import read_vector_index_config_table
@@ -135,6 +141,229 @@ def _setup_logging(verbose: bool) -> None:
         colorize=False,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {message}",
     )
+
+
+def _fmt_eta(sec: float) -> str:
+    """Человекочитаемый остаток времени: ``4м 32с`` / ``1ч 05м``."""
+    sec = int(sec)
+    if sec < 60:
+        return f"{sec}с"
+    m, s = divmod(sec, 60)
+    if m < 60:
+        return f"{m}м {s:02d}с"
+    h, m = divmod(m, 60)
+    return f"{h}ч {m:02d}м"
+
+
+def _interactive_stderr() -> bool:
+    """Живой терминал (TTY) или redirect/pipe?
+
+    В TTY прогресс перезаписывается через ``\\r`` (одна строка не плодит сотни).
+    При redirect в файл/cron перезапись бессмысленна — используем построчный
+    loguru-вывод раз в ``batch_size`` чанков.
+    """
+    try:
+        return bool(sys.stderr.isatty())
+    except Exception:
+        return False
+
+
+def _print_progress(
+    tag: str, idx: int, total: int, started: float, interactive: bool, batch_size: int,
+) -> None:
+    """Вывести прогресс эмбеддинга: для TTY — перезаписываемая строка с ETA,
+    иначе — лог-строка каждые ``batch_size`` чанков."""
+    if interactive:
+        elapsed = time.time() - started
+        rate = idx / elapsed if elapsed > 0 else 0.0
+        remaining = (total - idx) / rate if rate > 0 else 0.0
+        pct = idx / total * 100 if total else 0.0
+        line = (f"\r{tag} Эмбеддинг: {idx}/{total} ({pct:.0f}%), "
+                f"{rate:.1f} чанк/с, осталось ~{_fmt_eta(remaining)}")
+        sys.stderr.write(line.ljust(100))
+        sys.stderr.flush()
+    elif idx == 1 or idx % max(batch_size, 1) == 0 or idx == total:
+        logger.info(f"{tag} Прогресс эмбеддинга: {idx}/{total}")
+
+
+def _validate_index_config(
+    index_name: str, index_cfg: dict, chunk_size: int, chunk_overlap: int, metric: str,
+) -> dict:
+    """Pre-flight проверка конфига индекса перед сборкой.
+
+    Проверяет ВСЁ до начала эмбеддинга:
+    - existence и формат полей конфига
+    - existence исходной таблицы и колонок в PG
+    - формат embedding_cols (массив строк/объектов с ``column``)
+    - дубликаты колонок
+
+    Returns:
+        {"errors": [...], "warnings": [...], "skipped": [...]}
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    src_table = index_cfg.get("table", "")
+    pk_column = index_cfg.get("pk", "")
+    track_column = index_cfg.get("track_column", "")
+    raw_embedding_cols = index_cfg.get("embedding_columns", [])
+    content_cols = index_cfg.get("content_columns", [])
+
+    logger.info(f"[{index_name}] Pre-flight проверка конфига...")
+
+    # --- src_table ---
+    if not src_table:
+        errors.append("src_table не задан — укажите полное имя исходной таблицы "
+                       "(schema.table) в agent_vector_index_config.src_table")
+    elif "." not in src_table:
+        errors.append(f"src_table = '{src_table}' — ожидается формат 'schema.table'")
+
+    # --- pk_column ---
+    if not pk_column:
+        errors.append("pk_column не задан — укажите колонку первичного ключа")
+
+    # --- track_column ---
+    if not track_column:
+        warnings.append("track_column не задан — используется дефолт 'updated_at'. "
+                         "Если колонки updated_at нет, инкрементальный режим не будет работать")
+
+    # --- dostęp do source table в PG ---
+    available_cols: set[str] = set()
+    if src_table and "." in src_table:
+        db_schema, db_table_name = src_table.split(".", 1)
+        try:
+            rows = fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s",
+                db_schema, db_table_name,
+            )
+            available_cols = {r["column_name"] for r in rows}
+        except Exception as exc:
+            errors.append(f"Не удалось прочитать схему таблицы {src_table}: "
+                           f"{exc.__class__.__name__}: {exc}")
+        else:
+            if not available_cols:
+                errors.append(f"Таблица {src_table} не найдена или не имеет колонок "
+                               "(проверьте имя таблицы и права доступа)")
+
+            # pk_column
+            if pk_column and pk_column not in available_cols:
+                similar = [c for c in available_cols
+                           if c.lower() == pk_column.lower() or pk_column.lower() in c.lower()]
+                hint = f" (возможно, имелась в виду '{similar[0]}'?)" if similar else ""
+                errors.append(f"pk_column = '{pk_column}' не найдена в {src_table}{hint}")
+
+            # track_column
+            if track_column and track_column not in available_cols:
+                similar = [c for c in available_cols
+                           if c.lower() == track_column.lower() or track_column.lower() in c.lower()]
+                hint = f" (возможно, имелась в виду '{similar[0]}'?)" if similar else ""
+                errors.append(f"track_column = '{track_column}' не найдена в {src_table}{hint}")
+
+    # --- embedding_cols: формат ---
+    if not isinstance(raw_embedding_cols, (list, tuple)):
+        errors.append(f"embedding_cols должен быть JSON-массивом, получен "
+                       f"{type(raw_embedding_cols).__name__}: {raw_embedding_cols!r}. "
+                       f"Формат: [\"col\"] или [{{\"column\": \"col\", \"chunk\": true}}]")
+
+    embedding_col_names: list[str] = []
+    if isinstance(raw_embedding_cols, (list, tuple)):
+        if len(raw_embedding_cols) == 0:
+            warnings.append("embedding_cols пуст — все строки будут пропущены "
+                             "(нет колонок для эмбеддинга). Заполните: "
+                             "UPDATE agent_vector_index_config SET embedding_cols = "
+                             "'[\"нужная_колонка\"]'::jsonb WHERE index_name = ...")
+        for idx, elem in enumerate(raw_embedding_cols):
+            if isinstance(elem, str):
+                if not elem.strip():
+                    errors.append(f"embedding_cols[{idx}] — пустая строка")
+                else:
+                    embedding_col_names.append(elem)
+            elif isinstance(elem, dict):
+                col = elem.get("column")
+                if not col:
+                    available_str = ", ".join(sorted(available_cols)) if available_cols else "?"
+                    errors.append(f"embedding_cols[{idx}] — объект без ключа \"column\": "
+                                   f"{elem!r}. Ожидается: {{\"column\": \"имя_колонки\"}}. "
+                                   f"Доступные колонки в {src_table}: {available_str}")
+                elif not isinstance(col, str) or not col.strip():
+                    errors.append(f"embedding_cols[{idx}].column — должна быть непустая строка, "
+                                   f"получено: {col!r}")
+                else:
+                    embedding_col_names.append(col)
+                    allowed_keys = {"column", "chunk", "chunk_size", "chunk_overlap"}
+                    bad_keys = set(elem.keys()) - allowed_keys
+                    if bad_keys:
+                        warnings.append(f"embedding_cols[{idx}] — неизвестные ключи: "
+                                         f"{bad_keys}. Допустимые: {allowed_keys}")
+            else:
+                errors.append(f"embedding_cols[{idx}] — неожиданный тип "
+                               f"{type(elem).__name__}: {elem!r}. "
+                               f"Ожидается строка или объект {{\"column\": ...}}")
+
+    # --- embedding_cols: существование колонок ---
+    if available_cols and embedding_col_names:
+        for col in embedding_col_names:
+            if col not in available_cols:
+                similar = [c for c in available_cols
+                           if c.lower() == col.lower() or col.lower() in c.lower()]
+                hint = f"\n    → Возможно, имелась в виду '{similar[0]}'?" if similar else ""
+                errors.append(f"embedding_cols: колонка '{col}' не найдена в {src_table}{hint}"
+                               f"\n    → Доступные колонки: "
+                               f"{', '.join(sorted(available_cols))}")
+
+    # --- content_cols ---
+    if not content_cols:
+        warnings.append("content_cols пуст — поле content в векторах будет NULL. "
+                         "Заполните хотя бы одну колонку")
+    elif available_cols:
+        for col in content_cols:
+            if col not in available_cols:
+                similar = [c for c in available_cols
+                           if c.lower() == col.lower() or col.lower() in c.lower()]
+                hint = f" (возможно, '{similar[0]}'?)" if similar else ""
+                warnings.append(f"content_cols: колонка '{col}' не найдена в {src_table}{hint}")
+
+    # --- дубликаты ---
+    all_names = [n for n in embedding_col_names if n]
+    if len(all_names) != len(set(all_names)):
+        dupes = [n for n in set(all_names) if all_names.count(n) > 1]
+        warnings.append(f"Дубликаты колонок в embedding_cols: {dupes} "
+                         "(будут обработаны несколько раз)")
+
+    if content_cols:
+        content_set = set(content_cols)
+        emb_set = set(embedding_col_names)
+        overlap = content_set & emb_set
+        if overlap:
+            warnings.append(f"Колонки {overlap} есть и в content_cols, и в embedding_cols "
+                             "(нормально для коротких полей)")
+
+    # --- chunk-параметры ---
+    if chunk_size < 50:
+        errors.append(f"chunk_size = {chunk_size} — слишком маленький (минимум 50)")
+    if chunk_overlap >= chunk_size:
+        errors.append(f"chunk_overlap = {chunk_overlap} >= chunk_size = {chunk_size} — "
+                       "перекрытие должно быть меньше размера чанка")
+
+    # --- Итог ---
+    if errors:
+        for e in errors:
+            logger.error(f"  ✗ {e}")
+        logger.error(f"\nКак исправить:\n"
+                     f"  1. Откройте agent_vector_index_config:\n"
+                     f"     psql -c \"SELECT * FROM public.agent_vector_index_config "
+                     f"WHERE index_name = '{index_name}'\"\n"
+                     f"  2. Исправьте проблемные поля через UPDATE\n"
+                     f"  3. Проверьте снова: python tools/build_vectors.py --validate-only "
+                     f"--index {index_name}")
+    if warnings:
+        for w in warnings:
+            logger.warning(f"  ⚠ {w}")
+    if not errors and not warnings:
+        logger.success(f"  ✓ Конфиг индекса '{index_name}' валиден")
+
+    return {"errors": errors, "warnings": warnings}
 
 
 # =============================================================================
@@ -440,11 +669,14 @@ def build_index(
     errors = 0
     inserted_ok_pks: set[str] = set()
 
+    interactive = _interactive_stderr()
+    progress_started = time.time()
+
     for idx, chunk in enumerate(all_chunks, start=1):
         text = chunk["search_text"]
 
-        if idx == 1 or idx % max(batch_size, 1) == 0 or idx == len(all_chunks):
-            logger.info(f"{tag} Прогресс эмбеддинга: {idx}/{len(all_chunks)}")
+        _print_progress(tag, idx, len(all_chunks), progress_started,
+                        interactive, batch_size)
 
         logger.debug(f"{tag} эмбеддинг pk={chunk['pk']} chunk={chunk['chunk_index'] + 1}/"
                      f"{chunk['chunk_count']}, text[:80]={text[:80]!r}")
@@ -503,6 +735,10 @@ def build_index(
 
         if idx < len(all_chunks):
             time.sleep(pause_sec)
+
+    if interactive:
+        sys.stderr.write("\n")
+        sys.stderr.flush()
 
     # 6. Удаляем старые векторы изменённых строк ПОСЛЕ успешной вставки новых
     #    (избегаем потери данных, если новый эмбеддинг не удался)
@@ -618,6 +854,11 @@ def main():
     parser.add_argument("--embedding-retry-wait", type=float, default=5.0,
                         help="При ошибке получения эмбеддинга: подождать это время (сек) и повторить "
                              "один раз (default 5.0)")
+    parser.add_argument("--metric", choices=["cosine", "inner_product"],
+                        default="cosine",
+                        help="Метрика FAISS: 'cosine' (нормализация L2) или "
+                             "'inner_product' (без нормализации). Пишется в реестр "
+                             "индексов и попадает в signature (default: cosine)")
     parser.add_argument("--status", action="store_true",
                         help="Показать состояние всех индексов (кол-во векторов, размерность, актуальность)")
     parser.add_argument("--check", action="store_true",
@@ -630,6 +871,10 @@ def main():
                         help="Таблица-хранилище векторов (default: gateway.vector.index.storage_table)")
     parser.add_argument("--verbose", action="store_true",
                         help="Подробное логирование (уровень DEBUG): конфиг, каждый чанк/строка")
+    parser.add_argument("--validate-only", action="store_true",
+                        help="Только проверить конфиг индексов в БД (без сборки). "
+                             "Проверяет existence таблиц/колонок, формат embedding_cols, "
+                             " chunk-параметры. Выход 0 — всё валидно, 1 — ошибки.")
 
     args = parser.parse_args()
     _setup_logging(args.verbose)
@@ -651,24 +896,23 @@ def main():
     configure(dsn)
     logger.info(f"Подключение к БД настроено (dsn={dsn.split('@')[-1] if '@' in dsn else ''})")
 
-    from lib.services.table_registry import table_registry
-    vec_names = table_registry.vector_names()
-    vector_table = vec_names[0] if vec_names else ""
-    if not vector_table:
+    # Источник storage_table — ТОЛЬКО ``gateway.vector.index.storage_table`` +
+    # явный --db-table. Раньше утилита брала ``table_registry.vector_names()[0]``,
+    # что в проекте с несколькими vector-ресурсами (skill + infra) могло
+    # указывать на чужую таблицу без предупреждения.
+    effective_storage = args.db_table or storage_table
+    if not effective_storage:
         logger.error(
-            "table_registry.vector_names() пуст — зарегистрируйте skill "
-            "через table_registry.register(...) или укажите --db-table."
+            "Не задан storage_table: укажите gateway.vector.index.storage_table "
+            "в project.json или передайте --db-table."
         )
         return 1
-    if "." not in vector_table:
-        logger.error(f"vector_table должен быть в формате 'schema.table': {vector_table}")
+    if "." not in effective_storage:
+        logger.error(
+            f"storage_table должен быть в формате 'schema.table': {effective_storage}"
+        )
         return 1
-    db_schema, db_table = vector_table.split(".", 1)
-    if args.db_table and args.db_table != storage_table:
-        if "." in args.db_table:
-            db_schema, db_table = args.db_table.split(".", 1)
-        else:
-            db_table = args.db_table
+    db_schema, db_table = effective_storage.split(".", 1)
 
     row = fetch(
         "SELECT 1 FROM information_schema.tables "
@@ -733,7 +977,7 @@ def main():
             logger.info("  Все индексы актуальны, синхронизация не требуется")
             return
 
-    mode_label = "CHECK+SYNC" if args.check else "DRY-RUN" if args.dry_run else "FULL REBUILD" if args.full_rebuild else "INCREMENTAL"
+    mode_label = "VALIDATE-ONLY" if args.validate_only else "CHECK+SYNC" if args.check else "DRY-RUN" if args.dry_run else "FULL REBUILD" if args.full_rebuild else "INCREMENTAL"
     logger.info(f"Режим: {mode_label}")
     logger.info(f"Батч: {args.batch_size}, чанк: {args.chunk_size} симв., перекрытие: {args.chunk_overlap}, "
                 f"пауза: {args.pause_sec}с, retry_wait: {args.embedding_retry_wait}с")
@@ -747,7 +991,28 @@ def main():
             # Записываем фактические chunk-параметры и metric в реестр индексов
             # (idempotent), чтобы ``compute_index_signature`` при rebuild'е
             # оперировал теми значениями, которые реально использовались при сборке.
-            _persist_index_build_params(name, args.chunk_size, args.chunk_overlap)
+            _persist_index_build_params(
+                name, args.chunk_size, args.chunk_overlap, args.metric,
+            )
+            vresult = _validate_index_config(
+                name, cfg, args.chunk_size, args.chunk_overlap, args.metric,
+            )
+            if vresult["errors"]:
+                logger.error(f"Индекс '{name}': обнаружены ошибки конфига, сборка невозможна")
+                result = {
+                    "index_name": name, "total": 0, "inserted": 0,
+                    "updated": 0, "deleted": 0, "errors": len(vresult["errors"]),
+                }
+                results.append(result)
+                continue
+            if args.validate_only:
+                logger.success(f"Индекс '{name}': конфиг валиден, пропускаю (validate-only)")
+                result = {
+                    "index_name": name, "total": 0, "inserted": 0,
+                    "updated": 0, "deleted": 0, "errors": 0,
+                }
+                results.append(result)
+                continue
             result = build_index(
                 name, cfg,
                 db_table=args.db_table,
@@ -785,4 +1050,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

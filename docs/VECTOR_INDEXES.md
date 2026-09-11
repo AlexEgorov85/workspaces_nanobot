@@ -57,9 +57,10 @@ DDL: `sql/vectors/create_vector_index_config.sql`, `sql/vectors/create_vector_in
 
 | Цель | Команда | Что происходит |
 |------|---------|---------------|
-| **Добавить новый индекс** | 1. INSERT в `public.agent_vector_index_config`<br>2. `--index <name> --full-rebuild` | Создаётся конфиг, собираются вектора + FAISS |
+| **Добавить новый индекс** | 1. INSERT в `public.agent_vector_index_config`<br>2. `--index <name> --validate-only` (проверить конфиг)<br>3. `--index <name> --full-rebuild` | Создаётся конфиг, валидируется, собираются вектора + FAISS |
 | **Обновить один индекс (новые строки)** | `--index <name>` | Инкрементально: NEW/CHANGED/DELETED по `content_hash` |
 | **Обновить один индекс (изменился конфиг)** | UPDATE конфига + `--index <name> --full-rebuild` | TRUNCATE индекса + все строки заново |
+| **Проверить корректность конфига индекса (без сборки)** | `--validate-only [--index <name>]` | Pre-flight: существование таблиц/колонок, формат `embedding_cols`, chunk-параметры. Exit 0 — ок, 1 — ошибки |
 | **Обновить все индексы (новые строки)** | `build_vectors.py` (без флагов) | Все индексы из конфига, инкрементально |
 | **Обновить все индексы (после изменений конфига)** | `--full-rebuild` | Все индексы, TRUNCATE + заново |
 | **Проверить что всё актуально (без записей)** | `--check` | Сравнивает сигнатуру, обновляет только diff |
@@ -97,12 +98,21 @@ VALUES (
 ON CONFLICT (index_name) DO UPDATE SET ...;  -- для идемпотентного повторного применения
 ```
 
-**2. Проверьте:**
+**2. Проверьте конфиг (pre-flight, без сборки):**
 
 ```bash
-python tools/build_vectors.py --status
-# Должен появиться objects_index со счётчиком 0
+python tools/build_vectors.py --validate-only --index objects_index
+# ✓ Конфиг индекса 'objects_index' валиден
 ```
+
+`--validate-only` проверяет **до** эмбеддинга (ничего не вставляет):
+- существование `src_table`, `pk_column`, `track_column` в PG;
+- формат `embedding_cols` (массив строк/объектов с `column`);
+- существование каждой колонки из `embedding_cols`/`content_cols`;
+- корректность `chunk_size`/`chunk_overlap`;
+- дубликаты колонок.
+
+При ошибках — exit code 1, каждая ошибка с подсказкой (какие колонки реально есть, как исправить). Без аргумента `--index` проверяет все включённые индексы.
 
 **3. Соберите вектора:**
 
@@ -387,7 +397,7 @@ python scripts/cli.py --mode vector --query "..." --index-name does_not_exist
 
 #### Что будет если удалить индекс, а в `python scripts/cli.py` ссылка
 
-**Если индекс был в реестре предопределённых скриптов (`predefined/scripts.py` REGISTRY):** скрипты больше не ссылаются на `vector_source` — какой индекс использовать выбирается явно через `--index-name` в `--mode vector`. Удаление индекса из реестра на predefined не влияет.
+**Если индекс был в реестре предопределённых скриптов (`scripts/predefined/scripts.py` REGISTRY):** скрипты больше не ссылаются на `vector_source` — какой индекс использовать выбирается явно через `--index-name` в `--mode vector`. Удаление индекса из реестра на predefined не влияет.
 
 **Чистый CLI:** `--mode vector --index-name X` с удалённым/несуществующим X — ошибка `unknown_index` (не тихий `[]`): CLI валидирует имя индекса по реестру до `search_vector` (`_resolve_known_index`).
 
@@ -636,9 +646,11 @@ GROUP BY v.source;
 
 | Симптом | Причина | Что делать |
 |---------|---------|-----------|
-| `embedding_cols` содержит `[]` (пустой массив) | Все строки молча игнорируются (нет search_text) | Заполните конфиг: `UPDATE ... SET embedding_cols = '["title"]'::jsonb` |
+| `embedding_cols` содержит `[]` (пустой массив) | Все строки молча игнорируются (нет search_text) | `--validate-only` покажет warning. Заполните: `UPDATE ... SET embedding_cols = '["title"]'::jsonb` |
 | `embedding_cols` содержит колонку с NULL для всех строк | `_build_search_text` возвращает `""` → строка пропускается | Проверьте `SELECT col, COUNT(*) FROM table GROUP BY col`; используйте только заполненные колонки |
-| `content_cols` пуст | INSERT упадёт или `content` будет NULL | Заполните `content_cols` хотя бы одной колонкой |
+| `embedding_cols` содержит объект без ключа `"column"` | Ошибка формата (`{"chunk": true}` без имени колонки) | `--validate-only` покажет список доступных колонок. Добавьте `"column": "имя"`: `'[{"column": "description", "chunk": true}]'::jsonb` |
+| `embedding_cols`/`pk_column`/`track_column` ссылаются на несуществующие колонки | `column "X" does not exist` при SELECT | `--validate-only` покажет опечатки с подсказкой похожих колонок. Исправьте через UPDATE |
+| `content_cols` пуст | INSERT упадёт или `content` будет NULL | `--validate-only` покажет warning. Заполните `content_cols` хотя бы одной колонкой |
 | `pk_column` — UUID или TEXT | `pk_value TEXT` в `oarb.audit_vectors` вмещает только строки | Работает из коробки: `pk_value` — TEXT (`BIGINT`/`INTEGER` приводятся через `_norm_pk`); никакого ALTER не нужно |
 | `track_column = NULL` для всех строк | `_filter_unchanged` пропускает индекс | Используйте другую track_column или добавьте заполнение: `UPDATE table SET updated_at = NOW() WHERE updated_at IS NULL` |
 | В конфиге 2 индекса на одну таблицу с разными `embedding_cols` | Поддерживается, но FAISS общий | Создайте два индекса с разными `index_name`, проверьте через `provider.search_vector(index_name=...)` |
