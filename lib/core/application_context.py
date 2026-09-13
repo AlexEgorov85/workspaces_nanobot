@@ -630,7 +630,9 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
 
     publish_path = str(table_registry.snapshot_path(ctx.config.workspace_path))
 
-    emb = table_registry.embedding_config()
+    from lib.services.cache_provider_impl import read_embedding_config, read_vector_store_table
+
+    emb = read_embedding_config()
     embedding_base_url = emb.get("base_url", "")
     embedding_model = emb.get("model", "mxbai-embed-large:latest")
     embedding_dimension = int(emb.get("dimension", 1024))
@@ -649,8 +651,6 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     # ``gateway.vector.index.storage_table`` — это сырые эмбеддинги
     # (таблица из ``vector_db_table`` провайдера; см. ``DuckDbCacheStore._vector_db_table``),
     # у которых нет колонки ``metadata``; использовать её для проверки signature нельзя.
-    from lib.services.cache_provider_impl import read_vector_store_table
-
     sync_tables = list(dict.fromkeys(all_table_names + vector_names))
 
     store = DuckDbCacheStore(
@@ -705,18 +705,15 @@ def _register_infra_resources(ctx: ApplicationContext) -> None:
     и standalone-утилит (``tools/build_vectors.py``).
 
     Какие индексы строить и из каких source-таблиц — описывается в
-    PG-реестре (``read_vector_index_config_table()``;
-    см. ``VectorIndexSettings.config_table``).
+    ``project.json::gateway.vector.index.indexes`` (см.
+    ``VectorIndexSettings.indexes`` и ``read_vector_index_config``).
 
-    Embedding-конфиг (``gateway.vector.embedding``) кладётся в
-    ``TableRegistry.set_embedding_config(...)`` отдельно — это
-    runtime-конфиг без PG-ресурсов.
+    Embedding-параметры захардкожены в ``cache_provider_impl`` —
+    отдельная регистрация не нужна.
     """
     from lib.core.infra_registration import register_vector_storage
-    from lib.core.skill_registration import register_embedding_config
 
     register_vector_storage()
-    register_embedding_config()
 
 
 def _make_transcription(config: Any) -> Any:

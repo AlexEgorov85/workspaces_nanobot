@@ -1,25 +1,22 @@
-"""Integration tests: Skill workflow + Tool.
+"""Integration tests: Skill workflow + Core capability.
 
 Демонстрирует сценарии из TARGET_ARCHITECTURE.md §8 и SKILL.md Decision procedure.
+Проверяет данные через generic Core capability (``CacheProvider.query_sql`` /
+``CacheProvider.search_vector``), а не Agent-facing tools — те удалены (этап 18).
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import field, dataclass
 from pathlib import Path
 from typing import Any
 
 import duckdb
 import pytest
 
+from lib.services.cache_provider import SearchResult
 from lib.utils.sql_safety import validate_sql
-from workspace.tools.duckdb_query_tool import DuckdbQueryTool, DuckdbQueryToolConfig
-from workspace.tools.vector_search_tool import (
-    VectorSearchTool,
-    VectorSearchToolConfig,
-)
 
 
 @dataclass
@@ -34,182 +31,181 @@ class _FakeHit:
     row: dict = field(default_factory=dict)
 
 
-class _StubProvider:
-    def __init__(self, hits_by_index: dict[str, list[_FakeHit]] | None = None) -> None:
+class _StubDB:
+    """Адаптер in-memory DuckDB к ``CacheProvider.query_sql``."""
+
+    def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
+        self._conn = conn
+
+    def query_sql(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
+        try:
+            if params:
+                result = self._conn.execute(sql, list(params))
+            else:
+                result = self._conn.execute(sql)
+            columns = [c[0] for c in result.description] if result.description else []
+            rows = [dict(zip(columns, r, strict=False)) for r in result.fetchall()]
+            return {
+                "status": "success",
+                "row_count": len(rows),
+                "columns": columns,
+                "rows": rows,
+            }
+        except Exception as exc:
+            return {
+                "status": "error",
+                "row_count": 0,
+                "columns": [],
+                "rows": [],
+                "error": str(exc),
+            }
+
+
+class _StubVector:
+    """Адаптер к ``CacheProvider.search_vector``."""
+
+    def __init__(self, hits_by_index: dict[str, list[SearchResult]] | None = None) -> None:
         self._hits = hits_by_index or {}
 
-    def search_vector(self, query, index_name, top_k=5, threshold=None):
+    def search_vector(
+        self, query, index_name, top_k=5, threshold=None
+    ) -> list[SearchResult]:
         return list(self._hits.get(index_name, []))
 
 
-def _run(coro):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
-
-
-def _make_duckdb() -> DuckdbQueryTool:
-    config = DuckdbQueryToolConfig()
-    tool = DuckdbQueryTool(config=config)
-
-    def factory():
-        conn = duckdb.connect(":memory:")
-        conn.execute(
-            "CREATE TABLE audits ("
-            "id INTEGER, year INTEGER, title VARCHAR, auditee VARCHAR)"
-        )
-        conn.executemany(
-            "INSERT INTO audits VALUES (?, ?, ?, ?)",
-            [
-                (1, 2024, "Fire safety check", "Org A"),
-                (2, 2024, "Financial audit", "Org B"),
-                (3, 2025, "Fire safety audit", "Org A"),
-                (4, 2025, "Compliance review", "Org C"),
-            ],
-        )
-        return conn
-
-    tool.set_connection_factory(factory)
-    return tool
+def _make_duckdb() -> _StubDB:
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE audits ("
+        "id INTEGER, year INTEGER, title VARCHAR, auditee VARCHAR)"
+    )
+    conn.executemany(
+        "INSERT INTO audits VALUES (?, ?, ?, ?)",
+        [
+            (1, 2024, "Fire safety check", "Org A"),
+            (2, 2024, "Financial audit", "Org B"),
+            (3, 2025, "Fire safety audit", "Org A"),
+            (4, 2025, "Compliance review", "Org C"),
+        ],
+    )
+    return _StubDB(conn)
 
 
 class TestScenario1Aggregation:
-    """SKILL: «Сколько проверок по годам?» → duckdb_query."""
+    """SKILL: «Сколько проверок по годам?» → generic query_sql."""
 
     def test_aggregation_query(self) -> None:
-        tool = _make_duckdb()
+        db = _make_duckdb()
         # sql_guidance rule: SELECT ... GROUP BY year
         sql = (
             "SELECT year, COUNT(*) AS cnt FROM audits GROUP BY year ORDER BY year"
         )
         assert validate_sql(sql) is None
-        payload = json.loads(_run(tool.execute(sql=sql)))
+        payload = db.query_sql(sql)
         assert payload["status"] == "success"
-        assert payload["rows"] == [[2024, 2], [2025, 2]]
+        assert [(r["year"], r["cnt"]) for r in payload["rows"]] == [(2024, 2), (2025, 2)]
 
 
 class TestScenario2SemanticSearch:
-    """SKILL: «Найди похожие нарушения» → vector_search."""
+    """SKILL: «Найди похожие нарушения» → generic search_vector."""
 
     def test_vector_search_with_index_name(self) -> None:
-        config = VectorSearchToolConfig()
-        tool = VectorSearchTool(config=config)
-        provider = _StubProvider({
+        provider = _StubVector({
             "violations_index": [
-                _FakeHit(content="Fire safety violation", score=0.9, pk_value=42),
+                SearchResult(content="Fire safety violation", score=0.9, pk_value=42),
             ],
         })
-        tool.set_provider(provider)
-        payload = json.loads(_run(
-            tool.execute(query="пожарная безопасность", index_name="violations_index")
-        ))
-        assert payload["status"] == "success"
-        assert payload["count"] == 1
-        assert payload["results"][0]["id"] == 42
-        assert "Fire" in payload["results"][0]["text"]
+        results = provider.search_vector(
+            "пожарная безопасность", index_name="violations_index"
+        )
+        assert len(results) == 1
+        assert results[0].pk_value == 42
+        assert "Fire" in results[0].content
 
 
 class TestScenario3VectorThenDuckdb:
-    """SKILL: «Найди нарушения + посчитай по годам» → vector_search → duckdb_query."""
+    """SKILL: «Найди нарушения + посчитай по годам» → search_vector → query_sql."""
 
     def test_composite_workflow(self) -> None:
-        vector_config = VectorSearchToolConfig()
-        vector_tool = VectorSearchTool(config=vector_config)
-        provider = _StubProvider({
+        provider = _StubVector({
             "violations_index": [
-                _FakeHit(content="Fire safety issue", score=0.9, pk_value=1),
-                _FakeHit(content="Fire safety alert", score=0.85, pk_value=3),
+                SearchResult(content="Fire safety issue", score=0.9, pk_value=1),
+                SearchResult(content="Fire safety alert", score=0.85, pk_value=3),
             ],
         })
-        vector_tool.set_provider(provider)
-        v_payload = json.loads(_run(
-            vector_tool.execute(query="пожарная безопасность", index_name="violations_index")
-        ))
-        ids = [r["id"] for r in v_payload["results"]]
+        results = provider.search_vector(
+            "пожарная безопасность", index_name="violations_index"
+        )
+        ids = [r.pk_value for r in results]
         assert ids == [1, 3]
 
-        duckdb_tool = _make_duckdb()
+        db = _make_duckdb()
         ids_csv = ",".join(str(i) for i in ids)
         sql = (
-            f"SELECT year, COUNT(*) FROM audits "
+            f"SELECT year, COUNT(*) AS cnt FROM audits "
             f"WHERE id IN ({ids_csv}) GROUP BY year ORDER BY year"
         )
         assert validate_sql(sql) is None
-        d_payload = json.loads(_run(duckdb_tool.execute(sql=sql)))
-        assert d_payload["status"] == "success"
-        assert d_payload["rows"] == [[2024, 1], [2025, 1]]
+        payload = db.query_sql(sql)
+        assert payload["status"] == "success"
+        assert [(r["year"], r["cnt"]) for r in payload["rows"]] == [(2024, 1), (2025, 1)]
 
 
 class TestScenario4UnknownTableRejected:
-    """SKILL: «не использовать неизвестные таблицы» — duckdb_query это уважает."""
+    """SKILL: «не использовать неизвестные таблицы» — query_sql это уважает."""
 
     def test_no_domain_routing_when_table_missing(self) -> None:
-        tool = _make_duckdb()
-        payload = json.loads(_run(
-            tool.execute(sql="SELECT * FROM nonexistent_table")
-        ))
+        db = _make_duckdb()
+        payload = db.query_sql("SELECT * FROM nonexistent_table")
         assert payload["status"] == "error"
-        # Tool сообщает об ошибке без подсказок про audit-таблицы
-        assert "audit" not in payload["message"].lower()
+        # Core сообщает об ошибке без подсказок про audit-таблицы
+        assert "audit" not in payload["error"].lower()
 
 
-class TestScenario5SkillReferencesExist:
-    """SKILL.md ссылается на references/, которые существуют."""
+class TestScenario5SkillSelfContained:
+    """Phase 8: SKILL.md — единственный источник документации skill'а.
 
-    @pytest.mark.parametrize(
-        "ref_path",
-        [
-            "workspace/skills/audit_analyzer/references/schema.md",
-            "workspace/skills/audit_analyzer/references/vector_indexes.md",
-            "workspace/skills/audit_analyzer/references/sql_guidance.md",
-        ],
-    )
-    def test_reference_file_exists(self, ref_path: str) -> None:
-        path = Path(ref_path)
-        assert path.exists(), f"{ref_path} must exist for progressive disclosure"
-        assert path.stat().st_size > 200, f"{ref_path} too small"
+    ``references/*.md`` удалены: progressive disclosure отключён в пользу
+    self-contained документации. Тест проверяет, что SKILL.md достаточно
+    полон для агента.
+    """
 
-    def test_skill_md_uses_decision_procedure(self) -> None:
-        """SKILL.md должен содержать decision logic для выбора capability.
-
-        Проверяем наличие одного из вариантов:
-        - явный раздел "Decision procedure" / "Decision tree";
-        - таблица "задача → capability";
-        - список правил выбора tool'а.
-
-        После рефакторинга архитектура — ровно 2 capability:
-        ``duckdb_query`` и ``vector_search``. Старые tools
-        (``run_predefined_script``, ``nl_sql_generate``) запрещены.
-        """
-        skill = Path("workspace/skills/audit_analyzer/SKILL.md").read_text(encoding="utf-8")
-        markers = [
-            "Decision procedure",
-            "Decision tree",
-            "| Задача |",
-            "задача → capability",
-            "## 1. Predefined",
-            "## 2. Vector",
-            "## 3. Свободный",
-        ]
-        assert any(m in skill for m in markers), (
-            "SKILL.md не содержит decision logic — добавьте раздел "
-            "'Decision tree' / 'Decision procedure' или таблицу "
-            "'задача → capability'."
+    def test_skill_md_is_self_contained(self) -> None:
+        skill_path = Path("workspace/skills/audit_analyzer/SKILL.md")
+        assert skill_path.exists(), "SKILL.md must exist"
+        text = skill_path.read_text(encoding="utf-8")
+        assert len(text) > 2000, (
+            f"SKILL.md слишком мал ({len(text)} chars) — "
+            "весь контент из references/ должен быть в SKILL.md"
         )
-        assert "duckdb_query" in skill, (
-            "SKILL.md должен ссылаться на duckdb_query как основной "
-            "tool получения audit data."
-        )
-        assert "vector_search" in skill, (
-            "SKILL.md должен ссылаться на vector_search для "
-            "семантического поиска."
-        )
-        # Старые tools запрещены в SKILL.md как data flow.
-        # Допустимо упоминание в forbidden-list (`Не вызывай ...`).
-        for forbidden in ("run_predefined_script", "nl_sql_generate"):
-            assert skill.count(forbidden) <= 1, (
-                f"SKILL.md не должен использовать {forbidden} как data flow; "
-                f"допустимо только упоминание в forbidden-list."
+        # 6 скриптов каталогизированы.
+        for script in (
+            "analytics_by_year_month",
+            "audit_dynamics",
+            "audit_effectiveness",
+            "audit_types_stats",
+            "top_audited_objects",
+            "violations_by_type",
+        ):
+            assert script in text, f"SKILL.md должен упоминать {script}"
+        # 3 FAISS-индекса каталогизированы.
+        for index in ("audits_index", "violations_index", "audit_reports_index"):
+            assert index in text
+
+    def test_references_dir_not_required(self) -> None:
+        """``references/`` удалён — SKILL.md self-contained (Phase 8)."""
+        ref_dir = Path("workspace/skills/audit_analyzer/references")
+        if ref_dir.exists():
+            md_files = list(ref_dir.glob("*.md"))
+            assert not md_files, (
+                f"references/*.md должны быть удалены: {md_files}"
             )
+
+    def test_no_agent_tools_modules_exist(self) -> None:
+        """Agent-facing tools удалены (этап 18): duckdb_query / vector_search."""
+        removed = [
+            "workspace/tools/duckdb_query_tool.py",
+            "workspace/tools/vector_search_tool.py",
+        ]
+        for path in removed:
+            assert not Path(path).exists(), f"{path} должен быть удалён (этап 18)"

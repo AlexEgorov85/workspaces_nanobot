@@ -22,12 +22,24 @@ _SCRIPTS_DIR = str(
     Path(__file__).resolve().parents[1]
     / "workspace" / "skills" / "audit_analyzer" / "scripts"
 )
-if _SCRIPTS_DIR not in sys.path:
+_ADDED_SCRIPTS_DIR = _SCRIPTS_DIR not in sys.path
+if _ADDED_SCRIPTS_DIR:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 # Импорт после подкладывания пути — иначе `from llm import chat` упадёт.
 import generated_sql_mode as gsm  # noqa: E402
 import llm as llm_module  # noqa: E402
+
+# Модуль исполняется на этапе collection всего прогона, а audit-скрипты
+# содержат top-level-модуль `llm`, конфликтующий с пакетом
+# `legal_summarizer/scripts/llm/` (`from llm import client` у legal падал бы
+# на audit-модуле). Восстанавливаем исходный sys.path и вычищаем только
+# `llm` из sys.modules, чтобы остальные тесты (в т.ч. test_acceptance_matrix
+# и legal) резолвили `import llm` как legal-пакет. Ссылки на импортированные
+# модули сохранены в этом модуле — тесты ниже работают как раньше.
+if _ADDED_SCRIPTS_DIR:
+    sys.path.remove(_SCRIPTS_DIR)
+sys.modules.pop("llm", None)
 
 
 # ---------- sanitize_sql_response ---------------------------------------------

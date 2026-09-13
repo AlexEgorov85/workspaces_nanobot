@@ -101,12 +101,11 @@ def _required_keys():
         ("gateway.sync.max_queue_size", 10000),
         ("gateway.sync.reconnect_backoff_sec", 1.0),
         ("gateway.sync.reconnect_backoff_max_sec", 60.0),
-        # Embedding — общая runtime-инфраструктура, вынесена из skills.*
-        # в gateway.vector.embedding (commit «skill configuration boundary»).
-        ("gateway.vector.embedding.base_url", "http://localhost:11434/api/embed"),
-        ("gateway.vector.embedding.model", "mxbai-embed-large:latest"),
-        ("gateway.vector.embedding.dimension", 1024),
-        ("gateway.vector.embedding.http_timeout_sec", 60),
+        # Embedding-параметры захардкожены в cache_provider_impl (модульные
+        # константы); секция gateway.vector.embedding удалена. Бearer-токен —
+        # переменная окружения OS EMBED_TOKEN. Индексы декларируются в
+        # gateway.vector.index.indexes (перенесено из PG-реестра
+        # agent_vector_index_config, который больше не читается кодом).
         # cli
         ("cli.show_reasoning", True),
         ("cli.llm_timeout", 300),
@@ -141,25 +140,23 @@ def _required_keys():
         ("gateway.streamlit_port", 8501),
         ("gateway.streamlit_log_filename", "streamlit.log"),
         ("gateway.subprocess_shutdown_timeout_sec", 5.0),
-        # gateway.duckdb_query / gateway.vector_search — инфраструктурные tools.
-        ("gateway.duckdb_query.enable", True),
-        ("gateway.duckdb_query.max_rows", 1000),
-        ("gateway.duckdb_query.max_result_chars", 50000),
-        ("gateway.duckdb_query.query_timeout_sec", 30),
-        ("gateway.vector_search.enable", True),
-        ("gateway.vector_search.default_top_k", 5),
-        ("gateway.vector_search.max_top_k", 50),
-        ("gateway.vector_search.default_threshold", 0.0),
-        ("gateway.vector_search.max_query_chars", 4000),
-        ("gateway.vector_search.max_result_chars", 16000),
-        ("gateway.vector_search.timeout_sec", 30),
-        # NOTE: gateway.nl_sql_generate и gateway.run_predefined_script
-        # удалены в рефакторинге audit_analyzer — Agent использует
-        # duckdb_query напрямую (см. workspace/skills/audit_analyzer/SKILL.md).
+        # gateway.duckdb_query / gateway.vector_search — удалены (этап 18):
+        # Agent-facing tools (duckdb_query_tool.py, vector_search_tool.py)
+        # удалены; Agent работает через Core capability (CacheProvider).
         ("gateway.vector.index.enable", True),
         ("gateway.vector.index.default_root", "data_store/vectors"),
         ("gateway.vector.index.backend", "faiss"),
         ("gateway.vector.index.storage_table", "oarb.audit_vectors"),
+        ("gateway.vector.index.indexes.audits_index.table", "oarb.audits"),
+        ("gateway.vector.index.indexes.audits_index.pk", "id"),
+        ("gateway.vector.index.indexes.audits_index.metric", "cosine"),
+        ("gateway.vector.index.indexes.audits_index.enabled", True),
+        ("gateway.vector.index.indexes.violations_index.table", "oarb.violations"),
+        ("gateway.vector.index.indexes.violations_index.pk", "id"),
+        ("gateway.vector.index.indexes.violations_index.metric", "cosine"),
+        ("gateway.vector.index.indexes.audit_reports_index.table", "oarb.audit_reports"),
+        ("gateway.vector.index.indexes.audit_reports_index.pk", "id"),
+        ("gateway.vector.index.indexes.audit_reports_index.metric", "cosine"),
         # logging.db
         ("logging.db.enabled", True),
         ("logging.db.table_name", "agent_gateway_logs"),

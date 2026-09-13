@@ -8,9 +8,10 @@ embedding_columns помечена "chunk": true, её текст разбива
 row_data (JSONB) всегда содержит ПОЛНУЮ строку исходной таблицы,
 независимо от количества чанков.
 
-Конфиг читается из PG-реестра (``read_vector_index_config_table()``;
-см. ``VectorIndexSettings.config_table``) — единственный источник;
-конфигурация из project.json не подставляется.
+Конфиг читается из ``project.json::gateway.vector.index.indexes``
+(через ``read_vector_index_config({})``; см. ``VectorIndexSettings.indexes``) —
+единственный источник; PG-реестр ``agent_vector_index_config`` больше не
+читается (SQL-артефакты остались как legacy).
 
 Запуск (из корня проекта):
     # Инкрементальное обновление (только новые строки)
@@ -25,8 +26,8 @@ row_data (JSONB) всегда содержит ПОЛНУЮ строку исх�
     # Показать что будет добавлено
     python tools/build_vectors.py --dry-run
 
-    # Настроить чанкование
-    python tools/build_vectors.py --chunk-size 800 --chunk-overlap 150
+    # Pre-flight проверка конфига всех индексов без эмбеддинга
+    python tools/build_vectors.py --validate-only
 
     # При ошибке получения эмбеддинга: ждать это время (сек, default 5) и повторить один раз
     python tools/build_vectors.py --embedding-retry-wait 5
@@ -60,20 +61,19 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 _ROOT = Path(__file__).resolve().parents[1]                    # корень проекта
 # tools/build_vectors.py — generic индексатор. НЕ знает про skill'ы:
-# источник истины — PG-реестр (``read_vector_index_config_table()``;
-# см. ``VectorIndexSettings.config_table``), прочитанный через
-# ``read_vector_index_config({})`` (Phase 7).
-# Skill-секция в project.json исторически давала default storage_table и
-# chunk-параметры; сейчас default'ы берутся из ``gateway.vector.index.*``
-# (через ``infra_registration.register_vector_storage`` ниже) и из
-# hardcoded CLI defaults. Если в вашем проекте используется skill-specific
-# storage_table — задайте ``gateway.vector.index.storage_table`` в project.json.
+# источник истины — ``gateway.vector.index.indexes`` в project.json
+# (``read_vector_index_config({})``). Chunk-параметры и metric задаются
+# per-index в этом же конфиге; глобальные дефолты — модульные константы
+# ``_EMBED_*`` в ``cache_provider_impl``.
 for p in [str(_ROOT)]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
 from config import SETTINGS
-from lib.services.cache_provider_impl import read_vector_index_config
+from lib.services.cache_provider_impl import (
+    read_embedding_defaults,
+    read_vector_index_config,
+)
 from lib.services.text_splitter import build_chunks
 from lib.services.vector_index_service import (
     VectorIndexBuildService,
@@ -85,47 +85,13 @@ from utils.db import configure, execute, fetch, resolve_dsn
 # Standalone-регистрация runtime-storage (для случая когда build_vectors.py
 # запущен без ApplicationContext). Подменяет ApplicationContext._register_infra_resources.
 from lib.core.infra_registration import register_vector_storage
-from lib.core.skill_registration import register_embedding_config
 register_vector_storage()
-register_embedding_config()
 
 
 def fetchone(sql, *args):
     """Вернуть первую строку как dict или None."""
     rows = fetch(sql, *args)
     return rows[0] if rows else None
-
-
-def _persist_index_build_params(
-    index_name: str, chunk_size: int, chunk_overlap: int, metric: str,
-) -> None:
-    """Обновить chunk-параметры и metric в реестре индексов (idempotent).
-
-    Вызывается перед rebuild FAISS, чтобы ``compute_index_signature``
-    оперировал теми же параметрами, которые реально использовались при сборке.
-    Если реестр индексов не задан или таблица не существует — промолчит.
-
-    Это key для ``STALE``-detection по chunk-параметрам после миграции V002:
-    ``_read_current_index_config`` читает из реестра и сравнивает с сохранённой
-    signature; без UPSERT signature строится на default'ах, а в мигрированном
-    реестре может быть старое значение — будет бесконечный STALE.
-
-    ``metric`` обязателен (``"cosine"`` или ``"inner_product"``): signature
-    его включает, и расхождение между build- и verify-стороной ломает
-    STALE-detection.
-    """
-    try:
-        from lib.services.cache_provider_impl import read_vector_index_config_table
-        table = read_vector_index_config_table()
-        execute(
-            f"UPDATE {table} SET chunk_size = %s, chunk_overlap = %s, metric = %s, "
-            f"updated_at = NOW() WHERE index_name = %s",
-            chunk_size, chunk_overlap, metric, index_name,
-        )
-    except Exception as exc:
-        logger.debug(f"  Не удалось записать chunk-параметры в реестр индексов "
-                     f"({exc.__class__.__name__}): signature будет вычислена "
-                     f"по дефолтам из gateway.vector.embedding.*")
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -213,8 +179,8 @@ def _validate_index_config(
 
     # --- src_table ---
     if not src_table:
-        errors.append("src_table не задан — укажите полное имя исходной таблицы "
-                       "(schema.table) в agent_vector_index_config.src_table")
+        errors.append("table не задан — укажите полное имя исходной таблицы "
+                       "(schema.table) в gateway.vector.index.indexes.<имя>.table")
     elif "." not in src_table:
         errors.append(f"src_table = '{src_table}' — ожидается формат 'schema.table'")
 
@@ -270,9 +236,8 @@ def _validate_index_config(
     if isinstance(raw_embedding_cols, (list, tuple)):
         if len(raw_embedding_cols) == 0:
             warnings.append("embedding_cols пуст — все строки будут пропущены "
-                             "(нет колонок для эмбеддинга). Заполните: "
-                             "UPDATE agent_vector_index_config SET embedding_cols = "
-                             "'[\"нужная_колонка\"]'::jsonb WHERE index_name = ...")
+                             "(нет колонок для эмбеддинга). Заполните "
+                             "gateway.vector.index.indexes.<имя>.embedding_cols")
         for idx, elem in enumerate(raw_embedding_cols):
             if isinstance(elem, str):
                 if not elem.strip():
@@ -351,10 +316,8 @@ def _validate_index_config(
         for e in errors:
             logger.error(f"  ✗ {e}")
         logger.error(f"\nКак исправить:\n"
-                     f"  1. Откройте agent_vector_index_config:\n"
-                     f"     psql -c \"SELECT * FROM public.agent_vector_index_config "
-                     f"WHERE index_name = '{index_name}'\"\n"
-                     f"  2. Исправьте проблемные поля через UPDATE\n"
+                     f"  1. Откройте project.json → gateway.vector.index.indexes['{index_name}']\n"
+                     f"  2. Исправьте проблемные поля\n"
                      f"  3. Проверьте снова: python tools/build_vectors.py --validate-only "
                      f"--index {index_name}")
     if warnings:
@@ -435,8 +398,8 @@ def _content_hash(text: str) -> str:
 def _normalize_cols(embedding_cols: list) -> list[str]:
     """Привести embedding_cols к списку строк-имён колонок.
 
-    Конфигурация в PG-реестре (``read_vector_index_config_table()``;
-    см. ``VectorIndexSettings.config_table``) может содержать как
+    Конфигурация в ``gateway.vector.index.indexes`` (см.
+    ``VectorIndexSettings.indexes``) может содержать как
     простые имена колонок (["col1", "col2"]), так и объекты
     ([{"column": "col", "chunk": true, ...}, ...]). Функции
     `_build_search_text` и `build_chunks` ожидают только имена колонок,
@@ -833,32 +796,15 @@ def main():
                         help="Собрать только конкретный индекс")
     parser.add_argument("--batch-size", type=int, default=10,
                         help="Размер батча для эмбеддинга")
-    # Default-значения CLI — из глобальной runtime-секции ``gateway.vector.*``
-    # (НЕ из skills.audit_analyzer). Это generic — работает для любого skill'а.
+    # Default pause-sec — фиксированный (embedding-секция удалена)
     vector_cfg = SETTINGS.get("gateway", {}).get("vector") or {}
     index_cfg = vector_cfg.get("index") or {}
-    embed_cfg = vector_cfg.get("embedding") or {}
     storage_table = index_cfg.get("storage_table") or ""
-    parser.add_argument("--chunk-size", type=int,
-                        default=int(embed_cfg.get("default_chunk_size", 500)),
-                        help="Размер чанка в символах (default 500 или "
-                             "gateway.vector.embedding.default_chunk_size)")
-    parser.add_argument("--chunk-overlap", type=int,
-                        default=int(embed_cfg.get("default_chunk_overlap", 80)),
-                        help="Перекрытие чанков (default 80 или "
-                             "gateway.vector.embedding.default_chunk_overlap)")
-    parser.add_argument("--pause-sec", type=float,
-                        default=float(embed_cfg.get("build_batch_pause_sec", 5.0)),
-                        help="Пауза между запросами эмбеддинга, сек "
-                             "(default 5.0 или gateway.vector.embedding.build_batch_pause_sec)")
+    parser.add_argument("--pause-sec", type=float, default=5.0,
+                        help="Пауза между запросами эмбеддинга, сек (default 5.0)")
     parser.add_argument("--embedding-retry-wait", type=float, default=5.0,
                         help="При ошибке получения эмбеддинга: подождать это время (сек) и повторить "
                              "один раз (default 5.0)")
-    parser.add_argument("--metric", choices=["cosine", "inner_product"],
-                        default="cosine",
-                        help="Метрика FAISS: 'cosine' (нормализация L2) или "
-                             "'inner_product' (без нормализации). Пишется в реестр "
-                             "индексов и попадает в signature (default: cosine)")
     parser.add_argument("--status", action="store_true",
                         help="Показать состояние всех индексов (кол-во векторов, размерность, актуальность)")
     parser.add_argument("--check", action="store_true",
@@ -872,7 +818,7 @@ def main():
     parser.add_argument("--verbose", action="store_true",
                         help="Подробное логирование (уровень DEBUG): конфиг, каждый чанк/строка")
     parser.add_argument("--validate-only", action="store_true",
-                        help="Только проверить конфиг индексов в БД (без сборки). "
+                        help="Только проверить конфиг индексов (без сборки). "
                              "Проверяет existence таблиц/колонок, формат embedding_cols, "
                              " chunk-параметры. Выход 0 — всё валидно, 1 — ошибки.")
 
@@ -979,23 +925,22 @@ def main():
 
     mode_label = "VALIDATE-ONLY" if args.validate_only else "CHECK+SYNC" if args.check else "DRY-RUN" if args.dry_run else "FULL REBUILD" if args.full_rebuild else "INCREMENTAL"
     logger.info(f"Режим: {mode_label}")
-    logger.info(f"Батч: {args.batch_size}, чанк: {args.chunk_size} симв., перекрытие: {args.chunk_overlap}, "
-                f"пауза: {args.pause_sec}с, retry_wait: {args.embedding_retry_wait}с")
-    logger.info("Источник конфига: PG-реестр "
-                "(read_vector_index_config_table(); см. "
-                "gateway.vector.index.config_table)")
+    logger.info(f"Батч: {args.batch_size}, пауза: {args.pause_sec}с, retry_wait: {args.embedding_retry_wait}с")
+    logger.info("Источник конфига: project.json "
+                "(read_vector_index_config(); см. "
+                "gateway.vector.index.indexes)")
 
+    emb_default = read_embedding_defaults()
     results = []
     for name, cfg in enabled.items():
         try:
-            # Записываем фактические chunk-параметры и metric в реестр индексов
-            # (idempotent), чтобы ``compute_index_signature`` при rebuild'е
-            # оперировал теми значениями, которые реально использовались при сборке.
-            _persist_index_build_params(
-                name, args.chunk_size, args.chunk_overlap, args.metric,
-            )
+            # chunk-параметры и metric — из конфига индекса (project.json);
+            # fallback на глобальные дефолты (модульные константы).
+            chunk_size = int(cfg.get("chunk_size") or emb_default["chunk_size"])
+            chunk_overlap = int(cfg.get("chunk_overlap") or emb_default["chunk_overlap"])
+            metric = cfg.get("metric") or "cosine"
             vresult = _validate_index_config(
-                name, cfg, args.chunk_size, args.chunk_overlap, args.metric,
+                name, cfg, chunk_size, chunk_overlap, metric,
             )
             if vresult["errors"]:
                 logger.error(f"Индекс '{name}': обнаружены ошибки конфига, сборка невозможна")
@@ -1017,8 +962,8 @@ def main():
                 name, cfg,
                 db_table=args.db_table,
                 batch_size=args.batch_size,
-                default_chunk_size=args.chunk_size,
-                default_chunk_overlap=args.chunk_overlap,
+                default_chunk_size=chunk_size,
+                default_chunk_overlap=chunk_overlap,
                 pause_sec=args.pause_sec,
                 embedding_retry_wait=args.embedding_retry_wait,
                 full_rebuild=args.full_rebuild,

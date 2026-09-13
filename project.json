@@ -396,72 +396,83 @@
       "reconnect_backoff_sec": 1.0,
       "reconnect_backoff_max_sec": 60.0
     },
-    //  duckdb_query.* — tool workspace/tools/duckdb_query_tool.py.
-    //  Read-only SELECT-запросы в локальный DuckDB-кэш.
-    //  Все ключи опциональны; дефолты в DuckdbQueryToolConfig.
-    "duckdb_query": {
-      "enable": true,
-      "max_rows": 1000,
-      "max_result_chars": 50000,
-      "query_timeout_sec": 30
-    },
-    //  vector_search.* — tool workspace/tools/vector_search_tool.py.
-    //  Семантический поиск по FAISS-индексу.
-    //  Все ключи опциональны; дефолты в VectorSearchToolConfig.
-    "vector_search": {
-      "enable": true,
-      "default_top_k": 5,
-      "max_top_k": 50,
-      "default_threshold": 0.0,
-      "max_query_chars": 4000,
-      "max_result_chars": 16000,
-      "timeout_sec": 30
-    },
     //  vector.* — общая runtime-инфраструктура эмбеддингов и индексов.
-    //    embedding.* — параметры Ollama /api/embed (общие для всех skill'ов);
-    //                  раньше жили в skills.<name>.embedding, вынесены т.к.
-    //                  embedding service — это инфраструктура, не свойство
-    //                  конкретного домена skill'а. Регистрируется в
-    //                  TableRegistry при старте gateway через
-    //                  register_embedding_config.
-    //      base_url         — URL эмбеддер-сервиса.
-    //      model            — имя модели эмбеддингов.
-    //      dimension        — размерность вектора (используется при сборке FAISS).
-    //      http_timeout_sec — таймаут HTTP-запроса к эмбеддеру.
-    //      auth_token       — bearer-токен для Authorization: Bearer <token>.
-    //                         Используется, если эмбеддер за reverse proxy
-    //                         с авторизацией (open-webui, LiteLLM, клауд).
-    //                         Задавать через переменную окружения OS:
-    //                             "auth_token": "${EMBED_TOKEN}"
-    //                         и положить EMBED_TOKEN=... в .secrets.env.
-    //                         Прямое значение в project.json — только для
-    //                         локальной отладки, в коммиты не сохранять.
+    //    Какие индексы строить и из каких source-таблиц — описывается
+    //    в index.indexes (см. ниже). PG-реестр public.agent_vector_index_config
+    //    больше НЕ читается кодом (SQL-артефакты остались как legacy).
+    //    Параметры подключения к эмбеддеру (base_url=Ollama /api/embed,
+    //    model=mxbai-embed-large:latest, dimension=1024, timeout=60с)
+    //    захардкожены константами в cache_provider_impl.get_embedding();
+    //    bearer-токен для reverse-proxy — переменная окружения OS
+    //    EMBED_TOKEN=... (в .secrets.env). Прямые значения в project.json
+    //    не нужны.
     //    index.*    — FAISS-инфраструктура:
     //      storage_table  — единая PG-таблица-хранилище сырых эмбеддингов
     //                       (формат "schema.table"); регистрируется в
     //                       TableRegistry через register_infra.
+    //      signature_table— PG-таблица-хранилище сериализованных FAISS-
+    //                       индексов (BYTEA + metadata JSONB со signature).
     //      default_root   — корневая папка FAISS-индексов; путь к индексу =
     //                       <default_root>/<index_name>.
     //      backend        — runtime-бэкенд построения индексов ("faiss" и т.п.).
-    //  Какие именно индексы строить и из каких source-таблиц — описывается
-    //  в public.agent_vector_index_config (runtime-БД).
-    //  Все ключи опциональны; дефолты в EmbeddingSettings и VectorIndexSettings.
+    //      indexes        — {имя: VectorIndexConfig}: единственный источник
+    //                       конфига индексов (table, pk, content/embedding
+    //                       колонки, chunk-параметры, metric, enabled).
+    //                       Перенесено из PG-реестра agent_vector_index_config.
+    //    Ключи опциональны; дефолты — в VectorIndexSettings/VectorIndexConfig.
     //
     //  УСТАРЕВШИЙ ПУТЬ: gateway.vector_index.*  → УДАЛЁН. Используйте
     //  gateway.vector.index.* (это ЕДИНСТВЕННЫЙ канонический путь).
     "vector": {
-      "embedding": {
-        "base_url": "http://localhost:11434/api/embed",
-        "model": "mxbai-embed-large:latest",
-        "dimension": 1024,
-        "http_timeout_sec": 60,
-        "auth_token": "${EMBED_TOKEN}"
-      },
       "index": {
         "enable": true,
         "storage_table": "oarb.audit_vectors",
         "default_root": "data_store/vectors",
-        "backend": "faiss"
+        "backend": "faiss",
+        "indexes": {
+          "audits_index": {
+            "table": "oarb.audits",
+            "pk": "id",
+            "source_table": "audits",
+            "content_columns": ["title", "audit_type", "auditee_entity", "status"],
+            "embedding_columns": ["title", "audit_type", "auditee_entity", "status"],
+            "track_column": "updated_at",
+            "chunk_size": 500,
+            "chunk_overlap": 80,
+            "metric": "cosine",
+            "enabled": true
+          },
+          "violations_index": {
+            "table": "oarb.violations",
+            "pk": "id",
+            "source_table": "violations",
+            "content_columns": ["description", "recommendation", "violation_code", "severity"],
+            "embedding_columns": [
+              {"column": "description", "chunk": true, "chunk_size": 500, "chunk_overlap": 80},
+              "violation_code"
+            ],
+            "track_column": "updated_at",
+            "chunk_size": 500,
+            "chunk_overlap": 80,
+            "metric": "cosine",
+            "enabled": true
+          },
+          "audit_reports_index": {
+            "table": "oarb.audit_reports",
+            "pk": "id",
+            "source_table": "audit_reports",
+            "content_columns": ["full_text", "title", "report_number", "report_date"],
+            "embedding_columns": [
+              {"column": "full_text", "chunk": true, "chunk_size": 500, "chunk_overlap": 80},
+              "title"
+            ],
+            "track_column": "updated_at",
+            "chunk_size": 500,
+            "chunk_overlap": 80,
+            "metric": "cosine",
+            "enabled": true
+          }
+        }
       }
     }
   },

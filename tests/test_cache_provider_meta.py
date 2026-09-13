@@ -311,8 +311,8 @@ class TestCheckIndexSignatureInProvider:
             "missing" in result["_signature_reason"].lower()
 
     def test_check_returns_meta_unchanged_when_no_config_in_db(self):
-        """Если в ``agent_vector_index_config`` нет такого индекса —
-        STALE detection пропускается (нечего проверять).
+        """Если в конфиге (``gateway.vector.index.indexes``) нет такого
+        индекса — STALE detection пропускается (нечего проверять).
         """
         from unittest.mock import patch
 

@@ -1776,12 +1776,9 @@ class RuntimePatcher:
                         skipped_duplicate.append(tool.name)
                         continue
                     # DI: проброс инфраструктуры в tool'ы, которые её ожидают.
-                    # ``VectorSearchTool`` / ``DuckdbQueryTool`` — generic
-                    # tool'ы с явными ``set_provider``/``set_connection_factory``
-                    # точками внедрения; делаем это здесь, чтобы они работали
-                    # с реальной инфраструктурой (``cache_store``) в production,
-                    # а не с дефолтным fallback'ом (``duckdb.connect(":memory:")``
-                    # или ``no CacheProvider injected``).
+                    # Generic-путь ``set_provider`` / ``set_connection_factory``:
+                    # если tool ожидает ``CacheProvider``/``cache_store`` —
+                    # передаём реализацию из runtime, а не дефолтный fallback.
                     if cache_store is not None:
                         if hasattr(tool, "set_provider"):
                             try:

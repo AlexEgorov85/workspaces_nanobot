@@ -1,8 +1,8 @@
 """P0: signature индекса покрывает chunk_size / chunk_overlap / metric.
 
 Контракт (docs/TARGET_ARCHITECTURE.md §22.9 по vector-части):
-    build  →  конфиг-реестр (agent_vector_index_config)  →  signature
-    verify →  тот же конфиг-реестр                        →  signature
+    build  →  конфиг (project.json::gateway.vector.index.indexes) → signature
+    verify →  тот же конфиг                                      → signature
 Один и тот же canonical config-объект в обоих местах: ``_read_current_index_config``
 (verify) и ``_compute_index_signature_from_config`` (build).
 
@@ -55,8 +55,8 @@ class TestReadCurrentIndexConfig:
         assert cfg["src_table"] == "oarb.audits"
         assert cfg["embedding_model"] == "mxbai-embed-large:latest"
 
-    def test_falls_back_to_embedding_defaults_on_legacy_registry(self, monkeypatch):
-        """Схема до миграции V002 не имеет chunk-колонок — fallback на дефолты."""
+    def test_falls_back_to_embedding_defaults_when_chunk_params_missing(self, monkeypatch):
+        """Без per-index chunk-параметров — fallback на глобальные дефолты."""
         import lib.services.cache_provider_impl as impl
 
         legacy = _base_cfg()
@@ -75,7 +75,7 @@ class TestReadCurrentIndexConfig:
 
 
 class TestChunkChangeDetectsStale:
-    """Ключевой P0-контракт: смена chunk-параметров в реестре → STALE."""
+    """Ключевой P0-контракт: смена chunk-параметров в конфиге → STALE."""
 
     def test_chunk_size_change_detected(self, monkeypatch):
         import lib.services.cache_provider_impl as impl
@@ -90,7 +90,7 @@ class TestChunkChangeDetectsStale:
         stored_cfg = provider._read_current_index_config("audits_index")
         stored_sig = compute_index_signature(stored_cfg)
 
-        # Конфиг в реестре изменился: chunk_size 500 → 800.
+        # Конфиг изменился: chunk_size 500 → 800.
         monkeypatch.setattr(
             impl, "read_vector_index_config",
             lambda _c: {"audits_index": _base_cfg(chunk_size=800)},
@@ -153,23 +153,22 @@ class TestChunkChangeDetectsStale:
 
 class TestComputeIndexSignatureFromConfig:
     def test_includes_chunk_and_metric(self, monkeypatch):
-        import utils.db as dbmod
-
         import lib.services.cache_provider_impl as impl
 
-        row = {
-            "src_table": "oarb.audits",
-            "pk_column": "id",
-            "content_cols": ["title"],
-            "embedding_cols": [{"col": "title"}],
-            "track_column": "updated_at",
-            "chunk_size": 300,
-            "chunk_overlap": 40,
-            "metric": "inner_product",
+        indexes = {
+            "audits_index": {
+                "table": "oarb.audits",
+                "pk": "id",
+                "content_columns": ["title"],
+                "embedding_columns": [{"col": "title"}],
+                "track_column": "updated_at",
+                "chunk_size": 300,
+                "chunk_overlap": 40,
+                "metric": "inner_product",
+            }
         }
-        monkeypatch.setattr(dbmod, "fetch", lambda *a, **k: [row])
         monkeypatch.setattr(
-            impl, "read_vector_index_config_table", lambda: "public.agent_vector_index_config",
+            impl, "read_vector_index_config", lambda _c: indexes,
         )
         monkeypatch.setattr(
             impl, "read_embedding_config",
@@ -195,18 +194,21 @@ class TestComputeIndexSignatureFromConfig:
         assert sig == expected
 
     def test_chunk_change_changes_build_signature(self, monkeypatch):
-        import utils.db as dbmod
-
         import lib.services.cache_provider_impl as impl
 
         def _sig(chunk_size: int, metric: str) -> str:
-            row = {
-                "src_table": "oarb.audits", "pk_column": "id",
-                "content_cols": ["title"], "embedding_cols": [{"col": "title"}],
-                "track_column": "updated_at",
-                "chunk_size": chunk_size, "chunk_overlap": 80, "metric": metric,
+            indexes = {
+                "audits_index": {
+                    "table": "oarb.audits", "pk": "id",
+                    "content_columns": ["title"],
+                    "embedding_columns": [{"col": "title"}],
+                    "track_column": "updated_at",
+                    "chunk_size": chunk_size, "chunk_overlap": 80, "metric": metric,
+                }
             }
-            monkeypatch.setattr(dbmod, "fetch", lambda *a, **k: [row])
+            monkeypatch.setattr(
+                impl, "read_vector_index_config", lambda _c: indexes,
+            )
             provider = impl.PostgresDuckDbProvider(
                 vector_store_table="public.agent_vector_index_store",
             )
@@ -227,7 +229,7 @@ class TestGetIndexMetric:
         provider = _make_provider(monkeypatch, _register_with_metric("cosine"))
         assert provider._get_index_metric("audits_index") == "cosine"
 
-    def test_returns_none_when_no_registry(self, monkeypatch):
+    def test_returns_none_when_no_index(self, monkeypatch):
         provider = _make_provider(monkeypatch, {})
         assert provider._get_index_metric("audits_index") is None
 

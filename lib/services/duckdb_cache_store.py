@@ -855,12 +855,9 @@ class DuckDbCacheStore:
         max_rows: int = 1000,
     ) -> dict[str, Any]:
         """Выполнить read-only SQL к настроенному DuckDB-кэшу.
-
-        Точка интеграции для ``DuckdbQueryTool``: tool делегирует сюда запрос,
-        не зная пути к файлу DuckDB, жизненного цикла соединения и локов.
-        Возвращает ``{"rows": [...], "columns": [...]}`` при успехе или
-        ``{"error": <msg>}`` если кэш не готов / запрос упал. SQL-safety
-        (SELECT-only) контролируется самим tool'ом (``validate_sql``).
+        Используется ``CacheProvider.execute_readonly`` (generic Core Data
+        capability). Возвращает ``{"rows": [...], "columns": [...]}`` при
+        успехе или ``{"error": <msg>}`` если кэш не готов / запрос упал.
         """
         with self._lock:
             if self._conn is None:
@@ -967,8 +964,8 @@ class DuckDbCacheStore:
 
         Читает сохранённую signature из ``metadata`` PG-таблицы-хранилища
         (``self._vector_store_table``; см. ``VectorIndexSettings.signature_table``)
-        и сравнивает с вычисленной по ``read_vector_index_config_table()``
-        (``VectorIndexSettings.config_table``) + ``gateway.vector.embedding``.
+        и сравнивает с вычисленной по ``read_vector_index_config()``
+        (``gateway.vector.index.indexes``) + захардкоженному embedding-конфигу.
         При несовпадении бросает ``IndexIntegrityError`` (STALE) — это блокирует
         «тихую» семантическую деградацию (поиск старыми векторами по новым
         запросам).

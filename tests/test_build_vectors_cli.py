@@ -4,7 +4,8 @@
 поэтому «герметичный» прогон через monkey-patch слишком хрупок (слишком
 много SQL-путей внутри ``build_index``). Этот тест проверяет только
 **CLI-обвязку**: парсинг аргументов, ``--help``, fail-fast ветки без DSN,
-и что ``--metric`` действительно попадает в argparse без падения.
+и что chunk-параметры/metric берутся из конфига индекса (не CLI-флагов,
+которые удалены).
 
 Регрессии в самой сборке (классификация NEW/CHANGED/REMOVED,
 чанкование, signature) уже покрыты модульными тестами:
@@ -46,27 +47,21 @@ def _run(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
     )
 
 
-def test_help_exits_zero_and_lists_metric_flag() -> None:
-    """``--help`` не должен падать и должен рекламировать ``--metric``."""
+def test_help_exits_zero() -> None:
+    """``--help`` не должен падать."""
     proc = _run("--help")
     assert proc.returncode == 0, proc.stderr
-    assert "--metric" in proc.stdout
-    assert "cosine" in proc.stdout
-    assert "inner_product" in proc.stdout
+    assert "--db-table" in proc.stdout
 
 
-def test_metric_default_is_cosine() -> None:
-    """``--help`` показывает ``default: cosine`` — единый дефолт для signature."""
+def test_chunk_flags_removed_from_help() -> None:
+    """``--chunk-size``/``--chunk-overlap``/``--metric`` удалены — это per-index
+    конфиг ``gateway.vector.index.indexes``, а не CLI-флаги."""
     proc = _run("--help")
-    assert "default: cosine" in proc.stdout
-
-
-def test_metric_unknown_choice_rejected() -> None:
-    """Любое значение вне ``{cosine, inner_product}`` должно быть отвергнуто argparse."""
-    proc = _run("--metric", "l2", "--help")
-    assert proc.returncode != 0
-    combined = (proc.stdout or "") + (proc.stderr or "")
-    assert "invalid choice" in combined.lower() or "argparse" in combined.lower()
+    assert proc.returncode == 0
+    assert "--chunk-size" not in proc.stdout
+    assert "--chunk-overlap" not in proc.stdout
+    assert "--metric" not in proc.stdout
 
 
 def _run_bootstrap(setup_code: str) -> subprocess.CompletedProcess:

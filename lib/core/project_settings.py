@@ -26,7 +26,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from config import ConfigurationError
 
 __all__ = [
-    "EmbeddingSettings",
     "ProjectSettings",
     "SkillBriefContextSettings",
     "SkillCliSettings",
@@ -35,6 +34,7 @@ __all__ = [
     "SkillsSettings",
     "SyncSettings",
     "TableEntry",
+    "VectorIndexConfig",
     "VectorIndexEntry",
     "GatewaySettings",
     "VectorInfrastructureSettings",
@@ -65,21 +65,8 @@ class CompactSettings(_StrictOptional):
     print_to_terminal: bool | None = None
 
 
-class DuckDbQuerySettings(_StrictOptional):
-    enable: bool | None = None
-    max_rows: int | None = Field(default=None, gt=0)
-    max_result_chars: int | None = Field(default=None, gt=0)
-    query_timeout_sec: float | None = Field(default=None, gt=0)
-
-
-class VectorSearchSettings(_StrictOptional):
-    enable: bool | None = None
-    default_top_k: int | None = Field(default=None, gt=0)
-    max_top_k: int | None = Field(default=None, gt=0)
-    default_threshold: float | None = Field(default=None, ge=0, le=1)
-    max_query_chars: int | None = Field(default=None, gt=0)
-    max_result_chars: int | None = Field(default=None, gt=0)
-    timeout_sec: float | None = Field(default=None, gt=0)
+# DuckDbQuerySettings / VectorSearchSettings удалены (этап 18):
+# Agent-facing tools (duckdb_query_tool.py, vector_search_tool.py) удалены.
 
 
 class VectorIndexSettings(_StrictOptional):
@@ -88,9 +75,9 @@ class VectorIndexSettings(_StrictOptional):
     Хранилище эмбеддингов и сами индексы — общий runtime, не привязанный
     к домену skill'а. Доменные таблицы, нужные в DuckDB-кэше, декларируются
     в ``skills.<name>.tables[]``. Какие индексы строить и из каких
-    source-таблиц — описывается в PG-реестре (``config_table`` ниже;
-    дефолт — ``_DEFAULT_VECTOR_INDEX_CONFIG_TABLE`` в
-    ``cache_provider_impl``).
+    source-таблиц — описывается в ``indexes`` (см. ``VectorIndexConfig``);
+    это единственный источник (раньше был PG-реестр
+    ``public.agent_vector_index_config``).
 
     Путь в ``project.json``: ``gateway.vector.index.*`` (см.
     ``VectorInfrastructureSettings``). Раньше жил в ``gateway.vector_index.*`` —
@@ -112,13 +99,11 @@ class VectorIndexSettings(_StrictOptional):
             ``build_cache_provider`` для проверки/записи signature; если
             переименована через DDL — указать здесь, чтобы код не зависел
             от хардкода.
-        config_table: PG-таблица-реестр векторных индексов (какие
-            индексы строить, из каких source-таблиц, content_cols,
-            embedding_cols). Дефолт —
-            ``_DEFAULT_VECTOR_INDEX_CONFIG_TABLE`` в ``cache_provider_impl``
-            (DDL в ``sql/vectors/create_vector_index_config.sql``).
-            Используется ``cache_provider_impl.read_vector_index_config``
-            и ``tools/build_vectors.py``; если переименована — указать здесь.
+        indexes: полный конфиг vector-индексов ``{имя: VectorIndexConfig}``
+            (какие индексы строить, из каких source-таблиц, content_cols,
+            embedding_cols, chunk-параметры, metric). Единственный источник
+            для ``cache_provider_impl.read_vector_index_config`` и
+            ``tools/build_vectors.py``.
     """
 
     enable: bool | None = None
@@ -126,57 +111,19 @@ class VectorIndexSettings(_StrictOptional):
     backend: str | None = None
     storage_table: str | None = None
     signature_table: str | None = None
-    config_table: str | None = None
-
-
-class EmbeddingSettings(_StrictOptional):
-    """Параметры эмбеддингов (Ollama /api/embed и совместимые сервисы).
-
-    Общая runtime-инфраструктура, не привязанная к домену конкретного
-    skill'а (``embedding`` больше НЕ живёт в ``skills.<name>``). Источник
-    — ``project.json::gateway.vector.embedding``. Читается
-    ``skill_registration.register_embedding_config`` при старте gateway
-    и кладётся в ``TableRegistry.set_embedding_config(...)``.
-
-    Attributes:
-        base_url: URL эмбеддер-сервиса (например, Ollama ``/api/embed``).
-        model: имя модели эмбеддингов (например, ``mxbai-embed-large:latest``).
-        dimension: размерность вектора. Используется при сборке FAISS-индекса
-            и валидации совместимости с уже построенными индексами.
-        http_timeout_sec: таймаут HTTP-запроса к эмбеддер-сервису, сек.
-        auth_token: bearer-токен для ``Authorization: Bearer <token>``
-            при запросах к эмбеддер-сервису. Используется, если Ollama
-            (или совместимый сервис: open-webui, LiteLLM, клаудные
-            провайдеры с ``/api/embed``-совместимым API) выставлена за
-            reverse proxy с авторизацией. **Рекомендуемый способ задания** —
-            через переменную окружения OS: ``"auth_token": "${EMBED_TOKEN}"``
-            (подстановка делается на этапе мержа ``config.py`` из
-            ``.secrets.env``). Прямое значение в ``project.json`` — только
-            для локальной отладки, в коммиты не сохранять.
-    """
-
-    base_url: str | None = None
-    model: str | None = None
-    dimension: int | None = Field(default=None, gt=0)
-    http_timeout_sec: float | None = Field(default=None, gt=0)
-    auth_token: str | None = None
+    indexes: dict[str, VectorIndexConfig] | None = None
 
 
 class VectorInfrastructureSettings(_StrictOptional):
-    """Векторная инфраструктура (``gateway.vector.*``): эмбеддинги + индексы.
+    """Векторная инфраструктура (``gateway.vector.*``): индексы.
 
-    Содержит:
-      * ``embedding`` — ``EmbeddingSettings`` (см. выше);
-      * ``index`` — ``VectorIndexSettings`` (FAISS-индексы, storage-таблица).
-
-    Каноническое место для **общей** vector-инфраструктуры. Раньше
-    ``embedding`` жил в ``skills.<name>.embedding`` (per-skill), что
-    противоречит его runtime-семантике: ``embedding_config`` — singleton
-    в ``TableRegistry``, общий для всех skill'ов. Поэтому ``embedding``
-    перенесён в ``gateway.vector.embedding``.
+    Содержит ``index`` — ``VectorIndexSettings`` (конфиг индексов,
+    storage-таблица). Параметры подключения к эмбеддеру больше не
+    настраиваются: они захардкожены в ``cache_provider_impl.get_embedding()``
+    (модульные константы + ``EMBED_TOKEN`` из окружения OS).
+    Каноническое место для **общей** vector-инфраструктуры.
     """
 
-    embedding: EmbeddingSettings | None = None
     index: VectorIndexSettings | None = None
 
 
@@ -192,8 +139,7 @@ class GatewaySettings(_StrictOptional):
     llm_timeout: int | None = Field(default=None, gt=0)
     exec_timeout: int | None = Field(default=None, ge=0)
     compact: CompactSettings | None = None
-    duckdb_query: DuckDbQuerySettings | None = None
-    vector_search: VectorSearchSettings | None = None
+    # duckdb_query / vector_search: Agent-facing tools удалены (этап 18).
     vector: VectorInfrastructureSettings | None = None
     heartbeat: HeartbeatSettings | None = None
     sync: SyncSettings | None = None
@@ -320,8 +266,8 @@ class VectorIndexEntry(BaseModel):
     Источник эмбеддингов (PG-таблица исходных строк), алгоритм построения
     (FAISS / pgvector / Qdrant / иной бэкенд), параметры чанкинга и формат
     хранения — это runtime-параметры конкретного бэкенда, **общая
-    инфраструктура** (см. ``gateway.vector.index.*``, ``agent_vector_index_config``
-    в runtime-БД), а не часть декларации ресурса в ``skills.<name>``.
+    инфраструктура** (см. ``gateway.vector.index.indexes``),
+    а не часть декларации ресурса в ``skills.<name>``.
 
     Attributes:
         name: логическое имя индекса (``"audits_index"``, ``"products_v"``).
@@ -334,15 +280,60 @@ class VectorIndexEntry(BaseModel):
 
     Раньше в этой модели было обязательное поле ``source`` (имя PG-таблицы
     исходных строк). После того как source-таблицу перенесли в общий
-    runtime-реестр (``config_table``; см. ``VectorIndexSettings.config_table``),
-    ``source`` удалён из декларации skill'а. Если будет добавлен новый
-    backend, где source декларируется прямо в skill'е — это будет новая
-    схема, а не возврат к старой.
+    runtime-конфиг (``gateway.vector.index.indexes``), ``source`` удалён
+    из декларации skill'а. Если будет добавлен новый backend, где source
+    декларируется прямо в skill'е — это будет новая схема, а не возврат
+    к старой.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
+
+
+class VectorIndexConfig(BaseModel):
+    """Полный конфиг одного vector-индекса (``gateway.vector.index.indexes``).
+
+    Единственный источник деталей построения индекса: исходная таблица (``table``),
+    первичный ключ (``pk``), логическое имя источника (``source_table``),
+    колонки контента/эмбеддинга, track-колонка, chunk-параметры и metric.
+
+    Раньше это жило в PG-реестре ``public.agent_vector_index_config``
+    (``sql/vectors/create_vector_index_config.sql`` + seed) и читалось
+    ``cache_provider_impl.read_vector_index_config``. Теперь — это
+    настройка, переносится в ``project.json``.
+
+    Attributes:
+        table: исходная таблица для эмбеддинга (``schema.table``).
+        pk: колонка первичного ключа в ``table``.
+        source_table: логическое имя источника (значение ``source`` в
+            vector-хранилище ``oarb.audit_vectors``).
+        content_columns: колонки, попадающие в ``content`` вектора.
+        embedding_columns: колонки для эмбеддинга; элемент — строка
+            (имя колонки) или объект ``{"column": ..., "chunk": true,
+            "chunk_size": ..., "chunk_overlap": ...}``.
+        track_column: колонка инкрементального отслеживания (дефолт ``updated_at``).
+        chunk_size: размер чанка для длинных текстов (дефолт 500).
+        chunk_overlap: перекрытие чанков (дефолт 80).
+        metric: метрика FAISS (``cosine`` / ``inner_product``; дефолт ``cosine``).
+        enabled: включён ли индекс (дефолт ``True``).
+
+    Unknown keys запрещены (``extra="forbid"``) — fail-fast на опечатках
+    в ``project.json``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    table: str
+    pk: str
+    source_table: str | None = None
+    content_columns: list[str] = Field(default_factory=list)
+    embedding_columns: list[str | dict[str, Any]] | None = None
+    track_column: str | None = None
+    chunk_size: int | None = Field(default=None, gt=0)
+    chunk_overlap: int | None = Field(default=None, ge=0)
+    metric: Literal["cosine", "inner_product"] | None = None
+    enabled: bool = True
 
 
 class SkillCliSettings(_StrictOptional):
@@ -461,9 +452,8 @@ class SkillSettings(BaseModel):
         context batching).
 
     Это **только domain binding** skill'а. Shared infrastructure
-    (embedding service, DuckDB-кеш, FAISS root, sync) лежит вне
-    ``skills.*`` — см. ``gateway.vector.embedding``, ``gateway.duckdb``,
-    ``gateway.vector.index.*``, ``gateway.sync``.
+    (DuckDB-кеш, FAISS root, sync) лежит вне ``skills.*`` —
+    см. ``gateway.duckdb``, ``gateway.vector.index.*``, ``gateway.sync``.
 
     Граница: ``model_config = ConfigDict(extra="forbid")`` — fail-fast
     на опечатках в ``project.json`` (например, ``tablse`` вместо

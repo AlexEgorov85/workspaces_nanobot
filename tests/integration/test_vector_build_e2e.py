@@ -28,7 +28,6 @@ np = pytest.importorskip("numpy")
 _EMBED_DIM = 4
 _VECTOR_TABLE = "oarb.audit_vectors"
 _STORE_TABLE = "public.agent_vector_index_store"
-_CONFIG_TABLE = "public.agent_vector_index_config"
 _INDEX_NAME = "audits_index"
 
 
@@ -51,22 +50,20 @@ def _emb(text: str) -> list[float]:
 
 
 class _FakePG:
-    """In-memory имитация PostgreSQL: store + конфиг + векторы."""
+    """In-memory имитация PostgreSQL: store + векторы.
+
+    Конфиг индексов код не читает из PG (читается из project.json через
+    ``read_vector_index_config``, который здесь monkey-patched).
+    """
 
     def __init__(self) -> None:
         self.store: dict[str, dict] = {}
-        self.config_rows: list[dict] = []
-        self.config_row_single: dict | None = None
         self.vector_rows: list[dict] = []
         self.executed: list[tuple[str, tuple]] = []
 
     def fetch(self, sql: str, *args) -> list[dict]:
         s = sql.strip()
         lower = s.lower()
-        if lower.startswith("select index_name, source_table"):
-            return list(self.config_rows)
-        if "where index_name = %s" in lower and "chunk_size" in lower:
-            return [dict(self.config_row_single)] if self.config_row_single else []
         if "index_binary" in lower and "agent_vector_index_store" in lower:
             entry = self.store.get(args[0]) if args else None
             if entry:
@@ -103,6 +100,24 @@ class _FakePG:
         return blob, meta_json, dim, ntotal, source
 
 
+def _index_cfg(**overrides) -> dict:
+    """Pythonic-конфиг индекса (формат ``read_vector_index_config``)."""
+    cfg = {
+        "table": "oarb.audits",
+        "pk": "id",
+        "source_table": "audits",
+        "content_columns": ["title"],
+        "embedding_columns": [{"col": "title", "chunk": True}],
+        "track_column": "updated_at",
+        "chunk_size": 500,
+        "chunk_overlap": 80,
+        "metric": "cosine",
+        "enabled": True,
+    }
+    cfg.update(overrides)
+    return cfg
+
+
 def _patch_impl(monkeypatch, fake: _FakePG):
     import utils.db as dbmod
 
@@ -110,38 +125,21 @@ def _patch_impl(monkeypatch, fake: _FakePG):
 
     monkeypatch.setattr(dbmod, "fetch", fake.fetch)
     monkeypatch.setattr(dbmod, "execute", fake.execute)
-    monkeypatch.setattr(impl, "read_vector_index_config_table", lambda: _CONFIG_TABLE)
+    # Конфиг индексов живёт в project.json (gateway.vector.index.indexes);
+    # ``read_vector_index_config`` monkey-patched детерминированным pythonic-конфигом.
+    def _read_vector_index_config(_cfg) -> dict:
+        return cfg_container["indexes"]
+
+    cfg_container = {"indexes": {_INDEX_NAME: _index_cfg()}}
+    monkeypatch.setattr(impl, "read_vector_index_config", _read_vector_index_config)
     monkeypatch.setattr(
         impl, "read_embedding_config",
         lambda: {"model": "mxbai-embed-large:latest", "dimension": _EMBED_DIM},
     )
-    return impl
+    return impl, cfg_container
 
 
 def _setup_fake(fake: _FakePG) -> None:
-    fake.config_rows = [{
-        "index_name": _INDEX_NAME,
-        "source_table": "audits",
-        "src_table": "oarb.audits",
-        "pk_column": "id",
-        "content_cols": ["title"],
-        "embedding_cols": [{"col": "title", "chunk": True}],
-        "track_column": "updated_at",
-        "chunk_size": 500,
-        "chunk_overlap": 80,
-        "metric": "cosine",
-        "enabled": True,
-    }]
-    fake.config_row_single = {
-        "src_table": "oarb.audits",
-        "pk_column": "id",
-        "content_cols": ["title"],
-        "embedding_cols": [{"col": "title", "chunk": True}],
-        "track_column": "updated_at",
-        "chunk_size": 500,
-        "chunk_overlap": 80,
-        "metric": "cosine",
-    }
     fake.vector_rows = [
         {
             "source": _INDEX_NAME, "content": "Документ A", "search_text": "Документ A",
@@ -176,7 +174,7 @@ class TestVectorBuildE2E:
         """Полный vertical slice: build → store → reload (новый провайдер) → search."""
         fake = _FakePG()
         _setup_fake(fake)
-        impl = _patch_impl(monkeypatch, fake)
+        impl, _ = _patch_impl(monkeypatch, fake)
         monkeypatch.setattr(impl, "get_embedding", lambda text: _emb(text))
 
         provider = impl.PostgresDuckDbProvider(
@@ -212,10 +210,10 @@ class TestVectorBuildE2E:
         assert results[0].score == pytest.approx(1.0, abs=1e-5)
 
     def test_config_change_detects_stale_on_reload(self, monkeypatch):
-        """Смена chunk_size в реестре → STALE при reload (но загрузка работает)."""
+        """Смена chunk_size в конфиге → STALE при reload (но загрузка работает)."""
         fake = _FakePG()
         _setup_fake(fake)
-        impl = _patch_impl(monkeypatch, fake)
+        impl, cfg_container = _patch_impl(monkeypatch, fake)
         monkeypatch.setattr(impl, "get_embedding", lambda text: _emb(text))
 
         provider = impl.PostgresDuckDbProvider(
@@ -225,8 +223,7 @@ class TestVectorBuildE2E:
         provider.rebuild_and_store_index(_INDEX_NAME, _VECTOR_TABLE)
 
         # Конфиг изменился: chunk_size 500 → 900 (пересборка обязательна).
-        fake.config_rows[0]["chunk_size"] = 900
-        fake.config_row_single["chunk_size"] = 900
+        cfg_container["indexes"][_INDEX_NAME]["chunk_size"] = 900
 
         provider2 = impl.PostgresDuckDbProvider(
             vector_db_table=_VECTOR_TABLE,

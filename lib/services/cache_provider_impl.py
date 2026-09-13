@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Literal
@@ -53,11 +54,23 @@ _INDEX_SIGNATURE_FIELDS = (
 # Чтобы переименовать таблицу через DDL — указать новое имя в settings.
 _DEFAULT_VECTOR_INDEX_STORE_TABLE = "public.agent_vector_index_store"
 
-# Дефолтное имя PG-таблицы-реестра векторных индексов (какие индексы
-# строить, из каких source-таблиц, content_cols, embedding_cols).
-# Используется когда в ``project.json::gateway.vector.index.config_table``
-# ничего не задано. Чтобы переименовать через DDL — указать в settings.
-_DEFAULT_VECTOR_INDEX_CONFIG_TABLE = "public.agent_vector_index_config"
+
+# Параметры подключения к эмбеддер-сервису (Ollama /api/embed и совместимые).
+# Захардкожены в теле ``get_embedding()`` (задача «embedding-параметры в код»);
+# секция ``gateway.vector.embedding`` и ``EmbeddingSettings`` удалены.
+# Токен берётся из переменной окружения OS ``EMBED_TOKEN`` (если не задана —
+# запросы без Authorization).
+_EMBED_BASE_URL = "http://localhost:11434/api/embed"
+_EMBED_MODEL = "mxbai-embed-large:latest"
+_EMBED_DIMENSION = 1024
+_EMBED_TIMEOUT_SEC = 60.0
+_EMBED_RETRIES = 3
+_EMBED_TOKEN_ENV = "EMBED_TOKEN"
+
+# Дефолтные chunk-параметры сборки индекса (fallback, когда в конфиге индекса
+# ``gateway.vector.index.indexes.<name>`` не заданы chunk_size / chunk_overlap).
+_DEFAULT_CHUNK_SIZE = 500
+_DEFAULT_CHUNK_OVERLAP = 80
 
 
 def read_vector_store_table() -> str:
@@ -79,25 +92,6 @@ def read_vector_store_table() -> str:
     return (
         idx.get("signature_table")
         or _DEFAULT_VECTOR_INDEX_STORE_TABLE
-    )
-
-
-def read_vector_index_config_table() -> str:
-    """Имя PG-таблицы-реестра векторных индексов.
-
-    Источник — ``project.json::gateway.vector.index.config_table``
-    (см. ``VectorIndexSettings.config_table``). Дефолт —
-    значение ``_DEFAULT_VECTOR_INDEX_CONFIG_TABLE``.
-
-    Используется ``cache_provider_impl.read_vector_index_config`` и
-    ``tools/build_vectors.py`` для чтения декларации индексов.
-    """
-    from config import SETTINGS
-
-    idx = ((SETTINGS.get("gateway") or {}).get("vector") or {}).get("index") or {}
-    return (
-        idx.get("config_table")
-        or _DEFAULT_VECTOR_INDEX_CONFIG_TABLE
     )
 
 
@@ -165,36 +159,21 @@ _META_TABLE = "__schema_meta"
 def get_embedding(text: str) -> list[float] | None:
     """Единая точка получения эмбеддинга текста через Ollama /api/embed.
 
-    Конфиг (``base_url`` / ``model`` / ``timeout_sec`` / ``auth_token``)
-    читается из ``lib.services.table_registry.embedding_config()``
-    (положен туда на старте gateway через ``register_embedding_config``
-    из ``gateway.vector.embedding``). Это generic инфраструктурный слой —
-    ``lib/`` не зависит от конкретного навыка (TARGET §4, §22.9).
+    Параметры подключения (``base_url`` / ``model`` / ``timeout_sec`` /
+    ``retries``) захардкожены модульными константами
+    (``_EMBED_BASE_URL`` / ``_EMBED_MODEL`` / ``_EMBED_TIMEOUT_SEC`` /
+    ``_EMBED_RETRIES``). ``auth_token`` (bearer) читается из переменной
+    окружения OS ``EMBED_TOKEN``; если не задана — запрос без
+    ``Authorization`` (не ломает локальный Ollama без токена).
 
-    Если ``base_url`` пуст — функция возвращает ``None``.
-    ``auth_token`` (если задан) передаётся как ``Authorization: Bearer``.
-    Используется для Ollama / open-webui / LiteLLM / клаудных провайдеров,
-    выставленных за reverse proxy с авторизацией.
+    Это generic инфраструктурный слой — ``lib/`` не зависит от конкретного
+    навыка (TARGET §4, §22.9).
     """
-    try:
-        from lib.services.table_registry import table_registry
-        cfg = table_registry.embedding_config()
-    except Exception:
-        return None
-
-    base_url = cfg.get("base_url") or ""
-    if not base_url:
-        return None
-    model = cfg.get("model") or "mxbai-embed-large:latest"
-    timeout_sec = float(cfg.get("timeout_sec") or 60.0)
-    retries = int(cfg.get("max_retries") or 3)
-    auth_token_raw = (cfg.get("auth_token") or "").strip()
-    # Неразрешённый ${VAR}-плейсхолдер (env-переменная не задана) трактуем
-    # как «без авторизации» — иначе локальный Ollama без токена получит
-    # ``Authorization: Bearer ${EMBED_TOKEN}`` и сломается.
-    auth_token = auth_token_raw if (
-        auth_token_raw and not auth_token_raw.startswith("${")
-    ) else ""
+    base_url = _EMBED_BASE_URL
+    model = _EMBED_MODEL
+    timeout_sec = _EMBED_TIMEOUT_SEC
+    retries = _EMBED_RETRIES
+    auth_token = os.environ.get(_EMBED_TOKEN_ENV, "").strip()
 
     def _embed() -> list[float] | None:
         import httpx
@@ -230,96 +209,70 @@ def get_embedding(text: str) -> list[float] | None:
 
 
 def read_embedding_config() -> dict[str, Any]:
-    """Параметры эмбеддера из ``project.json::gateway.vector.embedding``.
+    """Параметры эмбеддера — из захардкоженных констант.
 
-    Источник — ``SETTINGS['gateway']['vector']['embedding']``
-    (см. ``EmbeddingSettings``).
-
-    Раньше секция жила в ``skills.<name>.embedding``. После commit
-    «skill configuration boundary» она вынесена на уровень gateway,
-    потому что embedding-service общий для всех skill'ов, а не специфичен
-    для домена одного навыка.
+    Секция ``gateway.vector.embedding`` удалена; параметры подключения
+    прописаны в теле ``get_embedding()`` (``_EMBED_*``-константы). Эта
+    функция — единая точка чтения тех же значений для signature-механики
+    (``_read_current_index_config`` / ``_compute_index_signature_from_config`` /
+    ``DuckDbCacheStore._check_index_integrity``), чтобы build- и verify-стороны
+    не расходились.
     """
-    from config import SETTINGS
-
-    emb = ((SETTINGS.get("gateway") or {}).get("vector") or {}).get("embedding") or {}
     return {
-        "base_url": emb.get("base_url", ""),
-        "model": emb.get("model", "mxbai-embed-large:latest"),
-        "dimension": emb.get("dimension", 1024),
-        "http_timeout_sec": emb.get("http_timeout_sec", 60.0),
-        "auth_token": emb.get("auth_token"),
+        "base_url": _EMBED_BASE_URL,
+        "model": _EMBED_MODEL,
+        "dimension": _EMBED_DIMENSION,
+        "http_timeout_sec": _EMBED_TIMEOUT_SEC,
+        "auth_token": os.environ.get(_EMBED_TOKEN_ENV) or None,
     }
 
 
 def read_embedding_defaults() -> dict[str, Any]:
-    """Дефолтные chunk-параметры сборки из ``gateway.vector.embedding``.
+    """Дефолтные chunk-параметры сборки (``_DEFAULT_CHUNK_*``).
 
-    Те самые значения, которые ``tools/build_vectors.py`` использует как
-    CLI-дефолты (``--chunk-size``/``--chunk-overlap``). Единая точка чтения —
-    чтобы signature-verification (``_read_current_index_config``) брала те же
-    значения, что и build, когда в реестре индексов нет per-index значений
-    (легаси-схема до миграции V002).
+    Единая точка чтения для build- и verify-сторон: ``tools/build_vectors.py``,
+    ``_read_current_index_config``, ``_compute_index_signature_from_config``
+    и ``_check_index_integrity`` берут одни и те же значения, когда в конфиге
+    индекса нет per-index chunk-параметров.
     """
-    from config import SETTINGS
-
-    emb = ((SETTINGS.get("gateway") or {}).get("vector") or {}).get("embedding") or {}
     return {
-        "chunk_size": int(emb.get("default_chunk_size", 500)),
-        "chunk_overlap": int(emb.get("default_chunk_overlap", 80)),
+        "chunk_size": _DEFAULT_CHUNK_SIZE,
+        "chunk_overlap": _DEFAULT_CHUNK_OVERLAP,
     }
 
 
 def read_vector_index_config(cfg: dict) -> dict[str, Any]:
-    """Конфиг векторных индексов: читается из PG-таблицы-реестра.
+    """Конфиг векторных индексов из ``project.json::gateway.vector.index.indexes``.
 
-    Имя таблицы — результат ``read_vector_index_config_table()``
-    (см. ``VectorIndexSettings.config_table``: ключ
-    ``project.json::gateway.vector.index.config_table``; дефолт — значение
-    ``_DEFAULT_VECTOR_INDEX_CONFIG_TABLE``, DDL в
-    ``sql/vectors/create_vector_index_config.sql``). При ошибке БД
-    исключение пробрасывается (кроме отсутствия колонок ``chunk_size``/
-    ``chunk_overlap``/``metric`` до миграции V002 — тогда читается
-    legacy-набор полей, чтобы signature-degradation была бесшумной).
+    Единственный источник декларации индексов (раньше был PG-реестр
+    ``public.agent_vector_index_config``). ``cfg`` игнорируется (API-compat
+    с существующими вызовами) — конфиг читается из глобального ``SETTINGS``.
+
+    Возвращает pythonic-формат: ``{имя: {table, pk, source_table,
+    content_columns, embedding_columns, track_column, chunk_size,
+    chunk_overlap, metric, enabled}}``.
     """
-    from utils.db import fetch
+    from config import SETTINGS
 
-    table = read_vector_index_config_table()
-    base_cols = (
-        "index_name, source_table, src_table, pk_column, "
-        "content_cols, embedding_cols, track_column, enabled"
-    )
-    try:
-        rows = fetch(
-            "SELECT " + base_cols + ", chunk_size, chunk_overlap, metric "
-            f"FROM {table} ORDER BY index_name"
-        )
-    except Exception:
-        # Миграция V002 не применена: колонок chunk-параметров нет.
-        # Читаем базовый набор — build/search не ломаются, просто signature
-        # не покрывает chunk-параметры (STALE-detection по ним отключён).
-        rows = fetch(
-            "SELECT " + base_cols + f" FROM {table} ORDER BY index_name"
-        )
-    result = {}
-    for r in rows:
-        ec = r["embedding_cols"]
-        if isinstance(ec, str):
-            try:
-                ec = json.loads(ec)
-            except (json.JSONDecodeError, TypeError):
-                ec = {}
-        result[r["index_name"]] = {
-            "table": r["src_table"],
-            "pk": r["pk_column"],
-            "source_table": r["source_table"],
-            "content_columns": list(r["content_cols"]) if isinstance(r.get("content_cols"), (list, tuple)) else [],
-            "embedding_columns": ec,
-            "track_column": r["track_column"],
-            "chunk_size": r.get("chunk_size"),
-            "chunk_overlap": r.get("chunk_overlap"),
-            "metric": r.get("metric"),
-            "enabled": r["enabled"],
+    idx = ((SETTINGS.get("gateway") or {}).get("vector") or {}).get("index") or {}
+    indexes = idx.get("indexes") or {}
+    if not isinstance(indexes, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for name, c in indexes.items():
+        if not isinstance(c, dict):
+            continue
+        result[name] = {
+            "table": c.get("table", ""),
+            "pk": c.get("pk", ""),
+            "source_table": c.get("source_table"),
+            "content_columns": list(c.get("content_columns") or []),
+            "embedding_columns": c.get("embedding_columns") or [],
+            "track_column": c.get("track_column"),
+            "chunk_size": c.get("chunk_size"),
+            "chunk_overlap": c.get("chunk_overlap"),
+            "metric": c.get("metric"),
+            "enabled": c.get("enabled", True),
         }
     return result
 
@@ -347,13 +300,12 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
     ``data_store/vectors``).
 
     ``vector_indexes[]`` используется только для индексов (имя);
-    source-таблица — runtime-реестр (``read_vector_index_config_table()``;
-    см. ``VectorIndexSettings.config_table``), не часть декларации skill'а.
+    source-таблица — общий runtime-конфиг (``read_vector_index_config()``;
+    см. ``gateway.vector.index.indexes``), не часть декларации skill'а.
 
     ``cache.*`` и ``embedding.*`` из ``cfg`` НЕ читаются:
-    ``embedding`` — общий runtime (``gateway.vector.embedding``);
-    cache path — единый ``table_registry.snapshot_path``. Источник —
-    ``read_embedding_config()`` без аргумента.
+    embedding-параметры захардкожены (``read_embedding_config()`` без
+    аргумента); cache path — единый ``table_registry.snapshot_path``.
 
     Использует ``cfg`` напрямую + ``lib.services.table_registry`` для путей.
     Не зависит от ``lib.services.audit_settings`` (TARGET §4, §22.9).
@@ -1121,8 +1073,9 @@ class PostgresDuckDbProvider(CacheProvider):
                 if idx is not None:
                     meta = self._check_index_signature(index_name, meta)
                     self._index_cache[index_name] = (idx, meta)
-                    # Сохраняем в provider для downstream (vector_search_tool)
-                    # — может прочитать ``_last_loaded_meta`` и показать warning.
+                    # Сохраняем meta в provider для downstream читателей
+                    # (``_signature_status`` / ``_signature_reason`` — см.
+                    # ``SearchResult.signature_status``).
                     self._last_loaded_meta = meta
                     return idx, meta
             except Exception:
@@ -1162,7 +1115,7 @@ class PostgresDuckDbProvider(CacheProvider):
         Возвращает ``meta`` (возможно с добавленными ``_signature_status``
         и ``_signature_reason``). Не блокирует загрузку — STALE/INVALID
         индекс всё равно загружается, но оператор видит предупреждение
-        в результатах поиска через ``vector_search_tool.execute()``.
+        в результатах поиска (``SearchResult.signature_status``).
 
         Если ``meta is None`` (нет данных для проверки) — возвращает
         как есть, ``_check_index_signature`` не падает.
@@ -1197,15 +1150,14 @@ class PostgresDuckDbProvider(CacheProvider):
     ) -> dict[str, Any] | None:
         """Прочитать конфиг индекса + embedding config для verify_index_signature.
 
-        Returns ``None`` если ``read_vector_index_config_table()`` не задан
-        или индекс не найден — в этом случае STALE detection пропускается
-        (нечего проверять).
+        Returns ``None`` если индекс не найден в
+        ``read_vector_index_config`` (``gateway.vector.index.indexes``) —
+        в этом случае STALE detection пропускается (нечего проверять).
 
-        ``chunk_size``/``chunk_overlap``/``metric`` берутся из реестра
-        (``agent_vector_index_config``); до миграции V002 (или NULL) —
-        fallback на глобальные дефолты ``gateway.vector.embedding.*``
-        (same defaults, что использует ``tools/build_vectors.py``), чтобы
-        signature при legacy-схеме оставался детерминированным.
+        ``chunk_size``/``chunk_overlap``/``metric`` берутся из конфига
+        индекса; если не заданы — fallback на глобальные дефолты
+        (``read_embedding_defaults`` + ``"cosine"``), чтобы signature
+        оставался детерминированным и build/verify не расходились.
         """
         try:
             configs = read_vector_index_config({})
@@ -1265,11 +1217,11 @@ class PostgresDuckDbProvider(CacheProvider):
             self._index_cache.clear()
 
     def _get_index_metric(self, index_name: str) -> str | None:
-        """Метрика индекса из реестра (``agent_vector_index_config.metric``).
+        """Метрика индекса из конфига (``gateway.vector.index.indexes``).
 
-        ``None`` — реестр недоступен/индекс не найден/легаси-схема до V002:
-        fallback на raw inner-product (без нормализации), обратно совместимо
-        с индексами до P0-2.
+        ``None`` — конфиг недоступен/индекс не найден: fallback на raw
+        inner-product (без нормализации), обратно совместимо с индексами
+        до P0-2.
         """
         try:
             cfg = self._read_current_index_config(index_name)
@@ -1367,8 +1319,8 @@ class PostgresDuckDbProvider(CacheProvider):
         """Перестроить индекс для source и сохранить в store (для индексаторов).
 
         Перед сохранением читает конфиг индекса из
-        ``read_vector_index_config_table()`` (``VectorIndexSettings.config_table``)
-        и текущий embedding-конфиг из ``gateway.vector.embedding``; вычисляет
+        ``read_vector_index_config()`` (``gateway.vector.index.indexes``)
+        и текущий embedding-конфиг (захардкоженные константы); вычисляет
         signature (``compute_index_signature``) и кладёт в ``metadata.signature``
         в store. Это позволяет последующему ``verify_index_signature``
         отличать CURRENT от STALE/INVALID без отдельной миграции схемы.
@@ -1390,59 +1342,42 @@ class PostgresDuckDbProvider(CacheProvider):
         return None
 
     def _compute_index_signature_from_config(self, source: str) -> str | None:
-        """Прочитать конфиг индекса из БД + embedding-конфиг и вычислить signature.
+        """Прочитать конфиг индекса из настроек + embedding-конфиг и вычислить signature.
 
-        Возвращает ``None`` если конфиг в БД не найден или таблица не задана —
-        в этом случае signature не пишется, и downstream-вызовы получат
-        ``INVALID`` через ``verify_index_signature`` (принудительная пересборка).
+        Возвращает ``None`` если конфиг индекса не найден или таблица не
+        задана — в этом случае signature не пишется, и downstream-вызовы
+        получат ``INVALID`` через ``verify_index_signature`` (принудительная
+        пересборка).
 
-        ``chunk_size``/``chunk_overlap``/``metric`` — из реестра индексов
-        (пишет ``tools/build_vectors.py`` при сборке); до миграции V002 —
-        fallback на глобальные дефолты, чтобы build- и verify-стороны
-        оставались консистентными.
+        ``chunk_size``/``chunk_overlap``/``metric`` — из конфига индекса
+        (``gateway.vector.index.indexes``); если не заданы — fallback на
+        глобальные дефолты, чтобы build- и verify-стороны оставались
+        консистентными.
         """
         if not self._vector_store_table:
             return None
         try:
-            from utils.db import fetch
+            configs = read_vector_index_config({})
         except Exception:
             return None
-        try:
-            table = read_vector_index_config_table()
-            rows = fetch(
-                "SELECT src_table, pk_column, content_cols, embedding_cols, "
-                f"track_column, chunk_size, chunk_overlap, metric "
-                f"FROM {table} WHERE index_name = %s",
-                source,
-            )
-        except Exception:
-            try:
-                rows = fetch(
-                    "SELECT src_table, pk_column, content_cols, embedding_cols, "
-                    f"track_column FROM {read_vector_index_config_table()} "
-                    "WHERE index_name = %s",
-                    source,
-                )
-            except Exception:
-                return None
-        if not rows:
+        cfg = configs.get(source)
+        if not cfg:
             return None
-        row = rows[0]
         emb_cfg = read_embedding_config()
         emb_default = read_embedding_defaults()
-        cfg = {
-            "src_table": row.get("src_table"),
-            "pk_column": row.get("pk_column"),
-            "content_cols": row.get("content_cols") or [],
-            "embedding_cols": row.get("embedding_cols") or [],
-            "track_column": row.get("track_column"),
+        sig_cfg = {
+            "src_table": cfg.get("table"),
+            "pk_column": cfg.get("pk"),
+            "content_cols": cfg.get("content_columns") or [],
+            "embedding_cols": cfg.get("embedding_columns") or [],
+            "track_column": cfg.get("track_column"),
             "embedding_model": emb_cfg.get("model"),
             "embedding_dimension": emb_cfg.get("dimension"),
-            "chunk_size": row.get("chunk_size") or emb_default["chunk_size"],
-            "chunk_overlap": row.get("chunk_overlap") or emb_default["chunk_overlap"],
-            "metric": row.get("metric") or "cosine",
+            "chunk_size": cfg.get("chunk_size") or emb_default["chunk_size"],
+            "chunk_overlap": cfg.get("chunk_overlap") or emb_default["chunk_overlap"],
+            "metric": cfg.get("metric") or "cosine",
         }
-        return compute_index_signature(cfg)
+        return compute_index_signature(sig_cfg)
 
     # -- resource --------------------------------------------------------
 

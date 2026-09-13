@@ -3,7 +3,7 @@
 
 CLI — единая точка вызова навыка из shell/runtime/тестов. Он НЕ содержит
 business-логики режимов: делегирует в ``predefined.run``, ``generated_sql_mode.run``,
-``VectorSearchTool``. Какой mode выбрать — решает Agent/user; CLI лишь исполняет
+``CacheProvider.search_vector``. Какой mode выбрать — решает Agent/user; CLI лишь исполняет
 запрошенную capability и сериализует результат в плоский JSON.
 
 Modes:
@@ -71,9 +71,8 @@ MODES = ("predefined", "generated_sql", "vector")
 def _resolve_known_index(index_name: str) -> tuple[bool | None, str]:
     """Проверить, что ``index_name`` зарегистрирован в runtime-реестре.
 
-    Использует публичный ``cache_provider_impl.read_vector_index_config({})``
-    (тот же источник, что и ``vector_search_tool._is_known_index``) — не
-    лезем в приватное состояние provider'а.
+    Использует публичный ``cache_provider_impl.read_vector_index_config({})`` —
+    не лезем в приватное состояние provider'а.
 
     Returns:
         ``(True, "")`` — индекс зарегистрирован.
@@ -138,15 +137,11 @@ def _ensure_registered() -> None:
     try:
         from config import SETTINGS
         from lib.core.infra_registration import register_vector_storage
-        from lib.core.skill_registration import (
-            register_embedding_config,
-            register_skill_from_config,
-        )
+        from lib.core.skill_registration import register_skill_from_config
 
         audit_cfg = SETTINGS.get("skills", {}).get("audit_analyzer", {})
         register_skill_from_config("audit_analyzer", audit_cfg)
         register_vector_storage()
-        register_embedding_config()
     except Exception as exc:
         print(f"[registration] WARN: {exc}", file=sys.stderr)
 
@@ -294,11 +289,17 @@ def _list_scripts(db: Any) -> dict:
 
 
 def _list_indexes() -> dict:
-    """Каталог FAISS-индексов из ``public.agent_vector_index_config``.
+    """Каталог FAISS-индексов из ``gateway.vector.index.indexes``.
+
+    Единственный источник конфигурации индексов — секция
+    ``project.json::gateway.vector.index.indexes`` (см.
+    ``VectorIndexSettings.indexes`` и ``VectorIndexConfig``); PG-реестр
+    ``public.agent_vector_index_config`` больше не читается кодом
+    (SQL-артефакты остались как legacy).
 
     Возвращает полные метаданные каждого индекса: source_table,
     embed-колонки, chunking, signature-status. Используется CLI-флагом
-    ``--list-indexes`` для discovery без чтения `` SKILL.md``.
+    ``--list-indexes`` для discovery без чтения ``SKILL.md``.
     """
     try:
         from lib.services.cache_provider_impl import read_vector_index_config
@@ -309,9 +310,8 @@ def _list_indexes() -> dict:
             "status": "error",
             "data": {
                 "message": (
-                    f"Не удалось прочитать реестр индексов: {exc}. "
-                    "Запустите gateway (python gateway.py) — реестр живёт "
-                    "в PostgreSQL."
+                    f"Не удалось прочитать конфиг индексов: {exc}. "
+                    "Проверьте project.json::gateway.vector.index.indexes."
                 ),
                 "error_type": "registry_unavailable",
             },

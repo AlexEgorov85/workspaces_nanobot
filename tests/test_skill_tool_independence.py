@@ -17,7 +17,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 def _all_py_files(root: Path) -> list[Path]:
     if not root.exists():
         return []
-    return [p for p in root.rglob("*.py") if "__pycache__" not in p.parts]
+    # Исключаем ``tests/`` подкаталоги навыков — это тесты навыка, а не
+    # runtime код; их импорты Tool допустимы (тест, а не сам Skill).
+    return [
+        p
+        for p in root.rglob("*.py")
+        if "__pycache__" not in p.parts and "tests" not in p.parts
+    ]
 
 
 def _imports_skill(tree: ast.AST) -> list[tuple[str, int]]:

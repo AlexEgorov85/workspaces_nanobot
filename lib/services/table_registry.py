@@ -19,10 +19,10 @@ runtime-снапшот ``workspace/data_store/duckdb/cache.duckdb``.
   и делает её доступной только через ``TableRegistry.resources_by_label()``.
   Runtime-sync ``label`` игнорирует.
 * ``VectorResource`` — описание одной PG-таблицы сырых эмбеддингов. FAISS
-  строится поверх неё (через ``read_vector_index_config_table()`` +
-  ``read_vector_store_table()`` — см. ``VectorIndexSettings.config_table`` /
-  ``.signature_table``), параметры model/dimension — в embedding-конфиге,
-  не в ресурсе.
+  строится поверх неё (через ``read_vector_index_config()`` +
+  ``read_vector_store_table()`` — см. ``gateway.vector.index.indexes`` /
+  ``.signature_table``); параметры model/dimension захардкожены в
+  ``cache_provider_impl``, не в ресурсе.
 * ``SkillRegistration.resources`` — единый набор ресурсов skill'а.
 """
 
@@ -155,12 +155,10 @@ class TableRegistry:
     Attributes:
         _registrations: skill-регистрации.
         _infra: инфраструктурные ресурсы.
-        _embedding: общий embedding-конфиг (base_url, model, dimension).
     """
 
     _registrations: dict[str, SkillRegistration] = field(default_factory=dict)
     _infra: dict[str, tuple[Resource, ...]] = field(default_factory=dict)
-    _embedding: dict[str, Any] = field(default_factory=dict)
 
     def register(self, registration: SkillRegistration) -> None:
         """Зарегистрировать skill."""
@@ -322,7 +320,6 @@ class TableRegistry:
         """
         self._registrations.clear()
         self._infra.clear()
-        self._embedding.clear()
 
     def snapshot_path(self, workspace_path: Path, filename: str = "cache.duckdb") -> Path:
         """Путь к runtime-снапшоту DuckDB.
@@ -331,20 +328,6 @@ class TableRegistry:
         файл для всех навыков (cross-skill запросы через ``duckdb_query``).
         """
         return workspace_path / "data_store" / "duckdb" / filename
-
-    def set_embedding_config(self, **kwargs: Any) -> None:
-        """Установить embedding-конфиг (общий для всех навыков).
-
-        Ключи: ``base_url``, ``model``, ``timeout_sec``, ``max_retries``,
-        ``dimension``.
-        """
-        merged = dict(self._embedding)
-        merged.update(kwargs)
-        self._embedding = merged
-
-    def embedding_config(self) -> dict[str, Any]:
-        """Текущий embedding-конфиг (пустой dict, если не настроен)."""
-        return dict(self._embedding)
 
 
 # Глобальный singleton.

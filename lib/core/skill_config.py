@@ -8,11 +8,11 @@
 ``config.SETTINGS`` и табличный реестр через ``lib.services.table_registry``.
 
 Embedding-конфиг (``get_embedding_config``, ``get_embedding_model``)
-больше НЕ параметризован по ``skill_name``: после commit «skill
-configuration boundary» embedding — общая runtime-инфраструктура
-(``gateway.vector.embedding``), а не свойство skill-домена. Эти функции
-читают напрямую из ``table_registry.embedding_config()`` (положен туда
-на старте gateway через ``register_embedding_config``).
+больше НЕ параметризован по ``skill_name``: embedding — общая
+runtime-инфраструктура. Эти функции читают из
+``cache_provider_impl.read_embedding_config()`` — параметры подключения
+захардкожены модульными константами (``_EMBED_*``), ``auth_token`` —
+из ``os.environ['EMBED_TOKEN']``.
 """
 
 from __future__ import annotations
@@ -279,23 +279,24 @@ def build_cache_provider(skill_name: str, skill_root: Path | str) -> Any:
 
 
 def get_vector_indexes(skill_name: str) -> dict[str, Any]:
-    """Метаданные индексов из PG-реестра (``read_vector_index_config_table()``,
-    см. ``VectorIndexSettings.config_table``)."""
+    """Метаданные индексов из ``gateway.vector.index.indexes``
+    (см. ``VectorIndexSettings.indexes`` и
+    ``cache_provider_impl.read_vector_index_config``)."""
     from lib.services.cache_provider_impl import read_vector_index_config
 
     return read_vector_index_config(_skill_cfg(skill_name))
 
 
 def get_embedding_config() -> dict[str, Any]:
-    """Embedding-конфиг из общего runtime-реестра.
+    """Embedding-конфиг из захардкоженных констант.
 
-    Источник — ``gateway.vector.embedding`` (положен в ``TableRegistry``
-    на старте gateway через ``register_embedding_config``). Не
-    параметризовано ``skill_name``: embedding — общая инфраструктура.
+    Источник — ``cache_provider_impl.read_embedding_config()``
+    (``_EMBED_*``-константы; ``auth_token`` из ``os.environ['EMBED_TOKEN']``).
+    Не параметризовано ``skill_name``: embedding — общая инфраструктура.
     """
-    from lib.services.table_registry import table_registry
+    from lib.services.cache_provider_impl import read_embedding_config
 
-    return table_registry.embedding_config()
+    return read_embedding_config()
 
 
 def get_embedding_model() -> str:

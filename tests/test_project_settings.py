@@ -33,8 +33,6 @@ class TestValidateProjectSettings:
             "gateway": {
                 "print_llm_calls": False,
                 "compact": {"enabled": True, "notify_in_history": True},
-                "duckdb_query": {"max_rows": 500, "query_timeout_sec": 10},
-                "vector_search": {"default_top_k": 5, "default_threshold": 0.7},
             },
             "cli": {"show_context_window": True, "max_iterations": 200},
             "streamlit": {"enabled": False, "error_window_sec": 600},
@@ -42,7 +40,6 @@ class TestValidateProjectSettings:
         result = validate_project_settings(settings)
         assert result.version == "2.5.0"
         assert result.channels.postgres.claim_strategy == "worker_pool"
-        assert result.gateway.duckdb_query.max_rows == 500
         assert result.cli.max_iterations == 200
 
     def test_unknown_keys_allowed(self) -> None:
@@ -87,10 +84,13 @@ class TestValidateProjectSettings:
             )
 
     def test_threshold_out_of_range_rejected(self) -> None:
-        with pytest.raises(ConfigurationError):
-            validate_project_settings(
-                {"gateway": {"vector_search": {"default_threshold": 1.5}}}
-            )
+        # ``gateway.vector_search.default_threshold`` — настройка удалённого
+        # agent-facing tool'а (Phase 18: duckdb_query / vector_search tools удалены).
+        # Невалидное значение НЕ должно падать: секции больше нет, лишний ключ
+        # пропускается через ``_StrictOptional(extra="allow")`` (forward-compat).
+        validate_project_settings(
+            {"gateway": {"vector_search": {"default_threshold": 1.5}}}
+        )
 
     def test_all_problems_listed_at_once(self) -> None:
         with pytest.raises(ConfigurationError) as excinfo:
@@ -234,7 +234,9 @@ class TestSkillSettingsExtraForbid:
     def test_legacy_embedding_section_rejected_direct(self) -> None:
         """Прямая валидация SkillSettings запрещает legacy-секцию ``embedding``.
 
-        После рефакторинга ``embedding`` должна жить в ``gateway.vector.embedding``.
+        Параметры эмбеддинга захардкожены в ``cache_provider_impl``
+        (``gateway.vector.embedding`` удалена); внутри skill'а секция
+        ``embedding`` по-прежнему extra-forbidden.
         """
         with pytest.raises(Exception) as excinfo:
             SkillSettings.model_validate({
@@ -390,9 +392,9 @@ class TestSkillBriefContextSettings:
 
 
 class TestVectorIndexEntryNoSource:
-    """``VectorIndexEntry.source`` удалён: source — инфраструктурная
-    декларация в PG-реестре (``read_vector_index_config_table()``;
-    см. ``VectorIndexSettings.config_table``), не часть skill'а.
+    """``VectorIndexEntry.source`` удалён: source — конфиг
+    индексов (``gateway.vector.index.indexes``; см. ``VectorIndexConfig``),
+    не часть skill'а.
 
     После commit ``VectorIndexEntry.extra="forbid"`` legacy-поля
     (``source``, ``embedding``, любые другие) теперь не «тихо»
@@ -446,79 +448,107 @@ class TestVectorIndexEntryNoSource:
         assert "extra_forbidden" in msg or "not permitted" in msg
 
 
-class TestGatewayVectorEmbedding:
-    """``gateway.vector.embedding`` — общая инфраструктура эмбеддингов."""
+class TestGatewayVectorIndexConfig:
+    """``gateway.vector.index.indexes`` — единственный источник конфига индексов.
 
-    def test_valid_embedding(self) -> None:
+    Секция ``gateway.vector.embedding`` удалена (параметры захардкожены в
+    ``cache_provider_impl``); индексы декларируются per-name словарём
+    ``gateway.vector.index.indexes`` (``VectorIndexConfig``), перенесены
+    из PG-реестра ``agent_vector_index_config``.
+    """
+
+    def test_valid_index_config(self) -> None:
         result = validate_project_settings({
             "gateway": {
                 "vector": {
-                    "embedding": {
-                        "base_url": "http://localhost:11434/api/embed",
-                        "model": "mxbai-embed-large:latest",
-                        "dimension": 1024,
-                        "http_timeout_sec": 60,
-                    },
+                    "index": {
+                        "storage_table": TEST_VECTOR_TABLE,
+                        "indexes": {
+                            "audits_index": {
+                                "table": "oarb.audits",
+                                "pk": "id",
+                                "source_table": "audits",
+                                "content_columns": ["title", "status"],
+                                "embedding_columns": ["title", "status"],
+                                "track_column": "updated_at",
+                                "chunk_size": 500,
+                                "chunk_overlap": 80,
+                                "metric": "cosine",
+                                "enabled": True,
+                            },
+                        },
+                    }
                 },
             },
         })
-        emb = result.gateway.vector.embedding
-        assert emb.base_url == "http://localhost:11434/api/embed"
-        assert emb.model == "mxbai-embed-large:latest"
-        assert emb.dimension == 1024
-        assert emb.http_timeout_sec == 60
+        cfg = result.gateway.vector.index.indexes["audits_index"]
+        assert cfg.table == "oarb.audits"
+        assert cfg.pk == "id"
+        assert cfg.content_columns == ["title", "status"]
+        assert cfg.metric == "cosine"
+        assert cfg.enabled is True
 
-    def test_embedding_with_auth_token(self) -> None:
-        """Bearer-токен для ``Authorization: Bearer <token>`` пробрасывается как есть.
+    def test_embedding_columns_accept_objects(self) -> None:
+        """embedding_columns: строки или объекты ``{"column":..., "chunk":...}``."""
+        result = validate_project_settings({
+            "gateway": {
+                "vector": {
+                    "index": {
+                        "indexes": {
+                            "violations_index": {
+                                "table": "oarb.violations",
+                                "pk": "id",
+                                "embedding_columns": [
+                                    {"column": "description", "chunk": True,
+                                     "chunk_size": 500, "chunk_overlap": 80},
+                                    "violation_code",
+                                ],
+                            },
+                        },
+                    }
+                },
+            },
+        })
+        cfg = result.gateway.vector.index.indexes["violations_index"]
+        assert cfg.embedding_columns[0]["column"] == "description"
+        assert cfg.embedding_columns[1] == "violation_code"
 
-        Подстановка ``${EMBED_TOKEN}`` происходит на этапе мержа config.py;
-        здесь мы проверяем только, что поле валидно.
+    def test_unknown_key_in_index_rejected(self) -> None:
+        """Опечатки внутри ``indexes.<name>`` падают fail-fast (extra="forbid")."""
+        with pytest.raises((ConfigurationError, Exception)):
+            validate_project_settings({
+                "gateway": {
+                    "vector": {
+                        "index": {
+                            "indexes": {
+                                "audits_index": {
+                                    "table": "oarb.audits",
+                                    "pk": "id",
+                                    "tablse": "oops",
+                                },
+                            },
+                        },
+                    }
+                },
+            })
+
+    def test_embedding_section_rejected(self) -> None:
+        """Legacy ``gateway.vector.embedding`` больше не читается.
+
+        ``EmbeddingSettings`` удалена; ``VectorInfrastructureSettings`` не
+        содержит поля ``embedding``, поэтому legacy-ключи считаются
+        неизвестными и не валидируются как ошибка (extra="allow" для
+        forward-compat) — их никто не читает.
         """
         result = validate_project_settings({
             "gateway": {
                 "vector": {
-                    "embedding": {
-                        "base_url": "http://localhost:11434/api/embed",
-                        "model": "mxbai-embed-large:latest",
-                        "dimension": 1024,
-                        "auth_token": "${EMBED_TOKEN}",
-                    },
+                    "embedding": {"base_url": "http://x"},
+                    "index": {"indexes": {}},
                 },
             },
         })
-        emb = result.gateway.vector.embedding
-        assert emb.auth_token == "${EMBED_TOKEN}"
-
-    def test_auth_token_optional(self) -> None:
-        """Если auth_token не задан — эмбеддер без авторизации (например, локальный Ollama)."""
-        result = validate_project_settings({
-            "gateway": {
-                "vector": {
-                    "embedding": {
-                        "base_url": "http://localhost:11434/api/embed",
-                        "model": "mxbai-embed-large:latest",
-                    },
-                },
-            },
-        })
-        emb = result.gateway.vector.embedding
-        assert emb.auth_token is None
-
-    def test_embedding_dimension_must_be_positive(self) -> None:
-        with pytest.raises(ConfigurationError):
-            validate_project_settings({
-                "gateway": {
-                    "vector": {"embedding": {"base_url": "x", "dimension": 0}}
-                }
-            })
-
-    def test_embedding_http_timeout_must_be_positive(self) -> None:
-        with pytest.raises(ConfigurationError):
-            validate_project_settings({
-                "gateway": {
-                    "vector": {"embedding": {"base_url": "x", "http_timeout_sec": -1}}
-                }
-            })
+        assert result.gateway.vector.index is not None
 
     def test_vector_index_path_unique(self) -> None:
         """``gateway.vector.index.*`` — единственный канонический путь.
@@ -676,13 +706,18 @@ class TestGatewayLegacyFailFast:
         assert result.gateway.vector.index.storage_table == "x"
 
     def test_no_legacy_section_works(self) -> None:
-        """Без legacy-секции — нормальный путь."""
+        """Без legacy-секции — нормальный путь.
+
+        Секция ``gateway.vector.embedding`` удалена: поле не валидируется
+        (extra="allow" для forward-compat), старт не падает, никто его не читает.
+        """
         result = validate_project_settings({
             "gateway": {
                 "vector": {"embedding": {"base_url": "http://x"}},
             },
         })
-        assert result.gateway.vector.embedding.base_url == "http://x"
+        assert result.gateway is not None
+        assert result.gateway.vector.index is None
 
     def test_unknown_gateway_top_level_still_allowed(self) -> None:
         """Случайные flat-ключи в ``gateway.*`` (forward-compat) всё ещё

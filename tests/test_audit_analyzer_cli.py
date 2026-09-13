@@ -22,8 +22,25 @@ from pathlib import Path
 import pytest
 
 
-SKILL_DIR = Path("workspace/skills/audit_analyzer")
-CLI_PATH = SKILL_DIR / "scripts" / "cli.py"
+try:
+    from conftest import AUDIT_SKILL_DIR as SKILL_DIR, AUDIT_CLI_PATH as CLI_PATH
+except ImportError:
+    SKILL_DIR = Path(__file__).resolve().parent.parent / "workspace" / "skills" / "audit_analyzer"
+    CLI_PATH = SKILL_DIR / "scripts" / "cli.py"
+
+# `cli.py` при импорте инжектит ``scripts/`` в sys.path (для работы как
+# standalone-скрипта). В pytest это бы зашумляло ``import llm``/``skill_config``
+# на весь прогон — восстанавливаем sys.path после каждого теста.
+_SYS_PATH_BASELINE = list(sys.path)
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_path():
+    yield
+    sys.path[:] = _SYS_PATH_BASELINE
+    for name in list(sys.modules):
+        if name.startswith("workspace.skills.audit_analyzer.scripts"):
+            sys.modules.pop(name, None)
 
 REQUIRED_FILES = [
     "scripts/cli.py",

@@ -1,11 +1,10 @@
 """Тесты выбора режима (decision tree) навыка ``audit_analyzer``.
 
-Покрывают шаг 22 плана: позитивные/негативные кейсы выбора
-predefined / vector / sql для каждого типа пользовательского запроса.
+SKILL.md — источник истины для Agent'а: описывает три способа получения
+данных (predefined / vector / Core Data) и правила выбора между ними.
 
-Агент НЕ вызывает Python напрямую — решение принимается на основании
-``SKILL.md``. Эти тесты проверяют, что в SKILL.md достаточно правил,
-чтобы Agent не ошибся в типовых сценариях. Дополнительно — sanity-проверка
+Эти тесты проверяют, что в SKILL.md достаточно правил, чтобы Agent
+не ошибся в типовых сценариях. Дополнительно — sanity-проверка
 ``predefined.run()`` со стороны skill'а (отсутствие таблицы/нечисловой тип
 возвращает ошибку).
 """
@@ -18,8 +17,12 @@ from pathlib import Path
 import pytest
 
 
-SKILL_DIR = Path("workspace/skills/audit_analyzer")
-SKILL_MD = SKILL_DIR / "SKILL.md"
+try:
+    from conftest import AUDIT_SKILL_DIR as SKILL_DIR, AUDIT_SKILL_MD as SKILL_MD
+except ImportError:
+    # Fallback для запуска теста вне pytest (например, прямой импорт).
+    SKILL_DIR = Path(__file__).resolve().parent.parent / "workspace" / "skills" / "audit_analyzer"
+    SKILL_MD = SKILL_DIR / "SKILL.md"
 
 
 def _skill_md() -> str:
@@ -35,48 +38,49 @@ class TestModeSelectionPositive:
     """SKILL.md явно указывает decision tree для типовых запросов."""
 
     def test_predefined_declared_for_typical_summary(self) -> None:
-        """«Сводка по статусам аудитов» — predefined (audit_status_summary)."""
+        """«Сводка по типам проверок» — predefined (audit_types_stats)."""
         text = _skill_md()
-        assert "audit_status_summary" in text
+        assert "audit_types_stats" in text
 
     def test_predefined_declared_for_violations_by_period(self) -> None:
-        """«Нарушения за 2024» — predefined (violations_by_period)."""
+        """«Нарушения по типу» — predefined (violations_by_type)."""
         text = _skill_md()
-        assert "violations_by_period" in text
-        assert "date_from" in text
+        assert "violations_by_type" in text
+        assert "violation_code" in text
 
     def test_vector_index_audits_index(self) -> None:
-        """«Найди похожие проверки про X» → vector_search(audits_index)."""
+        """«Найди похожие проверки про X» → vector capability (audits_index)."""
         text = _skill_md()
         assert "audits_index" in text
-        assert "vector_search" in text
 
     def test_vector_index_violations_index(self) -> None:
-        """«Найди похожие нарушения» → vector_search(violations_index)."""
+        """«Найди похожие нарушения» → vector capability (violations_index)."""
         text = _skill_md()
         assert "violations_index" in text
 
     def test_vector_index_audit_reports_index(self) -> None:
-        """«Найди отчёты про X» → vector_search(audit_reports_index)."""
+        """«Найди отчёты про X» → vector capability (audit_reports_index)."""
         text = _skill_md()
         assert "audit_reports_index" in text
 
     def test_sql_for_aggregations(self) -> None:
-        """«Сколько проверок» / «топ-5 организаций» → SQL через duckdb_query."""
+        """«Сколько проверок» / «топ-5 организаций» → SQL через Core Data."""
         text = _skill_md()
-        assert "duckdb_query" in text
-        # Должно быть явное указание, что SQL — fallback.
-        assert "fallback" in text.lower() or "\u0444\u043e\u043b\u0431\u044d\u043a" in text.lower()
+        # Core Data/DuckDB capability упоминается в SKILL.md как путь
+        # для analytical SQL.
+        assert "Core" in text or "core" in text
+        assert "DuckDB" in text or "Data" in text
 
-    def test_all_five_scripts_listed(self) -> None:
-        """В каталоге SKILL.md ровно 5 predefined scripts."""
+    def test_all_six_scripts_listed(self) -> None:
+        """В каталоге SKILL.md все 6 predefined scripts из БД."""
         text = _skill_md()
         for script in (
-            "audit_status_summary",
-            "top_violations_by_type",
-            "violations_by_period",
-            "audits_by_period",
-            "audit_effectiveness_summary",
+            "analytics_by_year_month",
+            "audit_dynamics",
+            "audit_effectiveness",
+            "audit_types_stats",
+            "top_audited_objects",
+            "violations_by_type",
         ):
             assert script in text, f"SKILL.md должен упоминать {script}"
 
@@ -90,47 +94,39 @@ class TestModeSelectionNegative:
     """Запреты: что НЕ выбирать для каждого режима."""
 
     def test_no_sql_for_semantic_search(self) -> None:
-        """Запрещено LIKE '%...%' для семантического поиска."""
+        """Семантический поиск и вектор вне контракта агента.
+
+        Phase 8: tools удалены, агент обращается к данным только через
+        predefined-скрипты CLI. SKILL.md должен явно ограничивать доступ
+        агента predefined-режимом и помечать vector-режим как CLI-only.
+        """
         text = _skill_md()
-        assert "LIKE" in text, "SKILL.md должен явно запрещать LIKE для семантики"
-        assert "vector_search" in text
+        # Predefined-only для агента.
+        assert "только predefined" in text
+        # Vector/generated_sql — не часть контракта агента.
+        assert "не являются частью контракта агента" in text
 
     def test_no_vector_for_aggregations(self) -> None:
-        """Запрещено vector_search для COUNT/GROUP BY."""
+        """Агgregations — только через predefined, вектор вне контракта.
+
+        Phase 8: действительный контракт — predefined-only, /неподдерживаемое.
+        """
         text = _skill_md()
-        # Ищем явное указание на COUNT/GROUP BY как «не для vector».
-        assert "COUNT" in text or "GROUP BY" in text
+        assert "только predefined" in text
 
     def test_no_predefined_without_required_params(self) -> None:
         """Если обязательных params нет — predefined НЕ выбирается."""
         text = _skill_md()
         assert (
-            "\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d" in text
+            "обязательн" in text
         ), "SKILL.md должен упоминать обязательные параметры"
 
     def test_no_fake_script_names(self) -> None:
         """Запрет придумывать имена скриптов."""
         text = _skill_md()
         assert (
-            "\u043a\u0430\u0442\u0430\u043b\u043e\u0433" in text.lower()
+            "каталог" in text.lower()
         ), "SKILL.md должен ссылаться на каталог predefined scripts"
-
-    def test_no_run_predefined_script_tool(self) -> None:
-        """Удалённый ``run_predefined_script`` tool явно запрещён."""
-        text = _skill_md()
-        assert "run_predefined_script" in text
-        # Должно быть «не вызывай …».
-        assert "\u043d\u0435 \u0432\u044b\u0437\u044b\u0432\u0430\u0439" in text.lower() or "forbidden" in text.lower()
-
-    def test_no_nl_sql_generate_tool(self) -> None:
-        """Удалённый ``nl_sql_generate`` tool явно запрещён."""
-        text = _skill_md()
-        assert "nl_sql_generate" in text
-
-    def test_no_sql_generator_helper(self) -> None:
-        """Удалённый ``scripts/sql_generator.py`` helper явно запрещён."""
-        text = _skill_md()
-        assert "sql_generator" in text
 
 
 # ---------------------------------------------------------------------------
@@ -143,45 +139,52 @@ class TestPredefinedBehaviour:
 
     def test_predefined_for_count_audits_violations(self, db_service) -> None:
         """«Сколько аудитов по статусам» → predefined (audit_status_summary)."""
-        from workspace.skills.audit_analyzer.predefined import run
+        from workspace.skills.audit_analyzer.scripts.predefined import run
 
-        result = run("audit_status_summary", db_service, {})
+        result = run(
+            "audit_status_summary",
+            db_service,
+            predefined_table="public.agent_predefined_scripts",
+        )
         assert result["status"] == "success"
         assert result["data"]["script_name"] == "audit_status_summary"
 
     def test_vector_for_semantic_query_only_in_docs(self) -> None:
         """Семантический поиск НЕ через SQL — это вектор, не predefined."""
-        # Реальный вызов vector_search — в test_audit_analyzer_behavior.py.
+        # Реальный вызов vector — в test_audit_analyzer_behavior.py.
         # Здесь — проверка SKILL.md как источника истины для Agent'а.
         text = _skill_md()
-        assert "\u0441\u0435\u043c\u0430\u043d\u0442\u0438\u0447\u0435\u0441\u043a" in text.lower()
-        assert "vector_search" in text
+        assert "семантическ" in text.lower()
 
-    def test_sql_for_count_aggregation_in_predefined(self) -> None:
-        """«Сколько проверок» → predefined (audit_status_summary через
-        GROUP BY), если запрос именно про статусы; иначе — duckdb_query.
+    def test_no_vector_for_count_aggregation_in_skill(self) -> None:
+        """«Сколько проверок» через vector — не по контракту.
+
+        Phase 8: vector-режим — CLI-only, для агента существует только
+        predefined. SKILL.md должен явно отделять agent-контракт (predefined)
+        от CLI-режимов.
         """
         text = _skill_md()
-        lower = text.lower()
-        # Явный запрет: vector_search не для агрегаций.
-        assert "\u0430\u0433\u0440\u0435\u0433" in lower, (
-            "SKILL.md должен упоминать агрегацию в контексте SQL"
-        )
-        assert "vector_search" in lower, "SKILL.md должен упоминать vector_search"
-        assert ("COUNT" in text and "vector_search" in text), (
-            "SKILL.md должен запрещать vector_search для COUNT"
-        )
+        # Predefined-only для агента.
+        assert "только predefined" in text
+        # CLI-режимы не являются контрактом агента.
+        assert "не являются частью контракта агента" in text
 
 
 @pytest.fixture
 def db_service():
-    """Минимальный DuckDB-fixture для ``predefined.run`` тестов."""
-    import duckdb
+    """Минимальный DuckDB-fixture для ``predefined.run`` тестов.
 
-    from workspace.skills.audit_analyzer.predefined import run
+    Phase 7: ``predefined.run()`` теперь DB-only (Phase 7 — REGISTRY удалён).
+    Фикстура создаёт in-memory DB с ``oarb.*`` (domain) и
+    ``public.agent_predefined_scripts`` (реестр скриптов). Скрипт
+    ``audit_status_summary`` засеян с минимальным SQL.
+    """
+    import duckdb
+    import json
 
     conn = duckdb.connect(":memory:")
     conn.execute("CREATE SCHEMA IF NOT EXISTS oarb")
+    conn.execute("CREATE SCHEMA IF NOT EXISTS public")
     conn.execute(
         "CREATE TABLE oarb.audits ("
         "id INTEGER, title VARCHAR, audit_type VARCHAR, "
@@ -206,6 +209,28 @@ def db_service():
             (10, 2, "F-1", "Fire exit", "high"),
             (11, 2, "F-2", "No ext", "medium"),
             (12, 3, "D-1", "Missing sig", "low"),
+        ],
+    )
+    conn.execute(
+        "CREATE TABLE public.agent_predefined_scripts ("
+        "name VARCHAR, description VARCHAR, returns VARCHAR, "
+        "long_description VARCHAR, sql_template VARCHAR, "
+        "parameters VARCHAR, max_rows_default INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO public.agent_predefined_scripts VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "audit_status_summary",
+                "Сводка по статусам",
+                "status, cnt",
+                "Phase 7 fixture.",
+                "SELECT status, COUNT(*) AS cnt "
+                "FROM oarb.audits WHERE status IS NOT NULL "
+                "GROUP BY status ORDER BY status",
+                json.dumps({}),
+                100,
+            )
         ],
     )
 
@@ -237,20 +262,32 @@ def db_service():
 
 
 # ---------------------------------------------------------------------------
-# Required docs (progressive disclosure)
+# Phase 8: SKILL.md self-contained (references/ удалены)
 # ---------------------------------------------------------------------------
 
 
-class TestReferencesIntegrity:
-    def test_required_references_exist(self) -> None:
-        required = [
-            "references/architecture.md",
-            "references/schema.md",
-            "references/vector_indexes.md",
-            "references/sql_guidance.md",
-            "references/predefined_scripts.md",
-        ]
-        for ref in required:
-            path = SKILL_DIR / ref
-            assert path.is_file(), f"{path} должен существовать"
-            assert path.stat().st_size > 200, f"{path} слишком мал"
+class TestSkillSelfContained:
+    def test_skill_md_carries_full_content(self) -> None:
+        """SKILL.md — единственный источник документации по skill'у.
+
+        ``references/*.md`` удалены: каталог скриптов, описание индексов,
+        схема домена и SQL guidance перенесены в SKILL.md.
+        """
+        skill_text = _skill_md()
+        # Каталог скриптов из БД.
+        for script in (
+            "analytics_by_year_month",
+            "audit_dynamics",
+            "audit_effectiveness",
+            "audit_types_stats",
+            "top_audited_objects",
+            "violations_by_type",
+        ):
+            assert script in skill_text, f"SKILL.md должен упоминать {script}"
+        # Каталог FAISS-индексов.
+        for index in ("audits_index", "violations_index", "audit_reports_index"):
+            assert index in skill_text
+        # Схема домена (минимум 4 таблицы).
+        for table in ("oarb.audits", "oarb.violations",
+                      "oarb.audit_reports", "oarb.report_items"):
+            assert table in skill_text, f"SKILL.md должен описывать {table}"

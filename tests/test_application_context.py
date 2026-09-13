@@ -351,9 +351,7 @@ class TestTableRegistryReset:
                 resources=(TableResource(name="public.leftover"),),
             )
         )
-        table_registry.set_embedding_config(base_url="http://stale", model="old")
         assert "leftover_skill" in table_registry.names()
-        assert table_registry.embedding_config() != {}
 
         script = Path(__file__).resolve().parent.parent
         ApplicationContext.create(
@@ -366,8 +364,4 @@ class TestTableRegistryReset:
         assert "leftover_skill" not in table_registry.names(), (
             "ApplicationContext.create() должен сбрасывать TableRegistry "
             "в начале; остались ресурсы от предыдущего context"
-        )
-        assert table_registry.embedding_config() == {}, (
-            "Embedding-конфиг тоже должен сбрасываться; "
-            f"остался: {table_registry.embedding_config()}"
         )

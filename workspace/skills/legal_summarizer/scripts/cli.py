@@ -267,21 +267,19 @@ def _ensure_registered() -> None:
     если skill уже зарегистрирован (например, gateway-populated реестр),
     повторная регистрация игнорируется.
 
-    Для skill'а без vector-инфраструктуры и без PG-таблиц вызовы
-    ``register_vector_storage`` и ``register_embedding_config`` будут no-op,
-    но вызываются для единообразия с полными skill'ами (audit_analyzer).
+    Для skill'а без vector-инфраструктуры и без PG-таблиц вызов
+    ``register_vector_storage`` будет no-op, но вызывается для единообразия
+    с полными skill'ами (audit_analyzer). Embedding-параметры после
+    удаления ``gateway.vector.embedding`` регистрировать не нужно —
+    они захардкожены в ``cache_provider_impl``.
     """
     from lib.core.infra_registration import register_vector_storage
-    from lib.core.skill_registration import (
-        register_embedding_config,
-        register_skill_from_config,
-    )
+    from lib.core.skill_registration import register_skill_from_config
     from config import SETTINGS
 
     legal_cfg = SETTINGS.get("skills", {}).get("legal_summarizer", {})
     register_skill_from_config("legal_summarizer", legal_cfg)
     register_vector_storage()
-    register_embedding_config()
 
 
 def main() -> None:
