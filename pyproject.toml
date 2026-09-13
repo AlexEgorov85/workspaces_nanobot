@@ -3,9 +3,14 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.backends._legacy:_Backend"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "workspace/skills/audit_analyzer/tests"]
 python_files = ["test_*.py"]
-pythonpath = [".", "workspace", "workspace/skills/legal_summarizer", "workspace/skills/legal_summarizer/scripts"]
+pythonpath = [
+    ".",
+    "workspace",
+    "workspace/skills/legal_summarizer",
+    "workspace/skills/legal_summarizer/scripts",
+]
 asyncio_mode = "auto"
 filterwarnings = [
     # FAISS SWIG-биндинги не имеют __module__; предупреждение приходит из

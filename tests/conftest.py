@@ -7,12 +7,55 @@ _user_site = r"C:\Users\Алексей\AppData\Roaming\Python\Python314\site-pac
 if _user_site not in sys.path:
     sys.path.insert(0, _user_site)
 
+# При full-suite прогонe первый вызов loguru происходит на этапе collection —
+# когда sys.stderr ещё реальный (cp1251 на Windows), а pytest fd-capture
+# позже читает буфер как UTF-8. Итог: UnicodeDecodeError в teardown и каскад
+# ERRORS на все последующие тесты. Перенастраиваем stderr на UTF-8 и
+# перепривязываем loguru здесь, до старта тестов.
+try:
+    from lib.utils.logging_utils import configure_loguru
+
+    configure_loguru("INFO")
+except Exception:
+    pass
+
 import tempfile
 from pathlib import Path
 from typing import Iterator
 
 import pytest
 import yaml
+
+
+# ---------------------------------------------------------------------------
+# Repo-root resolution (Phase 8 — was hardcoded ``Path("workspace/...")``
+# в 3 аудит-тест-файлах, ломался при запуске pytest не из cwd репо).
+# ---------------------------------------------------------------------------
+
+
+def _find_repo_root(start: Path) -> Path:
+    """Подняться от ``start`` вверх до корня репозитория.
+
+    Ищем ``workspace/skills/audit_analyzer/SKILL.md`` вверх по дереву.
+    Используется для абсолютного пути к skill'у без зависимости от cwd.
+    """
+    cur = start.resolve()
+    for _ in range(8):
+        if (cur / "workspace" / "skills" / "audit_analyzer" / "SKILL.md").is_file():
+            return cur
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    raise RuntimeError(
+        f"Cannot find repo root from {start}: "
+        "workspace/skills/audit_analyzer/SKILL.md not found"
+    )
+
+
+REPO_ROOT = _find_repo_root(Path(__file__).parent)
+AUDIT_SKILL_DIR = REPO_ROOT / "workspace" / "skills" / "audit_analyzer"
+AUDIT_SKILL_MD = AUDIT_SKILL_DIR / "SKILL.md"
+AUDIT_CLI_PATH = AUDIT_SKILL_DIR / "scripts" / "cli.py"
 
 from benchmarks.models import (
     BenchExpect,
