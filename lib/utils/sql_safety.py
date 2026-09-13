@@ -22,7 +22,7 @@ Security boundary (TARGET_ARCHITECTURE §16): любой SQL, который м�
 
 Контракт совместим с историческими функциями из
 ``workspace/skills/audit_analyzer/scripts/database.py`` и потребляется
-``workspace/tools/duckdb_query_tool.py`` и skill'ами без cross-import'ов.
+skill'ами без cross-import'ов.
 """
 
 from __future__ import annotations

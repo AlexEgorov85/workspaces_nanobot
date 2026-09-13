@@ -163,3 +163,88 @@ class TestFormatSchema:
         out = format_schema(schema)
         assert '"s".t — ' in out
         assert "a: int" in out
+
+    def test_table_order_preserved(self) -> None:
+        """Порядок таблиц в schema["tables"] сохраняется в выводе.
+
+        Этап 12: ``build_schema`` упорядочивает результат по входному списку
+        ``tables``. ``format_schema`` итерирует в этом порядке — для
+        стабильного LLM-промпта. Контракт: ``format_schema`` сохраняет
+        insertion order dict, и этот порядок == порядку входного ``tables``.
+        """
+        # Когда входной список в одном порядке, формат стабильный.
+        schema = {
+            "schema": "oarb",
+            "tables": {
+                "audits": {"columns": {"id": {"type": "int", "not_null": True}}},
+                "violations": {"columns": {"id": {"type": "int", "not_null": True}}},
+                "audit_reports": {"columns": {"id": {"type": "int", "not_null": True}}},
+            },
+        }
+        out = format_schema(schema)
+        i_audits = out.index('"oarb".audits —')
+        i_violations = out.index('"oarb".violations —')
+        i_reports = out.index('"oarb".audit_reports —')
+        # insertion order dict → audits первая.
+        assert i_audits < i_violations < i_reports
+
+
+class TestBuildSchemaTableOrder:
+    """Этап 12: ``build_schema`` упорядочивает результат по входному списку.
+
+    Регресс: до правки таблицы сортировались по ``information_schema`` ORDER BY
+    ``table_name`` — то есть алфавитно, не по тому, как пользователь передал
+    ``tables``. Это давало нестабильный LLM-промпт и могло сбивать few-shot
+    reasoning. После фикса порядок == порядку входа.
+    """
+
+    def _make_db(self) -> Any:
+        import duckdb
+
+        conn = duckdb.connect(":memory:")
+        conn.execute("CREATE SCHEMA IF NOT EXISTS main")
+        for tbl in ("audits", "violations", "audit_reports"):
+            conn.execute(f'CREATE TABLE main."{tbl}" (id INTEGER, title VARCHAR)')
+            conn.execute(f'INSERT INTO main."{tbl}" VALUES (?, ?)', [1, "x"])
+        return conn
+
+    def test_input_order_preserved_in_output(self) -> Any:
+        from lib.utils.duckdb_query import build_schema
+
+        conn = self._make_db()
+        schema = build_schema(
+            conn,
+            schema="main",
+            tables=["audits", "violations", "audit_reports"],
+            meta_reader=lambda s: {},
+        )
+        keys = list(schema["tables"].keys())
+        assert keys == ["audits", "violations", "audit_reports"]
+
+    def test_reverse_input_order_preserved(self) -> Any:
+        from lib.utils.duckdb_query import build_schema
+
+        conn = self._make_db()
+        schema = build_schema(
+            conn,
+            schema="main",
+            tables=["audit_reports", "violations", "audits"],
+            meta_reader=lambda s: {},
+        )
+        keys = list(schema["tables"].keys())
+        # Входной список в обратном порядке → result тоже в обратном.
+        assert keys == ["audit_reports", "violations", "audits"]
+
+    def test_subset_preserved_in_input_order(self) -> Any:
+        from lib.utils.duckdb_query import build_schema
+
+        conn = self._make_db()
+        # Подмножество таблиц в не-алфавитном порядке.
+        schema = build_schema(
+            conn,
+            schema="main",
+            tables=["violations", "audits"],
+            meta_reader=lambda s: {},
+        )
+        keys = list(schema["tables"].keys())
+        assert keys == ["violations", "audits"]

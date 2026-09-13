@@ -79,6 +79,12 @@ def build_schema(
     ``meta_reader(schema)`` возвращает ``{(table, column): (comment, pg_type)}``
     — комментарии и исходные PG-типы. Реализация зависит от того, где хранится
     мета (в DuckDB-файле, в зеркале): передаётся коллбеком из класса-владельца.
+
+    Порядок таблиц в результате совпадает с порядком входного ``tables`` —
+    это нужно для стабильного вывода ``format_schema`` (LLM-промпт).
+    SQL всё равно сортирует строки ``information_schema`` по ``table_name,
+    ordinal_position`` (это часть схемы), но порядок самих таблиц —
+    по входному списку.
     """
     sql = (
         "SELECT table_name, column_name, data_type, is_nullable, "
@@ -119,6 +125,20 @@ def build_schema(
             "not_null": row[3] == "NO",
             "comment": meta_value(tbl, row[1], 0),
         }
+    if tables:
+        # Упорядочить result по входному ``tables`` — стабильный порядок для
+        # downstream (format_schema, LLM-промпт). Колонки внутри каждой
+        # таблицы остаются в порядке ordinal_position из information_schema.
+        ordered: dict[str, Any] = {}
+        for t in tables:
+            if t in result:
+                ordered[t] = result[t]
+        # Любые таблицы, не упомянутые в ``tables``, идут в конец (на случай,
+        # если information_schema вернул лишние — не должно быть при IN (...)).
+        for t, info in result.items():
+            if t not in ordered:
+                ordered[t] = info
+        result = ordered
     return {"schema": schema, "tables": result}
 
 
