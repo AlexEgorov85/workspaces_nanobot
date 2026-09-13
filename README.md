@@ -157,6 +157,25 @@ pytest tests/ --cov=lib --cov-report=term-missing
 | **workspace/skills/*/SKILL.md** | Документация навыков |
 | **workspace/AGENTS.md** | Инструкции для агента |
 
+## 🆕 Что нового в v2.5.1
+
+**PATCH поверх v2.5.0, 2026-09-13.** Регрессии и доработки после MINOR-релиза — закрытие
+lifecycle-deadlock `postgres_channel` при `stream_end` с пустым delta (`71cfcde`),
+удаление agent-tools `duckdb_query` и `vector_search` (Phase 8 Resource Model
+Refactoring, `12bf182`), перенос конфига vector-индексов из PG-реестра
+`public.agent_vector_index_config` в `project.json::gateway.vector.index.indexes.*`
++ хардкод эмбеддинга (`bf59b5a`), DB-first `scripts/predefined` в `audit_analyzer`
++ удаление `tools/generate_predefined_scripts_sql.py` (`79e0e63`),
+`tools/build_vectors.py --validate-only` + ETA прогресса (`8b70383`), стабилизация
+порядка таблиц в `lib/utils/duckdb_query.build_schema` (`a8e03e8`), перенос тестов
+`audit_analyzer` в `workspace/skills/audit_analyzer/tests/` (`10771cc`),
+синхронизация архитектурной документации и README «Что нового».
+
+Изменения конфигурации: `config.json` — провайдер LLM `qwen3.6-35b-a3b` через
+`https://api.neuraldeep.ru/v1/`, `contextWindowTokens: 40000` (см. `e06b2b0`).
+
+Полный changelog — в [CHANGELOG.md → 2.5.1](CHANGELOG.md#251--2026-09-13).
+
 ## 🆕 Что нового в v2.5.0
 
 **MINOR поверх v2.4.0, 2026-09-11.** Крупный рефакторинг `legal_summarizer` (97-этапный
