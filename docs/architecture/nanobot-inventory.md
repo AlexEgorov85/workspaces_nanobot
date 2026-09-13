@@ -4,7 +4,7 @@
 > Машино-читаемая версия: [`nanobot-inventory.json`](nanobot-inventory.json).
 > Регенерация JSON: `python tools/scan_nanobot_inventory.py`.
 
-**Дата скана:** 2026-08-24 · **nanobot pinned:** 0.3.0 · **файлов просканировано:** 85
+**Дата скана:** 2026-09-11 · **nanobot pinned:** 0.3.0 · **файлов просканировано:** 178
 
 ## Легенда классификации
 
@@ -21,10 +21,10 @@
 
 | Метрика | Значение |
 |---|---|
-| Всего прямых импортов `nanobot.*` | 41 |
-| GREEN / YELLOW / ORANGE / RED импортов | 32 / 0* / 4 / 5* |
-| Точек `getattr(obj, "_private")` | 20 |
-| Точек `setattr` (monkey patch) | 2 (+ присваивания методов внутри RuntimePatcher) |
+| Всего прямых импортов `nanobot.*` | 48 |
+| GREEN / YELLOW / ORANGE / RED импортов | 38 / 0* / 5 / 5* |
+| Точек `getattr(obj, "_private")` | 18 |
+| Точек `setattr` (monkey patch) | 1 (+ присваивания методов внутри RuntimePatcher) |
 
 \* часть YELLOW-точек (многострочные импорты `_init_prompt_session`, `_read_interactive_input_async` и т.п.)
 и RED-классификация уточняются вручную ниже — автоматический сканер консервативен.
@@ -64,10 +64,11 @@
 
 | Файл:строка | Импорт | Назначение |
 |---|---|---|
-| `workspace/tools/duckdb_query_tool.py:43` | `Tool`, `ToolResult`, `tool_parameters` | generic SQL tool |
-| `workspace/tools/vector_search_tool.py:43` | `Tool`, `tool_parameters` | generic vector tool |
 | `workspace/tools/compact_context.py:34` | `Tool`, `ToolResult`, `tool_parameters` | ручное сжатие |
 | `workspace/tools/example.py:39` | `Tool`, `tool_parameters` | шаблон |
+
+(`duckdb_query_tool.py` / `vector_search_tool.py` удалены в фазе 8 — их импорты
+из инвентаря исключены.)
 
 ### 2.5. Сессии (YELLOW/RED)
 

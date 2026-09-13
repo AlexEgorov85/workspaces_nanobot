@@ -154,7 +154,7 @@ Skill не должен зависеть от конкретного Python-кл
 |---|---|---|
 | `temperature`, `max_tokens` для SQL-генерации | `skills.<name>.llm` (или `skills.<name>.generation`) | Execution policy skill'а (доменное решение) |
 | Модель / провайдер LLM | `config.json` (`agents.defaults.*`) | Выбор провайдера — это свойство инфраструктуры, не домена skill'а |
-| Ollama URL / `auth_token` для эмбеддера | `gateway.vector.embedding` | Embedding service — общий runtime, не домен skill'а |
+| Ollama URL / `auth_token` для эмбеддера | hardcoded в `cache_provider_impl` + `EMBED_TOKEN` env | Embedding service — общий runtime, не домен skill'а (см. Phase Resource Model Refactoring) |
 | DuckDB snapshot path | `table_registry.snapshot_path()` | Cache path — общий runtime |
 | FAISS root / backend / storage_table | `gateway.vector.index.*` | FAISS-инфраструктура — общий runtime |
 | PG → DuckDB sync интервал | `gateway.sync.*` | Sync — общий runtime |
@@ -170,11 +170,16 @@ cache/refresh policy, FAISS-бэкенд, sync-параметры, model/provide
 
 **Legacy-пути, удалённые при commit «skill configuration boundary»:**
 
-* `skills.<name>.embedding` → перенесён в `gateway.vector.embedding`.
+* `skills.<name>.embedding` → удалён вместе с `gateway.vector.embedding`
+  (параметры эмбеддера захардкожены в `cache_provider_impl`, токен —
+  из `EMBED_TOKEN` env).
 * `skills.<name>.cache` → удалён (поля были мёртвыми).
-* `skills.<name>.vector_indexes[].source` → удалён (source —
-  runtime-реестр в `public.agent_vector_index_config`).
+* `skills.<name>.vector_indexes[].source` → удалён (source — общий
+  runtime-конфиг `gateway.vector.index.indexes.<name>.table`,
+  перенесён из PG-реестра `public.agent_vector_index_config`).
 * `gateway.vector_index.*` → переименован в `gateway.vector.index.*`.
+* `public.agent_vector_index_config` (SQL-реестр) → legacy-артефакт;
+  единственный источник конфига — `gateway.vector.index.indexes.*`.
 
 Обратной совместимости нет (fail-fast через runtime-проверку, не
 через Pydantic): старый `project.json` с этими секциями стартует, но
@@ -198,11 +203,17 @@ Tool должен быть максимально generic в рамках сво
 
 ```text
 workspace/tools/
-    duckdb_query_tool.py
-    vector_search_tool.py
+    history_search_tool.py
+    legal_summarizer_query.py
 ```
 
 В будущем допустимы другие независимые Tools, если они представляют самостоятельную generic capability.
+
+> **Фаза 8:** generic tools `duckdb_query_tool.py` / `vector_search_tool.py`
+> **удалены**. Капабилити «свободный SQL» и «semantic search» больше не
+> являются Agent-facing tools — они доступны только через CLI skill'а
+> `audit_analyzer` (`scripts/cli.py --mode predefined / generated_sql / vector`).
+> Прямой доступ агента к свободному SQL и vector-search демонтирован.
 
 ---
 
@@ -243,13 +254,14 @@ from workspace.tools import ...
 ```mermaid
 flowchart TD
     SK["SKILL.md (audit_analyzer)"] --> AG["Agent (nanobot AgentLoop)"]
-    AG -->|выбирает| TL["Tool: duckdb_query / vector_search"]
-    TL -->|выполняет| EX["Tool executes capability"]
+    AG -->|прямой вызов| EX["Skill CLI: scripts/cli.py --mode predefined"]
+    EX -->|выполняет| CAP["Core capability (CacheProvider/query_sql)"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
-    class SK,AG,TL,EX core
+    class SK,AG,EX,CAP core
 ```
 
-Skill не вызывает Tool программно.
+Skill не вызывает Tool программно. (Generic tools `duckdb_query` /
+`vector_search` удалены в фазе 8 — Agent не имеет к ним доступа.)
 
 ---
 
@@ -263,10 +275,10 @@ Skill не вызывает Tool программно.
 flowchart LR
     SA["Skill: audit_analyzer"] --> SVC["Shared service (lib/services)"]
     SB["Skill: other"] --> SVC
-    TL["Tool: duckdb_query"] --> SVC
+    CLI["Skill CLI (scripts/cli.py)"] --> SVC
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
-    class SA,SB,TL core
+    class SA,SB,CLI core
     class SVC infra
 ```
 
@@ -285,34 +297,29 @@ business-specific routing
 
 ---
 
-# 5. DuckDB Tool
+# 5. DuckDB Capability
 
-Целевая capability:
+Целевая capability (через CLI skill'а, а не Agent-facing tool):
 
 ```text
-duckdb_query
+python scripts/cli.py --mode predefined --script <name> [--params '{...}']
 ```
 
 Назначение:
 
 > Выполнить безопасный read-only SQL запрос в доступном DuckDB источнике.
+> В фазе 8 публичный Agent-facing tool `duckdb_query` удалён; свободный
+> SQL — только внутри CLI skill'а (predefined scripts / `generated_sql`).
 
-Tool не знает конкретные таблицы и не знает Skills.
+Skill не знает конкретную реализацию Core, но вызывает её через
+`predefined.run()` / `CacheProvider.query_sql`.
 
-Пример:
+Режим `generated_sql` (NL→SQL через LLM) — побочный, не входит в контракт
+агента.
 
-```json
-{
-  "sql": "SELECT year, count(*) FROM audits GROUP BY year ORDER BY year",
-  "params": {},
-  "max_rows": 100
-}
-```
+## Capability отвечает за
 
-## Tool отвечает за
-
-- parsing/validation input;
-- read-only SQL policy;
+- read-only SQL policy (`validate_sql`);
 - запрет destructive statements;
 - запрет multi-statement;
 - query timeout;
@@ -322,7 +329,7 @@ Tool не знает конкретные таблицы и не знает Skil
 - structured errors;
 - logging/metrics.
 
-## Tool не отвечает за
+## Capability не отвечает за
 
 - какие таблицы являются audit tables;
 - какие таблицы разрешены конкретному Skill;
@@ -333,17 +340,19 @@ Tool не знает конкретные таблицы и не знает Skil
 
 ---
 
-# 6. Vector Search Tool
+# 6. Vector Search Capability
 
-Целевая capability:
+Целевая capability (через CLI skill'а, а не Agent-facing tool):
 
 ```text
-vector_search
+python scripts/cli.py --mode vector --query '<текст>' --index-name <name>
 ```
 
 Назначение:
 
 > Выполнить semantic search по указанному vector index.
+> В фазе 8 публичный Agent-facing tool `vector_search` удалён; доступ —
+> только через CLI skill'а.
 
 Пример:
 
@@ -356,11 +365,11 @@ vector_search
 }
 ```
 
-Tool не знает, что `violations_index` относится к audit domain.
+Capability не знает, что `violations_index` относится к audit domain.
 
-Он знает только generic vector infrastructure.
+Она знает только generic vector infrastructure.
 
-## Tool отвечает за
+## Capability отвечает за
 
 - получение/проверку index;
 - embedding;
@@ -372,7 +381,7 @@ Tool не знает, что `violations_index` относится к audit doma
 - structured errors;
 - metrics/logging.
 
-## Tool не отвечает за
+## Capability не отвечает за
 
 - выбор индекса по бизнес-смыслу;
 - audit-specific indexes;
@@ -389,13 +398,12 @@ Tool не знает, что `violations_index` относится к audit doma
 
 ```text
 workspace/skills/audit_analyzer/
-    SKILL.md
+    SKILL.md           (единственный источник документации; self-contained)
     scripts/
         ...
-    references/
-        schema.md
-        vector_indexes.md
-        reports.md
+    # references/ удалены в Phase 8 — SKILL.md self-contained.
+    # Другие skills (например, legal_summarizer) могут хранить references/
+    # если их SKILL.md < 2000 символов и нужны длинные reference-docs.
     assets/
         ...
 ```
@@ -424,14 +432,13 @@ Skill должен знать domain context:
 ```mermaid
 flowchart TD
     U["Запрос пользователя"] --> D{выбор capability}
-    D -->|агрегация / фильтр / группировка| Q["duckdb_query"]
-    D -->|семантический поиск| V["vector_search"]
-    D -->|поиск и анализ| VQ["vector_search + duckdb_query"]
-    D -->|сложный аналитический запрос| Q2["duckdb_query"]
+    D -->|6 predefined scripts| Q["CLI --mode predefined"]
+    D -->|точный аналитический SQL| G["CLI --mode generated_sql"]
+    D -->|семантический поиск| V["CLI --mode vector"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class U,D core
-    class Q,V,VQ,Q2 infra
+    class Q,G,V infra
 ```
 
 Если конкретный сценарий лучше решается predefined workflow внутри Skill, Skill может использовать собственный script.
@@ -468,15 +475,14 @@ Script не должен регистрировать Tool и не должен 
 
 Большие знания не следует целиком помещать в `SKILL.md`.
 
-Использовать progressive disclosure:
+SKILL.md — единственный источник документации по skill'у (self-contained,
+progressive disclosure отключён в Phase 8):
 
 ```mermaid
 flowchart TD
-    SK["SKILL.md (audit_analyzer)"] --> R1["references/schema.md"]
-    SK --> R2["references/vector_indexes.md"]
-    SK --> R3["references/reports.md"]
+    SK["SKILL.md (audit_analyzer)"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
-    class SK,R1,R2,R3 core
+    class SK core
 ```
 
 `SKILL.md` должен содержать правила принятия решений и основную процедуру.
@@ -498,11 +504,11 @@ CLI не должен зависеть от nanobot runtime только рад�
 ```mermaid
 flowchart LR
     CLI["cli_agent.py"] --> SK["Skill / scripts / shared service"]
-    AG["gateway.py (Agent)"] --> TL["Tools: duckdb_query / vector_search"]
+    AG["gateway.py (Agent)"] --> CLI2["Skill CLI: scripts/cli.py"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class CLI,AG core
-    class SK,TL infra
+    class SK,CLI2 infra
 ```
 
 Оба пути могут использовать общий infrastructure/domain code, но не должны вызывать друг друга.
@@ -723,13 +729,12 @@ flowchart TB
     NB["nanobot-ai (runtime)"] --> IL["workspaces_nanobot (lib/core)"]
     IL --> SI["shared infrastructure (lib/services)"]
     SI --> SK["Skills: audit_analyzer"]
-    SI --> TL["Tools: duckdb_query, vector_search"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef ext fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class NB,IL core
     class SI infra
-    class SK,TL infra
+    class SK infra
 ```
 
 Но domain-specific Skills и generic Tools не должны зависеть друг от друга.
@@ -741,8 +746,7 @@ flowchart TB
     NB["nanobot-ai"] --> IL["integration layer (lib/core)"]
     IL --> SI["shared infrastructure (lib/services)"]
     SI --> SK["Skills: audit_analyzer"]
-    SI --> TL["Tools: duckdb_query, vector_search"]
-    SK -.не зависят.-> TL
+    SK -.не зависят.-> TL["Tools: history_search, legal_summarizer_query"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef ext fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
@@ -780,7 +784,7 @@ if index_name == "violations_index":
 
 ## 22.4. Универсальный Tool превращается в hidden business engine
 
-Например `duckdb_query` начинает сам выбирать audit tables.
+Например generic SQL capability начинает сам выбирать audit tables.
 
 Запрещено.
 
@@ -1111,15 +1115,15 @@ workspaces_nanobot/
 +-- workspace/
 |   |
 |   +-- tools/
-|   |   +-- duckdb_query_tool.py
-|   |   +-- vector_search_tool.py
+|   |   +-- history_search_tool.py
+|   |   +-- legal_summarizer_query.py
+|   |   +-- compact_context.py
 |   |
 |   +-- skills/
 |       |
 |       +-- audit_analyzer/
 |       |   +-- SKILL.md
 |       |   +-- scripts/
-|       |   +-- references/
 |       |   +-- assets/
 |       |
 |       +-- other_skill/

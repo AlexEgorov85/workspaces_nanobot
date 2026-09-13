@@ -56,7 +56,7 @@ sys.path.insert(.../skills...)
 
 # В Skill — ЗАПРЕЩЕНО
 from workspace.tools import ...
-from workspace.tools.duckdb_query_tool import ...
+from workspace.tools.history_search_tool import ...
 ```
 
 Это правило проверяется AST-тестами в `tests/test_skill_tool_independence.py`.
@@ -72,8 +72,7 @@ from workspace.tools.duckdb_query_tool import ...
 - Domain-specific routing (`if caller == "audit_analyzer"`).
 - Конкретные отчёты, скрипты, registry.
 
-Tool — это generic capability. Например, `duckdb_query` умеет делать SELECT,
-`vector_search` умеет делать semantic search. Какой skill их использует — не его дело.
+Tool — это generic capability. Какой skill их использует — не его дело.
 
 ---
 
@@ -84,132 +83,79 @@ Tool — это generic capability. Например, `duckdb_query` умеет 
 - Внутренний contract Tool за пределами публичного (name, description, parameters).
 
 Skill пишет инструкции **в терминах capability**, а не в терминах Python:
-- ✅ «use `vector_search` with `index_name='violations_index'`»
+- ✅ «use `scripts/cli.py --mode vector` with `--index-name violations_index`»
 - ❌ «call `VectorSearchTool.execute(query=...)`»
 - ❌ «import VectorSearchTool»
 
 ---
 
-## 6. Контракт `duckdb_query`
+## 6. Контракт `duckdb_query` (удалён)
 
-```json
-{
-  "sql": "SELECT year, count(*) FROM audits GROUP BY year",
-  "params": { },
-  "max_rows": 100
-}
-```
+Публичный Agent-facing tool `duckdb_query` (`workspace/tools/duckdb_query_tool.py`)
+**удалён в фазе 8**. Read-only SQL больше не является Agent-facing tool'ом:
+Agent использует only predefined-скрипты через CLI
+(`scripts/cli.py --mode predefined --script <name>`).
 
-Ответ:
-
-```json
-{
-  "status": "success",
-  "columns": ["year", "count"],
-  "rows": [[2024, 120]],
-  "row_count": 1,
-  "returned_rows": 1,
-  "truncated": false
-}
-```
-
-Ошибка:
-
-```json
-{
-  "status": "error",
-  "error_type": "sql_error",
-  "message": "INSERT not allowed"
-}
-```
-
-### Read-only policy
+Read-only политика сохранена как infra-контракт Core:
 
 Разрешено: `SELECT`, `WITH ... SELECT`.
 Запрещено: `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`, `TRUNCATE`, `COPY`, `ATTACH`, `DETACH`, `INSTALL`, `LOAD`, `EXPORT`, `IMPORT`, `CALL`, multi-statement.
 
 Реализация: `lib/utils/sql_safety.py::validate_sql` (последняя граница перед execution).
 
-### Лимиты (configurable через `gateway.duckdb_query.*`)
-
-| ключ | default | диапазон |
-|---|---|---|
-| `enable` | true | — |
-| `max_rows` | 1000 | 1..10000 |
-| `max_result_chars` | 50000 | 1000..200000 |
-| `query_timeout_sec` | 30 sec | 1..300 |
-
-Tool **не привязан к конкретной схеме**: SQL-запросы должны быть
-fully-qualified (`schema.table`), `schema_name` в конфиге отсутствует.
-Доступные таблицы определяются `TableRegistry` (см. `docs/table-registry.md`).
+Исторические лимиты (`gateway.duckdb_query.*`) удалены вместе с tool'ом.
 
 ---
 
-## 7. Контракт `vector_search`
+## 7. Контракт `vector_search` (удалён)
 
-```json
-{
-  "query": "финансовые нарушения",
-  "index_name": "violations_index",
-  "top_k": 5,
-  "threshold": 0.5
-}
+Публичный Agent-facing tool `vector_search` (`workspace/tools/vector_search_tool.py`)
+**удалён в фазе 8**. Semantic search больше не является Agent-facing tool'ом:
+доступ — через CLI skill'а:
+
+```text
+python scripts/cli.py --mode vector --query '<текст>' --index-name <name>
 ```
 
-Ответ:
+Ответ CLI (JSON):
 
 ```json
 {
   "status": "success",
-  "index_name": "violations_index",
-  "query": "...",
-  "results": [
-    {"id": "123", "score": 0.82, "text": "...", "metadata": {"document_id": "..."}}
-  ],
-  "count": 1,
-  "truncated": false
+  "data": {
+    "results": [
+      {"id": "123", "score": 0.82, "text": "...", "source": "...", ...}
+    ],
+    "count": 1
+  }
 }
 ```
 
-### Конфиг (`gateway.vector_search.*`)
-
-| ключ | default | диапазон |
-|---|---|---|
-| `enable` | true | — |
-| `default_top_k` | 5 | 1..100 |
-| `max_top_k` | 50 | 1..100 |
-| `default_threshold` | 0.0 | 0.0..1.0 |
-| `max_query_chars` | 4000 | 100..16000 |
-| `max_result_chars` | 16000 | 1000..200000 |
-| `timeout_sec` | 30 | 1..120 |
-
----
+Исторические ключи конфига (`gateway.vector_search.*`) удалены вместе с tool'ом.
 
 ## 8. Decision procedure в `SKILL.md` (audit_analyzer)
 
 ```text
-Step 1: запрос соответствует predefined из references/predefined_scripts.md
-        → CLI `--mode predefined --script <name>` (реестр в `predefined/scripts.py`,
-        выполнение через `predefined.run` → generic DuckDB).
-Step 2: запрос про смысл/похожие → vector_search с index_name из
-        references/vector_indexes.md.
-Step 3: свободный SQL → Agent читает references/schema.md +
-        references/sql_guidance.md, формирует SELECT сам,
-        duckdb_query(sql=<...>, params=<...>).
-Step 4: при ошибке SQL → Agent читает message, исправляет,
-        повторяет duckdb_query (retry — задача Agent, не tool'а).
+Step 1: запрос соответствует predefined из `SKILL.md` (каталог скриптов)
+        → вызов CLI skill'а `scripts/cli.py --mode predefined --script <name>`
+        → выполнение SQL через generic `CacheProvider.query_sql`.
+Step 2: запрос не соответствует ни одному predefined → сообщить пользователю
+        (прямой доступ к свободному SQL и vector search у агента нет).
+Step 3: (operator/benchmark) для NL→SQL — CLI `--mode generated_sql`;
+        для семантического поиска — CLI `--mode vector` с `--index-name`.
+Step 4: при ошибке → прочитать message, переформулировать/уточнить запрос,
+        повторить (retry — задача Agent, не tool'а).
 Step 5: do not use unknown tables or indexes.
 Step 6: do not use DDL/DML.
-Step 7: do not use vector_search для COUNT/GROUP BY.
-Step 8: do not use LIKE для семантического поиска.
+Step 7: do not use vector/search для COUNT/GROUP BY.
 ```
 
-Skill `audit_analyzer` — **CLI + generic tools**: автономный skill-side CLI
+Skill `audit_analyzer` — **CLI-only**: автономный skill-side CLI
 `scripts/cli.py --mode <predefined | generated_sql | vector>` (единый entry-point,
-вызывается агентом через `tools.exec` с абсолютным путём; также используется
-бенчмарками/CI). Дополнительно агент может выполнять те же операции напрямую
-через generic tools `workspace/tools/duckdb_query_tool.py` (точный SELECT)
-и `workspace/tools/vector_search_tool.py` (семантика).
+вызывается агентом через `tools.exec`; также используется бенчмарками/CI).
+Generic tools `workspace/tools/duckdb_query_tool.py` (точный SELECT)
+и `workspace/tools/vector_search_tool.py` (семантика) **удалены в фазе 8** —
+агент не имеет к ним доступа.
 Подробности — в `docs/skill-tool-inventory.md` и `workspace/skills/audit_analyzer/SKILL.md`.
 
 Раньше (рефакторинг `refactor/skills-tools-cleanup`) CLI был удалён в пользу

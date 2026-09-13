@@ -19,9 +19,6 @@
 --
 --  Применение:
 --    psql "$DATABASE_URL" -f sql/audit_analyzer/fix_audit_types_stats_avg.sql
---
---  Альтернатива: tools/generate_predefined_scripts_sql.py --from-db
---  (выгрузит текущее состояние реестра; затем правки вносятся в этот файл).
 -- ============================================================================
 
 UPDATE public.agent_predefined_scripts

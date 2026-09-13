@@ -26,9 +26,7 @@
   Чтение кастомных настроек идёт через ``ctx._settings_ref`` (полный
   pydantic-объект ``Settings``, который кладёт туда
   ``RuntimePatcher.patch_project_tools``). Это общий путь для
-  ``compact_context`` (``gateway.compact.*``),
-  ``duckdb_query`` (``gateway.duckdb_query.*``),
-  ``vector_search`` (``gateway.vector_search.*``).
+  ``compact_context`` (``gateway.compact.*``).
   Секции под наши tool'ы естественно класть под ``tools.<config_key>``
   (там, где их уже ищет пользователь в ``config.json``).
 """

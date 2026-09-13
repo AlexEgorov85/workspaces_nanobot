@@ -134,8 +134,8 @@ flowchart LR
 | `preload_service.py` | Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель `workspace/data_store/duckdb/cache.duckdb` — `DuckDbCacheStore.publish()` через gateway (путь вычисляется через `table_registry.snapshot_path`). |
 | `db_logging_service.py` | **Новый** — структурированный журнал агента в `agent_gateway_logs` (имя настраивается через `logging.db.table_name`). |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
-| `schema_formatter.py` | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Замена: skill `audit_analyzer` сам читает `references/schema.md` (см. `workspace/skills/audit_analyzer/references/schema.md`). |
-| `nl_sql_runner.py` | **Удалён** — общая логика NL→SELECT pipeline. Заменена: CLI skill'а `audit_analyzer` — режим `--mode generated_sql` (`workspace/skills/audit_analyzer/scripts/generated_sql_mode.py`, прямой вызов `lib.services.llm_client.call_llm`), либо Agent формирует SQL сам (см. `workspace/skills/audit_analyzer/SKILL.md` и `references/sql_guidance.md`). |
+| `schema_formatter.py` | **Удалён** — internal service для формирования описания схемы БД. Использовался только `NlSqlRunner`'ом, который тоже удалён. Замена: skill `audit_analyzer` сам читает схему из `SKILL.md` (секция «Схема домена», см. `workspace/skills/audit_analyzer/SKILL.md`). |
+| `nl_sql_runner.py` | **Удалён** — общая логика NL→SELECT pipeline. Заменена: CLI skill'а `audit_analyzer` — режим `--mode generated_sql` (`workspace/skills/audit_analyzer/scripts/generated_sql_mode.py`, прямой вызов `lib.services.llm_client.call_llm`), либо Agent формирует SQL сам (см. `SKILL.md` секция «SQL guidance»). |
 
 ### Pre-resolve `${VAR}` от `.secrets.env`
 
@@ -1338,8 +1338,8 @@ nanobot/
 │   │   ├── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
 │   │   └── active_files_hook.py          #     side-channel активных файлов через session.metadata
 │   ├── tools/                            # кастомные tool'ы (auto-discover через patch_project_tools)
-│   │   ├── compact_context.py, duckdb_query_tool.py, vector_search_tool.py,
-│   │   │   history_search_tool.py, legal_summarizer_query.py, example.py
+│   │   ├── compact_context.py, history_search_tool.py,
+│   │   │   legal_summarizer_query.py, example.py
 │   ├── utils/                            # утилиты workspace
 │   │   ├── db.py, media.py, jsonb.py, event_log.py, session_file_store.py,
 │   │   │   session_key.py, clean_text.py, office_files.py, structure_cache.py
@@ -1351,12 +1351,11 @@ nanobot/
 │   │   │   ├── generated_sql_mode.py     #   режим generated_sql: LLM → SQL → EXPLAIN → выполнение
 │   │   │   ├── column_hints.py           #   подсказки по колонкам для LLM-режима
 │   │   │   ├── llm.py                    #   LLM-клиент (OpenAI-compatible HTTP)
-│   │   │   └── output.py                 #   форматирование JSON-вывода
-│   │   ├── predefined/                   #   реестр предопределённых SQL-скриптов (Python-литералы)
-│   │   │   ├── scripts.py                #     реестр скриптов (не PG-таблица!)
-│   │   │   ├── mode.py                   #     predefined.run() — выполнение через duckdb_query
-│   │   │   ├── builder.py, validator.py, models.py  #   ParamDefinition/ScriptDefinition
-│   │   └── references/                   #   schema.md, vector_indexes.md, architecture.md и др.
+│   │   │   ├── output.py                 #   форматирование JSON-вывода
+│   │   │   └── predefined/               #   predefined SQL из PG-реестра (DB-first)
+│   │   │       ├── db_loader.py          #     lookup скриптов в public.agent_predefined_scripts
+│   │   │       ├── mode.py               #     predefined.run() — выполнение через CacheProvider.query_sql
+│   │   │       ├── builder.py, validator.py, models.py  #   ParamDefinition/ScriptDefinition
 │   └── skills/office_files/              # навык: чтение docx/xlsx/xls/pdf/pptx/csv/txt
 │       ├── SKILL.md                      #   пользовательская документация
 │       └── (utils: workspace/utils/office_files.py)

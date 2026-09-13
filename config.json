@@ -3,10 +3,10 @@
     "defaults": {
       "workspace": "~/.nanobot/workspace",
       "modelPreset": null,
-      "model": "MiniMax-M3",
-      "provider": "minimax",
+      "model": "qwen3.6-35b-a3b",
+      "provider": "custom",
       "maxTokens": 8192,
-      "contextWindowTokens": 65536,
+      "contextWindowTokens": 40000,
       "contextBlockLimit": null,
       "temperature": 0.1,
       "fallbackModels": [],
@@ -233,8 +233,8 @@
   },
   "providers": {
     "custom": {
-      "apiKey": null,
-      "apiBase": "http://localhost:11434/api/generate",
+      "apiKey": "${LLM_API_KEY}",
+      "apiBase": "https://api.neuraldeep.ru/v1/",
       "apiType": "auto",
       "extraHeaders": null,
       "extraBody": null,

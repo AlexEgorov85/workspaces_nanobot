@@ -223,15 +223,13 @@ registered: foo, bar, baz; skipped: qux (disabled by config)"`.
 | Tool | Файл | Действие | Конфиг |
 |---|---|---|---|
 | `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (project.json) |
-| `duckdb_query` | `workspace/tools/duckdb_query_tool.py` | read-only SELECT-запрос в DuckDB-кэш | `gateway.duckdb_query.*` (project.json) |
-| `vector_search` | `workspace/tools/vector_search_tool.py` | семантический поиск по FAISS-индексу | `gateway.vector_search.*` (project.json) |
 | `history_search` | `workspace/tools/history_search_tool.py` | generic-поиск по журналу `agent_gateway_logs` (переживает context compaction) | `tools.history_search.*` (config.json; если секция не задана — дефолты модели `HistorySearchConfig`) |
 | `legal_summarizer_query` | `workspace/tools/legal_summarizer_query.py` | follow-up по saved `operation_id` для `legal_summarizer` | `tools.legal_summarizer_query.*` (config.json) |
 | `example_tool` | `workspace/tools/example.py` | шаблон (по умолчанию `enable=false`) | `tools.example.*` (config.json) |
 
-`duckdb_query` и `vector_search` — generic infrastructure tools, не знают
-конкретных Skills. Они используются skill'ом `audit_analyzer` через
-процедуру, описанную в `SKILL.md` (см. TARGET_ARCHITECTURE.md §5, §6, §8).
+Tools `duckdb_query` / `vector_search` **удалены** в фазе 8 (см.
+`skill-tool-inventory.md`). Доступ к `audit_analyzer` — только через
+CLI skill'а (`scripts/cli.py --mode predefined`).
 
 `audit_run_predefined_script` / `audit_search_vector` / `audit_generate_sql`
 **удалены** в рефакторинге `refactor/skills-tools-cleanup`
@@ -239,13 +237,12 @@ registered: foo, bar, baz; skipped: qux (disabled by config)"`.
 TARGET_ARCHITECTURE.md (импортировали skill через `importlib`); заменены на:
 
 - predefined — CLI-режим skill'а (`scripts/cli.py --mode predefined`);
-- vector search — tool `vector_search` (с указанием `index_name`);
-- NL→SELECT — skill workflow с tool `duckdb_query` (см.
-  `references/sql_guidance.md`);
+- vector search — CLI-режим skill'а (`scripts/cli.py --mode vector`);
+- NL→SELECT — CLI-режим skill'а (`scripts/cli.py --mode generated_sql`);
 - runtime-context providers (`providers.py`, инъекция схемы/predefined в system
   prompt) — удалены полностью: схема БД и списки скриптов теперь доступны
-  по требованию через tool `duckdb_query` / `predefined/scripts.py`
-  (реестр `REGISTRY` в памяти skill'а, не в PostgreSQL).
+  по требованию через `--list-scripts` / `--list-indexes`
+  (реестр в PostgreSQL).
 
 ---
 

@@ -3,7 +3,7 @@
     "description": "Инвентаризация зависимостей workspaces_nanobot от nanobot-ai",
     "nanobot_version_pinned": "0.3.0",
     "nanobot_version_installed": "0.3.0",
-    "scan_date": "2026-08-26",
+    "scan_date": "2026-09-11",
     "scanner": "tools/scan_nanobot_inventory.py",
     "legend": {
       "GREEN": "public/stable extension point",
@@ -13,22 +13,22 @@
     }
   },
   "summary": {
-    "files_scanned": 88,
-    "total_imports": 41,
+    "files_scanned": 178,
+    "total_imports": 48,
     "by_classification": {
-      "GREEN": 32,
+      "GREEN": 38,
       "RED": 5,
-      "ORANGE": 4
+      "ORANGE": 5
     },
-    "getattr_private_total": 20,
-    "setattr_total": 0
+    "getattr_private_total": 18,
+    "setattr_total": 1
   },
   "files": [
     {
       "file": "cli_agent.py",
       "imports": [
         {
-          "line": 127,
+          "line": 132,
           "statement": "from nanobot.config.paths import get_cron_dir  # type: ignore",
           "module": "nanobot.config.paths",
           "names": [
@@ -44,7 +44,7 @@
       "file": "gateway.py",
       "imports": [
         {
-          "line": 47,
+          "line": 65,
           "statement": "from nanobot.cli.commands import __logo__, __version__",
           "module": "nanobot.cli.commands",
           "names": [
@@ -56,7 +56,7 @@
       ],
       "getattr_private": [
         {
-          "line": 80,
+          "line": 98,
           "expr": "getattr(ctx.sync_service, \"_on_sync_callback\"",
           "object": "ctx.sync_service",
           "attr": "_on_sync_callback"
@@ -237,7 +237,7 @@
       "file": "lib/core/agent_factory.py",
       "imports": [
         {
-          "line": 106,
+          "line": 113,
           "statement": "from nanobot.agent.loop import AgentLoop",
           "module": "nanobot.agent.loop",
           "names": [
@@ -253,7 +253,7 @@
       "file": "lib/core/application_context.py",
       "imports": [
         {
-          "line": 568,
+          "line": 751,
           "statement": "from nanobot.cron.service import CronService",
           "module": "nanobot.cron.service",
           "names": [
@@ -331,7 +331,7 @@
       "file": "lib/hooks/database_logging_hook.py",
       "imports": [
         {
-          "line": 29,
+          "line": 30,
           "statement": "from nanobot.agent import AgentHookContext, AgentRunHookContext",
           "module": "nanobot.agent",
           "names": [
@@ -341,6 +341,12 @@
           "classification": "GREEN"
         }
       ],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "lib/hooks/terminal_tool_print_hook.py",
+      "imports": [],
       "getattr_private": [],
       "setattr_calls": []
     },
@@ -521,10 +527,16 @@
       "setattr_calls": []
     },
     {
+      "file": "lib/services/runtime_health.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
       "file": "lib/services/runtime_patcher.py",
       "imports": [
         {
-          "line": 295,
+          "line": 634,
           "statement": "from nanobot.agent.context_governance import ContextGovernor",
           "module": "nanobot.agent.context_governance",
           "names": [
@@ -533,7 +545,7 @@
           "classification": "ORANGE"
         },
         {
-          "line": 296,
+          "line": 635,
           "statement": "from nanobot.utils.runtime import ensure_nonempty_tool_result",
           "module": "nanobot.utils.runtime",
           "names": [
@@ -542,7 +554,23 @@
           "classification": "GREEN"
         },
         {
-          "line": 470,
+          "line": 838,
+          "statement": "from nanobot.utils import document as _document_mod",
+          "module": "nanobot.utils",
+          "names": [
+            "document as _document_mod"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 903,
+          "statement": "import nanobot.agent.loop as _loop_mod  # type: ignore",
+          "module": "nanobot.agent.loop",
+          "names": [],
+          "classification": "GREEN"
+        },
+        {
+          "line": 939,
           "statement": "from nanobot.session.manager import Session",
           "module": "nanobot.session.manager",
           "names": [
@@ -551,7 +579,7 @@
           "classification": "GREEN"
         },
         {
-          "line": 521,
+          "line": 990,
           "statement": "from nanobot.session.manager import Session",
           "module": "nanobot.session.manager",
           "names": [
@@ -560,7 +588,7 @@
           "classification": "GREEN"
         },
         {
-          "line": 770,
+          "line": 1280,
           "statement": "from nanobot.bus.events import OutboundMessage",
           "module": "nanobot.bus.events",
           "names": [
@@ -569,7 +597,7 @@
           "classification": "GREEN"
         },
         {
-          "line": 892,
+          "line": 1402,
           "statement": "from nanobot.agent.subagent import _SubagentHook",
           "module": "nanobot.agent.subagent",
           "names": [
@@ -578,14 +606,14 @@
           "classification": "RED"
         },
         {
-          "line": 1096,
+          "line": 1606,
           "statement": "import nanobot.agent.subagent as _subagent_mod",
           "module": "nanobot.agent.subagent",
           "names": [],
           "classification": "ORANGE"
         },
         {
-          "line": 1188,
+          "line": 1699,
           "statement": "from nanobot.agent.tools.base import Tool as _T",
           "module": "nanobot.agent.tools.base",
           "names": [
@@ -594,7 +622,7 @@
           "classification": "GREEN"
         },
         {
-          "line": 1218,
+          "line": 1729,
           "statement": "from nanobot.agent.tools.context import ToolContext",
           "module": "nanobot.agent.tools.context",
           "names": [
@@ -605,61 +633,61 @@
       ],
       "getattr_private": [
         {
-          "line": 77,
+          "line": 102,
           "expr": "getattr(agent, \"_last_usage\"",
           "object": "agent",
           "attr": "_last_usage"
         },
         {
-          "line": 231,
+          "line": 570,
           "expr": "getattr(agent, \"_state_build\"",
           "object": "agent",
           "attr": "_state_build"
         },
         {
-          "line": 381,
+          "line": 720,
           "expr": "getattr(agent, \"_save_turn\"",
           "object": "agent",
           "attr": "_save_turn"
         },
         {
-          "line": 748,
+          "line": 1258,
           "expr": "getattr(agent, \"_assemble_outbound\"",
           "object": "agent",
           "attr": "_assemble_outbound"
         },
         {
-          "line": 1204,
+          "line": 1715,
           "expr": "getattr(cls, \"__abstractmethods__\"",
           "object": "cls",
           "attr": "__abstractmethods__"
         },
         {
-          "line": 1226,
+          "line": 1737,
           "expr": "getattr(agent, \"_exec_session_manager\"",
           "object": "agent",
           "attr": "_exec_session_manager"
         },
         {
-          "line": 1232,
+          "line": 1743,
           "expr": "getattr(\n                    agent, \"_image_generation_provider_configs\"",
           "object": "agent",
           "attr": "_image_generation_provider_configs"
         },
         {
-          "line": 1247,
+          "line": 1758,
           "expr": "getattr(ctx, \"_agent_ref\"",
           "object": "ctx",
           "attr": "_agent_ref"
         },
         {
-          "line": 1389,
+          "line": 1932,
           "expr": "getattr(auto, \"_archive\"",
           "object": "auto",
           "attr": "_archive"
         },
         {
-          "line": 1479,
+          "line": 2022,
           "expr": "getattr(auto, \"_ttl\"",
           "object": "auto",
           "attr": "_ttl"
@@ -752,7 +780,14 @@
     {
       "file": "lib/utils/logging_utils.py",
       "imports": [],
-      "getattr_private": [],
+      "getattr_private": [
+        {
+          "line": 35,
+          "expr": "getattr(sys.stderr, \"_nanobot_reconfigured\"",
+          "object": "sys.stderr",
+          "attr": "_nanobot_reconfigured"
+        }
+      ],
       "setattr_calls": []
     },
     {
@@ -763,7 +798,39 @@
     },
     {
       "file": "lib/utils/outbound_meta.py",
-      "imports": [],
+      "imports": [
+        {
+          "line": 71,
+          "statement": "from nanobot.bus.outbound_events import outbound_event_from_message",
+          "module": "nanobot.bus.outbound_events",
+          "names": [
+            "outbound_event_from_message"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 95,
+          "statement": "from nanobot.bus.outbound_events import StreamedResponseEvent",
+          "module": "nanobot.bus.outbound_events",
+          "names": [
+            "StreamedResponseEvent"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 114,
+          "statement": "from nanobot.bus.outbound_events import (",
+          "module": "nanobot.bus.outbound_events",
+          "names": [
+            "(",
+            "StreamDeltaEvent",
+            "StreamEndEvent",
+            "ProgressEvent",
+            "RetryWaitEvent"
+          ],
+          "classification": "GREEN"
+        }
+      ],
       "getattr_private": [],
       "setattr_calls": []
     },
@@ -804,8 +871,30 @@
       "setattr_calls": []
     },
     {
+      "file": "workspace/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
       "file": "workspace/hooks/__init__.py",
       "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/hooks/active_files_hook.py",
+      "imports": [
+        {
+          "line": 47,
+          "statement": "from nanobot.agent import AgentHook",
+          "module": "nanobot.agent",
+          "names": [
+            "AgentHook"
+          ],
+          "classification": "GREEN"
+        }
+      ],
       "getattr_private": [],
       "setattr_calls": []
     },
@@ -842,7 +931,13 @@
       "setattr_calls": []
     },
     {
-      "file": "workspace/skills/audit_analyzer/__init__.py",
+      "file": "workspace/skills/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/audit_analyzer/scripts/__init__.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
@@ -850,24 +945,17 @@
     {
       "file": "workspace/skills/audit_analyzer/scripts/cli.py",
       "imports": [],
-      "getattr_private": [
-        {
-          "line": 220,
-          "expr": "getattr(db, \"_search_error\"",
-          "object": "db",
-          "attr": "_search_error"
-        }
-      ],
+      "getattr_private": [],
       "setattr_calls": []
     },
     {
-      "file": "workspace/skills/audit_analyzer/scripts/database.py",
+      "file": "workspace/skills/audit_analyzer/scripts/column_hints.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
     },
     {
-      "file": "workspace/skills/audit_analyzer/scripts/db_loader.py",
+      "file": "workspace/skills/audit_analyzer/scripts/generated_sql_mode.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
@@ -885,25 +973,37 @@
       "setattr_calls": []
     },
     {
-      "file": "workspace/skills/audit_analyzer/scripts/predefined.py",
+      "file": "workspace/skills/audit_analyzer/scripts/predefined/__init__.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
     },
     {
-      "file": "workspace/skills/audit_analyzer/scripts/predefined_mode.py",
+      "file": "workspace/skills/audit_analyzer/scripts/predefined/builder.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
     },
     {
-      "file": "workspace/skills/audit_analyzer/scripts/protocol.py",
+      "file": "workspace/skills/audit_analyzer/scripts/predefined/db_loader.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
     },
     {
-      "file": "workspace/skills/audit_analyzer/scripts/scripts_registry.py",
+      "file": "workspace/skills/audit_analyzer/scripts/predefined/mode.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/audit_analyzer/scripts/predefined/models.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/audit_analyzer/scripts/predefined/validator.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
@@ -915,7 +1015,492 @@
       "setattr_calls": []
     },
     {
-      "file": "workspace/skills/audit_analyzer/scripts/sql_mode.py",
+      "file": "workspace/skills/legal_summarizer/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/brief_compression.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/brief_context.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/canonical.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/chunk_selection.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/context_builder.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/document_io.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/estimation.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/execution_orchestration.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": [
+        {
+          "line": 15,
+          "expr": "setattr(llm_calls, \"llm_document_reduce\""
+        }
+      ]
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/inspection.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/manifest_builder.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/operation_id.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/pipeline_structure.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/question_context.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/application/service.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/cache/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/cache/document_cache.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/cache/manifest.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/chunking/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/chunking/_text_helpers.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/chunking/chunker.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/chunking/chunks.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/chunking/importance_score.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/chunking/order.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/chunking/packing.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/chunking/structural_packing.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/cli.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/cli_query.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/analysis.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/block_lookup.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/block_ownership.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/heading.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/hierarchy.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/identity.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/list_detection.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/loader.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/numbering.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/pdf_outline.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/physical.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/repair.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/safety_merge.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/section_helpers.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/structure.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/title.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/document/validation.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/execution/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/execution/config.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/execution/hierarchical.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/execution/map_reduce.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/execution/pipeline.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/llm/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/llm/calls.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/llm/client.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/llm/config.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/llm/prompts.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/llm/prompts_runtime.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/llm/retry.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/llm/sanitize.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/llm/single_flight.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/llm/tokens.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/output/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/output/presenter.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/planning/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/planning/plan.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/planning/strategy.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/__init__.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/candidate_aggregator.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/canonical.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/context_expansion.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/fallback.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/followup.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/index.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/normalizer.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/provenance.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/qa.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/quality.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/query.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/question.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/skills/legal_summarizer/scripts/retrieval/records.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
@@ -964,10 +1549,67 @@
       "setattr_calls": []
     },
     {
-      "file": "workspace/tools/duckdb_query_tool.py",
+      "file": "workspace/tools/example.py",
       "imports": [
         {
-          "line": 43,
+          "line": 37,
+          "statement": "from nanobot.agent.tools.base import Tool, tool_parameters",
+          "module": "nanobot.agent.tools.base",
+          "names": [
+            "Tool",
+            "tool_parameters"
+          ],
+          "classification": "GREEN"
+        }
+      ],
+      "getattr_private": [
+        {
+          "line": 76,
+          "expr": "getattr(ctx, \"_settings_ref\"",
+          "object": "ctx",
+          "attr": "_settings_ref"
+        }
+      ],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/tools/history_search_tool.py",
+      "imports": [
+        {
+          "line": 36,
+          "statement": "from nanobot.agent.tools.base import Tool, tool_parameters",
+          "module": "nanobot.agent.tools.base",
+          "names": [
+            "Tool",
+            "tool_parameters"
+          ],
+          "classification": "GREEN"
+        },
+        {
+          "line": 375,
+          "statement": "from nanobot.agent.tools.context import current_request_session_key",
+          "module": "nanobot.agent.tools.context",
+          "names": [
+            "current_request_session_key"
+          ],
+          "classification": "ORANGE"
+        }
+      ],
+      "getattr_private": [
+        {
+          "line": 155,
+          "expr": "getattr(ctx, \"_settings_ref\"",
+          "object": "ctx",
+          "attr": "_settings_ref"
+        }
+      ],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/tools/legal_summarizer_query.py",
+      "imports": [
+        {
+          "line": 48,
           "statement": "from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters",
           "module": "nanobot.agent.tools.base",
           "names": [
@@ -980,70 +1622,10 @@
       ],
       "getattr_private": [
         {
-          "line": 106,
+          "line": 133,
           "expr": "getattr(ctx, \"_settings_ref\"",
           "object": "ctx",
           "attr": "_settings_ref"
-        },
-        {
-          "line": 285,
-          "expr": "getattr(self, \"_connection_factory\"",
-          "object": "self",
-          "attr": "_connection_factory"
-        }
-      ],
-      "setattr_calls": []
-    },
-    {
-      "file": "workspace/tools/example.py",
-      "imports": [
-        {
-          "line": 39,
-          "statement": "from nanobot.agent.tools.base import Tool, tool_parameters",
-          "module": "nanobot.agent.tools.base",
-          "names": [
-            "Tool",
-            "tool_parameters"
-          ],
-          "classification": "GREEN"
-        }
-      ],
-      "getattr_private": [
-        {
-          "line": 78,
-          "expr": "getattr(ctx, \"_settings_ref\"",
-          "object": "ctx",
-          "attr": "_settings_ref"
-        }
-      ],
-      "setattr_calls": []
-    },
-    {
-      "file": "workspace/tools/vector_search_tool.py",
-      "imports": [
-        {
-          "line": 43,
-          "statement": "from nanobot.agent.tools.base import Tool, tool_parameters",
-          "module": "nanobot.agent.tools.base",
-          "names": [
-            "Tool",
-            "tool_parameters"
-          ],
-          "classification": "GREEN"
-        }
-      ],
-      "getattr_private": [
-        {
-          "line": 115,
-          "expr": "getattr(ctx, \"_settings_ref\"",
-          "object": "ctx",
-          "attr": "_settings_ref"
-        },
-        {
-          "line": 210,
-          "expr": "getattr(self, \"_provider\"",
-          "object": "self",
-          "attr": "_provider"
         }
       ],
       "setattr_calls": []
@@ -1062,6 +1644,12 @@
     },
     {
       "file": "workspace/utils/db.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/utils/event_log.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
@@ -1086,6 +1674,18 @@
     },
     {
       "file": "workspace/utils/session_file_store.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/utils/session_key.py",
+      "imports": [],
+      "getattr_private": [],
+      "setattr_calls": []
+    },
+    {
+      "file": "workspace/utils/structure_cache.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []
