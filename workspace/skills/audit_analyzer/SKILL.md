@@ -1,14 +1,14 @@
 ---
 name: audit_analyzer
-description: Анализ аудиторских проверок — predefined SQL-скрипты из PostgreSQL, семантический поиск по FAISS-индексам Core, свободный SQL через Core Data.
+description: Анализ аудиторских проверок — predefined SQL-скрипты из PostgreSQL (CLI).
 metadata: {"nanobot":{"emoji":"📊","always":true}}
 ---
 
 # Audit Analyzer
 
 Навык для работы с данными аудиторских проверок (нарушения, отчёты,
-плановые/фактические даты). Три способа получения данных — все через
-generic Core capability.
+плановые/фактические даты). Единый способ получения данных —
+predefined SQL-скрипты через CLI.
 
 ## Архитектура
 
@@ -16,47 +16,38 @@ generic Core capability.
 Agent / LLM
        │
        ▼
-audit_analyzer Skill
+exec: python scripts/cli.py --mode predefined --script <name> [--params '{}']
        │
-       ├── predefined analytical operations
-       │      └── predefined.run() → Core CacheProvider → DuckDB-PG снимок
-       │
-       ├── semantic search
-       │      └── Core Vector capability (FAISS по runtime-БД)
-       │
-       └── свободный SQL через Core Data
-              └── Core Data/DuckDB capability (SELECT-only)
-
+       ▼
+audit_analyzer Skill (CLI)
+       └── predefined.run() → Core CacheProvider → DuckDB-PG снимок
        ▼
 Core
- ├── Cache (DuckDB-PG snapshot)
- ├── Vector access (FAISS + embeddings)
- └── Data/DuckDB access (SELECT-only gate)
+ └── Cache (DuckDB-PG snapshot)
 
        ▼
 Storage
  ├── PostgreSQL (source of truth)
- ├── DuckDB cache (PG snapshot)
- └── vector storage (FAISS + agent_vector_index_store)
+ └── DuckDB cache (PG snapshot)
 ```
 
-**Важно:** в CLI три режима (`predefined`, `generated_sql`, `vector`).
-«Свободный SQL» — это **не CLI-режим**, а capability, через которую Agent
-выполняет SQL напрямую через generic `CacheProvider.query_sql` /
-`DuckDBService.execute_readonly`.
+**Доступ агента — только predefined через CLI.** В CLI также есть
+режимы `generated_sql` (NL→SQL через LLM) и `vector` (семантический
+поиск), но они не являются частью контракта агента — доступны через
+прямой вызов CLI.
 
 **Skill не владеет:**
 
-- логикой выполнения SQL (это `CacheProvider.query_sql` / generic SQL tool);
-- логикой FAISS-поиска (это `CacheProvider.search_vector`);
-- выбором embedding-модели (это `gateway.vector.embedding`);
+- логикой выполнения SQL (это `CacheProvider.query_sql` / Core);
+- выбором embedding-модели (захардкожено в `cache_provider_impl` /
+  `_EMBED_*`-константы; bearer-токен — из env `EMBED_TOKEN`);
 - LLM-вызовами (Core skill helper, если нужен).
 
 **Skill владеет только:**
 
 - каталогом predefined скриптов (через DB-реестр `public.agent_predefined_scripts`);
 - каталогом FAISS-индексов (логические имена);
-- правилами выбора между ними.
+- правилами выбора.
 
 ## Источник predefined скриптов
 
@@ -192,11 +183,14 @@ result {row_count, columns, rows (dict по именам колонок)}
 | `violations_index` | `oarb.violations` | `description` (chunk 500/80), `violation_code` | `description`: 500/80 | `0.65+` высокая, `0.5–0.65` умеренная |
 | `audit_reports_index` | `oarb.audit_reports` | `full_text` (chunk 500/80), `title` | `full_text`: 500/80 | `0.55+` высокая, `0.4–0.55` умеренная |
 
-Конфигурация — в `public.agent_vector_index_config` (seed:
-`sql/audit_analyzer/seed_default_indexes.sql`). Skill передаёт **только**
-логическое имя (`audits_index` / `violations_index` / `audit_reports_index`)
+Конфигурация — в `project.json::gateway.vector.index.indexes.*`
+(`VectorIndexConfig`). Skill передаёт **только** логическое имя
+(`audits_index` / `violations_index` / `audit_reports_index`)
 в generic vector capability — FAISS-детали (`agent_vector_index_store`,
 `oarb.audit_vectors`, сериализация, embedding-blob) знает только Core.
+PG-реестр `public.agent_vector_index_config` остаётся в репо как
+legacy SQL-артефакт, но кодом **не читается** (см. CHANGELOG →
+Resource Model Refactoring).
 
 **Известное предупреждение:** legacy FAISS-индексы могут иметь
 `signature_status: "INVALID"` — это by design (`verify_index_signature`
@@ -204,7 +198,7 @@ result {row_count, columns, rows (dict по именам колонок)}
 могут быть stale). Рекомендуется `python tools/build_vectors.py
 --full-rebuild`.
 
-### Советы по recall (vector_search)
+### Советы по recall (vector CLI)
 
 Качество recall зависит от embedding-модели (по умолчанию —
 `mxbai-embed-large`) и от формулировки запроса:
@@ -216,22 +210,20 @@ result {row_count, columns, rows (dict по именам колонок)}
    переформулировать через смежные термины: «пожарная безопасность» →
    «пожарная служба», «эвакуационные выходы».
 3. **Длина запроса имеет значение.** Оптимально 3–7 слов.
-4. **Threshold + top_k.** Если результаты нерелевантные — `threshold=0.5`
+4. **threshold + top_k.** Если результаты нерелевантные — `threshold=0.5`
    (или выше). Если результатов мало — увеличьте `top_k` и уменьшите
    `threshold`.
 5. **Несколько попыток.** Если первый запрос не сработал — попробуйте
    синонимы.
 
-### Конвенции vector_search
+### Конвенции vector (CLI --mode vector)
 
 - `index_name` — строковый идентификатор. Метаданные индексов (источник,
-  embed-колонки, signature) живут в `public.agent_vector_index_config`.
+  embed-колонки, signature) живут в `gateway.vector.index.indexes.<name>`.
   Сериализованный FAISS BYTEA — в `public.agent_vector_index_store`.
-- `top_k` ограничен `max_top_k` из конфига
-  (`gateway.vector_search.max_top_k`, по умолчанию 50).
-- `threshold` ограничен `[0.0, 1.0]`. По умолчанию —
-  `gateway.vector_search.default_threshold` (0.0 = без фильтра).
-- `audits_index` — дефолт для CLI при `--mode vector` без `--index-name`.
+- `--top-k` (дефолт `5`, потолок `50`).
+- `--threshold` (дефолт `0.0` = без фильтра, диапазон `[0.0, 1.0]`).
+- `audits_index` — дефолт при `--mode vector` без `--index-name`.
 
 ## Схема домена (`oarb.*`)
 
@@ -319,48 +311,49 @@ LEFT JOIN violations v ON v.audit_id = a.id
 - Статусы и severity — свободный текст (`varchar`), не PG-enum. Конкретный
   набор ярлыков определяется данными и может расширяться без миграции схемы.
 
-## SQL guidance (для свободного SQL через Core)
+## SQL guidance (режим generated_sql через CLI)
 
-Когда predefined и vector не подходят — Agent формирует SELECT сам и
-передаёт в generic `CacheProvider.query_sql` (или в Core Data
-capability).
+Режим `generated_sql` (NL→SQL через LLM) доступен через CLI — не
+является частью контракта агента, но используется для точных
+аналитических запросов поверх `oarb.*`-таблиц:
+
+```bash
+python scripts/cli.py --mode generated_sql --query '<запрос на NL>'
+```
 
 ### Правила
 
-- Только `SELECT` / `WITH` / `EXPLAIN`. Никаких DDL/DML — `validate_sql`
-  (`lib/utils/sql_safety.py`) отвергнет.
+- Генерируется только `SELECT` / `WITH` — `validate_sql`
+  (`lib/utils/sql_safety.py`) отвергнет DDL/DML.
 - Один statement. Без `; DROP ...`.
 - Полностью квалифицированные имена таблиц: `schema.table` (например,
   `oarb.audits`).
-- Параметры — позиционные `?` или именованные `:name`.
-- `LIMIT` добавляется автоматически (`max_rows` из
-  `gateway.duckdb_query.max_rows`).
+- `LIMIT` добавляется автоматически.
 
 ### Процесс (Agent reasoning)
 
 1. Определи нужную таблицу (см. секцию «Схема домена»).
 2. Определи нужные колонки.
-3. Сформируй минимальный `SELECT`.
-4. Используй явные `JOIN` для связей.
-5. Для агрегатов — `COUNT` / `SUM` / `AVG` + `GROUP BY`.
-6. Для дат используй `actual_date` / `report_date` / `deadline`.
+3. Сформулируй запрос на естественном языке.
+4. Для агрегатов — «сколько», «по месяцам», «топ-N».
+5. Для дат используй `actual_date` / `report_date` / `deadline`.
 
 ### Retry при ошибке
 
-`query_sql` вернёт структурированную ошибку:
+`generated_sql` CLI вернёт структурированный JSON:
 
 ```json
 {
+  "mode": "generated_sql",
   "status": "error",
-  "error_type": "sql_error",
-  "message": "..."
+  "data": { "message": "...", "error_type": "..." }
 }
 ```
 
 Agent-цикл:
 
 1. Прочитай `message`.
-2. Исправь SQL (синтаксис / имя таблицы / колонки).
+2. Переформулируй запрос (уточни таблицу / колонки / период).
 3. Повтори вызов.
 
 **Retry — задача Agent**, не отдельного Python-сервиса. Ограничение числа
@@ -369,7 +362,7 @@ Agent-цикл:
 ### Пустой результат — нормально
 
 ```json
-{"status": "success", "columns": [...], "rows": [], "row_count": 0}
+{"status": "success", "data": {"columns": [...], "rows": [], "row_count": 0}}
 ```
 
 Не интерпретируй как сбой. Сообщи пользователю «нет данных за указанный
@@ -387,30 +380,23 @@ Agent-цикл:
 ```
 Q: Запрос ТОЧНО соответствует одному из 6 predefined scripts
    И параметры известны (или все optional)?
-  YES → используй predefined capability (loader → Core query_sql)
+  YES → используй predefined (CLI --mode predefined --script <name>)
   NO ↓
 
-Q: Запрос про смысл/похожие, а не точные числа?
-  YES → используй vector capability с index_name из каталога выше
-  NO ↓
-
-  → используй analytical SQL capability (Core Data/DuckDB, SELECT-only)
+  → не поддерживается; сообщи пользователю, что запрос не
+    соответствует доступным predefined-скриптам
 ```
 
 ## Жёсткие правила
 
-- Не выбирай `index_name` сам — только из каталога выше.
 - Не выдумывай скрипт predefined — только из каталога выше.
-- Не используй vector search для COUNT / GROUP BY / точных фильтров.
 - Date-параметры — строго `YYYY-MM-DD` (валидация в `scripts/predefined/validator.py`).
 - Если predefined-скрипт вернул SQL error (например, устаревший SQL в
-  seed) — **не повторяй попытку**, переходи к `generated_sql` или
-  analytical SQL capability. Этот случай не «diagnostic», а legacy-данные.
-- Не используй `LIKE '%...%'` для семантического поиска — для этого
-  есть `vector_search`.
-- Не вызывай `exec` / `python` для выполнения SQL — только через Core Data.
-- Не обращайся к `public.agent_predefined_scripts` через Core SQL
-  напрямую — это реестр, а не доменная таблица.
+  seed) — **не повторяй попытку**, сообщи об ошибке. Этот случай не
+  «diagnostic», а legacy-данные.
+- Не вызывай `exec` / `python` для выполнения SQL напрямую — только через CLI.
+- Не обращайся к `public.agent_predefined_scripts` через SQL напрямую —
+  это реестр, а не доменная таблица.
 
 ## Runtime boundary
 
@@ -422,13 +408,12 @@ Skill реализует **только**:
   HTTP/LLM-вызовов. Никакого fallback на Python `REGISTRY` (удалён в
   Phase 7).
 - Доступ к логическим FAISS-индексам через generic Core Vector API
-  (`CacheProvider.search_vector`).
+  (`CacheProvider.search_vector`) — доступен через CLI `--mode vector`.
 - Доступ к доменным таблицам через generic Core Data API
-  (`CacheProvider.query_sql` / `CacheProvider.execute_readonly`).
+  (`CacheProvider.query_sql`) — доступен через CLI `--mode generated_sql` / `--mode vector`.
 
-Skill НЕ использует Agent-facing tools (`vector_search_tool`,
-`duckdb_query_tool`) — они живут в Core и доступны через generic
-Capability, а не как часть Skill API.
+Доступ агента — только через CLI (`scripts/cli.py`). Generic tools
+(`duckdb_query_tool`, `vector_search_tool`) удалены в Phase 8.
 
 Legacy mode `generated_sql` и соответствующий CLI-режим
 (`scripts/cli.py --mode generated_sql`) — оставлены для обратной

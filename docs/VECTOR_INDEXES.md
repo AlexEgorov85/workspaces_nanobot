@@ -3,11 +3,26 @@
 > Навигационный индекс каталога `docs/` — в [`README.md`](README.md). Этот документ —
 > самодостаточное описание подсистемы.
 
+> **⚠️ Источник конфигурации индексов.** Начиная с текущего релиза конфиг
+> векторных индексов живёт в `project.json::gateway.vector.index.indexes.*`
+> (`VectorIndexConfig`). PG-реестр `public.agent_vector_index_config` остаётся
+> в репозитории как **legacy SQL-артефакт** — `tools/build_vectors.py` и
+> `lib/services/cache_provider_impl.py` его **не читают**. Параметры подключения
+> к эмбеддеру (base_url, model, dimension, timeout, retries) захардкожены в
+> `lib/services/cache_provider_impl.py` (`_EMBED_*`-константы); bearer-токен —
+> из переменной окружения `EMBED_TOKEN`. Секция `gateway.vector.embedding`
+> в `project.json` удалена.
+>
+> Ниже часть инструкций (особенно «Как добавить новый индекс», «Как отключить»,
+> «Как удалить») всё ещё описывает **PG-реестр**. Эти шаги больше не нужны:
+> конфиг правится в `project.json::gateway.vector.index.indexes.<name>`.
+> См. CHANGELOG.md → Resource Model Refactoring и `AGENTS.md` → «Configuration».
+
 > **Об именах таблиц и индексов.** Имена `public.agent_vector_index_config`,
 > `public.agent_vector_index_store`, `oarb.audit_vectors`, а также имена самих
 > индексов (`audits_index`, `violations_index`, …) и исходных таблиц (`oarb.audits`,
 > …) — **не зашитые константы**, а значения текущей инсталляции. Они настраиваются
-> в `project.json`: `gateway.vector.index.config_table` / `signature_table` /
+> в `project.json`: `gateway.vector.index.signature_table` /
 > `storage_table`, `skills.audit_analyzer.tables[*].name`,
 > `skills.audit_analyzer.vector_indexes[*].name`. В других развёртываниях имена
 > могут отличаться.
@@ -35,7 +50,7 @@ flowchart LR
 
 | Таблица | Назначение | Кто пишет | Кто читает |
 |---------|-----------|-----------|-----------|
-| `public.agent_vector_index_config` | Конфиг индексов (имя, источник, колонки, чанки, metric, track_column, enabled) | `seed_default_indexes.sql` (вручную) / `tools/build_vectors.py` (`_persist_index_build_params` — фактические параметры сборки) | `tools/build_vectors.py` |
+| `public.agent_vector_index_config` | ⚠️ **Legacy SQL-артефакт.** Кодом **не читается** — конфиг индексов теперь живёт в `project.json::gateway.vector.index.indexes.*`. DDL оставлен в репо для обратной совместимости и исторических ссылок. | — | — |
 | `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (chunk_index/count, content_hash, row_data JSONB, synced_at) | `tools/build_vectors.py` | `lib/services/cache_provider_impl.py:PostgresDuckDbProvider` (агент читает только через DuckDB-снапшот `workspace/data_store/duckdb/cache.duckdb`; канон — PG) |
 | `public.agent_vector_index_store` | Сериализованный FAISS `BYTEA` + метаданные (dimension, vector_count, updated_at, signature, metric) | `provider.rebuild_and_store_index()` | `provider._load_index()` (in-memory + reload из store) |
 
@@ -181,14 +196,10 @@ python tools/build_vectors.py --index audits_index --full-rebuild
 
 #### Сценарий C: изменилась модель эмбеддинга или размерность
 
-`project.json → gateway.vector.embedding`:
-
-```json
-{
-  "model": "nomic-embed-text:latest",
-  "dimension": 768
-}
-```
+> **⚠️ Параметры эмбеддера захардкожены.** `base_url`, `model`, `dimension`,
+> `timeout_sec`, `retries` живут в `lib/services/cache_provider_impl.py`
+> (модульные константы `_EMBED_*`). Bearer-токен — `EMBED_TOKEN` env.
+> Чтобы сменить модель эмбеддинга — правьте константы и пересоберите.
 
 **Обязательная последовательность:**
 
@@ -204,7 +215,7 @@ python tools/build_vectors.py --full-rebuild
 
 # 4. Проверить размерность
 python tools/build_vectors.py --status
-# dim должен быть 768, не 1024
+# dim должен соответствовать новой модели, не 1024
 ```
 
 **Альтернатива (быстрее, но менее надёжно):** оставить `audit_vectors` без изменений, но тогда `provider.search_vector()` вернёт пустой результат с ошибкой `Размерность индекса не совпадает с размерностью эмбеддинга запроса`. Чистая пересборка безопаснее.
@@ -635,7 +646,7 @@ GROUP BY v.source;
 | Симптом | Причина | Что делать |
 |---------|---------|-----------|
 | `RuntimeError: Error in faiss::IndexFlat::search: index has 0 vectors` | FAISS-индекс пуст | `python tools/build_vectors.py --status` — если `vector_count=0`, пересоберите `--full-rebuild` |
-| `RuntimeError: Error in faiss::IndexFlat::add: dimension mismatch` | Размерность FAISS ≠ размерности эмбеддинга запроса | Модель Ollama изменилась, а конфиг/project.json — нет. Обновите `gateway.vector.embedding.{model, dimension}` и `--full-rebuild` |
+| `RuntimeError: Error in faiss::IndexFlat::add: dimension mismatch` | Размерность FAISS ≠ размерности эмбеддинга запроса | Модель Ollama изменилась, а `cache_provider_impl` — нет. Обновите `_EMBED_MODEL`/`_EMBED_DIMENSION` в `lib/services/cache_provider_impl.py` и `--full-rebuild` |
 | Все результаты с `score=0.000` | FAISS устарел (новые вектора в `audit_vectors` не пересобраны в FAISS) | `python tools/build_vectors.py --full-rebuild` |
 | Все результаты возвращают `row_data=None` | Поле `row_data` не пишется в INSERT | Проверьте `INSERT` в `tools/build_vectors.py:476-494`; у вас должна быть колонка `row_data JSONB` |
 | Поиск возвращает результаты из другой таблицы | `embedding_cols` конфликтуют между индексами (один и тот же текст в разных таблицах) | Используйте разные `index_name` и проверьте через `SELECT DISTINCT source FROM oarb.audit_vectors` |
@@ -667,12 +678,11 @@ GROUP BY v.source;
 | `snowflake-arctic-embed:latest` | 1024 | нет |
 | `bge-m3` | 1024 | нет |
 
-**Если меняете модель:**
+**Если меняете модель:** правьте модульные константы в `lib/services/cache_provider_impl.py`:
 
-```jsonc
-// project.json → gateway.vector.embedding
-"model":     "nomic-embed-text:latest",  // было mxbai-embed-large:latest
-"dimension": 768,                          // было 1024
+```python
+_EMBED_MODEL = "nomic-embed-text:latest"  # было mxbai-embed-large:latest
+_EMBED_DIMENSION = 768                     # было 1024
 ```
 
 После смены **обязательно**:
@@ -829,7 +839,7 @@ python tools/build_vectors.py --index audits_index --full-rebuild
 
 #### Эмбеддинг для разных моделей
 
-Каждый индекс эмбеддится **одной моделью** (из `project.json → gateway.vector.embedding`). Разные модели для разных индексов **не поддерживаются** через конфиг — только глобально.
+Каждый индекс эмбеддится **одной моделью** (из модульных констант `_EMBED_*` в `lib/services/cache_provider_impl.py`). Разные модели для разных индексов **не поддерживаются** — только глобально.
 
 Если нужна разная размерность для разных индексов — нужен рефакторинг `cache_provider_impl.py:PostgresDuckDbProvider` (per-index `embedding_base_url/model`).
 

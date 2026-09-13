@@ -29,6 +29,7 @@
 | `gateway.print_worker_activity` | `false` | Активность воркеров в терминал |
 | `gateway.print_db_activity` | `false` | Активность db-job'ов в терминал |
 | `gateway.vector.index.storage_table` | `oarb.audit_vectors` | Единая PG-таблица-хранилище сырых эмбеддингов. Регистрируется через `TableRegistry.register_infra("vector.storage", ...)` |
+| `gateway.vector.index.indexes.*` | `{}` | Конфиг vector-индексов (`VectorIndexConfig` per name; см. CHANGELOG → Resource Model Refactoring). PG-реестр `public.agent_vector_index_config` больше не читается кодом. |
 | `cli.show_context_window` | `true` | Метка занятости контекстного окна в CLI |
 | `streamlit.enabled` | не задано (`None`) — отключено по умолчанию | Гейт запуска Streamlit-UI на :8501 (явное `true` включает) |
 
@@ -43,10 +44,20 @@
 - `gateway.vector_index.*` (legacy) → `gateway.vector.index.*`
   — секция переименована. Обратной совместимости нет (fail-fast через
   runtime-проверку в `register_vector_storage`).
+- `gateway.vector.embedding` — удалена целиком. Параметры эмбеддера
+  (`base_url`, `model`, `dimension`, `http_timeout_sec`, `retries`)
+  захардкожены модульными константами `_EMBED_*` в
+  `lib/services/cache_provider_impl.py`. Bearer-токен — из переменной
+  окружения `EMBED_TOKEN` (env, не `project.json`).
+- `skills.<name>.embedding` — удалена; embedding больше не параметризован по skill'у.
 - `skills.<name>.vector_indexes[].source` — поле `source` больше не нужно.
-  PG-таблица исходных строк для каждого индекса — в
-  `public.agent_vector_index_config` (runtime-БД). Имена индексов (`name`)
-  остаются в `vector_indexes[]`.
+  Source-таблица (`table`/`pk`/`content_columns`/`embedding_columns`/`track_column`/
+  `chunk_size`/`chunk_overlap`/`metric`/`enabled`) для каждого индекса — в
+  `gateway.vector.index.indexes.<name>` (`VectorIndexConfig`, `extra="forbid"`).
+  PG-реестр `public.agent_vector_index_config` остаётся как legacy-артефакт
+  (SQL-артефакты в `sql/vectors/create_vector_index_config.sql`,
+  `sql/migrations/V002__vector_chunk_params.sql`,
+  `sql/audit_analyzer/seed_default_indexes.sql`); код их не читает.
 
 **Изменённые пути**:
 
@@ -66,11 +77,22 @@
   (см. [docs/skill-tool-inventory.md](skill-tool-inventory.md)).
 - `ApplicationContext.create()` теперь автоматически подключает
   `SessionFileRedirectHook` и фреймворковые хуки из `lib/hooks/`.
+- `lib/services/table_registry.py::TableRegistry.set_embedding_config` /
+  `embedding_config()` удалены; `lib/core/skill_registration.py::register_embedding_config`
+  удалён. Регистрация embedding-конфига больше не нужна.
 
-**Миграции** — `V002__vector_chunk_params.sql` добавляет в
-`public.agent_vector_index_config` колонки `chunk_size`/`chunk_overlap`/`metric`
-(дефолты `500`/`80`/`cosine`). DDL применяется через
-`python tools/migrate.py --apply`.
+**Миграции**:
+
+- `V002__vector_chunk_params.sql` добавляет в
+  `public.agent_vector_index_config` колонки `chunk_size`/`chunk_overlap`/`metric`
+  (дефолты `500`/`80`/`cosine`). DDL применяется через
+  `python tools/migrate.py --apply`.
+- **⚠️ После этого релиза код `public.agent_vector_index_config` НЕ читает.**
+  Таблица остаётся в репозитории как legacy-артефакт (для старых миграций
+  и исторических ссылок), но новый конфиг — в `project.json`.
+  При первоначальной настройке проекта перенесите seed-данные из
+  `sql/audit_analyzer/seed_default_indexes.sql` в секцию
+  `gateway.vector.index.indexes` (формат см. `VectorIndexConfig`).
 
 ## v2.3.0 → v2.3.1
 

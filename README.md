@@ -43,7 +43,8 @@ python tools/migrate.py --apply                                   # миграц
 ```
 
 > **Навык `audit_analyzer`** предоставляет CLI `scripts/cli.py --mode <predefined | generated_sql | vector>`
-> (для бенчмарков/CI) и workspace tools `duckdb_query` / `vector_search` (для runtime-агента).
+> (вызывается агентом через `exec`; также для бенчмарков/CI). Generic tools
+> `duckdb_query` / `vector_search` удалены в фазе 8 — агент работает только через CLI.
 > LLM-генерация SQL — режим `generated_sql` (`scripts/generated_sql_mode.py`, прямой вызов `lib.services.llm_client`).
 > Внешний контракт — `SKILL.md`.
 
@@ -101,7 +102,7 @@ DDL в `sql/<domain>/create_<schema>_<table>.sql` (один файл = одна 
 - **Канал:** `public.agent_conversation_messages`
 - **Журнал:** `public.agent_gateway_logs`, `public.agent_question_runs` (UUID + JSONB)
 - **Домен audit_analyzer:** `oarb.audits/violations/audit_reports/report_items` (REFERENCE)
-- **Векторы:** `oarb.audit_vectors`, `public.agent_vector_index_config/store` (FAISS BYTEA)
+- **Векторы:** `oarb.audit_vectors` (эмбеддинги), `public.agent_vector_index_store` (FAISS BYTEA + signature); `public.agent_vector_index_config` — legacy SQL-артефакт (кодом не читается; конфиг индексов — в `project.json::gateway.vector.index.indexes`)
 - **Predefined scripts:** `public.agent_predefined_scripts`
 - **Воркер-пул:** `public.agent_worker_claims` (UNIQUE PK, lease)
 - **Бенчмарки:** `public.agent_benchmark_runs/results`

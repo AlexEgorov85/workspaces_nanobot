@@ -63,10 +63,10 @@ Resource Model решает это так: skill — это **деклараци
 }
 ```
 
-Какие индексы строить и из каких source-таблиц — описывается в
-`public.agent_vector_index_config` (runtime-БД, имя настраивается через
-`gateway.vector.index.config_table`), это **инфраструктурная
-декларация**, не часть skill'а.
+Какие индексы строить и из каких source-таблиц — декларируется в
+`project.json::gateway.vector.index.indexes.<name>` (`VectorIndexConfig`),
+это **инфраструктурная декларация**, не часть skill'а. Легаси-реестр
+`public.agent_vector_index_config` (runtime-БД) кодом больше не читается.
 
 ## Resource: декларативная модель
 
@@ -103,8 +103,10 @@ table-sync (PG → DuckDB) и vector-индексация (FAISS / pgvector / Qd
 - `name` — полное имя таблицы в формате `schema.table` (qualified всегда).
 - `tracking_column` — по умолчанию `id` (строки не апдейтятся, монотонный PK).
 
-Параметры самого эмбеддинга (модель, размерность, URL Ollama) живут в
-секции `embedding.*`; параметры индекса — в `vector_indexes[]`.
+Параметры самого эмбеддинга (модель, размерность, URL Ollama,
+bearer-токен) захардкожены в `cache_provider_impl` (`_EMBED_*` константы,
+токен из окружения `EMBED_TOKEN`); параметры индекса — в
+`project.json::gateway.vector.index.indexes[]`.
 Это разделение намеренное: ресурс описывает **что** читаем, конфиг — **как**.
 
 ### VectorIndexEntry
@@ -144,14 +146,13 @@ Backend-specific параметры (для FAISS: `text_chunk_size`, `text_chun
   "enabled": true,             // OPTIONAL; false — skill пропускается при регистрации
   "tables": [ ... ],           // единый список ресурсов (str | TableEntry)
   "vector_indexes": [ ... ],   // OPTIONAL; список имён индексов (только name)
-  "embedding": { ... },        // OPTIONAL; параметры эмбеддинга
-  "cache": { ... },            // OPTIONAL; параметры in-memory кэша
   "cli": { ... },              // OPTIONAL; параметры CLI
   "llm": { ... }               // OPTIONAL; переопределение LLM
 }
 ```
 
-Все секции, кроме `tables[]`, опциональны.
+Все секции, кроме `tables[]`, опциональны. (Параметры эмбеддинга НЕ
+декларируются в `skills.<name>` — они захардкожены в `cache_provider_impl`;
 
 ### Секция tables
 
@@ -231,13 +232,7 @@ optional и backend-specific (read-only через `extra="allow"`):
       {"name": "audits_index"},
       {"name": "violations_index"},
       {"name": "audit_reports_index"}
-    ],
-    "embedding": {
-      "base_url": "http://localhost:11434/api/embed",
-      "model": "mxbai-embed-large:latest",
-      "dimension": 1024,
-      "http_timeout_sec": 60
-    }
+    ]
   }
 }
 ```
@@ -293,12 +288,7 @@ optional и backend-specific (read-only через `extra="allow"`):
     ],
     "vector_indexes": [
       {"name": "kb_index"}
-    ],
-    "embedding": {
-      "base_url": "http://localhost:11434/api/embed",
-      "model": "mxbai-embed-large:latest",
-      "dimension": 1024
-    }
+    ]
   }
 }
 ```
@@ -351,7 +341,8 @@ predefined_table = resources[0].name  # qualified 'schema.table'
    зона — storage и source-table).
 4. Дедупликация по имени: если имя встречается дважды, второй пропускается.
 5. Регистрирует результат через `table_registry.register(SkillRegistration(...))`.
-6. Если задан `embedding.*`, пишет его в embedding-конфиг реестра.
+6. (Embedding-конфиг в реестр больше НЕ пишется — параметры эмбеддинга
+   захардкожены в `cache_provider_impl`.)
 
 **`_register_infra_resources`** делегирует
 `lib/core/infra_registration.register_vector_storage()`, который:
@@ -395,9 +386,12 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 | `skill_for_table(table)` | `SkillRegistration`, владеющая таблицей (только skill-ресурсы). |
 | `tracking_column_for(table)` | Track-колонка для таблицы (skills + infra; `id` для vector). |
 | `names()` / `enabled_names()` | Имена зарегистрированных skill'ов (все/только enabled). |
-| `set_embedding_config(**kwargs)` / `embedding_config()` | Generic-конфиг эмбеддингов (не per-skill). |
 | `snapshot_path(workspace_path)` | Путь к общему DuckDB-снапшоту. |
 | `clear()` | Полный сброс реестра (тесты/пересборка). |
+
+> `set_embedding_config` / `embedding_config()` удалены в Фазе 6: параметры
+> эмбеддинга захардкожены в `cache_provider_impl` (`_EMBED_*`, токен из
+> окружения `EMBED_TOKEN`), читаются через `read_embedding_config()`.
 
 ## track column
 
@@ -431,8 +425,9 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 ## Где лежит снапшот
 
 Единый файл для всех skill'ов: `workspace/data_store/duckdb/cache.duckdb`
-(`TableRegistry.snapshot_path()`). Запросы — через tool `duckdb_query`
-(read-only SELECT).
+(`TableRegistry.snapshot_path()`). Доступ — через CLI skill'а
+(`scripts/cli.py --mode predefined` и `--list-scripts`);
+прямой tool `duckdb_query` удалён в фазе 8.
 
 ## Definition of Done для нового skill'а
 
@@ -445,7 +440,8 @@ predefined_table = resources[0].name  # qualified 'schema.table'
    элемент в `tables[]` помечен `label` через объектную форму.
 3. Если у таблицы нестандартная track-колонка — задана per-resource
    через `TableEntry.tracking_column`.
-4. Если используются эмбеддинги — `embedding.*` в корне skill'а.
+4. Если используются эмбеддинги — параметры не декларируются
+   (захардкожены в `cache_provider_impl`).
 5. Если skill отключён — `enabled: false` в корне секции.
 6. Runtime API skill'а — через `lib.core.skill_config` (параметризован
    по `skill_name`), не собственный `skill_config.py`.

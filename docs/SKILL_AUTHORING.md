@@ -167,9 +167,9 @@ LLM-генерация SELECT», а не «работа с аудитами».
 ```markdown
 | Задача | Режим | Инструмент |
 |---|---|---|
-| Аггрегация / фильтр по полям | Predefined / Generated SQL | `scripts/cli.py --mode predefined`, `duckdb_query` |
-| Свободный вопрос про данные (SELECT) | Generated SQL | `duckdb_query` tool |
-| Семантический поиск по смыслу | Vector | `vector_search` tool |
+| Аггрегация / фильтр по полям | Predefined / Generated SQL | `scripts/cli.py --mode predefined` / `--mode generated_sql` |
+| Свободный вопрос про данные (SELECT) | Generated SQL | `scripts/cli.py --mode generated_sql` |
+| Семантический поиск по смыслу | Vector | `scripts/cli.py --mode vector` |
 | Известный отчёт из реестра | Predefined | `scripts/cli.py --mode predefined` |
 ```
 
@@ -201,7 +201,7 @@ LLM-генерация SELECT», а не «работа с аудитами».
 ### 3.6 Anti-patterns в SKILL.md
 
 - ❌ Описывать конкретные Python-классы tools. Пишите в терминах capability
-  («use `vector_search` with `index_name='audits_index'`»), не в терминах
+  («use `scripts/cli.py --mode vector` with `--index-name 'audits_index'`»), не в терминах
   Python («call `VectorSearchTool.execute(...)`»). См. `skill-tool-architecture.md:80-89`.
 - ❌ Дублировать полную схему БД в SKILL.md. Используйте progressive
   disclosure — большие reference-файлы выносите в `references/`.
@@ -270,8 +270,10 @@ LLM-генерация SELECT», а не «работа с аудитами».
 `source`/`embedding` и прочие legacy-поля НЕ пройдут pydantic.
 
 **Что НЕ должно быть в `vector_indexes[]`**:
-- `source` — теперь в PG-реестре (`gateway.vector.index.config_table`);
-- `embedding` — теперь в `gateway.vector.embedding` (общий runtime).
+- `source` — теперь в `gateway.vector.index.indexes.<name>.table`
+  (общий runtime-конфиг; см. `VectorIndexConfig`).
+- `embedding` — параметры эмбеддера захардкожены в `cache_provider_impl`
+  (общий runtime; токен — из `EMBED_TOKEN` env).
 
 ### 4.4 Опциональные runtime-секции
 
@@ -295,10 +297,11 @@ LLM-генерация SELECT», а не «работа с аудитами».
 
 | Legacy ключ | Куда перенесён |
 |---|---|
-| `embedding.*` | → `gateway.vector.embedding` |
+| `embedding.*` | — (удалён; hardcoded в `cache_provider_impl`) |
 | `cache.*` (был мёртвым) | — (удалён) |
 | `sync.*` | → `gateway.sync.*` |
 | `vector_index.*` | → `gateway.vector.index.*` |
+| `vector_indexes[].source` | → `gateway.vector.index.indexes.<name>.table` |
 
 Обратной совместимости нет — runtime-проверка даст fail-fast.
 
@@ -361,26 +364,26 @@ def get_db_tables() -> list[str]:
 ```python
 def _ensure_registered() -> None:
     from lib.core.infra_registration import register_vector_storage
-    from lib.core.skill_registration import (
-        register_embedding_config,
-        register_skill_from_config,
-    )
+    from lib.core.skill_registration import register_skill_from_config
     from config import SETTINGS
 
     cfg = SETTINGS.get("skills", {}).get("<skill_name>", {})
     register_skill_from_config("<skill_name>", cfg)
     register_vector_storage()
-    register_embedding_config()
 ```
 
 `register_skill_from_config` (`lib/core/skill_registration.py:63-99`)
 идемпотентен — повторный вызов безопасен.
 
 **Skill без vector/tables** (как `legal_summarizer`): вызовы `register_skill_from_config`,
-`register_vector_storage`, `register_embedding_config` будут no-op (нечего регистрировать,
+`register_vector_storage` будут no-op (нечего регистрировать,
 `gateway.vector.index.storage_table` пуст → `register_vector_storage` пропускает).
 Тем не менее **рекомендуется всегда вызывать `_ensure_registered()`** для единообразия
 (контракт в §5.3 соблюдается безусловно; код одинаков во всех skill'ах).
+
+> `register_embedding_config` удалён: параметры эмбеддера захардкожены
+> в `cache_provider_impl`, токен берётся из переменной окружения `EMBED_TOKEN`.
+> Отдельная runtime-регистрация больше не нужна.
 
 ---
 
@@ -469,17 +472,18 @@ DuckDB-снапшот `workspace/data_store/duckdb/cache.duckdb` синхрон�
 | Поверхность | Кто использует | Когда |
 |---|---|---|
 | **`CacheProvider` напрямую** | Standalone CLI skill'ов (`audit_analyzer/scripts/cli.py`), утилиты (`tools/build_vectors.py`), тесты | Детерминированные сценарии: retry-цикл LLM, predefined-скрипты, map-reduce, ручной smoke |
-| **Generic tools** (`workspace/tools/duckdb_query_tool.py`, `vector_search_tool.py`) | Agent runtime (CLI/gateway/streamlit) при свободном NL-вопросе или ad-hoc семантическом поиске | Агент выбирает tool по `SKILL.md` description; tool — generic capability без домен-routing |
+| **Skill CLI** (`scripts/cli.py`) | Agent runtime (CLI/gateway/streamlit) при NL-вопросе | Агент вызывает CLI через `exec` по инструкциям `SKILL.md` |
 
 Обе поверхности **сводятся к одному runtime-синглтону** — данные в кэше и индексах
 общие. Это **не дублирование**, а намеренное разделение:
 - Skill'у нужен прямой доступ для retry-циклов, подготовки входных данных,
   валидации параметров — то, что generic tool не делает;
-- Tool даёт агенту единый «ровный» entrypoint без знания skill-рееестра.
+- CLI — единый «ровный» entrypoint для агента без generic tools.
 
-Связь между ними — **только через agent runtime**: skill в `SKILL.md` описывает
-capability в терминах tool'а («use `vector_search` with `index_name='audits_index'`»),
-агент вызывает tool. Сам skill tool **программно не вызывает**.
+Связь — **только через agent runtime/runtime CLI**: skill в `SKILL.md` описывает
+capability в терминах CLI («use `scripts/cli.py --mode vector` with
+`--index-name 'audits_index'`»), агент вызывает CLI. Сам skill generic tools
+**программно не вызывает** (tools `duckdb_query`/`vector_search` удалены в фазе 8).
 
 ### 7.2 Что РАЗРЕШЕНО в Skill
 
@@ -511,7 +515,7 @@ sys.path.insert(.../skills...)                        # ЗАПРЕЩЕНО
 
 ```python
 from workspace.tools import ...                       # ЗАПРЕЩЕНО
-from workspace.tools.duckdb_query_tool import ...      # ЗАПРЕЩЕНО
+from workspace.tools.history_search_tool import ...    # ЗАПРЕЩЕНО
 ```
 
 ### 7.4 Что Tool не должен знать
@@ -524,20 +528,22 @@ from workspace.tools.duckdb_query_tool import ...      # ЗАПРЕЩЕНО
 
 Skill пишет инструкции в терминах capability, не Python:
 
-- ✅ «use `vector_search` with `index_name='violations_index'`»
+- ✅ «use `scripts/cli.py --mode vector` with `--index-name 'violations_index'`»
 - ❌ «call `VectorSearchTool.execute(query=...)`»
 - ❌ «import VectorSearchTool»
 
-### 7.6 Generic Tool'ы, доступные Skill'ам
+### 7.6 Capability доступ Skill'ам
 
-| Tool | Контракт | Конфиг |
+| Capability | Контракт | Конфиг |
 |---|---|---|
-| `duckdb_query` | `{sql, params, max_rows}` → `{status, columns, rows, ...}` | `gateway.duckdb_query.*` |
-| `vector_search` | `{query, index_name, top_k, threshold}` → `{status, results, ...}` | `gateway.vector_search.*` |
-| `compact_context` | `{session_key, force}` | `gateway.compact.*` |
+| `scripts/cli.py --mode predefined` | `--script --params` → `{status, columns, rows, ...}` | `skills.audit_analyzer.*` |
+| `scripts/cli.py --mode vector` | `--query --index-name` → `{status, results, ...}` | `gateway.vector.index.*` (runtime-инфраструктура) |
+| `scripts/cli.py --mode generated_sql` | `--query --context` → `{status, columns, rows, ...}` | LLM-конфиг (эмбеддер захардкожен в `cache_provider_impl`) |
+| `compact_context` tool | `{session_key, force}` | `gateway.compact.*` |
 
-Полные контракты — `docs/skill-tool-architecture.md:93-180`. Для
-добавления нового generic tool — скопируйте `workspace/tools/example.py`.
+Generic tools `duckdb_query` / `vector_search` **удалены в фазе 8** — их
+контракты см. исторически в `docs/skill-tool-architecture.md:92-134`.
+Для добавления нового generic tool — скопируйте `workspace/tools/example.py`.
 
 ---
 
@@ -809,8 +815,11 @@ touch workspace/skills/<name>/scripts/__init__.py
 }
 ```
 
-Если нужны embeddings — настройте **общий** `gateway.vector.embedding`.
-Если vector-индексы — `gateway.vector.index.storage_table`.
+Если нужны embeddings — параметры подключения к эмбеддеру захардкожены
+в `cache_provider_impl` (модульные константы `_EMBED_*`); bearer-токен —
+через переменную окружения `EMBED_TOKEN`. Секция `gateway.vector.embedding`
+больше не нужна. Конфиг vector-индексов — в `gateway.vector.index.*`
+(storage_table, indexes).
 
 ### Шаг 5. Реализуйте `scripts/`
 
@@ -877,8 +886,8 @@ python cli_agent.py          # smoke
 - `lib/hooks/tool_audit_hook.py` — автоматическая audit trail для всех tool'ов.
 - `workspace/hooks/session_file_redirect_hook.py` — перенаправление файлов в `data_store/cache/sessions/<key>/`.
 - `workspace/hooks/recent_files_hook.py` — автоприкрепление созданных файлов.
-- `workspace/tools/{duckdb_query_tool,vector_search_tool,compact_context}.py` — generic tools.
-- `workspace/tools/example.py` — шаблон нового tool'а.
+- `workspace/tools/{history_search_tool,legal_summarizer_query,compact_context}.py` — generic tools.
+- `workspace/tools/example.py` — шаблон нового tool'а. (Tools `duckdb_query_tool` / `vector_search_tool` удалены в фазе 8.)
 
 При изменении `TARGET_ARCHITECTURE.md` или `skill-tool-architecture.md`
 синхронизировать этот документ.
