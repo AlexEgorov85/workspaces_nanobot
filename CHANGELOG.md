@@ -8,46 +8,31 @@
 
 ## [Unreleased]
 
-> **MINOR-релиз v2.5.0:** крупный рефакторинг `legal_summarizer` (97-этапный
-> план: layered package, document-level cache, brief как ровно один Chunk,
-> structural packing, вопрос-режим через document cache, e2e 3-mode CLI),
-> переработка конфигурационного контракта skills ↔ runtime infrastructure
-> (`TableRegistry.register_infra`, `gateway.vector.*`, `EmbeddingSettings`,
-> hard validation legacy-ключей), generic infrastructure tools
-> (`duckdb_query`, `vector_search`, `nl_sql_generate`, `column_descriptions`,
-> `history_search`, `compact_context`), SQL AST-security-guard, миграции
-> схемы, сервисы времени жизни (`ContextCompactionService`,
-> `RuntimeHealth`/`RuntimeReadiness`, `consolidator_locale`),
-> перенос утилит `lib/utils/*` (media/jsonb/outbound) → `workspace/utils/*`,
-> vector-storage как инфраструктурный ресурс, ремедиация compatibility-shim
-> долга, history_search FTS-baseline. Ниже — детальный changelog по подсистемам.
+## [2.5.1] — 2026-09-13
+
+> **PATCH-релиз v2.5.1:** регрессии и доработки после v2.5.0 — закрытие
+> lifecycle-deadlock `postgres_channel` при `stream_end` с пустым delta,
+> удаление agent-tools `duckdb_query` и `vector_search` (Phase 8
+> Resource Model Refactoring), перенос конфига vector-индексов из
+> PG-реестра в `project.json::gateway.vector.index.indexes.*` +
+> хардкод эмбеддинга, DB-first `scripts/predefined` в `audit_analyzer`
+> (+ удаление `tools/generate_predefined_scripts_sql.py`),
+> `tools/build_vectors.py --validate-only` + ETA прогресса, стабилизация
+> порядка таблиц в `lib/utils/duckdb_query.build_schema`, перенос тестов
+> `audit_analyzer` в `workspace/skills/audit_analyzer/tests/`,
+> синхронизация архитектурной документации и README «Что нового».
 >
-> **Breaking changes (по сравнению с v2.4.0):**
+> Изменения конфигурации: `config.json` — провайдер LLM
+> `qwen3.6-35b-a3b` через `https://api.neuraldeep.ru/v1/`,
+> `contextWindowTokens: 40000` (см. `e06b2b0`).
 >
-> * `gateway.vector_index.*` → `gateway.vector.index.*` (legacy-секция теперь
->   падает с `ConfigurationError`).
-> * `skills.<name>.embedding` / `skills.<name>.cache` — удалены из
->   `SkillSettings` (embedding — общий runtime; DuckDB snapshot всегда
->   из `table_registry.snapshot_path()`).
-> * `skills.<name>.vector_indexes[].source` — поле удалено (source живёт
->   в `public.agent_vector_index_config`).
-> * `skill_config.get_in_memory_config(name, root)` /
->   `is_in_memory_enabled(name)` / `get_embedding_config(name)` /
->   `get_embedding_model(name)` — удалены или обезличены (параметр
->   `skill_name` не нужен).
-> * Skill `audit_analyzer` полностью переведён на tool-only (каталог
->   `scripts/` удалён, все запросы — через generic tools).
-> * `lib/services/cache_store.py` → `duckdb_cache_store.py`,
->   `lib/services/sync_service.py` → `pg_duckdb_sync_service.py`,
->   `lib/services/audit_memory_store.py` / `audit_sync_service.py` —
->   переименованы и переписаны как generic infra.
-> * `lib/utils/media.py`, `lib/utils/outbound_filter.py`,
->   `lib/utils/media_jsonb.py` — перенесены в `workspace/utils/`
->   (`media.py`, `outbound_meta.py` остался в `lib/utils/`, `jsonb.py` в
->   `workspace/utils/`).
->
-> **Migration notes** — см. ниже секцию «Migration notes» и
-> `docs/MIGRATION.md` (обновлён под v2.4.0 → v2.5.0).
+> Детальный changelog подсистем (legal_summarizer refactor 97 этапов,
+> runtime hardening, `nl_sql_generate`/`column_descriptions`,
+> postgres_channel lifecycle, vector-resource model, generic tools
+> cleanup, audit_analyzer DB-first, build_vectors UX, документация) —
+> ниже по тексту блока в исходных секциях.
+> Подробный эпиграф MINOR-релиза v2.5.0 (breaking changes, migration
+> notes) — см. блок `## [2.5.0] — 2026-09-11` (в release/v2.5).
 
 ### Added (legal_summarizer: document-level cache + вопрос-режим через кэш)
 
