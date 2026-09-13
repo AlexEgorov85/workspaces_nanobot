@@ -105,148 +105,31 @@ This file documents non-obvious constraints and usage patterns.
   есть `legal_summarizer_query`. Это и быстрее, и кириллица не сломается.
 - Не передавай в `field` значения вне списка — будет отказ с понятной ошибкой.
 
-## duckdb_query — read-only SQL по whitelist таблиц
+## audit_analyzer — доступ через CLI
 
-Generic tool (`workspace/tools/duckdb_query_tool.py`). Выполняет
-SELECT/WITH/EXPLAIN в общем DuckDB-кеше и возвращает структурированный
-результат.
+Для работы с `audit_analyzer` Agent вызывает CLI навыка через `exec`
+(прямые tools `duckdb_query` / `vector_search` удалены):
 
-**Архитектура:**
+```bash
+# Predefined script (единственный Agent-контракт)
+python workspace/skills/audit_analyzer/scripts/cli.py --mode predefined \
+    --script violations_by_type --params '{"date_from": "2024-01-01"}'
 
-1. `validate_sql` — SELECT-only gate (см. `lib/utils/sql_safety.py`).
-2. `DuckDbCacheStore.execute_readonly(sql, params, max_rows)` —
-   выполнение в общем кэше через `CacheProvider.query_sql`.
-3. JSON-ответ с `{status, columns, rows, row_count, returned_rows, truncated}`.
+# Каталог predefined-скриптов (имя, описание, параметры)
+python workspace/skills/audit_analyzer/scripts/cli.py --list-scripts
 
-**Параметры:**
-
-- `sql` (обяз.) — SQL-запрос. SELECT/WITH/EXPLAIN. Параметры через `?`
-  (позиционно) или `:name` (именованно).
-- `params` (опц.) — словарь `{name: value}` для параметров запроса.
-- `max_rows` (опц., дефолт `gateway.duckdb_query.max_rows=1000`) —
-  локальный лимит строк.
-
-**Когда звать:**
-
-- Точный SELECT по таблице из `references/schema.md` навыка.
-- Чтение SQL из `public.agent_predefined_scripts` для выполнения
-  predefined (см. `audit_analyzer/SKILL.md`, секция «Predefined SQL»).
-- Агрегации, GROUP BY, JOIN, фильтры по колонкам.
-
-**Примеры:**
-
-- «Сводка по статусам аудитов» → Agent читает `sql_template` из
-  `public.agent_predefined_scripts WHERE name='audit_status_summary'`,
-  затем `duckdb_query(sql=<template>)`.
-- «Сколько проверок в 2024?» →
-  `duckdb_query(sql="SELECT COUNT(*) FROM oarb.audits WHERE actual_date >= ? AND actual_date < ?", params={...})`.
-
-**Не делать:**
-
-- Не пытайся выполнять DDL/DML — tool зарубит через `validate_sql`.
-- Не формируй `LIKE '%...%'` для семантического поиска — для этого
-  есть `vector_search`.
-
-**Конфиг (`project.json::gateway.duckdb_query`):**
-
-```json
-{
-  "gateway": {
-    "duckdb_query": {
-      "enable": true,
-      "max_rows": 1000,
-      "max_result_chars": 50000,
-      "query_timeout_sec": 30
-    }
-  }
-}
+# Каталог FAISS-индексов
+python workspace/skills/audit_analyzer/scripts/cli.py --list-indexes
 ```
 
-## vector_search — семантический поиск по FAISS-индексу
-
-Кастомный tool (`workspace/tools/vector_search_tool.py`). Generic-поиск по
-заранее зарегистрированному FAISS-индексу. Tool **не знает про домен** —
-`index_name` выбирается Agent'ом на основании каталога в `SKILL.md`
-(раздел «Vector indexes»).
-
-**Архитектура:**
-
-1. `CacheProvider.search_vector(query, index_name, top_k, threshold)` —
-   абстрактный интерфейс к FAISS; конкретная реализация регистрируется
-   runtime'ом.
-2. Нормализация результата в JSON-контракт `{status, query, index_name,
-   results: [{id, score, text, metadata}], count, truncated}`.
-3. STALE/INVALID detection — поставщик (provider) помечает meta через
-   `_signature_status` при загрузке индекса; tool пробрасывает
-   `index_warning` если индекс требует пересборки.
-
-**Параметры:**
-
-- `query` (обяз.) — поисковый запрос на естественном языке.
-- `index_name` (обяз.) — имя FAISS-индекса. Используй только имена из каталога
-  в `SKILL.md` (`audits_index`, `violations_index`, `audit_reports_index`).
-- `top_k` (опц., дефолт `gateway.vector_search.default_top_k=5`,
-  потолок `max_top_k=50`) — сколько ближайших результатов вернуть.
-- `threshold` (опц., дефолт `gateway.vector_search.default_threshold=0.0`,
-  диапазон `[0.0, 1.0]`) — минимальная cosine-схожесть.
-
-**Когда звать:**
-
-- Семантический поиск: «найди похожие нарушения», «проверки по X»,
-  «отчёты с выводами о …».
-- Когда важен **смысл**, а не точные числа/фильтры.
-
-**Когда НЕ звать:**
-
-- COUNT / GROUP BY / ORDER BY → `duckdb_query` (свободный SQL).
-- Точный `id` → `duckdb_query WHERE id = ?`.
-- Фильтры по конкретным колонкам (`severity`, `status`, `date`) →
-  `duckdb_query`.
-- Сложные JOIN'ы → `duckdb_query`.
-
-**Конфиг (`project.json::gateway.vector_search.*`):**
-
-```json
-{
-  "gateway": {
-    "vector_search": {
-      "enable": true,
-      "default_top_k": 5,
-      "max_top_k": 50,
-      "default_threshold": 0.0,
-      "max_query_chars": 4000,
-      "max_result_chars": 16000,
-      "timeout_sec": 30
-    }
-  }
-}
-```
-
-**Пример:**
-
-- «Найди нарушения про пожарную безопасность» →
-  `vector_search(query="пожарная безопасность", index_name="violations_index", top_k=5, threshold=0.5)`
-  → `{status, query, index_name, results: [...], count, truncated}`.
-
-**Замечания:**
-
-- Tool не выбирает `index_name` сам — Agent делает это по каталогу в `SKILL.md`.
-- Если `index_name` не зарегистрирован — `error_type: missing_index` или
-  `missing_provider`.
-- `IndexIntegrityError` (STALE/INVALID) → `error_type: stale_index` /
-  `invalid_index` с рекомендацией `rebuild via tools/build_vectors.py`.
-
-## Capability layer для audit_analyzer
-
-В режиме на `audit_analyzer` Agent выбирает один из двух generic tools:
-
-| Tool | Назначение | Когда |
+| Способ | Назначение | Когда |
 |---|---|---|
-| `duckdb_query` | Точный SELECT (включая чтение `sql_template` из `public.agent_predefined_scripts` inline) | Числовые/структурные запросы; predefined-скрипты; свободный SQL |
-| `vector_search` | Семантический поиск по FAISS | Запрос про **смысл**, индекс есть в `references/vector_indexes.md` |
+| `--mode predefined` | Точный SELECT по 6 predefined-скриптам | Числовые/структурные запросы; predefined-скрипты |
+| `--list-scripts` | Актуальный каталог скриптов из БД | Выбор скрипта |
+| `--list-indexes` | Актуальный каталог FAISS-индексов | Discovery индексов |
 
-Агент сам читает `SKILL.md` и делает выбор. Ни один tool не делает
-auto-routing или классификацию запроса. Генерация SQL — через CLI
-`scripts/cli.py --mode generated_sql` (skill-side `scripts/generated_sql_mode.py`,
-прямой вызов `lib.services.llm_client.call_llm`), используется по желанию Agent'а.
+Агент сам читает `SKILL.md` и делает выбор. Ни один режим не делает
+auto-routing или классификацию запроса. Режимы `--mode vector` и
+`--mode generated_sql` доступны в CLI, но не являются частью контракта
+агента.
 
