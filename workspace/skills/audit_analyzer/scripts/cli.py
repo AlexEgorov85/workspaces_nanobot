@@ -289,49 +289,95 @@ def _list_scripts(db: Any) -> dict:
 
 
 def _list_indexes() -> dict:
-    """Каталог FAISS-индексов из ``gateway.vector.index.indexes``.
+    """Каталог runtime-индексов из PG ``public.agent_vector_index_store``.
 
-    Единственный источник конфигурации индексов — секция
-    ``project.json::gateway.vector.index.indexes`` (см.
-    ``VectorIndexSettings.indexes`` и ``VectorIndexConfig``); PG-реестр
-    ``public.agent_vector_index_config`` больше не читается кодом
-    (SQL-артефакты остались как legacy).
+    Источник — **только** PG-таблица хранилища FAISS-blob'ов. Это
+    фактические артефакты, которые runtime реально увидит при поиске.
+    Конфиг декларации (``project.json::gateway.vector.index.indexes``)
+    здесь **не** используется — он покажет то, что обещано построить,
+    а не то, что реально собрано. Сравнить их двух — задача
+    ``tools/check_indexes.py`` (MISSING/ORPHAN/STALE/INVALID).
 
-    Возвращает полные метаданные каждого индекса: source_table,
-    embed-колонки, chunking, signature-status. Используется CLI-флагом
-    ``--list-indexes`` для discovery без чтения ``SKILL.md``.
+    Поля элемента списка:
+      ``index_name``        — имя индекса (= ``source`` в PG);
+      ``vectors``           — ``vector_count`` (количество векторов);
+      ``dimension``         — размерность FAISS;
+      ``metric``            — из ``metadata.metric``;
+      ``signature_status``  — ``CURRENT`` / ``STALE`` / ``INVALID`` /
+                              ``UNKNOWN`` (signature отсутствует;
+                              см. ``verify_index_signature``);
+      ``signature_short``   — первые 16 символов signature (для
+                              человеко-читаемого diff с конфигом);
+      ``updated_at``       — TIMESTAMPTZ последней пересборки.
     """
     try:
-        from lib.services.cache_provider_impl import read_vector_index_config
-
-        cfg = read_vector_index_config({})
+        from lib.services.cache_provider_impl import (
+            list_runtime_vector_indexes,
+            read_vector_index_config,
+            verify_index_signature,
+        )
     except Exception as exc:
         return {
             "status": "error",
             "data": {
                 "message": (
-                    f"Не удалось прочитать конфиг индексов: {exc}. "
-                    "Проверьте project.json::gateway.vector.index.indexes."
+                    f"Не удалось импортировать vector-discovery хелперы: {exc}."
                 ),
-                "error_type": "registry_unavailable",
+                "error_type": "import_failed",
             },
         }
-    items = []
-    for name in sorted(cfg.keys()):
-        meta = cfg[name]
-        items.append(
-            {
-                "index_name": name,
-                "source_table": meta.get("source_table"),
-                "content_cols": meta.get("content_cols"),
-                "embedding_cols": meta.get("embedding_cols"),
-                "chunk_size": meta.get("chunk_size"),
-                "chunk_overlap": meta.get("chunk_overlap"),
-                "metric": meta.get("metric"),
-                "enabled": meta.get("enabled"),
-            }
-        )
-    return {"status": "success", "data": {"count": len(items), "indexes": items}}
+
+    try:
+        runtime = list_runtime_vector_indexes()
+    except Exception as exc:
+        return {
+            "status": "error",
+            "data": {
+                "message": (
+                    f"PG store ``public.agent_vector_index_store`` недоступен: {exc}. "
+                    f"Это инфраструктурная ошибка (exit 2 в tools/check_indexes.py)."
+                ),
+                "error_type": "store_unavailable",
+            },
+        }
+
+    # Декларация нужна **только** для compute signature — сравниваем
+    # сохранённый signature в blob'е с текущим cfg, чтобы показать
+    # ``signature_status`` (CURRENT/STALE/INVALID).
+    declared = read_vector_index_config({}) or {}
+
+    items: list[dict] = []
+    for row in sorted(runtime, key=lambda r: r.get("source") or ""):
+        name = row.get("source") or ""
+        current_cfg = declared.get(name)
+        if current_cfg is not None:
+            status = verify_index_signature(row.get("metadata") or {}, current_cfg)
+        else:
+            # Orphan: blob есть в PG, но в JSON не объявлен. Здесь
+            # вычислить signature-status без cfg нельзя — ставим UNKNOWN.
+            status = "ORPHAN" if row.get("signature") else "UNKNOWN"
+        items.append({
+            "index_name": name,
+            "vectors": row.get("vector_count"),
+            "dimension": row.get("dimension"),
+            "metric": row.get("metric"),
+            "signature_status": status,
+            "signature_short": (row.get("signature") or "")[:16],
+            "updated_at": str(row.get("updated_at")) if row.get("updated_at") else None,
+        })
+
+    return {
+        "status": "success",
+        "data": {
+            "count": len(items),
+            "indexes": items,
+            "note": (
+                "Source: PG ``public.agent_vector_index_store`` (runtime artifacts). "
+                "Compare against ``project.json::gateway.vector.index.indexes`` "
+                "via ``tools/check_indexes.py`` to see declared-but-missing indexes."
+            ),
+        },
+    }
 
 
 def _run_predefined(script: str, db: Any, params: dict[str, Any] | None) -> dict:

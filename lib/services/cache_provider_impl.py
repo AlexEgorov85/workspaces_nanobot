@@ -138,6 +138,77 @@ def verify_index_signature(
         return "INVALID"
     current_sig = compute_index_signature(current_cfg)
     return "CURRENT" if stored_sig == current_sig else "STALE"
+
+
+def list_runtime_vector_indexes(
+    store_table: str | None = None,
+    *,
+    fetch_fn=None,
+) -> list[dict[str, Any]]:
+    """Прочитать runtime-артефакты из PG-таблицы FAISS-store.
+
+    Единственный источник **fact** состояния векторных индексов:
+    ``public.agent_vector_index_store`` (если задан -- PG-таблица).
+
+    Возвращает список dict'ов с полями:
+      ``source``         — имя индекса (= ``gateway.vector.index.indexes.<name>``)
+      ``dimension``      — размерность FAISS-векторов
+      ``vector_count``   — количество векторов в индексе
+      ``updated_at``     — TIMESTAMPTZ последней пересборки
+      ``metric``         — метрика из ``metadata`` (если записана)
+      ``signature``      — SHA256 из ``metadata`` (если записана)
+      ``metadata``       — полный dict из JSONB
+
+    Не вычисляет signature_status (это делает вызывающий через
+    :func:`verify_index_signature`). Не использует ``_SETTINGS`` —
+    принимает ``store_table`` явно, чтобы быть тестируемым без
+    ApplicationContext.
+
+    Параметр ``fetch_fn`` — для тестов; по умолчанию
+    ``utils.db.fetch``.
+
+    Возвращает ``[]`` при недоступности PG (логирует через ``logger``,
+    но не raise'ит — для CLI-friendly UX).
+    """
+    if store_table is None:
+        store_table = read_vector_store_table()
+    if fetch_fn is None:
+        from utils.db import fetch as _db_fetch
+        fetch_fn = _db_fetch
+
+    try:
+        rows = fetch_fn(
+            f"SELECT source, dimension, vector_count, updated_at, metadata "
+            f"FROM {store_table} ORDER BY source"
+        )
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "list_runtime_vector_indexes(%s) failed: %s", store_table, exc
+        )
+        return []
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        meta = row.get("metadata") or {}
+        if isinstance(meta, str):
+            try:
+                import json
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        out.append({
+            "source": row.get("source"),
+            "dimension": row.get("dimension"),
+            "vector_count": row.get("vector_count"),
+            "updated_at": row.get("updated_at"),
+            "metric": meta.get("metric") if isinstance(meta, dict) else None,
+            "signature": meta.get("signature") if isinstance(meta, dict) else None,
+            "metadata": meta if isinstance(meta, dict) else {},
+        })
+    return out
+
+
 _WORKSPACE = _ROOT / "workspace"
 for _p in (str(_ROOT), str(_WORKSPACE)):
     if _p not in sys.path:

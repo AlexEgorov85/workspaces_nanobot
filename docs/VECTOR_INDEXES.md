@@ -568,6 +568,34 @@ python tools/build_vectors.py --full-rebuild  # пересоберёт оста�
 
 **Поведение при поиске:** если несколько чанков одного документа попали в top-K, возвращается только один с наивысшим score, остальные доступны через `matched_chunks`.
 
+### Контроль declared vs runtime (tools/check_indexes.py)
+
+В проекте есть **два** источника правды по индексам — это намеренно:
+
+| Источник | Что отвечает |
+|---|---|
+| `project.json::gateway.vector.index.indexes.*` | **Желаемое состояние**: какие индексы должны быть построены и как (chunk-size, embedding-колонки, metric) |
+| `public.agent_vector_index_store` (PG) | **Фактическое состояние**: какие FAISS-blob'ы реально собраны и доступны runtime'у |
+
+**`--list-indexes`** в `audit_analyzer/scripts/cli.py` показывает только runtime
+(PG). Чтобы поймать расхождение (declared-but-MISSING / ORPHAN /
+STALE / INVALID-signature), есть `tools/check_indexes.py`:
+
+```bash
+python tools/check_indexes.py              # текстовый diff
+python tools/check_indexes.py --json      # structured (для CI)
+```
+
+| Exit | Значение |
+|---|---|
+| `0` | OK (signature CURRENT) |
+| `1` | divergence (MISSING / ORPHAN / STALE / INVALID) |
+| `2` | инфраструктурная ошибка (PG недоступна / project.json невалиден) |
+
+Использование: в CI / pre-deploy / после правок `gateway.vector.index.*`,
+после `tools/build_vectors.py --rebuild` и т.п. Ловит silent breakage
+«объявлен новый индекс в JSON, но FAISS-blob не пересобран».
+
 ### Мониторинг
 
 **Статусы через CLI:**

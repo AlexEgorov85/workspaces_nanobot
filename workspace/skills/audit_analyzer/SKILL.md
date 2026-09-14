@@ -277,12 +277,45 @@ skill'а.
 # Список predefined-скриптов (имя, описание, параметры)
 python workspace/skills/audit_analyzer/scripts/cli.py --list-scripts
 
-# Список FAISS-индексов (имя, источник, embed-колонки, chunking)
+# Список runtime-индексов (реальные FAISS-артефакты из PG store;
+# не декларация из project.json — её показывает tools/check_indexes.py).
 python workspace/skills/audit_analyzer/scripts/cli.py --list-indexes
 ```
 
 Оба возвращают JSON в stdout и не требуют `--mode`. Ошибки доступа к БД
 возвращаются как `{"status": "error", "data": {"error_type": "registry_unavailable", ...}}`.
+
+### Разделение ответственности discovery
+
+В проекте есть **два** «источника правды» по vector-индексам — это нормально:
+
+| Источник | Что отвечает | Как обнаружить |
+|---|---|---|
+| `project.json::gateway.vector.index.indexes.*` | **желаемое состояние** — какие индексы должны быть построены и как | `tools/check_indexes.py --json` (секция `declared`) |
+| `public.agent_vector_index_store` (PG) | **фактическое состояние** — какие FAISS-blob'ы собраны и доступны | `--list-indexes` И `tools/check_indexes.py` (секция `runtime`) |
+
+**Проверка согласованности:**
+
+```bash
+python tools/check_indexes.py              # текстовый diff, exit 0/1/2
+python tools/check_indexes.py --json      # structured diff, для CI
+```
+
+| Exit | Значение |
+|---|---|
+| `0` | декларация и runtime согласованы, signature CURRENT |
+| `1` | divergence: MISSING / ORPHAN / STALE / INVALID |
+| `2` | PG недоступна или project.json невалиден (инфраструктурная ошибка) |
+
+Это инструмент для CI / pre-deploy / ручной проверки. Использование в
+процессе разработки: после `git pull` секции `gateway.vector.index.*`
+или правки `tools/build_vectors.py` — стоит прогнать, чтобы поймать
+`MISSING` (объявлен индекс, но не собран).
+
+**`--list-indexes` показывает только runtime-состояние.** Поэтому
+если ты только что добавил новый индекс в project.json — `--list-indexes`
+его **не покажет**, потому что FAISS-blob ещё не собран. Запусти
+`tools/build_vectors.py <name>` и проверь снова.
 
 ## Тесты
 
