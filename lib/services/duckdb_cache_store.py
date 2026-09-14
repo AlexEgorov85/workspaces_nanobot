@@ -46,24 +46,26 @@ def _emit_sync_event(
     payload: dict[str, Any] | None = None,
     *,
     level: str = "INFO",
+    service: Any | None = None,
 ) -> None:
     """Тонкая обёртка для sync-событий в ``agent_gateway_logs``.
 
-    ``DuckDbCacheStore`` создаётся без DI ``DbLoggingService`` (publish идёт
-    из worker-потока ``PgDuckDbSyncService``, который уже владеет ссылкой
-    на сервис). Чтобы не дублировать развилку «sink → fallback», используем
-    единый helper из ``workspace.utils.event_log``: он уже умеет тихо
-    no-op'ить при выключенном ``logging.db.enabled`` или отсутствии DSN.
+    Делегирует единому dual-sink helper'у ``emit_sync_event`` из
+    ``workspace.utils.event_log``: через ``service`` (``DbLoggingService``),
+    если он передан и запущен, иначе — синхронный fallback
+    ``record_sync_event``. Так publish-события и события
+    ``PgDuckDbSyncService`` пишутся одним конвейером (единая точка правды).
     Все ошибки глотаются — publish не должен падать из-за логирования.
     """
     try:
-        from workspace.utils.event_log import record_sync_event
+        from workspace.utils.event_log import emit_sync_event
 
-        record_sync_event(
+        emit_sync_event(
             event_type=event_type,
             summary=summary,
             payload=payload,
             level=level,
+            service=service,
         )
     except Exception:
         pass
@@ -232,6 +234,7 @@ class DuckDbCacheStore:
         embedding_model: str = "mxbai-embed-large:latest",
         embedding_dimension: int = 1024,
         embedding_timeout_sec: float = 60.0,
+        db_logging_service: Any | None = None,
     ) -> None:
         self._cache_path = cache_path or ""      # пустая строка → in-memory DuckDB
         self._publish_path = publish_path or ""  # целевой файл снимка для CLI-читателей
@@ -243,6 +246,13 @@ class DuckDbCacheStore:
         self._embedding_model = embedding_model or "mxbai-embed-large:latest"
         self._embedding_dimension = int(embedding_dimension or 1024)
         self._embedding_timeout_sec = float(embedding_timeout_sec)
+        # Единый sink для sync-событий (publish OK/empty/failed): тот же
+        # ``DbLoggingService``, что использует ``PgDuckDbSyncService``, — чтобы
+        # все события одного sync-пути шли одним конвейером (см.
+        # ``_emit_sync_event`` / ``workspace.utils.event_log.emit_sync_event``).
+        # ``None`` (например, в юнит-тестах) → синхронный fallback
+        # ``record_sync_event``.
+        self._db_logging_service = db_logging_service
 
         self._lock = threading.RLock()
         self._conn: Any = None            # DuckDB (read-write)
@@ -856,6 +866,7 @@ class DuckDbCacheStore:
                             "total_rows": int(sum(counts.values())),
                         },
                         level="INFO",
+                        service=self._db_logging_service,
                     )
                 else:
                     logger.warning(
@@ -876,6 +887,7 @@ class DuckDbCacheStore:
                             "vector_db_table": self._vector_db_table or None,
                         },
                         level="WARN",
+                        service=self._db_logging_service,
                     )
                 return True
             except OSError as e:
@@ -899,6 +911,7 @@ class DuckDbCacheStore:
                         "error": str(e),
                     },
                     level="WARN",
+                    service=self._db_logging_service,
                 )
                 return False
             except Exception as e:
@@ -919,6 +932,7 @@ class DuckDbCacheStore:
                         "error": str(e),
                     },
                     level="WARN",
+                    service=self._db_logging_service,
                 )
                 return False
 

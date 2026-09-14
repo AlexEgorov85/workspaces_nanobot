@@ -124,12 +124,11 @@ def record_sync_event(
     Идемпотентно. Любые ошибки внутри глотаются — sync-код не должен
     падать из-за логирования.
 
-    Используется из sync-кода ``lib/services/pg_duckdb_sync_service.py`` и
-    ``lib/services/duckdb_cache_store.py``. Если в момент события
-    ``DbLoggingService`` уже доступен — вызывающий код должен идти через
-    ``DbLoggingService.log_event`` (async, через пул), а этот helper
-    использовать только когда ``db_logging_service is None`` (например,
-    из standalone-утилит или из очень ранних стадий старта).
+    **Низкоуровневый способ записи.** Новый код должен использовать
+    единый helper :func:`emit_sync_event` (dual-sink: через
+    ``DbLoggingService`` при наличии иначе синхронный fallback сюда).
+    Этот же helper используйте из standalone-утилит и очень ранних стадий
+    старта, когда ``DbLoggingService`` ещё не создан/не запущен.
     """
     record_event(
         event_type=event_type,
@@ -141,3 +140,58 @@ def record_sync_event(
         actor=_SYNC_ACTOR,
         level=level,
     )
+
+
+def emit_sync_event(
+    event_type: str,
+    summary: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    name: str | None = None,
+    level: str = "INFO",
+    service: Any | None = None,
+) -> None:
+    """Единая точка записи sync-событий в ``agent_gateway_logs``.
+
+    Единый dual-sink для всех писателей PG→DuckDB sync-пути
+    (``PgDuckDbSyncService`` и ``DuckDbCacheStore``):
+
+      1. Если передан работающий ``service`` (``DbLoggingService``) —
+         пишем через него (async, через пул, батчи). Это штатный конвейер
+         после ``ApplicationContext.start()``.
+      2. Иначе — синхронный fallback ``record_sync_event`` (прямой INSERT
+         через ``utils.db``) для ранних стадий старта / standalone-утилит,
+         где ``DbLoggingService`` ещё не создан/не запущен.
+
+    Обе ветки глотают ошибки — sync-код не должен падать из-за логирования.
+
+    Единая точка правды устраняет «дублирование»: раньше publish-события
+    писались в обход ``DbLoggingService`` (с прямой семантикой
+    ``NOW()`` при вызове), а остальные sync-события — через него (с
+    timestamp на момент flush). Теперь у всех sync-событий один конвейер
+    и одна семантика времени.
+    """
+    if service is not None:
+        try:
+            if getattr(service, "is_running", lambda: False)():
+                ok = service.log_sync_event(
+                    event_type=event_type,
+                    summary=summary,
+                    payload=payload,
+                    level=level,
+                    name=name,
+                )
+                if ok:
+                    return
+        except Exception:
+            pass
+    try:
+        record_sync_event(
+            event_type=event_type,
+            summary=summary,
+            payload=payload,
+            level=level,
+            name=name,
+        )
+    except Exception:
+        pass

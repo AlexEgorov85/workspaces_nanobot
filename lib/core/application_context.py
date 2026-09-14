@@ -707,6 +707,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         embedding_base_url=embedding_base_url,
         embedding_model=embedding_model,
         embedding_dimension=embedding_dimension,
+        db_logging_service=ctx.db_logging_service,
     )
     sync = PgDuckDbSyncService(
         dsn=dsn,

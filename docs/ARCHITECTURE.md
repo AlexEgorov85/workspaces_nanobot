@@ -225,6 +225,39 @@ TestDatabaseLoggingHookFactory.test_concurrent_sessions_do_not_mix_request_id`
 (переплетение двух сессий → `log_tool_result`/`after_run` несут свой
 `request_id`).
 
+### Единый конвейер sync-событий (`emit_sync_event`)
+
+PG→DuckDB sync-путь пишет события (`sync_service_started`,
+`sync_initial_load_done`, `sync_table_loaded`, `sync_publish_ok`/
+`sync_publish_empty`/`sync_publish_failed`, …) в `agent_gateway_logs`
+единым способом — через helper
+`workspace.utils.event_log.emit_sync_event(event_type, summary, payload,
+*, name, level, service)` (dual-sink):
+
+1. если передан запущенный `service` (`DbLoggingService`) — событие
+   идёт через пул-воркер (async, `timestamp` проставляется на flush);
+2. иначе — синхронный fallback `event_log.record_sync_event` (прямой
+   INSERT с `NOW()`): standalone-утилиты, ранние стадии старта, тесты,
+   где `DbLoggingService` ещё не создан/не запущен.
+
+Ошибки обеих веток глотаются — sync-код не падает из-за логирования.
+
+`service` инжектится в оба писателя sync-конвейера при сборке в
+`ApplicationContext._make_sync_services`:
+`PgDuckDbSyncService(db_logging_service=...)` и
+`DuckDbCacheStore(db_logging_service=...)` (publish-события из
+worker-потока). В юнит-тестах store создаётся без сервиса →
+автоматический fallback на `record_sync_event`.
+
+**Зачем единый конвейер (историческая проблема).** Раньше события
+писались двумя путями с разной семантикой времени: `DbLoggingService`
+буферизовал батчи и проставлял `timestamp` на flush
+(`flush_interval_sec=5`), а `DuckDbCacheStore._emit_sync_event` делал
+прямой INSERT с мгновенным `NOW()`. Из-за этого
+`sync_publish_ok` мог получить время РАНЬШЕ `sync_service_started` —
+ложная хронология в журнале. После перевода всех sync-событий на
+`emit_sync_event` хронология идёт одним потоком.
+
 ### Метрика занятости контекстного окна (`metadata.context_window`)
 
 **Задача.** Видеть в UI, сколько процентов контекстного окна модели
