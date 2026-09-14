@@ -4,6 +4,16 @@
 который gateway вызывает после initial sync, чтобы FAISS-индексы
 были готовы к первому запросу.
 
+Дополнительно: после прогона ``store.preload_indexes()`` сервис
+считает health-summary (declared vs loaded vs missing vs orphan vs
+stale) и:
+
+  * печатает multi-line резюме в **stderr** — оператор gateway видит
+    состояние vector-индексов сразу в терминале;
+  * пишет одно событие в ``public.agent_gateway_logs`` через
+    ``workspace.utils.event_log.emit_sync_event`` — для последующего
+    grep / SQL / CI-алёртов.
+
 Legacy-методы ``preload_audit_cache`` / ``background_audit_cache_refresh``
 / ``start_audit_cache_tasks`` / ``stop_tasks`` / ``get_audit_cache_config``
 / ``_audit_settings`` удалены в рефакторинге
@@ -17,9 +27,141 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_health_event(
+    summary: str,
+    payload: dict[str, Any],
+    *,
+    level: str,
+    service: Any | None,
+) -> None:
+    """Один-в-one dual-sink emit в ``agent_gateway_logs`` + logger.
+
+    Через ``emit_sync_event`` (workspace.utils.event_log) → если сервис
+    живёт, пишет в PG; иначе fallback в record_sync_event. Если и
+    fallback не сработает — тишина (publish/health-summary не должны
+    валить startup). Все ошибки глотаются.
+    """
+    try:
+        from workspace.utils.event_log import emit_sync_event
+
+        emit_sync_event(
+            event_type="vector_index_preload_health",
+            summary=summary,
+            payload=payload,
+            level=level,
+            service=service,
+        )
+    except Exception as exc:  # noqa: BLE001 — emit не должен валить preload
+        logger.debug("health event emit failed: %s", exc)
+
+
+def _format_lines(
+    declared_names: list[str],
+    loaded_items: list[dict[str, Any]],
+    missing: list[str],
+    orphan: list[str],
+    stale: list[str],
+) -> list[str]:
+    """Human-readable multi-line для терминала.
+
+    Цвет/жирность не навешиваем (нет ANSI на Windows-cmd). Только текст.
+    """
+    def fmt_loaded() -> str:
+        if not loaded_items:
+            return "—"
+        return ", ".join(
+            f"{it['index_name']}({it.get('vectors', '?')})"
+            for it in sorted(
+                loaded_items,
+                key=lambda x: x.get("index_name") or "",
+            )
+        )
+
+    return [
+        "[vector] preload health summary:",
+        f"  declared ({len(declared_names)}): "
+        f"{', '.join(declared_names) or '—'}",
+        f"  loaded   ({len(loaded_items)}): {fmt_loaded()}",
+        f"  missing  ({len(missing)}): {', '.join(missing) or '—'}",
+        f"  orphan   ({len(orphan)}): {', '.join(orphan) or '—'}",
+        f"  stale    ({len(stale)}): {', '.join(stale) or '—'}",
+    ]
+
+
+def compute_index_health(
+    declared: dict[str, Any],
+    loaded: list[dict[str, Any]] | None,
+    runtime_rows: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Pure-функция: посчитать declared/loaded/missing/orphan/stale.
+
+    Args:
+        declared: результат ``read_vector_index_config({})``.
+        loaded: то, что вернул ``store.preload_indexes()`` (или ``None`` /
+            пустой list при ошибке).
+        runtime_rows: то, что вернул ``list_runtime_vector_indexes()``
+            (PG store). Может быть ``None`` при недоступности PG.
+
+    Returns:
+        dict с ``declared_names``, ``loaded_items``, ``missing``,
+        ``orphan``, ``stale`` (все отсортированы), ``divergence`` —
+        bool, ``level`` — ``"INFO"`` или ``"WARN"``.
+    """
+    declared_names = sorted(declared.keys())
+
+    loaded_items: list[dict[str, Any]] = (
+        sorted(loaded, key=lambda x: x.get("index_name") or "")
+        if loaded
+        else []
+    )
+    loaded_names = {it.get("index_name") for it in loaded_items if it.get("index_name")}
+
+    missing = sorted(n for n in declared_names if n not in loaded_names)
+
+    if runtime_rows:
+        runtime_names = sorted(
+            r.get("source") for r in runtime_rows if r.get("source")
+        )
+        orphan = sorted(n for n in runtime_names if n not in declared)
+        runtime_by_name = {r.get("source"): r for r in runtime_rows if r.get("source")}
+        stale: list[str] = []
+        if runtime_by_name:
+            try:
+                from lib.services.cache_provider_impl import verify_index_signature
+
+                for name in loaded_names:
+                    if name not in declared:
+                        continue  # orphan, см. above
+                    row = runtime_by_name.get(name) or {}
+                    stored_meta = row.get("metadata") or {}
+                    try:
+                        status = verify_index_signature(stored_meta, declared[name])
+                        if status in ("STALE", "INVALID"):
+                            stale.append(f"{name}:{status}")
+                    except Exception:  # noqa: BLE001
+                        continue
+            except Exception:  # noqa: BLE001
+                stale = []
+    else:
+        orphan = []
+        stale = []
+
+    divergence = bool(missing) or bool(orphan) or bool(stale)
+    return {
+        "declared_names": declared_names,
+        "loaded_items": loaded_items,
+        "missing": missing,
+        "orphan": orphan,
+        "stale": stale,
+        "divergence": divergence,
+        "level": "WARN" if divergence else "INFO",
+    }
 
 
 class PreloadService:
@@ -31,8 +173,13 @@ class PreloadService:
     TARGET_ARCHITECTURE.md §34 — KEEP).
     """
 
-    def __init__(self, settings: Any = None) -> None:
+    def __init__(
+        self,
+        settings: Any = None,
+        db_logging_service: Any | None = None,
+    ) -> None:
         self._settings = settings
+        self._db_logging_service = db_logging_service
 
     async def preload_vector_indexes(self, store: Any) -> list | None:
         """Прогреть FAISS-индексы из DuckDB-кэша в память (gateway).
@@ -47,6 +194,13 @@ class PreloadService:
         DuckDB пуст и preload вернёт ``[]``). В gateway это решается
         через ``asyncio.Event`` + таймаут 30с.
 
+        После успешного (или неудачного) preload печатает health
+        summary в **stderr** и пишет событие в ``agent_gateway_logs``.
+        Эти шаги НЕ зависят от успеха preload — даже если ``loaded is None``
+        (PG недоступна, embed отсутствуют и т.п.), summary всё равно
+        считается по declared + runtime state и пишется. Это даёт
+        оператору полную картину divergence на старте.
+
         Returns:
             Список построенных индексов вида
             ``[{"index_name": ..., "vectors": N}, ...]`` или ``None``,
@@ -55,9 +209,90 @@ class PreloadService:
         if store is None or not store.is_ready():
             return None
         try:
-            return await asyncio.to_thread(store.preload_indexes)
+            loaded = await asyncio.to_thread(store.preload_indexes)
         except Exception as exc:
             logger.warning(
                 "PreloadService.preload_vector_indexes failed: %s", exc,
             )
-            return None
+            loaded = None
+
+        # Health summary — всё равно считаем, даже при ``loaded is None``
+        # (например, store недоступен → divergence всё равно видно через
+        # declared vs runtime).
+        try:
+            self._emit_health_summary(loaded)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("vector index health summary failed: %s", exc)
+
+        return loaded
+
+    def _emit_health_summary(self, loaded: list | None) -> None:
+        """Печать в stderr + запись в ``agent_gateway_logs``.
+
+        ``declared`` берём из JSON (read_vector_index_config).
+        ``runtime`` — из PG store (list_runtime_vector_indexes).
+
+        Любые ошибки PG/config глотаем — health summary **никогда**
+        не должна валить gateway startup. Лучше без summary, чем без
+        gateway.
+        """
+        # Сбор declared
+        try:
+            from lib.services.cache_provider_impl import (
+                read_vector_index_config,
+                list_runtime_vector_indexes,
+            )
+            declared = read_vector_index_config({}) or {}
+        except Exception:  # noqa: BLE001
+            declared = {}
+
+        # Сбор runtime
+        try:
+            runtime_rows = list_runtime_vector_indexes()
+        except Exception:  # noqa: BLE001
+            runtime_rows = None
+
+        health = compute_index_health(
+            declared=declared,
+            loaded=loaded,
+            runtime_rows=runtime_rows,
+        )
+
+        # --- terminal ---
+        lines = _format_lines(
+            declared_names=health["declared_names"],
+            loaded_items=health["loaded_items"],
+            missing=health["missing"],
+            orphan=health["orphan"],
+            stale=health["stale"],
+        )
+        try:
+            sys.stderr.write("\n".join(lines) + "\n")
+            sys.stderr.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+        # --- DB log ---
+        summary = (
+            f"declared={len(health['declared_names'])} "
+            f"loaded={len(health['loaded_items'])} "
+            f"missing={len(health['missing'])} "
+            f"orphan={len(health['orphan'])} "
+            f"stale={len(health['stale'])}"
+        )
+        payload: dict[str, Any] = {
+            "declared": health["declared_names"],
+            "loaded": [
+                {"index_name": it.get("index_name"), "vectors": it.get("vectors")}
+                for it in health["loaded_items"]
+            ],
+            "missing": health["missing"],
+            "orphan": health["orphan"],
+            "stale": health["stale"],
+        }
+        _emit_health_event(
+            summary=summary,
+            payload=payload,
+            level=health["level"],
+            service=self._db_logging_service,
+        )

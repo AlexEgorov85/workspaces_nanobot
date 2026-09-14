@@ -286,6 +286,33 @@ dim-«нет данных в кэше», неотличимо от реальн�
   печатает красный список ошибок построения вместо/вместе
   dim-строки «нет данных».
 
+**1.1. Health-summary declared vs runtime (vector index discovery)**.
+До этого — даже при полностью diverged состоянии (объявил
+новый индекс в `gateway.vector.index.indexes.*`, но не собрал blob
+через `tools/build_vectors.py`) gateway **молча** показывал зелёный
+«vector index … loaded» через fallback-цепочку
+(`store → vdb → cache → files`), без какого-либо указания, что на
+самом деле расхождение есть. Теперь `PreloadService.preload_vector_indexes`
+после прогона считает явное расхождение между **declared** (JSON,
+`project.json::gateway.vector.index.indexes.*`) и **runtime** (PG
+`public.agent_vector_index_store`), классифицируя каждое имя
+индекса в одну из категорий:
+
+  * `missing` — объявлен в JSON, но не загружен / не найден в PG store;
+  * `orphan` — blob в PG store, но не объявлен в JSON (мёртвые данные);
+  * `stale` — blob есть, но signature не совпадает с текущим cfg
+    (помечается как `STALE` или `INVALID`).
+
+Сводка печатается в **stderr** (multi-line, без ANSI) и пишется в
+`agent_gateway_logs` через `emit_sync_event` (event_type
+`vector_index_preload_health`, level=`WARN` если есть divergence,
+иначе `INFO`). Ошибки любого этапа (PG недоступна, config parse
+failed) глотаются — summary **никогда** не валит startup gateway.
+
+Чистая логика вычисления — в pure-функции `compute_index_health()`
+в `preload_service.py`, отделена от I/O и эмита; тестируема без mock'ов
+PG/JOBS.
+
 **2. PostgresChannel — циклы опроса БД.** Ошибки
 `poll_inbound`/`_poll_once`, `_lease_loop`, `_unstick_loop` раньше шли
 только в `self.logger.error` (loguru, терминал). Теперь каждая

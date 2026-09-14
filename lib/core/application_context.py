@@ -298,7 +298,7 @@ class ApplicationContext:
 
         # 8. Помощники
         ctx.transcription_service = _make_transcription(ctx.config)
-        ctx.preload_service = _make_preload(ctx.settings)
+        ctx.preload_service = _make_preload(ctx.settings, ctx.db_logging_service)
 
         ctx.runtime_health.mark_started()
         return ctx
@@ -951,14 +951,22 @@ def _make_transcription(config: Any) -> Any:
     return TranscriptionService(config)
 
 
-def _make_preload(settings: Any) -> Any:
+def _make_preload(
+    settings: Any,
+    db_logging_service: Any | None = None,
+) -> Any:
     """Создать ``PreloadService`` (для gateway — FAISS preload, для CLI — кеш навыка).
 
     ``settings`` — полные ``SETTINGS`` (для чтения ``skills.audit_analyzer``).
+    ``db_logging_service`` — для записи vector-preload health-события в
+    ``agent_gateway_logs`` (graceful degrade, если отсутствует).
     """
     from lib.services.preload_service import PreloadService
 
-    return PreloadService(settings=settings)
+    return PreloadService(
+        settings=settings,
+        db_logging_service=db_logging_service,
+    )
 
 
 def _make_cron_service(config: Any) -> Any:
