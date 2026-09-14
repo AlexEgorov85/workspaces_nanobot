@@ -593,6 +593,60 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
     )
 
 
+def _resolve_publish_path(ctx, workspace_path) -> str:
+    """Путь к ``cache.duckdb`` с учётом ``gateway.cache.local_path``.
+
+    DuckDB ATTACH берёт эксклюзивный flock, который NFS не отдаёт (файл
+    падает с ``"Conflicting lock is held in PID 0"`` даже после ``rm``).
+    Если в ``project.json::gateway.cache.local_path`` задан абсолютный путь
+    на локальной ФС — пишем туда. Иначе fallback на legacy
+    ``<workspace>/data_store/duckdb/cache.duckdb`` (для dev/test-сценариев).
+
+    Args:
+        ctx: ``ApplicationContext`` (для ``config_service.settings_section``).
+        workspace_path: legacy-путь к workspace (для fallback-варианта).
+
+    Returns:
+        str-путь к ``cache.duckdb``.
+    """
+    try:
+        gateway_cfg = ctx.config_service.settings_section("gateway") or {}
+    except Exception:
+        gateway_cfg = {}
+    cache_cfg = gateway_cfg.get("cache") if isinstance(gateway_cfg, dict) else None
+    cache_cfg = cache_cfg if isinstance(cache_cfg, dict) else {}
+
+    local_path = cache_cfg.get("local_path")
+    if local_path:
+        # Локальная ФС — пишем туда. ``gateway.cache.local_path`` обязан
+        # указывать на **директорию**; ``cache.duckdb`` дописываем сами.
+        from pathlib import Path
+
+        p = Path(local_path).expanduser()
+        if not p.is_absolute():
+            # относительный путь резолвим от workspace
+            p = Path(workspace_path) / p
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            # Не удалось создать local-каталог — отступаем на legacy,
+            # не валим старт gateway из-за кеша.
+            import logging
+            logging.getLogger(__name__).warning(
+                "gateway.cache.local_path=%s mkdir failed: %s — falling back to %s",
+                local_path, e, workspace_path,
+            )
+            from lib.services.table_registry import table_registry
+
+            return str(table_registry.snapshot_path(workspace_path))
+        return str(p / "cache.duckdb")
+
+    # Legacy fallback — workspace/data_store/duckdb/cache.duckdb (часто NFS).
+    from lib.services.table_registry import table_registry
+
+    return str(table_registry.snapshot_path(workspace_path))
+
+
 def _make_sync_services(ctx: ApplicationContext) -> tuple:
     """Собрать ``(PgDuckDbSyncService, DuckDbCacheStore)``.
 
@@ -672,7 +726,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         vector_names,
     )
 
-    publish_path = str(table_registry.snapshot_path(ctx.config.workspace_path))
+    publish_path = _resolve_publish_path(ctx, ctx.config.workspace_path)
 
     from lib.services.cache_provider_impl import read_embedding_config, read_vector_store_table
 
