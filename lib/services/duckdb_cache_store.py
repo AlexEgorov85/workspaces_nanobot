@@ -29,12 +29,15 @@ Bulk-вставка записей (list[dict]) идёт через pyarrow arra
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 import threading
 import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # DuckDB не поддерживает TO_CHAR(date, 'Month') — переписываем в strftime
 # (общая логика — в lib.utils.duckdb_query.rewrite_duck_sql).
@@ -795,19 +798,50 @@ class DuckDbCacheStore:
                             f"[memory_store] published {table}: {counts[table]} rows",
                             file=sys.stderr,
                         )
+                        logger.info(
+                            "DuckDbCacheStore.publish: %s = %d rows",
+                            table,
+                            counts[table],
+                        )
                     print(
                         f"[memory_store] cache snapshot -> {target} "
                         f"({len(counts)} tables, {sum(counts.values())} rows total)",
                         file=sys.stderr,
                     )
+                    logger.info(
+                        "DuckDbCacheStore.publish OK -> %s (%d tables, %d rows total)",
+                        target,
+                        len(counts),
+                        sum(counts.values()),
+                    )
+                else:
+                    logger.warning(
+                        "DuckDbCacheStore.publish OK but 0 tables copied to %s "
+                        "(publish_path задан, dirty=True, но ни одной таблицы в self._tables "
+                        "не существует во in-memory DuckDB — sync возможно не доставил данные).",
+                        target,
+                    )
                 return True
             except OSError as e:
                 # целевой файл открыт читателем (CLI) — повтор в следующем цикле
                 self._last_error = f"publish (replace): {e}"
+                logger.warning(
+                    "DuckDbCacheStore.publish FAIL (OSError при replace): %s "
+                    "— целевой файл %s занят читателем (CLI), "
+                    "snapshot останется в %s до следующего цикла.",
+                    e,
+                    target,
+                    tmp,
+                )
                 return False
             except Exception as e:
                 self._last_error = f"publish: {e}"
                 self._publish_errors += 1
+                logger.warning(
+                    "DuckDbCacheStore.publish FAIL: %s",
+                    e,
+                    exc_info=True,
+                )
                 return False
 
     # ------------------------------------------------------------------

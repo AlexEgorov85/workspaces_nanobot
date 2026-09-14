@@ -1,16 +1,16 @@
 """
-PgDuckDbSyncService — фоновая синхронизация audit-данных из PostgreSQL в кэш.
+PgDuckDbSyncService вЂ” С„РѕРЅРѕРІР°СЏ СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ audit-РґР°РЅРЅС‹С… РёР· PostgreSQL РІ РєСЌС€.
 
-Отвечает за:
-  * инкрементальную синхронизацию данных из PG в in-memory кэш (DuckDbCacheStore);
-  * корректное завершение (graceful shutdown) с гарантией сохранения очереди.
+РћС‚РІРµС‡Р°РµС‚ Р·Р°:
+  * РёРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅСѓСЋ СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЋ РґР°РЅРЅС‹С… РёР· PG РІ in-memory РєСЌС€ (DuckDbCacheStore);
+  * РєРѕСЂСЂРµРєС‚РЅРѕРµ Р·Р°РІРµСЂС€РµРЅРёРµ (graceful shutdown) СЃ РіР°СЂР°РЅС‚РёРµР№ СЃРѕС…СЂР°РЅРµРЅРёСЏ РѕС‡РµСЂРµРґРё.
 
-Весь SQL-доступ идёт через общий пул ``utils.db`` (worker-поток не держит
-собственного psycopg2-соединения — соединение выдаёт пул на время запроса,
-обрыв и переподключение обслуживает сам пул). Инкрементальные метки
-(``_last_sync``) живут в сервисе и сбрасываются при обрыве, чтобы
-перезагрузить таблицы целиком. Публичный API безопасен для вызова
-из asyncio/любого потока:
+Р’РµСЃСЊ SQL-РґРѕСЃС‚СѓРї РёРґС‘С‚ С‡РµСЂРµР· РѕР±С‰РёР№ РїСѓР» ``utils.db`` (worker-РїРѕС‚РѕРє РЅРµ РґРµСЂР¶РёС‚
+СЃРѕР±СЃС‚РІРµРЅРЅРѕРіРѕ psycopg2-СЃРѕРµРґРёРЅРµРЅРёСЏ вЂ” СЃРѕРµРґРёРЅРµРЅРёРµ РІС‹РґР°С‘С‚ РїСѓР» РЅР° РІСЂРµРјСЏ Р·Р°РїСЂРѕСЃР°,
+РѕР±СЂС‹РІ Рё РїРµСЂРµРїРѕРґРєР»СЋС‡РµРЅРёРµ РѕР±СЃР»СѓР¶РёРІР°РµС‚ СЃР°Рј РїСѓР»). РРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅС‹Рµ РјРµС‚РєРё
+(``_last_sync``) Р¶РёРІСѓС‚ РІ СЃРµСЂРІРёСЃРµ Рё СЃР±СЂР°СЃС‹РІР°СЋС‚СЃСЏ РїСЂРё РѕР±СЂС‹РІРµ, С‡С‚РѕР±С‹
+РїРµСЂРµР·Р°РіСЂСѓР·РёС‚СЊ С‚Р°Р±Р»РёС†С‹ С†РµР»РёРєРѕРј. РџСѓР±Р»РёС‡РЅС‹Р№ API Р±РµР·РѕРїР°СЃРµРЅ РґР»СЏ РІС‹Р·РѕРІР°
+РёР· asyncio/Р»СЋР±РѕРіРѕ РїРѕС‚РѕРєР°:
 
     sync_service = PgDuckDbSyncService(dsn=dsn, tables=[...])
     sync_service.set_on_new_records_callback(memory_store.upsert_records)
@@ -18,8 +18,8 @@ PgDuckDbSyncService — фоновая синхронизация audit-данн
     ...
     sync_service.stop(timeout_sec=10.0)
 
-Команды в очереди: ``POLL_CHANGES`` (немедленный поллинг), ``SHUTDOWN``
-(sentinel завершения).
+РљРѕРјР°РЅРґС‹ РІ РѕС‡РµСЂРµРґРё: ``POLL_CHANGES`` (РЅРµРјРµРґР»РµРЅРЅС‹Р№ РїРѕР»Р»РёРЅРі), ``SHUTDOWN``
+(sentinel Р·Р°РІРµСЂС€РµРЅРёСЏ).
 """
 
 from __future__ import annotations
@@ -42,14 +42,14 @@ COMMAND_SHUTDOWN = "SHUTDOWN"
 
 
 class PgDuckDbSyncService:
-    """Фоновая синхронизация произвольных таблиц из PostgreSQL в in-memory кэш.
+    """Р¤РѕРЅРѕРІР°СЏ СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ РїСЂРѕРёР·РІРѕР»СЊРЅС‹С… С‚Р°Р±Р»РёС† РёР· PostgreSQL РІ in-memory РєСЌС€.
 
-    Worker-поток владеет единственным подключением к PG. Поллинг таблиц
-    инкрементален (по track-колонке), новые/изменённые строки передаются
-    в callback ``on_new_records(table, records)`` — обычно это
+    Worker-РїРѕС‚РѕРє РІР»Р°РґРµРµС‚ РµРґРёРЅСЃС‚РІРµРЅРЅС‹Рј РїРѕРґРєР»СЋС‡РµРЅРёРµРј Рє PG. РџРѕР»Р»РёРЅРі С‚Р°Р±Р»РёС†
+    РёРЅРєСЂРµРјРµРЅС‚Р°Р»РµРЅ (РїРѕ track-РєРѕР»РѕРЅРєРµ), РЅРѕРІС‹Рµ/РёР·РјРµРЅС‘РЅРЅС‹Рµ СЃС‚СЂРѕРєРё РїРµСЂРµРґР°СЋС‚СЃСЏ
+    РІ callback ``on_new_records(table, records)`` вЂ” РѕР±С‹С‡РЅРѕ СЌС‚Рѕ
     :class:`DuckDbCacheStore.upsert_records`.
 
-    Имя класса сохранено для back-compat (см. TARGET_ARCHITECTURE.md §15).
+    РРјСЏ РєР»Р°СЃСЃР° СЃРѕС…СЂР°РЅРµРЅРѕ РґР»СЏ back-compat (СЃРј. TARGET_ARCHITECTURE.md В§15).
     """
 
     def __init__(
@@ -68,8 +68,8 @@ class PgDuckDbSyncService:
         self._schema = schema
         self._tables = [t for t in (tables or []) if t]
         self._vector_table = vector_table
-        # Все параметры — обязательны, передаются явно из settings (project.json).
-        # Никаких defaults в коде (TARGET: конфигурация только в settings).
+        # Р’СЃРµ РїР°СЂР°РјРµС‚СЂС‹ вЂ” РѕР±СЏР·Р°С‚РµР»СЊРЅС‹, РїРµСЂРµРґР°СЋС‚СЃСЏ СЏРІРЅРѕ РёР· settings (project.json).
+        # РќРёРєР°РєРёС… defaults РІ РєРѕРґРµ (TARGET: РєРѕРЅС„РёРіСѓСЂР°С†РёСЏ С‚РѕР»СЊРєРѕ РІ settings).
         self._poll_interval = float(poll_interval_sec)
         self._max_queue_size = max_queue_size
         self._reconnect_backoff = reconnect_backoff
@@ -86,11 +86,11 @@ class PgDuckDbSyncService:
         self._running = False
         self._initial_load = True
 
-        # Инкрементальный поллинг: {table: последнее значение track-колонки}
+        # РРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅС‹Р№ РїРѕР»Р»РёРЅРі: {table: РїРѕСЃР»РµРґРЅРµРµ Р·РЅР°С‡РµРЅРёРµ track-РєРѕР»РѕРЅРєРё}
         self._last_sync: dict[str, Any] = {}
-        # Batch-prefetch: {table: track-колонка}. Заполняется при первом опросе,
-        # далее читается за O(1). Устраняет повторный lookup через table_registry
-        # на каждом poll-цикле.
+        # Batch-prefetch: {table: track-РєРѕР»РѕРЅРєР°}. Р—Р°РїРѕР»РЅСЏРµС‚СЃСЏ РїСЂРё РїРµСЂРІРѕРј РѕРїСЂРѕСЃРµ,
+        # РґР°Р»РµРµ С‡РёС‚Р°РµС‚СЃСЏ Р·Р° O(1). РЈСЃС‚СЂР°РЅСЏРµС‚ РїРѕРІС‚РѕСЂРЅС‹Р№ lookup С‡РµСЂРµР· table_registry
+        # РЅР° РєР°Р¶РґРѕРј poll-С†РёРєР»Рµ.
         self._column_cache: dict[str, str] = {}
         self._on_new_records: Callable[[str, list[dict]], None] | None = None
         self._on_replace_records: Callable[[str, list[dict]], None] | None = None
@@ -108,64 +108,74 @@ class PgDuckDbSyncService:
         }
 
     # ------------------------------------------------------------------
-    # Публичный API
+    # РџСѓР±Р»РёС‡РЅС‹Р№ API
     # ------------------------------------------------------------------
 
     def set_on_new_records_callback(
         self, callback: Callable[[str, list[dict]], None]
     ) -> None:
-        """Задать callback для новых/изменённых строк: ``callback(table, records)``."""
+        """Р—Р°РґР°С‚СЊ callback РґР»СЏ РЅРѕРІС‹С…/РёР·РјРµРЅС‘РЅРЅС‹С… СЃС‚СЂРѕРє: ``callback(table, records)``."""
         self._on_new_records = callback
 
     def set_on_replace_records_callback(
         self, callback: Callable[[str, list[dict]], None]
     ) -> None:
-        """Задать callback для полной пересинхронизации: ``callback(table, records)``.
+        """Р—Р°РґР°С‚СЊ callback РґР»СЏ РїРѕР»РЅРѕР№ РїРµСЂРµСЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё: ``callback(table, records)``.
 
-        Вызывается при периодической полной перезагрузке таблицы (сверка
-        удалённых строк). Обычно это ``DuckDbCacheStore.replace_records``.
+        Р’С‹Р·С‹РІР°РµС‚СЃСЏ РїСЂРё РїРµСЂРёРѕРґРёС‡РµСЃРєРѕР№ РїРѕР»РЅРѕР№ РїРµСЂРµР·Р°РіСЂСѓР·РєРµ С‚Р°Р±Р»РёС†С‹ (СЃРІРµСЂРєР°
+        СѓРґР°Р»С‘РЅРЅС‹С… СЃС‚СЂРѕРє). РћР±С‹С‡РЅРѕ СЌС‚Рѕ ``DuckDbCacheStore.replace_records``.
         """
         self._on_replace_records = callback
 
     def set_on_schema_callback(
         self, callback: Callable[[str, list[dict]], None]
     ) -> None:
-        """Задать callback для описания колонок таблицы из PG information_schema.
+        """Р—Р°РґР°С‚СЊ callback РґР»СЏ РѕРїРёСЃР°РЅРёСЏ РєРѕР»РѕРЅРѕРє С‚Р°Р±Р»РёС†С‹ РёР· PG information_schema.
 
-        Вызывается перед загрузкой/полной пересинхронизацией таблицы:
-        ``callback(table, columns)``, где ``columns`` — список описаний
-        ``[{"name", "type", "not_null", "comment"}, ...]``. Обычно это
+        Р’С‹Р·С‹РІР°РµС‚СЃСЏ РїРµСЂРµРґ Р·Р°РіСЂСѓР·РєРѕР№/РїРѕР»РЅРѕР№ РїРµСЂРµСЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРµР№ С‚Р°Р±Р»РёС†С‹:
+        ``callback(table, columns)``, РіРґРµ ``columns`` вЂ” СЃРїРёСЃРѕРє РѕРїРёСЃР°РЅРёР№
+        ``[{"name", "type", "not_null", "comment"}, ...]``. РћР±С‹С‡РЅРѕ СЌС‚Рѕ
         ``DuckDbCacheStore.ensure_schema``.
         """
         self._on_schema = callback
 
     def set_on_sync_callback(self, callback: Callable[[], None]) -> None:
-        """Задать callback по завершении цикла синхронизации.
+        """Р—Р°РґР°С‚СЊ callback РїРѕ Р·Р°РІРµСЂС€РµРЅРёРё С†РёРєР»Р° СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё.
 
-        Вызывается из worker-потока после initial load и после каждого
-        поллинга — удобно для публикации снимка кеша (store.publish).
+        Р’С‹Р·С‹РІР°РµС‚СЃСЏ РёР· worker-РїРѕС‚РѕРєР° РїРѕСЃР»Рµ initial load Рё РїРѕСЃР»Рµ РєР°Р¶РґРѕРіРѕ
+        РїРѕР»Р»РёРЅРіР° вЂ” СѓРґРѕР±РЅРѕ РґР»СЏ РїСѓР±Р»РёРєР°С†РёРё СЃРЅРёРјРєР° РєРµС€Р° (store.publish).
         """
         self._on_sync_callback = callback
 
     def start(self, initial_load: bool = True) -> None:
-        """Запустить worker-поток.
+        """Р—Р°РїСѓСЃС‚РёС‚СЊ worker-РїРѕС‚РѕРє.
 
         Args:
-            initial_load: если True — сначала полная загрузка всех таблиц.
+            initial_load: РµСЃР»Рё True вЂ” СЃРЅР°С‡Р°Р»Р° РїРѕР»РЅР°СЏ Р·Р°РіСЂСѓР·РєР° РІСЃРµС… С‚Р°Р±Р»РёС†.
         """
         if self._thread is not None and self._thread.is_alive():
+            logger.warning(
+                "PgDuckDbSyncService.start: worker СѓР¶Рµ Р·Р°РїСѓС‰РµРЅ, РїРѕРІС‚РѕСЂРЅС‹Р№ start РёРіРЅРѕСЂРёСЂСѓРµС‚СЃСЏ."
+            )
             return
         self._initial_load = bool(initial_load)
         self._running = True
         self._stop_event.clear()
         self._stats["started_at"] = time.time()
+        logger.info(
+            "PgDuckDbSyncService.start: initial_load=%s tables=%d dsn_set=%s vector_table=%s",
+            self._initial_load,
+            len(self._tables),
+            bool(self._dsn),
+            self._vector_table or "(none)",
+        )
         self._thread = threading.Thread(
             target=self._worker, name="audit-sync", daemon=True
         )
         self._thread.start()
 
     def stop(self, timeout_sec: float = 10.0) -> None:
-        """Остановить worker-поток, сохранив оставшиеся записи из очереди."""
+        """РћСЃС‚Р°РЅРѕРІРёС‚СЊ worker-РїРѕС‚РѕРє, СЃРѕС…СЂР°РЅРёРІ РѕСЃС‚Р°РІС€РёРµСЃСЏ Р·Р°РїРёСЃРё РёР· РѕС‡РµСЂРµРґРё."""
         self._running = False
         self._stop_event.set()
         try:
@@ -178,7 +188,7 @@ class PgDuckDbSyncService:
         self._close_connection()
 
     def get_stats(self) -> dict[str, Any]:
-        """Мониторинг: размер очереди, счётчики, состояние подключения."""
+        """РњРѕРЅРёС‚РѕСЂРёРЅРі: СЂР°Р·РјРµСЂ РѕС‡РµСЂРµРґРё, СЃС‡С‘С‚С‡РёРєРё, СЃРѕСЃС‚РѕСЏРЅРёРµ РїРѕРґРєР»СЋС‡РµРЅРёСЏ."""
         with self._state_lock:
             stats = dict(self._stats)
         connected = False
@@ -200,11 +210,11 @@ class PgDuckDbSyncService:
         return stats
 
     def get_sync_stats(self) -> dict[str, Any]:
-        """Псевдоним ``get_stats`` (используется в мониторинге/логах)."""
+        """РџСЃРµРІРґРѕРЅРёРј ``get_stats`` (РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РІ РјРѕРЅРёС‚РѕСЂРёРЅРіРµ/Р»РѕРіР°С…)."""
         return self.get_stats()
 
     # ------------------------------------------------------------------
-    # Worker-цикл
+    # Worker-С†РёРєР»
     # ------------------------------------------------------------------
 
     def _worker(self) -> None:
@@ -219,11 +229,11 @@ class PgDuckDbSyncService:
                     break
                 self._poll_changes()
                 self._fire_sync_callback()
-                # Ждём интервал поллинга или сигнал остановки
+                # Р–РґС‘Рј РёРЅС‚РµСЂРІР°Р» РїРѕР»Р»РёРЅРіР° РёР»Рё СЃРёРіРЅР°Р» РѕСЃС‚Р°РЅРѕРІРєРё
                 self._stop_event.wait(self._poll_interval)
         finally:
             self._running = False
-            # Финальная попытка дописать оставшиеся записи
+            # Р¤РёРЅР°Р»СЊРЅР°СЏ РїРѕРїС‹С‚РєР° РґРѕРїРёСЃР°С‚СЊ РѕСЃС‚Р°РІС€РёРµСЃСЏ Р·Р°РїРёСЃРё
             try:
                 self._drain_queue()
             except Exception:
@@ -231,18 +241,27 @@ class PgDuckDbSyncService:
             self._close_connection()
 
     def _fire_sync_callback(self) -> None:
-        """Уведомить о завершении цикла синхронизации (после load/поллинга)."""
+        """РЈРІРµРґРѕРјРёС‚СЊ Рѕ Р·Р°РІРµСЂС€РµРЅРёРё С†РёРєР»Р° СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё (РїРѕСЃР»Рµ load/РїРѕР»Р»РёРЅРіР°)."""
         cb = self._on_sync_callback
         if cb is None:
+            logger.warning(
+                "PgDuckDbSyncService: _fire_sync_callback РІС‹Р·РІР°РЅ, РЅРѕ _on_sync_callback=None "
+                "(publish РІ cache.duckdb РЅРµ РїСЂРѕРёР·РѕР№РґС‘С‚)."
+            )
             return
         try:
             cb()
-        except Exception:
+        except Exception as exc:
             with self._state_lock:
                 self._stats["errors"] += 1
+            logger.warning(
+                "PgDuckDbSyncService: _on_sync_callback Р±СЂРѕСЃРёР» РёСЃРєР»СЋС‡РµРЅРёРµ: %s",
+                exc,
+                exc_info=True,
+            )
 
     def _drain_queue(self) -> None:
-        """Обработать все команды из очереди (неблокирующе)."""
+        """РћР±СЂР°Р±РѕС‚Р°С‚СЊ РІСЃРµ РєРѕРјР°РЅРґС‹ РёР· РѕС‡РµСЂРµРґРё (РЅРµР±Р»РѕРєРёСЂСѓСЋС‰Рµ)."""
         while True:
             try:
                 cmd, payload = self._queue.get_nowait()
@@ -261,20 +280,20 @@ class PgDuckDbSyncService:
                 self._queue.task_done()
 
     # ------------------------------------------------------------------
-    # Поллинг таблиц
+    # РџРѕР»Р»РёРЅРі С‚Р°Р±Р»РёС†
     # ------------------------------------------------------------------
 
     def _track_column_for(self, table: str) -> str:
-        """Вернуть колонку для инкрементального отслеживания изменений.
+        """Р’РµСЂРЅСѓС‚СЊ РєРѕР»РѕРЅРєСѓ РґР»СЏ РёРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅРѕРіРѕ РѕС‚СЃР»РµР¶РёРІР°РЅРёСЏ РёР·РјРµРЅРµРЅРёР№.
 
-        Источник истины — ``lib.services.table_registry`` (через
-        ``SkillRegistration.tracking_column_for(table)``). Это позволяет
-        skill'ам задавать per-table track-колонку через
-        ``TableResource.tracking_column`` без правок core.
-        Fallback — ``updated_at`` для обычных таблиц, ``id`` для vector.
+        РСЃС‚РѕС‡РЅРёРє РёСЃС‚РёРЅС‹ вЂ” ``lib.services.table_registry`` (С‡РµСЂРµР·
+        ``SkillRegistration.tracking_column_for(table)``). Р­С‚Рѕ РїРѕР·РІРѕР»СЏРµС‚
+        skill'Р°Рј Р·Р°РґР°РІР°С‚СЊ per-table track-РєРѕР»РѕРЅРєСѓ С‡РµСЂРµР·
+        ``TableResource.tracking_column`` Р±РµР· РїСЂР°РІРѕРє core.
+        Fallback вЂ” ``updated_at`` РґР»СЏ РѕР±С‹С‡РЅС‹С… С‚Р°Р±Р»РёС†, ``id`` РґР»СЏ vector.
 
-        Оптимизация: результат кешируется в ``self._column_cache`` после
-        первого lookup'а — последующие вызовы за O(1).
+        РћРїС‚РёРјРёР·Р°С†РёСЏ: СЂРµР·СѓР»СЊС‚Р°С‚ РєРµС€РёСЂСѓРµС‚СЃСЏ РІ ``self._column_cache`` РїРѕСЃР»Рµ
+        РїРµСЂРІРѕРіРѕ lookup'Р° вЂ” РїРѕСЃР»РµРґСѓСЋС‰РёРµ РІС‹Р·РѕРІС‹ Р·Р° O(1).
         """
         cached = self._column_cache.get(table)
         if cached is not None:
@@ -294,18 +313,30 @@ class PgDuckDbSyncService:
         return col
 
     def _do_initial_load(self) -> None:
-        """Параллельная начальная загрузка всех таблиц через thread-pool.
+        """РџР°СЂР°Р»Р»РµР»СЊРЅР°СЏ РЅР°С‡Р°Р»СЊРЅР°СЏ Р·Р°РіСЂСѓР·РєР° РІСЃРµС… С‚Р°Р±Р»РёС† С‡РµСЂРµР· thread-pool.
 
-        Каждая таблица полльится в отдельном потоке (psycopg2 connections
-        берутся из общего пула utils.db, который thread-safe).
+        РљР°Р¶РґР°СЏ С‚Р°Р±Р»РёС†Р° РїРѕР»Р»СЊРёС‚СЃСЏ РІ РѕС‚РґРµР»СЊРЅРѕРј РїРѕС‚РѕРєРµ (psycopg2 connections
+        Р±РµСЂСѓС‚СЃСЏ РёР· РѕР±С‰РµРіРѕ РїСѓР»Р° utils.db, РєРѕС‚РѕСЂС‹Р№ thread-safe).
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         if not self._tables:
+            logger.warning(
+                "PgDuckDbSyncService: initial_load Р·Р°РїСѓС‰РµРЅ, РЅРѕ self._tables РїСѓСЃС‚ "
+                "(РЅРё РѕРґРЅРѕР№ С‚Р°Р±Р»РёС†С‹ РЅРµ Р·Р°СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°РЅРѕ вЂ” _make_sync_services РїРµСЂРµРґР°Р» РїСѓСЃС‚РѕР№ СЃРїРёСЃРѕРє)."
+            )
             return
 
-        # max_workers = число таблиц (но не более 8, чтобы не утилизировать пул)
+        logger.info(
+            "PgDuckDbSyncService: initial_load START tables=%d dsn_set=%s",
+            len(self._tables),
+            bool(self._dsn),
+        )
+
+        # max_workers = С‡РёСЃР»Рѕ С‚Р°Р±Р»РёС† (РЅРѕ РЅРµ Р±РѕР»РµРµ 8, С‡С‚РѕР±С‹ РЅРµ СѓС‚РёР»РёР·РёСЂРѕРІР°С‚СЊ РїСѓР»)
         max_workers = min(len(self._tables), 8)
+        loaded_count = 0
+        error_count = 0
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="audit-sync-init") as ex:
             futures = {
                 ex.submit(self._poll_table_initial, table): table
@@ -316,23 +347,54 @@ class PgDuckDbSyncService:
                     return
                 table = futures[future]
                 try:
-                    future.result()
+                    rows = future.result()
+                    if rows is None:
+                        rows = 0
+                    loaded_count += 1
+                    logger.info(
+                        "PgDuckDbSyncService: initial_load loaded %d rows for %s",
+                        rows,
+                        table,
+                    )
                 except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                    logger.warning(
+                        "PgDuckDbSyncService: initial_load OperationalError РЅР° %s вЂ” РїСЂРѕР±СѓСЋ reconnect",
+                        table,
+                        exc_info=True,
+                    )
                     self._reconnect()
                     return
                 except psycopg2.errors.UndefinedTable:
+                    error_count += 1
                     logger.error(
-                        "PgDuckDbSyncService: таблица-источник не найдена: %s "
-                        "— пропускаю. Проверьте настройки db.tables/db.additional_tables "
-                        "в project.json::skills.<name> для соответствующего skill'а.",
+                        "PgDuckDbSyncService: С‚Р°Р±Р»РёС†Р°-РёСЃС‚РѕС‡РЅРёРє РЅРµ РЅР°Р№РґРµРЅР°: %s "
+                        "вЂ” РїСЂРѕРїСѓСЃРєР°СЋ. РџСЂРѕРІРµСЂСЊС‚Рµ РЅР°СЃС‚СЂРѕР№РєРё db.tables/db.additional_tables "
+                        "РІ project.json::skills.<name> РґР»СЏ СЃРѕРѕС‚РІРµС‚СЃС‚РІСѓСЋС‰РµРіРѕ skill'Р°.",
                         table,
                     )
-                except Exception:
+                except Exception as exc:
+                    error_count += 1
+                    logger.warning(
+                        "PgDuckDbSyncService: initial_load FAILED %s: %s",
+                        table,
+                        exc,
+                        exc_info=True,
+                    )
                     with self._state_lock:
                         self._stats["errors"] += 1
 
-    def _poll_table_initial(self, table: str) -> None:
-        """Начальная загрузка одной таблицы (для ThreadPoolExecutor)."""
+        logger.info(
+            "PgDuckDbSyncService: initial_load DONE loaded_ok=%d errors=%d total_tables=%d",
+            loaded_count,
+            error_count,
+            len(self._tables),
+        )
+
+    def _poll_table_initial(self, table: str) -> int:
+        """РќР°С‡Р°Р»СЊРЅР°СЏ Р·Р°РіСЂСѓР·РєР° РѕРґРЅРѕР№ С‚Р°Р±Р»РёС†С‹ (РґР»СЏ ThreadPoolExecutor).
+
+        Р’РѕР·РІСЂР°С‰Р°РµС‚ РєРѕР»РёС‡РµСЃС‚РІРѕ Р·Р°РіСЂСѓР¶РµРЅРЅС‹С… СЃС‚СЂРѕРє (РґР»СЏ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ).
+        """
         self._ensure_table_schema(table)
         rows, last = self._fetch_all(table)
         self._dispatch(table, rows)
@@ -340,14 +402,15 @@ class PgDuckDbSyncService:
             if last is not None:
                 self._last_sync[table] = last
             else:
-                # Пустая таблица: запоминаем "сейчас", чтобы дальше
-                # поллить инкрементально, а не перечитывать всё.
+                # РџСѓСЃС‚Р°СЏ С‚Р°Р±Р»РёС†Р°: Р·Р°РїРѕРјРёРЅР°РµРј "СЃРµР№С‡Р°СЃ", С‡С‚РѕР±С‹ РґР°Р»СЊС€Рµ
+                # РїРѕР»Р»РёС‚СЊ РёРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅРѕ, Р° РЅРµ РїРµСЂРµС‡РёС‚С‹РІР°С‚СЊ РІСЃС‘.
                 self._last_sync[table] = datetime.datetime.now(
                     datetime.UTC
                 )
+        return len(rows)
 
     def _poll_changes(self) -> None:
-        """Параллельный инкрементальный поллинг всех таблиц."""
+        """РџР°СЂР°Р»Р»РµР»СЊРЅС‹Р№ РёРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅС‹Р№ РїРѕР»Р»РёРЅРі РІСЃРµС… С‚Р°Р±Р»РёС†."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         if not self._running:
@@ -374,9 +437,9 @@ class PgDuckDbSyncService:
                     return
                 except psycopg2.errors.UndefinedTable:
                     logger.error(
-                        "PgDuckDbSyncService: таблица-источник не найдена при поллинге: %s "
-                        "— пропускаю. Проверьте настройки db.tables/db.additional_tables "
-                        "в project.json::skills.<name> для соответствующего skill'а.",
+                        "PgDuckDbSyncService: С‚Р°Р±Р»РёС†Р°-РёСЃС‚РѕС‡РЅРёРє РЅРµ РЅР°Р№РґРµРЅР° РїСЂРё РїРѕР»Р»РёРЅРіРµ: %s "
+                        "вЂ” РїСЂРѕРїСѓСЃРєР°СЋ. РџСЂРѕРІРµСЂСЊС‚Рµ РЅР°СЃС‚СЂРѕР№РєРё db.tables/db.additional_tables "
+                        "РІ project.json::skills.<name> РґР»СЏ СЃРѕРѕС‚РІРµС‚СЃС‚РІСѓСЋС‰РµРіРѕ skill'Р°.",
                         table,
                     )
                 except Exception:
@@ -384,7 +447,7 @@ class PgDuckDbSyncService:
                         self._stats["errors"] += 1
 
     def _poll_table(self, table: str) -> None:
-        # Периодическая полная пересинхронизация — сверка удалённых строк.
+        # РџРµСЂРёРѕРґРёС‡РµСЃРєР°СЏ РїРѕР»РЅР°СЏ РїРµСЂРµСЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ вЂ” СЃРІРµСЂРєР° СѓРґР°Р»С‘РЅРЅС‹С… СЃС‚СЂРѕРє.
         if self._full_resync_every > 0:
             self._resync_counter += 1
             if self._resync_counter >= self._full_resync_every:
@@ -394,7 +457,7 @@ class PgDuckDbSyncService:
                 self._ensure_table_schema(table)
                 rows, last = self._fetch_all(table)
                 self._dispatch_replace(table, rows)
-                # курсор не откатываем: новое значение только если оно больше
+                # РєСѓСЂСЃРѕСЂ РЅРµ РѕС‚РєР°С‚С‹РІР°РµРј: РЅРѕРІРѕРµ Р·РЅР°С‡РµРЅРёРµ С‚РѕР»СЊРєРѕ РµСЃР»Рё РѕРЅРѕ Р±РѕР»СЊС€Рµ
                 prev = self._last_sync.get(table)
                 if last is not None and (prev is None or last > prev):
                     self._last_sync[table] = last
@@ -415,15 +478,29 @@ class PgDuckDbSyncService:
         if not rows:
             return
         callback = self._on_new_records
-        if callback is not None:
-            try:
-                callback(table, rows)
-            except Exception:
-                with self._state_lock:
-                    self._stats["errors"] += 1
+        if callback is None:
+            logger.warning(
+                "PgDuckDbSyncService: _dispatch(%s, %d rows), РЅРѕ _on_new_records=None "
+                "вЂ” РґР°РЅРЅС‹Рµ РЅРµ РїРѕРїР°РґСѓС‚ РІ DuckDbCacheStore.upsert_records.",
+                table,
+                len(rows),
+            )
+            return
+        try:
+            callback(table, rows)
+        except Exception as exc:
+            with self._state_lock:
+                self._stats["errors"] += 1
+            logger.warning(
+                "PgDuckDbSyncService: _on_new_records(%s, %d rows) СѓРїР°Р»: %s",
+                table,
+                len(rows),
+                exc,
+                exc_info=True,
+            )
 
     def _dispatch_replace(self, table: str, rows: list[dict]) -> None:
-        """Полная пересинхронизация: заменить содержимое таблицы целиком."""
+        """РџРѕР»РЅР°СЏ РїРµСЂРµСЃРёРЅС…СЂРѕРЅРёР·Р°С†РёСЏ: Р·Р°РјРµРЅРёС‚СЊ СЃРѕРґРµСЂР¶РёРјРѕРµ С‚Р°Р±Р»РёС†С‹ С†РµР»РёРєРѕРј."""
         callback = self._on_replace_records
         if callback is None:
             return
@@ -434,7 +511,7 @@ class PgDuckDbSyncService:
                 self._stats["errors"] += 1
 
     def _ensure_table_schema(self, table: str) -> None:
-        """Передать описание колонок таблицы (PG information_schema) в store."""
+        """РџРµСЂРµРґР°С‚СЊ РѕРїРёСЃР°РЅРёРµ РєРѕР»РѕРЅРѕРє С‚Р°Р±Р»РёС†С‹ (PG information_schema) РІ store."""
         callback = self._on_schema
         if callback is None:
             return
@@ -448,7 +525,7 @@ class PgDuckDbSyncService:
                 self._stats["errors"] += 1
 
     def _fetch_schema(self, table: str) -> list[dict]:
-        """Описание колонок таблицы из PG: типы, NOT NULL, комментарии."""
+        """РћРїРёСЃР°РЅРёРµ РєРѕР»РѕРЅРѕРє С‚Р°Р±Р»РёС†С‹ РёР· PG: С‚РёРїС‹, NOT NULL, РєРѕРјРјРµРЅС‚Р°СЂРёРё."""
         schema, name = self._split_table(table)
         if not name:
             return []
@@ -511,24 +588,24 @@ class PgDuckDbSyncService:
         return columns
 
     def _split_table(self, table: str) -> tuple[str, str]:
-        """Разбить 'oarb.audits' на (schema, table)."""
+        """Р Р°Р·Р±РёС‚СЊ 'oarb.audits' РЅР° (schema, table)."""
         if "." in table:
             schema, name = table.split(".", 1)
             return schema, name
         return self._schema, table
 
     # ------------------------------------------------------------------
-    # SQL-доступ (через общий пул utils.db)
+    # SQL-РґРѕСЃС‚СѓРї (С‡РµСЂРµР· РѕР±С‰РёР№ РїСѓР» utils.db)
     # ------------------------------------------------------------------
 
     def _fq_table(self, table: str) -> str:
-        """Полное имя таблицы ``schema.table`` (без точки — схема из конфига)."""
+        """РџРѕР»РЅРѕРµ РёРјСЏ С‚Р°Р±Р»РёС†С‹ ``schema.table`` (Р±РµР· С‚РѕС‡РєРё вЂ” СЃС…РµРјР° РёР· РєРѕРЅС„РёРіР°)."""
         if "." in table:
             return f'"{table.split(".", 1)[0]}"."{table.split(".", 1)[1]}"'
         return f'"{self._schema}"."{table}"'
 
     def _db_run(self, fn):
-        """Выполнить ``fn(conn)`` на свободном соединении общего пула ``utils.db``."""
+        """Р’С‹РїРѕР»РЅРёС‚СЊ ``fn(conn)`` РЅР° СЃРІРѕР±РѕРґРЅРѕРј СЃРѕРµРґРёРЅРµРЅРёРё РѕР±С‰РµРіРѕ РїСѓР»Р° ``utils.db``."""
         from utils.db import configure, run
 
         if self._dsn:
@@ -574,25 +651,25 @@ class PgDuckDbSyncService:
         return max(values) if values else None
 
     # ------------------------------------------------------------------
-    # Подключение (через общий пул)
+    # РџРѕРґРєР»СЋС‡РµРЅРёРµ (С‡РµСЂРµР· РѕР±С‰РёР№ РїСѓР»)
     # ------------------------------------------------------------------
 
     def _ensure_connected(self) -> None:
-        """Убедиться, что DNS пула настроен; воркеры подключаются лениво."""
+        """РЈР±РµРґРёС‚СЊСЃСЏ, С‡С‚Рѕ DNS РїСѓР»Р° РЅР°СЃС‚СЂРѕРµРЅ; РІРѕСЂРєРµСЂС‹ РїРѕРґРєР»СЋС‡Р°СЋС‚СЃСЏ Р»РµРЅРёРІРѕ."""
         from utils.db import configure
 
         if self._dsn:
             configure(self._dsn)
 
     def _reconnect(self) -> None:
-        """Сбросить инкрементальные метки после обрыва соединения.
+        """РЎР±СЂРѕСЃРёС‚СЊ РёРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅС‹Рµ РјРµС‚РєРё РїРѕСЃР»Рµ РѕР±СЂС‹РІР° СЃРѕРµРґРёРЅРµРЅРёСЏ.
 
-        После обрыва перезагружаем таблицы целиком, чтобы не пропустить
-        изменения, произошедшие во время недоступности БД. Само соединение
-        (и его переподключение) живёт в общем пуле ``utils.db``.
+        РџРѕСЃР»Рµ РѕР±СЂС‹РІР° РїРµСЂРµР·Р°РіСЂСѓР¶Р°РµРј С‚Р°Р±Р»РёС†С‹ С†РµР»РёРєРѕРј, С‡С‚РѕР±С‹ РЅРµ РїСЂРѕРїСѓСЃС‚РёС‚СЊ
+        РёР·РјРµРЅРµРЅРёСЏ, РїСЂРѕРёР·РѕС€РµРґС€РёРµ РІРѕ РІСЂРµРјСЏ РЅРµРґРѕСЃС‚СѓРїРЅРѕСЃС‚Рё Р‘Р”. РЎР°РјРѕ СЃРѕРµРґРёРЅРµРЅРёРµ
+        (Рё РµРіРѕ РїРµСЂРµРїРѕРґРєР»СЋС‡РµРЅРёРµ) Р¶РёРІС‘С‚ РІ РѕР±С‰РµРј РїСѓР»Рµ ``utils.db``.
         """
         self._last_sync.clear()
         self._ensure_connected()
 
     def _close_connection(self) -> None:
-        """Больше не владеем соединением — пул закрывается сам."""
+        """Р‘РѕР»СЊС€Рµ РЅРµ РІР»Р°РґРµРµРј СЃРѕРµРґРёРЅРµРЅРёРµРј вЂ” РїСѓР» Р·Р°РєСЂС‹РІР°РµС‚СЃСЏ СЃР°Рј."""

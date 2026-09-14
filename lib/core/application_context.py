@@ -609,7 +609,19 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     if isinstance(pg, dict):
         dsn = pg.get("dsn", "") or ""
 
-    if not table_registry.resources() or not dsn:
+    if not table_registry.resources():
+        logger.warning(
+            "PgDuckDbSyncService skipped: TableRegistry пуст "
+            "(нет ни одной зарегистрированной таблицы через _auto_register_skills "
+            "или _register_infra_resources). "
+            "Проверьте секции project.json::skills.* и gateway.vector.index.*."
+        )
+        return None, None
+    if not dsn:
+        logger.warning(
+            "PgDuckDbSyncService skipped: channels.postgres.dsn не задан "
+            "(пустая строка или отсутствует ключ в project.json)."
+        )
         return None, None
 
     from lib.services.duckdb_cache_store import DuckDbCacheStore
@@ -619,6 +631,10 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     vector_names = list(table_registry.vector_names())
 
     if not all_table_names and not vector_names:
+        logger.warning(
+            "PgDuckDbSyncService skipped: в TableRegistry есть ресурсы, но ни одного "
+            "имени в table_names()/vector_names() — несоответствие регистрации."
+        )
         return None, None
 
     schemas: list[str] = []
@@ -627,6 +643,19 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             sch = r.name.split(".", 1)[0]
             if sch and sch not in schemas:
                 schemas.append(sch)
+
+    logger.info(
+        "PgDuckDbSyncService assembling: tables=%d vectors=%d schemas=%s dsn_set=%s",
+        len(all_table_names),
+        len(vector_names),
+        schemas,
+        bool(dsn),
+    )
+    logger.info(
+        "PgDuckDbSyncService tables=%s vector_tables=%s",
+        all_table_names,
+        vector_names,
+    )
 
     publish_path = str(table_registry.snapshot_path(ctx.config.workspace_path))
 
