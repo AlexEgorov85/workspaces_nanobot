@@ -42,14 +42,15 @@ BODY = """**PATCH-релиз v2.5.2:** две группы доработок п
 - **`DuckDbCacheStore.publish()`** больше не падает молча на stale `.tmp` (`605660b`): `tmp.unlink()` возвращает `False` с `sync_publish_failed` событием вместо `except OSError: pass`; имя `.tmp` уникальное на каждый вызов (`<name>.<pid>.<ms>.tmp`); ATTACH обёрнут в retry с экспоненциальным backoff (5 попыток: 0.1/0.2/0.4/0.8/1.6 с). Это правильная гигиена + читаемая диагностика; **корень NFS-несовместимости лечится safe default ниже**.
 - **`gateway.py` startup cleanup** теперь удаляет `cache.duckdb` **и** `cache.duckdb.tmp` (`652b09d`) — раньше `.tmp` оставался залоченным через NFS `lockd` при крахе между `ATTACH` и `os.replace`, и следующий publish сразу отстреливал `PID 0`.
 - **`preload_service.preload_vector_indexes`** — добавлен недостающий `import logging` + `logger = logging.getLogger(__name__)` (`48575e9`): `NameError: name 'logger' is not defined` ловил все ошибки `preload_indexes` в тестах и в реальном рантайме.
-- **`_resolve_publish_path` теперь выбирает локальную ФС по умолчанию** (`85cad2a`): если `gateway.cache.local_path` не задан, снимок уходит в `~/.cache/nanobot/duckdb/cache.duckdb` (POSIX `fcntl` работает там штатно), а не в legacy `<workspace>/data_store/duckdb/` — который на NFS роняет каждый sync-цикл с непонятным traceback. Подтверждено эмпирически: перенос workspace с NFS на ext4 полностью устраняет проблему.
-- **`_warn_if_publish_path_on_nfs(publish_path)`** — Linux-only проверка `/proc/mounts`: если снимок всё-таки попал на NFS (escape hatch через `gateway.cache.use_workspace_path: true` или symlink), печатает громкое WARNING в logging И в stderr с конкретными инструкциями. Защита от регрессии.
+- **`resolve_publish_path()` — единый механизм** вычисления пути к `cache.duckdb` (`85cad2a`, `b1d2e21`): если `gateway.cache.local_path` не задан, снимок уходит в `~/.cache/nanobot/duckdb/cache.duckdb` (POSIX `fcntl` работает там штатно), а не в legacy `<workspace>/data_store/duckdb/` — который на NFS роняет каждый sync-цикл с непонятным traceback. Подтверждено эмпирически: перенос workspace с NFS на ext4 полностью устраняет проблему.
+- **`build_cache_provider()` и `get_in_memory_cache_path()` тоже зовут `resolve_publish_path()`** (`b1d2e21`): до этого CLI/skill-слой хардкодил `table_registry.snapshot_path(workspace_root)`, и после safe-default фикса в gateway тот писал в одно место, а skill читал из другого — скилл видел устаревший/пустой снимок. v2.5.2+ оба слоя вызывают одну pure-функцию с одними `gateway.cache.*` настройками.
+- **`_warn_if_publish_path_on_nfs(publish_path)`** — Linux-only проверка `/proc/mounts`: если снимок всё-таки попал на NFS (через symlink), печатает громкое WARNING в logging И в stderr с конкретными инструкциями. Защита от регрессии.
 
 ## Added — NFS-safe cache path
 
-- **`gateway.cache.local_path`** (`c522b55`) — опциональный абсолютный или относительный (от workspace) путь к локальной ФС для снимка `cache.duckdb`. Явный override над safe default; полезно когда у `~/.cache` нет места или нужна отдельная ФС.
-- **`gateway.cache.use_workspace_path`** — escape hatch для возврата к legacy `<workspace>/data_store/duckdb/`. **Не рекомендуется** на NFS (см. WARNING выше); сохраняем для dev/debug-сценариев на ext4.
-- **`gateway.cache.publish_to_workspace`** — задел для копирования снимка обратно в workspace-путь (для multi-machine deployment). Схема готова, реализация copy-back — следующая итерация.
+- **`gateway.cache.local_path`** (`c522b55`) — **единственный** опциональный knob: абсолютный или относительный (от workspace) путь к локальной ФС для снимка `cache.duckdb`. Override над safe default; полезно когда у `~/.cache` нет места или нужна отдельная ФС.
+
+Никаких escape-hatch'ей и mode'ов совместимости не предусмотрено: один механизм (`resolve_publish_path`), один путь (`local_path` или default `~/.cache/`). Legacy `<workspace>/data_store/duckdb/` на NFS больше не поддерживается.
 
 ## Fixed — observability (sync/logging)
 
@@ -62,8 +63,9 @@ BODY = """**PATCH-релиз v2.5.2:** две группы доработок п
 
 - `tests/test_duckdb_cache_store.py` — все 43 теста проходят (включая новые пути под `tmp.<pid>.<ms>.tmp`).
 - `tests/test_preload_service.py::test_error_returns_none` — зелёный (раньше падал с `NameError`).
-- `tests/test_application_context.py::TestResolvePublishPath` (7 новых кейсов).
-- `tests/test_application_context.py::TestWarnIfPublishPathOnNfs` (2 новых кейса).
+- `tests/test_application_context.py::TestResolvePublishPath` (6 кейсов).
+- `tests/test_application_context.py::TestSingleMechanism` (1 кейс — критическая инвариантна: gateway и CLI `build_cache_provider` возвращают **один и тот же путь** с default-конфигом).
+- `tests/test_application_context.py::TestWarnIfPublishPathOnNfs` (2 кейса).
 
 ---
 

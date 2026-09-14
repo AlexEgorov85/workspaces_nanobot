@@ -202,9 +202,17 @@ def get_brief_context_config(skill_name: str) -> dict[str, Any]:
 def get_in_memory_cache_path(skill_root: Path | str) -> str:
     """Путь к единому DuckDB-снапшоту runtime-кэша.
 
-    Снимок общий для всех skill'ов (``workspace/data_store/duckdb/cache.duckdb``,
-    см. ``TableRegistry.snapshot_path()``) — это свойство runtime-инфраструктуры,
-    а не skill-домена. Поэтому функция НЕ параметризована ``skill_name``.
+    Снимок общий для всех skill'ов. v2.5.2+ путь вычисляется через
+    :func:`resolve_publish_path` (``lib/core/application_context.py``),
+    чтобы сходиться с gateway, который пишет тот же snapshot
+    (см. описание ``gateway.cache.*``).
+
+    Безопасный default — ``~/.cache/nanobot/duckdb/cache.duckdb``
+    (POSIX ``fcntl`` работает там штатно; на NFS ATTACH падает).
+    Override — через ``gateway.cache.local_path`` в ``project.json``.
+
+    Функция НЕ параметризована ``skill_name`` (снимок — свойство
+    runtime-инфраструктуры, не skill-домена).
 
     Заменила ранее существовавшую ``get_in_memory_config(skill_name,
     skill_root)``, которая возвращала ещё ``enabled`` / ``engine`` из
@@ -213,10 +221,14 @@ def get_in_memory_cache_path(skill_root: Path | str) -> str:
     ``max_age_sec`` / ``refresh_interval_sec`` не пробрасывались в
     ``PostgresDuckDbProvider``). См. commit «skill configuration boundary».
     """
-    from lib.services.table_registry import table_registry
+    from lib.core.application_context import resolve_publish_path
+    from config import SETTINGS
 
     workspace_root = Path(skill_root).parent.parent
-    return str(table_registry.snapshot_path(workspace_root))
+    gateway_cache_cfg = (SETTINGS.get("gateway") or {}).get("cache") or {}
+    if not isinstance(gateway_cache_cfg, dict):
+        gateway_cache_cfg = {}
+    return resolve_publish_path(str(workspace_root), gateway_cache_cfg)
 
 
 def get_vector_index_path(skill_name: str, skill_root: Path | str) -> str:

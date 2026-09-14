@@ -165,10 +165,16 @@ pytest tests/ --cov=lib --cov-report=term-missing
 sync-а падал с `IO Error: Could not set lock on file cache.duckdb.tmp:
 Conflicting lock is held in PID 0` (DuckDB `ATTACH` берёт эксклюзивный
 `flock`, который NFS `lockd` не отдаёт). Теперь:
-- safe default — `~/.cache/nanobot/duckdb/cache.duckdb` вместо
-  legacy `<workspace>/data_store/duckdb/` (`85cad2a`);
-- явный override через `gateway.cache.local_path` (`c522b55`);
-- escape hatch `gateway.cache.use_workspace_path` для dev/debug;
+- **единый механизм** `resolve_publish_path()` — вызывается и из
+  gateway, и из CLI/skill/vector_index_service; путь записи и путь
+  чтения **всегда совпадают** (`b1d2e21`, fix от расхождения после
+  коммита `85cad2a`);
+- safe default — `~/.cache/nanobot/duckdb/cache.duckdb` (POSIX `fcntl`
+  работает там штатно), без escape hatch и без совместимости с NFS
+  (`85cad2a`);
+- единственная опция override — `gateway.cache.local_path` (`c522b55`);
+  legacy `<workspace>/data_store/duckdb/` больше не выбирается
+  через `gateway.cache.use_workspace_path` — опция удалена;
 - startup WARNING при попадании снимка на NFS (`/proc/mounts` check);
 - defensive publish-слой: уникальный `.tmp.<pid>.<ms>.tmp`, retry с
   backoff на `ATTACH`, понятный `sync_publish_failed` вместо
@@ -181,9 +187,11 @@ Conflicting lock is held in PID 0` (DuckDB `ATTACH` берёт эксклюзи�
 (`initial_load` / `poll_cycle` / `claim` / `release` / `reconnect`)
 полностью пишется в `agent_gateway_logs` (`f58c957`, `d4558f9`).
 
-**Tests:** добавлены `TestResolvePublishPath` (7 кейсов) и
-`TestWarnIfPublishPathOnNfs` (2 кейса); все ранее падавшие тесты
-(включая `preload_service::test_error_returns_none`) зелёные.
+**Tests:** добавлены `TestResolvePublishPath` (6 кейсов),
+`TestSingleMechanism` (1 кейс — инвариантна согласованности gateway ↔
+CLI/skill) и `TestWarnIfPublishPathOnNfs` (2 кейса); все ранее
+падавшие тесты (включая `preload_service::test_error_returns_none`)
+зелёные.
 Полный changelog — в [CHANGELOG.md → 2.5.2](CHANGELOG.md#252--2026-09-14).
 
 ## 🆕 Что нового в v2.5.1

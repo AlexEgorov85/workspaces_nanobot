@@ -424,16 +424,19 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 
 ## Где лежит снапшот
 
-Единый файл для всех skill'ов; путь вычисляется в `_resolve_publish_path()`
-(`lib/core/application_context.py`) в порядке приоритета:
+Единый файл для всех skill'ов; путь вычисляется через **единую**
+`resolve_publish_path()` (`lib/core/application_context.py`):
 
   1. `gateway.cache.local_path` (если задан) → `<это>/cache.duckdb`;
-  2. `gateway.cache.use_workspace_path: true` → legacy
-     `TableRegistry.snapshot_path(workspace_path)` /
-     `workspace/data_store/duckdb/cache.duckdb` (escape hatch);
-  3. **default** (v2.5.2+) → `~/.cache/nanobot/duckdb/cache.duckdb`
+  2. **default** (v2.5.2+) → `~/.cache/nanobot/duckdb/cache.duckdb`
      (POSIX `fcntl` работает там штатно — DuckDB ATTACH flock не
      работает на NFS).
+
+И gateway, и CLI/skill/vector_index_service вызывают **ту же** функцию
+(`build_cache_provider` и `get_in_memory_cache_path` переключены на неё
+в v2.5.2), так что расхождение путей записи/чтения невозможно.
+Legacy `TableRegistry.snapshot_path(workspace_path)` через
+`gateway.cache.use_workspace_path` удалён.
 
 Доступ к снимку — через CLI skill'а (`scripts/cli.py --mode predefined`
 и `--list-scripts`); прямой tool `duckdb_query` удалён в фазе 8.

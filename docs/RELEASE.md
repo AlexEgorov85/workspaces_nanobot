@@ -74,7 +74,9 @@ git diff --check
 grep -rn 'workspace/data_store/duckdb/cache.duckdb' docs/ CHANGELOG.md README.md
 ```
 
-Устаревшие ссылки — обновить или пометить как legacy/explicit escape-hatch (например, `gateway.cache.use_workspace_path: true`).
+Устаревшие ссылки — обновить или пометить как исторические (например,
+прежние пути `workspace/data_store/duckdb/cache.duckdb`, ныне удалённые
+опции вроде `gateway.cache.use_workspace_path`).
 
 ### 1.5 Артефакт `tools/release_v<X>_<Y>_<Z>.py`
 

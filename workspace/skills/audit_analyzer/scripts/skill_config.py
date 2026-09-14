@@ -67,10 +67,11 @@ def get_max_retries() -> int:
 def get_in_memory_cache_path() -> str:
     """Путь к DuckDB-кэшу skill'а.
 
-    Использует ``TableRegistry.snapshot_path(workspace_root)`` — единый
-    runtime-снимок ``workspace/data_store/duckdb/cache.duckdb``. Этот
-    файл публикует gateway (см. ``PgDuckDbSyncService``); standalone
-    CLI читает его без предварительной инициализации.
+    v2.5.2+ — единый механизм ``resolve_publish_path()``
+    (``lib/core/application_context.py``); default
+    ``~/.cache/nanobot/duckdb/cache.duckdb``. Этот файл публикует gateway
+    (см. ``PgDuckDbSyncService``); standalone CLI читает его без
+    предварительной инициализации.
     """
     return _lib.get_in_memory_cache_path(_SKILL_ROOT)
 

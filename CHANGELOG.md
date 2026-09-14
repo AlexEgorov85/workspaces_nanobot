@@ -35,32 +35,35 @@
   `NameError: name 'logger' is not defined` ловил все ошибки `preload_indexes`
   в тестах (`tests/test_preload_service.py::test_error_returns_none`)
   и в реальном рантайме.
-- **`_resolve_publish_path` теперь выбирает локальную ФС по умолчанию**
-  (`85cad2a`): если `gateway.cache.local_path` не задан, снимок уходит
-  в `~/.cache/nanobot/duckdb/cache.duckdb` (POSIX `fcntl` работает там
-  штатно), а не в legacy `<workspace>/data_store/duckdb/` — который на
-  NFS роняет каждый sync-цикл с непонятным traceback. Подтверждено
-  эмпирически: перенос workspace с NFS на ext4 полностью устраняет
-  проблему.
+- **`resolve_publish_path` — единый механизм вычисления пути к
+  `cache.duckdb`** (`85cad2a`, `b1d2e21`): если `gateway.cache.local_path`
+  не задан, снимок уходит в `~/.cache/nanobot/duckdb/cache.duckdb` (POSIX
+  `fcntl` работает там штатно), а не в legacy
+  `<workspace>/data_store/duckdb/` — который на NFS роняет каждый
+  sync-цикл с непонятным traceback. Подтверждено эмпирически: перенос
+  workspace с NFS на ext4 полностью устраняет проблему.
+- **`build_cache_provider()` и `get_in_memory_cache_path()` тоже зовут
+  `resolve_publish_path()`** (этот коммит): до этого CLI/skill-слой
+  хардкодил `table_registry.snapshot_path(workspace_root)`, и после
+  safe-default фикса gateway писал в одно место, а skill читал из
+  другого — скилл видел устаревший/пустой снимок. v2.5.2+ оба слоя
+  вызывают одну pure-функцию с одними `gateway.cache.*` настройками.
 - **`_warn_if_publish_path_on_nfs(publish_path)`** — Linux-only проверка
-  `/proc/mounts`: если снимок всё-таки попал на NFS (escape hatch через
-  `gateway.cache.use_workspace_path: true` или symlink), печатает громкое
-  WARNING в logging И в stderr с конкретными инструкциями. Защита от
-  регрессии.
+  `/proc/mounts`: если снимок всё-таки попал на NFS (через symlink),
+  печатает громкое WARNING в logging И в stderr. Защита от регрессии.
 
 ### Added — NFS-safe cache path
 
-- **`gateway.cache.local_path`** (`c522b55`) — опциональный абсолютный
-  или относительный (от workspace) путь к локальной ФС для снимка
-  `cache.duckdb`. Явный override над safe default; полезно когда
-  у `~/.cache` нет места или нужна отдельная ФС.
-- **`gateway.cache.use_workspace_path`** — escape hatch для возврата к
-  legacy `<workspace>/data_store/duckdb/`. **Не рекомендуется** на NFS
-  (см. WARNING выше); сохраняем для dev/debug-сценариев на ext4.
-- **`gateway.cache.publish_to_workspace`** — задел для копирования
-  снимка обратно в workspace-путь (для multi-machine deployment, где
-  CLI/skill читают с NFS-шаринга на другой машине). Схема готова,
-  реализация copy-back — следующая итерация.
+- **`gateway.cache.local_path`** (`c522b55`) — единственный опциональный
+  knob: абсолютный или относительный (от workspace) путь к локальной
+  ФС для снимка `cache.duckdb`. Полезно когда у `~/.cache` нет места
+  или нужна отдельная ФС.
+
+Никаких escape-hatch'ей и mode'ов совместимости не предусмотрено:
+один механизм (`resolve_publish_path`), один путь (`local_path` или
+default `~/.cache/`). Legacy `<workspace>/data_store/duckdb/` на NFS
+больше не поддерживается — функция `resolve_publish_path` не даст
+ему проявиться.
 
 ### Fixed — observability (sync/logging)
 
@@ -90,11 +93,15 @@
   новые пути под `tmp.<pid>.<ms>.tmp`).
 - `tests/test_preload_service.py::test_error_returns_none` — зелёный
   (раньше падал с `NameError`).
-- `tests/test_application_context.py::TestResolvePublishPath` (7 новых
-  кейсов): default → `~/.cache`, absolute/relative `local_path`,
-  `use_workspace_path` escape hatch, порядок приоритетов
-  `local_path > use_workspace_path`, fallback при `local_path`
-  unwritable, broken `config_service` (returns `str` → не крэш).
+- `tests/test_application_context.py::TestResolvePublishPath` (6 новых
+  кейсов): default → `~/.cache`, empty cache_cfg → то же, absolute/relative
+  `local_path`, `local_path` unwritable → `OSError` (громко), unknown
+  legacy keys (`use_workspace_path`, `publish_to_workspace`, мусор)
+  молча игнорируются.
+- `tests/test_application_context.py::TestSingleMechanism` (1 кейс):
+  gateway и CLI `build_cache_provider` возвращают **один и тот же
+  путь** с default-конфигом — критическая инвариантна противоположного
+  расхождения.
 - `tests/test_application_context.py::TestWarnIfPublishPathOnNfs`
   (2 новых кейса): Linux NFS-путь → warning; Windows → no-op.
 

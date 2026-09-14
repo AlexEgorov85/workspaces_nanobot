@@ -163,7 +163,7 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
   `sql/session/create_public_agent_session_messages.sql`.
 - **Канал** (`public.agent_conversation_messages`) — без миграции (имя уже актуально).
   DDL: `sql/channels/create_public_agent_conversation_messages.sql`.
-- **DuckDB-снимок** — gateway пересоздаст автоматически (in-memory → новый snapshot); путь по умолчанию `~/.cache/nanobot/duckdb/cache.duckdb` (см. `_resolve_publish_path()`); legacy `<workspace>/data_store/duckdb/cache.duckdb` доступен через `gateway.cache.use_workspace_path: true`.
+- **DuckDB-снимок** — gateway пересоздаст автоматически (in-memory → новый snapshot); путь вычисляется через единый `resolve_publish_path()` (`lib/core/application_context.py`) — default `~/.cache/nanobot/duckdb/cache.duckdb`, override через `gateway.cache.local_path`. Legacy `<workspace>/data_store/duckdb/cache.duckdb` больше не выбирается ни через какой knob (escape hatch `use_workspace_path` удалён в v2.5.2).
 - **Векторные индексы** (`oarb.audit_vectors`, `public.agent_vector_index_store`,
   `public.agent_vector_index_config`) — без миграции (1.5.0 уже хранил их в БД);
   DDL в `sql/audit_analyzer/`.

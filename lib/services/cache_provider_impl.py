@@ -333,9 +333,21 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
     vi_list = cfg.get("vector_indexes") or []
     vi_first = vi_list[0] if vi_list and isinstance(vi_list[0], dict) else {}
 
-    from lib.services.table_registry import table_registry
     workspace_root = base.parent.parent
-    cache_path = str(table_registry.snapshot_path(workspace_root))
+
+    # Cache-path ВСЕГДА вычисляется через resolve_publish_path,
+    # чтобы сходиться с gateway (см. lib/core/application_context.py).
+    # До v2.5.2 здесь был hardcoded table_registry.snapshot_path(workspace_root)
+    # — после safe-default фикса в gateway он расходился с CLI/skill
+    # (gateway писал в ~/.cache/, а читали из <workspace>/data_store/),
+    # и skill видел устаревший snapshot. v2.5.2+ оба слоя вызывают
+    # одну pure-функцию с одними gateway.cache.* настройками.
+    from lib.core.application_context import resolve_publish_path
+
+    gateway_cache_cfg = (_SETTINGS.get("gateway") or {}).get("cache") or {}
+    if not isinstance(gateway_cache_cfg, dict):
+        gateway_cache_cfg = {}
+    cache_path = resolve_publish_path(str(workspace_root), gateway_cache_cfg)
 
     index_path = ""
     vi_name = vi_first.get("name", "")

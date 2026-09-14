@@ -612,96 +612,74 @@ def _default_local_cache_dir() -> "Path":
     return Path.home() / ".cache" / "nanobot" / "duckdb"
 
 
-def _resolve_publish_path(ctx, workspace_path) -> str:
-    """Путь к ``cache.duckdb`` (DuckDB-снапшот runtime-кеша).
+def resolve_publish_path(workspace_path, cache_cfg: dict | None = None) -> str:
+    """**ЕДИНЫЙ** механизм вычисления пути к ``cache.duckdb``.
 
-    **Безопасный default**: ``~/.cache/nanobot/duckdb/cache.duckdb``. Это
-    сделано осознанно: DuckDB ATTACH берёт эксклюзивный flock, который
+    **Безопасный default**: ``~/.cache/nanobot/duckdb/cache.duckdb``.
+    Решение осознанное: DuckDB ATTACH берёт эксклюзивный flock, который
     NFS не отдаёт (``"Conflicting lock is held in PID 0"`` на свежем файле
-    после ``rm`` — проверено эмпирически на jupyter-инсталляциях с
-    NFS-монтированием ``/home/datalab/nfs/.../workspace``). Legacy-путь
-    ``<workspace>/data_store/duckdb/cache.duckdb`` на NFS роняет каждый
-    sync-цикл с непонятным traceback.
+    после ``rm`` — проверено эмпирически).
 
-    Управление через ``gateway.cache.*`` в ``project.json``:
+    Управление через ``cache_cfg`` (как срез из
+    ``project.json::gateway.cache``):
 
     * ``local_path`` (str, опц.) — абсолютный/относительный (от workspace)
-      путь к каталогу на **локальной** ФС, где будет лежать ``cache.duckdb``.
+      путь к каталогу на локальной ФС, где будет лежать ``cache.duckdb``.
       Полезно, когда у ``~/.cache`` нет места или нужна отдельная ФС.
-    * ``use_workspace_path`` (bool, опц., дефолт ``False``) — escape hatch:
-      принудительно использовать legacy
-      ``<workspace>/data_store/duckdb/cache.duckdb``. **Не рекомендуется** —
-      сохраняйте только для dev/debug сценариев, где вы точно знаете, что
-      workspace на ext4. На NFS приведёт к регрессу ``PID 0``.
-    * ``publish_to_workspace`` (bool, опц., задел) — после успешного publish
-      копировать ``cache.duckdb`` в workspace-путь. Полезно, если CLI/skill
-      на **другой** машине читают с NFS-шаринга; в этом проекте пока
-      не реализовано.
+
+    **Никаких escape-hatch'ей и режимов совместимости.** Один механизм,
+    один путь: либо явный ``gateway.cache.local_path``, либо default
+    ``~/.cache/nanobot/duckdb/cache.duckdb``. Legacy
+    ``<workspace>/data_store/duckdb/cache.duckdb`` на NFS **не
+    поддерживается** и больше не доступен через эту функцию — он
+    приводил к расхождению между gateway и CLI/skill.
+
+    **Согласованность gateway ↔ CLI/skill.** Эту функцию вызывают:
+
+    1. **Gateway** (``_make_sync_services``) — пишет снимок после
+       каждого sync-цикла.
+    2. **CLI / skill / vector_index_service**
+       (``build_cache_provider``, ``get_in_memory_cache_path``) —
+       читает снимок через ``PostgresDuckDbProvider``.
+
+    Если оба слоя дадут разные пути — gateway пишет в одно место,
+    CLI читает из другого, и скилл видит устаревший/пустой снимок.
+    До v2.5.2 ``build_cache_provider`` хардкодил
+    ``table_registry.snapshot_path(workspace_root)``, который расходился
+    с новым safe default после деплоя. v2.5.2+ обе точки вызывают
+    эту pure-функцию с одними и теми же ``gateway.cache.*``.
 
     Args:
-        ctx: ``ApplicationContext`` (для ``config_service.settings_section``).
-        workspace_path: legacy-путь к workspace (для relative-path и escape hatch).
+        workspace_path: путь к workspace (для разрешения относительного
+            ``local_path``).
+        cache_cfg: dict — подсекция ``gateway.cache`` из project.json
+            (или ``None``/пустой dict, если не задана).
 
     Returns:
-        str-путь к ``cache.duckdb`` (гарантированно под локальной ФС в default;
-        может быть NFS только при явном ``use_workspace_path: true``).
+        str-путь к ``cache.duckdb`` (всегда на локальной ФС).
+
+    Raises:
+        OSError: если ни явный путь, ни default, ни workspace-local
+            fallback не могут быть созданы. **Не молчит** — падает
+            громко, чтобы проблема была видна сразу.
     """
     from pathlib import Path
 
-    try:
-        gateway_cfg = ctx.config_service.settings_section("gateway") or {}
-    except Exception:
-        gateway_cfg = {}
-    if not isinstance(gateway_cfg, dict):
-        gateway_cfg = {}
-    cache_cfg = gateway_cfg.get("cache") if isinstance(gateway_cfg.get("cache"), dict) else {}
+    if not isinstance(cache_cfg, dict):
+        cache_cfg = {}
 
     # 1) Явный override: gateway.cache.local_path.
     local_path = cache_cfg.get("local_path")
     if isinstance(local_path, str) and local_path.strip():
         p = Path(local_path).expanduser()
-        if not p.is_absolute():
+        if not p.is_absolute() and workspace_path:
             p = Path(workspace_path) / p
-        try:
-            p.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            # Не удалось создать — НЕ валимся на NFS, пробуем default.
-            import logging
-            logging.getLogger(__name__).warning(
-                "gateway.cache.local_path=%s mkdir failed: %s — falling back to default ~/.cache",
-                local_path, e,
-            )
-        else:
-            return str(p / "cache.duckdb")
-
-    # 2) Escape hatch: gateway.cache.use_workspace_path == true.
-    if cache_cfg.get("use_workspace_path") is True:
-        from lib.services.table_registry import table_registry
-
-        legacy = str(table_registry.snapshot_path(Path(workspace_path)))
-        import logging
-        logging.getLogger(__name__).warning(
-            "gateway.cache.use_workspace_path=true → cache.duckdb at %s. "
-            "Убедитесь, что это локальная ФС, иначе ATTACH упадёт с 'PID 0'.",
-            legacy,
-        )
-        return legacy
-
-    # 3) Default: ~/.cache/nanobot/duckdb/cache.duckdb на локальной ФС.
-    default = _default_local_cache_dir()
-    try:
-        default.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        # Совсем нет прав на ~/.cache/ (крайне редко) — fallback на
-        # workspace-local, но НЕ на NFS-ветку.
-        import logging
-        logging.getLogger(__name__).warning(
-            "Cannot create default cache dir %s — using workspace-local ./cache instead",
-            default,
-        )
-        p = Path(workspace_path) / "data_store" / "duckdb"
         p.mkdir(parents=True, exist_ok=True)
         return str(p / "cache.duckdb")
+
+    # 2) Default: ~/.cache/nanobot/duckdb/cache.duckdb на локальной ФС.
+    default = _default_local_cache_dir()
+    default.mkdir(parents=True, exist_ok=True)
     return str(default / "cache.duckdb")
 
 
@@ -711,10 +689,11 @@ def _warn_if_publish_path_on_nfs(publish_path: str) -> None:
     Используется ``/proc/mounts`` (только Linux). На других платформах
     функция — no-op.
 
-    Это защита от регрессии: даже если пользователь осознанно выставил
-    ``gateway.cache.use_workspace_path: true`` или положил workspace на
-    NFS-шару, мы ему скажем: «вот что сейчас произойдёт — ATTACH будет
-    падать с PID 0». Лучше увидеть это на старте, чем ловить в рантайме.
+    Это защита от регрессии: даже если пользователь положил workspace на
+    NFS-шару и ``local_path`` через symlink указывает на NFS (либо
+    ``~/.cache`` оказался на NFS), мы ему скажем: «вот что сейчас
+    произойдёт — ATTACH будет падать с PID 0». Лучше увидеть это на
+    старте, чем ловить в рантайме.
     """
     import logging
     import platform
@@ -750,7 +729,7 @@ def _warn_if_publish_path_on_nfs(publish_path: str) -> None:
                         "        Исправьте одним из способов:\n"
                         "          1) оставьте default (кеш автоматически уйдёт в ~/.cache/nanobot/duckdb);\n"
                         "          2) задайте gateway.cache.local_path на локальную ФС в project.json;\n"
-                        "          3) удалите gateway.cache.use_workspace_path, если он был включён.\n",
+                        "          3) уберите NFS из текущего пути (symlink / монтирование).\n",
                         publish_path, fstype, mount_point,
                     )
                     # Дополнительно — в stdout через print, чтобы пользователь
@@ -845,8 +824,13 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         vector_names,
     )
 
-    publish_path = _resolve_publish_path(ctx, ctx.config.workspace_path)
+    gateway_cfg = (ctx.config_service.settings_section("gateway") or {})
+    if not isinstance(gateway_cfg, dict):
+        gateway_cfg = {}
+    cache_cfg = gateway_cfg.get("cache") if isinstance(gateway_cfg.get("cache"), dict) else {}
+    publish_path = resolve_publish_path(ctx.config.workspace_path, cache_cfg)
     _warn_if_publish_path_on_nfs(publish_path)
+
     from lib.services.cache_provider_impl import read_embedding_config, read_vector_store_table
 
     emb = read_embedding_config()

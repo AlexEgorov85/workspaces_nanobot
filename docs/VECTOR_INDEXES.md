@@ -489,7 +489,7 @@ python tools/build_vectors.py --full-rebuild  # пересоберёт оста�
 1. In-memory кэш провайдера (`_index_cache`) — если уже загружен;
 2. `public.agent_vector_index_store` (FAISS blob + metadata, проверка signature);
 3. Пересборка из сырых векторов `oarb.audit_vectors` → сохранение в store;
-4. DuckDB-снапшот (см. `_resolve_publish_path()`; default `~/.cache/nanobot/duckdb/cache.duckdb`, legacy `<workspace>/data_store/duckdb/cache.duckdb` под `use_workspace_path: true`) — fallback;
+4. DuckDB-снапшот (см. `resolve_publish_path()`; default `~/.cache/nanobot/duckdb/cache.duckdb`, override `gateway.cache.local_path`) — fallback;
 5. Файлы `.faiss` (legacy).
 
 `search_vector` всегда проходит через `_load_index` — единый путь для кэша, store,

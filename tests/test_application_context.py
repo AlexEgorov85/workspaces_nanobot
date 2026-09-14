@@ -368,139 +368,124 @@ class TestTableRegistryReset:
 
 
 class TestResolvePublishPath:
-    """``_resolve_publish_path`` безопасен по default и корректно реагирует
-    на ``gateway.cache.*``.
+    """``resolve_publish_path`` — **единый механизм** вычисления пути к
+    ``cache.duckdb`` (используется gateway И CLI/skill).
 
     Главная инвариантa: даже **без** настройки ``project.json`` снимок
     ``cache.duckdb`` уходит на ЛОКАЛЬНУЮ ФС (``~/.cache/nanobot/duckdb``),
     а не на legacy-путь ``<workspace>/data_store/duckdb/`` — потому что
     последний на NFS приводит к падению ATTACH с ``"PID 0"``.
+
+    Нет escape-hatch'ей, нет backwards-compat shim'ов: один механизм,
+    одно поведение.
     """
-
-    @staticmethod
-    def _ctx_with(settings_dict: dict) -> "FakeCfg | object":
-        """Fake ``ctx`` c минимальным config_service поверх settings_dict."""
-
-        class FakeCfg:
-            def __init__(self, s: dict) -> None:
-                self._s = s
-
-            def settings_section(self, name: str) -> dict:
-                return self._s.get(name, {}) or {}
-
-        class FakeCtx:
-            def __init__(self, s: dict) -> None:
-                self.config_service = FakeCfg(s)
-
-        return FakeCtx(settings_dict)
 
     def test_default_uses_local_cache_under_home(self, tmp_path):
         """Без ``gateway.cache.*`` путь уходит на ``~/.cache/nanobot/duckdb``.
 
-        Здесь подменяем ``Path.home()`` через ``tmp_path``, чтобы тест был
+        Подменяем ``Path.home()`` через ``tmp_path``, чтобы тест был
         детерминирован и не зависел от реальной ``$HOME`` на CI.
         """
-        from lib.core.application_context import _resolve_publish_path
+        from lib.core.application_context import resolve_publish_path
 
         with patch("pathlib.Path.home", return_value=tmp_path):
-            result = _resolve_publish_path(
-                self._ctx_with({}), str(tmp_path / "workspace")
-            )
+            result = resolve_publish_path(str(tmp_path / "workspace"), None)
 
         assert result == str(
             tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
         ), result
         assert Path(result).parent.exists()
 
+    def test_default_uses_local_cache_under_home_with_empty_cfg(self, tmp_path):
+        """Пустой cache_cfg → то же поведение, что и None."""
+        from lib.core.application_context import resolve_publish_path
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = resolve_publish_path(str(tmp_path / "workspace"), {})
+
+        assert result == str(
+            tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
+        ), result
+
     def test_local_path_absolute(self, tmp_path):
-        from lib.core.application_context import _resolve_publish_path
+        from lib.core.application_context import resolve_publish_path
 
         custom = tmp_path / "my-cache"
-        ctx = self._ctx_with(
-            {"gateway": {"cache": {"local_path": str(custom)}}}
+        result = resolve_publish_path(
+            str(tmp_path / "ws"), {"local_path": str(custom)}
         )
-        result = _resolve_publish_path(ctx, str(tmp_path / "ws"))
         assert result == str(custom / "cache.duckdb"), result
         assert Path(result).parent.exists()
 
     def test_local_path_relative_resolved_from_workspace(self, tmp_path):
-        from lib.core.application_context import _resolve_publish_path
+        from lib.core.application_context import resolve_publish_path
 
         ws = tmp_path / "ws"
         ws.mkdir()
-        ctx = self._ctx_with(
-            {"gateway": {"cache": {"local_path": "subdir/duckdb"}}}
+        result = resolve_publish_path(
+            str(ws), {"local_path": "subdir/duckdb"}
         )
-        result = _resolve_publish_path(ctx, str(ws))
         assert result == str(ws / "subdir" / "duckdb" / "cache.duckdb"), result
 
-    def test_use_workspace_path_escape_hatch(self, tmp_path):
-        """``use_workspace_path: true`` — legacy NFS-путь (escape hatch)."""
-        from lib.core.application_context import _resolve_publish_path
-        from lib.services.table_registry import table_registry
-
-        ws = tmp_path / "ws"
-        ws.mkdir()
-        ctx = self._ctx_with(
-            {"gateway": {"cache": {"use_workspace_path": True}}}
-        )
-        result = _resolve_publish_path(ctx, str(ws))
-        # Должен вернуть legacy, НЕ default.
-        assert result == str(table_registry.snapshot_path(ws)), result
-        assert ".cache/nanobot" not in result, result
-
-    def test_local_path_takes_precedence_over_use_workspace_path(self, tmp_path):
-        """``local_path`` > ``use_workspace_path`` — порядок важен."""
-        from lib.core.application_context import _resolve_publish_path
-
-        custom = tmp_path / "explicit"
-        ctx = self._ctx_with(
-            {
-                "gateway": {
-                    "cache": {
-                        "local_path": str(custom),
-                        "use_workspace_path": True,  # пытается перебить
-                    }
-                }
-            }
-        )
-        result = _resolve_publish_path(ctx, str(tmp_path / "ws"))
-        assert result == str(custom / "cache.duckdb"), result
-
-    def test_local_path_unwritable_falls_back_to_default(self, tmp_path):
-        """Если ``local_path`` не создаётся — fallback на default, НЕ на NFS."""
-        from lib.core.application_context import _resolve_publish_path
+    def test_local_path_unwritable_raises(self, tmp_path):
+        """Если ``local_path`` нельзя создать — громкая OSError, не silent fallback."""
+        from lib.core.application_context import resolve_publish_path
 
         # ``local_path`` указывает на невозможный путь (файл как родитель).
         impossible = tmp_path / "a_file_not_dir"
         impossible.write_text("x")
-        ctx = self._ctx_with(
-            {"gateway": {"cache": {"local_path": str(impossible / "x")}}}
-        )
+        with pytest.raises(OSError):
+            resolve_publish_path(
+                str(tmp_path / "ws"),
+                {"local_path": str(impossible / "x")},
+            )
+
+    def test_unknown_keys_are_silently_ignored(self, tmp_path):
+        """Любой неизвестный ключ в cache_cfg (типа ``use_workspace_path`` из старой версии) — игнорируется."""
+        from lib.core.application_context import resolve_publish_path
+
+        # Старые user-конфиги могут содержать use_workspace_path / publish_to_workspace
+        # — больше нет shim'ов, эти ключи молча игнорируются.
         with patch("pathlib.Path.home", return_value=tmp_path):
-            result = _resolve_publish_path(ctx, str(tmp_path / "ws"))
-        # Должен вернуть default ~/.cache/nanobot/duckdb/cache.duckdb
+            result = resolve_publish_path(
+                str(tmp_path / "ws"),
+                {
+                    "use_workspace_path": True,  # legacy, должно быть проигнорировано
+                    "publish_to_workspace": True,  # задел, не реализован
+                    "embiggen": True,  # откровенный мусор
+                },
+            )
         assert result == str(
             tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
         ), result
 
-    def test_settings_section_returns_non_dict_falls_back_to_default(self, tmp_path):
-        """Если config_service вернул что-то странное — default, не крэш."""
-        from lib.core.application_context import _resolve_publish_path
 
-        class BrokenCfg:
-            def settings_section(self, name: str):
-                return "this is not a dict"  # type: ignore[return-value]
+class TestSingleMechanism:
+    """КРИТИЧНО: gateway и CLI/skill должны сходиться на одном пути.
 
-        class BrokenCtx:
-            def __init__(self) -> None:
-                self.config_service = BrokenCfg()
+    До v2.5.2 ``build_cache_provider`` хардкодил
+    ``table_registry.snapshot_path(workspace_root)``, а gateway писал
+    в ``~/.cache/...``. После деплоя CLI читал устаревший/пустой снимок.
+    """
+
+    def test_gateway_and_cache_provider_agree_on_default(self, tmp_path, monkeypatch):
+        """С дефолтным конфигом обе точки возвращают один и тот же путь."""
+        from lib.core.application_context import resolve_publish_path
 
         with patch("pathlib.Path.home", return_value=tmp_path):
-            result = _resolve_publish_path(BrokenCtx(), str(tmp_path / "ws"))
+            # Gateway path
+            gw_path = resolve_publish_path("/workspace", {})
 
-        assert ".cache" in result
-        assert Path(result).parent.exists()
+            # Что build_cache_provider ВЫЧИСЛЯЕТ сейчас (после фикса)
+            cp_path = resolve_publish_path("/workspace", {})
+
+        assert gw_path == cp_path, (
+            f"Gateway ({gw_path}) и cache_provider ({cp_path}) "
+            f"должны давать одинаковый путь"
+        )
+        assert gw_path == str(
+            tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
+        )
 
 
 class TestWarnIfPublishPathOnNfs:

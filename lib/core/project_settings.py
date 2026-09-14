@@ -195,50 +195,38 @@ class SyncSettings(_StrictOptional):
 class CacheSettings(_StrictOptional):
     """Параметры runtime-кеша (DuckDB-снапшот).
 
-    По умолчанию ``DuckDbCacheStore.publish_path`` живёт под
-    ``<workspace>/data_store/duckdb/cache.duckdb`` (``table_registry.snapshot_path``).
-    На NFS это **не работает**: DuckDB ATTACH берёт эксклюзивный flock на файл,
-    NFS ``lockd`` не выдаёт валидный PID, и ATTACH рапортует
-    ``"Conflicting lock is held in PID 0"`` на КАЖДОМ publish — даже на свежем
-    файле после ``rm``. Это известный footgun DuckDB: write-lock поверх NFS
-    официально не поддерживается.
+    **ЕДИНЫЙ механизм вычисления пути к кешу** —
+    :func:`lib.core.application_context.resolve_publish_path`. Все
+    слои runtime'а (gateway + CLI/skill) обязаны звать её, чтобы
+    путь записи и путь чтения **совпадали**.
 
-    Решение — перенести ``publish_path`` на локальную ФС:
+    Без настройки default — ``~/.cache/nanobot/duckdb/cache.duckdb``
+    (POSIX ``fcntl`` работает там штатно; на NFS ATTACH падает с
+    ``"Conflicting lock is held in PID 0"`` даже на свежем файле после
+    ``rm`` — проверено эмпирически). Legacy
+    ``<workspace>/data_store/duckdb/cache.duckdb`` **не поддерживается**
+    (на NFS гарантированно ломается, и именно это расхождение между
+    gateway и CLI было исходным багом v2.5.1 и ниже).
 
-      * ``local_path`` (str, опционально) — абсолютный путь к локальной
-        директории, где будет лежать ``cache.duckdb``. Должна быть
-        **read-write** для текущего пользователя и **НЕ на NFS**
-        (ext4/tmpfs/overlay2/xfs — подходит всё, что даёт POSIX-``fcntl``).
-        Если не задан — fallback на ``<workspace>/data_store/duckdb/``
-        (legacy NFS-поведение, для тестов и dev-сценариев без NFS).
-      * ``publish_to_workspace`` (bool, опционально, дефолт ``False``) —
-        после успешного publish дополнительно копировать ``cache.duckdb``
-        в legacy-путь под workspace (``table_registry.snapshot_path``).
-        Полезно, когда CLI/skill-процессы читают снапшот с NFS-шаринга,
-        а gateway крутится на другой машине с локальной ФС. **Не нужно**,
-        если gateway и CLI/skill запущены на одной машине — оба увидят
-        локальный файл.
+    Единственный knob:
 
-    Типичная настройка для jupyter-инсталляции с NFS-шарингом:
+      * ``local_path`` (str, опц.) — абсолютный/относительный (от workspace)
+        путь к каталогу на **локальной** ФС, где будет лежать
+        ``cache.duckdb``. Полезно, когда у ``~/.cache`` нет места или
+        нужна отдельная ФС.
+
+    Пример для jupyter-инсталляции, где ``~/.cache`` не подходит:
 
     .. code-block:: jsonc
 
         "gateway": {
           "cache": {
-            "local_path": "/home/datalab/.cache/nanobot/duckdb",
-            "publish_to_workspace": true
+            "local_path": "/var/lib/nanobot/duckdb"
           }
         }
-
-    CLI/skill читают ``cache.duckdb`` по тому же пути, что и gateway
-    (``get_cache_db_path`` в ``lib.core.skill_config``) — обе стороны должны
-    видеть один и тот же каталог. На одной машине — это просто локальный
-    путь; на разных машинах включается ``publish_to_workspace: true`` и CLI
-    читает с NFS-копии.
     """
 
     local_path: str | None = None
-    publish_to_workspace: bool | None = None
 
 
 class CliSettings(_StrictOptional):

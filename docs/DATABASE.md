@@ -202,14 +202,17 @@ DSN подключается только через `channels.postgres.dsn` в 
   исходные PG-типы и комментарии (без них — DuckDB-тип из information_schema).
   `publish()` атомарно записывает снимок таблиц (ATTACH во временный файл →
   `os.replace`) в `publish_path`, который вычисляется через
-  `_resolve_publish_path()` (`lib/core/application_context.py`):
+  `resolve_publish_path()` (`lib/core/application_context.py`) —
+  **единый механизм**, общий для gateway и CLI/skill:
 
   1. `gateway.cache.local_path` (если задан) → `<это>/cache.duckdb`;
-  2. `gateway.cache.use_workspace_path: true` → legacy
-     `<workspace>/data_store/duckdb/cache.duckdb` (escape hatch);
-  3. **default** (v2.5.2+) → `~/.cache/nanobot/duckdb/cache.duckdb`.
+  2. **default** (v2.5.2+) → `~/.cache/nanobot/duckdb/cache.duckdb`.
      DuckDB ATTACH flock не работает на NFS, поэтому default — локальная ФС,
      чтобы не падать с «Conflicting lock is held in PID 0».
+
+  Единственного опционального knob'а `local_path` достаточно; legacy
+  `<workspace>/data_store/duckdb/` через `gateway.cache.use_workspace_path`
+  удалён (это была compat-ветка, которая расходилась с CLI).
 
   Без изменений (`_dirty` = False) файл не перезаписывается; если снимок занят читателем
   (CLI) — публикация откладывается до следующего цикла, ошибка не теряет данные.
