@@ -82,10 +82,15 @@ def main() -> None:
         # initial_load не заполнит свежий снимок заново.
         _old_snapshot = ctx.cache_store.get_stats().get("publish_path")
         if _old_snapshot:
-            try:
-                Path(_old_snapshot).unlink(missing_ok=True)
-            except OSError:
-                pass
+            # Чистим и финальный снапшот, и осиротевший .tmp (publish мог быть
+            # убит между ATTACH и os.replace — тогда .tmp лежит залоченный
+            # через NFS lockd, и новый publish отстрелит "PID 0" на ATTACH).
+            for _candidate in (Path(_old_snapshot),
+                               Path(_old_snapshot + ".tmp")):
+                try:
+                    _candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
         ctx.sync_service.set_on_new_records_callback(
             ctx.cache_store.upsert_records
         )
