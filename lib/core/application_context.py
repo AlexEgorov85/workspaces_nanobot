@@ -593,58 +593,177 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
     )
 
 
-def _resolve_publish_path(ctx, workspace_path) -> str:
-    """Путь к ``cache.duckdb`` с учётом ``gateway.cache.local_path``.
+def _default_local_cache_dir() -> "Path":
+    """Безопасный default для runtime-кеша: ``~/.cache/nanobot/duckdb``.
 
-    DuckDB ATTACH берёт эксклюзивный flock, который NFS не отдаёт (файл
-    падает с ``"Conflicting lock is held in PID 0"`` даже после ``rm``).
-    Если в ``project.json::gateway.cache.local_path`` задан абсолютный путь
-    на локальной ФС — пишем туда. Иначе fallback на legacy
-    ``<workspace>/data_store/duckdb/cache.duckdb`` (для dev/test-сценариев).
+    DuckDB ATTACH берёт эксклюзивный flock, который NFS не отдаёт
+    (``"Conflicting lock is held in PID 0"`` на свежем файле после ``rm``).
+    Поэтому default для snapshot'а — **локальный** кеш-пользовательский
+    каталог (POSIX ``fcntl`` работает штатно на ext4/tmpfs/overlay2/xfs).
+    На Windows ``Path.home()`` указывает на ``%USERPROFILE%`` (``C:\\Users\\X\\``);
+    на Linux/macOS — ``/home/X`` / ``/Users/X``.
+
+    Структура каталога — ``<home>/.cache/nanobot/duckdb/cache.duckdb``.
+    Совпадает с XDG Base Directory Specification для user-level cache
+    (``$XDG_CACHE_HOME`` или ``~/.cache``).
+    """
+    from pathlib import Path
+
+    return Path.home() / ".cache" / "nanobot" / "duckdb"
+
+
+def _resolve_publish_path(ctx, workspace_path) -> str:
+    """Путь к ``cache.duckdb`` (DuckDB-снапшот runtime-кеша).
+
+    **Безопасный default**: ``~/.cache/nanobot/duckdb/cache.duckdb``. Это
+    сделано осознанно: DuckDB ATTACH берёт эксклюзивный flock, который
+    NFS не отдаёт (``"Conflicting lock is held in PID 0"`` на свежем файле
+    после ``rm`` — проверено эмпирически на jupyter-инсталляциях с
+    NFS-монтированием ``/home/datalab/nfs/.../workspace``). Legacy-путь
+    ``<workspace>/data_store/duckdb/cache.duckdb`` на NFS роняет каждый
+    sync-цикл с непонятным traceback.
+
+    Управление через ``gateway.cache.*`` в ``project.json``:
+
+    * ``local_path`` (str, опц.) — абсолютный/относительный (от workspace)
+      путь к каталогу на **локальной** ФС, где будет лежать ``cache.duckdb``.
+      Полезно, когда у ``~/.cache`` нет места или нужна отдельная ФС.
+    * ``use_workspace_path`` (bool, опц., дефолт ``False``) — escape hatch:
+      принудительно использовать legacy
+      ``<workspace>/data_store/duckdb/cache.duckdb``. **Не рекомендуется** —
+      сохраняйте только для dev/debug сценариев, где вы точно знаете, что
+      workspace на ext4. На NFS приведёт к регрессу ``PID 0``.
+    * ``publish_to_workspace`` (bool, опц., задел) — после успешного publish
+      копировать ``cache.duckdb`` в workspace-путь. Полезно, если CLI/skill
+      на **другой** машине читают с NFS-шаринга; в этом проекте пока
+      не реализовано.
 
     Args:
         ctx: ``ApplicationContext`` (для ``config_service.settings_section``).
-        workspace_path: legacy-путь к workspace (для fallback-варианта).
+        workspace_path: legacy-путь к workspace (для relative-path и escape hatch).
 
     Returns:
-        str-путь к ``cache.duckdb``.
+        str-путь к ``cache.duckdb`` (гарантированно под локальной ФС в default;
+        может быть NFS только при явном ``use_workspace_path: true``).
     """
+    from pathlib import Path
+
     try:
         gateway_cfg = ctx.config_service.settings_section("gateway") or {}
     except Exception:
         gateway_cfg = {}
-    cache_cfg = gateway_cfg.get("cache") if isinstance(gateway_cfg, dict) else None
-    cache_cfg = cache_cfg if isinstance(cache_cfg, dict) else {}
+    if not isinstance(gateway_cfg, dict):
+        gateway_cfg = {}
+    cache_cfg = gateway_cfg.get("cache") if isinstance(gateway_cfg.get("cache"), dict) else {}
 
+    # 1) Явный override: gateway.cache.local_path.
     local_path = cache_cfg.get("local_path")
-    if local_path:
-        # Локальная ФС — пишем туда. ``gateway.cache.local_path`` обязан
-        # указывать на **директорию**; ``cache.duckdb`` дописываем сами.
-        from pathlib import Path
-
+    if isinstance(local_path, str) and local_path.strip():
         p = Path(local_path).expanduser()
         if not p.is_absolute():
-            # относительный путь резолвим от workspace
             p = Path(workspace_path) / p
         try:
             p.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            # Не удалось создать local-каталог — отступаем на legacy,
-            # не валим старт gateway из-за кеша.
+            # Не удалось создать — НЕ валимся на NFS, пробуем default.
             import logging
             logging.getLogger(__name__).warning(
-                "gateway.cache.local_path=%s mkdir failed: %s — falling back to %s",
-                local_path, e, workspace_path,
+                "gateway.cache.local_path=%s mkdir failed: %s — falling back to default ~/.cache",
+                local_path, e,
             )
-            from lib.services.table_registry import table_registry
+        else:
+            return str(p / "cache.duckdb")
 
-            return str(table_registry.snapshot_path(workspace_path))
+    # 2) Escape hatch: gateway.cache.use_workspace_path == true.
+    if cache_cfg.get("use_workspace_path") is True:
+        from lib.services.table_registry import table_registry
+
+        legacy = str(table_registry.snapshot_path(Path(workspace_path)))
+        import logging
+        logging.getLogger(__name__).warning(
+            "gateway.cache.use_workspace_path=true → cache.duckdb at %s. "
+            "Убедитесь, что это локальная ФС, иначе ATTACH упадёт с 'PID 0'.",
+            legacy,
+        )
+        return legacy
+
+    # 3) Default: ~/.cache/nanobot/duckdb/cache.duckdb на локальной ФС.
+    default = _default_local_cache_dir()
+    try:
+        default.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Совсем нет прав на ~/.cache/ (крайне редко) — fallback на
+        # workspace-local, но НЕ на NFS-ветку.
+        import logging
+        logging.getLogger(__name__).warning(
+            "Cannot create default cache dir %s — using workspace-local ./cache instead",
+            default,
+        )
+        p = Path(workspace_path) / "data_store" / "duckdb"
+        p.mkdir(parents=True, exist_ok=True)
         return str(p / "cache.duckdb")
+    return str(default / "cache.duckdb")
 
-    # Legacy fallback — workspace/data_store/duckdb/cache.duckdb (часто NFS).
-    from lib.services.table_registry import table_registry
 
-    return str(table_registry.snapshot_path(workspace_path))
+def _warn_if_publish_path_on_nfs(publish_path: str) -> None:
+    """Если ``publish_path`` живёт на NFS — напечатать громкое предупреждение.
+
+    Используется ``/proc/mounts`` (только Linux). На других платформах
+    функция — no-op.
+
+    Это защита от регрессии: даже если пользователь осознанно выставил
+    ``gateway.cache.use_workspace_path: true`` или положил workspace на
+    NFS-шару, мы ему скажем: «вот что сейчас произойдёт — ATTACH будет
+    падать с PID 0». Лучше увидеть это на старте, чем ловить в рантайме.
+    """
+    import logging
+    import platform
+    import sys
+    from pathlib import Path
+
+    if platform.system().lower() not in ("linux", "linux2"):
+        return  # Windows/macOS — не делаем NFS-детект; фолбэк на реальный фейл
+
+    try:
+        p = Path(publish_path).resolve()
+    except OSError:
+        return  # путь ещё не существует — не наша забота
+
+    mounts = Path("/proc/mounts")
+    if not mounts.exists():
+        return
+
+    target = str(p)
+    try:
+        for raw in mounts.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = raw.split()
+            if len(parts) < 3:
+                continue
+            mount_point, fstype = parts[1], parts[2]
+            # ``mount_point`` — каталог; ищем самый длинный match
+            if target == mount_point or target.startswith(mount_point.rstrip("/") + "/"):
+                if "nfs" in fstype.lower():
+                    logging.getLogger(__name__).warning(
+                        "\n[cache] publish_path=%s лежит на %s (%s).\n"
+                        "        DuckDB ATTACH не работает поверх NFS — каждый sync-цикл\n"
+                        "        будет падать с 'Conflicting lock is held in PID 0'.\n"
+                        "        Исправьте одним из способов:\n"
+                        "          1) оставьте default (кеш автоматически уйдёт в ~/.cache/nanobot/duckdb);\n"
+                        "          2) задайте gateway.cache.local_path на локальную ФС в project.json;\n"
+                        "          3) удалите gateway.cache.use_workspace_path, если он был включён.\n",
+                        publish_path, fstype, mount_point,
+                    )
+                    # Дополнительно — в stdout через print, чтобы пользователь
+                    # гарантированно увидел даже если logging не настроен.
+                    print(
+                        f"[cache] WARNING: {publish_path} is on {fstype} "
+                        f"({mount_point}); DuckDB ATTACH will fail with 'PID 0'. "
+                        f"Check gateway.cache.local_path.",
+                        file=sys.stderr,
+                    )
+                return
+    except OSError:
+        return  # /proc недоступен — молча пропускаем
 
 
 def _make_sync_services(ctx: ApplicationContext) -> tuple:
@@ -727,7 +846,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     )
 
     publish_path = _resolve_publish_path(ctx, ctx.config.workspace_path)
-
+    _warn_if_publish_path_on_nfs(publish_path)
     from lib.services.cache_provider_impl import read_embedding_config, read_vector_store_table
 
     emb = read_embedding_config()

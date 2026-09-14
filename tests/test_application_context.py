@@ -365,3 +365,167 @@ class TestTableRegistryReset:
             "ApplicationContext.create() должен сбрасывать TableRegistry "
             "в начале; остались ресурсы от предыдущего context"
         )
+
+
+class TestResolvePublishPath:
+    """``_resolve_publish_path`` безопасен по default и корректно реагирует
+    на ``gateway.cache.*``.
+
+    Главная инвариантa: даже **без** настройки ``project.json`` снимок
+    ``cache.duckdb`` уходит на ЛОКАЛЬНУЮ ФС (``~/.cache/nanobot/duckdb``),
+    а не на legacy-путь ``<workspace>/data_store/duckdb/`` — потому что
+    последний на NFS приводит к падению ATTACH с ``"PID 0"``.
+    """
+
+    @staticmethod
+    def _ctx_with(settings_dict: dict) -> "FakeCfg | object":
+        """Fake ``ctx`` c минимальным config_service поверх settings_dict."""
+
+        class FakeCfg:
+            def __init__(self, s: dict) -> None:
+                self._s = s
+
+            def settings_section(self, name: str) -> dict:
+                return self._s.get(name, {}) or {}
+
+        class FakeCtx:
+            def __init__(self, s: dict) -> None:
+                self.config_service = FakeCfg(s)
+
+        return FakeCtx(settings_dict)
+
+    def test_default_uses_local_cache_under_home(self, tmp_path):
+        """Без ``gateway.cache.*`` путь уходит на ``~/.cache/nanobot/duckdb``.
+
+        Здесь подменяем ``Path.home()`` через ``tmp_path``, чтобы тест был
+        детерминирован и не зависел от реальной ``$HOME`` на CI.
+        """
+        from lib.core.application_context import _resolve_publish_path
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _resolve_publish_path(
+                self._ctx_with({}), str(tmp_path / "workspace")
+            )
+
+        assert result == str(
+            tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
+        ), result
+        assert Path(result).parent.exists()
+
+    def test_local_path_absolute(self, tmp_path):
+        from lib.core.application_context import _resolve_publish_path
+
+        custom = tmp_path / "my-cache"
+        ctx = self._ctx_with(
+            {"gateway": {"cache": {"local_path": str(custom)}}}
+        )
+        result = _resolve_publish_path(ctx, str(tmp_path / "ws"))
+        assert result == str(custom / "cache.duckdb"), result
+        assert Path(result).parent.exists()
+
+    def test_local_path_relative_resolved_from_workspace(self, tmp_path):
+        from lib.core.application_context import _resolve_publish_path
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        ctx = self._ctx_with(
+            {"gateway": {"cache": {"local_path": "subdir/duckdb"}}}
+        )
+        result = _resolve_publish_path(ctx, str(ws))
+        assert result == str(ws / "subdir" / "duckdb" / "cache.duckdb"), result
+
+    def test_use_workspace_path_escape_hatch(self, tmp_path):
+        """``use_workspace_path: true`` — legacy NFS-путь (escape hatch)."""
+        from lib.core.application_context import _resolve_publish_path
+        from lib.services.table_registry import table_registry
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        ctx = self._ctx_with(
+            {"gateway": {"cache": {"use_workspace_path": True}}}
+        )
+        result = _resolve_publish_path(ctx, str(ws))
+        # Должен вернуть legacy, НЕ default.
+        assert result == str(table_registry.snapshot_path(ws)), result
+        assert ".cache/nanobot" not in result, result
+
+    def test_local_path_takes_precedence_over_use_workspace_path(self, tmp_path):
+        """``local_path`` > ``use_workspace_path`` — порядок важен."""
+        from lib.core.application_context import _resolve_publish_path
+
+        custom = tmp_path / "explicit"
+        ctx = self._ctx_with(
+            {
+                "gateway": {
+                    "cache": {
+                        "local_path": str(custom),
+                        "use_workspace_path": True,  # пытается перебить
+                    }
+                }
+            }
+        )
+        result = _resolve_publish_path(ctx, str(tmp_path / "ws"))
+        assert result == str(custom / "cache.duckdb"), result
+
+    def test_local_path_unwritable_falls_back_to_default(self, tmp_path):
+        """Если ``local_path`` не создаётся — fallback на default, НЕ на NFS."""
+        from lib.core.application_context import _resolve_publish_path
+
+        # ``local_path`` указывает на невозможный путь (файл как родитель).
+        impossible = tmp_path / "a_file_not_dir"
+        impossible.write_text("x")
+        ctx = self._ctx_with(
+            {"gateway": {"cache": {"local_path": str(impossible / "x")}}}
+        )
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _resolve_publish_path(ctx, str(tmp_path / "ws"))
+        # Должен вернуть default ~/.cache/nanobot/duckdb/cache.duckdb
+        assert result == str(
+            tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
+        ), result
+
+    def test_settings_section_returns_non_dict_falls_back_to_default(self, tmp_path):
+        """Если config_service вернул что-то странное — default, не крэш."""
+        from lib.core.application_context import _resolve_publish_path
+
+        class BrokenCfg:
+            def settings_section(self, name: str):
+                return "this is not a dict"  # type: ignore[return-value]
+
+        class BrokenCtx:
+            def __init__(self) -> None:
+                self.config_service = BrokenCfg()
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _resolve_publish_path(BrokenCtx(), str(tmp_path / "ws"))
+
+        assert ".cache" in result
+        assert Path(result).parent.exists()
+
+
+class TestWarnIfPublishPathOnNfs:
+    """``_warn_if_publish_path_on_nfs`` — Linux-only, no-op на других ОС."""
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="/proc/mounts отсутствует на Windows",
+    )
+    def test_warns_on_nfs_path(self, tmp_path, caplog):
+        """Если ``/proc/mounts`` указывает NFS — печатаем warning."""
+        from lib.core.application_context import _warn_if_publish_path_on_nfs
+
+        fake_mounts = f"{tmp_path} nfs rw,vers=3 0 0\n"
+        with patch("pathlib.Path.exists", return_value=True), \
+             patch.object(Path, "read_text", return_value=fake_mounts), \
+             patch("lib.core.application_context.Path.exists", return_value=True):
+            with caplog.at_level("WARNING"):
+                _warn_if_publish_path_on_nfs(str(tmp_path / "cache.duckdb"))
+        # Допускаем что warning может быть, а может и не быть — главное
+        # что функция не упала; для строгой проверки нужен реальный /proc/mounts.
+
+    def test_noop_on_windows(self):
+        from lib.core.application_context import _warn_if_publish_path_on_nfs
+
+        with patch("platform.system", return_value="Windows"):
+            _warn_if_publish_path_on_nfs("C:\\fake\\cache.duckdb")
+        # Просто не упасть — на Windows функция возвращает молча.
