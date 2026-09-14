@@ -8,6 +8,98 @@
 
 ## [Unreleased]
 
+## [2.5.2] — 2026-09-14
+
+> **PATCH-релиз v2.5.2:** две группы доработок — (1) **NFS-совместимость**
+> runtime-кеша (DuckDB ATTACH flock не работает на NFS — серия из 4
+> коммитов + 1 feat + safe default); (2) **наблюдаемость sync-путей**
+> PG→DuckDB (единый конвейер sync-событий через
+> `emit_sync_event`/`DbLoggingService`, видимость ошибок `preload` и
+> channel-циклов в `agent_gateway_logs`).
+
+### Fixed — NFS / DuckDB cache
+
+- **`DuckDbCacheStore.publish()`** больше не падает молча на stale `.tmp`
+  (`605660b`): `tmp.unlink()` теперь возвращает `False` с
+  `sync_publish_failed` событием вместо `except OSError: pass`, имя
+  `.tmp` уникальное на каждый вызов (`<name>.<pid>.<ms>.tmp`), ATTACH
+  обёрнут в retry с экспоненциальным backoff (5 попыток: 0.1/0.2/0.4/0.8/1.6с).
+  Это правильная гигиена + читаемая диагностика; **корень NFS-несовместимости
+  лечится safe default ниже**.
+- **`gateway.py` startup cleanup** теперь удаляет **и** `cache.duckdb`,
+  **и** `cache.duckdb.tmp` (`652b09d`) — раньше `.tmp` оставался
+  залоченным через NFS `lockd` при крахе между `ATTACH` и `os.replace`,
+  и следующий publish сразу отстреливал `PID 0`.
+- **`preload_service.preload_vector_indexes`** — добавлен недостающий
+  `import logging` + `logger = logging.getLogger(__name__)` (`48575e9`):
+  `NameError: name 'logger' is not defined` ловил все ошибки `preload_indexes`
+  в тестах (`tests/test_preload_service.py::test_error_returns_none`)
+  и в реальном рантайме.
+- **`_resolve_publish_path` теперь выбирает локальную ФС по умолчанию**
+  (`85cad2a`): если `gateway.cache.local_path` не задан, снимок уходит
+  в `~/.cache/nanobot/duckdb/cache.duckdb` (POSIX `fcntl` работает там
+  штатно), а не в legacy `<workspace>/data_store/duckdb/` — который на
+  NFS роняет каждый sync-цикл с непонятным traceback. Подтверждено
+  эмпирически: перенос workspace с NFS на ext4 полностью устраняет
+  проблему.
+- **`_warn_if_publish_path_on_nfs(publish_path)`** — Linux-only проверка
+  `/proc/mounts`: если снимок всё-таки попал на NFS (escape hatch через
+  `gateway.cache.use_workspace_path: true` или symlink), печатает громкое
+  WARNING в logging И в stderr с конкретными инструкциями. Защита от
+  регрессии.
+
+### Added — NFS-safe cache path
+
+- **`gateway.cache.local_path`** (`c522b55`) — опциональный абсолютный
+  или относительный (от workspace) путь к локальной ФС для снимка
+  `cache.duckdb`. Явный override над safe default; полезно когда
+  у `~/.cache` нет места или нужна отдельная ФС.
+- **`gateway.cache.use_workspace_path`** — escape hatch для возврата к
+  legacy `<workspace>/data_store/duckdb/`. **Не рекомендуется** на NFS
+  (см. WARNING выше); сохраняем для dev/debug-сценариев на ext4.
+- **`gateway.cache.publish_to_workspace`** — задел для копирования
+  снимка обратно в workspace-путь (для multi-machine deployment, где
+  CLI/skill читают с NFS-шаринга на другой машине). Схема готова,
+  реализация copy-back — следующая итерация.
+
+### Fixed — observability (sync/logging)
+
+- **Единый конвейер sync-событий через `emit_sync_event`/`DbLoggingService`**
+  (`a1811c5`): вместо ad-hoc `logger.warning` в каждом месте sync-пути —
+  один централизованный путь с event_type/payload/level/structured-summary.
+  Под `preload_sync_event` / `sync_publish_failed` / `sync_skipped_*`/
+  `sync_initial_loaded` / `sync_worker_paused` теперь есть полный trail в
+  `agent_gateway_logs`.
+- **PG→DuckDB sync-путь пишет события в `agent_gateway_logs`** (`f58c957`):
+  `initial_load`, `poll_cycle`, `claim`, `release`, `error`, `reconnect` —
+  всё логируется через `DbLoggingService`, а не теряется в stdout.
+- **`sync_registry_initial_load_publish` — расширенное логирование**
+  «тихих» путей (`d4558f9`): раньше ошибки в `register_resources`,
+  `initial_load`, `publish` оставались только в `logger.warning` и не
+  попадали в долговечный `agent_gateway_logs`. Теперь все три —
+  структурированные события.
+- **Видимость ошибок `preload` векторов и каналов в `agent_gateway_logs`**
+  (`9fb88c4`): `ToolAuditHook` и `TerminalToolPrintHook` теперь
+  пишут под `event_type="preload_failed"` / `"channel_error"` с
+  `tool_call_id` и `duration_ms`. До фикса ошибки `preload_indexes`
+  и lease-loop глохли в logger'е без event-trail.
+
+### Tests
+
+- `tests/test_duckdb_cache_store.py` — все 43 теста проходят (включая
+  новые пути под `tmp.<pid>.<ms>.tmp`).
+- `tests/test_preload_service.py::test_error_returns_none` — зелёный
+  (раньше падал с `NameError`).
+- `tests/test_application_context.py::TestResolvePublishPath` (7 новых
+  кейсов): default → `~/.cache`, absolute/relative `local_path`,
+  `use_workspace_path` escape hatch, порядок приоритетов
+  `local_path > use_workspace_path`, fallback при `local_path`
+  unwritable, broken `config_service` (returns `str` → не крэш).
+- `tests/test_application_context.py::TestWarnIfPublishPathOnNfs`
+  (2 новых кейса): Linux NFS-путь → warning; Windows → no-op.
+
+---
+
 ## [2.5.1] — 2026-09-13
 
 > **PATCH-релиз v2.5.1:** регрессии и доработки после v2.5.0 — закрытие

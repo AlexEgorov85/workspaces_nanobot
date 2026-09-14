@@ -56,6 +56,9 @@ workspace/sessions/
 # --- Кеши реестров CLI-приложений (регенерируются) ---
 cli-apps/*.json
 
+# --- Release-script payload артефакты (tools/release_v*.py --dry-run) ---
+release_v*_payload.json
+
 # --- IDE/редакторы ---
 .idea/
 .vscode/

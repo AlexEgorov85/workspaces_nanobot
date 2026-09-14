@@ -51,7 +51,7 @@ flowchart LR
 | Таблица | Назначение | Кто пишет | Кто читает |
 |---------|-----------|-----------|-----------|
 | `public.agent_vector_index_config` | ⚠️ **Legacy SQL-артефакт.** Кодом **не читается** — конфиг индексов теперь живёт в `project.json::gateway.vector.index.indexes.*`. DDL оставлен в репо для обратной совместимости и исторических ссылок. | — | — |
-| `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (chunk_index/count, content_hash, row_data JSONB, synced_at) | `tools/build_vectors.py` | `lib/services/cache_provider_impl.py:PostgresDuckDbProvider` (агент читает только через DuckDB-снапшот `workspace/data_store/duckdb/cache.duckdb`; канон — PG) |
+| `oarb.audit_vectors` | Сырые эмбеддинги `REAL[]` + метаданные (chunk_index/count, content_hash, row_data JSONB, synced_at) | `tools/build_vectors.py` | `lib/services/cache_provider_impl.py:PostgresDuckDbProvider` (агент читает только через DuckDB-снапшот, см. `_resolve_publish_path()`; канон — PG) |
 | `public.agent_vector_index_store` | Сериализованный FAISS `BYTEA` + метаданные (dimension, vector_count, updated_at, signature, metric) | `provider.rebuild_and_store_index()` | `provider._load_index()` (in-memory + reload из store) |
 
 DDL: `sql/vectors/create_vector_index_config.sql`, `sql/vectors/create_vector_index_store.sql`, `sql/audit_analyzer/create_oarb_audit_vectors.sql`.
@@ -489,7 +489,7 @@ python tools/build_vectors.py --full-rebuild  # пересоберёт оста�
 1. In-memory кэш провайдера (`_index_cache`) — если уже загружен;
 2. `public.agent_vector_index_store` (FAISS blob + metadata, проверка signature);
 3. Пересборка из сырых векторов `oarb.audit_vectors` → сохранение в store;
-4. DuckDB-снапшот `workspace/data_store/duckdb/cache.duckdb` (fallback);
+4. DuckDB-снапшот (см. `_resolve_publish_path()`; default `~/.cache/nanobot/duckdb/cache.duckdb`, legacy `<workspace>/data_store/duckdb/cache.duckdb` под `use_workspace_path: true`) — fallback;
 5. Файлы `.faiss` (legacy).
 
 `search_vector` всегда проходит через `_load_index` — единый путь для кэша, store,

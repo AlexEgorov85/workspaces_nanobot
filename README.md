@@ -157,6 +157,35 @@ pytest tests/ --cov=lib --cov-report=term-missing
 | **workspace/skills/*/SKILL.md** | Документация навыков |
 | **workspace/AGENTS.md** | Инструкции для агента |
 
+## 🆕 Что нового в v2.5.2
+
+**PATCH поверх v2.5.1, 2026-09-14.** Две группы доработок:
+
+**NFS / DuckDB cache.** Раньше gateway, развёрнутый на NFS-шаре, цикл
+sync-а падал с `IO Error: Could not set lock on file cache.duckdb.tmp:
+Conflicting lock is held in PID 0` (DuckDB `ATTACH` берёт эксклюзивный
+`flock`, который NFS `lockd` не отдаёт). Теперь:
+- safe default — `~/.cache/nanobot/duckdb/cache.duckdb` вместо
+  legacy `<workspace>/data_store/duckdb/` (`85cad2a`);
+- явный override через `gateway.cache.local_path` (`c522b55`);
+- escape hatch `gateway.cache.use_workspace_path` для dev/debug;
+- startup WARNING при попадании снимка на NFS (`/proc/mounts` check);
+- defensive publish-слой: уникальный `.tmp.<pid>.<ms>.tmp`, retry с
+  backoff на `ATTACH`, понятный `sync_publish_failed` вместо
+  `except OSError: pass` (`605660b`, `652b09d`).
+
+**Observability sync-путей.** Единый конвейер `emit_sync_event` /
+`DbLoggingService` вместо ad-hoc `logger.warning` (`a1811c5`); ошибки
+`preload` векторов и `channel` lease-loop теперь попадают в долговечный
+`agent_gateway_logs` (`9fb88c4`, `48575e9`); `PG→DuckDB` sync-цикл
+(`initial_load` / `poll_cycle` / `claim` / `release` / `reconnect`)
+полностью пишется в `agent_gateway_logs` (`f58c957`, `d4558f9`).
+
+**Tests:** добавлены `TestResolvePublishPath` (7 кейсов) и
+`TestWarnIfPublishPathOnNfs` (2 кейса); все ранее падавшие тесты
+(включая `preload_service::test_error_returns_none`) зелёные.
+Полный changelog — в [CHANGELOG.md → 2.5.2](CHANGELOG.md#252--2026-09-14).
+
 ## 🆕 Что нового в v2.5.1
 
 **PATCH поверх v2.5.0, 2026-09-13.** Регрессии и доработки после MINOR-релиза — закрытие

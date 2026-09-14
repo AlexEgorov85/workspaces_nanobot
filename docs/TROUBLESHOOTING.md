@@ -57,14 +57,38 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 
 ## Ошибки синхронизации и кешей
 
-### `FileNotFoundError: workspace/data_store/duckdb/cache.duckdb`
+### `FileNotFoundError: ~/.cache/nanobot/duckdb/cache.duckdb` (или `workspace/data_store/duckdb/cache.duckdb`, если задан `gateway.cache.use_workspace_path: true`)
 
-DuckDB-кеш публикуется **только gateway'ом** через `DuckDbCacheStore.publish()`
-(путь вычисляется `table_registry.snapshot_path()` →
-`workspace/data_store/duckdb/cache.duckdb`). Запустите `python gateway.py` и
-подождите первого цикла синхронизации. Старый путь
+DuckDB-кеш публикуется **только gateway'ом** через `DuckDbCacheStore.publish()`.
+Путь определяется в `_resolve_publish_path()` (`lib/core/application_context.py`)
+в порядке приоритета:
+
+  1. `gateway.cache.local_path` (если задан) → `<это>/cache.duckdb`
+  2. `gateway.cache.use_workspace_path: true` → legacy `<workspace>/data_store/duckdb/cache.duckdb`
+  3. **default**: `~/.cache/nanobot/duckdb/cache.duckdb` (POSIX `fcntl` работает там штатно)
+
+Запустите `python gateway.py` и подождите первого цикла синхронизации. Старый путь
 `workspace/skills/audit_analyzer/cache/audit_cache.duckdb` из
 `project.json:in_memory_cache_path` больше не используется.
+
+### `IO Error: Could not set lock on file .../cache.duckdb.tmp: Conflicting lock is held in PID 0`
+
+DuckDB `ATTACH ... READ_WRITE` берёт эксклюзивный `flock`, который NFS `lockd`
+не отдаёт (POSIX `fcntl` vs NFS NLM — несовместимые протоколы). На свежем файле
+после `rm` ошибка воспроизводится стабильно (см. эмпирическую проверку в
+коммите `c522b55` и `duckdb/duckdb#4041`). Под `PID 0` в сообщении — NFS-шный
+«lock без валидного владельца», а не реальный процесс.
+
+**Решение** (с версии v2.5.2):
+
+  * **по умолчанию** снимок уходит на `~/.cache/nanobot/duckdb/cache.duckdb` —
+    POSIX `fcntl` работает там штатно, проблема исчезает без действий;
+  * если хотите хранить снимок в другой локальной директории (например,
+    `/var/lib/nanobot/cache/`) — задайте `gateway.cache.local_path` в `project.json`;
+  * если старт выкидывает `[cache] WARNING: ... is on nfs ...` — путь попал
+    на NFS через symlink или escape hatch `gateway.cache.use_workspace_path: true`;
+    см. `_warn_if_publish_path_on_nfs()` в `lib/core/application_context.py`
+    и уберите NFS из пути.
 
 ### `FAISS preload: no data in cache`
 

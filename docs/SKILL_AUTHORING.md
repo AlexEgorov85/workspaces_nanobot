@@ -464,8 +464,9 @@ Tool **не импортирует** Skill (TARGET §22.1,
 ### 7.1.1 Два пути к одной инфраструктуре
 
 Кэш и векторный поиск живут в **общем runtime** (`lib/services/cache_provider_impl.py`):
-DuckDB-снапшот `workspace/data_store/duckdb/cache.duckdb` синхронизируется с PG
-(`PgDuckDbSyncService`), FAISS-индексы строятся на его основе.
+DuckDB-снапшот (по умолчанию `~/.cache/nanobot/duckdb/cache.duckdb`,
+см. `_resolve_publish_path()`) синхронизируется с PG (`PgDuckDbSyncService`),
+FAISS-индексы строятся на его основе.
 
 К этому runtime подключаются **две независимые поверхности**:
 

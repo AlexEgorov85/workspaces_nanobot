@@ -62,7 +62,10 @@
 **Изменённые пути**:
 
 - DuckDB-снапшот: `workspace/skills/audit_analyzer/cache/audit_cache.duckdb`
-  → **`workspace/data_store/duckdb/cache.duckdb`** (публикуется gateway'ом).
+  → `workspace/data_store/duckdb/cache.duckdb` (публикуется gateway'ом,
+  историческое поведение до v2.5.2).
+  → **`~/.cache/nanobot/duckdb/cache.duckdb`** (v2.5.2+, default —
+  безопасная локальная ФС, см. `gateway.cache.local_path` для override).
   Старое поле `project.json:in_memory_cache_path` больше не читается.
 
 **Изменённое поведение**:
@@ -160,7 +163,7 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
   `sql/session/create_public_agent_session_messages.sql`.
 - **Канал** (`public.agent_conversation_messages`) — без миграции (имя уже актуально).
   DDL: `sql/channels/create_public_agent_conversation_messages.sql`.
-- **`workspace/data_store/duckdb/cache.duckdb`** — gateway пересоздаст автоматически (in-memory → новый snapshot; путь через `table_registry.snapshot_path()`).
+- **DuckDB-снимок** — gateway пересоздаст автоматически (in-memory → новый snapshot); путь по умолчанию `~/.cache/nanobot/duckdb/cache.duckdb` (см. `_resolve_publish_path()`); legacy `<workspace>/data_store/duckdb/cache.duckdb` доступен через `gateway.cache.use_workspace_path: true`.
 - **Векторные индексы** (`oarb.audit_vectors`, `public.agent_vector_index_store`,
   `public.agent_vector_index_config`) — без миграции (1.5.0 уже хранил их в БД);
   DDL в `sql/audit_analyzer/`.

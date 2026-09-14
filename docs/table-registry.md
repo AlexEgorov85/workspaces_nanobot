@@ -424,10 +424,19 @@ predefined_table = resources[0].name  # qualified 'schema.table'
 
 ## Где лежит снапшот
 
-Единый файл для всех skill'ов: `workspace/data_store/duckdb/cache.duckdb`
-(`TableRegistry.snapshot_path()`). Доступ — через CLI skill'а
-(`scripts/cli.py --mode predefined` и `--list-scripts`);
-прямой tool `duckdb_query` удалён в фазе 8.
+Единый файл для всех skill'ов; путь вычисляется в `_resolve_publish_path()`
+(`lib/core/application_context.py`) в порядке приоритета:
+
+  1. `gateway.cache.local_path` (если задан) → `<это>/cache.duckdb`;
+  2. `gateway.cache.use_workspace_path: true` → legacy
+     `TableRegistry.snapshot_path(workspace_path)` /
+     `workspace/data_store/duckdb/cache.duckdb` (escape hatch);
+  3. **default** (v2.5.2+) → `~/.cache/nanobot/duckdb/cache.duckdb`
+     (POSIX `fcntl` работает там штатно — DuckDB ATTACH flock не
+     работает на NFS).
+
+Доступ к снимку — через CLI skill'а (`scripts/cli.py --mode predefined`
+и `--list-scripts`); прямой tool `duckdb_query` удалён в фазе 8.
 
 ## Definition of Done для нового skill'а
 

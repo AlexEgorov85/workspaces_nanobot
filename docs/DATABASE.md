@@ -201,11 +201,17 @@ DSN подключается только через `channels.postgres.dsn` в 
   `__nanobot_meta.__schema_meta` (входит в снимок). `get_schema()` возвращает
   исходные PG-типы и комментарии (без них — DuckDB-тип из information_schema).
   `publish()` атомарно записывает снимок таблиц (ATTACH во временный файл →
-  `os.replace`) в `publish_path`, который вычисляется
-  `table_registry.snapshot_path(workspace_path)` →
-  `workspace/data_store/duckdb/cache.duckdb`. Путь снимка вычисляется
-  через `table_registry.snapshot_path()` и не задаётся напрямую в настройках. Без изменений
-  (`_dirty` = False) файл не перезаписывается; если снимок занят читателем
+  `os.replace`) в `publish_path`, который вычисляется через
+  `_resolve_publish_path()` (`lib/core/application_context.py`):
+
+  1. `gateway.cache.local_path` (если задан) → `<это>/cache.duckdb`;
+  2. `gateway.cache.use_workspace_path: true` → legacy
+     `<workspace>/data_store/duckdb/cache.duckdb` (escape hatch);
+  3. **default** (v2.5.2+) → `~/.cache/nanobot/duckdb/cache.duckdb`.
+     DuckDB ATTACH flock не работает на NFS, поэтому default — локальная ФС,
+     чтобы не падать с «Conflicting lock is held in PID 0».
+
+  Без изменений (`_dirty` = False) файл не перезаписывается; если снимок занят читателем
   (CLI) — публикация откладывается до следующего цикла, ошибка не теряет данные.
 
 Схема в `gateway.py::main()` (callbacks между сервисами — `main()` 77-124):
@@ -324,10 +330,10 @@ flowchart LR
   `last_error`, `indexes_in_memory`, `vector_sources`.
 - `PgDuckDbSyncService.get_stats()`: `polls`, `full_resyncs`, `reconnects`,
   `errors`, `queue_size`, `last_sync` (метка на таблицу), `connected`.
-- Внешние признаки работы: mtime файла кеша
-  (`workspace/data_store/duckdb/cache.duckdb`, путь из
-  `table_registry.snapshot_path()`) обновляется после каждого publish; лог
-  gateway: `audit_analyzer sync started (publish -> <path>)`.
+- Внешние признаки работы: mtime файла кеша (по умолчанию
+  `~/.cache/nanobot/duckdb/cache.duckdb`; см. `_resolve_publish_path()`)
+  обновляется после каждого publish; лог gateway:
+  `[memory_store] cache snapshot -> <path>`.
 
 ---
 
