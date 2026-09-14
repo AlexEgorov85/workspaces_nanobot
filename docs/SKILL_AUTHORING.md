@@ -82,7 +82,6 @@ workspace/skills/<skill_name>/
 │   ├── skill_config.py       # тонкая обёртка над lib.core.skill_config
 │   ├── llm.py                # LLM-клиент (если нужен)
 │   ├── generated_sql_mode.py # режим NL → SELECT (если нужен)
-│   ├── column_hints.py       # хинты по колонкам для generated_sql (если нужен)
 │   └── output.py             # форматирование/санитизация вывода
 ├── references/
 │   ├── schema.md

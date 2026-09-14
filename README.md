@@ -192,6 +192,40 @@ Conflicting lock is held in PID 0` (DuckDB `ATTACH` берёт эксклюзи�
 CLI/skill) и `TestWarnIfPublishPathOnNfs` (2 кейса); все ранее
 падавшие тесты (включая `preload_service::test_error_returns_none`)
 зелёные.
+
+**Audit-analyzer three-mode contract (`a396c27`).** `audit_analyzer`
+свёрнут в три равноправных режима — `predefined`, `vector`,
+`generated_sql` — **без fallback между ними**. Удалён
+`scripts/column_hints.py` и прежний registry: схема передаётся в LLM
+через `CacheProvider.get_schema()` +
+`lib.utils.sql_safety.format_schema`, few-shot — через
+`predefined.db_loader.load_all`. Если выбранный режим неприменим,
+агент получает явный `RuntimeError` с диагностикой, а не молчаливый
+переход на соседний режим.
+
+**Vector discovery: declared vs runtime (`61ead9b`).**
+`audit_analyzer/scripts/cli.py::_list_indexes()` теперь читает
+фактическое состояние FAISS-blob'ов из `public.agent_vector_index_store`
+(PG), а не декларативный JSON. Для сверки с декларацией
+(`project.json::gateway.vector.index.indexes.*`) добавлен
+`tools/check_indexes.py`: MISSING / ORPHAN / STALE / INVALID-signature,
+exit 0/1/2, `--json` для CI. См. `docs/VECTOR_INDEXES.md`.
+
+**Preload health summary на старте gateway (`78a57f4`).** После
+`preload_vector_indexes()` gateway печатает в **stderr** многострочный
+summary (`declared/loaded/missing/orphan/stale` + счётчики vectors) и
+пишет одно событие `vector_index_preload_health` в `agent_gateway_logs`
+через `emit_sync_event`: `level="WARN"` при divergence, иначе `INFO`.
+Конструктор `PreloadService(settings, db_logging_service)` —
+сервис логирования пробрасывается явно.
+
+**Tests (полный набор):** добавлены `TestResolvePublishPath` (6),
+`TestSingleMechanism` (1 — инвариантна gateway ↔ CLI/skill),
+`TestWarnIfPublishPathOnNfs` (2), `test_check_indexes` (17 — declared vs
+runtime), `test_preload_service` (+18 health summary, всего 22),
+`test_audit_analyzer_mode_selection` (переписан под three-mode),
+`test_audit_analyzer_generated_sql` (обновлён под `MAX_ATTEMPTS`).
+
 Полный changelog — в [CHANGELOG.md → 2.5.2](CHANGELOG.md#252--2026-09-14).
 
 ## 🆕 Что нового в v2.5.1

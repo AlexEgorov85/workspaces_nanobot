@@ -3,7 +3,7 @@
     "description": "Инвентаризация зависимостей workspaces_nanobot от nanobot-ai",
     "nanobot_version_pinned": "0.3.0",
     "nanobot_version_installed": "0.3.0",
-    "scan_date": "2026-09-11",
+    "scan_date": "2026-09-14",
     "scanner": "tools/scan_nanobot_inventory.py",
     "legend": {
       "GREEN": "public/stable extension point",
@@ -13,14 +13,14 @@
     }
   },
   "summary": {
-    "files_scanned": 178,
+    "files_scanned": 177,
     "total_imports": 48,
     "by_classification": {
       "GREEN": 38,
       "RED": 5,
       "ORANGE": 5
     },
-    "getattr_private_total": 18,
+    "getattr_private_total": 19,
     "setattr_total": 1
   },
   "files": [
@@ -56,7 +56,7 @@
       ],
       "getattr_private": [
         {
-          "line": 98,
+          "line": 103,
           "expr": "getattr(ctx.sync_service, \"_on_sync_callback\"",
           "object": "ctx.sync_service",
           "attr": "_on_sync_callback"
@@ -253,7 +253,7 @@
       "file": "lib/core/application_context.py",
       "imports": [
         {
-          "line": 751,
+          "line": 979,
           "statement": "from nanobot.cron.service import CronService",
           "module": "nanobot.cron.service",
           "names": [
@@ -406,7 +406,7 @@
       "file": "lib/services/channel_factory.py",
       "imports": [
         {
-          "line": 65,
+          "line": 67,
           "statement": "from nanobot.channels.manager import ChannelManager",
           "module": "nanobot.channels.manager",
           "names": [
@@ -499,7 +499,14 @@
     {
       "file": "lib/services/duckdb_cache_store.py",
       "imports": [],
-      "getattr_private": [],
+      "getattr_private": [
+        {
+          "line": 1155,
+          "expr": "getattr(self, \"_preload_errors\"",
+          "object": "self",
+          "attr": "_preload_errors"
+        }
+      ],
       "setattr_calls": []
     },
     {
@@ -944,12 +951,6 @@
     },
     {
       "file": "workspace/skills/audit_analyzer/scripts/cli.py",
-      "imports": [],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
-      "file": "workspace/skills/audit_analyzer/scripts/column_hints.py",
       "imports": [],
       "getattr_private": [],
       "setattr_calls": []

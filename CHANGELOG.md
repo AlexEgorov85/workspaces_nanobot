@@ -26,6 +26,14 @@
   обёрнут в retry с экспоненциальным backoff (5 попыток: 0.1/0.2/0.4/0.8/1.6с).
   Это правильная гигиена + читаемая диагностика; **корень NFS-несовместимости
   лечится safe default ниже**.
+- **Vector index discovery разделён на declared vs runtime** (`61ead9b`):
+  `audit_analyzer/scripts/cli.py::_list_indexes()` теперь читает фактическое
+  состояние FAISS-blob'ов из `public.agent_vector_index_store` (PG), а
+  не декларативный JSON — это единственный источник правды о том, что
+  реально собрано. Для сверки с декларацией добавлен
+  `tools/check_indexes.py` (exit 0/1/2, `--json`, `--no-runtime`,
+  `--strict-signature`), который показывает MISSING / ORPHAN / STALE /
+  INVALID-signature и читается и человеком, и CI.
 - **`gateway.py` startup cleanup** теперь удаляет **и** `cache.duckdb`,
   **и** `cache.duckdb.tmp` (`652b09d`) — раньше `.tmp` оставался
   залоченным через NFS `lockd` при крахе между `ATTACH` и `os.replace`,
@@ -87,6 +95,34 @@ default `~/.cache/`). Legacy `<workspace>/data_store/duckdb/` на NFS
   `tool_call_id` и `duration_ms`. До фикса ошибки `preload_indexes`
   и lease-loop глохли в logger'е без event-trail.
 
+### Changed — audit_analyzer three-mode contract (`a396c27`)
+
+- `audit_analyzer` свёрнут в **три равноправных режима** —
+  `predefined`, `vector`, `generated_sql` — **без fallback между ними**.
+  Если выбранный режим неприменим, агент получает явный `RuntimeError`
+  с диагностикой, а не молчаливый переход на соседний режим.
+- **Удалены** `scripts/column_hints.py` и прежний «registry»:
+  техническая схема больше не передаётся в LLM как хинты; LLM получает
+  схему через `CacheProvider.get_schema()` +
+  `lib.utils.sql_safety.format_schema`, few-shot — через
+  `predefined.db_loader.load_all`.
+- В `generated_sql` режиме переменная переименована: `MAX_RETRIES`
+  → `MAX_ATTEMPTS=4` (forensically honest: попыток столько, сколько
+  в цикле, а не «плюс одна сверху»); локальный
+  `_load_predefined_scripts` удалён — единый loader.
+
+### Added — preload health summary (`78a57f4`)
+
+- На старте gateway, после `preload_vector_indexes()`, теперь печатается
+  в **stderr** многострочный summary (`declared/loaded/missing/orphan/stale`
+  + счётчики vectors) и пишется **одно событие** в
+  `public.agent_gateway_logs` через `emit_sync_event`:
+  `event_type="vector_index_preload_health"`, `level="WARN"` если
+  есть divergence, иначе `INFO`. Payload содержит все пять списков
+  (declared/loaded/missing/orphan/stale) для последующего анализа.
+- Конструктор `PreloadService(settings, db_logging_service)` —
+  сервис логирования пробрасывается явно (раньше event-loop'а не было).
+
 ### Tests
 
 - `tests/test_duckdb_cache_store.py` — все 43 теста проходят (включая
@@ -104,6 +140,20 @@ default `~/.cache/`). Legacy `<workspace>/data_store/duckdb/` на NFS
   расхождения.
 - `tests/test_application_context.py::TestWarnIfPublishPathOnNfs`
   (2 новых кейса): Linux NFS-путь → warning; Windows → no-op.
+- `tests/test_audit_analyzer_mode_selection.py` — переписан под
+  three-mode контракт: каждый режим возвращает корректный dispatcher,
+  межрежимный fallback запрещён, ошибки выбора поверх несуществующего
+  режима — `RuntimeError` с диагностикой.
+- `tests/test_audit_analyzer_generated_sql.py` — обновлены mock'и
+  под `MAX_ATTEMPTS` и удаление `_load_predefined_scripts`; вместо
+  локального loader'а патчится `predefined.db_loader.load_all`.
+- `tests/test_check_indexes.py` (17 кейсов) — declared vs runtime diff:
+  все-OK / MISSING / ORPHAN / STALE / INVALID-signature / `--json` /
+  exit-code контракт.
+- `tests/test_preload_service.py` (22 кейса, +18 новых) — health summary
+  сходится с `list_runtime_vector_indexes()`; WARN-уровень события
+  при divergence; INFO — при полном совпадении; payload содержит
+  все пять списков.
 
 ---
 

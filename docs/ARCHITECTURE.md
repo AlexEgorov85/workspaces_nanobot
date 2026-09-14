@@ -1451,7 +1451,6 @@ nanobot/
 │   │   │   ├── cli.py                    #   точка входа (python scripts/cli.py ...)
 │   │   │   ├── skill_config.py           #   конфиг из SETTINGS + build_cache_provider()
 │   │   │   ├── generated_sql_mode.py     #   режим generated_sql: LLM → SQL → EXPLAIN → выполнение
-│   │   │   ├── column_hints.py           #   подсказки по колонкам для LLM-режима
 │   │   │   ├── llm.py                    #   LLM-клиент (OpenAI-compatible HTTP)
 │   │   │   ├── output.py                 #   форматирование JSON-вывода
 │   │   │   └── predefined/               #   predefined SQL из PG-реестра (DB-first)
