@@ -63,19 +63,24 @@ class PgDuckDbSyncService:
         reconnect_backoff: float = 0.0,
         reconnect_backoff_max: float = 0.0,
         full_resync_every: int = 0,
+        db_logging_service: Any | None = None,
     ) -> None:
         self._dsn = dsn
         self._schema = schema
         self._tables = [t for t in (tables or []) if t]
         self._vector_table = vector_table
-        # Р’СЃРµ РїР°СЂР°РјРµС‚СЂС‹ вЂ” РѕР±СЏР·Р°С‚РµР»СЊРЅС‹, РїРµСЂРµРґР°СЋС‚СЃСЏ СЏРІРЅРѕ РёР· settings (project.json).
-        # РќРёРєР°РєРёС… defaults РІ РєРѕРґРµ (TARGET: РєРѕРЅС„РёРіСѓСЂР°С†РёСЏ С‚РѕР»СЊРєРѕ РІ settings).
+        # Все параметры — обязательны, передаются явно из settings (project.json).
+        # Никаких defaults в коде (TARGET: конфигурация только в settings).
         self._poll_interval = float(poll_interval_sec)
         self._max_queue_size = max_queue_size
         self._reconnect_backoff = reconnect_backoff
         self._reconnect_backoff_max = reconnect_backoff_max
         self._full_resync_every = max(0, int(full_resync_every))
         self._resync_counter = 0
+        # Опциональный sink в ``agent_gateway_logs`` (через ``DbLoggingService``,
+        # async/пул). Если None — события идут через ``event_log.record_sync_event``
+        # (sync, всегда работает при logging.db.enabled+DSN). См. ``_log_sync_event``.
+        self._db_logging_service = db_logging_service
 
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=max_queue_size)
         self._stop_event = threading.Event()
@@ -147,6 +152,64 @@ class PgDuckDbSyncService:
         """
         self._on_sync_callback = callback
 
+    def _log_sync_event(
+        self,
+        event_type: str,
+        summary: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        level: str = "INFO",
+        name: str | None = None,
+    ) -> None:
+        """Записать sync-событие в ``agent_gateway_logs`` (двойной sink).
+
+        Приоритет:
+          1. Если передан ``db_logging_service`` (через ``__init__``) и его
+             пул запущен (``is_running()``) — пишем через
+             ``DbLoggingService.log_sync_event`` (async, неблокирующий,
+             очередь с backpressure).
+          2. Иначе — sync-фолбек ``workspace.utils.event_log.record_sync_event``
+             (INSERT через ``utils.db``, всегда работает при
+             ``logging.db.enabled=True`` и наличии DSN).
+
+        Все ошибки глотаются — sync-код не должен падать из-за логирования.
+        Подробности см. ``docs/ARCHITECTURE.md`` § «Управление логированием».
+        """
+        try:
+            svc = self._db_logging_service
+            if svc is not None and getattr(svc, "is_running", lambda: False)():
+                try:
+                    svc.log_sync_event(
+                        event_type=event_type,
+                        summary=summary,
+                        payload=payload,
+                        level=level,
+                        name=name,
+                    )
+                    return
+                except Exception as exc:
+                    logger.warning(
+                        "PgDuckDbSyncService: db_logging_service.log_sync_event failed: %s",
+                        exc,
+                    )
+        except Exception:
+            pass
+        try:
+            from workspace.utils.event_log import record_sync_event
+
+            record_sync_event(
+                event_type=event_type,
+                summary=summary,
+                payload=payload,
+                level=level,
+                name=name,
+            )
+        except Exception as exc:
+            logger.warning(
+                "PgDuckDbSyncService: event_log.record_sync_event failed: %s",
+                exc,
+            )
+
     def start(self, initial_load: bool = True) -> None:
         """Р—Р°РїСѓСЃС‚РёС‚СЊ worker-РїРѕС‚РѕРє.
 
@@ -168,6 +231,17 @@ class PgDuckDbSyncService:
             len(self._tables),
             bool(self._dsn),
             self._vector_table or "(none)",
+        )
+        self._log_sync_event(
+            event_type="sync_service_started",
+            summary=f"initial_load={self._initial_load} tables={len(self._tables)}",
+            payload={
+                "initial_load": self._initial_load,
+                "tables": list(self._tables),
+                "vector_table": self._vector_table or None,
+                "dsn_set": bool(self._dsn),
+            },
+            level="INFO",
         )
         self._thread = threading.Thread(
             target=self._worker, name="audit-sync", daemon=True
@@ -241,12 +315,17 @@ class PgDuckDbSyncService:
             self._close_connection()
 
     def _fire_sync_callback(self) -> None:
-        """РЈРІРµРґРѕРјРёС‚СЊ Рѕ Р·Р°РІРµСЂС€РµРЅРёРё С†РёРєР»Р° СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё (РїРѕСЃР»Рµ load/РїРѕР»Р»РёРЅРіР°)."""
+        """Уведомить о завершении цикла синхронизации (после load/поллинга)."""
         cb = self._on_sync_callback
         if cb is None:
             logger.warning(
-                "PgDuckDbSyncService: _fire_sync_callback РІС‹Р·РІР°РЅ, РЅРѕ _on_sync_callback=None "
-                "(publish РІ cache.duckdb РЅРµ РїСЂРѕРёР·РѕР№РґС‘С‚)."
+                "PgDuckDbSyncService: _fire_sync_callback вызван, но _on_sync_callback=None "
+                "(publish в cache.duckdb не произойдёт)."
+            )
+            self._log_sync_event(
+                event_type="sync_publish_skipped",
+                summary="_on_sync_callback=None — publish в cache.duckdb не произойдёт",
+                level="WARN",
             )
             return
         try:
@@ -255,9 +334,15 @@ class PgDuckDbSyncService:
             with self._state_lock:
                 self._stats["errors"] += 1
             logger.warning(
-                "PgDuckDbSyncService: _on_sync_callback Р±СЂРѕСЃРёР» РёСЃРєР»СЋС‡РµРЅРёРµ: %s",
+                "PgDuckDbSyncService: _on_sync_callback бросил исключение: %s",
                 exc,
                 exc_info=True,
+            )
+            self._log_sync_event(
+                event_type="sync_publish_failed",
+                summary=f"_on_sync_callback exception: {exc}",
+                payload={"error_type": type(exc).__name__, "error": str(exc)},
+                level="WARN",
             )
 
     def _drain_queue(self) -> None:
@@ -332,8 +417,14 @@ class PgDuckDbSyncService:
             len(self._tables),
             bool(self._dsn),
         )
+        self._log_sync_event(
+            event_type="sync_initial_load_started",
+            summary=f"initial_load START tables={len(self._tables)} dsn_set={bool(self._dsn)}",
+            payload={"tables": list(self._tables), "dsn_set": bool(self._dsn)},
+            level="INFO",
+        )
 
-        # max_workers = С‡РёСЃР»Рѕ С‚Р°Р±Р»РёС† (РЅРѕ РЅРµ Р±РѕР»РµРµ 8, С‡С‚РѕР±С‹ РЅРµ СѓС‚РёР»РёР·РёСЂРѕРІР°С‚СЊ РїСѓР»)
+        # max_workers = число таблиц (но не более 8, чтобы не утилизировать пул)
         max_workers = min(len(self._tables), 8)
         loaded_count = 0
         error_count = 0
@@ -356,21 +447,39 @@ class PgDuckDbSyncService:
                         rows,
                         table,
                     )
-                except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                    self._log_sync_event(
+                        event_type="sync_table_loaded",
+                        summary=f"{table}: {rows} rows",
+                        payload={"table": table, "rows": rows},
+                        level="INFO",
+                    )
+                except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
                     logger.warning(
-                        "PgDuckDbSyncService: initial_load OperationalError РЅР° %s вЂ” РїСЂРѕР±СѓСЋ reconnect",
+                        "PgDuckDbSyncService: initial_load OperationalError на %s — пробую reconnect",
                         table,
                         exc_info=True,
                     )
+                    self._log_sync_event(
+                        event_type="sync_initial_load_error",
+                        summary=f"OperationalError на {table}",
+                        payload={"table": table, "error_type": "OperationalError", "error": str(exc)},
+                        level="WARN",
+                    )
                     self._reconnect()
                     return
-                except psycopg2.errors.UndefinedTable:
+                except psycopg2.errors.UndefinedTable as exc:
                     error_count += 1
                     logger.error(
-                        "PgDuckDbSyncService: С‚Р°Р±Р»РёС†Р°-РёСЃС‚РѕС‡РЅРёРє РЅРµ РЅР°Р№РґРµРЅР°: %s "
-                        "вЂ” РїСЂРѕРїСѓСЃРєР°СЋ. РџСЂРѕРІРµСЂСЊС‚Рµ РЅР°СЃС‚СЂРѕР№РєРё db.tables/db.additional_tables "
-                        "РІ project.json::skills.<name> РґР»СЏ СЃРѕРѕС‚РІРµС‚СЃС‚РІСѓСЋС‰РµРіРѕ skill'Р°.",
+                        "PgDuckDbSyncService: таблица-источник не найдена: %s "
+                        "— пропускаю. Проверьте настройки db.tables/db.additional_tables "
+                        "в project.json::skills.<name> для соответствующего skill'а.",
                         table,
+                    )
+                    self._log_sync_event(
+                        event_type="sync_table_missing",
+                        summary=f"таблица-источник не найдена: {table}",
+                        payload={"table": table, "error_type": "UndefinedTable"},
+                        level="ERROR",
                     )
                 except Exception as exc:
                     error_count += 1
@@ -379,6 +488,16 @@ class PgDuckDbSyncService:
                         table,
                         exc,
                         exc_info=True,
+                    )
+                    self._log_sync_event(
+                        event_type="sync_initial_load_error",
+                        summary=f"initial_load FAILED {table}: {exc}",
+                        payload={
+                            "table": table,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                        level="WARN",
                     )
                     with self._state_lock:
                         self._stats["errors"] += 1
@@ -389,11 +508,24 @@ class PgDuckDbSyncService:
             error_count,
             len(self._tables),
         )
+        self._log_sync_event(
+            event_type="sync_initial_load_done",
+            summary=(
+                f"initial_load DONE loaded_ok={loaded_count} errors={error_count} "
+                f"total_tables={len(self._tables)}"
+            ),
+            payload={
+                "loaded_ok": loaded_count,
+                "errors": error_count,
+                "total_tables": len(self._tables),
+            },
+            level="WARN" if error_count else "INFO",
+        )
 
     def _poll_table_initial(self, table: str) -> int:
-        """РќР°С‡Р°Р»СЊРЅР°СЏ Р·Р°РіСЂСѓР·РєР° РѕРґРЅРѕР№ С‚Р°Р±Р»РёС†С‹ (РґР»СЏ ThreadPoolExecutor).
+        """Начальная загрузка одной таблицы (для ThreadPoolExecutor).
 
-        Р’РѕР·РІСЂР°С‰Р°РµС‚ РєРѕР»РёС‡РµСЃС‚РІРѕ Р·Р°РіСЂСѓР¶РµРЅРЅС‹С… СЃС‚СЂРѕРє (РґР»СЏ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ).
+        Возвращает количество загруженных строк (для логирования).
         """
         self._ensure_table_schema(table)
         rows, last = self._fetch_all(table)
@@ -480,10 +612,16 @@ class PgDuckDbSyncService:
         callback = self._on_new_records
         if callback is None:
             logger.warning(
-                "PgDuckDbSyncService: _dispatch(%s, %d rows), РЅРѕ _on_new_records=None "
-                "вЂ” РґР°РЅРЅС‹Рµ РЅРµ РїРѕРїР°РґСѓС‚ РІ DuckDbCacheStore.upsert_records.",
+                "PgDuckDbSyncService: _dispatch(%s, %d rows), но _on_new_records=None "
+                "— данные не попадут в DuckDbCacheStore.upsert_records.",
                 table,
                 len(rows),
+            )
+            self._log_sync_event(
+                event_type="sync_dispatch_skipped",
+                summary=f"callback отсутствует для {table} ({len(rows)} rows)",
+                payload={"table": table, "rows": len(rows)},
+                level="WARN",
             )
             return
         try:
@@ -492,11 +630,22 @@ class PgDuckDbSyncService:
             with self._state_lock:
                 self._stats["errors"] += 1
             logger.warning(
-                "PgDuckDbSyncService: _on_new_records(%s, %d rows) СѓРїР°Р»: %s",
+                "PgDuckDbSyncService: _on_new_records(%s, %d rows) упал: %s",
                 table,
                 len(rows),
                 exc,
                 exc_info=True,
+            )
+            self._log_sync_event(
+                event_type="sync_dispatch_failed",
+                summary=f"_on_new_records({table}, {len(rows)} rows) упал: {exc}",
+                payload={
+                    "table": table,
+                    "rows": len(rows),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+                level="WARN",
             )
 
     def _dispatch_replace(self, table: str, rows: list[dict]) -> None:

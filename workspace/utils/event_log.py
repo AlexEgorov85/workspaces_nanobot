@@ -96,3 +96,48 @@ def record_event(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("event_log: record_event(%s) failed: %s", event_type, exc)
+
+
+_SYNC_SESSION_ID = "gateway:sync"
+_SYNC_ACTOR = "sync"
+
+
+def record_sync_event(
+    event_type: str,
+    summary: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    name: str | None = None,
+    level: str = "INFO",
+) -> None:
+    """Sync-канал записи в ``agent_gateway_logs`` из PG→DuckDB sync-пути.
+
+    Тонкая обёртка над :func:`record_event` со стандартными для sync-событий
+    дефолтами:
+
+      * ``actor='sync'``;
+      * ``session_id='gateway:sync'`` — единый «безсессионный» идентификатор,
+        не привязанный к чату пользователя (sync-сервис работает независимо
+        от диалогов);
+      * ``channel=None`` (нет канала).
+
+    Идемпотентно. Любые ошибки внутри глотаются — sync-код не должен
+    падать из-за логирования.
+
+    Используется из sync-кода ``lib/services/pg_duckdb_sync_service.py`` и
+    ``lib/services/duckdb_cache_store.py``. Если в момент события
+    ``DbLoggingService`` уже доступен — вызывающий код должен идти через
+    ``DbLoggingService.log_event`` (async, через пул), а этот helper
+    использовать только когда ``db_logging_service is None`` (например,
+    из standalone-утилит или из очень ранних стадий старта).
+    """
+    record_event(
+        event_type=event_type,
+        name=name or event_type,
+        summary=summary,
+        payload=payload,
+        session_id=_SYNC_SESSION_ID,
+        channel=None,
+        actor=_SYNC_ACTOR,
+        level=level,
+    )

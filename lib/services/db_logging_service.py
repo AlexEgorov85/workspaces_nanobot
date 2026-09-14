@@ -478,6 +478,34 @@ class DbLoggingService:
             request_id=request_id,
         ))
 
+    def log_sync_event(
+        self,
+        event_type: str,
+        summary: str,
+        payload: dict | None = None,
+        *,
+        name: str | None = None,
+        level: str = "INFO",
+    ) -> bool:
+        """Записать событие из PG→DuckDB sync-пути.
+
+        Аналог :func:`workspace.utils.event_log.record_sync_event`, но
+        асинхронный (через пул ``DbLoggingService``). Используется из
+        worker-потока ``PgDuckDbSyncService``, когда ``db_logging_service``
+        уже доступен (``ApplicationContext.start()`` отработал). Если
+        сервис недоступен — caller должен упасть в ``event_log.record_sync_event``.
+        """
+        return self.log_event(LogEvent(
+            event_type=event_type,
+            level=level,
+            session_id="gateway:sync",
+            channel=None,
+            actor="sync",
+            name=name or event_type,
+            summary=summary[: self._summary_max_chars] if summary else "",
+            payload=payload or {},
+        ))
+
     def get_stats(self) -> dict[str, Any]:
         with self._state_lock:
             s = dict(self._stats)

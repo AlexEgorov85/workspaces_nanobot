@@ -616,11 +616,21 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             "или _register_infra_resources). "
             "Проверьте секции project.json::skills.* и gateway.vector.index.*."
         )
+        _record_sync_skipped(
+            event_type="sync_skipped_registry_empty",
+            reason="TableRegistry пуст",
+            detail="Нет ни одной зарегистрированной таблицы — проверьте project.json::skills.* и gateway.vector.index.*",
+        )
         return None, None
     if not dsn:
         logger.warning(
             "PgDuckDbSyncService skipped: channels.postgres.dsn не задан "
             "(пустая строка или отсутствует ключ в project.json)."
+        )
+        _record_sync_skipped(
+            event_type="sync_skipped_no_dsn",
+            reason="channels.postgres.dsn не задан",
+            detail="DATABASE_URL пустой или отсутствует ключ в project.json — sync не сможет подключиться к PG",
         )
         return None, None
 
@@ -634,6 +644,11 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         logger.warning(
             "PgDuckDbSyncService skipped: в TableRegistry есть ресурсы, но ни одного "
             "имени в table_names()/vector_names() — несоответствие регистрации."
+        )
+        _record_sync_skipped(
+            event_type="sync_skipped_no_table_names",
+            reason="в TableRegistry есть ресурсы, но table_names()/vector_names() пусты",
+            detail="Несоответствие регистрации — проверьте register() vs register_infra()",
         )
         return None, None
 
@@ -703,8 +718,29 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         reconnect_backoff=reconnect_backoff,
         reconnect_backoff_max=reconnect_backoff_max,
         full_resync_every=full_resync_every,
+        db_logging_service=ctx.db_logging_service,
     )
     return sync, store
+
+
+def _record_sync_skipped(event_type: str, reason: str, detail: str) -> None:
+    """Записать в ``agent_gateway_logs`` причину, по которой sync не стартанул.
+
+    Используется в ``_make_sync_services`` при ранних return'ах с тихими
+    причинами отказа. Идемпотентно и безопасно для вызова до старта
+    ``DbLoggingService`` — идёт через ``event_log.record_sync_event``.
+    """
+    try:
+        from workspace.utils.event_log import record_sync_event
+
+        record_sync_event(
+            event_type=event_type,
+            summary=f"PgDuckDbSyncService skipped: {reason}",
+            payload={"reason": reason, "detail": detail},
+            level="WARN",
+        )
+    except Exception:
+        pass
 
 
 

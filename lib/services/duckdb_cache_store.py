@@ -39,6 +39,35 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+def _emit_sync_event(
+    event_type: str,
+    summary: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    level: str = "INFO",
+) -> None:
+    """Тонкая обёртка для sync-событий в ``agent_gateway_logs``.
+
+    ``DuckDbCacheStore`` создаётся без DI ``DbLoggingService`` (publish идёт
+    из worker-потока ``PgDuckDbSyncService``, который уже владеет ссылкой
+    на сервис). Чтобы не дублировать развилку «sink → fallback», используем
+    единый helper из ``workspace.utils.event_log``: он уже умеет тихо
+    no-op'ить при выключенном ``logging.db.enabled`` или отсутствии DSN.
+    Все ошибки глотаются — publish не должен падать из-за логирования.
+    """
+    try:
+        from workspace.utils.event_log import record_sync_event
+
+        record_sync_event(
+            event_type=event_type,
+            summary=summary,
+            payload=payload,
+            level=level,
+        )
+    except Exception:
+        pass
+
 # DuckDB не поддерживает TO_CHAR(date, 'Month') — переписываем в strftime
 # (общая логика — в lib.utils.duckdb_query.rewrite_duck_sql).
 
@@ -814,12 +843,39 @@ class DuckDbCacheStore:
                         len(counts),
                         sum(counts.values()),
                     )
+                    _emit_sync_event(
+                        event_type="sync_publish_ok",
+                        summary=(
+                            f"cache snapshot -> {target} "
+                            f"({len(counts)} tables, {sum(counts.values())} rows)"
+                        ),
+                        payload={
+                            "publish_path": str(target),
+                            "tables": {k: int(v) for k, v in counts.items()},
+                            "total_tables": len(counts),
+                            "total_rows": int(sum(counts.values())),
+                        },
+                        level="INFO",
+                    )
                 else:
                     logger.warning(
                         "DuckDbCacheStore.publish OK but 0 tables copied to %s "
                         "(publish_path задан, dirty=True, но ни одной таблицы в self._tables "
                         "не существует во in-memory DuckDB — sync возможно не доставил данные).",
                         target,
+                    )
+                    _emit_sync_event(
+                        event_type="sync_publish_empty",
+                        summary=(
+                            f"publish OK, но 0 таблиц скопировано в {target} "
+                            f"(sync не доставил данные)"
+                        ),
+                        payload={
+                            "publish_path": str(target),
+                            "tables_in_store": list(self._tables or []),
+                            "vector_db_table": self._vector_db_table or None,
+                        },
+                        level="WARN",
                     )
                 return True
             except OSError as e:
@@ -833,6 +889,17 @@ class DuckDbCacheStore:
                     target,
                     tmp,
                 )
+                _emit_sync_event(
+                    event_type="sync_publish_failed",
+                    summary=f"publish FAIL (OSError при replace): {e}",
+                    payload={
+                        "publish_path": str(target),
+                        "tmp_path": str(tmp),
+                        "error_type": "OSError",
+                        "error": str(e),
+                    },
+                    level="WARN",
+                )
                 return False
             except Exception as e:
                 self._last_error = f"publish: {e}"
@@ -841,6 +908,17 @@ class DuckDbCacheStore:
                     "DuckDbCacheStore.publish FAIL: %s",
                     e,
                     exc_info=True,
+                )
+                _emit_sync_event(
+                    event_type="sync_publish_failed",
+                    summary=f"publish FAIL: {e}",
+                    payload={
+                        "publish_path": str(target),
+                        "tmp_path": str(tmp),
+                        "error_type": type(e).__name__,
+                        "error": str(e),
+                    },
+                    level="WARN",
                 )
                 return False
 
