@@ -53,5 +53,8 @@ class PreloadService:
             return None
         try:
             return await asyncio.to_thread(store.preload_indexes)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "PreloadService.preload_vector_indexes failed: %s", exc,
+            )
             return None

@@ -1017,8 +1017,14 @@ class DuckDbCacheStore:
 
         Returns:
             Список построенных индексов [{"index_name", "vectors"}, ...].
+        Ошибки построения сохраняются в ``self._preload_errors`` и
+        доступны через ``preload_errors()``; каждая ошибка также
+        дублируется в ``agent_gateway_logs`` (event
+        ``vector_index_build_failed`` / ``vector_preload_error``) и в
+        ``loguru.warning`` для мгновенной видимости в терминале.
         """
         loaded: list[dict[str, Any]] = []
+        self._preload_errors: list[dict[str, Any]] = []
         with self._lock:
             if self._conn is None or not self._vector_db_table:
                 return loaded
@@ -1031,19 +1037,66 @@ class DuckDbCacheStore:
                         'WHERE source IS NOT NULL ORDER BY source'
                     ).fetchall()
                 ]
-            except Exception:
+            except Exception as exc:
+                err = {
+                    "index_name": None,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+                self._preload_errors.append(err)
+                _emit_sync_event(
+                    event_type="vector_preload_error",
+                    summary=(
+                        f"не удалось получить список source из "
+                        f"{schema}.{name}: {exc}"
+                    ),
+                    payload=err,
+                    level="WARN",
+                    service=self._db_logging_service,
+                )
+                logger.warning("vector_preload_error: %s", exc)
                 return loaded
             for src in sources:
-                if src in self._index_cache:
-                    idx = self._index_cache[src][0]
-                else:
-                    idx, meta = self._load_source_index(src)
-                    if idx is not None:
-                        self._index_cache[src] = (idx, meta)
+                try:
+                    if src in self._index_cache:
+                        idx = self._index_cache[src][0]
                     else:
-                        continue
+                        idx, meta = self._load_source_index(src)
+                        if idx is not None:
+                            self._index_cache[src] = (idx, meta)
+                        else:
+                            continue
+                except Exception as exc:
+                    err = {
+                        "index_name": src,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    }
+                    self._preload_errors.append(err)
+                    _emit_sync_event(
+                        event_type="vector_index_build_failed",
+                        summary=(
+                            f"ошибка построения FAISS-индекса '{src}': {exc}"
+                        ),
+                        payload=err,
+                        level="WARN",
+                        service=self._db_logging_service,
+                    )
+                    logger.warning(
+                        "vector_index_build_failed (%s): %s", src, exc,
+                    )
+                    continue
                 loaded.append({"index_name": src, "vectors": idx.ntotal})
         return loaded
+
+    def preload_errors(self) -> list[dict[str, Any]]:
+        """Последние ошибки ``preload_indexes`` (сброс при каждом вызове).
+
+        Каждая ошибка — dict с ключами ``index_name`` (str или None),
+        ``error`` (str), ``error_type`` (str). Возвращает ``[]``, если
+        ошибок не было или ``preload_indexes`` ещё не вызывался.
+        """
+        return list(getattr(self, "_preload_errors", []))
 
     def _load_source_index(self, source: str, metric: str | None = None) -> tuple[Any, dict | None]:
         """Прочитать векторы source из DuckDB и построить FAISS-индекс.

@@ -105,8 +105,20 @@ class PostgresChannel(BaseChannel):
     docs/ARCHITECTURE.md » «Мульти-машинный пул воркеров».
     """
 
-    def __init__(self, config: dict, bus: MessageBus) -> None:
+    def __init__(
+        self,
+        config: dict,
+        bus: MessageBus,
+        *,
+        db_logging_service: Any | None = None,
+    ) -> None:
         super().__init__(config, bus)
+        # Опциональный ``DbLoggingService`` для долговечного журнала
+        # ``agent_gateway_logs``: «тихие» ошибки циклов опроса БД
+        # (poll/lease/unstick) пишутся туда в дополнение к loguru-логгеру
+        # (терминал). ``None`` (тесты, standalone) — журналирование
+        # отключается, остаётся только терминальный вывод.
+        self._db_logging_service = db_logging_service
         _get = config.get
 
         # ---- настройки подключения к БД ----
@@ -349,6 +361,15 @@ class PostgresChannel(BaseChannel):
                     await self._reclaim_and_heal()
             except Exception as e:
                 self.logger.error("Lease loop error: {}", e)
+                self._journal_event(
+                    event_type="channel_lease_error",
+                    summary=f"lease/heartbeat loop failed: {e}",
+                    payload={
+                        "component": "_lease_loop",
+                        "error_type": type(e).__name__,
+                        "error": str(e),
+                    },
+                )
 
     async def _reclaim_needed(self) -> bool:
         """Быстрый гейт перед тяжёлым reclaim: есть ли вообще работа.
@@ -576,6 +597,44 @@ class PostgresChannel(BaseChannel):
                 parts.append(f"{k}={v}")
         self.logger.debug("TASK lifecycle {}", " ".join(parts))
 
+    def _journal_event(
+        self,
+        event_type: str,
+        summary: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        level: str = "WARN",
+    ) -> None:
+        """Долговечно записать ошибку канала в ``agent_gateway_logs``.
+
+        Дублирует loguru-строку из циклов опроса БД (``poll_inbound`` /
+        ``_lease_loop`` / ``_unstick_loop``) в журнал ``DbLoggingService``,
+        чтобы «тихие» сбои были видны и post-factum (``history_search``,
+        дашборды), а не только в терминале. Нет ``DbLoggingService``
+        (``None`` — тесты/standalone) или он не запущен — no-op:
+        терминальный вывод loguru остаётся единственным источником.
+        Все ошибки внутри глотаются — канал не должен падать из-за
+        журналирования.
+        """
+        svc = self._db_logging_service
+        if svc is None or not getattr(svc, "is_running", lambda: False)():
+            return
+        try:
+            from lib.services.db_logging_service import LogEvent
+
+            svc.log_event(LogEvent(
+                event_type=event_type,
+                level=level,
+                session_id=None,
+                channel=self.name,
+                actor="channel",
+                name=event_type,
+                summary=summary,
+                payload=payload or {},
+            ))
+        except Exception:
+            pass
+
     @staticmethod
     def _preview(content: Any, limit: int = 60) -> str:
         """Короткий однострочный превью контента задачи для лога."""
@@ -722,8 +781,20 @@ class PostgresChannel(BaseChannel):
             await self._report_queue()
         if not exchange.is_slot_free():
             return False
-        had = await self._poll_once(exchange)
-        return bool(had)
+        try:
+            had = await self._poll_once(exchange)
+            return bool(had)
+        except Exception as exc:
+            self._journal_event(
+                event_type="channel_poll_error",
+                summary=f"poll_inbound/_poll_once failed: {exc}",
+                payload={
+                    "component": "_poll_once",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            raise
 
     async def _unstick_processing(self) -> list[str]:
         """Освободить сообщения, зависшие в ``processing`` дольше таймаута.
@@ -842,6 +913,15 @@ class PostgresChannel(BaseChannel):
                         )
             except Exception as e:
                 self.logger.error("Unstick loop error: {}", e)
+                self._journal_event(
+                    event_type="channel_unstick_error",
+                    summary=f"unstick (восстановление processing) failed: {e}",
+                    payload={
+                        "component": "_unstick_loop",
+                        "error_type": type(e).__name__,
+                        "error": str(e),
+                    },
+                )
 
     async def _claim_one(self) -> dict | None:
         """Атомарно захватить одну задачу и перевести её в ``processing``.

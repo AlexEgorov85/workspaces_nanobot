@@ -35,9 +35,11 @@ class ChannelFactory:
         self,
         transcription: Any | None = None,
         print_worker_activity: bool = False,
+        db_logging_service: Any | None = None,
     ) -> None:
         self._transcription = transcription
         self._print_worker_activity = print_worker_activity
+        self._db_logging_service = db_logging_service
 
     def create_all(
         self,
@@ -174,7 +176,9 @@ class ChannelFactory:
             "print_worker_activity": self._print_worker_activity,
             "claim_strategy": pg.get("claim_strategy", "single"),
         }
-        pg_channel = PostgresChannel(ch_cfg, bus)
+        pg_channel = PostgresChannel(
+            ch_cfg, bus, db_logging_service=self._db_logging_service,
+        )
         if self._transcription is not None:
             pg_channel.transcription_provider = self._transcription.provider
             pg_channel.transcription_api_key = self._transcription.get_api_key()

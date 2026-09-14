@@ -152,6 +152,7 @@ async def _run(ctx: ApplicationContext, first_sync_event) -> None:
     channel_factory = ChannelFactory(
         transcription=ctx.transcription_service,
         print_worker_activity=_gateway_print_worker_activity(),
+        db_logging_service=ctx.db_logging_service,
     )
     channels, messages = channel_factory.create_all(
         ctx.config, ctx.settings, ctx.bus, ctx.session_manager,
@@ -194,10 +195,24 @@ async def _run(ctx: ApplicationContext, first_sync_event) -> None:
             loaded = await ctx.preload_service.preload_vector_indexes(
                 cache_store
             )
-            if not loaded:
+            errs = cache_store.preload_errors()
+            if errs:
                 console.print(
-                    "[dim]audit_analyzer vector indexes: нет данных в кэше[/dim]"
+                    "[yellow]⚠[/yellow] vector index build errors: "
+                    f"{len(errs)}"
                 )
+                for err in errs:
+                    name = err.get("index_name") or "?"
+                    console.print(
+                        f"  [red]✗[/red] '{name}': "
+                        f"{err.get('error_type')}: {err.get('error')}"
+                    )
+            if not loaded:
+                if not errs:
+                    console.print(
+                        "[dim]audit_analyzer vector indexes: "
+                        "нет данных в кэше[/dim]"
+                    )
                 return
             for item in loaded:
                 console.print(

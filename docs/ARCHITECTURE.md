@@ -258,6 +258,48 @@ worker-потока). В юнит-тестах store создаётся без �
 ложная хронология в журнале. После перевода всех sync-событий на
 `emit_sync_event` хронология идёт одним потоком.
 
+### Видимость «тихих» ошибок: preload векторов и канал
+
+Общий принцип: проблемы, которые раньше молча проглатывались, должны
+попадать в `agent_gateway_logs` (post-factum, `history_search`) и в
+терминал gateway (мгновенно). Два источника «тихих» сбоев подняты на
+этот уровень:
+
+**1. FAISS-preload при старте** (`DuckDbCacheStore.preload_indexes`).
+Раньше ошибка чтения списка source была беззвучной (`return []`), а
+провал построения одного индекса — тихим `continue`: gateway печатал
+dim-«нет данных в кэше», неотличимо от реального отсутствия данных.
+Теперь `preload_indexes`:
+
+* собирает ошибки в `self._preload_errors` (аксессор
+  `preload_errors()`; сбрасывается при каждом вызове);
+* пишет события `vector_preload_error` (ошибка чтения `source` из
+  таблицы хранения, `index_name=None`) и `vector_index_build_failed`
+  (ошибка построения конкретного индекса) через
+  `_emit_sync_event(..., service=self._db_logging_service)` — в
+  журнал, при `None` — standalone-fallback; дополнительно дублирует
+  warning в терминал (`logger.warning`, stdlib-logging).
+* `PreloadService.preload_vector_indexes` логирует
+  `logger.warning` (loguru) при собственном исключении вместо тихого
+  `None`;
+* `gateway._preload_and_report` по `cache_store.preload_errors()`
+  печатает красный список ошибок построения вместо/вместе
+  dim-строки «нет данных».
+
+**2. PostgresChannel — циклы опроса БД.** Ошибки
+`poll_inbound`/`_poll_once`, `_lease_loop`, `_unstick_loop` раньше шли
+только в `self.logger.error` (loguru, терминал). Теперь каждая
+дублируется в `agent_gateway_logs` через метод `_journal_event`
+(`PostgresChannel`), событие-типы `channel_poll_error` /
+`channel_lease_error` / `channel_unstick_error` (payload:
+`component`/`error_type`/`error`). `_journal_event` — no-op без
+запущенного `DbLoggingService` (тесты/standalone пишут без сервиса);
+внутренние ошибки журналирования глотаются.
+
+`DbLoggingService` инжектится в `PostgresChannel` по цепочке:
+`gateway._run` → `ChannelFactory(db_logging_service=ctx.db_logging_service)`
+→ `create_all` → `PostgresChannel(config, bus, db_logging_service=...)`.
+
 ### Метрика занятости контекстного окна (`metadata.context_window`)
 
 **Задача.** Видеть в UI, сколько процентов контекстного окна модели
