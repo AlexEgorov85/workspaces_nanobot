@@ -456,8 +456,12 @@ class TestAuditAnalyerSkillToolSet:
         """SKILL.md — единственный источник документации по skill'у.
 
         ``references/`` удалены (Phase 8): весь релевантный контент
-        (каталог скриптов, описание индексов, схема домена, SQL guidance)
+        (каталог скриптов, описание индексов, бизнес-глоссарий, SQL guidance)
         перенесён в SKILL.md.
+
+        Техническая schema (колонки/типы ``oarb.*``) **не** прописывается
+        вручную — она читается через ``CacheProvider.get_schema()``. Поэтому
+        здесь нет asserts на ``oarb.audits`` / ``oarb.violations`` / etc.
         """
         skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         assert len(skill_text) > 2000, "SKILL.md подозрительно мал"
@@ -474,9 +478,11 @@ class TestAuditAnalyerSkillToolSet:
         # Все 3 FAISS-индекса каталогизированы.
         for index in ("audits_index", "violations_index", "audit_reports_index"):
             assert index in skill_text
-        # Domain schema упомянута.
-        for table in ("oarb.audits", "oarb.violations", "oarb.audit_reports"):
-            assert table in skill_text
+        # Технической schema (типы колонок, «## Схема домена») быть не должно.
+        assert "## Схема домена" not in skill_text, (
+            "SKILL.md не должен содержать раздел «## Схема домена» с типами колонок — "
+            "schema читается через CacheProvider.get_schema()"
+        )
 
     def test_references_dir_not_required(self) -> None:
         """``references/`` удалён — SKILL.md self-contained (Phase 8)."""

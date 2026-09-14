@@ -7,7 +7,7 @@ Pipeline с ретраями:
   3. Валидация безопасности (только SELECT, один statement)
   4. EXPLAIN (FORMAT JSON) — проверка синтаксиса без выполнения
   5. Выполнить SELECT
-  6. Если EXPLAIN или валидация упали — retry до MAX_RETRIES раз
+  6. Если EXPLAIN или валидация упали — retry до MAX_ATTEMPTS раз
      с передачей предыдущей ошибки в LLM для исправления
 
 Чтобы уменьшить класс ошибок «LLM выдумывает несуществующие таблицы»,
@@ -30,10 +30,11 @@ import re
 from llm import chat
 from skill_config import get_db_schema, get_db_tables, get_predefined_scripts_table
 
-from column_hints import format_hints_block
 from lib.utils.sql_safety import format_schema, validate_sql
+from workspace.skills.audit_analyzer.scripts.predefined.db_loader import load_all
+from workspace.skills.audit_analyzer.scripts.predefined.models import ScriptDefinition
 
-MAX_RETRIES = 3
+MAX_ATTEMPTS = 4  # было MAX_RETRIES=3 + 1 initial; теперь именовано честно.
 
 
 def _normalize(text: str) -> set[str]:
@@ -44,64 +45,35 @@ def _normalize(text: str) -> set[str]:
     return {tok for tok in re.split(r"[^a-zа-яё0-9]+", (text or "").lower()) if len(tok) >= 3}
 
 
-def _load_predefined_scripts(db) -> list[dict]:
-    """Загрузить реестр предопределённых скриптов из DuckDB-кэша.
-
-    Возвращает список ``{"name", "description", "sql_template", "tokens"}``
-    с предвычисленным keyword-множеством для быстрого ranking'а.
-
-    При ошибке (таблица отсутствует, нет прав) — возвращает пустой список.
-    Это НЕ фатально для sql-режима: few-shot просто не подклеится.
-    """
-    table = get_predefined_scripts_table()
-    if "." in table:
-        schema, tbl = table.split(".", 1)
-    else:
-        schema, tbl = "main", table
-    sql = (
-        f'SELECT name, description, sql_template '
-        f'FROM "{schema}"."{tbl}" ORDER BY name'
-    )
-    res = db.query_sql(sql)
-    if res.get("status") != "success":
-        return []
-    out = []
-    for row in res.get("rows", []):
-        name = row.get("name") or ""
-        desc = row.get("description") or ""
-        sql_tpl = row.get("sql_template") or ""
-        if not name:
-            continue
-        tokens = _normalize(f"{name} {desc}")
-        out.append({"name": name, "description": desc, "sql_template": sql_tpl, "tokens": tokens})
-    return out
-
-
-def _select_few_shot(query: str, scripts: list[dict], limit: int = 2) -> str:
+def _select_few_shot(query: str, scripts: dict[str, ScriptDefinition], limit: int = 2) -> str:
     """Выбрать top-N скриптов из реестра по keyword-overlap с запросом.
 
-    Скоринг = |tokens(scr) ∩ tokens(query)|. Возвращает многострочный
-    текстовый блок для system prompt или пустую строку, если реестр
-    пуст / нет релевантных скриптов.
+    Скоринг = |tokens(name+description) ∩ tokens(query)|. Возвращает
+    многострочный текстовый блок для system prompt или пустую строку,
+    если реестр пуст / нет релевантных скриптов.
+
+    Источник данных — единственный (``predefined.db_loader.load_all``),
+    без локальной копии SQL.
     """
     if not scripts:
         return ""
     q_tokens = _normalize(query)
     if not q_tokens:
         return ""
-    scored = []
-    for s in scripts:
-        score = len(q_tokens & s["tokens"])
+    scored: list[tuple[int, ScriptDefinition]] = []
+    for script in scripts.values():
+        tokens = _normalize(f"{script.name} {script.description}")
+        score = len(q_tokens & tokens)
         if score > 0:
-            scored.append((score, s))
+            scored.append((score, script))
     if not scored:
         return ""
-    scored.sort(key=lambda x: (-x[0], x[1]["name"]))
+    scored.sort(key=lambda x: (-x[0], x[1].name))
     chosen = [s for _, s in scored[:limit]]
     lines = ["Examples from the predefined registry (use as templates, adapt to the user's request):"]
     for s in chosen:
-        lines.append(f"  -- «{s['description']}» →")
-        lines.append(f"  {s['sql_template'].strip()}")
+        lines.append(f"  -- «{s.description}» →")
+        lines.append(f"  {s.sql_template.strip()}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -165,7 +137,7 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
     Сгенерировать SQL через LLM, проверить, выполнить (с retry-циклом).
 
     Если LLM вернула некорректный SQL (не прошёл EXPLAIN или валидацию),
-    ошибка передаётся обратно в LLM для исправления. До MAX_RETRIES + 1 попыток.
+    ошибка передаётся обратно в LLM для исправления. До ``MAX_ATTEMPTS`` попыток.
 
     Args:
         query: Запрос на естественном языке (например,
@@ -187,7 +159,11 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
     schema_text = format_schema(schema)
     qualified_tables = [f'"{get_db_schema()}"."{t}"' for t in (tables or [])]
 
-    registry = _load_predefined_scripts(db)
+    # Few-shot через существующий predefined-подсистему (db_loader.load_all) —
+    # единственный путь к реестру ``public.agent_predefined_scripts``.
+    # Если реестр недоступен — load_all вернёт {} и few-shot просто не
+    # подклеится. Это НЕ ошибка generated_sql-режима.
+    registry: dict[str, ScriptDefinition] = load_all(db, get_predefined_scripts_table())
     few_shot_block = _select_few_shot(query, registry, limit=2)
     few_shot_section = f"\n\n{few_shot_block}" if few_shot_block else ""
 
@@ -204,7 +180,6 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
         "schema-qualified names. Honesty over coverage: an explicit "
         "``<NO_MATCH>`` is the correct response when the data is unavailable.\n"
         "  3. Always schema-qualify table names."
-        f"{format_hints_block()}"
         f"{few_shot_section}"
     )
 
@@ -215,7 +190,7 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
 
     last_error: dict | None = None
 
-    for attempt in range(MAX_RETRIES + 1):
+    for attempt in range(MAX_ATTEMPTS):
         messages = list(base_messages)
 
         if attempt > 0 and last_error:
@@ -294,7 +269,7 @@ def run(query: str, db, context: list[dict] | None = None) -> dict:
         "data": {
             "message": (
                 f"Не удалось сгенерировать корректный SQL после "
-                f"{MAX_RETRIES + 1} попыток. Последняя ошибка: {detail['error']}"
+                f"{MAX_ATTEMPTS} попыток. Последняя ошибка: {detail['error']}"
             ),
             "sql": detail.get("sql", ""),
         },

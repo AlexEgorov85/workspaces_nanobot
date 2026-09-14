@@ -182,7 +182,9 @@ def stub_llm_chat(monkeypatch: pytest.MonkeyPatch):
 
 
 # Skill-конфиг возвращает _core_cfg функции — подменим их, чтобы не зависеть
-# от реального project.json и ApplicationContext.
+# от реального project.json и ApplicationContext. Патчим как ``skill_config``,
+# так и ``generated_sql_mode`` — у gsm локальные имена (``from skill_config import``),
+# прямой подмены ``skill_config.X`` недостаточно для вызовов из gsm.
 @pytest.fixture
 def stub_skill_config(monkeypatch: pytest.MonkeyPatch) -> None:
     import skill_config  # noqa: E402
@@ -191,6 +193,16 @@ def stub_skill_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(skill_config, "get_db_schema", lambda: "oarb")
     monkeypatch.setattr(
         skill_config,
+        "get_predefined_scripts_table",
+        lambda: "public.agent_predefined_scripts",
+    )
+    # Дублируем патчи в gsm — там ``from skill_config import ...`` уже связал
+    # локальные имена, прямой патч ``skill_config.X`` не повлияет на вызовы
+    # из ``generated_sql_mode.run()``.
+    monkeypatch.setattr(gsm, "get_db_tables", lambda: ["audits", "violations"])
+    monkeypatch.setattr(gsm, "get_db_schema", lambda: "oarb")
+    monkeypatch.setattr(
+        gsm,
         "get_predefined_scripts_table",
         lambda: "public.agent_predefined_scripts",
     )
@@ -212,7 +224,7 @@ class TestGeneratedSqlRun:
         fake_db._query_results.append(
             {"status": "success", "row_count": 1, "columns": ["n"], "rows": [{"n": 42}]}
         )
-        monkeypatch.setattr(gsm, "_load_predefined_scripts", lambda db: [])
+        monkeypatch.setattr(gsm, "load_all", lambda db, table: {})
         out = gsm.run("сколько аудитов?", db=fake_db)
         assert out["status"] == "success"
         assert out["mode"] == "generated_sql"
@@ -236,7 +248,7 @@ class TestGeneratedSqlRun:
         fake_db._query_results.append(
             {"status": "success", "row_count": 0, "columns": ["x"], "rows": []}
         )
-        monkeypatch.setattr(gsm, "_load_predefined_scripts", lambda db: [])
+        monkeypatch.setattr(gsm, "load_all", lambda db, table: {})
         out = gsm.run("?", db=fake_db)
         assert out["status"] == "success"
         # 2 вызова chat (1 fail + 1 retry success).
@@ -260,7 +272,7 @@ class TestGeneratedSqlRun:
         fake_db._query_results.append(
             {"status": "success", "row_count": 0, "columns": ["x"], "rows": []}
         )
-        monkeypatch.setattr(gsm, "_load_predefined_scripts", lambda db: [])
+        monkeypatch.setattr(gsm, "load_all", lambda db, table: {})
         out = gsm.run("?", db=fake_db)
         assert out["status"] == "success"
 
@@ -271,17 +283,17 @@ class TestGeneratedSqlRun:
         stub_skill_config,
         fake_db: _FakeDB,
     ) -> None:
-        """Если все MAX_RETRIES+1 попыток падают по safety → error + last sql."""
+        """Если все ``MAX_ATTEMPTS`` попыток падают по safety → error + last sql."""
         _chat, responses, _calls = stub_llm_chat
-        for _ in range(gsm.MAX_RETRIES + 1):
+        for _ in range(gsm.MAX_ATTEMPTS):
             responses.append("DROP TABLE x")  # safety_error
-        monkeypatch.setattr(gsm, "_load_predefined_scripts", lambda db: [])
+        monkeypatch.setattr(gsm, "load_all", lambda db, table: {})
         out = gsm.run("?", db=fake_db)
         assert out["status"] == "error"
         assert out["mode"] == "generated_sql"
         assert "Не удалось" in out["data"]["message"]
         assert "DROP TABLE x" in out["data"]["sql"]
-        assert _calls.call_count if hasattr(_calls, "call_count") else len(_calls) == gsm.MAX_RETRIES + 1
+        assert _calls.call_count if hasattr(_calls, "call_count") else len(_calls) == gsm.MAX_ATTEMPTS
 
     def test_llm_exception_is_retried(
         self,
@@ -306,7 +318,7 @@ class TestGeneratedSqlRun:
         monkeypatch.setattr(gsm, "chat", _flaky)
         monkeypatch.setattr(llm_module, "chat", _flaky)
 
-        monkeypatch.setattr(gsm, "_load_predefined_scripts", lambda db: [])
+        monkeypatch.setattr(gsm, "load_all", lambda db, table: {})
         fake_db._explain_results.append({"valid": True, "error": ""})
         fake_db._query_results.append(
             {"status": "success", "row_count": 0, "columns": ["x"], "rows": []}
@@ -372,7 +384,7 @@ class TestNoMatchShortCircuit:
         responses.append("<NO_MATCH>")
         # NB: db.explain и db.query_sql НЕ должны вызываться — это
         # short-circuit до safety/explain.
-        monkeypatch.setattr(gsm, "_load_predefined_scripts", lambda db: [])
+        monkeypatch.setattr(gsm, "load_all", lambda db, table: {})
         out = gsm.run("?", db=fake_db)
         assert out["status"] == "success"
         assert out["mode"] == "generated_sql"

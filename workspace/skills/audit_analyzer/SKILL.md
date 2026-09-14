@@ -1,95 +1,120 @@
 ---
 name: audit_analyzer
-description: Анализ аудиторских проверок — predefined SQL-скрипты из PostgreSQL (CLI).
+description: Анализ аудиторских проверок — три режима (predefined / vector / generated_sql).
 metadata: {"nanobot":{"emoji":"📊","always":true}}
 ---
 
 # Audit Analyzer
 
 Навык для работы с данными аудиторских проверок (нарушения, отчёты,
-плановые/фактические даты). Единый способ получения данных —
-predefined SQL-скрипты через CLI.
+плановые/фактические даты). Доступ к данным — **через три режима**, каждый
+из которых является частью контракта навыка; CLI маршрутизирует
+запросы и сериализует результат в плоский JSON.
 
-## Архитектура
+## Три режима навыка
 
+```text
+                audit_analyzer
+                       │
+          ┌────────────┼────────────┐
+          ↓            ↓            ↓
+       predefined    vector    generated_sql
+          │            │            │
+          ↓            ↓            ↓
+       DB scripts   Vector Core    LLM + schema
+          │            │            │
+          └────────────┼────────────┘
+                       ↓
+                    Core
+                       ↓
+              Cache / infrastructure
 ```
-Agent / LLM
-       │
-       ▼
-exec: python scripts/cli.py --mode predefined --script <name> [--params '{}']
-       │
-       ▼
-audit_analyzer Skill (CLI)
-       └── predefined.run() → Core CacheProvider → DuckDB-PG снимок
-       ▼
-Core
- └── Cache (DuckDB-PG snapshot)
 
-       ▼
-Storage
- ├── PostgreSQL (source of truth)
- └── DuckDB cache (PG snapshot)
-```
+| Режим | Когда использовать |
+|---|---|
+| `predefined`     | Существующий SQL-скрипт **точно** соответствует запросу, параметры известны (или все optional). |
+| `vector`         | Семантический поиск: похожие проверки / нарушения / отчёты / свободный текст. |
+| `generated_sql`  | predefined не подходит, данные живут в доступной schema, задача решается свободным SQL. |
 
-**Доступ агента — только predefined через CLI.** В CLI также есть
-режимы `generated_sql` (NL→SQL через LLM) и `vector` (семантический
-поиск), но они не являются частью контракта агента — доступны через
-прямой вызов CLI.
+### Что нельзя
 
-**Skill не владеет:**
+- Не делать **fallback между режимами**. Ошибка выбранного режима — это его ошибка, не повод перепрыгивать в другой.
+- Не придумывать таблицы / колонки / индексы / имена скриптов. Они берутся строго из реестров и schema.
+- Не выполнять DDL / DML вне режима predef'ined-контракта. `generated_sql` генерирует **только** SELECT.
 
-- логикой выполнения SQL (это `CacheProvider.query_sql` / Core);
-- выбором embedding-модели (захардкожено в `cache_provider_impl` /
-  `_EMBED_*`-константы; bearer-токен — из env `EMBED_TOKEN`);
-- LLM-вызовами (Core skill helper, если нужен).
+## Когда выбирать какой режим
 
-**Skill владеет только:**
+### `predefined`
 
-- каталогом predefined скриптов (через DB-реестр `public.agent_predefined_scripts`);
-- каталогом FAISS-индексов (логические имена);
-- правилами выбора.
+Используй, **когда выполняются ОБА условия**:
+
+1. **Весь смысл** запроса совпадает с назначением одного из 6 скриптов ниже.
+2. **Параметры** либо явно известны, либо все параметры скрипта optional.
+
+Примеры:
+
+- «покажи нарушения за 2024» → подходит `violations_by_type` с `date_from=2024-01-01`.
+- «топ-5 объектов по проверкам» → подходит `top_audited_objects` с `limit=5`.
+- «сводка по статусам похожих проверок» → **не подходит ни один** (нужен свободный SQL — переходи в `generated_sql`).
+
+### `vector`
+
+Используй, **когда запрос требует семантического поиска**:
+
+- похожие проверки / нарушения / отчёты;
+- fuzzy-матчинг по произвольному тексту;
+- синонимы / перифразы (когда exact-match по термину не срабатывает);
+- семантически близкие документы / описания.
+
+Используй **только** логические имена индексов из каталога ниже. Технические детали (FAISS, embeddings, blob-storage) не трогай — это слой Core.
+
+### `generated_sql`
+
+Используй, **когда predefined не подходит** и:
+
+- данные лежат в **доступной schema** (whitelist задаётся ресурсной конфигурацией skill'а);
+- задача решается свободным SQL (агрегации, JOIN, фильтры по датам/кодам);
+- есть подходящие few-shot примеры из реестра predefined-скриптов (pass-through через `_select_few_shot`).
+
+**Не выдумывай** таблицы и колонки. Если нужных данных нет в whitelist — LLM обязана вернуть `<NO_MATCH>` (это **честный** success-результат, не ошибка). Не подменяй таблицу на «похожую».
+
+Retry — задача **Agent'а** (обычно 2–3 переформулировки), не skill'а.
 
 ## Источник predefined скриптов
 
 Канонический источник SQL — `public.agent_predefined_scripts` в PostgreSQL.
-Python `REGISTRY` (legacy) удалён в Phase 7: единый путь — DB-first lookup
-через `scripts/predefined/db_loader.py`.
+Python `REGISTRY` (legacy) удалён в Phase 7; единственный путь — DB-first lookup
+через `scripts/predefined/db_loader.py`. Sql-функция `load_all` живёт
+в `predefined`-подсистеме и **не дублируется** в `generated_sql_mode`.
 
 ```
 PostgreSQL
     ↓ seed/migration
 public.agent_predefined_scripts (6 скриптов)
     ↓ PgDuckDbSyncService
-DuckDB-PG snapshot (workspace/data_store/duckdb/cache.duckdb)
+DuckDB-PG snapshot (default ~/.cache/nanobot/duckdb/cache.duckdb — см. resolve_publish_path)
     ↓ db_loader.load_script / load_all
 ScriptDefinition
     ↓ predefined.run(name, db, params, *, predefined_table=...)
 CacheProvider.query_sql(sql, values)
     ↓
-result {row_count, columns, rows (dict по именам колонок)}
+result {status, data.result.row_count / columns / rows}
 ```
 
-В БД сейчас лежат **6 скриптов**, прочитанных напрямую через psycopg2:
+В БД сейчас лежат **6 скриптов** (имя / назначение / параметры):
 
-- `analytics_by_year_month`
-- `audit_dynamics`
-- `audit_effectiveness`
-- `audit_types_stats`
-- `top_audited_objects`
-- `violations_by_type`
-
-Это — **единственный канонический список**.
-
-## Каталог predefined scripts
-
-| Скрипт | Назначение | Параметры |
-|---|---|---|
-| `analytics_by_year_month` | Аналитика проверок по годам и месяцам | `year` (опц., число) |
-| `audit_dynamics` | Динамика проверок по периодам (month/quarter/week) | `period` (опц., enum: month/quarter/week, default `month`), `date_from` (опц., date) |
-| `audit_effectiveness` | Оценка эффективности: проверки × нарушения × severity | `date_from`, `date_to`, `min_violations` (все опц.) |
-| `audit_types_stats` | Статистика по типам проверок | `audit_type` (опц., like), `date_from` (опц., date) |
-| `top_audited_objects` | Топ проверяемых объектов по количеству проверок | `auditee_entity` (опц., like), `date_from` (опц., date), `limit` (опц., default `10`) |
-| `violations_by_type` | Статистика нарушений по типам | `violation_code` (опц., like), `date_from` (опц., date) |
+- `analytics_by_year_month` — аналитика проверок по годам и месяцам.
+  Параметры: `year` (опц., число).
+- `audit_dynamics` — динамика проверок по периодам (month/quarter/week).
+  Параметры: `period` (опц., enum: month/quarter/week, default `month`), `date_from` (опц., date).
+- `audit_effectiveness` — оценка эффективности: проверки × нарушения × severity.
+  Параметры: `date_from`, `date_to`, `min_violations` (все опц.).
+- `audit_types_stats` — статистика по типам проверок.
+  Параметры: `audit_type` (опц., like), `date_from` (опц., date).
+- `top_audited_objects` — топ проверяемых объектов по количеству проверок.
+  Параметры: `auditee_entity` (опц., like), `date_from` (опц., date), `limit` (опц., default `10`).
+- `violations_by_type` — статистика нарушений по типам.
+  Параметры: `violation_code` (опц., like), `date_from` (опц., date).
 
 **Контракт:** все параметры **optional**, ни один скрипт не требует
 обязательных значений. Если параметр не передан — соответствующий
@@ -102,220 +127,37 @@ result {row_count, columns, rows (dict по именам колонок)}
 либо используйте другой скрипт. Актуальный каталог и типы параметров —
 через `--list-scripts`.
 
-### Подробное описание скриптов
-
-#### `analytics_by_year_month`
-
-- **Возвращает**: `audit_year`, `audit_month`, `audit_count`, `month_name`.
-- **Когда использовать**: «сколько проверок в каждом году», «динамика по годам».
-- **Параметры**:
-  - `year` (number, опц.) — фильтр по конкретному году.
-
-#### `audit_dynamics`
-
-- **Возвращает**: `period` (например, `2024-Q3` или `2024-06`), `audit_count`, `unique_objects`, `total_violations`.
-- **Когда использовать**: «помесячная / поквартальная динамика», «как менялось количество проверок».
-- **Параметры**:
-  - `period` (enum: `month` / `quarter` / `week`, опц., default `month`).
-  - `date_from` (date, опц.) — нижняя граница.
-
-#### `audit_effectiveness`
-
-- **Возвращает**: `audit_id`, `audit_title`, `actual_date`, `violations_count`, `violation_types_count`, `severity_level`.
-- **Когда использовать**: «какие проверки самые проблемные», «уровень серьёзности нарушений».
-- **Параметры**:
-  - `date_from` (date, опц.) — нижняя граница.
-  - `date_to` (date, опц.) — верхняя граница.
-  - `min_violations` (number, опц.) — минимальное число нарушений для фильтра.
-- **Семантика severity**: `severity_level` синтезируется по количеству
-  нарушений (`0 → «Без нарушений»`, `1–3 → «Допустимые»`, `4–10 →
-  «Серьезные»`, `>10 → «Критические»`). Замена на реальный `v.severity`
-  — отдельная задача.
-
-#### `audit_types_stats`
-
-- **Возвращает**: `audit_type`, `audit_count`, `unique_objects`, `total_violations`, `avg_severity`, `last_audit_date`.
-- **Когда использовать**: «по каким типам проверок больше всего нарушений».
-- **Параметры**:
-  - `audit_type` (like, опц.) — фильтр по типу (например, `'финансовый'`).
-  - `date_from` (date, опц.) — нижняя граница.
-- **Vector-validation для `audit_type`**: `vector_field=audit_type`,
-  `vector_top_k=3`, `vector_source=audits`, `vector_min_score=0.7` —
-  если введённое значение не находит прямого совпадения, fuzzy-matcher
-  может через vector-search предложить подходящее значение.
-
-#### `top_audited_objects`
-
-- **Возвращает**: `auditee_entity`, `audit_count`, `years_covered`, `last_audit_date`.
-- **Когда использовать**: «какие объекты проверяются чаще всего».
-- **Параметры**:
-  - `auditee_entity` (like, опц.) — фильтр по объекту.
-  - `date_from` (date, опц.) — нижняя граница.
-  - `limit` (limit, опц., default `10`) — топ-N.
-
-#### `violations_by_type`
-
-- **Возвращает**: `violation_code`, `violation_count`, `affected_audits`.
-- **Когда использовать**: «топ кодов нарушений», «по каким кодам больше всего проблем».
-- **Параметры**:
-  - `violation_code` (like, опц.) — фильтр по коду/типу.
-  - `date_from` (date, опц.) — нижняя граница.
-
-### Когда predefined «соответствует»
-
-Выбирай predefined script **только если выполняются оба условия**:
-
-1. **Весь смысл** запроса соответствует назначению скрипта.
-2. **Параметры** либо явно известны, либо все параметры скрипта
-   optional и могут быть опущены.
-
-Похожее слово в запросе ≠ подходящий predefined:
-
-- «покажи нарушения за 2024» — **подходит** `violations_by_type` с `date_from=2024-01-01`.
-- «топ-5 объектов по проверкам» — **подходит** `top_audited_objects` с `limit=5`.
-- «сводка по статусам похожих проверок» — **не подходит ни один** (нужен дополнительный фильтр; используй свободный SQL).
-
 ## Каталог vector indexes
 
-| Индекс | Источник | Embed-колонки | Chunking | Score |
-|---|---|---|---|---|
-| `audits_index` | `oarb.audits` | `title`, `audit_type`, `auditee_entity`, `status` | — | `0.6+` высокая, `0.4–0.6` умеренная |
-| `violations_index` | `oarb.violations` | `description` (chunk 500/80), `violation_code` | `description`: 500/80 | `0.65+` высокая, `0.5–0.65` умеренная |
-| `audit_reports_index` | `oarb.audit_reports` | `full_text` (chunk 500/80), `title` | `full_text`: 500/80 | `0.55+` высокая, `0.4–0.55` умеренная |
+Имена — логические; конфигурация в `project.json::gateway.vector.index.indexes.*`
+(`VectorIndexConfig`). Skill передаёт **только** логические имена в generic
+vector capability. Технические детали (как именно Core хранит индексы)
+— забота Core, skill их не видит.
 
-Конфигурация — в `project.json::gateway.vector.index.indexes.*`
-(`VectorIndexConfig`). Skill передаёт **только** логическое имя
-(`audits_index` / `violations_index` / `audit_reports_index`)
-в generic vector capability — FAISS-детали (`agent_vector_index_store`,
-`oarb.audit_vectors`, сериализация, embedding-blob) знает только Core.
-PG-реестр `public.agent_vector_index_config` остаётся в репо как
-legacy SQL-артефакт, но кодом **не читается** (см. CHANGELOG →
-Resource Model Refactoring).
+| Индекс | Бизнес-назначение |
+|---|---|
+| `audits_index`         | Семантический поиск по аудиторским проверкам. |
+| `violations_index`     | Семантический поиск по нарушениям (по описанию и коду). |
+| `audit_reports_index`  | Семантический поиск по полным текстам отчётов. |
 
-**Известное предупреждение:** legacy FAISS-индексы могут иметь
-`signature_status: "INVALID"` — это by design (`verify_index_signature`
-помечает индексы без signature как INVALID; поиск работает, но данные
-могут быть stale). Рекомендуется `python tools/build_vectors.py
---full-rebuild`.
-
-### Советы по recall (vector CLI)
-
-Качество recall зависит от embedding-модели (по умолчанию —
-`mxbai-embed-large`) и от формулировки запроса:
-
-1. **Конкретные термины лучше абстрактных.** «Нарушения сроков отчётности»
-   лучше сформулировать через конкретный термин домена («дедлайн»,
-   «просроченная отчётность», «не представлена в срок»).
-2. **Синонимы и перифразы.** Если запрос не сработал — попробуйте
-   переформулировать через смежные термины: «пожарная безопасность» →
-   «пожарная служба», «эвакуационные выходы».
-3. **Длина запроса имеет значение.** Оптимально 3–7 слов.
-4. **threshold + top_k.** Если результаты нерелевантные — `threshold=0.5`
-   (или выше). Если результатов мало — увеличьте `top_k` и уменьшите
-   `threshold`.
-5. **Несколько попыток.** Если первый запрос не сработал — попробуйте
-   синонимы.
+Конфигурация (модель эмбеддингов, chunking, метрика, threshold) — в
+`gateway.vector.index.indexes.<name>` проекта. PG-реестр
+`public.agent_vector_index_config` остаётся в репо как legacy SQL-артефакт;
+runtime его **не читает**.
 
 ### Конвенции vector (CLI --mode vector)
 
-- `index_name` — строковый идентификатор. Метаданные индексов (источник,
-  embed-колонки, signature) живут в `gateway.vector.index.indexes.<name>`.
-  Сериализованный FAISS BYTEA — в `public.agent_vector_index_store`.
+- `index_name` — строковый идентификатор из таблицы выше.
 - `--top-k` (дефолт `5`, потолок `50`).
 - `--threshold` (дефолт `0.0` = без фильтра, диапазон `[0.0, 1.0]`).
 - `audits_index` — дефолт при `--mode vector` без `--index-name`.
+- Неизвестный `--index-name` — ошибка (не авто-подбор другого).
 
-## Схема домена (`oarb.*`)
+## SQL guidance (режим generated_sql)
 
-Полная схема таблиц для свободного SQL. Все таблицы живут в схеме
-`oarb`, доступны через DuckDB-кэш как `oarb.<table>` (полное имя
-обязательно в SELECT).
-
-### `oarb.audits` — аудиторские проверки
-
-| column | type | description |
-|---|---|---|
-| `id` | integer | первичный ключ |
-| `title` | varchar(500) | название проверки |
-| `audit_type` | varchar(100) | тип проверки |
-| `planned_date` | date | плановая дата |
-| `actual_date` | date | фактическая дата |
-| `status` | varchar(50) | статус («Запланирована», «В работе», «Завершена», ...) |
-| `auditee_entity` | varchar(500) | проверяемая организация |
-| `created_at` | timestamptz | метка создания (sync) |
-| `updated_at` | timestamptz | метка обновления (sync) |
-
-### `oarb.violations` — нарушения
-
-| column | type | description |
-|---|---|---|
-| `id` | integer | первичный ключ |
-| `audit_id` | integer | FK → `oarb.audits.id` |
-| `report_id` | integer | FK → `oarb.audit_reports.id` (опц.) |
-| `item_id` | integer | FK → `oarb.report_items.id` (опц.) |
-| `violation_code` | varchar(100) | код нарушения |
-| `description` | text | описание нарушения |
-| `recommendation` | text | рекомендация по устранению |
-| `severity` | varchar(20) | критичность («низкая» / «средняя» / «высокая» / «критическая») |
-| `status` | varchar(50) | статус («открыто» / «в работе» / «закрыто») |
-| `responsible` | varchar(200) | ответственный |
-| `deadline` | date | срок устранения |
-| `created_at` | timestamptz | метка создания (sync) |
-| `updated_at` | timestamptz | метка обновления (sync) |
-
-### `oarb.audit_reports` — отчёты о проверках
-
-| column | type | description |
-|---|---|---|
-| `id` | integer | первичный ключ |
-| `audit_id` | integer | FK → `oarb.audits.id` |
-| `report_number` | varchar(100) | номер отчёта |
-| `report_date` | date | дата отчёта |
-| `title` | varchar(500) | заголовок отчёта |
-| `full_text` | text | полный текст отчёта |
-| `created_at` | timestamptz | метка создания (sync) |
-| `updated_at` | timestamptz | метка обновления (sync) |
-
-### `oarb.report_items` — пункты отчётов
-
-| column | type | description |
-|---|---|---|
-| `id` | integer | первичный ключ |
-| `report_id` | integer | FK → `oarb.audit_reports.id` |
-| `item_number` | varchar(20) | номер пункта |
-| `item_title` | varchar(500) | заголовок пункта |
-| `item_content` | text | содержимое |
-| `order_index` | integer | порядок отображения |
-| `created_at` | timestamptz | метка создания (sync) |
-| `updated_at` | timestamptz | метка обновления (sync) |
-
-### Сводные JOIN-связи
-
-```sql
--- Проверка → отчёт → пункты → нарушения
-audits a
-JOIN audit_reports r ON r.audit_id = a.id
-JOIN report_items ri ON ri.report_id = r.id
-LEFT JOIN violations v ON v.item_id = ri.id
-
--- Проверка → нарушения напрямую
-audits a
-LEFT JOIN violations v ON v.audit_id = a.id
-```
-
-### Домен-соглашения
-
-- Все таблицы имеют `updated_at` — синхронизация идёт инкрементально по этой колонке.
-- Идентификаторы — `BIGSERIAL` (в skill описаны как `integer` для краткости).
-- Текстовые поля могут содержать `NULL`.
-- Статусы и severity — свободный текст (`varchar`), не PG-enum. Конкретный
-  набор ярлыков определяется данными и может расширяться без миграции схемы.
-
-## SQL guidance (режим generated_sql через CLI)
-
-Режим `generated_sql` (NL→SQL через LLM) доступен через CLI — не
-является частью контракта агента, но используется для точных
-аналитических запросов поверх `oarb.*`-таблиц:
+Режим `generated_sql` (NL→SQL через LLM) — **часть контракта навыка**:
+используется для точных аналитических запросов, когда predefined
+не подходит.
 
 ```bash
 python scripts/cli.py --mode generated_sql --query '<запрос на NL>'
@@ -329,14 +171,8 @@ python scripts/cli.py --mode generated_sql --query '<запрос на NL>'
 - Полностью квалифицированные имена таблиц: `schema.table` (например,
   `oarb.audits`).
 - `LIMIT` добавляется автоматически.
-
-### Процесс (Agent reasoning)
-
-1. Определи нужную таблицу (см. секцию «Схема домена»).
-2. Определи нужные колонки.
-3. Сформулируй запрос на естественном языке.
-4. Для агрегатов — «сколько», «по месяцам», «топ-N».
-5. Для дат используй `actual_date` / `report_date` / `deadline`.
+- Если нужных данных нет в whitelist таблиц → LLM возвращает `<NO_MATCH>`.
+  Это **честный success** (никаких подстановок «похожей» таблицы).
 
 ### Retry при ошибке
 
@@ -346,7 +182,7 @@ python scripts/cli.py --mode generated_sql --query '<запрос на NL>'
 {
   "mode": "generated_sql",
   "status": "error",
-  "data": { "message": "...", "error_type": "..." }
+  "data": { "message": "...", "sql": "..." }
 }
 ```
 
@@ -356,8 +192,9 @@ Agent-цикл:
 2. Переформулируй запрос (уточни таблицу / колонки / период).
 3. Повтори вызов.
 
-**Retry — задача Agent**, не отдельного Python-сервиса. Ограничение числа
-попыток — на стороне Agent (обычно не больше 2-3).
+**Retry — задача Agent**, не skill'а. Внутри режима skill делает
+свои `MAX_ATTEMPTS` попыток с передачей ошибки обратно в LLM для
+исправления SQL — это не «смена режима», а фикс сгенерированного SQL.
 
 ### Пустой результат — нормально
 
@@ -368,65 +205,65 @@ Agent-цикл:
 Не интерпретируй как сбой. Сообщи пользователю «нет данных за указанный
 период».
 
-### Что не придумывать
+## Доменная модель (бизнес-глоссарий)
 
-- таблицы;
-- колонки;
-- индексы (`index_name` берётся строго из каталога выше);
-- значения enum.
+Техническая schema (колонки, типы) — в DuckDB-кэше, читается через
+`CacheProvider.get_schema()`. Никаких ручных копий schema в SKILL.md.
 
-## Decision tree
+**Бизнес-термины домена:**
 
-```
-Q: Запрос ТОЧНО соответствует одному из 6 predefined scripts
-   И параметры известны (или все optional)?
-  YES → используй predefined (CLI --mode predefined --script <name>)
-  NO ↓
+- **Проверка (Audit)** — запись о проведённой/плановой инспекции; сущность,
+  через которую чаще всего идёт выборка.
+- **Нарушение (Violation)** — факт, обнаруженный в проверке; имеет код,
+  описание, severity, статус, ответственного и срок устранения.
+- **Отчёт (Audit Report)** — документ по результатам проверки; содержит
+  пункты (Report Items) и привязан к проверке.
+- **Пункт отчёта (Report Item)** — структурная единица отчёта; к ней
+  могут быть привязаны нарушения.
 
-  → не поддерживается; сообщи пользователю, что запрос не
-    соответствует доступным predefined-скриптам
-```
+Связи между сущностями описываются в DB-реестре (`agent_predefined_scripts`,
+где `sql_template` уже использует правильные JOIN). Для `generated_sql`
+— LLM получает schema и few-shot через `predefined.db_loader.load_all`;
+явный JOIN-гайд здесь не нужен, потому что примеры уже в few-shot.
 
 ## Жёсткие правила
 
 - Не выдумывай скрипт predefined — только из каталога выше.
+- Не выдумывай `index_name` — только из каталога vector indexes.
 - Date-параметры — строго `YYYY-MM-DD` (валидация в `scripts/predefined/validator.py`).
-- Если predefined-скрипт вернул SQL error (например, устаревший SQL в
-  seed) — **не повторяй попытку**, сообщи об ошибке. Этот случай не
-  «diagnostic», а legacy-данные.
-- Не вызывай `exec` / `python` для выполнения SQL напрямую — только через CLI.
 - Не обращайся к `public.agent_predefined_scripts` через SQL напрямую —
   это реестр, а не доменная таблица.
+- Не вызывай `exec` / `python` для выполнения SQL напрямую — только через CLI.
 
 ## Runtime boundary
 
-Skill реализует **только**:
+**Skill** владеет:
 
-- `predefined.run(script_name, db, params, *, predefined_table)` —
-  DB-only lookup через `db_loader`. `predefined_table` обязателен
-  (например, `"public.agent_predefined_scripts"`). Не делает
-  HTTP/LLM-вызовов. Никакого fallback на Python `REGISTRY` (удалён в
-  Phase 7).
-- Доступ к логическим FAISS-индексам через generic Core Vector API
-  (`CacheProvider.search_vector`) — доступен через CLI `--mode vector`.
-- Доступ к доменным таблицам через generic Core Data API
-  (`CacheProvider.query_sql`) — доступен через CLI `--mode generated_sql` / `--mode vector`.
+- каталогом predefined-скриптов (через DB-реестр);
+- правилами выбора режима по характеру запроса;
+- форматом вывода `{mode, status, data}` (одинаков для всех трёх режимов).
 
-Доступ агента — только через CLI (`scripts/cli.py`). Generic tools
-(`duckdb_query_tool`, `vector_search_tool`) удалены в Phase 8.
+**Skill не владеет:**
 
-Legacy mode `generated_sql` и соответствующий CLI-режим
-(`scripts/cli.py --mode generated_sql`) — оставлены для обратной
-совместимости, не для нового кода.
+- логикой выполнения SQL (`CacheProvider.query_sql` / Core);
+- выбором embedding-модели (захардкожено в `cache_provider_impl`;
+  bearer-токен — из env `EMBED_TOKEN`);
+- деталями хранения и валидации vector-индексов (Core);
+- LLM-протоколами (`lib/services/llm_client.py` / Core).
+
+Доступ агента — через CLI (`scripts/cli.py`). Generic tools
+(`duckdb_query_tool`, `vector_search_tool`) удалены в Phase 8 —
+Agent обращается к данным через маршрутизацию по CLI, и выбор режима —
+обязанность Agent'а (decision tree выше).
 
 ## Как добавить новый predefined-скрипт
 
 1. Сделать DDL в БД: `INSERT INTO public.agent_predefined_scripts (...)`.
-2. Дождаться синхронизации (`PgDuckDbSyncService` опубликует снимок в
-   `workspace/data_store/duckdb/cache.duckdb`).
+2. Дождаться синхронизации (`PgDuckDbSyncService` опубликует снимок; путь —
+   см. `resolve_publish_path()` в `lib/core/application_context.py`).
 3. Описать в разделе «Каталог predefined scripts» этого файла.
 4. Добавить тест в
-   `workspace/skills/audit_analyzer/tests/test_audit_analyzer_predefined.py`.
+   `tests/test_audit_analyzer_predefined.py`.
 
 Удаление/изменение существующих скриптов — это DDL в БД, не правка
 skill'а.
@@ -449,7 +286,14 @@ python workspace/skills/audit_analyzer/scripts/cli.py --list-indexes
 
 ## Тесты
 
-- `workspace/skills/audit_analyzer/tests/test_audit_analyzer_predefined.py` —
+- `tests/test_audit_analyzer_predefined.py` —
   contract-тесты 6 скриптов + параметры + DB-first lookup + no-fallback.
-- `workspace/skills/audit_analyzer/tests/test_audit_analyzer_behavior.py` —
+- `tests/test_audit_analyzer_behavior.py` —
   Agent-loop контракт.
+- `tests/test_audit_analyzer_generated_sql.py` —
+  generated_sql pipeline (validate_sql, EXPLAIN, MAX_ATTEMPTS, NO_MATCH,
+  DDL/DML-отказ).
+- `tests/test_audit_analyzer_cli.py` —
+  CLI parser, mode routing, _run_vector validation.
+- `tests/test_audit_analyzer_mode_selection.py` —
+  три режима в SKILL.md (decision tree, ноль fallback'ов между ними).

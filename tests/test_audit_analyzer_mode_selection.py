@@ -1,17 +1,17 @@
-"""Тесты выбора режима (decision tree) навыка ``audit_analyzer``.
+"""Тесты контракта трёх режимов ``audit_analyzer``.
 
-SKILL.md — источник истины для Agent'а: описывает три способа получения
-данных (predefined / vector / Core Data) и правила выбора между ними.
+SKILL.md — единственный источник истины для Agent'а: описывает три режима
+(``predefined`` / ``vector`` / ``generated_sql``) и правила выбора
+между ними. Тесты проверяют, что в SKILL.md достаточно правил, чтобы
+Agent не ошибся в типовых сценариях, и что старый запрет «только
+predefined» полностью ушёл.
 
-Эти тесты проверяют, что в SKILL.md достаточно правил, чтобы Agent
-не ошибся в типовых сценариях. Дополнительно — sanity-проверка
-``predefined.run()`` со стороны skill'а (отсутствие таблицы/нечисловой тип
-возвращает ошибку).
+Дополнительно — sanity-проверка ``predefined.run()`` со стороны skill'а
+(отсутствие таблицы / нечисловой тип возвращает ошибку).
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -30,7 +30,41 @@ def _skill_md() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Позитивные сценарии: «такой-то запрос → такой-то режим»
+# Новый контракт: ВСЕ ТРИ РЕЖИМА = часть навыка.
+# ---------------------------------------------------------------------------
+
+
+class TestThreeModesContract:
+    """SKILL.md явно фиксирует три режима как часть контракта навыка."""
+
+    def test_three_modes_listed(self) -> None:
+        text = _skill_md()
+        assert "predefined" in text
+        assert "vector" in text
+        assert "generated_sql" in text
+
+    def test_no_predefined_only_exclusion(self) -> None:
+        """Старый запрет «только predefined / не часть контракта агента» снят."""
+        text = _skill_md().lower()
+        # Эти фразы были формулировкой старого контракта; теперь их быть не должно.
+        assert "только predefined" not in text, (
+            "SKILL.md не должен говорить, что predefined — единственный режим"
+        )
+        assert "не являются частью контракта агента" not in text
+
+    def test_decision_tree_branches_for_three_modes(self) -> None:
+        """Decision tree упоминает все три режима как валидные ветви выбора."""
+        text = _skill_md()
+        for marker in (
+            "predefined",
+            "vector",
+            "generated_sql",
+        ):
+            assert marker in text
+
+
+# ---------------------------------------------------------------------------
+# Позитивные сценарии: «такой-то запрос → такой-то режим» (SKILL.md учит Agent)
 # ---------------------------------------------------------------------------
 
 
@@ -38,12 +72,10 @@ class TestModeSelectionPositive:
     """SKILL.md явно указывает decision tree для типовых запросов."""
 
     def test_predefined_declared_for_typical_summary(self) -> None:
-        """«Сводка по типам проверок» — predefined (audit_types_stats)."""
         text = _skill_md()
         assert "audit_types_stats" in text
 
     def test_predefined_declared_for_violations_by_period(self) -> None:
-        """«Нарушения по типу» — predefined (violations_by_type)."""
         text = _skill_md()
         assert "violations_by_type" in text
         assert "violation_code" in text
@@ -63,13 +95,12 @@ class TestModeSelectionPositive:
         text = _skill_md()
         assert "audit_reports_index" in text
 
-    def test_sql_for_aggregations(self) -> None:
-        """«Сколько проверок» / «топ-5 организаций» → SQL через Core Data."""
-        text = _skill_md()
-        # Core Data/DuckDB capability упоминается в SKILL.md как путь
-        # для analytical SQL.
-        assert "Core" in text or "core" in text
-        assert "DuckDB" in text or "Data" in text
+    def test_generated_sql_declared_for_custom_analytics(self) -> None:
+        """generated_sql упоминается как валидный путь для нестандартной аналитики."""
+        text = _skill_md().lower()
+        assert "generated_sql" in text
+        # И прозрачный комментарий, что он — часть контракта (не «CLI-only»).
+        assert "cli-only" not in text or "vector-режим — cli-only" not in text
 
     def test_all_six_scripts_listed(self) -> None:
         """В каталоге SKILL.md все 6 predefined scripts из БД."""
@@ -91,28 +122,24 @@ class TestModeSelectionPositive:
 
 
 class TestModeSelectionNegative:
-    """Запреты: что НЕ выбирать для каждого режима."""
+    """Запреты внутри режимов и в режим-выборе."""
 
-    def test_no_sql_for_semantic_search(self) -> None:
-        """Семантический поиск и вектор вне контракта агента.
+    def test_no_fallback_between_modes(self) -> None:
+        """fallback между режимами ЗАПРЕЩЁН."""
+        text = _skill_md().lower()
+        assert "fallback между режимами" in text or "не делать fallback" in text or "не делает fallback" in text
 
-        Phase 8: tools удалены, агент обращается к данным только через
-        predefined-скрипты CLI. SKILL.md должен явно ограничивать доступ
-        агента predefined-режимом и помечать vector-режим как CLI-only.
-        """
-        text = _skill_md()
-        # Predefined-only для агента.
-        assert "только predefined" in text
-        # Vector/generated_sql — не часть контракта агента.
-        assert "не являются частью контракта агента" in text
-
-    def test_no_vector_for_aggregations(self) -> None:
-        """Агgregations — только через predefined, вектор вне контракта.
-
-        Phase 8: действительный контракт — predefined-only, /неподдерживаемое.
-        """
-        text = _skill_md()
-        assert "только predefined" in text
+    def test_no_inventing_table_names_in_python(self) -> None:
+        """Техническая schema не прописана вручную в SKILL.md (бизнес-глоссарий только)."""
+        text = _skill_md().lower()
+        # В SKILL.md не должно быть раздела «## Схема домена» с конкретными
+        # колонками и типами — это второй источник истины. Допустимы только
+        # упоминания имён таблиц в контексте whitelist (для generated_sql).
+        # Проверяем, что нет блока с table | column | description.
+        assert "схема домена" not in text, (
+            "SKILL.md не должен содержать раздел «Схема домена» с ручной schema — "
+            "это второй источник истины; schema читается через CacheProvider.get_schema()"
+        )
 
     def test_no_predefined_without_required_params(self) -> None:
         """Если обязательных params нет — predefined НЕ выбирается."""
@@ -151,33 +178,56 @@ class TestPredefinedBehaviour:
 
     def test_vector_for_semantic_query_only_in_docs(self) -> None:
         """Семантический поиск НЕ через SQL — это вектор, не predefined."""
-        # Реальный вызов vector — в test_audit_analyzer_behavior.py.
-        # Здесь — проверка SKILL.md как источника истины для Agent'а.
         text = _skill_md()
         assert "семантическ" in text.lower()
 
-    def test_no_vector_for_count_aggregation_in_skill(self) -> None:
-        """«Сколько проверок» через vector — не по контракту.
 
-        Phase 8: vector-режим — CLI-only, для агента существует только
-        predefined. SKILL.md должен явно отделять agent-контракт (predefined)
-        от CLI-режимов.
-        """
-        text = _skill_md()
-        # Predefined-only для агента.
-        assert "только predefined" in text
-        # CLI-режимы не являются контрактом агента.
-        assert "не являются частью контракта агента" in text
+# ---------------------------------------------------------------------------
+# Phase 8+: SKILL.md self-contained (references/ удалены, ровно один MD)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillSelfContained:
+    def test_skill_md_carries_full_content(self) -> None:
+        """SKILL.md — единственный источник документации по skill'у."""
+        skill_text = _skill_md()
+        # Каталог скриптов из БД.
+        for script in (
+            "analytics_by_year_month",
+            "audit_dynamics",
+            "audit_effectiveness",
+            "audit_types_stats",
+            "top_audited_objects",
+            "violations_by_type",
+        ):
+            assert script in skill_text, f"SKILL.md должен упоминать {script}"
+        # Каталог FAISS-индексов.
+        for index in ("audits_index", "violations_index", "audit_reports_index"):
+            assert index in skill_text
+
+        # Технической schema (типы колонок, раздел «## Схема домена») быть
+        # не должно — schema приходит из DuckDB-кэша через get_schema().
+        assert "## Схема домена" not in skill_text, (
+            "SKILL.md не должен содержать раздел «## Схема домена» с типами колонок — "
+            "schema читается через CacheProvider.get_schema()"
+        )
+
+        # Технические детали vector storage (BYTEA / signature internals /
+        # FAISS serialization) — нарушение разделения слоёв; skill владеет
+        # только логическими именами.
+        for forbidden in ("BYTEA", "FAISS serialization", "signature internals"):
+            assert forbidden not in skill_text, (
+                f"SKILL.md не должен содержать технические детали '{forbidden}' — "
+                "это слой Core, не skill"
+            )
 
 
 @pytest.fixture
 def db_service():
     """Минимальный DuckDB-fixture для ``predefined.run`` тестов.
 
-    Phase 7: ``predefined.run()`` теперь DB-only (Phase 7 — REGISTRY удалён).
-    Фикстура создаёт in-memory DB с ``oarb.*`` (domain) и
-    ``public.agent_predefined_scripts`` (реестр скриптов). Скрипт
-    ``audit_status_summary`` засеян с минимальным SQL.
+    Phase 7+: ``predefined.run()`` теперь DB-only (REGISTRY удалён).
+    Фикстура создаёт in-memory DB с нужными таблицами.
     """
     import duckdb
     import json
@@ -259,35 +309,3 @@ def db_service():
                 }
 
     return _DBService()
-
-
-# ---------------------------------------------------------------------------
-# Phase 8: SKILL.md self-contained (references/ удалены)
-# ---------------------------------------------------------------------------
-
-
-class TestSkillSelfContained:
-    def test_skill_md_carries_full_content(self) -> None:
-        """SKILL.md — единственный источник документации по skill'у.
-
-        ``references/*.md`` удалены: каталог скриптов, описание индексов,
-        схема домена и SQL guidance перенесены в SKILL.md.
-        """
-        skill_text = _skill_md()
-        # Каталог скриптов из БД.
-        for script in (
-            "analytics_by_year_month",
-            "audit_dynamics",
-            "audit_effectiveness",
-            "audit_types_stats",
-            "top_audited_objects",
-            "violations_by_type",
-        ):
-            assert script in skill_text, f"SKILL.md должен упоминать {script}"
-        # Каталог FAISS-индексов.
-        for index in ("audits_index", "violations_index", "audit_reports_index"):
-            assert index in skill_text
-        # Схема домена (минимум 4 таблицы).
-        for table in ("oarb.audits", "oarb.violations",
-                      "oarb.audit_reports", "oarb.report_items"):
-            assert table in skill_text, f"SKILL.md должен описывать {table}"
