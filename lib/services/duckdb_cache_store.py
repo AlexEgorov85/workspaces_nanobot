@@ -771,21 +771,77 @@ class DuckDbCacheStore:
                 self._dirty = False
                 return True
 
+            import os
+            import time
+
             target = Path(self._publish_path)
             target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(target.name + ".tmp")
+            # Уникальный .tmp на каждый publish (pid + ms-таймстамп) —
+            # защита от коллизий между параллельными запусками и от
+            # "осиротевших" файлов с устаревшим NFS-локом от предыдущего
+            # gateway (его .tmp уже не будет пересекаться по имени).
+            tmp = target.with_name(
+                f"{target.name}.{os.getpid()}.{int(time.time() * 1000)}.tmp"
+            )
             if tmp.exists():
                 try:
                     tmp.unlink()
-                except OSError:
-                    pass
-
-            import os
+                except OSError as e:
+                    # Не глотаем: файл залочен (NFS lockd / процесс-призрак) →
+                    # ATTACH всё равно упадёт через ~50 мс с непонятным
+                    # "PID 0". Лучше вернуть False с понятной диагностикой,
+                    # чем положить всю ветку publish в молчаливый fail-loop.
+                    self._last_error = f"publish (stale .tmp cleanup): {e}"
+                    logger.warning(
+                        "DuckDbCacheStore.publish: cannot remove stale %s: %s "
+                        "(NFS lockd / crashed peer?). Skip cycle.",
+                        tmp, e,
+                    )
+                    _emit_sync_event(
+                        event_type="sync_publish_failed",
+                        summary=f"publish FAIL (stale .tmp): {e}",
+                        payload={
+                            "publish_path": str(target),
+                            "tmp_path": str(tmp),
+                            "error_type": "OSError",
+                            "error": str(e),
+                        },
+                        level="WARN",
+                        service=self._db_logging_service,
+                    )
+                    return False
 
             counts: dict[str, int] = {}
             try:
                 tmp_literal = "'" + str(tmp).replace("'", "''") + "'"
-                self._conn.execute(f"ATTACH {tmp_literal} AS __out (READ_WRITE)")
+                # DuckDB ATTACH берёт эксклюзивный flock на файл. На NFS
+                # иногда видим "Conflicting lock is held in PID 0" от
+                # устаревшего lockd (предыдущий процесс умер, lockd не
+                # получил уведомления). Ретраим с экспоненциальным backoff —
+                # достаточно, чтобы пережить кратковременный stale lock.
+                import duckdb
+
+                last_err: Exception | None = None
+                for _attempt in range(5):
+                    try:
+                        self._conn.execute(
+                            f"ATTACH {tmp_literal} AS __out (READ_WRITE)"
+                        )
+                        last_err = None
+                        break
+                    except duckdb.IOException as e:
+                        last_err = e
+                        time.sleep(0.1 * (2 ** _attempt))
+                if last_err is not None:
+                    # ATTACH так и не получился — tmp лишний, удаляем и
+                    # пробрасываем в общий except ниже для нормального
+                    # sync_publish_failed события.
+                    try:
+                        if tmp.exists():
+                            tmp.unlink()
+                    except OSError:
+                        pass
+                    raise last_err
                 try:
                     copied = set()
                     for t in out:
