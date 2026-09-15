@@ -107,7 +107,21 @@ def full_fake_modules(tmp_path):
         settings.cli = {}
         settings.providers = MagicMock()
         cfg_mod.SETTINGS = settings
+        cfg_mod._ACTIVE_PROFILE = "test"
         cfg_mod.ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+        # Профильно-разрешённый Resolver (нужен для ApplicationContext.create).
+        # В тестах возвращает тот же `settings` — это эквивалентно
+        # default-профилю без override.
+        def _resolve_mode(profile=None):
+            return profile or "test"
+
+        cfg_mod._resolve_mode = _resolve_mode
+
+        def _resolve_application_config(profile=None):
+            return settings
+
+        cfg_mod.resolve_application_config = _resolve_application_config
 
         class ConfigurationError(ValueError):
             pass

@@ -30,7 +30,7 @@ class SessionStorageError(Exception):
 class SessionStorageService:
     """Фабрика SessionManager / PGSessionManager на основе конфигурации.
 
-    Замечание: до плана №N этот класс сам читал ``session_manager.json``
+    Замечание: до этого плана этот класс сам читал ``session_manager.json``
     через ``_load_override()`` и применял его к ``pg_cfg`` **после**
     ``SETTINGS`` — это перетирало runtime-таблицы, которые профиль уже
     установил. Теперь override применяется централизованно в
@@ -38,13 +38,6 @@ class SessionStorageService:
     ``config.py``: session_manager.json идёт на шаге 2, profile overlay —
     на шаге 4 ПОСЛЕДНИМ).
     """
-
-    def __init__(self) -> None:
-        # Параметр ``session_manager_json`` УДАЛЁН — путь к этому файлу
-        # знает только ``config.resolve_application_config()``. Для
-        # обратной совместимости параметр проигнорирован (но код, который
-        # его передавал, должен быть обновлён).
-        pass
 
     def create(
         self,

@@ -323,6 +323,26 @@ def validate_runtime_isolation(cfg: dict, mode: str) -> None:
         )
 
 
+ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _resolve_env_refs(value):
+    """Рекурсивно заменить ``${VAR}`` на значение из os.environ.
+
+    Неизвестная переменная оставляется как есть (ленивый режим, как
+    resolve_env_refs у nanobot) — импорт не должен падать без секрета.
+    """
+    if isinstance(value, str):
+        return ENV_REF_PATTERN.sub(
+            lambda m: os.environ.get(m.group(1), m.group(0)), value
+        )
+    if isinstance(value, dict):
+        return AttrDict({k: _resolve_env_refs(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return [_resolve_env_refs(v) for v in value]
+    return value
+
+
 def resolve_application_config(profile: str | None = None) -> AttrDict:
     """Единая точка формирования SETTINGS.
 
@@ -360,44 +380,34 @@ def resolve_application_config(profile: str | None = None) -> AttrDict:
 
 
 def get_active_profile() -> str:
-    """Вернуть текущий активный профиль (для баннера и логирования)."""
-    return _resolve_mode()
+    """Вернуть профиль, с которым построен модульный ``SETTINGS``.
 
-# Порядок мержей (поздний перекрывает ранний):
-#   project.json → config.json → .secrets.env
-#
-#   project.json   — проектные секции (channels.*, skills.*, cli, benchmark,
-#                    streamlit, gateway, logging.db) в формате JSONC.
-#   config.json    — настройки nanobot (агенты, провайдеры, API, gateway).
-#   .secrets.env   — секреты (API-ключи, DATABASE_URL) в провайдер-скоупинг
-#                    формате; подставляются в ${VAR} после резолва.
-SETTINGS = AttrDict()
-if _PROJECT_FILE.exists():
-    _deep_merge(SETTINGS, load_config_json(_PROJECT_FILE))
-if _CONFIG_FILE.exists():
-    _deep_merge(SETTINGS, load_config_json(_CONFIG_FILE))
-if _SECRETS_FILE.exists():
-    _deep_merge(SETTINGS, load_env(_SECRETS_FILE))
+    Возвращает ``_ACTIVE_PROFILE`` — значение, зафиксированное при
+    import-time. Это гарантирует, что ``SETTINGS`` и
+    ``get_active_profile()`` согласованы между собой (а не два
+    независимых чтения env, которые могут разойтись).
 
-
-ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-
-
-def _resolve_env_refs(value):
-    """Рекурсивно заменить ``${VAR}`` на значение из os.environ.
-
-    Неизвестная переменная оставляется как есть (ленивый режим, как
-    resolve_env_refs у nanobot) — импорт не должен падать без секрета.
+    Для динамического определения профиля в runtime (например, в
+    ApplicationContext.create(profile=...)) используйте
+    ``_resolve_mode(profile)`` напрямую.
     """
-    if isinstance(value, str):
-        return ENV_REF_PATTERN.sub(
-            lambda m: os.environ.get(m.group(1), m.group(0)), value
-        )
-    if isinstance(value, dict):
-        return AttrDict({k: _resolve_env_refs(v) for k, v in value.items()})
-    if isinstance(value, list):
-        return [_resolve_env_refs(v) for v in value]
-    return value
+    return _ACTIVE_PROFILE
+
+# Порядок мержей (поздний перекрывает ранний) — через ConfigurationResolver:
+#   1. project.json                    — база
+#   2. session_manager.json (если есть) — per-deploy override (pool/timeouts)
+#   3. config.json                     — nanobot-настройки
+#   4. profiles/<mode>.jsonc           — профиль (если mode != prod)
+#   5. .secrets.env (${VAR})           — резолв env refs
+#   6. validate_runtime_isolation()    — hard-fail
+#
+# Глобальный SETTINGS строится ОДИН РАЗ через ConfigurationResolver —
+# это ЕДИНСТВЕННЫЙ загрузчик конфигурации в проекте. Раньше здесь был
+# отдельный «старый» bootstrap (project.json → config.json → .secrets.env),
+# что создавало второй путь формирования конфигурации, расходящийся с
+# profile-aware путём через Resolver. Теперь оба пути объединены.
+_ACTIVE_PROFILE = _resolve_mode()
+SETTINGS = resolve_application_config(profile=_ACTIVE_PROFILE)
 
 
 def _flatten_env(d: dict, prefix: str = "") -> dict[str, str]:
@@ -477,12 +487,13 @@ for _prov_name, _prov_cfg in _candidates:
 # Экспорт без ${...}: эти ключи не меняются при резолве и не должны
 # затирать уже выставленные переменные окружения (setdefault).
 for key, val in _flatten_env(SETTINGS).items():
-    if "${" not in val:
+    if "${" not in str(val):
         os.environ.setdefault(key, val)
 
-# Резолв ${VAR} в проектных настройках (config.json читается сырым,
-# поэтому мост сам подставляет секреты из os.environ).
-SETTINGS = _resolve_env_refs(SETTINGS)
+# Резолв ${VAR} теперь полностью внутри ConfigurationResolver
+# (resolve_application_config → _resolve_env_refs). Повторный вызов
+# _resolve_env_refs на уровне модуля больше не нужен и был удалён —
+# SETTINGS уже разрешён к моменту первого использования.
 
 # Доэкспорт резолвнутых значений (setdefault: внешние env сохраняют приоритет).
 for key, val in _flatten_env(SETTINGS).items():

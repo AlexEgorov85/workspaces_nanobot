@@ -38,7 +38,8 @@ console = Console()
 def main() -> None:
     args = _parse_args()
     # Баннер с активным профилем — fail-safe визуальное подтверждение
-    # того, в какой среде стартует процесс (default = test).
+    # того, в какой среде стартует процесс (default = test). Резолвим
+    # один раз и передаём тот же профиль в ApplicationContext.
     from config import _resolve_mode
 
     active_profile = _resolve_mode(args.profile)
@@ -46,12 +47,12 @@ def main() -> None:
         f"[bold]Starting nanobot cli[/bold] · profile={active_profile}"
     )
     if args.patched:
-        _run_patched(args)
+        _run_patched(args, active_profile)
     else:
-        _run_vanilla(args)
+        _run_vanilla(args, active_profile)
 
 
-def _run_vanilla(args: argparse.Namespace) -> None:
+def _run_vanilla(args: argparse.Namespace, active_profile: str) -> None:
     """Стандартный CLI-агент (как ``nanobot agent``). Без доработок."""
     ctx = ApplicationContext.create(
         script_dir=_SCRIPT_DIR,
@@ -61,7 +62,7 @@ def _run_vanilla(args: argparse.Namespace) -> None:
         enable_cron=True,
         session_override=args.session,
         print_llm_calls=True,
-        profile=args.profile,
+        profile=active_profile,
     )
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)
@@ -75,7 +76,7 @@ def _run_vanilla(args: argparse.Namespace) -> None:
         ctx.stop()
 
 
-def _run_patched(args: argparse.Namespace) -> None:
+def _run_patched(args: argparse.Namespace, active_profile: str) -> None:
     """CLI-агент с PGSessionManager и workspace-хуками."""
     ctx = ApplicationContext.create(
         script_dir=_SCRIPT_DIR,
@@ -86,7 +87,7 @@ def _run_patched(args: argparse.Namespace) -> None:
         storage_override=args.storage,
         session_override=args.session,
         print_llm_calls=True,
-        profile=args.profile,
+        profile=active_profile,
     )
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)

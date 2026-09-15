@@ -112,17 +112,25 @@ class ApplicationContext:
         table_registry.clear()
 
         # 1. ConfigService + загрузка конфига
-        # ConfigService.load() сам подставляет ${VAR} плейсхолдеры из
-        # SETTINGS.providers.*.api_key (если ${VAR} — это *_API_KEY и
-        # .secrets.env задал api_key=... через "# providers: <name>").
-        # При ``profile`` config-сервис использует Resolver (см.
-        # ``config.resolve_application_config``) — иначе legacy
-        # SETTINGS-глобал.
+        # Резолвим профиль через Resolver (default = test). Если
+        # активный профиль отличается от глобального ``_ACTIVE_PROFILE``,
+        # пересобираем SETTINGS через Resolver для этого
+        # ApplicationContext. Это гарантирует, что ``ctx.settings``
+        # согласованы с ``ctx.profile`` и оба прошли через Resolver
+        # (никакого legacy-пути).
+        import config as _config
+        resolved_profile = _config._resolve_mode(profile)
+        if resolved_profile == _config._ACTIVE_PROFILE:
+            ctx_settings = _config.SETTINGS
+        else:
+            ctx_settings = _config.resolve_application_config(profile=resolved_profile)
+        ctx.profile = resolved_profile
+
         ctx.config_service = _make_config_service(
-            ctx.script_dir, ctx.workspace_dir, profile=profile
+            ctx.script_dir, ctx.workspace_dir, settings_override=ctx_settings
         )
         ctx.config = ctx.config_service.load()
-        ctx.settings = ctx.config_service.settings
+        ctx.settings = ctx_settings
 
         # 1a. Fail-fast валидация проектных настроек (типы/значения).
         from lib.core.project_settings import validate_project_settings
@@ -525,21 +533,23 @@ def _make_config_service(
     script_dir: Path,
     workspace_dir: Path,
     *,
-    profile: str | None = None,
+    settings_override: Any | None = None,
 ) -> Any:
     """Создать ``ConfigService``, привязанный к корню проекта.
 
     Использует lazy-import, чтобы не зависеть от ``config.py`` на
     старте (если config битый, ошибка проявится в ``.load()``).
 
-    ``profile`` (если задан) передаётся в ``ConfigService``, и
-    ``ctx.config_service.settings`` возвращает профильно-разрешённый
-    конфиг через ``config.resolve_application_config(profile)``.
+    ``settings_override`` — готовый resolved SETTINGS (от Resolver).
+    Если не передан — ConfigService возвращает глобальный
+    ``config.SETTINGS``. Оба пути Resolver-разрешённые.
     """
     from lib.services.config_service import ConfigService
 
     return ConfigService(
-        script_dir=script_dir, workspace_dir=workspace_dir, profile=profile
+        script_dir=script_dir,
+        workspace_dir=workspace_dir,
+        settings_override=settings_override,
     )
 
 

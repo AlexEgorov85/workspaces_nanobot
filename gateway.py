@@ -63,23 +63,25 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     """Точка входа gateway."""
     args = _parse_args()
+    # Резолвим профиль один раз (CLI > env > default=test) и передаём
+    # то же значение в ApplicationContext.create().
+    from config import _resolve_mode
+
+    active_profile = _resolve_mode(args.profile)
     ctx = ApplicationContext.create(
         script_dir=_SCRIPT_DIR,
         workspace_dir=_WORKSPACE_DIR,
         enable_db_logging=True,
         enable_audit=True,
         print_llm_calls=_gateway_print_llm_calls(),
-        profile=args.profile,
+        profile=active_profile,
     )
 
     _configure_logging(ctx.settings)
 
     from nanobot.cli.commands import __logo__, __version__
     from lib.utils.project_version import project_version
-    from config import _resolve_mode
 
-    # Баннер с активным профилем — fail-safe визуальное подтверждение.
-    active_profile = _resolve_mode(args.profile)
     console.print(
         f"{__logo__} Starting nanobot gateway · project v{project_version()} "
         f"(nanobot {__version__}) · profile={active_profile}..."
