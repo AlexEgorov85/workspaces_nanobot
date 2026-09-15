@@ -8,6 +8,7 @@ FAISS-индексов, вывод Rich-баннера.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import sys
@@ -50,24 +51,38 @@ sys.path.insert(0, str(_WORKSPACE_DIR))
 console = Console()
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="nanobot gateway")
+    parser.add_argument("--profile", type=str, default=None,
+                        help="Профиль конфигурации (default=test). "
+                             "Для prod: --profile=prod. Также читается из "
+                             "NANOBOT_PROFILE (env).")
+    return parser.parse_args()
+
+
 def main() -> None:
     """Точка входа gateway."""
+    args = _parse_args()
     ctx = ApplicationContext.create(
         script_dir=_SCRIPT_DIR,
         workspace_dir=_WORKSPACE_DIR,
         enable_db_logging=True,
         enable_audit=True,
         print_llm_calls=_gateway_print_llm_calls(),
+        profile=args.profile,
     )
 
     _configure_logging(ctx.settings)
 
     from nanobot.cli.commands import __logo__, __version__
     from lib.utils.project_version import project_version
+    from config import _resolve_mode
 
+    # Баннер с активным профилем — fail-safe визуальное подтверждение.
+    active_profile = _resolve_mode(args.profile)
     console.print(
         f"{__logo__} Starting nanobot gateway · project v{project_version()} "
-        f"(nanobot {__version__})..."
+        f"(nanobot {__version__}) · profile={active_profile}..."
     )
 
     # Назначаем callbacks и подменяем on_sync ДО ctx.start() — иначе

@@ -37,6 +37,14 @@ console = Console()
 
 def main() -> None:
     args = _parse_args()
+    # Баннер с активным профилем — fail-safe визуальное подтверждение
+    # того, в какой среде стартует процесс (default = test).
+    from config import _resolve_mode
+
+    active_profile = _resolve_mode(args.profile)
+    console.print(
+        f"[bold]Starting nanobot cli[/bold] · profile={active_profile}"
+    )
     if args.patched:
         _run_patched(args)
     else:
@@ -53,6 +61,7 @@ def _run_vanilla(args: argparse.Namespace) -> None:
         enable_cron=True,
         session_override=args.session,
         print_llm_calls=True,
+        profile=args.profile,
     )
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)
@@ -77,6 +86,7 @@ def _run_patched(args: argparse.Namespace) -> None:
         storage_override=args.storage,
         session_override=args.session,
         print_llm_calls=True,
+        profile=args.profile,
     )
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)
@@ -145,6 +155,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--storage", "-S", type=str, default="auto",
                         choices=("auto", "file", "postgres"))
     parser.add_argument("--session", "-s", type=str, default=None)
+    parser.add_argument("--profile", type=str, default=None,
+                        help="Профиль конфигурации (default=test). "
+                             "Для prod: --profile=prod. Также читается из "
+                             "NANOBOT_PROFILE (env).")
     return parser.parse_args()
 
 
