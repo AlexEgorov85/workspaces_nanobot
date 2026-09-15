@@ -7,6 +7,8 @@ from typing import Any
 _CONFIG_FILE = Path(__file__).parent / "config.json"
 _PROJECT_FILE = Path(__file__).parent / "project.json"
 _SECRETS_FILE = Path(__file__).parent / ".secrets.env"
+_SESSION_MANAGER_FILE = _PROJECT_FILE.parent / "session_manager.json"
+_PROFILES_DIR = _PROJECT_FILE.parent / "profiles"
 
 
 class AttrDict(dict):
@@ -156,6 +158,210 @@ def _deep_merge(base: dict, override: dict) -> None:
             _deep_merge(base[k], v)
         else:
             base[k] = v
+
+
+# ---------------------------------------------------------------------------
+# ConfigurationResolver — единая точка формирования SETTINGS
+# ---------------------------------------------------------------------------
+#
+# Главный принцип: режим (test/prod) существует только во время разрешения
+# конфигурации. После получения SETTINGS режим исчезает из runtime-модели.
+#
+# Порядок merge (поздний перекрывает ранний):
+#   1. project.json                    — база
+#   2. session_manager.json (если есть) — per-deploy override (pool/timeouts)
+#   3. config.json                     — nanobot-настройки
+#   4. profiles/<mode>.jsonc           — профиль (если mode != prod)
+#   5. .secrets.env (${VAR})           — резолв env refs
+#   6. validate_runtime_isolation()    — hard-fail
+#
+# Ключевое: profile overlay идёт ПОСЛЕДНИМ, поэтому profile-owned runtime-ключи
+# (channels.postgres.{table_name,messages_table,meta_table,claims_table} и
+# logging.db.{table_name,question_runs_table}) — immutable после применения
+# профиля. Даже если session_manager.json или config.json содержат prod-имена,
+# profile их перетирает.
+# ---------------------------------------------------------------------------
+
+PROFILE_OWNED_RUNTIME_KEYS = frozenset({
+    ("channels", "postgres", "table_name"),
+    ("channels", "postgres", "messages_table"),
+    ("channels", "postgres", "meta_table"),
+    ("channels", "postgres", "claims_table"),
+    ("logging",  "db",       "table_name"),
+    ("logging",  "db",       "question_runs_table"),
+})
+
+EXPECTED_RUNTIME_TABLE_NAMES: dict[str, dict[str, str]] = {
+    "prod": {
+        "conversation_messages": "agent_conversation_messages",
+        "session_messages":      "agent_session_messages",
+        "session_meta":          "agent_session_meta",
+        "worker_claims":         "agent_worker_claims",
+        "gateway_logs":          "agent_gateway_logs",
+        "question_runs":         "agent_question_runs",
+    },
+    "test": {
+        "conversation_messages": "agent_conversation_messages_test",
+        "session_messages":      "agent_session_messages_test",
+        "session_meta":          "agent_session_meta_test",
+        "worker_claims":         "agent_worker_claims_test",
+        "gateway_logs":          "agent_gateway_logs_test",
+        "question_runs":         "agent_question_runs_test",
+    },
+}
+
+
+def _resolve_mode(profile_arg: str | None = None) -> str:
+    """Определить активный профиль. Приоритет: CLI > env > default=test.
+
+    default=test — fail-safe: разработчик, набравший `python gateway.py`
+    без флагов, попадает в изолированный test, а не в прод.
+    """
+    mode = profile_arg
+    if mode is None:
+        env_value = os.environ.get("NANOBOT_PROFILE", "").strip()
+        mode = env_value or "test"
+    if not re.fullmatch(r"[a-z0-9_-]+", mode):
+        raise ConfigurationError(
+            f"NANOBOT_PROFILE={mode!r} недопустим: "
+            f"только [a-z0-9_-]+"
+        )
+    return mode
+
+
+def _load_session_manager_override() -> dict:
+    """Прочитать session_manager.json (если есть) ДО profile overlay.
+
+    Это сохраняет историческую роль per-deploy override для pool/timeout,
+    но НЕ ДАЁТ ему перетирать runtime-таблицы — профиль идёт позже
+    (см. порядок merge в начале секции).
+    """
+    if not _SESSION_MANAGER_FILE.exists():
+        return {}
+    data = json.loads(_SESSION_MANAGER_FILE.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def _merge_profile_overlay(cfg: dict, mode: str) -> None:
+    """Применить profiles/<mode>.jsonc как ПОСЛЕДНИЙ шаг перед валидацией.
+
+    Для prod — no-op (prod это чистый project.json).
+    Для test — требуется файл profiles/test.jsonc.
+    """
+    if mode == "prod":
+        return
+    overlay = _PROFILES_DIR / f"{mode}.jsonc"
+    if not overlay.exists():
+        raise ConfigurationError(
+            f"NANOBOT_PROFILE={mode!r}, но profiles/{mode}.jsonc не найден. "
+            f"Создайте profiles/{mode}.jsonc."
+        )
+    overlay_cfg = load_config_json(overlay)
+    if isinstance(overlay_cfg, AttrDict):
+        overlay_cfg = dict(overlay_cfg)
+    validate_profile_overlay(overlay_cfg, mode)
+    _deep_merge(cfg, overlay_cfg)
+
+
+def validate_profile_overlay(overlay_cfg: dict, mode: str) -> None:
+    """Hard-fail: profiles/<mode>.jsonc может содержать ТОЛЬКО
+    6 profile-owned runtime-ключей. Никакого DSN, skill data, vector storage.
+    """
+    allowed = PROFILE_OWNED_RUNTIME_KEYS
+
+    def _walk(node: object, path: tuple, found: set) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                _walk(v, path + (k,), found)
+        else:
+            found.add(path)
+
+    found: set = set()
+    _walk(overlay_cfg, (), found)
+    extra = found - allowed
+    if extra:
+        raise ConfigurationError(
+            f"profiles/{mode}.jsonc содержит ключи, которые профиль "
+            f"не имеет права менять: {sorted(extra)}. "
+            f"Разрешены только 6 profile-owned runtime-ключей: "
+            f"{sorted(allowed)}."
+        )
+
+
+def validate_runtime_isolation(cfg: dict, mode: str) -> None:
+    """Hard-fail: точное соответствие runtime-таблиц профилю."""
+    if mode not in EXPECTED_RUNTIME_TABLE_NAMES:
+        raise ConfigurationError(
+            f"validate_runtime_isolation: неизвестный mode={mode!r}. "
+            f"Допустимые: {list(EXPECTED_RUNTIME_TABLE_NAMES)}."
+        )
+    expected = EXPECTED_RUNTIME_TABLE_NAMES[mode]
+    pg = cfg.get("channels", {}).get("postgres", {}) if isinstance(cfg, dict) else {}
+    log = cfg.get("logging", {}).get("db", {}) if isinstance(cfg, dict) else {}
+    actual = {
+        "conversation_messages": (pg.get("table_name", "") if isinstance(pg, dict) else ""),
+        "session_messages":      (pg.get("messages_table", "") if isinstance(pg, dict) else ""),
+        "session_meta":          (pg.get("meta_table", "") if isinstance(pg, dict) else ""),
+        "worker_claims":         (pg.get("claims_table", "") if isinstance(pg, dict) else ""),
+        "gateway_logs":          (log.get("table_name", "") if isinstance(log, dict) else ""),
+        "question_runs":         (log.get("question_runs_table", "") if isinstance(log, dict) else ""),
+    }
+    bad = [(role, actual[role], expected[role])
+           for role in expected if actual[role] != expected[role]]
+    if bad:
+        lines = "\n".join(
+            f"  {role}: actual={a!r}, expected={e!r}"
+            for role, a, e in bad
+        )
+        raise ConfigurationError(
+            f"profile={mode!r}: runtime-таблицы не соответствуют ожидаемым:\n"
+            f"{lines}\n"
+            f"Возможная причина: profiles/{mode}.jsonc отсутствует или "
+            f"содержит prod-имена, либо session_manager.json/config.json "
+            f"перекрывают profile-owned ключи (это должно быть "
+            f"невозможно после применения профиля)."
+        )
+
+
+def resolve_application_config(profile: str | None = None) -> AttrDict:
+    """Единая точка формирования SETTINGS.
+
+    Используется всеми entry points (cli_agent.py, gateway.py,
+    streamlit_app.py). Возвращает AttrDict — тот же тип, который
+    существующий код уже импортирует через ``config.SETTINGS``.
+
+    Порядок merge: project.json → session_manager.json → config.json →
+    profiles/<mode>.jsonc → ${VAR} → validate.
+    """
+    mode = _resolve_mode(profile)
+
+    cfg: dict = {}
+    if _PROJECT_FILE.exists():
+        project_data = load_config_json(_PROJECT_FILE)
+        if isinstance(project_data, AttrDict):
+            project_data = dict(project_data)
+        _deep_merge(cfg, project_data)
+
+    _deep_merge(cfg, _load_session_manager_override())
+
+    if _CONFIG_FILE.exists():
+        config_data = load_config_json(_CONFIG_FILE)
+        if isinstance(config_data, AttrDict):
+            config_data = dict(config_data)
+        _deep_merge(cfg, config_data)
+
+    _merge_profile_overlay(cfg, mode)
+
+    cfg = _resolve_env_refs(cfg)
+
+    validate_runtime_isolation(cfg, mode)
+
+    return AttrDict(cfg)
+
+
+def get_active_profile() -> str:
+    """Вернуть текущий активный профиль (для баннера и логирования)."""
+    return _resolve_mode()
 
 # Порядок мержей (поздний перекрывает ранний):
 #   project.json → config.json → .secrets.env
