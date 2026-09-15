@@ -36,6 +36,7 @@ reference** по своей подсистеме; README в корне — эт�
 |---|---|
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Диагностический runbook — типовые ошибки и решения |
 | [MIGRATION.md](MIGRATION.md) | Сводка изменений между релизами + breaking changes |
+| [PROFILES.md](PROFILES.md) | Профили конфигурации (prod / test): запуск, `NANOBOT_PROFILE`, `--profile`, hard-fail валидация, миграция деплоев |
 
 ### Разработка
 

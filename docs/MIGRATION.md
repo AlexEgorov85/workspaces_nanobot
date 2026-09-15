@@ -6,7 +6,50 @@
 
 ---
 
-## v2.3.1 → v2.4.0 (текущая)
+## v2.5.2 → v2.5.3 (текущая) — Профили конфигурации (prod / test)
+
+⚠️ **Breaking change** в порядке запуска: `python gateway.py` без флагов
+теперь стартует в **test-режиме** (раньше — в проде). Все prod-деплои
+**обязаны** явно указать профиль.
+
+**Автоматические изменения** (ничего делать не нужно):
+
+- Добавлен `ConfigurationResolver` в `config.py` (см. [docs/PROFILES.md](PROFILES.md)).
+- Добавлен файл `profiles/test.jsonc` (в репозитории) — оверлей для test-режима.
+- Добавлен `--profile` CLI-флаг в `gateway.py` и `cli_agent.py`.
+- Баннер теперь содержит `profile=<mode>` (`profile=test` или `profile=prod`).
+- Удалён параметр `session_manager_json` из `SessionStorageService.__init__()` — теперь override из `session_manager.json` применяется централизованно в `ConfigurationResolver`.
+
+**Ручные действия** (ОБЯЗАТЕЛЬНО для prod-деплоев):
+
+1. **Явно указать профиль в проде.** Добавьте в systemd unit / docker-compose /
+   k8s manifest:
+
+   ```yaml
+   environment:
+     - NANOBOT_PROFILE=prod
+   ```
+
+   или запускайте с `python gateway.py --profile=prod`.
+
+2. **Проверить баннер.** При старте в терминале должно быть:
+   `Starting nanobot gateway · project v… · profile=prod...`
+   Если видите `profile=test` в проде — это ошибка деплоя, алертите.
+
+3. **Проверить наличие `profiles/test.jsonc`.** Должен быть в репозитории
+   (коммитится в составе плана). Без него `python gateway.py` без флагов
+   выбросит `ConfigurationError`.
+
+**Что НЕ изменилось:**
+
+- DSN, read-only данные (домен скилла, vector-storage, реестры) намеренно общие между prod и test.
+- Архитектура: ниже `ConfigurationResolver` runtime-код не знает о режиме (`if profile == "test"` в бизнес-логике — баг, а не фича).
+
+**Подробности**: [docs/PROFILES.md](PROFILES.md).
+
+---
+
+## v2.3.1 → v2.4.0
 
 **Автоматические изменения** (ничего делать не нужно):
 
