@@ -268,6 +268,113 @@ def test_missing_profile_overlay_in_test_mode_fails(monkeypatch, tmp_path):
         resolve_application_config(profile="test")
 
 
+# ---------------------------------------------------------------------------
+# 7. .secrets.env integration — критичный контракт плана
+# ---------------------------------------------------------------------------
+
+
+def test_secrets_env_loaded_and_exported_to_env(monkeypatch, tmp_path):
+    """Секреты из .secrets.env попадают в os.environ через Resolver
+    ДО резолва ${VAR} — иначе ${VAR} не разрешились бы.
+
+    Сценарий:
+      * .secrets.env содержит ``SECRET_TOKEN=foo123``
+      * os.environ НЕ содержит ``SECRET_TOKEN`` (только что стартовали)
+      * project.json содержит ``{"some_key": "${SECRET_TOKEN}"}``
+      * после ``resolve_application_config``: cfg["some_key"] == "foo123"
+        и os.environ["SECRET_TOKEN"] == "foo123".
+    """
+    # Arrange
+    monkeypatch.delenv("SECRET_TOKEN", raising=False)
+    (tmp_path / "secrets.env").write_text(
+        "SECRET_TOKEN=foo123\n", encoding="utf-8"
+    )
+    (tmp_path / "project.json").write_text(json.dumps({
+        "some_key": "${SECRET_TOKEN}",
+        "channels": {"postgres": {
+            "dsn": "postgresql://placeholder/x",
+            "table_name":     "agent_conversation_messages",
+            "messages_table": "agent_session_messages",
+            "meta_table":     "agent_session_meta",
+            "claims_table":   "agent_worker_claims",
+        }},
+        "logging": {"db": {
+            "table_name":          "agent_gateway_logs",
+            "question_runs_table": "agent_question_runs",
+        }},
+    }))
+    (tmp_path / "profiles").mkdir()
+    (tmp_path / "profiles" / "test.jsonc").write_text(json.dumps({
+        "channels": {"postgres": {
+            "table_name":     "agent_conversation_messages_test",
+            "messages_table": "agent_session_messages_test",
+            "meta_table":     "agent_session_meta_test",
+            "claims_table":   "agent_worker_claims_test",
+        }},
+        "logging": {"db": {
+            "table_name":          "agent_gateway_logs_test",
+            "question_runs_table": "agent_question_runs_test",
+        }},
+    }))
+
+    monkeypatch.setattr(config_mod, "_PROJECT_FILE", tmp_path / "project.json")
+    monkeypatch.setattr(config_mod, "_CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(config_mod, "_SECRETS_FILE", tmp_path / "secrets.env")
+    monkeypatch.setattr(config_mod, "_SESSION_MANAGER_FILE", tmp_path / "session_manager.json")
+    monkeypatch.setattr(config_mod, "_PROFILES_DIR", tmp_path / "profiles")
+
+    # Act
+    cfg = resolve_application_config(profile="test")
+
+    # Assert: ${SECRET_TOKEN} подставился
+    assert cfg["some_key"] == "foo123", (
+        f"Resolver не подставил ${{SECRET_TOKEN}}. cfg['some_key']={cfg['some_key']!r}. "
+        f"Значит .secrets.env не загружен в Resolver (regression после плана)."
+    )
+    # И секрет экспортирован в os.environ (для downstream-консьюмеров)
+    assert os.environ.get("SECRET_TOKEN") == "foo123"
+
+
+def test_secrets_env_optional(monkeypatch, tmp_path):
+    """Без .secrets.env Resolver всё равно работает (если ${VAR} не нужны)."""
+    monkeypatch.setattr(config_mod, "_PROJECT_FILE", tmp_path / "project.json")
+    monkeypatch.setattr(config_mod, "_CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(config_mod, "_SECRETS_FILE", tmp_path / "secrets.env")  # не существует
+    monkeypatch.setattr(config_mod, "_SESSION_MANAGER_FILE", tmp_path / "session_manager.json")
+    monkeypatch.setattr(config_mod, "_PROFILES_DIR", tmp_path / "profiles")
+
+    (tmp_path / "project.json").write_text(json.dumps({
+        "channels": {"postgres": {
+            "dsn": "postgresql://direct/x",
+            "table_name":     "agent_conversation_messages",
+            "messages_table": "agent_session_messages",
+            "meta_table":     "agent_session_meta",
+            "claims_table":   "agent_worker_claims",
+        }},
+        "logging": {"db": {
+            "table_name":          "agent_gateway_logs",
+            "question_runs_table": "agent_question_runs",
+        }},
+    }))
+    (tmp_path / "profiles").mkdir()
+    (tmp_path / "profiles" / "test.jsonc").write_text(json.dumps({
+        "channels": {"postgres": {
+            "table_name":     "agent_conversation_messages_test",
+            "messages_table": "agent_session_messages_test",
+            "meta_table":     "agent_session_meta_test",
+            "claims_table":   "agent_worker_claims_test",
+        }},
+        "logging": {"db": {
+            "table_name":          "agent_gateway_logs_test",
+            "question_runs_table": "agent_question_runs_test",
+        }},
+    }))
+
+    cfg = resolve_application_config(profile="test")
+    assert cfg["channels"]["postgres"]["dsn"] == "postgresql://direct/x"
+    assert cfg["channels"]["postgres"]["messages_table"] == "agent_session_messages_test"
+
+
 def test_validate_runtime_isolation_fails_for_wrong_names(isolated_project):
     """Точное соответствие runtime-таблиц — суффикс _test недостаточен."""
     tmp_path = isolated_project
@@ -285,6 +392,61 @@ def test_validate_runtime_isolation_fails_for_wrong_names(isolated_project):
     }
     with pytest.raises(ConfigurationError, match="foo_test"):
         config_mod.validate_runtime_isolation(cfg, "test")
+
+
+# ---------------------------------------------------------------------------
+# 8. validate_profile_overlay симметричная (требует все 6 ключей)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_profile_overlay_requires_all_six_keys():
+    """Симметричная проверка: profiles/<mode>.jsonc должен содержать
+    ВСЕ 6 profile-owned runtime-ключей — отсутствие любого из них =
+    fail-fast, а не молчаливая подмена дефолтами."""
+    partial_overlay = {
+        "channels": {"postgres": {
+            "messages_table": "agent_session_messages_test",
+            # остальные 5 ключей отсутствуют
+        }},
+    }
+    with pytest.raises(ConfigurationError, match="обязательн"):
+        config_mod.validate_profile_overlay(partial_overlay, "test")
+
+
+def test_validate_profile_overlay_accepts_complete_overlay():
+    """Полный оверлей (все 6 ключей) — проходит."""
+    complete = {
+        "channels": {"postgres": {
+            "table_name":     "agent_conversation_messages_test",
+            "messages_table": "agent_session_messages_test",
+            "meta_table":     "agent_session_meta_test",
+            "claims_table":   "agent_worker_claims_test",
+        }},
+        "logging": {"db": {
+            "table_name":          "agent_gateway_logs_test",
+            "question_runs_table": "agent_question_runs_test",
+        }},
+    }
+    config_mod.validate_profile_overlay(complete, "test")  # не должен бросить
+
+
+def test_validate_profile_overlay_rejects_extra_keys():
+    """Запрещено менять dsn, vector storage и т.п."""
+    overlay = {
+        "channels": {"postgres": {
+            "table_name":     "agent_conversation_messages_test",
+            "messages_table": "agent_session_messages_test",
+            "meta_table":     "agent_session_meta_test",
+            "claims_table":   "agent_worker_claims_test",
+            "dsn":            "postgresql://other_db/test",  # ЗАПРЕЩЕНО
+        }},
+        "logging": {"db": {
+            "table_name":          "agent_gateway_logs_test",
+            "question_runs_table": "agent_question_runs_test",
+        }},
+    }
+    with pytest.raises(ConfigurationError, match="dsn"):
+        config_mod.validate_profile_overlay(overlay, "test")
 
 
 # ---------------------------------------------------------------------------

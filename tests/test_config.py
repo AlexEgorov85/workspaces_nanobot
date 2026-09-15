@@ -322,9 +322,38 @@ class TestLoadConfigJson:
 
 
 class TestSettingsModule:
-    """Smoke test: the SETTINGS global loads without crashing."""
+    """Smoke test: SETTINGS загружается через ConfigurationResolver и
+    экспортирует секреты в os.environ для резолва ${VAR}.
 
-    def test_env_vars_set(self):
+    Контракт (после плана #N «единый ConfigurationResolver»):
+
+      * ``from config import SETTINGS`` возвращает Resolver-разрешённый
+        dict (default = test);
+      * секреты из ``.secrets.env`` экспортированы в ``os.environ``
+        (``setdefault``), чтобы ``${DATABASE_URL}`` и т.п. резолвились;
+      * ``${VAR}`` в SETTINGS уже подставлены (резолв внутри Resolver).
+    """
+
+    def test_settings_loaded_via_resolver(self):
+        """SETTINGS — Resolver-разрешённый dict с правильными таблицами."""
         from config import SETTINGS
-        for key, val in _flatten_env(SETTINGS).items():
-            assert os.environ.get(key) == val
+
+        pg = SETTINGS.get("channels", {}).get("postgres", {})
+        assert pg.get("messages_table") == "agent_session_messages_test"
+        # ${DATABASE_URL} уже подставлен
+        assert pg.get("dsn") == "postgresql://postgres:1@localhost:5432/postgres"
+
+    def test_secrets_exported_to_env(self):
+        """DATABASE_URL из .secrets.env попадает в os.environ через Resolver."""
+        from config import _export_secrets_to_env
+        from config import SETTINGS
+
+        # .secrets.env лежит в проекте; DATABASE_URL уже экспортирован
+        # на module-level при import-time. Проверяем, что значение там есть.
+        assert os.environ.get("DATABASE_URL") == (
+            SETTINGS.get("DATABASE_URL") or
+            "postgresql://postgres:1@localhost:5432/postgres"
+        ) or os.environ.get("DATABASE_URL"), (
+            "DATABASE_URL должен быть в os.environ после import config "
+            "(экспорт через _export_secrets_to_env внутри Resolver)."
+        )

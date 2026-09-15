@@ -211,6 +211,20 @@ EXPECTED_RUNTIME_TABLE_NAMES: dict[str, dict[str, str]] = {
 }
 
 
+class ConfigurationError(ValueError):
+    """Ошибка конфигурации: обязательный ключ отсутствует или некорректен.
+
+    В отличие от ``get_setting`` (возвращает переданный ``default``),
+    ``require_setting`` выбрасывает эту ошибку, чтобы отсутствие настройки
+    не маскировалось подставным значением. Единственный источник правды —
+    ConfigurationResolver.
+
+    Объявлен ДО ``_resolve_mode`` / ``resolve_application_config`` —
+    иначе ошибки конфигурации на module-level импорте превращались бы в
+    ``NameError: ConfigurationError is not defined``.
+    """
+
+
 def _resolve_mode(profile_arg: str | None = None) -> str:
     """Определить активный профиль. Приоритет: CLI > env > default=test.
 
@@ -242,6 +256,37 @@ def _load_session_manager_override() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _load_secrets_override() -> dict:
+    """Прочитать ``.secrets.env`` (если есть) — содержит секреты для
+    ``${VAR}`` плейсхолдеров (``DATABASE_URL``, ``EMBED_TOKEN`` и т.п.)
+    и провайдерские ``api_key`` через секцию ``# providers: llm``.
+
+    Содержимое файла попадает в две точки:
+      * в ``cfg`` через deep_merge (для ``providers.llm.api_key``,
+        используемых кодом напрямую через SETTINGS);
+      * в ``os.environ`` через ``_export_secrets_to_env`` (для резолва
+        ``${VAR}`` в ``_resolve_env_refs``).
+
+    Без этого шага все ``${DATABASE_URL}``/``${EMBED_TOKEN}`` и т.п.
+    остались бы нерезолвнутыми — агенту был бы передан ``${VAR}`` literal.
+    """
+    if _SECRETS_FILE is None or not _SECRETS_FILE.exists():
+        return {}
+    data = load_env(_SECRETS_FILE)
+    return dict(data) if isinstance(data, dict) else {}
+
+
+def _export_secrets_to_env(cfg: dict) -> None:
+    """Экспорт «плоских» значений из ``cfg`` в ``os.environ``.
+
+    Делается ДО ``_resolve_env_refs`` — чтобы ``${VAR}`` нашёл свои
+    значения. ``setdefault`` — внешние ``os.environ`` имеют приоритет.
+    """
+    for key, val in _flatten_env(cfg).items():
+        if "${" not in str(val):
+            os.environ.setdefault(key, val)
+
+
 def _merge_profile_overlay(cfg: dict, mode: str) -> None:
     """Применить profiles/<mode>.jsonc как ПОСЛЕДНИЙ шаг перед валидацией.
 
@@ -264,8 +309,15 @@ def _merge_profile_overlay(cfg: dict, mode: str) -> None:
 
 
 def validate_profile_overlay(overlay_cfg: dict, mode: str) -> None:
-    """Hard-fail: profiles/<mode>.jsonc может содержать ТОЛЬКО
-    6 profile-owned runtime-ключей. Никакого DSN, skill data, vector storage.
+    """Hard-fail: profiles/<mode>.jsonc симметрично проверяется на:
+
+      * все 6 profile-owned runtime-ключей ОБЯЗАНЫ присутствовать;
+      * никаких посторонних ключей (только эти 6 разрешены).
+
+    Симметричная проверка даёт чёткий контракт самого файла оверлея:
+    невалидный profile.jsonc ловится здесь, а не только на
+    финальной ``validate_runtime_isolation`` (которая страхует итог,
+    но не сам файл).
     """
     allowed = PROFILE_OWNED_RUNTIME_KEYS
 
@@ -278,6 +330,15 @@ def validate_profile_overlay(overlay_cfg: dict, mode: str) -> None:
 
     found: set = set()
     _walk(overlay_cfg, (), found)
+
+    missing = allowed - found
+    if missing:
+        raise ConfigurationError(
+            f"profiles/{mode}.jsonc не содержит обязательных "
+            f"profile-owned runtime-ключей: {sorted(missing)}. "
+            f"Все 6 ключей обязательны: {sorted(allowed)}."
+        )
+
     extra = found - allowed
     if extra:
         raise ConfigurationError(
@@ -343,6 +404,33 @@ def _resolve_env_refs(value):
     return value
 
 
+def _flatten_env(d: dict, prefix: str = "") -> dict[str, str]:
+    """Рекурсивно «расплющить» вложенный dict в плоский
+    ``{KEY_CHILD_...: str(value)}`` для экспорта в ``os.environ``.
+
+    Содержимое ``${VAR}``-плейсхолдеров пропускается (их нельзя
+    выставлять в env как литералы — на следующем проходе резолва они
+    могут перезаписать внешние значения).
+
+    Объявлена ДО ``resolve_application_config`` — иначе вызов
+    ``_export_secrets_to_env`` на module-level import падал бы с
+    ``NameError: _flatten_env is not defined``.
+    """
+    result: dict = {}
+    for k, v in d.items():
+        p = f"{prefix}_{k}" if prefix else k
+        if isinstance(v, dict):
+            result.update(_flatten_env(v, p))
+        else:
+            result[_(p).upper()] = str(v)
+    return result
+
+
+def _(s: str) -> str:
+    """Sanitize-преобразование имени env-переменной."""
+    return s.replace(" ", "_").replace("-", "_")
+
+
 def resolve_application_config(profile: str | None = None) -> AttrDict:
     """Единая точка формирования SETTINGS.
 
@@ -350,8 +438,15 @@ def resolve_application_config(profile: str | None = None) -> AttrDict:
     streamlit_app.py). Возвращает AttrDict — тот же тип, который
     существующий код уже импортирует через ``config.SETTINGS``.
 
-    Порядок merge: project.json → session_manager.json → config.json →
-    profiles/<mode>.jsonc → ${VAR} → validate.
+    Порядок merge (поздний перекрывает ранний):
+      1. project.json                    — база
+      2. session_manager.json (если есть) — per-deploy override
+      3. config.json                     — nanobot-настройки
+      4. .secrets.env                     — секреты (``DATABASE_URL``,
+                                          провайдерские ``api_key``)
+      5. profiles/<mode>.jsonc           — профиль (если mode != prod)
+      6. ${VAR} резолв через os.environ
+      7. validate_runtime_isolation()    — hard-fail
     """
     mode = _resolve_mode(profile)
 
@@ -369,6 +464,15 @@ def resolve_application_config(profile: str | None = None) -> AttrDict:
         if isinstance(config_data, AttrDict):
             config_data = dict(config_data)
         _deep_merge(cfg, config_data)
+
+    # Секреты из .secrets.env после config.json (чтобы могли перекрыть
+    # то, что в config.json, при необходимости). До профиля (профиль —
+    # только runtime-таблицы; секреты идут в cfg как обычные ключи).
+    _deep_merge(cfg, _load_secrets_override())
+
+    # Экспорт secrets в os.environ ДО _resolve_env_refs — чтобы ${VAR}
+    # в project.json/config.json нашли свои значения.
+    _export_secrets_to_env(cfg)
 
     _merge_profile_overlay(cfg, mode)
 
@@ -410,31 +514,6 @@ _ACTIVE_PROFILE = _resolve_mode()
 SETTINGS = resolve_application_config(profile=_ACTIVE_PROFILE)
 
 
-def _flatten_env(d: dict, prefix: str = "") -> dict[str, str]:
-    result = {}
-    for k, v in d.items():
-        p = f"{prefix}_{k}" if prefix else k
-        if isinstance(v, dict):
-            result.update(_flatten_env(v, p))
-        else:
-            result[_(p).upper()] = str(v)
-    return result
-
-
-def _(s: str) -> str:
-    return s.replace(" ", "_").replace("-", "_")
-
-
-class ConfigurationError(ValueError):
-    """Ошибка конфигурации: обязательный ключ отсутствует или некорректен.
-
-    В отличие от ``get_setting`` (возвращает переданный ``default``),
-    ``require_setting`` выбрасывает эту ошибку, чтобы отсутствие настройки
-    не маскировалось подставным значением. Единственный источник правды —
-    project.json.
-    """
-
-
 def get_setting(*keys: str, default=None):
     """Безопасный доступ к вложенным ключам SETTINGS.
 
@@ -472,29 +551,18 @@ def require_setting(*keys: str):
     return node
 
 
-# Приоритет: провайдер "llm" (из .secrets.env: секция "# providers: llm") —
-# это основной ключ LLM. Затем остальные провайдеры по порядку.
+# Экспорт ``os.environ`` теперь полностью внутри ConfigurationResolver
+# (``_export_secrets_to_env`` и пост-резолв экспорт в ``_resolve_env_refs``).
+# Раньше здесь был legacy-блок с двумя ``_flatten_env`` циклами и
+# провайдерским LLM_API_KEY export'ом — он перенесён в Resolver.
+
+# Провайдерский LLM_API_KEY можно ставить и здесь — это идемпотентный
+# setdefault, и Resolver тоже мог бы его ставить, но legacy-коду
+# ``lib.services.config_service.ConfigService._pre_resolve_env_refs``
+# нужен LLM_API_KEY в env ещё ДО ``_load_runtime_config``. Поэтому
+# выставляем здесь, после построения SETTINGS.
 _providers = SETTINGS.get("providers", {}) or {}
-_candidates: list[tuple[str, Any]] = []
 if isinstance(_providers.get("llm"), dict):
-    _candidates.append(("llm", _providers["llm"]))
-_candidates += [(_n, _c) for _n, _c in _providers.items() if isinstance(_c, dict)]
-for _prov_name, _prov_cfg in _candidates:
-    _key = _prov_cfg.get("api_key") or _prov_cfg.get("apiKey")
-    if _key and isinstance(_key, str) and not _key.startswith("${"):
-        os.environ.setdefault("LLM_API_KEY", _key)
-
-# Экспорт без ${...}: эти ключи не меняются при резолве и не должны
-# затирать уже выставленные переменные окружения (setdefault).
-for key, val in _flatten_env(SETTINGS).items():
-    if "${" not in str(val):
-        os.environ.setdefault(key, val)
-
-# Резолв ${VAR} теперь полностью внутри ConfigurationResolver
-# (resolve_application_config → _resolve_env_refs). Повторный вызов
-# _resolve_env_refs на уровне модуля больше не нужен и был удалён —
-# SETTINGS уже разрешён к моменту первого использования.
-
-# Доэкспорт резолвнутых значений (setdefault: внешние env сохраняют приоритет).
-for key, val in _flatten_env(SETTINGS).items():
-    os.environ.setdefault(key, val)
+    _llm_key = _providers["llm"].get("api_key") or _providers["llm"].get("apiKey")
+    if _llm_key and isinstance(_llm_key, str) and not _llm_key.startswith("${"):
+        os.environ.setdefault("LLM_API_KEY", _llm_key)
