@@ -122,17 +122,27 @@ class TestCreate:
 
 
 class TestSessionManagerJsonOverride:
+    """Тесты override из session_manager.json теперь живут в Resolver
+    (см. config._load_session_manager_override). SessionStorageService
+    больше не читает этот файл — параметр ``session_manager_json``
+    удалён из конструктора.
+    """
+
     def test_override_wins_over_pg(self, fake_modules, tmp_path):
-        sm_json = tmp_path / "session_manager.json"
-        sm_json.write_text(
-            '{"dsn": "postgresql://override/db", "schema": "custom", "max_conn": 8}',
-            encoding="utf-8",
-        )
-        service = SessionStorageService(session_manager_json=sm_json)
+        """Прежнее поведение переехало в config.resolve_application_config —
+        см. tests/test_config_resolver.py::test_session_manager_can_override_pool_but_not_runtime_tables.
+        Этот тест оставлен как smoke-проверка, что SessionStorageService
+        принимает ``pg`` с уже разрешённым override (без собственного
+        чтения session_manager.json)."""
+        service = SessionStorageService()
         service.create(
             _config(),
             storage="postgres",
-            pg=_pg(dsn="postgresql://from/config", schema="public"),
+            pg=_pg(
+                dsn="postgresql://override/db",
+                schema="custom",
+                max_conn=8,
+            ),
             configure_db=False,
         )
         kwargs = fake_modules["PGSessionManager"].call_args.kwargs
@@ -141,19 +151,22 @@ class TestSessionManagerJsonOverride:
         assert kwargs["max_conn"] == 8
 
     def test_missing_json_is_ignored(self, fake_modules, tmp_path):
-        service = SessionStorageService(session_manager_json=tmp_path / "nope.json")
+        """Без session_manager.json работает — override пустой."""
+        service = SessionStorageService()
         mode, _ = service.create(
             _config(), storage="postgres",
             pg=_pg(), configure_db=False,
         )
         assert mode == "postgres"
 
-    def test_invalid_json_raises(self, fake_modules, tmp_path):
+    def test_invalid_json_raises(self, fake_modules, tmp_path, monkeypatch):
+        """Невалидный JSON в session_manager.json → ValueError из Resolver.
+
+        Подменяем _SESSION_MANAGER_FILE в config на путь с битым JSON."""
         sm_json = tmp_path / "session_manager.json"
         sm_json.write_text("{broken json", encoding="utf-8")
-        service = SessionStorageService(session_manager_json=sm_json)
+        import config as config_mod
+        monkeypatch.setattr(config_mod, "_SESSION_MANAGER_FILE", sm_json)
+
         with pytest.raises(ValueError):
-            service.create(
-                _config(), storage="postgres",
-                pg=_pg(), configure_db=False,
-            )
+            config_mod._load_session_manager_override()

@@ -2,8 +2,9 @@
 
 Объединяет логику выбора PG/File/auto из gateway.py и cli_agent.py:
 
-  * источники конфигурации (по приоритету переопределения):
-      session_manager.json  →  параметр ``pg`` (секция channels.postgres)
+  * источник конфигурации — параметр ``pg`` (уже разрешённая секция
+    channels.postgres от ConfigurationResolver). ``session_manager.json``
+    **не читается здесь** — это делает Resolver (см. ``config.py``).
   * режим storage: ``auto`` | ``postgres`` | ``file``;
   * при ``configure_db=True`` и наличии DSN — настройка ``utils.db`` и
     экспорт ``DATABASE_URL`` (нужно инструментам/скриптам);
@@ -17,7 +18,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -28,30 +28,23 @@ class SessionStorageError(Exception):
 
 
 class SessionStorageService:
-    """Фабрика SessionManager / PGSessionManager на основе конфигурации."""
+    """Фабрика SessionManager / PGSessionManager на основе конфигурации.
 
-    def __init__(self, session_manager_json: Path | None = None) -> None:
-        self._sm_json = Path(session_manager_json) if session_manager_json else None
+    Замечание: до плана №N этот класс сам читал ``session_manager.json``
+    через ``_load_override()`` и применял его к ``pg_cfg`` **после**
+    ``SETTINGS`` — это перетирало runtime-таблицы, которые профиль уже
+    установил. Теперь override применяется централизованно в
+    ``config.resolve_application_config()`` (см. порядок merge в
+    ``config.py``: session_manager.json идёт на шаге 2, profile overlay —
+    на шаге 4 ПОСЛЕДНИМ).
+    """
 
-    # ------------------------------------------------------------------
-    # Переопределение из session_manager.json (приоритет над конфигом)
-    # ------------------------------------------------------------------
-
-    def _load_override(self) -> dict:
-        """Прочитать ``session_manager.json`` (если есть) для override.
-
-        Формат файла — плоский dict, например::
-
-            {"dsn": "postgresql://...", "schema": "audit", "max_conn": 8}
-
-        Поля, заданные здесь, ПЕРЕБИВАЮТ ``pg`` параметр и ``SETTINGS``.
-        При отсутствии файла возвращается ``{}`` (файл опционален).
-        Невалидный JSON — ошибка, а не молчаливый ``{}``.
-        """
-        if self._sm_json is None or not self._sm_json.exists():
-            return {}
-        data = json.loads(self._sm_json.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+    def __init__(self) -> None:
+        # Параметр ``session_manager_json`` УДАЛЁН — путь к этому файлу
+        # знает только ``config.resolve_application_config()``. Для
+        # обратной совместимости параметр проигнорирован (но код, который
+        # его передавал, должен быть обновлён).
+        pass
 
     def create(
         self,
@@ -66,8 +59,7 @@ class SessionStorageService:
         """Создать SessionManager подходящего типа.
 
         Алгоритм:
-          1. Мержим ``pg`` (секция channels.postgres из SETTINGS) с
-             override из ``session_manager.json`` (последний ПЕРЕБИВАЕТ);
+          1. Берём уже разрешённый ``pg`` от ConfigurationResolver;
           2. Достаём ``dsn`` из мердженной конфигурации;
           3. Если DSN есть И ``configure_db=True`` — настраиваем
              ``utils.db`` (общий пул для инструментов) и экспортируем
@@ -82,7 +74,7 @@ class SessionStorageService:
         Args:
             config: runtime-конфиг nanobot (нужен ``workspace_path``).
             storage: ``"auto"`` | ``"postgres"`` | ``"file"``.
-            pg: секция ``channels.postgres`` (dsn, schema, ...).
+            pg: уже разрешённая секция ``channels.postgres`` (dsn, schema, ...).
             configure_db: настраивать ``utils.db`` и ``DATABASE_URL`` при DSN.
             workspace_dir: переопределить workspace (по умолчанию из config).
             return_file_manager: для ``mode="file"`` вернуть
@@ -100,10 +92,10 @@ class SessionStorageService:
             SessionStorageError: ``storage="postgres"`` без DSN.
         """
         pg_cfg = dict(pg or {})
-        pg_cfg.update(self._load_override())  # session_manager.json побеждает
         pool_cfg = pg_cfg.get("pool", {}) if isinstance(pg_cfg.get("pool"), dict) else {}
-        # Legacy: плоские ключи min_conn/max_conn/pool_timeout в session_manager.json
-        # (использовались до введения channels.postgres.pool).
+        # Legacy: плоские ключи min_conn/max_conn/pool_timeout (использовались
+        # до введения channels.postgres.pool — теперь поставляются через
+        # Resolver как часть pg_cfg).
         for legacy_key in ("min_conn", "max_conn", "pool_timeout"):
             if legacy_key in pg_cfg and legacy_key not in pool_cfg:
                 pool_cfg[legacy_key] = pg_cfg[legacy_key]

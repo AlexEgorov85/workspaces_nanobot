@@ -79,6 +79,7 @@ class ApplicationContext:
         storage_override: str | None = None,
         session_override: str | None = None,
         print_llm_calls: bool = False,
+        profile: str | None = None,
     ) -> ApplicationContext:
         """Собрать контекст приложения.
 
@@ -92,10 +93,15 @@ class ApplicationContext:
             session_override: имя сессии (CLI).
             print_llm_calls: выводить в терминал токены LLM-итераций
                 (включается только в CLI-REPL через DatabaseLoggingHook).
+            profile: активный профиль конфигурации (None — берётся из
+                NANOBOT_PROFILE env, default=test). Передаётся в
+                ConfigService → ``ctx.config_service.settings`` возвращает
+                профильно-разрешённый конфиг.
         """
         ctx = cls()
         ctx.script_dir = Path(script_dir)
         ctx.workspace_dir = Path(workspace_dir)
+        ctx.profile = profile
 
         # Сбросить ``TableRegistry`` — это singleton, и при повторном
         # ``create()`` в одном процессе (тесты, streamlit-reload, gateway
@@ -109,7 +115,12 @@ class ApplicationContext:
         # ConfigService.load() сам подставляет ${VAR} плейсхолдеры из
         # SETTINGS.providers.*.api_key (если ${VAR} — это *_API_KEY и
         # .secrets.env задал api_key=... через "# providers: <name>").
-        ctx.config_service = _make_config_service(ctx.script_dir, ctx.workspace_dir)
+        # При ``profile`` config-сервис использует Resolver (см.
+        # ``config.resolve_application_config``) — иначе legacy
+        # SETTINGS-глобал.
+        ctx.config_service = _make_config_service(
+            ctx.script_dir, ctx.workspace_dir, profile=profile
+        )
         ctx.config = ctx.config_service.load()
         ctx.settings = ctx.config_service.settings
 
@@ -129,9 +140,11 @@ class ApplicationContext:
         # 3. SessionStorageService
         from lib.services.session_storage import SessionStorageService
 
-        ctx.session_storage_service = SessionStorageService(
-            session_manager_json=ctx.script_dir / "session_manager.json",
-        )
+        # Параметр session_manager_json удалён: теперь override из
+        # session_manager.json применяется централизованно в
+        # ConfigurationResolver (см. config.resolve_application_config,
+        # шаг 2 порядка merge).
+        ctx.session_storage_service = SessionStorageService()
         pg_section = ctx.config_service.settings_section("channels").get(
             "postgres", {}
         )
@@ -508,15 +521,26 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
     ctx.runtime_readiness.register("vector_search", check_vector_search, required=False)
 
 
-def _make_config_service(script_dir: Path, workspace_dir: Path) -> Any:
+def _make_config_service(
+    script_dir: Path,
+    workspace_dir: Path,
+    *,
+    profile: str | None = None,
+) -> Any:
     """Создать ``ConfigService``, привязанный к корню проекта.
 
     Использует lazy-import, чтобы не зависеть от ``config.py`` на
     старте (если config битый, ошибка проявится в ``.load()``).
+
+    ``profile`` (если задан) передаётся в ``ConfigService``, и
+    ``ctx.config_service.settings`` возвращает профильно-разрешённый
+    конфиг через ``config.resolve_application_config(profile)``.
     """
     from lib.services.config_service import ConfigService
 
-    return ConfigService(script_dir=script_dir, workspace_dir=workspace_dir)
+    return ConfigService(
+        script_dir=script_dir, workspace_dir=workspace_dir, profile=profile
+    )
 
 
 def _resolve_agent_id(config: Any) -> str:

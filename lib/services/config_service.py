@@ -24,26 +24,54 @@ from lib.utils.node_access import get_path as _get
 
 
 class ConfigService:
-    """Загрузка и нормализация конфигурации проекта."""
+    """Загрузка и нормализация конфигурации проекта.
+
+    Поведение ``settings``:
+      * без ``profile`` → возвращает глобальный ``SETTINGS`` (prod-база
+        без profile overlay; для обратной совместимости);
+      * с ``profile`` → возвращает профильно-разрешённый конфиг из
+        ``config.resolve_application_config(profile)``. Это режим
+        ``ApplicationContext(profile=...)`` и тестов merge-order.
+    """
 
     def __init__(
         self,
         script_dir: Path | None = None,
         workspace_dir: Path | None = None,
+        *,
+        profile: str | None = None,
     ) -> None:
         self.script_dir = Path(script_dir) if script_dir else None
         self.workspace_dir = Path(workspace_dir) if workspace_dir else None
+        self._profile = profile
+        self._resolved_cache: Any | None = None
 
     # ------------------------------------------------------------------
-    # SETTINGS (глобал из config.py)
+    # SETTINGS (глобал из config.py или профильно-разрешённый)
     # ------------------------------------------------------------------
 
     @property
     def settings(self) -> Any:
-        """Глобальные SETTINGS (project.json + config.json + .secrets.env)."""
-        from config import SETTINGS
+        """Глобальные SETTINGS или профильно-разрешённый конфиг.
 
-        return SETTINGS
+        При заданном ``profile`` результат кешируется (нет смысла
+        пересчитывать на каждом обращении — это дорого и идёт через
+        чтение файлов и валидацию).
+        """
+        if self._profile is None:
+            from config import SETTINGS
+
+            return SETTINGS
+        if self._resolved_cache is None:
+            from config import resolve_application_config
+
+            self._resolved_cache = resolve_application_config(profile=self._profile)
+        return self._resolved_cache
+
+    @property
+    def profile(self) -> str | None:
+        """Текущий активный профиль (``None`` — legacy prod-режим)."""
+        return self._profile
 
     def settings_section(self, name: str, default: dict | None = None) -> dict:
         """Вернуть top-level секцию SETTINGS как dict (пусто, если нет).
