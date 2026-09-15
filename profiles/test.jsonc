@@ -1,0 +1,27 @@
+{
+  // Тестовая среда (default для `python gateway.py` без флагов).
+  //
+  // Применяется ПОСЛЕДНИМ в порядке merge (см. config.resolve_application_config),
+  // поэтому 6 runtime-ключей здесь immutable после применения профиля.
+  // Этот файл может содержать ТОЛЬКО эти ключи — иначе
+  // validate_profile_overlay() выбросит ConfigurationError на старте.
+  //
+  // prod-конфиг живёт в project.json (без оверлеев).
+  // См. docs/PROFILES.md.
+
+  "channels": {
+    "postgres": {
+      "table_name":     "agent_conversation_messages_test",
+      "messages_table": "agent_session_messages_test",
+      "meta_table":     "agent_session_meta_test",
+      "claims_table":   "agent_worker_claims_test"
+    }
+  },
+
+  "logging": {
+    "db": {
+      "table_name":          "agent_gateway_logs_test",
+      "question_runs_table": "agent_question_runs_test"
+    }
+  }
+}
