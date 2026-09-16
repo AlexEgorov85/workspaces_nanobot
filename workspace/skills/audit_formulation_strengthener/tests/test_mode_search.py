@@ -148,7 +148,7 @@ def test_search_one_chunk_failure_does_not_crash(
 ) -> None:
     """Если LLM падает на одном чанке — остальные продолжают обрабатываться."""
     from modes import search
-    from llm import JsonParseError
+    from llm_client import JsonParseError
 
     def selective_failure(system, user, operation):
         # Падаем на втором чанке (первый в списке — chunk_index=0).

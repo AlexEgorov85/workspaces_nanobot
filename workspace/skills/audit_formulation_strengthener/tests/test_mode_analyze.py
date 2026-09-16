@@ -86,7 +86,7 @@ def test_analyze_severity_normalization(mock_llm_analyze) -> None:
 def test_analyze_invalid_json_after_retries() -> None:
     """LLM возвращает невалидный JSON после всех попыток → json_parse_failed."""
     from modes import analyze
-    from llm import JsonParseError
+    from llm_client import JsonParseError
 
     def raises(system, user, operation):
         raise JsonParseError("invalid JSON")

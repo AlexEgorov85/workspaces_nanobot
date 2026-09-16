@@ -18,14 +18,31 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Добавляем корень репо и scripts/legal_summarizer в sys.path, чтобы
-# импортировать single_flight без выставленного PYTHONPATH.
+# Добавляем пути в sys.path для импорта без PYTHONPATH.
+# Порядок важен: сначала legal_summarizer/scripts (чтобы найти llm/),
+# затем repo root (lib/), затем scripts/ skill'а (локальные модули).
+# _SKILL_ROOT = audit_formulation_strengthener
+# _SKILL_ROOT.parents[0] = skills
+# _SKILL_ROOT.parents[1] = workspace
+# _SKILL_ROOT.parents[2] = корень репо (workspaces_nanobot)
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
-_PROJECT_ROOT = _SKILL_ROOT.parents[1]
-_LS_SCRIPTS = Path(_PROJECT_ROOT) / "workspace" / "skills" / "legal_summarizer" / "scripts"
-for _p in (str(_PROJECT_ROOT), str(_LS_SCRIPTS)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+_REPO_ROOT = str(_SKILL_ROOT.parents[2])
+_LS_SCRIPTS = str(Path(_REPO_ROOT) / "workspace" / "skills" / "legal_summarizer" / "scripts")
+
+# Собираем все пути:
+# 1. _LS_SCRIPTS — для llm/ (legal_summarizer), добавляем в начало sys.path
+# 2. _REPO_ROOT — для lib/
+# 3. _SCRIPTS_DIR — для локальных модулей skill'а
+#
+# insert(0) для _LS_SCRIPTS чтобы перебить путь, добавленный при импорте
+# пакета workspace.skills.audit_formulation_strengthener.scripts
+if _LS_SCRIPTS not in sys.path:
+    sys.path.insert(0, _LS_SCRIPTS)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.append(_SCRIPTS_DIR)
 
 from llm.single_flight import guarded_chat  # type: ignore[import-not-found]  # noqa: E402
 from lib.services.llm_client import call_llm as _raw_call_llm  # type: ignore[import-not-found]  # noqa: E402
@@ -62,13 +79,16 @@ def call_llm_text(
         Текст ответа LLM.
     """
     cfg = get_llm_config()
+    # Формируем messages из system и user — формат, ожидаемый _raw_call_llm
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
     return guarded_chat(
         _raw_call_llm,
-        system=system,
-        user=user,
+        messages,
         max_tokens=int(cfg.get("max_tokens", 4096)),
         temperature=float(cfg.get("temperature", 0.1)),
-        operation=operation,
     )
 
 

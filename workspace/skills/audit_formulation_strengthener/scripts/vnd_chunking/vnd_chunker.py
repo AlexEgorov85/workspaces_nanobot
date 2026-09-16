@@ -24,12 +24,17 @@ from typing import Any
 
 # Добавляем корень репо и scripts/ legal_summarizer, чтобы импортировать
 # run_canonical_pipeline без выставленного PYTHONPATH.
-_SKILL_ROOT = Path(__file__).resolve().parents[2]
-_PROJECT_ROOT = _SKILL_ROOT.parents[1]
-_LS_SCRIPTS = _PROJECT_ROOT / "workspace" / "skills" / "legal_summarizer" / "scripts"
-for _p in (str(_PROJECT_ROOT), str(_LS_SCRIPTS)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# _SKILL_ROOT = audit_formulation_strengthener (path to skill root)
+# _SKILL_ROOT.parents[0] = skills
+# _SKILL_ROOT.parents[1] = workspace
+# _SKILL_ROOT.parents[2] = workspaces_nanobot (repo root)
+_SKILL_ROOT = Path(__file__).resolve().parents[2]  # audit_formulation_strengthener
+_REPO_ROOT = _SKILL_ROOT.parents[2]  # workspaces_nanobot
+_LS_SCRIPTS = str(_REPO_ROOT / "workspace" / "skills" / "legal_summarizer" / "scripts")
+if _LS_SCRIPTS not in sys.path:
+    sys.path.insert(0, _LS_SCRIPTS)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from chunking.chunks import Chunk  # type: ignore[import-not-found]  # noqa: E402
 

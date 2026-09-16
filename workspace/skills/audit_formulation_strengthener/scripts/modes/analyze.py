@@ -39,7 +39,7 @@ _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from llm import JsonParseError, call_llm_json  # type: ignore[import-not-found]  # noqa: E402
+from llm_client import JsonParseError, call_llm_json  # type: ignore[import-not-found]  # noqa: E402
 from prompts import load_prompt, render_prompt  # type: ignore[import-not-found]  # noqa: E402
 
 import output as _output  # type: ignore[import-not-found]  # noqa: E402

@@ -16,8 +16,10 @@ from typing import Any
 import pytest
 
 
-_SKILL_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
-sys.path.insert(0, str(_SKILL_SCRIPTS))
+# _SKILL_SCRIPTS вычисляется в _run_cli, чтобы conftest.py успел
+# настроить sys.path.
+def _get_skill_scripts() -> Path:
+    return Path(__file__).resolve().parents[1] / "scripts"
 
 
 # ---------------------------------------------------------------------------
@@ -32,31 +34,38 @@ def _run_cli(
     prepare_vnd_mock: Any | None = None,
 ) -> tuple[int, str]:
     """Запустить CLI с моками, вернуть (returncode, stdout)."""
-    # Импортируем cli.py как модуль.
     import importlib.util
 
+    _SKILL_SCRIPTS = _get_skill_scripts()
     spec = importlib.util.spec_from_file_location(
         "afs_cli", _SKILL_SCRIPTS / "cli.py"
     )
     cli_mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli_mod)  # type: ignore[union-attr]
 
-    # Подменяем LLM на уровне модулей modes/*.
+    # Принудительно импортируем modes, чтобы они появились в sys.modules.
+    # Иначе патч не сработает, т.к. modes импортируется через
+    # 'from modes import analyze' внутри функций cli.py.
     for mode_name in ("analyze", "search", "synthesize"):
-        try:
-            mode_mod = getattr(cli_mod.modes, mode_name)
-        except AttributeError:
-            continue
-        monkeypatch.setattr(mode_mod, "call_llm_json", llm_mock)
+        mod_key = f"modes.{mode_name}"
+        if mod_key not in sys.modules:
+            import importlib
+            importlib.import_module(mod_key)
 
-    # Подменяем prepare_vnd, если нужно.
+    # Подменяем LLM через sys.modules.
+    for mode_name in ("analyze", "search", "synthesize"):
+        mod_key = f"modes.{mode_name}"
+        if mod_key in sys.modules:
+            monkeypatch.setattr(sys.modules[mod_key], "call_llm_json", llm_mock)
+
+    # Подменяем prepare_vnd в vnd_io.
     if prepare_vnd_mock is not None:
-        try:
-            monkeypatch.setattr(cli_mod.modes.search, "prepare_vnd", prepare_vnd_mock)
-        except AttributeError:
-            pass
+        if "vnd_io" not in sys.modules:
+            import importlib
+            importlib.import_module("vnd_io")
+        monkeypatch.setattr(sys.modules["vnd_io"], "prepare_vnd", prepare_vnd_mock)
 
-    # Перехватываем stdout, чтобы не загрязнять вывод pytest'а.
+    # Перехватываем stdout.
     buf = io.StringIO()
     with redirect_stdout(buf):
         try:

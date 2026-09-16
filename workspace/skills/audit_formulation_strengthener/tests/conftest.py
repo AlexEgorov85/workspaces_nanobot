@@ -28,6 +28,25 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
+def _ensure_repo_paths() -> None:
+    """Добавить пути к репо для импорта ``lib``, ``llm``, ``chunking``."""
+    import os
+    repo_root = Path(__file__).resolve().parent  # tests/
+    while repo_root.name != "workspaces_nanobot" and repo_root.parent != repo_root:
+        repo_root = repo_root.parent
+    # Пути, которые нужны skill'ам для импорта
+    paths_to_add = [
+        str(repo_root),  # lib/*, config.py, etc.
+        str(repo_root / "workspace" / "skills" / "legal_summarizer" / "scripts"),  # llm/*, chunking/*
+    ]
+    for p in paths_to_add:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+
+_ensure_repo_paths()
+
+
 def _find_repo_root(start: Path) -> Path:
     """Найти корень репо (где лежит ``workspaces_nanobot/``)."""
     cur = start.resolve()
@@ -184,38 +203,39 @@ def mock_llm_all(mock_llm_analyze, mock_llm_search_map, mock_llm_synthesize):
 
 @pytest.fixture
 def sample_vnd_chunks():
-    """Список заранее подготовленных ``VndChunk``-подобных dicts.
+    """Список заранее подготовленных ``VndChunk``-подобных объектов.
 
     Используется для подмены ``vnd_io.prepare_vnd``.
+    Возвращает объекты с атрибутами (не dict), чтобы соответствовать
+    интерфейсу ``VndChunk`` из ``vnd_chunker``.
     """
-    from datetime import datetime
+    from types import SimpleNamespace
 
-    now = datetime.now().isoformat()
     return [
-        {
-            "source_file": "vnd1.txt",
-            "index": 0,
-            "text": "Срок хранения персональные данные — не менее пяти лет. (пункт 5.4)",
-            "section_title": "5.4 Сроки хранения",
-            "section_path": "5 / 5.4 Сроки хранения",
-            "token_estimate": 50,
-        },
-        {
-            "source_file": "vnd1.txt",
-            "index": 1,
-            "text": "Раздел о правах субъектов персональные данные.",
-            "section_title": "6.1 Права субъектов",
-            "section_path": "6 / 6.1 Права",
-            "token_estimate": 30,
-        },
-        {
-            "source_file": "vnd2.txt",
-            "index": 0,
-            "text": "Нерелевантный фрагмент про офисные процедуры.",
-            "section_title": "1.1 Общие положения",
-            "section_path": "1 / 1.1",
-            "token_estimate": 20,
-        },
+        SimpleNamespace(
+            source_file="vnd1.txt",
+            index=0,
+            text="Срок хранения персональные данные — не менее пяти лет. (пункт 5.4)",
+            section_title="5.4 Сроки хранения",
+            section_path="5 / 5.4 Сроки хранения",
+            token_estimate=50,
+        ),
+        SimpleNamespace(
+            source_file="vnd1.txt",
+            index=1,
+            text="Раздел о правах субъектов персональные данные.",
+            section_title="6.1 Права субъектов",
+            section_path="6 / 6.1 Права",
+            token_estimate=30,
+        ),
+        SimpleNamespace(
+            source_file="vnd2.txt",
+            index=0,
+            text="Нерелевантный фрагмент про офисные процедуры.",
+            section_title="1.1 Общие положения",
+            section_path="1 / 1.1",
+            token_estimate=20,
+        ),
     ]
 
 
@@ -226,20 +246,30 @@ def mock_prepare_vnd(sample_vnd_chunks):
     Подменяет на уровне модуля ``modes.search`` (и ``modes.synthesize``,
     если тот начнёт ходить в ВНД).
     """
+    # Импортируем dataclass здесь, чтобы избежать проблем с sys.path
+    import sys
+    from pathlib import Path
+    _SKILL_ROOT = Path(__file__).resolve().parent.parent
+    _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
+    for _p in [str(_SCRIPTS_DIR), str(_SKILL_ROOT.parent.parent.parent), str(_SKILL_ROOT.parent.parent / "workspace" / "skills" / "legal_summarizer" / "scripts")]:
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+
+    from vnd_io import VndBundle
 
     def _fake(*args: Any, **kwargs: Any):
-        return {
-            "vnd_paths": kwargs.get("vnd_paths") or [],
-            "chunks": sample_vnd_chunks,
-            "cache_key": "test_cache_key_" + "x" * 56,
-            "size_estimate": {
+        return VndBundle(
+            vnd_paths=kwargs.get("vnd_paths") or [],
+            chunks=sample_vnd_chunks,
+            cache_key="test_cache_key_" + "x" * 56,
+            size_estimate={
                 "vnd_files": len(kwargs.get("vnd_paths") or []),
                 "total_chars": 1000,
                 "total_pages_estimated": 1,
                 "chunks_estimated": len(sample_vnd_chunks),
                 "map_batches_planned": len(sample_vnd_chunks),
             },
-        }
+        )
 
     return _fake
 

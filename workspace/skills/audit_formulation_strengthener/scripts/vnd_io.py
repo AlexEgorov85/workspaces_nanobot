@@ -18,13 +18,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# Добавляем scripts/ skill'а в sys.path (для импорта vnd_chunker).
+# Добавляем пути в sys.path для импорта.
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPTS_DIR = _SKILL_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+_REPO_ROOT = _SKILL_ROOT.parents[2]
+_LS_SCRIPTS = str(_REPO_ROOT / "workspace" / "skills" / "legal_summarizer" / "scripts")
 
-from chunking import vnd_chunker  # type: ignore[import-not-found]  # noqa: E402
+# Добавляем пути
+_paths = [str(_SCRIPTS_DIR), str(_REPO_ROOT), _LS_SCRIPTS]
+for _p in _paths:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from vnd_chunking import vnd_chunker  # type: ignore[import-not-found]  # noqa: E402
 
 
 __all__ = ["VndInputError", "VndBundle", "prepare_vnd", "build_cache_key"]
