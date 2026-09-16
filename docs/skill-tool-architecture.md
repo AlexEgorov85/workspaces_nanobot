@@ -276,3 +276,110 @@ CLI skill'а `scripts/generated_sql_mode.py` для few-shot retrieval):
 
 Любое использование `label` в `lib/services/runtime`-слое (`cache_provider_impl.py`,
 `duckdb_cache_store.py`, `pg_duckdb_sync_service.py`) — архитектурная регрессия.
+
+---
+
+## 11. Skill `audit_formulation_strengthener`
+
+Skill для аудиторов: принимает **текст отклонения** + **файлы ВНД** (`.pdf`/`.docx`/`.txt`),
+возвращает **человекочитаемый отчёт** в строгом русском юридическом стиле.
+
+**Акт НЕ передаётся** — только отклонение и ВНД.
+
+### 11.1 Особенности (отличающие от других skills)
+
+| Особенность | Значение |
+|---|---|
+| `tables` | `[]` (пустой — ВНД приходят файлами, не из БД) |
+| `vector_indexes` | `[]` (пустой — без embeddings, map-reduce через LLM) |
+| Pipeline | `analyze → search (map-reduce) → synthesize` |
+| LLM-вызовы | 1 + N + 1 = N+2 (где N = число чанков ВНД) |
+| Формат отчёта | `.md` / `.txt` / `.docx` (по умолчанию `.md`), **не JSON** |
+
+### 11.2 Архитектурный контракт
+
+Skill **разрешено**:
+
+- ✅ Использовать `lib.services.llm_client.call_llm` (через `legal_summarizer.scripts.llm.guarded_chat`).
+- ✅ Использовать `workspace.skills.legal_summarizer.scripts.application.pipeline_structure.run_canonical_pipeline` — для I/O + чанкования ВНД.
+- ✅ Использовать `workspace.skills.legal_summarizer.scripts.chunking.chunks.Chunk` — dataclass чанка.
+- ✅ Использовать `lib.core.skill_config.get_*` — обёртки над конфигом.
+- ✅ Импортировать `workspace.utils.office_files.extract_text` — fallback для текста.
+
+Skill **запрещено** (дополнительно к общим правилам):
+
+- ❌ Хранить ВНД в PostgreSQL или DuckDB (ВНД приходят каждый раз заново).
+- ❌ Создавать vector-индексы для ВНД (map-reduce через LLM даёт прозрачность через `why_matches`).
+- ❌ Использовать `audit_analyzer`-специфичные ресурсы (`audits_index`, `violations_index`).
+- ❌ Возвращать JSON как пользовательский артефакт (только `.md`/`.txt`/`.docx`).
+- ❌ Добавлять skill-specific ключи в `project.json::skills.<name>` — `SkillSettings(extra="forbid")`
+  на уровне `SkillSettings`. (Подсекции наследуют `extra="allow"` от `_StrictOptional`,
+  но всё равно лучше выносить в Python-код.)
+
+### 11.3 Pipeline
+
+```
+CLI: --violation "..." --vnd vnd1.pdf --vnd vnd2.docx --output report.md
+
+analyze (1 LLM):
+  violation → {normalized, key_concepts, severity, suggested_vnd_sections}
+
+search (N LLM, map-reduce):
+  для каждого чанка ВНД:
+    chunk + violation → LLM → {relation_type, relevance_score, why_matches}
+  filter: score < 0.3 → отбрасываем
+  re-rank: top-10 по score
+
+synthesize (1 LLM):
+  analyze_data + search_findings → LLM → {title, violation_summary,
+    established_facts, deviation_analysis, vnd_citations[], verdict,
+    recommended_formulation}
+
+render: Report JSON → markdown → опционально .docx
+```
+
+### 11.4 Регистрация
+
+В `project.json`:
+
+```json
+{
+  "skills": {
+    "audit_formulation_strengthener": {
+      "enabled": true,
+      "tables": [],
+      "vector_indexes": [],
+      "cli": {"default_mode": "all", "max_retries": 3, "timeout_sec": 120},
+      "llm": {"max_tokens": 4096, "temperature": 0.1},
+      "chunking": {"chunk_size": 100000, "chunk_overlap": 0,
+                   "single_call_threshold": 20000, "chunk_size_input_ratio": 0.5},
+      "execution": {"confirmation_threshold_sec": 120,
+                    "estimated_chunk_duration_sec": 10,
+                    "max_chunks_for_execution": 50,
+                    "context_batching": false}
+    }
+  }
+}
+```
+
+Skill-specific константы **в Python-коде** (не в JSON):
+
+- `scripts/modes/search.py::TOP_K_CANDIDATES = 10`
+- `scripts/modes/search.py::MIN_RELEVANCE_SCORE = 0.3`
+
+### 11.5 Тесты
+
+- 42 unit-теста в `tests/` с моками LLM и `prepare_vnd`.
+- Все LLM-фазы замоканы, PDF/DOCX-парсинг замокан.
+- Тесты CLI через прямой вызов `main(argv)` + `redirect_stdout`.
+
+См. `workspace/skills/audit_formulation_strengthener/references/testing.md`.
+
+### 11.6 Что НЕ делает
+
+- ❌ Не хранит ВНД в БД (stateless).
+- ❌ Не использует embeddings (map-reduce через LLM).
+- ❌ Не принимает акт — только отклонение.
+- ❌ Не возвращает JSON как пользовательский артефакт.
+- ❌ Не имеет таблиц и vector-индексов.
+
