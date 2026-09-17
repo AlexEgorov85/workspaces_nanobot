@@ -155,18 +155,6 @@ def test_diff_stale_signature_diverges() -> None:
     assert items[0]["current_signature"]  # computed from cfg
 
 
-def test_diff_invalid_signature_diverges() -> None:
-    """Blob есть, signature отсутствует в metadata → INVALID → divergence."""
-    mod = _import_tool()
-    declared = _declared_cfg()
-    runtime = [_store_row(name="audits_index", signature=None)]
-    out = mod._diff(declared, runtime)
-    assert out["status"] == "DIVERGENCE"
-    items = out["divergence"]["stale_or_invalid"]
-    assert len(items) == 1
-    assert items[0]["status"] == "INVALID"
-
-
 def test_diff_handles_orphan_signature_unknown_status() -> None:
     """Orphan без cfg → signature_status нельзя вычислить (UNKNOWN, но не divergence)."""
     mod = _import_tool()

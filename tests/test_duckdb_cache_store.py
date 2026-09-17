@@ -20,7 +20,6 @@ if _project_root not in sys.path:
 
 from lib.services.duckdb_cache_store import DuckDbCacheStore
 from lib.services.table_registry import SkillRegistration, VectorResource, table_registry
-from lib.services.cache_provider_impl import read_vector_store_table
 
 _DIM = 1024
 
@@ -266,7 +265,6 @@ class TestSkillVectorFromCache:
             schema=_test_schema,
             cache_path=str(target),
             vector_db_table=TEST_VECTOR_TABLE,
-            vector_store_table="",  # у навыка нет PG store
             embedding_base_url="",
         )
         monkeypatch.setattr(cp, "get_embedding", lambda *a, **k: _vec(0))
@@ -300,7 +298,6 @@ class TestSkillVectorFromCache:
             schema=_test_schema,
             cache_path=str(target),
             vector_db_table=TEST_VECTOR_TABLE,
-            vector_store_table="",
             embedding_base_url="",
         )
         monkeypatch.setattr(cp, "get_embedding", lambda *a, **k: [0.1, 0.2, 0.3])
@@ -644,71 +641,9 @@ def _fake_cfg_module(monkeypatch, cfg, emb, meta_rows):
     monkeypatch.setattr(dbmod, "fetch", _fetch)
 
 
-class TestIndexIntegrity:
-    def test_skips_without_vector_store_table(self):
-        st = DuckDbCacheStore(cache_path="", vector_store_table="")
-        # не падает и не стучится в БД
-        st._check_index_integrity("audits_index")
-
-    def test_stale_raises(self, monkeypatch):
-        from lib.services.cache_provider import IndexIntegrityError
-
-        cfg = {"audits_index": {
-            "table": "audits", "pk": "id",
-            "content_columns": ["content"], "embedding_columns": {"c": "col"},
-            "track_column": "updated_at",
-        }}
-        emb = {"model": "mxbai-embed-large:latest", "dimension": 1024}
-        # заведомо несовпадающая 64-символьная hex-сигнатура
-        meta_rows = [{"metadata": {"signature": "0" * 64}}]
-
-        st = DuckDbCacheStore(cache_path="", vector_store_table=read_vector_store_table())
-        _fake_cfg_module(monkeypatch, cfg, emb, meta_rows)
-        with pytest.raises(IndexIntegrityError) as exc:
-            st._check_index_integrity("audits_index")
-        assert exc.value.status == "STALE"
-
-    def test_current_signature_ok(self, monkeypatch):
-        from lib.services.cache_provider_impl import compute_index_signature
-
-        cfg_data = {
-            "table": "audits", "pk": "id",
-            "content_columns": ["content"], "embedding_columns": {"c": "col"},
-            "track_column": "updated_at",
-            "chunk_size": 300, "chunk_overlap": 40, "metric": "inner_product",
-        }
-        cfg = {"audits_index": cfg_data}
-        emb = {"model": "mxbai-embed-large:latest", "dimension": 1024}
-        current_cfg = {
-            "src_table": cfg_data["table"],
-            "pk_column": cfg_data["pk"],
-            "content_cols": cfg_data["content_columns"],
-            "embedding_cols": cfg_data["embedding_columns"],
-            "track_column": cfg_data["track_column"],
-            "embedding_model": emb["model"],
-            "embedding_dimension": emb["dimension"],
-            "chunk_size": cfg_data["chunk_size"],
-            "chunk_overlap": cfg_data["chunk_overlap"],
-            "metric": cfg_data["metric"],
-        }
-        sig = compute_index_signature(current_cfg)
-        meta_rows = [{"metadata": {"signature": sig}}]
-
-        st = DuckDbCacheStore(cache_path="", vector_store_table=read_vector_store_table())
-        _fake_cfg_module(monkeypatch, cfg, emb, meta_rows)
-        # CURRENT → не бросает
-        st._check_index_integrity("audits_index")
-
-    def test_invalid_legacy_no_signature_skips(self, monkeypatch):
-        cfg = {"audits_index": {
-            "table": "audits", "pk": "id",
-            "content_columns": ["content"], "embedding_columns": {"c": "col"},
-            "track_column": "updated_at",
-        }}
-        emb = {"model": "mxbai-embed-large:latest", "dimension": 1024}
-        # legacy-индекс без signature в metadata → проверка пропускается
-        meta_rows = [{"metadata": {}}]
-
-        st = DuckDbCacheStore(cache_path="", vector_store_table=read_vector_store_table())
-        _fake_cfg_module(monkeypatch, cfg, emb, meta_rows)
-        st._check_index_integrity("audits_index")
+# После change ``remove-vector-index-store`` метод
+# ``DuckDbCacheStore._check_index_integrity`` удалён: persisted
+# signature в PG-таблице больше нет; сигнатура вычисляется inline в
+# ``cache_provider_impl._check_index_signature`` и всегда совпадает с
+# текущим конфигом. Класс ``TestIndexIntegrity`` удалён вместе с
+# тестами на устаревшее поведение.

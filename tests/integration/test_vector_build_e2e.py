@@ -1,19 +1,24 @@
-"""Integration-тест вертикального среза векторной подсистемы (P0-e2e).
+"""Integration-тест вертикального среза векторной подсистемы (e2e).
 
-Покрывает полный lifecycle:
+После change ``remove-vector-index-store`` покрывает полный lifecycle:
 
-    raw vectors (PG) → `rebuild_and_store_index` → FAISS (cosine) →
-    `agent_vector_index_store` (blob + signature) → НОВЫЙ провайдер
-    (симуляция restart) → `_load_index` (reload из store) → `search_vector`
-    → корректный top-hit с score == cosine(query, doc).
+    raw vectors (``<storage_table>``) → DuckDB-снапшот →
+    ``provider.preload_indexes`` → in-memory ``IndexFlatIP`` →
+    ``search_vector`` → корректный top-hit с score == cosine(query, doc).
 
-Также верифицирует P0-2 (нормализация L2 для cosine): после сборки косинус
-запроса к эталонному документу равен ~1.0, а не raw-IP (длина вектора²).
+Также верифицирует:
+  * P0-2 (нормализация L2 для cosine): после сборки косинус запроса
+    к эталонному документу равен ~1.0, а не raw-IP (длина вектора²);
+  * холодный miss без прогрева → ошибка ``_search_error`` (без ленивой
+    сборки FAISS, как требует спека «Preload indexes at startup»);
+  * payload (``content``/``row``) подтягивается per-hit через DuckDB SELECT,
+    а не из сериализованного индекса.
 
-PostgreSQL НЕ требуется: ``utils.db.fetch/execute`` замоканы in-memory
-фейком PG-store. ``get_embedding`` — детерминированный вектор.
+PostgreSQL НЕ требуется: ``utils.db.fetch/execute`` замоканы
+in-memory фейком PG-store. ``get_embedding`` — детерминированный вектор.
+DuckDB-коннекшен провайдера подменяется in-memory DuckDB-инстансом.
 
-Пропускается автоматически, если faiss/numpy недоступны.
+Пропускается автоматически, если faiss/numpy/duckdb недоступны.
 """
 from __future__ import annotations
 
@@ -23,11 +28,11 @@ import pytest
 
 faiss = pytest.importorskip("faiss")
 np = pytest.importorskip("numpy")
+duckdb = pytest.importorskip("duckdb")
 
 
 _EMBED_DIM = 4
-_VECTOR_TABLE = "oarb.audit_vectors"
-_STORE_TABLE = "public.agent_vector_index_store"
+_VECTOR_TABLE = "audit_vectors_test_e2e"
 _INDEX_NAME = "audits_index"
 
 
@@ -49,55 +54,57 @@ def _emb(text: str) -> list[float]:
     return _vec(0.0, 1.0, 0.0, 0.0)
 
 
-class _FakePG:
-    """In-memory имитация PostgreSQL: store + векторы.
+def _make_duckdb_with_vectors(records: list[dict]) -> "duckdb.DuckDBPyConnection":
+    """In-memory DuckDB с таблицей ``_VECTOR_TABLE`` и данными.
 
-    Конфиг индексов код не читает из PG (читается из project.json через
-    ``read_vector_index_config``, который здесь monkey-patched).
+    Колонки совпадают со схемой ``oarb.audit_vectors``.
     """
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        f'CREATE TABLE {_VECTOR_TABLE} ('
+        f'  id INTEGER,'
+        f'  source TEXT,'
+        f'  content TEXT,'
+        f'  search_text TEXT,'
+        f'  "table" TEXT,'
+        f'  pk_value TEXT,'
+        f'  chunk_index INTEGER,'
+        f'  chunk_count INTEGER,'
+        f'  row_data JSON,'
+        f'  embedding REAL[{_EMBED_DIM}]'
+        f')'
+    )
+    for i, r in enumerate(records):
+        conn.execute(
+            f'INSERT INTO {_VECTOR_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+                i,
+                r["source"],
+                r["content"],
+                r["search_text"],
+                r["table"],
+                str(r["pk_value"]),
+                r["chunk_index"],
+                r["chunk_count"],
+                json.dumps(r["row_data"]),
+                r["embedding"],
+            ],
+        )
+    return conn
+
+
+class _FakePG:
+    """In-memory имитация PostgreSQL для legacy-путей (должны быть no-op)."""
 
     def __init__(self) -> None:
-        self.store: dict[str, dict] = {}
-        self.vector_rows: list[dict] = []
         self.executed: list[tuple[str, tuple]] = []
 
     def fetch(self, sql: str, *args) -> list[dict]:
-        s = sql.strip()
-        lower = s.lower()
-        if "index_binary" in lower and "agent_vector_index_store" in lower:
-            entry = self.store.get(args[0]) if args else None
-            if entry:
-                return [{"index_binary": entry["index_binary"], "metadata": entry["metadata"]}]
-            return []
-        if lower.startswith("select 1 from"):
-            return [{"?column?": 1}] if self.store.get(args[0]) else []
-        if lower.startswith("select id, source, content"):
-            return [dict(r) for r in self.vector_rows]
         return []
 
     def execute(self, sql: str, *args) -> str:
-        s = sql.strip()
-        self.executed.append((s, args))
-        lower = s.lower()
-        if "agent_vector_index_store" in lower and (lower.startswith("update") or lower.startswith("insert")):
-            blob, meta_json, dim, ntotal, source = self._unpack(lower, args)
-            self.store[source] = {
-                "index_binary": blob,
-                "metadata": meta_json,
-                "dimension": dim,
-                "vector_count": ntotal,
-            }
-            return "UPDATE 1" if lower.startswith("update") else "INSERT 1"
+        self.executed.append((sql.strip(), args))
         return "OK"
-
-    @staticmethod
-    def _unpack(lower: str, args: tuple):
-        # INSERT: (source, blob, meta_json, dim, ntotal) | UPDATE: (blob, meta_json, dim, ntotal, source)
-        if lower.startswith("insert"):
-            source, blob, meta_json, dim, ntotal = args
-        else:
-            blob, meta_json, dim, ntotal, source = args
-        return blob, meta_json, dim, ntotal, source
 
 
 def _index_cfg(**overrides) -> dict:
@@ -118,20 +125,19 @@ def _index_cfg(**overrides) -> dict:
     return cfg
 
 
-def _patch_impl(monkeypatch, fake: _FakePG):
+def _patch_impl(monkeypatch, fake_pg: _FakePG, duck_conn, index_cfg: dict):
     import utils.db as dbmod
 
     import lib.services.cache_provider_impl as impl
 
-    monkeypatch.setattr(dbmod, "fetch", fake.fetch)
-    monkeypatch.setattr(dbmod, "execute", fake.execute)
-    # Конфиг индексов живёт в project.json (gateway.vector.index.indexes);
-    # ``read_vector_index_config`` monkey-patched детерминированным pythonic-конфигом.
-    def _read_vector_index_config(_cfg) -> dict:
-        return cfg_container["indexes"]
+    monkeypatch.setattr(dbmod, "fetch", fake_pg.fetch)
+    monkeypatch.setattr(dbmod, "execute", fake_pg.execute)
 
-    cfg_container = {"indexes": {_INDEX_NAME: _index_cfg()}}
-    monkeypatch.setattr(impl, "read_vector_index_config", _read_vector_index_config)
+    cfg_container = {"indexes": {_INDEX_NAME: index_cfg}}
+    monkeypatch.setattr(
+        impl, "read_vector_index_config",
+        lambda _cfg: cfg_container["indexes"],
+    )
     monkeypatch.setattr(
         impl, "read_embedding_config",
         lambda: {"model": "mxbai-embed-large:latest", "dimension": _EMBED_DIM},
@@ -139,21 +145,17 @@ def _patch_impl(monkeypatch, fake: _FakePG):
     return impl, cfg_container
 
 
-def _setup_fake(fake: _FakePG) -> None:
-    fake.vector_rows = [
-        {
-            "source": _INDEX_NAME, "content": "Документ A", "search_text": "Документ A",
-            "table": "oarb.audits", "pk_value": 1, "chunk_index": 0, "chunk_count": 1,
-            "row_data": json.dumps({"id": 1, "title": "Документ A"}),
-            "embedding": _vec(1.0, 0.0, 0.0, 0.0),
-        },
-        {
-            "source": _INDEX_NAME, "content": "Документ B", "search_text": "Документ B",
-            "table": "oarb.audits", "pk_value": 2, "chunk_index": 0, "chunk_count": 1,
-            "row_data": json.dumps({"id": 2, "title": "Документ B"}),
-            "embedding": _vec(0.0, 1.0, 0.0, 0.0),
-        },
-    ]
+def _make_provider(monkeypatch, fake_pg: _FakePG, duck_conn, index_cfg: dict):
+    """Создать провайдер с подменёнными зависимостями и DuckDB-коннекшеном."""
+    import lib.services.cache_provider_impl as impl
+
+    impl_, cfg_container = _patch_impl(monkeypatch, fake_pg, duck_conn, index_cfg)
+    provider = impl_.PostgresDuckDbProvider(
+        vector_db_table=_VECTOR_TABLE,
+        vector_indexes={_INDEX_NAME: index_cfg},
+    )
+    provider._conn = duck_conn
+    return provider, cfg_container
 
 
 class TestVectorBuildE2E:
@@ -162,73 +164,70 @@ class TestVectorBuildE2E:
         from lib.utils.duckdb_query import build_faiss_index
 
         idx, meta = build_faiss_index(
-            [{"embedding": _vec(3.0, 4.0, 0.0, 0.0),
-              "source": "s", "table": "t", "pk_value": 1, "content": "x"}],
+            [{
+                "embedding": _vec(3.0, 4.0, 0.0, 0.0),
+                "source": "s", "table": "t", "pk_value": 1,
+            }],
             metric="cosine",
         )
         assert meta["metric"] == "cosine"
         vec = idx.reconstruct(0)
         np.testing.assert_allclose(np.linalg.norm(vec), 1.0, atol=1e-6)
 
-    def test_rebuild_store_reload_search(self, monkeypatch):
-        """Полный vertical slice: build → store → reload (новый провайдер) → search."""
+    def test_preload_then_search_returns_correct_top_hit(self, monkeypatch):
+        """Полный vertical slice: DuckDB → preload_indexes → search_vector."""
         fake = _FakePG()
-        _setup_fake(fake)
-        impl, _ = _patch_impl(monkeypatch, fake)
-        monkeypatch.setattr(impl, "get_embedding", lambda text: _emb(text))
+        records = [
+            {
+                "source": _INDEX_NAME, "content": "Документ A",
+                "search_text": "Документ A", "table": "oarb.audits",
+                "pk_value": 1, "chunk_index": 0, "chunk_count": 1,
+                "row_data": {"id": 1, "title": "Документ A"},
+                "embedding": _vec(1.0, 0.0, 0.0, 0.0),
+            },
+            {
+                "source": _INDEX_NAME, "content": "Документ B",
+                "search_text": "Документ B", "table": "oarb.audits",
+                "pk_value": 2, "chunk_index": 0, "chunk_count": 1,
+                "row_data": {"id": 2, "title": "Документ B"},
+                "embedding": _vec(0.0, 1.0, 0.0, 0.0),
+            },
+        ]
+        conn = _make_duckdb_with_vectors(records)
+        import lib.services.cache_provider_impl as impl
+        impl_, _ = _patch_impl(monkeypatch, fake, conn, _index_cfg())
+        monkeypatch.setattr(impl_, "get_embedding", lambda text: _emb(text))
+        provider, _ = _make_provider(monkeypatch, fake, conn, _index_cfg())
 
-        provider = impl.PostgresDuckDbProvider(
-            vector_db_table=_VECTOR_TABLE,
-            vector_store_table=_STORE_TABLE,
-        )
+        # 1. preload_indexes: DuckDB → in-memory FAISS.
+        loaded = provider.preload_indexes(_VECTOR_TABLE)
+        assert len(loaded) == 1
+        assert loaded[0]["index_name"] == _INDEX_NAME
+        assert loaded[0]["vectors"] == 2
+        assert loaded[0].get("signature_status") == "CURRENT"
 
-        # 1. Build: vectors → FAISS → persist в store.
-        count = provider.rebuild_and_store_index(_INDEX_NAME, _VECTOR_TABLE)
-        assert count == 2
-        assert _INDEX_NAME in fake.store
-        meta_saved = json.loads(fake.store[_INDEX_NAME]["metadata"])
-        assert meta_saved.get("metric") == "cosine"
-        assert meta_saved.get("signature"), "signature должна писаться в store"
-        sig_saved = meta_saved["signature"]
-
-        # 2. "Restart": новый провайдер с чистым кэшем → reload из store.
-        provider2 = impl.PostgresDuckDbProvider(
-            vector_db_table=_VECTOR_TABLE,
-            vector_store_table=_STORE_TABLE,
-        )
-        idx, meta = provider2._load_index("", _INDEX_NAME, _VECTOR_TABLE)
-        assert idx is not None and idx.ntotal == 2
-        assert meta.get("signature") == sig_saved, "blob из store несёт ту же signature"
-        assert meta.get("_signature_status", "CURRENT") == "CURRENT"
-
-        # 3. Search: документ A должен быть top-1, score ≈ cosine.
-        results = provider2.search_vector(
+        # 2. search_vector: документ A должен быть top-1, score ≈ cosine.
+        results = provider.search_vector(
             query="Документ A", index_name=_INDEX_NAME, top_k=1,
         )
         assert len(results) == 1
-        assert results[0].pk_value == 1
+        assert results[0].pk_value in (1, "1")  # TEXT в DuckDB-схеме, int в старых тестах
         assert results[0].score == pytest.approx(1.0, abs=1e-5)
+        assert results[0].content == "Документ A"
+        assert results[0].row == {"id": 1, "title": "Документ A"}
 
-    def test_config_change_detects_stale_on_reload(self, monkeypatch):
-        """Смена chunk_size в конфиге → STALE при reload (но загрузка работает)."""
+    def test_cold_miss_returns_error_no_lazy_build(self, monkeypatch):
+        """Cold miss для непрогретого индекса → ошибка, без ленивой сборки."""
         fake = _FakePG()
-        _setup_fake(fake)
-        impl, cfg_container = _patch_impl(monkeypatch, fake)
-        monkeypatch.setattr(impl, "get_embedding", lambda text: _emb(text))
+        conn = _make_duckdb_with_vectors([])
+        import lib.services.cache_provider_impl as impl
+        impl_, _ = _patch_impl(monkeypatch, fake, conn, _index_cfg())
+        monkeypatch.setattr(impl_, "get_embedding", lambda text: _emb(text))
+        provider, _ = _make_provider(monkeypatch, fake, conn, _index_cfg())
 
-        provider = impl.PostgresDuckDbProvider(
-            vector_db_table=_VECTOR_TABLE,
-            vector_store_table=_STORE_TABLE,
+        # preload_indexes не вызывался → _index_cache пуст.
+        results = provider.search_vector(
+            query="anything", index_name=_INDEX_NAME, top_k=1,
         )
-        provider.rebuild_and_store_index(_INDEX_NAME, _VECTOR_TABLE)
-
-        # Конфиг изменился: chunk_size 500 → 900 (пересборка обязательна).
-        cfg_container["indexes"][_INDEX_NAME]["chunk_size"] = 900
-
-        provider2 = impl.PostgresDuckDbProvider(
-            vector_db_table=_VECTOR_TABLE,
-            vector_store_table=_STORE_TABLE,
-        )
-        idx, meta = provider2._load_index("", _INDEX_NAME, _VECTOR_TABLE)
-        assert idx is not None  # STALE не блокирует загрузку
-        assert meta.get("_signature_status") == "STALE"
+        assert results == []
+        assert provider._search_error is not None

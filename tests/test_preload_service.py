@@ -127,24 +127,6 @@ class TestComputeIndexHealth:
         assert "audits_index" in h["missing"]  # declared but not loaded (например, store не собран)
         assert h["divergence"] is True
 
-    def test_stale_when_signature_mismatch(self) -> None:
-        """Loaded есть, но stored signature НЕ совпадает с текущим cfg."""
-        cfg = _declared()
-        # stored signature другой hex, но длиной 64 → verify_index_signature вернёт STALE.
-        runtime = [_runtime_row(signature="f" * 64)]
-        loaded = [{"index_name": "audits_index", "vectors": 100}]
-        h = compute_index_health(cfg, loaded, runtime)
-        assert h["stale"] == ["audits_index:STALE"]
-        assert h["divergence"] is True
-
-    def test_stale_when_signature_invalid(self) -> None:
-        """Stored metadata без signature → INVALID, попадает в stale."""
-        cfg = _declared()
-        runtime = [_runtime_row(signature=None)]
-        loaded = [{"index_name": "audits_index", "vectors": 100}]
-        h = compute_index_health(cfg, loaded, runtime)
-        assert h["stale"] == ["audits_index:INVALID"]
-
     def test_handles_runtime_none_gracefully(self) -> None:
         """``runtime_rows=None`` (PG недоступна) → orphan/stale пусты, но не raise."""
         cfg = _declared()
@@ -276,18 +258,20 @@ class TestPreloadEmitsHealth:
         from lib.services.cache_provider_impl import compute_index_signature
 
         cfg = _declared()
-        sig = compute_index_signature(cfg["audits_index"])
         store = MagicMock()
         store.is_ready.return_value = True
+        # После change ``remove-vector-index-store`` STALE берётся
+        # из loaded_items[i]["signature_status"] (inline-вычисленный
+        # провайдером при preload). Тест симулирует это явно.
         store.preload_indexes.return_value = [
-            {"index_name": "audits_index", "vectors": 100}
+            {"index_name": "audits_index", "vectors": 100, "signature_status": "STALE"},
         ]
         with patch(
             "lib.services.cache_provider_impl.read_vector_index_config",
             return_value=cfg,
         ), patch(
             "lib.services.cache_provider_impl.list_runtime_vector_indexes",
-            return_value=[_runtime_row(signature="f" * 64)],  # STALE
+            return_value=[_runtime_row()],
         ), patch(
             "workspace.utils.event_log.emit_sync_event"
         ) as ev:

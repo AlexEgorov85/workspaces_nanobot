@@ -203,13 +203,19 @@ class TestIndexSignature:
         stored_sig = compute_index_signature(stored_cfg)
         assert verify_index_signature({"signature": stored_sig}, current_cfg) == "STALE"
 
-    def test_verify_invalid_when_no_signature(self):
+    def test_verify_current_when_no_signature(self):
+        """Без stored signature — CURRENT (новое поведение change remove-vector-index-store).
+
+        Раньше возвращался INVALID (нет signature → «legacy blob»). После
+        change persisted-signature больше нет; сигнатура вычисляется
+        inline при preload и всегда совпадает с текущим конфигом.
+        """
         from lib.services.cache_provider_impl import verify_index_signature
 
-        assert verify_index_signature({}, {"embedding_model": "mxbai"}) == "INVALID"
+        assert verify_index_signature({}, {"embedding_model": "mxbai"}) == "CURRENT"
         assert verify_index_signature(
             {"signature": None}, {"embedding_model": "mxbai"},
-        ) == "INVALID"
+        ) == "CURRENT"
 
     def test_verify_invalid_when_signature_corrupt(self):
         from lib.services.cache_provider_impl import verify_index_signature
@@ -290,10 +296,16 @@ class TestCheckIndexSignatureInProvider:
         ):
             result = provider._check_index_signature("audits_index", stored_meta)
 
-        assert "_signature_status" not in result
-        assert result == stored_meta  # unchanged
+        # После change _check_index_signature ВСЕГДА ставит _signature_status
+        # (для downstream-читателей compute_index_health).
+        assert result["_signature_status"] == "CURRENT"
 
-    def test_check_marks_invalid_when_no_signature_in_meta(self):
+    def test_check_marks_current_when_no_signature_in_meta(self):
+        """Без stored signature — CURRENT (новое поведение change).
+
+        Раньше ставился INVALID. После change persisted-signature нет,
+        поэтому нет данных для проверки → CURRENT.
+        """
         from unittest.mock import patch
 
         from lib.services.cache_provider_impl import PostgresDuckDbProvider
@@ -306,9 +318,7 @@ class TestCheckIndexSignatureInProvider:
         ):
             result = provider._check_index_signature("audits_index", stored_meta)
 
-        assert result["_signature_status"] == "INVALID"
-        assert "legacy" in result["_signature_reason"].lower() or \
-            "missing" in result["_signature_reason"].lower()
+        assert result["_signature_status"] == "CURRENT"
 
     def test_check_returns_meta_unchanged_when_no_config_in_db(self):
         """Если в конфиге (``gateway.vector.index.indexes``) нет такого

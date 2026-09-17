@@ -150,30 +150,10 @@ class TestMultiSkill:
             assert skill_config.get_cli_config("office_files")["default_mode"] == "auto"
 
 
-class TestVectorStoreTable:
-    def test_default_from_settings(self) -> None:
-        """Без явного signature_table — дефолт runtime-инфраструктуры."""
-        from lib.core import skill_config
-        from lib.services.cache_provider_impl import _DEFAULT_VECTOR_INDEX_STORE_TABLE
-
-        assert (
-            skill_config.get_vector_store_table()
-            == _DEFAULT_VECTOR_INDEX_STORE_TABLE
-        )
-
-    def test_overridden_via_settings(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Если в gateway.vector.index.signature_table задано имя — оно побеждает."""
-        import config as _config
-        from lib.core import skill_config
-
-        monkeypatch.setattr(
-            _config, "SETTINGS",
-            {"gateway": {"vector": {"index": {"signature_table": "public.custom_index_store"}}}},
-            raising=False,
-        )
-        assert (
-            skill_config.get_vector_store_table() == "public.custom_index_store"
-        )
+# После change ``remove-vector-index-store`` функция
+# ``skill_config.get_vector_store_table`` удалена (persisted FAISS-кеш
+# больше не существует). Класс ``TestVectorStoreTable`` удалён вместе с
+# ней.
 
 
 class TestVectorIndexConfigFromSettings:
