@@ -593,30 +593,40 @@ def _initialize_settings(profile: str) -> None:
 
     Raises:
         ConfigurationError:
-            * если ``profile`` не из whitelist ``{"prod", "test"}``;
             * если ``_initialize_settings`` уже был вызван в этом процессе
-              (любое значение второго аргумента → ``"already initialized"``).
+              — **сначала проверяется lifecycle state**, и только потом
+              whitelist. Любое значение второго аргумента →
+              ``"already initialized"`` (даже невалидный профиль вроде
+              ``"dev"`` не пройдёт через эту проверку, чтобы не маскировать
+              факт уже-инициализированного state — defensive programming);
+            * если ``profile`` не из whitelist ``{"prod", "test"}``
+              (выполняется ТОЛЬКО на первом вызове, до публикации SETTINGS);
+            * если ``SETTINGS`` proxy corrupted (неожиданный тип
+              — не должно случаться в runtime, диагностическая защита).
 
     Поведение при ошибке валидации merge/resolver
     (``profiles/<mode>.jsonc`` отсутствует, runtime-таблицы не
     соответствуют и т.п.) — также ``ConfigurationError`` (пробрасывается
     из ``resolve_application_config``), runtime-импорты не выполняются.
     """
-    if not isinstance(profile, str) or profile not in _SUPPORTED_PROFILES:
-        raise ConfigurationError(
-            f"profile={profile!r} is not supported "
-            f"(allowed: {', '.join(sorted(_SUPPORTED_PROFILES))})"
-        )
-
     settings = SETTINGS
     if not isinstance(settings, _LazySettings):
         raise ConfigurationError(
             "SETTINGS proxy corrupted: expected _LazySettings instance"
         )
     if settings._inner_dict is not None:
+        # Lifecycle wins: даже невалидный профиль ("dev", "foo bar")
+        # даёт "already initialized", а не "is not supported". Это
+        # предотвращает маскировку уже-инициализированного state за
+        # ошибкой whitelist. См. spec § D.1 + tasks.md D.3.
         raise ConfigurationError(
             "SETTINGS already initialized: _initialize_settings(profile) "
             "may be called only once per process"
+        )
+    if not isinstance(profile, str) or profile not in _SUPPORTED_PROFILES:
+        raise ConfigurationError(
+            f"profile={profile!r} is not supported "
+            f"(allowed: {', '.join(sorted(_SUPPORTED_PROFILES))})"
         )
 
     cfg = resolve_application_config(profile)

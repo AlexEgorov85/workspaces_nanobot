@@ -80,12 +80,48 @@ def test_settings_uninitialized_raises_on_getitem() -> None:
 
 
 def test_double_init_fails() -> None:
-    """Повторный ``_initialize_settings`` — ConfigurationError."""
+    """Повторный ``_initialize_settings`` — ConfigurationError.
+
+    Дважды вызывается с валидными профилями: второй вызов поднимает
+    ``already initialized``, а не ``is not supported`` (whitelist
+    даже не проверяется — lifecycle wins).
+    """
     if not config.is_settings_initialized():
         config._initialize_settings(profile="test")
     with pytest.raises(ConfigurationError) as excinfo:
         config._initialize_settings(profile="prod")
     assert "already initialized" in str(excinfo.value).lower()
+
+
+def test_double_init_with_invalid_profile_still_says_already_initialized() -> None:
+    """P0 spec-контракт: lifecycle check ПЕРЕД whitelist.
+
+    Если ``_initialize_settings`` уже вызван — второй вызов с **любым**
+    значением (включая невалидное ``"dev"``) даёт ``already initialized``,
+    а НЕ ``is not supported``. Это гарантирует, что уже-инициализированный
+    state не маскируется за ошибкой whitelist.
+
+    Тест изолирован subprocess'ом — иначе повторный init в одном
+    pytest-сеансе бросал бы ``already initialized`` ещё до проверки whitelist.
+    """
+    script = (
+        "import config\n"
+        "config._initialize_settings('prod')\n"
+        "try:\n"
+        "    config._initialize_settings('dev')\n"
+        "    print('UNEXPECTED_OK')\n"
+        "except config.ConfigurationError as e:\n"
+        "    print('msg:', str(e))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "already initialized" in result.stdout
+    assert "UNEXPECTED_OK" not in result.stdout
+    # Whitelist НЕ должен был сработать первым:
+    assert "is not supported" not in result.stdout
 
 
 def test_invalid_profile_rejected() -> None:
