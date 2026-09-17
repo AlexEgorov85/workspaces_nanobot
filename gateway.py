@@ -122,10 +122,13 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     # 3. Smoke-режим: печатает баннер и runtime-таблицу, выходит сразу.
     #    Позволяет integration-тестам проверить конфигурацию без подъёма
     #    postgres channel/websocket listener/full event loop.
-    if args.smoke:
-        from lib.utils.project_version import project_version
-        from nanobot.cli.commands import __logo__, __version__
+    # Импорты — выше ``if args.smoke:`` чтобы избежать
+    # UnboundLocalError (Python видит имя в теле функции и считает
+    # его локальным; ветка else не имеет своего импорта).
+    from lib.utils.project_version import project_version
+    from nanobot.cli.commands import __logo__, __version__
 
+    if args.smoke:
         runtime_table = ctx.settings["logging"]["db"]["table_name"]
         console.print(
             f"{__logo__} nanobot gateway smoke · "

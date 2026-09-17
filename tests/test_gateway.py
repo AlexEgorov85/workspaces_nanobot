@@ -137,11 +137,19 @@ def _setup_fake_modules():
     cfg.SETTINGS = settings
     cfg.ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
     # После Phase B gateway.py делает ``from config import
-    # ConfigurationError`` на module-level. Подменённый модуль
-    # ``config`` должен предоставлять этот символ, иначе import
-    # падает до входа в module body.
+    # ConfigurationError`` на module-level и вызывает
+    # ``_initialize_settings(profile)`` в entrypoint. Подменённый
+    # модуль ``config`` должен предоставлять оба символа, иначе import
+    # или entrypoint падают.
     from config import ConfigurationError as _real_CE
     cfg.ConfigurationError = _real_CE
+    # Используем no-op вместо реального ``_initialize_settings``:
+    # autouse-fixture в tests/conftest.py уже инициализирует
+    # глобальный proxy; реальный init в entrypoint бросил бы
+    # ``already initialized``. Тесты, которым нужен реальный lifecycle
+    # (acceptance-тесты ``test_profile_lifecycle.py``), используют
+    # subprocess-изоляцию и не подвержены этой проблеме.
+    cfg._initialize_settings = MagicMock()
     sys.modules["config"] = cfg
 
     # workspace
@@ -158,6 +166,16 @@ def _setup_fake_modules():
     utils_mod.db = utils_db
     sys.modules["utils"] = utils_mod
     sys.modules["utils.db"] = utils_db
+
+    # utils.media — ``db_logging_bus`` импортирует
+    # ``from utils.media import serialize as media_serialize`` на
+    # module-level. Без этого модуль utils.media не существует
+    # (utils — голый ModuleType без __path__, ``utils.media`` будет
+    # raise ``ModuleNotFoundError: 'utils' is not a package``).
+    utils_media = types.ModuleType("utils.media")
+    utils_media.serialize = MagicMock(return_value=None)
+    utils_mod.media = utils_media
+    sys.modules["utils.media"] = utils_media
 
 
 def _get_ctx():
@@ -190,7 +208,23 @@ class TestMain:
         AgentLoop.from_config.return_value.run = AsyncMock()
         _setup_channels()
 
-        with patch("gateway.GatewayRunner") as MockRunner:
+        # После Phase B ``GatewayRunner`` импортируется lazy внутри
+        # ``_entrypoint_main`` (не на module-level), поэтому patch
+        # должен ссылаться на module, где фактически происходит
+        # использование (``lib.lifecycle.gateway_runner``), а не на
+        # ``gateway.GatewayRunner`` (которого на module-level нет).
+        # ``--profile=test`` нужен entrypoint'у (Phase B сделал его
+        # обязательным).
+        #
+        # Также мокаем ``RuntimePatcher.apply_all`` — он пытается
+        # patch'ить ``workspace/tools/*.py``, которые импортируют
+        # ``nanobot.agent.tools.base`` (не существует в mock setup);
+        # этот тест проверяет только ``GatewayRunner.run_forever``,
+        # а не логику runtime patching.
+        from lib.services.runtime_patcher import RuntimePatcher
+        with patch("sys.argv", ["gateway.py", "--profile=test"]), \
+             patch("lib.lifecycle.gateway_runner.GatewayRunner") as MockRunner, \
+             patch.object(RuntimePatcher, "apply_all", return_value=MagicMock(failed=[])):
             MockRunner.return_value.run_forever = MagicMock()
             from gateway import main
 

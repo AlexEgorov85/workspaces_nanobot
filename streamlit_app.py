@@ -90,7 +90,7 @@ if _workspace not in sys.path:
 from utils.db import configure, fetch, fetchone, execute
 from utils.session_file_store import SessionFileStore
 from utils.jsonb import decode_jsonb as _decode_jsonb
-from utils.jsonb import decode_media_list as _decode_media_list
+from utils.jsonb import decode_json_list as _decode_media_list
 from utils.media import serialize as _media_serialize
 from utils.media import read_for_ui as _media_read_for_ui
 from utils.media import entry_from_data_url as _media_entry_from_data_url

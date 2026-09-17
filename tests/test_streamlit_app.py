@@ -21,6 +21,12 @@ if _user_site not in sys.path:
 @pytest.fixture(autouse=True)
 def mock_all():
     """Mock streamlit, utils.db, and config before importing streamlit_app."""
+    # После Phase B entrypoint ``streamlit_app.py`` парсит ``--profile`` из
+    # ``sys.argv`` на module-level. В тестах нет реального ``streamlit run``,
+    # поэтому подсовываем ``--profile=test`` явно, чтобы module-level
+    # validation прошёл (тесты сами не интересуются profile).
+    _original_argv = sys.argv
+    sys.argv = ["streamlit_app.py", "--profile=test"]
     with patch.dict("sys.modules"):
         import types
 
@@ -48,6 +54,18 @@ def mock_all():
 
         cfg = types.ModuleType("config")
         cfg.SETTINGS = MockSettings()
+        # После Phase B streamlit_app.py импортирует ``ConfigurationError``
+        # и вызывает ``_initialize_settings(profile=...)`` на module-level
+        # (через guard ``globals()`` для защиты от ``st.rerun()`` re-execution).
+        # Тесты используют свой mock — нужно дать им:
+        #   1. ``ConfigurationError`` для ``from config import ConfigurationError``;
+        #   2. ``_initialize_settings`` no-op (mock — не трогаем реальный
+        #      lifecycle, потому что autouse в conftest уже инициализировал
+        #      настоящий proxy, и реальный _initialize_settings бросил бы
+        #      ``already initialized``).
+        from config import ConfigurationError as _real_CE
+        cfg.ConfigurationError = _real_CE
+        cfg._initialize_settings = MagicMock()
         sys.modules["config"] = cfg
 
         utils_db = types.ModuleType("utils.db")
@@ -72,6 +90,7 @@ def mock_all():
             "streamlit_app": streamlit_app,
             "cfg": cfg,
         }
+        sys.argv = _original_argv
 
 
 # ===================================================================

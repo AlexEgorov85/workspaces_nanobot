@@ -187,7 +187,7 @@ class TestLoadEnv:
 
     def test_section_headers(self):
         content = (
-            "# database\n"
+            "# database:\n"
             "HOST=localhost\n"
             "PORT=5432\n"
             "# logging:level\n"
@@ -205,16 +205,20 @@ class TestLoadEnv:
             Path(tmp).unlink(missing_ok=True)
 
     def test_comment_lines_ignored(self):
-        # lines starting with # and no = are treated as headers (so they set prefix)
-        # lines with # and = are treated as comments and skipped
+        # Lines starting with ``#`` без ``=`` и без ``:`` — обычные
+        # комментарии (после CHANGELOG-фикса ``load_env``: только
+        # ``# section:`` с двоеточием считается заголовком секции).
+        # Линии с ``#`` и ``=`` — комментарии и игнорируются.
         content = "# this is a section header\nKEY=val\n#=another comment\n"
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False, suffix=".env") as f:
             f.write(content)
             tmp = f.name
         try:
             result = load_env(tmp)
-            # "this is a section header" becomes a single key (no colon to split on)
-            assert result["this is a section header"]["KEY"] == "val"
+            # ``# this is a section header`` — обычный комментарий,
+            # KEY попадает в корень.
+            assert result["KEY"] == "val"
+            assert "this is a section header" not in result
         finally:
             Path(tmp).unlink(missing_ok=True)
 
