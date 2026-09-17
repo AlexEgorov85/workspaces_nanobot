@@ -85,30 +85,31 @@ default.
   overlay applied) before `ApplicationContext.create()` is called
   and before any channel, service, or AgentLoop construction begins
 
-#### Scenario: Environment variables do not influence resolution
+#### Scenario: Environment variables do not participate in profile resolution
 
-- **WHEN** any environment variable that is not part of the
-  application entrypoint contract is set in the process environment
+- **WHEN** any environment variable is set in the process environment
 - **AND WHEN** the application entrypoint is invoked with
   `--profile=test`
 - **THEN** the resolved profile SHALL be `test`
-- **AND THEN** the unknown environment variable SHALL have no
-  effect on resolution, on the constructed `SETTINGS`, on the
-  runtime configuration, or on any subprocess
+- **AND THEN** the environment variable SHALL have no effect
+  on **profile resolution** specifically
+- **AND THIS REQUIREMENT does not constrain** other aspects of
+  `SETTINGS` (non-profile configuration sources are outside this
+  change's scope)
 
 ### Requirement: Profile surfaced for infrastructure use
 
-The system SHALL expose the resolved profile as part of `SETTINGS`
-under the **mapping access path** `SETTINGS["profile"]`. This is
-the canonical access path for new and modified code.
-The compatibility mechanism `_LazySettings.__getattr__` MAY
-continue to expose `SETTINGS.<attr>` for existing consumers of
-generic attribute access on the configuration tree, but the
-profile itself SHALL NOT be exposed via attribute access on
-`SETTINGS` (no `SETTINGS.profile`). The exposed profile value
-SHALL reflect the CLI argument that was passed to
-`_initialize_settings`, not any value derived from environment
-variables or implicit defaults.
+The system SHALL expose the resolved profile as part of `SETTINGS`.
+The canonical access path for **new and modified code** is the
+mapping access `SETTINGS["profile"]`. The compatibility
+mechanism `_LazySettings.__getattr__` continues to expose
+attribute access for existing consumers of generic attr access
+on the configuration tree; this MAY include `SETTINGS.profile`
+when `_inner_dict["profile"]` exists, since generic attr passthrough
+is part of the proxy's documented contract for backward
+compatibility. The exposed profile value SHALL reflect the CLI
+argument that was passed to `_initialize_settings`, not any value
+derived from environment variables or implicit defaults.
 
 #### Scenario: Infrastructure reads profile
 
@@ -266,25 +267,6 @@ failure mode where the banner said `prod` but the runtime used
 - **AND THEN** the banner SHALL also reflect `prod`
 - **AND THEN** both indicators SHALL agree
 
-## REMOVED Requirements
-
-### Requirement: Profile resolved at config load via environment fallback
-**Reason**: The legacy contract allowed the previously-named
-environment variable (referred to in older deployment descriptors)
-to set the active profile silently when CLI `--profile` was absent.
-This created duplication of source of truth and a silent failure
-mode where `--profile=prod` after a defaulted environment produced
-a banner that did not match runtime behaviour.
-**Migration**: Replace any usage of that legacy env var with
-explicit `--profile=<value>` argument passed to the application
-entrypoint command. This applies to `docker-compose.yml`, `k8s`
-manifests, `systemd` units, GitHub Actions jobs, and any other
-deployment descriptors. Code that currently relies on env-fallback
-(most prominently the module-level `SETTINGS` build in
-`config.py:517-518`) is replaced by explicit
-`config._initialize_settings(profile=...)` called from each
-application entrypoint before any other runtime import.
-
 ### Requirement: Profile is passed to application subprocesses only through --profile
 
 For every subprocess spawned by application runtime that is itself
@@ -332,3 +314,22 @@ the error and initialization contract is identical.
   is invoked with `--profile=<unsupported>`
 - **THEN** each SHALL raise `ConfigurationError("--profile=<v> is not supported (allowed: prod, test)")`
 - **AND THEN** each SHALL exit the process with status code 2
+
+## REMOVED Requirements
+
+### Requirement: Profile resolved at config load via environment fallback
+**Reason**: The legacy contract allowed the previously-named
+environment variable (referred to in older deployment descriptors)
+to set the active profile silently when CLI `--profile` was absent.
+This created duplication of source of truth and a silent failure
+mode where `--profile=prod` after a defaulted environment produced
+a banner that did not match runtime behaviour.
+**Migration**: Replace any usage of that legacy env var with
+explicit `--profile=<value>` argument passed to the application
+entrypoint command. This applies to `docker-compose.yml`, `k8s`
+manifests, `systemd` units, GitHub Actions jobs, and any other
+deployment descriptors. Code that currently relies on env-fallback
+(most prominently the module-level `SETTINGS` build in
+`config.py:517-518`) is replaced by explicit
+`config._initialize_settings(profile=...)` called from each
+application entrypoint before any other runtime import.

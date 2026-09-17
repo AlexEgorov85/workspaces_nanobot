@@ -19,11 +19,16 @@ secrets) не выполняются — это видно по отсутств
 ### A.3 Реализовать `_initialize_settings(profile)` и `_LazySettings`
 
 - `_initialize_settings(profile: str) -> None`:
-  - проверяет `profile in {"prod", "test"}` → иначе `ConfigurationError`;
-  - проверяет, что `_inner_dict` ещё не заполнен → иначе
-    `ConfigurationError("SETTINGS already initialized")`;
-  - вызывает `resolve_application_config(profile=profile)` и
-    сохраняет результат в `_LazySettings._inner_dict`;
+  - **первая проверка — lifecycle state:** если `_inner_dict` уже
+    заполнен → `ConfigurationError("SETTINGS already initialized")`
+    (это вызывается при ЛЮБОМ втором вызове, независимо от значения
+    profile, согласно spec «second call with any value»);
+  - **вторая проверка — whitelist:** если `profile not in {"prod",
+    "test"}` → `ConfigurationError("profile='<value>' is not
+    supported (allowed: prod, test)")`;
+  - только после обеих проверок успешно — вызвать
+    `resolve_application_config(profile=profile)` и сохранить
+    результат в `_LazySettings._inner_dict`;
   - **не возвращает значение** (`-> None`). Результат доступен только
     через `SETTINGS` после успешного вызова (side-effect publishing).
 - `_LazySettings`:
@@ -243,16 +248,31 @@ Subprocess-вызовы entrypoints, проверяющие реальное п�
   в лог → parent читает лог и проверяет, что
   `--profile=prod` присутствует.
 
-### D.5 Mock-переделка `test_application_context.py:110-127`
+### D.5 Тесты `ApplicationContext` без mock на `_initialize_settings`
 
-Переписать mocks: вместо `_resolve_mode` / `resolve_application_config`
-— mock `_initialize_settings`. Никакого return value у
-`_initialize_settings(profile)` не требуется (функция только
-публикует `_LazySettings._inner_dict` через site-effect);
-mock-стратегия: `mock.patch("config._initialize_settings")`
-без `return_value`, после вызова мока — тест проверяет, что
-`config.SETTINGS["logging"]` (и т.п.) стал доступен (т.е. lazy
-proxy инициализирован). Diff ≤ 30 строк.
+Тесты `ApplicationContext.create()` НЕ мокают `_initialize_settings`.
+`_initialize_settings` — это lifecycle-gate, а не функция с return
+value; mock на неё либо не делает ничего полезного (тогда
+`SETTINGS` остаётся uninitialized и `ApplicationContext` падает
+на `ConfigurationError`), либо пытается воспроизвести side-effect,
+что эквивалентно вызову реальной функции. Поэтому mock тут —
+антипаттерн.
+
+Правильная стратегия:
+
+1. Тест **явно** вызывает `config._initialize_settings(profile)`
+   перед `ApplicationContext.create()` (или в `setup`-фикстуре).
+2. Если тесту нужно проверить «что `ApplicationContext.create()`
+   вызвал `_initialize_settings`», это уже не нужно —
+   `ApplicationContext.create()` НЕ вызывает `_initialize_settings`
+   (lifecycle-gate был вызван раньше, entrypoint'ом); он читает
+   уже опубликованный `SETTINGS`. Mock на отсутствующий вызов
+   бесполезен.
+3. Старые mock'и (`_resolve_mode` / `resolve_application_config`)
+   удаляются.
+
+Diff по сути сводится к **удалению** mock'ов (≤ 30 строк
+negative-diff). Никаких новых mock'ов не требуется.
 
 ### D.6 Полный прогон
 
