@@ -210,6 +210,18 @@ Whitelist-валидация встраивается в `_initialize_settings(p
 `_initialize_settings`) остаётся, как и было заявлено в спецификации,
 но без отдельной функции `_resolve_mode`.
 
+**Сигнатура `_initialize_settings(profile)`:** функция НЕ возвращает
+значение (`-> None`). Результат initialization доступен **только**
+через `SETTINGS` после успешного вызова. Это явный выбор архитектуры:
+«функция публикует состояние» (side-effect на `_LazySettings._inner_dict`),
+а не «функция возвращает configuration в caller». Caller'у не нужно
+проверять return value; успех = _initialize_settings не бросил
+`ConfigurationError`; ошибка = бросил. Это контракт, который
+используется всеми entrypoint'ами и тестами. Mock-стратегия для
+тестов — `mock.patch("config._initialize_settings")` БЕЗ
+`return_value`; после мока проверяется что `config.SETTINGS`
+стал доступен через lazy proxy.
+
 Соответственно, `_ACTIVE_PROFILE` module-level global тоже
 удаляется (он привязан к `_resolve_mode`).
 
@@ -282,22 +294,31 @@ if __name__ == "__main__":
 `streamlit run <file>.py`) запускает startup lifecycle. Это
 контракт **application entrypoint**, не контракт `import`-statement.
 
-`gateway`, `cli_agent`, `streamlit_app` — application entrypoints, не
-модули со side-effects на import. `from gateway import something`
-или `python -m gateway` НЕ должны стартовать application; только
-**executable invocation** (как `python <file>.py` или
-`streamlit run <file>.py`) запускает startup lifecycle. Это контракт
-**application entrypoint**, не контракт `import`-statement.
-
 Для `streamlit_app.py` блок `if __name__ == "__main__":` НЕ работает
 (Streamlit-run сам решает, что ре-выполнять, и `__name__` не равен
 `"__main__"` при rerun). Поэтому в `streamlit_app.py` логика инициализации
 профиля выполняется **на module-level, выше** существующих импортов,
 без `if __name__ == "__main__":` обёртки — это согласуется с тем,
 что Streamlit кеширует модуль в `sys.modules` и не переимпортирует
-его на `st.rerun()`. Эффект тот же: `import streamlit_app` где-то ещё
-**не** триггерит startup, потому что только streamlit-run знает, как
-выполнить такой импорт с правильным `sys.argv` после `--`.
+его на `st.rerun()`.
+
+Это **by design**: для `streamlit_app.py` не гарантируется, что
+`import streamlit_app` (из других модулей, тестов, или REPL) НЕ
+триггерит module-level side effects, потому что Streamlit-run
+— единственный корректный entrypoint для этого файла.
+`gateway` и `cli_agent` эту гарантию предоставляют через `if __name__ == "__main__":`,
+`streamlit_app` — нет, потому что Streamlit этого не позволяет.
+
+Контракт приложения таков: `streamlit_app.py` запускается
+**только** через `streamlit run streamlit_app.py -- --profile=<v>`;
+другие формы invocation не являются частью application contract.
+Любое использование `streamlit_app.py` вне `streamlit run` —
+unsupported scenario, и наличие module-level initialization
+в этом случае семантически не определено. Если в будущем
+потребуется импортировать `streamlit_app` из тестов или
+других модулей без side effects, это отдельная задача
+(введение helper-модуля, вынос initialization в factory и т.п.) —
+НЕ часть данного OpenSpec change.
 
 ### Decision 3: Whitelist профилей и валидация на старте
 

@@ -100,11 +100,15 @@ default.
 
 The system SHALL expose the resolved profile as part of `SETTINGS`
 under the **mapping access path** `SETTINGS["profile"]`. This is
-the canonical access path. The system SHALL NOT expose the profile
-through any other attribute (`SETTINGS.profile`, `SETTINGS.get("profile")`
-without default, or other forms). The exposed profile value SHALL
-reflect the CLI argument that was passed to `_initialize_settings`,
-not any value derived from environment variables or implicit defaults.
+the canonical access path for new and modified code.
+The compatibility mechanism `_LazySettings.__getattr__` MAY
+continue to expose `SETTINGS.<attr>` for existing consumers of
+generic attribute access on the configuration tree, but the
+profile itself SHALL NOT be exposed via attribute access on
+`SETTINGS` (no `SETTINGS.profile`). The exposed profile value
+SHALL reflect the CLI argument that was passed to
+`_initialize_settings`, not any value derived from environment
+variables or implicit defaults.
 
 #### Scenario: Infrastructure reads profile
 
@@ -280,8 +284,6 @@ deployment descriptors. Code that currently relies on env-fallback
 `config.py:517-518`) is replaced by explicit
 `config._initialize_settings(profile=...)` called from each
 application entrypoint before any other runtime import.
-
-## ADDED Requirements
 
 ### Requirement: Profile is passed to application subprocesses only through --profile
 

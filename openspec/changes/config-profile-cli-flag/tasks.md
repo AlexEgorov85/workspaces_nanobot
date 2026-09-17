@@ -18,12 +18,14 @@ secrets) не выполняются — это видно по отсутств
 
 ### A.3 Реализовать `_initialize_settings(profile)` и `_LazySettings`
 
-- `_initialize_settings(profile)`:
+- `_initialize_settings(profile: str) -> None`:
   - проверяет `profile in {"prod", "test"}` → иначе `ConfigurationError`;
   - проверяет, что `_inner_dict` ещё не заполнен → иначе
     `ConfigurationError("SETTINGS already initialized")`;
   - вызывает `resolve_application_config(profile=profile)` и
-    сохраняет результат в `_LazySettings._inner_dict`.
+    сохраняет результат в `_LazySettings._inner_dict`;
+  - **не возвращает значение** (`-> None`). Результат доступен только
+    через `SETTINGS` после успешного вызова (side-effect publishing).
 - `_LazySettings`:
   - UNINITIALIZED state (initial): `__getitem__`, `__getattr__`,
     `.get()` бросают `ConfigurationError("SETTINGS not initialized:
@@ -194,14 +196,20 @@ Subprocess-вызовы entrypoints, проверяющие реальное п�
   не только баннер).
 - `test_gateway_profile_comes_only_from_cli`:
   `python gateway.py --profile=prod` с произвольным набором env
-  vars в parent (включая устаревшие deployment-имена, любые
-  unrelated vars и т.п.) →
+  vars в parent (любые unrelated vars) →
   `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
   (prod); `SETTINGS["profile"] == "prod"`; баннер говорит `prod`.
   Тест проверяет архитектурный контракт «environment не
   используется для передачи профиля», без ссылки на конкретные
   исторические имена.
-- `test_cli_agent_*`: аналогичные 4 кейса для `cli_agent.py`.
+- `test_cli_agent_happy_path`: `python cli_agent.py --profile=prod`
+  → `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
+  (prod); `SETTINGS["profile"] == "prod"`. Один happy path
+  подтверждает, что `cli_agent.py` использует тот же lifecycle
+  и тот же resolved configuration, что и `gateway.py`; остальные
+  edge cases (no-profile, invalid-profile, exit-2) одинаковы
+  для всех entrypoint'ов благодаря общему контракту и
+  покрываются на gateway.
 
 ### D.3 Streamlit invocation tests
 
@@ -238,8 +246,13 @@ Subprocess-вызовы entrypoints, проверяющие реальное п�
 ### D.5 Mock-переделка `test_application_context.py:110-127`
 
 Переписать mocks: вместо `_resolve_mode` / `resolve_application_config`
-— mock `_initialize_settings`. Каждый mock возвращает stub `cfg`,
-который используется в `ApplicationContext.create()`. Diff ≤ 30 строк.
+— mock `_initialize_settings`. Никакого return value у
+`_initialize_settings(profile)` не требуется (функция только
+публикует `_LazySettings._inner_dict` через site-effect);
+mock-стратегия: `mock.patch("config._initialize_settings")`
+без `return_value`, после вызова мока — тест проверяет, что
+`config.SETTINGS["logging"]` (и т.п.) стал доступен (т.е. lazy
+proxy инициализирован). Diff ≤ 30 строк.
 
 ### D.6 Полный прогон
 
@@ -413,12 +426,20 @@ OpenSpec считается готовой к реализации **тольк�
    no auto-init at SETTINGS access).
 10. Нет autouse fixture, скрывающего новый lifecycle.
 11. Repository-wide search для любой профильной env var
-    возвращает только:
+    возвращает только разрешённые категории:
     - Negative-test fixtures (тесты, специально проверяющие
-      игнорирование неизвестной env var);
-    - REMOVED-секция OpenSpec (описание удалённого контракта).
-    Никаких упоминаний в runtime-коде или в документации как
-    действующей концепции.
+      игнорирование неизвестной env var через произвольный
+      набор env vars; тест НЕ создаёт/упоминает конкретное
+      историческое имя);
+    - REMOVED-секция OpenSpec spec.md (как описание удалённого
+      контракта);
+    - `proposal.md` разделы «Context» / «Why» / «Impact» в стиле
+      «что мы убираем» (явно historic, не runtime-механизм);
+    - `tasks.md` Phase E (deployment-миграция, historic).
+    Запрещены в runtime-коде, в runtime-acceptance scenarios,
+    в test names, в requirements, и в любых местах, где env var
+    может выглядеть как действующий механизм (а не как
+    описание удалённого).
 12. `proposal.md`, `spec.md`, `design.md` и `tasks.md` описывают
     один и тот же механизм без взаимоисключающих требований
     (конфликтующих формулировок нет; cross-references согласованы).
