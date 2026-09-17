@@ -1,8 +1,8 @@
 ## Context
 
 `config.py:517-518` фиксирует `_ACTIVE_PROFILE` и `SETTINGS` на module-level
-import через `_resolve_mode()` (читает `NANOBOT_PROFILE` из `os.environ`) и
-`resolve_application_config(profile=_ACTIVE_PROFILE)`. Это происходит ДО
+import через `_resolve_mode()` (читает legacy env var из `os.environ`)
+и `resolve_application_config(profile=_ACTIVE_PROFILE)`. Это происходит ДО
 того, как `gateway.py` / `cli_agent.py` / `streamlit_app.py` успевают
 распарсить `--profile=prod` через `argparse`. Банер и `ctx.profile`
 получают правильное значение, но `from config import SETTINGS` отдают
@@ -33,7 +33,8 @@ test-версию: runtime-таблицы с `_test`-суффиксами. Ин�
 - Закрытое множество профилей: только `prod` и `test`. Другие значения — `ConfigurationError` на старте.
 - Импортабельный `SETTINGS` через proxy-объект (compatibility для 182 импортов).
 - Без silent default, без env fallback, без auto-init при чтении.
-- `NANOBOT_PROFILE` env-переменная полностью удаляется из кода и документации.
+- Legacy env var (упоминавшаяся в старых deployment descriptors) полностью
+  удаляется из кода и документации.
 
 **Non-Goals:**
 
@@ -74,15 +75,14 @@ Application subprocess (запускает gateway.py / cli_agent.py / streamlit
     --profile обязателен через command
     --profile отсутствует → fail-fast с ConfigurationError
 
-Utility subprocess (запускает standalone utility):
+Application subprocess получил --profile=<v> явно. Никакая env var
+не используется для передачи профиля; любые unknown env vars
+(включая устаревшие deployment-имена) — irrelevant для application
+runtime и игнорируются.
+
+Standalone utility (или low-level subprocess типа git/pip):
     --profile НЕ обязателен
     utility определяет свой собственный контракт если использует SETTINGS
-
-Environment inheritance:
-    NANOBOT_PROFILE SHALL NOT be transmitted to application subprocesses
-    (через application subprocess boundary см. Decision 9).
-    Sanitization low-level utility subprocess'ов (git, pip и подобных)
-    — ВНЕ scope этого change.
 ```
 
 ## Definitions
@@ -122,14 +122,6 @@ _initialize_settings
 SETTINGS
     compatibility access point к constructed configuration;
     mapping semantics; SETTINGS["profile"] — canonical profile access
-
-Application subprocess boundary
-    отвечает: ИЗОЛИРОВАТЬ deprecated env contract в child environment
-              (saнитизация NANOBOT_PROFILE для spawned application
-              entrypoint'ов; профиль передаётся через argv)
-
-ConfigurationResolver НЕ занимается subprocess environment — это
-отдельная ответственность на application layer (см. Decision 9).
 ```
 
 Это **строгое разделение ответственности**. `_LazySettings` НЕ
@@ -137,9 +129,6 @@ ConfigurationResolver НЕ занимается subprocess environment — эт�
 `ConfigurationResolver` (`resolve_application_config`) НЕ знает про
 `_initialize_settings` или proxy — он просто строит dict.
 `_initialize_settings` — единственная точка, где они встречаются.
-`Application subprocess boundary` тоже отдельная concerns — она
-**не** про configuration construction, а про изоляцию legacy
-contract'ов в spawned subprocess'ах.
 
 ### Decision 1: `_LazySettings` — compatibility boundary (не архитектура)
 
@@ -388,24 +377,28 @@ subprocess-вызов с правильным и неправильным `--pro
 `autouse`. Тесты, которым нужен resolved `SETTINGS`, явно
 инициализируют профиль в setup.
 
-### Decision 7: Application subprocess boundary не наследует `NANOBOT_PROFILE`
+### Decision 7: Application subprocess получает profile через argv, не через env
 
-**Выбор:** При формировании `env=` для дочернего процесса,
-являющегося **application entrypoint** (см. Decision 9
-ниже для деталей boundary), **не** передавать `NANOBOT_PROFILE`
-ни при каких условиях. Low-level utility subprocess'ы
-(`subprocess.run(["git", ...])`, `subprocess.run(["pip", ...])`)
-**вне scope** этого change — они не application entrypoints
-и у них собственный контракт.
+**Выбор:** При spawn'е дочернего процесса, являющегося
+**application entrypoint** (`gateway.py`, `cli_agent.py`,
+`streamlit_app.py`), parent передаёт активный профиль **через
+argv** (`--profile=<v>`), источник — `SETTINGS["profile"]`.
+Env-переменная для передачи профиля **не используется ни при каких
+условиях**, потому что единственный source of truth —
+`--profile=<v>`. Любая другая env var (включая устаревшие
+deployment-имена) — unknown external variable и игнорируется.
 
-Альтернатива: явный проброс `NANOBOT_PROFILE=...` в env. Отвергнута —
-это ровно та дупликация источника, от которой уходим.
+Альтернатива: env-based profile propagation (явная передача через
+`os.environ`). Отвергнута — это именно та дупликация источника,
+от которой уходим.
 
 **Обоснование:** отражено в `docs/INTERNAL_API.md` § «Конфигурация
-`tools.exec`» и реализуется через `_build_application_child_env()`
-(см. Decision 9). Application subprocess получает `--profile` через
-`command` явно; utility subprocess не обязан иметь `--profile`
-если он не application entrypoint.
+`tools.exec`» и в spec requirement «Profile is passed to application
+subprocesses only through --profile». Этот change **не вводит**
+механизм sanitization child environment: приложение просто не
+работает с устаревшими env var'ами — они нерелевантны для его
+runtime-контракта. Никакая sanitization в runtime не нужна, потому
+что никакого runtime-чтения этих env vars не существует.
 
 ### Decision 8: `tests/test_application_context.py:110-127` переписывается под новую сигнатуру
 
@@ -418,111 +411,7 @@ subprocess-вызов с правильным и неправильным `--pro
 **Обоснование:** единственная точка инициализации после change —
 `_initialize_settings`, и mock'и должны ставиться туда.
 
-### Decision 9: Application subprocess boundary sanitizes deprecated env vars
-
-**Проблема:** сегодня `lib/services/subprocess_manager.py:83-89` запускает
-Streamlit UI через `subprocess.Popen(...)` без явного `env=`. Это значит,
-что child наследует parent `os.environ` целиком, включая устаревшую
-`NANOBOT_PROFILE` если она там оказалась (по ошибке деплоя или исторической
-привычке). Child-streamlit в таком случае **получает deprecated env var**,
-даже если она ни на что не влияет в runtime-архитектуре (нет читающего кода).
-Это нарушает наблюдаемый invariant «`NANOBOT_PROFILE` нигде не наблюдается».
-
-**Выбор:** Ввести единый application subprocess boundary — **единственное место**
-в коде, где формируется `env=` для spawn'а application entrypoint'а. Это
-`lib/services/subprocess_manager.py` (или новый `lib/services/subprocess_env.py`,
-если архитектура предпочитает разделение — оба варианта допустимы; в обоих
-случаях граничная функция одна и та же).
-
-```python
-def _build_application_child_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env.pop("NANOBOT_PROFILE", None)
-    return env
-```
-
-И на стороне caller'а:
-
-```python
-proc = subprocess.Popen(
-    [sys.executable, "-m", "streamlit", "run", str(script),
-     "--", f"--profile={SETTINGS['profile']}",
-     ...],
-    env=_build_application_child_env(),
-    stdout=log_handle,
-    stderr=subprocess.STDOUT,
-)
-```
-
-Альтернативы рассмотрены:
-
-- **Дублировать `env.pop("NANOBOT_PROFILE", None)` в каждом caller'е** —
-  отвергнуто. Это та же ошибка, что в `config.py:240, 291`, и спецификация
-  прямо запрещает дублирование. Если spawn'ов application entrypoint'ов
-  станет несколько — boundary всё равно одна, вызываемая из всех мест.
-- **Положить `_build_application_child_env()` в `config.py` рядом с
-  `_initialize_settings`** — отвергнуто. Ответственность subprocess
-  boundary лежит не в `config` (который теперь занимается только
-  profile lifecycle), а в `lib/services/` (которому принадлежит
-  spawn-код).
-- **Ничего не делать, полагаясь на то, что код `NANOBOT_PROFILE` нигде
-  не читает** — отвергнуто. Observable invariant нарушается: child env
-  содержит deprecated var. Это тот же класс багов, как config.py:240 —
-  устаревший код тихо живёт в среде и рано или поздно активируется через
-  миграцию или supply-chain.
-
-**Обоснование:**
-
-1. **Boundary = `lib/services/subprocess_manager.py`** — единственное место
-   в `lib/`, где `subprocess.Popen` запускает application entrypoint
-   (Streamlit). Это подтверждено grep'ом (см. Phase C ниже).
-
-2. **Санитизация через `os.environ.copy()` + `.pop()`, не через
-   `os.environ.pop()`** — критично. Приложение продолжает работать
-   после spawn'а, и parent `os.environ` не должен неожиданно терять var.
-
-3. **Профиль передаётся через `argv`** (`--profile=...`), не через env.
-   Source of truth — `SETTINGS["profile"]`. Никакого повторного resolve
-   на стороне boundary.
-
-**Scope ограничение:** Санитизация применяется только к spawn'у
-application entrypoint'ов (`gateway.py`, `cli_agent.py`,
-`streamlit_app.py`). Low-level утилиты типа
-`subprocess.run(["git", "describe", ...])` в
-`lib/utils/project_version.py:50` НЕ трогаем — это не application
-entrypoint и не принимает `--profile`. Это тот же distinction, что для
-standalone utilities в Decision 5.
-
-### Decision 10: Категории runtime-участников
-
-Чтобы устранить двусмысленность вокруг слова «utility»:
-
-```text
-A. Application entrypoint
-   — создаёт ApplicationContext / SETTINGS runtime
-   — обязательно принимает --profile=<v>
-   — примеры: gateway.py, cli_agent.py, streamlit_app.py
-
-B. Application subprocess
-   — это application entrypoint, запущенный родителем
-   — получает профиль ТОЛЬКО через --profile=<v> в argv
-   — не получает NANOBOT_PROFILE через env
-   — sanitization происходит в application subprocess boundary
-     (см. Decision 9)
-
-C. Standalone utility
-   — не использует ApplicationContext / resolved SETTINGS
-   — НЕ обязано принимать --profile
-   — примеры: tools/build_vectors.py, tools/check_worker_pool_integrity.py,
-     workspace/skills/*/scripts/cli.py в standalone-режиме
-   — НЕ входит в scope application subprocess boundary
-```
-
-Boundary (Decision 9) защищает только категорию B. Категория C
-**никогда** не становится B при running через `subprocess.Popen`
-напрямую — они не используют этот код.
-
-### Decision 11: OpenSpec lifecycle финален перед реализацией
+### Decision 10: OpenSpec lifecycle финален перед реализацией
 
 Перед началом реализации `openspec.cmd validate config-profile-cli-flag --strict`
 проходит без ошибок; все 12 пунктов Definition of Done в `tasks.md`
@@ -604,7 +493,8 @@ run`; последующие `st.rerun()` re-execute скрипт **без пе�
 После завершения всех task'ов change считается реализованным, **когда**:
 
 - [ ] `config.py` не содержит module-level `SETTINGS` construction.
-- [ ] `config.py` не читает `NANOBOT_PROFILE` ни в каком виде.
+- [ ] `config.py` не читает environment variables для resolution
+      профиля ни в каком виде.
 - [ ] Нет default-профиля: без `--profile` — fail-fast.
 - [ ] Только `prod` и `test` принимаются; остальные — `ConfigurationError`.
 - [ ] `SETTINGS` не может быть прочитан до `_initialize_settings(...)`.
@@ -613,8 +503,8 @@ run`; последующие `st.rerun()` re-execute скрипт **без пе�
 - [ ] Application entrypoints (`gateway.py`, `cli_agent.py`, `streamlit_app.py`)
       требуют `--profile`.
 - [ ] Профиль инициализируется до любых runtime-импортов.
-- [ ] Subprocesses не получают профиль через environment.
-- [ ] Application subprocesses получают `--profile` через `command`.
+- [ ] Application subprocesses получают `--profile` через `command`
+      (никогда не через env).
 - [ ] Streamlit invocation явно определён (`streamlit run streamlit_app.py -- --profile=prod`).
 - [ ] Integration-тест проверяет runtime configuration (например, имя
       runtime-таблицы), не только банер.
@@ -624,11 +514,10 @@ run`; последующие `st.rerun()` re-execute скрипт **без пе�
 
 ### Этап M1 — shadow fix (только документация)
 
-1. Деплои переводятся с `NANOBOT_PROFILE=prod` на
+1. Деплои переводятся с устаревшей env var на
    `command: python gateway.py --profile=prod`.
 2. `docs/PROFILES.md` перерабатывается: «Запуск» через CLI-флаг;
-   «Миграция существующих деплоев» — таблица `NANOBOT_PROFILE=...` →
-   `command: ... --profile=...`.
+   «Миграция существующих деплоев» — таблица env → command.
 3. `AGENTS.md` обновляется.
 4. **Никаких** кодовых изменений в `config.py`.
 

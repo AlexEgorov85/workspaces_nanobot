@@ -85,15 +85,17 @@ default.
   overlay applied) before `ApplicationContext.create()` is called
   and before any channel, service, or AgentLoop construction begins
 
-#### Scenario: NANOBOT_PROFILE is ignored
+#### Scenario: Unknown environment variable does not influence resolution
 
-- **WHEN** `NANOBOT_PROFILE=prod` is set in the process environment
+- **WHEN** any environment variable that is not part of the
+  application entrypoint contract (e.g. legacy `NANOBOT_PROFILE=prod`)
+  is set in the process environment
 - **AND WHEN** the application entrypoint is invoked with
   `--profile=test`
 - **THEN** the resolved profile SHALL be `test`
-- **AND THEN** `NANOBOT_PROFILE` SHALL have no effect on resolution,
-  on the constructed `SETTINGS`, on the runtime configuration, or on
-  any subprocess
+- **AND THEN** the unknown environment variable SHALL have no
+  effect on resolution, on the constructed `SETTINGS`, on the
+  runtime configuration, or on any subprocess
 
 ### Requirement: Profile surfaced for infrastructure use
 
@@ -135,8 +137,8 @@ access resolved `SETTINGS` (import-order contract).
 - **WHEN** `import config` executes
 - **THEN** no profile SHALL be resolved
 - **AND THEN** no configuration SHALL be constructed
-- **AND THEN** `NANOBOT_PROFILE` SHALL NOT be read from the
-  process environment
+- **AND THEN** no environment variable SHALL be read for the
+  purpose of profile resolution
 
 #### Scenario: SETTINGS access before initialization fails fast
 
@@ -228,40 +230,6 @@ governs whether and how it consumes configuration.
 - **AND THEN** the supported invocation pattern is exactly that
   form (no other invocation pattern is part of this change)
 
-### Requirement: Profile does not inherit through subprocess environment
-
-The system SHALL NOT transmit any profile-related environment variable
-(notably `NANOBOT_PROFILE`) to subprocesses spawned by runtime tools
-(notably `workspace/tools/exec`). A subprocess that acts as an
-application entrypoint and needs to act under a specific profile
-SHALL receive `--profile=<value>` as part of its `command`
-argument; if no profile is passed in `command`, the subprocess
-SHALL fail with `ConfigurationError` per the application-entrypoint
-contract rather than silently inheriting a profile from a leaked
-environment variable. The detailed sanitization contract is
-specified in the requirement «Application subprocess boundary
-sanitizes deprecated env vars» (which is the application subprocess
-boundary's specific contract); this requirement provides the
-high-level assertion that no application subprocess receives
-`NANOBOT_PROFILE` regardless of mechanism.
-
-#### Scenario: Application subprocess receives --profile explicitly
-
-- **WHEN** a parent tool invokes an application entrypoint as a
-  subprocess with `--profile=test` in its `command`
-- **THEN** the subprocess SHALL resolve `test` as the active profile
-- **AND THEN** `NANOBOT_PROFILE` (if present in parent environment)
-  SHALL have no effect
-
-#### Scenario: Application subprocess without --profile fails
-
-- **WHEN** a parent tool invokes an application entrypoint as a
-  subprocess without `--profile` in its `command`
-- **THEN** the subprocess SHALL exit with non-zero status and
-  `ConfigurationError("--profile is required")`
-- **AND THEN** the parent SHALL NOT set `NANOBOT_PROFILE` in the
-  child environment as a workaround
-
 ### Requirement: Integration test verifies runtime configuration, not only banner
 
 The change SHALL include an end-to-end test that verifies a
@@ -286,10 +254,11 @@ failure mode where the banner said `prod` but the runtime used
 - **THEN** `SETTINGS["logging"]["db"]["table_name"]` SHALL equal
   `agent_gateway_logs_test`
 
-#### Scenario: env var does not influence table selection
+#### Scenario: Legacy env var does not influence table selection
 
-- **WHEN** `NANOBOT_PROFILE=test python gateway.py --profile=prod`
-  is invoked
+- **WHEN** an unknown or legacy environment variable (for example,
+  the previously-named `NANOBOT_PROFILE=test`) is set in the
+  process environment alongside `python gateway.py --profile=prod`
 - **THEN** `SETTINGS["logging"]["db"]["table_name"]` SHALL equal
   `agent_gateway_logs` (prod), not `agent_gateway_logs_test`
 - **AND THEN** the banner SHALL also reflect `prod`
@@ -298,13 +267,13 @@ failure mode where the banner said `prod` but the runtime used
 ## REMOVED Requirements
 
 ### Requirement: Profile resolved at config load via environment fallback
-**Reason**: The legacy contract allowed `NANOBOT_PROFILE` env var to set
-the active profile silently when CLI `--profile` was absent. This
-created duplication of source of truth and a silent failure mode
-where `--profile=prod` after a `test`-defaulted environment
-produced a banner that did not match runtime behaviour (`SETTINGS`
-table names already locked to `_test`).
-**Migration**: Replace any usage of `NANOBOT_PROFILE` env var with
+**Reason**: The legacy contract allowed the previously-named
+environment variable (referred to in older deployment descriptors)
+to set the active profile silently when CLI `--profile` was absent.
+This created duplication of source of truth and a silent failure
+mode where `--profile=prod` after a defaulted environment produced
+a banner that did not match runtime behaviour.
+**Migration**: Replace any usage of that legacy env var with
 explicit `--profile=<value>` argument passed to the application
 entrypoint command. This applies to `docker-compose.yml`, `k8s`
 manifests, `systemd` units, GitHub Actions jobs, and any other
@@ -314,83 +283,28 @@ deployment descriptors. Code that currently relies on env-fallback
 `config._initialize_settings(profile=...)` called from each
 application entrypoint before any other runtime import.
 
-## ADDED Requirements (Phase C / Subprocess environment isolation)
+## ADDED Requirements
 
-### Requirement: Application subprocess boundary sanitizes deprecated env vars
-
-For every subprocess spawned by application runtime that itself is
-an application entrypoint (`gateway.py`, `cli_agent.py`,
-`streamlit_app.py`), the application subprocess boundary SHALL
-construct the child environment as a copy of the parent environment
-with the deprecated configuration variable `NANOBOT_PROFILE`
-removed. The boundary SHALL NOT mutate parent `os.environ`. The
-boundary SHALL preserve all other environment variables.
-
-This requirement applies **only to the application subprocess
-boundary** — the place where the runtime spawns an application
-entrypoint. Low-level utility subprocesses that are not application
-entrypoints (e.g. `subprocess.run(["git", ...])`, `python -m pip`,
-similar short-lived tooling) are NOT required to apply this
-sanitization. The boundary locates the responsibility in ONE place;
-adding duplicated checks at every caller is explicitly disallowed.
-
-#### Scenario: NANOBOT_PROFILE removed from child env
-
-- **WHEN** parent process has `os.environ["NANOBOT_PROFILE"]="test"`
-- **AND WHEN** the application subprocess boundary spawns an
-  application entrypoint subprocess
-- **THEN** the child's `os.environ` SHALL NOT contain
-  `NANOBOT_PROFILE`
-
-#### Scenario: Unrelated env vars preserved
-
-- **WHEN** parent process has `os.environ["TEST_CHILD_ENV"]="preserved"`
-  and `os.environ["NANOBOT_PROFILE"]="test"`
-- **AND WHEN** the application subprocess boundary spawns an
-  application entrypoint subprocess
-- **THEN** the child SHALL see `TEST_CHILD_ENV=preserved` in its
-  environment
-- **AND THEN** the child SHALL NOT see `NANOBOT_PROFILE`
-
-#### Scenario: Parent os.environ unchanged after spawn
-
-- **WHEN** the application subprocess boundary spawns an
-  application entrypoint subprocess
-- **THEN** parent `os.environ["NANOBOT_PROFILE"]` SHALL remain
-  unchanged after the subprocess returns (whether the child
-  succeeded or failed)
-
-#### Scenario: Sanitization is in the boundary, not at every caller
-
-- **WHEN** the application runtime spawns an application entrypoint
-  subprocess
-- **THEN** the sanitization is performed in exactly one place
-  (the application subprocess boundary)
-- **AND THEN** no caller-level `os.environ.pop("NANOBOT_PROFILE", None)`
-  repetition is required
-
-### Requirement: Application subprocess gets profile only via --profile
+### Requirement: Profile is passed to application subprocesses only through --profile
 
 For every subprocess spawned by application runtime that is itself
-an application entrypoint, the parent SHALL pass the active profile
-as an explicit `--profile=<value>` CLI argument derived from
-`SETTINGS["profile"]` (the canonical resolved profile). The profile
-SHALL NOT be transported via environment variables, files, IPC,
-or any other side-channel.
+an application entrypoint (`gateway.py`, `cli_agent.py`,
+`streamlit_app.py`), the parent SHALL pass the active profile as
+an explicit `--profile=<value>` CLI argument. The profile value
+SHALL be derived from `SETTINGS["profile"]`. The profile SHALL
+NOT be transported via environment variables, files, IPC, or any
+other side-channel.
 
 #### Scenario: Application subprocess receives --profile explicitly
 
-- **WHEN** the application subprocess boundary spawns an
-  application entrypoint subprocess
+- **WHEN** the application runtime spawns an application entrypoint
+  subprocess
 - **THEN** the parent's `argv` for the child SHALL include
   `--profile=<value>` matching `SETTINGS["profile"]`
-- **AND THEN** no `NANOBOT_PROFILE` SHALL appear in the child's
-  `env`
 
 #### Scenario: Profile source is parent's SETTINGS, not env
 
-- **WHEN** the application subprocess boundary constructs the
-  child `argv`
+- **WHEN** the application runtime constructs the child's `argv`
 - **THEN** the profile value SHALL be read from
   `SETTINGS["profile"]`
 - **AND THEN** no second `_resolve_mode`, no env lookup, no default

@@ -51,14 +51,22 @@
   отдельной функции с именем `_resolve_mode` порождало бы лишнюю
   сущность без собственной ответственности.
 
-- **`NANOBOT_PROFILE` env-переменная удаляется** из:
+- **Устаревшая env var (исторически именовавшаяся как `NANOBOT_PROFILE`)
+  полностью удаляется** как механизм передачи профиля:
   - profile resolution;
   - configuration initialization;
   - runtime fallback;
-  - subprocess inheritance;
+  - subprocess propagation;
   - docs, deploy descriptors, CI, кода.
 
-  Дополнительный negative scenario: если `NANOBOT_PROFILE` каким-то образом присутствует в env (например, оставлен от старого деплоя), он **не оказывает влияния**. Только argv --profile.
+  Дополнительный negative scenario: если эта env var каким-то образом
+  присутствует в env (например, оставлена от старого деплоя), она
+  **не оказывает влияния**. Только argv `--profile`.
+
+  **Никакой runtime sanitization child environment не вводится.**
+  Приложение просто не работает с устаревшими env var'ами; их
+  игнорирование — это отсутствие кода, который их читает, а не
+  активный механизм вычистки.
 
 - **Поддерживаемые профили** — закрытое множество `{"prod", "test"}`. Любое другое значение (`--profile=dev`, `--profile=staging`, `--profile=foo`) — `ConfigurationError` на старте, до какого-либо конструирования runtime. Это консистентно с Negative Requirements существующей спеки (`introduce a third profile without an explicit OpenSpec change`).
 
@@ -72,7 +80,7 @@
   - Application subprocess (запускающий `gateway.py`, `cli_agent.py` или `streamlit_app.py`) **должен** получить `--profile` через `command`;
   - Application subprocess без `--profile` — fail-fast с `ConfigurationError`;
   - Обычный utility subprocess **не обязан** иметь `--profile`, если он не является application entrypoint;
-  - **Application subprocess boundary** — единственное место в коде (`lib/services/subprocess_manager.py`), где формируется `env=` для spawn'а application entrypoint'а. Граница **копирует** parent `os.environ` в child через `dict.copy()`, удаляет `NANOBOT_PROFILE`, неглобально. Это обеспечивает observable invariant «child не получает deprecated env var»;
+  - Никакой runtime sanitization child environment не вводится: устаревшие env vars просто игнорируются runtime-кодом;
   - `ConfigurationResolver` **не** занимается subprocess environment — это отдельная concern на application layer.
 
 - **Import-order contract** ужесточён: ни один модуль, импортированный application entrypoint до `_initialize_settings()`, не может обращаться к resolved `SETTINGS`. Это формальное требование спеки (а не только impl-детали): новый scenario «ранний SETTINGS access» защищает от повторения текущего бага.
@@ -81,7 +89,7 @@
 
 - **Compatibility layer** вводится как **временный boundary**: `_LazySettings` proxy сохраняет существующие `from config import SETTINGS` (182 импорта) без изменений. Это **не** новая архитектура, а способ пройти этот change с минимальной диффузией по коду. Полный отказ от module-level `SETTINGS` остаётся долгосрочной целью, но в **другой** OpenSpec change.
 
-- **BREAKING**: все существующие деплои, использующие `NANOBOT_PROFILE=prod` в `docker-compose`/`k8s`/`systemd`/GitHub Actions, должны быть переведены на передачу `command: python gateway.py --profile=prod` (или эквивалент для `cli_agent.py`/`streamlit_app.py`).
+- **BREAKING**: все существующие деплои, использующие env-based передачу профиля (исторически — `NANOBOT_PROFILE=prod`) в `docker-compose`/`k8s`/`systemd`/GitHub Actions, должны быть переведены на передачу `command: python gateway.py --profile=prod` (или эквивалент для `cli_agent.py`/`streamlit_app.py`).
 
 ## Capabilities
 
@@ -117,10 +125,10 @@
   - **autouse-fixture НЕ добавляется**: lifecycle-ошибки должны всплывать, а не маскироваться под тестовый bootstrap. Тесты явно вызывают `_initialize_settings(...)` в setup.
 
 - Документация:
-  - `docs/PROFILES.md` — переработка «Запуск» под CLI-флаг; «Миграция существующих деплоев» — таблица `NANOBOT_PROFILE=prod` → `command: python gateway.py --profile=prod` для docker-compose / k8s / systemd / GitHub Actions; секция «Что изменилось в этом релизе»;
-  - `AGENTS.md` (корень) — убрать `NANOBOT_PROFILE`;
+  - `docs/PROFILES.md` — переработка «Запуск» под CLI-флаг; «Миграция существующих деплоев» — таблица env → `command: python gateway.py --profile=prod` для docker-compose / k8s / systemd / GitHub Actions; секция «Что изменилось в этом релизе»;
+  - `AGENTS.md` (корень) — убрать упоминания устаревших env vars;
   - `.github/workflows/*.yml` — заменить env на `command: ... --profile=...`;
-  - `docs/INTERNAL_API.md` — секция «tools.exec»: profile-related env vars **никогда** не передаются в `env` subprocess-наследования;
+  - `docs/INTERNAL_API.md` — секция «tools.exec»: env-переменные не используются для передачи профиля; application subprocess получает `--profile` через `command`;
   - `CHANGELOG.md` — категория `Changed`: BREAKING для деплоев, мигрирующих с env на CLI-флаг; whitelisting профилей; обязательность `--profile` для application entrypoints.
 
 - `tests/conftest.py`: **autouse-fixture НЕ добавляется**. Тесты, которым нужен `SETTINGS`, делают явный `_initialize_settings(profile="...")` (см. `tests/test_standalone_failfast.py` как позитивный сценарий поведения proxy без init).
