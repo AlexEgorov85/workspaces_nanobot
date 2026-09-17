@@ -133,7 +133,22 @@ def _ensure_registered() -> None:
     standalone-CLI без gateway — поднимаем самостоятельно, чтобы
     ``get_predefined_scripts_table()`` и ``search_vector`` находили
     таблицу/индекс. Идемпотентно: повторная регистрация игнорируется.
+
+    После change ``config-profile-cli-flag`` ``SETTINGS`` —
+    ``_LazySettings`` proxy, который публикуется через
+    ``config._initialize_settings(profile)``. В standalone-CLI нет
+    никого, кто бы вызвал ``_initialize_settings``, поэтому делаем
+    это здесь (default = test, fail-safe для ad-hoc запусков). Если
+    proxy уже инициализирован entrypoint'ом (CLI запущен внутри
+    gateway/cli_agent/streamlit) — этот вызов no-op (повторный init
+    бросает ``already initialized``, который мы ловим).
     """
+    try:
+        import config as _cfg
+        if not _cfg.is_settings_initialized():
+            _cfg._initialize_settings(profile="test")
+    except Exception:
+        pass  # registration может продолжаться без настроенного профиля
     try:
         from config import SETTINGS
         from lib.core.infra_registration import register_vector_storage

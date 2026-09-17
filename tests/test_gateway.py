@@ -136,6 +136,12 @@ def _setup_fake_modules():
     cfg.get_setting = _fake_get_setting
     cfg.SETTINGS = settings
     cfg.ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+    # После Phase B gateway.py делает ``from config import
+    # ConfigurationError`` на module-level. Подменённый модуль
+    # ``config`` должен предоставлять этот символ, иначе import
+    # падает до входа в module body.
+    from config import ConfigurationError as _real_CE
+    cfg.ConfigurationError = _real_CE
     sys.modules["config"] = cfg
 
     # workspace

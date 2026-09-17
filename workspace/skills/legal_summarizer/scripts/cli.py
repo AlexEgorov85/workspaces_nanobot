@@ -270,9 +270,19 @@ def _ensure_registered() -> None:
     Для skill'а без vector-инфраструктуры и без PG-таблиц вызов
     ``register_vector_storage`` будет no-op, но вызывается для единообразия
     с полными skill'ами (audit_analyzer). Embedding-параметры после
-    удаления ``gateway.vector.embedding`` регистрировать не нужно —
+    удаления ``gateway.vector.embedding`` регистрировать не нужно -
     они захардкожены в ``cache_provider_impl``.
+
+    После change ``config-profile-cli-flag`` ``SETTINGS`` —
+    ``_LazySettings`` proxy, который публикуется через
+    ``_initialize_settings(profile)``. В standalone-CLI нет entrypoint,
+    который бы это сделал, поэтому поднимаем здесь (default = test).
+    Если proxy уже инициализирован — этот вызов no-op.
     """
+    import config as _cfg
+    if not _cfg.is_settings_initialized():
+        _cfg._initialize_settings(profile="test")
+
     from lib.core.infra_registration import register_vector_storage
     from lib.core.skill_registration import register_skill_from_config
     from config import SETTINGS

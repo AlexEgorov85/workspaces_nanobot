@@ -111,6 +111,7 @@ def test_storage_table_must_have_schema_qualifier() -> None:
     """
     proc = _run_bootstrap(
         "import config\n"
+        "config._initialize_settings(profile='test')\n"
         "config.SETTINGS['gateway']['vector']['index']['storage_table'] = 'no_schema_only'\n",
     )
     assert proc.returncode != 0
@@ -125,6 +126,7 @@ def test_storage_table_missing_exits_with_clear_error() -> None:
     """
     proc = _run_bootstrap(
         "import config\n"
+        "config._initialize_settings(profile='test')\n"
         "config.SETTINGS['gateway']['vector']['index'].pop('storage_table', None)\n",
     )
     assert proc.returncode != 0

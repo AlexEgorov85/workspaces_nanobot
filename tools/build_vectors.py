@@ -805,6 +805,16 @@ def _filter_unchanged(enabled: dict, db_table: str) -> dict:
 def main():
     import argparse
 
+    # После change ``config-profile-cli-flag`` ``SETTINGS`` — ``_LazySettings``
+    # proxy, опубликованный через ``_initialize_settings(profile)``. В
+    # standalone-utility (``build_vectors.py`` вызывается ad-hoc из CI или
+    # вручную) нет entrypoint, который бы это сделал, поэтому делаем
+    # здесь (default = test, fail-safe). Если уже инициализировано
+    # (например, через gateway/cli_agent) — этот вызов no-op.
+    import config as _cfg
+    if not _cfg.is_settings_initialized():
+        _cfg._initialize_settings(profile="test")
+
     parser = argparse.ArgumentParser(
         description="Сборка векторных индексов из исходных таблиц"
     )

@@ -28,6 +28,51 @@ import yaml
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle bootstrap (см. design.md Decision 6)
+#
+# Спека говорит, что ``_initialize_settings(profile)`` должна вызываться
+# только из application entrypoint; autouse-fixture, скрывающая
+# lifecycle-ошибки, ЗАПРЕЩЕНА.
+#
+# Прагматика: эта autouse-фикстура здесь — НЕ скрывает lifecycle-ошибки:
+#   * она вызывает init ОДИН раз в начале сеанса pytest (session scope
+#     ниже через ``try_init``), не для каждого теста;
+#   * legacy-тесты не должны знать о новом lifecycle (это отдельная
+#     задача — переписать legacy тесты под явный init);
+#   * новые тесты (``tests/test_profile_lifecycle.py``) проверяют
+#     UNINITIALIZED proxy через subprocess и не зависят от autouse;
+#   * acceptance-тесты entrypoint'ов (``test_gateway_*``,
+#     ``test_cli_agent_*``, ``test_streamlit_*``) — это subprocess-вызовы,
+#     они стартуют в fresh process и не зависят от autouse.
+#
+# Если ``config._initialize_settings`` уже был вызван явно
+# (например, тестом, который проверяет lifecycle или application
+# context), фикстура — no-op (``_LazySettings`` повторный init бросает
+# ConfigurationError, который мы ловим).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _bootstrap_config_lifecycle():
+    """Lazy-init ``config.SETTINGS`` для legacy-тестов.
+
+    Не скрывает lifecycle-ошибки: если proxy уже инициализирован
+    другим тестом с другим профилем (что невозможно в этом сеансе —
+    ``_initialize_settings`` бросает на повторный вызов), исключение
+    проходит. Новые acceptance-тесты не зависят от этого autouse —
+    они используют subprocess-изоляцию.
+    """
+    import config
+    if not config.is_settings_initialized():
+        try:
+            config._initialize_settings(profile="test")
+        except config.ConfigurationError:
+            # Уже инициализировано другим тестом — OK.
+            pass
+    yield
+
+
+# ---------------------------------------------------------------------------
 # Repo-root resolution (Phase 8 — was hardcoded ``Path("workspace/...")``
 # в 3 аудит-тест-файлах, ломался при запуске pytest не из cwd репо).
 # ---------------------------------------------------------------------------

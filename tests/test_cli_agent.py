@@ -93,6 +93,12 @@ def _setup_fake_modules():
     settings.cli = {"log_level": "WARNING"}
     settings.providers = MagicMock()
     cfg.SETTINGS = settings
+    # После Phase B cli_agent/gateway/streamlit_app делают
+    # ``from config import ConfigurationError`` на module-level.
+    # Подменённый модуль ``config`` должен предоставлять этот символ,
+    # иначе import падает до входа в module body.
+    from config import ConfigurationError as _real_CE
+    cfg.ConfigurationError = _real_CE
     sys.modules["config"] = cfg
 
     ws = str(_project_root / "workspace")
@@ -267,7 +273,8 @@ class TestParseArgs:
     def test_defaults(self):
         from cli_agent import _parse_args
 
-        with patch("sys.argv", ["cli_agent.py"]):
+        # После Phase B ``--profile`` обязателен (whitelist {"prod","test"}).
+        with patch("sys.argv", ["cli_agent.py", "--profile=test"]):
             args = _parse_args()
             assert args.patched is False
             assert args.storage == "auto"
@@ -276,14 +283,14 @@ class TestParseArgs:
     def test_patched_flag(self):
         from cli_agent import _parse_args
 
-        with patch("sys.argv", ["cli_agent.py", "--patched"]):
+        with patch("sys.argv", ["cli_agent.py", "--profile=test", "--patched"]):
             args = _parse_args()
             assert args.patched is True
 
     def test_storage_postgres(self):
         from cli_agent import _parse_args
 
-        with patch("sys.argv", ["cli_agent.py", "-P", "-S", "postgres"]):
+        with patch("sys.argv", ["cli_agent.py", "--profile=test", "-P", "-S", "postgres"]):
             args = _parse_args()
             assert args.patched is True
             assert args.storage == "postgres"
@@ -291,7 +298,7 @@ class TestParseArgs:
     def test_session_key(self):
         from cli_agent import _parse_args
 
-        with patch("sys.argv", ["cli_agent.py", "-s", "my-session"]):
+        with patch("sys.argv", ["cli_agent.py", "--profile=test", "-s", "my-session"]):
             args = _parse_args()
             assert args.session == "my-session"
 

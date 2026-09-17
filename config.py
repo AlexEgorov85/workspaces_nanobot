@@ -521,6 +521,19 @@ class _LazySettings:
     def __getitem__(self, key: str) -> Any:
         return self._ensure_initialized()[key]
 
+    def __setitem__(self, key: str, value: Any) -> None:
+        """``SETTINGS[k] = v`` для legacy-тестов, мутирующих proxy in-place.
+
+        Допустимо только в INITIALIZED state — UNINITIALIZED proxy не
+        имеет inner_dict для мутации. Бросает ту же ``ConfigurationError``,
+        что и ``__getitem__``, чтобы не маскировать lifecycle-ошибки.
+        """
+        self._ensure_initialized()[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        self._ensure_initialized()
+        del self._inner_dict[key]
+
     def __getattr__(self, name: str) -> Any:
         # ``__slots__`` доступ через object.__getattribute__; проксируем только
         # атрибуты дочернего dict (mapping-стиль), включая ``get``.
@@ -652,7 +665,7 @@ def get_setting(*keys: str, default=None):
     отсутствии ключа.
     """
     try:
-        node: object = SETTINGS
+        node: object = SETTINGS._inner_dict if isinstance(SETTINGS, _LazySettings) else SETTINGS
         for k in keys:
             if isinstance(node, dict) and k in node:
                 node = node[k]
@@ -670,7 +683,7 @@ def require_setting(*keys: str):
     если ключ (на любом уровне) отсутствует. Не возвращает fallback-литерал:
     отсутствие настройки — ошибка, а не молчаливая подстановка.
     """
-    node: object = SETTINGS
+    node: object = SETTINGS._inner_dict if isinstance(SETTINGS, _LazySettings) else SETTINGS
     for k in keys:
         if isinstance(node, dict) and k in node:
             node = node[k]

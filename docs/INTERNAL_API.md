@@ -5,7 +5,7 @@
 
 ## 🚦 Передача профиля в application subprocess
 
-После [`config-profile-cli-flag`](../../openspec/changes/config-profile-cli-flag)
+После [`config-profile-cli-flag`](../openspec/changes/config-profile-cli-flag)
 единственный канал передачи профиля конфигурации в subprocess —
 **argv `--profile=<value>`**. Env vars (исторически —
 `NANOBOT_PROFILE=prod`) больше **не используются**: ни runtime-код,
