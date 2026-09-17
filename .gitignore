@@ -100,3 +100,11 @@ workspace/skills/audit_analyzer/data_store/
 
 # --- Временные скрипты в кеше навыка ---
 workspace/skills/audit_analyzer/cache/_*.py
+
+# --- Локальные IDE/инструменты и dev-артефакты ---
+# Эти каталоги/файлы создаются локально при разработке, не для репо.
+.cline/
+.clinerules/
+docs/_archive/
+tools/debug/
+dump.txt
