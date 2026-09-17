@@ -14,6 +14,72 @@ from typing import Any
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
+
+# ---------------------------------------------------------------------------
+# Application entrypoint: parse --profile + _initialize_settings
+#
+# Streamlit имеет **особый lifecycle**: ``streamlit run streamlit_app.py``
+# вызывает ``runpy.run_path`` и каждый ``st.rerun()`` re-executes тело
+# скрипта (но ``streamlit_app`` остаётся в ``sys.modules``, так что
+# module-level statements выполняются заново при каждом rerun).
+#
+# Чтобы соблюсти spec-контракт «second call → already initialized»,
+# ставим guard через ``globals()``: module-level initialization
+# выполняется ровно один раз за lifetime процесса Streamlit. Guard не
+# меняет lifecycle-gate (``_initialize_settings`` остаётся строгой) —
+# он лишь предотвращает повторный ВЫЗОВ из этого модуля.
+#
+# Поддерживаемая форма запуска (см. design.md Decision 4):
+#   ``streamlit run streamlit_app.py -- --profile=prod``
+# Всё после ``--`` стримлит пробрасывает в ``sys.argv`` скрипта как
+# позиционные аргументы. Парсим их вручную (argparse не подходит —
+# ``--help`` мигнул бы ``SystemExit(0)``).
+# ---------------------------------------------------------------------------
+
+_SUPPORTED_PROFILES = ("prod", "test")
+
+from config import ConfigurationError  # noqa: E402 — нужен в _resolve_profile_from_argv
+
+
+def _resolve_profile_from_argv(argv: list[str] | None = None) -> str:
+    """Достать ``--profile=<v>`` или ``--profile <v>`` из ``sys.argv``.
+
+    Streamlit пробрасывает ``<args>`` после ``--`` как позиционные
+    элементы ``sys.argv`` (``streamlit run streamlit_app.py -- --profile=prod``
+    → ``sys.argv == [..., "streamlit_app.py", "--profile=prod"]``).
+    Поддерживаем обе формы (``--profile=prod`` / ``--profile prod``).
+    """
+    args = list(sys.argv) if argv is None else list(argv)
+    for i, arg in enumerate(args):
+        if arg.startswith("--profile="):
+            value = arg.split("=", 1)[1]
+            if value:
+                return value
+            break
+        if arg == "--profile" and i + 1 < len(args):
+            return args[i + 1]
+    raise ConfigurationError("--profile is required")
+
+
+_resolved_profile = _resolve_profile_from_argv()
+if _resolved_profile not in _SUPPORTED_PROFILES:
+    raise ConfigurationError(
+        f"--profile={_resolved_profile!r} is not supported "
+        f"(allowed: prod, test)"
+    )
+
+# Guard против streamlit re-execution: ``st.rerun()`` запускает module-level
+# statements заново через ``runpy``, но namespace модуля персистентен.
+# Устанавливаем флаг через ``globals()`` (ссылка на module globals, не
+# ``sys.modules[<name>].__dict__`` — последнее зависит от того, что модуль
+# уже в ``sys.modules`` и является антипаттерном).
+_GUARD_ATTR = "_config_initialized"
+if not globals().get(_GUARD_ATTR, False):
+    import config as _streamlit_cfg
+    _streamlit_cfg._initialize_settings(profile=_resolved_profile)
+    globals()[_GUARD_ATTR] = True
+
+
 import streamlit as st
 
 # Подключаем workspace, чтобы импортировать utils.db
@@ -24,7 +90,7 @@ if _workspace not in sys.path:
 from utils.db import configure, fetch, fetchone, execute
 from utils.session_file_store import SessionFileStore
 from utils.jsonb import decode_jsonb as _decode_jsonb
-from utils.jsonb import decode_json_list as _decode_media_list
+from utils.jsonb import decode_media_list as _decode_media_list
 from utils.media import serialize as _media_serialize
 from utils.media import read_for_ui as _media_read_for_ui
 from utils.media import entry_from_data_url as _media_entry_from_data_url

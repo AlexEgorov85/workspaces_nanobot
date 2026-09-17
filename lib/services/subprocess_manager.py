@@ -14,7 +14,11 @@
   * Graceful shutdown: ``terminate()`` → ``wait(timeout)`` → ``kill()``
     если процесс не завершился за таймаут. Это гарантирует, что при
     ``Ctrl+C`` Streamlit корректно закрывает свои подпроцессы
-    (websocket-серверы) до того как родитель убьёт его.
+    (websocket-серверы) до того как родитель убьёт его;
+  * ``--profile`` проброшен в ``argv`` spawn'нутого ``streamlit_app.py``
+    через ``SETTINGS["profile"]`` родителя (см. design.md Decision 7).
+    Никаких env vars для profile propagation — единый source of truth
+    это argv ``--profile``.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from config import get_setting
+from config import get_setting, SETTINGS
 
 
 class SubprocessManager:
@@ -67,11 +71,21 @@ class SubprocessManager:
             браузера — иначе в server-окружениях будет ошибка).
             stdout+stderr редиректятся в ``<log_dir>/<streamlit_log_filename>`` —
             иначе вывод теряется при завершении родителя.
+
+            ``--profile`` передаётся в argv spawn'нутого ``streamlit_app.py``
+            из ``SETTINGS["profile"]`` родителя — иначе child упадёт
+            с ``ConfigurationError("--profile is required")`` на module
+            level (см. design.md Decision 7 и Phase B.4).
         """
         script = Path(script_path)
         if not script.exists():
             return False
         port = int(port) if port else self._default_port
+
+        # ``SETTINGS["profile"]`` уже опубликован entrypoint'ом родителя;
+        # child получает тот же профиль через argv (никаких env vars —
+        # ``streamlit_app.py`` их не читает для profile resolution).
+        profile = str(SETTINGS["profile"])
 
         try:
             self._log_dir.mkdir(parents=True, exist_ok=True)
@@ -83,7 +97,8 @@ class SubprocessManager:
             proc = subprocess.Popen(
                 [sys.executable, "-m", "streamlit", "run", str(script),
                  "--server.headless", "true",
-                 "--server.port", str(port)],
+                 "--server.port", str(port),
+                 "--", f"--profile={profile}"],
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
             )

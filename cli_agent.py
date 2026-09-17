@@ -15,54 +15,126 @@ import shutil
 import sys
 from pathlib import Path
 
+
+_SUPPORTED_PROFILES = ("prod", "test")
+
+
+from config import ConfigurationError  # noqa: E402 — module-level import is safe (Phase A)
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Парсинг argv с явной whitelist-валидацией ``--profile``.
+
+    Whitelist и required-валидация делаются здесь, а не делегируются
+    ``argparse.error``/``choices=`` — иначе ``SystemExit(2)`` от argparse
+    минует ``ConfigurationError`` boundary, нарушая Error Lifecycle
+    Contract (см. design.md Decision 2 unification).
+    """
+    parser = argparse.ArgumentParser(description="nanobot CLI agent", add_help=False)
+    parser.add_argument("--patched", "-P", action="store_true", default=False)
+    parser.add_argument("--storage", "-S", type=str, default="auto",
+                        choices=("auto", "file", "postgres"))
+    parser.add_argument("--session", "-s", type=str, default=None)
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        help="Профиль конфигурации: prod | test.",
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Smoke-режим: парсит --profile, инициализирует SETTINGS, "
+             "печатает баннер + runtime-таблицу, выходит 0. "
+             "Только для D.2 integration-тестов.",
+    )
+    parser.add_argument("--help", "-h", action="store_true")
+    if argv is None:
+        argv = sys.argv[1:]
+    if "--help" in argv or "-h" in argv:
+        parser.print_help()
+        sys.exit(0)
+    args, _unknown = parser.parse_known_args(argv)
+
+    if not args.profile:
+        raise ConfigurationError("--profile is required")
+    if args.profile not in _SUPPORTED_PROFILES:
+        raise ConfigurationError(
+            f"--profile={args.profile!r} is not supported "
+            f"(allowed: prod, test)"
+        )
+    return args
+
+
 # Кросс-платформенная UTF-8 кодировка для ВСЕХ exec-подпроцессов (см. gateway.py).
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from rich.console import Console
 
-from lib.cli.console_loop import run_repl
-from lib.cli.display_config import DisplayConfig
-from lib.core.application_context import ApplicationContext
 
-_SCRIPT_DIR = Path(__file__).parent
-_WORKSPACE_DIR = _SCRIPT_DIR / "workspace"
+def _entrypoint_main(args: argparse.Namespace) -> None:
+    """Startup + application body, поднимает ``ConfigurationError`` на ошибках.
 
-# Добавляем корень проекта и workspace в sys.path (для lib.* / workspace.utils.*).
-sys.path.insert(0, str(_SCRIPT_DIR))
-sys.path.insert(0, str(_WORKSPACE_DIR))
+    Граница ``ConfigurationError → exit 2`` живёт в ``main()`` — здесь
+    нет ``sys.exit(2)`` (см. design.md Decision 2 unification).
+    """
+    import config as _cfg
+    _cfg._initialize_settings(profile=args.profile)
 
-console = Console()
+    from lib.cli.console_loop import run_repl
+    from lib.cli.display_config import DisplayConfig
+    from lib.core.application_context import ApplicationContext
 
-
-def main() -> None:
-    args = _parse_args()
-    # Баннер с активным профилем — fail-safe визуальное подтверждение
-    # того, в какой среде стартует процесс (default = test). Резолвим
-    # один раз и передаём тот же профиль в ApplicationContext.
-    from config import _resolve_mode
-
-    active_profile = _resolve_mode(args.profile)
     console.print(
-        f"[bold]Starting nanobot cli[/bold] · profile={active_profile}"
+        f"[bold]Starting nanobot cli[/bold] · profile={args.profile}"
     )
+
+    # Smoke-режим: печатает баннер + runtime-таблицу, выходит 0
+    # без открытия REPL/миграции cron/auto-scan хуков.
+    if args.smoke:
+        from lib.utils.project_version import project_version
+        from nanobot.cli.commands import __version__
+
+        cfg = ApplicationContext.create(
+            script_dir=script_dir_for_runtime(),
+            workspace_dir=script_dir_for_runtime() / "workspace",
+            enable_db_logging=True,
+            enable_audit=False,
+            enable_cron=False,
+            profile=args.profile,
+            print_llm_calls=False,
+        )
+        runtime_table = cfg.settings["logging"]["db"]["table_name"]
+        console.print(
+            f"nanobot cli smoke · project v{project_version()} · "
+            f"nanobot {__version__} · profile={args.profile} · "
+            f"logging.db.table_name={runtime_table}"
+        )
+        console.print("OK_SMOKE_COMPLETE")
+        cfg.stop()
+        return
+
     if args.patched:
-        _run_patched(args, active_profile)
+        _run_patched(args)
     else:
-        _run_vanilla(args, active_profile)
+        _run_vanilla(args)
 
 
-def _run_vanilla(args: argparse.Namespace, active_profile: str) -> None:
+def _run_vanilla(args: argparse.Namespace) -> None:
     """Стандартный CLI-агент (как ``nanobot agent``). Без доработок."""
+    from lib.cli.console_loop import run_repl
+    from lib.cli.display_config import DisplayConfig
+    from lib.core.application_context import ApplicationContext
+
     ctx = ApplicationContext.create(
-        script_dir=_SCRIPT_DIR,
-        workspace_dir=_WORKSPACE_DIR,
+        script_dir=script_dir_for_runtime(),
+        workspace_dir=script_dir_for_runtime() / "workspace",
         enable_db_logging=True,
         enable_audit=False,
         enable_cron=True,
         session_override=args.session,
         print_llm_calls=True,
-        profile=active_profile,
     )
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)
@@ -76,18 +148,21 @@ def _run_vanilla(args: argparse.Namespace, active_profile: str) -> None:
         ctx.stop()
 
 
-def _run_patched(args: argparse.Namespace, active_profile: str) -> None:
+def _run_patched(args: argparse.Namespace) -> None:
     """CLI-агент с PGSessionManager и workspace-хуками."""
+    from lib.cli.console_loop import run_repl
+    from lib.cli.display_config import DisplayConfig
+    from lib.core.application_context import ApplicationContext
+
     ctx = ApplicationContext.create(
-        script_dir=_SCRIPT_DIR,
-        workspace_dir=_WORKSPACE_DIR,
+        script_dir=script_dir_for_runtime(),
+        workspace_dir=script_dir_for_runtime() / "workspace",
         enable_db_logging=True,
         enable_audit=False,
         enable_cron=True,
         storage_override=args.storage,
         session_override=args.session,
         print_llm_calls=True,
-        profile=active_profile,
     )
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)
@@ -100,9 +175,10 @@ def _run_patched(args: argparse.Namespace, active_profile: str) -> None:
     asyncio.create_task(_run_patched_repl(ctx, args))
 
 
-def _run_patched_repl(ctx: ApplicationContext, args: argparse.Namespace) -> None:
+def _run_patched_repl(ctx, args: argparse.Namespace) -> None:
     """REPL для patched-режима."""
-    import asyncio
+    from lib.cli.console_loop import run_repl
+    from lib.cli.display_config import DisplayConfig
 
     async def bg():
         await run_repl(ctx.agent, ctx.config, session=args.session,
@@ -117,7 +193,7 @@ def _run_patched_repl(ctx: ApplicationContext, args: argparse.Namespace) -> None
         ctx.stop()
 
 
-def __get_cron(_ctx: ApplicationContext):
+def __get_cron(_ctx):
     """CronService уже создан в ApplicationContext — возвращаем None,
     потому что AgentFactory уже подключила его из hooks."""
     return None
@@ -150,18 +226,53 @@ def _migrate_cron_store(config) -> None:
         pass
 
 
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="nanobot CLI agent")
-    parser.add_argument("--patched", "-P", action="store_true", default=False)
-    parser.add_argument("--storage", "-S", type=str, default="auto",
-                        choices=("auto", "file", "postgres"))
-    parser.add_argument("--session", "-s", type=str, default=None)
-    parser.add_argument("--profile", type=str, default=None,
-                        help="Профиль конфигурации (default=test). "
-                             "Для prod: --profile=prod. Также читается из "
-                             "NANOBOT_PROFILE (env).")
-    return parser.parse_args()
+_SCRIPT_DIR: Path | None = None
+
+
+def script_dir_for_runtime() -> Path:
+    """Абсолютный путь к каталогу ``cli_agent.py``.
+
+    Ленивая инициализация, чтобы ``import cli_agent`` оставался
+    чистым от side-effects (контракт ``application entrypoint``).
+    """
+    global _SCRIPT_DIR
+    if _SCRIPT_DIR is None:
+        _SCRIPT_DIR = Path(__file__).resolve().parent
+    return _SCRIPT_DIR
+
+
+console = Console()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Точка входа cli_agent с единым error-lifecycle boundary.
+
+    Аналогично ``gateway.main`` — ловит ``ConfigurationError`` и
+    превращает в ``sys.stderr.write + return 2``. Один contract для
+    всех трёх entrypoint'ов (см. design.md Decision 2 unification).
+    """
+    try:
+        args = _parse_args(argv)
+    except ConfigurationError as exc:
+        sys.stderr.write(f"FATAL: {exc}\n")
+        return 2
+
+    script_dir = script_dir_for_runtime()
+    workspace_dir = script_dir / "workspace"
+
+    # Добавляем корень проекта и workspace в sys.path (для lib.* / workspace.utils.*).
+    if str(script_dir) not in sys.path:
+        sys.path.insert(0, str(script_dir))
+    if str(workspace_dir) not in sys.path:
+        sys.path.insert(0, str(workspace_dir))
+
+    try:
+        _entrypoint_main(args)
+    except ConfigurationError as exc:
+        sys.stderr.write(f"FATAL: {exc}\n")
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -15,6 +15,63 @@ import sys
 import traceback
 from pathlib import Path
 
+
+_SUPPORTED_PROFILES = ("prod", "test")
+
+
+# ``ConfigurationError`` импортируется на module-level до ``_parse_args`` —
+# единственное место, где boundary-исключения могут всплыть из
+# validation-кода в argv-парсинге (missing --profile, неподдерживаемый
+# профиль). Сам импорт ``config`` чистый (никаких side-effects на
+# module-level — Phase A).
+from config import ConfigurationError  # noqa: E402
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Парсинг argv без делегирования валидации ``--profile`` в argparse.
+
+    Ошибки argparse (``--help``, missing flag) НЕ минуют boundary
+    ``ConfigurationError → exit 2``. Внутри startup-блока выполняется
+    явная whitelist-валидация (а не делегируется ``argparse.error``) —
+    иначе ``SystemExit(2)`` от argparse минует ``ConfigurationError``
+    boundary, нарушая Error Lifecycle Contract (см. design.md Decision 2).
+    """
+    parser = argparse.ArgumentParser(
+        description="nanobot gateway", add_help=False
+    )
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        help="Профиль конфигурации: prod | test.",
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Smoke-режим: парсит --profile, инициализирует SETTINGS, "
+             "печатает баннер и имя runtime-таблицы, выходит 0. "
+             "Только для Phase F integration-тестов; production не использует.",
+    )
+    if argv is None:
+        argv = sys.argv[1:]
+    if "--help" in argv or "-h" in argv:
+        parser.print_help()
+        sys.exit(0)
+    args, _unknown = parser.parse_known_args(argv)
+
+    # Whitelist и required-валидация — внутри startup-блока,
+    # НЕ через ``argparse.error``. Это даёт нам ``ConfigurationError``
+    # boundary вместо ``SystemExit(2)`` от argparse.
+    if not args.profile:
+        raise ConfigurationError("--profile is required")
+    if args.profile not in _SUPPORTED_PROFILES:
+        raise ConfigurationError(
+            f"--profile={args.profile!r} is not supported "
+            f"(allowed: prod, test)"
+        )
+    return args
+
+
 # Кросс-платформенная кодировка для ВСЕХ exec-подпроцессов (Windows + Linux).
 # На Windows PowerShell по умолчанию cp1251/OEM, и Python-подпроцессы
 # получают эту кодировку в stdout/stderr — кириллица в путях/выводе
@@ -35,62 +92,60 @@ if sys.platform != "win32":
 from loguru import logger
 from rich.console import Console
 
-from lib.core.application_context import ApplicationContext
-from lib.lifecycle.gateway_runner import GatewayRunner
-from lib.services.channel_factory import ChannelFactory
 
-_SCRIPT_DIR = Path(__file__).parent
-_WORKSPACE_DIR = _SCRIPT_DIR / "workspace"
+def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: Path) -> None:
+    """Startup + application body.
 
-# Добавляем корень проекта и workspace в sys.path, чтобы импортировать
-# lib.hooks.* и workspace.utils.*. Префикс (0) — приоритет
-# над site-packages (нужно для подмены модулей в тестах).
-sys.path.insert(0, str(_SCRIPT_DIR))
-sys.path.insert(0, str(_WORKSPACE_DIR))
+    Raises ``ConfigurationError`` on startup errors. Никакого
+    ``sys.exit(2)`` изнутри — это ответственность boundary
+    ``_run`` (см. design.md Decision 2 unification).
+    """
+    import config as _cfg
 
-console = Console()
+    # 1. Lifecycle-gate: публикация SETTINGS на основе argv --profile.
+    #    ``_SUPPORTED_PROFILES`` в argparse уже гарантирует whitelist,
+    #    но ``_initialize_settings`` повторяет проверку (defensive —
+    #    если кто-то вызовет lifecycle-gate напрямую минуя CLI).
+    _cfg._initialize_settings(profile=args.profile)
 
+    from lib.core.application_context import ApplicationContext
+    from lib.lifecycle.gateway_runner import GatewayRunner
 
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="nanobot gateway")
-    parser.add_argument("--profile", type=str, default=None,
-                        help="Профиль конфигурации (default=test). "
-                             "Для prod: --profile=prod. Также читается из "
-                             "NANOBOT_PROFILE (env).")
-    return parser.parse_args()
-
-
-def main() -> None:
-    """Точка входа gateway."""
-    args = _parse_args()
-    # Резолвим профиль один раз (CLI > env > default=test) и передаём
-    # то же значение в ApplicationContext.create().
-    from config import _resolve_mode
-
-    active_profile = _resolve_mode(args.profile)
     ctx = ApplicationContext.create(
-        script_dir=_SCRIPT_DIR,
-        workspace_dir=_WORKSPACE_DIR,
+        script_dir=script_dir,
+        workspace_dir=workspace_dir,
         enable_db_logging=True,
         enable_audit=True,
         print_llm_calls=_gateway_print_llm_calls(),
-        profile=active_profile,
     )
+
+    # 3. Smoke-режим: печатает баннер и runtime-таблицу, выходит сразу.
+    #    Позволяет integration-тестам проверить конфигурацию без подъёма
+    #    postgres channel/websocket listener/full event loop.
+    if args.smoke:
+        from lib.utils.project_version import project_version
+        from nanobot.cli.commands import __logo__, __version__
+
+        runtime_table = ctx.settings["logging"]["db"]["table_name"]
+        console.print(
+            f"{__logo__} nanobot gateway smoke · "
+            f"project v{project_version()} · nanobot {__version__} · "
+            f"profile={args.profile} · logging.db.table_name={runtime_table}"
+        )
+        console.print("OK_SMOKE_COMPLETE")
+        return
 
     _configure_logging(ctx.settings)
 
-    from nanobot.cli.commands import __logo__, __version__
-    from lib.utils.project_version import project_version
-
     console.print(
-        f"{__logo__} Starting nanobot gateway · project v{project_version()} "
-        f"(nanobot {__version__}) · profile={active_profile}..."
+        f"{__logo__} Starting nanobot gateway · project v{_project_version()} "
+        f"(nanobot {__version__}) · profile={args.profile}..."
     )
 
     # Назначаем callbacks и подменяем on_sync ДО ctx.start() — иначе
     # PgDuckDbSyncService.worker-тред успеет сделать initial_load раньше,
     # чем мы поставим callback (set_on_new_records_callback=None), и
-    # данные не попадут в in-memory DuckDB.
+    # данные не попадут in-memory DuckDB.
     first_sync_event: "asyncio.Event | None" = None
     if ctx.sync_service is not None and ctx.cache_store is not None:
         ctx.cache_store.open()
@@ -167,7 +222,20 @@ def main() -> None:
         ctx.stop()
 
 
-async def _run(ctx: ApplicationContext, first_sync_event) -> None:
+def _project_version() -> str:
+    """Ленивая обёртка над ``lib.utils.project_version.project_version``.
+
+    Module-level импорт lib.* был отложен до первого обращения,
+    потому что ``import lib.utils.project_version`` транзитивно
+    читает ``config.SETTINGS`` (через event_log / log-формат) —
+    и эта функция вызывается только при штатном старте, когда
+    ``_initialize_settings`` уже отработал.
+    """
+    from lib.utils.project_version import project_version
+    return project_version()
+
+
+async def _run(ctx, first_sync_event) -> None:
     """Основной рабочий цикл gateway: каналы + Streamlit + агент."""
     from lib.services.channel_factory import ChannelFactory
 
@@ -183,8 +251,8 @@ async def _run(ctx: ApplicationContext, first_sync_event) -> None:
         console.print(msg)
 
     from lib.services.subprocess_manager import SubprocessManager
-    subprocess_manager = SubprocessManager(log_dir=_SCRIPT_DIR / "logs")
-    streamlit_script = _SCRIPT_DIR / "streamlit_app.py"
+    subprocess_manager = SubprocessManager(log_dir=script_dir_for_runtime() / "logs")
+    streamlit_script = script_dir_for_runtime() / "streamlit_app.py"
     if _streamlit_enabled() and subprocess_manager.spawn_streamlit(streamlit_script):
         console.print("[green]✓[/green] Streamlit UI started on :8501")
 
@@ -220,7 +288,7 @@ async def _run(ctx: ApplicationContext, first_sync_event) -> None:
             errs = cache_store.preload_errors()
             if errs:
                 console.print(
-                    "[yellow]⚠[/yellow] vector index build errors: "
+                    f"[yellow]⚠[/yellow] vector index build errors: "
                     f"{len(errs)}"
                 )
                 for err in errs:
@@ -267,6 +335,22 @@ async def _run(ctx: ApplicationContext, first_sync_event) -> None:
         flushed = ctx.agent.sessions.flush_all()
         if flushed:
             logger.info("Flushed {} session(s) to disk", flushed)
+
+
+_SCRIPT_DIR: Path | None = None
+
+
+def script_dir_for_runtime() -> Path:
+    """Абсолютный путь к каталогу gateway.py.
+
+    Module-level ``Path(__file__).parent`` лениво: чтобы ``import gateway``
+    оставался чистым от side-effects (контракт ``application entrypoint``
+    из design.md Decision 2).
+    """
+    global _SCRIPT_DIR
+    if _SCRIPT_DIR is None:
+        _SCRIPT_DIR = Path(__file__).resolve().parent
+    return _SCRIPT_DIR
 
 
 def _configure_logging(settings) -> None:
@@ -364,5 +448,44 @@ def _report_db_pool_startup() -> None:
         console.print("[red]✗[/red] DB pool: статус недоступен")
 
 
+console = Console()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Точка входа gateway с единым error-lifecycle boundary.
+
+    ``parse → validate → _initialize_settings → runtime imports →
+    ApplicationContext`` — это ЕДИНСТВЕННЫЙ startup-путь (см. design.md
+    Decision 2 unification). Все три exception-проверки
+    (whitelist/unknown profile, прочие ConfigurationError) поднимают
+    ``ConfigurationError``; этот boundary ловит её и превращает
+    в ``sys.stderr.write + return 2`` — никаких прямых ``sys.exit``
+    из validation-кода.
+    """
+    try:
+        args = _parse_args(argv)
+    except ConfigurationError as exc:
+        sys.stderr.write(f"FATAL: {exc}\n")
+        return 2
+
+    script_dir = script_dir_for_runtime()
+    workspace_dir = script_dir / "workspace"
+
+    # Добавляем корень проекта и workspace в sys.path, чтобы импортировать
+    # lib.hooks.* и workspace.utils.*. Префикс (0) — приоритет
+    # над site-packages (нужно для подмены модулей в тестах).
+    if str(script_dir) not in sys.path:
+        sys.path.insert(0, str(script_dir))
+    if str(workspace_dir) not in sys.path:
+        sys.path.insert(0, str(workspace_dir))
+
+    try:
+        _entrypoint_main(args, script_dir, workspace_dir)
+    except ConfigurationError as exc:
+        sys.stderr.write(f"FATAL: {exc}\n")
+        return 2
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
