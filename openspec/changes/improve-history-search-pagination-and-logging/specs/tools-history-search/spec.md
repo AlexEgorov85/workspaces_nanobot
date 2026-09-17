@@ -111,10 +111,18 @@ The system SHALL возвращать JSON-строку со следующей 
   - `timestamp` — ISO-8601;
   - `event_type`, `name`, `level`, `summary` — как в БД;
   - `payload` — JSON-string (может быть обрезан; см. truncation);
-  - `payload_truncated: bool` — `true`, если payload этого
-    события был обрезан до `per_event_cap` символов через
-    `truncate_middle` (сохраняет голову и хвост, маркер
-    "(N chars truncated)" в середине). Дефолт `false`.
+  - `payload_truncated: bool` — `true`, если итоговый
+    `payload` события отличается от payload'а в БД
+    вследствие **любого** механизма ограничения размера,
+    применённого tool'ом: `per_event_cap`
+    (первый проход через `truncate_middle`) ИЛИ
+    `max_result_chars` (повторное уменьшение `cap` через
+    `cap //= 2` с повторным `truncate_middle`).
+    `payload_truncated` SHALL быть `true` независимо от
+    того, какой из двух механизмов сработал, и независимо
+    от того, сколько раз payload уменьшался. Маркер
+    "(N chars truncated)" в середине сохраняется.
+    Дефолт `false`.
 
 #### Scenario: Успешный ответ без truncation
 - **WHEN** запрос возвращает 5 событий, ни одно не обрезано,
@@ -180,6 +188,25 @@ The system SHALL возвращать JSON-строку со следующей 
   и общий JSON влезает в `max_result_chars`
 - **THEN** `results_truncated=false`, `payload_truncated=true`
   на этом событии
+
+#### Scenario: payload_truncated при повторном ужатии из-за max_result_chars
+- **WHEN** в БД ровно одно событие с payload > per_event_cap;
+  `limit=10, offset=0`; первый truncation-проход
+  сжимает payload до `per_event_cap` (4000), но
+  итоговый JSON всё ещё превышает `max_result_chars`;
+  срабатывает второй проход с `cap //= 2` —
+  payload дополнительно сжимается до ~2000,
+  затем до ~1000, и т.д. до вписывания в `max_result_chars`
+- **THEN** ответ содержит это единственное событие
+  с `payload_truncated=true` (потому что итоговый
+  payload отличается от исходного в БД),
+  `results_truncated=false` (никакое **целое** событие
+  не было выброшено — это НЕ results_truncated;
+  уменьшение payload не считается за выброс события),
+  `has_more = false` (нет других событий ни в БД,
+  ни в выборке), `next_offset = offset + count = offset + 1`.
+  Возврат `results_truncated=true` в этом случае
+  SHALL считаться багом контракта
 
 ### Requirement: Детерминированный порядок страниц (для неизменного набора строк)
 
