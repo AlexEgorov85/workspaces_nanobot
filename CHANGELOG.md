@@ -137,6 +137,44 @@
   Streamlit UI не стартовал). Подробности — `docs/INTERNAL_API.md`
   § «Передача профиля в application subprocess».
 
+- **`history_search`: пагинация и честные truncation-флаги**
+  (`openspec/changes/improve-history-search-pagination-and-logging`).
+  Добавлен параметр `offset` (≥ 0, дефолт 0) и поля ответа `has_more` /
+  `next_offset` — продолжение пагинации через `offset = next_offset`,
+  а не через `offset + limit`, чтобы при `results_truncated=true` не
+  пропустить отброшенные события. SQL: `ORDER BY "timestamp" DESC,
+  "id" DESC LIMIT %s OFFSET %s` (детерминированный tie-breaker по
+  UUID `agent_gateway_logs.id` стабилен для равных `timestamp` в
+  одном батче flush'а); `LIMIT effective_limit + 1` даёт лишнюю
+  строку для детекции `db_has_more`. Разделены два разных механизма
+  truncation: `results_truncated` (на ответе — выброшены целые события,
+  чтобы влезть в `max_result_chars`) и `payload_truncated` (на каждом
+  событии — ужатие payload'а конкретного события через
+  `truncate_middle`). Старое поле `truncated` помечено **deprecated**
+  в пользу `results_truncated`; алиас удаляется в отдельном follow-up
+  change. `has_more = db_has_more OR results_truncated` — композитная
+  формула, гарантирующая что следующая страница остаётся видна даже
+  когда `LIMIT N+1` не нашёл следующей строки в БД, но часть
+  отобранных событий была отброшена truncation'ом.
+- **`db_logging_service`: диагностика `written_by_type` и
+  `oldest_queued_age_sec`** в `get_stats()`. `written_by_type: dict[str, int]`
+  инкрементируется **только** после успешного `_flush_batch` (не в
+  `_enqueue`); счётчик не сбрасывается при повторном `start()` —
+  lifetime эквивалентен lifetime экземпляра. `oldest_queued_age_sec`
+  — возраст самого старого `LogEvent` в очереди (`max(time.time()
+  - queued_at)`); учитываются только `LogEvent` (не
+  `_QuestionRunRecord` и не `_FlushSentinel`); пустая очередь или
+  очередь только из служебных объектов даёт `None`. `LogEvent.
+  queued_at: float | None` заполняется в `_enqueue` значением
+  `time.time()`.
+- **`logging.db.flush_interval_sec` в типизированной конфигурации**:
+  новое поле `LoggingDbSettings.flush_interval_sec: float | None`,
+  диапазон `0.5 ≤ value ≤ 60.0`, дефолт `5.0`. Значение передаётся
+  через `ConfigurationResolver` → `ProjectSettings` →
+  `ApplicationContext` → `DbLoggingService.__init__`; вне диапазона —
+  `pydantic.ValidationError` на старте `ApplicationContext.create`.
+  Сервис НЕ читает конфиг напрямую. См. `AGENTS.md` § «Configuration».
+
 ### Removed
 
 - **Таблица `public.agent_vector_index_store`** (имя бралось из

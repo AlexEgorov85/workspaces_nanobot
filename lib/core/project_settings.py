@@ -237,6 +237,7 @@ class ChannelsSettings(_StrictOptional):
 
 class LoggingDbSettings(_StrictOptional):
     enabled: bool | None = None
+    flush_interval_sec: float | None = Field(default=None, ge=0.5, le=60.0)
 
 
 class LoggingSettings(_StrictOptional):

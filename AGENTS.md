@@ -75,6 +75,7 @@
   - `logging.db.retention_days` (целое, дефолт `90`) — возраст в днях, старше которого события и question_runs удаляются фоновым пулом `DbLoggingService` (через `NOW() - (N || ' days')::interval`, совместимо с Greenplum 6.5). `0` или отсутствие — авто-удаление по возрасту выключено (события хранятся вечно).
   - `logging.db.purge_interval_sec` (дефолт `3600.0`) — интервал периодической очистки в worker-цикле `DbLoggingService`.
   - Любые пустые `outbound_final`/`outbound_delta` (пустой `content` и нет `media` — stream-чанки/синтетические финалы) удаляются ВСЕГДА при каждой итерации очистки, независимо от `retention_days`. Реализация: `DbLoggingService.purge_empty_outbound` / `purge_old` (`lib/services/db_logging_service.py`).
+  - `logging.db.flush_interval_sec` (float, дефолт `5.0`, диапазон `0.5 ≤ value ≤ 60.0`) — интервал flush'а батча worker-потоком `DbLoggingService` (секунды). Уменьшение ускоряет видимость событий в БД (полезно для отладки/диагностики), увеличение снижает нагрузку на БД при burst-трафике. Тип и диапазон валидируются через `LoggingDbSettings.flush_interval_sec` в `lib/core/project_settings.py`; вне диапазона — `pydantic.ValidationError` на старте `ApplicationContext.create`.
 - Настройки nanobot (агенты, провайдеры, API) — в `config.json`.
 - Секреты (API-ключи, `DATABASE_URL`) — в `.secrets.env` через `${VAR}`.
 - Читай в коде через `get_setting(*keys, default=...)` или `SETTINGS.*` из `config.py`.

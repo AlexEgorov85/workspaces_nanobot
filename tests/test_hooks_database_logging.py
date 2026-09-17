@@ -491,3 +491,66 @@ class TestBusLoggers:
         assert hook._request_id  # сгенерированный UUID
         svc.register_request.assert_called_once()
         assert svc.register_request.call_args.args[1] == hook._request_id
+
+
+class TestRunFinishedEventShape:
+    """Регрессионный тест: ``run_finished`` фактически пишется хуком
+    ``DatabaseLoggingHook.after_run`` (закрывает баг №3 из proposal:
+    «пишется ли ``run_finished`` вообще»).
+    """
+
+    def test_after_run_records_run_finished_event_type(self, sys_path):
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
+        from lib.services.db_logging_service import (
+            DbLoggingService,
+            LogEvent,
+        )
+
+        svc = DbLoggingService(
+            dsn="", table_name="x", question_runs_table="y",
+        )
+        hook = DatabaseLoggingHook(svc)
+        ctx = MagicMock()
+        ctx.final_content = "hello world"
+        ctx.tools_used = ["read", "write"]
+        ctx.stop_reason = "stop"
+        ctx.had_injections = False
+        ctx.error = None
+        ctx.usage = {"total_tokens": 123}
+
+        asyncio.run(hook.before_iteration(MagicMock(session_key="cli:1")))
+        asyncio.run(hook.after_run(ctx))
+        events = [e for e in svc._queue.queue if isinstance(e, LogEvent)]
+        assert any(e.event_type == "run_finished" for e in events), (
+            "after_run должен положить LogEvent с event_type='run_finished'"
+        )
+
+    def test_after_run_payload_shape(self, sys_path):
+        """Payload ``run_finished`` содержит ожидаемые поля
+        (для ``history_search``-парсинга)."""
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
+        from lib.services.db_logging_service import (
+            DbLoggingService,
+            LogEvent,
+        )
+
+        svc = DbLoggingService(
+            dsn="", table_name="x", question_runs_table="y",
+        )
+        hook = DatabaseLoggingHook(svc)
+        ctx = MagicMock()
+        ctx.final_content = "ответ"
+        ctx.tools_used = ["a", "b"]
+        ctx.stop_reason = "stop"
+        ctx.had_injections = False
+        ctx.error = None
+        ctx.usage = {"total_tokens": 7}
+
+        asyncio.run(hook.before_iteration(MagicMock(session_key="cli:1")))
+        asyncio.run(hook.after_run(ctx))
+        events = [e for e in svc._queue.queue if isinstance(e, LogEvent)]
+        run_ev = next(e for e in events if e.event_type == "run_finished")
+        assert run_ev.payload["final_content"] == "ответ"
+        assert run_ev.payload["tools_used"] == ["a", "b"]
+        assert run_ev.payload["stop_reason"] == "stop"
+        assert run_ev.payload["had_injections"] is False

@@ -75,6 +75,7 @@ class LogEvent:
     request_id: str | None = None
     name: str | None = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    queued_at: float | None = None
 
 
 @dataclass
@@ -158,6 +159,7 @@ class DbLoggingService:
             "last_purge_at": None,
             "last_purged_events": 0,
             "last_purged_runs": 0,
+            "written_by_type": {},
         }
 
         # Индекс «текущий вопрос»: session_key -> контекст вопроса.
@@ -512,8 +514,33 @@ class DbLoggingService:
         s.update({
             "running": self.is_running(),
             "queue_size": self._queue.qsize(),
+            "oldest_queued_age_sec": self._compute_oldest_queued_age_sec(),
         })
         return s
+
+    def _compute_oldest_queued_age_sec(self) -> float | None:
+        """Возраст самого старого ``LogEvent`` в очереди (секунды).
+
+        Учитываются ТОЛЬКО объекты ``LogEvent`` с непустым ``queued_at``
+        (выставленным в ``_enqueue``). ``_QuestionRunRecord`` и
+        ``_FlushSentinel`` исключаются: они не идут в
+        ``agent_gateway_logs`` и не должны влиять на метрику задержки
+        записи событий. Если очередь пуста или содержит только
+        служебные объекты — возвращается ``None``.
+
+        Возвращает ``max(time.time() - queued_at)`` (самый старый = самый
+        большой возраст). Семантика — «как давно самое старое событие
+        ждёт записи», а не «возраст первого по FIFO».
+        """
+        now = time.time()
+        ages = [
+            now - event.queued_at
+            for event in self._queue.queue
+            if isinstance(event, LogEvent) and event.queued_at is not None
+        ]
+        if not ages:
+            return None
+        return max(ages)
 
     # ------------------------------------------------------------------
     # Внутренние
@@ -535,6 +562,7 @@ class DbLoggingService:
             ``True`` — событие в очереди, ``False`` — очередь переполнена
             (``queue_full++`` в статистике). Никогда не блокирует.
         """
+        event.queued_at = time.time()
         try:
             self._queue.put_nowait(event)
         except queue.Full:
@@ -701,6 +729,10 @@ class DbLoggingService:
                 self._stats["written"] += len(batch)
                 self._stats["batch_count"] += 1
                 self._stats["connected"] = True
+                for etype, count in _count_by_type(batch).items():
+                    self._stats["written_by_type"][etype] = (
+                        self._stats["written_by_type"].get(etype, 0) + count
+                    )
         except Exception as exc:
             self._schema_ok = False
             with self._state_lock:
@@ -943,3 +975,19 @@ class DbLoggingService:
         self.purge_empty_outbound()
         if self._retention_days > 0:
             self.purge_old(self._retention_days)
+
+
+def _count_by_type(batch: list[LogEvent]) -> dict[str, int]:
+    """Подсчитать число событий каждого event_type в батче.
+
+    Возвращает dict с ключами = event_type (только непустые значения).
+    Используется для инкремента ``written_by_type`` только после успешного
+    INSERT'а в БД.
+    """
+    counter: dict[str, int] = {}
+    for e in batch:
+        et = e.event_type
+        if not et:
+            continue
+        counter[et] = counter.get(et, 0) + 1
+    return counter

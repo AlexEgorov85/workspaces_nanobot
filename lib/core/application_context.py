@@ -630,13 +630,29 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
             f"table_name={table_name!r}, question_runs_table={question_runs_table!r}"
         )
 
+    # ``logging.db.flush_interval_sec`` (см. ``LoggingDbSettings``): диапазон
+    # 0.5–60.0 сек, дефолт 5.0. Тип и значение валидируются pydantic на
+    # старте ``ApplicationContext.create`` через ``validate_project_settings``,
+    # поэтому здесь читаем уже валидное значение из типизированной проекции.
+    flush_interval_sec = 5.0
+    try:
+        if (
+            ctx.project_settings is not None
+            and ctx.project_settings.logging is not None
+            and ctx.project_settings.logging.db is not None
+            and ctx.project_settings.logging.db.flush_interval_sec is not None
+        ):
+            flush_interval_sec = ctx.project_settings.logging.db.flush_interval_sec
+    except Exception:
+        pass
+
     return DbLoggingService(
         dsn=dsn,
         table_name=table_name,
         question_runs_table=question_runs_table,
         schema=db_cfg.get("schema", "public"),
         dialect=db_cfg.get("dialect", "postgres"),
-        flush_interval_sec=float(db_cfg.get("flush_interval_sec", 5.0)),
+        flush_interval_sec=flush_interval_sec,
         batch_size=int(db_cfg.get("batch_size", 100)),
         queue_maxsize=int(db_cfg.get("queue_maxsize", 10000)),
         min_level=db_cfg.get("min_level", "INFO"),

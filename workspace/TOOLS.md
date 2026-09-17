@@ -53,6 +53,34 @@ This file documents non-obvious constraints and usage patterns.
 - `session_scope` (опц., дефолт `current`) — `current` (только текущая
   сессия) или `all` (по всем сессиям).
 - `limit` (опц.) — максимум событий (по конфигу `max_rows`).
+- `offset` (опц., дефолт 0) — пропустить первые `offset` событий
+  после сортировки `ORDER BY timestamp DESC, id DESC`. Продолжать
+  пагинацию через `next_offset` из предыдущего ответа, **НЕ** через
+  `offset + limit` (при `results_truncated=true` часть событий была
+  отброшена).
+
+**Ответ (JSON):**
+
+- `count` — количество событий в массиве `events`.
+- `has_more` — `true`, если есть следующая страница. Композитная формула
+  `db_has_more OR results_truncated`: даже когда `LIMIT N+1` не нашёл
+  следующей строки в БД, `results_truncated=true` означает, что
+  truncation выбросил часть отобранных событий и следующая страница
+  обязательна.
+- `next_offset` — целое ≥ 0; `offset` для следующего запроса при
+  пагинации. Равно `original_offset + count` (после всех truncation-проходов).
+- `results_truncated` — `true`, если из выборки были выброшены целые
+  события, чтобы общий JSON влез в `max_result_chars`.
+- `payload_truncated` (на каждом событии) — `true`, если `payload`
+  конкретного события отличается от БД из-за обрезки через
+  `truncate_middle`.
+- `truncated` — **deprecated** алиас `results_truncated`. Сохранён ради
+  совместимости; удаляется в отдельном follow-up change. Новый код должен
+  читать `results_truncated` (выброс целых событий) и `payload_truncated`
+  (ужатие payload'а конкретного события) раздельно.
+- `events: [{event_id, timestamp, event_type, name, level, summary,
+  payload, payload_truncated}]` — `payload` хранится как JSON-string
+  (нужен `json.loads` для получения структуры).
 
 **Примеры:**
 
@@ -62,6 +90,8 @@ This file documents non-obvious constraints and usage patterns.
   `history_search(event_type="context_compacted", session_scope="current")`
 - «Что я писал про договор аренды?» →
   `history_search(query="договор аренды", event_type="llm_call")`
+- Пагинация: первая страница → `history_search(limit=20)` →
+  если `has_more=true`, продолжить с `offset=next_offset` (НЕ `20`).
 
 **Замечания:**
 
@@ -69,6 +99,133 @@ This file documents non-obvious constraints and usage patterns.
   и пути), а НЕ выдуманные типы (`file_attached`, `file_created`,
   `document_summarized` — таких нет в журнале).
 - Если результат пустой — отвечай «не найдено в истории», не выдумывай.
+- `offset`-пагинация **не snapshot-consistent**: при INSERT'е новых
+  событий между запросами более новые строки попадают в начало
+  выборки. Если нужна строгая консистентность — это отдельный
+  future change (cursor-пагинация).
+
+### Структура payload по event_type
+
+Схема `payload` описывает **текущую** форму данных в `agent_gateway_logs`
+на момент публикации change и явно помечает поля, сериализованные как
+JSON-string. Изменение формы данных требует отдельного change.
+
+#### `tool_call.payload`
+
+```json
+{
+  "tool": "read_file",
+  "args": {"path": "data/report.pdf"},
+  "tool_call_id": "toolu_01H..."
+}
+```
+
+Все поля — простых типов или dict'ы.
+
+#### `tool_result.payload`
+
+```json
+{
+  "tool": "read_file",
+  "status": "ok",
+  "result": "{\"path\": \"data/report.pdf\", \"size\": 12345}",
+  "error": null
+}
+```
+
+**Важно:** `result` хранится как JSON-string (сериализуется через
+`psycopg2.extras.Json` и при больших объёмах обрезается с маркером
+`(N chars truncated)`). Для получения структуры примени
+`json.loads(payload.result)`.
+
+#### `llm_call.payload`
+
+```json
+{
+  "prompt": [
+    {"role": "system", "content": "..."},
+    {"role": "user", "content": "..."}
+  ],
+  "response": {"content": "...", "finish_reason": "stop", "tool_calls": [...]}
+}
+```
+
+`prompt` — массив ролей (system/user/assistant/tool), `response` —
+объект с контентом и метаданными. Размер payload'а сильно варьируется
+(большие `llm_call` обрезаются до `per_event_cap=4000` через
+`truncate_middle`).
+
+#### `run_finished.payload`
+
+```json
+{
+  "final_content": "итоговый ответ агента",
+  "tools_used": ["read_file", "compact_context"],
+  "stop_reason": "stop",
+  "had_injections": false,
+  "request_id": "uuid-..."
+}
+```
+
+Все поля — простых типов или list/str. `tools_used` — список имён
+инструментов, использованных в прогоне.
+
+#### `subagent_run_finished.payload`
+
+```json
+{
+  "final_content": "ответ подагента",
+  "tools_used": ["compact_context"],
+  "stop_reason": "stop",
+  "task_id": "task_01H...",
+  "task": "первое user-сообщение подагента (краткое описание задачи)",
+  "request_id": "subagent:task_01H...",
+  "parent_request_id": "uuid-..."
+}
+```
+
+`task_id` и `request_id` идентичны (= `subagent:<task_id>`),
+`parent_request_id` — `request_id` родительского вопроса, из которого
+запущен подагент.
+
+#### `inbound.payload`
+
+```json
+{
+  "content": "сообщение пользователя",
+  "message_id": "...",
+  "sender_id": "user_42",
+  "chat_id": "chat_42",
+  "media": [{"filename": "report.pdf", "file_id": "...", "mime_type": "application/pdf", "file_size": 12345}]
+}
+```
+
+`sender_id` / `chat_id` опциональны (есть не всегда), `media` — list
+объектов `MediaItem` (см. `workspace/utils/media.py`). `message_id`
+связывает `inbound` с `request_id` вопроса.
+
+#### `context_compacted.payload`
+
+Определяется реализацией `ContextCompactionService._notify`
+(`lib/services/context_compaction.py`) на момент архивации spec
+(snapshot, не долгосрочный нормативный контракт). Изменение схемы
+требует отдельного change.
+
+```json
+{
+  "mode": "tokens",
+  "archived_msgs": 42,
+  "kept_msgs": 8,
+  "tokens_before": 45000,
+  "tokens_after": 12000,
+  "summary": "краткое описание заархивированного",
+  "raw_dump": false
+}
+```
+
+`mode` — `tokens` (token-budget авто-сжатие) или `idle` (idle-сжатие;
+сейчас отключено, `idleCompactAfterMinutes: 0`). `raw_dump` — был ли
+полный дамп сообщений в стороннее хранилище.
 
 ## legal_summarizer_query — follow-up по уже проанализированному документу
 

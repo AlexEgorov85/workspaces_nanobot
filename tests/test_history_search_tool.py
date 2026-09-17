@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -92,8 +93,7 @@ async def test_search_event_type_filter() -> None:
 
 @pytest.mark.asyncio
 async def test_search_truncates_long_output() -> None:
-    import json as _json
-
+    
     big = [{"timestamp": "t", "event_type": "e", "level": "INFO",
             "summary": "s", "payload": {"x": "y" * 10000}}]
     tool = HistorySearchTool(config=HistorySearchToolConfig(max_result_chars=200))
@@ -105,7 +105,7 @@ async def test_search_truncates_long_output() -> None:
         # исходный JSON был бы ~10030 символов; усечение заметно режет,
         # при этом JSON остаётся валидным (агент должен его распарсить)
         assert len(result) < 1000
-        parsed = _json.loads(result)
+        parsed = json.loads(result)
         assert parsed["status"] == "success"
 
 
@@ -165,8 +165,7 @@ async def test_search_tool_name_combined_with_query() -> None:
 @pytest.mark.asyncio
 async def test_search_includes_name_field_in_events() -> None:
     """SELECT возвращает ``name``, и событие содержит поле ``name``."""
-    import json as _json
-
+    
     rows = [
         {
             "timestamp": "2026-01-01T10:00:00+00:00",
@@ -183,7 +182,7 @@ async def test_search_includes_name_field_in_events() -> None:
     ), patch("utils.db.fetch", return_value=rows):
         tool = _make_tool()
         result = await tool.execute(query=None)
-        parsed = _json.loads(result)
+        parsed = json.loads(result)
         assert parsed["count"] == 1
         ev = parsed["events"][0]
         assert ev["name"] == "compact_context"
@@ -195,8 +194,7 @@ async def test_search_returns_event_id_in_each_event() -> None:
     """Закрывает gap №3 (ANALYSIS.md): SELECT возвращает ``id``, и в JSON
     каждое событие содержит ``event_id``. Колонка ``id`` в таблице уже была,
     правка только в tool'е (расширение SELECT)."""
-    import json as _json
-
+    
     rows = [
         {
             "id": "11111111-2222-3333-4444-555555555555",
@@ -223,8 +221,399 @@ async def test_search_returns_event_id_in_each_event() -> None:
     ), patch("utils.db.fetch", return_value=rows):
         tool = _make_tool()
         result = await tool.execute(query=None)
-        parsed = _json.loads(result)
+        parsed = json.loads(result)
         assert parsed["count"] == 2
         ids = [ev.get("event_id") for ev in parsed["events"]]
         assert "11111111-2222-3333-4444-555555555555" in ids
         assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in ids
+
+
+class TestPagination:
+    """``offset`` и ``has_more``/``next_offset`` (D1, D2 change)."""
+
+    @pytest.mark.asyncio
+    async def test_schema_includes_offset_with_default_zero(self):
+        """JSON-schema ``history_search`` содержит ``offset`` с дефолтом 0."""
+        from workspace.tools.history_search_tool import (
+            HistorySearchTool,
+            HistorySearchToolConfig,
+        )
+
+        tool = HistorySearchTool(config=HistorySearchToolConfig())
+        params = tool.to_schema()["function"]["parameters"]
+        assert "offset" in params["properties"]
+        assert params["properties"]["offset"]["type"] == "integer"
+        assert params["properties"]["offset"].get("default") == 0
+        assert params["properties"]["offset"]["minimum"] == 0
+
+    @pytest.mark.asyncio
+    async def test_sql_uses_limit_offset_and_deterministic_order(self):
+        """SQL: ``ORDER BY timestamp DESC, id DESC LIMIT %s OFFSET %s``."""
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            await tool.execute(query=None, limit=7, offset=3)
+            sql, *params = fetch.call_args.args
+            assert '"timestamp" DESC, "id" DESC' in sql
+            assert "LIMIT %s OFFSET %s" in sql
+            assert "ORDER BY" in sql
+            # Параметры: effective_limit+1 и offset
+            assert params[-2] == 8  # 7 + 1
+            assert params[-1] == 3
+
+    @pytest.mark.asyncio
+    async def test_offset_zero_equivalent_to_default_behavior(self):
+        """``offset=0`` (по умолчанию) ведёт себя как раньше."""
+        rows = [
+            {"id": f"id-{i}", "timestamp": f"t{i}", "event_type": "x",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {"i": i}}
+            for i in range(3)
+        ]
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows) as fetch:
+            tool = _make_tool()
+            r1 = await tool.execute(query=None)
+            r2 = await tool.execute(query=None, offset=0)
+            assert r1 == r2
+            # offset=0 в params
+            assert fetch.call_args.args[-1] == 0
+
+    @pytest.mark.asyncio
+    async def test_has_more_true_when_more_rows_in_db(self):
+        """25 событий в БД, limit=10 → db_has_more=true, count=10."""
+        rows = [
+            {"id": f"id-{i}", "timestamp": f"t{i}", "event_type": "x",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {}}
+            for i in range(11)  # LIMIT N+1 = 11 строк
+        ]
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows):
+            tool = _make_tool()
+            result = await tool.execute(query=None, limit=10)
+            data = json.loads(result)
+            assert data["has_more"] is True
+            assert data["count"] == 10
+            assert data["next_offset"] == 10
+            assert data["results_truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_has_more_false_on_last_page(self):
+        """Последняя страница: limit=10, offset=20, в БД ровно 25 строк → count=5."""
+        rows = [
+            {"id": f"id-{i}", "timestamp": f"t{i}", "event_type": "x",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {}}
+            for i in range(5)  # только 5 последних
+        ]
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows):
+            tool = _make_tool()
+            result = await tool.execute(query=None, limit=10, offset=20)
+            data = json.loads(result)
+            assert data["has_more"] is False
+            assert data["count"] == 5
+            assert data["next_offset"] == 25
+            assert data["results_truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_has_more_true_when_results_truncated_even_without_db_more(self):
+        """Регрессия: ровно ``effective_limit`` событий в БД, но
+        truncation выбросил часть → ``has_more=true`` (агенту
+        обязательно звать следующую страницу)."""
+        rows = [
+            {"id": f"id-{i}", "timestamp": f"t{i}", "event_type": "tool_call",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {"k": "v"}}
+            for i in range(10)
+        ]
+        # max_result_chars настолько мал, что 4 события уже не влезают.
+        tool = HistorySearchTool(
+            config=HistorySearchToolConfig(max_result_chars=300),
+        )
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows):
+            result = await tool.execute(query=None, limit=10)
+            data = json.loads(result)
+            # db_has_more = false (10 строк в БД == effective_limit),
+            # но truncation выбросил 6 событий → results_truncated=true.
+            assert data["results_truncated"] is True
+            assert data["has_more"] is True
+            assert data["count"] < 10
+            # next_offset = offset + count после truncation'а
+            assert data["next_offset"] == data["count"]
+
+    @pytest.mark.asyncio
+    async def test_next_offset_no_truncation(self):
+        """Без truncation: ``next_offset = offset + count``."""
+        rows = [
+            {"id": f"id-{i}", "timestamp": f"t{i}", "event_type": "x",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {}}
+            for i in range(10)
+        ]
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows):
+            tool = _make_tool()
+            result = await tool.execute(query=None, limit=10)
+            data = json.loads(result)
+            assert data["count"] == 10
+            assert data["next_offset"] == 10
+
+    @pytest.mark.asyncio
+    async def test_next_offset_after_truncation(self):
+        """С truncation: ``next_offset = 0 + count`` (НЕ ``0 + limit``)."""
+        rows = [
+            {"id": f"id-{i}", "timestamp": f"t{i}", "event_type": "tool_call",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {"k": "v"}}
+            for i in range(10)
+        ]
+        tool = HistorySearchTool(
+            config=HistorySearchToolConfig(max_result_chars=400),
+        )
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows):
+            result = await tool.execute(query=None, limit=10, offset=0)
+            data = json.loads(result)
+            assert data["results_truncated"] is True
+            assert data["count"] < 10
+            assert data["next_offset"] == data["count"]
+
+    @pytest.mark.asyncio
+    async def test_next_offset_with_offset_arg(self):
+        rows = [
+            {"id": f"id-{i}", "timestamp": f"t{i}", "event_type": "x",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {}}
+            for i in range(4)
+        ]
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows):
+            tool = _make_tool()
+            result = await tool.execute(query=None, limit=10, offset=10)
+            data = json.loads(result)
+            assert data["count"] == 4
+            assert data["next_offset"] == 14
+
+    @pytest.mark.asyncio
+    async def test_empty_result_no_truncation(self):
+        """Пустой результат: ``count=0, has_more=false, results_truncated=false``."""
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=[]):
+            tool = _make_tool()
+            result = await tool.execute(query=None)
+            data = json.loads(result)
+            assert data["status"] == "success"
+            assert data["count"] == 0
+            assert data["has_more"] is False
+            assert data["results_truncated"] is False
+            assert data["next_offset"] == 0
+            assert data["events"] == []
+
+
+class TestTruncationFlags:
+    """``results_truncated`` vs ``payload_truncated`` — независимые флаги."""
+
+    @pytest.mark.asyncio
+    async def test_results_truncated_and_deprecated_alias(self):
+        """При truncation: ``results_truncated=true`` и ``truncated=true``.
+        Без truncation: оба ``false``."""
+        rows = [
+            {"id": f"id-{i}", "timestamp": f"t{i}", "event_type": "tool_call",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {"k": "v"}}
+            for i in range(10)
+        ]
+        tool_trunc = HistorySearchTool(
+            config=HistorySearchToolConfig(max_result_chars=300),
+        )
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows):
+            r_trunc = await tool_trunc.execute(query=None, limit=10)
+            data = json.loads(r_trunc)
+            assert data["results_truncated"] is True
+            assert data["truncated"] is True
+
+        small_rows = [
+            {"id": "id-1", "timestamp": "t1", "event_type": "tool_call",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {"k": "v"}}
+        ]
+        tool = _make_tool()
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=small_rows):
+            r_ok = await tool.execute(query=None)
+            data = json.loads(r_ok)
+            assert data["results_truncated"] is False
+            assert data["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_payload_truncated_per_event(self):
+        """payload > per_event_cap → ``payload_truncated=true`` только на этом событии."""
+        big = "x" * 5000
+        rows = [
+            {"id": "big", "timestamp": "t1", "event_type": "llm_call",
+             "name": "llm", "level": "INFO", "summary": "s",
+             "payload": {"prompt": big}},
+            {"id": "small", "timestamp": "t2", "event_type": "tool_call",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {"k": "ok"}},
+        ]
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows):
+            tool = _make_tool()
+            result = await tool.execute(query=None, limit=10)
+            data = json.loads(result)
+            assert data["count"] == 2
+            assert data["results_truncated"] is False
+            by_id = {ev["event_id"]: ev for ev in data["events"]}
+            assert by_id["big"]["payload_truncated"] is True
+            assert by_id["small"]["payload_truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_results_and_payload_independent(self):
+        """payload_truncated=true, results_truncated=false (payload ужат, события не выброшены)."""
+        big = "x" * 5000
+        rows = [
+            {"id": "big", "timestamp": "t1", "event_type": "llm_call",
+             "name": "llm", "level": "INFO", "summary": "s",
+             "payload": {"prompt": big}},
+        ]
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows):
+            tool = _make_tool()
+            result = await tool.execute(query=None, limit=10)
+            data = json.loads(result)
+            assert data["count"] == 1
+            assert data["results_truncated"] is False
+            assert data["events"][0]["payload_truncated"] is True
+
+    @pytest.mark.asyncio
+    async def test_payload_truncated_via_max_result_chars_second_pass(self):
+        """Регрессия: один event с большим payload, max_result_chars настолько
+        мал, что срабатывает второй проход (cap //= 2). Событие остаётся,
+        payload_truncated=true, results_truncated=false."""
+        big = "x" * 5000  # > per_event_cap (4000)
+        rows = [
+            {"id": "only", "timestamp": "t1", "event_type": "llm_call",
+             "name": "llm", "level": "INFO", "summary": "s",
+             "payload": {"prompt": big}},
+        ]
+        # max_result_chars достаточно мал, чтобы один пережатый payload
+        # всё ещё не влез — должно сработать уменьшение cap и пережим.
+        tool = HistorySearchTool(
+            config=HistorySearchToolConfig(max_result_chars=400),
+        )
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows):
+            result = await tool.execute(query=None, limit=10)
+            data = json.loads(result)
+            assert data["count"] == 1
+            assert data["results_truncated"] is False
+            assert data["events"][0]["payload_truncated"] is True
+
+    @pytest.mark.asyncio
+    async def test_truncated_alias_equals_results_truncated(self):
+        """Deprecated ``truncated`` всегда равен ``results_truncated``."""
+        rows = [
+            {"id": f"id-{i}", "timestamp": f"t{i}", "event_type": "tool_call",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {"k": "v"}}
+            for i in range(10)
+        ]
+        tool = HistorySearchTool(
+            config=HistorySearchToolConfig(max_result_chars=300),
+        )
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows):
+            result = await tool.execute(query=None, limit=10)
+            data = json.loads(result)
+            assert data["truncated"] == data["results_truncated"]
+
+
+class TestSnapshotConsistency:
+    """Snapshot-неконсистентность при активных INSERT'ах — документируем
+    ограничение, не фиксируем конкретные значения."""
+
+    @pytest.mark.asyncio
+    async def test_pagination_not_snapshot_consistent(self):
+        """Между двумя вызовами ``offset=0`` и ``offset=N`` могут появиться
+        новые события в начале выборки — это известное ограничение
+        ``offset``-пагинации без cursor'а.
+
+        Тест фиксирует, что новые строки попадают в начало (после
+        sort DESC): сценарий документирует ограничение и проверяет,
+        что код не делает вид, что пагинация стабильна.
+        """
+        rows_offset0 = [
+            {"id": f"id-{i}", "timestamp": f"2026-01-01T10:0{i}:00+00:00",
+             "event_type": "x", "name": "x", "level": "INFO", "summary": "s",
+             "payload": {}}
+            for i in range(5)
+        ]
+        # Через offset=0 ответ включает события 0..4.
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows_offset0):
+            tool = _make_tool()
+            r1 = await tool.execute(query=None, limit=5, offset=0)
+            data1 = json.loads(r1)
+            ids1 = [ev["event_id"] for ev in data1["events"]]
+            assert "id-0" in ids1
+
+        # Имитируем INSERT нового события ДО offset=4 — оно попадает в начало.
+        rows_offset10_flat: list[dict] = [
+            {"id": "newer", "timestamp": "2026-01-02T10:00:00+00:00",
+             "event_type": "x", "name": "x", "level": "INFO", "summary": "s",
+             "payload": {}},
+        ]
+        rows_offset10_flat.extend(
+            {"id": f"id-{i}", "timestamp": f"2026-01-01T10:0{i}:00+00:00",
+             "event_type": "x", "name": "x", "level": "INFO", "summary": "s",
+             "payload": {}}
+            for i in range(3)
+        )
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="s",
+        ), patch("utils.db.fetch", return_value=rows_offset10_flat):
+            tool = _make_tool()
+            r2 = await tool.execute(query=None, limit=5, offset=0)
+            data2 = json.loads(r2)
+            ids2 = [ev["event_id"] for ev in data2["events"]]
+            # Новое событие попало в начало выборки — offset-пагинация
+            # может сдвинуться.
+            assert "newer" in ids2

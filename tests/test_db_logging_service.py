@@ -340,6 +340,140 @@ class TestGetStats:
             assert k in stats
 
 
+class TestWrittenByType:
+    def test_written_by_type_empty_on_start(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        assert svc.get_stats()["written_by_type"] == {}
+
+    def test_enqueue_does_not_increment_written_by_type(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        before = time.time()
+        svc.log_tool_call("cli:1", "read", {})
+        svc.log_tool_result("cli:1", "read", "ok", 1.0)
+        # Счётчик written_by_type НЕ растёт в _enqueue — только после flush'а.
+        assert svc.get_stats()["written_by_type"] == {}
+        # queued_at заполнен для каждого LogEvent (≈ время enqueue).
+        for item in svc._queue.queue:
+            if isinstance(item, LogEvent):
+                assert item.queued_at is not None
+                assert item.queued_at >= before
+
+    def test_written_by_type_grows_after_flush(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=0.05,
+                                batch_size=8)
+        svc.start()
+        try:
+            for _ in range(5):
+                svc.log_tool_call("cli:1", "read", {})
+            for _ in range(3):
+                svc.log_tool_result("cli:1", "read", "ok", 1.0)
+            time.sleep(0.3)
+        finally:
+            svc.stop(timeout_sec=2.0)
+
+        counter = svc.get_stats()["written_by_type"]
+        assert counter.get("tool_call") == 5
+        assert counter.get("tool_result") == 3
+
+    def test_written_by_type_does_not_grow_on_flush_failure(
+        self, fake_psycopg2,
+    ):
+        from utils.db import set_pool_config
+
+        set_pool_config({"connect_max_retries": 1, "reconnect_backoff_sec": 0.05})
+        psycopg2 = sys.modules["psycopg2"]
+        psycopg2.connect = MagicMock(side_effect=RuntimeError("no db"))
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=0.05, batch_size=2)
+        svc.start()
+        try:
+            for _ in range(3):
+                svc.log_tool_call("cli:1", "read", {})
+            time.sleep(0.3)
+        finally:
+            svc.stop(timeout_sec=2.0)
+        # При падении flush'а written_by_type не должен инкрементироваться.
+        assert svc.get_stats()["written_by_type"] == {}
+        assert svc.get_stats()["failed"] >= 3
+
+    def test_written_by_type_not_reset_by_restart(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=0.05, batch_size=4)
+        svc.start()
+        try:
+            for _ in range(2):
+                svc.log_tool_call("cli:1", "read", {})
+            time.sleep(0.3)
+        finally:
+            svc.stop(timeout_sec=2.0)
+
+        first = svc.get_stats()["written_by_type"]
+        assert first.get("tool_call") == 2
+
+        # Повторный start() — счётчик written_by_type НЕ сбрасывается.
+        svc.start()
+        try:
+            svc.log_tool_call("cli:1", "read", {})
+            time.sleep(0.3)
+        finally:
+            svc.stop(timeout_sec=2.0)
+        second = svc.get_stats()["written_by_type"]
+        assert second.get("tool_call") == 3
+
+
+class TestOldestQueuedAge:
+    def test_oldest_queued_age_none_when_empty(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x")
+        assert svc.get_stats()["oldest_queued_age_sec"] is None
+
+    def test_oldest_queued_age_only_counts_log_events(
+        self, fake_psycopg2,
+    ):
+        from lib.services.db_logging_service import _QuestionRunRecord
+
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        # Только _QuestionRunRecord — LogEvent'ов нет.
+        svc.register_request(
+            "cli:1", "m1", user_id="u1", chat_id="c1",
+            agent_id="main", question="q",
+        )
+        assert all(
+            isinstance(it, _QuestionRunRecord) for it in svc._queue.queue
+        )
+        assert svc.get_stats()["oldest_queued_age_sec"] is None
+
+    def test_oldest_queued_age_returns_max_age(self, fake_psycopg2):
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        # Два LogEvent с разным queued_at — старший даёт max возраста.
+        older = LogEvent(event_type="tool_call")
+        older.queued_at = time.time() - 0.3
+        newer = LogEvent(event_type="tool_result")
+        newer.queued_at = time.time() - 0.1
+        # Добавляем напрямую в очередь, минуя _enqueue (чтобы queued_at
+        # не переписался на текущий time).
+        svc._queue.put_nowait(older)
+        svc._queue.put_nowait(newer)
+        age = svc.get_stats()["oldest_queued_age_sec"]
+        assert age is not None
+        # Возраст самого старого — ≈ 0.3 (не 0.1).
+        assert age >= 0.25
+        assert age < 0.5
+
+    def test_oldest_queued_age_ignores_records_without_queued_at(
+        self, fake_psycopg2,
+    ):
+        from lib.services.db_logging_service import _QuestionRunRecord
+
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        le = LogEvent(event_type="tool_call")
+        le.queued_at = time.time() - 0.2
+        # _QuestionRunRecord без queued_at — должно игнорироваться.
+        svc._queue.put_nowait(le)
+        svc._queue.put_nowait(_QuestionRunRecord(request_id="x"))
+        age = svc.get_stats()["oldest_queued_age_sec"]
+        assert age is not None
+        assert age >= 0.15
+        assert age < 0.4
+
+
 class TestSchemaCheck:
     def test_ensure_schema_raises_when_missing_tables(self, fake_psycopg2):
         svc = _svc(dsn="postgresql://x")

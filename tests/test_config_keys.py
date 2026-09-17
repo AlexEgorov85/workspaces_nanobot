@@ -247,3 +247,34 @@ class TestJsoncParsable:
     def test_jsonc_valid(self):
         data = _load_project_keys()
         assert isinstance(data, dict)
+
+
+class TestLoggingDbFlushIntervalValidation:
+    """``logging.db.flush_interval_sec`` валидируется ``LoggingDbSettings``.
+
+    Диапазон ``0.5 ≤ value ≤ 60.0``. Дефолт — ``5.0``. Вне диапазона —
+    ``pydantic.ValidationError`` (это уровень модели, а не
+    ``ConfigurationError``).
+    """
+
+    def test_default_is_none(self):
+        from lib.core.project_settings import LoggingDbSettings
+        assert LoggingDbSettings().flush_interval_sec is None
+
+    def test_in_range(self):
+        from lib.core.project_settings import LoggingDbSettings
+        assert LoggingDbSettings(flush_interval_sec=5.0).flush_interval_sec == 5.0
+        assert LoggingDbSettings(flush_interval_sec=0.5).flush_interval_sec == 0.5
+        assert LoggingDbSettings(flush_interval_sec=60.0).flush_interval_sec == 60.0
+
+    def test_below_minimum_raises(self):
+        from lib.core.project_settings import LoggingDbSettings
+        with pytest.raises(Exception) as exc_info:
+            LoggingDbSettings(flush_interval_sec=0.1)
+        assert "flush_interval_sec" in str(exc_info.value)
+
+    def test_above_maximum_raises(self):
+        from lib.core.project_settings import LoggingDbSettings
+        with pytest.raises(Exception) as exc_info:
+            LoggingDbSettings(flush_interval_sec=70.0)
+        assert "flush_interval_sec" in str(exc_info.value)
