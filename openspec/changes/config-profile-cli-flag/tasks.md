@@ -50,8 +50,13 @@ config.SETTINGS["profile"]                     # → ConfigurationError
 config._initialize_settings("prod")
 config.SETTINGS["logging"]["db"]["table_name"] # → "agent_gateway_logs"
 config.SETTINGS["profile"]                     # → "prod"
-config._initialize_settings("test")            # → ConfigurationError "already initialized"
-config._initialize_settings("dev")             # → ConfigurationError "not supported"
+config._initialize_settings("test")            # → "already initialized" (lifecycle wins)
+config._initialize_settings("prod")            # → "already initialized" (any value)
+config._initialize_settings("dev")             # → "already initialized" (any value, even wrong whitelist)
+
+# Separate run: invalid profile tested only on uninitialized state
+config.SETTINGS = _LazySettings()               # reset (test fixture, not production)
+config._initialize_settings("dev")             # → "not supported" (whitelist check fires first)
 ```
 
 ### A.4 Удалить избыточную ctx-пересборку в `ApplicationContext.create()`
@@ -251,28 +256,37 @@ Subprocess-вызовы entrypoints, проверяющие реальное п�
 ### D.5 Тесты `ApplicationContext` без mock на `_initialize_settings`
 
 Тесты `ApplicationContext.create()` НЕ мокают `_initialize_settings`.
-`_initialize_settings` — это lifecycle-gate, а не функция с return
-value; mock на неё либо не делает ничего полезного (тогда
-`SETTINGS` остаётся uninitialized и `ApplicationContext` падает
-на `ConfigurationError`), либо пытается воспроизвести side-effect,
-что эквивалентно вызову реальной функции. Поэтому mock тут —
-антипаттерн.
+`_initialize_settings` — это lifecycle-gate с side-effect публикацией
+`SETTINGS`, а не функция с return value; mock на неё либо бесполезен
+(mock не выполняет реальную функцию → `SETTINGS` остаётся uninitialized
+и `ApplicationContext.create()` падает на `ConfigurationError`), либо
+воспроизводит side-effect через `side_effect=...`, что эквивалентно
+вызову реальной функции. Поэтому mock `_initialize_settings` — антипаттерн.
 
 Правильная стратегия:
 
 1. Тест **явно** вызывает `config._initialize_settings(profile)`
-   перед `ApplicationContext.create()` (или в `setup`-фикстуре).
-2. Если тесту нужно проверить «что `ApplicationContext.create()`
-   вызвал `_initialize_settings`», это уже не нужно —
-   `ApplicationContext.create()` НЕ вызывает `_initialize_settings`
-   (lifecycle-gate был вызван раньше, entrypoint'ом); он читает
-   уже опубликованный `SETTINGS`. Mock на отсутствующий вызов
-   бесполезен.
-3. Старые mock'и (`_resolve_mode` / `resolve_application_config`)
-   удаляются.
+   перед `ApplicationContext.create()` (либо в `setup`-фикстуре,
+   либо в самом теле теста). Это — публикация реального `SETTINGS`,
+   а не подмена.
+2. После явного вызова тест проверяет, что `ApplicationContext.create()`
+   использует уже инициализированный `SETTINGS` без повторной
+   сборки конфигурации. Никаких вызовов `_initialize_settings` со
+   стороны `ApplicationContext` не ожидается и не должно быть
+   (lifecycle-gate был вызван раньше, entrypoint'ом; см. design.md
+   Decision 0/1).
+3. Если ранее тест проверял конкретный configuration-input
+   (например, какой именно dict отдаёт resolver), то мокать нужно
+   сам resolver (`resolve_application_config`), а не
+   `_initialize_settings`. Тесты на lifecycle и тесты на resolver —
+   это **разные** уровни, и смешивать их через один mock — ошибка.
+4. Старые mock'и (`_resolve_mode` / `resolve_application_config`
+   на уровне ApplicationContext) удаляются; если нужен resolver mock,
+   он делается точечно и явно.
 
-Diff по сути сводится к **удалению** mock'ов (≤ 30 строк
-negative-diff). Никаких новых mock'ов не требуется.
+Diff по сути сводится к **удалению** mock'ов на `_initialize_settings`
+(≤ 30 строк negative-diff). Никаких новых mock'ов на lifecycle-gate
+не требуется.
 
 ### D.6 Полный прогон
 

@@ -87,15 +87,18 @@ default.
 
 #### Scenario: Environment variables do not participate in profile resolution
 
-- **WHEN** any environment variable is set in the process environment
+- **WHEN** arbitrary environment variables are present in the
+  process environment
 - **AND WHEN** the application entrypoint is invoked with
   `--profile=test`
 - **THEN** the resolved profile SHALL be `test`
-- **AND THEN** the environment variable SHALL have no effect
-  on **profile resolution** specifically
-- **AND THIS REQUIREMENT does not constrain** other aspects of
-  `SETTINGS` (non-profile configuration sources are outside this
-  change's scope)
+- **AND THEN** profile-dependent runtime configuration (e.g.
+  `SETTINGS["logging"]["db"]["table_name"]`) SHALL reflect `test`
+- **AND** this scenario constrains ONLY **profile resolution**
+  specifically; other aspects of `SETTINGS` are out of scope for
+  this change and may legitimately be influenced by environment
+  variables used for other purposes (secrets, external service URLs,
+  etc.)
 
 ### Requirement: Profile surfaced for infrastructure use
 
