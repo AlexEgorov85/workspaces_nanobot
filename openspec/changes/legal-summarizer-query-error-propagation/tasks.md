@@ -13,13 +13,14 @@
       print(diagnose_manifest('no_such', '.'))"` возвращает
       `reason="not_found"` и **не** содержит поля `raw`.
 
-- [ ] 1.2 Покрыть `diagnose_manifest` unit-тестами на 4 случая:
+- [ ] 1.2 Покрыть `diagnose_manifest` unit-тестами на 5 случаев:
       `manifest не существует`, `JSON повреждён`, `version=1`,
-      `без поля version`. Различить два последних под
-      `unsupported_version` с разным `version_observed` (для v1 — значение,
-      для отсутствующего — `None`).
+      `без поля version`, `version="abc"` (non-integer). Различить под
+      `unsupported_version`: для `version=1` → `version_observed=1`,
+      для отсутствующего и для `version="abc"` →
+      `version_observed=None`.
       Верификация: `pytest workspace/skills/legal_summarizer/tests/test_manifest_diagnose.py -v`
-      зелёный.
+      зелёный, 5+ кейсов.
 
 ## 2. CLI query: три `error_type` вместо одного
 

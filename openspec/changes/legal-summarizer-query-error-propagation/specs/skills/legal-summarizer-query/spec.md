@@ -79,8 +79,18 @@ follow-up queries: missing, corrupted, and unsupported version.
   current manifest version
 - **THEN** the wrapper SHALL receive an error envelope with
   `error_type = "manifest_unsupported_version"` and `status = "error"`
-- **AND** the error envelope SHALL include the observed `version` value if
-  present
+- **AND** the error envelope SHALL include `version_observed` set to the
+  parsed integer value when the manifest's `version` field can be read as
+  an integer, and to `null` otherwise (including the case where the
+  field is missing or has a non-integer value like `"abc"`)
+
+#### Scenario: Manifest version non-integer
+- **WHEN** `cli_query.py` is invoked for an `operation_id` whose manifest
+  parses as JSON but its `version` field is not coercible to an integer
+  (for example `"abc"` or `["1"]`)
+- **THEN** the wrapper SHALL receive an error envelope with
+  `error_type = "manifest_unsupported_version"` and
+  `version_observed = null`
 
 ### Requirement: Backward compatibility of resume-path manifest loading
 The system SHALL keep the existing `load_manifest()` function in
