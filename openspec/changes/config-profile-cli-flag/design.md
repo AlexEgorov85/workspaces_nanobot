@@ -103,6 +103,31 @@ Environment inheritance:
 
 ## Decisions
 
+### Decision 0: Ownership разделение
+
+```text
+ConfigurationResolver
+    отвечает: КАК построить configuration
+              (project.json + profile overlay + secrets + validation)
+
+_LazySettings
+    отвечает: КОГДА configuration разрешено публиковать
+              (UNINITIALIZED / INITIALIZED, защита от double-init)
+
+_initialize_settings
+    отвечает: gate между "resolved <profile>" и "constructed SETTINGS"
+
+SETTINGS
+    compatibility access point к constructed configuration;
+    mapping semantics; SETTINGS["profile"] — canonical profile access
+```
+
+Это **строгое разделение ответственности**. `_LazySettings` НЕ
+содержит логики построения, merge или валидации — только lifecycle.
+`ConfigurationResolver` (`resolve_application_config`) НЕ знает про
+`_initialize_settings` или proxy — он просто строит dict. `_initialize_settings`
+— единственная точка, где они встречаются.
+
 ### Decision 1: `_LazySettings` — compatibility boundary (не архитектура)
 
 **Выбор:** Ввести `_LazySettings` proxy-объект, у которого только два
@@ -143,8 +168,14 @@ INITIALIZED
 
 - Повторный `_initialize_settings("test")` после
   `_initialize_settings("prod")` → `ConfigurationError`.
-- `SETTINGS[k]` до `_initialize_settings(...)` → `ConfigurationError`.
-- `SETTINGS[k]` после → dict access.
+- `SETTINGS["k"]` до `_initialize_settings(...)` →
+  `ConfigurationError`.
+- `SETTINGS["k"]` после → dict access (mapping semantics).
+- `SETTINGS.profile` (attribute access) — **НЕ** часть canonical
+  contract; может быть оставлен как backward-compat shim для
+  существующего кода (`streamlit_app.py:33` использует
+  `getattr(SETTINGS, "channels", {})`), но новый код
+  `SETTINGS["profile"]`.
 
 **Запрещено:**
 
@@ -154,6 +185,31 @@ profile switching
 environment fallback
 default profile
 ```
+
+### Decision 1a: `_resolve_mode()` удаляется полностью
+
+После удаления env-чтения из `_resolve_mode` функция превращается
+в:
+
+```python
+def _resolve_mode(profile_arg):
+    if profile_arg not in {"prod", "test"}:
+        raise ConfigurationError(...)
+    return profile_arg
+```
+
+Это уже **не resolution** (нет источника профиля, нет приоритетов,
+нет env-чтения), а **whitelist-валидация**. Сохранять её как
+отдельную функцию с именем `_resolve_mode` — лишняя сущность.
+
+**Решение:** Удалить `_resolve_mode()` из `config.py` полностью.
+Whitelist-валидация встраивается в `_initialize_settings(profile)`
+как defensive re-validation. Двойная проверка (entrypoint CLI +
+`_initialize_settings`) остаётся, как и было заявлено в спецификации,
+но без отдельной функции `_resolve_mode`.
+
+Соответственно, `_ACTIVE_PROFILE` module-level global тоже
+удаляется (он привязан к `_resolve_mode`).
 
 ### Decision 2: argparse на самом верху application entrypoint'а
 
@@ -338,24 +394,47 @@ subprocess-вызов с правильным и неправильным `--pro
 streamlit run streamlit_app.py -- --profile=prod
 ```
 
-Поведение `streamlit_app.py`:
+Реальный текущий `streamlit_app.py:31` уже выполняет
+`from config import SETTINGS` на module level (до любых streamlit-API
+вызовов). Модуль импортируется ОДИН раз при первом запуске `streamlit
+run`; последующие `st.rerun()` re-execute скрипт **без переимпорта**
+(`streamlit_app.py` уже в `sys.modules`). Это означает, что
+`_initialize_settings()` обязан выполниться в module-level блоке
+(а не в `if __name__ == "__main__":` — это условие для streamlit-run
+не сработает как для CLI).
 
-1. При старте (внутри `if __name__ == "__main__":` или module-level
-   pre-import block) — читать `sys.argv`, искать аргументы после `--`.
-2. Парсить `--profile=<value>`.
-3. Если отсутствует или не из `{prod, test}` — `ConfigurationError`
-   с сообщением «--profile is required, allowed: prod, test».
-4. `import config as _cfg; _cfg._initialize_settings(profile=...)`.
-5. Дальше runtime-импорты и streamlit-инициализация.
+Поведение `streamlit_app.py` после фикса:
+
+1. На самом верху файла (до существующих `import streamlit as st`
+   и `from utils.db import ...`, до `from config import SETTINGS`):
+   парсер `sys.argv`, ищущий `--profile=<value>` после `--`.
+2. Если отсутствует → `ConfigurationError("--profile is required")`.
+3. Если не из `{prod, test}` → `ConfigurationError(...)`.
+4. `import config as _cfg; _cfg._initialize_settings(profile=<value>)`.
+5. Дальше — текущий код `streamlit_app.py` без изменений (он
+   потребляет `SETTINGS` через `getattr(SETTINGS, ...)` —
+   backward-compat, см. Decision 1).
 
 **Acceptance test** (subprocess):
+
 - `streamlit run streamlit_app.py -- --profile=prod` →
-  `SETTINGS.profile == "prod"`, runtime configuration prod.
+  процесс стартует; `_initialize_settings("prod")` вызван;
+  `SETTINGS["profile"] == "prod"`; runtime configuration prod.
 - `streamlit run streamlit_app.py -- --profile=test` → test.
 - `streamlit run streamlit_app.py` (без `--profile`) →
-  `ConfigurationError("--profile is required")`.
+  module-level `ConfigurationError`, process exits before first
+  streamlit run completes.
 - `streamlit run streamlit_app.py -- --profile=dev` →
   `ConfigurationError("--profile=dev is not supported")`.
+
+**Implementation assumption об архитектуре Streamlit:** текущая
+форма `streamlit run <script> -- <args>` транслирует `<args>`
+в `sys.argv` как позиционные элементы после `--`. Если в будущей
+версии Streamlit это изменится, нужно будет обновить argparse-блок;
+это **implementation detail**, не часть spec. Спекуфицируется только
+поведение: `--profile=<v>` обязан прийти в `argv` после `--`,
+а streamlit-процесс обязан упасть с exit code 2 + `ConfigurationError`
+при его отсутствии.
 
 ## Архитектурный acceptance checklist
 

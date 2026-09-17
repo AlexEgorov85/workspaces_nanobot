@@ -6,6 +6,38 @@
 `from config import SETTINGS` импорты продолжают работать через
 compatibility proxy без изменений.
 
+## Error Lifecycle Contract
+
+Единый контракт обработки ошибок профиля разделяет **внутренний
+exception contract** от **внешнего CLI contract**:
+
+```text
+argv
+  ↓
+application entrypoint CLI parser
+  ├── missing --profile      → ConfigurationError("--profile is required")
+  └── --profile not in whitelist → ConfigurationError("--profile=<v> is not supported (allowed: prod, test)")
+
+import config
+  ↓
+config._initialize_settings(profile)
+  ├── profile not in whitelist → ConfigurationError (defensive re-validation)
+  └── SETTINGS already initialized → ConfigurationError("SETTINGS already initialized")
+
+SETTINGS access before initialization
+  └── → ConfigurationError("SETTINGS not initialized: call _initialize_settings(profile)")
+
+application entrypoint top-level
+  └── translates any startup ConfigurationError → process exit code 2
+```
+
+Принципы:
+
+1. `ConfigurationError` — единственный тип исключения для всех ошибок профиля и инициализации конфигурации.
+2. **Внутренний контракт** (между entrypoint-кодом и `config`-модулем) — exception. Любой код, вызывающий `_initialize_settings(...)` или читающий `SETTINGS`, может перехватить `ConfigurationError` программно (полезно для тестов и embedded-сценариев).
+3. **Внешний контракт** (CLI поведение для пользователя) — process exit code 2 при любой startup `ConfigurationError`. Entry-points не должны «глотать» эти ошибки и валиться позже с непонятным trace.
+4. `task B.1.1` НЕ должен сокращать «ConfigurationError → exit 2» в пользу «просто `sys.exit(2)` без exception». Оба шага обязательны: `_initialize_settings` бросает `ConfigurationError`; entrypoint top-level ловит и превращает в exit 2.
+
 ## MODIFIED Requirements
 
 ### Requirement: Resolution happens before runtime initialization
@@ -29,9 +61,20 @@ default.
 - **WHEN** an application entrypoint is invoked without `--profile`
 - **THEN** the system SHALL raise
   `ConfigurationError("--profile is required")`
+- **AND THEN** the application entrypoint top-level SHALL exit the
+  process with status code 2
 - **AND THEN** no runtime component SHALL be constructed
 - **AND THEN** `SETTINGS` SHALL NOT be exposed as resolved
   configuration
+
+#### Scenario: Exit code 2 for unsupported profile
+
+- **WHEN** an application entrypoint is invoked with
+  `--profile=<unsupported>`
+- **THEN** the system SHALL raise
+  `ConfigurationError("--profile=<v> is not supported (allowed: prod, test)")`
+- **AND THEN** the application entrypoint top-level SHALL exit the
+  process with status code 2
 
 #### Scenario: Profile resolved at config load
 
@@ -55,20 +98,35 @@ default.
 ### Requirement: Profile surfaced for infrastructure use
 
 The system SHALL expose the resolved profile as part of `SETTINGS`
-for use by infrastructure code (DB connection helpers, cache paths,
-channel configuration) ONLY. The exposed profile value SHALL reflect
-the CLI argument that was passed to `_initialize_settings`, not any
-value derived from environment variables or implicit defaults.
+under the **mapping access path** `SETTINGS["profile"]`. This is
+the canonical access path. The system SHALL NOT expose the profile
+through any other attribute (`SETTINGS.profile`, `SETTINGS.get("profile")`
+without default, or other forms). The exposed profile value SHALL
+reflect the CLI argument that was passed to `_initialize_settings`,
+not any value derived from environment variables or implicit defaults.
 
-#### Scenario: Infrastructure reads profile
+#### Scenario: Infrastructure reads profile via mapping access
 
 - **WHEN** a connection helper needs the active profile
-- **THEN** it SHALL read `SETTINGS.profile`
+- **THEN** it SHALL read `SETTINGS["profile"]`
 - **AND THEN** it SHALL NOT branch on profile in business logic
 
 #### Scenario: Profile value reflects CLI resolution
 
-- **WHEN** `SETTINGS.profile` is read
+- **WHEN** `SETTINGS["profile"]` is read
+- **THEN** its value SHALL equal the CLI argument that was passed
+  to `_initialize_settings`, not a value read from any environment
+  variable
+
+#### Scenario: Infrastructure reads profile
+
+- **WHEN** a connection helper needs the active profile
+- **THEN** it SHALL read `SETTINGS["profile"]` (mapping access) and
+  SHALL NOT branch on profile in business logic
+
+#### Scenario: Profile value reflects CLI resolution, not environment
+
+- **WHEN** `SETTINGS["profile"]` is read
 - **THEN** its value SHALL equal the CLI argument that was passed
   to `_initialize_settings`, not a value read from any environment
   variable

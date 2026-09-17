@@ -36,7 +36,20 @@
   config._initialize_settings(profile)
   ```
 
-  `_initialize_settings()` **не** ищет профиль в environment, config files или где-либо ещё. Принимает значение только как явный аргумент.
+  `_initialize_settings(profile)` принимает уже выбранный профиль
+  как явный аргумент. Он **не** ищет профиль в `os.environ`,
+  `project.json`, `config.json`, или где-либо ещё. Configuration'ом
+  приложения (project.json, profile overlay, secrets, validation)
+  занимается отдельный слой — `ConfigurationResolver`
+  (`resolve_application_config`), который получает профиль от
+  `_initialize_settings` уже как решённое значение и использует
+  его ТОЛЬКО для выбора profile overlay.
+
+  `_resolve_mode()` (старая функция) удаляется полностью: после
+  отказа от env-чтения и default'а она сводится к whitelist-валидации,
+  которая встраивается в `_initialize_settings`. Сохранение
+  отдельной функции с именем `_resolve_mode` порождало бы лишнюю
+  сущность без собственной ответственности.
 
 - **`NANOBOT_PROFILE` env-переменная удаляется** из:
   - profile resolution;
