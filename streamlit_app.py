@@ -69,15 +69,30 @@ if _resolved_profile not in _SUPPORTED_PROFILES:
     )
 
 # Guard против streamlit re-execution: ``st.rerun()`` запускает module-level
-# statements заново через ``runpy``, но namespace модуля персистентен.
-# Устанавливаем флаг через ``globals()`` (ссылка на module globals, не
-# ``sys.modules[<name>].__dict__`` — последнее зависит от того, что модуль
-# уже в ``sys.modules`` и является антипаттерном).
-_GUARD_ATTR = "_config_initialized"
-if not globals().get(_GUARD_ATTR, False):
-    import config as _streamlit_cfg
+# statements заново через ``runpy``. Персистентность зависит от того, как
+# Streamlit кеширует модуль — это не гарантировано контрактом, поэтому
+# НЕ полагаемся на ``globals()`` (которая очищается при некоторых формах
+# re-execution). Вместо этого используем фактический state
+# ``_LazySettings._inner_dict`` в модуле ``config`` (живёт в
+# ``sys.modules["config"]``, который гарантированно персистентен):
+# init уже выполнен ⇔ ``config.SETTINGS._inner_dict is not None``.
+#
+# ``hasattr`` вместо прямого доступа — для тестов, которые мокают
+# ``config.SETTINGS`` через простой объект без ``_inner_dict``:
+# guard должен тихо инициализировать в этом случае (тесты передают
+# свой mock _initialize_settings через cfg._initialize_settings).
+#
+# Это превращает guard в **декларативную проверку реального lifecycle state**,
+# а не в эфемерный module-attr флаг.
+import config as _streamlit_cfg
+if not hasattr(_streamlit_cfg.SETTINGS, "_inner_dict") or _streamlit_cfg.SETTINGS._inner_dict is None:
+    # Первый (или первый после реального process restart) запуск —
+    # делаем init. Если ``st.rerun()`` действительно re-executed
+    # module-level код, ``_inner_dict`` уже заполнен и мы пропускаем
+    # второй вызов. ``_initialize_settings`` остаётся строгой (second call
+    # с любым значением → ``already initialized``); guard не меняет её,
+    # а лишь предотвращает второй вызов из этого модуля.
     _streamlit_cfg._initialize_settings(profile=_resolved_profile)
-    globals()[_GUARD_ATTR] = True
 
 
 import streamlit as st

@@ -673,6 +673,22 @@ def get_setting(*keys: str, default=None):
 
     Используется в коде, где требуется значение по умолчанию при
     отсутствии ключа.
+
+    **Важно про lifecycle:** ``get_setting`` — это **compatibility helper**.
+    Если SETTINGS не инициализирован (proxy UNINITIALIZED),
+    ``get_setting`` возвращает ``default``, а НЕ поднимает
+    ``ConfigurationError``. Это намеренное поведение для backward-compat
+    с callers типа ``subprocess_manager.SubprocessManager.__init__``
+    (запускается из ``gateway.py:_run`` **после** ``_initialize_settings``,
+    но исторически модуль импортировался с module-level ``SETTINGS``;
+    default-fallback защищает от случайного вызова в неправильном
+    lifecycle context).
+
+    Для кода, который **требует** инициализированного SETTINGS
+    (новый runtime-код, entrypoint'ы, ApplicationContext),
+    используйте ``SETTINGS["..."]`` / ``SETTINGS.get("...")`` —
+    они поднимают ``ConfigurationError("not initialized")`` если proxy
+    UNINITIALIZED. См. design.md Decision 0/1 (lifecycle-gate).
     """
     try:
         node: object = SETTINGS._inner_dict if isinstance(SETTINGS, _LazySettings) else SETTINGS
