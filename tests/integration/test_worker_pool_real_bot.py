@@ -47,9 +47,23 @@ for _p in (str(_PROJECT_ROOT), str(_WORKSPACE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from config import SETTINGS  # noqa: E402
+from config import SETTINGS  # noqa: E402  # _LazySettings proxy
 
-_DSN = SETTINGS["channels"]["postgres"]["dsn"]
+_DSN = None
+
+
+def _ensure_dsn() -> str:
+    global _DSN
+    if _DSN is None:
+        try:
+            _DSN = SETTINGS["channels"]["postgres"]["dsn"]
+        except Exception as exc:
+            raise SystemExit(
+                "test_worker_pool_real_bot требует инициализированный "
+                "config.SETTINGS — запустите из application entrypoint "
+                f"с --profile=test: {exc}"
+            )
+    return _DSN
 _GATEWAY = str(_PROJECT_ROOT / "gateway.py")
 _TOOL = str(_PROJECT_ROOT / "tools" / "check_worker_pool_integrity.py")
 _LOG_DIR = Path(os.environ.get("TEMP", "/tmp")) / "opencode"
@@ -62,17 +76,18 @@ def _skip_if_not_live() -> None:
     llm = (SETTINGS.get("providers") or {}).get("llm") or {}
     if not llm.get("api_key"):
         pytest.skip("live e2e: providers.llm.api_key не настроен")
-    if not _DSN:
+    dsn = _ensure_dsn()
+    if not dsn:
         pytest.skip("live e2e: DATABASE_URL не настроен")
     try:
-        conn = psycopg2.connect(_DSN, gssencmode="disable")
+        conn = psycopg2.connect(dsn, gssencmode="disable")
         conn.close()
     except Exception as exc:
         pytest.skip(f"live e2e: БД недоступна ({exc})")
 
 
 def _db():
-    return psycopg2.connect(_DSN, gssencmode="disable")
+    return psycopg2.connect(_ensure_dsn(), gssencmode="disable")
 
 
 def _exec(sql: str, params=(), fetch: bool = True):

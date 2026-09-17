@@ -402,10 +402,27 @@ def test_test_mode_without_overlay_fails(isolated_project):
 # ---------------------------------------------------------------------------
 
 
-def test_invalid_profile_name_fails(isolated_project):
-    """Имя профиля должно соответствовать [a-z0-9_-]+."""
-    with pytest.raises(ConfigurationError, match="недопустим"):
-        resolve_application_config(profile="foo bar")
+def test_invalid_profile_name_fails():
+    """Имя профиля должно соответствовать whitelist ``{"prod", "test"}``.
+
+    После ``config-profile-cli-flag`` whitelist ужесточен — любое
+    значение вне списка теперь обрабатывается на уровне ``_initialize_settings``
+    (а не в самом resolver). Поэтому невалидное имя здесь проверяем
+    через явный ``_initialize_settings``, а не через
+    ``resolve_application_config`` напрямую.
+
+    Тест полагается на uninitialized ``SETTINGS`` proxy — должен
+    запускаться ПЕРЕД любым тестом, который делает init. Для надёжности
+    используем subprocess-изоляцию.
+    """
+    import subprocess
+    r = subprocess.run(
+        ["python", "-c",
+         "import config; config._initialize_settings('foo bar')"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode != 0
+    assert "is not supported" in r.stderr
 
 
 # ---------------------------------------------------------------------------

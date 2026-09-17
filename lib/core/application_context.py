@@ -93,10 +93,15 @@ class ApplicationContext:
             session_override: имя сессии (CLI).
             print_llm_calls: выводить в терминал токены LLM-итераций
                 (включается только в CLI-REPL через DatabaseLoggingHook).
-            profile: активный профиль конфигурации (None — берётся из
-                NANOBOT_PROFILE env, default=test). Передаётся в
-                ConfigService → ``ctx.config_service.settings`` возвращает
-                профильно-разрешённый конфиг.
+            profile: активный профиль конфигурации (``"prod"`` / ``"test"``).
+                Должен совпадать с уже инициализированным через
+                ``config._initialize_settings(profile)`` из application
+                entrypoint. ``None`` — fallback на ``config.SETTINGS["profile"]``
+                (если ленивый proxy уже инициализирован entrypoint'ом).
+
+        Raises:
+            ConfigurationError: если ``_initialize_settings(profile)`` ещё не
+                выполнен (proxy остался uninitialized).
         """
         ctx = cls()
         ctx.script_dir = Path(script_dir)
@@ -111,19 +116,35 @@ class ApplicationContext:
         from lib.services.table_registry import table_registry
         table_registry.clear()
 
-        # 1. ConfigService + загрузка конфига
-        # Резолвим профиль через Resolver (default = test). Если
-        # активный профиль отличается от глобального ``_ACTIVE_PROFILE``,
-        # пересобираем SETTINGS через Resolver для этого
-        # ApplicationContext. Это гарантирует, что ``ctx.settings``
-        # согласованы с ``ctx.profile`` и оба прошли через Resolver
-        # (никакого legacy-пути).
+        # 1. ConfigService + загрузка конфига.
+        #
+        # Один источник истины — глобальный ``SETTINGS`` (``_LazySettings``),
+        # уже построенный через ``_initialize_settings(profile)`` из application
+        # entrypoint. ``ApplicationContext`` **не** делает повторный
+        # resolve/resolver; это просто читает опубликованный ``SETTINGS``
+        # и оборачивает его в ``ConfigService``.
+        #
+        # Если кто-то вызвал ``ApplicationContext.create`` без
+        # предварительного entrypoint init — proxy поднимет
+        # ``ConfigurationError`` через ``__getitem__`` ниже, и тест/
+        # caller увидит ту же ошибку, что и entrypoint нарушение
+        # lifecycle (fail-fast).
         import config as _config
-        resolved_profile = _config._resolve_mode(profile)
-        if resolved_profile == _config._ACTIVE_PROFILE:
-            ctx_settings = _config.SETTINGS
-        else:
-            ctx_settings = _config.resolve_application_config(profile=resolved_profile)
+        ctx_settings = _config.SETTINGS
+        # Touching ``["profile"]`` материализует ConfigurationError на
+        # uninitialized proxy, но не делает duplicated work в happy-path.
+        resolved_profile = ctx_settings["profile"]
+        if profile is not None and profile != resolved_profile:
+            # entrypoint передал ``profile``, отличный от уже
+            # инициализированного. Раньше это могло быть env → CLI;
+            # теперь это явное нарушение lifecycle — fail-fast.
+            from config import ConfigurationError
+            raise ConfigurationError(
+                f"ApplicationContext.create(profile={profile!r}) called "
+                f"but SETTINGS already initialized for profile={resolved_profile!r}. "
+                "Application entrypoint must pass the same --profile value as "
+                "was passed to config._initialize_settings()."
+            )
         ctx.profile = resolved_profile
 
         ctx.config_service = _make_config_service(

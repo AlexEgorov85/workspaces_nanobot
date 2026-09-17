@@ -27,16 +27,13 @@ class ConfigService:
     """Загрузка и нормализация конфигурации проекта.
 
     Всегда возвращает профильно-разрешённый ``SETTINGS`` (один источник —
-    ``config.SETTINGS``, построенный через ``ConfigurationResolver``).
-    Никакого «legacy»-пути.
+    ``config.SETTINGS``, опубликованный ``_initialize_settings(profile)``
+    из application entrypoint до любого импорта, читающего конфиг).
+    Никакого «legacy»-пути, никакого двойного resolve.
 
-    Если ``ApplicationContext.create(profile=...)`` нуждается в
-    настройках с конкретным профилем (отличным от глобального
-    ``_ACTIVE_PROFILE``), он собирает свой SETTINGS через
-    ``config.resolve_application_config(profile)`` и передаёт готовый
-    dict через ``settings_override`` (см. ``ApplicationContext.create``).
-    Этот ConfigService не выбирает между путями — он просто возвращает
-    то, что дали.
+    ``ApplicationContext.create()`` использует тот же ``config.SETTINGS``;
+    ``settings_override`` оставлен только для тестовых сценариев,
+    явно подменяющих конфигурацию.
     """
 
     def __init__(
@@ -49,7 +46,7 @@ class ConfigService:
         self.script_dir = Path(script_dir) if script_dir else None
         self.workspace_dir = Path(workspace_dir) if workspace_dir else None
         # Если вызывающий передал готовый resolved config — используем
-        # его. Иначе — глобальный SETTINGS (тот же dict).
+        # его. Иначе — глобальный ``SETTINGS`` (через ``_LazySettings`` proxy).
         self._settings_override = settings_override
 
     # ------------------------------------------------------------------
@@ -58,12 +55,13 @@ class ConfigService:
 
     @property
     def settings(self) -> Any:
-        """SETTINGS — глобальный (построен через ConfigurationResolver)
-        или settings_override от ApplicationContext.
+        """SETTINGS — глобальный (``_LazySettings`` proxy,
+        материализованный ``_initialize_settings(profile)``)
+        или ``settings_override`` от ApplicationContext.
 
         ЕДИНСТВЕННЫЙ источник истины для runtime-конфигурации.
-        Раньше ConfigService имел fallback-путь к legacy SETTINGS (без
-        profile overlay); теперь все пути проходят через Resolver.
+        До ``_initialize_settings`` proxy бросает ``ConfigurationError``;
+        читать ``settings`` до инициализации — programming error.
         """
         if self._settings_override is not None:
             return self._settings_override
@@ -127,9 +125,12 @@ class ConfigService:
             Runtime-конфиг nanobot (объект с ``providers``, ``channels`` и т.д.).
 
         Порядок резолва ``${VAR}``:
-          1. config.py уже резолвит ``${...}`` в SETTINGS на старте импорта
-             (``_resolve_env_refs`` — из ``os.environ``, неизвестный ключ остаётся
-             как есть) и доэкспортирует плоские значения в ``os.environ``.
+          1. ``_initialize_settings(profile)`` запускает
+             ``resolve_application_config``, который резолвит ``${...}``
+             в SETTINGS (``_resolve_env_refs`` — из ``os.environ``,
+             неизвестный ключ остаётся как есть) и доэкспортирует
+             плоские значения из .secrets.env в ``os.environ``.
+             К моменту вызова этого метода ``SETTINGS`` уже Resolver-built.
           2. Здесь, до ``_load_runtime_config``, ``_pre_resolve_env_refs``
              подставляет ``*_API_KEY`` из ``SETTINGS.providers``, которых ещё нет
              в ``os.environ`` (секреты из .secrets.env), чтобы nanobot увидел их.

@@ -84,8 +84,17 @@ from utils.db import configure, execute, fetch, resolve_dsn
 
 # Standalone-регистрация runtime-storage (для случая когда build_vectors.py
 # запущен без ApplicationContext). Подменяет ApplicationContext._register_infra_resources.
+# Здесь ``register_vector_storage`` обёрнут в try/except: без
+# ``config._initialize_settings(profile)`` proxy ``SETTINGS`` UNINITIALIZED,
+# а module-level импорт не должен ронять ``import tools.build_vectors``
+# (tests collection, ``tools/build_vectors.py`` как dependency от других
+# утилит). При реальном запуске standalone — ``main()`` ниже падает
+# fail-fast на первом обращении к ``SETTINGS``.
 from lib.core.infra_registration import register_vector_storage
-register_vector_storage()
+try:
+    register_vector_storage()
+except Exception:
+    pass
 
 
 def fetchone(sql, *args):
