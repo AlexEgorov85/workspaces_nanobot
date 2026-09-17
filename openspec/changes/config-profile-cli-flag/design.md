@@ -79,8 +79,10 @@ Utility subprocess (запускает standalone utility):
     utility определяет свой собственный контракт если использует SETTINGS
 
 Environment inheritance:
-    NANOBOT_PROFILE НИКОГДА не передаётся в env дочерних процессов
-    ни через application, ни через utility
+    NANOBOT_PROFILE SHALL NOT be transmitted to application subprocesses
+    (через application subprocess boundary см. Decision 9).
+    Sanitization low-level utility subprocess'ов (git, pip и подобных)
+    — ВНЕ scope этого change.
 ```
 
 ## Definitions
@@ -267,6 +269,38 @@ if __name__ == "__main__":
 
 Аналогично для `cli_agent.py` и `streamlit_app.py`.
 
+**Важно — импорт как модуль:** Парсинг argv и вызов
+`_initialize_settings(profile)` обёрнуты в `if __name__ == "__main__":`
+(для `gateway.py`/`cli_agent.py`). Это означает, что:
+
+```text
+python -c "import gateway"     # НЕ запускает приложение,
+                               # НЕ инициализирует SETTINGS.
+                               # Модуль безопасно импортируется.
+
+python gateway.py             # запускает __main__-блок;
+                               # argv парсится;
+                               # SETTINGS инициализируется;
+                               # ApplicationContext создаётся.
+```
+
+`gateway`, `cli_agent`, `streamlit_app` — application entrypoints, не
+модули со side-effects на import. `from gateway import something`
+или `python -m gateway` НЕ должны стартовать application; только
+**executable invocation** (как `python <file>.py` или
+`streamlit run <file>.py`) запускает startup lifecycle. Это контракт
+**application entrypoint**, не контракт `import`-statement.
+
+Для `streamlit_app.py` блок `if __name__ == "__main__":` НЕ работает
+(Streamlit-run сам решает, что ре-выполнять, и `__name__` не равен
+`"__main__"` при rerun). Поэтому в `streamlit_app.py` логика инициализации
+профиля выполняется **на module-level, выше** существующих импортов,
+без `if __name__ == "__main__":` обёртки — это согласуется с тем,
+что Streamlit кеширует модуль в `sys.modules` и не переимпортирует
+его на `st.rerun()`. Эффект тот же: `import streamlit_app` где-то ещё
+**не** триггерит startup, потому что только streamlit-run знает, как
+выполнить такой импорт с правильным `sys.argv` после `--`.
+
 ### Decision 3: Whitelist профилей и валидация на старте
 
 **Выбор:** Разрешённые профили — только `prod` и `test`. Проверка
@@ -354,18 +388,23 @@ subprocess-вызов с правильным и неправильным `--pro
 `autouse`. Тесты, которым нужен resolved `SETTINGS`, явно
 инициализируют профиль в setup.
 
-### Decision 7: subprocess-инструменты (`tools.exec`) не наследуют профиль
+### Decision 7: Application subprocess boundary не наследует `NANOBOT_PROFILE`
 
-**Выбор:** При формировании `env` для дочернего процесса в
-`workspace/tools/exec` (через `nanobot.exec`-обёртку) **не**
-передавать ни `NANOBOT_PROFILE`, ни любые другие profile-related env vars.
+**Выбор:** При формировании `env=` для дочернего процесса,
+являющегося **application entrypoint** (см. Decision 9
+ниже для деталей boundary), **не** передавать `NANOBOT_PROFILE`
+ни при каких условиях. Low-level utility subprocess'ы
+(`subprocess.run(["git", ...])`, `subprocess.run(["pip", ...])`)
+**вне scope** этого change — они не application entrypoints
+и у них собственный контракт.
 
 Альтернатива: явный проброс `NANOBOT_PROFILE=...` в env. Отвергнута —
 это ровно та дупликация источника, от которой уходим.
 
 **Обоснование:** отражено в `docs/INTERNAL_API.md` § «Конфигурация
-`tools.exec`». Application subprocess получает `--profile` через
-`command` явно, utility subprocess не обязан иметь `--profile`
+`tools.exec`» и реализуется через `_build_application_child_env()`
+(см. Decision 9). Application subprocess получает `--profile` через
+`command` явно; utility subprocess не обязан иметь `--profile`
 если он не application entrypoint.
 
 ### Decision 8: `tests/test_application_context.py:110-127` переписывается под новую сигнатуру

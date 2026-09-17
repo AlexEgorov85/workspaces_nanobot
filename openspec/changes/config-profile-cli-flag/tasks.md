@@ -105,9 +105,11 @@ if __name__ == "__main__":
 
 ### B.2 `cli_agent.py`
 
-Точно тот же паттерн, что и в B.1, но без `try/except`, если утилита
-используется только интерактивно (поведение скрипта по
-неуказанному профилю — fail fast).
+`cli_agent.py` использует **тот же** startup lifecycle и **тот же**
+contract `ConfigurationError` → exit code 2, что и `gateway.py`
+(см. B.1). Никакой отдельной exception policy для `cli_agent.py`
+нет: отсутствие `--profile` или unsupported profile — это
+`ConfigurationError` + exit code 2 так же, как в `gateway.py`.
 
 ### B.3 `streamlit_app.py`
 
@@ -198,12 +200,19 @@ resolve, не читать env на стороне boundary.
 
 ### C.4 Удалить старую env propagation
 
-- Явное добавление `NANOBOT_PROFILE` в какой-либо spawn —
-  должно отсутствовать (grep `NANOBOT_PROFILE` в `lib/services/`
-  возвращает 0 совпадений в runtime-коде; тесты, специально
-  проверяющие её игнорирование, — исключение);
+- В runtime-коде `lib/` отсутствует логика **установки** или
+  **передачи** `NANOBOT_PROFILE` в child environment через
+  `env=` или `os.environ[...] = ...`.
+  Единственное допустимое runtime-упоминание `NANOBOT_PROFILE`
+  в `lib/` — это санитизация в application subprocess boundary
+  (т.е. `env.pop("NANOBOT_PROFILE", None)` в
+  `_build_application_child_env()` или эквивалентном helper'е —
+  не `setdefault` и не запись). Поведенческий acceptance: ни один
+  spawn'нутый application subprocess не получает `NANOBOT_PROFILE`
+  в child env (acceptance test D.4
+  `test_application_subprocess_no_nanobot_profile`).
 - Документация в `docs/INTERNAL_API.md` о передаче profile через
-  env subprocess'ам — удаляется;
+  env subprocess'ам — удаляется.
 - CI/deploy-config с `NANOBOT_PROFILE=...` — отдельный тикет
   по Phase E.
 
@@ -312,8 +321,6 @@ Subprocess-вызовы entrypoints, проверяющие реальное п�
 - `test_build_app_child_env_removes_nanobot_profile`;
 - `test_build_app_child_env_preserves_others`;
 - `test_build_app_child_env_does_not_mutate_parent_environ`.
-
-### D.5 Mock-переделка `test_application_context.py:110-127`
 
 ### D.5 Mock-переделка `test_application_context.py:110-127`
 

@@ -105,19 +105,6 @@ without default, or other forms). The exposed profile value SHALL
 reflect the CLI argument that was passed to `_initialize_settings`,
 not any value derived from environment variables or implicit defaults.
 
-#### Scenario: Infrastructure reads profile via mapping access
-
-- **WHEN** a connection helper needs the active profile
-- **THEN** it SHALL read `SETTINGS["profile"]`
-- **AND THEN** it SHALL NOT branch on profile in business logic
-
-#### Scenario: Profile value reflects CLI resolution
-
-- **WHEN** `SETTINGS["profile"]` is read
-- **THEN** its value SHALL equal the CLI argument that was passed
-  to `_initialize_settings`, not a value read from any environment
-  variable
-
 #### Scenario: Infrastructure reads profile
 
 - **WHEN** a connection helper needs the active profile
