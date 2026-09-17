@@ -15,10 +15,16 @@ domain errors, and process failures.
 
 #### Scenario: Successful response
 - **WHEN** `cli_query.py` exits with `returncode = 0` AND writes a
-  parseable JSON object with `status = "ok"` to stdout
+  parseable JSON value (object, array, scalar) to stdout
 - **THEN** the wrapper SHALL return the parsed JSON payload serialized as
-  a JSON string (UTF-8, `ensure_ascii=False`) in the same format as
-  existing successful tool responses, with `status = "ok"` preserved
+  a JSON string (UTF-8, ``ensure_ascii=False``, ``default=str``) in the
+  same format as existing successful tool responses
+- **AND** the wrapper SHALL NOT inspect ``status`` on the success path
+  (success-path validation is the responsibility of the CLI, not the
+  wrapper — see design D3 «Сохранить нынешний успешный путь»).
+  Out-of-band malformed payloads with ``returncode = 0`` (empty stdout,
+  stdout not parseable as JSON) trigger the separate ``empty_response``
+  / ``invalid_json`` scenarios below.
 
 #### Scenario: Domain error with structured JSON
 - **WHEN** `cli_query.py` exits with `returncode != 0` AND writes a
@@ -54,6 +60,12 @@ domain errors, and process failures.
 - **WHEN** `cli_query.py` exits with `returncode = 0` AND stdout is empty
 - **THEN** the wrapper SHALL return its own error envelope with
   `status = "error"` and `error_type = "empty_response"`
+
+#### Scenario: Non-JSON on success exit
+- **WHEN** `cli_query.py` exits with `returncode = 0` AND stdout is not
+  parseable as JSON (for example a traceback or a stray text fragment)
+- **THEN** the wrapper SHALL return its own error envelope with
+  `status = "error"` and `error_type = "invalid_json"`
 
 ### Requirement: Manifest diagnostic taxonomy
 The system SHALL distinguish three reasons a manifest is unavailable for

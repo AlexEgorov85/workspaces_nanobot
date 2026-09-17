@@ -328,7 +328,8 @@ as is. Это включает три manifest-причины:
 
 | Тест | Что проверяет |
 | --- | --- |
-| `tests/test_legal_summarizer_query_ipc.py` | IPC-сценарии между wrapper и CLI: success / domain error / process failure / pass-through полей |
+| `tests/test_legal_summarizer_query_ipc.py` | IPC-сценарии между wrapper и CLI через моки `subprocess.run`: success / domain error / process failure / pass-through полей |
+| `tests/test_legal_summarizer_query_manifest_integration.py` | **полный путь** manifest на диске → `cli_query.py` subprocess → wrapper pass-through; три manifest-причины через **реальные** файлы во временной директории |
 | `workspace/skills/legal_summarizer/tests/test_manifest_diagnose.py` | диагностика манифеста: missing / corrupted / version=1 / без version / `version="abc"` |
 | `workspace/skills/legal_summarizer/tests/architecture/test_document_cache_boundaries.py::test_operation_level_manifest_whitelist_enforced` | `diagnose_manifest` живёт в whitelist operation-level API |
 

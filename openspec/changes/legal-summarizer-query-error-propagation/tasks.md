@@ -96,13 +96,32 @@
       "version_observed":1, "path":"..."}` итоговый JSON-string
       содержит все 5 полей с исходными значениями (точное сравнение
       `json.loads(result)`).
-      Верификация: `pytest tests/test_legal_summarizer_query_ipc.py -v`
-      зелёный, 9+ сценариев.
+      Верификация:
+      * `pytest tests/test_legal_summarizer_query_ipc.py -v` зелёный,
+        9+ unit-сценариев (a–g, h через мок pass-through, i);
+      * `pytest tests/test_legal_summarizer_query_manifest_integration.py -v`
+        зелёный, 9 интеграционных сценариев (manifest на диске → реальный
+        `cli_query.py` subprocess → для 6 кейсов проверяется CLI-envelope
+        и `exit=1`; для 3 кейсов проверяется **полный путь** wrapper
+        pass-through без `cli_failed`).
+      NOTE: (h) разнесён на две реализации — мок-pass-through (ipc-юнит)
+      и **реальный** полный IPC-путь (manifest_integration). Это
+      закрывает acceptance criterion дословно: «каждый как отдельный
+      кейс с реальным файлом во временной директории».
 
 - [x] 4.2 Запустить полный набор `pytest` (включая существующие тесты
       `legal_summarizer` и `cache.manifest`); убедиться, что ничего не
       сломалось.
-      Верификация: `pytest` завершается без новых failed/skipped.
+      Верификация:
+      * `pytest workspace/skills/legal_summarizer/tests/architecture/
+        workspace/skills/legal_summarizer/tests/test_manifest_diagnose.py
+        tests/test_legal_summarizer_query_ipc.py
+        tests/test_legal_summarizer_query_manifest_integration.py
+        tests/test_manifest.py tests/test_skill_tool_independence.py
+        tests/test_architecture_tool_domain_free.py` — 100% зелёных;
+      * `pytest tests/` — регрессионный sweep без моих новых failed;
+        все известные pre-existing failures (см. notes в §4.2 git log)
+        воспроизводятся на master до merge и не относятся к change.
 
 ## 5. Документация
 
@@ -116,4 +135,6 @@
       `legal_summarizer_query`) добавить короткий абзац про IPC-контракт
       skill↔tool. Если раздела нет — добавить ссылку на
       `workspace/skills/legal_summarizer/SKILL.md#ipc-contract`.
-      Верификация: ссылка присутствует.
+      Верификация: ссылка присутствует; также добавлена ссылка на
+      новый интеграционный тест
+      `tests/test_legal_summarizer_query_manifest_integration.py`.
