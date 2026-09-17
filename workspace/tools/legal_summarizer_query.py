@@ -30,8 +30,53 @@
     дочерний Python тоже в UTF-8 — кириллица в путях не ломается.
   * ``capture_output=True`` + ``text=True`` (cp1251-safe).
 
-Контракт и поведение описаны в ``docs/skill-tool-architecture.md`` §6
-(generic infrastructure tools).
+Контракт и поведение (IPC с ``cli_query.py``)
+==============================================
+
+Wrapper работает в трёх режимах, отличая success / domain error /
+process failure по комбинации exit code и ``status``-поля в stdout.
+
+**exit 0 + ``status == "ok"`` (success)**
+    Tool возвращает payload сериализованный как JSON-строка
+    (``ensure_ascii=False``, ``default=str``).
+
+**exit ≠ 0 + ``status == "error"`` (domain error — pass-through)**
+    Tool **пробрасывает** JSON из stdout as is. Все поля CLI-envelope
+    (``operation_id``, ``error_type``, ``path``, ``version_observed``,
+    ``message``, и любые будущие) сохраняются без переименования.
+    Никакого собственного ``error_type`` или дополнительного envelope
+    не ставится. Это включает доменные ошибки:
+
+    * ``manifest_not_found`` — manifest.json отсутствует на диске;
+    * ``manifest_corrupted`` — manifest.json есть, но не парсится;
+    * ``manifest_unsupported_version`` — manifest.json не формата v2
+      (другая ``version`` или поле отсутствует / не приводится к int).
+
+    Подробности диагностики — в ``SKILL.md`` секция «IPC contract for
+    follow-up queries».
+
+**exit ≠ 0 + любой другой stdout (process failure)**
+    Tool возвращает собственный envelope::
+
+        {"status": "error",
+         "error_type": "cli_failed",
+         "message": "cli_query вернул exit=<N>. stderr: <фрагмент>"}
+
+    Сюда попадает: пустой stdout, stdout не JSON, stdout — JSON-массив,
+    dict без поля ``status``, dict со ``status != "error"``.
+
+Wrapper-уровневые ошибки (не зависят от CLI stdout)
+---------------------------------------------------
+
+* ``timeout`` — ``cli_query.py`` превысил ``tools.legal_summarizer_query.timeout_sec``;
+* ``cli_not_found`` — ``cli_query.py`` отсутствует по ожидаемому пути;
+* ``subprocess_error`` — ``subprocess.run`` бросил ``OSError`` до старта;
+* ``empty_response`` — exit 0, но stdout пустой;
+* ``invalid_json`` — exit 0, но stdout не парсится как JSON.
+
+Контракт зафиксирован в ``workspace/skills/legal_summarizer/SKILL.md``
+(секция «IPC contract for follow-up queries»). Нормативная спека — в
+``openspec/specs/skills/legal-summarizer-query/spec.md``.
 """
 
 from __future__ import annotations
@@ -249,11 +294,7 @@ class LegalSummarizerQueryTool(Tool):
             )
 
         if completed.returncode != 0:
-            return self._error(
-                "cli_failed",
-                f"cli_query вернул exit={completed.returncode}. "
-                f"stderr: {completed.stderr.strip()[:1000] or '<пусто>'}",
-            )
+            return self._handle_nonzero_exit(completed)
 
         stdout = (completed.stdout or "").strip()
         if not stdout:
@@ -272,6 +313,40 @@ class LegalSummarizerQueryTool(Tool):
             )
 
         return json.dumps(payload, ensure_ascii=False, default=str)
+
+    def _handle_nonzero_exit(self, completed: subprocess.CompletedProcess) -> str:
+        """Обработать non-zero exit cli_query.py: pass-through или cli_failed.
+
+        При ``returncode != 0``:
+
+        1. Пытаемся распарсить stdout как JSON. Если это dict с
+           top-level ``status == "error"`` (строгое равенство) — это
+           доменная ошибка CLI, пробрасываем as is (все поля сохранены).
+        2. Любой другой исход (stdout пустой / stdout не JSON /
+           stdout — JSON-массив / dict без поля ``status`` /
+           dict со ``status != "error"``) трактуем как реальную поломку
+           CLI и возвращаем собственный envelope ``cli_failed`` со
+           первыми 1000 символами stderr.
+        """
+        stdout_raw = completed.stdout or ""
+        parsed: Any = None
+        try:
+            parsed = json.loads(stdout_raw)
+        except (ValueError, TypeError):
+            parsed = None
+
+        if (
+            isinstance(parsed, dict)
+            and parsed.get("status") == "error"
+        ):
+            return json.dumps(parsed, ensure_ascii=False, default=str)
+
+        stderr_fragment = (completed.stderr or "").strip()[:1000] or "<пусто>"
+        return self._error(
+            "cli_failed",
+            f"cli_query вернул exit={completed.returncode}. "
+            f"stderr: {stderr_fragment}",
+        )
 
     def _error(self, error_type: str, message: str) -> str:
         payload = {

@@ -48,6 +48,96 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _read_json_strict(path: Path) -> tuple[dict[str, Any] | None, bool]:
+    """Прочитать JSON и отличить «файла нет» / «битый JSON» / «успех».
+
+    Возвращает ``(data, is_file_present)``:
+
+    * ``(None, False)`` — файла нет на диске.
+    * ``(None, True)`` — файл есть, но JSON повреждён (или не парсится).
+    * ``(dict, True)`` — файл прочитан как dict.
+
+    Используется :func:`diagnose_manifest` для различения причин
+    ``load_manifest is None``. Никогда не бросает.
+    """
+    if not path.is_file():
+        return None, False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, True
+    if not isinstance(data, dict):
+        return None, True
+    return data, True
+
+
+def _coerce_version_int(raw: dict[str, Any]) -> int | None:
+    """Прочитать ``raw["version"]`` как int, если это возможно.
+
+    Возвращает ``None`` если поля нет или оно не coerce'ится в int
+    (например, ``"abc"``, ``["1"]``, ``null``). Используется
+    :func:`diagnose_manifest` для различения «нет поля version» и
+    «version != 2».
+    """
+    if "version" not in raw:
+        return None
+    value = raw["version"]
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def diagnose_manifest(
+    operation_id: str,
+    workspace_root: Path | str | None = None,
+) -> dict[str, Any]:
+    """Диагностика manifest для IPC-слоя ``cli_query.py``.
+
+    Возвращает dict с полями:
+
+    * ``reason``: один из ``"ok"`` / ``"not_found"`` / ``"corrupted"``
+      / ``"unsupported_version"``;
+    * ``path``: абсолютный путь к manifest-файлу (для диагностического
+      сообщения);
+    * ``version_observed``: ``int | None``. Заполняется только когда
+      ``reason == "ok"`` или ``reason == "unsupported_version"`` и
+      ``raw["version"]`` может быть прочитан как int. Во всех остальных
+      случаях (поле отсутствует, ``"abc"``, массив и т.п.) — ``None``.
+
+    ``raw`` (содержимое manifest) намеренно **не возвращается**: для
+    ``"corrupted"`` получить его невозможно, а CLI для построения error
+    envelope он не нужен.
+
+    Эта функция **не подменяет** :func:`load_manifest` — resume-протокол
+    продолжает использовать неразличающий API. ``diagnose_manifest``
+    предназначена только для IPC-слоя CLI query и read-only tool'а
+    ``legal_summarizer_query``.
+    """
+    path = manifest_path(operation_id, workspace_root)
+    data, is_present = _read_json_strict(path)
+
+    if not is_present:
+        return {"reason": "not_found", "path": str(path), "version_observed": None}
+    if data is None:
+        return {"reason": "corrupted", "path": str(path), "version_observed": None}
+
+    version_int = _coerce_version_int(data)
+    if version_int == MANIFEST_VERSION_V2:
+        return {
+            "reason": "ok",
+            "path": str(path),
+            "version_observed": version_int,
+        }
+    return {
+        "reason": "unsupported_version",
+        "path": str(path),
+        "version_observed": version_int,
+    }
+
+
 @dataclass
 class NormalizedManifest:
     """Унифицированное представление manifest'а в формате v2."""
@@ -282,6 +372,7 @@ __all__ = [
     "MANIFEST_VERSION_V2",
     "NormalizedManifest",
     "load_manifest",
+    "diagnose_manifest",
     "save_manifest",
     "write_chunk_result",
     "read_chunk_result",

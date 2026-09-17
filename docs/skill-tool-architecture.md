@@ -276,3 +276,67 @@ CLI skill'а `scripts/generated_sql_mode.py` для few-shot retrieval):
 
 Любое использование `label` в `lib/services/runtime`-слое (`cache_provider_impl.py`,
 `duckdb_cache_store.py`, `pg_duckdb_sync_service.py`) — архитектурная регрессия.
+
+---
+
+## 11. Контракт `legal_summarizer_query`
+
+Tool `legal_summarizer_query` (`workspace/tools/legal_summarizer_query.py`)
+— единственный живой generic-tool, подключённый к конкретному skill'у
+через **subprocess-boundary** (не импорт). Связь Skill↔Tool всё равно
+**через агентский runtime** (§1), но контракт IPC между wrapper и
+`cli_query.py` — отдельная нормативная поверхность.
+
+### 11.1. IPC-протокол между wrapper и `cli_query.py`
+
+| exit code | stdout `status` | семантика |
+| --- | --- | --- |
+| 0 | `"ok"` | success |
+| ≠ 0 | `"error"` (JSON-объект) | domain error (pass-through) |
+| ≠ 0 | что-то иное | process failure → `cli_failed` |
+| 0 | пустой stdout | → `empty_response` |
+| 0 | stdout не JSON | → `invalid_json` |
+
+Wrapper НЕ ставит свой envelope поверх domain error: `error_type`,
+`operation_id`, `path`, `version_observed`, `message` доходят до агента
+as is. Это включает три manifest-причины:
+
+* `manifest_not_found`
+* `manifest_corrupted`
+* `manifest_unsupported_version`
+
+Диагностика `manifest` живёт в `workspace/skills/legal_summarizer/scripts/cache/manifest.py::diagnose_manifest`
+(operation-level API в том же модуле, где `load_manifest`).
+
+### 11.2. Что Tool НЕ делает
+
+- Tool **не импортирует** skill (это уже общее правило §3).
+- Tool **не интерпретирует** `status` поля CLI — он только пробрасывает
+  dict с `status == "error"` как есть (строгая проверка, не "есть status").
+- Tool **не пытается** выровнять `chunks_total` (manifest) и `chunk_count`
+  (per-chunk файлы) — расхождение документировано, а не правится кодом.
+
+### 11.3. Где контракт зафиксирован
+
+| Документ | Что внутри |
+| --- | --- |
+| `openspec/specs/skills/legal-summarizer-query/spec.md` | нормативная спека (ADDED Requirements, scenarios) |
+| `workspace/skills/legal_summarizer/SKILL.md` § «IPC contract for follow-up queries» | таблица exit code × status × error_type; семантика `chunks_total` vs `chunks` |
+| `workspace/tools/legal_summarizer_query.py` docstring | исчерпывающий список wrapper-уровневых и CLI-pass-through error_type |
+
+### 11.4. Тесты
+
+| Тест | Что проверяет |
+| --- | --- |
+| `tests/test_legal_summarizer_query_ipc.py` | IPC-сценарии между wrapper и CLI: success / domain error / process failure / pass-through полей |
+| `workspace/skills/legal_summarizer/tests/test_manifest_diagnose.py` | диагностика манифеста: missing / corrupted / version=1 / без version / `version="abc"` |
+| `workspace/skills/legal_summarizer/tests/architecture/test_document_cache_boundaries.py::test_operation_level_manifest_whitelist_enforced` | `diagnose_manifest` живёт в whitelist operation-level API |
+
+Любая попытка:
+
+* ввести ещё один `error_type`-префикс (`cli_manifest_*`) — нарушает
+  нормативную спеку и ломает grep'абельность кода;
+* подменить `status == "error"` на «наличие status» — ломает pass-through
+  контракт и пропускает случайный `exit 1 + {"status":"ok"}`;
+* убрать `diagnose_manifest` из whitelist operation-level API —
+  регрессия архитектурного guard (§10).

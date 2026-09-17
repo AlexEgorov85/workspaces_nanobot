@@ -80,6 +80,7 @@ _DOCUMENT_LEVEL_SYMBOLS = frozenset({
 # Operation-level API, легитимный в production (для whitelisting).
 _OPERATION_LEVEL_SYMBOLS = frozenset({
     "load_manifest",
+    "diagnose_manifest",
     "save_manifest",
     "write_chunk_result",
     "read_chunk_result",

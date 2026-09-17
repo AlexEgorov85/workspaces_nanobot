@@ -1,6 +1,6 @@
 ## 1. Diagnostic helper в `cache/manifest.py`
 
-- [ ] 1.1 Добавить `diagnose_manifest(operation_id, workspace_root) -> dict` в
+- [x] 1.1 Добавить `diagnose_manifest(operation_id, workspace_root) -> dict` в
       `workspace/skills/legal_summarizer/scripts/cache/manifest.py`. Возвращает
       `{"reason": "ok"|"not_found"|"corrupted"|"unsupported_version",
       "version_observed": int|None, "path": str}`.
@@ -13,7 +13,7 @@
       print(diagnose_manifest('no_such', '.'))"` возвращает
       `reason="not_found"` и **не** содержит поля `raw`.
 
-- [ ] 1.2 Покрыть `diagnose_manifest` unit-тестами на 5 случаев:
+- [x] 1.2 Покрыть `diagnose_manifest` unit-тестами на 5 случаев:
       `manifest не существует`, `JSON повреждён`, `version=1`,
       `без поля version`, `version="abc"` (non-integer). Различить под
       `unsupported_version`: для `version=1` → `version_observed=1`,
@@ -24,7 +24,7 @@
 
 ## 2. CLI query: три `error_type` вместо одного
 
-- [ ] 2.1 В `workspace/skills/legal_summarizer/scripts/cli_query.py` заменить
+- [x] 2.1 В `workspace/skills/legal_summarizer/scripts/cli_query.py` заменить
       `_load_manifest_or_none` на путь «сначала `diagnose_manifest`, при
       `reason != "ok"` — `_emit(...)` соответствующего error envelope и
       `return 1`». Envelope содержит `status="error"`, `error_type` равный
@@ -39,7 +39,7 @@
       на manifest с `version=1` — `error_type=manifest_unsupported_version` и
       `exit=1`.
 
-- [ ] 2.2 Добавить в `SKILL.md` явную секцию «IPC contract for follow-up
+- [x] 2.2 Добавить в `SKILL.md` явную секцию «IPC contract for follow-up
       queries» с таблицей `exit code` × `status` × `error_type`. Упомянуть
       `chunks_total` vs `field=chunks` как независимые источники.
       Верификация: `grep -n "IPC contract" workspace/skills/legal_summarizer/SKILL.md`
@@ -47,7 +47,7 @@
 
 ## 3. Wrapper: пробрасывать доменные ошибки
 
-- [ ] 3.1 В `workspace/tools/legal_summarizer_query.py::execute` после
+- [x] 3.1 В `workspace/tools/legal_summarizer_query.py::execute` после
       `subprocess.run` изменить порядок: при `returncode != 0` сначала
       попытаться `json.loads(stdout)`; пробросить JSON-строку только если
       результат — dict с `status == "error"` (строгое равенство значения,
@@ -63,7 +63,7 @@
       возвращает тот же JSON без обёртки `cli_failed`. Mock на
       `returncode=1, stdout='{"status":"ok"}'` возвращает `cli_failed`.
 
-- [ ] 3.2 Существующие error-типы wrapper'а (`timeout`, `cli_not_found`,
+- [x] 3.2 Существующие error-типы wrapper'а (`timeout`, `cli_not_found`,
       `subprocess_error`, `empty_response`, `invalid_json`,
       `cli_failed`) оставить в тех же code-paths. `cli_failed` теперь
       срабатывает **только** на невалидный/неожиданный stdout при
@@ -73,7 +73,7 @@
 
 ## 4. Регрессионные тесты
 
-- [ ] 4.1 Добавить `tests/test_legal_summarizer_query_ipc.py` со
+- [x] 4.1 Добавить `tests/test_legal_summarizer_query_ipc.py` со
       сценариями (через `unittest.mock.patch` на `subprocess.run`):
       (a) `exit=0 + {"status":"ok",...}` → wrapper возвращает payload
       без обёртки;
@@ -99,20 +99,20 @@
       Верификация: `pytest tests/test_legal_summarizer_query_ipc.py -v`
       зелёный, 9+ сценариев.
 
-- [ ] 4.2 Запустить полный набор `pytest` (включая существующие тесты
+- [x] 4.2 Запустить полный набор `pytest` (включая существующие тесты
       `legal_summarizer` и `cache.manifest`); убедиться, что ничего не
       сломалось.
       Верификация: `pytest` завершается без новых failed/skipped.
 
 ## 5. Документация
 
-- [ ] 5.1 Обновить docstring `workspace/tools/legal_summarizer_query.py`
+- [x] 5.1 Обновить docstring `workspace/tools/legal_summarizer_query.py`
       (секция «Контракт и поведение»): явно описать три режима IPC,
       перечислить доменные `error_type` и `cli_failed` как fallback.
       Верификация: `grep -n "exit 0\|exit != 0\|cli_failed" workspace/tools/legal_summarizer_query.py`
       находит описание.
 
-- [ ] 5.2 В `docs/skill-tool-architecture.md` (если там описан
+- [x] 5.2 В `docs/skill-tool-architecture.md` (если там описан
       `legal_summarizer_query`) добавить короткий абзац про IPC-контракт
       skill↔tool. Если раздела нет — добавить ссылку на
       `workspace/skills/legal_summarizer/SKILL.md#ipc-contract`.

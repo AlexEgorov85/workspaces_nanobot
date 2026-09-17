@@ -213,10 +213,52 @@ legal_summarizer_query(operation_id="<op_id>", field="all")      # весь mani
 
 Подробности — `workspace/TOOLS.md` раздел «legal_summarizer_query».
 
-**Resume прерванного прогона** (`status="partial"`): используй тот же `--operation-id --confirm`
-для **тот же операции** (`text + length + question`). Уже записанные
-`chunks/*.json` НЕ переобрабатываются. Это **не** для follow-up вопросов —
-`--question` создаёт новый `operation_id` (новый прогон).
+### IPC contract for follow-up queries (tool `legal_summarizer_query` ↔ `cli_query.py`)
+
+`cli_query.py` пишет в stdout **JSON-объект** с фиксированной семантикой
+по комбинации exit code и `status`-поля. Tool `legal_summarizer_query`
+читает stdout как есть и пробрасывает доменные ошибки агенту.
+
+| exit code | stdout `status` | тип результата | `error_type` (если `status="error"`) |
+| --- | --- | --- | --- |
+| 0 | `"ok"` | success | — |
+| ≠ 0 | `"error"` (JSON-объект) | domain error | `manifest_not_found` / `manifest_corrupted` / `manifest_unsupported_version` |
+| ≠ 0 | другое (пустой stdout / невалидный JSON / JSON без `status` / JSON-массив / `status != "error"`) | process failure | `cli_failed` |
+| 0 | пустой stdout | empty response | `empty_response` |
+| 0 | stdout не JSON | process failure (на стороне wrapper) | `invalid_json` |
+
+Wrapper-уровневые `error_type`, не зависящие от CLI:
+`timeout` (subprocess перешёл через `tools.legal_summarizer_query.timeout_sec`),
+`cli_not_found` (cli_query.py отсутствует на ожидаемом пути),
+`subprocess_error` (`subprocess.run` бросил `OSError` до старта).
+
+**Правила:**
+
+- `status == "ok"` И exit code == 0 — единственный «успешный» путь.
+  Tool возвращает payload as is (JSON-строка, UTF-8).
+- `status == "error"` И exit code ≠ 0 — **доменная ошибка**. Tool
+  пробрасывает JSON as is, **все поля сохранены** (`operation_id`,
+  `path`, `version_observed`, `message`, и любые будущие). Никакой
+  собственный envelope поверх не ставится.
+- Всё остальное при non-zero exit — реальная поломка CLI-процесса;
+  tool возвращает собственный envelope с `error_type = "cli_failed"`
+  и первыми 1000 символами stderr.
+
+#### Семантика `chunks_total` vs `field=chunks`
+
+Это **независимые источники**:
+
+- `chunks_total` (поле `--field stats`) — логический/плановый счётчик
+  чанков из manifest; отражает `chunks_total: N` в `manifest.json`,
+  подсчитанный при планировании прогона.
+- `chunks` (поле `--field chunks`) — массив **физических** partial-файлов
+  в `<op>/chunks/*.json`, обрезанных по `--max-chunk-summary-chars`.
+
+Их расхождение (`chunks_total != len(chunks)`) — **не баг**: часть
+запланированных чанков может быть не выполнена (status=`partial`),
+а физические partial-файлы могут иметь дополнительные версии. Tool
+возвращает оба источника независимо и **не пытается их согласовать**.
+
 
 ## Что внутри
 

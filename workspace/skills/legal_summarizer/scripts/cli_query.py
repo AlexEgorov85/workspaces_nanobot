@@ -87,19 +87,97 @@ def _resolve_workspace_root(arg: str | None) -> Path:
     return Path(__file__).resolve().parents[4]
 
 
-def _load_manifest_or_none(operation_id: str, workspace_root: Path) -> dict[str, Any] | None:
-    """Прочитать manifest.json через public ``load_manifest``.
+_MANIFEST_ERROR_TYPES = {
+    "not_found": "manifest_not_found",
+    "corrupted": "manifest_corrupted",
+    "unsupported_version": "manifest_unsupported_version",
+}
 
-    Если manifest не v2 (legacy v1 или corrupted) — ``load_manifest``
-    возвращает ``None``; нам этого достаточно для CLI query (caller
-    обрабатывает None как «manifest not found»).
+
+def _load_manifest_with_diagnosis(
+    operation_id: str,
+    workspace_root: Path,
+) -> dict[str, Any] | None:
+    """Прочитать manifest и вернуть доменную ошибку, если недоступен.
+
+    Отличается от :func:`_load_manifest_or_none` тем, что различит три
+    причины недоступности (``not_found`` / ``corrupted`` /
+    ``unsupported_version``) на уровне CLI-emit, а не схлопывает их в
+    единый ``manifest_not_found``. Используется ``main()`` для построения
+    структурированного error envelope (см. IPC-контракт в SKILL.md).
+
+    Возвращает ``None`` если manifest недоступен, и ``dict`` с
+    нормализованными данными если всё хорошо. Поле ``status`` в возврате
+    НЕ проставлено — caller добавит ``"ok"``.
     """
+    from cache.manifest import diagnose_manifest
+
+    diag = diagnose_manifest(operation_id, workspace_root)
+    reason = diag["reason"]
+    if reason != "ok":
+        envelope: dict[str, Any] = {
+            "status": "error",
+            "error_type": _MANIFEST_ERROR_TYPES[reason],
+            "operation_id": operation_id,
+            "workspace_root": str(workspace_root),
+            "path": diag["path"],
+            "version_observed": diag["version_observed"],
+            "message": _manifest_error_message(reason, operation_id, diag),
+        }
+        _emit(envelope)
+        return None
+
     from cache.manifest import load_manifest
 
     normalized = load_manifest(operation_id, workspace_root)
     if normalized is None:
+        # Резерв: между диагностикой и нормализацией manifest мог исчезнуть.
+        envelope = {
+            "status": "error",
+            "error_type": "manifest_not_found",
+            "operation_id": operation_id,
+            "workspace_root": str(workspace_root),
+            "path": diag["path"],
+            "message": (
+                f"manifest.json для operation_id={operation_id!r} стал "
+                "недоступен между диагностикой и чтением."
+            ),
+        }
+        _emit(envelope)
         return None
     return normalized.to_dict()
+
+
+def _manifest_error_message(reason: str, operation_id: str, diag: dict[str, Any]) -> str:
+    """Сформировать человекочитаемое сообщение для manifest-ошибки."""
+    base_path = (
+        f"workspace/data_store/cache/skills/legal_summarizer/{operation_id}"
+    )
+    if reason == "not_found":
+        return (
+            f"manifest.json для operation_id={operation_id!r} не найден "
+            f"(ожидался по пути <repo>/{base_path}/manifest.json). "
+            "Возможно, прогон был удалён или operation_id указан неверно."
+        )
+    if reason == "corrupted":
+        return (
+            f"manifest.json для operation_id={operation_id!r} существует, "
+            "но не парсится как валидный JSON. Файл повреждён или записан "
+            "не через cache.manifest.save_manifest()."
+        )
+    if reason == "unsupported_version":
+        observed = diag.get("version_observed")
+        if observed is None:
+            return (
+                f"manifest.json для operation_id={operation_id!r} не содержит "
+                "валидного поля version (или оно не приводится к int). "
+                "Поддерживается только manifest формата 2."
+            )
+        return (
+            f"manifest.json для operation_id={operation_id!r} имеет "
+            f"version={observed}, поддерживается только version=2."
+        )
+    return f"manifest недоступен: reason={reason!r}"
 
 
 def _load_chunk_summaries(
@@ -187,19 +265,9 @@ def main() -> int:
 
     args = _build_parser().parse_args()
     workspace_root = _resolve_workspace_root(args.workspace_root)
-    manifest = _load_manifest_or_none(args.operation_id, workspace_root)
+    manifest = _load_manifest_with_diagnosis(args.operation_id, workspace_root)
     if manifest is None:
-        _emit({
-            "status": "error",
-            "error_type": "manifest_not_found",
-            "operation_id": args.operation_id,
-            "workspace_root": str(workspace_root),
-            "message": (
-                f"manifest.json для operation_id={args.operation_id!r} не найден "
-                f"в {workspace_root / 'workspace' / 'data_store' / 'cache' / 'skills' / 'legal_summarizer' / args.operation_id}. "
-                "Возможно, прогон был удалён или operation_id указан неверно."
-            ),
-        })
+        # _load_manifest_with_diagnosis уже напечатал structured error envelope.
         return 1
 
     field = args.field
