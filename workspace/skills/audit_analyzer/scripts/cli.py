@@ -289,32 +289,32 @@ def _list_scripts(db: Any) -> dict:
 
 
 def _list_indexes() -> dict:
-    """Каталог runtime-индексов из PG ``public.agent_vector_index_store``.
+    """Каталог runtime-индексов из DuckDB-снапшота ``<storage_table>``.
 
-    Источник — **только** PG-таблица хранилища FAISS-blob'ов. Это
-    фактические артефакты, которые runtime реально увидит при поиске.
+    После change ``remove-vector-index-store`` persisted FAISS-кеш
+    (``agent_vector_index_store``) удалён. Runtime-состояние индексов
+    — это набор ``source`` (index_name), присутствующих в DuckDB-кэше
+    ``storage_table`` (синхронизируется через ``PgDuckDbSyncService``).
+    Это фактические артефакты, которые runtime реально увидит при поиске.
     Конфиг декларации (``project.json::gateway.vector.index.indexes``)
     здесь **не** используется — он покажет то, что обещано построить,
     а не то, что реально собрано. Сравнить их двух — задача
     ``tools/check_indexes.py`` (MISSING/ORPHAN/STALE/INVALID).
 
     Поля элемента списка:
-      ``index_name``        — имя индекса (= ``source`` в PG);
-      ``vectors``           — ``vector_count`` (количество векторов);
-      ``dimension``         — размерность FAISS;
-      ``metric``            — из ``metadata.metric``;
-      ``signature_status``  — ``CURRENT`` / ``STALE`` / ``INVALID`` /
-                              ``UNKNOWN`` (signature отсутствует;
-                              см. ``verify_index_signature``);
-      ``signature_short``   — первые 16 символов signature (для
-                              человеко-читаемого diff с конфигом);
-      ``updated_at``       — TIMESTAMPTZ последней пересборки.
+      ``index_name``        — имя индекса (= ``source`` в storage_table);
+      ``vectors``           — количество чанков (DuckDB COUNT(*));
+      ``dimension``         — ``None`` (DuckDB не хранит размерность
+                              векторов как поле);
+      ``signature_status``  — ``CURRENT`` если index_name в ``declared``,
+                              иначе ``ORPHAN`` (нет persisted-signature —
+                              не вычисляется без runtime-индекса);
+      ``updated_at``        — ``None`` (нет persisted-метаданных).
     """
     try:
         from lib.services.cache_provider_impl import (
             list_runtime_vector_indexes,
             read_vector_index_config,
-            verify_index_signature,
         )
     except Exception as exc:
         return {
@@ -334,35 +334,26 @@ def _list_indexes() -> dict:
             "status": "error",
             "data": {
                 "message": (
-                    f"PG store ``public.agent_vector_index_store`` недоступен: {exc}. "
+                    f"DuckDB-снапшот ``<storage_table>`` недоступен: {exc}. "
                     f"Это инфраструктурная ошибка (exit 2 в tools/check_indexes.py)."
                 ),
                 "error_type": "store_unavailable",
             },
         }
 
-    # Декларация нужна **только** для compute signature — сравниваем
-    # сохранённый signature в blob'е с текущим cfg, чтобы показать
-    # ``signature_status`` (CURRENT/STALE/INVALID).
     declared = read_vector_index_config({}) or {}
 
     items: list[dict] = []
     for row in sorted(runtime, key=lambda r: r.get("source") or ""):
         name = row.get("source") or ""
-        current_cfg = declared.get(name)
-        if current_cfg is not None:
-            status = verify_index_signature(row.get("metadata") or {}, current_cfg)
-        else:
-            # Orphan: blob есть в PG, но в JSON не объявлен. Здесь
-            # вычислить signature-status без cfg нельзя — ставим UNKNOWN.
-            status = "ORPHAN" if row.get("signature") else "UNKNOWN"
+        status = "CURRENT" if name in declared else "ORPHAN"
         items.append({
             "index_name": name,
             "vectors": row.get("vector_count"),
             "dimension": row.get("dimension"),
             "metric": row.get("metric"),
             "signature_status": status,
-            "signature_short": (row.get("signature") or "")[:16],
+            "signature_short": None,
             "updated_at": str(row.get("updated_at")) if row.get("updated_at") else None,
         })
 
@@ -372,7 +363,7 @@ def _list_indexes() -> dict:
             "count": len(items),
             "indexes": items,
             "note": (
-                "Source: PG ``public.agent_vector_index_store`` (runtime artifacts). "
+                "Source: DuckDB-снапшот ``<storage_table>`` (runtime artifacts). "
                 "Compare against ``project.json::gateway.vector.index.indexes`` "
                 "via ``tools/check_indexes.py`` to see declared-but-missing indexes."
             ),
