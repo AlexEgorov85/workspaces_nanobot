@@ -865,7 +865,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     publish_path = resolve_publish_path(ctx.config.workspace_path, cache_cfg)
     _warn_if_publish_path_on_nfs(publish_path)
 
-    from lib.services.cache_provider_impl import read_embedding_config, read_vector_store_table
+    from lib.services.cache_provider_impl import read_embedding_config
 
     emb = read_embedding_config()
     embedding_base_url = emb.get("base_url", "")
@@ -879,13 +879,12 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     reconnect_backoff_max = float(sync_cfg.get("reconnect_backoff_max_sec", 0) or 0)
     full_resync_every = int(sync_cfg.get("full_resync_every", 0) or 0)
 
-    # Имя PG-таблицы с сериализованными FAISS-индексами + metadata.signature.
-    # Берётся из ``gateway.vector.index.signature_table`` (см.
-    # ``VectorIndexSettings.signature_table`` и
-    # ``cache_provider_impl.read_vector_store_table``).
-    # ``gateway.vector.index.storage_table`` — это сырые эмбеддинги
-    # (таблица из ``vector_db_table`` провайдера; см. ``DuckDbCacheStore._vector_db_table``),
-    # у которых нет колонки ``metadata``; использовать её для проверки signature нельзя.
+    # ``gateway.vector.index.storage_table`` — единственный источник
+    # векторных данных (сырые эмбеддинги + метаданные чанков; см.
+    # ``DuckDbCacheStore._vector_db_table``). После change
+    # ``remove-vector-index-store`` persisted FAISS-кеш удалён; FAISS-индекс
+    # собирается в памяти из DuckDB-снапшота storage_table (preload_indexes
+    # при старте gateway).
     sync_tables = list(dict.fromkeys(all_table_names + vector_names))
 
     store = DuckDbCacheStore(
@@ -894,7 +893,6 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         schema=schemas[0] if schemas else "main",
         tables=all_table_names or None,
         vector_db_table=vector_names[0] if vector_names else "",
-        vector_store_table=read_vector_store_table(),
         embedding_base_url=embedding_base_url,
         embedding_model=embedding_model,
         embedding_dimension=embedding_dimension,

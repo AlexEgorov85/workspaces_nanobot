@@ -91,14 +91,6 @@ class VectorIndexSettings(_StrictOptional):
         storage_table: единая PG-таблица-хранилище сырых эмбеддингов.
             Регистрируется в ``TableRegistry`` через ``register_infra``
             и попадает в DuckDB-кэш через ``PgDuckDbSyncService``.
-        signature_table: PG-таблица-хранилище сериализованных FAISS-индексов
-            (BYTEA + ``metadata`` JSONB со signature). Дефолт —
-            ``_DEFAULT_VECTOR_INDEX_STORE_TABLE`` в ``cache_provider_impl``
-            (DDL в ``sql/vectors/create_vector_index_store.sql``).
-            Используется ``DuckDbCacheStore._check_index_integrity`` и
-            ``build_cache_provider`` для проверки/записи signature; если
-            переименована через DDL — указать здесь, чтобы код не зависел
-            от хардкода.
         indexes: полный конфиг vector-индексов ``{имя: VectorIndexConfig}``
             (какие индексы строить, из каких source-таблиц, content_cols,
             embedding_cols, chunk-параметры, metric). Единственный источник
@@ -110,7 +102,6 @@ class VectorIndexSettings(_StrictOptional):
     default_root: str | None = None
     backend: str | None = None
     storage_table: str | None = None
-    signature_table: str | None = None
     indexes: dict[str, VectorIndexConfig] | None = None
 
 
