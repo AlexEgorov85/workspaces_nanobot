@@ -410,15 +410,18 @@
     //      storage_table  — единая PG-таблица-хранилище сырых эмбеддингов
     //                       (формат "schema.table"); регистрируется в
     //                       TableRegistry через register_infra.
-    //      signature_table— PG-таблица-хранилище сериализованных FAISS-
-    //                       индексов (BYTEA + metadata JSONB со signature).
-    //      default_root   — корневая папка FAISS-индексов; путь к индексу =
-    //                       <default_root>/<index_name>.
+    //      default_root   — DEPRECATED: корневая папка FAISS-индексов
+    //                       (больше не используется; FAISS собирается в
+    //                       памяти из DuckDB-снапшота storage_table).
     //      backend        — runtime-бэкенд построения индексов ("faiss" и т.п.).
     //      indexes        — {имя: VectorIndexConfig}: единственный источник
     //                       конфига индексов (table, pk, content/embedding
     //                       колонки, chunk-параметры, metric, enabled).
     //                       Перенесено из PG-реестра agent_vector_index_config.
+    //      signature_table— УДАЛЁН (change remove-vector-index-store):
+    //                       persisted FAISS-кеш больше не существует.
+    //                       FAISS-индекс собирается из DuckDB-снапшота
+    //                       storage_table на лету (preload_indexes при старте).
     //    Ключи опциональны; дефолты — в VectorIndexSettings/VectorIndexConfig.
     //
     //  УСТАРЕВШИЙ ПУТЬ: gateway.vector_index.*  → УДАЛЁН. Используйте

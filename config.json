@@ -3,8 +3,8 @@
     "defaults": {
       "workspace": "~/.nanobot/workspace",
       "modelPreset": null,
-      "model": "qwen3.6-35b-a3b",
-      "provider": "custom",
+      "model": "MiniMax-M3",
+      "provider": "minimax",
       "maxTokens": 8192,
       "contextWindowTokens": 40000,
       "contextBlockLimit": null,

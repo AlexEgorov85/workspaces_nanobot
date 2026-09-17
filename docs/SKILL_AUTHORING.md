@@ -330,7 +330,6 @@ Pydantic-валидация в `ApplicationContext.create()`
 | `get_in_memory_cache_path(skill_root)` | Путь к общему DuckDB snapshot |
 | `get_vector_index_path(skill_name, skill_root)` | Путь к FAISS-индексу |
 | `get_vector_db_table(skill_name)` | Имя storage-таблицы векторов |
-| `get_vector_store_table()` | Сериализованные FAISS BYTEA |
 | `build_cache_provider(skill_name, skill_root)` | CacheProvider для DuckDB |
 | `get_vector_indexes(skill_name)` | Метаданные индексов из runtime-БД |
 | `get_embedding_config()` / `get_embedding_model()` | Общий runtime (без `skill_name`) |
