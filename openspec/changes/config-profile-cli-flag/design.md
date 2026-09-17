@@ -120,13 +120,24 @@ _initialize_settings
 SETTINGS
     compatibility access point к constructed configuration;
     mapping semantics; SETTINGS["profile"] — canonical profile access
+
+Application subprocess boundary
+    отвечает: ИЗОЛИРОВАТЬ deprecated env contract в child environment
+              (saнитизация NANOBOT_PROFILE для spawned application
+              entrypoint'ов; профиль передаётся через argv)
+
+ConfigurationResolver НЕ занимается subprocess environment — это
+отдельная ответственность на application layer (см. Decision 9).
 ```
 
 Это **строгое разделение ответственности**. `_LazySettings` НЕ
 содержит логики построения, merge или валидации — только lifecycle.
 `ConfigurationResolver` (`resolve_application_config`) НЕ знает про
-`_initialize_settings` или proxy — он просто строит dict. `_initialize_settings`
-— единственная точка, где они встречаются.
+`_initialize_settings` или proxy — он просто строит dict.
+`_initialize_settings` — единственная точка, где они встречаются.
+`Application subprocess boundary` тоже отдельная concerns — она
+**не** про configuration construction, а про изоляцию legacy
+contract'ов в spawned subprocess'ах.
 
 ### Decision 1: `_LazySettings` — compatibility boundary (не архитектура)
 
@@ -367,6 +378,119 @@ subprocess-вызов с правильным и неправильным `--pro
 
 **Обоснование:** единственная точка инициализации после change —
 `_initialize_settings`, и mock'и должны ставиться туда.
+
+### Decision 9: Application subprocess boundary sanitizes deprecated env vars
+
+**Проблема:** сегодня `lib/services/subprocess_manager.py:83-89` запускает
+Streamlit UI через `subprocess.Popen(...)` без явного `env=`. Это значит,
+что child наследует parent `os.environ` целиком, включая устаревшую
+`NANOBOT_PROFILE` если она там оказалась (по ошибке деплоя или исторической
+привычке). Child-streamlit в таком случае **получает deprecated env var**,
+даже если она ни на что не влияет в runtime-архитектуре (нет читающего кода).
+Это нарушает наблюдаемый invariant «`NANOBOT_PROFILE` нигде не наблюдается».
+
+**Выбор:** Ввести единый application subprocess boundary — **единственное место**
+в коде, где формируется `env=` для spawn'а application entrypoint'а. Это
+`lib/services/subprocess_manager.py` (или новый `lib/services/subprocess_env.py`,
+если архитектура предпочитает разделение — оба варианта допустимы; в обоих
+случаях граничная функция одна и та же).
+
+```python
+def _build_application_child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("NANOBOT_PROFILE", None)
+    return env
+```
+
+И на стороне caller'а:
+
+```python
+proc = subprocess.Popen(
+    [sys.executable, "-m", "streamlit", "run", str(script),
+     "--", f"--profile={SETTINGS['profile']}",
+     ...],
+    env=_build_application_child_env(),
+    stdout=log_handle,
+    stderr=subprocess.STDOUT,
+)
+```
+
+Альтернативы рассмотрены:
+
+- **Дублировать `env.pop("NANOBOT_PROFILE", None)` в каждом caller'е** —
+  отвергнуто. Это та же ошибка, что в `config.py:240, 291`, и спецификация
+  прямо запрещает дублирование. Если spawn'ов application entrypoint'ов
+  станет несколько — boundary всё равно одна, вызываемая из всех мест.
+- **Положить `_build_application_child_env()` в `config.py` рядом с
+  `_initialize_settings`** — отвергнуто. Ответственность subprocess
+  boundary лежит не в `config` (который теперь занимается только
+  profile lifecycle), а в `lib/services/` (которому принадлежит
+  spawn-код).
+- **Ничего не делать, полагаясь на то, что код `NANOBOT_PROFILE` нигде
+  не читает** — отвергнуто. Observable invariant нарушается: child env
+  содержит deprecated var. Это тот же класс багов, как config.py:240 —
+  устаревший код тихо живёт в среде и рано или поздно активируется через
+  миграцию или supply-chain.
+
+**Обоснование:**
+
+1. **Boundary = `lib/services/subprocess_manager.py`** — единственное место
+   в `lib/`, где `subprocess.Popen` запускает application entrypoint
+   (Streamlit). Это подтверждено grep'ом (см. Phase C ниже).
+
+2. **Санитизация через `os.environ.copy()` + `.pop()`, не через
+   `os.environ.pop()`** — критично. Приложение продолжает работать
+   после spawn'а, и parent `os.environ` не должен неожиданно терять var.
+
+3. **Профиль передаётся через `argv`** (`--profile=...`), не через env.
+   Source of truth — `SETTINGS["profile"]`. Никакого повторного resolve
+   на стороне boundary.
+
+**Scope ограничение:** Санитизация применяется только к spawn'у
+application entrypoint'ов (`gateway.py`, `cli_agent.py`,
+`streamlit_app.py`). Low-level утилиты типа
+`subprocess.run(["git", "describe", ...])` в
+`lib/utils/project_version.py:50` НЕ трогаем — это не application
+entrypoint и не принимает `--profile`. Это тот же distinction, что для
+standalone utilities в Decision 5.
+
+### Decision 10: Категории runtime-участников
+
+Чтобы устранить двусмысленность вокруг слова «utility»:
+
+```text
+A. Application entrypoint
+   — создаёт ApplicationContext / SETTINGS runtime
+   — обязательно принимает --profile=<v>
+   — примеры: gateway.py, cli_agent.py, streamlit_app.py
+
+B. Application subprocess
+   — это application entrypoint, запущенный родителем
+   — получает профиль ТОЛЬКО через --profile=<v> в argv
+   — не получает NANOBOT_PROFILE через env
+   — sanitization происходит в application subprocess boundary
+     (см. Decision 9)
+
+C. Standalone utility
+   — не использует ApplicationContext / resolved SETTINGS
+   — НЕ обязано принимать --profile
+   — примеры: tools/build_vectors.py, tools/check_worker_pool_integrity.py,
+     workspace/skills/*/scripts/cli.py в standalone-режиме
+   — НЕ входит в scope application subprocess boundary
+```
+
+Boundary (Decision 9) защищает только категорию B. Категория C
+**никогда** не становится B при running через `subprocess.Popen`
+напрямую — они не используют этот код.
+
+### Decision 11: OpenSpec lifecycle финален перед реализацией
+
+Перед началом реализации `openspec.cmd validate config-profile-cli-flag --strict`
+проходит без ошибок; все 12 пунктов Definition of Done в `tasks.md`
+выполнимы существующими acceptance-критериями; ни одно из проверенных
+противоречий не остаётся в артефактах. Только после этого `tasks.md`
+phase переводится из «planned» в «ready for implementation», и
+отдельный тикет начинает coding.
 
 ## Risks / Trade-offs
 

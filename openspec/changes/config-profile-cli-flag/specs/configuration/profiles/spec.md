@@ -243,15 +243,20 @@ governs whether and how it consumes configuration.
 
 ### Requirement: Profile does not inherit through subprocess environment
 
-The system SHALL NOT transmit any profile-related environment
-variable (notably `NANOBOT_PROFILE`) to subprocesses spawned by
-runtime tools (notably `workspace/tools/exec`). A subprocess that
-acts as an application entrypoint and needs to act under a specific
-profile SHALL receive `--profile=<value>` as part of its
-`command` argument; if no profile is passed in `command`, the
-subprocess SHALL fail with `ConfigurationError` per the
-application-entrypoint contract rather than silently inheriting a
-profile from a leaked environment variable.
+The system SHALL NOT transmit any profile-related environment variable
+(notably `NANOBOT_PROFILE`) to subprocesses spawned by runtime tools
+(notably `workspace/tools/exec`). A subprocess that acts as an
+application entrypoint and needs to act under a specific profile
+SHALL receive `--profile=<value>` as part of its `command`
+argument; if no profile is passed in `command`, the subprocess
+SHALL fail with `ConfigurationError` per the application-entrypoint
+contract rather than silently inheriting a profile from a leaked
+environment variable. The detailed sanitization contract is
+specified in the requirement «Application subprocess boundary
+sanitizes deprecated env vars» (which is the application subprocess
+boundary's specific contract); this requirement provides the
+high-level assertion that no application subprocess receives
+`NANOBOT_PROFILE` regardless of mechanism.
 
 #### Scenario: Application subprocess receives --profile explicitly
 
@@ -269,15 +274,6 @@ profile from a leaked environment variable.
   `ConfigurationError("--profile is required")`
 - **AND THEN** the parent SHALL NOT set `NANOBOT_PROFILE` in the
   child environment as a workaround
-
-#### Scenario: NANOBOT_PROFILE not propagated to subprocess
-
-- **WHEN** any tool spawns a subprocess
-- **THEN** the child's environment SHALL NOT contain
-  `NANOBOT_PROFILE` (or any other profile-related variable)
-- **AND THEN** the child's profile SHALL be determined solely by
-  `--profile` in its `command` (or by its own internal contract
-  if it is not an application entrypoint)
 
 ### Requirement: Integration test verifies runtime configuration, not only banner
 
@@ -330,3 +326,108 @@ deployment descriptors. Code that currently relies on env-fallback
 `config.py:517-518`) is replaced by explicit
 `config._initialize_settings(profile=...)` called from each
 application entrypoint before any other runtime import.
+
+## ADDED Requirements (Phase C / Subprocess environment isolation)
+
+### Requirement: Application subprocess boundary sanitizes deprecated env vars
+
+For every subprocess spawned by application runtime that itself is
+an application entrypoint (`gateway.py`, `cli_agent.py`,
+`streamlit_app.py`), the application subprocess boundary SHALL
+construct the child environment as a copy of the parent environment
+with the deprecated configuration variable `NANOBOT_PROFILE`
+removed. The boundary SHALL NOT mutate parent `os.environ`. The
+boundary SHALL preserve all other environment variables.
+
+This requirement applies **only to the application subprocess
+boundary** — the place where the runtime spawns an application
+entrypoint. Low-level utility subprocesses that are not application
+entrypoints (e.g. `subprocess.run(["git", ...])`, `python -m pip`,
+similar short-lived tooling) are NOT required to apply this
+sanitization. The boundary locates the responsibility in ONE place;
+adding duplicated checks at every caller is explicitly disallowed.
+
+#### Scenario: NANOBOT_PROFILE removed from child env
+
+- **WHEN** parent process has `os.environ["NANOBOT_PROFILE"]="test"`
+- **AND WHEN** the application subprocess boundary spawns an
+  application entrypoint subprocess
+- **THEN** the child's `os.environ` SHALL NOT contain
+  `NANOBOT_PROFILE`
+
+#### Scenario: Unrelated env vars preserved
+
+- **WHEN** parent process has `os.environ["TEST_CHILD_ENV"]="preserved"`
+  and `os.environ["NANOBOT_PROFILE"]="test"`
+- **AND WHEN** the application subprocess boundary spawns an
+  application entrypoint subprocess
+- **THEN** the child SHALL see `TEST_CHILD_ENV=preserved` in its
+  environment
+- **AND THEN** the child SHALL NOT see `NANOBOT_PROFILE`
+
+#### Scenario: Parent os.environ unchanged after spawn
+
+- **WHEN** the application subprocess boundary spawns an
+  application entrypoint subprocess
+- **THEN** parent `os.environ["NANOBOT_PROFILE"]` SHALL remain
+  unchanged after the subprocess returns (whether the child
+  succeeded or failed)
+
+#### Scenario: Sanitization is in the boundary, not at every caller
+
+- **WHEN** the application runtime spawns an application entrypoint
+  subprocess
+- **THEN** the sanitization is performed in exactly one place
+  (the application subprocess boundary)
+- **AND THEN** no caller-level `os.environ.pop("NANOBOT_PROFILE", None)`
+  repetition is required
+
+### Requirement: Application subprocess gets profile only via --profile
+
+For every subprocess spawned by application runtime that is itself
+an application entrypoint, the parent SHALL pass the active profile
+as an explicit `--profile=<value>` CLI argument derived from
+`SETTINGS["profile"]` (the canonical resolved profile). The profile
+SHALL NOT be transported via environment variables, files, IPC,
+or any other side-channel.
+
+#### Scenario: Application subprocess receives --profile explicitly
+
+- **WHEN** the application subprocess boundary spawns an
+  application entrypoint subprocess
+- **THEN** the parent's `argv` for the child SHALL include
+  `--profile=<value>` matching `SETTINGS["profile"]`
+- **AND THEN** no `NANOBOT_PROFILE` SHALL appear in the child's
+  `env`
+
+#### Scenario: Profile source is parent's SETTINGS, not env
+
+- **WHEN** the application subprocess boundary constructs the
+  child `argv`
+- **THEN** the profile value SHALL be read from
+  `SETTINGS["profile"]`
+- **AND THEN** no second `_resolve_mode`, no env lookup, no default
+  SHALL be invoked at the boundary
+
+### Requirement: All application entrypoints share identical lifecycle contract
+
+The three application entrypoints (`gateway.py`, `cli_agent.py`,
+`streamlit_app.py`) SHALL follow the SAME lifecycle and the SAME
+error-translation contract. No entrypoint SHALL define a private
+exception policy. Differences between entrypoints are limited to
+how argv is sourced (CLI argparse vs Streamlit's `--` passthrough);
+the error and initialization contract is identical.
+
+#### Scenario: All entrypoints fail with exit code 2 without --profile
+
+- **WHEN** each of `gateway.py`, `cli_agent.py`, `streamlit_app.py`
+  is invoked without `--profile`
+- **THEN** each SHALL raise `ConfigurationError("--profile is required")`
+- **AND THEN** each SHALL exit the process with status code 2
+
+#### Scenario: All entrypoints fail with exit code 2 with invalid profile
+
+- **WHEN** each of `gateway.py`, `cli_agent.py`, `streamlit_app.py`
+  is invoked with `--profile=<unsupported>`
+- **THEN** each SHALL raise `ConfigurationError("--profile=<v> is not supported (allowed: prod, test)")`
+- **AND THEN** each SHALL exit the process with status code 2

@@ -126,18 +126,97 @@ if __name__ == "__main__":
 module-level (а не в `if __name__ == "__main__":` — для streamlit-run
 это условие не сработает как для CLI).
 
-## Phase C — Subprocess / Environment Inheritance
+## Phase C — Application Subprocess Boundary (NEW, mandatory)
 
-Удалить всю документацию и контракт, которые предлагали передавать
-`NANOBOT_PROFILE` subprocess'ам через `env`. Зафиксировать
-контрактно: subprocess никогда не получает profile через env;
-application subprocess (запускающий `gateway.py`/`cli_agent.py`/
-`streamlit_app.py`) получает `--profile=<v>` через `command`.
+Эта фаза — новая обязательная часть реализации. Существующий
+код в `lib/services/subprocess_manager.py:83-89` запускает
+Streamlit UI через `subprocess.Popen(...)` **без** явного `env=`,
+что означает полное наследование parent `os.environ`. Это
+нарушает observable invariant «`NANOBOT_PROFILE` нигде не
+наблюдается в runtime».
 
-`docs/INTERNAL_API.md` секция «tools.exec» обновляется; никакого
-кода в `workspace/tools/exec` менять не нужно (по умолчанию
-subprocess env не наследует `NANOBOT_PROFILE` если его нет в
-parent env).
+### C.1 Найти реальную application subprocess boundary
+
+Через `grep -rn 'subprocess\.\(Popen\|run\|call\|check_call\|check_output\)' lib/`
+определить все места, где runtime спавнит subprocess. Применимо
+только к тем, которые запускают **application entrypoint**
+(`gateway.py` / `cli_agent.py` / `streamlit_app.py`). Low-level
+утилиты (`subprocess.run(["git", ...])`,
+`subprocess.run(["python", "-m", "pip", ...])`) — не application
+entrypoints и не входят в scope boundary.
+
+Ожидаемый результат для текущего репо: единственная точка —
+`lib/services/subprocess_manager.py:83-89`. Если найдены другие —
+вынести их в общий boundary (Phase C.2).
+
+### C.2 Реализовать sanitization helper
+
+В `lib/services/subprocess_manager.py` (или в новом
+`lib/services/subprocess_env.py`, если архитектура предпочитает
+разделение):
+
+```python
+def _build_application_child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("NANOBOT_PROFILE", None)
+    return env
+```
+
+Требования:
+- `NANOBOT_PROFILE` отсутствует в результате;
+- остальные environment variables сохраняются;
+- parent `os.environ` **НЕ** мутируется;
+- если `NANOBOT_PROFILE` отсутствовал в parent — это не ошибка
+  (`.pop(..., None)`);
+- не создавать глобальную переменную для хранения helper'а
+  (если он уже не существует); если существующий helper
+  уместен — переиспользовать.
+
+### C.3 Передать профиль через argv
+
+В caller'е boundary (`SubprocessManager.spawn_streamlit` и любые
+другие найденные spawn'ы application entrypoint'ов) дополнить
+`argv` явным `--profile=<v>`:
+
+```python
+cmd = [
+    sys.executable, "-m", "streamlit", "run", str(script),
+    "--", f"--profile={SETTINGS['profile']}",
+    "--server.headless", "true",
+    "--server.port", str(port),
+]
+proc = subprocess.Popen(
+    cmd,
+    env=_build_application_child_env(),
+    stdout=log_handle,
+    stderr=subprocess.STDOUT,
+)
+```
+
+Источник профиля — `SETTINGS["profile"]`. Не делать второй
+resolve, не читать env на стороне boundary.
+
+### C.4 Удалить старую env propagation
+
+- Явное добавление `NANOBOT_PROFILE` в какой-либо spawn —
+  должно отсутствовать (grep `NANOBOT_PROFILE` в `lib/services/`
+  возвращает 0 совпадений в runtime-коде; тесты, специально
+  проверяющие её игнорирование, — исключение);
+- Документация в `docs/INTERNAL_API.md` о передаче profile через
+  env subprocess'ам — удаляется;
+- CI/deploy-config с `NANOBOT_PROFILE=...` — отдельный тикет
+  по Phase E.
+
+### C.5 Acceptance behavior (не grep, а runtime)
+
+- parent `os.environ["NANOBOT_PROFILE"] = "test"` →
+  `SubprocessManager.spawn_streamlit` → в child env нет `NANOBOT_PROFILE`;
+- parent имеет `os.environ["TEST_CHILD_ENV"] = "preserved"` →
+  child получает это значение;
+- после spawn parent `os.environ` не изменился (включая
+  `NANOBOT_PROFILE` если был);
+- `SETTINGS["profile"]` родителя = `"prod"` → argv child содержит
+  `--profile=prod`.
 
 ## Phase D — Tests
 
@@ -200,13 +279,41 @@ Subprocess-вызовы entrypoints, проверяющие реальное п�
   подменить `streamlit run` минимальным harness'ом) имеет
   `["profile"] == "prod"` И runtime-таблицу prod.
 
-### D.4 Subprocess environment inheritance test
+### D.4 Child environment — обязательный integration test
 
-- `test_subprocess_no_nanobot_profile_leak`: parent-процесс имеет
-  `os.environ["NANOBOT_PROFILE"]="prod"`; subprocess, запущенный
-  через `subprocess.run`, в `os.environ` ребёнка НЕ содержит
-  `NANOBOT_PROFILE` (по умолчанию subprocess наследует parent env;
-  тест проверяет, что нет кода, который ЯВНО добавляет эту var).
+Ключевой тест change'а. Проверяет реализацию Phase C end-to-end
+через реальный application subprocess boundary.
+
+- `test_application_subprocess_no_nanobot_profile`: parent-процесс
+  ставит `os.environ["NANOBOT_PROFILE"] = "test"`; затем
+  запускается реальный application entrypoint subprocess через
+  application subprocess boundary (`SubprocessManager` или
+  эквивалентный helper); child-процесс пишет свой `os.environ`
+  в файл (`os.environ` доступен через `python -c "import os,
+  json; print(json.dumps(dict(os.environ)))" > /tmp/env.json`).
+  Затем родитель читает файл и проверяет, что
+  `"NANOBOT_PROFILE"` отсутствует.
+- `test_application_subprocess_other_env_preserved`:
+  parent ставит `os.environ["TEST_CHILD_ENV"] = "preserved"` →
+  child видит это значение.
+- `test_application_subprocess_parent_intact`:
+  parent ставит `os.environ["NANOBOT_PROFILE"] = "test"` →
+  subprocess запускается и завершается → parent
+  `os.environ["NANOBOT_PROFILE"]` остаётся `"test"`.
+- `test_application_subprocess_receives_profile_argv`:
+  parent инициализирует `SETTINGS["profile"] = "prod"` →
+  subprocess получает `--profile=prod` (можно проверить через
+  `child.py` который печатает sys.argv); subprocess устанавливает
+  prod-таблицу в runtime.
+
+### D.4a Subprocess boundary unit test (если helper вынесен отдельно)
+
+Если `_build_application_child_env()` вынесен в отдельный модуль:
+- `test_build_app_child_env_removes_nanobot_profile`;
+- `test_build_app_child_env_preserves_others`;
+- `test_build_app_child_env_does_not_mutate_parent_environ`.
+
+### D.5 Mock-переделка `test_application_context.py:110-127`
 
 ### D.5 Mock-переделка `test_application_context.py:110-127`
 
@@ -285,11 +392,11 @@ BREAKING для деплоев, использующих `NANOBOT_PROFILE=prod` 
 `Change 'config-profile-cli-flag' is valid` остаётся зелёным после каждого
 изменения артефактов. Реализация считается завершённой, когда:
 
+### Lifecycle и ownership
+
 - [ ] `config.py` не содержит module-level construction (`config.py`
       импортируется без побочных эффектов: ни merge, ни env-чтения,
       ни `_ACTIVE_PROFILE`, ни module-level `SETTINGS =`).
-- [ ] `config.py` не читает и не пишет `NANOBOT_PROFILE`
-      (ни `os.environ.get`, ни `setdefault`, ни прямое обращение).
 - [ ] `_resolve_mode()` удалён (поведенческая проверка: `import config;
       hasattr(config, "_resolve_mode")` → False).
 - [ ] Whitelist профилей: `{"prod", "test"}`. `--profile=dev`,
@@ -300,23 +407,113 @@ BREAKING для деплоев, использующих `NANOBOT_PROFILE=prod` 
 - [ ] Второй `_initialize_settings(...)` →
       `ConfigurationError("SETTINGS already initialized")`.
 - [ ] Профиль иммутабелен после инициализации (нет смены профиля).
-- [ ] Application entrypoints (`gateway.py`, `cli_agent.py`,
-      `streamlit_app.py`) требуют `--profile` и без него падают
-      с exit code 2 через `ConfigurationError`.
 - [ ] `SETTINGS["profile"]` доступен как canonical API.
+
+### Application entrypoints — единый contract
+
+- [ ] `gateway.py`, `cli_agent.py`, `streamlit_app.py` требуют
+      `--profile` и без него падают с `ConfigurationError` + exit 2.
+- [ ] Все три entrypoint'а используют **одинаковый** lifecycle:
+      parse → validate → `_initialize_settings` → runtime imports.
+- [ ] Все три entrypoint'а переводят startup `ConfigurationError`
+      в exit code 2 (нет «cli_agent без try/except»).
 - [ ] Профиль инициализируется до любых runtime-импортов
       в application entrypoint'е.
-- [ ] Subprocesses не получают `NANOBOT_PROFILE` через env
-      (отсутствует в child env даже если parent его имеет).
-- [ ] Application subprocesses получают `--profile` через `command`
-      явно.
-- [ ] Streamlit invocation зафиксирован:
-      `streamlit run streamlit_app.py -- --profile=<v>`.
-- [ ] Integration test (D.2.3) проверяет имя runtime-таблицы
+
+### NANOBOT_PROFILE — полное удаление
+
+- [ ] `config.py` не читает и не пишет `NANOBOT_PROFILE`
+      (ни `os.environ.get`, ни `setdefault`, ни прямое обращение).
+- [ ] Runtime-код в `lib/` не передаёт `NANOBOT_PROFILE`
+      subprocess'ам через env (test fixtures, специально проверяющие
+      её отсутствие, — исключение).
+- [ ] Документация, CI/deploy descriptors не упоминают
+      `NANOBOT_PROFILE` (после Phase E).
+
+### Application subprocess boundary (Phase C)
+
+- [ ] Существует ровно одно место в `lib/`, где формируется `env=`
+      для spawn'а application entrypoint'а
+      (`lib/services/subprocess_manager.py` или новый
+      `lib/services/subprocess_env.py`).
+- [ ] Boundary использует `os.environ.copy()` + `pop()`,
+      не глобальный `os.environ.pop()`.
+- [ ] Parent `os.environ` не мутируется после spawn'а
+      (acceptance test D.4 `test_application_subprocess_parent_intact`).
+- [ ] Child env не содержит `NANOBOT_PROFILE` даже если parent
+      его имеет (acceptance test D.4
+      `test_application_subprocess_no_nanobot_profile`).
+- [ ] Child env сохраняет unrelated vars
+      (acceptance test D.4 `test_application_subprocess_other_env_preserved`).
+- [ ] Application subprocess получает `--profile=<v>` через argv,
+      source — `SETTINGS["profile"]` родителя (acceptance test D.4
+      `test_application_subprocess_receives_profile_argv`).
+- [ ] Low-level утилиты (`lib/utils/project_version.py:50` и подобные)
+      НЕ модифицируются этой change'ой — они не application entrypoints.
+
+### Integration и observability
+
+- [ ] Integration test (D.2) проверяет имя runtime-таблицы
       (`agent_gateway_logs` vs `agent_gateway_logs_test`), а не
       только баннер.
+- [ ] Streamlit invocation зафиксирован:
+      `streamlit run streamlit_app.py -- --profile=<v>`.
+- [ ] `NANOBOT_PROFILE=test gateway.py --profile=prod` →
+      `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`.
+
+### Anti-patterns
+
 - [ ] `tests/conftest.py` autouse-fixture для `_initialize_settings`
       НЕ добавлен.
 - [ ] Никакой profile-ветки в business logic (`grep -rn
       'profile.*==.*"prod"\|profile.*==.*"test"' lib/ workspace/
       tools/` → 0).
+- [ ] Никакой `_resolve_mode()`-обвязки вокруг `_initialize_settings`
+      (т.е. helper не вызывает «resolve» сам профиль — он принимает
+      профиль как явный аргумент и валидирует whitelist).
+
+## Definition of Done
+
+OpenSpec считается готовой к реализации **только** когда одновременно
+выполнены все 12 условий:
+
+1. Единственный источник profile — CLI `--profile` (whitelist
+   `prod`/`test`).
+2. Единственная точка публикации `SETTINGS` —
+   `_initialize_settings(profile)`.
+3. Единственная внутренняя ошибка lifecycle/config —
+   `ConfigurationError`.
+4. Все application entrypoints имеют одинаковый startup/error
+   contract (нет «cli_agent без try/except»).
+5. `NANOBOT_PROFILE` нигде не используется для configuration
+   resolution (ни в коде, ни в deploy descriptors, ни в доках).
+6. `NANOBOT_PROFILE` удаляется из child environment через
+   application subprocess boundary (Phase C).
+7. Parent `os.environ` не мутируется ни одним spawn'ом
+   (acceptance test D.4 `test_application_subprocess_parent_intact`).
+8. Application subprocess получает profile через `--profile` в
+   `argv`, не через env (acceptance test D.4
+   `test_application_subprocess_receives_profile_argv`).
+9. Runtime integration tests проверяют фактическую configuration
+   (имя runtime-таблицы, не баннер).
+10. Нет fallback-механизма (no default profile, no env reading,
+    no auto-init at SETTINGS access).
+11. Нет autouse fixture, скрывающего новый lifecycle.
+12. `proposal.md`, `spec.md`, `design.md` и `tasks.md` описывают
+    один и тот же механизм без взаимоисключающих требований
+    (конфликтующих формулировок нет; cross-references согласованы).
+
+Проверка №12 выполняется через `openspec.cmd validate config-profile-cli-flag --strict`
+(зелёный) плюс ручное чтение критических путей:
+«`cli_agent` имеет другой error lifecycle?»,
+«`NANOBOT_PROFILE` supposedly 'ignored', но при этом передаётся child?»,
+«`NANOBOT_PROFILE` удаляется из parent вместо child?»,
+«standalone utilities обязаны принимать `--profile`?»,
+«`_resolve_mode` ещё фигурирует как рабочий механизм?»,
+«SETTINGS может создаваться при import?»,
+«profile может быть получен из environment/default?»,
+«entrypoint может создавать runtime до `_initialize_settings`?».
+
+Если хотя бы один из этих вопросов имеет ответ «да» в текущем
+состоянии артефактов — change возвращается на доработку до старта
+implementation.

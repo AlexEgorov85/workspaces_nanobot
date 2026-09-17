@@ -72,7 +72,8 @@
   - Application subprocess (запускающий `gateway.py`, `cli_agent.py` или `streamlit_app.py`) **должен** получить `--profile` через `command`;
   - Application subprocess без `--profile` — fail-fast с `ConfigurationError`;
   - Обычный utility subprocess **не обязан** иметь `--profile`, если он не является application entrypoint;
-  - Environment inheritance — `NANOBOT_PROFILE` **никогда** не передаётся дочерним процессам (ни application, ни utility).
+  - **Application subprocess boundary** — единственное место в коде (`lib/services/subprocess_manager.py`), где формируется `env=` для spawn'а application entrypoint'а. Граница **копирует** parent `os.environ` в child через `dict.copy()`, удаляет `NANOBOT_PROFILE`, неглобально. Это обеспечивает observable invariant «child не получает deprecated env var»;
+  - `ConfigurationResolver` **не** занимается subprocess environment — это отдельная concern на application layer.
 
 - **Import-order contract** ужесточён: ни один модуль, импортированный application entrypoint до `_initialize_settings()`, не может обращаться к resolved `SETTINGS`. Это формальное требование спеки (а не только impl-детали): новый scenario «ранний SETTINGS access» защищает от повторения текущего бага.
 
