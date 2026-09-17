@@ -3,7 +3,18 @@
 > Навигационный индекс каталога `docs/` — в [`README.md`](README.md). Этот документ —
 > самодостаточное описание подсистемы.
 
-> **⚠️ Источник конфигурации индексов.** Начиная с текущего релиза конфиг
+> **⚠️ Изменение архитектуры (change `remove-vector-index-store`).**
+> Persisted FAISS-кеш в `public.agent_vector_index_store` и настройка
+> `gateway.vector.index.signature_table` **удалены**. FAISS-индекс собирается
+> в памяти из DuckDB-снапшота `<storage_table>` на лету (`provider.preload_indexes`
+> при старте gateway). Все упоминания `agent_vector_index_store` /
+> `signature_table` ниже — **исторические**, для контекста миграции.
+> Современный поток: `oarb.audit_vectors` → `PgDuckDbSyncService` → DuckDB-снапшот
+> → `_load_index` (in-memory `IndexFlatIP`). См. `docs/ARCHITECTURE.md`
+> § «Vector-инфраструктура» и OpenSpec change
+> `openspec/changes/archive/<YYYY-MM-DD-remove-vector-index-store>/`.
+
+> **⚠️ Источник конфигурации индексов.** Конфиг
 > векторных индексов живёт в `project.json::gateway.vector.index.indexes.*`
 > (`VectorIndexConfig`). PG-реестр `public.agent_vector_index_config` остаётся
 > в репозитории как **legacy SQL-артефакт** — `tools/build_vectors.py` и
@@ -567,6 +578,62 @@ python tools/build_vectors.py --full-rebuild  # пересоберёт оста�
 4. В `content` (для отображения) добавляется суффикс ` [ч. N/M]`.
 
 **Поведение при поиске:** если несколько чанков одного документа попали в top-K, возвращается только один с наивысшим score, остальные доступны через `matched_chunks`.
+
+### Два режима выдачи в `search_vector`
+
+Метод `CacheProvider.search_vector(query, index_name, top_k, threshold)`
+поддерживает **два сценария** через одну и ту же команду.
+Метрика — косинусное сходство (по умолчанию, `metric=cosine`),
+score в диапазоне `[0.0, 1.0]`, **выше — лучше**:
+
+1. **Топ-K ближайших соседей.** Задаётся через `--top-k N`
+   (CLI дефолт `5`, потолок `50`, валидация в `cli.py`).
+   Возвращаются **ровно N** ближайших векторов по FAISS, отсортированных
+   по убыванию score. Если в индексе много «слабых» совпадений со
+   score `0.1–0.3` — они всё равно попадут в выдачу, если других
+   ближе нет.
+
+2. **Все результаты выше порога.** Задаётся через `--threshold T`
+   (CLI дефолт `0.0` = без фильтра, диапазон `[0.0, 1.0]`).
+   Возвращаются **все** вектора с `score >= T`, независимо от их числа.
+   Если threshold `0.7`, а в индексе набралось 12 результатов выше
+   `0.7` — `search_vector` вернёт 12 строк; если ни одно не набрало —
+   пустой список (graceful degradation).
+
+3. **Комбинация.** `--top-k N --threshold T` — сначала фильтр по
+   `threshold`, затем top-K из отфильтрованного.
+   Итоговый размер: `min(N, count_above_T)`.
+
+| Задача | Рекомендуемый режим | Параметры CLI |
+|---|---|---|
+| «Покажи первые 5 похожих проверок» | top-K (без threshold) | `--top-k 5` |
+| «Найди все нарушения с score не ниже 0.7» | threshold (без top-k) | `--threshold 0.7` |
+| «Не больше 10 результатов, но только уверенные» | top-K + threshold | `--top-k 10 --threshold 0.6` |
+| Неизвестный score-порог для индекса | top-K (без threshold) | `--top-k 5` — посмотреть распределение score в выдаче и подобрать threshold |
+
+**Примеры** (согласованы с `INTERNAL_API.md` § audit_analyzer CLI):
+
+```bash
+# топ-3 по схожести — режим top-K
+audit_analyze --mode vector --query 'пожарная безопасность' \
+    --index-name audits_index --top-k 3
+
+# все результаты выше порога 0.7 — режим threshold
+audit_analyze --mode vector --query 'статусы аудитов' \
+    --index-name audits_index --threshold 0.7
+```
+
+**Семантика в коде:** параметры читаются из CLI/программного вызова в
+`workspace/skills/audit_analyzer/scripts/cli.py:470-474` и передаются
+напрямую в `CacheProvider.search_vector(...)` (`lib/services/cache_provider.py:98`).
+Реализация FAISS-фильтрации и top-K — в `lib/services/cache_provider_impl.py::search_vector`
+и `lib/services/duckdb_cache_store.py::search_vector`. Порядок
+применения: **threshold → top_k**.
+
+**Деградация при сбоях:** при сбое эмбеддинга запроса или отсутствии
+индекса `search_vector` возвращает пустой список `[]` без падения
+(см. § «Graceful degradation в навыке» ниже) — это **намеренное
+поведение**, чтобы навык не падал целиком из-за одного запроса.
 
 ### Контроль declared vs runtime (tools/check_indexes.py)
 
