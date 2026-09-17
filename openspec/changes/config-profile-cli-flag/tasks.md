@@ -58,15 +58,18 @@ config._initialize_settings("dev")             # → ConfigurationError "not sup
 `ctx.profile == "prod"` И `ctx.settings["profile"] == "prod"`
 (одно значение, не два).
 
-### A.5 Удалить любое чтение/запись профильных env vars в `config.py`
+### A.5 Remove profile environment resolution
 
-Убрать любые `os.environ.get(...)`, `os.environ.setdefault(...)`,
-`os.environ[...] = ...` вызовы для получения или установки профиля
-(включая устаревшие env var, упоминавшиеся в deployment descriptors
-как `NANOBOT_PROFILE`). После Phase A поведенческий критерий:
-subprocess-вызов `config` с любой env var, содержащей профильное имя,
-не влияет на `_initialize_settings` — `_initialize_settings("prod")`
-даёт `SETTINGS["profile"]=="prod"` независимо от env.
+Profile SHALL be supplied only via explicit argument to
+`_initialize_settings(profile)`. The change SHALL remove all
+profile resolution through environment variables: any
+`os.environ.get(...)`, `os.environ.setdefault(...)`,
+`os.environ[...] = ...` call used for profile acquisition or
+persistence SHALL be removed. Behavioral criterion: subprocess
+invocation of `config` with arbitrary external environment
+variables SHALL NOT influence `_initialize_settings` —
+`_initialize_settings("prod")` yields `SETTINGS["profile"]=="prod"`
+regardless of env.
 
 ## Phase B — Application Entrypoints
 
@@ -166,10 +169,12 @@ runtime-коду, который спавнит application entrypoint. Ника
 - **`test_invalid_profile_rejected`**: `config._initialize_settings("dev")`
   → `ConfigurationError("profile='dev' is not supported")`. Никакая
   env-переменная не влияет на результат.
-- **`test_import_has_no_env_side_effects`**: `import config` в
-  subprocess с произвольной env var, содержащей профильное имя;
-  проверяем, что env остаётся неизменным (config не дёргает
-  `os.environ`) и `config.SETTINGS` остаётся uninitialized.
+- **`test_import_has_no_profile_resolution_side_effects`**:
+  `import config` не вызывает profile resolution, `config.SETTINGS`
+  остаётся uninitialized; `_initialize_settings("prod")` затем
+  даёт `SETTINGS["profile"]=="prod"` независимо от env. Тест
+  проверяет архитектурный контракт («environment не участвует
+  в profile resolution»), а не исторические переменные.
 
 ### D.2 Application entrypoint CLI tests
 
@@ -187,13 +192,15 @@ Subprocess-вызовы entrypoints, проверяющие реальное п�
   `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
   И `SETTINGS["profile"] == "prod"` (это **integration test** —
   не только баннер).
-- `test_gateway_unknown_env_var_ignored`:
-  произвольная env var с профильным именем (например, исторически
-  упоминавшаяся как `NANOBOT_PROFILE=test`) +
-  `python gateway.py --profile=prod` →
+- `test_gateway_profile_comes_only_from_cli`:
+  `python gateway.py --profile=prod` с произвольным набором env
+  vars в parent (включая устаревшие deployment-имена, любые
+  unrelated vars и т.п.) →
   `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
-  (prod). И `SETTINGS["profile"] == "prod"`. Баннер тоже
-  говорит `prod`.
+  (prod); `SETTINGS["profile"] == "prod"`; баннер говорит `prod`.
+  Тест проверяет архитектурный контракт «environment не
+  используется для передачи профиля», без ссылки на конкретные
+  исторические имена.
 - `test_cli_agent_*`: аналогичные 4 кейса для `cli_agent.py`.
 
 ### D.3 Streamlit invocation tests

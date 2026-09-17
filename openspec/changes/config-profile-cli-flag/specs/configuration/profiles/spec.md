@@ -85,11 +85,10 @@ default.
   overlay applied) before `ApplicationContext.create()` is called
   and before any channel, service, or AgentLoop construction begins
 
-#### Scenario: Unknown environment variable does not influence resolution
+#### Scenario: Environment variables do not influence resolution
 
 - **WHEN** any environment variable that is not part of the
-  application entrypoint contract (e.g. legacy `NANOBOT_PROFILE=prod`)
-  is set in the process environment
+  application entrypoint contract is set in the process environment
 - **AND WHEN** the application entrypoint is invoked with
   `--profile=test`
 - **THEN** the resolved profile SHALL be `test`
@@ -254,10 +253,9 @@ failure mode where the banner said `prod` but the runtime used
 - **THEN** `SETTINGS["logging"]["db"]["table_name"]` SHALL equal
   `agent_gateway_logs_test`
 
-#### Scenario: Legacy env var does not influence table selection
+#### Scenario: Profile comes only from --profile, table selection follows
 
-- **WHEN** an unknown or legacy environment variable (for example,
-  the previously-named `NANOBOT_PROFILE=test`) is set in the
+- **WHEN** arbitrary unrelated environment variables are set in the
   process environment alongside `python gateway.py --profile=prod`
 - **THEN** `SETTINGS["logging"]["db"]["table_name"]` SHALL equal
   `agent_gateway_logs` (prod), not `agent_gateway_logs_test`

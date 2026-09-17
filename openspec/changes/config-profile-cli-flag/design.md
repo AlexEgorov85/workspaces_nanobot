@@ -213,26 +213,43 @@ Whitelist-валидация встраивается в `_initialize_settings(p
 Соответственно, `_ACTIVE_PROFILE` module-level global тоже
 удаляется (он привязан к `_resolve_mode`).
 
-### Decision 2: argparse на самом верху application entrypoint'а
+### Decision 2: Startup parsing в executable entrypoint path
 
-**Выбор:** В `gateway.py`, `cli_agent.py`, `streamlit_app.py` argparse
-переезжает в module-level область, до любых импортов, читающих конфиг.
-Парсинг `--profile` — первая строка `main()` (или модуля, если
-требуется), до `ApplicationContext.create()`.
+**Выбор:** В `gateway.py` и `cli_agent.py` парсинг `--profile` и
+вызов `_initialize_settings(profile)` выполняются
+**в executable entrypoint path** — внутри `if __name__ == "__main__":`
+(с последующим `sys.exit(2)` на ошибках), **до** любых импортов,
+читающих конфиг. Это удерживает entrypoint от случайных
+import-side-effects: `import gateway` (из других модулей, тестов,
+или REPL) НЕ запускает приложение.
+
+Для `streamlit_app.py` (особый случай — `streamlit run` не выставляет
+`__name__ == "__main__"` на rerun) startup-блок расположен
+**на module-level, выше** существующих импортов; см. Decision 4 для
+деталей этого исключения.
 
 Альтернативы рассмотрены:
 
-- **`_resolve_mode(argv)` через post-import hook** — не решает: всё
-  равно происходит **после** module-level, а этого нельзя допустить
-  (нарушает инвариант 1).
-- **Pre-fork процесс с явной передачей через stdin/файл** — избыточно.
+- **Парсинг argv на module-level через post-import hook** — не решает:
+  всё равно происходит **после** любых side-effect imports, а
+  этого нельзя допустить (нарушает инвариант «import config не
+  конструирует SETTINGS»).
+- **Pre-fork процесс с явной передачей через stdin/файл** —
+  избыточно.
+- **argparse как глобальный module-level statement (без `if __name__`)** —
+  отвергнуто. Превращает `import gateway` в side-effect, нарушает
+  ожидаемый контракт импорта модуля. Слабый coding-agent может
+  буквально интерпретировать «argparse на module-level» именно
+  так; это та ловушка, которую явная формулировка «executable
+  entrypoint path» предотвращает.
 
-**Обоснование:** argparse на module-level в Python выполняется **до
-любых** `from ... import ...`, потому что модули импортируются
-**при первом обращении к ним**. Если entrypoint имеет module-level
-`if __name__ == "__main__": _resolve_and_init_profile()`, и все
-конфиг-читающие импорты находятся внутри `main()`, то
-`_initialize_settings` гарантированно происходит до import-цепочки.
+**Обоснование:** Python выполняет `if __name__ == "__main__":` блок
+**только** при executable invocation (`python gateway.py`); при
+обычном `import gateway` блок пропускается. Если entrypoint
+имеет конструкцию `if __name__ == "__main__": _resolve_and_init_profile()`,
+и все конфиг-читающие импорты находятся ниже этого блока
+или внутри `main()`, то `_initialize_settings` гарантированно
+происходит до import-цепочки, **но только** при executable run.
 
 **Конкретный паттерн:**
 
@@ -256,22 +273,14 @@ if __name__ == "__main__":
     # дальше все runtime-импорты
 ```
 
-Аналогично для `cli_agent.py` и `streamlit_app.py`.
+Аналогично для `cli_agent.py`. Для `streamlit_app.py` см. Decision 4.
 
-**Важно — импорт как модуль:** Парсинг argv и вызов
-`_initialize_settings(profile)` обёрнуты в `if __name__ == "__main__":`
-(для `gateway.py`/`cli_agent.py`). Это означает, что:
-
-```text
-python -c "import gateway"     # НЕ запускает приложение,
-                               # НЕ инициализирует SETTINGS.
-                               # Модуль безопасно импортируется.
-
-python gateway.py             # запускает __main__-блок;
-                               # argv парсится;
-                               # SETTINGS инициализируется;
-                               # ApplicationContext создаётся.
-```
+**Контракт импорта как модуля:** `import gateway`,
+`python -c "from cli_agent import ..."`, `from gateway import something`
+НЕ запускают приложение и НЕ инициализируют SETTINGS. Только
+**executable invocation** (как `python <file>.py` или
+`streamlit run <file>.py`) запускает startup lifecycle. Это
+контракт **application entrypoint**, не контракт `import`-statement.
 
 `gateway`, `cli_agent`, `streamlit_app` — application entrypoints, не
 модули со side-effects на import. `from gateway import something`
