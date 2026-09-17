@@ -1164,21 +1164,23 @@ outbound). Все остальные сообщения `send()` merge'ит в a
 `_delete_claim` — единую точку гарда. В single-режиме они физически
 не выполняются.
 
-### Priority polling path (для `/stop`)
+### Priority polling path (для priority-команд nanobot)
 
-**Задача.** Slash-команда `/stop` (зарегистрирована как priority в
-`nanobot.command.router.CommandRouter`) должна доходить до AgentLoop
-даже когда все обычные слоты заняты активной задачей той же сессии —
-иначе пользователь не может прервать долгий turn.
+**Задача.** Slash-команды, зарегистрированные как priority в
+`nanobot.command.router.CommandRouter` (`/stop`, `/restart`, `/status`),
+должны доходить до AgentLoop даже когда все обычные слоты заняты
+активной задачей той же сессии — иначе пользователь не может прервать
+долгий turn.
 
-**Scope.** Текущая реализация priority polling path работает только
-для `/stop` — это единственная priority-команда, для которой
-PostgresChannel фильтрует claim (`AND content = '/stop'` в WHERE).
-Другие priority-команды из `CommandRouter` (`/restart`, `/status`)
-**не** идут через этот путь в текущей версии — для них нет фильтра
-в `_claim_one(priority_content=...)`. Если потребуется расширить —
-это отдельный change с явным декларативным реестром priority-команд
-в транспорте (на текущий момент не делаем, чтобы не размывать scope).
+**Решение.** `MessageExchange._poll_loop` сначала вызывает опциональный
+хук канала `poll_priority_inbound`, и только если тот вернул `False`
+(нет priority-кандидатов) — переходит к обычному `poll_inbound` с
+проверкой `is_slot_free()`. Канал (PostgresChannel) сам решает, какие
+сообщения считать priority-кандидатами. Список priority-команд
+читается через `lib.channels.priority_commands.get_priority_commands()`
+(из `CommandRouter._priority` с fallback на захардкоженный
+`_DEFAULT_PRIORITY_COMMANDS`). Claim фильтрует через
+`AND content = ANY(%s)` — параметризованный список, не хардкод.
 
 **Решение.** `MessageExchange._poll_loop` сначала вызывает опциональный
 хук канала `poll_priority_inbound`, и только если тот вернул `False`
@@ -1206,7 +1208,9 @@ MessageExchange._poll_loop:
 
 - `MessageExchange` знает только: «есть priority inbound path».
 - `PostgresChannel.poll_priority_inbound` знает: как искать priority
-  кандидатов в БД (через `_claim_one(priority_content='/stop')`).
+  кандидатов в БД (через `_claim_one(priority_contents=...)`,
+  где `priority_contents` — список всех priority-команд из
+  `nanobot.command.router.CommandRouter`).
 - `nanobot.command.router.CommandRouter.is_priority` и
   `nanobot.command.builtin.cmd_stop` знают: что делать с командой
   после её доставки через `bus.publish_inbound` → `AgentLoop.run()`.

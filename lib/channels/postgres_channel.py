@@ -773,10 +773,10 @@ class PostgresChannel(BaseChannel):
           * независим от состояния обычных слотов (``acquire_slot`` /
             ``chat_inflight``); если все слоты заняты — priority всё равно
             пройдёт в AgentLoop;
-          * ищет только сообщения с содержимым ``/stop`` (priority
-            кандидат; конкретная команда — ответственность канала, не
-            ``MessageExchange``);
-          * не создаёт assistant-placeholder (команда остановки не ответ);
+          * ищет сообщения с ``content`` из списка priority-команд nanobot
+            (``/stop``, ``/restart``, ``/status`` — через
+            ``lib.channels.priority_commands.get_priority_commands()``);
+          * не создаёт assistant-placeholder (команда не ответ);
           * не блокируется ``_chat_inflight`` (priority должен пройти даже
             для chat'а, у которого уже активна обычная задача);
           * после диспатча чистит claim/lease/msg_ctx; **не** делает
@@ -806,15 +806,18 @@ class PostgresChannel(BaseChannel):
         """Реализация priority claim + dispatch.
 
         Шаги:
-          1. ``_claim_one(priority_content="/stop")`` — атомарный claim
-             (та же логика, что в ``_poll_once``, плюс фильтр по ``content``).
+          1. ``_claim_one(priority_contents=...)`` — атомарный claim
+             (та же логика, что в ``_poll_once``, плюс фильтр
+             ``content = ANY(%s)`` для всех priority-команд).
           2. re-check статуса (race-fix из user_stop_signal).
-          3. Если кандидат — ``/stop``, диспатчим через ``_handle_message``
-             с ``metadata["priority"]=True``, ``assistant_msg_id=None``,
-             минуя ``acquire_slot``/``chat_inflight``.
+          3. Если кандидат — priority-команда, диспатчим через
+             ``_handle_message`` с ``metadata["priority"]=True``,
+             ``assistant_msg_id=None``, минуя ``acquire_slot``/
+             ``chat_inflight``.
           4. Освобождаем claim + lease + msg_ctx.
         """
-        row = await self._claim_one(priority_content="/stop")
+        from lib.channels.priority_commands import get_priority_commands
+        row = await self._claim_one(priority_contents=get_priority_commands())
         if row is None:
             return False
 
@@ -1057,7 +1060,7 @@ class PostgresChannel(BaseChannel):
     async def _claim_one(
         self,
         *,
-        priority_content: str | None = None,
+        priority_contents: tuple[str, ...] | None = None,
     ) -> dict | None:
         """Атомарно захватить одну задачу и перевести её в ``processing``.
 
@@ -1073,21 +1076,22 @@ class PostgresChannel(BaseChannel):
             инстансов. Задача, захваченная другим воркером, не доступна
             благодаря ``NOT EXISTS (SELECT 1 FROM claims ...)``.
 
-        Если ``priority_content`` задан — claim фильтрует только сообщения
-        с этим содержимым (для priority polling path, см. ``poll_priority_inbound``).
+        Если ``priority_contents`` задан (кортеж строк) — claim фильтрует
+        только сообщения с ``content`` из этого списка. Используется для
+        priority polling path (см. ``poll_priority_inbound``).
 
         Возвращает строку-кандидата или None, если задач нет.
         """
         if self._claim_strategy == "single":
-            return await self._claim_one_single(priority_content=priority_content)
+            return await self._claim_one_single(priority_contents=priority_contents)
         while True:
             try:
                 async with transaction() as conn:
                     priority_clause = ""
                     params: tuple = (self._error_retry_delay,)
-                    if priority_content is not None:
-                        priority_clause = "  AND content = %s\n"
-                        params = (self._error_retry_delay, priority_content)
+                    if priority_contents is not None:
+                        priority_clause = "  AND content = ANY(%s)\n"
+                        params = (self._error_retry_delay, list(priority_contents))
                     row = await conn.fetchrow(
                         f"""
                         SELECT id, chat_id, user_id, content, media,
@@ -1139,7 +1143,7 @@ class PostgresChannel(BaseChannel):
     async def _claim_one_single(
         self,
         *,
-        priority_content: str | None = None,
+        priority_contents: tuple[str, ...] | None = None,
     ) -> dict | None:
         """Single-режим: захват задачи через ``UPDATE ... RETURNING``.
 
@@ -1158,15 +1162,15 @@ class PostgresChannel(BaseChannel):
         ``status='pending'`` в WHERE подзапроса + ``status != 'cancelled'``
         гарантирует, что захват не произойдёт).
 
-        Если ``priority_content`` задан — добавляется фильтр по содержимому
-        (``AND content = %s`` в обоих WHERE). Используется для priority
-        polling path (например, ``/stop``).
+        Если ``priority_contents`` задан (кортеж строк) — добавляется
+        фильтр ``AND content = ANY(%s)`` в обоих WHERE. Используется для
+        priority polling path (например, ``/stop``, ``/restart``, ``/status``).
         """
         priority_clause = ""
         params: tuple = (self._error_retry_delay,)
-        if priority_content is not None:
-            priority_clause = "  AND content = %s\n"
-            params = (self._error_retry_delay, priority_content)
+        if priority_contents is not None:
+            priority_clause = "  AND content = ANY(%s)\n"
+            params = (self._error_retry_delay, list(priority_contents))
         row = await fetchone(
             f"""
             UPDATE {self._fq_table}

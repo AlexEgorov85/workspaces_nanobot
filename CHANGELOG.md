@@ -15,26 +15,26 @@
 
 ### Fixed
 
-- **Cancellation now reaches active nanobot task.** Команда `/stop` от
-  пользователя теперь доходит до AgentLoop даже когда все обычные
-  слоты (`max_concurrent=1`/`2`/N) заняты активной задачей той же
-  сессии. Реализовано через **priority polling path** в
-  `MessageExchange._poll_loop` (новый опциональный хук канала
+- **Cancellation now reaches active nanobot task.** Команды `/stop`,
+  `/restart`, `/status` (все priority-команды из
+  `nanobot.command.router.CommandRouter`) теперь доходят до AgentLoop
+  даже когда все обычные слоты (`max_concurrent=1`/`2`/N) заняты
+  активной задачей той же сессии. Реализовано через **priority polling
+  path** в `MessageExchange._poll_loop` (новый опциональный хук канала
   `poll_priority_inbound`), который вызывается до проверки
   `is_slot_free()` и не зависит от обычного concurrency. Для
   PostgresChannel добавлен метод `poll_priority_inbound` +
   `_poll_priority_once`, использующий параметризованный
-  `_claim_one(priority_content='/stop')`. После доставки `/stop` в
+  `_claim_one(priority_contents=...)`, где `priority_contents` —
+  список всех priority-команд из
+  `lib.channels.priority_commands.get_priority_commands()`
+  (читается из `CommandRouter._priority` с fallback на дефолт).
+  Фильтр в SQL: `AND content = ANY(%s)`. После доставки команды в
   `bus.publish_inbound` работает штатный механизм nanobot:
-  `cmd_stop` → `_cancel_active_tasks(effective_key)`.
-
-  **Scope.** Текущая реализация priority polling path работает только
-  для `/stop` — это единственная priority-команда, для которой
-  PostgresChannel фильтрует claim (`AND content = '/stop'` в WHERE).
-  Другие priority-команды из `CommandRouter` (`/restart`, `/status`)
-  не идут через этот путь в текущей версии. Подробности и
+  `cmd_stop` → `_cancel_active_tasks(effective_key)` (или `cmd_restart`
+  / `cmd_status` для соответствующих команд). Подробности и
   acceptance-матрица — в `docs/ARCHITECTURE.md` § «Priority polling
-  path (для `/stop`)».
+  path (для priority-команд nanobot)».
 
 ### Added
 
@@ -56,12 +56,18 @@
   в `_poll_loop` **до** `poll_inbound`. Если хук не реализован
   каналом — default-поведение через `getattr(..., None)` (другие
   каналы не ломаются).
+- **`lib.channels.priority_commands.get_priority_commands()`** —
+  единый источник списка priority-команд nanobot для транспорта.
+  Читает `CommandRouter._priority` (duck-typing через
+  `hasattr(..., 'priority_commands')` для будущей совместимости);
+  fallback — захардкоженный `_DEFAULT_PRIORITY_COMMANDS = (
+  '/stop', '/restart', '/status')`.
 - **Тесты**: `tests/test_user_stop_signal_priority.py` (19 тестов —
   priority claim filter, dispatch без slot/chat_inflight/placeholder,
   race-fix, структурные проверки `_poll_loop`); расширен
   `tests/test_user_stop_signal.py` (DB safety net, finalize drop).
 - **Static-audit тест** `test_postgres_channel_static_audit.py::test_claim_one_routes_single_to_single_method`
-  обновлён под параметризованный `_claim_one_single(priority_content=...)`.
+  обновлён под параметризованный `_claim_one_single(priority_contents=...)`.
 
 ### Changed
 

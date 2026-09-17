@@ -70,26 +70,30 @@ def priority_polling_mock_db(tmp_path):
 
         sys.modules.pop("lib.channels.postgres_channel", None)
         sys.modules.pop("lib.channels.message_exchange", None)
+        sys.modules.pop("lib.channels.priority_commands", None)
 
         from lib.channels.postgres_channel import PostgresChannel
         from lib.channels.message_exchange import MessageExchange
+        from lib.channels.priority_commands import get_priority_commands
 
         class _Holder:
             def __init__(self):
                 self.PostgresChannel = PostgresChannel
                 self.MessageExchange = MessageExchange
+                self.get_priority_commands = get_priority_commands
                 self.db = db_mod
 
             def __iter__(self):
                 yield PostgresChannel
                 yield MessageExchange
+                yield get_priority_commands
                 yield db_mod
 
         yield _Holder()
 
 
 def _make_channel(mock_db, **overrides):
-    PostgresChannel, _, _ = mock_db
+    PostgresChannel, _, _, _ = mock_db
     config = {
         "dsn": "postgresql://localhost:5432/test",
         "table_name": "agent_conversation_messages",
@@ -106,31 +110,35 @@ def _make_channel(mock_db, **overrides):
 
 
 class TestClaimOneSinglePriorityFilter:
-    """``_claim_one_single(priority_content='/stop')`` фильтрует по содержимому."""
+    """``_claim_one_single(priority_contents=...)`` фильтрует по списку команд."""
 
     @pytest.mark.asyncio
     async def test_priority_filter_added_to_where(self, priority_polling_mock_db):
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         db.async_fetchone.return_value = None
 
-        await ch._claim_one_single(priority_content="/stop")
+        await ch._claim_one_single(priority_contents=("/stop", "/restart"))
 
         sql_text = db.async_fetchone.await_args.args[0]
-        assert "AND content = %s" in sql_text, (
-            f"WHERE должен содержать фильтр AND content = %s для priority claim; "
+        assert "AND content = ANY(%s)" in sql_text, (
+            f"WHERE должен содержать фильтр AND content = ANY(%s); "
             f"получили: {sql_text[:500]}"
         )
 
         params = db.async_fetchone.await_args.args[1:]
-        assert "/stop" in params, (
-            f"/stop должен быть в параметрах SQL; получили: {params}"
+        # params содержит error_retry_delay (int) и list priority commands
+        list_params = [p for p in params if isinstance(p, (list, tuple))]
+        assert any(
+            list(p) == ["/stop", "/restart"] for p in list_params
+        ), (
+            f"priority commands должны быть в параметрах SQL; получили: {params}"
         )
 
     @pytest.mark.asyncio
     async def test_priority_filter_absent_when_no_priority(self, priority_polling_mock_db):
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         db.async_fetchone.return_value = None
@@ -138,7 +146,7 @@ class TestClaimOneSinglePriorityFilter:
         await ch._claim_one_single()
 
         sql_text = db.async_fetchone.await_args.args[0]
-        assert "AND content = %s" not in sql_text, (
+        assert "AND content = ANY(%s)" not in sql_text, (
             f"обычный claim НЕ должен содержать content-фильтр; "
             f"получили: {sql_text[:500]}"
         )
@@ -149,7 +157,7 @@ class TestPollPriorityOnce:
 
     @pytest.mark.asyncio
     async def test_priority_dispatch_does_not_acquire_slot(self, priority_polling_mock_db):
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         ch._claim_one = AsyncMock(return_value={
@@ -176,7 +184,7 @@ class TestPollPriorityOnce:
 
     @pytest.mark.asyncio
     async def test_priority_dispatch_skips_chat_inflight(self, priority_polling_mock_db):
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         ch._chat_inflight.add("chat-A")
@@ -206,7 +214,7 @@ class TestPollPriorityOnce:
     async def test_priority_dispatch_does_not_create_assistant_placeholder(
         self, priority_polling_mock_db
     ):
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         ch._claim_one = AsyncMock(return_value={
@@ -232,7 +240,7 @@ class TestPollPriorityOnce:
     async def test_priority_dispatch_sets_priority_metadata(
         self, priority_polling_mock_db
     ):
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         ch._claim_one = AsyncMock(return_value={
@@ -259,7 +267,7 @@ class TestPollPriorityOnce:
     async def test_priority_dispatch_releases_claim_lease_ctx_chat(
         self, priority_polling_mock_db
     ):
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         ch._claim_one = AsyncMock(return_value={
@@ -291,7 +299,7 @@ class TestPollPriorityOnce:
     async def test_priority_dispatch_does_not_release_slot(
         self, priority_polling_mock_db
     ):
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         ch._claim_one = AsyncMock(return_value={
@@ -315,7 +323,7 @@ class TestPollPriorityOnce:
 
     @pytest.mark.asyncio
     async def test_priority_skips_cancelled_race(self, priority_polling_mock_db):
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         ch._claim_one = AsyncMock(return_value={
@@ -346,7 +354,7 @@ class TestPollPriorityInbound:
     async def test_returns_false_when_no_priority_candidate(
         self, priority_polling_mock_db
     ):
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
         ch._claim_one = AsyncMock(return_value=None)
 
@@ -358,7 +366,7 @@ class TestPollPriorityInbound:
     async def test_returns_true_when_priority_handled(
         self, priority_polling_mock_db
     ):
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
         ch._claim_one = AsyncMock(return_value={
             "id": "m-stop",
@@ -378,15 +386,19 @@ class TestPollPriorityInbound:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_passes_priority_content_to_claim(self, priority_polling_mock_db):
-        PostgresChannel, _, db = priority_polling_mock_db
+    async def test_passes_priority_contents_to_claim(self, priority_polling_mock_db):
+        from lib.channels.priority_commands import get_priority_commands
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
         ch._claim_one = AsyncMock(return_value=None)
 
         exchange = MagicMock()
         await ch.poll_priority_inbound(exchange)
 
-        ch._claim_one.assert_awaited_once_with(priority_content="/stop")
+        expected = get_priority_commands()
+        ch._claim_one.assert_awaited_once()
+        call_kwargs = ch._claim_one.await_args.kwargs
+        assert call_kwargs.get("priority_contents") == expected
 
 
 class TestPriorityRaceConditions:
@@ -398,7 +410,7 @@ class TestPriorityRaceConditions:
     ):
         """Если между claim и re-check AW пометил msg как cancelled —
         priority polling пропускает его (race-fix)."""
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         ch._claim_one = AsyncMock(return_value={
@@ -428,7 +440,7 @@ class TestPriorityRaceConditions:
     ):
         """Priority path НЕ должен вызывать acquire_slot даже если
         инфраструктура слотов пуста (проверяет изоляцию от semaphore)."""
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         ch._claim_one = AsyncMock(return_value={
@@ -457,7 +469,7 @@ class TestPriorityRaceConditions:
     ):
         """Если ``_handle_message`` падает с исключением — priority path
         вызывает ``_mark_failed`` (cleanup через стандартный путь)."""
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         ch._claim_one = AsyncMock(return_value={
@@ -488,7 +500,7 @@ class TestPriorityRaceConditions:
         self, priority_polling_mock_db
     ):
         """Success path не вызывает _release_slot — slot не занимался."""
-        PostgresChannel, _, db = priority_polling_mock_db
+        PostgresChannel, _, _, db = priority_polling_mock_db
         ch = _make_channel(priority_polling_mock_db)
 
         ch._claim_one = AsyncMock(return_value={
