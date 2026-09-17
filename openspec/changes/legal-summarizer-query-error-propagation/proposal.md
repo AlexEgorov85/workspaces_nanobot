@@ -75,8 +75,9 @@ tool и CLI skill'а — локальная ответственность са�
 - `workspace/skills/legal_summarizer/scripts/cli_query.py` — диагностика
   причин `manifest is None` через раздельный loader.
 - `workspace/skills/legal_summarizer/scripts/cache/manifest.py` — экспорт
-  новой диагностической функции (например, `diagnose_manifest(op_id, ws_root)`
-  → `(reason, raw_or_none)` или эквивалент), без ломки существующего
+  новой диагностической функции `diagnose_manifest(operation_id,
+  workspace_root) -> dict` с полями `reason` / `path` /
+  `version_observed` (без `raw`), без ломки существующего
   `load_manifest()` (resume-протокол продолжает использовать
   неразличающий API).
 - `workspace/skills/legal_summarizer/SKILL.md` — фиксация IPC-контракта и
