@@ -96,10 +96,16 @@
   без превращения этих wrapping'ов в долгосрочный нормативный
   контракт.
 
-**BREAKING** для `history_search` API: переименование
-`truncated` → `results_truncated` + `payload_truncated`. Старый
-`truncated` сохраняется как deprecated алиас ровно один
-MINOR-релиз, потом удаляется отдельным change.
+**API extension, compatibility-preserving change** для
+`history_search`: добавляются новые поля (`has_more`,
+`next_offset`, `results_truncated`, `payload_truncated`,
+параметр `offset`) и расширяется SQL-сортировка; **старый
+потребитель, читающий только `truncated`, продолжает
+работать без изменений** благодаря deprecated алиасу
+`truncated` (= `results_truncated`). Алиас удаляется
+отдельным follow-up change, который и будет формальным
+breaking change. Этот change миграции со стороны
+потребителя НЕ требует.
 
 ## Capabilities
 

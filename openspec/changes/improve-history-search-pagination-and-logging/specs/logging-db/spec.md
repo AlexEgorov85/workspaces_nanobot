@@ -23,9 +23,19 @@ The system SHALL принимать параметр `flush_interval_sec`
   `ConfigurationResolver` → `ProjectSettings` →
   `ApplicationContext` → конструктор `DbLoggingService`.
   Сервис НЕ читает `config.json`/`project.json` напрямую.
-- При выходе значения за диапазон SHOULD бросаться
-  `ConfigurationError` на этапе валидации
-  `LoggingDbSettings` (fail-fast, до старта сервиса).
+- **Boundary ошибок валидации** (двухуровневый):
+  - На уровне **модели** `LoggingDbSettings` —
+    `pydantic.ValidationError` при выходе за диапазон
+    (юнит-тест модели ловит именно `ValidationError`).
+  - На уровне **resolver / конфигурации** —
+    `ConfigurationError` (см. AGENTS.md «Профили
+    конфигурации»), если `ConfigurationResolver` /
+    `validate_project_settings` не может построить
+    `ProjectSettings` (например, опечатка в имени секции,
+    битый JSON). Интеграционный тест на пути
+    `project.json → ConfigurationResolver → ProjectSettings`
+    ловит именно `ConfigurationError`.
+  - В обоих случаях — fail-fast, до старта сервиса.
 - Поведение worker'а (батчевый flush по `flush_interval_sec`
   или `batch_size`, дедлайн-цикл с таймаутом) SHALL остаться
   как описано в `lib/services/db_logging_service.py:548-606`.
@@ -41,13 +51,20 @@ The system SHALL принимать параметр `flush_interval_sec`
   `DbLoggingService._flush_interval == 1.0`,
   события в среднем видны в БД через 1–3 секунды
 
-#### Scenario: Значение вне диапазона
-- **WHEN** `project.json::logging.db.flush_interval_sec = 0.1`
-  (меньше 0.5)
-- **THEN** `LoggingDbSettings` валидация бросает
-  `ConfigurationError` с указанием диапазона,
-  `ApplicationContext.start()` НЕ создаёт `DbLoggingService`
-  (fail-fast)
+#### Scenario: Значение вне диапазона — ValidationError на модели
+- **WHEN** `LoggingDbSettings(flush_interval_sec=0.1)`
+  вызван напрямую (юнит-тест модели)
+- **THEN** `pydantic.ValidationError` бросается
+  с указанием диапазона, `ApplicationContext` НЕ
+  вовлекается
+
+#### Scenario: Битый project.json — ConfigurationError на resolver
+- **WHEN** `project.json` содержит невалидный JSON
+  или отсутствует обязательная секция, через которую
+  валидируется `flush_interval_sec`
+- **THEN** `ConfigurationResolver` / `validate_project_settings`
+  бросает `ConfigurationError`, `ApplicationContext.start()`
+  НЕ создаёт `DbLoggingService` (fail-fast)
 
 #### Scenario: Значение передаётся через resolver chain
 - **WHEN** `SETTINGS` сформирован `ConfigurationResolver`
