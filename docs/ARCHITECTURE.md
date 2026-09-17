@@ -1164,13 +1164,21 @@ outbound). Все остальные сообщения `send()` merge'ит в a
 `_delete_claim` — единую точку гарда. В single-режиме они физически
 не выполняются.
 
-### Priority polling path (команды вроде `/stop`)
+### Priority polling path (для `/stop`)
 
-**Задача.** Slash-команды, зарегистрированные как priority в
-`nanobot.command.router.CommandRouter` (например, `/stop`,
-`/restart`, `/status`), должны доходить до AgentLoop даже когда все
-обычные слоты заняты активной задачей той же сессии — иначе пользователь
-не может прервать долгий turn.
+**Задача.** Slash-команда `/stop` (зарегистрирована как priority в
+`nanobot.command.router.CommandRouter`) должна доходить до AgentLoop
+даже когда все обычные слоты заняты активной задачей той же сессии —
+иначе пользователь не может прервать долгий turn.
+
+**Scope.** Текущая реализация priority polling path работает только
+для `/stop` — это единственная priority-команда, для которой
+PostgresChannel фильтрует claim (`AND content = '/stop'` в WHERE).
+Другие priority-команды из `CommandRouter` (`/restart`, `/status`)
+**не** идут через этот путь в текущей версии — для них нет фильтра
+в `_claim_one(priority_content=...)`. Если потребуется расширить —
+это отдельный change с явным декларативным реестром priority-команд
+в транспорте (на текущий момент не делаем, чтобы не размывать scope).
 
 **Решение.** `MessageExchange._poll_loop` сначала вызывает опциональный
 хук канала `poll_priority_inbound`, и только если тот вернул `False`

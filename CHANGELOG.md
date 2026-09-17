@@ -26,9 +26,15 @@
   `_poll_priority_once`, использующий параметризованный
   `_claim_one(priority_content='/stop')`. После доставки `/stop` в
   `bus.publish_inbound` работает штатный механизм nanobot:
-  `cmd_stop` → `_cancel_active_tasks(effective_key)`. Подробности и
+  `cmd_stop` → `_cancel_active_tasks(effective_key)`.
+
+  **Scope.** Текущая реализация priority polling path работает только
+  для `/stop` — это единственная priority-команда, для которой
+  PostgresChannel фильтрует claim (`AND content = '/stop'` в WHERE).
+  Другие priority-команды из `CommandRouter` (`/restart`, `/status`)
+  не идут через этот путь в текущей версии. Подробности и
   acceptance-матрица — в `docs/ARCHITECTURE.md` § «Priority polling
-  path (команды вроде `/stop`)».
+  path (для `/stop`)».
 
 ### Added
 
