@@ -1,24 +1,18 @@
 -- ============================================================================
--- public.agent_vector_index_store — сериализованные FAISS-индексы (binary blob)
--- Одна строка на source (= index_name из agent_vector_index_config).
--- Строится из произвольной исходной таблицы инструментами build_vectors.py:
--- все вектора одного source собираются в faiss.IndexFlatIP/IVFFlat,
--- сериализуются в BYTEA. Загружается lib.services.cache_provider_impl
--- при search_vector.
+-- DEPRECATED — этот DDL больше НЕ применяется.
 --
--- Generic infrastructure: таблица не привязана к домену; конкретный домен
--- (audit, finance, ...) добавляет свои индексы через INSERT в
--- agent_vector_index_config + INSERT в agent_vector_index_store.
+-- После change ``remove-vector-index-store`` (OpenSpec
+-- openspec/changes/archive/<YYYY-MM-DD-remove-vector-index-store>/) persisted
+-- FAISS-кеш в ``public.agent_vector_index_store`` удалён. FAISS-индекс
+-- собирается в памяти из DuckDB-снапшота ``<storage_table>`` на лету
+-- (``provider.preload_indexes`` при старте gateway). См. migration
+-- V003__drop_vector_index_store.sql.
 --
--- Распределение: DISTRIBUTED REPLICATED — каждый сегмент GP получает полную
--- копию. Строк мало (по одной на индекс), экономит JOIN с
--- agent_vector_index_config.
+-- Файл сохранён как исторический артефакт (DDL, который раньше создавал
+-- эту таблицу) для архивной документации. НЕ запускайте его на новых
+-- инстансах; для уже существующих таблиц применяется V003 (DROP TABLE).
 --
--- Ограничения GP 6.5:
---   * BYTEA на сегмент: до ~1GB (для индексов <1M×1024 float32 = ~400MB OK).
---   * Для очень больших индексов (>1M векторов) — нужно партиционирование
---     или внешнее хранилище.
--- Совместимость: Greenplum 6.5.
+-- Оригинальный документ ниже — для истории.
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS public.agent_vector_index_store (
