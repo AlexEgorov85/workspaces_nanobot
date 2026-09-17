@@ -6,8 +6,13 @@
 `SETTINGS = resolve_application_config(...)` из `config.py:517-518`.
 Поведенческий критерий: после запуска `python -c "import config;
 print('ok')"` никакие merge-шаги (`project.json`, profile overlay,
-secrets) не выполняются — это видно по отсутствию побочных эффектов
-(нет печати в лог, нет обращения к БД, нет `os.environ`-чтения).
+profile-related secrets) для profile resolution не выполняются.
+
+Это НЕ запрещает `os.environ`-чтение для **других** legitimate
+целей (resolve `SECRETS_FILE_PATH`, `LOG_LEVEL` или похожих
+не-profile-related переменных). Change ограничивается именно
+**profile resolution** — другие env-переменные могут
+использоваться компонентами ниже слоя config как обычно.
 
 ### A.2 Удалить `_resolve_mode()` полностью
 
@@ -54,9 +59,13 @@ config._initialize_settings("test")            # → "already initialized" (life
 config._initialize_settings("prod")            # → "already initialized" (any value)
 config._initialize_settings("dev")             # → "already initialized" (any value, even wrong whitelist)
 
-# Separate run: invalid profile tested only on uninitialized state
-config.SETTINGS = _LazySettings()               # reset (test fixture, not production)
-config._initialize_settings("dev")             # → "not supported" (whitelist check fires first)
+# Whitelist test must run in a fresh process (subprocess-based):
+#   python -c "import config; config._initialize_settings('dev')"
+#   → ConfigurationError("profile='dev' is not supported")
+# Reason: in-process reset is not a valid operation for SETTINGS
+# proxy (already-imported `from config import SETTINGS` references
+# old proxy, NOT the reset one). Use subprocess isolation for
+# whitelist-only test scenarios; do not invent a reset API.
 ```
 
 ### A.4 Удалить избыточную ctx-пересборку в `ApplicationContext.create()`
@@ -91,11 +100,25 @@ regardless of env.
 `if __name__ == "__main__":`, выполняемый до импортов), до
 `from lib.core.application_context import ...`. Использовать
 `argparse.ArgumentParser(add_help=False)` + `.parse_known_args()`.
-Whitelist и required-валидация — через прямые проверки
-(`profile in {"prod", "test"}`), затем — вызов
-`config._initialize_settings(profile=...)`.
 
-`main()` оборачивается в `try/except ConfigurationError`, который
+**Контракт обработки ошибок** (см. также Error Lifecycle Contract
+в spec.md):
+
+- **Внутренний контракт** — exception: missing/invalid profile
+  РАЗ `ConfigurationError(...)`. Не `sys.exit(2)` напрямую.
+- **Внешний контракт** — process exit: entrypoint top-level
+  перехватывает `ConfigurationError` через `try/except` и
+  конвертирует в `sys.exit(2) + stderr message`.
+
+Whitelist и required-валидация:
+
+- `profile is None` (no `--profile`) →
+  `raise ConfigurationError("--profile is required")`.
+- `profile not in {"prod", "test"}` →
+  `raise ConfigurationError(f"--profile={profile!r} is not supported (allowed: prod, test)")`.
+
+Эти ошибки возникают **внутри** startup-блока; `try/except` стоит
+на уровне `main()` или непосредственно вокруг startup-блока, и
 в catch'е делает `sys.stderr.write(...)` + `sys.exit(2)`.
 
 **Структурный паттерн** (не literal код):
@@ -103,45 +126,111 @@ Whitelist и required-валидация — через прямые прове�
 ```python
 # 1. На самом верху (module-level):
 import sys
-if __name__ == "__main__":
+import config as _cfg
+
+_CONFIGURATION_ERROR_BORDER = (
+    "--profile is required",
+    "is not supported",
+)
+
+def _entrypoint_main():
+    """Startup + application body, raises ConfigurationError on startup errors."""
     # 2. Парсинг argv:
     profile = _parse_profile_arg()  # argparse
-    # 3. Whitelist и required проверка ДО import config / _initialize_settings:
+    if profile is None:
+        raise ConfigurationError("--profile is required")
     if profile not in {"prod", "test"}:
-        ...  # ConfigurationError + sys.exit(2)
-    # 4. Импорт config и явная инициализация:
-    import config as _cfg
+        raise ConfigurationError(
+            f"--profile={profile!r} is not supported (allowed: prod, test)"
+        )
+    # 3. _initialize_settings (запускается lifecycle, не возвращает значение)
     _cfg._initialize_settings(profile=profile)
-    # 5. Только теперь runtime-импорты:
+    # 4. Только теперь runtime-импорты и инициализация приложения:
     from lib.core.application_context import ApplicationContext
     ...
-    # 6. main() в try/except ConfigurationError.
+    return ApplicationContext.create(...)
+
+if __name__ == "__main__":
+    try:
+        _entrypoint_main()
+    except ConfigurationError as exc:
+        sys.stderr.write(f"FATAL: {exc}\n")
+        sys.exit(2)
 ```
+
+Ключевой момент: **внутри** startup-блока — **исключения**,
+а **exit code 2** — **только** в entrypoint boundary. Прямых
+`sys.exit(2)` из validation-проверок НЕТ.
 
 ### B.2 `cli_agent.py`
 
 `cli_agent.py` использует **тот же** startup lifecycle и **тот же**
 contract `ConfigurationError` → exit code 2, что и `gateway.py`
 (см. B.1). Никакой отдельной exception policy для `cli_agent.py`
-нет: отсутствие `--profile` или unsupported profile — это
-`ConfigurationError` + exit code 2 так же, как в `gateway.py`.
+нет: ни прямой `sys.exit(2)` из validation-проверок, ни
+отдельный exit-code; всё проходит через один и тот же
+`try/except ConfigurationError` boundary на верхнем уровне.
 
 ### B.3 `streamlit_app.py`
 
 Файл уже выполняет `from config import SETTINGS` на module level
-(строка 31). Перенести инициализацию профиля **выше** этой строки:
+(строка 31). Streamlit имеет **особый lifecycle**, отличный от
+нормальных entrypoint'ов: модуль импортируется ОДИН раз
+при первом `streamlit run`, но `st.rerun()` **re-executes
+скрипт повторно** через runpy (`streamlit.runtime.scriptrunner`).
+Это значит, что module-level statements в `streamlit_app.py`
+выполняются заново при каждом `st.rerun()`. Если просто
+поместить `_initialize_settings(profile)` на module level,
+**второй `st.rerun()` упадёт** на
+`ConfigurationError("SETTINGS already initialized")` — что
+нарушит spec scenario «second call with any value → already
+initialized».
 
-- Парсить `--profile=<v>` из `sys.argv` (после `--`) на самом
-  верху файла.
-- Whitelist и required проверки.
-- `import config as _cfg; _cfg._initialize_settings(profile=<v>)`.
-- Дальше — текущий код без изменений.
+Решение: **guard вокруг вызова** на module level, не изменяя
+внутренний lifecycle `_initialize_settings`:
 
-Принцип: **module-level блок streamlit'а выполняется ОДИН раз**
-при первом `streamlit run`; `st.rerun()` re-executes скрипт
-**без переимпорта модуля**, поэтому инициализация должна быть на
-module-level (а не в `if __name__ == "__main__":` — для streamlit-run
-это условие не сработает как для CLI).
+```python
+# streamlit_app.py, на самом верху (выше существующих импортов)
+import sys as _streamlit_sys
+
+_app_argv_profile = None
+if "--profile=" in _streamlit_sys.argv:
+    _idx = _streamlit_sys.argv.index("--profile=")
+    _app_argv_profile = _streamlit_sys.argv[_idx + 1] if _idx + 1 < len(_streamlit_sys.argv) else None
+elif "--profile" in _streamlit_sys.argv:
+    _idx = _streamlit_sys.argv.index("--profile")
+    _app_argv_profile = _streamlit_sys.argv[_idx + 1] if _idx + 1 < len(_streamlit_sys.argv) and "=" not in _streamlit_sys.argv[_idx + 1] else None
+
+if not _app_argv_profile:
+    raise ConfigurationError("--profile is required")
+if _app_argv_profile not in {"prod", "test"}:
+    raise ConfigurationError(f"--profile={_app_argv_profile!r} is not supported (allowed: prod, test)")
+
+import config as _streamlit_cfg
+
+# Guard against st.rerun() re-execution: skip second call.
+# _initialize_settings itself stays strict (second call with any
+# value -> "already initialized"); this guard prevents the second
+# CALL from happening, not the second response from the function.
+_streamlit_init_done = getattr(_streamlit_sys.modules.get("streamlit_app"), "_initialized", False)
+if not _streamlit_init_done:
+    _streamlit_cfg._initialize_settings(profile=_app_argv_profile)
+    _streamlit_sys.modules["streamlit_app"]._initialized = True
+```
+
+Контракт по-прежнему: entrypoint initializes SETTINGS **ровно один раз**
+на startup, и любой второй вызов `_initialize_settings(...)`
+**из любого контекста** остаётся ошибкой. Guard на стороне
+streamlit_app — это **явная защита от re-execution**, а не
+изменение lifecycle-gate'а. Это принципиально отличается от
+«auto-init / profile switching»: lifecycle остаётся строгим,
+guard просто не вызывает функцию повторно.
+
+Behavioral acceptance: `st.rerun()` НЕ приводит к
+`ConfigurationError("already initialized")` — guard видит
+`_initialized = True` и пропускает. CLI-launch через
+`streamlit run` (даже если он внутренне делает re-execution
+при первом connect) проходит без второго вызова.
 
 ### B.4 Application subprocess получает `--profile` через argv
 

@@ -304,6 +304,19 @@ exception policy. Differences between entrypoints are limited to
 how argv is sourced (CLI argparse vs Streamlit's `--` passthrough);
 the error and initialization contract is identical.
 
+**Streamlit-specific note:** Streamlit's runpy-based execution
+re-executes the script on `st.rerun()`, so module-level code in
+`streamlit_app.py` runs multiple times within a single process.
+To honor both the Streamlit lifecycle and this change's strict
+«second call → already initialized» contract, `streamlit_app.py`
+SHALL guard its module-level `_initialize_settings(...)` call with
+a `_initialized` flag set on the module itself after the first
+successful call. The guard prevents the second CALL from
+happening; the `_initialize_settings` function itself stays
+strict. **This guard is not auto-init, profile switching, or a
+fallback — it is explicit protection against Streamlit's
+physical re-execution of the script body.**
+
 #### Scenario: All entrypoints fail with exit code 2 without --profile
 
 - **WHEN** each of `gateway.py`, `cli_agent.py`, `streamlit_app.py`
@@ -317,6 +330,19 @@ the error and initialization contract is identical.
   is invoked with `--profile=<unsupported>`
 - **THEN** each SHALL raise `ConfigurationError("--profile=<v> is not supported (allowed: prod, test)")`
 - **AND THEN** each SHALL exit the process with status code 2
+
+#### Scenario: Streamlit st.rerun does not trigger "already initialized"
+
+- **WHEN** `streamlit run streamlit_app.py -- --profile=prod`
+  succeeds and `_initialize_settings("prod")` is called once
+- **AND WHEN** `st.rerun()` re-executes the script body
+- **THEN** the guard SHALL skip the second `_initialize_settings(...)`
+  call
+- **AND THEN** the `_initialize_settings` function SHALL NOT have
+  been called a second time within this process
+- **AND THEN** the application SHALL continue running with the
+  already-published `SETTINGS`
+- **AND THEN** `SETTINGS["profile"]` SHALL continue to be `"prod"`
 
 ## REMOVED Requirements
 

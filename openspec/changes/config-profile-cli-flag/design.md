@@ -215,12 +215,29 @@ Whitelist-валидация встраивается в `_initialize_settings(p
 через `SETTINGS` после успешного вызова. Это явный выбор архитектуры:
 «функция публикует состояние» (side-effect на `_LazySettings._inner_dict`),
 а не «функция возвращает configuration в caller». Caller'у не нужно
-проверять return value; успех = _initialize_settings не бросил
-`ConfigurationError`; ошибка = бросил. Это контракт, который
-используется всеми entrypoint'ами и тестами. Mock-стратегия для
-тестов — `mock.patch("config._initialize_settings")` БЕЗ
-`return_value`; после мока проверяется что `config.SETTINGS`
-стал доступен через lazy proxy.
+проверять return value; успех = `_initialize_settings` не бросил
+`ConfigurationError`; ошибка = бросил.
+
+**Mock-стратегия для тестов:** `_initialize_settings` НЕ мокается
+в тестах `ApplicationContext`. Это lifecycle-gate, mocking его
+привёл бы к нонсенсу: `mock.patch("config._initialize_settings")`
+не выполняет реальную функцию → `_LazySettings._inner_dict` не
+заполняется → `SETTINGS` остаётся uninitialized → тест падает
+на первом же обращении к `SETTINGS`.
+
+Правильная стратегия:
+
+- Если тест проверяет lifecycle → тест явно вызывает
+  `config._initialize_settings(profile)` перед тем, как
+  использовать `ApplicationContext`. Это публикация реального
+  `SETTINGS`, а не mock.
+- Если тест проверяет resolver → mock ставится на
+  `resolve_application_config`, точечно и явно. Это другой
+  слой абстракции.
+
+Никаких новых mock на `_initialize_settings` не вводится. Mocking
+lifecycle-gate — антипаттерн, который смешивает два уровня
+(lifecycle и resolution). Подробнее см. tasks.md D.5.
 
 Соответственно, `_ACTIVE_PROFILE` module-level global тоже
 удаляется (он привязан к `_resolve_mode`).
@@ -478,29 +495,66 @@ streamlit run streamlit_app.py -- --profile=prod
 
 Реальный текущий `streamlit_app.py:31` уже выполняет
 `from config import SETTINGS` на module level (до любых streamlit-API
-вызовов). Модуль импортируется ОДИН раз при первом запуске `streamlit
-run`; последующие `st.rerun()` re-execute скрипт **без переимпорта**
-(`streamlit_app.py` уже в `sys.modules`). Это означает, что
-`_initialize_settings()` обязан выполниться в module-level блоке
-(а не в `if __name__ == "__main__":` — это условие для streamlit-run
-не сработает как для CLI).
+вызовов). Streamlit имеет **особый lifecycle**, отличный от
+`gateway.py` / `cli_agent.py`:
 
-Поведение `streamlit_app.py` после фикса:
+- Модуль импортируется ОДИН раз при первом запуске `streamlit run`
+  (через `streamlit.bootstrap` → `runpy.run_path`).
+- `st.rerun()` **re-executes скрипт** через runpy (вызывает те же
+  module-level statements снова); при этом `streamlit_app` остаётся
+  в `sys.modules`, но тело скрипта выполняется заново.
+- Это означает, что module-level `_initialize_settings(profile=...)`
+  без guard'а вызвал бы **второй** вызов на каждом `st.rerun()` —
+  что нарушило бы spec scenario «second call with any value →
+  already initialized».
 
-1. На самом верху файла (до существующих `import streamlit as st`
-   и `from utils.db import ...`, до `from config import SETTINGS`):
-   парсер `sys.argv`, ищущий `--profile=<value>` после `--`.
-2. Если отсутствует → `ConfigurationError("--profile is required")`.
-3. Если не из `{prod, test}` → `ConfigurationError(...)`.
-4. `import config as _cfg; _cfg._initialize_settings(profile=<value>)`.
-5. Дальше — текущий код `streamlit_app.py` без изменений (он
-   потребляет `SETTINGS` через `getattr(SETTINGS, ...)` —
-   backward-compat, см. Decision 1).
+**Решение: guard на module level** — НЕ модификация lifecycle-gate
+(она остаётся строгой), а явный «уже инициализировано» flag на
+модуле:
+
+```python
+# streamlit_app.py
+import sys as _streamlit_sys
+_module = _streamlit_sys.modules[__name__]
+if not getattr(_module, "_initialized", False):
+    _profile = _parse_profile_arg_from_sys_argv()  # whitelist-проверка
+    import config as _cfg
+    _cfg._initialize_settings(profile=_profile)
+    _module._initialized = True
+```
+
+Guard:
+- Проверяет «уже инициализировано этот streamlit-процесс
+  в этой сессии» через module-level attribute.
+- На первом startup вызывает `_initialize_settings(profile)`.
+- На каждом следующем `st.rerun()` видит `_initialized = True` и
+  не вызывает `_initialize_settings` снова.
+- **`_initialize_settings` остаётся неизменной** — second call с
+  другим profile (например, из другого потока) по-прежнему
+  вызывает `ConfigurationError`.
+
+Этот guard НЕ является auto-init, profile switching, или fallback'ом:
+он просто не позволяет streamlit re-execution случайно вызвать
+lifecycle-gate повторно. Lifecycle остаётся «ровно один вызов
+из entrypoint'а», guard лишь защищает от физического факта
+Streamlit re-executing script'а.
+
+Альтернативы рассмотрены:
+- **Сделать `_initialize_settings` tolerant к second call с тем же
+  profile** — отвергнуто. Меняет lifecycle-gate ради одного
+  конкретного runtime; нарушает архитектуру single source of truth.
+- **Полностью отказаться от module-level init в streamlit_app.py**
+  — отвергнуто. Streamlit-run не предоставляет startup hook'а
+  до module-level execution; `if __name__ == "__main__":` не
+  работает на rerun.
+- **Не править это и пускай Streamlit-разработчик справляется сам**
+  — отвергнуто. P0, поскольку нарушает spec
+  double-init contract.
 
 **Acceptance test** (subprocess):
 
 - `streamlit run streamlit_app.py -- --profile=prod` →
-  процесс стартует; `_initialize_settings("prod")` вызван;
+  процесс стартует; `_initialize_settings("prod")` вызван ОДИН раз;
   `SETTINGS["profile"] == "prod"`; runtime configuration prod.
 - `streamlit run streamlit_app.py -- --profile=test` → test.
 - `streamlit run streamlit_app.py` (без `--profile`) →
@@ -508,6 +562,12 @@ run`; последующие `st.rerun()` re-execute скрипт **без пе�
   streamlit run completes.
 - `streamlit run streamlit_app.py -- --profile=dev` →
   `ConfigurationError("--profile=dev is not supported")`.
+- **multi-rerun сценарий** (через subprocess + `streamlit run`
+  с `--server.runOnSave=false` либо прямой hack trigger
+  `st.rerun()`): после второго rerun guard видит
+  `_initialized=True`, `_initialize_settings` НЕ вызывается,
+  приложение продолжает работать. Никакого
+  `ConfigurationError("already initialized")`.
 
 **Implementation assumption об архитектуре Streamlit:** текущая
 форма `streamlit run <script> -- <args>` транслирует `<args>`

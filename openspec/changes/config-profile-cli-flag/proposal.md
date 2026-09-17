@@ -52,12 +52,19 @@
   сущность без собственной ответственности.
 
 - **Устаревшая env var (исторически именовавшаяся как `NANOBOT_PROFILE`)
-  полностью удаляется** как механизм передачи профиля:
+  полностью удаляется** как **действующий механизм** передачи
+  профиля из:
   - profile resolution;
   - configuration initialization;
   - runtime fallback;
   - subprocess propagation;
-  - docs, deploy descriptors, CI, кода.
+  - runtime code, deploy descriptors, CI, активной документации.
+
+  Исторические упоминания legacy env var **остаются разрешёнными**
+  в limited locations (Context/Why/Impact разделы `proposal.md`,
+  REMOVED-секция `spec.md`, Phase E разделы `tasks.md`, negative
+  test fixtures) как описание удаляемого контракта. Эти категории
+  перечислены в tasks.md Definition of Done #11.
 
   Дополнительный negative scenario: если эта env var каким-то образом
   присутствует в env (например, оставлена от старого деплоя), она
