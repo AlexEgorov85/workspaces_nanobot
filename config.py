@@ -68,7 +68,11 @@ def load_env(path: str | Path | None = None) -> AttrDict:
         line_stripped = line.strip()
         if not line_stripped:
             continue
-        if line_stripped.startswith("#") and "=" not in line_stripped:
+        if (
+            line_stripped.startswith("#")
+            and "=" not in line_stripped
+            and ":" in line_stripped.lstrip("#")
+        ):
             prefix = _header_to_prefix(line_stripped)
             continue
         if "=" not in line_stripped or line_stripped.startswith("#"):

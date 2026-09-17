@@ -8,6 +8,81 @@
 
 ## [Unreleased]
 
+> **MAJOR-релиз:** удаление persisted FAISS-кеша. После change
+> `remove-vector-index-store` единственный источник векторных данных —
+> `<storage_table>` (DuckDB-снапшот через `PgDuckDbSyncService`); FAISS-индекс
+> собирается в памяти при старте gateway (`provider.preload_indexes`).
+
+### Changed
+
+- **Vector-индекс собирается в памяти из DuckDB-снапшота** `gateway.vector.index.storage_table`
+  (синхронизируется через `PgDuckDbSyncService`). `provider.preload_indexes`
+  при старте gateway прогревает все индексы синхронно до сигнала `READY`;
+  пользовательские `search_vector` НЕ платят за cold-сборку. Если индекс
+  не прогрет — `search_vector` возвращает ошибку с понятным
+  `_search_error`, никакой ленивой сборки.
+- `build_faiss_index` (`lib/utils/duckdb_query.py`) больше не дублирует
+  `content` / `search_text` / `row_data` в JSONB-метаданных. `meta`
+  содержит только `{"metric": ..., "metadata": {<координаты чанков>}}`
+  (pk_value / chunk_index / chunk_count / table / source). Тяжёлый payload
+  подтягивается per-hit через DuckDB `SELECT content, search_text, row_data
+  FROM <storage_table> WHERE source = ? AND pk_value = ? AND chunk_index = ?`.
+- `compute_index_health` (`lib/services/preload_service.py`): `orphan`
+  берётся из DuckDB-снапшота `<storage_table>` (DISTINCT source) вместо
+  удалённой `agent_vector_index_store`; `stale` — из
+  `loaded_items[i]["signature_status"]` (inline-вычисленный при прогреве),
+  без чтения persisted `metadata.signature`.
+
+### Removed
+
+- **Таблица `public.agent_vector_index_store`** (имя бралось из
+  `gateway.vector.index.signature_table`) — DDL помечен DEPRECATED,
+  миграция `sql/migrations/V003__drop_vector_index_store.sql` удаляет её.
+- **Настройка `gateway.vector.index.signature_table`** — поле
+  `VectorIndexSettings.signature_table` удалено; `ProjectSettings(**)`
+  отвергает её с ValidationError.
+- **Метод `PostgresDuckDbProvider.rebuild_and_store_index`** — удалён.
+- **Метод `PostgresDuckDbProvider._save_index_to_store`** — удалён.
+- **Метод `PostgresDuckDbProvider._load_index_from_store`** — удалён.
+- **Метод `PostgresDuckDbProvider._load_vectors_from_db`** — удалён
+  (использовался только для side-effect `_save_index_to_store`).
+- **Метод `PostgresDuckDbProvider._load_index_from_files`** — удалён
+  (`.faiss`-файлы больше не персистятся).
+- **Метод `PostgresDuckDbProvider._compute_index_signature_from_config`**
+  — удалён (signature вычисляется on-the-fly в `_check_index_signature`).
+- **`lib.services.vector_index_service.VectorIndexBuildService.rebuild_and_store`**
+  — удалён.
+- **Legacy `gateway.vector.index.default_root`** — упоминания в
+  документации помечены DEPRECATED; FAISS не персистится на диск.
+
+### Fixed
+
+- **`config.py:load_env`** — `#`-строка без двоеточия (например, русскоязычный
+  комментарий) больше не воспринимается как заголовок секции и не меняет
+  prefix для последующих `KEY=VALUE`. Заголовком считается только строка,
+  содержащая `:` после `#`. Раньше строка вида `# foo: bar` могла перехватить
+  вложенный `LLM_API_KEY=...` под префикс `foo.bar`, из-за чего `${LLM_API_KEY}`
+  в `config.json` оставался нерезолвнутым, и LLM-клиент уходил на провайдера
+  с токеном-литералом (`Authorization: Bearer ${LLM_API_KEY}` → 401).
+- **`audit_analyzer` --mode vector** — `cli.py:470-474` корректно передаёт
+  `--top-k` и `--threshold` в `CacheProvider.search_vector(...)`. Регрессия
+  из-за плоского резолва `${LLM_API_KEY}` устранена: skill возвращает
+  результат из LLM (например, `generated_sql` для «сколько проверок»
+  → 10 строк, `vector` для «плановая проверка» → 3 результата).
+
+### Docs
+
+- **`workspace/skills/audit_analyzer/SKILL.md` § «Два режима выдачи в
+  `--mode vector`»** — добавлено явное описание трёх сценариев
+  (top-K / threshold / комбинация), таблица выбора сценария и CLI-примеры,
+  согласованные с `docs/INTERNAL_API.md`.
+- **`docs/VECTOR_INDEXES.md` § «Два режима выдачи в `search_vector`»** —
+  то же описание продублировано на уровне инфраструктуры (рядом с §
+  «Алгоритм чанкования»), со ссылками на `cache_provider.py:98` и
+  `cache_provider_impl.py::search_vector`.
+- **Дизамбигуация `--threshold` CLI vs `threshold` из конфига индекса**
+  в SKILL.md (раньше формулировка могла ввести в заблуждение).
+
 ## [2.5.2] — 2026-09-14
 
 > **PATCH-релиз v2.5.2:** две группы доработок — (1) **NFS-совместимость**
