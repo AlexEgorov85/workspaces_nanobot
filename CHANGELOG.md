@@ -12,6 +12,17 @@
 > `remove-vector-index-store` единственный источник векторных данных —
 > `<storage_table>` (DuckDB-снапшот через `PgDuckDbSyncService`); FAISS-индекс
 > собирается в памяти при старте gateway (`provider.preload_indexes`).
+>
+> **MAJOR-релиз:** единственный источник профиля конфигурации — CLI-флаг
+> `--profile` (см. `openspec/changes/config-profile-cli-flag`). Whitelist
+> закрытый: только `prod` и `test`. Env vars для передачи профиля
+> (исторически — `NANOBOT_PROFILE`) **полностью удалены** как
+> действующий механизм. Все три `application entrypoint`
+> (`gateway.py`, `cli_agent.py`, `streamlit_app.py`) без `--profile`
+> падают с `ConfigurationError` и `exit 2`. **BREAKING** для деплоев,
+> использующих env-based передачу профиля — требуется миграция на
+> `command: python gateway.py --profile=prod` (см. `docs/PROFILES.md`
+> § «Migration»).
 
 ### Fixed
 
@@ -89,6 +100,43 @@
   `loaded_items[i]["signature_status"]` (inline-вычисленный при прогреве),
   без чтения persisted `metadata.signature`.
 
+### Changed
+
+- **Профиль конфигурации теперь определяется только CLI-флагом
+  `--profile`** (whitelist: `prod`, `test`). Все три `application
+  entrypoint` (`gateway.py`, `cli_agent.py`, `streamlit_app.py`)
+  требуют обязательный `--profile` и без него падают с
+  `ConfigurationError` + `exit 2`. Env vars для передачи профиля
+  более не используются (исторически — `NANOBOT_PROFILE`); ни runtime
+  fallback, ни deploy descriptors (`docker-compose` / k8s / systemd /
+  GitHub Actions), ни активная документация. **BREAKING** для
+  существующих деплоев, использующих env-based передачу профиля —
+  требуется миграция на `command: python gateway.py --profile=prod`
+  (см. `docs/PROFILES.md` § «Migration»).
+- **`config._initialize_settings(profile)` — единственная точка
+  публикации `SETTINGS`.** После `import config` `SETTINGS` —
+  `_LazySettings` proxy, и любой доступ (`__getitem__` / `__getattr__`
+  / `.get`) поднимает `ConfigurationError`, пока
+  `config._initialize_settings(profile)` не отработает. Никакого
+  module-level `SETTINGS = resolve_application_config(...)`, никакого
+  default-профиля, никакого auto-init при чтении. Whitelist профилей
+  ужесточён: только `{"prod", "test"}` (раньше было regex
+  `[a-z0-9_-]+` — фактически любое имя; введение третьего профиля
+  требует отдельного OpenSpec change).
+- **`ApplicationContext.create(profile=...)`**: убрана избыточная
+  ctx-пересборка при `profile != _ACTIVE_PROFILE` (после change
+  `_ACTIVE_PROFILE` module-level global больше нет — `ApplicationContext`
+  просто читает уже инициализированный `SETTINGS` из `_LazySettings`).
+  Если caller вызвал `create` без предварительного entrypoint init —
+  `ConfigurationError` (`SETTINGS["profile"]` через proxy).
+- **Application subprocess получает профиль через argv, не через env.**
+  `lib.services.subprocess_manager.spawn_streamlit` теперь явно
+  добавляет `--profile=<SETTINGS["profile"]>` в argv child
+  `streamlit_app.py` (раньше child падал с
+  `ConfigurationError("--profile is required")` на module-level, и
+  Streamlit UI не стартовал). Подробности — `docs/INTERNAL_API.md`
+  § «Передача профиля в application subprocess».
+
 ### Removed
 
 - **Таблица `public.agent_vector_index_store`** (имя бралось из
@@ -110,6 +158,22 @@
   — удалён.
 - **Legacy `gateway.vector.index.default_root`** — упоминания в
   документации помечены DEPRECATED; FAISS не персистится на диск.
+- **Module-level `_ACTIVE_PROFILE` global в `config.py`** — удалён
+  как действующий runtime-механизм. Канонический доступ к активному
+  профилю теперь — `SETTINGS["profile"]` (или `get_active_profile()`
+  поверх него).
+- **`config._resolve_mode()`** — удалена полностью. После удаления
+  env-чтения функция сводилась к whitelist-валидации, которая
+  встроена в `config._initialize_settings(profile)`.
+- **Env var для передачи профиля (исторически — `NANOBOT_PROFILE`)** —
+  полностью удалена как действующий runtime-механизм. Ни runtime
+  fallback, ни deploy descriptors (`docker-compose` / k8s / systemd /
+  GitHub Actions), ни активная документация не используют её.
+  Приложение просто не работает с такими env vars; их игнорирование —
+  отсутствие кода, который их читает, а не активный sanitization.
+  Деплои, использующие эту переменную, должны быть переведены на
+  `command: python gateway.py --profile=prod` (см. `docs/PROFILES.md`
+  § «Migration»).
 
 ### Fixed
 

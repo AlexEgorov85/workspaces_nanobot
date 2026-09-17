@@ -18,6 +18,14 @@ runtime-таблиц остальная логика агента **не зна�
 - Если завтра появятся `dev` / `staging` — добавляются только
   `profiles/dev.jsonc` и т.п., **код агента не меняется**.
 
+> **BREAKING в этой версии:** единственный источник профиля — CLI-флаг
+> `--profile` в argv `application entrypoint`. Env vars, default-значения,
+> и любой implicit-fallback для profile resolution удалены. После
+> `import config` доступ к `SETTINGS` бросает `ConfigurationError`,
+> пока `config._initialize_settings(profile)` не отработает.
+> Подробности — `openspec/changes/config-profile-cli-flag/` (текущий
+> change) и `lib/utils/project_version.py`.
+
 ## Структура файлов
 
 ```
@@ -53,45 +61,110 @@ session_manager.json      ← per-deploy override (опционально)
 
 ## Запуск
 
-### По умолчанию (default = test, fail-safe)
+### Lifecycle-gate (Phase A)
 
-```bash
-python gateway.py
-# или
-python cli_agent.py
+`SETTINGS` больше **не строится** на module-level. Импорт `import config`
+делает чистый import — никакого merge, никакого env-чтения, никакого
+default-профиля. `SETTINGS` публикуется **только** через
+`config._initialize_settings(profile)`, вызываемый из application
+entrypoint.
+
+```text
+process start
+  ↓
+application entrypoint (gateway.py / cli_agent.py / streamlit_app.py)
+  ↓
+argparse парсит --profile (whitelist {"prod","test"})
+  ↓
+config._initialize_settings(profile)   ← единственная точка публикации
+  ↓
+ConfigurationResolver строит SETTINGS
+  ↓
+runtime imports / ApplicationContext
+  ↓
+channels / services / agent
 ```
 
-→ стартует в **test**-режиме. Если `profiles/test.jsonc` отсутствует →
-`ConfigurationError: profiles/test.jsonc не найден. Создайте profiles/test.jsonc.`
+Invariant: `SETTINGS` SHALL NOT be constructed during `import config`.
+Доступ к `SETTINGS` без `_initialize_settings(...)` — `ConfigurationError`.
 
-### Явное указание test
+### Application entrypoints
+
+Все три entrypoint'а следуют одному error lifecycle contract:
+`ConfigurationError` поднимается validation-кодом, ловится в `main()`,
+конвертируется в `sys.exit(2) + stderr FATAL`.
+
+**Gateway:**
 
 ```bash
-NANOBOT_PROFILE=test python gateway.py
-# или
+python gateway.py --profile=prod
 python gateway.py --profile=test
 ```
 
-### Prod
+`gateway.py --profile=prod --smoke` — smoke-режим: инициализирует
+SETTINGS, печатает баннер + имя runtime-таблицы, выходит 0. Используется
+только в integration-тестах; production — без `--smoke`.
+
+**CLI agent:**
 
 ```bash
-NANOBOT_PROFILE=prod python gateway.py
-# или
-python gateway.py --profile=prod
+python cli_agent.py --profile=prod
+python cli_agent.py --profile=test
+python cli_agent.py --profile=test --smoke   # smoke mode (см. выше)
 ```
 
-Prod = чистый `project.json` (никакого оверлея). Все runtime-таблицы
-должны быть prod-именами — иначе `ConfigurationError` на старте.
+**Streamlit:**
 
-### Streamlit
+```bash
+streamlit run streamlit_app.py -- --profile=prod
+streamlit run streamlit_app.py -- --profile=test
+```
 
-`streamlit_app.py` тоже принимает `--profile` / `NANOBOT_PROFILE`.
+`streamlit_app.py` парсит `--profile` из `sys.argv` (всё после `--`
+streamlit-run пробрасывает как позиционные элементы). При первом запуске
+вызывается `_initialize_settings(profile)`; `st.rerun()` повторно
+вызывает module-level statements, но guard через `globals()`
+предотвращает второй вызов lifecycle-gate.
 
-### Cron
+### Без `--profile`
 
-Cron-процессы **не имеют CLI**. Они читают `NANOBOT_PROFILE` из env.
-В systemd unit / docker-compose / k8s manifest обязательно задавайте
-`NANOBOT_PROFILE=prod` для prod-деплоев.
+Каждый entrypoint без `--profile` падает с `exit 2` + stderr
+`"FATAL: --profile is required"`. Это deliberate fail-fast: разработчик,
+набравший `python gateway.py` без флагов, должен явно выбрать профиль.
+
+### Неподдерживаемый `--profile`
+
+Любое значение вне `{"prod", "test"}` (например, `--profile=dev`,
+`--profile=staging`, `--profile=foo`) — `ConfigurationError` + exit 2.
+Whitelist закрытый; введение третьего профиля — отдельный OpenSpec change.
+
+### Environment fallback
+
+**Не существует.** Любая устаревшая переменная окружения для передачи
+профиля (исторически — `NANOBOT_PROFILE`) **не читается runtime-кодом**.
+Приложение просто не работает с такими переменными; их игнорирование —
+это отсутствие кода, который их читает, а не активный sanitization
+механизм. Деплои должны передавать `--profile` через `command:` в
+`docker-compose.yml` / k8s manifest / systemd unit / GitHub Actions.
+
+## Application subprocess получает `--profile` через argv
+
+Когда `gateway.py` spawn'ит `streamlit_app.py`, профиль передаётся в
+argv child (НЕ в env). Это контракт — никаких env vars:
+
+```python
+# lib/services/subprocess_manager.py:spawn_streamlit
+proc = subprocess.Popen(
+    [sys.executable, "-m", "streamlit", "run", str(script),
+     "--server.headless", "true",
+     "--server.port", str(port),
+     "--", f"--profile={profile}"],   # SETTINGS["profile"] родителя
+    ...
+)
+```
+
+`streamlit_app.py` получает свой `--profile` из argv и инициализирует
+SETTINGS через тот же lifecycle-gate.
 
 ## Порядок merge (ConfigurationResolver)
 
@@ -128,29 +201,79 @@ prod-имена — профиль их перетирает.
 Суффикс `_test` сам по себе недостаточен: `foo_test` в test-режиме →
 fail. Точное соответствие — единственный надёжный способ.
 
-## Миграция существующих деплоев
+## Migration: env-based deploy → CLI-флаг
 
-⚠️ **Breaking change**: `python gateway.py` без флагов теперь
-запускается в test-режиме (раньше — в prod). Все существующие prod-деплои
-**обязаны** явно указать профиль:
+⚠️ **BREAKING.** Если ваш деплой до сих пор использовал env-based
+передачу профиля (исторически — `NANOBOT_PROFILE=prod` в
+`docker-compose.yml` / k8s manifest / systemd unit / GitHub Actions),
+переведите его на CLI-флаг.
+
+### docker-compose.yml
 
 ```yaml
-# docker-compose.yml / k8s / systemd
-environment:
-  - NANOBOT_PROFILE=prod
+# БЫЛО (больше не работает):
+services:
+  gateway:
+    environment:
+      - NANOBOT_PROFILE=prod     # игнорируется runtime
+    command: ["python", "gateway.py"]
+
+# СТАЛО:
+services:
+  gateway:
+    command: ["python", "gateway.py", "--profile=prod"]
+    # никаких env vars для profile
 ```
 
-или:
+### Kubernetes (Deployment / CronJob / StatefulSet)
 
-```bash
-# CLI
-python gateway.py --profile=prod
+```yaml
+# БЫЛО:
+spec:
+  containers:
+    - name: gateway
+      env:
+        - name: NANOBOT_PROFILE
+          value: "prod"
+      command: ["python", "gateway.py"]
+# СТАЛО:
+spec:
+  containers:
+    - name: gateway
+      command: ["python", "gateway.py", "--profile=prod"]
+      # никаких env vars для profile
 ```
 
-### Health-check (рекомендуется)
+### systemd unit
 
-Добавьте в продовый мониторинг алерт на `Starting nanobot gateway …
-profile=`. Если в проде видите `profile=test` — это ошибка деплоя.
+```ini
+# БЫЛО:
+[Service]
+Environment=NANOBOT_PROFILE=prod
+ExecStart=/usr/bin/python /opt/gateway/gateway.py
+# СТАЛО:
+[Service]
+ExecStart=/usr/bin/python /opt/gateway/gateway.py --profile=prod
+# никаких Environment= для profile
+```
+
+### GitHub Actions
+
+```yaml
+# БЫЛО:
+- name: Start gateway (e2e)
+  env:
+    NANOBOT_PROFILE: prod
+  run: python gateway.py &
+# СТАЛО:
+- name: Start gateway (e2e)
+  run: python gateway.py --profile=prod &
+```
+
+### Health-check в проде
+
+Рекомендуется: добавьте в продовый мониторинг алерт на стартовый баннер
+`profile=`. Если видите `profile=test` в проде — это ошибка деплоя.
 
 ## Что НЕ изолируется профилем
 
@@ -162,13 +285,13 @@ profile=`. Если в проде видите `profile=test` — это оши�
 - Реестры (`agent_predefined_scripts`) — read-only.
 
 Если потребуется их изолировать (FAISS-пути, DuckDB-кеш, Streamlit-файлы,
-cron-файл) — это **отдельная задача**. Текущий план их не затрагивает.
+cron-файл) — это **отдельная задача**. Текущий change их не затрагивает.
 
 ## Что меняется в runtime
 
 **Меняется:**
 
-| Слой | Prod (явно) | Test (default/явно) |
+| Слой | Prod (явно) | Test (явно) |
 | --- | --- | --- |
 | Баннер | `profile=prod` | `profile=test` |
 | `channels.postgres.table_name` | `agent_conversation_messages` | `..._test` |
@@ -185,13 +308,8 @@ cron-файл) — это **отдельная задача**. Текущий п
 
 ## Тестирование
 
-Merge-order тесты (см. `tests/test_config_resolver.py`) доказывают:
-
-1. Профиль побеждает `session_manager.json` и `config.json`.
-2. `validate_profile_overlay` блокирует посторонние ключи.
-3. `validate_runtime_isolation` блокирует неправильные имена таблиц.
-4. Отсутствие `profiles/test.jsonc` при mode=test — fail-fast.
-5. Невалидное имя профиля (`foo bar`) — fail-fast.
+См. ``tests/test_profile_lifecycle.py`` (acceptance по tasks.md § D.1–D.5,
+§ D.7) и ``tests/test_profile_integration.py`` (merge-order + resolver).
 
 ## Архитектурная гарантия
 
@@ -201,17 +319,30 @@ Merge-order тесты (см. `tests/test_config_resolver.py`) доказыва�
 Можно проверить:
 
 ```bash
-grep -rn 'profile.*==.*"test"\|profile.*==.*"prod"' lib/ workspace/
-# Должно быть 0 результатов (или только в Resolver/CLI-parser)
+grep -rn 'profile.*==.*"test"\|profile.*==.*"prod"' lib/ workspace/ tools/
+# Должно быть 0 результатов (или только в CLI-parser)
 ```
+
+> **Дополнительно:** больше нет module-level `SETTINGS = ...` в
+> `config.py`. `import config` — чистый import без side-effects.
+> `SETTINGS` — это `_LazySettings` proxy, который поднимается
+> `ConfigurationError` на любом доступе до явного
+> `config._initialize_settings(profile)` из application entrypoint.
 
 ## Резюме
 
 ```text
-startup
+process start
    │
    ▼
-mode = CLI --profile > NANOBOT_PROFILE env > default=test
+argv
+   │
+   ▼
+application entrypoint (gateway.py / cli_agent.py / streamlit_app.py)
+   parses --profile (whitelist {"prod","test"}, required)
+   ↓
+   ▼
+config._initialize_settings(profile)      ← lifecycle-gate
    │
    ▼
 ConfigurationResolver (config.py)
@@ -224,7 +355,7 @@ ConfigurationResolver (config.py)
    └── 6) validate_runtime_isolation() — hard-fail
    │
    ▼
-SETTINGS (AttrDict)
+SETTINGS ("profile" обязательный ключ)
    │
    ▼
 ApplicationContext / Channel / Session / Logging / Agent / Skills

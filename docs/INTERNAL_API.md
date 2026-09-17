@@ -3,6 +3,55 @@
 > Навигационный индекс каталога `docs/` — в [`README.md`](README.md). Этот документ —
 > самодостаточное описание подсистемы.
 
+## 🚦 Передача профиля в application subprocess
+
+После [`config-profile-cli-flag`](../../openspec/changes/config-profile-cli-flag)
+единственный канал передачи профиля конфигурации в subprocess —
+**argv `--profile=<value>`**. Env vars (исторически —
+`NANOBOT_PROFILE=prod`) больше **не используются**: ни runtime-код,
+ни deployment descriptors, ни документация. Это закрытый источник
+истины.
+
+### Application subprocess
+
+Application entrypoint (`gateway.py`, `cli_agent.py`, `streamlit_app.py`)
+получает `--profile` через `argv` от родителя. Когда `gateway.py`
+spawn'ит `streamlit_app.py` через `lib.services.subprocess_manager`,
+профиль пробрасывается явно:
+
+```python
+proc = subprocess.Popen(
+    [sys.executable, "-m", "streamlit", "run", str(script),
+     "--server.headless", "true",
+     "--server.port", str(port),
+     "--", f"--profile={SETTINGS['profile']}"],
+    ...
+)
+```
+
+Источник значения — `SETTINGS["profile"]` родителя (опубликованный
+`config._initialize_settings(profile)` при старте gateway). Никакой
+второй resolve, никакого env lookup, никакого default — если parent
+не передал `--profile`, child упадёт с `ConfigurationError("--profile is required")`
+на module-level.
+
+### Deployment descriptors
+
+| Категория | Было | Стало |
+|---|---|---|
+| `docker-compose.yml` | `environment: NANOBOT_PROFILE=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
+| Kubernetes Deployment | `env: NANOBOT_PROFILE=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
+| systemd unit | `Environment=NANOBOT_PROFILE=prod` | `ExecStart=/usr/bin/python /opt/gateway/gateway.py --profile=prod` |
+| GitHub Actions | `env: NANOBOT_PROFILE: prod` | `run: python gateway.py --profile=prod` |
+
+Подробности и обоснование — `docs/PROFILES.md` (§ «Migration»).
+
+### Runtime sanitization
+
+**Не вводится.** Приложение просто не работает с устаревшими env
+var'ами — их игнорирование это отсутствие кода, который их читает,
+а не активный sanitization-механизм.
+
 ## ⚙️ Конфигурация `tools.exec` (запуск команд)
 
 Секция `tools.exec` в `config.json` управляет инструментом `exec` (запуск shell-команд).
