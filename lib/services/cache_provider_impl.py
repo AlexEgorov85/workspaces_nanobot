@@ -48,13 +48,6 @@ _INDEX_SIGNATURE_FIELDS = (
 )
 
 
-# Дефолтное имя PG-таблицы-хранилища сериализованных FAISS-индексов
-# (BYTEA + metadata JSONB со signature). Используется когда в
-# ``project.json::gateway.vector.index.signature_table`` ничего не задано.
-# Чтобы переименовать таблицу через DDL — указать новое имя в settings.
-_DEFAULT_VECTOR_INDEX_STORE_TABLE = "public.agent_vector_index_store"
-
-
 # Параметры подключения к эмбеддер-сервису (Ollama /api/embed и совместимые).
 # Захардкожены в теле ``get_embedding()`` (задача «embedding-параметры в код»);
 # секция ``gateway.vector.embedding`` и ``EmbeddingSettings`` удалены.
@@ -71,28 +64,6 @@ _EMBED_TOKEN_ENV = "EMBED_TOKEN"
 # ``gateway.vector.index.indexes.<name>`` не заданы chunk_size / chunk_overlap).
 _DEFAULT_CHUNK_SIZE = 500
 _DEFAULT_CHUNK_OVERLAP = 80
-
-
-def read_vector_store_table() -> str:
-    """Имя PG-таблицы-хранилища сериализованных FAISS-индексов.
-
-    Источник — ``project.json::gateway.vector.index.signature_table``
-    (см. ``VectorIndexSettings.signature_table``). Дефолт —
-    значение ``_DEFAULT_VECTOR_INDEX_STORE_TABLE``.
-
-    Используется ``build_cache_provider`` (как ``vector_store_table``
-    провайдера) и ``DuckDbCacheStore._check_index_integrity``: оба должны
-    смотреть в одну и ту же таблицу, иначе проверка signature бесшумно
-    выключается (``storage_table``-источник сырых эмбеддингов не имеет
-    колонки ``metadata``).
-    """
-    from config import SETTINGS
-
-    idx = ((SETTINGS.get("gateway") or {}).get("vector") or {}).get("index") or {}
-    return (
-        idx.get("signature_table")
-        or _DEFAULT_VECTOR_INDEX_STORE_TABLE
-    )
 
 
 def compute_index_signature(cfg: dict[str, Any]) -> str:
@@ -121,19 +92,27 @@ def verify_index_signature(
 ) -> Literal["CURRENT", "STALE", "INVALID"]:
     """Сравнить signature в сохранённом metadata с текущим конфигом.
 
+    После change ``remove-vector-index-store`` persisted metadata с
+    signature больше не существует (FAISS-индекс собирается в памяти
+    из DuckDB-снапшота). Стандартный путь — провайдер передаёт
+    ``stored_meta=None`` или ``{}`` (нет persisted-signature), что
+    трактуется как **CURRENT**: сигнатура вычисляется inline и
+    гарантированно совпадает с текущим конфигом.
+
     Returns:
-        ``CURRENT`` — конфиги совпадают (или signature отсутствует, но
-            ``stored_meta is None`` — индекс ещё не загружался).
+        ``CURRENT`` — ``stored_meta`` пуст/None (новый путь без persisted
+            signature) ИЛИ signature в нём совпадает с текущим конфигом.
         ``STALE``  — signature присутствует и не совпадает с текущим
-            (изменилась модель эмбеддингов, chunk параметры, columns).
-        ``INVALID`` — stored_meta есть, но в нём нет signature ИЛИ
-            signature повреждена (не hex).
+            (legacy-путь: изменилась модель эмбеддингов, chunk параметры,
+            columns).
+        ``INVALID`` — stored_meta есть, signature присутствует, но
+            повреждена (не hex / не sha256 длиной 64).
     """
     if stored_meta is None:
         return "CURRENT"
     stored_sig = stored_meta.get("signature")
     if not stored_sig:
-        return "INVALID"
+        return "CURRENT"
     if not isinstance(stored_sig, str) or len(stored_sig) != 64:
         return "INVALID"
     current_sig = compute_index_signature(current_cfg)
@@ -145,66 +124,101 @@ def list_runtime_vector_indexes(
     *,
     fetch_fn=None,
 ) -> list[dict[str, Any]]:
-    """Прочитать runtime-артефакты из PG-таблицы FAISS-store.
+    """Прочитать runtime-артефакты vector-индексов из DuckDB-снапшота.
 
-    Единственный источник **fact** состояния векторных индексов:
-    ``public.agent_vector_index_store`` (если задан -- PG-таблица).
+    После change ``remove-vector-index-store`` persisted FAISS-кеш
+    (``agent_vector_index_store``) удалён. Runtime-состояние индексов
+    — это просто набор ``source`` (index_name), присутствующих в
+    таблице сырых эмбеддингов (``gateway.vector.index.storage_table``,
+    синхронизированной в DuckDB через ``PgDuckDbSyncService``).
 
     Возвращает список dict'ов с полями:
       ``source``         — имя индекса (= ``gateway.vector.index.indexes.<name>``)
-      ``dimension``      — размерность FAISS-векторов
-      ``vector_count``   — количество векторов в индексе
-      ``updated_at``     — TIMESTAMPTZ последней пересборки
-      ``metric``         — метрика из ``metadata`` (если записана)
-      ``signature``      — SHA256 из ``metadata`` (если записана)
-      ``metadata``       — полный dict из JSONB
+      ``dimension``      — размерность (из DuckDB-схемы storage_table)
+      ``vector_count``   — количество чанков в индексе (DuckDB COUNT(*))
+      ``updated_at``     — ``None`` (нет persisted-метаданных с timestamp;
+                            обновление отслеживается по ``synced_at`` в
+                            ``storage_table`` если нужно — caller'ы могут
+                            читать напрямую)
 
     Не вычисляет signature_status (это делает вызывающий через
-    :func:`verify_index_signature`). Не использует ``_SETTINGS`` —
-    принимает ``store_table`` явно, чтобы быть тестируемым без
-    ApplicationContext.
+    :func:`verify_index_signature` или `_check_index_signature`
+    провайдера). Параметр ``fetch_fn`` принимается как duck-typing
+    (должен иметь метод ``execute(sql, params) -> cursor``) — по
+    умолчанию DuckDB-коннекшен из ``DuckDbCacheStore`` (через
+    ``cache_provider.PooledDuckDbConnection``).
 
-    Параметр ``fetch_fn`` — для тестов; по умолчанию
-    ``utils.db.fetch``.
-
-    Возвращает ``[]`` при недоступности PG (логирует через ``logger``,
-    но не raise'ит — для CLI-friendly UX).
+    Возвращает ``[]`` при недоступности DuckDB-снапшота (логирует
+    через ``logger``, но не raise'ит — для CLI-friendly UX).
     """
+    from config import SETTINGS
+
     if store_table is None:
-        store_table = read_vector_store_table()
-    if fetch_fn is None:
-        from utils.db import fetch as _db_fetch
-        fetch_fn = _db_fetch
+        idx = ((SETTINGS.get("gateway") or {}).get("vector") or {}).get("index") or {}
+        store_table = idx.get("storage_table") or ""
+
+    if not store_table:
+        return []
+
+    schema, name = (
+        store_table.split(".", 1)
+        if "." in store_table else ("", store_table)
+    )
+    full = f'"{schema}"."{name}"' if schema else f'"{name}"'
+
+    if fetch_fn is not None:
+        conn = fetch_fn
+    else:
+        try:
+            import duckdb
+            from pathlib import Path
+
+            cache_cfg = ((SETTINGS.get("gateway") or {}).get("cache") or {})
+            local_path = cache_cfg.get("local_path") or ""
+            if local_path:
+                db_path = Path(local_path)
+                if not db_path.is_absolute():
+                    from lib.core.skill_config import _WORKSPACE_ROOT
+                    db_path = _WORKSPACE_ROOT / local_path
+            else:
+                from pathlib import Path as _P
+                db_path = _P.home() / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
+            if not db_path.exists():
+                return []
+            conn = duckdb.connect(str(db_path), read_only=True)
+        except Exception:
+            return []
 
     try:
-        rows = fetch_fn(
-            f"SELECT source, dimension, vector_count, updated_at, metadata "
-            f"FROM {store_table} ORDER BY source"
-        )
+        rows = conn.execute(
+            f"SELECT source, COUNT(*) AS vector_count "
+            f"FROM {full} GROUP BY source ORDER BY source",
+        ).fetchall()
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning(
             "list_runtime_vector_indexes(%s) failed: %s", store_table, exc
         )
         return []
+    finally:
+        if fetch_fn is None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     out: list[dict[str, Any]] = []
     for row in rows:
-        meta = row.get("metadata") or {}
-        if isinstance(meta, str):
-            try:
-                import json
-                meta = json.loads(meta)
-            except Exception:
-                meta = {}
         out.append({
-            "source": row.get("source"),
-            "dimension": row.get("dimension"),
-            "vector_count": row.get("vector_count"),
-            "updated_at": row.get("updated_at"),
-            "metric": meta.get("metric") if isinstance(meta, dict) else None,
-            "signature": meta.get("signature") if isinstance(meta, dict) else None,
-            "metadata": meta if isinstance(meta, dict) else {},
+            "source": row[0] if hasattr(row, "__getitem__") else row.get("source"),
+            "dimension": None,
+            "vector_count": (
+                row[1] if hasattr(row, "__getitem__") else row.get("vector_count")
+            ),
+            "updated_at": None,
+            "metric": None,
+            "signature": None,
+            "metadata": {},
         })
     return out
 
@@ -285,7 +299,7 @@ def read_embedding_config() -> dict[str, Any]:
     Секция ``gateway.vector.embedding`` удалена; параметры подключения
     прописаны в теле ``get_embedding()`` (``_EMBED_*``-константы). Эта
     функция — единая точка чтения тех же значений для signature-механики
-    (``_read_current_index_config`` / ``_compute_index_signature_from_config`` /
+    (``_read_current_index_config`` /
     ``DuckDbCacheStore._check_index_integrity``), чтобы build- и verify-стороны
     не расходились.
     """
@@ -302,7 +316,7 @@ def read_embedding_defaults() -> dict[str, Any]:
     """Дефолтные chunk-параметры сборки (``_DEFAULT_CHUNK_*``).
 
     Единая точка чтения для build- и verify-сторон: ``tools/build_vectors.py``,
-    ``_read_current_index_config``, ``_compute_index_signature_from_config``
+    ``_read_current_index_config``,
     и ``_check_index_integrity`` берут одни и те же значения, когда в конфиге
     индекса нет per-index chunk-параметров.
     """
@@ -436,7 +450,6 @@ def build_cache_provider(cfg: dict, base_dir: str = "") -> PostgresDuckDbProvide
         vector_db_table=storage_table,
         vector_index_path=index_path,
         vector_indexes=read_vector_index_config(cfg),
-        vector_store_table=read_vector_store_table(),
         embedding_base_url=emb.get("base_url", ""),
         embedding_model=emb.get("model", "mxbai-embed-large:latest"),
     )
@@ -802,7 +815,6 @@ class PostgresDuckDbProvider(CacheProvider):
         vector_db_table: str = "",
         vector_index_path: str = "",
         vector_indexes: dict[str, Any] | None = None,
-        vector_store_table: str = "",
         embedding_base_url: str = "",
         embedding_model: str = "mxbai-embed-large:latest",
         embedding_timeout_sec: float = 60.0,
@@ -815,7 +827,6 @@ class PostgresDuckDbProvider(CacheProvider):
         self._vector_db_table = vector_db_table
         self._vector_index_path = vector_index_path
         self._vector_indexes = dict(vector_indexes) if vector_indexes else {}
-        self._vector_store_table = vector_store_table
         self._embedding_base_url = embedding_base_url
         self._embedding_model = embedding_model or "mxbai-embed-large:latest"
         self._embedding_timeout_sec = float(embedding_timeout_sec)
@@ -941,142 +952,6 @@ class PostgresDuckDbProvider(CacheProvider):
 
     # -- vector indexes --------------------------------------------------
 
-    def _load_index_from_files(self, index_dir: str, index_name: str) -> tuple[Any, dict | None]:
-        import os
-        import shutil
-        import tempfile
-
-        import faiss
-
-        index_path = os.path.join(index_dir, f"{index_name}.faiss")
-        meta_path = os.path.join(index_dir, f"{index_name}_metadata.json")
-
-        if not os.path.exists(index_path):
-            return None, None
-
-        meta = None
-        if os.path.exists(meta_path):
-            with open(meta_path, encoding="utf-8") as mf:
-                meta = json.load(mf)
-
-        try:
-            return faiss.read_index(index_path), meta
-        except RuntimeError:
-            pass
-
-        tmp_dir = os.path.join(tempfile.gettempdir(), "nanobot_vectors")
-        os.makedirs(tmp_dir, exist_ok=True)
-        tmp_idx = os.path.join(tmp_dir, f"{index_name}.faiss")
-        tmp_meta = os.path.join(tmp_dir, f"{index_name}_metadata.json")
-        shutil.copy2(index_path, tmp_idx)
-        if meta_path and os.path.exists(meta_path):
-            shutil.copy2(meta_path, tmp_meta)
-
-        try:
-            return faiss.read_index(tmp_idx), meta
-        except Exception:
-            return None, None
-
-    def _save_index_to_store(
-        self, source: str, index, metadata: dict, signature: str | None = None,
-    ) -> None:
-        if not self._vector_store_table:
-            return
-        import faiss
-        from utils.db import execute, fetch
-
-        store = self._vector_store_table
-        blob = bytes(faiss.serialize_index(index))
-        # Если вызывающий передал signature — кладём её в metadata.
-        # Это позволяет downstream-проверке ``verify_index_signature``
-        # отличать CURRENT от STALE/INVALID без отдельной колонки.
-        meta_to_save = dict(metadata or {})
-        if signature is not None:
-            meta_to_save["signature"] = signature
-        meta_json = json.dumps(meta_to_save, ensure_ascii=False, default=str)
-        dim = index.d
-        ntotal = index.ntotal
-
-        exists = fetch(f"SELECT 1 FROM {store} WHERE source = %s", source)
-        if exists:
-            execute(
-                f"UPDATE {store} SET index_binary = %s, metadata = %s::jsonb, "
-                f"dimension = %s, vector_count = %s, updated_at = NOW() "
-                f"WHERE source = %s",
-                blob, meta_json, dim, ntotal, source,
-            )
-        else:
-            execute(
-                f"INSERT INTO {store} (source, index_binary, metadata, dimension, vector_count, updated_at) "
-                f"VALUES (%s, %s, %s::jsonb, %s, %s, NOW())",
-                source, blob, meta_json, dim, ntotal,
-            )
-
-    def _load_index_from_store(self, source: str) -> tuple[Any, dict | None]:
-        if not self._vector_store_table:
-            return None, None
-        import faiss
-        import numpy as np
-        from utils.db import fetch
-
-        store = self._vector_store_table
-        rows = fetch(f"SELECT index_binary, metadata FROM {store} WHERE source = %s", source)
-        if not rows:
-            return None, None
-
-        row = rows[0]
-        blob = row["index_binary"]
-        meta = row.get("metadata") or {}
-        if isinstance(meta, str):
-            meta = json.loads(meta)
-
-        try:
-            if isinstance(blob, memoryview):
-                blob = bytes(blob)
-            blob_array = np.frombuffer(blob, dtype=np.uint8)
-            return faiss.deserialize_index(blob_array), meta
-        except Exception:
-            return None, None
-
-    def _load_vectors_from_db(
-        self, table_name: str, source: str | None = None, metric: str | None = None,
-    ) -> tuple[Any, dict | None]:
-        from utils.db import fetch
-
-        where = " WHERE source = %s" if source else ""
-        params = [source] if source else []
-        sql = (
-            f'SELECT id, source, content, search_text, "table", pk_value, '
-            f'chunk_index, chunk_count, row_data, embedding '
-            f'FROM {table_name}{where} ORDER BY id'
-        )
-
-        try:
-            rows = fetch(sql, *params)
-        except Exception:
-            return None, None
-
-        if not rows:
-            return None, None
-
-        records = [
-            {
-                "source": r.get("source") or source or "",
-                "content": r.get("content") or "",
-                "search_text": r.get("search_text") or "",
-                "table": r.get("table") or "",
-                "pk_value": r.get("pk_value"),
-                "chunk_index": r.get("chunk_index") or 0,
-                "chunk_count": r.get("chunk_count") or 1,
-                "row_data": r.get("row_data"),
-                "embedding": r.get("embedding"),
-            }
-            for r in rows
-        ]
-        from lib.utils.duckdb_query import build_faiss_index
-
-        return build_faiss_index(records, metric=metric)
-
     def _load_index_from_cache(
         self, source: str, metric: str | None = None,
     ) -> tuple[Any, dict | None]:
@@ -1121,13 +996,10 @@ class PostgresDuckDbProvider(CacheProvider):
         records = [
             {
                 "source": r[1] or source,
-                "content": r[2] or "",
-                "search_text": r[3] or "",
                 "table": r[4] or "",
                 "pk_value": r[5] if r[5] is not None else i,
                 "chunk_index": r[6] or 0,
                 "chunk_count": r[7] or 1,
-                "row_data": r[8],
                 "embedding": r[9],
             }
             for i, r in enumerate(rows)
@@ -1136,6 +1008,15 @@ class PostgresDuckDbProvider(CacheProvider):
 
         idx, meta = build_faiss_index(records, metric=metric)
         if idx is not None:
+            meta.setdefault("metadata", {})
+            for i, r in enumerate(rows):
+                meta["metadata"][str(i)] = {
+                    "source": r[1] or source,
+                    "table": r[4] or "",
+                    "pk_value": r[5] if r[5] is not None else i,
+                    "chunk_index": r[6] or 0,
+                    "chunk_count": r[7] or 1,
+                }
             self._index_cache[source] = (idx, meta)
         return idx, meta
 
@@ -1145,50 +1026,20 @@ class PostgresDuckDbProvider(CacheProvider):
         index_name: str,
         db_table: str | None = None,
     ) -> tuple[Any, dict | None]:
-        table = db_table or self._vector_db_table
-        if table:
-            cached = self._index_cache.get(index_name)
-            if cached is not None:
-                return cached
+        cached = self._index_cache.get(index_name)
+        if cached is not None:
+            return cached
 
-            try:
-                idx, meta = self._load_index_from_store(index_name)
-                if idx is not None:
-                    meta = self._check_index_signature(index_name, meta)
-                    self._index_cache[index_name] = (idx, meta)
-                    # Сохраняем meta в provider для downstream читателей
-                    # (``_signature_status`` / ``_signature_reason`` — см.
-                    # ``SearchResult.signature_status``).
-                    self._last_loaded_meta = meta
-                    return idx, meta
-            except Exception:
-                # PostgreSQL недоступен (offline/снимок навыка) —
-                # переходим к следующим fallback'ам.
-                pass
-
-            try:
-                idx, meta = self._load_vectors_from_db(
-                    table, source=index_name, metric=self._get_index_metric(index_name),
-                )
-                if idx is not None:
-                    self._save_index_to_store(index_name, idx, meta)
-                    meta = self._check_index_signature(index_name, meta)
-                    self._index_cache[index_name] = (idx, meta)
-                    return idx, meta
-            except Exception:
-                pass
-
-        # DuckDB-снимок навыка (offline path; до P0-3 был единственным
-        # источником для ``search_vector``). Fallback для кейсов, когда
-        # PostgreSQL недоступен или store/векторы ещё не собраны.
-        idx, meta = self._load_index_from_cache(index_name, metric=self._get_index_metric(index_name))
+        idx, meta = self._load_index_from_cache(
+            index_name, metric=self._get_index_metric(index_name),
+        )
         if idx is not None:
             meta = self._check_index_signature(index_name, meta)
             self._index_cache[index_name] = (idx, meta)
             self._last_loaded_meta = meta
             return idx, meta
 
-        return self._load_index_from_files(index_dir, index_name)
+        return None, None
 
     def _check_index_signature(
         self, index_name: str, meta: dict[str, Any] | None,
@@ -1212,10 +1063,10 @@ class PostgresDuckDbProvider(CacheProvider):
         if current_cfg is None:
             return meta
         status = verify_index_signature(meta, current_cfg)
-        if status == "CURRENT":
-            return meta
         meta = dict(meta)
         meta["_signature_status"] = status
+        if status == "CURRENT":
+            return meta
         if status == "STALE":
             meta["_signature_reason"] = (
                 "index config changed (embedding model / dimension / chunk / "
@@ -1266,8 +1117,6 @@ class PostgresDuckDbProvider(CacheProvider):
 
     def preload_indexes(self, db_table: str | None = None) -> list[dict[str, Any]]:
         """Прогреть кеш индексов в память."""
-        from utils.db import fetch
-
         table = db_table or self._vector_db_table
         if not table:
             return []
@@ -1276,20 +1125,17 @@ class PostgresDuckDbProvider(CacheProvider):
         cfg = self._vector_indexes or {}
         for name, c in cfg.items():
             names[name] = not (isinstance(c, dict) and c.get("enabled") is False)
-        if self._vector_store_table:
-            try:
-                for r in fetch(f"SELECT DISTINCT source FROM {self._vector_store_table}"):
-                    names.setdefault(r["source"], True)
-            except Exception:
-                pass
 
         loaded = []
         for name, enabled in names.items():
             if not enabled:
                 continue
-            idx, _ = self._load_index("", name, table)
+            idx, meta = self._load_index("", name, table)
             if idx is not None:
-                loaded.append({"index_name": name, "vectors": idx.ntotal})
+                item: dict[str, Any] = {"index_name": name, "vectors": idx.ntotal}
+                if isinstance(meta, dict) and "_signature_status" in meta:
+                    item["signature_status"] = meta["_signature_status"]
+                loaded.append(item)
         return loaded
 
     def invalidate_cache(self, source: str | None = None) -> None:
@@ -1376,7 +1222,10 @@ class PostgresDuckDbProvider(CacheProvider):
 
         from lib.utils.duckdb_query import build_raw_items, group_vector_hits
 
-        raw = build_raw_items(meta_items, scores, ids, index_name, threshold)
+        raw = build_raw_items(
+            meta_items, scores, ids, index_name, threshold,
+            conn=self._conn, vector_db_table=self._vector_db_table,
+        )
         results = group_vector_hits(raw, top_k, threshold)
 
         sig_status = (meta or {}).get("_signature_status", "")
@@ -1397,70 +1246,6 @@ class PostgresDuckDbProvider(CacheProvider):
             )
             for r in results
         ]
-
-    def rebuild_and_store_index(self, source: str, db_table: str) -> int | None:
-        """Перестроить индекс для source и сохранить в store (для индексаторов).
-
-        Перед сохранением читает конфиг индекса из
-        ``read_vector_index_config()`` (``gateway.vector.index.indexes``)
-        и текущий embedding-конфиг (захардкоженные константы); вычисляет
-        signature (``compute_index_signature``) и кладёт в ``metadata.signature``
-        в store. Это позволяет последующему ``verify_index_signature``
-        отличать CURRENT от STALE/INVALID без отдельной миграции схемы.
-
-        Returns:
-            Количество векторов построенного индекса, или ``None`` если данных
-            нет / индекс не собран.
-        """
-        idx, meta = self._load_vectors_from_db(
-            db_table, source=source, metric=self._get_index_metric(source),
-        )
-        if idx is not None:
-            signature = self._compute_index_signature_from_config(source)
-            self._save_index_to_store(source, idx, meta, signature=signature)
-            self._index_cache.pop(source, None)
-            print(f"[vector] Индекс '{source}' перестроен и сохранён в store "
-                  f"({idx.ntotal} векторов)", file=sys.stderr)
-            return idx.ntotal
-        return None
-
-    def _compute_index_signature_from_config(self, source: str) -> str | None:
-        """Прочитать конфиг индекса из настроек + embedding-конфиг и вычислить signature.
-
-        Возвращает ``None`` если конфиг индекса не найден или таблица не
-        задана — в этом случае signature не пишется, и downstream-вызовы
-        получат ``INVALID`` через ``verify_index_signature`` (принудительная
-        пересборка).
-
-        ``chunk_size``/``chunk_overlap``/``metric`` — из конфига индекса
-        (``gateway.vector.index.indexes``); если не заданы — fallback на
-        глобальные дефолты, чтобы build- и verify-стороны оставались
-        консистентными.
-        """
-        if not self._vector_store_table:
-            return None
-        try:
-            configs = read_vector_index_config({})
-        except Exception:
-            return None
-        cfg = configs.get(source)
-        if not cfg:
-            return None
-        emb_cfg = read_embedding_config()
-        emb_default = read_embedding_defaults()
-        sig_cfg = {
-            "src_table": cfg.get("table"),
-            "pk_column": cfg.get("pk"),
-            "content_cols": cfg.get("content_columns") or [],
-            "embedding_cols": cfg.get("embedding_columns") or [],
-            "track_column": cfg.get("track_column"),
-            "embedding_model": emb_cfg.get("model"),
-            "embedding_dimension": emb_cfg.get("dimension"),
-            "chunk_size": cfg.get("chunk_size") or emb_default["chunk_size"],
-            "chunk_overlap": cfg.get("chunk_overlap") or emb_default["chunk_overlap"],
-            "metric": cfg.get("metric") or "cosine",
-        }
-        return compute_index_signature(sig_cfg)
 
     # -- resource --------------------------------------------------------
 

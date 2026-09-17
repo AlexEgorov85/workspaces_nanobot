@@ -104,9 +104,13 @@ def compute_index_health(
     Args:
         declared: результат ``read_vector_index_config({})``.
         loaded: то, что вернул ``store.preload_indexes()`` (или ``None`` /
-            пустой list при ошибке).
+            пустой list при ошибке). После change
+            ``remove-vector-index-store`` может содержать
+            ``signature_status`` (CURRENT/STALE/INVALID) на каждой
+            записи — это inline-вычисленный статус.
         runtime_rows: то, что вернул ``list_runtime_vector_indexes()``
-            (PG store). Может быть ``None`` при недоступности PG.
+            (теперь читает из DuckDB-снапшота ``<storage_table>``,
+            DISTINCT source). Может быть ``None`` при недоступности.
 
     Returns:
         dict с ``declared_names``, ``loaded_items``, ``missing``,
@@ -129,25 +133,14 @@ def compute_index_health(
             r.get("source") for r in runtime_rows if r.get("source")
         )
         orphan = sorted(n for n in runtime_names if n not in declared)
-        runtime_by_name = {r.get("source"): r for r in runtime_rows if r.get("source")}
         stale: list[str] = []
-        if runtime_by_name:
-            try:
-                from lib.services.cache_provider_impl import verify_index_signature
-
-                for name in loaded_names:
-                    if name not in declared:
-                        continue  # orphan, см. above
-                    row = runtime_by_name.get(name) or {}
-                    stored_meta = row.get("metadata") or {}
-                    try:
-                        status = verify_index_signature(stored_meta, declared[name])
-                        if status in ("STALE", "INVALID"):
-                            stale.append(f"{name}:{status}")
-                    except Exception:  # noqa: BLE001
-                        continue
-            except Exception:  # noqa: BLE001
-                stale = []
+        for it in loaded_items:
+            name = it.get("index_name")
+            if not name or name not in declared:
+                continue
+            status = it.get("signature_status")
+            if status in ("STALE", "INVALID"):
+                stale.append(f"{name}:{status}")
     else:
         orphan = []
         stale = []

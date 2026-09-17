@@ -64,17 +64,3 @@ class VectorIndexBuildService:
     def provider(self) -> Any:
         """Общий провайдер (PostgresDuckDbProvider) — для чтения/поиска."""
         return self._provider
-
-    def rebuild_and_store(self, source: str, db_table: str) -> int | None:
-        """Перестроить индекс ``source`` из сырых векторов и сохранить в store.
-
-        Инвалидирует кэш, читает векторы ``source`` из ``db_table``,
-        строит ``IndexFlatIP`` и сохраняет blob в
-        ``mode_vector_store_table``. Возвращает число векторов или
-        ``None`` при ошибке (в т.ч. отсутствии faiss/numpy).
-        """
-        self._provider.invalidate_cache(source)
-        try:
-            return self._provider.rebuild_and_store_index(source, db_table)
-        except (ImportError, ModuleNotFoundError):
-            return None

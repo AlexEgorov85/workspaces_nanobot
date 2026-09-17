@@ -148,9 +148,26 @@ def build_raw_items(
     ids,
     index_name: str,
     threshold: float | None,
+    conn: Any | None = None,
+    vector_db_table: str = "",
 ) -> list[dict[str, Any]]:
-    """Собрать сырые чанки-строки из результатов поиска FAISS."""
+    """Собрать сырые чанки-строки из результатов поиска FAISS.
+
+    После change ``remove-vector-index-store`` ``meta_items`` содержит
+    только координаты (``pk_value``, ``chunk_index``, ``chunk_count``,
+    ``table``, ``source``) — тяжёлый payload (``content``, ``search_text``,
+    ``row_data``) подтягивается через DuckDB SELECT из
+    ``vector_db_table`` (``gateway.vector.index.storage_table``).
+
+    Если ``conn`` не передан, payload остаётся пустым (для тестов и
+    legacy-сценариев).
+    """
     raw: list[dict[str, Any]] = []
+    schema, name = (
+        vector_db_table.split(".", 1)
+        if "." in vector_db_table else ("", vector_db_table)
+    )
+    full = f'"{schema}"."{name}"' if schema else f'"{name}"'
     for score, doc_id in zip(scores[0], ids[0], strict=False):
         if doc_id < 0:
             continue
@@ -162,7 +179,32 @@ def build_raw_items(
         pk = item.get("pk_value", int(doc_id))
         tbl = item.get("table", "")
         src = item.get("source", index_name)
-        content = item.get("content", item.get("search_text", ""))
+
+        content = ""
+        row: dict[str, Any] = {}
+        if conn is not None and vector_db_table:
+            try:
+                row_db = conn.execute(
+                    f'SELECT content, search_text, row_data '
+                    f'FROM {full} '
+                    f'WHERE source = ? AND pk_value = ? AND chunk_index = ? '
+                    f'LIMIT 1',
+                    [index_name, pk, chunk_idx],
+                ).fetchone()
+            except Exception:
+                row_db = None
+            if row_db is not None:
+                content = row_db[0] or row_db[1] or ""
+                raw_row = row_db[2]
+                if isinstance(raw_row, str):
+                    try:
+                        import json as _json
+                        row = _json.loads(raw_row)
+                    except Exception:
+                        row = {}
+                elif isinstance(raw_row, dict):
+                    row = raw_row
+
         raw.append({
             "content": content,
             "score": float(score),
@@ -172,7 +214,7 @@ def build_raw_items(
             "chunk_index": chunk_idx,
             "chunk_total": chunk_total,
             "chunk": f"{chunk_idx + 1}/{chunk_total}" if chunk_total > 1 else "",
-            "row": item.get("row", {}),
+            "row": row,
         })
     return raw
 
@@ -240,7 +282,7 @@ def build_faiss_index(
         return None, None
     dimension = len(records[0]["embedding"])
     vectors = np.zeros((len(records), dimension), dtype=np.float32)
-    metadata: dict[str, Any] = {"metadata": {}, "metric": metric}
+    metadata: dict[str, Any] = {"metric": metric}
 
     for i, rec in enumerate(records):
         emb = rec["embedding"]
@@ -248,26 +290,6 @@ def build_faiss_index(
             vectors[i] = np.array(emb, dtype=np.float32)
         else:
             return None, None
-
-        row_data = rec.get("row_data")
-        if isinstance(row_data, str):
-            try:
-                row_data = json.loads(row_data)
-            except (json.JSONDecodeError, TypeError):
-                row_data = {}
-        elif not isinstance(row_data, dict):
-            row_data = {}
-
-        metadata["metadata"][str(i)] = {
-            "content": rec.get("content") or rec.get("search_text") or "",
-            "search_text": rec.get("search_text") or "",
-            "source": rec.get("source") or "",
-            "table": rec.get("table") or "",
-            "pk_value": rec.get("pk_value") if rec.get("pk_value") is not None else i,
-            "chunk_index": rec.get("chunk_index") or 0,
-            "chunk_count": rec.get("chunk_count") or 1,
-            "row": row_data or {},
-        }
 
     if metric == "cosine":
         faiss.normalize_L2(vectors)
