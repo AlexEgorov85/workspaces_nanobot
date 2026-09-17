@@ -21,6 +21,15 @@ profile-related secrets) для profile resolution не выполняются.
 Функция `_resolve_mode()` удаляется из `config.py` без замены.
 `_ACTIVE_PROFILE` global, ссылающийся на неё, тоже удаляется.
 
+**Зачем whitelist проверяется дважды** (CLI-entrypoint + `_initialize_settings`):
+если в будущем кто-то добавит новый application entrypoint или
+internal caller, который вызывает `_initialize_settings` напрямую
+(минуя CLI-парсинг), defensive whitelist на уровне
+`_initialize_settings` ловит невалидный profile ещё до того,
+как ConfigurationResolver выполнит merge. CLI-валидация и
+`_initialize_settings`-валидация — это **два независимых boundary'а**
+с одной responsibility каждый (CLI error UX vs invariant protection).
+
 ### A.3 Реализовать `_initialize_settings(profile)` и `_LazySettings`
 
 - `_initialize_settings(profile: str) -> None`:
@@ -127,11 +136,8 @@ Whitelist и required-валидация:
 # 1. На самом верху (module-level):
 import sys
 import config as _cfg
+from config import ConfigurationError  # re-exported
 
-_CONFIGURATION_ERROR_BORDER = (
-    "--profile is required",
-    "is not supported",
-)
 
 def _entrypoint_main():
     """Startup + application body, raises ConfigurationError on startup errors."""
@@ -149,6 +155,7 @@ def _entrypoint_main():
     from lib.core.application_context import ApplicationContext
     ...
     return ApplicationContext.create(...)
+
 
 if __name__ == "__main__":
     try:
@@ -212,10 +219,14 @@ import config as _streamlit_cfg
 # _initialize_settings itself stays strict (second call with any
 # value -> "already initialized"); this guard prevents the second
 # CALL from happening, not the second response from the function.
-_streamlit_init_done = getattr(_streamlit_sys.modules.get("streamlit_app"), "_initialized", False)
-if not _streamlit_init_done:
+# Use globals() rather than sys.modules["streamlit_app"].__dict__
+# to set the flag: globals() refers to module's own namespace,
+# which is the supported way to set per-module attributes from
+# within module-level code.
+_PROFILE_GUARD_ATTR = "_config_initialized"
+if not globals().get(_PROFILE_GUARD_ATTR, False):
     _streamlit_cfg._initialize_settings(profile=_app_argv_profile)
-    _streamlit_sys.modules["streamlit_app"]._initialized = True
+    globals()[_PROFILE_GUARD_ATTR] = True
 ```
 
 Контракт по-прежнему: entrypoint initializes SETTINGS **ровно один раз**
@@ -435,13 +446,50 @@ env для передачи профиля — требуется миграци
 
 ## Phase F — Real-DB Smoke Test
 
-- `python gateway.py --profile=prod` без env → баннер
-  `profile=prod` И `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`.
-  `history_search` отрабатывает на реальной таблице prod.
-- `python gateway.py --profile=test` без env → test-таблица, без `db_error`.
-- Произвольная устаревшая env var в окружении + `python gateway.py --profile=prod` →
-  prod-таблица (env проигнорирован), баннер + runtime согласованы.
-- `python gateway.py` → exit 2 + `ConfigurationError`, без runtime.
+Smoke-test запускает **`gateway.py` через `--profile=<v>` с
+**bounded harness'ом**, чтобы избежать полноценного infinite-loop
+runtime (gateway стартует postgres channel polling, websocket
+listener, streamlit subprocess и т.п., которые при smoke-тесте
+должны быть остановлены сразу после проверки конфигурации).
+
+Конкретно:
+
+1. **Smoke-CLI mode в `gateway.py`** (флаг `--smoke` или
+   внутренний `GATEWAY_SMOKE=1` env, или просто проверка через
+   subprocess с timeout): при `--smoke` gateway НЕ стартует
+   channels/services/event-loop. Только:
+   - Парсит `--profile`;
+   - Инициализирует `SETTINGS`;
+   - Печатает в stdout баннер `profile=<v>` и
+     `SETTINGS["logging"]["db"]["table_name"]`;
+   - Печатает `OK_SMOKE_COMPLETE` и выходит с кодом 0.
+
+   Эта функция специально добавлена для Phase F и для D.2
+   integration test'а; production invocation **не** использует
+   `--smoke`. Это позволяет тестам получить реальный
+   `SETTINGS["logging"]["db"]["table_name"]` без поднятия
+   postgres channel / websocket listener.
+
+2. Сценарии Phase F запускаются как
+   `subprocess.run(["python", "gateway.py", "--profile=prod", "--smoke"],
+                   timeout=10, capture_output=True)`:
+   - `python gateway.py --profile=prod --smoke` →
+     stdout содержит `OK_SMOKE_COMPLETE`, exit code 0,
+     `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
+     в выводе.
+   - `python gateway.py --profile=test --smoke` → test-таблица,
+     без `db_error` в выводе.
+   - Произвольная устаревшая env var + `--profile=prod --smoke` →
+     prod-таблица, env проигнорирован.
+   - `python gateway.py --smoke` (без `--profile`) → exit 2 +
+     stderr содержит `--profile is required`.
+   - `python gateway.py --profile=dev --smoke` → exit 2 +
+     `--profile='dev' is not supported`.
+
+3. `history_search` end-to-end test (отдельный scenario, не в
+   Phase F): он не требует `--smoke`, потому что это уже
+   **отдельный subprocess, выполняющий tool** — бесконечный
+   runtime gateway'а ему не нужен.
 
 ## Architectural Acceptance Checklist
 

@@ -244,18 +244,40 @@ lifecycle-gate — антипаттерн, который смешивает д�
 
 ### Decision 2: Startup parsing в executable entrypoint path
 
-**Выбор:** В `gateway.py` и `cli_agent.py` парсинг `--profile` и
-вызов `_initialize_settings(profile)` выполняются
-**в executable entrypoint path** — внутри `if __name__ == "__main__":`
-(с последующим `sys.exit(2)` на ошибках), **до** любых импортов,
-читающих конфиг. Это удерживает entrypoint от случайных
-import-side-effects: `import gateway` (из других модулей, тестов,
-или REPL) НЕ запускает приложение.
+**Выбор:** В `gateway.py` и `cli_agent.py` парсинг `--profile`,
+валидация и вызов `_initialize_settings(profile)` выполняются
+**в executable entrypoint path** — внутри `if __name__ == "__main__":`,
+**до** любых импортов, читающих конфиг. Это удерживает entrypoint
+от случайных import-side-effects: `import gateway` (из других
+модулей, тестов, или REPL) НЕ запускает приложение.
+
+**Error Lifecycle Contract (decision 2 unification):** Внутри
+startup-блока валидация **исключительно raise `ConfigurationError(...)`**.
+Никаких прямых `sys.exit(2)` из validation-проверок. Top-level
+catch (`try/except ConfigurationError` на самом верхнем уровне
+entrypoint'а) транслирует исключение в `sys.stderr.write(...)` +
+`sys.exit(2)`. Это ОДИН контракт для всех трёх entrypoint'ов
+(`gateway.py`, `cli_agent.py`, `streamlit_app.py`); различия между
+ними — только в источнике argv (argparse vs Streamlit's `--`
+passthrough), а не в error-translation.
+
+Этот контракт НЕ допускает:
+- прямой `sys.exit(2)` из validation-кода;
+- argparse-исключения, которые минуют `ConfigurationError`
+  и уходят в `argparse`-specific `SystemExit(2)` (т.к. это
+  не наш `ConfigurationError`, а другой exception type; для
+  единообразия валидация `--profile` НЕ делегируется argparse, а
+  делается явной проверкой `profile in {"prod", "test"}`);
+- `argparse.error(...)` → SystemExit, минующий boundary.
 
 Для `streamlit_app.py` (особый случай — `streamlit run` не выставляет
 `__name__ == "__main__"` на rerun) startup-блок расположен
 **на module-level, выше** существующих импортов; см. Decision 4 для
-деталей этого исключения.
+деталей этого исключения. Streamlit boundary использует тот же
+pattern — module-level `raise ConfigurationError(...)` при
+валидации, плюс catch на верхнем уровне (Streamlit ловит наш
+`ConfigurationError` через `try/except` в начале скрипта или
+внутри `StreamlitRunner.run()` wrapper'а; деталь см. Decision 4).
 
 Альтернативы рассмотрены:
 
@@ -271,6 +293,11 @@ import-side-effects: `import gateway` (из других модулей, тес�
   буквально интерпретировать «argparse на module-level» именно
   так; это та ловушка, которую явная формулировка «executable
   entrypoint path» предотвращает.
+- **Прямой `sys.exit(2)` из validation** — отвергнуто. Нарушает
+  Error Lifecycle Contract: validation raise'ит, boundary ловит
+  и exit'ит. Это разделение позволяет тестам ловить
+  `ConfigurationError` напрямую (без subprocess) и embedded-сценариям
+  обрабатывать ошибку по-своему.
 
 **Обоснование:** Python выполняет `if __name__ == "__main__":` блок
 **только** при executable invocation (`python gateway.py`); при
@@ -286,23 +313,55 @@ import-side-effects: `import gateway` (из других модулей, тес�
 # gateway.py
 import sys
 
-if __name__ == "__main__":
+import config as _cfg
+from config import ConfigurationError  # re-exported
+
+
+def _entrypoint_main() -> None:
+    """Startup + application body.
+
+    Raises ConfigurationError on startup errors (no --profile,
+    invalid --profile). Does NOT catch and exit: that's the
+    caller's responsibility (see _run below).
+    """
     import argparse
     _parser = argparse.ArgumentParser(add_help=False)
     _parser.add_argument("--profile", type=str, default=None)
-    _args, _ = _parser.parse_known_args()
+    _args, _parser.parse_known_args()
+
+    # Explicit validation (NOT delegated to argparse error):
     if not _args.profile:
-        sys.stderr.write("FATAL: --profile is required\n")
-        sys.exit(2)
+        raise ConfigurationError("--profile is required")
     if _args.profile not in {"prod", "test"}:
-        sys.stderr.write(f"FATAL: --profile={_args.profile!r} is not supported (allowed: prod, test)\n")
-        sys.exit(2)
-    import config as _cfg
+        raise ConfigurationError(
+            f"--profile={_args.profile!r} is not supported (allowed: prod, test)"
+        )
+
+    # Lifecycle gate:
     _cfg._initialize_settings(profile=_args.profile)
-    # дальше все runtime-импорты
+
+    # Only NOW do runtime imports:
+    from lib.core.application_context import ApplicationContext
+    ...
+    return ApplicationContext.create(...)
+
+
+def _run() -> int:
+    """Top-level boundary. Catches ConfigurationError, exits 2."""
+    try:
+        _entrypoint_main()
+    except ConfigurationError as exc:
+        sys.stderr.write(f"FATAL: {exc}\n")
+        return 2  # NOT sys.exit() — caller decides exit vs raise
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_run())
 ```
 
-Аналогично для `cli_agent.py`. Для `streamlit_app.py` см. Decision 4.
+Аналогично для `cli_agent.py`. Для `streamlit_app.py` см. Decision 4
+(module-level инициализация с guard'ом от rerun).
 
 **Контракт импорта как модуля:** `import gateway`,
 `python -c "from cli_agent import ..."`, `from gateway import something`
@@ -510,22 +569,35 @@ streamlit run streamlit_app.py -- --profile=prod
 
 **Решение: guard на module level** — НЕ модификация lifecycle-gate
 (она остаётся строгой), а явный «уже инициализировано» flag на
-модуле:
+**модуле `streamlit_app`** через `globals()`. Прямое
+манипулирование `sys.modules["streamlit_app"].__dict__` —
+антипаттерн (зависит от того, что модуль уже в `sys.modules` к
+моменту выполнения; обходит публичный API). Корректный способ
+— `globals()` (или атрибут на самом модуле через `setattr`):
 
 ```python
-# streamlit_app.py
-import sys as _streamlit_sys
-_module = _streamlit_sys.modules[__name__]
-if not getattr(_module, "_initialized", False):
+# streamlit_app.py, на самом верху файла
+_PROFILE_GUARD_ATTR = "_config_initialized"
+
+if not globals().get(_PROFILE_GUARD_ATTR, False):
     _profile = _parse_profile_arg_from_sys_argv()  # whitelist-проверка
     import config as _cfg
     _cfg._initialize_settings(profile=_profile)
-    _module._initialized = True
+    globals()[_PROFILE_GUARD_ATTR] = True
 ```
+
+`globals()` ссылается на module globals самого `streamlit_app.py`,
+которые персистентны между rerun'ами Streamlit (это и есть
+механизм сохранения состояния при rerun'е, который Streamlit
+использует для widget state, cache и т.п.). Через `globals()`
+атрибут устанавливается прямо в `streamlit_app.__dict__`, и при
+каждом последующем `st.rerun()` Python снова выполняет
+module-level statements, и `globals().get(...)` возвращает
+сохранённое значение `True`.
 
 Guard:
 - Проверяет «уже инициализировано этот streamlit-процесс
-  в этой сессии» через module-level attribute.
+  в этой сессии» через `globals()`.
 - На первом startup вызывает `_initialize_settings(profile)`.
 - На каждом следующем `st.rerun()` видит `_initialized = True` и
   не вызывает `_initialize_settings` снова.
