@@ -68,12 +68,22 @@ The system SHALL возвращать JSON-строку со следующей 
   (после всех truncation-проходов).
 - `session_scope` — фактически применённый scope (`"current"`
   или `"all"`).
-- `has_more` — `true`, если в БД есть подходящие события
-  после возвращённой страницы. Определяется через
-  `LIMIT effective_limit + 1` в SQL: запрос читает на одну
-  строку больше, чем `effective_limit`; если фактически
-  получено `> effective_limit`, лишняя строка отбрасывается
-  и `has_more = true`.
+- `has_more` — `true`, если после возвращённой страницы
+  в БД остались подходящие события, **которые агент ещё
+  не видел**. Определяется через композицию двух признаков:
+  - `db_has_more = (len(rows_from_db) > effective_limit)`
+    — SQL запрашивает `LIMIT effective_limit + 1` строк;
+    если фактически получено больше `effective_limit`,
+    лишняя строка отбрасывается и `db_has_more = true`.
+  - После truncation-проходов:
+    `has_more = db_has_more OR results_truncated`.
+  - Семантика: даже если `LIMIT N+1` не обнаружил
+    следующей строки в БД, `results_truncated=true`
+    означает, что текущая страница была сокращена
+    из-за `max_result_chars` и часть отобранных событий
+    **не показана агенту**; следующая страница
+    (`offset = next_offset`) существует и обязательна
+    для полного покрытия выборки.
 - `results_truncated` — `true`, если из выборки были выброшены
   целые события, чтобы общий JSON влез в `max_result_chars`.
   Дефолт `false`. `results_truncated` MUST NOT
@@ -133,6 +143,20 @@ The system SHALL возвращать JSON-строку со следующей 
   `next_offset = 0 + N` (например, `N=4` → `next_offset=4`),
   `has_more` отражает фактическое наличие следующей страницы
   (для последних страниц `false`, для промежуточных `true`)
+
+#### Scenario: has_more=true при results_truncated, даже если db_has_more=false
+- **WHEN** в БД ровно 10 подходящих событий,
+  `limit=10, offset=0`; SQL запрашивает `LIMIT 11`,
+  получено 10 строк → `db_has_more=false`;
+  но `max_result_chars` настолько мал, что
+  после truncation остаётся только 4 события
+- **THEN** ответ содержит
+  `count=4`, `results_truncated=true`,
+  `has_more=true` (потому что
+  `db_has_more OR results_truncated = false OR true = true`),
+  `next_offset=4`. Возврат `has_more=false` при
+  `results_truncated=true` SHALL считаться багом
+  контракта: агент остановится и не получит события 5..10
 
 #### Scenario: Продолжение пагинации при results_truncated=true
 - **WHEN** предыдущий запрос вернул

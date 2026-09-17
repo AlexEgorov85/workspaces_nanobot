@@ -59,13 +59,24 @@
   - Старое поле `truncated: bool` сохраняется как **deprecated
     алиас** `results_truncated` в течение одного MINOR-релиза.
     Удаление — отдельным follow-up change после релиза.
-- **Пагинация с `has_more`**:
+- **Пагинация с `has_more` и `next_offset`**:
   - Добавляется параметр `offset: int >= 0` (дефолт 0).
-  - В ответ добавляется `has_more: bool`.
+  - В ответ добавляются `has_more: bool` и
+    `next_offset: int` (`= offset + count`).
   - SQL: `ORDER BY "timestamp" DESC, id DESC LIMIT %s OFFSET %s`,
     где `LIMIT = effective_limit + 1` — лишняя строка
-    используется для определения `has_more` и не возвращается
+    используется для определения `db_has_more` и не возвращается
     агенту. Это дешевле, чем отдельный `COUNT(*)`.
+  - Финальный `has_more` вычисляется как
+    `db_has_more OR results_truncated`: даже если
+    `LIMIT N+1` не обнаружил следующей строки в БД,
+    `results_truncated=true` означает, что текущая страница
+    сокращена `max_result_chars` и часть отобранных событий
+    не показана агенту — следующая страница обязательна.
+  - `next_offset` позволяет продолжать пагинацию после
+    `results_truncated`, не пропуская события, отброшенные
+    из текущего ответа (агент SHALL использовать `next_offset`,
+    а не `offset + limit`).
 - **Детерминированная сортировка**: явный `ORDER BY "timestamp" DESC, id DESC`
   (UUID из `agent_gateway_logs.id`) — исключает повторы/пропуски
   событий на границе страниц при равных timestamp'ах.
