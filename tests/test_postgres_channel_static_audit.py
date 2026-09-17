@@ -134,8 +134,8 @@ def test_claim_one_routes_single_to_single_method():
     ), (
         "_claim_one должен делегировать в _claim_one_single для single-режима"
     )
-    assert "self._claim_one_single()" in src, (
-        "_claim_one должен вызывать self._claim_one_single()"
+    assert "self._claim_one_single" in src, (
+        "_claim_one должен вызывать self._claim_one_single (с параметрами или без)"
     )
 
 

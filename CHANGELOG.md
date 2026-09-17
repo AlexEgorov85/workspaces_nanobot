@@ -13,6 +13,50 @@
 > `<storage_table>` (DuckDB-снапшот через `PgDuckDbSyncService`); FAISS-индекс
 > собирается в памяти при старте gateway (`provider.preload_indexes`).
 
+### Fixed
+
+- **Cancellation now reaches active nanobot task.** Команда `/stop` от
+  пользователя теперь доходит до AgentLoop даже когда все обычные
+  слоты (`max_concurrent=1`/`2`/N) заняты активной задачей той же
+  сессии. Реализовано через **priority polling path** в
+  `MessageExchange._poll_loop` (новый опциональный хук канала
+  `poll_priority_inbound`), который вызывается до проверки
+  `is_slot_free()` и не зависит от обычного concurrency. Для
+  PostgresChannel добавлен метод `poll_priority_inbound` +
+  `_poll_priority_once`, использующий параметризованный
+  `_claim_one(priority_content='/stop')`. После доставки `/stop` в
+  `bus.publish_inbound` работает штатный механизм nanobot:
+  `cmd_stop` → `_cancel_active_tasks(effective_key)`. Подробности и
+  acceptance-матрица — в `docs/ARCHITECTURE.md` § «Priority polling
+  path (команды вроде `/stop`)».
+
+### Added
+
+- **DB safety net в polling**: фильтр `AND status != 'cancelled'` в
+  `_claim_one_single` (3 места: основной WHERE, подзапрос по соседним
+  задачам, финальный UPDATE) и в `_claim_one` (worker_pool) — если AW
+  пометил user-сообщение как `cancelled` ДО polling, polling его
+  пропускает (race-free).
+- **Race-check после claim**: повторный `fetchval` статуса в
+  `_poll_once` и `_poll_priority_once` — если между SELECT подзапроса
+  и UPDATE захвата AW пометил `cancelled`, polling не диспатчит и
+  освобождает claim + lease + локальный контекст.
+- **Drop response в `_finalize_turn`**: если user-сообщение стало
+  `cancelled` пока LLM работала, финальный ответ не публикуется;
+  освобождаются slot, claim, context bridge; assistant-placeholder
+  удаляется. Status user'а НЕ переписывается (он уже `cancelled` от AW).
+- **Priority polling contract** в `MessageExchange`:
+  `poll_priority_inbound` — опциональный async-хук канала, вызывается
+  в `_poll_loop` **до** `poll_inbound`. Если хук не реализован
+  каналом — default-поведение через `getattr(..., None)` (другие
+  каналы не ломаются).
+- **Тесты**: `tests/test_user_stop_signal_priority.py` (19 тестов —
+  priority claim filter, dispatch без slot/chat_inflight/placeholder,
+  race-fix, структурные проверки `_poll_loop`); расширен
+  `tests/test_user_stop_signal.py` (DB safety net, finalize drop).
+- **Static-audit тест** `test_postgres_channel_static_audit.py::test_claim_one_routes_single_to_single_method`
+  обновлён под параметризованный `_claim_one_single(priority_content=...)`.
+
 ### Changed
 
 - **Vector-индекс собирается в памяти из DuckDB-снапшота** `gateway.vector.index.storage_table`

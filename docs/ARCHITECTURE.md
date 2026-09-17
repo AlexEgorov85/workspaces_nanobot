@@ -1164,6 +1164,97 @@ outbound). Все остальные сообщения `send()` merge'ит в a
 `_delete_claim` — единую точку гарда. В single-режиме они физически
 не выполняются.
 
+### Priority polling path (команды вроде `/stop`)
+
+**Задача.** Slash-команды, зарегистрированные как priority в
+`nanobot.command.router.CommandRouter` (например, `/stop`,
+`/restart`, `/status`), должны доходить до AgentLoop даже когда все
+обычные слоты заняты активной задачей той же сессии — иначе пользователь
+не может прервать долгий turn.
+
+**Решение.** `MessageExchange._poll_loop` сначала вызывает опциональный
+хук канала `poll_priority_inbound`, и только если тот вернул `False`
+(нет priority-кандидатов) — переходит к обычному `poll_inbound` с
+проверкой `is_slot_free()`. Канал (PostgresChannel) сам решает, какие
+сообщения считать priority-кандидатами (для транспорта через таблицу
+`agent_conversation_messages` это `content = '/stop'`), и реализует
+`poll_priority_inbound` через параметризованный claim:
+
+```
+MessageExchange._poll_loop:
+    poll_priority = getattr(channel, "poll_priority_inbound", None)
+    while running:
+        if poll_priority:
+            handled = await poll_priority(exchange)
+            if handled:
+                await asyncio.sleep(0)   # yield, не busy-loop
+                continue
+        if exchange.is_slot_free():
+            handled = await channel.poll_inbound(exchange)
+            ...
+```
+
+**Граница ответственности:**
+
+- `MessageExchange` знает только: «есть priority inbound path».
+- `PostgresChannel.poll_priority_inbound` знает: как искать priority
+  кандидатов в БД (через `_claim_one(priority_content='/stop')`).
+- `nanobot.command.router.CommandRouter.is_priority` и
+  `nanobot.command.builtin.cmd_stop` знают: что делать с командой
+  после её доставки через `bus.publish_inbound` → `AgentLoop.run()`.
+
+Это сохраняет архитектурную границу: `MessageExchange` не знает
+конкретных команд, канал не знает как они обрабатываются, библиотека
+nanobot не знает откуда они пришли.
+
+**Priority polling — независим от обычных слотов:**
+
+- **Не вызывает `exchange.acquire_slot()`** — обычный semaphore не
+  затрагивается; priority-команды не считаются «занятыми слотами».
+- **Не вызывает `exchange.add_inflight()`** — `_inflight` остаётся
+  нетронутым (для других каналов это индикатор занятости).
+- **Не добавляет в `_chat_inflight`** — даже если chat активен
+  обычной задачей, priority команда всё равно проходит (это та самая
+  задача, которую нужно прервать).
+- **Не создаёт assistant-placeholder** — priority команда не
+  возвращает контент пользователю (это управляющая команда).
+- **Не вызывает `_release_slot`** — slot не занимался.
+
+После `_handle_message` priority path освобождает локальные ресурсы:
+`_delete_claim`, `_leases.discard`, `_msg_ctx.pop`, `_msg_chat.pop`.
+Сама отмена активной задачи происходит **внутри** AgentLoop через
+библиотечный `cmd_stop` → `_cancel_active_tasks(effective_key)` —
+priority polling доставляет `/stop` в шину, дальше работает
+стандартный механизм nanobot.
+
+**Двойная защита — DB safety net.** Помимо priority polling path,
+`_claim_one_single` и `_claim_one` (worker_pool) содержат фильтр
+`AND status != 'cancelled'` в WHERE (3 места — основной WHERE,
+подзапрос по соседним задачам, и финальный UPDATE). Если пользователь
+помечает сообщение как `cancelled` ДО того, как polling его
+захватил — polling его пропускает (race-free по `UPDATE ... WHERE
+id=(...)`). После claim — повторный `fetchval` re-check; если
+между SELECT подзапроса и UPDATE захвата AW пометил `cancelled`,
+polling не диспатчит и освобождает claim. В `_finalize_turn` —
+ещё один re-check: если user стал cancelled пока LLM работала,
+финальный ответ не публикуется, освобождаются slot/claim/context.
+
+**Сценарии:**
+
+| Состояние | Поведение |
+|---|---|
+| `max_concurrent=1`, A работает, A `/stop` | priority polling доставляет `/stop` → `cmd_stop` отменяет A **до** завершения LLM |
+| `max_concurrent=2`, A+B работают, A `/stop` | priority polling доставляет `/stop` → отменяется A, B продолжает |
+| A–J работают, F `/stop` | priority polling доставляет `/stop` → отменяется только F, остальные 9 не задеты |
+| `claim_strategy=worker_pool`, A отменён | запись в `agent_worker_claims` удалена через `_delete_claim`, lease удалён |
+| row cancelled до claim | polling skip через `AND status != 'cancelled'` |
+| row cancelled после claim (race) | re-check fetchval → drop + cleanup |
+| row cancelled во время LLM | `_finalize_turn` drop response, slot released |
+
+Тесты: `tests/test_user_stop_signal.py` (DB safety net + race checks),
+`tests/test_user_stop_signal_priority.py` (priority polling path +
+структурные проверки `_poll_loop`).
+
 **Когда включать `worker_pool`:** несколько инстансов gateway читают общую
 таблицу `agent_conversation_messages`. `UNIQUE PK (task_id)` в
 `agent_worker_claims` гарантирует, что одна задача не обрабатывается двумя
