@@ -956,6 +956,7 @@ class PostgresChannel(BaseChannel):
                               OR (status = 'error'
                                   AND updated_at + interval '1 second' * %s < NOW())
                           )
+                          AND status != 'cancelled'
                           AND NOT EXISTS (
                               SELECT 1 FROM {self._fq_claims} c
                               WHERE c.task_id = {self._fq_table}.id
@@ -1002,6 +1003,13 @@ class PostgresChannel(BaseChannel):
         Дополнительная защита — фильтр на чат без активной user-задачи.
 
         Не обращается к ``agent_worker_claims``.
+
+        user_stop_signal: ``status != 'cancelled'`` в обоих подзапросах —
+        если AW пометил user-сообщение как ``cancelled`` ДО того, как
+        polling успел его захватить, polling его пропускает (race-free:
+        UPDATE ... WHERE id = (...) сам по себе атомарен, а условие
+        ``status='pending'`` в WHERE подзапроса + ``status != 'cancelled'``
+        гарантирует, что захват не произойдёт).
         """
         row = await fetchone(
             f"""
@@ -1015,6 +1023,7 @@ class PostgresChannel(BaseChannel):
                       OR (status = 'error'
                           AND updated_at + interval '1 second' * %s < NOW())
                   )
+                  AND status != 'cancelled'
                   AND NOT EXISTS (
                       SELECT 1 FROM {self._fq_table} m2
                       WHERE m2.chat_id = {self._fq_table}.chat_id
@@ -1025,6 +1034,7 @@ class PostgresChannel(BaseChannel):
                 LIMIT 1
             )
             AND status = 'pending'
+            AND status != 'cancelled'
             RETURNING id, chat_id, user_id, content, media, metadata, created_at
             """,
             self._error_retry_delay,
@@ -1036,9 +1046,13 @@ class PostgresChannel(BaseChannel):
 
         Алгоритм:
           1. ``_claim_one`` — атомарный клейм задачи (INSERT claim + processing)
-          2. Проверяем, не занят ли chat_id в этом процессе (chat_inflight)
-          3. Создаём assistant-placeholder (чтобы web-клиент мог опрашивать)
-          4. Захватываем слот (exchange) → _handle_message
+          2. user_stop_signal: re-check статуса — если AW пометил
+             user-сообщение как ``cancelled`` МЕЖДУ ``_claim_one`` и
+             ``_handle_message`` (race window ~миллисекунды, но возможен
+             при сетевой задержке), polling НЕ диспатчит и освобождает claim
+          3. Проверяем, не занят ли chat_id в этом процессе (chat_inflight)
+          4. Создаём assistant-placeholder (чтобы web-клиент мог опрашивать)
+          5. Захватываем слот (exchange) → _handle_message
 
         Если из этого chat_id уже есть активное сообщение в этом процессе,
         возвращаем claim и статус в 'pending' — не диспатчим второе.
@@ -1057,10 +1071,40 @@ class PostgresChannel(BaseChannel):
         user_id = str(row["user_id"]) if row["user_id"] else chat_id
         self._lifecycle_log("claimed", user_msg_id, chat_id=chat_id)
 
+        # user_stop_signal: re-check после claim. Если user-сообщение уже
+        # было помечено как 'cancelled' в момент polling'а — откатываем claim
+        # и пропускаем. Без этого проверка в claim'е (status != 'cancelled'
+        # в WHERE) спасает только от race ДО claim; если AW пишет
+        # 'cancelled' ПОСЛЕ SELECT подзапроса, но ДО UPDATE захвата — наш
+        # SELECT уже прошёл, и мы захватили запись. Эта повторная проверка
+        # закрывает окно race.
+        cur_status = await fetchval(
+            f"SELECT status FROM {self._fq_table} WHERE id = %s",
+            user_msg_id,
+        )
+        if cur_status == "cancelled":
+            self.logger.info(
+                "user_stop_signal: skipping cancelled msg {} (chat={})",
+                user_msg_id, chat_id,
+            )
+            # Освобождаем claim (delete + убираем из _leases); статус уже
+            # 'cancelled' (AW поставил), не трогаем его.
+            await self._delete_claim(None, user_msg_id)
+            self._leases.discard(user_msg_id)
+            self._msg_ctx.pop(user_msg_id, None)
+            return False
+
+        content = row["content"] or ""
+
+        # user_stop_signal: /stop — priority command, должен пройти ДАЖЕ если
+        # chat_id уже active (активная задача — та, которую /stop отменяет).
+        is_stop_cmd = content.strip() == "/stop"
+
         # Не диспатчим, если из этого chat_id уже есть активное сообщение
         # в этом же процессе (в БД chat уже считается занятым, но защищаемся
         # от гонки между клеймом и фактическим диспатчем).
-        if chat_id in self._chat_inflight:
+        # Исключение: /stop — priority command, прерывает активный turn.
+        if chat_id in self._chat_inflight and not is_stop_cmd:
             await execute(
                 f"UPDATE {self._fq_table} SET status = 'pending', "
                 f"updated_at = NOW() WHERE id = %s",
@@ -1072,8 +1116,6 @@ class PostgresChannel(BaseChannel):
                 "Deferred msg {} from busy chat {}", user_msg_id, chat_id,
             )
             return False
-
-        content = row["content"] or ""
 
         raw_meta = _decode_jsonb(row["metadata"])
 
@@ -1091,29 +1133,38 @@ class PostgresChannel(BaseChannel):
         media_paths, _ = self._resolve_media_paths_and_hints(media)
         media = media_paths
 
-        # Создаём assistant-placeholder, чтобы Streamlit мог начать опрос
-        try:
-            assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id)
-            self._lifecycle_log(
-                "assistant_created", user_msg_id, chat_id=chat_id,
-                assistant_msg_id=assistant_msg_id,
-            )
-        except Exception:
-            self.logger.exception(
-                "Failed to insert assistant placeholder for {}", user_msg_id,
-            )
-            await execute(
-                f"UPDATE {self._fq_table} SET status = 'pending', "
-                f"updated_at = NOW() WHERE id = %s",
-                user_msg_id,
-            )
-            await self._delete_claim(None, user_msg_id)
-            self._leases.discard(user_msg_id)
-            return False
+        # Создаём assistant-placeholder, чтобы Streamlit мог начать опрос.
+        # /stop — не нужен placeholder (команда остановки, не ответ).
+        if is_stop_cmd:
+            assistant_msg_id = None
+        else:
+            try:
+                assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id)
+                self._lifecycle_log(
+                    "assistant_created", user_msg_id, chat_id=chat_id,
+                    assistant_msg_id=assistant_msg_id,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Failed to insert assistant placeholder for {}", user_msg_id,
+                )
+                await execute(
+                    f"UPDATE {self._fq_table} SET status = 'pending', "
+                    f"updated_at = NOW() WHERE id = %s",
+                    user_msg_id,
+                )
+                await self._delete_claim(None, user_msg_id)
+                self._leases.discard(user_msg_id)
+                return False
 
         await exchange.acquire_slot()
         exchange.add_inflight(user_msg_id)
-        self._chat_inflight.add(chat_id)
+        # /stop — priority command, не занимает chat_inflight-слот:
+        # это быстрая команда, которая не должна блокировать chat для
+        # последующих сообщений. Без этого /stop может зависнуть в
+        # processing и заблокировать chat навсегда.
+        if not is_stop_cmd:
+            self._chat_inflight.add(chat_id)
         self._msg_chat[user_msg_id] = chat_id
         self._activity_print(
             f"→ [task-worker] {self._worker_id} взял задачу {user_msg_id} "
@@ -1551,6 +1602,50 @@ class PostgresChannel(BaseChannel):
                 "resolver": ctx_meta.get("source"),
             },
         )
+
+        # user_stop_signal: проверяем, не был ли user-запрос отменён ПОКА
+        # LLM работал (от claim до finalize может пройти минута и более
+        # при длинных запросах). Если AW пометил user-сообщение как
+        # 'cancelled' — НЕ пишем ответ, освобождаем ресурсы. Status user'а
+        # НЕ трогаем (он уже 'cancelled' от AW).
+        cur_user_status = await fetchval(
+            f"SELECT status FROM {self._fq_table} WHERE id = %s",
+            user_msg_id,
+        )
+        if cur_user_status == "cancelled":
+            self.logger.info(
+                "user_stop_signal: dropping final response for cancelled user msg "
+                "{} (chat={}, assistant={})",
+                user_msg_id, chat_id, assistant_msg_id,
+            )
+            self._lifecycle_log(
+                "cancelled_drop", user_msg_id, chat_id=chat_id,
+                assistant_msg_id=assistant_msg_id,
+            )
+            # Удаляем assistant-заглушку (если была создана), claim, локальный
+            # контекст. Не трогаем user-строку — её уже пометил AW.
+            try:
+                await execute(
+                    f"DELETE FROM {self._fq_table} WHERE id = %s "
+                    f"AND role = 'assistant'",
+                    assistant_msg_id,
+                )
+            except Exception:
+                self.logger.warning(
+                    "user_stop_signal: failed to delete assistant placeholder {}",
+                    assistant_msg_id,
+                )
+            await self._delete_claim(None, user_msg_id)
+            self._msg_ctx.pop(user_msg_id, None)
+            self._leases.discard(user_msg_id)
+            self._release_slot(user_msg_id)
+            if chat_id:
+                self._drop_context_bridge(chat_id)
+            self._activity_print(
+                f"× [task-worker] {self._worker_id} отменил задачу {user_msg_id} "
+                f"(chat {chat_id}) [cancelled by user]"
+            )
+            return
 
         # Дописываем остатки рассуждений перед финальным ответом.
         # Делаем это ВНЕ финальной транзакции (race с _flush_reasoning
