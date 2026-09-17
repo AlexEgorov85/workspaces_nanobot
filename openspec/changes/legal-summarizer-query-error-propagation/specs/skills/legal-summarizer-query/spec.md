@@ -16,19 +16,35 @@ domain errors, and process failures.
 #### Scenario: Successful response
 - **WHEN** `cli_query.py` exits with `returncode = 0` AND writes a
   parseable JSON object with `status = "ok"` to stdout
-- **THEN** the wrapper SHALL return that JSON object as the tool result
-  with `status = "ok"` preserved
+- **THEN** the wrapper SHALL return the parsed JSON payload serialized as
+  a JSON string (UTF-8, `ensure_ascii=False`) in the same format as
+  existing successful tool responses, with `status = "ok"` preserved
 
 #### Scenario: Domain error with structured JSON
 - **WHEN** `cli_query.py` exits with `returncode != 0` AND writes a
-  parseable JSON object with `status = "error"` to stdout
-- **THEN** the wrapper SHALL return that JSON object as the tool result,
-  preserving `error_type`, `message`, and all structured fields
-- **AND** the wrapper SHALL NOT add its own generic error envelope on top
+  parseable JSON object whose top-level `status` field equals `"error"`
+- **THEN** the wrapper SHALL return the parsed JSON payload serialized as
+  a JSON string, preserving `error_type`, `message`, and all other
+  structured fields (for example `operation_id`, `version_observed`,
+  `path`)
+- **AND** the wrapper SHALL NOT add its own generic error envelope on
+  top
 
-#### Scenario: Process failure with invalid stdout
-- **WHEN** `cli_query.py` exits with `returncode != 0` AND stdout is empty
-  OR contains text that is not parseable as JSON
+#### Scenario: Non-error JSON on non-zero exit treated as process failure
+- **WHEN** `cli_query.py` exits with `returncode != 0` AND stdout is
+  parseable JSON that does NOT satisfy the domain-error shape
+  (missing top-level `status`, `status != "error"`, or stdout is a JSON
+  array instead of an object)
+- **THEN** the wrapper SHALL return its own error envelope with
+  `status = "error"` and `error_type = "cli_failed"`
+- **AND** the error message SHALL include the non-zero `returncode` and
+  the first fragment of `stderr` for diagnostics
+- **AND** the wrapper SHALL NOT propagate the unexpected JSON payload to
+  the caller as a success
+
+#### Scenario: Empty stdout on non-zero exit treated as process failure
+- **WHEN** `cli_query.py` exits with `returncode != 0` AND stdout is
+  empty
 - **THEN** the wrapper SHALL return its own error envelope with
   `status = "error"` and `error_type = "cli_failed"`
 - **AND** the error message SHALL include the non-zero `returncode` and
@@ -79,7 +95,11 @@ unsupported version) without leaking diagnostics through its return value.
   corrupted, or unsupported-version manifest, exactly as before
 - **AND** the new diagnostic capability SHALL be exposed through a
   separate function (e.g. `diagnose_manifest`) used only by
-  `cli_query.py`
+  `cli_query.py`. The diagnostic function SHALL return at most the
+  fields needed to build a CLI error envelope (`reason`, `path`,
+  `version_observed` when applicable) and SHALL NOT return the parsed
+  manifest contents, since those are not needed for diagnostics and may
+  be unavailable when the manifest is corrupted.
 
 ### Requirement: Documented semantics for chunks_total vs field=chunks
 The system SHALL document that `chunks_total` from the manifest and
@@ -95,7 +115,19 @@ partial-result files under `operation/chunks/*.json`.
 - **AND** `workspace/skills/legal_summarizer/SKILL.md` SHALL state
   explicitly that the two are independent sources
 
-### Requirement: Wrapper preserves existing non-process error types
+### Requirement: Wrapper passes through structured error fields unchanged
+The system SHALL preserve every top-level field of the CLI's domain-error
+JSON when propagating it through the tool wrapper.
+
+#### Scenario: Extra fields survive propagation
+- **WHEN** `cli_query.py` exits with `returncode != 0` AND stdout is a
+  JSON object with `status = "error"` and additional top-level fields
+  such as `operation_id`, `version_observed`, or `path`
+- **THEN** the wrapper's returned JSON string SHALL contain every one of
+  those fields with identical values, and SHALL NOT strip, rename, or
+  rewrap them
+
+
 The system SHALL keep the wrapper's pre-existing error types
 (`timeout`, `cli_not_found`, `subprocess_error`, `empty_response`,
 `invalid_json`) wired to the same code paths after the IPC change.

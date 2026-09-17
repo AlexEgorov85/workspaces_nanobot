@@ -41,9 +41,15 @@ IPC-контракт subprocess-boundary Tool↔CLI и снижает качес
   удаление `field=articles` — **не входят** в этот change (не доказано как
   дефект).
 
-**Никаких breaking changes для публичного API.** Контракт ошибок
-tool'а расширяется (новые `error_type`), существующие `cli_failed` остаются
-как fallback на невалидный stdout.
+**Schema и success-path публичного tool API не меняются.** `field` enum,
+`max_chunk_summary_chars` range, shape success-ответов, формат manifest v2 —
+всё остаётся прежним. Error contract tool'а расширяется: ранее скрытые
+доменные ошибки (`manifest_not_found` / `manifest_corrupted` /
+`manifest_unsupported_version`) становятся доступны вызывающему коду как
+отдельные `error_type`. Раньше все они схлопывались в обобщённый
+`cli_failed` (потому что wrapper выбрасывал stdout при non-zero exit).
+Сам `cli_failed` остаётся как fallback для настоящего process failure
+(невалидный stdout, неожиданный JSON-формат).
 
 ## Capabilities
 

@@ -41,11 +41,21 @@
 
 **Решение:** добавить новую функцию `diagnose_manifest(operation_id,
 workspace_root) -> dict` рядом с существующим `load_manifest()`,
-которая возвращает словарь с полями `reason` (`"not_found"` /
-`"corrupted"` / `"unsupported_version"` / `"ok"`) и, где применимо,
-`version_observed`, `path`, `raw` (для corrupted). Существующий
-`load_manifest()` остаётся без изменений (резюм-путь использует его как
-есть и не нуждается в различии причин).
+которая возвращает словарь с полями:
+
+- `reason`: `"ok"` / `"not_found"` / `"corrupted"` /
+  `"unsupported_version"`;
+- `path`: абсолютный путь к manifest-файлу (для диагностического
+  сообщения);
+- `version_observed`: `int | None`, заполняется только когда
+  `reason == "ok"` или `reason == "unsupported_version"` и значение
+  удалось прочитать как int.
+
+`raw` (содержимое manifest) **не возвращается**: для `corrupted`
+получить его невозможно, для остальных случаев CLI он не нужен для
+формирования error envelope. Существующий `load_manifest()` остаётся без
+изменений (резюм-путь использует его как есть и не нуждается в различии
+причин).
 
 **Альтернативы:**
 
@@ -76,20 +86,29 @@ workspace_root) -> dict` рядом с существующим `load_manifest()
   `_detect_version` — дублирует логику loader'а и расходится с ним при
   правках.
 
-### D3. Сначала парсить stdout, потом returncode в wrapper
+### D3. Сначала парсить stdout при non-zero exit, со строгим `status == "error"`
 
 **Решение:** в `legal_summarizer_query.py.execute` после `subprocess.run`
-**сначала** попытаться распарсить stdout как JSON (даже если
-`returncode != 0`). Если stdout — валидный JSON-объект с `status` —
-вернуть его как есть. Только если stdout пустой или невалидный JSON —
-вернуть `cli_failed` со stderr-фрагментом.
+при `returncode != 0` сначала попытаться распарсить stdout как JSON.
+Если stdout — JSON-объект, у которого top-level `status == "error"` —
+вернуть его как JSON-строку без модификаций (все поля сохранены).
+В **любом другом** случае (stdout пустой, stdout не JSON,
+stdout — JSON-массив, JSON-объект без поля `status`, JSON-объект с
+`status != "error"`) — вернуть собственный envelope `cli_failed` со
+stderr-фрагментом. Это сужает «проброс» строго до доменной ошибки и
+защищает от случайного `exit 1 + {"status":"ok"}` или
+`exit 1 + []`.
 
 Конкретный поток:
 
 ```text
 if returncode != 0:
     parsed = safe_json(stdout)
-    if parsed is not None and isinstance(parsed, dict) and "status" in parsed:
+    if (
+        parsed is not None
+        and isinstance(parsed, dict)
+        and parsed.get("status") == "error"
+    ):
         return json.dumps(parsed, ensure_ascii=False)
     return self._error("cli_failed", ...)
 
@@ -106,11 +125,13 @@ except JSONDecodeError:
 **Альтернативы:**
 
 - Оставить прежний порядок (returncode → stdout) — текущий баг.
-- Парсить stdout **всегда** и игнорировать `returncode` полностью — плохо:
-  настоящий process failure (segfault, OOM kill) не имеет structured
-  JSON, и мы теряем сигнал «CLI вообще упал».
+- Принимать любой `status in parsed` без проверки значения — поймает
+  `{"status":"ok"}` на non-zero exit как success, что нарушает контракт.
+- Парсить stdout **всегда** и игнорировать `returncode` полностью —
+  плохо: настоящий process failure (segfault, OOM kill) не имеет
+  structured JSON, и мы теряем сигнал «CLI вообще упал».
 
-### D4. Не вводить поле `error_type` дополнительно к доменным
+### D4. Не вводить поле `error_type` дополнительно к доменным + pass-through полей
 
 **Решение:** доменные ошибки (`manifest_not_found` и т.п.) уже имеют
 `error_type` в stdout JSON от CLI — wrapper просто пробрасывает поле
@@ -119,6 +140,10 @@ except JSONDecodeError:
 только для настоящих wrapper-уровневых ошибок (`cli_failed`,
 `timeout`, `cli_not_found`, `subprocess_error`, `empty_response`,
 `invalid_json`).
+
+Pass-through означает: wrapper сериализует CLI-envelope **as is**, не
+фильтруя поля. `operation_id`, `version_observed`, `path`, `message` и
+любые будущие поля доходят до агента без переименования и обёртки.
 
 **Альтернативы:**
 
@@ -144,9 +169,8 @@ except JSONDecodeError:
 
 - **[Дополнительный I/O в CLI]**: `cli_query.py` теперь делает два
   обращения к manifest (диагностика + нормализация). На локальной FS это
-  +1 read, ниже микросекунды, несущественно. → Митигация: при
-  успешной диагностике (`reason="ok"`) второй шаг может использовать
-  уже прочитанный `raw` — оптимизация по желанию, не блокер.
+  +1 read, ниже микросекунды, несущественно. Оптимизация чтения —
+  отдельная задача, **не входит** в этот change.
 - **[Рост surface у `_detect_version`]**: сейчас возвращает `None` или
   `MANIFEST_VERSION_V2`. Диагностическая функция должна различить
   «нет version field» и «version != 2» — формально это два разных
