@@ -11,7 +11,7 @@ stale) и:
   * печатает multi-line резюме в **stderr** — оператор gateway видит
     состояние vector-индексов сразу в терминале;
   * пишет одно событие в ``public.agent_gateway_logs`` через
-    ``workspace.utils.event_log.emit_sync_event`` — для последующего
+    ``DbLoggingService.try_log_event`` — для последующего
     grep / SQL / CI-алёртов.
 
 Legacy-методы ``preload_audit_cache`` / ``background_audit_cache_refresh``
@@ -40,25 +40,29 @@ def _emit_health_event(
     level: str,
     service: Any | None,
 ) -> None:
-    """Один-в-one dual-sink emit в ``agent_gateway_logs`` + logger.
+    """Один-в-one emit в ``agent_gateway_logs`` через ``DbLoggingService``.
 
-    Через ``emit_sync_event`` (workspace.utils.event_log) → если сервис
-    живёт, пишет в PG; иначе fallback в record_sync_event. Если и
-    fallback не сработает — тишина (publish/health-summary не должны
-    валить startup). Все ошибки глотаются.
+    Единственный writer — ``DbLoggingService`` (через
+    :func:`lib.services.db_logging_service.try_log_event`).
     """
-    try:
-        from workspace.utils.event_log import emit_sync_event
+    from lib.services.db_logging_service import LogEvent, try_log_event
 
-        emit_sync_event(
-            event_type="vector_index_preload_health",
-            summary=summary,
-            payload=payload,
-            level=level,
-            service=service,
-        )
-    except Exception as exc:  # noqa: BLE001 — emit не должен валить preload
-        logger.debug("health event emit failed: %s", exc)
+    log_event = LogEvent(
+        event_type="vector_index_preload_health",
+        level=level,
+        session_id="gateway:sync",
+        channel=None,
+        actor="sync",
+        name="vector_index_preload_health",
+        summary=summary,
+        payload=payload,
+    )
+    try_log_event(
+        service,
+        log_event,
+        producer="PreloadService",
+        event_type="vector_index_preload_health",
+    )
 
 
 def _format_lines(

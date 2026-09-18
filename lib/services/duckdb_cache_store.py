@@ -53,25 +53,27 @@ def _emit_sync_event(
 ) -> None:
     """Тонкая обёртка для sync-событий в ``agent_gateway_logs``.
 
-    Делегирует единому dual-sink helper'у ``emit_sync_event`` из
-    ``workspace.utils.event_log``: через ``service`` (``DbLoggingService``),
-    если он передан и запущен, иначе — синхронный fallback
-    ``record_sync_event``. Так publish-события и события
-    ``PgDuckDbSyncService`` пишутся одним конвейером (единая точка правды).
-    Все ошибки глотаются — publish не должен падать из-за логирования.
+    Единственный writer — ``DbLoggingService`` (через
+    :func:`lib.services.db_logging_service.try_log_event`).
     """
-    try:
-        from workspace.utils.event_log import emit_sync_event
+    from lib.services.db_logging_service import LogEvent, try_log_event
 
-        emit_sync_event(
-            event_type=event_type,
-            summary=summary,
-            payload=payload,
-            level=level,
-            service=service,
-        )
-    except Exception:
-        pass
+    log_event = LogEvent(
+        event_type=event_type,
+        level=level,
+        session_id="gateway:sync",
+        channel=None,
+        actor="sync",
+        name=event_type,
+        summary=summary,
+        payload=payload,
+    )
+    try_log_event(
+        service,
+        log_event,
+        producer="DuckDbCacheStore",
+        event_type=event_type,
+    )
 
 # DuckDB не поддерживает TO_CHAR(date, 'Month') — переписываем в strftime
 # (общая логика — в lib.utils.duckdb_query.rewrite_duck_sql).
@@ -250,7 +252,7 @@ class DuckDbCacheStore:
         # Единый sink для sync-событий (publish OK/empty/failed): тот же
         # ``DbLoggingService``, что использует ``PgDuckDbSyncService``, — чтобы
         # все события одного sync-пути шли одним конвейером (см.
-        # ``_emit_sync_event`` / ``workspace.utils.event_log.emit_sync_event``).
+        # ``_emit_sync_event`` через ``DbLoggingService.try_log_event``).
         # ``None`` (например, в юнит-тестах) → синхронный fallback
         # ``record_sync_event``.
         self._db_logging_service = db_logging_service

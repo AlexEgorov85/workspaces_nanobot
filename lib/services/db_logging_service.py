@@ -595,9 +595,9 @@ class DbLoggingService:
         При отсутствии сервиса caller должен использовать
         :func:`DbLoggingService.try_log_event` (defensive helper), который
         даёт no-op for business + operational WARNING, без fallback INSERT
-        в ``agent_gateway_logs``. Старый sync-fallback (ранее
-        ``record_sync_event`` в модуле ``workspace.utils.event_log``)
-        ликвидирован change'ом ``unify-agent-event-logging-pipeline``.
+        в ``agent_gateway_logs``. Старый sync-fallback (helper в модуле
+        ``event_log`` утилит workspace, удалён change'ом
+        ``unify-agent-event-logging-pipeline``).
         """
         return self.log_event(LogEvent(
             event_type=event_type,

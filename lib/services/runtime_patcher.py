@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys as _sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -479,6 +480,8 @@ class RuntimePatcher:
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
         self._record(report, "context_bridge_seed", self.patch_context_bridge_seed(agent))
         self._record(report, "async_save", self.patch_async_session_saves(agent))
+        self._record(report, "session_dir_watch", self.patch_session_dir_watch(
+            agent, workspace_dir))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager))
         self._record(report, "project_tools", self.patch_project_tools(
@@ -1028,6 +1031,113 @@ class RuntimePatcher:
         sessions.save = _wrapped_save
         sessions._async_save_executor = executor
         return True, "agent.sessions.save wrapped with background executor"
+
+    # ------------------------------------------------------------------
+    # Патч 1d-bis: диагностическое логирование пропавшего sessions_dir
+    # ------------------------------------------------------------------
+
+    def patch_session_dir_watch(
+        self, agent: Any, workspace_dir: Any
+    ) -> tuple[bool, str]:
+        """Снять показания вокруг ``SessionManager.save`` для расследования.
+
+        Временный диагностический патч: ошибки вида
+        ``FileNotFoundError: ...sessions/<key>.jsonl.tmp`` на ``open("w")``
+        означают, что ``self.sessions_dir`` исчез между конструктором
+        ``SessionManager`` и моментом ``save``. Чтобы подтвердить или
+        опровергнуть гипотезу, оборачиваем ``save`` так, чтобы он:
+
+          * непосредственно перед делегированием в ``original`` фиксировал
+            наличие ``self.sessions_dir`` (через ``is_dir()`` + ``stat().st_mtime``);
+          * при ошибке ``FileNotFoundError`` в ``open(tmp_path, "w")`` логировал
+            полную картину: ``self.sessions_dir``, ``tmp_path.parent``,
+            ``os.getcwd()``, ``os.listdir(self.sessions_dir.parent)`` (если
+            parent существует) — этого достаточно, чтобы понять, удалили
+            папку, переименовали workspace, или проблема в антивирусе.
+
+        Поведение ``save`` НЕ меняется: мы только читаем состояние ДО вызова
+        и логируем при ошибке. Никаких ``mkdir``, никаких повторов.
+
+        Гейт: запускается только если в ``settings.gateway.runtime_diagnostics``
+        есть ``session_dir_watch: true``. По умолчанию выключено — патч не
+        нужен в проде, только для расследования.
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+        """
+        try:
+            import config as _config
+            full_settings = getattr(_config, "SETTINGS", None)
+            diagnostics = (
+                (full_settings.get("gateway", {}) or {}).get("runtime_diagnostics", {})
+                if full_settings is not None else {}
+            )
+        except Exception:
+            diagnostics = {}
+
+        if not diagnostics.get("session_dir_watch"):
+            return False, "gateway.runtime_diagnostics.session_dir_watch != true"
+
+        if agent is None:
+            return False, "agent is None"
+        sessions = getattr(agent, "sessions", None)
+        if sessions is None:
+            return False, "agent.sessions is missing"
+        original = getattr(sessions, "save", None)
+        if original is None:
+            return False, "agent.sessions.save is missing"
+        if getattr(sessions, "_session_dir_watch_patched", False):
+            return False, "already patched"
+
+        sessions_dir = getattr(sessions, "sessions_dir", None)
+
+        def _snapshot_state() -> dict[str, Any]:
+            try:
+                exists = bool(sessions_dir.is_dir()) if sessions_dir is not None else False
+            except OSError as exc:
+                return {"sessions_dir": str(sessions_dir), "is_dir_error": repr(exc)}
+            try:
+                mtime = sessions_dir.stat().st_mtime if exists else None
+            except OSError as exc:
+                mtime = f"stat_error:{exc!r}"
+            return {
+                "sessions_dir": str(sessions_dir),
+                "exists": exists,
+                "mtime": mtime,
+            }
+
+        def _wrapped_save(session: Any, fsync: bool = False) -> Any:
+            pre = _snapshot_state()
+            try:
+                return original(session, fsync=fsync)
+            except FileNotFoundError as exc:
+                post = _snapshot_state()
+                try:
+                    parent_listing = (
+                        sorted(os.listdir(str(sessions_dir.parent)))
+                        if sessions_dir is not None and sessions_dir.parent.exists()
+                        else None
+                    )
+                except OSError as exc2:
+                    parent_listing = f"listdir_error:{exc2!r}"
+                logger.error(
+                    "session_dir_watch: FileNotFoundError на save: "
+                    "sessions_dir.exists={pre_exists}->{post_exists}, "
+                    "cwd={cwd}, parent_listing={parent_listing}, "
+                    "session_key={key}, "
+                    "original_error={err!r}",
+                    pre_exists=pre.get("exists"),
+                    post_exists=post.get("exists"),
+                    cwd=os.getcwd(),
+                    parent_listing=parent_listing,
+                    key=getattr(session, "key", "<unknown>"),
+                    err=exc,
+                )
+                raise
+
+        sessions.save = _wrapped_save
+        sessions._session_dir_watch_patched = True
+        return True, "agent.sessions.save wrapped with diagnostic logging"
 
     @staticmethod
     def _bump_schema_max(cls: Any, names: tuple, maximum: int) -> bool:
@@ -1815,6 +1925,8 @@ class RuntimePatcher:
                 ctx._settings_ref = settings
             if cache_store is not None:
                 ctx._cache_store_ref = cache_store
+            if db_logging_service is not None:
+                ctx._db_logging_service = db_logging_service
             if db_logging_service is not None:
                 ctx._db_logging_service = db_logging_service
 
