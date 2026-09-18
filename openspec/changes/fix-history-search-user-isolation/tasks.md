@@ -40,10 +40,20 @@ non-goals — в `proposal.md`; архитектурные решения — в
       `_request_index_lock`) обновлять обе записи индекса.
       Никакого публичного API для чтения user_id — только
       `_enqueue` имеет право заглядывать в индекс.
-- [ ] 2.4 Тот же файл, `_enqueue`: перед `put_nowait`, если
-      `event.user_id is None` и `event.session_id` в индексе —
-      подтянуть `event.user_id = entry["user_id"]`. Явное
-      значение producer'а имеет приоритет.
+- [ ] 2.4 Тот же файл, `_enqueue`: реализовать три ветви
+      (см. design.md «Logging propagation»):
+      ```python
+      if event.user_id is not None:
+          pass  # Explicit value wins
+      elif event.request_id is not None and event.session_id is not None:
+          entry = self._request_index.get(event.session_id)
+          if entry and entry["request_id"] == event.request_id:
+              event.user_id = entry["user_id"]
+      # else: event.user_id остаётся None
+      ```
+      Matching идёт **только по `event.request_id == entry["request_id"]`**,
+      НЕ по `session_id` alone. Явное значение producer'а имеет
+      приоритет.
 - [ ] 2.5 Тот же файл, `_insert_batch`: расширить INSERT —
       добавить `user_id` в список колонок (порядок: id, level,
       event_type, user_id, session_id, channel, actor, summary,
@@ -52,17 +62,30 @@ non-goals — в `proposal.md`; архитектурные решения — в
       - `test_log_event_user_id_reaches_insert` —
         мок `utils.db.run`/`execute_batch` фиксирует, что
         `LogEvent(user_id="alice")` доходит до INSERT.
-      - `test_enqueue_fills_user_id_from_request_index`:
-        register_request → enqueue пустого `user_id` →
-        INSERT содержит `user_id`.
+      - `test_enqueue_fills_user_id_when_request_id_matches`:
+        register_request → enqueue пустого `user_id` с тем же
+        `request_id` → INSERT содержит `user_id`.
       - `test_explicit_user_id_overrides_index`: register
         alice, enqueue с `user_id="bob"` → INSERT = "bob".
-      - `test_register_request_is_atomic_for_session_key`:
-        register A/alice, register B/bob → enqueue пустого
-        `user_id` под session_key=B → INSERT содержит "bob".
+      - `test_stale_event_does_not_inherit_next_request_user_id`:
+        register A/alice, создать LogEvent(request_id=A,
+        user_id=None) **до повторного register_request**;
+        register B/bob; затем _enqueue того же события
+        → INSERT содержит `user_id IS NULL`, НЕ "bob".
+        **Это primary logging-security тест, без него change
+        не считается готовой.**
+      - `test_event_without_request_id_does_not_inherit_user_id`:
+        register alice → enqueue `LogEvent(request_id=None,
+        session_id=telegram:123, user_id=None)` → INSERT
+        содержит `user_id IS NULL`.
+      - `test_register_request_updates_pair_atomically`:
+        mock с thread: параллельный reader индекса во время
+        `register_request` B/bob видит либо полностью A/alice,
+        либо полностью B/bob — не смесь.
       - `test_no_public_get_request_user_id`: проверить, что у
         `DbLoggingService` нет публичного метода
-        `get_request_user_id` (или эквивалента).
+        `get_request_user_id` (или эквивалента вроде
+        `lookup_user_id`/`resolve_user_id`).
 
 ## 3. history_search: фильтрация и жёсткий отказ
 
@@ -165,6 +188,18 @@ non-goals — в `proposal.md`; архитектурные решения — в
       `unify-agent-event-logging-pipeline` (нет прямого INSERT в
       `agent_gateway_logs` вне `DbLoggingService`): остаётся
       зелёным — никаких изменений в single-writer invariant.
+- [ ] 5.4 Новый contract-тест
+      `tests/contract/test_history_search_identity_contract.py`:
+      импортирует `nanobot.agent.tools.context.RequestContext`,
+      проверяет наличие поля `sender_id` с типом `str | None`
+      через `dataclasses.fields()`. Тест НЕ правит существующий
+      `tests/contract/test_tools_and_context.py` — это наш
+      dependency contract, фиксирующий использование
+      `RequestContext.sender_id` как identity-store. Если в
+      будущей версии nanobot поле будет переименовано —
+      адаптация делается через alias в `_current_user_id()`,
+      а этот тест переписывается в том же change, который
+      обновляет nanobot-зависимость.
 
 ## 6. Фикстуры и сценарии
 
@@ -229,6 +264,9 @@ non-goals — в `proposal.md`; архитектурные решения — в
       primary + supplementary guards зелёные.
 - [ ] 8.7 `pytest tests/` — никакой регрессии в смежных
       подсистемах.
+- [ ] 8.7a `pytest tests/contract/test_history_search_identity_contract.py`
+      — contract-тест на наличие `RequestContext.sender_id`
+      зелёный.
 - [ ] 8.8 `openspec.cmd validate fix-history-search-user-isolation`
       → «valid».
 - [ ] 8.9 Smoke `python cli_agent.py --profile=test --smoke` →
@@ -244,8 +282,16 @@ non-goals — в `proposal.md`; архитектурные решения — в
 - [ ] `LogEvent.user_id` доходит до INSERT (single-writer).
 - [ ] `_request_index` хранит пару `{request_id, user_id}`,
       обновляется атомарно.
-- [ ] `_enqueue` автозаполняет `user_id` из индекса, явное
-      значение приоритетнее.
+- [ ] `_enqueue` автозаполняет `user_id` из индекса **только
+      при совпадении `event.request_id == entry["request_id"]`**;
+      explicit value побеждает; event без `request_id` не
+      получает user_id из индекса.
+- [ ] Регрессионный тест stale event
+      (`test_stale_event_does_not_inherit_next_request_user_id`)
+      зелёный — это primary logging-security acceptance.
+- [ ] Contract-тест `RequestContext.sender_id` зелёный
+      (наш dependency contract, не правящий чужой
+      `test_tools_and_context.py`).
 - [ ] Нет публичного `get_request_user_id()`.
 - [ ] `session_scope="current"` фильтрует по `session_id`,
       `user_id` не участвует.
