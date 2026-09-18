@@ -1,48 +1,121 @@
-# Runtime Context
+# Контекст Runtime
 
-## Purpose
-Define the boundary between `ApplicationContext` (long-lived shared infrastructure) and per-session/per-execution state. The boundary ensures runtime infrastructure does not accumulate ephemeral data and that lifecycle transitions are deterministic.
+## Назначение
 
-## Source of Truth
+Определяет границу между `ApplicationContext` (долгоживущая общая инфраструктура) и состоянием на уровне сессии/выполнения. Граница гарантирует, что runtime-инфраструктура не накапливает эфемерные данные, а переходы жизненного цикла детерминированы.
 
-- Permanent invariants: `docs/TARGET_ARCHITECTURE.md` (`ApplicationContext` section).
-- Implementation: `docs/ARCHITECTURE.md` (descriptive).
+## Источник истины
 
-## Requirements
+- Нормативные инварианты: `docs/TARGET_ARCHITECTURE.md` (раздел `ApplicationContext`).
+- Реализация: `docs/ARCHITECTURE.md` (описательный).
 
-### Requirement: Single shared infrastructure root
+## Ответственность
 
-The system SHALL expose `ApplicationContext` as the single assembly point for runtime services.
+Компонент отвечает за:
+- предоставление единого корня сборки runtime-сервисов;
+- координацию жизненного цикла компонентов;
+- разделение общей инфраструктуры и сессионных данных.
 
-#### Scenario: Services wired through ApplicationContext
+## Граница
 
-- **WHEN** a runtime service is needed
-- **THEN** it SHALL be obtained through `ApplicationContext` or its documented accessor, not constructed ad hoc.
+Владеет:
+- сборкой runtime-сервисов;
+- координацией жизненного цикла.
 
-### Requirement: Session state lives outside ApplicationContext
+Может зависеть от:
+- инфраструктурных сервисов;
+- фабрик компонентов.
 
-The system SHALL store per-session state (messages, metadata, per-turn deltas) in `PGSessionManager` or the channel layer, NOT in `ApplicationContext`.
+Не должен зависеть от:
+- конкретных реализаций Skills;
+- сессионно-зависимых данных;
+- состояния сообщений сессии.
 
-#### Scenario: Session lookup
+## Публичный контракт
 
-- **WHEN** session metadata is required
-- **THEN** the system SHALL read it from `PGSessionManager`, not from `ApplicationContext` attributes.
+- `ApplicationContext.create()` — точка входа для сборки приложения.
+- `ctx.get_service(name)` — доступ к сервисам.
+- `ctx.start()` / `ctx.stop()` — управление жизненным циклом.
 
-### Requirement: Deterministic lifecycle
+## Входы
 
-The system SHALL define a deterministic `ctx.start()` / `ctx.stop()` lifecycle whose ordering SHALL NOT depend on the caller or on the active profile.
+- Конфигурация runtime-сервисов.
+- Запросы на получение сервисов.
 
-#### Scenario: Independent lifecycle
+## Выходы
 
-- **WHEN** two callers invoke `ctx.start()` concurrently
-- **THEN** the resulting lifecycle ordering SHALL be deterministic and SHALL NOT vary between runs.
+- Инициализированные runtime-сервисы.
+- Детерминированный жизненный цикл.
 
-## Negative Requirements
+## Состояние
 
-The system SHALL NOT:
+Хранит ссылки на runtime-сервисы. НЕ хранит:
+- сообщения сессии;
+- метаданные сессии;
+- состояние на уровень вопроса.
 
-- store per-session data on `ApplicationContext` (its lifetime outlives any single session).
-- store runtime-wide configuration on a session or message object.
-- introduce a parallel application context (no `ApplicationContext2`, no shadow registry, no override mechanism).
-- introduce a fallback application-context path (no `try_new` then `legacy_new`).
-- add a profile-specific branch in `ApplicationContext` (per `openspec/specs/configuration/profiles/spec.md`, profile is resolved at config time, business logic SHALL NOT branch on profile).
+## Зависимости
+
+- `ConfigService` — конфигурация.
+- `AgentFactory` — фабрика агентов.
+- Инфраструктурные сервисы (channels, cache, sessions).
+
+## Конфигурация
+
+- Конфигурация считывается из `SETTINGS` после разрешения профиля.
+- Не содержит ветвлений по профилю в бизнес-логике.
+
+## Жизненный цикл
+
+1. `ApplicationContext.create()` — создание и сборка сервисов.
+2. `ctx.start()` — инициализация сервисов в детерминированном порядке.
+3. `ctx.stop()` — остановка сервисов в обратном порядке.
+
+Жизненный цикл НЕ зависит от вызывающей стороны или активного профиля.
+
+## Владение данными
+
+Владеет ссылками на runtime-сервисы. Не владеет сессионными данными.
+
+## Поведение при ошибке
+
+- Ошибки инициализации должны прерывать запуск приложения.
+- Ошибки остановки должны логироваться, но не прерывать shutdown.
+
+## Инварианты
+
+- `ApplicationContext` — единственный корень сборки runtime.
+- Сессионное состояние хранится вне `ApplicationContext`.
+- Порядок жизненного цикла детерминирован.
+
+## Запрещённое поведение
+
+Компонент НЕ ДОЛЖЕН:
+- хранить сессионные данные на `ApplicationContext` (его время жизни превышает любую отдельную сессию).
+- хранить runtime-wide конфигурацию на сессии или сообщении.
+- вводить параллельный контекст приложения (никаких `ApplicationContext2`, shadow registry, override mechanism).
+- вводить обходной путь контекста приложения (никаких `try_new` затем `legacy_new`).
+- добавлять ветвление по профилю в `ApplicationContext` (согласно `openspec/specs/configuration/profiles/spec.md`, профиль разрешается во время конфигурации, бизнес-логика НЕ ДОЛЖНА ветвиться по профилю).
+
+## Потребители
+
+- `AgentFactory`
+- Channels (PostgresChannel, RedisChannel)
+- Session managers
+- Services (CacheProvider, VectorIndexService, DbLoggingService)
+
+## Реализация
+
+Основная реализация:
+- `lib/core/application_context.py:ApplicationContext`
+
+Связанные компоненты:
+- `lib/core/agent_factory.py:AgentFactory`
+- `lib/services/config_service.py:ConfigService`
+- `lib/session/pg_session_manager.py:PGSessionManager`
+
+## Проверка
+
+- Архитектурные тесты: проверка отсутствия сессионных данных в ApplicationContext.
+- Тесты жизненного цикла: проверка детерминированности порядка start/stop.
+- Code review: проверка отсутствия ветвлений по профилю.

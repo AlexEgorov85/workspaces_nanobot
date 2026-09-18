@@ -1,57 +1,125 @@
-# Vector Indexes
+# VectorIndexService
 
-## Purpose
-Define the logical model for vector indexes: configuration source, index lifecycle, Skill/service access, and failure behavior. Vector indexes are managed centrally and exposed through `CacheProvider.search_vector`.
+## Назначение
 
-## Source of Truth
+Определяет логическую модель для векторных индексов: источник конфигурации, жизненный цикл индексов, доступ Skills/сервисов и поведение при ошибках. Векторные индексы управляются централизованно и предоставляются через `CacheProvider.search_vector`.
 
-- Permanent invariants: `docs/TARGET_ARCHITECTURE.md` (Vector section).
-- Implementation: `docs/VECTOR_INDEXES.md` and `lib/services/vector_index_service.py` (descriptive).
+## Источник истины
 
-## Requirements
+- Нормативные инварианты: `docs/TARGET_ARCHITECTURE.md` (раздел Vector).
+- Реализация: `docs/VECTOR_INDEXES.md` и `lib/services/vector_index_service.py` (описательный).
 
-### Requirement: Single configuration source
+## Ответственность
 
-The system SHALL read vector index configuration from `gateway.vector.index.indexes.*` in `project.json` only.
+Компонент отвечает за:
+- управление конфигурацией векторных индексов;
+- сборку FAISS-индексов;
+- предоставление единого интерфейса векторного поиска;
+- регистрацию таблиц хранения векторов.
 
-#### Scenario: Index configuration
+## Граница
 
-- **WHEN** a vector index is added or modified
-- **THEN** its declaration SHALL live under `gateway.vector.index.indexes.<name>` in `project.json`.
+Владеет:
+- конфигурацией векторных индексов в `project.json`.
+- FAISS индексами в `<default_root>/<index_name>`.
+- Таблицей хранения векторов.
 
-### Requirement: Storage table registered through infra API
+Может зависеть от:
+- `CacheProvider` для доступа к поиску.
+- Конфигурации `gateway.vector.index.*`.
 
-The system SHALL persist vector embeddings in the table registered via `lib.core.infra_registration.register_vector_storage`.
+Не должен зависеть от:
+- Прямого доступа Skills к FAISS индексам.
+- Legacy таблицы `public.agent_vector_index_config`.
 
-#### Scenario: Vector storage table
+## Публичный контракт
 
-- **WHEN** `gateway.vector.index.storage_table` is set
-- **THEN** that table SHALL be registered through `register_vector_storage` so that `TableRegistry` knows about it for sync.
+- `VectorIndexService.build_index(index_name)` — сборка индекса.
+- `CacheProvider.search_vector(index_name, query, top_k)` — поиск по индексу.
+- Регистрация через `register_vector_storage(table_name)`.
 
-### Requirement: FAISS-backed
+## Входы
 
-The system SHALL build vector indexes using FAISS, invoked through `tools/build_vectors.py` and `lib/services/vector_index_service.py`.
+- Конфигурация из `gateway.vector.index.indexes.*`.
+- Данные для индексирования.
+- Запросы на векторный поиск.
 
-#### Scenario: Index build
+## Выходы
 
-- **WHEN** a vector index is built
-- **THEN** the FAISS index SHALL be persisted under `<gateway.vector.index.default_root>/<index_name>` and SHALL be loaded on demand at query time.
+- FAISS индексы в файловой системе.
+- Результаты векторного поиска.
 
-### Requirement: Single access path
+## Состояние
 
-The system SHALL expose vector search exclusively through `CacheProvider.search_vector`.
+Хранит:
+- Загруженные FAISS индексы в памяти (on demand).
+- Пути к индексам в файловой системе.
 
-#### Scenario: Skill performs vector search
+## Зависимости
 
-- **WHEN** a Skill needs a vector similarity query
-- **THEN** it SHALL call `CacheProvider.search_vector` and SHALL NOT load FAISS indexes directly.
+- `CacheProvider` — единая точка доступа к поиску.
+- FAISS библиотека.
+- PostgreSQL таблица хранения векторов.
+- Конфигурация `project.json::gateway.vector.index.*`.
 
-## Negative Requirements
+## Конфигурация
 
-The system SHALL NOT:
+- `gateway.vector.index.indexes.<name>` — декларация индексов.
+- `gateway.vector.index.storage_table` — таблица хранения.
+- `gateway.vector.index.default_root` — корневой путь к индексам.
 
-- read vector index configuration from the legacy `public.agent_vector_index_config` table (kept for historical reference only; not authoritative).
-- introduce a second vector storage backend alongside FAISS without an explicit OpenSpec change.
-- silently fall back to a non-FAISS backend on FAISS errors.
-- bypass `CacheProvider.search_vector` from Skill code.
-- read the legacy `gateway.vector_index.*` configuration key (removed; runtime-mute if present).
+## Жизненный цикл
+
+1. Чтение конфигурации из `project.json`.
+2. Регистрация таблицы хранения через `register_vector_storage`.
+3. Сборка индекса через `tools/build_vectors.py`.
+4. Сохранение FAISS индекса в `<default_root>/<index_name>`.
+5. Загрузка индекса on demand при поиске.
+
+## Владение данными
+
+Владеет конфигурацией индексов и путями к FAISS файлам.
+
+## Поведение при ошибке
+
+- Ошибка чтения конфигурации: fail fast, нет fallback на legacy table.
+- Ошибка FAISS: возврат ошибки, нет silent fallback на non-FAISS backend.
+- Ошибка поиска: возврат ошибки потребителю.
+
+## Инварианты
+
+- Конфигурация читается только из `project.json::gateway.vector.index.indexes.*`.
+- Хранение векторов зарегистрировано через `register_vector_storage`.
+- Единый доступ через `CacheProvider.search_vector`.
+- FAISS — единственный бэкенд.
+
+## Запрещённое поведение
+
+Система НЕ ДОЛЖНА:
+- читать конфигурацию векторных индексов из legacy таблицы `public.agent_vector_index_config` (оставлена для исторической справки, не авторитетна).
+- вводить второй бэкенд векторного хранилища помимо FAISS без явного OpenSpec change.
+- молча fallback на non-FAISS backend при ошибках FAISS.
+- обходить `CacheProvider.search_vector` из кода Skills.
+- читать legacy ключ конфигурации `gateway.vector_index.*` (удалён; runtime-mute если присутствует).
+
+## Потребители
+
+- Skills (через `CacheProvider.search_vector`).
+- audit_analyzer Skill.
+- legal_summarizer Skill.
+
+## Реализация
+
+Основная реализация:
+- `lib/services/vector_index_service.py:VectorIndexService`
+- `tools/build_vectors.py` — сборка индексов.
+
+Связанные компоненты:
+- `lib/services/cache_provider.py:CacheProvider`
+- `lib/core/infra_registration.py:register_vector_storage`
+
+## Проверка
+
+- Архитектурные тесты: проверка отсутствия прямого доступа к FAISS из Skills.
+- Тесты конфигурации: проверка чтения только из `project.json`.
+- Code review: проверка отсутствия legacy configuration keys.

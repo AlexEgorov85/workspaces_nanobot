@@ -1,49 +1,108 @@
-# Skill / Tool Boundary
+# Граница Skill / Tool
 
-## Purpose
-Define the architectural boundary between Skills (project-specific agent capabilities) and Tools (generic infrastructure). The boundary keeps domain logic in Skills and reusable plumbing in Tools.
+## Назначение
 
-## Source of Truth
+Определяет архитектурную границу между Skills (предметные возможности агента проекта) и Tools (универсальная инфраструктура). Граница сохраняет предметную логику в Skills и переиспользуемую инфраструктуру в Tools.
 
-- Permanent invariants: `docs/TARGET_ARCHITECTURE.md` (skill/tool boundary principles).
-- Implementation details: `docs/skill-tool-architecture.md` (descriptive, not normative).
-- Authoring guide: `docs/SKILL_AUTHORING.md`.
+## Источник истины
 
-## Requirements
+- Нормативные инварианты: `docs/TARGET_ARCHITECTURE.md` (принципы границы skill/tool).
+- Детали реализации: `docs/skill-tool-architecture.md` (описательный, не нормативный).
+- Руководство по созданию: `docs/SKILL_AUTHORING.md`.
 
-### Requirement: Skill layer holds domain logic
+## Ответственность
 
-The system SHALL keep project-specific domain logic inside the Skill layer (`workspace/skills/<name>/`).
+Компонент отвечает за:
+- разделение предметной логики и универсальной инфраструктуры;
+- независимую разработку Skills и Tools;
+- предотвращение циклических зависимостей между слоями.
 
-#### Scenario: Skill implements its own scripts
+## Граница
 
-- **WHEN** a Skill needs domain logic (e.g., SQL composition, output formatting, skill-specific orchestration)
-- **THEN** that logic SHALL live in `workspace/skills/<name>/scripts/` and SHALL NOT be re-implemented as a generic Tool.
+Владеет:
+- определением архитектурного правила разделения слоёв.
 
-### Requirement: Tool layer holds generic infrastructure
+Может зависеть от:
+- механизма tool-call для взаимодействия Skills и Tools.
 
-The system SHALL keep generic, reusable infrastructure functionality in Tool implementations under `workspace/tools/`.
+Не должен зависеть от:
+- конкретных реализаций Skills или Tools.
 
-#### Scenario: Tool is reusable across Skills
+## Публичный контракт
 
-- **WHEN** a Tool is defined under `workspace/tools/`
-- **THEN** it SHALL be usable from any Skill via the agent tool-call interface.
+Архитектурное правило, применяемое ко всей системе:
+- Skills размещаются в `workspace/skills/<name>/`.
+- Tools размещаются в `workspace/tools/`.
+- Взаимодействие происходит через стандартный механизм tool-call.
 
-### Requirement: Independence
+## Входы
 
-The system SHALL keep Skills and Tools independently developable: neither layer requires a compile-time dependency on the other.
+- Предметные требования от Skills.
+- Универсальные функции от Tools.
 
-#### Scenario: Skill consumes Tool via tool-call
+## Выходы
 
-- **WHEN** a Skill needs functionality that is implemented as a Tool
-- **THEN** the Skill SHALL invoke the Tool through the standard tool-call mechanism, not through a direct module import.
+- Архитектурное ограничение на импорты между слоями.
+- Правило независимой разработки компонентов.
 
-## Negative Requirements
+## Состояние
 
-The system SHALL NOT:
+Компонент не хранит состояния (архитектурное правило).
 
-- import concrete Tool implementations from inside Skill code (`workspace/skills/<name>/scripts/`, `workspace/skills/<name>/SKILL.md`).
-- import concrete Skill logic from inside Tool code (`workspace/tools/<tool>.py`).
-- introduce a fallback path that bypasses this boundary (no "legacy Skill import" or "secondary Tool call" mechanism).
-- create a second registry of Skills or Tools outside the one declared in `project.json::skills.*`.
-- add an alternative execution path (e.g., Tool directly callable without going through the tool-call interface).
+## Зависимости
+
+- Механизм tool-call агента.
+- Реестр Skills в `project.json::skills.*`.
+
+## Конфигурация
+
+- `project.json::skills.*` — декларация Skills.
+
+## Жизненный цикл
+
+Жизненный цикл не применяется (архитектурное правило).
+
+## Владение данными
+
+Компонент не владеет данными.
+
+## Поведение при ошибке
+
+Нарушение границы должно обнаруживаться на этапе code review и архитектурного аудита.
+
+## Инварианты
+
+- Предметная логика всегда находится в слое Skills.
+- Универсальная инфраструктура всегда находится в слое Tools.
+- Skills и Tools независимы на уровне компиляции.
+
+## Запрещённое поведение
+
+Система НЕ ДОЛЖНА:
+- импортировать конкретные реализации Tools из кода Skills (`workspace/skills/<name>/scripts/`, `workspace/skills/<name>/SKILL.md`).
+- импортировать конкретную логику Skills из кода Tools (`workspace/tools/<tool>.py`).
+- вводить обходной путь, нарушающий эту границу (никаких «legacy Skill import» или «secondary Tool call»).
+- создавать второй реестр Skills или Tools вне объявленного в `project.json::skills.*`.
+- добавлять альтернативный путь выполнения (например, прямой вызов Tool без механизма tool-call).
+
+## Потребители
+
+- Авторы Skills.
+- Авторы Tools.
+- Архитектурный аудит.
+
+## Реализация
+
+Основная реализация:
+- Архитектурное правило, применяемое ко всей кодовой базе.
+
+Связанные компоненты:
+- `docs/skill-tool-architecture.md` — описание реализации.
+- `docs/SKILL_AUTHORING.md` — руководство по созданию Skills.
+- `docs/TARGET_ARCHITECTURE.md` — нормативные принципы.
+
+## Проверка
+
+- Архитектурный аудит кода Skills и Tools.
+- Code review на предмет нарушения границы импортов.
+- Статический анализ зависимостей между `workspace/skills/` и `workspace/tools/`.
