@@ -1,110 +1,61 @@
-# ============================================================================
-#  Корневой .gitignore для проекта nanobot
-#  Дополняет workspace/.gitignore (только для data_store/.nanobot внутри workspace).
-#  Защищает секреты, кеши, runtime-данные и артефакты удалённых навыков.
-# ============================================================================
-
-# --- Секреты (КРИТИЧНО: .secrets.env содержит API-ключи и DSN) ---
-.secrets.env
-.env
-*.env.local
-
-# --- Python: виртуальное окружение и кеши ---
-.venv/
-venv/
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-
-# --- pytest / coverage ---
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.cache
-
-# --- Бенчмарки (только результаты прогонов, не сами тесты) ---
-.benchmarks/
-
-# --- Runtime-логи и история CLI ---
-/logs/
+```
+# Logs and temp files
 *.log
-history/
+*.tmp
 
-# --- Артефакты удалённых навыков / legacy ---
-# старый SPA-dist (удалён в v1.3.0, см. CHANGELOG)
-webui/
-# артефакты миграции data_store
-ws/
-# выгрузка из удалённого WebSocket-канала
-media/
+# Environment files
+.env
+.env.local
+*.env.*
 
-# --- Runtime-данные workspace ---
-# (workspace/.gitignore уже игнорирует data_store/cache/ и .nanobot/tool-results/ внутри workspace,
-#  поэтому в корне только то, что не закрыто вложенным .gitignore)
-# JSONL-истории старого SessionManager
-workspace/sessions/
-
-# --- DuckDB файлы (runtime-кеш) ---
-*.duckdb
-*.duckdb.wal
-*.duckdb-shm
-*.duckdb-journal
-
-# --- Кеши реестров CLI-приложений (регенерируются) ---
-cli-apps/*.json
-
-# --- Release-script payload артефакты (tools/release_v*.py --dry-run) ---
-release_v*_payload.json
-
-# --- IDE/редакторы ---
-.idea/
+# Editor/IDE files
 .vscode/
+.idea/
 *.swp
+*.swo
+
+# Dependency directories
+node_modules/
+venv/
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+dist/
+build/
+target/
+.gradle/
+
+# System files
 .DS_Store
 Thumbs.db
 
-# --- Разное ---
-*.bak
-*.tmp
-*.pid
+# Coverage reports
+coverage/
+htmlcov/
+.coverage
 
-# --- Локальный runtime ---
-gw_pid.txt
-gw_err.log
-gw_out.log
-workspace/config.json
-
-# --- Агент-runtime: конфиг и память бота (не часть репозитория) ---
-.opencode/
-AGENTS.md
-HEARTBEAT.md
-SOUL.md
-USER.md
-memory/
-prompts/
-workspace/cron/
-workspace/memory/.cursor
-
-# --- Результаты бенчмарков (прогоны) ---
-bench_full/
-bench_full2/
-
-# --- Runtime-данные вне workspace/.gitignore ---
-data_store/
-workspace/cache/
-workspace/data_store/streamlit_files/
-workspace/skills/audit_analyzer/data_store/
-
-# --- Временные скрипты в кеше навыка ---
-workspace/skills/audit_analyzer/cache/_*.py
-
-# --- Локальные IDE/инструменты и dev-артефакты ---
-# Эти каталоги/файлы создаются локально при разработке, не для репо.
-.cline/
-.clinerules/
-docs/_archive/
-tools/debug/
-dump.txt
+# Compressed files
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+```
