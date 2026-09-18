@@ -257,9 +257,12 @@ class TestLoggingDbFlushIntervalValidation:
     ``ConfigurationError``).
     """
 
-    def test_default_is_none(self):
+    def test_default_is_five(self):
         from lib.core.project_settings import LoggingDbSettings
-        assert LoggingDbSettings().flush_interval_sec is None
+        # Спека change требует: ``LoggingDbSettings().
+        # flush_interval_sec == 5.0`` — типизированная модель ЯВЛЯЕТСЯ
+        # источником default-value (не ``ApplicationContext``).
+        assert LoggingDbSettings().flush_interval_sec == 5.0
 
     def test_in_range(self):
         from lib.core.project_settings import LoggingDbSettings

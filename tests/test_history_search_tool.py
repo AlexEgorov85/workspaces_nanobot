@@ -562,6 +562,42 @@ class TestTruncationFlags:
             data = json.loads(result)
             assert data["truncated"] == data["results_truncated"]
 
+    @pytest.mark.asyncio
+    async def test_final_json_respects_max_result_chars(self):
+        """Регрессия на пункт 5 review: ``_render()`` должен включать
+        ``payload_truncated`` в проверяемый JSON, иначе финальный ответ
+        превысит ``max_result_chars`` на ~16-20 байт за счёт
+        дополнительного поля ``\"payload_truncated\": false`` на каждое
+        событие.
+
+        Сценарий: 10 событий с маленькими payload (~120 байт каждое).
+        Без ``payload_truncated`` в ``_render`` суммарный JSON был бы
+        ~1200 байт. С ``payload_truncated`` — ~1240 байт (10 ×
+        ``"payload_truncated": false,`` ≈ 28 байт на событие).
+        Тест проверяет, что финальный JSON строго ≤ ``max_result_chars``
+        на разумных порогах (400+; меньше — невалидный сценарий
+        из-за структурного overhead'а ~310 байт на 1 событие).
+        """
+        rows = [
+            {"id": f"id-{i}", "timestamp": f"t{i}", "event_type": "tool_call",
+             "name": "x", "level": "INFO", "summary": "s",
+             "payload": {"k": "v"}}
+            for i in range(10)
+        ]
+        for max_chars in (400, 800, 1200, 2000):
+            tool = HistorySearchTool(
+                config=HistorySearchToolConfig(max_result_chars=max_chars),
+            )
+            with patch(
+                "workspace.tools.history_search_tool._current_session_key",
+                return_value="s",
+            ), patch("utils.db.fetch", return_value=rows):
+                result = await tool.execute(query=None, limit=10)
+                assert len(result) <= max_chars, (
+                    f"len(result)={len(result)} > max_result_chars={max_chars} "
+                    "(payload_truncated учтён в _render)"
+                )
+
 
 class TestSnapshotConsistency:
     """Snapshot-неконсистентность при активных INSERT'ах — документируем

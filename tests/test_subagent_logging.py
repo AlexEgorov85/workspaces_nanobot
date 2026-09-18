@@ -134,3 +134,88 @@ class TestSubagentRunFinishedEventShape:
 
         counter = svc.get_stats()["written_by_type"]
         assert counter.get("subagent_run_finished") == 2
+
+    def test_subagent_logging_hook_finalize_writes_event(self):
+        """Wiring-тест через реальный ``_SubagentLoggingHook``:
+        патчер ``RuntimePatcher.patch_subagent_logging`` подменяет
+        ``nanobot.agent.subagent._SubagentHook`` на подкласс, который
+        эмиттирует ``subagent_run_finished`` через ``_finalize``.
+        Мы напрямую вызываем ``_finalize`` через подменённый класс и
+        проверяем, что ``db_logging_service.log_event`` получил
+        ``LogEvent`` с правильным ``event_type`` и характерным payload.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from lib.services.db_logging_service import (
+            DbLoggingService,
+            LogEvent,
+        )
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
+
+        svc = DbLoggingService(
+            dsn="", table_name="x", question_runs_table="y",
+        )
+        # ``_SubagentLoggingHook`` создаёт свой ``DatabaseLoggingHook``
+        # инстанс per-subagent (см. комментарий в runtime_patcher.py).
+        # Подменяем его на ``svc``, чтобы не плодить лишний.
+        with patch(
+            "lib.hooks.database_logging_hook.DatabaseLoggingHook",
+            lambda *_a, **_kw: DatabaseLoggingHook(svc),
+        ):
+            from lib.services.runtime_patcher import RuntimePatcher
+
+            patcher = RuntimePatcher()
+            ok, reason = patcher.patch_subagent_logging(
+                db_logging_service=svc, session_manager=None,
+            )
+            assert ok, reason
+
+            # Импортируем подменённый класс (патчер заменяет атрибут
+            # ``_SubagentHook`` модуля ``nanobot.agent.subagent``).
+            from nanobot.agent.subagent import _SubagentHook  # noqa: WPS433
+
+            # Конструируем хук с явным task_id и имитируем finalize
+            # через прямой вызов ``after_run`` / ``on_error``.
+            # Используем ``SimpleNamespace`` для ``context`` —
+            # ``_SubagentLoggingHook`` ожидает ``session_key``,
+            # ``final_content``, ``tools_used``, ``stop_reason``,
+            # ``messages``, ``usage``, ``error``.
+            ctx = SimpleNamespace(
+                session_key="postgres:42",
+                final_content="ответ подагента",
+                tools_used=["compact_context"],
+                stop_reason="stop",
+                messages=[
+                    {"role": "user", "content": "сводка договора"},
+                ],
+                usage={"total_tokens": 42},
+                error=None,
+            )
+            hook = _SubagentHook("task-1")
+            import asyncio
+            asyncio.run(hook.after_run(ctx))
+
+        # ``_finalize`` через ``after_run`` эмиттировал LogEvent в
+        # очередь ``svc``. Проверяем форму события.
+        events = [e for e in svc._queue.queue if isinstance(e, LogEvent)]
+        sub = next(
+            (e for e in events if e.event_type == "subagent_run_finished"),
+            None,
+        )
+        assert sub is not None, (
+            "после _SubagentLoggingHook._finalize LogEvent "
+            "subagent_run_finished должен быть в очереди"
+        )
+        # Форма события — точно как требует спекa § tools-history-search
+        # / subagent_run_finished payload:
+        assert sub.session_id == "subagent:task-1"
+        assert sub.channel == "subagent"
+        assert sub.payload["task_id"] == "task-1"
+        assert sub.payload["task"] == "сводка договора"
+        assert sub.payload["final_content"] == "ответ подагента"
+        assert sub.payload["tools_used"] == ["compact_context"]
+        assert sub.payload["stop_reason"] == "stop"
+        assert "parent_request_id" in sub.payload
+        assert "request_id" in sub.payload
+        # Канал и сессия соответствуют конвенции под-агента.
+        assert sub.request_id == "subagent:task-1"

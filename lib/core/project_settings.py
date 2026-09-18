@@ -239,6 +239,24 @@ class LoggingDbSettings(_StrictOptional):
     enabled: bool | None = None
     flush_interval_sec: float | None = Field(default=None, ge=0.5, le=60.0)
 
+    @model_validator(mode="after")
+    def _default_flush_interval_sec(self) -> "LoggingDbSettings":
+        """Подменить ``None`` на канонический дефолт ``5.0``.
+
+        Спека change ``improve-history-search-pagination-and-logging``
+        требует, чтобы типизированная конфигурация была
+        **источником default-value** для ``flush_interval_sec``:
+        ``LoggingDbSettings().flush_interval_sec == 5.0``. Pydantic
+        ``default=None`` оставляет поле ``None``-able (что нужно для
+        семантики «отсутствующий ключ не ошибка»), но downstream-код
+        (``ApplicationContext``) получает ``5.0`` без явного fallback
+        на константу. Контракт: внутри сконструированной модели
+        ``None`` сюда не попадает.
+        """
+        if self.flush_interval_sec is None:
+            object.__setattr__(self, "flush_interval_sec", 5.0)
+        return self
+
 
 class LoggingSettings(_StrictOptional):
     db: LoggingDbSettings | None = None

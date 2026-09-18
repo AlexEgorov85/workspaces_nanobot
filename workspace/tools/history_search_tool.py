@@ -384,13 +384,28 @@ class HistorySearchTool(Tool):
         results_truncated = False
         cap = per_event_cap
 
-        def _render(items: list[dict]) -> str:
+        def _render(items: list[dict], flags: dict[int, bool]) -> str:
+            """Сериализовать ответ с финальным флагом ``payload_truncated``.
+
+            ВАЖНО: ``payload_truncated`` включается в JSON при
+            формировании, чтобы проверка ``len(text) <= max_result_chars``
+            учитывала именно финальный размер ответа (включая доп.
+            поле ``payload_truncated: bool``). Раньше ``_render``
+            сериализовал события без этого флага, и проверка размера
+            проходила по «промежуточному» JSON, а финальный ответ
+            мог превысить ``max_result_chars`` на ~16-20 байт
+            (``"payload_truncated": false`` на каждое событие).
+            """
+            decorated = [
+                {**ev, "payload_truncated": bool(flags.get(idx, False))}
+                for idx, ev in enumerate(items)
+            ]
             return json.dumps(
                 {
                     "status": "success",
                     "count": len(items),
                     "session_scope": "all" if allow_all else "current",
-                    "events": items,
+                    "events": decorated,
                     "results_truncated": False,
                     "has_more": False,
                     "next_offset": original_offset + len(items),
@@ -401,7 +416,7 @@ class HistorySearchTool(Tool):
             )
 
         while True:
-            text = _render(events)
+            text = _render(events, payload_truncated_flags)
             if len(text) <= self.config.max_result_chars:
                 break
             if len(events) > 1:
@@ -425,7 +440,7 @@ class HistorySearchTool(Tool):
             if events:
                 events[0]["payload"] = ""
                 payload_truncated_flags[0] = True
-            text = _render(events)
+            text = _render(events, payload_truncated_flags)
             break
 
         # ``has_more`` вычисляется ПОСЛЕ truncation-проходов: даже если
@@ -434,9 +449,10 @@ class HistorySearchTool(Tool):
         # событий не показана агенту и следующая страница обязательна.
         has_more = bool(db_has_more or results_truncated)
 
-        for idx, ev in enumerate(events):
-            ev["payload_truncated"] = payload_truncated_flags.get(idx, False)
-
+        # ``payload_truncated`` уже добавлен в ``_render`` для каждого
+        # события — теперь просто пересобираем ответ с финальными
+        # флагами ``results_truncated`` / ``has_more`` / ``truncated``
+        # (которые нельзя было вычислить ДО выхода из truncation-цикла).
         # ``next_offset`` — продолжить пагинацию через offset = count,
         # не через offset + limit (при results_truncated=true часть
         # событий была отброшена; offset + limit пропустил бы их).
@@ -450,7 +466,15 @@ class HistorySearchTool(Tool):
             "next_offset": int(next_offset),
             "results_truncated": bool(results_truncated),
             "truncated": bool(results_truncated),
-            "events": events,
+            "events": [
+                {
+                    **ev,
+                    "payload_truncated": bool(
+                        payload_truncated_flags.get(idx, False)
+                    ),
+                }
+                for idx, ev in enumerate(events)
+            ],
         }
         return json.dumps(response, ensure_ascii=False, default=str)
 

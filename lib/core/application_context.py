@@ -630,19 +630,24 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
             f"table_name={table_name!r}, question_runs_table={question_runs_table!r}"
         )
 
-    # ``logging.db.flush_interval_sec`` (см. ``LoggingDbSettings``): диапазон
-    # 0.5–60.0 сек, дефолт 5.0. Тип и значение валидируются pydantic на
-    # старте ``ApplicationContext.create`` через ``validate_project_settings``,
-    # поэтому здесь читаем уже валидное значение из типизированной проекции.
+    # ``logging.db.flush_interval_sec`` (см. ``LoggingDbSettings``):
+    # диапазон ``0.5 ≤ value ≤ 60.0`` сек, дефолт ``5.0``. Значение уже
+    # валидировано pydantic на старте ``ApplicationContext.create``
+    # через ``validate_project_settings``, и ``LoggingDbSettings.
+    # _default_flush_interval_sec`` подменяет ``None`` на ``5.0``.
+    # Поэтому здесь читаем уже валидный ``float`` из типизированной
+    # проекции (или возвращаемся к 5.0, если ``project_settings``
+    # недоступен — например, в unit-тестах без полного bootstrap).
     flush_interval_sec = 5.0
     try:
         if (
             ctx.project_settings is not None
             and ctx.project_settings.logging is not None
             and ctx.project_settings.logging.db is not None
-            and ctx.project_settings.logging.db.flush_interval_sec is not None
         ):
-            flush_interval_sec = ctx.project_settings.logging.db.flush_interval_sec
+            value = ctx.project_settings.logging.db.flush_interval_sec
+            if value is not None:
+                flush_interval_sec = value
     except Exception:
         pass
 
