@@ -181,8 +181,11 @@ MINOR с пометкой `Changed` достаточен.
     `emit_sync_event`).
   - `lib/services/context_compaction.py` —
     `ContextCompactionService.__init__(agent, settings,
-    *, db_logging_service=None)`, `_record_event_log`
-    использует `db_logging_service.log_event(LogEvent(...))`,
+    *, db_logging_service)` — keyword-only
+    обязательный параметр (без дефолта;
+    composition root обязан передать явно),
+    `_record_event_log` использует
+    `db_logging_service.log_event(LogEvent(...))`,
     `_notify` разделяет `_write_history_notice` (под
     `notify_in_history`) и `_record_event_log` (всегда при
     `enabled=True`).

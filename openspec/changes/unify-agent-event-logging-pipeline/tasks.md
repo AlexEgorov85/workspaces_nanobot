@@ -27,10 +27,10 @@
 - [ ] 2.1 В `RuntimePatcher.apply_all` (`lib/services/runtime_patcher.py:440-493`) **расширить сигнатуру** `patch_compaction_tracking` и `patch_compact_command` параметром `db_logging_service` (kwarg). Текущий вызов `self.patch_compaction_tracking(agent, settings)` заменить на `self.patch_compaction_tracking(agent, settings, db_logging_service=db_logging_service)`. `db_logging_service` уже передаётся в `apply_all` через `db_logging_service=ctx.db_logging_service` (см. `application_context.py:325`). **Верификация:** `git grep -n "patch_compaction_tracking\|patch_compact_command" lib/services/runtime_patcher.py` — каждый вызов имеет `db_logging_service=`.
 
 - [ ] 2.2 В `runtime_patcher.patch_compaction_tracking` (`lib/services/runtime_patcher.py:1848-1888`):
-  - добавить kwarg `db_logging_service=None`;
+  - добавить kwarg `db_logging_service` (keyword-only **обязательный**, без дефолта — патч вызывается только из `apply_all`, который всегда передаёт явно через `db_logging_service=ctx.db_logging_service`);
   - **удалить** ранний return `if not svc.notify_in_history: return False, "..."` (строки 1882-1883) — patch остаётся активным при `notify_in_history=false`; решение о UI-стороне принимается внутри `_notify`;
   - передавать `db_logging_service` в `ContextCompactionService(agent, settings=settings, db_logging_service=db_logging_service)`.
-  **Верификация:** новый тест `tests/test_runtime_patcher.py::TestPatchCompactionTracking::test_patch_active_when_notify_in_history_false` — pass (patch не отключается, structured event пишется при auto-compaction); `test_patch_disabled_when_enabled_false` — pass (старое поведение сохраняется).
+  **Верификация:** новый тест `tests/test_runtime_patcher.py::TestPatchCompactionTracking::test_patch_active_when_notify_in_history_false` — pass (patch не отключается, structured event пишется при auto-compaction); `test_patch_disabled_when_enabled_false` — pass (старое поведение сохраняется); `git grep -n "patch_compaction_tracking" lib/services/runtime_patcher.py` — сигнатура всегда `*, db_logging_service` без дефолта.
 
 - [ ] 2.3 В `ContextCompactionService.__init__` (`lib/services/context_compaction.py:65-69`):
   - сигнатура: `def __init__(self, agent, settings=None, *, db_logging_service)` — `db_logging_service` теперь **keyword-only обязательный** kwarg (без `getattr(agent, ...)` fallback);

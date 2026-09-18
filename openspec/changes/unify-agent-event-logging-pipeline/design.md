@@ -161,9 +161,9 @@ self._record(report, "compact_tracking", self.patch_compaction_tracking(
 self._record(report, "compact_command", self.patch_compact_command(
     agent, settings, db_logging_service=db_logging_service))
 
-# patch_compaction_tracking — расширение:
+# patch_compaction_tracking — расширение (keyword-only обязательный):
 def patch_compaction_tracking(
-    self, agent, settings, *, db_logging_service=None
+    self, agent, settings, *, db_logging_service
 ) -> tuple[bool, str]:
     ...
     svc = ContextCompactionService(
@@ -185,14 +185,27 @@ def __init__(
 #### Контракт значения
 
 `db_logging_service` — **обязательный kwarg** (без
-дефолта, без fallback-lookup'ов). `None` —
-**валидное значение**, означающее «dependency
-отсутствует»: composition root решил не передавать
-сервис в этот код-path (тест, CLI без gateway,
-standalone-утилита). **Это не то же самое, что
-«service unavailable»** (когда dependency передана,
-но `is_running() == False`) — эти два состояния
-различаются в `try_log_event` и в producer-логике.
+дефолта, без fallback-lookup'ов) в production-сигнатурах
+(`ContextCompactionService.__init__`,
+`RuntimePatcher.patch_compaction_tracking`). Это
+composition-root contract: production composition
+root (ApplicationContext / CLI entrypoint) обязан
+передавать **работающий** экземпляр
+`DbLoggingService` (или, для тестов и standalone,
+явный мок через `db_logging_service=mock` или
+`db_logging_service=None`).
+
+`None` — **валидное runtime-значение** в
+`DbLoggingService.try_log_event(svc, ...)` (см.
+requirement «try_log_event contract» в `spec.md`):
+producer, получивший `None` через composition
+root (тест, CLI без gateway, standalone-утилита),
+обязан вести себя как degraded — no-op for
+business + operational WARNING. **Это не то же
+самое, что «service unavailable»** (когда
+dependency передана, но `is_running() == False`)
+— эти два состояния различаются в `try_log_event`
+(см. таблицу ниже).
 
 Два состояния обрабатываются явно:
 
@@ -712,7 +725,7 @@ token-budget сжатие через `_wrap_auto_compact_archive`
 
 ```python
 def patch_compaction_tracking(
-    self, agent, settings, *, db_logging_service=None
+    self, agent, settings, *, db_logging_service
 ) -> tuple[bool, str]:
     if agent is None:
         return False, "agent is None"
