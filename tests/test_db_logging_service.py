@@ -664,6 +664,101 @@ class TestUserIdPropagation:
         # на позиции сразу после event_type.
         assert "alice" in rows[0]
 
+    def test_auto_filled_user_id_reaches_insert_via_index(self, fake_psycopg2):
+        """End-to-end прокидывание auto-filled ``user_id`` в INSERT.
+
+        Полная security-boundary цепочка:
+
+          register_request(alice)
+                ↓
+          _enqueue(LogEvent(user_id=None, request_id=req-A))
+                ↓ _resolve_event_user_id
+          event.user_id = alice  (через request_id matching)
+                ↓
+          _insert_batch()
+                ↓
+          SQL params содержат ``alice`` в позиции user_id
+
+        Без этого теста покрытие было бы разорвано: explicit value
+        проверялся отдельно (test_log_event_user_id_reaches_insert),
+        auto-fill — отдельно (test_enqueue_fills_user_id_when_request_id_matches),
+        но именно «auto-filled → INSERT» — нет. Это критично для
+        history_search(session_scope="all") как security boundary:
+        если бы между ``_enqueue`` и ``_insert_batch`` значение
+        терялось, фильтр ``user_id = %s`` возвращал бы 0 строк.
+        """
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.register_request(
+            "cli:1", "req-A", user_id="alice", chat_id="c1",
+        )
+        # Producer создаёт событие БЕЗ user_id — auto-fill путь.
+        event = LogEvent(
+            event_type="tool_call",
+            session_id="cli:1",
+            request_id="req-A",
+            user_id=None,
+        )
+        svc._enqueue(event)
+        # После _enqueue event.user_id заполнен индексом.
+        assert event.user_id == "alice"
+
+        # Полный путь в INSERT: execute_batch должен получить SQL с
+        # колонкой user_id и параметры с ``alice`` в нужной позиции.
+        fake_psycopg2["execute_batch"].reset_mock()
+        svc._insert_batch(fake_psycopg2["conn"], [event])
+
+        call = fake_psycopg2["execute_batch"].call_args
+        sql = call.args[1]
+        rows = call.args[2]
+        assert "user_id" in sql
+        # В execute_batch первый аргумент — SQL, второй — список
+        # кортежей; в каждом кортеже позиция user_id — сразу после
+        # event_type (порядок колонок фиксирован в _insert_batch).
+        assert "alice" in rows[0], (
+            f"alice должна быть в позиции user_id INSERT-параметров; "
+            f"получено: {rows[0]!r}"
+        )
+
+    def test_auto_filled_user_id_does_not_reach_insert_when_request_mismatch(
+        self, fake_psycopg2,
+    ):
+        """End-to-end: stale-event auto-fill не «протекает» в INSERT.
+
+        register A/alice → LogEvent(req-A, user_id=None) →
+        register B/bob → _enqueue того же события →
+        _insert_batch: SQL params содержат ``None`` в позиции user_id,
+        НЕ ``bob``. Это primary logging-security acceptance на уровне
+        реальной INSERT-цепочки (не только очереди).
+        """
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.register_request(
+            "cli:1", "req-A", user_id="alice", chat_id="c1",
+        )
+        stale_event = LogEvent(
+            event_type="tool_call",
+            session_id="cli:1",
+            request_id="req-A",
+            user_id=None,
+        )
+        # Между созданием и _enqueue — перерегистрация индекса.
+        svc.register_request(
+            "cli:1", "req-B", user_id="bob", chat_id="c1",
+        )
+        svc._enqueue(stale_event)
+        # Stale event остался без user_id (не подхватил bob).
+        assert stale_event.user_id is None
+
+        # INSERT содержит None в позиции user_id.
+        fake_psycopg2["execute_batch"].reset_mock()
+        svc._insert_batch(fake_psycopg2["conn"], [stale_event])
+        rows = fake_psycopg2["execute_batch"].call_args.args[2]
+        # Позиция user_id — после event_type: (id, level, event_type, user_id, ...)
+        user_id_value = rows[0][3]
+        assert user_id_value is None, (
+            f"stale event должен сохранить user_id=None, "
+            f"получено: {user_id_value!r}"
+        )
+
     def test_enqueue_fills_user_id_when_request_id_matches(self, fake_psycopg2):
         """register_request + LogEvent(user_id=None) с тем же request_id
         автозаполняет ``user_id`` из индекса при ``_enqueue``."""

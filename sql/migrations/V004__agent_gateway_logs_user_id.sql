@@ -45,6 +45,7 @@ COMMENT ON INDEX public.agent_gateway_logs_user_id_timestamp_idx IS
     'Обслуживает access-pattern history_search(session_scope="all"): '
     'WHERE user_id = ? ORDER BY "timestamp" DESC.';
 
--- Комментарий к записи в schema_migrations (если скрипт выполняется вне
--- tools/migrate.py — например, руками):
-COMMENT ON SCHEMA public IS 'V004 added user_id + index to agent_gateway_logs';
+-- Регистрация версии выполняется runner'ом tools/migrate.py
+-- (INSERT в public.schema_migrations) — НЕ этим файлом.
+-- При ручном выполнении SQL нужно отдельно вставить запись
+-- в schema_migrations (или воспользоваться ``--baseline``).
