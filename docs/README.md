@@ -3,6 +3,27 @@
 Навигационный индекс для разработчиков. Каждый документ — **самодостаточный
 reference** по своей подсистеме; README в корне — это навигационный хаб.
 
+## 📋 Компонентные спецификации (OpenSpec)
+
+Каталог OpenSpec-спецификаций архитектурных компонентов живёт в
+[`openspec/specs/`](../openspec/specs/) и дополняет этот `docs/`-каталог.
+Реестр — [`openspec/specs/COMPONENTS.md`](../openspec/specs/COMPONENTS.md).
+
+| Категория | Назначение |
+|---|---|
+| `architecture/component-model` | Модель архитектурного компонента и шаблон spec |
+| `architecture/skill-tool-boundary` | Граница Skill / Tool |
+| `runtime/context` | `ApplicationContext` и его жизненный цикл |
+| `configuration/profiles` | Профили конфигурации (`prod` / `test`) |
+| `data/cache-provider` | `CacheProvider` (SQL-кэш + FAISS) |
+| `data/vector-indexes` | Векторные индексы (FAISS, lifecycle, целостность) |
+| `documentation/component-registry` | Правила ведения реестра компонентов |
+| `validation/component-spec-validation` | Правила автоматической валидации spec |
+
+Разделение ответственности между OpenSpec, `docs/` и кодом описано в
+[`openspec/specs/architecture/component-model/spec.md`](../openspec/specs/architecture/component-model/spec.md)
+(краткое резюме — в этом README ниже, в секции «📐 Нормативная архитектура (TARGET)»).
+
 ## Каталог
 
 ### Архитектура и интеграции
@@ -77,7 +98,13 @@ invariant'ы, anti-patterns, decision-чеклист и правила зави�
 > - `TARGET_ARCHITECTURE.md` — *норма* (правила, цель, contract). Не содержит описания «as-is».
 > - `ARCHITECTURE.md`, `DATABASE.md`, `INTERNAL_API.md` (и этот каталог) — *текущая реализация*
 >   (что и как работает сейчас). Ссылаются на `TARGET_ARCHITECTURE.md §N` за правилами.
-> - Где документы пересекаются по теме — детали реализации только в `docs/*`, правила только в `TARGET_ARCHITECTURE.md`.
+> - [`openspec/specs/`](../openspec/specs/) — *контракты компонентов* (component-level normative specs
+>   на русском): назначение, граница, требования, запрещённое поведение, зависимости, реализация,
+>   проверка. Шаблон и правила — [`architecture/component-model`](../openspec/specs/architecture/component-model/spec.md);
+>   реестр — [`COMPONENTS.md`](../openspec/specs/COMPONENTS.md). Валидация структуры —
+>   [`validation/component-spec-validation`](../openspec/specs/validation/component-spec-validation/spec.md).
+> - Где документы пересекаются по теме — детали реализации только в `docs/*`, правила только в `TARGET_ARCHITECTURE.md`,
+>   контракт компонента — только в соответствующей `openspec/specs/<domain>/<component>/spec.md`.
 
 ## 🚀 Быстрый старт для разработчика
 

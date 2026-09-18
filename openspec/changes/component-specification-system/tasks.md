@@ -11,11 +11,11 @@
 
 ## Миграция существующих спецификаций
 
-- [ ] Перевести `architecture/skill-tool-boundary` на русский, обновить по шаблону
-- [ ] Перевести `configuration/profiles` на русский, обновить по шаблону
-- [ ] Обновить `data/cache-provider` (переименование из data/cache)
-- [ ] Обновить `data/vector-indexes` по шаблону
-- [ ] Обновить `runtime/context` по шаблону
+- [x] Перевести `architecture/skill-tool-boundary` на русский, обновить по шаблону
+- [x] Перевести `configuration/profiles` на русский, обновить по шаблону
+- [x] Обновить `data/cache-provider` (переименование из data/cache)
+- [x] Обновить `data/vector-indexes` по шаблону
+- [x] Обновить `runtime/context` по шаблону
 
 ## Критерии готовности этого change
 
@@ -27,6 +27,12 @@
 - [x] Нет выдуманных контрактов — только зафиксированные решения
 - [x] `.gitignore` не изменён (исправлен blocker)
 - [x] Удалены дублирующие spec (data/cache удалён, оставлен data/cache-provider)
+- [x] 5 мигрированных spec проходят `tools/validate_component_specs.py`
+- [x] 3 delta-спека в `openspec/changes/.../specs/` приведены к OpenSpec-формату и проходят `openspec validate`
+- [x] `COMPONENTS.md` обновлён (статусы после миграции: 6 partial / 2 draft / 0 missing)
+- [x] `docs/README.md` дополнен разделом о компонентных спецификациях
+- [x] `AGENTS.md` дополнен секцией Component Specification System
+- [x] Добавлен `tools/validate_component_specs.py` (автоматическая валидация структуры spec)
 
 ## Следующие шаги (отдельные changes)
 
@@ -66,6 +72,6 @@
 
 ## Интеграция
 
-- [ ] Обновить docs/README.md с описанием системы спецификаций
-- [ ] Обновить AGENTS.md правилами работы со спецификациями
-- [ ] Добавить validation script для проверки структуры spec
+- [x] Обновить docs/README.md с описанием системы спецификаций
+- [x] Обновить AGENTS.md правилами работы со спецификациями
+- [x] Добавить validation script для проверки структуры spec
