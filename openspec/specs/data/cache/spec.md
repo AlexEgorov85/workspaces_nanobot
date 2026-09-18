@@ -1,48 +1,152 @@
-# Data Cache
+# Data Cache (Кеш данных)
 
-## Purpose
-Define the cache subsystem contract: source of truth, snapshot lifecycle, publication, atomicity, and consumer contract. The cache is a local DuckDB-based fast-access layer for read-mostly data synced from PostgreSQL.
+## Назначение
 
-## Source of Truth
+Определение контракта подсистемы кеша: источник истины, lifecycle snapshot'ов, публикация, атомарность и контракт потребителя. Кеш — это локальный DuckDB-based слой быстрого доступа для read-mostly данных, синхронизируемых из PostgreSQL.
 
-- Permanent invariants: `docs/TARGET_ARCHITECTURE.md` (Cache section).
-- Implementation: `docs/ARCHITECTURE.md` and `lib/services/cache_provider*.py` (descriptive).
+## Ответственность
 
-## Requirements
+Cache отвечает за:
+- определение источника истины (PostgreSQL)
+- управление lifecycle snapshot'ов DuckDB
+- предоставление единого consumer contract через CacheProvider
+- обеспечение атомарности операций кеша
 
-### Requirement: PostgreSQL is the source of truth
+## Граница
 
-The system SHALL treat PostgreSQL as the source of truth for cached tables.
+### Владеет
+- синхронизацией данных из PostgreSQL в локальный DuckDB
+- управлением snapshot lifecycle (создание, публикация, атомарный swap)
+- предоставлением API для query_cached_data через CacheProvider
 
-#### Scenario: Cache desync from PostgreSQL
+### Не владеет
+- бизнес-логикой Skills
+- прямым доступом к DuckDB файлу извне CacheProvider
+- хранением NFS-mounted файлов (только local ext4)
 
-- **WHEN** a cached row disagrees with PostgreSQL
-- **THEN** PostgreSQL SHALL win on the next sync; the cache SHALL NOT silently preserve stale data indefinitely.
+### Может зависеть от
+- PostgreSQL (источник истины)
+- локальной файловой системы ext4
+- конфигурации gateway.cache.local_path
 
-### Requirement: Local ext4 storage
+### Не должен зависеть от
+- конкретной реализации Skills
+- NFS storage
+- других cache store implementations
 
-The system SHALL persist the DuckDB cache file at `gateway.cache.local_path` (a local ext4 path, NOT an NFS path).
+## Публичный контракт
 
-#### Scenario: NFS storage attempted
+CacheProvider предоставляет:
+- `query_sql` — выполнение SQL query на cached data
+- `get_schema` — получение схемы cached таблиц
+- `explain` — объяснение плана выполнения
+- `search_vector` — векторный поиск (если применимо)
 
-- **WHEN** `gateway.cache.local_path` resolves to an NFS mount
-- **THEN** the cache provider SHALL fail fast at startup with a clear error rather than silently corrupting state.
+## Требования
 
-### Requirement: Single consumer contract
+### Требование: PostgreSQL — источник истины
 
-The system SHALL expose cache operations exclusively through `CacheProvider` (`query_sql`, `get_schema`, `explain`, `search_vector`).
+Система ДОЛЖНА рассматривать PostgreSQL как источник истины для кешированных таблиц.
 
-#### Scenario: Skill queries the cache
+#### Сценарий: Cache desync от PostgreSQL
 
-- **WHEN** a Skill needs to query a cached table
-- **THEN** it SHALL go through `CacheProvider` and SHALL NOT open the DuckDB file directly.
+- **КОГДА** кешированная строка не согласуется с PostgreSQL
+- **ТОГДА** PostgreSQL ДОЛЖЕН выиграть при следующей синхронизации; кеш НЕ ДОЛЖЕН молча сохранять stale data бессрочно
 
-## Negative Requirements
+### Требование: Локальное ext4 хранилище
 
-The system SHALL NOT:
+Система ДОЛЖНА сохранять DuckDB cache файл по пути `gateway.cache.local_path` (локальный ext4 путь, НЕ NFS путь).
 
-- write the DuckDB cache file directly to an NFS mount (empirically fails with `PID 0` locking errors).
-- introduce a second cache store implementation alongside `cache_provider.py`.
-- silently fall back to PostgreSQL when the cache is invalid; consumers SHALL be told.
-- bypass the cache provider from Skill code.
-- duplicate cache state outside the single cache file path.
+#### Сценарий: Попытка NFS storage
+
+- **КОГДА** `gateway.cache.local_path` разрешается в NFS mount
+- **ТОГДА** cache provider ДОЛЖЕН fail fast при старте с явной ошибкой, а не молча corrupt состояние
+
+### Требование: Единый consumer contract
+
+Система ДОЛЖNA предоставлять операции кеша исключительно через `CacheProvider` (`query_sql`, `get_schema`, `explain`, `search_vector`).
+
+#### Сценарий: Skill query к кешу
+
+- **КОГДА** Skill нуждается в query cached таблицы
+- **ТОГДА** он ДОЛЖЕН использовать `CacheProvider` и НЕ ДОЛЖЕН открывать DuckDB файл напрямую
+
+## Запрещённое поведение
+
+Система НЕ ДОЛЖНА:
+
+- писать DuckDB cache файл напрямую на NFS mount (эмпирически fails with `PID 0` locking errors)
+- создавать вторую cache store implementation рядом с `cache_provider.py`
+- молча fallback на PostgreSQL когда кеш invalid; потребители ДОЛЖНЫ быть уведомлены
+- bypass cache provider из Skill кода
+- дублировать cache state вне единственного cache file path
+
+## Зависимости
+
+- `docs/TARGET_ARCHITECTURE.md` — глобальные архитектурные принципы
+- `lib/services/cache_provider.py:CacheProvider` — реализация
+- PostgreSQL — источник истины
+- DuckDB — embedded DB engine
+
+## Конфигурация
+
+```json
+{
+  "gateway": {
+    "cache": {
+      "local_path": "/path/to/local/ext4/cache.duckdb",
+      "sync_tables": ["table1", "table2"]
+    }
+  }
+}
+```
+
+## Жизненный цикл
+
+1. **Инициализация**: CacheProvider создаётся при старте ApplicationContext
+2. **Синхронизация**: данные копируются из PostgreSQL в DuckDB
+3. **Публикация**: новый snapshot атомарно заменяет старый
+4. **Query**: потребители читают данные через CacheProvider API
+5. **Обновление**: периодическая resync по расписанию или событию
+
+## Состояние
+
+CacheProvider хранит:
+- путь к DuckDB файлу
+- список sync таблиц
+- статус последней синхронизации
+
+## Инварианты
+
+- PostgreSQL всегда является источником истины
+- DuckDB файл находится только на local ext4
+- Все операции кеша идут через CacheProvider
+- Нет второго cache store
+
+## Поведение при ошибке
+
+- NFS mount detected → fail fast с явной ошибкой
+- Sync failure → кеш остаётся со старыми данными, потребители уведомлены
+- Query error → ошибка возвращается потребителю, нет silent fallback
+
+## Потребители
+
+- Skills — query cached данных
+- AuditAnalyzer — анализ паттернов из кеша
+- LegalSummarizer — агрегация данных
+
+## Реализация
+
+Основная реализация:
+- `lib/services/cache_provider.py:CacheProvider`
+
+Связанные компоненты:
+- `lib/data/duckdb_sync.py:DuckDBSync`
+- `lib/core/application_context.py:ApplicationContext`
+
+## Проверка
+
+Валидация включает:
+1. Проверка отсутствия прямого доступа к DuckDB файлу (code review)
+2. Проверка fail fast на NFS mount (тесты)
+3. Проверка атомарности snapshot swap (тесты)

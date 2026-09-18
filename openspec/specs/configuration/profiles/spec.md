@@ -1,48 +1,150 @@
-# Configuration Profiles
+# Configuration Profiles (Профили конфигурации)
 
-## Purpose
-Define how the project's prod/test profile is resolved and the rules that govern profile-driven behavior. Profile resolution happens at configuration load time; business logic SHALL NOT branch on profile.
+## Назначение
 
-## Source of Truth
+Определение того, как разрешается prod/test профиль проекта и правила, управляющие поведением на основе профиля. Разрешение профиля происходит во время загрузки конфигурации; бизнес-логика НЕ ДОЛЖНА ветвиться по профилю.
 
-- Permanent invariants: `docs/TARGET_ARCHITECTURE.md` (Profiles section).
-- Implementation: `docs/PROFILES.md` (descriptive).
+## Ответственность
 
-## Requirements
+Profiles отвечают за:
+- определение механизма разрешения активного профиля (prod/test)
+- установку правил применения profile-specific overlays
+- запрет ветвления бизнес-логики по профилю
 
-### Requirement: Resolution happens before runtime initialization
+## Граница
 
-The system SHALL resolve the active profile (`prod` or `test`) during configuration resolution, BEFORE any runtime component (`ApplicationContext`, channels, services) is constructed.
+### Владеет
+- механизмом разрешения профиля на этапе загрузки конфигурации
+- применением profile-specific overlays к project.json
+- предоставлением resolved profile через SETTINGS для infrastructure
 
-#### Scenario: Profile resolved at config load
+### Не владеет
+- бизнес-логикой, которая ветвится по профилю
+- runtime-переключением профиля
+- созданием новых профилей без OpenSpec change
 
-- **WHEN** `project.json`, `config.json`, and `.secrets.env` are merged
-- **THEN** the active profile SHALL be resolved and stored on `SETTINGS` before any other runtime code runs.
+### Может зависеть от
+- project.json (базовая конфигурация)
+- config.json (локальные overrides)
+- .secrets.env (секреты)
 
-### Requirement: Profile overlays applied in documented order
+### Не должен зависеть от
+- runtime-компонентов (ApplicationContext, channels, services)
+- бизнес-логики Skills/Tools
 
-The system SHALL apply profile-specific overlays onto `project.json` according to the documented merge order.
+## Публичный контракт
 
-#### Scenario: Test profile resolves test tables
+Profile resolution предоставляет:
+- разрешение активного профиля (prod/test) до инициализации runtime
+- применение profile-specific overlays в документированном порядке
+- доступ к resolved profile через SETTINGS для infrastructure code
 
-- **WHEN** the active profile is `test`
-- **THEN** test-specific table suffixes SHALL be selected where applicable, and the resolution SHALL NOT silently fall back to non-test names.
+## Требования
 
-### Requirement: Profile surfaced for infrastructure use
+### Требование: Разрешение до инициализации runtime
 
-The system SHALL expose the resolved profile as part of `SETTINGS` for use by infrastructure code (DB connection helpers, cache paths, channel configuration) ONLY.
+Система ДОЛЖНА разрешать активный профиль (`prod` или `test`) во время разрешения конфигурации, ДО того как любой runtime-компонент (`ApplicationContext`, channels, services) будет создан.
 
-#### Scenario: Infrastructure reads profile
+#### Сценарий: Профиль разрешён при загрузке конфигурации
 
-- **WHEN** a connection helper needs the active profile
-- **THEN** it SHALL read `SETTINGS.profile` and SHALL NOT branch on profile in business logic.
+- **КОГДА** `project.json`, `config.json` и `.secrets.env` объединены
+- **ТОГДА** активный профиль ДОЛЖЕН быть разрешён и сохранён в `SETTINGS` до запуска любого другого runtime-кода
 
-## Negative Requirements
+### Требование: Profile overlays применяются в документированном порядке
 
-The system SHALL NOT:
+Система ДОЛЖНА применять profile-specific overlays к `project.json` согласно документированному порядку слияния.
 
-- contain `if profile == "prod"` / `if profile == "test"` branches in business logic.
-- fall back to a "default profile" if profile resolution fails (fail fast on misconfiguration).
-- allow profile switching at runtime (after configuration resolution).
-- silently ignore unknown profile keys.
-- introduce a third profile (`dev`, `staging`, etc.) without an explicit OpenSpec change.
+#### Сценарий: Test профиль разрешает test таблицы
+
+- **КОГДА** активный профиль равен `test`
+- **ТОГДА** должны быть выбраны test-specific table suffixes, и разрешение НЕ ДОЛЖНО молча fallback на non-test имена
+
+### Требование: Профиль доступен для infrastructure use
+
+Система ДОЛЖНА предоставлять resolved profile как часть `SETTINGS` для использования infrastructure-кодом (DB connection helpers, cache paths, channel configuration) ТОЛЬКО.
+
+#### Сценарий: Infrastructure читает профиль
+
+- **КОГДА** connection helper нуждается в активном профиле
+- **ТОГДА** он ДОЛЖЕН прочитать `SETTINGS.profile` и НЕ ДОЛЖЕН ветвиться по профилю в бизнес-логике
+
+## Запрещённое поведение
+
+Система НЕ ДОЛЖНА:
+
+- содержать ветки `if profile == "prod"` / `if profile == "test"` в бизнес-логике
+- fallback на "профиль по умолчанию" если разрешение профиля не удалось (fail fast на misconfiguration)
+- позволять переключение профиля на runtime (после разрешения конфигурации)
+- молча игнорировать неизвестные profile keys
+- создавать третий профиль (`dev`, `staging`, etc.) без явного OpenSpec change
+
+## Зависимости
+
+- `docs/TARGET_ARCHITECTURE.md` — глобальные архитектурные принципы
+- `project.json` — базовая конфигурация с профилями
+- `lib/services/config_service.py:ConfigService` — реализация разрешения
+
+## Конфигурация
+
+Профили определяются в `project.json`:
+
+```json
+{
+  "profiles": {
+    "prod": { ... },
+    "test": { ... }
+  }
+}
+```
+
+Разрешение происходит через:
+1. Базовый profile из project.json
+2. Overrides из config.json
+3. Переменные окружения из .secrets.env
+
+## Жизненный цикл
+
+1. **Загрузка**: project.json читается при старте
+2. **Разрешение**: активный профиль определяется из CLI flag / env / default
+3. **Слияние**: profile-specific overlays применяются к базовой конфигурации
+4. **Фиксация**: resolved profile сохраняется в SETTINGS
+5. **Использование**: infrastructure читает SETTINGS.profile при необходимости
+
+## Состояние
+
+Resolved profile хранится в SETTINGS как строка (`"prod"` или `"test"`).
+
+## Инварианты
+
+- Профиль разрешается ровно один раз при старте
+- После разрешения профиль не изменяется
+- Бизнес-логика не ветвится по профилю
+- Infrastructure использует профиль только для конфигурации
+
+## Поведение при ошибке
+
+- Ошибка разрешения профиля → fail fast, система не запускается
+- Неизвестный профиль → ошибка валидации конфигурации
+
+## Потребители
+
+- ConfigService — разрешение конфигурации
+- Database connection helpers — выбор таблиц/суффиксов
+- CacheProvider — выбор путей кеша
+- ChannelManager — конфигурация каналов
+
+## Реализация
+
+Основная реализация:
+- `lib/services/config_service.py:ConfigService`
+
+Связанные компоненты:
+- `project.json` — определение профилей
+- `docs/PROFILES.md` — описание реализации
+
+## Проверка
+
+Валидация включает:
+1. Проверка отсутствия `if profile ==` в бизнес-логике (code review, grep)
+2. Проверка fail fast behaviour при misconfiguration (тесты)
+3. Проверка однократного разрешения профиля (тесты)
