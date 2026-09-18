@@ -88,7 +88,8 @@ structured agent events в `agent_gateway_logs`**:
   `ApplicationContext._record_sync_skipped` — все sync-события
   идут **только** через инжектированный `db_logging_service`
   (`log_sync_event` / `log_event(LogEvent(...))`). Если
-  сервис `None` или не запущен — **silent no-op** (как
+  сервис `None` или не запущен — **no-op for business +
+  operational WARNING** (как
   `postgres_channel.py:_journal_event`), без fallback direct
   INSERT.
 - **Запретить** runtime-коду вне `lib/services/db_logging_service.py`
@@ -235,7 +236,8 @@ MINOR с пометкой `Changed` достаточен.
     вне `DbLoggingService`); unit-тесты
     «`notify_in_history=False` → `context_compacted`
     всё равно логируется»; «`db_logging_service=None`
-    → silent no-op без INSERT»; «decoupled concerns».
+    → no-op for business + WARNING без INSERT»;
+    «decoupled concerns».
 - **Документация:** `docs/ARCHITECTURE.md` § «Структурированное
   логирование» (полный rewrite), `AGENTS.md` (Project Layout,
   Configuration), `CHANGELOG.md` `[Unreleased]`,
