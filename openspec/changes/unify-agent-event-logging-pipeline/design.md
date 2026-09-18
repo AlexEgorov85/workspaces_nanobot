@@ -71,9 +71,14 @@
   плюс тесты). Все они должны продолжать работать
   с тем же positional/kwarg интерфейсом.
 - Существующий DI-паттерн через атрибуты
-  (`ctx._agent_ref`, `ctx._settings_ref`,
-  `ctx._db_logging_service`) уже используется в
-  `patch_subagent_logging` (`runtime_patcher.py:1399-1423`).
+  на `ctx` (`ctx._agent_ref`, `ctx._settings_ref`)
+  используется в `patch_project_tools`
+  (`runtime_patcher.py:1638-1642`). Это
+  симметричный паттерн, **которым мы пользуемся**
+  для `ToolContext` (см. D1, `compact_context.py`);
+  для `agent`-scoped DI (см. D1) используется
+  публичное поле `agent.db_logging_service`,
+  без префикса `_`.
 - Профили конфигурации (`--profile`) не меняются —
   logging-конфиг и так не входит в profile-owned
   runtime-ключи (см. AGENTS.md).
@@ -138,50 +143,139 @@
 `RuntimePatcher.apply_all` уже принимает
 `db_logging_service` и передаёт его в
 `patch_subagent_logging` (`runtime_patcher.py:1399-1423`).
-Расширяем `apply_all` так, чтобы после успешного
-вызова он **выставлял** `agent._db_logging_service`
-(только если `db_logging_service is not None` —
-не затираем уже выставленное значение).
+DI — **только explicit**: `db_logging_service`
+передаётся через аргумент конструктора /
+патча, без скрытых атрибутов на `agent` и без
+lookup'а через `getattr(agent, ...)`.
 
-`ContextCompactionService.__init__(agent, settings=None, *, db_logging_service=None)`
-с `None`-дефолтом; внутри:
+Контракт:
 
 ```python
-self._db_logging_service = (
-    db_logging_service
-    or getattr(agent, "_db_logging_service", None)
-)
+# RuntimePatcher.apply_all(...) — расширение сигнатуры:
+self._record(report, "compact_tracking", self.patch_compaction_tracking(
+    agent, settings, db_logging_service=db_logging_service))
+self._record(report, "compact_command", self.patch_compact_command(
+    agent, settings, db_logging_service=db_logging_service))
+
+# patch_compaction_tracking — расширение:
+def patch_compaction_tracking(
+    self, agent, settings, *, db_logging_service=None
+) -> tuple[bool, str]:
+    ...
+    svc = ContextCompactionService(
+        agent, settings=settings, db_logging_service=db_logging_service,
+    )
+    ...
+
+# ContextCompactionService — explicit kwarg (НЕ optional с fallback
+# на getattr):
+def __init__(
+    self,
+    agent: Any,
+    settings: Any = None,
+    *,
+    db_logging_service: Any,
+) -> None:
+    self._db_logging_service = db_logging_service
 ```
 
-Это даёт два пути:
+`db_logging_service` — обязательный kwarg. `None` —
+это **значение**, означающее «сервис недоступен»,
+а не «искать где-то ещё». Producer, получивший
+`None`, обязан вести себя как «сервис недоступен»
+(silent no-op для persistence + loguru-WARNING
+через `_missing_db_logging_service_warning`,
+см. D6).
 
-- **explicit** (тесты, fine-grained контроль):
-  `ContextCompactionService(agent, settings, db_logging_service=fake)`;
-- **implicit** (через runtime_patcher):
-  `ContextCompactionService(agent, settings=None)` —
-  сервис берётся с `agent._db_logging_service`.
+Все 5 production call-site'ов
+(`compact_command.py`, `console_loop.py`,
+`compact_context.py`, `runtime_patcher.py:1879`,
+`runtime_patcher.py:1884-1885` через
+`patch_compaction_tracking`) **обновляются**:
 
-Все 5 существующих call-site'ов (`compact_command.py`,
-`console_loop.py`, `compact_context.py`,
-`runtime_patcher.py:1879`, тесты) остаются без
-изменений сигнатуры — db_logging_service
-резолвится автоматически при работе под
-`ApplicationContext`, а в тестах/CLI без него
-остаётся `None` (silent no-op).
+| call-site | источник `db_logging_service` |
+| --- | --- |
+| `runtime_patcher.apply_all` | `db_logging_service=ctx.db_logging_service` (уже передаётся) |
+| `runtime_patcher.patch_compaction_tracking` | kwarg из `apply_all` |
+| `runtime_patcher.patch_compact_command` | kwarg из `apply_all` (если создаёт сервис) |
+| `compact_command.py:48` (`cmd_compact`) | через `getattr(ctx.loop, "db_logging_service", None)` |
+| `console_loop.py:149` (`_run_cli_compact`) | через `getattr(agent, "db_logging_service", None)` |
+| `compact_context.py:128` (tool `create`) | через `getattr(ctx, "_db_logging_service", None)` (`ToolContext`, симметричное `ctx._agent_ref` / `ctx._settings_ref`) |
+| Тесты | явная передача `db_logging_service=mock` или `None` |
+
+Для call-site'ов, у которых нет прямого
+`ApplicationContext` (`compact_command.py`,
+`console_loop.py`), DI идёт через `agent`.
+Но **не через скрытый неформальный атрибут**:
+добавляем **публичное поле** `agent.db_logging_service`
+(не `_db_logging_service`) и
+`ApplicationContext._wire_agent_db_logging()`,
+который выставляет его на этапе `start()`. Это
+не скрытый канал, а **документированный DI-канал**
+с явным naming'ом и одной точкой присваивания.
+
+Контракт:
+
+```python
+# lib/core/application_context.py — новый метод:
+def _wire_agent_db_logging(self) -> None:
+    self.agent.db_logging_service = self.db_logging_service
+
+# compact_command.py:
+svc = ContextCompactionService(
+    ctx.loop, settings=settings,
+    db_logging_service=getattr(ctx.loop, "db_logging_service", None),
+)
+
+# console_loop.py:
+svc = ContextCompactionService(
+    agent, settings=None,
+    db_logging_service=getattr(agent, "db_logging_service", None),
+)
+
+# compact_context.py — через ToolContext:
+return cls(service=ContextCompactionService(
+    agent, settings=settings,
+    db_logging_service=getattr(ctx, "_db_logging_service", None),
+))
+```
 
 **Альтернативы:**
 
-- Передавать `db_logging_service` явно через
-  ВСЕ 5 call-site'ов: больше boilerplate, риск
-  забыть в одном из мест (особенно в `compact_command.py`,
-  где `ctx` — это `CommandContext`, не
-  `ApplicationContext`).
-- Заводить global singleton `get_db_logging_service()`:
-  противоречит composition-root принципу.
+- **Полностью explicit через ВСЕ call-site'ы
+  без `agent.db_logging_service`**: требует
+  пробрасывать `db_logging_service` через
+  `CommandContext`, `AgentLoop`, `ToolContext`,
+  `RunRepl` locals — это глубокие изменения
+  в публичных API nanobot 0.3.0, которые по
+  AGENTS.md запрещено трогать.
+- **Скрытый атрибут `_db_logging_service`**:
+  фактически уже было отвергнуто: producer
+  начинает знать о неформальном канале,
+  контракт неявный, и при тестах/standalone
+  легко получить «пустое» значение без понимания,
+  почему.
+- **Global singleton `get_db_logging_service()`**:
+  противоречит composition-root принципу
+  (см. `openspec/specs/runtime/context/spec.md`).
 
-**Выбрано:** implicit lookup через `agent._db_logging_service`
-плюс optional explicit override. Соответствует
-существующему паттерну `_agent_ref` / `_settings_ref`.
+**Выбрано:** explicit kwarg во всех сигнатурах
+производителей + одно документированное поле
+`agent.db_logging_service` (публичное, не
+`_db_logging_service`) для call-site'ов, у которых
+нет прямого доступа к `ApplicationContext`.
+Поле присваивается **в одном месте**
+(`ApplicationContext._wire_agent_db_logging`)
+и читается через `getattr(agent,
+"db_logging_service", None)` — если атрибут
+отсутствует (тест создал `agent` напрямую),
+возвращается `None` (silent no-op + loguru-WARNING).
+
+Скрытого «через `_db_logging_service`» больше
+нет: producer либо получил сервис явно через
+kwarg, либо получил `None` явно через
+`getattr(..., None)`. Никаких неявных
+lookup'ов.
 
 ### D2. `_notify` разделяет concerns через два независимых условия
 
@@ -241,10 +335,50 @@ UI-стороной. Это закрывает **gap №1** из
   actor="system", name="consolidator",
   summary=text[:200] if text else "context compacted",
   payload={...})` — payload без изменений.
-- `db_logging_service is None` или
-  `is_running() == False` →
-  silent no-op + `logger.debug("context_compacted
-  persistence unavailable for {}", session_key)`.
+- Поведение при `db_logging_service is None` или
+  `is_running() == False` — **silent no-op для
+  persistence + loguru-warning на уровне `WARNING`**.
+  **Не DEBUG** — это диагностически значимое
+  событие (production-развёртывание без
+  observability), и оператор должен это видеть.
+
+Контракт единый для всех producer'ов
+(`ContextCompactionService._record_event_log`,
+`PgDuckDbSyncService._log_sync_event`,
+`DuckDbCacheStore` caller's,
+`PreloadService._emit_health_event`,
+`ApplicationContext._record_sync_skipped`-замена):
+
+```python
+def _try_log_event(svc, log_event: LogEvent, *, producer: str, event_type: str) -> bool:
+    """Единая точка входа producer'а в DbLoggingService.
+
+    Returns:
+        True — событие поставлено в очередь;
+        False — сервис недоступен/не запущен, событие
+        потеряно, зафиксировано в loguru WARNING.
+    """
+    if svc is None:
+        logger.warning(
+            "{}: structured event {} not persisted "
+            "(DbLoggingService is None)",
+            producer, event_type,
+        )
+        return False
+    if not svc.is_running():
+        logger.warning(
+            "{}: structured event {} not persisted "
+            "(DbLoggingService not running)",
+            producer, event_type,
+        )
+        return False
+    return bool(svc.log_event(log_event))
+```
+
+Уровень `WARNING` — единый для всех producer'ов.
+Никаких `DEBUG`, `INFO`, `ERROR`, `EXCEPTION` —
+это разброд, который запрещён invariant'ом
+D6.
 
 **Альтернативы:**
 
@@ -253,10 +387,20 @@ UI-стороной. Это закрывает **gap №1** из
   устраняем.
 - Async-обёртка через `asyncio.to_thread` над
   `record_event`: легаси-путь, удаляется.
+- Per-producer `logger.debug(...)`: создаёт
+  разнобой в логах (часть producer'ов пишет
+  DEBUG, часть WARNING, часть молчит), затрудняет
+  grep/CI-алёрты.
 
-**Выбрано:** через `DbLoggingService.log_event` —
-путь симметричен `database_logging_hook` и
-`_SubagentLoggingHook`. Событие уходит в общую
+**Выбрано:** единая helper-функция
+`_try_log_event(svc, log_event, producer, event_type)`
+с фиксированным уровнем WARNING. Располагается
+в `lib/services/db_logging_service.py` рядом
+с `LogEvent` и публикуется как `db_logging_service.try_log_event(...)` —
+producer'ы зовут его единообразно.
+
+Путь симметричен `database_logging_hook` и
+`_SubagentLoggingHook`: событие уходит в общую
 очередь, метрики `written_by_type` инкрементируются.
 
 ### D4. `emit_sync_event` и `record_sync_event` удаляются без deprecated-обёрток
@@ -289,84 +433,177 @@ refactor не должно быть скрытого legacy.
 return'ах с тихими причинами отказа (до
 `db_logging_service.start()`). После change:
 
-- В `_make_sync_services` все ранние return'ы
-  используют `logger.warning` с structured-полями
-  (`extra={...}` или форматированная строка) —
-  этого достаточно для diagnosability.
-- Если `ctx.db_logging_service` уже сконфигурирован
-  (как в production-сценарии), вызывающий код
-  может опционально вызвать
-  `ctx.db_logging_service.log_error(...)` для
-  observability — но **без `_record_sync_skipped`
-  helper'а** (прямой вызов).
+В `_make_sync_services` все ранние return'ы используют
+**единый** контракт через
+`DbLoggingService.try_log_event(...)` (см. D3) или
+`DbLoggingService.log_sync_event(...)` —
+с `_try_log_event`-семантикой (silent no-op для
+persistence при недоступности + loguru-WARNING).
+**Никакого «или loguru-warning напрямую»**: либо
+запись через `DbLoggingService`, либо ничего
+в `agent_gateway_logs`.
+
+Конкретно:
+
+```python
+# Было:
+def _record_sync_skipped(event_type, reason, detail):
+    try:
+        from workspace.utils.event_log import record_sync_event
+        record_sync_event(...)
+    except Exception:
+        pass
+
+# Стало (в _make_sync_services):
+if not ctx.db_logging_service:
+    logger.warning("PgDuckDbSyncService skipped: {}", reason)
+else:
+    ctx.db_logging_service.log_sync_event(
+        event_type=event_type,
+        summary=f"PgDuckDbSyncService skipped: {reason}",
+        payload={"reason": reason, "detail": detail},
+        level="WARN",
+    )
+```
+
+Если `db_logging_service` сконфигурирован — запись
+через него (event timeline).
+Если нет — только loguru-WARNING в терминал.
+Helper `_record_sync_skipped` **удаляется целиком**.
 
 **Альтернативы:**
 
 - Сохранить `_record_sync_skipped` и переписать
   его на `db_logging_service.log_error(...)`:
   плодит точку входа для одного edge-case'а.
+- Ранний return без `loguru-WARNING` (полностью
+  silent): теряем diagnosability для оператора.
 
-**Выбрано:** helper удаляется. Каждый ранний return
-в `_make_sync_services` либо логирует loguru-warning,
-либо зовёт `ctx.db_logging_service.log_error(...)`
-напрямую (если observability важна для оператора).
+**Выбрано:** helper удаляется; `_make_sync_services`
+использует **либо** `db_logging_service.log_sync_event(...)`
+**либо** `logger.warning(...)` в одном из двух
+местах (не «или» в одном выражении). Это устраняет
+архитектурное «или» из старого tasks §4.4.
 
-### D6. Architecture guard через AST-обход + regex-precise проверки
+### D6. Architecture guard: ownership-based + разделение production/import
 
 `tests/test_unified_event_logging_pipeline.py`
-содержит класс `TestNoDirectWriters` с параметризованным
-тестом, который обходит ВСЕ `.py`-файлы в
-`lib/`, `workspace/` (кроме `workspace/utils/event_log.py`,
-которого больше нет), `tools/`, `cli_agent.py`,
-`gateway.py`, `streamlit_app.py`. Для каждого файла:
+содержит **два** независимых guard-класса:
 
-1. **Прямой INSERT в `agent_gateway_logs`** —
-   regex
-   `r'INSERT\s+INTO\s+["\']?(?:[a-zA-Z_][\w]*\.)?["\']?["\']?agent_gateway_logs["\']?'`
-   (case-insensitive, multiline). Исключения:
-   `lib/services/db_logging_service.py` (единственное
-   место, где INSERT в эту таблицу легитимен).
-2. **Импорт `workspace.utils.event_log`** — regex
-   `r'from\s+workspace\.utils\.event_log\b'`
-   или `r'import\s+workspace\.utils\.event_log\b'`.
-   Это ошибка в любом файле (модуль удалён).
-3. **Вызовы `record_event(`, `record_sync_event(`,
-   `emit_sync_event(`** как вызовы функций —
-   `ast`-парсинг + `ast.walk` для `ast.Call`,
-   проверка `func.id in {"record_event",
-   "record_sync_event", "emit_sync_event"}`.
-   Исключение: docstring/test-fixture случаи —
-   для этого `ast` подходит лучше regex'а (не
-   ловит просто упоминания в комментариях).
+#### D6.1. `TestNoProductionDirectWriters` (production-allowlist)
 
-Guard запускается в `pytest tests/test_unified_event_logging_pipeline.py`
-(или общем `pytest tests/`). Тест параметризован
-по файлам → failure message указывает конкретный
-файл и правило.
+Обход production runtime-путей:
+`lib/**/*.py`, `workspace/**/*.py`,
+`tools/*.py`, `cli_agent.py`, `gateway.py`,
+`streamlit_app.py`. **Исключаются** `tests/`
+(тесты могут содержать SQL fixture).
+
+Allowlist (единственные файлы, где легитимны
+INSERT в logging-DB таблицы):
+
+```python
+LOGGING_OWNERS = {
+    "lib/services/db_logging_service.py",  # единственный owner
+}
+```
+
+Guard проверяет:
+
+1. **Ownership INSERT**: ни один production-файл
+   вне `LOGGING_OWNERS` не должен содержать
+   `INSERT` в `agent_gateway_logs` /
+   `agent_question_runs`. Detection — AST-парсинг
+   `ast.Call(func=ast.Attribute(attr='execute'),
+   args=[ast.Constant(value=sql), ...])` где
+   `sql` (после f-string evaluation через
+   `ast.literal_eval` или как литерал) содержит
+   имя logging-таблицы. Либо regex-fallback для
+   случаев с `f"INSERT INTO ... {table_name}"`,
+   где `table_name` берётся из
+   `settings.logging.db.table_name` — этот
+   случай отдельно проверяется unit-тестом
+   на «dynamic-table INSERT» (D6.4).
+2. **Ownership table name access**: ни один
+   production-файл вне `LOGGING_OWNERS` не должен
+   читать `logging.db.table_name` /
+   `logging.db.schema` для целей INSERT.
+   Detection — AST/grep по
+   `["logging"]["db"]["table_name"]`,
+   `.logging.db.table_name`,
+   `get_setting(..., "logging", "db", "table_name", ...)`
+   с проверкой контекста использования.
+
+#### D6.2. `TestNoDeletedModuleImports` (global guard)
+
+Обход **всего** Python-кода включая `tests/`,
+`tools/`, `lib/`, `workspace/`, application
+entrypoints:
+
+1. **Запрещённый импорт**:
+   `from workspace.utils.event_log`,
+   `import workspace.utils.event_log` —
+   `ast`-парсинг `ast.Import` /
+   `ast.ImportFrom` с `module='workspace.utils.event_log'`.
+2. **Запрещённые вызовы функций**:
+   `record_event(...)`, `record_sync_event(...)`,
+   `emit_sync_event(...)` как `ast.Call(func=ast.Name(...))`
+   в **любом** Python-файле репозитория, кроме
+   `docs/`/`.md` (в docstring'ах `.py` AST
+   игнорирует `Expr(value=Constant(...))` — это
+   безопасно).
+
+Оба guard-класса параметризованы по путям
+→ failure message указывает конкретный файл,
+строку и нарушенное правило.
+
+#### D6.3. Negative tests (in-tree fixtures)
+
+Отдельные negative-тесты с `tmp_path`-фикстурами:
+создать `.py`-файл с запрещённым импортом /
+INSERT — guard падает; удалить — guard зелёный.
+Это unit-тесты самого guard'а (страховка от
+регрессии в самом AST/regex), а **не** основной
+acceptance — основной acceptance это D6.1 и D6.2
+на реальном репозитории.
+
+#### D6.4. Coverage
+
+- `git grep -n 'INSERT INTO .* agent_gateway_logs' -- '*.py'` —
+  только `lib/services/db_logging_service.py`
+  (после выполнения change);
+- `git grep -nE '\b(record_event|record_sync_event|emit_sync_event)\(' -- '*.py'` —
+  пусто;
+- `git grep -n 'from workspace.utils.event_log\|import workspace.utils.event_log' -- '*.py'` —
+  пусто;
+- `git grep -n 'logging\.db\.table_name\|logging\["db"\]\["table_name"\]' -- '*.py'`
+  вне `lib/services/db_logging_service.py` —
+  пусто.
+
+Все 4 проверки прогоняются в
+`tests/test_unified_event_logging_pipeline.py`
+как `TestRepositoryGrepBaseline` (CI-проверка
+на regression после merge).
 
 **Альтернативы:**
 
-- Только regex: ложные срабатывания на docstring'ах
-  и комментариях (например, история change в
-  `CHANGELOG.md`-цитатах в Python-файлах).
-- Только AST: пропускает f-string'и с динамической
-  подстановкой имени таблицы (но в проекте таких
-  нет — `agent_gateway_logs` всегда литерал,
-  проверяется grep'ом).
-- `pytest-regex`-style test с хранением expected
-  matches в YAML: overhead на поддержку списка.
+- Только regex по `agent_gateway_logs`:
+  ложные срабатывания на docstring'ах
+  и пропускает `f"INSERT INTO ... {table}"`,
+  где `table` берётся из настроек.
+- Allowlist с размытым критерием «модуль
+  не использует psycopg2 для записи»:
+  не-питон-френдли, требует ручного аудита.
+- `pytest-regex` с YAML-списком expected matches:
+  overhead на поддержку списка, не адаптируется
+  к rename'ам.
 
-**Выбрано:** AST для вызовов функций (точность) +
-regex для INSERT-литералов (быстро, нет ложных
-срабатываний на строках в f-string). Docstring'и
-в docstring'ах `ContextCompactionService` и
-`DbLoggingService` упоминают `record_event` /
-`record_sync_event` / `INSERT INTO` в режиме
-«до этого change», что **не должно** триггерить
-guard — AST-парсинг корректно их игнорирует
-(вызовы функций как `func.id` ищутся только в
-телах функций и module-level, не в `Expr(value=Constant(...))`
-узлах docstring'ов).
+**Выбрано:** AST + ownership-allowlist для
+production (точное определение «кто может
+писать»), AST для global import guard
+(включая тесты). Разделение **обязательно** —
+production и тесты смешивать нельзя: тесты
+легитимно могут содержать SQL fixture для
+проверки поведения.
 
 ### D7. Lifecycle ordering: `db_logging_service.start()` ДО любых emitter'ов
 
@@ -374,10 +611,11 @@ guard — AST-парсинг корректно их игнорирует
 по шагам (см. `application_context.py:267-346`).
 Шаг `db_logging_service.start()` происходит
 **до** `RuntimePatcher.apply_all` (патчеру
-передаётся уже запущенный сервис) — это
-гарантирует, что когда `patch_compaction_tracking`
-создаёт `ContextCompactionService` и тот
-резолвит `agent._db_logging_service`,
+передаётся уже запущенный сервис через
+`db_logging_service=ctx.db_logging_service`) —
+это гарантирует, что к моменту, когда
+`patch_compaction_tracking` создаёт
+`ContextCompactionService` с этим `db_logging_service`,
 сервис уже запущен.
 
 Verify: `application_context.py` `_make_db_logging_service`
@@ -397,30 +635,87 @@ Verify: `application_context.py` `_make_db_logging_service`
 **Выбрано:** сохранить существующий порядок
 и явно задокументировать.
 
-### D8. `compact_command.py` — fallback к `agent._db_logging_service`
+### D8. `patch_compaction_tracking` остаётся активным при `notify_in_history=false`
 
-Команда `cmd_compact(ctx, settings=None)` имеет
-доступ к `ctx.loop` (= `agent`), но не имеет
-явного `db_logging_service`. Полагаемся на
-D1: `ContextCompactionService(ctx.loop, settings)`
-внутри резолвит `agent._db_logging_service`
-через `getattr`. Никаких изменений в
-`compact_command.py` не нужно.
+Текущее поведение
+(`runtime_patcher.py:1882-1883`):
+
+```python
+if not svc.notify_in_history:
+    return False, "gateway.compact.notify_in_history=false"
+```
+
+— патч целиком отключается, если
+`notify_in_history=false`. Это значит, что
+**auto-compaction** (idle-сжатие +
+token-budget сжатие через `_wrap_auto_compact_archive`
+и `_wrap_maybe_consolidate_by_tokens`) не пишет
+`context_compacted` в `agent_gateway_logs`
+в этом режиме.
+
+После change патч должен оставаться активным
+при `gateway.compact.enabled=true`, **включая**
+`notify_in_history=false`. Что меняется:
+
+```python
+def patch_compaction_tracking(
+    self, agent, settings, *, db_logging_service=None
+) -> tuple[bool, str]:
+    if agent is None:
+        return False, "agent is None"
+    try:
+        from lib.services.context_compaction import ContextCompactionService
+    except Exception as exc:
+        return False, f"import failed: {exc}"
+    try:
+        svc = ContextCompactionService(
+            agent, settings=settings,
+            db_logging_service=db_logging_service,
+        )
+        if not svc.enabled:
+            return False, "gateway.compact.enabled=false"
+        # УДАЛЕНО: ранний return при notify_in_history=false
+        # Теперь patch остаётся активным; разделение concerns
+        # делает _notify внутри record_external_compaction.
+        self._wrap_auto_compact_archive(agent, svc)
+        self._wrap_maybe_consolidate_by_tokens(agent, svc)
+    except Exception as exc:
+        return False, f"patch failed: {exc}"
+    return True, "auto compaction tracking patched"
+```
+
+Эффект:
+
+- `gateway.compact.enabled=false` →
+  patch disabled (как раньше);
+- `gateway.compact.enabled=true`,
+  `notify_in_history=true` →
+  patch active, `_record_event_log` + `_write_history_notice`
+  оба работают (как раньше);
+- `gateway.compact.enabled=true`,
+  `notify_in_history=false` →
+  patch **active** (раньше — disabled);
+  `_record_event_log` работает
+  (structured event в `agent_gateway_logs`),
+  `_write_history_notice` — нет.
 
 **Альтернативы:**
 
-- Добавить `db_logging_service` параметр в
-  `RuntimePatcher.patch_compact_command`:
-  патч уже получает `settings`, но не получает
-  `db_logging_service`. Расширение сигнатуры
-  нужно только если D1 не сработает (т.е.
-  если атрибут на `agent` не выставлен).
+- Сохранить ранний return и писать structured
+  event **в обход** auto-compaction path
+  (например, добавить второй hook):
+  дублирование кода, расхождение с ручным
+  `compact()`.
+- Сделать patch активным, но завернуть
+  `record_external_compaction` в условие
+  `if svc.notify_in_history:`: ровно то, что
+  мы убираем в `record_external_compaction`
+  (D2), поэтому не подходит.
 
-**Выбрано:** проверить в реализации, что
-`runtime_patcher.apply_all` действительно
-выставляет `agent._db_logging_service` ДО
-вызова `patch_compact_command`. Если нет —
-расширить сигнатуру (это D1-fallback).
+**Выбрано:** patch активен при
+`enabled=true` независимо от `notify_in_history`;
+решение о UI-стороне принимается внутри
+`_notify` (D2).
 
 ## Risks / Trade-offs
 

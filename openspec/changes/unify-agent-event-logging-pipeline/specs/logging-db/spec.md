@@ -12,18 +12,58 @@ sync service, cache service, channel) обязан превращаться
 
 ## ADDED Requirements
 
-### Requirement: Single writer of agent_gateway_logs
+### Requirement: Single writer invariant of agent_gateway_logs
 
-The system SHALL иметь ровно один runtime-механизм
-записи в `agent_gateway_logs`: `DbLoggingService`.
-Любой другой runtime-модуль SHALL NOT выполнять
-`INSERT`, `UPDATE` или `DELETE` против таблицы,
-заданной `logging.db.table_name`, в обход
-`DbLoggingService`. Имя таблицы и схема берутся
-из resolved `SETTINGS` (`logging.db.table_name`,
-`logging.db.schema`) и передаются сервису через
-composition root; runtime-producers не читают эти
-значения напрямую.
+`DbLoggingService` MUST be the only runtime
+component allowed to persist rows to
+`agent_gateway_logs` и `agent_question_runs`.
+Любой structured event независимо от источника
+(agent loop, hook, subagent, context compaction,
+sync service, cache service, channel) обязан
+превращаться в `LogEvent` и передаваться через
+`DbLoggingService`. Прямой SQL-fallback в журнал
+запрещён.
+
+Запрещено в runtime-коде (за пределами
+`lib/services/db_logging_service.py`):
+
+- INSERT/UPDATE/DELETE строк в таблицу,
+  заданную `logging.db.table_name`;
+- доступ к `logging.db.table_name` /
+  `logging.db.schema` для целей INSERT;
+- обращение к `channels.postgres.dsn` для
+  прямой записи в `agent_gateway_logs`;
+- вызов удалённого модуля
+  `workspace.utils.event_log` и его публичных
+  функций (`record_event` / `record_sync_event` /
+  `emit_sync_event`);
+- обход через любые другие persistence-хелперы
+  (`StructuredEventService`, `EventLogService`,
+  `GatewayEventLogger` и т.п.) — их **не должно
+  появиться** как слоя поверх `DbLoggingService`.
+
+Разрешённый путь:
+
+- `db_logging_service.log_event(LogEvent(...))`;
+- `db_logging_service.log_sync_event(...)`;
+- специализированные builder'ы
+  (`log_tool_call`, `log_tool_result`,
+  `log_llm_call`, `log_error`, `log_inbound`,
+  `log_outbound`, `log_sync_event`,
+  `register_request`, `finish_request`) — все
+  они внутри зовут `log_event(LogEvent(...))`;
+- `DbLoggingService.try_log_event(svc, log_event,
+  producer, event_type)` — единый helper для
+  producer'ов (см. Requirement
+  «Uniform logging behavior при недоступности
+  сервиса»).
+
+Имя таблицы, схема и DSN берутся из resolved
+`SETTINGS` (`logging.db.table_name`,
+`logging.db.schema`, `channels.postgres.dsn`)
+**внутри `DbLoggingService.__init__`** и
+передаются сервису через composition root.
+Runtime-producers не читают эти значения напрямую.
 
 #### Scenario: Все события проходят через DbLoggingService
 
@@ -40,8 +80,8 @@ composition root; runtime-producers не читают эти
   которые внутри строят `LogEvent` и зовут
   `log_event(LogEvent(...))`.
 - **AND** прямых `INSERT INTO "<schema>"."<table>"`
-  в runtime-коде SHALL NOT быть (за пределами самого
-  `lib/services/db_logging_service.py`).
+  в production runtime-коде SHALL NOT быть
+  (за пределами `lib/services/db_logging_service.py`).
 
 #### Scenario: request_id link сохраняется
 
@@ -56,6 +96,84 @@ composition root; runtime-producers не читают эти
   тоже идти через `DbLoggingService` (тот же сервис,
   специализированные методы `register_request` /
   `finish_request`, без второго writer'а).
+
+#### Scenario: Динамически формируемый INSERT ловится ownership-проверкой
+
+- **WHEN** producer пытается выполнить
+  `cursor.execute(f'INSERT INTO "{schema}"."{table}" ...')`
+  где `table = settings.logging.db.table_name`,
+  вне `lib/services/db_logging_service.py`
+- **THEN** architecture guard
+  (`tests/test_unified_event_logging_pipeline.py::TestNoProductionDirectWriters`)
+  SHALL обнаружить такой паттерн через
+  ownership-проверку (доступ к
+  `logging.db.table_name`) и пробросить фикстуру
+  через negative-test
+  `test_guard_catches_dynamic_table_insert`.
+- **AND** `pytest` SHALL упасть с указанием
+  файла и нарушенного правила.
+
+### Requirement: Uniform logging behavior при недоступности сервиса
+
+The system SHALL обеспечивать единое поведение
+для всех producer'ов structured events в случае,
+когда `DbLoggingService` недоступен
+(`db_logging_service is None` или
+`db_logging_service.is_running() == False`) в
+момент попытки записи structured event:
+
+1. **Structured persistence**: silent no-op —
+   событие не попадает в `agent_gateway_logs`.
+2. **Operational logging**: `logger.warning(...)` на
+   уровне `WARNING` с сообщением вида
+   `"<producer>: structured event <event_type> not persisted
+   (DbLoggingService <reason>)"`. Уровень WARNING —
+   **единый** для всех producer'ов (не DEBUG,
+   не INFO, не ERROR).
+3. **Business operation**: продолжается успешно —
+   observability не должна ломать бизнес-операцию.
+
+Никакого fallback direct INSERT в
+`agent_gateway_logs` ни при каких обстоятельствах
+— это инвариант, не оптимизация.
+
+Реализуется через **единую helper-функцию**
+`DbLoggingService.try_log_event(svc, log_event,
+*, producer: str, event_type: str) -> bool`,
+публикуемую как часть `DbLoggingService` API.
+Каждый producer (включая `ContextCompactionService`,
+`PgDuckDbSyncService`, `DuckDbCacheStore`,
+`PreloadService`, `ApplicationContext`-замены
+`_record_sync_skipped`) вызывает именно её, а
+не собственную обёртку с собственным уровнем
+логирования.
+
+#### Scenario: Producer при недоступности сервиса
+
+- **WHEN** любой producer пытается записать
+  structured event и `db_logging_service is None`
+  или `db_logging_service.is_running() == False`
+- **THEN** `DbLoggingService.try_log_event(...)` SHALL
+  быть silent no-op (событие не записано).
+- **AND** `logger.warning(...)` SHALL быть вызван
+  ровно один раз с producer-префиксом и event_type.
+- **AND** producer-вызов (например,
+  `ContextCompactionService.compact(...)`,
+  `PgDuckDbSyncService._log_sync_event(...)`,
+  `PreloadService._emit_health_event(...)`)
+  SHALL не бросить исключение и не вызвать
+  прямой SQL INSERT.
+
+#### Scenario: Все producer'ы используют один и тот же WARNING-уровень
+
+- **WHEN** тест `tests/test_unified_event_logging_pipeline.py::TestDbLoggingServiceUnavailableBehavior`
+  инспектирует `caplog.records` при недоступности
+  сервиса для каждого producer'а
+- **THEN** ВСЕ зафиксированные сообщения
+  SHALL иметь `levelname == "WARNING"`.
+- **AND** НЕ должно быть записей уровня `DEBUG`,
+  `INFO`, `ERROR` или `EXCEPTION` от producer'ов
+  в этом сценарии.
 
 ### Requirement: context_compacted через DbLoggingService
 
@@ -97,11 +215,13 @@ The system SHALL записывать событие `context_compacted`
   завершил сжатие успешно
 - **THEN** `compact(...)` SHALL вернуть успешный
   отчёт (`ok=True`, `archived_msgs > 0`).
-- **AND** `DbLoggingService.log_event(...)` SHALL
-  быть **no-op** (событие не записано).
-- **AND** loguru-логгер SHALL зафиксировать
-  факт «structured event persistence unavailable»
-  (без `agent_gateway_logs` write).
+- **AND** `DbLoggingService.try_log_event(...)` SHALL
+  быть silent no-op (событие не записано).
+- **AND** `logger.warning(...)` SHALL быть вызван
+  ровно один раз с сообщением вида
+  `"ContextCompactionService: structured event
+  context_compacted not persisted (DbLoggingService
+  <reason>)"` (НЕ DEBUG, НЕ INFO, НЕ ERROR).
 - **AND** прямой `INSERT INTO "<schema>"."<table>"`
   SHALL NOT быть выполнен.
 
@@ -141,9 +261,12 @@ The system SHALL записывать все sync-события PG→DuckDB
 - **AND** sync-операция SHALL NOT быть прервана
   (sync-код не должен падать из-за отсутствия
   observability-сервиса).
-- **AND** loguru SHALL зафиксировать потерю события
-  на уровне `DEBUG` (не `WARN` / `ERROR` —
-  это штатный режим для тестов и standalone).
+- **AND** `DbLoggingService.try_log_event(...)` SHALL
+  зафиксировать потерю события на уровне
+  `WARNING` (НЕ DEBUG, НЕ INFO, НЕ ERROR) —
+  единый уровень для всех producer'ов согласно
+  Requirement «Uniform logging behavior при
+  недоступности сервиса».
 
 #### Scenario: preload health-summary через DbLoggingService
 
@@ -168,11 +291,20 @@ The system SHALL NOT иметь fallback-механизма
 записи в `agent_gateway_logs` через прямой SQL,
 когда `DbLoggingService` отсутствует или не запущен.
 Если `DbLoggingService` недоступен, structured event
-SHALL NOT быть записан (silent no-op + loguru-фиксация).
-Любой runtime-код, который раньше «падал» в
+SHALL NOT быть записан (silent no-op +
+loguru-фиксация на уровне `WARNING` через
+`DbLoggingService.try_log_event`). Любой runtime-код,
+который раньше «падал» в
 `event_log.record_event` / `record_sync_event` /
 `emit_sync_event` как fallback, SHALL быть переписан
-на silent no-op.
+на silent no-op через `try_log_event`.
+
+Запрещено вводить **любые другие persistence-хелперы**,
+которые могли бы обойти `DbLoggingService` —
+ни в виде deprecated-обёрток, ни в виде
+«infrastructure safety net», ни в виде
+fallback на `agent_question_runs`-таблицу
+(это та же `DbLoggingService` ответственность).
 
 #### Scenario: Приложение стартует до готовности DbLoggingService
 
@@ -197,11 +329,16 @@ SHALL NOT быть записан (silent no-op + loguru-фиксация).
   соответственно отсутствует
 - **THEN** утилита SHALL использовать только
   loguru (`logger.info` / `logger.warning`) для
-  диагностики.
+  операционной диагностики в терминал.
 - **AND** утилита SHALL NOT импортировать
   `workspace.utils.event_log` (модуль удалён) и
   SHALL NOT выполнять прямой `INSERT INTO
   "<schema>"."<table>"`.
+- **AND** если утилита желает структурно
+  залогировать событие — она обязана создать
+  собственный экземпляр `DbLoggingService` через
+  composition root (не global singleton, не
+  fallback на прямой INSERT).
 
 #### Scenario: Тесты без DbLoggingService
 

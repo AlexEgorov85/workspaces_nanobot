@@ -45,9 +45,18 @@ structured agent events в `agent_gateway_logs`**:
   concerns** (UI-уведомление vs observability-trail).
 
 `context_compacted` обязан жить в долговечном журнале
-независимо от `notify_in_history` — иначе `history_search`
-теряет событие для recovery после compaction в тех
-конфигурациях, где UI-уведомление отключено.
+независимо от `notify_in_history` — сейчас при
+`notify_in_history=false` structured event
+`context_compacted` в `agent_gateway_logs` не
+создаётся (факт подтверждается
+`tests/test_context_compaction.py:837-854`,
+`TestNotifyRecordsEventLog::test_notify_skips_event_log_when_notify_disabled`).
+То есть `history_search(event_type="context_compacted")`
+в этом режиме возвращает пустой результат. После
+изменения событие должно создаваться в
+`agent_gateway_logs` всегда при `enabled=True`,
+а `notify_in_history` управляет только UI-стороной
+(заметкой в `agent_conversation_messages`).
 
 ## What Changes
 
@@ -162,15 +171,32 @@ MINOR с пометкой `Changed` достаточен.
   - `lib/core/application_context.py` —
     `_make_compaction_service` принимает
     `db_logging_service` и пробрасывает его в
-    `ContextCompactionService`; `_record_sync_skipped`
-    заменяется на вызов
-    `db_logging_service.log_sync_event(...)` (silent no-op
-    если `db_logging_service is None` / не запущен —
-    без прямого INSERT).
+    `ContextCompactionService` явным kwarg
+    (composition root); `_record_sync_skipped` —
+    фиксированный контракт: если `db_logging_service`
+    сконфигурирован и запущен — вызвать
+    `db_logging_service.log_sync_event(...)`; если нет
+    — loguru-warning на уровне `WARNING` через
+    `logger.warning(...)` (без записи в
+    `agent_gateway_logs`, **никакого** прямого INSERT
+    ни в каком режиме).
   - `lib/services/pg_duckdb_sync_service.py` —
     `_log_sync_event` использует
     `self._db_logging_service.log_sync_event(...)` напрямую,
     без `emit_sync_event`.
+  - `lib/services/runtime_patcher.py` —
+    `patch_compaction_tracking` принимает `db_logging_service`
+    явным kwarg и передаёт его в
+    `ContextCompactionService(...)`. Patch остаётся
+    активным при `gateway.compact.enabled=true`,
+    **включая** режим `notify_in_history=false`:
+    раньше весь patch отключался при
+    `notify_in_history=false`
+    (`runtime_patcher.py:1882-1883`), что гасило
+    и `_record_event_log` для auto-compaction.
+    После изменения отключается только
+    `_write_history_notice`, а `context_compacted`
+    остаётся в `agent_gateway_logs`.
   - `lib/services/duckdb_cache_store.py` —
     `_emit_sync_event` (внутренняя обёртка) удаляется;
     caller's используют инжектированный
