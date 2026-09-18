@@ -314,24 +314,30 @@ entry.request_id`. Lock в `register_request` обеспечивает
   эмиттируется
 - THEN в БД SHALL быть записано `user_id="bob"`.
 
-### Requirement: subagent inherits parent user_id
+### Requirement: subagent propagates parent user_id explicitly
 
-Когда subagent эмиттирует событие `subagent_run_finished` (или
-любое событие в рамках subagent-прогона), оно SHALL нести
-`user_id` родительского request. Subagent MUST NOT полагаться на
-автозаполнение через `_request_index` для своего `session_key`,
-потому что под-pipeline может менять контекст — единственный
-надёжный путь — явная передача `user_id` родителя в `LogEvent`.
+`_SubagentLoggingHook` MUST явно пробрасывать `user_id`
+родительского request в каждый `LogEvent`, который хук
+создаёт вне нормального request-index resolution path
+(subagent-pipeline может иметь собственный `session_key`
+или сменённый контекст — полагаться на автозаполнение в
+`_enqueue` для subagent-событий ненадёжно). Это касается
+событий, которые `_SubagentLoggingHook` создаёт сам
+(например, `subagent_run_finished`); остальные события
+subagent-прогона (tool_call, llm_call, и т.п.), идущие
+через стандартные `log_*` методы с явным `session_id` и
+`request_id`, проходят через обычный механизм
+`DbLoggingService.register_request` + request_id matching
+в `_enqueue`.
 
-#### Scenario: subagent inherits parent user_id
+#### Scenario: subagent_run_finished carries parent user_id
 
 - GIVEN parent request выполняется для user_id="alice"
-- AND subagent запускается через
-  `RuntimePatcher._SubagentLoggingHook`
-- WHEN `_SubagentLoggingHook._finalize` эмиттирует
-  `subagent_run_finished`
+- AND `_SubagentLoggingHook._finalize` создаёт
+  `LogEvent(event_type="subagent_run_finished", ...)`
+- WHEN этот `LogEvent` ставится в очередь
 - THEN `LogEvent.user_id` SHALL быть `"alice"`
-- AND не должно быть способа, при котором subagent сменил бы
+- AND не должно быть способа, при котором хук сменил бы
   `user_id` на собственный identity-store.
 
 #### Scenario: previous request user_id does not leak into next request
@@ -416,33 +422,30 @@ Tool API SHALL NOT принимать `user_id` (ни прямо, ни косв�
 ### Requirement: RequestContext exposes user identity
 
 Реализация `history_search` MUST получать идентификатор
-пользователя из текущего `RequestContext` через поле,
-содержащее `str | None` идентификатор отправителя. В
-nanobot 0.3.0 это поле `sender_id`. Поскольку контрактный
-тест `tests/contract/test_tools_and_context.py:30-35`
-фиксирует лишь консервативное подмножество полей
-`(channel, chat_id, message_id, session_key, runtime)`,
-эта change вводит **собственный** контрактный тест в нашей
-зоне, подтверждающий наличие identity-поля в RequestContext.
+пользователя из `nanobot.agent.tools.context.RequestContext`
+через поле `sender_id: str | None`. Имя поля фиксируется
+через единую точку `_current_user_id()` в
+`history_search_tool.py`. Прямой доступ к `sender_id` из
+других мест запрещён — это инкапсулирует зависимость от
+конкретной версии nanobot 0.3.0 в одной функции.
 
-Имя поля фиксируется через единую точку `_current_user_id()`
-в `history_search_tool.py`; сам контрактный тест SHALL
-проверять наличие поля с типом, совместимым с `str | None`,
-оставляя возможности для переименования в будущих версиях
-nanobot через явный alias в реализации.
+Если в будущей версии nanobot поле будет переименовано,
+эта change **не пытается** поддерживать обратную
+совместимость через alias: адаптация делается в отдельном
+change, который обновляет nanobot-зависимость и `_current_user_id()`
+вместе с этим requirement.
 
-#### Scenario: RequestContext provides user identity field
+#### Scenario: RequestContext provides sender_id field
 
 - GIVEN nanobot установлен согласно `requirements.txt`
-- WHEN выполняется новый contract test
+- WHEN выполняется contract test
   `tests/contract/test_history_search_identity_contract.py`
 - THEN импорт `nanobot.agent.tools.context.RequestContext`
   SHALL быть успешным
 - AND итерация `dataclasses.fields(RequestContext)` SHALL
-  содержать поле с именем из фиксированного списка
-  (`sender_id` на момент реализации), с типом, совместимым
-  с `str | None`
-- AND тест SHALL падать при отсутствии поля — это сигнал,
-  что спека больше не соответствует установленной версии
-  nanobot и требует отдельного change для обновления
-  identity-store alias.
+  содержать поле `sender_id`
+- AND аннотация `sender_id` SHALL быть совместима с `str | None`
+  (т.е. `str`, `Optional[str]`, `str | None`, `Union[str, None]`)
+- AND тест SHALL падать при отсутствии поля или несовместимой
+  аннотации — это сигнал, что change не соответствует
+  установленной версии nanobot и требует отдельной миграции.
