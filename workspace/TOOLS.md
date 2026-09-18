@@ -50,8 +50,16 @@ This file documents non-obvious constraints and usage patterns.
 - `tool_name` (опц.) — имя инструмента для фильтрации `tool_call` /
   `tool_result`. Удобно для поиска истории конкретного инструмента.
 - `since` / `until` (опц.) — ISO-8601 таймстамп.
-- `session_scope` (опц., дефолт `current`) — `current` (только текущая
-  сессия) или `all` (по всем сессиям).
+- `session_scope` (опц., дефолт `current`) — область поиска:
+  - `current` — только текущая сессия (по `session_id` из `RequestContext.session_key`).
+    При отсутствии identity-store возвращает
+    `{"status": "error", "error_type": "missing_session_identity"}`,
+    SQL-запрос НЕ выполняется.
+  - `all` — все сессии **текущего пользователя** (по `user_id` из
+    `RequestContext.sender_id`). Не глобальный поиск по всем пользователям.
+    При отсутствии identity-store возвращает
+    `{"status": "error", "error_type": "missing_user_identity"}`,
+    SQL-запрос НЕ выполняется.
 - `limit` (опц.) — максимум событий (по конфигу `max_rows`).
 - `offset` (опц., дефолт 0) — пропустить первые `offset` событий
   после сортировки `ORDER BY timestamp DESC, id DESC`. Продолжать
@@ -99,6 +107,11 @@ This file documents non-obvious constraints and usage patterns.
   и пути), а НЕ выдуманные типы (`file_attached`, `file_created`,
   `document_summarized` — таких нет в журнале).
 - Если результат пустой — отвечай «не найдено в истории», не выдумывай.
+- `history_search` **не выполняет глобальный поиск по всем пользователям**:
+  `session_scope="all"` — это все сессии текущего пользователя, а не
+  вся БД. Без identity-store запрос возвращает структурированную
+  ошибку (`missing_user_identity`) и SQL не выполняется. Это
+  закрывает cross-user leakage (security boundary).
 - `offset`-пагинация **не snapshot-consistent**: при INSERT'е новых
   событий между запросами более новые строки попадают в начало
   выборки. Если нужна строгая консистентность — это отдельный

@@ -178,6 +178,14 @@ def make_db_logging_hook_factory(
     def _factory(turn_context: Any) -> DatabaseLoggingHook:
         session_key = getattr(turn_context, "session_key", None) or None
         request_id = None
+        # ``user_id`` берём из identity-store текущего request (если есть)
+        # и пробрасываем в ``register_request``, чтобы индекс хранил
+        # пару {request_id, user_id} — это security boundary для
+        # ``history_search(session_scope="all")``. При отсутствии
+        # identity-store (websocket/streamlit без RequestContext, тесты) —
+        # ``user_id`` остаётся ``None``, события пишутся с ``user_id IS NULL``
+        # и НЕ участвуют в ``scope='all'`` (безопасный default).
+        user_id = _current_request_sender_id()
         if session_key and db_logging_service is not None:
             request_id = db_logging_service.get_request_id(session_key)
             # Если inbound не зарегистрировал вопрос (websocket без message_id
@@ -187,7 +195,9 @@ def make_db_logging_hook_factory(
                 request_id = str(uuid.uuid4())
                 try:
                     db_logging_service.register_request(
-                        session_key, request_id, agent_id=agent_id,
+                        session_key, request_id,
+                        user_id=user_id,
+                        agent_id=agent_id,
                     )
                 except Exception:
                     pass
@@ -200,6 +210,30 @@ def make_db_logging_hook_factory(
         )
 
     return _factory
+
+
+def _current_request_sender_id() -> str | None:
+    """``RequestContext.sender_id`` текущего request (или ``None``).
+
+    Единственная точка обращения к identity-store из
+    ``make_db_logging_hook_factory``. Инкапсулирует зависимость от
+    nanobot 0.3.0: если поле будет переименовано, адаптация делается
+    в этой функции.
+    """
+    try:
+        from nanobot.agent.tools.context import current_request_context
+    except Exception:
+        return None
+    try:
+        ctx = current_request_context()
+    except Exception:
+        return None
+    if ctx is None:
+        return None
+    sender_id = getattr(ctx, "sender_id", None)
+    if isinstance(sender_id, str) and sender_id:
+        return sender_id
+    return None
 
 
 class DatabaseLoggingHook(BaseToolTrackingHook):

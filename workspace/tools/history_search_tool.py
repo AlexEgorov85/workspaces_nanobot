@@ -28,6 +28,19 @@
 
 Контракт (см. ``openspec/specs/tools-history-search``):
 
+  * **Scope isolation (security)**: ``session_scope="current"`` фильтрует
+    по ``session_id`` текущего запроса (из RequestContext.session_key);
+    ``session_scope="all"`` фильтрует по ``user_id`` текущего запроса
+    (из RequestContext.sender_id). Это закрывает cross-user leakage:
+    ``scope="all"`` возвращает только события того же пользователя, не
+    глобальную выборку. При отсутствии identity для соответствующего
+    scope tool возвращает структурированную ошибку (``missing_session_identity``
+    / ``missing_user_identity``), и SQL-запрос НЕ выполняется.
+  * **Identity source**: единственный — ``RequestContext`` из
+    ``nanobot.agent.tools.context``. Имя поля фиксируется через приватный
+    helper ``_current_user_id()`` (для ``scope="all"``) — никаких обращений
+    к ``sender_id``/``session_id``/``chat_id``/``actor``/``payload`` из других
+    мест. Это инкапсулирует зависимость от nanobot 0.3.0.
   * **Пагинация**: ``offset`` (целое ≥ 0, дефолт 0) пропускает первые
     ``offset`` строк после ``ORDER BY timestamp DESC, id DESC``. SQL
     запрашивает ``LIMIT effective_limit + 1`` строк; лишняя строка
@@ -45,6 +58,9 @@
     отобранных событий была отброшена truncation'ом.
   * **next_offset**: ``offset + count`` — после truncation-проходов,
     чтобы продолжить пагинацию без пропуска отброшенных событий.
+  * **Без утечки ``user_id``**: ``user_id`` НЕ возвращается в payload'е
+    события и НЕ принимается как параметр tool'а — это внутренний
+    security attribute.
 """
 
 from __future__ import annotations
@@ -248,16 +264,22 @@ class HistorySearchTool(Tool):
             "Supports text query (ILIKE), event_type filter, tool_name filter "
             "(only meaningful for tool_call/tool_result; e.g. tool_name='compact_context' "
             "finds all calls/results of compact_context), time range "
-            "(since/until ISO-8601), session_scope ('current' default | 'all'), "
-            "limit, offset (pagination; continue via next_offset from previous "
-            "response, NOT offset+limit when results_truncated=true). "
+            "(since/until ISO-8601), session_scope ('current' default = "
+            "current session_id; 'all' = all sessions of the current user; "
+            "NEVER a global cross-user search). When identity-store is "
+            "unavailable for the requested scope (e.g. outside a request), "
+            "the tool returns a structured error and does NOT execute the "
+            "SQL query (missing_session_identity / missing_user_identity). "
+            "limit, offset (pagination; continue via next_offset from "
+            "previous response, NOT offset+limit when results_truncated=true). "
             "Returns JSON {status, count, session_scope, has_more, "
             "next_offset, results_truncated, truncated (deprecated alias), "
             "events:[{event_id, timestamp, event_type, name, level, summary, "
             "payload, payload_truncated}]}; event_id — UUID строки "
             "agent_gateway_logs, payload — JSON-string. has_more=true если "
             "есть следующая страница (композитная формула db_has_more OR "
-            "results_truncated). After getting results: parse payload "
+            "results_truncated). user_id is NEVER returned in the response "
+            "(security boundary). After getting results: parse payload "
             "(fields path/doc_id/args/result usually survive truncation), "
             "reuse any found path/doc_id instead of redoing work; if empty, "
             "say 'not found in history' — do not fabricate."
@@ -276,10 +298,38 @@ class HistorySearchTool(Tool):
         offset: int | None = None,
         **_kwargs: Any,
     ) -> str:
+        if session_scope not in ("current", "all"):
+            return self._error(
+                "invalid_session_scope",
+                f"session_scope must be 'current' or 'all', got {session_scope!r}",
+            )
+
         allow_all = session_scope == "all"
-        session_id = None
-        if not allow_all:
+
+        if allow_all:
+            user_id = _current_user_id()
+            if not user_id:
+                return self._error(
+                    "missing_user_identity",
+                    (
+                        "session_scope='all' требует идентификатор пользователя "
+                        "из текущего request context (RequestContext.sender_id); "
+                        "identity-store недоступен или sender_id is None. "
+                        "Без identity tool не выполняет SQL-запрос и не "
+                        "возвращает чужие события."
+                    ),
+                )
+        else:
             session_id = _current_session_key()
+            if not session_id:
+                return self._error(
+                    "missing_session_identity",
+                    (
+                        "session_scope='current' требует ключ текущей сессии "
+                        "из RequestContext.session_key; identity-store "
+                        "недоступен."
+                    ),
+                )
 
         original_offset = max(0, int(offset or 0))
         effective_limit = min(int(limit or self.config.max_rows), self.config.max_rows)
@@ -287,9 +337,16 @@ class HistorySearchTool(Tool):
         clauses: list[str] = []
         params: list[Any] = []
 
-        clauses.append("(%s OR session_id = %s)")
-        params.append(allow_all)
-        params.append(session_id or "")
+        if allow_all:
+            # ``user_id = %s`` — единственный security boundary для
+            # cross-session search. Без ``OR session_id = %s`` / ``WHERE TRUE``:
+            # фильтрация строго по user_id. Если user_id NULL в БД —
+            # строка не попадёт в выборку (безопасное поведение, см. V004).
+            clauses.append("user_id = %s")
+            params.append(user_id)
+        else:
+            clauses.append("session_id = %s")
+            params.append(session_id)
 
         clauses.append("(%s IS NULL OR event_type = %s)")
         params.append(event_type)
@@ -492,6 +549,38 @@ def _current_session_key() -> str | None:
         return current_request_session_key()
     except Exception:
         return None
+
+
+def _current_user_id() -> str | None:
+    """Получить идентификатор текущего пользователя из RequestContext.
+
+    Единственная точка обращения к ``RequestContext.sender_id`` в
+    history_search_tool. Инкапсулирует зависимость от nanobot 0.3.0:
+    если в будущей версии поле будет переименовано, адаптация делается
+    через эту функцию (см. contract-тест
+    ``tests/contract/test_history_search_identity_contract.py``).
+
+    Returns:
+        ``str`` — если ``RequestContext`` доступен и ``sender_id`` задан;
+        ``None`` — если контекста нет (вне оборота) или ``sender_id is None``.
+
+    Никаких fallback'ов на другие поля (``session_id``, ``chat_id``,
+    ``actor``, ``payload``) — отсутствие identity = жёсткий отказ.
+    """
+    try:
+        from nanobot.agent.tools.context import current_request_context
+    except Exception:
+        return None
+    try:
+        ctx = current_request_context()
+    except Exception:
+        return None
+    if ctx is None:
+        return None
+    sender_id = getattr(ctx, "sender_id", None)
+    if isinstance(sender_id, str) and sender_id:
+        return sender_id
+    return None
 
 
 def _log_table() -> tuple[str, str]:

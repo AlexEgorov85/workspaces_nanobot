@@ -31,6 +31,76 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def try_log_event(
+    svc: Any | None,
+    log_event: LogEvent,
+    *,
+    producer: str,
+    event_type: str,
+) -> bool:
+    """Defensive helper для producer'ов: попробовать записать событие.
+
+    Используется из sync-путей (``PgDuckDbSyncService._log_sync_event``,
+    ``DuckDbCacheStore`` publish-events, ``PreloadService._emit_health_event``,
+    ``ContextCompactionService._record_event_log`` после `_notify`-разделения
+    concerns) и других мест, где прямой вызов ``svc.log_event`` мог бы
+    упасть с ``AttributeError`` при ``svc is None`` или ``AttributeError``
+    при ``not svc.is_running()``.
+
+    Контракт:
+
+      * ``svc is None`` → ``logger.warning(...)`` на уровне **WARNING**
+        (НЕ DEBUG, НЕ INFO; единый для всех producer'ов) и возврат ``False``.
+      * ``not svc.is_running()`` → ``logger.warning(...)`` (тот же уровень)
+        и возврат ``False``.
+      * Иначе — ``svc.log_event(log_event)`` и возврат его bool-результата
+        (``True`` — событие в очереди, ``False`` — переполнение).
+
+    Семантика: ``False`` для бизнеса — **no-op** (не raise, не retry,
+    не fallback INSERT). Producer продолжает работу; observability просто
+    теряет одно событие. WARNING-уровень даёт операционную видимость
+    сбоя конвейера без шума в обычной работе (в отличие от DEBUG, который
+    при тихом запуске без logging ничего не покажет, и в отличие от INFO,
+    который был бы избыточным).
+
+    Args:
+        svc: ``DbLoggingService`` или ``None``.
+        log_event: готовое ``LogEvent`` для постановки в очередь.
+        producer: имя producer'а для WARNING-сообщения (например,
+            ``"PgDuckDbSyncService"``).
+        event_type: имя event_type для WARNING-сообщения (используется
+            ``log_event.event_type`` если не передан).
+
+    Returns:
+        ``True`` если событие поставлено в очередь, ``False`` иначе
+        (сервис недоступен / очередь переполнена).
+    """
+    if svc is None:
+        logger.warning(
+            "%s: drop event_type=%s (DbLoggingService is None)",
+            producer, event_type,
+        )
+        return False
+    try:
+        running = bool(svc.is_running())
+    except Exception:
+        running = False
+    if not running:
+        logger.warning(
+            "%s: drop event_type=%s (DbLoggingService not running)",
+            producer, event_type,
+        )
+        return False
+    try:
+        return bool(svc.log_event(log_event))
+    except Exception as exc:
+        logger.warning(
+            "%s: log_event failed for event_type=%s: %s",
+            producer, event_type, exc,
+        )
+        return False
+
+
 def _json_safe(value: Any) -> Any:
     """Рекурсивно привести значение к JSON-серизуемому виду.
 
@@ -62,6 +132,14 @@ class LogEvent:
     Контекст вопроса (user_id/agent_id/is_subagent/parent_*) живёт в
     отдельной таблице agent_question_runs (см. upsert_question_run) и здесь
     не дублируется — только request_id для связи.
+
+    Поле ``user_id`` хранится в ``agent_gateway_logs`` явно как security
+    boundary для ``history_search(session_scope="all")``. Это намеренное
+    исключение из правила "identity только в ``agent_question_runs``":
+    без него ``scope="all"`` требует JOIN на каждый поиск, а сам факт
+    JOIN'а по чужой сессии открывает окно для утечки. Колонка
+    заполняется через ``DbLoggingService`` явно (от producer'а или через
+    request_id matching в ``_enqueue``) и через backfill-миграцию V004.
     """
 
     event_type: str
@@ -73,6 +151,7 @@ class LogEvent:
     payload: dict | None = None
     metadata: dict | None = None
     request_id: str | None = None
+    user_id: str | None = None
     name: str | None = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     queued_at: float | None = None
@@ -163,11 +242,18 @@ class DbLoggingService:
         }
 
         # Индекс «текущий вопрос»: session_key -> контекст вопроса.
-        # Позволяет пронести request_id/user_id/chat_id/parent_request_id
+        # Парная запись {request_id, user_id} — обе поля обновляются
+        # атомарно под _request_index_lock в register_request. Позволяет
+        # пронести request_id/user_id/chat_id/parent_request_id
         # на все события вопроса (tool_call/run_finished/outbound),
         # даже если сами события не несут этих полей.
         # В рамках сессии прогоны последовательны, разные сессии имеют
         # разные ключи — коллизий нет.
+        # ``user_id`` денормализован для security boundary в
+        # ``history_search(session_scope="all")``. ``get_request_user_id``
+        # НЕ вводится публично — индекс читается только внутри ``_enqueue``
+        # (через request_id matching), чтобы ни один компонент не получил
+        # бы способ резолвить чужой identity по session_key.
         self._request_index: dict[str, dict[str, str | None]] = {}
         self._request_index_lock = threading.Lock()
         self._schema_ok = False
@@ -245,14 +331,24 @@ class DbLoggingService:
     ) -> bool:
         """Зарегистрировать контекст вопроса (upsert в agent_question_runs).
 
-        Также сохраняет session_key → request_id в индексе, чтобы последующие
-        tool/run/outbound-события знали request_id текущего вопроса.
+        Также сохраняет session_key → {request_id, user_id} в индексе,
+        чтобы последующие tool/run/outbound-события знали request_id
+        текущего вопроса и могли получить ``user_id`` через request_id
+        matching в ``_enqueue`` (для security boundary
+        ``history_search(session_scope="all")``).
+
+        Пара ``{request_id, user_id}`` обновляется атомарно под
+        ``_request_index_lock`` — параллельный reader видит либо
+        полностью старое состояние, либо полностью новое.
         """
         if not request_id:
             return False
         if session_key:
             with self._request_index_lock:
-                self._request_index[session_key] = request_id
+                self._request_index[session_key] = {
+                    "request_id": request_id,
+                    "user_id": user_id,
+                }
         return self._enqueue(_QuestionRunRecord(
             request_id=request_id,
             session_id=session_key,
@@ -274,7 +370,11 @@ class DbLoggingService:
         if not session_key:
             return None
         with self._request_index_lock:
-            return self._request_index.get(session_key)
+            entry = self._request_index.get(session_key)
+            if not isinstance(entry, dict):
+                return None
+            value = entry.get("request_id")
+            return value if isinstance(value, str) else None
 
     def clear_request(self, session_key: str | None) -> None:
         """Снять привязку вопроса по завершении прогона."""
@@ -491,11 +591,13 @@ class DbLoggingService:
     ) -> bool:
         """Записать событие из PG→DuckDB sync-пути.
 
-        Аналог :func:`workspace.utils.event_log.record_sync_event`, но
-        асинхронный (через пул ``DbLoggingService``). Используется из
-        worker-потока ``PgDuckDbSyncService``, когда ``db_logging_service``
-        уже доступен (``ApplicationContext.start()`` отработал). Если
-        сервис недоступен — caller должен упасть в ``event_log.record_sync_event``.
+        Используется из worker-потока ``PgDuckDbSyncService`` (и аналогичных).
+        При отсутствии сервиса caller должен использовать
+        :func:`DbLoggingService.try_log_event` (defensive helper), который
+        даёт no-op for business + operational WARNING, без fallback INSERT
+        в ``agent_gateway_logs``. Старый sync-fallback (ранее
+        ``record_sync_event`` в модуле ``workspace.utils.event_log``)
+        ликвидирован change'ом ``unify-agent-event-logging-pipeline``.
         """
         return self.log_event(LogEvent(
             event_type=event_type,
@@ -558,10 +660,33 @@ class DbLoggingService:
     def _enqueue(self, event: LogEvent) -> bool:
         """Неблокирующе положить событие в очередь.
 
+        Перед постановкой в очередь резолвит ``event.user_id`` по трём
+        ветвям (security boundary для ``history_search(scope="all")``):
+
+          1. Explicit value wins. Если producer явно задал ``user_id`` —
+             используется оно, индекс не читается. Это закрывает кейс
+             subagent'а, который должен прокинуть identity родителя
+             вне обычного request-index resolution path.
+          2. Match by request_id. Если ``event.user_id is None`` AND
+             ``event.request_id is not None`` AND индекс для
+             ``event.session_id`` содержит запись с тем же
+             ``request_id`` — подставляется ``user_id`` из индекса.
+          3. No inference. Иначе (``request_id is None``, request_id не
+             совпадает, или session_key отсутствует в индексе) —
+             ``event.user_id`` остаётся ``None``. Событие записывается
+             с ``user_id IS NULL`` и НЕ участвует в ``scope="all"``.
+
+        Matching ОБЯЗАН идти по ``event.request_id == entry["request_id"]``
+        (а не по ``session_id`` alone): между созданием события и его
+        enqueue может произойти ``register_request`` для следующего
+        request в той же ``session_key``, и без сверки по ``request_id``
+        отложенное событие получило бы чужой ``user_id``.
+
         Returns:
             ``True`` — событие в очереди, ``False`` — очередь переполнена
             (``queue_full++`` в статистике). Никогда не блокирует.
         """
+        self._resolve_event_user_id(event)
         event.queued_at = time.time()
         try:
             self._queue.put_nowait(event)
@@ -572,6 +697,30 @@ class DbLoggingService:
         with self._state_lock:
             self._stats["queued"] += 1
         return True
+
+    def _resolve_event_user_id(self, event: LogEvent) -> None:
+        """Резолв ``event.user_id`` из индекса (security boundary path).
+
+        Вызывается из :py:meth:`_enqueue` перед постановкой события в
+        очередь. Не делает ничего, если ``user_id`` уже задан producer'ом;
+        иначе пытается сопоставить ``event.request_id`` с текущим
+        request в индексе для ``event.session_id``. Никогда не выводит
+        ``user_id`` только по ``session_id`` — это закрывает класс атак
+        «событие-сирота получает текущего пользователя сессии».
+        """
+        if event.user_id is not None:
+            return
+        if event.request_id is None or event.session_id is None:
+            return
+        with self._request_index_lock:
+            entry = self._request_index.get(event.session_id)
+        if not isinstance(entry, dict):
+            return
+        if entry.get("request_id") != event.request_id:
+            return
+        resolved = entry.get("user_id")
+        if isinstance(resolved, str):
+            event.user_id = resolved
 
     def _worker(self) -> None:
         """Главный цикл worker-потока: drain очереди → батч → flush.
@@ -749,11 +898,11 @@ class DbLoggingService:
             psycopg2.extras.execute_batch(
                 cur,
                 f'INSERT INTO "{self._schema}"."{self._table_name}" '
-                '(id, level, event_type, session_id, channel, actor, summary, payload, metadata, '
-                'request_id, name) '
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                '(id, level, event_type, user_id, session_id, channel, actor, summary, payload, '
+                'metadata, request_id, name) '
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 [(
-                    e.id, e.level, e.event_type, e.session_id, e.channel, e.actor,
+                    e.id, e.level, e.event_type, e.user_id, e.session_id, e.channel, e.actor,
                     e.summary,
                     psycopg2.extras.Json(e.payload or {}),
                     psycopg2.extras.Json(e.metadata or {}),

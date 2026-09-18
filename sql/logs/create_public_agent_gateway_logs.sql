@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS public.agent_gateway_logs (
     session_id   VARCHAR(256),
     channel      VARCHAR(64),
     actor        VARCHAR(32),
+    user_id      VARCHAR(256),
     name         VARCHAR(256),
 
     summary      TEXT,
@@ -30,6 +31,9 @@ CREATE TABLE IF NOT EXISTS public.agent_gateway_logs (
 )
 DISTRIBUTED BY (request_id);
 
+CREATE INDEX IF NOT EXISTS agent_gateway_logs_user_id_timestamp_idx
+    ON public.agent_gateway_logs (user_id, "timestamp" DESC);
+
 COMMENT ON TABLE  public.agent_gateway_logs IS 'Структурированный журнал событий агента. Связан с agent_question_runs по request_id.';
 COMMENT ON COLUMN public.agent_gateway_logs.id          IS 'PK события (UUID, генерируется в приложении).';
 COMMENT ON COLUMN public.agent_gateway_logs."timestamp" IS 'Время события.';
@@ -39,7 +43,9 @@ COMMENT ON COLUMN public.agent_gateway_logs.request_id  IS 'FK-логическ�
 COMMENT ON COLUMN public.agent_gateway_logs.session_id  IS 'Денормализованный channel:chat_id для удобства.';
 COMMENT ON COLUMN public.agent_gateway_logs.channel     IS 'Канал (telegram/cli/etc).';
 COMMENT ON COLUMN public.agent_gateway_logs.actor       IS 'Кто инициировал событие (user/agent/system).';
+COMMENT ON COLUMN public.agent_gateway_logs.user_id     IS 'Идентификатор пользователя (sender_id из RequestContext). Денормализован из agent_question_runs.user_id как security boundary для history_search(session_scope="all"). Заполняется DbLoggingService явно (от producer''а или через request_id matching в _enqueue) либо backfill-миграцией V004.';
 COMMENT ON COLUMN public.agent_gateway_logs.name        IS 'Сущность события (категориальный ключ для фильтрации, никогда не NULL): tool_call/tool_result — имя tool; llm_call — модель; inbound — sender/user; outbound_final/outbound_intermediate — "assistant"; run_finished — "run"; subagent_run_finished — task_id; error — "error"; context_compacted и др. (через event_log.record_event) — переданное имя.';
 COMMENT ON COLUMN public.agent_gateway_logs.summary     IS 'Человекочитаемый сниппет события: обрезанный content (<=200), текст ошибки (для tool_result с status=error) или статус (finish_reason).';
 COMMENT ON COLUMN public.agent_gateway_logs.payload     IS 'JSONB: детальные данные события.';
 COMMENT ON COLUMN public.agent_gateway_logs.metadata    IS 'JSONB: дополнительные метаданные.';
+COMMENT ON INDEX  public.agent_gateway_logs_user_id_timestamp_idx IS 'Обслуживает access-pattern history_search(session_scope="all"): WHERE user_id = ? ORDER BY "timestamp" DESC.';

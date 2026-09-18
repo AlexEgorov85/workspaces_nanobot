@@ -13,7 +13,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "точная фраза, встречается в нескольких сессиях"
+    "description": "точная фраза, встречается в нескольких сессиях",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "exact_phrase_2",
@@ -27,7 +29,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "точная фраза 'отчёт по продажам'"
+    "description": "точная фраза 'отчёт по продажам'",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "exact_phrase_3",
@@ -41,7 +45,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "однословный запрос"
+    "description": "однословный запрос",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "exact_phrase_4",
@@ -55,7 +61,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "составная фраза"
+    "description": "составная фраза",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "exact_phrase_5",
@@ -69,7 +77,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "английский технический термин в payload"
+    "description": "английский технический термин в payload",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "filename_1",
@@ -85,7 +95,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "поиск по имени файла contract_2026_04.pdf"
+    "description": "поиск по имени файла contract_2026_04.pdf",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "filename_2",
@@ -100,7 +112,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "поиск по имени файла contract_2025_12.pdf"
+    "description": "поиск по имени файла contract_2025_12.pdf",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "filename_3",
@@ -116,7 +130,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "поиск по имени файла report_Q1_2026.xlsx"
+    "description": "поиск по имени файла report_Q1_2026.xlsx",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "filename_4",
@@ -130,7 +146,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "поиск по имени файла audit_summary.csv"
+    "description": "поиск по имени файла audit_summary.csv",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "filename_5",
@@ -144,7 +162,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "поиск по имени файла fire_safety_report.pdf"
+    "description": "поиск по имени файла fire_safety_report.pdf",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "filename_6",
@@ -160,7 +180,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "поиск по имени файла ABC-12345.txt"
+    "description": "поиск по имени файла ABC-12345.txt",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "filename_7",
@@ -176,7 +198,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "поиск по имени файла my_report_2026_final_v3.pdf"
+    "description": "поиск по имени файла my_report_2026_final_v3.pdf",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "doc_id_1",
@@ -190,7 +214,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "поиск по doc_id doc_2026_04_15_abc"
+    "description": "поиск по doc_id doc_2026_04_15_abc",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "doc_id_2",
@@ -204,7 +230,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "поиск по doc_id doc_2026_q1_summary"
+    "description": "поиск по doc_id doc_2026_q1_summary",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "doc_id_3",
@@ -218,7 +246,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "поиск по doc_id op_9876"
+    "description": "поиск по doc_id op_9876",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "tool_name_1",
@@ -234,7 +264,9 @@
     "expected_event_type": "tool_call",
     "session_scope": "all",
     "limit": null,
-    "description": "история вызовов compact_context"
+    "description": "история вызовов compact_context",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "tool_name_2",
@@ -246,7 +278,9 @@
     "expected_event_type": "tool_call",
     "session_scope": "all",
     "limit": null,
-    "description": "история вызовов vector_search"
+    "description": "история вызовов vector_search",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "tool_name_3",
@@ -258,7 +292,9 @@
     "expected_event_type": "tool_call",
     "session_scope": "all",
     "limit": null,
-    "description": "история вызовов duckdb_query"
+    "description": "история вызовов duckdb_query",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "tool_name_4",
@@ -273,7 +309,9 @@
     "expected_event_type": "tool_call",
     "session_scope": "all",
     "limit": null,
-    "description": "история вызовов read_file"
+    "description": "история вызовов read_file",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "scope_current_1",
@@ -303,7 +341,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "session_scope=all: все сессии"
+    "description": "session_scope=all: все сессии",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "event_type_only_1",
@@ -316,7 +356,9 @@
     "expected_event_type": "context_compacted",
     "session_scope": "all",
     "limit": null,
-    "description": "факт сжатия контекста (gap №1)"
+    "description": "факт сжатия контекста (gap №1)",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "event_type_only_2",
@@ -330,7 +372,9 @@
     "expected_event_type": "run_finished",
     "session_scope": "all",
     "limit": null,
-    "description": "прошлые финальные ответы агента"
+    "description": "прошлые финальные ответы агента",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "event_type_only_3",
@@ -344,7 +388,9 @@
     "expected_event_type": "inbound",
     "session_scope": "all",
     "limit": null,
-    "description": "история входящих сообщений пользователя"
+    "description": "история входящих сообщений пользователя",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "limit_1",
@@ -360,7 +406,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": 3,
-    "description": "limit=3: ожидаем не больше 3 результатов"
+    "description": "limit=3: ожидаем не больше 3 результатов",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "time_range_1",
@@ -376,7 +424,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "since/until (TBD — см. baseline)"
+    "description": "since/until (TBD — см. baseline)",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "negative_1",
@@ -386,7 +436,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "запрос, которого точно нет — ожидаем 0 результатов"
+    "description": "запрос, которого точно нет — ожидаем 0 результатов",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "ambiguous_1",
@@ -396,7 +448,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "однословный неоднозначный запрос, проверка шума"
+    "description": "однословный неоднозначный запрос, проверка шума",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "filename_complex_1",
@@ -410,7 +464,9 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "длинное имя с подчёркиваниями"
+    "description": "длинное имя с подчёркиваниями",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
   },
   {
     "id": "doc_id_only_1",
@@ -424,6 +480,32 @@
     "expected_event_type": null,
     "session_scope": "all",
     "limit": null,
-    "description": "поиск по doc_id без фильтра event_type"
+    "description": "поиск по doc_id без фильтра event_type",
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity"
+  },
+  {
+    "id": "scope_current_user_a",
+    "category": "user_isolation",
+    "query": null,
+    "expected_event_ids": [],
+    "expected_event_type": null,
+    "session_scope": "current",
+    "limit": null,
+    "description": "scope=current для alice в session alice_1 (для регрессии)",
+    "session_key": "telegram:alice_1",
+    "user_id": "alice"
+  },
+  {
+    "id": "scope_all_missing_user",
+    "category": "user_isolation",
+    "query": null,
+    "expected_event_ids": [],
+    "expected_event_type": null,
+    "session_scope": "all",
+    "limit": null,
+    "expected_status": "error",
+    "expected_error_type": "missing_user_identity",
+    "description": "scope=all без identity-store — missing_user_identity"
   }
 ]

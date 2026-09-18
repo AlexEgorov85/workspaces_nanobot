@@ -215,6 +215,47 @@ docstring до честного состояния: «единая точка з
 зафиксировать: пользовательский конфиг пока пустой, все правки лимитов
 делаются только в коде.
 
+### Gap №5. Cross-user leakage через `session_scope="all"` **(ЗАКРЫТ)**
+
+В исходной реализации ``history_search_tool.py`` фильтр строил
+``(%s OR session_id = %s)`` с булевым флагом ``allow_all``: при
+``session_scope="all"`` первая скобка всегда истинна — фильтр по
+``session_id`` снимался, а фильтра по пользователю в таблице
+просто не было. Это означало, что запрос пользователя A
+возвращал события пользователей B, C, … из чужих чатов и каналов
+(cross-user leakage). Дополнительно это делало
+``session_scope="all"`` непригодным как observability-tool для
+recovery после ``context_compacted``.
+
+**Решение (закрыто в change
+`openspec/changes/fix-history-search-user-isolation`):**
+
+- DDL: колонка ``user_id VARCHAR(256)`` в ``agent_gateway_logs``
+  + индекс ``(user_id, "timestamp" DESC)``.
+- Миграция ``V004__agent_gateway_logs_user_id.sql``: идемпотентный
+  ADD COLUMN + backfill UPDATE через
+  ``request_id → agent_question_runs.user_id IS NOT NULL`` +
+  CREATE INDEX.
+- ``LogEvent.user_id: str | None`` — намеренная денормализация
+  (security boundary); consistency через single-writer invariant
+  (``DbLoggingService`` — единственный writer) и request_id matching
+  в ``_enqueue`` (закрывает security окно stale-event).
+- ``history_search``: две взаимоисключающие ветви SQL —
+  ``current → session_id``, ``all → user_id``. Никаких
+  ``(%s OR session_id = %s)`` / ``WHERE TRUE`` / unscoped-fallback.
+  При отсутствии identity-store — жёсткий отказ
+  (``missing_user_identity`` / ``missing_session_identity``),
+  SQL не выполняется.
+- Tool API не меняется: ``user_id`` не параметр tool'а и не
+  возвращается в payload'е ответа.
+
+Primary security check — тесты
+``TestHistorySearchGeneratedSqlGuard`` (сгенерированный SQL и
+параметры проверяются через mock ``utils.db.fetch``). Supplementary
+grep-guard — ``tests/test_history_search_user_isolation_guards.py``.
+Contract-тест на ``RequestContext.sender_id`` —
+``tests/contract/test_history_search_identity_contract.py``.
+
 ## 5. Какие поля важны для каждого event_type (для будущего extraction)
 
 Без автоматического извлечения `payload` остаётся «всем сразу» —
@@ -457,10 +498,19 @@ anonymized sample и перепрогнать на нём.
 
 - **Gap №1** — `ContextCompactionService._notify` теперь пишет
   `context_compacted` в `agent_gateway_logs` через
-  `workspace.utils.event_log.record_event`. Инструкция агенту в
-  `description` tool'а и `workspace/TOOLS.md` согласована с фактом.
-  Тесты: `TestNotifyRecordsEventLog` (3 новых), всего 44/44 в
-  `test_context_compaction.py`.
+  `DbLoggingService.try_log_event(...)` (change
+  `unify-agent-event-logging-pipeline`). Observability-trail
+  `history_search(event_type="context_compacted")` НЕ зависит от
+  `notify_in_history` — `_record_event_log` идёт ВСЕГДА при
+  `enabled=True`, независимо от UI-уведомления (закрывает design D8).
+  `record_external_compaction` тоже идёт через `_notify` (ранний
+  return при `notify_in_history=false` удалён). `workspace/utils/event_log.py`
+  ликвидирован — единый writer `agent_gateway_logs` теперь
+  `lib/services/db_logging_service.py`. Тесты:
+  `TestNotifyRecordsEventLog` (4 теста, включая новый
+  `test_notify_still_records_event_log_when_notify_disabled`), плюс
+  `tests/test_unified_event_logging_pipeline.py` (AST/grep guards) и
+  `tests/test_unified_event_logging_contract.py` (contract-тесты).
 - **Gap №3** — `history_search_tool.py` возвращает `event_id` в каждом
   событии (расширен SELECT, добавлено поле в JSON). Существующий API не
   сломан. Тест: `test_search_returns_event_id_in_each_event` (1 новый),
