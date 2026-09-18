@@ -127,6 +127,8 @@
 
 - [ ] 9.6 В `docs/architecture/HISTORY_SEARCH_ANALYSIS.md` секция «Gap №1» пометить как «закрыт в release vX.Y — `ContextCompactionService._record_event_log` через `DbLoggingService.try_log_event`, не зависит от `notify_in_history`. `history_search(event_type="context_compacted")` теперь возвращает событие при любой настройке `notify_in_history`». **Верификация:** текст gap-раздела обновлён.
 
+- [ ] 9.7 В `docs/ARCHITECTURE.md` (секция «Структурированное логирование», добавленная в 9.2) добавить подсекцию «Skill invocation is out of scope» с явной формулировкой: Skills не имеют dedicated runtime `event_type`; загрузка `SKILL.md` в context не порождает event; вызов Skill-скриптов через `tools.exec` логируется как штатная пара `tool_call`/`tool_result`; `DbLoggingService.log_skill_call` НЕ вводится. Сослаться на `openspec/specs/logging-db/spec.md` requirement «Skill invocation is out of scope». **Верификация:** подсекция присутствует; явно упоминает, что `event_type="skill_call"` НЕ эмитится и что `log_skill_call` НЕ существует.
+
 ## 10. Phase 9 — регрессия и валидация
 
 - [ ] 10.1 `pytest tests/` — все тесты зелёные. Целевой baseline: `1480+ passed, ~22 skipped` (как baseline `CHANGELOG.md`); учёт удалённых тестов `test_event_log.py` (4) и новых `test_unified_event_logging_pipeline.py` (~30). **Верификация:** финальный прогон; `pytest tests/ -q 2>&1 | tail -5` показывает зелёный итог.
@@ -143,6 +145,8 @@
 
 - [ ] 10.7 `git grep -n 'agent\._db_logging_service\|self\._db_logging_service = .* getattr' -- '*.py'` — пусто (нет скрытого канала и нет fallback на `getattr`). **Верификация:** `git grep` пустой (допустимы только `self._db_logging_service = db_logging_service` в конструкторах producer'ов — но без `getattr(agent, ...)`).
 
-- [ ] 10.8 `openspec.cmd validate unify-agent-event-logging-pipeline` → `passed`, 0 issues. **Верификация:** финальный прогон валидатора.
+- [ ] 10.8 `git grep -nE '\blog_skill_call\b|event_type\s*=\s*"skill_call"' -- '*.py'` — пусто (страховка от регрессии: skill_call event_type и `log_skill_call` метод НЕ должны появиться). Это подтверждает requirement «Skill invocation is out of scope» — нет dedicated Skill runtime event. **Верификация:** `git grep` пустой.
 
-- [ ] 10.9 `openspec.cmd status --change unify-agent-event-logging-pipeline --json` → `isComplete: true`, все артефакты `done`. **Верификация:** `applyRequires: []` (только `tasks` в `applyRequires`, который становится `[tasks ✓]`).
+- [ ] 10.9 `openspec.cmd validate unify-agent-event-logging-pipeline` → `passed`, 0 issues. **Верификация:** финальный прогон валидатора.
+
+- [ ] 10.10 `openspec.cmd status --change unify-agent-event-logging-pipeline --json` → `isComplete: true`, все артефакты `done`. **Верификация:** `applyRequires: []` (только `tasks` в `applyRequires`, который становится `[tasks ✓]`).

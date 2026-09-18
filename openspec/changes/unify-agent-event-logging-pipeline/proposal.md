@@ -107,6 +107,23 @@ structured agent events в `agent_gateway_logs`**:
   и нет импорта удалённого модуля
   `workspace.utils.event_log`. Тест запускается в `pytest`
   и валится, если запрет нарушен.
+- **Зафиксировать границу контракта**: Skill invocation
+  is out of scope. Skills в текущей архитектуре — это
+  content (`SKILL.md`), инжектируемый в agent context
+  через `SkillsLoader.load_skills_for_context(...)` /
+  `build_skills_summary(...)`, а не runtime-callable
+  сущность. Поэтому dedicated `event_type="skill_call"`
+  НЕ вводится и `DbLoggingService.log_skill_call(...)`
+  НЕ существует. Загрузка `SKILL.md` в context не
+  порождает event; вызов Skill-скриптов агентом
+  через `tools.exec("python skills/<name>/scripts/cli.py ...")`
+  логируется как штатная пара `event_type="tool_call"`
+  / `event_type="tool_result"` с характерным payload
+  (имя tool'а — `exec`). Это фиксируется в спеке как
+  requirement «Skill invocation is out of scope» —
+  страховка от попыток будущего разработчика добавить
+  отдельный `skill_call` event_type, для которого
+  нет runtime-call site'а в текущей версии nanobot.
 - **Документация**:
   - `docs/ARCHITECTURE.md` — зафиксировать «`DbLoggingService`
     — единственный runtime writer of `agent_gateway_logs`»;

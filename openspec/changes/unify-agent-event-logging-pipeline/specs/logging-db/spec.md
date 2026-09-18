@@ -175,6 +175,82 @@ The system SHALL обеспечивать единое поведение
   `INFO`, `ERROR` или `EXCEPTION` от producer'ов
   в этом сценарии.
 
+### Requirement: Skill invocation is out of scope
+
+The system SHALL NOT иметь dedicated runtime
+event_type для «активации Skill». Skill в
+текущей архитектуре — это content (markdown-инструкции
+в `SKILL.md`), который загружается в agent context
+через `SkillsLoader.load_skills_for_context(...)` /
+`build_skills_summary(...)` (`nanobot/agent/skills.py`),
+а не runtime-callable сущность.
+
+Границы контракта:
+
+- **Загрузка / обнаружение / инжекция `SKILL.md`
+  в system prompt** НЕ порождает `skill_call` (или
+  любой другой) structured event в
+  `agent_gateway_logs`. Это внутреннее
+  техническое состояние runtime.
+- **Вызов Skill-скрипта агентом через
+  `tools.exec("python skills/<name>/scripts/cli.py ...")`**
+  логируется как штатная пара
+  `event_type="tool_call"` (`name="exec"`,
+  payload содержит `args` с командой) +
+  `event_type="tool_result"` (payload содержит
+  `result`). Это **не отдельный `skill_call`** —
+  это `tool_call`/`tool_result` с характерным
+  payload.
+- **Если** в будущем nanobot или этот проект
+  введёт runtime API вида
+  `SkillExecutor.invoke(skill_name, ...)` —
+  это отдельное архитектурное изменение,
+  которое вводит соответствующий event_type
+  через отдельный OpenSpec change. Эта
+  спецификация не предвосхищает этот контракт.
+
+Запрещено в runtime-коде:
+
+- Эмитить `event_type="skill_call"` (или
+  `skill_invocation`, `skill_activation`,
+  любой аналогичный) — нет runtime-call
+  site, нет соответствующего contract.
+- Вводить `DbLoggingService.log_skill_call(...)` —
+  единственный допустимый путь логирования
+  Skill-вызовов уже покрыт существующими
+  `log_tool_call` / `log_tool_result` (потому
+  что `tools.exec` — это tool).
+- Эмитить events при `SkillsLoader.list_skills(...)`,
+  `load_skill(...)`, `load_skills_for_context(...)`,
+  `build_skills_summary(...)` или аналогичных
+  чисто-loader методах.
+
+#### Scenario: Skill script execution через tools.exec порождает tool_call, не skill_call
+
+- **WHEN** агент запускает Skill-скрипт через
+  `tools.exec("python skills/audit_analyzer/scripts/cli.py ...")`
+- **THEN** `DbLoggingService` SHALL получить
+  `LogEvent` с `event_type="tool_call"`,
+  `name="exec"`, `actor="agent"`, payload
+  содержит `args` (с командой запуска).
+- **AND** `DbLoggingService` SHALL получить
+  соответствующий `LogEvent` с
+  `event_type="tool_result"`, `name="exec"`,
+  payload содержит `result`.
+- **AND** `skill_call` (или любой другой
+  skill-typed event) SHALL NOT быть эмитирован.
+
+#### Scenario: Загрузка SKILL.md в context не порождает event
+
+- **WHEN** `SkillsLoader.load_skills_for_context(...)`
+  или `build_skills_summary(...)` выполняется
+  при построении agent context
+- **THEN** `DbLoggingService` SHALL NOT получить
+  никакой `LogEvent` (никакой `skill_call`,
+  `skill_loaded`, `skill_discovered`, и т.п.).
+- **AND** `agent_gateway_logs` SHALL NOT содержать
+  записей, привязанных к этому вызову loader'а.
+
 ### Requirement: context_compacted через DbLoggingService
 
 The system SHALL записывать событие `context_compacted`
