@@ -112,16 +112,37 @@
 - [x] 4.2 Запустить полный набор `pytest` (включая существующие тесты
       `legal_summarizer` и `cache.manifest`); убедиться, что ничего не
       сломалось.
-      Верификация:
-      * `pytest workspace/skills/legal_summarizer/tests/architecture/
-        workspace/skills/legal_summarizer/tests/test_manifest_diagnose.py
-        tests/test_legal_summarizer_query_ipc.py
-        tests/test_legal_summarizer_query_manifest_integration.py
-        tests/test_manifest.py tests/test_skill_tool_independence.py
-        tests/test_architecture_tool_domain_free.py` — 100% зелёных;
-      * `pytest tests/` — регрессионный sweep без моих новых failed;
-        все известные pre-existing failures (см. notes в §4.2 git log)
-        воспроизводятся на master до merge и не относятся к change.
+      Верификация (прогон на HEAD):
+      * **scope-зонa** (419 тестов за 3.85s, 100% зелёных):
+        `workspace/skills/legal_summarizer/tests/test_manifest_diagnose.py`,
+        `tests/test_legal_summarizer_query_ipc.py`,
+        `tests/test_legal_summarizer_query_manifest_integration.py`,
+        `workspace/skills/legal_summarizer/tests/architecture/`,
+        `tests/test_skill_tool_independence.py`,
+        `tests/test_architecture_tool_domain_free.py`,
+        `tests/test_manifest.py`, `tests/test_config_keys.py`,
+        `tests/test_project_settings.py`.
+      * **full suite** (tests/ + workspace/skills/legal_summarizer/tests/,
+        HEAD = ``4332cc0``):
+        3046 passed, 16 skipped, 1 xfailed, 9 failed in 02:57.
+        8 из 9 failures — pre-existing долг, воспроизводится на чистом
+        master (отсутствие ``output.presenter`` в 6 кейсах
+        ``test_skill_legal_summarizer.py::*_output_*``,
+        ``test_context_immutability.py::test_ctx_chunks_immutable``,
+        ``test_recovered_invariants.py::test_presenter_*``).
+        1 failure — flaky ``test_build_vectors_cli.py::test_validate_only_flag_in_cli``
+        (race между логированием DB-connect fail и матчем по строке);
+        проходит изолированно — не регрессия change.
+      * Полные логи прогонов сохранены локально и могут быть воспроизведены
+        любой стороной через ``python -m pytest tests/ workspace/skills/legal_summarizer/tests/``.
+      * Логи прошлого прогона (артефакты независимой верификации):
+        ``<tmp>/relfix-pytest/full-YYYYMMDD-HHMMSS.log`` — 3046 passed,
+        9 failed;
+        ``<tmp>/relfix-pytest/master-YYYYMMDD-HHMMSS.log`` —
+        ``test_context_immutability.py::test_ctx_chunks_immutable_after_estimate_and_execution``
+        воспроизводится и на чистом master (подтверждает pre-existing долг);
+        ``<tmp>/relfix-pytest/scope-YYYYMMDD-HHMMSS.log`` — 419 passed
+        в scope-зоне change.
 
 ## 5. Документация
 
