@@ -301,6 +301,15 @@
           "llm_max_tokens": 8192                    // Резерв под output.
         }
       }
+    },
+    // -------------------------------------------------------------------------
+    //  follow_up — Follow Up (контроль исполнения поручений, корпус актов ОАРБ).
+    //  Реализация живёт в отдельном репозитории и запускается gateway'ем как
+    //  MCP-процесс по stdio (config.json::tools.mcpServers.follow_up →
+    //  workspace/skills/follow_up/scripts/follow_up_mcp). Здесь — только запись
+    //  в реестре навыков: таблиц и индексов в нашем runtime у него нет.
+    "follow_up": {
+      "enabled": true
     }
   },
 

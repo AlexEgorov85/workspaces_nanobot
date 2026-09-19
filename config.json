@@ -746,7 +746,14 @@
     "restrictToWorkspace": false,
     "webuiAllowLocalServiceAccess": true,
     "webuiAllowRemotePackageInstall": false,
-    "mcpServers": {},
+    "mcpServers": {
+      "follow_up": {
+        "type": "stdio",
+        "command": "workspace/skills/follow_up/scripts/follow_up_mcp",
+        "args": [],
+        "tool_timeout": 120
+      }
+    },
     "ssrfWhitelist": []
   },
   "modelPresets": {}

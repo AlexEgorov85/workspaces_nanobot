@@ -142,6 +142,20 @@
 
 ### Added
 
+- **Навык `follow_up` — Follow Up как внешний MCP-процесс.** Контроль
+  исполнения поручений и корпус актов проверок ОАРБ:
+  `workspace/skills/follow_up/SKILL.md` (инструкция агенту: когда звать,
+  разграничение с `audit_analyzer`, дословный вывод `answer_md`, ожидание
+  долгой сборки карточки), запись `skills.follow_up` в `project.json`,
+  статичный блок `tools.mcpServers.follow_up` в `config.json` и лаунчер
+  `workspace/skills/follow_up/scripts/follow_up_mcp` (`.cmd` для Windows).
+  Реализация остаётся в отдельном репозитории со своим venv: у навыка
+  `numpy<2` + `torch`, у нас `numpy==2.4.2` — в одном окружении они не
+  уживаются, MCP-процесс (штатный механизм `nanobot-ai`) даёт свой
+  интерпретатор. Машинные пути — в `follow_up.env.local` (под
+  `*.env.local` в `.gitignore`); без него лаунчер выходит с кодом 3, gateway
+  пропускает сервер и стартует дальше. OpenSpec: `add-follow-up-skill`.
+
 - **DB safety net в polling**: фильтр `AND status != 'cancelled'` в
   `_claim_one_single` (3 места: основной WHERE, подзапрос по соседним
   задачам, финальный UPDATE) и в `_claim_one` (worker_pool) — если AW

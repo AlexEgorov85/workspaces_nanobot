@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Лаунчер MCP-сервера Follow Up — то, что gateway нанобота запускает по stdio.
+
+Нанобот держит в `config.json` статичную команду:
+
+    "tools": {"mcpServers": {"follow_up": {
+        "type": "stdio",
+        "command": "workspace/skills/follow_up/scripts/follow_up_mcp",
+        "tool_timeout": 120
+    }}}
+
+Путь один и тот же на любой машине, поэтому файл можно держать в git. Где
+лежит сам Follow Up и каким интерпретатором его запускать, лаунчер узнаёт
+из `workspace/skills/follow_up/follow_up.env.local` (файл под `*.env.local`
+в `.gitignore`, у каждой машины свой) либо из переменных окружения:
+
+    FOLLOW_UP_ROOT=/opt/follow_up                    # корень клона Follow Up
+    FOLLOW_UP_PYTHON=/opt/follow_up/.venv/bin/python # его интерпретатор
+    MODELS_DEVICE=cpu                                # по умолчанию cpu
+
+Почему отдельный интерпретатор: у нанобота закреплён numpy 2.x, у Follow Up
+numpy<2 вместе с torch — в одном venv они не уживаются. Лаунчер сам
+стандартной библиотекой ограничен и запускается любым Python ≥ 3.8.
+
+Если ничего не настроено — выход с кодом 3 и понятной строкой в stderr;
+gateway такой сервер пропускает (`MCP server 'follow_up': failed to
+connect`) и стартует дальше. Проверить настройку без запуска:
+
+    python workspace/skills/follow_up/scripts/follow_up_mcp --check
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve()
+SKILL_DIR = HERE.parent.parent                  # workspace/skills/follow_up
+NANOBOT_HOME = SKILL_DIR.parent.parent.parent   # корень нанобота
+LOCAL_FILE = SKILL_DIR / "follow_up.env.local"
+EXIT_NOT_CONFIGURED = 3
+
+
+def _read_env_file(path: Path) -> dict:
+    """KEY=VALUE, комментарии с #, кавычки вокруг значения снимаются."""
+    out: dict = {}
+    if not path.exists():
+        return out
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        out[key.strip()] = value
+    return out
+
+
+def _default_python(root: Path) -> Path | None:
+    for candidate in (root / ".venv" / "bin" / "python",
+                      root / ".venv" / "Scripts" / "python.exe"):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def resolve() -> dict:
+    """Где Follow Up и чем его запускать. Окружение важнее файла."""
+    local = _read_env_file(LOCAL_FILE)
+    get = lambda k: (os.environ.get(k) or local.get(k) or "").strip()  # noqa: E731
+
+    problems: list = []
+    root_raw = get("FOLLOW_UP_ROOT")
+    root = Path(root_raw).expanduser() if root_raw else None
+    if root is None:
+        problems.append(f"не задан FOLLOW_UP_ROOT (окружение или {LOCAL_FILE})")
+    elif not (root / "backend" / "skill" / "mcp_server.py").exists():
+        problems.append(f"в FOLLOW_UP_ROOT={root} нет backend/skill/mcp_server.py")
+
+    py_raw = get("FOLLOW_UP_PYTHON")
+    python = Path(py_raw).expanduser() if py_raw else (_default_python(root) if root else None)
+    if python is None:
+        problems.append("не задан FOLLOW_UP_PYTHON и в FOLLOW_UP_ROOT нет .venv")
+    elif not python.exists():
+        problems.append(f"интерпретатор не найден: {python}")
+
+    return {
+        "ok": not problems,
+        "root": str(root) if root else None,
+        "python": str(python) if python else None,
+        "nanobot_home": str(NANOBOT_HOME),
+        "models_device": get("MODELS_DEVICE") or "cpu",
+        "local_file": str(LOCAL_FILE),
+        "local_file_exists": LOCAL_FILE.exists(),
+        "problems": problems,
+    }
+
+
+def main(argv: list) -> int:
+    info = resolve()
+    if "--check" in argv:
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+        return 0 if info["ok"] else EXIT_NOT_CONFIGURED
+    if not info["ok"]:
+        # stdout — канал JSON-RPC, туда ни слова.
+        print("follow_up: навык не настроен на этой машине:", file=sys.stderr)
+        for p in info["problems"]:
+            print(f"  - {p}", file=sys.stderr)
+        print(f"  Заполните {LOCAL_FILE} (см. follow_up.env.local.example) или "
+              f"запустите scripts/install_into_nanobot.py из репозитория Follow Up.",
+              file=sys.stderr)
+        return EXIT_NOT_CONFIGURED
+
+    root, python = Path(info["root"]), Path(info["python"])
+    env = dict(os.environ)
+    env.update({
+        "PYTHONPATH": str(root),
+        "NANOBOT_HOME": str(NANOBOT_HOME),     # модель берётся у агента
+        "MODELS_DEVICE": info["models_device"],
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+    })
+    cmd = [str(python), "-m", "backend.skill.mcp_server", *argv]
+    os.chdir(root)
+    if os.name != "nt":
+        os.execve(str(python), cmd, env)       # тот же PID, stdio как есть
+    return subprocess.run(cmd, env=env, cwd=str(root)).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
