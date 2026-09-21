@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys as _sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -479,14 +480,17 @@ class RuntimePatcher:
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
         self._record(report, "context_bridge_seed", self.patch_context_bridge_seed(agent))
         self._record(report, "async_save", self.patch_async_session_saves(agent))
+        self._record(report, "session_dir_watch", self.patch_session_dir_watch(
+            agent, workspace_dir))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager))
         self._record(report, "project_tools", self.patch_project_tools(
-            agent, workspace_dir, settings=settings, cache_store=cache_store))
+            agent, workspace_dir, settings=settings,
+            cache_store=cache_store, db_logging_service=db_logging_service))
         self._record(report, "compact_tracking", self.patch_compaction_tracking(
-            agent, settings))
+            agent, settings, db_logging_service=db_logging_service))
         self._record(report, "compact_command", self.patch_compact_command(
-            agent, settings))
+            agent, settings, db_logging_service=db_logging_service))
         self._record(report, "idle_guard", self.patch_auto_compact_idle_guard(agent))
         self._record(report, "document_text_threshold", self.patch_document_text_threshold(settings))
         self._record(report, "session_content_cleanup", self.patch_session_content_cleanup())
@@ -1028,6 +1032,113 @@ class RuntimePatcher:
         sessions._async_save_executor = executor
         return True, "agent.sessions.save wrapped with background executor"
 
+    # ------------------------------------------------------------------
+    # Патч 1d-bis: диагностическое логирование пропавшего sessions_dir
+    # ------------------------------------------------------------------
+
+    def patch_session_dir_watch(
+        self, agent: Any, workspace_dir: Any
+    ) -> tuple[bool, str]:
+        """Снять показания вокруг ``SessionManager.save`` для расследования.
+
+        Временный диагностический патч: ошибки вида
+        ``FileNotFoundError: ...sessions/<key>.jsonl.tmp`` на ``open("w")``
+        означают, что ``self.sessions_dir`` исчез между конструктором
+        ``SessionManager`` и моментом ``save``. Чтобы подтвердить или
+        опровергнуть гипотезу, оборачиваем ``save`` так, чтобы он:
+
+          * непосредственно перед делегированием в ``original`` фиксировал
+            наличие ``self.sessions_dir`` (через ``is_dir()`` + ``stat().st_mtime``);
+          * при ошибке ``FileNotFoundError`` в ``open(tmp_path, "w")`` логировал
+            полную картину: ``self.sessions_dir``, ``tmp_path.parent``,
+            ``os.getcwd()``, ``os.listdir(self.sessions_dir.parent)`` (если
+            parent существует) — этого достаточно, чтобы понять, удалили
+            папку, переименовали workspace, или проблема в антивирусе.
+
+        Поведение ``save`` НЕ меняется: мы только читаем состояние ДО вызова
+        и логируем при ошибке. Никаких ``mkdir``, никаких повторов.
+
+        Гейт: запускается только если в ``settings.gateway.runtime_diagnostics``
+        есть ``session_dir_watch: true``. По умолчанию выключено — патч не
+        нужен в проде, только для расследования.
+
+        Returns:
+            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+        """
+        try:
+            import config as _config
+            full_settings = getattr(_config, "SETTINGS", None)
+            diagnostics = (
+                (full_settings.get("gateway", {}) or {}).get("runtime_diagnostics", {})
+                if full_settings is not None else {}
+            )
+        except Exception:
+            diagnostics = {}
+
+        if not diagnostics.get("session_dir_watch"):
+            return False, "gateway.runtime_diagnostics.session_dir_watch != true"
+
+        if agent is None:
+            return False, "agent is None"
+        sessions = getattr(agent, "sessions", None)
+        if sessions is None:
+            return False, "agent.sessions is missing"
+        original = getattr(sessions, "save", None)
+        if original is None:
+            return False, "agent.sessions.save is missing"
+        if getattr(sessions, "_session_dir_watch_patched", False):
+            return False, "already patched"
+
+        sessions_dir = getattr(sessions, "sessions_dir", None)
+
+        def _snapshot_state() -> dict[str, Any]:
+            try:
+                exists = bool(sessions_dir.is_dir()) if sessions_dir is not None else False
+            except OSError as exc:
+                return {"sessions_dir": str(sessions_dir), "is_dir_error": repr(exc)}
+            try:
+                mtime = sessions_dir.stat().st_mtime if exists else None
+            except OSError as exc:
+                mtime = f"stat_error:{exc!r}"
+            return {
+                "sessions_dir": str(sessions_dir),
+                "exists": exists,
+                "mtime": mtime,
+            }
+
+        def _wrapped_save(session: Any, fsync: bool = False) -> Any:
+            pre = _snapshot_state()
+            try:
+                return original(session, fsync=fsync)
+            except FileNotFoundError as exc:
+                post = _snapshot_state()
+                try:
+                    parent_listing = (
+                        sorted(os.listdir(str(sessions_dir.parent)))
+                        if sessions_dir is not None and sessions_dir.parent.exists()
+                        else None
+                    )
+                except OSError as exc2:
+                    parent_listing = f"listdir_error:{exc2!r}"
+                logger.error(
+                    "session_dir_watch: FileNotFoundError на save: "
+                    "sessions_dir.exists={pre_exists}->{post_exists}, "
+                    "cwd={cwd}, parent_listing={parent_listing}, "
+                    "session_key={key}, "
+                    "original_error={err!r}",
+                    pre_exists=pre.get("exists"),
+                    post_exists=post.get("exists"),
+                    cwd=os.getcwd(),
+                    parent_listing=parent_listing,
+                    key=getattr(session, "key", "<unknown>"),
+                    err=exc,
+                )
+                raise
+
+        sessions.save = _wrapped_save
+        sessions._session_dir_watch_patched = True
+        return True, "agent.sessions.save wrapped with diagnostic logging"
+
     @staticmethod
     def _bump_schema_max(cls: Any, names: tuple, maximum: int) -> bool:
         """Поднять ``maximum`` у параметров схемы инструмента.
@@ -1436,16 +1547,58 @@ class RuntimePatcher:
                         self._db_hook._service.get_request_id(origin)
                         or self._task_id
                     )
+                # ``user_id`` родителя — security boundary для
+                # ``history_search(session_scope="all")``. Subagent не имеет
+                # собственного identity-store (его session_key =
+                # subagent:<task_id>); без явного прокидывания индекс для
+                # subagent-сессии был бы заполнен ``user_id=None`` и события
+                # подагента не попадали бы в ``scope='all'`` пользователя.
+                # Прокидываем user_id родителя явно: register_request
+                # кладёт пару {request_id, user_id} в индекс, и дальнейшие
+                # tool/event-события подагента получают user_id через
+                # request_id matching в ``_enqueue``.
+                parent_user_id = self._resolve_parent_user_id(context)
                 key = self._subagent_session_key(context)
                 self._db_hook._service.register_request(
                     key,
                     self._session_id,   # request_id подагента = subagent:<task_id>
+                    user_id=parent_user_id,
                     parent_request_id=self._parent_rid,
                     agent_id=self._session_id,
                     parent_agent_id=self._db_hook._agent_id,
                     is_subagent=True,
                     status="running",
                 )
+
+            def _resolve_parent_user_id(self, context) -> str | None:
+                """Получить ``user_id`` родительского request.
+
+                Источники (по приоритету):
+                  1. ``RequestContext.sender_id`` текущего request (если
+                     subagent вызван внутри нормального оборота и контекст
+                     доступен) — это та же identity, что попадает в
+                     ``agent_question_runs.user_id`` родителя.
+                  2. ``None`` (нет identity-store) — события подагента
+                     пишутся с ``user_id IS NULL`` и НЕ попадают в
+                     ``scope='all'`` (безопасный default).
+
+                Никаких fallback'ов на другие поля — отсутствие identity =
+                жёсткий отказ.
+                """
+                try:
+                    from nanobot.agent.tools.context import current_request_context
+                except Exception:
+                    return None
+                try:
+                    ctx = current_request_context()
+                except Exception:
+                    return None
+                if ctx is None:
+                    return None
+                sender_id = getattr(ctx, "sender_id", None)
+                if isinstance(sender_id, str) and sender_id:
+                    return sender_id
+                return None
 
             async def before_execute_tool(self, context, tool_call, tool, params):
                 self._ensure_request(context)
@@ -1522,6 +1675,15 @@ class RuntimePatcher:
                 try:
                     final = context.final_content or ""
                     task = self._extract_task(context)
+                    # Явный user_id родителя: security boundary для
+                    # ``history_search(session_scope="all")``. _ensure_request
+                    # уже обновил индекс, и request_id matching в _enqueue
+                    # подставит user_id; явное значение гарантирует, что
+                    # событие не зависит от состояния индекса (если между
+                    # _ensure_request и _enqueue кто-то успел переписать
+                    # индекс под другой request — explicit value всё равно
+                    # побеждает согласно правилам _enqueue).
+                    parent_user_id = self._resolve_parent_user_id(context)
                     self._db_hook._service.log_event(LogEvent(
                         event_type="subagent_run_finished",
                         level="ERROR" if context.error else "INFO",
@@ -1530,6 +1692,7 @@ class RuntimePatcher:
                         actor="agent",
                         name=self._task_id,
                         request_id=self._session_id,
+                        user_id=parent_user_id,
                         summary=(task or final)[:200],
                         payload={
                             "final_content": final,
@@ -1618,6 +1781,7 @@ class RuntimePatcher:
         self, agent: Any, workspace_dir: Any,
         *, settings: Any = None,
         cache_store: Any = None,
+        db_logging_service: Any = None,
     ) -> tuple[bool, str]:
         """Зарегистрировать кастомные tool'ы из ``workspace/tools/*.py``.
 
@@ -1761,6 +1925,10 @@ class RuntimePatcher:
                 ctx._settings_ref = settings
             if cache_store is not None:
                 ctx._cache_store_ref = cache_store
+            if db_logging_service is not None:
+                ctx._db_logging_service = db_logging_service
+            if db_logging_service is not None:
+                ctx._db_logging_service = db_logging_service
 
             registered: list[str] = []
             skipped_disabled: list[str] = []
@@ -1846,7 +2014,9 @@ class RuntimePatcher:
     # ------------------------------------------------------------------
 
     def patch_compaction_tracking(
-        self, agent: Any, settings: Any
+        self, agent: Any, settings: Any,
+        *,
+        db_logging_service: Any = None,
     ) -> tuple[bool, str]:
         """Обернуть авто-сжатие так, чтобы оно шло через тот же путь,
         что и ручной ``/compact``: тот же отчёт, та же запись в историю.
@@ -1868,6 +2038,11 @@ class RuntimePatcher:
 
         При ``gateway.compact.enabled=false`` или
         ``gateway.compact.notify_in_history=false`` патч — no-op.
+
+        ``db_logging_service`` — DI-ссылка на ``DbLoggingService`` (через
+        ``partial`` из ``RuntimePatcher.apply_all``). Используется в
+        ``ContextCompactionService`` как единственный writer
+        ``agent_gateway_logs`` (change ``unify-agent-event-logging-pipeline``).
         """
         if agent is None:
             return False, "agent is None"
@@ -1876,7 +2051,9 @@ class RuntimePatcher:
         except Exception as exc:
             return False, f"import failed: {exc}"
         try:
-            svc = ContextCompactionService(agent, settings=settings)
+            svc = ContextCompactionService(
+                agent, settings=settings, db_logging_service=db_logging_service,
+            )
             if not svc.enabled:
                 return False, "gateway.compact.enabled=false"
             if not svc.notify_in_history:
@@ -1888,7 +2065,9 @@ class RuntimePatcher:
         return True, "auto compaction tracking patched"
 
     def patch_compact_command(
-        self, agent: Any, settings: Any
+        self, agent: Any, settings: Any,
+        *,
+        db_logging_service: Any = None,
     ) -> tuple[bool, str]:
         """Зарегистрировать команду ``/compact`` в ``CommandRouter`` агента.
 
@@ -1907,6 +2086,11 @@ class RuntimePatcher:
         Регистрируем:
           * ``exact("/compact")`` — точное совпадение;
           * ``prefix("/compact ")`` — ``/compact idle`` (для совместимости).
+
+        ``db_logging_service`` — DI-ссылка на ``DbLoggingService``. Через
+        ``functools.partial`` пробрасывается в ``cmd_compact`` → в
+        ``ContextCompactionService`` как единственный writer
+        ``agent_gateway_logs`` (change ``unify-agent-event-logging-pipeline``).
         """
         from functools import partial
 
@@ -1915,7 +2099,11 @@ class RuntimePatcher:
         commands = getattr(agent, "commands", None)
         if commands is None:
             return False, "agent.commands is missing"
-        handler = partial(cmd_compact, settings=settings)
+        handler = partial(
+            cmd_compact,
+            settings=settings,
+            db_logging_service=db_logging_service,
+        )
         try:
             commands.exact("/compact", handler)
             commands.prefix("/compact ", handler)

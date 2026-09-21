@@ -510,9 +510,10 @@ class TestCompactContextTool:
         captured = {}
 
         class FakeService:
-            def __init__(self, agent, settings=None):
+            def __init__(self, agent, settings=None, *, db_logging_service=None):
                 captured["agent"] = agent
                 captured["settings"] = settings
+                captured["db_logging_service"] = db_logging_service
                 self.enabled = True
                 self.compact_called = False
 
@@ -782,19 +783,22 @@ class TestRecordExternalCompaction:
         svc._write_history_notice.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_skips_when_notify_disabled(self):
+    async def test_record_external_still_emits_event_log_when_notify_disabled(self, monkeypatch):
+        """notify_in_history=False больше не глушит observability-trail."""
         agent = MagicMock()
         agent.sessions = MagicMock()
         svc = ContextCompactionService(agent, settings=_settings(
             enabled=True, notify_in_history=False,
         ))
         svc._write_history_notice = AsyncMock()
+        svc._record_event_log = AsyncMock()
         await svc.record_external_compaction(
             session_key="postgres:1", mode="idle", summary="x",
             archived_msgs=10, kept_msgs=20,
             tokens_before=2000, tokens_after=800,
         )
         svc._write_history_notice.assert_not_called()
+        svc._record_event_log.assert_awaited_once()
 
 
 class TestNotifyRecordsEventLog:
@@ -834,7 +838,10 @@ class TestNotifyRecordsEventLog:
         assert "сводка" in args[2] or "10" in args[2]
 
     @pytest.mark.asyncio
-    async def test_notify_skips_event_log_when_notify_disabled(self, monkeypatch):
+    async def test_notify_still_records_event_log_when_notify_disabled(self, monkeypatch):
+        """При ``notify_in_history=False`` UI-history-notice пропускается,
+        а ``_record_event_log`` всё равно вызывается.
+        """
         agent = MagicMock()
         agent.sessions = MagicMock()
         svc = ContextCompactionService(agent, settings=_settings(
@@ -851,22 +858,21 @@ class TestNotifyRecordsEventLog:
         })
 
         svc._write_history_notice.assert_not_called()
-        svc._record_event_log.assert_not_called()
+        svc._record_event_log.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_record_event_log_handles_import_error(self, monkeypatch):
-        """Если ``workspace.utils.event_log`` недоступен (например, нет
-        psycopg2) — compaction не должен падать."""
+    async def test_record_event_log_handles_try_log_event_failure(self, monkeypatch):
+        """``_record_event_log`` использует ``try_log_event`` и не падает,
+        если сервис недоступен / ``try_log_event`` бросает исключение."""
         agent = MagicMock()
         agent.sessions = MagicMock()
         svc = ContextCompactionService(agent, settings=_settings())
 
         def _raise(*_a, **_k):
-            raise ImportError("psycopg2 not available")
+            raise RuntimeError("db is down")
 
         monkeypatch.setattr(
-            "workspace.utils.event_log.record_event", _raise,
-            raising=False,
+            "lib.services.db_logging_service.try_log_event", _raise,
         )
 
         await svc._record_event_log(

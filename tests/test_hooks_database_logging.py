@@ -3,7 +3,7 @@
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -492,6 +492,43 @@ class TestBusLoggers:
         svc.register_request.assert_called_once()
         assert svc.register_request.call_args.args[1] == hook._request_id
 
+    def test_factory_passes_user_id_from_identity_store(self):
+        """``register_request`` вызывается с ``user_id`` из identity-store
+        (RequestContext.sender_id), чтобы пара {request_id, user_id}
+        попала в индекс для последующего автозаполнения в ``_enqueue``."""
+        from lib.hooks.database_logging_hook import make_db_logging_hook_factory
+
+        svc = MagicMock()
+        svc.get_request_id.return_value = None
+        factory = make_db_logging_hook_factory(svc, agent_id="main")
+        turn = MagicMock()
+        turn.session_key = "telegram:42"
+        with patch(
+            "lib.hooks.database_logging_hook._current_request_sender_id",
+            return_value="alice",
+        ):
+            factory(turn)
+        kwargs = svc.register_request.call_args.kwargs
+        assert kwargs.get("user_id") == "alice"
+
+    def test_factory_passes_user_id_none_when_no_identity_store(self):
+        """Без RequestContext → ``user_id=None`` в register_request (события
+        пишутся с ``user_id IS NULL`` и НЕ попадают в scope='all')."""
+        from lib.hooks.database_logging_hook import make_db_logging_hook_factory
+
+        svc = MagicMock()
+        svc.get_request_id.return_value = None
+        factory = make_db_logging_hook_factory(svc, agent_id="main")
+        turn = MagicMock()
+        turn.session_key = "websocket:c1"
+        with patch(
+            "lib.hooks.database_logging_hook._current_request_sender_id",
+            return_value=None,
+        ):
+            factory(turn)
+        kwargs = svc.register_request.call_args.kwargs
+        assert kwargs.get("user_id") is None
+
 
 class TestRunFinishedEventShape:
     """Регрессионный тест: ``run_finished`` фактически пишется хуком
@@ -554,3 +591,35 @@ class TestRunFinishedEventShape:
         assert run_ev.payload["tools_used"] == ["a", "b"]
         assert run_ev.payload["stop_reason"] == "stop"
         assert run_ev.payload["had_injections"] is False
+
+    def test_run_finished_user_id_reaches_insert(self, sys_path):
+        """Регрессия на fix-history-search-user-isolation: ``run_finished``
+        доходит до INSERT с ``user_id`` (через автозаполнение из
+        индекса в ``_enqueue`` по request_id matching).
+
+        Сценарий: register_request с user_id="alice" → эмиттим
+        ``run_finished`` с тем же request_id → INSERT содержит user_id="alice".
+        """
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
+        from lib.services.db_logging_service import (
+            DbLoggingService,
+            LogEvent,
+        )
+
+        svc = DbLoggingService(
+            dsn="postgresql://x",
+            table_name="agent_gateway_logs",
+            question_runs_table="agent_question_runs",
+        )
+        svc.register_request("cli:1", "r1", user_id="alice", chat_id="c1")
+
+        # Эмулируем прямой emit ``run_finished`` с request_id=r1 и
+        # пустым user_id — _enqueue должен подставить "alice" из индекса.
+        event = LogEvent(
+            event_type="run_finished",
+            session_id="cli:1",
+            request_id="r1",
+            user_id=None,
+        )
+        svc._enqueue(event)
+        assert event.user_id == "alice"

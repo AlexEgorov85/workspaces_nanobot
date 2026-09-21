@@ -625,7 +625,7 @@ def _make_db_logging(ctx: ApplicationContext) -> Any | None:
         from config import ConfigurationError
 
         raise ConfigurationError(
-            "logging.db.table_name и logging.db.question_runs_table "
+            "конфиг logging.db (table_name и question_runs_table) "
             "обязательны для DbLoggingService (нет авто-дефолтов в коде). "
             f"table_name={table_name!r}, question_runs_table={question_runs_table!r}"
         )
@@ -837,6 +837,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             "Проверьте секции project.json::skills.* и gateway.vector.index.*."
         )
         _record_sync_skipped(
+            ctx.db_logging_service,
             event_type="sync_skipped_registry_empty",
             reason="TableRegistry пуст",
             detail="Нет ни одной зарегистрированной таблицы — проверьте project.json::skills.* и gateway.vector.index.*",
@@ -848,6 +849,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             "(пустая строка или отсутствует ключ в project.json)."
         )
         _record_sync_skipped(
+            ctx.db_logging_service,
             event_type="sync_skipped_no_dsn",
             reason="channels.postgres.dsn не задан",
             detail="DATABASE_URL пустой или отсутствует ключ в project.json — sync не сможет подключиться к PG",
@@ -866,6 +868,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             "имени в table_names()/vector_names() — несоответствие регистрации."
         )
         _record_sync_skipped(
+            ctx.db_logging_service,
             event_type="sync_skipped_no_table_names",
             reason="в TableRegistry есть ресурсы, но table_names()/vector_names() пусты",
             detail="Несоответствие регистрации — проверьте register() vs register_infra()",
@@ -947,24 +950,37 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     return sync, store
 
 
-def _record_sync_skipped(event_type: str, reason: str, detail: str) -> None:
+def _record_sync_skipped(
+    db_logging_service: Any,
+    event_type: str,
+    reason: str,
+    detail: str,
+) -> None:
     """Записать в ``agent_gateway_logs`` причину, по которой sync не стартанул.
 
     Используется в ``_make_sync_services`` при ранних return'ах с тихими
     причинами отказа. Идемпотентно и безопасно для вызова до старта
-    ``DbLoggingService`` — идёт через ``event_log.record_sync_event``.
+    ``DbLoggingService`` — единый конвейер через
+    ``DbLoggingService.try_log_event``.
     """
-    try:
-        from workspace.utils.event_log import record_sync_event
+    from lib.services.db_logging_service import LogEvent, try_log_event
 
-        record_sync_event(
-            event_type=event_type,
-            summary=f"PgDuckDbSyncService skipped: {reason}",
-            payload={"reason": reason, "detail": detail},
-            level="WARN",
-        )
-    except Exception:
-        pass
+    log_event = LogEvent(
+        event_type=event_type,
+        level="WARN",
+        session_id="gateway:sync",
+        channel=None,
+        actor="sync",
+        name=event_type,
+        summary=f"PgDuckDbSyncService skipped: {reason}",
+        payload={"reason": reason, "detail": detail},
+    )
+    try_log_event(
+        db_logging_service,
+        log_event,
+        producer="ApplicationContext",
+        event_type=event_type,
+    )
 
 
 

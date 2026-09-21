@@ -219,3 +219,115 @@ class TestSubagentRunFinishedEventShape:
         assert "request_id" in sub.payload
         # Канал и сессия соответствуют конвенции под-агента.
         assert sub.request_id == "subagent:task-1"
+
+
+class TestSubagentUserIdPropagation:
+    """``_SubagentLoggingHook`` явно прокидывает ``user_id`` родителя
+    в ``LogEvent.user_id`` для ``subagent_run_finished`` (security
+    boundary для ``history_search(session_scope="all")``)."""
+
+    def test_subagent_inherits_parent_user_id(self):
+        """parent alice → subagent → INSERT содержит user_id='alice'."""
+        from lib.services.db_logging_service import (
+            DbLoggingService,
+            LogEvent,
+        )
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
+        from unittest.mock import MagicMock, patch
+
+        svc = DbLoggingService(
+            dsn="", table_name="x", question_runs_table="y",
+        )
+        with patch(
+            "lib.hooks.database_logging_hook.DatabaseLoggingHook",
+            lambda *_a, **_kw: DatabaseLoggingHook(svc),
+        ):
+            from lib.services.runtime_patcher import RuntimePatcher
+
+            patcher = RuntimePatcher()
+            ok, reason = patcher.patch_subagent_logging(
+                db_logging_service=svc, session_manager=None,
+            )
+            assert ok, reason
+
+            from nanobot.agent.subagent import _SubagentHook  # noqa: WPS433
+
+            ctx = SimpleNamespace(
+                session_key="postgres:42",
+                final_content="ответ подагента",
+                tools_used=[],
+                stop_reason="stop",
+                messages=[{"role": "user", "content": "сводка"}],
+                usage={"total_tokens": 1},
+                error=None,
+            )
+            with patch(
+                "nanobot.agent.tools.context.current_request_context",
+                return_value=SimpleNamespace(sender_id="alice"),
+            ):
+                hook = _SubagentHook("task-1")
+                import asyncio
+                asyncio.run(hook.after_run(ctx))
+
+        events = [e for e in svc._queue.queue if isinstance(e, LogEvent)]
+        sub = next(
+            (e for e in events if e.event_type == "subagent_run_finished"),
+            None,
+        )
+        assert sub is not None
+        assert sub.user_id == "alice"
+
+    def test_previous_request_user_does_not_leak_to_subagent(self):
+        """previous request alice, current request bob → subagent текущего
+        request пишется с user_id='bob' (НЕ 'alice'). Закрывает security
+        окно вида «subagent подхватывает user_id предыдущего request»."""
+        from lib.services.db_logging_service import (
+            DbLoggingService,
+            LogEvent,
+        )
+        from lib.hooks.database_logging_hook import DatabaseLoggingHook
+        from unittest.mock import MagicMock, patch
+
+        svc = DbLoggingService(
+            dsn="", table_name="x", question_runs_table="y",
+        )
+        with patch(
+            "lib.hooks.database_logging_hook.DatabaseLoggingHook",
+            lambda *_a, **_kw: DatabaseLoggingHook(svc),
+        ):
+            from lib.services.runtime_patcher import RuntimePatcher
+
+            patcher = RuntimePatcher()
+            ok, reason = patcher.patch_subagent_logging(
+                db_logging_service=svc, session_manager=None,
+            )
+            assert ok, reason
+
+            from nanobot.agent.subagent import _SubagentHook  # noqa: WPS433
+
+            ctx = SimpleNamespace(
+                session_key="postgres:42",
+                final_content="ответ подагента",
+                tools_used=[],
+                stop_reason="stop",
+                messages=[{"role": "user", "content": "task"}],
+                usage={"total_tokens": 1},
+                error=None,
+            )
+            # Контекст текущего request: bob.
+            with patch(
+                "nanobot.agent.tools.context.current_request_context",
+                return_value=SimpleNamespace(sender_id="bob"),
+            ):
+                hook = _SubagentHook("task-2")
+                import asyncio
+                asyncio.run(hook.after_run(ctx))
+
+        events = [e for e in svc._queue.queue if isinstance(e, LogEvent)]
+        sub = next(
+            (e for e in events if e.event_type == "subagent_run_finished"),
+            None,
+        )
+        assert sub is not None
+        assert sub.user_id == "bob"
+        assert sub.user_id != "alice"

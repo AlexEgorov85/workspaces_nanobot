@@ -1,7 +1,6 @@
-# tools-history-search
+# tools-history-search Specification
 
 ## Purpose
-
 Контракт кастомного tool `history_search`: параметры, семантика
 области поиска (`current` / `all`), правила изоляции данных по
 пользователю и поведение при отсутствии идентификатора пользователя.
@@ -9,7 +8,7 @@
 который переживает context compaction и является основным источником
 данных для восстановления деталей, выпавших из контекста LLM.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: tool identity and scope
 
@@ -207,44 +206,103 @@ Tool `history_search` MUST NOT выполнять `INSERT`/`UPDATE`/`DELETE`/
 - AND колонка SHALL быть задокументирована через `COMMENT ON
   COLUMN` с явным указанием источника.
 
-### Requirement: user_id plumbed through LogEvent
+### Requirement: user_id inheritance rule
 
 `LogEvent.user_id` MUST доходить до колонки
-`agent_gateway_logs.user_id`. Когда producer (`log_inbound`,
-`log_outbound`, `log_tool_call`, `log_tool_result`,
-`log_llm_call`, `log_error`, `ContextCompactionService`) не задаёт
-`LogEvent.user_id` явно, `DbLoggingService` SHALL подтянуть
-`user_id` из внутреннего индекса `session_key → {request_id, user_id}`,
-заполняемого `DbLoggingService.register_request`. Индекс MUST NOT
-быть публичным API — это внутренний механизм `_enqueue`.
+`agent_gateway_logs.user_id`. Решение о том, какое значение
+записать, определяется тремя ветвями, проверяемыми в `_enqueue`
+в указанном порядке:
 
-#### Scenario: empty LogEvent.user_id is filled from request index
+1. **Explicit value wins.** Если `event.user_id` явно задано
+   producer'ом — используется оно, индекс не читается.
+2. **Match by request_id.** Если `event.user_id is None` AND
+   `event.request_id is not None` AND
+   `event.session_id` присутствует в индексе AND
+   `index[event.session_id]["request_id"] == event.request_id` —
+   подставляется `index[event.session_id]["user_id"]`.
+3. **No inference.** Во всех остальных случаях
+   (`event.request_id is None`, или `request_id` не совпадает с
+   текущим request в индексе, или `session_id` отсутствует в
+   индексе) — `event.user_id` остаётся `None`. Событие
+   записывается с `user_id IS NULL` и SHALL NOT участвовать
+   в результатах `session_scope="all"`.
 
-- GIVEN `register_request(session_key="telegram:123",
-  request_id="req-1", user_id="alice")` уже был вызван
-- AND `LogEvent(event_type="tool_call", session_id="telegram:123",
-  user_id=None)` эмиттируется в рамках того же request
-- THEN `DbLoggingService` SHALL записать в `agent_gateway_logs`
-  строку с `user_id="alice"`.
+Правило MUST NOT быть смягчено: если `event.request_id is None`
+— `user_id` НЕ выводится только по `session_id`. Это закрывает
+класс атак вида «событие без identity получает текущего
+пользователя сессии».
 
 #### Scenario: explicit LogEvent.user_id overrides the index
 
-- GIVEN индекс содержит `user_id="alice"` для
-  `session_key="telegram:123"`
+- GIVEN индекс содержит `{"request_id": "req-1",
+  "user_id": "alice"}` для `session_key="telegram:123"`
 - WHEN `LogEvent(event_type="tool_call",
-  session_id="telegram:123", user_id="bob")` эмиттируется
+  session_id="telegram:123", request_id="req-1",
+  user_id="bob")` эмиттируется
 - THEN `DbLoggingService` SHALL записать строку с `user_id="bob"`.
+
+#### Scenario: empty user_id is filled when request_id matches
+
+- GIVEN `register_request(session_key="telegram:123",
+  request_id="req-1", user_id="alice")` уже был вызван
+- AND `LogEvent(event_type="tool_call",
+  session_id="telegram:123", request_id="req-1",
+  user_id=None)` эмиттируется
+- THEN `DbLoggingService` SHALL записать строку с `user_id="alice"`.
+
+#### Scenario: stale event does not inherit next request's user_id
+
+- GIVEN `register_request(session_key="telegram:123",
+  request_id="req-A", user_id="alice")` уже был вызван
+- AND продюсер создал `LogEvent(event_type="tool_call",
+  session_id="telegram:123", request_id="req-A",
+  user_id=None)`, но ещё НЕ вызвал `_enqueue`
+- AND `register_request(session_key="telegram:123",
+  request_id="req-B", user_id="bob")` выполнен между
+  созданием события и его `_enqueue`
+- WHEN этот отложенный `LogEvent` ставится в очередь
+- THEN записанная строка SHALL иметь `user_id IS NULL`
+- AND SHALL NOT иметь `user_id="bob"`.
+
+#### Scenario: event without request_id does not inherit any user_id
+
+- GIVEN индекс для `session_key="telegram:123"` содержит
+  `user_id="alice"`
+- WHEN `LogEvent(event_type="tool_call",
+  session_id="telegram:123", request_id=None,
+  user_id=None)` эмиттируется
+- THEN записанная строка SHALL иметь `user_id IS NULL`
+- AND SHALL NOT быть показана в `history_search(session_scope="all")`.
 
 ### Requirement: register_request atomically updates identity
 
 `DbLoggingService.register_request` MUST атомарно обновлять обе
-записи индекса — `request_id` и `user_id` — вместе. После вызова
-`register_request` для `session_key` никакие события предыдущего
-request не должны наследовать `user_id` от предыдущего request
-в той же сессии. Контракт: индекс `session_key → {request_id, user_id}`
-— это парная запись, обновляемая одной операцией под одним lock'ом.
+записи индекса — `request_id` и `user_id` — вместе. Контракт:
+индекс `session_key → {request_id, user_id}` — это парная запись,
+обновляемая одной операцией под одним lock'ом. Никакого
+промежуточного состояния, в котором индекс содержит `request_id`
+нового request со старым `user_id`, наблюдаться не должно.
 
-#### Scenario: same session_key switches user atomically
+Правило «Match by request_id» из requirement «user_id inheritance
+rule» работает **совместно** с этим: событие `req-A` после
+перерегистрации `req-B` теряет доступ к `user_id` индекса не
+потому, что индекс «закрыт», а потому, что `event.request_id !=
+entry.request_id`. Lock в `register_request` обеспечивает
+согласованность пары, request_id matching в `_enqueue` —
+корректность выбора.
+
+#### Scenario: pair is updated atomically under lock
+
+- WHEN `register_request(session_key="telegram:123",
+  request_id="req-B", user_id="bob")` начинает выполняться
+- AND параллельный поток пытается прочитать индекс в этот
+  момент
+- THEN параллельный поток SHALL наблюдать либо полностью
+  старое состояние (`request_id="req-A", user_id="alice"`),
+  либо полностью новое (`request_id="req-B", user_id="bob"`),
+  но не смесь.
+
+#### Scenario: same session_key switches user, current event still correct
 
 - GIVEN `register_request(session_key="telegram:123",
   request_id="req-A", user_id="alice")` уже был вызван
@@ -253,27 +311,32 @@ request не должны наследовать `user_id` от предыдущ
 - WHEN `LogEvent(event_type="tool_call",
   session_id="telegram:123", user_id=None, request_id="req-B")`
   эмиттируется
-- THEN в БД SHALL быть записано `user_id="bob"`
-- AND SHALL NOT быть записано `user_id="alice"`.
+- THEN в БД SHALL быть записано `user_id="bob"`.
 
-### Requirement: subagent inherits parent user_id
+### Requirement: subagent propagates parent user_id explicitly
 
-Когда subagent эмиттирует событие `subagent_run_finished` (или
-любое событие в рамках subagent-прогона), оно SHALL нести
-`user_id` родительского request. Subagent MUST NOT полагаться на
-автозаполнение через `_request_index` для своего `session_key`,
-потому что под-pipeline может менять контекст — единственный
-надёжный путь — явная передача `user_id` родителя в `LogEvent`.
+`_SubagentLoggingHook` MUST явно пробрасывать `user_id`
+родительского request в каждый `LogEvent`, который хук
+создаёт вне нормального request-index resolution path
+(subagent-pipeline может иметь собственный `session_key`
+или сменённый контекст — полагаться на автозаполнение в
+`_enqueue` для subagent-событий ненадёжно). Это касается
+событий, которые `_SubagentLoggingHook` создаёт сам
+(например, `subagent_run_finished`); остальные события
+subagent-прогона (tool_call, llm_call, и т.п.), идущие
+через стандартные `log_*` методы с явным `session_id` и
+`request_id`, проходят через обычный механизм
+`DbLoggingService.register_request` + request_id matching
+в `_enqueue`.
 
-#### Scenario: subagent inherits parent user_id
+#### Scenario: subagent_run_finished carries parent user_id
 
 - GIVEN parent request выполняется для user_id="alice"
-- AND subagent запускается через
-  `RuntimePatcher._SubagentLoggingHook`
-- WHEN `_SubagentLoggingHook._finalize` эмиттирует
-  `subagent_run_finished`
+- AND `_SubagentLoggingHook._finalize` создаёт
+  `LogEvent(event_type="subagent_run_finished", ...)`
+- WHEN этот `LogEvent` ставится в очередь
 - THEN `LogEvent.user_id` SHALL быть `"alice"`
-- AND не должно быть способа, при котором subagent сменил бы
+- AND не должно быть способа, при котором хук сменил бы
   `user_id` на собственный identity-store.
 
 #### Scenario: previous request user_id does not leak into next request
@@ -354,3 +417,34 @@ Tool API SHALL NOT принимать `user_id` (ни прямо, ни косв�
 - THEN в `properties` SHALL NOT быть поля `user_id` (или
   эквивалента вида `principal_id` / `actor_id` / `owner_id`)
 - AND в `required` SHALL NOT быть такого поля.
+
+### Requirement: RequestContext exposes user identity
+
+Реализация `history_search` MUST получать идентификатор
+пользователя из `nanobot.agent.tools.context.RequestContext`
+через поле `sender_id: str | None`. Имя поля фиксируется
+через единую точку `_current_user_id()` в
+`history_search_tool.py`. Прямой доступ к `sender_id` из
+других мест запрещён — это инкапсулирует зависимость от
+конкретной версии nanobot 0.3.0 в одной функции.
+
+Если в будущей версии nanobot поле будет переименовано,
+эта change **не пытается** поддерживать обратную
+совместимость через alias: адаптация делается в отдельном
+change, который обновляет nanobot-зависимость и `_current_user_id()`
+вместе с этим requirement.
+
+#### Scenario: RequestContext provides sender_id field
+
+- GIVEN nanobot установлен согласно `requirements.txt`
+- WHEN выполняется contract test
+  `tests/contract/test_history_search_identity_contract.py`
+- THEN импорт `nanobot.agent.tools.context.RequestContext`
+  SHALL быть успешным
+- AND итерация `dataclasses.fields(RequestContext)` SHALL
+  содержать поле `sender_id`
+- AND аннотация `sender_id` SHALL быть совместима с `str | None`
+  (т.е. `str`, `Optional[str]`, `str | None`, `Union[str, None]`)
+- AND тест SHALL падать при отсутствии поля или несовместимой
+  аннотации — это сигнал, что change не соответствует
+  установленной версии nanobot и требует отдельной миграции.

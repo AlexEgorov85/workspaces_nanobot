@@ -186,37 +186,43 @@ class TestFormatLines:
 
 class TestEmitHealthEvent:
     def test_emits_with_full_payload(self) -> None:
-        """Дёргает ``emit_sync_event`` из ``workspace.utils.event_log``
+        """Дёргает ``try_log_event`` из ``lib.services.db_logging_service``
         с правильными аргументами (event_type, level, summary, payload, service).
         """
-        with patch("workspace.utils.event_log.emit_sync_event") as ev:
+        with patch("lib.services.db_logging_service.try_log_event") as ev:
             _emit_health_event(
                 summary="declared=3 loaded=2",
                 payload={"declared": ["a"], "missing": ["b"]},
                 level="WARN",
                 service="<db_logging_service>",
             )
-        ev.assert_called_once_with(
-            event_type="vector_index_preload_health",
-            summary="declared=3 loaded=2",
-            payload={"declared": ["a"], "missing": ["b"]},
-            level="WARN",
-            service="<db_logging_service>",
-        )
+        ev.assert_called_once()
+        args, kwargs = ev.call_args
+        assert kwargs["producer"] == "PreloadService"
+        assert kwargs["event_type"] == "vector_index_preload_health"
+        assert args[0] == "<db_logging_service>"
+        log_event = args[1]
+        assert log_event.event_type == "vector_index_preload_health"
+        assert log_event.level == "WARN"
+        assert log_event.summary == "declared=3 loaded=2"
+        assert log_event.payload == {"declared": ["a"], "missing": ["b"]}
 
     def test_emits_swallows_exceptions(self) -> None:
-        """Если ``emit_sync_event`` бросает — ``_emit_health_event`` НЕ бросает."""
+        """``_emit_health_event`` полагается на ``try_log_event``, который
+        сам глотает исключения. Тест проверяет, что helper вызывает
+        ``try_log_event`` (без своей обёртки try/except).
+        """
         with patch(
-            "workspace.utils.event_log.emit_sync_event",
-            side_effect=RuntimeError("boom"),
-        ):
-            # Должно просто проглотить.
+            "lib.services.db_logging_service.try_log_event",
+            return_value=False,
+        ) as ev:
             _emit_health_event(
                 summary="x",
                 payload={},
                 level="INFO",
                 service=None,
             )
+        ev.assert_called_once()
 
 
 # ============================================================================
@@ -273,18 +279,20 @@ class TestPreloadEmitsHealth:
             "lib.services.cache_provider_impl.list_runtime_vector_indexes",
             return_value=[_runtime_row()],
         ), patch(
-            "workspace.utils.event_log.emit_sync_event"
+            "lib.services.db_logging_service.try_log_event"
         ) as ev:
             svc = PreloadService(db_logging_service="<svc>")
             await svc.preload_vector_indexes(store)
 
         # Должно быть STALE → divergence=True → level=WARN
         ev.assert_called_once()
-        kwargs = ev.call_args.kwargs
+        args, kwargs = ev.call_args
+        assert kwargs["producer"] == "PreloadService"
         assert kwargs["event_type"] == "vector_index_preload_health"
-        assert kwargs["level"] == "WARN"
-        assert kwargs["service"] == "<svc>"
-        assert "audits_index:STALE" in kwargs["payload"]["stale"]
+        assert args[0] == "<svc>"
+        log_event = args[1]
+        assert log_event.level == "WARN"
+        assert "audits_index:STALE" in log_event.payload["stale"]
 
     @pytest.mark.asyncio
     async def test_preload_summary_when_loaded_is_none(self, capsys) -> None:
@@ -346,16 +354,17 @@ class TestPreloadEmitsHealth:
             "lib.services.cache_provider_impl.list_runtime_vector_indexes",
             return_value=[_runtime_row(signature=sig)],
         ), patch(
-            "workspace.utils.event_log.emit_sync_event"
+            "lib.services.db_logging_service.try_log_event"
         ) as ev:
             svc = PreloadService(db_logging_service="<svc>")
             await svc.preload_vector_indexes(store)
 
-        kwargs = ev.call_args.kwargs
-        assert kwargs["level"] == "INFO"
-        assert kwargs["payload"]["missing"] == []
-        assert kwargs["payload"]["stale"] == []
-        assert kwargs["payload"]["orphan"] == []
+        args = ev.call_args.args
+        log_event = args[1]
+        assert log_event.level == "INFO"
+        assert log_event.payload["missing"] == []
+        assert log_event.payload["stale"] == []
+        assert log_event.payload["orphan"] == []
 
 
 # ============================================================================

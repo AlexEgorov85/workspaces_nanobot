@@ -45,9 +45,18 @@ params.append(session_id or "")
   денормализация**, исключение из прежнего правила «identity
   только в `agent_question_runs`»: `user_id` стал security
   boundary для чтения событий, и без него `session_scope="all"`
-  требует JOIN на каждый поиск. Денормализация оправдана, потому
-  что `DbLoggingService` — единственный writer и синхронизация
-  гарантирована.
+  требует JOIN на каждый поиск. Consistency между
+  `agent_question_runs.user_id` (первичный source of truth) и
+  `agent_gateway_logs.user_id` (security boundary) обеспечивается
+  двумя механизмами: **(a)** single-writer invariant — все
+  runtime-события пишутся только через `DbLoggingService`, и
+  `user_id` подтягивается либо явно producer'ом, либо через
+  request_id matching в `_enqueue`; **(b)** идемпотентная
+  миграция `V004` с backfill через
+  `request_id → agent_question_runs.user_id IS NOT NULL`,
+  которая переносит identity только из осмысленных
+  question_runs и оставляет `NULL` для неопределимых
+  исторических событий.
 - `DbLoggingService._request_index` хранит парную запись
   `{request_id, user_id}` (а не только `request_id`). Атомарное
   обновление обеих полей под одним lock'ом в `register_request`.

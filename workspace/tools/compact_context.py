@@ -120,12 +120,19 @@ class CompactContextTool(Tool):
 
         agent = getattr(ctx, "_agent_ref", None)
         settings = getattr(ctx, "_settings_ref", None)
+        db_logging_service = getattr(ctx, "_db_logging_service", None)
         if agent is None:
             raise RuntimeError(
                 "CompactContextTool.create: ctx._agent_ref is None — "
                 "patch_project_tools должен прокидывать agent в ctx."
             )
-        return cls(service=ContextCompactionService(agent, settings=settings))
+        return cls(
+            service=ContextCompactionService(
+                agent,
+                settings=settings,
+                db_logging_service=db_logging_service,
+            )
+        )
 
     def __init__(self, *, service: Any) -> None:
         self._service = service

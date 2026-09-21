@@ -163,38 +163,26 @@ class PgDuckDbSyncService:
     ) -> None:
         """Записать sync-событие в ``agent_gateway_logs`` (единый конвейер).
 
-        Делегирует единому helper'у ``workspace.utils.event_log.emit_sync_event``
-        с инжектированным ``db_logging_service``:
-
-          1. Если передан и запущен ``DbLoggingService`` (штатный случай
-             после ``ApplicationContext.start()``) — пишем через него
-             (async, через пул, батчи).
-          2. Иначе (тесты, standalone, ранние стадии старта) — синхронный
-             fallback ``record_sync_event``.
-
-        Единая точка правды устраняет дублирование: раньше publish-события
-        из ``DuckDbCacheStore`` шли мимо сервиса с прямой семантикой
-        ``NOW()``, а события этого сервиса — через буфер с timestamp на
-        flush, что ломало порядок в ``agent_gateway_logs``.
-        Все ошибки глотаются — sync-код не должен падать из-за логирования.
+        Единственный writer — ``DbLoggingService`` через ``try_log_event``.
         """
-        try:
-            from workspace.utils.event_log import emit_sync_event
+        from lib.services.db_logging_service import LogEvent, try_log_event
 
-            emit_sync_event(
-                event_type=event_type,
-                summary=summary,
-                payload=payload,
-                level=level,
-                name=name,
-                service=self._db_logging_service,
-            )
-        except Exception as exc:
-            logger.warning(
-                "PgDuckDbSyncService: emit_sync_event(%s) failed: %s",
-                event_type,
-                exc,
-            )
+        log_event = LogEvent(
+            event_type=event_type,
+            level=level,
+            session_id="gateway:sync",
+            channel=None,
+            actor="sync",
+            name=name or event_type,
+            summary=summary,
+            payload=payload,
+        )
+        try_log_event(
+            self._db_logging_service,
+            log_event,
+            producer="PgDuckDbSyncService",
+            event_type=event_type,
+        )
 
     def start(self, initial_load: bool = True) -> None:
         """Р—Р°РїСѓСЃС‚РёС‚СЊ worker-РїРѕС‚РѕРє.

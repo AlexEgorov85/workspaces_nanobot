@@ -24,6 +24,99 @@
 > `command: python gateway.py --profile=prod` (см. `docs/PROFILES.md`
 > § «Migration»).
 
+> **SECURITY:** `history_search(session_scope="all")` больше не
+> возвращает глобальный набор событий (cross-user leakage). Фильтрация
+> теперь идёт по `user_id` (security boundary), а не по
+> `(%s OR session_id = %s)` с булевым ослаблением. Колонка `user_id`
+> добавлена в `agent_gateway_logs` (миграция V004, идемпотентный
+> backfill из `agent_question_runs.user_id`). При отсутствии
+> identity-store (`RequestContext.sender_id`) — `missing_user_identity`
+> / `missing_session_identity` (SQL-запрос НЕ выполняется). Изменение
+> по поведению: `scope="all"` теперь означает «все сессии текущего
+> пользователя», а не «глобальная выборка». Tool API не изменился
+> (новых параметров нет).
+
+### Security
+
+- **Cross-user isolation в `history_search`.** Закрыт gap №5 из
+  `docs/architecture/HISTORY_SEARCH_ANALYSIS.md`: фильтр
+  `(%s OR session_id = %s)` в `history_search_tool.py` заменён на две
+  взаимоисключающие ветви — `session_scope="current"` фильтрует по
+  `session_id`, `session_scope="all"` — по `user_id` из
+  `RequestContext.sender_id`. Никаких unscoped-fallback'ов
+  (`WHERE TRUE`, `OR TRUE`, `IS NULL OR user_id`). Добавлен
+  contract-тест на `RequestContext.sender_id`
+  (`tests/contract/test_history_search_identity_contract.py`) и
+  architecture guards (`tests/test_history_search_user_isolation_guards.py`).
+
+### Changed
+
+- **`agent_gateway_logs.user_id` (security boundary).** Колонка
+  `user_id VARCHAR(256)` рядом с `request_id`/`session_id`/`channel`/
+  `actor`/`name` + индекс `(user_id, "timestamp" DESC)`. Миграция
+  `V004__agent_gateway_logs_user_id.sql`: ADD COLUMN IF NOT EXISTS +
+  backfill UPDATE через `request_id → agent_question_runs.user_id IS
+  NOT NULL` (NULL-пользователь не «протекает») + CREATE INDEX IF NOT
+  EXISTS. Идемпотентна. `LogEvent.user_id: str | None` — намеренная
+  денормализация из `agent_question_runs.user_id` (первичный
+  source of truth). Consistency через single-writer invariant
+  (`DbLoggingService` — единственный writer) и request_id matching в
+  `_enqueue` (закрывает security окно stale-event). Новый
+  primary logging-security тест
+  `test_stale_event_does_not_inherit_next_request_user_id` —
+  обязательный acceptance gate.
+- **`history_search(session_scope="all")` — новая семантика.** Раньше
+  возвращал глобальный набор событий, теперь — все сессии текущего
+  пользователя. Без identity-store — структурированная ошибка
+  (`missing_user_identity` / `missing_session_identity`), fetch НЕ
+  вызван. Tool API не изменился (`user_id` НЕ параметр, НЕ
+  возвращается в payload'е). Breaking change по поведению: агенты на
+  prod начнут получать либо события только своего пользователя,
+  либо `missing_user_identity` (если request context не дошёл).
+- **Producers прокидывают `user_id`.** `database_logging_hook._factory`
+  резолвит `sender_id` из identity-store и передаёт в
+  `register_request(session_key, request_id, user_id=...)`. Индекс
+  хранит пару `{request_id, user_id}` атомарно под lock'ом.
+  `_SubagentLoggingHook._finalize` явно прокидывает `user_id`
+  родителя в `LogEvent.user_id` (explicit value побеждает индекс).
+  `context_compaction._record_event_log` прокидывает `user_id` через
+  `record_event(user_id=...)`. `record_event` теперь пишет колонку
+  `user_id` в INSERT.
+
+### Removed
+
+- **`workspace/utils/event_log.py` удалён целиком.** Раньше был
+  fallback-sync-fallback-INSERT (`record_event` /
+  `record_sync_event` / `emit_sync_event`) для случая, когда
+  `DbLoggingService` ещё не доступен. Теперь единый путь —
+  `DbLoggingService.try_log_event(...)` с no-op for business +
+  operational WARNING. Удалён и тест `tests/test_event_log.py`.
+  Тесты `test_context_compaction.py` / `test_preload_service.py`
+  адаптированы под новый API (моки на
+  `lib.services.db_logging_service.try_log_event`).
+- **Дублирующие concern-проверки в `record_external_compaction`.**
+  Ранний return `if not self.notify_in_history: return` удалён —
+  ответственность за разделение concerns (UI-notice vs event log)
+  перенесена в `_notify`. См. подробности в
+  `docs/ARCHITECTURE.md` § «Управление сжатием контекста».
+
+### Changed (logging pipeline)
+
+- **Единый logging pipeline через `DbLoggingService`.** Producer'ы
+  (`ContextCompactionService`, `PgDuckDbSyncService`, `DuckDbCacheStore`,
+  `PreloadService`, `ApplicationContext._record_sync_skipped`) передают
+  события через `db_logging_service.log_event(LogEvent(...))` или
+  `DbLoggingService.try_log_event(...)` — defensive helper с
+  единым WARNING при недоступности сервиса. DI поднимается через
+  `functools.partial` (`RuntimePatcher.patch_compact_command`) и
+  параметр `run_repl(...)` (`lib/cli/console_loop.py`) — никаких
+  промежуточных полей на `agent` (ни `_db_logging_service`, ни
+  `db_logging_service`). `patch_compaction_tracking` остаётся активным
+  при `notify_in_history=false`: `_record_event_log` идёт ВСЕГДА при
+  `enabled=True`, observability-trail `history_search(event_type=
+  "context_compacted")` не зависит от UI-уведомления (закрывает gap №1
+  из `docs/architecture/HISTORY_SEARCH_ANALYSIS.md` + design D8).
+
 ### Fixed
 
 - **Cancellation now reaches active nanobot task.** Команды `/stop`,

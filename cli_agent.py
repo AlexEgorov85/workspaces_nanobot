@@ -143,7 +143,8 @@ def _run_vanilla(args: argparse.Namespace) -> None:
         display = DisplayConfig.from_settings(
             ctx.config_service.settings_section("cli")
         )
-        asyncio.run(run_repl(ctx.agent, ctx.config, session=args.session, display=display))
+        asyncio.run(run_repl(ctx.agent, ctx.config, session=args.session, display=display,
+                             db_logging_service=ctx.db_logging_service))
     finally:
         ctx.stop()
 
@@ -184,7 +185,8 @@ def _run_patched_repl(ctx, args: argparse.Namespace) -> None:
         await run_repl(ctx.agent, ctx.config, session=args.session,
                        display=DisplayConfig.from_settings(
                            ctx.config_service.settings_section("cli")),
-                       background_task_factory=lambda: asyncio.sleep(1))
+                       background_task_factory=lambda: asyncio.sleep(1),
+                       db_logging_service=ctx.db_logging_service)
 
     ctx.start()
     try:

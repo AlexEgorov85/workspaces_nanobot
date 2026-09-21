@@ -637,3 +637,284 @@ class TestNamePopulation:
         call, result = list(svc._queue.queue)
         assert call.name == "read"
         assert result.name == "read"
+
+
+class TestUserIdPropagation:
+    """``LogEvent.user_id`` доходит до INSERT и автозаполняется из индекса."""
+
+    def test_log_event_user_id_reaches_insert(self, fake_psycopg2):
+        """Явно заданный producer'ом ``LogEvent.user_id`` доходит до INSERT."""
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.log_event(LogEvent(
+            event_type="tool_call",
+            session_id="cli:1",
+            request_id="r1",
+            user_id="alice",
+        ))
+        event = svc._queue.queue[0]
+        assert event.user_id == "alice"
+        # _insert_batch использует psycopg2.extras.execute_batch
+        # (мокается в fake_psycopg2), который вызывается с SQL и
+        # списком параметров-строк. Проверяем, что user_id попал в оба.
+        svc._insert_batch(fake_psycopg2["conn"], [event])
+        call = fake_psycopg2["execute_batch"].call_args
+        sql, rows = call.args[1], call.args[2]
+        assert "user_id" in sql
+        # Параметры — список кортежей: первый кортеж содержит user_id
+        # на позиции сразу после event_type.
+        assert "alice" in rows[0]
+
+    def test_auto_filled_user_id_reaches_insert_via_index(self, fake_psycopg2):
+        """End-to-end прокидывание auto-filled ``user_id`` в INSERT.
+
+        Полная security-boundary цепочка:
+
+          register_request(alice)
+                ↓
+          _enqueue(LogEvent(user_id=None, request_id=req-A))
+                ↓ _resolve_event_user_id
+          event.user_id = alice  (через request_id matching)
+                ↓
+          _insert_batch()
+                ↓
+          SQL params содержат ``alice`` в позиции user_id
+
+        Без этого теста покрытие было бы разорвано: explicit value
+        проверялся отдельно (test_log_event_user_id_reaches_insert),
+        auto-fill — отдельно (test_enqueue_fills_user_id_when_request_id_matches),
+        но именно «auto-filled → INSERT» — нет. Это критично для
+        history_search(session_scope="all") как security boundary:
+        если бы между ``_enqueue`` и ``_insert_batch`` значение
+        терялось, фильтр ``user_id = %s`` возвращал бы 0 строк.
+        """
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.register_request(
+            "cli:1", "req-A", user_id="alice", chat_id="c1",
+        )
+        # Producer создаёт событие БЕЗ user_id — auto-fill путь.
+        event = LogEvent(
+            event_type="tool_call",
+            session_id="cli:1",
+            request_id="req-A",
+            user_id=None,
+        )
+        svc._enqueue(event)
+        # После _enqueue event.user_id заполнен индексом.
+        assert event.user_id == "alice"
+
+        # Полный путь в INSERT: execute_batch должен получить SQL с
+        # колонкой user_id и параметры с ``alice`` в нужной позиции.
+        fake_psycopg2["execute_batch"].reset_mock()
+        svc._insert_batch(fake_psycopg2["conn"], [event])
+
+        call = fake_psycopg2["execute_batch"].call_args
+        sql = call.args[1]
+        rows = call.args[2]
+        assert "user_id" in sql
+        # В execute_batch первый аргумент — SQL, второй — список
+        # кортежей; в каждом кортеже позиция user_id — сразу после
+        # event_type (порядок колонок фиксирован в _insert_batch).
+        assert "alice" in rows[0], (
+            f"alice должна быть в позиции user_id INSERT-параметров; "
+            f"получено: {rows[0]!r}"
+        )
+
+    def test_auto_filled_user_id_does_not_reach_insert_when_request_mismatch(
+        self, fake_psycopg2,
+    ):
+        """End-to-end: stale-event auto-fill не «протекает» в INSERT.
+
+        register A/alice → LogEvent(req-A, user_id=None) →
+        register B/bob → _enqueue того же события →
+        _insert_batch: SQL params содержат ``None`` в позиции user_id,
+        НЕ ``bob``. Это primary logging-security acceptance на уровне
+        реальной INSERT-цепочки (не только очереди).
+        """
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.register_request(
+            "cli:1", "req-A", user_id="alice", chat_id="c1",
+        )
+        stale_event = LogEvent(
+            event_type="tool_call",
+            session_id="cli:1",
+            request_id="req-A",
+            user_id=None,
+        )
+        # Между созданием и _enqueue — перерегистрация индекса.
+        svc.register_request(
+            "cli:1", "req-B", user_id="bob", chat_id="c1",
+        )
+        svc._enqueue(stale_event)
+        # Stale event остался без user_id (не подхватил bob).
+        assert stale_event.user_id is None
+
+        # INSERT содержит None в позиции user_id.
+        fake_psycopg2["execute_batch"].reset_mock()
+        svc._insert_batch(fake_psycopg2["conn"], [stale_event])
+        rows = fake_psycopg2["execute_batch"].call_args.args[2]
+        # Позиция user_id — после event_type: (id, level, event_type, user_id, ...)
+        user_id_value = rows[0][3]
+        assert user_id_value is None, (
+            f"stale event должен сохранить user_id=None, "
+            f"получено: {user_id_value!r}"
+        )
+
+    def test_enqueue_fills_user_id_when_request_id_matches(self, fake_psycopg2):
+        """register_request + LogEvent(user_id=None) с тем же request_id
+        автозаполняет ``user_id`` из индекса при ``_enqueue``."""
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.register_request(
+            "cli:1", "r1", user_id="alice", chat_id="c1",
+        )
+        # Producer создаёт событие с явным request_id, но без user_id.
+        event = LogEvent(
+            event_type="tool_call",
+            session_id="cli:1",
+            request_id="r1",
+        )
+        assert event.user_id is None
+        ok = svc._enqueue(event)
+        assert ok is True
+        # После _enqueue event.user_id подставлен из индекса.
+        assert event.user_id == "alice"
+
+    def test_explicit_user_id_overrides_index(self, fake_psycopg2):
+        """Явный ``LogEvent.user_id`` от producer'а побеждает индекс."""
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.register_request(
+            "cli:1", "r1", user_id="alice", chat_id="c1",
+        )
+        event = LogEvent(
+            event_type="tool_call",
+            session_id="cli:1",
+            request_id="r1",
+            user_id="bob",
+        )
+        svc._enqueue(event)
+        # Явное значение победило — никакой подмены из индекса.
+        assert event.user_id == "bob"
+
+    def test_stale_event_does_not_inherit_next_request_user_id(
+        self, fake_psycopg2,
+    ):
+        """Primary logging-security тест: stale event с request_id=A,
+        созданный до ``register_request(B, user_id='bob')``, остаётся с
+        ``user_id=None`` при постановке в очередь. Это закрывает security
+        окно вида «отложенное событие req-A получает user_id следующего
+        request req-B»."""
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.register_request(
+            "cli:1", "req-A", user_id="alice", chat_id="c1",
+        )
+        # Producer создал событие req-A с пустым user_id — НЕ в очередь.
+        stale_event = LogEvent(
+            event_type="tool_call",
+            session_id="cli:1",
+            request_id="req-A",
+        )
+        # Регистрация следующего request'а той же session_key.
+        svc.register_request(
+            "cli:1", "req-B", user_id="bob", chat_id="c1",
+        )
+        # Теперь ставим stale_event в очередь.
+        svc._enqueue(stale_event)
+        # Stale event НЕ подхватил bob — индекс уже под req-B, но
+        # request_id у события = req-A, не совпадает.
+        assert stale_event.user_id is None
+
+    def test_event_without_request_id_does_not_inherit_user_id(
+        self, fake_psycopg2,
+    ):
+        """Событие без ``request_id`` НЕ получает ``user_id`` из индекса,
+        даже если для session_key индекс заполнен."""
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.register_request(
+            "cli:1", "req-A", user_id="alice", chat_id="c1",
+        )
+        event = LogEvent(
+            event_type="tool_call",
+            session_id="cli:1",
+            request_id=None,
+        )
+        svc._enqueue(event)
+        # request_id=None → никакого matching → user_id остаётся None.
+        assert event.user_id is None
+
+    def test_register_request_updates_pair_atomically(self, fake_psycopg2):
+        """Атомарность пары ``{request_id, user_id}``: параллельный
+        reader во время ``register_request`` видит либо полностью старое
+        состояние, либо полностью новое — не смесь."""
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.register_request(
+            "cli:1", "req-A", user_id="alice", chat_id="c1",
+        )
+        # Запускаем register_request(req-B, user_id=bob) параллельно с
+        # reader'ом, который читает индекс 100 раз через lock.
+        errors: list[str] = []
+        stop = threading.Event()
+
+        def reader():
+            while not stop.is_set():
+                with svc._request_index_lock:
+                    entry = svc._request_index.get("cli:1")
+                if not isinstance(entry, dict):
+                    continue
+                rid = entry.get("request_id")
+                uid = entry.get("user_id")
+                if rid == "req-A" and uid != "alice":
+                    errors.append(
+                        f"A mismatch: rid={rid} uid={uid}"
+                    )
+                elif rid == "req-B" and uid != "bob":
+                    errors.append(
+                        f"B mismatch: rid={rid} uid={uid}"
+                    )
+                elif rid not in ("req-A", "req-B"):
+                    errors.append(f"unknown rid: {rid}")
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        try:
+            svc.register_request(
+                "cli:1", "req-B", user_id="bob", chat_id="c1",
+            )
+            time.sleep(0.05)
+        finally:
+            stop.set()
+            t.join(timeout=2.0)
+        assert not errors, errors
+
+    def test_no_public_get_request_user_id(self):
+        """У ``DbLoggingService`` НЕТ публичного ``get_request_user_id``
+        (или эквивалента вроде ``lookup_user_id``/``resolve_user_id``).
+        ``user_id`` из индекса читается ТОЛЬКО внутри ``_enqueue``
+        через request_id matching — ни один компонент не получает
+        способ резолвить чужой identity по session_key."""
+        forbidden = {
+            "get_request_user_id",
+            "lookup_user_id",
+            "resolve_user_id",
+        }
+        for name in forbidden:
+            assert not hasattr(DbLoggingService, name), (
+                f"DbLoggingService.{name} не должен существовать "
+                "(security boundary)"
+            )
+
+    def test_clear_request_removes_pair(self, fake_psycopg2):
+        """``clear_request`` удаляет всю парную запись {request_id, user_id}."""
+        svc = _svc(dsn="postgresql://x", flush_interval_sec=5.0)
+        svc.register_request(
+            "cli:1", "r1", user_id="alice", chat_id="c1",
+        )
+        assert svc.get_request_id("cli:1") == "r1"
+        svc.clear_request("cli:1")
+        assert svc.get_request_id("cli:1") is None
+        # После clear новые события НЕ получают user_id из индекса.
+        event = LogEvent(
+            event_type="tool_call",
+            session_id="cli:1",
+            request_id="r1",
+        )
+        svc._enqueue(event)
+        assert event.user_id is None

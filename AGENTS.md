@@ -170,6 +170,71 @@ tasks, отдельные абзацы спеки) — на русском, но
 скрипты) — всегда латиницей, без перевода. Это дополняет правила для
 commit-сообщений и позволяет grep'абельность по объектам репо.
 
+## Component Specification System
+
+Каталог компонентных спецификаций (`openspec/specs/`) описывает **архитектурный
+контракт** каждого значимого компонента, а не его реализацию. Правила ведения —
+`openspec/specs/architecture/component-model/spec.md` (модель + шаблон),
+`openspec/specs/documentation/component-registry/spec.md` (правила реестра),
+`openspec/specs/validation/component-spec-validation/spec.md` (автоматическая проверка).
+Реестр — `openspec/specs/COMPONENTS.md`.
+
+**Разделение ответственности** (чтобы не дублировать):
+
+- `docs/TARGET_ARCHITECTURE.md` — глобальные архитектурные правила и принципы
+  (цель, не «as-is»).
+- `openspec/specs/<domain>/<component>/spec.md` — нормативный контракт
+  конкретного компонента: назначение, граница, требования, запрещённое поведение,
+  зависимости, реализация, проверка.
+- `docs/*.md` (включая `ARCHITECTURE.md`, `DATABASE.md`, `INTERNAL_API.md`,
+  `skill-tool-architecture.md`) — описание **текущей реализации** компонента,
+  operational/reference details.
+- Код — фактическая реализация.
+
+**Когда создавать / обновлять component spec:**
+
+- Добавил новый архитектурный компонент в `lib/`, `workspace/`, или существенный
+  подкомпонент с публичным контрактом / lifecycle / конфигурацией →
+  сначала запись в `openspec/specs/COMPONENTS.md` со статусом `missing`,
+  затем — отдельная spec в `openspec/specs/<domain>/<component>/spec.md`.
+- Изменил публичный контракт, границу или зависимости существующего компонента →
+  обнови соответствующую spec **в том же изменении**.
+- Изменил **нормативное правило** (принцип зависимости, граница Skill↔Tool,
+  антипаттерн, инвариант) → правь `docs/TARGET_ARCHITECTURE.md`, не дублируй в spec.
+- Изменил детали реализации существующего компонента (имена полей, внутренние
+  helper-функции, локальная рефакторинг-оптимизация) → правь код и/или
+  `docs/<соответствующий файл>`, **не** трогай spec (контракт не менялся).
+
+**Структура spec:** обязательные разделы по шаблону `architecture/component-model`:
+Назначение, Ответственность, Граница (Owns/Does not own/May depend on/Must not
+depend on), Публичный контракт, Требования (с минимум одним сценарием
+КОГДА/ТОГДА), Запрещённое поведение, Зависимости, Реализация (ссылки на код),
+Проверка. Опциональные — Конфигурация, Жизненный цикл, Состояние, Инварианты,
+Поведение при ошибке, Потребители.
+
+**Язык:** component specs пишутся на русском (заголовки разделов, тело).
+Имена классов (`ApplicationContext`), методов (`can_handle()`), файлов
+(`project.json`), ключей конфига (`gateway.cache.local_path`), API
+(`search_vector`) **никогда не переводятся** — это имена собственные для
+grep'абельности.
+
+**Что НЕ делать:**
+
+- Не выдавать предположения за контракт (spec основывается на анализе кода
+  или явно согласованных решениях).
+- Не создавать spec для каждого `.py`-файла — только для архитектурных
+  компонентов (см. определение в `architecture/component-model`).
+- Не устанавливать статус `complete` без реальной проверки соответствия
+  коду (статусы и их критерии — `documentation/component-registry`).
+- Не дублировать один контракт в двух spec (single source of truth).
+
+**Статусы:** `missing` → `draft` → `partial` → `complete` (или `deprecated`).
+Критерии перехода — в `openspec/specs/documentation/component-registry/spec.md`.
+
+**Валидация:** `openspec.cmd validate <name>` должен проходить зелёным до
+коммита change; проверка структуры spec — см.
+`openspec/specs/validation/component-spec-validation/spec.md`.
+
 ## Commit Messages
 
 Используется [Conventional Commits](https://www.conventionalcommits.org/) с русскими описаниями.

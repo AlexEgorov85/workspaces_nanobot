@@ -14,15 +14,22 @@ sync service, cache service, channel) обязан превращаться
 
 ### Requirement: Single writer invariant of agent_gateway_logs
 
-`DbLoggingService` MUST be the only runtime
-component allowed to persist rows to
-`agent_gateway_logs` и `agent_question_runs`.
+`DbLoggingService` MUST be the sole runtime
+owner permitted to persist structured events into
+`agent_gateway_logs` (и `agent_question_runs`).
 Любой structured event независимо от источника
 (agent loop, hook, subagent, context compaction,
 sync service, cache service, channel) обязан
 превращаться в `LogEvent` и передаваться через
 `DbLoggingService`. Прямой SQL-fallback в журнал
 запрещён.
+
+Это требование **архитектурное** и проверяется
+через ownership-based architecture guard
+(requirement «Architecture guard»), а не
+через grep одной строки `agent_gateway_logs`
+в репозитории (это implementation verification,
+не primary invariant).
 
 Запрещено в runtime-коде (за пределами
 `lib/services/db_logging_service.py`):
@@ -113,6 +120,96 @@ Runtime-producers не читают эти значения напрямую.
 - **AND** `pytest` SHALL упасть с указанием
   файла и нарушенного правила.
 
+### Requirement: try_log_event contract
+
+`DbLoggingService.try_log_event(svc, log_event, *,
+producer: str, event_type: str) -> bool` SHALL быть
+единой точкой входа producer'ов structured events
+в `DbLoggingService`. Контракт:
+
+1. **MUST NOT raise exceptions** — failures в
+   logging infrastructure MUST NOT прерывать
+   business-операцию (compact / sync / preload).
+2. **Различает два состояния dependency** и
+   обрабатывает их единообразно:
+
+   | Условие | Поведение |
+   | --- | --- |
+   | `svc is None` (dependency отсутствует — composition root решил не передавать) | WARNING (с причиной `"dependency is None"`) + возврат `False` |
+   | `svc.is_running() == False` (dependency передана, но service unavailable — например, после `stop()`) | WARNING (с причиной `"is not running"`) + возврат `False` |
+   | `svc.log_event(log_event)` бросил exception | WARNING (с причиной `"raised: <exc>"`) + возврат `False` |
+   | `svc.log_event(log_event)` вернул `False` (например, queue full) | (без WARNING — transient backpressure лечится в `_flush_batch`) + возврат `False` |
+   | успех (event в queue) | возврат `True` |
+
+3. **Уровень WARNING** — единственный уровень
+   operational logging для всех failure-режимов
+   (dependency None / service unavailable /
+   exception). НЕ DEBUG, НЕ INFO, НЕ ERROR,
+   НЕ EXCEPTION.
+4. **Возвращаемое значение `bool`** — producer
+   может игнорировать. Контракт резервирует
+   `bool` return для будущих метрик
+   (`dropped_events_by_producer` и т.п.).
+5. **Текст WARNING** SHALL включать
+   `producer` и `event_type` для grep/CI-алёртов,
+   и причину (dependency / not running / raised).
+
+`try_log_event` MUST NOT вводить дополнительный
+fallback INSERT в `agent_gateway_logs` — failure
+SHALL быть только operational WARNING.
+
+#### Scenario: dependency отсутствует — WARNING + False + no exception
+
+- **WHEN** producer зовёт `try_log_event(None,
+  log_event, producer="ContextCompactionService",
+  event_type="context_compacted")`
+- **THEN** функция SHALL вернуть `False`.
+- **AND** `logger.warning(...)` SHALL быть вызван
+  ровно один раз с текстом, содержащим
+  `"ContextCompactionService"`,
+  `"context_compacted"`, и причину `"dependency is None"`.
+- **AND** НЕ SHALL быть брошено исключение.
+- **AND** НЕ SHALL быть выполнен прямой INSERT.
+
+#### Scenario: service unavailable — WARNING + False + no exception
+
+- **WHEN** producer зовёт `try_log_event(svc,
+  log_event, ...)` где `svc` non-None, но
+  `svc.is_running() == False`
+- **THEN** функция SHALL вернуть `False`.
+- **AND** `logger.warning(...)` SHALL быть вызван
+  с причиной `"is not running"`.
+- **AND** НЕ SHALL быть брошено исключение.
+
+#### Scenario: log_event бросил exception — WARNING + False + no exception
+
+- **WHEN** `svc.log_event(log_event)` бросает
+  произвольное исключение
+- **THEN** функция SHALL вернуть `False` и
+  `logger.warning(...)` SHALL быть вызван с
+  причиной `"raised: <exc>"`.
+- **AND** исключение из `log_event` MUST NOT
+  проброситься наружу.
+
+#### Scenario: queue full — False, без WARNING
+
+- **WHEN** `svc.log_event(log_event)` возвращает
+  `False` (например, queue переполнена,
+  `stats["queue_full"]` инкрементируется внутри
+  `DbLoggingService`)
+- **THEN** `try_log_event` SHALL вернуть `False`.
+- **AND** `logger.warning(...)` SHALL NOT быть
+  вызван (queue full — transient backpressure,
+  не failure dependency).
+
+#### Scenario: success — True
+
+- **WHEN** `svc.log_event(log_event)` возвращает
+  `True` (event поставлен в queue)
+- **THEN** `try_log_event` SHALL вернуть `True`.
+- **AND** `logger.warning(...)` SHALL NOT быть
+  вызван.
+
 ### Requirement: Uniform logging behavior при недоступности сервиса
 
 The system SHALL обеспечивать единое поведение
@@ -122,8 +219,10 @@ The system SHALL обеспечивать единое поведение
 `db_logging_service.is_running() == False`) в
 момент попытки записи structured event:
 
-1. **Structured persistence**: silent no-op —
-   событие не попадает в `agent_gateway_logs`.
+1. **Structured persistence**: no-op for business
+   operation — событие не попадает в
+   `agent_gateway_logs`, business-операция
+   продолжается успешно.
 2. **Operational logging**: `logger.warning(...)` на
    уровне `WARNING` с сообщением вида
    `"<producer>: structured event <event_type> not persisted
@@ -154,7 +253,8 @@ The system SHALL обеспечивать единое поведение
   structured event и `db_logging_service is None`
   или `db_logging_service.is_running() == False`
 - **THEN** `DbLoggingService.try_log_event(...)` SHALL
-  быть silent no-op (событие не записано).
+  обеспечивать no-op for business (событие не
+  записано, business-операция продолжается).
 - **AND** `logger.warning(...)` SHALL быть вызван
   ровно один раз с producer-префиксом и event_type.
 - **AND** producer-вызов (например,
@@ -292,7 +392,8 @@ The system SHALL записывать событие `context_compacted`
 - **THEN** `compact(...)` SHALL вернуть успешный
   отчёт (`ok=True`, `archived_msgs > 0`).
 - **AND** `DbLoggingService.try_log_event(...)` SHALL
-  быть silent no-op (событие не записано).
+  обеспечивать no-op for business (событие не
+  записано, compaction продолжается).
 - **AND** `logger.warning(...)` SHALL быть вызван
   ровно один раз с сообщением вида
   `"ContextCompactionService: structured event
@@ -332,8 +433,9 @@ The system SHALL записывать все sync-события PG→DuckDB
   (`PgDuckDbSyncService._log_sync_event` или
   `PreloadService._emit_health_event` или
   `DuckDbCacheStore` caller's)
-- **THEN** helper SHALL быть silent no-op (без
-  `INSERT` и без `record_sync_event` fallback).
+- **THEN** helper SHALL обеспечивать no-op for
+  business (без `INSERT` и без `record_sync_event`
+  fallback).
 - **AND** sync-операция SHALL NOT быть прервана
   (sync-код не должен падать из-за отсутствия
   observability-сервиса).
@@ -367,13 +469,14 @@ The system SHALL NOT иметь fallback-механизма
 записи в `agent_gateway_logs` через прямой SQL,
 когда `DbLoggingService` отсутствует или не запущен.
 Если `DbLoggingService` недоступен, structured event
-SHALL NOT быть записан (silent no-op +
-loguru-фиксация на уровне `WARNING` через
+SHALL NOT быть записан (no-op for business +
+operational WARNING на уровне `WARNING` через
 `DbLoggingService.try_log_event`). Любой runtime-код,
 который раньше «падал» в
 `event_log.record_event` / `record_sync_event` /
 `emit_sync_event` как fallback, SHALL быть переписан
-на silent no-op через `try_log_event`.
+на no-op for business + WARNING через `try_log_event`
+(см. requirement «try_log_event contract»).
 
 Запрещено вводить **любые другие persistence-хелперы**,
 которые могли бы обойти `DbLoggingService` —
@@ -389,8 +492,9 @@ fallback на `agent_question_runs`-таблицу
   конфигурация резолвится, sync-сервисы ещё не инициализированы)
 - **AND WHEN** какой-либо runtime-компонент пытается
   записать structured event
-- **THEN** запись SHALL быть silent no-op (без прямого
-  `INSERT` в `agent_gateway_logs`).
+- **THEN** запись SHALL обеспечивать no-op for
+  business (без прямого `INSERT` в
+  `agent_gateway_logs`).
 - **AND** `DbLoggingService` (когда будет стартован
   позднее) SHALL обработать события только того
   периода, в котором он запущен — события, возникшие
@@ -481,6 +585,80 @@ Streamlit); (b) observability-trail в
   делегировать в `_notify`, и `_record_event_log`
   SHALL быть вызван **даже** если
   `notify_in_history=false` (как и для `compact()`).
+
+### Requirement: agent_question_runs как отдельная aggregate-модель
+
+`DbLoggingService` MUST владеть двумя разными
+persistence-моделями (как разные aggregate-контракты
+в одном сервисе):
+
+1. **`agent_gateway_logs`** — event timeline
+   (immutable-ish журнал structured agent events;
+   строки добавляются, не обновляются);
+2. **`agent_question_runs`** — request aggregate
+   (per-request контекст: `user_id`, `agent_id`,
+   `parent_request_id`, `is_subagent`, `status`,
+   `summary`, `question`, `media`; обновляется
+   через upsert по `request_id`).
+
+`agent_question_runs` НЕ объединяется с
+`agent_gateway_logs` в одну таблицу и НЕ
+превращается в часть event timeline. Это
+**другая persistence-модель**, отвечающая на
+другие вопросы:
+- event timeline: «что произошло в системе
+  в момент X» (для `history_search`, observability);
+- request aggregate: «какой вопрос сейчас
+  обрабатывается и в каком он статусе» (для
+  UI, отображения текущего request, маршрутизации).
+
+`DbLoggingService` является владельцем обоих —
+через специализированные методы
+`register_request` / `finish_request` для
+`agent_question_runs` (через
+`_QuestionRunRecord` + `_handle_question_run` +
+`_upsert_question_run`) и `log_event(LogEvent(...))`
+для `agent_gateway_logs`. **Никаких вторых
+writer'ов для обоих таблиц** вне `DbLoggingService`.
+
+Запрещено:
+
+- Вводить отдельный «run-store service»,
+  «run-tracker», «run-state-manager» или
+  аналогичные слои над `agent_question_runs`
+  (или под ним).
+- Сливать `agent_question_runs` с
+  `agent_gateway_logs` в одну таблицу через
+  JSONB-поле `request_state` — это другой
+  persistence contract.
+- Эмитить `agent_question_runs` rows через
+  `record_event` / `record_sync_event` /
+  `emit_sync_event` (или через прямой SQL) — это
+  контрактно разные persistence-модели.
+
+#### Scenario: agent_question_runs update через DbLoggingService
+
+- **WHEN** agent регистрирует начало нового
+  вопроса через `db_logging_service.register_request(...)`
+- **THEN** строка SHALL быть вставлена в
+  `agent_question_runs` через `DbLoggingService._handle_question_run`,
+  NOT через прямой SQL.
+- **AND** `agent_question_runs` SHALL остаться
+  отдельной таблицей (не объединена с
+  `agent_gateway_logs`).
+
+#### Scenario: agent_question_runs row идентифицируется по request_id
+
+- **WHEN** строка в `agent_gateway_logs`
+  ссылается на `request_id`
+- **THEN** соответствующий row в
+  `agent_question_runs` SHALL существовать
+  (через индекс `session_key → request_id` в
+  `DbLoggingService._request_index`).
+- **AND** обновление статуса
+  (`finish_request(...)`) SHALL идти через
+  `DbLoggingService` (`_handle_question_run` →
+  `_upsert_question_run`), не через прямой SQL.
 
 ### Requirement: Producers не читают logging-DB конфиг
 

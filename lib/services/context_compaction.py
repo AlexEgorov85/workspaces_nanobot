@@ -62,9 +62,14 @@ def _get_setting(settings: Any, *keys: str, default: Any = None) -> Any:
 class ContextCompactionService:
     """Единая точка запуска сжатия контекста (tool агента + CLI /compact)."""
 
-    def __init__(self, agent: Any, settings: Any = None) -> None:
+    def __init__(
+        self, agent: Any, settings: Any = None,
+        *,
+        db_logging_service: Any = None,
+    ) -> None:
         self.agent = agent
         self._settings = settings
+        self._db_logging_service = db_logging_service
         self._section = _get_setting(settings, "gateway", "compact", default={}) or {}
 
     @property
@@ -309,54 +314,72 @@ class ContextCompactionService:
                 Console().print(f"[dim]🗜️ {text}[/dim]")
             except Exception:
                 pass
+        await self._record_event_log(session_key, report, text)
         if self.notify_in_history:
             await self._write_history_notice(session_key, report)
-            await self._record_event_log(session_key, report, text)
 
     async def _record_event_log(
         self, session_key: str, report: dict, text: str,
     ) -> None:
         """Записать событие ``context_compacted`` в долговечный журнал
-        ``agent_gateway_logs`` через ``workspace.utils.event_log.record_event``.
+        ``agent_gateway_logs``.
 
         Закрывает gap №1 из ``docs/architecture/HISTORY_SEARCH_ANALYSIS.md``:
         инструкция для агента в ``description`` tool'а ``history_search`` и в
         ``workspace/TOOLS.md`` обещала событие, которого в журнале не было.
         Теперь обещание согласовано с фактическим поведением.
 
-        Синхронный ``utils.db.execute`` (под капотом ``record_event``)
-        вызывается через ``asyncio.to_thread``, чтобы не блокировать
-        event loop. Ошибка записи не валит compaction — это observability,
-        а не критический путь.
-        """
-        try:
-            from workspace.utils.event_log import record_event
-            import asyncio as _asyncio
+        Единственный writer — ``DbLoggingService`` (через
+        ``try_log_event`` — defensive helper). При отсутствии сервиса
+        событие теряется (no-op for business) и пишется WARNING —
+        observability-trail НЕ должен зависеть от ``notify_in_history``:
+        даже если UI-уведомления выключены, ``history_search(event_type=
+        "context_compacted")`` должен находить событие (это закрывает
+        design D8 — ``patch_compaction_tracking`` остаётся активным при
+        ``notify_in_history=false``).
 
-            summary = text[:200] if text else "context compacted"
-            payload = {
-                "mode": report.get("mode"),
-                "archived_msgs": report.get("archived_msgs"),
-                "kept_msgs": report.get("kept_msgs"),
-                "tokens_before": report.get("tokens_before"),
-                "tokens_after": report.get("tokens_after"),
-                "summary": report.get("summary"),
-                "raw_dump": report.get("raw_dump", False),
-            }
-            await _asyncio.to_thread(
-                record_event,
-                "context_compacted",
-                "consolidator",
-                summary,
-                payload,
-                session_id=session_key,
-                channel="system",
-                actor="system",
-                level="INFO",
+        ``user_id`` берётся из identity-store текущего request (для
+        ``history_search(session_scope="all")`` как security boundary).
+        При отсутствии identity-store — событие пишется с ``user_id IS NULL``
+        и НЕ участвует в ``scope='all'`` (безопасный default). ``DbLoggingService``
+        резолвит ``user_id`` через ``_enqueue`` security-boundary path,
+        но явное значение через LogEvent.user_id имеет приоритет (для
+        случаев вроде subagent'ов, которым нужно прокинуть identity родителя).
+        """
+        from lib.services.db_logging_service import LogEvent, try_log_event
+
+        summary = text[:200] if text else "context compacted"
+        payload = {
+            "mode": report.get("mode"),
+            "archived_msgs": report.get("archived_msgs"),
+            "kept_msgs": report.get("kept_msgs"),
+            "tokens_before": report.get("tokens_before"),
+            "tokens_after": report.get("tokens_after"),
+            "summary": report.get("summary"),
+            "raw_dump": report.get("raw_dump", False),
+        }
+        log_event = LogEvent(
+            event_type="context_compacted",
+            level="INFO",
+            session_id=session_key,
+            channel="system",
+            actor="consolidator",
+            name="consolidator",
+            summary=summary,
+            payload=payload,
+            user_id=_current_request_sender_id(),
+        )
+        try:
+            try_log_event(
+                self._db_logging_service,
+                log_event,
+                producer="ContextCompactionService",
+                event_type="context_compacted",
             )
         except Exception as exc:
             logger.warning(
-                "agent_gateway_logs write for {} failed: {}", session_key, exc,
+                "agent_gateway_logs write for {} failed: {}",
+                session_key, exc,
             )
 
     async def record_external_compaction(
@@ -380,9 +403,14 @@ class ContextCompactionService:
         в ``agent_conversation_messages`` ровно тем же кодом, что и
         ручной ``compact()`` (общий ``_notify`` + ``_write_history_notice``).
         Никакого двойного замера и отдельной ветки логирования.
+
+        Все три concerns (``_record_event_log``, ``_write_history_notice``,
+        ``print_to_terminal``) разруливаются внутри ``_notify``. Здесь
+        только подготовка ``report`` — ранний return при
+        ``notify_in_history=false`` удалён (раньше он гасил observability
+        даже при ``enabled=true``; теперь разделение concerns —
+        ответственность ``_notify``).
         """
-        if not self.notify_in_history:
-            return
         if not archived_msgs or archived_msgs <= 0:
             return
         report = {
@@ -457,3 +485,26 @@ class ContextCompactionService:
             logger.warning(
                 "History notice for {} not written: {}", session_key, exc,
             )
+
+
+def _current_request_sender_id() -> str | None:
+    """``RequestContext.sender_id`` текущего request (или ``None``).
+
+    Используется :py:meth:`ContextCompactionService._record_event_log`
+    для прокидывания ``user_id`` в ``agent_gateway_logs`` (security
+    boundary для ``history_search(session_scope="all")``).
+    """
+    try:
+        from nanobot.agent.tools.context import current_request_context
+    except Exception:
+        return None
+    try:
+        ctx = current_request_context()
+    except Exception:
+        return None
+    if ctx is None:
+        return None
+    sender_id = getattr(ctx, "sender_id", None)
+    if isinstance(sender_id, str) and sender_id:
+        return sender_id
+    return None

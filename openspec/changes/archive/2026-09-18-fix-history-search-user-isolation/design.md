@@ -30,9 +30,7 @@
 
 ## Logging propagation
 
-Решение D4 в первоначальной версии спеки сводилось к
-«автозаполнение в `_enqueue` из `_request_index`». Здесь это
-фиксируется строже:
+Решение D4 фиксируется в трёх ветвях `_enqueue`:
 
 ```
 session_key (RequestContext.session_key)
@@ -46,14 +44,42 @@ _request_index[session_key] = {"request_id": ..., "user_id": ...}
         │  invisible from outside — no public getter
         ▼
 _enqueue(event):
-    if event.user_id is None and event.session_id:
-        entry = _request_index.get(event.session_id)
-        if entry:
+    # 1. Explicit value wins
+    if event.user_id is not None:
+        pass
+    # 2. Match by request_id (NOT by session_id alone)
+    elif (
+        event.request_id is not None
+        and event.session_id is not None
+    ):
+        entry = self._request_index.get(event.session_id)
+        if entry and entry["request_id"] == event.request_id:
             event.user_id = entry["user_id"]
+    # 3. Otherwise: event.user_id remains None (no inference)
         │
         ▼
     INSERT into agent_gateway_logs (…, user_id, …)
 ```
+
+**Почему matching именно по `request_id`, а не по `session_id`.**
+
+Альтернативная формулировка «подставить `user_id` индекса при
+`event.session_id in index`» создаёт security-окно: между
+созданием `LogEvent` и его `_enqueue` может произойти
+`register_request` для следующего request в той же `session_key`.
+Без сверки по `request_id` отложенное событие `req-A` увидит
+индекс, уже перезаписанный под `req-B`, и запишется с
+`user_id="bob"` — то есть чужой identity. Это ровно та утечка,
+которую спека закрывает в `history_search`. Поэтому matching
+**обязан** идти через `event.request_id == entry["request_id"]`.
+
+**Событие без `request_id` не получает `user_id` из индекса.**
+
+Если `event.request_id is None`, ни одна из трёх ветвей не
+срабатывает: ни explicit, ни matching. Такой event пишется с
+`user_id IS NULL` и невидим для `session_scope="all"`. Это
+защищает от «события-сироты», которое иначе могло бы получить
+identity просто потому, что принадлежит той же сессии.
 
 **Публичный API не расширяется.** Ранний proposal предлагал
 `get_request_user_id(session_key)` — от него отказались: единственный
@@ -63,14 +89,11 @@ _enqueue(event):
 
 **Атомарность `register_request`.** Парная запись `{request_id,
 user_id}` обновляется одним вызовом под `_request_index_lock`.
-Сценарий «новый request зарегистрирован в той же `session_key`,
-старые события предыдущего request ещё в полёте» обрабатывается
-так: события предыдущего request несут явный `LogEvent.user_id`,
-заданный producer'ом при эмиссии (либо через автозаполнение по
-`session_id` на момент `_enqueue`). Если `register_request` уже
-перезаписал индекс к моменту `_enqueue` отложенного события — это
-**security regression**, и регрессионный тест
-`TestRegisterRequestAtomicUpdate` это ловит.
+Сам по себе lock защищает только согласованность пары внутри
+индекса. Корректность выбора `user_id` для конкретного события
+обеспечивается request_id matching в `_enqueue`. Это **два
+независимых механизма**: lock для consistency пары, request_id
+matching для security выбора.
 
 **Явный `user_id` от producer'а приоритетнее индекса.** Это
 закрывает случай subagent'а: `_SubagentLoggingHook` пишет
@@ -147,14 +170,35 @@ WHERE l.request_id = r.request_id
    **дополнительная** страховка от случайного возврата
    unscoped-формы после рефакторинга. Не заменяет проверку
    сгенерированного SQL.
-3. **Cross-user isolation** в фикстурах: alice и bob с
+3. **Stale event does not inherit next request's user_id** —
+   primary logging-pipeline guard. Тест в
+   `tests/test_db_logging_service.py`:
+   ```
+   register_request(session_key, request_id="A", user_id="alice")
+   event = LogEvent(request_id="A", user_id=None)
+   register_request(session_key, request_id="B", user_id="bob")
+   _enqueue(event)  # event всё ещё ссылается на A
+   → INSERT содержит user_id IS NULL
+   → INSERT НЕ содержит "bob"
+   ```
+   Это **главный** тест на logging security, без него change
+   принимать нельзя.
+4. **Cross-user isolation** в фикстурах: alice и bob с
    разными `session_id`, проверка, что ответ alice не содержит
    ни одного event_id bob'а.
-4. **Атомарность `register_request`** под одним lock'ом —
+5. **Атомарность `register_request`** под одним lock'ом —
    регрессионный тест на сценарий «смена пользователя в той же
-   сессии».
-5. **Subagent user_id** — parent alice → subagent alice (без
+   сессии»; проверяет, что параллельный поток не видит
+   смешанное состояние пары `(request_id, user_id)`.
+6. **Subagent user_id** — parent alice → subagent alice (без
    утечки); previous user_id не «протекает» в next request.
+7. **Event without request_id does not inherit user_id** —
+   тест, что `LogEvent(request_id=None, session_id=...)` пишется
+   с `user_id IS NULL` даже при наличии индекса для сессии.
+8. **RequestContext identity field present** — собственный
+   contract-тест в нашей зоне (см. requirement «RequestContext
+   exposes user identity» в спеке), не правящий существующий
+   `tests/contract/test_tools_and_context.py`.
 
 ## Non-Goals
 
@@ -180,10 +224,22 @@ WHERE l.request_id = r.request_id
 4. `history_search` возвращает события только текущего
    пользователя. Tool description обновлён.
 
-**Rollback:** DROP INDEX + ALTER TABLE DROP COLUMN + revert
-`LogEvent.user_id` и `_request_index` storage. Старый INSERT
-работает с любой схемой, у которой нет колонки `user_id`,
-потому что новый код пишет её опционально.
+**Rollback:** Эта change **не предоставляет обратной совместимости**
+старого кода со схемой без `user_id`: новый `_insert_batch`
+содержит `user_id` в списке колонок INSERT, и при отсутствии
+колонки в таблице вставка упадёт. Корректный откат:
+
+1. Сначала откатить код (revert PR с правкой `LogEvent`,
+   `_insert_batch`, `_enqueue`, `register_request`,
+   `_request_index`).
+2. Только после отката кода — удалить колонку и индекс
+   (`DROP INDEX` + `ALTER TABLE DROP COLUMN`).
+
+Обратный порядок (DDL сначала, код потом) даёт период
+неработоспособности `DbLoggingService`. Альтернатива — оставить
+колонку `user_id` в БД «сиротой» (NOT NULL DEFAULT не нужен,
+NULL допустим) до следующего релиза; новые события пишутся с
+`user_id IS NULL`, пока старый код не пишет `user_id` вообще.
 
 **Совместимость существующих данных:**
 

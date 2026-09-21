@@ -10,6 +10,8 @@ import pytest
 from workspace.tools.history_search_tool import (
     HistorySearchTool,
     HistorySearchToolConfig,
+    _current_session_key,
+    _current_user_id,
 )
 
 
@@ -65,17 +67,19 @@ async def test_search_current_session_filters_by_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_all_scope_sets_allow_all_flag() -> None:
+async def test_search_all_scope_filters_by_user_id() -> None:
+    """``scope='all'`` фильтрует по ``user_id`` из identity-store."""
     with patch(
-        "workspace.tools.history_search_tool._current_session_key",
-        return_value="postgres:123",
+        "workspace.tools.history_search_tool._current_user_id",
+        return_value="alice",
     ), patch("utils.db.fetch", return_value=[]) as fetch:
         tool = _make_tool()
         await tool.execute(query=None, session_scope="all")
         sql, *params = fetch.call_args.args
-        # первый булев параметр — allow_all
-        assert params[0] is True
-        assert "session_id = %s" in sql
+        assert "user_id = %s" in sql
+        assert "alice" in params
+        # Никакой ``session_id = %s`` в SQL для scope='all'.
+        assert "session_id = %s" not in sql
 
 
 @pytest.mark.asyncio
@@ -597,6 +601,241 @@ class TestTruncationFlags:
                     f"len(result)={len(result)} > max_result_chars={max_chars} "
                     "(payload_truncated учтён в _render)"
                 )
+
+
+class TestUserIsolation:
+    """Cross-user isolation для ``history_search(session_scope="all")``.
+
+    Закрывает security gap: раньше ``scope='all'`` через конструкцию
+    ``(%s OR session_id = %s)`` возвращал глобальный набор событий —
+    alice видела события bob, c, …. Теперь ``scope='all'`` фильтрует
+    по ``user_id`` (security boundary) и возвращает только события
+    того же пользователя.
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_scope_filters_by_user_id_alice(self):
+        """alice запрашивает scope='all' → SQL содержит ``user_id = 'alice'``."""
+        with patch(
+            "workspace.tools.history_search_tool._current_user_id",
+            return_value="alice",
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            await tool.execute(query=None, session_scope="all")
+            sql, *params = fetch.call_args.args
+            assert "user_id = %s" in sql
+            assert "alice" in params
+
+    @pytest.mark.asyncio
+    async def test_all_scope_excludes_other_users(self):
+        """bob запрашивает scope='all' → SQL содержит ``user_id = 'bob'``,
+        никакого ``alice`` в параметрах."""
+        with patch(
+            "workspace.tools.history_search_tool._current_user_id",
+            return_value="bob",
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            await tool.execute(query=None, session_scope="all")
+            sql, *params = fetch.call_args.args
+            assert "user_id = %s" in sql
+            assert "bob" in params
+            assert "alice" not in params
+
+    @pytest.mark.asyncio
+    async def test_all_scope_missing_user_returns_error(self):
+        """Без identity-store → ``missing_user_identity``, fetch НЕ вызван."""
+        with patch(
+            "workspace.tools.history_search_tool._current_user_id",
+            return_value=None,
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            result = await tool.execute(query=None, session_scope="all")
+            data = json.loads(result)
+            assert data["status"] == "error"
+            assert data["error_type"] == "missing_user_identity"
+            assert fetch.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_current_scope_filters_by_session_id(self):
+        """Регрессия: ``scope='current'`` сохраняет поведение по session_id."""
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="telegram:42",
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            await tool.execute(query=None, session_scope="current")
+            sql, *params = fetch.call_args.args
+            assert "session_id = %s" in sql
+            assert "telegram:42" in params
+
+    @pytest.mark.asyncio
+    async def test_current_scope_missing_session_returns_error(self):
+        """Без identity-store для session_key → ``missing_session_identity``."""
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value=None,
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            result = await tool.execute(query=None, session_scope="current")
+            data = json.loads(result)
+            assert data["status"] == "error"
+            assert data["error_type"] == "missing_session_identity"
+            assert fetch.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_response_does_not_leak_user_id(self):
+        """Ни на одном уровне JSON-ответа нет поля ``user_id``."""
+        rows = [
+            {
+                "id": "id-1",
+                "timestamp": "t1",
+                "event_type": "tool_call",
+                "name": "x",
+                "level": "INFO",
+                "summary": "s",
+                "payload": {"k": "v"},
+            }
+        ]
+        with patch(
+            "workspace.tools.history_search_tool._current_user_id",
+            return_value="alice",
+        ), patch("utils.db.fetch", return_value=rows):
+            tool = _make_tool()
+            result = await tool.execute(query=None, session_scope="all")
+            data = json.loads(result)
+            # Корень
+            assert "user_id" not in data
+            # События
+            for ev in data["events"]:
+                assert "user_id" not in ev
+                # payload внутри события — JSON-string, проверяем строкой
+                assert "user_id" not in ev["payload"]
+
+    @pytest.mark.asyncio
+    async def test_current_scope_does_not_compare_user_id(self):
+        """scope='current' фильтрует по session_id; ``user_id`` НЕ участвует
+        в предикате (даже если для строки той же сессии записан
+        ошибочный ``user_id``). Это контракт из спеки §3."""
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="telegram:42",
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            await tool.execute(query=None, session_scope="current")
+            sql, *params = fetch.call_args.args
+            # Никакого ``user_id = %s`` для scope='current'.
+            assert "user_id = %s" not in sql
+
+    @pytest.mark.asyncio
+    async def test_invalid_session_scope_returns_error(self):
+        """Невалидный ``session_scope`` → ``invalid_session_scope``."""
+        with patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            result = await tool.execute(query=None, session_scope="bogus")
+            data = json.loads(result)
+            assert data["status"] == "error"
+            assert data["error_type"] == "invalid_session_scope"
+            assert fetch.call_count == 0
+
+
+class TestGeneratedSqlGuard:
+    """Primary guard на сгенерированный SQL и параметры (security boundary).
+
+    Защита от регрессии после рефакторинга: даже если grep по исходнику
+    пропустит запрещённый паттерн, эти тесты фиксируют фактическую
+    форму SQL и порядок параметров.
+    """
+
+    @pytest.mark.asyncio
+    async def test_scope_current_uses_session_id_predicate(self):
+        """scope='current' → SQL содержит ``session_id = %s``, параметр = session_key."""
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="telegram:42",
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            await tool.execute(query=None, session_scope="current")
+            sql, *params = fetch.call_args.args
+            assert "session_id = %s" in sql
+            assert "telegram:42" in params
+
+    @pytest.mark.asyncio
+    async def test_scope_all_uses_user_id_predicate(self):
+        """scope='all' → SQL содержит ``user_id = %s``, параметр = sender_id."""
+        with patch(
+            "workspace.tools.history_search_tool._current_user_id",
+            return_value="alice",
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            await tool.execute(query=None, session_scope="all")
+            sql, *params = fetch.call_args.args
+            assert "user_id = %s" in sql
+            assert "alice" in params
+            # Никакого session_id = %s для scope='all' (никакого unscoped fallback).
+            assert "session_id = %s" not in sql
+
+    @pytest.mark.asyncio
+    async def test_scope_all_missing_user_does_not_call_fetch(self):
+        """scope='all' без identity → ``missing_user_identity``, fetch НЕ вызван."""
+        with patch(
+            "workspace.tools.history_search_tool._current_user_id",
+            return_value=None,
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            result = await tool.execute(query=None, session_scope="all")
+            data = json.loads(result)
+            assert data["error_type"] == "missing_user_identity"
+            assert fetch.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_scope_current_missing_session_does_not_call_fetch(self):
+        """scope='current' без session_key → ``missing_session_identity``,
+        fetch НЕ вызван."""
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value=None,
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            result = await tool.execute(query=None, session_scope="current")
+            data = json.loads(result)
+            assert data["error_type"] == "missing_session_identity"
+            assert fetch.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_no_unscoped_or_session_id_pattern(self):
+        """Primary guard: SQL НЕ содержит запрещённых паттернов unscoped
+        fallback'а (``(%s OR session_id = %s)``, ``OR TRUE``, ``WHERE TRUE``,
+        ``session_id LIKE``)."""
+        with patch(
+            "workspace.tools.history_search_tool._current_user_id",
+            return_value="alice",
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            await tool.execute(query=None, session_scope="all")
+            sql = fetch.call_args.args[0]
+            assert "(%s OR session_id = %s)" not in sql
+            assert "OR TRUE" not in sql.upper()
+            assert "WHERE TRUE" not in sql.upper()
+            assert "session_id LIKE" not in sql
+
+        with patch(
+            "workspace.tools.history_search_tool._current_session_key",
+            return_value="telegram:42",
+        ), patch("utils.db.fetch", return_value=[]) as fetch:
+            tool = _make_tool()
+            await tool.execute(query=None, session_scope="current")
+            sql = fetch.call_args.args[0]
+            assert "(%s OR session_id = %s)" not in sql
+            assert "user_id = %s" not in sql
+
+    @pytest.mark.asyncio
+    async def test_tool_schema_has_no_user_id_parameter(self):
+        """JSON-schema tool'а НЕ содержит ``user_id`` (security attribute
+        не должен быть параметром)."""
+        tool = _make_tool()
+        params = tool.to_schema()["function"]["parameters"]
+        assert "user_id" not in params["properties"]
+        assert "user_id" not in params.get("required", [])
 
 
 class TestSnapshotConsistency:
