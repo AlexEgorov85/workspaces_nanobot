@@ -34,19 +34,25 @@
 
 ## Decisions
 
-### D1: Подписка на `ContextCompactionEvent` через `bus.subscribe` + фильтр в `postgres_channel`
+### D1: Подписка на `ContextCompactionEvent` через выделенный `CompactionEventSubscriber`
 
-**Решение.** `lib/channels/postgres_channel.py` при чтении из `bus.outbound` распознаёт `OutboundMessage.event` типа `ContextCompactionEvent` (`compaction_id`, `phase ∈ {started, succeeded, failed, cancelled}`) и вызывает `ContextCompactionService._notify(session_key, report)`. Upstream `cmd_compact` (`builtin.py:348`) уже передаёт `events=delivery.events` — это `EventSink`, который `emit(ContextCompactionEvent(...))` направляет через `bus.publish_event` → `publish_outbound` (см. `bus/queue.py:49`, `agent/turn_delivery.py:200,367`). Событие попадает в `bus.outbound`, не в `bus._handlers` локального fan-out.
+**Решение.** Создать класс `CompactionEventSubscriber` в `lib/services/` — выделенный сервис-слушатель, который:
+1. Подписывается на `bus.outbound` (или через `bus.subscribe`) в `ApplicationContext.start()`;
+2. При получении `OutboundMessage` проверяет `isinstance(msg.event, ContextCompactionEvent)`;
+3. Вызывает публичный API `ContextCompactionService.notify_session_compacted(session_key, phase, compaction_id)` (НЕ `_notify` — приватный метод);
+4. Для всех фаз логирует в `DbLoggingService.try_log_event(event_type="context_compacted", ...)`.
+
+Upstream `cmd_compact` (`builtin.py:348`) передаёт `events=delivery.events` — это `EventSink`, который `emit(ContextCompactionEvent(...))` направляет через `bus.publish_event` → `bus.outbound`.
 
 **Альтернативы.**
 
-- (а) `bus.subscribe(handler, ContextCompactionEvent)` — **не сработает**: `events.emit` идёт через `publish_event` (outbound-queue), не `publish` (локальный fan-out). Подтверждено в `bus/queue.py:118`.
-- (б) Обёртка `summarize_provider_compaction` (новый метод Consolidator). Отклонено: возвращает summary, не вызывает наш `_notify`. Дублирование логики.
-- (в) Сохранить `patch_compaction_tracking` с обёрткой `AutoCompact._archive` (idle-путь) + хук `AgentHook.on_compact`. Отклонено: token-budget путь (через `ContextGovernor._compact_request_history`) не проходит через `_archive`. Два пути — два обработчика, рассинхрон.
+- (а) Фильтр внутри `postgres_channel`. Отклонено: нарушает SRP — канал не должен знать о бизнес-логике компакции.
+- (б) `bus.subscribe(handler, ContextCompactionEvent)` — **не сработает**: `events.emit` идёт через `publish_event` (outbound-queue), не `publish` (локальный fan-out). Подтверждено в `bus/queue.py:118`.
+- (в) Обёртка `summarize_provider_compaction` (новый метод Consolidator). Отклонено: возвращает summary, не вызывает наш notify. Дублирование логики.
 
-**Обоснование.** Upstream публикует `ContextCompactionEvent` через `EventSink` → `bus.publish_event` → `bus.outbound`. Наш `postgres_channel` уже подписан на `bus.outbound` (через `consume_outbound`), фильтрация по `isinstance(msg.event, ContextCompactionEvent)` — единственный стабильный путь без залезания в приватные API Consolidator.
+**Обоснование.** Выделенный сервис соблюдает SRP: транспорт (канал) не знает о бизнес-логике; сервис подписывается на события и обрабатывает их. Публичный API `notify_session_compacted` вместо `_notify` — стабильность при будущих upgrade.
 
-**Контракт для postgres_channel.** `agent_gateway_logs.event_type="context_compacted"` пишется для каждой фазы: `started` (start, phase="started"), `succeeded` (после успешного `compact_idle_session`), `failed`/`cancelled` (при исключении). History-notice в `agent_conversation_messages` пишется **только** для `succeeded`.
+**Контракт для subscriber'а.** `agent_gateway_logs.event_type="context_compacted"` пишется для каждой фазы: `started`, `succeeded`, `failed`/`cancelled`. History-notice в `agent_conversation_messages` пишется **только** для `succeeded`.
 
 ### D2: Перенос `_assemble_outbound` wrapper на новую сигнатуру
 
@@ -75,15 +81,15 @@
 - (а) Удалить патч полностью, принять upstream-поведение (только `[Attachment: <path>]`-маркер без извлечения текста). Отклонено: меняет UX — агенту придётся вызывать `read_file` для каждого приложения, что для больших PDF затратно и не нужно для маленьких файлов.
 - (б) Написать свой `extract_documents` с нуля. Отклонено: дублирует логику upstream, рассинхронизируется.
 
-### D5: Удаление `patch_compact_command` и `lib/commands/compact_command.py` (только логики)
+### D5: Удаление `patch_compact_command` и `lib/commands/compact_command.py`
 
-**Решение.** Удаляем `lib/commands/compact_command.py` и `patch_compact_command` в `lib/services/runtime_patcher.py`. Upstream `cmd_compact` (`nanobot/command/builtin.py:348`) делает то же: `loop.consolidator.compact_idle_session(ctx.key, runtime=runtime, events=delivery.events)`. **Наш `ContextCompactionService._notify` остаётся** и вызывается из нового `ContextCompactionChannelFilter` в `postgres_channel` при чтении `OutboundMessage.event` типа `ContextCompactionEvent` (фаза `succeeded`/`failed`/`cancelled`). Этот фильтр — **наш код** (мы его добавляем сами), он **не зависит** от удалённого `cmd_compact`.
+**Решение.** Удаляем `lib/commands/compact_command.py` и `patch_compact_command` в `lib/services/runtime_patcher.py`. Upstream `cmd_compact` (`nanobot/command/builtin.py:348`) делает то же: `loop.consolidator.compact_idle_session(ctx.key, runtime=runtime, events=delivery.events)`. **Наш `ContextCompactionService.notify_session_compacted(...)` остаётся** (публичный API) и вызывается из `CompactionEventSubscriber` при чтении `OutboundMessage.event` типа `ContextCompactionEvent` (фаза `succeeded`/`failed`/`cancelled`). Вызов публичного API, а не приватного `_notify`, обеспечивает стабильность при upgrade.
 
 **Альтернативы.**
 
 - (а) Сохранить наш handler и зарегистрировать через `priority=higher_than_builtin`. Отклонено: дублирование, риск двойного вызова.
 - (б) Обёрнуть upstream `cmd_compact` через `priority` ниже builtin. Отклонено: нестабильный API `priority`, нет доступа к `OutboundMessage` для notify-инъекции.
-- (в) Подписка через `AgentHook.after_run` для `_notify`. Отклонено: `AgentHook.after_run` вызывается **после** того, как `OutboundMessage` уже ушёл в канал; события compaction приходят как `OutboundMessage.event`, а не как хук-колбэк. Фильтр в канале — единственный путь, который видит `OutboundMessage.event`.
+- (в) Подписка через `AgentHook.after_run` для notify. Отклонено: `AgentHook.after_run` вызывается **после** того, как `OutboundMessage` уже ушёл в канал; события compaction приходят как `OutboundMessage.event`, а не как хук-колбэк. CompactionEventSubscriber — единственный путь, который видит `OutboundMessage.event`.
 
 ### D6: Удаление `patch_auto_compact_idle_guard`
 
@@ -108,11 +114,38 @@
 
 **Альтернативы.** Нет — это обёртка над стабильным upstream API.
 
-### D9: Тесты вне upgrade-скоупа — `xfail` с TODO
+### D9: Тесты вне upgrade-скоупа — `skip` с TODO
 
-**Решение.** `tests/test_profile_lifecycle.py::test_gateway_prod_smoke_selects_prod_tables` и три соседних теста — помечаются `@pytest.mark.xfail(reason="Windows subprocess/env issue, see #TODO")`. Тесты `test_history_search_tool.py::TestUserIsolation/TestGeneratedSqlGuard/TestSnapshotConsistency` (8 шт.) и `test_pg_session_manager.py::test_init_sets_framework_contract` — то же самое.
+**Решение.** `tests/test_profile_lifecycle.py::test_gateway_prod_smoke_selects_prod_tables` и три соседних теста — помечаются `@pytest.mark.skip(reason="Out of scope for 0.3.5 upgrade, tracked in ISSUE-XXX")`. Тесты `test_history_search_tool.py::TestUserIsolation/TestGeneratedSqlGuard/TestSnapshotConsistency` (8 шт.) и `test_pg_session_manager.py::test_init_sets_framework_contract` — то же самое.
 
 **Альтернативы.** Чинить эти тесты в рамках upgrade-изменения. Отклонено: выходит за скоуп, требует отдельного диагностического раунда (Windows subprocess, SQL-гвард с `user_id` predicate, фикстура моков).
+
+> **Примечание.** `xfail(strict=True)` нельзя использовать: если тест случайно починится, CI упадёт. `skip` корректен для отключения.
+
+### D-Y: Интроспекция сигнатур nanobot 0.3.5 (финальная проверка)
+
+Прямая интроспекция через `inspect.signature` на установленном `nanobot-ai==0.3.5`:
+
+```
+AgentLoop._assemble_outbound:
+(self, msg: 'InboundMessage', final_content: 'str', stop_reason: 'str', streamed_content: 'bool', *, log_content: 'bool' = True, turn_latency_ms: 'int | None' = None)
+
+ToolContext.__init__:
+(self, config: 'ToolsConfig', workspace: 'str', bus: 'MessageBus | None' = None, ..., file_state_store: 'FileStates | None' = None, ...)
+
+cmd_compact:
+(ctx: 'CommandContext') -> 'None'
+
+Consolidator.compact_idle_session:
+(self, session_key: 'str', *, runtime: 'LLMRuntime', max_suffix: 'int' = 0, events: 'EventSink' = EventSink(publish=None, accepts_type=None)) -> 'str | None'
+```
+
+**Выводы:**
+1. `_assemble_outbound` **включает** `log_content: bool = True` — наш патч должен передавать этот kwarg.
+2. `ToolContext` **включает** `file_state_store: FileStates | None = None` — НЕ удалять из kwargs.
+3. `Consolidator.compact_idle_session` принимает `events: EventSink` — наш CompactionEventSubscriber работает с этим API.
+
+---
 
 ### D-X: Перепроверка утверждений про upstream-покрытие
 
