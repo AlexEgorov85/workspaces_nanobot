@@ -40,14 +40,15 @@ def test_public_entrypoints() -> None:
 
 
 def test_patched_private_methods_exist() -> None:
+    """В nanobot 0.3.5 state-машина переписана: ``_state_build/_state_compact/
+    _state_restore/_state_save/_state_respond`` удалены, на их место пришли
+    ``_dispatch`` + ``_compact_session`` (см. design D1). Из приватных
+    методов, на которые мы раньше опирались, остались только
+    ``_assemble_outbound`` и ``_save_turn``.
+    """
     loop = _loop_cls()
     for name in (
         "_assemble_outbound",
-        "_state_build",
-        "_state_compact",
-        "_state_restore",
-        "_state_save",
-        "_state_respond",
         "_save_turn",
         "invalidate_runtime_config",
     ):
@@ -55,16 +56,21 @@ def test_patched_private_methods_exist() -> None:
 
 
 def test_assemble_outbound_signature() -> None:
+    """В nanobot 0.3.5 сигнатура: ``(msg, final_content, stop_reason, streamed_content,
+    *, log_content=True, turn_latency_ms=None)``. Старые параметры
+    ``all_msgs``/``had_injections`` удалены."""
     assert_params(
         _loop_cls()._assemble_outbound,
-        ["msg", "final_content", "all_msgs", "stop_reason", "had_injections", "streamed_content"],
-        kwonly=["turn_latency_ms"],
+        ["msg", "final_content", "stop_reason", "streamed_content"],
+        kwonly=["log_content", "turn_latency_ms"],
     )
 
 
 def test_save_turn_signature() -> None:
+    """``_save_turn`` имеет kwonly: ``turn_latency_ms``,
+    ``summary_checkpoint``, ``input_persisted_early``."""
     assert_params(
         _loop_cls()._save_turn,
         ["session", "messages", "skip"],
-        kwonly=["turn_latency_ms"],
+        kwonly=["turn_latency_ms", "summary_checkpoint", "input_persisted_early"],
     )

@@ -4,22 +4,21 @@
 инструмента (имя, аргументы, статус, ошибка, превью результата) на
 протяжении всех итераций оборота, а также вспомогательную функцию
 ``format_tool_params`` для форматирования параметров.
-"""
 
+В nanobot 0.3.5 хелперы из удалённого ``base_tool_tracking_hook`` не
+нужны: ``AgentHookContext.tool_calls`` напрямую возвращает список
+``ToolCallRequest`` с публичными атрибутами ``name``/``id``/``arguments``.
+"""
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from nanobot.agent import AgentHookContext
-
-from .base_tool_tracking_hook import BaseToolTrackingHook
-
 # Ключ-«bucket» для оборотов без session_key (например, прямые SDK-вызовы).
 _DEFAULT_KEY = ""
 
 
-class ToolAuditHook(BaseToolTrackingHook):
+class ToolAuditHook:
     """Аккумулирует каждый вызов инструмента (имя, аргументы, статус, ошибка,
     превью результата) на протяжении всех итераций оборота, чтобы вызывающая
     сторона могла вставить полный аудит-трейл в
@@ -40,7 +39,6 @@ class ToolAuditHook(BaseToolTrackingHook):
         (``_calls``) и счётчики начальной позиции следующей пачки
         (``_pending_start``).
         """
-        super().__init__()
         self._entries: dict[str, list[dict[str, Any]]] = {}
         self._calls: dict[str, list[dict]] = {}
         self._pending_start: dict[str, int] = {}
@@ -51,7 +49,7 @@ class ToolAuditHook(BaseToolTrackingHook):
         key = getattr(ctx, "session_key", None)
         return key if isinstance(key, str) else _DEFAULT_KEY
 
-    async def before_execute_tools(self, ctx: AgentHookContext) -> None:
+    async def before_execute_tools(self, ctx: Any) -> None:
         """Вызывается перед выполнением инструментов в итерации.
 
         Сохраняет снимок имён и аргументов всех инструментов текущей
@@ -63,25 +61,27 @@ class ToolAuditHook(BaseToolTrackingHook):
                  ``session_key`` и номер итерации.
         """
         key = self._bucket_key(ctx)
-        calls = self._iter_tool_calls(ctx)
+        calls = list(getattr(ctx, "tool_calls", None) or [])
         self._calls[key] = [
-            {"name": self._tool_call_name(tc), "arguments": self._tool_call_arguments(tc)}
+            {"name": str(getattr(tc, "name", "?")), "arguments": getattr(tc, "arguments", {})}
             for tc in calls
         ]
         bucket = self._entries.setdefault(key, [])
         self._pending_start[key] = len(bucket)
         for tc in calls:
-            info = self._tool_call_info(tc)
+            arguments = getattr(tc, "arguments", {})
+            if not isinstance(arguments, dict):
+                arguments = {}
             bucket.append({
-                "name": info["name"],
-                "arguments": info["arguments"],
+                "name": str(getattr(tc, "name", "?")),
+                "arguments": arguments,
                 "status": "started",
                 "error": None,
                 "result_preview": None,
                 "iteration": ctx.iteration,
             })
 
-    async def after_iteration(self, ctx: AgentHookContext) -> None:
+    async def after_iteration(self, ctx: Any) -> None:
         """Вызывается после завершения итерации.
 
         Обновляет статус и, при необходимости, ошибку или превью
@@ -150,7 +150,7 @@ def format_tool_params(params: list[dict]) -> dict[str, str]:
 
     Returns:
         Словарь, где ключ — имя инструмента, значение — строка с
-        отформатированными аргументами.
+        отформатированными параметрами.
     """
     result: dict[str, str] = {}
     for p in params:

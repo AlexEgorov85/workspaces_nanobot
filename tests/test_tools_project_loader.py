@@ -125,7 +125,7 @@ def _make_agent(*, tools_config_section=None) -> MagicMock:
     agent.file_states = MagicMock()
     agent.provider_snapshot_loader = MagicMock()
     agent._image_generation_provider_configs = {}
-    agent.runtime_events = MagicMock()
+    agent._runtime_control = MagicMock()
     # context.timezone — атрибут через ``.context``
     ctx_obj = MagicMock()
     ctx_obj.timezone = "UTC"
@@ -290,12 +290,12 @@ class TestPatchProjectToolsIntegration:
         agent.file_states = MagicMock()
         agent.provider_snapshot_loader = MagicMock()
         agent._image_generation_provider_configs = {}
+        agent._runtime_control = MagicMock()
         ctx_obj = MagicMock()
         ctx_obj.timezone = "UTC"
         agent.context = ctx_obj
         agent.workspace_scopes = MagicMock()
         agent.workspace_scopes.sandbox_status = None
-        agent.runtime_events = MagicMock()
 
         # Пустая workspace/tools
         (tmp_path / "tools").mkdir()
@@ -458,12 +458,12 @@ class TestRealCompactContextToolLoads:
         agent.file_states = MagicMock()
         agent.provider_snapshot_loader = MagicMock()
         agent._image_generation_provider_configs = {}
+        agent._runtime_control = MagicMock()
         ctx_obj = MagicMock()
         ctx_obj.timezone = "UTC"
         agent.context = ctx_obj
         agent.workspace_scopes = MagicMock()
         agent.workspace_scopes.sandbox_status = None
-        agent.runtime_events = MagicMock()
 
         class _CompactSec:
             enabled = True

@@ -111,6 +111,7 @@ class AgentFactory:
             ``Registered N tools`` при старте).
         """
         from nanobot.agent.loop import AgentLoop
+        from nanobot.agent.tools.registry import ToolRegistry
 
         hooks: list[Any] = []
         # ToolAuditHook — обязателен: каналы и CLI рендерят его записи
@@ -151,6 +152,7 @@ class AgentFactory:
             "session_manager": session_manager,
             "hooks": hooks,
             "hook_factories": hook_factories,
+            "tool_registry": ToolRegistry(),
         }
         if cron_service is not None:
             kwargs["cron_service"] = cron_service

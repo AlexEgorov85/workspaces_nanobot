@@ -21,7 +21,9 @@ def test_exact_dispatch() -> None:
 
     router.exact("/ping", handler)
 
-    ctx = CommandContext(msg=None, session=None, key="cli:direct", raw="/ping")
+    ctx = CommandContext(
+        msg=None, session=None, key="cli:direct", raw="/ping", loop=router,
+    )
     result = asyncio.run(router.dispatch(ctx))
     assert result == "pong"
     assert seen == ["cli:direct"]
@@ -39,17 +41,31 @@ def test_prefix_dispatch_extracts_args() -> None:
 
     router.prefix("/compact", handler)
 
-    ctx = CommandContext(msg=None, session=None, key="k", raw="/compact now please")
+    ctx = CommandContext(
+        msg=None, session=None, key="k", raw="/compact now please", loop=router,
+    )
     assert asyncio.run(router.dispatch(ctx)) is None
     assert args_holder == [" now please"]
 
 
-def test_unhandled_returns_none() -> None:
+def test_unhandled_dispatch_returns_outbound() -> None:
+    """В nanobot 0.3.5 ``CommandRouter.dispatch`` возвращает
+    ``OutboundMessage`` даже для неизвестных команд (сообщение
+    ``Unknown command ... Did you mean ...?``)."""
+    from nanobot.bus.events import OutboundMessage
     from nanobot.command.router import CommandContext, CommandRouter
 
     router = CommandRouter()
-    ctx = CommandContext(msg=None, session=None, key="k", raw="/unknown")
-    assert asyncio.run(router.dispatch(ctx)) is None
+
+    class _Msg:
+        channel = "cli"
+        chat_id = "direct"
+        metadata = {}
+
+    ctx = CommandContext(msg=_Msg(), session=None, key="k", raw="/unknown", loop=router)
+    result = asyncio.run(router.dispatch(ctx))
+    assert isinstance(result, OutboundMessage)
+    assert "Unknown command" in result.content
 
 
 def test_is_dispatchable_command() -> None:

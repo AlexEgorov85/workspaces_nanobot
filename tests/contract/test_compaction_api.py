@@ -25,6 +25,10 @@ def test_autocompact_archive_kwonly_runtime() -> None:
 
 
 def test_consolidator_init_signature() -> None:
+    """В nanobot 0.3.5 сигнатура ``Consolidator.__init__``:
+    ``(store, sessions, build_messages, get_tool_definitions, resolve_prompt_context=None)``.
+    Параметры ``consolidation_ratio``/``unified_session`` удалены (последние
+    живут как настройки consolidation'а на стороне AgentDefaults)."""
     from nanobot.agent.memory import Consolidator
 
     assert_params(
@@ -34,37 +38,40 @@ def test_consolidator_init_signature() -> None:
             "sessions",
             "build_messages",
             "get_tool_definitions",
-            "consolidation_ratio",
-            "unified_session",
         ],
     )
 
 
 def test_consolidator_methods_present() -> None:
+    """В nanobot 0.3.5 ``Consolidator`` использует ``summarize_provider_compaction``
+    вместо ``maybe_consolidate_by_tokens`` (помечен DEPRECATED). Имена
+    методов изменились — ``archive_session``/``pick_consolidation_boundary``
+    удалены. Оставлены публичные методы, на которые опирается
+    ``ContextCompactionService.compact``.
+    """
     from nanobot.agent.memory import Consolidator
 
     for name in (
-        "maybe_consolidate_by_tokens",
-        "estimate_session_prompt_tokens",
         "compact_idle_session",
-        "archive",
-        "pick_consolidation_boundary",
+        "estimate_session_prompt_tokens",
+        "summarize_provider_compaction",
+        "summarize_transcript",
+        "archive_session",
         "get_lock",
     ):
         assert callable(getattr(Consolidator, name, None)), f"Consolidator.{name} missing"
 
 
 def test_config_consolidation_keys() -> None:
+    """В nanobot 0.3.5 ``AgentDefaults.consolidation_ratio``/``consolidationRatio``
+    удалён (порог токен-консолидации зашит внутри Consolidator); осталось
+    только ``session_ttl_minutes`` (alias ``idleCompactAfterMinutes``)."""
     from nanobot.config.schema import AgentDefaults
 
     fields = AgentDefaults.model_fields
     assert "session_ttl_minutes" in fields, (
         "AgentDefaults.session_ttl_minutes missing (camelCase alias: idleCompactAfterMinutes)"
     )
-    assert "consolidation_ratio" in fields, (
-        "AgentDefaults.consolidation_ratio missing (camelCase alias: consolidationRatio)"
-    )
     ttl_alias = str(fields["session_ttl_minutes"].validation_alias)
-    ratio_alias = str(fields["consolidation_ratio"].validation_alias)
     assert "idleCompactAfterMinutes" in ttl_alias
-    assert "consolidationRatio" in ratio_alias
+    assert "consolidation_ratio" not in fields

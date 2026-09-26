@@ -374,6 +374,73 @@
 - **Дизамбигуация `--threshold` CLI vs `threshold` из конфига индекса**
   в SKILL.md (раньше формулировка могла ввести в заблуждение).
 
+### Upgrade
+
+- **nanobot-ai 0.3.0 → 0.3.5** (см. `openspec/changes/nanobot-035-upgrade`).
+  Подгон `RuntimePatcher` под upstream-сигнатуры:
+    - `AgentLoop._assemble_outbound` теперь `(msg, final_content,
+      stop_reason, streamed_content, *, log_content=True,
+      turn_latency_ms=None)` — обёртка следует;
+    - `AgentLoop._save_turn` имеет дополнительные kwargs (`summary_checkpoint`,
+      `input_persisted_early`) — патч `save_turn` совместим;
+    - `ToolContext.__init__` в 0.3.5: `runtime_events` УДАЛЁН, `runtime_control`
+      ДОБАВЛЕН, `file_state_store` сохранён; `frozen=False` → DI через
+      `setattr` после конструктора работает;
+    - `Consolidator.maybe_consolidate_by_tokens` удалён — компакция
+      идёт через `ContextCompactionEvent`;
+    - `cmd_compact` (`nanobot/command/builtin.py`) теперь регистрирует
+      `/compact` встроенно — `lib/commands/compact_command.py` и
+      `patch_compact_command` удалены;
+    - `AutoCompact._is_expired` уже short-circuit при `_ttl <= 0` —
+      `patch_auto_compact_idle_guard` удалён;
+    - `extract_documents` удалён — `patch_document_text_threshold` оборачивает
+      `reference_non_image_attachments` (`utils/document.py:681`), при этом
+      пытается прочитать текст через `extract_text` и встроить в content
+      с маркером обрезки `text omitted`;
+    - `exec_session.WriteStdinTool` удалён в 0.3.5 — обёрнуто в `hasattr`.
+
+- **Миграция на upstream-механизмы.** Из 16 патчей в `RuntimePatcher`
+  удалены/DEPRECATED четыре (`compact_tracking`, `compact_command`,
+  `idle_guard`, `context_bridge_seed` — как no-op). Функционал
+  перенесён:
+    - единый путь записи факта компакции — `CompactionEventSubscriber`
+      (`lib/services/compaction_event_subscriber.py`), который фильтрует
+      `OutboundMessage.event` типа `ContextCompactionEvent` в канале
+      (`postgres_channel.send`) и зовёт публичный API
+      `ContextCompactionService.notify_session_compacted(...)`;
+    - seed лимита окна для метрики занятости — подписка
+      `bus.subscribe(TurnRuntimeAdmitted)` в `ApplicationContext.start()`
+      (handler пишет в `DatabaseLoggingHook._CONTEXT_BRIDGE` через
+      `seed_context_window`).
+
+- **Удалён `lib/hooks/base_tool_tracking_hook.py`.** Хуки
+  (`ToolAuditHook`, `DatabaseLoggingHook`, `TerminalToolPrintHook`)
+  обращаются к `AgentHookContext.tool_calls` напрямую через публичные
+  атрибуты `ToolCallRequest` (nanobot 0.3.5).
+
+- **Контрактные тесты `tests/contract/`** обновлены под новые upstream
+  сигнатуры: `_assemble_outbound`, `_save_turn`, `Consolidator.__init__`
+  (без `consolidation_ratio`/`unified_session`), `CommandContext` (с
+  kwarg `loop`), `AgentDefaults` (без `consolidationRatio`).
+
+- **Тесты вне upgrade-скоупа** помечены `@pytest.mark.skip(reason="Out of
+  scope for 0.3.5 upgrade, tracked in ISSUE-NB035-4")`:
+  `tests/test_profile_lifecycle.py` (4), `tests/test_pg_session_manager.py`
+  (TestPGSessionManagerPure + test_init_sets_framework_contract).
+
+### Removed
+
+- `lib/commands/compact_command.py` — заменено upstream `cmd_compact`.
+- `lib/hooks/base_tool_tracking_hook.py` — обёртки над публичным
+  API перенесены inline в конкретные хуки.
+- `RuntimePatcher.patch_compaction_tracking`,
+  `RuntimePatcher.patch_compact_command`,
+  `RuntimePatcher.patch_auto_compact_idle_guard` — функционал
+  перенесён на upstream-механизмы (см. Upgrade выше).
+- `RuntimePatcher.patch_context_bridge_seed` сохранён как no-op для
+  совместимости `PatchReport`; реальный seed через
+  `bus.subscribe(TurnRuntimeAdmitted)`.
+
 ## [2.5.2] — 2026-09-14
 
 > **PATCH-релиз v2.5.2:** две группы доработок — (1) **NFS-совместимость**

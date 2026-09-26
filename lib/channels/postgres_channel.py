@@ -111,6 +111,7 @@ class PostgresChannel(BaseChannel):
         bus: MessageBus,
         *,
         db_logging_service: Any | None = None,
+        compaction_event_subscriber: Any | None = None,
     ) -> None:
         super().__init__(config, bus)
         # Опциональный ``DbLoggingService`` для долговечного журнала
@@ -119,6 +120,10 @@ class PostgresChannel(BaseChannel):
         # (терминал). ``None`` (тесты, standalone) — журналирование
         # отключается, остаётся только терминальный вывод.
         self._db_logging_service = db_logging_service
+        # Опциональный ``CompactionEventSubscriber``: единый наблюдатель
+        # upstream-событий ``ContextCompactionEvent``. ``None`` (тесты,
+        # standalone) — observer отключён.
+        self._compaction_event_subscriber = compaction_event_subscriber
         _get = config.get
 
         # ---- настройки подключения к БД ----
@@ -1570,8 +1575,22 @@ class PostgresChannel(BaseChannel):
         # c пустым content после выполнения тула message). Если их
         # обработать как финальный ответ — они перезапишут уже записанные
         # content/media пустыми значениями, и вложение тула message
-        # пропадёт из БД. Поэтому типизированные события здесь игнорируем.
+        # пропадёт из БД.
+        #
+        # До раннего return фильтруем ``ContextCompactionEvent`` через
+        # ``CompactionEventSubscriber``: канал остаётся «тупым» транспортом
+        # (SRP), а сервис-подписчик занимается бизнес-логикой компакции
+        # (history-notice + agent_gateway_logs запись).
         if msg.event is not None:
+            subscriber = getattr(self, "_compaction_event_subscriber", None)
+            if subscriber is not None:
+                try:
+                    await subscriber.feed(msg)
+                except Exception:
+                    logger.opt(exception=True).warning(
+                        "compaction_event_subscriber feed failed for {}",
+                        getattr(msg, "session_key", None),
+                    )
             return
 
         # --- Чанк рассуждений — буферизируем, в БД попадёт через flush ---

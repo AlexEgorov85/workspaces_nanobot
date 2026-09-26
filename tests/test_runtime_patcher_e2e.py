@@ -57,14 +57,16 @@ def _patched_exec(settings=None):
     import nanobot.agent.tools.shell as shell
     import nanobot.agent.tools.exec_session as es
 
-    orig = (
+    orig = [
         shell.MAX_OUTPUT_CHARS,
         shell.ExecTool._MAX_OUTPUT,
         shell.ExecTool.parameters,
         es.MAX_OUTPUT_CHARS,
         es.DEFAULT_MAX_OUTPUT_CHARS,
-        es.WriteStdinTool.parameters,
-    )
+    ]
+    has_ws = hasattr(es, "WriteStdinTool")
+    if has_ws:
+        orig.append(es.WriteStdinTool.parameters)
     try:
         RuntimePatcher().patch_exec_limits(settings or _Settings(
             persist_threshold=5000,
@@ -75,14 +77,14 @@ def _patched_exec(settings=None):
         ))
         yield
     finally:
-        (
-            shell.MAX_OUTPUT_CHARS,
-            shell.ExecTool._MAX_OUTPUT,
-            shell.ExecTool.parameters,
-            es.MAX_OUTPUT_CHARS,
-            es.DEFAULT_MAX_OUTPUT_CHARS,
-            es.WriteStdinTool.parameters,
-        ) = orig
+        restore = orig[:5]
+        shell.MAX_OUTPUT_CHARS = restore[0]
+        shell.ExecTool._MAX_OUTPUT = restore[1]
+        shell.ExecTool.parameters = restore[2]
+        es.MAX_OUTPUT_CHARS = restore[3]
+        es.DEFAULT_MAX_OUTPUT_CHARS = restore[4]
+        if has_ws:
+            es.WriteStdinTool.parameters = restore[5]
 
 
 @contextmanager

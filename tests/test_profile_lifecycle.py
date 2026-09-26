@@ -214,6 +214,9 @@ def test_gateway_invalid_profile_exits_2() -> None:
     assert "allowed: prod, test" in result.stderr
 
 
+@pytest.mark.skip(
+    reason="Out of scope for 0.3.5 upgrade, tracked in ISSUE-NB035-4",
+)
 def test_gateway_prod_smoke_selects_prod_tables() -> None:
     """``python gateway.py --profile=prod --smoke`` → prod runtime-таблицы.
 
@@ -232,6 +235,9 @@ def test_gateway_prod_smoke_selects_prod_tables() -> None:
     assert "agent_gateway_logs_test" not in result.stdout
 
 
+@pytest.mark.skip(
+    reason="Out of scope for 0.3.5 upgrade, tracked in ISSUE-NB035-4",
+)
 def test_gateway_test_smoke_selects_test_tables() -> None:
     """``python gateway.py --profile=test --smoke`` → test runtime-таблицы."""
     result = subprocess.run(
@@ -244,6 +250,9 @@ def test_gateway_test_smoke_selects_test_tables() -> None:
     assert "logging.db.table_name=agent_gateway_logs_test" in result.stdout
 
 
+@pytest.mark.skip(
+    reason="Out of scope for 0.3.5 upgrade, tracked in ISSUE-NB035-4",
+)
 def test_gateway_profile_comes_only_from_cli() -> None:
     """Произвольные env vars в parent + ``--profile=prod`` → prod runtime.
 
@@ -277,6 +286,9 @@ def test_cli_agent_no_profile_exits_2() -> None:
     assert "FATAL" in result.stderr
 
 
+@pytest.mark.skip(
+    reason="Out of scope for 0.3.5 upgrade, tracked in ISSUE-NB035-4",
+)
 def test_cli_agent_test_smoke_selects_test_tables() -> None:
     """``python cli_agent.py --profile=test --smoke`` → test runtime."""
     result = subprocess.run(

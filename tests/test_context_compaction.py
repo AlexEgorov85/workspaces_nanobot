@@ -147,20 +147,20 @@ class TestCompact:
         assert report["ok"] is False
         assert "session_key" in report["reason"]
 
-    def test_token_compaction_archives_and_reports(self):
-        agent, before, after, consolidator, sessions = _make_agent(
+    def test_token_compaction_returns_failure(self):
+        """В nanobot 0.3.5 ``Consolidator.maybe_consolidate_by_tokens`` удалён.
+        ``compact()`` без ``force=True``/``idle=True`` возвращает failure:
+        token-budget компакция идёт через upstream-событие
+        ``ContextCompactionEvent`` (см. ``CompactionEventSubscriber``)."""
+        agent, _before, _after, consolidator, _sessions = _make_agent(
             after_messages=[{"role": "user", "content": f"m{i}"} for i in range(22)],
             after_cursor=12,
         )
         svc = ContextCompactionService(agent, settings=_settings())
         report = asyncio.run(svc.compact(session_key="cli:1"))
-        assert report["ok"] is True
-        assert report["mode"] == "token"
-        assert report["archived_msgs"] == 12
-        assert report["kept_msgs"] == 22
-        assert report["tokens_before"] == 1000
-        assert report["tokens_after"] == 300
-        consolidator.maybe_consolidate_by_tokens.assert_awaited_once()
+        assert report["ok"] is False
+        assert "nanobot 0.3.5" in report["reason"] or "ContextCompactionEvent" in report["reason"]
+        consolidator.maybe_consolidate_by_tokens.assert_not_called()
         consolidator.compact_idle_session.assert_not_called()
 
     def test_idle_compaction_uses_compact_idle(self):
@@ -254,10 +254,15 @@ class TestCompact:
         assert report["summary"] is None
 
     def test_compactor_failure_is_caught(self):
+        """``maybe_consolidate_by_tokens`` удалён в nanobot 0.3.5;
+        вместо этого ``compact_idle_session`` используется при ``force=True``
+        (см. ``cmd_compact`` upstream builtin)."""
         agent, _before, _after, consolidator, _sessions = _make_agent()
-        consolidator.maybe_consolidate_by_tokens.side_effect = RuntimeError("LLM down")
+        consolidator.compact_idle_session.side_effect = RuntimeError("LLM down")
         svc = ContextCompactionService(agent, settings=_settings())
-        report = asyncio.run(svc.compact(session_key="cli:1"))
+        report = asyncio.run(
+            svc.compact(session_key="cli:1", idle=True),
+        )
         assert report["ok"] is False
         assert "LLM down" in report["reason"]
 
@@ -288,7 +293,7 @@ class TestEstimateFallback:
         consolidator.estimate_session_prompt_tokens = AsyncMock(
             side_effect=RuntimeError("provider not ready"),
         )
-        consolidator.maybe_consolidate_by_tokens = AsyncMock()
+        consolidator.compact_idle_session = AsyncMock(return_value=None)
         sessions = MagicMock()
         before = SimpleNamespace(
             key="cli:1", messages=[{"role": "user", "content": "x" * 4000}],
@@ -308,149 +313,21 @@ class TestEstimateFallback:
         agent.runtime_for_session = MagicMock(return_value=runtime)
 
         svc = ContextCompactionService(agent, settings=_settings())
-        report = asyncio.run(svc.compact(session_key="cli:1"))
+        report = asyncio.run(
+            svc.compact(session_key="cli:1", idle=True),
+        )
         assert report["ok"] is True
-        # Оценка теперь не 0, а ~1000 токенов (4000 chars / 4)
         assert report["tokens_before"] == 1000
         assert report["tokens_after"] == 1000
 
 
 class TestCmdCompact:
-    """``cmd_compact`` (lib/commands/compact_command.py) — slash-команда /compact.
+    """``cmd_compact`` (ранее ``lib/commands/compact_command.py``) удалён.
 
-    Возвращает ``OutboundMessage`` и всегда вызывает ``svc.compact(force=True)``,
-    независимо от размера контекста (детерминированно, до LLM).
+    В nanobot 0.3.5 встроенный ``cmd_compact`` из ``nanobot.command.builtin``
+    покрывает сценарий; наш обработчик избыточен. Тесты удалены:
+    см. ``openspec/changes/nanobot-035-upgrade``.
     """
-
-    def _ctx(self, **svc_cls):
-        from types import SimpleNamespace
-
-        msg = SimpleNamespace(channel="postgres", chat_id="streamlit", metadata={})
-        loop = SimpleNamespace(key="postgres:streamlit")
-        return SimpleNamespace(
-            loop=loop,
-            key="postgres:streamlit",
-            raw="/compact",
-            msg=msg,
-        ), svc_cls
-
-    def test_returns_outbound_message(self, monkeypatch):
-        from lib.commands.compact_command import cmd_compact
-
-        class FakeService:
-            enabled = True
-
-            def __init__(self, agent, settings=None):
-                pass
-
-            async def compact(self, **kwargs):
-                return {
-                    "ok": True, "archived_msgs": 5, "kept_msgs": 4,
-                    "tokens_before": 100, "tokens_after": 10,
-                    "summary": "x", "mode": "idle",
-                }
-
-            def format_report(self, report):
-                return f"ok archived={report['archived_msgs']}"
-
-        monkeypatch.setattr(
-            "lib.services.context_compaction.ContextCompactionService", FakeService,
-        )
-
-        import asyncio
-        ctx, _ = self._ctx()
-        result = asyncio.run(cmd_compact(ctx))
-
-        from nanobot.bus.events import OutboundMessage
-        from lib.utils.outbound_meta import FINAL_TURN_KEY
-        assert isinstance(result, OutboundMessage)
-        assert "archived=5" in result.content
-        assert result.metadata.get(FINAL_TURN_KEY) is True
-
-    def test_always_force_true_and_idle_parsed(self, monkeypatch):
-        from lib.commands.compact_command import cmd_compact
-
-        captured = {}
-
-        class FakeService:
-            enabled = True
-
-            def __init__(self, agent, settings=None):
-                pass
-
-            async def compact(self, **kwargs):
-                captured["kwargs"] = kwargs
-                return {
-                    "ok": True, "archived_msgs": 1, "kept_msgs": 1,
-                    "tokens_before": 100, "tokens_after": 10,
-                    "summary": None, "mode": "idle",
-                }
-
-            def format_report(self, report):
-                return f"ok"
-
-        monkeypatch.setattr(
-            "lib.services.context_compaction.ContextCompactionService", FakeService,
-        )
-
-        import asyncio
-        ctx, _ = self._ctx()
-        ctx.raw = "/compact idle"
-        asyncio.run(cmd_compact(ctx))
-        assert captured["kwargs"]["force"] is True
-        assert captured["kwargs"]["idle"] is True
-
-    def test_disabled_reports_disabled(self, monkeypatch):
-        from lib.commands.compact_command import cmd_compact
-
-        class FakeService:
-            enabled = False
-
-            def __init__(self, agent, settings=None):
-                pass
-
-        monkeypatch.setattr(
-            "lib.services.context_compaction.ContextCompactionService", FakeService,
-        )
-
-        import asyncio
-        ctx, _ = self._ctx()
-        result = asyncio.run(cmd_compact(ctx))
-        assert "отключено" in result.content
-
-    def test_partial_passes_settings(self, monkeypatch):
-        from functools import partial
-
-        from lib.commands.compact_command import cmd_compact
-
-        seen = {}
-
-        class FakeService:
-            enabled = True
-
-            def __init__(self, agent, settings=None):
-                seen["settings"] = settings
-
-            async def compact(self, **kwargs):
-                return {
-                    "ok": True, "archived_msgs": 1, "kept_msgs": 1,
-                    "tokens_before": 1, "tokens_after": 1,
-                    "summary": None, "mode": "idle",
-                }
-
-            def format_report(self, report):
-                return "ok"
-
-        monkeypatch.setattr(
-            "lib.services.context_compaction.ContextCompactionService", FakeService,
-        )
-
-        settings = object()
-        handler = partial(cmd_compact, settings=settings)
-        import asyncio
-        ctx, _ = self._ctx()
-        asyncio.run(handler(ctx))
-        assert seen["settings"] is settings
 
 
 class TestCompactContextTool:
@@ -889,165 +766,13 @@ class TestNotifyRecordsEventLog:
 
 
 class TestPatchCompactionTracking:
-    def test_skips_when_disabled(self, monkeypatch):
-        monkeypatch.setattr(
-            "lib.services.context_compaction.ContextCompactionService",
-            lambda *_a, **_k: SimpleNamespace(
-                enabled=False, notify_in_history=True,
-            ),
-        )
-        from lib.services.runtime_patcher import RuntimePatcher
-        ok, detail = RuntimePatcher().patch_compaction_tracking(
-            MagicMock(), settings=_settings(enabled=False),
-        )
-        assert ok is False and "enabled=false" in detail
+    """``patch_compaction_tracking`` удалён в nanobot 0.3.5:
+    ``Consolidator.maybe_consolidate_by_tokens`` отсутствует, обёртка
+    убрана. Тесты пока отключены (см. ``openspec/changes/nanobot-035-upgrade``).
+    """
 
-    def test_skips_when_notify_disabled(self, monkeypatch):
-        monkeypatch.setattr(
-            "lib.services.context_compaction.ContextCompactionService",
-            lambda *_a, **_k: SimpleNamespace(
-                enabled=True, notify_in_history=False,
-            ),
-        )
-        from lib.services.runtime_patcher import RuntimePatcher
-        ok, detail = RuntimePatcher().patch_compaction_tracking(
-            MagicMock(), settings=_settings(enabled=True, notify_in_history=False),
-        )
-        assert ok is False and "notify_in_history=false" in detail
-
-    def test_archive_wrapper_calls_record_on_real_archive(self, monkeypatch):
-        record_calls: list = []
-        estimate_returns = iter([(1000, "c"), (300, "c")])
-
-        class FakeSvc:
-            enabled = True
-            notify_in_history = True
-
-            async def record_external_compaction(self, **kw):
-                record_calls.append(kw)
-
-            async def _estimate(self, *a, **kw):
-                return next(estimate_returns)
-
-        monkeypatch.setattr(
-            "lib.services.context_compaction.ContextCompactionService",
-            lambda *_a, **_k: FakeSvc(),
-        )
-        from lib.services.runtime_patcher import RuntimePatcher
-
-        before = SimpleNamespace(
-            messages=[1] * 20, last_consolidated=0, metadata={},
-        )
-        after = SimpleNamespace(
-            messages=[1] * 8, last_consolidated=12,
-            metadata={"_last_summary": {"text": "svodka"}},
-        )
-        sessions = MagicMock()
-        sessions.get_or_create = MagicMock(side_effect=[before, after])
-        runtime = MagicMock()
-
-        async def fake_archive(key, *, runtime):
-            return "svodka"
-
-        auto = MagicMock()
-        auto._archive = fake_archive
-        agent = MagicMock()
-        agent.sessions = sessions
-        agent.consolidator = MagicMock()
-        agent.auto_compact = auto
-
-        ok, _ = RuntimePatcher().patch_compaction_tracking(agent, settings=_settings())
-        assert ok is True
-        asyncio.run(agent.auto_compact._archive("postgres:c1", runtime=runtime))
-        assert len(record_calls) == 1
-        assert record_calls[0]["mode"] == "idle"
-        assert record_calls[0]["archived_msgs"] == 12
-        assert record_calls[0]["summary"] == "svodka"
-
-    def test_archive_wrapper_skips_when_no_archive(self, monkeypatch):
-        record_calls: list = []
-
-        class FakeSvc:
-            enabled = True
-            notify_in_history = True
-
-            async def record_external_compaction(self, **kw):
-                record_calls.append(kw)
-
-            async def _estimate(self, *a, **kw):
-                return (100, "c")
-
-        monkeypatch.setattr(
-            "lib.services.context_compaction.ContextCompactionService",
-            lambda *_a, **_k: FakeSvc(),
-        )
-        from lib.services.runtime_patcher import RuntimePatcher
-
-        same = SimpleNamespace(messages=[1] * 5, last_consolidated=0, metadata={})
-        sessions = MagicMock()
-        sessions.get_or_create = MagicMock(return_value=same)
-        runtime = MagicMock()
-
-        async def fake_archive(key, *, runtime):
-            return ""  # нечего архивировать
-
-        auto = MagicMock()
-        auto._archive = fake_archive
-        agent = MagicMock()
-        agent.sessions = sessions
-        agent.consolidator = MagicMock()
-        agent.auto_compact = auto
-
-        RuntimePatcher().patch_compaction_tracking(agent, settings=_settings())
-        asyncio.run(agent.auto_compact._archive("postgres:c1", runtime=runtime))
-        assert record_calls == []
-
-    def test_maybe_consolidate_wrapper_calls_record_on_real_archive(self, monkeypatch):
-        record_calls: list = []
-
-        class FakeSvc:
-            enabled = True
-            notify_in_history = True
-
-            async def record_external_compaction(self, **kw):
-                record_calls.append(kw)
-
-            async def _estimate(self, *a, **kw):
-                return (100, "c")
-
-        monkeypatch.setattr(
-            "lib.services.context_compaction.ContextCompactionService",
-            lambda *_a, **_k: FakeSvc(),
-        )
-        from lib.services.runtime_patcher import RuntimePatcher
-
-        before = SimpleNamespace(
-            key="postgres:c1", messages=[1] * 15,
-            last_consolidated=0, metadata={},
-        )
-        after = SimpleNamespace(
-            key="postgres:c1", messages=[1] * 10,
-            last_consolidated=5,
-            metadata={"_last_summary": {"text": "ns"}},
-        )
-        sessions = MagicMock()
-        # _wrapped зовёт get_or_create ровно один раз (для after);
-        # замер before идёт через аргумент.
-        sessions.get_or_create = MagicMock(return_value=after)
-        runtime = MagicMock()
-        consolidator = MagicMock()
-        consolidator.maybe_consolidate_by_tokens = AsyncMock()
-        agent = MagicMock()
-        agent.sessions = sessions
-        agent.consolidator = consolidator
-        agent.auto_compact = MagicMock()
-
-        ok, _ = RuntimePatcher().patch_compaction_tracking(agent, settings=_settings())
-        assert ok is True
-        asyncio.run(
-            agent.consolidator.maybe_consolidate_by_tokens(before, runtime=runtime)
-        )
-        assert len(record_calls) == 1
-        assert record_calls[0]["mode"] == "token"
-        assert record_calls[0]["archived_msgs"] == 5
-        assert record_calls[0]["summary"] == "ns"
+    @pytest.mark.skip(
+        reason="patch_compaction_tracking удалён в 0.3.5; см. ISSUE-NB035-3",
+    )
+    def test_placeholder(self):
+        pass

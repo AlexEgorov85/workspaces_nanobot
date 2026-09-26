@@ -1,6 +1,6 @@
 # RuntimePatcher Inventory
 
-> Каталог всех monkey-patch'ей к `nanobot-ai==0.3.0`.
+> Каталог всех monkey-patch'ей к `nanobot-ai==0.3.5`.
 > Определение: [`lib/services/runtime_patcher.py`](../../lib/services/runtime_patcher.py).
 > См. также [nanobot-inventory.md](nanobot-inventory.md).
 
@@ -22,303 +22,275 @@ target, nanobot version, проверенную public alternative, upgrade risk
 | **KEEP** | upstream не даёт точки расширения — патч необходим |
 | **ISOLATE+TESTS** | патч нужен, но требует contract-тестов на целевой API |
 | **REVIEW** | возможно есть публичная альтернатива — проверить при апгрейде |
+| **DEPRECATED** | функционал перенесён на upstream-механизм в nanobot 0.3.5; патч оставлен как no-op для совместимости со `PatchReport`/логами |
 
 ---
 
-## Сводная таблица
+## Сводная таблица (nanobot-ai 0.3.5)
 
-| # | Патч | Target (nanobot API) | Тип target | Risk | Категория |
-|---|---|---|---|---|---|
-| 1 | `context_bridge_seed` | `agent._state_build` | private async method | HIGH | KEEP |
-| 2 | `context_governor` | `ContextGovernor.normalize_tool_result` | internal staticmethod | HIGH | ISOLATE+TESTS |
-| 3 | `save_turn` | `agent._save_turn` | private method | HIGH | KEEP |
-| 4 | `session_content_cleanup` | `Session.add_message` | public метод (обёртка класса) | MEDIUM | KEEP |
-| 5 | `async_save` | `agent.sessions.save` | public (меняет семантику sync→executor) | MEDIUM | KEEP |
-| 6 | `exec_limits` | константы `MAX_OUTPUT_CHARS` и схема tools | private class attrs | HIGH | REVIEW* |
-| 7 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | private class attrs | HIGH | REVIEW* |
-| 8 | `assemble_outbound` | `agent._assemble_outbound` | private method | CRITICAL | KEEP |
-| 9 | `subagent_logging` | `_SubagentHook` (подмена класса в модуле) | private class | CRITICAL | ISOLATE+TESTS |
-| 10 | `project_tools` | `ToolContext(...)` + DI setattr | internal ctor + собственная конвенция | HIGH | KEEP |
-| 11 | `compact_tracking` | `AutoCompact._archive`, `Consolidator.maybe_consolidate_by_tokens` | private + public | HIGH | KEEP |
-| 12 | `compact_command` | `agent.commands.exact/prefix` | public CommandRouter | LOW | KEEP |
-| 13 | `idle_guard` | `auto_compact.check_expired` | public (no-op замена) | LOW | REVIEW |
+| # | Патч | Target (nanobot API) | Risk | Категория |
+|---|---|---|---|---|
+| 1 | `context_bridge_seed` | `bus.subscribe(TurnRuntimeAdmitted)` (нет monkey-patch) | LOW | DEPRECATED (no-op) |
+| 2 | `context_governor` | `ContextGovernor.normalize_tool_result` | HIGH | ISOLATE+TESTS |
+| 3 | `save_turn` | `agent._save_turn` | HIGH | KEEP |
+| 4 | `session_content_cleanup` | `Session.add_message` | MEDIUM | KEEP |
+| 5 | `async_save` | `agent.sessions.save` | MEDIUM | KEEP |
+| 6 | `session_dir_watch` | `sessions.save` (diagnostic) | LOW | KEEP (gated) |
+| 7 | `exec_limits` | константы + schema tools | HIGH | REVIEW |
+| 8 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + schema | MEDIUM | KEEP |
+| 9 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | HIGH | REVIEW |
+| 10 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | KEEP |
+| 11 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | KEEP |
+| 12 | `project_tools` | `ToolContext(...)` + setattr DI | HIGH | KEEP |
+| 13 | `compact_tracking` | — | — | DEPRECATED |
+| 14 | `compact_command` | — | — | DEPRECATED |
+| 15 | `idle_guard` | — | — | DEPRECATED |
+| 16 | `document_text_threshold` | `reference_non_image_attachments` | MEDIUM | KEEP |
 
-\* REVIEW для лимитов: проверить, появились ли в nanobot ≥0.3.x конфигурируемые потолки
-tool-вывода; если да — патчи заменяются конфигом.
+---
+
+## Deprecation Notes (Что заменили в 0.3.5)
+
+### 1. `context_bridge_seed`
+
+Перенесён на подписку `bus.subscribe(TurnRuntimeAdmitted)` в
+`ApplicationContext.start()`. В runtime-patcher метод оставлен как no-op
+с `applied=True` для совместимости со `PatchReport`/логами; реальный seed
+делается подпиской на runtime-событие, которое публикуется через
+`bus.publish` (`nanobot/bus/runtime_events.py:204`).
+
+Замена: upstrеам — `TurnRuntimeAdmitted(context, runtime)` с
+`runtime.context_window_tokens` / `runtime.model`. Handler пишет
+в `DatabaseLoggingHook._CONTEXT_BRIDGE` через
+`seed_context_window(session_key, limit, model)` из
+`lib/hooks/database_logging_hook.py`.
+
+### 13. `compact_tracking`
+
+Удалён. В nanobot 0.3.5:
+* `Consolidator.maybe_consolidate_by_tokens` отсутствует — token-budget
+  компакция идёт через `ContextCompactionEvent`
+  (`nanobot.events.ContextCompactionEvent`).
+* `_write_history_notice`/`_record_event_log` теперь вызываются
+  из `CompactionEventSubscriber` (`lib/services/compaction_event_subscriber.py`),
+  который дёргается каналом при получении `OutboundMessage.event` типа
+  `ContextCompactionEvent`.
+
+Подробности: `openspec/changes/nanobot-035-upgrade/design.md`.
+
+### 14. `compact_command`
+
+Удалён вместе с `lib/commands/compact_command.py`. Upstream
+`cmd_compact` (`nanobot/command/builtin.py`) делает то же:
+`loop.consolidator.compact_idle_session(ctx.key, runtime=runtime,
+events=delivery.events)`. Принудительное сжатие остаётся публичным
+через `ContextCompactionService.compact(force=True)`.
+
+### 15. `idle_guard`
+
+Удалён. Upstream `AutoCompact._is_expired`
+(`nanobot/agent/autocompact.py`) возвращает `False` при `_ttl <= 0`,
+поэтому при `idleCompactAfterMinutes=0` патч был избыточен.
 
 ---
 
 ## Детальный каталог
 
-### 1. `patch_context_bridge_seed(agent)` — runtime_patcher.py:212
-
-```yaml
-PATCH: context_bridge_seed
-target: AgentLoop._state_build (private async)
-nanobot_version: 0.3.0
-purpose: >
-  На старте оборота засеять в мост DatabaseLoggingHook лимит
-  контекстного окна и модель; по-итерационный usage хука дополняет мост,
-  финальный блок context_window собирается в assemble_outbound.
-why_not_hook: >
-  Хук before_run не имеет доступа к prompt_tokens лимиту модели;
-  лимит живёт только внутри AgentLoop.state_build.
-public_alternative: нет (проверено 0.3.0); следить за runtime events.
-replacement: если nanobot начнёт публиковать usage в runtime events — убрать патч.
-risk: HIGH (переименование _state_build ломает seed → метрика окна пропадает,
-  но не падает: getattr с дефолтом None → skipped).
-tests: tests/test_runtime_patcher.py::test_context_bridge_seed*
-```
-
-### 2. `patch_context_governor(config, settings, workspace_dir)` — runtime_patcher.py:259
+### 2. `patch_context_governor(config, settings, workspace_dir)`
 
 ```yaml
 PATCH: context_governor
 target: ContextGovernor.normalize_tool_result (internal staticmethod)
-nanobot_version: 0.3.0
+nanobot_version: 0.3.5
 purpose: >
   Большие результаты инструментов (> persist_threshold) выгружать в
   workspace/data_store/cache/sessions/<session_key>/, в контекст класть
   короткую ссылку data_store/<path>. Экономия токенов + сохранение данных.
-why_not_hook: >
-  Усечение происходит ВНУТРИ governor до передачи результата агенту;
-  hook'и получают уже усечённый результат — данные потеряны бы безвозвратно.
-public_alternative: нет в 0.3.0.
-risk: HIGH (сигнатура staticmethod может измениться).
+public_alternative: нет.
+risk: HIGH.
 tests: tests/test_runtime_patcher_e2e.py, tests/test_gateway.py:261-266
 ```
 
-### 3. `patch_save_turn(settings, workspace_dir, agent)` — runtime_patcher.py:351
+### 3. `patch_save_turn(settings, workspace_dir, agent)`
 
 ```yaml
 PATCH: save_turn
 target: AgentLoop._save_turn (private)
-nanobot_version: 0.3.0
+nanobot_version: 0.3.5
 purpose: >
   Архивация больших tool-результатов в data_store/ ДО усечения истории
-  оборота; сериализация сообщений с защитой от потери медиа-ссылок.
-why_not_hook: >
-  after_run получает уже записанную историю; точка «до усечения» только здесь.
+  оборота _save_turn (нативный nanobot 0.3.5 режет строку до max_tool_result_chars);
+  сериализация сообщений с защитой от потери медиа-ссылок.
 public_alternative: нет.
-risk: HIGH.
+risk: HIGH (сигнатура обновилась: kwargs turn_latency_ms, summary_checkpoint,
+  input_persisted_early добавлены).
 tests: tests/test_runtime_patcher.py::test_save_turn*
 ```
 
-### 4. `patch_session_content_cleanup()` — runtime_patcher.py:451
+### 4. `patch_session_content_cleanup()`
 
 ```yaml
 PATCH: session_content_cleanup
 target: Session.add_message (nanobot.session.manager)
-nanobot_version: 0.3.0
+nanobot_version: 0.3.5
 purpose: >
-  Санитизация content/kwargs от NUL-символов (\x00) и unicode-escape артефактов
-  на источнике — иначе psycopg2 падает "A string literal cannot contain NUL".
-why_not_hook: >
-  Запись идёт из многих мест AgentLoop; перехват только в channel/hook
-  не покрывает все пути записи.
-public_alternative: нет; альтернатива — санитизация в PGSessionManager.save
-  (рассмотреть при апгрейде: перенос логики из глобального патча в наш адаптер
-  уберёт мутацию чужого класса).
-risk: MEDIUM (патчим публичный метод, сигнатура стабильна).
+  Санитизация content/kwargs от NUL-символов на источнике — иначе
+  psycopg2 падает "A string literal cannot contain NUL".
+public_alternative: перенос в PGSessionManager.save (обсуждается).
+risk: MEDIUM.
 tests: tests/test_runtime_patcher.py::test_session_content_cleanup*
 ```
 
-### 5. `patch_async_session_saves(agent)` — runtime_patcher.py:490
+### 5. `patch_async_session_saves(agent)`
 
 ```yaml
 PATCH: async_save
-target: agent.sessions.save (наш PGSessionManager!)
-nanobot_version: 0.3.0
+target: agent.sessions.save (наш PGSessionManager)
+nanobot_version: 0.3.5
 purpose: >
   Обёртка save() через ThreadPoolExecutor(max_workers=1): синхронный
   psycopg2-вызов не блокирует event loop и не взаимно-блокируется
   с postgres channel.
-why_not_otherway: >
-  Патчим СОБСТВЕННЫЙ менеджер сессий, не класс nanobot — это адаптация
-  нашего адаптера, риск ограничен нашим кодом.
-public_alternative: не требуется.
 risk: MEDIUM.
 tests: tests/test_runtime_patcher.py::test_async_session_saves*
 ```
 
-### 6. `patch_exec_limits(settings)` — runtime_patcher.py:597
+### 6. `patch_session_dir_watch(agent, workspace_dir)`
+
+```yaml
+PATCH: session_dir_watch
+target: agent.sessions.save
+nanobot_version: 0.3.5
+purpose: >
+  Диагностическое логирование FileNotFoundError вокруг save
+  (см. session_dir_watch). Гейт: gateway.runtime_diagnostics.session_dir_watch=true.
+risk: LOW.
+tests: tests (нет — гейт выключен по умолчанию, проверяется вручную).
+```
+
+### 7. `patch_exec_limits(settings)`
 
 ```yaml
 PATCH: exec_limits
 target: >
   exec_session.MAX_OUTPUT_CHARS / DEFAULT_MAX_OUTPUT_CHARS,
-  shell.MAX_OUTPUT_CHARS / ExecTool._MAX_OUTPUT (+ JSON-Schema maximum
-  через _bump_schema_max)
-nanobot_version: 0.3.0
-purpose: >
-  Поднять потолок вывода exec/shell-tools (дефолт nanobot режет ~50K символов);
+  shell.MAX_OUTPUT_CHARS / ExecTool._MAX_OUTPUT (+ JSON-Schema maximum).
+  WriteStdinTool удалён в 0.3.5 — getattr-guard.
+nanobot_version: 0.3.5
+purpose: поднять потолок вывода exec/shell-tools (дефолт ~50K символов);
   значения из gateway.tool_result_limits.* в project.json.
-public_alternative: >
-  ПРОВЕРИТЬ при апгрейде — возможно в новых версиях tool limits конфигурируются
-  штатно через config.json (tools.exec секция).
-risk: HIGH (все константы приватные).
-tests: tests/test_runtime_patcher.py::test_exec_limits*
+public_alternative: проверять tools.exec секцию config.json на каждом апгрейде.
+risk: HIGH.
+tests: tests/test_runtime_patcher.py::test_exec_limits*,
+  tests/test_runtime_patcher_e2e.py::TestExecToolE2E
 ```
 
-### 7. `patch_tool_limits(settings)` — runtime_patcher.py:651
+### 8. `patch_exec_timeout_cap(settings)`
+
+```yaml
+PATCH: exec_timeout_cap
+target: shell.ExecTool._MAX_TIMEOUT + JSON-Schema параметра timeout
+nanobot_version: 0.3.5
+purpose: >
+  Поднять потолок таймаута exec (хардкод 600с) выше для долгих навыков
+  (legal_summarizer 7–10 мин на ГК РФ).
+risk: MEDIUM.
+tests: tests/test_runtime_patcher.py
+```
+
+### 9. `patch_tool_limits(settings)`
 
 ```yaml
 PATCH: tool_limits
 target: >
   ReadFileTool._MAX_CHARS, ListDirTool._DEFAULT_MAX,
-  search._DEFAULT_HEAD_LIMIT, _DEFAULT_FILE_HEAD_LIMIT, GrepTool._MAX_FILE_BYTES
-nanobot_version: 0.3.0
+  search._DEFAULT_HEAD_LIMIT, _DEFAULT_FILE_HEAD_LIMIT, GrepTool._MAX_FILE_BYTES.
+nanobot_version: 0.3.5
 purpose: конфигурируемые потолки read_file/list_dir/grep.
-public_alternative: см. exec_limits — REVIEW при апгрейде.
 risk: HIGH.
 tests: tests/test_runtime_patcher.py::test_tool_limits*
 ```
 
-### 8. `patch_assemble_outbound(agent, tool_audit_hook, recent_files_hook=...)` — runtime_patcher.py:695
+### 10. `patch_assemble_outbound(agent, tool_audit_hook, recent_files_hook=...)`
 
 ```yaml
 PATCH: assemble_outbound
 target: AgentLoop._assemble_outbound (private)
-nanobot_version: 0.3.0
+nanobot_version: 0.3.5
 purpose: >
   Главный интеграционный патч. Внедряет в metadata финального outbound:
-  - _tool_audit (аудит вызовов инструментов из ToolAuditHook.drain);
-  - context_window {used, limit, pct, model} (метрика M1);
+  - _tool_audit (аудит вызовов из ToolAuditHook.drain);
   - media (auto-attach созданных файлов из RecentFilesHook);
   - _final_turn=True (маркер финализации оборота для postgres-канала);
-  плюс синтетический OutboundMessage, если MessageTool вернул None.
-why_not_hook: >
-  Ни один хук nanobot не вызывается ПОСЛЕ сборки outbound; канал получает
-  сообщение только отсюда. Без патча теряются аудит/UI-метрики/финализация.
-public_alternative: runtime events (OutboundMessage.event) покрывают часть,
-  но не дают injection в metadata — следить за развитием.
-risk: CRITICAL — ломается семантика DB-логирования, UI-метрик и финализации
-  оборота канала. getattr-защита даёт graceful skip, но функциональность деградирует.
-tests: tests/test_runtime_patcher.py (много), tests/test_recent_files_hook.py,
-  tests/test_gateway.py, tests/test_parallel_modes.py
+  плюс синтетический OutboundMessage при возврате None штатным кодом.
+  Сигнатура 0.3.5: (msg, final_content, stop_reason, streamed_content,
+  *, log_content=True, turn_latency_ms=None) — обёртка следует за ней.
+why_not_hook: ни один хук не вызывается ПОСЛЕ сборки outbound.
+public_alternative: OutboundMessage.event покрывает часть, но не даёт
+  injection в metadata.
+risk: HIGH — getattr-защита даёт graceful skip.
+tests: tests/test_runtime_patcher.py (TestPatchAssembleOutbound),
+  tests/test_recent_files_hook.py, tests/test_gateway.py,
+  tests/contract/test_agent_loop_api.py::test_assemble_outbound_signature
 ```
 
-### 9. `patch_subagent_logging(db_logging_service, session_manager)` — runtime_patcher.py:855
+### 11. `patch_subagent_logging(db_logging_service, session_manager=...)`
 
 ```yaml
 PATCH: subagent_logging
 target: nanobot.agent.subagent._SubagentHook (подмена ЦЕЛОГО КЛАССА в модуле)
-nanobot_version: 0.3.0
+nanobot_version: 0.3.5
 purpose: >
-  БД-логирование запусков подагентов: события тулов → DbLoggingService,
+  БД-логирование запусков подагентов: tool-события → DbLoggingService,
   итог subagent_run_finished, персист истории subagent:<task_id>.
   Штатный _SubagentHook пишет только debug в loguru.
-why_not_hook: >
-  SubagentManager создаёт внутренний хук жёстко; фабрики хуков туда не пробрасываются.
-public_alternative: нет в 0.3.0; мониторить появление hook-factory для subagents.
-risk: CRITICAL (любой рефактор SubagentRunner вверх по потоку).
+public_alternative: следить за hook-factory для subagents.
+risk: HIGH (CRITICAL пересмотрен до HIGH — публичные атрибуты Task/Context
+  стабильны в 0.3.5).
 tests: tests/test_runtime_patcher.py::test_subagent_logging*
 ```
 
-### 10. `patch_project_tools(agent, workspace_dir, settings=...)` — runtime_patcher.py:1106
+### 12. `patch_project_tools(agent, workspace_dir, settings=...)`
 
 ```yaml
 PATCH: project_tools
-target: ToolContext(...) конструктор (~17 kwargs) + agent.tools.register
-nanobot_version: 0.3.0
+target: ToolContext.__init__ (~13 kwargs в 0.3.5) + agent.tools.register
+nanobot_version: 0.3.5
 purpose: >
   Auto-discover workspace/tools/*.py (pkgutil), создание ToolContext со всеми
   зависимостями AgentLoop, регистрация tool'ов через штатный registry.
-  DI настроек: setattr(ctx, "_settings_ref", settings), setattr(ctx, "_agent_ref", agent)
-  — обход ограничения pydantic ToolsConfig (отбрасывает неизвестные секции).
-why_not_builtin: >
-  Штатный loader nanobot грузит tool'ы только из config.json; кастомные секции
-  конфига он отбрасывает. Это штатное РАСШИРЕНИЕ registry (register()),
-  не его подмена.
-public_alternative: частично есть (config-based tools); custom DI остаётся нашим.
-risk: HIGH (сигнатура ToolContext.__init__).
-tests: tests/test_runtime_patcher.py, tests/test_tools_project_loader.py
+  DI: setattr(ctx, "_agent_ref"/"_settings_ref"/"_cache_store_ref"/"_db_logging_service").
+  В 0.3.5:
+    - file_state_store — сохранён в ToolContext.__init__ kwargs;
+    - runtime_events — УДАЛЁН (не в сигнатуре);
+    - runtime_control — ДОБАВЛЕН (ToolContext.__init__);
+  ToolContext frozen=False → setattr для DI работает.
+public_alternative: частично есть (config-based tools).
+risk: HIGH (сигнатура ToolContext — до 13 kwargs).
+tests: tests/test_runtime_patcher.py, tests/test_tools_project_loader.py,
+  tests/contract/test_tools_and_context.py
 ```
 
-### 11. `patch_compaction_tracking(agent, settings)` — runtime_patcher.py:1305
-
-```yaml
-PATCH: compact_tracking
-target: AutoCompact._archive (private) + Consolidator.maybe_consolidate_by_tokens (public)
-nanobot_version: 0.3.0
-purpose: >
-  Единый путь записи факта сжатия: оба механизма авто-сжатия nanobot
-  уведомляют ContextCompactionService._notify → служебная заметка в
-  agent_conversation_messages (как при ручном /compact).
-why_not_hook: compaction не публикует событий в 0.3.0.
-public_alternative: следить за consolidation events.
-risk: HIGH (_archive приватный; maybe_consolidate_by_tokens публичный).
-tests: tests/test_runtime_patcher.py, tests/test_context_compaction.py
-```
-
-### 12. `patch_compact_command(agent, settings)` — runtime_patcher.py:1347
-
-```yaml
-PATCH: compact_command
-target: agent.commands.exact(...) / agent.commands.prefix(...) (CommandRouter)
-nanobot_version: 0.3.0
-purpose: регистрация slash-команды /compact по образцу builtin cmd_new.
-why_not_patch: это НЕ patch — штатная регистрация команды через публичный router.
-risk: LOW.
-tests: tests/test_runtime_patcher.py::test_compact_command*, tests/test_context_compaction.py
-```
-
-### 13. `patch_auto_compact_idle_guard(agent)` — runtime_patcher.py:1459
-
-```yaml
-PATCH: idle_guard
-target: auto_compact.check_expired (замена no-op лямбдой)
-nanobot_version: 0.3.0
-purpose: >
-  При idleCompactAfterMinutes=0 гасит дорогой sessions.list_sessions() на каждом
-  тике AgentLoop.run (проект использует token-budget компакцию, idle выключен).
-why_not_config: >
-  nanobot 0.3.0 сам вызывает check_expired без проверки флага disabled —
-  заглушка единственный способ.
-public_alternative: ПРОВЕРИТЬ при апгрейде (возможно исправлено upstream).
-risk: LOW (graceful: getattr с fallback).
-tests: tests/test_runtime_patcher.py::test_idle_guard*
-```
-
-### 14. `patch_document_text_threshold(settings)` — runtime_patcher.py:773
+### 16. `patch_document_text_threshold(settings)`
 
 ```yaml
 PATCH: document_text_threshold
-target: >
-  nanobot.utils.document.extract_documents (обёртка) + nanobot.agent.loop.extract_documents.
-  ВАЖНО: loop.py делает `from nanobot.utils.document import extract_documents`
-  (прямой import в namespace модуля, loop.py:88) и вызывает свою привязку
-  (loop.py:1472), поэтому переопределения атрибута модуля document
-  недостаточно — патч подменяет и ссылку в namespace loop.
-nanobot_version: 0.3.0
+target: nanobot.utils.document.reference_non_image_attachments
+nanobot_version: 0.3.5
 purpose: >
-  ЕДИНЫЙ универсальный механизм встраивания документов в user-промпт
-  (все каналы и навыки). Каждый файловый блок переписывается в
-  унифицированный формат:
+  Единый механизм встраивания документов в user-промпт (все каналы/навыки).
+  В 0.3.5 upstream `extract_documents` удалён — патч оборачивает
+  `reference_non_image_attachments`:
     маленький (≤ channels.document_text_threshold):
-      [File: <name> (saved at <path>)]
+      [File: <basename> (saved at <path>)]
       <text>
     большой (> порога):
-      [File: <name> (saved at <path>)]
+      [File: <basename> (saved at <path>)]
       [text omitted (len=… > threshold=…)]
-  Путь присутствует ВСЕГДА (агент знает, куда передать файл в skill /
-  read_file / exec). Группировка — по файловым блокам (`\n\n[File: `),
-  НЕ по `\n\n` (PDF разбит на под-страницы через `\n\n`, и сплит по
-  `\n\n` сломал бы документ на отдельные страницы; порог считается
-  по длине всего извлечённого текста файла).
-  Каналы НЕ дописывают собственных хинтов `[Attachment: … (saved at …)]` —
-  это была параллельная дублирующая ответственность, теперь вся
-  информация о файле идёт через единый механизм.
-why_not_config: >
-  nanobot 0.3.0 не имеет промежуточного режима «извлекать только если
-  ≤ N»; только бинарный channels.extractDocumentText (true/false).
-  Per-channel настройки тоже нет — патч применяется единообразно ко всем
-  каналам (Postgres, Redis, websocket, streamlit, subagent-сообщения
-  через _prepare_message_media).
-public_alternative: ПРОВЕРИТЬ при апгрейде (если upstream добавит per-call
-  параметр в extract_documents — патч можно схлопнуть).
-risk: MEDIUM (оборачиваем публичную функцию, сигнатура стабильна;
-  формат вывода меняется — добавляется `(saved at <path>)` в заголовке).
+  Изображения НЕ формируют текстовых блоков (путь идёт в image_paths).
+  Нечитаемые файлы — fallback на upstream [Attachment: <path>].
+public_alternative: ПРОВЕРИТЬ при апгрейде.
+risk: MEDIUM (оборачиваем публичную функцию, fallback на upstream при сбое).
 tests: tests/test_runtime_patcher.py::TestPatchDocumentTextThreshold
 ```
 
@@ -329,9 +301,15 @@ tests: tests/test_runtime_patcher.py::TestPatchDocumentTextThreshold
 1. **Новый patch без записи здесь** = архитектурное нарушение (TARGET §20).
 2. **При апгрейде nanobot:** пройти таблицу сверху вниз, для каждого патча сверить
    целевой API по changelog upstream; контракт каждого целевого API фиксируется
-   в `tests/contract/` (см. test_compaction_api, test_subagent_api и др.).
-3. **Кандидаты на удаление:** №6, №7 (если upstream даст конфигурацию лимитов),
-   №13 (если починят guard). Отслеживать в [Unreleased] CHANGELOG.
-4. **Запрещено** добавлять патчи вне этого класса (единственное исключение исторически:
-   `BusFactory._wrap` для MessageBus и Jinja2-loader в `consolidator_locale` — оба
-   задокументированы в nanobot-inventory.md §3.2).
+   в `tests/contract/`.
+3. **Кандидаты на удаление:** №7, №8, №9 (если upstream даст конфигурацию лимитов).
+   Отслеживать в [Unreleased] CHANGELOG.
+4. **DEPRECATED (#1, #13, #14, #15)** — сохраняются как no-op + `applied=True`
+   для совместимости со `PatchReport`. Реальный функционал перенесён:
+   - #1 → `bus.subscribe(TurnRuntimeAdmitted)` в `ApplicationContext.start()`
+   - #13 → `CompactionEventSubscriber.feed` через `OutboundMessage.event`
+   - #14 → upstream `nanobot.command.builtin.cmd_compact`
+   - #15 → upstream `AutoCompact._is_expired`
+5. **Запрещено** добавлять патчи вне этого класса (единственные исторические
+   исключения: `BusFactory._wrap` для MessageBus и Jinja2-loader в
+   `consolidator_locale` — оба задокументированы в nanobot-inventory.md §3.2).

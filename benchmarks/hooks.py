@@ -20,16 +20,12 @@ for _p in (str(_ROOT), str(_WORKSPACE)):
 
 from nanobot.agent.hook import AgentHookContext
 
-from lib.hooks.base_tool_tracking_hook import BaseToolTrackingHook
 
-
-class BenchmarkHook(BaseToolTrackingHook):
+class BenchmarkHook:
     """Перехватывает метрики во время выполнения агента в бенчмарке."""
 
     def __init__(self) -> None:
         """Инициализация хука с пустыми счётчиками."""
-
-        super().__init__()
         self.tool_calls: list[dict[str, Any]] = []
         self.iterations: int = 0
         self.skills: set[str] = set()
@@ -49,6 +45,18 @@ class BenchmarkHook(BaseToolTrackingHook):
         self.iterations += 1
         if context.usage:
             self.usage = dict(context.usage)
+
+    @staticmethod
+    def _iter_tool_calls(context: AgentHookContext) -> list:
+        return list(getattr(context, "tool_calls", None) or [])
+
+    @staticmethod
+    def _tool_call_name(call: Any) -> str:
+        return str(getattr(call, "name", "?"))
+
+    @staticmethod
+    def _tool_call_arguments(call: Any) -> Any:
+        return getattr(call, "arguments", {})
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         """Снимок имён и аргументов инструментов перед их выполнением.

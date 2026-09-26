@@ -214,24 +214,34 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
     ),
     "assemble_outbound": PatchSpec(
         name="assemble_outbound",
-        purpose="внедрить tool_audit, recent_files и context_window в финальный "
-                "outbound (UI-метаданные для канала и CLI)",
+        purpose="внедрить tool_audit и recent_files в финальный "
+                "outbound (UI-метаданные для канала и CLI); "
+                "context_window — отдельный путь (D7)",
         nanobot_target="nanobot.agent.loop.AgentLoop._assemble_outbound",
         reason="nanobot не имеет post-processor hook для OutboundMessage; "
-               "_assemble_outbound — единственная точка финала",
+               "_assemble_outbound — единственная точка финала; сигнатура "
+               "изменилась в 0.3.5 (msg, final_content, stop_reason, "
+               "streamed_content, *, log_content, turn_latency_ms) — "
+               "обёртка следована под новые kwargs",
         alternatives_checked="AgentHook.finalize_content не получает "
-                             "OutboundMessage",
+                             "OutboundMessage; метрика context_window "
+                             "вынесена в подписку TurnRuntimeAdmitted (D7)",
         risk="high",
     ),
     "context_bridge_seed": PatchSpec(
         name="context_bridge_seed",
-        purpose="засеять лимит окна/модель в мост контекста на старте оборота "
-                "(для живого обновления context_window в UI)",
-        nanobot_target="nanobot.agent.loop.AgentLoop._state_build",
-        reason="_state_build — единственная гарантированная точка входа в "
-               "оборот до итераций",
-        alternatives_checked="AgentHook.before_run не получает runtime-context",
-        risk="medium",
+        purpose="DEPRECATED в nanobot 0.3.5: _state_build удалён. "
+                "Заменено подпиской bus.subscribe(TurnRuntimeAdmitted), "
+                "регистрируется в ApplicationContext.start().",
+        nanobot_target="nanobot.bus.queue.MessageBus.subscribe(TurnRuntimeAdmitted)",
+        reason="DEPRECATED: _state_build — приватный метод, удалён в 0.3.5; "
+               "TurnRuntimeAdmitted — публичный тип-агента, "
+               "RuntimeEventPublisher публикует через bus.publish, "
+               "что попадает в локальный fan-out для подписчиков.",
+        alternatives_checked="bus.subscribe — публичный API; LLMRuntime."
+                             "context_window_tokens — публичное поле.",
+        risk="low",
+        nanobot_version="0.3.0",
     ),
     "async_save": PatchSpec(
         name="async_save",
@@ -254,52 +264,70 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
                              "subagent'а",
         risk="high",
     ),
-    "project_tools": PatchSpec(
+"project_tools": PatchSpec(
         name="project_tools",
         purpose="auto-discover + регистрация пользовательских tool'ов из "
-                "workspace/tools/*.py в AgentLoop.tools",
+                "workspace/tools/*.py в AgentLoop.tools; DI-расширения "
+                "(_agent_ref, _settings_ref, _cache_store_ref, "
+                "_db_logging_service) — через setattr после конструктора "
+                "(ToolContext frozen=False в 0.3.5)",
         nanobot_target="nanobot.agent.tools.base.Tool, ToolRegistry, "
-                       "ToolContext",
+                       "ToolContext, RuntimeControl",
         reason="nanobot не имеет механизма подключения пользовательских "
-                       "tool-каталогов",
+               "tool-каталогов; сигнатура ToolContext обновилась в 0.3.5: "
+               "file_state_store сохранён, runtime_events удалён, "
+               "добавлен runtime_control",
         alternatives_checked="ToolLoader.discover — ищет только во встроенных "
                              "пакетах",
         risk="low",
     ),
     "compact_tracking": PatchSpec(
         name="compact_tracking",
-        purpose="обернуть auto-compact так, чтобы он шёл через общий "
-                "ContextCompactionService (та же история, что и ручной /compact)",
+        purpose="DEPRECATED в nanobot 0.3.5: метод "
+                "Consolidator.maybe_consolidate_by_tokens удалён; upstream "
+                "AutoCompact.idle-ttl=0 уже short-circuit. Перенесено в "
+                "CompactionEventSubscriber (см. design D1).",
         nanobot_target="nanobot.agent.autocompact.AutoCompact._archive, "
                        "nanobot.agent.memory.Consolidator"
                        ".maybe_consolidate_by_tokens",
-        reason="AutoCompact/Consolidator не вызывают наш "
-               "ContextCompactionService; ручной /compact и auto-compact "
-               "расходятся в записях",
+        reason="DEPRECATED: оба метода обёрток заменены upstream-событием "
+               "ContextCompactionEvent. Канал видит "
+               "OutboundMessage.event и зовёт CompactionEventSubscriber "
+               "(см. openspec/changes/nanobot-035-upgrade/design.md).",
         alternatives_checked="AgentHook.on_compact — не существует в nanobot "
-                             "0.3.0",
-        risk="medium",
+                             "0.3.5; bus.subscribe не получит события "
+                             "из publish_event (channel queue)",
+        risk="low",
+        nanobot_version="0.3.0",
     ),
     "compact_command": PatchSpec(
         name="compact_command",
-        purpose="зарегистрировать /compact как настоящую slash-команду "
-                "(детерминированно до LLM)",
+        purpose="DEPRECATED в nanobot 0.3.5: upstream 'cmd_compact' "
+                "(nanobot/command/builtin.py:348) уже делает нужное "
+                "через loop.consolidator.compact_idle_session. Наш "
+                "/compact не нужен — notify_session_compacted остаётся "
+                "и зовётся из CompactionEventSubscriber (D1).",
         nanobot_target="nanobot.command.router.CommandRouter",
-        reason="без регистрации /compact уходит в LLM как user-сообщение и "
-               "модель часто отвечает текстом, не сжимая",
-        alternatives_checked="Tool 'compact' — LLM решает вызывать или нет",
+        reason="DEPRECATED: upstream builtin /compact покрывает сценарий; "
+               "наш handler дублировал функционал.",
+        alternatives_checked="Tool 'compact' — LLM решает вызывать или нет; "
+                             "CompactionEventSubscriber (см. design.md §D1)",
         risk="low",
+        nanobot_version="0.3.0",
     ),
     "idle_guard": PatchSpec(
         name="idle_guard",
-        purpose="заглушить бесполезное list_sessions в check_expired при "
-                "выключенном idle-компакте (N+1 запросов вхолостую)",
+        purpose="DEPRECATED в nanobot 0.3.5: upstream '_is_expired' "
+                "(autocompact.py:39-55) уже short-circuit при _ttl<=0; "
+                "ttl=0 в config.json проекта делает upstream-ветку "
+                "бесполезной сама по себе.",
         nanobot_target="nanobot.agent.autocompact.AutoCompact.check_expired",
-        reason="AutoCompact всегда перечисляет сессии, даже когда idle-TTL=0; "
-               "публичного способа отключить нет",
-        alternatives_checked="config 'idleCompactAfterMinutes: 0' — не "
-                             "предотвращает сам list_sessions",
+        reason="DEPRECATED: dead code в nanobot 0.3.5.",
+        alternatives_checked="config 'idleCompactAfterMinutes: 0' — upstream "
+                             "возвращает False из _is_expired; патч больше "
+                             "не нужен",
         risk="low",
+        nanobot_version="0.3.0",
     ),
     "session_content_cleanup": PatchSpec(
         name="session_content_cleanup",
@@ -317,13 +345,13 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
                 "user-промпт (все каналы и навыки): заголовок каждого блока "
                 "всегда содержит путь к файлу; при превышении порога тело "
                 "заменяется на короткий маркер text omitted",
-        nanobot_target="nanobot.utils.document.extract_documents + "
-                       "nanobot.agent.loop.extract_documents (прямой import)",
-        reason="каналы дублировали информацию о файле собственными хинтами "
-               "[Attachment: … (saved at …)] рядом с extract_documents — "
-               "два параллельных указания пути расходились между каналами; "
-               "вынесено в единую точку; порог защищает от раздувания "
-               "контекста на длинных PDF/DOCX",
+        nanobot_target="nanobot.utils.document.reference_non_image_attachments "
+                       "(в nanobot 0.3.5 вместо удалённого extract_documents)",
+        reason="в 0.3.5 extract_documents удалён; upstream по умолчанию "
+               "вставляет только [Attachment: <path>], что заставляет LLM "
+               "вызывать read_file даже для маленьких PDF/DOCX; патч "
+               "читает текст через extract_text и встраивает его в "
+               "content, защищая от раздувания контекста через порог",
         alternatives_checked="config 'channels.extractDocumentText=false' — "
                              "только полностью выключает извлечение, без "
                              "промежуточного режима «текст ≤ N»",
@@ -349,6 +377,7 @@ _SKIPPABLE_REASONS: frozenset[str] = frozenset({
     "agent.sessions is missing",
     "exec_session/shell module not loaded",
     "filesystem/search module not loaded",
+    "gateway.runtime_diagnostics.session_dir_watch != true",
     "document_text_threshold <= 0",
 })
 
@@ -487,11 +516,6 @@ class RuntimePatcher:
         self._record(report, "project_tools", self.patch_project_tools(
             agent, workspace_dir, settings=settings,
             cache_store=cache_store, db_logging_service=db_logging_service))
-        self._record(report, "compact_tracking", self.patch_compaction_tracking(
-            agent, settings, db_logging_service=db_logging_service))
-        self._record(report, "compact_command", self.patch_compact_command(
-            agent, settings, db_logging_service=db_logging_service))
-        self._record(report, "idle_guard", self.patch_auto_compact_idle_guard(agent))
         self._record(report, "document_text_threshold", self.patch_document_text_threshold(settings))
         self._record(report, "session_content_cleanup", self.patch_session_content_cleanup())
         return report
@@ -549,51 +573,28 @@ class RuntimePatcher:
         return f"scanned {tools_dir} ({count} {plural})"
 
     # ------------------------------------------------------------------
-    # Патч 2b: seed лимита окна в мост контекста на старте оборота
+    # Патч 2b: DEPRECATED в nanobot 0.3.5 — перенесён в
+    # ApplicationContext.start() через подписку на TurnRuntimeAdmitted.
     # ------------------------------------------------------------------
 
     def patch_context_bridge_seed(self, agent: Any) -> tuple[bool, str]:
-        """Засеять лимит окна/модель в мост контекста на старте оборота.
+        """DEPRECATED: в nanobot 0.3.5 ``_state_build`` удалён.
 
-        Для ЖИВОГО (по-итерационного) обновления занятости окна канал
-        должен знать лимит модели, но знает его только агент. Патч оборачивает
-        ``agent._state_build``: каждый оборот (до первых итераций) кладёт
-        ``runtime.context_window_tokens`` и модель в мост
-        (``lib.hooks.database_logging_hook.seed_context_window``). Хук пишет
-        usage каждой итерации, и канал собирает блок на лету.
+        Seed лимита окна/модели теперь подпиской на
+        ``TurnRuntimeAdmitted`` регистрируется в
+        ``ApplicationContext.start()`` (через
+        ``bus.subscribe(handler, TurnRuntimeAdmitted)`` —
+        ``bus/runtime_events.py:204`` использует ``bus.publish``, и
+        подписка видит событие). Handler пишет
+        ``runtime.context_window_tokens`` и ``runtime.model`` в мост
+        ``DatabaseLoggingHook._CONTEXT_BRIDGE``.
 
-        Best-effort: при любой ошибке старт оборота продолжается без seed
-        (тогда живое обновление недоступно, но финальный снапшот собирает
-        ``_attach_context_window`` из фолбэка ``agent._last_usage``).
-
-        Returns:
-            ``(True, ...)`` при успехе; ``(False, <причина>)`` при отказе.
+        Метод оставлен в ``apply_all`` как no-op + ``applied`` для
+        совместимости со ``PatchReport``/логами.
         """
         if agent is None:
             return False, "agent is None"
-        original = getattr(agent, "_state_build", None)
-        if original is None:
-            return False, "agent._state_build is missing"
-        try:
-            from lib.hooks.database_logging_hook import seed_context_window
-        except Exception as exc:
-            return False, f"import failed: {exc}"
-
-        async def _state_build_with_seed(ctx: Any) -> Any:
-            try:
-                runtime = ctx.runtime or agent.runtime_for_session(ctx.session)
-                limit = getattr(runtime, "context_window_tokens", 0) or 0
-                model = getattr(runtime, "model", None) or None
-                session_key = getattr(ctx, "session_key", None) or getattr(
-                    ctx.session, "key", None
-                )
-                seed_context_window(session_key, limit=limit, model=model)
-            except Exception:
-                pass
-            return await original(ctx)
-
-        agent._state_build = _state_build_with_seed
-        return True, "agent._state_build patched for context-bridge seed"
+        return True, "context-bridge seed moved to bus.subscribe(TurnRuntimeAdmitted)"
 
     # ------------------------------------------------------------------
     # Патч 1: ContextGovernor.normalize_tool_result
@@ -796,38 +797,50 @@ class RuntimePatcher:
     ) -> tuple[bool, str]:
         """Единый универсальный механизм встраивания документов в user-промпт.
 
-        ``nanobot.utils.document.extract_documents`` — ЕДИНСТВЕННОЕ место,
-        через которое текст документа попадает в ``content`` user-сообщения
-        LLM (для всех каналов — Postgres/Redis/websocket/streamlit).
-        Каналы НЕ должны дублировать эту информацию собственными хинтами
+        ``nanobot.utils.document.reference_non_image_attachments`` —
+        ЕДИНСТВЕННОЕ место, через которое upstream 0.3.5 формирует
+        файловые блоки в ``content`` user-сообщения (для всех каналов —
+        Postgres/Redis/websocket/streamlit). В 0.3.5
+        ``extract_documents`` удалён, и каналы НЕ должны дублировать
+        информацию о файле собственными хинтами
         вида ``[Attachment: … (saved at …)]``: иначе агент видит два
-        параллельных указания «файл там-то» и поведение расходится между
-        каналами.
+        параллельных указания «файл там-то» и поведение расходится
+        между каналами.
 
-        Патч переписывает формат каждого файлового блока в унифицированный:
+        Upstream-выдача формата ``reference_non_image_attachments``
+        (utils/document.py:681):
 
-        - маленький документ (извлечённый текст ≤ порога):
-          ``[File: <name> (saved at <path>)]\n<text>``
-        - большой документ (> порога):
-          ``[File: <name> (saved at <path>)]\n[text omitted (len=… > threshold=…)]``
+            ``[Attachment: <path>]``
 
-        Путь к файлу присутствует ВСЕГДА (и при полном тексте, и при
-        обрезке) — агент в любом случае знает, куда передать файл
-        (skill, ``read_file``, ``exec``), независимо от навыка. Тело
-        заменяется на короткий маркер ``text omitted`` при превышении
-        порога, чтобы не раздувать контекст.
+        — только путь, без извлечения текста документа. Этого мало для
+        маленьких документов (≤ порога): LLM вынуждена для каждого
+        вызывать ``read_file``, теряя обороты. Поэтому патч оборачивает
+        ``reference_non_image_attachments``: для каждого НЕ-изображения
+        пытается прочитать файл через ``extract_text`` и встроить
+        результат в content; если длина тела превышает ``threshold`` —
+        заменяет тело на короткий маркер ``text omitted``, сохраняя
+        путь в заголовке.
 
-        Группировка — по файловым блокам (``\n\n[File: ``), а не по ``\n\n``:
-        внутри PDF страницы разделены ``\n\n`` (``--- Page N ---``), и
-        сплит по ``\n\n`` ломал бы документ на отдельные страницы.
+        Итоговый формат каждого файлового блока:
+
+          * маленький документ (длина ≤ порога):
+            ``[File: <basename> (saved at <path>)]\n<text>``;
+          * большой документ (> порога):
+            ``[File: <basename> (saved at <path>)]\n[text omitted (len=… > threshold=…)]``;
+          * нечитаемый файл / изображение — fallback на upstream:
+            ``[Attachment: <path>]``.
+
+        Путь в заголовке присутствует ВСЕГДА, поэтому агент в любом
+        случае знает, куда передать файл (skill, ``read_file``, ``exec``).
 
         Настройка читается из ``channels.document_text_threshold``
         (общая для всех каналов). Дефолт 20000 символов: средний
         договор/акт/раздел закона укладывается, длинные книги —
-        обрезаются. ``<=0`` — патч пропускается (NO-OP).
+        обрезаются. ``<=0`` — патч пропускается (NO-OP, upstream
+        ``reference_non_image_attachments`` остаётся без обёртки).
 
         Returns:
-            ``(True, "extract_documents patched")`` при успехе;
+            ``(True, ...)`` при успехе;
             ``(False, <причина>)`` при отказе.
         """
         raw = _get(settings, "channels", "document_text_threshold", default=20000)
@@ -843,80 +856,85 @@ class RuntimePatcher:
         except Exception as exc:
             return False, f"import failed: {exc}"
 
-        original = getattr(_document_mod, "extract_documents", None)
-        if original is None:
-            return False, "extract_documents is missing"
+        reference = getattr(_document_mod, "reference_non_image_attachments", None)
+        if reference is None:
+            return False, "reference_non_image_attachments is missing"
+
+        extract_text = getattr(_document_mod, "extract_text", None)
+        is_image_file = getattr(_document_mod, "is_image_file", None)
 
         try:
-            _marker_prefix = "[File: "
+            def _is_image(path: str) -> bool:
+                if is_image_file is None or not isinstance(path, str):
+                    return False
+                try:
+                    return bool(is_image_file(path))
+                except Exception:
+                    return False
 
-            def _extract_with_threshold(
-                text: str,
-                media_paths: list[str],
-                **kwargs: Any,
+            def _read_attachment_body(path: str) -> str | None:
+                """Прочитать текст вложения через ``extract_text``.
+
+                Возвращает ``None`` для изображений, нечитаемых форматов
+                или ошибок чтения — в этом случае обёртка оставляет
+                upstream-маркер ``[Attachment: <path>]``.
+                """
+                if not isinstance(path, str) or not path:
+                    return None
+                if _is_image(path):
+                    return None
+                if extract_text is None:
+                    return None
+                try:
+                    text = extract_text(path)
+                except Exception:
+                    return None
+                if not isinstance(text, str) or not text:
+                    return None
+                return text
+
+            def _build_block(path: str) -> str:
+                """Сформировать файловый блок с учётом порога.
+
+                ``[File: <basename> (saved at <path>)]\n<body>``
+                либо ``[Attachment: <path>]`` (fallback).
+                """
+                basename = Path(path).name or path
+                body_text = _read_attachment_body(path)
+                if body_text is None:
+                    return f"[Attachment: {path}]"
+                body_len = len(body_text)
+                header = f"[File: {basename} (saved at {path})]"
+                if body_len <= threshold:
+                    return f"{header}\n{body_text}"
+                return (
+                    f"{header}\n"
+                    f"[text omitted (len={body_len} > threshold={threshold})]"
+                )
+
+            def _reference_with_threshold(
+                content: str, media: list[str],
             ) -> tuple[str, list[str]]:
-                new_text, image_paths = original(text, media_paths, **kwargs)
-                if not new_text or threshold <= 0:
-                    return new_text, image_paths
-                # Документ-блоки разделены ``\n\n[File: ``. Сплит по этому
-                # разделителю и возврат ``[File: `` обратно второму куску
-                # восстанавливает целые блоки (включая ``--- Page N ---``
-                # под-блоки внутри PDF, которые тоже разделены ``\n\n``).
-                parts = new_text.split("\n\n[File: ")
-                segments: list[str] = []
-                for i, part in enumerate(parts):
-                    segments.append(part if i == 0 else _marker_prefix + part)
-                rebuilt: list[str] = []
-                for segment in segments:
-                    if not segment.startswith(_marker_prefix):
-                        rebuilt.append(segment)
-                        continue
-                    newline_idx = segment.find("\n")
-                    if newline_idx < 0:
-                        rebuilt.append(segment)
-                        continue
-                    header = segment[:newline_idx]
-                    body = segment[newline_idx + 1:]
-                    basename = header[len(_marker_prefix):-1]
-                    path = _resolve_media_path(media_paths, basename)
-                    new_header = (
-                        f"[File: {basename} (saved at {path})]"
-                        if path
-                        else f"[File: {basename}]"
-                    )
-                    body_len = len(body)
-                    if body_len <= threshold:
-                        rebuilt.append(f"{new_header}\n{body}")
+                media_list = list(media or [])
+                image_paths: list[str] = []
+                attachment_blocks: list[str] = []
+                for path in media_list:
+                    if _is_image(path):
+                        image_paths.append(path)
                     else:
-                        rebuilt.append(
-                            f"{new_header}\n"
-                            f"[text omitted (len={body_len} > threshold={threshold})]"
-                        )
-                return "\n\n".join(rebuilt), image_paths
+                        attachment_blocks.append(_build_block(path))
+                if attachment_blocks:
+                    suffix = "\n\n".join(attachment_blocks)
+                    content = f"{content}\n\n{suffix}" if content else suffix
+                return content, image_paths
 
-            _document_mod.extract_documents = _extract_with_threshold
-
-            # ``nanobot.agent.loop`` импортирует ``extract_documents`` напрямую
-            # через ``from nanobot.utils.document import extract_documents``
-            # (loop.py:88) и вызывает свою привязку имени (loop.py:1472), а не
-            # ``document.extract_documents``. Поэтому переопределение атрибута
-            # модуля выше НЕ влияет на реальную точку вызова — нужно подменить
-            # и ссылку в namespace модуля ``loop``.
-            patched_targets = ["nanobot.utils.document.extract_documents"]
-            try:
-                import nanobot.agent.loop as _loop_mod  # type: ignore
-
-                if getattr(_loop_mod, "extract_documents", None) is not None:
-                    _loop_mod.extract_documents = _extract_with_threshold
-                    patched_targets.append("nanobot.agent.loop.extract_documents")
-            except Exception:
-                pass
+            _document_mod.reference_non_image_attachments = (
+                _reference_with_threshold
+            )
 
             return (
                 True,
-                "extract_documents patched for document_text_threshold ("
-                + ", ".join(patched_targets)
-                + ")",
+                "reference_non_image_attachments patched for document_text_threshold",
             )
         except Exception as exc:
             return False, f"patch failed: {exc}"
@@ -1217,9 +1235,12 @@ class RuntimePatcher:
             self._bump_schema_max(
                 shell.ExecTool, ("max_output_chars", "max_output_tokens"), max_out
             )
-            self._bump_schema_max(
-                es.WriteStdinTool, ("max_output_chars", "max_output_tokens"), max_out
-            )
+            # ``WriteStdinTool`` удалён в nanobot 0.3.5 — guard через hasattr.
+            ws_tool = getattr(es, "WriteStdinTool", None)
+            if ws_tool is not None:
+                self._bump_schema_max(
+                    ws_tool, ("max_output_chars", "max_output_tokens"), max_out
+                )
         except Exception as exc:
             return False, f"patch failed: {exc}"
         return True, "exec output limits patched"
@@ -1321,9 +1342,14 @@ class RuntimePatcher:
     ) -> tuple[bool, str]:
         """Подменить ``agent._assemble_outbound`` обёрткой, дописывающей аудит.
 
-        ``_assemble_outbound`` (см. ``nanobot/agent/loop.py``) формирует
-        финальный ``OutboundMessage``. Обёртка вызывает оригинальный метод,
-        затем:
+        Сигнатура upstream ``AgentLoop._assemble_outbound`` в nanobot 0.3.5:
+
+            ``(self, msg, final_content, stop_reason, streamed_content,
+               *, log_content=True, turn_latency_ms=None) -> OutboundMessage | None``
+
+        ``_dispatch`` зовёт метод с этими позиционными аргументами + kwarg
+        ``log_content``. Обёртка вызывает оригинальный метод as-is и
+        дописывает:
 
           * ``tool_audit_hook.drain(session_key)`` (см.
             ``workspace/hooks/tool_audit_hook.py``) — возвращает и
@@ -1335,23 +1361,14 @@ class RuntimePatcher:
             ко всем файлам, которые агент записал через ``write_file``
             за этот оборот (уже ПОСЛЕ ``SessionFileRedirectHook``, т.е.
             реальные). Подмешиваем их в ``result.media``, сравнивая по
-            basename. Закрывает сценарии:
+            basename.
 
-            1. модель забыла приложить созданный файл (``message({...})``
-               без ``media``) — добавляем реальный путь;
-            2. модель приложила несуществующий путь (``test.docx`` после
-               блокировки ``pip install``) — отбрасываем через
-               ``Path(p).is_file()``;
-            3. модель приложила нереальный абсолютный путь — мы берём
-               ``params["path"]`` ПОСЛЕ ``SessionFileRedirectHook``, т.е.
-               уже реальный локальный путь;
-            4. модель приложила путь, который ЭТИМ же редиректом был
-               перенесён в ``data_store/cache/sessions/<key>/`` (basename
-               совпадает, но указанный путь не существует на диске) —
-               заменяем этот устаревший путь реальным.
-
-        Порядок важен: ``RecentFilesHook`` должен идти **раньше**
-        ``ToolAuditHook`` в ``AgentLoop.hooks`` (см. ``ApplicationContext``).
+        ``context_window`` (метрика занятости окна) живёт в мосте
+        ``DatabaseLoggingHook._CONTEXT_BRIDGE`` и обновляется подпиской
+        на ``TurnRuntimeAdmitted``/обращениями к
+        ``get_context_window(session_key)``. Эта обёртка только
+        фиксирует блок в ``_store_context_window`` через
+        ``_attach_context_window`` в момент финала.
 
         Args:
             agent: ``AgentLoop``.
@@ -1370,12 +1387,12 @@ class RuntimePatcher:
         if original is None:
             return False, "agent._assemble_outbound is missing"
 
-        def _wrap(msg, final_content, all_msgs, stop_reason, had_injections,
-                  on_stream, *, turn_latency_ms=None):
+        def _wrap(msg, final_content, stop_reason, streamed_content,
+                  *, log_content=True, turn_latency_ms=None):
             from lib.utils.outbound_meta import FINAL_TURN_KEY as _FINAL_TURN
             result = original(
-                msg, final_content, all_msgs, stop_reason, had_injections,
-                on_stream, turn_latency_ms=turn_latency_ms,
+                msg, final_content, stop_reason, streamed_content,
+                log_content=log_content, turn_latency_ms=turn_latency_ms,
             )
             if result is None:
                 # ``_assemble_outbound`` возвращает None только при подавлении
@@ -1914,7 +1931,7 @@ class RuntimePatcher:
                     getattr(agent, "workspace_scopes", None),
                     "sandbox_status", None
                 ),
-                runtime_events=getattr(agent, "runtime_events", None),
+                runtime_control=getattr(agent, "_runtime_control", None),
             )
             # ``agent`` не входит в ToolContext по контракту nanobot — кладём
             # отдельным атрибутом, чтобы tool'ы с DI-сервисами (например,
@@ -2010,208 +2027,22 @@ class RuntimePatcher:
             return False, f"patch failed: {exc}"
 
     # ------------------------------------------------------------------
-    # Патч 5: авто-сжатие → заметка в agent_conversation_messages
+    # Вспомогательные методы для auto-compact/context-bridge УДАЛЕНЫ в 0.3.5
     # ------------------------------------------------------------------
 
-    def patch_compaction_tracking(
-        self, agent: Any, settings: Any,
-        *,
-        db_logging_service: Any = None,
-    ) -> tuple[bool, str]:
-        """Обернуть авто-сжатие так, чтобы оно шло через тот же путь,
-        что и ручной ``/compact``: тот же отчёт, та же запись в историю.
-
-        Оборачивает две штатные точки nanobot:
-
-          * ``agent.auto_compact._archive`` — idle-сжатие простаивающих
-            сессий (``AutoCompact.check_expired`` → ``_archive``);
-          * ``agent.consolidator.maybe_consolidate_by_tokens`` —
-            token-budget/replay-window сжатие на каждом ``_state_build``
-            /``_state_save``.
-
-        После оригинального метода обёртка сравнивает состояние сессии
-        (``last_consolidated`` до/после) и при факте архивации зовёт
-        ``ContextCompactionService.record_external_compaction(...)``,
-        который собирает отчёт и пишет заметку в ``agent_conversation_messages``
-        ровно тем же кодом, что и ручной ``compact()`` (та же функция
-        ``_write_history_notice``, тот же ``format_report``).
-
-        При ``gateway.compact.enabled=false`` или
-        ``gateway.compact.notify_in_history=false`` патч — no-op.
-
-        ``db_logging_service`` — DI-ссылка на ``DbLoggingService`` (через
-        ``partial`` из ``RuntimePatcher.apply_all``). Используется в
-        ``ContextCompactionService`` как единственный writer
-        ``agent_gateway_logs`` (change ``unify-agent-event-logging-pipeline``).
-        """
-        if agent is None:
-            return False, "agent is None"
-        try:
-            from lib.services.context_compaction import ContextCompactionService
-        except Exception as exc:
-            return False, f"import failed: {exc}"
-        try:
-            svc = ContextCompactionService(
-                agent, settings=settings, db_logging_service=db_logging_service,
-            )
-            if not svc.enabled:
-                return False, "gateway.compact.enabled=false"
-            if not svc.notify_in_history:
-                return False, "gateway.compact.notify_in_history=false"
-            self._wrap_auto_compact_archive(agent, svc)
-            self._wrap_maybe_consolidate_by_tokens(agent, svc)
-        except Exception as exc:
-            return False, f"patch failed: {exc}"
-        return True, "auto compaction tracking patched"
-
-    def patch_compact_command(
-        self, agent: Any, settings: Any,
-        *,
-        db_logging_service: Any = None,
-    ) -> tuple[bool, str]:
-        """Зарегистрировать команду ``/compact`` в ``CommandRouter`` агента.
-
-        ``/compact`` — это настоящая slash-команда (по образцу ``cmd_new``
-        из ``nanobot/command/builtin.py``). На любом канале (postgres,
-        streamlit, telegram) она срабатывает ДЕТЕРМИНИРОВАННО ДО LLM:
-        ``run()`` видит зарегистрированную команду в router'е и
-        обрабатывает её через ``_state_command`` / ``_dispatch_command_inline``,
-        не отправляя сообщение модели. Так ``/compact`` всегда сжимает
-        сессию безоговорочно (``force=True``), а не «по усмотрению» LLM.
-
-        Без этой регистрации ``/compact`` уходит в LLM как обычное
-        user-сообщение, и модель часто отвечает текстом «сжатие не
-        требуется», не вызывая tool — это и есть исходная проблема.
-
-        Регистрируем:
-          * ``exact("/compact")`` — точное совпадение;
-          * ``prefix("/compact ")`` — ``/compact idle`` (для совместимости).
-
-        ``db_logging_service`` — DI-ссылка на ``DbLoggingService``. Через
-        ``functools.partial`` пробрасывается в ``cmd_compact`` → в
-        ``ContextCompactionService`` как единственный writer
-        ``agent_gateway_logs`` (change ``unify-agent-event-logging-pipeline``).
-        """
-        from functools import partial
-
-        from lib.commands.compact_command import cmd_compact
-
-        commands = getattr(agent, "commands", None)
-        if commands is None:
-            return False, "agent.commands is missing"
-        handler = partial(
-            cmd_compact,
-            settings=settings,
-            db_logging_service=db_logging_service,
-        )
-        try:
-            commands.exact("/compact", handler)
-            commands.prefix("/compact ", handler)
-        except Exception as exc:
-            return False, f"register failed: {exc}"
-        return True, "/compact registered as slash command"
-
-    @staticmethod
-    def _wrap_auto_compact_archive(agent: Any, svc: Any) -> None:
-        """Обернуть ``AutoCompact._archive`` (idle auto-compact)."""
-        auto = getattr(agent, "auto_compact", None)
-        if auto is None:
-            return
-        original = getattr(auto, "_archive", None)
-        if original is None:
-            return
-
-        async def _wrapped(key: str, *, runtime: Any) -> Any:
-            sessions = agent.sessions
-            before_session = sessions.get_or_create(key)
-            before_cursor = int(getattr(before_session, "last_consolidated", 0) or 0)
-            before_tokens, _ = await svc._estimate(before_session, runtime)
-            result = await original(key, runtime=runtime)
-            fresh = sessions.get_or_create(key)
-            after_cursor = int(getattr(fresh, "last_consolidated", 0) or 0)
-            if after_cursor > before_cursor and result not in (None, "", "(nothing)"):
-                after_tokens, _ = await svc._estimate(fresh, runtime)
-                await svc.record_external_compaction(
-                    session_key=key, mode="idle",
-                    summary=result,
-                    archived_msgs=after_cursor - before_cursor,
-                    kept_msgs=len(getattr(fresh, "messages", []) or []),
-                    tokens_before=before_tokens,
-                    tokens_after=after_tokens,
-                )
-            return result
-
-        auto._archive = _wrapped
-
-    @staticmethod
-    def _wrap_maybe_consolidate_by_tokens(agent: Any, svc: Any) -> None:
-        """Обернуть ``Consolidator.maybe_consolidate_by_tokens`` (token auto-compact)."""
-        consolidator = getattr(agent, "consolidator", None)
-        if consolidator is None:
-            return
-        original = getattr(consolidator, "maybe_consolidate_by_tokens", None)
-        if original is None:
-            return
-
-        async def _wrapped(session: Any, **kwargs: Any) -> Any:
-            sessions = agent.sessions
-            key = getattr(session, "key", None)
-            before_cursor = int(getattr(session, "last_consolidated", 0) or 0)
-            runtime = kwargs.get("runtime")
-            before_tokens, _ = (
-                await svc._estimate(session, runtime) if runtime else (0, "")
-            )
-            await original(session, **kwargs)
-            if not key:
-                return
-            fresh = sessions.get_or_create(key)
-            after_cursor = int(getattr(fresh, "last_consolidated", 0) or 0)
-            if after_cursor > before_cursor:
-                after_meta = (getattr(fresh, "metadata", {}) or {})
-                summary_obj = after_meta.get("_last_summary")
-                summary = (
-                    summary_obj.get("text") if isinstance(summary_obj, dict)
-                    else summary_obj if isinstance(summary_obj, str) else None
-                )
-                after_tokens, _ = (
-                    await svc._estimate(fresh, runtime) if runtime else (0, "")
-                )
-                await svc.record_external_compaction(
-                    session_key=key, mode="token",
-                    summary=summary,
-                    archived_msgs=after_cursor - before_cursor,
-                    kept_msgs=len(getattr(fresh, "messages", []) or []),
-                    tokens_before=before_tokens,
-                    tokens_after=after_tokens,
-                )
-
-        consolidator.maybe_consolidate_by_tokens = _wrapped
-
-    def patch_auto_compact_idle_guard(self, agent: Any) -> tuple[bool, str]:
-        """Заглушить бесполезное перечисление сессий при выключенном idle-компакте.
-
-        ``AgentLoop.run`` при отсутствии входящих сообщений раз в секунду
-        зовёт ``AutoCompact.check_expired()`` (nanobot/agent/loop.py:1034).
-        Тот ВСЕГДА делает ``sessions.list_sessions()`` — дорогой N+1
-        (перечисление всех сессий + отдельный запрос превью каждой), даже
-        когда ``idleCompactAfterMinutes=0`` (idle-компакт выключен: сборка
-        ``_is_expired`` всегда возвращает False и ничего не архивируется).
-        При нескольких сессиях это сотни запросов в секунду вхолостую.
-
-        При выключенном idle-компакте заменяем ``check_expired`` на no-op.
-        """
-        auto = getattr(agent, "auto_compact", None)
-        if auto is None:
-            return False, "agent.auto_compact is missing"
-        original = getattr(auto, "check_expired", None)
-        if original is None:
-            return False, "auto_compact.check_expired is missing"
-        try:
-            ttl = int(getattr(auto, "_ttl", 0))
-        except Exception:
-            ttl = 0
-        if ttl > 0:
-            return False, f"idle compact enabled (ttl={ttl})"
-
-        auto.check_expired = lambda *a, **k: None
-        return True, "idle auto-compact enumeration disabled (ttl=0)"
+    # В nanobot 0.3.5:
+    # - ``Consolidator.maybe_consolidate_by_tokens`` отсутствует —
+    #   token-budget компакция идёт через ``ContextCompactionEvent``
+    #   (``nanobot.events.ContextCompactionEvent``);
+    # - upstream ``cmd_compact`` (nanobot/command/builtin.py:348) покрывает
+    #   ручной ``/compact``;
+    # - upstream ``AutoCompact._is_expired`` уже short-circuit при
+    #   ``_ttl <= 0``;
+    # - upstream ``TurnRuntimeAdmitted`` идёт через ``bus.publish``
+    #   и доступен через ``bus.subscribe``.
+    #
+    # Поэтому патчи ``compact_tracking``, ``compact_command``,
+    # ``idle_guard`` удалены; обязанности перенесены в
+    # ``lib/services/compaction_event_subscriber.py`` (D1) и
+    # подписку на ``TurnRuntimeAdmitted`` (D7).
+    # ------------------------------------------------------------------

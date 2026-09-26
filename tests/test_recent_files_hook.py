@@ -176,7 +176,7 @@ def test_patcher_auto_attaches_recent_files_when_media_empty(tmp_path):
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
 
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
     assert result.media == [str(p)], (
         f"Файл должен быть auto-attached в media, получили: {result.media!r}"
     )
@@ -205,7 +205,7 @@ def test_patcher_skips_recent_files_that_dont_exist(tmp_path):
 
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
 
     assert str(existing) in result.media
     assert str(missing) not in result.media, (
@@ -244,7 +244,7 @@ def test_patcher_replaces_stale_redirected_path(tmp_path):
 
     msg = MagicMock()
     msg.metadata = {"session_key": "postgres_streamlit"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
 
     assert result.media == [str(real)], (
         f"Устаревший путь должен быть заменён реальным: {result.media!r}"
@@ -274,7 +274,7 @@ def test_patcher_does_not_duplicate_existing_media(tmp_path):
 
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
 
     # Дубль по basename отброшен; существующий остался
     assert result.media == [str(p)]
@@ -295,7 +295,7 @@ def test_patcher_no_recent_hook_is_noop():
 
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
     assert result.media == ["/tmp/already.md"]
 
 
@@ -323,7 +323,7 @@ def test_patcher_appends_after_existing(tmp_path):
 
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
     assert result.media == [str(explicit), str(auto)]
 
 
@@ -351,6 +351,6 @@ def test_patcher_tool_audit_still_added(tmp_path):
 
     msg = MagicMock()
     msg.metadata = {"session_key": "cli:1"}
-    result = agent._assemble_outbound(msg, "x", [], "stop", False, None)
+    result = agent._assemble_outbound(msg, "x", "stop", False)
     assert str(p) in result.media
     assert "_tool_audit" in result.metadata

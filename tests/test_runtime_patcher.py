@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import threading
 import time
@@ -35,31 +36,50 @@ def _settings(gateway_overrides=None, channels=None, **overrides):
     return _Settings()
 
 
-def _make_fake_document_module(body_factory=None):
+def _make_fake_document_module(text_value=None):
     """Собрать fake ``nanobot.utils.document`` для подмены в ``sys.modules``.
 
     ``from nanobot.utils import document`` резолвится через атрибут
     ``document`` родительского модуля ``nanobot.utils``. Чтобы патч
     ``patch_document_text_threshold`` подхватил наш fake (а не
     настоящий submodule), подменяем **оба** ключа в ``sys.modules``.
+
+    ``extract_text(path)`` для тестовых файлов читает содержимое из
+    ``tmp_path_factory``: env-vars ``FAKE_FILE_<basename>`` содержат
+    текст файла. Если env не задан, возвращается ``text_value``
+    (одинаковый текст для всех).
     """
     document_mod = types.ModuleType("nanobot.utils.document")
 
-    def _fake_extract(text, media_paths, **kwargs):
-        new = text
-        if media_paths:
-            blocks = []
-            for p in media_paths:
-                body = (
-                    body_factory(media_paths)
-                    if body_factory is not None
-                    else "a" * 5000
-                )
-                blocks.append(f"[File: {Path(p).name}]\n{body}")
-            new = (text + "\n\n" + "\n\n".join(blocks)) if text else "\n\n".join(blocks)
-        return new, []
+    def _fake_extract_text(path):
+        if not isinstance(path, str) or not path:
+            return None
+        basename = Path(path).name
+        env_key = f"FAKE_FILE_{basename}"
+        if env_key in os.environ:
+            return os.environ[env_key]
+        return text_value
 
-    document_mod.extract_documents = _fake_extract
+    def _fake_is_image_file(path):
+        if not isinstance(path, str):
+            return False
+        name = Path(path).name.lower()
+        return name.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+
+    def _fake_reference(content, media):
+        # Поведение upstream ``reference_non_image_attachments``:
+        # только [Attachment: path] для не-изображений, ничего не читает.
+        blocks: list[str] = []
+        for p in media or []:
+            if not _fake_is_image_file(p):
+                blocks.append(f"[Attachment: {p}]")
+        if blocks:
+            content = f"{content}\n\n" + "\n\n".join(blocks) if content else "\n\n".join(blocks)
+        return content, []
+
+    document_mod.reference_non_image_attachments = _fake_reference
+    document_mod.extract_text = _fake_extract_text
+    document_mod.is_image_file = _fake_is_image_file
     return document_mod
 
 
@@ -78,6 +98,12 @@ def _patched_document_module(document_mod):
 
 
 class TestPatchAssembleOutbound:
+    """Nanobot 0.3.5: ``AgentLoop._assemble_outbound`` имеет сигнатуру
+    ``(self, msg, final_content, stop_reason, streamed_content,
+       *, log_content=True, turn_latency_ms=None)``.
+    Обёртка в ``RuntimePatcher.patch_assemble_outbound`` принимает
+    те же позиционные параметры и передаёт их оригиналу as-is."""
+
     def test_wraps_and_injects_audit(self):
         agent = MagicMock()
         original_return = MagicMock()
@@ -92,7 +118,7 @@ class TestPatchAssembleOutbound:
         assert ok
 
         result = agent._assemble_outbound(
-            MagicMock(), "content", [], "stop", False, None
+            MagicMock(), "content", "stop", False,
         )
         hook.drain.assert_called_once()
         assert result.metadata["_tool_audit"] == [{"name": "read"}]
@@ -105,7 +131,7 @@ class TestPatchAssembleOutbound:
         patcher = RuntimePatcher()
         ok, _ = patcher.patch_assemble_outbound(agent, hook)
 
-        result = agent._assemble_outbound(None, None, None, None, False, None)
+        result = agent._assemble_outbound(None, None, None, None)
         assert result is None
         hook.drain.assert_not_called()
         assert ok
@@ -119,7 +145,7 @@ class TestPatchAssembleOutbound:
         patcher = RuntimePatcher()
         ok, _ = patcher.patch_assemble_outbound(agent, MagicMock())
 
-        result = agent._assemble_outbound(MagicMock(), "x", [], "stop", False, None)
+        result = agent._assemble_outbound(MagicMock(), "x", "stop", False)
         assert ok
         assert result.metadata["_final_turn"] is True
 
@@ -135,7 +161,7 @@ class TestPatchAssembleOutbound:
         msg.chat_id = "chat-1"
         msg.metadata = {"message_id": "m-1", "answer_id": "a-1"}
 
-        result = agent._assemble_outbound(msg, "", [], "stop", False, None)
+        result = agent._assemble_outbound(msg, "", "stop", False)
         assert ok
         assert result is not None
         assert result.metadata["_final_turn"] is True
@@ -227,6 +253,17 @@ class TestPatchContextGovernor:
 
 
 class TestPatchDocumentTextThreshold:
+    """В nanobot 0.3.5 патч оборачивает ``reference_non_image_attachments``
+    вместо ``extract_documents``. Семантика: для каждого файла из ``media``
+    пытается прочитать текст через ``extract_text`` и встроить в content
+    (с маркером обрезки при превышении порога); изображения и
+    нечитаемые файлы — fallback на upstream-формат ``[Attachment: …]``.
+    """
+
+    def _patch_with_fake_doc(self, channels=None):
+        document_mod = _make_fake_document_module()
+        return _patched_document_module(document_mod), document_mod
+
     def test_threshold_zero_skipped(self):
         patcher = RuntimePatcher()
         ok, detail = patcher.patch_document_text_threshold(
@@ -251,75 +288,81 @@ class TestPatchDocumentTextThreshold:
         assert ok
         assert "patched" in detail
 
-    def test_small_text_passes_through(self):
-        document_mod = _make_fake_document_module()
-        with _patched_document_module(document_mod):
+    def test_small_text_passes_through_with_path(self, monkeypatch):
+        text = "a" * 100
+        ctx, document_mod = self._patch_with_fake_doc()
+        monkeypatch.setenv("FAKE_FILE_file.pdf", text)
+        with ctx:
             patcher = RuntimePatcher()
             ok, _ = patcher.patch_document_text_threshold(
                 _settings(channels={"document_text_threshold": 20000})
             )
             assert ok
-            new_text, _ = document_mod.extract_documents(
+            new_text, images = document_mod.reference_non_image_attachments(
                 "user prompt", ["x/cache/file.pdf"]
             )
-            # Унифицированный формат: путь ВСЕГДА в заголовке, даже для
-            # маленьких документов (агент должен мочь передать путь в skill).
             assert "[File: file.pdf (saved at x/cache/file.pdf)]" in new_text
+            assert text in new_text
             assert "text omitted" not in new_text
+            assert images == []
 
-    def test_large_text_replaced_with_marker_and_path(self):
-        document_mod = _make_fake_document_module(
-            body_factory=lambda media: "a" * 30000
-        )
-        with _patched_document_module(document_mod):
+    def test_large_text_replaced_with_marker_and_path(self, monkeypatch):
+        text = "a" * 30000
+        monkeypatch.setenv("FAKE_FILE_big.pdf", text)
+        ctx, document_mod = self._patch_with_fake_doc()
+        with ctx:
             patcher = RuntimePatcher()
             ok, _ = patcher.patch_document_text_threshold(
                 _settings(channels={"document_text_threshold": 1000})
             )
             assert ok
-            new_text, _ = document_mod.extract_documents(
+            new_text, _ = document_mod.reference_non_image_attachments(
                 "user prompt", ["cache/sessions/k/big.pdf"]
             )
-            # Унифицированный формат: путь в заголовке (один раз),
-            # маркер обрезки — отдельной строкой без дублирования пути.
-            assert "[File: big.pdf (saved at cache/sessions/k/big.pdf)]" in new_text
-            assert "[text omitted (len=30000 > threshold=1000)]" in new_text
-            # Дублирования «read at <path>» быть не должно — путь уже в заголовке.
+            assert (
+                "[File: big.pdf (saved at cache/sessions/k/big.pdf)]" in new_text
+            )
+            assert (
+                "[text omitted (len=30000 > threshold=1000)]" in new_text
+            )
             assert "read at" not in new_text
-            assert ("a" * 30000) not in new_text
+            assert text not in new_text
 
-    def test_marker_omits_path_when_basename_not_in_media(self):
-        # В реальной выдаче extract_documents basename берётся из media_paths.
-        # Здесь мы симулируем ситуацию, когда заголовок блока и список путей
-        # рассогласованы: блок от другого источника, и его basename нет в media.
-        def _factory(media):
-            return "a" * 5000
-
-        document_mod = _make_fake_document_module(body_factory=_factory)
-
-        def _custom_extract(text, media_paths, **kwargs):
-            # Перебиваем — формируем блок с basename, которого нет в media_paths
-            big_body = "a" * 5000
-            return text + "\n\n" + f"[File: ghost.pdf]\n{big_body}", []
-
-        document_mod.extract_documents = _custom_extract
-        with _patched_document_module(document_mod):
+    def test_image_returns_path_in_image_paths_only(self):
+        """Изображения НЕ формируют текстовых блоков: путь возвращается
+        в ``image_paths`` (для vision-блоков upstream), content не
+        раздувается маркерами.
+        """
+        ctx, document_mod = self._patch_with_fake_doc()
+        with ctx:
             patcher = RuntimePatcher()
             ok, _ = patcher.patch_document_text_threshold(
-                _settings(channels={"document_text_threshold": 100})
+                _settings(channels={"document_text_threshold": 20000})
             )
             assert ok
-            new_text, _ = document_mod.extract_documents(
-                "user prompt", ["cache/sessions/k/real.pdf"]
+            new_text, images = document_mod.reference_non_image_attachments(
+                "user prompt", ["x/cache/pic.png"]
             )
-            # Путь не нашёлся → заголовок БЕЗ «(saved at …)», маркер обрезки
-            # БЕЗ «read at <path>». Никакого выдуманного пути.
-            assert "text omitted" in new_text
-            assert "(saved at" not in new_text
-            assert "read at" not in new_text
-            assert "[File: ghost.pdf]\n[text omitted" in new_text
+            assert images == ["x/cache/pic.png"]
+            assert new_text == "user prompt"
+            assert "[File:" not in new_text
+            assert "[Attachment:" not in new_text
 
-    def test_missing_extract_documents_skipped(self):
+    def test_unreadable_file_falls_back_to_attachment(self, monkeypatch):
+        monkeypatch.delenv("FAKE_FILE_ghost.pdf", raising=False)
+        ctx, document_mod = self._patch_with_fake_doc()
+        with ctx:
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_document_text_threshold(
+                _settings(channels={"document_text_threshold": 20000})
+            )
+            assert ok
+            new_text, _ = document_mod.reference_non_image_attachments(
+                "user prompt", ["x/cache/ghost.pdf"]
+            )
+            assert "[Attachment: x/cache/ghost.pdf]" in new_text
+
+    def test_missing_reference_skipped(self):
         hidden = {"nanobot.utils.document": None, "nanobot.utils": None}
         with patch.dict("sys.modules", hidden):
             patcher = RuntimePatcher()
@@ -328,60 +371,6 @@ class TestPatchDocumentTextThreshold:
             )
             assert not ok
             assert "missing" in detail or "import failed" in detail
-
-    def test_multipage_pdf_grouped_by_file(self):
-        # nanobot разбивает PDF на ``--- Page N ---`` блоки, разделённые
-        # ``\n\n``. Каждая страница по отдельности меньше порога, но документ
-        # целиком — больше. Старый подход (сплит по ``\n\n``) пропускал бы
-        # каждую страницу и не сработал; патч должен группировать по файлу.
-
-        def _factory(media):
-            return (
-                "--- Page 1 ---\n" + "x" * 100 + "\n\n"
-                "--- Page 2 ---\n" + "x" * 100
-            )
-
-        document_mod = _make_fake_document_module(body_factory=_factory)
-        with _patched_document_module(document_mod):
-            patcher = RuntimePatcher()
-            ok, _ = patcher.patch_document_text_threshold(
-                _settings(channels={"document_text_threshold": 150})
-            )
-            assert ok
-            new_text, _ = document_mod.extract_documents(
-                "user prompt", ["cache/sessions/k/mp.pdf"]
-            )
-            assert "text omitted" in new_text
-            assert "--- Page" not in new_text
-            assert ("x" * 100) not in new_text
-
-    def test_loop_namespace_also_patched(self):
-        # Реальная точка вызова — ``nanobot.agent.loop`` (импорт через
-        # ``from nanobot.utils.document import extract_documents``), а не
-        # ``document.extract_documents``. Патч обязан подменить и эту ссылку.
-        document_mod = _make_fake_document_module(
-            body_factory=lambda media: "a" * 5000
-        )
-        import nanobot.agent.loop as _loop_mod
-
-        saved = _loop_mod.extract_documents
-        try:
-            with _patched_document_module(document_mod):
-                patcher = RuntimePatcher()
-                ok, detail = patcher.patch_document_text_threshold(
-                    _settings(channels={"document_text_threshold": 100})
-                )
-                assert ok
-                assert "nanobot.agent.loop.extract_documents" in detail
-                assert _loop_mod.extract_documents is not saved
-                new_text, _ = _loop_mod.extract_documents(
-                    "p", ["cache/sessions/k/big.pdf"]
-                )
-                assert "text omitted" in new_text
-                # Путь — в заголовке (единый механизм), не в маркере обрезки.
-                assert "[File: big.pdf (saved at cache/sessions/k/big.pdf)]" in new_text
-        finally:
-            _loop_mod.extract_documents = saved
 
 
 class TestPatchExecLimits:
@@ -805,118 +794,6 @@ class TestPatchAsyncSessionSaves:
         sessions._async_save_executor.shutdown(wait=True)
 
 
-class TestPatchCompactCommand:
-    """``patch_compact_command`` — регистрация ``/compact`` как slash-команды."""
-
-    def test_registers_exact_and_prefix(self):
-        from functools import partial
-
-        from lib.commands.compact_command import cmd_compact
-
-        class _Commands:
-            def __init__(self):
-                self.exact_reg = {}
-                self.prefix_reg = []
-
-            def exact(self, cmd, handler):
-                self.exact_reg[cmd] = handler
-
-            def prefix(self, pfx, handler):
-                self.prefix_reg.append((pfx, handler))
-
-        class _Agent:
-            commands = _Commands()
-
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_compact_command(_Agent(), _settings())
-        assert ok, detail
-        assert "/compact" in _Agent.commands.exact_reg
-        handler = _Agent.commands.exact_reg["/compact"]
-        assert isinstance(handler, partial)
-        assert handler.func is cmd_compact
-        assert any(pfx == "/compact " for pfx, _ in _Agent.commands.prefix_reg)
-
-    def test_missing_commands_skipped(self):
-        class _Agent:
-            pass
-
-        patcher = RuntimePatcher()
-        ok, detail = patcher.patch_compact_command(_Agent(), _settings())
-        assert ok is False
-        assert "commands" in detail
-
-    def test_apply_all_includes_compact_command(self):
-        agent = MagicMock()
-        original_return = MagicMock()
-        original_return.metadata = {}
-        agent._assemble_outbound.return_value = original_return
-        hook = MagicMock()
-        hook.drain.return_value = []
-
-        patcher = RuntimePatcher()
-        report = patcher.apply_all(
-            MagicMock(), _settings(persist_threshold=0), Path("ws"), agent, hook,
-            db_logging_service=None,
-        )
-        assert "compact_command" in report.to_dict()["applied"]
-
-    def test_apply_all_records_document_text_threshold(self):
-        agent = MagicMock()
-        original_return = MagicMock()
-        original_return.metadata = {}
-        agent._assemble_outbound.return_value = original_return
-        hook = MagicMock()
-        hook.drain.return_value = []
-
-        patcher = RuntimePatcher()
-        report = patcher.apply_all(
-            MagicMock(),
-            _settings(channels={"document_text_threshold": 20000}),
-            Path("ws"),
-            agent,
-            hook,
-            db_logging_service=None,
-        )
-        details = report.to_dict()["details"]
-        assert "document_text_threshold" in details
-        assert "patched" in details["document_text_threshold"]
-
-
-class TestAutoCompactIdleGuard:
-    """``patch_auto_compact_idle_guard`` — глушит list_sessions при ttl=0."""
-
-    def test_disabled_ttl_makes_check_expired_noop(self):
-        calls = []
-
-        def _original(*a, **k):
-            calls.append(a)
-
-        class _Auto:
-            _ttl = 0
-            check_expired = _original
-
-        class _Agent:
-            auto_compact = _Auto()
-
-        ok, detail = RuntimePatcher().patch_auto_compact_idle_guard(_Agent())
-        assert ok, detail
-        _Agent.auto_compact.check_expired("ignored")
-        assert calls == []  # оригинал не вызван — list_sessions не идёт
-
-    def test_enabled_ttl_keeps_original(self):
-        class _Auto:
-            _ttl = 30
-            check_expired = lambda *a, **k: "original"
-
-        class _Agent:
-            auto_compact = _Auto()
-
-        ok, detail = RuntimePatcher().patch_auto_compact_idle_guard(_Agent())
-        assert ok is False
-        assert "idle compact enabled" in detail
-        assert _Agent.auto_compact.check_expired() == "original"
-
-
 class TestApplyAll:
     def test_report_contents(self):
         agent = MagicMock()
@@ -939,14 +816,13 @@ class TestApplyAll:
 
 
 class TestPatchContextBridgeSeed:
-    """``patch_context_bridge_seed`` — патч ``agent._state_build`` для live-update."""
+    """``patch_context_bridge_seed`` удалён в nanobot 0.3.5:
+    seed лимита окна делается подпиской на TurnRuntimeAdmitted
+    в ApplicationContext.start().
 
-    @pytest.fixture(autouse=True)
-    def _clean_bridge(self):
-        from lib.hooks.database_logging_hook import pop_context_bridge
-        pop_context_bridge("postgres:chat-1")
-        yield
-        pop_context_bridge("postgres:chat-1")
+    Метод в RuntimePatcher остаётся как ``applied``-запись (no-op),
+    поэтому тесты проверяют только сигнатуру и пропуск.
+    """
 
     def test_no_agent_skipped(self):
         from lib.services.runtime_patcher import RuntimePatcher
@@ -955,70 +831,13 @@ class TestPatchContextBridgeSeed:
         assert ok is False
         assert "agent is None" in detail
 
-    def test_no_state_build_skipped(self):
+    def test_passes_through_when_agent_present(self):
+        """В 0.3.5 патч no-op: подписка делается вне RuntimePatcher."""
         from lib.services.runtime_patcher import RuntimePatcher
 
-        agent = MagicMock(spec=[])
-        ok, detail = RuntimePatcher().patch_context_bridge_seed(agent)
-        assert ok is False
-        assert "_state_build is missing" in detail
-
-    @pytest.mark.asyncio
-    async def test_patches_state_build_and_seeds_bridge(self):
-        from lib.hooks.database_logging_hook import _CONTEXT_BRIDGE
-        from lib.services.runtime_patcher import RuntimePatcher
-
-        call_count = {"n": 0}
-
-        async def original_state_build(c):
-            call_count["n"] += 1
-            return {"fresh": True, "got": c}
-
-        agent = MagicMock()
-        agent._state_build = original_state_build
-
-        runtime = MagicMock()
-        runtime.context_window_tokens = 65536
-        runtime.model = "MiniMax-M3"
-
-        ctx = MagicMock()
-        ctx.runtime = runtime
-        ctx.session_key = "postgres:chat-1"
-
-        ok, detail = RuntimePatcher().patch_context_bridge_seed(agent)
+        ok, detail = RuntimePatcher().patch_context_bridge_seed(MagicMock())
         assert ok is True
-
-        result = await agent._state_build(ctx)
-        assert result == {"fresh": True, "got": ctx}
-        assert call_count["n"] == 1
-
-        entry = _CONTEXT_BRIDGE.get("postgres:chat-1") or {}
-        assert entry.get("limit") == 65536
-        assert entry.get("model") == "MiniMax-M3"
-
-    @pytest.mark.asyncio
-    async def test_seed_errors_do_not_break_state_build(self):
-        """Любой сбой внутри seed → оригинальный ``_state_build`` всё равно вызван."""
-        from lib.services.runtime_patcher import RuntimePatcher
-
-        called = {"n": 0}
-
-        async def original_state_build(c):
-            called["n"] += 1
-            return {"fresh": True}
-
-        agent = MagicMock()
-        agent._state_build = original_state_build
-        agent.runtime_for_session = MagicMock(side_effect=RuntimeError("boom"))
-
-        ctx = MagicMock()
-        ctx.runtime = None
-        ctx.session_key = "postgres:chat-1"
-
-        RuntimePatcher().patch_context_bridge_seed(agent)
-        result = await agent._state_build(ctx)
-        assert called["n"] == 1
-        assert result == {"fresh": True}
+        assert "context-bridge" in detail or "subscribe" in detail.lower()
 
 
 class TestPatchReportClassification:
@@ -1039,9 +858,9 @@ class TestPatchReportClassification:
 
         report = PatchReport()
         RuntimePatcher._record(
-            report, "compact_tracking", (False, "import failed: cannot import name X"),
+            report, "assemble_outbound", (False, "import failed: cannot import name X"),
         )
-        assert report.failed == [("compact_tracking", "import failed: cannot import name X")]
+        assert report.failed == [("assemble_outbound", "import failed: cannot import name X")]
         assert report.skipped == []
 
     def test_agent_none_is_skipped(self):
@@ -1053,6 +872,11 @@ class TestPatchReportClassification:
         assert report.failed == []
 
     def test_idle_compact_enabled_is_skipped(self):
+        """Сохранено как legacy-причина — некоторые скипы теперь
+        классифицируются по другим правилам, но ``idle compact
+        enabled`` остаётся в ``_SKIPPABLE_REASONS`` для обратной
+        совместимости с PatchSpec.
+        """
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
@@ -1108,12 +932,22 @@ class TestPatchReportClassification:
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
-        RuntimePatcher._record(report, "compact_command", (True, "/compact registered"))
+        RuntimePatcher._record(
+            report, "document_text_threshold",
+            (True, "reference_non_image_attachments patched"),
+        )
         RuntimePatcher._record(report, "save_turn", (False, "persist_threshold <= 0"))
-        RuntimePatcher._record(report, "compact_tracking", (False, "import failed: boom"))
-        assert report.details["compact_command"] == "/compact registered"
+        RuntimePatcher._record(
+            report, "assemble_outbound", (False, "import failed: boom"),
+        )
+        assert (
+            report.details["document_text_threshold"]
+            == "reference_non_image_attachments patched"
+        )
         assert report.details["save_turn"] == "persist_threshold <= 0"
-        assert report.details["compact_tracking"] == "import failed: boom"
+        assert (
+            report.details["assemble_outbound"] == "import failed: boom"
+        )
 
 
 class TestPatchReportRender:
@@ -1123,23 +957,23 @@ class TestPatchReportRender:
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
-        report.applied.append("compact_command")
+        report.applied.append("document_text_threshold")
         report.skipped.append(("save_turn", "persist_threshold <= 0"))
-        report.failed.append(("compact_tracking", "import failed: boom"))
+        report.failed.append(("assemble_outbound", "import failed: boom"))
         rendered = report.render()
-        assert "✓ compact_command" in rendered
+        assert "✓ document_text_threshold" in rendered
         assert "⚠ save_turn skipped: persist_threshold <= 0" in rendered
-        assert "✗ compact_tracking failed: import failed: boom" in rendered
+        assert "✗ assemble_outbound failed: import failed: boom" in rendered
 
     def test_render_includes_spec_purpose_for_failed(self):
         from lib.services.runtime_patcher import PatchReport, RuntimePatcher
 
         specs = RuntimePatcher.patch_specs()
         report = PatchReport()
-        report.failed.append(("compact_tracking", "import failed: boom"))
+        report.failed.append(("assemble_outbound", "import failed: boom"))
         rendered = report.render(specs=specs)
-        assert "✗ compact_tracking failed: import failed: boom" in rendered
-        assert "auto-compact" in rendered  # purpose из PatchSpec содержит это слово
+        assert "✗ assemble_outbound failed: import failed: boom" in rendered
+        assert "tool_audit" in rendered  # purpose из PatchSpec
 
 
 class TestPatchSpecs:
@@ -1205,7 +1039,7 @@ class TestApplyAllFailed:
         )
         d = report.to_dict()
         assert "details" in d
-        assert "compact_command" in d["details"]
+        assert "document_text_threshold" in d["details"]
         assert "save_turn" in d["details"]
         assert "subagent_logging" in d["details"]
 

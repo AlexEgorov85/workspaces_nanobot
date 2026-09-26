@@ -24,8 +24,6 @@ from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
-from .base_tool_tracking_hook import BaseToolTrackingHook
-
 if TYPE_CHECKING:
     from nanobot.agent import AgentHookContext, AgentRunHookContext
 
@@ -236,7 +234,7 @@ def _current_request_sender_id() -> str | None:
     return None
 
 
-class DatabaseLoggingHook(BaseToolTrackingHook):
+class DatabaseLoggingHook:
     """Агентский хук — пересылает tool- и run-события в DbLoggingService.
 
     Живёт в ``lib/hooks/``: это фреймворковый хук, а не плагин
@@ -272,7 +270,6 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         request_id: str | None = None,
         print_llm_calls: bool = False,
     ) -> None:
-        super().__init__()
         self._service = db_logging_service
         self._tool_start_times: dict[str, float] = {}
         self._agent_id = agent_id
@@ -316,13 +313,13 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         tool: Any,
         params: Any,
     ) -> None:
-        tool_call_id = self._tool_call_id(tool_call)
+        tool_call_id = str(getattr(tool_call, "id", None) or id(tool_call))
         self._tool_start_times[tool_call_id] = time.time()
         self._capture_context(context)
         try:
             self._service.log_tool_call(
                 session_id=context.session_key or "",
-                tool_name=self._tool_call_name(tool_call),
+                tool_name=str(getattr(tool_call, "name", "?")),
                 args=params if isinstance(params, dict) else {},
                 tool_call_id=tool_call_id,
                 request_id=self._request_id,
@@ -338,13 +335,13 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         params: Any,
         result: Any,
     ) -> None:
-        tool_call_id = self._tool_call_id(tool_call)
+        tool_call_id = str(getattr(tool_call, "id", None) or id(tool_call))
         start = self._tool_start_times.pop(tool_call_id, None)
         latency_ms = (time.time() - start) * 1000.0 if start is not None else 0.0
         try:
             self._service.log_tool_result(
                 session_id=context.session_key or "",
-                tool_name=self._tool_call_name(tool_call),
+                tool_name=str(getattr(tool_call, "name", "?")),
                 result=result,
                 latency_ms=latency_ms,
                 tool_call_id=tool_call_id,
@@ -362,13 +359,13 @@ class DatabaseLoggingHook(BaseToolTrackingHook):
         params: Any,
         error: Any,
     ) -> None:
-        tool_call_id = self._tool_call_id(tool_call)
+        tool_call_id = str(getattr(tool_call, "id", None) or id(tool_call))
         start = self._tool_start_times.pop(tool_call_id, None)
         latency_ms = (time.time() - start) * 1000.0 if start is not None else 0.0
         try:
             self._service.log_tool_result(
                 session_id=context.session_key or "",
-                tool_name=self._tool_call_name(tool_call),
+                tool_name=str(getattr(tool_call, "name", "?")),
                 result=None,
                 latency_ms=latency_ms,
                 tool_call_id=tool_call_id,

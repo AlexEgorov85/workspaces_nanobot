@@ -319,7 +319,7 @@ async def test_patcher_auto_attach_end_to_end(mock_db, tmp_path):
     msg_ctx = MagicMock()
     msg_ctx.session_key = "cli:1"
     msg_ctx.metadata = {}
-    outbound = agent._assemble_outbound(msg_ctx, "x", [], "stop", False, None)
+    outbound = agent._assemble_outbound(msg_ctx, "x", "stop", False)
     assert outbound.media == [str(md)], (
         f"Auto-attach должен был добавить файл в media, получили: {outbound.media!r}"
     )

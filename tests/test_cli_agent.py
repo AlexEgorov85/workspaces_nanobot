@@ -320,7 +320,7 @@ class TestPatchAssembleOutbound:
         hook.drain.return_value = [{"name": "read"}]
 
         RuntimePatcher().patch_assemble_outbound(agent, hook)
-        result = agent._assemble_outbound(MagicMock(), "content", [], "stop", False, None)
+        result = agent._assemble_outbound(MagicMock(), "content", "stop", False)
         assert result.metadata["_tool_audit"] == [{"name": "read"}]
 
 
