@@ -5,9 +5,17 @@
 
 ## What
 `SessionRecoveryService` с тремя режимами:
-1. `detect-only` (default) — только лог + метрика (уже реализовано в `storage-hybridization`).
+1. `detect-only` (default) — только лог + метрика (полагается на событие `session_stale_detected` из `SessionColdSyncService`, см. `openspec/changes/storage-hybridization/design.md` D23).
 2. `read-only-fallback` — загрузка из PG с жёстким запретом на запись.
 3. `backup-and-restore` — атомарный бэкап JSONL → перезапись из PG → нормальная работа.
+
+## Жёсткая зависимость от change `storage-hybridization`
+
+**Этап A change `storage-hybridization`** (stale-detection + reverse-lag detection в `SessionColdSyncService`, метрики, события `session_stale_detected` / `sync_lag_exceeded`) — **обязательная предпосылка** для этого change.
+
+- Без завершённой Части A режим `detect-only` — полный no-op (нет источника событий stale-detected).
+- Rollout plan «включить `detect-only`, посмотреть логи, потом переключить на `backup-and-restore`» **не работает**, пока Часть A не активна и не проверена в проде.
+- До развёртывания `session-recovery` в любом режиме Часть A должна быть активна и проверена в проде минимум N дней (конкретный срок — на решении оператора, не входит в эту спеку).
 
 ## In scope
 - `SessionRecoveryService` с тремя режимами.

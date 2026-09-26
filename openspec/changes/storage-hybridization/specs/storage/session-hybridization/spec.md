@@ -169,32 +169,49 @@ deploy, observability и disaster-recovery. Запись в PG MUST
   - `upstream_session_count`: количество сессий в
     `list_sessions()` на последнем успешном цикле;
   - `pg_session_count`: количество строк в
-    `agent_session_meta` на последнем успешном цикле.
+    `agent_session_meta` на последнем успешном цикле;
+  - `stale_sync_skipped_total`: количество sync-пропусков из-за
+    `pg > jsonl + stale_tolerance` (включая dedup TTL, см.
+    requirement «Stale-detection и reverse-lag detection»);
+  - `stale_detected_total`: количество уникальных событий
+    `session_stale_detected` (после dedup TTL);
+  - `sync_lag_exceeded_total`: количество событий
+    `sync_lag_exceeded`.
 - **AND** эти метрики экспортируются в health-check endpoint
   через `RuntimeHealth` (см. `lib/services/runtime_health.py`).
 
-### Requirement: Multi-instance политика через pg_advisory_lock
+### Requirement: Multi-instance политика через pg_advisory_xact_lock
 
 При наличии нескольких реплик gateway `SessionColdSyncService`
-SHALL использовать `pg_try_advisory_lock(hashtext(
-'session_cold_sync'))` для автоматического leader-election:
-ровно одна реплика получает lock и выполняет sync, остальные
-пропускают цикл. Это устраняет необходимость внешней
-координации (Kubernetes labels, deployment manifests).
+SHALL использовать `pg_try_advisory_xact_lock(hashtext(
+'storage_hybridization_session_cold_sync'))` для автоматического
+leader-election в рамках одной транзакции sync-цикла: ровно одна
+реплика получает lock и выполняет sync, остальные пропускают
+цикл. Это устраняет необходимость внешней координации
+(Kubernetes labels, deployment manifests).
 
 Дополнительный escape hatch: `gateway.session_cold_sync.enabled=false`
 (default `true`) — sync-сервис не запускается вообще
 (для реплик, которые по политике не должны синхронизировать).
 
-#### Scenario: Leader-election через pg_try_advisory_lock
+> **Изменение модели lock:** первоначальная версия спеки
+> использовала session-scoped `pg_try_advisory_lock` с явным
+> `pg_advisory_unlock` в `finally`. Реальная имплементация и
+> дизайн `storage-hybridization` D-Pool перешли на **per-transaction**
+> (`pg_try_advisory_xact_lock`) — lock автоматически
+> освобождается на COMMIT/ROLLBACK, без отдельного
+> `pg_advisory_unlock`, без долгоживущего соединения.
+
+#### Scenario: Leader-election через pg_try_advisory_xact_lock
 
 - **WHEN** две реплики gateway стартуют одновременно и
   первая итерация `_sync_loop` запускается в обеих
 - **THEN** каждая реплика вызывает
-  `SELECT pg_try_advisory_lock(hashtext('storage_hybridization_session_cold_sync')::bigint)`
-  в начале цикла (через `utils.db` connection).
+  `SELECT pg_try_advisory_xact_lock(hashtext('storage_hybridization_session_cold_sync')::bigint)`
+  в начале цикла (через `utils.db.transaction()`, в той же
+  транзакции, где идёт sync).
   - Явный `::bigint` cast — `hashtext()` возвращает
-    `int4`; `pg_try_advisory_lock` имеет две перегрузки
+    `int4`; `pg_try_advisory_xact_lock` имеет две перегрузки
     `(bigint)` и `(int, int)`. Cast делает выбор перегрузки
     детерминированным и устраняет implicit cast.
   - Имя ключа `storage_hybridization_session_cold_sync`
@@ -202,26 +219,100 @@ SHALL использовать `pg_try_advisory_lock(hashtext(
     пересечься с другими advisory-lock'ами в проекте.
 - **AND** только одна реплика получает `True` (lock acquired);
   остальные получают `False` (lock already held).
-- **AND** реплика с lock'ом выполняет `_sync_batch()`.
+- **AND** реплика с lock'ом выполняет `_sync_batch()` в той же
+  транзакции.
 - **AND** остальные пропускают цикл и инкрементируют
   метрику `cycles_skipped_lock_busy`.
-- **AND** после завершения цикла реплика-держатель
-  вызывает `SELECT pg_advisory_unlock(hashtext(
-  'storage_hybridization_session_cold_sync')::bigint)`
-  в `finally` блоке. Lock освобождается; следующая
-  итерация начинается через `sync_interval_sec`.
+- **AND** lock автоматически освобождается на COMMIT/ROLLBACK
+  — никакого отдельного `pg_advisory_unlock` не требуется.
 
 #### Scenario: Crash реплики-держателя lock
 
-- **WHEN** реплика-держатель `pg_advisory_lock` падает
+- **WHEN** реплика-держатель `pg_try_advisory_xact_lock` падает
   (segfault, kill -9, network partition)
-- **THEN** PG автоматически освобождает session-level
-  advisory lock при разрыве соединения (это документированное
-  поведение PostgreSQL для session locks, не для
-  transaction locks).
+- **THEN** транзакция ROLLBACK'ится автоматически при разрыве
+  соединения; xact-scoped advisory lock освобождается
+  (документированное поведение PostgreSQL для transaction
+  locks).
 - **AND** следующая реплика захватывает lock в следующем
   цикле и продолжает sync. Время обнаружения —
   не более `sync_interval_sec`.
+
+### Requirement: Stale-detection и reverse-lag detection
+
+`SessionColdSyncService` SHALL детектировать две аномалии и
+публиковать через `DbLoggingService.try_log_event(...)` события
+для observability:
+
+1. **Stale (PG свежее JSONL):** если в PG
+   `agent_session_meta.updated_at` для ключа `K` больше
+   `upstream_session.updated_at` для того же `K` более чем на
+   `stale_tolerance_seconds` (default `120`) — sync для этого
+   ключа SHALL пропускаться (`continue`), и SHALL публиковаться
+   событие `event_type="session_stale_detected"` с
+   `payload={"session_key": K, "jsonl_updated_at": ...,
+   "pg_updated_at": ...}`.
+2. **Reverse lag (JSONL свежее PG):** если
+   `upstream_session.updated_at` больше PG `updated_at` более
+   чем на `sync_lag_threshold_seconds` (default `3600`) — sync
+   для этого ключа SHALL выполняться нормально (LWW — mirror
+   обновится), и SHALL публиковаться событие
+   `event_type="sync_lag_exceeded"` с теми же полями.
+
+Параметры SHALL быть конфигурируемыми через
+`gateway.session_cold_sync.stale_tolerance_seconds` и
+`sync_lag_threshold_seconds` (см. `SessionColdSyncSettings`
+в `lib/core/project_settings.py`).
+
+Stale-detection — защита cold-storage от перезаписи устаревшими
+upstream-данными (сценарии «volume restore», «host migration»,
+«multi-instance misconfiguration»). Reverse-lag detection —
+observability для диагностики сломанного sync.
+
+#### Scenario: Stale сессия — sync пропущен, событие опубликовано
+
+- **WHEN** `SessionColdSyncService._sync_session(key)` обнаруживает
+  `pg.updated_at > jsonl.updated_at + stale_tolerance`
+- **THEN** sync для этого ключа SHALL быть пропущен (никаких
+  `INSERT`/`UPDATE` в `agent_session_meta` /
+  `agent_session_messages`).
+- **AND** через `DbLoggingService` SHALL быть опубликовано
+  событие `event_type="session_stale_detected"` с `payload`,
+  содержащим `session_key`, `jsonl_updated_at`, `pg_updated_at`.
+- **AND** метрика `stale_sync_skipped_total` SHALL быть
+  инкрементирована (включая повторные skip после dedup TTL).
+
+#### Scenario: Equal или within-tolerance PG-сессия — silent skip
+
+- **WHEN** `pg.updated_at >= jsonl.updated_at`, но
+  `pg.updated_at - jsonl.updated_at <= stale_tolerance`
+- **THEN** sync SHALL пропустить эту сессию silently (текущее
+  поведение до добавления stale-detection; регрессионные
+  contract-тесты на этот случай обязательны — см. tasks
+  storage-hybridization этап 0).
+
+#### Scenario: Reverse lag — sync выполняется, событие опубликовано
+
+- **WHEN** `SessionColdSyncService._sync_session(key)` обнаруживает
+  `jsonl.updated_at > pg.updated_at + sync_lag_threshold`
+- **THEN** sync для этого ключа SHALL выполниться нормально
+  (LWW — mirror обновится).
+- **AND** через `DbLoggingService` SHALL быть опубликовано
+  событие `event_type="sync_lag_exceeded"`.
+- **AND** метрика `sync_lag_exceeded_total` SHALL быть
+  инкрементирована.
+
+#### Scenario: Stale-детект как предпосылка для session-recovery
+
+- **WHEN** change `session-recovery` активен в любом режиме
+- **THEN** `SessionRecoveryService` SHALL использовать тот же
+  staleness-детектор (single source of truth) для получения
+  списка stale-сессий — никакого собственного re-implementation
+  условия `pg > jsonl + tolerance` в `SessionRecoveryService`.
+- **AND** режим `detect-only` SHALL оставаться no-op до тех пор,
+  пока `SessionColdSyncService` не публикует события
+  `session_stale_detected` (см. tasks `session-recovery` —
+  «жёсткая зависимость от Части A»).
 
 #### Scenario: enabled=false отключает sync
 
