@@ -12,7 +12,7 @@
 6. `nanobot.command.builtin.cmd_compact` (`builtin.py:348`) теперь регистрирует `/compact` встроенно; наш `patch_compact_command` дублирует функционал.
 7. Появился `RuntimeControl` (`nanobot/agent/tools/runtime_control.py:151`), `RuntimeContextBlock` (`nanobot/runtime_context.py:25`), `LLMUsageStore` (`nanobot/llm_usage/store.py:159`), `FileEditActivityHook`, `AgentProgressHook`, встроенный `EventSink` + типизированные `bus/outbound_events.py`.
 
-Без правок: 9 контрактных + 59 юнит-тестов падают, 3 патча ломают прод в первом turn'е (`patch_assemble_outbound`, `patch_project_tools`, `patch_document_text_threshold`). Текущая версия `nanobot-ai==0.3.5` уже зафиксирована в `requirements.txt`.
+Без правок: 9 контрактных тестов + 17 юнит-тестов runtime_patcher (вместо заявленных 59 — часть старая сигнатура, которую мы обновляем) падают, 4 патча ломают прод в первом turn'е (`patch_assemble_outbound`, `patch_project_tools`, `patch_document_text_threshold`, `patch_exec_limits.WriteStdinTool`). Текущая версия `nanobot-ai==0.3.5` уже зафиксирована в `requirements.txt`. Дополнительно: `AgentLoop.from_config` в 0.3.5 требует новый kwarg-only `tool_registry` (см. design §7 task 7.1 — поправлен `lib/core/agent_factory.py`).
 
 Параллельно часть нашего самописного кода стала избыточной: upstream теперь сам делает auto-compact-idle guard, даёт `/compact`, даёт runtime event publisher. Цель — **использовать upstream, где он заменил наш обход, и сохранить нашу уникальную ценность (PG-персистентность, file-storage policy, SQL guard)**.
 

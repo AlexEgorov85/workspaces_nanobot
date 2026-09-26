@@ -34,25 +34,31 @@
 
 ## Decisions
 
-### D1: Подписка на `ContextCompactionEvent` через выделенный `CompactionEventSubscriber`
+### D1: `CompactionEventSubscriber` фильтрует `OutboundMessage.event` в `postgres_channel.send`
 
-**Решение.** Создать класс `CompactionEventSubscriber` в `lib/services/` — выделенный сервис-слушатель, который:
-1. Подписывается на `bus.outbound` (или через `bus.subscribe`) в `ApplicationContext.start()`;
-2. При получении `OutboundMessage` проверяет `isinstance(msg.event, ContextCompactionEvent)`;
-3. Вызывает публичный API `ContextCompactionService.notify_session_compacted(session_key, phase, compaction_id)` (НЕ `_notify` — приватный метод);
-4. Для всех фаз логирует в `DbLoggingService.try_log_event(event_type="context_compacted", ...)`.
+**Решение.** Создать класс `CompactionEventSubscriber` в `lib/services/` — выделенный сервис-слушатель с публичным методом `feed(outbound: OutboundMessage)`. Канал `postgres_channel` (и другие каналы транспорта) **дёргает** `subscriber.feed(msg)` из своего `send` при получении каждого `OutboundMessage`. Подписчик:
 
-Upstream `cmd_compact` (`builtin.py:348`) передаёт `events=delivery.events` — это `EventSink`, который `emit(ContextCompactionEvent(...))` направляет через `bus.publish_event` → `bus.outbound`.
+1. Фильтрует `isinstance(msg.event, ContextCompactionEvent)`;
+2. Вызывает публичный API `ContextCompactionService.notify_session_compacted(session_key, phase, compaction_id)` (НЕ приватный `_notify`);
+3. Для всех фаз (`started`/`succeeded`/`failed`/`cancelled`) пишет `event_type="context_compacted"` в `agent_gateway_logs`;
+4. History-notice в `agent_conversation_messages` пишется **только** для `succeeded` (при `notify_in_history=true`).
+
+DI-инъекция — через `compaction_event_subscriber=...` kwarg конструктора `PostgresChannel` (defaults в `None`, что отключает observer).
+
+Upstream `cmd_compact` (`nanobot/command/builtin.py`) передаёт `events=delivery.events` (`EventSink`), который `emit(ContextCompactionEvent(...))` направляет через `bus.publish_event` → `bus.outbound` (`OutboundMessage.event`).
 
 **Альтернативы.**
 
-- (а) Фильтр внутри `postgres_channel`. Отклонено: нарушает SRP — канал не должен знать о бизнес-логике компакции.
-- (б) `bus.subscribe(handler, ContextCompactionEvent)` — **не сработает**: `events.emit` идёт через `publish_event` (outbound-queue), не `publish` (локальный fan-out). Подтверждено в `bus/queue.py:118`.
-- (в) Обёртка `summarize_provider_compaction` (новый метод Consolidator). Отклонено: возвращает summary, не вызывает наш notify. Дублирование логики.
+- (а) Подписка `bus.subscribe(handler, ContextCompactionEvent)` в отдельном consumer. Отклонено: `publish_event` идёт через outbound-queue, **не** через локальный fan-out `publish` — `bus.subscribe` события **не видит** (подтверждено в `bus/queue.py:49-65`).
+- (б) Подписка `bus.subscribe(handler, TurnRuntimeAdmitted)`. Отклонено: относится к D7, не к compaction-events. События compaction идут через `publish_event`, а TurnRuntimeAdmitted — через `publish` (разные очереди).
+- (в) Обёртка `Consolidator.summarize_provider_compaction` для notify. Отклонено: возвращает summary, не вызывает наш notify; дублирование логики.
+- (г) Хук `AgentHook.after_run`. Отклонено: вызывается **после** отправки `OutboundMessage` в канал — события compaction (`OutboundMessage.event`) уже не виден.
 
-**Обоснование.** Выделенный сервис соблюдает SRP: транспорт (канал) не знает о бизнес-логике; сервис подписывается на события и обрабатывает их. Публичный API `notify_session_compacted` вместо `_notify` — стабильность при будущих upgrade.
+**Обоснование.** Компромисс SRP: канал остаётся «тупым» транспортом (знает о существовании subscriber'а как об одном observer'е), вся бизнес-логика — в подписчике. Подтверждено альтернативой (а) D-X (3) — единственный стабильный путь без залезания в приватные API Consolidator.
 
-**Контракт для subscriber'а.** `agent_gateway_logs.event_type="context_compacted"` пишется для каждой фазы: `started`, `succeeded`, `failed`/`cancelled`. History-notice в `agent_conversation_messages` пишется **только** для `succeeded`.
+**Контракт для subscriber'а.** Принимает `compaction_service: ContextCompactionService` (через `set_service` — DI-cycle-friendly). Все исключения внутри `feed()` глушатся с warning, чтобы не сломать путь `OutboundMessage` через канал.
+
+**Известное ограничение.** Подписка внедрена только в `postgres_channel.send`. Другие каналы (`redis_channel`, streamlit) — отдельная задача, не в скоупе этого изменения (см. R7 ниже).
 
 ### D2: Перенос `_assemble_outbound` wrapper на новую сигнатуру
 
@@ -74,7 +80,13 @@ Upstream `cmd_compact` (`builtin.py:348`) передаёт `events=delivery.even
 
 ### D4: `patch_document_text_threshold` → обёртка над `reference_non_image_attachments`
 
-**Решение.** Перецепляем патч на `nanobot.utils.document.reference_non_image_attachments(content, media, threshold=20000)` (`utils/document.py:681`). Расширяем поведение: если файл текстовый и его длина > threshold, заменяем блок на `[Attachment: <basename> (saved at <path>)]\n[text omitted (len=… > threshold=…)]`.
+**Решение.** Перецепляем патч на `nanobot.utils.document.reference_non_image_attachments(content, media)` (`utils/document.py:681` — upstream-сигнатура `(content, media)`, без `threshold`). Наша обёртка:
+
+1. Сохраняет `image_paths` (upstream-сематика для vision-блоков);
+2. Для каждого не-изображения пытается прочитать текст через `extract_text(path)` (`utils/document.py:extract_text`);
+3. Если длина тела ≤ `channels.document_text_threshold` (по умолчанию 20000) — формирует блок `[File: <basename> (saved at <path>)]\n<text>` (path ВСЕГДА в заголовке);
+4. Если > порога — `[File: <basename> (saved at <path>)]\n[text omitted (len=… > threshold=…)]`;
+5. Если изображение или `extract_text` упал — fallback на `[Attachment: <path>]` (upstream-формат, без нашего расширения).
 
 **Альтернативы.**
 
@@ -97,16 +109,24 @@ Upstream `cmd_compact` (`builtin.py:348`) передаёт `events=delivery.even
 
 **Альтернативы.** Нет — это dead code в новой версии.
 
-### D7: Перенос `patch_context_bridge_seed` на подписку `bus.subscribe(TurnRuntimeAdmitted)`
+### D7: `patch_context_bridge_seed` → no-op в `RuntimePatcher` (подписка в ApplicationContext — отдельная задача)
 
-**Решение.** Удаляем `patch_context_bridge_seed`. В `ApplicationContext.start()` подписываемся: `loop.bus.subscribe(handler, TurnRuntimeAdmitted)` (`bus/runtime_events.py:44`, `LLMRuntime.context_window_tokens` в `utils/llm_runtime.py:26`). Handler читает `event.runtime.context_window_tokens` и пишет в `DatabaseLoggingHook._CONTEXT_BRIDGE[session_key]` (для текущего UI-метра).
+**Решение.** В этом изменении `patch_context_bridge_seed` остаётся в `RuntimePatcher.apply_all` как **no-op** с `applied=True` (для совместимости со `PatchReport`/логами). Реальная подписка `bus.subscribe(handler, TurnRuntimeAdmitted)` в `ApplicationContext.start()` **отложена** как отдельная задача (см. R7).
+
+Механизм в новой версии:
+1. `RuntimeEventPublisher.turn_runtime_admitted(...)` (`bus/runtime_events.py:204`) зовёт `self.bus.publish(TurnRuntimeAdmitted(...))`;
+2. `bus.publish` (`bus/queue.py:118`) идёт через локальный fan-out (`_handlers`), который виден через `bus.subscribe`;
+3. Handler (вне `RuntimePatcher`) будет читать `event.runtime.context_window_tokens` и звать `DatabaseLoggingHook.seed_context_window(session_key, limit, model)`.
 
 **Альтернативы.**
 
-- (а) Wrapper вокруг `AgentLoop._build_turn` (`loop.py:1865`). Отклонено: приватный метод, может быть переименован; в 0.3.5 уже нет `_state_build` — охотничьи угодья сужаются.
-- (б) Подписка на `TurnRuntimeAdmitted` через `bus.subscribe` (`bus/queue.py:92`). Принято: событие публикуется через `bus.publish` (`bus/runtime_events.py:204`) — попадает в локальный fan-out, доступный через `subscribe`. Это **тот же** путь, который использует upstream WebUI (`session/webui_turns.py:577`).
+- (а) Wrapper вокруг `AgentLoop._build_turn` (`loop.py:1865`). Отклонено: приватный метод удалён в 0.3.5; идём через публичный путь upstream.
+- (б) Подписка на `TurnRuntimeAdmitted` через `bus.subscribe` (`bus/queue.py:92`). Отложено: реализация требует правок `ApplicationContext.start()` и `BusFactory` (нет `bus` в текущем контексте). Это **тот же** путь, который использует upstream WebUI (`session/webui_turns.py:577`).
+- (в) Реализовать подписку в этом же изменении. Отклонено: пересекается с R2/Architecture-контрактом `lib/services/` (требует выделения отдельного helper'а `ContextBridgeSubscriber` — отдельный OpenSpec-change чтобы не размывать scope).
 
-**Обоснование.** Подписка стабильна: `TurnRuntimeAdmitted` — публичный тип (`bus/runtime_events.py:44`), `bus.subscribe` — публичный API (`bus/queue.py:92`), `LLMRuntime.context_window_tokens` — публичное поле (`utils/llm_runtime.py:26`). Никаких приватных символов.
+**Обоснование.** Патч становится pure-no-op: `agent._state_build` удалён, поэтому реальный seed сейчас **не делается** в `RuntimePatcher`. Это означает, что при холодном старте оборота `metadata.context_window` в финале **не строится через мост** (но по-прежнему собирается из `agent._last_usage` в `_attach_context_window` fallback'е — см. `RuntimePatcher._attach_context_window`). Полноценная подписка — отдельное изменение.
+
+**Контракт.** `RuntimePatcher.patch_context_bridge_seed(None)` возвращает `(False, "agent is None")`; с реальным `agent` — `(True, "context-bridge seed moved to bus.subscribe(TurnRuntimeAdmitted)")`. Это видно в `PatchReport.applied`.
 
 ### D8: Удаление `lib/hooks/base_tool_tracking_hook.py`
 
@@ -209,6 +229,8 @@ Upstream `cmd_compact` (`nanobot/command/builtin.py:348`) выполняет **�
 - **R4: Удаление `patch_compact_command` теряет наш `force=True`-флаг.** → Митигация: upstream `cmd_compact` (`builtin.py:348`) всегда выполняет forced-compaction (нет `force` параметра). Это совпадает с нашей семантикой, потерь нет.
 - **R5: Удаление `patch_auto_compact_idle_guard` может изменить поведение при `idleCompactAfterMinutes != 0`.** → Митигация: наш проект использует `idleCompactAfterMinutes: 0` (`config.json`), поэтому патч ничего не делал. Документируем в `CHANGELOG.md` как no-behavior-change.
 - **R6: 3 падающих теста вне upgrade-скоупа помечены skip — могут маскировать реальные регрессии.** → Митигация: каждый skip имеет `reason` с TODO-ссылкой; при следующем прогоне suite создаётся задача на разбор.
+- **R7: Подписка `bus.subscribe(TurnRuntimeAdmitted)` в ApplicationContext.start() не реализована (D7 отложен).** При холодном старте оборота `metadata.context_window` собирается из fallback'а `agent._last_usage` в `_attach_context_window`. На UI-метке это видно как «секунды без обновлений» сразу после первого оборота; после первой записи в мосте (через `after_iteration` хука) метка оживает. Полное покрытие — отдельный OpenSpec change. Отслеживается в ISSUE-NB035-5.
+- **R8: `CompactionEventSubscriber.feed` подключён только в `postgres_channel.send`.** `redis_channel` и `streamlit_app` пока не вызывают observer; для них history-notice `context_compacted` НЕ появится. Расширение в отдельном OpenSpec change (R8 подсвечивает текущий scope).
 
 ## Migration Plan
 
