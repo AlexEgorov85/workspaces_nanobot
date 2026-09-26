@@ -6,11 +6,11 @@
 
 1. Переписана state-машина `AgentLoop` — `_state_build/_state_compact/_state_restore/_state_save/_state_respond` удалены, заменены на `_dispatch` + `_compact_session` + `TurnContext` (`nanobot/agent/loop.py`).
 2. Изменена сигнатура `_assemble_outbound` (6 → 4 позиционных + `log_content` kwarg) и `_save_turn` (добавлены `summary_checkpoint`/`input_persisted_early`).
-3. Изменён `ToolContext.__init__` — убраны `file_state_store`/`runtime_events`, добавлен `runtime_control` (`nanobot/agent/tools/context.py:79`).
+3. Изменён `ToolContext.__init__` — добавлен `runtime_control: RuntimeControl | None = None` (`nanobot/agent/tools/context.py:79`), `file_state_store: FileStates | None = None` сохранён, `runtime_events` удалён (не было в сигнатуре).
 4. Удалены оба `extract_documents` (`nanobot.utils.document.extract_documents` и `nanobot.agent.loop.extract_documents`) — патч становится no-op.
 5. `Consolidator.maybe_consolidate_by_tokens` удалён — token-budget compaction идёт через `ContextCompactionEvent` (`nanobot/agent/events.py:17`).
 6. `nanobot.command.builtin.cmd_compact` (`builtin.py:348`) теперь регистрирует `/compact` встроенно; наш `patch_compact_command` дублирует функционал.
-7. Появился `AgentRuntimeControl` (`nanobot/agent/tools/runtime_control.py:151`), `RuntimeContextBlock` (`nanobot/runtime_context.py:25`), `LLMUsageStore` (`nanobot/llm_usage/store.py:159`), `FileEditActivityHook`, `AgentProgressHook`, встроенный `EventSink` + типизированные `bus/outbound_events.py`.
+7. Появился `RuntimeControl` (`nanobot/agent/tools/runtime_control.py:151`), `RuntimeContextBlock` (`nanobot/runtime_context.py:25`), `LLMUsageStore` (`nanobot/llm_usage/store.py:159`), `FileEditActivityHook`, `AgentProgressHook`, встроенный `EventSink` + типизированные `bus/outbound_events.py`.
 
 Без правок: 9 контрактных + 59 юнит-тестов падают, 3 патча ломают прод в первом turn'е (`patch_assemble_outbound`, `patch_project_tools`, `patch_document_text_threshold`). Текущая версия `nanobot-ai==0.3.5` уже зафиксирована в `requirements.txt`.
 
@@ -20,16 +20,16 @@
 
 ### BREAKING: исправление сломанных патчей
 
-- **`patch_assemble_outbound`** — обёртка `_assemble_outbound` переписана под новую сигнатуру `(msg, final_content, stop_reason, streamed_content, *, log_content, turn_latency_ms)`. Удалены параметры `all_msgs` и `had_injections`. Учёт `metadata.context_window` переносится в `_dispatch`/`_build_turn` через `AgentRuntimeControl.set_context_window_tokens`.
-- **`patch_project_tools`** — `ToolContext(...)` вызов переписан: убраны kwargs `file_state_store`, `runtime_events`; добавлен `runtime_control=agent._runtime_control`. DI-расширения (`_agent_ref`, `_settings_ref`, `_cache_store_ref`, `_db_logging_service`) сохраняются через `setattr` после конструктора.
+- **`patch_assemble_outbound`** — обёртка `_assemble_outbound` переписана под новую сигнатуру `(msg, final_content, stop_reason, streamed_content, *, log_content=True, turn_latency_ms=None)`. Удалены параметры `all_msgs` и `had_injections`. Учёт `metadata.context_window` переносится в подписку на `TurnRuntimeAdmitted` (см. D7 в design.md).
+- **`patch_project_tools`** — `ToolContext(...)` вызов переписан: сохранён kwargs `file_state_store`, убран `runtime_events` (не в сигнатуре), добавлен `runtime_control=agent._runtime_control`. DI-расширения (`_agent_ref`, `_settings_ref`, `_cache_store_ref`, `_db_logging_service`) сохраняются через `setattr` после конструктора.
 - **`patch_document_text_threshold`** — обёртка перенесена с `extract_documents` (нет в 0.3.5) на `nanobot.utils.document.reference_non_image_attachments` (`utils/document.py:681`). Семантика: bounded-extraction до `channels.document_text_threshold` символов с маркером обрезки `[text omitted (len=… > threshold=…)]` и обязательным `[Attachment: <path>]` блоком.
 
 ### MEDIUM: миграция на встроенные upstream-механизмы
 
-- **`patch_compaction_tracking`** — обёртка `Consolidator.maybe_consolidate_by_tokens` удалена (метод отсутствует в 0.3.5). `ContextCompactionService._notify` подписывается на `ContextCompactionEvent` через `EventSink` (`nanobot/agent/events.py:46`) — событие приходит и для token-budget, и для idle-compact пути.
-- **`patch_compact_command` + `lib/commands/compact_command.py`** — удалены. Upstream `/compact` (`builtin.py:348`) уже делает нужное через `loop.consolidator.compact_idle_session(...)`. Наш `ContextCompactionService._notify` вызывается через `AgentHook.after_run` (расширение существующего хука) сразу после upstream-обработчика, чтобы history-notice в `agent_conversation_messages` остался.
+- **`patch_compaction_tracking`** — обёртка `Consolidator.maybe_consolidate_by_tokens` удалена (метод отсутствует в 0.3.5). `ContextCompactionService.notify_session_compacted` подписывается на `ContextCompactionEvent` через выделенный `CompactionEventSubscriber` — событие приходит и для token-budget, и для idle-compact пути.
+- **`patch_compact_command` + `lib/commands/compact_command.py`** — удалены. Upstream `/compact` (`builtin.py:348`) уже делает нужное через `loop.consolidator.compact_idle_session(...)`. Наш `ContextCompactionService.notify_session_compacted` вызывается из `CompactionEventSubscriber` при получении `OutboundMessage.event` типа `ContextCompactionEvent`, чтобы history-notice в `agent_conversation_messages` остался.
 - **`patch_auto_compact_idle_guard`** — удалён. Upstream `_is_expired` (`autocompact.py:39–55`) уже short-circuit'ит при `_ttl <= 0`.
-- **`patch_context_bridge_seed`** — обёртка переписана с `AgentLoop._state_build` (нет в 0.3.5) на `AgentLoop._build_turn` (`loop.py:1865`). Альтернатива: подписка на `RuntimeEventPublisher.turn_runtime_admitted` (`turn_delivery.py:242`), несущий `runtime.model` + `context_window_tokens` — приоритетный путь для Streamlit-UI.
+- **`patch_context_bridge_seed`** — удалён. Подписка на `TurnRuntimeAdmitted` (`turn_delivery.py:242`) через `bus.subscribe` — приоритетный путь для Streamlit-UI (см. D7 в design.md).
 
 ### LOW: гигиена и deprecation
 

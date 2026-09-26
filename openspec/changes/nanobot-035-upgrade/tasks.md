@@ -2,6 +2,7 @@
 
 - [ ] 1.1 Зафиксировать baseline прогонов: `pytest tests/contract -q` (9 failed) + `pytest tests/test_runtime_patcher.py tests/test_tools_project_loader.py tests/test_runtime_patcher_e2e.py -q` (59 failed) — вывод сохраняется как **CI-артефакт**, НЕ коммитится в репозиторий
 - [ ] 1.2 Создать тестовый helper `tests/contract/helpers_runtime.py::introspect_target(nanobot_path, version)` (использует `inspect.signature`) — убедиться, что helper импортируется и возвращает `inspect.Signature` для заданного nanobot-символа (`python -c "from tests.contract.helpers_runtime import introspect_target; import inspect; print(introspect_target('nanobot.agent.loop.AgentLoop._assemble_outbound'))"`)
+- [ ] 1.3 Проверить `ToolContext.__dataclass_params__.frozen` через интроспекцию — зафиксировать в baseline (ожидается `frozen=False`, что позволяет `setattr` для DI)
 
 ## 2. Этап 1: HIGH — сломанные патчи
 

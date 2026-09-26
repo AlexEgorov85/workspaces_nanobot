@@ -5,8 +5,8 @@
 - `nanobot-ai==0.3.5` зафиксирован в `requirements.txt`.
 - `lib/services/runtime_patcher.py` содержит ~16 патчей. Из них:
   - 8 работают без изменений (target-символы сохранены).
-  - 4 имеют сигнатурные изменения (`patch_save_turn` — kwargs добавлены, вызов совместим; `patch_assemble_outbound` — сломан в рантайме; `patch_project_tools` — TypeError; `patch_exec_limits` — `WriteStdinTool` удалён).
-  - 3 ссылаются на удалённые символы (`patch_context_bridge_seed` — `_state_build`; `patch_compaction_tracking` — `maybe_consolidate_by_tokens`; `patch_document_text_threshold` — оба `extract_documents`).
+  - 4 имеют сигнатурные изменения (`patch_save_turn` — kwargs добавлены, вызов совместим; `patch_assemble_outbound` — сломан в рантайме; `patch_project_tools` — TypeError; `patch_exec_limits` — MEDIUM: `hasattr`-guard для `WriteStdinTool`).
+  - 3 ссылаются на удалённые символы (`patch_context_bridge_seed` — заменён на подписку `TurnRuntimeAdmitted` (D7); `patch_compaction_tracking` — `maybe_consolidate_by_tokens`; `patch_document_text_threshold` — оба `extract_documents`).
   - 1 дублирует встроенный upstream (`patch_compact_command`).
   - 1 — dead после рефакторинга upstream (`patch_auto_compact_idle_guard`).
 - Контрактные тесты `tests/contract/` (9 падений) фиксируют v0.3.0-сигнатуры.
@@ -56,7 +56,7 @@ Upstream `cmd_compact` (`builtin.py:348`) передаёт `events=delivery.even
 
 ### D2: Перенос `_assemble_outbound` wrapper на новую сигнатуру
 
-**Решение.** Wrapper-функция с сигнатурой `(self, msg, final_content, stop_reason, streamed_content, *, log_content=True, turn_latency_ms=None)`. Логика `metadata.context_window` переносится в `AgentLoop._dispatch` (через `patch_context_bridge_seed` → `_build_turn`); логика `_tool_audit` и recent-files остаётся в wrapper'е через чтение `session.metadata` после `_build_turn`.
+**Решение.** Wrapper-функция с сигнатурой `(self, msg, final_content, stop_reason, streamed_content, *, log_content=True, turn_latency_ms=None)`. Логика `_tool_audit` и recent-files остаётся в wrapper'е через чтение `session.metadata` после `_build_turn`. Логика `metadata.context_window` переносится в подписку на `TurnRuntimeAdmitted` (см. D7).
 
 **Альтернативы.**
 
@@ -128,22 +128,37 @@ Upstream `cmd_compact` (`builtin.py:348`) передаёт `events=delivery.even
 
 ```
 AgentLoop._assemble_outbound:
-(self, msg: 'InboundMessage', final_content: 'str', stop_reason: 'str', streamed_content: 'bool', *, log_content: 'bool' = True, turn_latency_ms: 'int | None' = None)
+(self, msg, final_content, stop_reason, streamed_content, *, log_content: bool = True, turn_latency_ms: int | None = None)
 
-ToolContext.__init__:
-(self, config: 'ToolsConfig', workspace: 'str', bus: 'MessageBus | None' = None, ..., file_state_store: 'FileStates | None' = None, ...)
+ToolContext.__init__ (полная сигнатура):
+- config: ToolsConfig (REQUIRED)
+- workspace: str (REQUIRED)
+- bus: MessageBus | None = None
+- subagent_manager: SubagentManager | None = None
+- cron_service: CronService | None = None
+- exec_session_manager: ExecSessionManager | None = None
+- sessions: SessionManager | None = None
+- file_state_store: FileStates | None = None  ← СОХРАНЯЕМ
+- provider_snapshot_loader: Callable[..., ProviderSnapshot] | None = None
+- image_generation_provider_configs: dict[str, ProviderConfig] | None = None
+- timezone: str = 'UTC'
+- workspace_sandbox: WorkspaceSandboxStatus | None = None
+- runtime_control: RuntimeControl | None = None  ← ДОБАВЛЯЕМ
+
+ToolContext.__dataclass_params__: frozen=False  ← setattr работает
 
 cmd_compact:
-(ctx: 'CommandContext') -> 'None'
+(ctx: CommandContext) -> None
 
 Consolidator.compact_idle_session:
-(self, session_key: 'str', *, runtime: 'LLMRuntime', max_suffix: 'int' = 0, events: 'EventSink' = EventSink(publish=None, accepts_type=None)) -> 'str | None'
+(self, session_key, *, runtime: LLMRuntime, max_suffix: int = 0, events: EventSink) -> str | None
 ```
 
 **Выводы:**
 1. `_assemble_outbound` **включает** `log_content: bool = True` — наш патч должен передавать этот kwarg.
-2. `ToolContext` **включает** `file_state_store: FileStates | None = None` — НЕ удалять из kwargs.
-3. `Consolidator.compact_idle_session` принимает `events: EventSink` — наш CompactionEventSubscriber работает с этим API.
+2. `ToolContext` **включает** `file_state_store` и `runtime_control` — оба сохраняем/добавляем; `runtime_events` **НЕ** в сигнатуре (удалён).
+3. `ToolContext` имеет `frozen=False` — `setattr` для DI работает.
+4. `Consolidator.compact_idle_session` принимает `events: EventSink` — наш CompactionEventSubscriber работает с этим API.
 
 ---
 
@@ -167,16 +182,16 @@ Upstream `LLMUsageStore` (`nanobot/llm_usage/store.py:159`) хранит **то�
 
 **Вывод.** Это **два независимых слоя** с разной семантикой: upstream — content-free для UI-графиков; наш — content-rich для search. Никакого дублирования. Наше утверждение в драфте «upstream покрывает часть» — **корректно по сути, но не должно звучать как „upstream заменяет“**. Правка: спек переформулирует, что `LLMUsageStore` — это **параллельный слой** (не наша задача; не подключаем в этом изменении), а `DbLoggingService` — наш основной content-rich logger.
 
-**(2) Upstream `/compact` cmd vs наш `lib/commands/compact_command.py` + `ContextCompactionService._notify`.**
+**(2) Upstream `/compact` cmd vs наш `lib/commands/compact_command.py` + `ContextCompactionService.notify_session_compacted`.**
 
 Upstream `cmd_compact` (`nanobot/command/builtin.py:348`) выполняет **только**: `loop.consolidator.compact_idle_session(ctx.key, runtime=runtime, events=delivery.events)` + опциональный `provider_state = None` + `save`. **Никаких записей в БД** — нет ни обращения к `agent_conversation_messages`, ни к `agent_gateway_logs`. Подтверждено `grep -r "agent_conversation_messages\|agent_gateway_logs" nanobot/` — пусто (эти таблицы — наши).
 
-Наш `ContextCompactionService._notify` (`lib/services/context_compaction.py:304`):
+Наш `ContextCompactionService.notify_session_compacted` (публичный API, обёртка вокруг `_notify`):
 - `_record_event_log` → пишет `event_type="context_compacted"` в `agent_gateway_logs` (Postgres)
 - `_write_history_notice` → пишет в `agent_conversation_messages` (Postgres) для UI-стикера
 - Это **наш уникальный слой**, не дублирование upstream.
 
-**Вывод.** Утверждение D5 «удаляем наш cmd, оставляем upstream cmd_compact» — **корректно для логики compaction**, но не должно звучать как «наш `_notify` заменяется upstream». Уточнённый план: `lib/commands/compact_command.py` и `patch_compact_command` удаляются; **наш `_notify` остаётся** и вызывается из нового `ContextCompactionChannelFilter` в `postgres_channel` при чтении `OutboundMessage.event` типа `ContextCompactionEvent`. Подробности в D1.
+**Вывод.** Утверждение D5 «удаляем наш cmd, оставляем upstream cmd_compact» — **корректно для логики compaction**, но не должно звучать как «наш `notify_session_compacted` заменяется upstream». Уточнённый план: `lib/commands/compact_command.py` и `patch_compact_command` удаляются; **наш `notify_session_compacted` остаётся** и вызывается из выделенного `CompactionEventSubscriber` при чтении `OutboundMessage.event` типа `ContextCompactionEvent`. Подробности в D1.
 
 **(3) `EventSink.subscribe` для `ContextCompactionEvent` — реально ли работает?**
 
@@ -193,7 +208,7 @@ Upstream `cmd_compact` (`nanobot/command/builtin.py:348`) выполняет **�
 - **R3: `ToolContext` — frozen=False dataclass, `setattr` работает; но upstream может сделать frozen=True.** → Митигация: при следующем upgrade проверяем `frozen` через `inspect.signature(ToolContext)`. Если frozen — DI переносим в `__init__`-kwargs (как было в 0.3.0).
 - **R4: Удаление `patch_compact_command` теряет наш `force=True`-флаг.** → Митигация: upstream `cmd_compact` (`builtin.py:348`) всегда выполняет forced-compaction (нет `force` параметра). Это совпадает с нашей семантикой, потерь нет.
 - **R5: Удаление `patch_auto_compact_idle_guard` может изменить поведение при `idleCompactAfterMinutes != 0`.** → Митигация: наш проект использует `idleCompactAfterMinutes: 0` (`config.json`), поэтому патч ничего не делал. Документируем в `CHANGELOG.md` как no-behavior-change.
-- **R6: 3 падающих теста вне upgrade-скоупа помечены xfail — могут маскировать реальные регрессии.** → Митигация: каждый xfail имеет `reason` с TODO-ссылкой; при следующем прогоне suite создаётся задача на разбор. CI останавливается на `xfail` как `XPASS` (strict).
+- **R6: 3 падающих теста вне upgrade-скоупа помечены skip — могут маскировать реальные регрессии.** → Митигация: каждый skip имеет `reason` с TODO-ссылкой; при следующем прогоне suite создаётся задача на разбор.
 
 ## Migration Plan
 
