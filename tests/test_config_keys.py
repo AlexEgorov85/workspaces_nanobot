@@ -101,6 +101,11 @@ def _required_keys():
         ("gateway.sync.max_queue_size", 10000),
         ("gateway.sync.reconnect_backoff_sec", 1.0),
         ("gateway.sync.reconnect_backoff_max_sec", 60.0),
+        # Storage-hybridization: upstream LLMUsageStore + cold-storage mirror.
+        ("gateway.usage_store.enabled", True),
+        ("gateway.session_cold_sync.enabled", True),
+        ("gateway.session_cold_sync.sync_interval_sec", 30.0),
+        ("gateway.session_cold_sync.batch_size", 50),
         # Embedding-параметры захардкожены в cache_provider_impl (модульные
         # константы); секция gateway.vector.embedding удалена. Бearer-токен —
         # переменная окружения OS EMBED_TOKEN. Индексы декларируются в

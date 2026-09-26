@@ -73,6 +73,7 @@ class AgentFactory:
         agent_id: str | None = None,
         project_hooks: list[Any] | None = None,
         print_llm_calls: bool = False,
+        usage_store: Any | None = None,
     ) -> tuple[Any, list[Any], list[Any]]:
         """Создать AgentLoop с подключёнными хуками.
 
@@ -156,9 +157,31 @@ class AgentFactory:
         }
         if cron_service is not None:
             kwargs["cron_service"] = cron_service
+        if usage_store is not None:
+            kwargs["provider_snapshot_loader"] = self._wrap_provider_snapshot_loader(
+                config, usage_store, bus
+            )
 
         agent = AgentLoop.from_config(config, bus, **kwargs)
         return agent, hooks, hook_factories
+
+    @staticmethod
+    def _wrap_provider_snapshot_loader(
+        config: Any,
+        usage_store: Any,
+        bus: Any | None,
+    ) -> Any:
+        """Build a ``provider_snapshot_loader`` that attaches the LLM observer.
+
+        Falls back to ``config.build_provider_snapshot`` when available;
+        otherwise returns ``None`` and the upstream default is used.
+        """
+        base_loader = getattr(config, "build_provider_snapshot", None)
+        if base_loader is None:
+            return None
+        from lib.services.llm_observer import wrap_provider_snapshot_loader
+
+        return wrap_provider_snapshot_loader(base_loader, usage_store, bus=bus)
 
     @staticmethod
     def _import_tool_audit_hook():

@@ -32,6 +32,8 @@ reference** по своей подсистеме; README в корне — эт�
 |---|---|
 | [architecture/nanobot-inventory.md](architecture/nanobot-inventory.md) | Инвентарь всех зависимостей от `nanobot-ai` (GREEN/YELLOW/ORANGE/RED) |
 | [architecture/runtime-patcher-inventory.md](architecture/runtime-patcher-inventory.md) | Каталог monkey-patch'ей с target/risk/тестами |
+| [architecture/storage-layers.md](architecture/storage-layers.md) | Гибридная модель хранения сессий (upstream JSONL + cold-storage PG mirror); правила использования пула |
+| [architecture/usage-tracking.md](architecture/usage-tracking.md) | LLM usage tracking через upstream `LLMUsageStore` (observer-pipeline) + `DbLoggingService` |
 | [skill-tool-architecture.md](skill-tool-architecture.md) | Контракт Skill ↔ Tool: что разрешено, что запрещено |
 | [skill-tool-inventory.md](skill-tool-inventory.md) | Текущее состояние всех skill/tool и история удалённых |
 | [SKILL_AUTHORING.md](SKILL_AUTHORING.md) | **Пошаговый гайд**: как создать свой skill (структура, SKILL.md, регистрация в project.json, runtime API, best practices, anti-patterns, DoD) |

@@ -47,6 +47,10 @@ class ApplicationContext:
     sync_service: Any | None = None
     cache_store: Any | None = None
 
+    # Storage-hybridization: cold-storage mirror для сессий + LLM usage.
+    session_cold_sync_service: Any | None = None
+    usage_store: Any | None = None
+
     # Помощники
     config_service: Any = None
     runtime_patcher: Any = None
@@ -211,6 +215,17 @@ class ApplicationContext:
         if enable_db_logging:
             ctx.db_logging_service = _make_db_logging(ctx)
 
+        # 4a. LLMUsageStore (upstream observer storage).
+        # См. спеку ``storage/usage-store``. Всегда создаётся —
+        # фабрика вернёт ``None`` если конфиг отключён / nanobot
+        # не предоставляет класс.
+        ctx.usage_store = _make_usage_store(ctx)
+
+        # 4b. SessionColdSyncService (cold-storage mirror).
+        # Создаётся только при PG-конфиге. Sync стартует позже,
+        # в ``start()`` lifecycle.
+        ctx.session_cold_sync_service = _make_session_cold_sync_service(ctx)
+
         # 5. PgDuckDbSyncService + DuckDbCacheStore
         if enable_audit:
             _auto_register_skills(ctx)
@@ -275,6 +290,7 @@ class ApplicationContext:
             agent_id=agent_id,
             project_hooks=project_hooks or None,
             print_llm_calls=print_llm_calls,
+            usage_store=ctx.usage_store,
         )
 
         # ToolAuditHook — фреймворковый, входит в ``ctx.hooks`` последним
@@ -385,6 +401,18 @@ class ApplicationContext:
             except Exception as exc:
                 logger.warning("PgDuckDbSyncService not started: %s", exc)
 
+        if self.session_cold_sync_service is not None:
+            try:
+                self.session_cold_sync_service.start()
+                self._shutdown.register(
+                    "session_cold_sync_service",
+                    self.session_cold_sync_service,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "SessionColdSyncService not started: %s", exc
+                )
+
         self._started = True
 
         # Финальный readiness snapshot для startup-лога.
@@ -409,6 +437,12 @@ class ApplicationContext:
             return
         if self._shutdown is not None:
             self._shutdown.shutdown_all()
+        # Close LLM usage store (SQLite WAL).
+        if self.usage_store is not None:
+            try:
+                self.usage_store.close()
+            except Exception as exc:
+                logger.warning("usage_store.close failed: %s", exc)
         # После остановки сервисов закрываем общий пул соединений.
         _stop_db_pool()
         if self.runtime_health is not None:
@@ -1061,6 +1095,84 @@ def _make_cron_service(config: Any) -> Any:
     from nanobot.cron.service import CronService
 
     return CronService(config.workspace_path / "cron" / "jobs.json")
+
+
+def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
+    """Создать ``SessionColdSyncService`` (cold-storage mirror).
+
+    Сервис создаётся только если:
+
+    - есть ``session_manager`` (upstream JSONL);
+    - в PG-конфиге указан DSN (cold-storage нужен только при
+      PG-деплое).
+
+    Если условия не выполнены — возвращает ``None``.
+
+    См. спеку ``openspec/specs/storage/session-hybridization/spec.md``
+    requirement «Cold-storage mirror в PostgreSQL».
+    """
+    if ctx.session_manager is None:
+        return None
+    try:
+        from config import get_setting
+
+        pg_dsn = get_setting("channels", "postgres", "dsn", default="")
+    except Exception:
+        pg_dsn = ""
+    if not pg_dsn:
+        return None
+
+    try:
+        sync_cfg = ctx.config_service.settings_section("gateway").get(
+            "session_cold_sync", {}
+        )
+    except Exception:
+        sync_cfg = {}
+    if not isinstance(sync_cfg, dict):
+        sync_cfg = {}
+
+    enabled = bool(sync_cfg.get("enabled", True))
+    sync_interval_sec = float(sync_cfg.get("sync_interval_sec", 30.0))
+    batch_size = int(sync_cfg.get("batch_size", 50))
+
+    schema = get_setting("channels", "postgres", "schema", default="public")
+    meta_table = get_setting("channels", "postgres", "meta_table",
+                            default="agent_session_meta")
+    messages_table = get_setting("channels", "postgres", "messages_table",
+                                default="agent_session_messages")
+
+    from lib.services.session_cold_sync_service import SessionColdSyncService
+
+    return SessionColdSyncService(
+        session_manager=ctx.session_manager,
+        pg_dsn=pg_dsn,
+        schema=schema,
+        meta_table=meta_table,
+        messages_table=messages_table,
+        sync_interval_sec=sync_interval_sec,
+        batch_size=batch_size,
+        enabled=enabled,
+        db_logging_service=ctx.db_logging_service,
+    )
+
+
+def _make_usage_store(ctx: ApplicationContext) -> Any | None:
+    """Создать ``LLMUsageStore`` (upstream nanobot) по конфигу.
+
+    Конфиг — ``gateway.usage_store.*`` (``sqlite_path``,
+    ``enabled``). Возвращает ``None`` если отключено.
+
+    См. спеку ``openspec/specs/storage/usage-store/spec.md``.
+    """
+    try:
+        usage_cfg = ctx.config_service.settings_section("gateway").get(
+            "usage_store", None
+        )
+    except Exception:
+        usage_cfg = None
+    from lib.services.llm_usage_store_factory import create_usage_store
+
+    return create_usage_store(usage_cfg)
 
 
 # ----------------------------------------------------------------------

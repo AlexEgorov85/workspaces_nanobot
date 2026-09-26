@@ -8,6 +8,16 @@
 
 ## [Unreleased]
 
+> **MAJOR-релиз:** переход session hot-path на upstream `SessionManager`
+> (JSONL); PG остаётся как cold-storage mirror через
+> `SessionColdSyncService`. Upstream JSONL — единственный source
+> of truth. Исторические PG-сессии ДОЛЖНЫ быть перенесены в JSONL
+> **до** deploy отдельным скриптом (вне scope этого change), иначе
+> они будут удалены первым же sync-циклом. См.
+> `docs/architecture/storage-layers.md` и `docs/MIGRATION.md`
+> § «Storage hybridization». Подробности — в
+> `openspec/changes/storage-hybridization/`.
+
 > **MAJOR-релиз:** удаление persisted FAISS-кеша. После change
 > `remove-vector-index-store` единственный источник векторных данных —
 > `<storage_table>` (DuckDB-снапшот через `PgDuckDbSyncService`); FAISS-индекс
@@ -427,6 +437,76 @@
   scope for 0.3.5 upgrade, tracked in ISSUE-NB035-4")`:
   `tests/test_profile_lifecycle.py` (4), `tests/test_pg_session_manager.py`
   (TestPGSessionManagerPure + test_init_sets_framework_contract).
+
+### Removed
+
+### Added (storage-hybridization)
+
+- `lib/services/session_cold_sync_service.py` —
+  `SessionColdSyncService`: фоновый daemon-поток, зеркалирующий
+  upstream JSONL → PG. Per-transaction advisory lock
+  (`pg_try_advisory_xact_lock`), батчи с сортировкой по
+  `session_key`, leader-election для multi-instance deploy,
+  экспоненциальный backoff при ошибках PG. Метрики
+  (`cycles_total`, `cycles_failed_total`, `cycles_skipped_lock_busy`,
+  `cycles_skipped_pool_busy`, `pool_size`, `pool_available`,
+  `pool_wait_seconds` и др.) экспортируются через `get_stats()`.
+- `lib/services/llm_usage_store_factory.py` —
+  `create_usage_store(config)`: фабрика upstream
+  `nanobot.llm_usage.store.LLMUsageStore` (SQLite WAL). Дефолтный
+  путь — `<get_runtime_subdir("usage")>/usage.db`. Возвращает
+  `None` при `enabled=false` / отсутствии конфигурации.
+- `lib/services/llm_observer.py` — `wrap_provider_snapshot_loader`,
+  `attach_llm_observer`, `attach_fallback_model_observer`. Единый
+  путь подключения observer-pipeline (через обёртку
+  `provider_snapshot_loader`); fail-soft при ошибке attach.
+- `lib/services/runtime_health.py` — `RuntimeHealth.get_stats()`
+  (базовый liveness: `started_at`, `uptime_seconds`, `stopped`).
+- Контрактные тесты на upstream API:
+  `tests/contract/test_session_manager_api.py` (14 методов),
+  `tests/contract/test_usage_store_api.py` (init/record/
+  record_many/recent_calls/usage_payload/count/close),
+  `tests/contract/test_llm_observer_api.py` (provider API +
+  `wrap_provider_snapshot_loader` + FallbackProvider).
+- Архитектурные гарды `tests/test_storage_hybridization.py`:
+  запрет прямых `INSERT/UPDATE/DELETE` в `agent_session_*`
+  вне `SessionColdSyncService`; запрет собственных psycopg2-пулов;
+  запрет `event_type="llm_usage"` в `DbLoggingService`; проверка
+  docstring `PGSessionManager`.
+- `tests/test_session_cold_sync_service.py` (9 mock-тестов
+  включая `test_no_new_pool_created`), `tests/test_pg_session_manager.py`
+  (17 тестов под compatibility-layer роль),
+  `tests/test_storage_hybridization_factory.py`,
+  `tests/test_storage_hybridization_lifecycle.py`.
+- Документация: `docs/architecture/storage-layers.md`,
+  `docs/architecture/usage-tracking.md`, раздел «Storage
+  hybridization» в `docs/MIGRATION.md`.
+
+### Changed (storage-hybridization)
+
+- `lib/session/pg_session_manager.py` — `PGSessionManager` стал
+  тонким compatibility layer поверх upstream `SessionManager`.
+  Hot-path методы (`get_or_create`, `save`, `list_sessions`,
+  `read_session_metadata`, `read_session_file`, `delete_session`)
+  делегируются в `super()`. Никаких прямых SQL-операций в
+  `agent_session_meta` / `agent_session_messages` в hot path.
+- `lib/core/application_context.py` — создание
+  `SessionColdSyncService` и `LLMUsageStore`, lifecycle
+  (start/stop), обёртка `provider_snapshot_loader` через
+  `AgentFactory.create(... usage_store=...)`.
+- `lib/core/project_settings.py` — `UsageStoreSettings`,
+  `SessionColdSyncSettings` под `gateway.usage_store.*` /
+  `gateway.session_cold_sync.*`.
+- `project.json` — секции `gateway.usage_store.*` (дефолт
+  `enabled=true`) и `gateway.session_cold_sync.*`
+  (`enabled=true`, `sync_interval_sec=30.0`, `batch_size=50`).
+- `tests/test_config_keys.py` — `REQUIRED_KEYS` записи для
+  `gateway.usage_store.enabled` и
+  `gateway.session_cold_sync.{enabled,sync_interval_sec,batch_size}`.
+- `lib/services/context_compaction.py` и
+  `tools/generate_comments_sql.py` — обновлены docstring /
+  комментарии: сессии живут в upstream JSONL (`SessionManager`),
+  mirror — через `SessionColdSyncService`.
 
 ### Removed
 

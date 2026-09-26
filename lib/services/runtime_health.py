@@ -127,6 +127,23 @@ class RuntimeHealth:
     def status(self) -> HealthStatus:
         return "ALIVE" if self.is_alive() else "DEAD"
 
+    def get_stats(self) -> dict[str, Any]:
+        """Агрегированные operational stats.
+
+        Включает базовый liveness (``started_at``, ``uptime_seconds``).
+        Расширения (``session_cold_sync``, ``llm_observer``,
+        ``pool_*``) добавляются в ``gateway.py`` через композицию —
+        см. design D-Pool.6 и D20.
+        """
+        uptime: float | None = None
+        if self._started_at is not None and not self._stopped:
+            uptime = max(0.0, _now() - self._started_at)
+        return {
+            "started_at": self._started_at,
+            "uptime_seconds": uptime,
+            "stopped": self._stopped,
+        }
+
 
 class RuntimeReadiness:
     """Readiness-проверка зависимостей.

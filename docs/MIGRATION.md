@@ -6,7 +6,88 @@
 
 ---
 
-## v2.5.2 → v2.5.3 (текущая) — Профили конфигурации (prod / test)
+## v3.x.x — Storage hybridization (upstream SessionManager + cold PG mirror + LLMUsageStore)
+
+⚠️ **Breaking change** в архитектуре хранения сессий и LLM usage:
+
+- Hot-path запись/чтение сессий — теперь через upstream
+  `nanobot.session.manager.SessionManager` (JSONL),
+  `PGSessionManager` стал compatibility layer (см.
+  [docs/architecture/storage-layers.md](architecture/storage-layers.md)).
+- PostgreSQL остаётся как **cold-storage mirror** через
+  фоновый `SessionColdSyncService` (см.
+  [docs/architecture/storage-layers.md](architecture/storage-layers.md)).
+- LLM usage теперь идёт в upstream `LLMUsageStore` (SQLite WAL)
+  через observer-pipeline (см.
+  [docs/architecture/usage-tracking.md](architecture/usage-tracking.md));
+  `DbLoggingService` больше НЕ пишет `event_type="llm_usage"`.
+
+**Автоматические изменения** (ничего делать не нужно для greenfield):
+
+- Добавлен `SessionColdSyncService` в
+  `lib/services/session_cold_sync_service.py` — фоновый daemon-поток
+  с per-transaction advisory lock, батчами по 50 сессий.
+- Добавлен `lib/services/llm_usage_store_factory.py` — фабрика
+  `LLMUsageStore` с дефолтом
+  `<get_runtime_subdir("usage")>/usage.db`.
+- Добавлен `lib/services/llm_observer.py` —
+  `wrap_provider_snapshot_loader` подключает observer-pipeline.
+- `PGSessionManager` теперь — тонкий compatibility layer
+  (hot-path → `super()`); никаких прямых `INSERT/UPDATE` в
+  `agent_session_meta` / `agent_session_messages`.
+- Добавлены секции `gateway.usage_store.*` и
+  `gateway.session_cold_sync.*` в `project.json`.
+- Новые contract tests: `tests/contract/test_session_manager_api.py`,
+  `tests/contract/test_usage_store_api.py`,
+  `tests/contract/test_llm_observer_api.py`.
+- Архитектурный гард `tests/test_storage_hybridization.py` ловит
+  прямой SQL в `agent_session_*` и создание новых psycopg2-пулов.
+
+**Ручные действия** (ОБЯЗАТЕЛЬНО для проектов с историческими сессиями):
+
+1. **Миграция исторических PG-сессий в JSONL (до deploy).**
+   Если в вашем проекте в `agent_session_meta` /
+   `agent_session_messages` есть исторические сессии, написанные
+   старой версией `PGSessionManager` — перенесите их в upstream
+   JSONL отдельным скриптом **до** deploy
+   `storage-hybridization`. Без этого:
+
+   - история пользователей будет потеряна (sync удалит PG-строки
+     без upstream-двойника первым же циклом);
+   - UI покажет пустую историю для этих сессий.
+
+   Миграционный скрипт вне scope этого change; см. обсуждение в
+   [openspec/changes/storage-hybridization/proposal.md](../openspec/changes/storage-hybridization/proposal.md).
+
+2. **Передача DSN в pool.** Убедитесь, что `channels.postgres.dsn`
+   настроен — иначе `SessionColdSyncService` не запустится (см.
+   `gateway.session_cold_sync.enabled=true` дефолт).
+
+3. **Для multi-instance deploy**: `pg_try_advisory_xact_lock`
+   автоматически делает leader-election; никакой внешней
+   координации не требуется. Если хотите отключить sync на
+   конкретной реплике (по политике) — установите
+   `gateway.session_cold_sync.enabled=false`.
+
+**Rollback**: `git revert <commit-hash>` откатывает все изменения;
+PG-таблицы `agent_session_meta` / `agent_session_messages`
+остаются нетронутыми (sync-сервис только зеркалирует upstream,
+не удаляет PG-таблицу). SQLite-файлы
+`<get_runtime_subdir("usage")>/usage.db` также остаются
+(additive, не destructive).
+
+Если что-то пошло совсем не так (например, observer-pipeline ломает
+LLM-вызовы в production):
+
+1. `git revert <commit-hash>`;
+2. перезапустить gateway;
+3. LLM-вызовы восстановятся, `LLMUsageStore` отключится
+   (без observer нет записей);
+4. сессии останутся в JSONL (upstream hot path не трогали).
+
+---
+
+## v2.5.2 → v2.5.3 — Профили конфигурации (prod / test)
 
 ⚠️ **Breaking change** в порядке запуска: `python gateway.py` без флагов
 теперь стартует в **test-режиме** (раньше — в проде). Все prod-деплои

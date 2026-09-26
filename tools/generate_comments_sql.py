@@ -128,8 +128,9 @@ vector_index_store = {
 # 6. session_*
 session = {
     "public.agent_session_meta": (
-        "Метаданные сессий nanobot. Заменяет JSONL-файлы в workspace/sessions/. "
-        "Управляется PGSessionManager (lib/session/pg_session_manager.py). "
+        "Метаданные сессий nanobot. Cold-storage mirror upstream JSONL-стора "
+        "SessionManager (storage-hybridization). Управляется "
+        "SessionColdSyncService (lib/services/session_cold_sync_service.py). "
         "Таблица агента (префикс agent_).",
         {
             "session_key": 'PK — уникальный ключ сессии (например, "telegram:12345").',

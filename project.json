@@ -396,6 +396,19 @@
       "reconnect_backoff_sec": 1.0,
       "reconnect_backoff_max_sec": 60.0
     },
+    //  usage_store.* — параметры upstream LLMUsageStore (metadata-only LLM usage).
+    //  Дефолтный путь — <get_runtime_subdir("usage")>/usage.db.
+    //  enabled=false отключает observer (graceful degradation).
+    "usage_store": {
+      "enabled": true
+    },
+    //  session_cold_sync.* — фоновый mirror upstream JSONL → PG.
+    //  enabled=false отключает sync (escape hatch для multi-instance).
+    "session_cold_sync": {
+      "enabled": true,
+      "sync_interval_sec": 30.0,
+      "batch_size": 50
+    },
     //  vector.* — общая runtime-инфраструктура эмбеддингов и индексов.
     //    Какие индексы строить и из каких source-таблиц — описывается
     //    в index.indexes (см. ниже). PG-реестр public.agent_vector_index_config

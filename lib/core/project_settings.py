@@ -38,6 +38,8 @@ __all__ = [
     "VectorIndexEntry",
     "GatewaySettings",
     "VectorInfrastructureSettings",
+    "UsageStoreSettings",
+    "SessionColdSyncSettings",
     "validate_project_settings",
 ]
 
@@ -123,6 +125,32 @@ class HeartbeatSettings(_StrictOptional):
     intervalS: int | None = Field(default=None, gt=0)
 
 
+class UsageStoreSettings(_StrictOptional):
+    """Параметры upstream ``LLMUsageStore`` (``gateway.usage_store.*``).
+
+    ``sqlite_path`` — путь к SQLite-файлу (по умолчанию —
+    ``<get_runtime_subdir("usage")>/usage.db``). ``enabled=False``
+    отключает запись LLM-usage (graceful degradation).
+
+    См. спеку ``openspec/specs/storage/usage-store/spec.md``.
+    """
+
+    sqlite_path: str | None = None
+    enabled: bool | None = True
+
+
+class SessionColdSyncSettings(_StrictOptional):
+    """Параметры ``SessionColdSyncService`` (``gateway.session_cold_sync.*``).
+
+    Cold-storage mirror upstream JSONL → PG. Все ключи опциональны.
+    См. спеку ``openspec/specs/storage/session-hybridization/spec.md``.
+    """
+
+    enabled: bool | None = True
+    sync_interval_sec: float | None = Field(default=None, gt=0)
+    batch_size: int | None = Field(default=None, gt=0)
+
+
 class GatewaySettings(_StrictOptional):
     print_llm_calls: bool | None = None
     print_worker_activity: bool | None = None
@@ -135,6 +163,8 @@ class GatewaySettings(_StrictOptional):
     heartbeat: HeartbeatSettings | None = None
     sync: SyncSettings | None = None
     cache: CacheSettings | None = None
+    usage_store: UsageStoreSettings | None = None
+    session_cold_sync: SessionColdSyncSettings | None = None
 
     @model_validator(mode="before")
     @classmethod

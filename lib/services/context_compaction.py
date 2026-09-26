@@ -30,7 +30,8 @@ loguru INFO, опциональный Rich-вывод в терминал gatewa
 
 Заметка в ``agent_conversation_messages`` видна в UI-чате (Streamlit),
 но НЕ попадает в контекст промпта: контекст агента строится из
-``PGSessionManager`` (``agent_session_messages``), а таблица обмена —
+upstream JSONL-стора ``SessionManager`` (mirror в PG через
+``SessionColdSyncService``), а таблица обмена —
 транспорт показа сообщений.
 
 Импортируется без nanobot: тяжёлые зависимости резолвятся лениво.
@@ -521,7 +522,8 @@ class ContextCompactionService:
         ``streamlit:<chat_id>`` — это единственные каналы, у которых
         есть таблица обмена. Для прочих префиксов (например, ``cli:...``)
         — выходим без записи: история диалога CLI живёт в REPL-выводе
-        и ``PGSessionManager`` (``agent_session_messages``).
+        и upstream JSONL-сторе ``SessionManager`` (mirror в PG через
+        ``SessionColdSyncService``).
         """
         try:
             prefix, _, chat_id = (session_key + ":").partition(":")
