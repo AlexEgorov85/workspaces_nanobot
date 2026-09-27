@@ -392,6 +392,16 @@ class ApplicationContext:
         # первой задаче, но пул уже создан и подхватил pool-конфиг).
         _start_db_pool()
 
+        # Pre-startup проверка наличия обязательных runtime-таблиц
+        # (6 имён из SETTINGS["channels"]["postgres"] +
+        # SETTINGS["logging"]["db"]). При отсутствии любой — выброс
+        # SchemaValidationError (наследник ConfigurationError), который
+        # ловится в gateway.main() / cli_agent.main() → exit 2 + stderr.
+        # Без этой проверки gateway стартует, а сервисы падают уже
+        # на первой INSERT/SELECT в несуществующие таблицы.
+        # См. openspec/specs/runtime/startup-schema-validation.
+        self._validate_runtime_schema()
+
         # Подписчик на runtime-события nanobot 0.3.5.
         # Регистрируется ПОСЛЕ apply_all (если он активен) и ДО старта каналов,
         # чтобы seed лимита окна/модели + метрики оборота были доступны
@@ -509,6 +519,60 @@ class ApplicationContext:
         if self.runtime_health is not None:
             self.runtime_health.mark_stopped()
         self._started = False
+
+    def _validate_runtime_schema(self) -> None:
+        """Pre-startup проверка наличия обязательных runtime-таблиц.
+
+        Вызывается из ``start()`` сразу после ``_start_db_pool()`` и
+        до подъёма каналов/``db_logging_service``/``sync_service``.
+        Имена таблиц берутся из ``self.settings`` (6 ключей:
+        ``channels.postgres.{table_name,messages_table,meta_table,
+        claims_table}`` + ``logging.db.{table_name,question_runs_table}``)
+        — никаких литералов в коде.
+
+        При отсутствии любой таблицы — ``SchemaValidationError``
+        (наследник ``ConfigurationError``). Покрывается
+        ``gateway.main()`` / ``cli_agent.main()`` startup-boundary →
+        ``exit 2`` + ``stderr``.
+
+        Опциональный gate ``gateway.startup.schema_validation.enabled``
+        (``True`` по умолчанию) позволяет временно пропустить
+        проверку (например, при аварийном деплое).
+
+        См. ``openspec/specs/runtime/startup-schema-validation``.
+        """
+        try:
+            settings = self.settings or {}
+        except Exception:
+            settings = {}
+        gateway_cfg = settings.get("gateway") or {}
+        startup_cfg = gateway_cfg.get("startup") or {}
+        schema_cfg = startup_cfg.get("schema_validation") or {}
+        enabled = schema_cfg.get("enabled", True)
+        timeout_sec = float(schema_cfg.get("timeout_sec", 5.0))
+        if not enabled:
+            logger.warning(
+                "startup schema validation is disabled "
+                "(gateway.startup.schema_validation.enabled=false)"
+            )
+            return
+        try:
+            from utils.db import fetch as _db_fetch
+            from lib.services.schema_validation import SchemaValidationService
+        except Exception as exc:
+            # Если зависимости не загрузились — это серьёзная проблема,
+            # но не блокируем startup (раньше без этой проверки gateway
+            # всё равно бы упал позже). Логируем warning и пропускаем.
+            logger.warning("startup schema validation skipped: %s", exc)
+            return
+        # ``SchemaValidationService.validate`` бросает ``SchemaValidationError``
+        # (наследник ``ConfigurationError``) при missing — пусть поднимется
+        # до ``gateway.main()`` / ``cli_agent.main()``.
+        SchemaValidationService.validate(
+            settings,
+            fetch=_db_fetch,
+            timeout_sec=timeout_sec,
+        )
 
 
 # ----------------------------------------------------------------------

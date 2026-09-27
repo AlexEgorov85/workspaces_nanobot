@@ -8,12 +8,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- `lib/services/schema_validation.py` — `SchemaValidationService`, `MissingTable`, `SchemaValidationError` (наследник `ConfigurationError`). Pre-startup проверка наличия 6 runtime-таблиц (`channels.postgres.{table_name,messages_table,meta_table,claims_table}` + `logging.db.{table_name,question_runs_table}`) через один SELECT к `information_schema.tables`. Имена таблиц резолвятся из merged `SETTINGS` — **не зашиты в коде**. Спека: `openspec/specs/runtime/startup-schema-validation`.
+- Секция `gateway.startup.schema_validation.*` в `project.json`: `enabled: bool = true`, `timeout_sec: float = 5.0` (диапазон `0.1 ≤ value ≤ 60.0`). Позволяет временно отключить pre-startup проверку без правки кода.
+
 ### Changed
 
+- `ApplicationContext.start()`: после `_start_db_pool()` и до `RuntimeEventsSubscriber.start()` добавлен вызов `_validate_runtime_schema()`. При отсутствии любой из 6 runtime-таблиц — старт блокируется `SchemaValidationError` → `exit 2` + `stderr` через `gateway.main()` / `cli_agent.main()`. **BREAKING** для развёртываний, где таблицы не созданы — нужно предварительно применить `tools/migrate.py --apply` (для prod) или `tools/apply_test_profile_tables.py` (для test).
 - Дефолтный текст fallback-ответа при internal-ошибке (`RuntimePatcher._DEFAULT_INTERNAL_ERROR_TEXT`): `"Произошла внутренняя ошибка. Попробуйте позже."` → `"Не справился с этим запросом. Попробуйте, пожалуйста, ещё раз или переформулируйте вопрос."` — мягче, дружелюбнее, предлагает действие.
 
 ### Fixed
 
+- `lib/services/schema_validation.py`: сервис не разворачивал `_LazySettings` proxy при извлечении 6 runtime-имён из `SETTINGS` — `isinstance(proxy, dict) == False`, поэтому обход по путям падал на первом уровне и `SchemaValidationService.expected_table_names()` поднимала `_MissingConfigKeys` со списком ВСЕХ 6 ключей (`<settings>.channels.postgres.table_name` …), блокируя старт gateway **даже когда таблицы есть в БД**. Добавлен `_unwrap_settings()` (тот же паттерн, что в `config.require_setting` / `config.get_setting`); формат сообщения для `_MissingConfigKeys` переработан — `MissingTable` тут неуместен (ключ конфига ≠ таблица БД).
 - `RuntimePatcher.patch_turn_delivery_fail`: исправлена отправка двойного outbound — пользователь получал и fallback-ответ, и upstream-литерал `"Sorry, I encountered an error."`. Теперь на время вызова оригинального `fail()` атрибут `self.bus` подменяется на per-instance прокси `_OutboundSilencer`, который подавляет `publish_outbound`, но пропускает остальные методы bus и сохраняет `turn_completed` runtime-event (`openspec/changes/fix-error-fallback-double-outbound`).
 - `RuntimePatcher.patch_turn_delivery_fail`: payload `turn_failed` в `agent_gateway_logs` дополнен полями `exception_type`, `exception_message`, `exception_available`, `sender_id`, `agent_id`. Захват исключения через `sys.exception()` (вызов идёт изнутри `except`-блока в `loop.py:1480-1482`); `session_key` теперь берётся из `TurnDelivery.session_key` (раньше всегда был `null` — `lifecycle_message.session_key` не существует), идентификатор пользователя — из `lifecycle_message.sender_id` (раньше `null` — `lifecycle_message.user_id` не существует).
 - `RuntimePatcher.apply_all`: `patch_turn_delivery_fail` теперь получает `agent_id`, резолвленный из `config.agents.defaults.name` (с fallback на `config.default_agent` / `agent.name` / `None`).
