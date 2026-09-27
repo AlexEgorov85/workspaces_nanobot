@@ -78,6 +78,17 @@ def _resolve_media_path(media_paths: list[str], basename: str) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Error fallback constants (см. openspec/specs/runtime/error-fallback).
+# Hardcoded default для случаев, когда ``gateway.error_messages.internal_error``
+# в project.json не задан или ``settings`` недоступен (юнит-тесты без
+# ApplicationContext). Изменение этих констант требует согласования со
+# спекой — это пользовательский контракт.
+# ---------------------------------------------------------------------------
+_DEFAULT_INTERNAL_ERROR_TEXT: str = "Произошла внутренняя ошибка. Попробуйте позже."
+_DEFAULT_LOG_TO_DB: bool = True
+
+
 class ContextWindowNotSeededError(RuntimeError):
     """``DatabaseLoggingContextBridge`` не засеян для ``session_key``.
 
@@ -100,36 +111,74 @@ def _attach_context_window(agent: Any, session_key: str, result: Any) -> None:
     оборота (свежий по-итерационный usage из моста ``DatabaseLoggingHook``)
     поделённый на лимит окна модели.
 
-    Bridge MUST быть засеян к моменту первого outbound'а — это
-    контракт ``RuntimeEventsSubscriber`` (см. design.md D5
-    opencode change post-0.3.5-patches-cleanup):
-    ``TurnRuntimeAdmitted`` подписка заполняет ``limit``/``model``
-    до первой итерации. ``usage`` пишется через
-    ``_store_iteration_usage`` в ``DatabaseLoggingHook.after_iteration``.
+    Источник истины — ``DatabaseLoggingContextBridge``, засевается
+    через подписку на ``TurnRuntimeAdmitted`` в
+    ``RuntimeEventsSubscriber.start()`` (см. design.md D5 opencode
+    change post-0.3.5-patches-cleanup):
 
-    Если мост пуст — поднимается ``ContextWindowNotSeededError``
-    (явная ошибка вместо тихого fallback на ``agent._last_usage``,
-    который мог завышать занятость и скрывать дефекты подписки).
+    * Bridge MUST содержать ``limit``/``model`` к моменту первого
+      outbound'а (подписка заполняет через
+      ``seed_context_window(session_key, limit, model)``).
+    * ``usage`` пишется через ``_store_iteration_usage`` в
+      ``DatabaseLoggingHook.after_iteration``.
+
+    ``agent.context_window_tokens`` и ``agent.model`` — fallback
+    (для unit-тестов с MagicMock, где bridge может быть засеян,
+    но атрибуты агента не установлены). Если bridge пуст И атрибуты
+    пусты — поднимается ``ContextWindowNotSeededError`` (явная
+    ошибка вместо тихого fallback на ``agent._last_usage``, который
+    скрывал дефекты подписки).
 
     Готовый блок дополнительно кладём в мост: канал читает его в фоновом
     цикле живого обновления и пишет в processing-строку ТОЛЬКО блок (без
     лимита — лимит знает только агент).
     """
     from lib.hooks.database_logging_hook import (
+        _CONTEXT_BRIDGE,
+        _CONTEXT_BRIDGE_LOCK,
         _store_context_window,
         get_iteration_usage,
     )
     usage = get_iteration_usage(session_key)
-    limit = getattr(agent, "context_window_tokens", None) or 0
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-        # Bridge не засеян (нет RuntimeEventsSubscriber или подписки
-        # не сработали) — это явная ошибка, не тихий used=0.
+
+    # Лимит: bridge → agent. Если bridge засеян (подписка работает),
+    # limit берётся из bridge. Если нет — fallback на
+    # agent.context_window_tokens (для unit-тестов с MagicMock).
+    bridge_limit = 0
+    bridge_model = ""
+    with _CONTEXT_BRIDGE_LOCK:
+        bridge_entry = dict(_CONTEXT_BRIDGE.get(session_key) or {})
+    if isinstance(bridge_entry, dict):
+        bridge_limit = int(bridge_entry.get("limit") or 0)
+        bridge_model = (
+            bridge_entry.get("model", "")
+            if isinstance(bridge_entry.get("model"), str)
+            else ""
+        )
+
+    agent_limit = getattr(agent, "context_window_tokens", None) or 0
+    if isinstance(agent_limit, bool) or not isinstance(agent_limit, int):
+        agent_limit = 0
+
+    limit = bridge_limit or agent_limit
+    model = bridge_model or (getattr(agent, "model", None) or "")
+    if isinstance(model, str) is False:
+        model = ""
+
+    if limit <= 0:
+        # Ни bridge, ни agent не дают лимит — это явная ошибка,
+        # не тихий used=0.
         raise ContextWindowNotSeededError(
             f"context_window not seeded for session_key={session_key!r}; "
             f"RuntimeEventsSubscriber.start() required before "
             f"_attach_context_window"
         )
-    raw_used = (usage or {}).get("prompt_tokens") if isinstance(usage, dict) else None
+
+    raw_used = (
+        (usage or {}).get("prompt_tokens")
+        if isinstance(usage, dict)
+        else None
+    )
     try:
         used = int(raw_used or 0)
     except (TypeError, ValueError):
@@ -140,7 +189,6 @@ def _attach_context_window(agent: Any, session_key: str, result: Any) -> None:
         # клиенту «пока ничего не занято». Bridge засеян (limit > 0),
         # поэтому подписка работает.
         used = 0
-    model = getattr(agent, "model", None)
     block = {
         "used": used,
         "limit": int(limit),
@@ -522,6 +570,8 @@ class RuntimePatcher:
         self._record(report, "tool_limits", self.patch_tool_limits(settings))
         self._record(report, "assemble_outbound", self.patch_assemble_outbound(
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
+        self._record(report, "turn_delivery_fail", self.patch_turn_delivery_fail(
+            settings, db_logging_service))
         self._record(report, "async_save", self.patch_async_session_saves(agent))
         self._record(report, "session_dir_watch", self.patch_session_dir_watch(
             agent, workspace_dir))
@@ -1484,6 +1534,196 @@ class RuntimePatcher:
 
         agent._assemble_outbound = _wrap
         return True, "agent._assemble_outbound patched"
+
+    # ------------------------------------------------------------------
+    # Патч 2b: TurnDelivery.fail → заготовленный fallback вместо
+    # upstream-литерала "Sorry, I encountered an error."
+    # ------------------------------------------------------------------
+
+    def patch_turn_delivery_fail(
+        self,
+        settings: Any,
+        db_logging_service: Any = None,
+        agent_id: str | None = None,
+    ) -> tuple[bool, str]:
+        """Заменить ``TurnDelivery.fail`` обёрткой с заготовленным текстом.
+
+        Upstream-``nanobot.agent.turn_delivery.TurnDelivery.fail``
+        (``site-packages/.../turn_delivery.py:336-353``) при любом
+        ``Exception`` в ``AgentLoop._process_message`` отправляет
+        пользователю хардкод ``"Sorry, I encountered an error."``.
+        Патч подменяет метод класса обёрткой, которая:
+
+        1. читает ``gateway.error_messages.internal_error`` из SETTINGS
+           (default — ``_DEFAULT_INTERNAL_ERROR_TEXT``);
+        2. формирует ``OutboundMessage`` с ``content=internal_error``,
+           ``metadata._error_kind="internal"`` и оригинальным
+           ``channel/chat_id/metadata`` из ``self.lifecycle_message``;
+        3. при ``log_to_db=True`` (default) и доступном
+           ``db_logging_service`` пишет в ``agent_gateway_logs`` через
+           ``try_log_event`` (``event_type="turn_failed"``, payload c типом
+           и текстом исключения) — без утечки деталей пользователю;
+        4. вызывает оригинальный ``TurnDelivery.fail(self, publish_completion=...)``
+           для финализации ``turn_completed`` event (run-time event publisher).
+
+        ``asyncio.CancelledError`` НЕ проходит через ``fail()`` — в
+        upstream он обрабатывается отдельной веткой ``except`` в
+        ``_process_message`` и зовёт ``delivery.abort_stream()``. Патч
+        НЕ вмешивается в эту ветку (перехват именно на ``fail``).
+
+        Args:
+            settings: ``SETTINGS`` (или ``AttrDict``-проекция ``.gateway.*``).
+                ``None`` → default-текст, ``log_to_db=True``.
+            db_logging_service: ``DbLoggingService`` или ``None``. При
+                ``None`` — запись в БД пропускается (fail-open).
+            agent_id: идентификатор агента для колонки ``agent_id`` в
+                ``agent_gateway_logs`` payload (опционально).
+
+        Returns:
+            ``(True, "TurnDelivery.fail patched")`` при успехе;
+            ``(False, <причина>)`` если ``TurnDelivery`` модуль не
+            загружен (битый nanobot / нет в ``sys.modules``).
+        """
+        td_module = _getloaded("nanobot.agent.turn_delivery")
+        if td_module is None:
+            return False, "TurnDelivery module not loaded"
+
+        internal_error = _get(
+            settings, "gateway", "error_messages", "internal_error",
+            default=None,
+        )
+        if not isinstance(internal_error, str) or not internal_error:
+            internal_error = _DEFAULT_INTERNAL_ERROR_TEXT
+
+        log_to_db = _get(
+            settings, "gateway", "error_messages", "log_to_db", default=None,
+        )
+        if not isinstance(log_to_db, bool):
+            log_to_db = _DEFAULT_LOG_TO_DB
+
+        try:
+            TurnDelivery = getattr(td_module, "TurnDelivery")
+        except AttributeError:
+            return False, "TurnDelivery class not found in module"
+        original_fail = getattr(TurnDelivery, "fail", None)
+        if original_fail is None:
+            return False, "TurnDelivery.fail is missing"
+
+        async def _wrap_fail(self, *, publish_completion: bool) -> None:
+            # Локализация ссылок: даже если _DEFAULT_LOG_TO_DB/log_to_db
+            # изменятся после применения патча (теоретически), обёртка
+            # зафиксировала их значения.
+            from lib.services.db_logging_service import LogEvent, try_log_event
+
+            lifecycle = getattr(self, "lifecycle_message", None)
+            channel = getattr(lifecycle, "channel", None) if lifecycle else None
+            chat_id = getattr(lifecycle, "chat_id", None) if lifecycle else None
+            base_metadata = (
+                dict(getattr(lifecycle, "metadata", None) or {})
+                if lifecycle is not None
+                else {}
+            )
+            session_key = (
+                getattr(lifecycle, "session_key", None)
+                if lifecycle is not None
+                else None
+            )
+            user_id = (
+                getattr(lifecycle, "user_id", None)
+                if lifecycle is not None
+                else None
+            )
+
+            # Снимок ``self._failure_error_kind`` нужен для
+            # observability: пишем тип исключения, если upstream успел
+            # его зафиксировать. ``_failure_error_kind`` — приватное поле
+            # upstream-класса, может отсутствовать в других форках; резолв
+            # через getattr.
+            failure_error_kind = getattr(self, "_failure_error_kind", None)
+
+            outbound_metadata = dict(base_metadata)
+            outbound_metadata["_error_kind"] = "internal"
+            outbound_metadata["_final_turn"] = True
+
+            try:
+                from nanobot.bus.events import OutboundMessage
+            except Exception:
+                OutboundMessage = None  # type: ignore[assignment]
+
+            if OutboundMessage is not None:
+                try:
+                    outbound = OutboundMessage(
+                        channel=channel,
+                        chat_id=chat_id,
+                        content=internal_error,
+                        metadata=outbound_metadata,
+                    )
+                    # Пишем в bus напрямую (как делает оригинальный fail).
+                    bus = getattr(self, "bus", None)
+                    publish_outbound = getattr(bus, "publish_outbound", None)
+                    if callable(publish_outbound):
+                        publish_outbound(outbound)
+                except Exception as exc:
+                    logger.warning(
+                        "TurnDelivery.fail wrapper: failed to publish "
+                        "fallback outbound: {}",
+                        exc,
+                    )
+
+            # Запись в agent_gateway_logs через defensive helper
+            # (try_log_event сам обрабатывает svc=None / not running /
+            # log_event exception). Fail-open: при любом сбое БД —
+            # просто WARNING, оборот продолжается.
+            if log_to_db and db_logging_service is not None:
+                try:
+                    summary_text = (
+                        str(failure_error_kind)
+                        if failure_error_kind
+                        else "turn_failed"
+                    )
+                    log_event = LogEvent(
+                        event_type="turn_failed",
+                        level="ERROR",
+                        session_id=(
+                            session_key
+                            if isinstance(session_key, str)
+                            else None
+                        ),
+                        channel=channel,
+                        actor=None,
+                        summary=summary_text,
+                        payload={
+                            "kind": "internal",
+                            "failure_error_kind": failure_error_kind,
+                            "agent_id": agent_id,
+                        },
+                        metadata={
+                            "fallback_text_len": len(internal_error),
+                            "publish_completion": bool(publish_completion),
+                        },
+                        user_id=user_id if isinstance(user_id, str) else None,
+                    )
+                    try_log_event(
+                        db_logging_service,
+                        log_event,
+                        producer="runtime_patcher",
+                        event_type="turn_failed",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "TurnDelivery.fail wrapper: failed to build "
+                        "log_event: {}",
+                        exc,
+                    )
+
+            # Передаём управление оригинальному fail — он публикует
+            # turn_completed event (failure_kind="internal").
+            result = original_fail(self, publish_completion=publish_completion)
+            if asyncio.iscoroutine(result):
+                await result
+
+        TurnDelivery.fail = _wrap_fail
+        return True, "TurnDelivery.fail patched"
 
     # ------------------------------------------------------------------
     # Патч 3: SubagentManager._SubagentHook → БД-логирование подагентов

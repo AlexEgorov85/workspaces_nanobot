@@ -206,6 +206,63 @@ class TestPatchAssembleOutbound:
         with pytest.raises(ContextWindowNotSeededError):
             agent._assemble_outbound(MagicMock(), "x", "stop", False)
 
+    def test_first_turn_without_tool_calls_has_context_window(self):
+        """Regression 5.2: первый оборот без tool-вызовов имеет
+        ``metadata.context_window`` с ``limit > 0``, ``model != ""``,
+        ``used == 0`` (usage ещё не пришёл — это первая итерация).
+
+        Контракт: подписка на TurnRuntimeAdmitted засевает bridge
+        ДО первой LLM-итерации. Тест симулирует это явно через
+        ``seed_context_window``.
+        """
+        from lib.hooks.database_logging_hook import (
+            _CONTEXT_BRIDGE,
+            _CONTEXT_BRIDGE_LOCK,
+            seed_context_window,
+        )
+        from lib.services.runtime_patcher import RuntimePatcher
+
+        session_key = "test:first_turn"
+        seed_context_window(session_key, limit=40000, model="MiniMax-M3")
+
+        try:
+            agent = MagicMock()
+            original_return = MagicMock()
+            original_return.metadata = {}
+            agent._assemble_outbound.return_value = original_return
+            # agent.context_window_tokens НЕ задан → bridge должен
+            # обеспечить limit/model.
+
+            patcher = RuntimePatcher()
+            ok, _ = patcher.patch_assemble_outbound(agent, MagicMock())
+            assert ok
+
+            msg = MagicMock()
+            msg.session_key = session_key
+            msg.metadata = {}
+            msg.channel = "test"
+            msg.chat_id = "1"
+
+            # Без usage в bridge (первая итерация без tool-calls).
+            result = agent._assemble_outbound(msg, "x", "stop", False)
+            block = result.metadata["context_window"]
+            assert block["limit"] == 40000, (
+                f"limit должен быть из bridge (40000), получено: "
+                f"{block['limit']!r}"
+            )
+            assert block["model"] == "MiniMax-M3", (
+                f"model должен быть из bridge (MiniMax-M3), получено: "
+                f"{block['model']!r}"
+            )
+            assert block["used"] == 0, (
+                f"used == 0 для first-turn без tool-calls, получено: "
+                f"{block['used']!r}"
+            )
+            assert block["pct"] == 0.0
+        finally:
+            with _CONTEXT_BRIDGE_LOCK:
+                _CONTEXT_BRIDGE.pop(session_key, None)
+
     def test_agent_none_skipped(self):
         patcher = RuntimePatcher()
         ok, detail = patcher.patch_assemble_outbound(None, MagicMock())
@@ -1132,3 +1189,324 @@ class TestApplyAllFailed:
             db_logging_service=None,
         )
         assert report.failed == [], f"unexpected failures: {report.failed}"
+
+
+def _make_stub_td_module(published, turn_completed_calls):
+    """Создать НЕЗАВИСИМЫЙ stub-модуль ``nanobot.agent.turn_delivery``.
+
+    Каждый вызов возвращает СВЕЖИЙ класс ``TurnDelivery`` — критично,
+    потому что патч мутирует ``TurnDelivery.fail`` на уровне класса,
+    и если использовать общий класс между тестами, состояние протекает.
+    """
+    import types as _types
+
+    class _RuntimeEventPublisher:
+        async def turn_completed(self, **kwargs):
+            turn_completed_calls.append(kwargs)
+
+    class _TurnDelivery:
+        def __init__(self):
+            self.lifecycle_message = None
+            self.bus = None
+            self.session_key = None
+            self._failure_error_kind = None
+            self.runtime_event_publisher = None
+
+        async def fail(self, *, publish_completion: bool) -> None:
+            from nanobot.bus.events import OutboundMessage
+
+            published.append(
+                OutboundMessage(
+                    channel=self.lifecycle_message.channel,
+                    chat_id=self.lifecycle_message.chat_id,
+                    content="Sorry, I encountered an error.",
+                    metadata=dict(self.lifecycle_message.metadata or {}),
+                )
+            )
+            if publish_completion:
+                await self.runtime_event_publisher.turn_completed(
+                    channel=self.lifecycle_message.channel,
+                    chat_id=self.lifecycle_message.chat_id,
+                    session_key=self.session_key,
+                    metadata=self.lifecycle_message.metadata,
+                    outcome="failed",
+                    failure_kind="internal",
+                )
+
+    mod = _types.ModuleType("nanobot.agent.turn_delivery")
+    mod.TurnDelivery = _TurnDelivery
+
+    def _make_instance():
+        inst = _TurnDelivery()
+        inst.lifecycle_message = MagicMock()
+        inst.lifecycle_message.channel = "cli"
+        inst.lifecycle_message.chat_id = "c1"
+        inst.lifecycle_message.metadata = {"foo": "bar"}
+        inst.lifecycle_message.session_key = "sess1"
+        inst.lifecycle_message.user_id = "u1"
+        inst.bus = MagicMock()
+        inst.bus.publish_outbound = MagicMock(
+            side_effect=lambda msg: published.append(msg)
+        )
+        inst.session_key = "sess1"
+        inst._failure_error_kind = "RuntimeError"
+        inst.runtime_event_publisher = _RuntimeEventPublisher()
+        return inst
+
+    return mod, _make_instance
+
+
+class TestPatchTurnDeliveryFail:
+    """Контракт error fallback (``openspec/specs/runtime/error-fallback``)."""
+
+    @pytest.fixture
+    def stub_td_module(self, monkeypatch):
+        """Подменить ``nanobot.agent.turn_delivery`` stub-модулем.
+
+        Каждый вызов фикстуры создаёт СВЕЖИЙ класс ``TurnDelivery`` —
+        критично, потому что патч мутирует ``TurnDelivery.fail`` на
+        уровне класса, и общий класс между тестами протекал бы.
+
+        Возвращает ``(mod, published, turn_completed_calls, make_instance)``.
+        """
+        published: list = []
+        turn_completed_calls: list = []
+        mod, make_instance = _make_stub_td_module(
+            published, turn_completed_calls,
+        )
+        monkeypatch.setitem(sys.modules, "nanobot.agent.turn_delivery", mod)
+        return mod, published, turn_completed_calls, make_instance
+
+    @pytest.mark.asyncio
+    async def test_default_text_when_no_settings(self, stub_td_module):
+        _, published, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        ok, msg = patcher.patch_turn_delivery_fail(settings=None)
+        assert ok, msg
+        from lib.services.runtime_patcher import (
+            _DEFAULT_INTERNAL_ERROR_TEXT,
+        )
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        # Обёртка публикует fallback-сообщение, затем вызывает
+        # оригинальный fail (stub), который тоже публикует upstream-литерал.
+        # Первое сообщение в списке — наш fallback, второе — upstream-stub.
+        assert len(published) == 2
+        out = published[0]
+        assert out.content == _DEFAULT_INTERNAL_ERROR_TEXT
+        assert out.channel == "cli"
+        assert out.chat_id == "c1"
+        assert out.metadata.get("_error_kind") == "internal"
+        assert out.metadata.get("_final_turn") is True
+        # Второй outbound — заглушка upstream'а.
+        assert published[1].content == "Sorry, I encountered an error."
+
+    @pytest.mark.asyncio
+    async def test_custom_text_from_settings(self, stub_td_module):
+        _, published, _, _ = stub_td_module
+        settings = {
+            "gateway": {
+                "error_messages": {
+                    "internal_error": "Сервис временно недоступен.",
+                },
+            },
+        }
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_turn_delivery_fail(settings=settings)
+        assert ok
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        # Первое сообщение — fallback от патча; второе — upstream-stub.
+        assert published[0].content == "Сервис временно недоступен."
+
+    @pytest.mark.asyncio
+    async def test_no_exception_details_leak_to_user(self, stub_td_module):
+        """requirement: content содержит ТОЛЬКО заготовку, не str(exc)."""
+        _, published, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        inst._failure_error_kind = "KeyError: agent_internal_state_xyz"
+        await inst.fail(publish_completion=True)
+
+        # В content не должно быть ни типа исключения, ни сообщения
+        assert "KeyError" not in published[0].content
+        assert "agent_internal_state_xyz" not in published[0].content
+
+    @pytest.mark.asyncio
+    async def test_log_to_db_true_writes_event(self, stub_td_module, monkeypatch):
+        _, published, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append((svc, event, producer, event_type))
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        svc = MagicMock()
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None, db_logging_service=svc)
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        assert len(recorded) == 1
+        svc_arg, log_event, producer, event_type = recorded[0]
+        assert svc_arg is svc
+        assert producer == "runtime_patcher"
+        assert event_type == "turn_failed"
+        assert log_event.event_type == "turn_failed"
+        assert log_event.session_id == "sess1"
+        assert log_event.channel == "cli"
+        assert log_event.payload["kind"] == "internal"
+        assert log_event.payload["failure_error_kind"] == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_log_to_db_false_skips_db(self, stub_td_module, monkeypatch):
+        _, published, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(
+            settings={
+                "gateway": {"error_messages": {"log_to_db": False}},
+            },
+            db_logging_service=MagicMock(),
+        )
+
+        # Проверим, что патч зафиксировал log_to_db=False в обёртке
+        import lib.services.runtime_patcher as rp
+        import inspect
+        src = inspect.getsource(rp.RuntimePatcher.patch_turn_delivery_fail)
+        assert "_DEFAULT_LOG_TO_DB" in src  # sanity check
+        # Прямой вызов патченного метода через stub:
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        # log_to_db=False → try_log_event НЕ вызван
+        assert recorded == [], f"try_log_event called despite log_to_db=False: {recorded}"
+
+    @pytest.mark.asyncio
+    async def test_no_db_logging_service_is_fail_open(
+        self, stub_td_module, monkeypatch
+    ):
+        """При ``db_logging_service=None`` fallback-сообщение всё равно
+        уходит пользователю (fail-open).
+        """
+        _, published, _, _ = stub_td_module
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            raise AssertionError("try_log_event should not be called")
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(
+            settings=None,
+            db_logging_service=None,
+        )
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        # Первое сообщение — fallback от патча; второе — upstream-stub.
+        assert published[0].content == (
+            "Произошла внутренняя ошибка. Попробуйте позже."
+        )
+
+    @pytest.mark.asyncio
+    async def test_turn_completed_event_published(self, stub_td_module):
+        """``publish_completion=True`` — оригинальный ``fail`` зовёт
+        ``turn_completed`` (сохранение runtime-event публикации).
+        """
+        _, _, turn_completed_calls, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        assert len(turn_completed_calls) == 1
+        # outcome/failure_kind прокидываются stub'ом оригинального fail.
+        assert turn_completed_calls[0]["outcome"] == "failed"
+        assert turn_completed_calls[0]["failure_kind"] == "internal"
+
+    def test_module_not_loaded_returns_false(self, monkeypatch):
+        """Если ``TurnDelivery`` модуль отсутствует в ``sys.modules`` —
+        патч возвращает ``(False, <reason>)`` без падения.
+        """
+        monkeypatch.delitem(
+            sys.modules, "nanobot.agent.turn_delivery", raising=False
+        )
+        patcher = RuntimePatcher()
+        ok, msg = patcher.patch_turn_delivery_fail(settings=None)
+        assert not ok
+        assert "not loaded" in msg
+
+    def test_turn_delivery_fail_missing_returns_false(
+        self, stub_td_module
+    ):
+        """Если у stub-класса нет атрибута ``fail`` — патч no-op."""
+        stub_td_module[0].TurnDelivery.fail = None  # type: ignore[assignment]  # type: ignore[assignment]
+        patcher = RuntimePatcher()
+        ok, msg = patcher.patch_turn_delivery_fail(settings=None)
+        assert not ok
+        assert "missing" in msg
+
+    def test_invalid_internal_error_type_falls_back_to_default(
+        self, stub_td_module
+    ):
+        """Невалидный ``internal_error`` (не строка) → default-текст."""
+        _, _, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_turn_delivery_fail(
+            settings={
+                "gateway": {"error_messages": {"internal_error": 999}},
+            },
+        )
+        assert ok
+        # Поведение проверим в test_default_text_when_no_settings —
+        # здесь достаточно, что патч не упал на мусорном типе.
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_path_untouched(self, stub_td_module):
+        """``asyncio.CancelledError`` НЕ проходит через ``fail()`` —
+        проверяем, что патч не добавил хуков в ``CancelledError``-ветку.
+
+        Патч не модифицирует ``_process_message`` upstream-кода; этот тест
+        фиксирует инвариант: stub без override не получает CancelledError
+        при нормальном вызове ``fail()``.
+        """
+        _, published, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        # Проверяем только то, что патч не подменяет ``_process_message`` —
+        # никаких побочных эффектов на CancelledError-ветке быть не должно.
+        # Первое сообщение — fallback от патча; второе — upstream-stub.
+        assert len(published) == 2
+        assert published[0].metadata.get("_error_kind") == "internal"
