@@ -127,6 +127,112 @@ derived from environment variables or implicit defaults.
   to `_initialize_settings`, not a value read from any environment
   variable
 
+### Requirement: Test-only bootstrap of SETTINGS is permitted in `tests/conftest.py` as a documented exception
+
+> **Reason for MODIFICATION:** Реализация ввела
+> `tests/conftest.py::autouse`-фикстуру `_bootstrap_config_lifecycle`
+> (коммит `a5b77b9`), которая вызывает
+> `config._initialize_settings(profile="test")` для legacy-тестов,
+> читающих `SETTINGS[...]` напрямую без явного init. Формально это
+> нарушает исходный инвариант spec «autouse-fixture для
+> `_initialize_settings` НЕ добавлен». После анализа (см.
+> `tasks.md` § Anti-patterns DEVIATION) принято решение легитимизировать
+> это как **test-only exception** с явными границами.
+
+The original invariant required that no autouse-fixture
+calls `_initialize_settings(profile)`. This modification NARROWS
+that prohibition to **production runtime code only** and
+explicitly ALLOWS a single, well-bounded autouse-fixture in
+`tests/conftest.py` with the following constraints:
+
+- **Scope:** only in `tests/conftest.py` (not in any
+  `workspace/`, `lib/`, `tools/`, `gateway.py`, `cli_agent.py`,
+  `streamlit_app.py`).
+- **Behavior:** the autouse-fixture MAY call
+  `config._initialize_settings(profile="test")` once per pytest
+  session **iff** `config.is_settings_initialized()` returns
+  `False`. If the proxy is already initialized (e.g., by an
+  earlier test that explicitly calls `_initialize_settings`),
+  the fixture SHALL be a no-op.
+- **No silent recovery:** the fixture SHALL NOT swallow
+  `ConfigurationError` raised by `_initialize_settings` for
+  reasons other than «already initialized». If whitelist
+  validation fails or any other unexpected error occurs, the
+  fixture SHALL propagate it.
+- **No fallback semantics:** the fixture is bootstrap-only.
+  Acceptance tests that explicitly verify lifecycle behavior
+  (`tests/test_profile_lifecycle.py`) and subprocess-based
+  entrypoint acceptance tests (`tests/test_gateway.py`,
+  `tests/test_cli_agent.py`, `tests/test_streamlit_app.py`)
+  MUST NOT depend on the fixture — they run in fresh
+  subprocesses and verify behavior independently.
+- **Documented intent:** `tests/conftest.py` MUST contain a
+  comment block explaining why the fixture exists, the
+  constraints above, and the reference to this requirement.
+
+#### Scenario: Autouse-fixture initializes SETTINGS once per pytest session
+
+- **WHEN** pytest collects and runs a test that reads
+  `SETTINGS["..."]` without explicitly calling
+  `_initialize_settings`
+- **AND WHEN** `config.is_settings_initialized()` returns `False`
+- **THEN** the autouse-fixture SHALL call
+  `_initialize_settings(profile="test")` before the test body runs
+- **AND THEN** `SETTINGS["profile"]` SHALL be `"test"` for the
+  duration of the test
+- **AND THEN** `_initialize_settings` SHALL NOT be called again
+  by the fixture for subsequent tests in the same session
+  (subsequent calls hit the `is_settings_initialized() == True`
+  branch and become no-ops)
+
+#### Scenario: Autouse-fixture is no-op when SETTINGS already initialized
+
+- **WHEN** a test (e.g., `test_profile_lifecycle.py::test_double_init_fails`)
+  has already called `_initialize_settings(profile="prod")`
+- **AND WHEN** a subsequent test that depends on the fixture runs
+  in the same session
+- **THEN** the autouse-fixture SHALL skip its
+  `_initialize_settings(...)` call
+- **AND THEN** `SETTINGS["profile"]` SHALL remain `"prod"`
+  (the profile is immutable post-init)
+
+#### Scenario: Legacy tests rely on autouse-fixture
+
+- **GIVEN** legacy tests that read `SETTINGS["..."]` directly
+  (e.g., `tests/test_utils_db.py`, `tests/test_config.py`,
+  `tests/test_application_context_logging.py`,
+  `tests/test_storage_hybridization_factory.py`,
+  `tests/integration/test_worker_pool_*.py`,
+  `tests/integration/test_postgres_channel_lifecycle_stress.py`)
+- **WHEN** pytest runs them without explicit
+  `_initialize_settings` in the test body
+- **THEN** the autouse-fixture SHALL provide `SETTINGS` so these
+  tests can run without modification
+- **AND THEN** the legacy tests SHALL NOT need their own
+  `_initialize_settings` call
+
+#### Scenario: Migration path to remove autouse-fixture
+
+- **WHEN** all legacy tests that read `SETTINGS[...]` directly
+  have been migrated to either: (a) explicit
+  `_initialize_settings(profile="test")` in their setup, or (b)
+  subprocess-based acceptance tests that verify behavior in a
+  fresh process
+- **THEN** the autouse-fixture in `tests/conftest.py` SHALL be
+  removed
+- **AND THEN** the original invariant
+  («autouse-fixture НЕ добавлен») SHALL be restored without
+  modification to this requirement
+- **AND THEN** this MODIFIED requirement SHALL be reverted to
+  its original wording via a new OpenSpec change
+
+> **Migration note:** at the time of this modification, ~12 test
+> files in `tests/` and `tests/integration/` directly read
+> `SETTINGS[...]` without explicit init. Migrating all of them
+> is out of scope for this change (would require touching every
+> legacy test). The autouse-fixture is the pragmatic bridge
+> until a dedicated migration change is opened.
+
 ## ADDED Requirements
 
 ### Requirement: SETTINGS construction is explicit and order-checked
