@@ -1552,6 +1552,25 @@ class RuntimePatcher:
 
             _sessions = session_manager
             _default_bus: Any = None
+            # Когда True — ``_finalize`` пропускает прямую запись
+            # ``subagent_run_finished`` в БД, потому что
+            # ``RuntimeEventsSubscriber._handle_subagent_turn_completed``
+            # уже записал событие через pub-sub. Флаг управляется
+            # через ``RuntimeEventsSubscriber.start()/stop()`` (см.
+            # design.md D4 opencode change post-0.3.5-patches-cleanup).
+            _subscriber_registered: bool = False
+
+            @classmethod
+            def set_subscriber_registered(cls, registered: bool) -> None:
+                """Отметить, что ``SubagentLoggingSubscriber`` активен.
+
+                Когда True — ``_finalize`` не пишет
+                ``subagent_run_finished`` напрямую в БД
+                (handler уже записал), оставляя только
+                ``finish_request`` (для question_runs) и
+                ``_persist_history``.
+                """
+                cls._subscriber_registered = bool(registered)
 
             @classmethod
             def set_default_bus(cls, bus: Any) -> None:
@@ -1796,6 +1815,24 @@ class RuntimePatcher:
                     self._persist_history(context)
                 except Exception:
                     pass
+                # Если подписчик активен, _finalize не пишет
+                # subagent_run_finished напрямую (handler уже записал);
+                # только close_question_run. См. design.md D4.
+                if getattr(
+                    _SubagentLoggingHook, "_subscriber_registered", False
+                ):
+                    try:
+                        self._db_hook._service.finish_request(
+                            self._session_id,
+                            status="error" if context.error else "finished",
+                            summary=(
+                                getattr(context, "final_content", "") or ""
+                            )[:200] or None,
+                            response=getattr(context, "final_content", "") or None,
+                        )
+                    finally:
+                        self._db_hook._service.clear_request(key)
+                    return
                 try:
                     final = context.final_content or ""
                     task = self._extract_task(context)

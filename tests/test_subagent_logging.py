@@ -446,3 +446,64 @@ async def test_subagent_no_bus_means_no_publish() -> None:
         None,
     )
     assert sub is not None
+
+
+@pytest.mark.asyncio
+async def test_subagent_finalize_skips_log_event_when_subscriber_active() -> None:
+    """Когда ``_subscriber_registered=True``, ``_finalize`` НЕ пишет
+    ``subagent_run_finished`` напрямую в БД (запись сделает
+    ``_handle_subagent_turn_completed`` через pub-sub).
+
+    Также проверяет, что finish_request всё равно вызывается (для
+    question_runs). Открытие/закрытие request остаётся в _finalize.
+    """
+    from lib.hooks.database_logging_hook import DatabaseLoggingHook
+    from lib.services.db_logging_service import DbLoggingService
+    from lib.services.runtime_patcher import RuntimePatcher
+
+    svc = DbLoggingService(dsn="", table_name="x", question_runs_table="y")
+
+    # Патчим DatabaseLoggingHook внутри _SubagentLoggingHook,
+    # чтобы он использовал наш svc.
+    with patch(
+        "lib.hooks.database_logging_hook.DatabaseLoggingHook",
+        lambda *_a, **_kw: DatabaseLoggingHook(svc),
+    ):
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_subagent_logging(
+            db_logging_service=svc, session_manager=None,
+        )
+        assert ok
+
+        from nanobot.agent.subagent import _SubagentHook  # noqa: WPS433
+
+        # Активируем флаг subagent-subscriber.
+        _SubagentHook.set_subscriber_registered(True)
+        try:
+            ctx = SimpleNamespace(
+                session_key="telegram:1",
+                final_content="done",
+                tools_used=["read_file"],
+                stop_reason="end_turn",
+                messages=[{"role": "user", "content": "task"}],
+                usage=None,
+                error=None,
+                exception=None,
+            )
+            hook = _SubagentHook("task-flag")
+            await hook.after_run(ctx)
+
+            # _finalize НЕ должен был записать subagent_run_finished.
+            from lib.services.db_logging_service import LogEvent as _LogEvent
+
+            events = [e for e in svc._queue.queue if isinstance(e, _LogEvent)]
+            sub = next(
+                (e for e in events if e.event_type == "subagent_run_finished"),
+                None,
+            )
+            assert sub is None, (
+                "subagent_run_finished должен быть записан через pub-sub, "
+                "а не через _finalize напрямую"
+            )
+        finally:
+            _SubagentHook.set_subscriber_registered(False)

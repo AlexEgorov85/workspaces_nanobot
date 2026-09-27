@@ -76,6 +76,25 @@ def _set_subagent_default_bus(bus: Any) -> None:
         pass
 
 
+def _set_subagent_subscriber_registered(registered: bool) -> None:
+    """Отметить, что ``SubagentLoggingSubscriber`` активен.
+
+    Это сигнал ``_SubagentLoggingHook._finalize`` пропустить прямую
+    запись ``subagent_run_finished`` в БД (подписчик уже записал).
+    No-op если класс ещё не подменён monkey-patch'ем.
+
+    См. openspec/changes/post-0.3.5-patches-cleanup/design.md D4.
+    """
+    try:
+        from nanobot.agent.subagent import _SubagentHook
+
+        set_flag = getattr(_SubagentHook, "set_subscriber_registered", None)
+        if callable(set_flag):
+            set_flag(registered)
+    except Exception:
+        pass
+
+
 class RuntimeEventsSubscriber:
     """Observer-сервис для runtime-событий nanobot 0.3.5.
 
@@ -126,6 +145,10 @@ class RuntimeEventsSubscriber:
         # автоматически получают self._bus для публикации
         # SubagentTurnCompleted. См. design.md D3.
         _set_subagent_default_bus(self._bus)
+        # Также сигнализируем _finalize о том, что подписчик активен.
+        # Без этого флага будут дубли: и handler пишет через pub-sub,
+        # и _finalize пишет напрямую. См. design.md D4.
+        _set_subagent_subscriber_registered(True)
         self._started = True
         logger.debug(
             "RuntimeEventsSubscriber: зарегистрированы подписки на "
@@ -146,6 +169,10 @@ class RuntimeEventsSubscriber:
                 logger.opt(exception=True).warning(
                     "RuntimeEventsSubscriber: unsubscribe failed: {}", exc
                 )
+        # Откатить флаг subagent-subscriber — после stop() _finalize
+        # снова пишет subagent_run_finished напрямую (на случай
+        # повторного старта). См. design.md D4.
+        _set_subagent_subscriber_registered(False)
         self._started = False
 
     async def _handle_turn_runtime_admitted(self, event: TurnRuntimeAdmitted) -> None:
