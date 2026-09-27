@@ -225,38 +225,70 @@ TestDatabaseLoggingHookFactory.test_concurrent_sessions_do_not_mix_request_id`
 (переплетение двух сессий → `log_tool_result`/`after_run` несут свой
 `request_id`).
 
-### Единый конвейер sync-событий (`emit_sync_event`)
+### Единый конвейер structured-логирования (`DbLoggingService`)
 
 PG→DuckDB sync-путь пишет события (`sync_service_started`,
 `sync_initial_load_done`, `sync_table_loaded`, `sync_publish_ok`/
-`sync_publish_empty`/`sync_publish_failed`, …) в `agent_gateway_logs`
-единым способом — через helper
-`workspace.utils.event_log.emit_sync_event(event_type, summary, payload,
-*, name, level, service)` (dual-sink):
+`sync_publish_empty`/`sync_publish_failed`, …) и compaction-события
+(`context_compacted`) в `agent_gateway_logs` **единым способом** —
+через `DbLoggingService` (см. `lib/services/db_logging_service.py`).
 
-1. если передан запущенный `service` (`DbLoggingService`) — событие
-   идёт через пул-воркер (async, `timestamp` проставляется на flush);
-2. иначе — синхронный fallback `event_log.record_sync_event` (прямой
-   INSERT с `NOW()`): standalone-утилиты, ранние стадии старта, тесты,
-   где `DbLoggingService` ещё не создан/не запущен.
+**`DbLoggingService` — единственный runtime writer
+`agent_gateway_logs` и `agent_question_runs`.** Любой structured event
+передаётся через:
 
-Ошибки обеих веток глотаются — sync-код не падает из-за логирования.
+- `db_logging_service.log_event(LogEvent(...))` — основной путь
+  (асинхронный, через пул-воркер; `timestamp` проставляется на flush,
+  `flush_interval_sec=5`);
+- `DbLoggingService.try_log_event(svc, log_event, *, producer, event_type)`
+  — defensive helper для producer'ов (контракт WARNING при
+  недоступности сервиса, no-op for business). Это контрактно
+  единый уровень для всех producer'ов — никаких per-producer уровней
+  или fallback-INSERT'ов.
 
-`service` инжектится в оба писателя sync-конвейера при сборке в
-`ApplicationContext._make_sync_services`:
-`PgDuckDbSyncService(db_logging_service=...)` и
-`DuckDbCacheStore(db_logging_service=...)` (publish-события из
-worker-потока). В юнит-тестах store создаётся без сервиса →
-автоматический fallback на `record_sync_event`.
+**Прямой SQL INSERT в журнал запрещён** — это invariant архитектуры,
+защищён `tests/test_unified_event_logging_pipeline.py::TestNoProductionDirectWriters`
+(AST + ownership guard).
+
+Producer'ы (с обязательным keyword-only DI через `db_logging_service=`):
+
+| Producer | События | DI |
+|---|---|---|
+| `ContextCompactionService` | `context_compacted` | через `RuntimePatcher.patch_compact_command(partial(...))` или `run_repl(...)` параметр |
+| `PgDuckDbSyncService` | `sync_service_started`, `sync_initial_load_*`, `sync_table_loaded`, `sync_lag_exceeded`, `session_stale_detected` | kwarg `db_logging_service` |
+| `DuckDbCacheStore` | `sync_publish_ok`/`_failed`/`_empty`, `vector_preload_error`, `vector_index_build_failed` | kwarg `db_logging_service` |
+| `PreloadService` | `vector_index_preload_health` | kwarg `db_logging_service` |
+| `ApplicationContext._make_sync_services` | `sync_skipped_*` | inline `try_log_event` |
+| `DatabaseLoggingHook` (AgentLoop) | `tool_call`/`tool_result`/`llm_call`/`run_finished`/`turn_failed` | kwarg `db_logging_service` |
+
+DI поднимается через `functools.partial` (`RuntimePatcher.patch_compact_command`)
+и параметры composition root'ов (`run_repl(...)` в `lib/cli/console_loop.py`).
+**Никаких DI-полей на `agent`** (ни `_db_logging_service`, ни
+`db_logging_service`) — это историческая ошибка, исправленная в коммите
+`1893b17`.
+
+**Skill invocation is out of scope.** Skills не имеют dedicated
+runtime `event_type`; загрузка `SKILL.md` в context не порождает event;
+вызов Skill-скриптов через `tools.exec` логируется как штатная пара
+`tool_call`/`tool_result`; `DbLoggingService.log_skill_call` НЕ
+вводится; `event_type="skill_call"` НЕ эмитится. См.
+`openspec/specs/logging-db/spec.md` requirement «Skill invocation
+is out of scope».
 
 **Зачем единый конвейер (историческая проблема).** Раньше события
 писались двумя путями с разной семантикой времени: `DbLoggingService`
 буферизовал батчи и проставлял `timestamp` на flush
-(`flush_interval_sec=5`), а `DuckDbCacheStore._emit_sync_event` делал
-прямой INSERT с мгновенным `NOW()`. Из-за этого
+(`flush_interval_sec=5`), а `workspace.utils.event_log.record_sync_event`
+делал прямой INSERT с мгновенным `NOW()`. Из-за этого
 `sync_publish_ok` мог получить время РАНЬШЕ `sync_service_started` —
-ложная хронология в журнале. После перевода всех sync-событий на
-`emit_sync_event` хронология идёт одним потоком.
+ложная хронология в журнале. После унификации (change
+`unify-agent-event-logging-pipeline`) все события идут через
+`DbLoggingService`/`try_log_event`, хронология — одним потоком.
+
+**Удалённый модуль.** `workspace/utils/event_log.py` (197 строк,
+`record_event`/`record_sync_event`/`emit_sync_event`) удалён в коммите
+`1893b17`. Прямой INSERT bypass ликвидирован. Тесты
+`tests/test_event_log.py` (83 строки) тоже удалены.
 
 ### Видимость «тихих» ошибок: preload векторов и канал
 
@@ -276,9 +308,9 @@ dim-«нет данных в кэше», неотличимо от реальн�
 * пишет события `vector_preload_error` (ошибка чтения `source` из
   таблицы хранения, `index_name=None`) и `vector_index_build_failed`
   (ошибка построения конкретного индекса) через
-  `_emit_sync_event(..., service=self._db_logging_service)` — в
-  журнал, при `None` — standalone-fallback; дополнительно дублирует
-  warning в терминал (`logger.warning`, stdlib-logging).
+  `DbLoggingService.try_log_event(...)` — в журнал; при недоступности
+  сервиса — no-op + WARNING внутри `try_log_event`; дополнительно
+  дублирует warning в терминал (`logger.warning`, stdlib-logging).
 * `PreloadService.preload_vector_indexes` логирует
   `logger.warning` (loguru) при собственном исключении вместо тихого
   `None`;
@@ -304,10 +336,10 @@ dim-«нет данных в кэше», неотличимо от реальн�
     (помечается как `STALE` или `INVALID`).
 
 Сводка печатается в **stderr** (multi-line, без ANSI) и пишется в
-`agent_gateway_logs` через `emit_sync_event` (event_type
-`vector_index_preload_health`, level=`WARN` если есть divergence,
-иначе `INFO`). Ошибки любого этапа (PG недоступна, config parse
-failed) глотаются — summary **никогда** не валит startup gateway.
+`agent_gateway_logs` через `DbLoggingService.try_log_event`
+(event_type `vector_index_preload_health`, level=`WARN` если есть
+divergence, иначе `INFO`). Ошибки любого этапа (PG недоступна, config
+parse failed) глотаются — summary **никогда** не валит startup gateway.
 
 Чистая логика вычисления — в pure-функции `compute_index_health()`
 в `preload_service.py`, отделена от I/O и эмита; тестируема без mock'ов

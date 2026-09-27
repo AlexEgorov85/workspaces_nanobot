@@ -162,7 +162,7 @@ LIMIT %s
 Эти наблюдения **не входят в задачу «улучшить ILIKE»**, но фиксируются
 здесь как согласованные с пользователем решения до начала реализации.
 
-### Gap №1. `context_compacted` не пишется в `agent_gateway_logs`
+### Gap №1. `context_compacted` не пишется в `agent_gateway_logs` — **ЗАКРЫТ**
 
 `lib/services/context_compaction.py::_notify` пишет только в
 `agent_conversation_messages` через `_write_history_notice`. При этом:
@@ -176,10 +176,30 @@ LIMIT %s
 То есть инструмент обещает агент-инструкцию, которая в реальности ничего
 не находит.
 
-**Решение (согласовано):** добавить в `ContextCompactionService._notify`
-параллельный вызов `event_log.record_event(event_type="context_compacted",
-name="consolidator", payload=report, session_id=session_key, channel="system")`.
-Изменение одного места, согласовано с уже существующим `_write_history_notice`.
+**Статус: ЗАКРЫТ** в release vX.Y — change `unify-agent-event-logging-pipeline`,
+коммит `1893b17`. `ContextCompactionService._record_event_log` теперь
+вызывает `DbLoggingService.try_log_event(self._db_logging_service, log_event, producer="ContextCompactionService", event_type="context_compacted")`
+и **не зависит от `notify_in_history`**:
+
+- Ранний return `if not self.notify_in_history: return` удалён из
+  `patch_compaction_tracking` (патч остаётся активным при
+  `notify_in_history=false`).
+- `_notify` теперь разделяет concerns: structured event идёт ВСЕГДА
+  при `enabled=True`, UI-history-notice — при `notify_in_history`,
+  terminal output — при `print_to_terminal`.
+- `record_external_compaction` тоже проходит через `_notify` —
+  observability-trail больше не теряется при auto-compaction с
+  отключённым UI-уведомлением.
+
+**Новая реализация:** собирает `LogEvent(event_type="context_compacted",
+level="INFO", session_id=session_key, channel="system", actor="system",
+name="consolidator", summary=summary, payload=payload)` и вызывает
+`DbLoggingService.try_log_event(...)`. `history_search(event_type="context_compacted")`
+теперь возвращает событие при **любой** настройке `notify_in_history`.
+
+Дополнительно: `workspace/utils/event_log.py` (197 строк, `record_event`/
+`record_sync_event`/`emit_sync_event`) удалён в коммите `1893b17`.
+Прямой SQL INSERT bypass ликвидирован.
 
 ### Gap №2. `workspace/utils/event_log.py` содержит ложные утверждения
 

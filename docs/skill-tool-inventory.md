@@ -41,6 +41,8 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 | `tests/e2e_test.py` (skill) | `workspace/skills/audit_analyzer/tests/e2e_test.py` | standalone (не pytest) |
 | `scripts/generated/` | `workspace/skills/audit_analyzer/scripts/generated/` | одноразовый dump-скрипт |
 | `providers.py` (навыка) | `workspace/skills/audit_analyzer/providers.py` (наброски без регистрации) | удалён — регистрация через `ApplicationContext._auto_register_skills()` |
+| `workspace.utils.event_log` module | `workspace/utils/event_log.py` (197 строк: `record_event`, `record_sync_event`, `emit_sync_event`) | удалён в release vX.Y — заменён `DbLoggingService.log_event(LogEvent(...))` / `DbLoggingService.try_log_event(...)` (change `unify-agent-event-logging-pipeline`, коммит `1893b17`); прямой SQL INSERT bypass ликвидирован |
+| `tests/test_event_log.py` | `tests/test_event_log.py` (83 строки) | удалён — тестировал прямой INSERT bypass; заменён `tests/test_unified_event_logging_pipeline.py` (AST + ownership guard'ы) |
 
 ## Последующие изменения (после слияния в `master`)
 
