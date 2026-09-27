@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,7 @@ class ApplicationContext:
     # Lifecycle
     _started: bool = False
     _shutdown: Any | None = None  # ShutdownCoordinator
+    runtime_events_subscriber: Any | None = None  # RuntimeEventsSubscriber
 
     @classmethod
     def create(
@@ -390,6 +392,32 @@ class ApplicationContext:
         # первой задаче, но пул уже создан и подхватил pool-конфиг).
         _start_db_pool()
 
+        # Подписчик на runtime-события nanobot 0.3.5.
+        # Регистрируется ПОСЛЕ apply_all (если он активен) и ДО старта каналов,
+        # чтобы seed лимита окна/модели + метрики оборота были доступны
+        # для первого inbound-сообщения. Lifecycle:
+        # start() здесь → каналы стартуют → stop() в _stop_runtime_events_subscriber
+        # ДО MessageBus.drain() в shutdown-последовательности.
+        # См. openspec/changes/runtime-events-subscription.
+        try:
+            from lib.services.runtime_events_subscriber import (
+                RuntimeEventsSubscriber,
+            )
+            self.runtime_events_subscriber = RuntimeEventsSubscriber(
+                self.bus,
+                db_logging_service=self.db_logging_service,
+            )
+            self.runtime_events_subscriber.start()
+            if self._shutdown is not None:
+                self._shutdown.register(
+                    "runtime_events_subscriber",
+                    self.runtime_events_subscriber,
+                )
+        except Exception as exc:
+            logger.warning(
+                "RuntimeEventsSubscriber not started: %s", exc
+            )
+
         if self.db_logging_service is not None:
             self.db_logging_service.start()
             self._shutdown.register("db_logging_service", self.db_logging_service)
@@ -437,6 +465,39 @@ class ApplicationContext:
             return
         if self._shutdown is not None:
             self._shutdown.shutdown_all()
+        # MessageBus.drain() ожидает завершения in-flight handler'ов
+        # (например, _handle_turn_completed ещё может писать в БД через
+        # DbLoggingService с батчевым flush). Вызываем ПОСЛЕ остановки
+        # сервисов (channels/sync) и ДО остановки RuntimeEventsSubscriber.
+        # Если bus не имеет drain() (защита от nanobot < 0.3.5) — no-op.
+        # См. openspec/changes/runtime-events-subscription/design.md D7.
+        bus = getattr(self, "bus", None)
+        if bus is not None and hasattr(bus, "drain"):
+            try:
+                drain = bus.drain
+                if inspect.iscoroutinefunction(drain):
+                    import asyncio
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.ensure_future(drain())
+                        else:
+                            loop.run_until_complete(drain())
+                    except RuntimeError:
+                        pass
+                else:
+                    drain()
+            except Exception as exc:
+                logger.warning("MessageBus.drain failed: %s", exc)
+        # RuntimeEventsSubscriber.stop() — после drain, чтобы in-flight
+        # handler'ы гарантированно отработали.
+        if getattr(self, "runtime_events_subscriber", None) is not None:
+            try:
+                self.runtime_events_subscriber.stop()
+            except Exception as exc:
+                logger.warning(
+                    "RuntimeEventsSubscriber.stop failed: %s", exc
+                )
         # Close LLM usage store (SQLite WAL).
         if self.usage_store is not None:
             try:
