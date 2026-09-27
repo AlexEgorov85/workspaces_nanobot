@@ -13,16 +13,39 @@ import base64
 import re
 import sys
 import tempfile
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _WORKSPACE = _PROJECT_ROOT / "workspace"
 for p in (str(_PROJECT_ROOT), str(_WORKSPACE)):
     if p not in sys.path:
         sys.path.insert(0, p)
+
+
+@pytest.fixture(autouse=True)
+def _auto_seed_context_bridge(monkeypatch):
+    """Засеять bridge и подменить _session_key_of, чтобы
+    ``_attach_context_window`` не поднимал ``ContextWindowNotSeededError``
+    (контракт после opencode change post-0.3.5-patches-cleanup).
+    """
+    from lib.hooks.database_logging_hook import (
+        _CONTEXT_BRIDGE,
+        _CONTEXT_BRIDGE_LOCK,
+        seed_context_window,
+    )
+
+    session_key = "test:smoke:postgres_media"
+    seed_context_window(session_key, limit=40000, model="test-model")
+    monkeypatch.setattr(
+        "lib.services.runtime_patcher._session_key_of",
+        lambda msg: session_key,
+    )
+    yield
+    with _CONTEXT_BRIDGE_LOCK:
+        _CONTEXT_BRIDGE.pop(session_key, None)
 
 
 class _FakeSessionFileStore:

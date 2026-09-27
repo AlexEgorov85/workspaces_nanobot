@@ -26,6 +26,42 @@ for p in (str(_PROJECT_ROOT), str(_WORKSPACE)):
         sys.path.insert(0, p)
 
 
+@pytest.fixture(autouse=True)
+def _auto_seed_context_bridge(monkeypatch):
+    """Автоматически засеять ``DatabaseLoggingContextBridge`` для всех
+    тестов в этом файле (они вызывают ``patch_assemble_outbound``,
+    который внутри вызывает ``_attach_context_window``).
+
+    Контракт: в production-flow seed делается через
+    ``RuntimeEventsSubscriber.start()`` (подписка на
+    ``TurnRuntimeAdmitted``). Здесь симулируем это явно через
+    ``seed_context_window`` + cleanup после теста.
+
+    Также подменяем ``_session_key_of`` чтобы возвращать ключ,
+    который посеян в bridge (тесты передают разные session_key
+    через ``msg.session_key`` или ``msg.metadata`` — мы
+    унифицируем для текущего теста).
+
+    См. ``tests/_patcher_fixtures.py`` для переиспользуемых фикстур.
+    """
+    from lib.hooks.database_logging_hook import (
+        _CONTEXT_BRIDGE,
+        _CONTEXT_BRIDGE_LOCK,
+        seed_context_window,
+    )
+    from lib.services import runtime_patcher as _rp
+
+    session_key = "test:recent_files"
+    seed_context_window(session_key, limit=40000, model="test-model")
+
+    # Подменить ``_session_key_of`` чтобы возвращал наш ключ.
+    monkeypatch.setattr(_rp, "_session_key_of", lambda msg: session_key)
+
+    yield session_key
+    with _CONTEXT_BRIDGE_LOCK:
+        _CONTEXT_BRIDGE.pop(session_key, None)
+
+
 class _MockCtx:
     def __init__(self, session_key: str) -> None:
         self.session_key = session_key

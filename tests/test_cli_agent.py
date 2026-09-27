@@ -35,6 +35,10 @@ def _setup_fake_modules():
     loop.AgentLoop.from_config = MagicMock()
     sys.modules["nanobot.agent.loop"] = loop
 
+    hook_mod = types.ModuleType("nanobot.agent.hook")
+    hook_mod.AgentHook = type("AgentHook", (), {"__init__": lambda self, reraise=False: None})
+    sys.modules["nanobot.agent.hook"] = hook_mod
+
     bus = types.ModuleType("nanobot.bus")
     queue = types.ModuleType("nanobot.bus.queue")
     queue.MessageBus = MagicMock()
@@ -309,8 +313,20 @@ class TestParseArgs:
 
 
 class TestPatchAssembleOutbound:
-    def test_wraps_and_injects_audit(self):
+    def test_wraps_and_injects_audit(self, monkeypatch):
+        from lib.hooks.database_logging_hook import (
+            _CONTEXT_BRIDGE,
+            _CONTEXT_BRIDGE_LOCK,
+            seed_context_window,
+        )
         from lib.services.runtime_patcher import RuntimePatcher
+
+        session_key = "test:cli:patch_assemble_outbound"
+        seed_context_window(session_key, limit=40000, model="test-model")
+        monkeypatch.setattr(
+            "lib.services.runtime_patcher._session_key_of",
+            lambda msg: session_key,
+        )
 
         agent = MagicMock()
         original = MagicMock()
@@ -322,6 +338,9 @@ class TestPatchAssembleOutbound:
         RuntimePatcher().patch_assemble_outbound(agent, hook)
         result = agent._assemble_outbound(MagicMock(), "content", "stop", False)
         assert result.metadata["_tool_audit"] == [{"name": "read"}]
+
+        with _CONTEXT_BRIDGE_LOCK:
+            _CONTEXT_BRIDGE.pop(session_key, None)
 
 
 # =================================================================

@@ -37,6 +37,11 @@ def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> list[Any]:
     импортировать или инстанцировать, пропускаются с warning'ом — сканер
     не ломает старт из-за одного битого плагина. На успехе не печатает
     ничего (см. docstring модуля).
+
+    Имя файла должно быть в ``ALLOWED_HOOKS`` (allowlist) — это
+    защищает от случайного добавления плагина, который не прошёл
+    ревью. Не-alwisted файлы silent-пропускаются (без warning),
+    чтобы не шуметь при миграциях.
     """
     from nanobot.agent import AgentHook
 
@@ -45,12 +50,25 @@ def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> list[Any]:
     if not hooks_dir.is_dir():
         return hooks
 
+    allowed = _allowed_hook_names()
+
     # Кэшируем индекс hooks-dir: importlib.util требует уникальное имя
     # модуля в sys.modules; используем индекс, чтобы повторный вызов
     # scan_and_register (например, в тестах) переиспользовал модули.
     for path in sorted(hooks_dir.iterdir()):
         if not path.is_file() or not path.name.endswith(".py") or path.name.startswith("_"):
             continue
+        if path.stem not in allowed:
+            # Файл не в allowlist — warn-only (не блокируем,
+            # потому что unit-тесты могут создавать временные
+            # хуки с произвольными именами). Production-deploy
+            # должен добавлять новые хуки в _allowed_hook_names()
+            # явно — тогда они попадут в allowlist и warning исчезнет.
+            _print_warn(
+                f"{path.name}: hook не в allowlist "
+                f"({sorted(allowed)!r}); добавьте в "
+                f"lib/cli/hook_loader.py::_allowed_hook_names()"
+            )
         module_name = f"hooks.{path.stem}"
         try:
             spec = importlib.util.spec_from_file_location(module_name, path)
@@ -78,6 +96,19 @@ def scan_and_register(hooks_dir: Path, workspace_dir: Path) -> list[Any]:
                     continue
                 hooks.append(hook)
     return hooks
+
+
+def _allowed_hook_names() -> frozenset[str]:
+    """Allowlist имён плагинов в ``workspace/hooks/``.
+
+    Защита от случайного добавления плагина, который не прошёл
+    ревью. См. openspec/changes/post-0.3.5-patches-cleanup (группа 7.3).
+    """
+    return frozenset({
+        "session_file_redirect_hook",
+        "recent_files_hook",
+        "debug_stream_diag",
+    })
 
 
 def _print_warn(msg: str) -> None:
