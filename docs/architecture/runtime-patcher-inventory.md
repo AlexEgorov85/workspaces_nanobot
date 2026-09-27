@@ -30,7 +30,7 @@ target, nanobot version, проверенную public alternative, upgrade risk
 
 | # | Патч | Target (nanobot API) | Risk | Категория |
 |---|---|---|---|---|
-| 1 | `context_bridge_seed` | `bus.subscribe(TurnRuntimeAdmitted)` (нет monkey-patch) | LOW | DEPRECATED (no-op) |
+| 1 | `context_bridge_seed` | **УДАЛЁН** в opencode change post-0.3.5-patches-cleanup (коммит 2163f05). Seed лимита делается подпиской на `TurnRuntimeAdmitted` через `RuntimeEventsSubscriber.start()`. | — | REMOVED |
 | 2 | `context_governor` | `ContextGovernor.normalize_tool_result` | HIGH | ISOLATE+TESTS |
 | 3 | `save_turn` | `agent._save_turn` | HIGH | KEEP |
 | 4 | `session_content_cleanup` | `Session.add_message` | MEDIUM | KEEP |
@@ -40,7 +40,7 @@ target, nanobot version, проверенную public alternative, upgrade risk
 | 8 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + schema | MEDIUM | KEEP |
 | 9 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | HIGH | REVIEW |
 | 10 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | KEEP |
-| 11 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | KEEP |
+| 11 | `subagent_logging` | `_SubagentHook` (подмена класса) + публикация `SubagentTurnCompleted` через `bus.publish` | HIGH | KEEP |
 | 12 | `project_tools` | `ToolContext(...)` + setattr DI | HIGH | KEEP |
 | 13 | `compact_tracking` | — | — | DEPRECATED |
 | 14 | `compact_command` | — | — | DEPRECATED |
@@ -50,20 +50,6 @@ target, nanobot version, проверенную public alternative, upgrade risk
 ---
 
 ## Deprecation Notes (Что заменили в 0.3.5)
-
-### 1. `context_bridge_seed`
-
-Перенесён на подписку `bus.subscribe(TurnRuntimeAdmitted)` в
-`ApplicationContext.start()`. В runtime-patcher метод оставлен как no-op
-с `applied=True` для совместимости со `PatchReport`/логами; реальный seed
-делается подпиской на runtime-событие, которое публикуется через
-`bus.publish` (`nanobot/bus/runtime_events.py:204`).
-
-Замена: upstrеам — `TurnRuntimeAdmitted(context, runtime)` с
-`runtime.context_window_tokens` / `runtime.model`. Handler пишет
-в `DatabaseLoggingHook._CONTEXT_BRIDGE` через
-`seed_context_window(session_key, limit, model)` из
-`lib/hooks/database_logging_hook.py`.
 
 ### 13. `compact_tracking`
 
