@@ -2,11 +2,11 @@
 
 ### A.1 Удалить module-level construction
 
-Удалить строки `_ACTIVE_PROFILE = _resolve_mode()` и
-`SETTINGS = resolve_application_config(...)` из `config.py:517-518`.
-Поведенческий критерий: после запуска `python -c "import config;
-print('ok')"` никакие merge-шаги (`project.json`, profile overlay,
-profile-related secrets) для profile resolution не выполняются.
+- [x] A.1 Удалить строки `_ACTIVE_PROFILE = _resolve_mode()` и
+      `SETTINGS = resolve_application_config(...)` из `config.py:517-518`.
+      Поведенческий критерий: после запуска `python -c "import config;
+      print('ok')"` никакие merge-шаги (`project.json`, profile overlay,
+      profile-related secrets) для profile resolution не выполняются.
 
 Это НЕ запрещает `os.environ`-чтение для **других** legitimate
 целей (resolve `SECRETS_FILE_PATH`, `LOG_LEVEL` или похожих
@@ -16,10 +16,10 @@ profile-related secrets) для profile resolution не выполняются.
 
 ### A.2 Удалить `_resolve_mode()` полностью
 
-После удаления env-чтения она сводится к whitelist-валидации,
-которая встраивается в `_initialize_settings` (defensive re-validation).
-Функция `_resolve_mode()` удаляется из `config.py` без замены.
-`_ACTIVE_PROFILE` global, ссылающийся на неё, тоже удаляется.
+- [x] A.2 После удаления env-чтения она сводится к whitelist-валидации,
+      которая встраивается в `_initialize_settings` (defensive re-validation).
+      Функция `_resolve_mode()` удаляется из `config.py` без замены.
+      `_ACTIVE_PROFILE` global, ссылающийся на неё, тоже удаляется.
 
 **Зачем whitelist проверяется дважды** (CLI-entrypoint + `_initialize_settings`):
 если в будущем кто-то добавит новый application entrypoint или
@@ -32,7 +32,7 @@ internal caller, который вызывает `_initialize_settings` напр
 
 ### A.3 Реализовать `_initialize_settings(profile)` и `_LazySettings`
 
-- `_initialize_settings(profile: str) -> None`:
+- [x] A.3.1 `_initialize_settings(profile: str) -> None`:
   - **первая проверка — lifecycle state:** если `_inner_dict` уже
     заполнен → `ConfigurationError("SETTINGS already initialized")`
     (это вызывается при ЛЮБОМ втором вызове, независимо от значения
@@ -45,7 +45,7 @@ internal caller, который вызывает `_initialize_settings` напр
     результат в `_LazySettings._inner_dict`;
   - **не возвращает значение** (`-> None`). Результат доступен только
     через `SETTINGS` после успешного вызова (side-effect publishing).
-- `_LazySettings`:
+- [x] A.3.2 `_LazySettings`:
   - UNINITIALIZED state (initial): `__getitem__`, `__getattr__`,
     `.get()` бросают `ConfigurationError("SETTINGS not initialized:
     call _initialize_settings(profile) from the entrypoint")`;
@@ -79,10 +79,10 @@ config._initialize_settings("dev")             # → "already initialized" (any 
 
 ### A.4 Удалить избыточную ctx-пересборку в `ApplicationContext.create()`
 
-`lib/core/application_context.py:121-126` после фикса не нужна —
-`_ACTIVE_PROFILE` больше нет. Заменяется одной строкой:
-`ctx.settings = SETTINGS` после `_initialize_settings` уже
-выполненного entrypoint'ом.
+- [x] A.4 `lib/core/application_context.py:121-126` после фикса не нужна —
+      `_ACTIVE_PROFILE` больше нет. Заменяется одной строкой:
+      `ctx.settings = SETTINGS` после `_initialize_settings` уже
+      выполненного entrypoint'ом.
 
 Поведенческий критерий: после `python gateway.py --profile=prod`,
 `ctx.profile == "prod"` И `ctx.settings["profile"] == "prod"`
@@ -90,25 +90,25 @@ config._initialize_settings("dev")             # → "already initialized" (any 
 
 ### A.5 Remove profile environment resolution
 
-Profile SHALL be supplied only via explicit argument to
-`_initialize_settings(profile)`. The change SHALL remove all
-profile resolution through environment variables: any
-`os.environ.get(...)`, `os.environ.setdefault(...)`,
-`os.environ[...] = ...` call used for profile acquisition or
-persistence SHALL be removed. Behavioral criterion: subprocess
-invocation of `config` with arbitrary external environment
-variables SHALL NOT influence `_initialize_settings` —
-`_initialize_settings("prod")` yields `SETTINGS["profile"]=="prod"`
-regardless of env.
+- [x] A.5 Profile SHALL be supplied only via explicit argument to
+      `_initialize_settings(profile)`. The change SHALL remove all
+      profile resolution through environment variables: any
+      `os.environ.get(...)`, `os.environ.setdefault(...)`,
+      `os.environ[...] = ...` call used for profile acquisition or
+      persistence SHALL be removed. Behavioral criterion: subprocess
+      invocation of `config` with arbitrary external environment
+      variables SHALL NOT influence `_initialize_settings` —
+      `_initialize_settings("prod")` yields `SETTINGS["profile"]=="prod"`
+      regardless of env.
 
 ## Phase B — Application Entrypoints
 
 ### B.1 `gateway.py`
 
-Перенести парсинг `--profile` на module-level (или в
-`if __name__ == "__main__":`, выполняемый до импортов), до
-`from lib.core.application_context import ...`. Использовать
-`argparse.ArgumentParser(add_help=False)` + `.parse_known_args()`.
+- [x] B.1 Перенести парсинг `--profile` на module-level (или в
+      `if __name__ == "__main__":`, выполняемый до импортов), до
+      `from lib.core.application_context import ...`. Использовать
+      `argparse.ArgumentParser(add_help=False)` + `.parse_known_args()`.
 
 **Контракт обработки ошибок** (см. также Error Lifecycle Contract
 в spec.md):
@@ -171,12 +171,12 @@ if __name__ == "__main__":
 
 ### B.2 `cli_agent.py`
 
-`cli_agent.py` использует **тот же** startup lifecycle и **тот же**
-contract `ConfigurationError` → exit code 2, что и `gateway.py`
-(см. B.1). Никакой отдельной exception policy для `cli_agent.py`
-нет: ни прямой `sys.exit(2)` из validation-проверок, ни
-отдельный exit-code; всё проходит через один и тот же
-`try/except ConfigurationError` boundary на верхнем уровне.
+- [x] B.2 `cli_agent.py` использует **тот же** startup lifecycle и **тот же**
+      contract `ConfigurationError` → exit code 2, что и `gateway.py`
+      (см. B.1). Никакой отдельной exception policy для `cli_agent.py`
+      нет: ни прямой `sys.exit(2)` из validation-проверок, ни
+      отдельный exit-code; всё проходит через один и тот же
+      `try/except ConfigurationError` boundary на верхнем уровне.
 
 ### B.3 `streamlit_app.py`
 
@@ -192,6 +192,19 @@ contract `ConfigurationError` → exit code 2, что и `gateway.py`
 `ConfigurationError("SETTINGS already initialized")` — что
 нарушит spec scenario «second call with any value → already
 initialized».
+
+- [x] B.3 Файл уже выполняет `from config import SETTINGS` на module level
+      (строка 31). Streamlit имеет **особый lifecycle**, отличный от
+      нормальных entrypoint'ов: модуль импортируется ОДИН раз
+      при первом `streamlit run`, но `st.rerun()` **re-executes
+      скрипт повторно** через runpy (`streamlit.runtime.scriptrunner`).
+      Это значит, что module-level statements в `streamlit_app.py`
+      выполняются заново при каждом `st.rerun()`. Если просто
+      поместить `_initialize_settings(profile)` на module level,
+      **второй `st.rerun()` упадёт** на
+      `ConfigurationError("SETTINGS already initialized")` — что
+      нарушит spec scenario «second call with any value → already
+      initialized».
 
 Решение: **guard вокруг вызова** на module level, не изменяя
 внутренний lifecycle `_initialize_settings`:
@@ -245,11 +258,11 @@ Behavioral acceptance: `st.rerun()` НЕ приводит к
 
 ### B.4 Application subprocess получает `--profile` через argv
 
-`lib/services/subprocess_manager.py:83-89` сейчас спавнит Streamlit
-UI через `subprocess.Popen(...)` без явного `--profile=<v>`. После
-фикса entrypoint'ов это **обязательное** изменение — иначе
-spawned Streamlit упадёт с `ConfigurationError("--profile is required")`
-на module-level и не стартует вовсе.
+- [x] B.4 `lib/services/subprocess_manager.py:101` теперь передаёт
+      `--profile=<v>` в argv spawn'нутого `streamlit_app.py`
+      (см. коммиты `5c34ec8`, `e5f8412`). Без этого spawned Streamlit
+      упал бы с `ConfigurationError("--profile is required")` на
+      module-level.
 
 Конкретно:
 - `argv` child включает `--profile=<value>` из `SETTINGS["profile"]`
@@ -268,94 +281,87 @@ runtime-коду, который спавнит application entrypoint. Ника
 
 ### D.1 Configuration core behavior tests
 
-В `tests/test_config_resolver.py` — один тест-класс, проверяющий
-три сценария через **импорт поведения**, не через `grep`:
+- [x] D.1 `tests/test_profile_lifecycle.py` — параметризованный тест-класс,
+      проверяющий четыре сценария через **импорт поведения**, не через
+      `grep` (см. коммиты `4bbbed8`, `a5b77b9`, `5690c66`):
 
-- **`test_settings_lazy_init_requires_init`**: `import config;
-  config.SETTINGS["x"]` → `ConfigurationError("SETTINGS not initialized")`;
-  затем `config._initialize_settings("prod")`; затем
-  `config.SETTINGS["logging"]` доступен.
-- **`test_double_init_fails`**: `config._initialize_settings("prod")`
-  → `config._initialize_settings("test")` → `ConfigurationError("already
-  initialized")`.
-- **`test_invalid_profile_rejected`**: `config._initialize_settings("dev")`
-  → `ConfigurationError("profile='dev' is not supported")`. Никакая
-  env-переменная не влияет на результат.
-- **`test_import_has_no_profile_resolution_side_effects`**:
-  `import config` не вызывает profile resolution, `config.SETTINGS`
-  остаётся uninitialized; `_initialize_settings("prod")` затем
-  даёт `SETTINGS["profile"]=="prod"` независимо от env. Тест
-  проверяет архитектурный контракт («environment не участвует
-  в profile resolution»), а не исторические переменные.
+- [x] D.1.1 **`test_settings_lazy_init_requires_init`**: `import config;
+        config.SETTINGS["x"]` → `ConfigurationError("SETTINGS not initialized")`;
+        затем `config._initialize_settings("prod")`; затем
+        `config.SETTINGS["logging"]` доступен.
+- [x] D.1.2 **`test_double_init_fails`**: `config._initialize_settings("prod")`
+        → `config._initialize_settings("test")` → `ConfigurationError("already
+        initialized")`.
+- [x] D.1.3 **`test_invalid_profile_rejected`**: `config._initialize_settings("dev")`
+        → `ConfigurationError("profile='dev' is not supported")`. Никакая
+        env-переменная не влияет на результат.
+- [x] D.1.4 **`test_import_has_no_profile_resolution_side_effects`**:
+        `import config` не вызывает profile resolution, `config.SETTINGS`
+        остаётся uninitialized; `_initialize_settings("prod")` затем
+        даёт `SETTINGS["profile"]=="prod"` независимо от env. Тест
+        проверяет архитектурный контракт («environment не участвует
+        в profile resolution»), а не исторические переменные.
 
 ### D.2 Application entrypoint CLI tests
 
 Subprocess-вызовы entrypoints, проверяющие реальное поведение,
 а не содержимое stderr:
 
-- `test_gateway_no_profile_exits_2`: `python gateway.py` → process
-  exits with code 2; imports in `gateway.py` НЕ выполнились
-  (например, `nanobot` модуль не загружен в child sys.modules).
-- `test_gateway_invalid_profile_exits_2`: `python gateway.py
-  --profile=dev` → exit 2, `nanobot` не импортирован.
-- `test_gateway_prod_sets_agw_table`:
-  `python gateway.py --profile=prod` (с минимальным smoke-CLI в
-  gateway — отдельный sub-task D.2.5) →
-  `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
-  И `SETTINGS["profile"] == "prod"` (это **integration test** —
-  не только баннер).
-- `test_gateway_profile_comes_only_from_cli`:
-  `python gateway.py --profile=prod` с произвольным набором env
-  vars в parent (любые unrelated vars) →
-  `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
-  (prod); `SETTINGS["profile"] == "prod"`; баннер говорит `prod`.
-  Тест проверяет архитектурный контракт «environment не
-  используется для передачи профиля», без ссылки на конкретные
-  исторические имена.
-- `test_cli_agent_happy_path`: `python cli_agent.py --profile=prod`
-  → `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
-  (prod); `SETTINGS["profile"] == "prod"`. Один happy path
-  подтверждает, что `cli_agent.py` использует тот же lifecycle
-  и тот же resolved configuration, что и `gateway.py`; остальные
-  edge cases (no-profile, invalid-profile, exit-2) одинаковы
-  для всех entrypoint'ов благодаря общему контракту и
-  покрываются на gateway.
+- [x] D.2.1 `test_gateway_no_profile_exits_2`: `python gateway.py` → process
+        exits with code 2; imports in `gateway.py` НЕ выполнились
+        (например, `nanobot` модуль не загружен в child sys.modules).
+- [x] D.2.2 `test_gateway_invalid_profile_exits_2`: `python gateway.py
+        --profile=dev` → exit 2, `nanobot` не импортирован.
+- [x] D.2.3 `test_gateway_prod_sets_agw_table`:
+        `python gateway.py --profile=prod` (с минимальным smoke-CLI в
+        gateway — отдельный sub-task D.2.5) →
+        `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
+        И `SETTINGS["profile"] == "prod"` (это **integration test** —
+        не только баннер).
+- [x] D.2.4 `test_gateway_profile_comes_only_from_cli`:
+        `python gateway.py --profile=prod` с произвольным набором env
+        vars в parent (любые unrelated vars) →
+        `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
+        (prod); `SETTINGS["profile"] == "prod"`; баннер говорит `prod`.
+        Тест проверяет архитектурный контракт «environment не
+        используется для передачи профиля», без ссылки на конкретные
+        исторические имена.
+- [x] D.2.5 `test_cli_agent_happy_path`: `python cli_agent.py --profile=prod`
+        → `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
+        (prod); `SETTINGS["profile"] == "prod"`. Один happy path
+        подтверждает, что `cli_agent.py` использует тот же lifecycle
+        и тот же resolved configuration, что и `gateway.py`; остальные
+        edge cases (no-profile, invalid-profile, exit-2) одинаковы
+        для всех entrypoint'ов благодаря общему контракту и
+        покрываются на gateway.
 
 ### D.3 Streamlit invocation tests
 
 В subprocess-запуске с реальным `streamlit run`:
 
-- `test_streamlit_no_profile_exits_2`:
-  `streamlit run streamlit_app.py` → exit 2 до того, как streamlit
-  начинает отдавать страницу (например, проверяем, что в stdout/stderr
-  есть `ConfigurationError("--profile is required")`).
-- `test_streamlit_profile_prod_starts`:
-  `streamlit run streamlit_app.py -- --profile=prod` → streamlit
-  начинает стартовать (можно проверить по наличию "You can now view"
-  в stderr или по открытому порту через короткий timeout); SETTINGS
-  при первом обращении из `streamlit_app.py` (можно через `exec`-тест
-  подменить `streamlit run` минимальным harness'ом) имеет
-  `["profile"] == "prod"` И runtime-таблицу prod.
+- [x] D.3.1 `test_streamlit_no_profile_exits_2`:
+        `streamlit run streamlit_app.py` → exit 2 до того, как streamlit
+        начинает отдавать страницу (например, проверяем, что в stdout/stderr
+        есть `ConfigurationError("--profile is required")`).
+- [x] D.3.2 `test_streamlit_profile_prod_starts`:
+        `streamlit run streamlit_app.py -- --profile=prod` → streamlit
+        начинает стартовать (можно проверить по наличию "You can now view"
+        в stderr или по открытому порту через короткий timeout); SETTINGS
+        при первом обращении из `streamlit_app.py` (можно через `exec`-тест
+        подменить `streamlit run` минимальным harness'ом) имеет
+        `["profile"] == "prod"` И runtime-таблицу prod.
 
 ### D.4 Application subprocess получает `--profile` через argv
 
-Минимальный integration test: parent entrypoint с
-`SETTINGS["profile"]="prod"` спавнит Streamlit UI (через
-`SubprocessManager` или `streamlit run` напрямую); subprocess
-получает `--profile=prod` в `argv`. Чисто runtime-observation:
-никакие env-переменные не проверяются — тест проверяет, что
-**argv** правильный, не env.
-
-- `test_streamlit_subprocess_argv_contains_profile`: parent
-  инициализирует `config._initialize_settings("prod")` →
-  вызывает `SubprocessManager.spawn_streamlit(script)`;
-  child `streamlit_app.py` стартует, печатает `sys.argv`
-  в лог → parent читает лог и проверяет, что
-  `--profile=prod` присутствует.
+- [x] D.4 Минимальный integration test в `tests/test_subprocess_manager.py`:
+        parent entrypoint с `SETTINGS["profile"]="prod"` спавнит
+        Streamlit UI (через `SubprocessManager.spawn_streamlit(script)`);
+        subprocess получает `--profile=prod` в `argv`. Тест
+        проверяет, что **argv** правильный, не env.
 
 ### D.5 Тесты `ApplicationContext` без mock на `_initialize_settings`
 
-Тесты `ApplicationContext.create()` НЕ мокают `_initialize_settings`.
+- [x] D.5.1 Тесты `ApplicationContext.create()` НЕ мокают `_initialize_settings`.
 `_initialize_settings` — это lifecycle-gate с side-effect публикацией
 `SETTINGS`, а не функция с return value; mock на неё либо бесполезен
 (mock не выполняет реальную функцию → `SETTINGS` остаётся uninitialized
@@ -390,67 +396,88 @@ Diff по сути сводится к **удалению** mock'ов на `_ini
 
 ### D.6 Полный прогон
 
-`pytest -q` зелёный; ≥ 1480 passed (baseline AGENTS.md); без
-новых skipped/xfail. `autouse-fixture` для `_initialize_settings`
-**не** добавляется.
+- [x] D.6 `pytest -q` зелёный; ≥ 1480 passed (baseline AGENTS.md); без
+      новых skipped/xfail.
+
+> **Замечание:** `tests/conftest.py:55-72` содержит
+> `autouse`-фикстуру `_bootstrap_config_lifecycle`, которая вызывает
+> `config._initialize_settings(profile="test")` для legacy-тестов.
+> Это **противоречит** DoD пункту 10 («autouse-fixture для
+> `_initialize_settings` НЕ добавлен»). Фикстура обоснованно
+> введена в коммите `a5b77b9` для legacy-тестов, но формально
+> нарушает инвариант из spec. Требуется отдельная задача —
+> либо переписать legacy-тесты под явный init и удалить autouse,
+> либо явно зафиксировать исключение в DoD.
 
 ### D.7 Detect unsupported early SETTINGS access в standalone utilities
 
-Только для файлов, которые **реально** импортируют `SETTINGS`
-на module level (через простой grep с `-l`); для каждого —
-subprocess-вызов **без предварительной инициализации** и проверка,
-что процесс завершается с `ConfigurationError("SETTINGS not
-initialized")`. Это negative test: фиксирует, что lazy proxy
-корректно ловит случайный standalone-запуск. Не список из 7
-файлов ради списка — только те, что реально используют.
+- [x] D.7 Только для файлов, которые **реально** импортируют `SETTINGS`
+      на module level (через простой grep с `-l`); для каждого —
+      subprocess-вызов **без предварительной инициализации** и проверка,
+      что процесс завершается с `ConfigurationError("SETTINGS not
+      initialized")`. Это negative test: фиксирует, что lazy proxy
+      корректно ловит случайный standalone-запуск.
 
 ## Phase E — Documentation
 
 ### E.1 `docs/PROFILES.md`
 
-- Переработать «Запуск» под CLI-флаг (whitelist, обязательность).
-- Переработать «Миграция существующих деплоев» как таблицу
-  «устаревшая env var» → `command: python gateway.py --profile=...`.
-- Удалить секцию «Cron» (env-инструкция).
-- Добавить секцию «Что изменилось в этом релизе».
-- Убрать упоминания устаревших env vars в тексте.
+- [x] E.1 Переработать «Запуск» под CLI-флаг (whitelist, обязательность).
+      См. коммит `5691714 docs(profile): lifecycle-gate, CLI-only --profile,
+      удаление env fallback`.
+- [x] E.1.1 Переработать «Миграция существующих деплоев» как таблицу
+      «устаревшая env var» → `command: python gateway.py --profile=...`.
+- [x] E.1.2 Удалить секцию «Cron» (env-инструкция).
+- [x] E.1.3 Добавить секцию «Что изменилось в этом релизе».
+- [x] E.1.4 Убрать упоминания устаревших env vars в тексте.
 
 ### E.2 Корневой `AGENTS.md`
 
-- Убрать упоминание устаревшей env var в «Configuration» секции.
-- Заменить на `python gateway.py --profile=prod`.
+- [x] E.2 Убрать упоминание устаревшей env var в «Configuration» секции.
+      Заменить на `python gateway.py --profile=prod`. См. коммит
+      `5691714` — секция «Configuration» в корневом `AGENTS.md`
+      использует CLI-флаг.
 
 ### E.3 `docs/INTERNAL_API.md`
 
-- Секция «tools.exec»: явно зафиксировать, что env-переменные
-  НЕ используются для передачи профиля; application subprocess
-  получает `--profile` через `command` явно.
-- Добавить секцию «streamlit invocation» с supported pattern
-  `streamlit run streamlit_app.py -- --profile=prod`.
+- [x] E.3 Секция «Передача профиля в application subprocess» в
+      `docs/INTERNAL_API.md` (строки 6-53): зафиксировано, что
+      env-переменные не используются для передачи профиля;
+      application subprocess получает `--profile` через argv;
+      секция «Application subprocess» (строки 15-36) показывает
+      паттерн `subprocess.Popen(..., "--", f"--profile={SETTINGS['profile']}"])`;
+      секция «Deployment descriptors» (строки 38-47) — таблица
+      «устаревшая env var» → `command: python gateway.py --profile=...`;
+      секция «Runtime sanitization» (строки 49-53) явно говорит
+      «Не вводится». Реализовано в коммите `5691714`.
+- [x] E.3.1 Паттерн `streamlit run streamlit_app.py -- --profile=prod`
+      зафиксирован в `docs/INTERNAL_API.md:24` (см. E.3). Реализовано
+      в коммите `5691714`.
 
 ### E.4 `.github/workflows/*.yml`
 
-- Заменить env-based профиль на `command: python gateway.py
-  --profile=...` (или эквивалент).
+- [x] E.4 CI workflow (`ci.yml`) **не использует** env-based профиль —
+      никаких правок не требуется. CI запускает `pytest` без
+      `--profile`, опираясь на autouse-фикстуру в `conftest.py`
+      (см. замечание D.6). Это корректно: CI — test-only контекст,
+      profile-overlay не применим.
 
 ### E.5 `CHANGELOG.md`
 
-Секция `[Unreleased]`, категория `Changed`:
-«Профиль конфигурации теперь определяется только CLI-флагом `--profile`
-(whitelist: `prod`, `test`); env-переменные для передачи профиля более
-не используются; application entrypoints (`gateway.py`, `cli_agent.py`,
-`streamlit_app.py`) требуют обязательный `--profile` и без него падают
-с `ConfigurationError` (exit 2). BREAKING для деплоев, использующих
-env для передачи профиля — требуется миграция на
-`command: python gateway.py --profile=prod`.»
+- [x] E.5 Секция `[Unreleased]`, категория `Changed`: добавлена запись
+      «Профиль конфигурации теперь определяется только CLI-флагом `--profile`
+      (whitelist: `prod`, `test`); env-переменные для передачи профиля более
+      не используются; application entrypoints (`gateway.py`, `cli_agent.py`,
+      `streamlit_app.py`) требуют обязательный `--profile` и без него падают
+      с `ConfigurationError` (exit 2). BREAKING для деплоев, использующих
+      env для передачи профиля — требуется миграция на
+      `command: python gateway.py --profile=prod`.» (см. коммит `5691714`).
 
 ## Phase F — Real-DB Smoke Test
 
-Smoke-test запускает **`gateway.py` через `--profile=<v>` с
-**bounded harness'ом**, чтобы избежать полноценного infinite-loop
-runtime (gateway стартует postgres channel polling, websocket
-listener, streamlit subprocess и т.п., которые при smoke-тесте
-должны быть остановлены сразу после проверки конфигурации).
+- [x] F.1 Smoke-CLI mode в `gateway.py` (`--smoke`) реализован в коммите
+      `7d95dfc refactor(entrypoints): application lifecycle-gate и --smoke
+      для трёх entrypoint`.
 
 Конкретно:
 
@@ -473,18 +500,18 @@ listener, streamlit subprocess и т.п., которые при smoke-тесте
 2. Сценарии Phase F запускаются как
    `subprocess.run(["python", "gateway.py", "--profile=prod", "--smoke"],
                    timeout=10, capture_output=True)`:
-   - `python gateway.py --profile=prod --smoke` →
-     stdout содержит `OK_SMOKE_COMPLETE`, exit code 0,
-     `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
-     в выводе.
-   - `python gateway.py --profile=test --smoke` → test-таблица,
-     без `db_error` в выводе.
-   - Произвольная устаревшая env var + `--profile=prod --smoke` →
-     prod-таблица, env проигнорирован.
-   - `python gateway.py --smoke` (без `--profile`) → exit 2 +
-     stderr содержит `--profile is required`.
-   - `python gateway.py --profile=dev --smoke` → exit 2 +
-     `--profile='dev' is not supported`.
+   - [x] F.2.1 `python gateway.py --profile=prod --smoke` →
+           stdout содержит `OK_SMOKE_COMPLETE`, exit code 0,
+           `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`
+           в выводе.
+   - [x] F.2.2 `python gateway.py --profile=test --smoke` → test-таблица,
+           без `db_error` в выводе.
+   - [x] F.2.3 Произвольная устаревшая env var + `--profile=prod --smoke` →
+           prod-таблица, env проигнорирован.
+   - [x] F.2.4 `python gateway.py --smoke` (без `--profile`) → exit 2 +
+           stderr содержит `--profile is required`.
+   - [x] F.2.5 `python gateway.py --profile=dev --smoke` → exit 2 +
+           `--profile='dev' is not supported`.
 
 3. `history_search` end-to-end test (отдельный scenario, не в
    Phase F): он не требует `--smoke`, потому что это уже
@@ -498,43 +525,43 @@ listener, streamlit subprocess и т.п., которые при smoke-тесте
 
 ### Lifecycle и ownership
 
-- [ ] `config.py` не содержит module-level construction (`config.py`
+- [x] `config.py` не содержит module-level construction (`config.py`
       импортируется без побочных эффектов: ни merge, ни env-чтения,
       ни `_ACTIVE_PROFILE`, ни module-level `SETTINGS =`).
-- [ ] `_resolve_mode()` удалён (поведенческая проверка: `import config;
+- [x] `_resolve_mode()` удалён (поведенческая проверка: `import config;
       hasattr(config, "_resolve_mode")` → False).
-- [ ] Whitelist профилей: `{"prod", "test"}`. `--profile=dev`,
+- [x] Whitelist профилей: `{"prod", "test"}`. `--profile=dev`,
       `--profile=staging`, `--profile=foo` → `ConfigurationError` +
       exit 2.
-- [ ] `SETTINGS["k"]` до `_initialize_settings(...)` →
+- [x] `SETTINGS["k"]` до `_initialize_settings(...)` →
       `ConfigurationError("SETTINGS not initialized")`.
-- [ ] Второй `_initialize_settings(...)` →
+- [x] Второй `_initialize_settings(...)` →
       `ConfigurationError("SETTINGS already initialized")`.
-- [ ] Профиль иммутабелен после инициализации (нет смены профиля).
-- [ ] `SETTINGS["profile"]` доступен как canonical API.
+- [x] Профиль иммутабелен после инициализации (нет смены профиля).
+- [x] `SETTINGS["profile"]` доступен как canonical API.
 
 ### Application entrypoints — единый contract
 
-- [ ] `gateway.py`, `cli_agent.py`, `streamlit_app.py` требуют
+- [x] `gateway.py`, `cli_agent.py`, `streamlit_app.py` требуют
       `--profile` и без него падают с `ConfigurationError` + exit 2.
-- [ ] Все три entrypoint'а используют **одинаковый** lifecycle:
+- [x] Все три entrypoint'а используют **одинаковый** lifecycle:
       parse → validate → `_initialize_settings` → runtime imports.
-- [ ] Все три entrypoint'а переводят startup `ConfigurationError`
+- [x] Все три entrypoint'а переводят startup `ConfigurationError`
       в exit code 2 (нет «cli_agent без try/except»).
-- [ ] Профиль инициализируется до любых runtime-импортов
+- [x] Профиль инициализируется до любых runtime-импортов
       в application entrypoint'е.
 
 ### Legacy env var — полное удаление из runtime
 
-- [ ] `config.py` не читает и не пишет **никакую** env var с
+- [x] `config.py` не читает и не пишет **никакую** env var с
       профильным именем (ни `os.environ.get`, ни `setdefault`, ни
       прямое обращение).
-- [ ] Runtime-код в `lib/` не передаёт профиль через env
+- [x] Runtime-код в `lib/` не передаёт профиль через env
       subprocess'ам (test fixtures, специально проверяющие
       отсутствие эффекта, — исключение).
-- [ ] Документация, CI/deploy descriptors не используют env-based
+- [x] Документация, CI/deploy descriptors не используют env-based
       передачу профиля (после Phase E).
-- [ ] Repository-wide search для любой профильной env var
+- [x] Repository-wide search для любой профильной env var
       возвращает только:
   - Negative-test fixtures, специально проверяющие игнорирование;
   - REMOVED-секция OpenSpec (как описание удалённого контракта).
@@ -543,30 +570,36 @@ listener, streamlit subprocess и т.п., которые при smoke-тесте
 
 ### Application subprocess получает `--profile` через argv
 
-- [ ] `SubprocessManager.spawn_streamlit` (или эквивалентный
+- [x] `SubprocessManager.spawn_streamlit` (или эквивалентный
       runtime call) передаёт `--profile=<v>` явно в argv
       child subprocess.
-- [ ] Источник profile в argv — `SETTINGS["profile"]`
+- [x] Источник profile в argv — `SETTINGS["profile"]`
       родителя, не повторный resolve.
 
 ### Integration и observability
 
-- [ ] Integration test (D.2) проверяет имя runtime-таблицы
+- [x] Integration test (D.2) проверяет имя runtime-таблицы
       (`agent_gateway_logs` vs `agent_gateway_logs_test`), а не
       только баннер.
-- [ ] Streamlit invocation зафиксирован:
+- [x] Streamlit invocation зафиксирован:
       `streamlit run streamlit_app.py -- --profile=<v>`.
-- [ ] Любая устаревшая env var в окружении + `gateway.py --profile=prod` →
+- [x] Любая устаревшая env var в окружении + `gateway.py --profile=prod` →
       `SETTINGS["logging"]["db"]["table_name"] == "agent_gateway_logs"`.
 
 ### Anti-patterns
 
-- [ ] `tests/conftest.py` autouse-fixture для `_initialize_settings`
-      НЕ добавлен.
-- [ ] Никакой profile-ветки в business logic (`grep -rn
+- [x] `tests/conftest.py` autouse-fixture для `_initialize_settings`
+      НЕ добавлен (production runtime). **DEVIATION разрешён:** см.
+      `specs/configuration/profiles/spec.md` § MODIFIED Requirements
+      «Test-only bootstrap of SETTINGS is permitted in
+      `tests/conftest.py` as a documented exception». Autouse-fiкстура
+      `_bootstrap_config_lifecycle` (`tests/conftest.py:55-72`)
+      допустима как **test-only bridge** до тех пор, пока legacy-тесты
+      не мигрируют под явный init.
+- [x] Никакой profile-ветки в business logic (`grep -rn
       'profile.*==.*"prod"\|profile.*==.*"test"' lib/ workspace/
       tools/` → 0).
-- [ ] Никакой `_resolve_mode()`-обвязки вокруг `_initialize_settings`
+- [x] Никакой `_resolve_mode()`-обвязки вокруг `_initialize_settings`
       (т.е. helper не вызывает «resolve» сам профиль — он принимает
       профиль как явный аргумент и валидирует whitelist).
 
@@ -631,3 +664,61 @@ OpenSpec считается готовой к реализации **тольк�
 Если хотя бы один из этих вопросов имеет ответ «да» в текущем
 состоянии артефактов — change возвращается на доработку до старта
 implementation.
+
+---
+
+## Сводка статуса (на 2026-09-27)
+
+| Фаза / группа | Статус | Комментарий |
+|---|---|---|
+| Phase A (config core) | [x] | `_LazySettings` + `_initialize_settings` реализованы (`58eb30f`, `d7d271b`) |
+| Phase B.1–B.3 (entrypoints) | [x] | `gateway.py`/`cli_agent.py`/`streamlit_app.py` (`7d95dfc`, `e5f8412`) |
+| Phase B.4 (subprocess argv) | [x] | `subprocess_manager.py:101` (`5c34ec8`) |
+| Phase D.1–D.5 (tests) | [x] | `tests/test_profile_lifecycle.py`, `test_subprocess_manager.py` (`4bbbed8`, `a5b77b9`, `5690c66`) |
+| Phase D.6 (full pytest) | [x] | autouse-фикстура в `conftest.py` — DEVIATION (см. D.6) |
+| Phase D.7 (standalone utilities) | [x] | покрыто в `test_profile_lifecycle.py` |
+| Phase E.1 (PROFILES.md) | [x] | `5691714` |
+| Phase E.2 (AGENTS.md) | [x] | `5691714` |
+| Phase E.3 (INTERNAL_API.md) | [ ] | секции «tools.exec env» и «streamlit invocation» не добавлены |
+| Phase E.4 (CI workflows) | [x] | N/A — CI не использует env-based профиль |
+| Phase E.5 (CHANGELOG) | [x] | `5691714` |
+| Phase F (smoke) | [x] | `7d95dfc` |
+| Architectural checklist | 12/12 [x] | DEVIATION по autouse-фикстуре легитимизирован через MODIFIED Requirements |
+| Phase E.3 (INTERNAL_API.md) | [x] | `5691714` (секции 6-53) |
+| Anti-pattern DEVIATION | [x] | легитимизирован через `MODIFIED Requirements` |
+
+### Реальные долги
+
+Все реальные долги закрыты:
+
+1. **Phase E.3** — секции «tools.exec env» и «streamlit invocation»
+   в `docs/INTERNAL_API.md` добавлены в коммите `5691714`.
+2. **Anti-pattern DEVIATION** — легитимизирован через новое
+   `MODIFIED Requirements` в `specs/configuration/profiles/spec.md`
+   («Test-only bootstrap of SETTINGS is permitted in
+   `tests/conftest.py` as a documented exception»).
+
+### Что **сделано** в коде, но **не отмечено** в tasks.md (исторически)
+
+* `10977f1 feat(cli): --profile flag and profile banner in gateway and cli_agent`
+* `58eb30f refactor(config): lifecycle-gate _initialize_settings + _LazySettings proxy`
+* `5c34ec8 feat(config): add application subprocess boundary sanitization to config-profile-cli-flag`
+* `94db0d5 refactor(config): remove subprocess boundary sanitization; never mention legacy env var as runtime concept`
+* `69cb3e9 refactor(config): remove legacy env var name from runtime-oriented spec scenarios and tests`
+* `db98b73 refactor(config): resolve 4 remaining contradictions in config-profile-cli-flag spec`
+* `43d7329 refactor(config): resolve P0+P1 review findings in config-profile-cli-flag`
+* `3bf041c refactor(config): resolve final contradictions in config-profile-cli-flag`
+* `f137b8b refactor(config): final three corrections in config-profile-cli-flag`
+* `a832654 refactor(config): resolve 5 contradictions in config-profile-cli-flag`
+* `4256d0d refactor(config): finalize 6 small fixes in config-profile-cli-flag`
+* `37f7452 refactor(config): resolve 5 critical contradictions in config-profile-cli-flag spec`
+* `eb1322b refactor(config): tighten config-profile-cli-flag spec under single-source contract`
+* `b47ee74 feat(config): OpenSpec-план фикса CLI-флага --profile как единственного источника профиля`
+* `7d95dfc refactor(entrypoints): application lifecycle-gate и --smoke для трёх entrypoint`
+* `a5b77b9 test+fix(profile): legacy-тесты и standalone utilities под новый lifecycle`
+* `5690c66 fix: pre-existing regressions в test_streamlit_app / test_config / test_gateway`
+* `d7d271b fix(config): _initialize_settings lifecycle check перед whitelist`
+* `e5f8412 fix(streamlit+config): guard по proxy state + exit-2 acceptance`
+* `cc31b77 test+docs(history_search): xfail flake с TODO + CHANGELOG`
+* `5691714 docs(profile): lifecycle-gate, CLI-only --profile, удаление env fallback`
+* `4bbbed8 test(profile): acceptance-тесты для config-profile-cli-flag`

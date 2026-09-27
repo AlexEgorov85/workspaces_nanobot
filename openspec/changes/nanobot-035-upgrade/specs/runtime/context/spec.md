@@ -1,3 +1,10 @@
+## Purpose
+
+Описывает нормативные требования к runtime-context подсистеме после
+апгрейда upstream `nanobot-ai 0.3.5`. Цель — гарантировать совместимость
+runtime-patcher с новыми сигнатурами и миграцию compaction pipeline на
+upstream EventSink (`CompactionEventSubscriber`), избегая regressions.
+
 ## ADDED Requirements
 
 ### Requirement: Совместимость с upstream nanobot
