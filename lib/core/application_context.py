@@ -355,6 +355,8 @@ class ApplicationContext:
                 len(patch_report.failed),
                 [name for name, _ in patch_report.failed],
             )
+        _emit_patch_inventory_banner(patch_report)
+        _emit_project_tools_inventory_banner(patch_report)
 
         # 8. Помощники
         ctx.transcription_service = _make_transcription(ctx.config)
@@ -600,6 +602,212 @@ def _log_connected_hooks(ctx: ApplicationContext) -> None:
         # Старые Windows-консоли (cp1251) не умеют ✓ (U+2713) — выводим
         # тот же список обычным print, чтобы информация не пропадала.
         print(f"Hooks connected: {label}")
+    _emit_hook_inventory_banner(ctx)
+
+
+def _emit_hook_inventory_banner(ctx: ApplicationContext) -> None:
+    """Промпт-сводка по хукам через ``runtime_inventory.diff_hooks``.
+
+    Печатает:
+      * (нет вывода) — все required хуки на месте, нет unexpected;
+      * жёлтый блок — missing_optional / unexpected (не критично);
+      * красный блок — missing_required / missing_factory (нужно внимание).
+
+    Срабатывает ПОСЛЕ обычного ``Hooks connected: ...`` лога; использует
+    ``rich.console.Console`` с явными цветами/рамочкой, чтобы в глаза
+    бросалось даже если loguru/WARNING уровень подавлен.
+    """
+    from lib.services.runtime_inventory import collect_actual_hook_names, diff_hooks
+
+    actual_names, factory_count = collect_actual_hook_names(ctx)
+    diff = diff_hooks(actual_names, actual_factory_count=factory_count)
+
+    has_issue = (
+        diff["missing_required"] or diff["missing_factory"] or diff["unexpected"]
+    )
+    has_warn = diff["missing_optional"]
+    if not has_issue and not has_warn:
+        return
+
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+
+        console = Console(stderr=True)
+        if has_issue:
+            style = "bold red"
+            header = "HOOK INVENTORY: critical drift detected"
+        else:
+            style = "bold yellow"
+            header = "HOOK INVENTORY: optional drift"
+
+        lines: list[str] = []
+        if diff["missing_required"]:
+            lines.append(
+                f"[red]MISSING REQUIRED:[/red] {', '.join(diff['missing_required'])}"
+            )
+        if diff["missing_factory"]:
+            lines.append(
+                f"[red]MISSING FACTORY:[/red] {', '.join(diff['missing_factory'])}"
+            )
+        if diff["unexpected"]:
+            lines.append(
+                f"[yellow]UNEXPECTED:[/yellow] {', '.join(diff['unexpected'])}"
+            )
+        if diff["missing_optional"]:
+            lines.append(
+                f"[yellow]MISSING OPTIONAL:[/yellow] {', '.join(diff['missing_optional'])}"
+            )
+
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title=header,
+                border_style=style.replace("bold ", ""),
+                title_align="left",
+            )
+        )
+    except Exception as exc:
+        # Fallback на plain stderr, чтобы не потерять диагностику
+        # в средах без rich (например, при cp1251 + minimal Python).
+        import sys
+        sys.stderr.write(
+            f"HOOK INVENTORY: missing_required={diff['missing_required']} "
+            f"unexpected={diff['unexpected']} "
+            f"missing_factory={diff['missing_factory']} "
+            f"missing_optional={diff['missing_optional']} ({exc})\n"
+        )
+
+
+def _emit_patch_inventory_banner(patch_report: Any) -> None:
+    """Промпт-сводка по runtime-патчам через ``runtime_inventory.diff_runtime_patches``.
+
+    Печатает красный блок, если required-патч fail'ит или не запустился;
+    жёлтый — если есть failed optional (полезно видеть, но не ломает
+    runtime). Срабатывает ПОСЛЕ обычного ``Runtime patches:`` лога.
+    """
+    from lib.services.runtime_inventory import diff_runtime_patches
+
+    diff = diff_runtime_patches(
+        applied=list(patch_report.applied),
+        skipped=list(patch_report.skipped),
+        failed=list(patch_report.failed),
+    )
+
+    has_critical = diff["missing_required"] or diff["failed_required"]
+    has_warn = bool(patch_report.failed) and not has_critical
+    if not has_critical and not has_warn:
+        return
+
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+
+        console = Console(stderr=True)
+        if has_critical:
+            style = "bold red"
+            header = "RUNTIME PATCH INVENTORY: critical drift"
+        else:
+            style = "bold yellow"
+            header = "RUNTIME PATCH INVENTORY: optional patches failed"
+
+        lines: list[str] = []
+        if diff["missing_required"]:
+            lines.append(
+                f"[red]MISSING REQUIRED:[/red] {', '.join(diff['missing_required'])}"
+            )
+        if diff["failed_required"]:
+            lines.append(
+                f"[red]FAILED REQUIRED:[/red] {', '.join(diff['failed_required'])}"
+            )
+        if has_warn:
+            failed_optional = [
+                n for n, _ in patch_report.failed
+                if n not in diff["failed_required"]
+            ]
+            if failed_optional:
+                lines.append(
+                    f"[yellow]FAILED OPTIONAL:[/yellow] {', '.join(failed_optional)}"
+                )
+
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title=header,
+                border_style=style.replace("bold ", ""),
+                title_align="left",
+            )
+        )
+    except Exception as exc:
+        import sys
+        sys.stderr.write(
+            f"RUNTIME PATCH INVENTORY: missing_required={diff['missing_required']} "
+            f"failed_required={diff['failed_required']} "
+            f"failed={list(patch_report.failed)} ({exc})\n"
+        )
+
+
+def _emit_project_tools_inventory_banner(patch_report: Any) -> None:
+    """Промпт-сводка по project tools через ``runtime_inventory``.
+
+    Печатает красный блок, если required tool не зарегистрировался
+    (missing или failed); жёлтый — если unexpected tool или failed
+    optional. Срабатывает после ``apply_all`` (см. ``patch_project_tools``
+    detail-формат).
+    """
+    detail = patch_report.details.get("project_tools") if patch_report else None
+    if not detail:
+        return
+
+    from lib.services.runtime_inventory import diff_project_tools_from_detail
+
+    diff = diff_project_tools_from_detail(detail)
+
+    has_critical = diff["missing_required"] or diff["failed"]
+    has_warn = diff["unexpected"]
+    if not has_critical and not has_warn:
+        return
+
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+
+        console = Console(stderr=True)
+        if has_critical:
+            style = "bold red"
+            header = "PROJECT TOOLS INVENTORY: critical drift"
+        else:
+            style = "bold yellow"
+            header = "PROJECT TOOLS INVENTORY: drift"
+
+        lines: list[str] = []
+        if diff["missing_required"]:
+            lines.append(
+                f"[red]MISSING REQUIRED:[/red] {', '.join(diff['missing_required'])}"
+            )
+        if diff["failed"]:
+            lines.append(
+                f"[red]FAILED:[/red] {', '.join(diff['failed'])}"
+            )
+        if diff["unexpected"]:
+            lines.append(
+                f"[yellow]UNEXPECTED:[/yellow] {', '.join(diff['unexpected'])}"
+            )
+
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title=header,
+                border_style=style.replace("bold ", ""),
+                title_align="left",
+            )
+        )
+    except Exception as exc:
+        import sys
+        sys.stderr.write(
+            f"PROJECT TOOLS INVENTORY: missing_required={diff['missing_required']} "
+            f"failed={diff['failed']} unexpected={diff['unexpected']} ({exc})\n"
+        )
 
 
 def _register_readiness_checks(ctx: ApplicationContext) -> None:

@@ -234,6 +234,36 @@ def _current_request_sender_id() -> str | None:
     return None
 
 
+def _usage_to_dict(usage: Any) -> dict | None:
+    """Унифицированный адаптер ``LLMUsage | dict | None -> dict | None``.
+
+    Возвращает ``dict`` с per-turn полями (``prompt_tokens``,
+    ``completion_tokens``, ``total_tokens``, ...) для записи в БД и
+    payload-события. Принимает как dataclass ``nanobot.llm_usage.models.LLMUsage``
+    (с методом ``to_turn_dict()``), так и legacy-``dict``. На любом
+    неожиданном типе или сбое конверсии — ``None`` (fail-soft).
+    """
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return dict(usage) if usage else None
+    to_turn = getattr(usage, "to_turn_dict", None)
+    if callable(to_turn):
+        try:
+            payload = to_turn()
+        except Exception:
+            return None
+        return dict(payload) if isinstance(payload, dict) and payload else None
+    to_dict = getattr(usage, "to_dict", None)
+    if callable(to_dict):
+        try:
+            payload = to_dict()
+        except Exception:
+            return None
+        return dict(payload) if isinstance(payload, dict) and payload else None
+    return None
+
+
 class DatabaseLoggingHook:
     """Агентский хук — пересылает tool- и run-события в DbLoggingService.
 
