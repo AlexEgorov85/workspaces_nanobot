@@ -1,4 +1,4 @@
-"""Zero-reference audit: regression guard для legacy symbols (PLAN §34).
+"""Zero-reference audit: regression guard для legacy symbols.
 
 Это **regression guard**, не просто print. Три режима:
 
@@ -10,11 +10,10 @@
   ``node_modules`` исключены.
 * ``assert_no_legacy()`` — поднимает ``AssertionError`` при production hit,
   при наличии запрещённых файлов или при наличии legacy секций в
-  ``project.json`` (Этап 11/18).
+  ``project.json``.
 * ``main()`` — печать отчёта (production vs test разделение).
 
-**Один canonical registry** для всего проекта (Этап B+C remediation,
-2026-09-09):
+**Один canonical registry** для всего проекта:
 
 * ``_FORBIDDEN_MODULES`` — модули, запрещённые в production. Расширен
   на полный набор из ``test_legal_summarizer_no_legacy.py`` —
@@ -23,7 +22,7 @@
 * ``_FORBIDDEN_FILES`` — файлы, которые были удалены и не должны быть
   воссозданы.
 * ``_LEGACY_CONFIG_KEYS`` — legacy-ключи в ``project.json``.
-* ``_ALLOWED_LEGACY_TESTS`` — **test-level allow-list** (Этап C):
+* ``_ALLOWED_LEGACY_TESTS`` — **test-level allow-list**:
   словарь ``{file.py::test_function_name: rationale}``. Allow-list
   применяется **только к конкретным тестовым функциям**, а не ко
   всему файлу. Это позволяет правильным characterization-тестам

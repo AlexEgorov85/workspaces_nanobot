@@ -23,8 +23,8 @@ runtime-таблиц остальная логика агента **не зна�
 > и любой implicit-fallback для profile resolution удалены. После
 > `import config` доступ к `SETTINGS` бросает `ConfigurationError`,
 > пока `config._initialize_settings(profile)` не отработает.
-> Подробности — `openspec/changes/config-profile-cli-flag/` (текущий
-> change) и `lib/utils/project_version.py`.
+> Подробности — `openspec/specs/configuration/profiles/spec.md` и
+> `lib/utils/project_version.py`.
 
 ## Структура файлов
 

@@ -8,9 +8,10 @@
 ## Зачем это нужно
 
 Каждый skill читает свои данные через общий DuckDB-снапшот
-(`workspace/data_store/duckdb/cache.duckdb`). Чтобы snapshot содержал нужные
+(`resolve_publish_path()`: `project.json::gateway.cache.local_path` либо
+`~/.cache/nanobot/duckdb/cache.duckdb`). Чтобы snapshot содержал нужные
 таблицы, sync-слой (`PgDuckDbSyncService` + `DuckDbCacheStore`) должен знать,
-что именно синхронизировать. До рефакторинга это знание было разбросано:
+что именно синхронизировать. Раньше это знание было разбросано:
 
 - по плоским полям skill'а (`db_tables`, `db_additional_tables`, `mode_vector_*`,
   `track_column_overrides`);

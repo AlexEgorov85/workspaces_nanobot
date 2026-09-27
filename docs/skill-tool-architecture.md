@@ -84,16 +84,15 @@ Tool — это generic capability. Какой skill их использует �
 
 Skill пишет инструкции **в терминах capability**, а не в терминах Python:
 - ✅ «use `scripts/cli.py --mode vector` with `--index-name violations_index`»
-- ❌ «call `VectorSearchTool.execute(query=...)`»
-- ❌ «import VectorSearchTool»
+- ❌ «call a `vector_search` tool class with `query=...`»
+- ❌ «import a Python tool class»
 
 ---
 
-## 6. Контракт `duckdb_query` (удалён)
+## 6. Read-only SQL — не Agent-facing tool
 
-Публичный Agent-facing tool `duckdb_query` (`workspace/tools/duckdb_query_tool.py`)
-**не существует**. Read-only SQL не является Agent-facing tool'ом:
-Agent использует only predefined-скрипты через CLI
+Agent-facing tool `duckdb_query` **не существует**. Read-only SQL не является
+Agent-facing tool'ом: Agent использует only predefined-скрипты через CLI
 (`scripts/cli.py --mode predefined --script <name>`).
 
 Read-only политика сохранена как infra-контракт Core:
@@ -107,11 +106,10 @@ Read-only политика сохранена как infra-контракт Core
 
 ---
 
-## 7. Контракт `vector_search` (удалён)
+## 7. Semantic search — не Agent-facing tool
 
-Публичный Agent-facing tool `vector_search` (`workspace/tools/vector_search_tool.py`)
-**не существует**. Semantic search не является Agent-facing tool'ом:
-доступ — через CLI skill'а:
+Agent-facing tool `vector_search` **не существует**. Semantic search не является
+Agent-facing tool'ом: доступ — через CLI skill'а:
 
 ```text
 python scripts/cli.py --mode vector --query '<текст>' --index-name <name>
@@ -153,15 +151,11 @@ Step 7: do not use vector/search для COUNT/GROUP BY.
 Skill `audit_analyzer` — **CLI-only**: автономный skill-side CLI
 `scripts/cli.py --mode <predefined | generated_sql | vector>` (единый entry-point,
 вызывается агентом через `tools.exec`; также используется бенчмарками/CI).
-Generic tools `workspace/tools/duckdb_query_tool.py` (точный SELECT)
-и `workspace/tools/vector_search_tool.py` (семантика) **не существуют** —
-агент не имеет к ним доступа.
+Generic tools `duckdb_query` (точный SELECT) и `vector_search` (семантика)
+**не существуют** — агент не имеет к ним доступа.
 Подробности — в `docs/skill-tool-inventory.md` и `workspace/skills/audit_analyzer/SKILL.md`.
 
-Раньше (рефакторинг `refactor/skills-tools-cleanup`) CLI был удалён в пользу
-tool-only, но позже восстановлен (коммиты `f4b646e`, `94fadf2`, `9e646ef`):
-режимы `--mode predefined`, `--mode generated_sql`, `--mode vector` — активны.
-Tool'ы `run_predefined_script` и `nl_sql_generate` при этом удалены: их логика
+Tool'ы `run_predefined_script` и `nl_sql_generate` отсутствуют: их логика
 живёт в CLI skill'а (`predefined.run`, `generated_sql_mode.run`) и skill-side
 helper `scripts/skill_config.py` / `scripts/llm.py` (прямой вызов
 `lib.services.llm_client.call_llm` для LLM-генерации SQL).

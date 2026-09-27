@@ -4,7 +4,7 @@
 должен содержать самодостаточный ``AgentHook``-подкласс, который можно
 инстанцировать через ``cls(workspace_dir=workspace_dir)`` (единый контракт
 для всех плагинов). Фреймворковые хуки (``lib/hooks/``: ``ToolAuditHook``,
-``DatabaseLoggingHook``, ``BaseToolTrackingHook``) сюда НЕ входят — их
+``TerminalToolPrintHook``, ``DatabaseLoggingHook``) сюда НЕ входят — их
 провязывает ``AgentFactory``/``ApplicationContext`` явно, поэтому здесь
 не нужны ни ``inspect.signature``, ни маркеры-исключения, ни чёрные списки.
 

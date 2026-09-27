@@ -114,7 +114,8 @@
    - UI покажет пустую историю для этих сессий.
 
    Миграционный скрипт вне scope этого change; см. обсуждение в
-   [openspec/changes/storage-hybridization/proposal.md](../openspec/changes/storage-hybridization/proposal.md).
+   архивированном proposal
+   [openspec/changes/archive/2026-09-27-storage-hybridization/proposal.md](../openspec/changes/archive/2026-09-27-storage-hybridization/proposal.md).
 
 2. **Передача DSN в pool.** Убедитесь, что `channels.postgres.dsn`
    настроен — иначе `SessionColdSyncService` не запустится (см.
@@ -356,7 +357,8 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
 
 **Что НЕ изменилось:**
 
-- API точек входа: `python gateway.py`, `python cli_agent.py -P`.
+- API точек входа: `python gateway.py --profile=<prod|test>`,
+  `python cli_agent.py -P --profile=<prod|test>` (флаг `--profile` обязателен).
 - Имена таблиц БД.
 - `benchmarks/items/*.yaml` — формат совместим.
 - `audit_analyzer` режимы `predefined` / `sql` / `vector`.

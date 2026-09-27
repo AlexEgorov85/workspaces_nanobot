@@ -1,12 +1,12 @@
 """apply_test_profile_tables.py — создать 6 runtime-таблиц профиля test.
 
 Эти таблицы перечислены в profiles/test.jsonc:
-    channels.postgres.table_name          -> public.agent_conversation_messages_test
-    channels.postgres.messages_table      -> public.agent_session_messages_test
-    channels.postgres.meta_table          -> public.agent_session_meta_test
-    channels.postgres.claims_table        -> public.agent_worker_claims_test
-    logging.db.table_name                 -> public.agent_gateway_logs_test
-    logging.db.question_runs_table        -> public.agent_question_runs_test
+    channels.postgres.table_name     = public.agent_conversation_messages_test
+    channels.postgres.messages_table = public.agent_session_messages_test
+    channels.postgres.meta_table     = public.agent_session_meta_test
+    channels.postgres.claims_table   = public.agent_worker_claims_test
+    logging.db.table_name            = public.agent_gateway_logs_test
+    logging.db.question_runs_table   = public.agent_question_runs_test
 
 Применяет 6 create-скриптов из sql/<domain>/create_public_agent_*_test.sql
 через psycopg2 (DDL разбивается на отдельные statement'ы по ';').

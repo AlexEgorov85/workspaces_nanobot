@@ -83,7 +83,7 @@ Retry — задача **Agent'а** (обычно 2–3 переформулир
 ## Источник predefined скриптов
 
 Канонический источник SQL — `public.agent_predefined_scripts` в PostgreSQL.
-Python `REGISTRY` (legacy) удалён в Phase 7; единственный путь — DB-first lookup
+Python `REGISTRY` (legacy) отсутствует; единственный путь — DB-first lookup
 через `scripts/predefined/db_loader.py`. Sql-функция `load_all` живёт
 в `predefined`-подсистеме и **не дублируется** в `generated_sql_mode`.
 
@@ -304,9 +304,9 @@ Agent-цикл:
 - LLM-протоколами (`lib/services/llm_client.py` / Core).
 
 Доступ агента — через CLI (`scripts/cli.py`). Generic tools
-(`duckdb_query_tool`, `vector_search_tool`) удалены в Phase 8 —
-Agent обращается к данным через маршрутизацию по CLI, и выбор режима —
-обязанность Agent'а (decision tree выше).
+`duckdb_query` и `vector_search` отсутствуют — агент обращается к данным
+через маршрутизацию по CLI, и выбор режима — обязанность Agent'а
+(decision tree выше).
 
 ## Как добавить новый predefined-скрипт
 
@@ -329,8 +329,9 @@ skill'а.
 # Список predefined-скриптов (имя, описание, параметры)
 python workspace/skills/audit_analyzer/scripts/cli.py --list-scripts
 
-# Список runtime-индексов (реальные FAISS-артефакты из PG store;
-# не декларация из project.json — её показывает tools/check_indexes.py).
+# Список runtime-индексов (реальные вектора из storage_table в
+# DuckDB-снапшоте; не декларация из project.json — её показывает
+# tools/check_indexes.py).
 python workspace/skills/audit_analyzer/scripts/cli.py --list-indexes
 ```
 
@@ -344,7 +345,7 @@ python workspace/skills/audit_analyzer/scripts/cli.py --list-indexes
 | Источник | Что отвечает | Как обнаружить |
 |---|---|---|
 | `project.json::gateway.vector.index.indexes.*` | **желаемое состояние** — какие индексы должны быть построены и как | `tools/check_indexes.py --json` (секция `declared`) |
-| `public.agent_vector_index_store` (PG) | **фактическое состояние** — какие FAISS-blob'ы собраны и доступны | `--list-indexes` И `tools/check_indexes.py` (секция `runtime`) |
+| `gateway.vector.index.storage_table` в DuckDB-снапшоте | **фактическое состояние** — какие индексы реально собраны (значения `source`) | `--list-indexes` И `tools/check_indexes.py` (секция `runtime`) |
 
 **Проверка согласованности:**
 
@@ -366,8 +367,9 @@ python tools/check_indexes.py --json      # structured diff, для CI
 
 **`--list-indexes` показывает только runtime-состояние.** Поэтому
 если ты только что добавил новый индекс в project.json — `--list-indexes`
-его **не покажет**, потому что FAISS-blob ещё не собран. Запусти
-`tools/build_vectors.py <name>` и проверь снова.
+его **не покажет**, потому что вектора ещё не собраны в
+`gateway.vector.index.storage_table`. Запусти `tools/build_vectors.py --index <name>`
+и проверь снова.
 
 ## Тесты
 

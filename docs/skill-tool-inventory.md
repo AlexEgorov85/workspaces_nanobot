@@ -42,30 +42,27 @@ entry-point доступа к данным, generic tools для SQL/vector от
 | `tests/e2e_test.py` (skill) | `workspace/skills/audit_analyzer/tests/e2e_test.py` | standalone (не pytest) |
 | `scripts/generated/` | `workspace/skills/audit_analyzer/scripts/generated/` | одноразовый dump-скрипт |
 | `providers.py` (навыка) | `workspace/skills/audit_analyzer/providers.py` (наброски без регистрации) | удалён — регистрация через `ApplicationContext._auto_register_skills()` |
-| `workspace.utils.event_log` module | `workspace/utils/event_log.py` (197 строк: `record_event`, `record_sync_event`, `emit_sync_event`) | удалён в release vX.Y — заменён `DbLoggingService.log_event(LogEvent(...))` / `DbLoggingService.try_log_event(...)` (change `unify-agent-event-logging-pipeline`, коммит `1893b17`); прямой SQL INSERT bypass ликвидирован |
+| `workspace.utils.event_log` module | `workspace/utils/event_log.py` (197 строк: `record_event`, `record_sync_event`, `emit_sync_event`) | отсутствует — заменён `DbLoggingService.log_event(LogEvent(...))` / `DbLoggingService.try_log_event(...)` (change `unify-agent-event-logging-pipeline`, коммит `1893b17`); прямой SQL INSERT bypass ликвидирован |
 | `tests/test_event_log.py` | `tests/test_event_log.py` (83 строки) | удалён — тестировал прямой INSERT bypass; заменён `tests/test_unified_event_logging_pipeline.py` (AST + ownership guard'ы) |
 
-## Последующие изменения (после слияния в `master`)
-
-После первоначального рефакторинга на ветке `master` (HEAD `bb844cf`) закреплены
-дополнительные границы конфигурации:
+## Границы конфигурации runtime
 
 - **Конфигурационная граница `skills.*`**: секции `embedding` и `cache` вынесены
   из `skills.<name>` на уровень общей runtime-инфраструктуры `gateway.vector.*`.
-  `SkillSettings` теперь имеет `model_config = ConfigDict(extra="forbid")`
-  (fail-fast на опечатках и legacy-ключах). Регистрация embedding —
-  `lib.core.skill_registration.register_embedding_config` удалена
-  (Resource Model Refactoring): параметры эмбеддера захардкожены
-  в `cache_provider_impl` (`_EMBED_*`-константы), токен — из переменной
-  окружения `EMBED_TOKEN`. Секция `gateway.vector.embedding` удалена.
-- **`tools/build_vectors.py`** стал generic: убран hardcoded `audit_analyzer`,
+  `SkillSettings` имеет `model_config = ConfigDict(extra="forbid")`
+  (fail-fast на опечатках и legacy-ключах). Регистрация embedding
+  (`lib.core.skill_registration.register_embedding_config`) отсутствует:
+  параметры эмбеддера захардкожены в `cache_provider_impl` (`_EMBED_*`-константы),
+  токен — из переменной окружения `EMBED_TOKEN`. Секция
+  `gateway.vector.embedding` в `project.json` отсутствует.
+- **`tools/build_vectors.py`** — generic: hardcoded `audit_analyzer` отсутствует,
   источник индексов — `gateway.vector.index.indexes` в `project.json`
   (PG-реестр `public.agent_vector_index_config` — legacy-артефакт,
-  кодом больше не читается). Коммит `bb844cf`.
+  кодом не читается).
 - **Embedding `auth_token`** (bearer) поддерживается через
   переменную окружения `EMBED_TOKEN` (см. `cache_provider_impl._EMBED_TOKEN_ENV`).
 
-## Целевая зависимость (после рефакторинга)
+## Целевая зависимость
 
 ```mermaid
 flowchart LR
@@ -77,9 +74,16 @@ flowchart LR
     class INFRA infra
 ```
 
-Контракт и инварианты — в [docs/skill-tool-architecture.md](skill-tool-architecture.md)
+Контракт и инварианты — в [skill-tool-architecture.md](skill-tool-architecture.md)
 (TARGET_ARCHITECTURE.md §4, §22.1, §22.2, §28). Tools `duckdb_query` /
 `vector_search` не существуют — Agent-доступ к `audit_analyzer` только
 через CLI `--mode predefined`. Любое падение
 `tests/test_skill_tool_independence.py` / `tests/test_architecture_tool_domain_free.py` /
 `tests/test_core_infrastructure_independence.py` — архитектурная регрессия.
+
+## История
+
+Историческая инвентаризация skill/tool, baseline'ы рефакторингов и планы
+миграций перенесены в [`_archive/`](_archive/) — на актуальное состояние
+не ссылаться. Сводка изменений проекта — в
+[`CHANGELOG.md`](../CHANGELOG.md).

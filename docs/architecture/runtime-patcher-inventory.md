@@ -63,7 +63,8 @@ target, nanobot version, проверенную public alternative, upgrade risk
   который дёргается каналом при получении `OutboundMessage.event` типа
   `ContextCompactionEvent`.
 
-Подробности: `openspec/changes/nanobot-035-upgrade/design.md`.
+Подробности: `openspec/changes/nanobot-035-upgrade/design.md`
+(рабочий change, ещё не архивирован).
 
 ### 14. `compact_command`
 

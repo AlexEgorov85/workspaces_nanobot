@@ -119,8 +119,8 @@ Hot-path контракт зафиксирован в `tests/contract/test_sessi
 
 `SessionColdSyncService` использует **единый** пул
 `workspace/utils/db.py`. Никаких собственных psycopg2-пулов.
-Полные правила зафиксированы в
-`openspec/changes/storage-hybridization/design.md` § «Connection
+Полные правила зафиксированы в архивированном
+`openspec/changes/archive/2026-09-27-storage-hybridization/design.md` § «Connection
 pool» (D-Pool.1 — D-Pool.7). Краткая сводка:
 
 - **DI через `utils.db.transaction()` / `utils.db.run()`** —

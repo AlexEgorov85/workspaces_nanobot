@@ -14,9 +14,10 @@ pip install nanobot-ai && pip install -r requirements.txt
 copy .secrets.env.example .secrets.env   # cp на Linux
 # Отредактируйте .secrets.env: DB_PASSWORD=... и # providers: llm / api_key=...
 python tools/migrate.py --apply         # применить миграции схемы
-python gateway.py                        # AgentLoop + Postgres/Redis каналы + Streamlit :8501
+# --profile обязателен (prod | test), иначе ConfigurationError + exit 2:
+python gateway.py --profile=prod        # AgentLoop + Postgres/Redis каналы + Streamlit :8501
 # или:
-python cli_agent.py -P -s dev           # REPL в patched-режиме (PostgreSQL)
+python cli_agent.py -P --profile=prod -s dev   # REPL в patched-режиме (PostgreSQL)
 ```
 
 Минимальный набор таблиц (если нет `migrate.py`):
@@ -32,14 +33,15 @@ psql -d nanobot -f sql/channels/create_public_agent_conversation_messages.sql
 ## 🛠 Команды
 
 ```bash
-python gateway.py                                                 # долгоживущий сервер
-python cli_agent.py                          # REPL vanilla (JSONL)
-python cli_agent.py -P -s my-session         # REPL patched (PGSessionManager + хуки)
-python benchmarks/runner.py --tags simple                         # оценка качества
-python tools/build_vectors.py --full-rebuild                      # перестроение FAISS-индексов
-python tools/build_vectors.py --status                            # текущее состояние
-python tools/check_worker_pool_integrity.py --fix                 # диагностика пула воркеров
-python tools/migrate.py --apply                                   # миграции схемы
+python gateway.py --profile=prod                              # долгоживущий сервер
+python cli_agent.py --profile=prod                            # REPL vanilla (JSONL)
+python cli_agent.py --profile=prod -P -s my-session           # REPL patched (PGSessionManager + хуки)
+python benchmarks/runner.py --tags simple                     # оценка качества
+python tools/build_vectors.py --full-rebuild                  # перестроение векторов в storage_table
+python tools/build_vectors.py --status                        # текущее состояние
+python tools/check_indexes.py                                 # declared vs runtime индексов
+python tools/check_worker_pool_integrity.py --fix             # диагностика пула воркеров
+python tools/migrate.py --apply                               # миграции схемы
 ```
 
 > **Навык `audit_analyzer`** предоставляет CLI `scripts/cli.py --mode <predefined | generated_sql | vector>`

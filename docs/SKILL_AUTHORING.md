@@ -482,7 +482,7 @@ FAISS-индексы строятся на его основе.
 Связь — **только через agent runtime/runtime CLI**: skill в `SKILL.md` описывает
 capability в терминах CLI («use `scripts/cli.py --mode vector` with
 `--index-name 'audits_index'`»), агент вызывает CLI. Сам skill generic tools
-**программно не вызывает** (tools `duckdb_query`/`vector_search` удалены в фазе 8).
+**программно не вызывает** (tools `duckdb_query` / `vector_search` не существуют).
 
 ### 7.2 Что РАЗРЕШЕНО в Skill
 
@@ -540,9 +540,10 @@ Skill пишет инструкции в терминах capability, не Pytho
 | `scripts/cli.py --mode generated_sql` | `--query --context` → `{status, columns, rows, ...}` | LLM-конфиг (эмбеддер захардкожен в `cache_provider_impl`) |
 | `compact_context` tool | `{session_key, force}` | `gateway.compact.*` |
 
-Generic tools `duckdb_query` / `vector_search` **удалены в фазе 8** — их
-контракты см. исторически в `docs/skill-tool-architecture.md:92-134`.
-Для добавления нового generic tool — скопируйте `workspace/tools/example.py`.
+Generic tools `duckdb_query` / `vector_search` **не существуют** — доступ к данным
+skill'а идёт только через CLI (границы описаны в
+`docs/skill-tool-architecture.md` § 6–7). Для добавления нового generic tool —
+скопируйте `workspace/tools/example.py`.
 
 ---
 
@@ -886,7 +887,7 @@ python cli_agent.py          # smoke
 - `workspace/hooks/session_file_redirect_hook.py` — перенаправление файлов в `data_store/cache/sessions/<key>/`.
 - `workspace/hooks/recent_files_hook.py` — автоприкрепление созданных файлов.
 - `workspace/tools/{history_search_tool,legal_summarizer_query,compact_context}.py` — generic tools.
-- `workspace/tools/example.py` — шаблон нового tool'а. (Tools `duckdb_query_tool` / `vector_search_tool` удалены в фазе 8.)
+- `workspace/tools/example.py` — шаблон нового tool'а. (Tools `duckdb_query` / `vector_search` не существуют.)
 
 При изменении `TARGET_ARCHITECTURE.md` или `skill-tool-architecture.md`
 синхронизировать этот документ.

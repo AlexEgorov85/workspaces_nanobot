@@ -67,8 +67,7 @@
 | `workspace/tools/compact_context.py:34` | `Tool`, `ToolResult`, `tool_parameters` | ручное сжатие |
 | `workspace/tools/example.py:39` | `Tool`, `tool_parameters` | шаблон |
 
-(`duckdb_query_tool.py` / `vector_search_tool.py` удалены в фазе 8 — их импорты
-из инвентаря исключены.)
+(`duckdb_query` / `vector_search` — не Agent-facing tools, в инвентарь не входят.)
 
 ### 2.5. Сессии (YELLOW/RED)
 

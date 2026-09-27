@@ -67,9 +67,10 @@ DuckDB-кеш публикуется **только gateway'ом** через `D
   2. **default** (v2.5.2+): `~/.cache/nanobot/duckdb/cache.duckdb`
      (POSIX `fcntl` работает там штатно)
 
-Запустите `python gateway.py` и подождите первого цикла синхронизации. Старый путь
+Запустите `python gateway.py --profile=prod` и подождите первого цикла
+синхронизации. Старый путь
 `workspace/skills/audit_analyzer/cache/audit_cache.duckdb` из
-`project.json:in_memory_cache_path` больше не используется.
+`project.json::in_memory_cache_path` больше не используется.
 
 ### `IO Error: Could not set lock on file .../cache.duckdb.tmp: Conflicting lock is held in PID 0`
 

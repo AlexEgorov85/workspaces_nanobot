@@ -14,11 +14,17 @@ reference** по своей подсистеме; README в корне — эт�
 | `architecture/component-model` | Модель архитектурного компонента и шаблон spec |
 | `architecture/skill-tool-boundary` | Граница Skill / Tool |
 | `runtime/context` | `ApplicationContext` и его жизненный цикл |
+| `runtime/agent-hooks` | Фреймворковые и workspace-хуки агента |
+| `runtime/error-fallback` | Fallback-ответ при internal-ошибке оборота |
+| `runtime/runtime-events-subscription` | Подписка на runtime-события turn'а |
 | `configuration/profiles` | Профили конфигурации (`prod` / `test`) |
 | `data/cache-provider` | `CacheProvider` (SQL-кэш + FAISS) |
 | `data/vector-indexes` | Векторные индексы (FAISS, lifecycle, целостность) |
-| `documentation/component-registry` | Правила ведения реестра компонентов |
-| `validation/component-spec-validation` | Правила автоматической валидации spec |
+| `logging-db` | Долговечный журнал `agent_gateway_logs` |
+| `storage/session-hybridization` | Гибридное хранение сессий (JSONL + PG mirror) |
+| `storage/session-recovery` | Восстановление сессий после потери метаданных |
+| `storage/usage-store` | LLM usage tracking (`LLMUsageStore`) |
+| `tools-history-search` | Tool `history_search` по журналу `agent_gateway_logs` |
 
 Разделение ответственности между OpenSpec, `docs/` и кодом описано в
 [`openspec/specs/architecture/component-model/spec.md`](../openspec/specs/architecture/component-model/spec.md)
@@ -34,24 +40,18 @@ reference** по своей подсистеме; README в корне — эт�
 | [architecture/runtime-patcher-inventory.md](architecture/runtime-patcher-inventory.md) | Каталог monkey-patch'ей с target/risk/тестами |
 | [architecture/storage-layers.md](architecture/storage-layers.md) | Гибридная модель хранения сессий (upstream JSONL + cold-storage PG mirror); правила использования пула |
 | [architecture/usage-tracking.md](architecture/usage-tracking.md) | LLM usage tracking через upstream `LLMUsageStore` (observer-pipeline) + `DbLoggingService` |
+| [architecture/decisions/](architecture/decisions/) | ADR-подобные decision-записи по архитектурным изменениям |
 | [skill-tool-architecture.md](skill-tool-architecture.md) | Контракт Skill ↔ Tool: что разрешено, что запрещено |
 | [skill-tool-inventory.md](skill-tool-inventory.md) | Текущее состояние всех skill/tool и история удалённых |
+| [legal_summarizer_question_pipeline.md](legal_summarizer_question_pipeline.md) | Конвейер question-mode навыка `legal_summarizer` |
 | [SKILL_AUTHORING.md](SKILL_AUTHORING.md) | **Пошаговый гайд**: как создать свой skill (структура, SKILL.md, регистрация в project.json, runtime API, best practices, anti-patterns, DoD) |
 | [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md) | **Нормативный контракт**: принципы, invariant'ы, anti-patterns, decision-чеклист (цель, не «as-is») |
-
-### Исторические / WIP (рефакторинги)
-
-| Документ | Статус |
-|---|---|
-| [refactor_baseline.md](refactor_baseline.md) | WIP-заметки ветки `refactor/skills-tools-cleanup` (исторический снимок; актуальное состояние — в `skill-tool-inventory.md`) |
-| [legal_summarizer_baseline.md](legal_summarizer_baseline.md), [legal_summarizer_audit_stage1.md](legal_summarizer_audit_stage1.md), [legal_summarizer_legacy_inventory.md](legal_summarizer_legacy_inventory.md), [legal_summarizer_final_audit.md](legal_summarizer_final_audit.md), [legal_summarizer_progress_audit.md](legal_summarizer_progress_audit.md), [legal_summarizer_cleanup_baseline.md](legal_summarizer_cleanup_baseline.md), [legal_summarizer_cleanup_inventory.md](legal_summarizer_cleanup_inventory.md), [legal_summarizer_cleanup_handoff.md](legal_summarizer_cleanup_handoff.md) | Рабочие заметки рефакторинга `legal_summarizer` (Этапы 0–50). Актуальное состояние — в [architecture/COMPATIBILITY_INVENTORY.md](architecture/COMPATIBILITY_INVENTORY.md) |
 
 ### Подсистемы
 
 | Документ | Назначение |
 |---|---|
-| [table-registry.md](table-registry.md) | Реестр таблиц PG → DuckDB, sync-контроль |
-| [architecture/runtime-patcher-inventory.md](architecture/runtime-patcher-inventory.md) | Каталог monkey-patch'ей с target/risk/тестами (полная сводка) |
+| [table-registry.md](table-registry.md) | Реестр таблиц PG → DuckDB, sync-контроль, track-колонки |
 
 ### Операционные руководства
 
@@ -59,7 +59,8 @@ reference** по своей подсистеме; README в корне — эт�
 |---|---|
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Диагностический runbook — типовые ошибки и решения |
 | [MIGRATION.md](MIGRATION.md) | Сводка изменений между релизами + breaking changes |
-| [PROFILES.md](PROFILES.md) | Профили конфигурации (prod / test): запуск, `NANOBOT_PROFILE`, `--profile`, hard-fail валидация, миграция деплоев |
+| [PROFILES.md](PROFILES.md) | Профили конфигурации (prod / test): обязательный `--profile`, hard-fail валидация, миграция деплоев |
+| [RELEASE.md](RELEASE.md) | Release-процесс: версионирование, ветвление, теги, GitHub Release |
 
 ### Разработка
 
@@ -67,9 +68,17 @@ reference** по своей подсистеме; README в корне — эт�
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | `ApplicationContext`, поток инициализации, `lib/services`, `MessageExchange`, LLM-клиент, утилиты, дерево проекта |
 | [DATABASE.md](DATABASE.md) | Единый пул соединений, универсальный слой данных, конфигурация навыка, DDL, границы P0 |
-| [VECTOR_INDEXES.md](VECTOR_INDEXES.md) | FAISS, Ollama, `tools/build_vectors.py`, lifecycle кеша, edge-cases |
+| [VECTOR_INDEXES.md](VECTOR_INDEXES.md) | Векторная подсистема: `project.json` → `storage_table` → DuckDB-снапшот → in-memory FAISS, `tools/build_vectors.py`, edge-cases |
 | [INTERNAL_API.md](INTERNAL_API.md) | `tools.exec`, кастомные `workspace/tools/*.py`, CLI-режимы, `tools/`, добавление настроек |
 | [TESTING.md](TESTING.md) | Запуск тестов, контрактные тесты nanobot API, live e2e |
+
+### Архив
+
+[`_archive/`](_archive/) — исторические process/baseline/audit-артефакты:
+проектные планы рефакторингов, инвентаризации OpenSpec-миграции, baseline'ы
+`legal_summarizer`, черновики анализа `history_search` / event logging.
+**Не актуальная документация** — на состояние кода не ссылаться; история
+изменений проекта живёт в [`CHANGELOG.md`](../CHANGELOG.md).
 
 ### Внешние ссылки
 
@@ -82,10 +91,10 @@ reference** по своей подсистеме; README в корне — эт�
 ## Конвенция именования
 
 - `*.md` в корне `docs/` — навигационные / операционные документы.
-- `docs/architecture/` — каталоги инвентарей (генерируются из кода).
+- `docs/architecture/` — каталоги инвентарей (генерируются из кода) и `decisions/`.
 - `docs/*-architecture.md` — архитектурные контракты (skill/tool).
 - `docs/*-inventory.md` — инвентаризация компонентов.
-- `docs/*-baseline.md` и `docs/legal_summarizer_*.md` — исторические/WIP-заметки рефакторингов (см. секцию «Исторические / WIP» выше).
+- `docs/_archive/` — исторические process/baseline/audit-заметки (не актуальны).
 
 Все ссылки между документами — относительные (`./SKILL.md`, `../README.md`).
 
@@ -103,8 +112,8 @@ invariant'ы, anti-patterns, decision-чеклист и правила зави�
 > - [`openspec/specs/`](../openspec/specs/) — *контракты компонентов* (component-level normative specs
 >   на русском): назначение, граница, требования, запрещённое поведение, зависимости, реализация,
 >   проверка. Шаблон и правила — [`architecture/component-model`](../openspec/specs/architecture/component-model/spec.md);
->   реестр — [`COMPONENTS.md`](../openspec/specs/COMPONENTS.md). Валидация структуры —
->   [`validation/component-spec-validation`](../openspec/specs/validation/component-spec-validation/spec.md).
+>   реестр — [`COMPONENTS.md`](../openspec/specs/COMPONENTS.md); автоматическая проверка структуры —
+>   `python tools/validate_component_specs.py`.
 > - Где документы пересекаются по теме — детали реализации только в `docs/*`, правила только в `TARGET_ARCHITECTURE.md`,
 >   контракт компонента — только в соответствующей `openspec/specs/<domain>/<component>/spec.md`.
 
@@ -112,7 +121,8 @@ invariant'ы, anti-patterns, decision-чеклист и правила зави�
 
 1. Установите зависимости: `pip install -r requirements.txt`
 2. Запустите тесты без БД: `pytest tests/ -q`
-3. Запустите gateway / CLI и проверьте прогон: `python gateway.py` или `python cli_agent.py -P`
+3. Запустите gateway / CLI с профилем (без `--profile` — `ConfigurationError` + `exit 2`):
+   `python gateway.py --profile=prod` или `python cli_agent.py -P --profile=prod`
 4. Перед коммитом убедитесь, что проверки документации (CI `docs-lint`) проходят.
 
 Хотите написать **свой навык** (skill)? Начните с

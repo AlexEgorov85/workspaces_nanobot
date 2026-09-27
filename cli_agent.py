@@ -19,7 +19,7 @@ from pathlib import Path
 _SUPPORTED_PROFILES = ("prod", "test")
 
 
-from config import ConfigurationError  # noqa: E402 — module-level import is safe (Phase A)
+from config import ConfigurationError  # noqa: E402 — module-level import is safe
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -28,7 +28,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     Whitelist и required-валидация делаются здесь, а не делегируются
     ``argparse.error``/``choices=`` — иначе ``SystemExit(2)`` от argparse
     минует ``ConfigurationError`` boundary, нарушая Error Lifecycle
-    Contract (см. design.md Decision 2 unification).
+    Contract (см. docs/PROFILES.md и openspec/specs/configuration/profiles).
     """
     parser = argparse.ArgumentParser(description="nanobot CLI agent", add_help=False)
     parser.add_argument("--patched", "-P", action="store_true", default=False)

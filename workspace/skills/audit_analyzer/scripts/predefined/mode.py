@@ -90,7 +90,7 @@ def _resolve_script(
     """DB-only lookup.
 
     Скрипт читается только из ``public.agent_predefined_scripts``. Никакого
-    fallback на Python ``REGISTRY`` (удалён в Phase 7).
+    fallback на Python ``REGISTRY`` (legacy, отсутствует).
     """
     return load_script(db, predefined_table, script_name)
 

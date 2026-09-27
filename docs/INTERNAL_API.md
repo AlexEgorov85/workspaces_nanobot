@@ -5,7 +5,8 @@
 
 ## 🚦 Передача профиля в application subprocess
 
-После [`config-profile-cli-flag`](../openspec/changes/config-profile-cli-flag)
+Согласно спецификации
+[`openspec/specs/configuration/profiles`](../openspec/specs/configuration/profiles/spec.md),
 единственный канал передачи профиля конфигурации в subprocess —
 **argv `--profile=<value>`**. Env vars (исторически —
 `NANOBOT_PROFILE=prod`) больше **не используются**: ни runtime-код,
@@ -331,7 +332,7 @@ audit_analyze --mode vector --query 'статусы аудитов' --index-name
 Прямого PostgreSQL-бэкенда у CLI нет (см. [DATABASE.md](DATABASE.md)). Кеш создаёт и обновляет
 **gateway** (см. [DATABASE.md](DATABASE.md#-жизненный-цикл-кеша)); CLI про это не знает. Если файла
 кеша нет — CLI завершается с `FileNotFoundError`: «Кеш создаёт и обновляет
-gateway автоматически — запустите его (python gateway.py)».
+gateway автоматически — запустите его (python gateway.py --profile=prod)».
 
 Векторный поиск — параметр `--index-name` (по умолчанию `audits_index`).
 Строковые параметры predefined-скриптов передаются как есть (после
@@ -425,8 +426,8 @@ python tools/build_vectors.py --verbose
 
 **Важно:** при первом запуске проверить, что установлены зависимости FAISS:
 `pip install faiss-cpu numpy`. Без них вектора вставляются в `audit_vectors`,
-но `public.agent_vector_index_store` остаётся пустой, и `--mode vector` поиск
-через `lib/services/cache_provider_impl.py` не работает.
+но поиск `--mode vector` через `lib/services/cache_provider_impl.py` не работает
+(индекс FAISS собирается в памяти).
 
 **Типичные сценарии:**
 - **После изменений в DDL таблиц** — `--full-rebuild`.

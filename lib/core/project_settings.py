@@ -32,6 +32,8 @@ __all__ = [
     "SkillLlmSettings",
     "SkillSettings",
     "SkillsSettings",
+    "StartupSchemaValidationSettings",
+    "StartupSettings",
     "SyncSettings",
     "TableEntry",
     "VectorIndexConfig",
@@ -65,6 +67,35 @@ class CompactSettings(_StrictOptional):
     enabled: bool | None = None
     notify_in_history: bool | None = None
     print_to_terminal: bool | None = None
+
+
+class StartupSchemaValidationSettings(_StrictOptional):
+    """Pre-startup проверка наличия обязательных runtime-таблиц.
+
+    При ``enabled=True`` (по умолчанию) ``ApplicationContext.start()``
+    выполняет один ``SELECT`` к ``information_schema.tables`` для 6
+    таблиц из ``SETTINGS["channels"]["postgres"]`` и
+    ``SETTINGS["logging"]["db"]`` (те же ключи, что проходят
+    ``validate_runtime_isolation``). При отсутствии любой из них —
+    ``SchemaValidationError`` (наследник ``ConfigurationError``) →
+    ``exit 2`` через ``gateway.main()`` / ``cli_agent.main()``.
+
+    Attributes:
+        enabled: включить проверку (по умолчанию ``True``).
+        timeout_sec: верхняя граница ожидания запроса к БД
+            (по умолчанию ``5.0``, диапазон ``0.1 ≤ value ≤ 60.0``).
+
+    См. спеку ``openspec/specs/runtime/startup-schema-validation``.
+    """
+
+    enabled: bool = True
+    timeout_sec: float = Field(default=5.0, gt=0.0, le=60.0)
+
+
+class StartupSettings(_StrictOptional):
+    """Секция ``gateway.startup.*`` — параметры pre-startup валидации."""
+
+    schema_validation: StartupSchemaValidationSettings | None = None
 
 
 class ErrorMessagesSettings(_StrictOptional):
@@ -199,6 +230,7 @@ class GatewaySettings(_StrictOptional):
     cache: CacheSettings | None = None
     usage_store: UsageStoreSettings | None = None
     session_cold_sync: SessionColdSyncSettings | None = None
+    startup: StartupSettings | None = None
 
     @model_validator(mode="before")
     @classmethod

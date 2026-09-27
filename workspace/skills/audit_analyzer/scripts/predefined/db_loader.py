@@ -4,7 +4,8 @@
 Резолв таблицы идёт через ``lib.core.skill_config.get_predefined_scripts_table``
 (метка ``scripts_registry`` в ``TableRegistry``), а саму строку читаем
 через CacheProvider/DuckDB — после того, как ``PgDuckDbSyncService``
-опубликовал снимок в ``workspace/data_store/duckdb/cache.duckdb``.
+опубликовал снимок по пути ``resolve_publish_path()`` (``project.json::
+gateway.cache.local_path`` либо ``~/.cache/nanobot/duckdb/cache.duckdb``).
 
 Python ``REGISTRY`` (legacy) отсутствует — этот loader единственный источник
 ``ScriptDefinition``. Ошибка чтения таблицы возвращает пустой результат /
