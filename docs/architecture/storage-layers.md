@@ -165,6 +165,35 @@ source of truth; всё, чего нет в `list_sessions()`, удаляетс�
 
 См. `docs/MIGRATION.md` § «Storage migration (storage-hybridization)».
 
+## D23: Stale-detection и reverse-lag detection
+
+`SessionColdSyncService` защищает PG от перезаписи устаревшими
+данными и детектит аномалии sync'а:
+
+**Stale (PG свежее JSONL + tolerance):** если
+`pg_meta.updated_at > jsonl_meta.updated_at + stale_tolerance` —
+sync пропускается для этой сессии (`sync_skipped_stale_total += 1`),
+однократно логируется `event_type="session_stale_detected"` (с TTL
+60s in-memory dedup, чтобы не флудить). Дефолт tolerance — 120 сек
+(`gateway.session_cold_sync.stale_tolerance_seconds`). Защита от
+сценария «PG был обновлён внешним writer'ом (миграция, admin)
+после deploy storage-hybridization; sync не должен перезаписать
+актуальные данные устаревшими из JSONL».
+
+**Reverse-lag (JSONL свежее PG + threshold):** если
+`jsonl_meta.updated_at > pg_meta.updated_at + sync_lag_threshold` —
+логируется `event_type="sync_lag_exceeded"` (для observability).
+Дефолт threshold — 3600 секунд
+(`gateway.session_cold_sync.sync_lag_threshold_seconds`).
+Срабатывает, если sync-сервис долго не запускался (например,
+после deploy или из-за lock_busy). При срабатывании sync всё равно
+выполняется — это не блокирующий детект.
+
+Оба события пишутся через `DbLoggingService.try_log_event` (без
+прямого `INSERT` в `agent_gateway_logs`). Метрики
+`stale_detected_total`, `sync_skipped_stale_total`,
+`sync_lag_exceeded_total` публикуются в `get_stats()`.
+
 ## Failure modes
 
 | Сценарий | Поведение |
@@ -174,6 +203,8 @@ source of truth; всё, чего нет в `list_sessions()`, удаляетс�
 | Пул исчерпан | `cycles_skipped_pool_busy += 1`, цикл пропущен, hot path не затронут |
 | Upstream JSONL пуст | sync пишет 0 строк, `upstream_session_count = 0` |
 | Сессия есть в PG, но не в upstream | cleanup удаляет её из PG |
+| Stale-сессия (PG свежее JSONL) | пропуск sync (`sync_skipped_stale_total`), лог `session_stale_detected` |
+| JSONL значительно опережает PG | лог `sync_lag_exceeded` (sync всё равно выполняется) |
 
 ## Тесты
 

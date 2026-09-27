@@ -41,7 +41,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -56,6 +56,7 @@ _ADVISORY_LOCK_KEY = "storage_hybridization_session_cold_sync"
 _BACKOFF_BASE_SEC = 1.0
 _BACKOFF_CAP_SEC = 16 * 60.0
 _POOL_BUSY_BACKOFF_SEC = 5.0
+_STALE_LOG_DEDUP_TTL = timedelta(seconds=60.0)
 
 
 class SessionColdSyncService:
@@ -82,6 +83,8 @@ class SessionColdSyncService:
         enabled: bool = True,
         db_logging_service: "DbLoggingService | None" = None,
         pool_acquire_timeout_sec: float = 10.0,
+        stale_tolerance_seconds: int = 120,
+        sync_lag_threshold_seconds: int = 3600,
     ) -> None:
         self._session_manager = session_manager
         self._pg_dsn = pg_dsn
@@ -92,6 +95,10 @@ class SessionColdSyncService:
         self._batch_size = max(1, int(batch_size))
         self._enabled = bool(enabled)
         self._pool_acquire_timeout_sec = max(0.1, float(pool_acquire_timeout_sec))
+        self._stale_tolerance = timedelta(seconds=max(0, int(stale_tolerance_seconds)))
+        self._sync_lag_threshold = timedelta(
+            seconds=max(0, int(sync_lag_threshold_seconds))
+        )
 
         self._db_logging = db_logging_service
 
@@ -101,18 +108,24 @@ class SessionColdSyncService:
         self._state_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._running = True
 
         self._cycles_total = 0
         self._cycles_failed_total = 0
         self._consecutive_failures = 0
         self._cycles_skipped_lock_busy = 0
         self._cycles_skipped_pool_busy = 0
+        self._stale_detected_counter = 0
+        self._sync_lag_exceeded_counter = 0
+        self._sync_skipped_stale_counter = 0
         self._rows_synced_total = 0
         self._messages_synced_total = 0
         self._last_success_ts: float | None = None
         self._last_pool_wait_seconds: float | None = None
         self._last_upstream_session_count: int = 0
         self._last_pg_session_count: int = 0
+
+        self._stale_logged_at: dict[str, datetime] = {}
 
         self._pool_size: int | None = None
         self._pool_available: int | None = None
@@ -142,12 +155,14 @@ class SessionColdSyncService:
     def stop(self, timeout_sec: float = 30.0) -> None:
         """Корректно остановить поток.
 
-        Перед teardown пытается выполнить финальный ``_sync_cycle()``
-        (для D21 shutdown order), если lock свободен в пределах
-        ``timeout_sec``.
+        Устанавливает ``self._running = False`` и ждёт завершения
+        текущего цикла в пределах ``timeout_sec``. Перед teardown
+        пытается выполнить финальный ``_sync_cycle()`` для D21
+        shutdown order (если lock свободен).
         """
         if self._thread is None:
             return
+        self._running = False
         self._stop_event.set()
         acquired = self._state_lock.acquire(timeout=timeout_sec)
         if acquired:
@@ -164,10 +179,10 @@ class SessionColdSyncService:
         self._thread = None
 
     def _worker(self) -> None:
-        while not self._stop_event.is_set():
+        while self._running and not self._stop_event.is_set():
             try:
                 with self._state_lock:
-                    self._sync_cycle()
+                    self._do_sync_batch()
             except Exception as exc:
                 self._consecutive_failures += 1
                 self._cycles_failed_total += 1
@@ -185,17 +200,26 @@ class SessionColdSyncService:
         )
         return min(backoff, _BACKOFF_CAP_SEC)
 
-    def _sync_cycle(self) -> None:
-        """Один цикл sync: leader-election → read upstream → write PG.
+    def _do_sync_batch(self) -> None:
+        """Один цикл sync: leader-election → read upstream → D23/D11 sync.
 
-        Все исключения пробрасываются наверх (вызывающий инкрементирует
+        Реализует:
+        - leader-election через ``pg_try_advisory_xact_lock``;
+        - per-iteration ``self._running`` проверку (graceful
+          shutdown по ``stop()``);
+        - D23 stale-detection (если PG свежее JSONL + tolerance —
+          пропустить sync для этой сессии);
+        - reverse-lag detection (если JSONL свежее PG + threshold
+          — залогировать ``sync_lag_exceeded``);
+        - last-write-wins для нормальных сессий.
+
+        Исключения пробрасываются наверх (вызывающий инкрементирует
         счётчики и логирует).
         """
         self._cycles_total += 1
         t_start = time.monotonic()
 
-        acquired = self._try_advisory_xact_lock()
-        if not acquired:
+        if not self._try_advisory_xact_lock():
             self._cycles_skipped_lock_busy += 1
             self._last_pool_wait_seconds = time.monotonic() - t_start
             return
@@ -206,7 +230,13 @@ class SessionColdSyncService:
             self._last_upstream_session_count = len(upstream_keys)
 
             sorted_sessions = sorted(upstream_sessions, key=lambda s: s["key"])
-            self._sync_batches(sorted_sessions)
+            for sm in sorted_sessions:
+                if not self._running:
+                    return
+                key = sm.get("key")
+                if not key:
+                    continue
+                self._sync_session_with_detection(key)
             self._cleanup_missing(upstream_keys)
 
             pg_count = self._count_pg_sessions()
@@ -216,40 +246,83 @@ class SessionColdSyncService:
         finally:
             self._last_pool_wait_seconds = time.monotonic() - t_start
 
-    def _read_upstream(self) -> list[dict[str, Any]]:
-        return self._session_manager.list_sessions() or []
+    def _sync_cycle(self) -> None:
+        """Backward-compat alias: финальный flush при ``stop()``.
 
-    def _sync_batches(self, sorted_sessions: list[dict[str, Any]]) -> None:
-        for start in range(0, len(sorted_sessions), self._batch_size):
-            batch = sorted_sessions[start:start + self._batch_size]
-            for sm in batch:
-                key = sm.get("key")
-                if not key:
-                    continue
-                self._sync_session(key)
+        Реализация идентична ``_do_sync_batch`` (вызывается при
+        shutdown для D21).
+        """
+        self._do_sync_batch()
 
-    def _sync_session(self, key: str) -> None:
-        """Mirror одной сессии: meta + messages (если свежее)."""
+    def _sync_session_with_detection(self, key: str) -> None:
+        """Один ключ: D23 stale-check + reverse-lag + LWW sync.
+
+        Структура (согласно tasks.md 3.4):
+          1. ``existing is None`` — нормальный sync (новая сессия).
+          2. ``existing > jsonl + tolerance`` — STALE, log
+             ``session_stale_detected``, skip.
+          3. ``existing >= jsonl`` (EQUAL/PG-WITHIN-TOLERANCE) — silent
+             skip (no-op).
+          4. else — нормальный sync + проверка sync_lag_exceeded.
+        """
         try:
             snapshot = self._session_manager.read_session_snapshot(key)
         except Exception:
             return
-
         if snapshot is None:
             return
 
-        upstream_updated_at = getattr(snapshot, "updated_at", None)
-        if upstream_updated_at is None:
+        jsonl_updated_at = getattr(snapshot, "updated_at", None)
+        if jsonl_updated_at is None:
             return
 
-        existing_updated_at = self._read_pg_updated_at(key)
-        if existing_updated_at is not None and existing_updated_at >= upstream_updated_at:
+        pg_meta = self._read_pg_updated_at(key)
+        pg_updated_at = pg_meta if pg_meta is None else pg_meta.get("updated_at")
+
+        if pg_updated_at is None:
+            # 1. Новая сессия — нормальный sync.
+            self._do_lww_sync(key, snapshot, jsonl_updated_at)
             return
 
-        self._upsert_meta(key, snapshot, upstream_updated_at)
+        if pg_updated_at > jsonl_updated_at + self._stale_tolerance:
+            # 2. STALE: PG свежее JSONL + tolerance → пропуск.
+            self._sync_skipped_stale_counter += 1
+            if not self._is_stale_logged_recently(key):
+                self._log_stale(key, jsonl_updated_at, pg_updated_at)
+                self._stale_logged_at[key] = datetime.now()
+                self._stale_detected_counter += 1
+            return
+
+        if pg_updated_at >= jsonl_updated_at:
+            # 3. EQUAL / PG-WITHIN-TOLERANCE — silent skip (current behavior).
+            return
+
+        # 4. JSONL > PG → нормальный sync + проверка reverse-lag.
+        self._do_lww_sync(key, snapshot, jsonl_updated_at)
+        if jsonl_updated_at > pg_updated_at + self._sync_lag_threshold:
+            self._log_lag_exceeded(key, jsonl_updated_at, pg_updated_at)
+            self._sync_lag_exceeded_counter += 1
+
+    def _do_lww_sync(self, key: str, snapshot: Any, jsonl_updated_at: datetime) -> None:
+        """LWW-sync: записать meta + messages в PG."""
+        self._upsert_meta(key, snapshot, jsonl_updated_at)
         self._replace_messages(key, snapshot)
         self._rows_synced_total += 1
         self._messages_synced_total += len(getattr(snapshot, "messages", []) or [])
+
+    def _is_stale_logged_recently(self, key: str) -> bool:
+        """True, если для ``key`` уже логировали stale-detected
+        за последние ``_STALE_LOG_DEDUP_TTL`` секунд."""
+        last = self._stale_logged_at.get(key)
+        if last is None:
+            return False
+        if datetime.now() - last > _STALE_LOG_DEDUP_TTL:
+            self._stale_logged_at.pop(key, None)
+            return False
+        return True
+
+    def _read_upstream(self) -> list[dict[str, Any]]:
+        return self._session_manager.list_sessions() or []
 
     def _upsert_meta(self, key: str, snapshot: Any, updated_at: datetime) -> None:
         metadata_val = getattr(snapshot, "metadata", None) or {}
@@ -449,6 +522,66 @@ class SessionColdSyncService:
             event_type=event.event_type,
         )
 
+    def _log_stale(
+        self,
+        key: str,
+        jsonl_updated_at: datetime,
+        pg_updated_at: datetime,
+    ) -> None:
+        """D23: PG свежее JSONL + tolerance → логируем ``session_stale_detected``.
+
+        Используется in-memory dedup ``_stale_logged_at`` (TTL 60s),
+        чтобы не флудить БД на каждом sync-цикле.
+        """
+        if self._db_logging is None:
+            return
+        event = LogEvent(
+            event_type="session_stale_detected",
+            level="WARNING",
+            summary=f"session_stale_detected: {key} (PG newer than JSONL + tolerance)",
+            session_id=key,
+            payload={
+                "session_key": key,
+                "jsonl_updated_at": jsonl_updated_at.isoformat(),
+                "pg_updated_at": pg_updated_at.isoformat(),
+                "tolerance_seconds": self._stale_tolerance.total_seconds(),
+            },
+        )
+        try_log_event(
+            self._db_logging,
+            event,
+            producer="SessionColdSyncService",
+            event_type=event.event_type,
+        )
+
+    def _log_lag_exceeded(
+        self,
+        key: str,
+        jsonl_updated_at: datetime,
+        pg_updated_at: datetime,
+    ) -> None:
+        """Reverse-lag: JSONL свежее PG + threshold → логируем ``sync_lag_exceeded``."""
+        if self._db_logging is None:
+            return
+        event = LogEvent(
+            event_type="sync_lag_exceeded",
+            level="WARNING",
+            summary=f"sync_lag_exceeded: {key} (JSONL newer than PG + threshold)",
+            session_id=key,
+            payload={
+                "session_key": key,
+                "jsonl_updated_at": jsonl_updated_at.isoformat(),
+                "pg_updated_at": pg_updated_at.isoformat(),
+                "threshold_seconds": self._sync_lag_threshold.total_seconds(),
+            },
+        )
+        try_log_event(
+            self._db_logging,
+            event,
+            producer="SessionColdSyncService",
+            event_type=event.event_type,
+        )
+
     def get_stats(self) -> dict[str, Any]:
         """Метрики для health-check.
 
@@ -471,6 +604,11 @@ class SessionColdSyncService:
             "cycles_skipped_lock_busy": self._cycles_skipped_lock_busy,
             "cycles_skipped_pool_busy": self._cycles_skipped_pool_busy,
             "consecutive_failures": self._consecutive_failures,
+            "stale_detected_total": self._stale_detected_counter,
+            "sync_lag_exceeded_total": self._sync_lag_exceeded_counter,
+            "sync_skipped_stale_total": self._sync_skipped_stale_counter,
+            "stale_tolerance_seconds": int(self._stale_tolerance.total_seconds()),
+            "sync_lag_threshold_seconds": int(self._sync_lag_threshold.total_seconds()),
             "last_success_ts": self._last_success_ts,
             "last_success_lag_seconds": last_success_lag,
             "pool_size": pool_size,

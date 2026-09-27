@@ -1134,6 +1134,10 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
     enabled = bool(sync_cfg.get("enabled", True))
     sync_interval_sec = float(sync_cfg.get("sync_interval_sec", 30.0))
     batch_size = int(sync_cfg.get("batch_size", 50))
+    stale_tolerance_seconds = int(sync_cfg.get("stale_tolerance_seconds", 120))
+    sync_lag_threshold_seconds = int(
+        sync_cfg.get("sync_lag_threshold_seconds", 3600)
+    )
 
     schema = get_setting("channels", "postgres", "schema", default="public")
     meta_table = get_setting("channels", "postgres", "meta_table",
@@ -1153,6 +1157,8 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
         batch_size=batch_size,
         enabled=enabled,
         db_logging_service=ctx.db_logging_service,
+        stale_tolerance_seconds=stale_tolerance_seconds,
+        sync_lag_threshold_seconds=sync_lag_threshold_seconds,
     )
 
 

@@ -447,10 +447,19 @@
   upstream JSONL → PG. Per-transaction advisory lock
   (`pg_try_advisory_xact_lock`), батчи с сортировкой по
   `session_key`, leader-election для multi-instance deploy,
-  экспоненциальный backoff при ошибках PG. Метрики
+  экспоненциальный backoff при ошибках PG, per-iteration
+  `self._running` graceful-shutdown check. **D23 stale-detection**:
+  если `pg > jsonl + tolerance` — sync для этой сессии пропускается
+  с логированием `event_type="session_stale_detected"` (in-memory
+  dedup TTL 60s). **Reverse-lag detection**: если
+  `jsonl > pg + threshold` — логируется
+  `event_type="sync_lag_exceeded"`. Метрики
   (`cycles_total`, `cycles_failed_total`, `cycles_skipped_lock_busy`,
-  `cycles_skipped_pool_busy`, `pool_size`, `pool_available`,
-  `pool_wait_seconds` и др.) экспортируются через `get_stats()`.
+  `cycles_skipped_pool_busy`, `stale_detected_total`,
+  `sync_lag_exceeded_total`, `sync_skipped_stale_total`,
+  `stale_tolerance_seconds`, `sync_lag_threshold_seconds`,
+  `pool_size`, `pool_available`, `pool_wait_seconds` и др.)
+  экспортируются через `get_stats()`.
 - `lib/services/llm_usage_store_factory.py` —
   `create_usage_store(config)`: фабрика upstream
   `nanobot.llm_usage.store.LLMUsageStore` (SQLite WAL). Дефолтный
@@ -473,11 +482,17 @@
   вне `SessionColdSyncService`; запрет собственных psycopg2-пулов;
   запрет `event_type="llm_usage"` в `DbLoggingService`; проверка
   docstring `PGSessionManager`.
-- `tests/test_session_cold_sync_service.py` (9 mock-тестов
-  включая `test_no_new_pool_created`), `tests/test_pg_session_manager.py`
-  (17 тестов под compatibility-layer роль),
+- `tests/test_session_cold_sync_service.py` (16 mock-тестов:
+  lifecycle, batch sorting, staleness/lag detection, dedup TTL,
+  per-iteration graceful shutdown, архитектурный гард
+  `test_no_new_pool_created`); `tests/test_pg_session_manager.py`
+  (17 тестов под compatibility-layer роль);
   `tests/test_storage_hybridization_factory.py`,
-  `tests/test_storage_hybridization_lifecycle.py`.
+  `tests/test_storage_hybridization_lifecycle.py`,
+  `tests/contract/test_session_manager_contract.py`
+  (4 контракта: `updated_at` обновляется при `save()`, `Session`
+  constructor, `try_log_event` sync, `utils.db.run` rollback
+  contract).
 - Документация: `docs/architecture/storage-layers.md`,
   `docs/architecture/usage-tracking.md`, раздел «Storage
   hybridization» в `docs/MIGRATION.md`.

@@ -143,12 +143,15 @@ class SessionColdSyncSettings(_StrictOptional):
     """Параметры ``SessionColdSyncService`` (``gateway.session_cold_sync.*``).
 
     Cold-storage mirror upstream JSONL → PG. Все ключи опциональны.
-    См. спеку ``openspec/specs/storage/session-hybridization/spec.md``.
+    См. спеку ``openspec/specs/storage/session-hybridization/spec.md``
+    и design D23 (stale-detection + reverse-lag detection).
     """
 
     enabled: bool | None = True
     sync_interval_sec: float | None = Field(default=None, gt=0)
     batch_size: int | None = Field(default=None, gt=0)
+    stale_tolerance_seconds: int | None = Field(default=None, ge=0)
+    sync_lag_threshold_seconds: int | None = Field(default=None, ge=0)
 
 
 class GatewaySettings(_StrictOptional):
