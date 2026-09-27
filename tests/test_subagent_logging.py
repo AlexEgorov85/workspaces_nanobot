@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -331,3 +331,118 @@ class TestSubagentUserIdPropagation:
         assert sub is not None
         assert sub.user_id == "bob"
         assert sub.user_id != "alice"
+
+
+# ---------------------------------------------------------------------------
+# post-0.3.5-patches-cleanup / группа 2:
+# _SubagentLoggingHook публикует SubagentTurnCompleted через bus.publish.
+# ---------------------------------------------------------------------------
+
+
+class FakeBus:
+    """Имитация ``MessageBus`` для тестов публикации событий."""
+
+    def __init__(self) -> None:
+        self.published: list = []
+
+    async def publish(self, event: Any) -> None:
+        self.published.append(event)
+
+
+@pytest.mark.asyncio
+async def test_subagent_publishes_subagent_turn_completed_on_after_run() -> None:
+    from lib.hooks.database_logging_hook import DatabaseLoggingHook
+    from lib.services.db_logging_service import DbLoggingService, LogEvent
+    from lib.services.runtime_patcher import RuntimePatcher
+
+    svc = DbLoggingService(dsn="", table_name="x", question_runs_table="y")
+    bus = FakeBus()
+
+    with patch(
+        "lib.hooks.database_logging_hook.DatabaseLoggingHook",
+        lambda *_a, **_kw: DatabaseLoggingHook(svc),
+    ):
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_subagent_logging(
+            db_logging_service=svc, session_manager=None, bus=bus,
+        )
+        assert ok
+
+        from nanobot.agent.subagent import _SubagentHook  # noqa: WPS433
+
+        ctx = SimpleNamespace(
+            session_key="telegram:1",
+            final_content="done",
+            tools_used=["read_file"],
+            stop_reason="end_turn",
+            messages=[{"role": "user", "content": "task description"}],
+            usage=SimpleNamespace(total_tokens=128),
+            error=None,
+            exception=None,
+        )
+        hook = _SubagentHook("task-pub", bus=bus)
+
+    # after_run публикует SubagentTurnCompleted через bus.publish.
+    with patch(
+        "lib.hooks.database_logging_hook._current_request_sender_id",
+        return_value="alice",
+    ):
+        await hook.after_run(ctx)
+
+    assert len(bus.published) == 1
+    from lib.events.subagent import SubagentTurnCompleted
+
+    ev = bus.published[0]
+    assert isinstance(ev, SubagentTurnCompleted)
+    assert ev.task_id == "task-pub"
+    assert ev.final_content == "done"
+    assert ev.tools_used == ["read_file"]
+    assert ev.had_error is False
+
+
+@pytest.mark.asyncio
+async def test_subagent_no_bus_means_no_publish() -> None:
+    """Без bus — публикация пропускается, _finalize продолжает работать."""
+    from lib.hooks.database_logging_hook import DatabaseLoggingHook
+    from lib.services.db_logging_service import DbLoggingService
+    from lib.services.runtime_patcher import RuntimePatcher
+
+    svc = DbLoggingService(dsn="", table_name="x", question_runs_table="y")
+
+    with patch(
+        "lib.hooks.database_logging_hook.DatabaseLoggingHook",
+        lambda *_a, **_kw: DatabaseLoggingHook(svc),
+    ):
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_subagent_logging(
+            db_logging_service=svc, session_manager=None,
+            # bus не передаётся
+        )
+        assert ok
+
+        from nanobot.agent.subagent import _SubagentHook  # noqa: WPS433
+
+        ctx = SimpleNamespace(
+            session_key="telegram:1",
+            final_content="done",
+            tools_used=[],
+            stop_reason="end_turn",
+            messages=[{"role": "user", "content": "task"}],
+            usage=None,
+            error=None,
+            exception=None,
+        )
+        hook = _SubagentHook("task-nobus")  # bus=None по умолчанию
+
+    # Не должно быть исключения.
+    await hook.after_run(ctx)
+
+    # _finalize всё равно должен был записать subagent_run_finished.
+    from lib.services.db_logging_service import LogEvent as _LogEvent
+
+    events = [e for e in svc._queue.queue if isinstance(e, _LogEvent)]
+    sub = next(
+        (e for e in events if e.event_type == "subagent_run_finished"),
+        None,
+    )
+    assert sub is not None

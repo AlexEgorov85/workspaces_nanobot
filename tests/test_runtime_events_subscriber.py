@@ -182,33 +182,37 @@ def subscriber(bus: FakeBus, db_service: FakeDbLoggingService) -> RuntimeEventsS
 # ---------------------------------------------------------------------------
 
 
-def test_subscribe_turn_runtime_admitted(bus: FakeBus) -> None:
-    """start() регистрирует подписку на TurnRuntimeAdmitted."""
+def test_subscribe_all_events(bus: FakeBus) -> None:
+    """start() регистрирует три подписки (TurnRuntimeAdmitted,
+    TurnCompleted, SubagentTurnCompleted)."""
     RuntimeEventsSubscriber(bus).start()
-    assert len(bus._handlers) == 1
-    from nanobot.bus.runtime_events import TurnRuntimeAdmitted
+    assert len(bus._handlers) == 3
+    event_types = [t for _, t in bus._handlers]
+    from nanobot.bus.runtime_events import TurnCompleted, TurnRuntimeAdmitted
 
-    assert bus._handlers[0][1] is TurnRuntimeAdmitted
+    assert event_types.count(TurnRuntimeAdmitted) == 1
+    assert event_types.count(TurnCompleted) == 1
+    assert event_types.count(SubagentTurnCompleted) == 1
 
 
 def test_double_start_noop(bus: FakeBus) -> None:
     """Повторный start() без stop() НЕ добавляет дублирующих подписок.
 
     loguru не интегрируется с pytest caplog; контракт проверяется через
-    счётчик подписок: должно остаться ровно 1 (без дублирования).
+    счётчик подписок: должно остаться ровно 3 (без дублирования).
     """
     s = RuntimeEventsSubscriber(bus)
     s.start()
-    assert len(bus._handlers) == 1
+    assert len(bus._handlers) == 3
     s.start()
-    assert len(bus._handlers) == 1
+    assert len(bus._handlers) == 3
 
 
 def test_stop_unsubscribes_lifo(bus: FakeBus) -> None:
     """stop() вызывает unsubscribe в LIFO-порядке."""
     s = RuntimeEventsSubscriber(bus)
     s.start()
-    assert len(bus._handlers) == 1
+    assert len(bus._handlers) == 3
     s.stop()
     assert len(bus._handlers) == 0
     assert s._started is False
@@ -322,3 +326,21 @@ def test_subagent_turn_completed_error(
     assert log.level == "ERROR"
     assert log.payload["had_error"] is True
     assert log.payload["error"] == "boom"
+
+
+# ---------------------------------------------------------------------------
+# Wire subagent publishing: set_default_bus(_bus) при start().
+# ---------------------------------------------------------------------------
+
+
+def test_start_wires_subagent_default_bus(bus: FakeBus) -> None:
+    """start() вызывает _set_subagent_default_bus(bus), что сохраняет
+    ссылку в ``_SubagentLoggingHook._default_bus`` (если патч применён).
+
+    Если monkey-patch ``_SubagentHook`` ещё не применён — no-op (logger
+    говорит, что подписки зарегистрированы, но set_default_bus
+    молча проглатывает ImportError/AttributeError).
+    """
+    # Без патча set_default_bus не существует — _set_subagent_default_bus
+    # ловит AttributeError silently.
+    RuntimeEventsSubscriber(bus).start()  # не падает

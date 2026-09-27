@@ -55,6 +55,27 @@ from lib.hooks.database_logging_hook import seed_context_window
 from lib.services.db_logging_service import LogEvent
 
 
+def _set_subagent_default_bus(bus: Any) -> None:
+    """Установить bus для автопривязки к новым инстансам
+    ``_SubagentLoggingHook``.
+
+    Использует monkey-patch set_default_bus класса (если патч уже
+    применён через ``RuntimePatcher.patch_subagent_logging``); no-op
+    если класс ещё не подменён.
+
+    См. openspec/changes/post-0.3.5-patches-cleanup/design.md D3
+    (Subagent публикует SubagentTurnCompleted через bus.publish).
+    """
+    try:
+        from nanobot.agent.subagent import _SubagentHook
+
+        set_bus = getattr(_SubagentHook, "set_default_bus", None)
+        if callable(set_bus):
+            set_bus(bus)
+    except Exception:
+        pass
+
+
 class RuntimeEventsSubscriber:
     """Observer-сервис для runtime-событий nanobot 0.3.5.
 
@@ -94,10 +115,21 @@ class RuntimeEventsSubscriber:
         self._unsubscribers.append(
             self._bus.subscribe(self._handle_turn_runtime_admitted, TurnRuntimeAdmitted)
         )
+        self._unsubscribers.append(
+            self._bus.subscribe(self._handle_turn_completed, TurnCompleted)
+        )
+        self._unsubscribers.append(
+            self._bus.subscribe(self._handle_subagent_turn_completed, SubagentTurnCompleted)
+        )
+        # Wire subagent publishing: новые _SubagentLoggingHook инстансы
+        # (создаются через patched _SubagentHook в runtime_patcher.py)
+        # автоматически получают self._bus для публикации
+        # SubagentTurnCompleted. См. design.md D3.
+        _set_subagent_default_bus(self._bus)
         self._started = True
         logger.debug(
-            "RuntimeEventsSubscriber: зарегистрирована подписка на "
-            "TurnRuntimeAdmitted"
+            "RuntimeEventsSubscriber: зарегистрированы подписки на "
+            "TurnRuntimeAdmitted, TurnCompleted, SubagentTurnCompleted"
         )
 
     def stop(self) -> None:

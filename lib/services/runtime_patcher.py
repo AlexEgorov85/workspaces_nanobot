@@ -473,6 +473,7 @@ class RuntimePatcher:
         session_manager: Any = None,
         recent_files_hook: Any = None,
         cache_store: Any = None,
+        bus: Any = None,
     ) -> PatchReport:
         """Применить все патчи и вернуть отчёт.
 
@@ -512,7 +513,7 @@ class RuntimePatcher:
         self._record(report, "session_dir_watch", self.patch_session_dir_watch(
             agent, workspace_dir))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
-            db_logging_service, session_manager))
+            db_logging_service, session_manager, bus=bus))
         self._record(report, "project_tools", self.patch_project_tools(
             agent, workspace_dir, settings=settings,
             cache_store=cache_store, db_logging_service=db_logging_service))
@@ -754,7 +755,7 @@ class RuntimePatcher:
                     return None
             return None
 
-        def _wrap(session, messages, skip, *, turn_latency_ms=None):
+        def _wrap(session, messages, skip, *, turn_latency_ms=None, summary_checkpoint=None, input_persisted_early=False):
             archived = list(messages)
             for idx in range(skip, len(archived)):
                 m = archived[idx]
@@ -783,7 +784,14 @@ class RuntimePatcher:
                     )
                 except OSError:
                     continue
-            return original(session, archived, skip, turn_latency_ms=turn_latency_ms)
+            return original(
+                session,
+                archived,
+                skip,
+                turn_latency_ms=turn_latency_ms,
+                summary_checkpoint=summary_checkpoint,
+                input_persisted_early=input_persisted_early,
+            )
 
         agent._save_turn = _wrap
         return True, "AgentLoop._save_turn patched for archiving"
@@ -1491,7 +1499,11 @@ class RuntimePatcher:
     # ------------------------------------------------------------------
 
     def patch_subagent_logging(
-        self, db_logging_service: Any, session_manager: Any = None
+        self,
+        db_logging_service: Any,
+        session_manager: Any = None,
+        *,
+        bus: Any = None,
     ) -> tuple[bool, str]:
         """Логировать подагентов: tool-события, итог запуска и историю.
 
@@ -1531,6 +1543,7 @@ class RuntimePatcher:
 
             from lib.hooks.database_logging_hook import DatabaseLoggingHook
             from lib.services.db_logging_service import LogEvent
+            from lib.hooks.database_logging_hook import _usage_to_dict
         except Exception as exc:
             return False, f"import failed: {exc}"
 
@@ -1538,8 +1551,25 @@ class RuntimePatcher:
             """_SubagentHook + БД-логирование + персист истории подагента."""
 
             _sessions = session_manager
+            _default_bus: Any = None
 
-            def __init__(self, task_id, status=None):
+            @classmethod
+            def set_default_bus(cls, bus: Any) -> None:
+                """Установить bus для автопривязки к новым инстансам.
+
+                Используется ``RuntimeEventsSubscriber`` (см.
+                ``lib/services/runtime_events_subscriber.py``) при
+                подписке на ``SubagentTurnCompleted``. После установки
+                каждый новый ``_SubagentLoggingHook`` инстанс будет
+                автоматически получать ``self._bus = bus``, и его
+                ``_publish_subagent_turn_completed`` будет эмитить
+                события в ``bus``.
+
+                См. openspec/changes/post-0.3.5-patches-cleanup/design.md D3.
+                """
+                cls._default_bus = bus
+
+            def __init__(self, task_id, status=None, bus=None):
                 super().__init__(task_id, status)
                 self._task_id = str(task_id)
                 self._session_id = f"subagent:{self._task_id}"
@@ -1550,6 +1580,19 @@ class RuntimePatcher:
                 # бы _request_id/_run_session_key друг друга.
                 self._db_hook = DatabaseLoggingHook(db_logging_service)
                 self._parent_rid = None
+                # MessageBus для публикации SubagentTurnCompleted.
+                # 1) Явный параметр ``bus`` (предпочтительно для прямых
+                # вызовов из тестов).
+                # 2) Fallback: берём class-level state, который
+                # RuntimeEventsSubscriber может установить через
+                # ``_SubagentLoggingHook.set_default_bus(bus)``
+                # (см. lib/services/runtime_events_subscriber.py).
+                # Если None — публикация пропускается, subagent_run_finished
+                # пишется через _finalize как раньше (backward compat).
+                # См. openspec/changes/post-0.3.5-patches-cleanup/design.md D3.
+                self._bus = bus if bus is not None else getattr(
+                    _SubagentLoggingHook, "_default_bus", None
+                )
 
             def _subagent_session_key(self, context) -> str:
                 """``<origin>:subagent:<task_id>`` или ``subagent:<task_id>``."""
@@ -1672,12 +1715,76 @@ class RuntimePatcher:
                     self._db_hook._request_id = ctx_rid
 
             async def after_run(self, context):
+                await self._publish_subagent_turn_completed(context, had_error=False)
                 await self._finalize(context)
 
             async def on_error(self, context):
                 # runner вызывает on_error до after_run в путях с error —
                 # guard-флаг исключает двойную запись истории/итога
+                await self._publish_subagent_turn_completed(context, had_error=True)
                 await self._finalize(context)
+
+            async def _publish_subagent_turn_completed(
+                self, context, *, had_error: bool
+            ):
+                """Опубликовать кастомный SubagentTurnCompleted через
+                ``bus.publish(event)``.
+
+                Используется ``RuntimeEventsSubscriber`` (см.
+                ``lib/services/runtime_events_subscriber.py``) для записи
+                ``subagent_run_finished`` в ``agent_gateway_logs`` через
+                нативный pub-sub, заменяя прямое обращение к
+                ``DbLoggingService`` из ``_finalize``.
+
+                Если ``self._bus is None`` (нет шины — backward compat) —
+                no-op. Запись в БД в этом случае остаётся за ``_finalize``.
+                См. openspec/changes/post-0.3.5-patches-cleanup/design.md D3.
+                """
+                if self._bus is None:
+                    return
+                try:
+                    from lib.events.subagent import SubagentTurnCompleted
+                except Exception:
+                    return
+
+                final = getattr(context, "final_content", "") or ""
+                tools = list(getattr(context, "tools_used", None) or [])
+                stop_reason = getattr(context, "stop_reason", None)
+                usage = getattr(context, "usage", None)
+                error_text = getattr(context, "error", None) or None
+
+                try:
+                    task_text = self._extract_task(context) if hasattr(self, "_extract_task") else None
+                except Exception:
+                    task_text = None
+
+                parent_user_id = self._resolve_parent_user_id(context)
+
+                event = SubagentTurnCompleted(
+                    task_id=self._task_id,
+                    parent_request_id=self._parent_rid,
+                    parent_user_id=parent_user_id,
+                    final_content=final,
+                    tools_used=tools,
+                    stop_reason=stop_reason,
+                    request_id=self._session_id,
+                    task=task_text,
+                    usage=usage,
+                    had_error=bool(had_error),
+                    error=error_text if had_error else None,
+                )
+                try:
+                    publish = getattr(self._bus, "publish", None)
+                    if publish is None:
+                        return
+                    result = publish(event)
+                    if hasattr(result, "__await__"):
+                        await result
+                except Exception as exc:
+                    logger.warning(
+                        "_SubagentLoggingHook.publish(SubagentTurnCompleted) failed: %s",
+                        exc,
+                    )
 
             async def _finalize(self, context):
                 if self._finalized:
@@ -1721,7 +1828,9 @@ class RuntimePatcher:
                             "parent_request_id": self._parent_rid,
                         },
                         metadata={
-                            "tokens_used": (context.usage or {}).get("total_tokens"),
+                            "tokens_used": (
+                                _usage_to_dict(getattr(context, "usage", None)) or {}
+                            ).get("total_tokens"),
                             "had_error": bool(context.error),
                         },
                     ))
