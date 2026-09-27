@@ -2163,23 +2163,8 @@ class RuntimePatcher:
             logger.exception("patch_project_tools failed: {}", exc)
             return False, f"patch failed: {exc}"
 
-    # ------------------------------------------------------------------
-    # Вспомогательные методы для auto-compact/context-bridge УДАЛЕНЫ в 0.3.5
-    # ------------------------------------------------------------------
+    # Вспомогательный комментарий (компакция + context-bridge seed) удалён в 0.3.5.
+# Исторический audit-trail сохранён в
+# openspec/changes/nanobot-035-upgrade/design.md и
+# openspec/changes/runtime-events-subscription/proposal.md.
 
-    # В nanobot 0.3.5:
-    # - ``Consolidator.maybe_consolidate_by_tokens`` отсутствует —
-    #   token-budget компакция идёт через ``ContextCompactionEvent``
-    #   (``nanobot.events.ContextCompactionEvent``);
-    # - upstream ``cmd_compact`` (nanobot/command/builtin.py:348) покрывает
-    #   ручной ``/compact``;
-    # - upstream ``AutoCompact._is_expired`` уже short-circuit при
-    #   ``_ttl <= 0``;
-    # - upstream ``TurnRuntimeAdmitted`` идёт через ``bus.publish``
-    #   и доступен через ``bus.subscribe``.
-    #
-    # Поэтому патчи ``compact_tracking``, ``compact_command``,
-    # ``idle_guard`` удалены; обязанности перенесены в
-    # ``lib/services/compaction_event_subscriber.py`` (D1) и
-    # подписку на ``TurnRuntimeAdmitted`` (D7).
-    # ------------------------------------------------------------------
