@@ -207,6 +207,8 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
 
     _report_db_pool_startup()
 
+    _check_websocket_port_available(ctx)
+
     try:
         GatewayRunner().run_forever(
             lambda: asyncio.run(_run(ctx, first_sync_event))
@@ -331,7 +333,7 @@ async def _run(ctx, first_sync_event) -> None:
 
         subprocess_manager.terminate_all()
 
-        await ctx.agent.close_mcp()
+        await ctx.agent.aclose()
         ctx.agent.stop()
         await channels.stop_all()
 
@@ -449,6 +451,93 @@ def _report_db_pool_startup() -> None:
             )
     except Exception:
         console.print("[red]✗[/red] DB pool: статус недоступен")
+
+
+def _check_websocket_port_available(ctx) -> None:
+    """Проверить занятость порта WebSocket-канала перед стартом цикла.
+
+    ``WebSocketChannel.start()`` биндит ``127.0.0.1:8765`` через
+    ``websockets.asyncio.server.serve``. Если предыдущий запуск gateway
+    был убит некорректно (крестик окна, диспетчер задач, kill -9), порт
+    остаётся занятым процессом, который не успел закрыть сокет. Без
+    этой проверки gateway падает с криптическим ``OSError: [Errno 10048]``
+    в недрах ``asyncio.create_server`` уже после прохождения половины
+    стартапа (включая Streamlit и Postgres-канал).
+
+    Хост/порт — upstream default из
+    ``nanobot.channels.websocket.runtime.WebSocketConfig`` (см.
+    ``runtime.py:197-198``). Функция читает фактические значения из
+    ``ctx.config.channels.websocket``, если они там заданы; иначе —
+    дефолты.
+
+    При занятости — печатает понятную диагностику (PID процесса-владельца
+    и подсказку про ``taskkill``/Ctrl+C) и завершает процесс с кодом 1
+    ДО запуска ``run_forever()``. Это предотвращает частичный старт
+    (Streamlit, синхронизация DuckDB) с последующим падением.
+    """
+    import socket
+
+    from rich.console import Console as _Console
+    _console = _Console()
+
+    host = "127.0.0.1"
+    port = 8765
+    try:
+        ws_cfg = getattr(getattr(ctx.config, "channels", None), "websocket", None)
+        if ws_cfg is not None:
+            host = getattr(ws_cfg, "host", host) or host
+            port = int(getattr(ws_cfg, "port", port) or port)
+    except Exception:
+        pass
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+        except OSError as e:
+            owner_pid = _find_listener_pid(host, port) or "?"
+            _console.print(
+                f"[red]✗[/red] Порт {host}:{port} уже занят (PID {owner_pid}). "
+                f"Вероятно, остался висеть предыдущий процесс gateway."
+            )
+            _console.print(
+                "  Завершите его одним из способов и запустите снова:"
+            )
+            _console.print(f"    taskkill /PID {owner_pid} /F")
+            _console.print("    (или закройте окно gateway через Ctrl+C в PowerShell)")
+            raise SystemExit(1) from e
+
+
+def _find_listener_pid(host: str, port: int) -> int | None:
+    """Найти PID процесса, слушающего ``host:port`` (Windows).
+
+    Использует ``netstat -ano`` через subprocess (PowerShell не имеет
+    нативного API для этого). При ошибке парсинга или отсутствии
+    процесса — возвращает ``None``.
+    """
+    import re
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout
+    except Exception:
+        return None
+
+    pattern = re.compile(
+        rf"\s+TCP\s+{re.escape(host)}:{port}\s+\S+\s+LISTENING\s+(\d+)\s*"
+    )
+    m = pattern.search(out)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
 
 
 console = Console()
