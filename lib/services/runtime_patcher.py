@@ -1662,7 +1662,9 @@ class RuntimePatcher:
                     bus = getattr(self, "bus", None)
                     publish_outbound = getattr(bus, "publish_outbound", None)
                     if callable(publish_outbound):
-                        publish_outbound(outbound)
+                        result = publish_outbound(outbound)
+                        if asyncio.iscoroutine(result):
+                            await result
                 except Exception as exc:
                     logger.warning(
                         "TurnDelivery.fail wrapper: failed to publish "
