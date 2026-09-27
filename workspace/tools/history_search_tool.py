@@ -106,6 +106,7 @@ class HistorySearchToolConfig(BaseModel):
                 "tool_result",
                 "llm_call",
                 "run_finished",
+                "turn_completed",
                 "subagent_run_finished",
                 "inbound",
             ],
@@ -122,7 +123,11 @@ class HistorySearchToolConfig(BaseModel):
                 "  • llm_call — полный промпт итерации LLM, включая вопросы "
                 "пользователя (поиск по тексту диалога).\n"
                 "  • run_finished — прошлый финальный ответ агента "
-                "пользователю.\n"
+                "пользователю (содержит final_content, tools_used). "
+                "Для пользовательского контента это основной тип.\n"
+                "  • turn_completed — метрики оборота: latency_ms, outcome, "
+                "usage_tokens, runtime_model. НЕ содержит final_content — "
+                "только статистика. Для контента используйте run_finished.\n"
                 "  • subagent_run_finished — ответ под-агента.\n"
                 "  • inbound — входящее сообщение пользователя.\n"
                 "Если не указан — ищутся все типы. Для поиска файлов "
