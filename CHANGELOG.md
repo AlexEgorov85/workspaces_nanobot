@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Дефолтный текст fallback-ответа при internal-ошибке (`RuntimePatcher._DEFAULT_INTERNAL_ERROR_TEXT`): `"Произошла внутренняя ошибка. Попробуйте позже."` → `"Не справился с этим запросом. Попробуйте, пожалуйста, ещё раз или переформулируйте вопрос."` — мягче, дружелюбнее, предлагает действие.
+
 ### Fixed
 
 - `RuntimePatcher.patch_turn_delivery_fail`: исправлена отправка двойного outbound — пользователь получал и fallback-ответ, и upstream-литерал `"Sorry, I encountered an error."`. Теперь на время вызова оригинального `fail()` атрибут `self.bus` подменяется на per-instance прокси `_OutboundSilencer`, который подавляет `publish_outbound`, но пропускает остальные методы bus и сохраняет `turn_completed` runtime-event (`openspec/changes/fix-error-fallback-double-outbound`).

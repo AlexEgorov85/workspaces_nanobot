@@ -21,7 +21,7 @@ AND ни один `publish_outbound` SHALL NOT содержать `content="Sorr
 #### Scenario: Default-текст при отсутствии project.json-секции
 
 - **WHEN** в `project.json` нет `gateway.error_messages.internal_error`
-- **THEN** пользователь получает `OutboundMessage.content = "Произошла внутренняя ошибка. Попробуйте позже."`
+- **THEN** пользователь получает `OutboundMessage.content = "Не справился с этим запросом. Попробуйте, пожалуйста, ещё раз или переформулируйте вопрос."`
 
 #### Scenario: Custom-текст из project.json
 
@@ -125,7 +125,7 @@ THEN поведение SHALL остаться как в upstream: `CancelledErr
 #### Scenario: Graceful shutdown без fallback-сообщения
 
 - **WHEN** оператор посылает SIGTERM и активный оборот прерывается
-- **THEN** пользователь НЕ получает `"Произошла внутренняя ошибка..."`; ветка `CancelledError` остаётся нетронутой
+- **THEN** пользователь НЕ получает fallback-сообщение (ни default, ни custom); ветка `CancelledError` остаётся нетронутой
 
 ### Requirement: Отсутствие утечки деталей исключения пользователю
 
@@ -135,7 +135,7 @@ THEN `OutboundMessage.content` SHALL содержать ТОЛЬКО текст 
 #### Scenario: Только заготовка в content
 
 - **WHEN** исходное исключение — `KeyError("agent_internal_state_xyz")`
-- **THEN** пользователь получает `"Произошла внутренняя ошибка. Попробуйте позже."`; в `OutboundMessage.content` НЕТ подстроки `"agent_internal_state_xyz"`, `"KeyError"` или пути к исходнику
+- **THEN** пользователь получает default fallback-текст; в `OutboundMessage.content` НЕТ подстроки `"agent_internal_state_xyz"`, `"KeyError"` или пути к исходнику
 
 ### Requirement: Не-регрессия публичного контракта OutboundMessage
 
