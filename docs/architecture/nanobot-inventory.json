@@ -890,22 +890,6 @@
       "setattr_calls": []
     },
     {
-      "file": "workspace/hooks/active_files_hook.py",
-      "imports": [
-        {
-          "line": 47,
-          "statement": "from nanobot.agent import AgentHook",
-          "module": "nanobot.agent",
-          "names": [
-            "AgentHook"
-          ],
-          "classification": "GREEN"
-        }
-      ],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
       "file": "workspace/hooks/recent_files_hook.py",
       "imports": [
         {

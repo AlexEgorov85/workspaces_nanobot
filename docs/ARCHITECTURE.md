@@ -1540,8 +1540,8 @@ nanobot/
 ├── workspace/                            # runtime-данные и плагины-хуки
 │   ├── hooks/                            # плагины: самодостаточные AgentHook (cls(workspace_dir=...))
 │   │   ├── session_file_redirect_hook.py #     перенаправление write/edit + media тула message в data_store/cache/sessions/
-│   │   ├── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
-│   │   └── active_files_hook.py          #     side-channel активных файлов через session.metadata
+│   │   └── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
+│   │       # active_files_hook.py удалён (см. ADR active-files-hook-removal.md)
 │   ├── tools/                            # кастомные tool'ы (auto-discover через patch_project_tools)
 │   │   ├── compact_context.py, history_search_tool.py,
 │   │   │   legal_summarizer_query.py, example.py

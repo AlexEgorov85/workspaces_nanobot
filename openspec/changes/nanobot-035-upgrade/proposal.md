@@ -41,7 +41,7 @@
 
 `patch_context_governor`, `patch_save_turn`, `patch_exec_timeout_cap`, `patch_tool_limits`, `patch_async_session_saves`, `patch_session_dir_watch`, `patch_subagent_logging`, `patch_session_content_cleanup` — сигнатуры и пути в 0.3.5 не изменились, патчи работают как есть.
 
-`DbLoggingService` (`agent_gateway_logs`), `PGSessionManager`, `workspace/hooks/{session_file_redirect,active_files,recent_files}_hook.py`, `lib/utils/sql_safety.py`, `workspace/utils/db.py`, `lib/services/runtime_health.py`, channel layer (`lib/channels/postgres_channel.py`), vector pipeline (`lib/services/{pg_duckdb_sync_service,duckdb_cache_store,table_registry,vector_index_service,cache_provider,cache_provider_impl}`), skill layer (`workspace/skills/*`) — **наша уникальная ценность**, в upstream нет эквивалента, остаются без изменений.
+`DbLoggingService` (`agent_gateway_logs`), `PGSessionManager`, `workspace/hooks/{session_file_redirect,recent_files}_hook.py`, `lib/utils/sql_safety.py`, `workspace/utils/db.py`, `lib/services/runtime_health.py`, channel layer (`lib/channels/postgres_channel.py`), vector pipeline (`lib/services/{pg_duckdb_sync_service,duckdb_cache_store,table_registry,vector_index_service,cache_provider,cache_provider_impl}`), skill layer (`workspace/skills/*`) — **наша уникальная ценность**, в upstream нет эквивалента, остаются без изменений.
 
 ### Capabilities
 
