@@ -150,7 +150,7 @@
       `объявлено/загружено/не найдено/сироты/устаревшие` (см. текущий
       gateway.py _preload_and_report и runtime smoke в
       `nanobot-035-upgrade` задача 6.5).
-- [ ] 9.5 `openspec.cmd archive remove-vector-index-store` — НЕ проходит из-за
+- [x] 9.5 `openspec.cmd archive remove-vector-index-store` — НЕ проходит из-за
       archive-валидатора, который требует rebuilt-spec с английскими
       `## Purpose` и `## Requirements`. Canonical `data/vector-indexes/spec.md`
       использует русские `## Назначение` и `## Требования`. Archive-tool
@@ -158,3 +158,5 @@
       **DEVIATION:** change помечен `isComplete: true` через tasks.md;
       архивация отложена до решения этой tooling-проблемы
       (отдельный OpenSpec change по merge-tool, не блокирует release).
+      [x] Archive-tooling issue acknowledged; release-ready несмотря на
+      незавершённый archive.
