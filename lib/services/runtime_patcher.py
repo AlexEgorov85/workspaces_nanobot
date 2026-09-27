@@ -520,6 +520,72 @@ class PatchReport:
         return "\n".join(lines)
 
 
+class _OutboundSilencer:
+    """Прокси для подавления outbound'а при вызове upstream ``TurnDelivery.fail``.
+
+    Используется в ``RuntimePatcher.patch_turn_delivery_fail._wrap_fail``:
+    на время вызова оригинального ``fail()`` ``self.bus`` подменяется на
+    этот объект. ``__getattr__`` пробрасывает все обращения к реальному
+    bus, кроме ``publish_outbound`` — она возвращает ``None`` без публикации.
+    Это позволяет сохранить upstream-логику ``turn_completed`` runtime-event,
+    не отправляя при этом upstream-литерал ``"Sorry, I encountered an error."``
+    пользователю.
+
+    Подмена атрибута экземпляра (per-instance) безопасна для конкурентных
+    оборотов: один ``TurnDelivery`` живёт ровно один оборот.
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def publish_outbound(self, msg: Any) -> None:
+        return None
+
+
+def _resolve_agent_id(config: Any, agent: Any) -> str | None:
+    """Резолв идентификатора активного агента для передачи в патчи.
+
+    Источники по убыванию приоритета:
+    1. ``config.agents.defaults.name`` (если задано явно) или
+       ``config.agents.defaults`` (default-агент).
+    2. ``config.default_agent`` (если есть).
+    3. ``agent.name`` (fallback на переданный ``AgentLoop``).
+    4. ``None`` если ничего не удалось достать.
+
+    nanobot ``Config`` (``config/schema.py:422``) хранит агентов в
+    ``config.agents.defaults`` (один имплицитный default). Имя может быть
+    задано явно или выводится из конфига; для runtime-событий проекта
+    используется значение ``config.agents.defaults.name`` или
+    ``"default"``.
+    """
+    try:
+        defaults = getattr(getattr(config, "agents", None), "defaults", None)
+        if defaults is not None:
+            name = getattr(defaults, "name", None)
+            if isinstance(name, str) and name:
+                return name
+    except Exception:
+        pass
+    try:
+        default_agent = getattr(config, "default_agent", None)
+        if isinstance(default_agent, str) and default_agent:
+            return default_agent
+    except Exception:
+        pass
+    try:
+        agent_name = getattr(agent, "name", None)
+        if isinstance(agent_name, str) and agent_name:
+            return agent_name
+    except Exception:
+        pass
+    return None
+
+
 class RuntimePatcher:
     """Применение всех локальных доработок к фреймворку nanobot."""
 
@@ -571,7 +637,7 @@ class RuntimePatcher:
         self._record(report, "assemble_outbound", self.patch_assemble_outbound(
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
         self._record(report, "turn_delivery_fail", self.patch_turn_delivery_fail(
-            settings, db_logging_service))
+            settings, db_logging_service, agent_id=_resolve_agent_id(config, agent)))
         self._record(report, "async_save", self.patch_async_session_saves(agent))
         self._record(report, "session_dir_watch", self.patch_session_dir_watch(
             agent, workspace_dir))
@@ -1610,10 +1676,17 @@ class RuntimePatcher:
             return False, "TurnDelivery.fail is missing"
 
         async def _wrap_fail(self, *, publish_completion: bool) -> None:
-            # Локализация ссылок: даже если _DEFAULT_LOG_TO_DB/log_to_db
-            # изменятся после применения патча (теоретически), обёртка
-            # зафиксировала их значения.
+            # Импорт внутри обёртки — ``LogEvent``/``try_log_event`` не
+            # нужны, если ``log_to_db=False``.
             from lib.services.db_logging_service import LogEvent, try_log_event
+
+            # Захват активного исключения. ``TurnDelivery.fail`` вызывается
+            # изнутри ``except Exception``-блока в
+            # ``AgentLoop._process_message`` (``loop.py:1480-1482``), поэтому
+            # ``sys.exception()`` возвращает активное исключение. При прямом
+            # вызове вне ``except``-блока (юнит-тест) вернётся ``None`` →
+            # ``exception_available=False`` в payload.
+            exc = _sys.exception()
 
             lifecycle = getattr(self, "lifecycle_message", None)
             channel = getattr(lifecycle, "channel", None) if lifecycle else None
@@ -1623,23 +1696,28 @@ class RuntimePatcher:
                 if lifecycle is not None
                 else {}
             )
-            session_key = (
-                getattr(lifecycle, "session_key", None)
-                if lifecycle is not None
-                else None
-            )
-            user_id = (
-                getattr(lifecycle, "user_id", None)
+
+            # Авторитетные источники. ``InboundMessage``
+            # (``bus/events.py:25-37``) НЕ имеет полей ``session_key`` /
+            # ``user_id`` (есть ``sender_id`` и ``session_key_override``),
+            # поэтому читаем ``session_key`` с ``TurnDelivery``-экземпляра
+            # (атрибут установлен ``TurnDelivery.create(msg, session_key)``
+            # в ``turn_delivery.py:85-103``), а идентификатор пользователя —
+            # с ``lifecycle_message.sender_id``.
+            session_key = getattr(self, "session_key", None)
+            sender_id = (
+                getattr(lifecycle, "sender_id", None)
                 if lifecycle is not None
                 else None
             )
 
-            # Снимок ``self._failure_error_kind`` нужен для
-            # observability: пишем тип исключения, если upstream успел
-            # его зафиксировать. ``_failure_error_kind`` — приватное поле
-            # upstream-класса, может отсутствовать в других форках; резолв
-            # через getattr.
             failure_error_kind = getattr(self, "_failure_error_kind", None)
+
+            exception_available = exc is not None
+            exception_type = (
+                type(exc).__name__ if exc is not None else None
+            )
+            exception_message = str(exc) if exc is not None else None
 
             outbound_metadata = dict(base_metadata)
             outbound_metadata["_error_kind"] = "internal"
@@ -1658,24 +1736,23 @@ class RuntimePatcher:
                         content=internal_error,
                         metadata=outbound_metadata,
                     )
-                    # Пишем в bus напрямую (как делает оригинальный fail).
                     bus = getattr(self, "bus", None)
                     publish_outbound = getattr(bus, "publish_outbound", None)
                     if callable(publish_outbound):
                         result = publish_outbound(outbound)
                         if asyncio.iscoroutine(result):
                             await result
-                except Exception as exc:
+                except Exception as exc_pub:
                     logger.warning(
                         "TurnDelivery.fail wrapper: failed to publish "
                         "fallback outbound: {}",
-                        exc,
+                        exc_pub,
                     )
 
-            # Запись в agent_gateway_logs через defensive helper
+            # Запись в ``agent_gateway_logs`` через defensive helper
             # (try_log_event сам обрабатывает svc=None / not running /
             # log_event exception). Fail-open: при любом сбое БД —
-            # просто WARNING, оборот продолжается.
+            # WARNING, оборот продолжается.
             if log_to_db and db_logging_service is not None:
                 try:
                     summary_text = (
@@ -1698,12 +1775,21 @@ class RuntimePatcher:
                             "kind": "internal",
                             "failure_error_kind": failure_error_kind,
                             "agent_id": agent_id,
+                            "sender_id": sender_id,
+                            "chat_id": chat_id,
+                            "exception_type": exception_type,
+                            "exception_message": exception_message,
+                            "exception_available": exception_available,
                         },
                         metadata={
                             "fallback_text_len": len(internal_error),
                             "publish_completion": bool(publish_completion),
                         },
-                        user_id=user_id if isinstance(user_id, str) else None,
+                        user_id=(
+                            sender_id
+                            if isinstance(sender_id, str)
+                            else None
+                        ),
                     )
                     try_log_event(
                         db_logging_service,
@@ -1711,18 +1797,31 @@ class RuntimePatcher:
                         producer="runtime_patcher",
                         event_type="turn_failed",
                     )
-                except Exception as exc:
+                except Exception as exc_log:
                     logger.warning(
                         "TurnDelivery.fail wrapper: failed to build "
                         "log_event: {}",
-                        exc,
+                        exc_log,
                     )
 
-            # Передаём управление оригинальному fail — он публикует
-            # turn_completed event (failure_kind="internal").
-            result = original_fail(self, publish_completion=publish_completion)
-            if asyncio.iscoroutine(result):
-                await result
+            # Вызов оригинального ``fail`` — ради ``turn_completed``
+            # runtime-event. На время вызова ``self.bus`` подменяется на
+            # ``_OutboundSilencer``, который НЕ публикует outbound (но
+            # пропускает остальные атрибуты bus через ``__getattr__``).
+            # Подмена атрибута экземпляра безопасна для конкурентных
+            # оборотов (один ``TurnDelivery`` живёт один оборот).
+            original_bus = getattr(self, "bus", None)
+            if original_bus is not None:
+                self.bus = _OutboundSilencer(original_bus)
+            try:
+                result = original_fail(
+                    self, publish_completion=publish_completion
+                )
+                if asyncio.iscoroutine(result):
+                    await result
+            finally:
+                if original_bus is not None:
+                    self.bus = original_bus
 
         TurnDelivery.fail = _wrap_fail
         return True, "TurnDelivery.fail patched"

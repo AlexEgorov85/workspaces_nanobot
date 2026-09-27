@@ -1197,12 +1197,24 @@ def _make_stub_td_module(published, turn_completed_calls):
     Каждый вызов возвращает СВЕЖИЙ класс ``TurnDelivery`` — критично,
     потому что патч мутирует ``TurnDelivery.fail`` на уровне класса,
     и если использовать общий класс между тестами, состояние протекает.
+
+    Stub воспроизводит upstream ``turn_delivery.py:336-353``:
+    ``fail()`` зовёт ``await self.bus.publish_outbound(...)`` (а не
+    мутирует общий список в обход bus), чтобы per-instance прокси
+    ``_OutboundSilencer`` мог подавить outbound при вызове оригинала.
     """
     import types as _types
 
     class _RuntimeEventPublisher:
         async def turn_completed(self, **kwargs):
             turn_completed_calls.append(kwargs)
+
+    class _StubBus:
+        def __init__(self, sink):
+            self._sink = sink
+
+        async def publish_outbound(self, msg):
+            self._sink.append(msg)
 
     class _TurnDelivery:
         def __init__(self):
@@ -1215,7 +1227,7 @@ def _make_stub_td_module(published, turn_completed_calls):
         async def fail(self, *, publish_completion: bool) -> None:
             from nanobot.bus.events import OutboundMessage
 
-            published.append(
+            await self.bus.publish_outbound(
                 OutboundMessage(
                     channel=self.lifecycle_message.channel,
                     chat_id=self.lifecycle_message.chat_id,
@@ -1242,12 +1254,13 @@ def _make_stub_td_module(published, turn_completed_calls):
         inst.lifecycle_message.channel = "cli"
         inst.lifecycle_message.chat_id = "c1"
         inst.lifecycle_message.metadata = {"foo": "bar"}
-        inst.lifecycle_message.session_key = "sess1"
-        inst.lifecycle_message.user_id = "u1"
-        inst.bus = MagicMock()
-        inst.bus.publish_outbound = MagicMock(
-            side_effect=lambda msg: published.append(msg)
-        )
+        inst.lifecycle_message.sender_id = "u1"
+        # ``InboundMessage`` НЕ имеет ``session_key`` / ``user_id`` —
+        # ставим None, чтобы тесты провалились, если реализация
+        # по ошибке начнёт их читать.
+        inst.lifecycle_message.session_key = None
+        inst.lifecycle_message.user_id = None
+        inst.bus = _StubBus(published)
         inst.session_key = "sess1"
         inst._failure_error_kind = "RuntimeError"
         inst.runtime_event_publisher = _RuntimeEventPublisher()
@@ -1290,18 +1303,15 @@ class TestPatchTurnDeliveryFail:
         inst = stub_td_module[3]()
         await inst.fail(publish_completion=True)
 
-        # Обёртка публикует fallback-сообщение, затем вызывает
-        # оригинальный fail (stub), который тоже публикует upstream-литерал.
-        # Первое сообщение в списке — наш fallback, второе — upstream-stub.
-        assert len(published) == 2
+        # Ровно один outbound — наш fallback. Upstream-литерал подавлен
+        # per-instance прокси на ``self.bus``.
+        assert len(published) == 1
         out = published[0]
         assert out.content == _DEFAULT_INTERNAL_ERROR_TEXT
         assert out.channel == "cli"
         assert out.chat_id == "c1"
         assert out.metadata.get("_error_kind") == "internal"
         assert out.metadata.get("_final_turn") is True
-        # Второй outbound — заглушка upstream'а.
-        assert published[1].content == "Sorry, I encountered an error."
 
     @pytest.mark.asyncio
     async def test_custom_text_from_settings(self, stub_td_module):
@@ -1320,7 +1330,7 @@ class TestPatchTurnDeliveryFail:
         inst = stub_td_module[3]()
         await inst.fail(publish_completion=True)
 
-        # Первое сообщение — fallback от патча; второе — upstream-stub.
+        assert len(published) == 1
         assert published[0].content == "Сервис временно недоступен."
 
     @pytest.mark.asyncio
@@ -1334,13 +1344,31 @@ class TestPatchTurnDeliveryFail:
         inst._failure_error_kind = "KeyError: agent_internal_state_xyz"
         await inst.fail(publish_completion=True)
 
-        # В content не должно быть ни типа исключения, ни сообщения
         assert "KeyError" not in published[0].content
         assert "agent_internal_state_xyz" not in published[0].content
 
     @pytest.mark.asyncio
-    async def test_log_to_db_true_writes_event(self, stub_td_module, monkeypatch):
+    async def test_upstream_literal_not_published(self, stub_td_module):
+        """Upstream-литерал ``"Sorry, I encountered an error."`` НЕ ДОЛЖЕН
+        доходить до пользователя — это инвариант подмены.
+        """
         _, published, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        for msg in published:
+            assert msg.content != "Sorry, I encountered an error.", (
+                f"upstream literal leaked: {msg.content!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_log_to_db_true_writes_event(
+        self, stub_td_module, monkeypatch
+    ):
+        _, _, _, _ = stub_td_module
         recorded: list = []
 
         def fake_try_log_event(svc, event, *, producer, event_type):
@@ -1354,7 +1382,9 @@ class TestPatchTurnDeliveryFail:
 
         svc = MagicMock()
         patcher = RuntimePatcher()
-        patcher.patch_turn_delivery_fail(settings=None, db_logging_service=svc)
+        patcher.patch_turn_delivery_fail(
+            settings=None, db_logging_service=svc, agent_id="agent_test",
+        )
 
         inst = stub_td_module[3]()
         await inst.fail(publish_completion=True)
@@ -1369,10 +1399,20 @@ class TestPatchTurnDeliveryFail:
         assert log_event.channel == "cli"
         assert log_event.payload["kind"] == "internal"
         assert log_event.payload["failure_error_kind"] == "RuntimeError"
+        assert log_event.payload["agent_id"] == "agent_test"
+        assert log_event.payload["sender_id"] == "u1"
+        assert log_event.payload["chat_id"] == "c1"
+        # exception_available зависит от того, есть ли активное исключение
+        # при вызове. В pytest-asyncio без except-блока — False.
+        assert log_event.payload["exception_available"] is False
+        assert log_event.payload["exception_type"] is None
+        assert log_event.payload["exception_message"] is None
 
     @pytest.mark.asyncio
-    async def test_log_to_db_false_skips_db(self, stub_td_module, monkeypatch):
-        _, published, _, _ = stub_td_module
+    async def test_log_to_db_false_skips_db(
+        self, stub_td_module, monkeypatch
+    ):
+        _, _, _, _ = stub_td_module
         recorded: list = []
 
         def fake_try_log_event(svc, event, *, producer, event_type):
@@ -1392,17 +1432,12 @@ class TestPatchTurnDeliveryFail:
             db_logging_service=MagicMock(),
         )
 
-        # Проверим, что патч зафиксировал log_to_db=False в обёртке
-        import lib.services.runtime_patcher as rp
-        import inspect
-        src = inspect.getsource(rp.RuntimePatcher.patch_turn_delivery_fail)
-        assert "_DEFAULT_LOG_TO_DB" in src  # sanity check
-        # Прямой вызов патченного метода через stub:
         inst = stub_td_module[3]()
         await inst.fail(publish_completion=True)
 
-        # log_to_db=False → try_log_event НЕ вызван
-        assert recorded == [], f"try_log_event called despite log_to_db=False: {recorded}"
+        assert recorded == [], (
+            f"try_log_event called despite log_to_db=False: {recorded}"
+        )
 
     @pytest.mark.asyncio
     async def test_no_db_logging_service_is_fail_open(
@@ -1430,7 +1465,7 @@ class TestPatchTurnDeliveryFail:
         inst = stub_td_module[3]()
         await inst.fail(publish_completion=True)
 
-        # Первое сообщение — fallback от патча; второе — upstream-stub.
+        assert len(published) == 1
         assert published[0].content == (
             "Произошла внутренняя ошибка. Попробуйте позже."
         )
@@ -1448,9 +1483,173 @@ class TestPatchTurnDeliveryFail:
         await inst.fail(publish_completion=True)
 
         assert len(turn_completed_calls) == 1
-        # outcome/failure_kind прокидываются stub'ом оригинального fail.
         assert turn_completed_calls[0]["outcome"] == "failed"
         assert turn_completed_calls[0]["failure_kind"] == "internal"
+
+    @pytest.mark.asyncio
+    async def test_turn_completed_not_published_when_completion_false(
+        self, stub_td_module
+    ):
+        _, _, turn_completed_calls, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=False)
+
+        assert turn_completed_calls == []
+
+    @pytest.mark.asyncio
+    async def test_session_key_from_turn_delivery_instance(
+        self, stub_td_module, monkeypatch
+    ):
+        """``session_key`` берётся из ``self.session_key`` (атрибут
+        ``TurnDelivery``), а НЕ из ``lifecycle_message`` (такого поля нет).
+        """
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None, db_logging_service=MagicMock())
+
+        inst = stub_td_module[3]()
+        # Поставим «плохое» значение в lifecycle_message.session_key —
+        # если реализация по ошибке его читает, тест упадёт.
+        inst.lifecycle_message.session_key = "WRONG_LIFECYCLE"
+        inst.session_key = "real_session_key"
+        await inst.fail(publish_completion=True)
+
+        assert recorded[0].session_id == "real_session_key"
+
+    @pytest.mark.asyncio
+    async def test_sender_id_from_lifecycle_message(
+        self, stub_td_module, monkeypatch
+    ):
+        """``sender_id`` берётся из ``lifecycle_message.sender_id``."""
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None, db_logging_service=MagicMock())
+
+        inst = stub_td_module[3]()
+        inst.lifecycle_message.sender_id = "u-42"
+        await inst.fail(publish_completion=True)
+
+        assert recorded[0].payload["sender_id"] == "u-42"
+        assert recorded[0].user_id == "u-42"
+
+    @pytest.mark.asyncio
+    async def test_agent_id_passed_through(
+        self, stub_td_module, monkeypatch
+    ):
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(
+            settings=None, db_logging_service=MagicMock(), agent_id="agent_main",
+        )
+
+        inst = stub_td_module[3]()
+        await inst.fail(publish_completion=True)
+
+        assert recorded[0].payload["agent_id"] == "agent_main"
+
+    @pytest.mark.asyncio
+    async def test_exception_available_inside_except_block(
+        self, stub_td_module, monkeypatch
+    ):
+        """При вызове из ``except``-блока ``sys.exception()`` возвращает
+        активное исключение — payload содержит ``exception_available=true``
+        и тип/текст исключения.
+        """
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None, db_logging_service=MagicMock())
+
+        inst = stub_td_module[3]()
+
+        try:
+            raise ValueError("boom-12345")
+        except Exception:
+            await inst.fail(publish_completion=True)
+
+        assert len(recorded) == 1
+        evt = recorded[0]
+        assert evt.payload["exception_available"] is True
+        assert evt.payload["exception_type"] == "ValueError"
+        assert evt.payload["exception_message"] == "boom-12345"
+
+    @pytest.mark.asyncio
+    async def test_exception_unavailable_degrades_gracefully(
+        self, stub_td_module, monkeypatch
+    ):
+        """Без активного исключения (прямой вызов из теста) — payload
+        содержит ``exception_available=false`` и ``null`` тип/сообщение.
+        """
+        _, _, _, _ = stub_td_module
+        recorded: list = []
+
+        def fake_try_log_event(svc, event, *, producer, event_type):
+            recorded.append(event)
+            return True
+
+        monkeypatch.setattr(
+            "lib.services.db_logging_service.try_log_event",
+            fake_try_log_event,
+        )
+
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None, db_logging_service=MagicMock())
+
+        inst = stub_td_module[3]()
+        # Прямой вызов — НЕ из except-блока.
+        await inst.fail(publish_completion=True)
+
+        assert len(recorded) == 1
+        evt = recorded[0]
+        assert evt.payload["exception_available"] is False
+        assert evt.payload["exception_type"] is None
+        assert evt.payload["exception_message"] is None
 
     def test_module_not_loaded_returns_false(self, monkeypatch):
         """Если ``TurnDelivery`` модуль отсутствует в ``sys.modules`` —
@@ -1464,11 +1663,9 @@ class TestPatchTurnDeliveryFail:
         assert not ok
         assert "not loaded" in msg
 
-    def test_turn_delivery_fail_missing_returns_false(
-        self, stub_td_module
-    ):
+    def test_turn_delivery_fail_missing_returns_false(self, stub_td_module):
         """Если у stub-класса нет атрибута ``fail`` — патч no-op."""
-        stub_td_module[0].TurnDelivery.fail = None  # type: ignore[assignment]  # type: ignore[assignment]
+        stub_td_module[0].TurnDelivery.fail = None  # type: ignore[assignment]
         patcher = RuntimePatcher()
         ok, msg = patcher.patch_turn_delivery_fail(settings=None)
         assert not ok
@@ -1486,17 +1683,12 @@ class TestPatchTurnDeliveryFail:
             },
         )
         assert ok
-        # Поведение проверим в test_default_text_when_no_settings —
-        # здесь достаточно, что патч не упал на мусорном типе.
 
     @pytest.mark.asyncio
     async def test_cancelled_error_path_untouched(self, stub_td_module):
-        """``asyncio.CancelledError`` НЕ проходит через ``fail()`` —
-        проверяем, что патч не добавил хуков в ``CancelledError``-ветку.
-
-        Патч не модифицирует ``_process_message`` upstream-кода; этот тест
-        фиксирует инвариант: stub без override не получает CancelledError
-        при нормальном вызове ``fail()``.
+        """Патч не подменяет ``_process_message`` — CancelledError-ветка
+        upstream'а остаётся нетронутой. Здесь фиксируем только инвариант
+        «ровно один outbound» и отсутствие побочных эффектов.
         """
         _, published, _, _ = stub_td_module
         patcher = RuntimePatcher()
@@ -1505,8 +1697,22 @@ class TestPatchTurnDeliveryFail:
         inst = stub_td_module[3]()
         await inst.fail(publish_completion=True)
 
-        # Проверяем только то, что патч не подменяет ``_process_message`` —
-        # никаких побочных эффектов на CancelledError-ветке быть не должно.
-        # Первое сообщение — fallback от патча; второе — upstream-stub.
-        assert len(published) == 2
+        assert len(published) == 1
         assert published[0].metadata.get("_error_kind") == "internal"
+
+    @pytest.mark.asyncio
+    async def test_bus_is_restored_after_original_fail(
+        self, stub_td_module
+    ):
+        """``self.bus`` восстанавливается после вызова оригинального
+        ``fail()`` — критично для следующих вызовов в этом обороте.
+        """
+        _, _, _, _ = stub_td_module
+        patcher = RuntimePatcher()
+        patcher.patch_turn_delivery_fail(settings=None)
+
+        inst = stub_td_module[3]()
+        real_bus = inst.bus
+        await inst.fail(publish_completion=True)
+
+        assert inst.bus is real_bus

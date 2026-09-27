@@ -1,9 +1,4 @@
-# runtime/error-fallback Specification
-
-## Purpose
-Конфигурируемый заготовленный ответ при необработанном исключении в `AgentLoop._process_message` (upstream-`nanobot`) с записью деталей в долговечный журнал `agent_gateway_logs`. Заменяет захардкоженный `"Sorry, I encountered an error."` в `TurnDelivery.fail` на операторски-редактируемый текст без утечки traceback'а пользователю.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Подстановка заготовленного текста при internal-ошибке
 
@@ -45,16 +40,6 @@ AND ни один `publish_outbound` SHALL NOT содержать `content="Sorr
 - **THEN** она SHALL вызвать оригинальный `TurnDelivery.fail(self, publish_completion=...)` для продолжения логики `turn_completed`
 - **AND** на время этого вызова `self.bus` SHALL быть подменён на прокси `_OutboundSilencer`, который НЕ публикует outbound (но пропускает все остальные методы bus через `__getattr__`)
 - **AND** после возврата оригинального `fail()` атрибут `self.bus` SHALL быть восстановлен в исходное значение через `try/finally`
-
-### Requirement: Метаданные error_kind в финальном outbound
-
-WHEN система формирует fallback-ответ на необработанное исключение,
-THEN `OutboundMessage.metadata._error_kind` SHALL быть равен `"internal"`.
-
-#### Scenario: Маркер в metadata
-
-- **WHEN** пользователь получает fallback-ответ
-- **THEN** `outbound.metadata["_error_kind"] == "internal"` (отличимо от обычного ответа и от upstream-литерала `"Sorry, I encountered an error."`)
 
 ### Requirement: Поведение observability
 
@@ -106,43 +91,3 @@ AND при `log_to_db=false` система SHALL **не** вызывать `try
 - **WHEN** `_wrap_fail` вызван вне `except`-блока (например, прямо из unit-теста без активного исключения)
 - **THEN** payload SHALL содержать `exception_available=false`, `exception_type=null`, `exception_message=null`
 - **AND** остальные поля (`session_key`, `sender_id`, `agent_id`, `channel`, `chat_id`) SHALL заполняться как обычно
-
-### Requirement: Сохранение runtime-event публикации
-
-WHEN система формирует fallback-ответ,
-THEN система SHALL опубликовать `turn_completed` с `outcome="failed"` и `failure_kind="internal"` (как это делает upstream `TurnDelivery.fail`).
-
-#### Scenario: Postgres-channel корректно финализирует слот
-
-- **WHEN** задача в worker_pool завершилась необработанным исключением и пользователь получил fallback-ответ
-- **THEN** PostgresChannel.send получает финальный outbound и помечает задачу как `completed` (а не `processing`), reclaim не срабатывает
-
-### Requirement: Не-применимость для CancelledError
-
-WHEN `AgentLoop._process_message` ловит `asyncio.CancelledError` (shutdown/cleanup path),
-THEN поведение SHALL остаться как в upstream: `CancelledError` обрабатывается отдельной веткой (`delivery.abort_stream()` + `restore_runtime_checkpoint`) и НЕ проходит через fallback-обёртку.
-
-#### Scenario: Graceful shutdown без fallback-сообщения
-
-- **WHEN** оператор посылает SIGTERM и активный оборот прерывается
-- **THEN** пользователь НЕ получает `"Произошла внутренняя ошибка..."`; ветка `CancelledError` остаётся нетронутой
-
-### Requirement: Отсутствие утечки деталей исключения пользователю
-
-WHEN система формирует fallback-ответ,
-THEN `OutboundMessage.content` SHALL содержать ТОЛЬКО текст `gateway.error_messages.internal_error` (без str(exc), traceback, имени функции или module path).
-
-#### Scenario: Только заготовка в content
-
-- **WHEN** исходное исключение — `KeyError("agent_internal_state_xyz")`
-- **THEN** пользователь получает `"Произошла внутренняя ошибка. Попробуйте позже."`; в `OutboundMessage.content` НЕТ подстроки `"agent_internal_state_xyz"`, `"KeyError"` или пути к исходнику
-
-### Requirement: Не-регрессия публичного контракта OutboundMessage
-
-WHEN система формирует fallback-ответ,
-THEN `OutboundMessage` SHALL сохранить все обязательные поля (`channel`, `chat_id`, `content`, `metadata`) и SHALL быть совместим с downstream-каналами (PostgresChannel, RedisChannel, ConsoleLoop, Streamlit) без изменений в их обработчиках.
-
-#### Scenario: PostgresChannel не падает на fallback
-
-- **WHEN** fallback-ответ публикуется в `bus.publish_outbound`
-- **THEN** PostgresChannel.send корректно обрабатывает его как финальный outbound, переводит задачу в `completed`, удаляет claim — никаких изменений в коде канала не требуется

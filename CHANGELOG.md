@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `RuntimePatcher.patch_turn_delivery_fail`: исправлена отправка двойного outbound — пользователь получал и fallback-ответ, и upstream-литерал `"Sorry, I encountered an error."`. Теперь на время вызова оригинального `fail()` атрибут `self.bus` подменяется на per-instance прокси `_OutboundSilencer`, который подавляет `publish_outbound`, но пропускает остальные методы bus и сохраняет `turn_completed` runtime-event (`openspec/changes/fix-error-fallback-double-outbound`).
+- `RuntimePatcher.patch_turn_delivery_fail`: payload `turn_failed` в `agent_gateway_logs` дополнен полями `exception_type`, `exception_message`, `exception_available`, `sender_id`, `agent_id`. Захват исключения через `sys.exception()` (вызов идёт изнутри `except`-блока в `loop.py:1480-1482`); `session_key` теперь берётся из `TurnDelivery.session_key` (раньше всегда был `null` — `lifecycle_message.session_key` не существует), идентификатор пользователя — из `lifecycle_message.sender_id` (раньше `null` — `lifecycle_message.user_id` не существует).
+- `RuntimePatcher.apply_all`: `patch_turn_delivery_fail` теперь получает `agent_id`, резолвленный из `config.agents.defaults.name` (с fallback на `config.default_agent` / `agent.name` / `None`).
+
 > **MAJOR-релиз:** переход session hot-path на upstream `SessionManager`
 > (JSONL); PG остаётся как cold-storage mirror через
 > `SessionColdSyncService`. Upstream JSONL — единственный source
