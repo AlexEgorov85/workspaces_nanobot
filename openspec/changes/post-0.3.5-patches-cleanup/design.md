@@ -34,7 +34,7 @@ nanobot\`).
   полагаясь на `RuntimeEventsSubscriber` (seed `TurnRuntimeAdmitted`).
 * Удалить мёртвый код `ActiveFilesHook` и его side-channel-ключи.
 * Удалить `RuntimePatcher.patch_context_bridge_seed` (no-op с 0.3.5).
-* Удалить устаревший исторический комментарий `runtime_patcher.py:2043-2057`.
+* Удалить устаревший исторический комментарий `runtime_patcher.py:2040-2058`.
 
 **Non-Goals:**
 

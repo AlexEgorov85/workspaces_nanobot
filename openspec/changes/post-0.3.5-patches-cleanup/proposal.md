@@ -45,7 +45,7 @@
    subagent-события — это известное архитектурное ограничение.
 
 5. **No-op-комментарии в `runtime_patcher.py:580-597` (метод
-   `patch_context_bridge_seed`) и `runtime_patcher.py:2043-2057`** —
+   `patch_context_bridge_seed`) и `runtime_patcher.py:2040-2058`** —
    устарели после применения `runtime-events-subscription`. Docstring
    метода ссылается на план миграции, который уже реализован в отдельном
    change, и продолжает сбивать grep-поиск.
@@ -75,8 +75,8 @@
   целиком: метод, запись в `_PATCH_SPECS` (`runtime_patcher.py:231-245`),
   вызов в `apply_all` (`runtime_patcher.py:510`). В startup-логе
   `apply_all` этот spec исчезает.
-* Устаревший исторический комментарий `runtime_patcher.py:2043-2057`
-  (12 строк). Логика комментария уже отражена в
+* Устаревший исторический комментарий `runtime_patcher.py:2040-2058`
+  (19 строк). Логика комментария уже отражена в
   `openspec/changes/nanobot-035-upgrade/design.md` и
   `openspec/changes/runtime-events-subscription/proposal.md`.
 
@@ -163,7 +163,7 @@
 * `workspace/hooks/active_files_hook.py` (370 строк)
 * `RuntimePatcher.patch_context_bridge_seed` (~18 строк + запись в `_PATCH_SPECS`)
 * Fallback `_last_usage` (~3 строки)
-* Устаревший комментарий `runtime_patcher.py:2043-2057` (12 строк)
+* Устаревший комментарий `runtime_patcher.py:2040-2058` (19 строк)
 
 **Добавляется:**
 

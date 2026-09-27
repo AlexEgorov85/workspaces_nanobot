@@ -40,7 +40,7 @@
 - [ ] 7.4 Удалить упоминания `ActiveFilesHook` из `docs/ARCHITECTURE.md:1544` и `docs/architecture/nanobot-inventory.json:893`. Verify: `grep -rn "active_files_hook\|ActiveFilesHook" docs/` = 0 совпадений.
 - [ ] 7.5 Обновить `openspec/changes/nanobot-035-upgrade/proposal.md:44` — удалить `active_files_hook.py` из списка сохраняемых файлов. Verify: grep `active_files_hook` в `openspec/changes/nanobot-035-upgrade/` = 0.
 - [ ] 7.6 Удалить `RuntimePatcher.patch_context_bridge_seed` (`runtime_patcher.py:580-597`) целиком, удалить запись из `_PATCH_SPECS` (`runtime_patcher.py:231-245`), удалить вызов из `apply_all` (`runtime_patcher.py:510`). Verify: `tests/test_runtime_patcher.py::test_context_bridge_seed_removed` (новый) проходит — spec не в `apply_all()` report.
-- [ ] 7.7 Удалить устаревший комментарий `runtime_patcher.py:2043-2057` (12 строк). Verify: `grep -n "Вспомогательные методы для auto-compact/context-bridge" runtime_patcher.py` = 0.
+- [ ] 7.7 Удалить устаревший комментарий `runtime_patcher.py:2040-2058` (19 строк). Verify: `grep -n "Вспомогательные методы для auto-compact/context-bridge" runtime_patcher.py` = 0.
 - [ ] 7.8 Добавить защитный тест `tests/test_active_files_hook.py::test_file_does_not_exist` — проверяет, что `Path("workspace/hooks/active_files_hook.py").exists()` = False. Verify: тест проходит.
 
 ## 8. Валидация
