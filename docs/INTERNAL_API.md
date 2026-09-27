@@ -282,9 +282,8 @@ Tools `duckdb_query` / `vector_search` **не существуют** (см.
 CLI skill'а (`scripts/cli.py --mode predefined`).
 
 `audit_run_predefined_script` / `audit_search_vector` / `audit_generate_sql`
-**удалены** в рефакторинге `refactor/skills-tools-cleanup`
-(коммиты `593d509`, `7d8f6b0`). Они нарушали §3, §22.1, §22.2
-TARGET_ARCHITECTURE.md (импортировали skill через `importlib`); заменены на:
+**отсутствуют** — они нарушали §3, §22.1, §22.2 TARGET_ARCHITECTURE.md
+(импортировали skill через `importlib`); заменены на:
 
 - predefined — CLI-режим skill'а (`scripts/cli.py --mode predefined`);
 - vector search — CLI-режим skill'а (`scripts/cli.py --mode vector`);

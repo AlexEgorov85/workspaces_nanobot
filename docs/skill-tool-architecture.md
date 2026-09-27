@@ -1,6 +1,6 @@
 ﻿# Skill / Tool architecture
 
-**Документ-контракт** для рефакторинга `refactor/skills-tools-cleanup`.
+**Нормативный документ-контракт** между `Skill` и `Tool`.
 Цель — зафиксировать архитектурные правила и служить reference при code review.
 
 ---

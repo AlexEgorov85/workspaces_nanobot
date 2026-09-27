@@ -3,8 +3,8 @@
 Зафиксированное состояние skill/tool в репозитории (skill-side CLI — единый
 entry-point доступа к данным, generic tools для SQL/vector отсутствуют).
 
-Исторические процессные заметки этого рефакторинга — в
-[docs/_archive/](_archive/).
+Исторические process/baseline-артефакты — в
+[`docs/_archive/`](_archive/).
 
 ## Сводная таблица
 
@@ -83,7 +83,6 @@ flowchart LR
 
 ## История
 
-Историческая инвентаризация skill/tool, baseline'ы рефакторингов и планы
-миграций перенесены в [`_archive/`](_archive/) — на актуальное состояние
-не ссылаться. Сводка изменений проекта — в
+Process/baseline/inventory-артефакты перенесены в [`_archive/`](_archive/) —
+на актуальное состояние не ссылаться. Сводка изменений проекта — в
 [`CHANGELOG.md`](../CHANGELOG.md).
