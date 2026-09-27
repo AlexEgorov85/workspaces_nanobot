@@ -99,6 +99,11 @@ class SessionColdSyncService:
         self._sync_lag_threshold = timedelta(
             seconds=max(0, int(sync_lag_threshold_seconds))
         )
+        if sync_lag_threshold_seconds < stale_tolerance_seconds:
+            raise ValueError(
+                f"sync_lag_threshold_seconds ({sync_lag_threshold_seconds}) "
+                f"must be >= stale_tolerance_seconds ({stale_tolerance_seconds})"
+            )
 
         self._db_logging = db_logging_service
 
@@ -117,7 +122,7 @@ class SessionColdSyncService:
         self._cycles_skipped_pool_busy = 0
         self._stale_detected_counter = 0
         self._sync_lag_exceeded_counter = 0
-        self._sync_skipped_stale_counter = 0
+        self._stale_sync_skipped_counter = 0
         self._rows_synced_total = 0
         self._messages_synced_total = 0
         self._last_success_ts: float | None = None
@@ -286,7 +291,7 @@ class SessionColdSyncService:
 
         if pg_updated_at > jsonl_updated_at + self._stale_tolerance:
             # 2. STALE: PG свежее JSONL + tolerance → пропуск.
-            self._sync_skipped_stale_counter += 1
+            self._stale_sync_skipped_counter += 1
             if not self._is_stale_logged_recently(key):
                 self._log_stale(key, jsonl_updated_at, pg_updated_at)
                 self._stale_logged_at[key] = datetime.now()
@@ -294,6 +299,7 @@ class SessionColdSyncService:
             return
 
         if pg_updated_at >= jsonl_updated_at:
+            # 3. EQUAL / PG-WITHIN-TOLERANCE — silent skip (current behavior).
             # 3. EQUAL / PG-WITHIN-TOLERANCE — silent skip (current behavior).
             return
 
@@ -606,7 +612,7 @@ class SessionColdSyncService:
             "consecutive_failures": self._consecutive_failures,
             "stale_detected_total": self._stale_detected_counter,
             "sync_lag_exceeded_total": self._sync_lag_exceeded_counter,
-            "sync_skipped_stale_total": self._sync_skipped_stale_counter,
+            "stale_sync_skipped_total": self._stale_sync_skipped_counter,
             "stale_tolerance_seconds": int(self._stale_tolerance.total_seconds()),
             "sync_lag_threshold_seconds": int(self._sync_lag_threshold.total_seconds()),
             "last_success_ts": self._last_success_ts,

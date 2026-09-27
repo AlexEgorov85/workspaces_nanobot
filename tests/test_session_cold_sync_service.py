@@ -366,25 +366,103 @@ class TestSessionColdSyncServiceMock:
                     )
 
 
-class TestStaleAndLagDetection:
-    """D23: stale-detection (PG > JSONL + tolerance → skip + log)
-    + reverse-lag detection (JSONL > PG + threshold → log)."""
+class TestStage0Regression:
+    """Этап 0: contract-тесты на текущее поведение _sync_session ДО
+    рефакторинга условия. Без них есть риск сломать silent-skip для
+    нормального случая при добавлении stale-detection (tasks 0.1-0.3)."""
 
-    def test_stale_detection_skips_sync_and_logs(self) -> None:
+    def test_sync_skips_when_pg_equal_to_jsonl(self) -> None:
+        """0.1: при ``existing_updated_at == upstream_updated_at``
+        sync не выполняется, никаких событий не публикуется."""
+        from lib.services.session_cold_sync_service import SessionColdSyncService
+
+        ts = datetime(2026, 9, 1, 12, 0, 0)
+        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts)})
+        svc = SessionColdSyncService(
+            session_manager=sm,
+            pg_dsn="postgresql://test",
+            stale_tolerance_seconds=120,
+        )
+        with patch.object(svc, "_read_pg_updated_at",
+                          return_value={"updated_at": ts}), \
+             patch.object(svc, "_upsert_meta") as mock_upsert, \
+             patch.object(svc, "_log_stale") as mock_log_stale, \
+             patch("utils.db.transaction", _fake_transaction):
+            svc._do_sync_batch()
+        assert svc.get_stats()["stale_sync_skipped_total"] == 0
+        assert svc.get_stats()["rows_synced_total"] == 0
+        mock_upsert.assert_not_called()
+        mock_log_stale.assert_not_called()
+
+    def test_sync_skips_when_pg_newer_within_tolerance(self) -> None:
+        """0.2: при ``pg > jsonl``, но ``pg - jsonl < stale_tolerance``
+        — sync пропускается silently (текущее поведение)."""
+        from lib.services.session_cold_sync_service import SessionColdSyncService
+
+        ts_jsonl = datetime(2026, 9, 1, 12, 0, 0)
+        ts_pg = ts_jsonl + timedelta(seconds=60)
+        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_jsonl)})
+        svc = SessionColdSyncService(
+            session_manager=sm,
+            pg_dsn="postgresql://test",
+            stale_tolerance_seconds=120,
+        )
+        with patch.object(svc, "_read_pg_updated_at",
+                          return_value={"updated_at": ts_pg}), \
+             patch.object(svc, "_upsert_meta") as mock_upsert, \
+             patch.object(svc, "_log_stale") as mock_log_stale, \
+             patch("utils.db.transaction", _fake_transaction):
+            svc._do_sync_batch()
+        assert svc.get_stats()["stale_detected_total"] == 0
+        assert svc.get_stats()["rows_synced_total"] == 0
+        mock_log_stale.assert_not_called()
+        mock_upsert.assert_not_called()
+
+    def test_sync_performs_lww_when_jsonl_newer(self) -> None:
+        """0.3: при ``upstream_updated_at > existing_updated_at``
+        sync выполняется (last-write-wins, текущее поведение)."""
         from lib.services.session_cold_sync_service import SessionColdSyncService
 
         ts_old = datetime(2026, 9, 1, 12, 0, 0)
-        ts_new = ts_old + timedelta(seconds=300)
-        sm = _FakeSessionManager({
-            "k1": _FakeSession("k1", ts_old),
-        })
+        ts_new = ts_old + timedelta(seconds=60)
+        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_new)})
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
             stale_tolerance_seconds=120,
             sync_lag_threshold_seconds=3600,
         )
-        # Mock: PG свежее JSONL + tolerance
+        with patch.object(svc, "_read_pg_updated_at",
+                          return_value={"updated_at": ts_old}), \
+             patch.object(svc, "_upsert_meta") as mock_upsert, \
+             patch.object(svc, "_replace_messages") as mock_messages, \
+             patch("utils.db.transaction", _fake_transaction):
+            svc._do_sync_batch()
+        assert svc.get_stats()["rows_synced_total"] == 1
+        mock_upsert.assert_called_once()
+        mock_messages.assert_called_once()
+
+
+class TestStaleAndLagDetection:
+    """D23: stale-detection (PG > JSONL + tolerance → skip + log)
+    + reverse-lag detection (JSONL > PG + threshold → log).
+
+    Имена тестов — точно как в tasks.md 4.3.
+    """
+
+    def test_stale_detected_event_published_when_pg_ahead(self) -> None:
+        """task 4.3: PG свежее JSONL + tolerance → session_stale_detected."""
+        from lib.services.session_cold_sync_service import SessionColdSyncService
+
+        ts_old = datetime(2026, 9, 1, 12, 0, 0)
+        ts_new = ts_old + timedelta(seconds=300)
+        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_old)})
+        svc = SessionColdSyncService(
+            session_manager=sm,
+            pg_dsn="postgresql://test",
+            stale_tolerance_seconds=120,
+            sync_lag_threshold_seconds=3600,
+        )
         with patch.object(svc, "_read_pg_updated_at",
                           return_value={"updated_at": ts_new}), \
              patch.object(svc, "_log_stale") as mock_log_stale, \
@@ -392,19 +470,40 @@ class TestStaleAndLagDetection:
              patch("utils.db.transaction", _fake_transaction):
             svc._do_sync_batch()
         stats = svc.get_stats()
-        assert stats["sync_skipped_stale_total"] == 1
         assert stats["stale_detected_total"] == 1
+        assert stats["stale_sync_skipped_total"] == 1
         mock_log_stale.assert_called_once()
         mock_upsert.assert_not_called()
 
-    def test_reverse_lag_detection_logs(self) -> None:
+    def test_stale_event_dedup_within_ttl(self) -> None:
+        """task 4.3: повторный stale-event в пределах TTL не публикуется."""
+        from lib.services.session_cold_sync_service import SessionColdSyncService
+
+        ts_old = datetime(2026, 9, 1, 12, 0, 0)
+        ts_new = ts_old + timedelta(seconds=300)
+        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_old)})
+        svc = SessionColdSyncService(
+            session_manager=sm,
+            pg_dsn="postgresql://test",
+            stale_tolerance_seconds=120,
+        )
+        with patch.object(svc, "_read_pg_updated_at",
+                          return_value={"updated_at": ts_new}), \
+             patch.object(svc, "_log_stale") as mock_log_stale, \
+             patch("utils.db.transaction", _fake_transaction):
+            svc._do_sync_batch()
+            svc._do_sync_batch()
+        assert mock_log_stale.call_count == 1
+        assert svc.get_stats()["stale_detected_total"] == 1
+        assert svc.get_stats()["stale_sync_skipped_total"] == 2
+
+    def test_reverse_lag_event_published(self) -> None:
+        """task 4.3: JSONL > PG + threshold → sync_lag_exceeded."""
         from lib.services.session_cold_sync_service import SessionColdSyncService
 
         ts_old = datetime(2026, 9, 1, 12, 0, 0)
         ts_new = ts_old + timedelta(seconds=7200)
-        sm = _FakeSessionManager({
-            "k1": _FakeSession("k1", ts_new),
-        })
+        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_new)})
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
@@ -414,11 +513,38 @@ class TestStaleAndLagDetection:
         with patch.object(svc, "_read_pg_updated_at",
                           return_value={"updated_at": ts_old}), \
              patch.object(svc, "_log_lag_exceeded") as mock_log_lag, \
+             patch.object(svc, "_upsert_meta") as mock_upsert, \
              patch("utils.db.transaction", _fake_transaction):
             svc._do_sync_batch()
-        stats = svc.get_stats()
-        assert stats["sync_lag_exceeded_total"] == 1
-        mock_log_lag.assert_called_once()
+        assert mock_log_lag.call_count == 1
+        assert svc.get_stats()["sync_lag_exceeded_total"] == 1
+        # LWW тоже выполнен
+        assert svc.get_stats()["rows_synced_total"] == 1
+        mock_upsert.assert_called_once()
+
+    def test_normal_sync_continues_after_lag_event(self) -> None:
+        """task 4.3: после sync_lag_exceeded sync всё равно выполняется."""
+        from lib.services.session_cold_sync_service import SessionColdSyncService
+
+        ts_old = datetime(2026, 9, 1, 12, 0, 0)
+        ts_new = ts_old + timedelta(seconds=7200)
+        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_new)})
+        svc = SessionColdSyncService(
+            session_manager=sm,
+            pg_dsn="postgresql://test",
+            stale_tolerance_seconds=120,
+            sync_lag_threshold_seconds=3600,
+        )
+        with patch.object(svc, "_read_pg_updated_at",
+                          return_value={"updated_at": ts_old}), \
+             patch.object(svc, "_log_lag_exceeded"), \
+             patch.object(svc, "_upsert_meta") as mock_upsert, \
+             patch.object(svc, "_replace_messages") as mock_messages, \
+             patch("utils.db.transaction", _fake_transaction):
+            svc._do_sync_batch()
+        assert svc.get_stats()["rows_synced_total"] == 1
+        mock_upsert.assert_called_once()
+        mock_messages.assert_called_once()
 
     def test_no_stale_when_within_tolerance(self) -> None:
         """Если разница меньше tolerance — sync выполняется как обычно."""
@@ -426,9 +552,7 @@ class TestStaleAndLagDetection:
 
         ts_old = datetime(2026, 9, 1, 12, 0, 0)
         ts_pg = ts_old + timedelta(seconds=60)
-        sm = _FakeSessionManager({
-            "k1": _FakeSession("k1", ts_old),
-        })
+        sm = _FakeSessionManager({"k1": _FakeSession("k1", ts_old)})
         svc = SessionColdSyncService(
             session_manager=sm,
             pg_dsn="postgresql://test",
@@ -440,34 +564,22 @@ class TestStaleAndLagDetection:
              patch("utils.db.transaction", _fake_transaction):
             svc._do_sync_batch()
         stats = svc.get_stats()
-        assert stats["sync_skipped_stale_total"] == 0
+        assert stats["stale_sync_skipped_total"] == 0
         assert stats["stale_detected_total"] == 0
         mock_log_stale.assert_not_called()
 
-    def test_stale_log_dedup_within_ttl(self) -> None:
-        """Повторный stale-detect в пределах TTL не логируется повторно."""
+    def test_constructor_rejects_invalid_thresholds(self) -> None:
+        """Task 2.4: sync_lag_threshold_seconds < stale_tolerance_seconds
+        должно бросить ValueError."""
         from lib.services.session_cold_sync_service import SessionColdSyncService
 
-        ts_old = datetime(2026, 9, 1, 12, 0, 0)
-        ts_new = ts_old + timedelta(seconds=300)
-        sm = _FakeSessionManager({
-            "k1": _FakeSession("k1", ts_old),
-        })
-        svc = SessionColdSyncService(
-            session_manager=sm,
-            pg_dsn="postgresql://test",
-            stale_tolerance_seconds=120,
-        )
-        with patch.object(svc, "_read_pg_updated_at",
-                          return_value={"updated_at": ts_new}), \
-             patch.object(svc, "_log_stale") as mock_log_stale, \
-             patch("utils.db.transaction", _fake_transaction):
-            svc._do_sync_batch()
-            svc._do_sync_batch()
-        stats = svc.get_stats()
-        assert stats["stale_detected_total"] == 1
-        assert stats["sync_skipped_stale_total"] == 2
-        assert mock_log_stale.call_count == 1
+        with pytest.raises(ValueError, match="sync_lag_threshold"):
+            SessionColdSyncService(
+                session_manager=_FakeSessionManager({}),
+                pg_dsn="postgresql://test",
+                stale_tolerance_seconds=300,
+                sync_lag_threshold_seconds=120,
+            )
 
 
 class TestGracefulShutdown:
