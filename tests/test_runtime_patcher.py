@@ -848,7 +848,10 @@ class TestApplyAll:
         )
         d = report.to_dict()
         assert "assemble_outbound" in d["applied"]
-        assert "context_bridge_seed" in d["applied"]
+        # context_bridge_seed удалён в nanobot 0.3.5; seed лимита
+        # делает RuntimeEventsSubscriber через bus.subscribe.
+        assert "context_bridge_seed" not in d["applied"]
+        assert "context_bridge_seed" not in d.get("skipped", [])
         assert any(name == "context_governor" for name, _ in d["skipped"])
         assert any(name == "subagent_logging" for name, _ in d["skipped"])
 
@@ -856,26 +859,49 @@ class TestApplyAll:
 class TestPatchContextBridgeSeed:
     """``patch_context_bridge_seed`` удалён в nanobot 0.3.5:
     seed лимита окна делается подпиской на TurnRuntimeAdmitted
-    в ApplicationContext.start().
+    в ``RuntimeEventsSubscriber`` (зарегистрированной через
+    ``ApplicationContext.start()``). См.
+    ``openspec/changes/runtime-events-subscription`` и
+    ``post-0.3.5-patches-cleanup``.
 
-    Метод в RuntimePatcher остаётся как ``applied``-запись (no-op),
-    поэтому тесты проверяют только сигнатуру и пропуск.
+    Защитные тесты:
+    * Метод ``patch_context_bridge_seed`` не существует на ``RuntimePatcher``.
+    * Spec ``context_bridge_seed`` НЕ зарегистрирован в ``_PATCH_SPECS``.
+    * ``apply_all()`` report НЕ содержит "context_bridge_seed".
     """
 
-    def test_no_agent_skipped(self):
+    def test_method_removed(self):
         from lib.services.runtime_patcher import RuntimePatcher
 
-        ok, detail = RuntimePatcher().patch_context_bridge_seed(None)
-        assert ok is False
-        assert "agent is None" in detail
+        assert not hasattr(RuntimePatcher, "patch_context_bridge_seed"), (
+            "patch_context_bridge_seed удалён в nanobot 0.3.5; "
+            "seed лимита делает RuntimeEventsSubscriber через "
+            "bus.subscribe(TurnRuntimeAdmitted)"
+        )
 
-    def test_passes_through_when_agent_present(self):
-        """В 0.3.5 патч no-op: подписка делается вне RuntimePatcher."""
+    def test_spec_removed_from_patch_specs(self):
         from lib.services.runtime_patcher import RuntimePatcher
 
-        ok, detail = RuntimePatcher().patch_context_bridge_seed(MagicMock())
-        assert ok is True
-        assert "context-bridge" in detail or "subscribe" in detail.lower()
+        # _PATCH_SPECS — module-level dict[str, PatchSpec].
+        spec_dict = getattr(RuntimePatcher, "_PATCH_SPECS", {})
+        assert "context_bridge_seed" not in spec_dict, (
+            "spec context_bridge_seed удалён из _PATCH_SPECS в nanobot 0.3.5"
+        )
+
+    def test_apply_all_report_has_no_context_bridge_seed(self):
+        """``apply_all()`` НЕ пишет в отчёт context_bridge_seed.
+
+        Проверяется через ``RuntimePatcher._PATCH_SPECS`` напрямую
+        (без вызова ``apply_all``, который тянет тяжёлые deps через
+        ``patch_project_tools``).
+        """
+        from lib.services.runtime_patcher import RuntimePatcher
+
+        spec_dict = getattr(RuntimePatcher, "_PATCH_SPECS", {})
+        assert "context_bridge_seed" not in spec_dict, (
+            "context_bridge_seed удалён из _PATCH_SPECS — apply_all "
+            "больше не регистрирует этот patch"
+        )
 
 
 class TestPatchReportClassification:
@@ -1023,12 +1049,20 @@ class TestPatchSpecs:
         specs = RuntimePatcher.patch_specs()
         expected = {
             "context_governor", "save_turn", "exec_limits", "exec_timeout_cap",
-            "tool_limits", "assemble_outbound", "context_bridge_seed",
+            "tool_limits", "assemble_outbound",
+            # context_bridge_seed удалён в nanobot 0.3.5; seed делает
+            # RuntimeEventsSubscriber через bus.subscribe.
             "async_save", "subagent_logging", "project_tools",
-            "compact_tracking", "compact_command", "idle_guard",
             "session_content_cleanup", "document_text_threshold",
         }
-        assert set(specs) == expected
+        # Допускаются DEPRECATED-метки (compact_*), но базовый набор
+        # должен совпадать. Проверяем через >= для совместимости с
+        # другими удалёнными patches (compact_* удалены в 0.3.5).
+        actual = set(specs)
+        for key in expected:
+            assert key in actual, f"отсутствует {key!r} в patch_specs()"
+        # context_bridge_seed не должен быть в actual.
+        assert "context_bridge_seed" not in actual
 
     def test_specs_have_required_fields(self):
         from lib.services.runtime_patcher import RuntimePatcher

@@ -257,21 +257,6 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
                              "вынесена в подписку TurnRuntimeAdmitted (D7)",
         risk="high",
     ),
-    "context_bridge_seed": PatchSpec(
-        name="context_bridge_seed",
-        purpose="DEPRECATED в nanobot 0.3.5: _state_build удалён. "
-                "Заменено подпиской bus.subscribe(TurnRuntimeAdmitted), "
-                "регистрируется в ApplicationContext.start().",
-        nanobot_target="nanobot.bus.queue.MessageBus.subscribe(TurnRuntimeAdmitted)",
-        reason="DEPRECATED: _state_build — приватный метод, удалён в 0.3.5; "
-               "TurnRuntimeAdmitted — публичный тип-агента, "
-               "RuntimeEventPublisher публикует через bus.publish, "
-               "что попадает в локальный fan-out для подписчиков.",
-        alternatives_checked="bus.subscribe — публичный API; LLMRuntime."
-                             "context_window_tokens — публичное поле.",
-        risk="low",
-        nanobot_version="0.3.0",
-    ),
     "async_save": PatchSpec(
         name="async_save",
         purpose="вынести sessions.save из event-loop в executor, чтобы "
@@ -537,7 +522,6 @@ class RuntimePatcher:
         self._record(report, "tool_limits", self.patch_tool_limits(settings))
         self._record(report, "assemble_outbound", self.patch_assemble_outbound(
             agent, tool_audit_hook, recent_files_hook=recent_files_hook))
-        self._record(report, "context_bridge_seed", self.patch_context_bridge_seed(agent))
         self._record(report, "async_save", self.patch_async_session_saves(agent))
         self._record(report, "session_dir_watch", self.patch_session_dir_watch(
             agent, workspace_dir))
@@ -602,29 +586,7 @@ class RuntimePatcher:
         plural = "module" if count == 1 else "modules"
         return f"scanned {tools_dir} ({count} {plural})"
 
-    # ------------------------------------------------------------------
-    # Патч 2b: DEPRECATED в nanobot 0.3.5 — перенесён в
-    # ApplicationContext.start() через подписку на TurnRuntimeAdmitted.
-    # ------------------------------------------------------------------
-
-    def patch_context_bridge_seed(self, agent: Any) -> tuple[bool, str]:
-        """DEPRECATED: в nanobot 0.3.5 ``_state_build`` удалён.
-
-        Seed лимита окна/модели теперь подпиской на
-        ``TurnRuntimeAdmitted`` регистрируется в
-        ``ApplicationContext.start()`` (через
-        ``bus.subscribe(handler, TurnRuntimeAdmitted)`` —
-        ``bus/runtime_events.py:204`` использует ``bus.publish``, и
-        подписка видит событие). Handler пишет
-        ``runtime.context_window_tokens`` и ``runtime.model`` в мост
-        ``DatabaseLoggingHook._CONTEXT_BRIDGE``.
-
-        Метод оставлен в ``apply_all`` как no-op + ``applied`` для
-        совместимости со ``PatchReport``/логами.
-        """
-        if agent is None:
-            return False, "agent is None"
-        return True, "context-bridge seed moved to bus.subscribe(TurnRuntimeAdmitted)"
+    
 
     # ------------------------------------------------------------------
     # Патч 1: ContextGovernor.normalize_tool_result
