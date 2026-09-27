@@ -58,4 +58,70 @@ htmlcov/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
+
+# AI-assistant tools (developer environment)
+.cline/
+.clinerules/
+.opencode/
+.cursor/
+CLAUDE.md
+AGENTS.md.local
+
+# Local secrets / credentials (NEVER commit)
+.secrets.env
+*.secret
+*.key
+*.pem
+
+# nanobot-specific runtime caches and per-session state
+# (NOT part of the codebase; regenerated on each run)
+data_store/
+docarray.json
+dump.txt
+HEARTBEAT.md
+history/
+llm_usage.sqlite3
+llm_usage.sqlite3-shm
+llm_usage.sqlite3-wal
+logs/
+media/
+memory/
+SOUL.md
+USER.md
+sessions/
+webui/
+
+# Per-workspace dynamic state
+workspace/.nanobot/
+workspace/cron/jobs.lock
+workspace/memory/.cursor
+workspace/memory/.dream_cursor
+workspace/sessions/.webui_session_index.json
+
+# Python build/test artifacts (в дополнение к IDE/dependency разделам)
+*.pyc
+*.pyo
+*.pyd
+.coverage
+.coverage.*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ruff/
+htmlcov/
+
+# Build/test droppings (компилируются из source, не коммитим)
+build/
+dist/
+*.egg-info/
+*.egg
+.tox/
+.nox/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.benchmarks/
+.coverage
+htmlcov/
 ```
