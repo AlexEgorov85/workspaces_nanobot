@@ -1,10 +1,10 @@
-# CacheProvider (Провайдер кэша)
+﻿# CacheProvider (Провайдер кэша)
 
-## Назначение
+## Purpose
 
 Определение контракта подсистемы кэширования данных: источник истины, жизненный цикл snapshot'ов, публичный API, атомарность обновлений и контракт потребителя. Кэш — локальный DuckDB-слой для быстрого доступа к read-mostly данным, синхронизированным из PostgreSQL.
 
-## Ответственность
+## Responsibility
 
 CacheProvider отвечает за:
 
@@ -15,9 +15,9 @@ CacheProvider отвечает за:
 - прогрев FAISS-индексов в память и выполнение vector search
 - контроль целостности векторных индексов (`IndexIntegrityError`)
 
-## Граница
+## Boundary
 
-### Владеет
+### Owns
 
 - DuckDB-файлом кэша на локальном ext4 storage
 - snapshot'ами таблиц из PostgreSQL
@@ -25,27 +25,27 @@ CacheProvider отвечает за:
 - публичным API `CacheProvider` (ABC + DuckDB/FAISS-реализация)
 - протоколом обнаружения stale/невалидных индексов через `IndexIntegrityError`
 
-### Не владеет
+### Does Not Own
 
 - бизнес-логикой интерпретации результатов (задача вызывающей стороны)
 - прямым доступом Skills к DuckDB-файлу
 - альтернативными vector storage backends (единственный backend — FAISS)
 - NFS storage (явно запрещён)
 
-### Может зависеть от
+### May Depend On
 
 - PostgreSQL как источника истины
 - конфигурации `gateway.cache.local_path` (путь к DuckDB)
 - конфигурации `gateway.vector.*` (параметры эмбеддинга и индексов)
 - `TableRegistry` для синхронизации таблиц PG → DuckDB
 
-### Не должен зависеть от
+### Must Not Depend On
 
 - NFS storage для файла кэша
 - прямого доступа Skills к DuckDB-файлу
 - конкретной реализации Skills
 
-## Публичный контракт
+## Public Contract
 
 `CacheProvider` (ABC в `lib/services/cache_provider.py`) предоставляет:
 
@@ -64,58 +64,58 @@ CacheProvider отвечает за:
 - `SearchResult` — результат vector search (content, score, source, table, pk_value, chunk, matched_chunks, row, signature_status, signature_reason)
 - `IndexIntegrityError` — векторный индекс не прошёл проверку signature (STALE/INVALID)
 
-## Требования
+## Requirements
 
-### Требование: PostgreSQL — источник истины
+### Requirement: PostgreSQL — источник истины
 
 Система ДОЛЖНА рассматривать PostgreSQL как единственный источник истины для всех кэшируемых таблиц.
 
-#### Сценарий: обновление данных
+#### Scenario: обновление данных
 
 - **КОГДА** в PostgreSQL изменились строки кэшируемой таблицы
 - **ТОГДА** `PgDuckDbSyncService` ДОЛЖЕН подхватить изменение (по track-колонке) и инкрементально обновить DuckDB-снапшот
 - **И НЕ ДОЛЖЕН** использовать dual-write или иной механизм записи в обе БД одновременно
 
-### Требование: локальный ext4 storage
+### Requirement: локальный ext4 storage
 
 Система ДОЛЖНА хранить DuckDB-файл кэша только на локальном ext4 storage. NFS — явно запрещён.
 
-#### Сценарий: обнаружение NFS пути
+#### Scenario: обнаружение NFS пути
 
 - **КОГДА** `gateway.cache.local_path` указывает на NFS mount
 - **ТОГДА** старт `CacheProvider` ДОЛЖЕН fail-fast с явной ошибкой (PID 0 locking errors эмпирически)
 
-### Требование: единый интерфейс доступа
+### Requirement: единый интерфейс доступа
 
 Система ДОЛЖНА предоставлять доступ к кэшу только через `CacheProvider`. Прямой доступ к DuckDB-файлу из кода Skills запрещён.
 
-#### Сценарий: Skill запрашивает данные
+#### Scenario: Skill запрашивает данные
 
 - **КОГДА** Skill нуждается в SQL-запросе к кэшу
 - **ТОГДА** он ДОЛЖЕН вызвать `CacheProvider.query_sql()` (или другой метод интерфейса)
 - **И НЕ ДОЛЖЕН** открывать DuckDB-файл напрямую
 
-### Требование: vector search только через `CacheProvider.search_vector`
+### Requirement: vector search только через `CacheProvider.search_vector`
 
 Система ДОЛЖНА выполнять vector search исключительно через `CacheProvider.search_vector`. Прямая загрузка FAISS-индексов из Skills запрещена.
 
-#### Сценарий: Skill выполняет vector search
+#### Scenario: Skill выполняет vector search
 
 - **КОГДА** Skill нуждается в vector similarity query
 - **ТОГДА** он ДОЛЖЕН вызвать `CacheProvider.search_vector` с указанием `index_name`
 - **И НЕ ДОЛЖЕН** открывать FAISS-файлы напрямую
 
-### Требование: контроль целостности индексов
+### Requirement: контроль целостности индексов
 
 Система ДОЛЖНА проверять signature индекса (модель эмбеддингов, размерность, колонки, chunk-параметры) перед использованием и поднимать `IndexIntegrityError` при несовпадении.
 
-#### Сценарий: stale индекс
+#### Scenario: stale индекс
 
 - **КОГДА** сигнатура сохранённого индекса не совпадает с текущей конфигурацией
 - **ТОГДА** `search_vector` ДОЛЖЕН поднять `IndexIntegrityError` со статусом `STALE` или `INVALID`
 - **И НЕ ДОЛЖЕН** возвращать «тихую» деградацию результатов
 
-## Запрещённое поведение
+## Forbidden Behavior
 
 Система НЕ ДОЛЖНА:
 
@@ -127,7 +127,7 @@ CacheProvider отвечает за:
 - открывать FAISS-индексы из кода Skills напрямую
 - создавать альтернативный vector storage backend рядом с FAISS без явного OpenSpec change
 
-## Зависимости
+## Dependencies
 
 - `docs/TARGET_ARCHITECTURE.md` — глобальные архитектурные принципы
 - `lib/services/cache_provider.py:CacheProvider` — ABC интерфейс
@@ -138,13 +138,13 @@ CacheProvider отвечает за:
 - `lib/services/table_registry.py:TableRegistry` — реестр таблиц для синхронизации
 - `tools/build_vectors.py` — CLI для сборки FAISS-индексов
 
-## Конфигурация
+## Configuration
 
 - `gateway.cache.local_path` — путь к локальному DuckDB-файлу (ext4, НЕ NFS).
 - `gateway.vector.index.*` — параметры FAISS-индексов (см. `openspec/specs/data/vector-indexes/spec.md`).
 - `gateway.vector.index.storage_table` — PG-таблица для хранения эмбеддингов (формат `schema.table`, например `oarb.audit_vectors`).
 
-## Жизненный цикл
+## Lifecycle
 
 1. **Инициализация**: проверка пути к хранилищу (fail-fast на NFS).
 2. **Refresh**: `CacheProvider.refresh()` создаёт/обновляет SQL-кэш из PostgreSQL.
@@ -154,7 +154,7 @@ CacheProvider отвечает за:
 6. **Stale check**: `check_stale()` сверяет метки изменений.
 7. **Закрытие**: `close()` освобождает ресурсы (соединения, файлы).
 
-## Состояние
+## State
 
 CacheProvider хранит:
 
@@ -163,7 +163,7 @@ CacheProvider хранит:
 - FAISS-индексы, загруженные в память (`preload_indexes`).
 - Кэш сигнатур индексов для контроля целостности.
 
-## Инварианты
+## Invariants
 
 - PostgreSQL — источник истины для кэшируемых таблиц.
 - Кэш хранится только на локальном ext4 storage.
@@ -171,7 +171,7 @@ CacheProvider хранит:
 - Все векторные индексы FAISS-backed.
 - Сигнатура индекса проверяется перед каждым использованием.
 
-## Поведение при ошибке
+## Error Behavior
 
 - **NFS path**: fail fast при старте с явной ошибкой.
 - **Ошибка синхронизации**: логирование, кэш остаётся со stale данными до следующей успешной синхронизации (явная retry-политика `PgDuckDbSyncService`).
@@ -179,7 +179,7 @@ CacheProvider хранит:
 - **Stale/invalid index**: `IndexIntegrityError` с статусом `STALE`/`INVALID` и описанием `reason`; вызывающая сторона обязана обработать (например, пересобрать индекс через `tools/build_vectors.py`).
 - **Config missing**: fail fast при старте (`ConfigurationError`).
 
-## Потребители
+## Consumers
 
 - Skills (через `CacheProvider`) — SQL-запросы и vector search.
 - `VectorIndexService` (через `search_vector`).
@@ -187,7 +187,7 @@ CacheProvider хранит:
 - `tools/build_vectors.py` — сборка FAISS-индексов.
 - Тесты (`tests/test_duckdb_cache_store.py`, `tests/test_pg_duckdb_sync_service.py`).
 
-## Реализация
+## Implementation
 
 Основная реализация:
 
@@ -206,7 +206,7 @@ CacheProvider хранит:
 - `docs/DATABASE.md` — слой данных и границы P0
 - `docs/VECTOR_INDEXES.md` — детали vector-инфраструктуры
 
-## Проверка
+## Verification
 
 Валидация включает:
 
