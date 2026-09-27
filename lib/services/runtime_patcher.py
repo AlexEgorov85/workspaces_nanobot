@@ -78,17 +78,38 @@ def _resolve_media_path(media_paths: list[str], basename: str) -> str:
     return ""
 
 
+class ContextWindowNotSeededError(RuntimeError):
+    """``DatabaseLoggingContextBridge`` не засеян для ``session_key``.
+
+    Bridge seed'ит ``TurnRuntimeAdmitted``-подписка из
+    ``RuntimeEventsSubscriber.start()``. Если подписчик не активен
+    (например, в standalone-тестах без ``ApplicationContext``) —
+    блок ``metadata.context_window`` невозможно построить корректно.
+
+    Это явная ошибка вместо тихого fallback'а на ``agent._last_usage``,
+    который скрывал дефекты подписки. UI/CLI получает
+    ``ContextWindowNotSeededError`` через exception-chain, и метрика
+    НЕ отображается — это лучше, чем ``used=0``.
+    """
+
+
 def _attach_context_window(agent: Any, session_key: str, result: Any) -> None:
     """Внедрить ``metadata["context_window"]`` в финальный outbound.
 
     Метрика M1 (занятость окна): ``prompt_tokens`` последней итерации
     оборота (свежий по-итерационный usage из моста ``DatabaseLoggingHook``)
-    поделённый на лимит окна модели (``agent.context_window_tokens``).
+    поделённый на лимит окна модели.
 
-    Если мост пуст (например, DB-логирование выключено и хука нет), делаем
-    фолбэк на накопленный ``agent._last_usage`` — он завышает занятость на
-    многоитеративных оборотах (сумма prompt_tokens по всем итерациям),
-    поэтому считается запасным вариантом.
+    Bridge MUST быть засеян к моменту первого outbound'а — это
+    контракт ``RuntimeEventsSubscriber`` (см. design.md D5
+    opencode change post-0.3.5-patches-cleanup):
+    ``TurnRuntimeAdmitted`` подписка заполняет ``limit``/``model``
+    до первой итерации. ``usage`` пишется через
+    ``_store_iteration_usage`` в ``DatabaseLoggingHook.after_iteration``.
+
+    Если мост пуст — поднимается ``ContextWindowNotSeededError``
+    (явная ошибка вместо тихого fallback на ``agent._last_usage``,
+    который мог завышать занятость и скрывать дефекты подписки).
 
     Готовый блок дополнительно кладём в мост: канал читает его в фоновом
     цикле живого обновления и пишет в processing-строку ТОЛЬКО блок (без
@@ -99,23 +120,31 @@ def _attach_context_window(agent: Any, session_key: str, result: Any) -> None:
         get_iteration_usage,
     )
     usage = get_iteration_usage(session_key)
-    if not usage:
-        usage = getattr(agent, "_last_usage", None) or {}
     limit = getattr(agent, "context_window_tokens", None) or 0
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-        return
+        # Bridge не засеян (нет RuntimeEventsSubscriber или подписки
+        # не сработали) — это явная ошибка, не тихий used=0.
+        raise ContextWindowNotSeededError(
+            f"context_window not seeded for session_key={session_key!r}; "
+            f"RuntimeEventsSubscriber.start() required before "
+            f"_attach_context_window"
+        )
     raw_used = (usage or {}).get("prompt_tokens") if isinstance(usage, dict) else None
     try:
         used = int(raw_used or 0)
     except (TypeError, ValueError):
-        return
+        used = 0
     if used <= 0:
-        return
+        # usage ещё не пришёл — первая итерация без tool-calls.
+        # Допустимый случай: НЕ throw, просто used=0 показывает
+        # клиенту «пока ничего не занято». Bridge засеян (limit > 0),
+        # поэтому подписка работает.
+        used = 0
     model = getattr(agent, "model", None)
     block = {
         "used": used,
         "limit": int(limit),
-        "pct": round(min(1.0, used / float(limit)), 4),
+        "pct": round(min(1.0, used / float(limit)), 4) if limit > 0 else 0.0,
         "model": model if isinstance(model, str) else "",
     }
     metadata = dict(result.metadata or {})

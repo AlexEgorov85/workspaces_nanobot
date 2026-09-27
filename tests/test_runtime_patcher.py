@@ -102,16 +102,30 @@ class TestPatchAssembleOutbound:
     ``(self, msg, final_content, stop_reason, streamed_content,
        *, log_content=True, turn_latency_ms=None)``.
     Обёртка в ``RuntimePatcher.patch_assemble_outbound`` принимает
-    те же позиционные параметры и передаёт их оригиналу as-is."""
+    те же позиционные параметры и передаёт их оригиналу as-is.
+
+    В nanobot 0.3.5 ``_attach_context_window`` ТРЕБУЕТ засеянный bridge
+    (``seed_context_window`` вызывается через подписку на
+    TurnRuntimeAdmitted в ``RuntimeEventsSubscriber``). Тесты должны
+    сеять bridge явно — иначе получают ``ContextWindowNotSeededError``.
+    """
+
+    def _seed_bridge(self, session_key: str, limit: int = 40000, model: str = "MiniMax-M3") -> None:
+        from lib.hooks.database_logging_hook import seed_context_window
+
+        seed_context_window(session_key, limit=limit, model=model)
 
     def test_wraps_and_injects_audit(self):
         agent = MagicMock()
         original_return = MagicMock()
         original_return.metadata = {}
         agent._assemble_outbound.return_value = original_return
+        agent.context_window_tokens = 40000  # симулируем RuntimeEventAdmitted-эффект
 
         hook = MagicMock()
         hook.drain.return_value = [{"name": "read"}]
+
+        self._seed_bridge("telegram:1")
 
         patcher = RuntimePatcher()
         ok, _ = patcher.patch_assemble_outbound(agent, hook)
@@ -126,7 +140,9 @@ class TestPatchAssembleOutbound:
     def test_result_none_skips_drain(self):
         agent = MagicMock()
         agent._assemble_outbound.return_value = None
+        agent.context_window_tokens = 40000
         hook = MagicMock()
+        self._seed_bridge("telegram:1")
 
         patcher = RuntimePatcher()
         ok, _ = patcher.patch_assemble_outbound(agent, hook)
@@ -141,6 +157,8 @@ class TestPatchAssembleOutbound:
         original_return = MagicMock()
         original_return.metadata = {}
         agent._assemble_outbound.return_value = original_return
+        agent.context_window_tokens = 40000
+        self._seed_bridge("telegram:1")
 
         patcher = RuntimePatcher()
         ok, _ = patcher.patch_assemble_outbound(agent, MagicMock())
@@ -152,6 +170,8 @@ class TestPatchAssembleOutbound:
     def test_none_result_synthesizes_marker_outbound(self):
         agent = MagicMock()
         agent._assemble_outbound.return_value = None
+        agent.context_window_tokens = 40000
+        self._seed_bridge("telegram:1")
 
         patcher = RuntimePatcher()
         ok, _ = patcher.patch_assemble_outbound(agent, MagicMock())
@@ -167,6 +187,24 @@ class TestPatchAssembleOutbound:
         assert result.metadata["_final_turn"] is True
         assert result.content == ""
         assert result.chat_id == "chat-1"
+
+    def test_context_window_not_seeded_raises(self):
+        """Без seed_context_window — ContextWindowNotSeededError."""
+        agent = MagicMock()
+        original_return = MagicMock()
+        original_return.metadata = {}
+        agent._assemble_outbound.return_value = original_return
+        agent.context_window_tokens = 0  # типичный случай без подписки
+
+        patcher = RuntimePatcher()
+        ok, _ = patcher.patch_assemble_outbound(agent, MagicMock())
+        assert ok
+
+        # Без seed — поднимается ContextWindowNotSeededError.
+        from lib.services.runtime_patcher import ContextWindowNotSeededError
+
+        with pytest.raises(ContextWindowNotSeededError):
+            agent._assemble_outbound(MagicMock(), "x", "stop", False)
 
     def test_agent_none_skipped(self):
         patcher = RuntimePatcher()
@@ -529,7 +567,7 @@ class TestPatchSaveTurn:
         msg = {"role": "tool", "content": big, "tool_call_id": "t1", "name": "exec"}
         captured = {}
 
-        def _fake_save_turn(session, messages, skip, *, turn_latency_ms=None):
+        def _fake_save_turn(session, messages, skip, *, turn_latency_ms=None, **kw):
             captured["messages"] = messages
             captured["turn_latency_ms"] = turn_latency_ms
             return None
