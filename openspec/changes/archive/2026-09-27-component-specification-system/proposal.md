@@ -1,6 +1,6 @@
 # Component Specification System
 
-## Проблема
+## Why
 
 Проект имеет значительный объём архитектурной документации, но отсутствует единая система компонентных спецификаций.
 
@@ -95,6 +95,13 @@ docs/ (operational/reference details)
 - skills/audit-analyzer
 - skills/legal-summarizer
 - skills/office-files
+
+## What Changes
+
+- Вводятся три новые спецификации: `architecture/component-model`, `documentation/component-registry`, `validation/component-spec-validation`
+- 5 существующих спек (`configuration/profiles`, `data/cache-provider`, `data/vector-indexes`, `runtime/context`, `architecture/skill-tool-boundary`) приводятся к единому шаблону
+- Создаётся реестр компонентов `openspec/specs/COMPONENTS.md`
+- Документация по правилам ведения спецификаций добавляется в `AGENTS.md` и `docs/README.md`
 
 ## Definition of Done для этого change
 

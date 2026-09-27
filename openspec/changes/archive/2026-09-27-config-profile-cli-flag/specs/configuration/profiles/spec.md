@@ -40,7 +40,7 @@ application entrypoint top-level
 
 ## MODIFIED Requirements
 
-### Requirement: Resolution happens before runtime initialization
+### Requirement: Разрешение до инициализации runtime
 
 The system SHALL resolve the active profile (`prod` or `test`)
 BEFORE any runtime component is constructed. The profile SHALL be
@@ -48,6 +48,11 @@ obtained exclusively from the `--profile` CLI argument passed to
 the application entrypoint. The system SHALL NOT read the profile
 from any environment variable, configuration file, or implicit
 default.
+
+#### Scenario: Профиль разрешён при загрузке конфигурации
+
+- **КОГДА** `project.json`, `config.json` и `.secrets.env` объединены
+- **ТОГДА** активный профиль ДОЛЖЕН быть разрешён и сохранён в `SETTINGS` до запуска любого другого runtime-кода
 
 #### Scenario: Application entrypoint parses --profile
 
@@ -100,7 +105,7 @@ default.
   variables used for other purposes (secrets, external service URLs,
   etc.)
 
-### Requirement: Profile surfaced for infrastructure use
+### Requirement: Профиль доступен для infrastructure use
 
 The system SHALL expose the resolved profile as part of `SETTINGS`.
 The canonical access path for **new and modified code** is the
@@ -113,6 +118,11 @@ is part of the proxy's documented contract for backward
 compatibility. The exposed profile value SHALL reflect the CLI
 argument that was passed to `_initialize_settings`, not any value
 derived from environment variables or implicit defaults.
+
+#### Scenario: Infrastructure читает профиль
+
+- **КОГДА** connection helper нуждается в активном профиле
+- **ТОГДА** он ДОЛЖЕН прочитать `SETTINGS.profile` и НЕ ДОЛЖЕН ветвиться по профилю в бизнес-логике
 
 #### Scenario: Infrastructure reads profile
 
@@ -127,9 +137,11 @@ derived from environment variables or implicit defaults.
   to `_initialize_settings`, not a value read from any environment
   variable
 
+## ADDED Requirements
+
 ### Requirement: Test-only bootstrap of SETTINGS is permitted in `tests/conftest.py` as a documented exception
 
-> **Reason for MODIFICATION:** Реализация ввела
+> **Reason:** Реализация ввела
 > `tests/conftest.py::autouse`-фикстуру `_bootstrap_config_lifecycle`
 > (коммит `a5b77b9`), которая вызывает
 > `config._initialize_settings(profile="test")` для legacy-тестов,
@@ -140,7 +152,7 @@ derived from environment variables or implicit defaults.
 > это как **test-only exception** с явными границами.
 
 The original invariant required that no autouse-fixture
-calls `_initialize_settings(profile)`. This modification NARROWS
+calls `_initialize_settings(profile)`. This requirement NARROWS
 that prohibition to **production runtime code only** and
 explicitly ALLOWS a single, well-bounded autouse-fixture in
 `tests/conftest.py` with the following constraints:
@@ -223,17 +235,15 @@ explicitly ALLOWS a single, well-bounded autouse-fixture in
 - **AND THEN** the original invariant
   («autouse-fixture НЕ добавлен») SHALL be restored without
   modification to this requirement
-- **AND THEN** this MODIFIED requirement SHALL be reverted to
+- **AND THEN** this requirement SHALL be reverted to
   its original wording via a new OpenSpec change
 
-> **Migration note:** at the time of this modification, ~12 test
+> **Migration note:** at the time of this requirement creation, ~12 test
 > files in `tests/` and `tests/integration/` directly read
 > `SETTINGS[...]` without explicit init. Migrating all of them
 > is out of scope for this change (would require touching every
 > legacy test). The autouse-fixture is the pragmatic bridge
 > until a dedicated migration change is opened.
-
-## ADDED Requirements
 
 ### Requirement: SETTINGS construction is explicit and order-checked
 

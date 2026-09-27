@@ -4,9 +4,9 @@
 
 Этот документ определяет модель архитектурного компонента проекта workspaces_nanobot и устанавливает единый шаблон для всех компонентных спецификаций.
 
-## ADDED Requirements
+## MODIFIED Requirements
 
-### Requirement: каждый значимый компонент имеет спецификацию
+### Requirement: каждый архитектурный компонент имеет спецификацию
 
 Система ДОЛЖНА поддерживать реестр архитектурных компонентов. Каждый production-компонент, включённый в реестр, ДОЛЖЕН иметь отдельную OpenSpec specification.
 
@@ -16,7 +16,7 @@
 - **THEN** он ДОЛЖЕН быть добавлен в COMPONENTS.md со статусом `missing`
 - **AND** для него ДОЛЖНА быть создана спецификация
 
-### Requirement: спецификация на русском языке
+### Requirement: спецификация на русском
 
 Все новые и изменяемые component specifications ДОЛЖНЫ быть написаны на русском языке. Технические идентификаторы, имена классов, методов, файлов, конфигурационных ключей и API ДОЛЖНЫ сохранять оригинальное написание.
 
@@ -56,10 +56,8 @@ Component specification ДОЛЖНА описывать contractual behavior. Im
 
 - **WHEN** spec описывает метод компонента
 - **THEN** описание ДОЛЖНО формулировать контракт, а не перечислять поля реализации
-- **BAD**: "ApplicationContext имеет 17 полей: field1, field2, ..., field17"
-- **GOOD**: "ApplicationContext предоставляет единый корень сборки общей инфраструктуры runtime"
 
-### Requirement: single source of truth
+### Requirement: единственный источник истины
 
 Нормативные архитектурные правила ДОЛЖНЫ оставаться в `docs/TARGET_ARCHITECTURE.md`. Component-specific contracts ДОЛЖНЫ вестись в `openspec/specs/<domain>/<component>/spec.md`. Implementation descriptions ДОЛЖНЫ оставаться в `docs/`.
 
