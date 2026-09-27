@@ -40,42 +40,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from lib.services.db_logging_service import LogEvent, try_log_event
+
 logger = logging.getLogger(__name__)
 
 
-def _emit_sync_event(
-    event_type: str,
-    summary: str,
-    payload: dict[str, Any] | None = None,
-    *,
-    level: str = "INFO",
-    service: Any | None = None,
-) -> None:
-    """Тонкая обёртка для sync-событий в ``agent_gateway_logs``.
-
-    Единственный writer — ``DbLoggingService`` (через
-    :func:`lib.services.db_logging_service.try_log_event`).
-    """
-    from lib.services.db_logging_service import LogEvent, try_log_event
-
-    log_event = LogEvent(
-        event_type=event_type,
-        level=level,
-        session_id="gateway:sync",
-        channel=None,
-        actor="sync",
-        name=event_type,
-        summary=summary,
-        payload=payload,
-    )
-    try_log_event(
-        service,
-        log_event,
-        producer="DuckDbCacheStore",
-        event_type=event_type,
-    )
-
 # DuckDB не поддерживает TO_CHAR(date, 'Month') — переписываем в strftime
+# (общая логика — в lib.utils.duckdb_query.rewrite_duck_sql).
 # (общая логика — в lib.utils.duckdb_query.rewrite_duck_sql).
 
 
@@ -251,10 +222,9 @@ class DuckDbCacheStore:
         self._embedding_timeout_sec = float(embedding_timeout_sec)
         # Единый sink для sync-событий (publish OK/empty/failed): тот же
         # ``DbLoggingService``, что использует ``PgDuckDbSyncService``, — чтобы
-        # все события одного sync-пути шли одним конвейером (см.
-        # ``_emit_sync_event`` через ``DbLoggingService.try_log_event``).
-        # ``None`` (например, в юнит-тестах) → синхронный fallback
-        # ``record_sync_event``.
+        # все события одного sync-пути шли одним конвейером через
+        # ``DbLoggingService.try_log_event``. ``None`` (например, в юнит-тестах)
+        # → no-op for business + operational WARNING внутри ``try_log_event``.
         self._db_logging_service = db_logging_service
 
         self._lock = threading.RLock()
@@ -800,17 +770,25 @@ class DuckDbCacheStore:
                         "(NFS lockd / crashed peer?). Skip cycle.",
                         tmp, e,
                     )
-                    _emit_sync_event(
+                    try_log_event(
+                        self._db_logging_service,
+                        LogEvent(
+                            event_type="sync_publish_failed",
+                            level="WARN",
+                            session_id="gateway:sync",
+                            channel=None,
+                            actor="sync",
+                            name="sync_publish_failed",
+                            summary=f"publish FAIL (stale .tmp): {e}",
+                            payload={
+                                "publish_path": str(target),
+                                "tmp_path": str(tmp),
+                                "error_type": "OSError",
+                                "error": str(e),
+                            },
+                        ),
+                        producer="DuckDbCacheStore",
                         event_type="sync_publish_failed",
-                        summary=f"publish FAIL (stale .tmp): {e}",
-                        payload={
-                            "publish_path": str(target),
-                            "tmp_path": str(tmp),
-                            "error_type": "OSError",
-                            "error": str(e),
-                        },
-                        level="WARN",
-                        service=self._db_logging_service,
                     )
                     return False
 
@@ -912,20 +890,28 @@ class DuckDbCacheStore:
                         len(counts),
                         sum(counts.values()),
                     )
-                    _emit_sync_event(
-                        event_type="sync_publish_ok",
-                        summary=(
-                            f"cache snapshot -> {target} "
-                            f"({len(counts)} tables, {sum(counts.values())} rows)"
+                    try_log_event(
+                        self._db_logging_service,
+                        LogEvent(
+                            event_type="sync_publish_ok",
+                            level="INFO",
+                            session_id="gateway:sync",
+                            channel=None,
+                            actor="sync",
+                            name="sync_publish_ok",
+                            summary=(
+                                f"cache snapshot -> {target} "
+                                f"({len(counts)} tables, {sum(counts.values())} rows)"
+                            ),
+                            payload={
+                                "publish_path": str(target),
+                                "tables": {k: int(v) for k, v in counts.items()},
+                                "total_tables": len(counts),
+                                "total_rows": int(sum(counts.values())),
+                            },
                         ),
-                        payload={
-                            "publish_path": str(target),
-                            "tables": {k: int(v) for k, v in counts.items()},
-                            "total_tables": len(counts),
-                            "total_rows": int(sum(counts.values())),
-                        },
-                        level="INFO",
-                        service=self._db_logging_service,
+                        producer="DuckDbCacheStore",
+                        event_type="sync_publish_ok",
                     )
                 else:
                     logger.warning(
@@ -934,19 +920,27 @@ class DuckDbCacheStore:
                         "не существует во in-memory DuckDB — sync возможно не доставил данные).",
                         target,
                     )
-                    _emit_sync_event(
-                        event_type="sync_publish_empty",
-                        summary=(
-                            f"publish OK, но 0 таблиц скопировано в {target} "
-                            f"(sync не доставил данные)"
+                    try_log_event(
+                        self._db_logging_service,
+                        LogEvent(
+                            event_type="sync_publish_empty",
+                            level="WARN",
+                            session_id="gateway:sync",
+                            channel=None,
+                            actor="sync",
+                            name="sync_publish_empty",
+                            summary=(
+                                f"publish OK, но 0 таблиц скопировано в {target} "
+                                f"(sync не доставил данные)"
+                            ),
+                            payload={
+                                "publish_path": str(target),
+                                "tables_in_store": list(self._tables or []),
+                                "vector_db_table": self._vector_db_table or None,
+                            },
                         ),
-                        payload={
-                            "publish_path": str(target),
-                            "tables_in_store": list(self._tables or []),
-                            "vector_db_table": self._vector_db_table or None,
-                        },
-                        level="WARN",
-                        service=self._db_logging_service,
+                        producer="DuckDbCacheStore",
+                        event_type="sync_publish_empty",
                     )
                 return True
             except OSError as e:
@@ -960,17 +954,25 @@ class DuckDbCacheStore:
                     target,
                     tmp,
                 )
-                _emit_sync_event(
+                try_log_event(
+                    self._db_logging_service,
+                    LogEvent(
+                        event_type="sync_publish_failed",
+                        level="WARN",
+                        session_id="gateway:sync",
+                        channel=None,
+                        actor="sync",
+                        name="sync_publish_failed",
+                        summary=f"publish FAIL (OSError при replace): {e}",
+                        payload={
+                            "publish_path": str(target),
+                            "tmp_path": str(tmp),
+                            "error_type": "OSError",
+                            "error": str(e),
+                        },
+                    ),
+                    producer="DuckDbCacheStore",
                     event_type="sync_publish_failed",
-                    summary=f"publish FAIL (OSError при replace): {e}",
-                    payload={
-                        "publish_path": str(target),
-                        "tmp_path": str(tmp),
-                        "error_type": "OSError",
-                        "error": str(e),
-                    },
-                    level="WARN",
-                    service=self._db_logging_service,
                 )
                 return False
             except Exception as e:
@@ -981,17 +983,25 @@ class DuckDbCacheStore:
                     e,
                     exc_info=True,
                 )
-                _emit_sync_event(
+                try_log_event(
+                    self._db_logging_service,
+                    LogEvent(
+                        event_type="sync_publish_failed",
+                        level="WARN",
+                        session_id="gateway:sync",
+                        channel=None,
+                        actor="sync",
+                        name="sync_publish_failed",
+                        summary=f"publish FAIL: {e}",
+                        payload={
+                            "publish_path": str(target),
+                            "tmp_path": str(tmp),
+                            "error_type": type(e).__name__,
+                            "error": str(e),
+                        },
+                    ),
+                    producer="DuckDbCacheStore",
                     event_type="sync_publish_failed",
-                    summary=f"publish FAIL: {e}",
-                    payload={
-                        "publish_path": str(target),
-                        "tmp_path": str(tmp),
-                        "error_type": type(e).__name__,
-                        "error": str(e),
-                    },
-                    level="WARN",
-                    service=self._db_logging_service,
                 )
                 return False
 
@@ -1103,15 +1113,23 @@ class DuckDbCacheStore:
                     "error_type": type(exc).__name__,
                 }
                 self._preload_errors.append(err)
-                _emit_sync_event(
-                    event_type="vector_preload_error",
-                    summary=(
-                        f"не удалось получить список source из "
-                        f"{schema}.{name}: {exc}"
+                try_log_event(
+                    self._db_logging_service,
+                    LogEvent(
+                        event_type="vector_preload_error",
+                        level="WARN",
+                        session_id="gateway:sync",
+                        channel=None,
+                        actor="sync",
+                        name="vector_preload_error",
+                        summary=(
+                            f"не удалось получить список source из "
+                            f"{schema}.{name}: {exc}"
+                        ),
+                        payload=err,
                     ),
-                    payload=err,
-                    level="WARN",
-                    service=self._db_logging_service,
+                    producer="DuckDbCacheStore",
+                    event_type="vector_preload_error",
                 )
                 logger.warning("vector_preload_error: %s", exc)
                 return loaded
@@ -1132,14 +1150,22 @@ class DuckDbCacheStore:
                         "error_type": type(exc).__name__,
                     }
                     self._preload_errors.append(err)
-                    _emit_sync_event(
-                        event_type="vector_index_build_failed",
-                        summary=(
-                            f"ошибка построения FAISS-индекса '{src}': {exc}"
+                    try_log_event(
+                        self._db_logging_service,
+                        LogEvent(
+                            event_type="vector_index_build_failed",
+                            level="WARN",
+                            session_id="gateway:sync",
+                            channel=None,
+                            actor="sync",
+                            name="vector_index_build_failed",
+                            summary=(
+                                f"ошибка построения FAISS-индекса '{src}': {exc}"
+                            ),
+                            payload=err,
                         ),
-                        payload=err,
-                        level="WARN",
-                        service=self._db_logging_service,
+                        producer="DuckDbCacheStore",
+                        event_type="vector_index_build_failed",
                     )
                     logger.warning(
                         "vector_index_build_failed (%s): %s", src, exc,

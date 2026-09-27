@@ -78,8 +78,8 @@ class PgDuckDbSyncService:
         self._full_resync_every = max(0, int(full_resync_every))
         self._resync_counter = 0
         # Опциональный sink в ``agent_gateway_logs`` (через ``DbLoggingService``,
-        # async/пул). Если None — события идут через ``event_log.record_sync_event``
-        # (sync, всегда работает при logging.db.enabled+DSN). См. ``_log_sync_event``.
+        # async/пул). Если None — no-op for business + operational WARNING внутри
+        # ``DbLoggingService.try_log_event``. См. ``_log_sync_event``.
         self._db_logging_service = db_logging_service
 
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=max_queue_size)

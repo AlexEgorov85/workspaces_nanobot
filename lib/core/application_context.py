@@ -931,11 +931,24 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             "или _register_infra_resources). "
             "Проверьте секции project.json::skills.* и gateway.vector.index.*."
         )
-        _record_sync_skipped(
+        from lib.services.db_logging_service import LogEvent, try_log_event
+        try_log_event(
             ctx.db_logging_service,
+            LogEvent(
+                event_type="sync_skipped_registry_empty",
+                level="WARN",
+                session_id="gateway:sync",
+                channel=None,
+                actor="sync",
+                name="sync_skipped_registry_empty",
+                summary="PgDuckDbSyncService skipped: TableRegistry пуст",
+                payload={
+                    "reason": "TableRegistry пуст",
+                    "detail": "Нет ни одной зарегистрированной таблицы — проверьте project.json::skills.* и gateway.vector.index.*",
+                },
+            ),
+            producer="ApplicationContext",
             event_type="sync_skipped_registry_empty",
-            reason="TableRegistry пуст",
-            detail="Нет ни одной зарегистрированной таблицы — проверьте project.json::skills.* и gateway.vector.index.*",
         )
         return None, None
     if not dsn:
@@ -943,11 +956,24 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             "PgDuckDbSyncService skipped: channels.postgres.dsn не задан "
             "(пустая строка или отсутствует ключ в project.json)."
         )
-        _record_sync_skipped(
+        from lib.services.db_logging_service import LogEvent, try_log_event
+        try_log_event(
             ctx.db_logging_service,
+            LogEvent(
+                event_type="sync_skipped_no_dsn",
+                level="WARN",
+                session_id="gateway:sync",
+                channel=None,
+                actor="sync",
+                name="sync_skipped_no_dsn",
+                summary="PgDuckDbSyncService skipped: channels.postgres.dsn не задан",
+                payload={
+                    "reason": "channels.postgres.dsn не задан",
+                    "detail": "DATABASE_URL пустой или отсутствует ключ в project.json — sync не сможет подключиться к PG",
+                },
+            ),
+            producer="ApplicationContext",
             event_type="sync_skipped_no_dsn",
-            reason="channels.postgres.dsn не задан",
-            detail="DATABASE_URL пустой или отсутствует ключ в project.json — sync не сможет подключиться к PG",
         )
         return None, None
 
@@ -962,11 +988,24 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             "PgDuckDbSyncService skipped: в TableRegistry есть ресурсы, но ни одного "
             "имени в table_names()/vector_names() — несоответствие регистрации."
         )
-        _record_sync_skipped(
+        from lib.services.db_logging_service import LogEvent, try_log_event
+        try_log_event(
             ctx.db_logging_service,
+            LogEvent(
+                event_type="sync_skipped_no_table_names",
+                level="WARN",
+                session_id="gateway:sync",
+                channel=None,
+                actor="sync",
+                name="sync_skipped_no_table_names",
+                summary="PgDuckDbSyncService skipped: в TableRegistry есть ресурсы, но table_names()/vector_names() пусты",
+                payload={
+                    "reason": "в TableRegistry есть ресурсы, но table_names()/vector_names() пусты",
+                    "detail": "Несоответствие регистрации — проверьте register() vs register_infra()",
+                },
+            ),
+            producer="ApplicationContext",
             event_type="sync_skipped_no_table_names",
-            reason="в TableRegistry есть ресурсы, но table_names()/vector_names() пусты",
-            detail="Несоответствие регистрации — проверьте register() vs register_infra()",
         )
         return None, None
 
@@ -1051,12 +1090,11 @@ def _record_sync_skipped(
     reason: str,
     detail: str,
 ) -> None:
-    """Записать в ``agent_gateway_logs`` причину, по которой sync не стартанул.
+    """DEPRECATED: инлайнен в ``_make_sync_services``.
 
-    Используется в ``_make_sync_services`` при ранних return'ах с тихими
-    причинами отказа. Идемпотентно и безопасно для вызова до старта
-    ``DbLoggingService`` — единый конвейер через
-    ``DbLoggingService.try_log_event``.
+    Оставлен как back-compat shim для возможных внешних callers'ов
+    (на данный момент ни одного нет). Использует
+    ``DbLoggingService.try_log_event`` — единый writer.
     """
     from lib.services.db_logging_service import LogEvent, try_log_event
 
