@@ -67,6 +67,36 @@ class CompactSettings(_StrictOptional):
     print_to_terminal: bool | None = None
 
 
+class ErrorMessagesSettings(_StrictOptional):
+    """Заготовленные ответы при internal-ошибке ``AgentLoop._process_message``.
+
+    Используется патчем ``RuntimePatcher.patch_turn_delivery_fail`` (см.
+    спеку ``openspec/specs/runtime/error-fallback``): при любом
+    ``Exception`` в upstream-``AgentLoop`` пользователь получает
+    ``gateway.error_messages.internal_error`` вместо захардкоженного
+    англоязычного литерала из upstream-``TurnDelivery.fail``. Детали
+    исключения (тип + текст) пишутся в ``agent_gateway_logs`` при
+    ``log_to_db=true``.
+
+    Attributes:
+        internal_error: текст, который видит пользователь вместо upstream
+            ``"Sorry, I encountered an error."``. По умолчанию — русская
+            формулировка без раскрытия внутренних деталей.
+        log_to_db: писать ли ``event_type="turn_failed"`` в
+            ``agent_gateway_logs`` через ``DbLoggingService.try_log_event``
+            (см. ``lib/services/db_logging_service.py:34``). При
+            ``False`` — детали остаются только в ``loguru``. По умолчанию
+            ``True`` (оператор видит, что сломалось, через
+            ``history_search``).
+
+    Unknown keys разрешены (``_StrictOptional(extra="allow")``) —
+    forward-compat по будущим per-channel/per-language формулировкам.
+    """
+
+    internal_error: str | None = None
+    log_to_db: bool | None = None
+
+
 # DuckDbQuerySettings / VectorSearchSettings удалены (этап 18):
 # Agent-facing tools (duckdb_query_tool.py, vector_search_tool.py) удалены.
 
@@ -161,6 +191,7 @@ class GatewaySettings(_StrictOptional):
     llm_timeout: int | None = Field(default=None, gt=0)
     exec_timeout: int | None = Field(default=None, ge=0)
     compact: CompactSettings | None = None
+    error_messages: ErrorMessagesSettings | None = None
     # duckdb_query / vector_search: Agent-facing tools удалены (этап 18).
     vector: VectorInfrastructureSettings | None = None
     heartbeat: HeartbeatSettings | None = None

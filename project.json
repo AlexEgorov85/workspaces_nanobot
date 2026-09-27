@@ -411,6 +411,24 @@
       "stale_tolerance_seconds": 120,
       "sync_lag_threshold_seconds": 3600
     },
+    //  error_messages.* — заготовленные ответы при internal-ошибке
+    //  AgentLoop._process_message (см. openspec/specs/runtime/error-fallback).
+    //    internal_error  — текст, который видит пользователь вместо
+    //                      upstream-литерала "Sorry, I encountered an error."
+    //                      По умолчанию: "Произошла внутренняя ошибка.
+    //                      Попробуйте позже." Детали исключения в content
+    //                      НЕ попадают (только в agent_gateway_logs).
+    //    log_to_db       — писать ли event_type="turn_failed" в
+    //                      agent_gateway_logs через DbLoggingService
+    //                      (для history_search и диагностики).
+    //                      По умолчанию true.
+    //  Ключи опциональны; дефолты — в ErrorMessagesSettings
+    //  (lib/core/project_settings.py) и _DEFAULT_INTERNAL_ERROR_TEXT в
+    //  lib/services/runtime_patcher.py.
+    // "error_messages": {
+    //   "internal_error": "Произошла внутренняя ошибка. Попробуйте позже.",
+    //   "log_to_db": true
+    // },
     //  vector.* — общая runtime-инфраструктура эмбеддингов и индексов.
     //    Какие индексы строить и из каких source-таблиц — описывается
     //    в index.indexes (см. ниже). PG-реестр public.agent_vector_index_config

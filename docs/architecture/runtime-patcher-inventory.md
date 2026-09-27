@@ -46,6 +46,7 @@ target, nanobot version, проверенную public alternative, upgrade risk
 | 14 | `compact_command` | — | — | DEPRECATED |
 | 15 | `idle_guard` | — | — | DEPRECATED |
 | 16 | `document_text_threshold` | `reference_non_image_attachments` | MEDIUM | KEEP |
+| 17 | `turn_delivery_fail` | `TurnDelivery.fail` (private, класса) | MEDIUM | KEEP |
 
 ---
 
@@ -278,6 +279,34 @@ purpose: >
 public_alternative: ПРОВЕРИТЬ при апгрейде.
 risk: MEDIUM (оборачиваем публичную функцию, fallback на upstream при сбое).
 tests: tests/test_runtime_patcher.py::TestPatchDocumentTextThreshold
+```
+
+### 17. `patch_turn_delivery_fail(settings, db_logging_service=None, agent_id=None)`
+
+```yaml
+PATCH: turn_delivery_fail
+target: nanobot.agent.turn_delivery.TurnDelivery.fail (private, уровень класса)
+nanobot_version: 0.3.5
+purpose: >
+  Конфигурируемый fallback-ответ при любом Exception в
+  AgentLoop._process_message (upstream). Upstream-TurnDelivery.fail
+  публикует захардкоженный литерал "Sorry, I encountered an error." —
+  патч подменяет метод класса обёрткой, которая:
+    1) читает gateway.error_messages.internal_error (default русский текст);
+    2) публикует OutboundMessage(content=internal_error, metadata={"_error_kind": "internal", "_final_turn": True});
+    3) при log_to_db=true пишет event_type="turn_failed" в agent_gateway_logs
+       через DbLoggingService.try_log_event (fail-open при svc=None);
+    4) вызывает оригинальный fail() для финализации turn_completed event.
+  asyncio.CancelledError-ветка (abort_stream + restore_runtime_checkpoint)
+  НЕ задета — она идёт мимо TurnDelivery.fail. Детали исключения
+  (тип + str(exc)) в OutboundMessage.content НЕ попадают — только в БД
+  (для history_search) и loguru.
+public_alternative: нет в upstream 0.3.5; отслеживать появление extension
+  point в nanobot CHANGELOG.
+risk: MEDIUM (патч уровня класса затрагивает все инстансы TurnDelivery;
+  контракт upstream-метода может измениться при апгрейде).
+tests: tests/test_runtime_patcher.py::TestPatchTurnDeliveryFail
+spec: openspec/specs/runtime/error-fallback/spec.md
 ```
 
 ---
