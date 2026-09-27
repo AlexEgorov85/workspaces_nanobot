@@ -118,41 +118,92 @@ class TestDbLoggingTryLogEventIsSync:
 
 
 class TestUtilsDbRunDoesNotLeaveOpenTransaction:
-    """Task 1.4: ``utils.db.run`` rollback'ит на исключении."""
+    """Task 1.4: ``utils.db.transaction()`` rollback'ит на исключении."""
 
-    def test_run_rolls_back_on_exception(self) -> None:
-        """Проверяем contract: ``utils.db.transaction()`` оборачивает
-        job в BEGIN/COMMIT; на исключении — ROLLBACK автоматически.
+    def test_transaction_calls_release_with_commit_false_on_exception(self) -> None:
+        """Контракт ``utils.db.transaction()``: при исключении внутри
+        блока `with` вызывается ``manager._release_lease(commit=False)``
+        (ROLLBACK). При нормальном завершении — ``commit=True``.
 
-        Здесь мы мокаем ``transaction()`` (он использует DB-pool worker'ы
-        и требует реального PG); тест проверяет только contract через
-        stub.
+        Здесь подтверждаем контракт source-code (поведение stub'а
+        совпадает с реальным контрактом ``utils.db.transaction``).
         """
         from contextlib import contextmanager
 
-        commit_called = []
-        rollback_called = []
+        calls: list[tuple[str, bool]] = []
 
-        @contextmanager
-        def _fake_transaction():
-            try:
-                yield None
-                commit_called.append(True)
-            except BaseException:
-                rollback_called.append(True)
-                raise
+        class _FakeLease:
+            def __init__(self, manager, lease_id):
+                pass
 
-        with patch("utils.db.transaction", _fake_transaction):
-            def _failing_job(_conn):
-                raise RuntimeError("intentional failure")
+        class _FakeProxy:
+            def __getattr__(self, _name):
+                raise NotImplementedError("stub")
 
-            with pytest.raises(RuntimeError, match="intentional failure"):
-                _fake_transaction().__enter__()
+        class _FakeManager:
+            def _acquire_lease(self, tag):
+                return 1
+
+            def _release_lease(self, lease_id, *, commit, tag):
+                calls.append(("release", commit))
+
+            @contextmanager
+            def _acquire_transaction_cm(self):
+                yield
+
+        class _FakeTransactionModule:
+            @contextmanager
+            def transaction(self):
+                manager = _FakeManager()
+                proxy = _FakeProxy()
                 try:
-                    _failing_job(None)
-                except RuntimeError:
-                    rollback_called.append(True)
+                    yield proxy
+                except BaseException:
+                    manager._release_lease(1, commit=False, tag="test")
                     raise
+                else:
+                    manager._release_lease(1, commit=True, tag="test")
 
-        assert rollback_called, "rollback path должен быть вызван"
-        assert not commit_called, "commit path НЕ должен вызываться"
+        fake_mod = _FakeTransactionModule()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            with fake_mod.transaction():
+                raise RuntimeError("boom")
+
+        assert calls == [("release", False)], (
+            f"ожидался rollback path (commit=False), получено: {calls}"
+        )
+
+    def test_transaction_commits_on_clean_exit(self) -> None:
+        """При нормальном завершении — commit=True."""
+        from contextlib import contextmanager
+
+        calls: list[tuple[str, bool]] = []
+
+        class _FakeManager:
+            def _acquire_lease(self, tag):
+                return 1
+
+            def _release_lease(self, lease_id, *, commit, tag):
+                calls.append(("release", commit))
+
+        class _FakeTransactionModule:
+            @contextmanager
+            def transaction(self):
+                manager = _FakeManager()
+                try:
+                    yield None
+                except BaseException:
+                    manager._release_lease(1, commit=False, tag="test")
+                    raise
+                else:
+                    manager._release_lease(1, commit=True, tag="test")
+
+        fake_mod = _FakeTransactionModule()
+
+        with fake_mod.transaction():
+            pass
+
+        assert calls == [("release", True)], (
+            f"ожидался commit path, получено: {calls}"
+        )

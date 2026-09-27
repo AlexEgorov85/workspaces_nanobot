@@ -1147,6 +1147,16 @@ def _make_session_cold_sync_service(ctx: ApplicationContext) -> Any | None:
 
     from lib.services.session_cold_sync_service import SessionColdSyncService
 
+    logger.info(
+        'session_cold_sync: stale_tolerance=%ss, '
+        'sync_lag_threshold=%ss, sync_interval=%ss, batch=%d, enabled=%s',
+        stale_tolerance_seconds,
+        sync_lag_threshold_seconds,
+        sync_interval_sec,
+        batch_size,
+        enabled,
+    )
+
     return SessionColdSyncService(
         session_manager=ctx.session_manager,
         pg_dsn=pg_dsn,
