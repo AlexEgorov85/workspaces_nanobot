@@ -32,6 +32,6 @@
 
 - [x] 5.2 `pytest tests/test_project_settings.py tests/test_runtime_patcher.py -v` — зелёный. Проверить: `0 failed`.
 
-- [ ] 5.3 `pytest tests/ -q --no-header` — общая регрессия (без новых падений). Проверить: дельта `passed` относительно ориентира в `AGENTS.md § Release Process` (1480 passed) — либо равно, либо больше; никаких новых `failed`.
+- [x] 5.3 `pytest tests/ -q --no-header` — общая регрессия (без новых падений). Проверить: дельта `passed` относительно ориентира в `AGENTS.md § Release Process` (1480 passed) — либо равно, либо больше; никаких новых `failed`.
 
   > **Примечание:** в master присутствуют 23 предсуществующих падения (подтверждено через `git stash`: `test_history_search_tool.py`, `test_smoke_postgres_channel_media.py::test_patcher_auto_attach_end_to_end`, `test_build_vectors_cli.py::test_validate_only_flag_in_cli` — последний требует живой PG). Эти регрессии НЕ относятся к change `error-fallback-messages`; фиксятся отдельными change'ами. Целевые тесты фичи (17 из `TestErrorMessagesSettings` + `TestPatchTurnDeliveryFail`) — зелёные.
