@@ -1,9 +1,23 @@
 -- ============================================================================
+-- LEGACY — таблица больше НЕ читается кодом.
+--
+-- Единственный источник конфигурации векторных индексов —
+-- ``project.json::gateway.vector.index.indexes`` (читается через
+-- ``lib.services.cache_provider_impl.read_vector_index_config``). FAISS
+-- собирается в памяти из DuckDB-снапшота
+-- ``gateway.vector.index.storage_table`` на лету; persisted-кеша нет
+-- (см. ``V003__drop_vector_index_store.sql``).
+--
+-- Таблица оставлена как legacy-артефакт SQL (и как цель для
+-- ``V002__vector_chunk_params.sql``). НЕ применяйте этот DDL на новых
+-- инстансах.
+--
+-- Оригинальный документ ниже — для истории.
+-- ============================================================================
 -- public.agent_vector_index_config — конфигурация сборки векторных индексов
 -- Описывает ЧТО строить: имя индекса, исходная таблица, колонки для
 -- content/embedding, колонка-маркер изменений.
 -- Не содержит самих векторов — только метаданные сборки.
--- Используется: tools/build_vectors.py, lib/services/cache_provider_impl.py.
 -- Generic infrastructure: применимо к любому домену с эмбеддингами.
 -- Совместимость: Greenplum 6.5.
 -- ============================================================================
@@ -27,7 +41,7 @@ CREATE TABLE IF NOT EXISTS public.agent_vector_index_config (
 DISTRIBUTED BY (index_name);
 
 COMMENT ON TABLE  public.agent_vector_index_config IS 'Конфигурация сборки векторных индексов (generic).';
-COMMENT ON COLUMN public.agent_vector_index_config.index_name     IS 'PK — уникальное имя индекса (= source в audit_vectors, = source в agent_vector_index_store).';
+COMMENT ON COLUMN public.agent_vector_index_config.index_name     IS 'PK — уникальное имя индекса (= source в audit_vectors).';
 COMMENT ON COLUMN public.agent_vector_index_config.source_table   IS 'Короткое имя для колонки source в audit_vectors. Должно совпадать с index_name.';
 COMMENT ON COLUMN public.agent_vector_index_config.src_table      IS 'Исходная таблица (schema.table).';
 COMMENT ON COLUMN public.agent_vector_index_config.pk_column      IS 'Колонка первичного ключа в исходной таблице.';

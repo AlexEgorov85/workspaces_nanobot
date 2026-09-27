@@ -1,20 +1,20 @@
 """Единый сервисный слой работы с векторными индексами.
 
-Собирает в одном месте все операции над FAISS-индексами:
+Собирает в одном месте операции build-слоя:
   * создание эмбеддинга (Ollama /api/embed)         — ``get_embedding``
     (re-export из ``lib/services/cache_provider_impl`` — единая функция)
-  * пересборка индекса из сырых векторов и персист
-    в store (``read_vector_store_table()`` / ``VectorIndexSettings.signature_table``)
-                                                — ``VectorIndexBuildService``
+  * владение общим ``PostgresDuckDbProvider``        — ``VectorIndexBuildService``
 
-Навык (``workspace/skills/audit_analyzer``) и инструменты
-(``tools/build_vectors.py``) переиспользуют этот слой вместо собственных
-реализаций эмбеддинга/сборки. Низкоуровневая работа делегируется
-``PostgresDuckDbProvider`` (``lib/services/cache_provider_impl.py``):
-поиск ``search_vector``, построение ``IndexFlatIP``, сохранение blob'а.
+Инструменты (``tools/build_vectors.py``) переиспользуют этот слой вместо
+собственных реализаций эмбеддинга. Низкоуровневая работа делегируется
+``PostgresDuckDbProvider`` (``lib/services/cache_provider_impl.py``): поиск
+``search_vector``, построение ``IndexFlatIP``, сборка индекса из DuckDB-снапшота
+``gateway.vector.index.storage_table`` (``preload_indexes``).
 
-Поиск и прогрев индексов в память уже живут в провайдере —
-здесь они не дублируются, этот модуль отвечает только за build-слой.
+Persisted FAISS-кеша нет: индексы не пишутся в PG и не сериализуются на диск —
+они живут в памяти процесса (``provider._index_cache``) и собираются заново из
+снапшота. Поиск и прогрев индексов в память также живут в провайдере — здесь они
+не дублируются, этот модуль отвечает только за build-слой.
 """
 
 from __future__ import annotations
@@ -39,18 +39,17 @@ for _p in (str(_ROOT), str(_WORKSPACE)):
 
 
 class VectorIndexBuildService:
-    """Пересборка и персист FAISS-индексов через общий провайдер.
+    """Build-слой над общим ``PostgresDuckDbProvider``.
 
-    Держит ОДИН экземпляр ``PostgresDuckDbProvider`` (не создаёт новый
-    на каждый вызов), поэтому кэш индексов ``_index_cache`` переиспользуется
-    между операциями. Используется ``tools/build_vectors.py`` после вставки
-    новых/удаления старых векторов в ``mode_vector_db_table``.
+    Держит ОДИН экземпляр ``PostgresDuckDbProvider`` (не создаёт новый на каждый
+    вызов), поэтому кэш индексов ``provider._index_cache`` переиспользуется
+    между операциями. Сам FAISS собирает провайдер (``preload_indexes``) из
+    DuckDB-снапшота ``gateway.vector.index.storage_table``; персиста нет.
 
-    Пример:
+    Использование::
+
         >>> svc = VectorIndexBuildService()
-        >>> n = svc.rebuild_and_store(
-        ...     "audits_index", "<schema.table из gateway.vector.index.storage_table>",
-        ... )
+        >>> svc.provider.search_vector("текст", index_name="audits_index")
     """
 
     def __init__(self, cfg: dict[str, Any] | None = None, base_dir: str = "") -> None:

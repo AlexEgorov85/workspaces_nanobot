@@ -21,7 +21,7 @@
 > `project.json`. Они могут отличаться в других развёртываниях. Ключи конфигурации:
 > `channels.postgres.table_name` / `messages_table` / `meta_table` / `claims_table`,
 > `skills.audit_analyzer.tables[*].name` / `vector_indexes[*].name`,
-> `gateway.vector.index.storage_table` / `config_table` / `signature_table`,
+> `gateway.vector.index.storage_table`,
 > `logging.db.table_name` / `question_runs_table`,
 > `benchmark.runs_table` / `results_table`. Точный список и дефолты — в
 > [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md) и [AGENTS.md](../AGENTS.md).
@@ -48,12 +48,12 @@ flowchart LR
   таблицы в `DuckDbCacheStore` (чисто in-memory DuckDB), а после каждого цикла
   `store.publish()` атомарно записывает снимок (temp + `os.replace`) в файл
   кеша навыка (`in_memory_cache_path`).
-- Навык CLI (`predefined`/`sql`) — запросы выполняются по опубликованному кешу
-  (или напрямую по PG, если кеш выключен). Создание/обновление кеша его не
+- Навык CLI (`predefined` / `generated_sql`) — запросы выполняются по опубликованному
+  кешу (или напрямую по PG, если кеш выключен). Создание/обновление кеша его не
   касается. Единый интерфейс бэкенда: `get_schema / query_sql / explain`.
-- `--mode vector` — семантический поиск по FAISS-индексу: провайдер загружает
-  индекс из `public.agent_vector_index_store` (BYTEA), при промахе пересобирает из
-  `oarb.audit_vectors`, эмбеддинг запроса получает через Ollama.
+- `--mode vector` — семантический поиск: FAISS-индекс собирается **в памяти**
+  из DuckDB-снапшота `gateway.vector.index.storage_table` при старте gateway
+  (`PreloadService.preload_vector_indexes`), эмбеддинг запроса получает через Ollama.
 
 ---
 
@@ -326,13 +326,14 @@ dim-«нет данных в кэше», неотличимо от реальн�
 (`store → vdb → cache → files`), без какого-либо указания, что на
 самом деле расхождение есть. Теперь `PreloadService.preload_vector_indexes`
 после прогона считает явное расхождение между **declared** (JSON,
-`project.json::gateway.vector.index.indexes.*`) и **runtime** (PG
-`public.agent_vector_index_store`), классифицируя каждое имя
-индекса в одну из категорий:
+`project.json::gateway.vector.index.indexes.*`) и **runtime** (DuckDB-снапшот
+таблицы-хранилища `gateway.vector.index.storage_table`,
+`cache_provider_impl.list_runtime_vector_indexes()`), классифицируя каждое
+имя индекса в одну из категорий:
 
-  * `missing` — объявлен в JSON, но не загружен / не найден в PG store;
-  * `orphan` — blob в PG store, но не объявлен в JSON (мёртвые данные);
-  * `stale` — blob есть, но signature не совпадает с текущим cfg
+  * `missing` — объявлен в JSON, но не найден в снапшоте-хранилище;
+  * `orphan` — есть строки в снапшоте-хранилище, но индекс не объявлен в JSON;
+  * `stale` — строки есть, но сигнатура не совпадает с текущим cfg
     (помечается как `STALE` или `INVALID`).
 
 Сводка печатается в **stderr** (multi-line, без ANSI) и пишется в
@@ -465,8 +466,8 @@ flowchart LR
 **Точки входа:**
 
 1. **Настоящая slash-команда ``/compact``** —
-   `lib/commands/compact_command.py::cmd_compact`, регистрируется
-   `RuntimePatcher.patch_compact_command` в `agent.commands`
+   upstream `nanobot/command/builtin.py::cmd_compact`, расширяется
+   `RuntimePatcher.patch_compact_command` (fail-soft обёртка) в `agent.commands`
    (`CommandRouter`), где это единственный путь, общий для всех каналов
    (postgres, streamlit, telegram). В `run()` зарегистрированные команды
    перехватываются **до** LLM (``_dispatch_command_inline`` /
@@ -1366,8 +1367,9 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
 обязан ставить в `metadata` `FINAL_TURN_KEY="_final_turn"` (из `lib/utils/outbound_meta.py`).
 Иначе `postgres_channel.send()` трактует ответ как промежуточную публикацию и НЕ
 финализирует оборот → `status='completed'` не ставится, claim/слот не освобождаются,
-чата блокируется. Пример корректного паттерна — `lib/commands/compact_command.py`
-(ставит `_final_turn` во все свои `OutboundMessage`).
+чата блокируется. Пример корректного паттерна — обработчик compact-команды
+(`RuntimePatcher.patch_compact_command`, ставит `_final_turn` во все свои
+`OutboundMessage`).
 
 ### Lifecycle-инвариант оборота (PostgresChannel)
 
@@ -1393,8 +1395,7 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
    `_msg_ctx`, `_leases`, `_release_slot`. Раньше `pop`/`release` шли
    до транзакции, и при ошибке БД локальное состояние рассинхронизировалось
    с БД.
-2. **Единый резолвер `_resolve_turn_context`** (Phase 2 плана фикса
-   lifecycle deadlock). Один источник истины для `user_msg_id` /
+2. **Единый резолвер `_resolve_turn_context`**. Один источник истины для `user_msg_id` /
    `assistant_msg_id` / `chat_id`:
    `origin_message_id` → `message_id` → `_msg_ctx` →
    `answer_id → SELECT assistant.reply_to`. Заменяет разбросанные fallback'ы.
@@ -1507,7 +1508,8 @@ streamlit-UI, аварийными script'ами после deploy.
 nanobot/
 ├── docs/                                  # каталог технической документации (навигация — docs/README.md)
 ├── tools/                                # инфраструктурные CLI-утилиты
-│   └── build_vectors.py                  #   сборка векторных индексов (вне навыка)
+│   ├── build_vectors.py                  #   сборка векторных индексов (вне навыка)
+│   └── check_indexes.py                  #   declared-vs-runtime diff по векторным индексам
 ├── sql/                                  # DDL сгруппированы по доменам
 │   ├── README.md                          #   порядок применения, каталог
 │   ├── session/                           #   session_meta + session_messages
@@ -1521,7 +1523,11 @@ nanobot/
 │   ├── core/                             #   bootstrap ApplicationContext + фабрики
 │   │   ├── application_context.py        #     create/start/stop, связывает все общие сервисы
 │   │   ├── agent_factory.py              #     AgentLoop + ToolAudit hook + фабрика DatabaseLogging (per-turn)
-│   │   └── bus_factory.py                #     MessageBus + обёртки publish_inbound/outbound
+│   │   ├── bus_factory.py                #     MessageBus + обёртки publish_inbound/outbound
+│   │   ├── project_settings.py           #     pydantic-валидация merged SETTINGS (fail-fast)
+│   │   ├── skill_config.py               #     параметризованный runtime API для skill'ов
+│   │   ├── skill_registration.py         #     декларативная регистрация skill-ресурсов
+│   │   └── infra_registration.py         #     регистрация инфраструктурных ресурсов (vector storage)
 │   ├── services/                         #   сервисный слой
 │   │   ├── config_service.py             #    SETTINGS-аксессор + pre-resolve env + таймауты
 │   │   ├── session_storage.py            #    выбор PGSessionManager / SessionManager
@@ -1538,11 +1544,16 @@ nanobot/
 │   │   ├── cache_provider.py             #     интерфейс CacheProvider + SearchResult
 │   │   ├── cache_provider_impl.py        #     PostgresDuckDbProvider + фабрика и модульные функции
 │   │   ├── text_splitter.py              #     чанкование текстов для индексаторов
-│   │   ├── vector_index_service.py       #     VectorIndexBuildService — инкрементальная сборка FAISS
+│   │   ├── vector_index_service.py       #     VectorIndexBuildService — build-слой (провайдер + эмбеддинг)
 │   │   ├── table_registry.py             #     pluggable-реестр ресурсов (skill + infra namespaces)
 │   │   ├── context_compaction.py         #     ContextCompactionService — единая точка сжатия контекста
 │   │   ├── consolidator_locale.py        #     monkeypatch Jinja2-шаблонов из workspace/overrides/
 │   │   ├── runtime_health.py             #     RuntimeHealth/RuntimeReadiness (liveness + readiness)
+│   │   ├── runtime_events_subscriber.py  #     подписка на runtime-события → turn-метрики
+│   │   ├── compaction_event_subscriber.py#     событие context_compacted → шина
+│   │   ├── session_cold_sync_service.py  #     daemon: upstream JSONL → PG cold-storage mirror
+│   │   ├── llm_observer.py               #     обёртки observer-pipeline (fail-soft)
+│   │   ├── llm_usage_store_factory.py    #     фабрика upstream LLMUsageStore
 │   │   └── llm_client.py                 #     call_llm / call_llm_async (OpenAI-compatible HTTP)
 │   │   # DDL для DbLoggingService (agent_gateway_logs, имя через logging.db.table_name) — в sql/logs/
 │   ├── cli/                              #  вынесено из cli_agent.py
@@ -1550,7 +1561,6 @@ nanobot/
 │   │   ├── display_config.py             #   DisplayConfig
 │   │   └── hook_loader.py                #   сканирование workspace/hooks/*.py
 │   ├── hooks/                            #  фреймворковые хуки (не плагины)
-│   │   ├── base_tool_tracking_hook.py    #     общий каркас для tool-хуков
 │   │   ├── tool_audit_hook.py            #     хук аудита вызовов инструментов
 │   │   ├── database_logging_hook.py      #     AgentHook для tool-событий + run_finished в БД; per-turn инстанс через make_db_logging_hook_factory
 │   │   └── terminal_tool_print_hook.py   #     вывод результатов tool'ов в терминал (gateway.print_tools)
@@ -1560,9 +1570,10 @@ nanobot/
 │   ├── channels/                         #   каналы
 │   │   ├── postgres_channel.py           #     канал через таблицу agent_conversation_messages
 │   │   ├── redis_channel.py              #     канал через Redis-очереди (BRPOP/LPUSH)
+│   │   ├── priority_commands.py          #     команды с приоритетом над обычной очередью
 │   │   └── message_exchange.py           #     общий формат сообщений каналов (MessageExchange)
 │   ├── session/                          #   хранилище сессий
-│   │   └── pg_session_manager.py         #     хранение сессий в PostgreSQL (без JSONL)
+│   │   └── pg_session_manager.py         #     cold-storage mirror поверх upstream JSONL SessionManager
 │   └── utils/                            #   утилиты сервисного слоя
 │       ├── sql_safety.py                 #     SQL Security Guard (read-only AST-политика)
 │       ├── outbound_meta.py              #     фильтрация служебных outbound
@@ -1572,13 +1583,13 @@ nanobot/
 ├── workspace/                            # runtime-данные и плагины-хуки
 │   ├── hooks/                            # плагины: самодостаточные AgentHook (cls(workspace_dir=...))
 │   │   ├── session_file_redirect_hook.py #     перенаправление write/edit + media тула message в data_store/cache/sessions/
-│   │   └── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
-│   │       # active_files_hook.py удалён (см. ADR active-files-hook-removal.md)
+│   │   ├── recent_files_hook.py          #     сбор созданных файлов для auto-attach в media
+│   │   └── debug_stream_diag.py          #     диагностика стриминга
 │   ├── tools/                            # кастомные tool'ы (auto-discover через patch_project_tools)
 │   │   ├── compact_context.py, history_search_tool.py,
 │   │   │   legal_summarizer_query.py, example.py
 │   ├── utils/                            # утилиты workspace
-│   │   ├── db.py, media.py, jsonb.py, event_log.py, session_file_store.py,
+│   │   ├── db.py, media.py, jsonb.py, session_file_store.py,
 │   │   │   session_key.py, clean_text.py, office_files.py, structure_cache.py
 │   ├── skills/audit_analyzer/            # навык: тонкий CLI поверх провайдера
 │   │   ├── SKILL.md                      #   пользовательская документация

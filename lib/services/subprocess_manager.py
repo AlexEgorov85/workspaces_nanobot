@@ -75,7 +75,7 @@ class SubprocessManager:
             ``--profile`` передаётся в argv spawn'нутого ``streamlit_app.py``
             из ``SETTINGS["profile"]`` родителя — иначе child упадёт
             с ``ConfigurationError("--profile is required")`` на module
-            level (см. design.md Decision 7 и Phase B.4).
+            level (см. docs/ARCHITECTURE.md § «Профили конфигурации»).
         """
         script = Path(script_path)
         if not script.exists():

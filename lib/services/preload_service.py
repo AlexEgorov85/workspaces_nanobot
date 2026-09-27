@@ -16,11 +16,9 @@ stale) и:
 
 Legacy-методы ``preload_audit_cache`` / ``background_audit_cache_refresh``
 / ``start_audit_cache_tasks`` / ``stop_tasks`` / ``get_audit_cache_config``
-/ ``_audit_settings`` удалены в рефакторинге
-``refactor/core-extract-duckdb-faiss``: единственный писатель
-``audit_cache.duckdb`` теперь — ``DuckDbCacheStore.publish()`` через
-gateway (PgDuckDbSyncService → in-memory mirror → snapshot file). CLI-агент
-остаётся чистым читателем.
+/ ``_audit_settings`` отсутствуют: единственный писатель ``audit_cache.duckdb``
+— ``DuckDbCacheStore.publish()`` через gateway (PgDuckDbSyncService →
+in-memory mirror → snapshot file). CLI-агент остаётся чистым читателем.
 """
 
 from __future__ import annotations

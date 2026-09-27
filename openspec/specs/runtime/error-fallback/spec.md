@@ -21,7 +21,7 @@ AND ни один `publish_outbound` SHALL NOT содержать `content="Sorr
 #### Scenario: Default-текст при отсутствии project.json-секции
 
 - **WHEN** в `project.json` нет `gateway.error_messages.internal_error`
-- **THEN** пользователь получает `OutboundMessage.content = "Не справился с этим запросом. Попробуйте, пожалуйста, ещё раз или переформулируйте вопрос."`
+- **THEN** пользователь получает `OutboundMessage.content = "Я не справился с этим запросом. Попробуйте, пожалуйста, ещё раз или переформулируйте вопрос."`
 
 #### Scenario: Custom-текст из project.json
 

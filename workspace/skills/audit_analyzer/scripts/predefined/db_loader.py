@@ -6,9 +6,9 @@
 через CacheProvider/DuckDB — после того, как ``PgDuckDbSyncService``
 опубликовал снимок в ``workspace/data_store/duckdb/cache.duckdb``.
 
-Python ``REGISTRY`` (legacy) удалён в Phase 7 — этот loader теперь
-единственный источник ``ScriptDefinition``. Ошибка чтения таблицы
-возвращает пустой результат / ``None``, **не** молчаливый fallback.
+Python ``REGISTRY`` (legacy) отсутствует — этот loader единственный источник
+``ScriptDefinition``. Ошибка чтения таблицы возвращает пустой результат /
+``None``, **не** молчаливый fallback.
 
 Не вводит новых абстракций: ``load_script`` / ``load_all`` + dataclass-
 конвертер из JSONB-строки PG в ``ScriptDefinition``.

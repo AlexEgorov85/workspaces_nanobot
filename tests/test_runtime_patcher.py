@@ -1467,7 +1467,7 @@ class TestPatchTurnDeliveryFail:
 
         assert len(published) == 1
         assert published[0].content == (
-            "Не справился с этим запросом. "
+            "Я не справился с этим запросом. "
             "Попробуйте, пожалуйста, ещё раз или переформулируйте вопрос."
         )
 

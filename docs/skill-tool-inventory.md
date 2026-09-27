@@ -1,9 +1,10 @@
 # Skill / Tool inventory
 
-Зафиксированное состояние после рефакторинга `refactor/skills-tools-cleanup`
-(коммиты `c593d509`..`7d8f6b0`; слито в `master` @ `bb844cf`).
+Зафиксированное состояние skill/tool в репозитории (skill-side CLI — единый
+entry-point доступа к данным, generic tools для SQL/vector отсутствуют).
 
-Baseline до старта рефакторинга — в [docs/refactor_baseline.md](refactor_baseline.md).
+Исторические процессные заметки этого рефакторинга — в
+[docs/_archive/](_archive/).
 
 ## Сводная таблица
 
@@ -21,15 +22,15 @@ Baseline до старта рефакторинга — в [docs/refactor_baseli
 
 | component | бывший путь | замена |
 |---|---|---|
-| `duckdb_query` tool | `workspace/tools/duckdb_query_tool.py` | CLI skill'а `scripts/cli.py --mode predefined` (фаза 8; прямой доступ агента к свободному SQL удалён) |
-| `vector_search` tool | `workspace/tools/vector_search_tool.py` | CLI skill'а `scripts/cli.py --mode vector` (фаза 8; прямой доступ агента к vector-search удалён) |
+| `duckdb_query` tool | `workspace/tools/duckdb_query_tool.py` | CLI skill'а `scripts/cli.py --mode predefined` (прямой доступ агента к свободному SQL отсутствует) |
+| `vector_search` tool | `workspace/tools/vector_search_tool.py` | CLI skill'а `scripts/cli.py --mode vector` (прямой доступ агента к vector-search отсутствует) |
 | `run_predefined_script` tool | `workspace/tools/run_predefined_script.py` | CLI skill'а `scripts/cli.py --mode predefined --script <name>` / `predefined.run()` (реестр в `public.agent_predefined_scripts`, см. `SKILL.md`) |
 | `nl_sql_generate` tool | `workspace/tools/nl_sql_generate.py` | CLI skill'а `scripts/cli.py --mode generated_sql` (LLM-генерация SQL) |
 | `column_descriptions` tool | `workspace/tools/column_descriptions.py` | `SKILL.md` секции «Схема домена» + «SQL guidance» (Agent читает сам) |
 | `NlSqlRunner` core | `lib/services/nl_sql_runner.py` | не используется (NL→SELECT pipeline выпилен) |
 | `SchemaFormatter` core | `lib/services/schema_formatter.py` | не используется |
 | `ColumnDescriptionsResolver` core | `lib/services/column_descriptions.py` | не используется |
-| `PredefinedScriptRegistry` core | `lib/services/predefined_script_registry.py` | реестр `public.agent_predefined_scripts` (DB-first; Python `REGISTRY`/`scripts/predefined/scripts.py` удалены в фазе 7) |
+| `PredefinedScriptRegistry` core | `lib/services/predefined_script_registry.py` | реестр `public.agent_predefined_scripts` (DB-first; Python `REGISTRY`/`scripts/predefined/scripts.py` отсутствуют) |
 | `PredefinedScriptRequestBuilder` core | `lib/services/predefined_script_request.py` | `scripts/predefined/builder.py::DynamicQueryBuilder` (inline `?`-подстановка в SQL из реестра skill'а) |
 | `ParameterValidator` core | `lib/services/predefined_script_validator.py` | не используется |
 | `audit_run_predefined_script` tool | `workspace/tools/audit_analyzer_tool.py::AuditRunPredefinedScriptTool` | CLI skill'а (`scripts/cli.py --mode predefined --script <name>`) |
@@ -78,7 +79,7 @@ flowchart LR
 
 Контракт и инварианты — в [docs/skill-tool-architecture.md](skill-tool-architecture.md)
 (TARGET_ARCHITECTURE.md §4, §22.1, §22.2, §28). Tools `duckdb_query` /
-`vector_search` удалены в фазе 8 — Agent-доступ к `audit_analyzer` только
+`vector_search` не существуют — Agent-доступ к `audit_analyzer` только
 через CLI `--mode predefined`. Любое падение
 `tests/test_skill_tool_independence.py` / `tests/test_architecture_tool_domain_free.py` /
 `tests/test_core_infrastructure_independence.py` — архитектурная регрессия.

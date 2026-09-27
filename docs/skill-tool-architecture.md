@@ -92,7 +92,7 @@ Skill пишет инструкции **в терминах capability**, а н�
 ## 6. Контракт `duckdb_query` (удалён)
 
 Публичный Agent-facing tool `duckdb_query` (`workspace/tools/duckdb_query_tool.py`)
-**удалён в фазе 8**. Read-only SQL больше не является Agent-facing tool'ом:
+**не существует**. Read-only SQL не является Agent-facing tool'ом:
 Agent использует only predefined-скрипты через CLI
 (`scripts/cli.py --mode predefined --script <name>`).
 
@@ -110,7 +110,7 @@ Read-only политика сохранена как infra-контракт Core
 ## 7. Контракт `vector_search` (удалён)
 
 Публичный Agent-facing tool `vector_search` (`workspace/tools/vector_search_tool.py`)
-**удалён в фазе 8**. Semantic search больше не является Agent-facing tool'ом:
+**не существует**. Semantic search не является Agent-facing tool'ом:
 доступ — через CLI skill'а:
 
 ```text
@@ -154,7 +154,7 @@ Skill `audit_analyzer` — **CLI-only**: автономный skill-side CLI
 `scripts/cli.py --mode <predefined | generated_sql | vector>` (единый entry-point,
 вызывается агентом через `tools.exec`; также используется бенчмарками/CI).
 Generic tools `workspace/tools/duckdb_query_tool.py` (точный SELECT)
-и `workspace/tools/vector_search_tool.py` (семантика) **удалены в фазе 8** —
+и `workspace/tools/vector_search_tool.py` (семантика) **не существуют** —
 агент не имеет к ним доступа.
 Подробности — в `docs/skill-tool-inventory.md` и `workspace/skills/audit_analyzer/SKILL.md`.
 

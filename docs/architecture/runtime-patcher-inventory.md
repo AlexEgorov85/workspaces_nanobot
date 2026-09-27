@@ -293,10 +293,18 @@ purpose: >
   публикует захардкоженный литерал "Sorry, I encountered an error." —
   патч подменяет метод класса обёрткой, которая:
     1) читает gateway.error_messages.internal_error (default русский текст);
-    2) публикует OutboundMessage(content=internal_error, metadata={"_error_kind": "internal", "_final_turn": True});
-    3) при log_to_db=true пишет event_type="turn_failed" в agent_gateway_logs
+    2) захватывает активное исключение через sys.exception() (вызов идёт
+       изнутри except-блока в loop.py:1480-1482);
+    3) публикует OutboundMessage(content=internal_error, metadata={"_error_kind": "internal", "_final_turn": True});
+    4) при log_to_db=true пишет event_type="turn_failed" в agent_gateway_logs
        через DbLoggingService.try_log_event (fail-open при svc=None);
-    4) вызывает оригинальный fail() для финализации turn_completed event.
+       payload содержит exception_type/exception_message/exception_available/
+       sender_id/agent_id/session_key/channel/chat_id/failure_error_kind;
+    5) вызывает оригинальный fail() для финализации turn_completed event,
+       предварительно подменив self.bus на per-instance прокси
+       _OutboundSilencer, который НЕ публикует outbound (но пропускает
+       остальные методы bus через __getattr__). Это подавляет двойной
+       outbound: пользователь получает ровно один fallback-ответ.
   asyncio.CancelledError-ветка (abort_stream + restore_runtime_checkpoint)
   НЕ задета — она идёт мимо TurnDelivery.fail. Детали исключения
   (тип + str(exc)) в OutboundMessage.content НЕ попадают — только в БД

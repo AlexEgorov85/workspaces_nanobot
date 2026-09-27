@@ -235,8 +235,8 @@ class GatewaySettings(_StrictOptional):
 class SyncSettings(_StrictOptional):
     """Параметры фоновой синхронизации PG → DuckDB (PgDuckDbSyncService).
 
-    Глобальные runtime-параметры, общие для всех skills. До рефакторинга
-    жили в ``skills.audit_analyzer.sync.*``; вынесены в ``gateway.sync.*``,
+    Глобальные runtime-параметры, общие для всех skills. Раньше жили в
+    ``skills.audit_analyzer.sync.*``; вынесены в ``gateway.sync.*``,
     поскольку sync — это свойство runtime infrastructure, а не skill-домена.
     """
 
@@ -534,7 +534,7 @@ class SkillExecutionSettings(_StrictOptional):
     Управляет подтверждением длинных операций (``confirmation_required``),
     оценкой длительности (``estimated_chunk_duration_sec``),
     safety net (``max_chunks_for_execution``) и параметрами
-    context batching (Phase 2B для ``legal_summarizer``).
+    context batching (используются ``legal_summarizer``).
     """
 
     confirmation_threshold_sec: float | None = Field(default=None, gt=0)

@@ -6,6 +6,63 @@
 
 ---
 
+## Незарелизованное (`master`, CHANGELOG → [Unreleased](../CHANGELOG.md)) — векторные индексы и изоляция `history_search`
+
+⚠️ **Breaking change** в подсистеме векторных индексов: persisted FAISS-кеш
+удалён, таблица-сигнатура и настройка `signature_table` больше не существуют.
+
+**Автоматические изменения**:
+
+- FAISS-индексы собираются **в памяти** при старте gateway
+  (`PreloadService.preload_vector_indexes`) из DuckDB-снапшота
+  `gateway.vector.index.storage_table`; persisted-артефактов в PG больше нет.
+- `tools/build_vectors.py` пишет векторы в `storage_table` и пересобирает
+  FAISS в памяти; настройки `gateway.vector.index.signature_table` и
+  `config_table` удалены из `VectorIndexSettings` (их наличие в `project.json`
+  — fail-fast на старте).
+- `--list-indexes` (CLI `audit_analyzer`) и `tools/check_indexes.py` читают
+  runtime-состояние из того же снапшота, а не из PG-таблицы.
+- `history_search(session_scope="all")` изолирован по `user_id` (security):
+  колонка `agent_gateway_logs.user_id` + индекс `(user_id, "timestamp" DESC)`.
+  Семантика `scope="all"` — «все сессии текущего пользователя», а не глобальная
+  выборка; при отсутствии identity-store возвращается `missing_user_identity` /
+  `missing_session_identity` **без** обращения к БД.
+
+**Ручные действия**:
+
+1. **Удалить legacy-таблицу FAISS-кэша.** Миграция `V003__drop_vector_index_store.sql`
+   содержит **шаблон**: `DROP TABLE IF EXISTS "<signature_table>";` — runner
+   (`tools/migrate.py`) выполняет SQL как есть, без подстановок, поэтому при
+   `--apply` это no-op. Оператор подставляет реальное имя (в существующих
+   инстансах — `public.agent_vector_index_store`) и выполняет DROP вручную:
+
+   ```sql
+   DROP TABLE IF EXISTS public.agent_vector_index_store;
+   ```
+
+   `V004__agent_gateway_logs_user_id.sql` (колонка `user_id` + backfill из
+   `agent_question_runs.user_id` + индекс) — обычная, применяется через
+   `python tools/migrate.py --apply`.
+
+   Не редактируйте уже применённые миграции: изменение содержимого ломает
+   checksum (`--verify` → DRIFT). Для отката — `DROP TABLE IF EXISTS ...`
+   вручную и `--force` при повторном применении.
+
+2. **Пересобрать векторные индексы**: `python tools/build_vectors.py --full-rebuild`.
+   До пересборки поиск в `--mode vector` вернёт пустую выдачу — runtime
+   получает векторы из снапшота `storage_table`, который наполняется этой
+   командой.
+
+3. **Проверить согласованность декларации и runtime**:
+   `python tools/check_indexes.py` (exit 0 — согласовано, 1 — divergence,
+   2 — инфраструктурная ошибка).
+
+4. **Аудит вызовов `history_search`**: агент, полагавшийся на глобальную выдачу
+   по `session_scope="all"`, теперь получает события только своего пользователя
+   либо `missing_user_identity`, если identity-store не заполнен.
+
+---
+
 ## v3.x.x — Storage hybridization (upstream SessionManager + cold PG mirror + LLMUsageStore)
 
 ⚠️ **Breaking change** в архитектуре хранения сессий и LLM usage:
@@ -90,8 +147,10 @@ LLM-вызовы в production):
 ## v2.5.2 → v2.5.3 — Профили конфигурации (prod / test)
 
 ⚠️ **Breaking change** в порядке запуска: `python gateway.py` без флагов
-теперь стартует в **test-режиме** (раньше — в проде). Все prod-деплои
-**обязаны** явно указать профиль.
+больше **не стартует** — падает с `ConfigurationError` и `exit 2`. Профиль
+обязателен и передаётся только CLI-флагом `--profile` (whitelist: `prod` /
+`test`); env-передача профиля (исторически `NANOBOT_PROFILE`) не читается
+runtime-кодом.
 
 **Автоматические изменения** (ничего делать не нужно):
 
@@ -103,23 +162,21 @@ LLM-вызовы в production):
 
 **Ручные действия** (ОБЯЗАТЕЛЬНО для prod-деплоев):
 
-1. **Явно указать профиль в проде.** Добавьте в systemd unit / docker-compose /
-   k8s manifest:
+1. **Явно указать профиль в проде.** Передайте `--profile` в точке входа:
 
-   ```yaml
-   environment:
-     - NANOBOT_PROFILE=prod
+   ```bash
+   command: python gateway.py --profile=prod
    ```
 
-   или запускайте с `python gateway.py --profile=prod`.
+   Передача через env (`NANOBOT_PROFILE=prod`) runtime-кодом **не читается** —
+   деплой с ней завершится с `exit 2`.
 
 2. **Проверить баннер.** При старте в терминале должно быть:
    `Starting nanobot gateway · project v… · profile=prod...`
    Если видите `profile=test` в проде — это ошибка деплоя, алертите.
 
-3. **Проверить наличие `profiles/test.jsonc`.** Должен быть в репозитории
-   (коммитится в составе плана). Без него `python gateway.py` без флагов
-   выбросит `ConfigurationError`.
+3. **Проверить наличие `profiles/test.jsonc`.** Должен быть в репозитории.
+   Без него `python gateway.py --profile=test` выбросит `ConfigurationError`.
 
 **Что НЕ изменилось:**
 

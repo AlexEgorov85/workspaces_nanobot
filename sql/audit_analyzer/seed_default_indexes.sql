@@ -1,6 +1,12 @@
 -- ============================================================================
---  Seed: дефолтные векторные индексы audit_analyzer
+--  LEGACY — seed больше НЕ нужен: код не читает agent_vector_index_config.
 -- ============================================================================
+--  Декларация индексов живёт в project.json::
+--      gateway.vector.index.indexes.{audits_index,violations_index,audit_reports_index}
+--  (таблица public.agent_vector_index_config кодом не читается). Скрипт
+--  оставлен для уже развёрнутых legacy-инстансов — повторный запуск
+--  идемпотентен (ON CONFLICT DO UPDATE).
+--
 --  Заполняет public.agent_vector_index_config тремя индексами на основе реальной
 --  схемы источников:
 --
@@ -8,10 +14,7 @@
 --    violations_index   → oarb.violations     (description с чанкованием)
 --    audit_reports_index→ oarb.audit_reports  (full_text с чанкованием)
 --
---  Идемпотентно: ON CONFLICT DO UPDATE — повторный запуск обновляет настройки
---  существующих индексов и добавляет недостающие.
---
---  Применение:
+--  Применение (только legacy-инстансы):
 --    psql "$DATABASE_URL" -f sql/audit_analyzer/seed_default_indexes.sql
 --
 --  После: python tools/build_vectors.py --full-rebuild
