@@ -14,11 +14,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from nanobot.agent import AgentHook
+
 # Ключ-«bucket» для оборотов без session_key (например, прямые SDK-вызовы).
 _DEFAULT_KEY = ""
 
 
-class ToolAuditHook:
+class ToolAuditHook(AgentHook):
     """Аккумулирует каждый вызов инструмента (имя, аргументы, статус, ошибка,
     превью результата) на протяжении всех итераций оборота, чтобы вызывающая
     сторона могла вставить полный аудит-трейл в
@@ -39,6 +41,7 @@ class ToolAuditHook:
         (``_calls``) и счётчики начальной позиции следующей пачки
         (``_pending_start``).
         """
+        super().__init__()
         self._entries: dict[str, list[dict[str, Any]]] = {}
         self._calls: dict[str, list[dict]] = {}
         self._pending_start: dict[str, int] = {}

@@ -27,6 +27,7 @@ import time
 from typing import Any
 
 from loguru import logger
+from nanobot.agent import AgentHook
 
 # Метка канала: «tools» — конкретный подсистемный канал для живого вывода
 # tool-вызовов, чтобы не уезжать в общий fallback (``__main__``/модуль).
@@ -100,7 +101,7 @@ def _format_result(result: Any) -> str:
     return text
 
 
-class TerminalToolPrintHook:
+class TerminalToolPrintHook(AgentHook):
     """Живой терминальный вызов для каждого ``tool_call`` итерации.
 
     Печатает результат сразу в ``after_iteration``: ошибки — подробно
@@ -108,6 +109,7 @@ class TerminalToolPrintHook:
     """
 
     def __init__(self) -> None:
+        super().__init__()
         self._starts: dict[str, list[float]] = {}
 
     @staticmethod

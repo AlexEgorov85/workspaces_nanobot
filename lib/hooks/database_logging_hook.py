@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
+from nanobot.agent import AgentHook
+
 if TYPE_CHECKING:
     from nanobot.agent import AgentHookContext, AgentRunHookContext
 
@@ -77,13 +79,20 @@ def seed_context_window(
         entry["model"] = model if isinstance(model, str) else ""
 
 
-def _store_iteration_usage(session_key: str | None, usage: dict | None) -> None:
-    """Записать по-итерационный usage оборота для сессии (неблокирующий)."""
+def _store_iteration_usage(session_key: str | None, usage: Any) -> None:
+    """Записать по-итерационный usage оборота для сессии (неблокирующий).
+
+    Принимает как ``dict`` (legacy), так и ``LLMUsage`` из nanobot 0.3.5+
+    (через ``_usage_to_dict``). Нормализует в dict на входе, чтобы
+    downstream-ридеры (``get_context_window``, ``get_iteration_usage``)
+    всегда видели dict-контракт.
+    """
     if not session_key:
         return
+    payload = _usage_to_dict(usage)
     with _CONTEXT_BRIDGE_LOCK:
         entry = _CONTEXT_BRIDGE.setdefault(session_key, {})
-        entry["usage"] = dict(usage or {})
+        entry["usage"] = dict(payload) if payload else {}
         entry["ts"] = time.time()
 
 
@@ -264,7 +273,7 @@ def _usage_to_dict(usage: Any) -> dict | None:
     return None
 
 
-class DatabaseLoggingHook:
+class DatabaseLoggingHook(AgentHook):
     """Агентский хук — пересылает tool- и run-события в DbLoggingService.
 
     Живёт в ``lib/hooks/``: это фреймворковый хук, а не плагин
@@ -300,6 +309,7 @@ class DatabaseLoggingHook:
         request_id: str | None = None,
         print_llm_calls: bool = False,
     ) -> None:
+        super().__init__()
         self._service = db_logging_service
         self._tool_start_times: dict[str, float] = {}
         self._agent_id = agent_id
@@ -438,7 +448,7 @@ class DatabaseLoggingHook:
                 iteration=self._pending_iteration or getattr(context, "iteration", None),
                 model=getattr(response, "model", None),
                 finish_reason=getattr(response, "finish_reason", None),
-                usage=dict(getattr(context, "usage", None) or {}),
+                usage=_usage_to_dict(getattr(context, "usage", None)) or {},
                 request_id=self._request_id,
             )
         except Exception as exc:
@@ -448,7 +458,7 @@ class DatabaseLoggingHook:
 
     def _print_llm_tokens(self, context: Any) -> None:
         """Вывести в терминал две строки о токенах итерации (CLI-режим)."""
-        usage = dict(getattr(context, "usage", None) or {})
+        usage = _usage_to_dict(getattr(context, "usage", None)) or {}
         if not usage:
             return
         prompt = usage.get("prompt_tokens")
@@ -490,6 +500,7 @@ def _make_run_event(
 
     final = context.final_content or ""
     tools = context.tools_used or []
+    usage_dict = _usage_to_dict(getattr(context, "usage", None)) or {}
     payload: dict[str, Any] = {
         "final_content": final,
         "tools_used": tools,
@@ -508,7 +519,7 @@ def _make_run_event(
         summary=final[:200],
         payload=payload,
         metadata={
-            "tokens_used": (context.usage or {}).get("total_tokens"),
+            "tokens_used": usage_dict.get("total_tokens"),
             "had_error": bool(context.error),
         },
     )
