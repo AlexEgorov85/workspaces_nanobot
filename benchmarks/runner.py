@@ -593,7 +593,7 @@ async def _run_suite(
     # enable_audit=False при --no-audit (только локальные прогоны без DSN).
     enable_audit = not getattr(args, "no_audit", False)
     try:
-        ctx = ApplicationContext.create(
+        ctx = ApplicationContext.create(role='gateway', 
             script_dir=BENCH_SCRIPT_DIR,
             workspace_dir=BENCH_WORKSPACE_DIR,
             enable_db_logging=True,

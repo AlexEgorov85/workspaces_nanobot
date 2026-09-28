@@ -96,7 +96,7 @@ def _entrypoint_main(args: argparse.Namespace) -> None:
         from lib.utils.project_version import project_version
         from nanobot.cli.commands import __version__
 
-        cfg = ApplicationContext.create(
+        cfg = ApplicationContext.create(role='cli', 
             script_dir=script_dir_for_runtime(),
             workspace_dir=script_dir_for_runtime() / "workspace",
             enable_db_logging=True,
@@ -127,7 +127,7 @@ def _run_vanilla(args: argparse.Namespace) -> None:
     from lib.cli.display_config import DisplayConfig
     from lib.core.application_context import ApplicationContext
 
-    ctx = ApplicationContext.create(
+    ctx = ApplicationContext.create(role='cli', 
         script_dir=script_dir_for_runtime(),
         workspace_dir=script_dir_for_runtime() / "workspace",
         enable_db_logging=True,
@@ -155,7 +155,7 @@ def _run_patched(args: argparse.Namespace) -> None:
     from lib.cli.display_config import DisplayConfig
     from lib.core.application_context import ApplicationContext
 
-    ctx = ApplicationContext.create(
+    ctx = ApplicationContext.create(role='cli', 
         script_dir=script_dir_for_runtime(),
         workspace_dir=script_dir_for_runtime() / "workspace",
         enable_db_logging=True,
@@ -170,7 +170,7 @@ def _run_patched(args: argparse.Namespace) -> None:
 
     # ctx.agent уже содержит проектные хуки (SessionFileRedirectHook и др.) и
     # все runtime-patches (``assemble_outbound`` и пр.) уже применены через
-    # ``ApplicationContext.create()`` → ``RuntimePatcher.apply_all()``.
+    # ``ApplicationContext.create(role='cli', )`` → ``RuntimePatcher.apply_all()``.
     # Никаких дополнительных ``patch_*`` вызовов здесь быть не должно —
     # повторное применение приводит к double-wrap (см. openspec change
     # ``runtime-patcher-composition-cleanup``).

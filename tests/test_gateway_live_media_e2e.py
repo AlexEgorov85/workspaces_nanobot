@@ -4,7 +4,7 @@
 ``NANOBOT_LIVE_E2E=1`` (иначе тест ничего не запускает и не пишет в БД).
 
 Что делаем:
-  1. ``ApplicationContext.create(...)`` — реальная сборка сервисов ровно как
+  1. ``ApplicationContext.create(role='gateway', ...)`` — реальная сборка сервисов ровно как
      в ``gateway.py`` (конфиг, агент, авто-скан хуков ``workspace/hooks/*``
      включая ``SessionFileRedirectHook`` + ``RecentFilesHook`` +
      ``RuntimePatcher``, ``agent.run``).
@@ -127,7 +127,7 @@ async def live_env(live_required):
     from lib.core.application_context import ApplicationContext
     from lib.services.channel_factory import ChannelFactory
 
-    ctx = ApplicationContext.create(
+    ctx = ApplicationContext.create(role='gateway', 
         script_dir=_PROJECT_ROOT,
         workspace_dir=_WORKSPACE,
         enable_db_logging=False,

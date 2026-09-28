@@ -111,7 +111,7 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     from lib.core.application_context import ApplicationContext
     from lib.lifecycle.gateway_runner import GatewayRunner
 
-    ctx = ApplicationContext.create(
+    ctx = ApplicationContext.create(role='gateway', 
         script_dir=script_dir,
         workspace_dir=workspace_dir,
         enable_db_logging=True,

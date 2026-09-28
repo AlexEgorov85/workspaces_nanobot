@@ -7,6 +7,30 @@
 
 Все тяжёлые зависимости (nanobot, psycopg2) импортируются лениво —
 модуль безопасно импортировать даже в тестовых средах.
+
+Composition contract
+====================
+
+``ApplicationContext.create()`` принимает ТОЛЬКО typed-параметры:
+
+  * обязательный ``role: Literal["gateway", "cli"]``;
+  * явные override-ключи ``storage_override``, ``session_override``;
+  * ``**kwargs`` — временная compatibility boundary для deprecated
+    ``enable_db_logging / enable_audit / enable_cron / print_llm_calls /
+    profile`` (см. AGENTS.md § «Working Conventions → Configuration»).
+
+``role`` определяет только composition инфраструктуры
+(``PostgresChannel``, ``CronService``); НЕ определяет cache owner/reader —
+это ответственность ``CacheOwnershipCoordinator`` (см.
+``lib/services/cache_ownership.py``).
+
+Cache owner/reader status — НЕ через ``role``:
+
+  * role="gateway" может быть OWNER (если пришёл первый к PG claim) или
+    READER (если первым пришёл CLI);
+  * role="cli" — то же самое;
+  * Оба процесса открывают ``cache.duckdb`` через concrete factory
+    ``DuckDbCacheStore.open(path, mode)`` с mode от ``coord.try_claim()``.
 """
 
 from __future__ import annotations
@@ -14,9 +38,61 @@ from __future__ import annotations
 import inspect
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+
+# Deprecated kwargs, принимаются ТОЛЬКО через **kwargs до раскрытия
+# change ``remove-deprecated-enable-kwargs``. Production code MUST NOT
+# их использовать. См. openspec/changes/unify-cli-gateway-architecture
+# design D1 «Staged implementation» и Stage G.
+DEPRECATED_ENABLE_KWARGS = frozenset({
+    "enable_db_logging",
+    "enable_audit",
+    "enable_cron",
+    "print_llm_calls",
+})
+
+
+def _resolve_enable_kwargs(
+    kwargs: dict[str, Any],
+    *,
+    gateway_settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Извлечь deprecated ``enable_*``/``print_llm_calls`` из ``**kwargs``.
+
+    Возвращает dict со всеми DEPRECATED_ENABLE_KWARGS (defaults из
+    ``gateway.*`` settings). При передаче kwarg — поднимает
+    ``DeprecationWarning`` (через ``warnings.warn`` с ``stacklevel=2``,
+    чтобы указывать на caller'а, а не на эту функцию).
+
+    Production code MUST NOT передавать эти kwargs напрямую —
+    использовать вместо этого ``gateway.enable_*`` в SETTINGS.
+    """
+    import warnings
+
+    gateways = gateway_settings or {}
+    defaults = {
+        "enable_db_logging": bool(gateways.get("enable_db_logging", True)),
+        "enable_audit": bool(gateways.get("enable_audit", True)),
+        "enable_cron": bool(gateways.get("enable_cron", False)),
+        "print_llm_calls": bool(gateways.get("print_llm_calls", False)),
+    }
+
+    out = dict(defaults)
+    for key, value in kwargs.items():
+        if key in DEPRECATED_ENABLE_KWARGS:
+            warnings.warn(
+                f"ApplicationContext.create({key}={value!r}) is deprecated; "
+                f"configure gateway.{key} in project.json instead. "
+                "This compatibility boundary will be removed by change "
+                "remove-deprecated-enable-kwargs.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            out[key] = bool(value)
+    return out
 
 
 class ApplicationContext:
@@ -46,7 +122,15 @@ class ApplicationContext:
     # Сервисы (опциональные)
     db_logging_service: Any | None = None
     sync_service: Any | None = None
-    cache_store: Any | None = None
+    cache_provider: Any | None = None  # CacheProvider ABC instance (Stage D)
+    cache_store: Any | None = None  # legacy alias for cache_provider
+
+    # Composition role (Stage A)
+    role: str = ""  # "gateway" | "cli"
+    enable_db_logging: bool = True
+    enable_audit: bool = True
+    enable_cron: bool = False
+    print_llm_calls: bool = False
 
     # Storage-hybridization: cold-storage mirror для сессий + LLM usage.
     session_cold_sync_service: Any | None = None
@@ -79,40 +163,73 @@ class ApplicationContext:
         script_dir: Path,
         workspace_dir: Path,
         *,
-        enable_db_logging: bool = True,
-        enable_audit: bool = True,
-        enable_cron: bool = False,
+        role: Literal["gateway", "cli"],
         storage_override: str | None = None,
         session_override: str | None = None,
-        print_llm_calls: bool = False,
-        profile: str | None = None,
+        **kwargs: Any,
     ) -> ApplicationContext:
         """Собрать контекст приложения.
 
         Args:
             script_dir: корень проекта (где лежит config.json).
             workspace_dir: корень workspace.
-            enable_db_logging: инициализировать DbLoggingService.
-            enable_audit: инициализировать PgDuckDbSyncService + DuckDbCacheStore.
-            enable_cron: подключить CronService (CLI).
+            role: точка входа (``"gateway"`` или ``"cli"``). Определяет
+                composition инфраструктуры (``PostgresChannel`` только в
+                gateway, ``CronService`` только в gateway). НЕ определяет
+                cache owner/reader — это ответственность
+                ``CacheOwnershipCoordinator``.
             storage_override: режим хранилища из CLI (auto/postgres/file).
             session_override: имя сессии (CLI).
-            print_llm_calls: выводить в терминал токены LLM-итераций
-                (включается только в CLI-REPL через DatabaseLoggingHook).
-            profile: активный профиль конфигурации (``"prod"`` / ``"test"``).
-                Должен совпадать с уже инициализированным через
-                ``config._initialize_settings(profile)`` из application
-                entrypoint. ``None`` — fallback на ``config.SETTINGS["profile"]``
-                (если ленивый proxy уже инициализирован entrypoint'ом).
+            **kwargs: deprecated compatibility boundary для
+
+                * ``profile`` (str | None);
+                * ``enable_db_logging`` (bool);
+                * ``enable_audit`` (bool);
+                * ``enable_cron`` (bool);
+                * ``print_llm_calls`` (bool).
+
+                Принимаются с ``DeprecationWarning`` + применяются как
+                override над ``SETTINGS["gateway"].*``. После раскрытия
+                change ``remove-deprecated-enable-kwargs`` — ``TypeError``.
 
         Raises:
             ConfigurationError: если ``_initialize_settings(profile)`` ещё не
                 выполнен (proxy остался uninitialized).
         """
+        # Делегируем ``**kwargs`` валидацию/применение (с DeprecationWarning).
+        import config as _config
+        ctx_settings = _config.SETTINGS
+        # Touching ``["profile"]`` материализует ConfigurationError на
+        # uninitialized proxy, но не делает duplicated work в happy-path.
+        resolved_profile = ctx_settings["profile"]
+        if "profile" in kwargs:
+            profile = kwargs.pop("profile")
+            if profile is not None and profile != resolved_profile:
+                # entrypoint передал ``profile``, отличный от уже
+                # инициализированного. Это явное нарушение lifecycle —
+                # fail-fast через ConfigurationError boundary.
+                from config import ConfigurationError
+                raise ConfigurationError(
+                    f"ApplicationContext.create(profile={profile!r}) called "
+                    f"but SETTINGS already initialized for profile={resolved_profile!r}. "
+                    "Application entrypoint must pass the same --profile value as "
+                    "was passed to config._initialize_settings()."
+                )
+
+        gateways = ctx_settings.get("gateway") or {}
+        enable_kwargs = _resolve_enable_kwargs(
+            kwargs, gateway_settings=gateways
+        )
+
         ctx = cls()
         ctx.script_dir = Path(script_dir)
         ctx.workspace_dir = Path(workspace_dir)
-        ctx.profile = profile
+        ctx.profile = resolved_profile
+        ctx.role = role
+        ctx.enable_db_logging = bool(enable_kwargs["enable_db_logging"])
+        ctx.enable_audit = bool(enable_kwargs["enable_audit"])
+        ctx.enable_cron = bool(enable_kwargs["enable_cron"])
+        ctx.print_llm_calls = bool(enable_kwargs["print_llm_calls"])
 
         # Сбросить ``TableRegistry`` — это singleton, и при повторном
         # ``create()`` в одном процессе (тесты, streamlit-reload, gateway
@@ -121,37 +238,6 @@ class ApplicationContext:
         # ниже заполнят реестр заново.
         from lib.services.table_registry import table_registry
         table_registry.clear()
-
-        # 1. ConfigService + загрузка конфига.
-        #
-        # Один источник истины — глобальный ``SETTINGS`` (``_LazySettings``),
-        # уже построенный через ``_initialize_settings(profile)`` из application
-        # entrypoint. ``ApplicationContext`` **не** делает повторный
-        # resolve/resolver; это просто читает опубликованный ``SETTINGS``
-        # и оборачивает его в ``ConfigService``.
-        #
-        # Если кто-то вызвал ``ApplicationContext.create`` без
-        # предварительного entrypoint init — proxy поднимет
-        # ``ConfigurationError`` через ``__getitem__`` ниже, и тест/
-        # caller увидит ту же ошибку, что и entrypoint нарушение
-        # lifecycle (fail-fast).
-        import config as _config
-        ctx_settings = _config.SETTINGS
-        # Touching ``["profile"]`` материализует ConfigurationError на
-        # uninitialized proxy, но не делает duplicated work в happy-path.
-        resolved_profile = ctx_settings["profile"]
-        if profile is not None and profile != resolved_profile:
-            # entrypoint передал ``profile``, отличный от уже
-            # инициализированного. Раньше это могло быть env → CLI;
-            # теперь это явное нарушение lifecycle — fail-fast.
-            from config import ConfigurationError
-            raise ConfigurationError(
-                f"ApplicationContext.create(profile={profile!r}) called "
-                f"but SETTINGS already initialized for profile={resolved_profile!r}. "
-                "Application entrypoint must pass the same --profile value as "
-                "was passed to config._initialize_settings()."
-            )
-        ctx.profile = resolved_profile
 
         ctx.config_service = _make_config_service(
             ctx.script_dir, ctx.workspace_dir, settings_override=ctx_settings
@@ -204,7 +290,7 @@ class ApplicationContext:
                 or ctx.config_service.get_str("gateway", "storage", default="auto"),
                 pg=pg_section,
                 configure_db=True,
-                return_file_manager=not enable_cron,
+                return_file_manager=not ctx.enable_cron,
             )
         except Exception as exc:
             logger.warning("SessionStorageService failed: %s", exc)
@@ -214,7 +300,7 @@ class ApplicationContext:
         ctx.session_manager = session_manager
 
         # 4. DbLoggingService
-        if enable_db_logging:
+        if ctx.enable_db_logging:
             ctx.db_logging_service = _make_db_logging(ctx)
 
         # 4a. LLMUsageStore (upstream observer storage).
@@ -229,10 +315,22 @@ class ApplicationContext:
         ctx.session_cold_sync_service = _make_session_cold_sync_service(ctx)
 
         # 5. PgDuckDbSyncService + DuckDbCacheStore
-        if enable_audit:
+        if ctx.enable_audit:
             _auto_register_skills(ctx)
             _register_infra_resources(ctx)
-            ctx.sync_service, ctx.cache_store = _make_sync_services(ctx)
+            _sync_service, _cache_provider = _make_sync_services(ctx)
+            ctx.sync_service = _sync_service
+            # Stage D: ``CacheProvider`` — единый runtime interface для
+            # Skill/Tool/AgentLoop. Concrete implementation
+            # (текущая: ``DuckDbCacheStore``) живёт только в composition
+            # code. Все runtime-consumers MUST зависеть от ``CacheProvider``
+            # (см. ``lib.services.cache_provider`` ABC).
+            ctx.cache_provider = _cache_provider
+            # Back-compat alias — runtime code/project tools/runtime
+            # patches всё ещё ожидают ``ctx.cache_store`` (rename в
+            # Stage D). После migrate callers на новый interface alias
+            # может быть удалён.
+            ctx.cache_store = ctx.cache_provider
 
         # 6. BusFactory + AgentFactory
         from lib.core.bus_factory import BusFactory
@@ -258,8 +356,13 @@ class ApplicationContext:
 
         from lib.core.agent_factory import AgentFactory
 
+        # CronService — ТОЛЬКО для role="gateway". При role="cli" значение
+        # ``gateway.enable_cron`` MUST быть проигнорировано (см.
+        # openspec/changes/unify-cli-gateway-architecture design D7 —
+        # «Cron = gateway-only»). Решает проблему «два процесса выполняют
+        # один jobs.json дважды».
         cron_service = None
-        if enable_cron:
+        if ctx.enable_cron and ctx.role == "gateway":
             cron_service = _make_cron_service(ctx.config)
 
         # 6a. Auto-scan проектных хуков из ``workspace/hooks/*.py`` (ПЛАГИНЫ).
@@ -291,7 +394,7 @@ class ApplicationContext:
             db_logging_service=ctx.db_logging_service,
             agent_id=agent_id,
             project_hooks=project_hooks or None,
-            print_llm_calls=print_llm_calls,
+            print_llm_calls=ctx.print_llm_calls,
             usage_store=ctx.usage_store,
         )
 

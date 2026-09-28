@@ -192,7 +192,7 @@ def _get_ctx():
     """Создать и вернуть ApplicationContext при уже настроенных mock'ах."""
     from lib.core.application_context import ApplicationContext
 
-    return ApplicationContext.create(
+    return ApplicationContext.create(role='gateway', 
         script_dir=_project_root,
         workspace_dir=_workspace_path,
         enable_db_logging=False,

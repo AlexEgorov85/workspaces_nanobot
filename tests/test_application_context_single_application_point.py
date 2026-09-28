@@ -1,6 +1,6 @@
 """Регрессионные тесты:
 
-- ``ApplicationContext.create()`` применяет runtime patches ровно один раз
+- ``ApplicationContext.create(role='gateway', )`` применяет runtime patches ровно один раз
   (реальный вызов через ``full_fake_modules``, не мок);
 - CLI/gateway/streamlit entrypoint'ы НЕ повторно вызывают ``patch_*`` методы
   ``RuntimePatcher`` после ``create()``.
@@ -62,7 +62,7 @@ def test_cli_agent_does_not_call_patch_methods_after_create() -> None:
     assert not patch_calls, (
         "cli_agent.py не должен вызывать patch_* методы RuntimePatcher — "
         f"найдено: {patch_calls}. Runtime patches применяются ровно один "
-        "раз в ApplicationContext.create()."
+        "раз в ApplicationContext.create(role='gateway', )."
     )
 
 
@@ -77,7 +77,7 @@ def test_cli_agent_does_not_call_apply_all() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Реальный вызов ApplicationContext.create() с spy'нутыми apply_all и
+# Реальный вызов ApplicationContext.create(role='gateway', ) с spy'нутыми apply_all и
 # register_project_tools.
 #
 # Фикстура НЕ подменяет ``nanobot.agent`` целиком (это ломает импорт
@@ -89,7 +89,7 @@ def test_cli_agent_does_not_call_apply_all() -> None:
 
 @pytest.fixture
 def _full_fake_modules(tmp_path):
-    """Минимальный bootstrap для ApplicationContext.create().
+    """Минимальный bootstrap для ApplicationContext.create(role='gateway', ).
 
     НЕ подменяем ``nanobot.agent`` целиком — это ломает импорт
     ``nanobot.agent.tools.*`` (нужен AgentFactory). Вместо этого
@@ -234,7 +234,7 @@ def _full_fake_modules(tmp_path):
 
 
 def test_apply_all_called_exactly_once_during_create(_full_fake_modules) -> None:
-    """``ApplicationContext.create()`` вызывает ``RuntimePatcher.apply_all``
+    """``ApplicationContext.create(role='gateway', )`` вызывает ``RuntimePatcher.apply_all``
     РОВНО ОДИН РАЗ.
 
     Это главный invariant композиции (см. спеку, Decision 1). Тест
@@ -253,7 +253,7 @@ def test_apply_all_called_exactly_once_during_create(_full_fake_modules) -> None
 
     with patch.object(RuntimePatcher, "apply_all", spy_apply_all):
         script = REPO_ROOT
-        ApplicationContext.create(
+        ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -261,7 +261,7 @@ def test_apply_all_called_exactly_once_during_create(_full_fake_modules) -> None
         )
 
     assert len(apply_all_calls) == 1, (
-        f"ApplicationContext.create() должен вызывать RuntimePatcher.apply_all "
+        f"ApplicationContext.create(role='gateway', ) должен вызывать RuntimePatcher.apply_all "
         f"ровно один раз, найдено: {len(apply_all_calls)} вызовов"
     )
 
@@ -269,7 +269,7 @@ def test_apply_all_called_exactly_once_during_create(_full_fake_modules) -> None
 def test_register_project_tools_called_exactly_once_during_create(
     _full_fake_modules,
 ) -> None:
-    """``ApplicationContext.create()`` вызывает ``register_project_tools``
+    """``ApplicationContext.create(role='gateway', )`` вызывает ``register_project_tools``
     РОВНО ОДИН РАЗ, сразу после ``apply_all``.
 
     Это второй stage composition root'а (см. спеку, Decision 3). Тест
@@ -297,7 +297,7 @@ def test_register_project_tools_called_exactly_once_during_create(
              spy_register,
          ):
         script = REPO_ROOT
-        ApplicationContext.create(
+        ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -313,7 +313,7 @@ def test_register_project_tools_called_exactly_once_during_create(
 def test_patch_assemble_outbound_called_exactly_once_during_create(
     _full_fake_modules,
 ) -> None:
-    """``ApplicationContext.create()`` приводит к **ровно одному** вызову
+    """``ApplicationContext.create(role='gateway', )`` приводит к **ровно одному** вызову
     ``RuntimePatcher.patch_assemble_outbound`` (через ``apply_all``).
 
     Конкретный сценарий из спеки (см. ``specs/runtime/runtime-patcher/spec.md``,
@@ -322,13 +322,13 @@ def test_patch_assemble_outbound_called_exactly_once_during_create(
 
       > он SHALL spy/mock'нуть ``RuntimePatcher.patch_assemble_outbound``
       > через ``unittest.mock.patch.object(..., wraps=original)``,
-      > вызвать ``ApplicationContext.create()`` и проверить, что
+      > вызвать ``ApplicationContext.create(role='gateway', )`` и проверить, что
       > ``mock.call_count == 1``.
 
     Spy через ``wraps=original`` сохраняет production semantics — тест
     наблюдает за вызовами без изменения поведения. Тест доказывает:
       * ``patch_assemble_outbound`` вызывается ровно один раз;
-      * это происходит ВНУТРИ ``ApplicationContext.create()``;
+      * это происходит ВНУТРИ ``ApplicationContext.create(role='gateway', )``;
       * НЕ происходит вне ``create()`` (cli_agent/gateway/streamlit).
 
     Технический нюанс: ``patch.object`` с ``wraps`` для методов через
@@ -348,7 +348,7 @@ def test_patch_assemble_outbound_called_exactly_once_during_create(
 
     with patch.object(RuntimePatcher, "patch_assemble_outbound", spy):
         script = REPO_ROOT
-        ApplicationContext.create(
+        ApplicationContext.create(role='gateway', 
             script_dir=script,
             workspace_dir=script / "workspace",
             enable_db_logging=False,
@@ -356,7 +356,7 @@ def test_patch_assemble_outbound_called_exactly_once_during_create(
         )
 
     assert call_count["n"] == 1, (
-        f"ApplicationContext.create() должен привести к ровно одному "
+        f"ApplicationContext.create(role='gateway', ) должен привести к ровно одному "
         f"вызову RuntimePatcher.patch_assemble_outbound, найдено: "
         f"{call_count['n']}. Это означает либо дубль (раньше был в "
         f"cli_agent.py:174), либо пропуск патча."
