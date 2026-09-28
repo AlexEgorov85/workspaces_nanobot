@@ -28,7 +28,8 @@ reference):
 * ``create(ctx)`` собирает ``ContextCompactionService`` из DI-ссылок
   ``ctx._agent_ref`` и ``ctx._settings_ref``;
 * ``_plugin_discoverable = False`` — auto-loader nanobot пропускает
-  (мы регистрируем через ``patch_project_tools`` явно).
+  (мы регистрируем через
+  ``lib.services.project_tool_loader.register_project_tools`` явно).
 """
 from __future__ import annotations
 
@@ -129,7 +130,7 @@ class CompactContextTool(Tool):
         if agent is None:
             raise RuntimeError(
                 "CompactContextTool.create: ctx._agent_ref is None — "
-                "patch_project_tools должен прокидывать agent в ctx."
+                "register_project_tools должен прокидывать agent в ctx."
             )
         return cls(
             service=ContextCompactionService(

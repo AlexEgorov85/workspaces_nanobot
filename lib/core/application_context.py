@@ -766,26 +766,44 @@ def _emit_patch_inventory_banner(patch_report: Any) -> None:
 def _emit_project_tools_inventory_banner(project_tools_result: Any) -> None:
     """Промпт-сводка по project tools через ``runtime_inventory``.
 
+    Использует **структурные поля** ``ProjectToolsLoadResult``
+    (``registered`` / ``disabled`` / ``duplicate`` / ``failed`` /
+    ``error``) **напрямую**, а не regex-парсинг ``detail``. Это:
+
+      * даёт корректный баннер при outer-loader failure (раньше
+        ``detail = "register_project_tools failed: RuntimeError: ..."``
+        парсился как ``failed=["RuntimeError: ..."]`` — мусор);
+      * отделяет ``loader-level error`` от ``per-tool failed``;
+      * сохраняет совместимость с ``diagnose_startup.py``, который
+        читает ``Custom (project) tools:`` из логов (там всё ещё
+        ``detail`` — ``runtime_inventory.parse_project_tools_detail``).
+
     Печатает красный блок, если required tool не зарегистрировался
-    (missing или failed); жёлтый — если unexpected tool или failed
-    optional. Срабатывает после ``register_project_tools(...)`` —
-    ``project_tools_result.detail`` несёт тот же формат, что был
-    раньше в ``patch_report.details["project_tools"]`` (см.
-    ``lib/services/project_tool_loader.py`` и
-    ``lib/services/runtime_inventory.py::parse_project_tools_detail``).
+    (missing или failed) или loader вернул ``error``; жёлтый — если
+    unexpected tool или failed optional.
     """
     if project_tools_result is None:
         return
-    detail = getattr(project_tools_result, "detail", None)
-    if not detail:
-        return
+    registered = list(getattr(project_tools_result, "registered", []) or [])
+    disabled = list(getattr(project_tools_result, "disabled", []) or [])
+    duplicate = list(getattr(project_tools_result, "duplicate", []) or [])
+    failed = list(getattr(project_tools_result, "failed", []) or [])
+    error = getattr(project_tools_result, "error", None)
 
-    from lib.services.runtime_inventory import diff_project_tools_from_detail
+    # Раньше banner анализировал detail через regex, что для outer
+    # failure давало семантически неправильный результат
+    # (failed = ["RuntimeError: ...]"). Сейчас diff вычисляется из
+    # structured-полей напрямую.
+    from lib.services.runtime_inventory import diff_project_tools
 
-    diff = diff_project_tools_from_detail(detail)
+    diff = diff_project_tools(
+        registered=registered,
+        skipped_disabled=disabled,
+        failed=failed,
+    )
 
-    has_critical = diff["missing_required"] or diff["failed"]
-    has_warn = diff["unexpected"]
+    has_critical = bool(diff["missing_required"] or diff["failed"] or error)
+    has_warn = bool(diff["unexpected"] or diff["disabled_required"])
     if not has_critical and not has_warn:
         return
 
@@ -802,6 +820,10 @@ def _emit_project_tools_inventory_banner(project_tools_result: Any) -> None:
             header = "PROJECT TOOLS INVENTORY: drift"
 
         lines: list[str] = []
+        if error:
+            # Outer-loader failure (``_discover`` / ``ToolContext`` / etc.)
+            # — отдельная категория, не путать с per-tool failed.
+            lines.append(f"[red]LOADER ERROR:[/red] {error}")
         if diff["missing_required"]:
             lines.append(
                 f"[red]MISSING REQUIRED:[/red] {', '.join(diff['missing_required'])}"
@@ -809,6 +831,10 @@ def _emit_project_tools_inventory_banner(project_tools_result: Any) -> None:
         if diff["failed"]:
             lines.append(
                 f"[red]FAILED:[/red] {', '.join(diff['failed'])}"
+            )
+        if diff["disabled_required"]:
+            lines.append(
+                f"[red]DISABLED REQUIRED:[/red] {', '.join(diff['disabled_required'])}"
             )
         if diff["unexpected"]:
             lines.append(
@@ -826,7 +852,8 @@ def _emit_project_tools_inventory_banner(project_tools_result: Any) -> None:
     except Exception as exc:
         import sys
         sys.stderr.write(
-            f"PROJECT TOOLS INVENTORY: missing_required={diff['missing_required']} "
+            f"PROJECT TOOLS INVENTORY: error={error} "
+            f"missing_required={diff['missing_required']} "
             f"failed={diff['failed']} unexpected={diff['unexpected']} ({exc})\n"
         )
 

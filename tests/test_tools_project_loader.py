@@ -494,6 +494,88 @@ class TestOuterFailure:
         assert "agent is None" in result.detail
 
 
+class TestProjectToolsInventoryBanner:
+    """``_emit_project_tools_inventory_banner`` использует структурные
+    поля ``ProjectToolsLoadResult`` напрямую, а не regex-парсинг
+    ``detail`` (см. opencode change ``runtime-patcher-composition-cleanup``,
+    followups — banner behaviour fix).
+
+    Раньше banner вызывал ``diff_project_tools_from_detail(detail)``,
+    что для outer-loader failure (``detail = "register_project_tools
+    failed: RuntimeError: ..."``) давал семантически неправильный
+    результат: ``failed = ["RuntimeError: ..."]``.
+    """
+
+    def test_outer_failure_shows_loader_error_not_garbled_name(
+        self, capsys, monkeypatch
+    ):
+        """Outer-loader failure показывает ``LOADER ERROR: <repr>``,
+        а не garbage в ``FAILED:``."""
+        from lib.core.application_context import _emit_project_tools_inventory_banner
+        from lib.services.project_tool_loader import ProjectToolsLoadResult
+
+        result = ProjectToolsLoadResult(
+            registered=[],
+            disabled=[],
+            duplicate=[],
+            failed=["register_project_tools"],
+            detail="register_project_tools failed: RuntimeError: intentional boom",
+            error="RuntimeError: intentional boom",
+        )
+
+        _emit_project_tools_inventory_banner(result)
+
+        captured = capsys.readouterr()
+        # ``LOADER ERROR:`` строка должна содержать error repr
+        assert "LOADER ERROR:" in captured.err
+        assert "RuntimeError: intentional boom" in captured.err
+        # НЕ должно быть FAILED: с garbage именем из regex-парсинга
+        assert "FAILED: RuntimeError" not in captured.err
+
+    def test_missing_required_with_structured_fields(self, capsys):
+        """Когда required tool missing, banner показывает MISSING REQUIRED
+        через structured-поля (без regex-парсинга detail)."""
+        from lib.core.application_context import _emit_project_tools_inventory_banner
+        from lib.services.project_tool_loader import ProjectToolsLoadResult
+
+        result = ProjectToolsLoadResult(
+            registered=["history_search"],
+            disabled=[],
+            duplicate=[],
+            failed=[],
+            detail="1 project tools registered: history_search",  # legacy
+            error=None,
+        )
+
+        _emit_project_tools_inventory_banner(result)
+
+        captured = capsys.readouterr()
+        assert "MISSING REQUIRED:" in captured.err
+        assert "compact_context" in captured.err
+        assert "legal_summarizer_query" in captured.err
+
+    def test_no_inventory_drift_returns_silently(self, capsys):
+        """Если drift нет (всё совпадает с canonical) — banner молчит."""
+        from lib.core.application_context import _emit_project_tools_inventory_banner
+        from lib.services.project_tool_loader import ProjectToolsLoadResult
+
+        result = ProjectToolsLoadResult(
+            registered=["compact_context", "history_search", "legal_summarizer_query"],
+            disabled=["ExampleTool"],
+            duplicate=[],
+            failed=[],
+            detail="3 project tools registered: ...; 1 disabled by config: ExampleTool",
+            error=None,
+        )
+
+        _emit_project_tools_inventory_banner(result)
+
+        captured = capsys.readouterr()
+        # canonical + disabled ExampleTool = нет drift
+        assert "MISSING REQUIRED" not in captured.err
+        assert "FAILED" not in captured.err
+
+
 class TestRealCompactContextToolLoads:
     """Реальный ``workspace/tools/compact_context.py`` загружается
     через ``register_project_tools``. Изолирован в отдельный класс, чтобы
