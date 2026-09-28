@@ -210,14 +210,30 @@ Discovery (`pkgutil.iter_modules`, `importlib.util.spec_from_file_location`,
 
 **Соотношение structured vs `detail`:** `ProjectToolsLoadResult`
 содержит структурные поля `registered`/`disabled`/`duplicate`/
-`failed` для programmatic consumers и поле `detail: str` для
-presentation/diagnostic. Существующий формат `detail` сохраняется
-без изменений (используется баннером `_emit_project_tools_inventory_banner`
-и парсером `parse_project_tools_detail` в `runtime_inventory.py`).
-**В рамках этой change** ни `diff_project_tools_from_detail()`, ни
-regex-парсер не переписываются — change фиксирует только новый
-контракт loader'а и переключение banner'а на чтение
-`project_tools_result.detail` вместо `patch_report.details["project_tools"]`.
+`failed` для programmatic consumers, поле `error: str | None` для
+loader-level failure и поле `detail: str` для presentation/diagnostic
+(legacy-формат, читаемый `diagnose_startup.py` через
+`parse_project_tools_detail`).
+
+Баннер `_emit_project_tools_inventory_banner` использует **напрямую
+structured-поля** через `diff_project_tools(registered, skipped_disabled,
+failed)`, **а не** regex-парсинг `detail`. Это закрывает важный
+диагностический дефект pre-fix версии: при outer-loader failure
+`detail = "register_project_tools failed: RuntimeError: <repr>"`
+старый regex-парсер давал `failed = ["RuntimeError: <repr>"]` —
+семантически неверное имя tool'а. Post-fix баннер:
+  * outer-failure → отдельная строка `LOADER ERROR: <error repr>`;
+  * per-tool failed → `FAILED: <canonical tool name>`;
+  * required missing → `MISSING REQUIRED: <names>`;
+  * required disabled → `DISABLED REQUIRED: <names>`;
+  * unexpected → `UNEXPECTED: <names>`.
+Раньше для outer-failure banner был семантически некорректен.
+Сейчас — чистые категории из structured-источника.
+
+`parse_project_tools_detail` в `runtime_inventory.py` остаётся без
+изменений — он используется `tools/diagnose_startup.py` для парсинга
+**логов** (`Custom (project) tools: <detail>`), а не баннера. Прежний
+формат `detail` сохраняется для совместимости.
 
 `RuntimePatcher.apply_all()` больше **не** вызывает `patch_project_tools`
 и не возвращает `project_tools` в `PatchReport`. Архитектура:
@@ -255,10 +271,17 @@ _emit_project_tools_inventory_banner(project_tools_result)
 ```
 
 Баннер `project tools` больше **не** читает `patch_report.details["project_tools"]`
-(этого ключа в `PatchReport` больше нет) — он читает
-`project_tools_result.detail`. Тест 4.4 фиксирует это. Сама функция
+(этого ключа в `PatchReport` больше нет) и больше **не** парсит
+`project_tools_result.detail` через regex. Сигнатура баннера
+принимает `ProjectToolsLoadResult` целиком и использует
+structured-поля (`registered`/`disabled`/`duplicate`/`failed`/`error`)
+напрямую через `diff_project_tools(...)`. Регрессионные тесты
+`tests/test_tools_project_loader.py::TestProjectToolsInventoryBanner`
+фиксируют три сценария: outer-loader failure → `LOADER ERROR: <repr>`;
+required missing → `MISSING REQUIRED: <names>`; no drift → баннер
+молчит. Сама функция
 `_emit_project_tools_inventory_banner` находится в
-`lib/core/application_context.py:750-810` (не в
+`lib/core/application_context.py` (не в
 `lib/services/runtime_inventory.py` — слабому агенту легко
 перепутать; см. task 4.4).
 
@@ -444,13 +467,18 @@ non-critical`. После введения `PatchSpec.required` (см. Decision 
   `_emit_project_tools_inventory_banner` (он больше не может читать
   `patch_report.details["project_tools"]`) и `diagnose_startup.py`,
   диагностика project tools сломается.
-  → **Mitigation:** task 4.4 явно переключает banner на
-  `project_tools_result.detail`; task 4.5 — AST-тест
+  → **Mitigation:** task 4.4 переключает banner на structured-поля
+  `ProjectToolsLoadResult` через `diff_project_tools(...)` (НЕ
+  regex-парсинг `detail`); task 4.5 — AST-тест
   `test_runtime_patcher_no_project_tools_boundary` подтверждает
   что в `runtime_patcher.py` не осталось ссылок на
   `project_tools`/`workspace.tools`/`ToolContext`/
-  `agent.tools.register`; `tools/diagnose_startup.py --strict`
-  остаётся зелёным (если запускается).
+  `agent.tools.register`; регрессионные тесты
+  `TestProjectToolsInventoryBanner` фиксируют outer-failure /
+  missing-required / no-drift сценарии;
+  `tools/diagnose_startup.py --strict` остаётся зелёным (если
+  запускается) — он читает `detail` из логов через
+  `parse_project_tools_detail`, который не переписывался.
 
 - **[Risk]** Ужесточение теста `test_all_patches_have_specs` (subset →
   equality) может сломать существующие CI-прогоны, если где-то

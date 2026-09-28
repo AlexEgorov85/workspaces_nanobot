@@ -127,7 +127,7 @@
   удалить упоминания `compact_tracking`/`compact_command`/`idle_guard`,
   добавить `turn_delivery_fail`/`session_dir_watch`.
   Verify:
-  ```
+  ```bash
   git grep -l "compact_tracking\|compact_command\|idle_guard" \
     -- '*.md' '*.py' | \
     grep -v CHANGELOG.md | \
@@ -224,17 +224,24 @@
 
 - [x] 4.4 В `lib/core/application_context.py` обновить
   `_emit_project_tools_inventory_banner` (определена в
-  `application_context.py:750-810`, **не** в `runtime_inventory.py`)
-  — баннер **больше НЕ читает**
-  `patch_report.details["project_tools"]` (этого ключа в
-  `PatchReport` больше нет после Phase 4). Источник данных —
-  `project_tools_result.detail` (см. task 4.3). Сигнатура
-  `_emit_project_tools_inventory_banner` меняется с
-  `(patch_report)` на `(project_tools_result)`.
+  `application_context.py`, **не** в `runtime_inventory.py`).
+  Баннер больше **НЕ читает** `patch_report.details["project_tools"]`
+  (этого ключа в `PatchReport` больше нет после Phase 4) и
+  больше **НЕ парсит** `project_tools_result.detail` через
+  regex. Сигнатура баннера: `(project_tools_result: ProjectToolsLoadResult)`.
+  Источник данных — **structured-поля** `ProjectToolsLoadResult`
+  (`registered` / `disabled` / `duplicate` / `failed` / `error`),
+  дифф вычисляется через `diff_project_tools(...)` напрямую.
+  Outer-loader failure (`_discover` / `ToolContext` / etc.) попадает
+  в отдельную строку `LOADER ERROR: <repr>`, не в `FAILED:`.
+  `parse_project_tools_detail` в `runtime_inventory.py` остаётся
+  без изменений — он нужен `diagnose_startup.py` для парсинга
+  **логов** (`Custom (project) tools: <detail>`), а не баннера.
   Verify: `git diff` показывает правки только в `application_context.py`;
-  ручной прогон `cli_agent.py --smoke` печатает баннер project
-  tools с теми же именами, что и до change; `tools/diagnose_startup.py
-  --strict` (если запускается) exit 0.
+  ручной прогон `cli_agent.py --smoke` печатает баннер project tools;
+  `tests/test_tools_project_loader.py::TestProjectToolsInventoryBanner`
+  фиксирует outer-failure / missing-required / no-drift сценарии;
+  `tools/diagnose_startup.py --strict` (если запускается) exit 0.
 
 - [x] 4.5 Архитектурный тест `tests/test_architecture_*.py`
   (или расширение `test_dependency_direction.py`)
@@ -475,8 +482,12 @@
 - [x] Регистрация project tools живёт в `lib/services/project_tool_loader.py`;
   единственная публичная функция `register_project_tools(...)`;
   возвращает `ProjectToolsLoadResult`.
-- [x] `_emit_project_tools_inventory_banner` читает
-  `project_tools_result.detail`, **не** `patch_report.details["project_tools"]`.
+- [x] `_emit_project_tools_inventory_banner` использует structured-поля
+  `ProjectToolsLoadResult.{registered,disabled,duplicate,failed,error}`
+  через `diff_project_tools(...)` (НЕ regex-парсинг `detail`); outer-loader
+  failure показывается как `LOADER ERROR: <repr>`, не как garbled
+  `FAILED: <repr>`. Регрессия закрыта
+  `tests/test_tools_project_loader.py::TestProjectToolsInventoryBanner`.
 - [x] Hook allowlist не-alwisted файлы не импортируются (модуль
   не выполняется); тесты через `monkeypatch.setattr` на
   `_allowed_hook_names`.
