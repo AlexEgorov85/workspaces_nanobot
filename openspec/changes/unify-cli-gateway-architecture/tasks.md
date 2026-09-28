@@ -17,45 +17,36 @@
 
 - [ ] 2.1 Создать `lib/services/cache_ownership.py`:
   - `class CacheAccessMode(enum.Enum)`: `READ_WRITE`, `READ_ONLY`.
-  - `class CacheOwnershipResult`: `mode`, `my_generation`, `current_owner_id`, `current_generation`.
+  - `class ClaimResult`: `acquired: bool`, `generation: int`, `owner_id: str`, `current_owner_id: str | None`, `current_generation: int | None`.
   - `class CacheOwnershipCoordinator`:
     - `__init__(worker_id: str, dsn: str, resource_key: str = "duckdb_cache", ttl_seconds: int = 60)`.
-    - `def try_claim(self) -> CacheOwnershipResult`:
-      ```sql
-      INSERT INTO agent_cache_ownership (resource_key, owner_id, generation, last_heartbeat_at, expires_at)
-      VALUES ($1, $2, COALESCE((SELECT generation FROM agent_cache_ownership WHERE resource_key = $1), 0) + 1, NOW(), NOW() + INTERVAL '60 seconds')
-      ON CONFLICT (resource_key) DO UPDATE
-      SET owner_id = EXCLUDED.owner_id,
-          generation = agent_cache_ownership.generation + 1,
-          acquired_at = NOW(),
-          last_heartbeat_at = NOW(),
-          expires_at = EXCLUDED.expires_at
-      WHERE agent_cache_ownership.expires_at < NOW()
-      RETURNING (xmax = 0) AS inserted, owner_id, generation;
-      ```
-      - Если RETURNING вернул 1 row, `inserted=true` → claim acquired → return `CacheOwnershipResult(mode=READ_WRITE, my_generation=returned.generation)`.
-      - Если RETURNING вернул 0 rows → claim not acquired → отдельный SELECT для чтения current owner metadata → return `CacheOwnershipResult(mode=READ_ONLY, current_owner_id=..., current_generation=...)`.
-    - `def heartbeat(self) -> None`:
+    - `def try_claim(self) -> ClaimResult` — atomic через PG-транзакцию. Implementation MAY использовать `INSERT ... ON CONFLICT (resource_key) DO UPDATE SET generation = COALESCE(agent_cache_ownership.generation, 0) + 1, ... WHERE agent_cache_ownership.expires_at < NOW() RETURNING ...`. Возвращает:
+      - `ClaimResult(acquired=True, generation=N, owner_id=self.worker_id)` при успешном claim.
+      - `ClaimResult(acquired=False, current_owner_id=X, current_generation=N)` при неудачном claim.
+    - `def heartbeat(self) -> bool`:
       ```sql
       UPDATE agent_cache_ownership
       SET last_heartbeat_at = NOW(), expires_at = NOW() + INTERVAL '60 seconds'
       WHERE resource_key = $1 AND owner_id = $2 AND generation = $3;
       ```
-      Если WHERE не match (generation изменился) → heartbeat fails → sync stops.
-    - `def release(self) -> None`:
+      Returns True если успешно, False если WHERE не match.
+    - `def release(self) -> bool`:
       ```sql
       DELETE FROM agent_cache_ownership
       WHERE resource_key = $1 AND owner_id = $2 AND generation = $3
       RETURNING resource_key;
       ```
-      No-op + WARNING если RETURNING 0 rows.
-    - `def is_still_owner(self) -> bool`:
+      Returns True если успешно, False при несовпадении (caller логирует WARNING).
+    - `def acquire_write_fence(self) -> ContextManager[None]`:
+      Внутри context manager:
       ```sql
-      SELECT generation FROM agent_cache_ownership
-      WHERE resource_key = $1 AND owner_id = $2 AND generation = $3 AND expires_at > NOW();
+      BEGIN PG;
+        SELECT pg_advisory_xact_lock(hashtext($resource_key));
+        -- (caller validates generation + executes DuckDB write)
+      COMMIT;
       ```
-      Returns True только если (owner_id, generation) match AND claim не expired.
-  Verify: `python -c "from lib.services.cache_ownership import CacheOwnershipCoordinator, CacheAccessMode, CacheOwnershipResult; print('ok')"` работает.
+      Mutual exclusion с ownership takeover branch в `try_claim()`.
+  Verify: `python -c "from lib.services.cache_ownership import CacheOwnershipCoordinator, CacheAccessMode, ClaimResult; print('ok')"` работает.
 
 ## 3. DuckDbCacheStore: API с явным mode + реальный DuckDB read-only connection
 
@@ -65,22 +56,22 @@
   Verify: `tests/test_cache_provider_mode.py::TestReadOnlyConnectionBlocksMutations` зелёный (проверяет реальный уровень DuckDB, не только assertion).
 - [ ] 3.2 `CacheProvider` MUST иметь assertion guard (второй уровень защиты): при попытке INSERT/UPDATE/DELETE через `CacheProvider.query_sql(...)` с `mode=READ_ONLY` raise `ReadOnlyAssertionError`. Verify: `tests/test_cache_provider_mode.py::TestReadOnlyAssertionGuard` зелёный.
 - [ ] 3.3 `CacheProvider` MUST reject путь на NFS ДО открытия DuckDB. Verify: `tests/test_cache_provider_mode.py::TestRejectsNFSPath` зелёный.
+- [ ] 3.4 `CacheProvider` (ABC) MUST иметь classmethod/staticmethod `open(path: str, mode: CacheAccessMode) -> CacheProvider`. `DuckDbCacheStore.open(...)` — concrete factory, возвращающий `CacheProvider` instance. Verify: `tests/test_cache_provider_layering.py` зелёный.
 
 ## 4. PgDuckDbSyncService: создаётся только при OWNER + generation fencing
 
-- [ ] 4.1 `PgDuckDbSyncService.__init__()` принимает: `heartbeat_callback`, `release_callback`, `fence_callback`, `my_generation: int`.
-- [ ] 4.2 Sync-поток MUST проверять generation ПЕРЕД каждой записью:
+- [ ] 4.1 `PgDuckDbSyncService.__init__()` принимает: `cache_provider: CacheProvider`, `my_generation: int`, `heartbeat_callback`, `release_callback`, `fence_callback` (context manager).
+- [ ] 4.2 Sync-поток MUST использовать `coord.acquire_write_fence()` (PG advisory lock) для mutual exclusion с takeover:
   ```python
   def _write_with_fence(self, sql, params):
-      # атомарно: SELECT generation + write внутри одной PG-транзакции
-      with self.dbsession.transaction() as tx:
+      with self.coord.acquire_write_fence() as lock:
+          # внутри lock: проверка generation + DuckDB write
           current_gen = tx.execute(
               "SELECT generation FROM agent_cache_ownership WHERE resource_key = 'duckdb_cache' AND expires_at > NOW()"
           ).scalar()
           if current_gen != self.my_generation:
               raise OwnershipLostError(f"generation mismatch: have {self.my_generation}, db has {current_gen}")
-          # запись в DuckDB
-          self.cache_store.execute(sql, params)
+          self.cache_provider.execute_sql(sql, params)
   ```
   Verify: integration test `test_fencing_prevents_write_after_takeover` (требует PG).
 - [ ] 4.3 В `ApplicationContext.create()`:
@@ -141,23 +132,23 @@
 - [ ] 8.3 `tests/test_application_context_role.py::TestDuckDBLifecycleOrdering` — verify sequence: `resolve_publish_path` → `try_claim` → `DuckDbCacheStore.open(mode=...)` → (OWNER) `PgDuckDbSyncService.start()`.
 - [ ] 8.4 `tests/test_cli_uses_in_memory_bus.py` — REPL использует bus, `PostgresChannel` НЕ создаётся.
 - [ ] 8.5 `tests/test_cache_ownership_claim.py`:
-  - `test_first_process_becomes_owner` → READ_WRITE, my_generation=1.
-  - `test_second_process_becomes_reader` → READ_ONLY.
+  - `test_first_process_becomes_owner` → `ClaimResult(acquired=True, generation=1)`.
+  - `test_second_process_becomes_reader` → `ClaimResult(acquired=False, current_owner_id=...)`.
   - `test_concurrent_claim_exactly_one_owner` — два процесса параллельно → ровно один OWNER.
-  - `test_already_owner_returns_read_write` — повторный `try_claim` того же worker → READ_WRITE, та же generation (не инкремент).
-  - `test_stale_claim_takeover` — claim expired → следующий процесс → READ_WRITE, generation incremented.
-  - `test_heartbeat_updates_claim` — heartbeat обновляет `expires_at`.
-  - `test_heartbeat_fails_after_generation_change` — после takeover heartbeat нашего owner'а returns 0 rows → sync должен остановиться.
-  - `test_release_deletes_claim_for_matching_generation` — release() с правильным generation → success.
-  - `test_release_is_noop_for_mismatched_generation` — release() с чужим или outdated generation → 0 rows + WARNING.
-  - `test_old_owner_fencing_with_generation` — после takeover старый owner sync получает `OwnershipLostError` при попытке записи.
+  - `test_stale_claim_takeover` — claim expired → следующий процесс → generation incremented.
+  - `test_heartbeat_updates_claim`.
+  - `test_heartbeat_fails_after_generation_change` — после takeover heartbeat returns False → sync останавливается.
+  - `test_release_deletes_claim_for_matching_generation` — release с правильным generation → success.
+  - `test_release_is_noop_for_mismatched_generation` — release с чужим generation → False + WARNING.
+  - `test_old_owner_fencing_with_advisory_lock` — B захватывает lock + takeover; A blocked внутри lock; A получает `OwnershipLostError` при попытке write.
   - `test_ownership_key_fixed` — только один ряд в `agent_cache_ownership`.
   Verify: `pytest -v` зелёный (требует PG).
 - [ ] 8.6 `tests/test_cache_provider_mode.py`:
+  - `test_read_only_blocks_insert_via_duckdb_connection` — реальный DuckDB `read_only=True` connection.
   - `test_read_only_blocks_insert_via_assertion` — assertion guard.
-  - `test_read_only_blocks_insert_via_duckdb_connection` — реальный DuckDB read_only connection.
   - `test_read_only_blocks_update` / `test_read_only_blocks_delete` / `test_read_only_allows_select`.
   - `test_read_write_allows_mutations`.
+  - `test_query_sql_accepts_any_sql_in_read_write` — INSERT/UPDATE/DELETE работают в READ_WRITE.
   - `test_rejects_nfs_path`.
   Verify: `pytest -v` зелёный.
 - [ ] 8.7 `tests/test_cache_provider_role_paths.py` — `role="cli" == role="gateway" == cache.duckdb`.
@@ -167,6 +158,13 @@
 - [ ] 8.11 `tests/test_cli_no_profile.py` — CLI rejects `--profile`, hardcodes test, ignores env.
 - [ ] 8.12 `tests/test_gateway_accepts_profile.py` — gateway принимает `--profile=prod`/`--profile=test`.
 - [ ] 8.13 Integration test: параллельный запуск `cli_agent.py` и `gateway.py --profile=test` — один OWNER (generation=N), второй READER; `cache.duckdb` (один файл) валиден; fencing предотвращает write после takeover.
+- [ ] 8.14 Новый `tests/test_cache_provider_layering.py`:
+  - `test_application_context_uses_cache_provider_abc_not_duckdb` — `ctx.cache_provider` типизирован как `CacheProvider`, не `DuckDbCacheStore`.
+  - `test_duckdb_cache_store_open_returns_cache_provider_instance` — factory возвращает ABC instance.
+- [ ] 8.15 Новый `tests/test_application_context_role.py::TestCacheLifecycleIndependentOfAudit`:
+  - При `gateway.enable_audit=False` и `gateway.cache` настроен → `CacheProvider` MUST быть создан.
+  - При `gateway.enable_audit=False` → `PgDuckDbSyncService` MUST NOT быть создан.
+  - Skills (`audit_analyzer`) MUST иметь доступ к cache даже при `enable_audit=False`.
 
 ## 9. Документация
 
