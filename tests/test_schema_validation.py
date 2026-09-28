@@ -24,6 +24,7 @@ from lib.services.schema_validation import (
     SchemaValidationError,
     SchemaValidationService,
     _MissingConfigKeys,
+    _hint_for_profile,
 )
 
 
@@ -87,12 +88,51 @@ class TestSchemaValidationError:
         assert "profile='test'" in text
         assert "public.agent_conversation_messages" in text
         assert "public.agent_gateway_logs" in text
-        assert "hint: apply migrations" in text
+        assert "python tools/apply_test_profile_tables.py" in text
 
     def test_empty_missing_message_still_safe(self) -> None:
         err = SchemaValidationError([], profile="prod")
         text = str(err)
         assert "profile='prod'" in text
+
+    def test_message_in_russian(self) -> None:
+        err = SchemaValidationError(
+            [MissingTable(schema="public", name="agent_gateway_logs")],
+            profile="prod",
+        )
+        text = str(err)
+        assert "Не найдены обязательные runtime-таблицы" in text
+        assert "Отсутствуют таблицы:" in text
+        assert "Подсказка:" in text
+        assert "python tools/migrate.py --apply" in text
+
+    def test_missing_config_keys_message_in_russian(self) -> None:
+        err = _MissingConfigKeys(
+            ["channels.postgres.table_name"],
+            profile="prod",
+        )
+        text = str(err)
+        assert "Не найдены обязательные ключи конфигурации" in text
+        assert "Отсутствуют ключи:" in text
+        assert "profile='prod'" in text
+        assert "channels.postgres.table_name" in text
+        assert "project.json" in text
+
+
+class TestHintForProfile:
+    @pytest.mark.parametrize(
+        ("profile", "expected"),
+        [
+            ("prod", "python tools/migrate.py --apply"),
+            ("test", "python tools/apply_test_profile_tables.py"),
+            ("dev", "примените миграции для выбранного профиля"),
+            ("", "примените миграции для выбранного профиля"),
+        ],
+    )
+    def test_hint_for_known_and_unknown_profiles(
+        self, profile: str, expected: str
+    ) -> None:
+        assert _hint_for_profile(profile) == expected
 
 
 class TestMissingTable:

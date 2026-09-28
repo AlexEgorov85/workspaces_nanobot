@@ -35,6 +35,29 @@ _EXPECTED_KEYS: tuple[tuple[str, ...], ...] = (
 )
 
 
+def _hint_for_profile(profile: str) -> str:
+    """Actionable-подсказка для создания runtime-таблиц по профилю.
+
+    Возвращает команду CLI, которую оператор должен запустить,
+    чтобы создать недостающие таблицы. Для известных профилей
+    возвращается конкретная команда; для неизвестных —
+    generic-вариант без указания конкретной утилиты.
+
+    Examples:
+        >>> _hint_for_profile("prod")
+        'python tools/migrate.py --apply'
+        >>> _hint_for_profile("test")
+        'python tools/apply_test_profile_tables.py'
+        >>> _hint_for_profile("dev")
+        'примените миграции для выбранного профиля'
+    """
+    if profile == "prod":
+        return "python tools/migrate.py --apply"
+    if profile == "test":
+        return "python tools/apply_test_profile_tables.py"
+    return "примените миграции для выбранного профиля"
+
+
 def _unwrap_settings(settings: Any) -> dict[str, Any]:
     """Развернуть ``_LazySettings`` proxy в сырой ``dict``.
 
@@ -90,12 +113,13 @@ class SchemaValidationError(ConfigurationError):
 
     def _build_message(self) -> str:
         lines: list[str] = [
-            f"Schema validation failed for profile={self.profile!r}:",
-            "missing runtime tables:",
+            f"Не найдены обязательные runtime-таблицы "
+            f"(profile={self.profile!r}):",
+            "Отсутствуют таблицы:",
         ]
         for t in self.missing:
             lines.append(f"  - {t.full_name}")
-        lines.append("hint: apply migrations before starting the gateway")
+        lines.append(f"Подсказка: {_hint_for_profile(self.profile)}")
         return "\n".join(lines)
 
 
@@ -116,14 +140,15 @@ class _MissingConfigKeys(SchemaValidationError):
 
     def _build_config_message(self) -> str:
         lines: list[str] = [
-            f"Schema validation failed for profile={self.profile!r}:",
-            "missing required config keys:",
+            f"Не найдены обязательные ключи конфигурации "
+            f"(profile={self.profile!r}):",
+            "Отсутствуют ключи:",
         ]
         for k in self.missing_config_keys:
             lines.append(f"  - {k}")
         lines.append(
-            "hint: define the keys in project.json under "
-            "channels.postgres.* / logging.db.*"
+            "Подсказка: определите ключи в project.json "
+            "в секциях channels.postgres.* / logging.db.*"
         )
         return "\n".join(lines)
 
@@ -243,7 +268,7 @@ class SchemaValidationService:
         if missing:
             profile = str(raw.get("profile", "<unknown>"))
             logger.error(
-                "startup schema validation failed: profile={} missing={}",
+                "не пройдена startup-проверка схемы: profile={} отсутствуют={}",
                 profile,
                 [m.full_name for m in missing],
             )
@@ -255,4 +280,5 @@ __all__ = [
     "MissingTable",
     "SchemaValidationError",
     "SchemaValidationService",
+    "_hint_for_profile",
 ]

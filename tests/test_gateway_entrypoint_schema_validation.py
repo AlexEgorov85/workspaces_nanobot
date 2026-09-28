@@ -81,4 +81,4 @@ class TestGatewayMainBoundary:
         assert "FATAL" in err
         assert "agent_conversation_messages" in err
         assert "agent_gateway_logs" in err
-        assert "apply migrations" in err
+        assert "python tools/migrate.py --apply" in err

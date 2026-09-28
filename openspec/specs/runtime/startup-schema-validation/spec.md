@@ -66,7 +66,7 @@
 - `ApplicationContext._validate_runtime_schema(self) -> None` —
   приватный метод, вызывается из `start()`.
 
-## Требования
+## Requirements
 
 ### Requirement: Pre-startup runtime schema gate
 
