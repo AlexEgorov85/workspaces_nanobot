@@ -132,19 +132,25 @@ CLI MUST обрабатывать slash-команду `/compact` как лок�
 - **THEN** CLI MUST вызвать `ContextCompactionService.compact(session_key="cli:<session>", idle=True, force=True)` локально
 - **AND** событие `context_compacted` MUST быть записано в `agent_gateway_logs` через `DbLoggingService`
 
-### Requirement: Cron в обоих режимах (config-driven)
+### Requirement: Cron = gateway-only
 
-Cron-сервис MUST создаваться и в `role="gateway"`, и в `role="cli"`, если `gateway.enable_cron=True` в SETTINGS. `role="utility"` MUST NOT создавать CronService.
+`CronService` MUST создаваться ТОЛЬКО при `role="gateway"` (если `gateway.enable_cron=True`). CLI MUST NOT создавать `CronService`.
 
-Если одновременно работают и CLI, и gateway, cron fires из обоих процессов — это **документированное поведение**, не bug (разные процессы имеют свои `cron/jobs.json`).
+Если одновременно работают CLI и gateway, cron fires ТОЛЬКО из gateway — нет дублирования `jobs.json`.
 
-#### Scenario: Cron в CLI и gateway
+Это BREAKING для пользователей, у которых сейчас cron работал в CLI. Документируется в CHANGELOG.
 
-- **WHEN** `cli_agent.py` или `gateway.py` запущен с `gateway.enable_cron=True`
+#### Scenario: Cron в gateway
+
+- **WHEN** `gateway.py` запущен с `gateway.enable_cron=True`
 - **THEN** `CronService` MUST быть подключен к `AgentLoop`
 - **AND** scheduled jobs MUST выполняться при наступлении cron-тайминга
 
-## ADDED Requirements (DuckDB runtime-resource)
+#### Scenario: Cron НЕ в CLI
+
+- **WHEN** `cli_agent.py` запущен
+- **THEN** `CronService` MUST NOT создаваться
+- **AND** scheduled jobs MUST NOT выполняться из CLI-процесса (они выполняются в gateway, если он запущен)
 
 ### Requirement: DuckDB — runtime-resource с PG-level ownership claim
 
@@ -197,6 +203,45 @@ Producer периодически обновляет claim (TTL heartbeat). Ес
 - Делать `AgentLoop` aware о CLI, PostgreSQL, HTTP, WebSocket, terminal (transport-agnostic).
 - Использовать один `PostgresChannel`-инстанс одновременно в CLI и gateway.
 - Создавать `PgDuckDbSyncService` без предварительного `try_claim_cache_ownership()` (sync без ownership claim запрещён).
+- Принимать `--profile` CLI-аргумент в `cli_agent.py` (CLI MUST hardcode `profile="test"`).
+- Читать профиль из env-переменных в `cli_agent.py`.
+- Ветвиться по `profile == "test"` в runtime-компонентах (выбор профиля — на этапе resolution, не в runtime).
+
+### Requirement: CLI имеет фиксированный профиль test
+
+`cli_agent.py` MUST NOT принимать `--profile` CLI-аргумент и MUST NOT читать профиль из переменных окружения. CLI MUST hardcode `profile="test"` при вызове `config._initialize_settings(profile="test")`.
+
+CLI — локальный test/dev entrypoint, не production deployment interface. CLI не должен создавать ложную универсальность (`cli --profile prod` и т.п.). Это уменьшает поверхность конфигурации.
+
+"test" в контексте CLI НЕ означает урезанный runtime: CLI MUST иметь тот же AgentLoop, Skills, Tools, DuckDB, Vector search, Memory, Logging, Prompts, Runtime patches, что и gateway. Различие только в profile (CLI == "test" hardcoded) и transport (CLI == in-memory bus).
+
+Gateway entrypoint `gateway.py` MAY принимать `--profile` (текущее поведение сохраняется).
+
+После `config._initialize_settings(profile="test")` runtime-компоненты НЕ ДОЛЖНЫ ветвиться по `profile == "test"` — выбор профиля происходит только на этапе resolution. Подробный контракт — в `configuration/profiles`.
+
+#### Scenario: CLI не принимает --profile
+
+- **WHEN** пользователь запускает `python cli_agent.py --profile=test`
+- **THEN** argparse MUST exit с ошибкой `unrecognized arguments: --profile=test`
+- **AND** процесс MUST NOT запускать ApplicationContext
+
+#### Scenario: CLI hardcodes profile="test"
+
+- **WHEN** пользователь запускает `python cli_agent.py` (без `--profile`)
+- **THEN** CLI MUST вызвать `config._initialize_settings(profile="test")` (hardcoded)
+- **AND** `SETTINGS["profile"]` MUST быть `"test"`
+
+#### Scenario: CLI не читает профиль из env
+
+- **WHEN** пользователь запускает `python cli_agent.py` с `NANOBOT_PROFILE=prod` в env
+- **THEN** CLI MUST игнорировать переменную окружения
+- **AND** `SETTINGS["profile"]` MUST быть `"test"`
+
+#### Scenario: Gateway сохраняет --profile механизм
+
+- **WHEN** пользователь запускает `python gateway.py --profile=prod` или `python gateway.py --profile=test`
+- **THEN** gateway MUST принять `--profile`
+- **AND** `SETTINGS["profile"]` MUST соответствовать переданному значению
 
 ## Dependencies
 

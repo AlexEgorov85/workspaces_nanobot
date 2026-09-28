@@ -53,9 +53,11 @@
 
 - **`gateway.py` больше не спавнит Streamlit subprocess.** Удаляются `SubprocessManager.spawn_streamlit` (или весь модуль), `_streamlit_enabled()`, упоминания `streamlit_app.py` в `gateway.py`. `streamlit.*`-секция в `project.json` оставляется как permissive (pydantic `extra="allow"`), но runtime её игнорирует.
 
-- **Cron:** контролируется `gateway.enable_cron` (default `True`). Работает и в CLI, и в gateway, если включено.
+- **Cron = gateway-only.** `CronService` создаётся ТОЛЬКО при `role="gateway"` (если `gateway.enable_cron=True`). CLI НЕ запускает `CronService` — решает проблему «два процесса выполняют один и тот же jobs.json дважды».
 
 - **`/compact` в CLI остаётся локальным shortcut:** вызов `ContextCompactionService.compact(...)` напрямую из REPL.
+
+- **CLI = фиксированный профиль `test`.** `cli_agent.py` MUST NOT принимать `--profile` CLI-аргумент и MUST NOT читать профиль из переменных окружения. CLI hardcode'ит `profile="test"` при вызове `config._initialize_settings(profile="test")`. CLI — локальный test/dev entrypoint, не production deployment interface. Это убирает ложную универсальность (`cli --profile prod` и т.п.) и уменьшает поверхность конфигурации. После resolution runtime-компоненты НЕ ДОЛЖНЫ ветвиться по `profile == "test"`. Gateway entrypoint сохраняет существующий `--profile` механизм.
 
 ## Capabilities
 
@@ -68,6 +70,7 @@
 - `runtime/context`: добавляется требование «`ApplicationContext.create()` MUST принимать обязательный kwarg `role`; флаги `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` MUST NOT входить в публичной обязательную сигнатуру, читаются из `SETTINGS["gateway"].*` если не переданы; deprecated kwargs MAY приниматься для обратной совместимости с тестами и интегрируемыми утилитами и MUST быть удалены в следующем MINOR после раскрытия».
 
 - `data/cache-provider`: добавляется требование «`cache.duckdb` MUST быть единым runtime-ресурсом, открываемым в `ApplicationContext.create()` для `role="gateway"` и `role="cli"`. Владение sync'ом MUST определяться через PG-level ownership claim (см. `runtime/entrypoints`): первый захвативший claim процесс становится producer, остальные — consumer'ами. Никаких role-based путей (`cli.duckdb`, `gateway.duckdb`) — только `<local_path>/cache.duckdb`».
+- `configuration/profiles`: добавляется требование «`cli_agent.py` MUST NOT принимать `--profile` CLI-аргумент и MUST NOT читать профиль из переменных окружения; CLI MUST hardcode `profile="test"` при вызове `config._initialize_settings(profile="test")`. CLI — локальный test/dev entrypoint. Gateway MAY принимать `--profile`. После resolution runtime-компоненты НЕ ДОЛЖНЫ ветвиться по `profile == "test"`».
 
 ## Impact
 

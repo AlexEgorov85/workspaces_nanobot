@@ -71,7 +71,7 @@ CLI-runtime-флаги (kwargs `storage_override`, `session_override`) оста�
 | `DuckDbCacheStore` (открывает `<local_path>/cache.duckdb`) | ✅ | ✅ | ❌ |
 | `PostgresChannel` (worker pool) | ✅ | ❌ | ❌ |
 | `PgDuckDbSyncService` (sync — если claim выдан) | ✅ | ✅ | ❌ |
-| `CronService` (если `gateway.enable_cron=True`) | ✅ | ✅ | ❌ |
+| `CronService` (если `gateway.enable_cron=True`) | ✅ | ❌ | ❌ |
 | WebSocket port check (вызывается из entrypoint) | ✅ | ❌ | ❌ |
 | Console I/O (in-memory bus) | ❌ | ✅ | ❌ |
 
@@ -115,18 +115,14 @@ CLI REPL: `bus.publish_inbound(InboundMessage(channel="cli", ...))` + `bus.consu
 - File lock на `cache.duckdb` — отвергнуто: DuckDB уже использует flock на файле; layering ещё одного flock поверх — хрупко.
 - Жёсткое правило «gateway = producer» — отвергнуто: пользователь явно сказал CLI без gateway должен работать.
 
-### D5. Удаление Streamlit — единым коммитом
+### D5. Streamlit removal — отдельный change
 
-**Решение:**
-- Удалить `streamlit_app.py` (файл).
-- Удалить `lib/services/subprocess_manager.py::spawn_streamlit`. Если других методов в модуле нет — удалить модуль целиком.
-- Удалить `_streamlit_enabled()` и блок `if _streamlit_enabled() and subprocess_manager.spawn_streamlit(...)` из `gateway.py::run`. Удалить импорт `SubprocessManager`.
-- `streamlit.*`-секция в `project.json` — оставляется как permissive (pydantic `extra="allow"`); runtime её игнорирует.
-- Обновить `AGENTS.md`, `README.md`, `docs/INTERNAL_API.md`, `docs/ARCHITECTURE.md`.
+**Решение:** Удаление `streamlit_app.py`, `SubprocessManager.spawn_streamlit`, `_streamlit_enabled()` — НЕ часть текущего change. Это отдельный change `remove-streamlit-runtime` (НЕ начат в этом change).
+
+Текущий change содержит ТОЛЬКО запрет импорта `streamlit` в runtime-коде через `runtime/entrypoints::Forbidden Behavior`. Физическое удаление файла/модуля/функций — отдельная задача с отдельной спецификацией.
 
 **Альтернативы:**
-- Deprecation period — отвергнуто: пользователь явно сказал «удалить полностью».
-- Сохранить `streamlit_app.py` как legacy — отвергнуто: 2190 строк неиспользуемого кода = технический долг.
+- Удалить Streamlit в этом change — отвергнуто: пользователь явно сказал «отдельный change».
 
 ### D6. WebSocket port check остаётся в gateway
 
@@ -140,9 +136,33 @@ CLI REPL: `bus.publish_inbound(InboundMessage(channel="cli", ...))` + `bus.consu
 
 **Решение:** `lib/cli/console_loop.py::_run_cli_compact` остаётся без изменений. CLI вызывает `ContextCompactionService.compact(session_key="cli:<session>", idle=True, force=True)` напрямую.
 
-### D9. Cron в обоих режимах (config-driven)
+### D9. Cron = gateway-only
 
-**Решение:** `CronService` создаётся, если `gateway.enable_cron=True`. Работает и в `role="gateway"`, и в `role="cli"`. `role="utility"` НЕ создаёт `CronService`. Документируется: cron fires из обоих процессов, если они одновременно работают.
+**Решение:** `CronService` создаётся ТОЛЬКО при `role="gateway"` (если `gateway.enable_cron=True`). CLI НЕ запускает `CronService`. Решает проблему «два процесса выполняют один jobs.json дважды».
+
+**Альтернативы:**
+- Cron в обоих с distributed ownership — отвергнуто: nanobot.cron не имеет claim-механизма; добавление claim для cron — отдельный change.
+- Cron в обоих (текущее поведение) — отвергнуто: документирование не решает проблему.
+
+**Breaking change:** пользователи, у которых сейчас cron работал в CLI, теряют эту функциональность. Документируется в CHANGELOG. Альтернатива — запустить gateway (always-on процесс с cron).
+
+### D14. CLI = фиксированный профиль test
+
+**Решение:** `cli_agent.py` MUST NOT принимать `--profile` CLI-аргумент. CLI hardcode'ит `profile="test"` при вызове `config._initialize_settings(profile="test")`. CLI MUST NOT читать профиль из env-переменных.
+
+CLI — локальный test/dev entrypoint, не production deployment interface. Не нужно создавать ложную универсальность (`cli --profile prod`). Это уменьшает поверхность конфигурации и количество комбинаций для тестирования.
+
+"test" в контексте CLI НЕ означает урезанный runtime: CLI MUST иметь тот же AgentLoop, Skills, Tools, DuckDB, Vector search, Memory, Logging, Prompts, Runtime patches, что и gateway. Различие только в profile (CLI == "test" hardcoded) и transport (CLI == in-memory bus).
+
+Gateway MAY принимать `--profile` (текущее поведение сохраняется).
+
+После `config._initialize_settings(profile="test")` runtime-компоненты НЕ ДОЛЖНЫ ветвиться по `profile == "test"` — выбор профиля происходит только на этапе resolution.
+
+**Альтернативы:**
+- CLI принимает `--profile` как раньше — отвергнуто: пользователь явно сказал «CLI = fixed test».
+- CLI читает профиль из env — отвергнуто: нарушает принцип `configuration/profiles` (профиль только через argv).
+
+**Breaking change:** пользователи, которые запускали `cli_agent.py --profile=prod`, должны перейти на gateway. Документируется в CHANGELOG.
 
 ### D10. Тесты — backward compatibility и новые сценарии
 
@@ -162,12 +182,15 @@ CLI REPL: `bus.publish_inbound(InboundMessage(channel="cli", ...))` + `bus.consu
 - **[Risk]** PG-level claim через `agent_worker_claims` — race condition если два процесса стартуют одновременно. → **Mitigation:** unique constraint на `(claim_type, status)`; один INSERT проходит, другой — `ON CONFLICT` или violation. Документировано в `cache_ownership.py`.
 - **[Risk]** Если `cache_ownership` claim TTL = 60 сек, и producer kill'нут через `kill -9`, consumer ждёт 60 сек прежде чем может перехватить. → **Mitigation:** heartbeat каждые 30 сек; в тестах используется уменьшенный TTL (5 сек).
 - **[Risk]** Deprecated-период для `enable_*` kwargs затягивается. → **Mitigation:** явная задача в tasks.md с привязкой к MINOR-релизу.
-- **[Risk]** Удаление Streamlit ломает существующие deployment'ы. → **Mitigation:** CHANGELOG BREAKING в категории `Removed`.
-- **[Risk]** Cron fires дважды при одновременной работе CLI и gateway. → **Mitigation:** документируется как known limitation.
+- **[Risk]** Удаление Streamlit (отдельный change) ломает существующие deployment'ы. → **Mitigation:** CHANGELOG BREAKING в категории `Removed` (в том отдельном change).
+- **[Risk]** Cron = gateway-only — пользователи CLI теряют cron. → **Mitigation:** документируется в CHANGELOG; альтернатива — запустить gateway (always-on).
+- **[Risk]** CLI = fixed test — пользователи, которые запускали `cli_agent.py --profile=prod`, должны перейти на gateway. → **Mitigation:** CHANGELOG BREAKING в категории `Changed`.
 
 ## Migration Plan
 
-**Шаг 1 (текущий MINOR):** Реализация всех решений, deprecated-период для `enable_*` kwargs, Streamlit удаляется, PG-level cache claim добавляется. DeprecationWarning в логи.
+**Шаг 1 (текущий MINOR):** Реализация всех решений. DeprecationWarning в логи для `**kwargs` `enable_*`. Cron BREAKING (CLI не запускает). CacheOwnershipCoordinator добавляется. CLI hardcode'ит `profile="test"`.
+
+**Шаг 3 (отдельный change):** Удаление Streamlit (`remove-streamlit-runtime`).
 
 **Шаг 2 (следующий MINOR):** Удаление deprecated `enable_*` kwargs из `ApplicationContext.create()`.
 
