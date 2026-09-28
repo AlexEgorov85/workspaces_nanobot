@@ -29,6 +29,15 @@ CLI_REJECTED_FLAGS = frozenset({"--profile", "-profile", "-p"})
 
 from config import ConfigurationError  # noqa: E402 — module-level import is safe
 
+from lib.utils.windows_terminal import enable_vt, is_windows_console
+
+# Без ENABLE_VIRTUAL_TERMINAL_PROCESSING Windows-консоль рендерит
+# ANSI escape как "?" — поэтому "[dim]→ LLM: ..." выходит как
+# "?[2m→ LLM: ...?[0m". Делаем ДО первого вывода; на других платформах
+# и при перенаправленном stdout no-op.
+if is_windows_console():
+    enable_vt()
+
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Парсинг argv. ``--profile`` НЕ принимается (CLI = фиксированный

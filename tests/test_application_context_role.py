@@ -20,6 +20,7 @@ import inspect
 import sys
 import warnings
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -95,6 +96,62 @@ class TestCompositionFields:
                 f"{attr!r} SHOULD be either class attr or named param"
             )
 
+
+class TestStopClosesCacheProvider:
+    """``ApplicationContext.stop()`` MUST закрывать ``cache_provider``.
+
+    Регрессия: до этого ``stop()`` останавливал sync service, db-logging,
+    ownership coordinator, usage store и db pool, но НЕ закрывал
+    DuckDB-коннект на ``cache.duckdb``. На Windows файл оставался
+    залоченным процессом (ERROR_SHARING_VIOLATION), и следующий
+    инстанс (другая сессия CLI или gateway на той же машине) не
+    мог открыть кэш — даже после явного ``exit``.
+    """
+
+    def test_stop_closes_cache_provider(self) -> None:
+        from lib.core.application_context import ApplicationContext
+
+        ctx = ApplicationContext.__new__(ApplicationContext)
+        ctx._started = True
+        ctx._shutdown = None
+        ctx.bus = None
+        ctx.runtime_events_subscriber = None
+        ctx.usage_store = None
+        ctx.ownership_coordinator = None
+        ctx.runtime_health = None
+        ctx.cache_provider = MagicMock(name="cache_provider")
+        ctx.cache_store = ctx.cache_provider  # alias, выставляется в start()
+        ctx.stop()
+        ctx.cache_provider.close.assert_called_once_with()
+
+    def test_stop_skips_close_when_no_cache_provider(self) -> None:
+        from lib.core.application_context import ApplicationContext
+
+        ctx = ApplicationContext.__new__(ApplicationContext)
+        ctx._started = True
+        ctx._shutdown = None
+        ctx.bus = None
+        ctx.runtime_events_subscriber = None
+        ctx.usage_store = None
+        ctx.ownership_coordinator = None
+        ctx.runtime_health = None
+        ctx.cache_provider = None
+        ctx.cache_store = None
+        # НЕ должно быть AttributeError при ``getattr(...,None) == None``.
+        ctx.stop()
+
+    def test_stop_is_idempotent_when_not_started(self) -> None:
+        """Повторный stop (или stop до start) — no-op."""
+        from lib.core.application_context import ApplicationContext
+
+        ctx = ApplicationContext.__new__(ApplicationContext)
+        ctx._started = False
+        ctx.cache_provider = MagicMock()
+        ctx.stop()
+        ctx.cache_provider.close.assert_not_called()
+
+
+class TestDeprecatedKwargsResolver:
     def test_deprecated_kwar_module_constant(self) -> None:
         from lib.core.application_context import DEPRECATED_ENABLE_KWARGS
 
@@ -105,8 +162,6 @@ class TestCompositionFields:
             "print_llm_calls",
         })
 
-
-class TestDeprecatedKwargsResolver:
     def test_resolve_with_no_kwargs_uses_gateway_defaults(self) -> None:
         from lib.core.application_context import _resolve_enable_kwargs
 

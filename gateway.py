@@ -26,6 +26,11 @@ _SUPPORTED_PROFILES = ("prod", "test")
 # module-level — Phase A).
 from config import ConfigurationError  # noqa: E402
 
+from lib.utils.windows_terminal import enable_vt, is_windows_console
+
+if is_windows_console():
+    enable_vt()
+
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Парсинг argv без делегирования валидации ``--profile`` в argparse.

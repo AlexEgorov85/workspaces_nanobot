@@ -635,6 +635,17 @@ class ApplicationContext:
                 self.usage_store.close()
             except Exception as exc:
                 logger.warning("usage_store.close failed: %s", exc)
+        # Cache storage close — DuckDB-коннект на ``cache.duckdb``.
+        # Без явного close() файл остаётся залоченным процессом на
+        # Windows (ERROR_SHARING_VIOLATION при попытке следующего
+        # инстанса открыть тот же путь в RW/RO режиме) — даже после
+        # ``os._exit(0)`` из-за mmapped-страниц. Дополнительно логируем:
+        # ``store.get_stats().publishes`` теперь уже не изменится.
+        if getattr(self, "cache_provider", None) is not None:
+            try:
+                self.cache_provider.close()
+            except Exception as exc:
+                logger.warning("cache_provider.close failed: %s", exc)
         # Ownership release — Stage E. При shutdown coordinator.release()
         # удаляет строку claim из ``agent_cache_ownership`` для
         # следующего takeover'а (или kill -9 потом expire'нется).
