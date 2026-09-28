@@ -175,21 +175,21 @@ async def run_repl(
             (например, фоновая подгрузка кеша аудит-навыка).
     """
     from nanobot.bus.events import InboundMessage
-    from nanobot.cli.commands import (
-        __logo__,
-        __version__,
-        _init_prompt_session,
-        _is_exit_command,
-        _model_display,
-        _read_interactive_input_async,
-        _restore_terminal,
-        _sanitize_surrogates,
-    )
+
+    from lib.cli.nanobot_cli_compat import get_logo_version, get_repl_helpers, model_display
+
+    _helpers = get_repl_helpers()
+    _init_prompt_session = _helpers["_init_prompt_session"]
+    _is_exit_command = _helpers["_is_exit_command"]
+    _read_interactive_input_async = _helpers["_read_interactive_input_async"]
+    _restore_terminal = _helpers["_restore_terminal"]
+    _sanitize_surrogates = _helpers["_sanitize_surrogates"]
 
     cfg = display or DisplayConfig()
     bus = agent.bus
     _init_prompt_session()
-    _model, _preset_tag = _model_display(config)
+    __logo__, __version__ = get_logo_version()
+    _model, _preset_tag = model_display(config)
     console.print(
         f"{__logo__} nanobot {__version__} "
         f"Interactive [bold blue]({_model})[/bold blue]{_preset_tag} "

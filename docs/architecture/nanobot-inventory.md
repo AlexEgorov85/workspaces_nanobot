@@ -97,7 +97,7 @@
 | Файл:строка | Импорт | Класс | Назначение |
 |---|---|---|---|
 | `lib/cli/console_loop.py:176` | `InboundMessage` | GREEN | публикация в шину из REPL |
-| `lib/cli/console_loop.py:177-186` | `_init_prompt_session`, `_is_exit_command`, `_model_display`, `_read_interactive_input_async`, `_restore_terminal`, `_sanitize_surrogates` | **RED** | приватные хелперы REPL `nanobot cli`; изоляция: тонкий адаптер `lib/cli/nanobot_cli_compat.py` |
+| `lib/cli/nanobot_cli_compat.py` | `_init_prompt_session`, `_is_exit_command`, `_read_interactive_input_async`, `_restore_terminal` (0.3.5: `nanobot.cli.terminal`), `_model_display`, `_sanitize_surrogates` | **GREEN** | приватные хелперы REPL `nanobot cli` изолированы в адаптере: `lib/cli/nanobot_cli_compat.py` (version-agnostic, `get_repl_helpers()`) |
 | `lib/commands/compact_command.py:39` | `OutboundMessage` | GREEN | результат slash-команды |
 | `lib/services/config_service.py:115` | `_load_runtime_config` | **RED** | приватная сборка runtime-конфига; альтернативы нет — фиксировать в contract tests |
 | `lib/services/config_service.py:116` | `sync_workspace_templates` | YELLOW | публичная, но нестабильная утилита |
