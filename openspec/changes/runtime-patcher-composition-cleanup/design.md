@@ -194,7 +194,7 @@ def register_project_tools(
 ) -> ProjectToolsLoadResult:
     """discover + DI + register — best-effort операция с частичным успехом.
     Ошибка одного tool не отменяет успешно зарегистрированные остальные."""
-```python
+```
 
 **Не атомарная**: best-effort с детерминированным частичным успехом.
 Это поведение уже реализовано в существующем `patch_project_tools`
@@ -228,7 +228,7 @@ regex-парсер не переписываются — change фиксируе
                /                    \
    RuntimePatcher.apply_all()   register_project_tools()
    (upstream runtime patches)   (project tools registration)
-```text
+```
 
 `RuntimePatcher` и `ProjectToolLoader` — **независимые** этапы
 composition, оба вызываются `ApplicationContext.create()`. Ни один
@@ -252,7 +252,7 @@ project_tools_result = register_project_tools(
 )
 ctx.project_tools_result = project_tools_result
 _emit_project_tools_inventory_banner(project_tools_result)
-```python
+```
 
 Баннер `project tools` больше **не** читает `patch_report.details["project_tools"]`
 (этого ключа в `PatchReport` больше нет) — он читает
@@ -341,7 +341,7 @@ class PatchSpec:
     risk: str
     nanobot_version: str = "0.3.0"
     required: bool = False
-```python
+```
 
 В `runtime_inventory.canonical_runtime_patches()` убирается
 `high_risk_required`; проекция становится:
@@ -356,7 +356,7 @@ return [
     )
     for name, spec in RuntimePatcher.patch_specs().items()
 ]
-```python
+```
 
 Дефолтные значения `required` для существующих спеков задаются явно
 на основе реального fail-impact для diagnostics:
