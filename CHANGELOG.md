@@ -10,6 +10,33 @@
 
 ### Added
 
+- **`change `unify-cli-gateway-architecture` — Stage C/D/B/E/F/7 (композиция CLI/Gateway, CacheProvider mode + ownership, CLI = fixed test profile)**:
+  - `sql/migrations/V005__create_agent_cache_ownership.sql` — таблица `public.agent_cache_ownership` (`resource_key`, `owner_id`, `generation`, `acquired_at`, `last_heartbeat_at`, `expires_at`). Фиксированный `resource_key='local_cache'` идентифицирует логический cache resource. `generation` — монотонно растущий fencing token. TTL 60 сек. `INSERT ... ON CONFLICT` под `pg_advisory_xact_lock(hashtext(resource_key))`.
+  - `lib/services/cache_ownership.py` — `CacheOwnershipCoordinator` (`try_claim` / `heartbeat` / `release` / `acquire_write_fence`), `CacheAccessMode` (READ_WRITE/READ_ONLY), `ClaimResult` (frozen dataclass), `OwnershipLostError`. Атомарный PG-claim с инкрементом generation при takeover.
+  - `lib/services/cache_provider.py` — два новых exception: `UnsupportedSqlError` (DDL rejected в любом mode), `ReadOnlyAssertionError` (DML rejected в READ_ONLY). `CacheProvider` ABC MUST NOT иметь метода `open()` — это ответственность concrete factory (D14 layered architecture).
+  - `lib/services/duckdb_cache_store.py` — `@classmethod DuckDbCacheStore.open(path, mode)` — concrete factory. `mode=READ_ONLY` → DuckDB physical read-only connection (первый уровень защиты). `mode=READ_WRITE` → обычное открытие. `_reject_unsupported_filesystem(path)` — NFS/SMB/CIFS rejection через `/proc/mounts` (D11/D12). `query_sql()` — `_assert_query_sql_allowed_locked` (второй уровень защиты): DDL → UnsupportedSqlError, DML в READ_ONLY → ReadOnlyAssertionError. CREATE SCHEMA skipped в READ_ONLY mode (DuckDB физически запрещает). Instance method `open()` сохранён как alias `connect()` для back-compat с `gateway.py`/`runner.py`.
+  - `lib/services/pg_duckdb_sync_service.py` — fencing integration: `__init__` принимает `ownership_coordinator` + `cache_provider` (kw-only). `_sync_cycle_with_fence()` оборачивает `_poll_changes()` в `coord.acquire_write_fence()`. При `OwnershipLostError` — log + `_running=False` (worker останавливается, следующий takeover может перехватить ownership).
+  - `lib/core/application_context.py` — composition wiring:
+    * `ApplicationContext.create(role: Literal["gateway", "cli"], **kwargs)` — typed signature без `profile`/`enable_*` в named params; deprecated kwargs через `**kwargs` с `DeprecationWarning` + defaults из `SETTINGS["gateway"].*`.
+    * `ctx.role`, `ctx.enable_db_logging`, `ctx.enable_audit`, `ctx.enable_cron`, `ctx.print_llm_calls`, `ctx.ownership_coordinator`, `ctx.cache_provider` — новые поля.
+    * `_make_sync_services` создаёт `CacheOwnershipCoordinator`, делает `try_claim()`, открывает `DuckDbCacheStore.open(path, mode)` с mode из claim (READ_WRITE для OWNER, READ_ONLY для READER). `sync_service` создаётся ТОЛЬКО для OWNER.
+    * `CronService` создаётся только при `role="gateway"`. При `role="cli"` значение `gateway.enable_cron` MUST быть проигнорировано (D7 cron = gateway-only).
+    * `ctx.stop()` вызывает `ownership_coordinator.release()`.
+  - `cli_agent.py` (Stage F) — `CLI_FIXED_PROFILE = 'test'`; `--profile` MUST NOT приниматься; передача → `ConfigurationError` + `exit 2`. CLI не читает profile из окружения (D8).
+  - `config.py::PROFILE_OWNED_RUNTIME_KEYS` — явно документировано: `gateway.cache.local_path` MUST NOT быть profile-owned (shared runtime resource, D11).
+  - **Tests**: `test_cache_ownership_claim.py` (18), `test_cache_provider_mode.py` (21), `test_application_context_role.py` (10), `test_application_context_cache_lifecycle.py` (14), `test_cli_agent_profile.py` (11), `test_shared_cache_path_across_profiles.py` (6).
+
+### Changed
+
+- **CLI/Gateway теперь используют единый `ApplicationContext`** с typed signature `ApplicationContext.create(role=..., **kwargs)`. **BREAKING** для callers передающих `profile`/`enable_*` как named params — переход на `**kwargs` или `SETTINGS["gateway"].*`.
+- **CLI = фиксированный профиль `test`** (design D8). **BREAKING**: пользователи запускавшие `cli_agent.py --profile=prod` должны перейти на `gateway.py`. Спецификация: `openspec/changes/unify-cli-gateway-architecture/specs/runtime/entrypoints/spec.md`.
+- **Cron = gateway-only** (design D7). **BREAKING**: в CLI `CronService` НЕ создаётся, даже если `gateway.enable_cron=True`. Решает проблему «два процесса выполняют один jobs.json дважды».
+- `gateway.enable_db_logging/enable_audit/enable_cron/print_llm_calls` — deprecated в `**kwargs`-обработке (`DeprecationWarning` с stacklevel=2). После change `remove-deprecated-enable-kwargs` — `TypeError`.
+
+### Deprecated
+
+- Передача `enable_db_logging`/`enable_audit`/`enable_cron`/`print_llm_calls` как keyword arguments в `ApplicationContext.create(...)` — use `SETTINGS["gateway"].*`. Будет удалено в change `remove-deprecated-enable-kwargs`.
+
 - `lib/services/schema_validation.py` — `SchemaValidationService`, `MissingTable`, `SchemaValidationError` (наследник `ConfigurationError`). Pre-startup проверка наличия 6 runtime-таблиц (`channels.postgres.{table_name,messages_table,meta_table,claims_table}` + `logging.db.{table_name,question_runs_table}`) через один SELECT к `information_schema.tables`. Имена таблиц резолвятся из merged `SETTINGS` — **не зашиты в коде**. Спека: `openspec/specs/runtime/startup-schema-validation`.
 - Секция `gateway.startup.schema_validation.*` в `project.json`: `enabled: bool = true`, `timeout_sec: float = 5.0` (диапазон `0.1 ≤ value ≤ 60.0`). Позволяет временно отключить pre-startup проверку без правки кода.
 - `lib/services/runtime_inventory.py` — single source of truth для startup-инвентаря: канонические списки (`canonical_framework_hooks()` / `canonical_plugin_hooks()` / `canonical_project_tools()` / `canonical_runtime_patches()`) + diff-функции (`diff_hooks` / `diff_project_tools` / `diff_runtime_patches`). Используется в `ApplicationContext` для prominent-баннеров (`rich.Panel`, stderr) при missing-required / failed-required / unexpected — после `_log_connected_hooks()` и `apply_all()`, рядом с обычным loguru-логом. Тесты: `tests/test_runtime_inventory.py` (18 кейсов).
