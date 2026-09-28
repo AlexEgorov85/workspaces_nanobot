@@ -329,9 +329,15 @@ async def test_patcher_auto_attach_end_to_end(mock_db, tmp_path):
     ok, _ = patcher.patch_assemble_outbound(agent, audit, recent)
     assert ok
 
-    # Имитируем, что write_file уже выполнился и recent знает про файл
+    # Имитируем, что write_file уже выполнился и recent знает про файл.
+    # Session_key должен совпадать с тем, под которым _auto_seed_context_bridge
+    # засеял bridge (см. выше): monkeypatch на _session_key_of подменяет
+    # возвращаемое значение на ключ fixture'а — независимо от msg.session_key.
+    # Если хочется использовать другой ключ — тест должен либо seed'ить bridge
+    # сам, либо просить fixture переключить ключ.
+    session_key = "test:smoke:postgres_media"
     ctx = MagicMock()
-    ctx.session_key = "cli:1"
+    ctx.session_key = session_key
     tool_call = MagicMock()
     tool_call.name = "write_file"
     params = {"path": str(md)}  # уже перенаправленный в data_store/...
@@ -340,7 +346,7 @@ async def test_patcher_auto_attach_end_to_end(mock_db, tmp_path):
 
     # Теперь _assemble_outbound должен вернуть msg с auto-attached media
     msg_ctx = MagicMock()
-    msg_ctx.session_key = "cli:1"
+    msg_ctx.session_key = session_key
     msg_ctx.metadata = {}
     outbound = agent._assemble_outbound(msg_ctx, "x", "stop", False)
     assert outbound.media == [str(md)], (

@@ -555,7 +555,18 @@ class TestCompactContextToolRegistered:
     @pytest.fixture(autouse=True)
     def _isolate(self):
         import sys
-        to_drop = [k for k in sys.modules if k.startswith("workspace.tools.")]
+        # Только compact_context: ``patch_project_tools`` создаёт временные tool'ы
+        # через ``importlib.util.spec_from_file_location`` с произвольными именами
+        # модулей. Сбрасывание ВСЕХ ``workspace.tools.*`` ломает патчинг
+        # ``_current_session_key`` в ``test_history_search_tool.py``
+        # (test file кеширует ссылку на класс из импорта на момент коллекции;
+        # удаление модуля из sys.modules приводит к тому, что patch вешает атрибут
+        # на новый модуль, а class.method всё ещё резолвит имя в старом).
+        to_drop = [
+            k for k in sys.modules
+            if k == "workspace.tools.compact_context"
+            or k.startswith("workspace.tools.compact_context.")
+        ]
         for k in to_drop:
             del sys.modules[k]
         yield

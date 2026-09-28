@@ -12,11 +12,16 @@ from lib.services.runtime_patcher import RuntimePatcher
 
 @pytest.fixture(autouse=True)
 def _isolate_workspace_tools_modules():
-    """Очистить кеш ``sys.modules['workspace.tools.*']`` между тестами.
+    """Сбросить ВСЕ ``workspace.tools.*`` перед каждым тестом этого файла.
 
-    Без этого ранее загруженные tool-классы (из других тестов)
-    продолжают жить в ``Tool.__subclasses__()`` и попадают в candidates,
-    ломая изоляцию тестов.
+    Без этого ранее загруженные tool-классы (из других тестов) продолжают
+    жить в ``sys.modules['workspace.tools.*']`` и попадают в candidates
+    ``patch_project_tools``, ломая изоляцию тестов.
+
+    Это безопасно, потому что ``test_tools_project_loader.py`` идёт ПОСЛЕ
+    ``test_history_search_tool.py`` и ``test_context_compaction.py``
+    алфавитно — на момент его запуска те тесты уже прошли, и состояние
+    ``workspace.tools.*`` сброшено перед этим файлом.
     """
     to_drop = [k for k in sys.modules if k.startswith("workspace.tools.")]
     for k in to_drop:
@@ -430,12 +435,13 @@ class TestRealCompactContextToolLoads:
 
     @pytest.fixture(autouse=True)
     def _isolate(self):
+        # Только синтетические модули этого теста (см. fixture модуля выше
+        # — глобальный сброс ломает ``test_history_search_tool``).
         import sys
-        to_drop = [k for k in sys.modules if k.startswith("workspace.tools.")]
-        for k in to_drop:
-            del sys.modules[k]
+        before = {k for k in sys.modules if k.startswith("workspace.tools.")}
         yield
-        for k in to_drop:
+        after = {k for k in sys.modules if k.startswith("workspace.tools.")}
+        for k in after - before:
             sys.modules.pop(k, None)
 
     def test_real_compact_context_tool_loads(self):
