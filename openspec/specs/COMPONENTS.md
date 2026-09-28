@@ -11,12 +11,12 @@
 | Категория | Всего | Complete | Partial | Draft | Missing |
 |-----------|-------|----------|---------|-------|---------|
 | architecture | 2 | 0 | 2 | 0 | 0 |
-| runtime | 2 | 0 | 2 | 0 | 0 |
+| runtime | 3 | 0 | 3 | 0 | 0 |
 | configuration | 1 | 0 | 1 | 0 | 0 |
 | data | 2 | 0 | 2 | 0 | 0 |
 | documentation | 1 | 0 | 0 | 1 | 0 |
 | validation | 1 | 0 | 0 | 1 | 0 |
-| **Итого** | **9** | **0** | **7** | **2** | **0** |
+| **Итого** | **10** | **0** | **8** | **2** | **0** |
 
 ## Компоненты
 
@@ -33,6 +33,7 @@
 |-----------|------------|--------------|--------|
 | ApplicationContext | `lib/core/application_context.py:ApplicationContext` | [`runtime/context`](runtime/context/spec.md) | partial |
 | StartupSchemaValidation | `lib/services/schema_validation.py:SchemaValidationService` | [`runtime/startup-schema-validation`](runtime/startup-schema-validation/spec.md) | partial |
+| RuntimePatcher | `lib/services/runtime_patcher.py:RuntimePatcher` | [`runtime/runtime-patcher`](runtime/runtime-patcher/spec.md) | partial |
 
 ### Configuration
 

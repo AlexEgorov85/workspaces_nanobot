@@ -334,7 +334,8 @@ class TestCompactContextTool:
     """Тесты ``CompactContextTool`` (workspace/tools/compact_context.py).
 
     После переноса в ``workspace/tools/`` tool регистрируется через
-    ``RuntimePatcher.patch_project_tools``. Эти тесты проверяют
+    ``register_project_tools`` (см.
+    ``lib/services/project_tool_loader.py``). Эти тесты проверяют
     стандартный паттерн: ``enabled(ctx)`` / ``create(ctx)``.
     """
 
@@ -550,12 +551,12 @@ class TestCompactContextTool:
 
 
 class TestCompactContextToolRegistered:
-    """Проверка, что tool реально регистрируется через ``patch_project_tools``."""
+    """Проверка, что tool реально регистрируется через ``register_project_tools``."""
 
     @pytest.fixture(autouse=True)
     def _isolate(self):
         import sys
-        # Только compact_context: ``patch_project_tools`` создаёт временные tool'ы
+        # Только compact_context: ``register_project_tools`` создаёт временные tool'ы
         # через ``importlib.util.spec_from_file_location`` с произвольными именами
         # модулей. Сбрасывание ВСЕХ ``workspace.tools.*`` ломает патчинг
         # ``_current_session_key`` в ``test_history_search_tool.py``
@@ -573,9 +574,9 @@ class TestCompactContextToolRegistered:
         for k in to_drop:
             sys.modules.pop(k, None)
 
-    def test_patch_project_tools_registers_compact_context(self, tmp_path, monkeypatch):
+    def test_register_project_tools_registers_compact_context(self, tmp_path, monkeypatch):
         """Если ``gateway.compact.enabled=true`` — tool появляется в agent.tools."""
-        from lib.services.runtime_patcher import RuntimePatcher
+        from lib.services.project_tool_loader import register_project_tools
 
         # Минимальный workspace с компактным tool
         tools_dir = tmp_path / "tools"
@@ -622,14 +623,10 @@ class TestCompactContextToolRegistered:
         agent.workspace_scopes.sandbox_status = None
         agent.runtime_events = MagicMock()
 
-        ok, msg = RuntimePatcher().patch_project_tools(
+        result = register_project_tools(
             agent, tmp_path, settings=settings,
         )
-        assert ok is True, msg
-        registered = [
-            c.args[0].name for c in agent.tools.register.call_args_list
-        ]
-        assert "compact_context" in registered, msg
+        assert "compact_context" in result.registered, result.detail
 
 
 from pathlib import Path

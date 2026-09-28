@@ -168,10 +168,12 @@ def _run_patched(args: argparse.Namespace) -> None:
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)
 
-    # ctx.agent уже содержит проектные хуки (SessionFileRedirectHook и др.) —
-    # ApplicationContext.create() сделал auto-scan и пересобрал AgentLoop.
-    # Здесь только финальный семантический патч _assemble_outbound.
-    ctx.runtime_patcher.patch_assemble_outbound(ctx.agent, ctx.tool_audit_hook)
+    # ctx.agent уже содержит проектные хуки (SessionFileRedirectHook и др.) и
+    # все runtime-patches (``assemble_outbound`` и пр.) уже применены через
+    # ``ApplicationContext.create()`` → ``RuntimePatcher.apply_all()``.
+    # Никаких дополнительных ``patch_*`` вызовов здесь быть не должно —
+    # повторное применение приводит к double-wrap (см. openspec change
+    # ``runtime-patcher-composition-cleanup``).
 
     asyncio.create_task(_run_patched_repl(ctx, args))
 

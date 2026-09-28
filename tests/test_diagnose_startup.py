@@ -21,7 +21,6 @@ Runtime patches
 \u2713 assemble_outbound
 \u2713 async_save
 \u2713 subagent_logging
-\u2713 project_tools
 \u2713 document_text_threshold
 \u26a0 save_turn skipped: persist_threshold <= 0
 \u26a0 context_governor skipped: persist_threshold <= 0

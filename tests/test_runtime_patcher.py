@@ -1031,23 +1031,23 @@ class TestPatchReportClassification:
         assert report.failed == []
 
     def test_internal_failed_marker_reclassifies(self):
-        """``[INTERNAL_FAILED]`` от ``patch_project_tools`` → failed."""
+        """``[INTERNAL_FAILED]`` маркер → failed (не applied, не skipped)."""
         from lib.services.runtime_patcher import PatchReport
 
         report = PatchReport()
         RuntimePatcher._record(
             report,
-            "project_tools",
-            (True, "[INTERNAL_FAILED] 3 project tools registered: foo; 1 failed: Bar"),
+            "save_turn",
+            (True, "[INTERNAL_FAILED] 3 turns saved: foo; 1 failed: Bar"),
         )
         assert report.failed == [
             (
-                "project_tools",
-                "[INTERNAL_FAILED] 3 project tools registered: foo; 1 failed: Bar",
+                "save_turn",
+                "[INTERNAL_FAILED] 3 turns saved: foo; 1 failed: Bar",
             ),
         ]
         assert report.skipped == []
-        assert "project_tools" not in report.applied
+        assert "save_turn" not in report.applied
 
     def test_details_recorded_for_every_state(self):
         from lib.services.runtime_patcher import PatchReport
@@ -1098,28 +1098,79 @@ class TestPatchReportRender:
 
 
 class TestPatchSpecs:
-    """Каждый патч из ``apply_all`` должен иметь ``PatchSpec``."""
+    """Каждый патч из ``apply_all`` должен иметь ``PatchSpec``,
+    три множества (apply_all AST / _PATCH_SPECS / canonical) —
+    попарно равны (финально — 12 patches)."""
 
-    def test_all_patches_have_specs(self):
+    def _extract_apply_all_names(self) -> set[str]:
+        """AST-извлечение имён patches из тела ``RuntimePatcher.apply_all``.
+
+        Берём все строки второго позиционного аргумента
+        ``self._record(report, "<name>", ...)``. Это даёт фактический
+        набор имён, которые ``apply_all`` пишет в ``PatchReport``.
+        """
+        import ast
+        import inspect
+        import textwrap
         from lib.services.runtime_patcher import RuntimePatcher
 
-        specs = RuntimePatcher.patch_specs()
-        expected = {
-            "context_governor", "save_turn", "exec_limits", "exec_timeout_cap",
-            "tool_limits", "assemble_outbound",
-            # context_bridge_seed удалён в nanobot 0.3.5; seed делает
-            # RuntimeEventsSubscriber через bus.subscribe.
-            "async_save", "subagent_logging", "project_tools",
-            "session_content_cleanup", "document_text_threshold",
-        }
-        # Допускаются DEPRECATED-метки (compact_*), но базовый набор
-        # должен совпадать. Проверяем через >= для совместимости с
-        # другими удалёнными patches (compact_* удалены в 0.3.5).
-        actual = set(specs)
-        for key in expected:
-            assert key in actual, f"отсутствует {key!r} в patch_specs()"
-        # context_bridge_seed не должен быть в actual.
-        assert "context_bridge_seed" not in actual
+        source = textwrap.dedent(inspect.getsource(RuntimePatcher.apply_all))
+        tree = ast.parse(source)
+        names: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            # Цель — атрибут ``self._record``
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr != "_record":
+                continue
+            if len(node.args) < 2:
+                continue
+            second = node.args[1]
+            if not isinstance(second, ast.Constant) or not isinstance(second.value, str):
+                continue
+            names.add(second.value)
+        return names
+
+    def test_inventory_is_exact(self):
+        """Main invariant: три множества попарно равны."""
+        from lib.services.runtime_patcher import RuntimePatcher
+        from lib.services.runtime_inventory import canonical_runtime_patches
+
+        apply_all_names = self._extract_apply_all_names()
+        patch_specs_names = set(RuntimePatcher.patch_specs())
+        canonical_names = {p.name for p in canonical_runtime_patches()}
+
+        assert apply_all_names == patch_specs_names, (
+            f"apply_all != _PATCH_SPECS: "
+            f"only in apply_all={apply_all_names - patch_specs_names}, "
+            f"only in _PATCH_SPECS={patch_specs_names - apply_all_names}",
+        )
+        assert apply_all_names == canonical_names, (
+            f"apply_all != canonical: "
+            f"only in apply_all={apply_all_names - canonical_names}, "
+            f"only in canonical={canonical_names - apply_all_names}",
+        )
+        assert patch_specs_names == canonical_names, (
+            f"_PATCH_SPECS != canonical: "
+            f"only in _PATCH_SPECS={patch_specs_names - canonical_names}, "
+            f"only in canonical={canonical_names - patch_specs_names}",
+        )
+
+    def test_inventory_size_is_12(self):
+        """Sanity check для этой change: ровно 12 patches во всех трёх множествах.
+
+        Этот тест не защищает архитектурный контракт (его защищает
+        ``test_inventory_is_exact``); он фиксирует текущее количество
+        patches и обновляется отдельно при добавлении legitimate patch'а.
+        """
+        from lib.services.runtime_patcher import RuntimePatcher
+        from lib.services.runtime_inventory import canonical_runtime_patches
+
+        apply_all_names = self._extract_apply_all_names()
+        assert len(apply_all_names) == 12
+        assert len(RuntimePatcher.patch_specs()) == 12
+        assert len(canonical_runtime_patches()) == 12
 
     def test_specs_have_required_fields(self):
         from lib.services.runtime_patcher import RuntimePatcher

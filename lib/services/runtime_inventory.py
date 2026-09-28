@@ -13,8 +13,9 @@ Single source of truth для ожидаемых хуков, project tools и ru
 
   * один источник правды — все три потребителя (startup-логирование,
     diagnose-скрипт, тесты) видят одно и то же;
-  * ``PatchSpec.required`` нет в ``RuntimePatcher`` (есть только ``risk``)
-    — здесь ``required`` определяется явно по criticality;
+  * ``PatchSpec.required`` определён в ``RuntimePatcher._PATCH_SPECS``
+    (см. ``lib/services/runtime_patcher.py``) и спроецирован здесь без
+    дополнительного hardcoded set'а (см. ниже);
   * динамическое сканирование ``workspace/hooks/*.py`` / ``workspace/tools/*.py``
     делается здесь же, чтобы runtime-инвентарь не разъезжался с реальным
     диском.
@@ -23,9 +24,8 @@ Single source of truth для ожидаемых хуков, project tools и ru
 
   * добавить новый hook → ``canonical_plugin_hooks()``;
   * добавить новый project tool → ``canonical_project_tools()``;
-  * добавить новый runtime patch → ``RuntimePatcher.patch_specs()`` (там
-    же ``required`` через ``high_risk_required`` ниже, если патч ломает
-    runtime при отказе).
+  * добавить новый runtime patch → ``RuntimePatcher.patch_specs()``
+    (там же ``required`` в PatchSpec).
 """
 from __future__ import annotations
 
@@ -162,23 +162,21 @@ def canonical_project_tools() -> list[ToolSpec]:
 def canonical_runtime_patches() -> list[RuntimePatchSpec]:
     """Все runtime-патчи из ``RuntimePatcher.patch_specs()``.
 
-    ``required`` = если патч fail'ит, runtime ломается (subagent не
-    пишется в БД, tool-результаты не обрезаются, и т.п.). Список
-    критичных имён захардкожен (нет поля ``required`` в ``PatchSpec``):
-    критичность определяется по реальному fail-impact, а не по ``risk``.
+    ``required`` берётся напрямую из ``PatchSpec.required`` —
+    единственный источник истины для criticality. Семантика:
+    ``required=True`` — failed/missing патч подсвечивается в
+    startup-баннере (``_emit_patch_inventory_banner``) и в
+    ``diff_runtime_patches`` как ``missing_required`` /
+    ``failed_required``. Это **только** metadata для diagnostics;
+    control flow НЕ зависит от ``required`` (failed-патч логируется
+    warning'ом и ``ApplicationContext.create()`` продолжает работу).
     """
-    high_risk_required = frozenset({
-        "assemble_outbound",
-        "subagent_logging",
-        "save_turn",
-        "context_governor",
-    })
     from lib.services.runtime_patcher import RuntimePatcher
 
     return [
         RuntimePatchSpec(
             name=name,
-            required=name in high_risk_required,
+            required=spec.required,
             risk=spec.risk,
             purpose=spec.purpose,
         )
@@ -327,9 +325,10 @@ def diff_runtime_patches(
 
 
 def parse_project_tools_detail(detail: str) -> dict[str, list[str]]:
-    """Распарсить ``detail`` патча ``project_tools`` в structured-формат.
+    """Распарсить ``detail`` из ``ProjectToolsLoadResult.detail`` в structured-формат.
 
-    Формат ``detail`` (см. ``RuntimePatcher.patch_project_tools``):
+    Формат ``detail`` (см. ``lib/services/project_tool_loader.py::
+    register_project_tools``):
         ``[INTERNAL_FAILED] N project tools registered: a, b; M disabled by config: c;
         K already registered: d; J failed: e``
 

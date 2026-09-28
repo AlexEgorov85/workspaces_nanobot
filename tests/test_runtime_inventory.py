@@ -58,6 +58,91 @@ class TestCanonical:
             assert required_name in names, required_name
 
 
+class TestPatchSpecRequiredProjection:
+    """``PatchSpec.required`` — единственный источник истины для criticality.
+
+    Семантический тест (не module-attribute): подменяем
+    ``RuntimePatcher.patch_specs`` fake-реализацией и убеждаемся,
+    что ``canonical_runtime_patches()`` проецирует ``required``
+    именно из spec.required, без второго hardcoded set'а.
+    """
+
+    def test_required_projects_from_patch_spec(self, monkeypatch) -> None:
+        from lib.services import runtime_inventory
+        from lib.services import runtime_patcher
+        from lib.services.runtime_patcher import PatchSpec
+
+        def fake_patch_specs():
+            return {
+                "X_high_required": PatchSpec(
+                    name="X_high_required",
+                    purpose="",
+                    nanobot_target="",
+                    reason="",
+                    alternatives_checked="",
+                    risk="high",
+                    required=True,
+                ),
+                "Y_high_optional": PatchSpec(
+                    name="Y_high_optional",
+                    purpose="",
+                    nanobot_target="",
+                    reason="",
+                    alternatives_checked="",
+                    risk="high",
+                    required=False,
+                ),
+                "Z_low_required": PatchSpec(
+                    name="Z_low_required",
+                    purpose="",
+                    nanobot_target="",
+                    reason="",
+                    alternatives_checked="",
+                    risk="low",
+                    required=True,
+                ),
+            }
+
+        monkeypatch.setattr(
+            runtime_patcher.RuntimePatcher, "patch_specs",
+            staticmethod(fake_patch_specs),
+        )
+
+        canonical = {
+            p.name: p for p in runtime_inventory.canonical_runtime_patches()
+        }
+        assert canonical["X_high_required"].required is True
+        assert canonical["Y_high_optional"].required is False
+        assert canonical["Z_low_required"].required is True
+
+    def test_critical_patches_marked_required(self) -> None:
+        """Только 4 патча с ``required=True``: ``assemble_outbound``,
+        ``save_turn``, ``subagent_logging``, ``context_governor``.
+
+        Защита от ложного «risk=high → required=true» автоприведения.
+        """
+        from lib.services.runtime_inventory import canonical_runtime_patches
+
+        required_names = {
+            p.name for p in canonical_runtime_patches() if p.required
+        }
+        assert required_names == {
+            "assemble_outbound",
+            "save_turn",
+            "subagent_logging",
+            "context_governor",
+        }
+
+    def test_no_hardcoded_required_set(self) -> None:
+        """В ``runtime_inventory`` нет локального ``high_risk_required``."""
+        from lib.services import runtime_inventory
+
+        assert not hasattr(runtime_inventory, "high_risk_required"), (
+            "high_risk_required удалён как hardcoded источник истины; "
+            "используйте PatchSpec.required"
+        )
+
+
 class TestDiffHooks:
     def test_actual_matches_canonical(self) -> None:
         from lib.services.runtime_inventory import diff_hooks
@@ -179,7 +264,10 @@ class TestDiffRuntimePatches:
             for p in canonical_runtime_patches()
             if p.required
         }
-        applied = ["assemble_outbound", "async_save", "subagent_logging", "project_tools"]
+        # ``project_tools`` больше не в ``canonical_runtime_patches()``
+        # (после change runtime-patcher-composition-cleanup) —
+        # регистрация переехала в ProjectToolLoader.
+        applied = ["assemble_outbound", "async_save", "subagent_logging"]
         skipped = [
             (p, "x") for p in required if p not in applied
         ]

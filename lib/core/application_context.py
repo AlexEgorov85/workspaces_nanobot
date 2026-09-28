@@ -356,7 +356,23 @@ class ApplicationContext:
                 [name for name, _ in patch_report.failed],
             )
         _emit_patch_inventory_banner(patch_report)
-        _emit_project_tools_inventory_banner(patch_report)
+
+        # 7a. Project tools registration — независимый stage composition
+        # root'а (см. openspec/changes/runtime-patcher-composition-cleanup,
+        # design Decision 3). ``register_project_tools`` НЕ вызывается из
+        # ``RuntimePatcher.apply_all()`` — это отдельный вызов, source
+        # of truth для ``_emit_project_tools_inventory_banner``.
+        from lib.services.project_tool_loader import register_project_tools
+
+        project_tools_result = register_project_tools(
+            agent=ctx.agent,
+            workspace_dir=ctx.workspace_dir,
+            settings=ctx.settings,
+            cache_store=ctx.cache_store,
+            db_logging_service=ctx.db_logging_service,
+        )
+        ctx.project_tools_result = project_tools_result
+        _emit_project_tools_inventory_banner(project_tools_result)
 
         # 8. Помощники
         ctx.transcription_service = _make_transcription(ctx.config)
@@ -747,15 +763,20 @@ def _emit_patch_inventory_banner(patch_report: Any) -> None:
         )
 
 
-def _emit_project_tools_inventory_banner(patch_report: Any) -> None:
+def _emit_project_tools_inventory_banner(project_tools_result: Any) -> None:
     """Промпт-сводка по project tools через ``runtime_inventory``.
 
     Печатает красный блок, если required tool не зарегистрировался
     (missing или failed); жёлтый — если unexpected tool или failed
-    optional. Срабатывает после ``apply_all`` (см. ``patch_project_tools``
-    detail-формат).
+    optional. Срабатывает после ``register_project_tools(...)`` —
+    ``project_tools_result.detail`` несёт тот же формат, что был
+    раньше в ``patch_report.details["project_tools"]`` (см.
+    ``lib/services/project_tool_loader.py`` и
+    ``lib/services/runtime_inventory.py::parse_project_tools_detail``).
     """
-    detail = patch_report.details.get("project_tools") if patch_report else None
+    if project_tools_result is None:
+        return
+    detail = getattr(project_tools_result, "detail", None)
     if not detail:
         return
 

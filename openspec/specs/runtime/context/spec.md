@@ -72,12 +72,36 @@ ApplicationContext предоставляет:
 
 ### Requirement: Совместимость с upstream nanobot
 
-`ApplicationContext.start()` MUST ДОЛЖЕН вызывать `RuntimePatcher.apply_all` после инициализации сервисов и до старта каналов; если `apply_all` оставляет непустой `report.failed`, система MUST ДОЛЖНА логировать warning, но MUST NOT НЕ ДОЛЖНА прерывать старт (каждый `failed`-патч явно помечен `DEPRECATED` и не критичен для прод).
+`ApplicationContext.create()` MUST вызывать `RuntimePatcher.apply_all` после инициализации сервисов и до того, как `ApplicationContext` отдаёт `ctx.agent` внешним потребителям (gateway, CLI, streamlit). Регистрация project tools (`lib.services.project_tool_loader.register_project_tools`) вызывается отдельным шагом сразу после `apply_all` в той же `create()` — это **независимый** этап composition root'а (см. spec `runtime/runtime-patcher`).
+
+`ApplicationContext.start()` SHALL NOT вызывать `RuntimePatcher.apply_all()` или отдельные `patch_*` методы `RuntimePatcher`, входящие в `apply_all`. Существующий lifecycle `start()` (template overrides, `_start_db_pool()`, `_validate_runtime_schema()`, старт `db_logging_service`, `sync_service`, `session_cold_sync_service`, `RuntimeEventsSubscriber`) сохраняется без изменения. Граница фиксируется только в части runtime patches: `start()` их не применяет, ни прямо, ни косвенно.
+
+**Семантика failed-патчей и `PatchSpec.required`:**
+
+`PatchSpec.required: bool` — это metadata для diagnostics (startup-баннер, `diff_runtime_patches()`, `diagnose_startup.py`), а **НЕ** триггер прерывания startup. Если `apply_all` оставляет непустой `report.failed`, система MUST логировать warning со всеми именами failed-патчей (включая те, у которых `PatchSpec.required=True`, — для оператора), и MUST NOT прерывать startup. Это поведение реализовано в `lib/core/application_context.py:352-357` (`logger.warning(... %d runtime patch(es) failed ...)`).
 
 #### Scenario: Апгрейд upstream-nanobot без регрессии
 
 - **WHEN** версия `nanobot-ai` в `requirements.txt` меняется
 - **THEN** `pytest tests/contract/` MUST ДОЛЖЕН запускаться первым; если есть падения, они MUST ДОЛЖНЫ быть исправлены или явно помечены `xfail` до merge upgrade-изменения
+
+#### Scenario: `apply_all` вызывается ровно один раз и только в `create()`
+
+- **WHEN** `ApplicationContext.create()` завершается успешно
+- **THEN** `RuntimePatcher.apply_all` MUST быть вызван ровно один раз, и `ctx.agent._assemble_outbound` MUST содержать ровно один project wrapper layer.
+- **AND** `ApplicationContext.start()` MUST NOT вызывать `RuntimePatcher.apply_all` ни прямо, ни через отдельные `patch_*` методы `RuntimePatcher`.
+- **AND** внешние entrypoint'ы (`cli_agent.py`, `gateway.py`, `streamlit_app.py`) MUST NOT вызывать `RuntimePatcher.apply_all` или отдельные `patch_*` методы, входящие в `apply_all`, после возврата из `create()`.
+
+#### Scenario: Failed-патч с `required=True` логируется, но не прерывает startup
+
+- **WHEN** `apply_all` оставляет `report.failed` и один из failed-патчей имеет `PatchSpec.required=True` (например, `assemble_outbound` сломался из-за изменения сигнатуры upstream-метода)
+- **THEN** система MUST логировать `logger.warning(...)` с именем этого патча и общим списком failed-патчей (для оператора).
+- **AND** система MUST NOT выбрасывать исключение, MUST NOT прерывать startup, MUST NOT вызывать `sys.exit`.
+
+#### Scenario: `required=True` НЕ означает startup-abort
+
+- **WHEN** разработчик читает `PatchSpec.required` и пытается добавить raise/abort на failed required-патче
+- **THEN** тест должен явно проверять, что `ApplicationContext.create()` НЕ выбрасывает исключение при failed `required=True`-патче, и startup продолжается с warning-логом.
 
 ### Requirement: ContextCompactionService через upstream EventSink
 

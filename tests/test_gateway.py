@@ -226,21 +226,29 @@ class TestMain:
         # ``--profile=test`` нужен entrypoint'у (Phase B сделал его
         # обязательным).
         #
-        # Также мокаем ``RuntimePatcher.apply_all`` — он пытается
-        # patch'ить ``workspace/tools/*.py``, которые импортируют
-        # ``nanobot.agent.tools.base`` (не существует в mock setup);
-        # этот тест проверяет только ``GatewayRunner.run_forever``,
+        # Также мокаем ``RuntimePatcher.apply_all`` и
+        # ``register_project_tools`` — они пытаются patch'ить upstream
+        # API и загружать ``workspace/tools/*.py``, которые импортируют
+        # ``nanobot.agent.tools.base`` (не существует в mock setup).
+        # Этот тест проверяет только ``GatewayRunner.run_forever``,
         # а не логику runtime patching.
         from lib.services.runtime_patcher import RuntimePatcher
-        # ``PatchReport.details`` должен иметь ``"project_tools"`` либо отсутствовать
-        # (см. ``_emit_project_tools_inventory_banner``), иначе ``re.search``
-        # падает на MagicMock.
+        from lib.services.project_tool_loader import ProjectToolsLoadResult
+        # ``PatchReport.details`` пустой (никаких runtime-patches) и
+        # ``ProjectToolsLoadResult`` с пустым detail — оба компонента
+        # скипают свои баннеры, чтобы ``_emit_*_inventory_banner`` не
+        # пытались распарсить MagicMock'и.
         fake_report = MagicMock()
         fake_report.details = {}
         fake_report.failed = []
+        fake_project_tools_result = ProjectToolsLoadResult(detail="")
         with patch("sys.argv", ["gateway.py", "--profile=test"]), \
              patch("lib.lifecycle.gateway_runner.GatewayRunner") as MockRunner, \
-             patch.object(RuntimePatcher, "apply_all", return_value=fake_report):
+             patch.object(RuntimePatcher, "apply_all", return_value=fake_report), \
+             patch(
+                 "lib.services.project_tool_loader.register_project_tools",
+                 return_value=fake_project_tools_result,
+             ):
             MockRunner.return_value.run_forever = MagicMock()
             from gateway import main
 

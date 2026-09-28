@@ -11,6 +11,12 @@
      ``DbLoggingService`` и ``session_manager`` (SubagentManager использует
      внутренний ``_SubagentHook``, который иначе пишет только debug в loguru).
 
+Регистрация кастомных tool'ов из ``workspace/tools/*.py`` (раньше —
+``patch_project_tools``) вынесена в отдельный loader:
+``lib/services/project_tool_loader.py::register_project_tools``;
+вызывается из ``ApplicationContext.create()`` сразу после
+``apply_all()``. ``RuntimePatcher`` НЕ зависит от loader'а.
+
 Каждый патч — в try/except: если API nanobot изменился, патч не применяется,
 процесс не падает, причина попадает в ``PatchReport``.
 """
@@ -225,6 +231,15 @@ class PatchSpec:
         risk: уровень риска при апгрейде (``low``/``medium``/``high``).
             ``high`` — патч трогает приватный метод, ломается при rename.
         nanobot_version: версия nanobot, на которой патч валидирован.
+        required: критичность для diagnostics (НЕ для startup abort).
+            ``True`` — failed/missing patch этого имени подсвечивается
+            в startup-баннере через ``_emit_patch_inventory_banner`` и
+            в ``diff_runtime_patches`` как ``missing_required`` /
+            ``failed_required``. Это **только** metadata — control flow
+            НЕ зависит от ``required``: failed-патч (включая
+            ``required=True``) логируется warning'ом и
+            ``ApplicationContext.create()`` продолжает работу.
+            ``False`` (по умолчанию) — opt-in фича, skip по конфигу.
     """
 
     name: str
@@ -234,6 +249,7 @@ class PatchSpec:
     alternatives_checked: str
     risk: str
     nanobot_version: str = "0.3.0"
+    required: bool = False
 
 
 _PATCH_SPECS: dict[str, PatchSpec] = {
@@ -246,6 +262,7 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
         reason="nanobot режет вывод инструментов по умолчанию и теряет данные",
         alternatives_checked="config-ключи не покрывают кастомный persist-каталог",
         risk="medium",
+        required=True,
     ),
     "save_turn": PatchSpec(
         name="save_turn",
@@ -256,6 +273,7 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
                "extension point для кастомного persist",
         alternatives_checked="public hook 'before/after_save_turn' отсутствует",
         risk="high",
+        required=True,
     ),
     "exec_limits": PatchSpec(
         name="exec_limits",
@@ -308,6 +326,7 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
                              "OutboundMessage; метрика context_window "
                              "вынесена в подписку TurnRuntimeAdmitted (D7)",
         risk="high",
+        required=True,
     ),
     "async_save": PatchSpec(
         name="async_save",
@@ -329,71 +348,34 @@ _PATCH_SPECS: dict[str, PatchSpec] = {
         alternatives_checked="AgentHook — не передаётся в AgentRunner.run() "
                              "subagent'а",
         risk="high",
+        required=True,
     ),
-"project_tools": PatchSpec(
-        name="project_tools",
-        purpose="auto-discover + регистрация пользовательских tool'ов из "
-                "workspace/tools/*.py в AgentLoop.tools; DI-расширения "
-                "(_agent_ref, _settings_ref, _cache_store_ref, "
-                "_db_logging_service) — через setattr после конструктора "
-                "(ToolContext frozen=False в 0.3.5)",
-        nanobot_target="nanobot.agent.tools.base.Tool, ToolRegistry, "
-                       "ToolContext, RuntimeControl",
-        reason="nanobot не имеет механизма подключения пользовательских "
-               "tool-каталогов; сигнатура ToolContext обновилась в 0.3.5: "
-               "file_state_store сохранён, runtime_events удалён, "
-               "добавлен runtime_control",
-        alternatives_checked="ToolLoader.discover — ищет только во встроенных "
-                             "пакетах",
-        risk="low",
+    "turn_delivery_fail": PatchSpec(
+        name="turn_delivery_fail",
+        purpose="конфигурируемый fallback-ответ при internal-ошибке в "
+                "AgentLoop._process_message (подмена захардкоженного "
+                "upstream-литерала \"Sorry, I encountered an error.\")",
+        nanobot_target="nanobot.agent.turn_delivery.TurnDelivery.fail",
+        reason="public extension point отсутствует; патч подменяет метод "
+               "класса обёрткой, читает gateway.error_messages.internal_error, "
+               "подавляет двойной outbound через per-instance _OutboundSilencer "
+               "и пишет event_type=\"turn_failed\" в agent_gateway_logs",
+        alternatives_checked="AgentHook.after_run — слишком поздно и не видит "
+                             "OutboundMessage от TurnDelivery.fail; "
+                             "EventSink не публикуется upstream-методом",
+        risk="medium",
     ),
-    "compact_tracking": PatchSpec(
-        name="compact_tracking",
-        purpose="DEPRECATED в nanobot 0.3.5: метод "
-                "Consolidator.maybe_consolidate_by_tokens удалён; upstream "
-                "AutoCompact.idle-ttl=0 уже short-circuit. Перенесено в "
-                "CompactionEventSubscriber (см. design D1).",
-        nanobot_target="nanobot.agent.autocompact.AutoCompact._archive, "
-                       "nanobot.agent.memory.Consolidator"
-                       ".maybe_consolidate_by_tokens",
-        reason="DEPRECATED: оба метода обёрток заменены upstream-событием "
-               "ContextCompactionEvent. Канал видит "
-               "OutboundMessage.event и зовёт CompactionEventSubscriber "
-               "(см. openspec/changes/nanobot-035-upgrade/design.md).",
-        alternatives_checked="AgentHook.on_compact — не существует в nanobot "
-                             "0.3.5; bus.subscribe не получит события "
-                             "из publish_event (channel queue)",
+    "session_dir_watch": PatchSpec(
+        name="session_dir_watch",
+        purpose="диагностическое логирование FileNotFoundError вокруг "
+                "agent.sessions.save (file появился и исчез между созданием "
+                "и обращением); гейт gateway.runtime_diagnostics.session_dir_watch",
+        nanobot_target="nanobot.agent.loop.AgentLoop.sessions.save",
+        reason="nanobot падает FileNotFoundError без traceback-контекста; "
+               "минимальный wrapper собирает filename + session_key",
+        alternatives_checked="public hook отсутствует; try/except в каждом "
+                             "channel — дубль",
         risk="low",
-        nanobot_version="0.3.0",
-    ),
-    "compact_command": PatchSpec(
-        name="compact_command",
-        purpose="DEPRECATED в nanobot 0.3.5: upstream 'cmd_compact' "
-                "(nanobot/command/builtin.py:348) уже делает нужное "
-                "через loop.consolidator.compact_idle_session. Наш "
-                "/compact не нужен — notify_session_compacted остаётся "
-                "и зовётся из CompactionEventSubscriber (D1).",
-        nanobot_target="nanobot.command.router.CommandRouter",
-        reason="DEPRECATED: upstream builtin /compact покрывает сценарий; "
-               "наш handler дублировал функционал.",
-        alternatives_checked="Tool 'compact' — LLM решает вызывать или нет; "
-                             "CompactionEventSubscriber (см. design.md §D1)",
-        risk="low",
-        nanobot_version="0.3.0",
-    ),
-    "idle_guard": PatchSpec(
-        name="idle_guard",
-        purpose="DEPRECATED в nanobot 0.3.5: upstream '_is_expired' "
-                "(autocompact.py:39-55) уже short-circuit при _ttl<=0; "
-                "ttl=0 в config.json проекта делает upstream-ветку "
-                "бесполезной сама по себе.",
-        nanobot_target="nanobot.agent.autocompact.AutoCompact.check_expired",
-        reason="DEPRECATED: dead code в nanobot 0.3.5.",
-        alternatives_checked="config 'idleCompactAfterMinutes: 0' — upstream "
-                             "возвращает False из _is_expired; патч больше "
-                             "не нужен",
-        risk="low",
-        nanobot_version="0.3.0",
     ),
     "session_content_cleanup": PatchSpec(
         name="session_content_cleanup",
@@ -432,10 +414,6 @@ _SKIPPABLE_REASONS: frozenset[str] = frozenset({
     "exec_max_output_chars <= 0",
     "read_file_max_chars <= 0",
     "db_logging_service is None",
-    "gateway.compact.enabled=false",
-    "gateway.compact.notify_in_history=false",
-    "workspace/tools not found — skip",
-    "no project tools found",
     "agent.auto_compact is missing",
     "agent.commands is missing",
     "auto_compact is missing",
@@ -458,8 +436,6 @@ def _classify_skip(detail: str) -> bool:
     if detail in _SKIPPABLE_REASONS:
         return True
     if detail.startswith("idle compact enabled"):
-        return True
-    if detail.startswith("no project tools found"):
         return True
     if detail.startswith("[INTERNAL_FAILED]"):
         return False
@@ -623,9 +599,9 @@ class RuntimePatcher:
                 ``None`` — патч пропускается).
             session_manager: ``SessionManager``/``PGSessionManager`` — для
                 персиста истории подагентов (может быть ``None``).
-            cache_store: ``CacheProvider`` (для DI в generic tools через
-                ``patch_project_tools``; ``None`` — патч пропускает DI,
-                tool'ы остаются со своими fallback'ами).
+            cache_store: ``CacheProvider`` (резерв для будущих патчей;
+                сейчас не используется — DI project tools переехал в
+                ``lib/services/project_tool_loader.py``).
 
         Returns:
             ``PatchReport`` со списками ``applied`` / ``skipped`` (с причиной).
@@ -647,9 +623,6 @@ class RuntimePatcher:
             agent, workspace_dir))
         self._record(report, "subagent_logging", self.patch_subagent_logging(
             db_logging_service, session_manager, bus=bus))
-        self._record(report, "project_tools", self.patch_project_tools(
-            agent, workspace_dir, settings=settings,
-            cache_store=cache_store, db_logging_service=db_logging_service))
         self._record(report, "document_text_threshold", self.patch_document_text_threshold(settings))
         self._record(report, "session_content_cleanup", self.patch_session_content_cleanup())
         return report
@@ -672,8 +645,8 @@ class RuntimePatcher:
         ``[INTERNAL_FAILED]``); ``False`` → ``skipped`` или ``failed``
         в зависимости от причины (``_classify_skip``).
         Маркер ``[INTERNAL_FAILED]`` в detail переклассифицирует
-        успешный патч (например, ``patch_project_tools`` с частичным
-        успехом) в ``failed``.
+        успешный патч с частичным успехом (один из его внутренних
+        шагов упал) в ``failed``.
         """
         ok, detail = result
         report.details[name] = detail
@@ -687,10 +660,11 @@ class RuntimePatcher:
 
     @staticmethod
     def _format_workspace_hint(workspace_dir: Any) -> str:
-        """Краткая подсказка с путём до workspace/tools в лог-сообщении.
+        """Краткая подсказка с путём до workspace в лог-сообщении.
 
-        Используется в логах ``patch_project_tools``, чтобы оператор сразу
-        видел, откуда грузились tool'ы. Если пути нет — пустая строка.
+        Используется в логах отдельных патчей (``patch_session_dir_watch``
+        и др.), чтобы оператор сразу видел, к какому workspace они
+        относятся. Если пути нет — пустая строка.
         """
         if not workspace_dir:
             return ""
@@ -2270,243 +2244,6 @@ class RuntimePatcher:
         except Exception as exc:
             return False, f"patch failed: {exc}"
         return True, "SubagentManager._SubagentHook patched for DB logging"
-
-    # ------------------------------------------------------------------
-    # Патч 4: auto-discover и регистрация пользовательских tool'ов
-    #         из workspace/tools/*.py
-    # ------------------------------------------------------------------
-
-    def patch_project_tools(
-        self, agent: Any, workspace_dir: Any,
-        *, settings: Any = None,
-        cache_store: Any = None,
-        db_logging_service: Any = None,
-    ) -> tuple[bool, str]:
-        """Зарегистрировать кастомные tool'ы из ``workspace/tools/*.py``.
-
-        Использует встроенные механизмы nanobot:
-
-          * ``pkgutil.iter_modules`` по ``workspace/tools/`` (как
-            ``ToolLoader.discover`` в ``nanobot/agent/tools/loader.py:37``);
-          * ``Tool.enabled(ctx)`` / ``Tool.create(ctx)`` (как
-            ``ToolLoader.load`` в ``loader.py:86-118``);
-          * ``ToolRegistry.register`` (см.
-            ``nanobot/agent/tools/registry.py:30``).
-
-        ``ToolContext`` собирается из полей ``AgentLoop`` тем же способом,
-        что в ``AgentLoop._register_default_tools`` (``loop.py:597-630``).
-        В вашей версии nanobot ``ToolContext.__init__`` не принимает
-        ``metadata``, поэтому дополнительные DI-ссылки (``agent``,
-        ``settings``) пробрасываются через ``setattr``:
-
-          * ``ctx._agent_ref`` — ``AgentLoop`` (для tool'ов, которым нужен
-            ``agent.consolidator`` и т.п.);
-          * ``ctx._settings_ref`` — ``SETTINGS`` (для чтения ``gateway.*``
-            секций, не дублированных в ``config.tools.*``).
-
-        Конфликты имён (например, если свой tool назван ``exec``) не
-        затирают встроенные — те, что уже в ``agent.tools``, пропускаются.
-
-        Args:
-            agent: ``AgentLoop``.
-            workspace_dir: ``Path`` — корень workspace, в нём лежит
-                ``tools/`` с модулями кастомных tool'ов.
-            settings: ``SETTINGS`` (опционально) — для ``ctx._settings_ref``.
-                Если ``None``, tool'ы, которым нужен settings, получат
-                ``None`` и сами решают, как с этим жить.
-
-        Returns:
-            ``(True, "<N> tools registered: <names>")`` или
-            ``(False, "<причина>")``.
-        """
-        if agent is None:
-            return False, "agent is None"
-        try:
-            import importlib.util
-            import pkgutil
-            import sys as _sys
-            from pathlib import Path as _P
-
-            tools_dir = _P(workspace_dir) / "tools"
-            if not tools_dir.is_dir():
-                return True, "workspace/tools not found — skip"
-
-            imported: list[str] = []
-            for _imp, mod_name, _ispkg in pkgutil.iter_modules([str(tools_dir)]):
-                if mod_name.startswith("_"):
-                    continue
-                full = f"workspace.tools.{mod_name}"
-                if full in _sys.modules:
-                    continue
-                try:
-                    file_path = tools_dir / f"{mod_name}.py"
-                    spec = importlib.util.spec_from_file_location(
-                        full, str(file_path)
-                    )
-                    if spec is None or spec.loader is None:
-                        logger.warning(
-                            "Failed to build spec for {}", full
-                        )
-                        continue
-                    module = importlib.util.module_from_spec(spec)
-                    _sys.modules[full] = module
-                    try:
-                        spec.loader.exec_module(module)
-                        imported.append(full)
-                    except Exception:
-                        _sys.modules.pop(full, None)
-                        raise
-                except Exception:
-                    logger.exception("Failed to import {}", full)
-
-            from nanobot.agent.tools.base import Tool as _T
-
-            candidates: list[type] = []
-            seen_ids: set[int] = set()
-            for mod_name in list(_sys.modules):
-                if not mod_name.startswith("workspace.tools."):
-                    continue
-                module = _sys.modules.get(mod_name)
-                if module is None:
-                    continue
-                for attr_name in dir(module):
-                    cls = getattr(module, attr_name, None)
-                    if not (isinstance(cls, type) and issubclass(cls, _T)):
-                        continue
-                    if cls is _T:
-                        continue
-                    if getattr(cls, "__abstractmethods__", None):
-                        continue
-                    if id(cls) in seen_ids:
-                        continue
-                    seen_ids.add(id(cls))
-                    candidates.append(cls)
-
-            if not candidates:
-                return True, (
-                    "no project tools found" + (
-                        f" (imported: {', '.join(imported)})" if imported else ""
-                    )
-                )
-
-            from nanobot.agent.tools.context import ToolContext
-
-            ctx = ToolContext(
-                config=getattr(agent, "tools_config", None),
-                workspace=str(getattr(agent, "workspace", workspace_dir)),
-                bus=getattr(agent, "bus", None),
-                subagent_manager=getattr(agent, "subagents", None),
-                cron_service=getattr(agent, "cron_service", None),
-                exec_session_manager=getattr(agent, "_exec_session_manager", None),
-                sessions=getattr(agent, "sessions", None),
-                file_state_store=getattr(agent, "file_states", None),
-                provider_snapshot_loader=getattr(
-                    agent, "provider_snapshot_loader", None
-                ),
-                image_generation_provider_configs=getattr(
-                    agent, "_image_generation_provider_configs", None
-                ),
-                timezone=getattr(
-                    getattr(agent, "context", None), "timezone", "UTC"
-                ) or "UTC",
-                workspace_sandbox=getattr(
-                    getattr(agent, "workspace_scopes", None),
-                    "sandbox_status", None
-                ),
-                runtime_control=getattr(agent, "_runtime_control", None),
-            )
-            # ``agent`` не входит в ToolContext по контракту nanobot — кладём
-            # отдельным атрибутом, чтобы tool'ы с DI-сервисами (например,
-            # CompactContextTool) могли его получить через
-            # ``getattr(ctx, "_agent_ref", None)``.
-            ctx._agent_ref = agent
-            if settings is not None:
-                ctx._settings_ref = settings
-            if cache_store is not None:
-                ctx._cache_store_ref = cache_store
-            if db_logging_service is not None:
-                ctx._db_logging_service = db_logging_service
-            if db_logging_service is not None:
-                ctx._db_logging_service = db_logging_service
-
-            registered: list[str] = []
-            skipped_disabled: list[str] = []
-            skipped_duplicate: list[str] = []
-            failed: list[str] = []
-            for cls in candidates:
-                try:
-                    if not cls.enabled(ctx):
-                        skipped_disabled.append(cls.__name__)
-                        continue
-                    tool = cls.create(ctx)
-                    if agent.tools.get(tool.name) is not None:
-                        skipped_duplicate.append(tool.name)
-                        continue
-                    # DI: проброс инфраструктуры в tool'ы, которые её ожидают.
-                    # Generic-путь ``set_provider`` / ``set_connection_factory``:
-                    # если tool ожидает ``CacheProvider``/``cache_store`` —
-                    # передаём реализацию из runtime, а не дефолтный fallback.
-                    if cache_store is not None:
-                        if hasattr(tool, "set_provider"):
-                            try:
-                                tool.set_provider(cache_store)
-                            except Exception:
-                                logger.exception(
-                                    "set_provider failed for {}", cls.__name__,
-                                )
-                        elif hasattr(tool, "set_connection_factory"):
-                            try:
-                                tool.set_connection_factory(
-                                    getattr(cache_store, "get_duckdb_connection", None)
-                                    or getattr(cache_store, "connect", None)
-                                )
-                            except Exception:
-                                logger.exception(
-                                    "set_connection_factory failed for {}",
-                                    cls.__name__,
-                                )
-                    agent.tools.register(tool)
-                    registered.append(tool.name)
-                except Exception:
-                    logger.exception("Failed to register {}", cls.__name__)
-                    failed.append(cls.__name__)
-
-            detail = f"{len(registered)} project tools registered"
-            if registered:
-                detail += f": {', '.join(registered)}"
-            if skipped_disabled:
-                detail += (
-                    f"; {len(skipped_disabled)} disabled by config: "
-                    f"{', '.join(skipped_disabled)}"
-                )
-            if skipped_duplicate:
-                detail += (
-                    f"; {len(skipped_duplicate)} already registered: "
-                    f"{', '.join(skipped_duplicate)}"
-                )
-            if failed:
-                detail += f"; {len(failed)} failed: {', '.join(failed)}"
-            # Помечаем detail маркером ``[INTERNAL_FAILED]`` если внутри
-            # ``for cls in candidates`` хоть один tool упал на
-            # ``cls.enabled``/``cls.create``/``register``. Тогда
-            # ``_record`` классифицирует этот патч как failed, а не
-            # skipped (по умолчанию ``True`` → ``applied``).
-            if failed:
-                detail = "[INTERNAL_FAILED] " + detail
-            # Логируем итог через INFO — иначе пользователь не видит,
-            # что проектные tool'ы реально подхватились (в nanobot
-            # ``Registered N tools`` логируется только для builtin
-            # внутри ``AgentLoop._register_default_tools``).
-            logger.info(
-                "Custom (project) tools: {} — {}",
-                detail,
-                self._format_workspace_hint(workspace_dir),
-            )
-            return True, detail
-
-        except Exception as exc:
-            logger.exception("patch_project_tools failed: {}", exc)
-            return False, f"patch failed: {exc}"
 
     # Вспомогательный комментарий (компакция + context-bridge seed) удалён в 0.3.5.
 # Исторический audit-trail сохранён в

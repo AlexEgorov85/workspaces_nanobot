@@ -1,4 +1,19 @@
-"""Тесты ``RuntimePatcher.patch_project_tools`` (auto-discover кастомных tool'ов)."""
+"""Тесты ``register_project_tools`` из ``lib/services/project_tool_loader.py``.
+
+Этот файл — historical continuation ``test_tools_project_loader.py``, который
+тестировал ``RuntimePatcher.patch_project_tools``. После opencode change
+``runtime-patcher-composition-cleanup`` регистрация project tools
+переехала в отдельный loader
+(см. ``lib/services/project_tool_loader.py::register_project_tools``);
+``RuntimePatcher`` больше НЕ имеет метода ``patch_project_tools`` и
+НЕ вызывает его из ``apply_all()``.
+
+Семантика тестов не меняется — best-effort регистрация, ``detail``-формат
+совместим с ``runtime_inventory.parse_project_tools_detail``. Никакие
+тесты-логика не удаляются, только точечный рефакторинг fixtures
+(``RuntimePatcher().patch_project_tools(...)`` →
+``register_project_tools(...)``).
+"""
 from __future__ import annotations
 
 import sys
@@ -7,7 +22,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from lib.services.runtime_patcher import RuntimePatcher
+from lib.services.project_tool_loader import (
+    ProjectToolsLoadResult,
+    register_project_tools,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -16,7 +34,7 @@ def _isolate_workspace_tools_modules():
 
     Без этого ранее загруженные tool-классы (из других тестов) продолжают
     жить в ``sys.modules['workspace.tools.*']`` и попадают в candidates
-    ``patch_project_tools``, ломая изоляцию тестов.
+    ``register_project_tools``, ломая изоляцию тестов.
 
     Это безопасно, потому что ``test_tools_project_loader.py`` идёт ПОСЛЕ
     ``test_history_search_tool.py`` и ``test_context_compaction.py``
@@ -89,8 +107,6 @@ def workspace_with_disabled_tool(tmp_path):
     tools_dir = tmp_path / "tools"
     tools_dir.mkdir()
     _write_tool_module(tools_dir, "dummy", enable_field="disable_me")
-    # Переопределяем config_cls так, чтобы поле называлось ``disable_me``.
-    # Для простоты — оставим дефолт (enable=True) и проверим через ctx.
     return tmp_path
 
 
@@ -165,31 +181,34 @@ class _FakeToolsConfig:
 # ---------------------------------------------------------------------------
 
 
-class TestPatchProjectTools:
+class TestRegisterProjectTools:
     def test_workspace_tools_missing_is_ok(self, tmp_path):
         """Нет ``workspace/tools/`` — skip без ошибки."""
-        patcher = RuntimePatcher()
         agent = _make_agent()
-        ok, msg = patcher.patch_project_tools(agent, tmp_path)
-        assert ok is True
-        assert "not found" in msg or "skip" in msg
+        result = register_project_tools(agent, tmp_path)
+        assert isinstance(result, ProjectToolsLoadResult)
+        assert result.registered == []
+        assert result.disabled == []
+        assert result.duplicate == []
+        assert result.failed == []
+        assert "not found" in result.detail or "skip" in result.detail
         agent.tools.register.assert_not_called()
 
     def test_agent_is_none(self, tmp_path):
         """``agent=None`` — отказ с явной причиной."""
-        patcher = RuntimePatcher()
-        ok, msg = patcher.patch_project_tools(None, tmp_path)
-        assert ok is False
-        assert "agent is None" in msg
+        result = register_project_tools(None, tmp_path)
+        assert isinstance(result, ProjectToolsLoadResult)
+        assert "agent is None" in result.detail
+        assert result.registered == []
+        assert result.failed == []
 
     def test_registers_tool_from_workspace(self, workspace_with_tool):
         """Tool из ``workspace/tools/dummy.py`` регистрируется."""
         agent = _make_agent(tools_config_section={"dummy": {"enable": True}})
 
-        patcher = RuntimePatcher()
-        ok, msg = patcher.patch_project_tools(agent, workspace_with_tool)
-        assert ok is True, msg
-        assert "dummy_tool" in msg
+        result = register_project_tools(agent, workspace_with_tool)
+        assert "dummy_tool" in result.detail
+        assert "dummy_tool" in result.registered
         # Был вызван register
         assert agent.tools.register.called
         # Имя зарегистрированного tool — "dummy_tool"
@@ -206,20 +225,18 @@ class TestPatchProjectTools:
         # что tool уже зарегистрирован ранее (например, встроенным loader'ом).
         agent.tools.get.return_value = object()  # любой truthy
 
-        patcher = RuntimePatcher()
-        ok, msg = patcher.patch_project_tools(agent, workspace_with_tool)
-        assert ok is True
-        assert "already registered" in msg
+        result = register_project_tools(agent, workspace_with_tool)
+        assert "already registered" in result.detail
+        assert "dummy_tool" in result.duplicate
         agent.tools.register.assert_not_called()
 
     def test_disabled_in_config(self, workspace_with_tool):
         """Tool с ``enable=False`` в config — пропускается."""
         agent = _make_agent(tools_config_section={"dummy": {"enable": False}})
 
-        patcher = RuntimePatcher()
-        ok, msg = patcher.patch_project_tools(agent, workspace_with_tool)
-        assert ok is True
-        assert "disabled" in msg
+        result = register_project_tools(agent, workspace_with_tool)
+        assert "disabled" in result.detail
+        assert "DummyTool" in result.disabled
         agent.tools.register.assert_not_called()
 
     def test_two_tools_both_registered(self, workspace_with_two_tools):
@@ -231,9 +248,9 @@ class TestPatchProjectTools:
             }
         )
 
-        patcher = RuntimePatcher()
-        ok, msg = patcher.patch_project_tools(agent, workspace_with_two_tools)
-        assert ok is True, msg
+        result = register_project_tools(agent, workspace_with_two_tools)
+        assert "dummy_tool" in result.registered
+        assert "other_tool" in result.registered
         registered_names = [
             call.args[0].name
             for call in agent.tools.register.call_args_list
@@ -247,10 +264,9 @@ class TestPatchProjectTools:
         (tmp_path / "tools" / "__init__.py").write_text("")
 
         agent = _make_agent()
-        patcher = RuntimePatcher()
-        ok, msg = patcher.patch_project_tools(agent, tmp_path)
-        assert ok is True
-        assert "no project tools" in msg
+        result = register_project_tools(agent, tmp_path)
+        assert "no project tools" in result.detail
+        assert result.registered == []
         agent.tools.register.assert_not_called()
 
     def test_module_import_failure_does_not_crash(self, tmp_path, caplog):
@@ -266,10 +282,9 @@ class TestPatchProjectTools:
         agent = _make_agent(
             tools_config_section={"dummy": {"enable": True}}
         )
-        patcher = RuntimePatcher()
-        ok, msg = patcher.patch_project_tools(agent, tmp_path)
-        # Патч должен завершиться без падения
-        assert ok is True
+        result = register_project_tools(agent, tmp_path)
+        # Регистрация должна завершиться без падения
+        assert "dummy_tool" in result.registered
         # good-модуль всё-таки зарегистрировался
         registered_names = [
             call.args[0].name
@@ -278,10 +293,11 @@ class TestPatchProjectTools:
         assert "dummy_tool" in registered_names
 
 
-class TestPatchProjectToolsIntegration:
-    """Проверка, что ``apply_all`` зовёт ``patch_project_tools``."""
+class TestRegisterProjectToolsIntegration:
+    """Проверка, что ``register_project_tools`` работает standalone
+    (без привязки к ``RuntimePatcher.apply_all``)."""
 
-    def test_apply_all_records_project_tools(self, tmp_path):
+    def test_returns_project_tools_load_result(self, tmp_path):
         agent = MagicMock()
         agent.tools.get.return_value = object()  # всё "уже зарегистрировано"
         agent.tools.has.return_value = True
@@ -306,16 +322,13 @@ class TestPatchProjectToolsIntegration:
         (tmp_path / "tools").mkdir()
         (tmp_path / "tools" / "__init__.py").write_text("")
 
-        patcher = RuntimePatcher()
-        # Без tool_audit_hook и прочих зависимостей — apply_all может
-        # упасть на других патчах; вызовем напрямую.
-        ok, msg = patcher.patch_project_tools(agent, tmp_path)
-        assert ok is True
-        assert "no project tools" in msg
+        result = register_project_tools(agent, tmp_path)
+        assert isinstance(result, ProjectToolsLoadResult)
+        assert "no project tools" in result.detail
 
 
-class TestPatchProjectToolsEdgeCases:
-    """Edge-кейсы для ``patch_project_tools``."""
+class TestRegisterProjectToolsEdgeCases:
+    """Edge-кейсы для ``register_project_tools``."""
 
     def test_no_init_py_still_works(self, tmp_path):
         """``__init__.py`` в workspace/tools/ необязателен (модули загружаются
@@ -326,9 +339,9 @@ class TestPatchProjectToolsEdgeCases:
         _write_tool_module(tools_dir, "no_init")
 
         agent = _make_agent(tools_config_section={"dummy": {"enable": True}})
-        ok, msg = RuntimePatcher().patch_project_tools(agent, tmp_path)
-        assert ok is True, msg
-        assert "dummy_tool" in msg
+        result = register_project_tools(agent, tmp_path)
+        assert "dummy_tool" in result.detail
+        assert "dummy_tool" in result.registered
 
     def test_dunder_module_skipped(self, tmp_path):
         """Модули, начинающиеся с ``_``, не подхватываются."""
@@ -338,8 +351,7 @@ class TestPatchProjectToolsEdgeCases:
         _write_tool_module(tools_dir, "regular")
 
         agent = _make_agent(tools_config_section={"dummy": {"enable": True}})
-        ok, msg = RuntimePatcher().patch_project_tools(agent, tmp_path)
-        assert ok is True, msg
+        result = register_project_tools(agent, tmp_path)
         # Только regular.py зарегистрирован
         registered = [
             c.args[0].name for c in agent.tools.register.call_args_list
@@ -356,30 +368,22 @@ class TestPatchProjectToolsEdgeCases:
         agent = _make_agent(tools_config_section={"dummy": {"enable": True}})
         settings = MagicMock(name="settings")
 
-        ok, _msg = RuntimePatcher().patch_project_tools(
+        result = register_project_tools(
             agent, tmp_path, settings=settings,
         )
-        assert ok is True
-        # Tool-класс имеет доступ к ctx; проверяем через enabled() с реальным ctx
-        from workspace.tools import dummy  # type: ignore  # noqa
-        # Через рефлексию: убедимся, что ToolContext был создан с _settings_ref
-        # (косвенно — через отсутствие ошибки).
+        assert "dummy_tool" in result.registered
 
     def test_no_settings_no_crash(self, tmp_path):
-        """Без ``settings=None`` — патч работает (tool получает None)."""
+        """Без ``settings=None`` — loader работает (tool получает None)."""
         tools_dir = tmp_path / "tools"
         tools_dir.mkdir()
         _write_tool_module(tools_dir, "dummy")
 
         agent = _make_agent(tools_config_section={"dummy": {"enable": True}})
-        ok, msg = RuntimePatcher().patch_project_tools(
+        result = register_project_tools(
             agent, tmp_path, settings=None,
         )
-        assert ok is True, msg
-        registered = [
-            c.args[0].name for c in agent.tools.register.call_args_list
-        ]
-        assert "dummy_tool" in registered
+        assert "dummy_tool" in result.registered
 
     def test_create_failure_logged_and_continues(self, tmp_path, caplog):
         """Если ``cls.create(ctx)`` падает, остальные tool'ы продолжают
@@ -416,21 +420,17 @@ class TestPatchProjectToolsEdgeCases:
                 "broken_create": {"enable": True},
             }
         )
-        patcher = RuntimePatcher()
-        ok, msg = patcher.patch_project_tools(agent, tmp_path)
-        assert ok is True, msg
+        result = register_project_tools(agent, tmp_path)
         # good зарегистрирован, broken — нет
-        registered = [
-            c.args[0].name for c in agent.tools.register.call_args_list
-        ]
-        assert "dummy_tool" in registered
-        assert "broken_create_tool" not in registered
-        assert "failed" in msg.lower() or "broken" in msg.lower()
+        assert "dummy_tool" in result.registered
+        assert "broken_create_tool" not in result.registered
+        assert "BrokenCreateTool" in result.failed
+        assert result.detail.startswith("[INTERNAL_FAILED] ")
 
 
 class TestRealCompactContextToolLoads:
     """Реальный ``workspace/tools/compact_context.py`` загружается
-    через patch_project_tools. Изолирован в отдельный класс, чтобы
+    через ``register_project_tools``. Изолирован в отдельный класс, чтобы
     состояние модуля не утекало в другие тесты."""
 
     @pytest.fixture(autouse=True)
@@ -479,11 +479,7 @@ class TestRealCompactContextToolLoads:
             gateway = _Gw()
         settings = _Settings()
 
-        ok, msg = RuntimePatcher().patch_project_tools(
+        result = register_project_tools(
             agent, workspace_root / "workspace", settings=settings,
         )
-        assert ok is True, msg
-        registered = [
-            c.args[0].name for c in agent.tools.register.call_args_list
-        ]
-        assert "compact_context" in registered, msg
+        assert "compact_context" in result.registered, result.detail
