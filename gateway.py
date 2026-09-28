@@ -114,9 +114,6 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     ctx = ApplicationContext.create(role='gateway', 
         script_dir=script_dir,
         workspace_dir=workspace_dir,
-        enable_db_logging=True,
-        enable_audit=True,
-        print_llm_calls=_gateway_print_llm_calls(),
     )
 
     # 3. Smoke-режим: печатает баннер и runtime-таблицу, выходит сразу.

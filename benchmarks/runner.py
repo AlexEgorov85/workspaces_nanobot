@@ -596,8 +596,6 @@ async def _run_suite(
         ctx = ApplicationContext.create(role='gateway', 
             script_dir=BENCH_SCRIPT_DIR,
             workspace_dir=BENCH_WORKSPACE_DIR,
-            enable_db_logging=True,
-            enable_audit=enable_audit,
         )
     finally:
         # Восстанавливаем config.json даже при ошибке инициализации

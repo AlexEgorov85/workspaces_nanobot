@@ -113,11 +113,7 @@ def _entrypoint_main(args: argparse.Namespace) -> None:
         cfg = ApplicationContext.create(role='cli', 
             script_dir=script_dir_for_runtime(),
             workspace_dir=script_dir_for_runtime() / "workspace",
-            enable_db_logging=True,
-            enable_audit=False,
-            enable_cron=False,
             profile=CLI_FIXED_PROFILE,
-            print_llm_calls=False,
         )
         runtime_table = cfg.settings["logging"]["db"]["table_name"]
         console.print(
@@ -144,11 +140,7 @@ def _run_vanilla(args: argparse.Namespace) -> None:
     ctx = ApplicationContext.create(role='cli', 
         script_dir=script_dir_for_runtime(),
         workspace_dir=script_dir_for_runtime() / "workspace",
-        enable_db_logging=True,
-        enable_audit=False,
-        enable_cron=True,
         session_override=args.session,
-        print_llm_calls=True,
     )
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)
@@ -171,12 +163,8 @@ def _run_patched(args: argparse.Namespace) -> None:
     ctx = ApplicationContext.create(role='cli', 
         script_dir=script_dir_for_runtime(),
         workspace_dir=script_dir_for_runtime() / "workspace",
-        enable_db_logging=True,
-        enable_audit=False,
-        enable_cron=True,
         storage_override=args.storage,
         session_override=args.session,
-        print_llm_calls=True,
     )
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)

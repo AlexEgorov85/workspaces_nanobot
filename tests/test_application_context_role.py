@@ -152,3 +152,58 @@ class TestDeprecatedKwargsResolver:
             gateway_settings={"enable_cron": False},
         )
         assert result["enable_cron"] is True
+
+
+class TestProductionCallersDoNotUseDeprecatedKwargs:
+    """Production code MUST NOT передавать deprecated kwargs (design D8).
+
+    Совместимость через ``**kwargs`` существует только для внешних
+    callers. Собственные entrypoint'ы обязаны брать значения из
+    ``SETTINGS["gateway"]``, иначе каждый запуск печатает
+    ``DeprecationWarning`` и runtime расходится с конфигом.
+    """
+
+    _DEPRECATED = (
+        "enable_db_logging",
+        "enable_audit",
+        "enable_cron",
+        "print_llm_calls",
+    )
+
+    def _production_files(self) -> list[Path]:
+        return [
+            _project_root / "cli_agent.py",
+            _project_root / "gateway.py",
+            _project_root / "benchmarks" / "runner.py",
+        ]
+
+    @pytest.mark.parametrize(
+        "path",
+        ["cli_agent.py", "gateway.py", "benchmarks/runner.py"],
+    )
+    def test_no_deprecated_kwargs_in_entrypoints(self, path: str) -> None:
+        import ast
+
+        source = (_project_root / path).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and func.attr == "create"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "ApplicationContext"
+            ):
+                continue
+            for kw in node.keywords:
+                if kw.arg in self._DEPRECATED:
+                    offenders.append(f"{path}:{node.lineno} {kw.arg}=")
+
+        assert not offenders, (
+            "Production entrypoints must not pass deprecated kwargs: "
+            + ", ".join(offenders)
+        )
