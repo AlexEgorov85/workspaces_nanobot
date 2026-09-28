@@ -14,13 +14,16 @@ nanobot» в `openspec/specs/runtime/context/spec.md`.
 после инициализации сервисов и до того, как `ApplicationContext`
 отдаёт `ctx.agent` внешним потребителям (gateway, CLI, streamlit).
 
-`ApplicationContext.start()` SHALL отвечать исключительно за
-фоновое lifecycle-оборудование (`_start_db_pool()`,
+`ApplicationContext.start()` SHALL NOT вызывать
+`RuntimePatcher.apply_all()` или отдельные `patch_*` методы
+`RuntimePatcher`, входящие в `apply_all`. Существующий
+lifecycle `start()` (template overrides, `_start_db_pool()`,
 `_validate_runtime_schema()`, старт `db_logging_service`,
 `sync_service`, `session_cold_sync_service`,
-`RuntimeEventsSubscriber`), и SHALL NOT вызывать
-`RuntimePatcher.apply_all()` или отдельные `patch_*` методы
-`RuntimePatcher`, входящие в `apply_all`.
+`RuntimeEventsSubscriber`) сохраняется без изменения —
+эта change **не** рефакторит `start()` (см. Non-Goals в
+`design.md`). Граница фиксируется только в части runtime
+patches: `start()` их не применяет, ни прямо, ни косвенно.
 
 **Семантика failed-патчей и `PatchSpec.required`:**
 

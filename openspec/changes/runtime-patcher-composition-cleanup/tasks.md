@@ -77,20 +77,50 @@
   в `tests/test_runtime_inventory.py::test_required_projects_from_patch_spec`
   (см. task 6.1) явно проверяет отсутствие второго источника истины.
 
+- [ ] 3.4a Обновить устаревшие docstring'и в
+  `lib/services/runtime_inventory.py` после удаления
+  `high_risk_required`:
+  - module-level docstring (строки 1–29): убрать утверждения
+    «`PatchSpec.required` нет в `PatchSpec` (есть только `risk`)»
+    и «здесь `required` определяется явно по criticality» —
+    теперь `PatchSpec.required` существует и является источником
+    истины; убрать упоминание «`high_risk_required` ниже» в
+    секции «Изменения канонических списков»;
+  - docstring `canonical_runtime_patches()` (строки 162–169):
+    убрать «`required` = если патч fail'ит, runtime ломается
+    (...) критичных имён захардкожен (нет поля `required` в
+    `PatchSpec`)» — теперь `required` берётся из `PatchSpec`;
+  - все остальные места в docstring, описывающие старую
+    модель с `high_risk_required`, обновляются или удаляются.
+  Verify: `git grep -n "high_risk_required\|нет поля .required. в .PatchSpec" \
+    -- lib/services/runtime_inventory.py` показывает 0 матчей;
+  ручной smoke `python -c "from lib.services.runtime_inventory import
+  canonical_runtime_patches; help(canonical_runtime_patches)" |
+  grep -i "high_risk\|required.*нет"` показывает 0 матчей.
+
 - [ ] 3.5 Ужесточить
   `tests/test_runtime_patcher.py::TestPatchSpecs::test_all_patches_have_specs`
-  до exact-match проверки трёх множеств: переименовать в
+  до exact-match проверки трёх множеств. Переименовать в
   `test_inventory_is_exact` и заменить
-  `for key in expected: assert key in actual`
-  на **попарное равенство трёх множеств** (AST-анализ
-  `RuntimePatcher.apply_all` для извлечения реально вызываемых
-  имён из аргументов `self._record(report, "<name>", ...)`,
+  `for key in expected: assert key in actual` на **попарное
+  равенство трёх множеств** (AST-анализ `RuntimePatcher.apply_all`
+  для извлечения реально вызываемых имён из аргументов
+  `self._record(report, "<name>", ...)`,
   `set(RuntimePatcher.patch_specs())`, и
-  `{p.name for p in canonical_runtime_patches()}`). Финальный
-  expected — 12 имён. **Запрещено** создавать четвёртый hardcoded
-  список имён в `expected` — иначе тест перестаёт ловить drift
-  между `apply_all()` и `_PATCH_SPECS`. Verify: тест падает на
-  старом коде (14 vs 12); зеленеет после 3.1–3.3 И 4.2.
+  `{p.name for p in canonical_runtime_patches()}`).
+  **Запрещено** создавать четвёртый hardcoded список имён в
+  `expected` — иначе тест перестаёт ловить drift между
+  `apply_all()` и `_PATCH_SPECS`. Тест состоит из двух частей:
+  - **Main invariant:**
+    `apply_all_names == patch_specs_names == canonical_names`
+    (архитектурный контракт этой change — three sets exactly equal);
+  - **Sanity check для этой конкретной change:**
+    `len(apply_all_names) == 12`
+    (фиксирует текущее количество; обновляется при добавлении
+    legitimate patch'а в будущем, но **отдельно** от main invariant).
+  Verify: тест падает на старом коде (14 vs 12 в `_PATCH_SPECS`
+  и/или `project_tools` в `apply_all`); зеленеет после 3.1–3.3
+  И 4.2.
 
 - [ ] 3.6 Обновить `docs/architecture/runtime-patcher-inventory.md` —
   пересобрать каталог патчей под новое exact inventory (12 patches),

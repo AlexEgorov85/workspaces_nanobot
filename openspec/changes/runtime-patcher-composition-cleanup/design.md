@@ -507,9 +507,9 @@ non-critical`. После введения `PatchSpec.required` (см. Decision 
      `tests/test_runtime_inventory.py`, `tests/test_application_context.py`,
      `tests/test_agent_factory.py` — все зелёные.
 
-**Rollback:** revert merge; никаких эффектов на БД-данные. Никаких
-deprecation period / no-op stubs — change атомарна и узка
-(см. Non-Goals и Decision 3).
+**Rollback:** revert merge; никаких эффектов на БД-данные. Change
+обратима обычным revert и не требует миграций данных. Никаких
+deprecation period / no-op stubs (см. Non-Goals и Decision 3).
 
 ## Open Questions
 

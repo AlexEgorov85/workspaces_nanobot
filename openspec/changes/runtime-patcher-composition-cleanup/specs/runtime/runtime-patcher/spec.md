@@ -96,15 +96,23 @@ call site'ов), а не runtime-механизмом idempotency. `RuntimePatch
   на единственную точку применения patches и SHALL NOT вызывать
   `patch_*` методы `RuntimePatcher` напрямую.
 
-#### Scenario: Регрессионный тест проверяет ровно один wrap
+#### Scenario: Регрессионный тест проверяет ровно один вызов `patch_assemble_outbound`
 
 - **WHEN** `tests/test_application_context.py::test_single_application_point`
   (или эквивалентный) запускается
-- **THEN** он SHALL проверить, что после полного запуска
-  `ApplicationContext.create()` `agent._assemble_outbound` обёрнут
-  ровно один раз (через маркер `_project_wrapped=True` или
-  эквивалентный), без проверок idempotency / re-entrancy на
-  уровне `RuntimePatcher`.
+- **THEN** он SHALL spy/mock'нуть
+  `RuntimePatcher.patch_assemble_outbound` через
+  `unittest.mock.patch.object(RuntimePatcher, "patch_assemble_outbound",
+  wraps=original)` (или эквивалентный spy-паттерн),
+  вызвать `ApplicationContext.create()` и проверить, что
+  `mock.call_count == 1`.
+- **AND** дополнительный AST-тест
+  (`tests/test_architecture_*.py::test_no_repeated_patch_in_cli`
+  или эквивалентный) SHALL проверить, что в `cli_agent.py` нет
+  вызова `patch_assemble_outbound` после `ApplicationContext.create()`.
+- **AND** никакого дополнительного marker'а (`_project_wrapped=True`
+  или эквивалентного) в production-код не вводится — production
+  semantics не меняется ради тестов.
 
 ### Requirement: Точное соответствие inventory (финально — 12 patches)
 
