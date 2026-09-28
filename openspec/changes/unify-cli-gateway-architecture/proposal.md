@@ -1,137 +1,144 @@
 ## Why
 
-Сейчас `cli_agent.py` и `gateway.py` запускают `ApplicationContext.create(...)` с **разными параметрами** (`enable_audit`, `enable_cron`, `print_llm_calls`, `storage_override`, `session_override`), и каждая точка входа по-своему публикует сообщения агента: CLI — напрямую в in-memory `MessageBus` (`bus.publish_inbound`), gateway — через `PostgresChannel` (worker pool, таблица `agent_messages`). Это значит, что:
+`cli_agent.py` и `gateway.py` сегодня вызывают `ApplicationContext.create(...)` с разными параметрами (`enable_audit`, `enable_cron`, `print_llm_calls`, `storage_override`, `session_override`). Кроме того, **DuckDB-кэш разделён по ролям**: gateway пишет `<local_path>/cache.duckdb`, CLI пишет `<local_path>/cli.duckdb`. Это создаёт два независимых состояния локального data layer, что ломает принцип «единый operational data layer агента».
 
-- поведение агента (LLM, tools, skill'ы, runtime-патчи, хуки, сессии) на самом деле **одинаковое**, но его конфигурация размазана по двум entrypoint'ам;
-- CLI не видит сообщения, прилетающие в gateway, и наоборот — нельзя, например, запустить задачу через HTTP и подхватить ответ в REPL, или наоборот;
-- `ApplicationContext.create()` принимает `enable_*`-флаги как constructor-args, хотя они должны быть config-driven, а не различием между точками входа;
-- инфраструктурные компоненты (Streamlit-сабпроцесс, проверка занятости WebSocket-порта) живут в gateway и не имеют смысла для CLI, но их присутствие делает gateway «толще» than a pure transport.
+Также есть проблема composition layer: `ApplicationContext.create()` принимает 5 `enable_*`-kwargs как constructor-args, что размывает границу «entrypoint-specific runtime flags» vs «shared runtime». И Streamlit — server-only зависимость — зашит в `gateway.py`.
 
-Цель change: **CLI и gateway отличаются только рендерером и сервисами, которые требуются серверу**. Один и тот же `ApplicationContext` (без `enable_*`-флагов в сигнатуре — они читаются из конфига), один и тот же transport-механизм (`PostgresChannel` через таблицу `agent_messages`), один и тот же пул воркеров.
+Цель change: **единый composition root** для CLI и gateway. Один `ApplicationContext.create(role=..., ...)` для обоих, отличается только параметр `role` и опциональные CLI-флаги. DuckDB — единый runtime-resource (один файл `cache.duckdb`), владение синком определяется на уровне runtime через PG-level claim (а не жёстко через `role`). Transport остаётся специфичным для каждого entrypoint'а (CLI = in-memory bus, gateway = PostgresChannel).
 
 ## What Changes
 
-- **`ApplicationContext.create()` принимает `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls`, `storage_override`, `session_override` через единый интерфейс** — все `enable_*` флаги **читаются из `SETTINGS["gateway"].*`** внутри самой фабрики (не из kwargs). CLI и gateway вызывают `ApplicationContext.create(...)` с **одной и той же сигнатурой** (только runtime-флаги, специфичные для CLI: `--storage`, `--session`).
+- **`ApplicationContext.create()` принимает обязательный kwarg `role: Literal["gateway", "cli", "utility"]`** и опциональные runtime-флаги для CLI: `storage_override`, `session_override`. Параметры `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` помечаются deprecated в kwargs — фабрика читает их из `SETTINGS["gateway"].*`, если kwargs не переданы.
 
-  - `gateway.enable_db_logging` (default `true`)
-  - `gateway.enable_audit` (default `true`) — **поведение зависит от роли процесса** (см. ниже «producer/consumer модель»)
-  - `gateway.enable_cron` (default `true`)
-  - `gateway.print_llm_calls` (default `false`)
-  - CLI-специфичные runtime-флаги (остаются kwargs): `storage_override` (`--storage`), `session_override` (`--session`).
+  ```text
+  ApplicationContext.create(
+      script_dir=...,
+      workspace_dir=...,
+      role="cli" | "gateway" | "utility",
+      # CLI-only:
+      storage_override=None | "auto" | "postgres" | "file",
+      session_override=None | "<name>",
+  )
+  ```
 
-  *Сигнатура `create()` поэтапно сужается:* параметры `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` помечаются как **deprecated** в kwargs (читают default из конфига, но поддерживаются для обратной совместимости с тестами и интеграционным кодом) и **удаляются в следующем MINOR релизе** после раскрытия.
+- **`role` определяет transport-composition**, не поведение `AgentLoop` и не владение DuckDB:
 
-- **CLI публикует сообщения через `PostgresChannel`**, а не напрямую в `MessageBus`. Внутри процесса `MessageBus` остаётся для работы `agent.run()` (он подписан на bus), но **input** идёт через таблицу `agent_messages` (через `PostgresChannel.publish_inbound`-обёртку, совместимую с worker pool), а **output** — через ту же таблицу (CLI подписан на outbound-строки, фильтрует по `chat_id`, рисует typewriter).
+  | Сервис | `role="gateway"` | `role="cli"` | `role="utility"` |
+  |---|---|---|---|
+  | `AgentLoop` (hooks, runtime patches, skills, tools, memory) | ✅ | ✅ | ✅ |
+  | `DbLoggingService` (если `gateway.enable_db_logging=True`) | ✅ | ✅ | ✅ |
+  | `SessionManager` | ✅ | ✅ | ✅ |
+  | `RuntimeEventsSubscriber` | ✅ | ✅ | ✅ |
+  | `RuntimePatcher.apply_all()` | ✅ | ✅ | ✅ |
+  | `DuckDbCacheStore` (открывает `<local_path>/cache.duckdb`) | ✅ | ✅ | ❌ |
+  | `PostgresChannel` (worker pool) | ✅ | ❌ | ❌ |
+  | `PgDuckDbSyncService` (sync — если claim выдан) | ✅ | ✅ | ❌ |
+  | `CronService` (если `gateway.enable_cron=True`) | ✅ | ✅ | ❌ |
+  | WebSocket port check (вызывается из entrypoint) | ✅ | ❌ | ❌ |
+  | Console I/O (in-memory bus) | ❌ | ✅ | ❌ |
 
-  Это означает, что `lib/cli/console_loop.py::run_repl` больше не зовёт `bus.publish_inbound(InboundMessage(channel="cli", ...))` напрямую; вместо этого используется единый `Channel` API (`start_all` / `publish_inbound` / `consume_outbound`), тот же, что в `lib/channels/postgres_channel.py`.
+  DuckDB — **не gateway-specific resource**. Это runtime-resource: открывается в `ApplicationContext.create()` всегда (если `gateway.enable_audit=True`), владение sync'ом определяется через PG-level ownership claim (см. ниже).
 
-- **`gateway.py` больше не спавнит `streamlit_app.py`** как subprocess. Удаляется `lib/services/subprocess_manager.py::spawn_streamlit` (или весь метод), `gateway.py::_streamlit_enabled()`, упоминания `streamlit_app.py` в `AGENTS.md`, `README.md`, `streamlit.*`-секция в `project.json` (если она существует), `streamlit_app.py` сам файл, тесты, ссылающиеся на Streamlit-путь. Если в `project.json` есть `streamlit.enabled=true`, конфиг игнорируется, но **настройка не валидируется как unknown** (pydantic остаётся permissive для legacy-ключей).
+- **PG-level ownership claim для DuckDB-sync.** Никто из entrypoint'ов не назначен жёстко producer'ом. При старте `PgDuckDbSyncService` пытается арендовать cache ownership через PG (через существующую таблицу `agent_worker_claims`, расширенную claim_type='cache', или отдельную таблицу `agent_cache_ownership`). Кто первый арендовал — тот producer; остальные процессы становятся consumer'ами (открывают cache read-only, sync не запускают).
 
-- **CLI-флаг `--storage` остаётся**, но меняет семантику: `--storage=file` означает «не подключаться к PostgresChannel, писать ответы в локальный файл сессии» (это offline-режим, а не выбор PG-storage). `--storage=postgres` (по умолчанию) — обычный режим через таблицу.
+  Сценарии:
+  - **Только CLI запущен** → CLI захватывает ownership, становится producer, синхронизирует cache, skills работают.
+  - **Только gateway запущен** → gateway захватывает ownership, становится producer.
+  - **И CLI, и gateway запущены** → первый запущенный — producer; второй — consumer (читает snapshot первого).
+  - **Producer умер** → следующий процесс при старте видит stale claim (TTL > N секунд без heartbeat) и захватывает ownership.
 
-- **`/compact` в CLI** продолжает работать: `lib/cli/console_loop.py::_run_cli_compact` остаётся, но вместо прямого `agent.compact_idle_session(...)` использует `ContextCompactionService` через ту же шину (это уже так после change `runtime-patcher-composition-cleanup`).
+- **Единый snapshot-путь: `<local_path>/cache.duckdb`** для всех процессов. Никаких `cli.duckdb` или других role-based путей.
 
-- **Audit sync (PG → DuckDB): producer/consumer модель.** Когда `enable_audit=True` И `storage_mode=="postgres"`:
-  - Если процесс — **gateway**: запускается `PgDuckDbSyncService`, snapshot публикуется в `gateway.cache.local_path` (или default `~/.cache/nanobot/duckdb/cache.duckdb`);
-  - Если процесс — **CLI**: запускается `PgDuckDbSyncService`, но snapshot идёт в **отдельный путь** `~/.cache/nanobot/duckdb/cli.duckdb`, чтобы избежать конфликта блокировок DuckDB, если CLI и gateway запущены одновременно;
-  - Если процесс — **standalone utility** (`enable_audit=True`, но не gateway/CLI) — путь по умолчанию тот же, что у gateway.
+- **`AgentLoop` остаётся transport-agnostic.** Никаких изменений в `nanobot.AgentLoop`, `nanobot.MessageBus`, `BaseChannel`. CLI продолжает использовать `bus.publish_inbound(InboundMessage(channel="cli", ...))` и `bus.consume_outbound()` — это даёт унификацию через общий bus.
 
-  Решение о том, «кто продьюсер, кто консьюмер», принимается **по типу процесса** (gateway/CLI/utility), а не по пользовательскому вводу. CLI и gateway **никогда не пишут в один файл**.
+- **`gateway.py` больше не спавнит Streamlit subprocess.** Удаляются `SubprocessManager.spawn_streamlit` (или весь модуль), `_streamlit_enabled()`, упоминания `streamlit_app.py` в `gateway.py`. `streamlit.*`-секция в `project.json` оставляется как permissive (pydantic `extra="allow"`), но runtime её игнорирует.
 
-- **Worker pool — общий.** Когда запущен и CLI, и gateway, любой воркер может забрать любую задачу из `agent_worker_claims`. Это даёт graceful degradation: если gateway упал, CLI подхватывает его очередь (chat_id `gateway:*` тоже обрабатывается, но CLI рендерит только `cli:*`).
+- **Cron:** контролируется `gateway.enable_cron` (default `True`). Работает и в CLI, и в gateway, если включено.
 
-- **WebSocket port check (`gateway.py::_check_websocket_port_available`) остаётся в gateway.** Это server-only проверка «не висит ли предыдущий процесс», она не имеет смысла для CLI.
+- **`/compact` в CLI остаётся локальным shortcut:** вызов `ContextCompactionService.compact(...)` напрямую из REPL.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `runtime/entrypoints`: контракт application entrypoint'ов (`cli_agent.py`, `gateway.py`). Описывает: единая сигнатура `ApplicationContext.create()` (без `enable_*`-kwargs), единый transport через `PostgresChannel` для обоих, разделение «renderer» (CLI = typewriter, gateway = нет) и «server-only services» (WebSocket port check, Streamlit — удалён). Producer/consumer модель для audit-sync (gateway = writer `cache.duckdb`, CLI = writer `cli.duckdb`). Это контракт, который должны соблюдать **оба** entrypoint'а и любые будущие точки входа.
+- `runtime/entrypoints`: контракт application entrypoint'ов (`cli_agent.py`, `gateway.py`, standalone utilities). Описывает: единая сигнатура `ApplicationContext.create(role=...)` (без `enable_*` в публичной kwargs), composition-rules для каждой роли, разделение «shared runtime» (AgentLoop, Skills, Tools, Memory, Session, Logging, DuckDB) и «role-specific transport» (CLI = Console I/O через in-memory bus, gateway = PostgresChannel). Контракт «DuckDB — runtime-resource с PG-level ownership claim» (никаких apply for `клип-унечный` snapshot; ownership выдаётся первому процессу через PG claim). Контракт запрета Streamlit в runtime-коде. AgentLoop MUST быть transport-agnostic.
 
 ### Modified Capabilities
 
-- `runtime/context`: добавляется требование «`ApplicationContext.create()` MUST НЕ ДОЛЖЕН принимать `enable_*`-параметры в публичной сигнатуре; все runtime-флаги читаются из `SETTINGS["gateway"].*` внутри фабрики. Deprecated alias-параметры допустимы только как compatibility boundary, с явным deprecation marker и плановым удалением». Это формализует единую точку конфигурации.
+- `runtime/context`: добавляется требование «`ApplicationContext.create()` MUST принимать обязательный kwarg `role`; флаги `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` MUST NOT входить в публичной обязательную сигнатуру, читаются из `SETTINGS["gateway"].*` если не переданы; deprecated kwargs MAY приниматься для обратной совместимости с тестами и интегрируемыми утилитами и MUST быть удалены в следующем MINOR после раскрытия».
 
-- `data/cache-provider`: добавляется требование «`PostgresDuckDbProvider` (или эквивалент) MUST ДОЛЖЕН резолвить snapshot-путь через `resolve_publish_path(role: Literal["gateway","cli","utility"])`, где `role` определяется по типу процесса. Разные `role` MUST возвращать **разные пути** для избежания конфликта DuckDB flock». Это формализует producer/consumer модель для audit-sync.
+- `data/cache-provider`: добавляется требование «`cache.duckdb` MUST быть единым runtime-ресурсом, открываемым в `ApplicationContext.create()` для `role="gateway"` и `role="cli"`. Владение sync'ом MUST определяться через PG-level ownership claim (см. `runtime/entrypoints`): первый захвативший claim процесс становится producer, остальные — consumer'ами. Никаких role-based путей (`cli.duckdb`, `gateway.duckdb`) — только `<local_path>/cache.duckdb`».
 
 ## Impact
 
 - `lib/core/application_context.py`:
-  - Параметры `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` помечаются как deprecated в kwargs;
-  - Если kwarg передан — он используется (compat behavior);
-  - Если kwarg НЕ передан — читается `SETTINGS["gateway"].<flag>` (новый default behavior);
-  - Новая kwargs `role: Literal["gateway","cli","utility"] = "gateway"` (default для обратной совместимости). Используется `resolve_publish_path(role=role)` и для разделения producer-путей.
+  - Добавить обязательный kwarg `role: Literal["gateway","cli","utility"] = "gateway"` (default для backward compat).
+  - Параметры `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` помечаются deprecated в kwargs; если kwargs не передан — читается из `SETTINGS["gateway"].*`; если передан — используется kwargs + `warnings.warn(..., DeprecationWarning, stacklevel=2)`.
+  - Composition matrix (см. таблицу выше) реализуется в `ApplicationContext.create()`.
+  - `resolve_publish_path(role=role)` остаётся в API, но `role="cli"` и `role="gateway"` возвращают **один и тот же путь** `<local_path>/cache.duckdb` (для backward compat с существующими вызовами); `role="utility"` MAY возвращать тот же путь, но `CacheProvider` для utility не открывается (см. матрицу).
+
+- `lib/services/pg_duckdb_sync_service.py` (или новый модуль `lib/services/cache_ownership.py`):
+  - Новый модуль `cache_ownership.py::try_claim_cache_ownership(worker_id, ...) -> bool` использует PG-транзакцию с `agent_worker_claims` (расширенную `claim_type='cache'`) или отдельную таблицу `agent_cache_ownership`.
+  - `PgDuckDbSyncService.start()` сначала вызывает `try_claim_cache_ownership(...)`; если `False` — service работает в consumer-mode (без фонового sync, только открывает snapshot для чтения).
+  - Heartbeat claim каждые N секунд (default `30`); cleanup при shutdown.
+
+- SQL schema (`sql/` или `sql/migrations/`):
+  - Расширение `agent_worker_claims` колонкой `claim_type VARCHAR DEFAULT 'task' NOT NULL` или создание отдельной таблицы `agent_cache_ownership(worker_id PRIMARY KEY, acquired_at TIMESTAMP, last_heartbeat_at TIMESTAMP, status VARCHAR)`.
+  - Миграция через `tools/migrate.py --apply`.
 
 - `gateway.py`:
-  - Удаляется блок `_streamlit_enabled()` + `subprocess_manager.spawn_streamlit(...)` + импорт `SubprocessManager`;
-  - Удаляется `lib/services/subprocess_manager.py` (или метод, если модуль используется ещё где-то);
-  - Удаляется блок `_check_websocket_port_available` (или переносится в отдельный helper, который зовется явно из `gateway.py` — server-only check);
-  - `_entrypoint_main(...)` больше **не передаёт** `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` в `ApplicationContext.create(...)`;
-  - Передаёт `role="gateway"` явно (или `role` определяется автоматически по argv).
+  - Убрать kwargs `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` из `ApplicationContext.create(...)`.
+  - Передавать `role="gateway"`.
+  - Удалить блок `_streamlit_enabled()` + `subprocess_manager.spawn_streamlit(...)` + импорт `SubprocessManager`.
+  - `_check_websocket_port_available` остаётся (server-only pre-startup check).
 
 - `cli_agent.py`:
-  - `_run_vanilla` / `_run_patched` больше **не передают** `enable_*`-флаги в `ApplicationContext.create(...)`;
-  - Передают `role="cli"` явно;
-  - `lib/cli/console_loop.py::run_repl` переписывается: вместо `bus.publish_inbound(InboundMessage(channel="cli", ...))` используется `cli_channel.publish_inbound(...)`, где `cli_channel = PostgresChannel(...)` (новый инстанс с теми же настройками, что у gateway).
+  - Убрать те же kwargs из `ApplicationContext.create(...)`.
+  - Передавать `role="cli"`.
+  - `lib/cli/console_loop.py::run_repl` остаётся без изменений: `bus.publish_inbound(InboundMessage(channel="cli", ...))` + `bus.consume_outbound()`.
 
-- `lib/cli/console_loop.py`:
-  - `run_repl` принимает дополнительный параметр `channel: Channel` (или подобный интерфейс);
-  - Внутри `run_repl` подписывается на `channel.consume_outbound()` вместо `bus.consume_outbound()`;
-  - Внутри REPL-цикла `bus.publish_inbound(...)` заменяется на `channel.publish_inbound(...)`;
-  - Slash-команда `/compact` остаётся в `run_repl`, но не вызывает `agent` напрямую — отправляет специальное управляющее сообщение через `channel` (либо остаётся как локальный shortcut, см. design.md).
+- `lib/services/cache_provider_impl.py::resolve_publish_path`:
+  - `role` параметр сохраняется для backward compat, но `role="cli"` и `role="gateway"` возвращают **`<local_path>/cache.duckdb`** (один путь для обоих).
 
-- `lib/channels/postgres_channel.py`:
-  - Проверяется, что `publish_inbound` совместим с уже существующим `InboundMessage`-контрактом. Если нет — добавляется wrapper/Adapter;
-  - Worker pool: `agent_worker_claims` уже принимает задачи от любого `chat_id` (нет фильтрации), так что CLI может подхватывать задачи gateway. Это уже работает, никаких изменений не нужно.
+- Standalone utilities (`tools/build_vectors.py` и др.):
+  - Все вызовы `ApplicationContext.create(...)` должны передавать `role="utility"` явно (или default `role="gateway"`, если утилита только читает snapshot).
 
-- `lib/services/cache_provider_impl.py` / `resolve_publish_path`:
-  - `resolve_publish_path(workspace_path, cache_cfg, role="gateway")` — добавляется параметр `role`;
-  - `role="cli"` возвращает `<local_path>/cli.duckdb` (или эквивалент);
-  - `role="gateway"` и `role="utility"` возвращают `<local_path>/cache.duckdb`;
-  - CLI-skills (`audit_analyzer`, `legal_summarizer`) используют `role="cli"` при чтении snapshot — это читает **свой** snapshot, который CLI сам и обновил.
+- `lib/services/subprocess_manager.py::spawn_streamlit`:
+  - Удаляется; если других методов нет — модуль удаляется целиком.
 
-- `lib/services/preload_service.py`:
-  - Если процесс — CLI, preload FAISS-индексов для CLI-snapshot. Сейчас это делает только gateway; теперь делает и CLI (если `enable_audit=True`).
+- `streamlit_app.py`: удаляется файл целиком.
 
-- `tests/`:
-  - `tests/test_application_context.py` — обновляется под новые defaults (без `enable_*` в kwargs → читает из конфига);
-  - `tests/test_cache_provider.py` (если есть) — добавляются сценарии `role="cli"` vs `role="gateway"`;
-  - `tests/test_storage_hybridization.py` — без изменений (контракт о таблице не меняется);
-  - Новый `tests/test_cli_over_postgres_channel.py` — интеграционный сценарий: CLI публикует сообщение → воркер забирает → CLI читает ответ → рендерит;
-  - Существующие тесты, которые вызывают `ApplicationContext.create(enable_audit=True/False)`, продолжают работать (deprecated kwargs поддерживаются).
+- Тесты:
+  - Существующие тесты с `ApplicationContext.create(enable_audit=True/False, ...)` — продолжают работать (deprecated kwargs поддерживаются).
+  - `tests/test_application_context_role.py` (новый) — composition matrix.
+  - `tests/test_cache_ownership_claim.py` (новый) — `try_claim_cache_ownership` testable: первый процесс — producer, второй — consumer; stale claim takeover.
+  - `tests/test_cache_provider_role_paths.py` (новый) — `resolve_publish_path(role="cli") == resolve_publish_path(role="gateway") == cache.duckdb`.
+  - `tests/test_streamlit_removed.py` (новый) — отсутствие Streamlit-импортов.
 
 - Документация:
-  - `AGENTS.md` (этот файл) — обновляется секция «Project Layout»: убирается упоминание `streamlit_app.py`, SubprocessManager; добавляется упоминание `TerminalChannel` (новый модуль);
-  - `README.md` — обновляется упоминание Streamlit (удаляется как deployment-опция);
-  - `docs/ARCHITECTURE.md` — секция «Запуск CLI / gateway» переписывается под «entrypoint contracts»;
-  - `docs/INTERNAL_API.md` — удаляется секция про Streamlit, добавляется секция «Producer/Consumer для audit sync»;
-  - `CHANGELOG.md` — категория `Changed`: BREAKING (Streamlit удалён; `--storage=file` меняет семантику; `--storage=postgres` теперь default в CLI); категория `Added`: producer/consumer snapshot для CLI;
-  - `docs/PROFILES.md` — без изменений (профили не затронуты).
-
-- **Streamlit**: `streamlit_app.py`, `subprocess_manager.spawn_streamlit`, `gateway._streamlit_enabled`, тесты, ссылающиеся на streamlit-путь, упоминания в AGENTS.md/README — удаляются. `streamlit.*` в `project.json` игнорируется runtime, но не валидируется как unknown (pydantic permissive).
+  - `AGENTS.md` (этот файл) — секция «Project Layout» обновляется.
+  - `README.md` — удаление Streamlit.
+  - `docs/ARCHITECTURE.md` — единый composition root, runtime-level cache coordination.
+  - `docs/INTERNAL_API.md` — секция «Role-based composition», «PG-level Cache Claim».
+  - `CHANGELOG.md` — `Added`/`Removed`/`Changed`.
 
 ## Open Questions
 
-Переносятся в `design.md` (не блокируют proposal):
+Переносятся в `design.md`:
 
-1. **TerminalChannel как отдельный класс или просто инстанс `PostgresChannel` с `chat_id="cli"`?** — design определит, существует ли отдельная обёртка или достаточно одного класса.
-
-2. **`/compact` в CLI: shortcut через шину или отдельный control-flow?** — сейчас CLI ловит `/compact` локально через `_run_cli_compact`. Через таблицу это станет либо локальным shortcut'ом (вызов `ContextCompactionService` напрямую из CLI), либо маршрутизированной slash-командой (как в gateway, через `RuntimePatcher.patch_compact_command`).
-
-3. **Preload FAISS-индексов в CLI: блокирующий startup-step или фоновый?** — gateway делает preload в фоне (`asyncio.create_task(_preload_and_report)`). В CLI пользователь уже ждёт, можно блокировать.
-
-4. **`session_override` (`--session`) в CLI: сохраняется ли в `agent_messages` как `chat_id=cli:<session>`?** — нужно подтвердить, что CLI REPL пишет в `chat_id=cli:<session>` так же, как сейчас пишет в bus.
-
-5. **CLI без gateway: работает ли `audit_analyzer`?** — CLI пишет свой snapshot, skills читают его. Если CLI запущен один — всё работает. Если CLI+gateway — каждый читает свой snapshot. Подтвердить, что это OK.
+1. **PG-level claim mechanism: extend `agent_worker_claims` или новая таблица `agent_cache_ownership`?** — design.md определит.
+2. **Heartbeat интервал и TTL для stale-claim takeover** — design.md определит конкретные числа (default 30 sec heartbeat, 90 sec TTL).
+3. **`role="utility"` — открывает ли cache_store для чтения?** — design.md определит (вероятно NO — embedding-утилиты обычно читают PG напрямую, не cache).
 
 ## Что принципиально НЕ делается в этом change
 
-- Полный отказ от `enable_*` kwargs `ApplicationContext.create()` (deprecated-период сохраняется, чтобы не сломать существующие тесты).
-- Изменение `PostgresChannel` worker pool API (он уже принимает задачи от любого `chat_id`).
-- Изменение `nanobot.MessageBus` (CLI больше не использует bus напрямую для input/output, но `agent.run()` внутри процесса по-прежнему подписан на bus через `AgentLoop`).
-- Рефакторинг `lib/services/subprocess_manager.py` (если у него есть другие методы, кроме `spawn_streamlit`).
-- Изменение контракта `bus.publish_inbound` / `bus.consume_outbound` — это upstream `nanobot`, не наш слой.
-- Изменение схемы `agent_messages` / `agent_worker_claims` / `agent_conversation_messages`.
-- Полный отказ от in-memory bus (CLI использует bus для `agent.run()`, просто input/output идут мимо).
-- Удаление `streamlit_app.py` без периода deprecated (если в репо есть ссылки — сначала переход на «ignore flag», потом удаление в MINOR).
-- Изменение `gateway.compact.*` / `gateway.compact.notify_in_history` / других существующих `gateway.*` ключей, не упомянутых выше.
+- Изменение `nanobot.MessageBus`, `nanobot.AgentLoop`, `BaseChannel` (transport layer).
+- Заставлять CLI использовать `PostgresChannel` для I/O (CLI = in-memory bus).
+- Создание `TerminalChannel` или другого нового transport-класса.
+- Изменение схемы `agent_messages` / `agent_conversation_messages`.
+- Передача worker pool задач между CLI и gateway (worker pool остаётся gateway-only).
+- Рефакторинг `lib/services/db_logging_bus.py`, `lib/services/runtime_events_subscriber.py`.
+- Изменение `gateway.compact.*` / других `gateway.*` ключей, не упомянутых в proposal.
+- Полный отказ от in-memory bus — он остаётся для `agent.run()` в обоих режимах.
+- Удаление `WebSocket` канала как такового — он остаётся gateway transport.
+- Переписывание `lib/cli/console_loop.py::run_repl`.
