@@ -1,9 +1,15 @@
 ## 1. Baseline и inventory-снимок
 
 - [ ] 1.1 Зафиксировать baseline текущего состояния. Снять списки:
-  `apply_all()` patches (13 имён), `_PATCH_SPECS` keys (14 имён),
-  `canonical_runtime_patches()` keys (14 имён),
-  `_allowed_hook_names()` (3 имени), `high_risk_required` (4 имени).
+  `apply_all()` patches (13 имён — `context_governor`, `save_turn`,
+  `exec_limits`, `exec_timeout_cap`, `tool_limits`, `assemble_outbound`,
+  `turn_delivery_fail`, `async_save`, `session_dir_watch`,
+  `subagent_logging`, `project_tools`, `document_text_threshold`,
+  `session_content_cleanup`), `_PATCH_SPECS` имена (14 —
+  11 совпадающих с `apply_all` + `project_tools` + 3 DEPRECATED),
+  `canonical_runtime_patches()` имена (те же 14, что и `_PATCH_SPECS`),
+  `_allowed_hook_names()` (3 имени), `high_risk_required` (4 имени,
+  локальная переменная внутри `canonical_runtime_patches`).
   Verify: ручной вывод в issue/PR-описании или в фиксации
   baseline-лога; `git diff --stat` показывает 0 изменений.
 
@@ -18,14 +24,14 @@
 - [ ] 2.2 Добавить регрессионный тест
   `tests/test_application_context.py::test_single_application_point`
   (или эквивалентный), который:
-  - вызывает `ApplicationContext.create()` и затем проверяет, что
+  - вызывает `ApplicationContext.create()` и проверяет, что
     `agent._assemble_outbound` обёрнут ровно один раз
     (через `getattr`/`wraps`/маркер `_project_wrapped=True`);
-  - имитирует `_run_patched` (повторный `patch_assemble_outbound`)
-    и проверяет, что либо функция не существует, либо повторный
-    вызов поднимает `RuntimeError("already patched")`.
+  - **НЕ** проверяет idempotency — контракт держится архитектурно
+    (отсутствие повторных call site'ов), а не runtime-флагом.
   Verify: `pytest tests/test_application_context.py -k
-  single_application_point -q` зелёный; тест падает на старом коде.
+  single_application_point -q` зелёный; тест падает на старом коде
+  (двойная обёртка в `cli_agent.py:174`).
 
 - [ ] 2.3 Добавить явный архитектурный тест
   `tests/test_architecture_*.py` (или в
@@ -69,9 +75,11 @@
 
 - [ ] 3.5 Ужесточить
   `tests/test_runtime_patcher.py::TestPatchSpecs::test_all_patches_have_specs`
-  с `for key in expected: assert key in actual` до `assert
-  set(actual) == expected` (exact match). Verify: тест падает
-  на старом коде (14 vs 13); зеленеет после 3.1–3.3.
+  до exact-match проверки: переименовать в
+  `test_inventory_is_exact` и заменить `for key in expected: assert key in actual`
+  на `assert set(actual) == expected` (список expected — финальный
+  набор 12 patches). Verify: тест падает на старом коде
+  (14 vs 12 + extra финальных); зеленеет после 3.1–3.3 И 4.2.
 
 - [ ] 3.6 Обновить `docs/architecture/runtime-patcher-inventory.md` —
   пересобрать каталог патчей под новое exact inventory, удалить
@@ -84,32 +92,67 @@
 
 ## 4. Вынос `patch_project_tools` в отдельный loader
 
-- [ ] 4.1 Создать `lib/services/project_tool_loader.py` с функциями
-  `discover(workspace_dir) -> list[type]` и
-  `register_all(agent, tools, *, cache_store, db_logging_service,
-  settings) -> tuple[registered, disabled, duplicate, failed]`.
-  Тело функций — копия существующего `patch_project_tools`
-  (`lib/services/runtime_patcher.py:2279-2509`) без семантических
-  правок: тот же `pkgutil.iter_modules` по `workspace/tools/`, тот же
-  `ToolContext(...)` с тем же `setattr` DI, тот же
-  `cls.enabled(ctx)` / `cls.create(ctx)` / `agent.tools.register(tool)`.
-  Verify: `python -c "from lib.services.project_tool_loader import
-  discover, register_all; print('OK')"` печатает OK.
+- [ ] 4.1 Создать `lib/services/project_tool_loader.py` с
+  **одним** публичным контрактом:
+
+  ```python
+  @dataclass(frozen=True)
+  class ProjectToolsLoadResult:
+      registered: list[str]
+      disabled: list[str]
+      duplicate: list[str]
+      failed: list[str]
+      detail: str
+
+  def register_project_tools(
+      agent: AgentLoop,
+      workspace_dir: Path,
+      *,
+      settings: Any = None,
+      cache_store: CacheProvider | None = None,
+      db_logging_service: DbLoggingService | None = None,
+  ) -> ProjectToolsLoadResult: ...
+  ```
+
+  Тело `register_project_tools` — копия существующего
+  `patch_project_tools` (`lib/services/runtime_patcher.py:2279-2509`)
+  без семантических правок: тот же `pkgutil.iter_modules` по
+  `workspace/tools/`, тот же `ToolContext(...)` с тем же `setattr`
+  DI, тот же `cls.enabled(ctx)` / `cls.create(ctx)` /
+  `agent.tools.register(tool)`. Discovery (`pkgutil.iter_modules` +
+  `importlib.util`) — приватная функция `_discover(workspace_dir)`,
+  не публичная. Verify: `python -c "from lib.services.project_tool_loader
+  import register_project_tools, ProjectToolsLoadResult; print('OK')"`
+  печатает OK.
 
 - [ ] 4.2 В `lib/services/runtime_patcher.py` удалить метод
   `patch_project_tools` и удалить соответствующий вызов из
   `apply_all()` (`lib/services/runtime_patcher.py:650-652`). Никаких
-  backward-compat stubs — `_PATCH_SPECS` не содержит `project_tools`
-  после Phase 3.
+  backward-compat stubs — `RuntimePatcher` **не содержит** методов
+  по `project_tools` после Phase 4. Если позже потребуется
+  вернуть — это новая change, не legacy-fallback.
   Verify: `git grep -n "patch_project_tools\|project_tools"
-  -- lib/` показывает 0 матчей в `lib/services/runtime_patcher.py`
-  (допустимы матчи в loader).
+  -- lib/services/runtime_patcher.py` показывает 0 матчей.
 
 - [ ] 4.3 В `lib/core/application_context.py` после
   `ctx.runtime_patcher.apply_all(...)` (строки 339–346) добавить
-  вызов loader'а: импорт `lib.services.project_tool_loader` и
-  `register_all(agent, discover(workspace_dir), ...)` с теми же
-  DI-параметрами, что передавались в `patch_project_tools` ранее.
+  вызов loader'а:
+
+  ```python
+  from lib.services.project_tool_loader import (
+      register_project_tools, ProjectToolsLoadResult,
+  )
+
+  project_tools_result = register_project_tools(
+      agent=ctx.agent,
+      workspace_dir=ctx.workspace_dir,
+      settings=ctx.settings,
+      cache_store=ctx.cache_store,
+      db_logging_service=ctx.db_logging_service,
+  )
+  ctx.project_tools_result = project_tools_result
+  ```
+
   Verify: `pytest tests/test_application_context.py
   tests/test_tools_project_loader.py -q` зелёный; интеграционный
   тест `test_real_compact_context_tool_loads` (см. существующий
@@ -117,22 +160,22 @@
 
 - [ ] 4.4 В `lib/services/runtime_inventory.py` обновить
   `_emit_project_tools_inventory_banner` (или эквивалентный
-  inventory-banner) — источник данных о project tools остаётся
-  тот же `patch_report.details["project_tools"]` (отчёт
-  формирует loader, не `RuntimePatcher`). Если banner читает
-  напрямую из `_PATCH_SPECS` — переделать на чтение из
-  `RuntimePatcher.patch_specs()` минус удалённые/добавленные.
-  Verify: `git diff` показывает только косметические правки в
-  banner; `tools/diagnose_startup.py --strict` (если запускается)
-  exit 0.
+  inventory-banner) — баннер **больше НЕ читает**
+  `patch_report.details["project_tools"]` (этого ключа в
+  `PatchReport` больше нет после Phase 4). Источник данных —
+  `project_tools_result.detail` (см. task 4.3).
+  Verify: `git diff` показывает правки banner-функции; ручной
+  прогон `cli_agent.py --smoke` печатает баннер project tools
+  с теми же именами, что и до change; `tools/diagnose_startup.py
+  --strict` (если запускается) exit 0.
 
 - [ ] 4.5 Архитектурный тест `tests/test_architecture_*.py`
   (или расширение `test_dependency_direction.py`)
-  `test_runtime_patcher_does_not_register_project_tools`:
+  `test_runtime_patcher_no_project_tools_boundary`:
   через AST-анализ `lib/services/runtime_patcher.py` подтверждает,
-  что модуль не импортирует `workspace.tools`, не строит
-  `ToolContext` и не зовёт `agent.tools.register`.
-  Verify: тест падает на старом коде; зеленеет после 4.1–4.3.
+  что модуль не импортирует `workspace.tools.*`, не строит
+  `ToolContext`, не зовёт `agent.tools.register`. Verify: тест
+  падает на старом коде; зеленеет после 4.1–4.3.
 
 ## 5. Реальный hook allowlist
 
@@ -145,44 +188,58 @@
   Verify: `git diff lib/cli/hook_loader.py` показывает только
   изменение логики в ветке `if path.stem not in allowed`.
 
-- [ ] 5.2 Добавить тест
-  `tests/test_session_file_redirect_hook.py` (или
-  `tests/test_application_context.py` / новый
-  `tests/test_hook_allowlist.py`)
-  `test_non_allowlisted_hook_is_not_imported`:
-  - создать временный `workspace/hooks/_test_blocked_hook.py` с
-    module-level side-effect: `MARKER_PATH.write_text("imported")`;
+- [ ] 5.2 Добавить тест `tests/test_hook_allowlist.py`
+  (новый файл) `test_non_allowlisted_hook_blocks_module_exec`:
+  - `monkeypatch.setattr(hook_loader, "_allowed_hook_names",
+    lambda: frozenset())` (полностью пустой allowlist для теста);
+  - создать временный hook-файл с module-level side-effect:
+    `MARKER_PATH.write_text("imported")`;
   - вызвать `scan_and_register(hooks_dir, workspace_dir)`;
-  - assert `not MARKER_PATH.exists()` (модуль не выполнялся).
+  - assert `not MARKER_PATH.exists()` (модуль **не выполнялся**).
   Verify: тест падает на старом коде (warning + import +
   module exec); зеленеет после 5.1.
 
 - [ ] 5.3 Добавить тест `test_allowlisted_hook_is_registered`:
-  - `session_file_redirect_hook.py` присутствует и входит в
-    `_allowed_hook_names()`;
+  - `monkeypatch.setattr(hook_loader, "_allowed_hook_names",
+    lambda: frozenset({"session_file_redirect_hook"}))`;
+  - создать `session_file_redirect_hook.py` во временной
+    `workspace/hooks/` через `_write_hook_module` helper;
   - assert `len(scan_and_register(...)) > 0` и инстанс имеет
     type name `"SessionFileRedirectHook"`.
   Verify: тест зелёный; обеспечивает, что сужение allowlist не
-  отрезает production-хуки.
+  отрезает production-хуки. Production `_allowed_hook_names()` не
+  трогаем в тестах — monkeypatch на функции.
 
 - [ ] 5.4 Добавить тест `test_unknown_hook_silent_skip`:
-  - два файла в `workspace/hooks/`: `_test_known.py` (в allowlist)
-    и `_test_unknown.py` (вне allowlist, без side-effect);
-  - assert возвращаемый список содержит только инстанс known hook.
+  - `monkeypatch.setattr(hook_loader, "_allowed_hook_names",
+    lambda: frozenset({"known_hook"}))`;
+  - два файла в `workspace/hooks/`: `known_hook.py` (в allowlist)
+    и `unknown_hook.py` (вне allowlist, без side-effect);
+  - assert возвращаемый список содержит только инстанс known hook,
+    и нет экземпляров из `unknown_hook`.
   Verify: тест падает на старом коде (оба импортируются);
   зеленеет после 5.1.
 
 ## 6. Архитектурные тесты и инварианты
 
 - [ ] 6.1 Добавить тест
-  `tests/test_runtime_inventory.py::test_no_high_risk_required_set`:
-  - `from lib.services.runtime_inventory import high_risk_required` →
-    `ImportError`;
-  - `set(canonical_runtime_patches()) == set(RuntimePatcher.patch_specs())`.
-  Verify: тест зелёный; проверяет Decision 5.
+  `tests/test_runtime_inventory.py::test_required_projects_from_patch_spec`
+  (семантический, не module-attribute):
+  - Через `monkeypatch.setattr` подменить
+    `RuntimePatcher.patch_specs` на fake-реализацию,
+    возвращающую dict с 3 spec'ами:
+    - `X_high_required`: `risk="high"`, `required=True`;
+    - `Y_high_optional`: `risk="high"`, `required=False`
+      (доказывает отсутствие автокорреляции `risk → required`);
+    - `Z_low_required`: `risk="low"`, `required=True`.
+  - Вызвать `canonical_runtime_patches()`.
+  - assert `required=True` для X и Z; `required=False` для Y.
+  Verify: тест падает на старом коде (где `high_risk_required` —
+  hardcoded set, который бы проигнорировал fake-spec.required);
+  зеленеет после 3.4.
 
 - [ ] 6.2 Добавить тест
-  `tests/test_runtime_inventory.py::test_required_in_patch_spec_for_critical_patches`:
+  `tests/test_runtime_inventory.py::test_critical_patches_marked_required`:
   - `required=True` для `assemble_outbound`, `save_turn`,
     `subagent_logging`, `context_governor`;
   - никаких других патчей с `required=True` (защита от ложного
@@ -205,35 +262,33 @@
 
 ## 7. Спецификации и реестр
 
-- [ ] 7.1 Зарегистрировать в `openspec/specs/COMPONENTS.md` два
-  компонента:
+- [ ] 7.1 Зарегистрировать в `openspec/specs/COMPONENTS.md` только
+  один компонент:
   - `RuntimePatcher` (`lib/services/runtime_patcher.py:RuntimePatcher`) →
-    `runtime/runtime-patcher` со статусом `partial`;
-  - `ProjectToolLoader` (`lib/services/project_tool_loader.py`) →
-    категория `runtime` со статусом `partial`.
-  Verify: `git diff openspec/specs/COMPONENTS.md` показывает две
-  новые строки; таблица категории `runtime` теперь содержит
-  4 записи (ранее — 2).
+    `runtime/runtime-patcher` со статусом `partial`.
+  **`ProjectToolLoader` НЕ регистрируется** — это internal
+  stateless helper (нет lifecycle, нет state, нет конфигурации,
+  одна функция). По критериям `openspec/specs/architecture/component-model/spec.md`
+  это не компонент. Loader описывается только в `docs/ARCHITECTURE.md`
+  и упоминается в boundary-разделе спеки `runtime-patcher`.
+  Verify: `git diff openspec/specs/COMPONENTS.md` показывает
+  одну новую строку; таблица категории `runtime` теперь содержит
+  3 записи (ранее — 2).
 
-- [ ] 7.2 После архивации change создать canonical-спеки:
+- [ ] 7.2 После архивации change создать canonical-спеку:
   - `openspec/specs/runtime/runtime-patcher/spec.md` (по шаблону
-    `architecture/component-model` на русском);
-  - `openspec/specs/runtime/project-tool-loader/spec.md` (если
-    loader признаётся компонентом — см. ниже).
-  Если `ProjectToolLoader` — узкий stateless модуль из 2–3
-  функций без lifecycle/state/configuration — отдельная
-  спека НЕ создаётся, loader описывается только в
-  `docs/ARCHITECTURE.md`.
-  Verify: `python tools/validate_component_specs.py` зелёный;
-  см. `openspec/specs/architecture/component-model/spec.md`
-  для критериев «что считается компонентом».
+    `architecture/component-model` на русском).
+  **Спека `project-tool-loader/spec.md` НЕ создаётся** — loader
+  не компонент. Verify: `python tools/validate_component_specs.py`
+  зелёный.
 
 - [ ] 7.3 Исправить contract drift в
   `openspec/specs/runtime/context/spec.md`: требование
   «`ApplicationContext.start()` MUST вызывать `RuntimePatcher.apply_all`»
   заменяется на актуальное утверждение
   (см. `specs/runtime/context/spec.md` MODIFIED Requirement в этой
-  change). Verify: `git grep "start()" -- openspec/specs/runtime/context/`
+  change + Decision 6 в design.md — полная перезапись, не
+  частичная правка). Verify: `git grep "start()" -- openspec/specs/runtime/context/`
   показывает только корректные ссылки; новая формулировка
   соответствует `Decision 1` и `Decision 6` в design.md.
 
@@ -252,7 +307,7 @@
   `lib/core/application_context.py:339-346`.
 
 - [ ] 8.3 Обновить `docs/architecture/runtime-patcher-inventory.md` —
-  финальный каталог из 13 patches (после 3.1–3.3).
+  финальный каталог из **12 patches** (после 3.1–3.3 И 4.2).
 
 - [ ] 8.4 Обновить `CHANGELOG.md` — блок `[Unreleased]`,
   категории `Changed` (composition cleanup), `Removed`
@@ -281,8 +336,10 @@
   «Валидация спецификаций» в `architecture/component-model/spec.md`.
 
 - [ ] 9.4 Smoke: `python cli_agent.py --profile=test --smoke` —
-  exit 0; баннер «Runtime patches» содержит ровно 13 строк
-  с `✓`/`⚠`/`✗`, ни одного `unexpected_applied` в startup-логе.
+  exit 0; баннер «Runtime patches» содержит ровно **12** строк
+  с `✓`/`⚠`/`✗`, ни одного `unexpected_applied` в startup-логе;
+  баннер «Project tools» печатается отдельным блоком на
+  основании `ProjectToolsLoadResult.detail`.
   Verify: ручной прогон или интеграционный тест
   `tests/test_application_context.py::test_smoke_banner`.
 
@@ -294,23 +351,32 @@
 
 Скопировать в описание PR:
 
-- [ ] `ApplicationContext.create()` применяет patches ровно один раз.
-- [ ] `cli_agent._run_patched()` не применяет `assemble_outbound`
-  повторно.
-- [ ] `apply_all() == _PATCH_SPECS keys == canonical_runtime_patches()`.
+- [ ] `ApplicationContext.create()` применяет runtime patches ровно один раз;
+  entrypoint'ы (cli_agent/gateway/streamlit) **не** повторно вызывают
+  ни `apply_all`, ни отдельные `patch_*` методы.
+- [ ] `cli_agent._run_patched()` не применяет `assemble_outbound` повторно.
+- [ ] **`apply_all() == _PATCH_SPECS names == canonical_runtime_patches() == 12`**.
 - [ ] `compact_tracking`/`compact_command`/`idle_guard` удалены из
   `_PATCH_SPECS`.
 - [ ] `turn_delivery_fail`/`session_dir_watch` имеют `PatchSpec`.
+- [ ] `project_tools` удалён из `_PATCH_SPECS` и из `apply_all()`.
 - [ ] `RuntimePatcher` не импортирует `workspace.tools.*` и не
-  регистрирует tools.
-- [ ] Регистрация project tools живёт в `lib/services/project_tool_loader.py`.
+  регистрирует tools (AST-тест 4.5).
+- [ ] Регистрация project tools живёт в `lib/services/project_tool_loader.py`;
+  единственная публичная функция `register_project_tools(...)`;
+  возвращает `ProjectToolsLoadResult`.
+- [ ] `_emit_project_tools_inventory_banner` читает
+  `project_tools_result.detail`, **не** `patch_report.details["project_tools"]`.
 - [ ] Hook allowlist не-alwisted файлы не импортируются (модуль
-  не выполняется).
-- [ ] `high_risk_required` удалён; `PatchSpec.required` —
-  единственный источник.
+  не выполняется); тесты через `monkeypatch.setattr` на
+  `_allowed_hook_names`.
+- [ ] `high_risk_required` удалён из `runtime_inventory.py`;
+  `PatchSpec.required` — единственный источник; семантический
+  тест 6.1 доказывает проекцию.
 - [ ] `openspec/specs/runtime/context/spec.md` не противоречит
-  фактическому lifecycle.
-- [ ] `openspec/specs/COMPONENTS.md` содержит записи для
-  `RuntimePatcher` и `ProjectToolLoader`.
+  фактическому lifecycle (полная перезапись requirement'а,
+  не частичная правка).
+- [ ] `openspec/specs/COMPONENTS.md` содержит запись **только**
+  для `RuntimePatcher` (не для `ProjectToolLoader`).
 - [ ] CHANGELOG обновлён, AGENTS.md синхронизирован,
   `docs/ARCHITECTURE.md` отражает loader boundary.

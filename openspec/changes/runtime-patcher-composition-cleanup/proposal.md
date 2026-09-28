@@ -49,13 +49,16 @@ hardcoded set `high_risk_required` (см.
   `RuntimePatcher` более не отвечает за discover / DI / register
   пользовательских tool'ов.
 - Канонический runtime-patch inventory синхронизируется с реальным
-  набором вызываемых patches:
-  - `turn_delivery_fail` и `session_dir_watch` получают `PatchSpec`;
-  - `compact_tracking`, `compact_command`, `idle_guard` удаляются из
-    `_PATCH_SPECS` (DEPRECATED в nanobot 0.3.5, фактически не
-    вызываются);
-  - `project_tools` удаляется из `_PATCH_SPECS` после вынесения
-    регистрации.
+  набором вызываемых patches в две стадии:
+  - стадия 1: `turn_delivery_fail` и `session_dir_watch` получают
+    `PatchSpec`; `compact_tracking`, `compact_command`, `idle_guard`
+    удаляются из `_PATCH_SPECS` (DEPRECATED в nanobot 0.3.5,
+    фактически не вызываются);
+  - стадия 2: `project_tools` удаляется из `_PATCH_SPECS` и из
+    `apply_all()` после вынесения регистрации в `ProjectToolLoader`.
+  **Финальное состояние: ровно 12 patches в `apply_all()` /
+  `_PATCH_SPECS` / `canonical_runtime_patches()`** (project_tools
+  больше не входит ни в один из трёх множеств).
 - Hook allowlist становится **действительно** ограничивающим: файл не
   из allowlist не импортируется и не регистрируется.
 - Источник истины для критичности (`required` vs optional) —
@@ -88,43 +91,48 @@ hardcoded set `high_risk_required` (см.
 ## Impact
 
 - Код:
-  - `lib/services/runtime_patcher.py`: убрать `patch_project_tools`,
-    метод остаётся в `apply_all` пустой заглушкой NO-OP до полного
-    вынесения; добавить `PatchSpec` для `turn_delivery_fail` и
-    `session_dir_watch`; удалить `compact_tracking`/`compact_command`/
-    `idle_guard` из `_PATCH_SPECS`;
+  - `lib/services/runtime_patcher.py`: полностью удалить метод
+    `patch_project_tools` и его вызов из `apply_all()` (никаких
+    backward-compat stubs и deprecation period — это уже
+    запрещено `docs/TARGET_ARCHITECTURE.md`); добавить `PatchSpec`
+    для `turn_delivery_fail` и `session_dir_watch`; удалить
+    `compact_tracking`/`compact_command`/`idle_guard` из `_PATCH_SPECS`;
   - `lib/cli/hook_loader.py`: исправить логику allowlist —
     не-alwisted файлы пропускаются без импорта;
   - `cli_agent.py`: убрать повторный `patch_assemble_outbound` из
     `_run_patched()`;
   - новый модуль `lib/services/project_tool_loader.py` —
-    discover + DI + register project tools;
-  - `lib/services/runtime_inventory.py`: убрать `high_risk_required`,
-    проекция из `PatchSpec.required`;
-  - `lib/core/application_context.py`: новый вызов loader'а
-    project tools вместо `patch_project_tools` через `apply_all`;
-    composition-root остаётся `create()`.
+    единственная публичная функция `register_project_tools(...)`,
+    возвращающая `ProjectToolsLoadResult` (discovery приватная);
+  - `lib/services/runtime_inventory.py`: убрать локальный
+    `high_risk_required`, проекция из `PatchSpec.required`;
+  - `lib/core/application_context.py`: после `apply_all()` —
+    отдельный вызов `register_project_tools(...)`; composition-root
+    остаётся `create()`.
 - Тесты:
   - `tests/test_runtime_patcher.py`:
     `test_all_patches_have_specs` ужесточается до `==`;
-  - `tests/test_tools_project_loader.py`: расширяется (или переносится)
-    на новый модуль loader'а;
-  - `tests/test_runtime_inventory.py`: тест на отсутствие
-    `high_risk_required` в `canonical_runtime_patches`;
+  - `tests/test_tools_project_loader.py`: расширяется под новый
+    модуль loader'а (или переносится в
+    `tests/test_project_tool_loader.py`);
+  - `tests/test_runtime_inventory.py`: семантический тест на
+    проекцию `PatchSpec.required` (см. Decision 5 / Issue #7 в
+    design.md);
   - новые тесты:
     `test_application_context_single_application_point`,
-    `test_hook_allowlist_rejects_unknown_hook`,
-    `test_patch_assemble_outbound_not_reapplied_in_cli`;
+    `test_hook_allowlist_blocks_module_exec`,
+    `test_runtime_patcher_no_project_tools_boundary`;
   - `tests/test_architecture_*.py` / `tests/test_dependency_direction.py`:
     добавить проверку, что `RuntimePatcher` не импортирует
     `workspace.tools.*` и не зовёт `ToolRegistry.register`.
 - Конфигурация: без изменений.
 - SQL/DDL: без изменений.
-- API: `RuntimePatcher.patch_project_tools` помечается deprecated и
-  выпиливается в release-ветке после архивации change.
+- API: `RuntimePatcher.patch_project_tools` удаляется атомарно
+  в этой change (никаких deprecation period).
 - Документация:
-  - `openspec/specs/COMPONENTS.md`: добавить записи для
-    `RuntimePatcher` и `ProjectToolLoader`;
+  - `openspec/specs/COMPONENTS.md`: добавить запись только для
+    `RuntimePatcher` (см. Decision 3 — `ProjectToolLoader` —
+    internal helper, не компонент);
   - `openspec/specs/runtime/context/spec.md`: исправить требование про
     `apply_all`;
   - `AGENTS.md` / `docs/ARCHITECTURE.md`: синхронизировать описание

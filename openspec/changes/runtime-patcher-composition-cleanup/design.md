@@ -13,6 +13,10 @@
   `turn_delivery_fail` и `session_dir_watch`; вместо них в `_PATCH_SPECS`
   есть DEPRECATED-остатки `compact_tracking`, `compact_command`,
   `idle_guard`, которые нигде не вызываются.
+- **Финальный inventory после этой change**: 12 patches в
+  `apply_all()` (project_tools удалён), 12 в `_PATCH_SPECS`, 12 в
+  `canonical_runtime_patches()`. Дрейф между тремя множествами
+  невозможен — exact-match тест.
 - `lib/core/application_context.py:325-358` — `apply_all()` вызывается
   **внутри** `ApplicationContext.create()`, а не в `start()`.
 - `cli_agent.py:152-176` — `_run_patched()` после `create()` ещё раз
@@ -87,19 +91,32 @@ architecture, audit_analyzer workflow, MCP, profile mechanism,
 
 ## Decisions
 
-### Decision 1: Единственная точка применения runtime patches — `RuntimePatcher.apply_all()` из `ApplicationContext.create()`
+### Decision 1: Единственная точка применения runtime patches — `RuntimePatcher.apply_all()` из `ApplicationContext.create()`. Никакой runtime-idempotency не требуется.
 
-`ApplicationContext.create()` остаётся composition root и единственной
+`ApplicationContext.create()` остаётся composition root и **единственной**
 точкой, которая вызывает `RuntimePatcher.apply_all()` для полного
 набора патчей. После возврата из `create()` ни один entrypoint
 (`cli_agent.py`, `gateway.py`, `streamlit_app.py`) не должен повторно
-вызывать ни `apply_all`, ни отдельные `patch_*` методы (для патчей,
-которые входят в `apply_all`).
+вызывать ни `apply_all`, ни отдельные `patch_*` методы, входящие в
+`apply_all`.
+
+Контракт: **повторный вызов `apply_all()` или отдельного `patch_*`
+после возврата из `create()` запрещён архитектурно, без
+runtime-механизма idempotency.** `RuntimePatcher` НЕ обязан
+поддерживать повторное применение вручную — каждый отдельный
+`patch_*` метод (например, `patch_assemble_outbound`) оборачивает
+upstream-метод в обычную обёртку; повторный вызов приведёт к
+double-wrap, что и есть текущий баг в `cli_agent.py:174`. Idempotency
+не вводится (post-change) — слабому агенту не нужно ни добавлять
+`already_patched` флаг, ни пытаться сделать wrap-функцию
+само-идемпотентной.
 
 **Почему:** `apply_all` уже фактически вызывается в `create()` — это
 composition-фаза, в которой уже доступны `agent`, `tool_audit_hook`,
 `db_logging_service`, `cache_store`, `recent_files_hook`, `session_manager`,
-`workspace_dir`. Любой повторный вызов — дубль.
+`workspace_dir`. Любой повторный вызов — дубль. Runtime-flag типа
+`already_patched` не нужен: контракт держится тем, что в коде
+есть ровно один production call site.
 
 **Альтернативы:**
 
@@ -109,24 +126,39 @@ composition-фаза, в которой уже доступны `agent`, `tool_a
   ассерт на идемпотентность `start()` (`self._started`) перестанет
   покрывать повторный вызов `apply_all`.
 - (b) Ввести дополнительный вызов `apply_all` в `start()` с
-  idempotency-флагом. Отвергнуто — два пути вызова — два источника
-  истины, в `create()` уже всё необходимое.
-- (c) Оставить как есть и просто убрать вызов из `cli_agent`. Узкое
-  решение, но допустимо как разновидность (a) выше — change
-  выбирает чистый (a) вариант: запрет на повторные вызовы после
-  `create()` фиксируется в спеке, код приводится в соответствие.
+  idempotency-флагом. Отвергнуто — два пути вызова = два источника
+  истины; в `create()` уже всё необходимое.
+- (c) **Выбрано:** оставить `apply_all()` в `create()` и удалить
+  повторный вызов `patch_assemble_outbound` из `cli_agent._run_patched()`.
+  Composition root остаётся `create()`; фиксируется в спеке как
+  единственный production call site. Runtime-idempotency не
+  вводится.
 
 ### Decision 2: `apply_all()` exact inventory ↔ `_PATCH_SPECS` exact inventory ↔ `canonical_runtime_patches()` exact inventory
 
-Три множества должны быть равны. Любое расхождение считается drift'ом
-и блокирует merge через тест `test_runtime_patcher.py::TestPatchSpecs::test_all_patches_have_specs`
-(ужесточается с `assert key in actual` до `assert actual == expected`).
-Тест должен явно покрывать:
+Три множества должны быть попарно равны. Любое расхождение считается
+drift'ом и блокирует merge через exact-match тест
+`tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`
+(ужесточается с `for key in expected: assert key in actual` до
+`assert set(actual) == expected`).
 
-- 13 patches в `apply_all()`;
-- 13 specs в `_PATCH_SPECS`;
-- 13 entries в `canonical_runtime_patches()`;
-- `project_tools` исчезает из `_PATCH_SPECS` после вынесения.
+**Финальное состояние: 12 patches в каждом из трёх множеств**
+(после удаления `project_tools`). Стадии:
+
+- **После Phase 3 (sync inventory)** — 13 patches в каждом множестве
+  (`apply_all()` всё ещё включает `project_tools`; в `_PATCH_SPECS`
+  добавлены `turn_delivery_fail`/`session_dir_watch`, удалены три
+  DEPRECATED);
+- **После Phase 4 (extract project_tools)** — 12 patches в каждом
+  множестве (`project_tools` удалён и из `apply_all()`, и из
+  `_PATCH_SPECS`; `RuntimePatcher.apply_all()` зовёт 12 patches;
+  `RuntimePatcher.patch_specs()` возвращает 12 specs;
+  `canonical_runtime_patches()` возвращает 12 entries).
+
+Тест `test_inventory_is_exact` фиксирует **финальное** состояние
+(12 == 12 == 12). Промежуточные состояния (Phase 3) не требуют
+отдельного теста, если разработчик выполняет Phase 3 и Phase 4
+последовательно.
 
 **Почему:** subset-проверка маскирует drift, как показал ручной аудит
 (три DEPRECATED-остатка живут в `_PATCH_SPECS`, но не вызываются).
@@ -135,23 +167,76 @@ Exact-проверка делает drift видимым при первом CI-
 **Альтернативы:** Множество «allow superset» (как сейчас) — отвергнуто
 как раз и маскирующее drift.
 
-### Decision 3: `RuntimePatcher` не владеет registration project tools
+### Decision 3: `RuntimePatcher` не владеет registration project tools. `ProjectToolLoader` — internal helper, не компонент.
 
-`patch_project_tools()` (тело методом `importlib.util` + `pkgutil.iter_modules`
+`patch_project_tools()` (тело: `importlib.util` + `pkgutil.iter_modules`
 + `ToolContext(...)` + `agent.tools.register(tool)`) переносится в
-узкий модуль `lib/services/project_tool_loader.py`:
+узкий модуль `lib/services/project_tool_loader.py` с единственным
+публичным контрактом:
 
 ```python
-def discover(workspace_dir: Path) -> list[type[Tool]]: ...
-def register_all(
+@dataclass(frozen=True)
+class ProjectToolsLoadResult:
+    registered: list[str]
+    disabled: list[str]
+    duplicate: list[str]
+    failed: list[str]
+    detail: str  # форматированная строка для баннера логов
+
+
+def register_project_tools(
     agent: AgentLoop,
-    tools: list[type[Tool]],
+    workspace_dir: Path,
     *,
-    cache_store: CacheProvider | None,
-    db_logging_service: DbLoggingService | None,
-    settings: Any,
-) -> tuple[list[str], list[str], list[str], list[str]]: ...
+    settings: Any = None,
+    cache_store: CacheProvider | None = None,
+    db_logging_service: DbLoggingService | None = None,
+) -> ProjectToolsLoadResult:
+    """discover + DI + register — атомарная операция."""
 ```
+
+Discovery (`pkgutil.iter_modules`, `importlib.util.spec_from_file_location`,
+`spec.loader.exec_module`) — приватная функция внутри модуля
+(`_discover(workspace_dir) -> list[type]`); наружу торчит только
+`register_project_tools`. Это **не** публичный API для
+последовательных вызовов `discover` + `register`.
+
+`RuntimePatcher.apply_all()` больше **не** вызывает `patch_project_tools`
+и не возвращает `project_tools` в `PatchReport`. В
+`ApplicationContext.create()` после `apply_all()` отдельным шагом
+вызывается:
+
+```python
+from lib.services.project_tool_loader import (
+    register_project_tools, ProjectToolsLoadResult,
+)
+
+project_tools_result = register_project_tools(
+    agent=ctx.agent,
+    workspace_dir=ctx.workspace_dir,
+    settings=ctx.settings,
+    cache_store=ctx.cache_store,
+    db_logging_service=ctx.db_logging_service,
+)
+ctx.project_tools_result = project_tools_result
+_emit_project_tools_inventory_banner(project_tools_result)
+```
+
+Баннер `project tools` больше **не** читает `patch_report.details["project_tools"]`
+(этого ключа в `PatchReport` больше нет) — он читает
+`project_tools_result.detail`. Тест 4.4 фиксирует это.
+
+**Статус `ProjectToolLoader`:** это **узкий stateless helper** —
+нет lifecycle, нет конфигурации, нет state, нет публичного контракта
+помимо одной функции и одного dataclass. По критериям
+`openspec/specs/architecture/component-model/spec.md` это **не
+компонент**. Отдельная spec не создаётся, запись в `COMPONENTS.md`
+не добавляется. Loader описывается только в
+`docs/ARCHITECTURE.md` как dependency `RuntimePatcher`'а
+(boundary-раздел спеки `runtime-patcher`).
+
+`RuntimePatcher` остаётся компонентом и получает canonical spec
++ запись в `COMPONENTS.md`.
 
 Loader **не** создаёт нового registry, **не** импортирует Skills,
 **не** знает имён доменных tool'ов (Skill-названия для
@@ -160,13 +245,10 @@ DI-расширения (`_agent_ref`, `_settings_ref`, `_cache_store_ref`,
 `_db_logging_service`) остаются тем же `setattr`-паттерном, что и
 сейчас — change только перемещает код, не переписывает его.
 
-`RuntimePatcher.apply_all()` больше **не** вызывает `patch_project_tools`.
-В `ApplicationContext.create()` после `apply_all()` отдельным шагом
-вызывается `register_project_tools(agent, workspace_dir, ...)` из loader'а.
-
 **Почему:** Разделение ответственности. `RuntimePatcher` — адаптер
-к upstream runtime API, не tool registry. Сейчас
-`patch_project_tools` сидит в нём по инерции первого релиза.
+к upstream runtime API, не tool registry. `ProjectToolLoader` —
+stateless helper, не компонент. Сейчас `patch_project_tools` сидит
+в `RuntimePatcher` по инерции первого релиза.
 
 **Альтернативы:**
 
@@ -278,9 +360,26 @@ return [
 (`_start_db_pool()`, `_validate_runtime_schema()`, фоновые сервисы,
 `RuntimeEventsSubscriber.start()`).
 
+Дополнительный drift в существующей спеке:
+
+> «каждый `failed`-патч явно помечен `DEPRECATED` и не критичен для прод»
+
+Это утверждение неверно вводит связь `failed → DEPRECATED →
+non-critical`. После введения `PatchSpec.required` (см. Decision 5)
+контракт становится:
+
+> **required = criticality для inventory/diagnostics, NOT для startup abort.**
+> Если `apply_all` оставляет непустой `report.failed`, система MUST
+> логировать warning (включая имена `required=True`-патчей для
+> оператора) и MUST NOT прерывать startup. Это поведение уже
+> реализовано в `application_context.py:352-357` (только `logger.warning`).
+
+Слабому агенту **запрещается** добавлять raise/abort на failed патчах
+даже если у них `required=True` — это противоречит фактическому коду.
+
 **Почему:** Spec не должен диктовать неправильное поведение. Если
 выровнять код под spec — сломается composition root (понадобится
-прокидывать все DI-зависимости в `start()` и снимать идемпотентность).
+прокидывать в `start()` все DI-зависимости и снимать идемпотентность).
 Если оставить drift — каждое новое ревью будет спотыкаться.
 
 **Альтернативы:** Перенос `apply_all()` в `start()` — отвергнуто,
@@ -290,10 +389,16 @@ return [
 
 - **[Risk]** После вынесения `patch_project_tools` `apply_all()` теряет
   последний «не-monkey-patch» элемент. Если забыть синхронизировать
-  `_emit_project_tools_inventory_banner` и `diagnose_startup.py`,
+  `_emit_project_tools_inventory_banner` (он больше не может читать
+  `patch_report.details["project_tools"]`) и `diagnose_startup.py`,
   диагностика project tools сломается.
-  → **Mitigation:** task 3.5 явно синхронизирует обе функции; тест
-  `test_diagnose_startup.py` остаётся зелёным (если запускается).
+  → **Mitigation:** task 4.4 явно переключает banner на
+  `project_tools_result.detail`; task 4.5 — AST-тест
+  `test_runtime_patcher_no_project_tools_boundary` подтверждает
+  что в `runtime_patcher.py` не осталось ссылок на
+  `project_tools`/`workspace.tools`/`ToolContext`/
+  `agent.tools.register`; `tools/diagnose_startup.py --strict`
+  остаётся зелёным (если запускается).
 
 - **[Risk]** Ужесточение теста `test_all_patches_have_specs` (subset →
   equality) может сломать существующие CI-прогоны, если где-то
@@ -342,7 +447,7 @@ return [
 2. Поднять новую версию gateway/CLI.
 3. Smoke-проверки:
    - `cli_agent.py --profile=test --smoke` — старт проходит, баннер
-     «Runtime patches» содержит ровно 13 имён, никаких
+     «Runtime patches» содержит ровно 12 имён, никаких
      «unexpected_applied» в startup-логе;
    - `python tools/diagnose_startup.py --strict` — exit 0
      (при наличии тестового профиля и БД);
@@ -350,10 +455,9 @@ return [
      `tests/test_runtime_inventory.py`, `tests/test_application_context.py`,
      `tests/test_agent_factory.py` — все зелёные.
 
-**Rollback:** revert merge; никаких эффектов на БД-данные. Если
-revert невозможен (долгий downtime) — `project_tools` остаётся
-как no-op stub в `apply_all` ещё один релиз (deprecation period).
-Сейчас deprecation period не нужен — change атомарна и узка.
+**Rollback:** revert merge; никаких эффектов на БД-данные. Никаких
+deprecation period / no-op stubs — change атомарна и узка
+(см. Non-Goals и Decision 3).
 
 ## Open Questions
 

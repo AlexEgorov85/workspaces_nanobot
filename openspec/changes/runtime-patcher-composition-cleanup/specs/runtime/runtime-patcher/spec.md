@@ -1,9 +1,9 @@
 ## Purpose
 
 Нормативный контракт `RuntimePatcher` — единого компонента применения
-monkey-patch'ей к upstream `nanobot.agent.loop.AgentLoop`, его
-граница ответственности (только upstream runtime patches, не
-tool registration), требования к однократности применения, точному
+monkey-patch'ей к upstream `nanobot.agent.loop.AgentLoop`. Контракт
+фиксирует границу ответственности (только upstream runtime patches,
+не tool registration), требования к однократности применения, точному
 соответствию inventory и единственному источнику `required`/`optional`
 метаданных.
 
@@ -25,30 +25,53 @@ tool registration), требования к однократности прим�
 - вызов `agent.tools.register(...)`;
 - DI-инъекции в `Tool`-подклассы.
 
+Регистрация project tools SHALL выполняться отдельным
+stateless helper'ом `lib.services.project_tool_loader` с
+единственной публичной функцией `register_project_tools(agent,
+workspace_dir, *, settings, cache_store, db_logging_service)
+-> ProjectToolsLoadResult`. `ProjectToolLoader` — **не**
+компонент (нет lifecycle/state/configuration; см.
+`openspec/specs/architecture/component-model/spec.md`), отдельная
+canonical spec для loader'а НЕ создаётся, запись в
+`openspec/specs/COMPONENTS.md` для loader'а НЕ добавляется.
+
 #### Scenario: Регистрация project tools происходит вне `RuntimePatcher`
 
 - **WHEN** стартует `ApplicationContext.create()`
 - **THEN** обнаружение и регистрация project tools SHALL происходить
-  через `lib.services.project_tool_loader` (или эквивалентный узкий
-  loader), и SHALL NOT вызываться из `RuntimePatcher.apply_all()` и
-  из любых `patch_*` методов `RuntimePatcher`.
+  через `lib.services.project_tool_loader.register_project_tools(...)`
+  сразу после `RuntimePatcher.apply_all()`, и SHALL NOT вызываться
+  из `RuntimePatcher.apply_all()` и из любых `patch_*` методов
+  `RuntimePatcher`.
+- **AND** результат регистрации (экземпляр `ProjectToolsLoadResult`)
+  SHALL храниться отдельно от `PatchReport` (например,
+  `ctx.project_tools_result`), а `PatchReport.details` SHALL NOT
+  содержать ключа `project_tools`.
 
 #### Scenario: Архитектурный тест запрещает discover tools в `RuntimePatcher`
 
 - **WHEN** `tests/test_architecture_*.py` (или
   `tests/test_dependency_direction.py`) запускается
-- **THEN** тест SHALL проверить, что `lib/services/runtime_patcher.py`
-  не импортирует `workspace.tools.*`, не зовёт
-  `ToolContext(...)` и не зовёт `agent.tools.register(...)`.
+- **THEN** тест SHALL проверить через AST-анализ, что
+  `lib/services/runtime_patcher.py` не импортирует
+  `workspace.tools.*`, не зовёт `ToolContext(...)` и не зовёт
+  `agent.tools.register(...)`.
 
 ### Requirement: Однократное применение runtime patches к одному `AgentLoop`
 
-Каждый enabled patch из `RuntimePatcher.apply_all()` SHALL применяться
-не более одного раза к одному экземпляру `AgentLoop` в рамках одного
-startup lifecycle. Точка вызова `apply_all()` SHALL быть единственной;
-повторный вызов `apply_all()` или прямой вызов любого включённого
-в `apply_all` `patch_*` метода после возврата из
-`ApplicationContext.create()` SHALL быть запрещён.
+`ApplicationContext.create()` MUST быть единственным production
+call site для `RuntimePatcher.apply_all()`. После возврата из
+`create()` ни один entrypoint (`cli_agent.py`, `gateway.py`,
+`streamlit_app.py`) SHALL NOT вызывать `apply_all()` или отдельные
+`patch_*` методы `RuntimePatcher`, входящие в `apply_all`.
+
+Контракт держится **архитектурно** (отсутствие повторных
+call site'ов), а не runtime-механизмом idempotency. `RuntimePatcher`
+НЕ обязан поддерживать повторное применение — каждый отдельный
+`patch_*` метод оборачивает upstream-цель в обычную обёртку, и
+повторный вызов приведёт к double-wrap (это и есть текущий баг
+в `cli_agent.py:174`). Никакого `already_patched` флага не
+вводится.
 
 #### Scenario: `ApplicationContext.create()` применяет patches ровно один раз
 
@@ -73,29 +96,31 @@ startup lifecycle. Точка вызова `apply_all()` SHALL быть един
   на единственную точку применения patches и SHALL NOT вызывать
   `patch_*` методы `RuntimePatcher` напрямую.
 
-#### Scenario: Регрессионный тест запрещает дубль
+#### Scenario: Регрессионный тест проверяет ровно один wrap
 
 - **WHEN** `tests/test_application_context.py::test_single_application_point`
   (или эквивалентный) запускается
 - **THEN** он SHALL проверить, что после полного запуска
-  `ApplicationContext.create()` `_assemble_outbound` обёрнут ровно
-  один раз, а повторный вызов `apply_all()` на том же `agent`
-  либо запрещён, либо идемпотентен (idempotency contract явно
-  фиксируется в коде и тесте).
+  `ApplicationContext.create()` `agent._assemble_outbound` обёрнут
+  ровно один раз (через маркер `_project_wrapped=True` или
+  эквивалентный), без проверок idempotency / re-entrancy на
+  уровне `RuntimePatcher`.
 
-### Requirement: Точное соответствие inventory
+### Requirement: Точное соответствие inventory (финально — 12 patches)
 
 Множество имён patches, вызываемых `RuntimePatcher.apply_all()`,
 множество ключей `_PATCH_SPECS` и множество имён в
 `lib.services.runtime_inventory.canonical_runtime_patches()` SHALL
-быть попарно равны. Любое расхождение считается drift'ом и SHALL
-быть обнаружено существующим или новым архитектурным тестом.
+быть попарно равны. **Финальное состояние: 12 patches в каждом из
+трёх множеств** (после удаления `project_tools`). Любое расхождение
+считается drift'ом и SHALL быть обнаружено архитектурным тестом.
 
 #### Scenario: Дрейф между apply_all и PatchSpec невозможен
 
-- **WHEN** `tests/test_runtime_patcher.py::TestPatchSpecs` запускается
-- **THEN** он SHALL проверять `actual == expected` (exact match),
-  а не `key in actual` (subset).
+- **WHEN** `tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`
+  (или эквивалентный) запускается
+- **THEN** он SHALL проверять `set(actual) == expected` (exact match
+  ровно 12 имён), а не `key in actual` (subset).
 
 #### Scenario: Дрейф между PatchSpec и canonical inventory невозможен
 
@@ -108,16 +133,24 @@ startup lifecycle. Точка вызова `apply_all()` SHALL быть един
 - **WHEN** в `_PATCH_SPECS` присутствует запись, не вызываемая из
   `apply_all()`
 - **THEN** тест SHALL упасть, сигнализируя drift; такие записи
-  (например, `compact_tracking`, `compact_command`, `idle_guard`)
+  (`compact_tracking`, `compact_command`, `idle_guard`)
   SHALL быть удалены в этой change.
 
 #### Scenario: Фактические элементы apply_all без PatchSpec запрещены
 
 - **WHEN** `apply_all()` зовёт `patch_*` метод, для которого нет
   записи в `_PATCH_SPECS`
-- **THEN** тест SHALL упасть; такие элементы (например,
-  `turn_delivery_fail`, `session_dir_watch`) SHALL получить
-  `PatchSpec` в этой change.
+- **THEN** тест SHALL упасть; такие элементы (`turn_delivery_fail`,
+  `session_dir_watch`) SHALL получить `PatchSpec` в этой change.
+
+#### Scenario: `project_tools` исключён из runtime inventory
+
+- **WHEN** после этой change запрашиваются
+  `RuntimePatcher.patch_specs()` или
+  `canonical_runtime_patches()`
+- **THEN** ни одно из множеств SHALL NOT содержать имени
+  `project_tools`; регистрация project tools — ответственность
+  `ProjectToolLoader`, не runtime patches.
 
 ### Requirement: Hook allowlist действительно ограничивает
 
