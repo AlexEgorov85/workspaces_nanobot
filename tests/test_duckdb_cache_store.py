@@ -83,7 +83,7 @@ def store(tmp_path):
         vector_db_table=TEST_VECTOR_TABLE,
         embedding_base_url="",
     )
-    assert st.open()
+    assert st.connect()
     yield st
     st.close()
 
@@ -232,7 +232,7 @@ class TestSkillVectorFromCache:
             tables=["audits"],
             vector_db_table=TEST_VECTOR_TABLE,
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         assert store.publish() is True
         store.close()
@@ -256,7 +256,7 @@ class TestSkillVectorFromCache:
             tables=["audits"],
             vector_db_table=TEST_VECTOR_TABLE,
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         assert store.publish() is True
         store.close()
@@ -289,7 +289,7 @@ class TestSkillVectorFromCache:
             tables=["audits"],
             vector_db_table=TEST_VECTOR_TABLE,
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_VECTOR_TABLE, _VECTOR_RECORDS)
         assert store.publish() is True
         store.close()
@@ -323,7 +323,7 @@ class TestPublish:
             schema=_test_schema,
             tables=["audits", "violations"],
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_TABLE, [{"id": 1, "title": "П1", "status": "open"}])
         assert store.get_stats()["dirty"] is True
         assert store.publish() is True
@@ -347,7 +347,7 @@ class TestPublish:
             schema=_test_schema,
             tables=["audits"],
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         store.publish()
         store.upsert_records(TEST_TABLE, [{"id": 1, "title": "Б", "status": "open"}])
@@ -364,7 +364,7 @@ class TestPublish:
     def test_publish_noop_when_not_dirty(self, tmp_path):
         target = tmp_path / "out.duckdb"
         store = DuckDbCacheStore(cache_path="", publish_path=str(target), schema=_test_schema)
-        store.open()
+        store.connect()
         assert store.publish() is True
         assert not target.exists()
         store.close()
@@ -377,7 +377,7 @@ class TestPublish:
             schema=_test_schema,
             tables=["audits"],
         )
-        store.open()
+        store.connect()
         # нет данных (store не грязный) — обычный publish no-op, force — создаёт снимок
         assert store.publish() is True
         assert not target.exists()
@@ -388,7 +388,7 @@ class TestPublish:
 
     def test_publish_force_noop_without_publish_path(self):
         store = DuckDbCacheStore(cache_path="", schema=_test_schema)
-        store.open()
+        store.connect()
         assert store.publish(force=True) is True
         store.close()
 
@@ -400,7 +400,7 @@ class TestPublish:
             schema=_test_schema,
             tables=["audits", "violations"],  # violations не заполнена
         )
-        store.open()
+        store.connect()
         store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         assert store.publish() is True
         import duckdb
@@ -414,7 +414,7 @@ class TestPublish:
 
     def test_publish_without_publish_path_is_noop(self):
         store = DuckDbCacheStore(cache_path="", schema=_test_schema)
-        store.open()
+        store.connect()
         store.upsert_records(TEST_TABLE, [{"id": 1, "title": "А", "status": "open"}])
         assert store.publish() is True
         store.close()
@@ -523,7 +523,7 @@ class TestReplace:
         st = DuckDbCacheStore(
             cache_path="", publish_path=str(target), schema=_test_schema, tables=["audits"],
         )
-        st.open()
+        st.connect()
         st.ensure_schema(TEST_TABLE, _COLS)
         st.upsert_records(TEST_TABLE, [{"id": 1, "title": "П1", "amount": 1.5, "checked_on": "2024-05-21"}])
         assert st.publish() is True

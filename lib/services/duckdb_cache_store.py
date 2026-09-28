@@ -40,6 +40,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from lib.services.cache_ownership import CacheAccessMode
+from lib.services.cache_provider import ReadOnlyAssertionError, UnsupportedSqlError
 from lib.services.db_logging_service import LogEvent, try_log_event
 
 logger = logging.getLogger(__name__)
@@ -125,6 +127,124 @@ def _safe_str(v: Any) -> str | None:
     if isinstance(v, (dict, list, tuple)):
         return json.dumps(v, ensure_ascii=False, default=str)
     return str(v)
+
+
+class UnsupportedFilesystemError(RuntimeError):
+    """Concrete cache storage MUST reject unsupported network/shared filesystem.
+
+    D11 / design D12: ``DuckDbCacheStore.open(path, mode)`` (и будущие
+    SQLite/SQL-реализации) MUST проверить, что ``path`` лежит на
+    локальной FS (ext4/APFS/NTFS). NFS / SMB / network filesystems
+    MUST быть rejected ДО открытия storage — DuckDB ATTACH с
+    ``read_only=True`` всё равно упадёт с «Conflicting lock is held
+    in PID 0», но лучше fail-fast.
+    """
+
+
+def _reject_unsupported_filesystem(path: str) -> None:
+    """Поднять ``UnsupportedFilesystemError``, если ``path`` на network FS.
+
+    Работает через ``/proc/mounts`` (только Linux). Windows / macOS —
+    no-op. Через symlink ``path`` разрешается (``Path.resolve``).
+    """
+    import platform
+
+    if platform.system().lower() not in ("linux", "linux2"):
+        return
+
+    mounts_path = Path("/proc/mounts")
+    if not mounts_path.exists():
+        return
+
+    try:
+        target = str(Path(path).resolve())
+    except OSError:
+        return
+
+    try:
+        for raw in mounts_path.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            parts = raw.split()
+            if len(parts) < 3:
+                continue
+            mount_point, fstype = parts[1], parts[2]
+            if (
+                target == mount_point
+                or target.startswith(mount_point.rstrip("/") + "/")
+            ):
+                if (
+                    "nfs" in fstype.lower()
+                    or "smb" in fstype.lower()
+                    or "cifs" in fstype.lower()
+                ):
+                    raise UnsupportedFilesystemError(
+                        f"cache path {path!r} is on {fstype} ({mount_point}); "
+                        "concrete cache storage rejects unsupported "
+                        "network/shared filesystems (see design D12). "
+                        "Use a local filesystem for gateway.cache.local_path."
+                    )
+                return
+    except UnsupportedFilesystemError:
+        raise
+    except OSError:
+        return
+
+
+_DDL_KEYWORDS = (
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "TRUNCATE",
+)
+
+
+_DML_KEYWORDS = (
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "MERGE",
+    "REPLACE",
+)
+
+
+def _classify_sql(sql: str) -> str:
+    """Классифицировать SQL statement type для ``query_sql`` валидации.
+
+    Returns:
+        Один из ``"SELECT" / "DML" / "DDL" / "OTHER"``.
+
+    Raises:
+        UnsupportedSqlError: явный DDL (``CREATE/ALTER/DROP/TRUNCATE``).
+        ReadOnlyAssertionError: ``DML`` при ``mode=READ_ONLY``.
+    """
+    if not isinstance(sql, str):
+        raise UnsupportedSqlError(str(sql), reason="non-string SQL not supported")
+
+    stripped = sql.strip().lstrip("(").lstrip()
+    head = stripped.split(None, 1)[0].upper() if stripped else ""
+
+    if head in _DDL_KEYWORDS:
+        raise UnsupportedSqlError(
+            sql, reason=f"DDL ({head}) is not supported by CacheProvider"
+        )
+
+    if head in _DML_KEYWORDS:
+        return "DML"
+
+    if head == "SELECT" or head.startswith("SELECT"):
+        return "SELECT"
+
+    if head == "WITH":
+        return "SELECT"
+
+    if head == "EXPLAIN":
+        return "SELECT"
+
+    if head == "PRAGMA":
+        return "SELECT"
+
+    return "OTHER"
 
 
 # Внутренняя таблица метаданных схемы (комментарии таблиц/колонок).
@@ -229,6 +349,15 @@ class DuckDbCacheStore:
 
         self._lock = threading.RLock()
         self._conn: Any = None            # DuckDB (read-write)
+        # Cache access mode — задаётся через ``DuckDbCacheStore.open(path, mode)``
+        # или явно через ``_mode = ...``. ``None`` указывает на legacy ``__init__``
+        # path (back-compat для callers, которые создавали ``DuckDbCacheStore``
+        # напрямую, без ``.open()`` — этот путь считается RW по умолчанию).
+        self._mode: CacheAccessMode | None = None
+        # Реальное read-only открытие DuckDB connection: при ``mode=READ_ONLY``
+        # DuckDB физически блокирует INSERT/UPDATE/DELETE (первый уровень
+        # защиты по design D12). Default ``False`` — backward-compat.
+        self._duckdb_read_only: bool = False
         self._is_ready = False
         self._index_cache: dict[str, tuple[Any, dict | None]] = {}
         self._dirty_sources: set[str] = set()
@@ -250,7 +379,19 @@ class DuckDbCacheStore:
     # ------------------------------------------------------------------
 
     def open(self) -> bool:
-        """Открыть (создать при отсутствии) DuckDB-кэш."""
+        """Открыть (создать при отсутствии) DuckDB-кэш.
+
+        DEPRECATED имя: для нового кода используйте ``connect()`` —
+        имя ``open`` зарезервировано за classmethod-factory в Stage D.
+        Сохранён как alias ``open()`` для back-compat с gateway.py и
+        benchmarks/runner.py — они вызывают ``cache_store.open()``.
+        После change ``unify-cli-gateway-architecture`` alias может быть
+        удалён; новый код MUST использовать ``connect()``.
+        """
+        return self.connect()
+
+    def connect(self) -> bool:
+        """Открыть DuckDB connection через ``_open_locked`` (post-Stage D)."""
         with self._lock:
             try:
                 self._open_locked()
@@ -266,14 +407,56 @@ class DuckDbCacheStore:
 
         if self._conn is not None:
             return
+        # Определяем реальный read-only режим — либо из explicit mode
+        # (через ``DuckDbCacheStore.open(path, mode)``), либо из
+        # legacy __init__ path с ``_duckdb_read_only`` (default False).
+        if self._mode is not None:
+            self._duckdb_read_only = bool(self._mode == CacheAccessMode.READ_ONLY)
+        elif not self._duckdb_read_only:
+            self._duckdb_read_only = False
+
         if self._cache_path:
             p = Path(self._cache_path)
             p.parent.mkdir(parents=True, exist_ok=True)
-            conn = duckdb.connect(str(p))
+            conn = duckdb.connect(str(p), read_only=self._duckdb_read_only)
         else:
-            conn = duckdb.connect()
-        conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
+            conn = duckdb.connect(read_only=self._duckdb_read_only)
+        # CREATE SCHEMA только в RW mode — DuckDB read-only connection
+        # физически запрещает любые мутации, включая CREATE SCHEMA IF NOT
+        # EXISTS. Schema MUST уже существовать из предыдущего RW-сеанса
+        # (OWNER процесс создал при первом открытии).
+        if not self._duckdb_read_only:
+            conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
         self._conn = conn
+
+    @classmethod
+    def open(
+        cls,
+        path: str,
+        mode: CacheAccessMode,
+    ) -> DuckDbCacheStore:
+        """Concrete factory — создать ``DuckDbCacheStore`` с заданным access mode.
+
+        Является единственным путём для открытия cache storage через
+        ``CacheProvider`` runtime. ``CacheProvider`` ABC НЕ имеет метода
+        ``open()`` — это ответственность concrete factory (см.
+        ``lib/services/cache_provider.py``).
+
+        ``path`` — путь к ``cache.duckdb``. Должен быть на локальной FS:
+        NFS / SMB / network filesystem MUST быть rejected ДО открытия
+        storage (см. ``_reject_unsupported_filesystem``).
+        ``mode=CacheAccessMode.READ_ONLY`` → DuckDB открывается с
+        ``read_only=True`` (первый уровень защиты по design D12).
+        ``mode=CacheAccessMode.READ_WRITE`` → обычное открытие.
+
+        Raises:
+            UnsupportedFilesystemError: ``path`` лежит на network/
+                shared filesystem. Storage НЕ открывается — fail-fast.
+        """
+        _reject_unsupported_filesystem(path)
+        instance = cls(cache_path=path)
+        instance._mode = mode
+        return instance
 
     def is_ready(self) -> bool:
         return self._is_ready
@@ -1030,9 +1213,40 @@ class DuckDbCacheStore:
                 return {"status": "error", "row_count": 0, "columns": [], "rows": [],
                         "error": "DuckDbCacheStore is not ready"}
 
+            self._assert_query_sql_allowed_locked(sql)
+
             from lib.utils.duckdb_query import run_query
 
             return run_query(self._conn, sql, params)
+
+    def _assert_query_sql_allowed_locked(self, sql: str) -> None:
+        """Второй уровень защиты (assertion guard) для ``query_sql``.
+
+        Первый уровень — DuckDB connection opened с ``read_only=True``
+        для ``mode=READ_ONLY`` (физический bar). Этот guard закрывает
+        случай, когда ``_conn`` (как-то) был переоткрыт в RW или user
+        пишет из другого процесса.
+
+        Семантика:
+
+          * DDL (``CREATE/ALTER/DROP/TRUNCATE``) → ``UnsupportedSqlError``
+            в любом mode;
+          * ``SELECT`` → всегда разрешён;
+          * ``INSERT/UPDATE/DELETE`` при ``mode=READ_ONLY`` →
+            ``ReadOnlyAssertionError``;
+          * ``mode`` неизвестен (``None`` через legacy ``__init__`` path
+            без ``DuckDbCacheStore.open``) → cache открыт в RW по
+            default (back-compat).
+        """
+        sql_kind = _classify_sql(sql)
+        if sql_kind == "OTHER":
+            raise UnsupportedSqlError(
+                sql, reason="only SELECT/INSERT/UPDATE/DELETE are supported"
+            )
+        if sql_kind == "DML" and (
+            self._mode == CacheAccessMode.READ_ONLY or self._duckdb_read_only
+        ):
+            raise ReadOnlyAssertionError(sql)
 
     def explain(self, sql: str) -> dict[str, Any]:
         with self._lock:

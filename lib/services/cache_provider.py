@@ -60,6 +60,40 @@ class IndexIntegrityError(Exception):
         super().__init__(f"vector index {index_name!r} is {status}: {reason}")
 
 
+class UnsupportedSqlError(Exception):
+    """SQL statement type не поддерживается CacheProvider.
+
+    Поднимается ``query_sql()`` при попытке выполнить DDL
+    (``CREATE/ALTER/DROP/TRUNCATE``) в любом mode. Отдельный exception
+    class — чтобы tool мог показать пользователю структурированную
+    ошибку (``unsupported_sql``), не подмешивая её под
+    ``read_only_assertion``.
+    """
+
+    def __init__(self, sql: str, reason: str = "") -> None:
+        self.sql = sql
+        self.reason = reason or "DDL not supported by CacheProvider"
+        super().__init__(f"unsupported SQL: {self.reason} (sql={sql!r})")
+
+
+class ReadOnlyAssertionError(Exception):
+    """Попытка мутации через ``query_sql()`` при ``mode=READ_ONLY``.
+
+    Первый уровень защиты — DuckDB connection с ``read_only=True`` —
+    физически блокирует ``INSERT/UPDATE/DELETE``. Это второй уровень
+    (assertion guard в ``CacheProvider``), для случая когда user-side
+    код обходит ``query_sql`` API и пишет в cache напрямую через
+    concrete adapter.
+    """
+
+    def __init__(self, sql: str = "") -> None:
+        self.sql = sql
+        super().__init__(
+            "CacheProvider opened in READ_ONLY mode; "
+            f"mutations are forbidden (sql={sql!r})"
+        )
+
+
 class CacheProvider(ABC):
     """Абстрактный провайдер кэша данных (SQL-кеш + векторные индексы)."""
 

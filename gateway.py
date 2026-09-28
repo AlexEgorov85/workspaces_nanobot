@@ -151,7 +151,7 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     # данные не попадут in-memory DuckDB.
     first_sync_event: "asyncio.Event | None" = None
     if ctx.sync_service is not None and ctx.cache_store is not None:
-        ctx.cache_store.open()
+        ctx.cache_store.connect()
         # Пересоздаём снапшот при каждом старте: удаляем устаревший файл,
         # чтобы CLI/skill не читали данные с прошлого запуска, пока
         # initial_load не заполнит свежий снимок заново.
