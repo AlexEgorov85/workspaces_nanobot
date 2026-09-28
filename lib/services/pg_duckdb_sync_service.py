@@ -64,6 +64,9 @@ class PgDuckDbSyncService:
         reconnect_backoff_max: float = 0.0,
         full_resync_every: int = 0,
         db_logging_service: Any | None = None,
+        *,
+        ownership_coordinator: Any | None = None,
+        cache_provider: Any | None = None,
     ) -> None:
         self._dsn = dsn
         self._schema = schema
@@ -86,14 +89,24 @@ class PgDuckDbSyncService:
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
 
+        # Stage E (change ``unify-cli-gateway-architecture``):
+        # ownership_coordinator + cache_provider — fencing integration.
+        # Если переданы, каждый sync-cycle оборачивается в
+        # ``coord.acquire_write_fence()`` (PG advisory lock + generation
+        # check) перед тем, как сообщать cache_provider о новых записях.
+        # При takeover (другой OWNER с большим generation) sync останавливается
+        # с ``OwnershipLostError``, освобождает claim, и не пишет в stale cache.
+        self._ownership_coordinator = ownership_coordinator
+        self._cache_provider = cache_provider
+
         self._conn: psycopg2.extensions.connection | None = None
         self._thread: threading.Thread | None = None
         self._running = False
         self._initial_load = True
 
-        # РРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅС‹Р№ РїРѕР»Р»РёРЅРі: {table: РїРѕСЃР»РµРґРЅРµРµ Р·РЅР°С‡РµРЅРёРµ track-РєРѕР»РѕРЅРєРё}
+        # РРЅРєСЂРµРјРµРЅС‚Р°Р»СЊРЅС‹Р№ РїРѕР»Р»РёРЅРі: {table: РїРѕСЃР»РµРґРЅРµРµ Р·РЅР°С‡РµРЅРёРµ track-РєРѕР»РѕРЅРєРё}
         self._last_sync: dict[str, Any] = {}
-        # Batch-prefetch: {table: track-РєРѕР»РѕРЅРєР°}. Р—Р°РїРѕР»РЅСЏРµС‚СЃСЏ РїСЂРё РїРµСЂРІРѕРј РѕРїСЂРѕСЃРµ,
+        # Batch-prefetch: {table: track-РєРѕР»РѕРЅРєР°}. Р—Р°РїРѕР»РЅСЏРµС‚СЃСй РїСЂРё РїРµСЂРІРѕРј РѕРїСЂРѕСЃРµ,
         # РґР°Р»РµРµ С‡РёС‚Р°РµС‚СЃСЏ Р·Р° O(1). РЈСЃС‚СЂР°РЅСЏРµС‚ РїРѕРІС‚РѕСЂРЅС‹Р№ lookup С‡РµСЂРµР· table_registry
         # РЅР° РєР°Р¶РґРѕРј poll-С†РёРєР»Рµ.
         self._column_cache: dict[str, str] = {}
@@ -261,8 +274,8 @@ class PgDuckDbSyncService:
         """РџСЃРµРІРґРѕРЅРёРј ``get_stats`` (РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РІ РјРѕРЅРёС‚РѕСЂРёРЅРіРµ/Р»РѕРіР°С…)."""
         return self.get_stats()
 
-    # ------------------------------------------------------------------
-    # Worker-С†РёРєР»
+# ------------------------------------------------------------------
+    # Worker-цикл
     # ------------------------------------------------------------------
 
     def _worker(self) -> None:
@@ -275,18 +288,59 @@ class PgDuckDbSyncService:
                 self._drain_queue()
                 if not self._running:
                     break
-                self._poll_changes()
+                # Fencing boundary: внутри одного PG-цикла с advisory
+                # lock + generation check. При takeover (другой OWNER,
+                # generation изменился) — ловим ``OwnershipLostError`` и
+                # останавливаем worker. coord.release() ещё нет смысла
+                # — пусть стейт-машина реклеймит при следующем старте
+                # (это Stage F-плюс task; сейчас — fail-soft воркер-стоп).
+                self._sync_cycle_with_fence()
+                if not self._running:
+                    break
                 self._fire_sync_callback()
-                # Р–РґС‘Рј РёРЅС‚РµСЂРІР°Р» РїРѕР»Р»РёРЅРіР° РёР»Рё СЃРёРіРЅР°Р» РѕСЃС‚Р°РЅРѕРІРєРё
+                # Ждём интервал поллинга или сигнал остановки
                 self._stop_event.wait(self._poll_interval)
         finally:
             self._running = False
-            # Р¤РёРЅР°Р»СЊРЅР°СЏ РїРѕРїС‹С‚РєР° РґРѕРїРёСЃР°С‚СЊ РѕСЃС‚Р°РІС€РёРµСЃСЏ Р·Р°РїРёСЃРё
+            # Финальная попытка дописать оставшиеся записи
             try:
                 self._drain_queue()
             except Exception:
                 pass
             self._close_connection()
+
+    def _sync_cycle_with_fence(self) -> None:
+        """Stage E: fencing-wrapped sync cycle.
+
+        Если coordinator не передан — старый путь (без fencing). Если
+        передан — внутри ``coord.acquire_write_fence()`` выполняется
+        PG-координация с advisory lock + generation check. При успехе —
+        ``_poll_changes()`` + ``_fire_sync_callback()``. При
+        ``OwnershipLostError`` — sync-cycle прерывается, логируется,
+        worker выходит из run-цикла.
+        """
+        if self._ownership_coordinator is None:
+            self._poll_changes()
+            return
+        try:
+            with self._ownership_coordinator.acquire_write_fence():
+                self._poll_changes()
+        except Exception as exc:
+            from lib.services.cache_ownership import OwnershipLostError
+            if isinstance(exc, OwnershipLostError):
+                logger.warning(
+                    "PgDuckDbSyncService: ownership lost (%s); stopping worker",
+                    exc,
+                )
+                self._log_sync_event(
+                    event_type="sync_ownership_lost",
+                    summary=f"ownership lost during sync cycle: {exc}",
+                    payload={"reason": str(exc)},
+                    level="WARN",
+                )
+                self._running = False
+                return
+            raise
 
     def _fire_sync_callback(self) -> None:
         """Уведомить о завершении цикла синхронизации (после load/поллинга)."""

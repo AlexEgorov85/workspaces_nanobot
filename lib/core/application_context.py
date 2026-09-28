@@ -124,6 +124,7 @@ class ApplicationContext:
     sync_service: Any | None = None
     cache_provider: Any | None = None  # CacheProvider ABC instance (Stage D)
     cache_store: Any | None = None  # legacy alias for cache_provider
+    ownership_coordinator: Any | None = None  # CacheOwnershipCoordinator (Stage C)
 
     # Composition role (Stage A)
     role: str = ""  # "gateway" | "cli"
@@ -314,18 +315,16 @@ class ApplicationContext:
         # в ``start()`` lifecycle.
         ctx.session_cold_sync_service = _make_session_cold_sync_service(ctx)
 
-        # 5. PgDuckDbSyncService + DuckDbCacheStore
+        # 5. CacheOwnershipCoordinator + cache_provider + sync service
         if ctx.enable_audit:
             _auto_register_skills(ctx)
             _register_infra_resources(ctx)
-            _sync_service, _cache_provider = _make_sync_services(ctx)
-            ctx.sync_service = _sync_service
-            # Stage D: ``CacheProvider`` — единый runtime interface для
-            # Skill/Tool/AgentLoop. Concrete implementation
-            # (текущая: ``DuckDbCacheStore``) живёт только в composition
-            # code. Все runtime-consumers MUST зависеть от ``CacheProvider``
-            # (см. ``lib.services.cache_provider`` ABC).
-            ctx.cache_provider = _cache_provider
+            (
+                ctx.cache_provider,
+                ctx.sync_service,
+                _ownership_coord,
+            ) = _make_sync_services(ctx)
+            ctx.ownership_coordinator = _ownership_coord
             # Back-compat alias — runtime code/project tools/runtime
             # patches всё ещё ожидают ``ctx.cache_store`` (rename в
             # Stage D). После migrate callers на новый interface alias
@@ -635,6 +634,14 @@ class ApplicationContext:
                 self.usage_store.close()
             except Exception as exc:
                 logger.warning("usage_store.close failed: %s", exc)
+        # Ownership release — Stage E. При shutdown coordinator.release()
+        # удаляет строку claim из ``agent_cache_ownership`` для
+        # следующего takeover'а (или kill -9 потом expire'нется).
+        if self.ownership_coordinator is not None:
+            try:
+                self.ownership_coordinator.release()
+            except Exception as exc:
+                logger.warning("ownership_coordinator.release failed: %s", exc)
         # После остановки сервисов закрываем общий пул соединений.
         _stop_db_pool()
         if self.runtime_health is not None:
@@ -1373,7 +1380,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             producer="ApplicationContext",
             event_type="sync_skipped_registry_empty",
         )
-        return None, None
+        return None, None, None
     if not dsn:
         logger.warning(
             "PgDuckDbSyncService skipped: channels.postgres.dsn не задан "
@@ -1398,8 +1405,12 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             producer="ApplicationContext",
             event_type="sync_skipped_no_dsn",
         )
-        return None, None
+        return None, None, None
 
+    from lib.services.cache_ownership import (
+        CacheAccessMode,
+        CacheOwnershipCoordinator,
+    )
     from lib.services.duckdb_cache_store import DuckDbCacheStore
     from lib.services.pg_duckdb_sync_service import PgDuckDbSyncService
 
@@ -1430,7 +1441,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             producer="ApplicationContext",
             event_type="sync_skipped_no_table_names",
         )
-        return None, None
+        return None, None, None
 
     schemas: list[str] = []
     for r in (*table_registry.table_resources(), *table_registry.vector_resources()):
@@ -1481,17 +1492,63 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     # при старте gateway).
     sync_tables = list(dict.fromkeys(all_table_names + vector_names))
 
-    store = DuckDbCacheStore(
-        cache_path="",
-        publish_path=publish_path,
-        schema=schemas[0] if schemas else "main",
-        tables=all_table_names or None,
-        vector_db_table=vector_names[0] if vector_names else "",
-        embedding_base_url=embedding_base_url,
-        embedding_model=embedding_model,
-        embedding_dimension=embedding_dimension,
-        db_logging_service=ctx.db_logging_service,
+    # ==== Stage C/D/B/E integration ====
+    # 1. CacheOwnershipCoordinator — координатор ownership для логического
+    #    cache resource ``local_cache`` через таблицу ``agent_cache_ownership``
+    #    (см. sql/migrations/V005__create_agent_cache_ownership.sql).
+    # 2. ``coord.try_claim()`` — atomic PG INSERT ... ON CONFLICT. Один процесс
+    #    получает acquired=True (OWNER), остальные — False (READER).
+    # 3. ``DuckDbCacheStore.open(path, mode)`` — concrete factory. mode
+    #    зависит от результата claim:
+    #      - acquired=True → READ_WRITE (OWNER может писать в cache);
+    #      - acquired=False → READ_ONLY (READER, через физический read-only
+    #        DuckDB connection + assertion guard в query_sql).
+    worker_id = f"{ctx.role}_{os.getpid()}"
+    coord = CacheOwnershipCoordinator(
+        worker_id=worker_id,
+        dsn=dsn,
+        resource_key="local_cache",
     )
+    claim = coord.try_claim()
+    logger.info(
+        "cache_ownership: role=%s worker_id=%s acquired=%s generation=%d "
+        "current_owner=%s",
+        ctx.role, worker_id, claim.acquired, claim.generation,
+        claim.current_owner_id or "(none)",
+    )
+
+    mode = CacheAccessMode.READ_WRITE if claim.acquired else CacheAccessMode.READ_ONLY
+
+    # Concrete factory — DuckDB connection opened с учётом ``mode``.
+    # Если path не на локальной FS — ``UnsupportedFilesystemError`` поднимается.
+    store = DuckDbCacheStore.open(
+        path=publish_path,
+        mode=mode,
+    )
+    # Конфигурируем store через конструктор args через post-init хак:
+    # factory ``open()`` принимает только path/mode. Другие поля
+    # (schema, tables, vector_db_table, embedding_*) настраиваются
+    # отдельным вызовом или через прямой dict.
+    store._publish_path = publish_path
+    store._schema = schemas[0] if schemas else "main"
+    store._tables = all_table_names or None
+    store._vector_db_table = vector_names[0] if vector_names else ""
+    store._embedding_base_url = embedding_base_url
+    store._embedding_model = embedding_model
+    store._embedding_dimension = embedding_dimension
+    store._db_logging_service = ctx.db_logging_service
+
+    # ``sync_service`` создаётся ТОЛЬКО если этот процесс — OWNER
+    # (claim.acquired=True). READER процессы НЕ sync'ят — только читают
+    # snapshot, который публикует OWNER.
+    if not claim.acquired:
+        logger.info(
+            "cache_ownership: role=%s worker_id=%s is READER; "
+            "sync_service NOT created (other process is OWNER gen=%d)",
+            ctx.role, worker_id, claim.generation,
+        )
+        return store, None, coord
+
     sync = PgDuckDbSyncService(
         dsn=dsn,
         schema=schemas[0] if schemas else "main",
@@ -1503,8 +1560,10 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         reconnect_backoff_max=reconnect_backoff_max,
         full_resync_every=full_resync_every,
         db_logging_service=ctx.db_logging_service,
+        ownership_coordinator=coord,
+        cache_provider=store,
     )
-    return sync, store
+    return store, sync, coord
 
 
 def _record_sync_skipped(
