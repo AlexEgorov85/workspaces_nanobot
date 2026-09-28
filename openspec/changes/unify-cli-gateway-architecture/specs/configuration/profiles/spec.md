@@ -14,6 +14,8 @@ Gateway entrypoint `gateway.py` MAY принимать `--profile` (текуще
 
 После `config._initialize_settings(profile="test")` runtime-компоненты НЕ ДОЛЖНЫ ветвиться по `profile == "test"` — выбор профиля происходит только на этапе resolution, не в runtime-коде.
 
+`ApplicationContext.create()` MUST NOT принимать `profile` как параметр. Профиль MUST быть разрешён ДО `create()` через `_initialize_settings(profile=...)`. После resolution `ApplicationContext` получает профиль через `SETTINGS["profile"]`, не через constructor-arg.
+
 #### Scenario: CLI не принимает --profile
 
 - **WHEN** пользователь запускает `python cli_agent.py --profile=test`
@@ -31,6 +33,12 @@ Gateway entrypoint `gateway.py` MAY принимать `--profile` (текуще
 - **WHEN** пользователь запускает `python cli_agent.py` с `NANOBOT_PROFILE=prod` в env
 - **THEN** CLI MUST игнорировать переменную окружения
 - **AND** `SETTINGS["profile"]` MUST быть `"test"`, не `"prod"`
+
+#### Scenario: ApplicationContext.create() не принимает profile
+
+- **WHEN** application entrypoint вызывает `ApplicationContext.create(...)`
+- **THEN** он MUST NOT передавать `profile` как параметр
+- **AND** `inspect.signature(ApplicationContext.create)` MUST NOT содержать `profile` в `parameters`
 
 #### Scenario: Runtime не ветвится по profile
 
