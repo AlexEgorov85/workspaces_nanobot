@@ -287,4 +287,3 @@ class AgentFactory:
             print_llm_calls=print_llm_calls,
             get_model=get_model,
         )
-        )

@@ -4,6 +4,13 @@
 (включая auto-scan проектных хуков из ``workspace/hooks/``),
 REPL/typewriter — в ``lib.cli.console_loop``. Этот файл — CLI-аргументы,
 миграция cron, preload аудит-кеша навыка, vanilla/patched-режимы.
+
+CLI = фиксированный профиль ``test`` (Stage F из
+``unify-cli-gateway-architecture``). ``--profile`` больше НЕ принимается;
+передача → ``ConfigurationError``. CLI MUST NOT поднимать env-based
+override (см. design D8). CLI — локальный test/dev entrypoint, не
+production deployment interface; для production-dep используется
+``gateway.py``.
 """
 
 from __future__ import annotations
@@ -16,14 +23,17 @@ import sys
 from pathlib import Path
 
 
-_SUPPORTED_PROFILES = ("prod", "test")
+CLI_FIXED_PROFILE = "test"
+CLI_REJECTED_FLAGS = frozenset({"--profile", "-profile", "-p"})
 
 
 from config import ConfigurationError  # noqa: E402 — module-level import is safe
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Парсинг argv с явной whitelist-валидацией ``--profile``.
+    """Парсинг argv. ``--profile`` НЕ принимается (CLI = фиксированный
+    profile ``test``, см. design D8). Если передан — ``ConfigurationError``
+    с понятным сообщением.
 
     Whitelist и required-валидация делаются здесь, а не делегируются
     ``argparse.error``/``choices=`` — иначе ``SystemExit(2)`` от argparse
@@ -36,15 +46,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         choices=("auto", "file", "postgres"))
     parser.add_argument("--session", "-s", type=str, default=None)
     parser.add_argument(
-        "--profile",
-        type=str,
-        default=None,
-        help="Профиль конфигурации: prod | test.",
-    )
-    parser.add_argument(
         "--smoke",
         action="store_true",
-        help="Smoke-режим: парсит --profile, инициализирует SETTINGS, "
+        help="Smoke-режим: инициализирует SETTINGS, "
              "печатает баннер + runtime-таблицу, выходит 0. "
              "Только для D.2 integration-тестов.",
     )
@@ -54,15 +58,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if "--help" in argv or "-h" in argv:
         parser.print_help()
         sys.exit(0)
+
+    # Stage F: явный reject ``--profile`` до argparse (после будет
+    # путать с hidden args). Учитываем и form с ``=`` (``--profile=test``,
+    # ``-p=test``) — argv-элемент может начинаться с rejected.
+    for arg in argv:
+        for rejected in CLI_REJECTED_FLAGS:
+            if arg == rejected or arg.startswith(rejected + "="):
+                raise ConfigurationError(
+                    f"cli_agent.py: {rejected} is not supported "
+                    f"(CLI uses fixed profile={CLI_FIXED_PROFILE!r}; "
+                    "use gateway.py for prod deployment)"
+                )
+
     args, _unknown = parser.parse_known_args(argv)
 
-    if not args.profile:
-        raise ConfigurationError("--profile is required")
-    if args.profile not in _SUPPORTED_PROFILES:
-        raise ConfigurationError(
-            f"--profile={args.profile!r} is not supported "
-            f"(allowed: prod, test)"
-        )
+    # ``profile`` фиксирован — НЕ передаётся в lifecycle-gate.
+    args.profile = CLI_FIXED_PROFILE
     return args
 
 
@@ -80,14 +92,16 @@ def _entrypoint_main(args: argparse.Namespace) -> None:
     нет ``sys.exit(2)`` (см. design.md Decision 2 unification).
     """
     import config as _cfg
-    _cfg._initialize_settings(profile=args.profile)
+    # CLI = фиксированный test-профиль (Stage F, design D8). НЕ
+    # читаем из окружения и НЕ принимаем --profile.
+    _cfg._initialize_settings(profile=CLI_FIXED_PROFILE)
 
     from lib.cli.console_loop import run_repl
     from lib.cli.display_config import DisplayConfig
     from lib.core.application_context import ApplicationContext
 
     console.print(
-        f"[bold]Starting nanobot cli[/bold] · profile={args.profile}"
+        f"[bold]Starting nanobot cli[/bold] · profile={CLI_FIXED_PROFILE}"
     )
 
     # Smoke-режим: печатает баннер + runtime-таблицу, выходит 0
@@ -102,13 +116,13 @@ def _entrypoint_main(args: argparse.Namespace) -> None:
             enable_db_logging=True,
             enable_audit=False,
             enable_cron=False,
-            profile=args.profile,
+            profile=CLI_FIXED_PROFILE,
             print_llm_calls=False,
         )
         runtime_table = cfg.settings["logging"]["db"]["table_name"]
         console.print(
             f"nanobot cli smoke · project v{project_version()} · "
-            f"nanobot {__version__} · profile={args.profile} · "
+            f"nanobot {__version__} · profile={CLI_FIXED_PROFILE} · "
             f"logging.db.table_name={runtime_table}"
         )
         console.print("OK_SMOKE_COMPLETE")
