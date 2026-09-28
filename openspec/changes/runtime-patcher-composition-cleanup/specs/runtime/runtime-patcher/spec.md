@@ -119,14 +119,27 @@ call site'ов), а не runtime-механизмом idempotency. `RuntimePatch
 
 - **WHEN** `tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`
   (или эквивалентный) запускается
-- **THEN** он SHALL проверять `set(actual) == expected` (exact match
-  ровно 12 имён), а не `key in actual` (subset).
+- **THEN** он SHALL проверять **три множества одновременно**:
+  - имена patches, фактически вызываемых из
+    `RuntimePatcher.apply_all()` (извлечённые через AST-анализ
+    тела метода: все аргументы `name` в вызовах
+    `self._record(report, "<name>", ...)`);
+  - `set(RuntimePatcher.patch_specs())`;
+  - `{p.name for p in canonical_runtime_patches()}`.
+  Все три множества SHALL быть попарно равны (финально — по 12
+  имён). Это инвариант «three sets exactly equal», а не
+  subset-проверка (`assert key in actual` ужесточается до
+  `assert set(actual) == expected`).
 
 #### Scenario: Дрейф между PatchSpec и canonical inventory невозможен
 
 - **WHEN** `tests/test_runtime_inventory.py` запускается
-- **THEN** он SHALL проверять, что `set(canonical_runtime_patches())`
-  равно `set(RuntimePatcher.patch_specs())` без исключений.
+- **THEN** он SHALL проверять, что
+  `{p.name for p in canonical_runtime_patches()}`
+  равно `set(RuntimePatcher.patch_specs())` без исключений
+  (сравнение имён, не объектов; `canonical_runtime_patches()`
+  возвращает `list[RuntimePatchSpec]`, `patch_specs()` —
+  `dict[str, PatchSpec]`).
 
 #### Scenario: Stale DEPRECATED-остатки запрещены
 

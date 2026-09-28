@@ -167,7 +167,7 @@ Exact-проверка делает drift видимым при первом CI-
 **Альтернативы:** Множество «allow superset» (как сейчас) — отвергнуто
 как раз и маскирующее drift.
 
-### Decision 3: `RuntimePatcher` не владеет registration project tools. `ProjectToolLoader` — internal helper, не компонент.
+### Decision 3: `RuntimePatcher` не владеет registration project tools. `ProjectToolLoader` — internal helper, не компонент. Оба — независимые этапы composition в `ApplicationContext`.
 
 `patch_project_tools()` (тело: `importlib.util` + `pkgutil.iter_modules`
 + `ToolContext(...)` + `agent.tools.register(tool)`) переносится в
@@ -181,7 +181,7 @@ class ProjectToolsLoadResult:
     disabled: list[str]
     duplicate: list[str]
     failed: list[str]
-    detail: str  # форматированная строка для баннера логов
+    detail: str  # presentation/diagnostic строка для баннера логов
 
 
 def register_project_tools(
@@ -192,8 +192,15 @@ def register_project_tools(
     cache_store: CacheProvider | None = None,
     db_logging_service: DbLoggingService | None = None,
 ) -> ProjectToolsLoadResult:
-    """discover + DI + register — атомарная операция."""
+    """discover + DI + register — best-effort операция с частичным успехом.
+    Ошибка одного tool не отменяет успешно зарегистрированные остальные."""
 ```
+
+**Не атомарная**: best-effort с детерминированным частичным успехом.
+Это поведение уже реализовано в существующем `patch_project_tools`
+(цикл `for cls in candidates` ловит исключения per-class). Слово
+«атомарная» вводить в спеку запрещено — оно провоцирует неверные
+traces (rollback при ошибке).
 
 Discovery (`pkgutil.iter_modules`, `importlib.util.spec_from_file_location`,
 `spec.loader.exec_module`) — приватная функция внутри модуля
@@ -201,10 +208,35 @@ Discovery (`pkgutil.iter_modules`, `importlib.util.spec_from_file_location`,
 `register_project_tools`. Это **не** публичный API для
 последовательных вызовов `discover` + `register`.
 
+**Соотношение structured vs `detail`:** `ProjectToolsLoadResult`
+содержит структурные поля `registered`/`disabled`/`duplicate`/
+`failed` для programmatic consumers и поле `detail: str` для
+presentation/diagnostic. Существующий формат `detail` сохраняется
+без изменений (используется баннером `_emit_project_tools_inventory_banner`
+и парсером `parse_project_tools_detail` в `runtime_inventory.py`).
+**В рамках этой change** ни `diff_project_tools_from_detail()`, ни
+regex-парсер не переписываются — change фиксирует только новый
+контракт loader'а и переключение banner'а на чтение
+`project_tools_result.detail` вместо `patch_report.details["project_tools"]`.
+
 `RuntimePatcher.apply_all()` больше **не** вызывает `patch_project_tools`
-и не возвращает `project_tools` в `PatchReport`. В
-`ApplicationContext.create()` после `apply_all()` отдельным шагом
-вызывается:
+и не возвращает `project_tools` в `PatchReport`. Архитектура:
+
+```
+              ApplicationContext.create()
+                /                  \
+               /                    \
+   RuntimePatcher.apply_all()   register_project_tools()
+   (upstream runtime patches)   (project tools registration)
+```
+
+`RuntimePatcher` и `ProjectToolLoader` — **независимые** этапы
+composition, оба вызываются `ApplicationContext.create()`. Ни один
+из них **не зависит** от другого: `RuntimePatcher` ничего не знает
+про `ProjectToolLoader` и наоборот. Это два независимых stage'а
+одного composition root.
+
+`ApplicationContext.create()` после `apply_all()`:
 
 ```python
 from lib.services.project_tool_loader import (
@@ -224,19 +256,25 @@ _emit_project_tools_inventory_banner(project_tools_result)
 
 Баннер `project tools` больше **не** читает `patch_report.details["project_tools"]`
 (этого ключа в `PatchReport` больше нет) — он читает
-`project_tools_result.detail`. Тест 4.4 фиксирует это.
+`project_tools_result.detail`. Тест 4.4 фиксирует это. Сама функция
+`_emit_project_tools_inventory_banner` находится в
+`lib/core/application_context.py:750-810` (не в
+`lib/services/runtime_inventory.py` — слабому агенту легко
+перепутать; см. task 4.4).
 
 **Статус `ProjectToolLoader`:** это **узкий stateless helper** —
 нет lifecycle, нет конфигурации, нет state, нет публичного контракта
 помимо одной функции и одного dataclass. По критериям
 `openspec/specs/architecture/component-model/spec.md` это **не
 компонент**. Отдельная spec не создаётся, запись в `COMPONENTS.md`
-не добавляется. Loader описывается только в
-`docs/ARCHITECTURE.md` как dependency `RuntimePatcher`'а
-(boundary-раздел спеки `runtime-patcher`).
+не добавляется. Loader описывается только в `docs/ARCHITECTURE.md`
+как **независимый этап composition** в `ApplicationContext.create()`.
 
 `RuntimePatcher` остаётся компонентом и получает canonical spec
-+ запись в `COMPONENTS.md`.
++ запись в `COMPONENTS.md`. Boundary-раздел спеки `runtime-patcher`
+фиксирует: «`RuntimePatcher` НЕ зависит от `ProjectToolLoader`;
+регистрация project tools — ответственность loader'а, не
+`RuntimePatcher`».
 
 Loader **не** создаёт нового registry, **не** импортирует Skills,
 **не** знает имён доменных tool'ов (Skill-названия для
@@ -321,11 +359,25 @@ return [
 ```
 
 Дефолтные значения `required` для существующих спеков задаются явно
-на основе реального fail-impact:
+на основе реального fail-impact для diagnostics:
 
 - `assemble_outbound`, `save_turn`, `subagent_logging`,
-  `context_governor` — `required=True` (ломают runtime при отказе);
+  `context_governor` — `required=True` (отсутствие или failure
+  считается **критическим для диагностики** runtime inventory);
 - остальные — `required=False` (skip по конфигу / opt-in фичи).
+
+**`required=True` НЕ означает:**
+- **НЕ** исключение из `ApplicationContext.create()`;
+- **НЕ** startup abort (см. Decision 6);
+- **НЕ** автоматический rollback других успешно зарегистрированных
+  patches.
+
+`required` — это **только** metadata для inventory/diagnostics
+(startup-баннер, `diff_runtime_patches()`, `diagnose_startup.py`),
+которая влияет на то, как failed/missing patch отображается
+оператору (через warning-лог с явным маркером), но **не** на
+control flow. Это два независимых измерения: `risk` (цена
+апгрейда nanobot) и `required` (критичность для diagnostics).
 
 **Почему:** Текущий второй hardcoded set `high_risk_required`
 (`runtime_inventory.py:170-175`) дублирует знание, которое уже

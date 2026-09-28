@@ -67,28 +67,45 @@
   -q` зелёный; dataclass по-прежнему frozen.
 
 - [ ] 3.4 В `lib/services/runtime_inventory.py::canonical_runtime_patches`
-  (строки 162–186) удалить `high_risk_required` и проекцию через
-  `spec.required` (а не через локальный frozenset). Verify:
-  `set(canonical_runtime_patches()) == set(RuntimePatcher.patch_specs())`;
-  unit-тест в `tests/test_runtime_inventory.py` явно проверяет
-  отсутствие `high_risk_required` атрибута в модуле.
+  (строки 162–186) удалить локальный `high_risk_required` и
+  **заменить** текущую проекцию на проекцию через `spec.required`
+  (а не через локальный frozenset). Verify:
+  `{p.name for p in canonical_runtime_patches()} ==
+  set(RuntimePatcher.patch_specs())` (сравнение имён, не объектов:
+  `canonical_runtime_patches()` возвращает `list[RuntimePatchSpec]`,
+  `patch_specs()` — `dict[str, PatchSpec]`); семантический тест
+  в `tests/test_runtime_inventory.py::test_required_projects_from_patch_spec`
+  (см. task 6.1) явно проверяет отсутствие второго источника истины.
 
 - [ ] 3.5 Ужесточить
   `tests/test_runtime_patcher.py::TestPatchSpecs::test_all_patches_have_specs`
-  до exact-match проверки: переименовать в
-  `test_inventory_is_exact` и заменить `for key in expected: assert key in actual`
-  на `assert set(actual) == expected` (список expected — финальный
-  набор 12 patches). Verify: тест падает на старом коде
-  (14 vs 12 + extra финальных); зеленеет после 3.1–3.3 И 4.2.
+  до exact-match проверки трёх множеств: переименовать в
+  `test_inventory_is_exact` и заменить
+  `for key in expected: assert key in actual`
+  на **попарное равенство трёх множеств** (AST-анализ
+  `RuntimePatcher.apply_all` для извлечения реально вызываемых
+  имён из аргументов `self._record(report, "<name>", ...)`,
+  `set(RuntimePatcher.patch_specs())`, и
+  `{p.name for p in canonical_runtime_patches()}`). Финальный
+  expected — 12 имён. **Запрещено** создавать четвёртый hardcoded
+  список имён в `expected` — иначе тест перестаёт ловить drift
+  между `apply_all()` и `_PATCH_SPECS`. Verify: тест падает на
+  старом коде (14 vs 12); зеленеет после 3.1–3.3 И 4.2.
 
 - [ ] 3.6 Обновить `docs/architecture/runtime-patcher-inventory.md` —
-  пересобрать каталог патчей под новое exact inventory, удалить
-  упоминания `compact_tracking`/`compact_command`/`idle_guard`,
+  пересобрать каталог патчей под новое exact inventory (12 patches),
+  удалить упоминания `compact_tracking`/`compact_command`/`idle_guard`,
   добавить `turn_delivery_fail`/`session_dir_watch`.
-  Verify: `git grep -l "compact_tracking\|compact_command\|idle_guard"
-  -- '*.md' '*.py'` показывает 0 матчей вне CHANGELOG и git
-  history (исключения — `_PATCH_SPECS` если остались DEPRECATED
-  в release-ветке для миграции, и CHANGELOG).
+  Verify:
+  ```
+  git grep -l "compact_tracking\|compact_command\|idle_guard" \
+    -- '*.md' '*.py' | \
+    grep -v CHANGELOG.md | \
+    grep -v 'openspec/changes/archive/'
+  ```
+  показывает 0 матчей. Никаких исключений для `_PATCH_SPECS` или
+  release-веток — патчи удаляются атомарно (см. Decision 3 и
+  Non-Goals про отсутствие deprecation period).
 
 ## 4. Вынос `patch_project_tools` в отдельный loader
 
@@ -121,7 +138,24 @@
   DI, тот же `cls.enabled(ctx)` / `cls.create(ctx)` /
   `agent.tools.register(tool)`. Discovery (`pkgutil.iter_modules` +
   `importlib.util`) — приватная функция `_discover(workspace_dir)`,
-  не публичная. Verify: `python -c "from lib.services.project_tool_loader
+  не публичная.
+
+  **Семантика — best-effort с частичным успехом, НЕ атомарная:**
+  ошибка одного tool (`Tool.enabled` / `Tool.create` /
+  `agent.tools.register`) не отменяет успешно зарегистрированные
+  остальные. Это поведение уже реализовано в существующем
+  `patch_project_tools` (цикл `for cls in candidates` ловит
+  исключения per-class, см. `runtime_patcher.py:2470-2472`).
+  `ProjectToolsLoadResult` фиксирует детерминированный результат
+  через структурные поля `registered`/`disabled`/`duplicate`/
+  `failed` (для programmatic consumers) и поле `detail: str`
+  (presentation/diagnostic representation — для баннера логов
+  и для существующего `parse_project_tools_detail` в
+  `runtime_inventory.py`). В рамках этой change сохраняется
+  существующий формат `detail`; `diff_project_tools_from_detail()`
+  и regex-парсер не переписываются.
+
+  Verify: `python -c "from lib.services.project_tool_loader
   import register_project_tools, ProjectToolsLoadResult; print('OK')"`
   печатает OK.
 
@@ -158,15 +192,18 @@
   тест `test_real_compact_context_tool_loads` (см. существующий
   в `tests/test_tools_project_loader.py:431+`) продолжает проходить.
 
-- [ ] 4.4 В `lib/services/runtime_inventory.py` обновить
-  `_emit_project_tools_inventory_banner` (или эквивалентный
-  inventory-banner) — баннер **больше НЕ читает**
+- [ ] 4.4 В `lib/core/application_context.py` обновить
+  `_emit_project_tools_inventory_banner` (определена в
+  `application_context.py:750-810`, **не** в `runtime_inventory.py`)
+  — баннер **больше НЕ читает**
   `patch_report.details["project_tools"]` (этого ключа в
   `PatchReport` больше нет после Phase 4). Источник данных —
-  `project_tools_result.detail` (см. task 4.3).
-  Verify: `git diff` показывает правки banner-функции; ручной
-  прогон `cli_agent.py --smoke` печатает баннер project tools
-  с теми же именами, что и до change; `tools/diagnose_startup.py
+  `project_tools_result.detail` (см. task 4.3). Сигнатура
+  `_emit_project_tools_inventory_banner` меняется с
+  `(patch_report)` на `(project_tools_result)`.
+  Verify: `git diff` показывает правки только в `application_context.py`;
+  ручной прогон `cli_agent.py --smoke` печатает баннер project
+  tools с теми же именами, что и до change; `tools/diagnose_startup.py
   --strict` (если запускается) exit 0.
 
 - [ ] 4.5 Архитектурный тест `tests/test_architecture_*.py`
@@ -176,6 +213,49 @@
   что модуль не импортирует `workspace.tools.*`, не строит
   `ToolContext`, не зовёт `agent.tools.register`. Verify: тест
   падает на старом коде; зеленеет после 4.1–4.3.
+
+- [ ] 4.6 Обновить существующие тестовые fixtures, где
+  `project_tools` всё ещё числится в runtime inventory. Список
+  обязательных правок (базируется на текущем коде в
+  `tests/test_runtime_inventory.py`,
+  `tests/test_runtime_patcher.py`, `tests/test_tools_project_loader.py`,
+  `tests/test_context_compaction.py`, `tests/test_gateway.py`,
+  `tests/test_diagnose_startup.py`):
+  - `tests/test_runtime_inventory.py:182` — убрать `"project_tools"`
+    из `applied` списка в `test_applied_matches_canonical` (после
+    change в `applied` нет `project_tools`; subset-проверка
+    продолжает работать, но fixture должен отражать фактическое
+    состояние `apply_all`);
+  - `tests/test_runtime_patcher.py:1112` — убрать `"project_tools"`
+    из `expected` subset в `test_all_patches_have_specs` (после
+    change этот тест переписывается на exact-match в task 3.5,
+    см. там);
+  - `tests/test_tools_project_loader.py` — все вызовы
+    `RuntimePatcher().patch_project_tools(...)` или
+    `patcher.patch_project_tools(...)` заменяются на
+    `register_project_tools(...)` из нового модуля. Сам файл
+    **не переименовывается** (`tests/test_tools_project_loader.py`
+    остаётся, см. Issue 10 ниже); классы тестов
+    (`TestPatchProjectTools` → `TestRegisterProjectTools`)
+    переименовываются минимально, docstring'и обновляются;
+  - `tests/test_context_compaction.py:625` —
+    `RuntimePatcher().patch_project_tools(...)` → вызов
+    `register_project_tools(...)` напрямую;
+  - `tests/test_gateway.py:235-236` — assertions про
+    `patch_report.details["project_tools"]` должны быть
+    удалены/обновлены, т.к. этого ключа больше нет в
+    `PatchReport` (см. task 4.4);
+  - `tests/test_diagnose_startup.py` — если parser читает
+    `patch_report.details["project_tools"]`, переключается на
+    новый `ProjectToolsLoadResult` (или совместимый формат
+    через `project_tools_result.detail`).
+  Verify: `pytest tests/test_tools_project_loader.py
+  tests/test_runtime_inventory.py tests/test_runtime_patcher.py
+  tests/test_context_compaction.py tests/test_gateway.py
+  tests/test_diagnose_startup.py -q` — все зелёные; ни в одном
+  файле нет упоминаний `patch_project_tools` (как метода
+  `RuntimePatcher`) и нет fixture'ов, считающих `project_tools`
+  runtime patch'ем.
 
 ## 5. Реальный hook allowlist
 

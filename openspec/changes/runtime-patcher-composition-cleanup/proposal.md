@@ -113,8 +113,11 @@ hardcoded set `high_risk_required` (см.
   - `tests/test_runtime_patcher.py`:
     `test_all_patches_have_specs` ужесточается до `==`;
   - `tests/test_tools_project_loader.py`: расширяется под новый
-    модуль loader'а (или переносится в
-    `tests/test_project_tool_loader.py`);
+    модуль loader'а (без переименования файла и без создания
+    `tests/test_project_tool_loader.py`); все вызовы
+    `RuntimePatcher().patch_project_tools(...)` в существующих
+    тестах заменяются на
+    `register_project_tools(...)` напрямую;
   - `tests/test_runtime_inventory.py`: семантический тест на
     проекцию `PatchSpec.required` (см. Decision 5 / Issue #7 в
     design.md);
