@@ -5,6 +5,7 @@
   CREATE TABLE agent_cache_ownership (
       resource_key VARCHAR PRIMARY KEY,           -- фиксированное значение: 'duckdb_cache'
       owner_id VARCHAR NOT NULL,                    -- worker_id текущего владельца
+      generation BIGINT NOT NULL DEFAULT 1,         -- fencing token (монотонно растёт при takeover)
       acquired_at TIMESTAMP NOT NULL DEFAULT NOW(),
       last_heartbeat_at TIMESTAMP NOT NULL DEFAULT NOW(),
       expires_at TIMESTAMP NOT NULL
@@ -12,47 +13,77 @@
   ```
   Verify: `python tools/migrate.py --status` показывает применённую миграцию; `psql -c "\d agent_cache_ownership"` показывает таблицу.
 
-## 2. CacheOwnershipCoordinator: новый модуль
+## 2. CacheOwnershipCoordinator: новый модуль с generation/fencing
 
 - [ ] 2.1 Создать `lib/services/cache_ownership.py`:
   - `class CacheAccessMode(enum.Enum)`: `READ_WRITE`, `READ_ONLY`.
+  - `class CacheOwnershipResult`: `mode`, `my_generation`, `current_owner_id`, `current_generation`.
   - `class CacheOwnershipCoordinator`:
     - `__init__(worker_id: str, dsn: str, resource_key: str = "duckdb_cache", ttl_seconds: int = 60)`.
-    - `def try_claim(self) -> CacheAccessMode`:
+    - `def try_claim(self) -> CacheOwnershipResult`:
       ```sql
-      INSERT INTO agent_cache_ownership (resource_key, owner_id, last_heartbeat_at, expires_at)
-      VALUES ($1, $2, NOW(), NOW() + INTERVAL '60 seconds')
+      INSERT INTO agent_cache_ownership (resource_key, owner_id, generation, last_heartbeat_at, expires_at)
+      VALUES ($1, $2, COALESCE((SELECT generation FROM agent_cache_ownership WHERE resource_key = $1), 0) + 1, NOW(), NOW() + INTERVAL '60 seconds')
       ON CONFLICT (resource_key) DO UPDATE
       SET owner_id = EXCLUDED.owner_id,
+          generation = agent_cache_ownership.generation + 1,
           acquired_at = NOW(),
           last_heartbeat_at = NOW(),
           expires_at = EXCLUDED.expires_at
       WHERE agent_cache_ownership.expires_at < NOW()
-      RETURNING owner_id;
+      RETURNING (xmax = 0) AS inserted, owner_id, generation;
       ```
-      - Если RETURNING даёт наш `owner_id` → return `READ_WRITE`.
-      - Если RETURNING даёт чужой `owner_id` → return `READ_ONLY`.
-    - `def heartbeat(self) -> None` — `UPDATE last_heartbeat_at=NOW(), expires_at=NOW() + INTERVAL '60 seconds' WHERE resource_key=$1 AND owner_id=$2`. Вызывается каждые 30 сек.
-    - `def release(self) -> None` — `DELETE FROM agent_cache_ownership WHERE resource_key=$1 AND owner_id=$2`. Вызывается при clean shutdown.
-    - `def is_still_owner(self) -> bool` — проверка текущего владельца. Используется sync-потоком для fencing (D4).
-  Verify: `python -c "from lib.services.cache_ownership import CacheOwnershipCoordinator, CacheAccessMode; print('ok')"` работает.
+      - Если RETURNING вернул 1 row, `inserted=true` → claim acquired → return `CacheOwnershipResult(mode=READ_WRITE, my_generation=returned.generation)`.
+      - Если RETURNING вернул 0 rows → claim not acquired → отдельный SELECT для чтения current owner metadata → return `CacheOwnershipResult(mode=READ_ONLY, current_owner_id=..., current_generation=...)`.
+    - `def heartbeat(self) -> None`:
+      ```sql
+      UPDATE agent_cache_ownership
+      SET last_heartbeat_at = NOW(), expires_at = NOW() + INTERVAL '60 seconds'
+      WHERE resource_key = $1 AND owner_id = $2 AND generation = $3;
+      ```
+      Если WHERE не match (generation изменился) → heartbeat fails → sync stops.
+    - `def release(self) -> None`:
+      ```sql
+      DELETE FROM agent_cache_ownership
+      WHERE resource_key = $1 AND owner_id = $2 AND generation = $3
+      RETURNING resource_key;
+      ```
+      No-op + WARNING если RETURNING 0 rows.
+    - `def is_still_owner(self) -> bool`:
+      ```sql
+      SELECT generation FROM agent_cache_ownership
+      WHERE resource_key = $1 AND owner_id = $2 AND generation = $3 AND expires_at > NOW();
+      ```
+      Returns True только если (owner_id, generation) match AND claim не expired.
+  Verify: `python -c "from lib.services.cache_ownership import CacheOwnershipCoordinator, CacheAccessMode, CacheOwnershipResult; print('ok')"` работает.
 
-## 3. DuckDbCacheStore: API с явным mode
+## 3. DuckDbCacheStore: API с явным mode + реальный DuckDB read-only connection
 
 - [ ] 3.1 `DuckDbCacheStore.open(path: str, mode: CacheAccessMode) -> DuckDbCacheStore`:
-  - `mode=READ_ONLY` → `duckdb.connect(path, read_only=True)`.
+  - `mode=READ_ONLY` → `duckdb.connect(path, read_only=True)` (первый уровень защиты — DuckDB connection НЕ позволит мутации).
   - `mode=READ_WRITE` → `duckdb.connect(path, read_only=False)`.
-  - При попытке INSERT/UPDATE/DELETE в `READ_ONLY` режиме — raise `ReadOnlyAssertionError`.
-  Verify: `tests/test_cache_provider_mode.py::TestReadOnlyBlocksMutations` зелёный.
-- [ ] 3.2 `duckdb.connect` после `kill -9`: DuckDB ATTACH auto-recovery. Если fails — логирование ERROR + raise. Verify: integration test с corrupted `cache.duckdb`.
+  Verify: `tests/test_cache_provider_mode.py::TestReadOnlyConnectionBlocksMutations` зелёный (проверяет реальный уровень DuckDB, не только assertion).
+- [ ] 3.2 `CacheProvider` MUST иметь assertion guard (второй уровень защиты): при попытке INSERT/UPDATE/DELETE через `CacheProvider.query_sql(...)` с `mode=READ_ONLY` raise `ReadOnlyAssertionError`. Verify: `tests/test_cache_provider_mode.py::TestReadOnlyAssertionGuard` зелёный.
 - [ ] 3.3 `CacheProvider` MUST reject путь на NFS ДО открытия DuckDB. Verify: `tests/test_cache_provider_mode.py::TestRejectsNFSPath` зелёный.
 
-## 4. PgDuckDbSyncService: создаётся только при OWNER + fencing
+## 4. PgDuckDbSyncService: создаётся только при OWNER + generation fencing
 
-- [ ] 4.1 `PgDuckDbSyncService.__init__()` — принимает опциональный `heartbeat_callback: Callable[[], None]`, `release_callback: Callable[[], None]`, `fence_callback: Callable[[], bool]`.
-- [ ] 4.2 `PgDuckDbSyncService.start()` — НЕ вызывает `try_claim` самостоятельно. Использует переданные callbacks.
-- [ ] 4.3 Sync-поток MUST проверять `fence_callback()` перед каждой записью в DuckDB. Если `False` → raise `OwnershipLostError` и остановить sync.
-- [ ] 4.4 В `ApplicationContext.create()`:
+- [ ] 4.1 `PgDuckDbSyncService.__init__()` принимает: `heartbeat_callback`, `release_callback`, `fence_callback`, `my_generation: int`.
+- [ ] 4.2 Sync-поток MUST проверять generation ПЕРЕД каждой записью:
+  ```python
+  def _write_with_fence(self, sql, params):
+      # атомарно: SELECT generation + write внутри одной PG-транзакции
+      with self.dbsession.transaction() as tx:
+          current_gen = tx.execute(
+              "SELECT generation FROM agent_cache_ownership WHERE resource_key = 'duckdb_cache' AND expires_at > NOW()"
+          ).scalar()
+          if current_gen != self.my_generation:
+              raise OwnershipLostError(f"generation mismatch: have {self.my_generation}, db has {current_gen}")
+          # запись в DuckDB
+          self.cache_store.execute(sql, params)
+  ```
+  Verify: integration test `test_fencing_prevents_write_after_takeover` (требует PG).
+- [ ] 4.3 В `ApplicationContext.create()`:
   ```python
   coord = CacheOwnershipCoordinator(
       worker_id=f"{role}_{os.getpid()}",
@@ -60,107 +91,90 @@
       resource_key="duckdb_cache",
       ttl_seconds=60,
   )
-  mode = coord.try_claim()  # atomic
-  ctx.cache_store = DuckDbCacheStore.open(path=resolve_publish_path(...), mode=mode)
-  if mode == CacheAccessMode.READ_WRITE:
+  result = coord.try_claim()  # atomic, returns CacheOwnershipResult
+  ctx.cache_store = DuckDbCacheStore.open(path=resolve_publish_path(...), mode=result.mode)
+  if result.mode == CacheAccessMode.READ_WRITE:
       ctx.sync_service = PgDuckDbSyncService(
           ...,
+          my_generation=result.my_generation,
           heartbeat_callback=coord.heartbeat,
-          release_callback=coord.release,
+          release_callback=lambda: coord.release(),
           fence_callback=coord.is_still_owner,
       )
       ctx.sync_service.start(initial_load=True)
   else:
       ctx.sync_service = None
   ```
-  Verify: `tests/test_application_context_role.py::TestRoleComposition::test_gateway_owner_creates_sync_service` и `test_cli_reader_does_not_create_sync_service` зелёные.
+  Verify: `tests/test_application_context_role.py::TestRoleComposition::test_gateway_owner_creates_sync_service_with_generation` и `test_cli_reader_does_not_create_sync_service` зелёные.
 
-## 5. ApplicationContext: typed signature без profile + role
+## 5. ApplicationContext: typed signature без profile + role (staged implementation)
 
-- [ ] 5.1 Обновить `lib/core/application_context.py`:
-  - Убрать `profile`, `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` из typed signature.
-  - Добавить обязательный kwarg `role: Literal["gateway","cli"]`.
-  - Добавить `**kwargs` для backward compat (только deprecated `enable_*`).
-  - Обновить docstring с явным указанием: `profile` MUST быть resolved до через `_initialize_settings(profile=...)`.
-  Verify: `python -c "import inspect; params = list(inspect.signature(ApplicationContext.create).parameters.keys()); assert 'profile' not in params; assert 'enable_db_logging' not in params; assert 'role' in params"`.
-- [ ] 5.2 Реализовать обработку `**kwargs`:
-  ```python
-  DEPRECATED_KWARGS = ("enable_db_logging", "enable_audit", "enable_cron", "print_llm_calls")
-  for key in DEPRECATED_KWARGS:
-      if key in kwargs:
-          warnings.warn(f"{key}=... is deprecated; configure via SETTINGS['gateway'].{key} instead", DeprecationWarning, stacklevel=2)
-          kwargs[key] = kwargs.pop(key)
-      else:
-          kwargs[key] = SETTINGS["gateway"].get(key, ...)
-  ```
-  Verify: `tests/test_application_context_role.py::TestDeprecatedKwargs::test_kwargs_trigger_warning` зелёный.
-- [ ] 5.3 Реализовать composition matrix (D2):
-  - `role="gateway"`: создать `PostgresChannel`, `DuckDbCacheStore` (через CacheOwnershipCoordinator), `PgDuckDbSyncService` (если OWNER), `CronService` (если `gateway.enable_cron=True`).
-  - `role="cli"`: НЕ создавать `PostgresChannel`, `CronService`; создать `DuckDbCacheStore` (через CacheOwnershipCoordinator), `PgDuckDbSyncService` (если OWNER).
+- [ ] **Stage A**: Убрать из typed signature `profile`, `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls`. Добавить `role: Literal["gateway","cli"]`. Добавить `**kwargs` для backward compat. Verify: `python -c "import inspect; params = list(inspect.signature(ApplicationContext.create).parameters.keys()); assert 'profile' not in params; assert 'enable_db_logging' not in params; assert 'role' in params"`.
+- [ ] **Stage B**: Реализовать composition matrix в `ApplicationContext.create()`:
+  - `role="gateway"`: создать `PostgresChannel`, `CronService` (если `gateway.enable_cron=True`).
+  - `role="cli"`: НЕ создавать `PostgresChannel`, `CronService`.
   Verify: `tests/test_application_context_role.py::TestRoleComposition` зелёный.
+- [ ] **Stage C** (в этом change): `CacheOwnershipCoordinator` + `agent_cache_ownership` + atomic claim + generation/fencing (см. задачи 1-4).
+- [ ] **Stage D** (в этом change): `CacheProvider.open(mode=...)` + `DuckDbCacheStore.open(mode=...)` с реальным DuckDB read-only connection (см. задачу 3).
+- [ ] **Stage E** (в этом change): `PgDuckDbSyncService` integration с generation fencing (см. задачу 4).
+- [ ] **Stage F** (в этом change): Удалить `--profile` из `cli_agent.py` (см. задачу 6.1).
+- [ ] **Stage G** (отдельный change): удаление deprecated `enable_*` kwargs из `**kwargs`-обработки.
 
 ## 6. CLI/gateway call site updates
 
-- [ ] 6.1 Обновить `cli_agent.py::_parse_args` — УДАЛИТЬ `--profile` argparse argument полностью. CLI MUST hardcode `profile="test"` при `_cfg._initialize_settings(profile="test")`. Verify: `python cli_agent.py --profile=test` exit != 0; `python cli_agent.py --smoke` exit 0.
-- [ ] 6.2 Обновить `cli_agent.py::_entrypoint_main` — убрать kwargs `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls`. Передавать `role="cli"`. НЕ передавать `profile`. Verify: `python cli_agent.py --smoke` exit 0.
-- [ ] 6.3 Обновить `gateway.py::_entrypoint_main` — убрать те же kwargs. Передавать `role="gateway"`. НЕ передавать `profile` (resolved до). `--profile` остаётся. Verify: `python gateway.py --profile=test --smoke` exit 0.
+- [ ] 6.1 Обновить `cli_agent.py::_parse_args` — УДАЛИТЬ `--profile` argparse argument. CLI MUST hardcode `profile="test"`. Verify: `python cli_agent.py --profile=test` exit != 0.
+- [ ] 6.2 Обновить `cli_agent.py::_entrypoint_main` — убрать `enable_*` kwargs. Передавать `role="cli"`. НЕ передавать `profile`. Verify: `python cli_agent.py --smoke` exit 0.
+- [ ] 6.3 Обновить `gateway.py::_entrypoint_main` — убрать `enable_*` kwargs. Передавать `role="gateway"`. НЕ передавать `profile`. `--profile` остаётся. Verify: `python gateway.py --profile=test --smoke` exit 0.
 - [ ] 6.4 CLI `lib/cli/console_loop.py::run_repl` остаётся без изменений.
-- [ ] 6.5 Обновить существующие тесты/скрипты, использующие `cli_agent.py --profile=...` — убрать `--profile` для CLI. Verify: `grep -rn "cli_agent.*--profile" tests/ scripts/` → 0.
+- [ ] 6.5 Обновить существующие тесты/скрипты, использующие `cli_agent.py --profile=...` — убрать `--profile`.
 
-## 7. resolve_publish_path: единый путь
+## 7. ConfigurationResolver: gateway.cache.local_path MUST быть shared
 
-- [ ] 7.1 `lib/services/cache_provider_impl.py::resolve_publish_path(role)` — `role="cli"` и `role="gateway"` возвращают **`<local_path>/cache.duckdb`**. Verify: `tests/test_cache_provider_role_paths.py` зелёный.
+- [ ] 7.1 ConfigurationResolver MUST reject per-profile override `gateway.cache.local_path`. Если `profiles/test.jsonc` или `profiles/prod.jsonc` задают `gateway.cache.local_path` — ConfigurationError на старте.
+- [ ] 7.2 `resolve_publish_path(role)` — `role="cli"` и `role="gateway"` возвращают один и тот же `<local_path>/cache.duckdb`. Verify: `tests/test_cache_provider_role_paths.py` зелёный.
+- [ ] 7.3 Verify: `tests/test_shared_cache_path_across_profiles.py` — при `profile="test"` и `profile="prod"` оба резолвят один и тот же физический путь.
 
 ## 8. Тесты: новые и обновлённые
 
-- [ ] 8.1 `tests/test_application_context_role.py::TestRoleComposition` — composition matrix. Verify: `pytest -v` зелёный.
-- [ ] 8.2 `tests/test_application_context_role.py::TestNoProfileInSignature` — `inspect.signature(ApplicationContext.create)` НЕ содержит `profile`.
-- [ ] 8.3 `tests/test_application_context_role.py::TestDuckDBLifecycleOrdering` — verify sequence: `resolve_publish_path` → `try_claim` → `DuckDbCacheStore.open(mode=...)` → (OWNER) `PgDuckDbSyncService.start()`. Используется mock для отслеживания вызовов.
-- [ ] 8.4 `tests/test_cli_uses_in_memory_bus.py`:
-  - `test_cli_does_not_create_postgres_channel`
-  - `test_cli_repl_uses_bus_publish_inbound`
-  - `test_agent_loop_subscribed_to_bus_in_cli_role`
-  Verify: `pytest -v` зелёный.
+- [ ] 8.1 `tests/test_application_context_role.py::TestRoleComposition` — composition matrix.
+- [ ] 8.2 `tests/test_application_context_role.py::TestNoProfileInSignature` — `inspect.signature` НЕ содержит `profile`.
+- [ ] 8.3 `tests/test_application_context_role.py::TestDuckDBLifecycleOrdering` — verify sequence: `resolve_publish_path` → `try_claim` → `DuckDbCacheStore.open(mode=...)` → (OWNER) `PgDuckDbSyncService.start()`.
+- [ ] 8.4 `tests/test_cli_uses_in_memory_bus.py` — REPL использует bus, `PostgresChannel` НЕ создаётся.
 - [ ] 8.5 `tests/test_cache_ownership_claim.py`:
-  - `test_first_process_becomes_owner` — `try_claim` → `READ_WRITE`.
-  - `test_second_process_becomes_reader` — после первого → `READ_ONLY`.
+  - `test_first_process_becomes_owner` → READ_WRITE, my_generation=1.
+  - `test_second_process_becomes_reader` → READ_ONLY.
   - `test_concurrent_claim_exactly_one_owner` — два процесса параллельно → ровно один OWNER.
-  - `test_already_owner_returns_read_write` — повторный `try_claim` того же worker → `READ_WRITE`.
-  - `test_stale_claim_takeover` — claim expired → следующий процесс → `READ_WRITE`.
+  - `test_already_owner_returns_read_write` — повторный `try_claim` того же worker → READ_WRITE, та же generation (не инкремент).
+  - `test_stale_claim_takeover` — claim expired → следующий процесс → READ_WRITE, generation incremented.
   - `test_heartbeat_updates_claim` — heartbeat обновляет `expires_at`.
-  - `test_release_deletes_claim` — `release()` удаляет claim.
-  - `test_old_owner_fencing` — после перехвата ownership (через `release()` или heartbeat expiry в другом процессе) старый owner `is_still_owner()` возвращает `False`.
-  - `test_ownership_key_fixed` — только один ряд в `agent_cache_ownership` после множественных claim.
+  - `test_heartbeat_fails_after_generation_change` — после takeover heartbeat нашего owner'а returns 0 rows → sync должен остановиться.
+  - `test_release_deletes_claim_for_matching_generation` — release() с правильным generation → success.
+  - `test_release_is_noop_for_mismatched_generation` — release() с чужим или outdated generation → 0 rows + WARNING.
+  - `test_old_owner_fencing_with_generation` — после takeover старый owner sync получает `OwnershipLostError` при попытке записи.
+  - `test_ownership_key_fixed` — только один ряд в `agent_cache_ownership`.
   Verify: `pytest -v` зелёный (требует PG).
 - [ ] 8.6 `tests/test_cache_provider_mode.py`:
-  - `test_read_only_blocks_insert`
-  - `test_read_only_blocks_update`
-  - `test_read_only_blocks_delete`
-  - `test_read_only_allows_select`
-  - `test_read_write_allows_mutations`
-  - `test_rejects_nfs_path`
+  - `test_read_only_blocks_insert_via_assertion` — assertion guard.
+  - `test_read_only_blocks_insert_via_duckdb_connection` — реальный DuckDB read_only connection.
+  - `test_read_only_blocks_update` / `test_read_only_blocks_delete` / `test_read_only_allows_select`.
+  - `test_read_write_allows_mutations`.
+  - `test_rejects_nfs_path`.
   Verify: `pytest -v` зелёный.
-- [ ] 8.7 `tests/test_cache_provider_role_paths.py` — `role="cli" == role="gateway"`. Verify: `pytest` зелёный.
-- [ ] 8.8 `tests/test_agent_loop_transport_agnostic.py` — AgentLoop работает только через bus. Verify: `pytest` зелёный.
-- [ ] 8.9 `tests/test_streamlit_imports_removed.py` — `grep` подтверждает отсутствие импортов Streamlit в runtime-коде. Verify: `pytest` зелёный.
-- [ ] 8.10 `tests/test_cli_no_profile.py::TestCLINoProfile`:
-  - `test_cli_rejects_profile_arg`
-  - `test_cli_uses_test_profile_default`
-  - `test_cli_ignores_env_profile`
-  Verify: `pytest -v` зелёный.
-- [ ] 8.11 `tests/test_gateway_accepts_profile.py::TestGatewayAcceptsProfile`:
-  - `test_gateway_accepts_prod_profile`
-  - `test_gateway_accepts_test_profile`
-  Verify: `pytest -v` зелёный.
-- [ ] 8.12 Integration test: параллельный запуск `cli_agent.py` и `gateway.py --profile=test` — один OWNER, второй READER; `cache.duckdb` (один файл) валиден. Verify: integration test passes.
+- [ ] 8.7 `tests/test_cache_provider_role_paths.py` — `role="cli" == role="gateway" == cache.duckdb`.
+- [ ] 8.8 `tests/test_shared_cache_path_across_profiles.py` — `profile="test"` и `profile="prod"` оба резолвят один физический путь.
+- [ ] 8.9 `tests/test_agent_loop_transport_agnostic.py` — AgentLoop работает только через bus.
+- [ ] 8.10 `tests/test_streamlit_imports_removed.py` — AST-based проверка (не grep) отсутствия импортов Streamlit.
+- [ ] 8.11 `tests/test_cli_no_profile.py` — CLI rejects `--profile`, hardcodes test, ignores env.
+- [ ] 8.12 `tests/test_gateway_accepts_profile.py` — gateway принимает `--profile=prod`/`--profile=test`.
+- [ ] 8.13 Integration test: параллельный запуск `cli_agent.py` и `gateway.py --profile=test` — один OWNER (generation=N), второй READER; `cache.duckdb` (один файл) валиден; fencing предотвращает write после takeover.
 
 ## 9. Документация
 
-- [ ] 9.1 Обновить `AGENTS.md` — секция «Project Layout»: добавить `CacheOwnershipCoordinator`, `lib/services/cache_ownership.py`; добавить `role="cli"|"gateway"` для `ApplicationContext.create(...)`; убрать упоминание Streamlit (ссылка на отдельный change `remove-streamlit-runtime`); секция «Configuration» — добавить «CLI = fixed test profile».
-- [ ] 9.2 Обновить `README.md` — обновить описание архитектуры (см. `openspec/changes/unify-cli-gateway-architecture/README.md`).
-- [ ] 9.3 Обновить `docs/ARCHITECTURE.md` — секции «Composition Root», «CacheOwnershipCoordinator», «DuckDB ownership», «CLI profile».
-- [ ] 9.4 Обновить `docs/INTERNAL_API.md` — секции «Role-based composition», «CacheOwnershipCoordinator», «CacheProvider API», «CLI = fixed test profile».
-- [ ] 9.5 Обновить `CHANGELOG.md` — `Added` (composition unification, CacheOwnershipCoordinator, CacheProvider mode API); `Changed` (BREAKING: cron = gateway-only; CLI = fixed test profile, не принимает --profile); `Deprecated` (`enable_*` через `**kwargs`).
+- [ ] 9.1 `AGENTS.md` — добавить `CacheOwnershipCoordinator`, `lib/services/cache_ownership.py`; `role="cli"|"gateway"` для `ApplicationContext.create(...)`; убрать Streamlit (ссылка на `remove-streamlit-runtime`); секция «Configuration» — CLI = fixed test profile.
+- [ ] 9.2 `README.md` (корневой) — обновить описание архитектуры (см. change's README.md).
+- [ ] 9.3 `docs/ARCHITECTURE.md` — секции «Composition Root», «CacheOwnershipCoordinator», «DuckDB ownership», «CLI profile», «Generation/fencing token».
+- [ ] 9.4 `docs/INTERNAL_API.md` — секции «Role-based composition», «CacheOwnershipCoordinator», «CacheProvider API», «CLI = fixed test profile».
+- [ ] 9.5 `CHANGELOG.md` — `Added` (composition unification, CacheOwnershipCoordinator, generation/fencing token, CacheProvider mode API); `Changed` (BREAKING: cron = gateway-only; CLI = fixed test profile; `gateway.cache.local_path` MUST быть shared); `Deprecated` (`enable_*` через `**kwargs`).
 
 ## 10. Валидация и smoke
 
@@ -168,11 +182,11 @@
 - [ ] 10.2 `pytest tests/ -q` зелёный.
 - [ ] 10.3 `python cli_agent.py --smoke` exit 0.
 - [ ] 10.4 `python gateway.py --profile=test --smoke` exit 0.
-- [ ] 10.5 `python cli_agent.py --profile=test` exit != 0 (negative).
-- [ ] 10.6 Smoke: `python cli_agent.py` → REPL стартует, ввод → typewriter. Verify: manual run.
-- [ ] 10.7 Smoke: только CLI без gateway — CLI = OWNER, sync запускается. Verify: `audit_analyzer` возвращает свежие данные.
-- [ ] 10.8 Smoke: параллельный запуск CLI и gateway — один OWNER, второй READER. Verify: `lsof cache.duckdb` показывает writer-процесс.
-- [ ] 10.9 Smoke: `kill -9` producer → через 60 сек claim stale → новый процесс перехватывает; старый producer прекращает записи (fencing).
+- [ ] 10.5 `python cli_agent.py --profile=test` exit != 0.
+- [ ] 10.6 Smoke: `python cli_agent.py` → REPL работает, ввод → typewriter.
+- [ ] 10.7 Smoke: только CLI без gateway — CLI = OWNER (generation=1), sync запускается.
+- [ ] 10.8 Smoke: параллельный запуск CLI и gateway — один OWNER, второй READER; `lsof cache.duckdb` показывает writer-процесс.
+- [ ] 10.9 Smoke: `kill -9` producer → через 60 сек claim stale → новый owner (generation incremented) → старый producer fencing test.
 - [ ] 10.10 `python tools/architecture_guard.py` exit 0.
 
 ## 11. Деактивация deprecated kwargs (следующий MINOR)

@@ -23,8 +23,10 @@ Deprecated kwargs через `**kwargs` MUST быть удалены в MINOR р
 
 - **КОГДА** application entrypoint стартует
 - **ТОГДА** он MUST вызвать `config._initialize_settings(profile=...)` ПЕРЕД `ApplicationContext.create(...)`
-- **И ДОЛЖЕН** передать resolved `SETTINGS` в `ApplicationContext.create(...)` (через composition, НЕ через `profile=` kwarg)
+- **И ДОЛЖЕН** полагаться на global `SETTINGS`, опубликованный `_initialize_settings()`
 - **И НЕ ДОЛЖЕН** передавать `profile` как параметр в `ApplicationContext.create(...)`
+- **AND** `ApplicationContext.create()` MUST потреблять (consume) уже-resolved global `SETTINGS` через `import config as _config; ctx_settings = _config.SETTINGS`
+- **AND** `ApplicationContext.create()` MUST NOT resolve profile самостоятельно и MUST NOT принимать `settings` как параметр
 
 #### Scenario: CLI и gateway используют одну typed signature create()
 

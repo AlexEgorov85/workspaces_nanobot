@@ -130,7 +130,7 @@ Lifecycle MUST быть строго:
 - **AND** `DuckDbCacheStore` MUST NOT быть открыт до получения результата `coord.try_claim()`
 - **AND** `PgDuckDbSyncService` MUST NOT быть создан до открытия `DuckDbCacheStore`
 
-### Requirement: Ownership contract — atomic claim + fencing
+### Requirement: Ownership contract — atomic claim + fencing token
 
 Ownership MUST определяться через отдельную таблицу `agent_cache_ownership` в PostgreSQL (НЕ расширение `agent_worker_claims`):
 
@@ -138,6 +138,7 @@ Ownership MUST определяться через отдельную табли
 CREATE TABLE agent_cache_ownership (
     resource_key VARCHAR PRIMARY KEY,           -- фиксированное значение: 'duckdb_cache'
     owner_id VARCHAR NOT NULL,                    -- worker_id текущего владельца
+    generation BIGINT NOT NULL DEFAULT 1,         -- fencing token (монотонно растёт при takeover)
     acquired_at TIMESTAMP NOT NULL DEFAULT NOW(),
     last_heartbeat_at TIMESTAMP NOT NULL DEFAULT NOW(),
     expires_at TIMESTAMP NOT NULL
@@ -146,34 +147,85 @@ CREATE TABLE agent_cache_ownership (
 
 **Ownership key** = `'duckdb_cache'` (фиксированная строка, НЕ per-process, НЕ per-role). MUST быть ровно **один** активный claim на ресурс `<local_path>/cache.duckdb`.
 
-**Atomic claim:** через PG-транзакцию `INSERT ... ON CONFLICT (resource_key) DO UPDATE SET ... WHERE agent_cache_ownership.expires_at < NOW() RETURNING owner_id`. Два процесса одновременно делают claim → ровно один получает `READ_WRITE` (RETURNING даёт его `owner_id`), остальные — `READ_ONLY` (RETURNING даёт чужой `owner_id`).
+**Atomic claim MUST различать два outcomes:**
 
-Heartbeat каждые 30 сек (`UPDATE last_heartbeat_at = NOW(), expires_at = NOW() + INTERVAL '60 seconds'`). TTL = 60 сек. Stale claim (без heartbeat > 60 сек) MAY быть перехвачен следующим процессом.
+1. **Claim acquired → OWNER (READ_WRITE).** Процесс получил ownership.
+2. **Claim not acquired → READER (READ_ONLY).** Другой процесс уже владеет ресурсом (его `expires_at > NOW()`).
 
-**Fencing старого producer:** если процесс потерял ownership (его claim был перезаписан другим процессом ИЛИ его `heartbeat()` вернул failure), он MUST прекратить любые записи в DuckDB и остановить `PgDuckDbSyncService`. Sync-поток MUST проверять `coord.is_still_owner()` перед каждой записью.
+Контракт `try_claim()` MUST NOT опираться на `RETURNING` для определения "кто сейчас owner, если мы НЕ выиграли claim". Реализация MAY использовать `INSERT ... ON CONFLICT (resource_key) DO UPDATE ... WHERE agent_cache_ownership.expires_at < NOW() RETURNING (xmax = 0) AS inserted, owner_id, generation`:
+
+- Если `result` имеет `inserted=true` → claim acquired → OWNER → use the returned `generation` as our `my_generation`.
+- Если `result` имеет `inserted=false` (или 0 rows) → claim not acquired → отдельный SELECT для чтения текущего owner metadata (owner_id, generation) для логирования.
+
+PG row-level locking на `INSERT ... ON CONFLICT` гарантирует атомарность: два процесса одновременно делают claim → ровно один получает `inserted=true` (OWNER), остальные получают `inserted=false` (READER).
+
+**Fencing token (generation):** каждый takeover (новый owner захватывает stale claim) MUST инкрементировать `generation` на 1. Процесс, получивший OWNER, MUST запомнить `my_generation` и использовать его для каждой записи в DuckDB. Sync-поток MUST атомарно проверять:
+
+```sql
+-- перед каждой записью:
+SELECT generation FROM agent_cache_ownership
+WHERE resource_key = 'duckdb_cache' AND expires_at > NOW();
+-- если возвращённое generation != my_generation → ownership LOST → stop sync
+```
+
+Этот check MUST быть атомарным с самой записью в идеале; реализация может использовать:
+- **Generation check + advisory lock** (PG `pg_try_advisory_xact_lock(key)` с тем же `key`, что и `resource_key`).
+- **Generation check в одной транзакции** с write transaction в DuckDB.
+
+Любая запись при `generation != my_generation` MUST быть отклонена — старый owner НЕ ДОЛЖЕН иметь возможность продолжить синхронизацию после takeover.
+
+Heartbeat каждые 30 сек (`UPDATE last_heartbeat_at = NOW(), expires_at = NOW() + INTERVAL '60 seconds' WHERE resource_key = $1 AND owner_id = $2 AND generation = $3`). TTL = 60 сек. Stale claim (без heartbeat > 60 сек) MAY быть перехвачен следующим процессом.
+
+**`release()` contract:** MUST удалять ownership ТОЛЬКО если `(resource_key, owner_id, generation)` совпадают с текущим значением в таблице. A consumer MUST NOT release чужой ownership. `release()` MUST be a no-op при несовпадении (и логировать WARNING).
+
+```sql
+DELETE FROM agent_cache_ownership
+WHERE resource_key = $1 AND owner_id = $2 AND generation = $3
+RETURNING resource_key;
+-- Если RETURNING 0 rows → ownership уже не наш → no-op + warning
+-- Если RETURNING 1 row → успешно released
+```
 
 #### Scenario: Atomic claim — ровно один OWNER при concurrent calls
 
 - **WHEN** два процесса одновременно вызывают `CacheOwnershipCoordinator.try_claim()`
-- **THEN** ровно один MUST получить `READ_WRITE`
-- **AND** остальные MUST получить `READ_ONLY`
-- **AND** это гарантируется `INSERT ... ON CONFLICT (resource_key) DO UPDATE` с `RETURNING owner_id` и PG row-level locking
+- **THEN** ровно один MUST получить `READ_WRITE` (его `try_claim` returns OWNER + `my_generation`)
+- **AND** остальные MUST получить `READ_ONLY` (их `try_claim` returns READER; current owner metadata читается отдельным SELECT для логирования)
+- **AND** это гарантируется PG row-level lock на `INSERT ... ON CONFLICT (resource_key) DO UPDATE WHERE expires_at < NOW() RETURNING (xmax=0) AS inserted`
 
-#### Scenario: Fencing — старый producer прекращает записи
+#### Scenario: Generation инкрементируется при takeover
 
-- **WHEN** producer A владеет cache, затем producer B захватывает ownership (A's heartbeat expired)
-- **THEN** producer A MUST прекратить любые записи в DuckDB
-- **AND** producer A MUST остановить `PgDuckDbSyncService`
-- **AND** producer A MUST NOT создавать новых строк в `cache.duckdb` после потери ownership
+- **WHEN** producer A владеет cache с `generation=5`, затем producer A heartbeat expires
+- **AND** producer B вызывает `try_claim()` и получает OWNER
+- **THEN** producer B MUST получить `my_generation=6`
+- **AND** `agent_cache_ownership.generation` MUST быть `6`
 
-#### Scenario: kill -9 producer — DuckDB recovery
+#### Scenario: Fencing — старый producer прекращает записи при изменении generation
 
-- **WHEN** producer-процесс был killed через `kill -9` (no graceful shutdown)
+- **WHEN** producer A владеет cache с `my_generation=5`
+- **AND** producer B захватывает ownership (generation становится 6)
+- **AND** producer A пытается записать в DuckDB
+- **THEN** sync-поток producer A MUST атомарно проверить `generation == my_generation`
+- **AND** при `generation != my_generation` (т.е. generation=6 ≠ my_generation=5) sync MUST отклонить запись
+- **AND** sync MUST остановиться с логированием "ownership lost to generation N"
+- **AND** producer A MUST NOT создавать новых строк в `cache.duckdb`
+
+#### Scenario: release() только для matching ownership
+
+- **WHEN** process A владеет cache с `generation=5`
+- **AND** process A вызывает `release()`
+- **THEN** release MUST удалить claim (RETURNING 1 row)
+- **WHEN** process B (READER) вызывает `release()` с чужими `(owner_id, generation)`
+- **THEN** release MUST быть no-op (RETURNING 0 rows) + WARNING лог
+
+#### Scenario: kill -9 producer — следующий owner открывает существующий cache
+
+- **WHEN** producer-процесс был killed через `kill -9` (no graceful shutdown, no release)
 - **THEN** heartbeat останавливается
 - **AND** через `claim_ttl_seconds` (60 сек) claim становится stale
-- **AND** следующий процесс при старте MAY перехватить ownership через `try_claim()`
-- **AND** `DuckDbCacheStore.open(mode=READ_WRITE)` для нового owner MUST выполнить ATTACH к существующему `cache.duckdb` с auto-recovery (DuckDB ATTACH автоматически выполняет WAL replay при следующем открытии)
-- **AND** если recovery fails — система MUST логировать ERROR с инструкцией `rm cache.duckdb && restart`
+- **AND** следующий процесс при старте MAY перехватить ownership через `try_claim()` (получит `my_generation > previous_generation`)
+- **AND** следующий процесс MUST иметь возможность reopen существующий `cache.duckdb` если DuckDB считает БД recoverable (через штатный DuckDB ATTACH / WAL replay / auto-recovery)
+- **AND** acceptance criterion: после unclean termination + takeover новый owner может продолжить работу без ручного восстановления
 
 ### Requirement: CacheProvider API с явным mode
 
@@ -295,6 +347,10 @@ CLI MUST обрабатывать `/compact` как локальный shortcut:
 - Ветвиться по `profile == "test"` в runtime-компонентах (выбор профиля — на этапе resolution).
 - Принимать `--profile` CLI-аргумент в `cli_agent.py`.
 - Читать профиль из env-переменных в `cli_agent.py`.
+- Определять `gateway.cache.local_path` per-profile (это shared runtime resource, не profile-specific value).
+- Создавать новые API компоненты (`CacheOwnershipCoordinator`, `CacheAccessMode`, `DuckDbCacheStore.open(mode=...)`, `ReadOnlyAssertionError`) без явного объявления в design.md как новых контрактов.
+- Реализовать `release()` без проверки `(owner_id, generation)` match.
+- Использовать только assertion для блокировки мутаций в READ_ONLY режиме (DuckDB connection тоже MUST быть открыт в реальном read_only mode).
 
 ## Dependencies
 
