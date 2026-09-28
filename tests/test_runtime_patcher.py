@@ -950,7 +950,7 @@ class TestPatchContextBridgeSeed:
 
         Проверяется через ``RuntimePatcher._PATCH_SPECS`` напрямую
         (без вызова ``apply_all``, который тянет тяжёлые deps через
-        ``patch_project_tools``).
+        патчи upstream runtime API).
         """
         from lib.services.runtime_patcher import RuntimePatcher
 

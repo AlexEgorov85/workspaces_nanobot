@@ -1,10 +1,15 @@
 """CompactContextTool — tool ручного сжатия контекста диалога.
 
-Регистрируется автоматически через ``RuntimePatcher.patch_project_tools``
-при старте gateway/CLI (см. ``lib/services/runtime_patcher.py``).
+Регистрируется автоматически через
+``lib.services.project_tool_loader.register_project_tools`` при старте
+gateway/CLI (см. ``lib/services/project_tool_loader.py``). Вызывается
+из ``ApplicationContext.create()`` сразу после
+``RuntimePatcher.apply_all()`` как независимый stage composition root'а
+(см. opencode change ``runtime-patcher-composition-cleanup``,
+Decision 3).
 Управляется секцией ``gateway.compact.*`` в ``project.json``: при
-``gateway.compact.enabled=false`` патч ``Tool.enabled`` возвращает
-``False`` и tool не регистрируется.
+``gateway.compact.enabled=false`` ``Tool.enabled`` возвращает ``False``
+и tool не регистрируется (попадает в ``ProjectToolsLoadResult.disabled``).
 
 Внутри делегирует ``ContextCompactionService`` (см.
 ``lib/services/context_compaction.py``), который зовёт штатный

@@ -195,12 +195,19 @@ class TestRegisterProjectTools:
         agent.tools.register.assert_not_called()
 
     def test_agent_is_none(self, tmp_path):
-        """``agent=None`` — отказ с явной причиной."""
+        """``agent=None`` — отказ с явной причиной.
+
+        ``result.failed`` теперь содержит маркер ``"register_project_tools"``
+        (loader-level failure), чтобы banner diagnostics видел отказ
+        через ``diff_project_tools()``. ``result.error`` заполняется
+        для programmatic consumers.
+        """
         result = register_project_tools(None, tmp_path)
         assert isinstance(result, ProjectToolsLoadResult)
         assert "agent is None" in result.detail
         assert result.registered == []
-        assert result.failed == []
+        assert "register_project_tools" in result.failed
+        assert result.error is not None
 
     def test_registers_tool_from_workspace(self, workspace_with_tool):
         """Tool из ``workspace/tools/dummy.py`` регистрируется."""
@@ -231,12 +238,19 @@ class TestRegisterProjectTools:
         agent.tools.register.assert_not_called()
 
     def test_disabled_in_config(self, workspace_with_tool):
-        """Tool с ``enable=False`` в config — пропускается."""
+        """Tool с ``enable=False`` в config — пропускается.
+
+        ``result.disabled`` теперь содержит каноническое имя tool'а
+        (``tool.name`` == ``"dummy_tool"``), а не class name
+        (``"DummyTool"``) — это нужно для совпадения с
+        ``canonical_project_tools()`` (см. opencode change
+        ``runtime-patcher-composition-cleanup``).
+        """
         agent = _make_agent(tools_config_section={"dummy": {"enable": False}})
 
         result = register_project_tools(agent, workspace_with_tool)
         assert "disabled" in result.detail
-        assert "DummyTool" in result.disabled
+        assert "dummy_tool" in result.disabled
         agent.tools.register.assert_not_called()
 
     def test_two_tools_both_registered(self, workspace_with_two_tools):
@@ -424,8 +438,60 @@ class TestRegisterProjectToolsEdgeCases:
         # good зарегистрирован, broken — нет
         assert "dummy_tool" in result.registered
         assert "broken_create_tool" not in result.registered
-        assert "BrokenCreateTool" in result.failed
+        # ``result.failed`` теперь содержит каноническое имя tool'а
+        # (``tool.name`` == ``"broken_create_tool"``), а не class name.
+        assert "broken_create_tool" in result.failed
         assert result.detail.startswith("[INTERNAL_FAILED] ")
+
+
+class TestOuterFailure:
+    """Outer-failure loader'а (``_discover`` / ``ToolContext`` и т.п.)
+    должен попадать в ``ProjectToolsLoadResult.failed`` и ``error``,
+    чтобы banner diagnostics не терял loader-level ошибку (см.
+    opencode change ``runtime-patcher-composition-cleanup``, фаза 4.1).
+
+    Раньше внешний ``except`` возвращал ``ProjectToolsLoadResult(detail="patch failed: ...")``
+    без заполнения ``failed`` — banner не видел failure.
+    """
+
+    def test_outer_failure_populates_failed_and_error(self, tmp_path, monkeypatch):
+        """Если ``_discover`` падает — ``failed`` и ``error`` заполняются."""
+        from lib.services import project_tool_loader
+
+        def _explode(workspace_dir):
+            raise RuntimeError("intentional discover failure")
+
+        monkeypatch.setattr(project_tool_loader, "_discover", _explode)
+
+        agent = _make_agent(tools_config_section={})
+        # Make a tools/ directory so we don't early-return "workspace/tools not found"
+        (tmp_path / "tools").mkdir()
+        (tmp_path / "tools" / "__init__.py").write_text("")
+
+        result = register_project_tools(agent, tmp_path)
+
+        # Outer failure MUST populate ``failed`` for banner diagnostics.
+        assert "register_project_tools" in result.failed, (
+            "Outer loader failure не попал в result.failed — "
+            "banner diagnostics не увидит loader-level failure. "
+            f"failed={result.failed}, detail={result.detail!r}"
+        )
+        assert result.error is not None, (
+            "Outer loader failure должен заполнять result.error для "
+            "programmatic consumers"
+        )
+        assert "intentional discover failure" in result.error
+        # Detail содержит repr исключения для диагностики в логах.
+        assert "intentional discover failure" in result.detail
+        # Регистрация не происходит при outer failure.
+        assert result.registered == []
+
+    def test_agent_none_populates_failed_and_error(self, tmp_path):
+        """``agent=None`` — тоже outer failure (хотя и явный)."""
+        result = register_project_tools(None, tmp_path)
+        assert "register_project_tools" in result.failed
+        assert result.error is not None
+        assert "agent is None" in result.detail
 
 
 class TestRealCompactContextToolLoads:

@@ -222,7 +222,7 @@ regex-парсер не переписываются — change фиксируе
 `RuntimePatcher.apply_all()` больше **не** вызывает `patch_project_tools`
 и не возвращает `project_tools` в `PatchReport`. Архитектура:
 
-```
+```text
               ApplicationContext.create()
                 /                  \
                /                    \

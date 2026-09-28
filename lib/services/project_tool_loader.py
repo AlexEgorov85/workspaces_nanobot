@@ -43,18 +43,31 @@ class ProjectToolsLoadResult:
         registered: имена tool'ов, успешно зарегистрированных в
             ``agent.tools`` (порядок: как прошли discovery и DI).
         disabled: имена tool'ов, пропущенных по конфигурации
-            (``Tool.enabled(ctx) == False``).
+            (``Tool.enabled(ctx) == False``). Используется
+            **каноническое** имя tool'а (``tool.name``) для
+            совпадения с ``runtime_inventory.canonical_project_tools()``;
+            fallback на ``cls.__name__`` — если ``cls().name`` падает.
         duplicate: имена tool'ов, не зарегистрированных из-за конфликта
             имён (в ``agent.tools`` уже есть tool с таким именем).
         failed: имена tool'ов, упавших на ``Tool.create()`` или
             ``agent.tools.register`` (с ``logger.exception`` трассой).
+            Используется **каноническое** имя (``tool.name``), fallback
+            на ``cls.__name__``. На **outer** failure loader-а
+            (``_discover`` / импорт / ``ToolContext`` и т.п.)
+            в ``failed`` пишется ``["register_project_tools"]``,
+            чтобы banner diagnostics не терял loader-level ошибку.
         detail: presentation/diagnostic строка для баннера логов.
             Формат совместим с
             ``lib.services.runtime_inventory.parse_project_tools_detail``:
             ``[INTERNAL_FAILED] N project tools registered: a, b;
             M disabled by config: c; K already registered: d;
             J failed: e``. Маркер ``[INTERNAL_FAILED]`` ставится
-            только если ``failed`` непустой.
+            если ``failed`` непустой (включая outer-loader failure).
+        error: ``str`` c repr внешнего исключения loader-а, если
+            произошло в ``_discover`` / ``ToolContext`` / etc.
+            ``None`` если все шаги прошли штатно. Используется
+            programmatic consumers (banner'ы / ``diagnose_startup``)
+            для различения «частичный success» vs «loader failure».
     """
 
     registered: list[str] = field(default_factory=list)
@@ -62,6 +75,7 @@ class ProjectToolsLoadResult:
     duplicate: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     detail: str = ""
+    error: str | None = None
 
 
 def _discover(workspace_dir: Path) -> list[type]:
@@ -206,11 +220,40 @@ def register_project_tools(
         ``disabled`` / ``duplicate`` / ``failed`` и ``detail``-строкой
         для баннера логов (формат совместим с
         ``runtime_inventory.parse_project_tools_detail``).
+
+        Имена в ``registered``/``disabled``/``duplicate``/``failed``
+        — **канонические** (``tool.name``), что позволяет
+        ``runtime_inventory.diff_project_tools()`` матчить их с
+        ``canonical_project_tools()``. Fallback на ``cls.__name__``
+        если ``cls().name`` падает.
+
+        При **outer-failure** (сбой в ``_discover`` / ``_build_tool_context``
+        / etc., пойманный внешним ``except``) — ``failed`` заполняется
+        маркером ``"register_project_tools"`` и ``error`` получает
+        repr исключения, чтобы banner diagnostics (``diff_project_tools``)
+        видел loader-level ошибку, а не только частичный success.
     """
     from loguru import logger
 
+    def _canonical_name(cls: type) -> str:
+        """Получить каноническое имя tool'а (``tool.name``).
+
+        На момент ``enabled() == False`` инстанса ещё нет, поэтому
+        пытаемся создать его без side-effects (``Tool.__init__``
+        no-op в nanobot 0.3.5). Если не получилось — fallback
+        на ``cls.__name__`` (старое поведение для диагностики).
+        """
+        try:
+            return cls().name
+        except Exception:
+            return cls.__name__
+
     if agent is None:
-        return ProjectToolsLoadResult(detail="agent is None")
+        return ProjectToolsLoadResult(
+            failed=["register_project_tools"],
+            detail="agent is None",
+            error="agent is None",
+        )
 
     try:
         tools_dir = Path(workspace_dir) / "tools"
@@ -229,9 +272,10 @@ def register_project_tools(
         failed: list[str] = []
 
         for cls in candidates:
+            canonical = _canonical_name(cls)
             try:
                 if not cls.enabled(ctx):
-                    skipped_disabled.append(cls.__name__)
+                    skipped_disabled.append(canonical)
                     continue
                 tool = cls.create(ctx)
                 if agent.tools.get(tool.name) is not None:
@@ -243,7 +287,7 @@ def register_project_tools(
                             tool.set_provider(cache_store)
                         except Exception:
                             logger.exception(
-                                "set_provider failed for {}", cls.__name__,
+                                "set_provider failed for {}", canonical,
                             )
                     elif hasattr(tool, "set_connection_factory"):
                         try:
@@ -254,13 +298,13 @@ def register_project_tools(
                         except Exception:
                             logger.exception(
                                 "set_connection_factory failed for {}",
-                                cls.__name__,
+                                canonical,
                             )
                 agent.tools.register(tool)
                 registered.append(tool.name)
             except Exception:
-                logger.exception("Failed to register {}", cls.__name__)
-                failed.append(cls.__name__)
+                logger.exception("Failed to register {}", canonical)
+                failed.append(canonical)
 
         detail = f"{len(registered)} project tools registered"
         if registered:
@@ -292,4 +336,14 @@ def register_project_tools(
         )
     except Exception as exc:
         logger.exception("register_project_tools failed: {}", exc)
-        return ProjectToolsLoadResult(detail=f"patch failed: {exc}")
+        # Outer-failure: ``failed=["register_project_tools"]`` —
+        # маркер для banner diagnostics; ``error`` — repr для
+        # programmatic consumers. Detail остаётся совместимым
+        # с ``parse_project_tools_detail`` (префикс ``[INTERNAL_FAILED]``
+        # парсером НЕ распознаётся — но banner смотрит на ``failed``
+        # через ``ProjectToolsLoadResult.failed``, а не на detail).
+        return ProjectToolsLoadResult(
+            failed=["register_project_tools"],
+            detail=f"register_project_tools failed: {exc}",
+            error=f"{type(exc).__name__}: {exc}",
+        )

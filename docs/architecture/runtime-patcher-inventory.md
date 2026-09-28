@@ -44,17 +44,17 @@ runtime patch'ом — это отдельный loader
 
 | # | Патч | Target (nanobot API) | Risk | Required | Категория |
 |---|---|---|---|---|---|
-| 1 | `context_governor` | `ContextGovernor.normalize_tool_result` | HIGH | ✓ | ISOLATE+TESTS |
+| 1 | `context_governor` | `ContextGovernor.normalize_tool_result` | MEDIUM | ✓ | ISOLATE+TESTS |
 | 2 | `save_turn` | `agent._save_turn` | HIGH | ✓ | KEEP |
-| 3 | `exec_limits` | константы + schema tools | HIGH | — | REVIEW |
+| 3 | `exec_limits` | константы + schema tools | MEDIUM | — | REVIEW |
 | 4 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + schema | MEDIUM | — | KEEP |
-| 5 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | HIGH | — | REVIEW |
+| 5 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | MEDIUM | — | REVIEW |
 | 6 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | KEEP |
 | 7 | `async_save` | `agent.sessions.save` | MEDIUM | — | KEEP |
 | 8 | `session_dir_watch` | `sessions.save` (diagnostic) | LOW | — | KEEP (gated) |
 | 9 | `subagent_logging` | `_SubagentHook` (подмена класса) + публикация `SubagentTurnCompleted` через `bus.publish` | HIGH | ✓ | KEEP |
 | 10 | `turn_delivery_fail` | `TurnDelivery.fail` (private, класса) | MEDIUM | — | KEEP |
-| 11 | `session_content_cleanup` | `Session.add_message` | MEDIUM | — | KEEP |
+| 11 | `session_content_cleanup` | `Session.add_message` | LOW | — | KEEP |
 | 12 | `document_text_threshold` | `reference_non_image_attachments` | MEDIUM | — | KEEP |
 
 `Required = ✓` (4 патча: `assemble_outbound`, `save_turn`,
@@ -112,7 +112,8 @@ purpose: >
   workspace/data_store/cache/sessions/<session_key>/, в контекст класть
   короткую ссылку data_store/<path>. Экономия токенов + сохранение данных.
 public_alternative: нет.
-risk: HIGH.
+risk: MEDIUM (статический метод, не приватный instance-метод —
+  ломается только при rename сигнатуры).
 tests: tests/test_runtime_patcher_e2e.py, tests/test_gateway.py
 ```
 
@@ -145,7 +146,8 @@ nanobot_version: 0.3.5
 purpose: поднять потолок вывода exec/shell-tools (дефолт ~50K символов);
   значения из gateway.tool_result_limits.* в project.json.
 public_alternative: проверять tools.exec секцию config.json на каждом апгрейде.
-risk: HIGH.
+risk: MEDIUM (модульные константы + JSON-Schema — оба публичных
+  слоя, ломаются только при изменении схемы).
 tests: tests/test_runtime_patcher.py::test_exec_limits*,
   tests/test_runtime_patcher_e2e.py::TestExecToolE2E
 ```
@@ -172,7 +174,7 @@ target: >
   search._DEFAULT_HEAD_LIMIT, _DEFAULT_FILE_HEAD_LIMIT, GrepTool._MAX_FILE_BYTES.
 nanobot_version: 0.3.5
 purpose: конфигурируемые потолки read_file/list_dir/grep.
-risk: HIGH.
+risk: MEDIUM (модульные константы — не приватные instance-методы).
 tests: tests/test_runtime_patcher.py::test_tool_limits*
 ```
 
@@ -287,7 +289,7 @@ purpose: >
   Санитизация content/kwargs от NUL-символов на источнике — иначе
   psycopg2 падает "A string literal cannot contain NUL".
 public_alternative: перенос в PGSessionManager.save (обсуждается).
-risk: MEDIUM.
+risk: LOW (только защитная логика, не меняет upstream-контракт).
 tests: tests/test_runtime_patcher.py::test_session_content_cleanup*
 ```
 
