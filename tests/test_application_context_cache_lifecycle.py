@@ -86,6 +86,153 @@ class TestMakeSyncServicesReturnsCoordinator:
         assert callable(_make_sync_services)
 
 
+class TestSyncServiceCallbacksWired:
+    """OWNER MUST получать sync_service с уже выставленными колбэками.
+
+    Регрессия: wiring жил в callers (``gateway.py`` / ``benchmarks/runner.py``)
+    и потерялся при консолидации. ``PgDuckDbSyncService._dispatch`` при
+    ``_on_new_records=None`` делает молчаливый ``return`` — данные из PG
+    не попадают в DuckDB-кэш, без исключения и без traceback.
+    """
+
+    def _ctx_stub(self) -> MagicMock:
+        ctx = MagicMock()
+        ctx.role = "gateway"
+        ctx.config_service.settings_section.return_value = {
+            "postgres": {"dsn": "postgresql://stub/stub"}
+        }
+        ctx.db_logging_service = None
+        return ctx
+
+    def _patch_deps(self, monkeypatch: pytest.MonkeyPatch, acquired: bool):
+        import lib.services.cache_ownership as co_mod
+        import lib.services.duckdb_cache_store as store_mod
+        import lib.services.pg_duckdb_sync_service as sync_mod
+        import lib.services.table_registry as tr_mod
+
+        store = MagicMock(name="store")
+        store.upsert_records = MagicMock(name="store.upsert_records")
+        store.replace_records = MagicMock(name="store.replace_records")
+        store.publish = MagicMock(name="store.publish")
+
+        sync = MagicMock(name="sync")
+
+        def _try_claim(self) -> MagicMock:
+            return MagicMock(
+                acquired=acquired,
+                generation=1,
+                current_owner_id="owner" if acquired else None,
+            )
+
+        class _CoordStub:
+            """Подмена координатора целиком.
+
+            Нельзя патчить только ``try_claim``: реальный ``__init__``
+            вызывает ``_db.configure(dsn)`` и перенастраивает ГЛОБАЛЬНЫЙ
+            db-pool на stub-хост. После этого любой следующий тест,
+            которому нужен PG, виснет на коннекте.
+            """
+
+            def __init__(self, **kwargs: object) -> None:
+                self._worker_id = kwargs.get("worker_id")
+
+            try_claim = _try_claim
+
+        monkeypatch.setattr(
+            co_mod, "CacheOwnershipCoordinator", _CoordStub
+        )
+        monkeypatch.setattr(
+            store_mod,
+            "DuckDbCacheStore",
+            MagicMock(**{"open.return_value": store}),
+        )
+        monkeypatch.setattr(
+            sync_mod,
+            "PgDuckDbSyncService",
+            MagicMock(return_value=sync),
+        )
+        # Registry пустой вне реального create() -> ранний выход.
+        monkeypatch.setattr(
+            tr_mod.table_registry,
+            "resources",
+            MagicMock(
+                return_value=[
+                    MagicMock(schema="oarb", name="audits", label="audit"),
+                    MagicMock(schema="oarb", name="violations", label="audit"),
+                ]
+            ),
+        )
+        monkeypatch.setattr(
+            tr_mod.table_registry,
+            "table_names",
+            MagicMock(return_value=["oarb.audits", "oarb.violations"]),
+        )
+        monkeypatch.setattr(
+            tr_mod.table_registry, "vector_names", MagicMock(return_value=[])
+        )
+        return store, sync
+
+    def test_upsert_callback_delegates_with_resolved_pk(self, monkeypatch) -> None:
+        """NEW-RECORD колбэк MUST передавать в store PK источника.
+
+        Без этого store ищет колонку ``id``, для таблиц с другим PK
+        (``public.agent_predefined_scripts`` → ``name``) уходит в
+        CREATE OR REPLACE, а батчи от ``_fetch_incremental`` — дельта,
+        поэтому несвязанные строки теряются.
+        """
+        from lib.core.application_context import _make_sync_services
+
+        store, sync = self._patch_deps(monkeypatch, acquired=True)
+        sync.key_column_for = MagicMock(return_value="name")
+        _make_sync_services(self._ctx_stub())
+
+        sync.set_on_new_records_callback.assert_called_once()
+        cb = sync.set_on_new_records_callback.call_args[0][0]
+        assert callable(cb), "колбэк должен быть callable-обёрткой"
+
+        batch = [{"name": "s1", "description": "d"}]
+        cb("public.agent_predefined_scripts", batch)
+
+        sync.key_column_for.assert_called_once_with(
+            "public.agent_predefined_scripts"
+        )
+        store.upsert_records.assert_called_once_with(
+            "public.agent_predefined_scripts", batch, key_column="name"
+        )
+
+    def test_upsert_callback_failure_does_not_raise(self, monkeypatch) -> None:
+        """Ошибка upsert MUST NOT ронять sync-поток."""
+        from lib.core.application_context import _make_sync_services
+
+        store, sync = self._patch_deps(monkeypatch, acquired=True)
+        sync.key_column_for = MagicMock(return_value="name")
+        store.upsert_records.side_effect = RuntimeError("boom")
+        _make_sync_services(self._ctx_stub())
+
+        cb = sync.set_on_new_records_callback.call_args[0][0]
+        cb("oarb.audits", [{"id": 1}])  # MUST NOT raise
+
+    def test_replace_and_sync_callbacks_point_at_store(self, monkeypatch) -> None:
+        from lib.core.application_context import _make_sync_services
+
+        store, sync = self._patch_deps(monkeypatch, acquired=True)
+        _make_sync_services(self._ctx_stub())
+
+        sync.set_on_replace_records_callback.assert_called_once_with(
+            store.replace_records
+        )
+        sync.set_on_sync_callback.assert_called_once_with(store.publish)
+
+    def test_reader_process_gets_no_sync_service(self, monkeypatch) -> None:
+        from lib.core.application_context import _make_sync_services
+
+        _store, sync = self._patch_deps(monkeypatch, acquired=False)
+        result = _make_sync_services(self._ctx_stub())
+
+        assert result[1] is None, "READER MUST NOT get a sync_service"
+        sync.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Stage E — fencing integration в PgDuckDbSyncService
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import types
 
 import pytest
 
@@ -180,3 +181,81 @@ class TestGetModelPlumbing:
 
         captured = asyncio.run(run())
         assert [c["model"] for c in captured] == ["A", "B"], captured
+
+    def test_agent_factory_wiring_populates_model(self, monkeypatch):
+        """AgentFactory.create() MUST заполнить ``_agent_box`` ПОСЛЕ
+        ``AgentLoop.from_config`` (backfill на строке 194) — иначе
+        get_model() вечно возвращает None и llm_call.model в
+        agent_gateway_logs остаётся пустым.
+
+        Проверяем сквозной путь: реальный ``AgentFactory.create`` →
+        ``hook_factories[0]`` → инстанс ``DatabaseLoggingHook`` →
+        его ``get_model`` отдаёт текущий ``agent.model``.
+        """
+        from nanobot.agent.loop import AgentLoop
+
+        from lib.core.agent_factory import AgentFactory
+
+        built: dict[str, object] = {}
+
+        class FakeAgent:
+            def __init__(self) -> None:
+                self.model = "gpt-test"
+
+        def fake_from_config(config, bus, **kwargs):
+            built["hook_factories"] = kwargs.get("hook_factories") or []
+            built["kwargs"] = kwargs
+            agent = FakeAgent()
+            built["agent"] = agent
+            return agent
+
+        monkeypatch.setattr(AgentLoop, "from_config", staticmethod(fake_from_config))
+
+        class FakeService:
+            def get_request_id(self, session_key):
+                return "req-1"
+
+        agent, _hooks, hook_factories = AgentFactory().create(
+            config=object(),
+            bus=object(),
+            db_logging_service=FakeService(),
+            agent_id="a1",
+        )
+
+        assert isinstance(agent, FakeAgent), "create() MUST вернуть собранный agent"
+        assert len(hook_factories) == 1, hook_factories
+        assert hook_factories is built["hook_factories"], "фабрика MUST уйти в AgentLoop"
+
+        turn_ctx = types.SimpleNamespace(session_key="cli:s1")
+        hook = hook_factories[0](turn_ctx)
+
+        # Проверяем НЕ приватный атрибут, а наблюдаемое поведение:
+        # модель реально доезжает в llm_call при after_iteration.
+        assert callable(getattr(hook, "_get_model", None)), (
+            "DatabaseLoggingHook MUST хранить get_model callable, "
+            f"got {hook!r}"
+        )
+
+        class RecordingService(FakeService):
+            def __init__(self) -> None:
+                self.llm_calls: list[dict] = []
+
+            def log_llm_call(self, **kwargs) -> None:
+                self.llm_calls.append(kwargs)
+
+        rec = RecordingService()
+        hook2 = hook_factories[0](turn_ctx)
+        hook2._service = rec
+
+        async def run():
+            ctx = _ctx_template()
+            ctx.response = _make_response()
+            await hook2.after_iteration(ctx)
+
+        asyncio.run(run())
+        assert rec.llm_calls, "after_iteration MUST записать llm_call"
+        assert rec.llm_calls[0].get("model") == "gpt-test", rec.llm_calls[0]
+
+        # runtime-switch: смена модели на лету видна без пересоздания хука
+        built["agent"].model = "claude-other"
+        assert hook2._get_model() == "claude-other", hook2._get_model()

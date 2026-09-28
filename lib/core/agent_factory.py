@@ -148,12 +148,10 @@ class AgentFactory:
             # момент регистрации фабрики ``agent`` ещё не существует;
             # кидаем изменяемый контейнер ``_agent_box``, который
             # ``AgentLoop.from_config`` заполнит ссылкой. ``get_model``
-            # читается ленивo на каждой итерации — после ``from_config``
+            # читается лениво на каждой итерации — после ``from_config``
             # ``_agent_box[0]`` уже содержит ``agent``, свойство
             # ``AgentLoop.model`` (``nanobot/agent/loop.py:218``) отдаёт
             # текущее значение runtime_resolver.runtime.model.
-            from lib.hooks.database_logging_hook import make_db_logging_hook_factory
-
             _agent_box: list[Any] = []
 
             def get_model() -> str | None:

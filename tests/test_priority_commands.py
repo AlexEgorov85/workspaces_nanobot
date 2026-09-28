@@ -94,3 +94,41 @@ class TestGetPriorityCommandsWithRouter:
         assert "/alpha" in cmds
         assert "/beta" in cmds
         assert "/stop" in cmds
+
+    def test_order_is_deterministic(self, reset_module):
+        """Порядок MUST быть стабильным: сначала defaults в зафиксированном
+        порядке, затем discovered — в порядке обнаружения.
+
+        Регрессия: реализация на ``tuple(set)`` давала порядок, зависящий
+        от hash-seed процесса, поэтому логи и snapshot'ы сравнения
+        priority_polling расходились между запусками.
+        """
+
+        class FakeRouter:
+            priority_commands = ["/alpha", "/beta"]
+            _priority = {"/gamma": object()}
+
+        with patch.object(reset_module, "CommandRouter", FakeRouter):
+            first = reset_module.get_priority_commands()
+            second = reset_module.get_priority_commands()
+
+        assert first == second, (first, second)
+        assert first[: len(reset_module._DEFAULT_PRIORITY_COMMANDS)] == (
+            reset_module._DEFAULT_PRIORITY_COMMANDS
+        ), first
+        assert list(first[len(reset_module._DEFAULT_PRIORITY_COMMANDS):]) == [
+            "/alpha",
+            "/beta",
+            "/gamma",
+        ], first
+
+    def test_defaults_order_preserved_when_router_empty(self, reset_module):
+        """Пустой router — порядок ровно как в ``_DEFAULT_PRIORITY_COMMANDS``."""
+
+        class FakeRouter:
+            priority_commands = {}
+            _priority = {}
+
+        with patch.object(reset_module, "CommandRouter", FakeRouter):
+            cmds = reset_module.get_priority_commands()
+        assert cmds == reset_module._DEFAULT_PRIORITY_COMMANDS, cmds

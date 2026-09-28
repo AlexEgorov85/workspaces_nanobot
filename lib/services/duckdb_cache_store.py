@@ -483,16 +483,34 @@ class DuckDbCacheStore:
     # Приём данных (вызывается из PgDuckDbSyncService/worker-потока)
     # ------------------------------------------------------------------
 
-    def upsert_records(self, table: str, records: list[dict[str, Any]]) -> bool:
+    def upsert_records(
+        self,
+        table: str,
+        records: list[dict[str, Any]],
+        *,
+        key_column: str | None = None,
+    ) -> bool:
         """Добавить/обновить строки таблицы в локальный кэш.
 
-        Батч заменяет существующие записи с теми же id (upsert по ключу),
-        новые id — добавляются. Если в записях нет колонки ``id``, таблица
+        Батч заменяет существующие записи с тем же ключом (upsert),
+        новые — добавляются. Ключ: явный ``key_column`` (PK источника,
+        резолвится в ``PgDuckDbSyncService.key_column_for``), иначе
+        колонка ``id``, иначе — если в записях нет колонки ``id``, таблица
         целиком пересоздаётся из батча (с предупреждением).
+
+        ВАЖНО про пересоздание: оно деструктивно для частичного батча.
+        ``_fetch_incremental`` отдаёт ДЕЛЬТУ (``WHERE track_col > last``),
+        поэтому без ключа несвязанные строки были бы потеряны. Таблицам
+        без PK нужен ``key_column`` от sync service, а не дефолт ``id``.
 
         Если таблица является векторной (``vector_db_table``), источники
         (source) из батча помечаются грязными — индекс перестроится лениво
         при следующем search_vector.
+
+        Args:
+            table: ``schema.table`` (или ``table`` в схеме store).
+            records: батч строк (dict).
+            key_column: PK-колонка источника; ``None`` → ``id`` → recreate.
 
         Returns:
             True при успешном сохранении, False при ошибке.
@@ -502,7 +520,7 @@ class DuckDbCacheStore:
         with self._lock:
             try:
                 self._open_locked()
-                self._upsert_locked(table, records)
+                self._upsert_locked(table, records, key_column)
                 self._upserts += 1
                 self._last_upsert_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 self._dirty = True
@@ -717,7 +735,12 @@ class DuckDbCacheStore:
             result[(table, column)] = (comment, pg_type)
         return result
 
-    def _upsert_locked(self, table: str, records: list[dict[str, Any]]) -> None:
+    def _upsert_locked(
+        self,
+        table: str,
+        records: list[dict[str, Any]],
+        key_column: str | None = None,
+    ) -> None:
         schema, name = _split_table(table)
         schema = schema or self._schema
         if not name:
@@ -779,14 +802,18 @@ class DuckDbCacheStore:
             'WHERE table_schema = ? AND table_name = ?', [schema, name]
         ).fetchall()]
 
-        key_col = "id" if "id" in df_cols else None
+        key_col = key_column or ("id" if "id" in df_cols else None)
         insert_cols = [c for c in df_cols if c in existing_cols]
 
-        # Если нет ключа — DROP (DDL), дальше _ingest_arrow сделает CREATE OR REPLACE.
+        # Ключ не найден — DROP (DDL), дальше _ingest_arrow сделает
+        # CREATE OR REPLACE. Деструктивно для дельты, поэтому warning
+        # должен быть громким, а не информационным.
         if not (key_col and key_col in existing_cols):
             print(
-                f"[memory_store] Таблица {full}: нет колонки 'id', "
-                "таблица пересоздаётся из батча",
+                f"[memory_store] ВНИМАНИЕ: {full}: нет ключа upsert "
+                f"(id_column='{key_column}', нет 'id') — таблица "
+                "ПЕРЕСОЗДАЁТСЯ из батча. Для дельты это удаляет "
+                "несвязанные строки; укажите PK через key_column.",
                 file=sys.stderr,
             )
             self._ingest_arrow(table, records, insert_cols, create_table=True)
@@ -1047,7 +1074,32 @@ class DuckDbCacheStore:
                         )
                 finally:
                     self._conn.execute("DETACH __out")
-                os.replace(tmp, target)
+                # ``os.replace`` на Windows не может перезаписать файл, пока
+                # на нём открыт handle (ERROR_SHARING_VIOLATION → WinError 5),
+                # в т.ч. на собственное RW-соединение OWNER'а. На Unix
+                # replace поверх открытого файла разрешён, поэтому баг был
+                # невидим. Закрываем соединение → подменяем → открываем заново.
+                #
+                # Порядок важен и для консистентности: DuckDB на ``close()``
+                # делает checkpoint и УДАЛЯЕТ ``<target>.wal``. Если бы replace
+                # шёл до close, на диске остался бы ``cache.duckdb.wal`` от
+                # старого файла, а сам target был бы уже новым — DuckDB
+                # подхватил бы чужой WAL при следующем открытии.
+                live_conn = self._conn
+                self._conn = None
+                if live_conn is not None:
+                    try:
+                        live_conn.close()
+                    except Exception:
+                        pass
+                try:
+                    os.replace(tmp, target)
+                finally:
+                    if live_conn is not None:
+                        # reopen по тому же cache_path; индексы/метки не
+                        # сбрасываем (close() их затирает, а данные прежние).
+                        self._open_locked()
+                        self._is_ready = True
                 self._dirty = False
                 self._publishes += 1
                 self._last_publish_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

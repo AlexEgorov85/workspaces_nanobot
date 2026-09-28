@@ -110,6 +110,10 @@ class PgDuckDbSyncService:
         # РґР°Р»РµРµ С‡РёС‚Р°РµС‚СЃСЏ Р·Р° O(1). РЈСЃС‚СЂР°РЅСЏРµС‚ РїРѕРІС‚РѕСЂРЅС‹Р№ lookup С‡РµСЂРµР· table_registry
         # РЅР° РєР°Р¶РґРѕРј poll-С†РёРєР»Рµ.
         self._column_cache: dict[str, str] = {}
+        # PK-колонки таблиц (для DELETE+INSERT upsert в DuckDB-кэше).
+        # Отличается от ``_column_cache``: track-колонка отвечает за
+        # инкрементальный polling, PK — за идентификацию строки при upsert.
+        self._pk_cache: dict[str, str | None] = {}
         self._on_new_records: Callable[[str, list[dict]], None] | None = None
         self._on_replace_records: Callable[[str, list[dict]], None] | None = None
         self._on_schema: Callable[[str, list[dict]], None] | None = None
@@ -424,6 +428,55 @@ class PgDuckDbSyncService:
         col = "id" if table == self._vector_table else "updated_at"
         self._column_cache[table] = col
         return col
+
+    def key_column_for(self, table: str) -> str | None:
+        """PK-колонка таблицы для upsert в DuckDB-кэше (``None`` — нет PK).
+
+        Нужна, потому что ``DuckDbCacheStore.upsert_records`` умеет делать
+        инкрементальный DELETE+INSERT только по ключу, а дефолтно ищет
+        колонку ``id``. Таблицы вида ``public.agent_predefined_scripts``
+        имеют PK ``name`` и без явной передачи ключа попадали в ветку
+        ``CREATE OR REPLACE TABLE`` — а батчи от ``_fetch_incremental``
+        являются ДЕЛЬТОЙ, поэтому несвязанные строки молча терялись.
+
+        Резолвится один раз на таблицу и кэшируется (в т.ч. ``None``).
+        Составной PK не поддерживается — для таких таблиц нужен
+        отдельный contract; здесь возвращается ``None`` и store
+        пересоздаёт таблицу (как раньше).
+        """
+        if table in self._pk_cache:
+            return self._pk_cache[table]
+
+        pk: str | None = None
+
+        def _work(conn: Any) -> list[tuple[str, ...]]:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT a.attname FROM pg_index i "
+                    "JOIN pg_attribute a "
+                    "  ON a.attrelid = i.indrelid "
+                    " AND a.attnum = ANY(i.indkey) "
+                    "WHERE i.indrelid = %s::regclass AND i.indisprimary "
+                    "ORDER BY a.attnum",
+                    [self._fq_table(table)],
+                )
+                return cur.fetchall()
+            finally:
+                cur.close()
+
+        try:
+            rows = self._db_run(_work)
+            if len(rows) == 1:
+                pk = str(rows[0][0])
+        except Exception as exc:
+            logger.warning(
+                "PgDuckDbSyncService.key_column_for(%s): PK lookup failed (%s) "
+                "— upsert пойдёт через пересоздание таблицы",
+                table, exc,
+            )
+        self._pk_cache[table] = pk
+        return pk
 
     def _do_initial_load(self) -> None:
         """РџР°СЂР°Р»Р»РµР»СЊРЅР°СЏ РЅР°С‡Р°Р»СЊРЅР°СЏ Р·Р°РіСЂСѓР·РєР° РІСЃРµС… С‚Р°Р±Р»РёС† С‡РµСЂРµР· thread-pool.

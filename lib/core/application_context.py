@@ -1564,6 +1564,31 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         ownership_coordinator=coord,
         cache_provider=store,
     )
+    # Callbacks MUST выставляться здесь, в composition root — иначе
+    # ``_dispatch`` молча уходит в ``if callback is None: return`` и данные
+    # из PG никогда не попадают в DuckDB-кэш. Раньше wiring жил в callers
+    # (gateway.py / benchmarks/runner.py) и потерялся при консолидации.
+    #
+    # Callers, которым нужен свой хук (например, benchmark ждёт первый
+    # sync через asyncio.Event), MUST chaining-ить предыдущий колбэк,
+    # а не затирать его — как это делал прежний benchmarks/runner.py.
+    sync.set_on_replace_records_callback(store.replace_records)
+    sync.set_on_sync_callback(store.publish)
+
+    # Upsert требует PK источника: без него store дефолтно ищет ``id`` и
+    # для таблиц с другим PK (напр. ``public.agent_predefined_scripts``
+    # с PK ``name``) уходит в CREATE OR REPLACE — деструктивно для
+    # дельты от ``_fetch_incremental``. PK резолвится лениво и кэшируется
+    # в sync service, поэтому лишних запросов к PG на старте нет.
+    def _upsert_with_pk(table: str, records: list[dict]) -> None:
+        try:
+            store.upsert_records(
+                table, records, key_column=sync.key_column_for(table)
+            )
+        except Exception as exc:
+            logger.warning("cache upsert(%s) failed: %s", table, exc)
+
+    sync.set_on_new_records_callback(_upsert_with_pk)
     return store, sync, coord
 
 

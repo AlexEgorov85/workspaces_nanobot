@@ -50,14 +50,15 @@ def get_priority_commands() -> tuple[str, ...]:
     ``(cmd, handler)`` для регистрации, а не возвращает данные.
     """
     found: set[str] = set(_DEFAULT_PRIORITY_COMMANDS)
+    extra: list[str] = []
     router = CommandRouter()
 
     if hasattr(router, "priority_commands"):
         value = router.priority_commands
         if isinstance(value, dict):
-            found.update(value.keys())
+            extra.extend(value.keys())
         elif isinstance(value, (list, tuple, set)):
-            found.update(value)
+            extra.extend(value)
 
     if hasattr(router, "_priority") and isinstance(router._priority, dict):
         # ВАЖНО: в nanobot 0.3.5+ ``_priority`` существует как
@@ -65,6 +66,15 @@ def get_priority_commands() -> tuple[str, ...]:
         # есть, но содержимого нет. ``tuple({}.keys())`` = ``()``,
         # что роняет priority-polling. Здесь мы ОБЪЕДИНЯЕМ с
         # defaults, поэтому «пустой router» не даёт пустой результат.
-        found.update(router._priority.keys())
+        extra.extend(router._priority.keys())
 
-    return tuple(found)
+    found.update(extra)
+
+    # Порядок детерминирован: сначала defaults (их порядок зафиксирован
+    # в ``_DEFAULT_PRIORITY_COMMANDS``), затем discovered — в порядке
+    # обнаружения. ``tuple(set)`` давал плавающий порядок между
+    # вызовами в пределах процесса (hash seed для ``str`` не меняется,
+    # но порядок всё равно не отражает приоритет).
+    ordered = [cmd for cmd in _DEFAULT_PRIORITY_COMMANDS if cmd in found]
+    ordered.extend(cmd for cmd in extra if cmd in found and cmd not in ordered)
+    return tuple(ordered)
