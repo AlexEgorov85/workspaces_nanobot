@@ -83,6 +83,24 @@ context канала (он лежит в `media` payload сообщения).
 Конкретные правила для каждого skill'а — в его `SKILL.md` (секция
 «Чтение файлов из чата»).
 
+## Анализ формулировок отклонений по ВНД
+
+Когда аудитор формулирует отклонение/нарушение и прикладывает файл(ы)
+ВНД (`.pdf`/`.docx`/`.txt`), используй навык
+`audit_formulation_strengthener` — он возвращает человекочитаемый отчёт
+в строгом русском юридическом стиле:
+
+```bash
+python workspace/skills/audit_formulation_strengthener/scripts/cli.py \
+    --violation "<текст отклонения>" \
+    --vnd "<путь_к_vnd1>" [--vnd "<путь_к_vnd2>" ...] \
+    --output report.md
+```
+
+Перед запуском на больших ВНД рекомендуется оценить объём работы
+(`--mode all --estimate-only`) — skill без LLM-вызовов вернёт `size_estimate`
+и число планируемых вызовов (`1+N+1`).
+
 ## Scheduled Reminders
 
 Before scheduling reminders, check available skills and follow skill guidance first.
