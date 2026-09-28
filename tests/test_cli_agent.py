@@ -277,34 +277,40 @@ class TestParseArgs:
     def test_defaults(self):
         from cli_agent import _parse_args
 
-        # После Phase B ``--profile`` обязателен (whitelist {"prod","test"}).
-        with patch("sys.argv", ["cli_agent.py", "--profile=test"]):
+        # Stage F (change ``unify-cli-gateway-architecture``, design D8):
+        # CLI = фиксированный профиль ``test``, ``--profile`` НЕ
+        # принимается. Тест вызывает _parse_args без ``--profile``.
+        with patch("sys.argv", ["cli_agent.py"]):
             args = _parse_args()
             assert args.patched is False
             assert args.storage == "auto"
             assert args.session is None
+            assert args.profile == "test"
 
     def test_patched_flag(self):
         from cli_agent import _parse_args
 
-        with patch("sys.argv", ["cli_agent.py", "--profile=test", "--patched"]):
+        with patch("sys.argv", ["cli_agent.py", "--patched"]):
             args = _parse_args()
             assert args.patched is True
+            assert args.profile == "test"
 
     def test_storage_postgres(self):
         from cli_agent import _parse_args
 
-        with patch("sys.argv", ["cli_agent.py", "--profile=test", "-P", "-S", "postgres"]):
+        with patch("sys.argv", ["cli_agent.py", "-P", "-S", "postgres"]):
             args = _parse_args()
             assert args.patched is True
             assert args.storage == "postgres"
+            assert args.profile == "test"
 
     def test_session_key(self):
         from cli_agent import _parse_args
 
-        with patch("sys.argv", ["cli_agent.py", "--profile=test", "-s", "my-session"]):
+        with patch("sys.argv", ["cli_agent.py", "-s", "my-session"]):
             args = _parse_args()
             assert args.session == "my-session"
+            assert args.profile == "test"
 
 
 # =================================================================
