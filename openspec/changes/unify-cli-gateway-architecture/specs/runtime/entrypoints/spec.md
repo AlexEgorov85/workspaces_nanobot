@@ -83,7 +83,7 @@ MUST NOT приниматься `ApplicationContext.create()`; их переда
 | `RuntimePatcher.apply_all()` | ✅ | ✅ |
 | `CacheProvider` (если `gateway.cache` настроен) | ✅ | ✅ |
 | `CacheOwnershipCoordinator` (если `gateway.cache` настроен) | ✅ | ✅ |
-| concrete `CacheProvider` implementation (factory: `open(path, mode)`) | ✅ | ✅ |
+| concrete cache factory (`DuckDbCacheStore.open(path, mode)`) | ✅ | ✅ |
 | `PostgresChannel` (worker pool) | ✅ | ❌ |
 | `CacheSyncService` (sync — если `enable_audit=True` И OWNER) | ✅ | ✅ (если OWNER) |
 | `CronService` (если `gateway.enable_cron=True`) | ✅ | ❌ |
@@ -547,7 +547,7 @@ CLI MUST обрабатывать `/compact` как локальный shortcut:
 - Создавать `CacheProvider` через прямую инстанциацию concrete implementation минуя concrete factory.
 - Использовать `pg_advisory_xact_lock` или эквивалентный механизм для fencing producer write без advisory lock — generation check alone НЕДОСТАТОЧЕН.
 - Передавать deprecated `enable_*` kwargs в новом production code (только через `**kwargs` для backward compat, deprecated).
-- Реализовывать `query_sql` как строго SELECT-only API — `query_sql` MUST принимать любые SQL с READ_ONLY assertion guard.
+- Реализовывать `query_sql` как произвольный SQL API — НЕДОПУСТИМО. `query_sql` MUST принимать только SELECT, INSERT, UPDATE и DELETE. DDL и другие неподдерживаемые SQL statements MUST отклоняться с `UnsupportedSqlError` в любом mode.
 - Импортировать `DuckDbCacheStore` (или другую concrete cache implementation) из runtime-consumer кода (AgentLoop, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator`). Concrete implementation MAY использоваться только в composition root и в разделе concrete adapter.
 
 ## Dependencies
@@ -585,7 +585,7 @@ CLI MUST обрабатывать `/compact` как локальный shortcut:
    - `test_read_only_connection_blocks_mutations_via_storage_engine` — concrete adapter открывает storage в реальном read-only mode (DuckDB: `duckdb.connect(read_only=True)`).
    - `test_read_only_blocks_insert_via_assertion`.
    - `test_read_write_allows_mutations`.
-   - `test_query_sql_accepts_any_sql_in_read_write`.
+   - `test_query_sql_accepts_select_and_dml_in_read_write`.
    - `test_rejects_nfs_path`.
 8. `tests/test_cache_provider_layering.py`:
    - `test_application_context_uses_cache_provider_abc_not_duckdb` — `ctx.cache_provider` типизирован как `CacheProvider`, не `DuckDbCacheStore`.

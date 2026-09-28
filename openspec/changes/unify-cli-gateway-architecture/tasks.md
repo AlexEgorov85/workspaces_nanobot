@@ -148,7 +148,7 @@
   - `test_read_only_blocks_insert_via_assertion` — assertion guard.
   - `test_read_only_blocks_update` / `test_read_only_blocks_delete` / `test_read_only_allows_select`.
   - `test_read_write_allows_mutations`.
-  - `test_query_sql_accepts_any_sql_in_read_write` — INSERT/UPDATE/DELETE работают в READ_WRITE.
+  - `test_query_sql_accepts_select_and_dml_in_read_write` — SELECT/INSERT/UPDATE/DELETE работают в READ_WRITE.
   - `test_rejects_nfs_path`.
   Verify: `pytest -v` зелёный.
 - [ ] 8.7 `tests/test_cache_provider_role_paths.py` — `role="cli" == role="gateway" == cache.duckdb`.

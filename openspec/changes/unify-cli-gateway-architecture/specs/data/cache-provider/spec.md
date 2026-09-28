@@ -21,8 +21,8 @@ Skills (`audit_analyzer`, `legal_summarizer`) MUST открывать cache че
 
 #### Scenario: обнаружение NFS пути
 
-- **КОГДА** `gateway.cache.local_path` указывает на NFS mount или другую network filesystem
-- **ТОГДА** `CacheProvider` MUST reject путь ДО открытия cache с явной ошибкой (PID 0 locking errors эмпирически)
+- **КОГДА** `gateway.cache.local_path` указывает на NFS mount или другую network/shared filesystem
+- **ТОГДА** concrete cache storage MUST reject путь ДО открытия cache с явной ошибкой (PID 0 locking errors эмпирически)
 
 #### Scenario: CLI и gateway используют один и тот же snapshot
 
@@ -138,7 +138,7 @@ Coordinator MUST NOT выполнять операций чтения или з�
 - **THEN** он НЕ ДОЛЖЕН делать read/write в cache storage
 - **AND** он работает только с PostgreSQL `agent_cache_ownership` table
 
-### Requirement: query_sql mode semantics (DML only)
+### Requirement: query_sql mode semantics
 
 `query_sql()` MUST принимать **только следующие SQL statement types**: `SELECT`, `INSERT`, `UPDATE`, `DELETE`. DDL statements MUST быть отклонены в любом режиме.
 
