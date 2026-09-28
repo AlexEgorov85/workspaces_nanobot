@@ -49,14 +49,26 @@ CLI и gateway MUST вызывать `ApplicationContext.create(...)` с **од�
 
 ### Requirement: Deprecated kwargs с явной compatibility boundary
 
-`ApplicationContext.create(...)` MAY принимать kwargs `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` через `**kwargs` для backward compat с существующими тестами и интеграционным кодом. Эти kwargs MUST NOT быть именованными параметрами в typed signature (физическая форма compatibility boundary). Deprecated kwargs MUST быть удалены в MINOR релизе после раскрытия этого change.
+Deprecated kwargs являются временной compatibility boundary. Они MUST приниматься только через `**kwargs` до выполнения отдельного change `remove-deprecated-enable-kwargs`. До этого change production code MUST NOT использовать эти kwargs. После применения `remove-deprecated-enable-kwargs`:
+
+- `enable_db_logging`
+- `enable_audit`
+- `enable_cron`
+- `print_llm_calls`
+
+MUST NOT приниматься `ApplicationContext.create()`; их передача MUST приводить к `TypeError`.
 
 #### Scenario: Deprecated kwargs через **kwargs продолжают работать
 
 - **WHEN** существующий тест вызывает `ApplicationContext.create(..., enable_audit=False)` через `**kwargs`
 - **THEN** система MUST использовать переданное значение `enable_audit=False`, игнорируя конфиг `gateway.enable_audit`
 - **AND** система MUST логировать `DeprecationWarning` с указанием на новый путь конфигурации
-- **AND** сигнатура системы ДОЛЖНА оставаться НЕИЗМЕННОЙ после MINOR релиза, который удаляет эти kwargs
+
+#### Scenario: После remove-deprecated-enable-kwargs — TypeError на deprecated kwargs
+
+- **WHEN** change `remove-deprecated-enable-kwargs` реализован
+- **AND** код вызывает `ApplicationContext.create(..., enable_audit=False)` через `**kwargs`
+- **THEN** MUST быть поднят `TypeError`
 
 ### Requirement: role определяет composition инфраструктуры, не AgentLoop
 
@@ -127,7 +139,13 @@ Lifecycle MUST быть строго:
    create CacheSyncService (only for OWNER in audit mode)
 ```
 
-`ApplicationContext` MUST зависеть только от `CacheProvider` (ABC), NOT от concrete implementation (`DuckDbCacheStore`). Concrete factory `DuckDbCacheStore.open(...)` (или эквивалентный для другой реализации) вызывается composition root'ом и возвращает `CacheProvider` instance.
+`ApplicationContext` является composition root и MAY использовать concrete factory (например, `DuckDbCacheStore.open(path, mode)`) для сборки текущей реализации `CacheProvider`. После создания runtime:
+
+- `ApplicationContext.cache_provider` MUST иметь тип `CacheProvider`;
+- runtime consumers (AgentLoop, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator`) MUST зависеть только от `CacheProvider`;
+- concrete implementation MUST NOT использоваться как тип runtime dependency.
+
+Зависимость `ApplicationContext` от `DuckDbCacheStore` допускается ТОЛЬКО в composition code, который создаёт concrete implementation.
 
 #### Scenario: Lifecycle ordering (claim → mode → open → optional sync)
 
@@ -262,58 +280,87 @@ RETURNING resource_key;
 API MUST быть layered:
 
 ```text
-CacheOwnershipCoordinator     ← try_claim / heartbeat / release (только ownership)
+CacheOwnershipCoordinator     ← try_claim / heartbeat / release / acquire_write_fence (только ownership)
         ↓
 CacheAccessMode              ← READ_WRITE / READ_ONLY (enum)
         ↓
-CacheProvider (ABC)          ← open(path, mode) → CacheProvider instance; query/search/schema/close
+CacheProvider (ABC)          ← interface: query_sql / search_vector / get_schema / close
         ↓
-DuckDbCacheStore             ← concrete implementation CacheProvider (factory)
+Concrete implementation      ← текущая: DuckDbCacheStore; future: SQLiteCacheStore
 ```
 
-**`CacheProvider`** MUST быть абстрактным интерфейсом с classmethod/staticmethod `open(path: str, mode: CacheAccessMode) -> CacheProvider`. **ApplicationContext MUST зависеть только от `CacheProvider` (НЕ от `DuckDbCacheStore`)**. `DuckDbCacheStore.open(...)` — factory method, который возвращает `CacheProvider` instance.
+**`CacheProvider` MUST NOT иметь метода `open()`.** Это ответственность concrete factory.
+
+Concrete implementation создаётся composition root через concrete factory:
+
+```python
+# для текущей реализации:
+DuckDbCacheStore.open(path, mode) -> CacheProvider
+# для будущей реализации:
+SQLiteCacheStore.open(path, mode) -> CacheProvider
+```
+
+**`ApplicationContext` является composition root** и MAY использовать concrete factory для сборки текущей реализации `CacheProvider`. После создания runtime:
+
+- `ApplicationContext.cache_provider` MUST иметь тип `CacheProvider`;
+- runtime consumers (AgentLoop, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator`) MUST зависеть только от `CacheProvider`;
+- concrete implementation MUST NOT использоваться как тип runtime dependency.
+
+Зависимость `ApplicationContext` от `DuckDbCacheStore` допускается ТОЛЬКО в composition code, который создаёт concrete implementation.
 
 В `READ_ONLY` режиме все мутации (INSERT/UPDATE/DELETE) MUST быть запрещены через **двухуровневую защиту**:
 1. **Concrete cache adapter MUST открыть storage connection в реальном read-only режиме** (для текущей реализации DuckDB: `duckdb.connect(path, read_only=True)`; для будущей SQLite — соответствующий API). Сам storage engine не позволит мутации.
 2. **`CacheProvider.query_sql(...)` MUST поднять `ReadOnlyAssertionError`** при INSERT/UPDATE/DELETE.
 
-`query_sql()` контракт: executes any SQL statement; mutation statements allowed only in `READ_WRITE` mode.
+`query_sql()` контракт: MUST принимать только следующие SQL statement types:
+- `SELECT`
+- `INSERT`
+- `UPDATE`
+- `DELETE`
 
-`CacheProvider` MUST reject путь на NFS (или другую network filesystem с неподдерживаемым locking) до открытия storage — fail-fast с явной ошибкой.
+DDL и другие schema-changing statements (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `CREATE INDEX`, `DROP INDEX`) MUST быть отклонены с `UnsupportedSqlError` в любом mode (включая READ_WRITE).
 
-#### Scenario: Layered API — ApplicationContext зависит только от CacheProvider
+Concrete cache storage MUST reject unsupported network/shared filesystem paths before opening the storage. Для текущей DuckDB implementation NFS/SMB и другие network/shared filesystems MUST быть rejected. Для будущих реализаций правила аналогичны.
+
+#### Scenario: Layered API — ApplicationContext хранит cache через CacheProvider
 
 - **WHEN** `ApplicationContext.create()` создаёт cache runtime
 - **THEN** `ctx.cache_provider` MUST быть типизирован как `CacheProvider` (ABC)
-- **AND** `ctx.cache_provider = DuckDbCacheStore.open(path, mode)` (factory)
-- **AND** `ApplicationContext` MUST NOT содержать `DuckDbCacheStore` в полях
+- **AND** `ctx.cache_provider` MAY быть создан через concrete factory (например, `DuckDbCacheStore.open(path, mode)`) — это composition-time code
+- **AND** `ApplicationContext` MUST NOT содержать `DuckDbCacheStore` (или другую concrete implementation) как поле runtime consumer
+- **AND** runtime consumers (AgentLoop, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator`) MUST зависеть только от `CacheProvider`
 
-#### Scenario: CacheProvider.open(READ_ONLY) — реальный cache storage read-only connection
+#### Scenario: Concrete factory открывает READ_ONLY cache — реальный read-only connection
 
 - **WHEN** concrete factory (например, `DuckDbCacheStore.open(path, mode=READ_ONLY)`) вызван
 - **THEN** concrete adapter MUST открыть storage connection в реальном read-only режиме (для DuckDB: `duckdb.connect(path, read_only=True)`)
 - **AND** попытки INSERT/UPDATE/DELETE на уровне SQL MUST быть отклонены storage engine
 
-#### Scenario: CacheProvider.open(READ_ONLY) — assertion guard
+#### Scenario: Concrete factory открывает READ_ONLY cache — assertion guard
 
 - **WHEN** concrete factory (например, `DuckDbCacheStore.open(mode=READ_ONLY)`) вызван
 - **AND** через `CacheProvider.query_sql(...)` вызывается INSERT/UPDATE/DELETE
 - **THEN** MUST поднять `ReadOnlyAssertionError`
 
-#### Scenario: CacheProvider.open(READ_WRITE) разрешает мутации
+#### Scenario: Concrete factory открывает READ_WRITE cache — мутации разрешены
 
 - **WHEN** concrete factory (например, `DuckDbCacheStore.open(mode=READ_WRITE)`) вызван
-- **THEN** SELECT/INSERT/UPDATE/DELETE MUST работать нормально
+- **THEN** `SELECT`/`INSERT`/`UPDATE`/`DELETE` MUST работать нормально
 
-#### Scenario: query_sql() принимает DML в READ_WRITE
+#### Scenario: query_sql() в READ_WRITE принимает SELECT и DML
 
-- **WHEN** concrete factory создаёт CacheProvider в READ_WRITE и вызов `query_sql("INSERT INTO ...")` или `query_sql("UPDATE ...")` или `query_sql("DELETE ...")`
+- **WHEN** CacheProvider создан в READ_WRITE и `query_sql("SELECT ...")` или `query_sql("INSERT INTO ...")` или `query_sql("UPDATE ...")` или `query_sql("DELETE ...")`
 - **THEN** операция MUST выполниться нормально
 
-#### Scenario: query_sql() отклоняет DDL в любом mode
+#### Scenario: query_sql() в READ_WRITE отклоняет DDL
 
-- **WHEN** вызов `query_sql("CREATE TABLE ...")` или `query_sql("DROP TABLE ...")` или `query_sql("ALTER TABLE ...")` или `query_sql("TRUNCATE TABLE ...")` (в любом mode)
-- **THEN** MUST поднять `UnsupportedSqlError`
+- **WHEN** CacheProvider создан в READ_WRITE и `query_sql("CREATE TABLE ...")` или `query_sql("DROP TABLE ...")` или `query_sql("ALTER TABLE ...")` или `query_sql("TRUNCATE TABLE ...")` или `query_sql("CREATE INDEX ...")` или `query_sql("DROP INDEX ...")`
+- **THEN** MUST поднять `UnsupportedSqlError` (DDL запрещён даже в READ_WRITE)
+
+#### Scenario: query_sql() в READ_ONLY принимает SELECT
+
+- **WHEN** CacheProvider создан в READ_ONLY и `query_sql("SELECT ...")`
+- **THEN** операция MUST выполниться нормально
 
 #### Scenario: CacheProvider reject NFS path
 

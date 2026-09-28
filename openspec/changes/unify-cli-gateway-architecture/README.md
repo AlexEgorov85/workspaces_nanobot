@@ -27,11 +27,20 @@ CLI и Gateway используют единый `ApplicationContext` и оди�
                            │
                  CacheOwnershipCoordinator
                            │
-                  ┌────────┴────────┐
-                  │                 │
-              OWNER (RW)        READER (RO)
-                  │                 │
-              PG → DuckDB      DuckDB RO
+                 ┌────────┴────────┐
+                 │                 │
+             OWNER (RW)        READER (RO)
+                 │                 │
+                 └───┬─────────┬───┘
+                     │         │
+                 CacheProvider  CacheProvider
+                 (interface)   (interface)
+                     │         │
+                 ┌───┴────────┴───┐
+                 │               │
+            DuckDbCacheStore (current impl.)
+                 │               │
+            <local_path>/cache.duckdb
 ```
 
 **CLI:**
@@ -42,9 +51,13 @@ CLI и Gateway используют единый `ApplicationContext` и оди�
 - `PostgresChannel → in-memory MessageBus → AgentLoop`
 - profile через `--profile` argv
 
-**DuckDB:**
-- Один файл `cache.duckdb` для всех процессов.
-- Ownership sync определяется через PostgreSQL claim (`agent_cache_ownership`).
+**Cache:**
+- Один snapshot-файл (`<local_path>/cache.duckdb`) для всех процессов.
+- Ownership определяется через PostgreSQL claim (`agent_cache_ownership`, resource_key='local_cache').
 - Один producer (READ_WRITE), остальные процессы read-only consumers (READ_ONLY).
 - Atomic claim через `INSERT ... ON CONFLICT (resource_key) DO UPDATE`.
 - Fencing: старый producer прекращает записи после потери ownership.
+
+**Текущая concrete cache implementation:** DuckDB (`DuckDbCacheStore`).
+
+Future: SQLite (`SQLiteCacheStore`) может заменить без изменения ownership contract или `CacheProvider` interface.

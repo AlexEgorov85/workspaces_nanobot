@@ -299,7 +299,18 @@ PostgreSQL transaction MUST оставаться открытой на всём 
 
 **Решение:** Система ДОЛЖНА хранить snapshot-файл на локальной filesystem с требуемой cache storage locking semantics (POSIX `fcntl` flock, etc.). Network/shared filesystem (NFS, SMB, etc.) — запрещён. Конкретная FS не специфицируется (ext4 — Linux default, APFS — macOS, NTFS — Windows).
 
-`CacheProvider` MUST reject путь на NFS или другую network filesystem ДО открытия storage — fail-fast с явной ошибкой.
+```text
+Logical cache resource
+        │
+Текущий physical storage
+        │
+<local_path>/cache.duckdb  (текущая реализация)
+<local_path>/cache.sqlite  (будущая реализация, например)
+```
+
+**`cache.duckdb` является текущим physical storage implementation, а не частью `CacheProvider` contract.** Изменение имени или формата physical storage НЕ ДОЛЖНО менять ownership contract, `CacheProvider` interface или `CacheSyncService`.
+
+**Concrete cache storage MUST reject unsupported network/shared filesystem paths before opening the storage.** Для текущей DuckDB implementation NFS/SMB и другие network/shared filesystems MUST быть rejected. Для будущих реализаций правила аналогичны (storage без локального filesystem locking semantics недопустим).
 
 **`gateway.cache.local_path` MUST быть shared runtime resource**, не profile-specific value. Если CLI работает с `profile="test"`, а gateway с `profile="prod"` — оба процесса MUST резолвить snapshot в один и тот же физический путь. Профили НЕ ДОЛЖНЫ переопределять `gateway.cache.local_path`. Если `profiles/test.jsonc` и `profiles/prod.jsonc` имеют разные значения `gateway.cache.local_path` — ConfigurationResolver MUST reject это как ошибку конфигурации.
 
