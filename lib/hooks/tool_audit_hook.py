@@ -142,28 +142,42 @@ class ToolAuditHook(AgentHook):
 def format_tool_params(params: list[dict]) -> dict[str, str]:
     """Форматирует список параметров инструментов в словарь строк.
 
-    Для каждого словаря из ``params`` загружает поле ``arguments``
-    как JSON и сериализует значение каждого аргумента в компактный
-    строковый вид (с repr для простых типов и json.dumps для
-    составных).
+    Принимает ``p["arguments"]`` в одной из форм:
+
+    * **dict** (nanobot 0.3.5+: ``ToolCallRequest.arguments: Any`` —
+      фактически ``dict`` после парсинга provider'ом; см.
+      ``nanobot/providers/openai_compat_provider.py`` и др.);
+    * **str** с JSON (legacy/другие transport'ы — JSON-encoded);
+    * **None** / прочее — оборачивается в ``{"_": repr(value)}``.
+
+    Для каждого аргумента значение сериализуется в компактный
+    строковый вид (repr для простых типов и json.dumps для составных).
 
     Параметры:
         params: Список словарей с ключами ``name`` (имя инструмента)
-                и ``arguments`` (строка JSON с аргументами).
+                и ``arguments`` (dict / JSON-строка / None).
 
-    Returns:
+    Возвращает:
         Словарь, где ключ — имя инструмента, значение — строка с
-        отформатированными параметрами.
+        отформатированными параметрами. Если инструменты не переданы,
+        возвращается пустой словарь.
     """
     result: dict[str, str] = {}
     for p in params:
         name = p["name"]
-        try:
-            args = json.loads(p["arguments"])
-            if not isinstance(args, dict):
-                args = {"_": str(args)}
-        except (json.JSONDecodeError, TypeError):
-            args = {"_": str(p["arguments"])}
+        arguments = p.get("arguments")
+        if isinstance(arguments, dict):
+            args = arguments
+        elif isinstance(arguments, str):
+            try:
+                loaded = json.loads(arguments)
+                args = loaded if isinstance(loaded, dict) else {"_": str(loaded)}
+            except (json.JSONDecodeError, TypeError):
+                args = {"_": arguments}
+        elif arguments is None:
+            args = {}
+        else:
+            args = {"_": str(arguments)}
         parts = []
         for k, v in args.items():
             if isinstance(v, str):

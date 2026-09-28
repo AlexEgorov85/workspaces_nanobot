@@ -162,6 +162,7 @@ def make_db_logging_hook_factory(
     db_logging_service: Any,
     agent_id: str | None = None,
     print_llm_calls: bool = False,
+    get_model: Callable[[], str | None] | None = None,
 ) -> Callable[[Any], DatabaseLoggingHook]:
     """Фабрика: создать СВЕЖИЙ ``DatabaseLoggingHook`` на КАЖДЫЙ оборот.
 
@@ -177,6 +178,15 @@ def make_db_logging_hook_factory(
     Args:
         db_logging_service: ``DbLoggingService``.
         agent_id: id агента для колонки ``agent_id`` в логах.
+        print_llm_calls: печатать в терминал CLI токены каждой итерации.
+        get_model: опциональный callable для резолва текущего имени
+            модели в ``after_iteration``. Нужен потому что в nanobot
+            0.3.5+ ``LLMResponse.model`` удалён — ``getattr(response,
+            "model", None)`` всегда ``None``. ``AgentFactory``
+            замыкает ``get_model`` над ``lambda: agent.model``.
+            Если не передан — ``DatabaseLoggingHook.model`` остаётся
+            ``None``, и ``log_llm_call`` пишет ``name="llm"``
+            (как и до фикса).
 
     Returns:
         Фабрика ``def(turn_context) -> DatabaseLoggingHook``.
@@ -214,6 +224,7 @@ def make_db_logging_hook_factory(
             session_key=session_key,
             request_id=request_id,
             print_llm_calls=print_llm_calls,
+            get_model=get_model,
         )
 
     return _factory
@@ -308,12 +319,19 @@ class DatabaseLoggingHook(AgentHook):
         session_key: str | None = None,
         request_id: str | None = None,
         print_llm_calls: bool = False,
+        get_model: Callable[[], str | None] | None = None,
     ) -> None:
         super().__init__()
         self._service = db_logging_service
         self._tool_start_times: dict[str, float] = {}
         self._agent_id = agent_id
         self._print_llm_calls = print_llm_calls
+        # Closure для резолва текущей модели. Закрывается фабрикой
+        # (см. ``make_db_logging_hook_factory``). Вызывается в
+        # ``after_iteration`` — в nanobot 0.3.5+ ``LLMResponse.model``
+        # удалён, поэтому читать надо с ``agent.model`` (property
+        # ``nanobot/agent/loop.py:218`` → ``runtime_resolver.runtime.model``).
+        self._get_model: Callable[[], str | None] | None = get_model
         # Контекст текущего оборота/вопроса. Запекается в фабрике на оборот,
         # чтобы ``after_run`` (у которого в контексте нет session_key) знал
         # свой вопрос. ``_capture_context`` дополнительно перечитывает
@@ -441,12 +459,25 @@ class DatabaseLoggingHook(AgentHook):
         try:
             from dataclasses import asdict
 
+            # Резолв имени модели: в nanobot 0.3.5+ ``LLMResponse.model``
+            # удалён — он теперь живёт на ``AgentLoop.model`` (свойство
+            # ``runtime_resolver.runtime.model``). Фабрика фабрики
+            # ``make_db_logging_hook_factory`` принимает опциональный
+            # ``get_model`` callable, закрывающийся над ``agent.model``
+            # (см. ``AgentFactory.create``). Если callable не передан
+            # (тесты, fallback) — пишем с ``model=None``, и
+            # ``log_llm_call`` ставит ``name="llm"``.
+            try:
+                model = self._get_model() if self._get_model else None
+            except Exception:
+                model = None
+
             self._service.log_llm_call(
                 session_id=self._run_session_key or "",
                 prompt=self._pending_prompt or [],
                 response=asdict(response),
                 iteration=self._pending_iteration or getattr(context, "iteration", None),
-                model=getattr(response, "model", None),
+                model=model,
                 finish_reason=getattr(response, "finish_reason", None),
                 usage=_usage_to_dict(getattr(context, "usage", None)) or {},
                 request_id=self._request_id,

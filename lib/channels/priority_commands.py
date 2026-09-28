@@ -3,7 +3,14 @@
 Каналы (PostgresChannel, RedisChannel) фильтруют priority polling
 через этот список. Список читается из
 ``nanobot.command.router.CommandRouter._priority`` — единственного
-реестра priority-команд в nanobot 0.3.0.
+реестра priority-команд в nanobot 0.3.5.
+
+Семантика: возвращаем **объединение** встроенных команд
+(``_DEFAULT_PRIORITY_COMMANDS``) и того, что зарегистрировано в
+``CommandRouter``. Это гарантирует, что ``/stop``, ``/restart``,
+``/status`` всегда присутствуют в выдаче — даже если у свежего
+``CommandRouter._priority`` пустой ``{}`` (в nanobot 0.3.5+ атрибут
+существует, но пуст до регистрации хендлеров).
 
 Если nanobot в будущем добавит публичный API
 (``CommandRouter.priority_commands()`` или аналог), здесь стоит
@@ -27,24 +34,37 @@ _DEFAULT_PRIORITY_COMMANDS: tuple[str, ...] = (
 def get_priority_commands() -> tuple[str, ...]:
     """Вернуть актуальный список priority-команд nanobot.
 
-    Порядок:
-      1. Если в ``CommandRouter`` есть публичный атрибут
-         ``priority_commands`` (dict/list/tuple/set) — используем его.
-      2. Если доступен приватный ``_priority`` (dict[str, Handler]) —
-         берём ключи.
-      3. Fallback — ``_DEFAULT_PRIORITY_COMMANDS`` (захардкоженный
-         список из встроенных команд nanobot 0.3.0).
+    Шаги:
+      1. Стартуем с базовых встроенных (``_DEFAULT_PRIORITY_COMMANDS``).
+      2. Если в ``CommandRouter`` есть публичный атрибут
+         ``priority_commands`` (dict/list/tuple/set) — добавляем его
+         ключи/значения поверх.
+      3. Если доступен приватный ``_priority`` (dict[str, Handler]) —
+         добавляем его ключи поверх.
+
+    Возвращаем объединение (без дублей). Никогда не возвращаем
+    ``()`` если базовые непусты — это даёт стабильный floor для
+    priority-polling каналов.
 
     Метод ``CommandRouter.priority`` НЕ вызываем — он принимает
     ``(cmd, handler)`` для регистрации, а не возвращает данные.
     """
+    found: set[str] = set(_DEFAULT_PRIORITY_COMMANDS)
     router = CommandRouter()
+
     if hasattr(router, "priority_commands"):
         value = router.priority_commands
         if isinstance(value, dict):
-            return tuple(value.keys())
-        if isinstance(value, (list, tuple, set)):
-            return tuple(value)
+            found.update(value.keys())
+        elif isinstance(value, (list, tuple, set)):
+            found.update(value)
+
     if hasattr(router, "_priority") and isinstance(router._priority, dict):
-        return tuple(router._priority.keys())
-    return _DEFAULT_PRIORITY_COMMANDS
+        # ВАЖНО: в nanobot 0.3.5+ ``_priority`` существует как
+        # пустой ``{}`` сразу после ``CommandRouter()`` — атрибут
+        # есть, но содержимого нет. ``tuple({}.keys())`` = ``()``,
+        # что роняет priority-polling. Здесь мы ОБЪЕДИНЯЕМ с
+        # defaults, поэтому «пустой router» не даёт пустой результат.
+        found.update(router._priority.keys())
+
+    return tuple(found)

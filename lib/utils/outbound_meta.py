@@ -60,21 +60,14 @@ def is_stream_delta(metadata: Mapping[str, Any] | None) -> bool:
 def _typed_event(msg: Any) -> Any | None:
     """Вернуть типизированный outbound-ивент nanobot из ``msg`` (или None).
 
-    nanobot 0.3.0 несёт события в ``msg.event``; legacy-флаги в ``metadata``
-    — только fallback. Возвращает сам объект ивента (для ``isinstance``) либо
-    ``None`` при отсутствии nanobot/ивента.
+    Начиная с nanobot 0.3.5 событие приходит как ``msg.event`` напрямую —
+    никакого legacy-fallback не нужно. Legacy-функция
+    ``outbound_event_from_message`` (направление ``msg → event``) в
+    nanobot 0.3.5+ заменена на ``outbound_message_for_event``
+    (направление ``event → msg`` — обратное), поэтому прежний
+    fallback в этом направлении невозможен.
     """
-    evt = getattr(msg, "event", None)
-    if evt is not None:
-        return evt
-    try:
-        from nanobot.bus.outbound_events import outbound_event_from_message
-    except Exception:
-        return None
-    try:
-        return outbound_event_from_message(msg)
-    except Exception:
-        return None
+    return getattr(msg, "event", None)
 
 
 def is_outbound_final(msg: Any) -> bool:
