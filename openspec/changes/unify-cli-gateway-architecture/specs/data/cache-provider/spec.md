@@ -151,20 +151,25 @@ In `READ_ONLY` режиме:
 In `READ_WRITE` режиме:
 - `SELECT`/`INSERT`/`UPDATE`/`DELETE` MUST выполняться нормально.
 
-#### Scenario: query_sql() отклоняет DDL
+#### Scenario: query_sql() отклоняет DDL в любом mode
 
-- **WHEN** `query_sql("CREATE TABLE ...")` или `query_sql("DROP TABLE ...")` вызван
-- **THEN** MUST поднять `ReadOnlyAssertionError` или эквивалентную ошибку
+- **WHEN** `query_sql("CREATE TABLE ...")` или `query_sql("DROP TABLE ...")` или `query_sql("ALTER TABLE ...")` или `query_sql("TRUNCATE TABLE ...")` или `query_sql("CREATE INDEX ...")` или `query_sql("DROP INDEX ...")` вызван (в любом mode)
+- **THEN** MUST поднять `UnsupportedSqlError` или эквивалентную dedicated validation error (НЕ `ReadOnlyAssertionError`, поскольку DDL запрещён даже в READ_WRITE)
 
 #### Scenario: query_sql() в READ_WRITE принимает DML
 
-- **WHEN** `CacheProvider.open(mode=READ_WRITE)` и `query_sql("INSERT INTO ...")` или `query_sql("UPDATE ...")` или `query_sql("DELETE ...")`
+- **WHEN** CacheProvider в mode=READ_WRITE и `query_sql("INSERT INTO ...")` или `query_sql("UPDATE ...")` или `query_sql("DELETE ...")`
 - **THEN** операция MUST выполниться нормально
 
 #### Scenario: query_sql() в READ_ONLY блокирует DML
 
-- **WHEN** `CacheProvider.open(mode=READ_ONLY)` и `query_sql("INSERT INTO ...")`
+- **WHEN** CacheProvider в mode=READ_ONLY и `query_sql("INSERT INTO ...")`
 - **THEN** MUST поднять `ReadOnlyAssertionError` до выполнения
+
+#### Scenario: query_sql() в READ_ONLY принимает SELECT
+
+- **WHEN** CacheProvider в mode=READ_ONLY и `query_sql("SELECT ...")`
+- **THEN** операция MUST выполниться нормально
 
 ### Requirement: CacheAccessMode и двухуровневая защита
 
@@ -184,17 +189,17 @@ Concrete adapter (например, `DuckDbCacheStore`) сам реализуе�
 
 #### Scenario: Concrete adapter открывает storage в реальном read_only режиме
 
-- **WHEN** `CacheProvider.open(path, mode=READ_ONLY)` вызван
-- **THEN** concrete adapter MUST открыть storage connection в реальном read-only режиме (например, для DuckDB: `duckdb.connect(path, read_only=True)`)
+- **WHEN** CacheProvider создан в mode=READ_ONLY (например, `DuckDbCacheStore.open(path, mode=READ_ONLY)`)
+- **THEN** concrete adapter MUST открыть storage connection в реальном read-only режиме (для DuckDB: `duckdb.connect(path, read_only=True)`)
 - **AND** попытки INSERT/UPDATE/DELETE на уровне SQL MUST быть отклонены storage engine
 
 #### Scenario: CacheProvider поднимает ReadOnlyAssertionError при INSERT/UPDATE/DELETE в READ_ONLY
 
-- **WHEN** `CacheProvider.open(mode=READ_ONLY)` вызван
+- **WHEN** CacheProvider в mode=READ_ONLY
 - **AND** через `CacheProvider.query_sql(...)` вызывается INSERT/UPDATE/DELETE
 - **THEN** MUST поднять `ReadOnlyAssertionError` до выполнения
 
-#### Scenario: query_sql() отклоняет DDL в любом режиме
+#### Scenario: query_sql() отклоняет DDL в любом mode
 
-- **WHEN** `query_sql("CREATE TABLE ...")` или `query_sql("DROP TABLE ...")` вызван (в любом mode)
-- **THEN** MUST поднять `ReadOnlyAssertionError` или эквивалентную ошибку (DDL запрещён)
+- **WHEN** вызов `query_sql("CREATE TABLE ...")` или `query_sql("DROP TABLE ...")` (в любом mode)
+- **THEN** MUST поднять `UnsupportedSqlError` (DDL запрещён даже в READ_WRITE)
