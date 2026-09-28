@@ -2,104 +2,199 @@
 
 ### Requirement: локальный ext4 storage
 
-Система ДОЛЖНА хранить DuckDB-файл кэша только на локальной filesystem с поддержкой требуемой DuckDB locking semantics (POSIX `fcntl` flock, etc.). Network/shared filesystem (NFS, SMB, etc.) — запрещён (NFS эмпирически fails with PID 0 errors на свежем файле). Конкретная FS не специфицируется (ext4 — Linux default, APFS — macOS, NTFS — Windows; все поддерживают DuckDB locking); термин «ext4» в заголовке requirement сохранён для backward compat с существующими ссылками в тестах и документации, но требование портативно на любую local FS.
+Система ДОЛЖНА хранить snapshot-файл только на локальной filesystem с поддержкой требуемых cache storage locking semantics (POSIX `fcntl` flock, etc.). Network/shared filesystem (NFS, SMB, etc.) — запрещён (NFS эмпирически fails with PID 0 errors на свежем файле). Конкретная FS не специфицируется (ext4 — Linux default, APFS — macOS, NTFS — Windows); термин «ext4» в заголовке requirement сохранён для backward compat с существующими ссылками в тестах и документации, но требование портативно на любую local FS.
 
-`CacheProvider` MUST reject путь, расположенный на NFS или другой network filesystem, ДО открытия DuckDB — fail-fast с явной ошибкой.
+`CacheProvider` MUST reject путь, расположенный на NFS или другой network filesystem, ДО открытия cache — fail-fast с явной ошибкой.
 
 Snapshot-путь MUST быть единым для всех процессов:
 
 - `cache.duckdb` — единый runtime-resource, открывается в `ApplicationContext.create()` для `role="gateway"` и `role="cli"` в режиме, определяемом `CacheOwnershipCoordinator`.
-- Никаких role-based путей (`cli.duckdb`, `gateway.duckdb`). Параметр `role` в `resolve_publish_path(role)` сохранён для backward compat, но `role="cli"` и `role="gateway"` MUST возвращать **`<local_path>/cache.duckdb`**.
+- Никаких role-based путей. Параметр `role` в `resolve_publish_path(role)` сохранён для backward compat, но `role="cli"` и `role="gateway"` MUST возвращать **`<local_path>/cache.duckdb`**.
 
-**`gateway.cache.local_path` MUST быть shared runtime resource**, не profile-specific value. Если CLI работает с `profile="test"`, а gateway с `profile="prod"` — оба процесса MUST резолвить `cache.duckdb` в один и тот же физический путь. Профили НЕ ДОЛЖНЫ переопределять `gateway.cache.local_path`.
+**`gateway.cache.local_path` MUST быть shared runtime resource**, не profile-specific value. Если CLI работает с `profile="test"`, а gateway с `profile="prod"` — оба процесса MUST резолвить snapshot в один и тот же физический путь. Профили НЕ ДОЛЖНЫ переопределять `gateway.cache.local_path`.
 
-**Cache lifecycle MUST быть отделён от `gateway.enable_audit`.** Cache runtime (`CacheProvider`, `DuckDbCacheStore`, `CacheOwnershipCoordinator`) создаётся, если `gateway.cache` секция настроена (наличие `gateway.cache.local_path`). `gateway.enable_audit` MUST NOT определять существование cache — он контролирует ТОЛЬКО audit sync (`PgDuckDbSyncService`).
+**Cache lifecycle MUST быть отделён от `gateway.enable_audit`.** Cache runtime (`CacheProvider`, concrete implementation, `CacheOwnershipCoordinator`) создаётся, если `gateway.cache` секция настроена (наличие `gateway.cache.local_path`). `gateway.enable_audit` MUST NOT определять существование cache — он контролирует ТОЛЬКО audit sync (`CacheSyncService`).
 
 Режим открытия (`READ_WRITE` или `READ_ONLY`) MUST определяться через `CacheOwnershipCoordinator.try_claim(worker_id)` ДО создания `CacheProvider`. См. подробный контракт в `runtime/entrypoints`.
 
-Skills (`audit_analyzer`, `legal_summarizer`) MUST открывать `cache.duckdb` через `CacheProvider` (без `role`-based path), читать свежий snapshot независимо от того, какой процесс является owner'ом.
+Skills (`audit_analyzer`, `legal_summarizer`) MUST открывать cache через `CacheProvider` (без `role`-based path), читать свежий snapshot независимо от того, какой процесс является owner'ом.
 
 #### Scenario: обнаружение NFS пути
 
 - **КОГДА** `gateway.cache.local_path` указывает на NFS mount или другую network filesystem
-- **ТОГДА** `CacheProvider` MUST reject путь ДО открытия DuckDB с явной ошибкой (PID 0 locking errors эмпирически)
-- **И НЕ ДОЛЖЕН** пытаться открыть DuckDB на NFS
+- **ТОГДА** `CacheProvider` MUST reject путь ДО открытия cache с явной ошибкой (PID 0 locking errors эмпирически)
 
 #### Scenario: CLI и gateway используют один и тот же snapshot
 
 - **КОГДА** запущены `cli_agent.py` (profile=test) и `gateway.py --profile=prod` одновременно
-- **ТОГДА** оба процесса MUST резолвить `cache.duckdb` в один и тот же физический путь
-- **И НЕ ДОЛЖНО** происходить race condition на DuckDB flock
+- **ТОГДА** оба процесса MUST резолвить cache в один и тот же физический путь
 
 #### Scenario: Профили не переопределяют gateway.cache.local_path
 
 - **КОГДА** `profiles/test.jsonc` и `profiles/prod.jsonc` имеют разные значения `gateway.cache.local_path`
 - **ТОГДА** ConfigurationResolver MUST reject это как ошибку конфигурации
-- **AND** CLI и gateway MUST всегда видеть один и тот же физический путь
 
 #### Scenario: enable_audit=False НЕ отключает cache
 
 - **КОГДА** `gateway.enable_audit=False`, но `gateway.cache` секция настроена
 - **ТОГДА** `CacheProvider` MUST быть создан (cache runtime существует)
-- **AND** `PgDuckDbSyncService` MUST NOT быть создан (sync отключён)
-- **AND** Skills (`audit_analyzer`, `legal_summarizer`) MUST иметь доступ к `cache.duckdb` через `CacheProvider`
+- **AND** `CacheSyncService` MUST NOT быть создан (sync отключён)
+- **AND** Skills (`audit_analyzer`, `legal_summarizer`) MUST иметь доступ к cache через `CacheProvider`
+- **AND** если процесс получил ownership cache resource → `READ_WRITE` access НЕЗАВИСИМО от `enable_audit` (другие runtime-компоненты MAY выполнять cache mutations через `CacheProvider`)
 
 ## ADDED Requirements
 
-### Requirement: CacheProvider API с явным mode + layered architecture + query_sql semantics
+### Requirement: Storage implementation isolation
 
-API MUST быть layered:
+Конкретный тип локального cache-хранилища является implementation detail. Нормативные runtime-контракты НЕ ДОЛЖНЫ использовать конкретное имя или API текущей storage implementation, кроме разделов, описывающих соответствующий concrete adapter.
 
-```text
-CacheOwnershipCoordinator     ← try_claim / heartbeat / release (только ownership)
-        ↓
-CacheAccessMode              ← READ_WRITE / READ_ONLY (enum)
-        ↓
-CacheProvider (ABC)          ← open(path, mode) → CacheProvider instance; query_sql / search_vector / get_schema / close
-        ↓
-DuckDbCacheStore             ← concrete implementation CacheProvider (factory: open() → CacheProvider)
-```
+Компоненты, которые MUST NOT зависеть от `DuckDbCacheStore` (или любого другого concrete имени):
 
-**`CacheProvider`** MUST быть абстрактным интерфейсом с classmethod/staticmethod `open(path: str, mode: CacheAccessMode) -> CacheProvider`. **`DuckDbCacheStore.open(...)`** — concrete factory, возвращающий `CacheProvider` instance. **ApplicationContext MUST зависеть только от `CacheProvider` (НЕ от `DuckDbCacheStore`)** — `DuckDbCacheStore` не должен появляться в полях `ctx`.
+- `AgentLoop`
+- Skills
+- Tools
+- `CacheSyncService`
+- `CacheOwnershipCoordinator`
+- Runtime consumers `CacheProvider`
 
-**`query_sql()` контракт:** executes any SQL statement; mutation statements (INSERT/UPDATE/DELETE) allowed only in `READ_WRITE` mode.
+`DuckDbCacheStore` MAY фигурировать только в:
+- Concrete adapter specification
+- Composition root (`ApplicationContext.create`)
+- Configuration/factory
+- Tests, проверяющих DuckDB-specific behavior
+
+Замена `DuckDbCacheStore` на другую реализацию `CacheProvider` (например, `SQLiteCacheStore`) НЕ ДОЛЖНА требовать изменений в `AgentLoop`, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator` или других runtime consumers `CacheProvider`. Изменения MAY потребоваться только в concrete adapter, composition root, configuration/factory и integration tests конкретной реализации.
+
+#### Scenario: Замена concrete cache implementation
+
+- **GIVEN** cache runtime реализован через `CacheProvider`
+- **WHEN** concrete implementation заменяется (например, `DuckDbCacheStore` → `SQLiteCacheStore`)
+- **THEN** `AgentLoop` MUST NOT require changes
+- **AND** Skills MUST NOT require changes
+- **AND** Tools MUST NOT require changes
+- **AND** `CacheSyncService` MUST NOT require changes
+- **AND** `CacheOwnershipCoordinator` MUST NOT require changes
+- **AND** изменения MAY потребоваться только в: concrete adapter, composition root, configuration/factory, integration tests конкретной реализации
+
+#### Scenario: runtime-consumer код не импортирует concrete cache implementation
+
+- **WHEN** проверяется `AgentLoop`, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator` на импорт concrete cache class
+- **THEN** НЕ ДОЛЖНО быть импортов `DuckDbCacheStore` (или любой другой concrete реализации)
+- **AND** эти компоненты работают только через `CacheProvider` интерфейс
+
+### Requirement: CacheProvider как интерфейс без конкретной СУБД
+
+`CacheProvider` MUST быть runtime-интерфейсом доступа к cache-хранилищу. `CacheProvider` MUST NOT:
+
+- знать имя или тип конкретной СУБД;
+- содержать DuckDB-specific или SQLite-specific API в публичных методах;
+- управлять ownership PostgreSQL resource (это `CacheOwnershipCoordinator`);
+- самостоятельно выполнять ownership takeover;
+- создавать concrete storage implementation.
+
+`CacheProvider` НЕ ИМЕЕТ метода `open()`. Concrete factory (например, `DuckDbCacheStore.open(path, mode)` или эквивалентный для другой реализации) вызывается composition root'ом `ApplicationContext`.
+
+#### Scenario: Замена concrete implementation
+
+- **GIVEN** cache runtime реализован через `CacheProvider`
+- **WHEN** concrete implementation заменяется (например, `DuckDbCacheStore` → `SQLiteCacheStore`)
+- **THEN** `CacheOwnershipCoordinator` MUST NOT require changes
+- **AND** `CacheSyncService` MUST NOT require changes
+- **AND** runtime consumers MUST NOT require changes
+
+#### Scenario: runtime-consumer код не импортирует concrete cache implementation
+
+- **WHEN** проверяется `AgentLoop`, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator` на импорт concrete cache class
+- **THEN** НЕ ДОЛЖНО быть импортов `DuckDbCacheStore` (или любой другой concrete реализации)
+- **AND** эти компоненты работают только через `CacheProvider` интерфейс
+
+### Requirement: CacheOwnershipCoordinator как абстрагированный ownership
+
+`CacheOwnershipCoordinator` MUST отвечать за ownership общего **логического** cache resource. Coordinator MUST NOT зависеть от конкретной реализации локального cache-хранилища.
+
+Ownership определяется для одного логического cache resource, который может быть реализован DuckDB, SQLite или другой локальной реализацией.
+
+Coordinator отвечает только за:
+- `try_claim()` (atomic claim)
+- `heartbeat()`
+- `release()`
+- `acquire_write_fence()` (PG advisory lock для fencing)
+- проверку текущего owner (через `ClaimResult.current_owner_id` / `current_generation`)
+- generation (fencing token)
+
+Coordinator MUST NOT выполнять операций чтения или записи cache-хранилища.
+
+#### Scenario: Замена concrete cache implementation
+
+- **GIVEN** cache runtime реализован через `CacheProvider`
+- **WHEN** concrete implementation заменяется
+- **THEN** `CacheOwnershipCoordinator` MUST NOT require changes
+- **AND** runtime consumers MUST NOT require changes
+- **AND** изменения MAY потребоваться только в: concrete `CacheProvider` implementation, composition root, configuration/factory, integration tests конкретной реализации
+
+#### Scenario: Coordinator не делает cache I/O
+
+- **WHEN** `CacheOwnershipCoordinator` выполняет любую операцию (`try_claim`, `heartbeat`, `release`, `acquire_write_fence`)
+- **THEN** он НЕ ДОЛЖЕН делать read/write в cache storage
+- **AND** он работает только с PostgreSQL `agent_cache_ownership` table
+
+### Requirement: query_sql mode semantics (DML only)
+
+`query_sql()` MUST принимать **только DML statements**: `SELECT`, `INSERT`, `UPDATE`, `DELETE`. DDL statements MUST быть отклонены в любом режиме.
+
+DDL включает как минимум: `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `CREATE INDEX`, `DROP INDEX`, и эквивалентные schema-changing statements.
+
+In `READ_ONLY` режиме:
+- `SELECT` MUST выполняться нормально.
+- `INSERT`/`UPDATE`/`DELETE` MUST поднимать `ReadOnlyAssertionError` **до выполнения**.
+
+In `READ_WRITE` режиме:
+- `SELECT`/`INSERT`/`UPDATE`/`DELETE` MUST выполняться нормально.
+
+#### Scenario: query_sql() отклоняет DDL
+
+- **WHEN** `query_sql("CREATE TABLE ...")` или `query_sql("DROP TABLE ...")` вызван
+- **THEN** MUST поднять `ReadOnlyAssertionError` или эквивалентную ошибку
+
+#### Scenario: query_sql() в READ_WRITE принимает DML
+
+- **WHEN** `CacheProvider.open(mode=READ_WRITE)` и `query_sql("INSERT INTO ...")` или `query_sql("UPDATE ...")` или `query_sql("DELETE ...")`
+- **THEN** операция MUST выполниться нормально
+
+#### Scenario: query_sql() в READ_ONLY блокирует DML
+
+- **WHEN** `CacheProvider.open(mode=READ_ONLY)` и `query_sql("INSERT INTO ...")`
+- **THEN** MUST поднять `ReadOnlyAssertionError` до выполнения
+
+### Requirement: CacheAccessMode и двухуровневая защита
+
+`CacheAccessMode` — абстрактный enum: `READ_WRITE` или `READ_ONLY`. Ownership определяет режим:
+
+- `ClaimResult.acquired=True` → `READ_WRITE`
+- `ClaimResult.acquired=False` → `READ_ONLY`
+
+Concrete adapter (например, `DuckDbCacheStore`) сам реализует, как открыть своё хранилище в этих режимах.
 
 В `READ_ONLY` режиме все мутации MUST быть запрещены через **двухуровневую защиту**:
-1. **DuckDB connection MUST быть открыт через `duckdb.connect(path, read_only=True)`** (сама DuckDB не позволит мутации).
+
+1. **Concrete adapter MUST открыть storage connection в реальном read-only режиме** (например, для DuckDB: `duckdb.connect(path, read_only=True)`). Сам storage engine не позволит мутации.
 2. **`CacheProvider.query_sql(...)` MUST поднять `ReadOnlyAssertionError`** при INSERT/UPDATE/DELETE.
 
-`CacheProvider` MUST reject путь на NFS (или другую network filesystem с неподдерживаемым locking) до открытия DuckDB — fail-fast с явной ошибкой.
+Оба уровня защиты MUST присутствовать одновременно (defense in depth).
 
-#### Scenario: Layered API — ApplicationContext зависит только от CacheProvider
-
-- **WHEN** `ApplicationContext.create()` создаёт cache runtime
-- **THEN** `ctx.cache_provider` MUST быть типизирован как `CacheProvider` (ABC)
-- **AND** `ctx.cache_provider = DuckDbCacheStore.open(path, mode)` (factory)
-- **AND** `ApplicationContext` MUST NOT содержать `DuckDbCacheStore` в полях
-
-#### Scenario: CacheProvider.open(READ_ONLY) — реальный DuckDB read-only connection
+#### Scenario: Concrete adapter открывает storage в реальном read_only режиме
 
 - **WHEN** `CacheProvider.open(path, mode=READ_ONLY)` вызван
-- **THEN** DuckDB connection MUST быть создан через `duckdb.connect(path, read_only=True)`
-- **AND** попытки INSERT/UPDATE/DELETE на уровне SQL MUST быть отклонены DuckDB
+- **THEN** concrete adapter MUST открыть storage connection в реальном read-only режиме (например, для DuckDB: `duckdb.connect(path, read_only=True)`)
+- **AND** попытки INSERT/UPDATE/DELETE на уровне SQL MUST быть отклонены storage engine
 
-#### Scenario: CacheProvider.open(READ_ONLY) — assertion guard
+#### Scenario: CacheProvider поднимает ReadOnlyAssertionError при INSERT/UPDATE/DELETE в READ_ONLY
 
 - **WHEN** `CacheProvider.open(mode=READ_ONLY)` вызван
 - **AND** через `CacheProvider.query_sql(...)` вызывается INSERT/UPDATE/DELETE
-- **THEN** MUST поднять `ReadOnlyAssertionError`
+- **THEN** MUST поднять `ReadOnlyAssertionError` до выполнения
 
-#### Scenario: CacheProvider.open(READ_WRITE) разрешает мутации
+#### Scenario: query_sql() отклоняет DDL в любом режиме
 
-- **WHEN** `CacheProvider.open(mode=READ_WRITE)` вызван
-- **THEN** SELECT/INSERT/UPDATE/DELETE MUST работать нормально
-
-#### Scenario: query_sql() принимает любые SQL в READ_WRITE
-
-- **WHEN** `CacheProvider.open(mode=READ_WRITE)` и вызов `query_sql("INSERT INTO ...")` или `query_sql("UPDATE ...")` или `query_sql("DELETE ...")`
-- **THEN** операция MUST выполниться нормально
-
-#### Scenario: CacheProvider reject NFS path
-
-- **WHEN** `gateway.cache.local_path` указывает на NFS mount или другую network filesystem
-- **THEN** `CacheProvider` MUST fail-fast с явной ошибкой
+- **WHEN** `query_sql("CREATE TABLE ...")` или `query_sql("DROP TABLE ...")` вызван (в любом mode)
+- **THEN** MUST поднять `ReadOnlyAssertionError` или эквивалентную ошибку (DDL запрещён)

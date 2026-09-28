@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Определяет контракт application entrypoint'ов (`cli_agent.py`, `gateway.py`) поверх единого composition root. Оба entrypoint'а вызывают `ApplicationContext.create(role=...)` с одной и той же typed signature; различие только в `role` и опциональных CLI-runtime-флагах. AgentLoop остаётся transport-agnostic: transport (CLI = in-memory bus / gateway = PostgresChannel) живёт ниже AgentLoop, не в нём. DuckDB — runtime-resource, владение sync'ом определяется через PG-level ownership claim через отдельную таблицу `agent_cache_ownership` с фиксированным ownership key `duckdb_cache`.
+Определяет контракт application entrypoint'ов (`cli_agent.py`, `gateway.py`) поверх единого composition root. Оба entrypoint'а вызывают `ApplicationContext.create(role=...)` с одной и той же typed signature; различие только в `role` и опциональных CLI-runtime-флагах. AgentLoop остаётся transport-agnostic: transport (CLI = in-memory bus / gateway = PostgresChannel) живёт ниже AgentLoop, не в нём. Cache runtime — abstract (`CacheProvider` interface), владение sync'ом определяется через PG-level ownership claim через отдельную таблицу `agent_cache_ownership` с фиксированным ownership key `duckdb_cache`. Concrete cache implementation (`DuckDbCacheStore`) находится только в composition root и в разделе concrete adapter; runtime consumers работают только через `CacheProvider` interface.
 
 ## ADDED Requirements
 
@@ -60,7 +60,7 @@ CLI и gateway MUST вызывать `ApplicationContext.create(...)` с **од�
 
 ### Requirement: role определяет composition инфраструктуры, не AgentLoop
 
-`role` MUST определять, какие инфраструктурные сервисы создаются внутри `ApplicationContext.create()`. `role` MUST NOT представлять environment, profile, deployment mode, storage ownership или runtime behavior. `role` MUST NOT определять DuckDB producer/consumer status — это ответственность `CacheOwnershipCoordinator`.
+`role` MUST определять, какие инфраструктурные сервисы создаются внутри `ApplicationContext.create()`. `role` MUST NOT представлять environment, profile, deployment mode, storage ownership или runtime behavior. `role` MUST NOT определять cache producer/consumer status — это ответственность `CacheOwnershipCoordinator`.
 
 | Сервис | `role="gateway"` | `role="cli"` |
 |---|---|---|
@@ -71,16 +71,16 @@ CLI и gateway MUST вызывать `ApplicationContext.create(...)` с **од�
 | `RuntimePatcher.apply_all()` | ✅ | ✅ |
 | `CacheProvider` (если `gateway.cache` настроен) | ✅ | ✅ |
 | `CacheOwnershipCoordinator` (если `gateway.cache` настроен) | ✅ | ✅ |
-| `DuckDbCacheStore` (открывает `<local_path>/cache.duckdb` в режиме claim) | ✅ | ✅ |
+| concrete `CacheProvider` implementation (factory: `open(path, mode)`) | ✅ | ✅ |
 | `PostgresChannel` (worker pool) | ✅ | ❌ |
-| `PgDuckDbSyncService` (sync — если `enable_audit=True` И OWNER) | ✅ | ✅ (если OWNER) |
+| `CacheSyncService` (sync — если `enable_audit=True` И OWNER) | ✅ | ✅ (если OWNER) |
 | `CronService` (если `gateway.enable_cron=True`) | ✅ | ❌ |
 | WebSocket port check (вызывается из entrypoint) | ✅ | ❌ |
 | Console I/O (in-memory bus) | ❌ | ✅ |
 
-`role` MUST NOT влиять на `AgentLoop` (и его hooks, runtime patches, skills, tools, memory). `role` MAY влиять только на transport-инфраструктуру (PostgresChannel, Console I/O) и entrypoint-specific services (CronService, WebSocket check). **Cache runtime** (`CacheProvider`, `DuckDbCacheStore`, `CacheOwnershipCoordinator`) — shared runtime-resource, открывается в обоих `role="gateway"` и `role="cli"` если `gateway.cache` секция настроена. **Sync runtime** (`PgDuckDbSyncService`) — controlled by `gateway.enable_audit`, separate concern.
+`role` MUST NOT влиять на `AgentLoop` (и его hooks, runtime patches, skills, tools, memory). `role` MAY влиять только на transport-инфраструктуру (PostgresChannel, Console I/O) и entrypoint-specific services (CronService, WebSocket check). **Cache runtime** (`CacheProvider`, concrete implementation, `CacheOwnershipCoordinator`) — shared runtime-resource, открывается в обоих `role="gateway"` и `role="cli"` если `gateway.cache` секция настроена. **Sync runtime** (`CacheSyncService`) — controlled by `gateway.enable_audit`, separate concern.
 
-`role` MUST NOT влиять на `AgentLoop` (и его hooks, runtime patches, skills, tools, memory). `role` MAY влиять только на transport-инфраструктуру (PostgresChannel, Console I/O) и entrypoint-specific services (CronService, WebSocket check). DuckDB — runtime-resource, открывается в обоих `role="gateway"` и `role="cli"` в режиме, определяемом `CacheOwnershipCoordinator`.
+`role` MUST NOT влиять на `AgentLoop` (и его hooks, runtime patches, skills, tools, memory). `role` MAY влиять только на transport-инфраструктуру (PostgresChannel, Console I/O) и entrypoint-specific services (CronService, WebSocket check). Cache runtime — abstract (`CacheProvider` interface), открывается в обоих `role="gateway"` и `role="cli"` в режиме, определяемом `CacheOwnershipCoordinator`.
 
 #### Scenario: role="gateway" создаёт PostgresChannel и CronService
 
@@ -109,32 +109,33 @@ CLI и gateway MUST вызывать `ApplicationContext.create(...)` с **од�
 - **THEN** `PostgresChannel` вызывает `bus.publish_inbound(InboundMessage(channel="postgres", chat_id=..., content=...))` — тот же AgentLoop обрабатывает через bus
 - **AND** AgentLoop MUST вести себя идентично в обоих случаях
 
-### Requirement: CacheOwnershipCoordinator MUST определять режим DuckDB ДО открытия
+### Requirement: CacheOwnershipCoordinator MUST определять режим cache ДО открытия
 
-DuckDB-кэш (`<local_path>/cache.duckdb`) MUST быть единым runtime-resource. Режим открытия (`READ_WRITE` или `READ_ONLY`) MUST определяться через `CacheOwnershipCoordinator.try_claim(worker_id)` ДО создания `DuckDbCacheStore`.
+Cache-snapshot (`<local_path>/cache.duckdb` через concrete adapter) MUST быть единым runtime-resource. Режим открытия (`READ_WRITE` или `READ_ONLY`) MUST определяться через `CacheOwnershipCoordinator.try_claim(worker_id)` ДО создания concrete `CacheProvider` implementation.
 
 Lifecycle MUST быть строго:
 
 ```text
-1. resolve cache.duckdb path (через resolve_publish_path)
+1. resolve snapshot path (через resolve_publish_path)
 2. attempt atomic PG ownership claim (CacheOwnershipCoordinator.try_claim → ClaimResult)
 3. determine access mode from ClaimResult:
    - acquired=True → READ_WRITE (OWNER)
    - acquired=False → READ_ONLY (READER)
-4. CacheProvider.open(path, mode=ClaimResult.mode) — открывает DuckDB через DuckDbCacheStore factory
+4. concrete_factory.open(path, mode=ClaimResult.mode) → CacheProvider instance
+   (concrete_factory = DuckDbCacheStore.open для текущей реализации)
 5. if ClaimResult.acquired AND gateway.enable_audit=True:
-   create PgDuckDbSyncService (only for OWNER in audit mode)
+   create CacheSyncService (only for OWNER in audit mode)
 ```
 
-`CacheProvider` MUST зависеть от `CacheProvider` interface, NOT от `DuckDbCacheStore`. `DuckDbCacheStore.open(...)` — factory method, возвращающий `CacheProvider` instance. ApplicationContext MUST NOT напрямую инстанцировать `DuckDbCacheStore` как поле `ctx.cache_store`; вместо этого `ctx.cache_provider = CacheProvider` (типизирован как ABC).
+`ApplicationContext` MUST зависеть только от `CacheProvider` (ABC), NOT от concrete implementation (`DuckDbCacheStore`). Concrete factory `DuckDbCacheStore.open(...)` (или эквивалентный для другой реализации) вызывается composition root'ом и возвращает `CacheProvider` instance.
 
 #### Scenario: Lifecycle ordering (claim → mode → open → optional sync)
 
 - **WHEN** `ApplicationContext.create()` инициализирует cache runtime
-- **THEN** последовательность MUST быть: `resolve_publish_path(...)` → `coord.try_claim()` → `CacheProvider.open(mode=ClaimResult.mode)` → (если OWNER И `enable_audit=True`) `PgDuckDbSyncService.start()`
-- **AND** `CacheProvider` MUST NOT быть открыт до получения `ClaimResult`
-- **AND** `PgDuckDbSyncService` MUST NOT быть создан без `ClaimResult.acquired=True`
-- **AND** `PgDuckDbSyncService` MUST NOT быть создан если `gateway.enable_audit=False`
+- **THEN** последовательность MUST быть: `resolve_publish_path(...)` → `coord.try_claim()` → concrete_factory.open(mode=ClaimResult.mode) → (если OWNER И `enable_audit=True`) `CacheSyncService.start()`
+- **AND** concrete factory НЕ ДОЛЖЕН быть вызван до получения `ClaimResult`
+- **AND** `CacheSyncService` MUST NOT быть создан без `ClaimResult.acquired=True`
+- **AND** `CacheSyncService` MUST NOT быть создан если `gateway.enable_audit=False`
 
 ### Requirement: Ownership contract — atomic claim + real fencing через advisory lock
 
@@ -182,20 +183,27 @@ Mandatory contract:
 ```text
 Fencing MUST обеспечивать mutual exclusion между:
 1. Ownership takeover (try_claim() DO UPDATE branch);
-2. Producer write critical section (validate generation + DuckDB write).
+2. Producer mutation critical section (validate generation + execute mutation через CacheProvider).
 
 Рекомендуемый механизм — PG advisory lock:
 
   BEGIN PG transaction;
-    SELECT pg_advisory_xact_lock(hash(resource_key));  -- serialize
-    -- (в try_claim branch: check generation + INSERT/UPDATE; в producer write: check generation + DuckDB write)
+    SELECT pg_advisory_xact_lock(hashtext($resource_key));  -- serialize
+    -- (в try_claim branch: check generation + INSERT/UPDATE; в producer mutation: check generation + execute mutation через CacheProvider)
   COMMIT;
 
 Lock MUST быть held для полного критического раздела:
-  ownership validation AND corresponding DuckDB mutation.
+  ownership validation AND corresponding CacheProvider mutation.
+
+PostgreSQL transaction MUST NOT быть committed или closed между шагами ownership validation и execution of mutation.
+
+Если ownership не совпадает:
+- mutation через CacheProvider НЕ выполняется;
+- ownership НЕ изменяется;
+- transaction завершается без producer mutation.
 ```
 
-Реализация MAY использовать `pg_advisory_xact_lock(key=hash(resource_key))` (автоматически освобождается при COMMIT/ROLLBACK). Альтернативные механизмы с той же семантикой mutual exclusion допустимы.
+Реализация MAY использовать `pg_advisory_xact_lock(key=hashtext(resource_key))` (автоматически освобождается при COMMIT/ROLLBACK). Альтернативные механизмы с той же семантикой mutual exclusion допустимы.
 
 **Generation НЕ является самостоятельным write barrier.** Только в комбинации с advisory lock generation обеспечивает fencing.
 
@@ -226,11 +234,11 @@ RETURNING resource_key;
 
 #### Scenario: Fencing через advisory lock — старый producer прекращает записи
 
-- **WHEN** producer A хочет записать в DuckDB
-- **THEN** producer A MUST атомарно захватить `pg_advisory_xact_lock(hash('duckdb_cache'))`
+- **WHEN** producer A хочет выполнить mutation через `CacheProvider`
+- **THEN** producer A MUST атомарно захватить `pg_advisory_xact_lock(hashtext('duckdb_cache'))`
 - **AND** внутри lock MUST проверить `(owner_id=A, generation=my_generation)` match текущему `agent_cache_ownership` row
-- **AND** только при match → запись в DuckDB
-- **AND** при несовпадении (B уже takeover) → lock release при COMMIT → A MUST NOT записать
+- **AND** только при match → execute mutation через `CacheProvider`
+- **AND** при несовпадении (B уже takeover) → lock release при COMMIT → A MUST NOT выполнить mutation
 - **AND** B НЕ МОЖЕТ инкрементировать generation пока A держит lock (PG advisory lock mutual exclusion)
 
 #### Scenario: release() только для matching ownership
@@ -247,7 +255,7 @@ RETURNING resource_key;
 - **THEN** heartbeat останавливается
 - **AND** через `claim_ttl_seconds` (60 сек) claim становится stale
 - **AND** следующий процесс при старте MAY перехватить ownership через `try_claim()` (получит `generation > previous_generation`)
-- **AND** следующий процесс MUST иметь возможность reopen существующий `cache.duckdb` если DuckDB считает БД recoverable (acceptance criterion, не конкретный механизм)
+- **AND** следующий процесс MUST иметь возможность reopen существующий snapshot файл если cache storage считает его recoverable (acceptance criterion, не конкретный механизм)
 
 ### Requirement: CacheProvider API с явным mode + layered architecture
 
@@ -266,12 +274,12 @@ DuckDbCacheStore             ← concrete implementation CacheProvider (factory)
 **`CacheProvider`** MUST быть абстрактным интерфейсом с classmethod/staticmethod `open(path: str, mode: CacheAccessMode) -> CacheProvider`. **ApplicationContext MUST зависеть только от `CacheProvider` (НЕ от `DuckDbCacheStore`)**. `DuckDbCacheStore.open(...)` — factory method, который возвращает `CacheProvider` instance.
 
 В `READ_ONLY` режиме все мутации (INSERT/UPDATE/DELETE) MUST быть запрещены через **двухуровневую защиту**:
-1. **DuckDB connection MUST быть открыт через `duckdb.connect(path, read_only=True)`** (сама DuckDB не позволит мутации).
+1. **Concrete cache adapter MUST открыть storage connection в реальном read-only режиме** (например, для DuckDB: `duckdb.connect(path, read_only=True)`). Сам storage engine не позволит мутации.
 2. **`CacheProvider.query_sql(...)` MUST поднять `ReadOnlyAssertionError`** при INSERT/UPDATE/DELETE.
 
 `query_sql()` контракт: executes any SQL statement; mutation statements allowed only in `READ_WRITE` mode.
 
-`CacheProvider` MUST reject путь на NFS (или другую network filesystem с неподдерживаемым locking) до открытия DuckDB — fail-fast с явной ошибкой.
+`CacheProvider` MUST reject путь на NFS (или другую network filesystem с неподдерживаемым locking) до открытия storage — fail-fast с явной ошибкой.
 
 #### Scenario: Layered API — ApplicationContext зависит только от CacheProvider
 
@@ -280,11 +288,11 @@ DuckDbCacheStore             ← concrete implementation CacheProvider (factory)
 - **AND** `ctx.cache_provider = DuckDbCacheStore.open(path, mode)` (factory)
 - **AND** `ApplicationContext` MUST NOT содержать `DuckDbCacheStore` в полях
 
-#### Scenario: CacheProvider.open(READ_ONLY) — реальный DuckDB read-only connection
+#### Scenario: CacheProvider.open(READ_ONLY) — реальный cache storage read-only connection
 
 - **WHEN** `CacheProvider.open(path, mode=READ_ONLY)` вызван
-- **THEN** DuckDB connection MUST быть создан через `duckdb.connect(path, read_only=True)`
-- **AND** попытки INSERT/UPDATE/DELETE на уровне SQL MUST быть отклонены DuckDB
+- **THEN** concrete adapter MUST открыть storage connection в реальном read-only режиме
+- **AND** попытки INSERT/UPDATE/DELETE на уровне SQL MUST быть отклонены storage engine
 
 #### Scenario: CacheProvider.open(READ_ONLY) — assertion guard
 
@@ -306,6 +314,67 @@ DuckDbCacheStore             ← concrete implementation CacheProvider (factory)
 
 - **WHEN** `gateway.cache.local_path` указывает на NFS mount или другую network filesystem
 - **THEN** `CacheProvider` MUST fail-fast с явной ошибкой (PID 0 locking errors эмпирически)
+
+### Requirement: CacheSyncService для синхронизации данных
+
+`CacheSyncService` отвечает за синхронизацию данных из PostgreSQL в локальное cache-хранилище. `CacheSyncService` НЕ ДОЛЖЕН зависеть от конкретной реализации `CacheProvider`.
+
+Источник данных синхронизации — PostgreSQL. Destination — локальное cache-хранилище, доступное через `CacheProvider` interface.
+
+`CacheSyncService` НЕ ДОЛЖЕН напрямую импортировать concrete cache implementation (например, `DuckDbCacheStore`). Название и интерфейс сервиса НЕ ДОЛЖНЫ предполагать конкретный тип локального хранилища.
+
+```text
+PostgreSQL
+    │
+    ▼
+CacheSyncService (storage-independent)
+    │
+    ▼
+CacheProvider (interface)
+    │
+    ▼
+concrete implementation (DuckDbCacheStore / SQLiteCacheStore)
+```
+
+Все producer mutations через `CacheSyncService` MUST проходить через ownership-fenced write boundary:
+
+```text
+1. BEGIN PostgreSQL transaction.
+2. Acquire resource-scoped coordination lock.
+3. Read current ownership state.
+4. Verify owner_id + generation.
+5. Execute mutation through CacheProvider.
+6. COMMIT PostgreSQL transaction.
+
+PostgreSQL transaction MUST NOT быть committed или closed между шагами 4 и 5.
+
+Если ownership не совпадает:
+- mutation через CacheProvider НЕ выполняется;
+- ownership НЕ изменяется;
+- transaction завершается без producer mutation.
+```
+
+#### Scenario: sync не может обойти fencing
+
+- **GIVEN** процесс является producer
+- **AND** ownership содержит generation G
+- **WHEN** `CacheSyncService` выполняет mutation
+- **THEN** mutation MUST проходить через fenced write boundary
+- **AND** concrete cache implementation MUST NOT вызываться в обход этого boundary
+
+#### Scenario: ownership generation изменился до выполнения mutation
+
+- **GIVEN** процесс является producer
+- **AND** ownership generation изменился (B сделал takeover) ДО выполнения mutation
+- **WHEN** `CacheSyncService` пытается выполнить mutation
+- **THEN** mutation MUST NOT быть выполнена
+- **AND** `OwnershipLostError` MUST быть поднят
+
+#### Scenario: CacheSyncService storage-agnostic
+
+- **WHEN** `CacheSyncService` выполняет mutation
+- **THEN** он импортирует `CacheProvider` interface, НЕ `DuckDbCacheStore` (или другую concrete реализацию)
+- **AND** замена concrete cache implementation НЕ требует изменений в `CacheSyncService`
 
 ### Requirement: Cron = gateway-only
 
@@ -365,7 +434,7 @@ CLI MUST обрабатывать `/compact` как локальный shortcut:
 
 `cli_agent.py` MUST NOT принимать `--profile` CLI-аргумент и MUST NOT читать профиль из env. CLI MUST hardcode `profile="test"` при вызове `config._initialize_settings(profile="test")`. Gateway MAY принимать `--profile`.
 
-"test" в контексте CLI НЕ означает урезанный runtime: CLI MUST иметь тот же AgentLoop, Skills, Tools, DuckDB, Vector search, Memory, Logging, Prompts, Runtime patches, что и gateway. Различие только в profile (CLI == "test" hardcoded) и transport (CLI == in-memory bus).
+"test" в контексте CLI НЕ означает урезанный runtime: CLI MUST иметь тот же AgentLoop, Skills, Tools, Vector search, Memory, Logging, Prompts, Runtime patches, что и gateway (плюс CacheProvider interface). Различие только в profile (CLI == "test" hardcoded) и transport (CLI == in-memory bus).
 
 #### Scenario: CLI не принимает --profile
 
@@ -394,8 +463,8 @@ CLI MUST обрабатывать `/compact` как локальный shortcut:
 
 - Передавать `enable_db_logging`, `enable_audit`, `enable_cron`, `print_llm_calls` как именованные параметры в typed signature `ApplicationContext.create(...)`.
 - Передавать `profile` как параметр в `ApplicationContext.create(...)` (profile MUST быть resolved ДО через `_initialize_settings(profile=...)`).
-- Открывать `DuckDbCacheStore` в режиме `READ_WRITE` без предварительного `CacheOwnershipCoordinator.try_claim()`.
-- Создавать `PgDuckDbSyncService` если `CacheAccessMode = READ_ONLY`.
+- Открывать concrete cache adapter в режиме `READ_WRITE` без предварительного `CacheOwnershipCoordinator.try_claim()`.
+- Создавать `CacheSyncService` если `CacheAccessMode = READ_ONLY`.
 - Создавать `CronService` при `role="cli"`.
 - Использовать `PostgresChannel` для I/O в CLI (CLI = in-memory bus).
 - Делать `AgentLoop` aware о CLI, PostgreSQL, HTTP, WebSocket, terminal (transport-agnostic).
@@ -406,24 +475,27 @@ CLI MUST обрабатывать `/compact` как локальный shortcut:
 - Принимать `--profile` CLI-аргумент в `cli_agent.py`.
 - Читать профиль из env-переменных в `cli_agent.py`.
 - Определять `gateway.cache.local_path` per-profile (это shared runtime resource, не profile-specific value).
-- Создавать новые API компоненты (`CacheOwnershipCoordinator`, `ClaimResult`, `CacheAccessMode`, `DuckDbCacheStore.open(mode=...)`, `ReadOnlyAssertionError`) без явного объявления в design.md как новых контрактов.
+- Создавать новые API компоненты (`CacheOwnershipCoordinator`, `ClaimResult`, `CacheAccessMode`, `ReadOnlyAssertionError`) без явного объявления в design.md как новых контрактов.
 - Реализовать `release()` без проверки `(owner_id, generation)` match.
-- Использовать только assertion для блокировки мутаций в READ_ONLY режиме (DuckDB connection тоже MUST быть открыт в реальном read_only mode).
-- Создавать `CacheProvider` через прямую инстанциацию `DuckDbCacheStore` минуя `CacheProvider.open()` factory.
+- Использовать только assertion для блокировки мутаций в READ_ONLY режиме (concrete cache adapter connection тоже MUST быть открыт в реальном read_only mode).
+- Создавать `CacheProvider` через прямую инстанциацию concrete implementation минуя concrete factory.
 - Использовать `pg_advisory_xact_lock` или эквивалентный механизм для fencing producer write без advisory lock — generation check alone НЕДОСТАТОЧЕН.
 - Передавать deprecated `enable_*` kwargs в новом production code (только через `**kwargs` для backward compat, deprecated).
 - Реализовывать `query_sql` как строго SELECT-only API — `query_sql` MUST принимать любые SQL с READ_ONLY assertion guard.
+- Импортировать `DuckDbCacheStore` (или другую concrete cache implementation) из runtime-consumer кода (AgentLoop, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator`). Concrete implementation MAY использоваться только в composition root и в разделе concrete adapter.
 
 ## Dependencies
 
 - `openspec/specs/runtime/context/spec.md` — `ApplicationContext` как composition root
-- `openspec/specs/data/cache-provider/spec.md` — snapshot path resolution
+- `openspec/specs/data/cache-provider/spec.md` — `CacheProvider` interface (storage-independent)
 - `openspec/specs/logging-db/spec.md` — `DbLoggingService` для записи `context_compacted` events
 - `openspec/specs/configuration/profiles/spec.md` — CLI fixed profile contract
-- `lib/core/application_context.py:ApplicationContext`
+- `lib/core/application_context.py:ApplicationContext` (composition root)
 - `lib/channels/postgres_channel.py:PostgresChannel` (gateway-only)
-- `lib/services/pg_duckdb_sync_service.py:PgDuckDbSyncService`
-- `lib/services/cache_ownership.py` (новый) — `CacheOwnershipCoordinator`
+- `lib/services/cache_sync_service.py:CacheSyncService` (storage-independent)
+- `lib/services/cache_ownership.py` — `CacheOwnershipCoordinator` (storage-independent)
+- `lib/services/cache_provider.py:CacheProvider` (ABC interface)
+- `lib/services/duckdb_cache_store.py:DuckDbCacheStore` (concrete adapter; MAY использоваться только в composition root)
 
 ## Verification
 
@@ -457,4 +529,5 @@ CLI MUST обрабатывать `/compact` как локальный shortcut:
 11. `tests/test_streamlit_imports_removed.py` — AST-based проверка отсутствия импортов Streamlit.
 12. `tests/test_cli_no_profile.py::TestCLINoProfile` — CLI rejects `--profile`, hardcodes test, ignores env.
 13. `tests/test_gateway_accepts_profile.py::TestGatewayAcceptsProfile` — gateway принимает `--profile=prod`/`--profile=test`.
-14. `tests/test_application_context_role.py::TestDuckDBLifecycleOrdering` — `resolve_publish_path` → `try_claim` → `CacheProvider.open(mode=...)` → (OWNER AND `enable_audit=True`) `PgDuckDbSyncService.start()`.
+14. `tests/test_application_context_role.py::TestCacheLifecycleOrdering` — `resolve_publish_path` → `try_claim` → concrete_factory.open(mode=...) → (OWNER AND `enable_audit=True`) `CacheSyncService.start()`.
+
