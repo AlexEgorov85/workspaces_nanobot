@@ -4,10 +4,14 @@
 Проверяют typed signature ``ApplicationContext.create(role=...)``:
 
   * ``role`` MUST быть обязательным KEYWORD_ONLY параметром;
-  * ``profile`` MUST NOT быть named параметром (читается из SETTINGS);
+  * ``profile`` MUST NOT быть named параметром (читается из SETTINGS)
+    и MUST отвергаться как kwarg с ``TypeError`` — профиль определён
+    ДО ``create()`` через ``config._initialize_settings``;
   * ``enable_*``/``print_llm_calls`` MUST NOT быть named параметрами;
-  * deprecated kwargs (``enable_*``, ``profile``, ``print_llm_calls``) MUST
+  * deprecated kwargs (``enable_*``, ``print_llm_calls``) MUST
     приниматься через ``**kwargs`` с ``DeprecationWarning``;
+  * любой kwarg вне ``DEPRECATED_ENABLE_KWARGS`` MUST приводить к
+    ``TypeError`` (allowlist, а не молчаливое игнорирование);
   * при ``role="cli"`` ``CronService`` MUST NOT создаваться, даже если
     ``enable_cron=True`` был передан (gateway-only invariant);
   * cache_provider field MUST существовать (Stage D plumbing); legacy
@@ -173,15 +177,34 @@ class TestDeprecatedKwargsResolver:
         assert result["enable_cron"] is False
         assert result["print_llm_calls"] is False
 
-    def test_resolve_with_unknown_kwarg_silently_keeps_it(self) -> None:
+    def test_resolve_with_unknown_kwarg_raises_type_error(self) -> None:
+        """Неизвестный kwarg — явная ошибка, а не молчаливое игнорирование.
+
+        Allowlist-семантика: ``DEPRECATED_ENABLE_KWARGS`` — закрытый
+        список. Тихая отбрасыровка скрывала бы опечатки вроде
+        ``enable_aduit=`` и возвращала бы конфигурацию, отличную от
+        запрошенной.
+        """
         from lib.core.application_context import _resolve_enable_kwargs
 
-        result = _resolve_enable_kwargs(
-            {"unknown": "x"},
-            gateway_settings={},
-        )
-        assert "unknown" not in result
-        assert result["enable_db_logging"] is True
+        with pytest.raises(TypeError) as excinfo:
+            _resolve_enable_kwargs({"unknown": "x"}, gateway_settings={})
+        assert "unknown" in str(excinfo.value)
+
+    def test_resolve_with_profile_kwarg_raises_type_error(self) -> None:
+        """``profile`` не является допустимым kwarg — профиль не тут.
+
+        Профиль определяется ДО ``create()`` (argv entrypoint) и
+        публикуется через ``config._initialize_settings``; composition
+        root читает его из ``SETTINGS["profile"]``.
+        """
+        from lib.core.application_context import _resolve_enable_kwargs
+
+        with pytest.raises(TypeError) as excinfo:
+            _resolve_enable_kwargs({"profile": "test"}, gateway_settings={})
+        message = str(excinfo.value)
+        assert "profile" in message
+        assert "_initialize_settings" in message
 
     def test_resolve_with_deprecated_kwarg_emits_warning(self) -> None:
         from lib.core.application_context import _resolve_enable_kwargs

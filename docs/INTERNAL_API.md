@@ -8,10 +8,15 @@
 Согласно спецификации
 [`openspec/specs/configuration/profiles`](../openspec/specs/configuration/profiles/spec.md),
 единственный канал передачи профиля конфигурации в subprocess —
-**argv `--profile=<value>`**. Env vars (исторически —
-`NANOBOT_PROFILE=prod`) больше **не используются**: ни runtime-код,
+**argv `--profile=<value>`** (для `cli_agent.py` — фиксированный
+профиль `test`, флаг не принимается). Переменные окружения
+**не используются** как источник профиля: ни runtime-код,
 ни deployment descriptors, ни документация. Это закрытый источник
 истины.
+
+> Environment остаётся легитимным каналом для **секретов**,
+> `${VAR}`-подстановки и внешних URL — запрет касается только
+> выбора профиля.
 
 ### Application subprocess
 
@@ -38,19 +43,23 @@ proc = subprocess.Popen(
 
 ### Deployment descriptors
 
-| Категория | Было | Стало |
+| Категория | Было (env-based) | Стало |
 |---|---|---|
-| `docker-compose.yml` | `environment: NANOBOT_PROFILE=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
-| Kubernetes Deployment | `env: NANOBOT_PROFILE=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
-| systemd unit | `Environment=NANOBOT_PROFILE=prod` | `ExecStart=/usr/bin/python /opt/gateway/gateway.py --profile=prod` |
-| GitHub Actions | `env: NANOBOT_PROFILE: prod` | `run: python gateway.py --profile=prod` |
+| `docker-compose.yml` | `environment: <PROFILE_ENV_VAR>=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
+| Kubernetes Deployment | `env: <PROFILE_ENV_VAR>=prod` | `command: ["python", "gateway.py", "--profile=prod"]` |
+| systemd unit | `Environment=<PROFILE_ENV_VAR>=prod` | `ExecStart=/usr/bin/python /opt/gateway/gateway.py --profile=prod` |
+| GitHub Actions | `env: <PROFILE_ENV_VAR>: prod` | `run: python gateway.py --profile=prod` |
+
+`<PROFILE_ENV_VAR>` — плейсхолдер: runtime не читает **никакую**
+env-переменную для выбора профиля, поэтому конкретное историческое
+имя несущественно.
 
 Подробности и обоснование — `docs/PROFILES.md` (§ «Migration»).
 
 ### Runtime sanitization
 
-**Не вводится.** Приложение просто не работает с устаревшими env
-var'ами — их игнорирование это отсутствие кода, который их читает,
+**Не вводится.** Приложение просто не работает с env var'ами выбора
+профиля — их игнорирование это отсутствие кода, который их читает,
 а не активный sanitization-механизм.
 
 ## ⚙️ Конфигурация `tools.exec` (запуск команд)

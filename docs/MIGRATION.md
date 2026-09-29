@@ -150,14 +150,14 @@ LLM-вызовы в production):
 ⚠️ **Breaking change** в порядке запуска: `python gateway.py` без флагов
 больше **не стартует** — падает с `ConfigurationError` и `exit 2`. Профиль
 обязателен и передаётся только CLI-флагом `--profile` (whitelist: `prod` /
-`test`); env-передача профиля (исторически `NANOBOT_PROFILE`) не читается
-runtime-кодом.
+`test`). Env-передача профиля не читается runtime-кодом: **ни одна**
+переменная окружения не участвует в выборе профиля.
 
 **Автоматические изменения** (ничего делать не нужно):
 
 - Добавлен `ConfigurationResolver` в `config.py` (см. [docs/PROFILES.md](PROFILES.md)).
 - Добавлен файл `profiles/test.jsonc` (в репозитории) — оверлей для test-режима.
-- Добавлен `--profile` CLI-флаг в `gateway.py` и `cli_agent.py`.
+- Добавлен `--profile` CLI-флаг в `gateway.py`.
 - Баннер теперь содержит `profile=<mode>` (`profile=test` или `profile=prod`).
 - Удалён параметр `session_manager_json` из `SessionStorageService.__init__()` — теперь override из `session_manager.json` применяется централизованно в `ConfigurationResolver`.
 
@@ -169,7 +169,7 @@ runtime-кодом.
    command: python gateway.py --profile=prod
    ```
 
-   Передача через env (`NANOBOT_PROFILE=prod`) runtime-кодом **не читается** —
+   Передача профиля через env runtime-кодом **не читается** —
    деплой с ней завершится с `exit 2`.
 
 2. **Проверить баннер.** При старте в терминале должно быть:
@@ -357,8 +357,9 @@ Legacy-мигратор файлов `.faiss` удалён. Если у вас �
 
 **Что НЕ изменилось:**
 
-- API точек входа: `python gateway.py --profile=<prod|test>`,
-  `python cli_agent.py -P --profile=<prod|test>` (флаг `--profile` обязателен).
+- API точек входа: `python gateway.py --profile=<prod|test>`
+  (флаг `--profile` обязателен) и `python cli_agent.py -P`
+  (CLI — фиксированный профиль `test`, флаг не принимается).
 - Имена таблиц БД.
 - `benchmarks/items/*.yaml` — формат совместим.
 - `audit_analyzer` режимы `predefined` / `sql` / `vector`.

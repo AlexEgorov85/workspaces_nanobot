@@ -31,6 +31,19 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 
+# Произвольные profile-like имена переменных окружения. Тесты проверяют,
+# что выбор профиля игнорирует environment ЛЮБОГО вида, поэтому набор
+# намеренно включает разные формы (префикс/суффикс/без префикса) и не
+# привязан к одному историческому имени.
+_PROFILE_LIKE_ENV_VARS = (
+    "FOO_PROFILE",
+    "APP_PROFILE",
+    "PROFILE",
+    "DEPLOY_MODE",
+    "NANOBOT_CONFIG_PROFILE",
+)
+
+
 # ---------------------------------------------------------------------------
 # Stage F — CLI rejects --profile
 # ---------------------------------------------------------------------------
@@ -94,20 +107,27 @@ class TestCliHardcodesProfileInLifecycle:
     def test_cli_does_not_resolve_profile_from_env(self, monkeypatch) -> None:
         """CLI MUST NOT читать профиль из env (D8: only test, env-override запрещён).
 
-        Негативная проверка: даже если в окружении стоит ``NANOBOT_PROFILE=prod``,
-        CLI игнорирует — ``_initialize_settings(profile=CLI_FIXED_PROFILE)``.
+        Негативная проверка: даже если в окружении выставлены
+        profile-like переменные (``FOO_PROFILE``, ``APP_PROFILE``,
+        ``PROFILE``, ``DEPLOY_MODE``), CLI их игнорирует —
+        ``_initialize_settings(profile=CLI_FIXED_PROFILE)``.
 
-        Проверяем, что config.resolve_application_config не использует
-        ``os.environ.get("NANOBOT_PROFILE")`` ни прямо, ни через
-        ``os.environ`` mapping. Это упадёт, если кто-то снова введёт
-        env-fallback в обход новой модели.
+        Проверка намеренно name-agnostic: перебирается набор
+        произвольных имён, а не одно историческое. Так тест ловит
+        env-fallback под ЛЮБЫМ именем и не ломается на rename.
+
+        Дополнительно проверяется, что путь разрешения профиля
+        (``config._initialize_settings`` /
+        ``config.resolve_application_config``) не обращается к
+        environment как к источнику значения профиля.
         """
         from cli_agent import CLI_FIXED_PROFILE
         import config
 
-        # Подменяем все источники env на ``prod``, чтобы любое чтение
-        # NANOBOT_PROFILE дало prod.
-        monkeypatch.setenv("NANOBOT_PROFILE", "prod")
+        # Подменяем profile-like переменные на ``prod``, чтобы любое
+        # их чтение дало prod вместо дефолтного test.
+        for name in _PROFILE_LIKE_ENV_VARS:
+            monkeypatch.setenv(name, "prod")
 
         # Сбрасываем singleton, чтобы повторная инициализация прошла
         # чисто.
@@ -121,8 +141,9 @@ class TestCliHardcodesProfileInLifecycle:
             import config as _cfg
             _cfg._initialize_settings(profile=CLI_FIXED_PROFILE)
             assert _cfg.SETTINGS["profile"] == "test", (
-                "NANOBOT_PROFILE=prod подменён в окружении, но "
-                "SETTINGS['profile'] должен быть 'test' (CLI hardcode)"
+                "profile-like env-переменные выставлены в prod, но "
+                "SETTINGS['profile'] должен быть 'test' (CLI hardcode). "
+                f"Проверенные имена: {', '.join(_PROFILE_LIKE_ENV_VARS)}"
             )
         finally:
             # Не оставляем SETTINGS в инициализированном состоянии — это

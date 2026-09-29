@@ -121,8 +121,9 @@ invariant'ы, anti-patterns, decision-чеклист и правила зави�
 
 1. Установите зависимости: `pip install -r requirements.txt`
 2. Запустите тесты без БД: `pytest tests/ -q`
-3. Запустите gateway / CLI с профилем (без `--profile` — `ConfigurationError` + `exit 2`):
-   `python gateway.py --profile=prod` или `python cli_agent.py -P --profile=prod`
+3. Запустите gateway с профилем (без `--profile` — `ConfigurationError` + `exit 2`)
+   или CLI (фиксированный профиль `test`, флаг не принимается):
+   `python gateway.py --profile=prod` или `python cli_agent.py -P`
 4. Перед коммитом убедитесь, что проверки документации (CI `docs-lint`) проходят.
 
 Хотите написать **свой навык** (skill)? Начните с

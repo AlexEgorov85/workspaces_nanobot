@@ -8,12 +8,15 @@ proxy, который публикуется ТОЛЬКО через ``_initiali
 Покрытие (соответствует tasks.md § D):
 
   D.1 Configuration core behavior:
-    * test_settings_lazy_init_requires_init — UNINITIALIZED SETTINGS
+    * test_settings_uninitialized_raises_on_getitem — UNINITIALIZED SETTINGS
       поднимает ConfigurationError на ``__getitem__``/``.get``
     * test_double_init_fails — повторный ``_initialize_settings``
       поднимает ConfigurationError
     * test_invalid_profile_rejected — whitelist; никакие env vars не
       участвуют в profile resolution
+    * test_env_vars_do_not_influence_profile_resolution — name-agnostic
+      проверка: произвольные profile-like env vars не влияют на выбор
+      профиля
     * test_import_has_no_profile_resolution_side_effects —
       ``import config`` не выполняет profile resolution
 
@@ -23,7 +26,10 @@ proxy, который публикуется ТОЛЬКО через ``_initiali
     * test_gateway_prod_smoke_selects_prod_tables
     * test_gateway_test_smoke_selects_test_tables
     * test_gateway_profile_comes_only_from_cli
-    * test_cli_agent_no_profile_exits_2
+    * test_cli_agent_starts_without_profile_flag — CLI = fixed ``test``,
+      ``--profile`` не требуется
+    * test_cli_agent_rejects_profile_flag — CLI отклоняет ``--profile``
+      с exit 2
     * test_cli_agent_test_smoke_selects_test_tables
 
   D.3 Streamlit invocation tests:
@@ -40,6 +46,12 @@ proxy, который публикуется ТОЛЬКО через ``_initiali
     * test_application_context_uses_resolved_settings — нет mock'ов
       на _initialize_settings, явный init перед create
 
+  D.6 Static guards (архитектурные инварианты, name-agnostic):
+    * test_profile_resolution_path_does_not_read_environment — функции
+      пути разрешения профиля не обращаются к ``os.environ``
+    * test_application_context_rejects_profile_kwarg — ``create(profile=)``
+      приводит к ``TypeError``
+
   D.7 Negative scenarios (proxy корректно ловит случайный
       standalone-запуск):
     * test_standalone_import_does_not_initialize_setttings
@@ -47,9 +59,12 @@ proxy, который публикуется ТОЛЬКО через ``_initiali
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -275,24 +290,51 @@ def test_gateway_profile_comes_only_from_cli() -> None:
     assert "logging.db.table_name=agent_gateway_logs" in result.stdout
 
 
-def test_cli_agent_no_profile_exits_2() -> None:
-    """``python cli_agent.py`` без ``--profile`` — exit 2."""
+def test_cli_agent_starts_without_profile_flag() -> None:
+    """``python cli_agent.py --smoke`` без ``--profile`` — exit 0, profile=test.
+
+    CLI имеет фиксированный профиль ``test`` и НЕ требует ``--profile``
+    (см. ``openspec/specs/runtime/entrypoints`` — «CLI имеет фиксированный
+    профиль test»). Smoke-путь инициализирует ``SETTINGS`` и создаёт
+    ``ApplicationContext`` без ``ctx.start()``, поэтому PG-соединения не
+    требуются.
+    """
     result = subprocess.run(
-        [sys.executable, "cli_agent.py"],
-        capture_output=True, text=True,
+        [sys.executable, "cli_agent.py", "--smoke"],
+        capture_output=True, text=True, timeout=60,
     )
-    assert result.returncode == 2
-    assert "--profile is required" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "OK_SMOKE_COMPLETE" in result.stdout
+    assert "profile=test" in result.stdout
+
+
+def test_cli_agent_rejects_profile_flag() -> None:
+    """``python cli_agent.py --profile=test`` → exit 2.
+
+    CLI не имеет выбора профиля: передача ``--profile`` отклоняется с
+    ``ConfigurationError`` (error boundary → exit 2), а
+    ``ApplicationContext`` не запускается.
+    """
+    result = subprocess.run(
+        [sys.executable, "cli_agent.py", "--profile=test"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 2, (
+        f"Ожидался exit 2 при --profile=test. "
+        f"stdout={result.stdout!r} stderr={result.stderr[-300:]!r}"
+    )
     assert "FATAL" in result.stderr
+    assert "--profile" in result.stderr
+    assert "OK_SMOKE_COMPLETE" not in result.stdout
 
 
 @pytest.mark.skip(
     reason="Out of scope for 0.3.5 upgrade, tracked in ISSUE-NB035-4",
 )
 def test_cli_agent_test_smoke_selects_test_tables() -> None:
-    """``python cli_agent.py --profile=test --smoke`` → test runtime."""
+    """``python cli_agent.py --smoke`` → test runtime-таблицы (fixed profile)."""
     result = subprocess.run(
-        [sys.executable, "cli_agent.py", "--profile=test", "--smoke"],
+        [sys.executable, "cli_agent.py", "--smoke"],
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
@@ -505,6 +547,184 @@ def test_streamlit_invalid_profile_exits_2_consistent() -> None:
         f"stdout={result.stdout!r} stderr={result.stderr[-300:]!r}"
     )
     assert "is not supported" in result.stderr or "is not supported" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# D.6 Static guards: архитектурные инварианты выбора профиля
+# ---------------------------------------------------------------------------
+#
+# Guards намеренно name-agnostic: они проверяют СТРУКТУРУ пути
+# разрешения профиля, а не конкретное историческое имя env-переменной.
+# Привязка к литералу хрупка — она ломается на rename, но не ловит
+# env-fallback, введённый под любым другим именем.
+
+
+# Функции, формирующие выбор активного профиля.
+#
+# Проверяется ТОЛЬКО этот путь, и проверяется семантически (через AST),
+# а не текстовым поиском: ``config.py`` законно использует ``os.environ``
+# для экспорта секретов (``_export_secrets_to_env``,
+# ``os.environ.setdefault("LLM_API_KEY", ...)``) и резолва ``${VAR}``
+# (``_resolve_env_refs``). Запрещено лишь ЧТЕНИЕ environment как источника
+# значения профиля.
+#
+# Name-agnostic: ловит env-fallback под любым именем переменной
+# (``mode = os.environ.get(...)``, ``os.getenv("ANY", ...)``), не ломаясь
+# на rename, и не даёт false positive на комментариях/строках.
+_PROFILE_RESOLUTION_FUNCTIONS = (
+    "_initialize_settings",
+    "resolve_application_config",
+    "_merge_profile_overlay",
+)
+
+# Строки, указывающие на участие env в выборе профиля.
+_PROFILE_NAME_HINTS = ("profile", "mode")
+
+# Атрибут env-mapping: ``os.environ`` / ``environ``.
+_ENV_READ_ATTRS = frozenset({"environ"})
+
+# Методы чтения env-mapping. ``get`` покрывает ``os.environ.get(...)``,
+# ``getenv`` — модульную функцию ``os.getenv(...)``.
+_ENV_READ_METHODS = frozenset({"get", "getenv"})
+
+# Родительские операторы: если оператор содержит env-чтение И упоминает
+# profile/mode — значение environment участвует в выборе профиля.
+_ENCLOSING_STMTS = (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Return, ast.If)
+
+
+def _is_env_read(node: ast.AST) -> bool:
+    """True, если ``node`` — чтение environment.
+
+    Ловит ``os.environ[...]``, ``os.environ.get(...)``,
+    ``os.getenv(...)``, ``environ[...]``, ``environ.get(...)``.
+    """
+    if isinstance(node, ast.Attribute) and node.attr in _ENV_READ_ATTRS:
+        return True
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            # os.environ.get(...) либо os.getenv(...)
+            if func.attr in _ENV_READ_METHODS and (
+                func.attr == "getenv" or _is_env_read(func.value)
+            ):
+                return True
+        if isinstance(func, ast.Name) and func.id in _ENV_READ_METHODS:
+            return True
+    if isinstance(node, ast.Subscript) and _is_env_read(node.value):
+        return True
+    return False
+
+
+def _profile_related_env_reads(tree: ast.AST) -> list[tuple[int, str]]:
+    """Найти env-чтения, участвующие в выборе профиля.
+
+    Инвариант: профиль определяется ТОЛЬКО startup-контрактом entrypoint
+    (argv ``--profile`` для gateway, фиксированный ``"test"`` для CLI).
+
+    Анализируются операторы целиком (Assign / Return / If): env-чтение
+    внутри оператора, который оперирует profile/mode, — регрессия.
+    Так ловится и ``mode = os.environ.get(...)`` (слово ``mode`` — в
+    target, а не в самом чтении), и ``return os.environ.get(...)``.
+
+    НЕ нарушение (легитимно): запись в ``os.environ``
+    (``setdefault("LLM_API_KEY", ...)``) — экспорт секретов, и чтение
+    env-переменных, не связанных с профилем.
+    """
+    offenders: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, _ENCLOSING_STMTS):
+            continue
+        # Есть ли env-чтение в поддереве оператора?
+        if not any(
+            _is_env_read(child)
+            for child in ast.walk(node)
+            if child is not node
+        ):
+            continue
+        # Оператор оперирует profile/mode?
+        names = [
+            n.id for n in ast.walk(node) if isinstance(n, ast.Name)
+        ] + [
+            n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)
+        ]
+        if any(
+            any(hint in name.lower() for hint in _PROFILE_NAME_HINTS)
+            for name in names
+        ):
+            offenders.append(
+                (getattr(node, "lineno", 0), ast.unparse(node))
+            )
+            continue
+        # ``return os.environ.get(...)`` — возвращаемое значение само
+        # является env-чтением, а имени profile/mode в операторе нет.
+        # В функциях пути разрешения профиля результат определяет
+        # активный профиль, поэтому такой возврат — регрессия.
+        if isinstance(node, ast.Return) and node.value is not None:
+            if _is_env_read(node.value):
+                offenders.append(
+                    (getattr(node, "lineno", 0), ast.unparse(node))
+                )
+    return offenders
+
+
+def test_profile_resolution_path_does_not_read_environment() -> None:
+    """Путь разрешения профиля MUST NOT читать env как источник профиля.
+
+    Архитектурный инвариант: environment MAY использоваться для секретов
+    и ``${VAR}`` substitution, но MUST NOT участвовать в выборе
+    активного профиля (см. ``configuration/profiles`` — «Environment
+    variables do not participate in profile resolution»).
+
+    Проверка семантическая (AST): нарушение — когда значение env-чтения
+    присваивается profile/mode-переменной. Экспорт секретов
+    (``os.environ.setdefault("LLM_API_KEY", ...)``) — не нарушение,
+    т.к. это запись, а не чтение.
+    """
+    offenders: list[str] = []
+    for func_name in _PROFILE_RESOLUTION_FUNCTIONS:
+        func = getattr(config, func_name, None)
+        assert func is not None, f"config.{func_name} не найден"
+        try:
+            source = textwrap.dedent(inspect.getsource(func))
+            tree = ast.parse(source)
+        except (OSError, TypeError, SyntaxError) as exc:  # pragma: no cover
+            offenders.append(f"config.{func_name}: не удалось разобрать ({exc})")
+            continue
+        for lineno, snippet in _profile_related_env_reads(tree):
+            offenders.append(f"config.{func_name}:{lineno}: {snippet}")
+    assert not offenders, (
+        "Путь разрешения профиля MUST NOT читать environment как источник "
+        "профиля — профиль определяется только startup-контрактом "
+        "entrypoint (argv --profile для gateway, фиксированный 'test' для "
+        "CLI). Экспорт секретов в os.environ допустим. Нарушения:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_application_context_rejects_profile_kwarg() -> None:
+    """``ApplicationContext.create(profile=...)`` → ``TypeError``.
+
+    Профиль определяется ДО ``create()`` и публикуется через
+    ``_initialize_settings``; composition root читает его только из
+    ``SETTINGS["profile"]``. Передача профиля через ``**kwargs`` —
+    регрессия lifecycle-контракта.
+    """
+    from lib.core.application_context import (
+        DEPRECATED_ENABLE_KWARGS,
+        ApplicationContext,
+    )
+
+    assert "profile" not in inspect.signature(ApplicationContext.create).parameters
+    assert "profile" not in DEPRECATED_ENABLE_KWARGS, (
+        "profile не должен входить в deprecated compatibility kwargs — "
+        "у него нет migration path в project.json"
+    )
+
+    with pytest.raises(TypeError) as excinfo:
+        ApplicationContext.create(
+            Path("."), Path("."), role="cli", profile="test",
+        )
+    assert "profile" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

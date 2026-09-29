@@ -16,8 +16,14 @@ Composition contract
   * обязательный ``role: Literal["gateway", "cli"]``;
   * явные override-ключи ``storage_override``, ``session_override``;
   * ``**kwargs`` — временная compatibility boundary для deprecated
-    ``enable_db_logging / enable_audit / enable_cron / print_llm_calls /
-    profile`` (см. AGENTS.md § «Working Conventions → Configuration»).
+    ``enable_db_logging / enable_audit / enable_cron / print_llm_calls``
+    (см. AGENTS.md § «Working Conventions → Configuration»).
+    Любой другой ключ (включая ``profile``) отвергается ``TypeError``.
+
+``profile`` НЕ является параметром ``create()`` — профиль выбирается
+на границе запуска приложения (argv application entrypoint) и
+публикуется через ``config._initialize_settings(profile=...)``.
+Composition root читает его только из ``SETTINGS["profile"]``.
 
 ``role`` определяет только composition инфраструктуры
 (``PostgresChannel``, ``CronService``); НЕ определяет cache owner/reader —
@@ -68,10 +74,29 @@ def _resolve_enable_kwargs(
     ``DeprecationWarning`` (через ``warnings.warn`` с ``stacklevel=2``,
     чтобы указывать на caller'а, а не на эту функцию).
 
+    ``DEPRECATED_ENABLE_KWARGS`` — allowlist: любой ключ, которого в нём
+    нет, отвергается ``TypeError``. Это делает ``profile=`` (и опечатки
+    вроде ``enable_aduit=``) явной ошибкой вместо молчаливого игнора.
+    ``profile`` намеренно отсутствует: у него нет migration path в
+    ``project.json`` — это не deprecated API, а состояние ``SETTINGS``,
+    определённое ДО ``create()``.
+
     Production code MUST NOT передавать эти kwargs напрямую —
     использовать вместо этого ``gateway.enable_*`` в SETTINGS.
     """
     import warnings
+
+    unknown = sorted(set(kwargs) - DEPRECATED_ENABLE_KWARGS)
+    if unknown:
+        raise TypeError(
+            "ApplicationContext.create() got an unexpected keyword "
+            f"argument(s): {', '.join(unknown)}. "
+            f"Accepted deprecated kwargs: "
+            f"{', '.join(sorted(DEPRECATED_ENABLE_KWARGS))}. "
+            "Profile MUST be resolved before create() via "
+            "config._initialize_settings(profile=...) and is read from "
+            "SETTINGS['profile']."
+        )
 
     gateways = gateway_settings or {}
     defaults = {
@@ -184,7 +209,6 @@ class ApplicationContext:
             session_override: имя сессии (CLI).
             **kwargs: deprecated compatibility boundary для
 
-                * ``profile`` (str | None);
                 * ``enable_db_logging`` (bool);
                 * ``enable_audit`` (bool);
                 * ``enable_cron`` (bool);
@@ -194,29 +218,25 @@ class ApplicationContext:
                 override над ``SETTINGS["gateway"].*``. После раскрытия
                 change ``remove-deprecated-enable-kwargs`` — ``TypeError``.
 
+                ``profile`` НЕ принимается: профиль определён ДО вызова
+                и читается из ``SETTINGS["profile"]``. Передача
+                ``profile=`` приводит к ``TypeError``.
+
         Raises:
             ConfigurationError: если ``_initialize_settings(profile)`` ещё не
                 выполнен (proxy остался uninitialized).
+            TypeError: если в ``**kwargs`` передан ключ вне
+                ``DEPRECATED_ENABLE_KWARGS`` (включая ``profile``).
         """
         # Делегируем ``**kwargs`` валидацию/применение (с DeprecationWarning).
         import config as _config
         ctx_settings = _config.SETTINGS
         # Touching ``["profile"]`` материализует ConfigurationError на
         # uninitialized proxy, но не делает duplicated work в happy-path.
+        # Единственный канал получения профиля в composition root —
+        # resolved SETTINGS; способ выбора профиля entrypoint'а здесь
+        # неизвестен и не нужен.
         resolved_profile = ctx_settings["profile"]
-        if "profile" in kwargs:
-            profile = kwargs.pop("profile")
-            if profile is not None and profile != resolved_profile:
-                # entrypoint передал ``profile``, отличный от уже
-                # инициализированного. Это явное нарушение lifecycle —
-                # fail-fast через ConfigurationError boundary.
-                from config import ConfigurationError
-                raise ConfigurationError(
-                    f"ApplicationContext.create(profile={profile!r}) called "
-                    f"but SETTINGS already initialized for profile={resolved_profile!r}. "
-                    "Application entrypoint must pass the same --profile value as "
-                    "was passed to config._initialize_settings()."
-                )
 
         gateways = ctx_settings.get("gateway") or {}
         enable_kwargs = _resolve_enable_kwargs(

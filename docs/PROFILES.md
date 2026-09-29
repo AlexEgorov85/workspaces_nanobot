@@ -74,7 +74,9 @@ process start
   ↓
 application entrypoint (gateway.py / cli_agent.py / streamlit_app.py)
   ↓
-argparse парсит --profile (whitelist {"prod","test"})
+определение профиля по startup-контракту entrypoint:
+  gateway.py      → argparse --profile (whitelist {"prod","test"}, обязателен)
+  cli_agent.py    → фиксированный "test" (флаг не принимается)
   ↓
 config._initialize_settings(profile)   ← единственная точка публикации
   ↓
@@ -105,13 +107,20 @@ python gateway.py --profile=test
 SETTINGS, печатает баннер + имя runtime-таблицы, выходит 0. Используется
 только в integration-тестах; production — без `--smoke`.
 
-**CLI agent:**
+**CLI agent** — фиксированный профиль `test`, флаг `--profile` НЕ принимается:
 
 ```bash
-python cli_agent.py --profile=prod
-python cli_agent.py --profile=test
-python cli_agent.py --profile=test --smoke   # smoke mode (см. выше)
+python cli_agent.py                    # REPL / smoke — профиль всегда test
+python cli_agent.py --smoke            # smoke mode (см. выше)
+python cli_agent.py --profile=test     # ОТКАЗ: ConfigurationError + exit 2
 ```
+
+CLI — локальный test/dev entrypoint, а не production-deploy interface.
+Фиксированный профиль убирает ложную универсальность и уменьшает
+количество комбинаций для тестирования. `test` в CLI НЕ означает
+урезанный runtime: тот же AgentLoop, Skills, Tools, DuckDB, Vector
+search, Memory, Logging, Prompts, Runtime patches, что и в gateway.
+Различие — только в profile и transport (CLI == in-memory bus).
 
 **Streamlit:**
 
@@ -128,23 +137,36 @@ streamlit-run пробрасывает как позиционные элеме�
 
 ### Без `--profile`
 
-Каждый entrypoint без `--profile` падает с `exit 2` + stderr
-`"FATAL: --profile is required"`. Это deliberate fail-fast: разработчик,
-набравший `python gateway.py` без флагов, должен явно выбрать профиль.
+Поведение зависит от entrypoint:
+
+- `gateway.py` без `--profile` падает с `exit 2` + stderr
+  `"FATAL: --profile is required"`. Это deliberate fail-fast: оператор,
+  набравший `python gateway.py` без флагов, должен явно выбрать профиль.
+- `cli_agent.py` без `--profile` работает штатно — профиль `test`
+  зафиксирован в коде entrypoint.
 
 ### Неподдерживаемый `--profile`
 
-Любое значение вне `{"prod", "test"}` (например, `--profile=dev`,
-`--profile=staging`, `--profile=foo`) — `ConfigurationError` + exit 2.
-Whitelist закрытый; введение третьего профиля — отдельный OpenSpec change.
+Для `gateway.py` любое значение вне `{"prod", "test"}` (например,
+`--profile=dev`, `--profile=staging`, `--profile=foo`) —
+`ConfigurationError` + exit 2. Whitelist закрытый; введение третьего
+профиля — отдельный OpenSpec change. `cli_agent.py` отклоняет сам флаг
+`--profile` независимо от значения.
 
-### Environment fallback
+### Environment не участвует в выборе профиля
 
-**Не существует.** Любая устаревшая переменная окружения для передачи
-профиля (исторически — `NANOBOT_PROFILE`) **не читается runtime-кодом**.
-Приложение просто не работает с такими переменными; их игнорирование —
-это отсутствие кода, который их читает, а не активный sanitization
-механизм. Деплои должны передавать `--profile` через `command:` в
+**Environment не является источником профиля.** Никакая переменная
+окружения — ни под историческим именем, ни под любым другим — не
+участвует в выборе активного профиля. Профиль определяется только
+явным startup-контрактом entrypoint: argv `--profile` для `gateway.py`
+и фиксированный `test` для `cli_agent.py`.
+
+Их игнорирование — это отсутствие кода, который их читает, а не
+активный sanitization-механизм. Environment остаётся легитимным
+каналом для **секретов**, `${VAR}`-подстановки и внешних URL — запрет
+касается только выбора профиля.
+
+Деплои должны передавать `--profile` через `command:` в
 `docker-compose.yml` / k8s manifest / systemd unit / GitHub Actions.
 
 ## Application subprocess получает `--profile` через argv
@@ -203,10 +225,11 @@ fail. Точное соответствие — единственный над�
 
 ## Migration: env-based deploy → CLI-флаг
 
-⚠️ **BREAKING.** Если ваш деплой до сих пор использовал env-based
-передачу профиля (исторически — `NANOBOT_PROFILE=prod` в
-`docker-compose.yml` / k8s manifest / systemd unit / GitHub Actions),
-переведите его на CLI-флаг.
+⚠️ **BREAKING.** Если ваш деплой передавал профиль через переменную
+окружения (env-based способ передачи профиля), переведите его на
+CLI-флаг. Ниже используется плейсхолдер `<PROFILE_ENV_VAR>` — имя
+конкретной переменной не имеет значения: runtime не читает **никакую**
+env-переменную для выбора профиля.
 
 ### docker-compose.yml
 
@@ -215,7 +238,7 @@ fail. Точное соответствие — единственный над�
 services:
   gateway:
     environment:
-      - NANOBOT_PROFILE=prod     # игнорируется runtime
+      - <PROFILE_ENV_VAR>=prod     # игнорируется runtime
     command: ["python", "gateway.py"]
 
 # СТАЛО:
@@ -233,7 +256,7 @@ spec:
   containers:
     - name: gateway
       env:
-        - name: NANOBOT_PROFILE
+        - name: <PROFILE_ENV_VAR>
           value: "prod"
       command: ["python", "gateway.py"]
 # СТАЛО:
@@ -249,7 +272,7 @@ spec:
 ```ini
 # БЫЛО:
 [Service]
-Environment=NANOBOT_PROFILE=prod
+Environment=<PROFILE_ENV_VAR>=prod
 ExecStart=/usr/bin/python /opt/gateway/gateway.py
 # СТАЛО:
 [Service]
@@ -263,7 +286,7 @@ ExecStart=/usr/bin/python /opt/gateway/gateway.py --profile=prod
 # БЫЛО:
 - name: Start gateway (e2e)
   env:
-    NANOBOT_PROFILE: prod
+    <PROFILE_ENV_VAR>: prod
   run: python gateway.py &
 # СТАЛО:
 - name: Start gateway (e2e)
@@ -338,8 +361,10 @@ process start
 argv
    │
    ▼
-application entrypoint (gateway.py / cli_agent.py / streamlit_app.py)
-   parses --profile (whitelist {"prod","test"}, required)
+ application entrypoint (gateway.py / cli_agent.py / streamlit_app.py)
+   определяет профиль по своему startup-контракту
+   (gateway: --profile, whitelist {"prod","test"}, обязателен;
+    cli_agent: фиксированный "test", флаг не принимается)
    ↓
    ▼
 config._initialize_settings(profile)      ← lifecycle-gate

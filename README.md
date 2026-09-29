@@ -14,10 +14,10 @@ pip install nanobot-ai && pip install -r requirements.txt
 copy .secrets.env.example .secrets.env   # cp на Linux
 # Отредактируйте .secrets.env: DB_PASSWORD=... и # providers: llm / api_key=...
 python tools/migrate.py --apply         # применить миграции схемы
-# --profile обязателен (prod | test), иначе ConfigurationError + exit 2:
+# --profile обязателен для gateway (prod | test), иначе ConfigurationError + exit 2:
 python gateway.py --profile=prod        # AgentLoop + Postgres/Redis каналы + Streamlit :8501
-# или:
-python cli_agent.py -P --profile=prod -s dev   # REPL в patched-режиме (PostgreSQL)
+# или (CLI — фиксированный профиль test, флаг --profile не принимается):
+python cli_agent.py -P -s dev           # REPL в patched-режиме (PostgreSQL)
 ```
 
 Минимальный набор таблиц (если нет `migrate.py`):
@@ -34,8 +34,8 @@ psql -d nanobot -f sql/channels/create_public_agent_conversation_messages.sql
 
 ```bash
 python gateway.py --profile=prod                              # долгоживущий сервер
-python cli_agent.py --profile=prod                            # REPL vanilla (JSONL)
-python cli_agent.py --profile=prod -P -s my-session           # REPL patched (PGSessionManager + хуки)
+python cli_agent.py                                           # REPL vanilla (JSONL), профиль test
+python cli_agent.py -P -s my-session                          # REPL patched (PGSessionManager + хуки)
 python benchmarks/runner.py --tags simple                     # оценка качества
 python tools/build_vectors.py --full-rebuild                  # перестроение векторов в storage_table
 python tools/build_vectors.py --status                        # текущее состояние
