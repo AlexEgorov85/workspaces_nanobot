@@ -91,20 +91,43 @@ class TestCliFixedProfile:
 
 
 class TestCliHardcodesProfileInLifecycle:
-    def test_cli_does_not_resolve_profile_from_env(self) -> None:
-        """CLI MUST NOT read profile из env (D8: only test, env-override запрещён).
+    def test_cli_does_not_resolve_profile_from_env(self, monkeypatch) -> None:
+        """CLI MUST NOT читать профиль из env (D8: only test, env-override запрещён).
 
         Негативная проверка: даже если в окружении стоит ``NANOBOT_PROFILE=prod``,
         CLI игнорирует — ``_initialize_settings(profile=CLI_FIXED_PROFILE)``.
+
+        Проверяем, что config.resolve_application_config не использует
+        ``os.environ.get("NANOBOT_PROFILE")`` ни прямо, ни через
+        ``os.environ`` mapping. Это упадёт, если кто-то снова введёт
+        env-fallback в обход новой модели.
         """
         from cli_agent import CLI_FIXED_PROFILE
+        import config
 
-        # Установка env не должна влиять на CLI.
-        env = {**os.environ, "NANOBOT_PROFILE": "prod"}
-        assert "NANOBOT_PROFILE" not in os.environ or True
+        # Подменяем все источники env на ``prod``, чтобы любое чтение
+        # NANOBOT_PROFILE дало prod.
+        monkeypatch.setenv("NANOBOT_PROFILE", "prod")
 
-        # CLI hardcode'ит profile=test.
-        assert CLI_FIXED_PROFILE == "test"
+        # Сбрасываем singleton, чтобы повторная инициализация прошла
+        # чисто.
+        config.SETTINGS._inner_dict = None
+
+        try:
+            # При наличии env-fallback в config.resolve_application_config
+            # этот вызов либо поднимет ConfigurationError("profile='prod'
+            # not in whitelist"), либо вернёт SETTINGS["profile"] == "prod".
+            # Спека требует: CLI hardcode'ит "test", env игнорируется.
+            import config as _cfg
+            _cfg._initialize_settings(profile=CLI_FIXED_PROFILE)
+            assert _cfg.SETTINGS["profile"] == "test", (
+                "NANOBOT_PROFILE=prod подменён в окружении, но "
+                "SETTINGS['profile'] должен быть 'test' (CLI hardcode)"
+            )
+        finally:
+            # Не оставляем SETTINGS в инициализированном состоянии — это
+            # ломает последующие тесты, которые сами инициализируют.
+            config.SETTINGS._inner_dict = None
 
 
 # ---------------------------------------------------------------------------

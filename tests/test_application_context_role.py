@@ -223,6 +223,7 @@ class TestProductionCallersDoNotUseDeprecatedKwargs:
         "enable_audit",
         "enable_cron",
         "print_llm_calls",
+        "profile",
     )
 
     def _production_files(self) -> list[Path]:

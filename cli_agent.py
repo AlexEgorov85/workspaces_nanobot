@@ -122,7 +122,6 @@ def _entrypoint_main(args: argparse.Namespace) -> None:
         cfg = ApplicationContext.create(role='cli', 
             script_dir=script_dir_for_runtime(),
             workspace_dir=script_dir_for_runtime() / "workspace",
-            profile=CLI_FIXED_PROFILE,
         )
         runtime_table = cfg.settings["logging"]["db"]["table_name"]
         console.print(
@@ -150,6 +149,7 @@ def _run_vanilla(args: argparse.Namespace) -> None:
         script_dir=script_dir_for_runtime(),
         workspace_dir=script_dir_for_runtime() / "workspace",
         session_override=args.session,
+        storage_override=args.storage,
     )
     _configure_logging(ctx.settings)
     _migrate_cron_store(ctx.config)

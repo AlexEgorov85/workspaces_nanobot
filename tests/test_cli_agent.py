@@ -313,6 +313,107 @@ class TestParseArgs:
             assert args.profile == "test"
 
 
+class TestRunVanillaForwardsStorageAndSession:
+    """Stage F contract: ``_run_vanilla`` MUST передавать ``storage_override``
+    и ``session_override`` в ``ApplicationContext.create()``.
+
+    Регрессия: до правки ``_run_vanilla`` теряла ``args.storage`` — CLI
+    принимал ``--storage=file``, но пробрасывал его только в
+    ``_run_patched``. Это нарушало спецификацию
+    (``openspec/specs/runtime/entrypoints/spec.md``: «CLI entrypoint MUST
+    принимать runtime-флаги ``--storage`` и ``--session``») и приводило к
+    тихой потере режима хранилища при vanilla-запуске.
+    """
+
+    def _capture_create_kwargs(self, monkeypatch):
+        """Подменить ``ApplicationContext.create`` через ``__new__``
+        construction-time shim нельзя (это classmethod). Используем
+        прямой monkeypatch на ``ApplicationContext.create``."""
+        captured: dict = {}
+
+        def _fake_create(cls, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            # Возвращаем мок-инстанс, чтобы _run_vanilla мог позвать .stop()
+            mock = MagicMock()
+            mock.settings = {"logging": {"db": {"table_name": "agent_gateway_logs_test"}}}
+            mock.config = MagicMock()
+            mock.config_service = MagicMock()
+            mock.config_service.settings_section.return_value = {}
+            return mock
+
+        from lib.core import application_context as ac
+
+        monkeypatch.setattr(ac.ApplicationContext, "create", classmethod(_fake_create))
+        return captured
+
+    def test_vanilla_passes_storage_override(self, monkeypatch) -> None:
+        from argparse import Namespace
+        import cli_agent
+
+        captured = self._capture_create_kwargs(monkeypatch)
+
+        args = Namespace(
+            smoke=False,
+            session=None,
+            storage="file",
+            patched=False,
+        )
+        # Run до первой ``await`` в run_repl — нам нужно только убедиться,
+        # что ctx создан с правильным kwargs. Используем прямой вызов
+        # внутренней логики, минуя asyncio.run/run_repl.
+        cli_agent._configure_logging({"cli": {}})
+        # Без запуска REPL напрямую подменим порядок: вызываем тело
+        # _run_vanilla до asyncio.run, отлавливая kwargs.
+        # Для этого выдёргиваем ApplicationContext.create уже подменённым.
+
+        # Простой способ: запустить _run_vanilla в фоне, перехватив
+        # ApplicationContext.create — мокинстанс не блокирует REPL,
+        # потому что REPL вызовет ``asyncio.run(run_repl(ctx.agent, ...))``
+        # и провалится на MagicMock.agent. Поэтому прервём выполнение
+        # через monkeypatch на asyncio.run.
+        from unittest.mock import patch as _patch
+        with _patch("cli_agent.asyncio.run", side_effect=SystemExit(0)):
+            try:
+                cli_agent._run_vanilla(args)
+            except SystemExit:
+                pass
+
+        assert "kwargs" in captured, "ApplicationContext.create не был вызван"
+        assert captured["kwargs"].get("storage_override") == "file", (
+            f"_run_vanilla не пробросил --storage=file в create(); "
+            f"kwargs={captured['kwargs']}"
+        )
+        assert captured["kwargs"].get("role") == "cli"
+        assert "profile" not in captured["kwargs"], (
+            "_run_vanilla не должен передавать profile — "
+            "профиль уже разрешён через _initialize_settings"
+        )
+
+    def test_vanilla_passes_session_override(self, monkeypatch) -> None:
+        from argparse import Namespace
+        import cli_agent
+        from unittest.mock import patch as _patch
+
+        captured = self._capture_create_kwargs(monkeypatch)
+        args = Namespace(
+            smoke=False,
+            session="my-session",
+            storage="auto",
+            patched=False,
+        )
+        with _patch("cli_agent.asyncio.run", side_effect=SystemExit(0)):
+            try:
+                cli_agent._run_vanilla(args)
+            except SystemExit:
+                pass
+
+        assert captured["kwargs"].get("session_override") == "my-session", (
+            f"_run_vanilla не пробросил --session=my-session; "
+            f"kwargs={captured['kwargs']}"
+        )
+
+
 # =================================================================
 # RuntimePatcher — patch_assemble_outbound (consumed by cli_agent)
 # =================================================================
