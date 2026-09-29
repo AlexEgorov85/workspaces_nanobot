@@ -56,6 +56,7 @@
 - `docs/` — каталог дополнительной документации (README.md — навигационный хаб, на который ссылается корневой `README.md`):
   - `docs/architecture/` — инвентаризация зависимостей (`nanobot-inventory.md`/`nanobot-inventory.json`) и monkey-patch'ей (`runtime-patcher-inventory.md`).
   - `docs/skill-tool-architecture.md` — контракт Skill ↔ Tool (что разрешено/запрещено, decision procedure в `SKILL.md`).
+  - `docs/architecture/decisions/audit-analyzer-runtime-boundary.md` — ADR: `audit_analyzer` эталонной является CLI-слой (skill-side `scripts/cli.py --mode <predefined|generated_sql|vector>` над существующими `lib/services`), Agent-tools для этих режимов НЕ возвращаются; baseline-таблица границы + хронология A–G + два открытых process-boundary дефекта.
   - `docs/skill-tool-inventory.md` — текущее состояние всех skill/tool и история удалённых.
   - `docs/table-registry.md` — реестр таблиц PG → DuckDB, sync-контроль, track-колонки.
   - `docs/architecture/runtime-patcher-inventory.md` — каталог monkey-patch'ей с target/risk/тестами.

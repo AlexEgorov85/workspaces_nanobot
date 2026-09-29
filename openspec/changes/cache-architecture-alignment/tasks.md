@@ -1,66 +1,178 @@
-## 1. Cache lifecycle decoupling (Decision 1, пункт 1)
+## 1. Contract (Phase 1 — DONE)
 
-- [ ] 1.1 Split `_make_sync_services()` into `_make_cache_runtime()` + `_make_sync_service()` in `lib/core/application_context.py`, verify both methods are idempotent when called twice
-- [ ] 1.2 Change gate logic so `_make_cache_runtime()` runs whenever `gateway.cache.local_path` is set, regardless of `enable_audit`, verify `python cli_agent.py --smoke` exits 0 with `enable_audit=false` in project.json
-- [ ] 1.3 Add test `tests/test_application_context_cache_lifecycle.py::TestCacheRuntimeIndependentOfEnableAudit` asserting cache runtime created when `enable_audit=False`, verify all 3 cases pass (OWNER + READ_WRITE, READER + READ_ONLY, READER + READ_ONLY even with audit disabled)
-- [ ] 1.4 Sync service still gated by `enable_audit=True` AND `acquired=True`, verify by smoke test that no `CacheSyncService.start()` call when audit is disabled
+- [x] 1.1 Новая capability `data/cache-runtime-lifecycle`: `specs/data/cache-runtime-lifecycle/spec.md`
+- [x] 1.2 Модификация `data/cache-provider`: `specs/data/cache-provider/spec.md`
+- [x] 1.3 Удаление дубликатов cache-контракта из `runtime/entrypoints`:
+      `specs/runtime/entrypoints/spec.md` (`## REMOVED Requirements`, 4 требования)
 
-## 2. DuckDbCacheStore extends CacheProvider (Decision 2, пункт 2)
+## 2. Cache runtime не зависит от способа запуска (Decision 1)
 
-- [ ] 2.1 Make `DuckDbCacheStore` inherit from `CacheProvider` ABC in `lib/services/duckdb_cache_store.py:308`, verify `isinstance(DuckDbCacheStore.open(path, mode), CacheProvider)` returns True via smoke test
-- [ ] 2.2 Audit all abstract methods on `CacheProvider` (lib/services/cache_provider.py) and ensure `DuckDbCacheStore` implements each, verify by extending `tests/test_cache_provider_mode.py::TestIsCacheProvider`
-- [ ] 2.3 Remove `instance method open(self)` (line 381) leaving only `@classmethod open(cls, path, mode)`, verify no callers depend on the instance-method signature
-- [ ] 2.4 Update `tests/test_cache_provider_mode.py:81` to assert `isinstance(instance, CacheProvider)` not `DuckDbCacheStore`, verify all existing tests still pass
+- [ ] 2.1 Разделить `_make_sync_services()` (`lib/core/application_context.py`) на `_make_cache_runtime()` + `_make_sync_service()`; обе идемпотентны при повторном вызове
+- [ ] 2.2 `_make_cache_runtime()` вызывается при наличии `gateway.cache.local_path` независимо от `enable_audit`; снять гейт `if ctx.enable_audit:` (`application_context.py:340`)
+- [ ] 2.3 `worker_id` строить без `ctx.role` (`application_context.py:1538`)
+- [ ] 2.4 `tests/test_application_context_cache_lifecycle.py::TestCacheRuntimeIndependentOfEnableAudit`: 3 кейса (OWNER + READ_WRITE, READER + READ_ONLY, READER + READ_ONLY при `enable_audit=False`)
+- [ ] 2.5 `tests/test_application_context_role.py` (`:96` перечисляет `cache_store`; `:127`, `:143` ставят alias) — привести к новому поведению; `role`-независимость ownership проверяется отдельным тестом
+- [ ] 2.6 `python cli_agent.py --smoke` и `python gateway.py --profile=test --smoke` — exit 0 при `enable_audit=false`
 
-## 3. Unified query_sql enforcement (Decision 2 cont., пункты 3, 10)
+## 3. Ownership lifecycle (Decision 4, 9)
 
-- [ ] 3.1 Audit `PostgresDuckDbProvider.query_sql` vs `DuckDbCacheStore.query_sql` for divergent enforcement, document both paths in design notes
-- [ ] 3.2 Decide: either (a) consolidate `PostgresDuckDbProvider` into `DuckDbCacheStore` or (b) extract shared `_assert_query_sql_allowed_locked` into `CacheProvider` base class as a private helper, verify by code review and runtime test
-- [ ] 3.3 Whichever path chosen, add test verifying both providers reject DDL (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`) in any mode and reject INSERT/UPDATE/DELETE in READ_ONLY mode
+- [ ] 3.1 `start_heartbeat()` / `stop_heartbeat()` / `_heartbeat_loop()` в `lib/services/cache_ownership.py`; сигнал остановки — `threading.Event`
+- [ ] 3.2 Heartbeat стартует только при `try_claim().acquired=True`; READER heartbeat-worker'а не имеет
+- [ ] 3.3 Heartbeat останавливается в `release()` и при обнаружении takeover (`heartbeat() == False` → лог `ownership_lost`, worker не producer)
+- [ ] 3.4 Формальный порядок shutdown в `ApplicationContext.stop()` (`application_context.py:613-681`): `stop sync` → `stop heartbeat` → `close cache` (`:664-668`) → `release` (`:672-676`)
+- [ ] 3.5 Тест shutdown-ordering: после `release()` worker sync не может записать
+- [ ] 3.6 `tests/test_cache_ownership_lifecycle.py::TestHeartbeatWorker` — 4 сценария спеки: продление `expires_at`, takeover после TTL, READER не heartbeat'ит, graceful shutdown
 
-## 4. Producer fencing scope (Decision 3, пункты 4, 5)
+## 4. Producer fencing (Decision 5, 6)
 
-- [ ] 4.1 Add `_with_fence(work: Callable[[], None], label: str)` helper to `PgDuckDbSyncService` in `lib/services/pg_duckdb_sync_service.py`, verify by inspection that fence is acquired and generation rechecked before work
-- [ ] 4.2 Wrap `_do_initial_load()` in `_with_fence`, verify by adding test `test_initial_load_under_fence` that mocks ownership takeover mid-load and asserts `OwnershipLostError`
-- [ ] 4.3 Wrap `_fire_sync_callback()` in `_with_fence`, verify by test `test_sync_callback_under_fence` with takeover during callback
-- [ ] 4.4 Refactor existing `_poll_changes()` to use `_with_fence` (instead of inline `with acquire_write_fence()`), verify by running existing `TestSyncServiceFencingBehavior` suite
-- [ ] 4.5 Run full sync test suite, verify no regression in polling-fence behavior
+- [ ] 4.1 `_with_fence(work, label)` в `lib/services/pg_duckdb_sync_service.py`; fence + recheck generation до `work`
+- [ ] 4.2 Обернуть `_do_initial_load()` (вызов с `:289`, вне fence)
+- [ ] 4.3 Разделить callback-семантику: `set_on_sync_callback(cb, mutates_cache: bool = True)`; cache-mutating — под fence (вызовы на `:290` и `:304`, сейчас вне fence)
+- [ ] 4.4 Перевести `_poll_changes()` (`:330`) на `_with_fence` вместо inline `with acquire_write_fence()`
+- [ ] 4.5 Исправить docstring `_sync_cycle_with_fence` (`:321-322`): он описывает callback внутри fence, которого там нет
+- [ ] 4.6 Тесты: `test_initial_load_under_fence`, `test_sync_callback_under_fence` (takeover посреди), observer-callback не берёт advisory lock; существующий `TestSyncServiceFencingBehavior` — без регрессий
+- [ ] 4.7 Ветка `if self._ownership_coordinator is None` — только для изолированных тестов экземпляра; composition MUST передавать coordinator (тест composition-контракта)
 
-## 5. Heartbeat lifecycle (Decision 4, пункт 6)
+## 5. Один файл — один интерфейс — одна реализация (Decision 7, 10, 11)
 
-- [ ] 5.1 Add `start_heartbeat()`, `stop_heartbeat()`, and internal `_heartbeat_loop()` to `CacheOwnershipCoordinator` in `lib/services/cache_ownership.py`, verify threading.Event for stop signal
-- [ ] 5.2 Auto-start heartbeat on `try_claim().acquired=True`, verify by integration test that heartbeat thread is alive after successful claim and dead after `release()`
-- [ ] 5.3 Auto-stop heartbeat on `release()` and on detection of takeover (current claim generation != ours), verify by mock test
-- [ ] 5.4 Add new test file `tests/test_cache_ownership_lifecycle.py::TestHeartbeatWorker`, verify all 4 scenarios from spec: heartbeat updates `expires_at`, takeover allowed after TTL, READER doesn't heartbeat, graceful shutdown
-- [ ] 5.5 Wire heartbeat into `ApplicationContext.stop()` for graceful shutdown, verify by integration test
+**Модель (принята 2026-09-29).** Существует **ровно один файл кэша**. К нему
+имеют доступ **только** через интерфейс кэша (`CacheProvider`) — runtime,
+skill и любой другой компонент. Какая реализация стоит за интерфейсом
+(DuckDB, другая СУБД, файл в памяти) — **не важно и не видно вызывающим**:
+компонент, назвавший конкретный класс хранилища, нарушает модель.
 
-## 6. NFS detection cross-platform (Decision 5, пункт 9)
+**Проверено по коду: сегодня этой модели нет.**
 
-- [ ] 6.1 Create `lib/utils/filesystem_prober.py` with `detect_network_filesystem(path) -> bool`, verify by unit tests covering Linux/macOS/Windows via mocked `platform.system()` and `subprocess.run()`
-- [ ] 6.2 Wire `detect_network_filesystem` into `DuckDbCacheStore.__init__` (or `open()`) before opening storage, verify by smoke test that local-FS path opens and network-FS path fails with `UnsupportedFilesystemError`
-- [ ] 6.3 Add test `tests/test_duckdb_cache_store.py::TestNfsCheck::test_macos_nfs_rejected` mocking `platform.system() == "Darwin"` and `subprocess.run` returning NFS mount, verify fail-fast
-- [ ] 6.4 Add test `test_windows_smb_rejected` mocking Windows + `ctypes` response `DRIVE_REMOTE`, verify fail-fast
+| Ожидание | Факт |
+|---|---|
+| Реализация за интерфейсом одна | `DuckDbCacheStore` (`duckdb_cache_store.py:308`) объявлен как `class DuckDbCacheStore:` — **не наследует** `CacheProvider`; `PostgresDuckDbProvider(CacheProvider)` (`cache_provider_impl.py:800`) — второй провайдер, живущий в слое skill'а |
+| Runtime работает через интерфейс | `ApplicationContext.cache_provider: Any \| None` (`application_context.py:151`), `cache_store: Any \| None` (`:152`) — на уровне типа интерфейса нет; DI-шов (`project_tool_loader.py:284-296`) отдаёт tool'ам `DuckDbCacheStore`, а docstring `:213` обещает `CacheProvider` |
+| Файл один | `DuckDbCacheStore.open(path=publish_path)` → `_cache_path = path` (`duckdb_cache_store.py:457`), затем `application_context.py:1564` присваивает `_publish_path` **тот же** путь → `_cache_path == _publish_path`. Runtime уже пишет в этот файл напрямую |
+| Снапшот — отдельный файл | `publish()` (`:920-1110`) копирует файл **сам на себя**: `ATTACH` tmp → `CREATE OR REPLACE TABLE … AS SELECT` → `close()` → `os.replace(tmp, target)` → reopen (`:1077-1102`). Расхождение `local_path` как «файл» (`:177-186`) против «каталог» (`resolve_publish_path`) — следствие того же раздвоения |
+| Методов интерфейса хватает обеим сторонам | У `DuckDbCacheStore` реализовано 7 из 9 abstract-методов; нет `refresh`/`check_stale` — то есть класс **не мог** объявить наследование, не определив судьбу этих двух методов |
 
-## 7. cache_store → cache_provider rename (Decision 6, пункт 8)
+- [ ] 5.1 `class DuckDbCacheStore(CacheProvider)` (`duckdb_cache_store.py:308`).
+      Объявить наследование — после решения по `refresh`/`check_stale` (5.2),
+      иначе класс не инстанцируется
+- [ ] 5.2 **Судьба `refresh()` / `check_stale()`** (решение). Оба метода
+      описывают репликацию PostgreSQL → кэш, а не свойство файла кэша.
+      Проверено: **ни одного production-вызова** — `refresh()`/`check_stale()`
+      вызываются только из `PostgresDuckDbProvider` (`:870`, `:882`), а
+      `load_cache_from_postgres` (`:677`) и `check_cache_stale` (`:736`) — только
+      из `tests/test_cache_provider_meta.py`. Репликацией в runtime владеет
+      `PgDuckDbSyncService`. → **Оба метода уходят из ABC**; репликация остаётся
+      за sync-слоем, а не за интерфейсом файла. verify: `grep -n "refresh\|check_stale"
+      lib/services/cache_provider.py` — 0 hit
+- [ ] 5.3 **Поверхность интерфейса** после 5.2. Чтение: `is_ready`,
+      `get_schema`, `query_sql`, `explain`, `search_vector`, `preload_indexes`,
+      `close`. Запись: **`upsert_records`** — единственная мутация (ingestion от
+      sync-слоя). Сейчас `upsert_records` вне ABC, хотя через него runtime
+      пишет, — интерфейс не покрывает собственное основное назначение.
+      verify: каждый метод ABC реализован в `DuckDbCacheStore`, и
+      `issubclass(DuckDbCacheStore, CacheProvider)` → `True`
+- [ ] 5.4 **Одна точка создания провайдера, реализация невидима.**
+      Функция `open_cache_provider(*, mode) -> CacheProvider` в
+      `lib/services/cache_provider.py` (слой интерфейса) — единственный
+      способ получить провайдера в рантайме. Внутри (ленивый импорт, во
+      избежание цикла `cache_provider` ⇄ `cache_provider_impl`) она
+      разрешает путь через `resolve_publish_path()` и делегирует конкретной
+      реализации. **Вызывающий код вне слоя реализации не называет
+      `DuckDbCacheStore` ни разу** — ни gateway, ни skill, ни tools. verify:
+      `grep -rn "DuckDbCacheStore" lib/ workspace/ tools/ benchmarks/ gateway.py cli_agent.py`
+      даёт хит только в `lib/services/duckdb_cache_store.py` и в тестах самой
+      реализации
+- [ ] 5.5 **Удалить `PostgresDuckDbProvider`** (`cache_provider_impl.py:800`)
+      целиком вместе с его дублем открытия файла (`:888` `open_cache`,
+      `:897-905` `_open_cache` → `duckdb.connect(read_only=True)`) и
+      `load_cache_from_postgres` (`:677`) / `check_cache_stale` (`:736`).
+      Сегодня это **вторая реализация интерфейса**, доступная skill'у, —
+      прямое нарушение модели «одна реализация»
+- [ ] 5.6 `build_cache_provider` (`:366`) — удалить (он создавал вторую
+      реализацию). `lib/core/skill_config.py:274-275` и
+      `workspace/skills/audit_analyzer/scripts/skill_config.py:79` —
+      **оставить**: тонкие делегаты в 5.4 с возвращаемым типом
+      `CacheProvider`. Skill-side CLI сохраняет точку входа
+      (`docs/skill-tool-architecture.md` §8)
+- [ ] 5.7 `ApplicationContext` (`application_context.py:151-152`) —
+      `cache_provider: CacheProvider | None` вместо `Any | None`;
+      docstring `:151` («CacheProvider ABC instance») станет правдой. verify
+      `typing.get_type_hints` на поле
+- [ ] 5.8 **Удалить `publish()`-как-self-replace** (`duckdb_cache_store.py:920-1110`).
+      Механизм temp+`os.replace` — наследие модели «снимок», сменившейся на
+      ownership при переходе Stage C/D, но не доведённой до конца: файл
+      публикуется **сам в себя**, а `close()`/reopen вокруг `os.replace`
+      (`:1088-1102`) каждый цикл роняет и заново захватывает блокировку —
+      источник недетерминированного окна для читателя на Windows.
+      Следствия: `_publish_path` (`:335`, `:942`) и `store._publish_path =
+      publish_path` (`application_context.py:1564`) удаляются; `force=` и счётчики
+      `_publishes`/`_publish_errors`/`_last_publish_at` пересматриваются;
+      `gateway.py:159-170, 177-186, 220-226, 270-275` (удаление «старого
+      снапшота», ожидание первого publish) правятся под новую семантику
+- [ ] 5.9 Удалить instance-метод `open(self)` (`:381-391`) — он **перекрыт**
+      `@classmethod open(cls, path, mode)` (`:432-459`) в теле класса и потому
+      мёртв, а его docstring (`:385-389`) лжёт, называя callers `gateway.py` и
+      `benchmarks/runner.py`: оба зовут `connect()` (`gateway.py:158`,
+      `benchmarks/runner.py:618`). verify `grep -n "def open" lib/services/duckdb_cache_store.py`
+      даёт ровно одно определение
+- [ ] 5.10 `list_runtime_vector_indexes` (`cache_provider_impl.py:123-224`) MUST
+      NOT открывать DuckDB самостоятельно (`:189`) и MUST NOT разрешать путь сам
+      (`:177-186`); собственный `except Exception: return []` (`:190`) маскирует
+      недоступность файла под «каталог пуст», а импорт
+      `from lib.core.skill_config import _WORKSPACE_ROOT` (`:182`) падает
+      `ImportError`, т.к. символ в модуле **отсутствует**. Реализация — в
+      change `fix-cache-process-boundary` §2
+- [ ] 5.11 Guard чистоты интерфейса: `CacheProvider` не имеет `open` /
+      `open_cache` / `try_claim` / `heartbeat` / `acquire_write_fence` /
+      `release`; подклассы не добавляют lifecycle-методов; точка создания
+      провайдера — **единственная** функция 5.4, а не метод ABC
+- [ ] 5.12 **Открытый вопрос, не решённый этим change:** при одном файле и
+      одном интерфейсе остаётся блокировка. Один файл — один держатель:
+      процесс, получивший ownership (`application_context.py:1552`), держит
+      файл в `READ_WRITE`, и второй процесс **не может открыть его даже с
+      `read_only=True`** — ограничение движка на уровне файла, которое сужение
+      интерфейса не лечит. Сужение интерфейса убирает параллельные реализации
+      и ложную диагностику, но конкурентное чтение из второго процесса требует
+      отдельного решения по жизненному циклу держателя: передача владения с
+      закрытием и повторным открытием **или** явный запрет конкурентного
+      доступа. До решения §5 **не закрывает** наблюдаемый Windows-баг.
+      Требуется решение пользователя
 
-- [ ] 7.1 Rename all 13 occurrences in `gateway.py` (lines 155, 156, 160, 172, 182, 222, 224, 266, 268, 269, 272, 293, 295), verify by grep that no `cache_store` references remain
-- [ ] 7.2 Rename all 4 occurrences in `benchmarks/runner.py`, verify by smoke test of benchmark runner
-- [ ] 7.3 Rename all 8 occurrences in `lib/services/project_tool_loader.py` (lines 144, 156, 189, 201, 213, 267, 287, 295), verify by full test suite pass
-- [ ] 7.4 Update `ApplicationContext.__init__` alias line 333 to set `cache_store` to None (no longer alias), verify by integration test that runtime consumers can use either for one release
-- [ ] 7.5 Add AST-grep test `tests/test_cache_provider_layering.py::TestNoCacheStoreAliasInRuntime` asserting no `cache_store` reference outside `application_context.py` (alias), verify by full test pass
-- [ ] 7.6 Document in CHANGELOG "Deprecated" section that `cache_store` alias will be removed in next MINOR release
+## 6. Удаление `cache_store` alias (Decision 12)
 
-## 8. Test layering guard (Decision 7, пункт 11)
+- [ ] 6.1 `gateway.py` — 13 ссылок (строки 157, 158, 162, 174, 184, 224, 226, 268, 270, 271, 274, 295, 297)
+- [ ] 6.2 `lib/services/project_tool_loader.py` — 11 ссылок (144, 156, 189, 190, 201, 213, 267, 284, 287, 295, 296); параметр переименовать в `cache_provider`
+- [ ] 6.3 `lib/services/runtime_patcher.py` — 2 ссылки (583, 602)
+- [ ] 6.4 `benchmarks/runner.py` — 4 ссылки (615, 618, 620, 654)
+- [ ] 6.5 `lib/core/application_context.py` — удалить поле-legacy (`:152`), присваивание (`:350-353`), прокидывание в `patch_project_tools`/`patch_subagent_logging` (`:468`, `:494`), `getattr(ctx, "cache_store", ...)` в readiness (`:1069`, `:1092`) и тексты docstring (`:1010-1011`, `:1073`, `:1082`, `:1096`, `:1101`)
+- [ ] 6.6 `tests/test_application_context_role.py:96` — убрать `cache_store` из ожидаемого множества атрибутов
+- [ ] 6.7 AST-тест `tests/test_cache_provider_layering.py::TestNoCacheStoreAliasInRuntime`: ни одной ссылки на `cache_store` в `lib/`, `workspace/`, `tools/`, `benchmarks/`, `tests/` (кроме исторического упоминания в docstring `release_v252.py`)
+- [ ] 6.8 CHANGELOG: запись в `Removed` (не `Deprecated`) — alias удалён в этом change, без переходного релиза
 
-- [ ] 8.1 Create `tests/test_cache_provider_layering.py::TestCacheProviderInheritance` with AST-grep asserting no runtime import of `DuckDbCacheStore` outside composition root (`lib/services/duckdb_cache_store.py`, `lib/services/cache_provider_impl.py`, `lib/core/application_context.py`), verify by running the test
-- [ ] 8.2 Create test `TestRuntimeConsumersDependOnCacheProvider` asserting `AgentLoop`, Skills, Tools, `CacheSyncService`, `CacheOwnershipCoordinator` import from `lib.services.cache_provider` not `lib.services.duckdb_cache_store`, verify by AST scan
-- [ ] 8.3 Update existing `tests/test_cache_provider_mode.py` to use `CacheProvider` (not concrete class) in isinstance checks throughout, verify all 21 tests still pass
+## 7. Storage safety (Decision 8)
 
-## 9. Final integration and archive
+- [ ] 7.1 `lib/utils/filesystem_prober.py`: `detect_network_filesystem(path) -> bool` (Linux/macOS/Windows)
+- [ ] 7.2 Подключить проверку в `DuckDbCacheStore` до открытия storage; сетевая FS → `UnsupportedFilesystemError`
+- [ ] 7.3 Типизированные open-ошибки: «файла нет» / «файл залочен» / «неподдерживаемая FS» различимы
+- [ ] 7.4 Тесты `tests/test_duckdb_cache_store.py`: macOS NFS, Windows SMB (`DRIVE_REMOTE`), локальная FS — ok
 
-- [ ] 9.1 Run full test suite (`python -m pytest tests/ -q`), verify only the known pre-existing `test_finds_workspace_hooks_without_hooks_dir_in_syspath` failure remains
-- [ ] 9.2 Run `python tools/architecture_guard.py`, verify no new violations
-- [ ] 9.3 Run `python cli_agent.py --smoke` and `python gateway.py --profile=test --smoke`, verify both exit 0
-- [ ] 9.4 Update CHANGELOG `[Unreleased]` block with the 11-point list mapping to commits 1-8
-- [ ] 9.5 Run `openspec.cmd archive cache-architecture-alignment` to merge spec deltas into canonical `data/cache-provider/spec.md`, verify archive validates
-- [ ] 9.6 Run `openspec.cmd validate cache-architecture-alignment` post-archive, verify clean
+## 8. Верификация (Phase 8)
+
+- [ ] 8.1 `python -m pytest tests/ -q` — без новых падений относительно baseline
+- [ ] 8.2 `python tools/architecture_guard.py` — без новых нарушений
+- [ ] 8.3 `python cli_agent.py --smoke`, `python gateway.py --profile=test --smoke` — exit 0
+- [ ] 8.4 Обновить `docs/ARCHITECTURE.md`, `AGENTS.md` (§ «Project Layout»), `CHANGELOG.md`
+- [ ] 8.5 `openspec.cmd validate cache-architecture-alignment`
+- [ ] 8.6 `openspec.cmd archive cache-architecture-alignment` — спека `data/cache-runtime-lifecycle` переносится в canonical
+
+## Вне scope этого change
+
+- Протечки абстракции skill ↔ storage-реализация (`cache_provider_impl` в skill'е,
+  `hasattr(open_cache)`, тип возврата фабрики, self-open DuckDB в
+  `list_runtime_vector_indexes`) — `fix-cache-process-boundary`
+- Кросс-процессная блокировка одного файла — см. §5.12, **не решена ни одним
+  из текущих changes**. §5 убирает параллельные реализации и ложную диагностику,
+  но «один файл — один держатель» остаётся ограничением движка
+- `CliChannel`, native TUI, удаление `role`, расположение `CronService`, Gateway client protocol, typed outbound events — `unify-runtime-channels`
+- `return_file_manager=not ctx.enable_cron` (`application_context.py:315`) — переносит `unify-runtime-channels`
+- Изменение default `enable_cron`
+- Удаление `streamlit_app.py` — `remove-streamlit-runtime`
