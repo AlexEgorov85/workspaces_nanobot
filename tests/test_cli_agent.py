@@ -259,13 +259,14 @@ class TestHookLoader:
 
 
 class TestTypewriter:
-    @pytest.mark.asyncio
-    async def test_zero_speed_prints(self):
-        from lib.cli.console_loop import _typewriter
+    """DEPRECATED: ``_typewriter`` удалён из console_loop.py после перехода
+    на upstream ``nanobot.cli.terminal``. Reasoning/печать управляются
+    ``cli_terminal._ReasoningBuffer`` и ``cli_terminal._print_agent_response``.
+    Этот класс оставлен пустым как маркер миграции; удалить в следующем релизе.
+    """
 
-        with patch("lib.cli.console_loop.console") as mc:
-            await _typewriter("hello", "bold", 0)
-            mc.print.assert_called_once()
+    def test_marker(self):
+        pass
 
 
 # =================================================================
