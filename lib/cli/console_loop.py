@@ -15,6 +15,7 @@ from rich.console import Console
 
 from lib.cli.display_config import DisplayConfig
 from lib.utils.outbound_meta import is_stream_delta
+from lib.utils.windows_terminal import enable_vt, is_windows_console
 
 console = Console()
 
@@ -188,6 +189,12 @@ async def run_repl(
     cfg = display or DisplayConfig()
     bus = agent.bus
     _init_prompt_session()
+    # prompt_toolkit на старте может выставить line-input mode и сбросить
+    # ENABLE_VIRTUAL_TERMINAL_PROCESSING, который мы включили при
+    # импорте cli_agent.py → последующий Rich-вывод уезжает с ANSI в
+    # legacy cmd/PowerShell ISE как ``?[2m...``. Возвращаем режим.
+    if is_windows_console():
+        enable_vt()
     __logo__, __version__ = get_logo_version()
     _model, _preset_tag = model_display(config)
     console.print(
@@ -248,6 +255,13 @@ async def run_repl(
         while True:
             try:
                 user_input = _sanitize_surrogates(await _read_interactive_input_async())
+                # prompt_toolkit переключает console mode в line-input при
+                # чтении. На legacy Windows-консоли это сбрасывает
+                # ENABLE_VIRTUAL_TERMINAL_PROCESSING → последующий Rich-вывод
+                # печатает ANSI-коды, которые консоль без VT рендерит как
+                # ``?[2m...``. Возвращаем режим перед каждым display-этапом.
+                if is_windows_console():
+                    enable_vt()
                 command = user_input.strip()
                 if not command:
                     continue

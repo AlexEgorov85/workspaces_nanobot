@@ -172,10 +172,8 @@ class TestDatabaseLoggingHook:
         from lib.hooks.database_logging_hook import DatabaseLoggingHook
         from nanobot.providers.base import LLMResponse
 
-        fake_console = MagicMock()
-        monkeypatch.setattr(
-            "lib.hooks.database_logging_hook.console", fake_console
-        )
+        printed: list[str] = []
+        monkeypatch.setattr("builtins.print", lambda *a, **k: printed.append(" ".join(str(x) for x in a)))
         service = MagicMock()
         hook = DatabaseLoggingHook(service, print_llm_calls=True)
         ctx = MagicMock()
@@ -185,7 +183,6 @@ class TestDatabaseLoggingHook:
 
         asyncio.run(hook.before_iteration(ctx))
         asyncio.run(hook.after_iteration(ctx))
-        printed = [c.args[0] for c in fake_console.print.call_args_list]
         assert any("отправлен промпт (120 токенов)" in p for p in printed)
         assert any("получен ответ (45 токенов)" in p for p in printed)
 
@@ -193,10 +190,8 @@ class TestDatabaseLoggingHook:
         from lib.hooks.database_logging_hook import DatabaseLoggingHook
         from nanobot.providers.base import LLMResponse
 
-        fake_console = MagicMock()
-        monkeypatch.setattr(
-            "lib.hooks.database_logging_hook.console", fake_console
-        )
+        printed: list[str] = []
+        monkeypatch.setattr("builtins.print", lambda *a, **k: printed.append(" ".join(str(x) for x in a)))
         service = MagicMock()
         hook = DatabaseLoggingHook(service, print_llm_calls=False)
         ctx = MagicMock()
@@ -206,7 +201,7 @@ class TestDatabaseLoggingHook:
 
         asyncio.run(hook.before_iteration(ctx))
         asyncio.run(hook.after_iteration(ctx))
-        fake_console.print.assert_not_called()
+        assert not any("отправлен промпт" in p or "получен ответ" in p for p in printed)
 
     def test_before_execute_tool_captures_session_key(self, sys_path):
         from lib.hooks.database_logging_hook import DatabaseLoggingHook

@@ -22,16 +22,12 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from rich.console import Console
-
 from nanobot.agent import AgentHook
 
 if TYPE_CHECKING:
     from nanobot.agent import AgentHookContext, AgentRunHookContext
 
 logger = logging.getLogger(__name__)
-
-console = Console()
 
 # ---------------------------------------------------------------------------
 # Мост per-iteration usage между хуком и патчами RuntimePatcher.
@@ -488,7 +484,14 @@ class DatabaseLoggingHook(AgentHook):
             self._print_llm_tokens(context)
 
     def _print_llm_tokens(self, context: Any) -> None:
-        """Вывести в терминал две строки о токенах итерации (CLI-режим)."""
+        """Вывести в терминал две строки о токенах итерации (CLI-режим).
+
+        Раньше использовался ``Rich Console.print("[dim]...")``, который на
+        legacy Windows-консоли (cmd/PowerShell ISE без VT) рендерил
+        ``?[2m→ LLM: ...?[0m`` из-за подмены ESC на ``?``. Эти строки —
+        debug-вывод; декоративный dim-стиль тут не нужен, важен сам факт
+        вывода. Используем ``print()`` напрямую — никакого ANSI.
+        """
         usage = _usage_to_dict(getattr(context, "usage", None)) or {}
         if not usage:
             return
@@ -497,9 +500,9 @@ class DatabaseLoggingHook(AgentHook):
         if prompt is None and completion is None:
             return
         if prompt is not None:
-            console.print(f"[dim]→ LLM: отправлен промпт ({prompt} токенов)[/dim]")
+            print(f"→ LLM: отправлен промпт ({prompt} токенов)")
         if completion is not None:
-            console.print(f"[dim]← LLM: получен ответ ({completion} токенов)[/dim]")
+            print(f"← LLM: получен ответ ({completion} токенов)")
 
     async def after_run(self, context: AgentRunHookContext) -> None:
         try:
