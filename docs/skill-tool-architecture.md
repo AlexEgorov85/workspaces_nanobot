@@ -9,6 +9,20 @@
 
 `Skill` и `Tool` — **независимые механизмы**.
 
+Skill и Tool — **параллельные потребители** общей runtime-инфраструктуры:
+
+```text
+              AgentRuntime
+               /         \
+              v           v
+           Skill         Tool
+              \           /
+               \         /
+                v       v
+        shared runtime infrastructure
+        (lib/services, lib/core, lib/utils)
+```
+
 Связь между ними — только через агентский runtime:
 
 ```text
@@ -27,21 +41,30 @@ Tool executes capability
 Skill **не вызывает** Tool программно.
 Tool **не импортирует** Skill.
 
+**Shared infrastructure — не Tool-слой.** Наличие callable-функции в `lib/`
+не делает её Tool'ом: Tool'ом становится только capability, которую агент
+выбирает и вызывает самостоятельно (см. §6 и §7).
+
 ---
 
 ## 2. Что разрешено
 
 ```python
 # Skill
-from lib.services.cache_provider_impl import build_cache_provider
+from lib.services.cache_provider import CacheProvider   # интерфейс
 from lib.utils.sql_safety import validate_sql
+from lib.core import skill_config as _lib                # runtime API
 
 # Tool
-from lib.services.cache_provider_impl import build_cache_provider
+from lib.services.cache_provider import CacheProvider   # тот же интерфейс
 from lib.utils.sql_safety import validate_sql
 ```
 
-Skill и Tool могут использовать **общую инфраструктуру** (`lib/utils`, `lib/services`).
+Skill и Tool могут использовать **общую инфраструктуру** (`lib/utils`, `lib/services`, `lib/core`).
+
+Skill обращается к инфраструктуре **напрямую** — через существующий
+runtime/application interface, а не через Tool. Наличие callable-функции в
+`lib/` не превращает её ни в Tool, ни в обязанность Skill'а искать Tool.
 
 ---
 
@@ -83,17 +106,28 @@ Tool — это generic capability. Какой skill их использует �
 - Внутренний contract Tool за пределами публичного (name, description, parameters).
 
 Skill пишет инструкции **в терминах capability**, а не в терминах Python:
-- ✅ «use `scripts/cli.py --mode vector` with `--index-name violations_index`»
+- ✅ «выполни семантический поиск по индексу `violations_index`»
+  (в текущей реализации — `scripts/cli.py --mode vector --index-name ...`)
 - ❌ «call a `vector_search` tool class with `query=...`»
 - ❌ «import a Python tool class»
+
+Конкретный интерфейс доставки capability (skill-side CLI, script, Tool) —
+деталь реализации. Норма фиксирует **форму** инструкции (в терминах
+capability), а не конкретный способ её выполнения.
 
 ---
 
 ## 6. Read-only SQL — не Agent-facing tool
 
 Agent-facing tool `duckdb_query` **не существует**. Read-only SQL не является
-Agent-facing tool'ом: Agent использует only predefined-скрипты через CLI
-(`scripts/cli.py --mode predefined --script <name>`).
+Agent-facing capability: агент не выбирает свободный SQL самостоятельно —
+это внутренняя операция доменного Skill'а. Данные доступны через
+предопределённые скрипты Skill'а (в текущей реализации —
+`scripts/cli.py --mode predefined --script <name>`).
+
+Это и есть канонический пример «generic, но **не** agent-facing»: свободный
+SELECT по произвольным таблицам потребовал бы от агента знать схему и домен,
+а это работа Skill'а, а не самостоятельное действие Tool'а.
 
 Read-only политика сохранена как infra-контракт Core:
 
@@ -109,7 +143,10 @@ Read-only политика сохранена как infra-контракт Core
 ## 7. Semantic search — не Agent-facing tool
 
 Agent-facing tool `vector_search` **не существует**. Semantic search не является
-Agent-facing tool'ом: доступ — через CLI skill'а:
+Agent-facing capability: агент не выбирает семантический поиск самостоятельно —
+это внутренняя операция Skill'а, оперирующая доменными индексами.
+
+Текущий операционный интерфейс Skill'а:
 
 ```text
 python scripts/cli.py --mode vector --query '<текст>' --index-name <name>
@@ -135,12 +172,11 @@ python scripts/cli.py --mode vector --query '<текст>' --index-name <name>
 
 ```text
 Step 1: запрос соответствует predefined из `SKILL.md` (каталог скриптов)
-        → вызов CLI skill'а `scripts/cli.py --mode predefined --script <name>`
-        → выполнение SQL через generic `CacheProvider.query_sql`.
+        → выполнение SQL через `CacheProvider.query_sql`.
 Step 2: запрос не соответствует ни одному predefined → сообщить пользователю
         (прямой доступ к свободному SQL и vector search у агента нет).
-Step 3: (operator/benchmark) для NL→SQL — CLI `--mode generated_sql`;
-        для семантического поиска — CLI `--mode vector` с `--index-name`.
+Step 3: (operator/benchmark) NL→SQL и семантический поиск — внутренние
+        операции Skill'а, не Agent-facing capability.
 Step 4: при ошибке → прочитать message, переформулировать/уточнить запрос,
         повторить (retry — задача Agent, не tool'а).
 Step 5: do not use unknown tables or indexes.
@@ -148,17 +184,35 @@ Step 6: do not use DDL/DML.
 Step 7: do not use vector/search для COUNT/GROUP BY.
 ```
 
-Skill `audit_analyzer` — **CLI-only**: автономный skill-side CLI
-`scripts/cli.py --mode <predefined | generated_sql | vector>` (единый entry-point,
-вызывается агентом через `tools.exec`; также используется бенчмарками/CI).
-Generic tools `duckdb_query` (точный SELECT) и `vector_search` (семантика)
-**не существуют** — агент не имеет к ним доступа.
-Подробности — в `docs/skill-tool-inventory.md` и `workspace/skills/audit_analyzer/SKILL.md`.
+### Что здесь нормативно, а что — as-is
 
-Tool'ы `run_predefined_script` и `nl_sql_generate` отсутствуют: их логика
-живёт в CLI skill'а (`predefined.run`, `generated_sql_mode.run`) и skill-side
-helper `scripts/skill_config.py` / `scripts/llm.py` (прямой вызов
-`lib.services.llm_client.call_llm` для LLM-генерации SQL).
+**Нормативно:**
+
+- `audit_analyzer` — **Skill**: доменная логика, оркестрация и capability
+  доступа к доменным данным живут в Skill.
+- Все три capability (predefined SQL, NL→SQL, vector search) — **внутренние
+  операции Skill'а**, а не Agent-facing Tools. Агент не выбирает их
+  самостоятельно.
+- Generic tools `duckdb_query` (точный SELECT) и `vector_search` (семантика)
+  **не создаются**.
+
+**As-is (текущая реализация, не норма):**
+
+- Skill `audit_analyzer` сейчас предоставляет эти capability через
+  skill-side CLI `scripts/cli.py --mode <predefined | generated_sql | vector>`,
+  который агент запускает через `tools.exec`; тот же интерфейс используют
+  бенчмарки и CI.
+- Tool'ы `run_predefined_script` и `nl_sql_generate` отсутствуют: их логика
+  живёт в Skill (`predefined.run`, `generated_sql_mode.run`) и skill-side
+  helper `scripts/skill_config.py` / `scripts/llm.py` (прямой вызов
+  `lib.services.llm_client.call_llm` для LLM-генерации SQL).
+
+CLI — **операционный** интерфейс доставки capability, а не архитектурное
+требование Skill'а. Норма не предписывает его наличие; она запрещает
+`Skill → Tool` и создание Agent-facing Tools под внутренние операции Skill'а.
+
+Подробности текущего состояния — в `docs/skill-tool-inventory.md` и
+`workspace/skills/audit_analyzer/SKILL.md`.
 
 ---
 
@@ -250,8 +304,8 @@ Skill может объявить свою метку и находить соо
 `scripts/db_loader.py` при этом не восстанавливался — реестр
 предопределённых скриптов читается через
 `lib.core.skill_config.get_predefined_scripts_table("audit_analyzer")`
-(используется утилитой `tools/generate_predefined_scripts_sql.py` и
-CLI skill'а `scripts/generated_sql_mode.py` для few-shot retrieval):
+(predefined-скрипты — DB-first, отдельная SQL-генерация удалена) и
+используется skill'ом `scripts/generated_sql_mode.py` для few-shot retrieval:
 
 ### Negative contract
 

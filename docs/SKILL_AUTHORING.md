@@ -13,11 +13,17 @@
 **Skill** — доменный пакет для агента:
 
 - инструкции (когда применять, какой capability выбрать);
-- Python-скрипты (детерминированные/CLI процедуры, map-reduce);
+- Python-скрипты (детерминированные процедуры, map-reduce);
+- доменная оркестрация и capability доступа к доменным данным;
 - опциональные данные/промпты/references (progressive disclosure);
 - декларация PG-таблиц/vector-индексов в `project.json`.
 
 Skill **не вызывает** Tool программно (`TARGET_ARCHITECTURE.md:209-228`), Tool **не знает** о Skill (§22.1). Связь — через agent runtime: skill описывает capability терминами, агент решает какой tool вызвать.
+
+**Shared infrastructure** (`lib/services`, `lib/core`, `lib/utils`) — общий слой
+проверки, исполнения и хранения, используемый и Skills, и Tools. Наличие
+callable-функции в `lib/` **не** превращает её в Tool: Tool'ом становится
+только то, что агент выбирает и вызывает самостоятельно (§1).
 
 Универсальная структура:
 
@@ -40,10 +46,23 @@ workspace/skills/<skill_name>/
 | Сценарий | Создаём |
 |---|---|
 | Доменная логика «как решать задачу X в нашей БД» | **Skill** |
-| Generic возможность «выполнить SELECT» / «найти семантически» | **Tool** (`workspace/tools/`) |
+| Доменный workflow из нескольких шагов | **Skill** (`scripts/`, оркестрация) |
+| Детерминированная операция **внутри** Skill workflow | **Skill script** + существующий runtime interface |
 | LLM-фолбэк на естественном языке для конкретного домена | **Skill** (`generated_sql`/`map_reduce` режим) |
 | Тонкая обёртка вокруг generic utility для домена | **Skill** (как `office_files` поверх `workspace/utils/`) |
+| Capability, которую агент выбирает и вызывает **самостоятельно** | **Tool** (`workspace/tools/`) |
+| Реализация, общая для Skill и Tool | **`lib/services`** / **`lib/core`** |
 | Универсальный SQL validator / chunker / splitter | **`lib/utils`** |
+
+> **Generic ≠ Tool.** «Capability уже реализована и выглядит generic» —
+> **не** достаточное основание завести Tool. Спросите: *агент выбирает и
+> вызывает её самостоятельно, как отдельный шаг плана?* Если нет — это
+> внутренняя операция Skill'а или shared infrastructure.
+>
+> Каноничные примеры «generic, но не agent-facing»: свободный read-only
+> SQL, семантический поиск, NL→SQL для конкретной схемы. Для них Agent-facing
+> Tools (`duckdb_query`, `vector_search`, `nl_sql_generate`) **не создаются** —
+> см. `docs/skill-tool-architecture.md` §6–§8.
 
 Если вы сомневаетесь — посмотрите на существующие skill'ы (`audit_analyzer`, `legal_summarizer`, `office_files`) как референс.
 
@@ -59,9 +78,15 @@ workspace/skills/<skill_name>/
 ├── __init__.py
 └── scripts/
     ├── __init__.py
-    ├── cli.py
+    ├── cli.py                 # операционный entry-point (опционально, см. §2.4a)
     └── skill_config.py        # обёртка над lib.core.skill_config
 ```
+
+> `cli.py` — **операционный** интерфейс, а не обязательная часть Skill.
+> Он нужен, если skill запускают из CLI/бенчмарков/CI или агент должен
+> обращаться к capability отдельным вызовом. Skill, которому это не требуется,
+> может обойтись `SKILL.md` + `scripts/`. Норма (`TARGET_ARCHITECTURE.md` §11)
+> не предписывает его наличие.
 
 ### 2.2 Полная (несколько режимов + БД + LLM)
 
@@ -78,7 +103,7 @@ workspace/skills/<skill_name>/
 │   └── validator.py          # валидация параметров
 ├── scripts/
 │   ├── __init__.py
-│   ├── cli.py                # точка входа CLI (--mode <predefined|generated_sql|vector>)
+│   ├── cli.py                # операционный entry-point (опционально, не норма)
 │   ├── skill_config.py       # тонкая обёртка над lib.core.skill_config
 │   ├── llm.py                # LLM-клиент (если нужен)
 │   ├── generated_sql_mode.py # режим NL → SELECT (если нужен)
@@ -164,16 +189,20 @@ LLM-генерация SELECT», а не «работа с аудитами».
 (`audit_analyzer/SKILL.md:13-19`):
 
 ```markdown
-| Задача | Режим | Инструмент |
+| Задача | Capability | Как выполняется |
 |---|---|---|
-| Аггрегация / фильтр по полям | Predefined / Generated SQL | `scripts/cli.py --mode predefined` / `--mode generated_sql` |
-| Свободный вопрос про данные (SELECT) | Generated SQL | `scripts/cli.py --mode generated_sql` |
-| Семантический поиск по смыслу | Vector | `scripts/cli.py --mode vector` |
-| Известный отчёт из реестра | Predefined | `scripts/cli.py --mode predefined` |
+| Аггрегация / фильтр по полям | Predefined / NL→SQL | внутренняя операция Skill'а |
+| Свободный вопрос про данные (SELECT) | NL→SQL | внутренняя операция Skill'а |
+| Семантический поиск по смыслу | Vector search | внутренняя операция Skill'а |
+| Известный отчёт из реестра | Predefined | внутренняя операция Skill'а |
 ```
 
 Для однорежимных skill'ов (`legal_summarizer`, `office_files`) — секции
 «Когда использовать» + «Когда не вызывать».
+
+Описывайте **capability и условия выбора**, а не способ доставки. Конкретный
+интерфейс (`--mode predefined`, `--mode vector` и т.п.) — деталь текущей
+реализации, а не норма: он может измениться, не делая `SKILL.md` неверным.
 
 ### 3.4 Имена таблиц/индексов
 
@@ -200,8 +229,8 @@ LLM-генерация SELECT», а не «работа с аудитами».
 ### 3.6 Anti-patterns в SKILL.md
 
 - ❌ Описывать конкретные Python-классы tools. Пишите в терминах capability
-  («use `scripts/cli.py --mode vector` with `--index-name 'audits_index'`»), не в терминах
-  Python («call `VectorSearchTool.execute(...)`»). См. `skill-tool-architecture.md:80-89`.
+  («выполни семантический поиск по индексу `audits_index'`»), не в терминах
+  Python («call `VectorSearchTool.execute(...)`»). См. `skill-tool-architecture.md` §5.
 - ❌ Дублировать полную схему БД в SKILL.md. Используйте progressive
   disclosure — большие reference-файлы выносите в `references/`.
 - ❌ Подмешивать «как именно реализован Python внутри runtime» —
@@ -527,9 +556,12 @@ from workspace.tools.history_search_tool import ...    # ЗАПРЕЩЕНО
 
 Skill пишет инструкции в терминах capability, не Python:
 
-- ✅ «use `scripts/cli.py --mode vector` with `--index-name 'violations_index'`»
+- ✅ «выполни семантический поиск по индексу `violations_index`»
 - ❌ «call `VectorSearchTool.execute(query=...)`»
 - ❌ «import VectorSearchTool»
+
+Норма фиксирует **форму** инструкции, а не способ доставки: `--mode vector`
+в примере выше — деталь текущей реализации, а не требование.
 
 ### 7.6 Capability доступ Skill'ам
 
@@ -540,10 +572,10 @@ Skill пишет инструкции в терминах capability, не Pytho
 | `scripts/cli.py --mode generated_sql` | `--query --context` → `{status, columns, rows, ...}` | LLM-конфиг (эмбеддер захардкожен в `cache_provider_impl`) |
 | `compact_context` tool | `{session_key, force}` | `gateway.compact.*` |
 
-Generic tools `duckdb_query` / `vector_search` **не существуют** — доступ к данным
-skill'а идёт только через CLI (границы описаны в
-`docs/skill-tool-architecture.md` § 6–7). Для добавления нового generic tool —
-скопируйте `workspace/tools/example.py`.
+Generic tools `duckdb_query` / `vector_search` **не создаются** — это внутренние
+операции Skill'а, а не agent-facing capability (границы описаны в
+`docs/skill-tool-architecture.md` § 6–§8). Новый Tool заводится **только** при
+agent-facing критерии (§1); для добавления — `workspace/tools/example.py`.
 
 ---
 
@@ -715,6 +747,8 @@ pytest tests/test_auto_register_skills.py             -v
 
 ❌ Tool, который знает о Skill (поймает `test_architecture_tool_domain_free.py`).
 
+❌ Заводить Tool только потому, что capability уже реализована и выглядит generic. Сначала §1 / TARGET §30 вопрос 11.
+
 ❌ Multi-statement SQL или DDL/DML. Безопасность — `lib.utils.sql_safety.validate_sql()`.
 
 ❌ Секреты в `project.json` — `${VAR}` + `.secrets.env`.
@@ -737,8 +771,12 @@ pytest tests/test_auto_register_skills.py             -v
 
 1. ☐ Структура соответствует одному из трёх паттернов §2.3 (полный / минимальный / documentation-only).
 2. ☐ `SKILL.md` написан по §3: правильный frontmatter, decision procedure, «Что не делать».
-3. ☐ Skill **НЕ импортирует** `workspace.tools`.
-4. ☐ Skill использует generic Tool'ы без домен-routing.
+3. ☐ Skill **НЕ импортирует** `workspace.tools` и **НЕ вызывает** Tool'ы (в т.ч. через tool-call).
+4. ☐ Skill **не зависит** от конкретных Tool implementation: внутренние операции workflow идут
+   через существующий runtime/application interface напрямую. Tool создан **только** если
+   capability действительно agent-facing — агент выбирает и вызывает её самостоятельно, как
+   отдельный шаг плана (§1, TARGET §30 вопрос 11); наличие готовой generic-функции в
+   `lib/services` основанием для Tool'а не является.
 5. ☐ Архитектурные тесты `tests/test_skill_tool_independence.py tests/test_architecture_tool_domain_free.py tests/test_resource_universality.py tests/test_auto_register_skills.py` — без падений.
 6. ☐ `pytest tests/ -q` — без регрессий.
 7. ☐ `python cli_agent.py` стартует без ошибок (smoke).
@@ -750,7 +788,7 @@ pytest tests/test_auto_register_skills.py             -v
 
 ### Полный skill (audit_analyzer)
 
-9. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/__init__.py, scripts/cli.py, scripts/skill_config.py}` создан.
+9. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/__init__.py, scripts/skill_config.py}` создан; `scripts/cli.py` — если нужен операционный интерфейс (§2.1).
 10. ☐ В `project.json` добавлена секция `skills.<name>` с fully qualified таблицами.
 11. ☐ Если используется `label="scripts_registry"` (или другое) — явно отмечено.
 12. ☐ Если у таблицы нестандартная track-колонка — задана per-resource (по умолчанию `updated_at`).
@@ -760,7 +798,7 @@ pytest tests/test_auto_register_skills.py             -v
 
 ### Минимальный skill (legal_summarizer)
 
-9'. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/__init__.py, scripts/cli.py, scripts/skill_config.py}` создан (без `tables[]`/`vector_indexes[]`, если их нет).
+9'. ☐ Каталог `workspace/skills/<name>/{SKILL.md, scripts/__init__.py, scripts/skill_config.py}` создан (без `tables[]`/`vector_indexes[]`, если их нет); `scripts/cli.py` — по необходимости.
 10'. ☐ В `project.json` есть `skills.<name>` с `cli`/`llm`/`chunking` (по необходимости).
 11'. ☐ CLI регистрирует skill через `_ensure_registered()` (для skill'ов с LLM обязательно; для чистых LLM-pipeline вызовы могут быть no-op).
 12'. ☐ Unit-тест минимум на один сценарий.
@@ -777,9 +815,9 @@ pytest tests/test_auto_register_skills.py             -v
 
 ### Шаг 1. Спроектируйте
 
-- Это Skill или Tool? (см. §1)
+- Это Skill, Tool или shared infrastructure? (см. §1, TARGET §30 вопрос 11)
 - Какие таблицы/индексы? Сколько режимов?
-- Будет ли CLI? Нужен ли LLM? Чанкинг?
+- Нужен ли операционный entry-point (`cli.py`)? Нужен ли LLM? Чанкинг?
 
 ### Шаг 2. Создайте структуру каталога
 

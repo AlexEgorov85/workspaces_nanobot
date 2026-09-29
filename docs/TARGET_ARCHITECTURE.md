@@ -211,9 +211,13 @@ workspace/tools/
 
 > **Generic tools `duckdb_query_tool.py` / `vector_search_tool.py` не
 > существуют.** Капабилити «свободный SQL» и «semantic search» не являются
-> Agent-facing tools — они доступны только через CLI skill'а `audit_analyzer`
-> (`scripts/cli.py --mode predefined / generated_sql / vector`).
+> Agent-facing capability: агент не должен выбирать их самостоятельно —
+> это внутренние операции доменного Skill'а.
 > Прямой доступ агента к свободному SQL и vector-search демонтирован.
+>
+> **Generic ≠ agent-facing.** Наличие такой capability в `lib/services` не
+> делает её Tool'ом. Tool появляется только там, где агент выбирает и
+> вызывает её самостоятельно (см. §30, вопрос 11).
 
 ---
 
@@ -249,19 +253,34 @@ from workspace.tools import ...
 
 Агент должен считать такие зависимости архитектурным дефектом.
 
-Связь Skill и Tool происходит через agent runtime:
+Связь Skill и Tool — через agent runtime, при этом **Skill не вызывает Tool**:
 
 ```mermaid
 flowchart TD
-    SK["SKILL.md (audit_analyzer)"] --> AG["Agent (nanobot AgentLoop)"]
-    AG -->|прямой вызов| EX["Skill CLI: scripts/cli.py --mode predefined"]
-    EX -->|выполняет| CAP["Core capability (CacheProvider/query_sql)"]
+    AG["Agent (nanobot AgentLoop)"] -->|выбирает и вызывает| TL["Tool: agent-facing capability"]
+    AG -->|загружает инструкции| SK["SKILL.md (audit_analyzer)"]
+    SK -->|доменная оркестрация| EX["Skill: internal capability"]
+    TL --> SVC["shared infrastructure (lib/services, lib/core, lib/utils)"]
+    EX --> SVC
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
-    class SK,AG,EX,CAP core
+    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
+    class AG,SK,EX core
+    class TL,SVC infra
 ```
 
-Skill не вызывает Tool программно. (Generic tools `duckdb_query` /
-`vector_search` отсутствуют — Agent не имеет к ним доступа.)
+Обе поверхности (Skill и Tool) обращаются к shared infrastructure
+**напрямую**:
+
+```text
+Skill ─┐
+       ├─> shared runtime infrastructure
+Tool  ─┘
+```
+
+Способ доставки capability агенту (agent-facing Tool, skill-side CLI, skill
+script) — деталь реализации. Норма запрещает только зависимости
+`Skill → Tool` и `Tool → Skill`; она не предписывает конкретный интерфейс
+доставки.
 
 ---
 
@@ -275,7 +294,7 @@ Skill не вызывает Tool программно. (Generic tools `duckdb_qu
 flowchart LR
     SA["Skill: audit_analyzer"] --> SVC["Shared service (lib/services)"]
     SB["Skill: other"] --> SVC
-    CLI["Skill CLI (scripts/cli.py)"] --> SVC
+    UT["Утилиты / standalone-скрипты"] --> SVC
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class SA,SB,CLI core
@@ -295,11 +314,16 @@ business-specific routing
 
 если это не является частью явно выделенного domain layer.
 
+**Shared infrastructure — не Tool-слой.** Инфраструктура, которой пользуются
+и Skills, и Tools, живёт в `lib/services`, `lib/core`, `lib/utils`. Наличие
+callable-функции в `lib/` **не превращает её в Agent-facing Tool**: Tool'ом
+становится только то, что агент выбирает и вызывает самостоятельно.
+
 ---
 
 # 5. DuckDB Capability
 
-Целевая capability (через CLI skill'а, а не Agent-facing tool):
+Внутренняя операция Skill'а (не Agent-facing capability). Текущий операционный интерфейс:
 
 ```text
 python scripts/cli.py --mode predefined --script <name> [--params '{...}']
@@ -309,7 +333,8 @@ python scripts/cli.py --mode predefined --script <name> [--params '{...}']
 
 > Выполнить безопасный read-only SQL запрос в доступном DuckDB источнике.
 > Публичного Agent-facing tool `duckdb_query` нет; свободный
-> SQL — только внутри CLI skill'а (predefined scripts / `generated_sql`).
+> SQL — внутренняя операция Skill'а (predefined scripts / `generated_sql`),
+> а не capability, которую агент выбирает самостоятельно.
 
 Skill не знает конкретную реализацию Core, но вызывает её через
 `predefined.run()` / `CacheProvider.query_sql`.
@@ -342,7 +367,7 @@ Skill не знает конкретную реализацию Core, но вы�
 
 # 6. Vector Search Capability
 
-Целевая capability (через CLI skill'а, а не Agent-facing tool):
+Внутренняя операция Skill'а (не Agent-facing capability). Текущий операционный интерфейс:
 
 ```text
 python scripts/cli.py --mode vector --query '<текст>' --index-name <name>
@@ -351,8 +376,9 @@ python scripts/cli.py --mode vector --query '<текст>' --index-name <name>
 Назначение:
 
 > Выполнить semantic search по указанному vector index.
-> Публичного Agent-facing tool `vector_search` нет; доступ —
-> только через CLI skill'а.
+> Публичного Agent-facing tool `vector_search` нет; семантический поиск —
+> внутренняя операция Skill'а, а не capability, которую агент выбирает
+> самостоятельно.
 
 Пример:
 
@@ -432,9 +458,9 @@ Skill должен знать domain context:
 ```mermaid
 flowchart TD
     U["Запрос пользователя"] --> D{выбор capability}
-    D -->|6 predefined scripts| Q["CLI --mode predefined"]
-    D -->|точный аналитический SQL| G["CLI --mode generated_sql"]
-    D -->|семантический поиск| V["CLI --mode vector"]
+    D -->|6 predefined scripts| Q["Skill: predefined run"]
+    D -->|точный аналитический SQL| G["Skill: NL→SQL"]
+    D -->|семантический поиск| V["Skill: vector search"]
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class U,D core
@@ -493,9 +519,12 @@ flowchart TD
 
 # 11. CLI
 
-CLI является отдельным способом запуска capability.
+CLI — **операционный** способ запуска capability, а не архитектурное требование.
 
 CLI не является Tool.
+
+CLI **не обязателен**: Skill, которому не нужен отдельный интерфейс запуска,
+может состоять только из `SKILL.md` и scripts.
 
 CLI не должен зависеть от nanobot runtime только ради запуска domain logic.
 
@@ -504,12 +533,16 @@ CLI не должен зависеть от nanobot runtime только рад�
 ```mermaid
 flowchart LR
     CLI["cli_agent.py"] --> SK["Skill / scripts / shared service"]
-    AG["gateway.py (Agent)"] --> CLI2["Skill CLI: scripts/cli.py"]
+    AG["gateway.py (Agent)"] -->|через agent runtime| SK
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class CLI,AG core
-    class SK,CLI2 infra
+    class SK infra
 ```
+
+Агент взаимодействует со Skill через agent runtime. CLI skill'а, если он
+существует, — один из операционных интерфейсов доставки capability, а не
+обязательная часть архитектуры Skill.
 
 Оба пути могут использовать общий infrastructure/domain code, но не должны вызывать друг друга.
 
@@ -683,6 +716,17 @@ Skill reasoning
 
 Если ApplicationContext начинает накапливать domain logic, эту логику следует вынести в соответствующий service.
 
+Он владеет lifecycle глобальной инфраструктуры и **не владеет** состоянием:
+
+```text
+ApplicationContext  — global infrastructure lifecycle (create/start/stop)
+SessionContext      — per-agent / per-session state
+Skill               — domain state конкретного навыка
+```
+
+Состояние сессии не кэшируется в `ApplicationContext`, а доменное состояние
+Skill'а не поднимается в `ApplicationContext` или `lib/services`.
+
 ---
 
 # 19. AgentFactory
@@ -734,40 +778,34 @@ test
 
 # 21. Dependency direction
 
-Целевая зависимость:
+Целевая зависимость — **от агента и потребителей к инфраструктуре**, а не наоборот:
 
 ```mermaid
 flowchart TB
-    NB["nanobot-ai (runtime)"] --> IL["workspaces_nanobot (lib/core)"]
-    IL --> SI["shared infrastructure (lib/services)"]
-    SI --> SK["Skills: audit_analyzer"]
+    NB["nanobot-ai (runtime)"] --> IL["integration layer (lib/core)"]
+    NB --> SK["Skills (domain)"]
+    NB --> TL["Tools (agent-facing capability)"]
+    SK --> SI["shared infrastructure (lib/services, lib/core, lib/utils)"]
+    TL --> SI
     classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
-    classDef ext fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
     classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
     class NB,IL core
-    class SI infra
-    class SK infra
+    class SK,TL,SI infra
 ```
 
-Но domain-specific Skills и generic Tools не должны зависеть друг от друга.
+Skills и Tools — **параллельные** зависимости от shared infrastructure,
+а не последовательные уровни:
 
-Более точная practical model:
-
-```mermaid
-flowchart TB
-    NB["nanobot-ai"] --> IL["integration layer (lib/core)"]
-    IL --> SI["shared infrastructure (lib/services)"]
-    SI --> SK["Skills: audit_analyzer"]
-    SK -.не зависят.-> TL["Tools: history_search, legal_summarizer_query"]
-    classDef core fill:#fff3cd,stroke:#d39e00,stroke-width:2px
-    classDef ext fill:#d1ecf1,stroke:#0c5460,stroke-width:2px
-    classDef infra fill:#d4edda,stroke:#1b7a3d,stroke-width:2px
-    class NB,IL core
-    class SI infra
-    class SK,TL infra
+```text
+Skill ─┐
+       ├─> shared runtime infrastructure
+Tool  ─┘
 ```
 
-`Shared infrastructure` не должен быть скрытым business layer.
+Domain-specific Skills и generic Tools не должны зависеть друг от друга.
+
+`shared infrastructure` не должен быть скрытым business layer и не должен
+зависеть от конкретных Skills или Tools.
 
 ---
 
@@ -1049,6 +1087,22 @@ Tool = independent callable capability.
 ### Question 10
 
 Как это изменение повлияет на обновление `nanobot-ai`?
+
+### Question 11
+
+Является ли новая capability **agent-facing**?
+
+Агент выбирает и вызывает её самостоятельно, как отдельный шаг своего плана —
+или это внутренний шаг доменного workflow?
+
+Если внутренний шаг — это Skill (scripts) либо shared infrastructure, а не Tool.
+
+### Question 12
+
+Проверь критерий Question 11 **до** создания `workspace/tools/<name>.py`.
+
+Существование callable-функции в `lib/services` и её generic-природа **не**
+являются достаточным основанием для Tool'а.
 
 ---
 
