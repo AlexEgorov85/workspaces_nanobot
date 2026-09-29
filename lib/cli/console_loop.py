@@ -1,46 +1,30 @@
 """ConsoleLoop — интерактивный REPL CLI-агента поверх MessageBus + AgentLoop.
 
-Переиспользует upstream-хелперы ``nanobot.cli.terminal``:
+Структура REPL — зеркало upstream ``run_interactive`` из
+``nanobot/cli/agent.py`` (HKUDS/nanobot @ main). Не изобретаем —
+делегируем:
 
-  * ``_ReasoningBuffer`` — буферизация reasoning с sentence-boundary flush.
-  * ``_maybe_print_interactive_progress`` — обработка ``ProgressEvent``
-    по флагам (``reasoning_delta`` / ``reasoning_end`` / ``tool_hint`` /
-    ``send_progress``), а также ``ContextCompactionEvent`` и
-    ``RetryWaitEvent``.
-  * ``_print_agent_response`` — рендер финального ответа с markdown и
-    стандартным header.
-  * ``_print_interactive_response`` — рендер интерактивных сообщений,
-    не идущих в основной ответ.
+  * ``cli_terminal._init_prompt_session`` / ``_read_interactive_input_async`` /
+    ``_is_exit_command`` / ``_restore_terminal`` / ``_flush_pending_tty_input`` /
+    ``_print_agent_response`` / ``_print_interactive_response`` /
+    ``_maybe_print_interactive_progress`` / ``_ReasoningBuffer`` —
+    все через ``lib.cli.nanobot_cli_compat.get_repl_helpers()`` (где
+    уже сделана кросс-версионная адаптация для nanobot 0.3.0..0.3.5).
 
-Структура REPL-цикла — зеркало upstream ``nanobot/cli/agent.py``:
+Единственное наше расширение: ``turn_wait_timeout`` на
+``turn_done.wait()`` как safety net — если LLM полностью отказал
+(нет ``StreamedResponseEvent`` после ``RetryWaitEvent``), REPL печатает
+fallback и возвращается к ``You:``. Upstream полагается на Ctrl+C.
 
-  1. На старте: ``turn_done.set()``, ``turn_response.clear()``, создать
-     ``_ReasoningBuffer`` + ``StreamRenderer`` (на каждый turn).
-  2. Per turn:
-     a. Очистить ``turn_done``, ``turn_response``, ``reasoning_buffer``.
-     b. ``renderer = StreamRenderer(...)`` (новый на каждый turn, см.
-        upstream).
-     c. ``bus.publish_inbound(InboundMessage(...))`` с metadata
-        ``_wants_stream=True``.
-     d. ``await turn_done.wait()`` (с timeout — наш safety net на случай
-        полного отказа LLM).
-     e. Render ответа через ``_print_agent_response``.
-  3. На ``KeyboardInterrupt`` / ``EOFError`` — restore_terminal, Goodbye,
-     cancel outbound task, agent.stop.
+Отличия от upstream ``run_interactive``:
 
-Единственное наше расширение — timeout на ``turn_done.wait()``. Upstream
-кода этого не делает (полагается на Ctrl+C); у нас явный fallback
-(печать "(нет ответа Ns — проверьте LLM connectivity)") чтобы REPL не
-висел навсегда.
-
-Локальные хелперы, которые upstream НЕ покрывает:
-
-  * ``_print_tool_events`` — рендер ``_tool_audit`` из metadata
-    (RuntimePatcher.patch_assemble_outbound кладёт).
-  * ``_print_context_window`` — рендер ``context_window`` блока (UI
-    состояния контекста из того же patch).
-
-Эти двое оставлены, так как они часть наших runtime-patches, не upstream.
+  * Создание ``agent_loop`` идёт через наш ``ApplicationContext`` —
+    ``agent`` уже передан параметром, не создаётся внутри.
+  * ``StreamRenderer`` импортируется опционально (graceful fallback
+    если upstream stream-модуль недоступен).
+  * Наши runtime-patch metadata (``_tool_audit``, ``context_window``)
+    извлекаются из ``StreamedResponseEvent.metadata`` ПОСЛЕ основного
+    рендера upstream'а и печатаются как пост-блоки.
 """
 
 from __future__ import annotations
@@ -58,18 +42,16 @@ console = Console()
 
 
 # ---------------------------------------------------------------------------
-# Наши runtime-patch helpers (не покрыты upstream)
+# Runtime-patch display helpers (наши, не покрыты upstream).
+# ``_tool_audit`` / ``context_window`` кладёт в ``metadata``
+# ``RuntimePatcher.patch_assemble_outbound`` (см. ``lib/services/runtime_patcher.py``).
+# Upstream эти поля НЕ читает — рендерим сами после финального ответа.
 # ---------------------------------------------------------------------------
 
 
 async def _print_tool_events(events: list, cfg: DisplayConfig) -> None:
-    """Рендер ``_tool_audit`` блока из ``metadata``.
-
-    ``RuntimePatcher.patch_assemble_outbound`` собирает события tool'ов
-    (call/ok/error) и кладёт их в ``metadata["_tool_audit"]``. Здесь
-    рисуем их dim-italic'ом.
-    """
-    if not cfg.show_tool_calls:
+    """Рендер ``_tool_audit`` блока (per-call tool events)."""
+    if not cfg.show_tool_calls or not events:
         return
     for ev in events:
         if not isinstance(ev, dict):
@@ -99,11 +81,7 @@ async def _print_tool_events(events: list, cfg: DisplayConfig) -> None:
 
 
 async def _print_context_window(block: Any, cfg: DisplayConfig) -> None:
-    """Рендер ``context_window`` блока (UI индикатор занятости окна).
-
-    ``{used, limit, pct, model}`` кладётся в ``metadata.context_window``
-    патчем ``RuntimePatcher.patch_assemble_outbound``.
-    """
+    """Рендер ``context_window`` блока (UI индикатор занятости)."""
     if not cfg.show_context_window or not isinstance(block, dict):
         return
     try:
@@ -125,18 +103,18 @@ async def _print_context_window(block: Any, cfg: DisplayConfig) -> None:
     console.print(f"[dim]{label}[/dim]")
 
 
+# ---------------------------------------------------------------------------
+# /compact — наша CLI-команда (upstream её не обрабатывает)
+# ---------------------------------------------------------------------------
+
+
 async def _run_cli_compact(
     agent: Any,
     command: str,
     chat_id: str,
     cli_channel: str,
 ) -> None:
-    """CLI-команда ``/compact``: локальное сжатие контекста.
-
-    Upstream ``run_interactive`` не обрабатывает ``/compact`` —
-    это особенность нашего CLI. Использует ``ContextCompactionService``
-    напрямую с ``force=True``.
-    """
+    """CLI-команда ``/compact``: локальное сжатие контекста."""
     from lib.services.context_compaction import ContextCompactionService
 
     tokens = command.split()
@@ -152,7 +130,7 @@ async def _run_cli_compact(
 
 
 # ---------------------------------------------------------------------------
-# REPL — адаптация upstream ``run_interactive`` (см. ``nanobot/cli/agent.py``)
+# REPL — структура upstream ``run_interactive`` (см. ``nanobot/cli/agent.py``)
 # ---------------------------------------------------------------------------
 
 
@@ -164,21 +142,21 @@ async def run_repl(
     display: DisplayConfig | None = None,
     background_task_factory: Any | None = None,
 ) -> None:
-    """Главный REPL: ввод → publish_inbound → ждать turn_done → рендер.
+    """Главный REPL — копия upstream ``run_interactive``.
 
     Args:
-        agent: AgentLoop.
+        agent: AgentLoop (создан через наш ApplicationContext).
         config: runtime config (логотип, пресет).
         session: имя сессии (cli:<session>).
         display: DisplayConfig.
-        background_task_factory: callable() → Optional[Task] — фоновая задача.
+        background_task_factory: callable() → Optional[Task].
     """
     from nanobot.bus.events import InboundMessage
     from nanobot.bus.outbound_events import (
         StreamDeltaEvent,
         StreamedResponseEvent,
+        StreamEndEvent,
     )
-    from nanobot.cli import terminal as cli_terminal
 
     from lib.cli.nanobot_cli_compat import (
         get_logo_version,
@@ -186,21 +164,43 @@ async def run_repl(
         model_display,
     )
 
+    # Upstream helpers — все через ``get_repl_helpers`` (см. docs в
+    # ``nanobot_cli_compat.py``).
     _helpers = get_repl_helpers()
     _init_prompt_session = _helpers["_init_prompt_session"]
     _is_exit_command = _helpers["_is_exit_command"]
     _read_interactive_input_async = _helpers["_read_interactive_input_async"]
     _restore_terminal = _helpers["_restore_terminal"]
+    _flush_pending_tty_input = _helpers.get(
+        "_flush_pending_tty_input", lambda: None,
+    )
     _sanitize_surrogates = _helpers["_sanitize_surrogates"]
+    _print_agent_response = _helpers["_print_agent_response"]
+    _print_interactive_response = _helpers["_print_interactive_response"]
+    _maybe_print_interactive_progress = _helpers[
+        "_maybe_print_interactive_progress"
+    ]
+    _ReasoningBuffer = _helpers["_ReasoningBuffer"]
+
+    # Upstream ``run_interactive`` создаёт ``StreamRenderer`` на каждый
+    # turn. ``StreamRenderer`` — public в upstream ``nanobot.cli.stream``.
+    # Импортируем опционально (graceful fallback на None, если
+    # upstream-модуль недоступен).
+    try:
+        from nanobot.cli.stream import StreamRenderer as _StreamRenderer
+    except Exception:
+        _StreamRenderer = None  # type: ignore[misc, assignment]
 
     cfg = display or DisplayConfig()
     bus = agent.bus
     channels_config = getattr(agent, "channels_config", None)
+    markdown = getattr(config, "markdown", True)
+    if not isinstance(markdown, bool):
+        markdown = True
 
     _init_prompt_session()
     # prompt_toolkit на старте может сбросить ENABLE_VIRTUAL_TERMINAL_PROCESSING →
-    # последующий Rich-вывод уезжает с ANSI в legacy cmd/PowerShell ISE как
-    # ``?[2m...``. Возвращаем режим.
+    # Rich вывод уезжает с ANSI в legacy cmd/PowerShell ISE как ``?[2m...``.
     if is_windows_console():
         enable_vt()
 
@@ -218,24 +218,8 @@ async def run_repl(
     else:
         cli_channel, chat_id = "cli", session or "direct"
 
-    # ``cli_terminal._flush_pending_tty_input()`` — upstream вызывает
-    # перед каждым ``_read_interactive_input_async()``. Гарантирует, что
-    # pending stdin flush до пользователя не приходит после ответа LLM.
-
-    # Upstream ``run_interactive`` создаёт ``StreamRenderer`` на каждый
-    # turn. У нас нет его public — берём из upstream если доступен,
-    # иначе fallback на None (cli_terminal handles renderer=None
-    # graceful).
-    try:
-        from nanobot.cli.stream import StreamRenderer  # noqa: F401
-        _StreamRenderer = StreamRenderer
-    except Exception:
-        _StreamRenderer = None
-
-    # Лимит ожидания финального ответа на один turn. Upstream кода
-    # этого нет (полагается на Ctrl+C); мы добавляем safety net, чтобы
-    # REPL не висел при полном отказе LLM. Значение больше upstream
-    # retry-таймаута (~120-180 сек для 3 attempt'ов).
+    # Лимит ожидания финального ответа. Upstream этого нет (полагается
+    # на Ctrl+C); мы добавляем safety net.
     turn_wait_timeout = 300.0
     try:
         from config import SETTINGS
@@ -250,20 +234,12 @@ async def run_repl(
     turn_done = asyncio.Event()
     turn_done.set()
     turn_response: list[Any] = []
-    reasoning_buffer = cli_terminal._ReasoningBuffer()
-    renderer = None  # создаётся на каждый turn ниже, если ``_StreamRenderer`` доступен
+    reasoning_buffer = _ReasoningBuffer()
+    renderer = None
 
+    # ``_consume_outbound`` — точная копия upstream ``run_interactive``
+    # (см. ``nanobot/cli/agent.py``).
     async def _consume_outbound() -> None:
-        """Постоянный consumer — копия upstream ``_consume_outbound``.
-
-        Не поднимает ``turn_done`` для terminal events, кроме
-        ``StreamedResponseEvent``. ``StreamDeltaEvent`` пишет в
-        renderer.on_delta (если есть). ``ProgressEvent`` /
-        ``ContextCompactionEvent`` / ``RetryWaitEvent`` — через
-        upstream ``_maybe_print_interactive_progress`` (он сам
-        диспатчит по флагам ProgressEvent и обрабатывает compaction/
-        retry через ``_print_interactive_progress_line``).
-        """
         nonlocal renderer
         while True:
             try:
@@ -279,7 +255,10 @@ async def run_repl(
                 if renderer:
                     await renderer.on_delta(msg.content)
                 continue
-
+            if isinstance(event, StreamEndEvent):
+                if renderer:
+                    await renderer.on_end(resuming=event.resuming)
+                continue
             if isinstance(event, StreamedResponseEvent):
                 if msg.content and renderer and not getattr(renderer, "streamed", True):
                     try:
@@ -289,19 +268,17 @@ async def run_repl(
                     print_kwargs: dict[str, Any] = {}
                     if getattr(renderer, "header_printed", False):
                         print_kwargs["show_header"] = False
-                    cli_terminal._print_agent_response(
+                    _print_agent_response(
                         msg.content,
-                        render_markdown=True,
+                        render_markdown=markdown,
                         metadata=msg.metadata,
                         **print_kwargs,
                     )
                 turn_done.set()
                 continue
 
-            # ProgressEvent / ContextCompactionEvent / RetryWaitEvent /
-            # GoalStatusEvent / TurnEndEvent / … — upstream обрабатывает.
             try:
-                handled = await cli_terminal._maybe_print_interactive_progress(
+                handled = await _maybe_print_interactive_progress(
                     msg,
                     None,
                     channels_config,
@@ -313,17 +290,15 @@ async def run_repl(
             if handled:
                 continue
 
-            # Не terminal и не progress → это, видимо, финальный
-            # ответ (fallback path из upstream).
             if not turn_done.is_set():
                 if msg.content:
                     turn_response.append(msg)
                 turn_done.set()
             elif msg.content:
                 try:
-                    await cli_terminal._print_interactive_response(
+                    await _print_interactive_response(
                         msg.content,
-                        render_markdown=True,
+                        render_markdown=markdown,
                         metadata=msg.metadata,
                     )
                 except Exception:
@@ -346,7 +321,7 @@ async def run_repl(
         while True:
             try:
                 try:
-                    cli_terminal._flush_pending_tty_input()
+                    _flush_pending_tty_input()
                 except Exception:
                     pass
                 if renderer and hasattr(renderer, "stop_for_input"):
@@ -379,7 +354,7 @@ async def run_repl(
                 if _StreamRenderer is not None:
                     try:
                         renderer = _StreamRenderer(
-                            render_markdown=True,
+                            render_markdown=markdown,
                             bot_name=getattr(
                                 config.agents.defaults, "bot_name", None,
                             ),
@@ -402,53 +377,83 @@ async def run_repl(
                     )
                 )
 
-                # Ждём StreamedResponseEvent (финальный ответ).
+                # Ждём StreamedResponseEvent (финальный ответ). Upstream
+                # ждёт бесконечно; мы добавляем safety net.
                 try:
                     await asyncio.wait_for(
                         turn_done.wait(), timeout=turn_wait_timeout,
                     )
                 except TimeoutError:
-                    # LLM не вернул ответ за turn_wait_timeout сек (например,
-                    # все retry-attempt'ы провалились). Не блокируем REPL —
-                    # печатаем placeholder, идём дальше. LLM error уже
-                    # залогирован выше (retry warnings в stderr).
                     console.print(
                         f"[red](нет ответа {turn_wait_timeout:.0f}s — "
                         "проверьте LLM connectivity)[/red]"
                     )
                     continue
 
-                # Рендер результата turn'а. ``StreamedResponseEvent`` уже
-                # отрендерен внутри consumer'а через ``_print_agent_response``.
-                # Здесь обрабатываем только fallback-путь (turn_response
-                # пришёл НЕ через StreamedResponseEvent).
+                # Рендер результата turn'а — копия upstream ``run_interactive``.
                 if turn_response:
                     response_msg = turn_response[0]
                     content = response_msg.content
                     meta = response_msg.metadata
-                    if content:
+                    if content and not isinstance(
+                        response_msg.event, StreamedResponseEvent,
+                    ):
+                        # Fallback для сообщений, не идущих через
+                        # StreamedResponseEvent — upstream печатает
+                        # через ``_print_agent_response``.
+                        if renderer:
+                            try:
+                                await renderer.close()
+                            except Exception:
+                                pass
+                        print_kwargs: dict[str, Any] = {}
+                        if renderer and getattr(
+                            renderer, "header_printed", False,
+                        ):
+                            print_kwargs["show_header"] = False
                         try:
-                            cli_terminal._print_agent_response(
-                                content, render_markdown=True, metadata=meta,
+                            _print_agent_response(
+                                content,
+                                render_markdown=markdown,
+                                metadata=meta,
+                                **print_kwargs,
                             )
                         except Exception:
                             console.print(content)
+                elif renderer and not getattr(renderer, "streamed", True):
+                    try:
+                        await renderer.close()
+                    except Exception:
+                        pass
 
-                # Наши runtime-patch metadata: tool audit + context window.
-                meta_of_msg = (
-                    turn_response[0].metadata if turn_response else None
-                ) if turn_response else None
-                meta_dict: dict = meta_of_msg or {}
-                if "_tool_audit" in meta_dict:
-                    await _print_tool_events(meta_dict["_tool_audit"], cfg)
-                if "context_window" in meta_dict:
-                    await _print_context_window(meta_dict["context_window"], cfg)
+                # Наши runtime-patch metadata (``_tool_audit``,
+                # ``context_window``) — извлекаем из
+                # ``StreamedResponseEvent.metadata`` или fallback-пути
+                # (``turn_response[0].metadata``). Печатаем как пост-блоки.
+                tool_audit: list | None = None
+                context_window: dict | None = None
+                if turn_response:
+                    meta_dict = turn_response[0].metadata or {}
+                    tool_audit = meta_dict.get("_tool_audit")
+                    context_window = meta_dict.get("context_window")
+                # Если основной путь был через StreamedResponseEvent, то
+                # ``turn_response`` пуст, но ``agent_loop`` уже отрендерил
+                # ответ через ``_print_agent_response``. Наши поля мы НЕ
+                # получаем в этом пути — известный gap (upstream не
+                # передаёт ``turn_response`` через ``StreamedResponseEvent``
+                # handler). TODO: расширить upstream pattern, чтобы
+                # ``StreamedResponseEvent`` тоже мержил metadata в
+                # общий turn-state.
+
+                if tool_audit:
+                    await _print_tool_events(tool_audit, cfg)
+                if context_window:
+                    await _print_context_window(context_window, cfg)
             except (KeyboardInterrupt, EOFError):
                 _restore_terminal()
                 console.print("\nGoodbye!")
                 break
     finally:
-        # Закрываем consumer первым (он ждёт bus.consume_outbound).
         outbound_task.cancel()
         try:
             await outbound_task

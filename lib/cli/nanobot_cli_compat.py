@@ -34,11 +34,26 @@ _AUX_MODULES: tuple[str, ...] = (
 _AUX_HELPERS: tuple[str, ...] = ("_model_display", "_sanitize_surrogates")
 
 #: Имена приватных REPL-хелперов, которые должен скрывать адаптер.
+# Расширено для upstream-структуры run_interactive:
+#   * ``_print_agent_response`` / ``_print_interactive_response`` —
+#     рендер финального ответа с markdown.
+#   * ``_maybe_print_interactive_progress`` — обработка ProgressEvent
+#     по флагам (reasoning_delta / reasoning_end / tool_hint и т.д.)
+#     + ContextCompactionEvent + RetryWaitEvent.
+#   * ``_ReasoningBuffer`` — буферизация reasoning с sentence-boundary
+#     flush.
+#   * ``_flush_pending_tty_input`` — flush pending stdin input
+#     (вызывается перед user prompt).
 _TERMINAL_HELPERS: tuple[str, ...] = (
     "_init_prompt_session",
     "_is_exit_command",
     "_read_interactive_input_async",
     "_restore_terminal",
+    "_flush_pending_tty_input",
+    "_print_agent_response",
+    "_print_interactive_response",
+    "_maybe_print_interactive_progress",
+    "_ReasoningBuffer",
 )
 
 _resolved: dict[str, Any] | None = None
