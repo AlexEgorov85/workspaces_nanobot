@@ -84,6 +84,13 @@
 файла сообщается как «файл отсутствует» и указывает запустить
 `python gateway.py`, который и вызывает блокировку.
 
+Решение конфликта принято 2026-09-29 и отдельным change'ом
+(`cache-architecture-alignment` §5.12-5.16): кэш — **process-exclusive**
+ресурс, проверкой служит сама попытка открытия файла, конфликт фатален на
+старте. Здесь снимается только ручное конструирование сообщения в skill'е:
+после §1 и §2 кода, который превращает `False` в «файл не найден», просто
+не остаётся.
+
 ### Разрыв 5 — мёртвый код с ложным docstring
 
 `duckdb_cache_store.py:381-391` — instance-метод `open(self)`, **перекрытый**
@@ -197,20 +204,18 @@
 
 ## Out of Scope
 
-- **Кросс-процессная блокировка одного файла.** Один файл — один держатель:
-  процесс, получивший ownership (`application_context.py:1552`), держит файл
-  в `READ_WRITE`, и второй процесс не может открыть его даже с
-  `read_only=True`. Это ограничение движка на уровне файла: subprocess не
-  разделяет соединение с gateway, поэтому сужением интерфейса оно **не
-  лечится**. Этот change убирает параллельные реализации, ложную диагностику
-  и мёртвый код, но конкурентное чтение из второго процесса требует отдельного
-  решения по жизненному циклу держателя — см.
-  `cache-architecture-alignment` §5.12.
+- **Сам контракт владения файлом кэша.** Конфликт за файл между процессами
+  больше не открытый вопрос, а решённое правило: кэш process-exclusive,
+  проверкой служит сама попытка открытия, второй процесс не запускается с
+  типизированной ошибкой. Реализуется в `cache-architecture-alignment`
+  §5.12-5.16. Здесь снимается только следствие для skill'а — ручное
+  конструирование «cache not found» вместо разбора реальной причины.
 - **Наследование `DuckDbCacheStore` от `CacheProvider`, судьба
   `refresh`/`check_stale`, удаление `PostgresDuckDbProvider`,
   удаление `publish()`-как-self-replace, типизация
-  `ApplicationContext.cache_provider`** — `cache-architecture-alignment` §5
-  (ядро реализации; этот change фиксирует модель и границу skill'а).
+  `ApplicationContext.cache_provider`, роль `CacheOwnershipCoordinator`** —
+  `cache-architecture-alignment` §5 (ядро реализации; этот change фиксирует
+  модель и границу skill'а).
 - ownership, heartbeat, fencing, shutdown ordering, producer lifecycle,
   удаление alias `cache_store`, типизированные storage-ошибки —
   `cache-architecture-alignment`.

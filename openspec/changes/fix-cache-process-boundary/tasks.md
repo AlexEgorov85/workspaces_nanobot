@@ -155,21 +155,19 @@ runtime, — через ту же точку создания провайдер
 
 ## Вне scope этого change
 
-- **Кросс-процессная блокировка одного файла.** Один файл — один держатель:
-  процесс с ownership (`application_context.py:1552`) держит файл в
-  `READ_WRITE`, и второй процесс не может открыть его даже с
-  `read_only=True`. Ограничение движка на уровне файла: subprocess не
-  разделяет соединение с gateway, поэтому сужением интерфейса оно **не
-  лечится**. Этот change убирает параллельные реализации, ложную
-  диагностику и мёртвый код, но не конкурентное чтение — см.
-  `cache-architecture-alignment` §5.12, где это зафиксировано как открытый
-  вопрос.
+- **Сам механизм process-exclusivity** (кэш как неделимая ресурс-запись,
+  фатальность конфликта на старте, запрет отдельного pre-check занятости) —
+  `cache-architecture-alignment` §5.12-5.16. Здесь снимается только следствие
+  для skill'а: ручное конструирование «cache not found» вместо разбора
+  реальной причины не удаётся.
 - Ядро интерфейса (наследование `DuckDbCacheStore`, судьба
   `refresh`/`check_stale`, удаление `PostgresDuckDbProvider` и
   `publish()`-как-self-replace, типизация `ctx.cache_provider`) —
   `cache-architecture-alignment` §5.
 - ownership, heartbeat, fencing, producer lifecycle, типизированные
   storage-ошибки, удаление alias `cache_store` — `cache-architecture-alignment`.
+  Заметка: `CacheOwnershipCoordinator` **сохраняется** — за координацию
+  записи/синхронизации, а не за передачу открытого файла между процессами.
 - Создание `workspace/tools/audit_analyzer_query.py` и удаление
   `scripts/cli.py` — **отменено**: противоречит принятому эталону
   (эпоха A/G, CLI-слой) и `docs/skill-tool-architecture.md` §8, а также
