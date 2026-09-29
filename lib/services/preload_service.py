@@ -16,9 +16,15 @@ stale) и:
 
 Legacy-методы ``preload_audit_cache`` / ``background_audit_cache_refresh``
 / ``start_audit_cache_tasks`` / ``stop_tasks`` / ``get_audit_cache_config``
-/ ``_audit_settings`` отсутствуют: единственный писатель ``audit_cache.duckdb``
-— ``DuckDbCacheStore.publish()`` через gateway (PgDuckDbSyncService →
-in-memory mirror → snapshot file). CLI-агент остаётся чистым читателем.
+/ ``_audit_settings`` отсутствуют.
+
+Модель доступа к кэшу: **один файл, одна точка входа — интерфейс.**
+Единственный писатель файла — sync-слой (``PgDuckDbSyncService``) через
+``CacheProvider.upsert_records``. Отдельного «снимка для читателей» нет,
+и шага публикации не существует: runtime, CLI и skills получают доступ
+к тому же файлу только через ``open_cache_provider()``. Файл
+process-exclusive — второй процесс, не получивший его на старте, не
+запускается (``CacheBusyError``).
 """
 
 from __future__ import annotations

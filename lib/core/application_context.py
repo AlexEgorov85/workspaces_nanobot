@@ -148,8 +148,8 @@ class ApplicationContext:
     # Сервисы (опциональные)
     db_logging_service: Any | None = None
     sync_service: Any | None = None
-    cache_provider: Any | None = None  # CacheProvider ABC instance (Stage D)
-    cache_store: Any | None = None  # legacy alias for cache_provider
+    cache_provider: "CacheProvider | None" = None
+    cache_store: "CacheProvider | None" = None  # legacy alias for cache_provider
     ownership_coordinator: Any | None = None  # CacheOwnershipCoordinator (Stage C)
 
     # Composition role (Stage A)
@@ -1443,7 +1443,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
         CacheAccessMode,
         CacheOwnershipCoordinator,
     )
-    from lib.services.duckdb_cache_store import DuckDbCacheStore
+    from lib.services.cache_provider import open_cache_provider
     from lib.services.pg_duckdb_sync_service import PgDuckDbSyncService
 
     all_table_names = list(table_registry.table_names())
@@ -1499,15 +1499,8 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     if not isinstance(gateway_cfg, dict):
         gateway_cfg = {}
     cache_cfg = gateway_cfg.get("cache") if isinstance(gateway_cfg.get("cache"), dict) else {}
-    publish_path = resolve_publish_path(ctx.config.workspace_path, cache_cfg)
-    _warn_if_publish_path_on_nfs(publish_path)
-
-    from lib.services.cache_provider_impl import read_embedding_config
-
-    emb = read_embedding_config()
-    embedding_base_url = emb.get("base_url", "")
-    embedding_model = emb.get("model", "mxbai-embed-large:latest")
-    embedding_dimension = int(emb.get("dimension", 1024))
+    cache_path = resolve_publish_path(ctx.config.workspace_path, cache_cfg)
+    _warn_if_publish_path_on_nfs(cache_path)
 
     sync_cfg = (ctx.config_service.settings_section("gateway") or {}).get("sync") or {}
     poll_interval_sec = float(sync_cfg.get("poll_interval_sec", 0) or 0)
@@ -1530,11 +1523,13 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     #    (см. sql/migrations/V005__create_agent_cache_ownership.sql).
     # 2. ``coord.try_claim()`` — atomic PG INSERT ... ON CONFLICT. Один процесс
     #    получает acquired=True (OWNER), остальные — False (READER).
-    # 3. ``DuckDbCacheStore.open(path, mode)`` — concrete factory. mode
-    #    зависит от результата claim:
-    #      - acquired=True → READ_WRITE (OWNER может писать в cache);
-    #      - acquired=False → READ_ONLY (READER, через физический read-only
-    #        DuckDB connection + assertion guard в query_sql).
+    # 3. ``open_cache_provider(mode)`` — единая точка создания провайдера
+    #    (слой интерфейса). Режим зависит от результата claim:
+    #      - acquired=True → READ_WRITE (OWNER пишет в cache);
+    #      - acquired=False → READ_ONLY.
+    #    Если файл кэша уже держит другой процесс, попытка открытия
+    #    поднимает CacheBusyError: кэш process-exclusive, и такой процесс
+    #    не считается успешно запущенным.
     worker_id = f"{ctx.role}_{os.getpid()}"
     coord = CacheOwnershipCoordinator(
         worker_id=worker_id,
@@ -1551,24 +1546,17 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
 
     mode = CacheAccessMode.READ_WRITE if claim.acquired else CacheAccessMode.READ_ONLY
 
-    # Concrete factory — DuckDB connection opened с учётом ``mode``.
-    # Если path не на локальной FS — ``UnsupportedFilesystemError`` поднимается.
-    store = DuckDbCacheStore.open(
-        path=publish_path,
+    # Единая точка создания провайдера (слой интерфейса). Здесь НЕ называется
+    # конкретный класс хранилища: путь, схема, таблицы, векторное хранилище и
+    # параметры эмбеддингов настраиваются внутри фабрики.
+    #
+    # Попытка открыть файл И ЕСТЬ проверка занятости (кэш process-exclusive):
+    # если файл держит другой процесс, поднимается ``CacheBusyError`` и
+    # процесс не считается успешно запущенным.
+    store = open_cache_provider(
         mode=mode,
+        db_logging_service=ctx.db_logging_service,
     )
-    # Конфигурируем store через конструктор args через post-init хак:
-    # factory ``open()`` принимает только path/mode. Другие поля
-    # (schema, tables, vector_db_table, embedding_*) настраиваются
-    # отдельным вызовом или через прямой dict.
-    store._publish_path = publish_path
-    store._schema = schemas[0] if schemas else "main"
-    store._tables = all_table_names or None
-    store._vector_db_table = vector_names[0] if vector_names else ""
-    store._embedding_base_url = embedding_base_url
-    store._embedding_model = embedding_model
-    store._embedding_dimension = embedding_dimension
-    store._db_logging_service = ctx.db_logging_service
 
     # ``sync_service`` создаётся ТОЛЬКО если этот процесс — OWNER
     # (claim.acquired=True). READER процессы НЕ sync'ят — только читают
@@ -1604,7 +1592,6 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     # sync через asyncio.Event), MUST chaining-ить предыдущий колбэк,
     # а не затирать его — как это делал прежний benchmarks/runner.py.
     sync.set_on_replace_records_callback(store.replace_records)
-    sync.set_on_sync_callback(store.publish)
 
     # Upsert требует PK источника: без него store дефолтно ищет ``id`` и
     # для таблиц с другим PK (напр. ``public.agent_predefined_scripts``

@@ -11,7 +11,6 @@ from lib.services.cache_provider_impl import (
     _META_SCHEMA,
     _META_TABLE,
     _capture_schema_meta,
-    load_cache_from_postgres,
 )
 
 
@@ -99,31 +98,6 @@ def test_capture_schema_meta_empty_tables_ok(tmp_path):
     _capture_schema_meta(conn, pg_conn, [("oarb", [])])
     assert _read_meta(conn) == []
     conn.close()
-
-
-def test_load_cache_from_postgres_captures_meta(tmp_path):
-    cache_path = str(tmp_path / "cache.duckdb")
-    db_config = {
-        "schema": "oarb",
-        "tables": ["audits"],
-        "additional_tables": [["public", "predefined_scripts"]],
-    }
-    pg_conn = MagicMock()
-    cur = MagicMock()
-    cur.fetchall.side_effect = [
-        [("audits", "id", "integer", None, "Идентификатор", "Аудиторские проверки")],
-        [("predefined_scripts", "name", "text", None, "Имя скрипта", "Реестр скриптов")],
-    ]
-    pg_conn.cursor.return_value = cur
-    with patch("utils.db.run", lambda fn: fn(pg_conn)), \
-         patch("lib.services.cache_provider_impl._copy_table"), \
-         patch("lib.services.cache_provider_impl._store_meta"):
-        load_cache_from_postgres(cache_path, db_config)
-
-    conn = duckdb.connect(cache_path)
-    rows = _read_meta(conn)
-    assert ("oarb", "audits", None, "Аудиторские проверки", None) in rows
-    assert ("public", "predefined_scripts", "name", "Имя скрипта", "text") in rows
 
 
 class TestIndexSignature:
@@ -235,131 +209,3 @@ class TestIndexSignature:
 
         assert verify_index_signature(None, {}) == "CURRENT"
 
-
-class TestCheckIndexSignatureInProvider:
-    """``PostgresDuckDbProvider._check_index_signature`` — STALE-detection
-    на загрузке индекса. Помечает meta через ``_signature_status``.
-    """
-
-    def test_check_marks_stale_when_signature_mismatch(self):
-        from unittest.mock import patch
-
-        from lib.services.cache_provider_impl import (
-            PostgresDuckDbProvider,
-            compute_index_signature,
-        )
-
-        provider = PostgresDuckDbProvider()
-        stored_cfg = {"embedding_model": "mxbai", "embedding_dimension": 1024}
-        stored_sig = compute_index_signature(stored_cfg)
-        stored_meta = {"signature": stored_sig, "pk_value": 1}
-
-        current_cfg = {
-            "src_table": _TEST_TABLE,
-            "pk_column": "id",
-            "content_cols": ["title"],
-            "embedding_cols": [],
-            "track_column": "updated_at",
-            "embedding_model": "nomic",  # changed
-            "embedding_dimension": 768,  # changed
-        }
-        with patch.object(
-            provider, "_read_current_index_config", return_value=current_cfg,
-        ):
-            result = provider._check_index_signature("audits_index", stored_meta)
-
-        assert result["_signature_status"] == "STALE"
-        assert "embedding model" in result["_signature_reason"].lower()
-
-    def test_check_marks_current_when_signature_matches(self):
-        from unittest.mock import patch
-
-        from lib.services.cache_provider_impl import (
-            PostgresDuckDbProvider,
-            compute_index_signature,
-        )
-
-        provider = PostgresDuckDbProvider()
-        cfg = {
-            "src_table": _TEST_TABLE,
-            "pk_column": "id",
-            "content_cols": ["title"],
-            "embedding_cols": [],
-            "track_column": "updated_at",
-            "embedding_model": "mxbai",
-            "embedding_dimension": 1024,
-        }
-        sig = compute_index_signature(cfg)
-        stored_meta = {"signature": sig, "pk_value": 1}
-        with patch.object(
-            provider, "_read_current_index_config", return_value=cfg,
-        ):
-            result = provider._check_index_signature("audits_index", stored_meta)
-
-        # После change _check_index_signature ВСЕГДА ставит _signature_status
-        # (для downstream-читателей compute_index_health).
-        assert result["_signature_status"] == "CURRENT"
-
-    def test_check_marks_current_when_no_signature_in_meta(self):
-        """Без stored signature — CURRENT (новое поведение change).
-
-        Раньше ставился INVALID. После change persisted-signature нет,
-        поэтому нет данных для проверки → CURRENT.
-        """
-        from unittest.mock import patch
-
-        from lib.services.cache_provider_impl import PostgresDuckDbProvider
-
-        provider = PostgresDuckDbProvider()
-        stored_meta = {"pk_value": 1}  # no signature field
-        current_cfg = {"embedding_model": "mxbai"}
-        with patch.object(
-            provider, "_read_current_index_config", return_value=current_cfg,
-        ):
-            result = provider._check_index_signature("audits_index", stored_meta)
-
-        assert result["_signature_status"] == "CURRENT"
-
-    def test_check_returns_meta_unchanged_when_no_config_in_db(self):
-        """Если в конфиге (``gateway.vector.index.indexes``) нет такого
-        индекса — STALE detection пропускается (нечего проверять).
-        """
-        from unittest.mock import patch
-
-        from lib.services.cache_provider_impl import PostgresDuckDbProvider
-
-        provider = PostgresDuckDbProvider()
-        stored_meta = {"signature": "a" * 64, "pk_value": 1}
-        with patch.object(
-            provider, "_read_current_index_config", return_value=None,
-        ):
-            result = provider._check_index_signature("nonexistent", stored_meta)
-
-        assert result == stored_meta
-        assert "_signature_status" not in result
-
-    def test_check_does_not_mutate_input_meta(self):
-        """Функция не должна мутировать входной dict."""
-        from unittest.mock import patch
-
-        from lib.services.cache_provider_impl import (
-            PostgresDuckDbProvider,
-            compute_index_signature,
-        )
-
-        provider = PostgresDuckDbProvider()
-        stored_cfg = {"embedding_model": "mxbai", "embedding_dimension": 1024}
-        stored_sig = compute_index_signature(stored_cfg)
-        stored_meta = {"signature": stored_sig, "pk_value": 1}
-        original = dict(stored_meta)
-
-        current_cfg = {
-            "embedding_model": "nomic",
-            "embedding_dimension": 768,
-        }
-        with patch.object(
-            provider, "_read_current_index_config", return_value=current_cfg,
-        ):
-            provider._check_index_signature("audits_index", stored_meta)
-
-        assert stored_meta == original

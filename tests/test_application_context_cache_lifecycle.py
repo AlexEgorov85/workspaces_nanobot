@@ -212,7 +212,13 @@ class TestSyncServiceCallbacksWired:
         cb = sync.set_on_new_records_callback.call_args[0][0]
         cb("oarb.audits", [{"id": 1}])  # MUST NOT raise
 
-    def test_replace_and_sync_callbacks_point_at_store(self, monkeypatch) -> None:
+    def test_replace_callback_points_at_store_and_no_publish_step(self, monkeypatch) -> None:
+        """Запись идёт напрямую в файл кэша; шага публикации НЕТ.
+
+        ``publish()`` удалён вместе с моделью «снимок»: файл кэша один, и
+        sync-слой пишет в него сам. Проверка ``set_on_sync_callback``
+        отсутствует намеренно — регистрировать там нечего.
+        """
         from lib.core.application_context import _make_sync_services
 
         store, sync = self._patch_deps(monkeypatch, acquired=True)
@@ -221,7 +227,7 @@ class TestSyncServiceCallbacksWired:
         sync.set_on_replace_records_callback.assert_called_once_with(
             store.replace_records
         )
-        sync.set_on_sync_callback.assert_called_once_with(store.publish)
+        sync.set_on_sync_callback.assert_not_called()
 
     def test_reader_process_gets_no_sync_service(self, monkeypatch) -> None:
         from lib.core.application_context import _make_sync_services

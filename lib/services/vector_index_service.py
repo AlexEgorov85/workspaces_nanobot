@@ -39,12 +39,17 @@ for _p in (str(_ROOT), str(_WORKSPACE)):
 
 
 class VectorIndexBuildService:
-    """Build-слой над общим ``PostgresDuckDbProvider``.
+    """Build-слой над общим провайдером кэша.
 
-    Держит ОДИН экземпляр ``PostgresDuckDbProvider`` (не создаёт новый на каждый
-    вызов), поэтому кэш индексов ``provider._index_cache`` переиспользуется
-    между операциями. Сам FAISS собирает провайдер (``preload_indexes``) из
-    DuckDB-снапшота ``gateway.vector.index.storage_table``; персиста нет.
+    Держит ОДИН экземпляр ``CacheProvider`` (не создаёт новый на каждый
+    вызов), поэтому кэш индексов переиспользуется между операциями. FAISS
+    собирается провайдером (``preload_indexes``) из файла кэша; персиста
+    нет.
+
+    Провайдер берётся из **единой точки создания**
+    (``open_cache_provider``) — тот же путь, что у runtime и у skills.
+    Имя конкретной реализации здесь не фигурирует: смена реализации не
+    должна требовать правок в этом классе.
 
     Использование::
 
@@ -53,13 +58,14 @@ class VectorIndexBuildService:
     """
 
     def __init__(self, cfg: dict[str, Any] | None = None, base_dir: str = "") -> None:
-        from lib.services.cache_provider_impl import build_cache_provider
+        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import open_cache_provider
 
         self._cfg = cfg if cfg is not None else {}
         self._base_dir = base_dir
-        self._provider = build_cache_provider(self._cfg, base_dir)
+        self._provider = open_cache_provider(mode=CacheAccessMode.READ_ONLY)
 
     @property
     def provider(self) -> Any:
-        """Общий провайдер (PostgresDuckDbProvider) — для чтения/поиска."""
+        """Общий ``CacheProvider`` — для чтения/поиска."""
         return self._provider

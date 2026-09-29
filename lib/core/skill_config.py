@@ -18,7 +18,10 @@ runtime-инфраструктура. Эти функции читают из
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover — только для аннотаций
+    from lib.services.cache_provider import CacheProvider
 
 
 def _skills() -> dict[str, Any]:
@@ -271,10 +274,33 @@ def get_vector_db_table(skill_name: str) -> str:
     return ""
 
 
-def build_cache_provider(skill_name: str, skill_root: Path | str) -> Any:
-    from lib.services.cache_provider_impl import build_cache_provider as _build
+def build_cache_provider(skill_name: str, skill_root: Path | str) -> CacheProvider:
+    """Провайдера кэша для skill'а — через ту же точку создания, что и у runtime.
 
-    return _build(_skill_cfg(skill_name), str(skill_root))
+    Тонкий делегат в :func:`lib.services.cache_provider.open_cache_provider`.
+    Имя и сигнатура сохранены, потому что skill-side CLI
+    (``workspace/skills/audit_analyzer/scripts/cli.py``) вызывает их как
+    утверждённую точку входа (``docs/skill-tool-architecture.md`` §8) — и
+    skill, и runtime MUST получать один и тот же провайдер.
+
+    ``skill_root`` намеренно не участвует в разрешении пути: путь к файлу
+    кэша вычисляет сама фабрика единой функцией ``resolve_publish_path()``.
+    Раньше skill-слой разрешал его отдельно — это и было причиной расхождения
+    путей между двумя процессами.
+
+    Returns:
+        Экземпляр реализации ``CacheProvider``. Конкретный класс вызывающему
+        неизвестен.
+
+    Raises:
+        CacheBusyError: файл кэша держит другой процесс (кэш
+            process-exclusive) — skill не сможет работать и MUST сообщить об
+            этом явно, а не превращать конфликт в «файл не найден».
+    """
+    from lib.services.cache_ownership import CacheAccessMode
+    from lib.services.cache_provider import open_cache_provider
+
+    return open_cache_provider(mode=CacheAccessMode.READ_ONLY)
 
 
 def get_vector_indexes(skill_name: str) -> dict[str, Any]:

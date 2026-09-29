@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover — только для аннотаций
+    from lib.services.cache_provider import CacheProvider
 
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _SKILL_ROOT.parents[1]
@@ -35,7 +38,6 @@ __all__ = [
     "get_llm_config",
     "get_cli_config",
     "get_max_retries",
-    "get_in_memory_cache_path",
     "build_cache_provider",
 ]
 
@@ -64,17 +66,17 @@ def get_max_retries() -> int:
     return _lib.get_max_retries(_SKILL_NAME)
 
 
-def get_in_memory_cache_path() -> str:
-    """Путь к DuckDB-кэшу skill'а.
+def build_cache_provider() -> "CacheProvider":
+    """Провайдер кэша — тот же, что у runtime.
 
-    v2.5.2+ — единый механизм ``resolve_publish_path()``
-    (``lib/core/application_context.py``); default
-    ``~/.cache/nanobot/duckdb/cache.duckdb``. Этот файл публикует gateway
-    (см. ``PgDuckDbSyncService``); standalone CLI читает его без
-    предварительной инициализации.
+    Тонкий делегат в единую точку создания. Skill не выбирает реализацию и
+    не открывает файл кэша: это деталь runtime. Что стоит за интерфейсом —
+    DuckDB или что-то другое — skill'у неизвестно и знать не нужно.
+
+    Raises:
+        CacheBusyError: файл кэша держит другой процесс. Кэш
+            process-exclusive, поэтому skill в этот момент не может
+            работать, и сообщение об этом приходит типизированным, а не
+            как «файл не найден».
     """
-    return _lib.get_in_memory_cache_path(_SKILL_ROOT)
-
-
-def build_cache_provider() -> Any:
     return _lib.build_cache_provider(_SKILL_NAME, _SKILL_ROOT)

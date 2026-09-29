@@ -57,7 +57,6 @@ from output import prepare_output, sanitize_output  # noqa: E402
 from skill_config import (  # noqa: E402
     build_cache_provider,
     get_cli_config,
-    get_in_memory_cache_path,
     get_predefined_scripts_table,
 )
 from workspace.skills.audit_analyzer.scripts.predefined import run as predefined_run  # noqa: E402
@@ -239,17 +238,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _open_db():
-    """Открыть DuckDB-кэш через CacheProvider (создаёт если нет)."""
+    """Получить провайдера кэша через интерфейс.
+
+    Провайдер открыт и настроен самой точкой создания
+    (``open_cache_provider``) — вызывать отдельный open не нужно и нельзя:
+    метода ``open_cache`` в интерфейсе не существует.
+
+    Никакой собственной диагностики ошибок открытия здесь не конструируется:
+    причина (в том числе конфликт process-exclusive) приходит типизированным
+    исключением из слоя кэша. Раньше skill превращал любой отказ в
+    «DuckDB-кеш не найден» и советовал запустить gateway — то есть
+    предлагал запустить тот самый процесс, который и вызывает блокировку.
+    """
     provider = build_cache_provider()
-    cache_path = get_in_memory_cache_path()
-    if hasattr(provider, "open_cache"):
-        if not provider.open_cache():
-            raise FileNotFoundError(
-                f"DuckDB-кеш не найден: {cache_path}. "
-                "Кеш создаёт и обновляет gateway автоматически — "
-                "запустите его (python gateway.py)."
-            )
-    print(f"[DB] DuckDB cache ({cache_path})", file=sys.stderr)
+    print(f"[DB] cache provider ready ({type(provider).__name__})", file=sys.stderr)
     return provider
 
 

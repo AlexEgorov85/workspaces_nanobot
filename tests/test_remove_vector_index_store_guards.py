@@ -172,22 +172,30 @@ class TestNoHardcodedTableNames:
 
 
 class TestLoadIndexOnlyUsesCachePath:
-    """_load_index идёт ТОЛЬКО через _load_index_from_cache."""
+    """Загрузка векторов индекса идёт ТОЛЬКО из файла кэша.
+
+    Раньше предметом проверки был ``_load_index`` удалённого
+    ``PostgresDuckDbProvider``. Теперь единственная реализация —
+    ``DuckDbCacheStore``, и векторы читает ``_load_source_index``.
+    """
 
     def test_load_index_source_contains_only_cache_call(self) -> None:
         import re
 
-        from lib.services import cache_provider_impl as impl
+        from lib.services import duckdb_cache_store as impl
 
         src = Path(impl.__file__).read_text(encoding="utf-8")
-        m = re.search(r"def _load_index\([^)]*\)[^\n]*:\s*\n(?P<body>(?:\s+[^\n]*\n)+)", src)
-        assert m, "_load_index not found"
+        m = re.search(
+            r"def _load_source_index\([^)]*\)[^\n]*:\s*\n(?P<body>(?:\s+[^\n]*\n)+)",
+            src,
+        )
+        assert m, "_load_source_index not found"
         body = m.group("body")
 
-        assert "_load_index_from_cache" in body
-        # Никаких fallback'ов на store или files.
-        assert "_load_index_from_store" not in body
-        assert "_load_index_from_files" not in body
+        # Источник векторов — файл кэша (DuckDB storage table), и всё.
+        assert "query_sql" in body or "_conn" in body
+        # Никаких fallback'ов на удалённый vector-store или файловый кэш.
+        assert "agent_vector_index_store" not in body
         assert "_load_vectors_from_db" not in body
 
 
@@ -195,7 +203,7 @@ class TestPreloadIndexesUsesOnlyConfig:
     """preload_indexes берёт имена только из gateway.vector.index.indexes.*."""
 
     def test_preload_indexes_source_no_store_reference(self) -> None:
-        from lib.services import cache_provider_impl as impl
+        from lib.services import duckdb_cache_store as impl
 
         src = Path(impl.__file__).read_text(encoding="utf-8")
 
@@ -221,35 +229,6 @@ class TestPreloadIndexesUsesOnlyConfig:
         assert "SELECT DISTINCT source FROM" not in body
         assert "agent_vector_index_store" not in body
         assert "_vector_store_table" not in body
-
-
-class TestSearchVectorColdMissRaises:
-    """search_vector для непрогретого индекса → ошибка без ленивой сборки."""
-
-    def test_cold_miss_returns_empty_with_error(self, monkeypatch):
-        from lib.services import cache_provider_impl as impl
-
-        monkeypatch.setattr(
-            impl, "read_vector_index_config",
-            lambda _cfg: {"nonexistent_index": {
-                "table": "t", "pk": "id",
-                "source_table": "t", "content_columns": ["x"],
-                "embedding_columns": ["x"], "track_column": "id",
-                "chunk_size": 500, "chunk_overlap": 80, "metric": "cosine",
-            }},
-        )
-        monkeypatch.setattr(
-            impl, "read_embedding_config",
-            lambda: {"model": "mxbai-embed-large:latest", "dimension": 1024},
-        )
-
-        provider = impl.PostgresDuckDbProvider(vector_db_table="missing.tbl")
-        # _index_cache пуст.
-        results = provider.search_vector(
-            query="anything", index_name="nonexistent_index", top_k=5,
-        )
-        assert results == []
-        assert provider._search_error is not None
 
 
 class TestBuildFaissIndexMinimalMeta:

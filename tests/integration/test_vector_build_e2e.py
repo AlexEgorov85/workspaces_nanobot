@@ -147,15 +147,14 @@ def _patch_impl(monkeypatch, fake_pg: _FakePG, duck_conn, index_cfg: dict):
 
 def _make_provider(monkeypatch, fake_pg: _FakePG, duck_conn, index_cfg: dict):
     """Создать провайдер с подменёнными зависимостями и DuckDB-коннекшеном."""
-    import lib.services.cache_provider_impl as impl
+    from lib.services.duckdb_cache_store import DuckDbCacheStore
 
-    impl_, cfg_container = _patch_impl(monkeypatch, fake_pg, duck_conn, index_cfg)
-    provider = impl_.PostgresDuckDbProvider(
+    _patch_impl(monkeypatch, fake_pg, duck_conn, index_cfg)
+    provider = DuckDbCacheStore(
         vector_db_table=_VECTOR_TABLE,
-        vector_indexes={_INDEX_NAME: index_cfg},
     )
     provider._conn = duck_conn
-    return provider, cfg_container
+    return provider, None
 
 
 class TestVectorBuildE2E:
@@ -200,11 +199,10 @@ class TestVectorBuildE2E:
         provider, _ = _make_provider(monkeypatch, fake, conn, _index_cfg())
 
         # 1. preload_indexes: DuckDB → in-memory FAISS.
-        loaded = provider.preload_indexes(_VECTOR_TABLE)
+        loaded = provider.preload_indexes()
         assert len(loaded) == 1
         assert loaded[0]["index_name"] == _INDEX_NAME
         assert loaded[0]["vectors"] == 2
-        assert loaded[0].get("signature_status") == "CURRENT"
 
         # 2. search_vector: документ A должен быть top-1, score ≈ cosine.
         results = provider.search_vector(
@@ -225,9 +223,8 @@ class TestVectorBuildE2E:
         monkeypatch.setattr(impl_, "get_embedding", lambda text: _emb(text))
         provider, _ = _make_provider(monkeypatch, fake, conn, _index_cfg())
 
-        # preload_indexes не вызывался → _index_cache пуст.
+        # preload_indexes не вызывался → индекс не прогрет.
         results = provider.search_vector(
             query="anything", index_name=_INDEX_NAME, top_k=1,
         )
         assert results == []
-        assert provider._search_error is not None

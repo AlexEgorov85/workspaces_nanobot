@@ -41,7 +41,12 @@ from pathlib import Path
 from typing import Any
 
 from lib.services.cache_ownership import CacheAccessMode
-from lib.services.cache_provider import ReadOnlyAssertionError, UnsupportedSqlError
+from lib.services.cache_provider import (
+    CacheBusyError,
+    CacheProvider,
+    ReadOnlyAssertionError,
+    UnsupportedSqlError,
+)
 from lib.services.db_logging_service import LogEvent, try_log_event
 
 logger = logging.getLogger(__name__)
@@ -305,8 +310,8 @@ def _map_pg_type(pg_type: str) -> str:
     return _PG_TO_DUCKDB.get(t, "VARCHAR")
 
 
-class DuckDbCacheStore:
-    """Локальное in-memory mirror + FAISS: PostgreSQL → DuckDB + индексы.
+class DuckDbCacheStore(CacheProvider):
+    """Единственная concrete-реализация ``CacheProvider``: один DuckDB-файл + FAISS в памяти.
 
     Generic infrastructure component: получает записи через
     :meth:`upsert_records` (от любого синхронизатора), отвечает на
@@ -315,13 +320,17 @@ class DuckDbCacheStore:
 
     Имя класса сохранено для back-compat (см. TARGET_ARCHITECTURE.md §15,
     §34 — KEEP existing working behavior).
+
+    Экземпляры создаются **только** через
+    :func:`lib.services.cache_provider.open_cache_provider` — единая точка
+    создания во всём рантайме. Прямой вызов конструктора допускается
+    лишь в тестах самой реализации.
     """
 
     def __init__(
         self,
         *,
         cache_path: str = "",
-        publish_path: str = "",
         schema: str = "main",
         tables: list[str] | None = None,
         vector_db_table: str = "",
@@ -332,7 +341,6 @@ class DuckDbCacheStore:
         db_logging_service: Any | None = None,
     ) -> None:
         self._cache_path = cache_path or ""      # пустая строка → in-memory DuckDB
-        self._publish_path = publish_path or ""  # целевой файл снимка для CLI-читателей
         self._schema = schema or "main"
         self._tables = list(tables) if tables else None
         self._vector_db_table = vector_db_table or ""
@@ -340,7 +348,7 @@ class DuckDbCacheStore:
         self._embedding_model = embedding_model or "mxbai-embed-large:latest"
         self._embedding_dimension = int(embedding_dimension or 1024)
         self._embedding_timeout_sec = float(embedding_timeout_sec)
-        # Единый sink для sync-событий (publish OK/empty/failed): тот же
+        # Единый sink для операционных событий реализации: тот же
         # ``DbLoggingService``, что использует ``PgDuckDbSyncService``, — чтобы
         # все события одного sync-пути шли одним конвейером через
         # ``DbLoggingService.try_log_event``. ``None`` (например, в юнит-тестах)
@@ -361,42 +369,36 @@ class DuckDbCacheStore:
         self._is_ready = False
         self._index_cache: dict[str, tuple[Any, dict | None]] = {}
         self._dirty_sources: set[str] = set()
-        self._dirty = False               # были новые данные с момента последнего publish
         # Описания колонок (из PG information_schema) для пересоздания пустых таблиц
         self._schema_defs: dict[str, list[dict[str, Any]]] = {}
 
         # статистика для мониторинга
         self._upserts = 0
         self._upsert_errors = 0
-        self._publishes = 0
-        self._publish_errors = 0
         self._last_upsert_at: str | None = None
-        self._last_publish_at: str | None = None
         self._last_error: str | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def open(self) -> bool:
-        """Открыть (создать при отсутствии) DuckDB-кэш.
-
-        DEPRECATED имя: для нового кода используйте ``connect()`` —
-        имя ``open`` зарезервировано за classmethod-factory в Stage D.
-        Сохранён как alias ``open()`` для back-compat с gateway.py и
-        benchmarks/runner.py — они вызывают ``cache_store.open()``.
-        После change ``unify-cli-gateway-architecture`` alias может быть
-        удалён; новый код MUST использовать ``connect()``.
-        """
-        return self.connect()
-
     def connect(self) -> bool:
-        """Открыть DuckDB connection через ``_open_locked`` (post-Stage D)."""
+        """Открыть DuckDB connection через ``_open_locked``.
+
+        Возвращает ``False`` только для ошибок, не связанных с занятостью
+        файла. Конфликт блокировки **не подавляется**: он поднимается как
+        ``CacheBusyError``, потому что файл кэша process-exclusive, и
+        процесс, не получивший его, не считается запущенным.
+        """
         with self._lock:
             try:
                 self._open_locked()
                 self._is_ready = True
                 return True
+            except CacheBusyError as e:
+                self._last_error = f"open: {e}"
+                self._is_ready = False
+                raise
             except Exception as e:
                 self._last_error = f"open: {e}"
                 self._is_ready = False
@@ -418,7 +420,14 @@ class DuckDbCacheStore:
         if self._cache_path:
             p = Path(self._cache_path)
             p.parent.mkdir(parents=True, exist_ok=True)
-            conn = duckdb.connect(str(p), read_only=self._duckdb_read_only)
+            try:
+                conn = duckdb.connect(str(p), read_only=self._duckdb_read_only)
+            except Exception as exc:
+                # Попытка открытия И ЕСТЬ проверка занятости файла.
+                # Отдельного pre-check здесь быть не должно: он отделён
+                # от открытия во времени и даёт гонку (оба процесса
+                # увидят «свободно» и оба упадут здесь).
+                raise self._classify_open_error(exc, str(p)) from exc
         else:
             conn = duckdb.connect(read_only=self._duckdb_read_only)
         # CREATE SCHEMA только в RW mode — DuckDB read-only connection
@@ -428,6 +437,62 @@ class DuckDbCacheStore:
         if not self._duckdb_read_only:
             conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
         self._conn = conn
+
+    @staticmethod
+    def _classify_open_error(exc: Exception, path: str) -> Exception:
+        """Разобрать ошибку открытия файла кэша.
+
+        Конфликт блокировки превращается в ``CacheBusyError`` — процесс
+        держит файл, и это **не** «файл отсутствует». Всё остальное
+        возвращается как есть: типизация остальных причин (нет файла,
+        неподдерживаемая FS) — задача storage-слоя.
+        """
+        message = str(exc)
+        busy_markers = (
+            "Conflicting lock",
+            "conflicting lock",
+            "Could not set lock",
+            "database is locked",
+            "is already open",
+            "another process",
+        )
+        if any(marker in message for marker in busy_markers):
+            return CacheBusyError(path=path, cause=exc)
+        return exc
+
+    def configure(
+        self,
+        *,
+        schema: str = "main",
+        tables: list[str] | None = None,
+        vector_db_table: str = "",
+        embedding_base_url: str = "",
+        embedding_model: str = "mxbai-embed-large:latest",
+        embedding_dimension: int = 1024,
+        db_logging_service: Any | None = None,
+    ) -> None:
+        """Настроить экземпляр перед первым ``connect()``.
+
+        Существует, чтобы composition root **не писал приватные поля**
+        реализации. Раньше он делал ``store._schema = ...`` и
+        ``store._tables = ...`` — знание о реализации протекало наружу, и
+        смена реализации требовала бы правок в каждом вызывающем.
+
+        Вызывается только из ``open_cache_provider()``; напрямую из
+        runtime-кода не используется.
+        """
+        if self._conn is not None:
+            raise RuntimeError(
+                "configure() вызывается до connect(): настройка после "
+                "открытия не поддерживается"
+            )
+        self._schema = schema or "main"
+        self._tables = list(tables) if tables else None
+        self._vector_db_table = vector_db_table or ""
+        self._embedding_base_url = embedding_base_url
+        self._embedding_model = embedding_model or "mxbai-embed-large:latest"
+        self._embedding_dimension = int(embedding_dimension or 1024)
+        self._db_logging_service = db_logging_service
 
     @classmethod
     def open(
@@ -523,7 +588,6 @@ class DuckDbCacheStore:
                 self._upsert_locked(table, records, key_column)
                 self._upserts += 1
                 self._last_upsert_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                self._dirty = True
                 self._mark_vector_sources_dirty(table, records)
                 return True
             except Exception as e:
@@ -615,7 +679,6 @@ class DuckDbCacheStore:
                 self._replace_locked(table, records)
                 self._upserts += 1
                 self._last_upsert_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                self._dirty = True
                 self._mark_vector_sources_dirty(table, records)
                 return True
             except Exception as e:
@@ -912,333 +975,6 @@ class DuckDbCacheStore:
             if src:
                 self._dirty_sources.add(str(src))
                 self._index_cache.pop(str(src), None)
-
-    # ------------------------------------------------------------------
-    # Публикация снимка для навыка (CLI читает файл на чтение)
-    # ------------------------------------------------------------------
-
-    def publish(
-        self, tables: list[str] | None = None, *, force: bool = False
-    ) -> bool:
-        """Атомарно записать снимок таблиц в ``publish_path``.
-
-        Навык (CLI) открывает этот файл на чтение. Gateway НЕ держит его
-        открытым: публикация пишет во временный файл, затем os.replace —
-        поэтому читатель в любой момент видит целостный снимок, а конфликтов
-        блокировок DuckDB (один писатель на файл) не возникает.
-
-        Если данных с прошлой публикации не менялось (``_dirty``) или
-        ``publish_path`` не задан — метод ничего не делает (no-op True) —
-        кроме случая ``force=True``, когда снимок пересоздаётся целиком
-        из текущего состояния кеша (используется при старте gateway, чтобы
-        файл не оставался устаревшим).
-        При неудаче замены (файл занят читателем) снимок останется грязным
-        и будет повторён в следующем цикле.
-
-        Args:
-            tables: какие таблицы включить в снимок (по умолчанию — конфиг).
-            force: пересоздать снимок, даже если данные не менялись.
-        """
-        if not self._publish_path:
-            return True
-        with self._lock:
-            if self._conn is None or (not self._dirty and not force):
-                return True
-            out = [t for t in (tables or self._tables or []) if t]
-            # Навык работает только со своим снимком — ему нужны и векторные
-            # данные (``vector_db_table``; см. ``gateway.vector.index.storage_table``),
-            # чтобы строить FAISS-индекс локально.
-            if self._vector_db_table and self._vector_db_table not in out:
-                out.append(self._vector_db_table)
-            if not out:
-                self._dirty = False
-                return True
-
-            import os
-            import time
-
-            target = Path(self._publish_path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # Уникальный .tmp на каждый publish (pid + ms-таймстамп) —
-            # защита от коллизий между параллельными запусками и от
-            # "осиротевших" файлов с устаревшим NFS-локом от предыдущего
-            # gateway (его .tmp уже не будет пересекаться по имени).
-            tmp = target.with_name(
-                f"{target.name}.{os.getpid()}.{int(time.time() * 1000)}.tmp"
-            )
-            if tmp.exists():
-                try:
-                    tmp.unlink()
-                except OSError as e:
-                    # Не глотаем: файл залочен (NFS lockd / процесс-призрак) →
-                    # ATTACH всё равно упадёт через ~50 мс с непонятным
-                    # "PID 0". Лучше вернуть False с понятной диагностикой,
-                    # чем положить всю ветку publish в молчаливый fail-loop.
-                    self._last_error = f"publish (stale .tmp cleanup): {e}"
-                    logger.warning(
-                        "DuckDbCacheStore.publish: cannot remove stale %s: %s "
-                        "(NFS lockd / crashed peer?). Skip cycle.",
-                        tmp, e,
-                    )
-                    try_log_event(
-                        self._db_logging_service,
-                        LogEvent(
-                            event_type="sync_publish_failed",
-                            level="WARN",
-                            session_id="gateway:sync",
-                            channel=None,
-                            actor="sync",
-                            name="sync_publish_failed",
-                            summary=f"publish FAIL (stale .tmp): {e}",
-                            payload={
-                                "publish_path": str(target),
-                                "tmp_path": str(tmp),
-                                "error_type": "OSError",
-                                "error": str(e),
-                            },
-                        ),
-                        producer="DuckDbCacheStore",
-                        event_type="sync_publish_failed",
-                    )
-                    return False
-
-            counts: dict[str, int] = {}
-            try:
-                tmp_literal = "'" + str(tmp).replace("'", "''") + "'"
-                # DuckDB ATTACH берёт эксклюзивный flock на файл. На NFS
-                # иногда видим "Conflicting lock is held in PID 0" от
-                # устаревшего lockd (предыдущий процесс умер, lockd не
-                # получил уведомления). Ретраим с экспоненциальным backoff —
-                # достаточно, чтобы пережить кратковременный stale lock.
-                import duckdb
-
-                last_err: Exception | None = None
-                for _attempt in range(5):
-                    try:
-                        self._conn.execute(
-                            f"ATTACH {tmp_literal} AS __out (READ_WRITE)"
-                        )
-                        last_err = None
-                        break
-                    except duckdb.IOException as e:
-                        last_err = e
-                        time.sleep(0.1 * (2 ** _attempt))
-                if last_err is not None:
-                    # ATTACH так и не получился — tmp лишний, удаляем и
-                    # пробрасываем в общий except ниже для нормального
-                    # sync_publish_failed события.
-                    try:
-                        if tmp.exists():
-                            tmp.unlink()
-                    except OSError:
-                        pass
-                    raise last_err
-                try:
-                    copied = set()
-                    for t in out:
-                        schema, name = _split_table(t)
-                        schema = schema or self._schema
-                        # только существующие таблицы (пустые источники не создаются)
-                        exists = self._conn.execute(
-                            "SELECT 1 FROM information_schema.tables "
-                            "WHERE table_schema = ? AND table_name = ?",
-                            [schema, name],
-                        ).fetchone()
-                        if exists is None:
-                            continue
-                        self._conn.execute(f'CREATE SCHEMA IF NOT EXISTS __out."{schema}"')
-                        self._conn.execute(
-                            f'CREATE OR REPLACE TABLE __out."{schema}"."{name}" '
-                            f'AS SELECT * FROM "{schema}"."{name}"'
-                        )
-                        copied.add((schema, name))
-                        row_count = self._conn.execute(
-                            f'SELECT COUNT(*) FROM __out."{schema}"."{name}"'
-                        ).fetchone()[0]
-                        counts[f"{schema}.{name}"] = int(row_count)
-                    # метаданные схемы (комментарии) — если есть что копировать
-                    meta_exists = self._conn.execute(
-                        "SELECT 1 FROM information_schema.tables "
-                        "WHERE table_schema = ? AND table_name = ?",
-                        [_META_SCHEMA, _META_TABLE],
-                    ).fetchone()
-                    if meta_exists is not None and copied:
-                        src_schemas = [c[0] for c in copied]
-                        placeholders = ",".join("?" for _ in src_schemas)
-                        self._conn.execute(f'CREATE SCHEMA IF NOT EXISTS __out."{_META_SCHEMA}"')
-                        self._conn.execute(
-                            f'CREATE OR REPLACE TABLE __out."{_META_SCHEMA}"."{_META_TABLE}" '
-                            f"AS SELECT * FROM \"{_META_SCHEMA}\".\"{_META_TABLE}\" "
-                            f"WHERE schema_name IN ({placeholders})",
-                            src_schemas,
-                        )
-                finally:
-                    self._conn.execute("DETACH __out")
-                # ``os.replace`` на Windows не может перезаписать файл, пока
-                # на нём открыт handle (ERROR_SHARING_VIOLATION → WinError 5),
-                # в т.ч. на собственное RW-соединение OWNER'а. На Unix
-                # replace поверх открытого файла разрешён, поэтому баг был
-                # невидим. Закрываем соединение → подменяем → открываем заново.
-                #
-                # Порядок важен и для консистентности: DuckDB на ``close()``
-                # делает checkpoint и УДАЛЯЕТ ``<target>.wal``. Если бы replace
-                # шёл до close, на диске остался бы ``cache.duckdb.wal`` от
-                # старого файла, а сам target был бы уже новым — DuckDB
-                # подхватил бы чужой WAL при следующем открытии.
-                live_conn = self._conn
-                self._conn = None
-                if live_conn is not None:
-                    try:
-                        live_conn.close()
-                    except Exception:
-                        pass
-                try:
-                    os.replace(tmp, target)
-                finally:
-                    if live_conn is not None:
-                        # reopen по тому же cache_path; индексы/метки не
-                        # сбрасываем (close() их затирает, а данные прежние).
-                        self._open_locked()
-                        self._is_ready = True
-                self._dirty = False
-                self._publishes += 1
-                self._last_publish_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                if counts:
-                    for table in sorted(counts):
-                        print(
-                            f"[memory_store] published {table}: {counts[table]} rows",
-                            file=sys.stderr,
-                        )
-                        logger.info(
-                            "DuckDbCacheStore.publish: %s = %d rows",
-                            table,
-                            counts[table],
-                        )
-                    print(
-                        f"[memory_store] cache snapshot -> {target} "
-                        f"({len(counts)} tables, {sum(counts.values())} rows total)",
-                        file=sys.stderr,
-                    )
-                    logger.info(
-                        "DuckDbCacheStore.publish OK -> %s (%d tables, %d rows total)",
-                        target,
-                        len(counts),
-                        sum(counts.values()),
-                    )
-                    try_log_event(
-                        self._db_logging_service,
-                        LogEvent(
-                            event_type="sync_publish_ok",
-                            level="INFO",
-                            session_id="gateway:sync",
-                            channel=None,
-                            actor="sync",
-                            name="sync_publish_ok",
-                            summary=(
-                                f"cache snapshot -> {target} "
-                                f"({len(counts)} tables, {sum(counts.values())} rows)"
-                            ),
-                            payload={
-                                "publish_path": str(target),
-                                "tables": {k: int(v) for k, v in counts.items()},
-                                "total_tables": len(counts),
-                                "total_rows": int(sum(counts.values())),
-                            },
-                        ),
-                        producer="DuckDbCacheStore",
-                        event_type="sync_publish_ok",
-                    )
-                else:
-                    logger.warning(
-                        "DuckDbCacheStore.publish OK but 0 tables copied to %s "
-                        "(publish_path задан, dirty=True, но ни одной таблицы в self._tables "
-                        "не существует во in-memory DuckDB — sync возможно не доставил данные).",
-                        target,
-                    )
-                    try_log_event(
-                        self._db_logging_service,
-                        LogEvent(
-                            event_type="sync_publish_empty",
-                            level="WARN",
-                            session_id="gateway:sync",
-                            channel=None,
-                            actor="sync",
-                            name="sync_publish_empty",
-                            summary=(
-                                f"publish OK, но 0 таблиц скопировано в {target} "
-                                f"(sync не доставил данные)"
-                            ),
-                            payload={
-                                "publish_path": str(target),
-                                "tables_in_store": list(self._tables or []),
-                                "vector_db_table": self._vector_db_table or None,
-                            },
-                        ),
-                        producer="DuckDbCacheStore",
-                        event_type="sync_publish_empty",
-                    )
-                return True
-            except OSError as e:
-                # целевой файл открыт читателем (CLI) — повтор в следующем цикле
-                self._last_error = f"publish (replace): {e}"
-                logger.warning(
-                    "DuckDbCacheStore.publish FAIL (OSError при replace): %s "
-                    "— целевой файл %s занят читателем (CLI), "
-                    "snapshot останется в %s до следующего цикла.",
-                    e,
-                    target,
-                    tmp,
-                )
-                try_log_event(
-                    self._db_logging_service,
-                    LogEvent(
-                        event_type="sync_publish_failed",
-                        level="WARN",
-                        session_id="gateway:sync",
-                        channel=None,
-                        actor="sync",
-                        name="sync_publish_failed",
-                        summary=f"publish FAIL (OSError при replace): {e}",
-                        payload={
-                            "publish_path": str(target),
-                            "tmp_path": str(tmp),
-                            "error_type": "OSError",
-                            "error": str(e),
-                        },
-                    ),
-                    producer="DuckDbCacheStore",
-                    event_type="sync_publish_failed",
-                )
-                return False
-            except Exception as e:
-                self._last_error = f"publish: {e}"
-                self._publish_errors += 1
-                logger.warning(
-                    "DuckDbCacheStore.publish FAIL: %s",
-                    e,
-                    exc_info=True,
-                )
-                try_log_event(
-                    self._db_logging_service,
-                    LogEvent(
-                        event_type="sync_publish_failed",
-                        level="WARN",
-                        session_id="gateway:sync",
-                        channel=None,
-                        actor="sync",
-                        name="sync_publish_failed",
-                        summary=f"publish FAIL: {e}",
-                        payload={
-                            "publish_path": str(target),
-                            "tmp_path": str(tmp),
-                            "error_type": type(e).__name__,
-                            "error": str(e),
-                        },
-                    ),
-                    producer="DuckDbCacheStore",
-                    event_type="sync_publish_failed",
-                )
-                return False
 
     # ------------------------------------------------------------------
     # SQL-запросы
@@ -1610,7 +1346,6 @@ class DuckDbCacheStore:
             return {
                 "is_ready": self._is_ready,
                 "cache_path": str(self._cache_path),
-                "publish_path": str(self._publish_path),
                 "schema": self._schema,
                 "tables": tables,
                 "vector_sources": vector_sources,
@@ -1619,12 +1354,8 @@ class DuckDbCacheStore:
                     for src, (idx, _m) in self._index_cache.items()
                 },
                 "dirty_sources": sorted(self._dirty_sources),
-                "dirty": self._dirty,
                 "upserts": self._upserts,
                 "upsert_errors": self._upsert_errors,
-                "publishes": self._publishes,
-                "publish_errors": self._publish_errors,
                 "last_upsert_at": self._last_upsert_at,
-                "last_publish_at": self._last_publish_at,
                 "last_error": self._last_error,
             }

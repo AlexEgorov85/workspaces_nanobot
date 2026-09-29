@@ -153,50 +153,21 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
     # данные не попадут in-memory DuckDB.
     first_sync_event: "asyncio.Event | None" = None
     if ctx.sync_service is not None and ctx.cache_store is not None:
-        ctx.cache_store.connect()
-        # Пересоздаём снапшот при каждом старте: удаляем устаревший файл,
-        # чтобы CLI/skill не читали данные с прошлого запуска, пока
-        # initial_load не заполнит свежий снимок заново.
-        _old_snapshot = ctx.cache_store.get_stats().get("publish_path")
-        if _old_snapshot:
-            # Чистим и финальный снапшот, и осиротевший .tmp (publish мог быть
-            # убит между ATTACH и os.replace — тогда .tmp лежит залоченный
-            # через NFS lockd, и новый publish отстрелит "PID 0" на ATTACH).
-            for _candidate in (Path(_old_snapshot),
-                               Path(_old_snapshot + ".tmp")):
-                try:
-                    _candidate.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        # Файл кэша уже открыт: open_cache_provider() вызывает connect()
+        # при создании провайдера. Отдельного шага «подготовить файл» и
+        # отдельного шага «опубликовать снимок» больше нет — кэш это один
+        # файл, в который sync-слой пишет напрямую.
         ctx.sync_service.set_on_new_records_callback(
             ctx.cache_store.upsert_records
         )
-        # Сохраняем оригинальный callback и подменяем на обёртку,
-        # которая set-ит Event при первом вызове И публикует снимок
-        # DuckDB в publish_path после каждого цикла синхронизации.
-        # Без publish() файл workspace/data_store/duckdb/cache.duckdb
-        # не создаётся — CLI/skill читают пусто/404. Путь вычисляется
-        # через table_registry.snapshot_path() в ApplicationContext.
-        prev_cb = getattr(ctx.sync_service, "_on_sync_callback", None)
+        # Event для ожидания первого цикла синхронизации: до него кэш
+        # пуст, и потребителям читать нечего.
         first_sync_event = asyncio.Event()
-        memory_store = ctx.cache_store
-        _first_sync_done = False
-
-        def _on_first_sync() -> None:
-            if first_sync_event is not None:
-                first_sync_event.set()
+        prev_cb = getattr(ctx.sync_service, "_on_sync_callback", None)
 
         def _wrapped() -> None:
-            nonlocal _first_sync_done
-            _on_first_sync()
-            try:
-                # Первая публикация — принудительная: снапшот пересоздаётся
-                # даже если initial_load не нашёл ни одной строки (иначе
-                # старый файл, удалённый при старте, не восстановится).
-                memory_store.publish(force=not _first_sync_done)
-                _first_sync_done = True
-            except Exception:
-                pass
+            if first_sync_event is not None:
+                first_sync_event.set()
             if prev_cb is not None:
                 try:
                     prev_cb()
@@ -216,14 +187,8 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
             lambda: asyncio.run(_run(ctx, first_sync_event))
         )
     finally:
-        # Финальный снимок в publish_path — гарантируем, что CLI/skill
-        # увидят свежие данные даже если цикл поллинга не успел
-        # отработать после последнего апдейта.
-        if ctx.cache_store is not None:
-            try:
-                ctx.cache_store.publish()
-            except Exception:
-                pass
+        # Шага «опубликовать финальный снимок» больше нет: данные уже в
+        # файле кэша, отдельной публикации не существует.
         # Останавливаем фоновые сервисы, которые создал ApplicationContext,
         # но Streamlit/channels — отдельно (живут в shutdown(ctx))
         ctx.stop()
@@ -266,10 +231,11 @@ async def _run(ctx, first_sync_event) -> None:
     cache_store = ctx.cache_store
     sync_service = ctx.sync_service
     if cache_store is not None and sync_service is not None:
-        if cache_store.get_stats().get("publish_path"):
+        _cache_file = cache_store.get_stats().get("cache_path")
+        if _cache_file:
             console.print(
                 f"[green]✓[/green] audit_analyzer sync started "
-                f"(publish -> {cache_store.get_stats()['publish_path']})"
+                f"(cache -> {_cache_file})"
             )
         else:
             console.print("[green]✓[/green] audit_analyzer sync started")

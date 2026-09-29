@@ -615,7 +615,8 @@ async def _run_suite(
         ctx.sync_service is not None and ctx.cache_store is not None
     )
     if audit_ready:
-        ctx.cache_store.connect()
+        # Файл кэша уже открыт: open_cache_provider() вызывает connect()
+        # при создании провайдера.
         ctx.sync_service.set_on_new_records_callback(
             ctx.cache_store.upsert_records
         )

@@ -434,14 +434,14 @@ def _rebuild_faiss(index_name: str, db_table: str, rebuilt_only_deletion: bool =
     будет недоступен до установки зависимостей.
     """
     try:
-        from lib.services.cache_provider_impl import build_cache_provider
+        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import open_cache_provider
 
-        provider = build_cache_provider({}, str(_ROOT))
-        # Открываем кэш провайдера, чтобы ``preload_indexes`` мог читать
-        # из DuckDB-снапшота storage_table.
-        if hasattr(provider, "open_cache") and not getattr(provider, "_conn", None):
-            provider.open_cache()
-        loaded = provider.preload_indexes(db_table)
+        # Единая точка создания — тот же путь, что у runtime и у skills.
+        # Файл открыт уже самой фабрикой; отдельного ``open_cache`` больше
+        # нет: открытие — часть создания провайдера.
+        provider = open_cache_provider(mode=CacheAccessMode.READ_ONLY)
+        loaded = provider.preload_indexes()
     except (ImportError, ModuleNotFoundError) as exc:
         logger.warning(f"  ПРЕДУПРЕЖДЕНИЕ: FAISS-индекс для '{index_name}' не собран — "
                        f"отсутствует зависимость ({exc.__class__.__name__}: {exc}). "

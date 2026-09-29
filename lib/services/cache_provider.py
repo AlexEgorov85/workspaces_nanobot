@@ -19,7 +19,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover — только для аннотаций
+    from lib.services.cache_ownership import CacheAccessMode
 
 
 @dataclass
@@ -94,27 +97,68 @@ class ReadOnlyAssertionError(Exception):
         )
 
 
+class CacheBusyError(Exception):
+    """Файл кэша уже держит другой процесс.
+
+    Файл кэша — **process-exclusive** ресурс: в любой момент у него ровно
+    один активный владелец. Попытка открыть его вторым процессом
+    невозможна по определению.
+
+    **Проверкой занятости служит сама попытка открыть файл.** Отдельная
+    предварительная проверка (`if file.locked()`) и последующее открытие
+    разделены во времени и дают гонку — оба процесса увидят «свободно» и
+    оба упадут при открытии. Поэтому этот класс поднимается по результату
+    открытия, а не по результату предварительного осмотра.
+
+    Процесс, получивший эту ошибку на инициализации, **не считается
+    успешно запущенным** и завершает startup.
+    """
+
+    def __init__(self, path: str = "", holder: str = "", cause: Exception | None = None) -> None:
+        self.path = path
+        self.holder = holder
+        self.cause = cause
+        holder_part = f" (держит: {holder})" if holder else ""
+        super().__init__(
+            f"Файл кэша занят другим процессом{holder_part}: {path}. "
+            "Кэш — process-exclusive ресурс: одновременно его держит только "
+            "один процесс. Завершите этот процесс и повторите запуск. "
+            "Это НЕ означает, что файл отсутствует."
+        )
+
+
 class CacheProvider(ABC):
-    """Абстрактный провайдер кэша данных (SQL-кеш + векторные индексы)."""
+    """Абстрактный провайдер кэша данных (SQL-кеш + векторные индексы).
+
+    **Единственная точка доступа к файлу кэша** для runtime, skills и любых
+    других компонентов. Конкретная реализация (DuckDB, другая СУБД, файл
+    в памяти) — деталь этого модуля: называть конкретный класс хранилища
+    запрещено, всё поведение выражается этим интерфейсом.
+
+    Создание провайдера — не метод этого класса, а модульная функция
+    :func:`open_cache_provider`. Экземпляр открывает файл один раз; файл
+    process-exclusive, поэтому открыть его, когда файл уже держит другой
+    процесс, невозможно — и это surfaced как типизированная ошибка
+    :class:`CacheBusyError`, а не как «кэш недоступен».
+
+    Состав контракта намеренно узкий:
+
+    * **чтение** — ``query_sql``, ``explain``, ``get_schema``,
+      ``search_vector``, ``preload_indexes``;
+    * **единственная мутация** — ``upsert_records`` (ingestion от
+      sync-слоя, а не со стороны потребителя);
+    * **ресурс** — ``is_ready``, ``close``.
+
+    Репликация PostgreSQL → кэш (``refresh``, ``check_stale``) в контракт
+    **не входит**: это ответственность sync-слоя
+    (``PgDuckDbSyncService``), а не свойство файла кэша.
+    """
 
     # -- lifecycle ------------------------------------------------------
 
     @abstractmethod
     def is_ready(self) -> bool:
         """Готов ли кэш к запросам (файл открыт и в памяти)."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def refresh(self) -> bool:
-        """Создать/обновить SQL-кэш из канонической БД. True при успехе."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def check_stale(self) -> dict[str, Any]:
-        """Сверить метки изменений (MAX updated) у таблиц кэша с источником.
-
-        Возвращает dict с ключами: fresh, stale_tables, cache_meta, pg_meta.
-        """
         raise NotImplementedError
 
     @abstractmethod
@@ -171,9 +215,118 @@ class CacheProvider(ABC):
         """Получить структуру таблиц кэша (information_schema)."""
         raise NotImplementedError
 
+    # -- запись ---------------------------------------------------------
+
+    @abstractmethod
+    def upsert_records(
+        self,
+        table: str,
+        records: list[dict[str, Any]],
+        *,
+        key_column: str | None = None,
+    ) -> bool:
+        """Добавить/обновить строки таблицы в кэше.
+
+        Единственная мутация в контракте: её вызывает sync-слой
+        (``PgDuckDbSyncService``), а не потребитель. Потребители читают
+        кэш и не пишут в него.
+
+        Args:
+            table: ``schema.table`` (или ``table`` в схеме хранилища).
+            records: батч строк (dict).
+            key_column: PK-колонка источника; ``None`` → ``id`` → recreate.
+
+        Returns:
+            True при успешном сохранении, False при ошибке.
+        """
+        raise NotImplementedError
+
     # -- resource -------------------------------------------------------
 
     @abstractmethod
     def close(self) -> None:
         """Закрыть открытые ресурсы (соединение кэша и т.п.)."""
         raise NotImplementedError
+
+
+def open_cache_provider(
+    *,
+    mode: CacheAccessMode,
+    db_logging_service: Any | None = None,
+) -> CacheProvider:
+    """**Единственная точка создания** ``CacheProvider`` в рантайме.
+
+    Её зовут одинаково: runtime (composition root), skills, project tools и
+    standalone-утилиты. Вызывающий код **не знает**, какая реализация стоит
+    за интерфейсом, и не должен её называть — смена реализации не должна
+    требовать правок вне этого модуля.
+
+    Экземпляр возвращается полностью настроенным: схема, набор таблиц,
+    векторное хранилище и параметры эмбеддингов задаются здесь же. Раньше
+    composition root конфигурировал провайдера, присваивая приватные поля
+    реализации (``store._schema = ...``) — это и было то место, где знание
+    о реализации протекало наружу.
+
+    Путь к файлу кэша разрешается единой функцией ``resolve_publish_path()``:
+    второй потребитель той же настройки, трактующий её иначе, и есть
+    источник расхождения путей.
+
+    Args:
+        mode: требуемый режим доступа. ``READ_WRITE`` — процесс пишет в кэш
+            (владелец, sync-слой); ``READ_ONLY`` — процесс только читает.
+        db_logging_service: sink операционных событий реализации
+            (sync/publish). ``None`` — события не пишутся.
+
+    Returns:
+        Готовый к работе экземпляр реализации.
+
+    Raises:
+        CacheBusyError: файл кэша уже держит другой процесс. Попытка
+            открытия **и есть** проверка занятости — отдельной
+            предварительной проверки не выполняется и выполняться не
+            должно (TOCTOU-гонка: оба процесса увидят «свободно» и оба
+            упадут при открытии).
+        UnsupportedFilesystemError: путь лежит на network/shared
+            filesystem, где locking semantics не поддерживаются.
+    """
+    # Импорты внутри функции: модули реализации импортируют этот модуль
+    # (ABC, SearchResult, исключения), и на уровне модулей получился бы цикл.
+    from lib.core.application_context import resolve_publish_path
+    from lib.services.cache_ownership import CacheAccessMode as _Mode
+    from lib.services.cache_provider_impl import read_embedding_config
+    from lib.services.duckdb_cache_store import DuckDbCacheStore
+    from lib.services.table_registry import table_registry
+
+    from config import SETTINGS
+
+    mode = _Mode(mode)
+
+    gateway_cfg = SETTINGS.get("gateway") or {}
+    cache_cfg = gateway_cfg.get("cache") if isinstance(gateway_cfg.get("cache"), dict) else {}
+    workspace_path = str(SETTINGS.get("workspace_path") or "")
+    path = resolve_publish_path(workspace_path, cache_cfg)
+
+    table_names = list(table_registry.table_names())
+    vector_names = list(table_registry.vector_names())
+
+    schemas: list[str] = []
+    for resource in (*table_registry.table_resources(), *table_registry.vector_resources()):
+        if "." in resource.name:
+            schema = resource.name.split(".", 1)[0]
+            if schema and schema not in schemas:
+                schemas.append(schema)
+
+    embedding = read_embedding_config()
+
+    provider = DuckDbCacheStore.open(path=path, mode=mode)
+    provider.configure(
+        schema=schemas[0] if schemas else "main",
+        tables=table_names or None,
+        vector_db_table=vector_names[0] if vector_names else "",
+        embedding_base_url=embedding.get("base_url", ""),
+        embedding_model=embedding.get("model", "mxbai-embed-large:latest"),
+        embedding_dimension=int(embedding.get("dimension", 1024)),
+        db_logging_service=db_logging_service,
+    )
+    provider.connect()
+    return provider
