@@ -1,11 +1,11 @@
 """Bootstrap сервера: fail-fast, обязательность ``sqlglot``, отсутствие
-ручного ``@mcp.tool()``.
+FastMCP и ручной регистрации операций.
 
-Пункт 2.5 требует, чтобы в ``server.py`` не было ни одного ``@mcp.tool()``:
-иначе добавление операции перестаёт быть добавлением файла. Пункт 2.14 —
-сервер не поднимается без ``sqlglot``, потому что без AST-ветки guard
-пропускает ``pg_sleep``, ``information_schema`` и ``UPDATE``/``DELETE`` после
-``--``-комментария.
+Пункт 2.5 требует, чтобы в ``server.py`` не было ни ``@mcp.tool()``, ни
+``FastMCP``: иначе добавление операции перестаёт быть добавлением файла, а на
+провод уходит вторая, выведенная обёрткой схема. Пункт 2.14 — сервер не
+поднимается без ``sqlglot``, потому что без AST-ветки guard пропускает
+``pg_sleep``, ``information_schema`` и ``UPDATE``/``DELETE`` после ``--``.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,6 +22,21 @@ sys.path.insert(0, str(PLATFORM_ROOT))
 
 from libs.enterprise_common.errors import InfrastructureError  # noqa: E402
 from servers.enterprise import server as enterprise_server  # noqa: E402
+
+
+async def _discover(transport: Any) -> list[Any]:
+    """Операции так, как их увидит настоящий клиент, — по протоколу."""
+    from mcp.shared.memory import create_connected_server_and_client_session as connect
+
+    async with connect(transport) as session:
+        return (await session.list_tools()).tools
+
+
+async def _call(transport: Any, name: str, arguments: dict[str, Any]) -> Any:
+    from mcp.shared.memory import create_connected_server_and_client_session as connect
+
+    async with connect(transport) as session:
+        return await session.call_tool(name, arguments=arguments)
 
 
 class TestBootstrap:
@@ -49,9 +65,83 @@ class TestBootstrap:
         _, _, container = enterprise_server.build()
         assert container.get("data") is not None
 
-    def test_module_exposes_mcp_attribute(self) -> None:
-        """Контракт для архитектурного теста: сервер поднимается под именем ``mcp``."""
-        assert hasattr(enterprise_server, "mcp")
+    def test_transport_is_lowlevel_server(self) -> None:
+        from mcp.server.lowlevel import Server
+
+        transport, _, _ = enterprise_server.build()
+        assert isinstance(transport, Server)
+        assert callable(transport.run)
+
+
+class TestWireContract:
+    """Контракт проверяется по протоколу, а не по внутренним структурам."""
+
+    def test_operations_are_discoverable(self) -> None:
+        transport, registry, _ = enterprise_server.build()
+        tools = pytest.importorskip("anyio").run(_discover, transport)
+        assert {t.name for t in tools} == set(registry.names())
+
+    def test_every_operation_is_documented(self) -> None:
+        transport, _, _ = enterprise_server.build()
+        for tool in pytest.importorskip("anyio").run(_discover, transport):
+            assert tool.description, f"у операции {tool.name} нет описания"
+
+    def test_wire_schema_is_exactly_the_registry_schema(self) -> None:
+        """На проводе ровно одна схема — та, что провалидирована при загрузке.
+
+        С ``FastMCP`` их было две: реестровая и выведенная обёрткой. Расхождение
+        проявлялось как ``kwargs`` в схеме и падение валидации на нормальном
+        вызове.
+        """
+        import anyio
+
+        transport, registry, _ = enterprise_server.build()
+        tools = {t.name: t for t in anyio.run(_discover, transport)}
+        for definition in registry:
+            wire = tools[definition.name].inputSchema
+            assert wire.get("properties") == dict(definition.input_schema["properties"])
+            assert sorted(wire.get("required", [])) == sorted(definition.input_schema["required"])
+            assert "kwargs" not in wire.get("properties", {})
+            assert "args" not in wire.get("properties", {})
+
+    def test_call_returns_text(self) -> None:
+        import anyio
+
+        transport, _, _ = enterprise_server.build()
+        result = anyio.run(
+            _call,
+            transport,
+            "log_event",
+            {"event_type": "smoke.contract", "summary": "проверка"},
+        )
+        assert not result.isError
+        assert "accepted" in result.content[0].text
+
+    def test_domain_error_carries_code_and_no_traceback(self) -> None:
+        import anyio
+
+        transport, _, _ = enterprise_server.build()
+        result = anyio.run(_call, transport, "log_event", {"event_type": "   "})
+        text = result.content[0].text
+        assert result.isError is True
+        assert "invalid_request" in text
+        assert "Traceback" not in text
+
+    def test_unknown_operation_is_reported_as_error(self) -> None:
+        import anyio
+
+        transport, _, _ = enterprise_server.build()
+        result = anyio.run(_call, transport, "no_such_operation", {})
+        assert result.isError is True
+        assert "Traceback" not in result.content[0].text
+
+    def test_argument_validation_uses_wire_schema(self) -> None:
+        """Отсутствующий обязательный параметр отсекается протоколом."""
+        import anyio
+
+        transport, _, _ = enterprise_server.build()
+        result = anyio.run(_call, transport, "log_event", {})
+        assert result.isError is True
 
 
 class TestSqlglotIsMandatory:
@@ -61,22 +151,38 @@ class TestSqlglotIsMandatory:
         Подниматься «на всякий случай» нельзя: сервер, работающий с ослабленной
         защитой, опаснее сервера, который не поднялся.
         """
-        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+        import builtins
+
+        real_import = builtins.__import__
 
         def fake_import(name: str, *args: object, **kwargs: object) -> object:
             if name == "sqlglot":
                 raise ImportError("sqlglot отсутствует")
-            return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+            return real_import(name, *args, **kwargs)
 
-        monkeypatch.setattr("builtins.__import__", fake_import)
+        monkeypatch.setattr(builtins, "__import__", fake_import)
         with pytest.raises(InfrastructureError, match="sqlglot"):
             enterprise_server._check_dependencies()
 
     def test_dependency_list_names_sqlglot(self) -> None:
         assert "sqlglot" in enterprise_server.REQUIRED_PACKAGES
 
+    def test_missing_dsn_stops_server(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Сервер без DSN выглядит рабочим, пока журнал пуст.
 
-class TestNoManualToolDecorators:
+        Буфер при этом честно теряет каждое событие, но агент об этом не узнаёт.
+        Молчаливая потеря журнала хуже отказа на старте.
+        """
+        from libs.enterprise_data import db as data_db
+
+        monkeypatch.setattr(data_db, "_dsn", "")
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("PG_DSN", raising=False)
+        with pytest.raises(InfrastructureError, match="не задан DSN"):
+            enterprise_server._check_dependencies()
+
+
+class TestNoManualToolRegistration:
     def test_server_has_no_tool_decorators(self) -> None:
         """Операции приходят файлами; декоратор означал бы правку server.py."""
         source = (PLATFORM_ROOT / "servers" / "enterprise" / "server.py").read_text(encoding="utf-8")

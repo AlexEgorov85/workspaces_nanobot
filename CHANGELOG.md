@@ -10,6 +10,14 @@
 
 ### Changed
 
+- **Транспорт `enterprise-mcp` переведён с `FastMCP` на базовый API пакета `mcp`** (change `enterprise-mcp-platform`, Фаза 2).
+  - `FastMCP.add_tool()` выводит схему инструмента разведкой сигнатуры обработчика, поэтому первая версия обёртки с `**kwargs` отдала модели поле `kwargs` вместо параметров операции, и на проводе оказалась вторая схема. На базовом API (`mcp.server.lowlevel.Server`, `mcp.types.Tool`) на провод уходит ровно `ToolDefinition.input_schema` из реестра — ровно та схема, которую объявил владелец операции.
+  - `libs/enterprise_common/loader.py`: `register_with_server()`/`_wrap()` заменены на `build_server(registry, *, name, version, instructions)`. Синхронные обработчики разгружаются в поток (`anyio.to_thread.run_sync`) — иначе блокирующий пул PostgreSQL встал бы на event loop всего сервера. Доменная ошибка наружу отдаётся как `CallToolResult(isError=True)` с префиксом `[code]`, без traceback.
+  - `servers/enterprise/server.py`: `build()` возвращает `(transport, registry, container)`, добавлен `main()` со stdio-запуском. `_check_dependencies()` расширен fail-fast'ом по DSN: без него буфер журнала терял бы каждое событие, а молча работающий сервер хуже не поднявшегося.
+  - `servers/_template/server.py` переписан под ту же форму capability/service/tools; `servers/_template/service.py` удалён.
+  - Запрет `FastMCP` проверяется AST-guard'ом по импортам (`FORBIDDEN_MODULES` в `tests/test_architecture_boundaries.py`), а не текстовым поиском: название запрещённого модуля в докстринге — это объяснение, а не нарушение. Guard проверен на заведомо плохих данных.
+  - Контракт bootstrap'а и шаблона проверяется через настоящую MCP-сессию в памяти (`mcp.shared.memory.create_connected_server_and_client_session`); добавлен `mcp-platform/tests/conftest.py` с `DATABASE_URL` на сессию — сервер обязан отказываться подниматься без DSN, и это проверяется.
+
 - **Локальный снимок DuckDB остаётся в целевой архитектуре** (change `enterprise-mcp-platform`; правки только в плане, код агента не менялся).
   - Прежняя постановка change — «DuckDB удаляется полностью», отдельная фаза 5 на удаление ~2 600 строк и 10 тестовых модулей — **отменена**. Взамен: снимок остаётся и переходит под владение capability `data` как производный ресурс с единственным писателем.
   - Ошибочность прежнего вывода зафиксирована. Довод «лишняя абстракция» был верен про **слой владения** (claim в PostgreSQL, heartbeat, fencing по `generation`) и неверен про **сам снимок**. Слой уже снят change'ом `drop-local-cache-read-from-pg`: `CacheOwnershipCoordinator` (438 строк) и `pg_duckdb_sync_service.py` (798 строк). Цифра «~2 600 строк умирают» была завышена — из кластера вычиталось ровно то, что переезжает в capability `vectors`.

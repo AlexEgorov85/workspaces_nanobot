@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 from collections.abc import Iterable
 from pathlib import Path
@@ -34,6 +35,7 @@ from types import ModuleType
 from typing import Any
 
 from libs.enterprise_common.container import ToolContainer
+from libs.enterprise_common.errors import EnterpriseError
 from libs.enterprise_common.registry import ToolDefinition, ToolLoadError, ToolRegistry, build_input_schema
 
 logger = logging.getLogger(__name__)
@@ -159,40 +161,86 @@ def load_registry(
     return registry
 
 
-def register_with_server(registry: ToolRegistry, mcp: Any) -> list[ToolDefinition]:
-    """Зарегистрировать операции реестра в ``FastMCP`` и вернуть их.
+def build_server(
+    registry: ToolRegistry,
+    *,
+    name: str,
+    version: str = "1",
+    instructions: str | None = None,
+) -> Any:
+    """Собрать MCP-сервер из реестра на базовом API пакета ``mcp``.
 
-    Единственное место, где платформа знает про MCP. Сервисы и реестр о нём
-    не знают — иначе тест сервиса без MCP перестаёт быть возможным.
+    Осознанно **не** ``FastMCP``: удобная обёртка выводит схему параметров
+    своей разведкой сигнатуры, и на проводе оказывается вторая схема, а
+    расхождение с той, что валидируется при загрузке, обнаруживается только
+    в рантайме. Здесь на провод уходит ровно ``ToolDefinition.input_schema``.
+
+    Единственное место в платформе, где встречается протокол MCP: реестр,
+    сервисы и определения о нём не знают, иначе тест сервиса без протокола
+    перестал бы быть возможным.
     """
-    registered: list[ToolDefinition] = []
-    for definition in registry:
-        mcp.add_tool(
-            _wrap(definition),
-            name=definition.name,
-            description=definition.description,
-        )
-        registered.append(definition)
-    return registered
+    import anyio
+    from mcp.server.lowlevel import Server
+    from mcp.types import CallToolResult, TextContent, Tool
 
+    server = Server(name, version=version, instructions=instructions)
 
-def _wrap(definition: ToolDefinition) -> Any:
-    """Подогнать обработчик под ожидаемую MCP сигнатуру.
+    @server.list_tools()
+    async def list_tools() -> list[Any]:
+        return [
+            Tool(
+                name=definition.name,
+                description=definition.description,
+                inputSchema=dict(definition.input_schema),
+            )
+            for definition in registry
+        ]
 
-    Доменная ошибка наружу уходит как ``ValueError`` с её кодом: агент не
-    должен видеть ни traceback, ни исключения драйверов.
-    """
-    from libs.enterprise_common.errors import EnterpriseError
+    @server.call_tool()
+    async def call_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
+        def _error(code: str, message: str) -> Any:
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"[{code}] {message}")],
+                isError=True,
+            )
 
-    def call(**kwargs: Any) -> Any:
         try:
-            return definition.handler(**kwargs)
+            definition = registry.get(tool_name)
         except EnterpriseError as exc:
-            raise ValueError(f"[{exc.code}] {exc.message}") from exc
+            return _error(exc.code, exc.message)
 
-    call.__name__ = definition.name
-    call.__doc__ = definition.description
-    return call
+        # Обработчики синхронные и ходят в пул PostgreSQL. Вызов из event loop
+        # без разгрузки заблокировал бы весь сервер, включая отмену хода.
+        def invoke() -> Any:
+            return definition.handler(**arguments)
+
+        try:
+            result = await anyio.to_thread.run_sync(invoke)
+        except EnterpriseError as exc:
+            # Доменная ошибка: агент получает код и текст, а не traceback.
+            return _error(exc.code, exc.message)
+        except Exception as exc:  # noqa: BLE001
+            return _error("internal_error", f"{type(exc).__name__}: {exc}")
+
+        return CallToolResult(
+            content=[TextContent(type="text", text=_as_text(result))],
+            isError=False,
+        )
+
+    return server
+
+
+def _as_text(result: Any) -> str:
+    """Привести результат операции к тексту ответа.
+
+    Операции возвращают JSON-строку сами: формат ответа — часть контракта
+    операции, а не решение транспорта.
+    """
+    if isinstance(result, str):
+        return result
+    if isinstance(result, (dict, list)):
+        return json.dumps(result, ensure_ascii=False)
+    return str(result)
 
 
 def iter_definitions(registry: ToolRegistry) -> Iterable[ToolDefinition]:

@@ -331,12 +331,69 @@ def test_sql_param_guard_detects_violation() -> None:
     assert _scan_tool_sql_params(source, "capabilities/data/tools/query_sql.py")
 
 
+#: Модули SDK, которые запрещено использовать.
+#:
+#: ``mcp.server.fastmcp`` — удобная обёртка, которая выводит JSON-схему
+#: параметров своей разведкой сигнатуры. На провод уходит вторая схема, и её
+#: расхождение с той, что валидируется при загрузке, обнаруживается только в
+#: рантайме: первая версия так и отдала модели поле ``kwargs`` вместо
+#: параметров операции. Платформа работает на базовом API ``mcp``.
+FORBIDDEN_MODULES = ("mcp.server.fastmcp", "fastmcp")
+
+
+def _forbidden_module_hits(source: str, rel: str) -> list[str]:
+    """Модули из ``FORBIDDEN_MODULES``, встречающиеся как импорты.
+
+    Смотрит только импорты, а не текст: название запрещённого модуля в
+    докстринге — это объяснение, а не использование. Отдельная текстовая
+    проверка превращала бы любую документацию о причине запрета в нарушение.
+    """
+    if rel == _rel(SELF) or rel.startswith("tests/"):
+        return []
+    tree = ast.parse(source, filename=rel)
+    hits: set[str] = set()
+    for node in ast.walk(tree):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            names = [node.module]
+        for name in names:
+            for banned in FORBIDDEN_MODULES:
+                if name == banned or name.startswith(banned + "."):
+                    hits.add(name)
+    return sorted(hits)
+
+
+@pytest.mark.parametrize("path", _python_files(), ids=_rel)
+def test_no_fastmcp(path: Path) -> None:
+    """Транспорт платформы — базовый API ``mcp``, а не ``FastMCP``."""
+    hits = _forbidden_module_hits(path.read_text(encoding="utf-8"), _rel(path))
+    assert not hits, f"{_rel(path)} импортирует {hits}; на провод уйдёт вторая схема"
+
+
+def test_forbidden_module_guard_detects_violation() -> None:
+    """Проверка самого сторожа: он обязан ловить то, ради чего написан."""
+    source = "from mcp.server.fastmcp import FastMCP\n\nmcp = FastMCP('x')\n"
+    assert _forbidden_module_hits(source, "servers/enterprise/server.py")
+
+
+def test_forbidden_module_guard_ignores_prose() -> None:
+    """Объяснить запрет в докстринге — не значит его нарушить."""
+    source = '"""Мы не используем FastMCP: он выводит свою схему."""\n\ncode = "x"\n'
+    assert _forbidden_module_hits(source, "libs/enterprise_common/loader.py") == []
+
+
 @pytest.mark.parametrize("path", _server_modules(), ids=_rel)
 def test_server_imports_without_nanobot(path: Path) -> None:
     """Главный gate: сервер поднимается в процессе, где импорт агента запрещён.
 
     Блокировка ставится на уровне ``sys.meta_path`` — это ловит и прямые
     ``import nanobot``, и транзитивные подтягивания из SDK.
+
+    Проверяется не наличие глобального объекта, а то, что ``build()``
+    действительно собирает рабочий сервер: глобальный экземпляр означал бы,
+    что проверка зависит от момента импорта, а не от кода bootstrap'а.
     """
     module = "servers." + path.parent.name + ".server"
     code = f"""
@@ -354,7 +411,9 @@ sys.path.insert(0, {str(PLATFORM_ROOT)!r})
 
 import importlib
 mod = importlib.import_module({module!r})
-assert hasattr(mod, "mcp"), "server module must expose `mcp`"
+transport, registry, container = mod.build()
+assert callable(transport.run), "server must expose run()"
+assert len(registry) > 0, "server must register at least one operation"
 print("OK")
 """
     proc = subprocess.run(

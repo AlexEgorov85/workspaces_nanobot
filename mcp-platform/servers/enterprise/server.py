@@ -29,8 +29,8 @@ from typing import Any
 
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.errors import InfrastructureError
-from libs.enterprise_common.loader import load_registry, register_with_server
-from mcp.server.fastmcp import FastMCP
+from libs.enterprise_common.loader import build_server, load_registry
+from libs.enterprise_common.registry import ToolRegistry
 
 #: Корень платформы: ``mcp-platform/``. Нужен и загрузчику (для модульных имён),
 #: и проверке зависимостей.
@@ -45,6 +45,18 @@ REQUIRED_PACKAGES = ("sqlglot",)
 
 
 def _check_dependencies() -> None:
+    """Проверить, что сервер может работать, **до** того как он начал.
+
+    Два условия, оба fail-fast по одной причине: сервер, который поднялся и
+    работает вхолостую, хуже сервера, который не поднялся.
+
+    * ``sqlglot`` — без AST-ветки guard проверяет только первый блокируемый
+      оператор, ``INTO`` и multi-statement, и пропускает ``pg_sleep``,
+      ``information_schema`` и ``UPDATE``/``DELETE`` после ``--``-комментария;
+    * DSN — без него пул не инициализируется, и буфер журнала честно, но
+      незаметно теряет каждое событие. Поднявшийся сервер без DSN выглядит
+      рабочим, пока журнал пуст.
+    """
     missing: list[str] = []
     for name in REQUIRED_PACKAGES:
         try:
@@ -57,6 +69,15 @@ def _check_dependencies() -> None:
             + ", ".join(missing)
             + ". Без sqlglot guard проверяет только первый оператор и пропускает "
             "pg_sleep, information_schema и UPDATE/DELETE после -- комментария"
+        )
+
+    from libs.enterprise_data.db import resolve_dsn
+
+    if not resolve_dsn():
+        raise InfrastructureError(
+            "не задан DSN. Задайте переменную окружения DATABASE_URL (или PG_DSN) "
+            "для процесса enterprise-mcp. Без неё пул не поднимется, а буфер "
+            "журнала будет терять каждое событие"
         )
 
 
@@ -92,30 +113,51 @@ def _log_table_from_env() -> tuple[str, str]:
     return schema or "public", table or "agent_gateway_logs"
 
 
-def build() -> tuple[Any, Any, ToolContainer]:
-    """Собрать сервер: проверка, сервисы, реестр, регистрация.
+def build() -> tuple[Any, ToolRegistry, ToolContainer]:
+    """Собрать сервер: проверка, сервисы, реестр, транспорт.
 
-    Возвращает ``(mcp, registry, container)`` — чтобы тест мог проверить
+    Возвращает ``(server, registry, container)`` — чтобы тест мог проверить
     реестр, не поднимая транспорт.
     """
     _check_dependencies()
     container = _build_container()
     registry = load_registry(CAPABILITIES_DIR, container, root=PLATFORM_ROOT)
-    registered = register_with_server(registry, mcp)
-
-    logger.info("операций загружено: %d", len(registered))
+    transport = build_server(
+        registry,
+        name="enterprise-mcp",
+        instructions=(
+            "Enterprise-слой проекта. Операции данных, векторов, аудита и LLM. "
+            "Операций произвольного SQL здесь нет и не будет."
+        ),
+    )
+    logger.info("операций загружено: %d", len(registry))
     for name in registry.names():
         logger.info("  операция: %s", name)
-    return mcp, registry, container
+    return transport, registry, container
 
 
-#: Экземпляр создаётся один и экспортируется под именем ``mcp``: это
-#: обязательный контракт — архитектурный тест поднимает сервер в подпроцессе
-#: с заблокированным ``nanobot`` и требует наличия этого атрибута.
-mcp = FastMCP("enterprise-mcp")
+def main() -> None:
+    """Поднять сервер по stdio. Точка входа для MCP-клиента агента."""
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    transport, _, container = build()
+    data = container.get("data")
+    data.start()
+    try:
+        async def _serve() -> None:
+            async with stdio_server() as (read_stream, write_stream):
+                await transport.run(
+                    read_stream,
+                    write_stream,
+                    transport.create_initialization_options(),
+                )
+
+        anyio.run(_serve)
+    finally:
+        data.stop()
 
 
 if __name__ == "__main__":  # pragma: no cover - ручной запуск
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-    build()
-    mcp.run()  # stdio по умолчанию
+    main()

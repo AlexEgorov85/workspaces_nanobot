@@ -1,16 +1,16 @@
-"""Контракт эталона: форма сервиса и регистрация через реестр.
+"""Контракт эталона: форма сервиса и сборка транспорта из реестра.
 
 Проверяет ровно то, что потом копируется в каждый домен:
-* сервис работает и тестируется БЕЗ MCP;
-* адаптер отдаёт discoverable-инструменты;
+* сервис работает и тестируется БЕЗ протокола;
+* операции попадают в discovery с описаниями;
 * доменная ошибка не превращается в мусор на стороне агента.
 """
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,7 +23,15 @@ from libs.enterprise_common.errors import (  # noqa: E402
     NotFoundError,
 )
 from servers._template.capabilities.template.service.main import EchoService  # noqa: E402
-from servers._template.server import build, mcp  # noqa: E402
+from servers._template.server import build  # noqa: E402
+
+
+async def _discover(transport: Any) -> list[Any]:
+    """Операции так, как их увидит настоящий клиент, — по протоколу."""
+    from mcp.shared.memory import create_connected_server_and_client_session as connect
+
+    async with connect(transport) as session:
+        return (await session.list_tools()).tools
 
 
 class TestServiceWithoutMcp:
@@ -52,38 +60,45 @@ class TestServiceWithoutMcp:
         assert InfrastructureError.code != InvalidRequestError.code
 
 
-@pytest.fixture
-def populated_server():
-    """Заполнить ``mcp`` операциями.
-
-    Раньше инструменты появлялись при импорте — декораторы выполнялись на
-    уровне модуля. Теперь регистрация явная и происходит в ``build()``, как на
-    реальном старте сервера, поэтому до discovery нужно дойти до неё.
-    """
-    return build()
-
-
 class TestAdapterDiscovery:
     """Адаптер обязан отдавать инструменты, видимые агенту."""
 
-    def test_tools_are_discoverable(self, populated_server: object) -> None:
-        tools = asyncio.run(mcp.list_tools())
-        names = {t.name for t in tools}
-        assert {"echo", "lookup"} <= names, f"не найдены инструменты: {names}"
-
-    def test_every_tool_is_documented(self, populated_server: object) -> None:
-        """Описание попадает агенту в tool discovery — пустое описание
-        заставляет модель гадать."""
-        for tool in asyncio.run(mcp.list_tools()):
-            assert tool.description, f"у инструмента {tool.name} нет описания"
-
-    def test_operations_come_from_registry_not_decorators(self, populated_server: object) -> None:
+    def test_operations_come_from_registry_not_decorators(self) -> None:
         """Добавление операции — новый файл, а не правка bootstrap'а."""
-        _, registry, _ = populated_server
+        _, registry, _ = build()
         assert set(registry.names()) == {"echo", "lookup"}
         assert set(registry.by_category()) == {"template"}
 
-    def test_every_registered_operation_is_discoverable(self, populated_server: object) -> None:
-        _, registry, _ = populated_server
-        discovered = {t.name for t in asyncio.run(mcp.list_tools())}
-        assert set(registry.names()) <= discovered
+    def test_tools_are_discoverable(self) -> None:
+        import anyio
+
+        transport, registry, _ = build()
+        tools = anyio.run(_discover, transport)
+        names = {t.name for t in tools}
+        assert set(registry.names()) <= names, f"не найдены операции: {names}"
+
+    def test_every_tool_is_documented(self) -> None:
+        """Описание попадает агенту в discovery — пустое описание заставляет
+        модель гадать."""
+        import anyio
+
+        transport, _, _ = build()
+        for tool in anyio.run(_discover, transport):
+            assert tool.description, f"у операции {tool.name} нет описания"
+
+    def test_domain_error_reaches_caller_as_code(self) -> None:
+        import anyio
+
+        from mcp.shared.memory import create_connected_server_and_client_session as connect
+
+        transport, _, _ = build()
+
+        async def call() -> Any:
+            async with connect(transport) as session:
+                return await session.call_tool("lookup", arguments={"key": "нет-такого"})
+
+        result = anyio.run(call)
+        text = result.content[0].text
+        assert result.isError is True
+        assert "not_found" in text
+        assert "Traceback" not in text
