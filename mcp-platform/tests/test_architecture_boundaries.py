@@ -85,7 +85,13 @@ RESOURCE_OWNERS: tuple[tuple[str, frozenset[str]], ...] = (
         ),
     ),
     ("libs/vectors", frozenset({"faiss"})),
-    ("libs/llm", frozenset({"chat/completions"})),
+    # HTTP-клиент провайдера — тоже владение, а не свободный импорт: без
+    # ``httpx``/``requests`` в наборе ловилась только строка URL в константе,
+    # а прямой импорт в любой capability проходил молча. Ровно то, из-за чего
+    # правило про URL существовало. Нарушение поймано буквально на первой же
+    # проверке: ``libs/vectors/embedding.py`` поднял свой ``httpx`` к
+    # эндпойнту эмбеддингов, у которого URL не содержит ``chat/completions``.
+    ("libs/llm", frozenset({"chat/completions", "httpx", "requests"})),
 )
 
 #: Параметры, через которые SQL мог бы попасть на поверхность агента.
@@ -293,6 +299,16 @@ def test_service_owners_guard_detects_violation() -> None:
         (
             "servers/enterprise/capabilities/llm/service/client.py",
             "URL = 'https://api/v1/chat/completions'\n",
+        ),
+        # Тот же HTTP-клиент, но без URL-константы: правило про строку URL
+        # молча пропускало прямой импорт, а это и есть вторая копия клиента.
+        (
+            "servers/enterprise/capabilities/llm/service/direct.py",
+            "import httpx\n\ndef f():\n    return httpx.Client()\n",
+        ),
+        (
+            "servers/enterprise/capabilities/llm/service/requests_call.py",
+            "import requests\n\ndef f():\n    return requests.post('u')\n",
         ),
         # Снимок DuckDB открывается только во владельце. Capability ``vectors``
         # получает снимок сервисом, поэтому собственный ``duckdb.connect``
