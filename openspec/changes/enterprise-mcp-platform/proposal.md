@@ -1,4 +1,4 @@
-# Enterprise-слой в один MCP-сервер, DuckDB удаляется
+# Enterprise-слой в один MCP-сервер
 
 ## Why
 
@@ -34,20 +34,34 @@ N потоков `_Worker` с выделенными соединениями, �
 **Следствие:** capability `data` — это перенос существующего модуля плюс MCP-поверхность,
 а не новая подсистема.
 
-### DuckDB — лишняя абстракция
+### DuckDB — лишним был слой владения, а не снимок
 
 Цепочка данных сегодня: `oarb.audit_vectors (PG) → DuckDB-снапшот → FAISS`.
-Векторы **уже лежат в PostgreSQL** (`gateway.vector.index.storage_table`),
-поэтому посредник между базой и индексом ничего не добавляет. Стоимость:
+Прежняя редакция этого change объявляла снимок лишней абстракцией и ставила его
+удаление отдельной фазой. Разбор показал, что вывод неверен в обе стороны.
 
-* ~2 600 строк production-кода, которые умирают;
-* 10 тестовых модулей, 64 из 159 тестовых файлов затрагиваются (40%);
-* класс операционных проблем: блокировка файла на NFS, «устарел ли снимок»,
-  путь `gateway.cache.local_path`;
-* `TableRegistry` (347) существует только чтобы перечислить таблицы для
-  снапшота.
+**Цифра удаляемого была завышена.** ~2 600 строк считались «умирающими», хотя
+план сам признавал: `duckdb_query.py` и `cache_provider.py` — смешанные модули,
+`build_faiss_index`, `group_vector_hits`, `build_raw_items` и векторная половина
+`cache_provider_impl.py` переживают удаление и переезжают в capability `vectors`.
 
-Побочно исчезает весь этот класс проблем, а цепочка теряет один hop.
+**Довод рабочий — но против другого объекта.** Лишней была координация владения:
+claim в PostgreSQL, heartbeat каждые 30 секунд, fencing по `generation`,
+advisory-lock boundary. Это два запроса в минуту бессрочно в системе с общим
+пулом, то есть расход того ресурса, ради экономии которого кэш существует. Слой
+уже снят: `drop-local-cache-read-from-pg` удалил `CacheOwnershipCoordinator` (438)
+и `pg_duckdb_sync_service.py` (798).
+
+**Что осталось и почему это не лишнее.** Снимок — производный ресурс с одним
+писателем и без фоновых обращений к базе. Он даёт то, чего не даёт прямое
+чтение PostgreSQL: реестр `public.agent_predefined_scripts` и его шаблоны
+написаны в его диалекте (позиционные `?`, схема по умолчанию `main`), и
+`run_script` / `generate_sql` сегодня исполняются против него. Удаление — это
+миграция реестра целиком ради выигрыша, невидимого вызывающему.
+
+**Цена остаётся и признаётся:** файл на диске, путь в конфигурации, запрет на
+сетевые ФС, устаревание снимка по построению, единственный писатель. Пять
+условий исполнения — в `specs/data/duckdb-cache/spec.md`.
 
 ### 12 патчей — часть из них заменима хуками
 
@@ -143,10 +157,11 @@ LLM и стоит вызова провайдера. Смягчение — few-
   `lib/services/subprocess_manager.py`, `workspace/tools/example.py`
   (зарегистрирован как живой `ExampleTool`), `tools/legacy_audit.py`,
   `tools/test_audit.py`.
-- **REMOVED:** DuckDB-кластер — `duckdb_cache_store.py`, `cache_load_service.py`,
-  `cache_provider.py`, DuckDB-часть `duckdb_query.py` и `cache_provider_impl.py`;
-  `skill_registration.py`; cache-API в `skill_config.py`; секция `CacheSettings`;
-  88 строк кэш-обвязки в `application_context.py`.
+- **MOVED:** кластер снимка — `duckdb_cache_store.py`, `cache_load_service.py`,
+  `cache_provider.py`, исполнитель запросов из `duckdb_query.py`,
+  `_capture_schema_meta` из `cache_provider_impl.py` — уходит из агента в
+  `libs/enterprise_data` как владелец снимка. Cache-API в `skill_config.py` и
+  88 строк кэш-обвязки в `application_context.py` уходят из агента вместе с ним.
 - **ADDED:** `enterprise-mcp` — **один** MCP-процесс со всеми инструментами.
   Внутри — capability-каталоги `capabilities/<name>/{skill/SKILL.md,
   tools/*.py, service/}`, наполняемые динамическим реестром: `server.py` не
@@ -177,11 +192,13 @@ LLM и стоит вызова провайдера. Смягчение — few-
   `--`-комментария. Раньше деградация была сознательно разрешена — после
   введения `generate_sql` это означало бы выключение защиты ровно там, где вход
   недоверенный.
-- **MODIFIED (порядок фаз):** capability `audit` переезжает на PostgreSQL
-  **до** удаления DuckDB, потому что `db_loader` сегодня читает реестр через
-  `CacheProvider`, то есть из локального снимка.
-- **ADDED:** capability `vectors` — сборка FAISS в памяти напрямую из
-  PostgreSQL, **лениво по первому запросу**. Векторы документов
+- **MODIFIED (порядок фаз):** жёсткая зависимость capability `audit` от удаления
+  DuckDB снята. Раньше `db_loader` читал реестр через `CacheProvider`, поэтому
+  `audit` обязан был переехать на PostgreSQL раньше удаления снимка. Снимок
+  остаётся, `audit` читает его через capability `data`, и обе фазы становятся
+  переездом, а не переписыванием.
+- **ADDED:** capability `vectors` — сборка FAISS в памяти из локального снимка,
+  **лениво по первому запросу**. Векторы документов
   предрассчитаны, но **вектор запроса эмбедится в рантайме**: зависимость от
   сервиса эмбеддингов остаётся и должна быть названа явно.
 - **ADDED:** capability `llm` — доменный вызов LLM как операция `complete`.
@@ -205,8 +222,10 @@ LLM и стоит вызова провайдера. Смягчение — few-
 
 ## Capabilities
 
-- `data/duckdb-removal` — **NEW**. DuckDB как лишний посредник; цепочка
-  `PG → FAISS`.
+- `data/duckdb-cache` — **NEW**. Локальный снимок остаётся и переходит под
+  владение capability `data`: единственный писатель, файл не удерживается между
+  операциями, устарелость наблюдаема, сетевые ФС запрещены, возврат слоя
+  синхронизации запрещён. Три входа к данным не расширяются.
 - `data/query` — **NEW**. Capability `data`: пул и очередь как граница;
   поверхность агента — инфраструктура без доступа к данным (`log_event`,
   `schema_check`, `history_search`); SQL на поверхности отсутствует; предел
@@ -216,7 +235,7 @@ LLM и стоит вызова провайдера. Смягчение — few-
   `public.agent_predefined_scripts` как доверенная зона; значения
   параметризуются, SQL не показывается модели; `no_match` отделён от
   `not_answerable`.
-- `data/vectors` — **NEW**. Capability `vectors`: сборка FAISS без снапшота,
+- `data/vectors` — **NEW**. Capability `vectors`: сборка FAISS из снимка,
   ленивая загрузка по первому запросу.
 - `data/llm` — **NEW**. Capability `llm`: доменный вызов LLM как операция
   `complete`; в агенте `llm_client.py` и `llm_config.py` перестают
@@ -238,31 +257,34 @@ LLM и стоит вызова провайдера. Смягчение — few-
 
 - **Остаток агента:** 21 781 → ~16 800 (после удалений) → ~15 500 (после
   замены патчей).
-- **Удаляется:** ~3 600 строк кэша, 3 599 бенчмарков, 818 Streamlit,
-  201 `check_worker_pool_integrity`, ~1 200 протокола аренды, 131 `example.py`.
+- **Удаляется:** 3 599 бенчмарков, 818 Streamlit, 201 `check_worker_pool_integrity`,
+  ~1 200 протокола аренды, 131 `example.py`. Кэш **не удаляется**: ~2 600 строк
+  меняют место жительства и уходят из агента в `mcp-platform`.
 - **Миграции БД:** DROP для `agent_worker_claims`, `agent_benchmark_runs`,
   `agent_benchmark_results`. `sql/vectors/create_vector_index_config.sql` и
   `create_vector_index_store.sql` — legacy, удаляются (таблица store уже
   удалена в `V003`).
-- **Настройки:** удаляются `gateway.cache.local_path`,
-  `gateway.vector.index.default_root` (уже DEPRECATED), `benchmark.*`,
-  `streamlit.*`, 8 ключей `channels.postgres.*` аренды. Правятся
-  `tests/test_config_keys.py` и `tests/test_docs_consistency.py`.
+- **Настройки:** удаляются `gateway.vector.index.default_root` (уже DEPRECATED),
+  `benchmark.*`, `streamlit.*`, 3 ключа `channels.postgres.*` аренды.
+  `gateway.cache.local_path` **сохраняется** и переезжает в конфиг сервера как
+  путь снимка. Правятся `tests/test_config_keys.py` и
+  `tests/test_project_settings.py`.
 - **Настройки, которые НЕ удаляются:** `skills.*.tables` и
-  `skills.*.vector_indexes`. Раньше они описывали состав снапшота DuckDB, но
-  после удаления DuckDB у них появляется другое назначение: `skills.*.tables`
-  становится разрешённым списком таблиц для `generate_sql` и источником метки
-  `scripts_registry`, а `vector_indexes` — конфигурацией capability `vectors`.
-  Удалять их вместе со снапшотом нельзя. Метка на таблице означает, что она не
-  попадает в описание схемы для генератора, — то есть реестр скриптов не
-  протекает в LLM.
-- **Тесты:** пересборка baseline **после** шага удаления DuckDB, не до. Строка
-  допустимых падений (4 предсуществующих) изменится.
+  `skills.*.vector_indexes`. Они описывают состав снимка, и это назначение
+  сохраняется: `skills.*.tables` — разрешённый список таблиц для `generate_sql`
+  и источник метки `scripts_registry`, `vector_indexes` — конфигурация
+  capability `vectors`. Метка на таблице означает, что она не попадает в
+  описание схемы для генератора, — то есть реестр скриптов не протекает в LLM.
+- **Тесты:** 10 модулей кэша не удаляются, а переезжают в `mcp-platform` как
+  стражи capability `data`. Пересборка baseline — **после** их переезда, не до:
+  строка допустимых падений (4 предсуществующих) изменится.
 - **Потери:** HA-отказоустойчивость, end-to-end замер качества ответа,
   веб-интерфейс, а также чистота зависимостей агента в части офисных пакетов —
   они остаются в `requirements.txt` сознательно.
-- **Существующий change `drop-local-cache-read-from-pg`** описывает снимок
-  как таковой. Этот change идёт дальше: снимка не остаётся.
+- **Существующий change `drop-local-cache-read-from-pg`** описывает снимок как
+  таковой и снимает слой владения. Этот change идёт дальше в другую сторону: он
+  переносит снимок под владение capability `data` и запрещает возвращать
+  снятый слой.
 - **Не затрагивается:** `nanobot 0.3.5` как пакет, доменные таблицы `oarb.*`,
   контур сообщений `agent_conversation_messages`.
 

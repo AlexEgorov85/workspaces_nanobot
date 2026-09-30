@@ -12,8 +12,9 @@
 | `tests/test_resume_scenarios.py::test_resume_integration_run_writes_manifest` | ❌ |
 
 > **Правило применимости:** после шага 1 допустимы ровно эти же четыре падения.
-> После шага 5 (удаление DuckDB) строка допустимых падений **пересобирается** —
-> чинить тесты удалённой подсистемы бессмысленно.
+> После фазы 5 (перенос кластера снимка) строка допустимых падений
+> **пересобирается** — тесты кэша уезжают вместе с кодом, и чинить их на старой
+> архитектуре бессмысленно.
 >
 > **Известный флак, не входящий в строку:** `test_legal_summarizer_running_subprocess.py::test_running_marker_arrives_before_run_completes`
 > падает под нагрузкой полного прогона и проходит в изоляции. Проверяется одним
@@ -29,10 +30,11 @@
 создаёт свой пул, свой FAISS или свой HTTP-клиент, и обход запрещён
 архитектурным стражем, а не договорённостью — фаза 2, пункт 2.15.
 
-**Порядок фаз жёсткий.** Capability `audit` (фаза 4) переезжает на PostgreSQL
-**до** удаления DuckDB (фаза 5), потому что `db_loader` сегодня читает реестр
-через `CacheProvider`, то есть из локального снимка. Обратный порядок оставит
-`run_script` без источника.
+**Порядок фаз жёсткий, но не из-за снимка.** Раньше capability `audit` (фаза 4)
+обязана была переехать на PostgreSQL **до** удаления DuckDB (фаза 5): `db_loader`
+читал реестр через `CacheProvider`, и обратный порядок оставил бы `run_script` без
+источника. Снимок остаётся, `audit` читает его через capability `data` и файл не
+открывает, поэтому это ограничение снято. Фазы 4 и 5 — переезд, не переписывание.
 
 ---
 
@@ -230,8 +232,8 @@
 
 ## Фаза 3 — capability `vectors` и `llm`
 
-> `vectors` идёт **до** удаления DuckDB: FAISS собирается из снапшота, и
-> удаление снапшота раньше гасит векторный поиск. Обе capability — каталоги в
+> `vectors` читает снимок через capability `data` и файл не открывает, поэтому больше не
+> зависит от того, что будет с кластером снимка. Обе capability — каталоги в
 > том же процессе, новых серверов не заводится.
 
 - [ ] 3.1 Извлечь из `lib/utils/duckdb_query.py` в `libs/vectors`:
@@ -242,7 +244,8 @@
       `get_embedding`, `read_embedding_config`, `read_vector_index_config`,
       `compute/verify_index_signature`, `list_runtime_vector_indexes`
 - [ ] 3.4 Перенести `vector_index_service.py`, `text_splitter.py`, `preload_service.py`
-- [ ] 3.5 **Переписать** чтение векторов: из PostgreSQL напрямую, а не из снапшота
+- [ ] 3.5 Чтение векторов оставить на снимке, но получать его **только** через capability
+      `data`: ни собственного `duckdb.connect`, ни пути к файлу
 - [ ] 3.6 Перенести `tools/build_vectors.py` (сборка эмбеддингов), `tools/check_indexes.py`
 - [ ] 3.7 Конфигурация: `gateway.vector.index.indexes.*` → конфиг `enterprise-mcp`
 - [ ] 3.8 Операции как `capabilities/vectors/tools/*.py` через реестр фазы 2:
@@ -273,23 +276,27 @@
 
 ---
 
-## Фаза 4 — capability `audit`: переезд на PostgreSQL
+## Фаза 4 — capability `audit`: перенос конвейера
 
-> **Порядок обязателен.** `db_loader` сегодня читает реестр через
-> `CacheProvider`, то есть из локального DuckDB-снимка. Удаление снапшота раньше
-> переезда оставит `run_script` без источника. Поэтому `audit` идёт **до**
-> фазы 5.
+> **Объём фазы сокращён.** Раньше здесь был переезд на PostgreSQL: загрузчик
+> реестра переписывался под `psycopg2`, схема по умолчанию менялась
+> с `main` на `public`, а фаза 5 удаляла снимок. Снимок остаётся, поэтому 4.3 и 4.4
+> **отменяются**: реестр и его шаблоны остаются в диалекте снимка. Требования к
+> поверхности — проверка списка таблиц, потолок строк, запрет `context` от
+> вызывающей стороны — сохраняются без изменений.
 
 - [ ] 4.1 Резолв `scripts_registry` из `TableRegistry` перенести в сервис
       capability `audit`; `resources_by_label("scripts_registry")` — единственный
       путь к имени таблицы реестра
-- [ ] 4.2 **Перевести `db_loader` на PostgreSQL напрямую**, минуя `CacheProvider`.
-      Значения параметров — отдельным списком позиционных аргументов
-- [ ] 4.3 **Плейсхолдеры под диалект драйвера.** `sql_template` описан с `?`,
-      и загрузчик реестра использует `?` в `WHERE name = ?`; у `psycopg2` — `%s`.
-      Правка в двух местах: сборщик и загрузчик
-- [ ] 4.4 Схема по умолчанию при отсутствии точки в имени — `public`, а не `main`
-      (текущее значение взято из DuckDB)
+- [ ] 4.2 `db_loader` перенести в capability `audit` **с сохранением поведения**:
+      чтение реестра идёт через операцию capability `data`, значение параметра —
+      отдельным позиционным аргументом. Миграции на PostgreSQL нет
+- [ ] 4.3 ~~Плейсхолдеры под диалект драйвера~~ — **ОТМЕНЕНО**. `sql_template` и загрузчик
+      используют `?`, и это диалект снимка; менять его на `%s` без смены
+      исполнителя нельзя
+- [ ] 4.4 ~~Схема по умолчанию `public`~~ — **ОТМЕНЕНО**. `main` — схема исполнителя;
+      подстановка `public` сломала бы шаблоны реестра, записанные без
+      указания схемы
 - [ ] 4.5 Перенести пайплайн `predefined` (загрузчик, валидатор параметров,
       сборщик шаблона) в `capabilities/audit/service/`
 - [ ] 4.6 Перенести пайплайн `generated_sql`: описание схемы, few-shot из
@@ -320,49 +327,55 @@
       что skill и операции ведут к одному сервису и не вложены друг в друга
 
 **Приёмка:** ни один зарегистрированный инструмент не принимает SQL. Реестр
-читается из PostgreSQL, а не из снимка. Сгенерированный запрос, ссылающийся на
-таблицу вне разрешённого списка, отклоняется **до** выполнения. Скрипт с
-неизвестным именем возвращает `not_found`, сломанный реестр —
-`registry_unavailable`, а не пустой каталог.
+читается через capability `data`, и capability `audit` не открывает файл снимка. Сгенерированный
+запрос, ссылающийся на таблицу вне разрешённого списка, отклоняется
+**до** выполнения. Скрипт с неизвестным именем возвращает `not_found`, сломанный
+реестр — `registry_unavailable`, а не пустой каталог.
 
 ---
 
-## Фаза 5 — удаление DuckDB
+## Фаза 5 — перенос кластера снимка во владельца
 
-> Фаза выполняется **после** фазы 4. `db_loader` читает реестр через
-> `CacheProvider`, то есть из снимка; удаление снапшота раньше переезда оставит
-> `run_script` без источника.
+> Фаза выполняется **после** фазы 4: обе capability читают снимок, и перенос
+> кластера меняет только место жительства. Снимок **остаётся** — отменяется
+> только выписывание его из проекта.
 
-Атомарный коммит без MCP-работы.
+Атомарный коммит без MCP-работы. Ни одна строка кластера не удаляется.
 
-- [ ] 5.1 Удалить `duckdb_cache_store.py` (1455)
-- [ ] 5.2 Удалить `cache_load_service.py` (472)
-- [ ] 5.3 Удалить `cache_provider.py` (440) и DuckDB-часть `duckdb_query.py` (338)
-- [ ] 5.4 Удалить `lib/core/skill_registration.py` (98)
-- [ ] 5.5 Удалить cache-API из `lib/core/skill_config.py`
-- [ ] 5.6 Удалить секцию `CacheSettings` из `project_settings.py`
-- [ ] 5.7 Удалить 88 строк кэш-обвязки из `application_context.py`:
+- [ ] 5.1 Перенести `duckdb_cache_store.py` (1455) в `libs/enterprise_data`
+- [ ] 5.2 Перенести `cache_load_service.py` (472) — единственный писатель снимка
+- [ ] 5.3 Перенести `cache_provider.py` (440) вместе с `CacheAccessMode`; в
+      `libs/vectors` уходят `SearchResult` и `IndexIntegrityError`
+- [ ] 5.4 Перенести исполнитель запросов из `lib/utils/duckdb_query.py`:
+      `run_query`, `explain_query`, `build_schema`, `rewrite_duck_sql`
+- [ ] 5.5 Перенести `_capture_schema_meta` из `cache_provider_impl.py`; остальное
+      ушло в фазу 3
+- [ ] 5.6 Убрать cache-API из `lib/core/skill_config.py`. `TableRegistry` и
+      `skill_registration.py` **остаются** — они описывают состав снимка
+- [ ] 5.7 Секция `CacheSettings` переезжает из `project_settings.py` в конфиг
+      сервера как путь снимка
+- [ ] 5.8 Убрать 88 строк кэш-обвязки из `application_context.py`:
       `resolve_cache_path`, `_warn_if_cache_path_on_nfs`, `_init_cache_runtime`,
       `check_duckdb_cache`, `check_vector_search`
-- [ ] 5.8 Удалить из `table_registry.py` только агрегацию имён в список загрузки.
-      **Сохранить** `resources_by_label("scripts_registry")`, `register_infra`,
-      `tracking_column_for`
 - [ ] 5.9 Удалить `sql/vectors/create_vector_index_config.sql` и
-      `create_vector_index_store.sql`
-- [ ] 5.10 Удалить 10 тестовых модулей: `test_duckdb_cache_store.py`,
+      `create_vector_index_store.sql` — это legacy прошлого шага, а не снимок
+- [ ] 5.10 Перенести 10 тестовых модулей кэша в `mcp-platform` как стражи
+      capability `data`: `test_duckdb_cache_store.py`,
       `test_cache_provider_meta.py`, `test_single_cache_interface.py`,
       `test_cache_no_file_hold.py`, `test_cache_provider_open_failure.py`,
       `test_cache_provider_mode.py`, `test_cache_load_service.py`,
       `test_table_registry.py`, `test_skill_cache_boundary.py`,
       `test_shared_cache_path_across_profiles.py`
-- [ ] 5.11 Переписать `tests/test_application_context*` (5 файлов)
-- [ ] 5.12 Удалить `duckdb` и `pyarrow` из `requirements.txt`
+- [ ] 5.11 Добавить страж: вне `libs/enterprise_data` запрещены `duckdb.connect`,
+      `ATTACH` и импорт `duckdb`
+- [ ] 5.12 Переписать `tests/test_application_context*` (5 файлов)
 - [ ] 5.13 **Пересобрать baseline** и зафиксировать новую строку падений
-- [ ] 5.14 Поправить `tests/test_docs_consistency.py` (проверяет упоминания DuckDB)
+- [ ] 5.14 Проверить, что `duckdb` и `pyarrow` в зависимостях сервера, а в
+      зависимостях агента — нет
 
-**Приёмка:** в `requirements.txt` нет `duckdb`. `grep -R "duckdb" lib/ workspace/`
-пусто. Векторный поиск работает. `run_script` работает — реестр читается из
-PostgreSQL, а не из того, что удалили.
+**Приёмка:** `grep -R "duckdb" lib/ workspace/` пуст — в агенте снимка нет. В
+`mcp-platform` движок есть: снимок открывается, `run_script` работает, векторный
+поиск работает. Ни одна capability не открывает файл снимка.
 
 ---
 
@@ -472,7 +485,8 @@ PostgreSQL, а не из того, что удалили.
 - [ ] 10.2 Офисные пакеты (`python-docx`, `openpyxl`, `pypdf`, `python-pptx`)
       **остаются** в требованиях агента — решение принято осознанно
 - [ ] 10.3 Убрать из требований агента то, что уехало: `sqlglot`, `duckdb`,
-      `pyarrow`, `faiss`, клиентский LLM-пакет
+      `pyarrow`, `faiss`, клиентский LLM-пакет. `duckdb` и `pyarrow` при этом **переходят в
+      манифест сервера**, а не исчезают
 - [ ] 10.4 Обновить `AGENTS.md`, `CHANGELOG.md`, `docs/`
 - [ ] 10.5 Для `enterprise-mcp`: старт без Nanobot, health, discovery, нормальный запрос,
       некорректный запрос, сбой инфраструктуры, таймаут
@@ -481,8 +495,8 @@ PostgreSQL, а не из того, что удалили.
       `llm_client`, `db.py`, `sql_safety`, `jsonb`, `clean_text`
 - [ ] 10.7 `test_office_files.py` остаётся в прогоне агента — он не переезжает
 - [ ] 10.8 Прогнать архитектурный страж сервисов (2.15) по всему `mcp-platform`:
-      ни одна capability не открывает соединение, не собирает индекс и не
-      создаёт HTTP-клиент LLM
+      ни одна capability не открывает соединение, не собирает индекс, не
+      создаёт HTTP-клиент LLM и не открывает файл снимка
 
 **Приёмка:** чистое окружение с `nanobot-ai==0.3.5` поднимается и работает.
 Сервер не требует Nanobot. Платформа обновляется независимо от агента.

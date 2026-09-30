@@ -84,7 +84,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     Миграция на MCP · аудит завершён
   </div>
   <h1>Один сервер.<br>Агент теряет данные, код и патчи.</h1>
-  <p class="lede">Всё enterprise-слой живёт в <strong>одном</strong> MCP-процессе <strong>enterprise-mcp</strong>, наполняемом динамическим реестром: capability добавляется файлом. PostgreSQL — единственный стор, DuckDB удаляется, FAISS собирается в памяти лениво. Из двенадцати патчей Nanobot остаётся четыре.</p>
+  <p class="lede">Всё enterprise-слой живёт в <strong>одном</strong> MCP-процессе <strong>enterprise-mcp</strong>, наполняемом динамическим реестром: capability добавляется файлом. PostgreSQL — единственный стор, локальный снимок DuckDB остаётся под владением capability <code>data</code>, FAISS собирается в памяти лениво. Из двенадцати патчей Nanobot остаётся четыре.</p>
 </header>
 
 <section>
@@ -185,7 +185,7 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     <text x="515" y="457" font-family="'Outfit',sans-serif" font-size="11.5" fill="#7c7a72">конфигурация и ключи переезжают в конфиг enterprise-mcp</text>
     <text x="515" y="474" font-family="'Outfit',sans-serif" font-size="11.5" fill="#7c7a72">в агенте LLM-клиента не остаётся ни строки</text>
 
-    <text x="35" y="512" font-family="'Outfit',sans-serif" font-size="12" fill="#a8662f">DuckDB удаляется целиком: ~2 600 строк кода, 10 тестовых модулей, весь снимок на диске и класс операционных проблем с ним</text>
+    <text x="35" y="512" font-family="'Outfit',sans-serif" font-size="12" fill="#a8662f">Слой владения снимком снят: координатор, heartbeat и fencing. Снимок остаётся — под одним владельцем, с одним писателем</text>
   </svg>
   </div>
   <p class="caption">Домены audit и legal — capability, а не процессы: у них нет собственного протокола, только операции и инструкция для агента. <code>data</code> — инфраструктура, <code>audit</code> — весь запрос к данным, и SQL от модели не проходит ни через одну операцию.</p>
@@ -522,15 +522,15 @@ footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-si
     <li><div class="who">ШАГ 1</div><p><strong>Реестр:</strong> <code>ToolDefinition</code>, <code>ToolRegistry</code>, загрузчик <code>capabilities/*/tools/*.py</code>, fail-fast на любом нарушении. Идёт раньше любой capability, иначе состав придётся перечислять руками.</p></li>
     <li><div class="who">ШАГ 2</div><p><code>libs/enterprise_data</code> ← <code>workspace/utils/db.py</code> + <code>sql_safety</code> + <code>jsonb</code> + <code>clean_text</code>. Это перенос готового модуля, а не постройка.</p></li>
     <li><div class="who">ШАГ 3</div><p>Capability <code>data</code> — инфраструктура: <code>log_event</code>, <code>history_search</code>, <code>schema_check</code>. Обязательные предохранители: запрет старта без <code>sqlglot</code>, серверный предел стоимости запроса, которого в коде нет, и архитектурный страж, валящий сборку при обходе сервисов.</p></li>
-    <li><div class="who">ШАГ 4</div><p>Capability <code>vectors</code>: сборка FAISS напрямую из PostgreSQL <strong>и лениво</strong> — по первому векторному запросу, с локом на прогрев и наблюдаемым состоянием. Векторы документов предрассчитаны, но вектор запроса эмбедится в рантайме: зависимость от сервиса эмбеддингов остаётся. Переносит <code>build_faiss_index</code>, <code>group_vector_hits</code> и векторную половину <code>cache_provider_impl.py</code>.</p></li>
+    <li><div class="who">ШАГ 4</div><p>Capability <code>vectors</code>: сборка FAISS из снимка <strong>и лениво</strong> — по первому векторному запросу, с локом на прогрев и наблюдаемым состоянием. Снимок читается только через capability <code>data</code>. Векторы документов предрассчитаны, но вектор запроса эмбедится в рантайме: зависимость от сервиса эмбеддингов остаётся. Переносит <code>build_faiss_index</code>, <code>group_vector_hits</code> и векторную половину <code>cache_provider_impl.py</code>.</p></li>
     <li><div class="who">ШАГ 5</div><p>Capability <code>llm</code>: <code>libs/llm</code> + операция <code>complete</code>. Убирает 287 строк LLM-клиента из агента.</p></li>
-    <li><div class="who">ШАГ 6</div><p>Capability <code>audit</code> на PostgreSQL: <code>db_loader</code> напрямую вместо снапшота, плейсхолдеры под <code>psycopg2</code>, схема по умолчанию <code>public</code>, проверка списка таблиц в коде, потолок строк, без <code>context</code> от вызывающей стороны. Убирает последнюю зависимость от снапшота.</p></li>
-    <li><div class="who">ШАГ 7</div><p><strong>Удаление DuckDB</strong> одним коммитом, без MCP-работы. К этому моменту ни векторный поиск, ни реестр скриптов от снапшота не зависят. Baseline пересобирается здесь, не раньше.</p></li>
+    <li><div class="who">ШАГ 6</div><p>Capability <code>audit</code>: перенос конвейера с сохранением диалекта снимка (<code>?</code> и <code>main</code> остаются), проверка списка таблиц в коде, потолок строк, без <code>context</code> от вызывающей стороны. Миграции реестра на PostgreSQL нет — она была бы правкой диалекта без выигрыша для вызывающего.</p></li>
+    <li><div class="who">ШАГ 7</div><p><strong>Перенос кластера снимка</strong> во владельца <code>libs/enterprise_data</code> одним коммитом. ~2 600 строк меняют место жительства, ни одна не удаляется. Снаружи — страж: вне владельца запрещены <code>duckdb.connect</code> и <code>ATTACH</code>. Baseline пересобирается здесь, не раньше.</p></li>
     <li><div class="who">ШАГ 8</div><p>Логирование через <code>enterprise-mcp: log_event</code>: буфер в агенте, батчевый flush, дроп при переполнении. Журнал не встаёт в общую очередь за <code>generate_sql</code> — у сервиса два входа. <code>db_logging_bus.py</code> остаётся в агенте — он знает форму сообщений Nanobot.</p></li>
     <li><div class="who">ШАГ 9</div><p>Патчи → хуки и события. <code>assemble_outbound</code> уходит первым, у него все три обязанности уже выразимы событиями. Проверяется реальным ходом с вложением, заполняется ли вообще слот <code>media</code>.</p></li>
     <li><div class="who">ШАГ 10</div><p>Document-tool агента и перенос <code>legal_summarizer</code> — 30 000 строк с нулевой связностью. Сначала проверяется, что парсер не расходится на две копии.</p></li>
     <li><div class="who">ШАГ 11</div><p>Остатки <code>audit_analyzer</code> в агенте: <code>SKILL.md</code> под три операции, удаление <code>scripts/cli.py</code> и <code>predefined/</code>, разбор расхождения каталога скриптов между текстом и базой.</p></li>
-    <li><div class="who">ШАГ 12</div><p>Разделение зависимостей: из <code>requirements.txt</code> агента уходят <code>sqlglot</code>, <code>duckdb</code>, <code>pyarrow</code>, <code>faiss</code> и клиентский LLM-пакет. Офисные остаются — решение принято осознанно.</p></li>
+    <li><div class="who">ШАГ 12</div><p>Разделение зависимостей: из <code>requirements.txt</code> агента уходят <code>sqlglot</code>, <code>duckdb</code>, <code>pyarrow</code>, <code>faiss</code> и клиентский LLM-пакет. <code>duckdb</code> и <code>pyarrow</code> переходят в манифест сервера, а не исчезают. Офисные остаются — решение принято осознанно.</p></li>
   </ol>
 </section>
 

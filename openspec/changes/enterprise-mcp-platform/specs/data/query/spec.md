@@ -145,6 +145,8 @@ capability.**
   `AbstractConnectionPool` и `create_pool`
 - **AND** вне владельца индексов SHALL отсутствовать импорты `faiss` и вызовы
   `IndexFlatIP`
+- **AND** вне владельца локального снимка SHALL отсутствовать `duckdb.connect`,
+  `ATTACH` и импорт `duckdb`
 - **AND** вне `libs/llm` SHALL отсутствовать вызовы HTTP-клиента провайдера LLM
 - **AND** нарушение SHALL валить проверку, а не писать предупреждение
 

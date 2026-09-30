@@ -10,8 +10,8 @@
 | | |
 |---|---|
 | **Сервер** | **один** — `enterprise-mcp`. Внутри capability-каталоги `data`, `audit`, `vectors`, `llm`, `legal` |
-| **Хранилища** | PostgreSQL — единственный стор. FAISS — в памяти процесса, **ленивая сборка** |
-| **DuckDB** | **удаляется полностью.** Считается лишней абстракцией |
+| **Хранилища** | PostgreSQL — единственный стор. Локальный снимок DuckDB — производный. FAISS — в памяти процесса, **ленивая сборка** |
+| **DuckDB** | **остаётся** локальным снимком под владением capability `data`. Удаляется слой владения, а не снимок — см. §1.1 |
 | **Агент** | `nanobot-ai==0.3.5` не меняется. Знает только LLM, диалог, сессию, MCP-клиент |
 | **Домены** | audit и legal — capability, а не процессы. Живут в `capabilities/<name>/` |
 | **Доступ к данным** | **Модель не пишет SQL.** Три входа: `run_script`, `generate_sql`, `history_search`. Всё исполняемое спроектировано заранее — см. §3.3 |
@@ -19,20 +19,50 @@
 | **Документы** | **остаются в агенте** нативным tool'ом. `office_files.py` не переезжает, офисные пакеты остаются в его `requirements` |
 | **Наполнение сервера** | Динамический реестр: `capabilities/*/tools/*.py` → авто-регистрация. `server.py` не знает список инструментов заранее — см. §3.2 |
 
-Цепочка данных сокращается на один hop:
+Цепочка данных не сокращается — меняется её владелец:
 
 ```
-было:  oarb.audit_vectors (PG) → DuckDB-снапшот → FAISS в памяти
-стало: oarb.audit_vectors (PG) → FAISS в памяти
+было:  lib/services/duckdb_cache_store.py  →  DuckDB-снапшот  →  FAISS в памяти
+стало: libs/enterprise_data                →  DuckDB-снапшот  →  FAISS в памяти
 ```
 
 Векторы документов уже хранятся в PostgreSQL
 (`gateway.vector.index.storage_table`), поэтому capability `vectors` не загружает
 модель эмбеддингов — он берёт готовые векторы. Эмбеддинги документов считает
-отдельная задача. **Но вектор запроса эмбедится в рантайме**
+отдельная задача (`tools/build_vectors.py`), которая пишет в PG.
+**Но вектор запроса эмбедится в рантайме**
 (`get_embedding(query)` → сервис эмбеддингов), так что зависимость от него
 остаётся и должна быть названа, а не обнаружена в проде.
-(`tools/build_vectors.py`), которая пишет в PG.
+
+### 1.1 Почему снимок остаётся
+
+Прежняя редакция этого документа ставила «DuckDB удаляется полностью» и считала
+это ~2 600 строк, которые умирают. Обе цифры были неверны.
+
+**Неверна цифра.** План сам признавал, что `duckdb_query.py` и
+`cache_provider.py` — смешанные модули: `build_faiss_index`, `group_vector_hits`,
+`build_raw_items` и векторная половина `cache_provider_impl.py` переживают
+удаление и переезжают в capability `vectors`. Из «3 600 строк кластера»
+вычиталось то, что не умирает.
+
+**Верен вывод про слой владения — но не про снимок.** Довод «лишняя абстракция»
+работает против координатора владения, heartbeat'а и fencing'а, и они уже
+удалены: change `drop-local-cache-read-from-pg` снял `CacheOwnershipCoordinator`
+(438 строк) и `pg_duckdb_sync_service.py` (798 строк). Снимок после этого
+остался рабочим — он и есть то, что работает в релизе 2.5.3.
+
+**Что теряется при удалении снимка.** Реестр `public.agent_predefined_scripts`
+сегодня читается не из PostgreSQL, а из снимка, и его шаблоны написаны в
+диалекте DuckDB: позиционные `?` в `sql_template` и в `WHERE name = ?` загрузчика,
+схема по умолчанию `main`. Перенос на PostgreSQL — это миграция реестра целиком
+плюс правки в сборщике и загрузчике, ради выигрыша, которого вызывающий не видит.
+`run_script` и `generate_sql` сегодня исполняются против снимка, и это
+эмпирически проверенный путь.
+
+**Цена решения принимается явно**, а не списывается: файл на диске, путь в
+конфигурации, запрет на сетевые ФС, устаревание снимка по построению, единственный
+писатель. Пять обязательных условий исполнения описаны в
+`specs/data/duckdb-cache/spec.md`.
 
 ---
 
@@ -330,7 +360,7 @@ capability `audit` — туда, где лежит реестр скриптов
 
 | Модуль | Строк | Почему |
 |---|---:|---|
-| `scripts/predefined/db_loader.py` | ~150 | Реестр `public.agent_predefined_scripts`. **Переводится на PostgreSQL напрямую**, до удаления DuckDB |
+| `scripts/predefined/db_loader.py` | ~150 | Реестр `public.agent_predefined_scripts`. Переносится как есть, диалект снимка сохраняется — см. §1.1 |
 | `scripts/predefined/validator.py` | ~200 | Типы, обязательность, значения по умолчанию |
 | `scripts/predefined/builder.py` | ~230 | Сборка шаблона, параметризация, авто-`LIMIT` |
 | `scripts/predefined/mode.py` | ~200 | Конвейер `run_script` |
@@ -351,12 +381,13 @@ SQL от вызывающей стороны. Подробные контрак�
 | `tools/check_indexes.py` | 285 | Сверка объявленных индексов с рантаймом |
 | `lib/services/cache_provider_impl.py` | 476 | **Бо́льшая часть — векторная обвязка:** `get_embedding`, `read_embedding_config`, `read_vector_index_config`, `compute/verify_index_signature`, `list_runtime_vector_indexes`. Умирает только `_capture_schema_meta` |
 | `lib/services/preload_service.py` | 318 | Вся его работа — `store.preload_indexes()`, то есть сборка FAISS в памяти |
-| `lib/utils/duckdb_query.py` | 338 **частично** | `build_faiss_index`, `group_vector_hits`, `build_raw_items` — **единственный в репозитории код сборки FAISS.** Извлечь ДО удаления файла |
-| `lib/services/cache_provider.py` | 440 частично | Сам класс умирает, но концепции `SearchResult` и `IndexIntegrityError` векторные — переехать должны они |
+| `lib/utils/duckdb_query.py` | 338 **частично** | `build_faiss_index`, `group_vector_hits`, `build_raw_items` — **единственный в репозитории код сборки FAISS.** Уезжают в `libs/vectors`; `run_query`, `explain_query`, `build_schema`, `rewrite_duck_sql` остаются во владельце снимка |
+| `lib/services/cache_provider.py` | 440 | Интерфейс доступа к снимку. Переезжает во владельца снимка; `SearchResult` и `IndexIntegrityError` уезжают в `libs/vectors` |
 
 ⚠️ `duckdb_query.py` и `cache_provider.py` — **смешанные модули под DuckDB-этикеткой.**
-Удалять их целиком нельзя: capability `vectors` придётся заново выводить группировку
-чанков и косинусную нормализацию с нуля. Сначала извлечение, потом удаление.
+Теперь они не удаляются, а делятся: векторная половина уезжает в capability
+`vectors`, исполнитель запросов остаётся во владельце снимка. Делить по границе
+ролей, а не по названию файла.
 
 Конфигурация индексов переезжает как есть: `project.json::gateway.vector.index.indexes`
 (по индексу: таблица, pk, content/embedding-колонки, track-колонка, chunk_size,
@@ -375,42 +406,45 @@ chunk_overlap, metric).
 с **полным отсутствием** зависимостей от `nanobot`, `psycopg2` и DuckDB.
 Переносится тривиально.
 
-### 4.4 Умирает
+### 4.4 Кластер снимка переезжает, а не умирает
 
-**Кластер DuckDB** — ~2 600 строк, которые действительно умирают
-(из 3 600 строк кластера; остальное переезжает в capability `vectors`):
+**Кластер DuckDB — ~2 600 строк, которые переезжают во владельца снимка
+(`libs/enterprise_data`).** Ни одна из них не удаляется: снимок остаётся
+(§1.1). Переезд меняет место жительства, а не поведение.
 
-| Модуль | Строк | Что умирает |
+| Модуль | Строк | Куда и что |
 |---|---:|---|
-| `lib/services/duckdb_cache_store.py` | 1455 | целиком — ATTACH, блокировки, `_read_conn` на вызов |
-| `lib/services/cache_load_service.py` | 472 | целиком — он существует только чтобы наполнить файл снапшота |
-| `lib/services/cache_provider.py` | 440 | ABC и `open_cache_provider` для локального файла |
-| `lib/utils/duckdb_query.py` | 338 | `run_query`, `explain_query`, `build_schema`, `rewrite_duck_sql` |
-| `lib/services/cache_provider_impl.py` | 476 | только `_capture_schema_meta` |
+| `lib/services/duckdb_cache_store.py` | 1455 | `libs/enterprise_data` целиком — ATTACH, блокировки, `_read_conn` на вызов |
+| `lib/services/cache_load_service.py` | 472 | `libs/enterprise_data` целиком — единственный писатель снимка |
+| `lib/services/cache_provider.py` | 440 | `libs/enterprise_data` — интерфейс и фабрика; `CacheAccessMode` переезжает вместе с ним |
+| `lib/utils/duckdb_query.py` | 338 | Делится: `run_query`, `explain_query`, `build_schema`, `rewrite_duck_sql` — во владельца снимка, векторная половина — в `libs/vectors` |
+| `lib/services/cache_provider_impl.py` | 476 | Только `_capture_schema_meta` — во владельца снимка, остальное — в `libs/vectors` |
 
 **Каскадом — с оговорками:**
 
-| Модуль | Строк | Что умирает |
+| Модуль | Строк | Что меняется |
 |---|---:|---|
-| `lib/core/skill_registration.py` | 98 | Регистрирует skill-ресурсы в `TableRegistry` |
-| `lib/core/skill_config.py` | 325 | `get_in_memory_cache_path` и `build_cache_provider` |
-| `lib/core/project_settings.py` | 759 | секция `CacheSettings`; остальное остаётся |
-| `lib/services/runtime_health.py` | 210 | проверки компонент `duckdb_cache` и `vector_search` — перенаправить на два сервера |
-| `lib/core/application_context.py` | 1816 | 88 строк кэш-обвязки из 1816: `resolve_cache_path`, `_warn_if_cache_path_on_nfs`, `_init_cache_runtime`, `check_duckdb_cache`, `check_vector_search` |
+| `lib/core/skill_registration.py` | 98 | Остаётся: объявления таблиц по-прежнему описывают состав снимка |
+| `lib/core/skill_config.py` | 325 | `get_in_memory_cache_path` и `build_cache_provider` уходят из агента вместе с кэш-API |
+| `lib/core/project_settings.py` | 759 | Секция `CacheSettings` переезжает в конфиг сервера; остальное остаётся |
+| `lib/services/runtime_health.py` | 210 | Проверки компонент `duckdb_cache` и `vector_search` перенаправляются на capability `data` и `vectors` |
+| `lib/core/application_context.py` | 1816 | 88 строк кэш-обвязки из 1816 уходят из агента: `resolve_cache_path`, `_warn_if_cache_path_on_nfs`, `_init_cache_runtime`, `check_duckdb_cache`, `check_vector_search` |
 | `lib/services/__init__.py` | 8 | текст «DuckDB-кеш» в docstring устаревает |
 
 > ✅ **Хорошая новость для шага 1:** `runtime_patcher.py` (2252 строки) не нужно
 > трогать. Его единственное упоминание кэша — неиспользуемый DI-параметр
 > `cache_store: Any = None` (`:583`) с комментарием «резерв для будущих патчей».
 
-> ⚠️ **`table_registry.py` (347) НЕ умирает целиком.** Имя обманывает: это не
-> маппинг PG→DuckDB, а реестр ресурсов с тремя живыми потребителями, не связанными
-> со снапшотом:
+> ⚠️ **`table_registry.py` (347) остаётся целиком.** Имя обманывает: это не
+> маппинг PG→DuckDB, а реестр ресурсов с тремя потребителями:
 > * `resources_by_label("scripts_registry")` — резолвит **таблицу PostgreSQL**
->   для `audit_analyzer` (через `skill_config.py:85-102`). Удаление сломает
->   SQL-скрипты аудита в первый же день;
+>   для `audit_analyzer` (через `skill_config.py:85-102`);
 > * `register_infra("vector.storage")` — регистрирует `oarb.audit_vectors`;
 > * `tracking_column_for` — описывает колонку-маркер в PG.
+>
+> Пока снимок существует, остаётся и агрегация имён в список загрузки для
+> `CacheLoadService` — она по-прежнему нужна. Прежняя редакция плана выписывала
+> её в «умирает», потому что снимок выписывался из проекта.
 >
 > Умирает только агрегация имён в список загрузки для `CacheLoadService`
 > (`application_context.py:1388`). Остальное расходится: векторная часть →
@@ -540,18 +574,19 @@ enterprise-стек». Разбор — `design.md` §7.1.
 
 | Ключ | Судьба |
 |---|---|
-| `gateway.cache.local_path` | **Удалить** — нечего кэшировать на диск |
+| `gateway.cache.local_path` | **Сохраняется** — переезжает в конфиг `enterprise-mcp` как путь снимка. По умолчанию — локальное хранилище пользователя |
 | `gateway.vector.index.default_root` | **Удалить** — путь на диске |
 | `gateway.vector.index.enable` / `backend` / `storage_table` | Сохраняются, переезжают в конфиг `enterprise-mcp` |
 | `gateway.vector.index.indexes.*` | Сохраняются, переезжают в конфиг `enterprise-mcp` |
-| `skills.*.tables` | **Сохраняется** — после удаления DuckDB становится разрешённым списком таблиц для `generate_sql` и источником метки `scripts_registry` |
+| `skills.*.tables` | **Сохраняется** — описывает состав снимка, служит разрешённым списком таблиц для `generate_sql` и источником метки `scripts_registry` |
 | `skills.*.vector_indexes` | **Сохраняется** — становится конфигурацией capability `vectors` |
 | `logging.db.*` | Переезжает в конфиг capability `data` |
 | `channels.postgres.pool.*` | Переезжает в конфиг capability `data` (размер пула — его ответственность) |
 
 Правки затронут `tests/test_config_keys.py` (`REQUIRED_KEYS`) и
-`tests/test_docs_consistency.py`, который сейчас проверяет упоминания DuckDB
-в документации.
+`tests/test_project_settings.py`. Упоминание `test_docs_consistency.py` в прежней
+редакции было фактической ошибкой: модуль встречается с DuckDB только в тексте о
+дубликатах ключей JSON и упоминания в документации не проверяет.
 
 ---
 
@@ -561,31 +596,26 @@ enterprise-стек». Разбор — `design.md` §7.1.
 
 | Куда | Что |
 |---|---|
-| Удалить | `test_duckdb_cache_store.py` (368), `test_cache_provider_meta.py`, `test_single_cache_interface.py` (452), `test_cache_no_file_hold.py`, `test_cache_provider_open_failure.py`, `test_cache_provider_mode.py`, `test_cache_load_service.py`, `test_table_registry.py` (531), `test_skill_cache_boundary.py`, `test_shared_cache_path_across_profiles.py` |
-| Перенести в `mcp-platform` | Тесты capability `data`, capability `audit`, capability `vectors`, `libs/document` |
+| Перенести в `mcp-platform` | 10 модулей кэша (`test_duckdb_cache_store.py`, `test_cache_provider_meta.py`, `test_single_cache_interface.py`, `test_cache_no_file_hold.py`, `test_cache_provider_open_failure.py`, `test_cache_provider_mode.py`, `test_cache_load_service.py`, `test_table_registry.py`, `test_skill_cache_boundary.py`, `test_shared_cache_path_across_profiles.py`) — становятся стражами capability `data`; плюс тесты capability `audit`, `vectors` и `libs/document` |
 | Переписать | `test_application_context*` (5 файлов) — они на ~300 строк ссылаются на снимаемую подсистему |
-| Обновить | `test_config_keys.py`, `test_docs_consistency.py`, `test_project_settings.py` (798) |
-| Добавить | Архитектурный страж сервисов: вне владельцев соединений, индексов и LLM-клиента запрещены `psycopg2.connect`, `*ConnectionPool`, `create_pool`, импорты `faiss`, `IndexFlatIP` и HTTP-вызовы провайдера |
+| Обновить | `test_config_keys.py`, `test_project_settings.py` (798) |
+| Добавить | Архитектурный страж сервисов: вне владельцев соединений, индексов, LLM-клиента и снимка запрещены `psycopg2.connect`, `*ConnectionPool`, `create_pool`, импорты `faiss`, `IndexFlatIP`, `duckdb.connect`, `ATTACH` и HTTP-вызовы провайдера |
 
-**Baseline надо пересобрать после удаления DuckDB, а не до.** Строка допустимых
-падений (4 предсуществующих) станет другой. Чинить старые тесты удалённой
-подсистемы — работа без смысла.
+**Baseline пересобирается на шаге 5, после переезда кластера снимка.** До него
+тесты переезжают вместе с кодом, поэтому пересчитывать строку падений раньше
+бессмысленно.
 
 ---
 
 ## 8. Порядок работ
 
-> **Поправка после аудита `lib/`.** В прошлой редакции я ставил удаление DuckDB
-> первым. Это неверно: код сборки FAISS живёт **внутри** DuckDB-модулей и читает
-> векторы из снапшота (`duckdb_query.build_faiss_index`). Удалив DuckDB раньше
-> capability `vectors`, мы гасим векторный поиск и вынуждены отлаживать два
-> класса отказа одновременно.
->
-> **Поправка после разведки `audit_analyzer`.** Есть и второе ограничение:
-> `db_loader` читает реестр `public.agent_predefined_scripts` через
-> `CacheProvider`, то есть тоже из снапшота. Удаление DuckDB раньше capability
-> `audit` оставит `run_script` без источника. Поэтому переезд `audit` на
-> PostgreSQL обязателен **до** удаления.
+> **Поправка после возврата снимка.** Две предыдущие поправки выводили порядок
+> фаз из того, что снимок удаляется: код сборки FAISS живёт внутри
+> DuckDB-модулей, а `db_loader` читает реестр `public.agent_predefined_scripts`
+> из снимка, поэтому capability `vectors` и `audit` обязаны идти **до** удаления.
+> Снимок остаётся (§1.1), и оба ограничения теряют силу: обе capability читают
+> его через capability `data` и не открывают файл. Ограничение «один механизм за
+> раз» сохраняется, но фазы 4 и 5 становятся переездом, а не переписыванием.
 
 | # | Шаг | Основание |
 |---|---|---|
@@ -593,19 +623,19 @@ enterprise-стек». Разбор — `design.md` §7.1.
 | 1 | Реестр: `ToolDefinition`, `ToolRegistry`, загрузчик `capabilities/*/tools/*.py`, fail-fast | Нужен раньше любой capability, иначе состав придётся перечислять вручную |
 | 2 | `libs/enterprise_data` ← `workspace/utils/db.py` + `sql_safety` + `jsonb` + `clean_text` | Модуль уже чист и покрыт тестами; это перенос, а не постройка |
 | 3 | capability `data`: `log_event`, `history_search`, `schema_check`; два входа в очередь; предел стоимости запроса; запрет старта без `sqlglot`; архитектурный страж сервисов | Тонкий слой: схемы инструментов, маппинг ошибок |
-| 4 | **capability `vectors`**: сборка FAISS **напрямую из PostgreSQL**, лениво | Заменяет путь «снапшот → FAISS». Переносит `build_faiss_index`, `group_vector_hits`, `build_raw_items` и векторную половину `cache_provider_impl.py` |
+| 4 | **capability `vectors`**: сборка FAISS из снимка, лениво | Путь «снапшот → FAISS» сохраняется. Переносит `build_faiss_index`, `group_vector_hits`, `build_raw_items` и векторную половину `cache_provider_impl.py` |
 | 5 | capability `llm`: `libs/llm` + операция `complete` | Убирает 287 строк LLM-клиента из агента |
-| 6 | **capability `audit`** на PostgreSQL: `db_loader` напрямую, плейсхолдеры под `psycopg2`, схема по умолчанию `public`, проверка списка таблиц в коде, потолок строк, без `context` от вызывающего | Убирает последнюю зависимость от снапшота. **Должна идти до шага 7** |
-| 7 | **Удаление DuckDB** одним коммитом, без MCP-работы | К этому моменту ни векторный поиск, ни реестр скриптов от снапшота не зависят. Затрагивает `lib/services/`, 2 утилиты, 88 строк в `application_context.py` и 10 тестовых модулей. Проверяемо пересборкой baseline |
+| 6 | **capability `audit`**: перенос конвейера с сохранением диалекта снимка; проверка списка таблиц в коде, потолок строк, без `context` от вызывающего | Реестр и шаблоны остаются в диалекте снимка (`?`, `main`) — переписывать их под `psycopg2` незачем. Требования безопасности поверхности сохраняются |
+| 7 | **Перенос кластера снимка** во владельца `libs/enterprise_data` одним коммитом | ~2 600 строк меняют место жительства: `duckdb_cache_store.py`, `cache_load_service.py`, `cache_provider.py`, исполнитель запросов из `duckdb_query.py`. Снимок остаётся (§1.1) |
 | 8 | Логирование через `enterprise-mcp: log_event` | Буфер в агенте, батчевый flush. `db_logging_bus.py` остаётся в агенте |
 | 9 | Патчи → хуки и события | 12 → 4 |
 | 10 | document-tool агента + перенос `legal_summarizer` | Самый чистый актив, ноль связности |
 | 11 | Остатки `audit_analyzer` в агенте: `SKILL.md`, удаление `scripts/cli.py` и `predefined/` | Код уже в платформе, остаётся привести описание в порядок |
-| 12 | Разделение зависимостей | Убрать из `requirements.txt` агента `sqlglot`, `duckdb`, `pyarrow`, `faiss`, LLM-пакет. Офисные — остаются, решение принято |
+| 12 | Разделение зависимостей | Убрать из `requirements.txt` агента `sqlglot`, `duckdb`, `pyarrow`, `faiss`, LLM-пакет; `duckdb` и `pyarrow` переходят в манифест сервера. Офисные — остаются, решение принято |
 
-**Пересобрать baseline после удаления DuckDB, не до.** Строка допустимых падений
-(4 предсуществующих) после удаления станет другой; чинить тесты удалённой
-подсистемы — работа без смысла.
+**Пересобрать baseline на шаге 7, не раньше.** Строка допустимых падений
+(4 предсуществующих) изменится, когда тесты кэша переедут вместе с кодом; чинить
+их на старой архитектуре — работа без смысла.
 
 ---
 
@@ -620,6 +650,12 @@ enterprise-стек». Разбор — `design.md` §7.1.
    должна быть **до** — иначе она не сможет сообщить, что сервер не поднялся.
 3. **Redis-канал** — снимает ли однопроцессность (решение §10.1) смысл
    `redis_channel.py` (378) и `message_exchange.py` (171)?
+4. **Предел стоимости запроса к снимку.** Серверный `statement_timeout` — механизм
+   PostgreSQL, к DuckDB он неприменим, и объявлять его там было бы ложным
+   обещанием. Сегодня единственные ограничения запроса к снимку — AST-политика
+   read-only, проверка состава таблиц и потолок строк; ни одно не прерывает уже
+   начавшееся исполнение. Нужен ли явный механизм прерывания, и если да, то чей:
+   поток- watchdog в процессе или ограничение сверху. Владелец и срок не назначены.
 4. **Показывать ли SQL в ответе `run_script`** — по умолчанию убрано: для модели
    это приглашение вернуть ручную правку. Оператору полезно, но оператора звать
    нельзя.
