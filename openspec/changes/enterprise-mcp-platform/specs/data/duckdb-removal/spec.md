@@ -96,6 +96,11 @@ LEGACY в шапке, кодом не читается), `sql/vectors/create_vec
 
 ### Requirement: DuckDB как зависимость
 
+Зависимость DuckDB SHALL быть удалена из состава проекта вместе с кодом,
+который её использовал.
+
+#### Scenario: Зависимость убрана
+
 - **WHEN** состав `requirements.txt` проверяется
 - **THEN** `duckdb` и `pyarrow` SHALL отсутствовать
 - **AND** `grep` по `lib/` и `workspace/` SHALL не находить упоминаний DuckDB
