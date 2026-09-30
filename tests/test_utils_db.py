@@ -543,22 +543,78 @@ class TestPool:
                 third_result.append(f"err:{exc!r}")
 
         tc = threading.Thread(target=_third)
-        tc.start()
-        # Детерминированно ждём, что третья транзакция реально началась
-        # (а не «прошло 0.3с от старта потока» — на загруженной машине поток
-        # мог не успеть стартовать, и 3-я операция успевала завершиться, что
-        # давало ложный флейк). Затем наблюдаем окно ~0.5с: третья должна
-        # ждать в очереди (workers=2 заняты), не падая с ошибкой.
-        assert third_started.wait(timeout=30)
-        deadline = time.monotonic() + 0.5
-        while time.monotonic() < deadline:
-            assert third_result == []
-            time.sleep(0.02)
-        release.set()
-        ta.join(timeout=30); tb.join(timeout=30)
-        tc.join(timeout=30)
+        # Детерминированная проверка предпосылки вместо окна времени. Раньше
+        # здесь стояло наблюдение 0.5с с утверждением «третья не завершилась»:
+        # окно — монетка, и оно маскировало настоящий дефект — пул умел
+        # вырасти выше max_conn, и третья транзакция получала лишний воркер
+        # вместо ожидания. Теперь снимок пула в момент входа третьей
+        # транзакции в аренду: оба воркера заняты, пул упёрся в потолок,
+        # значит ждать она обязана.
+        _db = mock_psycopg2["_db"]
+        third_entered = threading.Event()
+        third_view: dict = {}
+        orig_acquire = _db.DBManager._acquire_lease
+
+        def _watched_acquire(self, tag=""):
+            if threading.current_thread() is tc:
+                with self._cond:
+                    third_view.update(
+                        workers=len(self._workers),
+                        max_conn=self._max_conn,
+                        free=sum(1 for w in self._workers if w._lease_id == 0),
+                    )
+                third_entered.set()
+            return orig_acquire(self, tag)
+
+        with patch.object(_db.DBManager, "_acquire_lease", _watched_acquire):
+            tc.start()
+            assert third_started.wait(timeout=30)
+            assert third_entered.wait(timeout=30), "третья транзакция не дошла до аренды"
+            assert third_view["workers"] == third_view["max_conn"], third_view
+            assert third_view["free"] == 0, third_view
+            release.set()
+            ta.join(timeout=30); tb.join(timeout=30)
+            tc.join(timeout=30)
+        assert not tc.is_alive(), "третья транзакция застряла"
         assert third_result == ["ok"]
         assert sorted(results) == ["a", "b"]
+
+    def test_pool_never_exceeds_max_conn(self, mock_psycopg2):
+        """Инвариант: конкурентный старт и аренда не открывают лишних
+        соединений.
+
+        Регрессия: ``start()`` рос под ``_lifecycle_lock``, а
+        ``_acquire_lease``/``_submit`` — под ``_cond``, поэтому проверка
+        «пор пул не вырос» и сам рост были не атомарны. Потоки,
+        одновременно поднявшие пул и взявшие аренду, давали 3-4 воркера при
+        max_conn=2, и лишние транзакции проходили мимо ожидания.
+        """
+        mock_psycopg2["set_pool_config"]({"min_conn": 2, "max_conn": 2})
+        mock_psycopg2["configure"]("dsn")
+
+        errors: list[str] = []
+        gate = threading.Barrier(8, timeout=30)
+
+        def _worker(i: int) -> None:
+            try:
+                gate.wait()
+                with mock_psycopg2["transaction"]() as conn:
+                    conn.execute("UPDATE t SET x=%s", i)
+            except Exception as exc:
+                errors.append(f"{i}:{exc!r}")
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+            assert not t.is_alive(), "поток застрял в ожидании воркера"
+
+        assert errors == [], errors
+        mgr = mock_psycopg2["_db"]._get_manager()
+        assert len(mgr._workers) <= mgr._max_conn, (
+            f"пул вырос выше max_conn: {len(mgr._workers)} > {mgr._max_conn}"
+        )
 
     def test_lease_released_when_begin_fails(self, mock_psycopg2):
         """Утечка лиза: если begin-задача падает, воркер возвращается в пул."""
@@ -572,7 +628,7 @@ class TestPool:
             side_effect=RuntimeError("begin boom"),
         ):
             with pytest.raises(RuntimeError, match="begin boom"):
-                with mock_psycopg2["transaction"]() as conn:
+                with mock_psycopg2["transaction"]():
                     pass
 
         mgr = _db._get_manager()

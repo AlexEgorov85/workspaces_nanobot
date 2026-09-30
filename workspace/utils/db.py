@@ -402,6 +402,7 @@ class DBManager:
         self._job_max_retries = int(_pool_cfg.get("job_max_retries", 3))
         self._connect_max_retries = int(_pool_cfg.get("connect_max_retries", 5))
         self._lifecycle_lock = threading.Lock()
+        self._worker_seq = 0
 
         # Вывод активности db-worker'ов в терминал (по образцу
         # print_worker_activity для воркеров задач канала). Включается
@@ -429,7 +430,14 @@ class DBManager:
             self._running = True
             self._started = True
             self._stop.clear()
-            for _ in range(self._min_conn):
+            if self._min_conn > self._max_conn:
+                # Мис-конфиг: доводим пул до потолка и не превышаем его —
+                # иначе поднялось бы лишнее соединение.
+                logger.warning(
+                    "db-pool: min_conn=%d больше max_conn=%d, пул поднят на %d",
+                    self._min_conn, self._max_conn, self._max_conn,
+                )
+            for _ in range(min(self._min_conn, self._max_conn)):
                 self._spawn_worker()
         return self
 
@@ -441,14 +449,33 @@ class DBManager:
                 self._running = False
                 self._stop.set()
                 self._cond.notify_all()
+            # join вне _cond: выход воркера тоже берёт _cond, и join под ним
+            # был бы взаимоблокировкой.
             for w in list(self._workers):
                 w.join(timeout=2.0)
-            self._workers.clear()
+            with self._cond:
+                self._workers.clear()
             self._started = False
 
-    def _spawn_worker(self) -> _Worker:
-        w = _Worker(self, len(self._workers))
-        self._workers.append(w)
+    def _spawn_worker(self) -> _Worker | None:
+        """Создать воркера, не превысив ``max_conn``.
+
+        Список воркеров — общий ресурс, и правят его три места: ``start()``
+        под ``_lifecycle_lock``, аренда и ``_submit`` под ``_cond``. Пока
+        проверка «пор пул не вырос» и сам рост жили в разных замках, два
+        потока, одновременно поднявшие пул и взявшие аренду, открывали
+        больше соединений, чем разрешено: третья транзакция получала
+        свежий воркер вместо ожидания занятого, а PostgreSQL получал
+        больше коннектов, чем ``max_conn``. Поэтому потолок проверяется и
+        применяется здесь, под одним замком, а не на стороне вызова.
+        ``None`` означает «потолок достигнут»: вызывающий ждёт освобождения.
+        """
+        with self._cond:
+            if len(self._workers) >= self._max_conn:
+                return None
+            self._worker_seq += 1
+            w = _Worker(self, self._worker_seq)
+            self._workers.append(w)
         w.start()
         return w
 
@@ -533,12 +560,14 @@ class DBManager:
             self._queue.append(job)
             # Автомасштаб: если все воркеры заняты/зализированы, а в очереди
             # есть задачи — дорастим пул до max_conn (простаивающие потом
-            # уходят по idle_timeout в _maybe_shrink).
+            # уходят по idle_timeout в _maybe_shrink). Потолок держит сам
+            # _spawn_worker, поэтому None означает «уже на max_conn».
             while len(self._workers) < self._max_conn:
                 free = sum(1 for w in self._workers if w._lease_id == 0)
                 if len(self._queue) <= free:
                     break
-                self._spawn_worker()
+                if self._spawn_worker() is None:
+                    break
             self._cond.notify_all()
         return job.result
 
@@ -559,7 +588,9 @@ class DBManager:
                         "DB pool is shutting down while waiting for lease"
                     )
                 free = next((w for w in self._workers if w._lease_id == 0), None)
-                if free is None and len(self._workers) < self._max_conn:
+                if free is None:
+                    # Потолок проверяет сам _spawn_worker: если пул уже на
+                    # max_conn, он вернёт None и мы честно встанем в ожидание.
                     free = self._spawn_worker()
                 if free is not None:
                     self._lease_seq += 1
