@@ -91,8 +91,8 @@ Python `REGISTRY` (legacy) отсутствует; единственный пу
 PostgreSQL
     ↓ seed/migration
 public.agent_predefined_scripts (6 скриптов)
-    ↓ PgDuckDbSyncService
-DuckDB-PG snapshot (default ~/.cache/nanobot/duckdb/cache.duckdb — см. resolve_publish_path)
+    ↓ CacheLoadService — разовая загрузка при старте gateway
+локальный кэш (путь выбирает runtime, skill его не знает)
     ↓ db_loader.load_script / load_all
 ScriptDefinition
     ↓ predefined.run(name, db, params, *, predefined_table=...)
@@ -259,7 +259,7 @@ Agent-цикл:
 
 ## Доменная модель (бизнес-глоссарий)
 
-Техническая schema (колонки, типы) — в DuckDB-кэше, читается через
+Техническая schema (колонки, типы) — в локальном кэше, читается через
 `CacheProvider.get_schema()`. Никаких ручных копий schema в SKILL.md.
 
 **Бизнес-термины домена:**
@@ -302,7 +302,8 @@ Agent-цикл:
   `EMBED_TOKEN`);
 - деталями хранения и валидации vector-индексов (Core);
 - LLM-протоколами (`lib/services/llm_client.py` / Core);
-- **выбором хранилища**: DuckDB или что-то другое — деталь runtime.
+- **выбором хранилища** и его реализации: DuckDB, что-то другое —
+  деталь runtime.
 
 ### Доступ к кэшу
 
@@ -310,11 +311,18 @@ Skill получает провайдера кэша **только** через
 `CacheProvider`, из единой точки создания. Skill не открывает файл кэша,
 не вычисляет путь к нему и не выбирает реализацию.
 
-Файл кэша — **process-exclusive** ресурс: если его уже держит другой
-процесс (например, запущенный gateway), skill не может работать и
-завершается с типизированной ошибкой «кэш занят другим процессом». Это
-не означает, что файл отсутствует, и запускать ради этого gateway не нужно
-— наоборот, он и создаёт конкуренцию. Завершите держатель и повторите.
+Файл кэша **никто не держит**. Runtime наполняет его один раз при старте и
+сразу отпускает; skill открывает его только на время своей операции, в
+режиме `READ_ONLY`, и закрывает по завершении. Поэтому конкуренции за файл
+нет: работающий gateway не мешает skill'у, запускать его «чтобы снять
+занятость» не нужно.
+
+Кэш — **снимок** состояния PostgreSQL на момент загрузки. Догоняющих
+изменений нет: если данные в PostgreSQL изменились после последней
+загрузки, skill этого не увидит. Время снимка runtime записывает в
+событие `cache_load_done` журнала `agent_gateway_logs` (поле `payload.loaded_at`)
+— сверяйся с ним, прежде чем ссылаться на «текущие» данные. Сам skill
+признаков устаревания не вычисляет.
 
 Доступ агента — через CLI (`scripts/cli.py`). Generic tools
 `duckdb_query` и `vector_search` отсутствуют — агент обращается к данным
@@ -324,8 +332,8 @@ Skill получает провайдера кэша **только** через
 ## Как добавить новый predefined-скрипт
 
 1. Сделать DDL в БД: `INSERT INTO public.agent_predefined_scripts (...)`.
-2. Дождаться синхронизации (`PgDuckDbSyncService` опубликует снимок; путь —
-   см. `resolve_publish_path()` в `lib/core/application_context.py`).
+2. Перезагрузить кэш — снимок обновляется только при загрузке, то есть при
+   старте runtime (путь и момент выбирает runtime, skill не участвует).
 3. Описать в разделе «Каталог predefined scripts» этого файла.
 4. Добавить тест в
    `tests/test_audit_analyzer_predefined.py`.
@@ -343,7 +351,7 @@ skill'а.
 python workspace/skills/audit_analyzer/scripts/cli.py --list-scripts
 
 # Список runtime-индексов (реальные вектора из storage_table в
-# DuckDB-снапшоте; не декларация из project.json — её показывает
+# локальном кэше; не декларация из project.json — её показывает
 # tools/check_indexes.py).
 python workspace/skills/audit_analyzer/scripts/cli.py --list-indexes
 ```
@@ -358,7 +366,7 @@ python workspace/skills/audit_analyzer/scripts/cli.py --list-indexes
 | Источник | Что отвечает | Как обнаружить |
 |---|---|---|
 | `project.json::gateway.vector.index.indexes.*` | **желаемое состояние** — какие индексы должны быть построены и как | `tools/check_indexes.py --json` (секция `declared`) |
-| `gateway.vector.index.storage_table` в DuckDB-снапшоте | **фактическое состояние** — какие индексы реально собраны (значения `source`) | `--list-indexes` И `tools/check_indexes.py` (секция `runtime`) |
+| `gateway.vector.index.storage_table` в локальном кэше | **фактическое состояние** — какие индексы реально собраны (значения `source`) | `--list-indexes` И `tools/check_indexes.py` (секция `runtime`) |
 
 **Проверка согласованности:**
 

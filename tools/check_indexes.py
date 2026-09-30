@@ -6,7 +6,7 @@
     (что должно быть построено);
   * runtime-состояние, которое видит ``search_vector`` — индексы,
     перечисленные ``list_runtime_vector_indexes`` из
-    ``lib.services.cache_provider_impl`` по данным DuckDB-снапшота
+    ``lib.services.cache_provider_impl`` по данным DuckDB-кэша
     ``gateway.vector.index.storage_table`` (что реально собрано).
 
 Используется как точка входа для CI / pre-deploy / при ручной проверке.
@@ -16,7 +16,7 @@ Exit codes
 * ``0`` — нет расхождений;
 * ``1`` — есть расхождение (declared-but-missing / orphan / stale /
   invalid signature);
-* ``2`` — инфраструктурная ошибка (DuckDB-снапшот недоступен, project.json не
+* ``2`` — инфраструктурная ошибка (DuckDB-кэш недоступен, project.json не
   валиден и т.п.).
 
 Зачем
@@ -28,7 +28,7 @@ Exit codes
 декларацией и runtime:
 
   * декларация (``project.json``) — desired state;
-  * runtime (DuckDB-снапшот ``storage_table``) — actual state;
+  * runtime (DuckDB-кэш ``storage_table``) — actual state;
   * этот скрипт — контроль расхождения.
 """
 from __future__ import annotations
@@ -59,7 +59,7 @@ def _diff(
     declared: dict[str, Any] | Exception,
     runtime: list[dict[str, Any]] | Exception,
 ) -> dict[str, Any]:
-    """Сравнить декларацию (JSON) и runtime (PG). Возвращает структурированный diff.
+    """Сравнить декларацию (JSON) и runtime (DuckDB-кэш). Возвращает структурированный diff.
 
     Возвращает dict с ключами:
       ``declared``: {name: {…из declared JSON…}}, ``source='json'`` или
@@ -168,16 +168,30 @@ def _diff(
 
 def _load_declared() -> dict[str, Any] | Exception:
     try:
-        return read_vector_index_config({}) or {}
+        return read_vector_index_config() or {}
     except Exception as exc:
         return exc
 
 
-def _load_runtime(fetch_fn=None) -> list[dict[str, Any]] | Exception:
+def _open_provider() -> Any:
+    """Открыть DuckDB-кэш в read-only через единственную точку создания.
+
+    Инструмент читает кэш, а не PG, и не создаёт собственного соединения:
+    ``list_runtime_vector_indexes`` работает через интерфейс провайдера.
+    """
+    from lib.services.cache_provider import CacheAccessMode
+    from lib.services.cache_provider import open_cache_provider
+
+    return open_cache_provider(mode=CacheAccessMode.READ_ONLY)
+
+
+def _load_runtime() -> list[dict[str, Any]] | Exception:
     try:
-        if fetch_fn is not None:
-            return list_runtime_vector_indexes(fetch_fn=fetch_fn)
-        return list_runtime_vector_indexes()
+        provider = _open_provider()
+    except Exception as exc:
+        return exc
+    try:
+        return list_runtime_vector_indexes(provider=provider)
     except Exception as exc:
         return exc
 
@@ -235,13 +249,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="вывести структурированный JSON вместо человеко-читаемого текста",
     )
-    parser.add_argument(
-        "--fetch-fn",
-        type=str,
-        default=None,
-        help=argparse.SUPPRESS,  # internal: для тестов (не используется)
-    )
     args = parser.parse_args(argv)
+
+    # Standalone-утилита: нет entrypoint, который бы опубликовал SETTINGS
+    # (тот же паттерн, что в tools/build_vectors.py). Оверлей профиля `test`
+    # меняет только имена таблиц каналов/логов — `workspace_path` и
+    # `gateway.cache.local_path` для этого инструмента те же, что у prod.
+    import config as _cfg
+
+    if not _cfg.is_settings_initialized():
+        _cfg._initialize_settings(profile="test")
 
     declared = _load_declared()
     runtime = _load_runtime()

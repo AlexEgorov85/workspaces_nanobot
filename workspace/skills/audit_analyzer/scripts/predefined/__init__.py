@@ -2,11 +2,11 @@
 
 Public API:
 
-* :func:`predefined.run` — выполнить скрипт через generic DuckDB-сервис.
+* :func:`predefined.run` — выполнить скрипт через ``CacheQueryService``.
 * :func:`predefined.list_scripts` — метаданные всех скриптов из DB.
 * :func:`predefined.list_available` — список имён через запятую.
 * :func:`predefined.load_script` / :func:`predefined.load_all` — DB-only
-  чтение из ``public.agent_predefined_scripts`` через DuckDB-PG-снимок.
+  чтение из ``public.agent_predefined_scripts`` через локальный кэш.
 * :class:`predefined.ScriptDefinition` — описание одного скрипта.
 * :class:`predefined.ParamDefinition` — описание параметра.
 * :class:`predefined.ParameterValidator` — валидация параметров.
@@ -28,7 +28,7 @@ from workspace.skills.audit_analyzer.scripts.predefined.db_loader import (
     load_script,
 )
 from workspace.skills.audit_analyzer.scripts.predefined.mode import (
-    DuckDBServiceProtocol,
+    CacheQueryService,
     list_available,
     list_scripts,
     run,
@@ -47,7 +47,7 @@ __all__ = [
     "BuildError",
     "DBScriptProvider",
     "DynamicQueryBuilder",
-    "DuckDBServiceProtocol",
+    "CacheQueryService",
     "ParamDefinition",
     "ParameterValidator",
     "ScriptDefinition",

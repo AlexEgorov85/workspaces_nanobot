@@ -70,7 +70,7 @@ MODES = ("predefined", "generated_sql", "vector")
 def _resolve_known_index(index_name: str) -> tuple[bool | None, str]:
     """Проверить, что ``index_name`` зарегистрирован в runtime-реестре.
 
-    Использует публичный ``cache_provider_impl.read_vector_index_config({})`` —
+    Использует публичный ``cache_provider_impl.read_vector_index_config()`` —
     не лезем в приватное состояние provider'а.
 
     Returns:
@@ -86,7 +86,7 @@ def _resolve_known_index(index_name: str) -> tuple[bool | None, str]:
     """
     try:
         from lib.services.cache_provider_impl import read_vector_index_config
-        names = sorted(read_vector_index_config({}).keys())
+        names = sorted(read_vector_index_config().keys())
     except Exception as exc:
         return (
             None,
@@ -168,7 +168,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="audit_analyzer_cli",
         description=(
             "audit_analyzer: predefined SQL, NL->SQL через LLM, "
-            "или vector-поиск по DuckDB-кэшу."
+            "или vector-поиск по локальному кэшу."
         ),
     )
     parser.add_argument(
@@ -247,7 +247,7 @@ def _open_db():
     Никакой собственной диагностики ошибок открытия здесь не конструируется:
     причина (в том числе конфликт process-exclusive) приходит типизированным
     исключением из слоя кэша. Раньше skill превращал любой отказ в
-    «DuckDB-кеш не найден» и советовал запустить gateway — то есть
+    «кэш не найден» и советовал запустить gateway — то есть
     предлагал запустить тот самый процесс, который и вызывает блокировку.
     """
     provider = build_cache_provider()
@@ -305,13 +305,13 @@ def _list_scripts(db: Any) -> dict:
     }
 
 
-def _list_indexes() -> dict:
-    """Каталог runtime-индексов из DuckDB-снапшота ``<storage_table>``.
+def _list_indexes(db: Any) -> dict:
+    """Каталог runtime-индексов из локального кэша (``<storage_table>``).
 
     После change ``remove-vector-index-store`` persisted FAISS-кеш
     (``agent_vector_index_store``) удалён. Runtime-состояние индексов
-    — это набор ``source`` (index_name), присутствующих в DuckDB-кэше
-    ``storage_table`` (синхронизируется через ``PgDuckDbSyncService``).
+    — это набор ``source`` (index_name), присутствующих в локальном кэше
+    (``storage_table``, наполняется при загрузке кэша при старте процесса).
     Это фактические артефакты, которые runtime реально увидит при поиске.
     Конфиг декларации (``project.json::gateway.vector.index.indexes``)
     здесь **не** используется — он покажет то, что обещано построить,
@@ -320,8 +320,8 @@ def _list_indexes() -> dict:
 
     Поля элемента списка:
       ``index_name``        — имя индекса (= ``source`` в storage_table);
-      ``vectors``           — количество чанков (DuckDB COUNT(*));
-      ``dimension``         — ``None`` (DuckDB не хранит размерность
+      ``vectors``           — количество чанков;
+      ``dimension``         — ``None`` (хранилище не хранит размерность
                               векторов как поле);
       ``signature_status``  — ``CURRENT`` если index_name в ``declared``,
                               иначе ``ORPHAN`` (нет persisted-signature —
@@ -345,20 +345,20 @@ def _list_indexes() -> dict:
         }
 
     try:
-        runtime = list_runtime_vector_indexes()
+        runtime = list_runtime_vector_indexes(provider=db)
     except Exception as exc:
         return {
             "status": "error",
             "data": {
                 "message": (
-                    f"DuckDB-снапшот ``<storage_table>`` недоступен: {exc}. "
+                    f"локальный кэш (``<storage_table>``) недоступен: {exc}. "
                     f"Это инфраструктурная ошибка (exit 2 в tools/check_indexes.py)."
                 ),
                 "error_type": "store_unavailable",
             },
         }
 
-    declared = read_vector_index_config({}) or {}
+    declared = read_vector_index_config() or {}
 
     items: list[dict] = []
     for row in sorted(runtime, key=lambda r: r.get("source") or ""):
@@ -380,7 +380,7 @@ def _list_indexes() -> dict:
             "count": len(items),
             "indexes": items,
             "note": (
-                "Source: DuckDB-снапшот ``<storage_table>`` (runtime artifacts). "
+                "Source: локальный кэш ``<storage_table>`` (runtime artifacts). "
                 "Compare against ``project.json::gateway.vector.index.indexes`` "
                 "via ``tools/check_indexes.py`` to see declared-but-missing indexes."
             ),
@@ -539,7 +539,7 @@ def _run(args: argparse.Namespace) -> dict:
         if getattr(args, "list_scripts", False):
             return _list_scripts(db)
         if getattr(args, "list_indexes", False):
-            return _list_indexes()
+            return _list_indexes(db)
         if args.mode == "predefined":
             return _run_predefined(args.script, db, args.params)
         if args.mode == "generated_sql":

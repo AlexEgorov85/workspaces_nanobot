@@ -11,7 +11,7 @@
 (legacy) больше не существует.
 
 Не тестируют LLM-Agent — только Python-API ``predefined.run`` и
-``DuckDBServiceProtocol``.
+``CacheQueryService``.
 """
 
 from __future__ import annotations

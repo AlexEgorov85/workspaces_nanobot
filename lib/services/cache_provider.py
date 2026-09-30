@@ -11,18 +11,37 @@
 
 Конкретная реализация не завязана на предметную область — любое приложение
 (навык, модуль) получает эти методы через интерфейс и само интерпретирует
-результаты. Сама реализация живёт в `cache_provider_impl.py` и управляется
-из gateway (жизненный цикл: refresh / check_stale / preload_indexes / close).
+результаты. Реализация живёт в `duckdb_cache_store.py` и создаётся
+единственной фабрикой `open_cache_provider()` (жизненный цикл: connect /
+preload_indexes / close; репликация PG → кэш — дело sync-слоя).
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from enum import Enum
+from typing import Any
 
-if TYPE_CHECKING:  # pragma: no cover — только для аннотаций
-    from lib.services.cache_ownership import CacheAccessMode
+from config import ConfigurationError
+
+
+class CacheAccessMode(Enum):
+    """Режим доступа к cache storage.
+
+    Описывает **свойство доступа**, а не результат координации владения между
+    процессами: распределённый ownership удалён (см. change
+    ``drop-local-cache-read-from-pg``), и режим определяется стадией
+    жизненного цикла кэша — ``READ_WRITE`` только на стадии пересоздания кэша
+    при старте процесса, ``READ_ONLY`` во всех остальных случаях.
+
+    Раньше enum жил в ``lib/services/cache_ownership.py`` и режим выбирался из
+    результата ``CacheOwnershipCoordinator.try_claim()``. Он перенесён сюда,
+    рядом с ``CacheProvider``, чей режим доступа он и описывает.
+    """
+
+    READ_WRITE = "READ_WRITE"
+    READ_ONLY = "READ_ONLY"
 
 
 @dataclass
@@ -127,13 +146,40 @@ class CacheBusyError(Exception):
         )
 
 
-class CacheProvider(ABC):
-    """Абстрактный провайдер кэша данных (SQL-кеш + векторные индексы).
+class CacheOpenError(ConfigurationError):
+    """Файл кэша не удалось открыть (кроме случая «занят другим процессом»).
 
-    **Единственная точка доступа к файлу кэша** для runtime, skills и любых
-    других компонентов. Конкретная реализация (DuckDB, другая СУБД, файл
-    в памяти) — деталь этого модуля: называть конкретный класс хранилища
-    запрещено, всё поведение выражается этим интерфейсом.
+    Занятость разбирается отдельно и поднимается как :class:`CacheBusyError`.
+    Всё остальное — битый/повреждённый файл, неподдерживаемая FS, read-only
+    к несуществующему файлу, недостаточные права — раньше приводило к
+    ``connect() → False``, а этот ``False`` молча игнорировался точкой
+    создания. На выходе был объект, о котором ``is_ready()`` говорит
+    ``False``, а вызывающий считал его рабочим: skill печатал
+    «cache provider ready» и получал «DuckDbCacheStore is not ready» на
+    первом же запросе.
+
+    Ошибка открытия — это ошибка startup-инфраструктуры, поэтому она
+    поднимается, а не возвращается флагом.
+    """
+
+    def __init__(self, path: str = "", cause: Exception | None = None) -> None:
+        self.path = path
+        self.cause = cause
+        detail = f": {cause}" if cause is not None else ""
+        super().__init__(
+            f"Не удалось открыть файл кэша {path}{detail}. "
+            "Файл кэша — обязательная startup-зависимость: процесс, не "
+            "получивший его, не считается запущенным."
+        )
+
+
+class CacheProvider(ABC):
+    """Роль **чтения**: что получают потребители (runtime, skills, tools).
+
+    Единственная точка доступа к файлу кэша для всех, кто читает.
+    Конкретная реализация (DuckDB, другая СУБД, файл в памяти) — деталь
+    этого модуля: называть конкретный класс хранилища запрещено, всё
+    поведение выражается этим интерфейсом.
 
     Создание провайдера — не метод этого класса, а модульная функция
     :func:`open_cache_provider`. Экземпляр открывает файл один раз; файл
@@ -141,12 +187,16 @@ class CacheProvider(ABC):
     процесс, невозможно — и это surfaced как типизированная ошибка
     :class:`CacheBusyError`, а не как «кэш недоступен».
 
-    Состав контракта намеренно узкий:
+    **Роли записи здесь нет намеренно.** Потребитель не пишет в кэш: если бы
+    он мог, интерфейс описывал бы две разные аудитории (читателей и
+    ingestion) одним списком методов, и половина контракта досталась бы тем,
+    кому она не адресована. Запись живёт в :class:`CacheIngestion`, а
+    реализация удовлетворяет обоим ролям через :class:`CacheStore`.
+
+    Состав роли:
 
     * **чтение** — ``query_sql``, ``explain``, ``get_schema``,
       ``search_vector``, ``preload_indexes``;
-    * **единственная мутация** — ``upsert_records`` (ingestion от
-      sync-слоя, а не со стороны потребителя);
     * **ресурс** — ``is_ready``, ``close``.
 
     Репликация PostgreSQL → кэш (``refresh``, ``check_stale``) в контракт
@@ -215,7 +265,30 @@ class CacheProvider(ABC):
         """Получить структуру таблиц кэша (information_schema)."""
         raise NotImplementedError
 
-    # -- запись ---------------------------------------------------------
+    # -- resource -------------------------------------------------------
+
+    @abstractmethod
+    def close(self) -> None:
+        """Закрыть открытые ресурсы (соединение кэша и т.п.)."""
+        raise NotImplementedError
+
+
+class CacheIngestion(ABC):
+    """Роль **записи**: её получает только sync-слой.
+
+    Sync-сервис — единственный владелец содержимого кэша, и он умеет три
+    разные вещи, которые нельзя смешивать:
+
+    * ``upsert_records`` — долить/обновить дельту;
+    * ``replace_records`` — полная перезапись таблицы (full resync);
+    * ``ensure_schema`` — создать/дополнить таблицу под новый набор колонок.
+
+    Раньше эти три были объявлены на concrete-классе, а runtime дёргал их
+    через переменную, типизированную ``CacheProvider``: контракт врал, и
+    guard, проверявший «ровно одну мутацию в ABC», тем самым запрещал
+    честный фикс. Теперь они объявлены здесь, а потребители получают
+    :class:`CacheProvider` без единого write-метода.
+    """
 
     @abstractmethod
     def upsert_records(
@@ -227,10 +300,6 @@ class CacheProvider(ABC):
     ) -> bool:
         """Добавить/обновить строки таблицы в кэше.
 
-        Единственная мутация в контракте: её вызывает sync-слой
-        (``PgDuckDbSyncService``), а не потребитель. Потребители читают
-        кэш и не пишут в него.
-
         Args:
             table: ``schema.table`` (или ``table`` в схеме хранилища).
             records: батч строк (dict).
@@ -241,19 +310,47 @@ class CacheProvider(ABC):
         """
         raise NotImplementedError
 
-    # -- resource -------------------------------------------------------
+    @abstractmethod
+    def replace_records(
+        self,
+        table: str,
+        records: list[dict[str, Any]],
+    ) -> bool:
+        """Полностью пересоздать содержимое таблицы (full resync).
+
+        Деструктивная операция: несвязанные строки удаляются. Вызывается
+        только sync-слоем.
+        """
+        raise NotImplementedError
 
     @abstractmethod
-    def close(self) -> None:
-        """Закрыть открытые ресурсы (соединение кэша и т.п.)."""
+    def ensure_schema(
+        self,
+        table: str,
+        records: list[dict[str, Any]],
+        schema_meta: dict[tuple[str, str], tuple[str, str]] | None = None,
+    ) -> bool:
+        """Привести схему таблицы в соответствие с батчем (DDL при нехватке)."""
         raise NotImplementedError
+
+
+class CacheStore(CacheProvider, CacheIngestion):
+    """Полный контракт единственного хранилища кэша: чтение + ingestion.
+
+    Это то, что возвращает :func:`open_cache_provider` и что лежит в
+    ``ApplicationContext.cache_provider``. Роли разделены, но реализация
+    по-прежнему одна, а разделение видно в типах, а не в соглашениях.
+
+    Наружу (DI project tools, skills) отдаётся ``CacheProvider`` — то есть
+    только чтение. Синхронизатор получает ``CacheIngestion``.
+    """
 
 
 def open_cache_provider(
     *,
     mode: CacheAccessMode,
     db_logging_service: Any | None = None,
-) -> CacheProvider:
+) -> CacheStore:
     """**Единственная точка создания** ``CacheProvider`` в рантайме.
 
     Её зовут одинаково: runtime (composition root), skills, project tools и
@@ -267,7 +364,7 @@ def open_cache_provider(
     реализации (``store._schema = ...``) — это и было то место, где знание
     о реализации протекало наружу.
 
-    Путь к файлу кэша разрешается единой функцией ``resolve_publish_path()``:
+    Путь к файлу кэша разрешается единой функцией ``resolve_cache_path()``:
     второй потребитель той же настройки, трактующий её иначе, и есть
     источник расхождения путей.
 
@@ -275,7 +372,7 @@ def open_cache_provider(
         mode: требуемый режим доступа. ``READ_WRITE`` — процесс пишет в кэш
             (владелец, sync-слой); ``READ_ONLY`` — процесс только читает.
         db_logging_service: sink операционных событий реализации
-            (sync/publish). ``None`` — события не пишутся.
+            (sync/upsert). ``None`` — события не пишутся.
 
     Returns:
         Готовый к работе экземпляр реализации.
@@ -286,25 +383,28 @@ def open_cache_provider(
             предварительной проверки не выполняется и выполняться не
             должно (TOCTOU-гонка: оба процесса увидят «свободно» и оба
             упадут при открытии).
+        CacheOpenError: файл не удалось открыть по другой причине (битый
+            файл, read-only к несуществующему файлу, права). Раньше этот
+            случай возвращался как ``connect() → False``, а флаг
+            игнорировался, и наружу уходил «готовый» неготовый объект.
         UnsupportedFilesystemError: путь лежит на network/shared
             filesystem, где locking semantics не поддерживаются.
     """
     # Импорты внутри функции: модули реализации импортируют этот модуль
     # (ABC, SearchResult, исключения), и на уровне модулей получился бы цикл.
-    from lib.core.application_context import resolve_publish_path
-    from lib.services.cache_ownership import CacheAccessMode as _Mode
+    from lib.core.application_context import resolve_cache_path
     from lib.services.cache_provider_impl import read_embedding_config
     from lib.services.duckdb_cache_store import DuckDbCacheStore
     from lib.services.table_registry import table_registry
 
     from config import SETTINGS
 
-    mode = _Mode(mode)
+    mode = CacheAccessMode(mode)
 
     gateway_cfg = SETTINGS.get("gateway") or {}
     cache_cfg = gateway_cfg.get("cache") if isinstance(gateway_cfg.get("cache"), dict) else {}
     workspace_path = str(SETTINGS.get("workspace_path") or "")
-    path = resolve_publish_path(workspace_path, cache_cfg)
+    path = resolve_cache_path(workspace_path, cache_cfg)
 
     table_names = list(table_registry.table_names())
     vector_names = list(table_registry.vector_names())
@@ -328,5 +428,13 @@ def open_cache_provider(
         embedding_dimension=int(embedding.get("dimension", 1024)),
         db_logging_service=db_logging_service,
     )
-    provider.connect()
+    if not provider.connect():
+        # ``connect() == False`` — это не «готово, но не very ready», а
+        # провал startup-зависимости. Раньше флаг игнорировался, и наружу
+        # уходил объект с ``is_ready() == False``.
+        detail = (provider.get_stats() or {}).get("last_error")
+        raise CacheOpenError(
+            path=path,
+            cause=RuntimeError(detail) if detail else None,
+        )
     return provider

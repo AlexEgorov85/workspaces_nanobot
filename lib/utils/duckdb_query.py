@@ -280,20 +280,59 @@ def build_faiss_index(
 
     if not records:
         return None, None
-    dimension = len(records[0]["embedding"])
+
+    first = _as_vector(records[0]["embedding"])
+    if first is None:
+        return None, None
+    dimension = len(first)
     vectors = np.zeros((len(records), dimension), dtype=np.float32)
     metadata: dict[str, Any] = {"metric": metric}
 
     for i, rec in enumerate(records):
-        emb = rec["embedding"]
-        if isinstance(emb, (list, tuple)) and len(emb) == dimension:
-            vectors[i] = np.array(emb, dtype=np.float32)
-        else:
+        emb = _as_vector(rec["embedding"])
+        if emb is None or len(emb) != dimension:
             return None, None
+        vectors[i] = np.array(emb, dtype=np.float32)
 
     if metric == "cosine":
         faiss.normalize_L2(vectors)
     index = faiss.IndexFlatIP(dimension)
     index.add(vectors)
     return index, metadata
+
+
+def _as_vector(raw: Any) -> list[float] | None:
+    """Привести значение колонки ``embedding`` к списку чисел.
+
+    В локальном снимке колонка ``embedding`` хранится как ``VARCHAR``:
+    тип ``REAL[]`` из PostgreSQL не переносится в DuckDB напрямую, и
+    значение приходит текстом вида ``"[-0.04, 0.11, ...]"``. Раньше
+    ``build_faiss_index`` ждал только ``list``/``tuple`` и на строке
+    молча возвращал ``(None, None)`` — из-за чего vector search отвечал
+    «Документы не найдены» при полностью готовом индексе и доступном
+    эмбеддере. Молчание было хуже всего: отказ сборки индекса выглядел
+    как пустой результат поиска.
+
+    Возвращает ``None``, если разобрать не удалось.
+    """
+    import numpy as np
+
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple, np.ndarray)):
+        return [float(x) for x in raw]
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = raw.decode("utf-8")
+        except Exception:
+            return None
+    if isinstance(raw, str):
+        text = raw.strip().strip("[]")
+        if not text:
+            return None
+        try:
+            return [float(part) for part in text.split(",")]
+        except ValueError:
+            return None
+    return None
 

@@ -203,35 +203,32 @@ def get_brief_context_config(skill_name: str) -> dict[str, Any]:
 
 
 def get_in_memory_cache_path(skill_root: Path | str) -> str:
-    """Путь к единому DuckDB-снапшоту runtime-кэша.
+    """Путь к файлу runtime-кэша (``cache.duckdb``).
 
-    Снимок общий для всех skill'ов. v2.5.2+ путь вычисляется через
-    :func:`resolve_publish_path` (``lib/core/application_context.py``),
-    чтобы сходиться с gateway, который пишет тот же snapshot
-    (см. описание ``gateway.cache.*``).
+    Файл общий для всех skill'ов. v2.5.2+ путь вычисляется через
+    :func:`resolve_cache_path` (``lib/core/application_context.py``) — ту же
+    pure-функцию, что вызывает и точка создания провайдера, поэтому
+    расхождение путей между читателем и владельцем невозможно
+    (см. ``gateway.cache.*``).
 
     Безопасный default — ``~/.cache/nanobot/duckdb/cache.duckdb``
-    (POSIX ``fcntl`` работает там штатно; на NFS ATTACH падает).
-    Override — через ``gateway.cache.local_path`` в ``project.json``.
+    (на NFS DuckDB не отдаёт file lock). Override — через
+    ``gateway.cache.local_path`` (это **каталог**) в ``project.json``.
 
-    Функция НЕ параметризована ``skill_name`` (снимок — свойство
+    Функция НЕ параметризована ``skill_name`` (файл кэша — свойство
     runtime-инфраструктуры, не skill-домена).
 
-    Заменила ранее существовавшую ``get_in_memory_config(skill_name,
-    skill_root)``, которая возвращала ещё ``enabled`` / ``engine`` из
-    ``skills.<name>.cache.*``. Эти поля были мёртвыми (``enabled``
-    нигде не проверялся, ``engine`` нигде не использовался,
-    ``max_age_sec`` / ``refresh_interval_sec`` не пробрасывались в
-    ``PostgresDuckDbProvider``). См. commit «skill configuration boundary».
+    Раньше называлась «путём к снимку»: модель «снимок для читателей» снята,
+    путь указывает на единственный рабочий файл.
     """
-    from lib.core.application_context import resolve_publish_path
+    from lib.core.application_context import resolve_cache_path
     from config import SETTINGS
 
     workspace_root = Path(skill_root).parent.parent
     gateway_cache_cfg = (SETTINGS.get("gateway") or {}).get("cache") or {}
     if not isinstance(gateway_cache_cfg, dict):
         gateway_cache_cfg = {}
-    return resolve_publish_path(str(workspace_root), gateway_cache_cfg)
+    return resolve_cache_path(str(workspace_root), gateway_cache_cfg)
 
 
 def get_vector_index_path(skill_name: str, skill_root: Path | str) -> str:
@@ -284,7 +281,7 @@ def build_cache_provider(skill_name: str, skill_root: Path | str) -> CacheProvid
     skill, и runtime MUST получать один и тот же провайдер.
 
     ``skill_root`` намеренно не участвует в разрешении пути: путь к файлу
-    кэша вычисляет сама фабрика единой функцией ``resolve_publish_path()``.
+    кэша вычисляет сама фабрика единой функцией ``resolve_cache_path()``.
     Раньше skill-слой разрешал его отдельно — это и было причиной расхождения
     путей между двумя процессами.
 
@@ -297,7 +294,7 @@ def build_cache_provider(skill_name: str, skill_root: Path | str) -> CacheProvid
             process-exclusive) — skill не сможет работать и MUST сообщить об
             этом явно, а не превращать конфликт в «файл не найден».
     """
-    from lib.services.cache_ownership import CacheAccessMode
+    from lib.services.cache_provider import CacheAccessMode
     from lib.services.cache_provider import open_cache_provider
 
     return open_cache_provider(mode=CacheAccessMode.READ_ONLY)
@@ -309,7 +306,7 @@ def get_vector_indexes(skill_name: str) -> dict[str, Any]:
     ``cache_provider_impl.read_vector_index_config``)."""
     from lib.services.cache_provider_impl import read_vector_index_config
 
-    return read_vector_index_config(_skill_cfg(skill_name))
+    return read_vector_index_config()
 
 
 def get_embedding_config() -> dict[str, Any]:

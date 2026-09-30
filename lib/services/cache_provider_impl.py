@@ -27,10 +27,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sys
 from pathlib import Path
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 # Пути к проекту и workspace — чтобы `from utils.db import ...` работал
 # независимо от рабочего каталога.
@@ -128,7 +131,7 @@ def verify_index_signature(
 def list_runtime_vector_indexes(
     store_table: str | None = None,
     *,
-    fetch_fn=None,
+    provider: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Прочитать runtime-артефакты vector-индексов из DuckDB-снапшота.
 
@@ -152,16 +155,17 @@ def list_runtime_vector_indexes(
 
     **Источник данных обязателен.** Функция НЕ открывает файл кэша сама и
     НЕ разрешает путь к нему: единственный доступ — уже полученный
-    ``CacheProvider`` (или его соединение) через ``fetch_fn``. Раньше
-    здесь был собственный ``duckdb.connect`` плюс self-resolve
-    ``gateway.cache.local_path``, из-за чего: относительный ``local_path``
-    ронял ``ImportError`` (несуществующий ``_WORKSPACE_ROOT``) и молча
-    превращался в пустой каталог индексов, а ``local_path`` трактовался
-    как файл вместо каталога.
+    ``CacheProvider`` (:func:`lib.services.cache_provider.open_cache_provider`),
+    и чтение идёт через его ``query_sql`` — то есть через тот же публичный
+    интерфейс, что и у потребителей. Раньше здесь был собственный
+    ``duckdb.connect`` плюс self-resolve ``gateway.cache.local_path``,
+    из-за чего: относительный ``local_path`` ронял ``ImportError``
+    (несуществующий ``_WORKSPACE_ROOT``) и молча превращался в пустой каталог
+    индексов, а ``local_path`` трактовался как файл вместо каталога.
 
-    ``[]`` означает «индексов нет», а не «кэш недоступен»: недоступность
-    MUST подниматься вызывающим (см. ``CacheBusyError``), а не глотаться
-    здесь.
+    ``[]`` означает «индексов нет» (таблицы-хранилища ещё не создана), а не
+    «кэш недоступен»: недоступность MUST подниматься вызывающим
+    (см. ``CacheBusyError``), а не глотаться здесь.
     """
     from config import SETTINGS
 
@@ -178,46 +182,66 @@ def list_runtime_vector_indexes(
     )
     full = f'"{schema}"."{name}"' if schema else f'"{name}"'
 
-    if fetch_fn is None:
+    if provider is None:
         raise ValueError(
-            "list_runtime_vector_indexes() требует fetch_fn: функция не "
-            "открывает файл кэша самостоятельно. Передайте провайдера "
-            "(или его соединение), полученный из open_cache_provider()."
+            "list_runtime_vector_indexes() требует provider: функция не "
+            "открывает файл кэша самостоятельно. Передайте экземпляр, "
+            "полученный из open_cache_provider()."
         )
-    conn = fetch_fn
 
-    try:
-        rows = conn.execute(
-            f"SELECT source, COUNT(*) AS vector_count "
-            f"FROM {full} GROUP BY source ORDER BY source",
-        ).fetchall()
-    except Exception as exc:
-        import logging
-        logging.getLogger(__name__).warning(
-            "list_runtime_vector_indexes(%s) failed: %s", store_table, exc
+    sql = (
+        f"SELECT source, COUNT(*) AS vector_count "
+        f"FROM {full} GROUP BY source ORDER BY source"
+    )
+    result = provider.query_sql(sql)
+    status = (result or {}).get("status")
+    if status != "success":
+        error = str((result or {}).get("error") or "unknown error")
+        if _is_missing_relation(error):
+            logger.warning(
+                "list_runtime_vector_indexes: storage table %s отсутствует (%s); "
+                "runtime-индексов нет",
+                store_table, error,
+            )
+            return []
+        raise RuntimeError(
+            f"list_runtime_vector_indexes({store_table}) failed: {error}"
         )
-        return []
-    finally:
-        if fetch_fn is None:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
     out: list[dict[str, Any]] = []
-    for row in rows:
+    for row in (result.get("rows") or []):
+        if isinstance(row, dict):
+            source = row.get("source")
+            count = row.get("vector_count")
+        else:  # провайдер, отдающий кортежи
+            source = row[0] if hasattr(row, "__getitem__") else None
+            count = row[1] if hasattr(row, "__getitem__") else None
         out.append({
-            "source": row[0] if hasattr(row, "__getitem__") else row.get("source"),
+            "source": source,
             "dimension": None,
-            "vector_count": (
-                row[1] if hasattr(row, "__getitem__") else row.get("vector_count")
-            ),
+            "vector_count": count,
             "updated_at": None,
             "metric": None,
             "signature": None,
             "metadata": {},
         })
     return out
+
+
+def _is_missing_relation(error: str) -> bool:
+    """Отсутствует ли в сообщении признак «таблицы/представления нет».
+
+    Отличается от «кэш недоступен»: отсутствие таблицы-хранилища — это
+    нормальное состояние (индексы ещё не собраны), а любая другая ошибка
+    чтения MUST подниматься вызывающему, а не превращаться в «индексов нет».
+    """
+    lowered = error.lower()
+    return (
+        "does not exist" in lowered
+        or "no such table" in lowered
+        or "catalog error" in lowered
+        or "was not found" in lowered
+    )
 
 
 _WORKSPACE = _ROOT / "workspace"
@@ -323,12 +347,17 @@ def read_embedding_defaults() -> dict[str, Any]:
     }
 
 
-def read_vector_index_config(cfg: dict) -> dict[str, Any]:
+def read_vector_index_config() -> dict[str, Any]:
     """Конфиг векторных индексов из ``project.json::gateway.vector.index.indexes``.
 
     Единственный источник декларации индексов (раньше был PG-реестр
-    ``public.agent_vector_index_config``). ``cfg`` игнорируется (API-compat
-    с существующими вызовами) — конфиг читается из глобального ``SETTINGS``.
+    ``public.agent_vector_index_config``).
+
+    Параметра ``cfg`` больше нет: он игнорировался (конфиг всегда читался
+    из глобального ``SETTINGS``), но делал вызовы правдоподобными —
+    ``read_vector_index_config({})`` и ``read_vector_index_config(
+    _skill_cfg(skill_name))`` выглядели как чтение переданного конфига.
+    Сигнатура-обманка удалена вместе с параметром.
 
     Возвращает pythonic-формат: ``{имя: {table, pk, source_table,
     content_columns, embedding_columns, track_column, chunk_size,

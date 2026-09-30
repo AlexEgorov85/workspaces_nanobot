@@ -9,7 +9,7 @@ row_data (JSONB) всегда содержит ПОЛНУЮ строку исх�
 независимо от количества чанков.
 
 Конфиг читается из ``project.json::gateway.vector.index.indexes``
-(через ``read_vector_index_config({})``; см. ``VectorIndexSettings.indexes``) —
+(через ``read_vector_index_config()``; см. ``VectorIndexSettings.indexes``) —
 единственный источник; PG-реестр ``agent_vector_index_config`` больше не
 читается (SQL-артефакты остались как legacy).
 
@@ -62,7 +62,7 @@ if hasattr(sys.stderr, 'reconfigure'):
 _ROOT = Path(__file__).resolve().parents[1]                    # корень проекта
 # tools/build_vectors.py — generic индексатор. НЕ знает про skill'ы:
 # источник истины — ``gateway.vector.index.indexes`` в project.json
-# (``read_vector_index_config({})``). Chunk-параметры и metric задаются
+# (``read_vector_index_config()``). Chunk-параметры и metric задаются
 # per-index в этом же конфиге; глобальные дефолты — модульные константы
 # ``_EMBED_*`` в ``cache_provider_impl``.
 for p in [str(_ROOT)]:
@@ -434,7 +434,7 @@ def _rebuild_faiss(index_name: str, db_table: str, rebuilt_only_deletion: bool =
     будет недоступен до установки зависимостей.
     """
     try:
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.cache_provider import open_cache_provider
 
         # Единая точка создания — тот же путь, что у runtime и у skills.
@@ -899,7 +899,7 @@ def main():
         )
         sys.exit(1)
 
-    indexes = read_vector_index_config({})
+    indexes = read_vector_index_config()
     if not indexes:
         logger.error("Нет конфигурации vector_indexes")
         sys.exit(1)

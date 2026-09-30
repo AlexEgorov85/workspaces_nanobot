@@ -26,17 +26,15 @@ Composition contract
 Composition root читает его только из ``SETTINGS["profile"]``.
 
 ``role`` определяет только composition инфраструктуры
-(``PostgresChannel``, ``CronService``); НЕ определяет cache owner/reader —
-это ответственность ``CacheOwnershipCoordinator`` (см.
-``lib/services/cache_ownership.py``).
+(``PostgresChannel``, ``CronService``); НЕ определяет режим доступа к кэшу —
+режим задаётся стадией жизненного цикла кэша (см. ``CacheAccessMode``).
 
-Cache owner/reader status — НЕ через ``role``:
+Режим доступа к кэшу — НЕ через ``role``:
 
-  * role="gateway" может быть OWNER (если пришёл первый к PG claim) или
-    READER (если первым пришёл CLI);
-  * role="cli" — то же самое;
-  * Оба процесса открывают ``cache.duckdb`` через concrete factory
-    ``DuckDbCacheStore.open(path, mode)`` с mode от ``coord.try_claim()``.
+  * стадия пересоздания кэша при старте — ``READ_WRITE``;
+  * все прочие стадии и внешние потребители — ``READ_ONLY``;
+  * оба процесса открывают ``cache.duckdb`` через concrete factory
+    ``DuckDbCacheStore.open(path, mode)``.
 """
 
 from __future__ import annotations
@@ -45,7 +43,10 @@ import inspect
 import logging
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:  # pragma: no cover — только для аннотаций
+    from lib.services.cache_provider import CacheStore
 
 logger = logging.getLogger(__name__)
 
@@ -147,10 +148,16 @@ class ApplicationContext:
 
     # Сервисы (опциональные)
     db_logging_service: Any | None = None
-    sync_service: Any | None = None
-    cache_provider: "CacheProvider | None" = None
-    cache_store: "CacheProvider | None" = None  # legacy alias for cache_provider
-    ownership_coordinator: Any | None = None  # CacheOwnershipCoordinator (Stage C)
+    # Change ``drop-local-cache-read-from-pg``: загрузка кэша — разовая
+    # синхронная операция, отдельной службы и фонового потока нет.
+    cache_loader: Any | None = None
+    cache_provider: CacheStore | None = None
+    cache_store: CacheStore | None = None  # legacy alias for cache_provider
+    # Change ``drop-local-cache-read-from-pg``: поле ``ownership_coordinator``
+    # удалено вместе со слоем владения. Навыки и CLI, присваивавшие
+    # ``ctx.ownership_coordinator = None``, продолжают работать: dataclass
+    # без ``__slots__`` допускает произвольные атрибуты экземпляра.
+    # cache_store: Any | None = None  # DEPRECATED: слой владения удалён (drop-local-cache-read-from-pg)
 
     # Composition role (Stage A)
     role: str = ""  # "gateway" | "cli"
@@ -204,7 +211,7 @@ class ApplicationContext:
                 composition инфраструктуры (``PostgresChannel`` только в
                 gateway, ``CronService`` только в gateway). НЕ определяет
                 cache owner/reader — это ответственность
-                ``CacheOwnershipCoordinator``.
+                ``CacheAccessMode``.
             storage_override: режим хранилища из CLI (auto/postgres/file).
             session_override: имя сессии (CLI).
             **kwargs: deprecated compatibility boundary для
@@ -256,7 +263,7 @@ class ApplicationContext:
         # Сбросить ``TableRegistry`` — это singleton, и при повторном
         # ``create()`` в одном процессе (тесты, streamlit-reload, gateway
         # перезапуск конфига) старые регистрации остались бы и смешались
-        # с новыми. ``_make_sync_services`` и ``_auto_register_skills``
+        # с новыми. ``_init_cache_runtime`` и ``_auto_register_skills``
         # ниже заполнят реестр заново.
         from lib.services.table_registry import table_registry
         table_registry.clear()
@@ -336,16 +343,14 @@ class ApplicationContext:
         # в ``start()`` lifecycle.
         ctx.session_cold_sync_service = _make_session_cold_sync_service(ctx)
 
-        # 5. CacheOwnershipCoordinator + cache_provider + sync service
+        # 5. cache runtime: загрузка (READ_WRITE) -> close -> чтение (READ_ONLY)
         if ctx.enable_audit:
             _auto_register_skills(ctx)
             _register_infra_resources(ctx)
             (
                 ctx.cache_provider,
-                ctx.sync_service,
-                _ownership_coord,
-            ) = _make_sync_services(ctx)
-            ctx.ownership_coordinator = _ownership_coord
+                ctx.cache_loader,
+            ) = _init_cache_runtime(ctx)
             # Back-compat alias — runtime code/project tools/runtime
             # patches всё ещё ожидают ``ctx.cache_store`` (rename в
             # Stage D). После migrate callers на новый interface alias
@@ -573,12 +578,10 @@ class ApplicationContext:
             self.db_logging_service.start()
             self._shutdown.register("db_logging_service", self.db_logging_service)
 
-        if self.sync_service is not None:
-            try:
-                self.sync_service.start(initial_load=True)
-                self._shutdown.register("sync_service", self.sync_service)
-            except Exception as exc:
-                logger.warning("PgDuckDbSyncService not started: %s", exc)
+        # Загрузка кэша уже выполнена в composition root
+        # (``_init_cache_runtime``): это разовая синхронная операция, у неё
+        # нет ни потока, ни ``start()``, ни записи в shutdown-координатор.
+        # Фоновой синхронизации больше не существует.
 
         if self.session_cold_sync_service is not None:
             try:
@@ -666,14 +669,6 @@ class ApplicationContext:
                 self.cache_provider.close()
             except Exception as exc:
                 logger.warning("cache_provider.close failed: %s", exc)
-        # Ownership release — Stage E. При shutdown coordinator.release()
-        # удаляет строку claim из ``agent_cache_ownership`` для
-        # следующего takeover'а (или kill -9 потом expire'нется).
-        if self.ownership_coordinator is not None:
-            try:
-                self.ownership_coordinator.release()
-            except Exception as exc:
-                logger.warning("ownership_coordinator.release failed: %s", exc)
         # После остановки сервисов закрываем общий пул соединений.
         _stop_db_pool()
         if self.runtime_health is not None:
@@ -1237,11 +1232,16 @@ def _default_local_cache_dir() -> "Path":
     return Path.home() / ".cache" / "nanobot" / "duckdb"
 
 
-def resolve_publish_path(workspace_path, cache_cfg: dict | None = None) -> str:
-    """**ЕДИНЫЙ** механизм вычисления пути к ``cache.duckdb``.
+def resolve_cache_path(workspace_path, cache_cfg: dict | None = None) -> str:
+    """**ЕДИНЫЙ** механизм вычисления пути к файлу кэша ``cache.duckdb``.
+
+    Имя функции исторически было ``resolve_publish_path``, хотя публикации
+    не существует: файл кэша один, и «снимок для читателей» снят вместе с
+    ``publish()``. Старое имя вводило в заблуждение при каждом чтении
+    call-site'а, поэтому переименовано.
 
     **Безопасный default**: ``~/.cache/nanobot/duckdb/cache.duckdb``.
-    Решение осознанное: DuckDB ATTACH берёт эксклюзивный flock, который
+    Решение осознанное: DuckDB берёт эксклюзивный file lock, который
     NFS не отдаёт (``"Conflicting lock is held in PID 0"`` на свежем файле
     после ``rm`` — проверено эмпирически).
 
@@ -1249,7 +1249,9 @@ def resolve_publish_path(workspace_path, cache_cfg: dict | None = None) -> str:
     ``project.json::gateway.cache``):
 
     * ``local_path`` (str, опц.) — абсолютный/относительный (от workspace)
-      путь к каталогу на локальной ФС, где будет лежать ``cache.duckdb``.
+      путь к **каталогу** на локальной ФС, в котором будет лежать
+      ``cache.duckdb``. Имя файла добавляется здесь, поэтому
+      ``local_path`` = ``/opt/duckdb``, а не ``/opt/duckdb/cache.duckdb``.
       Полезно, когда у ``~/.cache`` нет места или нужна отдельная ФС.
 
     **Никаких escape-hatch'ей и режимов совместимости.** Один механизм,
@@ -1259,19 +1261,16 @@ def resolve_publish_path(workspace_path, cache_cfg: dict | None = None) -> str:
     поддерживается** и больше не доступен через эту функцию — он
     приводил к расхождению между gateway и CLI/skill.
 
-    **Согласованность gateway ↔ CLI/skill.** Эту функцию вызывают:
+    **Согласованность gateway ↔ CLI/skill.** Эту функцию зовёт и
+    composition root (``_init_cache_runtime`` — для NFS-предупреждения), и
+    единственная точка создания провайдера (``open_cache_provider``), а
+    значит — runtime, skills, tools и standalone-утилиты.
 
-    1. **Gateway** (``_make_sync_services``) — пишет снимок после
-       каждого sync-цикла.
-    2. **CLI / skill / vector_index_service**
-       (``build_cache_provider``, ``get_in_memory_cache_path``) —
-       читает снимок через ``PostgresDuckDbProvider``.
-
-    Если оба слоя дадут разные пути — gateway пишет в одно место,
-    CLI читает из другого, и скилл видит устаревший/пустой снимок.
-    До v2.5.2 ``build_cache_provider`` хардкодил
+    Если эти слои дадут разные пути — владелец пишет в одно место,
+    читатель открывает другое, и скилл видит пустой кэш. До v2.5.2
+    ``build_cache_provider`` хардкодил
     ``table_registry.snapshot_path(workspace_root)``, который расходился
-    с новым safe default после деплоя. v2.5.2+ обе точки вызывают
+    с новым safe default после деплоя. v2.5.2+ все точки вызывают
     эту pure-функцию с одними и теми же ``gateway.cache.*``.
 
     Args:
@@ -1308,8 +1307,8 @@ def resolve_publish_path(workspace_path, cache_cfg: dict | None = None) -> str:
     return str(default / "cache.duckdb")
 
 
-def _warn_if_publish_path_on_nfs(publish_path: str) -> None:
-    """Если ``publish_path`` живёт на NFS — напечатать громкое предупреждение.
+def _warn_if_cache_path_on_nfs(cache_path: str) -> None:
+    """Если ``cache_path`` живёт на NFS — напечатать громкое предупреждение.
 
     Используется ``/proc/mounts`` (только Linux). На других платформах
     функция — no-op.
@@ -1317,8 +1316,8 @@ def _warn_if_publish_path_on_nfs(publish_path: str) -> None:
     Это защита от регрессии: даже если пользователь положил workspace на
     NFS-шару и ``local_path`` через symlink указывает на NFS (либо
     ``~/.cache`` оказался на NFS), мы ему скажем: «вот что сейчас
-    произойдёт — ATTACH будет падать с PID 0». Лучше увидеть это на
-    старте, чем ловить в рантайме.
+    произойдёт — DuckDB не отдаст эксклюзивный lock поверх NFS, и открытие
+    файла упадёт». Лучше увидеть это на старте, чем ловить в рантайме.
     """
     import logging
     import platform
@@ -1329,7 +1328,7 @@ def _warn_if_publish_path_on_nfs(publish_path: str) -> None:
         return  # Windows/macOS — не делаем NFS-детект; фолбэк на реальный фейл
 
     try:
-        p = Path(publish_path).resolve()
+        p = Path(cache_path).resolve()
     except OSError:
         return  # путь ещё не существует — не наша забота
 
@@ -1348,20 +1347,20 @@ def _warn_if_publish_path_on_nfs(publish_path: str) -> None:
             if target == mount_point or target.startswith(mount_point.rstrip("/") + "/"):
                 if "nfs" in fstype.lower():
                     logging.getLogger(__name__).warning(
-                        "\n[cache] publish_path=%s лежит на %s (%s).\n"
-                        "        DuckDB ATTACH не работает поверх NFS — каждый sync-цикл\n"
+                        "\n[cache] cache_path=%s лежит на %s (%s).\n"
+                        "        DuckDB не работает поверх NFS — открытие файла кэша\n"
                         "        будет падать с 'Conflicting lock is held in PID 0'.\n"
                         "        Исправьте одним из способов:\n"
                         "          1) оставьте default (кеш автоматически уйдёт в ~/.cache/nanobot/duckdb);\n"
                         "          2) задайте gateway.cache.local_path на локальную ФС в project.json;\n"
                         "          3) уберите NFS из текущего пути (symlink / монтирование).\n",
-                        publish_path, fstype, mount_point,
+                        cache_path, fstype, mount_point,
                     )
                     # Дополнительно — в stdout через print, чтобы пользователь
                     # гарантированно увидел даже если logging не настроен.
                     print(
-                        f"[cache] WARNING: {publish_path} is on {fstype} "
-                        f"({mount_point}); DuckDB ATTACH will fail with 'PID 0'. "
+                        f"[cache] WARNING: {cache_path} is on {fstype} "
+                        f"({mount_point}); DuckDB will fail with 'PID 0'. "
                         f"Check gateway.cache.local_path.",
                         file=sys.stderr,
                     )
@@ -1370,12 +1369,12 @@ def _warn_if_publish_path_on_nfs(publish_path: str) -> None:
         return  # /proc недоступен — молча пропускаем
 
 
-def _make_sync_services(ctx: ApplicationContext) -> tuple:
-    """Собрать ``(PgDuckDbSyncService, DuckDbCacheStore)``.
+def _init_cache_runtime(ctx: ApplicationContext) -> tuple:
+    """Загрузить кэш и открыть его на чтение: ``(CacheProvider, CacheLoadService)``.
 
     Список таблиц берётся из ``TableRegistry`` (skills + infra).
-    Sync-параметры — из ``gateway.sync.*``. Snapshot — общий
-    ``<workspace>/data_store/duckdb/cache.duckdb``.
+    Sync-параметры — из ``gateway.sync.*``. Файл кэша — общий, локальный:
+    путь вычисляет ``resolve_cache_path()`` (тот же, что у потребителей).
 
     Возвращает ``(None, None)`` если реестр пуст или нет DSN.
     """
@@ -1388,7 +1387,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
 
     if not table_registry.resources():
         logger.warning(
-            "PgDuckDbSyncService skipped: TableRegistry пуст "
+            "CacheLoadService skipped: TableRegistry пуст "
             "(нет ни одной зарегистрированной таблицы через _auto_register_skills "
             "или _register_infra_resources). "
             "Проверьте секции project.json::skills.* и gateway.vector.index.*."
@@ -1403,7 +1402,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
                 channel=None,
                 actor="sync",
                 name="sync_skipped_registry_empty",
-                summary="PgDuckDbSyncService skipped: TableRegistry пуст",
+                summary="CacheLoadService skipped: TableRegistry пуст",
                 payload={
                     "reason": "TableRegistry пуст",
                     "detail": "Нет ни одной зарегистрированной таблицы — проверьте project.json::skills.* и gateway.vector.index.*",
@@ -1412,10 +1411,10 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             producer="ApplicationContext",
             event_type="sync_skipped_registry_empty",
         )
-        return None, None, None
+        return None, None
     if not dsn:
         logger.warning(
-            "PgDuckDbSyncService skipped: channels.postgres.dsn не задан "
+            "CacheLoadService skipped: channels.postgres.dsn не задан "
             "(пустая строка или отсутствует ключ в project.json)."
         )
         from lib.services.db_logging_service import LogEvent, try_log_event
@@ -1428,7 +1427,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
                 channel=None,
                 actor="sync",
                 name="sync_skipped_no_dsn",
-                summary="PgDuckDbSyncService skipped: channels.postgres.dsn не задан",
+                summary="CacheLoadService skipped: channels.postgres.dsn не задан",
                 payload={
                     "reason": "channels.postgres.dsn не задан",
                     "detail": "DATABASE_URL пустой или отсутствует ключ в project.json — sync не сможет подключиться к PG",
@@ -1437,21 +1436,21 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             producer="ApplicationContext",
             event_type="sync_skipped_no_dsn",
         )
-        return None, None, None
+        return None, None
 
-    from lib.services.cache_ownership import (
+    from lib.services.cache_provider import (
         CacheAccessMode,
-        CacheOwnershipCoordinator,
+        CacheProvider,
+        CacheStore,
+        open_cache_provider,
     )
-    from lib.services.cache_provider import open_cache_provider
-    from lib.services.pg_duckdb_sync_service import PgDuckDbSyncService
 
     all_table_names = list(table_registry.table_names())
     vector_names = list(table_registry.vector_names())
 
     if not all_table_names and not vector_names:
         logger.warning(
-            "PgDuckDbSyncService skipped: в TableRegistry есть ресурсы, но ни одного "
+            "CacheLoadService skipped: в TableRegistry есть ресурсы, но ни одного "
             "имени в table_names()/vector_names() — несоответствие регистрации."
         )
         from lib.services.db_logging_service import LogEvent, try_log_event
@@ -1464,7 +1463,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
                 channel=None,
                 actor="sync",
                 name="sync_skipped_no_table_names",
-                summary="PgDuckDbSyncService skipped: в TableRegistry есть ресурсы, но table_names()/vector_names() пусты",
+                summary="CacheLoadService skipped: в TableRegistry есть ресурсы, но table_names()/vector_names() пусты",
                 payload={
                     "reason": "в TableRegistry есть ресурсы, но table_names()/vector_names() пусты",
                     "detail": "Несоответствие регистрации — проверьте register() vs register_infra()",
@@ -1473,7 +1472,7 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
             producer="ApplicationContext",
             event_type="sync_skipped_no_table_names",
         )
-        return None, None, None
+        return None, None
 
     schemas: list[str] = []
     for r in (*table_registry.table_resources(), *table_registry.vector_resources()):
@@ -1483,14 +1482,14 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
                 schemas.append(sch)
 
     logger.info(
-        "PgDuckDbSyncService assembling: tables=%d vectors=%d schemas=%s dsn_set=%s",
+        "CacheLoadService assembling: tables=%d vectors=%d schemas=%s dsn_set=%s",
         len(all_table_names),
         len(vector_names),
         schemas,
         bool(dsn),
     )
     logger.info(
-        "PgDuckDbSyncService tables=%s vector_tables=%s",
+        "CacheLoadService tables=%s vector_tables=%s",
         all_table_names,
         vector_names,
     )
@@ -1499,15 +1498,19 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     if not isinstance(gateway_cfg, dict):
         gateway_cfg = {}
     cache_cfg = gateway_cfg.get("cache") if isinstance(gateway_cfg.get("cache"), dict) else {}
-    cache_path = resolve_publish_path(ctx.config.workspace_path, cache_cfg)
-    _warn_if_publish_path_on_nfs(cache_path)
+    cache_path = resolve_cache_path(ctx.config.workspace_path, cache_cfg)
+    _warn_if_cache_path_on_nfs(cache_path)
 
-    sync_cfg = (ctx.config_service.settings_section("gateway") or {}).get("sync") or {}
-    poll_interval_sec = float(sync_cfg.get("poll_interval_sec", 0) or 0)
-    max_queue_size = int(sync_cfg.get("max_queue_size", 0) or 0)
-    reconnect_backoff = float(sync_cfg.get("reconnect_backoff_sec", 0) or 0)
-    reconnect_backoff_max = float(sync_cfg.get("reconnect_backoff_max_sec", 0) or 0)
-    full_resync_every = int(sync_cfg.get("full_resync_every", 0) or 0)
+    # Число потоков загрузки ограничено размером общего пула соединений:
+    # каждый поток занимает слот. Прежний код поднимал
+    # ``min(len(tables), 8)`` потоков, что при ``max_conn=4`` заставляло их
+    # конкурировать за одни и те же соединения — система, чьё назначение —
+    # экономить соединения, расходовала их сама.
+    # Параметры непрерывного режима (poll_interval_sec, max_queue_size,
+    # reconnect_backoff, full_resync_every) удалены вместе с ним.
+    pool_cfg = pg.get("pool") if isinstance(pg, dict) else None
+    pool_cfg = pool_cfg if isinstance(pool_cfg, dict) else {}
+    max_workers = int(pool_cfg.get("max_conn", 1) or 1)
 
     # ``gateway.vector.index.storage_table`` — единственный источник
     # векторных данных (сырые эмбеддинги + метаданные чанков; см.
@@ -1517,97 +1520,47 @@ def _make_sync_services(ctx: ApplicationContext) -> tuple:
     # при старте gateway).
     sync_tables = list(dict.fromkeys(all_table_names + vector_names))
 
-    # ==== Stage C/D/B/E integration ====
-    # 1. CacheOwnershipCoordinator — координатор ownership для логического
-    #    cache resource ``local_cache`` через таблицу ``agent_cache_ownership``
-    #    (см. sql/migrations/V005__create_agent_cache_ownership.sql).
-    # 2. ``coord.try_claim()`` — atomic PG INSERT ... ON CONFLICT. Один процесс
-    #    получает acquired=True (OWNER), остальные — False (READER).
-    # 3. ``open_cache_provider(mode)`` — единая точка создания провайдера
-    #    (слой интерфейса). Режим зависит от результата claim:
-    #      - acquired=True → READ_WRITE (OWNER пишет в cache);
-    #      - acquired=False → READ_ONLY.
-    #    Если файл кэша уже держит другой процесс, попытка открытия
-    #    поднимает CacheBusyError: кэш process-exclusive, и такой процесс
-    #    не считается успешно запущенным.
-    worker_id = f"{ctx.role}_{os.getpid()}"
-    coord = CacheOwnershipCoordinator(
-        worker_id=worker_id,
-        dsn=dsn,
-        resource_key="local_cache",
-    )
-    claim = coord.try_claim()
-    logger.info(
-        "cache_ownership: role=%s worker_id=%s acquired=%s generation=%d "
-        "current_owner=%s",
-        ctx.role, worker_id, claim.acquired, claim.generation,
-        claim.current_owner_id or "(none)",
-    )
-
-    mode = CacheAccessMode.READ_WRITE if claim.acquired else CacheAccessMode.READ_ONLY
-
-    # Единая точка создания провайдера (слой интерфейса). Здесь НЕ называется
-    # конкретный класс хранилища: путь, схема, таблицы, векторное хранилище и
-    # параметры эмбеддингов настраиваются внутри фабрики.
+    # ==== Стадия 1: ЗАГРУЗКА (единственная запись в кэш за всё время) ====
+    # Кэш — снимок состояния PostgreSQL, зафиксированный в момент загрузки.
+    # Слой владения удалён: writer один и известен — этот процесс. Фоновой
+    # синхронизации, дельт и очереди задач больше не существует.
     #
-    # Попытка открыть файл И ЕСТЬ проверка занятости (кэш process-exclusive):
-    # если файл держит другой процесс, поднимается ``CacheBusyError`` и
-    # процесс не считается успешно запущенным.
-    store = open_cache_provider(
-        mode=mode,
+    # Режим определяется стадией жизненного цикла, а не координацией
+    # владения: загрузка — READ_WRITE, всё остальное — READ_ONLY.
+    # Если файл держит другой процесс, открытие поднимает CacheBusyError;
+    # это штатная ошибка, а не недостающая координация.
+    from lib.services.cache_load_service import CacheLoadService
+
+    writer: CacheStore = open_cache_provider(
+        mode=CacheAccessMode.READ_WRITE,
         db_logging_service=ctx.db_logging_service,
     )
-
-    # ``sync_service`` создаётся ТОЛЬКО если этот процесс — OWNER
-    # (claim.acquired=True). READER процессы НЕ sync'ят — только читают
-    # snapshot, который публикует OWNER.
-    if not claim.acquired:
-        logger.info(
-            "cache_ownership: role=%s worker_id=%s is READER; "
-            "sync_service NOT created (other process is OWNER gen=%d)",
-            ctx.role, worker_id, claim.generation,
-        )
-        return store, None, coord
-
-    sync = PgDuckDbSyncService(
+    loader = CacheLoadService(
         dsn=dsn,
+        store=writer,
         schema=schemas[0] if schemas else "main",
         tables=sync_tables,
         vector_table=vector_names[0] if vector_names else "",
-        poll_interval_sec=poll_interval_sec,
-        max_queue_size=max_queue_size,
-        reconnect_backoff=reconnect_backoff,
-        reconnect_backoff_max=reconnect_backoff_max,
-        full_resync_every=full_resync_every,
+        max_workers=max_workers,
         db_logging_service=ctx.db_logging_service,
-        ownership_coordinator=coord,
-        cache_provider=store,
     )
-    # Callbacks MUST выставляться здесь, в composition root — иначе
-    # ``_dispatch`` молча уходит в ``if callback is None: return`` и данные
-    # из PG никогда не попадают в DuckDB-кэш. Раньше wiring жил в callers
-    # (gateway.py / benchmarks/runner.py) и потерялся при консолидации.
-    #
-    # Callers, которым нужен свой хук (например, benchmark ждёт первый
-    # sync через asyncio.Event), MUST chaining-ить предыдущий колбэк,
-    # а не затирать его — как это делал прежний benchmarks/runner.py.
-    sync.set_on_replace_records_callback(store.replace_records)
+    try:
+        # Слот общего пула соединений занимается только на время этого
+        # вызова и освобождается сразу после.
+        loader.load()
+    finally:
+        writer.close()
 
-    # Upsert требует PK источника: без него store дефолтно ищет ``id`` и
-    # для таблиц с другим PK (напр. ``public.agent_predefined_scripts``
-    # с PK ``name``) уходит в CREATE OR REPLACE — деструктивно для
-    # дельты от ``_fetch_incremental``. PK резолвится лениво и кэшируется
-    # в sync service, поэтому лишних запросов к PG на старте нет.
-    def _upsert_with_pk(table: str, records: list[dict]) -> None:
-        try:
-            store.upsert_records(
-                table, records, key_column=sync.key_column_for(table)
-            )
-        except Exception as exc:
-            logger.warning("cache upsert(%s) failed: %s", table, exc)
+    # ==== Стадия 2: ЧТЕНИЕ ====
+    # Провайдер живёт весь процесс (в нём держится прогретый FAISS), но
+    # соединение с файлом открывает на время операции и закрывает сразу
+    # после — файл остаётся свободным.
+    provider: CacheProvider = open_cache_provider(
+        mode=CacheAccessMode.READ_ONLY,
+        db_logging_service=ctx.db_logging_service,
+    )
 
-    sync.set_on_new_records_callback(_upsert_with_pk)
-    return store, sync, coord
+    return provider, loader
 
 
 def _record_sync_skipped(
@@ -1616,7 +1569,7 @@ def _record_sync_skipped(
     reason: str,
     detail: str,
 ) -> None:
-    """DEPRECATED: инлайнен в ``_make_sync_services``.
+    """DEPRECATED: инлайнен в ``_init_cache_runtime``.
 
     Оставлен как back-compat shim для возможных внешних callers'ов
     (на данный момент ни одного нет). Использует
@@ -1631,7 +1584,7 @@ def _record_sync_skipped(
         channel=None,
         actor="sync",
         name=event_type,
-        summary=f"PgDuckDbSyncService skipped: {reason}",
+        summary=f"CacheLoadService skipped: {reason}",
         payload={"reason": reason, "detail": detail},
     )
     try_log_event(

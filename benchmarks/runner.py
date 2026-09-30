@@ -589,7 +589,7 @@ async def _run_suite(
             original_config = None
 
     # Контекст приложения: поднимает Bus + SessionStorage + DbLogging +
-    # PgDuckDbSyncService + DuckDbCacheStore + PreloadService + AgentLoop.
+    # CacheLoadService + DuckDbCacheStore + PreloadService + AgentLoop.
     # enable_audit=False при --no-audit (только локальные прогоны без DSN).
     enable_audit = not getattr(args, "no_audit", False)
     try:
@@ -609,48 +609,16 @@ async def _run_suite(
 
     # Коллбэки синка ставим ДО ctx.start() — иначе worker-тред успеет
     # сделать initial_load раньше и данные не попадут в DuckDB-кэш
-    # (см. комментарий в gateway.py:50-77).
-    first_sync_event: "asyncio.Event | None" = None
-    audit_ready = (
-        ctx.sync_service is not None and ctx.cache_store is not None
-    )
-    if audit_ready:
-        # Файл кэша уже открыт: open_cache_provider() вызывает connect()
-        # при создании провайдера.
-        ctx.sync_service.set_on_new_records_callback(
-            ctx.cache_store.upsert_records
-        )
-        prev_cb = getattr(ctx.sync_service, "_on_sync_callback", None)
-        first_sync_event = asyncio.Event()
-
-        def _on_first_sync() -> None:
-            if first_sync_event is not None:
-                first_sync_event.set()
-
-        def _wrapped() -> None:
-            _on_first_sync()
-            if prev_cb is not None:
-                try:
-                    prev_cb()
-                except Exception:
-                    pass
-
-        ctx.sync_service.set_on_sync_callback(_wrapped)
-
+    # Кэш уже загружен синхронно в composition root
+    # (``ApplicationContext.create`` → ``_init_cache_runtime``): ожидать
+    # «первого sync» нечего. Дублирующая
+    # привязка коллэков записи убрана вместе
+    # с composition root (change ``drop-local-cache-read-from-pg``).
+    audit_ready = ctx.cache_store is not None
     ctx.start()
 
     try:
         if audit_ready:
-            try:
-                await asyncio.wait_for(first_sync_event.wait(), timeout=30.0)
-            except asyncio.TimeoutError:
-                print(
-                    "[yellow]⚠[/yellow] audit_analyzer initial load timeout "
-                    "(>30s), прогон на текущем состоянии DuckDB-кэша"
-                )
-            else:
-                print("[green]✓[/green] audit_analyzer initial load received")
-
             loaded = await ctx.preload_service.preload_vector_indexes(
                 ctx.cache_store
             )

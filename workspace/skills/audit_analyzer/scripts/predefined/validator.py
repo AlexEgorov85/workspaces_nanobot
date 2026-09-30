@@ -4,7 +4,7 @@
 (эталон a606fe0). Логика и сообщения об ошибках сохранены.
 
 Critical rules:
-  * Validator НЕ обращается к DuckDB / PostgreSQL / LLM / Agent.
+  * Validator НЕ обращается к хранилищу / PostgreSQL / LLM / Agent.
   * Validator НЕ знает про конкретные таблицы.
   * Validator получает ``ScriptDefinition`` + ``params`` и возвращает
     либо кортеж ``(merged_params, unknown_keys, None)``,

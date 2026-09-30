@@ -26,10 +26,12 @@ _SUPPORTED_PROFILES = ("prod", "test")
 # module-level — Phase A).
 from config import ConfigurationError  # noqa: E402
 
-from lib.utils.windows_terminal import enable_vt, is_windows_console
+from lib.utils.windows_terminal import ensure_console_colors
 
-if is_windows_console():
-    enable_vt()
+# Legacy Windows-консоль без VT печатает ANSI как "?[2m...". Включаем VT,
+# а если хост не поддерживает — глушим цвета (NO_COLOR + ANSI-фильтр).
+# До первого Console(), т.к. no_color читается в Console.__init__.
+_WINDOWS_COLOR_WARNING = ensure_console_colors()
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -147,34 +149,11 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
         f"(nanobot {__version__}) · profile={args.profile}..."
     )
 
-    # Назначаем callbacks и подменяем on_sync ДО ctx.start() — иначе
-    # PgDuckDbSyncService.worker-тред успеет сделать initial_load раньше,
-    # чем мы поставим callback (set_on_new_records_callback=None), и
-    # данные не попадут in-memory DuckDB.
-    first_sync_event: "asyncio.Event | None" = None
-    if ctx.sync_service is not None and ctx.cache_store is not None:
-        # Файл кэша уже открыт: open_cache_provider() вызывает connect()
-        # при создании провайдера. Отдельного шага «подготовить файл» и
-        # отдельного шага «опубликовать снимок» больше нет — кэш это один
-        # файл, в который sync-слой пишет напрямую.
-        ctx.sync_service.set_on_new_records_callback(
-            ctx.cache_store.upsert_records
-        )
-        # Event для ожидания первого цикла синхронизации: до него кэш
-        # пуст, и потребителям читать нечего.
-        first_sync_event = asyncio.Event()
-        prev_cb = getattr(ctx.sync_service, "_on_sync_callback", None)
-
-        def _wrapped() -> None:
-            if first_sync_event is not None:
-                first_sync_event.set()
-            if prev_cb is not None:
-                try:
-                    prev_cb()
-                except Exception:
-                    pass
-
-        ctx.sync_service.set_on_sync_callback(_wrapped)
+    # Кэш к этому моменту уже загружен: загрузка — разовая
+    # синхронная операция, выполненная в composition root
+    # (``ApplicationContext.create`` -> ``_init_cache_runtime``) до возврата сюда. Ожидать
+    # «первый sync» нечего: колбэков записи и фонового потока
+    # больше не существует.
 
     ctx.start()
 
@@ -184,7 +163,7 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
 
     try:
         GatewayRunner().run_forever(
-            lambda: asyncio.run(_run(ctx, first_sync_event))
+            lambda: asyncio.run(_run(ctx))
         )
     finally:
         # Шага «опубликовать финальный снимок» больше нет: данные уже в
@@ -207,7 +186,7 @@ def _project_version() -> str:
     return project_version()
 
 
-async def _run(ctx, first_sync_event) -> None:
+async def _run(ctx) -> None:
     """Основной рабочий цикл gateway: каналы + Streamlit + агент."""
     from lib.services.channel_factory import ChannelFactory
 
@@ -229,33 +208,25 @@ async def _run(ctx, first_sync_event) -> None:
         console.print("[green]✓[/green] Streamlit UI started on :8501")
 
     cache_store = ctx.cache_store
-    sync_service = ctx.sync_service
-    if cache_store is not None and sync_service is not None:
+    if cache_store is not None:
         _cache_file = cache_store.get_stats().get("cache_path")
         if _cache_file:
             console.print(
-                f"[green]✓[/green] audit_analyzer sync started "
+                f"[green]✓[/green] audit_analyzer кэш загружен "
                 f"(cache -> {_cache_file})"
             )
         else:
-            console.print("[green]✓[/green] audit_analyzer sync started")
+            console.print(
+                "[green]✓[/green] audit_analyzer кэш загружен"
+            )
 
-        # Фоновый прогрев FAISS-индексов в память; результат печатается
-        # по мере готовности. Дожидаемся первого sync-callback от
-        # PgDuckDbSyncService (он вызывается после initial_load), иначе
-        # preload стартует на пустом DuckDB-кеше и видит "нет данных".
+        # Прогрев FAISS-индексов в память. Ожидать
+        # первого синхрона не нужно: кэш уже
+        # загружен синхронно до открытия такого
+        # здесь, и предыдущему читать есть чему.
         async def _preload_and_report() -> None:
-            if first_sync_event is not None:
-                try:
-                    await asyncio.wait_for(
-                        first_sync_event.wait(), timeout=30.0
-                    )
-                except asyncio.TimeoutError:
-                    console.print(
-                        "[yellow]⚠[/yellow] audit_analyzer initial load "
-                        "timeout (>30s), preload на текущем состоянии"
-                    )
             loaded = await ctx.preload_service.preload_vector_indexes(
+
                 cache_store
             )
             errs = cache_store.preload_errors()

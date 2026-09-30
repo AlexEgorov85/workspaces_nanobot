@@ -34,7 +34,6 @@ __all__ = [
     "SkillsSettings",
     "StartupSchemaValidationSettings",
     "StartupSettings",
-    "SyncSettings",
     "TableEntry",
     "VectorIndexConfig",
     "VectorIndexEntry",
@@ -153,7 +152,7 @@ class VectorIndexSettings(_StrictOptional):
         backend: runtime-бэкенд (``"faiss"``, ``"pgvector"``, ``"qdrant"``).
         storage_table: единая PG-таблица-хранилище сырых эмбеддингов.
             Регистрируется в ``TableRegistry`` через ``register_infra``
-            и попадает в DuckDB-кэш через ``PgDuckDbSyncService``.
+            и попадает в DuckDB-кэш через ``CacheLoadService``.
         indexes: полный конфиг vector-индексов ``{имя: VectorIndexConfig}``
             (какие индексы строить, из каких source-таблиц, content_cols,
             embedding_cols, chunk-параметры, metric). Единственный источник
@@ -226,7 +225,6 @@ class GatewaySettings(_StrictOptional):
     # duckdb_query / vector_search: Agent-facing tools удалены (этап 18).
     vector: VectorInfrastructureSettings | None = None
     heartbeat: HeartbeatSettings | None = None
-    sync: SyncSettings | None = None
     cache: CacheSettings | None = None
     usage_store: UsageStoreSettings | None = None
     session_cold_sync: SessionColdSyncSettings | None = None
@@ -264,26 +262,11 @@ class GatewaySettings(_StrictOptional):
         return data
 
 
-class SyncSettings(_StrictOptional):
-    """Параметры фоновой синхронизации PG → DuckDB (PgDuckDbSyncService).
-
-    Глобальные runtime-параметры, общие для всех skills. Раньше жили в
-    ``skills.audit_analyzer.sync.*``; вынесены в ``gateway.sync.*``,
-    поскольку sync — это свойство runtime infrastructure, а не skill-домена.
-    """
-
-    poll_interval_sec: float | None = Field(default=None, gt=0)
-    full_resync_every: int | None = Field(default=None, ge=0)
-    max_queue_size: int | None = Field(default=None, gt=0)
-    reconnect_backoff_sec: float | None = Field(default=None, gt=0)
-    reconnect_backoff_max_sec: float | None = Field(default=None, gt=0)
-
-
 class CacheSettings(_StrictOptional):
     """Параметры runtime-кеша (DuckDB-снапшот).
 
     **ЕДИНЫЙ механизм вычисления пути к кешу** —
-    :func:`lib.core.application_context.resolve_publish_path`. Все
+    :func:`lib.core.application_context.resolve_cache_path`. Все
     слои runtime'а (gateway + CLI/skill) обязаны звать её, чтобы
     путь записи и путь чтения **совпадали**.
 

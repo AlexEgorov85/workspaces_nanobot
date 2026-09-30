@@ -7,14 +7,14 @@
 
 Инструменты (``tools/build_vectors.py``) переиспользуют этот слой вместо
 собственных реализаций эмбеддинга. Низкоуровневая работа делегируется
-``PostgresDuckDbProvider`` (``lib/services/cache_provider_impl.py``): поиск
-``search_vector``, построение ``IndexFlatIP``, сборка индекса из DuckDB-снапшота
-``gateway.vector.index.storage_table`` (``preload_indexes``).
+провайдеру кэша (``DuckDbCacheStore``, ``lib/services/duckdb_cache_store.py``):
+поиск ``search_vector``, построение ``IndexFlatIP``, сборка индекса из
+таблицы-хранилища ``gateway.vector.index.storage_table`` (``preload_indexes``).
 
 Persisted FAISS-кеша нет: индексы не пишутся в PG и не сериализуются на диск —
-они живут в памяти процесса (``provider._index_cache``) и собираются заново из
-снапшота. Поиск и прогрев индексов в память также живут в провайдере — здесь они
-не дублируются, этот модуль отвечает только за build-слой.
+они живут в памяти процесса (внутри провайдера) и собираются заново из файла
+кэша при каждом старте. Поиск и прогрев индексов в память также живут в
+провайдере — здесь они не дублируются, этот модуль отвечает только за build-слой.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class VectorIndexBuildService:
     """
 
     def __init__(self, cfg: dict[str, Any] | None = None, base_dir: str = "") -> None:
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.cache_provider import open_cache_provider
 
         self._cfg = cfg if cfg is not None else {}

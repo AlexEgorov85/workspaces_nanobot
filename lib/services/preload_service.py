@@ -117,7 +117,7 @@ def compute_index_health(
     """Pure-функция: посчитать declared/loaded/missing/orphan/stale.
 
     Args:
-        declared: результат ``read_vector_index_config({})``.
+        declared: результат ``read_vector_index_config()``.
         loaded: то, что вернул ``store.preload_indexes()`` (или ``None`` /
             пустой list при ошибке). После change
             ``remove-vector-index-store`` может содержать
@@ -228,17 +228,19 @@ class PreloadService:
         # (например, store недоступен → divergence всё равно видно через
         # declared vs runtime).
         try:
-            self._emit_health_summary(loaded)
+            self._emit_health_summary(loaded, store)
         except Exception as exc:  # noqa: BLE001
             logger.warning("vector index health summary failed: %s", exc)
 
         return loaded
 
-    def _emit_health_summary(self, loaded: list | None) -> None:
+    def _emit_health_summary(self, loaded: list | None, store: Any = None) -> None:
         """Печать в stderr + запись в ``agent_gateway_logs``.
 
         ``declared`` берём из JSON (read_vector_index_config).
-        ``runtime`` — из PG store (list_runtime_vector_indexes).
+        ``runtime`` — из DuckDB-хранилища через **тот же** провайдер,
+        которым preload читал векторы (``store``): функция
+        ``list_runtime_vector_indexes`` не открывает файл кэша сама.
 
         Любые ошибки PG/config глотаем — health summary **никогда**
         не должна валить gateway startup. Лучше без summary, чем без
@@ -250,13 +252,13 @@ class PreloadService:
                 read_vector_index_config,
                 list_runtime_vector_indexes,
             )
-            declared = read_vector_index_config({}) or {}
+            declared = read_vector_index_config() or {}
         except Exception:  # noqa: BLE001
             declared = {}
 
         # Сбор runtime
         try:
-            runtime_rows = list_runtime_vector_indexes()
+            runtime_rows = list_runtime_vector_indexes(provider=store)
         except Exception:  # noqa: BLE001
             runtime_rows = None
 

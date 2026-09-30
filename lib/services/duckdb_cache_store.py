@@ -37,13 +37,14 @@ import re
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from lib.services.cache_ownership import CacheAccessMode
+from lib.services.cache_provider import CacheAccessMode
 from lib.services.cache_provider import (
     CacheBusyError,
-    CacheProvider,
+    CacheStore,
     ReadOnlyAssertionError,
     UnsupportedSqlError,
 )
@@ -53,7 +54,6 @@ logger = logging.getLogger(__name__)
 
 
 # DuckDB не поддерживает TO_CHAR(date, 'Month') — переписываем в strftime
-# (общая логика — в lib.utils.duckdb_query.rewrite_duck_sql).
 # (общая логика — в lib.utils.duckdb_query.rewrite_duck_sql).
 
 
@@ -278,6 +278,32 @@ _PG_TO_DUCKDB = {
 }
 
 
+# DuckDB сообщает держателя блокировки в тексте ошибки, но в разных сборках
+# по-разному: Windows — «File is already open in C:\...\python.exe (PID 1234)»,
+# Linux — «Conflicting lock is held by process with PID 1234». Держатель нужен
+# оператору в сообщении, иначе «занято другим процессом» бесполезно.
+_LOCK_HOLDER_WITH_PATH_RE = re.compile(
+    r"already open in\s+(?P<who>.+?)\s*\(\s*PID\s*(?P<pid>\d+)\s*\)",
+    re.IGNORECASE | re.DOTALL,
+)
+_LOCK_HOLDER_PID_RE = re.compile(
+    r"held (?:by|by process with) PID\s*(?P<pid>\d+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_lock_holder(message: str) -> str | None:
+    """Извлечь «кто держит файл» из текста ошибки DuckDB (``None`` — не нашли)."""
+    match = _LOCK_HOLDER_WITH_PATH_RE.search(message)
+    if match:
+        who = " ".join(match.group("who").split())
+        return f"{who} (PID {match.group('pid')})"
+    match = _LOCK_HOLDER_PID_RE.search(message)
+    if match:
+        return f"PID {match.group('pid')}"
+    return None
+
+
 def _map_pg_type(pg_type: str) -> str:
     """Смаппить PG-тип колонки в DuckDB-тип.
 
@@ -310,7 +336,7 @@ def _map_pg_type(pg_type: str) -> str:
     return _PG_TO_DUCKDB.get(t, "VARCHAR")
 
 
-class DuckDbCacheStore(CacheProvider):
+class DuckDbCacheStore(CacheStore):
     """Единственная concrete-реализация ``CacheProvider``: один DuckDB-файл + FAISS в памяти.
 
     Generic infrastructure component: получает записи через
@@ -393,6 +419,14 @@ class DuckDbCacheStore(CacheProvider):
         with self._lock:
             try:
                 self._open_locked()
+                if self._mode == CacheAccessMode.READ_ONLY:
+                    # Файл проверяет свободу, но между
+                    # операциями ми есть некому, кому
+                    # подхватьно делать. Открытие
+                    # выполняется проверка занятости
+                    # (CacheBusyError / UnsupportedFilesystemError), но самфайл
+                    # не удерживается между операциями.
+                    self._close_locked()
                 self._is_ready = True
                 return True
             except CacheBusyError as e:
@@ -403,6 +437,55 @@ class DuckDbCacheStore(CacheProvider):
                 self._last_error = f"open: {e}"
                 self._is_ready = False
                 return False
+
+    @contextmanager
+    def _read_conn(self):
+        """Соединение на время операции чтения.
+
+        Режим ``READ_WRITE`` (стадия загрузки) держит
+        соединение постоянно — его владеет
+        загрузчик. В режиме ``READ_ONLY`` соединение
+        открывается на время операции и
+        закрывается сразу после, поэтому
+        между чтениями процесс файла не касается.
+
+        Основание: DuckDB допускает несколько
+        параллельных читателей и блокирует
+        только writer (проверено на DuckDB 1.5.4 двумя
+        реальными процессами). После
+        загрузки writer'ов не остался, файл
+        свободен всегда.
+        """
+        with self._lock:
+            persistent = self._conn is not None
+            if not persistent and self._is_ready:
+                # Открывать имеет право только проверенное хранилище:
+                # ``connect()`` убедился, что файл открывается, и закрыл
+                # соединение. Непроверенное хранилище (is_ready() == False)
+                # читать нельзя — файл может отсутствовать, лежать на
+                # неподдерживаемой FS или быть неинициализированным.
+                self._open_locked()
+            conn = self._conn
+        try:
+            yield conn
+        finally:
+            if not persistent and conn is not None:
+                with self._lock:
+                    self._close_locked()
+
+    def _close_locked(self) -> None:
+        """Закрыть соединение, если оно открыто по себе.
+
+        Включается после операции чтения
+        и перед передачей егё владелецу.
+        """
+        if self._conn is None:
+            return
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        self._conn = None
 
     def _open_locked(self) -> None:
         import duckdb
@@ -457,7 +540,11 @@ class DuckDbCacheStore(CacheProvider):
             "another process",
         )
         if any(marker in message for marker in busy_markers):
-            return CacheBusyError(path=path, cause=exc)
+            return CacheBusyError(
+                path=path,
+                holder=_extract_lock_holder(message) or "",
+                cause=exc,
+            )
         return exc
 
     def configure(
@@ -987,25 +1074,25 @@ class DuckDbCacheStore(CacheProvider):
     ) -> dict[str, Any]:
         schema = schema_name or self._schema
         tables = table_names if table_names is not None else self._tables
-        with self._lock:
-            if self._conn is None:
+        from lib.utils.duckdb_query import build_schema
+
+        with self._read_conn() as conn:
+            if conn is None:
                 raise RuntimeError("DuckDbCacheStore is not ready")
-
-            from lib.utils.duckdb_query import build_schema
-
-            return build_schema(self._conn, schema, tables, self._load_schema_meta)
+            return build_schema(conn, schema, tables, self._load_schema_meta)
 
     def query_sql(self, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
-        with self._lock:
-            if self._conn is None:
+        # Проверка режима не требует соединения: она смотрит только на текст
+        # SQL и на ``self._mode``, поэтому выполняется до открытия файла.
+        self._assert_query_sql_allowed_locked(sql)
+
+        from lib.utils.duckdb_query import run_query
+
+        with self._read_conn() as conn:
+            if conn is None:
                 return {"status": "error", "row_count": 0, "columns": [], "rows": [],
                         "error": "DuckDbCacheStore is not ready"}
-
-            self._assert_query_sql_allowed_locked(sql)
-
-            from lib.utils.duckdb_query import run_query
-
-            return run_query(self._conn, sql, params)
+            return run_query(conn, sql, params)
 
     def _assert_query_sql_allowed_locked(self, sql: str) -> None:
         """Второй уровень защиты (assertion guard) для ``query_sql``.
@@ -1037,13 +1124,12 @@ class DuckDbCacheStore(CacheProvider):
             raise ReadOnlyAssertionError(sql)
 
     def explain(self, sql: str) -> dict[str, Any]:
-        with self._lock:
-            if self._conn is None:
+        from lib.utils.duckdb_query import explain_query
+
+        with self._read_conn() as conn:
+            if conn is None:
                 return {"valid": False, "error": "DuckDbCacheStore is not ready"}
-
-            from lib.utils.duckdb_query import explain_query
-
-            return explain_query(self._conn, sql)
+            return explain_query(conn, sql)
 
     def execute_readonly(
         self,
@@ -1056,11 +1142,11 @@ class DuckDbCacheStore(CacheProvider):
         capability). Возвращает ``{"rows": [...], "columns": [...]}`` при
         успехе или ``{"error": <msg>}`` если кэш не готов / запрос упал.
         """
-        with self._lock:
-            if self._conn is None:
+        with self._read_conn() as conn:
+            if conn is None:
                 return {"error": "DuckDbCacheStore is not ready"}
             try:
-                cur = self._conn.cursor()
+                cur = conn.cursor()
                 try:
                     if params:
                         if isinstance(params, dict):
@@ -1096,14 +1182,14 @@ class DuckDbCacheStore(CacheProvider):
         """
         loaded: list[dict[str, Any]] = []
         self._preload_errors: list[dict[str, Any]] = []
-        with self._lock:
-            if self._conn is None or not self._vector_db_table:
+        with self._read_conn() as conn:
+            if conn is None or not self._vector_db_table:
                 return loaded
             schema, name = _split_table(self._vector_db_table)
             schema = schema or self._schema
             try:
                 sources = [
-                    r[0] for r in self._conn.execute(
+                    r[0] for r in conn.execute(
                         f'SELECT DISTINCT source FROM "{schema}"."{name}" '
                         'WHERE source IS NOT NULL ORDER BY source'
                     ).fetchall()
@@ -1250,8 +1336,8 @@ class DuckDbCacheStore(CacheProvider):
         from lib.services.cache_provider import SearchResult
         from lib.services.cache_provider_impl import get_embedding
 
-        with self._lock:
-            if self._conn is None or not self._vector_db_table:
+        with self._read_conn() as conn:
+            if conn is None or not self._vector_db_table:
                 return []
 
             if index_name in self._dirty_sources or index_name not in self._index_cache:
@@ -1287,10 +1373,18 @@ class DuckDbCacheStore(CacheProvider):
 
         from lib.utils.duckdb_query import build_raw_items, group_vector_hits
 
-        raw = build_raw_items(
-            meta_items, scores, ids, index_name, threshold,
-            conn=self._conn, vector_db_table=self._vector_db_table,
-        )
+        # Гидратация строк обязана идти ВНУТРИ ``with``: соединение живёт
+        # только на время блока, и после выхода ``self._conn`` равен None.
+        # Раньше соединение было постоянным, поэтому ``self._conn`` здесь
+        # ещё работал; с переходом на «открыть на операцию» обращение к нему
+        # после блока давало пустую выборку — vector search молча возвращал
+        # «Документы не найдены» при загруженном индексе и доступном
+        # эмбеддере.
+        with self._read_conn() as hydr_conn:
+            raw = build_raw_items(
+                meta_items, scores, ids, index_name, threshold,
+                conn=hydr_conn, vector_db_table=self._vector_db_table,
+            )
         results = group_vector_hits(raw, top_k, threshold)
 
         return [
@@ -1313,18 +1407,18 @@ class DuckDbCacheStore(CacheProvider):
 
     def get_stats(self) -> dict[str, Any]:
         """Снимок состояния хранилища для мониторинга."""
-        with self._lock:
+        with self._read_conn() as conn:
             tables = {}
             vector_sources = {}
-            if self._conn is not None:
+            if conn is not None:
                 try:
-                    rows = self._conn.execute(
+                    rows = conn.execute(
                         "SELECT table_schema, table_name FROM information_schema.tables "
                         "WHERE table_schema = ? ORDER BY table_name",
                         [self._schema],
                     ).fetchall()
                     for schema, name in rows:
-                        cnt = self._conn.execute(
+                        cnt = conn.execute(
                             f'SELECT COUNT(*) FROM "{schema}"."{name}"'
                         ).fetchone()[0]
                         tables[name] = {"rows": cnt}
@@ -1334,7 +1428,7 @@ class DuckDbCacheStore(CacheProvider):
                     schema, name = _split_table(self._vector_db_table)
                     schema = schema or self._schema
                     try:
-                        src_rows = self._conn.execute(
+                        src_rows = conn.execute(
                             f'SELECT source, COUNT(*) AS cnt FROM "{schema}"."{name}" '
                             "GROUP BY source ORDER BY source"
                         ).fetchall()

@@ -91,6 +91,8 @@ class VectorResource:
 Resource = TableResource | VectorResource
 
 
+
+
 @dataclass(frozen=True)
 class SkillRegistration:
     """Описание ресурсов одного skill'а.
@@ -148,8 +150,8 @@ class TableRegistry:
       Регистрируются через ``register_infra(key, resources)``.
 
     Методы-агрегаторы (``table_names``, ``vector_names``, ``resources``,
-    ``tracking_column_for``) объединяют оба namespace'а — сборка
-    runtime'а (``_make_sync_services``, ``_make_cache_store``) не различает
+    ``tracking_column_for``) объединяют первые два namespace'а — сборка
+    runtime'а (``_init_cache_runtime``) не различает
     источник ресурса.
 
     Attributes:
@@ -159,6 +161,7 @@ class TableRegistry:
 
     _registrations: dict[str, SkillRegistration] = field(default_factory=dict)
     _infra: dict[str, tuple[Resource, ...]] = field(default_factory=dict)
+
 
     def register(self, registration: SkillRegistration) -> None:
         """Зарегистрировать skill."""

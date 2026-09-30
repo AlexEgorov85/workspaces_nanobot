@@ -4,7 +4,7 @@
 
     public.agent_predefined_scripts         (PostgreSQL, source of truth)
         ↓ seed_predefined_scripts.sql
-    DuckDB-PG snapshot (cache.duckdb)        (см. PgDuckDbSyncService)
+    локальный кэш (снимок на момент загрузки)
         ↓ db_loader.load_script / load_all
     ScriptDefinition
         ↓ resolve/merge
@@ -19,8 +19,8 @@
 Critical rules:
   * Скрипты читаются только из ``public.agent_predefined_scripts`` (DB-source).
     Python ``REGISTRY`` удалён; fallback отсутствует.
-  * ``DuckDBService`` — generic ``lib.services.DuckDBService`` (или
-    интерфейс ``CacheProvider``); никакого домен-знания здесь нет.
+  * ``CacheQueryService`` — срез ``CacheProvider`` (нужен только
+    ``query_sql``); никакого домен-знания здесь нет.
   * ``run()`` не делает HTTP/LLM вызовов.
 """
 
@@ -43,17 +43,18 @@ __all__ = [
     "run",
     "list_available",
     "list_scripts",
-    "DuckDBServiceProtocol",
+    "CacheQueryService",
 ]
 
 
-class DuckDBServiceProtocol(Protocol):
+class CacheQueryService(Protocol):
     """Минимальный интерфейс, нужный режиму predefined.
 
-    Совместим с любым ``CacheProvider`` (см. ``lib.services.cache_provider``):
-    ``DuckDbCacheStore`` и ``PostgresDuckDbProvider``. SQL-безопасность
-    контролируется tool'ом ``duckdb_query`` через ``validate_sql`` (см.
-    ``lib.utils.sql_safety``); здесь — только выполнение.
+    Структурно — срез ``CacheProvider`` (см.
+    ``lib.services.cache_provider``): нужен только ``query_sql``.
+    Конкретная реализация кэша skill'у неизвестна. SQL-безопасность
+    контролируется на стороне runtime через ``validate_sql``
+    (см. ``lib.utils.sql_safety``); здесь — только выполнение.
     """
 
     def query_sql(
@@ -84,7 +85,7 @@ def list_scripts(
 
 def _resolve_script(
     script_name: str,
-    db: DuckDBServiceProtocol | DBScriptProvider,
+    db: CacheQueryService | DBScriptProvider,
     predefined_table: str,
 ):
     """DB-only lookup.
@@ -97,7 +98,7 @@ def _resolve_script(
 
 def run(
     script_name: str,
-    db: DuckDBServiceProtocol,
+    db: CacheQueryService,
     params: dict[str, Any] | None = None,
     *,
     predefined_table: str | None = None,
@@ -106,8 +107,8 @@ def run(
 
     Args:
         script_name: имя скрипта (DB-only lookup, см. ``db_loader``).
-        db: generic DuckDB-сервис (``DuckDbCacheStore`` или
-            stub с тем же интерфейсом в тестах).
+        db: ``CacheQueryService`` — срез ``CacheProvider``
+            (или stub с тем же интерфейсом в тестах).
         params: пользовательские параметры запроса.
         predefined_table: обязательный ``schema.table`` PG-реестра
             (например, ``public.agent_predefined_scripts``).

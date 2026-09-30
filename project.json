@@ -128,7 +128,7 @@
   //    * embedding service (Ollama /api/embed, включая auth_token) → gateway.vector.embedding
   //    * DuckDB snapshot path                                  → table_registry.snapshot_path()
   //    * FAISS backend / storage / root                        → gateway.vector.index.*
-  //    * PG → DuckDB sync                                      → gateway.sync.*
+  //    * PG → DuckDB загрузка кэша                          → без секции (разовая загрузка)
   //  Правило описано в TARGET_ARCHITECTURE §skills.* boundary.
   //
   //  Структура tables (lib/core/project_settings.py::TableEntry):
@@ -160,9 +160,9 @@
   //  gateway (например, опечатка "tablse" или оставшийся от старой версии
   //  ключ "embedding"/"cache"). Это сознательное ужесточение контракта.
   //
-  //  ВНИМАНИЕ: sync.* (poll_interval_sec, full_resync_every, max_queue_size,
-  //  reconnect_backoff_*) — это НЕ секция skill'а, а глобальная runtime-секция
-  //  на уровне gateway.sync.* (общая для всех skills). См. ниже.
+  //  Секции gateway.sync.* (поллинг, очередь записов, reconnect-бэкофф)
+  //  УДАЛЕНЫ: была фоновой синхронизации. Загрузка кэша —
+  //  разовая операция при старте процесса (снимок PG в момент загрузки).
   // ---------------------------------------------------------------------------
   "skills": {
     "audit_analyzer": {
@@ -384,17 +384,6 @@
       "enabled": true,                 // Зарегистрировать tool compact_context и обрабатывать /compact в CLI
       "notify_in_history": true,       // Писать заметку о сжатии в agent_conversation_messages (видно в Streamlit)
       "print_to_terminal": false       // Дублировать заметку в терминал gateway (по образцу print_worker_activity)
-    },
-    //  sync.* — параметры фоновой синхронизации PG → DuckDB (PgDuckDbSyncService).
-    //  Глобальные runtime-параметры, общие для всех skills. Минимум 4 часа
-    //  (см. lib/services/pg_duckdb_sync_service.py). Все ключи опциональны;
-    //  дефолты указаны в коде.
-    "sync": {
-      "poll_interval_sec": 14400,
-      "full_resync_every": 10,
-      "max_queue_size": 10000,
-      "reconnect_backoff_sec": 1.0,
-      "reconnect_backoff_max_sec": 60.0
     },
     //  usage_store.* — параметры upstream LLMUsageStore (metadata-only LLM usage).
     //  Дефолтный путь — <get_runtime_subdir("usage")>/usage.db.

@@ -3,9 +3,8 @@
 Единая точка входа для runtime-чтения predefined-скриптов из PostgreSQL.
 Резолв таблицы идёт через ``lib.core.skill_config.get_predefined_scripts_table``
 (метка ``scripts_registry`` в ``TableRegistry``), а саму строку читаем
-через CacheProvider/DuckDB — после того, как ``PgDuckDbSyncService``
-опубликовал снимок по пути ``resolve_publish_path()`` (``project.json::
-gateway.cache.local_path`` либо ``~/.cache/nanobot/duckdb/cache.duckdb``).
+через базовый интерфейс ``CacheProvider``. Skill не знает ни чем наполнен кэш,
+где лежит файл и какая СУБД под ним: это деталь runtime.
 
 Python ``REGISTRY`` (legacy) отсутствует — этот loader единственный источник
 ``ScriptDefinition``. Ошибка чтения таблицы возвращает пустой результат /
@@ -33,11 +32,11 @@ __all__ = [
 
 
 class DBScriptProvider(Protocol):
-    """Минимальный интерфейс для чтения скриптов из DuckDB-кэша PG-снимка.
+    """Минимальный интерфейс для чтения скриптов из локального кэша.
 
-    Совместим с любым ``CacheProvider``: ``DuckDbCacheStore`` и
-    ``PostgresDuckDbProvider``. Сейчас единственный путь — ``query_sql``
-    поверх снимка ``workspace/data_store/duckdb/cache.duckdb``.
+    Структурно это срез ``CacheProvider``: нужен только ``query_sql``.
+    Конкретная реализация кэша skill'у неизвестна, и подмена хранилища
+    не должна требовать изменений здесь.
     """
 
     def query_sql(
@@ -97,10 +96,10 @@ def _qualified_table(table: str) -> tuple[str, str]:
 
 
 def load_all(provider: DBScriptProvider, table: str) -> dict[str, ScriptDefinition]:
-    """Загрузить все скрипты из PG-реестра через DuckDB-кэш.
+    """Загрузить все скрипты из PG-реестра через локальный кэш.
 
     Args:
-        provider: ``CacheProvider`` с открытым DuckDB-кэшем.
+        provider: ``CacheProvider`` (роль только для чтения).
         table: ``schema.table`` реестра (из
             ``lib.core.skill_config.get_predefined_scripts_table``).
 

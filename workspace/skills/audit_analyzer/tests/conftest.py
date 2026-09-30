@@ -274,7 +274,7 @@ def _make_db() -> duckdb.DuckDBPyConnection:
 
 
 class _DBService:
-    """Адаптер in-memory DuckDB к ``DuckDBServiceProtocol``."""
+    """Адаптер in-memory DuckDB к ``CacheQueryService``."""
 
     def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
         self._conn = conn
