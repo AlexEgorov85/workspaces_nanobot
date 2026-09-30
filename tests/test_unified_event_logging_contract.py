@@ -295,16 +295,20 @@ class TestDbLoggingServiceUnavailableBehavior:
         assert any("ContextCompactionService" in r.getMessage() for r in warnings)
 
     def test_log_sync_event_noop_with_warning(self, caplog):
-        """``PgDuckDbSyncService._log_sync_event`` при ``None`` — WARNING."""
-        from lib.services.pg_duckdb_sync_service import PgDuckDbSyncService
+        """``CacheLoadService._log_sync_event`` при ``None`` — WARNING."""
+        from unittest.mock import MagicMock
 
-        sync = PgDuckDbSyncService(dsn="x", schema="main", tables=["t"])
+        from lib.services.cache_load_service import CacheLoadService
+
+        loader = CacheLoadService(
+            dsn="x", store=MagicMock(), schema="main", tables=["t"]
+        )
 
         with caplog.at_level(logging.WARNING, logger="lib.services.db_logging_service"):
-            sync._log_sync_event("sync_test", "x", payload={"a": 1})
+            loader._log_sync_event("cache_load_test", "x", payload={"a": 1})
 
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("PgDuckDbSyncService" in r.getMessage() for r in warnings)
+        assert any("CacheLoadService" in r.getMessage() for r in warnings)
 
     def test_emit_health_event_noop_with_warning(self, caplog):
         """``PreloadService._emit_health_event`` при ``None`` — WARNING."""
@@ -324,7 +328,7 @@ class TestDbLoggingServiceUnavailableBehavior:
 
 PRODUCER_MODULES = (
     "lib/services/context_compaction.py",
-    "lib/services/pg_duckdb_sync_service.py",
+    "lib/services/cache_load_service.py",
     "lib/services/duckdb_cache_store.py",
     "lib/services/preload_service.py",
 )

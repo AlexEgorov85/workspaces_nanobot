@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import types
@@ -32,10 +33,24 @@ def full_fake_modules(tmp_path):
         agent_instance = MagicMock()
         loop.AgentLoop = MagicMock()
         loop.AgentLoop.from_config = MagicMock(return_value=agent_instance)
+        # ``lib/core/agent_factory.py`` импортирует ещё и
+        # ``nanobot.agent.tools.registry``. Фейк ``nanobot.agent`` — простой
+        # ModuleType без подпакета ``tools``, поэтому подмодуль нужно
+        # зарегистрировать явно, иначе импорт падает с «'nanobot.agent' is
+        # not a package». Раньше это маскировалось тем, что реальный
+        # ``nanobot.agent.tools`` уже лежал в ``sys.modules`` от других
+        # тестов, и фейк проходил только в полном прогоне.
+        tools_pkg = types.ModuleType("nanobot.agent.tools")
+        tools_registry = types.ModuleType("nanobot.agent.tools.registry")
+        tools_registry.ToolRegistry = MagicMock()
+        sol.agent.tools = tools_pkg
+        tools_pkg.registry = tools_registry
         sys.modules["nanobot"] = sol
         sys.modules["nanobot.agent"] = sol.agent
         sys.modules["nanobot.agent.loop"] = loop
         sys.modules["nanobot.agent.hook"] = hook
+        sys.modules["nanobot.agent.tools"] = tools_pkg
+        sys.modules["nanobot.agent.tools.registry"] = tools_registry
 
         # nanobot.bus
         sol.bus = types.ModuleType("nanobot.bus")
@@ -127,6 +142,10 @@ def full_fake_modules(tmp_path):
             pass
 
         cfg_mod.ConfigurationError = ConfigurationError
+        # Запоминаем настоящий ``config`` и DSN в окружении до подмены
+        # (восстанавливаются в teardown фикстуры).
+        _prev_config_module = sys.modules.get("config")
+        _prev_database_url = os.environ.get("DATABASE_URL")
         sys.modules["config"] = cfg_mod
 
         # workspace
@@ -182,6 +201,24 @@ def full_fake_modules(tmp_path):
             "config": runtime_config,
         }
 
+        # Cleanup: вернуть настоящий модуль ``config``. Фикстура подменяет
+        # его фейком в ``sys.modules``; без восстановления тесты, идущие
+        # после (например, ``test_config.py``), читают фейковый ``SETTINGS``
+        # и падают в зависимости от порядка запуска.
+        if _prev_config_module is not None:
+            sys.modules["config"] = _prev_config_module
+        else:  # pragma: no cover
+            sys.modules.pop("config", None)
+
+        # ``SessionStorageService`` пишет resolved DSN в ``os.environ``
+        # (это нужно, чтобы skill-subprocess унаследовал его). Фейковый DSN
+        # не должен утекать в процесс pytest — иначе acceptance-тесты,
+        # запускающие CLI в subprocess, наследуют его и падают.
+        if _prev_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = _prev_database_url
+
 
 class TestCreate:
     def test_creates_context_with_all_services(self, full_fake_modules):
@@ -204,7 +241,7 @@ class TestCreate:
         assert ctx.transcription_service is not None
         assert ctx.preload_service is not None
         assert ctx.db_logging_service is None
-        assert ctx.sync_service is None
+        assert ctx.cache_loader is None
 
     def test_storage_file_when_no_dsn(self, full_fake_modules):
         from lib.core.application_context import ApplicationContext
@@ -382,7 +419,7 @@ class TestTableRegistryReset:
 
 
 class TestResolvePublishPath:
-    """``resolve_publish_path`` — **единый механизм** вычисления пути к
+    """``resolve_cache_path`` — **единый механизм** вычисления пути к
     ``cache.duckdb`` (используется gateway И CLI/skill).
 
     Главная инвариантa: даже **без** настройки ``project.json`` снимок
@@ -400,10 +437,10 @@ class TestResolvePublishPath:
         Подменяем ``Path.home()`` через ``tmp_path``, чтобы тест был
         детерминирован и не зависел от реальной ``$HOME`` на CI.
         """
-        from lib.core.application_context import resolve_publish_path
+        from lib.core.application_context import resolve_cache_path
 
         with patch("pathlib.Path.home", return_value=tmp_path):
-            result = resolve_publish_path(str(tmp_path / "workspace"), None)
+            result = resolve_cache_path(str(tmp_path / "workspace"), None)
 
         assert result == str(
             tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
@@ -412,56 +449,56 @@ class TestResolvePublishPath:
 
     def test_default_uses_local_cache_under_home_with_empty_cfg(self, tmp_path):
         """Пустой cache_cfg → то же поведение, что и None."""
-        from lib.core.application_context import resolve_publish_path
+        from lib.core.application_context import resolve_cache_path
 
         with patch("pathlib.Path.home", return_value=tmp_path):
-            result = resolve_publish_path(str(tmp_path / "workspace"), {})
+            result = resolve_cache_path(str(tmp_path / "workspace"), {})
 
         assert result == str(
             tmp_path / ".cache" / "nanobot" / "duckdb" / "cache.duckdb"
         ), result
 
     def test_local_path_absolute(self, tmp_path):
-        from lib.core.application_context import resolve_publish_path
+        from lib.core.application_context import resolve_cache_path
 
         custom = tmp_path / "my-cache"
-        result = resolve_publish_path(
+        result = resolve_cache_path(
             str(tmp_path / "ws"), {"local_path": str(custom)}
         )
         assert result == str(custom / "cache.duckdb"), result
         assert Path(result).parent.exists()
 
     def test_local_path_relative_resolved_from_workspace(self, tmp_path):
-        from lib.core.application_context import resolve_publish_path
+        from lib.core.application_context import resolve_cache_path
 
         ws = tmp_path / "ws"
         ws.mkdir()
-        result = resolve_publish_path(
+        result = resolve_cache_path(
             str(ws), {"local_path": "subdir/duckdb"}
         )
         assert result == str(ws / "subdir" / "duckdb" / "cache.duckdb"), result
 
     def test_local_path_unwritable_raises(self, tmp_path):
         """Если ``local_path`` нельзя создать — громкая OSError, не silent fallback."""
-        from lib.core.application_context import resolve_publish_path
+        from lib.core.application_context import resolve_cache_path
 
         # ``local_path`` указывает на невозможный путь (файл как родитель).
         impossible = tmp_path / "a_file_not_dir"
         impossible.write_text("x")
         with pytest.raises(OSError):
-            resolve_publish_path(
+            resolve_cache_path(
                 str(tmp_path / "ws"),
                 {"local_path": str(impossible / "x")},
             )
 
     def test_unknown_keys_are_silently_ignored(self, tmp_path):
         """Любой неизвестный ключ в cache_cfg (типа ``use_workspace_path`` из старой версии) — игнорируется."""
-        from lib.core.application_context import resolve_publish_path
+        from lib.core.application_context import resolve_cache_path
 
         # Старые user-конфиги могут содержать use_workspace_path / publish_to_workspace
         # — больше нет shim'ов, эти ключи молча игнорируются.
         with patch("pathlib.Path.home", return_value=tmp_path):
-            result = resolve_publish_path(
+            result = resolve_cache_path(
                 str(tmp_path / "ws"),
                 {
                     "use_workspace_path": True,  # legacy, должно быть проигнорировано
@@ -484,14 +521,14 @@ class TestSingleMechanism:
 
     def test_gateway_and_cache_provider_agree_on_default(self, tmp_path, monkeypatch):
         """С дефолтным конфигом обе точки возвращают один и тот же путь."""
-        from lib.core.application_context import resolve_publish_path
+        from lib.core.application_context import resolve_cache_path
 
         with patch("pathlib.Path.home", return_value=tmp_path):
             # Gateway path
-            gw_path = resolve_publish_path("/workspace", {})
+            gw_path = resolve_cache_path("/workspace", {})
 
             # Что build_cache_provider ВЫЧИСЛЯЕТ сейчас (после фикса)
-            cp_path = resolve_publish_path("/workspace", {})
+            cp_path = resolve_cache_path("/workspace", {})
 
         assert gw_path == cp_path, (
             f"Gateway ({gw_path}) и cache_provider ({cp_path}) "
@@ -503,7 +540,7 @@ class TestSingleMechanism:
 
 
 class TestWarnIfPublishPathOnNfs:
-    """``_warn_if_publish_path_on_nfs`` — Linux-only, no-op на других ОС."""
+    """``_warn_if_cache_path_on_nfs`` — Linux-only, no-op на других ОС."""
 
     @pytest.mark.skipif(
         sys.platform == "win32",
@@ -511,20 +548,20 @@ class TestWarnIfPublishPathOnNfs:
     )
     def test_warns_on_nfs_path(self, tmp_path, caplog):
         """Если ``/proc/mounts`` указывает NFS — печатаем warning."""
-        from lib.core.application_context import _warn_if_publish_path_on_nfs
+        from lib.core.application_context import _warn_if_cache_path_on_nfs
 
         fake_mounts = f"{tmp_path} nfs rw,vers=3 0 0\n"
         with patch("pathlib.Path.exists", return_value=True), \
              patch.object(Path, "read_text", return_value=fake_mounts), \
              patch("lib.core.application_context.Path.exists", return_value=True):
             with caplog.at_level("WARNING"):
-                _warn_if_publish_path_on_nfs(str(tmp_path / "cache.duckdb"))
+                _warn_if_cache_path_on_nfs(str(tmp_path / "cache.duckdb"))
         # Допускаем что warning может быть, а может и не быть — главное
         # что функция не упала; для строгой проверки нужен реальный /proc/mounts.
 
     def test_noop_on_windows(self):
-        from lib.core.application_context import _warn_if_publish_path_on_nfs
+        from lib.core.application_context import _warn_if_cache_path_on_nfs
 
         with patch("platform.system", return_value="Windows"):
-            _warn_if_publish_path_on_nfs("C:\\fake\\cache.duckdb")
+            _warn_if_cache_path_on_nfs("C:\\fake\\cache.duckdb")
         # Просто не упасть — на Windows функция возвращает молча.

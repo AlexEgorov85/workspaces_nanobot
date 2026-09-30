@@ -24,6 +24,25 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CLI = _REPO_ROOT / "workspace" / "skills" / "legal_summarizer" / "scripts" / "cli.py"
 
+# Переменные, которые уводят дочерний CLI в сеть/БД. В полном прогоне они
+# уже выставлены предыдущими тестами (``SessionStorageService`` пишет
+# resolved DSN в ``os.environ``, конфиг экспортирует ключи), и ребёнок
+# начинает подключаться к БД вместо того, чтобы просто печатать в stdout.
+# Наблюдаемое здесь свойство — отсутствие буферизации stdout — от них не
+# зависит, поэтому они убираются из окружения ребёнка.
+_CHILD_ENV_DENYLIST = frozenset(
+    {
+        "DATABASE_URL",
+        "LLM_API_KEY",
+        "LLM_BASE_URL",
+        "EMBED_TOKEN",
+        "OLLAMA_URL",
+        "NANOBOT_PROFILE",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    }
+)
+
 
 _STUB_SUMMARIZER = textwrap.dedent(
     """
@@ -41,9 +60,24 @@ _STUB_SUMMARIZER = textwrap.dedent(
         # Имитируем долгий LLM-вызов, чтобы увидеть, успеет ли
         # RUNNING-маркер выйти до того, как мы вернём результат.
         # Спим в stderr — наблюдатель может прочитать момент старта.
+        #
+        # Вместо фиксированного sleep ждём ФАЙЛ-СИГНАЛ от родителя: только
+        # после того, как он прочитал RUNNING-маркер и убедился, что процесс
+        # ещё жив, он создаёт файл и ребёнок продолжает. С sleep(5.0) окно
+        # было гонкой: на загруженной машине родитель не успевал прочитать
+        # маркер за 5 с, ребёнок завершался, и проверка «процесс жив» падала
+        # при полностью корректном коде. Теперь детерминированно.
+        import os as _os
         import sys as _sys
+        import pathlib as _pl
         print(f"[STUB] run_started t={_time.monotonic():.3f}", file=_sys.stderr, flush=True)
-        _time.sleep(5.0)
+        _gate = _pl.Path(_os.environ["LEGAL_SUMMARIZER_STUB_GATE"])
+        # Дедлайн ребёнка ВСЕГДА длиннее дедлайна родителя (120 с), иначе
+        # стаб вышел бы раньше, чем родитель откроет ворота, и проверка
+        # «процесс жив» получила бы ложный отказ.
+        _deadline = _time.monotonic() + 180.0
+        while not _gate.exists() and _time.monotonic() < _deadline:
+            _time.sleep(0.02)
         print(f"[STUB] run_finished t={_time.monotonic():.3f}", file=_sys.stderr, flush=True)
         return {
             "status": "completed",
@@ -183,6 +217,20 @@ def test_running_marker_arrives_before_run_completes(tmp_path):
         """
     )
 
+    gate = tmp_path / "_release_gate"
+    # Ребёнку НЕ наследуем мутированное окружение процесса pytest целиком.
+    # В полном прогоне к этому моменту другие тесты уже выставили
+    # DATABASE_URL/LLM_API_KEY (например, SessionStorageService пишет
+    # resolved DSN в os.environ), и CLI навыка начинает ходить в сеть —
+    # тест наблюдает не flush, а сетевые ретраи. Проверяемое здесь
+    # свойство (stdout не буферизуется) от окружения не зависит, поэтому
+    # убираем ровно те переменные, что уводят процесс в сеть/БД.
+    child_env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in _CHILD_ENV_DENYLIST
+    }
+    child_env["LEGAL_SUMMARIZER_STUB_GATE"] = str(gate)
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -200,7 +248,7 @@ def test_running_marker_arrives_before_run_completes(tmp_path):
         encoding="utf-8",
         errors="replace",
         bufsize=1,
-        env={**os.environ},
+        env=child_env,
         cwd=str(_CLI.parent),
     )
 
@@ -209,7 +257,13 @@ def test_running_marker_arrives_before_run_completes(tmp_path):
     started = time.monotonic()
     first_marker_at: float | None = None
     proc_alive_when_running: bool | None = None
-    deadline = started + 15.0
+    # Дедлайн — верхняя граница ожидания, а не фиксированная пауза: если
+    # процесс умрёт, цикл выйдет по EOF раньше. 120 с — с запасом на
+    # сильно загруженную машину, где старт интерпретатора и импорт навыка
+    # занимают десятки секунд. В норме тест завершается за ~1 с и дедлайн
+    # не играет роли: смысл проверки — ПОРЯДОК («маркер до завершения»),
+    # а порядок теперь гарантирован файлом-воротами, а не гонкой со временем.
+    deadline = started + 120.0
     decoder = json.JSONDecoder()
 
     # ``json.dumps(..., indent=2)`` в cli._emit() делает multi-line JSON,
@@ -246,14 +300,30 @@ def test_running_marker_arrives_before_run_completes(tmp_path):
 
     proc.poll()
 
+    # Отпускаем ребёнка: он ждёт этот файл внутри стаба. Создаём его ДО
+    # assert'ов, чтобы упавший тест не оставлял висящий процесс до
+    # дедлайна стаба — иначе следующий прогон ждал бы его выхода.
+    gate.touch()
+
+    # Диагностика падения: stderr ребёнка показывает, докудался ли он до
+    # стаба (``[STUB] run_started``) или застрял раньше — без этого
+    # сообщение об ошибке неотличимо от «маркер не пришёл».
+    try:
+        proc.wait(timeout=180)
+    except subprocess.TimeoutExpired:  # pragma: no cover
+        proc.kill()
+        proc.wait(timeout=30)
+    child_err = (proc.stderr.read() if proc.stderr else "")[-2000:]
+
     assert first_marker_at is not None, (
-        "RUNNING-маркер не пришёл в stdout за 15 сек. "
-        f"returncode={proc.returncode}"
+        "RUNNING-маркер не пришёл в stdout за 120 сек. "
+        f"returncode={proc.returncode}\n--- child stderr ---\n{child_err}"
     )
     assert proc_alive_when_running, (
         "RUNNING пришёл ТОЛЬКО ПОСЛЕ завершения процесса — stdout "
-        "буферизуется, контракт долгой операции нарушен."
+        "буферизуется, контракт долгой операции нарушен.\n"
+        f"returncode={proc.returncode}\n--- child stderr ---\n{child_err}"
     )
-
-    proc.wait(timeout=30)
-    assert proc.returncode == 0
+    assert proc.returncode == 0, (
+        f"returncode={proc.returncode}\n--- child stderr ---\n{child_err}"
+    )

@@ -125,7 +125,7 @@ class TestDefaultSchemaIsGeneric:
         "path",
         [
             "lib/services/duckdb_cache_store.py",
-            "lib/services/pg_duckdb_sync_service.py",
+            "lib/services/cache_load_service.py",
         ],
     )
     def test_no_oarb_default(self, path: str) -> None:

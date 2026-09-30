@@ -24,10 +24,15 @@ from pathlib import Path
 
 import pytest
 
-from lib.services.cache_provider import CacheProvider
+from lib.services.cache_provider import CacheIngestion, CacheProvider, CacheStore
 from lib.services.duckdb_cache_store import DuckDbCacheStore
 
 _ROOT = Path(__file__).resolve().parent.parent
+
+# Методы записи. Их НЕТ в роли чтения — и именно поэтому «write-метод,
+# используемый рантаймом, но не объявленный в контракте» больше не может
+# произойти молча.
+_WRITE_METHODS = {"upsert_records", "replace_records", "ensure_schema"}
 
 # Единственные места, где имя конкретной реализации законно.
 #
@@ -124,15 +129,15 @@ class TestSingleImplementation:
                 if not isinstance(node, ast.ClassDef):
                     continue
                 for base in node.bases:
-                    if isinstance(base, ast.Name) and base.id == "CacheProvider":
+                    if isinstance(base, ast.Name) and base.id == "CacheStore":
                         found.append(f"{_rel(path)}::{node.name}")
         assert found == ["lib/services/duckdb_cache_store.py::DuckDbCacheStore"], (
-            f"Ожидалась ровно одна реализация CacheProvider, найдено: {found}"
+            f"Ожидалась ровно одна реализация CacheStore, найдено: {found}"
         )
 
     def test_concrete_class_declares_inheritance(self) -> None:
         """Иначе enforcement query_sql и типизированные ошибки не имеют носителя."""
-        assert issubclass(DuckDbCacheStore, CacheProvider)
+        assert issubclass(DuckDbCacheStore, CacheStore)
         assert not DuckDbCacheStore.__abstractmethods__, (
             f"Не реализованы методы ABC: {DuckDbCacheStore.__abstractmethods__}"
         )
@@ -296,16 +301,245 @@ class TestInterfaceSurface:
             "heartbeat", "acquire_write_fence", "release",
             "start_heartbeat", "stop_heartbeat", "start", "stop", "publish",
         }
-        present = forbidden & set(vars(CacheProvider))
-        assert not present, f"Lifecycle-методы в ABC недопустимы: {sorted(present)}"
+        for role in (CacheProvider, CacheIngestion):
+            present = forbidden & set(vars(role))
+            assert not present, (
+                f"Lifecycle-методы в {role.__name__} недопустимы: {sorted(present)}"
+            )
 
-    def test_single_mutation_method(self) -> None:
-        """Мутация в контракте ровно одна — ingestion от sync-слоя."""
-        mutations = {
-            "upsert_records", "replace_records", "insert_records",
-            "delete_records", "update_records",
-        }
-        present = mutations & set(vars(CacheProvider))
-        assert present == {"upsert_records"}, (
-            f"Ожидалась ровно одна мутация upsert_records, найдено: {sorted(present)}"
+    def test_read_role_has_no_write_methods(self) -> None:
+        """Роль чтения не содержит ни одного write-метода.
+
+        Регрессия, которую этот guard закрывает: sync-слой дёргал
+        ``replace_records`` и ``ensure_schema`` у экземпляра, объявленного
+        как ``CacheProvider``, — то есть контракт врал, и «проверка ровно
+        одной мутации» запрещала это исправить.
+        """
+        leaked = _WRITE_METHODS & set(vars(CacheProvider))
+        assert not leaked, (
+            f"Роль чтения не должна содержать write-методы: {sorted(leaked)}"
         )
+
+    def test_write_role_declares_every_write_method(self) -> None:
+        """Роль записи объявляет ровно три операции ingestion."""
+        declared = {
+            name for name, value in vars(CacheIngestion).items()
+            if callable(value) and not name.startswith("_")
+        }
+        assert declared == _WRITE_METHODS, (
+            f"Ожидались ровно {sorted(_WRITE_METHODS)}, найдено {sorted(declared)}"
+        )
+
+    def test_write_role_methods_are_abstract(self) -> None:
+        """Роль записи — контракт, а не второй носитель реализации."""
+        for name in _WRITE_METHODS:
+            assert name in CacheIngestion.__abstractmethods__, (
+                f"{name} MUST быть abstract в CacheIngestion"
+            )
+
+    def test_composite_exposes_both_roles(self) -> None:
+        assert issubclass(CacheStore, CacheProvider)
+        assert issubclass(CacheStore, CacheIngestion)
+
+
+class TestRuntimeUsesDeclaredContract:
+    """Рантайм не может вызывать у провайдера то, чего нет в контракте.
+
+    Это тот класс дефекта, который статические проверки «есть ли вторая
+    реализация» и «нет ли lifecycle-методов» не видят: метод существует у
+    concrete-класса, вызывающий типизирован ``CacheProvider``, и всё
+    работает — пока однажды не перестаёт.
+    """
+
+    # Места, где провайдер кэша реально передаётся и вызывается.
+    # Список явный, а не «все переменные с именем store»: имена ``store`` и
+    # ``provider`` в других модулях принадлежат другим объектам (сессии,
+    # LLM-провайдер), и такой guard ловил бы чужой код.
+    #
+    # Change ``drop-local-cache-read-from-pg``: запись в кэш выполняет
+    # ``CacheLoadService``, который держит роль ``CacheStore`` как
+    # ``self._store`` — это отслеживается через ``_WIRING_SITES_ATTRS``,
+    # потому что ресивер здесь не простое имя, а атрибут экземпляра.
+    _WIRING_SITES: dict[str, set[str]] = {
+        "lib/core/application_context.py": {"store", "writer", "provider"},
+        "lib/services/preload_service.py": {"store"},
+    }
+    _WIRING_SITES_ATTRS: dict[str, set[str]] = {
+        "lib/services/cache_load_service.py": {"_store"},
+    }
+
+    def _declared(self) -> set[str]:
+        names: set[str] = set()
+        for role in (CacheProvider, CacheIngestion):
+            names |= {n for n in dir(role) if not n.startswith("_")}
+        return names
+
+    def _accesses(self) -> list[tuple[str, int, str, str]]:
+        found: list[tuple[str, int, str, str]] = []
+        for rel, receivers in self._WIRING_SITES.items():
+            path = _ROOT / rel
+            if not path.exists():
+                continue
+            tree = _parse(path)
+            if tree is None:
+                continue
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id in receivers
+                    and not node.attr.startswith("_")
+                ):
+                    found.append((rel, node.lineno, node.value.id, node.attr))
+        for rel, attrs in self._WIRING_SITES_ATTRS.items():
+            path = _ROOT / rel
+            if not path.exists():
+                continue
+            tree = _parse(path)
+            if tree is None:
+                continue
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Attribute)
+                    and node.value.attr in attrs
+                    and not node.attr.startswith("_")
+                ):
+                    found.append((rel, node.lineno, node.value.attr, node.attr))
+        return found
+
+    def test_every_used_method_is_declared(self) -> None:
+        declared = self._declared()
+        offenders = [
+            f"{rel}:{line} {recv}.{attr}"
+            for rel, line, recv, attr in self._accesses()
+            if attr not in declared
+        ]
+        assert not offenders, (
+            "Рантайм вызывает у провайдера кэша методы, которых нет в "
+            f"CacheProvider/CacheIngestion: {offenders}"
+        )
+
+    def test_wiring_sites_are_actually_seen(self) -> None:
+        """Защита от вакуума: правило выше должно что-то находить.
+
+        Порог — 4, это фактическое число точек обращения к контракту кэша в
+        рантайме: ``ensure_schema`` и ``replace_records`` в ``CacheLoadService``
+        (единственный writer), ``is_ready`` и ``preload_indexes`` в прогреве.
+        Если он упадёт до нуля, значит правило проверяет пустоту.
+        """
+        accesses = self._accesses()
+        assert len(accesses) >= 4, (
+            f"Найдено всего {len(accesses)} обращений к провайдеру в местах "
+            "обвязки — проверка выше рискует ничего не проверять"
+        )
+
+
+class TestDiscoveryRequiresProvider:
+    """Дискавери читает через интерфейс, а не открывает файл кэша сам.
+
+    Регрессия: ``fetch_fn`` стал обязательным, но ни один из трёх вызывающих
+    не был переведён на него. Итог был тихим: ``--list-indexes`` отдавал
+    ``store_unavailable``, а health-summary прогрева глотал исключение и
+    печатал ``orphan (0) / stale (0)`` — то есть «всё зелёное» при
+    недоступном runtime. Обязательный параметр без подключённых мест вызова
+    должен ломаться громко, поэтому он проверяется здесь.
+    """
+
+    _CALLEE = "list_runtime_vector_indexes"
+
+    def test_every_call_site_passes_provider(self) -> None:
+        offenders: list[str] = []
+        for path in _iter_sources():
+            tree = _parse(path)
+            if tree is None:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                chain = _dotted_chain(node.func)
+                if not chain or chain[-1] != self._CALLEE:
+                    continue
+                if "provider" in {kw.arg for kw in node.keywords}:
+                    continue
+                offenders.append(f"{_rel(path)}:{node.lineno}")
+        assert not offenders, (
+            "Вызовы list_runtime_vector_indexes() без provider= "
+            f"(каждый такой вызов упадёт в рантайме): {offenders}"
+        )
+
+    def test_call_sites_exist(self) -> None:
+        """Защита от вакуума: правило выше не должно молча ничего не проверять."""
+        found: list[str] = []
+        for path in _iter_sources():
+            tree = _parse(path)
+            if tree is None:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    chain = _dotted_chain(node.func)
+                    if chain and chain[-1] == self._CALLEE:
+                        found.append(_rel(path))
+        assert len(set(found)) >= 3, (
+            f"Ожидалось минимум 3 места вызова, найдено {sorted(set(found))}"
+        )
+
+    def test_missing_provider_raises(self) -> None:
+        """Без провайдера — исключение, а не тихая пустая выдача."""
+        from lib.services.cache_provider_impl import list_runtime_vector_indexes
+
+        with pytest.raises(ValueError, match="требует provider"):
+            list_runtime_vector_indexes()
+
+    def test_unavailable_cache_is_not_reported_as_empty(self) -> None:
+        """Ошибка чтения MUST подниматься, а не выглядеть как «индексов нет»."""
+
+        class _Broken:
+            is_ready = True
+
+            def query_sql(self, sql: str) -> dict:
+                return {"status": "error", "error": "IO Error: cannot open database file"}
+
+        from lib.services.cache_provider_impl import list_runtime_vector_indexes
+
+        with pytest.raises(RuntimeError, match="failed"):
+            list_runtime_vector_indexes(provider=_Broken())
+
+    def test_missing_storage_table_means_no_indexes(self) -> None:
+        """Отсутствие таблицы-хранилища — нормальное «индексов нет»."""
+
+        class _Empty:
+            is_ready = True
+
+            def query_sql(self, sql: str) -> dict:
+                return {
+                    "status": "error",
+                    "error": 'Catalog Error: Table with name oarb.audit_vectors does not exist!',
+                }
+
+        from lib.services.cache_provider_impl import list_runtime_vector_indexes
+
+        assert list_runtime_vector_indexes(provider=_Empty()) == []
+
+    def test_reads_through_query_sql(self) -> None:
+        """Строки приходят из ``query_sql`` провайдера, а не из своего соединения."""
+        seen: list[str] = []
+
+        class _Ok:
+            is_ready = True
+
+            def query_sql(self, sql: str) -> dict:
+                seen.append(sql)
+                return {
+                    "status": "success",
+                    "row_count": 1,
+                    "columns": ["source", "vector_count"],
+                    "rows": [{"source": "audits_index", "vector_count": 10}],
+                }
+
+        from lib.services.cache_provider_impl import list_runtime_vector_indexes
+
+        rows = list_runtime_vector_indexes(provider=_Ok())
+        assert [r["source"] for r in rows] == ["audits_index"]
+        assert rows[0]["vector_count"] == 10
+        assert seen and "GROUP BY source" in seen[0]

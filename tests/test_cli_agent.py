@@ -170,10 +170,15 @@ class TestHookLoader:
 
         # Создать поддельный ``hooks/`` с одним валидным хуком и убедиться,
         # что sys.path НЕ содержит tmp_path (имитируем реальный gateway).
+        #
+        # Имя файла MUST быть из ``_allowed_hook_names()``: allowlist
+        # ограничивающий — файл вне него не импортируется вовсе, и тест
+        # проверял бы не загрузку, а отказ. Берём тот же stem, что и в
+        # исходном баге, — так тест остаётся привязан к регрессии.
         real_path = sys.path[:]
         try:
             sys.path[:] = [p for p in sys.path if str(tmp_path) not in p]
-            fake_hook = tmp_path / "my_hook.py"
+            fake_hook = tmp_path / "session_file_redirect_hook.py"
             fake_hook.write_text(
                 "from nanobot.agent import AgentHook\n"
                 "class MyHook(AgentHook):\n"
@@ -188,6 +193,29 @@ class TestHookLoader:
             )
         finally:
             sys.path[:] = real_path
+
+    def test_non_allowlisted_hook_is_skipped(self, tmp_path):
+        """Параллельный контракт: файл вне allowlist НЕ импортируется.
+
+        Allowlist — осознанное ужесточение (change
+        ``runtime-patcher-composition-cleanup``, Decision 4): раньше
+        незнакомый файл давал warning и всё равно исполнялся. Теперь он
+        пропускается целиком, поэтому два теста выше не могут покрывать
+        одно и то же.
+        """
+        from lib.cli.hook_loader import scan_and_register
+
+        (tmp_path / "my_hook.py").write_text(
+            "from nanobot.agent import AgentHook\n"
+            "class MyHook(AgentHook):\n"
+            "    def __init__(self, workspace_dir=None):\n"
+            "        super().__init__()\n"
+        )
+        hooks = scan_and_register(tmp_path, _project_root / "workspace")
+        assert hooks == [], (
+            "хук вне allowlist не должен ни импортироваться, ни "
+            f"инстанцироваться; получено: {hooks}"
+        )
 
     def test_finds_real_workspace_hooks(self):
         """Интеграционная проверка: реальные хуки в workspace/hooks/

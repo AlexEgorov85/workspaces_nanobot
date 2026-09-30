@@ -25,6 +25,7 @@ acceptance-критерий —
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import threading
@@ -57,10 +58,22 @@ def minimal_fake_modules(tmp_path):
         agent_instance = MagicMock()
         loop.AgentLoop = MagicMock()
         loop.AgentLoop.from_config = MagicMock(return_value=agent_instance)
+        # ``lib/core/agent_factory.py`` импортирует ещё и
+        # ``nanobot.agent.tools.registry``. Фейк ``nanobot.agent`` — это
+        # простой ModuleType без подпакета ``tools``, поэтому подмодуль
+        # нужно зарегистрировать явно, иначе импорт падает с
+        # «'nanobot.agent' is not a package».
+        tools_pkg = types.ModuleType("nanobot.agent.tools")
+        tools_registry = types.ModuleType("nanobot.agent.tools.registry")
+        tools_registry.ToolRegistry = MagicMock()
+        sol.agent.tools = tools_pkg
+        tools_pkg.registry = tools_registry
         sys.modules["nanobot"] = sol
         sys.modules["nanobot.agent"] = sol.agent
         sys.modules["nanobot.agent.loop"] = loop
         sys.modules["nanobot.agent.hook"] = hook
+        sys.modules["nanobot.agent.tools"] = tools_pkg
+        sys.modules["nanobot.agent.tools.registry"] = tools_registry
 
         sol.bus = types.ModuleType("nanobot.bus")
         bus = types.ModuleType("nanobot.bus.queue")
@@ -171,6 +184,10 @@ def minimal_fake_modules(tmp_path):
             pass
 
         cfg_mod.ConfigurationError = ConfigurationError
+        # Запоминаем настоящий ``config`` и DSN в окружении до подмены.
+        # Восстанавливаются в teardown (см. конец фикстуры).
+        _prev_config_module = sys.modules.get("config")
+        _prev_database_url = os.environ.get("DATABASE_URL")
         sys.modules["config"] = cfg_mod
 
         # ``lib.core.project_settings`` импортирует ``ConfigurationError``
@@ -256,6 +273,29 @@ def minimal_fake_modules(tmp_path):
             except Exception:
                 pass
 
+        # Cleanup: вернуть настоящий модуль ``config`` в ``sys.modules``.
+        # Фикстура подменяет его фейком, а без восстановления любой тест,
+        # идущий после (например, ``test_config.py``, который читает
+        # ``SETTINGS["channels"]["postgres"]``), получит фейковые настройки
+        # и упадёт в зависимости от порядка запуска.
+        if _prev_config_module is not None:
+            sys.modules["config"] = _prev_config_module
+        else:  # pragma: no cover - до фикстуры модуля не было
+            sys.modules.pop("config", None)
+
+        # Cleanup: вернуть ``DATABASE_URL`` в окружении.
+        # ``SessionStorageService`` (``lib/services/session_storage.py``)
+        # пишет resolved DSN в ``os.environ`` — в проде это нужно, чтобы
+        # skill-subprocess унаследовал его. В тестах фейковый DSN
+        # (``postgresql://test``) утекает в процесс pytest и наследуется
+        # acceptance-тестами (``test_profile_lifecycle.py`` запускает
+        # ``cli_agent.py`` в subprocess), из-за чего они падают в зависимости
+        # от порядка запуска.
+        if _prev_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = _prev_database_url
+
 
 class _FakeCursor:
     def __init__(self, conn):
@@ -314,7 +354,6 @@ class TestFlushIntervalSecPropagation:
             workspace_dir=script / "workspace",
             enable_db_logging=True,
             enable_audit=False,
-            profile="test",
         )
 
         try:
@@ -351,7 +390,6 @@ class TestFlushIntervalSecPropagation:
             workspace_dir=script / "workspace",
             enable_db_logging=True,
             enable_audit=False,
-            profile="test",
         )
 
         try:
@@ -385,7 +423,6 @@ class TestFlushIntervalSecPropagation:
                 workspace_dir=script / "workspace",
                 enable_db_logging=True,
                 enable_audit=False,
-                profile="test",
             )
         # Сообщение должно явно указывать на ``flush_interval_sec``,
         # чтобы оператор понимал, какой ключ не прошёл валидацию.

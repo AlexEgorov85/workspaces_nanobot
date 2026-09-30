@@ -95,12 +95,11 @@ def _required_keys():
             {"name": "violations_index"},
             {"name": "audit_reports_index"},
         ]),
-        # Sync-параметры глобальные, живут в gateway.sync.* (Phase 6 рефакторинга).
-        ("gateway.sync.poll_interval_sec", 14400),
-        ("gateway.sync.full_resync_every", 10),
-        ("gateway.sync.max_queue_size", 10000),
-        ("gateway.sync.reconnect_backoff_sec", 1.0),
-        ("gateway.sync.reconnect_backoff_max_sec", 60.0),
+        # Секция ``gateway.sync.*`` удалена вместе со снимком
+        # ``PgDuckDbSyncService`` (change ``drop-local-cache-read-from-pg``):
+        # фонового режима синхронизации нет, кеш — разовая
+        # операция. Наименое ограничение число потоков загрузки —
+        # размер пула взят из ``channels.postgres.pool.max_conn``.
         # Storage-hybridization: upstream LLMUsageStore + cold-storage mirror.
         ("gateway.usage_store.enabled", True),
         ("gateway.session_cold_sync.enabled", True),

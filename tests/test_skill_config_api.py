@@ -165,7 +165,7 @@ class TestVectorIndexConfigFromSettings:
         """
         from lib.services.cache_provider_impl import read_vector_index_config
 
-        cfg = read_vector_index_config({})
+        cfg = read_vector_index_config()
         assert "audits_index" in cfg
         assert cfg["audits_index"]["table"] == "oarb.audits"
         assert cfg["audits_index"]["pk"] == "id"
@@ -188,7 +188,7 @@ class TestVectorIndexConfigFromSettings:
             }}}}},
             raising=False,
         )
-        cfg = read_vector_index_config({})
+        cfg = read_vector_index_config()
         assert cfg["audits_index"]["chunk_size"] == 777
 
 

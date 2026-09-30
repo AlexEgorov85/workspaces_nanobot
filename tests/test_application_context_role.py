@@ -121,7 +121,6 @@ class TestStopClosesCacheProvider:
         ctx.bus = None
         ctx.runtime_events_subscriber = None
         ctx.usage_store = None
-        ctx.ownership_coordinator = None
         ctx.runtime_health = None
         ctx.cache_provider = MagicMock(name="cache_provider")
         ctx.cache_store = ctx.cache_provider  # alias, выставляется в start()
@@ -137,7 +136,6 @@ class TestStopClosesCacheProvider:
         ctx.bus = None
         ctx.runtime_events_subscriber = None
         ctx.usage_store = None
-        ctx.ownership_coordinator = None
         ctx.runtime_health = None
         ctx.cache_provider = None
         ctx.cache_store = None

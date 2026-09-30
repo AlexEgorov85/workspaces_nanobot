@@ -178,7 +178,7 @@ class TestResolveKnownIndex:
 
         monkeypatch.setattr(
             "lib.services.cache_provider_impl.read_vector_index_config",
-            lambda cfg: {"audits_index": object(), "violations_index": object()},
+            lambda: {"audits_index": object(), "violations_index": object()},
         )
         known, msg = cli._resolve_known_index("audits_index")
         assert known is True
@@ -189,7 +189,7 @@ class TestResolveKnownIndex:
 
         monkeypatch.setattr(
             "lib.services.cache_provider_impl.read_vector_index_config",
-            lambda cfg: {"audits_index": object(), "violations_index": object()},
+            lambda: {"audits_index": object(), "violations_index": object()},
         )
         known, msg = cli._resolve_known_index("bogus_index")
         assert known is False
@@ -203,7 +203,7 @@ class TestResolveKnownIndex:
 
         monkeypatch.setattr(
             "lib.services.cache_provider_impl.read_vector_index_config",
-            lambda cfg: {},
+            lambda: {},
         )
         known, msg = cli._resolve_known_index("anything")
         assert known is False
@@ -217,7 +217,7 @@ class TestResolveKnownIndex:
         """
         from workspace.skills.audit_analyzer.scripts import cli
 
-        def _explode(cfg):
+        def _explode():
             raise RuntimeError("PG unavailable")
 
         monkeypatch.setattr(
@@ -249,7 +249,7 @@ class TestRunVectorValidation:
 
         monkeypatch.setattr(
             "lib.services.cache_provider_impl.read_vector_index_config",
-            lambda cfg: {"audits_index": object()},
+            lambda: {"audits_index": object()},
         )
         result = cli._run_vector(
             query="пожарная безопасность",
@@ -294,7 +294,7 @@ class TestRunVectorValidation:
 
         monkeypatch.setattr(
             "lib.services.cache_provider_impl.read_vector_index_config",
-            lambda cfg: {"audits_index": object()},
+            lambda: {"audits_index": object()},
         )
 
         @dataclass

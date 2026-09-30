@@ -208,6 +208,13 @@ class _Worker(threading.Thread):
         self._connect_error: BaseException | None = None
         self._print_activity = manager._print_activity
         self._activity_lock = manager._activity_lock
+        # Синхронизация ленивого подключения. Без неё два потока (цикл
+        # воркера и, например, ``probe_connections``) могут одновременно
+        # увидеть ``_conn is None`` и оба вызвать ``psycopg2.connect()`` —
+        # второе соединение перезапишет первое, и оно утечёт. При пуле из
+        # 4 слотов на процесс это ровно тот ресурс, который пул обязан
+        # беречь.
+        self._conn_lock = threading.Lock()
 
     # -- соединение ---------------------------------------------------------
 
@@ -217,9 +224,23 @@ class _Worker(threading.Thread):
         При неудаче ``connect_max_retries`` попыток — сдаёмся: job получит
         ошибку, воркер останется неподключённым (следующий job попробует снова).
         Так сервис, ждущий ``run()``, не блокируется навсегда при недоступной БД.
+
+        Блокировка ``_conn_lock`` делает проверку «подключён ли» и сам
+        ``connect()`` атомарными: конкурентный первый вызов ждёт уже
+        начатое подключение, а не открывает второе.
         """
         if self._conn is not None and not self._conn.closed:
             return True
+        with self._conn_lock:
+            # Повторная проверка под локом: другой поток мог подключиться,
+            # пока этот ждал.
+            if self._conn is not None and not self._conn.closed:
+                return True
+            return self._connect_with_backoff()
+
+    def _connect_with_backoff(self) -> bool:
+        """Цикл подключения с экспоненциальным backoff (вызывается под
+        ``_conn_lock``)."""
         dsn = self._manager._dsn
         if not dsn:
             self._connect_error = RuntimeError(

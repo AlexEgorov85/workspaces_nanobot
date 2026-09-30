@@ -416,20 +416,28 @@ class TestPool:
 
         tx_done = threading.Event()
         tx_acquired = threading.Event()
+        op_sent = threading.Event()
 
         def _tx():
             with mock_psycopg2["transaction"]() as conn:
                 conn.execute("UPDATE t SET x=1")
                 tx_acquired.set()
-                time.sleep(0.2)
+                # Lease держим до тех пор, пока главный поток действительно
+                # отправил обычную операцию. Раньше здесь был sleep(0.2):
+                # на загруженной машине окно успевало истечь, воркер
+                # освобождался, и обычная операция уходила на него же —
+                # call_count становился 1 вместо 2. Теперь перекрытие
+                # гарантировано событием, а не гонкой со временем.
+                op_sent.wait(timeout=30)
             tx_done.set()
 
         t = threading.Thread(target=_tx)
         t.start()
-        assert tx_acquired.wait(timeout=5)
+        assert tx_acquired.wait(timeout=30)
         # обычная операция из главного потока — пока lease занят
         mock_psycopg2["execute"]("UPDATE other SET x=1")
-        t.join(timeout=5)
+        op_sent.set()
+        t.join(timeout=30)
         assert tx_done.is_set()
         # воркер транзакции + второй воркер для обычной операции
         assert mock_psycopg2["mock_connect"].call_count == 2
@@ -489,16 +497,30 @@ class TestPool:
         mock_psycopg2["set_pool_config"]({"min_conn": 2, "max_conn": 2})
         mock_psycopg2["configure"]("dsn")
 
+        # Событие срабатывает ТОЛЬКО когда оба воркера заняты.
+        # Раньше здесь стоял Event, который устанавливался ПЕРВЫМ же
+        # холдером: на загруженной машине второй поток не успевал взять
+        # воркер, и 3-я транзакция честно занимала свободный — тест проходил
+        # по неверной причине, а при настоящей проверке «оба заняты» падал.
+        # Barrier здесь не годится: parties=2, а wait() звали трое (оба
+        # холдера и главный поток), из-за чего барьер ломался. Поэтому —
+        # счётчик под блокировкой.
+        held = 0
+        held_lock = threading.Lock()
         both_held = threading.Event()
         release = threading.Event()
         results = []
 
         def _tx(name):
+            nonlocal held
             try:
                 with mock_psycopg2["transaction"]() as conn:
                     conn.execute("UPDATE t SET x=1 WHERE name=%s", name)
-                    both_held.set()
-                    assert release.wait(timeout=10)
+                    with held_lock:
+                        held += 1
+                        if held >= 2:
+                            both_held.set()
+                    assert release.wait(timeout=30)
                     results.append(name)
             except Exception as exc:  # pragma: no cover
                 results.append(f"{name}:{exc!r}")
@@ -506,7 +528,7 @@ class TestPool:
         ta = threading.Thread(target=_tx, args=("a",))
         tb = threading.Thread(target=_tx, args=("b",))
         ta.start(); tb.start()
-        assert both_held.wait(timeout=10)
+        assert both_held.wait(timeout=30)
 
         third_result = []
         third_started = threading.Event()
@@ -527,14 +549,14 @@ class TestPool:
         # мог не успеть стартовать, и 3-я операция успевала завершиться, что
         # давало ложный флейк). Затем наблюдаем окно ~0.5с: третья должна
         # ждать в очереди (workers=2 заняты), не падая с ошибкой.
-        assert third_started.wait(timeout=5)
+        assert third_started.wait(timeout=30)
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline:
             assert third_result == []
             time.sleep(0.02)
         release.set()
-        ta.join(timeout=10); tb.join(timeout=10)
-        tc.join(timeout=10)
+        ta.join(timeout=30); tb.join(timeout=30)
+        tc.join(timeout=30)
         assert third_result == ["ok"]
         assert sorted(results) == ["a", "b"]
 

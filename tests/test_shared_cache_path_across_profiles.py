@@ -8,7 +8,7 @@
 * ``validate_profile_overlay`` MUST reject ``gateway.cache.local_path``
   как extra-key в overlay;
 * Путь резолвится в один и тот же файл вне зависимости от профиля
-  (через ``resolve_publish_path`` — fallback на ``~/.cache`` default).
+  (через ``resolve_cache_path`` — fallback на ``~/.cache`` default).
 """
 
 from __future__ import annotations
@@ -69,31 +69,31 @@ class TestValidateProfileOverlayRejectsLocalPath:
 
 
 class TestResolvePublishPathConsistencyAcrossProfiles:
-    """``resolve_publish_path(role)`` MUST вернуть один и тот же путь для role='cli' и role='gateway'."""
+    """``resolve_cache_path(role)`` MUST вернуть один и тот же путь для role='cli' и role='gateway'."""
 
     def test_default_path_is_workspace_independent(self) -> None:
-        """``resolve_publish_path`` возвращает единый дефолтный путь.
+        """``resolve_cache_path`` возвращает единый дефолтный путь.
 
         Без явного ``local_path`` в конфиге оба профиля MUST получить
         ``~/.cache/nanobot/duckdb/cache.duckdb``.
         """
         from lib.core.application_context import (
-            resolve_publish_path,
+            resolve_cache_path,
             _default_local_cache_dir,
         )
 
         default_dir = _default_local_cache_dir()
-        path_gateway = resolve_publish_path(None, cache_cfg=None)
-        path_cli = resolve_publish_path(None, cache_cfg=None)
+        path_gateway = resolve_cache_path(None, cache_cfg=None)
+        path_cli = resolve_cache_path(None, cache_cfg=None)
         assert path_gateway == path_cli
 
     def test_explicit_local_path_shared(self) -> None:
         """Явный ``local_path`` в cache_cfg -> путь НЕ зависит от workspace."""
-        from lib.core.application_context import resolve_publish_path
+        from lib.core.application_context import resolve_cache_path
 
         cfg = {"local_path": "/tmp/shared-cache"}
-        path1 = resolve_publish_path(None, cache_cfg=cfg)
-        path2 = resolve_publish_path("/anywhere", cache_cfg=cfg)
+        path1 = resolve_cache_path(None, cache_cfg=cfg)
+        path2 = resolve_cache_path("/anywhere", cache_cfg=cfg)
         assert path1 == path2
 
 

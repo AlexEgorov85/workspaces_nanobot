@@ -70,7 +70,7 @@ class TestCacheProviderABCContract:
         )
 
     def test_open_returns_duckdb_cache_store(self, local_cache_path: Path) -> None:
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore
 
         instance = DuckDbCacheStore.open(
@@ -90,7 +90,7 @@ class TestCacheProviderABCContract:
         ``open`` остаётся classmethod, поэтому instance вызывает
         ``connect()``. Legacy instance ``open()`` сохранён как alias.
         """
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore
 
         store = DuckDbCacheStore.open(
@@ -128,7 +128,7 @@ class TestExceptionClasses:
 class TestDuckDBConnectionMode:
     def test_read_write_allows_insert(self, local_cache_path: Path) -> None:
         """Первый уровень защиты отсутствует в READ_WRITE mode."""
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore
 
         store = DuckDbCacheStore.open(
@@ -147,7 +147,7 @@ class TestDuckDBConnectionMode:
 
     def test_read_only_physical_blocks_insert(self, local_cache_path: Path) -> None:
         """DuckDB connection opened read_only=True физически reject'ит INSERT."""
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore
 
         store = DuckDbCacheStore.open(
@@ -173,7 +173,7 @@ class TestDuckDBConnectionMode:
             ro_store.close()
 
     def test_read_only_allows_select(self, local_cache_path: Path) -> None:
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore
 
         store = DuckDbCacheStore.open(
@@ -206,7 +206,7 @@ class TestDuckDBConnectionMode:
 
 class TestQuerySqlAssertionGuard:
     def test_select_allowed_in_read_only(self, local_cache_path: Path) -> None:
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore
 
         store = DuckDbCacheStore.open(
@@ -233,7 +233,7 @@ class TestQuerySqlAssertionGuard:
     def test_insert_in_read_only_raises_read_only_assertion(
         self, local_cache_path: Path
     ) -> None:
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore
 
         store = DuckDbCacheStore.open(
@@ -261,7 +261,7 @@ class TestQuerySqlAssertionGuard:
     def test_update_in_read_only_raises_read_only_assertion(
         self, local_cache_path: Path
     ) -> None:
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore
 
         store = DuckDbCacheStore.open(
@@ -290,7 +290,7 @@ class TestQuerySqlAssertionGuard:
     def test_delete_in_read_only_raises_read_only_assertion(
         self, local_cache_path: Path
     ) -> None:
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore
 
         store = DuckDbCacheStore.open(
@@ -319,7 +319,7 @@ class TestQuerySqlAssertionGuard:
     def test_ddl_in_read_write_raises_unsupported_sql(
         self, local_cache_path: Path
     ) -> None:
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore
 
         store = DuckDbCacheStore.open(
@@ -346,7 +346,7 @@ class TestQuerySqlAssertionGuard:
 
     def test_dml_in_read_write_works(self, local_cache_path: Path) -> None:
         """``query_sql()`` принимает SELECT/INSERT/UPDATE/DELETE в READ_WRITE."""
-        from lib.services.cache_ownership import CacheAccessMode
+        from lib.services.cache_provider import CacheAccessMode
         from lib.services.duckdb_cache_store import DuckDbCacheStore
 
         store = DuckDbCacheStore.open(
