@@ -101,10 +101,32 @@ return result, {...}          # возвращается ИСХОДНЫЙ result
 | 10 | `turn_delivery_fail` | удалить: подкласс `TurnDeliveryFactory` через `AgentLoop(turn_delivery_factory=...)` |
 | 4 | `exec_timeout_cap` | удалить: `tools.exec.timeout` уже прокинут, остаток — подкласс `ExecTool` |
 | 5 | `tool_limits` | частично: 3 из 5 целей — подклассы `Tool`; 2 глобала `search.py` остаются |
-| 6 | `assemble_outbound` | частично: `_final_turn` → `TurnEndEvent`; `_tool_audit`/`media` — решение не принято |
+| 6 | `assemble_outbound` | удалить: `_final_turn` → `TurnEndEvent`; `_tool_audit` и `media` → события через `turn_context.events`, потребитель — канал |
 | 3 | `exec_limits` | остаётся: потолок в глобале модуля, схема заморожена `deepcopy` |
 | 9 | `subagent_logging` | остаётся: нет параметра хука у `SubagentManager`, `events` → `NO_EVENTS` |
-| 12 | `document_text_threshold` | уходит вместе с документами |
+| 12 | `document_text_threshold` | удалить: порог переносится в нативный document-tool агента |
+
+Каталог сокращается с 12 до **2 полностью необходимых и 2 частичных**:
+удаляются `2`, `4`, `6`, `7`, `8`, `10`, `11`, `12`; частичными остаются `1`
+(только подстановка значения) и `5` (3 из 5 целей — подклассы `Tool`);
+полностью остаются `3` и `9`.
+
+#### Scenario: Вложения и аудит tool'ов доставляются событием
+
+- **WHEN** ход завершается и в `OutboundMessage.metadata` требуется `media`
+  или запись аудита вызова tool'а
+- **THEN** хук SHALL публиковать это через `turn_context.events`
+- **AND** канал SHALL читать событие и формировать выдачу
+- **AND** патч `assemble_outbound` SHALL быть удалён
+- **AND** снятие патча SHALL сдвигать момент появления вложения у пользователя
+  с этапа сборки outbound на этап обработки события
+
+#### Scenario: Удаляется и несуществующий путь
+
+- **WHEN** проверка показывает, что слот `media` заполняется только на этапе
+  сборки outbound и больше нигде
+- **THEN** публикация `media` SHALL быть удалена вместе с патчем
+- **AND** решение SHALL считаться закрытым без остаточного кода
 
 #### Scenario: Конструкция TurnDelivery подменяется фабрикой
 

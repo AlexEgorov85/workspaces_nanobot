@@ -60,50 +60,54 @@
 
 ---
 
-## Фаза 2 — реестр инструментов, `libs/data` и `data-mcp`
+## Фаза 2 — реестр инструментов, `libs/enterprise_data` и capability `data`
 
-> Реестр идёт первым: оба сервера наполняются через него, а `data-mcp` —
-> первый, кто его использует.
+> Реестр идёт первым: capability `data` — первый, кто его использует.
+> Сервер один (`enterprise-mcp`), поэтому всё дальнейшее — это добавление
+> каталогов в `capabilities/`, а не новые процессы.
 
 - [ ] 2.1 `libs/enterprise_common`: `ToolDefinition` (name, description, handler,
       category, version, enabled, tags, permissions) и `ToolRegistry`
-- [ ] 2.2 Загрузчик `tools/*.py` → `create_tool(container)`: discovery,
-      импорт, вызов точки входа, регистрация
+- [ ] 2.2 Загрузчик: рекурсивный обход `capabilities/*/tools/*.py` →
+      `create_tool(container)` → discovery, импорт, вызов точки входа,
+      регистрация
 - [ ] 2.3 Валидация при загрузке: импорт, наличие `create_tool`, тип
       `ToolDefinition`, непустые `name`/`description`, уникальность `name`,
       callable `handler`, валидная схема аргументов
 - [ ] 2.4 **Fail-fast:** ошибка одного файла валит старт сервера целиком, с
-      именем файла и `name`. Тест на каждый пункт валидации
-- [ ] 2.5 Переписать `servers/_template/server.py` на bootstrap реестра вместо
-      `@mcp.tool()` вручную; эталон копируется, а не выдумывается заново
-- [ ] 2.6 Перенести `workspace/utils/db.py` → `mcp-platform/libs/data/db.py`
-- [ ] 2.7 Перенести `lib/utils/sql_safety.py` → `mcp-platform/libs/data/sql_safety.py`
+      путём до файла и `name`. Тест на каждый пункт валидации
+- [ ] 2.5 `servers/enterprise/server.py` — bootstrap реестра без единого
+      `@mcp.tool()`; переписать `servers/_template` под этот вид
+- [ ] 2.6 Перенести `workspace/utils/db.py` → `mcp-platform/libs/enterprise_data/db.py`
+- [ ] 2.7 Перенести `lib/utils/sql_safety.py` → `mcp-platform/libs/enterprise_data/sql_safety.py`
 - [ ] 2.8 Перенести `workspace/utils/jsonb.py` и `clean_text.py`
 - [ ] 2.9 Перенести `tests/test_utils_db.py` и `tests/test_sql_safety.py`
-- [ ] 2.10 `mcp-platform/servers/data/`: `service.py` (логика, тестируется без
-      MCP) + `tools/*.py` (по файлу на операцию)
-- [ ] 2.11 Операции: `query_sql` (read-only, AST-валидация), `log_event`,
+- [ ] 2.10 `capabilities/data/`: `service/` (логика, тестируется без MCP) +
+      `tools/*.py` (по файлу на операцию)
+- [ ] 2.11 Операции: `query_sql` (read-only, AST-валидация, `statement_timeout`
+      на стороне сервера), `log_event`,
       `history_search` (изоляция по `user_id`/`session_id` как часть контракта),
       `upsert_records`, `schema_check`
-- [ ] 2.12 Перенаправить потребителей на `data-mcp`:
+- [ ] 2.12 Перенаправить потребителей на `enterprise-mcp`:
       `history_search_tool.py` (оставить ~30-строчный адаптер),
       `db_logging_service.py`, `benchmarks` (уже удалён), `streamlit` (уже удалён),
       `schema_validation.py` (остаётся в агенте, `fetch` внедряется)
 - [ ] 2.13 Архитектурный тест: `mcp-platform` не импортирует `nanobot`, `lib`, `workspace`
 
 **Приёмка:** `cd mcp-platform && pytest` — зелёные. Сервер поднимается в
-подпроцессе с заблокированным `import nanobot`. `mcp-platform/servers/data/`
-не содержит `psycopg2.pool` / `ThreadedConnectionPool` (единый пул). Добавление
-файла в `tools/` не требует правок `server.py`.
+подпроцессе с заблокированным `import nanobot`. `capabilities/data/` не
+содержит `psycopg2.pool` / `ThreadedConnectionPool` (единый пул). Добавление
+файла в `capabilities/data/tools/` не требует правок `server.py`.
 
 ---
 
-## Фаза 3 — `vector-mcp`
+## Фаза 3 — capability `vectors` и `llm`
 
-> Шаг идёт **до** удаления DuckDB: FAISS собирается из снапшота, и удаление
-> снапшота раньше гасит векторный поиск.
+> `vectors` идёт **до** удаления DuckDB: FAISS собирается из снапшота, и
+> удаление снапшота раньше гасит векторный поиск. Обе capability — каталоги в
+> том же процессе, новых серверов не заводится.
 
-- [ ] 3.1 Извлечь из `lib/utils/duckdb_query.py` в `vector-mcp`:
+- [ ] 3.1 Извлечь из `lib/utils/duckdb_query.py` в `libs/vectors`:
       `build_faiss_index`, `group_vector_hits`, `build_raw_items`
 - [ ] 3.2 Извлечь из `lib/services/cache_provider.py` концепции `SearchResult`,
       `IndexIntegrityError`
@@ -112,14 +116,26 @@
       `compute/verify_index_signature`, `list_runtime_vector_indexes`
 - [ ] 3.4 Перенести `vector_index_service.py`, `text_splitter.py`, `preload_service.py`
 - [ ] 3.5 **Переписать** чтение векторов: из PostgreSQL напрямую, а не из снапшота
-- [ ] 3.6 Перенести `tools/build_vectors.py` (сборка и прогрев), `tools/check_indexes.py`
-- [ ] 3.7 Конфигурация: `gateway.vector.index.indexes.*` → конфиг `vector-mcp`
-- [ ] 3.8 Операции как `servers/vector/tools/*.py` через тот же реестр из фазы 2:
-      `vector_search`, `list_indexes`, `index_stats` — собственного механизма
-      регистрации не заводить
+- [ ] 3.6 Перенести `tools/build_vectors.py` (сборка эмбеддингов), `tools/check_indexes.py`
+- [ ] 3.7 Конфигурация: `gateway.vector.index.indexes.*` → конфиг `enterprise-mcp`
+- [ ] 3.8 Операции как `capabilities/vectors/tools/*.py` через реестр фазы 2:
+      `vector_search`, `list_indexes`, `index_stats`
+- [ ] 3.9 **Ленивая загрузка индекса:** FAISS собирается по первому
+      векторному запросу, не на старте процесса. Локом — параллельные запросы
+      ждут один прогрев. Состояние (`нет` / `собирается` / `готов` / `ошибка`)
+      наблюдаемо. `list_indexes` и `index_stats` отвечают без поднятия индекса
+- [ ] 3.10 Перенести `lib/services/llm_client.py` и `llm_config.py`
+      → `mcp-platform/libs/llm/` без изменения поведения
+- [ ] 3.11 `capabilities/llm/`: `service/` (вызов провайдера) + `tools/complete.py`
+- [ ] 3.12 Конфигурация провайдера и ключи переезжают в конфиг `enterprise-mcp`,
+      из `config.json` агента
+- [ ] 3.13 Удалить `llm_client.py` и `llm_config.py` из агента; убедиться, что
+      в `lib/` не осталось потребителей
 
 **Приёмка:** `vector_search` возвращает те же результаты, что до шага 4.
-`vector-mcp` **не имеет** зависимости от модели эмбеддингов.
+Capability `vectors` **не имеет** зависимости от модели эмбеддингов.
+Сервер отвечает на `query_sql` сразу после старта, не дожидаясь сборки индекса.
+В агенте не осталось ни строки LLM-клиента.
 
 ---
 
@@ -167,51 +183,71 @@
 - [ ] 5.3 `async_save` → обёртка в `session_storage.py` при создании
       `PGSessionManager`; патч удалить
 - [ ] 5.4 `session_content_cleanup` → `PGSessionManager.save` через
-      `libs/data/clean_text.py`; патч удалить
+      `libs/enterprise_data/clean_text.py`; патч удалить
 - [ ] 5.5 Удалить `session_dir_watch`
-- [ ] 5.6 `assemble_outbound` → урезать: `_final_turn` перевести на `TurnEndEvent`
-- [ ] 5.7 Обновить `runtime_inventory.canonical_runtime_patches()` и
+- [ ] 5.6 `assemble_outbound` → удалить целиком: `_final_turn` перевести на
+      `TurnEndEvent`, `media` и `_tool_audit` — на публикацию из хука через
+      `turn_context.events`, потребитель — канал
+- [ ] 5.7 `document_text_threshold` → порог переносится в нативный
+      document-tool агента; патч удаляется
+- [ ] 5.8 **Проверить слот `media` одним реальным ходом с вложением.** Если он
+      не заполняется нигде, кроме этапа сборки outbound, публикация `media`
+      удаляется вместе с патчем и решение закрывается без остаточного кода
+- [ ] 5.9 Обновить `runtime_inventory.canonical_runtime_patches()` и
       `tests/test_runtime_patcher.py::TestPatchSpecs::test_inventory_is_exact`
-- [ ] 5.8 Обновить `docs/architecture/runtime-patcher-inventory.md`:
+- [ ] 5.10 Обновить `docs/architecture/runtime-patcher-inventory.md`:
       категории, тесты, risk пересчитать
 
-**Приёмка:** патчей 12 → ≤ 8 на этом шаге (окончательно 5–6 после фаз 7–8).
-Каждый оставшийся имеет заполненное «Условие удаления».
+**Приёмка:** патчей 12 → **4** на этом шаге: `2` полностью необходимых
+(`exec_limits`, `subagent_logging`) + 2 частичных (`context_governor`,
+`tool_limits`). Каждый оставшийся имеет заполненное «Условие удаления».
 
 ---
 
-## Фаза 6 — логирование через `data-mcp`
+## Фаза 6 — логирование через `enterprise-mcp`
 
 - [ ] 6.1 Локальный буфер в процессе агента, ограниченный размером, дроп при переполнении
-- [ ] 6.2 Батчевый асинхронный flush в `data-mcp: log_event`
-- [ ] 6.3 Локальный fallback для сбоев самого `data-mcp` (файл/stderr) — петля не замыкается
-- [ ] 6.4 `logging.db.retention_days` и purge пустых outbound → в конфиг `data-mcp`
+- [ ] 6.2 Батчевый асинхронный flush в `enterprise-mcp: log_event`
+- [ ] 6.3 Локальный fallback для сбоев самого `enterprise-mcp` (файл/stderr) — петля не замыкается
+- [ ] 6.4 `logging.db.retention_days` и purge пустых outbound → в конфиг `enterprise-mcp`
 - [ ] 6.5 `db_logging_bus.py` остаётся в агенте
-- [ ] 6.6 Интеграционный тест: недоступность `data-mcp` не блокирует ход
+- [ ] 6.6 Интеграционный тест: недоступность `enterprise-mcp` не блокирует ход
 
-**Приёмка:** при остановленном `data-mcp` ходы проходят, логи теряются,
+**Приёмка:** при остановленном `enterprise-mcp` ходы проходят, логи теряются,
 счётчик потерь растёт.
 
 ---
 
-## Фаза 7 — `libs/document` и `legal_summarizer`
+## Фаза 7 — document-tool и `legal_summarizer`
 
-- [ ] 7.1 Перенести `workspace/utils/office_files.py` → `mcp-platform/libs/document/`
-- [ ] 7.2 Перенести `tests/test_office_files.py`
-- [ ] 7.3 Решить вопрос доступа агента к офисным файлам (открытое решение 1)
+> **Решение принято:** доступ к офисным файлам остаётся нативным tool'ом
+> агента, `office_files.py` **не переезжает** в `mcp-platform`. Офисные пакеты
+> остаются в `requirements.txt` агента — это зафиксированное исключение из
+> цели «установка Nanobot не тянет enterprise-стек».
+
+- [ ] 7.1 Написать нативный document-tool агента поверх `office_files.py`;
+      порог длины текста переносится из патча в его собственный код
+- [ ] 7.2 Проверить, не расходятся ли две копии парсера: домен `legal`
+      переезжает в платформу и тоже разбирает документы. Дублировать модуль
+      нельзя — домен получает уже извлечённый текст
+- [ ] 7.3 Перенести `tests/test_office_files.py` не трогая: тест остаётся
+      в проекте агента
 - [ ] 7.4 Перенести `workspace/skills/legal_summarizer/**` (80 модулей, 142 теста)
 - [ ] 7.5 Переписать 4 архитектурных guard-теста legal под новый расклад файлов
 - [ ] 7.6 `workspace/tools/legal_summarizer_query.py` → MCP-вызов, ~30 строк
+- [ ] 7.7 Разложить legal по capability
+      `capabilities/legal_summarizer/{skill/SKILL.md, tools/*.py, service/}`
 
 **Приёмка:** legal работает; в репозитории агента нет ни одного импорта legal.
+Парсер офисных файлов существует в проекте агента в единственном экземпляре.
 
 ---
 
 ## Фаза 8 — `audit_analyzer`
 
-- [ ] 8.1 Обернуть `scripts/cli.py` в MCP-поверхность поверх `data-mcp` / `vector-mcp`
+- [ ] 8.1 Обернуть `scripts/cli.py` в MCP-поверхность поверх capability `data` / `vectors`
 - [ ] 8.2 Резолв `scripts_registry` из `TableRegistry` перенести в audit-сервис
-- [ ] 8.3 SQL-безопасность (`sql_safety`) — внутри сервера, не в агенте
+- [ ] 8.3 SQL-безопасность (`sql_safety`) — внутри платформы, не в агенте
 - [ ] 8.4 Удалить регистрацию audit-tool'ов из `project_tool_loader`
 - [ ] 8.5 Разложить перенесённые домены по capability
       `capabilities/<name>/{skill/SKILL.md, tools/*.py, service/}`; проверить,
@@ -223,14 +259,18 @@
 
 ## Фаза 9 — зависимости и финальная проверка
 
-- [ ] 9.1 Разделить `requirements.txt`: runtime агента / `data-mcp` / `vector-mcp` / `document-mcp`
-- [ ] 9.2 Убрать офисные и векторные пакеты из требований агента (если выбран вариант B по документам)
-- [ ] 9.3 Обновить `AGENTS.md`, `CHANGELOG.md`, `docs/`
-- [ ] 9.4 Для каждого MCP: старт без Nanobot, health, discovery, нормальный запрос,
+- [ ] 9.1 Разделить `requirements.txt`: runtime агента / `enterprise-mcp`
+- [ ] 9.2 Офисные пакеты (`python-docx`, `openpyxl`, `pypdf`, `python-pptx`)
+      **остаются** в требованиях агента — решение принято осознанно
+- [ ] 9.3 Убрать из требований агента то, что уехало: `sqlglot`, `duckdb`,
+      `pyarrow`, `faiss`, клиентский LLM-пакет
+- [ ] 9.4 Обновить `AGENTS.md`, `CHANGELOG.md`, `docs/`
+- [ ] 9.5 Для `enterprise-mcp`: старт без Nanobot, health, discovery, нормальный запрос,
       некорректный запрос, сбой инфраструктуры, таймаут
-- [ ] 9.5 Прогнать тесты всех переехавших модулей в `mcp-platform`:
+- [ ] 9.6 Прогнать тесты всех переехавших модулей в `mcp-platform`:
       `legal_summarizer` (80 скриптов + 142 тестовых файла), `audit_analyzer`,
-      `office_files`, `db.py`, `sql_safety`, `jsonb`, `clean_text`
+      `llm_client`, `db.py`, `sql_safety`, `jsonb`, `clean_text`
+- [ ] 9.7 `test_office_files.py` остаётся в прогоне агента — он не переезжает
 
 **Приёмка:** чистое окружение с `nanobot-ai==0.3.5` поднимается и работает.
-Ни один MCP не требует Nanobot. Каждый обновляется независимо.
+Сервер не требует Nanobot. Платформа обновляется независимо от агента.

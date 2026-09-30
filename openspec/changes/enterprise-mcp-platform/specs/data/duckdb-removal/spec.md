@@ -4,7 +4,7 @@
 
 Система SHALL собирать FAISS-индексы напрямую из PostgreSQL, без
 промежуточного локального файла. Таблица-источник эмбеддиндов задаётся
-конфигурацией (`vector-mcp.storage_table`, ранее
+конфигурацией (`enterprise-mcp.indexes.storage_table`, ранее
 `gateway.vector.index.storage_table`) и SHALL NOT быть зашита в код.
 
 Система SHALL NOT создавать и SHALL NOT читать локальный кэш-файл DuckDB.
@@ -13,7 +13,7 @@
 
 #### Scenario: Сборка индекса при старте процесса
 
-- **WHEN** процесс `vector-mcp` поднимается
+- **WHEN** сервер `enterprise-mcp` поднимается
 - **THEN** он SHALL выбрать строки эмбеддингов из PostgreSQL по `source = ?`
   для каждого объявленного индекса
 - **AND** SHALL собрать FAISS в памяти вызовом, эквивалентным
@@ -31,7 +31,7 @@
 
 #### Scenario: Отсутствие модели эмбеддингов
 
-- **WHEN** `vector-mcp` собирает или обслуживает индекс
+- **WHEN** capability `vectors` собирает или обслуживает индекс
 - **THEN** он SHALL NOT загружать модель эмбеддингов и SHALL NOT выполнять
   сетевых вызовов к LLM-провайдеру
 - **AND** эмбеддинги SHALL считаться отдельной задачей, записывающей строки в
@@ -53,7 +53,7 @@
 Посредник между PostgreSQL и FAISS упраздняется.
 
 **Удаляемые модули** (реальная стоимость смерти — ~2 600 строк; остальное
-переезжает в `vector-mcp`):
+переезжает в capability `vectors`):
 
 | Модуль | Строк |
 |---|---:|
@@ -81,7 +81,7 @@ LEGACY в шапке, кодом не читается), `sql/vectors/create_vec
 
 - **WHEN** `lib/utils/duckdb_query.py` удаляется
 - **THEN** `build_faiss_index`, `group_vector_hits` и `build_raw_items` SHALL
-  уже находиться в `vector-mcp`
+  уже находиться в capability `vectors`
 - **AND** группировка чанков и косинусная нормализация SHALL NOT выводиться
   заново
 
