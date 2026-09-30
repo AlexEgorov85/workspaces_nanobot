@@ -1,0 +1,12 @@
+# Enterprise-стек платформы. Nanobot здесь НЕТ и не появится.
+#
+# Этот файл — «правый» набор зависимостей. Корневой requirements.txt
+# в проекте агента содержит смешанный список (nanobot + enterprise +
+# office + vectors); цель миграции — сделать установку Nanobot
+# независимой от enterprise-стека.
+
+mcp>=1.27
+
+# --- dev ---
+pytest>=8
+pytest-asyncio>=0.24

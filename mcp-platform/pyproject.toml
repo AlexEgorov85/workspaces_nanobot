@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "enterprise-mcp-platform"
+version = "0.1.0"
+description = "Enterprise MCP servers, independent from nanobot"
+requires-python = ">=3.11"
+
+# ВАЖНО: nanobot-ai здесь отсутствует намеренно и навсегда.
+# Установка этого пакета не должна тянуть agent runtime.
+dependencies = [
+    "mcp>=1.27",
+]
+
+[project.optional-dependencies]
+# Заполняется по мере переноса доменов (фаза 11 исходного плана).
+# audit-mcp:  duckdb, sqlglot, faiss-cpu, numpy, pyarrow, psycopg2-binary
+# document-mcp: python-docx, openpyxl, pypdf, pdfplumber, python-pptx, Pillow
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.setuptools]
+packages = ["libs", "servers"]
+
+[tool.pytest.ini_options]
+# Изолированный прогон. Тесты платформы НЕ входят в тесты агента
+# (в корневом pyproject testpaths остаются tests/ и skills).
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
