@@ -177,7 +177,6 @@ class ApplicationContext:
     runtime_readiness: Any = None
     transcription_service: Any = None
     session_storage_service: Any = None
-    subprocess_manager: Any = None
     preload_service: Any = None
 
     # Per-turn hook factories (для DatabaseLoggingHook и т.п.), которые
@@ -261,7 +260,7 @@ class ApplicationContext:
         ctx.print_llm_calls = bool(enable_kwargs["print_llm_calls"])
 
         # Сбросить ``TableRegistry`` — это singleton, и при повторном
-        # ``create()`` в одном процессе (тесты, streamlit-reload, gateway
+        # ``create()`` в одном процессе (тесты, gateway-reload, gateway
         # перезапуск конфига) старые регистрации остались бы и смешались
         # с новыми. ``_init_cache_runtime`` и ``_auto_register_skills``
         # ниже заполнят реестр заново.
@@ -395,7 +394,7 @@ class ApplicationContext:
         # в ``lib/hooks/``) провязывает ``AgentFactory``; плагины
         # (например, ``SessionFileRedirectHook``, ``RecentFilesHook``)
         # сканируются здесь единым механизмом для всех точек входа
-        # (gateway, cli_agent, streamlit). Сканирование идёт ДО создания
+        # (gateway, cli_agent). Сканирование идёт ДО создания
         # ``AgentLoop``, чтобы агент создавался ровно один раз с полным
         # списком хуков (иначе был двойной лог ``Registered N tools``).
         # Если папки ``hooks/`` нет или она пуста (например, в юнит-тестах) —

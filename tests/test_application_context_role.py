@@ -251,12 +251,11 @@ class TestProductionCallersDoNotUseDeprecatedKwargs:
         return [
             _project_root / "cli_agent.py",
             _project_root / "gateway.py",
-            _project_root / "benchmarks" / "runner.py",
         ]
 
     @pytest.mark.parametrize(
         "path",
-        ["cli_agent.py", "gateway.py", "benchmarks/runner.py"],
+        ["cli_agent.py", "gateway.py"],
     )
     def test_no_deprecated_kwargs_in_entrypoints(self, path: str) -> None:
         import ast

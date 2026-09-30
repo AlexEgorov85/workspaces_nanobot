@@ -13,8 +13,6 @@
   //      channels.*        — каналы связи (Postgres, Redis, пулы)
   //      skills.*          — настройки пользовательских навыков
   //      cli               — настройки CLI-агента (cli_agent.py)
-  //      benchmark         — сохранение результатов бенчмарков
-  //      streamlit         — веб-чат (streamlit_app.py)
   //      gateway           — gateway-сервер + перезапуск + subprocess'ы
   //      logging.db        — структурированный журнал (DbLoggingService)
   //
@@ -45,7 +43,7 @@
       "schema": "public",                     // Схема БД
       "messages_table": "agent_session_messages",   // Таблица сообщений сессий (PGSessionManager)
       "meta_table": "agent_session_meta",           // Таблица метаданных сессий (PGSessionManager)
-      "table_name": "agent_conversation_messages",  // Таблица обмена сообщениями (PostgresChannel/streamlit)
+      "table_name": "agent_conversation_messages",  // Таблица обмена сообщениями (PostgresChannel)
       "poll_interval": 10.0,                   // Поллинг новых сообщений, сек
       "flush_interval": 5.0,                  // Сброс reasoning в metadata, сек
       "max_concurrent": 2,                    // Макс. параллельно обрабатываемых сообщений
@@ -313,26 +311,6 @@
   },
 
   // ---------------------------------------------------------------------------
-  //  benchmark.* — сохранение результатов бенчмарков в PostgreSQL
-  // ---------------------------------------------------------------------------
-  "benchmark": {
-    "db_schema": "public",            // Схема БД
-    "runs_table": "agent_benchmark_runs",   // Таблица прогонов
-    "results_table": "agent_benchmark_results"  // Таблица результатов
-  },
-
-  // ---------------------------------------------------------------------------
-  //  streamlit.* — веб-чат (streamlit_app.py)
-  // ---------------------------------------------------------------------------
-  "streamlit": {
-    "enabled": true,                 // Поднимать веб-чат на :8501 при старте gateway. false — UI не запускается
-    "max_wait": 600,                  // Макс. ожидание ответа агента, сек
-    "poll_interval": 10.0,             // Интервал поллинга статуса, сек
-    "files_dir": "data_store/streamlit_files",  // Папка загруженных файлов
-    "error_window_sec": 300           // Окно повтора для error-сообщений (5 мин)
-  },
-
-  // ---------------------------------------------------------------------------
   //  gateway.* — настройки gateway-сервера (gateway.py)
   // ---------------------------------------------------------------------------
   "gateway": {
@@ -364,15 +342,12 @@
     "print_tools": false,              // Выводить в терминал результат каждого tool-call (TerminalToolPrintHook). false — гасит шум от долгих write_stdin/exec; ошибки тулов всё равно уходят в agent_gateway_logs.
     "restart_initial_delay_sec": 1.0, // Начальная пауза backoff при перезапуске (gateway_runner.py)
     "restart_max_delay_sec": 30.0,    // Потолок backoff при перезапуске
-    "streamlit_port": 8501,           // Порт Streamlit subprocess (subprocess_manager.py)
-    "streamlit_log_filename": "streamlit.log",  // Имя лог-файла Streamlit
-    "subprocess_shutdown_timeout_sec": 5.0,  // Таймаут graceful shutdown subprocess'а
     //  compact.* — ручное сжатие контекста сессии (ContextCompactionService).
     //  Подробности: lib/services/context_compaction.py, workspace/tools/compact_context.py.
     //  Все ключи опциональны; дефолты указаны в коде.
     "compact": {
       "enabled": true,                 // Зарегистрировать tool compact_context и обрабатывать /compact в CLI
-      "notify_in_history": true,       // Писать заметку о сжатии в agent_conversation_messages (видно в Streamlit)
+      "notify_in_history": true,       // Писать заметку о сжатии в agent_conversation_messages
       "print_to_terminal": false       // Дублировать заметку в терминал gateway (по образцу print_worker_activity)
     },
     //  usage_store.* — параметры upstream LLMUsageStore (metadata-only LLM usage).

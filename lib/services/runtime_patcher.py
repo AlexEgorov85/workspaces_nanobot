@@ -893,7 +893,7 @@ class RuntimePatcher:
         ``nanobot.utils.document.reference_non_image_attachments`` —
         ЕДИНСТВЕННОЕ место, через которое upstream 0.3.5 формирует
         файловые блоки в ``content`` user-сообщения (для всех каналов —
-        Postgres/Redis/websocket/streamlit). В 0.3.5
+        Postgres/Redis/websocket). В 0.3.5
         ``extract_documents`` удалён, и каналы НЕ должны дублировать
         информацию о файле собственными хинтами
         вида ``[Attachment: … (saved at …)]``: иначе агент видит два

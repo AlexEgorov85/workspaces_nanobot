@@ -40,10 +40,6 @@ sql/
 │   ├── create_public_agent_gateway_logs.sql             #   public.agent_gateway_logs
 │   └── create_public_agent_gateway_logs_test.sql        #   профиль test
 │
-├── benchmarks/                                          # Benchmarks
-│   ├── create_public_agent_benchmark_runs.sql           #   public.agent_benchmark_runs
-│   └── create_public_agent_benchmark_results.sql        #   public.agent_benchmark_results
-│
 ├── vectors/                                             # legacy (кодом не читается)
 │   ├── create_vector_index_config.sql                   #   public.agent_vector_index_config — LEGACY
 │   └── create_vector_index_store.sql                    #   public.agent_vector_index_store — DEPRECATED (V003)
@@ -116,7 +112,7 @@ psql "$DATABASE_URL" -f sql/session/create_public_agent_session_messages.sql
 psql "$DATABASE_URL" -f sql/channels/create_public_agent_conversation_messages.sql
 ```
 
-### Полная установка (gateway + audit_analyzer + benchmarks)
+### Полная установка (gateway + audit_analyzer)
 
 ```bash
 # 1. Сессии
@@ -131,8 +127,6 @@ psql "$DATABASE_URL" -f sql/logs/create_public_agent_question_runs.sql
 psql "$DATABASE_URL" -f sql/logs/create_public_agent_gateway_logs.sql
 
 # 4. Бенчмарки
-psql "$DATABASE_URL" -f sql/benchmarks/create_public_agent_benchmark_runs.sql
-psql "$DATABASE_URL" -f sql/benchmarks/create_public_agent_benchmark_results.sql
 
 # 6. Домен audit_analyzer — reference таблицы (если нет в существующей БД)
 psql "$DATABASE_URL" -f sql/audit_analyzer/create_oarb_audits.sql

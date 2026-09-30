@@ -24,7 +24,7 @@ session-папке (по относительному пути и по basename)
 
 Белый список (не перенаправляются):
     - AGENTS.md, SOUL.md, USER.md, TOOLS.md, HEARTBEAT.md, MEMORY.md
-    - .opencode/**, memory/**, sql/**, lib/**, tests/**, benchmarks/**
+    - .opencode/**, memory/**, sql/**, lib/**, tests/**
     - workspace/hooks/**, workspace/skills/**, **/*.py
     - явные пути в workspace/data_store/** (cache, vectors, ...)
 
@@ -70,7 +70,6 @@ _ALLOWED_PREFIXES: ClassVar[tuple[str, ...]] = (
     "sql/",
     "lib/",
     "tests/",
-    "benchmarks/",
     "tools/",
     "cli-apps/",
     "logs/",

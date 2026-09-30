@@ -1,7 +1,7 @@
 # nanobot — Personal AI Agent (Deployment)
 
 Локальная инсталляция фреймворка **[nanobot-ai](https://github.com/HKUDS/nanobot)**
-(PyPI: `nanobot-ai`) с кастомными доработками: PostgreSQL-каналы, Redis, Streamlit UI,
+(PyPI: `nanobot-ai`) с кастомными доработками: PostgreSQL-каналы, Redis,
 бенчмарки, навыки `audit_analyzer`, `legal_summarizer` и `office_files`.
 
 > **Агент:** Aura (🐈) · **Модель:** OpenAI-compatible · **ОС:** Windows · **Язык:** RU/EN
@@ -15,7 +15,7 @@ copy .secrets.env.example .secrets.env   # cp на Linux
 # Отредактируйте .secrets.env: DB_PASSWORD=... и # providers: llm / api_key=...
 python tools/migrate.py --apply         # применить миграции схемы
 # --profile обязателен для gateway (prod | test), иначе ConfigurationError + exit 2:
-python gateway.py --profile=prod        # AgentLoop + Postgres/Redis каналы + Streamlit :8501
+python gateway.py --profile=prod        # AgentLoop + Postgres/Redis каналы
 # или (CLI — фиксированный профиль test, флаг --profile не принимается):
 python cli_agent.py -P -s dev           # REPL в patched-режиме (PostgreSQL)
 ```
@@ -36,7 +36,6 @@ psql -d nanobot -f sql/channels/create_public_agent_conversation_messages.sql
 python gateway.py --profile=prod                              # долгоживущий сервер
 python cli_agent.py                                           # REPL vanilla (JSONL), профиль test
 python cli_agent.py -P -s my-session                          # REPL patched (PGSessionManager + хуки)
-python benchmarks/runner.py --tags simple                     # оценка качества
 python tools/build_vectors.py --full-rebuild                  # перестроение векторов в storage_table
 python tools/build_vectors.py --status                        # текущее состояние
 python tools/check_indexes.py                                 # declared vs runtime индексов
@@ -58,7 +57,7 @@ python tools/migrate.py --apply                               # миграции
 flowchart LR
     WEB["gateway (HTTP API)"] --> ORCH["Оркестрация<br/>ApplicationContext"]
     TERM["cli_agent (терминал)"] --> ORCH
-    UI["streamlit (веб)"] --> ORCH
+    UI["внешний веб-клиент"] --> ORCH
     ORCH --> AGENT["Агент<br/>рассуждение + инструменты"]
     ORCH --> BUS["Шина сообщений"]
     AGENT --> CACHE[("Локальный кеш (DuckDB)")]
@@ -84,11 +83,11 @@ flowchart LR
 nanobot/
 ├── README.md  CHANGELOG.md  AGENTS.md
 ├── config.json  project.json  config.py        # 3 конфига
-├── gateway.py  cli_agent.py  streamlit_app.py  # точки входа
+├── gateway.py  cli_agent.py                  # точки входа
 ├── lib/                          # сервисный слой: core, services, cli, hooks,
 │                                 #   lifecycle, channels, session, utils, commands
 ├── workspace/                    # runtime, hooks-плагины, skills, memory
-├── tests/  benchmarks/  tools/  sql/  docs/  requirements.txt
+├── tests/  tools/  sql/  docs/  requirements.txt
 ```
 
 Подробное дерево — в [docs/ARCHITECTURE.md → Структура проекта](docs/ARCHITECTURE.md#структура-проекта).
@@ -105,7 +104,6 @@ DDL в `sql/<domain>/create_<schema>_<table>.sql` (один файл = одна 
 - **Домен audit_analyzer:** `oarb.audits/violations/audit_reports/report_items` (REFERENCE)
 - **Векторы:** `oarb.audit_vectors` (эмбеддинги, FAISS собирается в памяти из DuckDB-снапшота — таблица-хранилище задаётся `gateway.vector.index.storage_table`); `public.agent_vector_index_config` и `public.agent_vector_index_store` — legacy SQL-артефакты, кодом не читаются; конфиг индексов — в `project.json::gateway.vector.index.indexes`
 - **Predefined scripts:** `public.agent_predefined_scripts`
-- **Бенчмарки:** `public.agent_benchmark_runs/results`
 
 > Имена таблиц/индексов выше — значения текущей инсталляции (REFERENCE). Они
 > настраиваются в `project.json` (`channels.postgres.*`, `skills.audit_analyzer.tables[]`/`vector_indexes[]`, `gateway.vector.index.*`, `logging.db.*`, `benchmark.*`) и в других развёртываниях могут отличаться.
@@ -126,7 +124,7 @@ pytest tests/ --cov=lib --cov-report=term-missing
 Группы: `test_application_context.py` + `test_*_factory.py` · `test_runtime_patcher.py`
 + `test_utils_db.py` · `test_*_service.py` (db_logging, audit, transcription) ·
 `test_pg_session_manager.py` + `test_*_channel.py` · `test_hooks_*.py` +
-`test_recent_files_hook.py` + `test_office_files.py` · `test_benchmarks_*.py` +
+`test_recent_files_hook.py` + `test_office_files.py` ·
 `test_gateway*.py` + `test_cli_agent.py`.
 
 ## ⏰ Heartbeat и cron
@@ -153,7 +151,6 @@ pytest tests/ --cov=lib --cov-report=term-missing
 | **[docs/table-registry.md](docs/table-registry.md)** | Реестр таблиц PG → DuckDB |
 | **[docs/skill-tool-architecture.md](docs/skill-tool-architecture.md)** | Контракт Skill ↔ Tool |
 | **[docs/architecture/](docs/architecture/)** | Инвентаризация зависимостей и monkey-patch'ей |
-| **[benchmarks/README.md](benchmarks/README.md)** | Бенчмарки: модели, YAML, веса |
 | **[lib/channels/README.md](lib/channels/README.md)** | Каналы (Postgres/Redis): DDL, поток, конфиг |
 | **[lib/session/README.md](lib/session/README.md)** | `PGSessionManager`: схема, graceful degradation |
 | **workspace/skills/*/SKILL.md** | Документация навыков |
@@ -177,7 +174,7 @@ DuckDB-снапшот `gateway.vector.index.storage_table`, FAISS собирае
 
 **MAJOR.** Профиль конфигурации задаётся только CLI-флагом `--profile`
 (whitelist: `prod` / `test`); env-передача профиля больше не работает,
-`gateway.py` / `cli_agent.py` / `streamlit_app.py` без флага падают с
+`gateway.py` / `cli_agent.py` без флага падают с
 `ConfigurationError` и `exit 2` (см. `docs/PROFILES.md`).
 
 **SECURITY.** `history_search(session_scope="all")` изолирован по `user_id`
@@ -301,7 +298,7 @@ generic infrastructure tools (`duckdb_query`, `vector_search`, `nl_sql_generate`
 
 ## 🛡 Зависимости и лицензия
 
-`nanobot`, `psycopg2-binary`, `redis`, `streamlit`, `loguru`, `httpx`, `duckdb`,
+`nanobot`, `psycopg2-binary`, `redis`, `loguru`, `httpx`, `duckdb`,
 `faiss-cpu`, `numpy`, `pyarrow`, `PyYAML` — точные версии в `requirements.txt`.
 
 **Лицензия:** MIT.

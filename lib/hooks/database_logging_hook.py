@@ -195,7 +195,7 @@ def make_db_logging_hook_factory(
         # и пробрасываем в ``register_request``, чтобы индекс хранил
         # пару {request_id, user_id} — это security boundary для
         # ``history_search(session_scope="all")``. При отсутствии
-        # identity-store (websocket/streamlit без RequestContext, тесты) —
+        # identity-store (websocket без RequestContext, тесты) —
         # ``user_id`` остаётся ``None``, события пишутся с ``user_id IS NULL``
         # и НЕ участвуют в ``scope='all'`` (безопасный default).
         user_id = _current_request_sender_id()

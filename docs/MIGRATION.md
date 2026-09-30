@@ -22,7 +22,11 @@
 
 **Ручные действия:**
 
-0. **Удалить таблицу аренды.** `sql/migrations/V006__drop_agent_worker_claims.sql`
+0. **Удалить таблицы бенчмарков.** `sql/migrations/V007__drop_benchmark_tables.sql`
+   содержит `DROP TABLE IF EXISTS public.agent_benchmark_results;` и
+   `public.agent_benchmark_runs;` — применяется штатно. DDL `sql/benchmarks/`
+   удалён.
+1. **Удалить таблицу аренды.** `sql/migrations/V006__drop_agent_worker_claims.sql`
    (`python tools/migrate.py --apply`) содержит `DROP TABLE IF EXISTS
    public.agent_worker_claims;` — runner выполняет SQL как есть, подстановок
    нет, так что скрипт применяется штатно. Номер 006, а не 005: `005` уже

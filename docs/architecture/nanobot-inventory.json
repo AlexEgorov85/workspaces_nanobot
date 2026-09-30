@@ -13,7 +13,7 @@
     }
   },
   "summary": {
-    "files_scanned": 185,
+    "files_scanned": 183,
     "total_imports": 65,
     "by_classification": {
       "RED": 6,
@@ -89,7 +89,7 @@
       "file": "lib/channels/postgres_channel.py",
       "imports": [
         {
-          "line": 37,
+          "line": 34,
           "statement": "from nanobot.bus.events import OutboundMessage",
           "module": "nanobot.bus.events",
           "names": [
@@ -98,7 +98,7 @@
           "classification": "GREEN"
         },
         {
-          "line": 38,
+          "line": 35,
           "statement": "from nanobot.bus.queue import MessageBus",
           "module": "nanobot.bus.queue",
           "names": [
@@ -107,7 +107,7 @@
           "classification": "GREEN"
         },
         {
-          "line": 39,
+          "line": 36,
           "statement": "from nanobot.channels.base import BaseChannel",
           "module": "nanobot.channels.base",
           "names": [
@@ -118,7 +118,7 @@
       ],
       "getattr_private": [
         {
-          "line": 1585,
+          "line": 1274,
           "expr": "getattr(self, \"_compaction_event_subscriber\"",
           "object": "self",
           "attr": "_compaction_event_subscriber"
@@ -297,7 +297,7 @@
       "file": "lib/core/application_context.py",
       "imports": [
         {
-          "line": 1673,
+          "line": 1672,
           "statement": "from nanobot.cron.service import CronService",
           "module": "nanobot.cron.service",
           "names": [
@@ -902,7 +902,7 @@
       "imports": [],
       "getattr_private": [
         {
-          "line": 76,
+          "line": 75,
           "expr": "getattr(settings, \"_inner_dict\"",
           "object": "settings",
           "attr": "_inner_dict"
@@ -939,12 +939,6 @@
           "classification": "GREEN"
         }
       ],
-      "getattr_private": [],
-      "setattr_calls": []
-    },
-    {
-      "file": "lib/services/subprocess_manager.py",
-      "imports": [],
       "getattr_private": [],
       "setattr_calls": []
     },
@@ -1090,12 +1084,6 @@
           "attr": "_nanobot_ansi_stripped"
         }
       ],
-      "setattr_calls": []
-    },
-    {
-      "file": "streamlit_app.py",
-      "imports": [],
-      "getattr_private": [],
       "setattr_calls": []
     },
     {

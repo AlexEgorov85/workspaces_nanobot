@@ -2,7 +2,7 @@
 
 Разные каналы и web-UI обмениваются вложениями, и чтобы схема жила в одном
 месте (а не копировалась в ``postgres_channel``, ``redis_channel`` и
-``streamlit_app``), весь сериализатор/десериализатор вынесен сюда.
+web-UI), весь сериализатор/десериализатор вынесен сюда.
 
 Форматы ``media``:
 
@@ -19,7 +19,7 @@
 Пользователи кодекса:
   * ``postgres_channel`` — embеd (send) и decode (poll);
   * ``redis_channel`` — то же самое поверх Redis-очередей;
-  * ``streamlit_app`` — запись user-медиа в DB и отрисовка вложений.
+  * web-UI — запись user-медиа в DB и отрисовка вложений.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def entry_from_data_url(data_url: str, filename: str | None = None) -> dict[str,
     """Собрать storage-элемент из готового data URL.
 
     Имя по умолчанию выводится из MIME-типа (``file.png``); при переданном
-    ``filename`` сохраняется оригинальное имя (для user-upload из streamlit).
+    ``filename`` сохраняется оригинальное имя (для user-upload из web-UI).
     """
     info = data_url_info(data_url)
     mime_type = info[0] if info else "application/octet-stream"
@@ -225,7 +225,7 @@ def read_for_ui(entry: Any) -> tuple[str, str, str]:
 
     Возвращает ``(data_url, path, filename)``, пробуя ``file_id`` (новый
     AW), ``data`` (legacy), ``path`` (после decode) и строковые media.
-    Позволяет UI (streamlit) не знать ни одной из схем.
+    Позволяет UI не знать ни одной из схем.
     """
     if not isinstance(entry, dict):
         s = entry if isinstance(entry, str) else ""

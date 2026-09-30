@@ -104,13 +104,19 @@
       (`lib/services/schema_validation.py`) — иначе `validate_runtime_isolation`
       и проверка профиля падали бы с `ConfigurationError`. Проверка схемы
       теперь смотрит 5 runtime-таблиц, а не 6.
-- [ ] 1.5 Удалить `benchmarks/`, `benchmarks/db.py`, `tools/legal_benchmark.py`,
-      `tools/legacy_audit.py`, `tools/test_audit.py`; DROP `agent_benchmark_runs`,
-      `agent_benchmark_results`; удалить секцию `benchmark.*`
-- [ ] 1.6 Удалить `streamlit_app.py`, `lib/services/subprocess_manager.py`,
-      spawn-логику в `gateway.py`, секцию `streamlit.*`, `tests/test_streamlit_app.py`
-- [ ] 1.7 Удалить `workspace/tools/example.py` и запись `ExampleTool` из
-      `runtime_inventory.py`
+- [x] 1.5 Удалить `benchmarks/`, `tools/legal_benchmark.py`, `tools/test_audit.py`;
+      DROP `agent_benchmark_runs`, `agent_benchmark_results`
+      (`sql/migrations/V007__drop_benchmark_tables.sql`); удалить секцию `benchmark.*`.
+      **`tools/legacy_audit.py` ОСТАВЛЕН** — план называл его служебным, но это
+      движок живого guard'а `tests/test_no_legacy_imports.py`. **НЕ удалён**
+      `tests/benchmarks/` — имя каталога вводит в заблуждение, это тесты
+      quality-бенчмарков навыка `legal_summarizer`.
+- [x] 1.6 Удалить `streamlit_app.py`, `lib/services/subprocess_manager.py`,
+      spawn-логику в `gateway.py`, секцию `streamlit.*`,
+      `tests/test_streamlit_app.py`, `tests/test_subprocess_manager.py`
+- [x] 1.7 Удалить `workspace/tools/example.py` и запись `ExampleTool` из
+      `runtime_inventory.py` (образец контракта Tool перенесён на
+      `workspace/tools/history_search_tool.py`)
 - [x] 1.8 Обновить `AGENTS.md`, `CHANGELOG.md`, `lib/channels/README.md`,
       `README.md`, `docs/ARCHITECTURE.md`, `docs/TROUBLESHOOTING.md`,
       `sql/README.md`, `openspec/specs/runtime/startup-schema-validation`

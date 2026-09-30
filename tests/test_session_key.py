@@ -101,7 +101,7 @@ def test_extract_session_key_does_not_match_nested_sessions():
 
 def test_roundtrip_real_session_keys():
     """SessionFileRedirectHook формирует путь по тому же алгоритму — roundtrip должен совпадать."""
-    raw_keys = ["cli:1", "telegram:8281248569", "postgres:abc-def-123", "streamlit:user42"]
+    raw_keys = ["cli:1", "telegram:8281248569", "postgres:abc-def-123", "redis:user42"]
     for raw in raw_keys:
         safe = safe_session_key(raw)
         path = f"data_store/cache/sessions/{safe}/document.pdf"

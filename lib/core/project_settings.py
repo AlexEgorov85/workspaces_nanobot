@@ -301,11 +301,6 @@ class CliSettings(_StrictOptional):
     max_iterations: int | None = Field(default=None, gt=0)
 
 
-class StreamlitSettings(_StrictOptional):
-    enabled: bool | None = None
-    error_window_sec: float | None = Field(default=None, gt=0)
-
-
 class ChannelsSettings(_StrictOptional):
     postgres: PostgresChannelSettings | None = None
     document_text_threshold: int | None = Field(default=None, ge=0)
@@ -691,7 +686,6 @@ class ProjectSettings(BaseModel):
     channels: ChannelsSettings | None = None
     gateway: GatewaySettings | None = None
     cli: CliSettings | None = None
-    streamlit: StreamlitSettings | None = None
     logging: LoggingSettings | None = None
     skills: SkillsSettings | None = None
 

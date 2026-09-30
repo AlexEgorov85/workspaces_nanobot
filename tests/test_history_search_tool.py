@@ -42,7 +42,7 @@ def _fake_rows() -> list[dict]:
 @pytest.mark.xfail(
     reason=(
         "Order-dependent flake: мокает utils.db.fetch глобально; "
-        "test_streamlit_app.py и другие тесты переустанавливают "
+        "другие тесты переустанавливают "
         "sys.modules['utils.db'] через свой mock, что ломает патч "
         "здесь. Pre-existing, не связано с change config-profile-cli-flag. "
         "TODO: выделить в отдельный changelog или вынести utils.db "

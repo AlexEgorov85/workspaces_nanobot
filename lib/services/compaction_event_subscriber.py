@@ -11,7 +11,7 @@
 Контракт:
 
   * handler-функции канала (``postgres_channel.send``,
-    ``redis_channel.send``, ``streamlit_app._render_agent``)
+    ``redis_channel.send``)
     **должны** вызвать ``CompactionEventSubscriber.feed(outbound)``
     перед обработкой события: фильтр-логика общая, SRP не нарушается
     (канал по-прежнему не знает о бизнес-логике компакции).
@@ -34,7 +34,7 @@ from loguru import logger
 class CompactionEventSubscriber:
     """Подписчик на ``OutboundMessage.event`` типа ``ContextCompactionEvent``.
 
-    Канал (postgres/redis/streamlit) вызывает ``feed(outbound)`` при
+    Канал (postgres/redis) вызывает ``feed(outbound)`` при
     каждом ``OutboundMessage``. Subscriber фильтрует события по
     ``isinstance(msg.event, ContextCompactionEvent)`` и зовёт
     публичный API ``ContextCompactionService``.

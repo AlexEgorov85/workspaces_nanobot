@@ -53,7 +53,6 @@ PRODUCTION_ROOTS_STRICT: tuple[Path, ...] = (
 ENTRYPOINT_FILES: tuple[Path, ...] = (
     REPO_ROOT / "cli_agent.py",
     REPO_ROOT / "gateway.py",
-    REPO_ROOT / "streamlit_app.py",
 )
 
 # Self-exclusion: этот файл docstring'и и negative-fixture упоминают

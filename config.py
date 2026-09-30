@@ -502,8 +502,8 @@ class _LazySettings:
 
     Поддерживает mapping-access (``SETTINGS["profile"]``) для нового
     кода и attribute-access (``SETTINGS.profile`` — через ``__getattr__``)
-    для backward-compat с существующим кодом (``streamlit_app.py``,
-    ``history_search_tool.py`` и т.п.).
+    для backward-compat с существующим кодом
+    (``history_search_tool.py`` и т.п.).
     """
 
     __slots__ = ("_inner_dict",)
@@ -679,11 +679,9 @@ def get_setting(*keys: str, default=None):
     Если SETTINGS не инициализирован (proxy UNINITIALIZED),
     ``get_setting`` возвращает ``default``, а НЕ поднимает
     ``ConfigurationError``. Это намеренное поведение для backward-compat
-    с callers типа ``subprocess_manager.SubprocessManager.__init__``
-    (запускается из ``gateway.py:_run`` **после** ``_initialize_settings``,
-    но исторически модуль импортировался с module-level ``SETTINGS``;
-    default-fallback защищает от случайного вызова в неправильном
-    lifecycle context).
+    с callers, которые читают настройки на уровне модуля, ещё до
+    инициализации SETTINGS: default-fallback защищает от случайного вызова
+    в неправильном lifecycle context.
 
     Для кода, который **требует** инициализированного SETTINGS
     (новый runtime-код, entrypoint'ы, ApplicationContext),

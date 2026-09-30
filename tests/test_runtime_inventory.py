@@ -39,11 +39,18 @@ class TestCanonical:
         required = {t.name for t in canonical_project_tools() if t.required}
         assert required == {"compact_context", "history_search", "legal_summarizer_query"}
 
-    def test_example_tool_is_optional(self) -> None:
+    def test_example_tool_absent(self) -> None:
+        """Шаблонный tool УБРАНЕН из канонического списка.
+
+        ``workspace/tools/example.py`` удалён; его возврат в
+        ``canonical_project_tools()`` — регрессия инвентаря
+        (тестовый образец — сейчас
+        ``history_search_tool``).
+        """
         from lib.services.runtime_inventory import canonical_project_tools
 
-        ex = [t for t in canonical_project_tools() if t.name == "ExampleTool"]
-        assert ex and not ex[0].required
+        names = {t.name for t in canonical_project_tools()}
+        assert "ExampleTool" not in names
 
     def test_runtime_patches_covers_known(self) -> None:
         from lib.services.runtime_inventory import canonical_runtime_patches

@@ -33,7 +33,7 @@ def test_assert_no_legacy_whole_repo() -> None:
     """Regression guard: production не должен содержать legacy hits.
 
     Сканирует ВСЕ .py файлы репозитория (lib/, workspace/, tools/,
-    gateway.py, streamlit_app.py, cli_agent.py, tests/, sql/,
+    gateway.py, cli_agent.py, tests/, sql/,
     benchmarks/). Каталоги ``__pycache__``, ``.venv``, ``data_store``
     и прочие cache-каталоги исключены внутри ``audit()``.
 

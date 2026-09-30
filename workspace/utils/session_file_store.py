@@ -33,14 +33,14 @@ def guess_ext_from_mime(mime_type: str, default_ext: str = ".bin") -> str:
     """Единая точка: от MIME-типа к расширению файла.
 
     Эквивалент прежних ``SessionFileStore._guess_ext_from_mime`` и
-    ``streamlit_app._get_extension_from_mime`` (была одна и та же логика
+    прежняя ``_get_extension_from_mime`` (была одна и та же логика
     ``mimetypes.guess_extension`` с разным дефолтом).
     Отбирает параметры (``text/html; charset=utf-8`` → ``.html``).
 
     Args:
         mime_type: MIME-тип (или пустая строка).
         default_ext: расширение при неизвестном типе — ``.bin`` для
-            хранилища вложений, ``""`` для Streamlit (без подстановки).
+            хранилища вложений, ``""`` для web-UI (без подстановки).
 
     Returns:
         Расширение с ведущей точкой (``.png``, ``.html``) или ``default_ext``.

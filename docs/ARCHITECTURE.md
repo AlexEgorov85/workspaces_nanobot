@@ -23,8 +23,10 @@
 > `skills.audit_analyzer.tables[*].name` / `vector_indexes[*].name`,
 > `gateway.vector.index.storage_table`,
 > `logging.db.table_name` / `question_runs_table`,
-> `benchmark.runs_table` / `results_table`. Точный список и дефолты — в
+> `gateway.vector.index.storage_table`. Точный список и дефолты — в
 > [TARGET_ARCHITECTURE.md](TARGET_ARCHITECTURE.md) и [AGENTS.md](../AGENTS.md).
+> Таблицы бенчмарков (`agent_benchmark_runs` / `agent_benchmark_results`) и
+> настройка `benchmark.*` удалены в фазе 1 миграции `enterprise-mcp-platform`.
 
 ```mermaid
 flowchart LR
@@ -131,7 +133,6 @@ flowchart LR
 | `project_tool_loader.py` | Stateless helper для регистрации кастомных tool'ов из `workspace/tools/*.py`. Единственный публичный контракт: `register_project_tools(...) -> ProjectToolsLoadResult`. Вызывается из `ApplicationContext.create()` сразу после `apply_all()` как независимый stage composition root'а. **НЕ** компонент (нет lifecycle/state/config — критерии `openspec/specs/architecture/component-model/spec.md`). |
 | `channel_factory.py` | `ChannelManager` + Redis + Postgres каналы + транскрипция (вынесено из gateway). Конструктор принимает `print_worker_activity` (пробрасывается в `PostgresChannel` из `gateway.print_worker_activity`). |
 | `transcription_service.py` | openai/groq key/URL/language (вынесено из gateway). |
-| `subprocess_manager.py` | Streamlit spawn + terminate/kill. |
 | `preload_service.py` | Только FAISS preload (`preload_vector_indexes`) для gateway. Legacy CLI-методы `preload_audit_cache` / `background_audit_cache_refresh` / `start_audit_cache_tasks` / `stop_tasks` удалены в `refactor/core-extract-duckdb-faiss`: единственный писатель DuckDB-снимка — `DuckDbCacheStore.publish()` через gateway; путь снимка вычисляется через единый `resolve_cache_path()` (`lib/core/application_context.py`) — default `~/.cache/nanobot/duckdb/cache.duckdb` или override `gateway.cache.local_path`. CLI/skill/vector_index_service вызывают ту же функцию, так что расхождение невозможно. |
 | `db_logging_service.py` | **Новый** — структурированный журнал агента в `agent_gateway_logs` (имя настраивается через `logging.db.table_name`). |
 | `db_logging_bus.py` | **Новый** — обёртки `publish_inbound`/`publish_outbound` для `DbLoggingService`. |
@@ -171,10 +172,10 @@ api_key=XavGPsHjtNt3uOtFGUhabUuad5PRm2D0W
 (например, `skills.audit_analyzer.llm_*`) передаются через `overrides`.
 
 Используется единообразно:
-* навыком `audit_analyzer` — `scripts/skill_config.py::get_llm_config()`;
-* бенчмарками — `benchmarks/runner.py::_run_suite()` (без хардкода
-  провайдера при `--model`; `ensure_llm_env()` гарантирует
-  `LLM_API_KEY` в env для резолва `${LLM_API_KEY}`).
+* навыком `audit_analyzer` — `scripts/skill_config.py::get_llm_config()`.
+
+Потребитель в лице бенчмарк-раннера (`benchmarks/runner.py::_run_suite()`)
+удалён вместе с подсистемой бенчмарков.
 
 Так смена модели/провайдера/ключа агента автоматически меняет LLM и в
 навыке, и в бенчмарке — без дублирования секретов в трёх местах.
@@ -407,7 +408,7 @@ PG/JOBS.
    `_flush_live_context` в `_flush_reasoning_loop` (каждые
    `_flush_interval` секунд) читает `get_context_window(session_key)` и
    пишет блок в `metadata.context_window` processing-ассистент строки
-   в БД. UI (Streamlit) видит его через свой поллинг
+   в БД. Внешний UI видит его через свой поллинг
    `metadata.context_window` и рисует прогресс-бар, который
    заполняется «вживую» по мере роста промпта. После финализации
    оборота `_drop_context_bridge(chat_id)` снимает мост.
@@ -475,7 +476,7 @@ flowchart LR
    upstream `nanobot/command/builtin.py::cmd_compact`, расширяется
    `RuntimePatcher.patch_compact_command` (fail-soft обёртка) в `agent.commands`
    (`CommandRouter`), где это единственный путь, общий для всех каналов
-   (postgres, streamlit, telegram). В `run()` зарегистрированные команды
+   (postgres, redis, telegram). В `run()` зарегистрированные команды
    перехватываются **до** LLM (``_dispatch_command_inline`` /
    ``_state_command``), поэтому сжатие срабатывает детерминированно и
    безоговорочно, а не «по усмотрению» модели. Handler ставит
@@ -579,15 +580,16 @@ async def _notify(self, session_key, report):
 
 | Поле | Значение |
 |---|---|
-| `chat_id` | из `session_key` (`postgres:<chat>` или `streamlit:<chat>`) |
+| `chat_id` | из `session_key` (`postgres:<chat>`) |
 | `role` | `assistant` |
 | `status` | `completed` |
 | `content` | результат `format_report(report)` (полный текст) |
 | `metadata.kind` | `context_compact` (метка для UI/аналитики) |
 | `metadata.compact` | весь `report` (archived_msgs, kept_msgs, tokens, summary, mode) |
 
-Поддерживаются **только** префиксы `postgres:` и `streamlit:` — это
-единственные каналы с таблицей обмена. Для CLI-сессий (`cli:`)
+Поддерживается **только** префикс `postgres:` — единственный канал с
+таблицей обмена (Streamlit-UI и его префикс `streamlit:` удалены в фазе 1
+миграции `enterprise-mcp-platform`). Для CLI-сессий (`cli:`)
 запись пропускается: REPL сам показывает отчёт в терминале, в БД
 идти нечему.
 
@@ -769,7 +771,7 @@ UI читает то, что есть, и не обязан понимать к�
 
 ##### 3. `raw_meta` от UI (что кладёт источник)
 
-Когда внешний клиент (Streamlit, REST, Telegram-бот) пишет
+Когда внешний клиент (REST, Telegram-бот) пишет
 **новое** user-сообщение, он может положить любые поля в `metadata`
 INSERT-а. Канал их читает и мерджит с собственными ключами:
 
@@ -786,7 +788,7 @@ meta: dict[str, Any] = {
 
 **Конвенция** для `raw_meta` от UI: только поля, описывающие
 маршрутизацию. Сейчас в проекте используется `session_key`
-(потенциально; Streamlit-INSERT не пишет `metadata` — DEFAULT `'{}'`).
+(потенциально; INSERT от UI не пишет `metadata` — DEFAULT `'{}'`).
 Любые `kind`/`compact`/`reasoning`/`context_window` от UI
 **игнорируются** (будут перезаписаны каналом/патчами на следующих
 стадиях жизненного цикла).
@@ -800,7 +802,7 @@ meta: dict[str, Any] = {
 
 | Источник | Файл | Когда | Что пишет в `metadata` |
 |---|---|---|---|
-| UI (INSERT) | `streamlit_app.py:567` и аналоги | при отправке user-сообщения | `raw_meta` (опционально, `session_key` и прочее) |
+| Внешний UI (INSERT) | web-клиент при отправке user-сообщения | при INSERT | `raw_meta` (опционально, `session_key` и прочее) |
 | `PostgresChannel._poll_once` | `lib/channels/postgres_channel.py:758` | при клейме задачи | `message_id` (в assistant-строке), `answer_id` (в user-строке) |
 | `PostgresChannel._flush_reasoning` | `postgres_channel.py:530` | live, каждые `_flush_interval` сек | `reasoning` (дописывается) |
 | `PostgresChannel._finalize_turn` | `postgres_channel.py:1156` | на `_turn_end` | `reasoning` (atomic append остатков) |
@@ -845,7 +847,7 @@ meta: dict[str, Any] = {
 
 | Поле | Тип | Описание |
 |---|---|---|
-| `session_key` | `str` | Полный ключ сессии (например, `postgres:streamlit`) |
+| `session_key` | `str` | Полный ключ сессии (например, `postgres:chat-42`) |
 | `mode` | `"token"` \| `"idle"` | Режим: token-budget (`maybe_consolidate_by_tokens`) или idle (`compact_idle_session`) |
 | `ok` | `bool` | `true` если сжатие успешно |
 | `archived_msgs` | `int` | Сколько сообщений заархивировано (≥ 1 для записи) |
@@ -864,7 +866,8 @@ meta: dict[str, Any] = {
 
 ##### 7. Примеры UI-логики
 
-**Streamlit** (`streamlit_app.py`) — три места с условным рендером:
+Внешний web-клиент — три места с условным рендером
+(в агент UI-кода нет; показываю как контракт `metadata`):
 
 ```python
 # _load_chat_history (строки 89, 96, 100)
@@ -923,7 +926,8 @@ else:
     await bot.send_message(chat_id, row["content"])
 ```
 
-**Стиль в Streamlit** для `compact_notice`:
+**Стиль UI** для `compact_notice` (реализация была в Streamlit, удалён
+вместе с ним; контракт `metadata` сохранён):
 
 * CSS-класс `.compact-notice` — жёлтый фон `#fff8e1`,
   левая полоска `#f0c040`, мелкий шрифт, скругления. Определён в
@@ -960,7 +964,7 @@ else:
 * Если `metadata` не содержит ключа, который UI ожидает — UI должен
   обрабатывать отсутствие (`metadata.get("X")` / `?.` / `metadata?.X`).
 * `metadata.reasoning` может быть очень длинным — UI может рендерить
-  свёрнутым `<details>` (как делает Streamlit).
+  свёрнутым `<details>` (так делал Streamlit UI).
 * `metadata.context_window.pct` уже clamp 0..1, 4 знака — можно
   умножать на 100 сразу, не нормализуя.
 * `metadata.compact.tokens_before/after` — `0` допустимо (если
@@ -975,8 +979,6 @@ else:
   `reasoning` live + atomic append в `_finalize_turn`.
 * `tests/test_postgres_channel.py::TestPostgresChannelContextWindow` —
   `context_window` live-update + drop.
-* `tests/test_streamlit_app.py::TestRenderContextWindow` —
-  UI-рендер `context_window`.
 * `tests/test_console_loop.py::TestPrintContextWindow` —
   CLI-рендер `context_window`.
 * `tests/test_context_compaction.py` — запись `kind == "context_compact"`,
@@ -1048,8 +1050,7 @@ read→persist→read петли).
 
 `MessageExchange` — единая точка кодирования/декодирования `InboundMessage` /
 `OutboundMessage`, поллинга и публикации outbound, фильтрации служебных
-сообщений. `PostgresChannel` и `RedisChannel` — тонкие обёртки над ним,
-`streamlit_app.py` использует тот же движок для чтения истории. Запрещено
+сообщений. `PostgresChannel` и `RedisChannel` — тонкие обёртки над ним. Запрещено
 дублировать логику polling/encoding в новых каналах — только через
 `MessageExchange`.
 
@@ -1160,7 +1161,6 @@ outbound). Все остальные сообщения `send()` merge'ит в a
 `processing_timeout`, `unstick_interval`, `max_stuck_retries`,
 `error_retry_delay`, `worker_id` (пусто → авто `{hostname}:{pid}:{rand8}`;
 участвует только в логах и выводе активности).
-**`streamlit.error_window_sec`** — окно ожидания повтора `error`-задач.
 
 **Поток данных:**
 
@@ -1434,7 +1434,7 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
 Один модуль с пресетами `setup(level=..., json=..., redact_keys=...)`,
 вызываемый из `ApplicationContext.create()` и CLI-цикла. Гарантирует
 одинаковый формат логов и redaction секретов во всех точках входа
-(`gateway.py`, `cli_agent.py`, `streamlit_app.py`).
+(`gateway.py`, `cli_agent.py`).
 
 ### `lib/utils/project_version.py` — версия проекта
 
@@ -1451,7 +1451,7 @@ Fallback при отсутствии ключа — `git describe --tags`, за�
 ### `lib/utils/outbound_meta.py` — фильтрация outbound
 
 Скрывает internal-сообщения из пользовательского потока. Раньше фильтр
-был в каждом канале свой → поведение в Streamlit расходилось с
+был в каждом канале свой → поведение UI расходилось с
 Postgres/Redis. Теперь — один, через `MessageExchange`.
 
 ### `scripts/backfill_media_aw.py` — миграция media в AW-формат
@@ -1467,8 +1467,8 @@ file_size}` (payload → `data_store/cache/sessions/_shared/attachments/`,
 
 `RuntimeHealth` (liveness) и `RuntimeReadiness` (готовность с учётом
 зависимостей) дают операционную картину процесса. Это не HTTP-эндпойнт —
-используется в `ApplicationContext.start()` (логирует итоговый readiness),
-streamlit-UI, аварийными script'ами после deploy.
+используется в `ApplicationContext.start()` (логирует итоговый readiness)
+и аварийными script'ами после deploy.
 
 - **Health (liveness):** `RuntimeHealth.is_alive()` / `status()` — процесс жив,
   asyncio-loop работает, не в shutdown. Пульс отвечает всегда.
@@ -1497,7 +1497,6 @@ nanobot/
 │   ├── channels/                          #   seed_messages.sql (тестовые данные)
 │   ├── logs/                              #   agent_gateway_logs (DbLoggingService, имя через logging.db.table_name)
 │   ├── audit_analyzer/                    #   домен oarb.* + векторы (GP)
-│   ├── benchmarks/                        #   agent_benchmark_runs + agent_benchmark_results
 │   └── migrations/                        #   инкрементальные миграции (например, logs)
 │
 ├── lib/                                  # сервисный слой
@@ -1516,7 +1515,6 @@ nanobot/
 │   │   ├── project_tool_loader.py        #    stateless loader project tools (workspace/tools/*.py)
 │   │   ├── channel_factory.py            #    ChannelManager + Redis/Postgres каналы
 │   │   ├── transcription_service.py      #    openai/groq key/URL/language
-│   │   ├── subprocess_manager.py         #    Streamlit spawn + terminate/kill
 │   │   ├── preload_service.py            #    FAISS preload + audit_cache refresh
 │   │   ├── db_logging_service.py         #    worker, batch INSERT, без JSONL-fallback, get_stats()
 │   │   ├── db_logging_bus.py             #    обёртки publish_inbound/outbound
@@ -1594,7 +1592,6 @@ nanobot/
 │
 ├── gateway.py                            #  тонкий оркестратор
 ├── cli_agent.py                          #  тонкий оркестратор
-├── streamlit_app.py                      # [web-клиент, не через ApplicationContext]
 ├── config.py                             # SETTINGS (project.json + config.json + .secrets.env)
 └── project.json                          # конфигурация (channels.*, skills.*, gateway, cli, logging.db)
 ```

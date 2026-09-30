@@ -117,16 +117,6 @@ def _required_keys():
         ("cli.log_level", "WARNING"),
         ("cli.repl_idle_timeout_sec", 1.0),
         ("cli.show_context_window", True),
-        # benchmark
-        ("benchmark.db_schema", "public"),
-        ("benchmark.runs_table", "agent_benchmark_runs"),
-        ("benchmark.results_table", "agent_benchmark_results"),
-        # streamlit
-        ("streamlit.enabled", True),
-        ("streamlit.max_wait", 600),
-        ("streamlit.poll_interval", 10.0),
-        ("streamlit.files_dir", "data_store/streamlit_files"),
-        ("streamlit.error_window_sec", 300),
         # gateway
         ("gateway.storage", "file"),
         ("gateway.persist_threshold", 50000),
@@ -140,9 +130,6 @@ def _required_keys():
         ("gateway.print_db_activity", False),
         ("gateway.restart_initial_delay_sec", 1.0),
         ("gateway.restart_max_delay_sec", 30.0),
-        ("gateway.streamlit_port", 8501),
-        ("gateway.streamlit_log_filename", "streamlit.log"),
-        ("gateway.subprocess_shutdown_timeout_sec", 5.0),
         # gateway.duckdb_query / gateway.vector_search — удалены (этап 18):
         # Agent-facing tools (duckdb_query_tool.py, vector_search_tool.py)
         # удалены; Agent работает через Core capability (CacheProvider).

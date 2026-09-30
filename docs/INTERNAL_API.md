@@ -20,10 +20,11 @@
 
 ### Application subprocess
 
-Application entrypoint (`gateway.py`, `cli_agent.py`, `streamlit_app.py`)
-получает `--profile` через `argv` от родителя. Когда `gateway.py`
-spawn'ит `streamlit_app.py` через `lib.services.subprocess_manager`,
-профиль пробрасывается явно:
+Application subprocess-приложений больше нет: `streamlit_app.py` и
+`lib/services/subprocess_manager.py` удалены в фазе 1 миграции
+`enterprise-mcp-platform`. Остались два entrypoint — `gateway.py` и
+`cli_agent.py`, профиль получают через `argv` от пользователя. Историческая
+схема пробрасывания (для понимания, почему `--profile` идёт именно в argv):
 
 ```python
 proc = subprocess.Popen(
@@ -145,7 +146,7 @@ env-переменную для выбора профиля, поэтому ко
 
 Reference: `nanobot/agent/tools/image_generation.py`
 (`ImageGenerationTool` — самый полный пример) и
-`workspace/tools/example.py` (минимальный шаблон).
+`workspace/tools/history_search_tool.py` (минимальный шаблон).
 
 ### Где живут tool'ы
 
@@ -284,7 +285,6 @@ registered: foo, bar, baz; skipped: qux (disabled by config)"`.
 | `compact_context` | `workspace/tools/compact_context.py` | ручное сжатие контекста | `gateway.compact.*` (project.json) |
 | `history_search` | `workspace/tools/history_search_tool.py` | generic-поиск по журналу `agent_gateway_logs` (переживает context compaction) | `tools.history_search.*` (config.json; если секция не задана — дефолты модели `HistorySearchConfig`) |
 | `legal_summarizer_query` | `workspace/tools/legal_summarizer_query.py` | follow-up по saved `operation_id` для `legal_summarizer` | `tools.legal_summarizer_query.*` (config.json) |
-| `example_tool` | `workspace/tools/example.py` | шаблон (по умолчанию `enable=false`) | `tools.example.*` (config.json) |
 
 Tools `duckdb_query` / `vector_search` **не существуют** (см.
 `skill-tool-inventory.md`). Доступ к `audit_analyzer` — только через

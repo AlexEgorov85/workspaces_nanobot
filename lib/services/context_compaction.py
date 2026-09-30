@@ -28,7 +28,7 @@ loguru INFO, опциональный Rich-вывод в терминал gatewa
 один ``_write_history_notice``, одна loguru-строка. Пользователь и
 логи не различают, было ли сжатие ручным или автоматическим.
 
-Заметка в ``agent_conversation_messages`` видна в UI-чате (Streamlit),
+Заметка в ``agent_conversation_messages`` видна в UI-чате,
 но НЕ попадает в контекст промпта: контекст агента строится из
 upstream JSONL-стора ``SessionManager`` (mirror в PG через
 ``SessionColdSyncService``), а таблица обмена —
@@ -446,7 +446,7 @@ class ContextCompactionService:
         Вызывается из ``CompactionEventSubscriber.feed`` (см.
         ``lib/services/compaction_event_subscriber.py``) при получении
         ``OutboundMessage.event`` типа ``ContextCompactionEvent`` из
-        ``bus.outbound``. Канал (postgres/redis/streamlit) дёргает
+        ``bus.outbound``. Канал (postgres/redis) дёргает
         subscriber из своего ``send``; CLI-gateway вызывает метод
         напрямую (минуя шину).
 
@@ -518,9 +518,9 @@ class ContextCompactionService:
     async def _write_history_notice(self, session_key: str, report: dict) -> None:
         """Записать заметку о сжатии в ``agent_conversation_messages``.
 
-        Поддерживает session_key видов ``postgres:<chat_id>`` и
-        ``streamlit:<chat_id>`` — это единственные каналы, у которых
-        есть таблица обмена. Для прочих префиксов (например, ``cli:...``)
+        Поддерживает session_key вида ``postgres:<chat_id>`` — единственный
+        канал, у которого есть таблица обмена. Для прочих префиксов
+        (например, ``cli:...``)
         — выходим без записи: история диалога CLI живёт в REPL-выводе
         и upstream JSONL-сторе ``SessionManager`` (mirror в PG через
         ``SessionColdSyncService``).
@@ -529,7 +529,7 @@ class ContextCompactionService:
             prefix, _, chat_id = (session_key + ":").partition(":")
         except Exception:
             return
-        if prefix not in ("postgres", "streamlit") or not chat_id:
+        if prefix != "postgres" or not chat_id:
             return
         pg = _get_setting(self._settings, "channels", "postgres", default={}) or {}
         dsn = pg.get("dsn") or ""

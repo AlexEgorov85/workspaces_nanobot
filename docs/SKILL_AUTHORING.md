@@ -576,7 +576,7 @@ Skill пишет инструкции в терминах capability, не Pytho
 Generic tools `duckdb_query` / `vector_search` **не создаются** — это внутренние
 операции Skill'а, а не agent-facing capability (границы описаны в
 `docs/skill-tool-architecture.md` § 6–§8). Новый Tool заводится **только** при
-agent-facing критерии (§1); для добавления — `workspace/tools/example.py`.
+agent-facing критерии (§1); для добавления — `workspace/tools/history_search_tool.py`.
 
 ---
 
@@ -926,7 +926,7 @@ python cli_agent.py          # smoke
 - `workspace/hooks/session_file_redirect_hook.py` — перенаправление файлов в `data_store/cache/sessions/<key>/`.
 - `workspace/hooks/recent_files_hook.py` — автоприкрепление созданных файлов.
 - `workspace/tools/{history_search_tool,legal_summarizer_query,compact_context}.py` — generic tools.
-- `workspace/tools/example.py` — шаблон нового tool'а. (Tools `duckdb_query` / `vector_search` не существуют.)
+- `workspace/tools/history_search_tool.py` — образец нового tool'а. (Tools `duckdb_query` / `vector_search` не существуют.)
 
 При изменении `TARGET_ARCHITECTURE.md` или `skill-tool-architecture.md`
 синхронизировать этот документ.

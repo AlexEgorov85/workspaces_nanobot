@@ -9,11 +9,11 @@
   Redis). Required failing → ``NOT_READY``; optional failing → ``DEGRADED``;
   все зелёные → ``READY``.
 
-Не является HTTP-эндпойнтом (это можно добавить позже через streamlit /
+Не является HTTP-эндпойнтом (это можно добавить позже через web-UI /
 gateway admin-route). Используется:
 
   * ``ApplicationContext.start()`` — логирует итоговый readiness.
-  * streamlit-UI / gateway-admins — для отображения текущего состояния.
+  * web-UI / gateway-admins — для отображения текущего состояния.
   * аварийные скрипты / smoke-проверки после deploy.
 
 Состояния:

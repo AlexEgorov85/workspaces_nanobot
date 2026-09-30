@@ -40,7 +40,7 @@ def decode_json_list(val: Any) -> list:
       * ``list`` → возвращается как есть
       * любое другое → ``[]``
 
-    Эквивалент прежней ``streamlit_app._decode_media_list`` — единая точка
+    Эквивалент прежнего ``_decode_media_list`` в web-UI — единая точка
     для чтения JSONB-колонок-списков (например, ``media``).
     """
     if val is None:

@@ -149,13 +149,6 @@ def canonical_project_tools() -> list[ToolSpec]:
             description="вопрос-ответ по пакетам документов legal_summarizer",
             config_key=None,
         ),
-        ToolSpec(
-            name="ExampleTool",
-            module="example",
-            required=False,
-            description="шаблон с правильным паттерном (disabled by config — служебный)",
-            config_key=None,
-        ),
     ]
 
 

@@ -2,8 +2,8 @@
 
 Тонкий оркестратор: вся инициализация сервисов — в ``ApplicationContext``,
 каналы — в ``ChannelFactory``, lifecycle — в ``GatewayRunner``.
-Файл отвечает ТОЛЬКО за gateway-специфику: spawn Streamlit, preload
-FAISS-индексов, вывод Rich-баннера.
+Файл отвечает ТОЛЬКО за gateway-специфику: preload FAISS-индексов,
+вывод Rich-баннера.
 """
 
 from __future__ import annotations
@@ -169,7 +169,7 @@ def _entrypoint_main(args: argparse.Namespace, script_dir: Path, workspace_dir: 
         # Шага «опубликовать финальный снимок» больше нет: данные уже в
         # файле кэша, отдельной публикации не существует.
         # Останавливаем фоновые сервисы, которые создал ApplicationContext,
-        # но Streamlit/channels — отдельно (живут в shutdown(ctx))
+        # но channels — отдельно (живут в shutdown(ctx))
         ctx.stop()
 
 
@@ -187,7 +187,7 @@ def _project_version() -> str:
 
 
 async def _run(ctx) -> None:
-    """Основной рабочий цикл gateway: каналы + Streamlit + агент."""
+    """Основной рабочий цикл gateway: каналы + агент."""
     from lib.services.channel_factory import ChannelFactory
 
     channel_factory = ChannelFactory(
@@ -200,12 +200,6 @@ async def _run(ctx) -> None:
     )
     for msg in messages:
         console.print(msg)
-
-    from lib.services.subprocess_manager import SubprocessManager
-    subprocess_manager = SubprocessManager(log_dir=script_dir_for_runtime() / "logs")
-    streamlit_script = script_dir_for_runtime() / "streamlit_app.py"
-    if _streamlit_enabled() and subprocess_manager.spawn_streamlit(streamlit_script):
-        console.print("[green]✓[/green] Streamlit UI started on :8501")
 
     cache_store = ctx.cache_store
     if cache_store is not None:
@@ -269,8 +263,6 @@ async def _run(ctx) -> None:
         channels_task.cancel()
         with __import__("contextlib").suppress(asyncio.CancelledError):
             await channels_task
-
-        subprocess_manager.terminate_all()
 
         await ctx.agent.aclose()
         ctx.agent.stop()
@@ -339,22 +331,6 @@ def _gateway_print_worker_activity() -> bool:
     return bool(value)
 
 
-def _streamlit_enabled() -> bool:
-    """Прочитать флаг включения Streamlit UI.
-
-    Читает ``streamlit.enabled`` из `project.json` (секция streamlit).
-    ``false`` — gateway не поднимает веб-чат на :8501; ``true`` (по умолчанию)
-    — поднимает.
-    """
-    try:
-        from lib.services.config_service import ConfigService
-
-        value = ConfigService().settings_section("streamlit").get("enabled", True)
-    except Exception:
-        return True
-    return bool(value)
-
-
 def _report_db_pool_startup() -> None:
     """Прогреть пул соединений БД и вывести отчёт о его воркерах.
 
@@ -401,7 +377,7 @@ def _check_websocket_port_available(ctx) -> None:
     остаётся занятым процессом, который не успел закрыть сокет. Без
     этой проверки gateway падает с криптическим ``OSError: [Errno 10048]``
     в недрах ``asyncio.create_server`` уже после прохождения половины
-    стартапа (включая Streamlit и Postgres-канал).
+    стартапа (включая Postgres-канал).
 
     Хост/порт — upstream default из
     ``nanobot.channels.websocket.runtime.WebSocketConfig`` (см.
@@ -412,7 +388,7 @@ def _check_websocket_port_available(ctx) -> None:
     При занятости — печатает понятную диагностику (PID процесса-владельца
     и подсказку про ``taskkill``/Ctrl+C) и завершает процесс с кодом 1
     ДО запуска ``run_forever()``. Это предотвращает частичный старт
-    (Streamlit, синхронизация DuckDB) с последующим падением.
+    (прогрев кэша DuckDB) с последующим падением.
     """
     import socket
 

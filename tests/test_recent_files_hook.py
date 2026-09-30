@@ -279,7 +279,7 @@ def test_patcher_replaces_stale_redirected_path(tmp_path):
     assert ok
 
     msg = MagicMock()
-    msg.metadata = {"session_key": "postgres_streamlit"}
+    msg.metadata = {"session_key": "postgres_chat42"}
     result = agent._assemble_outbound(msg, "x", "stop", False)
 
     assert result.media == [str(real)], (

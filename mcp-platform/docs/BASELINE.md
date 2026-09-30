@@ -99,6 +99,38 @@ worker-пула (`NANOBOT_INTEGRATION=1` / `NANOBOT_LIVE_E2E=1`), которые
 `F401`), ни одной новой; `config.py` загружается, три удалённых ключа
 в `channels.postgres` отсутствуют.
 
+## Дельта фазы 1.5–1.7 — бенчмарки, Streamlit, шаблон tool'а
+
+Корневой прогон: **`4 failed, 3664 passed, 31 skipped, 1 xpassed` за 171 с**
+(без `tests/test_legal_summarizer_running_subprocess.py` — см. ниже).
+Падения — те же четыре предсуществующих, ни одного нового.
+
+| | После 1.1–1.4 | После 1.5–1.7 | Дельта |
+|---|---|---|---|
+| Сбор тестов | 4 035 | 3 605 в `tests/` | −430 |
+| passed | 3 999 | 3 664 | −335 |
+
+Что ушло: 8 файлов `tests/test_benchmarks_*.py`, `tests/test_streamlit_app.py`,
+`tests/test_subprocess_manager.py`; секция «D.3 Streamlit invocation tests» из
+`test_profile_lifecycle.py` (5 тестов), `TestStreamlitEnabled` из
+`test_gateway.py`, `test_example_tool_is_optional` из
+`test_runtime_inventory.py`, плюс −2 параметра у
+`test_dependency_direction`/`test_single_cache_interface`-style гардей из-за
+удалённых `lib/`, `workspace/` и `tools/` модулей.
+
+**Осторожно с полным прогоном.** `tests/test_legal_summarizer_running_subprocess.py`
+не только флакует, но и **подвешивает** прогон: родительский pytest ждёт
+дочерний процесс, который не завершается. В этом сеансе он дважды
+останавливал полный прогон. Обход при верификации:
+`--ignore=tests/test_legal_summarizer_running_subprocess.py`, а сам файл
+гнать изолированно (проходит). Это предсуществующий дефект, не регрессия
+миграции; `pytest-timeout` в проекте не установлен, поэтому страховки нет.
+
+**Ещё найдено, не исправлено:** `tools/generate_comments_sql.py` падает на
+чистом клоне — читает `workspace/skills/audit_analyzer/cache/schema.json`,
+а каталог `cache/` игнорится git. `sql/comments/apply_all_comments.sql`
+поэтому правился вручную.
+
 ## Baseline платформы
 
 ```bash

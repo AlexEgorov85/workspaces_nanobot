@@ -26,7 +26,7 @@
   * ``sys.executable`` + абсолютный путь к ``cli_query.py`` (через
     ``parents[3]`` от самого файла tool'а) — не зависит от cwd.
   * ``PYTHONUTF8=1`` и ``PYTHONIOENCODING=utf-8`` уже выставлены на
-    entry-points (``gateway.py``/``cli_agent.py``/``streamlit_app.py``),
+    entry-points (``gateway.py``/``cli_agent.py``),
     дочерний Python тоже в UTF-8 — кириллица в путях не ломается.
   * ``capture_output=True`` + ``text=True`` (cp1251-safe).
 

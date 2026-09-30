@@ -381,7 +381,7 @@ class TestCreate:
 class TestTableRegistryReset:
     """``ApplicationContext.create(role='gateway', )`` сбрасывает singleton
     ``table_registry`` в начале, чтобы при повторном создании context
-    в одном процессе (тесты, streamlit-reload) не утекали ресурсы
+    в одном процессе (например, в тестах) не утекали ресурсы
     от предыдущего context.
 
     Без фикса: после первой ``create()`` с skill "A" вторая ``create()``

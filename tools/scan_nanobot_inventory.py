@@ -1,8 +1,8 @@
 """Одноразовый сканер nanobot-зависимостей: строит JSON-инвентарь.
 
 Запуск: python tools/scan_nanobot_inventory.py [--out docs/architecture/nanobot-inventory.json]
-Сканирует lib/, workspace/, gateway.py, cli_agent.py, streamlit_app.py.
-Не трогает tests/, benchmarks/, .venv/.
+Сканирует lib/, workspace/, gateway.py, cli_agent.py.
+Не трогает tests/, .venv/.
 """
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SCAN_PATHS = ["lib", "workspace", "gateway.py", "cli_agent.py", "streamlit_app.py"]
-EXCLUDE = ("__pycache__", ".venv", "tests", "benchmarks", "data_store")
+SCAN_PATHS = ["lib", "workspace", "gateway.py", "cli_agent.py"]
+EXCLUDE = ("__pycache__", ".venv", "tests", "data_store")
 
 IMPORT_RE = re.compile(r"^\s*(?:from (nanobot[\w.]*) import ([^\n#]+)|import (nanobot[\w.]*))")
 GETATTR_PRIVATE_RE = re.compile(

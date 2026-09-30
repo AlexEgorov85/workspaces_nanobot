@@ -2,7 +2,7 @@
 
 - ``ApplicationContext.create(role='gateway', )`` применяет runtime patches ровно один раз
   (реальный вызов через ``full_fake_modules``, не мок);
-- CLI/gateway/streamlit entrypoint'ы НЕ повторно вызывают ``patch_*`` методы
+- CLI/gateway entrypoint'ы НЕ повторно вызывают ``patch_*`` методы
   ``RuntimePatcher`` после ``create()``.
 
 Спека: opencode change ``runtime-patcher-composition-cleanup``, Scenario
@@ -329,7 +329,7 @@ def test_patch_assemble_outbound_called_exactly_once_during_create(
     наблюдает за вызовами без изменения поведения. Тест доказывает:
       * ``patch_assemble_outbound`` вызывается ровно один раз;
       * это происходит ВНУТРИ ``ApplicationContext.create(role='gateway', )``;
-      * НЕ происходит вне ``create()`` (cli_agent/gateway/streamlit).
+      * НЕ происходит вне ``create()`` (cli_agent/gateway).
 
     Технический нюанс: ``patch.object`` с ``wraps`` для методов через
     ``Mock(wraps=...)`` некорректно работает на Python 3.14 (mock не

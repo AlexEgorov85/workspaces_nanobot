@@ -4,8 +4,8 @@
 
 * ``audit()`` — возвращает structured result (dict с hits). Сканирует
   **весь проект** (не только ``legal_summarizer``): ``lib/``, ``workspace/``,
-  ``tools/``, ``gateway.py``, ``streamlit_app.py``, ``cli_agent.py``,
-  ``tests/``, ``sql/``, ``benchmarks/``. Каталоги ``__pycache__``, ``.venv``,
+  ``tools/``, ``gateway.py``, ``cli_agent.py``,
+  ``tests/``, ``sql/``. Каталоги ``__pycache__``, ``.venv``,
   ``data_store``, ``.pytest_cache``, ``.ruff_cache``, ``.benchmarks``,
   ``node_modules`` исключены.
 * ``assert_no_legacy()`` — поднимает ``AssertionError`` при production hit,

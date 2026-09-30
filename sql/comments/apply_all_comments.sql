@@ -180,38 +180,3 @@ COMMENT ON COLUMN public.agent_gateway_logs."name" IS 'Сущность собы
 COMMENT ON COLUMN public.agent_gateway_logs."summary" IS 'Краткое текстовое описание события.';
 COMMENT ON COLUMN public.agent_gateway_logs."payload" IS 'JSONB: детальные данные события.';
 COMMENT ON COLUMN public.agent_gateway_logs."metadata" IS 'JSONB: дополнительные метаданные.';
-
--- ---- public.agent_benchmark_runs ----
-COMMENT ON TABLE public.agent_benchmark_runs IS 'Мета-информация о прогонах бенчмарков (один прогон = один набор тестов). Управляется benchmarks/db.py. Таблица агента (префикс agent_).';
-COMMENT ON COLUMN public.agent_benchmark_runs."id" IS 'PK прогона (UUID).';
-COMMENT ON COLUMN public.agent_benchmark_runs."suite_name" IS 'Имя тестового набора.';
-COMMENT ON COLUMN public.agent_benchmark_runs."suite_tags" IS 'JSONB: теги набора (smoke/full/regression).';
-COMMENT ON COLUMN public.agent_benchmark_runs."config" IS 'JSONB: конфигурация прогона.';
-COMMENT ON COLUMN public.agent_benchmark_runs."total_items" IS 'Всего вопросов в прогоне.';
-COMMENT ON COLUMN public.agent_benchmark_runs."passed_items" IS 'Сколько вопросов прошло.';
-COMMENT ON COLUMN public.agent_benchmark_runs."total_score" IS 'Сумма score по всем вопросам.';
-COMMENT ON COLUMN public.agent_benchmark_runs."avg_score" IS 'Средний score по вопросам.';
-COMMENT ON COLUMN public.agent_benchmark_runs."duration_sec" IS 'Длительность прогона, сек.';
-COMMENT ON COLUMN public.agent_benchmark_runs."started_at" IS 'Время начала.';
-COMMENT ON COLUMN public.agent_benchmark_runs."finished_at" IS 'Время завершения (NULL пока идёт).';
-
--- ---- public.agent_benchmark_results ----
-COMMENT ON TABLE public.agent_benchmark_results IS 'Результаты по каждому вопросу бенчмарка. Связаны с agent_benchmark_runs по run_id. Таблица агента (префикс agent_).';
-COMMENT ON COLUMN public.agent_benchmark_results."id" IS 'PK результата (UUID).';
-COMMENT ON COLUMN public.agent_benchmark_results."run_id" IS 'FK на agent_benchmark_runs.id.';
-COMMENT ON COLUMN public.agent_benchmark_results."item_id" IS 'ID тестового вопроса.';
-COMMENT ON COLUMN public.agent_benchmark_results."item_name" IS 'Человекочитаемое имя вопроса.';
-COMMENT ON COLUMN public.agent_benchmark_results."difficulty" IS 'Сложность (1-5 или шкала suite).';
-COMMENT ON COLUMN public.agent_benchmark_results."category" IS 'Категория (sql/reasoning/...).';
-COMMENT ON COLUMN public.agent_benchmark_results."item_type" IS 'single (один шаг) | multi_step.';
-COMMENT ON COLUMN public.agent_benchmark_results."passed" IS 'True, если ответ прошёл проверку.';
-COMMENT ON COLUMN public.agent_benchmark_results."score" IS 'Оценка 0.0–1.0 (от автотеста).';
-COMMENT ON COLUMN public.agent_benchmark_results."response" IS 'Ответ агента (text).';
-COMMENT ON COLUMN public.agent_benchmark_results."tools_used" IS 'JSONB: список вызванных инструментов.';
-COMMENT ON COLUMN public.agent_benchmark_results."skills_activated" IS 'JSONB: список активированных навыков.';
-COMMENT ON COLUMN public.agent_benchmark_results."total_iterations" IS 'Количество итераций агента.';
-COMMENT ON COLUMN public.agent_benchmark_results."duration_sec" IS 'Длительность ответа, сек.';
-COMMENT ON COLUMN public.agent_benchmark_results."error" IS 'Текст ошибки (если была).';
-COMMENT ON COLUMN public.agent_benchmark_results."llm_judge_score" IS 'Оценка LLM-judge (если использовался).';
-COMMENT ON COLUMN public.agent_benchmark_results."details" IS 'JSONB: произвольные детали прогона.';
-COMMENT ON COLUMN public.agent_benchmark_results."created_at" IS 'Время создания записи.';

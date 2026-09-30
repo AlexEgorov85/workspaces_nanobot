@@ -5,7 +5,7 @@
 навигационный хаб от деталей.
 
 > **TL;DR для диагноста:** логи — в stderr (loguru, `sys.stderr`); файловый
-> лог только у Streamlit — `logs/streamlit.log`; статистика пула —
+> статистика пула соединений —
 > `CacheLoadService.get_stats()`;
 > зависшие `processing`-задачи — их вернёт в пул фоновый `_unstick_loop`; для
 > разблокировки сразу см. `docs/ARCHITECTURE.md` § «Воркеры не берут задачи».
@@ -109,28 +109,28 @@ DuckDB `ATTACH ... READ_WRITE` берёт эксклюзивный `flock`, ко
 
 ## Бенчмарки и оценка
 
-### `match_type: llm_judge` не даёт 1.0 / «LLM judge returned no parseable JSON»
+Подсистема бенчмарков качества удалена в фазе 1 миграции
+`enterprise-mcp-platform`: пакет `benchmarks/` (runner, evaluator, scorer,
+loader, reporter, db, hooks, models), скрипты `tools/legal_benchmark.py`,
+`tools/legacy_audit.py`, `tools/test_audit.py`, таблицы
+`agent_benchmark_runs` / `agent_benchmark_results` и секция `benchmark.*`
+в `project.json`. Разделы этого файла про LLM-судью и загрузчик YAML- suites
+больше не применимы.
 
-LLM-судья реализован (`benchmarks/evaluator.py:_check_llm_judge()`): запрашивает
-у LLM JSON `{"score": 0.0|0.5|1.0, "reason": ...}` и нормализует на дискретную
-шкалу. Проверка считается пройденной при `score >= 0.5`. При любом сбое
-(нет конфига провайдера, сеть, невалидный JSON) балл — `0.0`, нейтральный
-`0.5` не подставляется. Проверьте `config.json:providers.llm.api_key`.
-
-### Файл `.yaml` в `benchmarks/items/` игнорируется
-
-Файлы, начинающиеся с `_` (например `_template.yaml`), пропускаются загрузчиком.
-Уберите `_` из имени.
+**Не путать** с каталогом `tests/benchmarks/` — он остался: это тесты
+quality-бенчмарков навыка `legal_summarizer` (проверка golden-датасета
+`required_facts` и наличие canonical-модулей скилла), а не тесты пакета
+`benchmarks/`.
 
 ---
 
-## Streamlit UI
+## Web-UI
 
-### `Streamlit` ждёт ответ бесконечно
-
-С v2.0.0 streamlit-цикл не имеет таймаута: на статусе `failed` он делает re-check
-5 минут, далее ждёт возврата в `processing` бесконечно. Это сделано умышленно
-(обход `st.rerun maxReruns`). Если поведение не устраивает — меняйте `streamlit_app.py`.
+Streamlit-UI удалён в фазе 1 миграции `enterprise-mcp-platform`
+(`streamlit_app.py`, `lib/services/subprocess_manager.py`, секция `streamlit.*`,
+связанные тесты). Диагностика зависшего UI теперь сводится к каналу:
+задача в `processing` дольше `processing_timeout` вернёт в пул `_unstick_loop`,
+см. `docs/ARCHITECTURE.md` § «Воркеры не берут задачи».
 
 ---
 

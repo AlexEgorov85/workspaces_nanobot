@@ -33,7 +33,6 @@ class TestValidateProjectSettings:
                 "compact": {"enabled": True, "notify_in_history": True},
             },
             "cli": {"show_context_window": True, "max_iterations": 200},
-            "streamlit": {"enabled": False, "error_window_sec": 600},
         }
         result = validate_project_settings(settings)
         assert result.version == "2.5.0"

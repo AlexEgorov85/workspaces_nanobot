@@ -91,7 +91,7 @@ class PostgresChannel(BaseChannel):
         3. ``_handle_message`` отправляет в шину → агенту
         4. Агент формирует ответ → ``send()`` пишет status='completed'
            и удаляет claim
-        5. Web-сервер (Streamlit) видит completed и показывает ответ
+        5. Web-сервер видит completed и показывает ответ
 
     Рассуждения агента (reasoning) пишутся в real-time через
     ``send_reasoning_delta`` → буферизируются → ``_flush_reasoning``
@@ -188,7 +188,7 @@ class PostgresChannel(BaseChannel):
 
         # ---- единое хранилище файлов сессии ----
         # Канал делит SessionFileStore со всем приложением. Это та же
-        # инстанция, через которую tools/streamlit/другие каналы кладут
+        # инстанция, через которую tools/другие каналы кладут
         # файлы в ``cache/sessions/{session_key}/attachments/`` и
         # ``cache/sessions/{session_key}/results/``.
         injected_store = _get("_file_store")
@@ -508,7 +508,7 @@ class PostgresChannel(BaseChannel):
 
         Каждые ``_flush_interval`` секунд читает блок ``context_window`` из
         моста per-iteration usage (``lib.hooks.database_logging_hook``) и
-        пишет его в metadata processing assistant-строки. UI (Streamlit)
+        пишет его в metadata processing assistant-строки. UI
         через свой поллинг видит его ДО финализации ответа — прогресс-бар
         заполняется «вживую» по мере роста промпта.
 
@@ -984,7 +984,7 @@ class PostgresChannel(BaseChannel):
         media_paths, _ = self._resolve_media_paths_and_hints(media)
         media = media_paths
 
-        # Создаём assistant-placeholder, чтобы Streamlit мог начать опрос.
+        # Создаём assistant-placeholder, чтобы web-сервер мог начать опрос.
         try:
             assistant_msg_id = await self._insert_assistant_message(user_msg_id, chat_id)
             self._lifecycle_log(
@@ -1034,7 +1034,7 @@ class PostgresChannel(BaseChannel):
     async def _insert_assistant_message(self, user_msg_id: str, chat_id: str) -> str:
         """Создать assistant-заглушку (status='processing') и сохранить её id.
 
-        Зачем: чтобы web-сервер (Streamlit) мог начать опрашивать ответ
+        Зачем: чтобы web-сервер мог начать опрашивать ответ
         ДО того, как агент закончит генерацию. Как только агент завершит,
         ``send()`` обновит эту запись: content + status='completed'.
 

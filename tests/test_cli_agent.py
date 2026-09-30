@@ -97,7 +97,7 @@ def _setup_fake_modules():
     settings.cli = {"log_level": "WARNING"}
     settings.providers = MagicMock()
     cfg.SETTINGS = settings
-    # После Phase B cli_agent/gateway/streamlit_app делают
+    # После Phase B cli_agent/gateway делают
     # ``from config import ConfigurationError`` на module-level.
     # Подменённый модуль ``config`` должен предоставлять этот символ,
     # иначе import падает до входа в module body.

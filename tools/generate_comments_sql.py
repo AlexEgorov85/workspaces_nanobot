@@ -153,7 +153,7 @@ session = {
         },
     ),
     "public.agent_conversation_messages": (
-        "Таблица обмена сообщениями канала PostgresChannel / Web-чата (Streamlit). "
+        "Таблица обмена сообщениями канала PostgresChannel и web-чата. "
         "Агент опрашивает входящие (status=pending), отвечает и пишет ответ обратно "
         "в эту же таблицу. Единотабличная схема (роль в role, рассуждения в metadata.reasoning). "
         "Таблица агента (префикс agent_).",
@@ -222,52 +222,6 @@ logs = {
     ),
 }
 
-# 8. benchmark
-benchmark = {
-    "public.agent_benchmark_runs": (
-        "Мета-информация о прогонах бенчмарков (один прогон = один набор тестов). "
-        "Управляется benchmarks/db.py. Таблица агента (префикс agent_).",
-        {
-            "id": "PK прогона (UUID).",
-            "suite_name": "Имя тестового набора.",
-            "suite_tags": "JSONB: теги набора (smoke/full/regression).",
-            "config": "JSONB: конфигурация прогона.",
-            "total_items": "Всего вопросов в прогоне.",
-            "passed_items": "Сколько вопросов прошло.",
-            "total_score": "Сумма score по всем вопросам.",
-            "avg_score": "Средний score по вопросам.",
-            "duration_sec": "Длительность прогона, сек.",
-            "started_at": "Время начала.",
-            "finished_at": "Время завершения (NULL пока идёт).",
-        },
-    ),
-    "public.agent_benchmark_results": (
-        "Результаты по каждому вопросу бенчмарка. Связаны с agent_benchmark_runs по run_id. "
-        "Таблица агента (префикс agent_).",
-        {
-            "id": "PK результата (UUID).",
-            "run_id": "FK на agent_benchmark_runs.id.",
-            "item_id": "ID тестового вопроса.",
-            "item_name": "Человекочитаемое имя вопроса.",
-            "difficulty": "Сложность (1-5 или шкала suite).",
-            "category": "Категория (sql/reasoning/...).",
-            "item_type": "single (один шаг) | multi_step.",
-            "passed": "True, если ответ прошёл проверку.",
-            "score": "Оценка 0.0–1.0 (от автотеста).",
-            "response": "Ответ агента (text).",
-            "tools_used": "JSONB: список вызванных инструментов.",
-            "skills_activated": "JSONB: список активированных навыков.",
-            "total_iterations": "Количество итераций агента.",
-            "duration_sec": "Длительность ответа, сек.",
-            "error": "Текст ошибки (если была).",
-            "llm_judge_score": "Оценка LLM-judge (если использовался).",
-            "details": "JSONB: произвольные детали прогона.",
-            "created_at": "Время создания записи.",
-        },
-    ),
-}
-
-
 # Сборка
 out_path = Path(r"sql/comments/apply_all_comments.sql")
 out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -282,10 +236,10 @@ lines.append("-- ===============================================================
 lines.append("")
 
 for full, (comment, columns) in {**audit_tables, **predefined_scripts, **audit_vectors,
-                                   **vector_index_config, **session, **logs, **benchmark}.items():
+                                   **vector_index_config, **session, **logs}.items():
     lines.append("")
     lines.append(f"-- ---- {full} ----")
     lines.extend(render_table(full, full, comment, columns))
 
 out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-print(f"Written: {out_path} ({len(lines)} lines, {len(audit_tables) + len(predefined_scripts) + len(audit_vectors) + len(vector_index_config) + len(session) + len(logs) + len(benchmark)} tables)")
+print(f"Written: {out_path} ({len(lines)} lines, {len(audit_tables) + len(predefined_scripts) + len(audit_vectors) + len(vector_index_config) + len(session) + len(logs)} tables)")
