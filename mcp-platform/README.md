@@ -36,6 +36,7 @@ mcp-platform/
 ├── requirements.txt          # только enterprise-стек, без nanobot
 ├── docs/
 │   ├── BASELINE.md           # точка отсчёта миграции (фаза 0)
+│   ├── MCP-CONTRACTS.md      # контракты операций: что делает, что возвращает, когда падает
 │   ├── MIGRATION.md          # что куда переносится и в каком порядке
 │   └── TARGET-ARCHITECTURE.md
 ├── libs/

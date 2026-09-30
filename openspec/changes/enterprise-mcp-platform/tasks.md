@@ -84,15 +84,22 @@
 - [ ] 2.9 Перенести `tests/test_utils_db.py` и `tests/test_sql_safety.py`
 - [ ] 2.10 `capabilities/data/`: `service/` (логика, тестируется без MCP) +
       `tools/*.py` (по файлу на операцию)
-- [ ] 2.11 Операции: `query_sql` (read-only, AST-валидация, `statement_timeout`
-      на стороне сервера), `log_event`,
+- [ ] 2.11 Операции: `query_sql` (read-only, AST-валидация), `log_event`,
       `history_search` (изоляция по `user_id`/`session_id` как часть контракта),
       `upsert_records`, `schema_check`
-- [ ] 2.12 Перенаправить потребителей на `enterprise-mcp`:
+- [ ] 2.12 **Обязать серверный предел стоимости запроса.** `statement_timeout` в
+      коде нет: `psycopg2.connect` не передаёт `options=`, а `autocommit=True`
+      делает `SET LOCAL statement_timeout` нооп. Внести либо на соединении в
+      момент коннекта, либо в замыкании задания с явным сбросом. Внести
+      `max_rows` на сервере, а не в SQL модели
+- [ ] 2.13 **Запретить старт без `sqlglot`.** Без AST-ветки guard проверяет
+      только первый блокируемый оператор, `INTO` и multi-statement, и пропускает
+      `pg_sleep`, `information_schema` и `UPDATE`/`DELETE` после `--`-комментария
+- [ ] 2.14 Перенаправить потребителей на `enterprise-mcp`:
       `history_search_tool.py` (оставить ~30-строчный адаптер),
       `db_logging_service.py`, `benchmarks` (уже удалён), `streamlit` (уже удалён),
       `schema_validation.py` (остаётся в агенте, `fetch` внедряется)
-- [ ] 2.13 Архитектурный тест: `mcp-platform` не импортирует `nanobot`, `lib`, `workspace`
+- [ ] 2.15 Архитектурный тест: `mcp-platform` не импортирует `nanobot`, `lib`, `workspace`
 
 **Приёмка:** `cd mcp-platform && pytest` — зелёные. Сервер поднимается в
 подпроцессе с заблокированным `import nanobot`. `capabilities/data/` не
@@ -133,7 +140,8 @@
       в `lib/` не осталось потребителей
 
 **Приёмка:** `vector_search` возвращает те же результаты, что до шага 4.
-Capability `vectors` **не имеет** зависимости от модели эмбеддингов.
+Зависимость вектора запроса есть служебная зависимость на сервис
+эмбеддингов — это зависимая должна быть названа явно в контракте.
 Сервер отвечает на `query_sql` сразу после старта, не дожидаясь сборки индекса.
 В агенте не осталось ни строки LLM-клиента.
 
