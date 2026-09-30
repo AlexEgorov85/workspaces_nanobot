@@ -7,6 +7,14 @@
 
 mcp>=1.27
 
+# --- владение данными (libs/enterprise_data) ---
+psycopg2-binary==2.9.12
+# Обязателен, а не опционален: без AST-ветки guard проверяет только первый
+# блокируемый оператор, INTO и multi-statement, и пропускает pg_sleep,
+# information_schema и UPDATE/DELETE после -- комментария. Сервер не
+# поднимается без него.
+sqlglot==30.17.0
+
 # --- dev ---
 pytest>=8
 pytest-asyncio>=0.24

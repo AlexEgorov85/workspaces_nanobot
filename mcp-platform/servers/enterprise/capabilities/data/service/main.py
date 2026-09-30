@@ -1,0 +1,393 @@
+"""Capability ``data`` — владелец доступа к PostgreSQL.
+
+Сервис владеет пулом. Операции к нему не создают соединений и не импортируют
+``psycopg2``: единственное место, где есть ``psycopg2``, — ``libs/enterprise_data``.
+
+**Два входа (2.12).** ``submit`` — блокирующий, для работы с данными.
+``accept`` — неблокирующий, буфер писателя журнала. Одна очередь означала бы,
+что запрос модели конкурирует с записью журнала за воркеры пула; потеря события
+безвозвратна и не сопровождается ошибкой, поэтому у них разные входы.
+
+**Серверный предел стоимости (2.13).** ``statement_timeout`` выставляется на
+сессии в момент выполнения задания и сбрасывается в ``finally``. Пул работает
+с ``autocommit=True``, поэтому ``SET LOCAL`` здесь — нооп, и «надёжная» версия
+на ``connect options`` потребовала бы изменения владельца пула.
+
+Профиль вызывающей стороны, к которой относится операция, передан
+параметром ``audience`` и не выводится по умолчанию: логирование не должно
+писать в журнал входа в журнал.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass
+from types import ModuleType
+from typing import Any
+
+from libs.enterprise_common.errors import InfrastructureError, InvalidRequestError
+from libs.enterprise_data.jsonb import decode_jsonb
+from servers.enterprise.capabilities.data.service.writer import EventBuffer
+
+logger = logging.getLogger(__name__)
+
+#: Профили вызывающих. ``model`` — то, что видит агент; ``runtime`` — внутренние
+#: потоки процесса (очередь задач, канал). Права операций различаются по
+#: профилю, а не по имени вызывающего: иначе право на очередь появится у модели.
+AUDIENCE_MODEL = "model"
+AUDIENCE_RUNTIME = "runtime"
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    """Одна строка журнала в доменном виде."""
+
+    id: str
+    timestamp: Any
+    event_type: str
+    name: str
+    level: str
+    summary: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SearchPage:
+    """Страница результатов с признаком наличия следующей."""
+
+    hits: tuple[SearchHit, ...]
+    next_offset: int | None
+    truncated: bool = False
+
+
+class DataService:
+    """Доступ к данным инфраструктуры и очереди задач."""
+
+    def __init__(
+        self,
+        *,
+        db: ModuleType | None = None,
+        log_table: tuple[str, str] = ("public", "agent_gateway_logs"),
+        expected_tables: tuple[str, ...] = (),
+        statement_timeout_ms: int = 30_000,
+        max_rows: int = 1000,
+        buffer_maxlen: int = 2048,
+        buffer_flush_interval: float = 5.0,
+    ) -> None:
+        self._db = db
+        self._log_schema, self._log_table = log_table
+        self._expected_tables = tuple(expected_tables)
+        self._statement_timeout_ms = int(statement_timeout_ms)
+        self._max_rows = int(max_rows)
+        self._buffer = EventBuffer(
+            self._write_events,
+            maxlen=buffer_maxlen,
+            flush_interval=buffer_flush_interval,
+        )
+
+    # -- доступ к пулу ------------------------------------------------------
+
+    def _pool(self) -> ModuleType:
+        if self._db is None:
+            from libs.enterprise_data import db as real_db
+
+            return real_db
+        return self._db
+
+    def submit(self, job: Any, *, audience: str = AUDIENCE_RUNTIME) -> Any:
+        """Блокирующий вход: выполнить задание на воркере пула.
+
+        Только работа с данными. Всё, что можно потерять, идёт через ``accept``.
+        """
+        pool = self._pool()
+        try:
+            return pool.run(lambda conn: self._guarded(conn, job))
+        except InfrastructureError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - наружу уходит доменная ошибка
+            raise InfrastructureError(f"задание в пуле не выполнено: {exc}") from exc
+
+    def accept(self, event: dict[str, Any]) -> str | None:
+        """Неблокирующий вход: событие в буфер журнала.
+
+        Возвращает ``None`` либо маркер отброшенного события. Исключений не
+        бросает: потеря события не должна останавливать ход.
+        """
+        return self._buffer.accept(event)
+
+    def _guarded(self, conn: Any, job: Any) -> Any:
+        """Выставить предел стоимости, выполнить, сбросить предел."""
+        with conn.cursor() as cur:
+            cur.execute(f"SET statement_timeout = {self._statement_timeout_ms}")
+        try:
+            return job(conn)
+        finally:
+            with conn.cursor() as cur:
+                cur.execute("SET statement_timeout = 0")
+
+    def start(self) -> None:
+        self._buffer.start()
+
+    def stop(self) -> None:
+        self._buffer.stop()
+
+    def stats(self) -> dict[str, Any]:
+        return {"event_buffer": self._buffer.stats(), "max_rows": self._max_rows}
+
+    # -- запись журнала -----------------------------------------------------
+
+    def _write_events(self, events: list[dict[str, Any]]) -> None:
+        pool = self._pool()
+        schema, table = self._log_schema, self._log_table
+        sql = (
+            f'INSERT INTO "{schema}"."{table}" '
+            '(id, "timestamp", event_type, name, level, summary, payload, session_id, user_id) '
+            "VALUES (%s, now(), %s, %s, %s, %s, %s, %s, %s)"
+        )
+        rows = [
+            (
+                event.get("id") or None,
+                event.get("event_type", ""),
+                event.get("name", ""),
+                event.get("level", "info"),
+                event.get("summary", ""),
+                json.dumps(event.get("payload") or {}),
+                event.get("session_id"),
+                event.get("user_id"),
+            )
+            for event in events
+        ]
+        if not rows:
+            return
+        pool.execute(sql, rows)  # type: ignore[attr-defined]
+
+    def log_event(
+        self,
+        event_type: str,
+        name: str = "",
+        level: str = "info",
+        summary: str = "",
+        payload: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        *,
+        audience: str = AUDIENCE_MODEL,
+    ) -> str:
+        """Записать событие журнала. Неблокирующий вход.
+
+        Возвращает ``"accepted"`` либо ``"dropped"``: агент должен видеть
+        переполнение, иначе он решит, что событие записано.
+        """
+        if not event_type.strip():
+            raise InvalidRequestError("event_type не должен быть пустым")
+        result = self.accept(
+            {
+                "event_type": event_type,
+                "name": name,
+                "level": level,
+                "summary": summary,
+                "payload": payload or {},
+                "session_id": session_id,
+                "user_id": user_id,
+            }
+        )
+        return "dropped" if result is not None else "accepted"
+
+    # -- чтение журнала -----------------------------------------------------
+
+    def history_search(
+        self,
+        query: str = "",
+        event_type: str | None = None,
+        level: str | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        since: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        *,
+        audience: str = AUDIENCE_MODEL,
+    ) -> SearchPage:
+        """Поиск по журналу в пределах области видимости.
+
+        Изоляция — часть контракта, а не рекомендация: поиск без ``user_id`` и
+        без ``session_id`` отклоняется. В журнале лежат вопросы пользователей
+        и внутренние события, и «покажи всё» — это утечка, а не удобство.
+        """
+        if not user_id and not session_id:
+            raise InvalidRequestError(
+                "нужен user_id или session_id: поиск по журналу без области видимости запрещён"
+            )
+        limit = max(1, min(int(limit), self._max_rows))
+        offset = max(0, int(offset))
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if user_id:
+            clauses.append("user_id = %s")
+            params.append(user_id)
+        if session_id:
+            clauses.append("session_id = %s")
+            params.append(session_id)
+        if event_type:
+            clauses.append("event_type = %s")
+            params.append(event_type)
+        if level:
+            clauses.append("level = %s")
+            params.append(level)
+        if since:
+            clauses.append('"timestamp" >= %s')
+            params.append(since)
+        if query.strip():
+            clauses.append("(summary ILIKE %s OR payload::text ILIKE %s)")
+            needle = f"%{query.strip()}%"
+            params.extend([needle, needle])
+
+        schema, table = self._log_schema, self._log_table
+        # ``LIMIT N+1`` — лишняя строка детектирует наличие следующей страницы
+        # одним запросом, без отдельного счётчика.
+        sql = (
+            f'SELECT id, "timestamp", event_type, name, level, summary, payload '
+            f'FROM "{schema}"."{table}" '
+            f"WHERE {' AND '.join(clauses)} "
+            'ORDER BY "timestamp" DESC, id DESC '
+            "LIMIT %s OFFSET %s"
+        )
+        params.extend([limit + 1, offset])
+
+        rows = self.submit(lambda conn: _fetch(conn, sql, params), audience=audience)
+        has_more = len(rows) > limit
+        visible = rows[:limit]
+        hits = tuple(
+            SearchHit(
+                id=str(row[0]),
+                timestamp=row[1],
+                event_type=row[2] or "",
+                name=row[3] or "",
+                level=row[4] or "",
+                summary=row[5] or "",
+                payload=decode_jsonb(row[6]) if row[6] is not None else {},
+            )
+            for row in visible
+        )
+        return SearchPage(
+            hits=hits,
+            next_offset=offset + limit if has_more else None,
+            truncated=len(visible) >= self._max_rows,
+        )
+
+    # -- проверка схемы -----------------------------------------------------
+
+    def schema_check(
+        self,
+        expected: tuple[str, ...] | None = None,
+        *,
+        audience: str = AUDIENCE_MODEL,
+    ) -> dict[str, Any]:
+        """Проверить наличие обязательных таблиц.
+
+        Один запрос к ``information_schema`` вместо попытки открыть каждую
+        таблицу: отсутствие таблицы должно отличаться от ошибки соединения, и
+        различать их дешевле по одному списку, чем по N неудачным попыткам.
+        """
+        wanted = tuple(expected or self._expected_tables)
+        if not wanted:
+            raise InvalidRequestError("не задано ни одной ожидаемой таблицы")
+        sql = (
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            "WHERE (table_schema || '.' || table_name) = ANY(%s)"
+        )
+        rows = self.submit(lambda conn: _fetch(conn, sql, [list(wanted)]), audience=audience)
+        found = {f"{row[0]}.{row[1]}" for row in rows}
+        missing = sorted(name for name in wanted if name not in found)
+        return {
+            "expected": len(wanted),
+            "found": len(found),
+            "missing": missing,
+            "ok": not missing,
+        }
+
+    # -- очередь задач ------------------------------------------------------
+    #
+    # Эти операции обслуживают канал агента, а не модель. Право на них есть
+    # только у профиля ``runtime``: модель, захватившая задачу, увела бы её
+    # у живого воркера.
+
+    def _require_runtime(self, audience: str, operation: str) -> None:
+        if audience != AUDIENCE_RUNTIME:
+            raise InvalidRequestError(
+                f"{operation} доступна только рантайму агента, профиль вызова: {audience}"
+            )
+
+    def claim_task(
+        self,
+        task_table: str,
+        worker_id: str,
+        *,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> dict[str, Any] | None:
+        """Атомарно захватить одну задачу. ``None`` — очередь пуста.
+
+        Единственный ``UPDATE ... RETURNING`` с внешним фильтром по статусу:
+        повторный захват невозможен, а гонки между воркерами не возникает,
+        потому что переход статуса выполняется самой СУБД.
+        """
+        self._require_runtime(audience, "claim_task")
+        sql = (
+            f"UPDATE {task_table} SET status = 'processing', claimed_at = now(), worker_id = %s "
+            "WHERE id = ("
+            f"  SELECT id FROM {task_table} WHERE status = 'pending' "
+            "  ORDER BY id FOR UPDATE LIMIT 1"
+            ") AND status = 'pending' RETURNING id, payload, session_id, created_at"
+        )
+
+        def job(conn: Any) -> dict[str, Any] | None:
+            with conn.cursor() as cur:
+                cur.execute(sql, (worker_id,))
+                row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "id": str(row[0]),
+                "payload": decode_jsonb(row[1]) if row[1] is not None else {},
+                "session_id": row[2],
+                "created_at": row[3],
+            }
+
+        return self.submit(job, audience=audience)
+
+    def update_task_status(
+        self,
+        task_table: str,
+        task_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        retry_after_sec: int | None = None,
+        audience: str = AUDIENCE_RUNTIME,
+    ) -> bool:
+        """Вернуть задачу в нужный статус. ``False`` — такой задачи нет."""
+        self._require_runtime(audience, "update_task_status")
+        allowed = {"pending", "processing", "done", "error", "failed"}
+        if status not in allowed:
+            raise InvalidRequestError(f"недопустимый статус: {status!r}, допустимы {sorted(allowed)}")
+        sql = (
+            f"UPDATE {task_table} SET status = %s, error = %s"
+            + (" , available_at = now() + (%s || ' seconds')::interval" if retry_after_sec else "")
+            + " WHERE id = %s RETURNING id"
+        )
+        params: list[Any] = [status, error]
+        if retry_after_sec:
+            params.append(str(int(retry_after_sec)))
+        params.append(task_id)
+        rows = self.submit(lambda conn: _fetch(conn, sql, params), audience=audience)
+        return bool(rows)
+
+
+def _fetch(conn: Any, sql: str, params: list[Any]) -> list[tuple[Any, ...]]:
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        if cur.description is None:
+            return []
+        return list(cur.fetchall())

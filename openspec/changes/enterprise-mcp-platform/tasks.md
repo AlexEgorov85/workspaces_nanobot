@@ -174,43 +174,57 @@
 > Сервер один (`enterprise-mcp`), поэтому всё дальнейшее — это добавление
 > каталогов в `capabilities/`, а не новые процессы.
 
-- [ ] 2.1 `libs/enterprise_common`: `ToolDefinition` (name, description, handler,
+- [x] 2.1 `libs/enterprise_common`: `ToolDefinition` (name, description, handler,
       category, version, enabled, tags, permissions) и `ToolRegistry`
-- [ ] 2.2 Загрузчик: рекурсивный обход `capabilities/*/tools/*.py` →
+- [x] 2.2 Загрузчик: рекурсивный обход `capabilities/*/tools/*.py` →
       `create_tool(container)` → discovery, импорт, вызов точки входа,
       регистрация
-- [ ] 2.3 Валидация при загрузке: импорт, наличие `create_tool`, тип
+- [x] 2.3 Валидация при загрузке: импорт, наличие `create_tool`, тип
       `ToolDefinition`, непустые `name`/`description`, уникальность `name`,
       callable `handler`, валидная схема аргументов
-- [ ] 2.4 **Fail-fast:** ошибка одного файла валит старт сервера целиком, с
+- [x] 2.4 **Fail-fast:** ошибка одного файла валит старт сервера целиком, с
       путём до файла и `name`. Тест на каждый пункт валидации
-- [ ] 2.5 `servers/enterprise/server.py` — bootstrap реестра без единого
+- [x] 2.5 `servers/enterprise/server.py` — bootstrap реестра без единого
       `@mcp.tool()`; переписать `servers/_template` под этот вид
-- [ ] 2.6 Перенести `workspace/utils/db.py` → `mcp-platform/libs/enterprise_data/db.py`
-- [ ] 2.7 Перенести `lib/utils/sql_safety.py` → `mcp-platform/libs/enterprise_data/sql_safety.py`
-- [ ] 2.8 Перенести `workspace/utils/jsonb.py` и `clean_text.py`
-- [ ] 2.9 Перенести `tests/test_utils_db.py` и `tests/test_sql_safety.py`
-- [ ] 2.10 `capabilities/data/`: `service/` (логика, тестируется без MCP) +
+- [x] 2.6 Перенести `workspace/utils/db.py` → `mcp-platform/libs/enterprise_data/db.py`.
+      **Отклонение:** пункт сформулирован как «перенос», фактически это копия.
+      Пул нужен обеим сторонам: канал агента уходит в MCP (2.18), но
+      `pg_session_manager`, `session_cold_sync_service` и `context_compaction`
+      по плану остаются в агенте и пишут в PostgreSQL напрямую. Удаление
+      агентской копии — вместе с маршрутизацией этих трёх, отдельным пунктом.
+      В платформенной копии `resolve_dsn()` переписан: `config` агента —
+      запрещённый импорт, DSN приходит из `DATABASE_URL`/`PG_DSN`
+- [x] 2.7 Перенести `lib/utils/sql_safety.py` → `mcp-platform/libs/enterprise_data/sql_safety.py`
+- [x] 2.8 Перенести `workspace/utils/jsonb.py` и `clean_text.py`
+- [x] 2.9 Перенести `tests/test_utils_db.py` и `tests/test_sql_safety.py`
+- [x] 2.10 `capabilities/data/`: `service/` (логика, тестируется без MCP) +
       `tools/*.py` (по файлу на операцию)
-- [ ] 2.11 Операции capability `data` — **только инфраструктура**, без доступа к
+- [x] 2.11 Операции capability `data` — **только инфраструктура**, без доступа к
       данным модели: `log_event`, `history_search` (изоляция по
       `user_id`/`session_id` как часть контракта), `schema_check`. Операции
       `query_sql` и `upsert_records` **не создаются**: произвольного SQL на
       поверхности агента не существует
-- [ ] 2.12 **Два входа в очередь.** Сервис владельца пула получает
+- [x] 2.18 **Операции очереди задач** (`claim_task`, `update_task_status`) —
+      решение владельца, сверх исходного списка 2.11. Канал агента обращается
+      к capability `data`, а та читает таблицу задач и возвращает готовый
+      формат. Право есть только у профиля `runtime`: модель, захватившая
+      задачу, увела бы её у живого воркера. Операции зарегистрированы в MCP, но
+      агент **не** включает их в список, отдаваемый модели, — фильтрация на
+      стороне агента, а не на сервере
+- [x] 2.12 **Два входа в очередь.** Сервис владельца пула получает
       `submit(job)` — блокирующий, для работы с данными, и `accept(event)` —
       неблокирующий, буфер писателя журнала. Одна очередь означает, что
       `generate_sql` с четырьмя вызовами LLM конкурирует с записью журнала за
       воркеры; потеря события безвозвратна и не сопровождается ошибкой
-- [ ] 2.13 **Обязать серверный предел стоимости запроса.** `statement_timeout` в
+- [x] 2.13 **Обязать серверный предел стоимости запроса.** `statement_timeout` в
       коде нет: `psycopg2.connect` не передаёт `options=`, а `autocommit=True`
       делает `SET LOCAL statement_timeout` нооп. Внести либо на соединении в
       момент коннекта, либо в замыкании задания с явным сбросом. Внести
       `max_rows` на сервере, а не в SQL модели
-- [ ] 2.14 **Запретить старт без `sqlglot`.** Без AST-ветки guard проверяет
+- [x] 2.14 **Запретить старт без `sqlglot`.** Без AST-ветки guard проверяет
       только первый блокируемый оператор, `INTO` и multi-statement, и пропускает
       `pg_sleep`, `information_schema` и `UPDATE`/`DELETE` после `--`-комментария
-- [ ] 2.15 **Архитектурный страж сервисов.** Проверка, которая валит сборку при
+- [x] 2.15 **Архитектурный страж сервисов.** Проверка, которая валит сборку при
       обходе: вне сервисов-владельцев нет `psycopg2.connect` / `*ConnectionPool` /
       `create_pool`, вне владельца индексов нет `faiss` и `IndexFlatIP`, вне
       `libs/llm` нет HTTP-вызовов провайдера. Сообщение называет файл и
@@ -218,15 +232,22 @@
       `tests/test_storage_hybridization.py::TestNoDirectSQLToSessionTables`
 - [ ] 2.16 Перенаправить потребителей на `enterprise-mcp`:
       `history_search_tool.py` (оставить ~30-строчный адаптер),
-      `db_logging_service.py`, `benchmarks` (уже удалён), `streamlit` (уже удалён),
-      `schema_validation.py` (остаётся в агенте, `fetch` внедряется)
-- [ ] 2.17 Архитектурный тест: `mcp-platform` не импортирует `nanobot`, `lib`, `workspace`
+      `db_logging_service.py`, `schema_validation.py` (остаётся в агенте,
+      `fetch` внедряется). **Не начат:** требует клиента MCP в агенте, то есть
+      транспортного слоя, которого в платформе ещё нет. Операции на стороне
+      capability `data` готовы (2.11), не хватает только адаптера
+- [x] 2.17 Архитектурный тест: `mcp-platform` не импортирует `nanobot`, `lib`, `workspace`
 
 **Приёмка:** `cd mcp-platform && pytest` — зелёные. Сервер поднимается в
 подпроцессе с заблокированным `import nanobot`. `capabilities/data/` не
 содержит `psycopg2.pool` / `ThreadedConnectionPool` (единый пул). Добавление
 файла в `capabilities/data/tools/` не требует правок `server.py`. Ни одна
 зарегистрированная операция не принимает SQL от вызывающей стороны.
+
+> **Приёмка неполная.** Пункт 2.16 открыт: канал, журнал и `history_search`
+> в агенте по-прежнему ходят в PostgreSQL напрямую. Capability `data` готова
+> принять их, но транспорта MCP-клиента в агенте нет. Маршрутизация канала —
+> первый шаг фазы 3.
 
 ---
 

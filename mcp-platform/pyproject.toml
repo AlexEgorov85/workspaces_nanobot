@@ -12,16 +12,39 @@ requires-python = ">=3.11"
 # Установка этого пакета не должна тянуть agent runtime.
 dependencies = [
     "mcp>=1.27",
+    # Владелец доступа к данным. psycopg2 существует ровно в одном пакете
+    # платформы — libs/enterprise_data.
+    "psycopg2-binary==2.9.12",
+    # Обязателен: без AST-ветки guard пропускает pg_sleep, information_schema
+    # и UPDATE/DELETE после -- комментария. Сервер не поднимается без него.
+    "sqlglot==30.17.0",
 ]
 
 [project.optional-dependencies]
-# Заполняется по мере переноса доменов (фаза 11 исходного плана).
-# audit-mcp:  duckdb, sqlglot, faiss-cpu, numpy, pyarrow, psycopg2-binary
-# document-mcp: python-docx, openpyxl, pypdf, pdfplumber, python-pptx, Pillow
+# Наполняется по мере переноса доменов.
+# capability vectors (фаза 3): faiss-cpu, numpy, duckdb, pyarrow
+# capability legal (фаза 8): python-docx, openpyxl, pypdf, pdfplumber, python-pptx, Pillow
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
 
 [tool.setuptools]
-packages = ["libs", "servers"]
+# Явный список, а не find_packages: лишний пакет в платформе должен попасть
+# сюда руками и быть замечен в diff'е, а не подхватиться молча.
+packages = [
+    "libs",
+    "libs.enterprise_common",
+    "libs.enterprise_data",
+    "servers",
+    "servers._template",
+    "servers._template.capabilities",
+    "servers._template.capabilities.template",
+    "servers._template.capabilities.template.service",
+    "servers._template.capabilities.template.tools",
+    "servers.enterprise",
+    "servers.enterprise.capabilities",
+    "servers.enterprise.capabilities.data",
+    "servers.enterprise.capabilities.data.service",
+    "servers.enterprise.capabilities.data.tools",
+]
 
 [tool.pytest.ini_options]
 # Изолированный прогон. Тесты платформы НЕ входят в тесты агента
