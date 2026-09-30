@@ -88,25 +88,58 @@ return result, {...}          # возвращается ИСХОДНЫЙ result
 
 ### Requirement: Каталог патчей RuntimePatcher
 
-Каталог из 12 патчей сокращается. Целевое состояние — **4–5 патчей**.
+Каталог из 12 патчей сокращается до **2 полностью необходимых и 2 частичных**.
+Доказательная база — `docs/architecture/nanobot-reuse-catalog.md`.
 
 | # | Патч | Решение |
 |---|---|---|
-| 10 | `turn_delivery_fail` | хуки `finalize_content` + `on_error` + `TurnCompleted` |
-| 2 | `save_turn` | хук `after_execute_tool` |
-| 6 | `assemble_outbound` | события: `_final_turn` → `TurnEndEvent`, `_tool_audit` и `media` → публикация из хука |
-| 7 | `async_save` | переносится в `PGSessionManager` |
-| 11 | `session_content_cleanup` | переносится в `PGSessionManager.save` |
-| 1 | `context_governor` | выгрузка в файл уходит в хук; остаётся только подстановка ссылки для встроенных tool'ов, и она исчезает вместе с переносом тяжёлых запросов в MCP |
-| 8 | `session_dir_watch` | удаляется |
+| 1 | `context_governor` | удалить: `workspace` и `max_tool_result_chars` уже прокинуты, upstream-функция работает |
+| 2 | `save_turn` | удалить: следствие (1) |
+| 7 | `async_save` | удалить: переносится в `PGSessionManager` |
+| 11 | `session_content_cleanup` | удалить: переносится в `PGSessionManager.save` |
+| 8 | `session_dir_watch` | удалить |
+| 10 | `turn_delivery_fail` | удалить: подкласс `TurnDeliveryFactory` через `AgentLoop(turn_delivery_factory=...)` |
+| 4 | `exec_timeout_cap` | удалить: `tools.exec.timeout` уже прокинут, остаток — подкласс `ExecTool` |
+| 5 | `tool_limits` | частично: 3 из 5 целей — подклассы `Tool`; 2 глобала `search.py` остаются |
+| 6 | `assemble_outbound` | частично: `_final_turn` → `TurnEndEvent`; `_tool_audit`/`media` — решение не принято |
+| 3 | `exec_limits` | остаётся: потолок в глобале модуля, схема заморожена `deepcopy` |
+| 9 | `subagent_logging` | остаётся: нет параметра хука у `SubagentManager`, `events` → `NO_EVENTS` |
 | 12 | `document_text_threshold` | уходит вместе с документами |
-| 9 | `subagent_logging` | остаётся: у `SubagentManager` нет фабрики хуков |
-| 3, 5 | `exec_limits`, `tool_limits` | остаются: конфигурации в 0.3.5 нет |
-| 4 | `exec_timeout_cap` | пересматривается: legal уезжает в MCP |
 
-`subagent_logging` — единственный случай, где блокер **структурный**, а не
-семантический: точка вставки отсутствует физически, а не потому, что хук
-слабее патча.
+#### Scenario: Конструкция TurnDelivery подменяется фабрикой
+
+- **WHEN** требуется изменить текст fallback-ответа
+- **THEN** реализация SHALL наследоваться от `TurnDeliveryFactory` и
+  инжектиться через публичный параметр `AgentLoop(turn_delivery_factory=...)`
+- **AND** оба entry point — gateway и CLI — SHALL передавать фабрику
+- **AND** `WebuiTurnRoutePolicy` SHALL быть сохранён
+- **AND** monkey-patch класса `TurnDelivery` SHALL NOT применяться
+
+### Requirement: Переиспользование проверяется до патча
+
+Перед добавлением monkey-patch'а SHALL проверяться
+`docs/architecture/nanobot-reuse-catalog.md`: возможно, требуемый механизм
+Nanobot уже поставляет и он просто не подключён. Патч, дублирующий
+работающую функцию Nanobot, SHALL считаться нарушением независимо от
+работоспособности.
+
+Каталог SHALL обновляться при каждом исследовании установленной версии.
+
+#### Scenario: Патч дублирует upstream
+
+- **WHEN** обнаружено, что целевой метод Nanobot уже выполняет требуемое
+  поведение при штатной конфигурации
+- **THEN** патч SHALL быть удалён
+- **AND** SHALL быть добавлена запись в каталог переиспользования с цепочкой
+  конфигурации, доказывающей, что механизм активен
+
+#### Scenario: Патч нужен, но есть подкласс
+
+- **WHEN** целевой атрибут читается как `self.<attr>`, а `ToolRegistry.register`
+  допускает перезапись по имени
+- **THEN** реализация SHALL предпочесть подкласс и прямую регистрацию
+- **AND** путь через entry-point плагины SHALL NOT использоваться: он
+  пропускает коллизию со встроенным именем
 
 #### Scenario: Fallback-ответ при ошибке хода
 

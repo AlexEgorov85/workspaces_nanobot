@@ -44,18 +44,29 @@ runtime patch'ом — это отдельный loader
 
 | # | Патч | Target (nanobot API) | Risk | Required | Категория | Условие удаления |
 |---|---|---|---|---|---|---|
-| 1 | `context_governor` | `ContextGovernor.normalize_tool_result` | MEDIUM | ✓ | ISOLATE+TESTS | хук выгружает результат в файл; остаётся только подстановка ссылки для встроенных tool'ов. Исчезает, когда тяжёлые запросы уйдут в MCP |
-| 2 | `save_turn` | `agent._save_turn` | HIGH | ✓ | KEEP | **хуки:** `after_execute_tool` вызывается раньше, чем upstream усечёт результат |
-| 3 | `exec_limits` | константы + schema tools | MEDIUM | — | REVIEW | upstream даст конфигурацию лимитов |
-| 4 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + schema | MEDIUM | — | KEEP | legal уезжает в MCP — LLM-вызов уходит из процесса агента |
-| 5 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | MEDIUM | — | REVIEW | upstream даст конфигурацию лимитов |
-| 6 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | KEEP | **события:** `_final_turn` → `TurnEndEvent`, `_tool_audit` и `media` → публикация через `turn_context.events` |
-| 7 | `async_save` | `agent.sessions.save` | MEDIUM | — | KEEP | **собственный класс:** `agent.sessions` — это `PGSessionManager`, патч не нужен |
-| 8 | `session_dir_watch` | `sessions.save` (диагностика) | LOW | — | KEEP (gated) | **удаляется** — гейт выключен по умолчанию, тестов нет |
-| 9 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | ✓ | KEEP | upstream даст фабрику хуков для subagent'ов (сейчас `_SubagentHook` конструируется жёстко) |
-| 10 | `turn_delivery_fail` | `TurnDelivery.fail` | MEDIUM | — | KEEP | **хуки:** `finalize_content` заменяет текст, `on_error` + `TurnCompleted` дают логирование |
-| 11 | `session_content_cleanup` | `Session.add_message` | LOW | — | KEEP | **собственный класс:** `PGSessionManager.save` — `clean_text.py` уже делает это для PostgreSQL |
-| 12 | `document_text_threshold` | `reference_non_image_attachments` | MEDIUM | — | KEEP | документы уезжают в `libs/document` |
+| 1 | `context_governor` | `ContextGovernor.normalize_tool_result` | MEDIUM | ✓ | **REMOVE** | **Уже не нужен.** `workspace` и `max_tool_result_chars` уже прокинуты: `AgentLoop` → `AgentRunSpec` → `ContextGovernanceConfig` → `maybe_persist_tool_result`. Патч переписывает работающую функцию |
+| 2 | `save_turn` | `agent._save_turn` | HIGH | ✓ | **REMOVE** | Следствие патча 1: результат персистится в момент возврата tool'а, усечение не теряет оригинал. Upstream санитайзит через `_sanitize_persisted_blocks` |
+| 3 | `exec_limits` | глобалы `exec_session.MAX_OUTPUT_CHARS` + import-frozen схема | MEDIUM | — | KEEP | upstream даст конфигурацию лимитов вывода. Подкласс не достаёт: потолок в глобале модуля, схема заморожена `deepcopy` в `base.py:336` |
+| 4 | `exec_timeout_cap` | `ExecTool._MAX_TIMEOUT` + схема | MEDIUM | — | **REMOVE** | `tools.exec.timeout` уже прокинут (`config_service.py:277`), `0` = без лимита. Остаток — подкласс `ExecTool`. Обоснование «legal 7–10 мин» отпадает с переездом legal в MCP |
+| 5 | `tool_limits` | `_MAX_CHARS`, `_DEFAULT_*`, `_MAX_FILE_BYTES` | MEDIUM | — | **PARTIAL** | 3 из 5 целей читаются как `self.<attr>` → подкласс `Tool` под тем же именем. `search._DEFAULT_HEAD_LIMIT` и `_DEFAULT_FILE_HEAD_LIMIT` — голые глобалы, подкласс не перехватывает; они лишь значения по умолчанию (per-call `head_limit` есть) |
+| 6 | `assemble_outbound` | `agent._assemble_outbound` | HIGH | ✓ | **PARTIAL** | `_final_turn` → `TurnEndEvent`; хук на стадии `run` гарантированно раньше outbound при `await bus.publish`. `_tool_audit` и `media` — либо событие + чтение на канале, либо узкий патч: `media` никогда не заполняется nanobot, штатный слот `_agent_ui` пишется только на этапе сборки |
+| 7 | `async_save` | `agent.sessions.save` | MEDIUM | — | **REMOVE** | `agent.sessions` — собственный `PGSessionManager`. Обёртка делается при создании в `session_storage.py` |
+| 8 | `session_dir_watch` | `sessions.save` (диагностика) | LOW | — | **REMOVE** | Гейт выключен по умолчанию, тестов нет |
+| 9 | `subagent_logging` | `_SubagentHook` (подмена класса) | HIGH | ✓ | KEEP | upstream даст параметр хука у `SubagentManager` и передаст `events` в `AgentRunSpec` субагента. Сейчас нет ни того, ни другого: `events` → `NO_EVENTS`, событий ноль. Проверить, запускаются ли субагенты в деплое — если нет, патч удаляется |
+| 10 | `turn_delivery_fail` | `TurnDelivery.fail` (хардкоженный литерал) | MEDIUM | — | **REMOVE** | `AgentLoop(turn_delivery_factory=...)` — публичный параметр, конструкций `TurnDelivery(` в пакете две и обе в фабрике. Подкласс `TurnDeliveryFactory` покрывает 100% инстансов. Инжектить в gateway и CLI, сохранив `WebuiTurnRoutePolicy` |
+| 11 | `session_content_cleanup` | `Session.add_message` | LOW | — | **REMOVE** | `PGSessionManager.save` + `clean_text.py`, который уезжает в `libs/data` |
+| 12 | `document_text_threshold` | `reference_non_image_attachments` | MEDIUM | — | KEEP→REMOVE | документы уезжают в `libs/document` |
+
+Колонка и каталог внесены в рамках openspec change
+[`enterprise-mcp-platform`](../../openspec/changes/enterprise-mcp-platform/).
+**Доказательная база по каждому пункту — в
+[`nanobot-reuse-catalog.md`](nanobot-reuse-catalog.md).** Перед добавлением
+нового патча каталог просматривается обязательно: он отвечает на вопрос
+«а не поставляет ли это Nanobot уже?».
+
+**Каждый патч обязан иметь заполненное условие удаления.** Патч без него —
+архитектурное нарушение наравне с патчем без записи в этом документе.
+
 
 `Required = ✓` (4 патча: `assemble_outbound`, `save_turn`,
 `subagent_logging`, `context_governor`) — критичность для
