@@ -256,19 +256,26 @@
 
 ### Added
 
-- **Навык `follow_up` — Follow Up как внешний MCP-процесс.** Контроль
-  исполнения поручений и корпус актов проверок ОАРБ:
-  `workspace/skills/follow_up/SKILL.md` (инструкция агенту: когда звать,
+- **Навык `follow_up` — Follow Up целиком, сервер отдельным процессом.**
+  Контроль исполнения поручений и корпус актов проверок ОАРБ. В
+  `workspace/skills/follow_up/` — инструкция агенту `SKILL.md` (когда звать,
   разграничение с `audit_analyzer`, дословный вывод `answer_md`, ожидание
-  долгой сборки карточки), запись `skills.follow_up` в `project.json`,
-  статичный блок `tools.mcpServers.follow_up` в `config.json` и лаунчер
-  `workspace/skills/follow_up/scripts/follow_up_mcp` (`.cmd` для Windows).
-  Реализация остаётся в отдельном репозитории со своим venv: у навыка
-  `numpy<2` + `torch`, у нас `numpy==2.4.2` — в одном окружении они не
-  уживаются, MCP-процесс (штатный механизм `nanobot-ai`) даёт свой
-  интерпретатор. Машинные пути — в `follow_up.env.local` (под
-  `*.env.local` в `.gitignore`); без него лаунчер выходит с кодом 3, gateway
-  пропускает сервер и стартует дальше. OpenSpec: `add-follow-up-skill`.
+  долгой сборки карточки), код сервера `backend/`, `tools.json` (описания и
+  схемы его инструментов), лаунчер `scripts/follow_up_mcp` и
+  `requirements.txt` навыка. `workspace/tools/follow_up.py` — семь
+  инструментов агента `mcp_follow_up_*`: загрузчик проекта регистрирует их
+  как обычные project tools, а модуль держит сервер отдельным процессом
+  (тем же Python) и MCP-сессию с ним по stdio. `config.json` не меняется:
+  в `nanobot-ai` 0.3.5 `tools.mcpServers` читают только CLI фреймворка, а
+  gateway проекта MCP не подключает. Клонировать и настраивать на машине
+  ничего не нужно: модель — из настроек агента, Greenplum и схема — из
+  `channels.postgres`, модели — из
+  `workspace/data_store/cache/caches_pipelines/`. Отдельный процесс — потому
+  что у навыка своя SQLite с единственным писателем и фоновые потоки
+  синхронизации корпуса. Код навыка сопровождается в репозитории Follow Up;
+  вложенный `ruff.toml` исключает `backend/` из линтера проекта. Проверка
+  машины — `follow_up_mcp --check`. Запись `skills.follow_up` в
+  `project.json`. OpenSpec: `add-follow-up-skill`.
 
 - **DB safety net в polling**: фильтр `AND status != 'cancelled'` в
   `_claim_one_single` (3 места: основной WHERE, подзапрос по соседним

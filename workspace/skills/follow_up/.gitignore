@@ -1,0 +1,15 @@
+# Рабочие данные Follow Up: база, индексы, кэш корпуса, журналы, модели.
+/data/
+/logs/
+/models/
+*.db
+# Настройки конкретной машины.
+.env
+site_defaults.env
+follow_up.env.local
+# Код навыка — весь в git, даже если корневой .gitignore режет каталоги по
+# имени (`memory/` — для workspace/memory, а в backend/ есть core/memory).
+# Образец настроек — тоже, хотя его накрывает корневое `*.env.*`.
+!backend/**/
+!follow_up.env.local.example
+__pycache__/

@@ -1,0 +1,7 @@
+# Код Follow Up (backend/) проверяется линтером в собственном репозитории
+# Follow Up и приезжает сюда готовым; здесь — только то, что написано
+# под агента. Остальные настройки — из корневого pyproject.toml.
+extend = "../../../pyproject.toml"
+extend-exclude = ["backend"]
+# Лаунчер без расширения .py — без этого ruff его бы не увидел.
+extend-include = ["scripts/follow_up_mcp"]
