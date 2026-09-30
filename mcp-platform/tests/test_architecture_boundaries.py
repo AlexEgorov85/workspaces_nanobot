@@ -3,13 +3,23 @@
 Проверяет правила из ``README.md`` автоматически. Это единственная защита
 от тихого возврата зависимости от агента: человек забудет, CI — нет.
 
-Правила:
+Нумерация ниже — по ``README.md`` §«Жёсткие правила»:
+
 1. В ``mcp-platform/**`` запрещены импорты агента и его внутренних пакетов.
 2. Никаких динамических импортов запрещённых модулей.
 3. Никаких ссылок на внутренности AgentLoop (AgentLoop/ToolContext/MessageBus).
 4. Каждый ``servers/*/server.py`` обязан импортироваться при ЗАПРЕЩЁННОМ
    ``nanobot`` — то есть реально стартовать без агента.
 5. Серверы не импортируют друг друга.
+6. Никаких импортов наверх — п. 1 покрывает это по корням пакетов.
+7. Нет массовых рефакторингов «заодно» — проверяется п. 1 на каждом файле.
+8. Один владелец на разделяемый ресурс: capability получают сервис, а не
+   создают свой пул, свой FAISS или свой HTTP-клиент.
+9. Ни одна операция не принимает SQL от вызывающей стороны.
+
+Правила 8 и 9 проверяются функциями, у которых есть свои тесты на
+заведомо плохом коде: страж, который ни разу не срабатывал, неотличим от
+стража, который ничего не проверяет.
 """
 
 from __future__ import annotations
@@ -46,6 +56,38 @@ AGENT_INTERNALS = ("AgentLoop", "ToolContext", "MessageBus", "CommandRouter")
 #: Динамический импорт в обход правил.
 DYNAMIC_IMPORT = re.compile(r"import_module\(\s*[\"']([A-Za-z_][\w.]*)[\"']")
 
+#: Разделяемые ресурсы: какие конструкции кому принадлежат.
+#:
+#: Владелец задаётся префиксом пути внутри платформы. Всё, что перечислено в
+#: ``tokens``, обязано жить только внутри владельца. Capability получают
+#: готовый сервис из контейнера и не строят ресурс сами.
+#:
+#: Токен ловится либо как идентификатор в коде (``psycopg2``, ``faiss``),
+#: либо как подстрока строковой константы (``chat/completions`` в URL).
+RESOURCE_OWNERS: tuple[tuple[str, frozenset[str]], ...] = (
+    (
+        "libs/enterprise_data",
+        frozenset(
+            {
+                "psycopg2",
+                "create_pool",
+                "SimpleConnectionPool",
+                "ThreadedConnectionPool",
+                "AbstractConnectionPool",
+            }
+        ),
+    ),
+    ("libs/vector_index", frozenset({"faiss"})),
+    ("libs/llm", frozenset({"chat/completions"})),
+)
+
+#: Параметры, через которые SQL мог бы попасть на поверхность агента.
+#:
+#: ``query`` здесь нет намеренно: у ``history_search`` это текстовый поисковый
+#: запрос, а не SQL. Запрет должен быть точным, иначе проверку начнут
+#: обходить, отключая её целиком.
+SQL_PARAM_NAMES = frozenset({"sql", "query_sql", "statement", "raw_sql", "sql_text", "ddl"})
+
 
 def _python_files() -> list[Path]:
     return sorted(
@@ -73,6 +115,107 @@ def _imported_roots(tree: ast.AST) -> set[str]:
             if node.module:
                 roots.add(node.module.split(".")[0])
     return roots
+
+
+def _dotted_names(tree: ast.AST) -> set[str]:
+    """Все точечные имена, встречающиеся в модуле, вплоть до полной цепочки."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            parts: list[str] = []
+            cur: ast.AST = node
+            while isinstance(cur, ast.Attribute):
+                parts.append(cur.attr)
+                cur = cur.value
+            if isinstance(cur, ast.Name):
+                parts.append(cur.id)
+                names.add(".".join(reversed(parts)))
+    return names
+
+
+def _string_constants(tree: ast.AST) -> set[str]:
+    return {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+
+def _strip_docstrings(tree: ast.AST) -> None:
+    """Убирает докстринги из дерева, разбирая его на месте.
+
+    Без этого страж ловит прозу: модуль, который *называет* ``faiss`` в
+    докстринге, чтобы объяснить, почему агент не должен его видеть, ничем не
+    отличается от модуля, который его импортирует. Документация — не
+    использование.
+    """
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        first = body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            body.pop(0)
+
+
+def _scan_source(source: str, rel: str) -> list[str]:
+    """Возвращает список нарушений владения ресурсами для одного файла.
+
+    Функция чистая: принимает текст и относительный путь. Это позволяет
+    проверять сам страж — см. ``test_service_owners_guard_detects_violation``.
+    """
+    if rel == _rel(SELF) or rel.startswith("tests/"):
+        return []
+
+    tree = ast.parse(source, filename=rel)
+    _strip_docstrings(tree)
+    identifiers = _dotted_names(tree) | _imported_roots(tree)
+    strings = _string_constants(tree)
+
+    offenders: list[str] = []
+    for owner, tokens in RESOURCE_OWNERS:
+        if rel.startswith(owner + "/"):
+            continue
+        hits = sorted(
+            token
+            for token in tokens
+            if token in identifiers or any(token in s for s in strings)
+        )
+        if hits:
+            offenders.append(
+                f"{rel}: {hits} принадлежит {owner}/ — capability получают сервис, "
+                f"а не создают ресурс сами"
+            )
+    return offenders
+
+
+def _tool_files() -> list[Path]:
+    return sorted(
+        p
+        for p in (PLATFORM_ROOT / "servers").rglob("tools/*.py")
+        if "__pycache__" not in p.parts
+    )
+
+
+def _scan_tool_sql_params(source: str, rel: str) -> list[str]:
+    """Параметры, через которые вызывающая сторона могла бы передать SQL."""
+    tree = ast.parse(source, filename=rel)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        args = node.args
+        names = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+        bad = sorted(set(names) & SQL_PARAM_NAMES)
+        if bad:
+            offenders.append(f"{rel}: {node.name}(...) принимает {bad}")
+    return offenders
 
 
 def test_platform_is_not_empty() -> None:
@@ -111,6 +254,81 @@ def test_no_agent_internals(path: Path) -> None:
             used.add(node.attr)
     bad = used & set(AGENT_INTERNALS)
     assert not bad, f"{_rel(path)} использует внутренности агента: {sorted(bad)}"
+
+
+@pytest.mark.parametrize("path", _python_files(), ids=_rel)
+def test_shared_resources_have_single_owner(path: Path) -> None:
+    """Правило 8: capability получают сервис, а не создают ресурс сами.
+
+    Вторая копия индекса — это вторая сотня тысяч векторов в памяти, второй
+    пул — второе число соединений против той же базы. Обе ошибки выглядят
+    локально разумными, поэтому их ловит проверка, а не ревью.
+    """
+    offenders = _scan_source(path.read_text(encoding="utf-8"), _rel(path))
+    assert not offenders, "\n".join(offenders)
+
+
+def test_service_owners_guard_detects_violation() -> None:
+    """Проверка самого стража: он обязан ловить то, ради чего написан.
+
+    Страж, который ни разу не срабатывал, неотличим от стража, который
+    ничего не проверяет. Здесь он получает заведомо плохой код.
+    """
+    cases: tuple[tuple[str, str], ...] = (
+        (
+            "servers/enterprise/capabilities/audit/service/run.py",
+            "import psycopg2\n\ndef f():\n    return psycopg2.connect('dsn')\n",
+        ),
+        (
+            "servers/enterprise/capabilities/vectors/service/index.py",
+            "import faiss\n\ndef f():\n    return faiss.IndexFlatIP(4)\n",
+        ),
+        (
+            "servers/enterprise/capabilities/llm/service/client.py",
+            "URL = 'https://api/v1/chat/completions'\n",
+        ),
+    )
+    for rel, source in cases:
+        assert _scan_source(source, rel), f"страж промолчал на {rel}"
+
+
+def test_service_owners_guard_allows_owner() -> None:
+    """Владелец ресурса — единственное место, где конструкция разрешена."""
+    source = "import psycopg2\n\ndef f():\n    return psycopg2.connect('dsn')\n"
+    assert _scan_source(source, "libs/enterprise_data/db.py") == []
+
+
+def test_service_owners_guard_ignores_prose() -> None:
+    """Назвать ресурс в докстринге — не значит его использовать.
+
+    ``libs/enterprise_common/errors.py`` объясняет, почему агент не должен
+    видеть исключения драйверов, и упоминает их в тексте. Это документация,
+    а не обход сервиса.
+    """
+    source = '"""Агент не должен видеть psycopg2/faiss-исключения."""\n\ncode = "x"\n'
+    assert _scan_source(source, "libs/enterprise_common/errors.py") == []
+
+
+@pytest.mark.parametrize("path", _tool_files(), ids=_rel)
+def test_no_tool_accepts_sql(path: Path) -> None:
+    """Правило 9: SQL не приходит от вызывающей стороны.
+
+    Проверяется по сигнатуре: если у операции есть параметр с именем из
+    запрещённого списка, она просит у модели текст запроса.
+    """
+    offenders = _scan_tool_sql_params(path.read_text(encoding="utf-8"), _rel(path))
+    assert not offenders, "\n".join(offenders)
+
+
+def test_sql_param_guard_detects_violation() -> None:
+    """Проверка самого сторожа параметров."""
+    source = (
+        "def create_tool(container):\n"
+        "    def query_sql(sql: str, limit: int = 100) -> str:\n"
+        "        return ''\n"
+        "    return query_sql\n"
+    )
+    assert _scan_tool_sql_params(source, "capabilities/data/tools/query_sql.py")
 
 
 @pytest.mark.parametrize("path", _server_modules(), ids=_rel)

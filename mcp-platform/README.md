@@ -25,8 +25,18 @@ Enterprise-слой, вынесенный из агента. **Nanobot тут н
    переноса старый tool удаляется, а не остаётся «на всякий случай».
 7. **Нет массовых рефакторингов «заодно».** Если пришлось импортировать
    `nanobot.*` — остановиться и переработать границу, а не подключить импорт.
+8. **Один владелец на разделяемый ресурс.** Пул и очередь PostgreSQL, векторные
+   индексы и клиент эмбеддингов, LLM-клиент — по одному владельцу. Capability
+   получают готовый сервис из контейнера и описывают операции, а не управление
+   ресурсами. Ни одна capability не создаёт свой пул, свой FAISS или свой
+   HTTP-клиент. Обход запрещён архитектурным стражем, а не договорённостью:
+   вне владельцев не встречаются `psycopg2.connect`, `*ConnectionPool`,
+   `create_pool`, импорты `faiss`, `IndexFlatIP` и HTTP-вызовы провайдера.
+9. **Модель не пишет SQL.** На поверхности агента нет операции, принимающей SQL
+   или фрагмент SQL. Данные доступны через `run_script` (шаблон из реестра),
+   `generate_sql` (LLM внутри сервера) и `history_search` (код платформы).
 
-Проверяется автоматически: `tests/test_architecture_boundaries.py`.
+Проверяется автоматически: `tests/test_architecture_boundaries.py` — п. 2, 8 и 9.
 
 ## Раскладка
 
@@ -38,44 +48,61 @@ mcp-platform/
 │   ├── BASELINE.md           # точка отсчёта миграции (фаза 0)
 │   ├── MCP-CONTRACTS.md      # контракты операций: что делает, что возвращает, когда падает
 │   ├── MIGRATION.md          # что куда переносится и в каком порядке
-│   └── TARGET-ARCHITECTURE.md
+│   ├── TARGET-ARCHITECTURE.md
+│   └── architecture.html     # визуальная схема: решения, порядок, цена каждого
 ├── libs/
-│   ├── enterprise_common/    # config, models, errors, реестр инструментов
-│   └── enterprise_data/      # postgres, vector (FAISS)
+│   ├── enterprise_common/    # реестр инструментов, ошибки, конфиг
+│   ├── enterprise_data/      # пул PostgreSQL, очередь, sql_safety — ВЛАДЕЛЕЦ соединений
+│   ├── vector_index/         # FAISS, кэш индексов, эмбеддинги — ВЛАДЕЛЕЦ индексов
+│   └── llm/                  # клиент провайдера — ВЛАДЕЛЕЦ LLM-вызовов
 ├── servers/
 │   ├── _template/            # ЭТАЛОН. Копируется, а не выдумывается заново.
-│   └── <name>/
+│   └── enterprise/
 │       ├── server.py         # bootstrap: поднять реестр, отдать MCP
-│       ├── tools/*.py        # по файлу на инструмент
-│       └── service.py
+│       └── capabilities/
+│           ├── data/         # инфраструктура: log_event, history_search, schema_check
+│           ├── audit/        # весь запрос к данным: list_scripts, run_script, generate_sql
+│           ├── vectors/      # vector_search, list_indexes, index_stats
+│           ├── llm/          # complete
+│           ├── legal/        # домен
+│           └── <name>/
+│               ├── skill/SKILL.md   # инструкция — Nanobot читает своим механизмом Skills
+│               ├── tools/*.py       # по файлу на операцию
+│               └── service/         # реализация, тестируется без MCP
 └── tests/
 ```
+
+Capability ≠ процесс. Если каталогу понадобится изоляция, он уезжает в свой
+процесс **конфигурацией загрузчика** — это меняет список каталогов, а не код
+операций.
 
 ## Слои внутри одного сервера
 
 ```text
-server.py   # тонкий bootstrap: собрать реестр и отдать его MCP
+server.py             # тонкий bootstrap: собрать реестр и отдать его MCP
     ↓
-tools/*.py  # по одному инструменту на файл: create_tool(container) → ToolDefinition
+capabilities/*/tools/ # по одному инструменту на файл: create_tool(container) → ToolDefinition
     ↓
-service.py  # бизнес-логика домена. Ни MCP, ни Nanobot, ни SQL в промптах
+capabilities/*/service/ # бизнес-логика домена. Ни MCP, ни Nanobot
     ↓
-libs/enterprise_data   # доступ к данным
+libs/*                # разделяемые сервисы, по одному владельцу на ресурс
 ```
 
 Сервер **не должен** содержать бизнес-логику и **не должен** знать список
-инструментов заранее. Логика живёт в `service.py` и тестируется без MCP вообще.
-Список инструментов приходит из `tools/` при старте.
+инструментов заранее. Логика живёт в `service/` и тестируется без MCP вообще.
+Список инструментов приходит при старте.
 
-## Как добавить сервер
+## Как добавить capability
 
-1. Скопировать `servers/_template` в `servers/<name>`.
-2. Реализовать `service.py`. Он обязан тестироваться без MCP.
+1. Скопировать `servers/_template/capabilities/<name>` и переименовать.
+2. Реализовать `service/`. Он обязан тестироваться без MCP и **не должен**
+   открывать соединение, собирать индекс или поднимать HTTP-клиент — всё это
+   берётся из `container`.
 3. Создать `tools/<operation>.py` для каждой операции (§ «Как добавить инструмент»).
 4. Описать `server.py` как bootstrap реестра — без `@mcp.tool()` вручную.
-5. Добавить `servers/<name>/tests/test_service.py` и тест загрузки реестра.
+5. Добавить `tests/test_service.py` и тест загрузки реестра.
 6. Проверить: `pytest` в `mcp-platform/` зелёный, `server.py` запускается
-   без установленного nanobot.
+   без установленного nanobot, архитектурный страж не падает.
 7. Только после этого — подключать к агенту через `config.json::mcpServers`.
 
 ## Как добавить инструмент
@@ -83,22 +110,26 @@ libs/enterprise_data   # доступ к данным
 Один файл. `server.py` не меняется.
 
 ```python
-# servers/data/tools/history_search.py
+# capabilities/data/tools/history_search.py
 def create_tool(container):
     def history_search(query: str, limit: int = 20) -> str:
-        return container.data.history_search(query, limit)
+        return container.data.history_search(query, limit)   # сервис, не соединение
 
     return ToolDefinition(
         name="history_search",
         description="Поиск по журналу agent_gateway_logs",
         handler=history_search,
-        category="read",
+        category="data",          # имя capability, из которого пришёл файл
         version="1.0",
     )
 ```
 
-Порядок при старте: `tools/*.py` → `create_tool(container)` → валидация →
-`registry.register()` → MCP. Валидатор проверяет импорт, наличие
+Имена инструментов плоские и уникальные в пределах сервера: MCP-клиент Nanobot
+и так приклеивает префикс `mcp_enterprise_`, а namespace внутри него только
+путает модель. Принадлежность к capability живёт в `category`.
+
+Порядок при старте: `capabilities/*/tools/*.py` → `create_tool(container)` →
+валидация → `registry.register()` → MCP. Валидатор проверяет импорт, наличие
 `create_tool`, тип `ToolDefinition`, непустые `name`/`description`, уникальность
 `name`, callable `handler` и валидность схемы аргументов.
 
