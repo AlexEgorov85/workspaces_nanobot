@@ -52,7 +52,6 @@ class TestValidateProfileOverlayRejectsLocalPath:
                     "table_name": "agent_conversation_messages",
                     "messages_table": "agent_session_messages",
                     "meta_table": "agent_session_meta",
-                    "claims_table": "agent_worker_claims",
                 },
             },
             "logging": {
@@ -107,7 +106,7 @@ class TestProfileOwnedRuntimeKeysExcludeCacheLocalPath:
             assert key != ("gateway", "cache", "local_path")
 
     def test_profile_owned_keys_count(self) -> None:
-        """Точное число profile-owned ключей: 6 (см. AGENTS.md § «Profiles»)."""
+        """Точное число profile-owned ключей: 5 (см. AGENTS.md § «Profiles»)."""
         from config import PROFILE_OWNED_RUNTIME_KEYS
 
-        assert len(PROFILE_OWNED_RUNTIME_KEYS) == 6
+        assert len(PROFILE_OWNED_RUNTIME_KEYS) == 5

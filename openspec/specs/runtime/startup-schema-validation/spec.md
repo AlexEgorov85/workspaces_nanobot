@@ -92,27 +92,28 @@ patches, preload, hooks). Проверка SHALL выполняться ровн
 
 Список таблиц, проверяемых на старте, SHALL вычисляться
 динамически из активного профиля конфигурации (`--profile`), а не
-захардкожен в коде проверки. Источник истины для имён 6 runtime-
-таблиц — `config.EXPECTED_RUNTIME_TABLE_NAMES[profile]`
-(`config.py:205-222`), который уже используется механизмом
-`validate_runtime_isolation`.
+захардкожен в коде проверки. Источник истины для имён 5 runtime-
+таблиц — `config.EXPECTED_RUNTIME_TABLE_NAMES[profile]`,
+который уже используется механизмом `validate_runtime_isolation`.
+`channels.postgres.claims_table` в перечень НЕ входит: таблица
+аренды `agent_worker_claims` удалена миграцией
+`sql/migrations/V006__drop_agent_worker_claims.sql`.
 
 #### Scenario: Prod-профиль
 - **WHEN** активен профиль `prod`
 - **THEN** проверяются имена из
-  `EXPECTED_RUNTIME_TABLE_NAMES["prod"]` (6 таблиц:
+  `EXPECTED_RUNTIME_TABLE_NAMES["prod"]` (5 таблиц:
   `agent_conversation_messages`, `agent_session_meta`,
-  `agent_session_messages`, `agent_worker_claims`,
-  `agent_gateway_logs`, `agent_question_runs`)
+  `agent_session_messages`, `agent_gateway_logs`,
+  `agent_question_runs`)
 
 #### Scenario: Test-профиль
 - **WHEN** активен профиль `test`
 - **THEN** проверяются имена из
-  `EXPECTED_RUNTIME_TABLE_NAMES["test"]` (6 таблиц:
+  `EXPECTED_RUNTIME_TABLE_NAMES["test"]` (5 таблиц:
   `agent_conversation_messages_test`,
   `agent_session_meta_test`, `agent_session_messages_test`,
-  `agent_worker_claims_test`, `agent_gateway_logs_test`,
-  `agent_question_runs_test`)
+  `agent_gateway_logs_test`, `agent_question_runs_test`)
 
 ### Requirement: Сообщение об ошибке содержит список недостающих таблиц
 

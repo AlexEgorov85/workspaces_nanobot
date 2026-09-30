@@ -46,7 +46,7 @@ def isolated_project(monkeypatch, tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 1. validate_profile_overlay — только 6 разрешённых ключей
+# 1. validate_profile_overlay — только 5 разрешённых ключей
 # ---------------------------------------------------------------------------
 
 
@@ -58,7 +58,6 @@ def test_validate_profile_overlay_rejects_dsn():
                 "table_name":     "agent_conversation_messages_test",
                 "messages_table": "agent_session_messages_test",
                 "meta_table":     "agent_session_meta_test",
-                "claims_table":   "agent_worker_claims_test",
                 "dsn":            "postgresql://other_db/test",  # ЗАПРЕЩЕНО
             }
         },
@@ -74,14 +73,13 @@ def test_validate_profile_overlay_rejects_dsn():
 
 
 def test_validate_profile_overlay_accepts_only_allowed_keys():
-    """Шесть разрешённых runtime-ключей — без посторонних."""
+    """Пять разрешённых runtime-ключей — без посторонних."""
     overlay = {
         "channels": {
             "postgres": {
                 "table_name":     "agent_conversation_messages_test",
                 "messages_table": "agent_session_messages_test",
                 "meta_table":     "agent_session_meta_test",
-                "claims_table":   "agent_worker_claims_test",
             }
         },
         "logging": {
@@ -102,7 +100,6 @@ def test_validate_profile_overlay_rejects_vector_storage():
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -126,13 +123,12 @@ def test_validate_profile_overlay_rejects_vector_storage():
 
 
 def test_validate_runtime_isolation_test_mode_matches():
-    """В test все 6 runtime-таблиц должны иметь точные test-имена."""
+    """В test все 5 runtime-таблиц должны иметь точные test-имена."""
     cfg = {
         "channels": {"postgres": {
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -150,7 +146,6 @@ def test_validate_runtime_isolation_test_mode_rejects_foo_test():
             "table_name":     "foo_test",  # неправильно
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -168,7 +163,6 @@ def test_validate_runtime_isolation_prod_mode_matches():
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -186,7 +180,6 @@ def test_validate_runtime_isolation_prod_mode_rejects_test_suffix():
             "table_name":     "agent_conversation_messages_test",  # неправильно для prod
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -214,7 +207,6 @@ def test_profile_wins_over_session_manager_and_config_json(isolated_project):
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -237,7 +229,6 @@ def test_profile_wins_over_session_manager_and_config_json(isolated_project):
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -250,7 +241,6 @@ def test_profile_wins_over_session_manager_and_config_json(isolated_project):
     assert cfg["channels"]["postgres"]["messages_table"] == "agent_session_messages_test"
     assert cfg["channels"]["postgres"]["table_name"] == "agent_conversation_messages_test"
     assert cfg["channels"]["postgres"]["meta_table"] == "agent_session_meta_test"
-    assert cfg["channels"]["postgres"]["claims_table"] == "agent_worker_claims_test"
     assert cfg["logging"]["db"]["table_name"] == "agent_gateway_logs_test"
     assert cfg["logging"]["db"]["question_runs_table"] == "agent_question_runs_test"
 
@@ -267,7 +257,6 @@ def test_profile_wins_when_session_manager_uses_test_but_config_uses_prod(
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -287,7 +276,6 @@ def test_profile_wins_when_session_manager_uses_test_but_config_uses_prod(
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -311,7 +299,6 @@ def test_session_manager_can_override_pool_but_not_runtime_tables(
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
             "pool": {"min_conn": 1, "max_conn": 4, "pool_timeout": 5.0},
         }},
         "logging": {"db": {
@@ -330,7 +317,6 @@ def test_session_manager_can_override_pool_but_not_runtime_tables(
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -353,7 +339,6 @@ def test_prod_profile_uses_pure_project_json(isolated_project):
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -363,7 +348,7 @@ def test_prod_profile_uses_pure_project_json(isolated_project):
     # profiles/ не создаём — для prod это не нужно
 
     cfg = resolve_application_config(profile="prod")
-    # Все 6 runtime-таблиц должны быть prod-именами (валидация прошла)
+    # Все 5 runtime-таблиц должны быть prod-именами (валидация прошла)
     assert cfg["channels"]["postgres"]["table_name"] == "agent_conversation_messages"
     assert cfg["channels"]["postgres"]["messages_table"] == "agent_session_messages"
     assert cfg["logging"]["db"]["table_name"] == "agent_gateway_logs"
@@ -384,7 +369,6 @@ def test_test_mode_without_overlay_fails(isolated_project):
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",

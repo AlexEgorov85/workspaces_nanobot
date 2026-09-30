@@ -470,7 +470,7 @@ chunk_overlap, metric).
 | `tools/diagnose_startup.py` | 442 | Сверка стартового лога с каноническим инвентарём |
 | `tools/scan_nanobot_inventory.py` | 176 | Карта зависимостей от nanobot для апгрейда |
 | `tools/audit_nanobot_contracts.py` | 194 | Проверка, что импортируемые символы nanobot существуют |
-| `tools/check_worker_pool_integrity.py` | 201 | Диагностика аренды задач воркерами |
+
 
 ### 4.6 Модули без владельца — вопрос закрыт
 
@@ -663,13 +663,21 @@ enterprise-стек». Разбор — `design.md` §7.1.
 | Что уходит | Строк / объём |
 |---|---|
 | `lib/channels/postgres_channel.py` — протокол аренды | ~1 200 из 2 190 (оценка по 85 упоминаниям) |
-| `tools/check_worker_pool_integrity.py` | 201 |
-| `sql/workers/` — 4 файла | DROP-миграция |
-| Настройки `channels.postgres.*` | 8 ключей: `claims_table`, `lease_interval`, `claim_strategy`, `unstick_interval`, `max_stuck_retries`, `max_concurrent`, `processing_timeout`, `error_retry_delay` |
-| Тесты | ~5 файлов |
+| `tools/check_worker_pool_integrity.py` | 201 строка |
+| `sql/workers/` | 2 файла | `sql/migrations/V006__drop_agent_worker_claims.sql` |
+| Настройки `channels.postgres.*` | **3 ключа:** `claims_table`, `claim_strategy`, `lease_interval`. Остальные (`poll_interval`, `unstick_interval`, `processing_timeout`, `error_retry_delay`, `worker_id`, `max_stuck_retries`, `max_concurrent`) живы в single-режиме | плюс ключ профиля `claims_table` в `PROFILE_OWNED_RUNTIME_KEYS` / `EXPECTED_RUNTIME_TABLE_NAMES` и в `_EXPECTED_KEYS` — иначе `validate_runtime_isolation` падает с `ConfigurationError` |
+| Тесты | 3 файла удалены, 45 тестов |
 | Документация | `lib/channels/README.md`, `AGENTS.md`, `CHANGELOG.md` |
 
-Замена в `postgres_channel`: простой опрос с `FOR UPDATE SKIP LOCKED`.
+**Замена в `postgres_channel`: ничего.** Захват задачи остаётся тем же одним
+`UPDATE ... RETURNING` (`_claim_one`), эксклюзивность — внешний
+`AND status = 'pending'`. Переход на `FOR UPDATE SKIP LOCKED` **отменён**:
+проект разворачивается на Greenplum 6.5 (ядро PostgreSQL 9.4, см.
+`sql/README.md`), где `SKIP LOCKED` недоступен, а Greenplum при
+`SELECT ... FOR UPDATE` берёт блокировку уровня **таблицы** — такой захват
+заблокировал бы всех читателей и писателей `agent_conversation_messages`.
+Корректности `SKIP LOCKED` здесь и не нужен. SQL захвата проверен на
+идентичность прежнему `_claim_one_single`.
 **Потеря:** отказоустойчивость уровня HA. Принимается осознанно.
 
 ### 10.2 Бенчмарки

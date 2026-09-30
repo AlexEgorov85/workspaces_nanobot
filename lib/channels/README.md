@@ -29,13 +29,13 @@
 
 | Механизм | Описание |
 |----------|----------|
-| **Поллинг** | `_poll_loop` опрашивает БД каждые `poll_interval` секунд. Захват задачи зависит от `claim_strategy`: `worker_pool` — INSERT в `agent_worker_claims` (UNIQUE PK `task_id` — арбитр эксклюзивности) + UPDATE `processing` в одной транзакции; `single` (по умолчанию) — `UPDATE ... RETURNING` через `_claim_one_single` (без обращений к `agent_worker_claims`) |
+| **Поллинг** | `_poll_loop` опрашивает БД каждые `poll_interval` секунд. Захват задачи — `UPDATE ... RETURNING` в `_claim_one`: состояние захвата хранится в самой строке задачи (`status='processing'`), таблицы аренды `agent_worker_claims` нет (удалена миграцией `V006`) |
 | **Параллельность** | `max_concurrent` (asyncio.Semaphore). Пока сообщение обрабатывается, другие из того же `chat_id` откладываются |
 | **Reasoning** | Чанки рассуждений буферизируются и сбрасываются в `metadata.reasoning` каждые `flush_interval` секунд. Race condition исключается через `asyncio.Lock` |
 | **Медиа** | Каждый файл кодируется в dict `{"filename": "<имя>", "data": "data:<mime>;base64,<...>"}` и сохраняется в `media`. При загрузке декодируется обратно в `data_store/cache/sessions/`. HTTP/HTTPS-ссылки остаются строками |
-| **Аренда (пул воркеров)** | Только при `claim_strategy="worker_pool"`: каждая задача защищена lease (`lease_until = NOW() + processing_timeout`), heartbeat продлевает её каждые `lease_interval` сек. Мульти-машинная схема: одна задача физически не может обрабатываться двумя воркерами (UNIQUE PK `claims`). При `claim_strategy="single"` lease-loop не запускается |
-| **Reclaim+heal** | Только при `claim_strategy="worker_pool"`: истёкшие lease возвращают задачи в `pending` (или `failed` при исчерпании `max_stuck_retries`); `processing`-без-claim → `error`; висячие аренды и orphaned-placeholder чистятся. См. `_reclaim_and_heal`. При `single` вместо этого работает `_unstick_loop` с интервалом `unstick_interval` (по умолчанию 120 сек) — возвращает зависшие `processing`-строки в `pending` (или `failed`) |
-| **Ошибки** | Разведены статусы: `error` — повторяемая ошибка (повтор после `error_retry_delay`), `failed` — терминальный (не повторяется) |
+| **Эксклюзивность захвата** | Гарантирует внешний `AND status = 'pending'` в `_claim_one`: если задачу уже взял другой захват, повторный UPDATE не срабатывает, двойная обработка невозможна. `FOR UPDATE SKIP LOCKED` не используется — недоступно на Greenplum 6.5 (ядро PG 9.4), а Greenplum при `FOR UPDATE` берёт блокировку уровня таблицы |
+| **Возврат в пул** | `_unstick_loop` с интервалом `unstick_interval` (по умолчанию 120 сек) возвращает `processing`-строки с `updated_at` старше `processing_timeout` в `pending` (или `failed` при исчерпании `max_stuck_retries`). Это единственный механизм возврата — таблицы аренды и lease/heartbeat больше нет. При `stop()` незавершённые задачи возвращает `_return_claimed_to_pool` |
+| **Ошибки** | Разведены статусы: `error` — повторяемая ошибка, `failed` — терминальный (не повторяется). Известный дефект: ветка повтора `error` в `_claim_one` сейчас недостижима — внешний `AND status = 'pending'` её отсекает, поэтому задача после повторяемой ошибки остаётся в `error` навсегда. Настройка `error_retry_delay` сохранена как контракт `_mark_failed`; см. CHANGELOG |
 | **Placeholder** | При захвате сообщения сразу создаётся assistant-запись (`status=processing`), чтобы Streamlit мог начать опрос до завершения генерации |
 
 ### Конфигурация
@@ -46,15 +46,12 @@
     "dsn": "postgresql://user:pass@localhost:5432/nanobot",
     "schema": "public",
     "table_name": "agent_conversation_messages",
-    "claims_table": "agent_worker_claims",
     "poll_interval": 2.0,
     "flush_interval": 2.0,
     "max_concurrent": 1,
     "processing_timeout": 120,
     "max_stuck_retries": 3,
-    "lease_interval": 15.0,
     "error_retry_delay": 60.0,
-    "claim_strategy": "single",
     "unstick_interval": 120.0,
     "worker_id": "",
     "msg_ctx_max_size": 100,

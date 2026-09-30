@@ -10,7 +10,7 @@
   * priority path не вызывает ``acquire_slot`` / ``add_inflight``;
   * priority path не создаёт assistant-placeholder;
   * priority path обходит ``chat_inflight`` (даже если chat активен);
-  * priority path освобождает claim + lease + msg_ctx + msg_chat;
+  * priority path освобождает захват + msg_ctx + msg_chat;
   * ``MessageExchange._poll_loop`` вызывает ``poll_priority_inbound``
     первым и обрабатывает его даже при ``is_slot_free() == False``.
 """
@@ -109,8 +109,8 @@ def _make_channel(mock_db, **overrides):
     return PostgresChannel(config, bus)
 
 
-class TestClaimOneSinglePriorityFilter:
-    """``_claim_one_single(priority_contents=...)`` фильтрует по списку команд."""
+class TestClaimOnePriorityFilter:
+    """``_claim_one(priority_contents=...)`` фильтрует по списку команд."""
 
     @pytest.mark.asyncio
     async def test_priority_filter_added_to_where(self, priority_polling_mock_db):
@@ -119,7 +119,7 @@ class TestClaimOneSinglePriorityFilter:
 
         db.async_fetchone.return_value = None
 
-        await ch._claim_one_single(priority_contents=("/stop", "/restart"))
+        await ch._claim_one(priority_contents=("/stop", "/restart"))
 
         sql_text = db.async_fetchone.await_args.args[0]
         assert "AND content = ANY(%s)" in sql_text, (
@@ -143,7 +143,7 @@ class TestClaimOneSinglePriorityFilter:
 
         db.async_fetchone.return_value = None
 
-        await ch._claim_one_single()
+        await ch._claim_one()
 
         sql_text = db.async_fetchone.await_args.args[0]
         assert "AND content = ANY(%s)" not in sql_text, (
@@ -171,7 +171,6 @@ class TestPollPriorityOnce:
         })
         db.async_fetchval.return_value = "processing"
         ch._handle_message = AsyncMock()
-        ch._delete_claim = AsyncMock()
 
         exchange = MagicMock()
         exchange.acquire_slot = AsyncMock()
@@ -200,7 +199,6 @@ class TestPollPriorityOnce:
         })
         db.async_fetchval.return_value = "processing"
         ch._handle_message = AsyncMock()
-        ch._delete_claim = AsyncMock()
 
         exchange = MagicMock()
         exchange.acquire_slot = AsyncMock()
@@ -229,7 +227,6 @@ class TestPollPriorityOnce:
         db.async_fetchval.return_value = "processing"
         ch._insert_assistant_message = AsyncMock(return_value="asst-1")
         ch._handle_message = AsyncMock()
-        ch._delete_claim = AsyncMock()
 
         exchange = MagicMock()
         await ch._poll_priority_once(exchange)
@@ -254,7 +251,6 @@ class TestPollPriorityOnce:
         })
         db.async_fetchval.return_value = "processing"
         ch._handle_message = AsyncMock()
-        ch._delete_claim = AsyncMock()
 
         exchange = MagicMock()
         await ch._poll_priority_once(exchange)
@@ -264,7 +260,7 @@ class TestPollPriorityOnce:
         assert meta_arg.get("answer_id") is None
 
     @pytest.mark.asyncio
-    async def test_priority_dispatch_releases_claim_lease_ctx_chat(
+    async def test_priority_dispatch_releases_claim_ctx_chat(
         self, priority_polling_mock_db
     ):
         PostgresChannel, _, _, db = priority_polling_mock_db
@@ -281,17 +277,15 @@ class TestPollPriorityOnce:
         })
         db.async_fetchval.return_value = "processing"
         ch._handle_message = AsyncMock()
-        ch._delete_claim = AsyncMock()
 
-        ch._leases.add("m-stop")
+        ch._claimed_ids.add("m-stop")
         ch._msg_ctx["m-stop"] = {"x": 1}
         ch._msg_chat["m-stop"] = "chat-A"
 
         exchange = MagicMock()
         await ch._poll_priority_once(exchange)
 
-        ch._delete_claim.assert_awaited_once()
-        assert "m-stop" not in ch._leases
+        assert "m-stop" not in ch._claimed_ids
         assert "m-stop" not in ch._msg_ctx
         assert "m-stop" not in ch._msg_chat
 
@@ -313,7 +307,6 @@ class TestPollPriorityOnce:
         })
         db.async_fetchval.return_value = "processing"
         ch._handle_message = AsyncMock()
-        ch._delete_claim = AsyncMock()
         ch._release_slot = MagicMock()
 
         exchange = MagicMock()
@@ -337,14 +330,13 @@ class TestPollPriorityOnce:
         })
         db.async_fetchval.return_value = "cancelled"
         ch._handle_message = AsyncMock()
-        ch._delete_claim = AsyncMock()
 
         exchange = MagicMock()
         result = await ch._poll_priority_once(exchange)
         assert result is False
 
         ch._handle_message.assert_not_called()
-        ch._delete_claim.assert_awaited()
+        assert "m-stop" not in ch._claimed_ids
 
 
 class TestPollPriorityInbound:
@@ -379,7 +371,6 @@ class TestPollPriorityInbound:
         })
         db.async_fetchval.return_value = "processing"
         ch._handle_message = AsyncMock()
-        ch._delete_claim = AsyncMock()
 
         exchange = MagicMock()
         result = await ch.poll_priority_inbound(exchange)
@@ -425,14 +416,13 @@ class TestPriorityRaceConditions:
         # re-check fetchval возвращает 'cancelled' (race window).
         db.async_fetchval.return_value = "cancelled"
         ch._handle_message = AsyncMock()
-        ch._delete_claim = AsyncMock()
 
         exchange = MagicMock()
         result = await ch._poll_priority_once(exchange)
         assert result is False
 
         ch._handle_message.assert_not_called()
-        ch._delete_claim.assert_awaited()
+        assert "m-stop" not in ch._claimed_ids
 
     @pytest.mark.asyncio
     async def test_priority_does_not_acquire_slot_under_any_condition(
@@ -454,7 +444,6 @@ class TestPriorityRaceConditions:
         })
         db.async_fetchval.return_value = "processing"
         ch._handle_message = AsyncMock()
-        ch._delete_claim = AsyncMock()
 
         exchange = MagicMock()
         exchange.acquire_slot = AsyncMock()
@@ -484,7 +473,6 @@ class TestPriorityRaceConditions:
         db.async_fetchval.return_value = "processing"
         ch._handle_message = AsyncMock(side_effect=RuntimeError("boom"))
         ch._mark_failed = AsyncMock()
-        ch._delete_claim = AsyncMock()
 
         exchange = MagicMock()
         result = await ch._poll_priority_once(exchange)
@@ -493,7 +481,6 @@ class TestPriorityRaceConditions:
         ch._mark_failed.assert_awaited_once()
         # cleanup НЕ делается нашим кодом, если _mark_failed был вызван
         # (он сам управляет cleanup).
-        ch._delete_claim.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_priority_does_not_release_slot_on_success(
@@ -514,7 +501,6 @@ class TestPriorityRaceConditions:
         })
         db.async_fetchval.return_value = "processing"
         ch._handle_message = AsyncMock()
-        ch._delete_claim = AsyncMock()
         ch._release_slot = MagicMock()
 
         exchange = MagicMock()

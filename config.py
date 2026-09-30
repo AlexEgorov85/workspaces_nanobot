@@ -187,7 +187,7 @@ def _deep_merge(base: dict, override: dict) -> None:
 #   6. validate_runtime_isolation()    — hard-fail
 #
 # Ключевое: profile overlay идёт ПОСЛЕДНИМ, поэтому profile-owned runtime-ключи
-# (channels.postgres.{table_name,messages_table,meta_table,claims_table} и
+# (channels.postgres.{table_name,messages_table,meta_table} и
 # logging.db.{table_name,question_runs_table}) — immutable после применения
 # профиля. Даже если session_manager.json или config.json содержат prod-имена,
 # profile их перетирает.
@@ -197,7 +197,6 @@ PROFILE_OWNED_RUNTIME_KEYS = frozenset({
     ("channels", "postgres", "table_name"),
     ("channels", "postgres", "messages_table"),
     ("channels", "postgres", "meta_table"),
-    ("channels", "postgres", "claims_table"),
     ("logging",  "db",       "table_name"),
     ("logging",  "db",       "question_runs_table"),
     # NB (change ``unify-cli-gateway-architecture``, design D11/Stage 7):
@@ -212,7 +211,6 @@ EXPECTED_RUNTIME_TABLE_NAMES: dict[str, dict[str, str]] = {
         "conversation_messages": "agent_conversation_messages",
         "session_messages":      "agent_session_messages",
         "session_meta":          "agent_session_meta",
-        "worker_claims":         "agent_worker_claims",
         "gateway_logs":          "agent_gateway_logs",
         "question_runs":         "agent_question_runs",
     },
@@ -220,7 +218,6 @@ EXPECTED_RUNTIME_TABLE_NAMES: dict[str, dict[str, str]] = {
         "conversation_messages": "agent_conversation_messages_test",
         "session_messages":      "agent_session_messages_test",
         "session_meta":          "agent_session_meta_test",
-        "worker_claims":         "agent_worker_claims_test",
         "gateway_logs":          "agent_gateway_logs_test",
         "question_runs":         "agent_question_runs_test",
     },
@@ -309,8 +306,8 @@ def _merge_profile_overlay(cfg: dict, mode: str) -> None:
 def validate_profile_overlay(overlay_cfg: dict, mode: str) -> None:
     """Hard-fail: profiles/<mode>.jsonc симметрично проверяется на:
 
-      * все 6 profile-owned runtime-ключей ОБЯЗАНЫ присутствовать;
-      * никаких посторонних ключей (только эти 6 разрешены).
+      * все 5 profile-owned runtime-ключей ОБЯЗАНЫ присутствовать;
+      * никаких посторонних ключей (только эти 5 разрешены).
 
     Симметричная проверка даёт чёткий контракт самого файла оверлея:
     невалидный profile.jsonc ловится здесь, а не только на
@@ -334,7 +331,7 @@ def validate_profile_overlay(overlay_cfg: dict, mode: str) -> None:
         raise ConfigurationError(
             f"profiles/{mode}.jsonc не содержит обязательных "
             f"profile-owned runtime-ключей: {sorted(missing)}. "
-            f"Все 6 ключей обязательны: {sorted(allowed)}."
+            f"Все 5 ключей обязательны: {sorted(allowed)}."
         )
 
     extra = found - allowed
@@ -342,7 +339,7 @@ def validate_profile_overlay(overlay_cfg: dict, mode: str) -> None:
         raise ConfigurationError(
             f"profiles/{mode}.jsonc содержит ключи, которые профиль "
             f"не имеет права менять: {sorted(extra)}. "
-            f"Разрешены только 6 profile-owned runtime-ключей: "
+            f"Разрешены только 5 profile-owned runtime-ключей: "
             f"{sorted(allowed)}."
         )
 
@@ -361,7 +358,6 @@ def validate_runtime_isolation(cfg: dict, mode: str) -> None:
         "conversation_messages": (pg.get("table_name", "") if isinstance(pg, dict) else ""),
         "session_messages":      (pg.get("messages_table", "") if isinstance(pg, dict) else ""),
         "session_meta":          (pg.get("meta_table", "") if isinstance(pg, dict) else ""),
-        "worker_claims":         (pg.get("claims_table", "") if isinstance(pg, dict) else ""),
         "gateway_logs":          (log.get("table_name", "") if isinstance(log, dict) else ""),
         "question_runs":         (log.get("question_runs_table", "") if isinstance(log, dict) else ""),
     }

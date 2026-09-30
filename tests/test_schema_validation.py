@@ -29,7 +29,7 @@ from lib.services.schema_validation import (
 
 
 def _full_settings(profile: str = "prod") -> dict[str, Any]:
-    """Шаблон SETTINGS с полным набором 6 runtime-ключей."""
+    """Шаблон SETTINGS с полным набором 5 runtime-ключей."""
     return {
         "profile": profile,
         "channels": {
@@ -37,7 +37,6 @@ def _full_settings(profile: str = "prod") -> dict[str, Any]:
                 "table_name": "agent_conversation_messages",
                 "messages_table": "agent_session_messages",
                 "meta_table": "agent_session_meta",
-                "claims_table": "agent_worker_claims",
             },
         },
         "logging": {
@@ -147,14 +146,13 @@ class TestMissingTable:
 
 
 class TestExpectedTableNames:
-    def test_extracts_six_names_in_order(self) -> None:
+    def test_extracts_five_names_in_order(self) -> None:
         settings = _full_settings()
         names = SchemaValidationService.expected_table_names(settings)
         assert names == [
             ("public", "agent_conversation_messages"),
             ("public", "agent_session_messages"),
             ("public", "agent_session_meta"),
-            ("public", "agent_worker_claims"),
             ("public", "agent_gateway_logs"),
             ("public", "agent_question_runs"),
         ]
@@ -167,7 +165,6 @@ class TestExpectedTableNames:
                     "table_name": "agent_conversation_messages_test",
                     "messages_table": "agent_session_messages_test",
                     "meta_table": "agent_session_meta_test",
-                    "claims_table": "agent_worker_claims_test",
                 },
             },
             "logging": {
@@ -189,7 +186,6 @@ class TestExpectedTableNames:
                     "table_name": "my_custom_chat",
                     "messages_table": "my_custom_msg",
                     "meta_table": "my_custom_meta",
-                    "claims_table": "my_custom_claims",
                 },
             },
             "logging": {
@@ -204,7 +200,6 @@ class TestExpectedTableNames:
             ("public", "my_custom_chat"),
             ("public", "my_custom_msg"),
             ("public", "my_custom_meta"),
-            ("public", "my_custom_claims"),
             ("public", "my_custom_logs"),
             ("public", "my_custom_runs"),
         ]
@@ -250,7 +245,6 @@ class TestExpectedTableNames:
             ("public", "agent_conversation_messages"),
             ("public", "agent_session_messages"),
             ("public", "agent_session_meta"),
-            ("public", "agent_worker_claims"),
             ("public", "agent_gateway_logs"),
             ("public", "agent_question_runs"),
         ]
@@ -345,7 +339,7 @@ class TestValidate:
         assert isinstance(exc_info.value, SchemaValidationError)
 
     def test_works_with_lazy_settings_proxy(self) -> None:
-        """End-to-end через proxy: должны извлечься 6 имён и
+        """End-to-end через proxy: должны извлечься 5 имён и
         пройти через ``check_tables`` без missing.
         """
         from config import AttrDict, _LazySettings

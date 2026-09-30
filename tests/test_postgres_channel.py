@@ -429,7 +429,7 @@ class TestPostgresChannelSend:
         только merge'нуть контент, а второй (синтетический ``_final_turn`` с
         пустым content, который шлёт патч ``_assemble_outbound`` при
         подавленном финале) — зафинализировать оборот, сохранив накопленный
-        текст и закрыв claim/слот/``_msg_ctx``.
+        текст и закрыв слот/``_msg_ctx``.
         """
         PostgresChannel, _, mock_db = mock_db_and_psycopg
         conn = AsyncMock()
@@ -450,13 +450,11 @@ class TestPostgresChannelSend:
 
         ch = _make_channel(
             (PostgresChannel, None, mock_db),
-            claim_strategy="worker_pool",
             parallel_enabled=True,
         )
         ch._msg_ctx = {"m-1": {"assistant_msg_id": "a-1"}}
         ch.exchange.add_inflight("m-1")
         ch._msg_chat["m-1"] = "chat-1"
-        ch._leases.add("m-1")
 
         # 1) Промежуточная публикация тула message(...)
         tool_msg = MagicMock()
@@ -470,7 +468,6 @@ class TestPostgresChannelSend:
         await ch.send(tool_msg)
         assert "m-1" in ch._msg_ctx
         assert "m-1" in ch.exchange.inflight
-        assert "m-1" in ch._leases  # аренда/слот не тронуты
 
         # 2) Синтетический финал с пустым content и маркером конца оборота
         final_msg = MagicMock()
@@ -488,12 +485,10 @@ class TestPostgresChannelSend:
         await ch.send(final_msg)
         assert "m-1" not in ch._msg_ctx  # финализировано
         assert "m-1" not in ch.exchange.inflight
-        assert "m-1" not in ch._leases
         # Накопленный merge'ом контент сохранён в финальном UPDATE
         assert written["final_content"] == "Hello from tool"
-        # claim удалён
         calls = conn.execute.call_args_list
-        assert any("DELETE FROM" in c.args[0] for c in calls)
+        assert any("UPDATE" in c.args[0] and "completed" in c.args[0] for c in calls)
 
 
 class TestPostgresChannelSendDelta:
@@ -668,77 +663,6 @@ class TestPostgresChannelMedia:
         PostgresChannel, _, _ = mock_db_and_psycopg
         ch = _make_channel((PostgresChannel, None, None))
         assert ch._resolve_media_paths_and_hints([]) == ([], [])
-
-
-class TestPostgresChannelReclaimAndHeal:
-    """Тесты ``_reclaim_and_heal`` — только в worker_pool-режиме."""
-
-    @pytest.mark.asyncio
-    async def test_no_stuck_messages(self, mock_db_and_psycopg):
-        PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_conn = AsyncMock()
-        mock_conn.fetch.return_value = []
-        mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
-        ch = _make_channel(
-            (PostgresChannel, None, mock_db),
-            claim_strategy="worker_pool",
-        )
-        await ch._reclaim_and_heal()  # should not raise
-
-    @pytest.mark.asyncio
-    async def test_stuck_message_retried(self, mock_db_and_psycopg):
-        PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_conn = AsyncMock()
-        mock_conn.fetch.return_value = [{"task_id": "1", "worker_id": "w-1"}]
-        mock_conn.fetchrow.return_value = {"metadata": "{}"}
-        mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
-
-        ch = _make_channel(
-            (PostgresChannel, None, mock_db),
-            claim_strategy="worker_pool",
-        )
-        await ch._reclaim_and_heal()
-        # вернул в pending, удалил placeholder, heal + orphan + cleanup
-        assert mock_conn.execute.call_count >= 3
-
-    @pytest.mark.asyncio
-    async def test_stuck_message_max_retries(self, mock_db_and_psycopg):
-        PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_conn = AsyncMock()
-        mock_conn.fetch.return_value = [{"task_id": "1", "worker_id": "w-1"}]
-        mock_conn.fetchrow.return_value = {"metadata": '{"retry_count": 2}'}
-        mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
-
-        ch = _make_channel(
-            (PostgresChannel, None, mock_db),
-            claim_strategy="worker_pool",
-        )
-        await ch._reclaim_and_heal()
-        # исчерпан лимит → failed
-        assert mock_conn.execute.call_count >= 2
-
-    @pytest.mark.asyncio
-    async def test_own_live_lease_not_reclaimed(self, mock_db_and_psycopg):
-        """Задача, которую воркер держит в ``_leases``, не должна
-        отзываться даже при истёкшем lease — это вызвало бы дубль
-        обработки и удаление живого assistant-placeholder.
-        """
-        PostgresChannel, _, mock_db = mock_db_and_psycopg
-        mock_conn = AsyncMock()
-        # _reclaim_and_heal читает lease_until < NOW() с фильтром self
-        mock_conn.fetch.return_value = []
-        mock_db.async_transaction.return_value.__aenter__.return_value = mock_conn
-        ch = _make_channel(
-            (PostgresChannel, None, mock_db),
-            claim_strategy="worker_pool",
-        )
-        ch._leases.add("own-msg-1")
-        await ch._reclaim_and_heal()
-        call = mock_conn.fetch.call_args
-        sql, params = call.args[0], call.args[1]
-        assert "NOT" in sql
-        assert "task_id = ANY(%s::uuid[])" in sql
-        assert "own-msg-1" in params
 
 
 class TestPostgresChannelWorkerActivity:
@@ -1073,7 +997,6 @@ def _claim_task(ch, user_msg_id="m-1", chat_id="chat-1", assistant_msg_id="a-1")
     ch._chat_inflight.add(chat_id)
     ch._msg_chat[user_msg_id] = chat_id
     ch._msg_ctx[user_msg_id] = {"assistant_msg_id": assistant_msg_id}
-    ch._leases.add(user_msg_id)
 
 
 def _outbound(content="Final answer", chat_id="chat-1", **meta):
@@ -1093,7 +1016,6 @@ def _assert_local_clean(ch, user_msg_id, chat_id):
     assert user_msg_id not in ch._msg_ctx
     assert user_msg_id not in ch.exchange.inflight
     assert user_msg_id not in ch._msg_chat
-    assert user_msg_id not in ch._leases
     assert chat_id not in ch._chat_inflight
 
 
@@ -1101,7 +1023,7 @@ class TestPostgresChannelTurnLifecycle:
     """Lifecycle-инвариант: после финала (любого пути) локальное состояние
     полностью очищено. Каждый тест поднимает «захваченную задачу» через
     ``_claim_task`` и затем отправляет финальный outbound. Если канал
-    оставляет хвосты (ctx/inflight/lease/chat), соответствующий
+    оставляет хвосты (ctx/inflight/chat), соответствующий
     ассерт упадёт — это и есть «репродукция бага».
     """
 
@@ -1114,7 +1036,7 @@ class TestPostgresChannelTurnLifecycle:
         mock_db.async_transaction.return_value.__aenter__.return_value = conn
 
         ch = _make_channel(
-            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+            (PostgresChannel, None, mock_db),
         )
         _claim_task(ch, user_msg_id="m-1", chat_id="chat-1", assistant_msg_id="a-1")
 
@@ -1127,7 +1049,6 @@ class TestPostgresChannelTurnLifecycle:
 
         _assert_local_clean(ch, "m-1", "chat-1")
         claim_sqls = [c.args[0] for c in conn.execute.call_args_list]
-        assert any("DELETE FROM" in s and "agent_worker_claims" in s for s in claim_sqls)
         assert any("UPDATE" in s and "completed" in s for s in claim_sqls)
 
     @pytest.mark.asyncio
@@ -1139,7 +1060,7 @@ class TestPostgresChannelTurnLifecycle:
         mock_db.async_transaction.return_value.__aenter__.return_value = conn
 
         ch = _make_channel(
-            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+            (PostgresChannel, None, mock_db),
         )
         _claim_task(ch, user_msg_id="m-2", chat_id="chat-2", assistant_msg_id="a-2")
 
@@ -1165,7 +1086,7 @@ class TestPostgresChannelTurnLifecycle:
         mock_db.async_transaction.return_value.__aenter__.return_value = conn
 
         ch = _make_channel(
-            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+            (PostgresChannel, None, mock_db),
         )
         _claim_task(ch, user_msg_id="m-3", chat_id="chat-3", assistant_msg_id="a-3")
         ch._stream_buffers["s-3"] = "Hello streamed world"
@@ -1200,7 +1121,7 @@ class TestPostgresChannelTurnLifecycle:
         mock_db.async_transaction.return_value.__aenter__.return_value = conn
 
         ch = _make_channel(
-            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+            (PostgresChannel, None, mock_db),
         )
         _claim_task(ch, user_msg_id="m-4", chat_id="chat-4", assistant_msg_id="a-4")
         ch._stream_buffers["s-4"] = ""
@@ -1231,7 +1152,7 @@ class TestPostgresChannelTurnLifecycle:
         mock_db.async_transaction.return_value.__aenter__.return_value = conn
 
         ch = _make_channel(
-            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+            (PostgresChannel, None, mock_db),
         )
         _claim_task(ch, user_msg_id="m-5", chat_id="chat-5", assistant_msg_id="a-5")
 
@@ -1260,7 +1181,7 @@ class TestPostgresChannelTurnLifecycle:
         mock_db.async_transaction.return_value.__aenter__.return_value = conn
 
         ch = _make_channel(
-            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+            (PostgresChannel, None, mock_db),
         )
         _claim_task(ch, user_msg_id="m-6", chat_id="chat-6", assistant_msg_id="a-6")
 
@@ -1305,7 +1226,7 @@ class TestPostgresChannelLifecycleDiagnostics:
         mock_db.async_transaction.return_value.__aenter__.return_value = conn
 
         ch = _make_channel(
-            (PostgresChannel, None, mock_db), claim_strategy="worker_pool",
+            (PostgresChannel, None, mock_db),
         )
         _claim_task(ch, user_msg_id="m-L", chat_id="chat-L", assistant_msg_id="a-L")
 
@@ -1340,7 +1261,7 @@ class TestPostgresChannelUnstickProcessing:
     ``conn.fetchrow`` для чтения metadata. Тест проверяет:
       - возвращённый список содержит id восстановленных задач;
       - DB получает UPDATE status='pending' (retry < max) или 'failed';
-      - ``_unstick_loop`` чистит ``_msg_ctx``, ``_leases``, ``exchange.inflight``.
+      - ``_unstick_loop`` чистит ``_msg_ctx``, ``exchange.inflight``.
     """
 
     @pytest.mark.asyncio
@@ -1384,7 +1305,6 @@ class TestPostgresChannelUnstickProcessing:
         for msg_id in recovered:
             if msg_id in ch._msg_ctx or msg_id in ch.exchange.inflight:
                 ch._msg_ctx.pop(msg_id, None)
-                ch._leases.discard(msg_id)
                 ch._release_slot(msg_id)
 
         _assert_local_clean(ch, "m-loop", "chat-loop")

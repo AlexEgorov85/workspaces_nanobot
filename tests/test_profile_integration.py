@@ -28,7 +28,7 @@ from config import (
 
 
 # ---------------------------------------------------------------------------
-# 1. validate_profile_overlay — только 6 разрешённых ключей
+# 1. validate_profile_overlay — только 5 разрешённых ключей
 # ---------------------------------------------------------------------------
 
 
@@ -40,7 +40,6 @@ def test_validate_profile_overlay_rejects_dsn():
                 "table_name":     "agent_conversation_messages_test",
                 "messages_table": "agent_session_messages_test",
                 "meta_table":     "agent_session_meta_test",
-                "claims_table":   "agent_worker_claims_test",
                 "dsn":            "postgresql://other_db/test",  # ЗАПРЕЩЕНО
             }
         },
@@ -56,14 +55,13 @@ def test_validate_profile_overlay_rejects_dsn():
 
 
 def test_validate_profile_overlay_accepts_only_allowed_keys():
-    """Шесть разрешённых runtime-ключей — без посторонних."""
+    """Пять разрешённых runtime-ключей — без посторонних."""
     overlay = {
         "channels": {
             "postgres": {
                 "table_name":     "agent_conversation_messages_test",
                 "messages_table": "agent_session_messages_test",
                 "meta_table":     "agent_session_meta_test",
-                "claims_table":   "agent_worker_claims_test",
             }
         },
         "logging": {
@@ -83,7 +81,6 @@ def test_validate_profile_overlay_rejects_vector_storage():
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -107,13 +104,12 @@ def test_validate_profile_overlay_rejects_vector_storage():
 
 
 def test_validate_runtime_isolation_test_mode_matches():
-    """В test все 6 runtime-таблиц должны иметь точные test-имена."""
+    """В test все 5 runtime-таблиц должны иметь точные test-имена."""
     cfg = {
         "channels": {"postgres": {
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -130,7 +126,6 @@ def test_validate_runtime_isolation_test_mode_rejects_foo_test():
             "table_name":     "foo_test",  # неправильно
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -148,7 +143,6 @@ def test_validate_runtime_isolation_prod_mode_matches():
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -165,7 +159,6 @@ def test_validate_runtime_isolation_prod_mode_rejects_test_suffix():
             "table_name":     "agent_conversation_messages_test",  # неправильно для prod
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -192,7 +185,6 @@ def test_profile_wins_over_session_manager_and_config_json(isolated_project):
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -212,7 +204,6 @@ def test_profile_wins_over_session_manager_and_config_json(isolated_project):
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -224,7 +215,6 @@ def test_profile_wins_over_session_manager_and_config_json(isolated_project):
     assert cfg["channels"]["postgres"]["messages_table"] == "agent_session_messages_test"
     assert cfg["channels"]["postgres"]["table_name"] == "agent_conversation_messages_test"
     assert cfg["channels"]["postgres"]["meta_table"] == "agent_session_meta_test"
-    assert cfg["channels"]["postgres"]["claims_table"] == "agent_worker_claims_test"
     assert cfg["logging"]["db"]["table_name"] == "agent_gateway_logs_test"
     assert cfg["logging"]["db"]["question_runs_table"] == "agent_question_runs_test"
 
@@ -239,7 +229,6 @@ def test_profile_wins_when_session_manager_uses_test_but_config_uses_prod(isolat
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -259,7 +248,6 @@ def test_profile_wins_when_session_manager_uses_test_but_config_uses_prod(isolat
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -281,7 +269,6 @@ def test_session_manager_can_override_pool_but_not_runtime_tables(isolated_proje
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
             "pool": {"min_conn": 1, "max_conn": 4, "pool_timeout": 5.0},
         }},
         "logging": {"db": {
@@ -300,7 +287,6 @@ def test_session_manager_can_override_pool_but_not_runtime_tables(isolated_proje
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -321,7 +307,6 @@ def test_prod_profile_uses_pure_project_json(isolated_project):
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -350,7 +335,6 @@ def test_test_mode_without_overlay_fails(isolated_project):
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -414,7 +398,6 @@ def test_resolver_accepts_whitelist_test(tmp_path_factory) -> None:
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -428,7 +411,6 @@ def test_resolver_accepts_whitelist_test(tmp_path_factory) -> None:
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -472,7 +454,6 @@ def test_secrets_env_loaded_and_exported_to_env(monkeypatch, tmp_path):
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -485,7 +466,6 @@ def test_secrets_env_loaded_and_exported_to_env(monkeypatch, tmp_path):
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -518,7 +498,6 @@ def test_secrets_env_optional(monkeypatch, tmp_path):
             "table_name":     "agent_conversation_messages",
             "messages_table": "agent_session_messages",
             "meta_table":     "agent_session_meta",
-            "claims_table":   "agent_worker_claims",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs",
@@ -531,7 +510,6 @@ def test_secrets_env_optional(monkeypatch, tmp_path):
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -552,7 +530,6 @@ def test_validate_runtime_isolation_fails_for_wrong_names(isolated_project):
             "table_name":     "foo_test",  # неправильно
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -564,18 +541,18 @@ def test_validate_runtime_isolation_fails_for_wrong_names(isolated_project):
 
 
 # ---------------------------------------------------------------------------
-# 8. validate_profile_overlay симметричная (требует все 6 ключей)
+# 8. validate_profile_overlay симметричная (требует все 5 ключей)
 # ---------------------------------------------------------------------------
 
 
-def test_validate_profile_overlay_requires_all_six_keys():
+def test_validate_profile_overlay_requires_all_keys():
     """Симметричная проверка: profiles/<mode>.jsonc должен содержать
-    ВСЕ 6 profile-owned runtime-ключей — отсутствие любого из них =
+    ВСЕ 5 profile-owned runtime-ключей — отсутствие любого из них =
     fail-fast, а не молчаливая подмена дефолтами."""
     partial_overlay = {
         "channels": {"postgres": {
             "messages_table": "agent_session_messages_test",
-            # остальные 5 ключей отсутствуют
+            # остальные 4 ключа отсутствуют
         }},
     }
     with pytest.raises(ConfigurationError, match="обязательн"):
@@ -583,13 +560,12 @@ def test_validate_profile_overlay_requires_all_six_keys():
 
 
 def test_validate_profile_overlay_accepts_complete_overlay():
-    """Полный оверлей (все 6 ключей) — проходит."""
+    """Полный оверлей (все 5 ключей) — проходит."""
     complete = {
         "channels": {"postgres": {
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
         }},
         "logging": {"db": {
             "table_name":          "agent_gateway_logs_test",
@@ -606,7 +582,6 @@ def test_validate_profile_overlay_rejects_extra_keys():
             "table_name":     "agent_conversation_messages_test",
             "messages_table": "agent_session_messages_test",
             "meta_table":     "agent_session_meta_test",
-            "claims_table":   "agent_worker_claims_test",
             "dsn":            "postgresql://other_db/test",  # ЗАПРЕЩЕНО
         }},
         "logging": {"db": {

@@ -11,11 +11,9 @@
         "dsn": "postgresql://user:pass@localhost:5432/nanobot",
         "schema": "public",
         "table_name": "agent_conversation_messages",
-        "claims_table": "agent_worker_claims",
         "poll_interval": 2.0,
         "max_concurrent": 1,
         "processing_timeout": 300,
-        "lease_interval": 15.0,
         "error_retry_delay": 60.0,
         "max_stuck_retries": 3,
         "worker_id": ""
@@ -33,7 +31,6 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-import psycopg2
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
@@ -87,9 +84,10 @@ class PostgresChannel(BaseChannel):
     Жизненный цикл сообщения:
 
         1. Пользователь пишет сообщение → INSERT с status='pending'
-        2. ``_claim_one`` атомарно захватывает задачу: INSERT claim в
-           ``agent_worker_claims`` (UNIQUE PK — арбитр эксклюзивности) +
-           UPDATE status='processing'
+        2. ``_claim_one`` атомарно захватывает задачу:
+           ``UPDATE ... WHERE id = (SELECT ... WHERE status='pending' ..)``
+           — если задача уже переведена в processing, повторный UPDATE
+           не срабатывает, и второй захват невозможен
         3. ``_handle_message`` отправляет в шину → агенту
         4. Агент формирует ответ → ``send()`` пишет status='completed'
            и удаляет claim
@@ -150,31 +148,22 @@ class PostgresChannel(BaseChannel):
         self._flush_interval: float = float(_get("flush_interval", 2.0))
 
         # ---- мульти-машинный пул воркеров (аренда задач через claims) ----
-        # Уникальный идентификатор этого воркера: либо явный из конфига,
+        # ---- идентификация воркера (только для логов и вывода активности) ----
+        # Уникальный идентификатор этого инстанса: либо явный из конфига,
         # либо авто-генерируемый {hostname}:{pid}:{rand8}.
         self._worker_id: str = (_get("worker_id") or "").strip()
         if not self._worker_id:
             self._worker_id = (
                 f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
             )
-        self._claims_table: str = _get("claims_table", "agent_worker_claims")
-        self._fq_claims: str = f"{self._schema}.{self._claims_table}"
-        # период heartbeat-продления аренды (сек)
-        self._lease_interval: float = float(_get("lease_interval", 15.0))
         # пауза перед повторным захватом задачи со статусом error (сек)
         self._error_retry_delay: int = int(_get("error_retry_delay", 60))
-        # task_id задач, аренда которых сейчас принадлежит этому воркеру
-        self._leases: set[str] = set()
-        self._lease_task: asyncio.Task | None = None
-
-        # ---- режим аренды (gateway.parallel.claim_strategy) ----
-        # ``single`` (дефолт) — захват задачи через ``UPDATE ... RETURNING`` без
-        # таблицы ``agent_worker_claims`` (как в v2.3.1). Подходит для
-        # одиночного инстанса gateway.
-        # ``worker_pool`` — захват через ``INSERT INTO agent_worker_claims``
-        # + lease/heartbeat для координации нескольких инстансов gateway.
-        # Подробности: docs/ARCHITECTURE.md § «Глобальный рубильник параллельности».
-        self._claim_strategy: str = _get("claim_strategy", "single")
+        # task_id задач, которые захвачены этим инстансом прямо сейчас.
+        # Множество локальное: состояние захвата хранится в самой строке
+        # задачи (status='processing'), поэтому heartbeat и таблица
+        # аренды не нужны. Используется для возврата незавершённых задач
+        # в пул при остановке.
+        self._claimed_ids: set[str] = set()
 
         # ---- вывод активности пула воркеров в терминал ----
         # Включается в gateway отключаемой опцией `gateway.print_worker_activity`
@@ -224,11 +213,10 @@ class PostgresChannel(BaseChannel):
         self._flush_task: asyncio.Task | None = None
 
         # ---- откат зависших processing (single-режим) ----
-        # В single-режиме ``_unstick_processing`` запускается в фоновой задаче
-        # с интервалом ``unstick_interval`` (по дефолту = processing_timeout / 5,
-        # минимум 60 сек). Это убирает SELECT+UPDATE каждые poll_interval на
-        # пустом столе (когда ничего зависшего нет). В worker_pool-режиме
-        # reclaim/heal делает ``_lease_loop`` через ``agent_worker_claims``.
+        # ``_unstick_processing`` запускается в фоновой задаче с интервалом
+        # ``unstick_interval`` (по дефолту = processing_timeout / 5, минимум
+        # 60 сек). Это убирает SELECT+UPDATE каждые poll_interval на
+        # пустом столе (когда ничего зависшего нет).
         self._unstick_interval: float = max(
             60.0,
             float(_get("unstick_interval", max(60.0, self._processing_timeout / 5))),
@@ -281,31 +269,26 @@ class PostgresChannel(BaseChannel):
         return self._file_store
 
     async def start(self) -> None:
-        """Запустить циклы опроса БД, продления аренды и сброса рассуждений."""
+        """Запустить циклы опроса БД и сброса рассуждений."""
         self._running = True
         self._flush_task = asyncio.create_task(self._flush_reasoning_loop())
-        if self._claim_strategy == "worker_pool":
-            self._lease_task = asyncio.create_task(self._lease_loop())
-        else:
-            self._lease_task = None
-            # single-режим: фоновый unstick с интервалом unstick_interval (по
-            # дефолту значительно больше poll_interval — чтобы не дёргать БД
-            # каждые 10 сек на пустом столе)
-            self._unstick_task = asyncio.create_task(self._unstick_loop())
+        # Фоновый unstick с интервалом unstick_interval (по дефолту
+        # значительно больше poll_interval — чтобы не дёргать БД каждые
+        # 10 сек на пустом столе).
+        self._unstick_task = asyncio.create_task(self._unstick_loop())
         await self.exchange.start()
         self.logger.info(
             "Polling {} every {}s (processing timeout {}s, worker_id={}, "
-            "claim_strategy={}, unstick_interval={}s)",
+            "unstick_interval={}s)",
             self._fq_table,
             self._poll_interval,
             self._processing_timeout,
             self._worker_id,
-            self._claim_strategy,
             self._unstick_interval,
         )
 
     async def stop(self) -> None:
-        """Остановить все циклы, освободить аренды и сбросить рассуждения."""
+        """Остановить все циклы и сбросить рассуждения."""
         self._running = False
         await self.exchange.stop()
         await self._flush_reasoning()
@@ -318,241 +301,35 @@ class PostgresChannel(BaseChannel):
             with suppress(asyncio.CancelledError):
                 await self._unstick_task
             self._unstick_task = None
-        if self._lease_task:
-            self._lease_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._lease_task
-            self._lease_task = None
-        # Вернуть незавершённые задачи в пул (другие воркеры их подберут).
-        await self._release_all_leases()
+        # Вернуть незавершённые задачи в пул (их подберёт следующий цикл).
+        await self._return_claimed_to_pool()
         # db — глобальный singleton из utils.db, закрывается при выходе
         # из процесса. Явно не закрываем, чтобы не сломать другие каналы.
 
-    # ------------------------------------------------------------------
-    # Аренда задач (lease) — heartbeat и reclaim
-    # ------------------------------------------------------------------
+    async def _return_claimed_to_pool(self) -> None:
+        """Вернуть незавершённые задачи этого инстанса в пул при остановке.
 
-    async def _lease_loop(self) -> None:
-        """Фоновая задача: периодически продлевает аренды и возвращает
-        задачи с истёкшими арендами обратно в пул.
-
-        Каждые ``_lease_interval`` секунд:
-          1. heartbeat — продлить ``lease_until`` для своих аренд;
-          2. ``_reclaim_and_heal`` — вернуть в пул задачи, чьи lease истекли
-             (с быстрым гейтом ``_reclaim_needed``: на пустом столе, где нет
-             ни ``processing``-строк, ни claims, тяжёлая транзакция из
-             4 UPDATE/DELETE пропускается).
-
-        Порядок важен: heartbeat идёт **первым**, иначе задержка тика
-        (заблокированный event loop, медленная БД) приведёт к тому, что
-        воркер отзовёт собственную живую задачу.
-
-        В single-режиме (``claim_strategy == "single"``) метод — no-op.
-        Lease-loop не запускается (см. ``start()``), но гард защищает от
-        случайного вызова.
+        Задачи возвращаются в ``pending`` (если всё ещё ``processing``), и их
+        assistant-placeholder удаляется, чтобы следующий захват не нашёл
+        оборванный ответ. Таблица аренды не используется: состояние захвата
+        хранится в самой строке задачи.
         """
-        if self._claim_strategy != "worker_pool":
-            return
-        while self._running:
-            await asyncio.sleep(self._lease_interval)
-            try:
-                if self._leases:
-                    await execute(
-                        f"UPDATE {self._fq_claims} SET lease_until = "
-                        f"NOW() + interval '1 second' * %s WHERE worker_id = %s",
-                        self._processing_timeout, self._worker_id,
-                    )
-                if await self._reclaim_needed():
-                    await self._reclaim_and_heal()
-            except Exception as e:
-                self.logger.error("Lease loop error: {}", e)
-                self._journal_event(
-                    event_type="channel_lease_error",
-                    summary=f"lease/heartbeat loop failed: {e}",
-                    payload={
-                        "component": "_lease_loop",
-                        "error_type": type(e).__name__,
-                        "error": str(e),
-                    },
-                )
-
-    async def _reclaim_needed(self) -> bool:
-        """Быстрый гейт перед тяжёлым reclaim: есть ли вообще работа.
-
-        Возвращает False, если в таблице нет ни одной ``processing``-строки и
-        в ``claims`` нет ни одной аренды — тогда полному ``_reclaim_and_heal``
-        (транзакция из 4 UPDATE/DELETE) делать нечего, и он пропускается.
-        Это убирает лишние обращения к БД на пустом столе при каждом тике
-        ``_lease_loop``.
-
-        При ошибке проверки возвращает True — безопаснее прогнать полный
-        reclaim, чем пропустить что-то зависшее.
-
-        В single-режиме возвращает False сразу (claims не используются).
-        """
-        if self._claim_strategy != "worker_pool":
-            return False
-        try:
-            return bool(
-                await fetchval(
-                    f"SELECT EXISTS (SELECT 1 FROM {self._fq_table} "
-                    f"WHERE status = 'processing') "
-                    f"OR EXISTS (SELECT 1 FROM {self._fq_claims})"
-                )
-            )
-        except Exception:
-            return True
-
-    async def _reclaim_and_heal(self) -> None:
-        """Вернуть задачи с истёкшими арендами и вылечить рассинхроны claims.
-
-        Инвариант: ``processing ⇔ claim``. Нарушения чинятся в одной
-        транзакции:
-
-          1. Reclaim: истёкшие lease удаляются, их задачи возвращаются в
-             ``pending`` (или ``failed`` при исчерпании лимита retry),
-             assistant-placeholder удаляется.
-          2. Heal: ``processing`` без claim → ``error`` (аномалия, будет
-             повторена после ``error_retry_delay``).
-          3. Orphaned assistant (``processing`` без живой user-пары) →
-             ``failed``.
-          4. Висячая аренда: claim есть, а задача не в ``processing``
-             (уже completed/pending/error) — удаляется как мусор.
-
-        Аренды, которые этот воркер держит в памяти (``_leases``), из
-        reclaim исключаются: задача физически обрабатывается здесь, и
-        отзыв истёкшего lease привёл бы к дублю обработки и удалению
-        живого assistant-placeholder.
-
-        В single-режиме — no-op (claims не используются).
-        """
-        if self._claim_strategy != "worker_pool":
+        if not self._claimed_ids:
             return
         async with transaction() as conn:
-            # 1. Reclaim по истечению lease (кроме своих живых аренд)
-            own = list(self._leases)
-            if own:
-                rows = await conn.fetch(
-                    f"DELETE FROM {self._fq_claims} WHERE lease_until < NOW() "
-                    f"AND NOT (task_id = ANY(%s::uuid[]) AND worker_id = %s) "
-                    f"RETURNING task_id, worker_id",
-                    own, self._worker_id,
-                )
-            else:
-                rows = await conn.fetch(
-                    f"DELETE FROM {self._fq_claims} WHERE lease_until < NOW() "
-                    f"RETURNING task_id, worker_id"
-                )
-            for r in rows:
-                msg_id = str(r["task_id"])
-                meta_row = await conn.fetchrow(
-                    f"SELECT metadata FROM {self._fq_table} WHERE id = %s",
-                    msg_id,
-                )
-                meta = _decode_jsonb(meta_row["metadata"]) if meta_row else {}
-                retry_count = meta.get("retry_count", 0) + 1
-                meta["retry_count"] = retry_count
-                if retry_count >= self._max_stuck_retries:
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'failed', "
-                        f"metadata = %s, updated_at = NOW() "
-                        f"WHERE id = %s AND status = 'processing'",
-                        meta, msg_id,
-                    )
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'failed', "
-                        f"updated_at = NOW() WHERE reply_to = %s "
-                        f"AND role = 'assistant' AND status = 'processing'",
-                        msg_id,
-                    )
-                    self.logger.warning(
-                        "Reclaimed user msg {} exceeded max retries ({}/{})",
-                        msg_id, retry_count, self._max_stuck_retries,
-                    )
-                else:
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'pending', "
-                        f"metadata = %s, updated_at = NOW() "
-                        f"WHERE id = %s AND status = 'processing'",
-                        meta, msg_id,
-                    )
-                    await conn.execute(
-                        f"DELETE FROM {self._fq_table} WHERE reply_to = %s "
-                        f"AND role = 'assistant' AND status IN ('processing', 'failed')",
-                        msg_id,
-                    )
-                    self.logger.warning(
-                        "Reclaimed stuck user msg {} (retry {}/{})",
-                        msg_id, retry_count, self._max_stuck_retries,
-                    )
-
-            # 2. Heal: processing без claim — повторяемая ошибка
-            await conn.execute(
-                f"UPDATE {self._fq_table} SET status = 'error', "
-                f"updated_at = NOW() "
-                f"WHERE role = 'user' AND status = 'processing' "
-                f"AND NOT EXISTS (SELECT 1 FROM {self._fq_claims} c "
-                f"WHERE c.task_id = {self._fq_table}.id)"
-            )
-
-            # 3. Orphaned assistant-сообщения (без живой user-пары)
-            await conn.execute(
-                f"UPDATE {self._fq_table} SET status = 'failed', "
-                f"updated_at = NOW() WHERE role = 'assistant' "
-                f"AND status = 'processing' AND NOT EXISTS "
-                f"(SELECT 1 FROM {self._fq_table} u "
-                f"WHERE u.id = {self._fq_table}.reply_to AND u.role = 'user')"
-            )
-
-            # 4. Висячие аренды: claim есть, а задача не в обработке — мусор
-            await conn.execute(
-                f"DELETE FROM {self._fq_claims} c "
-                f"WHERE NOT EXISTS (SELECT 1 FROM {self._fq_table} m "
-                f"WHERE m.id = c.task_id AND m.status = 'processing')"
-            )
-
-    async def _delete_claim(self, conn: Any | None, task_id: str) -> None:
-        """Удалить claim задачи из ``agent_worker_claims``.
-
-        В single-режиме (``claim_strategy == "single"``) — no-op: таблица
-        ``agent_worker_claims`` не используется, физически ничего не пишется.
-        В worker_pool пишет DELETE в указанную транзакцию (или одноразовый
-        ``execute`` через пул, если ``conn=None``).
-        """
-        if self._claim_strategy != "worker_pool":
-            return
-        sql = (
-            f"DELETE FROM {self._fq_claims} "
-            f"WHERE task_id = %s AND worker_id = %s"
-        )
-        if conn is not None:
-            await conn.execute(sql, task_id, self._worker_id)
-        else:
-            await execute(sql, task_id, self._worker_id)
-
-    async def _release_all_leases(self) -> None:
-        """Освободить все аренды этого воркера при остановке.
-
-        Задачи возвращаются в ``pending`` (если всё ещё ``processing``),
-        claims удаляются (только в worker_pool), assistant-placeholder — тоже.
-        """
-        if not self._leases:
-            return
-        async with transaction() as conn:
-            for task_id in list(self._leases):
+            for task_id in list(self._claimed_ids):
                 await conn.execute(
                     f"UPDATE {self._fq_table} SET status = 'pending', "
                     f"updated_at = NOW() "
                     f"WHERE id = %s AND status = 'processing'",
                     task_id,
                 )
-                await self._delete_claim(conn, task_id)
                 await conn.execute(
                     f"DELETE FROM {self._fq_table} WHERE reply_to = %s "
                     f"AND role = 'assistant' AND status = 'processing'",
                     task_id,
                 )
-        self._leases.clear()
+        self._claimed_ids.clear()
 
     # ------------------------------------------------------------------
     # Активность пула воркеров (опциональный вывод в терминал gateway)
@@ -613,7 +390,7 @@ class PostgresChannel(BaseChannel):
         """Долговечно записать ошибку канала в ``agent_gateway_logs``.
 
         Дублирует loguru-строку из циклов опроса БД (``poll_inbound`` /
-        ``_lease_loop`` / ``_unstick_loop``) в журнал ``DbLoggingService``,
+        ``_unstick_loop``) в журнал ``DbLoggingService``,
         чтобы «тихие» сбои были видны и post-factum (``history_search``,
         дашборды), а не только в терминале. Нет ``DbLoggingService``
         (``None`` — тесты/standalone) или он не запущен — no-op:
@@ -827,7 +604,7 @@ class PostgresChannel(BaseChannel):
             return False
 
         user_msg_id = str(row["id"])
-        self._leases.add(user_msg_id)
+        self._claimed_ids.add(user_msg_id)
         chat_id = str(row["chat_id"]) if row["chat_id"] else str(row["user_id"])
         user_id = str(row["user_id"]) if row["user_id"] else chat_id
         self._lifecycle_log("priority_claimed", user_msg_id, chat_id=chat_id)
@@ -843,8 +620,7 @@ class PostgresChannel(BaseChannel):
                 "user_stop_signal: priority skipping cancelled msg {} (chat={})",
                 user_msg_id, chat_id,
             )
-            await self._delete_claim(None, user_msg_id)
-            self._leases.discard(user_msg_id)
+            self._claimed_ids.discard(user_msg_id)
             self._msg_ctx.pop(user_msg_id, None)
             return False
 
@@ -895,8 +671,7 @@ class PostgresChannel(BaseChannel):
         # ``bus.publish_inbound`` доставит ``/stop`` в AgentLoop.run(),
         # где ``commands.is_priority(raw)`` инициирует ``cmd_stop`` →
         # ``_cancel_active_tasks(effective_key)``.
-        await self._delete_claim(None, user_msg_id)
-        self._leases.discard(user_msg_id)
+        self._claimed_ids.discard(user_msg_id)
         self._msg_ctx.pop(user_msg_id, None)
         self._msg_chat.pop(user_msg_id, None)
         self._activity_print(
@@ -909,10 +684,9 @@ class PostgresChannel(BaseChannel):
         """Хук транспорта для ``MessageExchange``: берет новое сообщение из БД.
 
         Откат зависших ``processing``:
-          * single-режим — фоновая задача ``_unstick_loop`` каждые
-            ``unstick_interval`` секунд (по дефолту значительно больше
-            ``poll_interval``, чтобы не дёргать БД на пустом столе).
-          * worker_pool — ``_lease_loop`` через таблицу ``agent_worker_claims``.
+          * фоновая задача ``_unstick_loop`` каждые ``unstick_interval``
+            секунд (по дефолту значительно больше ``poll_interval``, чтобы
+            не дёргать БД на пустом столе).
 
         Возвращает True, если сообщение обработано.
         """
@@ -938,11 +712,8 @@ class PostgresChannel(BaseChannel):
     async def _unstick_processing(self) -> list[str]:
         """Освободить сообщения, зависшие в ``processing`` дольше таймаута.
 
-        Используется в single-режиме как замена reclaim/heal из worker_pool.
         Вызывается из фоновой ``_unstick_loop`` раз в ``unstick_interval``
-        секунд (по дефолту ~processing_timeout/5, минимум 60 сек). В
-        worker_pool это делает ``_lease_loop`` через таблицу
-        ``agent_worker_claims``.
+        секунд (по дефолту ~processing_timeout/5, минимум 60 сек).
 
         Механизм:
           — ``processing`` дольше ``processing_timeout`` → повторная попытка.
@@ -953,7 +724,7 @@ class PostgresChannel(BaseChannel):
         Возвращает список ``user_msg_id``, которые были фактически
         восстановлены (возвращены в ``pending`` или терминально ``failed``).
         Это позволяет вызывающему коду очистить локальное состояние
-        (``_msg_ctx``, ``_leases``, ``_msg_chat``, ``_chat_inflight``,
+        (``_msg_ctx``, ``_claimed_ids``, ``_msg_chat``, ``_chat_inflight``,
         ``exchange.inflight``) для задач, которые этот воркер уже
         «забыл» — иначе после ``unstick`` локал остался бы занятым, и
         polling не взял бы новые сообщения.
@@ -1025,13 +796,12 @@ class PostgresChannel(BaseChannel):
     async def _unstick_loop(self) -> None:
         """Фоновая задача: периодически откатывает зависшие ``processing``.
 
-        Используется только в single-режиме (worker_pool делает это через
-        ``_lease_loop`` + ``agent_worker_claims``). Интервал — значительно
-        больше ``poll_interval``, чтобы на пустом столе ``SELECT зависших``
-        не выполнялся каждые ``poll_interval`` секунд.
+        Интервал — значительно больше ``poll_interval``, чтобы на пустом
+        столе ``SELECT зависших`` не выполнялся каждые ``poll_interval``
+        секунд.
 
         Для каждого восстановленного ``user_msg_id`` снимает локальное
-        состояние воркера (``_msg_ctx``, ``_leases``, ``_msg_chat``,
+        состояние воркера (``_msg_ctx``, ``_claimed_ids``, ``_msg_chat``,
         ``_chat_inflight``, ``exchange.inflight``). Без этого воркер
         остался бы с заполненным слотом, и polling не поднял бы новые
         сообщения даже после восстановления БД.
@@ -1045,7 +815,7 @@ class PostgresChannel(BaseChannel):
                 for msg_id in recovered:
                     if msg_id in self._msg_ctx or msg_id in self.exchange.inflight:
                         self._msg_ctx.pop(msg_id, None)
-                        self._leases.discard(msg_id)
+                        self._claimed_ids.discard(msg_id)
                         self._release_slot(msg_id)
                         self.logger.info(
                             "Cleared local state for unstuck msg {}", msg_id,
@@ -1069,107 +839,31 @@ class PostgresChannel(BaseChannel):
     ) -> dict | None:
         """Атомарно захватить одну задачу и перевести её в ``processing``.
 
-        Режимы (выбираются через ``claim_strategy``):
-          * ``single`` — захват через ``UPDATE ... RETURNING`` без таблицы
-            ``agent_worker_claims`` (как в v2.3.1). Подходит для одного
-            инстанса gateway. Защита от двойной обработки между инстансами
-            опирается на блокировку строки (``WHERE status='pending'`` в
-            подзапросе + ``UPDATE WHERE status='pending'``). Дополнительный
-            фильтр — чат без активной ``processing`` user-задачи.
-          * ``worker_pool`` — захват через ``INSERT INTO agent_worker_claims``
-            (UNIQUE PK task_id) как арбитр эксклюзивности для нескольких
-            инстансов. Задача, захваченная другим воркером, не доступна
-            благодаря ``NOT EXISTS (SELECT 1 FROM claims ...)``.
+        Захват идёт одним ``UPDATE ... RETURNING``: подзапрос выбирает самую
+        старую подходящую задачу, внешний ``WHERE`` требует, чтобы её статус
+        всё ещё был ``pending``. Если задачу параллельно взял другой захват,
+        статус уже ``processing``, и повторный UPDATE не срабатывает — двойная
+        обработка невозможна. Таблица аренды не используется: состояние захвата
+        хранится в самой строке задачи. Дополнительный фильтр — чат без
+        активной ``processing`` user-задачи.
 
-        Если ``priority_contents`` задан (кортеж строк) — claim фильтрует
-        только сообщения с ``content`` из этого списка. Используется для
-        priority polling path (см. ``poll_priority_inbound``).
+        user_stop_signal: ``status != 'cancelled'`` в обоих подзапросах — если
+        AW пометил user-сообщение как ``cancelled`` ДО того, как polling успел
+        его захватить, polling его пропускает (race-free: ``UPDATE ... WHERE
+        id = (...)`` сам по себе атомарен, а условие ``status='pending'`` в
+        WHERE подзапроса + ``status != 'cancelled'`` гарантирует, что захват
+        не произойдёт).
 
-        Возвращает строку-кандидата или None, если задач нет.
-        """
-        if self._claim_strategy == "single":
-            return await self._claim_one_single(priority_contents=priority_contents)
-        while True:
-            try:
-                async with transaction() as conn:
-                    priority_clause = ""
-                    params: tuple = (self._error_retry_delay,)
-                    if priority_contents is not None:
-                        priority_clause = "  AND content = ANY(%s)\n"
-                        params = (self._error_retry_delay, list(priority_contents))
-                    row = await conn.fetchrow(
-                        f"""
-                        SELECT id, chat_id, user_id, content, media,
-                               metadata, created_at
-                        FROM {self._fq_table}
-                        WHERE role = 'user'
-                          AND (
-                              status = 'pending'
-                              OR (status = 'error'
-                                  AND updated_at + interval '1 second' * %s < NOW())
-                          )
-                          AND status != 'cancelled'
-{priority_clause}                          AND NOT EXISTS (
-                              SELECT 1 FROM {self._fq_claims} c
-                              WHERE c.task_id = {self._fq_table}.id
-                          )
-                          AND NOT EXISTS (
-                              SELECT 1 FROM {self._fq_table} m2
-                              WHERE m2.chat_id = {self._fq_table}.chat_id
-                                AND m2.role = 'user'
-                                AND m2.status = 'processing'
-                          )
-                        ORDER BY created_at ASC
-                        LIMIT 1
-                        """,
-                        *params,
-                    )
-                    if row is None:
-                        return None
-                    task_id = str(row["id"])
-                    await conn.execute(
-                        f"INSERT INTO {self._fq_claims} "
-                        f"(task_id, worker_id, claimed_at, lease_until, created_at) "
-                        f"VALUES (%s, %s, NOW(), "
-                        f"NOW() + interval '1 second' * %s, NOW())",
-                        task_id, self._worker_id, self._processing_timeout,
-                    )
-                    await conn.execute(
-                        f"UPDATE {self._fq_table} SET status = 'processing', "
-                        f"updated_at = NOW() WHERE id = %s",
-                        task_id,
-                    )
-                    return row
-            except psycopg2.IntegrityError:
-                # другой воркер только что захватил этого кандидата —
-                # транзакция откачена, пробуем следующего
-                self.logger.debug("Claim lost (unique violation), retrying")
+        Если ``priority_contents`` задан (кортеж строк) — добавляется фильтр
+        ``AND content = ANY(%s)`` в обоих WHERE. Используется для priority
+        polling path (например, ``/stop``, ``/restart``, ``/status``).
 
-    async def _claim_one_single(
-        self,
-        *,
-        priority_contents: tuple[str, ...] | None = None,
-    ) -> dict | None:
-        """Single-режим: захват задачи через ``UPDATE ... RETURNING``.
-
-        Атомарность обеспечивается подзапросом ``SELECT ... WHERE
-        status='pending'`` + ``UPDATE ... WHERE status='pending'``: если два
-        запроса попытаются взять одну задачу, второй увидит
-        ``status='processing'`` и ничего не захватит (WHERE не сработает).
-        Дополнительная защита — фильтр на чат без активной user-задачи.
-
-        Не обращается к ``agent_worker_claims``.
-
-        user_stop_signal: ``status != 'cancelled'`` в обоих подзапросах —
-        если AW пометил user-сообщение как ``cancelled`` ДО того, как
-        polling успел его захватить, polling его пропускает (race-free:
-        UPDATE ... WHERE id = (...) сам по себе атомарен, а условие
-        ``status='pending'`` в WHERE подзапроса + ``status != 'cancelled'``
-        гарантирует, что захват не произойдёт).
-
-        Если ``priority_contents`` задан (кортеж строк) — добавляется
-        фильтр ``AND content = ANY(%s)`` в обоих WHERE. Используется для
-        priority polling path (например, ``/stop``, ``/restart``, ``/status``).
+        Известный дефект, намеренно не тронутый при снятии протокола аренды:
+        внешний ``AND status = 'pending'`` делает ветку повтора
+        ``status='error'`` в подзапросе недостижимой. Задача, помеченная
+        ``_mark_failed`` как повторяемая ошибка (retry_count <
+        max_stuck_retries), больше не подхватывается и остаётся в ``error``
+        навсегда. Требует отдельного решения — см. CHANGELOG.
         """
         priority_clause = ""
         params: tuple = (self._error_retry_delay,)
@@ -1205,7 +899,6 @@ class PostgresChannel(BaseChannel):
             *params,
         )
         return row
-
     async def _poll_once(self, exchange: MessageExchange) -> bool:
         """Забрать самое старое сообщение (через клейм) и отправить агенту.
 
@@ -1231,7 +924,7 @@ class PostgresChannel(BaseChannel):
             return False  # нет новых сообщений
 
         user_msg_id = str(row["id"])
-        self._leases.add(user_msg_id)
+        self._claimed_ids.add(user_msg_id)
         chat_id = str(row["chat_id"]) if row["chat_id"] else str(row["user_id"])
         user_id = str(row["user_id"]) if row["user_id"] else chat_id
         self._lifecycle_log("claimed", user_msg_id, chat_id=chat_id)
@@ -1252,10 +945,9 @@ class PostgresChannel(BaseChannel):
                 "user_stop_signal: skipping cancelled msg {} (chat={})",
                 user_msg_id, chat_id,
             )
-            # Освобождаем claim (delete + убираем из _leases); статус уже
+            # Снимаем задачу с локального учёта захвата; статус уже
             # 'cancelled' (AW поставил), не трогаем его.
-            await self._delete_claim(None, user_msg_id)
-            self._leases.discard(user_msg_id)
+            self._claimed_ids.discard(user_msg_id)
             self._msg_ctx.pop(user_msg_id, None)
             return False
 
@@ -1270,8 +962,7 @@ class PostgresChannel(BaseChannel):
                 f"updated_at = NOW() WHERE id = %s",
                 user_msg_id,
             )
-            await self._delete_claim(None, user_msg_id)
-            self._leases.discard(user_msg_id)
+            self._claimed_ids.discard(user_msg_id)
             self.logger.debug(
                 "Deferred msg {} from busy chat {}", user_msg_id, chat_id,
             )
@@ -1309,8 +1000,7 @@ class PostgresChannel(BaseChannel):
                 f"updated_at = NOW() WHERE id = %s",
                 user_msg_id,
             )
-            await self._delete_claim(None, user_msg_id)
-            self._leases.discard(user_msg_id)
+            self._claimed_ids.discard(user_msg_id)
             return False
 
         await exchange.acquire_slot()
@@ -1441,14 +1131,13 @@ class PostgresChannel(BaseChannel):
                     "User msg {} failed ({}/{}) [{}]",
                     user_msg_id, retry_count, self._max_stuck_retries, reason,
                 )
-            await self._delete_claim(conn, user_msg_id)
         status = "error" if retry_count < self._max_stuck_retries else "failed"
         self._lifecycle_log(
             "failed", user_msg_id, chat_id=chat_id,
             assistant_msg_id=assistant_msg_id,
             extra={"reason": reason, "status": status},
         )
-        self._leases.discard(user_msg_id)
+        self._claimed_ids.discard(user_msg_id)
         self._msg_ctx.pop(user_msg_id, None)
         self._release_slot(user_msg_id)
         if assistant_msg_id:
@@ -1725,9 +1414,9 @@ class PostgresChannel(BaseChannel):
 
         Инвариант порядка (P0 — «DB-first»):
           1. ``_resolve_turn_context`` — собрать user/assistant/chat
-          2. **DB transaction** (UPDATE assistant → UPDATE user → DELETE claim)
+          2. **DB transaction** (UPDATE assistant → UPDATE user)
           3. Только после успешного commit:
-             ``_msg_ctx.pop`` → ``_leases.discard`` → ``_release_slot``.
+             ``_msg_ctx.pop`` → ``_claimed_ids.discard`` → ``_release_slot``.
           4. На исключении — ``_mark_failed`` (он сам управляет cleanup).
 
         Это исключает ситуацию «локально отпустили, а БД всё ещё processing».
@@ -1800,9 +1489,8 @@ class PostgresChannel(BaseChannel):
                     "user_stop_signal: failed to delete assistant placeholder {}",
                     assistant_msg_id,
                 )
-            await self._delete_claim(None, user_msg_id)
             self._msg_ctx.pop(user_msg_id, None)
-            self._leases.discard(user_msg_id)
+            self._claimed_ids.discard(user_msg_id)
             self._release_slot(user_msg_id)
             if chat_id:
                 self._drop_context_bridge(chat_id)
@@ -1875,7 +1563,6 @@ class PostgresChannel(BaseChannel):
                     f"updated_at = NOW() WHERE id = %s",
                     user_msg_id,
                 )
-                await self._delete_claim(conn, user_msg_id)
             self._lifecycle_log(
                 "db_committed", user_msg_id, chat_id=chat_id,
                 assistant_msg_id=assistant_msg_id,
@@ -1899,7 +1586,7 @@ class PostgresChannel(BaseChannel):
             assistant_msg_id=assistant_msg_id,
         )
         self._msg_ctx.pop(user_msg_id, None)
-        self._leases.discard(user_msg_id)
+        self._claimed_ids.discard(user_msg_id)
         self._release_slot(user_msg_id)
         if chat_id:
             self._drop_context_bridge(chat_id)
@@ -1994,12 +1681,12 @@ class PostgresChannel(BaseChannel):
         Дополнительно:
           — удаляет chat_id из ``_chat_inflight`` (если был)
           — удаляет запись из ``_msg_chat``
-          — снимает задачу с аренды этого воркера (``_leases``)
+          — снимает задачу с локального учёта захвата (``_claimed_ids``)
         """
         if not user_msg_id:
             return
         self.exchange.release_slot(user_msg_id)
-        self._leases.discard(user_msg_id)
+        self._claimed_ids.discard(user_msg_id)
         chat_id = self._msg_chat.pop(user_msg_id, None)
         if chat_id:
             self._chat_inflight.discard(chat_id)
@@ -2044,7 +1731,7 @@ class PostgresChannel(BaseChannel):
             )
             if mid in self._msg_ctx or mid in self.exchange.inflight:
                 self._msg_ctx.pop(mid, None)
-                self._leases.discard(mid)
+                self._claimed_ids.discard(mid)
                 self._release_slot(mid)
         if chat_id:
             self._chat_inflight.discard(chat_id)
@@ -2175,16 +1862,13 @@ class PostgresChannel(BaseChannel):
             "dsn": "postgresql://user:pass@localhost:5432/nanobot",
             "schema": "public",
             "table_name": "agent_conversation_messages",
-            "claims_table": "agent_worker_claims",
             "poll_interval": 2.0,
             "flush_interval": 2.0,
             "max_concurrent": 1,
             "processing_timeout": 600,
-            "lease_interval": 15.0,
             "error_retry_delay": 60.0,
             "max_stuck_retries": 3,
             "worker_id": "",
             "allow_from": ["*"],
-            "claim_strategy": "single",
             "unstick_interval": 120.0,
         }

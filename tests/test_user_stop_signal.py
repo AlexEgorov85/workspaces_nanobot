@@ -110,8 +110,8 @@ def _make_channel(mock_db, **overrides):
     return PostgresChannel(config, bus)
 
 
-class TestClaimOneSingleSkipsCancelled:
-    """Тест SQL-логики _claim_one_single: WHERE status != 'cancelled'."""
+class TestClaimOneSkipsCancelled:
+    """Тест SQL-логики _claim_one: WHERE status != 'cancelled'."""
 
     @pytest.mark.asyncio
     async def test_claim_returns_none_when_user_status_is_cancelled(self, user_stop_signal_mock_db):
@@ -126,7 +126,7 @@ class TestClaimOneSingleSkipsCancelled:
         # только return_value на существующем mock'е из фикстуры.
         db.async_fetchone.return_value = None
 
-        result = await ch._claim_one_single()
+        result = await ch._claim_one()
         assert result is None
 
         # fetchone должен быть вызван с WHERE status != 'cancelled'
@@ -239,10 +239,8 @@ class TestFinalizeTurnDropsCancelled:
         db.async_fetchval.return_value = "cancelled"
 
         # _delete_claim и _release_slot — моки для проверки.
-        ch._delete_claim = AsyncMock()
         ch._release_slot = MagicMock()
         ch._msg_ctx = {"u-1": {}}
-        ch._leases = {"u-1"}
         ch._drop_context_bridge = MagicMock()
 
         # OutboundMessage с content+final_turn.
@@ -338,10 +336,8 @@ class TestFinalizeTurnDropsCancelled:
 
         ch._reasoning_io_lock = _fake_lock()
         # _delete_claim и _release_slot.
-        ch._delete_claim = AsyncMock()
         ch._release_slot = MagicMock()
         ch._msg_ctx = {"u-2": {}}
-        ch._leases = {"u-2"}
         ch._drop_context_bridge = MagicMock()
 
         from nanobot.bus.events import OutboundMessage

@@ -7,7 +7,8 @@
 > **TL;DR для диагноста:** логи — в stderr (loguru, `sys.stderr`); файловый
 > лог только у Streamlit — `logs/streamlit.log`; статистика пула —
 > `CacheLoadService.get_stats()`;
-> целостность пула воркеров — `python tools/check_worker_pool_integrity.py --fix`.
+> зависшие `processing`-задачи — их вернёт в пул фоновый `_unstick_loop`; для
+> разблокировки сразу см. `docs/ARCHITECTURE.md` § «Воркеры не берут задачи».
 
 ---
 
@@ -155,8 +156,6 @@ PowerShell интерпретирует `=` по-своему. Использу�
 
 | Утилита | Назначение |
 |---|---|
-| `python tools/check_worker_pool_integrity.py` | Проверка orphan-claims в `agent_worker_claims` (имя настраивается через `channels.postgres.claims_table`) |
-| `python tools/check_worker_pool_integrity.py --fix` | Возврат задач «мёртвых» воркеров в `pending` + снятие claim |
 | `python tools/diagnose_startup.py --log <PATH>` | Парсер startup-лога gateway/CLI: извлекает секции `Hooks connected` / `Registered N tools` / `Custom (project) tools` / `Runtime patches`, сверяет с каноническими списками из `lib/services/runtime_inventory.py`. Печатает OK / DRIFT / CRITICAL по хукам/project tools/runtime patches. Exit 0 (ОК), 1 (critical), 2 (drift). Опции: `--strict` (warning → exit 1), `--json` (для CI), `--no-color`. См. «Startup-inventory drift» ниже. |
 | `python tools/diagnose_startup.py` (без `--log`) | Читает startup-лог из stdin — удобно для pipe: `python gateway.py --profile=prod 2>&1 \| python tools/diagnose_startup.py --no-color` |
 | `CacheLoadService.get_stats()` | `tables`, `loaded_at`, `loaded_ok`, `errors`, `missing_tables`, `rows_total`, `max_workers` |

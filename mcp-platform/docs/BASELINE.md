@@ -52,6 +52,53 @@ python -m pytest -q
 значит падение не связано с изменениями фазы. В список допустимых падений он
 не входит: при возврате к baseline исчезает сам.
 
+## Дельта фазы 1 — снятие протокола аренды задач
+
+Корневой прогон: **`4 failed, 3999 passed, 31 skipped, 1 xpassed` за 116 с**.
+Падения — те же четыре предсуществующих, ни одного нового.
+
+| | Фаза 0 (после) | Фаза 1 (после) | Дельта |
+|---|---|---|---|
+| Сбор тестов | 4 080 | 4 035 | −45 |
+| passed | 4 036 | 3 999 | −37 |
+| skipped | 39 | 31 | −8 |
+
+`skipped` уменьшился ровно на 8 — это удалённые opt-in интеграционные тесты
+worker-пула (`NANOBOT_INTEGRATION=1` / `NANOBOT_LIVE_E2E=1`), которые и так не
+выполнялись. Уменьшение `passed` на 37 объясняется полностью:
+
+| Файл | Было | Стало | Дельта |
+|---|---|---|---|
+| `tests/test_parallel_modes.py` | 12 | 4 | −8 |
+| `tests/test_postgres_channel_static_audit.py` (удалён) | 8 | 0 | −8 |
+| `tests/integration/test_worker_pool_concurrency.py` (удалён) | 5 | 0 | −5 |
+| `tests/test_single_mode_audit.py` | 14 | 9 | −5 |
+| `tests/test_postgres_channel.py` | 69 | 65 | −4 |
+| `tests/integration/test_worker_pool_real_bot.py` (удалён) | 3 | 0 | −3 |
+| `tests/test_config_keys.py` | 116 | 113 | −3 |
+| `tests/test_project_settings.py` | 62 | 61 | −1 |
+| **Сумма** | | | **−37** |
+
+Оставшиеся 8 из 45 дают параметризованные гарды, чьи наборы параметров
+сократились вместе с удалёнными объектами (в первую очередь
+`test_dependency_direction.py`, `test_single_cache_interface.py`,
+`test_storage_hybridization.py`, `test_remove_vector_index_store_guards.py`).
+Пофайловую сверку снимали сравнением сборки в распакованном снимке `bf3ab48`;
+абсолютные числа такой снимки непригодны как база — в архив не попадают
+неотслеживаемые файлы, по которым параметризуется
+`test_unified_event_logging_pipeline.py` (+156 кейсов артефакта).
+
+**Доказательство, что поведение single-режима не изменилось.** SQL захвата
+извлечён из AST и сравнён: текст в нынешнем `_claim_one` **побайтово равен**
+прежнему `_claim_one_single` (нормализация — только подстановки
+`{self._fq_table}` и `{priority_clause}`).
+
+**Прочие проверки:** `tools/architecture_guard.py` — exit 0; `mcp-platform` —
+`53 passed, 1 skipped`; `ruff` по изменённым файлам `lib/` — те же 4
+предсуществующих находки (`F821` в `postgres_channel.py`, `UP037`, `UP035`,
+`F401`), ни одной новой; `config.py` загружается, три удалённых ключа
+в `channels.postgres` отсутствуют.
+
 ## Baseline платформы
 
 ```bash

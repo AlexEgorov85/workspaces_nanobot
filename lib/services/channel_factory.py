@@ -144,11 +144,6 @@ class ChannelFactory:
             (для распознавания голосовых вложений);
           * ``enabled=True`` + нет ``dsn`` — сообщение об ошибке в
             консоль, канал НЕ создаётся (это явная ошибка конфига).
-
-        ``claim_strategy`` (``channels.postgres.claim_strategy``) управляет
-        режимом аренды задач:
-          * ``"single"`` (дефолт) — один инстанс, без ``agent_worker_claims``;
-          * ``"worker_pool"`` — мульти-машинный пул с lease/heartbeat.
         """
         pg = _section(settings, "channels").get("postgres", {})
         if not pg.get("enabled", False):
@@ -174,7 +169,6 @@ class ChannelFactory:
             "processing_timeout": pg.get("processing_timeout", 120),
             "allow_from": pg.get("allow_from", ["*"]),
             "print_worker_activity": self._print_worker_activity,
-            "claim_strategy": pg.get("claim_strategy", "single"),
         }
         pg_channel = PostgresChannel(
             ch_cfg, bus, db_logging_service=self._db_logging_service,

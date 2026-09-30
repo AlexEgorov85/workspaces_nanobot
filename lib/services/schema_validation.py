@@ -29,7 +29,6 @@ _EXPECTED_KEYS: tuple[tuple[str, ...], ...] = (
     ("channels", "postgres", "table_name"),
     ("channels", "postgres", "messages_table"),
     ("channels", "postgres", "meta_table"),
-    ("channels", "postgres", "claims_table"),
     ("logging", "db", "table_name"),
     ("logging", "db", "question_runs_table"),
 )
@@ -175,10 +174,9 @@ class SchemaValidationService:
 
         Принимает как сырой dict, так и ``_LazySettings`` proxy
         (разворачивается через ``_inner_dict``). Источник истины —
-        6 ключей ``channels.postgres.{table_name, messages_table,
-        meta_table, claims_table}`` +
-        ``logging.db.{table_name, question_runs_table}``. Если
-        какого-то ключа нет — выбрасывается ``_MissingConfigKeys``
+        5 ключей ``channels.postgres.{table_name, messages_table,
+        meta_table}`` + ``logging.db.{table_name, question_runs_table}``.
+        Если какого-то ключа нет — выбрасывается ``_MissingConfigKeys``
         (наследник ``SchemaValidationError`` → ``ConfigurationError``).
         """
         raw = _unwrap_settings(settings)

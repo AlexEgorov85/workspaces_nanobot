@@ -51,7 +51,6 @@ session_manager.json      ← per-deploy override (опционально)
 | `conversation_messages` | `channels.postgres.table_name` | `agent_conversation_messages` | `agent_conversation_messages_test` |
 | `session_messages` | `channels.postgres.messages_table` | `agent_session_messages` | `agent_session_messages_test` |
 | `session_meta` | `channels.postgres.meta_table` | `agent_session_meta` | `agent_session_meta_test` |
-| `worker_claims` | `channels.postgres.claims_table` | `agent_worker_claims` | `agent_worker_claims_test` |
 | `gateway_logs` | `logging.db.table_name` | `agent_gateway_logs` | `agent_gateway_logs_test` |
 | `question_runs` | `logging.db.question_runs_table` | `agent_question_runs` | `agent_question_runs_test` |
 
@@ -320,7 +319,6 @@ cron-файл) — это **отдельная задача**. Текущий ch
 | `channels.postgres.table_name` | `agent_conversation_messages` | `..._test` |
 | `channels.postgres.messages_table` | `agent_session_messages` | `..._test` |
 | `channels.postgres.meta_table` | `agent_session_meta` | `..._test` |
-| `channels.postgres.claims_table` | `agent_worker_claims` | `..._test` |
 | `logging.db.table_name` | `agent_gateway_logs` | `..._test` |
 | `logging.db.question_runs_table` | `agent_question_runs` | `..._test` |
 

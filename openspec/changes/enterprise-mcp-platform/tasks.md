@@ -86,11 +86,24 @@
 
 Каждый набор — отдельный коммит, после каждого пересборка baseline.
 
-- [ ] 1.1 `agent_worker_claims`: DROP-миграция, удаление `sql/workers/`
-- [ ] 1.2 Удалить протокол аренды из `lib/channels/postgres_channel.py`; заменить
-      опросом с `FOR UPDATE SKIP LOCKED`
-- [ ] 1.3 Удалить `tools/check_worker_pool_integrity.py`
-- [ ] 1.4 Удалить 8 настроек `channels.postgres.*` из `project.json` и `project_settings.py`
+- [x] 1.1 `agent_worker_claims`: DROP-миграция `sql/migrations/V006__drop_agent_worker_claims.sql`, удаление `sql/workers/`
+- [x] 1.2 Удалить протокол аренды из `lib/channels/postgres_channel.py`
+      (`_lease_loop`, `_reclaim_needed`, `_reclaim_and_heal`, `_delete_claim`;
+      `_claim_one` + `_claim_one_single` слиты в `_claim_one`;
+      `_release_all_leases` → `_return_claimed_to_pool`;
+      `_leases` → `_claimed_ids`; удалён ставший неиспользуемым `import psycopg2`).
+      **Без перехода на `FOR UPDATE SKIP LOCKED` — см. поправку ниже.**
+- [x] 1.3 Удалить `tools/check_worker_pool_integrity.py` + тесты worker_pool
+      (`tests/integration/test_worker_pool_concurrency.py`,
+      `tests/integration/test_worker_pool_real_bot.py`,
+      `tests/test_postgres_channel_static_audit.py`)
+- [x] 1.4 Убрать ставшие мёртвыми настройки `channels.postgres.*`:
+      **`claims_table`, `claim_strategy`, `lease_interval`** (не 8 — см. поправку).
+      Попутно: ключ `claims_table` убран из `PROFILE_OWNED_RUNTIME_KEYS` и
+      `EXPECTED_RUNTIME_TABLE_NAMES` (`config.py`) и из `_EXPECTED_KEYS`
+      (`lib/services/schema_validation.py`) — иначе `validate_runtime_isolation`
+      и проверка профиля падали бы с `ConfigurationError`. Проверка схемы
+      теперь смотрит 5 runtime-таблиц, а не 6.
 - [ ] 1.5 Удалить `benchmarks/`, `benchmarks/db.py`, `tools/legal_benchmark.py`,
       `tools/legacy_audit.py`, `tools/test_audit.py`; DROP `agent_benchmark_runs`,
       `agent_benchmark_results`; удалить секцию `benchmark.*`
@@ -98,10 +111,51 @@
       spawn-логику в `gateway.py`, секцию `streamlit.*`, `tests/test_streamlit_app.py`
 - [ ] 1.7 Удалить `workspace/tools/example.py` и запись `ExampleTool` из
       `runtime_inventory.py`
-- [ ] 1.8 Обновить `AGENTS.md`, `CHANGELOG.md`, `lib/channels/README.md`, `README.md`
-- [ ] 1.9 Править `tests/test_config_keys.py` (`REQUIRED_KEYS`)
+- [x] 1.8 Обновить `AGENTS.md`, `CHANGELOG.md`, `lib/channels/README.md`,
+      `README.md`, `docs/ARCHITECTURE.md`, `docs/TROUBLESHOOTING.md`,
+      `sql/README.md`, `openspec/specs/runtime/startup-schema-validation`
+- [x] 1.9 Править `tests/test_config_keys.py` (`REQUIRED_KEYS`)
 
 **Приёмка:** 4 101 → ожидаемо ~3 950 тестов; ни одного падения сверх предсуществующих.
+
+### Поправки к фазе 1 (проверено, две неверные предпосылки плана)
+
+**1.2 — `FOR UPDATE SKIP LOCKED` не делается, инструкция отменена.** Проект
+разворачивается на **Greenplum 6.5 (ядро PostgreSQL 9.4**, `sql/README.md:197`),
+где `SKIP LOCKED` (появился в PostgreSQL 9.5) недоступен, а Greenplum при
+`SELECT ... FOR UPDATE` берёт блокировку уровня **ТАБЛИЦЫ** — такой захват
+заблокировал бы всех читателей и писателей `agent_conversation_messages`.
+Корректности `SKIP LOCKED` и не нужен: внешний `AND status = 'pending'` уже
+исключает повторный захват, а `SKIP LOCKED` даёт только снижение задержки
+при конкурентных захватах. Захват оставлен без изменений.
+
+**1.4 — мёртвых настроек 3, а не 8.** `PostgresChannelSettings` содержит 8 полей,
+но живыми в single-режиме остаются `poll_interval`, `unstick_interval`,
+`processing_timeout`, `error_retry_delay`, `worker_id` (последний печатается в
+логах и в выводе активности). Удалены только те, чей код удалён: `claims_table`,
+`claim_strategy`, `lease_interval`.
+
+### Обнаруженные дефекты, НЕ исправленные в фазе 1
+
+Оба предсуществующие, оба — изменение поведения, а не удаление кода, поэтому
+вынесены за рамки фазы и ждут отдельного решения.
+
+1. **Ветка повтора `status='error'` в `_claim_one` недостижима.** Подзапрос
+   выбирает задачу и по `error`, и по `pending`, но внешний
+   `AND status = 'pending'` отсекает строку, выбранную по `error`. `_mark_failed`
+   переводит задачу в `error` с обещанием вернуть её в пул после
+   `error_retry_delay` — повторного захвата не происходит, задача остаётся в
+   `error` навсегда. Настройка сохранена как контракт, механизма за ней нет.
+2. **`NameError` в `postgres_channel.py`** (свободное имя `logger` вместо
+   `self.logger` в обработчике исключения подписки `compaction_event_subscriber`).
+   Отмечено `ruff` как `F821` ещё до фазы 1. Правка однострочная.
+
+### Номер миграции
+
+`V006`, а не `V005`: в истории уже был `V005__create_agent_cache_ownership.sql`
+(удалён вместе с `cache_ownership.py`), и базы, где он успел примениться, хранят
+`005` в `public.schema_migrations`. Номера миграций не переиспользуются.
+
 `gateway.py` и `cli_agent.py` стартуют.
 
 ---

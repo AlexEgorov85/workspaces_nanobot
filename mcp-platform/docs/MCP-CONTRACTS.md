@@ -211,9 +211,10 @@ slow и fast конкурируют за одни и те же воркеры, �
 **Ошибки:** `queue_full`, `internal`.
 
 **Сегодня.** `SchemaValidationService.validate(settings, fetch=…)`
-→ `expected_table_names` → `check_tables`. Шесть ключей:
-`channels.postgres.{table_name, messages_table, meta_table, claims_table}` и
-`logging.db.{table_name, question_runs_table}`. Имена берутся из merged
+→ `expected_table_names` → `check_tables`. Пять ключей:
+`channels.postgres.{table_name, messages_table, meta_table}` и
+`logging.db.{table_name, question_runs_table}` — `claims_table` убран вместе с
+таблицей аренды (миграция `V006`). Имена берутся из merged
 SETTINGS, **схема захардкожена** `public`. `table_type='BASE TABLE'` —
 представление не считается таблицей. Исключения: `SchemaValidationError`
 (список `MissingTable`) и приватный `_MissingConfigKeys` (нет ключей конфига,

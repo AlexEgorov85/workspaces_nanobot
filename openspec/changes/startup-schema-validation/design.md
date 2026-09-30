@@ -81,14 +81,17 @@ ConfigurationError` и превращаются в `sys.stderr.write + return 2`
 ### Decision 2: Источник имён таблиц — `SETTINGS`, не литералы
 
 Сервис `SchemaValidationService` принимает `settings: dict` и
-извлекает 6 имён по путям:
+извлекает 5 имён по путям:
 
 ```
-channels.postgres.{table_name, messages_table, meta_table, claims_table}
+channels.postgres.{table_name, messages_table, meta_table}
 logging.db.{table_name, question_runs_table}
 ```
 
-Это **те же 6 ключей**, которые использует runtime (PostgresChannel,
+> Обновлено в change `enterprise-mcp-platform` (фаза 1): `claims_table` и
+> таблица `agent_worker_claims` удалены, ключей стало **5**.
+
+Это **те же 5 ключей**, которые использует runtime (PostgresChannel,
 PGSessionManager, DbLoggingService) и которые проходят через
 `validate_runtime_isolation` (`config.py:345-377`). Поэтому
 drift между проверкой и runtime невозможен — мы проверяем

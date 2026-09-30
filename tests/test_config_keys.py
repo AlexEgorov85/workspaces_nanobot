@@ -49,10 +49,7 @@ def _required_keys():
         ("channels.postgres.max_stuck_retries", 3),
         ("channels.postgres.msg_ctx_max_size", 100),
         ("channels.postgres.worker_id", ""),
-        ("channels.postgres.claims_table", "agent_worker_claims"),
-        ("channels.postgres.lease_interval", 15.0),
         ("channels.postgres.error_retry_delay", 60.0),
-        ("channels.postgres.claim_strategy", "single"),
         ("channels.postgres.media_cache_dir", "data_store/cache/sessions"),
         # общее поведение для всех каналов (Postgres, Redis, будущие)
         ("channels.document_text_threshold", 20000),

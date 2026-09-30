@@ -160,18 +160,14 @@ def _make_channel(test_schema, max_concurrent=1):
             "dsn": dsn,
             "schema": schema,
             "table_name": "agent_conversation_messages",
-            "claims_table": "agent_worker_claims_disabled",
             "poll_interval": 0.1,
             "flush_interval": 60.0,
             "max_concurrent": max_concurrent,
             "processing_timeout": 60,
-            "claim_strategy": "single",
             "unstick_interval": 999.0,
         },
         MessageBus(),
     )
-    ch._claims_table = "agent_worker_claims_disabled"
-    ch._fq_claims = f"{schema}.agent_worker_claims_disabled"
     return ch
 
 
@@ -361,7 +357,7 @@ async def test_s5_polling_continues_after_finishes(test_schema):
 
     # Новая задача берётся в работу
     new_user = _insert_user(ds, schema, "chat-next", "Q-next")
-    row = await ch._claim_one_single()
+    row = await ch._claim_one()
     assert row is not None
     assert str(row["id"]) == new_user
 
@@ -474,7 +470,6 @@ async def test_s6_full_poll_loop_with_max_concurrent_2(test_schema):
     assert ch._msg_ctx == {}
     assert ch._msg_chat == {}
     assert ch._chat_inflight == set()
-    assert ch._leases == set()
 
     # 6. Видим, что обработчик реально дёргался для всех 5.
     assert sorted(seen) == sorted(user_ids)

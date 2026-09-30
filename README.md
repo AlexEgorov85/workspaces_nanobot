@@ -40,7 +40,6 @@ python benchmarks/runner.py --tags simple                     # оценка к�
 python tools/build_vectors.py --full-rebuild                  # перестроение векторов в storage_table
 python tools/build_vectors.py --status                        # текущее состояние
 python tools/check_indexes.py                                 # declared vs runtime индексов
-python tools/check_worker_pool_integrity.py --fix             # диагностика пула воркеров
 python tools/migrate.py --apply                               # миграции схемы
 ```
 
@@ -106,7 +105,6 @@ DDL в `sql/<domain>/create_<schema>_<table>.sql` (один файл = одна 
 - **Домен audit_analyzer:** `oarb.audits/violations/audit_reports/report_items` (REFERENCE)
 - **Векторы:** `oarb.audit_vectors` (эмбеддинги, FAISS собирается в памяти из DuckDB-снапшота — таблица-хранилище задаётся `gateway.vector.index.storage_table`); `public.agent_vector_index_config` и `public.agent_vector_index_store` — legacy SQL-артефакты, кодом не читаются; конфиг индексов — в `project.json::gateway.vector.index.indexes`
 - **Predefined scripts:** `public.agent_predefined_scripts`
-- **Воркер-пул:** `public.agent_worker_claims` (UNIQUE PK, lease)
 - **Бенчмарки:** `public.agent_benchmark_runs/results`
 
 > Имена таблиц/индексов выше — значения текущей инсталляции (REFERENCE). Они

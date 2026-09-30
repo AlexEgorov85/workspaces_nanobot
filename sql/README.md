@@ -44,10 +44,6 @@ sql/
 │   ├── create_public_agent_benchmark_runs.sql           #   public.agent_benchmark_runs
 │   └── create_public_agent_benchmark_results.sql        #   public.agent_benchmark_results
 │
-├── workers/                                             # Мульти-машинный пул воркеров
-│   ├── create_public_agent_worker_claims.sql            #   public.agent_worker_claims (аренда задач)
-│   └── create_public_agent_worker_claims_test.sql       #   профиль test
-│
 ├── vectors/                                             # legacy (кодом не читается)
 │   ├── create_vector_index_config.sql                   #   public.agent_vector_index_config — LEGACY
 │   └── create_vector_index_store.sql                    #   public.agent_vector_index_store — DEPRECATED (V003)
@@ -60,7 +56,8 @@ sql/
 │   ├── V001__baseline.sql                               #   базовая линия (штамп, без DDL)
 │   ├── V002__vector_chunk_params.sql                    #   chunk_size/chunk_overlap/metric в agent_vector_index_config
 │   ├── V003__drop_vector_index_store.sql                #   ШАБЛОН: DROP <signature_table> (подставить вручную)
-│   └── V004__agent_gateway_logs_user_id.sql             #   user_id + backfill + индекс в agent_gateway_logs
+│   ├── V004__agent_gateway_logs_user_id.sql             #   user_id + backfill + индекс в agent_gateway_logs
+│   └── V006__drop_agent_worker_claims.sql               #   DROP agent_worker_claims (снят протокол аренды)
 │
 └── audit_analyzer/                                      # навык audit_analyzer
     ├── create_oarb_audits.sql                           #   oarb.audits          (REFERENCE)
@@ -101,8 +98,11 @@ python tools/migrate.py --baseline          # штамповать сущест�
   реальное имя таблицы оператор подставляет и выполняет DROP вручную;
 - существующая БД: после первой установки выполнить `--baseline`
   (V001 не содержит DDL — только точка отсчёта);
-- новые изменения схемы — новый файл `V005__*.sql` и далее; ретроактивно
-  менять применённые миграции нельзя.
+- новые изменения схемы — новый файл `V007__*.sql` и далее; ретроактивно
+  менять применённые миграции нельзя. Номера не переиспользуются: в истории
+  уже был `V005__create_agent_cache_ownership.sql` (удалён вместе с
+  `cache_ownership.py`), и базы, где он применился, хранят `005` в
+  `public.schema_migrations`.
 
 ---
 
@@ -116,16 +116,6 @@ psql "$DATABASE_URL" -f sql/session/create_public_agent_session_messages.sql
 psql "$DATABASE_URL" -f sql/channels/create_public_agent_conversation_messages.sql
 ```
 
-### Мульти-машинный пул воркеров (аренда задач)
-
-Таблица аренды добавляется на любую БД (и свежую, и существующую) одним
-скриптом — колонка в `agent_conversation_messages` для этого не нужна
-(владелец задачи живёт только в `agent_worker_claims.worker_id`):
-
-```bash
-psql "$DATABASE_URL" -f sql/workers/create_public_agent_worker_claims.sql
-```
-
 ### Полная установка (gateway + audit_analyzer + benchmarks)
 
 ```bash
@@ -136,14 +126,11 @@ psql "$DATABASE_URL" -f sql/session/create_public_agent_session_messages.sql
 # 2. Канал
 psql "$DATABASE_URL" -f sql/channels/create_public_agent_conversation_messages.sql
 
-# 3. Мульти-машинный пул воркеров (аренда задач)
-psql "$DATABASE_URL" -f sql/workers/create_public_agent_worker_claims.sql
-
-# 4. Журнал событий (DbLoggingService)
+# 3. Журнал событий (DbLoggingService)
 psql "$DATABASE_URL" -f sql/logs/create_public_agent_question_runs.sql
 psql "$DATABASE_URL" -f sql/logs/create_public_agent_gateway_logs.sql
 
-# 5. Бенчмарки
+# 4. Бенчмарки
 psql "$DATABASE_URL" -f sql/benchmarks/create_public_agent_benchmark_runs.sql
 psql "$DATABASE_URL" -f sql/benchmarks/create_public_agent_benchmark_results.sql
 
@@ -177,7 +164,6 @@ DuckDB-снапшота `gateway.vector.index.storage_table`, а деклара�
 | Ситуация                                                | Куда класть                                              |
 |---------------------------------------------------------|----------------------------------------------------------|
 | Таблица для новой фичи runtime                          | подкаталог по домену: `sql/<domain>/create_<schema>_<table>.sql` |
-| Таблица аренды задач воркеров (пул)                     | `sql/workers/create_public_agent_worker_claims.sql`      |
 | Доменная таблица для навыка                             | `sql/<skill>/create_<schema>_<table>.sql`                |
 | Тестовые данные                                         | `sql/<domain>/seed_<table>.sql`                          |
 

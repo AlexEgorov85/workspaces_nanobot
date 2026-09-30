@@ -36,7 +36,6 @@ def _build_settings_with_missing() -> dict[str, Any]:
                 "table_name": "agent_conversation_messages",
                 "messages_table": "agent_session_messages",
                 "meta_table": "agent_session_meta",
-                "claims_table": "agent_worker_claims",
             },
         },
         "logging": {

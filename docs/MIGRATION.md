@@ -6,10 +6,28 @@
 
 ---
 
-## Незарелизованное (`master`, CHANGELOG → [Unreleased](../CHANGELOG.md)) — векторные индексы и изоляция `history_search`
+## Незарелизованное (`master`, CHANGELOG → [Unreleased](../CHANGELOG.md)) — векторные индексы, изоляция `history_search`, снятие протокола аренды задач
 
 ⚠️ **Breaking change** в подсистеме векторных индексов: persisted FAISS-кеш
 удалён, таблица-сигнатура и настройка `signature_table` больше не существуют.
+
+⚠️ **Breaking change** в канале PostgreSQL: протокол аренды задач (мульти-машинный
+пул воркеров) удалён целиком. Таблица `public.agent_worker_claims` и настройки
+`channels.postgres.{claims_table, claim_strategy, lease_interval}` больше не
+существуют. Активный режим всегда был `single`, поэтому поведение канала на
+рабочей инсталляции не меняется. **Потеряно:** отказоустойчивость уровня HA —
+упавший инстанс gateway не отдаёт задачу, пока её не вернёт `_unstick_loop`
+соседнего. `SkillSettings` объявлен с `extra="forbid"`: оставленные в
+`project.json` ключи из удалённых остановят старт gateway с `ConfigurationError`.
+
+**Ручные действия:**
+
+0. **Удалить таблицу аренды.** `sql/migrations/V006__drop_agent_worker_claims.sql`
+   (`python tools/migrate.py --apply`) содержит `DROP TABLE IF EXISTS
+   public.agent_worker_claims;` — runner выполняет SQL как есть, подстановок
+   нет, так что скрипт применяется штатно. Номер 006, а не 005: `005` уже
+   использовался ранее (`V005__create_agent_cache_ownership.sql`, удалён), и
+   базы, где он применился, хранят его в `public.schema_migrations`.
 
 **Автоматические изменения**:
 

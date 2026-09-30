@@ -680,9 +680,9 @@ class ApplicationContext:
 
         Вызывается из ``start()`` сразу после ``_start_db_pool()`` и
         до подъёма каналов/``db_logging_service``/``sync_service``.
-        Имена таблиц берутся из ``self.settings`` (6 ключей:
-        ``channels.postgres.{table_name,messages_table,meta_table,
-        claims_table}`` + ``logging.db.{table_name,question_runs_table}``)
+        Имена таблиц берутся из ``self.settings`` (5 ключей:
+        ``channels.postgres.{table_name,messages_table,meta_table}``
+        + ``logging.db.{table_name,question_runs_table}``)
         — никаких литералов в коде.
 
         При отсутствии любой таблицы — ``SchemaValidationError``

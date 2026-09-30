@@ -19,7 +19,7 @@
 > **Об именах таблиц и индексов.** Все имена таблиц/индексов, упомянутые ниже, —
 > **не зашитые константы**, а значения текущей инсталляции, настраиваемые в
 > `project.json`. Они могут отличаться в других развёртываниях. Ключи конфигурации:
-> `channels.postgres.table_name` / `messages_table` / `meta_table` / `claims_table`,
+> `channels.postgres.table_name` / `messages_table` / `meta_table`,
 > `skills.audit_analyzer.tables[*].name` / `vector_indexes[*].name`,
 > `gateway.vector.index.storage_table`,
 > `logging.db.table_name` / `question_runs_table`,
@@ -1067,141 +1067,109 @@ read→persist→read петли).
 и делегировать `start/stop/send/send_delta/poll_once` в `MessageExchange`.
 Подробнее — [`../lib/channels/README.md`](../lib/channels/README.md).
 
-### Мульти-машинный пул воркеров (аренда задач через `agent_worker_claims`)
+### Захват задач и статусы (`agent_conversation_messages`)
 
-`PostgresChannel` разворачивается на нескольких машинах как полный gateway,
-читающий одну таблицу `public.agent_conversation_messages`. Чтобы одна задача
-(сообщение веб-чата) физически не обрабатывалась двумя воркерами, введена
-таблица аренд `public.agent_worker_claims` (`sql/workers/`, DDL — см.
-`sql/README.md`). Эксклюзивность гарантирует **UNIQUE PK `(task_id)`, а не
-MVCC/`UPDATE ... WHERE status='pending'`**: два `INSERT` с одним `task_id`
-невозможны, второй падает на unique-индексе.
+Захват задачи (сообщения веб-чата) делает **один** `UPDATE ... RETURNING`
+в `_claim_one` (`lib/channels/postgres_channel.py`):
 
-**Инвариант:** `status='processing' ⇔ существует ровно одна claim-запись с
-живым lease` для этого `task_id`.
+```sql
+UPDATE agent_conversation_messages
+   SET status = 'processing', updated_at = NOW()
+ WHERE id = (SELECT id FROM agent_conversation_messages
+              WHERE role = 'user' AND (status = 'pending' OR (status = 'error' AND ...))
+                AND status != 'cancelled'
+                AND NOT EXISTS (SELECT 1 ... m2.status = 'processing' в том же chat_id)
+              ORDER BY created_at ASC LIMIT 1)
+   AND status = 'pending' AND status != 'cancelled'
+RETURNING id, chat_id, user_id, content, media, metadata, created_at
+```
+
+**Инвариант:** захват эксклюзивен, потому что внешний `AND status = 'pending'`
+делает повторный UPDATE нерабочим. Если задачу уже взял другой захват, её
+статус не `pending`, UPDATE не срабатывает, вторая обработка невозможна.
+Это MVCC-перепроверка UPDATE, а не UNIQUE-индекс.
+
+Таблицы аренды `public.agent_worker_claims` **нет** — она удалена миграцией
+`sql/migrations/V006__drop_agent_worker_claims.sql`, вместе с настройками
+`claims_table`, `claim_strategy`, `lease_interval`. Протокол lease/heartbeat
+(`_lease_loop`, `_reclaim_needed`, `_reclaim_and_heal`, `_delete_claim`) удалён
+из канала. Состояние захвата хранится в самой строке задачи.
+
+**Почему не `FOR UPDATE SKIP LOCKED`.** План перехода предполагал заменить опрос
+на `SELECT ... FOR UPDATE SKIP LOCKED`. Это сознательно не сделано: проект
+разворачивается на Greenplum 6.5 (ядро PostgreSQL 9.4 — см. `sql/README.md`),
+где `SKIP LOCKED` (появился в PostgreSQL 9.5) недоступен, а Greenplum при
+`SELECT ... FOR UPDATE` берёт блокировку уровня **таблицы** — такой захват
+заблокировал бы всех читателей и писателей `agent_conversation_messages`.
+Корректности `SKIP LOCKED` здесь и не нужен: он даёт только снижение задержки
+при конкурентных захватах, а эксклюзивность обеспечивает `AND status='pending'`.
 
 **Статусы задач:**
 
 | Статус | Значение | Повторяется? |
 |---|---|---|
 | `pending` | готова к обработке | да, сразу |
-| `processing` | в работе воркера (держит claim) | нет — защищена lease |
-| `error` | повторяемая ошибка | да, после `error_retry_delay` |
+| `processing` | в работе (задачу взял инстанс) | нет |
+| `error` | повторяемая ошибка | заявлен повтор после `error_retry_delay` |
 | `failed` | терминальный (не меняется) | нет — окончательно |
 | `completed` | успешно завершена | — |
 
 `error` и `failed` разведены: `error` (retry-каунтер в `metadata.retry_count`
-не исчерпан) возвращается в пул после паузы; `failed` — immutable-терминал.
-Раньше обе ситуации сводились к `failed`, и web-клиент ждал оконное время на
-«появление в работе», которое могло никогда не наступить.
+не исчерпан) должен вернуться в пул после паузы; `failed` — immutable-терминал.
 
-**Клейм (`_claim_one`) — одна транзакция:**
-1. `SELECT` самого старого кандидата (`pending` или `error` с истёкшим
-   backoff) без активного claim и из чата без активной `user`-задачи
-   (`status='processing'`);
-2. `INSERT INTO agent_worker_claims ...` — арбитр эксклюзивности; при
-   `UniqueViolation` транзакция откатывается и выбирается следующий кандидат;
-3. `UPDATE messages SET status='processing'` — владелец задачи живёт только
-   в `agent_worker_claims.worker_id`, колонка в сообщениях не используется.
+> **Известный дефект.** Ветка повтора `error` сейчас недостижима: внешний
+> `AND status = 'pending'` отсекает строку, выбранную подзапросом по
+> `status = 'error'`. `_mark_failed` переводит задачу в `error` с обещанием
+> вернуть её в пул, но повторного захвата не происходит — задача остаётся в
+> `error` навсегда. Настройка `error_retry_delay` сохранена как контракт,
+> но механизма за ней сейчас нет. Требует отдельного решения (см. CHANGELOG).
 
-**Lease и heartbeat:** срок аренды = `processing_timeout`. Фоновая задача
-`_lease_loop` каждые `lease_interval` продлевает `lease_until` своим арендам и
-запускает `_reclaim_and_heal`. Это **единственный** источник reclaim/heal —
-из горячего пути опроса (`poll_inbound`) транзакция убрана, чтобы не гонять
-4 UPDATE/DELETE на каждом тике `poll_interval`. Перед запуском
-`_reclaim_and_heal` `_lease_loop` проверяет быстрый гейт `_reclaim_needed`
-(есть ли хоть одна `processing`-строка или хоть один claim): на пустом столе
-транзакция пропускается целиком (ред. один `SELECT ... EXISTS` на тик).
+**Возврат зависших задач в пул.** Единственный механизм — фоновая
+`_unstick_loop` с интервалом `unstick_interval` (по умолчанию
+`max(60, processing_timeout/5)` = 120 сек). `_unstick_processing` возвращает
+`processing`-строки с `updated_at` старше `processing_timeout` в `pending`
+(или в `failed`, если исчерпан `max_stuck_retries`) и чистит assistant-placeholder.
+Отдельный таймер вместо вызова на каждом poll-тике — чтобы не делать
+`SELECT`+`UPDATE` каждые `poll_interval` на пустом столе. При `stop()`
+незавершённые задачи возвращает `_return_claimed_to_pool`.
 
-**`_reclaim_and_heal` (одна транзакция):**
-1. `DELETE FROM claims WHERE lease_until < NOW()` — «мёртвый» воркер
-   освобождает задачи: задача → `pending` (или `failed` при исчерпании
-   `max_stuck_retries`), assistant-placeholder удаляется;
-2. `processing`-без-claim → `error` (аномалия, повторится после backoff);
-3. orphaned assistant-placeholder (без user-пары) → `failed`;
-4. висячая аренда (claim есть, а задача не в `processing`) — удаляется.
-
-**Освобождение аренды:** `send()` (только на финальном outbound) /
-`send_delta(stream_end)` / `_mark_failed` удаляют claim в той же транзакции,
-что и запись `completed`/`error`/`failed`. `stop()` возвращает незавершённые
-задачи в пул (`_release_all_leases`).
+**Что это значит по мульти-машинности.** Несколько инстансов gateway на общей
+таблице по-прежнему не схлопываются в двойную обработку (это гарантирует
+MVCC-перепроверка UPDATE), но HA-механизма больше нет: упавший инстанс не
+отдаёт задачу, пока её не вернёт `_unstick_loop` соседнего. Отказоустойчивость
+уровня HA сознательно потеряна.
 
 **Промежуточные публикации тула `message(...)` vs финал оборота.**
 `MessageTool` в nanobot публикует свой outbound через шину **в момент
 исполнения тула**, т.е. до завершения оборота. `send()` финализирует оборот
-(claim + слот + `_msg_ctx`) **только** на маркере `metadata["_final_turn"]`
+(слот + `_msg_ctx`) **только** на маркере `metadata["_final_turn"]`
 (или legacy `_turn_end` / `latency_ms`), который ставит патч
 `RuntimePatcher.patch_assemble_outbound` (при подавленном финале — синтетическим
 outbound). Все остальные сообщения `send()` merge'ит в assistant-строку
 (`_merge_tool_delivery`): накопление `content` + media без дублей, status
-остаётся `processing`, слот/claim/аренда не трогаются. Это исключает ситуацию,
-когда оборот «завершался» на промежуточной публикации, а затем уходил в
-`failed` через reclaim. Маркер объявлен в `lib/utils/outbound_meta.py` как
-`FINAL_TURN_KEY` (не входит в `OUTBOUND_DROPPED_KEYS`, чтобы потоковые каналы
-вроде Redis передавали финальный ответ как обычно). `_release_slot` в
-финализации вызывается после успешной записи, а не до неё — иначе задача
-снималась с heartbeat, пока claim ещё жив, и другой воркер мог её reclaim-нуть.
+остаётся `processing`, слот не трогается. Это исключает ситуацию, когда оборот
+«завершался» на промежуточной публикации. Маркер объявлен в
+`lib/utils/outbound_meta.py` как `FINAL_TURN_KEY` (не входит в
+`OUTBOUND_DROPPED_KEYS`, чтобы потоковые каналы вроде Redis передавали
+финальный ответ как обычно). `_release_slot` в финализации вызывается после
+успешной записи, а не до неё.
 
-**Конфиг (`channels.postgres`):** `worker_id` (пусто → авто
-`{hostname}:{pid}:{rand8}`, идентификация воркера в claims), `claims_table`
-(таблица аренды задач), `table_name` (таблица канала, дефолт
-`agent_conversation_messages`), `messages_table` / `meta_table` (таблицы сессий),
-`lease_interval`, `error_retry_delay`. **`streamlit.error_window_sec`** — окно
-ожидания повтора `error`-задач (быв. `failed_window_sec`).
+**Конфиг (`channels.postgres`):** `table_name` (таблица канала, дефолт
+`agent_conversation_messages`), `messages_table` / `meta_table` (таблицы
+сессий), `poll_interval`, `flush_interval`, `max_concurrent`,
+`processing_timeout`, `unstick_interval`, `max_stuck_retries`,
+`error_retry_delay`, `worker_id` (пусто → авто `{hostname}:{pid}:{rand8}`;
+участвует только в логах и выводе активности).
+**`streamlit.error_window_sec`** — окно ожидания повтора `error`-задач.
 
-Этот режим включается через `channels.postgres.claim_strategy="worker_pool"`.
-По умолчанию `claim_strategy="single"` (см. следующую секцию) — захват
-без таблицы `agent_worker_claims`, как в v2.3.1.
+**Поток данных:**
 
-### Режим аренды задач (`channels.postgres.claim_strategy`)
-
-`channels.postgres.claim_strategy` — настройка режима аренды задач в
-`PostgresChannel`. Управляет только арендой, не затрагивая `max_concurrent`
-(локальная конкуренция через `asyncio.Semaphore` в `MessageExchange`).
-
-| Значение | Описание |
-|---|---|
-| `"single"` (дефолт) | Один инстанс gateway. Захват задачи через `UPDATE ... RETURNING` (как в v2.3.1). `agent_worker_claims` НЕ используется, lease-loop не запускается. Защита от зависших `processing` — фоновая `_unstick_loop` с интервалом `channels.postgres.unstick_interval` (по умолчанию `max(60, processing_timeout/5)` = 120 сек). |
-| `"worker_pool"` | Мульти-машинный пул. Захват через `INSERT INTO agent_worker_claims` + lease/heartbeat (см. предыдущую секцию «Мульти-машинный пул воркеров»). Используется, если запущено несколько инстансов gateway с общей таблицей `agent_conversation_messages`. |
-
-**Когда переключать:**
-
-* Один инстанс gateway (типичный деплой) — оставьте `single` (дефолт).
-  Это ровно поведение v2.3.1, минус лишние SQL-запросы к `agent_worker_claims`.
-* Несколько инстансов — поставьте `worker_pool`. Тогда захват задач между
-  инстансами координируется через `agent_worker_claims` (UNIQUE PK +
-  lease/heartbeat).
-
-**Реализация (`lib/channels/postgres_channel.py`):**
-
-* `claim_strategy` читается в `__init__` из конфига канала (по умолчанию
-  `"single"`).
-* `_claim_one` ветвится: в `single` делегирует в `_claim_one_single` (один
-  `UPDATE ... RETURNING` через `fetchone`); в `worker_pool` — старая логика
-  с `INSERT INTO claims` + `UPDATE`.
-* `_delete_claim(conn, task_id)` — единая точка гарда: в `single` — no-op,
-  в `worker_pool` пишет DELETE.
-* `_lease_loop` / `_reclaim_needed` / `_reclaim_and_heal` — гарды в начале:
-  в `single` сразу `return` / `return False`.
-* В `single` `_lease_task` не создаётся в `start()`, а в `poll_inbound`
-  вызывается `_unstick_processing` для отката зависших `processing`.
-
-**Поток данных в single-режиме:**
-
-1. `PostgresChannel._poll_once()` → `_claim_one()` → `_claim_one_single()`
-   (один `UPDATE ... RETURNING` через `fetchone`, без INSERT в claims).
-2. После обработки `_finalize_turn()` → `UPDATE SET status='completed'` и
-   `_delete_claim(conn, msg_id)` (no-op в single).
-3. На каждом poll `poll_inbound` вызывает `_unstick_processing()` —
-   откат зависших `processing` (retry/failed счётчик в metadata).
-
-**Поток данных в worker_pool** — см. предыдущую секцию «Мульти-машинный пул
-воркеров»; `claim_strategy="worker_pool"` восстанавливает эту логику 1-в-1.
-
-Все 5 точек `DELETE FROM agent_worker_claims` в `_poll_once`, `_mark_failed`,
-`_finalize_turn`, `send_delta`, `_release_all_leases` проходят через
-`_delete_claim` — единую точку гарда. В single-режиме они физически
-не выполняются.
+1. `PostgresChannel._poll_once()` → `_claim_one()` — один
+   `UPDATE ... RETURNING` через `fetchone`.
+2. После обработки `_finalize_turn()` → `UPDATE SET status='completed'`,
+   снятие слота и `_claimed_ids`.
+3. Раз в `unstick_interval` сек `_unstick_loop` → `_unstick_processing()` —
+   откат зависших `processing` (retry/failed счётчик в `metadata`).
 
 ### Priority polling path (для priority-команд nanobot)
 
@@ -1272,23 +1240,23 @@ nanobot не знает откуда они пришли.
 - **Не вызывает `_release_slot`** — slot не занимался.
 
 После `_handle_message` priority path освобождает локальные ресурсы:
-`_delete_claim`, `_leases.discard`, `_msg_ctx.pop`, `_msg_chat.pop`.
+`_claimed_ids.discard`, `_msg_ctx.pop`, `_msg_chat.pop`.
 Сама отмена активной задачи происходит **внутри** AgentLoop через
 библиотечный `cmd_stop` → `_cancel_active_tasks(effective_key)` —
 priority polling доставляет `/stop` в шину, дальше работает
 стандартный механизм nanobot.
 
 **Двойная защита — DB safety net.** Помимо priority polling path,
-`_claim_one_single` и `_claim_one` (worker_pool) содержат фильтр
-`AND status != 'cancelled'` в WHERE (3 места — основной WHERE,
-подзапрос по соседним задачам, и финальный UPDATE). Если пользователь
+`_claim_one` содержит фильтр
+`AND status != 'cancelled'` в WHERE (2 места — основной WHERE и
+подзапрос по соседним задачам). Если пользователь
 помечает сообщение как `cancelled` ДО того, как polling его
 захватил — polling его пропускает (race-free по `UPDATE ... WHERE
 id=(...)`). После claim — повторный `fetchval` re-check; если
 между SELECT подзапроса и UPDATE захвата AW пометил `cancelled`,
 polling не диспатчит и освобождает claim. В `_finalize_turn` —
 ещё один re-check: если user стал cancelled пока LLM работала,
-финальный ответ не публикуется, освобождаются slot/claim/context.
+финальный ответ не публикуется, освобождаются слот и контекст.
 
 **Сценарии:**
 
@@ -1297,7 +1265,6 @@ polling не диспатчит и освобождает claim. В `_finalize_t
 | `max_concurrent=1`, A работает, A `/stop` | priority polling доставляет `/stop` → `cmd_stop` отменяет A **до** завершения LLM |
 | `max_concurrent=2`, A+B работают, A `/stop` | priority polling доставляет `/stop` → отменяется A, B продолжает |
 | A–J работают, F `/stop` | priority polling доставляет `/stop` → отменяется только F, остальные 9 не задеты |
-| `claim_strategy=worker_pool`, A отменён | запись в `agent_worker_claims` удалена через `_delete_claim`, lease удалён |
 | row cancelled до claim | polling skip через `AND status != 'cancelled'` |
 | row cancelled после claim (race) | re-check fetchval → drop + cleanup |
 | row cancelled во время LLM | `_finalize_turn` drop response, slot released |
@@ -1306,21 +1273,32 @@ polling не диспатчит и освобождает claim. В `_finalize_t
 `tests/test_user_stop_signal_priority.py` (priority polling path +
 структурные проверки `_poll_loop`).
 
-**Когда включать `worker_pool`:** несколько инстансов gateway читают общую
-таблицу `agent_conversation_messages`. `UNIQUE PK (task_id)` в
-`agent_worker_claims` гарантирует, что одна задача не обрабатывается двумя
-инстансами одновременно; lease/heartbeat (`lease_interval`) подхватывает
-мёртвые воркеры; `_reclaim_and_heal` чинит рассинхроны инварианта
-`processing ⇔ claim`.
+**Модель захвата — одна.** Таблицы аренды `agent_worker_claims` больше нет
+(удалена миграцией `sql/migrations/V006__drop_agent_worker_claims.sql`),
+протокол lease/heartbeat/reclaim снят из канала. Захват задачи — один
+`UPDATE ... RETURNING` в `_claim_one`: состояние захвата хранится в самой строке
+задачи (`status='processing'`). Эксклюзивность обеспечивает внешний
+`AND status = 'pending'` — если задачу уже взял другой захват, повторный UPDATE
+не срабатывает, двойная обработка невозможна.
 
-**Когда использовать single:** один инстанс на машину, простые деплои,
-горизонтальное масштабирование не планируется — выигрываем на одном
-SQL-запросе (INSERT в claims) на каждое сообщение.
+**Что это значит по мульти-машинности.** Несколько инстансов gateway на общей
+таблице по-прежнему не схлопываются в двойную обработку (это гарантирует
+MVCC-перепроверка UPDATE), но HA-механизма больше нет: упавший инстанс не
+отдаёт задачу, пока её не вернёт `_unstick_loop`. Отказоустойчивость уровня HA
+сознательно потеряна.
 
-**Диагностика:** `tools/check_worker_pool_integrity.py --fix` — read-only отчёт
-об инварианте `processing ⇔ claim` (или repair). Ключевой гейт — оптимизированный
-интеграционный тест `tests/integration/test_worker_pool_concurrency.py`
-(кейсы C1–C5, opt-in через `NANOBOT_INTEGRATION=1`).
+**Почему не `FOR UPDATE SKIP LOCKED`.** План перехода предполагал заменить опрос
+на `SELECT ... FOR UPDATE SKIP LOCKED`. Это не сделано: проект разворачивается на
+Greenplum 6.5 (ядро PostgreSQL 9.4, см. `sql/README.md`), где `SKIP LOCKED`
+(появился в PostgreSQL 9.5) недоступен, а Greenplum при `SELECT ... FOR UPDATE`
+берёт блокировку уровня **таблицы** — такой захват заблокировал бы всех
+читателей и писателей `agent_conversation_messages`. Корректности `SKIP LOCKED`
+здесь и не нужен: он даёт только снижение задержки при конкурентных захватах,
+а эксклюзивность обеспечивает `AND status = 'pending'`.
+
+**Диагностика.** Ключевой гейт — `tests/test_postgres_channel.py`
+(lifecycle-инвариант) и `tests/test_single_mode_audit.py` (runtime-перехват SQL:
+в single-режиме не выполняется ни одного обращения к таблице аренды).
 
 #### Воркеры не берут задачи — «зависшая» `processing`-задача блокирует чат
 
@@ -1334,35 +1312,33 @@ SQL-запросе (INSERT в claims) на каждое сообщение.
 
 **Почему задача зависает в `processing`:**
 - воркер (gateway-процесс) был убит жёстко (`Ctrl+Break`, `kill -9`, отвал хоста),
-  не успев `_release_all_leases`/`_finalize_turn` — claim остался живым на время
-  `processing_timeout` (lease ещё не истёк), задача висит `processing`;
+  не успев `_return_claimed_to_pool`/`_finalize_turn` — задача висит `processing`,
+  пока её не вернёт в пул `_unstick_loop` (интервал `unstick_interval`,
+  по умолчанию `max(60, processing_timeout/5)` = 120 сек);
 - shortcut slash-команда (например, `/compact`), которая **минует**
   `_assemble_outbound`, не кладётся `_final_turn` и не финализируется →
-  `send()` merge'ит ответ, `status` остаётся `processing`, claim не освобождается.
+  `send()` merge'ит ответ, `status` остаётся `processing`, задача не финализируется.
 
-**Важно про `check_worker_pool_integrity.py`.** Он находит рассинхроны инварианта
-`processing ⇔ claim` и **истёкшие** lease. Случай «живой lease мёртвого воркера» он
-НЕ видит: инвариант соблюдён (задача `processing`, claim есть, lease не истёк), поэтому
-отчитывается `[OK]`, хотя чат фактически заблокирован. Только после истечения lease
-`_reclaim_and_heal` вернёт задачу в пул и разблокирует чат (до `processing_timeout`).
+**Кто вернёт задачу в пул.** Таблицы аренды больше нет, поэтому и диагностировать
+нечего: единственный механизм — `_unstick_loop` с интервалом
+`unstick_interval` (по умолчанию 120 сек), который возвращает `processing`-строки
+с `updated_at` старше `processing_timeout` в `pending` (или в `failed`, если исчерпан
+`max_stuck_retries`). Пока цикл не прошёл, задача остаётся `processing` — это
+ожидаемое окно, а не признак поломки.
 
 **Найти заблокированный чат (read-only):**
 ```sql
--- какие user-задачи висят в processing и у кого их claim
-SELECT id, chat_id FROM public.agent_conversation_messages
-WHERE role='user' AND status='processing';
-
-SELECT c.task_id, c.worker_id, c.lease_until > NOW() AS live_lease, c.lease_until
-FROM public.agent_worker_claims c ORDER BY c.claimed_at DESC;
+-- какие user-задачи висят в processing и как долго
+SELECT id, chat_id, status, updated_at, NOW() - updated_at AS age
+FROM public.agent_conversation_messages
+WHERE role='user' AND status='processing'
+ORDER BY updated_at ASC;
 ```
-Если `live_lease = true` у claim, чей `worker_id` — уже несуществующий процесс
-(мёртвый gateway), значит воркер не вернёт его, пока lease не истёк.
+Строка с `age` больше `processing_timeout` — её вернёт следующий тик `_unstick_loop`.
 
-**Разблокировать сейчас (сброс зависшей задачи в пул, заменяет ожидание lease):**
+**Разблокировать сейчас (не дожидаясь цикла):**
 ```sql
--- 1. снять claim мёртвого воркера
-DELETE FROM public.agent_worker_claims WHERE task_id = '<task_id>';
--- 2. вернуть задачу в пул, чтобы её репроцессил живый воркер
+-- вернуть задачу в пул, чтобы её репроцессил живой воркер
 UPDATE public.agent_conversation_messages
 SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
 ```
@@ -1372,8 +1348,8 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
 `OutboundMessage` в обход `_assemble_outbound` (shortcut-команда, синтетический финал),
 обязан ставить в `metadata` `FINAL_TURN_KEY="_final_turn"` (из `lib/utils/outbound_meta.py`).
 Иначе `postgres_channel.send()` трактует ответ как промежуточную публикацию и НЕ
-финализирует оборот → `status='completed'` не ставится, claim/слот не освобождаются,
-чата блокируется. Пример корректного паттерна — обработчик compact-команды
+финализирует оборот → `status='completed'` не ставится, слот не освобождается,
+чат блокируется. Пример корректного паттерна — обработчик compact-команды
 (`RuntimePatcher.patch_compact_command`, ставит `_final_turn` во все свои
 `OutboundMessage`).
 
@@ -1389,16 +1365,15 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
 
 * user-сообщение: `processing → completed | error | failed`;
 * assistant-сообщение: `processing → completed` (или удалено в `error`/`failed`);
-* `agent_worker_claims.lease` удалён (только `worker_pool`);
-* `_msg_ctx`, `_msg_chat`, `_chat_inflight`, `_leases`, `exchange._inflight`
+* `_msg_ctx`, `_msg_chat`, `_chat_inflight`, `_claimed_ids`, `exchange._inflight`
   — все пусты для этого `user_msg_id`/`chat_id`.
 
 Ключевые инварианты реализации:
 
 1. **DB-first порядок в `_finalize_turn`** (`postgres_channel.py:_finalize_turn`).
-   Сначала выполняется транзакция (UPDATE assistant → UPDATE user →
-   DELETE claim), и только после успешного commit снимаются
-   `_msg_ctx`, `_leases`, `_release_slot`. Раньше `pop`/`release` шли
+   Сначала выполняется транзакция (UPDATE assistant → UPDATE user), и
+   только после успешного commit снимаются
+   `_msg_ctx`, `_claimed_ids`, `_release_slot`. Раньше `pop`/`release` шли
    до транзакции, и при ошибке БД локальное состояние рассинхронизировалось
    с БД.
 2. **Единый резолвер `_resolve_turn_context`**. Один источник истины для `user_msg_id` /
@@ -1436,7 +1411,7 @@ SET status='pending', updated_at=NOW() WHERE id = '<task_id>';
 * `tests/integration/test_postgres_channel_lifecycle_stress.py` —
   opt-in (под `NANOBOT_INTEGRATION=1`) integration-тест против
   реальной PostgreSQL: серия из 4 разных финалов + проверка,
-  что `exchange.inflight` пуст и `_claim_one_single` поднимает
+  что `exchange.inflight` пуст и `_claim_one` поднимает
   следующую задачу без перезапуска процесса.
 
 ### `lib/services/llm_client.py` — единая точка вызова LLM

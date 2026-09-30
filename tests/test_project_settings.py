@@ -25,9 +25,7 @@ class TestValidateProjectSettings:
             "channels": {
                 "postgres": {
                     "worker_id": "w1",
-                    "claim_strategy": "worker_pool",
                     "poll_interval": 2.0,
-                    "lease_interval": 30,
                 }
             },
             "gateway": {
@@ -39,7 +37,7 @@ class TestValidateProjectSettings:
         }
         result = validate_project_settings(settings)
         assert result.version == "2.5.0"
-        assert result.channels.postgres.claim_strategy == "worker_pool"
+        assert result.channels.postgres.worker_id == "w1"
         assert result.cli.max_iterations == 200
 
     def test_unknown_keys_allowed(self) -> None:
@@ -69,13 +67,6 @@ class TestValidateProjectSettings:
         with pytest.raises(ConfigurationError) as excinfo:
             validate_project_settings({"gateway": {"print_llm_calls": "yes-please"}})
         assert "gateway.print_llm_calls" in str(excinfo.value)
-
-    def test_wrong_claim_strategy_value(self) -> None:
-        with pytest.raises(ConfigurationError) as excinfo:
-            validate_project_settings(
-                {"channels": {"postgres": {"claim_strategy": "both"}}}
-            )
-        assert "claim_strategy" in str(excinfo.value)
 
     def test_negative_poll_interval_rejected(self) -> None:
         with pytest.raises(ConfigurationError):

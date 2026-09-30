@@ -55,7 +55,6 @@ def _settings(
         "table_name": "agent_conversation_messages",
         "messages_table": "agent_session_messages",
         "meta_table": "agent_session_meta",
-        "claims_table": "agent_worker_claims",
     }
     db = {
         "table_name": "agent_gateway_logs",
@@ -100,7 +99,7 @@ class TestValidateRuntimeSchema:
 
     def test_passes_when_all_tables_present(self) -> None:
         ctx = _CtxStub(_settings())
-        # Mock fetch возвращает все 6 таблиц
+        # Mock fetch возвращает все 5 таблиц
         names = SchemaValidationService.expected_table_names(ctx.settings)
         existing = {n for _, n in names}
 
@@ -117,7 +116,7 @@ class TestValidateRuntimeSchema:
     def test_raises_when_one_table_missing(self) -> None:
         # Делаем так, чтобы agent_gateway_logs отсутствовал
         settings = _settings()
-        # Подменяем настройку fetch, чтобы вернуть только 5 из 6.
+        # Подменяем настройку fetch, чтобы вернуть только 4 из 5.
         names = SchemaValidationService.expected_table_names(settings)
         existing = {n for _, n in names if n != "agent_gateway_logs"}
 
@@ -179,7 +178,7 @@ class TestValidateRuntimeSchema:
 
         def _fetch(sql: str, *params: Any) -> list[dict[str, Any]]:
             captured["called"] = True
-            # Возвращаем все 6 таблиц существующими, чтобы не падать.
+            # Возвращаем все 5 таблиц существующими, чтобы не падать.
             names = SchemaValidationService.expected_table_names(_settings())
             return [
                 {"table_schema": "public", "table_name": n}

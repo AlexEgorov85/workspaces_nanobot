@@ -53,10 +53,7 @@ class _StrictOptional(BaseModel):
 
 class PostgresChannelSettings(_StrictOptional):
     worker_id: str | None = None
-    claims_table: str | None = None
-    claim_strategy: Literal["single", "worker_pool"] | None = None
     poll_interval: float | None = Field(default=None, gt=0)
-    lease_interval: float | None = Field(default=None, gt=0)
     error_retry_delay: float | None = Field(default=None, ge=0)
     unstick_interval: float | None = Field(default=None, gt=0)
     processing_timeout: int | None = Field(default=None, gt=0)
