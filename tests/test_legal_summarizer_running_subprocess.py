@@ -1,35 +1,55 @@
 """Регрессия на flush RUNNING-маркера из cli.py.
 
-План: 4 бага legal_summarizer / шаг 1.
+Тест проверяет ровно одно свойство: маркер ``status=running`` должен попасть в
+stdout subprocess **до** того, как завершится долгая операция. Без
+``flush=True`` на ``print(...)`` stdout subprocess буферизуется, и наблюдатель
+(агент) не увидит RUNNING, пока процесс не выйдет и Python не сбросит буфер.
 
-Запускаем cli.py как настоящий subprocess с подменой ``summarizer``
-через bootstrap-скрипт (добавляет stub-модуль в ``sys.modules`` до
-``runpy.run_path(cli.py)``). Stub ``run()`` спит 1.5 сек — за это время
-subprocess должен успеть напечатать ``status=running`` в stdout.
+**Это интеграционный тест, и он ходит к живому провайдеру LLM.**
 
-Без ``flush=True`` (см. fix ``_emit/_emit_done``) этот тест красный —
-RUNNING приходит только после завершения stub-run.
+История, важная для следующего читателя. Тест изначально подменял работу скилла
+стабом ``summarizer.py``. Скил давно разнесён по пакетам
+(``llm/``, ``application/``, ``chunking/``, ``output/``, ``document/``), модуля
+``summarizer`` в нём больше нет, а ``cli.py`` импортирует
+``from llm.config import ...`` и ``from application.service import ...``. Стаб
+подставлялся в ``sys.path``, но его никто не импортировал: ``import summarizer``
+проходил, модуль оседал в кэше импортов и не использовался ни одним
+``import``. Тест молча выполнял настоящий скил с настоящим вызовом LLM и
+зависел от сети — при живом провайдере он был зелёным, при недоступном
+падал, и ничто в его имени или коде об этом не говорило.
+
+Мёртвый стаб удалён. Живой прогон не удалён, а сделан **явной опцией**:
+``NANOBOT_LEGAL_SUMMARIZER_LIVE_TESTS=1``. Причина именно в opt-in, а не в
+мягком skip по наличию провайдера: в полном прогоне к этому моменту
+``SETTINGS`` уже инициализирован предыдущими тестами, конфигурация доступна,
+и «мягкая» проверка решила бы, что провайдер есть — то есть приёмка получала
+результат, зависящий от лимитов и доступности внешнего сервиса.
+
+Отдельный герметичный тест ``TestFlushContract.test_emit_uses_flush`` закрывает
+контракт flush без процесса и без сети, поэтому выключенный по умолчанию
+интеграционный прогон не оставляет регрессию непокрытой.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
 import time
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 _CLI = _REPO_ROOT / "workspace" / "skills" / "legal_summarizer" / "scripts" / "cli.py"
 
-# Переменные, которые уводят дочерний CLI в сеть/БД. В полном прогоне они
-# уже выставлены предыдущими тестами (``SessionStorageService`` пишет
-# resolved DSN в ``os.environ``, конфиг экспортирует ключи), и ребёнок
-# начинает подключаться к БД вместо того, чтобы просто печатать в stdout.
-# Наблюдаемое здесь свойство — отсутствие буферизации stdout — от них не
-# зависит, поэтому они убираются из окружения ребёнка.
+#: Переменные, которые уводят дочерний CLI в сеть/БД. В полном прогоне они
+#: уже выставлены предыдущими тестами (``SessionStorageService`` пишет
+#: resolved DSN в ``os.environ``, конфиг экспортирует ключи), и ребёнок
+#: начинает подключаться к БД вместо того, чтобы просто печатать в stdout.
 _CHILD_ENV_DENYLIST = frozenset(
     {
         "DATABASE_URL",
@@ -43,147 +63,22 @@ _CHILD_ENV_DENYLIST = frozenset(
     }
 )
 
+#: Потолок ожидания маркера. В норме тест укладывается в секунды; значение
+#: большое, потому что при живом провайдере сеть может висеть долго.
+_MARKER_DEADLINE_SEC = 120.0
 
-_STUB_SUMMARIZER = textwrap.dedent(
-    """
-    import time as _time
-
-    def get_chunking_config():
-        return {"chunk_size": 100000}
-
-    def get_execution_config():
-        return {"estimated_chunk_duration_sec": 20,
-                "confirmation_threshold_sec": 120,
-                "max_chunks_for_execution": 50}
-
-    def run(text, **kwargs):
-        # Имитируем долгий LLM-вызов, чтобы увидеть, успеет ли
-        # RUNNING-маркер выйти до того, как мы вернём результат.
-        # Спим в stderr — наблюдатель может прочитать момент старта.
-        #
-        # Вместо фиксированного sleep ждём ФАЙЛ-СИГНАЛ от родителя: только
-        # после того, как он прочитал RUNNING-маркер и убедился, что процесс
-        # ещё жив, он создаёт файл и ребёнок продолжает. С sleep(5.0) окно
-        # было гонкой: на загруженной машине родитель не успевал прочитать
-        # маркер за 5 с, ребёнок завершался, и проверка «процесс жив» падала
-        # при полностью корректном коде. Теперь детерминированно.
-        import os as _os
-        import sys as _sys
-        import pathlib as _pl
-        print(f"[STUB] run_started t={_time.monotonic():.3f}", file=_sys.stderr, flush=True)
-        _gate = _pl.Path(_os.environ["LEGAL_SUMMARIZER_STUB_GATE"])
-        # Дедлайн ребёнка ВСЕГДА длиннее дедлайна родителя (120 с), иначе
-        # стаб вышел бы раньше, чем родитель откроет ворота, и проверка
-        # «процесс жив» получила бы ложный отказ.
-        _deadline = _time.monotonic() + 180.0
-        while not _gate.exists() and _time.monotonic() < _deadline:
-            _time.sleep(0.02)
-        print(f"[STUB] run_finished t={_time.monotonic():.3f}", file=_sys.stderr, flush=True)
-        return {
-            "status": "completed",
-            "operation_id": "op_stub",
-            "result": {
-                "subject": "stub subject",
-                "summary": "stub summary",
-                "length": "brief",
-                "chars_in": len(text),
-                "chunks": 1,
-                "context_batches": 0,
-                "sections": 0,
-                "strategy": "single",
-                "title": None,
-            },
-            "stats": {
-                "chars_in": len(text),
-                "chunks": 1,
-                "context_batches_total": 0,
-                "sections_total": 0,
-                "meaningful_sections": 0,
-                "article_count": 0,
-                "map_calls": 0,
-                "section_reduce_calls": 0,
-                "section_trim_calls": 0,
-                "document_reduce_calls": 0,
-                "reduce_calls": 0,
-                "total_llm_calls": 0,
-                "retries": 0,
-                "failed_batches": [],
-                "partial": False,
-                "duration_sec": 0.0,
-                "strategy": "single",
-            },
-        }
-
-    def inspect(text, **kwargs):
-        return type("I", (), {
-            "chars_in": len(text),
-            "chunks": [],
-            "context_batches": [],
-            "tree": None,
-            "strategy": "single",
-            "estimated_llm_calls": 1,
-        })()
-
-    def estimate(insp):
-        from dataclasses import dataclass
-        @dataclass
-        class _Est:
-            chunks_count: int = 0
-            context_batches: int = 0
-            estimated_llm_calls: int = 1
-            estimated_duration_min_sec: float = 0.0
-            estimated_duration_max_sec: float = 0.0
-            confirmation_threshold_sec: float = 120.0
-        return _Est()
-
-    class _Ctx:
-        chunks = []
-        strategy = "single"
-
-    def _build_execution_context(insp, *, length=None, question=None):
-        return _Ctx()
-
-    def _estimate_for_run(insp, ctx):
-        return estimate(insp)
-
-    def needs_confirmation(est):
-        return False
-
-    def quick_estimate(path):
-        return {"chars_in": 0, "estimate": estimate(None)}
-
-    def load_text(path, *, mode="full"):
-        return "stub text for the test"
-
-    def make_operation_id(text, length):
-        return "op_stub"
-
-    def _progress(msg):
-        pass
-
-    def _extract_subject(text):
-        return "stub"
-
-    def _strip_think_blocks(text):
-        return text
-
-    def _load_prompt(name):
-        return "stub system prompt"
-
-    _LENGTH_INSTRUCTIONS = {"brief": "b", "detailed": "d"}
-    _QUESTION_INSTRUCTION_TEMPLATE = ""
-    def _system_instruction(length, question):
-        return ""
-    """
-)
+#: Оптический выключатель живого прогона. Тест ходит к настоящему провайдеру
+#: и по умолчанию выключен: в полном прогоне к этому моменту ``SETTINGS`` уже
+#: инициализирован, конфигурация доступна, и тест молча уходил в сеть — то
+#: есть приёмка получала результат, зависящий от лимитов и доступности
+#: внешнего сервиса. Отсутствие провайдера проверялось бы «мягко» (skip) и не
+#: отражало бы, что в этом прогоне он есть.
+_LIVE_ENV_FLAG = "NANOBOT_LEGAL_SUMMARIZER_LIVE_TESTS"
 
 
-def _write_stub_dir(tmp_path: Path) -> Path:
-    """Создать временную папку с подменным ``summarizer.py``."""
-    stub_dir = tmp_path / "_stubs"
-    stub_dir.mkdir(exist_ok=True)
-    (stub_dir / "summarizer.py").write_text(_STUB_SUMMARIZER, encoding="utf-8")
-    return stub_dir
+def _live_disabled() -> bool:
+    """Нужен ли явный opt-in для прогона против живого провайдера."""
+    return os.environ.get(_LIVE_ENV_FLAG, "").strip() not in {"1", "true", "yes"}
 
 
 def _make_doc(tmp_path: Path) -> Path:
@@ -192,45 +87,64 @@ def _make_doc(tmp_path: Path) -> Path:
     return p
 
 
+class TestFlushContract:
+    """Герметичная часть: контракт flush проверяется без процесса и без сети."""
+
+    def test_emit_uses_flush(self) -> None:
+        """Каждый ``print`` в пути выдачи маркера обязан заканчиваться ``flush=True``.
+
+        Проверяется исходник, а не поведение, — сознательно: единственная
+        альтернатива потребовала бы живого провайдера, и регрессия «убрали
+        ``flush=True``» ждала бы своей недели, пока сеть жива.
+        """
+        source = _CLI.read_text(encoding="utf-8")
+        assert "def _emit" in source, "в cli.py нет функции выдачи маркера"
+
+        emit_body = source[source.index("def _emit") :]
+        # Тело _emit — до следующей функции верхнего уровня.
+        next_def = emit_body.find("\ndef ", 1)
+        if next_def != -1:
+            emit_body = emit_body[:next_def]
+
+        prints = re.findall(r"print\((?:[^()]|\([^()]*\))*\)", emit_body)
+        assert prints, "в _emit нет ни одного print"
+        for statement in prints:
+            assert "flush=True" in statement, (
+                f"print в _emit без flush=True: {statement!r}. Без него stdout "
+                "subprocess буферизуется, и RUNNING-маркер дойдёт только после "
+                "завершения операции"
+            )
+
+
+@pytest.mark.skipif(
+    _live_disabled(),
+    reason=(
+        "интеграционный тест против живого провайдера LLM, по умолчанию "
+        "выключен: результат приёмки не должен зависеть от лимитов и "
+        "доступности внешнего сервиса. Включить: NANOBOT_LEGAL_SUMMARIZER_LIVE_TESTS=1. "
+        "Контракт flush без сети закрыт TestFlushContract.test_emit_uses_flush"
+    ),
+)
 def test_running_marker_arrives_before_run_completes(tmp_path):
-    """RUNNING-маркер должен попасть в stdout до завершения run().
+    """RUNNING-маркер должен попасть в stdout до завершения долгой операции.
 
-    Без flush=True на ``print(...)`` stdout subprocess буферизуется —
-    агент (или другой наблюдатель) не увидит RUNNING, пока процесс не
-    завершится и Python не сбросит буфер при exit.
-
-    Чтение stdout — построчное (через ``readline`` после перевода stdout
-    subprocess в бинарный line-buffered режим). Блок ``read(1024)``
-    хрупок к packetization/buffering на разных платформах; line-by-line
-    стабильнее.
+    Чтение stdout — построчное через ``readline``: блок ``read(1024)`` хрупок
+    к packetization/buffering на разных платформах, построчно стабильнее.
+    ``cli._emit()`` печатает multi-line JSON, поэтому строки копятся в буфер и
+    разбираются ``raw_decode`` с любой непробельной позиции.
     """
     doc = _make_doc(tmp_path)
-    stubs = _write_stub_dir(tmp_path)
 
     bootstrap = textwrap.dedent(
         f"""
-        import sys
-        sys.path.insert(0, {str(stubs)!r})
-        import summarizer  # noqa: F401  (регистрируем в sys.modules)
         import runpy
         runpy.run_path({str(_CLI)!r}, run_name="__main__")
         """
     )
 
-    gate = tmp_path / "_release_gate"
-    # Ребёнку НЕ наследуем мутированное окружение процесса pytest целиком.
-    # В полном прогоне к этому моменту другие тесты уже выставили
-    # DATABASE_URL/LLM_API_KEY (например, SessionStorageService пишет
-    # resolved DSN в os.environ), и CLI навыка начинает ходить в сеть —
-    # тест наблюдает не flush, а сетевые ретраи. Проверяемое здесь
-    # свойство (stdout не буферизуется) от окружения не зависит, поэтому
-    # убираем ровно те переменные, что уводят процесс в сеть/БД.
     child_env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in _CHILD_ENV_DENYLIST
+        k: v for k, v in os.environ.items() if k not in _CHILD_ENV_DENYLIST
     }
-    child_env["LEGAL_SUMMARIZER_STUB_GATE"] = str(gate)
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -257,20 +171,10 @@ def test_running_marker_arrives_before_run_completes(tmp_path):
     started = time.monotonic()
     first_marker_at: float | None = None
     proc_alive_when_running: bool | None = None
-    # Дедлайн — верхняя граница ожидания, а не фиксированная пауза: если
-    # процесс умрёт, цикл выйдет по EOF раньше. 120 с — с запасом на
-    # сильно загруженную машину, где старт интерпретатора и импорт навыка
-    # занимают десятки секунд. В норме тест завершается за ~1 с и дедлайн
-    # не играет роли: смысл проверки — ПОРЯДОК («маркер до завершения»),
-    # а порядок теперь гарантирован файлом-воротами, а не гонкой со временем.
-    deadline = started + 120.0
+    deadline = started + _MARKER_DEADLINE_SEC
     decoder = json.JSONDecoder()
-
-    # ``json.dumps(..., indent=2)`` в cli._emit() делает multi-line JSON,
-    # поэтому построчный readline() не годится: первая строка это только
-    # ``"{"``. Накапливаем в buffer, пробуем raw_decode начиная с
-    # любой non-whitespace позиции; на каждой итерации крутим readline().
     buffer = ""
+
     while time.monotonic() < deadline:
         line = proc.stdout.readline()
         if not line:
@@ -278,8 +182,6 @@ def test_running_marker_arrives_before_run_completes(tmp_path):
                 break
             continue
         buffer += line
-        # Пытаемся распарсить JSON начиная с любой non-whitespace позиции.
-        # Если нашли — обрезаем buffer.
         stripped = buffer.lstrip()
         if not stripped:
             buffer = ""
@@ -300,14 +202,6 @@ def test_running_marker_arrives_before_run_completes(tmp_path):
 
     proc.poll()
 
-    # Отпускаем ребёнка: он ждёт этот файл внутри стаба. Создаём его ДО
-    # assert'ов, чтобы упавший тест не оставлял висящий процесс до
-    # дедлайна стаба — иначе следующий прогон ждал бы его выхода.
-    gate.touch()
-
-    # Диагностика падения: stderr ребёнка показывает, докудался ли он до
-    # стаба (``[STUB] run_started``) или застрял раньше — без этого
-    # сообщение об ошибке неотличимо от «маркер не пришёл».
     try:
         proc.wait(timeout=180)
     except subprocess.TimeoutExpired:  # pragma: no cover
@@ -316,7 +210,8 @@ def test_running_marker_arrives_before_run_completes(tmp_path):
     child_err = (proc.stderr.read() if proc.stderr else "")[-2000:]
 
     assert first_marker_at is not None, (
-        "RUNNING-маркер не пришёл в stdout за 120 сек. "
+        "RUNNING-маркер не пришёл в stdout за "
+        f"{_MARKER_DEADLINE_SEC:.0f} сек. "
         f"returncode={proc.returncode}\n--- child stderr ---\n{child_err}"
     )
     assert proc_alive_when_running, (
