@@ -378,11 +378,123 @@ chunk_overlap, metric).
 1. **Документы** — нативный tool агента (A) или отдельный сервер (B)? Определяет, выполнима ли цель «установка Nanobot не тянет enterprise-стек».
 2. **Кто считает эмбеддинги** — `tools/build_vectors.py` как отдельная задача (текущий план) или часть `vector-mcp`?
 3. **Границы `data-mcp`** — доступен ли read-only SQL произвольной сложности агенту, или только именованные операции? Первое проще, второе безопаснее: произвольный `ILIKE` по 24 таблицам рано или поздно даст стоимость на полкорпуса.
-4. **Судьба `example.py` / dead tools** — удалять или хранить.
-5. **Судьба `benchmarks/`** — остаются в агенте или уезжают.
-6. **Кто владеет LLM-выходом** — `llm_client.py` + `llm_config.py` (287 строк)
+**Закрыто:** `agent_worker_claims`, `benchmarks/`, `streamlit`, `example.py` — см. §10.
+Разделы «судьба `example.py`» и «судьба `benchmarks/`» предыдущих редакций сняты.
+
+4. **Кто владеет LLM-выходом** — `llm_client.py` + `llm_config.py` (287 строк)
    остались без владельца. Предлагаю два независимых клиента: агент со своим
    провайдером для диалога, домены со своим в `libs/llm`. Нужно подтверждение.
-7. **`schema_validation.py`** — остаётся в агенте (проверяет наличие его же
+5. **`schema_validation.py`** — остаётся в агенте (проверяет наличие его же
    runtime-таблиц), но ходит в БД через внедрённый адаптер. Перенаправляется
    на `data-mcp`, а не переезжает в него.
+6. **Redis-канал** — снимает ли однопроцессность (решение §10.1) смысл
+   `redis_channel.py` (378) и `message_exchange.py` (171)?
+
+---
+
+## 10. Принятые решения об удалении
+
+### 10.1 Мультимашинная аренда задач
+
+`agent_worker_claims` и протокол claim/lease/heartbeat/reclaim/heal удаляются.
+Агент становится **однопроцессным**.
+
+| Что уходит | Строк / объём |
+|---|---|
+| `lib/channels/postgres_channel.py` — протокол аренды | ~1 200 из 2 190 (оценка по 85 упоминаниям) |
+| `tools/check_worker_pool_integrity.py` | 201 |
+| `sql/workers/` — 4 файла | DROP-миграция |
+| Настройки `channels.postgres.*` | 8 ключей: `claims_table`, `lease_interval`, `claim_strategy`, `unstick_interval`, `max_stuck_retries`, `max_concurrent`, `processing_timeout`, `error_retry_delay` |
+| Тесты | ~5 файлов |
+| Документация | `lib/channels/README.md`, `AGENTS.md`, `CHANGELOG.md` |
+
+Замена в `postgres_channel`: простой опрос с `FOR UPDATE SKIP LOCKED`.
+**Потеря:** отказоустойчивость уровня HA. Принимается осознанно.
+
+### 10.2 Бенчмарки
+
+`benchmarks/` (2 327) + `benchmarks/db.py` (340) + `tools/legal_benchmark.py` (197),
+2 таблицы в `sql/benchmarks/`, ~5 тестовых файлов, секция `benchmark.*`.
+
+Вместе уходят `tools/legacy_audit.py` (484) и `tools/test_audit.py` (735) —
+процессные артефакты, не runtime.
+
+**Потеря:** end-to-end замер качества ответа. 4 101 юнит-тест остаются, но они
+проверяют компоненты, а не ответ пользователю.
+
+### 10.3 Streamlit
+
+`streamlit_app.py` (669) + `lib/services/subprocess_manager.py` (149, существует
+**только** для его запуска) + логика spawn в `gateway.py`.
+
+`workspace/utils/media.py` (259) сокращается — каналы ещё его читают.
+Тесты: `test_streamlit_app.py` уходит, `test_profile_lifecycle.py` — частично.
+Настройки `streamlit.*` удаляются.
+
+**Потеря:** веб-интерфейс как продуктовая поверхность.
+
+### 10.4 Итог по остатку агента
+
+| | Строк |
+|---|---:|
+| Сейчас | 21 781 |
+| После трёх удалений | ~16 800 |
+| После замены патчей на хуки | ~15 500 |
+
+---
+
+## 11. Патчи: что заменяется хуками
+
+Инвентарь 12 патчей — в `docs/architecture/runtime-patcher-inventory.md`.
+Проверено, что даёт `nanobot-ai==0.3.5`:
+
+* **`AgentHook` — 18 методов**, включая `after_execute_tool`, `on_error`,
+  `on_finally`, `before_iteration`, `finalize_content`;
+* **`AgentHookContext` мутабельный**: `messages`, `tool_results`, `error`,
+  `final_content` — обычные поля дата-класса;
+* **`AgentTurnHookContext.events: EventSink`** — хук может публиковать события;
+* **`finalize_content(context, content) -> str | None`** вызывается в
+  `agent/runner.py` в трёх местах — pipeline-хук на финальный контент;
+* **`AgentTurnHookFactory = Callable[[AgentTurnHookContext], AgentHook | None]`** —
+  официальная фабрика per-turn хуков;
+* **23 события**, в том числе `TurnCompleted` (несёт `outcome`, `failure_kind`,
+  `failure_error_kind`, `failure_attempts`), `TurnEndEvent`, `SessionTurnPersisted`,
+  `SessionTurnStarted`, `ContextCompactionEvent`, `RecoveryStateEvent`,
+  `RetryStatusEvent`, `RetryWaitEvent`.
+
+| # | Патч | Вердикт | Чем заменяется |
+|---|---|---|---|
+| 10 | `turn_delivery_fail` | **хуком** | `finalize_content` заменяет текст «Sorry, I encountered an error.» на месте — двойной outbound не возникает вовсе. `on_error` + поле `error` в контексте дают логирование `turn_failed`. Патч делал 6 обязанностей, хук делает 2 |
+| 2 | `save_turn` | **хуком** | `after_execute_tool` вызывается в `execution.py` сразу после `tool.execute()`. Архивировать результат в этот момент **раньше**, чем upstream усечёт его в `_save_turn` |
+| 7 | `async_save` | **нашим классом** | `agent.sessions` — это наш `PGSessionManager`. Обёртка на `ThreadPoolExecutor` делается при создании в `session_storage.py` |
+| 11 | `session_content_cleanup` | **нашим классом** | Чистка NUL — забота PostgreSQL. `clean_text.py` уже делает это и уезжает в `libs/data`. Перенести в `PGSessionManager.save` |
+| 8 | `session_dir_watch` | **удалить** | Диагностика, выключена по умолчанию, тестов нет |
+| 6 | `assemble_outbound` | **урезать** | Хука «после сборки outbound» в 0.3.5 нет — подтверждено чтением `AgentHook`. `_final_turn` уходит на `TurnEndEvent`/`TurnCompleted`. `media` и `_tool_audit` остаются: прочитать их на отправке нечем |
+| 1 | `context_governor` | **остаётся** | `after_execute_tool` получает `result`, но `execution.py` возвращает `return result` — хук **не может** подменить содержимое в контексте. Для MCP-инструментов укорачивание делает сам `data-mcp`; для встроенных (`read_file`) патч остаётся |
+| 9 | `subagent_logging` | **остаётся** | `SubagentManager` конструирует `_SubagentHook` жёстко (`hook=_SubagentHook(task_id, status)`), фабрики нет. Точки вставки не существует — патч оправдан |
+| 3, 5 | `exec_limits`, `tool_limits` | **остаются** | Конфига в 0.3.5 нет. Альтернатива — свой `Tool`, наследующий `ExecTool`, вместо мутации чужого класса; требует проверки правил переопределения в реестре |
+| 4 | `exec_timeout_cap` | **пересмотреть** | Обоснование — длинные legal-задачи; уезжают в MCP, где LLM-вызов происходит в сервере |
+| 12 | `document_text_threshold` | **уходит с документами** | Публичная функция nanobot, но логика документная; переезжает вместе с решением по документам |
+
+**Итог: 12 → 5–6.** Четыре патча заменяются хуками или собственным классом без
+патча, ещё четыре уходят по мере миграции.
+
+### Пять правил вместо патча
+
+1. **Патчить наше, а не фреймворк.** Если поведение правится в
+   `PGSessionManager`, патч не нужен — правь наш класс.
+2. **Подписка на событие вместо инъекции в metadata.** Уже сработало для
+   `compact_tracking`, теперь то же для `_final_turn` и fallback-текста.
+3. **Проверять не наличие хука, а наличие у него возвращаемого значения.**
+   `finalize_content` возвращает значение и подменяет контент; `after_execute_tool`
+   возвращает `None`, и `execution.py` делает `return result` — результат в
+   контекст попадёт исходный.
+4. **Проверять наличие конфига до патча константы.** Для exec в 0.3.5 конфига нет.
+5. **Контрактные тесты на целевой API** уже есть в `tests/contract/`.
+
+### Что добавить в инвентарь
+
+В `docs/architecture/runtime-patcher-inventory.md` ввести колонку
+**«при каком условии исчезнет»** и проставить её для всех двенадцати. Тогда
+патчи перестают быть рентой «на когда-нибудь»: у каждого есть срок, завязанный
+на шаг миграции.

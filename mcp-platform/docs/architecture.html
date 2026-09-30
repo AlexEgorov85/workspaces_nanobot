@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Целевая архитектура: 2 MCP и остаток агента</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --cream:#f7f5f0;--card:#fff;--line:#e9e3d6;--line-soft:#f0ece2;
+  --ink:#14171e;--body:#3a4256;--muted:#7c7a72;
+  --accent:#2f6f5e;--a08:rgba(47,111,94,.08);--a14:rgba(47,111,94,.14);
+  --warn:#a8662f;--w10:rgba(168,102,47,.09);--w28:rgba(168,102,47,.26);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--cream);color:var(--body);font-family:'Outfit','Segoe UI',system-ui,sans-serif;font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1080px;margin:0 auto;padding:0 24px 72px}
+@media(min-width:768px){.wrap{padding:0 40px 96px}}
+h1,h2{font-family:'DM Serif Display',Georgia,serif;color:var(--ink);font-weight:400}
+h1{font-size:34px;line-height:1.15;letter-spacing:-.005em}
+h2{font-size:25px;line-height:1.2}
+h3{font-size:15px;color:var(--ink);font-weight:600}
+.mono{font-family:'JetBrains Mono','Cascadia Mono',Consolas,monospace}
+header{padding:52px 0 8px}
+.eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:18px}
+.lede{font-size:17px;line-height:1.55;max-width:68ch;margin-top:18px}
+.lede strong{color:var(--ink);font-weight:600}
+section{margin-top:50px}
+.sec-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+.sec-num{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent);background:var(--a08);border:1px solid var(--a14);border-radius:6px;padding:2px 8px}
+.sec-sub{color:var(--muted);font-size:14px;max-width:74ch;margin-bottom:22px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.04)}
+.grid{display:grid;gap:14px}
+@media(min-width:760px){.grid-2{grid-template-columns:1fr 1fr}}
+.diagram{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:14px 10px 6px;box-shadow:0 4px 16px -2px rgba(0,0,0,.06);overflow-x:auto}
+.diagram svg{display:block;width:100%;height:auto;min-width:720px}
+.tbl-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:16px;background:var(--card)}
+table{width:100%;border-collapse:collapse;font-size:14px;min-width:820px}
+th{text-align:left;padding:12px 15px;background:var(--a08);color:var(--accent);font-weight:600;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;border-bottom:1px solid var(--line)}
+td{padding:12px 15px;border-bottom:1px solid var(--line-soft);vertical-align:top;line-height:1.45}
+tr:last-child td{border-bottom:none}
+td.num{font-family:'JetBrains Mono',monospace;text-align:right;white-space:nowrap;color:var(--ink);font-size:13px}
+td.blk{color:var(--ink);font-weight:500}
+.verdict{font-size:11.5px;padding:2px 8px;border-radius:6px;white-space:nowrap;display:inline-block;font-weight:600}
+.v-keep{background:var(--a08);color:var(--accent);border:1px solid var(--a14)}
+.v-move{background:var(--w10);color:var(--warn);border:1px solid var(--w28)}
+.v-cut{background:#f6ecec;color:#9a4b4b;border:1px solid #e5cccc}
+.timeline{list-style:none;padding:0;margin:0;position:relative}
+.timeline::before{content:"";position:absolute;left:9px;top:8px;bottom:10px;width:2px;background:var(--accent);opacity:.3}
+.timeline li{position:relative;padding:0 0 18px 36px}
+.timeline li:last-child{padding-bottom:0}
+.timeline li::before{content:"";position:absolute;left:2px;top:5px;width:16px;height:16px;border-radius:50%;background:var(--cream);border:2px solid var(--accent)}
+.timeline .who{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--accent);font-weight:500}
+.timeline p{font-size:14px;line-height:1.5;margin-top:2px}
+.rule{display:flex;gap:13px;align-items:flex-start}
+.rule-ic{flex:0 0 auto;width:30px;height:30px;border-radius:9px;background:var(--a08);border:1px solid var(--a14);display:flex;align-items:center;justify-content:center;color:var(--accent)}
+.rule p{font-size:13.5px;line-height:1.5}
+.note{background:var(--a08);border:1px solid var(--a14);border-radius:14px;padding:16px 18px;margin-top:16px;font-size:13.5px;line-height:1.55}
+.note strong{color:var(--ink)}
+.note.warn{background:var(--w10);border-color:var(--w28)}
+.big{font-family:'JetBrains Mono',monospace;font-size:30px;color:var(--ink);line-height:1.1}
+.bignum{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-top:16px}
+.bignum .card{padding:16px 18px}
+.bignum span{display:block;font-size:12px;color:var(--muted);margin-top:4px}
+footer{margin-top:54px;padding-top:22px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+    Миграция на MCP · аудит завершён
+  </div>
+  <h1>Два сервера.<br>Агент теряет данные, код и патчи.</h1>
+  <p class="lede">PostgreSQL — единственный стор, DuckDB удаляется, FAISS собирается в памяти напрямую из базы. Всё, что касается данных, уходит в <strong>data-mcp</strong> и <strong>vector-mcp</strong>. Однопроцессный агент без бенчмарков, веб-интерфейса и мультимашинной аренды задач. Из двенадцати патчей Nanobot остаётся пять.</p>
+</header>
+
+<section>
+  <div class="sec-head"><span class="sec-num">01</span><h2>Целевая схема</h2></div>
+  <p class="sec-sub">Цепочка данных потеряла один hop. Раньше векторы шли так: PostgreSQL → DuckDB-снапшот → FAISS. Теперь напрямую.</p>
+
+  <div class="diagram">
+  <svg viewBox="0 0 960 528" role="img" aria-label="Целевая архитектура: Nanobot через MCP обращается к data-mcp и vector-mcp, они работают поверх общих библиотек и PostgreSQL">
+    <defs>
+      <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="#2f6f5e"/>
+      </marker>
+      <marker id="arL" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" fill="#c9c4b6"/>
+      </marker>
+    </defs>
+
+    <rect x="35" y="8" width="890" height="76" rx="14" fill="#ffffff" stroke="#2f6f5e" stroke-width="1.5"/>
+    <text x="55" y="36" font-family="'DM Serif Display',Georgia,serif" font-size="17" fill="#14171e">Nanobot 0.3.5 — тонкий агент</text>
+    <text x="55" y="58" font-family="'Outfit',sans-serif" font-size="12.5" fill="#3a4256">LLM · диалог · сессия · контекст и его сжатие · встроенные tool'ы · MCP-клиент</text>
+    <rect x="742" y="26" width="163" height="24" rx="7" fill="rgba(47,111,94,.09)" stroke="rgba(47,111,94,.3)"/>
+    <text x="823" y="42" font-family="'JetBrains Mono',monospace" font-size="11" fill="#2f6f5e" text-anchor="middle">0 enterprise-импортов</text>
+
+    <line x1="480" y1="86" x2="480" y2="122" stroke="#2f6f5e" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="500" y="100" font-family="'JetBrains Mono',monospace" font-size="12" fill="#2f6f5e">MCP · stdio</text>
+    <text x="500" y="117" font-family="'Outfit',sans-serif" font-size="11.5" fill="#7c7a72">discovery → вызов → результат или доменная ошибка</text>
+
+    <line x1="250" y1="288" x2="250" y2="314" stroke="#c9c4b6" stroke-width="1.5" marker-end="url(#arL)"/>
+    <line x1="710" y1="288" x2="710" y2="314" stroke="#c9c4b6" stroke-width="1.5" marker-end="url(#arL)"/>
+
+    <rect x="35" y="140" width="430" height="148" rx="14" fill="#ffffff" stroke="#e9e3d6"/>
+    <rect x="35" y="140" width="430" height="3" rx="1.5" fill="#2f6f5e"/>
+    <text x="55" y="170" font-family="'JetBrains Mono',monospace" font-size="15" fill="#14171e">data-mcp</text>
+    <text x="55" y="190" font-family="'Outfit',sans-serif" font-size="11.5" fill="#7c7a72">PostgreSQL. Пул с выделенными соединениями, очередь задач, лизы</text>
+    <text x="55" y="216" font-family="'JetBrains Mono',monospace" font-size="11" fill="#2f6f5e">query_sql  · read-only, AST-валидация</text>
+    <text x="55" y="236" font-family="'JetBrains Mono',monospace" font-size="11" fill="#2f6f5e">log_event  · батчевая запись, retention</text>
+    <text x="55" y="256" font-family="'JetBrains Mono',monospace" font-size="11" fill="#2f6f5e">history_search  · изоляция по user_id / session_id</text>
+    <text x="55" y="276" font-family="'Outfit',sans-serif" font-size="10.5" fill="#c0bba9">сервер умеет писать — агент получает только именованные операции</text>
+
+    <rect x="495" y="140" width="430" height="148" rx="14" fill="#ffffff" stroke="#e9e3d6"/>
+    <rect x="495" y="140" width="430" height="3" rx="1.5" fill="#2f6f5e"/>
+    <text x="515" y="170" font-family="'JetBrains Mono',monospace" font-size="15" fill="#14171e">vector-mcp</text>
+    <text x="515" y="190" font-family="'Outfit',sans-serif" font-size="11.5" fill="#7c7a72">FAISS в памяти процесса. Векторы уже лежат в PostgreSQL</text>
+    <text x="515" y="216" font-family="'JetBrains Mono',monospace" font-size="11" fill="#2f6f5e">vector_search</text>
+    <text x="515" y="236" font-family="'JetBrains Mono',monospace" font-size="11" fill="#2f6f5e">list_indexes  · index_stats</text>
+    <text x="515" y="256" font-family="'Outfit',sans-serif" font-size="10.5" fill="#c0bba9">модель эмбеддингов не нужна — векторы предрассчитаны</text>
+    <text x="515" y="276" font-family="'Outfit',sans-serif" font-size="10.5" fill="#c0bba9">персиста на диске нет: пересборка на каждом старте</text>
+
+    <rect x="35" y="316" width="430" height="92" rx="14" fill="rgba(47,111,94,.06)" stroke="rgba(47,111,94,.26)"/>
+    <text x="55" y="342" font-family="'JetBrains Mono',monospace" font-size="13.5" fill="#2f6f5e">libs/data</text>
+    <text x="55" y="364" font-family="'Outfit',sans-serif" font-size="12" fill="#3a4256">пул + очередь · AST-валидация · JSONB</text>
+    <text x="55" y="384" font-family="'Outfit',sans-serif" font-size="12" fill="#3a4256">перенос готового workspace/utils/db.py,</text>
+    <text x="55" y="400" font-family="'Outfit',sans-serif" font-size="12" fill="#3a4256">а не новая подсистема</text>
+
+    <rect x="495" y="316" width="430" height="92" rx="14" fill="rgba(47,111,94,.06)" stroke="rgba(47,111,94,.26)"/>
+    <text x="515" y="342" font-family="'JetBrains Mono',monospace" font-size="13.5" fill="#2f6f5e">libs/document + домены</text>
+    <text x="515" y="364" font-family="'Outfit',sans-serif" font-size="12" fill="#3a4256">парсинг офисных · audit-analyzer · legal-summarizer</text>
+    <text x="515" y="384" font-family="'Outfit',sans-serif" font-size="12" fill="#3a4256">30 000 строк доменов с нулём импортов nanobot —</text>
+    <text x="515" y="400" font-family="'Outfit',sans-serif" font-size="12" fill="#3a4256">переносятся тривиально</text>
+
+    <line x1="480" y1="410" x2="480" y2="438" stroke="#2f6f5e" stroke-width="2" marker-end="url(#ar)"/>
+
+    <rect x="35" y="442" width="890" height="76" rx="13" fill="#f0ede6" stroke="#e0dacb"/>
+    <text x="55" y="470" font-family="'JetBrains Mono',monospace" font-size="14" fill="#14171e">PostgreSQL / Greenplum — единственный стор</text>
+    <text x="55" y="492" font-family="'Outfit',sans-serif" font-size="12" fill="#7c7a72">oarb.audits · violations · audit_reports · audit_vectors   |   public.agent_gateway_logs · question_runs · session_meta · session_messages · conversation_messages · worker_claims</text>
+    <text x="55" y="510" font-family="'Outfit',sans-serif" font-size="11.5" fill="#a8662f">DuckDB удаляется: ~2 600 строк кода, 10 тестовых модулей, весь снимок на диске</text>
+  </svg>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">02</span><h2>Что остаётся в агенте — и стоит ли</h2></div>
+  <p class="sec-sub">21 781 строка. Ниже — по блокам, с честным вердиктом. Зелёное оставляем, оранжевое требует вашего решения, красное — кандидат на удаление.</p>
+
+  <div class="bignum">
+    <div class="card"><div class="big">21 781</div><span>строк в агенте сейчас</span></div>
+    <div class="card"><div class="big" style="color:var(--warn)">~16 800</div><span>после трёх удалений</span></div>
+    <div class="card"><div class="big" style="color:var(--accent)">~15 500</div><span>после замены патчей на хуки</span></div>
+    <div class="card"><div class="big" style="color:var(--accent)">12 → 5</div><span>патчей останется</span></div>
+  </div>
+
+  <div class="tbl-wrap" style="margin-top:16px">
+  <table>
+    <thead>
+      <tr><th style="width:27%">Блок</th><th style="width:8%">Строк</th><th style="width:47%">Зачем он в агенте</th><th style="width:18%">Вердикт</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="blk">Обвязка Nanobot<br><span class="mono" style="font-size:11.5px;color:var(--muted)">runtime_patcher, application_context, agent_factory, bus_factory</span></td>
+        <td class="num">5 592</td>
+        <td>Цена неприкосновенности Nanobot: 12 патчей внутренностей AgentLoop, для которых у фреймворка нет точек расширения. Плюс сборка сервисов и lifecycle.</td>
+        <td><span class="verdict v-move">пересмотреть</span><br><span style="font-size:12px;color:var(--muted)">2 252 строки патчей — теперь обосновывать каждый заново</span></td>
+      </tr>
+      <tr>
+        <td class="blk">Каналы и аренда задач<br><span class="mono" style="font-size:11.5px;color:var(--muted)">postgres_channel, message_exchange</span></td>
+        <td class="num">~1 200</td>
+        <td>Протокол аренды <strong>удалён</strong> — агент становится однопроцессным. Остаётся только перенос сообщений через <code>agent_conversation_messages</code> с <code>FOR UPDATE SKIP LOCKED</code>. Теряется отказоустойчивость уровня HA.</td>
+        <td><span class="verdict v-keep">оставить</span><br><span style="font-size:12px;color:var(--muted)">удалено ~1 200 строк, 8 настроек, 4 SQL-файла</span></td>
+      </tr>
+      <tr>
+        <td class="blk">Бенчмарки</td>
+        <td class="num">0</td>
+        <td><strong>Удалены полностью</strong> вместе с <code>benchmarks/db.py</code>, <code>tools/legal_benchmark.py</code> и процессными артефактами <code>legacy_audit.py</code> / <code>test_audit.py</code>. Теряется end-to-end замер качества ответа.</td>
+        <td><span class="verdict v-cut">удалено</span><br><span style="font-size:12px;color:var(--muted)">−3 599 строк</span></td>
+      </tr>
+      <tr>
+        <td class="blk">Streamlit и его subprocess-менеджер</td>
+        <td class="num">0</td>
+        <td><strong>Удалены</strong>. <code>subprocess_manager.py</code> существовал только чтобы поднимать UI, поэтому уходит целиком. Теряется веб-интерфейс как продуктовая поверхность.</td>
+        <td><span class="verdict v-cut">удалено</span><br><span style="font-size:12px;color:var(--muted)">−818 строк</span></td>
+      </tr>
+      <tr>
+        <td class="blk">Хуки и инструменты агента<br><span class="mono" style="font-size:11.5px;color:var(--muted)">database_logging_hook, tool_audit, terminal_print, session_file_redirect, recent_files, project_tool_loader</span></td>
+        <td class="num">2 471</td>
+        <td>Политика файлов — не дать агенту разбрасывать файлы, автоприкрепление созданного, аудит вызовов. `database_logging_hook` становится MCP-клиентом.</td>
+        <td><span class="verdict v-keep">оставить</span><br><span style="font-size:12px;color:var(--muted)">кроме debug_stream_diag (70) — сам помечен временным</span></td>
+      </tr>
+      <tr>
+        <td class="blk">Точки входа<br><span class="mono" style="font-size:11.5px;color:var(--muted)">cli_agent, gateway, lifecycle, media</span></td>
+        <td class="num">1 977</td>
+        <td>REPL оператора и сервер с каналами. Spawn Streamlit убран. <code>media.py</code> сокращается — каналы ещё его читают.</td>
+        <td><span class="verdict v-keep">оставить</span></td>
+      </tr>
+      <tr>
+        <td class="blk">Наблюдаемость и здоровье<br><span class="mono" style="font-size:11.5px;color:var(--muted)">db_logging_bus, runtime_events_subscriber, runtime_health, schema_validation</span></td>
+        <td class="num">1 665</td>
+        <td>Превращают события Nanobot в метрики и логи. Знание формы сообщений — агентское; писатель уезжает.</td>
+        <td><span class="verdict v-keep">оставить</span><br><span style="font-size:12px;color:var(--muted)">проверки health перенаправить на серверы</span></td>
+      </tr>
+      <tr>
+        <td class="blk">Сессии и хранение<br><span class="mono" style="font-size:11.5px;color:var(--muted)">pg_session_manager, session_cold_sync, session_storage, session_file_store</span></td>
+        <td class="num">1 496</td>
+        <td>Персистентность диалога: JSONL + холодное зеркало в PG + файлы на диске. Это продукт, а не доступ к данным.</td>
+        <td><span class="verdict v-keep">оставить</span></td>
+      </tr>
+      <tr>
+        <td class="blk">Сжатие контекста и CLI<br><span class="mono" style="font-size:11.5px;color:var(--muted)">console_loop, hook_loader, cli_compat, display_config</span></td>
+        <td class="num">1 003</td>
+        <td>REPL с typewriter-выводом и слэш-командами; автозагрузка плагинов; маскировка приватных имён Nanobot.</td>
+        <td><span class="verdict v-keep">оставить</span></td>
+      </tr>
+      <tr>
+        <td class="blk">Служебные утилиты проекта<br><span class="mono" style="font-size:11.5px;color:var(--muted)">diagnose_startup, scan_nanobot_inventory, audit_nanobot_contracts</span></td>
+        <td class="num">812</td>
+        <td>Сторожа апгрейда: сверяют стартовый лог с инвентарём, картируют зависимости от Nanobot, ловят несуществующие символы.</td>
+        <td><span class="verdict v-keep">оставить</span></td>
+      </tr>
+      <tr>
+        <td class="blk">Оставшиеся tool-ы<br><span class="mono" style="font-size:11.5px;color:var(--muted)">compact_context, legal_summarizer_query</span></td>
+        <td class="num">537</td>
+        <td>Сжатие контекста — да. IPC-шим к legal (360 строк) — заменяется MCP-вызовом, останется ~30. <code>example.py</code> удалён: он был зарегистрирован как живой <code>ExampleTool</code>, то есть шаблон отвечал перед моделью в рантайме.</td>
+        <td><span class="verdict v-keep">оставить</span><br><span style="font-size:12px;color:var(--muted)">−131 строка</span></td>
+      </tr>
+      <tr>
+        <td class="blk">Мелкие utils</td>
+        <td class="num">328</td>
+        <td>Доступ к настройкам, контракт метаданных outbound, единая настройка логов, версия проекта.</td>
+        <td><span class="verdict v-keep">оставить</span></td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">03</span><h2>12 патчей → 5: что заменяется хуками</h2></div>
+  <p class="sec-sub">Вы были правы, что стоит проверить хуки. Проверил фактическую поверхность <code>nanobot-ai==0.3.5</code>: у <code>AgentHook</code> 18 методов, у <code>AgentHookContext</code> мутабельные поля, и есть 23 события.</p>
+
+  <div class="grid grid-2" style="margin-bottom:16px">
+    <div class="card">
+      <div class="rule" style="margin-bottom:12px">
+        <div class="rule-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5.5v6c0 5 3.4 9.4 8 10.5 4.6-1.1 8-5.5 8-10.5v-6Z"/></svg></div>
+        <div><h3>Что даёт 0.3.5</h3><p>Точки, которых не было в прежней редакции.</p></div>
+      </div>
+      <ul style="font-size:13.5px;line-height:1.7;color:var(--body);padding-left:18px">
+        <li><code>finalize_content(ctx, content) → str | None</code> — вызывается в <code>runner.py</code> трижды, <strong>подменяет финальный контент</strong></li>
+        <li><code>AgentHookContext</code> мутабельный: <code>messages</code>, <code>tool_results</code>, <code>error</code></li>
+        <li><code>AgentTurnHookContext.events: EventSink</code> — хук публикует события</li>
+        <li><code>AgentTurnHookFactory</code> — официальная фабрика per-turn хуков</li>
+        <li><code>TurnCompleted</code> несёт <code>outcome</code>, <code>failure_kind</code>, <code>failure_error_kind</code>, <code>failure_attempts</code></li>
+      </ul>
+    </div>
+    <div class="card" style="background:var(--w10);border-color:var(--w28)">
+      <div class="rule" style="margin-bottom:12px">
+        <div class="rule-ic" style="background:rgba(168,102,47,.1);border-color:rgba(168,102,47,.3);color:var(--warn)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v5M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></div>
+        <div><h3>Ловушка, которую надо знать</h3><p>Наличие хука ≠ возможность повлиять.</p></div>
+      </div>
+      <p style="font-size:13.5px;line-height:1.65">В <code>execution.py</code> вызов идёт так: <code>result = await tool.execute(...)</code> → <code>await hook.after_execute_tool(context, ..., result)</code> → <code>return result</code>. Хук получает результат, но <strong>возвращаемого значения не имеет</strong>, а раннер отдаёт <code>result</code> без изменений. Подменить содержимое результата в контексте через хук нельзя.</p>
+      <p style="font-size:13.5px;line-height:1.65;margin-top:10px">Отсюда правило: проверять не <em>наличие</em> хука, а наличие у него возвращаемого значения. <code>finalize_content</code> возвращает значение и подменяет контент — работает. <code>after_execute_tool</code> — нет.</p>
+    </div>
+  </div>
+
+  <div class="tbl-wrap">
+  <table style="min-width:760px">
+    <thead>
+      <tr><th style="width:6%">#</th><th style="width:20%">Патч</th><th style="width:13%">Вердикт</th><th style="width:61%">Чем заменяется</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="num">10</td><td class="blk"><code>turn_delivery_fail</code></td><td><span class="verdict v-keep">хуком</span></td><td><code>finalize_content</code> заменяет «Sorry, I encountered an error.» на месте — двойной outbound не возникает вовсе. <code>on_error</code> + поле <code>error</code> дают логирование. Патч делал 6 обязанностей, хук делает 2</td></tr>
+      <tr><td class="num">2</td><td class="blk"><code>save_turn</code></td><td><span class="verdict v-keep">хуком</span></td><td><code>after_execute_tool</code> вызывается сразу после <code>tool.execute()</code> — архивировать результат там <strong>раньше</strong>, чем upstream усечёт его в <code>_save_turn</code></td></tr>
+      <tr><td class="num">7</td><td class="blk"><code>async_save</code></td><td><span class="verdict v-keep">нашим классом</span></td><td><code>agent.sessions</code> — это наш <code>PGSessionManager</code>. Обёртка на <code>ThreadPoolExecutor</code> делается при создании в <code>session_storage.py</code></td></tr>
+      <tr><td class="num">11</td><td class="blk"><code>session_content_cleanup</code></td><td><span class="verdict v-keep">нашим классом</span></td><td>Чистка NUL — забота PostgreSQL. <code>clean_text.py</code> уже делает это и уезжает в <code>libs/data</code>. Перенести в <code>PGSessionManager.save</code></td></tr>
+      <tr><td class="num">8</td><td class="blk"><code>session_dir_watch</code></td><td><span class="verdict v-cut">удалить</span></td><td>Диагностика, выключена по умолчанию, тестов нет</td></tr>
+      <tr><td class="num">6</td><td class="blk"><code>assemble_outbound</code></td><td><span class="verdict v-move">урезать</span></td><td>Хука «после сборки outbound» в 0.3.5 нет. <code>_final_turn</code> уходит на <code>TurnEndEvent</code>. <code>media</code> и <code>_tool_audit</code> остаются: прочитать их на отправке нечем</td></tr>
+      <tr><td class="num">1</td><td class="blk"><code>context_governor</code></td><td><span class="verdict v-move">остаётся</span></td><td>Из-за <code>return result</code> хук не может укоротить результат. Для MCP-инструментов это делает сам <code>data-mcp</code>, для встроенных — остаётся патч</td></tr>
+      <tr><td class="num">9</td><td class="blk"><code>subagent_logging</code></td><td><span class="verdict v-move">остаётся</span></td><td><code>SubagentManager</code> конструирует <code>_SubagentHook</code> жёстко, фабрики нет — точки вставки не существует. Патч оправдан</td></tr>
+      <tr><td class="num">3, 5</td><td class="blk"><code>exec_limits</code>, <code>tool_limits</code></td><td><span class="verdict v-move">остаются</span></td><td>Конфига в 0.3.5 нет. Альтернатива — свой <code>Tool</code> вместо мутации чужого класса; требует проверки правил переопределения в реестре</td></tr>
+      <tr><td class="num">4</td><td class="blk"><code>exec_timeout_cap</code></td><td><span class="verdict v-move">пересмотреть</span></td><td>Обоснование — длинные legal-задачи; уезжают в MCP, где LLM-вызов происходит в сервере</td></tr>
+      <tr><td class="num">12</td><td class="blk"><code>document_text_threshold</code></td><td><span class="verdict v-move">уходит с документами</span></td><td>Публичная функция nanobot, но логика документная; переезжает вместе с решением по документам</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note">
+    <strong>Проект уже решалось один раз.</strong> Change <code>runtime-patcher-composition-cleanup</code> вынес <code>project_tools</code> в отдельный загрузчик, <code>compact_tracking</code> — в подписку на событие, <code>compact_command</code> — в upstream-builtin. Приём рабочий, playbook есть.
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="sec-num">04</span><h2>Порядок работ</h2></div>
+  <p class="sec-sub">Исправлен после аудита: FAISS собирается из снапшота, поэтому `vector-mcp` обязан читать из PostgreSQL раньше, чем снапшот исчезнет.</p>
+
+  <ol class="timeline">
+    <li><div class="who">ШАГ 0</div><p><strong>Принятые удаления:</strong> <code>agent_worker_claims</code> с протоколом аренды, <code>benchmarks/</code>, <code>streamlit</code> вместе с <code>subprocess_manager.py</code>, <code>example.py</code>, сломанный и мёртвый код. Каждый набор — отдельный коммит с DROP-миграциями и пересборкой baseline.</p></li>
+    <li><div class="who">ШАГ 1</div><p><code>libs/data</code> ← <code>workspace/utils/db.py</code> + <code>sql_safety</code> + <code>jsonb</code> + <code>clean_text</code>. Это перенос готового модуля, а не постройка.</p></li>
+    <li><div class="who">ШАГ 2</div><p><code>data-mcp</code> — тонкая MCP-поверхность над <code>libs/data</code>.</p></li>
+    <li><div class="who">ШАГ 3</div><p><code>vector-mcp</code> — сборка FAISS напрямую из PostgreSQL. Переносит <code>build_faiss_index</code>, <code>group_vector_hits</code> и векторную половину <code>cache_provider_impl.py</code>.</p></li>
+    <li><div class="who">ШАГ 4</div><p><strong>Удаление DuckDB</strong> одним коммитом, без MCP-работы. Векторный поиск к этому моменту уже не зависит от снапшота.</p></li>
+    <li><div class="who">ШАГ 5</div><p>Замена патчей на хуки: <code>turn_delivery_fail</code> и <code>save_turn</code> уходят первыми — у них есть готовые точки расширения. <code>async_save</code> и <code>session_content_cleanup</code> переезжают в <code>PGSessionManager</code>.</p></li>
+    <li><div class="who">ШАГ 6</div><p>Логирование через <code>data-mcp</code>: буфер в агенте, батчевый flush, дроп при переполнении. <code>db_logging_bus.py</code> остаётся в агенте.</p></li>
+    <li><div class="who">ШАГ 7</div><p><code>libs/document</code> и перенос <code>legal_summarizer</code> — 30 000 строк с нулевой связностью.</p></li>
+    <li><div class="who">ШАГ 8</div><p><code>audit-analyzer</code> поверх двух серверов. CLI-граница уже существует.</p></li>
+  </ol>
+</section>
+
+<footer>
+  <div class="mono" style="color:var(--ink)">refactor/mcp-platform · 693995d</div>
+  <div style="margin-top:10px">Аудит: 73 файла <span class="mono">lib/</span> · <span class="mono">workspace/</span>, <span class="mono">tools/</span>, <span class="mono">benchmarks/</span> · 64 из 159 тестовых файлов затрагиваются. Основной проект не изменён: 4 101 тест на месте.</div>
+</footer>
+
+</div>
+</body>
+</html>
