@@ -333,6 +333,26 @@ class LoggingSettings(_StrictOptional):
     db: LoggingDbSettings | None = None
 
 
+class EnterpriseMcpSettings(_StrictOptional):
+    """Подключение агента к MCP-серверу ``enterprise-mcp``.
+
+    Объявление одно, и читает его клиент агента. ``mcpServers`` в
+    ``config.json`` намеренно остаётся пустым: пока операции не отдаются
+    модели, вторая копия процесса была бы вторым владельцем пула
+    PostgreSQL, а владелец у разделяемого ресурса должен быть один.
+
+    Пути и интерпретатор приходят как ``${VAR}`` и резолвятся в
+    ``os.environ`` (см. ``config._export_runtime_env``) — в конфиг не
+    зашивается ничего, что принадлежит конкретной машине.
+    """
+
+    enabled: bool | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    cwd: str | None = None
+    tool_timeout_sec: float | None = Field(default=None, gt=0)
+
+
 # ---------------------------------------------------------------------------
 # skills.<name> — универсальная декларация навыка (см. PHASE «унификация»).
 # Каждый skill объявляется в project.json одной JSON-секцией; ApplicationContext
@@ -688,6 +708,7 @@ class ProjectSettings(BaseModel):
     cli: CliSettings | None = None
     logging: LoggingSettings | None = None
     skills: SkillsSettings | None = None
+    enterprise_mcp: EnterpriseMcpSettings | None = None
 
 
 class _LegacyGatewaySectionsError(Exception):

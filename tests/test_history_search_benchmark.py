@@ -22,7 +22,6 @@ timestamp DESC. Метрики фиксируются в
 from __future__ import annotations
 
 import json
-import re
 import time
 from pathlib import Path
 from typing import Any
@@ -78,64 +77,33 @@ def _make_event_id_set(events: list[dict]) -> set[str]:
     return {e["id"] for e in events if e.get("id")}
 
 
-def _simulate_baseline_sql(sql: str, params: tuple, events: list[dict]) -> list[dict]:
-    """Эмулятор текущего SQL: фильтры + ORDER BY timestamp DESC + LIMIT.
+def _filter_events(arguments: dict[str, Any], events: list[dict]) -> list[dict]:
+    """Отборка корпуса по аргументам операции — как это делает владелец данных.
 
-    Воспроизводит поведение ``history_search_tool.py::execute`` (Этап 2).
-    Парсит SQL для определения применённых фильтров — это устойчивее, чем
-    жёсткая привязка к индексу параметра, потому что опциональные фильтры
-    могут отсутствовать и индексы сдвигаются.
+    Раньше здесь разбирался текст baseline-SQL. Теперь tool SQL не строит, и
+    разбирать нечего: предикаты приезжают аргументами операции. Отборка
+    повторяет прежнюю семантику (область видимости, тип, имя, окно времени,
+    ILIKE по summary+payload), чтобы метрики оставались сопоставимыми с
+    записанными в ``HISTORY_SEARCH_ANALYSIS.md``.
     """
-    if not params:
-        return []
+    user_id = arguments.get("user_id")
+    allow_all = bool(user_id)
+    session_id = arguments.get("session_id") or None
+    event_type = arguments.get("event_type")
+    tool_name = arguments.get("tool_name")
+    since = arguments.get("since")
+    until = arguments.get("until")
+    query = (arguments.get("query") or "").strip()
+    limit = int(arguments.get("limit") or 50)
+    offset = int(arguments.get("offset") or 0)
 
-    allow_all = bool(params[0])
-    session_id = params[1] or None
-
-    # Разбираем SQL по меткам, чтобы понять, какие фильтры применены
-    sql_lc = sql.lower()
-    has_query = "ilike %s" in sql_lc
-    has_tool_name = "name = %s" in sql_lc
-    has_since = '"timestamp" >= %s' in sql_lc
-    has_until = '"timestamp" <= %s' in sql_lc
-
-    # Идём по params в порядке, который соответствует порядку clauses в tool
-    idx = 2
-    event_type = params[idx] if idx < len(params) else None
-    idx += 2  # event_type повторяется дважды в clause
-
-    tool_name = None
-    if has_tool_name:
-        if idx < len(params):
-            tool_name = params[idx]
-        idx += 1
-
-    like = None
-    if has_query:
-        if idx + 1 < len(params):
-            like = params[idx]
-            # params[idx+1] — дубль для payload::text ILIKE
-        idx += 2
-
-    since = None
-    if has_since:
-        if idx < len(params):
-            since = params[idx]
-        idx += 1
-
-    until = None
-    if has_until:
-        if idx < len(params):
-            until = params[idx]
-        idx += 1
-
-    limit = params[-1]
-
-    out = []
+    out: list[dict] = []
     for e in events:
-        if not allow_all:
-            if e.get("session_id") != session_id:
+        if allow_all:
+            if e.get("user_id") != user_id:
                 continue
+        elif e.get("session_id") != session_id:
+            continue
         if event_type and e.get("event_type") != event_type:
             continue
         if tool_name and e.get("name") != tool_name:
@@ -145,26 +113,52 @@ def _simulate_baseline_sql(sql: str, params: tuple, events: list[dict]) -> list[
             continue
         if until and ts > until:
             continue
-        if like:
-            stripped = like.strip("%")
+        if query:
             blob = (e.get("summary") or "") + " " + json.dumps(
                 e.get("payload") or {}, ensure_ascii=False
             )
-            if stripped.lower() not in blob.lower():
+            if query.lower() not in blob.lower():
                 continue
         out.append(e)
-        if len(out) >= limit:
-            break
-    return out
+    return out[offset:offset + limit]
 
 
-def _make_fake_fetch(events: list[dict]):
-    """Вернуть функцию ``fetch(sql, *params)``, повторяющую baseline-SQL."""
+class _FakeMcpClient:
+    """Клиент-подмена операции ``history_search``.
 
-    def _fetch(sql: str, *params):
-        return _simulate_baseline_sql(sql, params, events)
+    Отвечает в формате capability ``data``. Раньше tool получал строки из
+    фейкового ``utils.db.fetch``; после переноса tool без клиента возвращал
+    ``mcp_unavailable``, и бенчмарк печатал Recall 0.0, оставаясь «зелёным»
+    — гейд, который измеряет пустоту.
+    """
 
-    return _fetch
+    def __init__(self, events: list[dict]) -> None:
+        self._events = events
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call(self, operation: str, arguments: dict) -> str:
+        assert operation == "history_search", f"неожиданная операция {operation!r}"
+        self.calls.append((operation, dict(arguments)))
+        hits = _filter_events(arguments, self._events)
+        return json.dumps(
+            {
+                "hits": [
+                    {
+                        "id": e.get("id"),
+                        "timestamp": e.get("timestamp"),
+                        "event_type": e.get("event_type"),
+                        "name": e.get("name"),
+                        "level": e.get("level"),
+                        "summary": e.get("summary"),
+                        "payload": e.get("payload") or {},
+                    }
+                    for e in hits
+                ],
+                "next_offset": None,
+                "truncated": False,
+            },
+            ensure_ascii=False,
+        )
 
 
 # -------------------------------------------------------------------- fixtures
@@ -181,10 +175,11 @@ def scenarios() -> list[dict[str, Any]]:
 
 
 @pytest.fixture
-def tool() -> HistorySearchTool:
-    return HistorySearchTool(config=HistorySearchToolConfig(
-        max_rows=50, max_result_chars=80_000,
-    ))
+def tool(events) -> HistorySearchTool:
+    return HistorySearchTool(
+        config=HistorySearchToolConfig(max_rows=50, max_result_chars=80_000),
+        client=_FakeMcpClient(events),
+    )
 
 
 # -------------------------------------------------------------------- metrics
@@ -236,7 +231,6 @@ async def test_baseline_metrics(events, scenarios, tool, monkeypatch):
         "workspace.tools.history_search_tool._current_session_key",
         lambda: "postgres:1001",
     )
-    monkeypatch.setattr("utils.db.fetch", _make_fake_fetch(events))
 
     recalls_5: list[float] = []
     recalls_10: list[float] = []

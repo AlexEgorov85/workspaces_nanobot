@@ -485,5 +485,26 @@
       "connect_backoff_max_sec": 60.0, // Потолок backoff psycopg2.connect
       "summary_max_chars": 200         // Усечение summary до N символов
     }
+  },
+
+  // ---------------------------------------------------------------------------
+  //  enterprise_mcp.* — подключение агента к MCP-серверу платформы
+  //
+  //  Объявление одно: его читает клиент агента (lib/services/
+  //  enterprise_mcp_client.py). В config.json секция tools.mcpServers
+  //  намеренно пуста — вторая копия процесса означала бы второго
+  //  владельца пула PostgreSQL, а владелец у разделяемого ресурса один.
+  //
+  //  ${NANOBOT_PYTHON} и ${NANOBOT_PROJECT_ROOT} подставляются из
+  //  os.environ (config._export_runtime_env): в конфиге нет ни одного
+  //  пути конкретной машины. Сервер получает DATABASE_URL из окружения
+  //  агента — отдельно он его не знает и без него не поднимается.
+  // ---------------------------------------------------------------------------
+  "enterprise_mcp": {
+    "enabled": true,                             // Варианты: true | false
+    "command": "${NANOBOT_PYTHON}",               // Интерпретатор с зависимостями сервера
+    "args": ["-m", "servers.enterprise.server"], // Точка входа: stdio-сервер
+    "cwd": "${NANOBOT_PROJECT_ROOT}/mcp-platform",
+    "tool_timeout_sec": 30.0                     // Таймаут одного вызова операции, сек
   }
 }

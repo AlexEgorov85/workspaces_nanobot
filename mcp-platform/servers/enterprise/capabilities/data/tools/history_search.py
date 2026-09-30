@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from libs.enterprise_common.container import ToolContainer
 from libs.enterprise_common.registry import ToolDefinition
@@ -27,7 +26,9 @@ def handle_history_search(
     query: str = "",
     event_type: str | None = None,
     level: str | None = None,
+    tool_name: str | None = None,
     since: str | None = None,
+    until: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> str:
@@ -39,9 +40,11 @@ def handle_history_search(
         query=query,
         event_type=event_type,
         level=level,
+        tool_name=tool_name,
         session_id=session_id,
         user_id=user_id,
         since=since,
+        until=until,
         limit=limit,
         offset=offset,
         audience=AUDIENCE_MODEL,

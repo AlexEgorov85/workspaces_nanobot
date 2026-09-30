@@ -22,9 +22,10 @@
       }
     }
 
-Безопасность: все фильтры передаются позиционными ``%s``-параметрами,
-без интерполяции строк в SQL (как в ``duckdb_query``). Observability —
-через штатный ``tool_audit_hook``.
+Безопасность: tool не строит SQL. Он подставляет личность текущего запроса
+и вызывает операцию ``history_search`` capability ``data``, а параметры
+операции — позиционные, без интерполяции. Observability — через штатный
+``tool_audit_hook``.
 
 Контракт (см. ``openspec/specs/tools-history-search``):
 
@@ -35,16 +36,21 @@
     ``scope="all"`` возвращает только события того же пользователя, не
     глобальную выборку. При отсутствии identity для соответствующего
     scope tool возвращает структурированную ошибку (``missing_session_identity``
-    / ``missing_user_identity``), и SQL-запрос НЕ выполняется.
+    / ``missing_user_identity``), и операция НЕ вызывается.
+  * **Почему tool остался, а модель не зовёт операцию напрямую**: личность
+    берётся из ``RequestContext`` агента, а ``MCPToolWrapper`` нанобота
+    передаёт ровно те аргументы, которые задала модель. Прямой вызов
+    операции означал бы, что ``session_id`` приходит от модели, — то есть
+    граница изоляции перестала бы быть границей.
   * **Identity source**: единственный — ``RequestContext`` из
     ``nanobot.agent.tools.context``. Имя поля фиксируется через приватный
     helper ``_current_user_id()`` (для ``scope="all"``) — никаких обращений
     к ``sender_id``/``session_id``/``chat_id``/``actor``/``payload`` из других
     мест. Это инкапсулирует зависимость от nanobot 0.3.0.
   * **Пагинация**: ``offset`` (целое ≥ 0, дефолт 0) пропускает первые
-    ``offset`` строк после ``ORDER BY timestamp DESC, id DESC``. SQL
-    запрашивает ``LIMIT effective_limit + 1`` строк; лишняя строка
-    определяет ``db_has_more``.
+    ``offset`` строк после ``ORDER BY timestamp DESC, id DESC``. Наличие
+    следующей страницы сообщает владелец данных (``next_offset``/
+    ``truncated`` в ответе операции), а не пересчёт строк в адаптере.
   * **Детерминированный порядок**: tie-breaker по ``id`` (UUID) — стабильный
     для равных ``timestamp`` (типично при multi-row INSERT в одном батче).
   * **Раздельные truncation-флаги**: ``results_truncated`` (на ответе) —
@@ -54,8 +60,8 @@
     ``results_truncated``.
   * **Честный ``has_more``**: ``db_has_more OR results_truncated`` —
     композитная формула, чтобы следующая страница была видна даже когда
-    ``LIMIT N+1`` не обнаружил следующей строки в БД, но часть
-    отобранных событий была отброшена truncation'ом.
+    в базе следующей строки нет, но часть отобранных событий была
+    отброшена truncation'ом.
   * **next_offset**: ``offset + count`` — после truncation-проходов,
     чтобы продолжить пагинацию без пропуска отброшенных событий.
   * **Без утечки ``user_id``**: ``user_id`` НЕ возвращается в payload'е
@@ -65,13 +71,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any, ClassVar
 
 from nanobot.agent.tools.base import Tool, tool_parameters
 from pydantic import BaseModel, Field
 
+from lib.services.enterprise_mcp_client import (
+    EnterpriseMcpUnavailable,
+    EnterpriseOperationError,
+)
 from lib.utils.text_utils import truncate_middle
 
 
@@ -196,8 +205,9 @@ class HistorySearchTool(Tool):
 
     config_key: ClassVar[str] = "history_search"
 
-    def __init__(self, *, config: HistorySearchToolConfig) -> None:
+    def __init__(self, *, config: HistorySearchToolConfig, client: Any = None) -> None:
         self.config = config
+        self._client = client
 
     @classmethod
     def config_cls(cls):
@@ -240,7 +250,11 @@ class HistorySearchTool(Tool):
             config = cls.config_cls()(**section)
         except Exception:
             config = cls.config_cls()()
-        return cls(config=config)
+        # Клиент enterprise-mcp: единственный путь к журналу. ``None`` — раздел
+        # ``enterprise_mcp`` выключен; тогда tool остаётся зарегистрированным и
+        # отвечает структурной ошибкой, чтобы модель видела причину, а не
+        # «неизвестный инструмент».
+        return cls(config=config, client=getattr(ctx, "_enterprise_mcp", None))
 
     @property
     def name(self) -> str:
@@ -339,93 +353,71 @@ class HistorySearchTool(Tool):
         original_offset = max(0, int(offset or 0))
         effective_limit = min(int(limit or self.config.max_rows), self.config.max_rows)
 
-        clauses: list[str] = []
-        params: list[Any] = []
+        client = self._client
+        if client is None:
+            return self._error(
+                "mcp_unavailable",
+                "Клиент enterprise-mcp не создан: раздел enterprise_mcp выключен "
+                "или не задан (project.json). Поиск по журналу выполняется "
+                "только через него.",
+            )
 
-        if allow_all:
-            # ``user_id = %s`` — единственный security boundary для
-            # cross-session search. Без ``OR session_id = %s`` / ``WHERE TRUE``:
-            # фильтрация строго по user_id. Если user_id NULL в БД —
-            # строка не попадёт в выборку (безопасное поведение, см. V004).
-            clauses.append("user_id = %s")
-            params.append(user_id)
-        else:
-            clauses.append("session_id = %s")
-            params.append(session_id)
-
-        clauses.append("(%s IS NULL OR event_type = %s)")
-        params.append(event_type)
-        params.append(event_type)
-
-        if tool_name:
-            clauses.append("name = %s")
-            params.append(tool_name)
-
-        if query:
-            like = f"%{query}%"
-            clauses.append("(summary ILIKE %s OR payload::text ILIKE %s)")
-            params.append(like)
-            params.append(like)
-
-        if since:
-            clauses.append('"timestamp" >= %s')
-            params.append(since)
-
-        if until:
-            clauses.append('"timestamp" <= %s')
-            params.append(until)
-
-        schema, table = _log_table()
-        # Детерминированный порядок: ``timestamp DESC, id DESC`` — UUID как
-        # tie-breaker защищает от потери/дублей строк одного батча flush'а
-        # на границе страниц. ``LIMIT N+1`` даёт лишнюю строку для
-        # детекции наличия следующей страницы в БД.
-        sql = (
-            f'SELECT id, "timestamp", event_type, name, level, summary, payload '
-            f'FROM "{schema}"."{table}" '
-            f"WHERE {' AND '.join(clauses)} "
-            'ORDER BY "timestamp" DESC, "id" DESC '
-            'LIMIT %s OFFSET %s'
-        )
-        params.append(effective_limit + 1)
-        params.append(original_offset)
+        # Личность подставляет агент, а не модель: session_scope решает, что
+        # именно уходит в операцию, и решение принимается здесь, по данным
+        # текущего запроса. Модель не может ни расширить область, ни сузить
+        # её до чужой сессии.
+        try:
+            raw = await client.call(
+                "history_search",
+                {
+                    "session_id": "" if allow_all else str(session_id),
+                    "user_id": user_id if allow_all else None,
+                    "query": query or "",
+                    "event_type": event_type,
+                    "tool_name": tool_name,
+                    "since": since,
+                    "until": until,
+                    "limit": effective_limit,
+                    "offset": original_offset,
+                },
+            )
+        except EnterpriseOperationError as exc:
+            return self._error(exc.code, exc.message)
+        except EnterpriseMcpUnavailable as exc:
+            return self._error("mcp_unavailable", str(exc))
+        except Exception as exc:  # noqa: BLE001 - модель не должна видеть traceback
+            return self._error("unexpected_error", str(exc))
 
         try:
-            from utils.db import fetch
-        except Exception as exc:
-            return self._error("import_error", str(exc))
+            page = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            return self._error("protocol_error", f"ответ операции не разобран: {exc}")
 
-        try:
-            rows = await asyncio.to_thread(fetch, sql, *params)
-        except Exception as exc:
-            return self._error("db_error", str(exc))
-
-        events = []
-        for row in rows or []:
-            payload = row.get("payload")
+        events: list[dict[str, Any]] = []
+        for hit in page.get("hits") or []:
+            payload = hit.get("payload")
             if isinstance(payload, (dict, list)):
                 try:
                     payload_text = json.dumps(payload, ensure_ascii=False, default=str)
-                except Exception:
+                except Exception:  # noqa: BLE001 - payload может быть любым
                     payload_text = str(payload)
             else:
                 payload_text = str(payload) if payload is not None else ""
             events.append({
-                "event_id": row.get("id"),
-                "timestamp": str(row.get("timestamp")),
-                "event_type": row.get("event_type"),
-                "name": row.get("name"),
-                "level": row.get("level"),
-                "summary": row.get("summary"),
+                "event_id": hit.get("id"),
+                "timestamp": str(hit.get("timestamp")),
+                "event_type": hit.get("event_type"),
+                "name": hit.get("name"),
+                "level": hit.get("level"),
+                "summary": hit.get("summary"),
                 "payload": payload_text,
             })
 
-        # Phase 1 (до truncation): db_has_more определяется наличием
-        # лишней строки в выборке. Лишняя строка отбрасывается из
-        # ответа агента сразу — она служит только маркером.
-        db_has_more = len(events) > effective_limit
-        if db_has_more:
-            events = events[:effective_limit]
+        # Наличие следующей страницы решает владелец данных: операция
+        # запрашивает LIMIT N+1 и сообщает ``next_offset``/``truncated``.
+        # Считать это в адаптере нельзя — там нет ни лимита, ни строки,
+        # которая была отброшена как маркер.
+        db_has_more = page.get("next_offset") is not None or bool(page.get("truncated"))
 
         # Phase 2 (truncation): обрезаем payload каждого события до
         # ``per_event_cap`` символов через ``truncate_middle``; если общий
@@ -586,17 +578,3 @@ def _current_user_id() -> str | None:
     if isinstance(sender_id, str) and sender_id:
         return sender_id
     return None
-
-
-def _log_table() -> tuple[str, str]:
-    try:
-        from config import SETTINGS
-
-        db = (
-            (SETTINGS.get("logging", {}) or {}).get("db", {}) or {}
-        )
-        schema = db.get("schema") or "public"
-        table = db.get("table_name") or "agent_gateway_logs"
-        return schema, table
-    except Exception:
-        return "public", "agent_gateway_logs"

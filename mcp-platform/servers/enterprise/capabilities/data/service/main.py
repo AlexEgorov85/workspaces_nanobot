@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any
@@ -37,6 +38,30 @@ logger = logging.getLogger(__name__)
 #: профилю, а не по имени вызывающего: иначе право на очередь появится у модели.
 AUDIENCE_MODEL = "model"
 AUDIENCE_RUNTIME = "runtime"
+
+#: Уровни, которые принимает ``valid_level`` (CHECK в DDL журнала).
+#: Журнал хранит верхний регистр, и всё, что с ним сравнивается, приводится
+#: к нему же через :func:`normalize_level`.
+_LOG_LEVELS = ("DEBUG", "INFO", "WARN", "ERROR")
+
+
+def normalize_level(value: str | None) -> str:
+    """Привести уровень к тому, что принимает CHECK-ограничение журнала.
+
+    Пустое значение — ``INFO``. Неизвестное — отказ, а не тихая замена:
+    опечатка в уровне, съеденная молча, выглядит в журнале как будто
+    событие было важнее или менее важным, чем на самом деле.
+    """
+    candidate = (value or "").strip().upper()
+    if not candidate:
+        return "INFO"
+    if candidate == "WARNING":
+        candidate = "WARN"
+    if candidate not in _LOG_LEVELS:
+        raise InvalidRequestError(
+            f"уровень {value!r} недопустим: журнал принимает {', '.join(_LOG_LEVELS)}"
+        )
+    return candidate
 
 
 @dataclass(frozen=True)
@@ -138,16 +163,30 @@ class DataService:
     # -- запись журнала -----------------------------------------------------
 
     def _write_events(self, events: list[dict[str, Any]]) -> None:
-        pool = self._pool()
+        """Записать батч событий журнала.
+
+        Батч уходит циклом ``execute`` по одному соединению, а не одним
+        вызовом со списком строк: контракт ``db.execute(sql, *args)`` — один
+        параметр на плейсхолдер. Список строк в этом месте попадал в
+        санитизацию как единственный параметр, ``clean_text`` на нём падал, и
+        сброс молча терял весь батч — операция ``log_event`` отвечала
+        «accepted» и при этом ничего не писала.
+
+        Все строки батча идут в одном задании пула, то есть в одной
+        транзакции: половина батча в журнале хуже, чем ничего.
+        """
         schema, table = self._log_schema, self._log_table
         sql = (
             f'INSERT INTO "{schema}"."{table}" '
             '(id, "timestamp", event_type, name, level, summary, payload, session_id, user_id) '
-            "VALUES (%s, now(), %s, %s, %s, %s, %s, %s, %s)"
+            "VALUES (%s, now(), %s, %s, %s, %s, %s::jsonb, %s, %s)"
         )
         rows = [
             (
-                event.get("id") or None,
+                # ``agent_gateway_logs.id`` — UUID NOT NULL без DEFAULT:
+                # ключ события рождается в приложении, а не в базе. Раньше
+                # сюда уходил NULL, и весь батч откатывался.
+                event.get("id") or str(uuid.uuid4()),
                 event.get("event_type", ""),
                 event.get("name", ""),
                 event.get("level", "info"),
@@ -160,13 +199,19 @@ class DataService:
         ]
         if not rows:
             return
-        pool.execute(sql, rows)  # type: ignore[attr-defined]
+
+        def _work(conn: Any) -> None:
+            with conn.cursor() as cur:
+                for row in rows:
+                    cur.execute(sql, row)
+
+        self.submit(_work)
 
     def log_event(
         self,
         event_type: str,
         name: str = "",
-        level: str = "info",
+        level: str = "INFO",
         summary: str = "",
         payload: dict[str, Any] | None = None,
         session_id: str | None = None,
@@ -185,7 +230,9 @@ class DataService:
             {
                 "event_type": event_type,
                 "name": name,
-                "level": level,
+                # Нормализация здесь, на границе запроса: в буфер уходит уже
+                # валидное значение, и сброс не может упасть из-за уровня.
+                "level": normalize_level(level),
                 "summary": summary,
                 "payload": payload or {},
                 "session_id": session_id,
@@ -201,9 +248,11 @@ class DataService:
         query: str = "",
         event_type: str | None = None,
         level: str | None = None,
+        tool_name: str | None = None,
         session_id: str | None = None,
         user_id: str | None = None,
         since: str | None = None,
+        until: str | None = None,
         limit: int = 50,
         offset: int = 0,
         *,
@@ -235,10 +284,21 @@ class DataService:
             params.append(event_type)
         if level:
             clauses.append("level = %s")
-            params.append(level)
+            # Тот же регистр, что и при записи: фильтр, приведённый к
+            # другой графе, молча не находит ничего.
+            params.append(normalize_level(level))
+        if tool_name:
+            # ``name`` в журнале — имя инструмента для tool_call/tool_result.
+            # Смысленно только вместе с ними, но фильтровать можно и без
+            # event_type: не ограничиваем вызывающего его знанием схемы журнала.
+            clauses.append("name = %s")
+            params.append(tool_name)
         if since:
             clauses.append('"timestamp" >= %s')
             params.append(since)
+        if until:
+            clauses.append('"timestamp" <= %s')
+            params.append(until)
         if query.strip():
             clauses.append("(summary ILIKE %s OR payload::text ILIKE %s)")
             needle = f"%{query.strip()}%"

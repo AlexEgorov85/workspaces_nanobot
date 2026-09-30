@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,7 @@ def _header_to_prefix(header: str) -> list[str]:
 
 
 def load_env(path: str | Path | None = None) -> AttrDict:
-    env_file = Path(path or _ENV_FILE)
+    env_file = Path(path or _SECRETS_FILE)
     if not env_file.exists():
         return AttrDict()
 
@@ -282,6 +283,22 @@ def _export_secrets_to_env(cfg: dict) -> None:
             os.environ.setdefault(key, val)
 
 
+def _export_runtime_env() -> None:
+    """Экспорт фактов о запуске в ``os.environ`` — для резолва ``${VAR}``.
+
+    Нужны MCP-серверу, который запускает сам агент. Объявление сервера
+    живёт в ``config.json`` в единственном экземпляре, и оттуда берутся
+    интерпретатор и корень платформы. Без этого в конфиге пришлось бы
+    зашить абсолютные пути конкретной машины, а сервер поднялся бы не
+    тем Python, в котором установлены его зависимости.
+
+    ``setdefault`` — внешнее окружение имеет приоритет: другой
+    интерпретатор может быть указан осознанно.
+    """
+    os.environ.setdefault("NANOBOT_PYTHON", sys.executable)
+    os.environ.setdefault("NANOBOT_PROJECT_ROOT", str(_PROJECT_FILE.parent))
+
+
 def _merge_profile_overlay(cfg: dict, mode: str) -> None:
     """Применить profiles/<mode>.jsonc как ПОСЛЕДНИЙ шаг перед валидацией.
 
@@ -467,6 +484,10 @@ def resolve_application_config(profile: str) -> AttrDict:
     # Экспорт secrets в os.environ ДО _resolve_env_refs — чтобы ${VAR}
     # в project.json/config.json нашли свои значения.
     _export_secrets_to_env(cfg)
+
+    # Факты о запуске — тоже до резолва: ими заполняются ${NANOBOT_PYTHON}
+    # и ${NANOBOT_PROJECT_ROOT} в объявлении MCP-сервера.
+    _export_runtime_env()
 
     _merge_profile_overlay(cfg, profile)
 

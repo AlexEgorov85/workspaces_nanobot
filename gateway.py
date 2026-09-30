@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import os
 import sys
 import traceback
@@ -265,6 +266,12 @@ async def _run(ctx) -> None:
             await channels_task
 
         await ctx.agent.aclose()
+        # Сессия enterprise-mcp закрывается здесь, пока жив loop: после
+        # выхода из asyncio.run() закрыть её уже нечем, и сервер завершился
+        # бы только вслед за stdin агента.
+        if getattr(ctx, "enterprise_mcp", None) is not None:
+            with contextlib.suppress(Exception):
+                await ctx.enterprise_mcp.aclose()
         ctx.agent.stop()
         await channels.stop_all()
 

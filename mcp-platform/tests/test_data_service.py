@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -219,6 +220,63 @@ class TestHistorySearchIsolation:
         assert svc2.history_search(session_id="s1", limit=10).next_offset is None
 
 
+class TestHistorySearchFilters:
+    """Фильтры, без которых поиск по журналу неполон.
+
+    ``tool_name`` и ``until`` пришли из агентского контракта: адаптер
+    ``history_search`` сохраняет модельную поверхность, значит операция
+    обязана уметь всё, чем она пользовалась раньше. Потеря фильтра здесь
+    выглядела бы как «иногда поиск не находит то, что раньше находил».
+    """
+
+    def _last_select(self, svc: DataService) -> tuple[str, tuple]:
+        selects = [
+            s
+            for s in svc._db.conn.statements
+            if s[0].lstrip().startswith("SELECT")
+        ]
+        assert selects, "сервис не выполнял SELECT"
+        return selects[-1]
+
+    def test_tool_name_filters_by_name(self) -> None:
+        svc = DataService(db=_fake_db(), buffer_flush_interval=0.0)
+        svc.history_search(session_id="s1", tool_name="compact_context")
+        sql, params = self._last_select(svc)
+        assert "name = %s" in sql
+        assert "compact_context" in str(params)
+
+    def test_until_adds_upper_time_bound(self) -> None:
+        svc = DataService(db=_fake_db(), buffer_flush_interval=0.0)
+        svc.history_search(session_id="s1", since="2026-01-01", until="2026-02-01")
+        sql, params = self._last_select(svc)
+        assert '"timestamp" >= %s' in sql
+        assert '"timestamp" <= %s' in sql
+        assert "2026-01-01" in str(params)
+        assert "2026-02-01" in str(params)
+
+    def test_filters_are_parameterized(self) -> None:
+        """Значения фильтров не попадают в текст запроса."""
+        svc = DataService(db=_fake_db(), buffer_flush_interval=0.0)
+        svc.history_search(
+            session_id="s1", tool_name="x'; DROP TABLE y; --", until="'; --"
+        )
+        sql, params = self._last_select(svc)
+        assert "DROP TABLE" not in sql
+        assert "DROP TABLE" in str(params)
+
+    def test_filters_do_not_weaken_isolation(self) -> None:
+        """Фильтры не отменяют требование области видимости."""
+        svc = DataService(db=_fake_db(), buffer_flush_interval=0.0)
+        with pytest.raises(InvalidRequestError, match="области видимости"):
+            svc.history_search(tool_name="compact_context", until="2026-02-01")
+        # Запрос не выполнялся вовсе.
+        assert not [
+            s
+            for s in svc._db.conn.statements
+            if s[0].lstrip().startswith("SELECT")
+        ]
+
+
 # --- права очереди ---------------------------------------------------------
 
 
@@ -291,3 +349,56 @@ class TestLogEvent:
         stats = service.stats()
         assert stats["event_buffer"]["pending"] == 1
         assert stats["max_rows"] > 0
+
+    # -- запись батча -------------------------------------------------------
+
+    def test_flush_writes_one_insert_per_event(self) -> None:
+        """Сброс батча реально доходит до БД.
+
+        Регрессия: ``_write_events`` звал ``execute(sql, rows)``, а контракт
+        ``db.execute(sql, *args)`` — один параметр на плейсхолдер. Список
+        строк уходил в санитизацию как единственный параметр, ``clean_text``
+        на нём падал, и ``log_event`` отвечал «accepted», не записав
+        ничего. На фейковом пуле это не ловилось: падение жило внутри
+        ``EventBuffer.flush``, который глотает исключение по замыслу.
+        """
+        db = _fake_db()
+        svc = DataService(db=db, buffer_flush_interval=0.0)
+        svc.log_event("a", summary="первое")
+        svc.log_event("b", name="tool", session_id="s1", user_id="u1")
+        svc._buffer.flush()
+
+        inserts = [s for s in db.conn.statements if s[0].lstrip().startswith("INSERT")]
+        assert len(inserts) == 2, f"ожидался INSERT на каждое событие, получили {inserts}"
+
+    def test_placeholder_count_matches_row_width(self) -> None:
+        """Ширина строки обязана совпадать с числом плейсхолдеров.
+
+        PostgreSQL проверил бы это сам, но на фейковом пуле расхождение
+        осталось бы незамеченным до первого реального INSERT.
+        """
+        db = _fake_db()
+        svc = DataService(db=db, buffer_flush_interval=0.0)
+        svc.log_event("a", payload={"k": "v"}, session_id="s1")
+        svc._buffer.flush()
+
+        sql, params = next(
+            s for s in db.conn.statements if s[0].lstrip().startswith("INSERT")
+        )
+        assert sql.count("%s") == len(params)
+        assert json.loads(params[5]) == {"k": "v"}
+
+    def test_failed_flush_is_counted_not_raised(self) -> None:
+        """Ошибка записи не поднимается наружу, но видна в счётчике."""
+        db = _fake_db()
+        svc = DataService(db=db, buffer_flush_interval=0.0)
+        svc.log_event("a")
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("db down")
+
+        db.run = _boom
+        svc._buffer.flush()
+
+        assert svc.stats()["event_buffer"]["flush_errors"] == 1
+        assert svc.stats()["event_buffer"]["written"] == 0

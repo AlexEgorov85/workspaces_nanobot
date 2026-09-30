@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -169,6 +168,11 @@ class ApplicationContext:
     # Storage-hybridization: cold-storage mirror для сессий + LLM usage.
     session_cold_sync_service: Any | None = None
     usage_store: Any | None = None
+
+    # Клиент к MCP-серверу enterprise-mcp. Создаётся всегда, когда раздел
+    # ``enterprise_mcp`` включён, но соединение ленивое: сервер не поднимается,
+    # пока не понадобился, и не мешает старту агента, если платформа не собрана.
+    enterprise_mcp: Any | None = None
 
     # Помощники
     config_service: Any = None
@@ -442,7 +446,6 @@ class ApplicationContext:
         from lib.services.runtime_health import (
             RuntimeHealth,
             RuntimeReadiness,
-            ComponentStatus,
         )
 
         ctx.runtime_health = RuntimeHealth()
@@ -491,12 +494,20 @@ class ApplicationContext:
         # of truth для ``_emit_project_tools_inventory_banner``.
         from lib.services.project_tool_loader import register_project_tools
 
+        ctx.enterprise_mcp = _make_enterprise_mcp(ctx.settings)
+        if ctx.enterprise_mcp is not None:
+            logger.info(
+                "enterprise-mcp: клиент создан (%s), соединение ленивое",
+                ctx.enterprise_mcp.describe(),
+            )
+
         project_tools_result = register_project_tools(
             agent=ctx.agent,
             workspace_dir=ctx.workspace_dir,
             settings=ctx.settings,
             cache_store=ctx.cache_store,
             db_logging_service=ctx.db_logging_service,
+            enterprise_mcp=ctx.enterprise_mcp,
         )
         ctx.project_tools_result = project_tools_result
         _emit_project_tools_inventory_banner(project_tools_result)
@@ -618,6 +629,14 @@ class ApplicationContext:
             return
         if self._shutdown is not None:
             self._shutdown.shutdown_all()
+        # Клиент enterprise-mcp: сессия stdio закрывается на том же loop,
+        # которому принадлежит. В gateway loop уже закрыт ``asyncio.run'ом`` —
+        # тогда сервер завершается сам по закрытию stdin (см. client.close()).
+        if getattr(self, "enterprise_mcp", None) is not None:
+            try:
+                self.enterprise_mcp.close()
+            except Exception as exc:
+                logger.warning("enterprise_mcp.close failed: %s", exc)
         # MessageBus.drain() ожидает завершения in-flight handler'ов
         # (например, _handle_turn_completed ещё может писать в БД через
         # DbLoggingService с батчевым flush). Вызываем ПОСЛЕ остановки
@@ -939,7 +958,7 @@ def _emit_project_tools_inventory_banner(project_tools_result: Any) -> None:
     )
 
     has_critical = bool(diff["missing_required"] or diff["failed"] or error)
-    has_warn = bool(diff["unexpected"] or diff["disabled_required"])
+    has_warn = bool(diff["unexpected"] or diff["disabled_required"] or duplicate)
     if not has_critical and not has_warn:
         return
 
@@ -976,6 +995,12 @@ def _emit_project_tools_inventory_banner(project_tools_result: Any) -> None:
             lines.append(
                 f"[yellow]UNEXPECTED:[/yellow] {', '.join(diff['unexpected'])}"
             )
+        if duplicate:
+            # Два файла с одинаковым ToolSpec: зарегистрирован первый,
+            # второй молча выпал. Без этой строки потеря была бы невидима.
+            lines.append(
+                f"[yellow]DUPLICATE (не зарегистрирован):[/yellow] {', '.join(duplicate)}"
+            )
 
         console.print(
             Panel(
@@ -1009,7 +1034,6 @@ def _register_readiness_checks(ctx: ApplicationContext) -> None:
     """
     from lib.services.runtime_health import (
         ComponentStatus,
-        compute_overall_status,
     )
 
     def check_postgres() -> ComponentStatus | None:
@@ -1440,7 +1464,6 @@ def _init_cache_runtime(ctx: ApplicationContext) -> tuple:
     from lib.services.cache_provider import (
         CacheAccessMode,
         CacheProvider,
-        CacheStore,
         open_cache_provider,
     )
 
@@ -1660,6 +1683,18 @@ def _make_preload(
         settings=settings,
         db_logging_service=db_logging_service,
     )
+
+
+def _make_enterprise_mcp(settings: Any) -> Any:
+    """Создать клиента к MCP-серверу ``enterprise-mcp``.
+
+    ``None`` — раздел ``enterprise_mcp`` выключен или не задан. Это не
+    ошибка: без него агент работает, но потребители, которым нужен
+    сервер, отвечают структурной ошибкой вместо падения на старте.
+    """
+    from lib.services.enterprise_mcp_client import client_from_settings
+
+    return client_from_settings(settings)
 
 
 def _make_cron_service(config: Any) -> Any:

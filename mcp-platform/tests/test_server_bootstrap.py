@@ -104,6 +104,21 @@ class TestWireContract:
             assert "kwargs" not in wire.get("properties", {})
             assert "args" not in wire.get("properties", {})
 
+    def test_history_search_exposes_full_filter_set(self) -> None:
+        """Фильтры поиска видны на проводе, а не только в реестре.
+
+        Агентский адаптер ``history_search`` сохраняет модельную
+        поверхность, поэтому ``tool_name`` и ``until`` обязаны быть в
+        схеме операции: иначе вызов отвергнут валидацией до входа в
+        обработчик, и фильтр молча перестанет работать.
+        """
+        import anyio
+
+        transport, _, _ = enterprise_server.build()
+        tools = {t.name: t for t in anyio.run(_discover, transport)}
+        props = tools["history_search"].inputSchema["properties"]
+        assert {"tool_name", "until", "event_type", "level", "since", "query"} <= set(props)
+
     def test_call_returns_text(self) -> None:
         import anyio
 

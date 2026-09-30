@@ -230,12 +230,15 @@
       `libs/llm` нет HTTP-вызовов провайдера. Сообщение называет файл и
       конструкцию. Аналог существующего
       `tests/test_storage_hybridization.py::TestNoDirectSQLToSessionTables`
-- [ ] 2.16 Перенаправить потребителей на `enterprise-mcp`:
-      `history_search_tool.py` (оставить ~30-строчный адаптер),
-      `db_logging_service.py`, `schema_validation.py` (остаётся в агенте,
-      `fetch` внедряется). **Не начат:** требует клиента MCP в агенте, то есть
-      транспортного слоя, которого в платформе ещё нет. Операции на стороне
-      capability `data` готовы (2.11), не хватает только адаптера
+- [ ] 2.16 Перенаправить потребителей на `enterprise-mcp`. **Частично закрыт:**
+      `history_search` (решение владельца от 2026-09-30 — тонким адаптером, а не
+      удалением). Агент больше не строит SQL: tool подставляет личность из
+      `RequestContext` и вызывает операцию capability `data`. Клиент —
+      `lib/services/enterprise_mcp_client.py`, объявление сервера одно
+      (`project.json → enterprise_mcp`), `tools.mcpServers` в `config.json`
+      намеренно пуст: вторая копия процесса была бы вторым владельцем пула.
+      **Осталось:** `db_logging_service.py` и `schema_validation.py` — там
+      агент выступает клиентом, а не модель, поэтому это отдельный механизм
 - [x] 2.17 Архитектурный тест: `mcp-platform` не импортирует `nanobot`, `lib`, `workspace`
 
 **Приёмка:** `cd mcp-platform && pytest` — зелёные. Сервер поднимается в

@@ -1,17 +1,16 @@
 """Тесты архитектурных guard'ов change ``fix-history-search-user-isolation``.
 
-Primary security check — тесты ``TestHistorySearchGeneratedSqlGuard``
-(сгенерированный SQL и параметры) в ``test_history_search_tool.py``.
-Этот файл — supplementary grep-guard по исходнику
-``workspace/tools/history_search_tool.py``: страховка от случайного
-возврата unscoped-формы после рефакторинга, не primary check.
+Primary security check — тесты ``TestOperationArgumentsGuard``
+(аргументы операции: ровно одна непустая личность на вызов) в
+``test_history_search_tool.py``. Этот файл — supplementary grep-guard по
+исходнику ``workspace/tools/history_search_tool.py``: страховка от
+случайного возврата unscoped-формы после рефакторинга, не primary check.
 """
 from __future__ import annotations
 
 import ast
 from pathlib import Path
 
-import pytest
 
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -22,7 +21,7 @@ class TestHistorySearchSourceGuard:
     """Supplementary guard: в исходнике ``history_search_tool.py`` нет
     запрещённых паттернов unscoped-fallback'а. Это страховка от регрессии
     после рефакторинга, не primary security check (он — в
-    ``TestHistorySearchGeneratedSqlGuard`` через mock fetch)."""
+    ``TestOperationArgumentsGuard`` через подставной MCP-клиент)."""
 
     def _strip_comments(self, src: str) -> str:
         """Убрать комментарии и docstring, чтобы guard не ругался на текст в них."""

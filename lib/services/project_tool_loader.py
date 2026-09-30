@@ -142,7 +142,7 @@ def _discover(workspace_dir: Path) -> list[type]:
 
 
 def _build_tool_context(agent: Any, settings: Any, cache_store: Any,
-                        db_logging_service: Any) -> Any:
+                        db_logging_service: Any, enterprise_mcp: Any = None) -> Any:
     """Собрать ``ToolContext`` из атрибутов ``AgentLoop``.
 
     Тот же набор kwargs, что был в ``RuntimePatcher.patch_project_tools``
@@ -190,6 +190,8 @@ def _build_tool_context(agent: Any, settings: Any, cache_store: Any,
         ctx._cache_store_ref = cache_store
     if db_logging_service is not None:
         ctx._db_logging_service = db_logging_service
+    if enterprise_mcp is not None:
+        ctx._enterprise_mcp = enterprise_mcp
     return ctx
 
 
@@ -200,6 +202,7 @@ def register_project_tools(
     settings: Any = None,
     cache_store: Any = None,
     db_logging_service: Any = None,
+    enterprise_mcp: Any = None,
 ) -> ProjectToolsLoadResult:
     """Discover + DI + register project tools из ``<workspace>/tools/``.
 
@@ -214,6 +217,9 @@ def register_project_tools(
             ``set_provider`` / ``set_connection_factory``.
         db_logging_service: ``DbLoggingService`` (опционально) — для
             ``ctx._db_logging_service``.
+        enterprise_mcp: ``EnterpriseMcpClient`` (опционально) — для
+            ``ctx._enterprise_mcp``; ``None``, если раздел
+            ``enterprise_mcp`` выключен или не задан.
 
     Returns:
         ``ProjectToolsLoadResult`` со структурными полями ``registered`` /
@@ -264,7 +270,7 @@ def register_project_tools(
         if not candidates:
             return ProjectToolsLoadResult(detail="no project tools found")
 
-        ctx = _build_tool_context(agent, settings, cache_store, db_logging_service)
+        ctx = _build_tool_context(agent, settings, cache_store, db_logging_service, enterprise_mcp)
 
         registered: list[str] = []
         skipped_disabled: list[str] = []
