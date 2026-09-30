@@ -468,21 +468,22 @@ chunk_overlap, metric).
 
 | # | Патч | Вердикт | Чем заменяется |
 |---|---|---|---|
-| 10 | `turn_delivery_fail` | **хуком** | `finalize_content` заменяет текст «Sorry, I encountered an error.» на месте — двойной outbound не возникает вовсе. `on_error` + поле `error` в контексте дают логирование `turn_failed`. Патч делал 6 обязанностей, хук делает 2 |
-| 2 | `save_turn` | **хуком** | `after_execute_tool` вызывается в `execution.py` сразу после `tool.execute()`. Архивировать результат в этот момент **раньше**, чем upstream усечёт его в `_save_turn` |
-| 7 | `async_save` | **нашим классом** | `agent.sessions` — это наш `PGSessionManager`. Обёртка на `ThreadPoolExecutor` делается при создании в `session_storage.py` |
-| 11 | `session_content_cleanup` | **нашим классом** | Чистка NUL — забота PostgreSQL. `clean_text.py` уже делает это и уезжает в `libs/data`. Перенести в `PGSessionManager.save` |
-| 8 | `session_dir_watch` | **удалить** | Диагностика, выключена по умолчанию, тестов нет |
-| 6 | `assemble_outbound` | **события** | Хука «после сборки outbound» в 0.3.5 нет, но хук может **опередить** её: `after_execute_tool` публикует `_tool_audit` и `media` через `turn_context.events` раньше, чем канал получит финальный outbound. `_final_turn` → `TurnEndEvent` |
-| 1 | `context_governor` | **частично хук** | Выгрузка большого результата в файл — побочный эффект, хук может. Но подстановка короткой ссылки в контекст — нет: `execution.py` делает `return result`, игнорируя хук. Остаётся подстановка для встроенных tool'ов; для MCP-инструментов её делает сам `data-mcp` |
-| 9 | `subagent_logging` | **остаётся** | `SubagentManager` конструирует `_SubagentHook` жёстко (`hook=_SubagentHook(task_id, status)`), фабрики нет. Точки вставки не существует — патч оправдан |
-| 3, 5 | `exec_limits`, `tool_limits` | **остаются** | Конфига в 0.3.5 нет. Альтернатива — свой `Tool`, наследующий `ExecTool`, вместо мутации чужого класса; требует проверки правил переопределения в реестре |
-| 4 | `exec_timeout_cap` | **пересмотреть** | Обоснование — длинные legal-задачи; уезжают в MCP, где LLM-вызов происходит в сервере |
-| 12 | `document_text_threshold` | **уходит с документами** | Публичная функция nanobot, но логика документная; переезжает вместе с решением по документам |
+| 10 | `turn_delivery_fail` | **подкласс** | `AgentLoop(turn_delivery_factory=...)` — публичный параметр, валидация только по шине, а конструкций `TurnDelivery(` в пакете две и обе в фабрике. Подкласс `TurnDeliveryFactory` покрывает 100%. Инжектить в gateway и CLI, сохранив `WebuiTurnRoutePolicy` |
+| 2 | `save_turn` | **удалить** | Следствие патча 1: результат персистится в момент возврата tool'а, усечение в `_save_turn` не теряет оригинал. Upstream санитайзит через `_sanitize_persisted_blocks` |
+| 7 | `async_save` | **нашим классом** | `agent.sessions` — наш `PGSessionManager`. Обёртка на `ThreadPoolExecutor` делается при создании в `session_storage.py` |
+| 11 | `session_content_cleanup` | **нашим классом** | Чистка NUL — забота PostgreSQL; `clean_text.py` уже делает это и уезжает в `libs/data` |
+| 8 | `session_dir_watch` | **удалить** | Гейт выключен по умолчанию, тестов нет |
+| 1 | `context_governor` | **удалить** | **Upstream уже работает.** `workspace` и `max_tool_result_chars` прокинуты: `config/schema.py` → `AgentLoop` → `AgentRunSpec` → `ContextGovernanceConfig` → `maybe_persist_tool_result`. Патч переписывал работающую функцию |
+| 4 | `exec_timeout_cap` | **удалить** | `tools.exec.timeout` уже прокинут (`0` = без лимита); остаток — подкласс `ExecTool`. Обоснование «legal 7–10 мин» отпадает с переездом legal в MCP |
+| 5 | `tool_limits` | **частично** | 3 из 5 целей читаются как `self.<attr>` → подкласс `Tool` под тем же именем. `search._DEFAULT_HEAD_LIMIT` и `_DEFAULT_FILE_HEAD_LIMIT` — голые глобалы, не перехватываются, но они лишь дефолты: per-call `head_limit` есть |
+| 6 | `assemble_outbound` | **частично** | `_final_turn` → `TurnEndEvent`. Хук на стадии `run` с `await bus.publish` гарантированно раньше outbound. `media` и `_tool_audit` — решение не принято: `media` никогда не заполняется nanobot, штатный слот `_agent_ui` пишется только на этапе сборки |
+| 9 | `subagent_logging` | **остаётся** | Блокер структурный: у `SubagentManager` нет параметра хука и он зашит; субагент зовёт `runner.run` напрямую, минуя цепочку хуков; `events` не передаётся → `NO_EVENTS` → ноль событий |
+| 3 | `exec_limits` | **остаётся** | Потолок в глобалах модуля внутри `clamp_session_int`, а `maximum` схемы заморожен `deepcopy` при декорации — подкласс не достаёт. Нужен контрактный тест на инварианты |
+| 12 | `document_text_threshold` | **уходит с документами** | Логика документная; переезжает вместе с решением по документам |
 
-**Итог: 12 → 4–5.** Шесть заменяются хуками, событиями или собственным классом
-(`1` частично, `2`, `6`, `7`, `10`, `11`), один удаляется (`8`), один уходит по
-миграции доменов (`12`).
+**Итог: 12 → 2 полностью необходимых + 2 частичных.** Семь патчей удаляются без замены или подклассом, и двое из них (`context_governor`, `save_turn`) оказались переписыванием работающей upstream-функции.
+
+Полная доказательная база — `docs/architecture/nanobot-reuse-catalog.md`; перед добавлением патча каталог просматривается обязательно.
 
 `subagent_logging` — единственный оставшийся патч с **структурным** блокером:
 `_SubagentHook` конструируется жёстко, фабрики для subagent'ов нет, то есть
